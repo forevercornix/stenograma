@@ -24,23 +24,27 @@ pkg update -y && pkg install -y git gh unzip
 termux-setup-storage    # leiskite prieigą prie failų, kai paklaus
 ```
 
-## 3. Įkelti projekto zip į telefoną
+## 3. Įkelti projektą į telefoną
 
-- Atsisiųskite `stenograma-project.zip` į telefoną (į Downloads aplanką).
-- Termux'e išarchyvuokite:
+**Rekomenduojama — `git bundle` (patikimiausia telefone):** vietoj zip naudokite
+`stenograma.bundle` failą — tai VIENAS failas su visa git istorija, kurio
+archyvatorius negali sugadinti (skirtingai nuo zip, kur paslėptas `.git` aplankas
+gali dingti).
 
+```bash
+cd ~/storage/downloads
+git clone stenograma.bundle ~/stenograma-project
+cd ~/stenograma-project
+git log --oneline    # turi rodyti 3 commit'us - istorija atkurta
+```
+
+**Arba zip (jei turite tik jį):**
 ```bash
 cd ~/storage/downloads
 unzip stenograma-project.zip -d ~
 cd ~/stenograma-project
+git log --oneline    # jei „not a git repository" - žr. „Jei .git dingo" apačioje
 ```
-
-Patikrinkite, kad git istorija atsikėlė:
-```bash
-git log --oneline    # turi rodyti 2 commit'us
-```
-Jei rodo „not a git repository" — zip išsiarchyvavo be paslėpto `.git` aplanko.
-Tada žr. skiltį „Jei .git dingo" apačioje.
 
 ## 4. Prisijungti prie GitHub
 
