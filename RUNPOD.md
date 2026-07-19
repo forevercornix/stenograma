@@ -6,6 +6,30 @@ veikė; pyannote diarizacija tuo metu grąžino 400 - žr. troubleshooting žemi
 Ne kiekvienas žingsnis buvo pakartotas nepriklausomai - jei kas nesutampa su tuo,
 ką matote, pirmiausia paleiskite `npm run doctor`.
 
+## 0. Dažnos staigmenos (perskaityk PIRMA)
+
+Realių diegimų metu šie dalykai dažniausiai suklaidina - jie visi **normalūs**, ne gedimai:
+
+- **Node.js 20+ NĖRA iš anksto įdiegtas.** RunPod PyTorch/CUDA image'ai turi Python ir
+  CUDA, bet ne Node. Įsidiekite rankiniu būdu PRIEŠ `setup.sh` (žr. 2b, žemiau):
+  ```bash
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+  ```
+- **GPU paketų diegimas gali kelias–keliolika minučių nerodyti JOKIO progreso.** `pip`
+  atsisiunčia CUDA/Torch/pyannote (keli GB) tyliai - tai NĖRA strigimas. Palaukite; jei
+  visai neramu, kitame terminale stebėkite `htop` ar tinklo aktyvumą.
+- **Ilgoms operacijoms naudokite `tmux`** (RunPod image'uose jau būna; jei ne -
+  `apt-get install -y tmux`). Jei SSH ryšys nutrūksta build'o metu be tmux, procesas
+  žūva ir tenka pradėti iš naujo. Su tmux jis tęsiasi:
+  ```bash
+  tmux new -s stenograma      # paleisti sesiją
+  # ... paleidžiate setup.sh / docker build ...
+  # atsijungti nuo sesijos (procesas lieka veikti): Ctrl+B, tada D
+  tmux attach -t stenograma   # grįžti vėliau
+  ```
+- **`setup.sh` pabaigoje išvardija likusius žingsnius** (HF token, Claude API raktas,
+  `make demo`) - perskaitykite tą pabaigą, ten pasakyta, ko dar reikia.
+
 ## 1. Pod'o pasirinkimas
 
 | Parametras | Rekomendacija | Kodėl |
