@@ -1,0 +1,47 @@
+# Backend su LOKALIA transkripcija (faster-whisper-embedded) - reikia Python+ffmpeg
+# TAME PAČIAME konteineryje, nes providerio klasė spawn'ina Python subprocess.
+#
+# Paprastas backend/Dockerfile (tik Node) TINKA, kai TRANSCRIPTION_PROVIDER yra
+# mock arba išorinis API (azure/deepgram/openai) - jam Python nereikia. ŠIS variantas
+# reikalingas TIK faster-whisper-embedded profiliui.
+#
+# CPU variantas. GPU (device=cuda) - žr. komentarą apačioje ir docker-compose.gpu.yml.
+FROM node:20-slim
+
+WORKDIR /app
+
+# Python 3 + pip + ffmpeg lokaliai transkripcijai.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
+# Python priklausomybės (faster-whisper), UŽFIKSUOTOS VERSIJOS - deterministinis build.
+COPY scripts/requirements-cpu.lock.txt ./scripts/requirements-cpu.lock.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r scripts/requirements-cpu.lock.txt
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY . .
+
+ENV NODE_ENV=production
+# Konteineryje Python komanda yra "python3" (ne "python").
+ENV FASTER_WHISPER_PYTHON_BIN=python3
+EXPOSE 3001
+
+CMD ["node", "server.js"]
+
+# ─────────────────────────────────────────────────────────────────────────
+# GPU VARIANTAS: vietoj `FROM node:20-slim` naudokite CUDA bazinį image su Node,
+# arba nvidia/cuda + rankinis Node diegimas, pvz.:
+#
+#   FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+#   RUN apt-get update && apt-get install -y curl python3 python3-pip ffmpeg \
+#    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+#    && apt-get install -y nodejs
+#   RUN pip3 install --break-system-packages nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*
+#   ... (likusi dalis ta pati, + FASTER_WHISPER_DEVICE=cuda per env)
+#
+# Paleidimas su GPU: `docker run --gpus all ...` arba compose deploy.resources
+# (žr. docker-compose.gpu.yml). LD_LIBRARY_PATH nustato pats providerio kodas.
+# ─────────────────────────────────────────────────────────────────────────

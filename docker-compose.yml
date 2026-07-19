@@ -1,0 +1,81 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────
+# NUMATYTAS REŽIMAS: NODE_ENV=development (žr. žemiau), kad `docker compose up`
+# veiktų IŠ KARTO be papildomos konfigūracijos (mock tiekėjai, API_KEY neprivalomas).
+#
+# ⚠️  SAUGUMO KRITINĖ PASTABA APIE PRIEVADUS (ports):
+# Prievadai žemiau ("127.0.0.1:3001:3001" ir pan.) SĄMONINGAI susieti TIK su
+# localhost (127.0.0.1), NE su 0.0.0.0. Priešingu atveju - jei šis compose
+# paleistas bet kokioje mašinoje su viešu IP (cloud VM ir pan.) - kartu su
+# numatytu NODE_ENV=development (žr. žemiau, reiškia BE API_KEY autentifikacijos)
+# bet kas internete galėtų nemokamai naudoti /api/generate su jūsų realiu LLM
+# raktu. NEKEISKITE šio susiejimo į "0.0.0.0:3001:3001" ar tiesiog "3001:3001"
+# (Docker pagal nutylėjimą sieja su 0.0.0.0!) be reverse proxy + TLS + tikros
+# autentifikacijos priešais.
+#
+# PRODUKCIJAI (svarbu!): prieš viešą diegimą būtina .env faile (šalia šio failo)
+# nustatyti BENT:
+#   NODE_ENV=production
+#   API_KEY=<ilgas atsitiktinis raktas>       # be šito /api/generate ir /api/transcribe
+#                                              # produkcijoje grąžins 503 (tyčia, žr. README)
+#   AUDIT_API_KEY=<kitas atsitiktinis raktas>
+#   HEALTH_DETAILS=hidden
+#   CORS_ORIGIN=https://jusu-tikras-domenas.lt
+# ir REALIAI vertinti, ar bendras API_KEY apskritai tinka jūsų atvejui, ar
+# reikia reverse proxy / session / OAuth (žr. backend/README.md).
+# ─────────────────────────────────────────────────────────────────────────
+
+services:
+  backend:
+    build: ./backend
+    # SVARBU: skaito backend/.env (jį generuoja scripts/configure.sh ir setup.sh).
+    # Be šito Compose imtų reikšmes TIK iš shell/šakninio .env, o configure.sh
+    # sugeneruota konfigūracija būtų tyliai ignoruojama. required:false - kad
+    # veiktų ir be failo (numatytosios reikšmės iš environment bloko žemiau).
+    env_file:
+      - path: ./backend/.env
+        required: false
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      # TIK infrastruktūra, kurią Compose valdo pats (ne vartotojo konfigūracija).
+      # VISI provider/raktų/limitų kintamieji perkelti į backend/.env (env_file
+      # aukščiau), nes Compose `environment` blokas PERRAŠO `env_file` - jei jie
+      # liktų čia, configure.sh sugeneruota konfigūracija būtų ignoruojama.
+      # backend/config.js turi savo numatytąsias reikšmes, jei .env ko nors neturi.
+      PORT: 3001
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    # image: kaip backend/pyannote - be REGISTRY lokalus vardas, su REGISTRY
+    # traukiamas iš GHCR (docker compose pull). ⚠️ SVARBU: frontend image kol kas
+    # NĖRA universalus skirtingiems domenams, nes VITE_BACKEND_URL įkeliamas BUILD
+    # metu (žr. README "Frontend backend adresas"). Publikuotą image reikėtų statyti
+    # su tinkamu VITE_BACKEND_URL arba (geriau) naudoti nginx /api proxy - žr.
+    # docker-compose.runpod.yml pavyzdį ir README pastabą.
+    image: ${REGISTRY:+$REGISTRY/}stenograma-frontend:latest
+    build:
+      context: ./frontend
+      args:
+        # TUŠČIAS VITE_BACKEND_URL -> frontend naudoja santykinį /api, kurį nginx
+        # proxy'ina į backendą. Tas pats image tinka bet kuriam domenui (jokio CORS,
+        # jokio build-time domeno). Nustatykite tik jei NENAUDOJATE proxy.
+        VITE_BACKEND_URL: ${VITE_BACKEND_URL:-}
+        VITE_API_KEY: ${VITE_API_KEY:-}
+    environment:
+      # nginx /api proxy taikinys (Docker Compose serviso vardas). Frontend'o
+      # konteineris šiuos naudoja proxy_pass eilutėje (žr. frontend/nginx.conf).
+      BACKEND_HOST: backend
+      BACKEND_PORT: 3001
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      backend:
+        # Laukia, kol backend healthcheck (/api/health) praeis, ne tik konteinerio
+        # paleidimo - kad frontend'as neatsivertų prieš veikiantį API.
+        condition: service_healthy

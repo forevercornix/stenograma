@@ -1,0 +1,83 @@
+# Paruoštų Docker image'ų publikavimas į GitHub Container Registry (GHCR).
+#
+# ĮJUNGTA: paleidžiama automatiškai su versijos tag'u (pvz. `git tag v1.0.0 && git push --tags`)
+# ARBA rankiniu būdu (workflow_dispatch iš Actions tab). Image'us žymi automatiškai
+# per github.repository_owner - OWNER keisti NEREIKIA.
+#
+# Prieš pirmą paleidimą įsitikinkite:
+#   - repo Settings > Actions > General > Workflow permissions = "Read and write"
+#     (arba job jau turi packages: write žemiau).
+#
+# Ką daro: stato GPU backend + pyannote + whisper image'us ir frontend, push'ina į
+# ghcr.io su BuildKit cache (greitesni pakartotiniai build'ai). Tada vartotojai:
+#   export REGISTRY=ghcr.io/<jūsų-vartotojas>
+#   make quickstart-gpu   # traukia paruoštus image'us vietoj 15-30 min lokalaus build
+# Tai didžiausias vienkartinis diegimo pagreitinimas.
+
+name: Publish images (GHCR)
+
+on:
+  workflow_dispatch: {} # rankinis paleidimas iš Actions tab
+  push:
+    tags: ["v*"] # automatiškai su versijos tag'u (v1.0.0, v1.2.3, ...)
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # fail-fast: false - jei vienas image nepavyksta, kiti vis tiek pabaigiami.
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            context: ./backend
+            dockerfile: ./backend/Dockerfile.whisper.gpu
+            tag: stenograma-backend:gpu
+          - name: whisper
+            context: ./whisper-server
+            dockerfile: ./whisper-server/Dockerfile.gpu
+            tag: stenograma-whisper:gpu
+          - name: pyannote
+            context: ./pyannote-server
+            dockerfile: ./pyannote-server/Dockerfile.gpu
+            tag: stenograma-pyannote:gpu
+          - name: frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+            tag: stenograma-frontend:latest
+            # frontend numatytai naudoja SANTYKINĮ /api (nginx proxy) - tad
+            # publikuotas image UNIVERSALUS bet kuriam domenui (jokio VITE_BACKEND_URL
+            # perbuildinimo). Žr. README "Frontend backend adresas".
+    steps:
+      - uses: actions/checkout@v4
+
+      # BuildKit su cache - greitesni pakartotiniai build'ai (sluoksnių cache GHA'e).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.tag }}
+          # GitHub Actions cache - sluoksniai išlieka tarp workflow paleidimų.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      # PASTABA: GPU image'ai statomi CPU runner'yje (build nereikalauja GPU, tik
+      # RUNTIME reikalauja). Realų GPU veikimą patikrinkite savo GPU mašinoje.

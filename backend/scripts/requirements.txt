@@ -1,0 +1,7 @@
+faster-whisper>=1.0.0
+
+# --- GPU (device=cuda) PALAIKYMUI - be šitų faster-whisper NEVEIKS su cuda ---
+# Būtina pagal oficialią faster-whisper dokumentaciją (SYSTRAN/faster-whisper).
+# Jei naudojate TIK device=cpu, šių dviejų eilučių NEREIKIA.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

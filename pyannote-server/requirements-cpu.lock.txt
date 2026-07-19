@@ -1,0 +1,24 @@
+# Pyannote serveris - CPU priklausomybės, UŽFIKSUOTOS VERSIJOS.
+#
+# Naudojimas:
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-cpu.lock.txt
+#
+# STATUSAS - SVARBU (sąžiningai):
+# Šios versijos NEBUVO realiai išbandytos šioje aplinkoje (nėra prieigos prie gated
+# pyannote modelio nei GPU). Tai REKOMENDUOJAMAS suderinamas rinkinys pagal
+# pyannote.audio 3.1 dokumentaciją, ne "žinoma, kad veikia" - kaip faster-whisper
+# lock'as. Pirmo diegimo metu patikrinkite realiu audio ir, jei reikia, koreguokite.
+#
+# torch/torchaudio NĖRA čia (įdiegiami atskirai su tinkamu index-url CPU/GPU) -
+# žr. komentarą viršuje ir Dockerfile'us.
+
+pyannote.audio==3.3.2
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+huggingface-hub==0.27.1
+numpy==2.2.1
+
+# Testavimui:
+pytest==8.3.4

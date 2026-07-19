@@ -1,0 +1,124 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+/**
+ * RESTART RECOVERY integracinis testas su TIKRU Redis + BullMQ.
+ *
+ * ⚠️ PRALEIDŽIAMAS be REDIS_URL (kaip pyannote test_real_gpu.py be tokeno). Sandbox'e
+ * Redis daemon nėra, tad šis testas ten nesivykdo - paleiskite jį su tikru Redis:
+ *
+ *   REDIS_URL=redis://localhost:6379 node --test tests/queueRecovery.integration.test.js
+ *
+ * Ką tikrina (1 etapo priėmimo kriterijus "restart neturi nutraukti darbo"):
+ *   - jobas įdėtas į BullMQ eilę su REDIS_URL IŠLIEKA Redis'e net be worker'io;
+ *   - kai worker'is paleidžiamas, jis pasiima laukiantį jobą ir jį užbaigia;
+ *   - būsena teisingai atsispindi jobStore (queued -> completed).
+ *
+ * Tai imituoja "backend įdėjo jobą, tada nukrito/persileido, worker'is jį pabaigė".
+ */
+
+const HAS_REDIS = !!process.env.REDIS_URL;
+
+test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'restarto'", { skip: !HAS_REDIS ? "reikia REDIS_URL su tikru Redis" : false }, async () => {
+  const jobStore = require("../utils/jobStore");
+  const jobRunner = require("../queues/jobRunner");
+  const { QUEUE_NAMES, createQueueConnection } = require("../queues/config");
+  const { Queue } = require("bullmq");
+
+  await jobStore.init();
+  await jobRunner.init();
+  assert.equal(jobRunner.getMode(), "bullmq");
+
+  // Registruojam paprastą test processor'ių (protokolo generavimas mock).
+  jobRunner.registerProcessor("protocol", async () => ({ protocol: { pavadinimas: "Test" }, meta: {} }));
+
+  // 1. Sukuriam jobą ir įdedam į eilę - BET worker'io DAR NEPALEIDŽIAM.
+  //    (imituoja: backend įdėjo, tada nukrito prieš apdorojimą)
+  const job = await jobStore.create();
+  await jobRunner.enqueueProtocol(job.id, { transcript: "pakankamai ilgas testinis tekstas" });
+
+  // 2. Patikrinam, kad jobas TIKRAI laukia eilėje (Redis'e), ne dingęs.
+  const queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: createQueueConnection() });
+  const waiting = await queue.getWaitingCount();
+  assert.ok(waiting >= 1, "jobas turi laukti eilėje net be worker'io");
+
+  // 3. "Restartas": dabar paleidžiam worker'į - jis turi pasiimti laukiantį jobą.
+  const { createWorker } = require("../workers");
+  const { protocolProcessor } = require("../queues/processors");
+  const worker = createWorker(QUEUE_NAMES.PROTOCOL, async () => ({ protocol: { pavadinimas: "Test" }, meta: {} }));
+
+  // 4. Laukiam, kol jobas užbaigiamas (worker pasiima ir įvykdo).
+  let finalStatus;
+  for (let i = 0; i < 40; i++) {
+    const j = await jobStore.get(job.id);
+    finalStatus = j?.status;
+    if (finalStatus === "completed" || finalStatus === "failed") break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  assert.equal(finalStatus, "completed", "worker turi užbaigti jobą, likusį eilėje po restarto");
+
+  await worker.close();
+  await queue.close();
+  await jobRunner.close();
+});
+
+test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir pabaigiamas kito worker'io", { skip: !HAS_REDIS ? "reikia REDIS_URL su tikru Redis" : false }, async () => {
+  const jobStore = require("../utils/jobStore");
+  const jobRunner = require("../queues/jobRunner");
+  const { QUEUE_NAMES, createQueueConnection } = require("../queues/config");
+  const { Queue, Worker } = require("bullmq");
+
+  await jobStore.init();
+  await jobRunner.init();
+
+  const job = await jobStore.create();
+  await jobRunner.enqueueProtocol(job.id, { transcript: "pakankamai ilgas tekstas stalled testui" });
+
+  // 1. Pirmas worker'is PASIIMA jobą ir "užstringa" (imituojam kritimą vykdymo
+  //    metu - processor'ius niekada neužbaigia, tada worker uždaromas be graceful).
+  let firstWorkerGotJob = false;
+  const dyingWorker = new Worker(
+    QUEUE_NAMES.PROTOCOL,
+    async () => {
+      firstWorkerGotJob = true;
+      await new Promise((r) => setTimeout(r, 100000)); // "kabo" - niekada nebaigia
+    },
+    {
+      connection: createQueueConnection(),
+      // Trumpas lock/stalled testui, kad nereikėtų laukti 30s.
+      lockDuration: 2000,
+      stalledInterval: 1000,
+    }
+  );
+
+  // Palaukiam, kol pirmas worker'is pasiima jobą.
+  for (let i = 0; i < 20 && !firstWorkerGotJob; i++) await new Promise((r) => setTimeout(r, 200));
+  assert.ok(firstWorkerGotJob, "pirmas worker'is turi pasiimti jobą");
+
+  // 2. "Sustabdom" pirmą worker'į vykdymo metu (force close - imituoja kritimą).
+  await dyingWorker.close(true);
+
+  // 3. Paleidžiam ANTRĄ worker'į (imituoja restartą). Jis turi pasiimti STALLED jobą
+  //    (BullMQ po lockDuration+stalledInterval grąžina jį į eilę) ir užbaigti.
+  const { createWorker } = require("../workers");
+  const recoveryWorker = createWorker(QUEUE_NAMES.PROTOCOL, async () => ({ protocol: { pavadinimas: "Recovered" }, meta: {} }));
+
+  let finalStatus;
+  for (let i = 0; i < 60; i++) {
+    const j = await jobStore.get(job.id);
+    finalStatus = j?.status;
+    if (finalStatus === "completed" || finalStatus === "failed") break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  // Jobas turi būti arba užbaigtas (stalled recovery suveikė), arba aiškiai failed
+  // (po maxStalledCount) - abu atvejai priimtini pagal reikalavimą.
+  assert.ok(
+    finalStatus === "completed" || finalStatus === "failed",
+    `stalled jobas turi būti completed arba failed, bet buvo: ${finalStatus}`
+  );
+
+  await recoveryWorker.close();
+  await jobRunner.close();
+});

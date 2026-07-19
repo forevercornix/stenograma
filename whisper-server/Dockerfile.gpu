@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.7
+# Persistentus faster-whisper serveris (GPU, device=cuda).
+# CUDA bazinis image + GPU CUDA bibliotekos, tad WHISPER_DEVICE=cuda realiai veikia.
+#
+# Reikia: NVIDIA GPU + nvidia-container-toolkit. Paleidimas su --gpus all arba
+# compose deploy.resources.
+#
+# ⚠️ NEBUVO build-testuota be GPU aplinkos - CUDA/versijų suderinamumą patikrinkite
+# pirmo build'o metu.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-gpu.lock.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --break-system-packages -r requirements-gpu.lock.txt
+
+COPY server.py ./
+
+ENV PORT=8000
+ENV WHISPER_MODEL=small
+ENV WHISPER_DEVICE=cuda
+ENV WHISPER_COMPUTE_TYPE=float16
+
+# OPTIONAL: modelio pre-download BUILD metu. Su --build-arg PREDOWNLOAD_MODEL=1
+# modelis "įkepamas" į image, tad PIRMAS paleidimas nelaukia atsisiuntimo (greičiau
+# paleidžiama, bet image ~500MB-1GB didesnis). Be šito modelis atsisiunčiamas pirmo
+# paleidimo metu (mažesnis image, bet pirmas startas lėtesnis).
+ARG PREDOWNLOAD_MODEL=0
+RUN if [ "$PREDOWNLOAD_MODEL" = "1" ]; then \
+      python3 -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8')" ; \
+    fi
+
+EXPOSE 8000
+
+CMD ["python3", "server.py"]

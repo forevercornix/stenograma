@@ -1,0 +1,134 @@
+# GPU / pilno stacko override docker-compose.yml pagrindui.
+#
+# Naudojimas:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#   (arba: make docker-gpu)
+#
+# Ką prideda/keičia lyginant su baziniu docker-compose.yml:
+#   - backend statomas iš Dockerfile.whisper.gpu (CUDA bazinis image + Node +
+#     Python + GPU CUDA bibliotekos) ir naudoja lokalią faster-whisper transkripciją
+#     su GPU (device=cuda REALIAI veikia);
+#   - pridedamas pyannote diarizacijos servisas iš Dockerfile.gpu (CUDA image +
+#     GPU torch) - lokalus, GDPR (jokie duomenys neišeina iš mašinos);
+#   - abu gauna GPU per deploy.resources (reikia nvidia-container-toolkit host'e).
+#
+# ⚠️  Reikia:
+#   1) NVIDIA GPU + draiveriai + nvidia-container-toolkit host mašinoje;
+#   2) .env faile (šalia šio failo) nustatytas HUGGINGFACE_TOKEN (pyannote gated modeliui).
+#
+# Naudojami TIKRI GPU Dockerfile'ai (Dockerfile.whisper.gpu, pyannote-server/
+# Dockerfile.gpu) su CUDA baziniais image'ais ir GPU torch - NE CPU su komentarais.
+# CPU variantai (Dockerfile.whisper, pyannote-server/Dockerfile) lieka atskirai,
+# jei GPU nėra. SVARBU: GPU image'ai NEBUVO build-testuoti be GPU aplinkos - CUDA/
+# torch versijų suderinamumą patikrinkite pirmo build'o metu.
+#
+# ⚠️  Prievadų susiejimas su 127.0.0.1 (žr. bazinio compose saugumo pastabą) galioja ir čia.
+
+services:
+  backend:
+    # image: reikšmė priklauso nuo REGISTRY kintamojo (šakninis .env ar shell):
+    #   - be REGISTRY  -> lokalus vardas "stenograma-backend:gpu" (statoma lokaliai
+    #                     iš build: sekcijos žemiau; jokio bandymo jungtis prie registry);
+    #   - su REGISTRY  -> "$REGISTRY/stenograma-backend:gpu" (pvz. ghcr.io/jusu-vardas/...),
+    #                     tada `docker compose pull` traukia paruoštą image.
+    # ⚠️ Paruošti image'ai dar NEPUBLIKUOTI - kol REGISTRY nenustatytas, naudojamas
+    # lokalus build (make quickstart-gpu ar make docker-gpu-build). Žr. README
+    # "Paruošti Docker image'ai (GHCR)".
+    image: ${REGISTRY:+$REGISTRY/}stenograma-backend:gpu
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.whisper.gpu
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      # LITERALŪS (ne ${VAR:-...}) - profilio ESMĖ. Jei būtų perrašomi,
+      # `TRANSCRIPTION_PROVIDER=mock make quickstart-gpu` paleistų GPU stacką, bet
+      # backend naudotų mock - klaidinantis "GPU" režimas be realaus GPU darbo.
+      TRANSCRIPTION_PROVIDER: faster-whisper-embedded
+      FASTER_WHISPER_DEVICE: cuda
+      FASTER_WHISPER_COMPUTE_TYPE: float16
+      DIARIZATION_PROVIDER: pyannote
+      PYANNOTE_URL: http://pyannote:8001/diarize
+      # KONFIGŪRUOJAMI (tikslinimas, ne profilio esmė):
+      FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-small}
+      # GPU atveju rekomenduojama concurrency=1 (kiekvienas subprocess kelia
+      # modelį į VRAM iš naujo - žr. .env.example pastabą).
+      FASTER_WHISPER_MAX_CONCURRENCY: ${FASTER_WHISPER_MAX_CONCURRENCY:-1}
+      # Modelių cache tarp konteinerio perkrovimų (kad nereikėtų atsisiųsti iš naujo).
+      HF_HOME: /models/hf
+      # Persistentus job store per Redis (žr. redis servisą žemiau). Backend
+      # automatiškai jį naudoja; be jo grįžtų į in-memory.
+      REDIS_URL: redis://redis:6379
+    volumes:
+      # MODEL_CACHE_DIR leidžia RunPod'e (ar kitur) nukreipti modelių cache į
+      # PERSISTENT network volume (pvz. /workspace/models), kad modeliai neišnyktų
+      # sunaikinus podą ir nereikėtų vėl siųsti kelių GB. Numatyta - įvardytas
+      # Docker volume (stenograma-models), kuris išlieka tarp restartų toje pačioje
+      # mašinoje, bet NE tarp podų perkūrimo debesyje.
+      - ${MODEL_CACHE_DIR:-stenograma-models}:/models
+    depends_on:
+      pyannote:
+        # NE tik "paleistas" (default), o "sveikas" - t.y. pyannote healthcheck
+        # (/health?probe=true) patvirtino, kad modelis REALIAI įkeltas. Be šito
+        # backend'as startuotų iš karto, ir pirmoji diarizacija galėtų nepavykti
+        # ar labai ilgai laukti, kol pyannote dar siunčiasi/krauna modelį.
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  pyannote:
+    image: ${REGISTRY:+$REGISTRY/}stenograma-pyannote:gpu
+    build:
+      context: ./pyannote-server
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "127.0.0.1:8001:8001"
+    environment:
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+      PYANNOTE_MODEL: ${PYANNOTE_MODEL:-pyannote/speaker-diarization-3.1}
+      HF_HOME: /models/hf
+    volumes:
+      - ${MODEL_CACHE_DIR:-stenograma-models}:/models
+    healthcheck:
+      # ?probe=true PRIVERSTINAI bando įkelti modelį ir grąžina 503, jei nepavyksta
+      # (pvz. trūksta HUGGINGFACE_TOKEN) - kad "unhealthy" būsena realiai atspindėtų
+      # neveikiantį modelį, ne tik gyvą HTTP serverį. start_period duoda laiko
+      # pirmam (lėtam) modelio atsisiuntimui/įkėlimui.
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health?probe=true').getcode()==200 else 1)"]
+      interval: 30s
+      timeout: 120s
+      start_period: 300s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Redis - persistentus job store (jobai išlieka perkrovus backendą, palaiko kelis
+  # worker'ius). Backend'as automatiškai jį naudoja per REDIS_URL (žemiau). Be šio
+  # serviso backend grįžtų į in-memory (jobai dingtų per restartą).
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]  # AOF persistencija diske
+    volumes:
+      - stenograma-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  stenograma-models:
+  stenograma-redis:

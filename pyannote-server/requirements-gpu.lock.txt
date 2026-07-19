@@ -1,0 +1,28 @@
+# Pyannote serveris - GPU (CUDA) priklausomybės, UŽFIKSUOTOS VERSIJOS.
+#
+# Naudojimas:
+#   pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements-gpu.lock.txt
+#
+# STATUSAS - SVARBU (sąžiningai):
+# NEBUVO realiai išbandyta šioje aplinkoje (nėra GPU nei gated pyannote modelio
+# prieigos). REKOMENDUOJAMAS suderinamas rinkinys pagal pyannote.audio 3.x + CUDA
+# 12.4 dokumentaciją. Pirmo GPU diegimo metu BŪTINA patikrinti:
+#   python -c "import torch; print(torch.cuda.is_available())"   # turi būti True
+#   python -c "import pyannote.audio; print('OK')"
+# ir realiu audio per /diarize. torch cu124 turi atitikti host CUDA - jei ne,
+# keiskite į savo cuXXX ir atitinkamai atnaujinkite šias versijas.
+
+pyannote.audio==3.3.2
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+huggingface-hub==0.27.1
+numpy==2.2.1
+
+# Testavimui:
+pytest==8.3.4
+
+# PASTABA: torch==2.5.1 ir torchaudio==2.5.1 NĖRA šiame faile - juos įdiekite
+# ATSKIRAI su --index-url .../cu124 (žr. komentarą viršuje), nes PyPI numatytoji
+# torch versija yra CPU, o mums reikia CUDA build'o.

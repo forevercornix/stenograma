@@ -1,0 +1,17 @@
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+pyannote.audio>=3.1
+# torch įdiegiamas atskirai Dockerfile'e (CPU ar CUDA variantas priklauso nuo bazinio image)
+
+# Testavimui (pytest test_server.py, test_diarize_integration.py):
+pytest>=8.0
+
+# ─────────────────────────────────────────────────────────────────────────
+# ⚠️  ŠIS failas naudoja MINIMALIAS (>=) versijas - patogu vystymui, bet RIZIKINGA
+# produkcijai/RunPod (po kelių mėnesių gali įsidiegti nesuderinamos naujesnės
+# versijos). DETERMINISTINIAM diegimui naudokite užfiksuotus lock failus:
+#   requirements-cpu.lock.txt  - CPU (+ torch cpu, žr. failo komentarus)
+#   requirements-gpu.lock.txt  - GPU (+ torch cu124, žr. failo komentarus)
+# Docker image'ai (Dockerfile / Dockerfile.gpu) jau naudoja lock failus.
+# ─────────────────────────────────────────────────────────────────────────

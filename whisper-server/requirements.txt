@@ -1,0 +1,15 @@
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+faster-whisper>=1.0.0
+
+# Testavimui (pytest test_server.py, test_transcribe_integration.py):
+pytest>=8.0
+
+# ─────────────────────────────────────────────────────────────────────────
+# ⚠️  MINIMALIOS (>=) versijos - patogu vystymui, RIZIKINGA produkcijai. Determi-
+# nistiniam diegimui naudokite lock failus:
+#   requirements-cpu.lock.txt  - CPU (int8)
+#   requirements-gpu.lock.txt  - GPU (float16 + CUDA bibliotekos)
+# Docker image'ai jau naudoja lock failus.
+# ─────────────────────────────────────────────────────────────────────────

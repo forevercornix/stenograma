@@ -1,0 +1,17 @@
+# Python virtualenv (šimtai MB - NIEKADA nesiųsti į build context)
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+
+# Testai (nereikalingi runtime image'e; CI juos leidžia atskirai)
+test_*.py
+
+# Dev/dokumentacija
+README.md
+.env
+*.log
+
+# Lock failai, kurių šis image nenaudoja (CPU image nenaudoja gpu.lock ir atvirkščiai;
+# konkretų lock failą COPY'ina pats Dockerfile)

@@ -1,0 +1,18 @@
+# Demo/mock override docker-compose.yml pagrindui.
+#
+# Naudojimas:
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+#   (arba: make quickstart)
+#
+# KODĖL ATSKIRAS FAILAS: bazinis compose skaito backend/.env (env_file). Jei
+# vartotojas anksčiau per `make configure` pasirinko faster-whisper/claude, tada
+# `make quickstart` (demo) paveldėtų TAS reikšmes, nors žada mock/demo. Šis
+# override PRIVERSTINAI nustato mock - `environment` blokas Compose'e perrašo
+# env_file, tad demo profilis izoliuotas nuo likusio backend/.env.
+
+services:
+  backend:
+    environment:
+      TRANSCRIPTION_PROVIDER: mock
+      DIARIZATION_PROVIDER: none
+      LLM_PROVIDER: mock

@@ -1,0 +1,22 @@
+# Stenograma backend - CPU transkripcijos priklausomybės, UŽFIKSUOTOS VERSIJOS.
+#
+# KODĖL LOCK: `faster-whisper>=1.0.0` (žr. requirements.txt) leidžia pip įdiegti
+# bet kokią naujesnę versiją - po kelių mėnesių tai gali reikšti nesuderinamą
+# ctranslate2/numpy/tokenizers kombinaciją, ypač švarioje RunPod aplinkoje.
+# Šios versijos REALIAI PATIKRINTOS (vartotojo Windows sesija, 2026-07):
+# transkribuotas tikras 4 val. lietuviškas įrašas su `small` modeliu, veikė.
+#
+# Naudojimas (deterministinis diegimas):
+#   pip install -r scripts/requirements-cpu.lock.txt
+#
+# Atnaujinus - iš naujo patikrinkite realiu audio ir perfiksuokite.
+
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+numpy==2.5.1
+huggingface-hub==1.23.0
+tokenizers==0.23.1
+av==18.0.0
+onnxruntime==1.27.0
+# Netiesioginės, bet svarbios suderinamumui:
+tqdm==4.68.4

@@ -1,0 +1,19 @@
+# Whisper serveris - CPU priklausomybės, UŽFIKSUOTOS VERSIJOS.
+# faster-whisper stack'as REALIAI PATIKRINTAS (vartotojo Windows sesija, 2026-07,
+# tikras 4 val. lietuviškas įrašas su small modeliu, CPU).
+#
+# Naudojimas:  pip install -r requirements-cpu.lock.txt
+
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+numpy==2.5.1
+huggingface-hub==1.23.0
+tokenizers==0.23.1
+av==18.0.0
+onnxruntime==1.27.0
+tqdm==4.68.4
+
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+pytest==8.3.4

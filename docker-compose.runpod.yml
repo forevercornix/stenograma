@@ -1,0 +1,35 @@
+# RunPod (ir kitų cloud proxy) override docker-compose.yml + docker-compose.gpu.yml pagrindui.
+#
+# Naudojimas RunPod'e:
+#   export MODEL_CACHE_DIR=/workspace/models
+#   export HUGGINGFACE_TOKEN=hf_...
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.runpod.yml up -d --build
+#
+# KUO SKIRIASI nuo lokalaus quickstart:
+#   - Lokaliai prievadai susieti su 127.0.0.1 (saugu, bet cloud proxy nepasiekia).
+#     RunPod'e frontend'as eksponuojamas 0.0.0.0:5173, kad RunPod HTTP proxy jį matytų.
+#   - VIENAS viešas prievadas (frontend :5173). Backend (:3001) ir pyannote (:8001)
+#     NEeksponuojami viešai - frontend nginx /api proxy pasiekia backendą VIDINIU
+#     Docker tinklu. Tai ir saugiau, ir paprasčiau (RunPod'e atidarote tik 5173).
+#   - Frontend naudoja SANTYKINĮ /api (nginx proxy), tad tas pats image veikia
+#     nepriklausomai nuo RunPod proxy domeno - jokio VITE_BACKEND_URL perbuildinimo.
+#
+# RunPod pod nustatymuose: Expose HTTP Ports = 5173. Frontend pasiekiamas per
+# https://<POD_ID>-5173.proxy.runpod.net
+
+services:
+  frontend:
+    # 0.0.0.0 (ne 127.0.0.1) - kad RunPod proxy pasiektų iš išorės.
+    ports:
+      - "0.0.0.0:5173:80"
+    # BACKEND_HOST/PORT jau nustatyti baziniame compose (backend:3001) - nginx
+    # proxy'ina /api vidiniu tinklu, viešo backend prievado nereikia.
+
+  backend:
+    # Backend NEeksponuojamas viešai - tik vidinis Docker tinklas (frontend nginx
+    # jį pasiekia per proxy). Perrašom bazinį ports, kad neatidarytų 3001 viešai.
+    ports: []
+
+  pyannote:
+    # Tas pats - pyannote tik vidinis.
+    ports: []

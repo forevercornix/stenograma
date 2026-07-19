@@ -1,0 +1,968 @@
+import React, { useState, useRef, useEffect } from "react";
+import Papa from "papaparse";
+import {
+  Mic,
+  Square,
+  Upload,
+  ClipboardPaste,
+  Sparkles,
+  Download,
+  RotateCcw,
+  FileAudio,
+  X,
+  Plus,
+  AlertCircle,
+  Pencil,
+  FileSpreadsheet,
+  FileType,
+  Info,
+  Server,
+} from "lucide-react";
+
+// ─────────────────────────────────────────────────────────────────────────
+// KONFIGŪRACIJA
+// Backend'as YRA PRIVALOMAS - šis frontend'as niekada nekviečia jokio LLM
+// tiesiai iš naršyklės (raktas niekada nekeliauja į klientą).
+//
+// DU deployment režimai:
+//  1) SANTYKINIS URL (rekomenduojama Docker/produkcijai): VITE_BACKEND_URL="" -
+//     tada BACKEND_URL="" ir fetch naudoja santykinį "/api/..." (ta pati kilmė kaip
+//     frontend). nginx tą "/api" proxy'ina į backendą. JOKIO CORS, JOKIO build-time
+//     domeno - tas pats frontend image tinka BET KURIAM domenui. Žr. nginx.conf ir
+//     docker-compose.runpod.yml.
+//  2) ABSOLIUTUS URL (dev, kai frontend :5173 ir backend :3001 atskirai): nustatykite
+//     VITE_BACKEND_URL=http://localhost:3001. Numatyta dev režimu (žr. žemiau).
+//
+// Numatyta: jei VITE_BACKEND_URL neapibrėžtas, dev režime naudojam localhost:3001,
+// o produkcijos build'e (import.meta.env.PROD) - santykinį "" (nginx proxy).
+// ─────────────────────────────────────────────────────────────────────────
+const BACKEND_URL =
+  import.meta.env.VITE_BACKEND_URL !== undefined
+    ? import.meta.env.VITE_BACKEND_URL
+    : import.meta.env.PROD
+      ? "" // produkcijos build be aiškaus URL -> santykinis /api (nginx proxy)
+      : "http://localhost:3001"; // dev -> tiesioginis backend'as
+
+// ─────────────────────────────────────────────────────────────────────────
+// PASTABA APIE API_KEY: jei backend'e nustatytas API_KEY (žr. backend/.env),
+// šis frontend'as gali jį siųsti per VITE_API_KEY - BET tai reiškia raktas bus
+// ĮKOMPILIUOTAS į viešai pasiekiamą JS bundle'ą ir matomas bet kam per naršyklės
+// dev tools. Tai priimtina TIK vidiniam/lokaliam naudojimui (intranet, VPN, savo
+// kompiuteris) - NIEKADA viešame internete. Viešam deployment'ui reikalingas
+// reverse proxy arba backend-for-frontend sluoksnis, kuris raktą prideda
+// SERVERIO pusėje (naršyklė jo niekada nemato), arba pilna sesijų/OAuth sistema.
+// Žr. backend/README.md skyrių "Autentifikacija ir viešas diegimas".
+// ─────────────────────────────────────────────────────────────────────────
+const API_KEY = import.meta.env.VITE_API_KEY || "";
+function withApiKeyHeader(headers = {}) {
+  return API_KEY ? { ...headers, "x-api-key": API_KEY } : headers;
+}
+
+const INK = "#1B2A41";
+const PAPER = "#F7F5F0";
+const LINE = "#E4DFD3";
+const BRASS = "#9C7A34";
+const REDINK = "#A83A2E";
+const SLATE = "#5B6472";
+const GREEN = "#3D6B4A";
+
+import { todayISO, formatDateLT, completeness, formatTranscribeProgress } from "./utils.js";
+
+export default function Stenograma() {
+  const [mode, setMode] = useState("record");
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [participants, setParticipants] = useState([]);
+  const [participantInput, setParticipantInput] = useState("");
+  const [transcript, setTranscript] = useState("");
+  const [interim, setInterim] = useState("");
+  const [isRecording, setIsRecording] = useState(false);
+  // recognition.onend yra priskiriamas VIENĄ kartą per startRecording() kvietimą ir
+  // niekad nebepriskiriamas iš naujo - jei jo viduje tikrintume tiesiog `isRecording`
+  // state kintamąjį, jis "įšaltų" (stale closure) su reikšme, kokia buvo TĄ konkretų
+  // render'ą (praktiškai visada `false`, nes onend sukuriamas PRIEŠ setIsRecording(true)
+  // pritaikymą). Ref atnaujinamas SINCHRONIŠKAI kartu su state, tad onend visada mato
+  // TIKRĄ, dabartinę reikšmę.
+  const isRecordingRef = useRef(false);
+  const [audioFileName, setAudioFileName] = useState("");
+  const [audioURL, setAudioURL] = useState("");
+  const [audioFile, setAudioFile] = useState(null);
+  const [diarize, setDiarize] = useState(true);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribeProgress, setTranscribeProgress] = useState("");
+  const [speechSupported, setSpeechSupported] = useState(true);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState("");
+  const [protocol, setProtocol] = useState(null);
+  const [levels, setLevels] = useState([4, 4, 4, 4, 4, 4, 4, 4]);
+  const [stamped, setStamped] = useState(false);
+  const [meta, setMeta] = useState(null);
+  const [showAudit, setShowAudit] = useState(false);
+  const [backendStatus, setBackendStatus] = useState("checking"); // checking | online | offline
+  const [backendInfo, setBackendInfo] = useState(null);
+
+  const recognitionRef = useRef(null);
+  const audioCtxRef = useRef(null);
+  const analyserRef = useRef(null);
+  const rafRef = useRef(null);
+  const streamRef = useRef(null);
+
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) setSpeechSupported(false);
+  }, []);
+  useEffect(() => () => stopRecording(), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Kiekvieną kartą pasikeitus audioURL (naujas failas arba reset), atlaisviname
+  // PREVIOUS blob URL - be šito naršyklė laikytų senus audio duomenis atmintyje
+  // visą sesijos laiką (memory leak augantis su kiekvienu naujai įkeltu failu).
+  useEffect(() => {
+    return () => {
+      if (audioURL) URL.revokeObjectURL(audioURL);
+    };
+  }, [audioURL]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${BACKEND_URL}/api/health`)
+      .then((r) => {
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setBackendStatus("online");
+        setBackendInfo(data);
+      })
+      .catch(() => {
+        if (!cancelled) setBackendStatus("offline");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const addParticipant = () => {
+    const name = participantInput.trim();
+    if (name && !participants.includes(name)) setParticipants([...participants, name]);
+    setParticipantInput("");
+  };
+  const removeParticipant = (name) => setParticipants(participants.filter((p) => p !== name));
+
+  const drawLevels = () => {
+    if (!analyserRef.current) return;
+    const analyser = analyserRef.current;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+    const bars = 8;
+    const step = Math.floor(data.length / bars);
+    const next = [];
+    for (let i = 0; i < bars; i++) next.push(Math.max(4, Math.round(((data[i * step] || 0) / 255) * 28)));
+    setLevels(next);
+    rafRef.current = requestAnimationFrame(drawLevels);
+  };
+
+  const startRecording = async () => {
+    setError("");
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return setSpeechSupported(false);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+      source.connect(analyser);
+      audioCtxRef.current = audioCtx;
+      analyserRef.current = analyser;
+      drawLevels();
+    } catch (e) {
+      setError("Nepavyko pasiekti mikrofono. Patikrinkite naršyklės leidimus.");
+      return;
+    }
+    const recognition = new SR();
+    recognition.lang = "lt-LT";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      let finalChunk = "";
+      let interimChunk = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        if (res.isFinal) finalChunk += res[0].transcript + " ";
+        else interimChunk += res[0].transcript;
+      }
+      if (finalChunk) setTranscript((prev) => (prev + " " + finalChunk).trim());
+      setInterim(interimChunk);
+    };
+    recognition.onerror = (e) => {
+      if (e.error === "no-speech") return;
+      setError("Balso atpažinimo klaida: " + e.error);
+    };
+    recognition.onend = () => {
+      if (recognitionRef.current === recognition && isRecordingRef.current) {
+        try {
+          recognition.start();
+        } catch (_) {}
+      }
+    };
+    recognitionRef.current = recognition;
+    recognition.start();
+    isRecordingRef.current = true;
+    setIsRecording(true);
+  };
+
+  const stopRecording = () => {
+    isRecordingRef.current = false;
+    setIsRecording(false);
+    setInterim("");
+    if (recognitionRef.current) {
+      const r = recognitionRef.current;
+      recognitionRef.current = null;
+      try {
+        r.onend = null;
+        r.stop();
+      } catch (_) {}
+    }
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    setLevels([4, 4, 4, 4, 4, 4, 4, 4]);
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setAudioFileName(file.name);
+    setAudioFile(file);
+    setAudioURL(URL.createObjectURL(file));
+  };
+
+  // Naudoja ASINCHRONINĮ /api/transcribe-jobs + polling, NE sinchroninį
+  // /api/transcribe. Tai BŪTINA (ne tik gera praktika), kai backend'as pasiekiamas
+  // per HTTP proxy su savo trumpu timeout limitu (pvz. RunPod HTTP proxy = kietas
+  // 100s limitas, nepriklausomas nuo backend'o nustatymų) - ilgas/GPU transkribavimas
+  // per sinchroninį kelią tokiu atveju niekada negrąžintų atsakymo laiku.
+  const handleAutoTranscribe = async () => {
+    if (!audioFile) return;
+    setIsTranscribing(true);
+    setError("");
+    setTranscribeProgress("");
+    try {
+      const form = new FormData();
+      form.append("audio", audioFile);
+      form.append("language", "lt");
+      form.append("diarize", String(diarize));
+
+      const createRes = await fetch(`${BACKEND_URL}/api/transcribe-jobs`, {
+        method: "POST",
+        headers: withApiKeyHeader(),
+        body: form,
+      });
+      const createData = await createRes.json();
+      if (!createRes.ok) throw new Error(createData.error || "Nepavyko pradėti transkribavimo");
+
+      const jobId = createData.jobId;
+      let job = createData;
+      const pollIntervalMs = 3000;
+      const maxPolls = 1200; // 3s * 1200 = 1 val. maksimalus laukimas
+
+      for (let i = 0; i < maxPolls; i++) {
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+        const pollRes = await fetch(`${BACKEND_URL}/api/transcribe-jobs/${jobId}`, { headers: withApiKeyHeader() });
+        job = await pollRes.json();
+        if (!pollRes.ok) throw new Error(job.error || "Klaida tikrinant transkribavimo būseną");
+        setTranscribeProgress(formatTranscribeProgress(job));
+        if (job.status === "completed" || job.status === "failed") break;
+      }
+
+      if (job.status === "failed") throw new Error(job.error || "Transkribavimas nepavyko");
+      if (job.status !== "completed") throw new Error("Transkribavimas užtruko per ilgai (viršyta laukimo riba).");
+
+      const data = job.result;
+      const text = data.segments?.length
+        ? data.segments.map((s) => `${s.speaker ? s.speaker + ": " : ""}${s.text}`).join("\n")
+        : data.text;
+      setTranscript(text);
+    } catch (e) {
+      setError("Automatinis transkribavimas nepavyko: " + e.message);
+    } finally {
+      setIsTranscribing(false);
+      setTranscribeProgress("");
+    }
+  };
+
+  const canGenerate = transcript.trim().length > 20 && !isGenerating && backendStatus === "online";
+
+  const handleGenerate = async () => {
+    setError("");
+    setIsGenerating(true);
+    setStamped(false);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/generate`, {
+        method: "POST",
+        headers: withApiKeyHeader({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ title, date: formatDateLT(date), participants, transcript }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Generavimo klaida");
+      setProtocol(data.protocol);
+      setMeta({ source: "backend", ...data.meta });
+      setTimeout(() => setStamped(true), 200);
+    } catch (e) {
+      setError("Nepavyko sugeneruoti protokolo: " + e.message);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleReset = () => {
+    stopRecording();
+    setTitle("");
+    setDate(todayISO());
+    setParticipants([]);
+    setParticipantInput("");
+    setTranscript("");
+    setInterim("");
+    setAudioFileName("");
+    setAudioURL("");
+    setAudioFile(null);
+    setProtocol(null);
+    setMeta(null);
+    setStamped(false);
+    setError("");
+  };
+
+  // ── Protokolo redagavimo pagalbinės funkcijos ──
+  const updateField = (field, value) => setProtocol((p) => ({ ...p, [field]: value }));
+  const updateListLine = (field, index, value) => {
+    const arr = [...(protocol[field] || [])];
+    arr[index] = value;
+    updateField(field, arr);
+  };
+  const addListLine = (field) => updateField(field, [...(protocol[field] || []), ""]);
+  const removeListLine = (field, index) => updateField(field, (protocol[field] || []).filter((_, i) => i !== index));
+
+  const updateKlausimas = (index, key, value) => {
+    const arr = [...(protocol.aptarti_klausimai || [])];
+    arr[index] = { ...arr[index], [key]: value };
+    updateField("aptarti_klausimai", arr);
+  };
+  const addKlausimas = () =>
+    updateField("aptarti_klausimai", [...(protocol.aptarti_klausimai || []), { klausimas: "", santrauka: "" }]);
+  const removeKlausimas = (index) =>
+    updateField("aptarti_klausimai", (protocol.aptarti_klausimai || []).filter((_, i) => i !== index));
+
+  const updateVeiksmas = (index, key, value) => {
+    const arr = [...(protocol.veiksmai || [])];
+    arr[index] = { ...arr[index], [key]: value };
+    updateField("veiksmai", arr);
+  };
+  const addVeiksmas = () =>
+    updateField("veiksmai", [...(protocol.veiksmai || []), { uzduotis: "", atsakingas: "", terminas: "" }]);
+  const removeVeiksmas = (index) => updateField("veiksmai", (protocol.veiksmai || []).filter((_, i) => i !== index));
+
+  // ── Eksportai ──
+  const downloadTxt = () => {
+    if (!protocol) return;
+    let out = `PROTOKOLAS\n${protocol.pavadinimas || ""}\nData: ${protocol.data || ""}\n\n`;
+    out += `DALYVIAI:\n${(protocol.dalyviai || []).map((d) => "- " + d).join("\n") || "Nenurodyta"}\n\n`;
+    out += `DARBOTVARKĖ:\n${(protocol.darbotvarke || []).map((d, i) => `${i + 1}. ${d}`).join("\n") || "Nenurodyta"}\n\n`;
+    out += `APTARTI KLAUSIMAI:\n${
+      (protocol.aptarti_klausimai || []).map((k, i) => `${i + 1}. ${k.klausimas}\n   ${k.santrauka}`).join("\n") ||
+      "Nenurodyta"
+    }\n\n`;
+    out += `NUTARIMAI:\n${(protocol.nutarimai || []).map((n, i) => `${i + 1}. ${n}`).join("\n") || "Nenurodyta"}\n\n`;
+    out += `VEIKSMAI:\n${
+      (protocol.veiksmai || [])
+        .map((v) => `- ${v.uzduotis} | Atsakingas: ${v.atsakingas} | Terminas: ${v.terminas}`)
+        .join("\n") || "Nenurodyta"
+    }\n`;
+    downloadBlob(out, `protokolas_${date}.txt`, "text/plain;charset=utf-8");
+  };
+
+  const downloadCsv = () => {
+    if (!protocol) return;
+    const rows = (protocol.veiksmai || []).map((v) => ({
+      Užduotis: v.uzduotis,
+      Atsakingas: v.atsakingas,
+      Terminas: v.terminas,
+    }));
+    const csv = Papa.unparse(rows.length ? rows : [{ Užduotis: "", Atsakingas: "", Terminas: "" }]);
+    downloadBlob("\uFEFF" + csv, `veiksmai_${date}.csv`, "text/csv;charset=utf-8");
+  };
+
+  // Tikras OOXML .docx (ne HTML trick) - naudoja "docx" npm paketą, kuris veikia
+  // tiesiogiai naršyklėje (Packer.toBlob). Realus Word dokumentas su antraštėmis,
+  // lentele ir formatavimu, ne .html failas su .doc plėtiniu.
+  const downloadDocx = async () => {
+    if (!protocol) return;
+    const {
+      Document, Packer, Paragraph, TextRun, HeadingLevel,
+      Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType,
+    } = await import("docx");
+
+    const brassColor = "9C7A34";
+    const slateColor = "5B6472";
+
+    const heading2 = (text) =>
+      new Paragraph({ text, heading: HeadingLevel.HEADING_2, spacing: { before: 300, after: 120 } });
+
+    const bulletList = (items) =>
+      items.length
+        ? items.map((item) => new Paragraph({ text: item, bullet: { level: 0 } }))
+        : [new Paragraph({ children: [new TextRun({ text: "Nenurodyta", italics: true, color: slateColor })] })];
+
+    const cell = (text, opts = {}) =>
+      new TableCell({
+        width: { size: opts.width || 33, type: WidthType.PERCENTAGE },
+        children: [new Paragraph({ children: [new TextRun({ text: text || "", bold: opts.bold })] })],
+      });
+
+    const veiksmaiRows = [
+      new TableRow({
+        children: [cell("Užduotis", { bold: true }), cell("Atsakingas", { bold: true }), cell("Terminas", { bold: true })],
+      }),
+      ...((protocol.veiksmai || []).length
+        ? protocol.veiksmai.map((v) => new TableRow({ children: [cell(v.uzduotis), cell(v.atsakingas), cell(v.terminas)] }))
+        : [new TableRow({ children: [cell("Nenurodyta"), cell(""), cell("")] })]),
+    ];
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {},
+          children: [
+            new Paragraph({
+              children: [new TextRun({ text: "PROTOKOLAS", bold: true, size: 22, color: slateColor })],
+              spacing: { after: 200 },
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: protocol.pavadinimas || "", bold: true, size: 32 })],
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: `Data: ${protocol.data || ""}`, color: slateColor, size: 20 })],
+              spacing: { after: 200 },
+            }),
+
+            heading2("Dalyviai"),
+            new Paragraph({ text: (protocol.dalyviai || []).join(", ") || "Nenurodyta" }),
+
+            heading2("Darbotvarkė"),
+            ...bulletList(protocol.darbotvarke || []),
+
+            heading2("Aptarti klausimai"),
+            ...((protocol.aptarti_klausimai || []).length
+              ? protocol.aptarti_klausimai.flatMap((k) => [
+                  new Paragraph({ children: [new TextRun({ text: k.klausimas, bold: true })] }),
+                  new Paragraph({ text: k.santrauka, spacing: { after: 120 } }),
+                ])
+              : [new Paragraph({ children: [new TextRun({ text: "Nenurodyta", italics: true, color: slateColor })] })]),
+
+            heading2("Nutarimai"),
+            ...bulletList(protocol.nutarimai || []),
+
+            heading2("Veiksmai"),
+            new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: veiksmaiRows }),
+
+            new Paragraph({ text: "", spacing: { before: 600 } }),
+            new Paragraph({ text: "_____________________________" }),
+            new Paragraph({ text: "Protokolą parengė (parašas, vardas pavardė)", spacing: { before: 60 } }),
+          ],
+        },
+      ],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `protokolas_${date}.docx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadBlob = (content, filename, mime) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const score = completeness(protocol);
+
+  return (
+    <div style={{ background: PAPER, fontFamily: "'IBM Plex Sans', sans-serif", color: INK }} className="min-h-screen w-full">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+        .serif { font-family: 'Source Serif 4', Georgia, serif; }
+        .mono { font-family: 'IBM Plex Mono', monospace; }
+        @keyframes pulseRec { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+        @keyframes stampIn {
+          0% { transform: scale(2.2) rotate(-14deg); opacity: 0; }
+          60% { transform: scale(0.92) rotate(-8deg); opacity: 1; }
+          80% { transform: scale(1.04) rotate(-10deg); }
+          100% { transform: scale(1) rotate(-8deg); opacity: 1; }
+        }
+        .stamp-in { animation: stampIn 0.5s cubic-bezier(.2,.8,.3,1.1) forwards; }
+        .paper-lines { background-image: repeating-linear-gradient(to bottom, transparent, transparent 30px, ${LINE} 30px, ${LINE} 31px); }
+        .editline { background: transparent; border: none; border-bottom: 1px dashed ${LINE}; outline: none; width: 100%; padding: 2px 0; }
+        .editline:focus { border-bottom: 1px solid ${BRASS}; }
+        ::selection { background: ${BRASS}33; }
+      `}</style>
+
+      <header className="border-b" style={{ borderColor: LINE }}>
+        <div className="max-w-6xl mx-auto px-6 py-6 flex items-baseline justify-between flex-wrap gap-2">
+          <div>
+            <p className="mono text-[11px] tracking-[0.2em] uppercase flex items-center gap-2" style={{ color: SLATE }}>
+              Susitikimų protokolų generatorius
+              <span
+                className="mono text-[9px] px-1.5 py-0.5 rounded-sm flex items-center gap-1"
+                style={{
+                  background: backendStatus === "online" ? "#E9F2EA" : backendStatus === "offline" ? "#FBEDEA" : "#F1EADD",
+                  color: backendStatus === "online" ? GREEN : backendStatus === "offline" ? REDINK : BRASS,
+                }}
+              >
+                <Server size={10} />
+                {backendStatus === "checking" && "Jungiamasi prie backend..."}
+                {backendStatus === "online" &&
+                  (backendInfo?.llmProvider
+                    ? `Backend aktyvus (${backendInfo.llmProvider} / ${backendInfo.transcriptionProvider} / diarizacija: ${backendInfo.diarizationProvider})`
+                    : "Backend aktyvus")}
+                {backendStatus === "offline" && "Backend nepasiekiamas"}
+              </span>
+            </p>
+            <h1 className="serif text-3xl font-semibold tracking-tight">Stenograma</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAudit((s) => !s)}
+              className="flex items-center gap-1.5 text-sm mono px-3 py-1.5 rounded-sm border hover:bg-black/[0.03] transition-colors"
+              style={{ borderColor: LINE, color: SLATE }}
+            >
+              <Info size={13} /> Audit
+            </button>
+            <button
+              onClick={handleReset}
+              className="flex items-center gap-1.5 text-sm mono px-3 py-1.5 rounded-sm border hover:bg-black/[0.03] transition-colors"
+              style={{ borderColor: LINE, color: SLATE }}
+            >
+              <RotateCcw size={13} /> Naujas protokolas
+            </button>
+          </div>
+        </div>
+
+        {backendStatus === "offline" && (
+          <div className="max-w-6xl mx-auto px-6 pb-4">
+            <div className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
+              <AlertCircle size={16} className="shrink-0 mt-0.5" />
+              <span>
+                Backend'as ({BACKEND_URL || "santykinis /api"}) nepasiekiamas. Paleiskite jį: <code>cd backend && npm install && npm start</code>.
+                Šis frontend'as sąmoningai nekviečia jokio LLM tiesiai iš naršyklės — be backend'o protokolo
+                sugeneruoti negalima.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {showAudit && (
+          <div className="max-w-6xl mx-auto px-6 pb-4">
+            <div className="text-xs mono p-3 rounded-sm" style={{ background: "#FCFBF8", border: `1px solid ${LINE}`, color: SLATE }}>
+              {meta ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div>promptVersion: <b style={{ color: INK }}>{meta.promptVersion}</b></div>
+                  <div>llmProvider: <b style={{ color: INK }}>{meta.llmProvider}</b></div>
+                  <div>repair bandymai: <b style={{ color: INK }}>{meta.jsonRepairAttempts ?? 0}</b></div>
+                  <div>trukmė: <b style={{ color: INK }}>{meta.processingTimeMs} ms</b></div>
+                  <div>input tokens: <b style={{ color: INK }}>{meta.usage?.inputTokens ?? "—"}</b></div>
+                  <div>output tokens: <b style={{ color: INK }}>{meta.usage?.outputTokens ?? "—"}</b></div>
+                  <div>apytikslė kaina: <b style={{ color: INK }}>{meta.estimatedCostUsd != null ? `$${meta.estimatedCostUsd}` : "—"}</b></div>
+                  <div>šaltinis: <b style={{ color: INK }}>backend</b></div>
+                </div>
+              ) : (
+                <span>Audit informacija (be pilno log'o — tam žr. backend GET /api/audit) pasirodys čia po protokolo sugeneravimo.</span>
+              )}
+            </div>
+          </div>
+        )}
+      </header>
+
+      <main className="max-w-6xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-5 gap-8">
+        <section className="lg:col-span-2 space-y-6">
+          <div className="space-y-3">
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Susitikimo pavadinimas"
+              className="w-full serif text-lg font-medium bg-transparent border-b pb-2 outline-none placeholder:text-[#9a9488] focus:border-b-2"
+              style={{ borderColor: LINE }}
+            />
+            <div className="flex items-center gap-3">
+              <label className="mono text-xs uppercase tracking-wide" style={{ color: SLATE }}>Data</label>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="mono text-sm bg-transparent border-b pb-1 outline-none" style={{ borderColor: LINE }} />
+            </div>
+            <div>
+              <label className="mono text-xs uppercase tracking-wide block mb-1.5" style={{ color: SLATE }}>Dalyviai (nebūtina)</label>
+              <div className="flex flex-wrap gap-1.5 mb-1.5">
+                {participants.map((p) => (
+                  <span key={p} className="mono text-xs px-2 py-1 rounded-sm flex items-center gap-1" style={{ background: "#EFEADF", border: `1px solid ${LINE}` }}>
+                    {p}
+                    <X size={11} className="cursor-pointer" onClick={() => removeParticipant(p)} />
+                  </span>
+                ))}
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  value={participantInput}
+                  onChange={(e) => setParticipantInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addParticipant())}
+                  placeholder="Vardas ir paspauskite Enter"
+                  className="flex-1 text-sm bg-transparent border-b pb-1 outline-none placeholder:text-[#9a9488]"
+                  style={{ borderColor: LINE }}
+                />
+                <button onClick={addParticipant} className="p-1.5 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE }} aria-label="Pridėti dalyvį">
+                  <Plus size={14} />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-1 border-b" style={{ borderColor: LINE }}>
+            {[
+              { id: "record", label: "Įrašyti gyvai", icon: Mic },
+              { id: "upload", label: "Įkelti failą", icon: Upload },
+              { id: "paste", label: "Įklijuoti tekstą", icon: ClipboardPaste },
+            ].map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setMode(t.id)}
+                className="flex items-center gap-1.5 mono text-xs uppercase tracking-wide px-3 py-2.5 -mb-px border-b-2 transition-colors"
+                style={{ borderColor: mode === t.id ? BRASS : "transparent", color: mode === t.id ? INK : SLATE }}
+              >
+                <t.icon size={13} /> {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="min-h-[220px]">
+            {mode === "record" && (
+              <div className="space-y-4">
+                {!speechSupported ? (
+                  <div className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
+                    <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                    <span>Jūsų naršyklė nepalaiko balso atpažinimo. Naudokite Chrome/Edge arba „Įklijuoti tekstą".</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-4">
+                      <button
+                        onClick={isRecording ? stopRecording : startRecording}
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-sm text-sm font-medium transition-colors"
+                        style={{ background: isRecording ? REDINK : INK, color: PAPER }}
+                      >
+                        {isRecording ? <Square size={14} /> : <Mic size={14} />}
+                        {isRecording ? "Stabdyti įrašymą" : "Pradėti įrašymą"}
+                      </button>
+                      {isRecording && (
+                        <div className="flex items-end gap-[3px] h-7">
+                          {levels.map((l, i) => (
+                            <div key={i} style={{ width: 3, height: l, background: REDINK, borderRadius: 1, transition: "height 0.08s linear" }} />
+                          ))}
+                        </div>
+                      )}
+                      {isRecording && (
+                        <span className="mono text-xs flex items-center gap-1.5" style={{ color: REDINK }}>
+                          <span style={{ width: 6, height: 6, borderRadius: 999, background: REDINK, display: "inline-block", animation: "pulseRec 1.2s ease-in-out infinite" }} />
+                          ĮRAŠOMA
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-sm p-3 rounded-sm min-h-[110px] leading-relaxed" style={{ background: "#FCFBF8", border: `1px solid ${LINE}` }}>
+                      {transcript || <span style={{ color: "#B3ACA0" }}>Kalbėkite — tekstas rodysis čia realiu laiku…</span>}
+                      {interim && <span style={{ color: SLATE }}> {interim}</span>}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {mode === "upload" && (
+              <div className="space-y-4">
+                <label className="flex flex-col items-center justify-center gap-2 py-8 rounded-sm border-2 border-dashed cursor-pointer hover:bg-black/[0.02] transition-colors" style={{ borderColor: LINE }}>
+                  <FileAudio size={22} style={{ color: SLATE }} />
+                  <span className="text-sm" style={{ color: SLATE }}>{audioFileName || "Pasirinkite garso arba video failą (garsas bus ištrauktas)"}</span>
+                  <input type="file" accept="audio/*,video/mp4,video/webm,.mp4,.webm" className="hidden" onChange={handleFileUpload} />
+                </label>
+                {audioURL && <audio controls src={audioURL} className="w-full" style={{ height: 36 }} />}
+
+                <label className="flex items-center gap-2 text-sm" style={{ color: SLATE }}>
+                  <input type="checkbox" checked={diarize} onChange={(e) => setDiarize(e.target.checked)} />
+                  Atskirti kalbėtojus (diarizacija), jei tiekėjas palaiko
+                </label>
+                <button
+                  onClick={handleAutoTranscribe}
+                  disabled={!audioFile || isTranscribing || backendStatus !== "online"}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-medium"
+                  style={{ background: INK, color: PAPER, opacity: !audioFile || isTranscribing || backendStatus !== "online" ? 0.4 : 1 }}
+                >
+                  {isTranscribing ? `Transkribuojama${transcribeProgress ? ` (${transcribeProgress})` : "…"}` : "Transkribuoti automatiškai"}
+                </button>
+                {backendInfo?.transcriptionProvider === "mock" && (
+                  <p className="text-xs" style={{ color: SLATE }}>
+                    Backend šiuo metu naudoja <code>mock</code> transkribavimo tiekėją — grąžins pavyzdinį (ne jūsų failo)
+                    tekstą. Realiam rezultatui nustatykite <code>TRANSCRIPTION_PROVIDER=whisper</code> (ar kitą) backend'o
+                    <code>.env</code> faile.
+                  </p>
+                )}
+                {backendInfo?.diarizationProvider && (
+                  <p className="text-xs" style={{ color: SLATE }}>
+                    Kalbėtojų atskyrimas: <code>{backendInfo.diarizationProvider}</code> — tai atskiras nuo transkribavimo
+                    komponentas (<code>DIARIZATION_PROVIDER</code> backend'o <code>.env</code>), veikiantis nepriklausomai
+                    nuo pasirinkto transkribavimo tiekėjo (pvz. Whisper transkripcija + pyannote diarizacija).
+                  </p>
+                )}
+                <textarea
+                  value={transcript}
+                  onChange={(e) => setTranscript(e.target.value)}
+                  placeholder="Transkripcija (galite naudoti formatą „Vardas: tekstas” geresniam rezultatui) arba paspauskite „Transkribuoti automatiškai” aukščiau…"
+                  className="w-full text-sm p-3 rounded-sm min-h-[140px] leading-relaxed outline-none resize-y"
+                  style={{ background: "#FCFBF8", border: `1px solid ${LINE}` }}
+                />
+              </div>
+            )}
+
+            {mode === "paste" && (
+              <textarea
+                value={transcript}
+                onChange={(e) => setTranscript(e.target.value)}
+                placeholder="Įklijuokite susitikimo transkripciją (formatas „Vardas: tekstas” padeda tiksliau nustatyti dalyvius)…"
+                className="w-full text-sm p-3 rounded-sm min-h-[220px] leading-relaxed outline-none resize-y"
+                style={{ background: "#FCFBF8", border: `1px solid ${LINE}` }}
+              />
+            )}
+          </div>
+
+          {error && (
+            <div className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
+              <AlertCircle size={16} className="shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <button
+            onClick={handleGenerate}
+            disabled={!canGenerate}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-sm text-sm font-medium transition-opacity"
+            style={{ background: INK, color: PAPER, opacity: canGenerate ? 1 : 0.4, cursor: canGenerate ? "pointer" : "not-allowed" }}
+            title={backendStatus !== "online" ? "Backend nepasiekiamas" : undefined}
+          >
+            <Sparkles size={15} />
+            {isGenerating ? "Generuojama…" : "Generuoti protokolą"}
+          </button>
+          {backendInfo?.llmProvider === "mock" && (
+            <p className="text-xs -mt-4" style={{ color: SLATE }}>
+              Backend šiuo metu naudoja <code>mock</code> LLM tiekėją — protokolas sudaromas paprastomis heuristikomis
+              (ne tikru LLM), bet iš JŪSŲ realiai įvestos transkripcijos. Realiam LLM rezultatui nustatykite
+              <code>LLM_PROVIDER=claude</code> (ar kitą) backend'o <code>.env</code> faile.
+            </p>
+          )}
+        </section>
+
+        <section className="lg:col-span-3">
+          <div className="relative rounded-sm shadow-sm paper-lines" style={{ background: "#FEFEFC", border: `1px solid ${LINE}`, minHeight: 560, padding: "40px 44px" }}>
+            {!protocol && !isGenerating && (
+              <div className="h-full flex flex-col items-center justify-center text-center py-24">
+                <p className="serif text-lg" style={{ color: "#B3ACA0" }}>Dokumentas dar neparengtas</p>
+                <p className="text-sm mt-1" style={{ color: "#C4BEB2" }}>Užpildykite duomenis kairėje ir paspauskite „Generuoti protokolą"</p>
+              </div>
+            )}
+
+            {isGenerating && (
+              <div className="h-full flex flex-col items-center justify-center py-24">
+                <div className="mono text-xs tracking-widest uppercase" style={{ color: SLATE, animation: "pulseRec 1.4s ease-in-out infinite" }}>
+                  Rengiamas protokolas…
+                </div>
+              </div>
+            )}
+
+            {protocol && !isGenerating && (
+              <div className="relative">
+                {stamped && (
+                  <div
+                    className="stamp-in absolute -top-2 right-0 select-none"
+                    style={{ width: 92, height: 92, borderRadius: 999, border: `3px solid ${BRASS}`, color: BRASS, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", transform: "rotate(-8deg)" }}
+                  >
+                    <span className="mono text-[10px] font-medium tracking-wider leading-tight">PARENGTA<br />AI</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pr-24">
+                  <p className="mono text-[11px] tracking-[0.2em] uppercase" style={{ color: SLATE }}>Protokolas</p>
+                  <span
+                    className="mono text-[10px] px-2 py-0.5 rounded-sm"
+                    title="Kiek laukų realiai užpildyta (ne 'Nenurodyta')"
+                    style={{ background: score >= 70 ? "#E9F2EA" : "#FBEDEA", color: score >= 70 ? GREEN : REDINK }}
+                  >
+                    Pilnumas {score}%
+                  </span>
+                </div>
+
+                <input
+                  className="editline serif text-2xl font-semibold mt-1"
+                  value={protocol.pavadinimas || ""}
+                  onChange={(e) => updateField("pavadinimas", e.target.value)}
+                />
+                <input
+                  className="editline mono text-sm mt-1"
+                  style={{ color: SLATE, maxWidth: 200 }}
+                  value={protocol.data || ""}
+                  onChange={(e) => updateField("data", e.target.value)}
+                />
+
+                <div className="mt-6">
+                  <h3 className="mono text-xs uppercase tracking-wide mb-2" style={{ color: BRASS }}>Dalyviai</h3>
+                  <input
+                    className="editline text-sm"
+                    value={(protocol.dalyviai || []).join(", ")}
+                    onChange={(e) => updateField("dalyviai", e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
+                  />
+                </div>
+
+                <EditableList title="Darbotvarkė" items={protocol.darbotvarke || []} onChange={(i, v) => updateListLine("darbotvarke", i, v)} onAdd={() => addListLine("darbotvarke")} onRemove={(i) => removeListLine("darbotvarke", i)} ordered />
+
+                <div className="mt-6">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="mono text-xs uppercase tracking-wide" style={{ color: BRASS }}>Aptarti klausimai</h3>
+                    <button onClick={addKlausimas} className="text-xs flex items-center gap-1" style={{ color: SLATE }}><Plus size={12} /> pridėti</button>
+                  </div>
+                  <div className="space-y-3">
+                    {(protocol.aptarti_klausimai || []).map((k, i) => (
+                      <div key={i} className="group flex gap-2">
+                        <div className="flex-1">
+                          <input className="editline text-sm font-medium" value={k.klausimas} onChange={(e) => updateKlausimas(i, "klausimas", e.target.value)} placeholder="Klausimas" />
+                          <textarea className="editline text-sm mt-1 resize-none" style={{ color: SLATE }} rows={2} value={k.santrauka} onChange={(e) => updateKlausimas(i, "santrauka", e.target.value)} placeholder="Santrauka" />
+                        </div>
+                        <button onClick={() => removeKlausimas(i)} className="opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: SLATE }}><X size={14} /></button>
+                      </div>
+                    ))}
+                    {!(protocol.aptarti_klausimai || []).length && <p className="text-sm" style={{ color: SLATE }}>Nenurodyta</p>}
+                  </div>
+                </div>
+
+                <EditableList title="Nutarimai" items={protocol.nutarimai || []} onChange={(i, v) => updateListLine("nutarimai", i, v)} onAdd={() => addListLine("nutarimai")} onRemove={(i) => removeListLine("nutarimai", i)} ordered />
+
+                <div className="mt-6 mb-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="mono text-xs uppercase tracking-wide flex items-center gap-1.5" style={{ color: BRASS }}>
+                      Veiksmai
+                      {meta?.grounding?.unverifiedActionsCount > 0 && (
+                        <span
+                          className="mono text-[9px] normal-case px-1.5 py-0.5 rounded-sm"
+                          style={{ background: "#FBEDEA", color: REDINK }}
+                          title="Šie veiksmai turi žemą leksinį persidengimą su transkripcija (grounding check) - peržiūrėkite prieš pasitikėdami"
+                        >
+                          {meta.grounding.unverifiedActionsCount}/{meta.grounding.totalActionsCount} nepatvirtinta
+                        </span>
+                      )}
+                    </h3>
+                    <button onClick={addVeiksmas} className="text-xs flex items-center gap-1" style={{ color: SLATE }}><Plus size={12} /> pridėti</button>
+                  </div>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left border-b" style={{ borderColor: LINE }}>
+                        <th className="mono text-[10px] uppercase font-medium pb-1.5" style={{ color: SLATE }}>Užduotis</th>
+                        <th className="mono text-[10px] uppercase font-medium pb-1.5" style={{ color: SLATE }}>Atsakingas</th>
+                        <th className="mono text-[10px] uppercase font-medium pb-1.5" style={{ color: SLATE }}>Terminas</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(protocol.veiksmai || []).map((v, i) => (
+                        <tr key={i} className="group border-b" style={{ borderColor: LINE }}>
+                          <td className="py-1.5 pr-3">
+                            <div className="flex items-center gap-1.5">
+                              {v._grounding && !v._grounding.verified && (
+                                <span title={`Žemas leksinis persidengimas su transkripcija (${Math.round(v._grounding.overlapRatio * 100)}%) - peržiūrėkite`}>
+                                  <AlertCircle size={13} style={{ color: REDINK, flexShrink: 0 }} />
+                                </span>
+                              )}
+                              <input className="editline" value={v.uzduotis} onChange={(e) => updateVeiksmas(i, "uzduotis", e.target.value)} />
+                            </div>
+                          </td>
+                          <td className="py-1.5 pr-3"><input className="editline" value={v.atsakingas} onChange={(e) => updateVeiksmas(i, "atsakingas", e.target.value)} /></td>
+                          <td className="py-1.5 pr-3"><input className="editline mono" value={v.terminas} onChange={(e) => updateVeiksmas(i, "terminas", e.target.value)} /></td>
+                          <td><button onClick={() => removeVeiksmas(i)} className="opacity-0 group-hover:opacity-100" style={{ color: SLATE }}><X size={13} /></button></td>
+                        </tr>
+                      ))}
+                      {!(protocol.veiksmai || []).length && (
+                        <tr><td colSpan={4} className="py-1.5 text-sm" style={{ color: SLATE }}>Nenurodyta</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                  {meta?.grounding?.unverifiedActionsCount > 0 && (
+                    <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color: SLATE }}>
+                      <AlertCircle size={11} /> Transcript grounding check (leksinis persidengimas, ne semantinis fact-checking) - peržiūrėkite pažymėtus veiksmus prieš eksportuojant.
+                    </p>
+                  )}
+                </div>
+
+                <p className="text-xs flex items-center gap-1.5 mt-4" style={{ color: SLATE }}>
+                  <Pencil size={11} /> Visi laukai redaguojami — spustelėkite ir taisykite prieš eksportuojant.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {protocol && !isGenerating && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button onClick={downloadTxt} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE, color: SLATE }}>
+                <Download size={13} /> .txt
+              </button>
+              <button onClick={downloadDocx} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE, color: SLATE }}>
+                <FileType size={13} /> Word (.docx)
+              </button>
+              <button onClick={downloadCsv} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE, color: SLATE }}>
+                <FileSpreadsheet size={13} /> Veiksmai .csv
+              </button>
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function EditableList({ title, items, onChange, onAdd, onRemove, ordered }) {
+  return (
+    <div className="mt-6">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="mono text-xs uppercase tracking-wide" style={{ color: BRASS }}>{title}</h3>
+        <button onClick={onAdd} className="text-xs flex items-center gap-1" style={{ color: SLATE }}><Plus size={12} /> pridėti</button>
+      </div>
+      <div className="space-y-1.5">
+        {items.map((item, i) => (
+          <div key={i} className="group flex items-center gap-2">
+            {ordered && <span className="mono text-xs" style={{ color: SLATE }}>{i + 1}.</span>}
+            <input className="editline text-sm flex-1" value={item} onChange={(e) => onChange(i, e.target.value)} />
+            <button onClick={() => onRemove(i)} className="opacity-0 group-hover:opacity-100" style={{ color: SLATE }}><X size={13} /></button>
+          </div>
+        ))}
+        {!items.length && <p className="text-sm" style={{ color: SLATE }}>Nenurodyta</p>}
+      </div>
+    </div>
+  );
+}

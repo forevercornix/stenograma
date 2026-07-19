@@ -1,0 +1,38 @@
+# CPU override docker-compose.yml pagrindui.
+#
+# Naudojimas:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up --build
+#   (arba: make quickstart-cpu)
+#
+# KODĖL ATSKIRAS FAILAS: bazinis docker-compose.yml numato TRANSCRIPTION_PROVIDER=mock
+# (kad veiktų iš karto be nieko). `quickstart-cpu` be šito override tiesiog paleistų
+# TĄ PATĮ mock, ką ir `quickstart` - t.y. CPU profilis būtų buvęs klaidingas.
+# Šis failas įjungia REALIĄ lokalią CPU transkripciją (faster-whisper-embedded).
+#
+# Backend'ui reikia Python+ffmpeg konteineryje, tad naudojamas Dockerfile.whisper
+# (ne bazinis tik-Node Dockerfile).
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.whisper
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      # LITERALŪS (ne ${VAR:-...}) - profilio ESMĖ, kurios negalima netyčia perrašyti
+      # per shell/šakninį .env. Jei šie būtų ${VAR:-faster-whisper-embedded}, tada
+      # TRANSCRIPTION_PROVIDER=mock aplinkoje paverstų "CPU profilį" mock'u.
+      TRANSCRIPTION_PROVIDER: faster-whisper-embedded
+      DIARIZATION_PROVIDER: none
+      FASTER_WHISPER_DEVICE: cpu
+      FASTER_WHISPER_COMPUTE_TYPE: int8
+      # KONFIGŪRUOJAMI (tikslinimas, ne profilio esmė):
+      FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-small}
+      HF_HOME: /models/hf
+    volumes:
+      - ${MODEL_CACHE_DIR:-stenograma-models}:/models
+
+volumes:
+  stenograma-models:

@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Deterministinis diegimas (npm ci)
+        run: npm ci
+
+      - name: Sintaksės patikra (node --check)
+        run: npm run check
+
+      - name: Unit / route testai (mock tiekėjai, be jokių API raktų)
+        run: npm test
+
+      - name: Smoke test - paleisti serverį ir patikrinti /api/health
+        env:
+          TRANSCRIPTION_PROVIDER: mock
+          LLM_PROVIDER: mock
+          NODE_ENV: test
+          PORT: 3001
+        run: |
+          node server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:3001/api/health; then
+              echo "Backend atsakė sėkmingai"
+              kill $SERVER_PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend neatsakė per 10s"
+          kill $SERVER_PID
+          exit 1
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Deterministinis diegimas (npm ci)
+        run: npm ci
+
+      - name: Unit testai (Vitest)
+        run: npm test
+
+      - name: Build (vite build)
+        env:
+          VITE_BACKEND_URL: http://localhost:3001
+        run: npm run build
+
+  pyannote-server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pyannote-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Diegti TIK lengvas priklausomybes (be pyannote/torch modelio)
+        # Sąmoningai NEDIEGIAME pyannote.audio/torch (~GB, reikia GPU realiam darbui) -
+        # mock testai (test_server.py, test_diarize_integration.py) tikrina /health
+        # diagnostiką IR /diarize kontraktą su MOCK pipeline, kuriems modelio nereikia.
+        # test_real_gpu.py automatiškai praleidžiamas be HUGGINGFACE_TOKEN.
+        run: pip install fastapi python-multipart pytest
+
+      - name: Pyannote kontrakto testai (mock pipeline - /health + /diarize {turns:[...]})
+        # test_diarize_integration.py BŪTENT tikrina tą kontraktą, kurio trūkumas
+        # (serveris neegzistavo) sukėlė realią diarizacijos klaidą vartotojui.
+        run: pytest test_server.py test_diarize_integration.py -v
+
+  whisper-server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: whisper-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Diegti TIK lengvas priklausomybes (be faster-whisper modelio)
+        # Sąmoningai NEDIEGIAME faster-whisper (modelis + CUDA bibliotekos) - mock
+        # testai tikrina /health diagnostiką IR /transcribe {text,segments} kontraktą
+        # su MOCK modeliu, kuriems tikro modelio nereikia.
+        run: pip install fastapi python-multipart pytest
+
+      - name: Whisper kontrakto testai (mock modelis - /health + /transcribe {text,segments})
+        # test_transcribe_integration.py tikrina tą patį kontraktą, kurio trūkumas
+        # (serverio realizacijos nebuvo) būtų sukėlęs transkribavimo klaidą server profilyje.
+        run: pytest test_server.py test_transcribe_integration.py -v
+
+  e2e:
+    runs-on: ubuntu-latest
+    # E2E paleidžia TIKRĄ backend'ą (mock provideriais) + frontend ir per naršyklę
+    # atlieka pilną vartotojo srautą: įklijuoti tekstą -> generuoti protokolą ->
+    # eksportuoti DOCX. Būtent ši testų klasė anksčiau buvo "NOT verified".
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Backend priklausomybės (Playwright webServer jį paleidžia mock režimu).
+      - name: Diegti backend priklausomybes
+        working-directory: backend
+        run: npm ci
+
+      - name: Diegti frontend priklausomybes
+        working-directory: frontend
+        run: npm ci
+
+      # Chromium naršyklė E2E testams (CI aplinkoje prieinama; sandbox'e - ne).
+      - name: Diegti Playwright Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E testai (mock provideriai - pilnas srautas per naršyklę)
+        working-directory: frontend
+        env:
+          CI: "true"
+        run: npm run test:e2e
+
+      # Nesėkmės atveju - įkelti trace/screenshot artefaktus diagnostikai.
+      - name: Įkelti Playwright ataskaitą (jei nepavyko)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose build (backend + frontend image build patikra)
+        run: docker compose build
+
+      - name: Smoke test - paleisti per docker compose ir patikrinti /api/health
+        run: |
+          docker compose up -d backend
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:3001/api/health; then
+              echo "Backend konteineryje atsakė sėkmingai"
+              docker compose down
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Backend konteineryje neatsakė per 40s"
+          docker compose logs backend
+          docker compose down
+          exit 1

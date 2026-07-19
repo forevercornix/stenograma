@@ -1,0 +1,103 @@
+# "Server" profilis: persistentūs Whisper IR pyannote servisai (modeliai įkelti
+# vieną kartą, laikomi atmintyje/VRAM tarp užklausų).
+#
+# Naudojimas:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.server.yml up -d --build
+#
+# SKIRTUMAS nuo docker-compose.gpu.yml: ten backend naudoja faster-whisper-EMBEDDED
+# (Node spawn'ina Python procesą kiekvienai užklausai, modelis kraunamas iš naujo).
+# ČIA backend naudoja faster-whisper-SERVER - kalbasi su persistentu whisper-server
+# per HTTP, modelis kraunamas VIENĄ kartą. Tinka daug vienalaikių vartotojų / bendram
+# serveriui. Simetriška pyannote architektūrai.
+#
+# ⚠️ GPU keliai NEBUVO build-testuoti be GPU aplinkos.
+
+services:
+  backend:
+    environment:
+      # Perjungiam iš embedded į server profilį - backend kalbasi su whisper-server.
+      TRANSCRIPTION_PROVIDER: faster-whisper-server
+      FASTER_WHISPER_URL: http://whisper:8000/transcribe
+      # BullMQ eilė (atskiri worker'iai apačioje). Backend TIK įdeda į eilę.
+      REDIS_URL: redis://redis:6379
+      # Bendras storage, kad worker'is pasiektų audio (tas pats volume).
+      STORAGE_DIR: /storage
+    volumes:
+      - stenograma-storage:/storage
+    depends_on:
+      whisper:
+        condition: service_healthy
+      pyannote:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Atskiras worker procesas - vykdo BullMQ eilės jobus (transkripcija, protokolas).
+  # HTTP backend TIK įdeda jobus; ČIA jie realiai apdorojami. Restartavus backend'ą
+  # vykdomas darbas nenutraukiamas (jį daro šis servisas). Galima skalauti su
+  # `docker compose up --scale worker=N`.
+  worker:
+    build:
+      context: ./backend
+      # Tas pats image kaip backend (stenograma-backend:gpu) - worker naudoja TĄ PATĮ
+      # backend kodą, tik paleidžia workers/index.js. Su REGISTRY traukiamas publikuotas
+      # backend:gpu; be jo statomas lokaliai iš to paties Dockerfile.
+      dockerfile: Dockerfile.whisper.gpu
+    image: ${REGISTRY:+$REGISTRY/}stenograma-backend:gpu
+    command: ["node", "workers/index.js"]
+    environment:
+      TRANSCRIPTION_PROVIDER: faster-whisper-server
+      FASTER_WHISPER_URL: http://whisper:8000/transcribe
+      DIARIZATION_PROVIDER: pyannote
+      PYANNOTE_URL: http://pyannote:8001/diarize
+      LLM_PROVIDER: ${LLM_PROVIDER:-claude}
+      REDIS_URL: redis://redis:6379
+      REDIS_REQUIRED: "true"
+      STORAGE_DIR: /storage
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+    env_file:
+      - path: ./backend/.env
+        required: false
+    volumes:
+      - stenograma-storage:/storage
+    depends_on:
+      whisper:
+        condition: service_healthy
+      pyannote:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  whisper:
+    build:
+      context: ./whisper-server
+      dockerfile: Dockerfile.gpu
+    image: ${REGISTRY:+$REGISTRY/}stenograma-whisper:gpu
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
+      WHISPER_MAX_CONCURRENCY: ${WHISPER_MAX_CONCURRENCY:-2}
+      HF_HOME: /models/hf
+    volumes:
+      - ${MODEL_CACHE_DIR:-stenograma-models}:/models
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health?probe=true').getcode()==200 else 1)"]
+      interval: 30s
+      timeout: 120s
+      start_period: 300s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  # Bendras audio storage backend'ui ir worker'iui (kad worker pasiektų failą pagal
+  # storageKey). MVP - Docker volume; 2 etape keistina į MinIO/S3.
+  stenograma-storage:
+  # Modelių cache (jei MODEL_CACHE_DIR nenustatytas - naudojamas šis named volume).
+  stenograma-models:

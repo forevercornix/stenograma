@@ -1,0 +1,25 @@
+# Whisper serveris - GPU (device=cuda) priklausomybės, UŽFIKSUOTOS VERSIJOS.
+#
+# Naudojimas:  pip install -r requirements-gpu.lock.txt
+#
+# STATUSAS: faster-whisper stack'as patikrintas CPU režimu. CUDA bibliotekų
+# (nvidia-cublas/cudnn) TIKSLIOS versijos iš tos pačios sesijos. device=cuda
+# realaus GPU veikimo ŠIOJE APLINKOJE NEBUVO - patikrinkite pirmo build'o metu.
+
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+numpy==2.5.1
+huggingface-hub==1.23.0
+tokenizers==0.23.1
+av==18.0.0
+onnxruntime==1.27.0
+tqdm==4.68.4
+
+# CUDA runtime bibliotekos (ctranslate2 4.8.x reikalauja cuDNN 9.x).
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.24.0.43
+
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+pytest==8.3.4

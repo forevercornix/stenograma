@@ -1,0 +1,33 @@
+backend/node_modules/
+backend/.env
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+*.log
+.DS_Store
+.active-profile
+stenograma-support-*.txt
+
+# Šakninis .env (Docker Compose + preflight skaito automatiškai; TURI paslapčių - NIEKADA necommitinti)
+/.env
+
+# Runtime failų storage (audio jobams)
+backend/storage/
+
+# Playwright E2E artefaktai
+frontend/playwright-report/
+frontend/test-results/
+frontend/e2e/fixtures/
+
+# Bet kokie .env visuose servisuose (dviguba apsauga)
+**/.env
+!**/.env.example
+
+# Python servisų venv (pyannote/whisper - jei kas paleido lokaliai)
+pyannote-server/.venv/
+whisper-server/.venv/
