@@ -4,6 +4,17 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## Pataisyta (po realaus RunPod diegimo audito)
+
+- **Hardcodinti portai Makefile (diegimo defektas).** `make gpu`/`make dev`/`make pyannote`
+  naudojo fiksuotus portus (backend `3001`, pyannote `8001`), kurie RunPod'e jau užimti
+  nginx/proxy - dėl to stackas nepasileidžia net su teisingais raktais. Portai padaryti
+  konfigūruojami per Makefile kintamuosius (`BACKEND_PORT`, `PYANNOTE_PORT`,
+  `FRONTEND_PORT`), perduodamus ir serveriams, ir jų tarpusavio sąsajai (`PYANNOTE_URL`).
+  Naudojimas: `make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001`. Dokumentuota RUNPOD.md.
+
+---
+
 ## Milestone 1 – Reliable processing pipeline ✅
 
 Tikslas: paversti veikiantį prototipą patikimu apdorojimo konvejeriu, kuris

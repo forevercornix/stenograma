@@ -29,6 +29,16 @@ Realių diegimų metu šie dalykai dažniausiai suklaidina - jie visi **normalū
   ```
 - **`setup.sh` pabaigoje išvardija likusius žingsnius** (HF token, Claude API raktas,
   `make demo`) - perskaitykite tą pabaigą, ten pasakyta, ko dar reikia.
+- **Portų konfliktas su RunPod nginx.** RunPod'e numatyti portai (backend `3001`,
+  pyannote `8001`) gali būti jau užimti proxy/nginx. Tada `make gpu` nepasileidžia -
+  NE dėl HF/Claude/CUDA/faster-whisper, o dėl porto konflikto. Sprendimas - perrašykite
+  portus (jie konfigūruojami):
+  ```bash
+  make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001
+  ```
+  Portai perduodami ir serveriams, ir jų tarpusavio sąsajai (`PYANNOTE_URL`)
+  automatiškai. Nepamirškite atitinkamai atnaujinti RunPod "Expose HTTP Ports" ir,
+  jei naudojate frontend'ą, jo `VITE_BACKEND_URL`.
 
 ## 1. Pod'o pasirinkimas
 

@@ -2,6 +2,16 @@
 # Tikslas (vartotojo prašymas po realaus diegimo): nereikėtų prisiminti ilgų komandų.
 # Naudojimas:  make <taikinys>   (pvz. `make dev`, `make doctor`, `make gpu`)
 # `make` arba `make help` parodo šį sąrašą.
+#
+# KONFIGŪRUOJAMI PORTAI. RunPod ir kitose aplinkose numatyti portai (3001, 8001)
+# gali būti jau užimti (pvz. nginx). Perrašykite juos iš komandinės eilutės:
+#   make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001
+# arba eksportuokite aplinkoje. Reikšmės perduodamos ir serveriams (PORT), ir jų
+# tarpusavio sąsajai (PYANNOTE_URL), kad viskas liktų nuoseklu.
+BACKEND_PORT ?= 3001
+PYANNOTE_PORT ?= 8001
+FRONTEND_PORT ?= 5173
+PYANNOTE_URL ?= http://localhost:$(PYANNOTE_PORT)/diarize
 
 .DEFAULT_GOAL := help
 .PHONY: help setup setup-gpu configure preflight-gpu quickstart quickstart-cpu quickstart-gpu quickstart-runpod demo dev prod worker cpu gpu gpu-transcription pyannote doctor smoke smoke-gpu warmup verify status logs update support-bundle test test-frontend test-pyannote docker docker-gpu down clean
@@ -47,11 +57,11 @@ demo: ## "Happy path" po setup: paleidžia backend (mock), atlieka pilną sraut�
 	./scripts/demo.sh
 
 dev: ## Backend + frontend lokaliai (development, mock tiekėjai - veikia be raktų)
-	@echo "Paleidžiu backend (:3001) ir frontend (:5173). Stabdyti - Ctrl+C."
+	@echo "Paleidžiu backend (:$(BACKEND_PORT)) ir frontend (:$(FRONTEND_PORT)). Stabdyti - Ctrl+C."
 	@$(MAKE) -j2 _dev-backend _dev-frontend
 
 _dev-backend:
-	cd backend && npm run dev
+	cd backend && PORT=$(BACKEND_PORT) npm run dev
 
 _dev-frontend:
 	cd frontend && npm run dev
@@ -74,11 +84,11 @@ cpu: ## Backend su lokalia CPU transkripcija (be diarizacijos)
 gpu-transcription: ## TIK backend su GPU transkripcija (device=cuda, be diarizacijos)
 	cd backend && TRANSCRIPTION_PROVIDER=faster-whisper-embedded FASTER_WHISPER_DEVICE=cuda FASTER_WHISPER_COMPUTE_TYPE=float16 FASTER_WHISPER_MAX_CONCURRENCY=1 npm start
 
-pyannote: ## TIK pyannote diarizacijos serveris (:8001, naudoja make setup-gpu venv)
+pyannote: ## TIK pyannote diarizacijos serveris (portas PYANNOTE_PORT, numatyta 8001; naudoja make setup-gpu venv)
 	@if [ -x pyannote-server/.venv/bin/python ]; then \
-		cd pyannote-server && .venv/bin/python server.py; \
+		cd pyannote-server && PORT=$(PYANNOTE_PORT) .venv/bin/python server.py; \
 	elif [ -x pyannote-server/.venv/Scripts/python.exe ]; then \
-		cd pyannote-server && .venv/Scripts/python.exe server.py; \
+		cd pyannote-server && PORT=$(PYANNOTE_PORT) .venv/Scripts/python.exe server.py; \
 	else \
 		echo "Pyannote venv (pyannote-server/.venv) nerastas. Pirma paleiskite: make setup-gpu"; \
 		echo "(sisteminis python3 nenaudojamas tyčia - jame pyannote greičiausiai neįdiegtas)"; \
@@ -86,14 +96,15 @@ pyannote: ## TIK pyannote diarizacijos serveris (:8001, naudoja make setup-gpu v
 	fi
 
 gpu: ## Pilnas GPU stackas lokaliai (be Docker): pyannote + backend su GPU transkripcija IR diarizacija
-	@echo "Paleidžiu pyannote (:8001) IR backend su GPU+diarizacija. Reikia HUGGINGFACE_TOKEN. Stabdyti - Ctrl+C."
+	@echo "Paleidžiu pyannote (:$(PYANNOTE_PORT)) IR backend (:$(BACKEND_PORT)) su GPU+diarizacija. Reikia HUGGINGFACE_TOKEN. Stabdyti - Ctrl+C."
 	@echo "Alternatyva per Docker (izoliuota): make quickstart-gpu"
+	@echo "Jei portai užimti (pvz. RunPod nginx): make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001"
 	@$(MAKE) -j2 pyannote _gpu-backend-with-diarization
 
 _gpu-backend-with-diarization:
-	cd backend && TRANSCRIPTION_PROVIDER=faster-whisper-embedded FASTER_WHISPER_DEVICE=cuda \
+	cd backend && PORT=$(BACKEND_PORT) TRANSCRIPTION_PROVIDER=faster-whisper-embedded FASTER_WHISPER_DEVICE=cuda \
 		FASTER_WHISPER_COMPUTE_TYPE=float16 FASTER_WHISPER_MAX_CONCURRENCY=1 \
-		DIARIZATION_PROVIDER=pyannote PYANNOTE_URL=http://localhost:8001/diarize npm start
+		DIARIZATION_PROVIDER=pyannote PYANNOTE_URL=$(PYANNOTE_URL) npm start
 
 # ─── Diagnostika ir priežiūra ────────────────────────────────────────────────
 doctor: ## Diagnostika: Node, Python, CUDA, ffmpeg, modeliai, diskas, RAM (nekeičia nieko)
@@ -115,7 +126,7 @@ verify: ## Pilnas end-to-end patikrinimas (= smoke-gpu prieš veikiantį stacką
 status: ## Konteinerių ir health būsena (pagal aktyvų profilį)
 	@docker compose $$(./scripts/compose-args.sh) ps 2>/dev/null || echo "(Docker stackas nepaleistas)"
 	@echo "--- Health ---"
-	@curl -fs http://localhost:3001/api/health 2>/dev/null || echo "backend: nepasiekiamas"
+	@curl -fs http://localhost:$(BACKEND_PORT)/api/health 2>/dev/null || echo "backend: nepasiekiamas"
 	@echo ""
 
 logs: ## Svarbiausi visų servisų logai (pagal aktyvų profilį - GPU režime rodo ir pyannote)
