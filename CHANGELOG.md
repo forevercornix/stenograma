@@ -82,6 +82,14 @@ MinIO/S3 failų saugykla, retention/GDPR, audit logas. Žr. README roadmap.
 
 ## Žinomi apribojimai (iš realaus RunPod testavimo, taisytini atskirai)
 
+- **Whisper halucinacijos tyloje (VAD neįjungtas).** RASTA su 4 val. įrašu: tyliose
+  vietose (pauzės, tylus fonas) faster-whisper „prasimano" tekstą - dažniausiai YouTube
+  titrų likučius („www.youtube.com" ir pan.). 4 val. teste ~37% segmentų (462 iš 1274)
+  buvo tokios halucinacijos. Pyannote joms NEPRISKYRĖ kalbėtojo (`speaker=null`), tad
+  jos atskiriamos. Du sprendimai (atskiras darbas): (1) įjungti faster-whisper
+  `vad_filter=True` (voice activity detection praleidžia tylą - šalinama priežastis);
+  (2) filtruoti segmentus be kalbėtojo su žinomais halucinacijų šablonais prieš protokolą.
+  Pagrindinis kalbos turinys NENUKENČIA - halucinacijos tik tyliose vietose.
 - **Job progresas ilgiems failams.** `progress` laukas visada `null` iki `completed` -
   kelių valandų įrašui vartotojas nemato „kiek liko". Infrastruktūra paruošta (job
   laukas, frontend rodymas, servisas priima `onProgress`), bet whisper-server → backend
