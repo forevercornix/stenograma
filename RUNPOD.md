@@ -159,6 +159,26 @@ cd frontend
 npm run dev -- --host 0.0.0.0
 ```
 
+### 4b. Vidinis backend↔servisų timeout (ilgi failai)
+
+Atskiras dalykas nuo RunPod proxy limito aukščiau: backend'as, kviesdamas pyannote/Whisper
+servisus per HTTP, turi savo timeout. **RASTA REALIAI (4 val. įrašas):** anksčiau jis buvo
+fiksuotas 90s, todėl ilgo failo diarizacija/transkripcija nutrūkdavo su
+`viršijo 90000ms limitą`, NORS pyannote realiai užbaigdavo darbą (`POST /diarize 200 OK`
+matėsi jau PO klaidos). Dabar timeout **proporcingas audio trukmei** (nuo 5 min iki 90 min),
+tad ilgi failai praeina be papildomos konfigūracijos.
+
+Jei vis tiek reikia perrašyti (labai ilgi ar lėti failai):
+```bash
+# Bendras fiksuotas timeout (perrašo proporcingą skaičiavimą):
+API_TIMEOUT_MS=3600000 make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001   # 60 min
+# Arba proporcingo skaičiavimo ribos:
+#   AUDIO_TIMEOUT_MAX_MS  - viršutinė riba (numatyta 90 min)
+#   AUDIO_TIMEOUT_MS_PER_SEC - ms vienai audio sekundei (numatyta 4000)
+```
+⚠️ Ilgi MP3 pyannote'ui problematiški (žr. §0). Ilgus įrašus konvertuokite į WAV:
+`ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav`.
+
 ## 5. Patikrinimas
 
 ```bash

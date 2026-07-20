@@ -6,6 +6,15 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ## Pataisyta (po realaus RunPod diegimo audito)
 
+- **Fiksuotas 90s HTTP timeout nutraukdavo ilgų failų apdorojimą (defektas).** Backend'as,
+  kviesdamas pyannote/Whisper per HTTP, naudojo fiksuotą 90s timeout. RASTA su 4 val.
+  įrašu: diarizacija trunka ilgiau nei 90s, tad backend'as klaidingai pažymėdavo jobą
+  `failed` su `viršijo 90000ms limitą`, NORS pyannote realiai užbaigdavo (`POST /diarize
+  200 OK` matėsi jau po klaidos). Pataisyta: numatytas timeout pakeltas iki 5 min, o audio
+  apdorojimui naudojamas PROPORCINGAS timeout pagal failo dydį (5-90 min), naudojamas ir
+  diarizacijoje, ir transkripcijoje. Perrašoma per `API_TIMEOUT_MS` / `AUDIO_TIMEOUT_*`.
+  Pridėti regresijos testai (`tests/httpClient.timeout.test.js`). Dokumentuota RUNPOD.md §4b.
+
 - **Hardcodinti portai Makefile (diegimo defektas).** `make gpu`/`make dev`/`make pyannote`
   naudojo fiksuotus portus (backend `3001`, pyannote `8001`), kurie RunPod'e jau užimti
   nginx/proxy - dėl to stackas nepasileidžia net su teisingais raktais. Portai padaryti

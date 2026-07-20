@@ -1,5 +1,5 @@
 const DiarizationProvider = require("./DiarizationProvider");
-const { fetchWithTimeout } = require("../../utils/httpClient");
+const { fetchWithTimeout, timeoutForAudioBytes } = require("../../utils/httpClient");
 
 /**
  * STATUS: interface implemented, integration not verified in this environment
@@ -30,11 +30,15 @@ class PyannoteDiarizationProvider extends DiarizationProvider {
 
     // form.getBuffer() - native fetch (undici) nesuderinamas su Node form-data kaip
     // stream body (sugadina multipart boundary). Žr. FasterWhisperProvider.js paaiškinimą.
+    // Proporcingas timeout: ilgo įrašo diarizacija (pyannote) trunka daug ilgiau nei
+    // numatyti 90s. RASTA REALIAI (RunPod, 4 val.): fiksuotas 90s nutraukdavo laukimą,
+    // nors pyannote realiai baigdavo. Dabar timeout skaičiuojamas iš audio dydžio.
+    const timeoutMs = timeoutForAudioBytes(audioBuffer.length);
     const res = await fetchWithTimeout(this.url, {
       method: "POST",
       body: form.getBuffer(),
       headers: form.getHeaders(),
-    });
+    }, timeoutMs);
     if (!res.ok) {
       // RASTA REALIAI DIEGIANT (vartotojo RunPod sesija): pyannote serveris grąžino
       // 400, bet klaidos KŪNAS nebuvo rodomas niekur - diagnostika buvo akla.

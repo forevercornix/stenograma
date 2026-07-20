@@ -1,5 +1,5 @@
 const TranscriptionProvider = require("./TranscriptionProvider");
-const { fetchWithTimeout } = require("../../utils/httpClient");
+const { fetchWithTimeout, timeoutForAudioBytes } = require("../../utils/httpClient");
 
 /**
  * STATUS: interface implemented, integration not verified in this environment
@@ -46,11 +46,13 @@ class FasterWhisperProvider extends TranscriptionProvider {
     // boundary ("Expected boundary character" klaida serveryje). Sprendimas -
     // form.getBuffer() paverčia į Buffer, kurį undici priima su rankiniu
     // Content-Type (su boundary iš getHeaders()).
+    // Proporcingas timeout ilgiems failams (žr. httpClient.timeoutForAudioBytes).
+    const timeoutMs = timeoutForAudioBytes(audioBuffer.length);
     const res = await fetchWithTimeout(this.url, {
       method: "POST",
       body: form.getBuffer(),
       headers: form.getHeaders(),
-    });
+    }, timeoutMs);
     if (!res.ok) {
       throw new Error(`Faster-Whisper lokalus serveris grąžino klaidą (${res.status}). Ar jis paleistas ties ${this.url}?`);
     }
