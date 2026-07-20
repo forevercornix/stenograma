@@ -70,3 +70,15 @@ statiškai patikrinti ir paruošti CI'ui / jūsų mašinai. Žr. README skiltį
 
 OIDC autentifikavimas, organizacijų/rolių multi-tenancy, PostgreSQL + migracijos,
 MinIO/S3 failų saugykla, retention/GDPR, audit logas. Žr. README roadmap.
+
+## Žinomi apribojimai (iš realaus RunPod testavimo, taisytini atskirai)
+
+- **Job progresas ilgiems failams.** `progress` laukas visada `null` iki `completed` -
+  kelių valandų įrašui vartotojas nemato „kiek liko". Infrastruktūra paruošta (job
+  laukas, frontend rodymas, servisas priima `onProgress`), bet whisper-server → backend
+  grandinė neteikia tarpinio progreso (vienas HTTP POST vietoj streaming'o). Sprendimas:
+  whisper-server SSE/chunked su progresu → backend rašo į jobStore. Žr. README trade-off'ai.
+- **MP3 ilgiems failams + pyannote.** Ilgas MP3 pyannote/torchaudio kelyje sukelia
+  begalinį `MPEG_LAYER_III` warning'ų srautą ir įstrigimą; WAV veikia švariai. Kol nėra
+  automatinio konvertavimo (planuojama), ilgus MP3 konvertuokite į WAV prieš siunčiant:
+  `ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav`.

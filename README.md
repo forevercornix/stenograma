@@ -333,6 +333,18 @@ platesnį diegimą:
   worker'ius (atominis job reservation), bendrą audio storage (worker pasiekia failą
   pagal raktą, ne lokalų /tmp; failas trinamas po galutinio statuso, ne tarp retry).
   Kas dar liko 2 etapui: PostgreSQL rezultatams, MinIO/S3 vietoj Docker volume.
+- **Job progresas nerodomas ilgiems failams (žinomas apribojimas).** Job'o būsena
+  yra `queued`/`processing`/`completed`/`failed`, bet **be tarpinio progreso procento** -
+  `progress` laukas visada `null`, kol staiga tampa `completed`. Ilgiems įrašams
+  (pvz. kelių valandų) tai reiškia, kad vartotojas nemato „kiek liko". Infrastruktūra
+  jau paruošta (job `progress` laukas, frontend `formatTranscribeProgress`, servisas
+  priima `onProgress`), bet **niekas jo neužpildo**: whisper-server gauna segmentus
+  srautu (`for seg in segments_iter`, turi `seg.end` + bendrą trukmę, tad %
+  APSKAIČIUOJAMAS), tačiau backend kviečia whisper-server vienu HTTP POST ir laukia
+  VISO rezultato - nėra streaming'o (SSE/chunked), kuris perduotų progresą į jobStore.
+  Pilnas sprendimas (atskiras darbas): whisper-server streaming atsakymas su progresu →
+  backend rašo į jobStore → frontend polling jį parodo. Diarizacija (pyannote) progreso
+  neteikia iš principo (dirba „viską iškart"), tad progresas dengtų tik transkripciją.
 - **Transkribavimas: embedded ARBA server.** `faster-whisper-embedded` (numatyta):
   Node spawn'ina Python procesą kiekvienai užklausai, modelis kraunamas iš naujo -
   paprasta, tinka desktop scenarijui. `faster-whisper-server` (persistentus
