@@ -6,6 +6,14 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ## Pataisyta (po realaus RunPod diegimo audito)
 
+- **`file`/`audio` laukų nenuoseklumas įkeliant.** `/api/transcribe` ir
+  `/api/transcribe-jobs` priimdavo tik `audio` lauką, o `file` metė "Unexpected field"
+  (RASTA realiai - natūralu bandyti `-F "file=@..."`). Dabar priimami ABU laukai.
+- **Whisper halucinacijų filtras.** Backend'as automatiškai šalina tyloje "prasimanytus"
+  YouTube-titrų segmentus (segmentai be kalbėtojo su žinomais šablonais). Konservatyvus -
+  realios kalbos neliečia. Išjungiama `FILTER_HALLUCINATIONS=false`, plečiama
+  `HALLUCINATION_EXTRA_PATTERNS`. Nauji testai. (4 val. teste tai buvo ~37% segmentų.)
+
 - **Fiksuotas 90s HTTP timeout nutraukdavo ilgų failų apdorojimą (defektas).** Backend'as,
   kviesdamas pyannote/Whisper per HTTP, naudojo fiksuotą 90s timeout. RASTA su 4 val.
   įrašu: diarizacija trunka ilgiau nei 90s, tad backend'as klaidingai pažymėdavo jobą

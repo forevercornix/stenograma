@@ -21,6 +21,14 @@ test("POST /api/transcribe-jobs - be failo grąžina 400 iš karto", async () =>
   assert.equal(res.status, 400);
 });
 
+test("POST /api/transcribe-jobs - priima ir 'file' lauką (ne tik 'audio')", async () => {
+  // Regresija: anksčiau .single("audio") mesdavo "Unexpected field", jei vartotojas
+  // siųsdavo -F "file=@...". Dabar priimami abu laukai. RASTA realiai testuojant.
+  const res = await request(app).post("/api/transcribe-jobs").attach("file", fakeMp3Buffer(), "test.mp3");
+  assert.equal(res.status, 202);
+  assert.ok(res.body.jobId);
+});
+
 test("POST /api/transcribe-jobs - grąžina jobId IŠ KARTO (202), o GET vėliau parodo completed rezultatą su transkripcija", async () => {
   const createRes = await request(app).post("/api/transcribe-jobs").attach("audio", fakeMp3Buffer(), "test.mp3");
 

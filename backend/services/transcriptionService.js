@@ -1,6 +1,7 @@
 const { getTranscriptionProvider, REGISTRY: TRANSCRIPTION_REGISTRY } = require("../providers/transcription");
 const { getDiarizationProvider, isKnownDiarizationMode } = require("../providers/diarization");
 const { mergeDiarization } = require("../utils/mergeDiarization");
+const { filterHallucinations } = require("../utils/filterHallucinations");
 const { detectAudioMagic } = require("../utils/audioMagicBytes");
 const auditLog = require("../utils/auditLog");
 const { sanitizeServerError } = require("../utils/sanitizeError");
@@ -106,6 +107,22 @@ async function transcribeAudio({
       transcription.segments = mergeDiarization(transcription.segments, diarizationResult.turns);
       transcription.diarization = true;
       diarizationProviderUsed = diarizationProvider.name;
+    }
+
+    // Halucinacijų filtras (žr. utils/filterHallucinations.js). Šalina Whisper
+    // "prasimanytus" YouTube-titrų segmentus tyloje. Konservatyvus: su diarizacija
+    // liečia tik segmentus be kalbėtojo. Išjungiama per FILTER_HALLUCINATIONS=false.
+    if (Array.isArray(transcription.segments)) {
+      const before = transcription.segments.length;
+      const filtered = filterHallucinations(transcription.segments, {
+        diarized: !!transcription.diarization,
+      });
+      transcription.segments = filtered.segments;
+      if (filtered.removed > 0) {
+        transcription.text = filtered.text;
+        transcription.hallucinationsRemoved = filtered.removed;
+        console.log(`[stenograma] Halucinacijų filtras: pašalinta ${filtered.removed}/${before} segmentų.`);
+      }
     }
 
     auditLog.record({

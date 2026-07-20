@@ -67,8 +67,15 @@ const upload = multer({
 });
 
 function uploadSingleAudio(req, res, next) {
-  upload.single("audio")(req, res, (err) => {
+  // Priimame IR "audio", IR "file" lauką (žr. transcribeJobs.js paaiškinimą).
+  const handler = upload.fields([
+    { name: "audio", maxCount: 1 },
+    { name: "file", maxCount: 1 },
+  ]);
+  handler(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
+    const f = (req.files && (req.files.audio?.[0] || req.files.file?.[0])) || null;
+    if (f) req.file = f;
     next();
   });
 }

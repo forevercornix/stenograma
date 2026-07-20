@@ -179,6 +179,24 @@ API_TIMEOUT_MS=3600000 make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001   # 60 min
 ⚠️ Ilgi MP3 pyannote'ui problematiški (žr. §0). Ilgus įrašus konvertuokite į WAV:
 `ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav`.
 
+### 4c. Diarizacijos tikslumas ir halucinacijos (kokybės patarimai)
+
+RASTA realiai testuojant (4 val. lietuviškas įrašas su prastesniu Teams garsu):
+
+- **Per daug kalbėtojų? Naudokite `numSpeakers`.** Be šio parametro pyannote linkęs
+  PER DAUG skaidyti (4 val. teste rado 18 "kalbėtojų", nors realiai buvo mažiau) - tas
+  pats žmogus su svyruojančiu garsu priskiriamas naujam ID. Jei žinote realų skaičių:
+  ```bash
+  curl ... -F "audio=@failas.wav" -F "diarize=true" -F "numSpeakers=8"
+  ```
+- **Halucinacijos tyloje filtruojamos automatiškai.** Whisper tyliose vietose "prasimano"
+  YouTube-titrų tekstą; backend'as juos pašalina automatiškai (segmentai be kalbėtojo su
+  žinomais šablonais). Išjungti: `FILTER_HALLUCINATIONS=false`. Papildomi šablonai:
+  `HALLUCINATION_EXTRA_PATTERNS="frazė1,frazė2"`. Idealesnis sprendimas ateičiai -
+  faster-whisper `vad_filter` (šalina priežastį).
+- **Laukas `audio` arba `file`.** Įkeliant failą priimami abu lauko pavadinimai
+  (`-F "audio=@..."` ir `-F "file=@..."`) - anksčiau tik `audio`.
+
 ## 5. Patikrinimas
 
 ```bash
