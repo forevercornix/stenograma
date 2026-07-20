@@ -152,6 +152,36 @@ atskirą pyannote venv su GPU Torch ir patikrina `HUGGINGFACE_TOKEN`). Realiam A
 rankiniai, realiai patikrinti). **RunPod/GPU** - žr. [`RUNPOD.md`](RUNPOD.md).
 Diagnostika bet kada: `cd backend && npm run doctor`.
 
+## Kasdienis paleidimas (aplinka jau paruošta)
+
+Kai `setup.sh` jau paleistas ir modeliai atsisiųsti (pvz. grįžote prie to paties
+RunPod pod'o), darbo pradžiai NEreikia iš naujo diegti - tik paleisti servisus:
+
+**GPU su diarizacija (pilnas realaus darbo režimas):**
+```bash
+make gpu                                   # paleidžia pyannote + backend (API) kartu
+# jei portai užimti (pvz. RunPod nginx ant 3001/8001):
+make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001
+```
+`make gpu` paleidžia **backend API + pyannote** ir laiko juos veikiančius (stabdyti -
+`Ctrl+C`). Reikia `HUGGINGFACE_TOKEN` (pyannote modeliui). Pirmą kartą po pod'o
+paleidimo modeliai kraunami į VRAM - kelios sekundės.
+
+**Frontend (naršyklė) - jei reikia, paleidžiamas ATSKIRAI** (`make gpu` jo neįjungia):
+```bash
+cd frontend && npm run dev                 # http://localhost:5173 (ar RunPod proxy URL)
+```
+Jei backend'as ne ant 3001, frontend'ui nurodykite jį per `frontend/.env`
+(`VITE_BACKEND_URL`) arba naudokite nginx `/api` proxy (žr. RUNPOD.md).
+
+**Patikrinti, kad viskas gyva:**
+```bash
+make status                                # health būsena
+make verify BACKEND_PORT=4001              # pilnas end-to-end smoke prieš veikiantį stacką
+```
+
+**Sustabdyti:** `Ctrl+C` (jei `make gpu` fronte). Docker atveju - `make down`.
+
 ## Komponentų statusas
 
 **Realaus 4 val. lietuviško posėdžio įrašo testas** atskleidė ir ištaisė realų
