@@ -7,6 +7,11 @@ pyannote.audio>=3.1
 # Testavimui (pytest test_server.py, test_diarize_integration.py):
 pytest>=8.0
 
+# NEPRIVALOMA: greitesnis modelių atsisiuntimas iš Hugging Face (naudinga RunPod'e su
+# dideliais modeliais). Įjungiama nustačius HF_HUB_ENABLE_HF_TRANSFER=1. Jei diegiate
+# rankiniu būdu, BŪTINAI į venv: pyannote-server/.venv/bin/python -m pip install hf_transfer
+hf_transfer>=0.1
+
 # ─────────────────────────────────────────────────────────────────────────
 # ⚠️  ŠIS failas naudoja MINIMALIAS (>=) versijas - patogu vystymui, bet RIZIKINGA
 # produkcijai/RunPod (po kelių mėnesių gali įsidiegti nesuderinamos naujesnės

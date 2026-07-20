@@ -51,6 +51,19 @@ Realių diegimų metu šie dalykai dažniausiai suklaidina - jie visi **normalū
   su `large-v3`; kelių kalbėtojų diarizacijos tikslumo; ilgo (kelių valandų) failo
   stabilumo; realaus frontend įkėlimo; didelio failo RAM/disko naudojimo. Šiuos
   patikrinkite su tikru įrašu prieš produkcinį naudojimą.
+- **Pyannote naudoja SAVO venv Python, ne sisteminį.** `make setup-gpu` diegia pyannote
+  į izoliuotą `pyannote-server/.venv`, ir `make pyannote` paleidžia būtent
+  `pyannote-server/.venv/bin/python`. Tad JEI reikia papildomo paketo pyannote'ui,
+  diekite jį į TĄ venv, ne per sisteminį `pip`/`python3` (kitaip serveris jo nematys):
+  ```bash
+  pyannote-server/.venv/bin/python -m pip install <paketas>
+  ```
+  Dažnas atvejis - greitesnis modelių atsisiuntimas iš Hugging Face su `hf_transfer`:
+  ```bash
+  pyannote-server/.venv/bin/python -m pip install hf_transfer
+  # tada įjunkite jį aplinkoje prieš paleidžiant:
+  export HF_HUB_ENABLE_HF_TRANSFER=1
+  ```
 
 ## 1. Pod'o pasirinkimas
 
