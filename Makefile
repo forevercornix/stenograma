@@ -114,14 +114,14 @@ smoke: ## Greitas smoke testas (backend mock, be tinklo/Docker)
 	cd backend && npm run test-install
 
 smoke-gpu: ## End-to-end smoke per VEIKIANTĮ stacką: WAV -> transkripcija -> protokolas (tikras HTTP)
-	./scripts/smoke-gpu.sh
+	BACKEND=$(or $(BACKEND),http://localhost:$(BACKEND_PORT)) ./scripts/smoke-gpu.sh
 
 warmup: ## Modelių "warm-up": paleidžia trumpą audio, kad modeliai įsikeltų į cache/VRAM (per smoke-gpu)
 	@echo "Warm-up: pirmas realus failas nebus 'netikėtai lėtas' po šito."
-	./scripts/smoke-gpu.sh
+	BACKEND=$(or $(BACKEND),http://localhost:$(BACKEND_PORT)) ./scripts/smoke-gpu.sh
 
-verify: ## Pilnas end-to-end patikrinimas (= smoke-gpu prieš veikiantį stacką)
-	./scripts/smoke-gpu.sh
+verify: ## Pilnas end-to-end patikrinimas (= smoke-gpu prieš veikiantį stacką). Portą keiskite: make verify BACKEND_PORT=4001
+	BACKEND=$(or $(BACKEND),http://localhost:$(BACKEND_PORT)) ./scripts/smoke-gpu.sh
 
 status: ## Konteinerių ir health būsena (pagal aktyvų profilį)
 	@docker compose $$(./scripts/compose-args.sh) ps 2>/dev/null || echo "(Docker stackas nepaleistas)"

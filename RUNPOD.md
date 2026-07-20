@@ -39,6 +39,18 @@ Realių diegimų metu šie dalykai dažniausiai suklaidina - jie visi **normalū
   Portai perduodami ir serveriams, ir jų tarpusavio sąsajai (`PYANNOTE_URL`)
   automatiškai. Nepamirškite atitinkamai atnaujinti RunPod "Expose HTTP Ports" ir,
   jei naudojate frontend'ą, jo `VITE_BACKEND_URL`.
+- **`make verify` su nestandartiniu portu.** Jei backend'as ne ant 3001, nurodykite portą:
+  ```bash
+  make verify BACKEND_PORT=4001
+  # arba su pilnu RunPod proxy URL:
+  BACKEND=https://<POD_ID>-4001.proxy.runpod.net make verify
+  ```
+  ⚠️ **Ką `make verify` (smoke) patikrina ir ko NE.** Smoke naudoja trumpą sintetinį
+  WAV, tad įrodo tik, kad grandinė VEIKIA (WAV → transkripcija → diarizacija →
+  protokolas per tikrą HTTP). Jis **NEpatvirtina**: lietuviškos žmogaus kalbos kokybės
+  su `large-v3`; kelių kalbėtojų diarizacijos tikslumo; ilgo (kelių valandų) failo
+  stabilumo; realaus frontend įkėlimo; didelio failo RAM/disko naudojimo. Šiuos
+  patikrinkite su tikru įrašu prieš produkcinį naudojimą.
 
 ## 1. Pod'o pasirinkimas
 
