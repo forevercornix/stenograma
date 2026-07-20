@@ -90,6 +90,15 @@ if [ "$GPU_MODE" = true ]; then
   "$VENV_PIP" install --quiet -r pyannote-server/requirements-gpu.lock.txt \
     || warn "pyannote priklausomybių diegimas nepavyko - žr. pyannote-server/requirements-gpu.lock.txt."
 
+  # 5c-bis. hf_transfer: RunPod'e praktiškai būtinas - be jo dideli modeliai dažnai
+  # timeout'ina/nutrūksta atsisiunčiant iš Hugging Face. Diegiam į TĄ PATĮ venv
+  # (ne sisteminį python) ir pasiūlom įjungti. Nėra lock failuose tyčia (versija ne
+  # kritinė, o be jo diegimas RunPod'e dažnai visai neįvyktų).
+  say "Diegiu hf_transfer (atsparesnis modelių atsisiuntimas - RunPod'e ~būtinas)..."
+  "$VENV_PIP" install --quiet hf_transfer \
+    || warn "hf_transfer diegimas nepavyko - modelių atsisiuntimas RunPod'e gali timeout'inti. Bandykite: pyannote-server/.venv/bin/python -m pip install hf_transfer"
+  say "PATARIMAS: prieš pirmą paleidimą įjunkite greitą atsisiuntimą: export HF_HUB_ENABLE_HF_TRANSFER=1"
+
   # 5d. (HF tokeno IR modelio prieigos patikra jau atlikta 5a preflight'e -
   # scripts/preflight-gpu.sh realiai tikrina prieigą prie gated modelio, ne tik
   # ar kintamasis nustatytas.)

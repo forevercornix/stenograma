@@ -58,12 +58,17 @@ Realių diegimų metu šie dalykai dažniausiai suklaidina - jie visi **normalū
   ```bash
   pyannote-server/.venv/bin/python -m pip install <paketas>
   ```
-  Dažnas atvejis - greitesnis modelių atsisiuntimas iš Hugging Face su `hf_transfer`:
+- **`hf_transfer` RunPod'e praktiškai BŪTINAS.** Be jo pyannote/Whisper modelių
+  atsisiuntimas iš Hugging Face RunPod'e dažnai **nutrūksta arba timeout'ina** (dideli
+  failai + nestabilus tinklas), ir serveris nepasileidžia. Su `hf_transfer` (paralelinis,
+  atsparesnis atsisiuntimas) - pavyksta. Įdiekite į venv IR įjunkite PRIEŠ pirmą
+  paleidimą:
   ```bash
   pyannote-server/.venv/bin/python -m pip install hf_transfer
-  # tada įjunkite jį aplinkoje prieš paleidžiant:
   export HF_HUB_ENABLE_HF_TRANSFER=1
   ```
+  ⚠️ Kitose aplinkose (stabilus tinklas) be jo gali veikti - bet RunPod'e nerekomenduojama
+  bandyti be jo, sutaupysite laiko.
 
 ## 1. Pod'o pasirinkimas
 
