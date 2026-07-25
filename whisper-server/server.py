@@ -47,11 +47,12 @@ _load_error = None
 # Concurrency limitas: keli vienalaikiai transkribavimai dalintųsi ta pačia GPU/CPU.
 # Semaforas riboja, kad neperkrautų VRAM/CPU (kiekvienas transcribe() naudoja modelį).
 _MAX_CONCURRENCY = int(os.environ.get("WHISPER_MAX_CONCURRENCY", "2"))
-_semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
-# Threading semaforas SSE worker'iui (jis sukasi atskirame thread, ne event loop'e).
-# TAS PATS limitas kaip _semaphore - kartu jie riboja bendrą vienalaikių transkribavimų
-# skaičių (async /transcribe + SSE /transcribe-stream) VRAM apsaugai.
-_thread_semaphore = _threading.Semaphore(_MAX_CONCURRENCY)
+# VIENAS bendras concurrency valdiklis ABIEM endpointams (/transcribe IR
+# /transcribe-stream). BoundedSemaphore (ne paprastas) - kad per daug release()
+# iškart mestų klaidą, ne tyliai padidintų limitą. Gaunamas per asyncio.to_thread
+# abiejuose keliuose, tad bendras vienalaikių GPU transkribavimų skaičius NEViršija
+# _MAX_CONCURRENCY (anksčiau du atskiri semaforai leido 2×N - defektas).
+_gpu_semaphore = _threading.BoundedSemaphore(_MAX_CONCURRENCY)
 
 
 def _get_model():
@@ -120,11 +121,18 @@ async def transcribe(
                     break
                 tmp.write(chunk)
 
-        # Semaforas: ribojam vienalaikius transkribavimus (VRAM/CPU apsauga).
-        async with _semaphore:
+        # Bendras GPU semaforas (tas pats kaip /transcribe-stream). Gaunam per
+        # to_thread su timeout, kad neblokuotų event loop ir nekabintų amžinai.
+        wait_sec = int(os.environ.get("STREAM_QUEUE_WAIT_SEC", "300"))
+        acquired = await asyncio.to_thread(_gpu_semaphore.acquire, True, wait_sec)
+        if not acquired:
+            raise HTTPException(status_code=503, detail="Serveris užimtas (concurrency limitas). Bandykite vėliau.")
+        try:
             # faster-whisper yra sinchroninis - paleidžiam thread pool'e, kad
             # neblokuotų event loop (kiti /health ar užklausos vis tiek atsakomos).
             result = await asyncio.to_thread(_run_transcription, model, tmp_path, language)
+        finally:
+            _gpu_semaphore.release()
         return JSONResponse(result)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Transkribavimo klaida: {type(e).__name__}: {e}")
@@ -164,30 +172,39 @@ async def transcribe_stream(
 
     async def event_gen():
         q: "_queue.Queue" = _queue.Queue(maxsize=100)
-        stop = _threading.Event()  # signalas worker'iui stotis (kliento disconnect)
-        acquired = False
+        stop = _threading.Event()  # kliento disconnect signalas worker'iui
 
         def worker():
-            nonlocal acquired
-            # Concurrency limitas: TAS PATS threading semaforas kaip /transcribe VRAM
-            # apsaugai. Blokuojantis acquire su timeout - jei per ilgai laukia eilėje,
-            # grąžinam klaidą, ne kabinam amžinai.
+            # Bendras GPU semaforas (TAS PATS kaip /transcribe). Blokuojantis acquire su
+            # timeout - jei per ilgai eilėje, grąžinam klaidą, ne kabinam amžinai.
             wait_sec = int(os.environ.get("STREAM_QUEUE_WAIT_SEC", "300"))
-            if not _thread_semaphore.acquire(timeout=wait_sec):
-                q.put(("error", {"error": "Serveris užimtas (concurrency limitas). Bandykite vėliau."}))
-                q.put(("__end__", None))
+            if not _gpu_semaphore.acquire(timeout=wait_sec):
+                _safe_put(q, ("error", {"error": "Serveris užimtas (concurrency limitas). Bandykite vėliau."}), stop)
+                _safe_put(q, ("__end__", None), stop)
+                _cleanup_temp(tmp_path)
                 return
-            acquired = True
             try:
+                # 'started': signalizuoja klientui, kad darbas PRASIDĖJO. Nuo šio momento
+                # backend'as NEBEGALI daryti aklo fallback (kitaip dvigubas GPU darbas),
+                # net jei dar negautas pirmas progress. Sprendžia "krito prieš 1-ą segmentą".
+                _safe_put(q, ("started", {}), stop)
                 for evt in _stream_transcription(model, tmp_path, language):
-                    if stop.is_set():  # klientas atsijungė - nutraukiam darbą
+                    # COOPERATIVE cancellation: patikra TIK tarp segmentų. Vieno ilgo
+                    # segmento apdorojimo (model.transcribe iteracija) nutraukti negalim -
+                    # tikras hard-cancel reikalautų atskiro proceso. Žr. RUNPOD.md.
+                    if stop.is_set():
                         break
-                    q.put(evt)
+                    if not _safe_put(q, evt, stop):
+                        break  # klientas dingo ir queue pilna - baigiam
             except Exception as e:  # noqa: BLE001
-                q.put(("error", {"error": f"{type(e).__name__}: {e}"}))
+                _safe_put(q, ("error", {"error": f"{type(e).__name__}: {e}"}), stop)
             finally:
-                _thread_semaphore.release()
-                q.put(("__end__", None))
+                _gpu_semaphore.release()
+                _safe_put(q, ("__end__", None), stop)
+                # Temp failą trina WORKER'IS (ne event_gen), nes tik jis tikrai žino,
+                # kada pipeline baigė failą naudoti. Taip failas NEIŠTRINAMAS, kol thread
+                # gyvas (išsprendžia per-ankstyvo trynimo problemą galutinai).
+                _cleanup_temp(tmp_path)
 
         t = _threading.Thread(target=worker, daemon=True)
         t.start()
@@ -200,21 +217,37 @@ async def transcribe_stream(
                 name, payload = evt
                 yield f"event: {name}\ndata: {_json.dumps(payload)}\n\n"
         except asyncio.CancelledError:
-            # Klientas atsijungė (disconnect) - signalizuojam worker'iui stotis.
-            stop.set()
+            stop.set()  # klientas atsijungė - worker'is nutrauks (tarp segmentų) ir susivalys pats
             raise
         finally:
-            stop.set()  # bet kokiu atveju - worker'is turi baigtis
-            # Temp failo valymas: laukiam, kol worker'is realiai baigs naudoti failą
-            # (kitaip trintume failą, kurį pipeline dar skaito). Trumpas join su timeout.
-            await asyncio.to_thread(t.join, 5)
-            if os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+            stop.set()
+            # NEtriname temp failo čia - tai daro worker'is finally bloke, kai TIKRAI
+            # baigia (net jei tai užtrunka ilgiau nei klientas laukia). Nedarome ir
+            # t.join() - neblokuojam atsakymo uždarymo; daemon thread'as susitvarko pats.
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+def _safe_put(q, item, stop, per_try=0.5):
+    """Neblokuojantis put su stop patikra: jei queue pilna (klientas nebeskaito),
+    tikrina stop ir kartoja, kol pavyksta arba gaunamas stop. Grąžina True jei įdėjo,
+    False jei stop suveikė (klientas dingo). Išsprendžia amžino blocking q.put problemą."""
+    while True:
+        try:
+            q.put(item, timeout=per_try)
+            return True
+        except _queue.Full:
+            if stop.is_set():
+                return False
+            continue
+
+
+def _cleanup_temp(path):
+    if path and os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _stream_transcription(model, audio_path, language):

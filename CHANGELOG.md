@@ -105,6 +105,15 @@ MinIO/S3 failų saugykla, retention/GDPR, audit logas. Žr. README roadmap.
 
 ## Žinomi apribojimai (iš realaus RunPod testavimo, taisytini atskirai)
 
+- **SSE progreso cancellation yra COOPERATIVE (ne hard).** Kliento disconnect nutraukia
+  darbą TIK tarp Whisper segmentų - vieno ilgo segmento apdorojimo (`model.transcribe`
+  iteracijos) nutraukti negalima be atskiro proceso modelio. Temp failą trina worker'is
+  savo `finally` bloke (kai TIKRAI baigia), ne event generatorius - tad failas
+  neištrinamas, kol thread gyvas. Serverio pusė padengta Python integraciniais testais
+  (`whisper-server/test_stream_integration.py`: bendras concurrency, semaforo
+  atlaisvinimas, temp valymas). Vis dar EKSPERIMENTINIS - `WHISPER_STREAM_PROGRESS=false`
+  numatytai.
+
 - **Whisper halucinacijos tyloje (VAD neįjungtas).** RASTA su 4 val. įrašu: tyliose
   vietose (pauzės, tylus fonas) faster-whisper „prasimano" tekstą - dažniausiai YouTube
   titrų likučius („www.youtube.com" ir pan.). 4 val. teste ~37% segmentų (462 iš 1274)

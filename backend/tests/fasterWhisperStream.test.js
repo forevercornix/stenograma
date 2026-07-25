@@ -26,6 +26,7 @@ test("SSE kontraktas: progress event'ai kviečia onProgress, done grąžina rezu
   const { srv, url } = await startMockServer((req, res) => {
     assert.ok(req.url.endsWith("/transcribe-stream"), "turi kviesti /transcribe-stream");
     res.writeHead(200, { "Content-Type": "text/event-stream" });
+    sse(res, "started", {});
     sse(res, "progress", { percent: 25, processedSec: 60, totalSec: 240 });
     sse(res, "progress", { percent: 50, processedSec: 120, totalSec: 240 });
     sse(res, "done", { text: "labas", segments: [{ start: 0, end: 1, text: "labas" }], language: "lt" });
@@ -42,6 +43,53 @@ test("SSE kontraktas: progress event'ai kviečia onProgress, done grąžina rezu
   assert.deepEqual(seen, [25, 50], "onProgress gauna abu progresus");
   assert.equal(result.text, "labas");
   assert.equal(result.segments.length, 1);
+  delete process.env.WHISPER_STREAM_PROGRESS;
+  srv.close();
+});
+
+test("'started' event draudžia fallback net BE progreso (krito po started, prieš 1-ą segmentą)", async () => {
+  const { srv, url } = await startMockServer((req, res) => {
+    if (req.url.endsWith("/transcribe-stream")) {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      sse(res, "started", {});
+      // krinta iškart po started, be jokio progreso ir be done
+      setTimeout(() => res.destroy(), 50);
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ text: "NETURI BŪTI KVIESTA", segments: [], language: "lt" }));
+    }
+  });
+  process.env.WHISPER_STREAM_PROGRESS = "true";
+
+  const provider = new FasterWhisperProvider({ url });
+  await assert.rejects(
+    () => provider.transcribe(Buffer.from("x".repeat(1000)), { onProgress: () => {} }),
+    /įpusėjus|nutr/i,
+    "po 'started' fallback draudžiamas, net be progreso"
+  );
+
+  delete process.env.WHISPER_STREAM_PROGRESS;
+  srv.close();
+});
+
+test("SSE error event su JSON grąžina žmogui skaitomą žinutę (ne visą JSON)", async () => {
+  const { srv, url } = await startMockServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    sse(res, "error", { error: "Serveris užimtas" });
+    res.end();
+  });
+  process.env.WHISPER_STREAM_PROGRESS = "true";
+
+  const provider = new FasterWhisperProvider({ url });
+  await assert.rejects(
+    () => provider.transcribe(Buffer.from("x".repeat(1000)), { onProgress: () => {} }),
+    (e) => {
+      assert.ok(e.message.includes("Serveris užimtas"), "žinutė ištraukta iš JSON");
+      assert.ok(!e.message.includes("{"), "ne visa JSON eilutė");
+      return true;
+    }
+  );
+
   delete process.env.WHISPER_STREAM_PROGRESS;
   srv.close();
 });

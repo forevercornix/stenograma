@@ -130,13 +130,20 @@ class FasterWhisperProvider extends TranscriptionProvider {
         buffer = buffer.slice(idx + 2);
         const evt = parseSseEvent(raw);
         if (!evt) continue;
-        if (evt.event === "progress" && evt.data) {
-          progressState.received = true; // pažymim, kad darbas jau prasidėjo (fallback nebesaugus)
+        if (evt.event === "started") {
+          // Serveris gavo semaforą ir PRADĖJO darbą - nuo šio momento fallback nebesaugus
+          // (net prieš pirmą progresą), kad nekartotume transkripcijos iš naujo.
+          progressState.received = true;
+        } else if (evt.event === "progress" && evt.data) {
+          progressState.received = true;
           try { options.onProgress(JSON.parse(evt.data)); } catch { /* ignoruojam blogą progresą */ }
         } else if (evt.event === "done" && evt.data) {
           done = JSON.parse(evt.data);
         } else if (evt.event === "error") {
-          throw new Error(evt.data || "streaming error");
+          // Serveris ATSAKĖ su klaida (ne HTTP lygio problema) - fallback nebeprasmingas
+          // (serveris veikia, tik ši užklausa nepavyko). Žymim, kad fallback draudžiamas.
+          progressState.received = true;
+          throw new Error(parseSseErrorMessage(evt.data));
         }
       }
     }
@@ -167,6 +174,20 @@ function parseSseEvent(raw) {
     else if (line.startsWith("data:")) data += line.slice(5).trim();
   }
   return { event, data };
+}
+
+function parseSseErrorMessage(data) {
+  // Serveris siunčia error kaip JSON {"error":"..."} - ištraukiam žmogui skaitomą
+  // žinutę, ne visą JSON eilutę (P3 pastaba).
+  let message = "Whisper streaming klaida";
+  if (!data) return message;
+  try {
+    const payload = JSON.parse(data);
+    message = payload.error || message;
+  } catch {
+    message = data;
+  }
+  return message;
 }
 
 module.exports = FasterWhisperProvider;

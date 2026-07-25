@@ -117,8 +117,14 @@ def _convert_to_wav(src_path):
 
     KODĖL: pyannote/torchaudio ilgą MP3 apdoroja nestabiliai (MPEG_LAYER_III warning'ų
     srautas, įstrigimas). 16kHz mono WAV - formatas, kurį pyannote mėgsta.
+
+    LOGGING: nesėkmės NEtylios - įspėjam (ffmpeg nerastas, timeout, blogas failas,
+    pilnas diskas), kad diegiantysis matytų, jog konvertavimas neįvyko ir naudojamas
+    originalas (kuris ilgam MP3 gali strigti).
     """
     if not shutil.which("ffmpeg"):
+        print("[pyannote] ⚠️  ffmpeg nerastas - MP3->WAV konvertavimas praleistas, "
+              "naudojamas originalas (ilgas MP3 gali strigti). Įdiekite ffmpeg.", flush=True)
         return None
     out_path = src_path + ".conv.wav"
     try:
@@ -126,18 +132,26 @@ def _convert_to_wav(src_path):
             ["ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", out_path],
             check=True,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=int(os.environ.get("FFMPEG_TIMEOUT_SEC", "600")),
         )
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             return out_path
-    except Exception:
-        # Konvertavimas nepavyko - grįžtam prie originalo (geriau bandyti nei klaida).
-        if os.path.exists(out_path):
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
+        print("[pyannote] ⚠️  ffmpeg konvertavimas davė tuščią failą - naudojamas originalas.", flush=True)
+    except subprocess.TimeoutExpired:
+        print(f"[pyannote] ⚠️  ffmpeg konvertavimas viršijo laiko limitą "
+              f"({os.environ.get('FFMPEG_TIMEOUT_SEC', '600')}s) - naudojamas originalas.", flush=True)
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or b"").decode("utf-8", "replace")[-300:] if e.stderr else ""
+        print(f"[pyannote] ⚠️  ffmpeg konvertavimas nepavyko - naudojamas originalas. {err}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[pyannote] ⚠️  ffmpeg konvertavimo klaida ({type(e).__name__}) - naudojamas originalas.", flush=True)
+    # Nesėkmės atveju - išvalom galimą dalinį failą
+    if os.path.exists(out_path):
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
     return None
 
 
