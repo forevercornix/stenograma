@@ -175,36 +175,14 @@ async def transcribe_stream(
         stop = _threading.Event()  # kliento disconnect signalas worker'iui
 
         def worker():
-            # Bendras GPU semaforas (TAS PATS kaip /transcribe). Blokuojantis acquire su
-            # timeout - jei per ilgai eilėje, grąžinam klaidą, ne kabinam amžinai.
-            wait_sec = int(os.environ.get("STREAM_QUEUE_WAIT_SEC", "300"))
-            if not _gpu_semaphore.acquire(timeout=wait_sec):
-                _safe_put(q, ("error", {"error": "Serveris užimtas (concurrency limitas). Bandykite vėliau."}), stop)
-                _safe_put(q, ("__end__", None), stop)
-                _cleanup_temp(tmp_path)
-                return
-            try:
-                # 'started': signalizuoja klientui, kad darbas PRASIDĖJO. Nuo šio momento
-                # backend'as NEBEGALI daryti aklo fallback (kitaip dvigubas GPU darbas),
-                # net jei dar negautas pirmas progress. Sprendžia "krito prieš 1-ą segmentą".
-                _safe_put(q, ("started", {}), stop)
-                for evt in _stream_transcription(model, tmp_path, language):
-                    # COOPERATIVE cancellation: patikra TIK tarp segmentų. Vieno ilgo
-                    # segmento apdorojimo (model.transcribe iteracija) nutraukti negalim -
-                    # tikras hard-cancel reikalautų atskiro proceso. Žr. RUNPOD.md.
-                    if stop.is_set():
-                        break
-                    if not _safe_put(q, evt, stop):
-                        break  # klientas dingo ir queue pilna - baigiam
-            except Exception as e:  # noqa: BLE001
-                _safe_put(q, ("error", {"error": f"{type(e).__name__}: {e}"}), stop)
-            finally:
-                _gpu_semaphore.release()
-                _safe_put(q, ("__end__", None), stop)
-                # Temp failą trina WORKER'IS (ne event_gen), nes tik jis tikrai žino,
-                # kada pipeline baigė failą naudoti. Taip failas NEIŠTRINAMAS, kol thread
-                # gyvas (išsprendžia per-ankstyvo trynimo problemą galutinai).
-                _cleanup_temp(tmp_path)
+            _run_stream_worker(
+                model=model,
+                audio_path=tmp_path,
+                language=language,
+                q=q,
+                stop=stop,
+                semaphore=_gpu_semaphore,
+            )
 
         t = _threading.Thread(target=worker, daemon=True)
         t.start()
@@ -248,6 +226,43 @@ def _cleanup_temp(path):
             os.unlink(path)
         except OSError:
             pass
+
+
+def _run_stream_worker(model, audio_path, language, q, stop, semaphore,
+                       stream_fn=None, cleanup_fn=None):
+    """
+    SSE worker'io ciklas kaip TESTUOJAMA modulio funkcija (ne closure kopija).
+
+    Ir realus /transcribe-stream worker, IR integraciniai testai kviečia BŪTENT ŠITĄ
+    funkciją - tad testas negali "nueiti į šoną" nuo realaus kodo (jei ciklas pasikeis,
+    testas pamatys). stream_fn/cleanup_fn injektuojami testams (numatytai - realios).
+
+    Elgesys: gauna semaforą (timeout); 'started'; iteruoja segmentus tikrindamas stop
+    TARP jų (cooperative cancel); _safe_put False -> nutraukia; klaidą -> error event;
+    finally atlaisvina semaforą, siunčia end, valo temp.
+    """
+    stream_fn = stream_fn or _stream_transcription
+    cleanup_fn = cleanup_fn or _cleanup_temp
+
+    wait_sec = int(os.environ.get("STREAM_QUEUE_WAIT_SEC", "300"))
+    if not semaphore.acquire(timeout=wait_sec):
+        _safe_put(q, ("error", {"error": "Serveris užimtas (concurrency limitas). Bandykite vėliau."}), stop)
+        _safe_put(q, ("__end__", None), stop)
+        cleanup_fn(audio_path)
+        return
+    try:
+        _safe_put(q, ("started", {}), stop)
+        for evt in stream_fn(model, audio_path, language):
+            if stop.is_set():
+                break
+            if not _safe_put(q, evt, stop):
+                break
+    except Exception as e:  # noqa: BLE001
+        _safe_put(q, ("error", {"error": f"{type(e).__name__}: {e}"}), stop)
+    finally:
+        semaphore.release()
+        _safe_put(q, ("__end__", None), stop)
+        cleanup_fn(audio_path)
 
 
 def _stream_transcription(model, audio_path, language):

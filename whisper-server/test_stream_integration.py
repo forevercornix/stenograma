@@ -289,40 +289,64 @@ def test_safe_put_nutraukia_laukima_gavus_stop_signala(server_mod):
 
 
 def test_worker_ciklas_nutruksta_gavus_stop(server_mod):
-    """TIESIOGINIS worker'io ciklo nutraukimo testas (ko _safe_put testas neįrodo).
+    """TIESIOGINIS worker'io ciklo nutraukimo testas - kviečia REALŲ _run_stream_worker
+    (ne logikos kopiją). Jei realus ciklas ateityje pasikeis, šis testas tai pamatys.
 
-    Imituojam worker'io logikos esmę: iteruojam per DAUG segmentų, dedam į MAŽĄ queue
-    (kad užsipildytų), niekas neskaito -> _safe_put ims blokuoti su stop patikra. Kai
-    nustatom stop, ciklas turi NUTRŪKTI (ne apdoroti visų segmentų). Patvirtina, kad
-    `if not _safe_put(...): break` realiai nutraukia darbą tarp segmentų."""
+    Setup: maža queue (užsipildo), niekas neskaito, DAUG segmentų per injektuotą stream_fn.
+    Nustatom stop -> worker'io ciklas turi NUTRŪKTI (per `if not _safe_put: break`), ne
+    apdoroti visų 1000 segmentų."""
     import queue as _q
     q = _q.Queue(maxsize=2)
     stop = threading.Event()
-    processed = []
+    sem = threading.BoundedSemaphore(1)
+    yielded = {"count": 0}
 
-    def fake_stream():
-        # imituoja _stream_transcription: daug segmentų
+    def fake_stream(model, path, lang):
         for i in range(1000):
+            yielded["count"] += 1
             yield ("progress", {"percent": i})
 
-    # atskiras thread nustato stop po trumpo laiko (imituoja disconnect)
     def disconnect():
         time.sleep(0.3)
         stop.set()
     threading.Thread(target=disconnect, daemon=True).start()
 
-    # worker'io ciklo ESMĖ (ta pati logika kaip server.py worker()):
-    for evt in fake_stream():
-        if stop.is_set():
-            break
-        if not server_mod._safe_put(q, evt, stop, per_try=0.05):
-            break
-        processed.append(evt)
+    # Kviečiam REALŲ worker'į su injektuotu stream_fn ir cleanup (kad neliestų failų).
+    server_mod._run_stream_worker(
+        model=None, audio_path="/tmp/nėra.wav", language="lt",
+        q=q, stop=stop, semaphore=sem,
+        stream_fn=fake_stream, cleanup_fn=lambda p: None,
+    )
 
-    # Ciklas turi nutrūkti GEROKAI anksčiau nei 1000 segmentų (nes queue užsipildė ir
-    # stop suveikė). Jei ciklas nebūtų nutrūkęs, būtų bandęs visus 1000.
-    assert len(processed) < 1000, "ciklas turi nutrūkti gavus stop, ne apdoroti visų"
+    # Ciklas turi nutrūkti gerokai anksčiau nei 1000 (queue užsipildė + stop suveikė).
+    assert yielded["count"] < 1000, "worker'is turi nutrūkti gavus stop, ne apdoroti visų"
     assert stop.is_set(), "stop turėjo suveikti"
-    # Įrodymas, kad nutrūko dėl stop (ne dėl kitos priežasties): apdorota tik tiek, kiek
-    # tilpo į queue prieš disconnect (maža dalis).
-    assert len(processed) <= 10, f"turėjo nutrūkti anksti (apdorota {len(processed)})"
+    # Semaforas turi būti atlaisvintas (finally) - kitas acquire pavyksta iškart.
+    assert sem.acquire(blocking=False), "semaforas turi būti atlaisvintas po worker'io"
+
+
+def test_worker_atlaisvina_semafora_po_klaidos(server_mod):
+    """Kviečia REALŲ _run_stream_worker su stream_fn, kuri meta klaidą. Semaforas turi
+    būti atlaisvintas (finally), o error event - queue."""
+    import queue as _q
+    q = _q.Queue(maxsize=100)
+    stop = threading.Event()
+    sem = threading.BoundedSemaphore(1)
+
+    def failing_stream(model, path, lang):
+        raise RuntimeError("modelio klaida")
+        yield  # niekada
+
+    server_mod._run_stream_worker(
+        model=None, audio_path="/tmp/nėra.wav", language="lt",
+        q=q, stop=stop, semaphore=sem,
+        stream_fn=failing_stream, cleanup_fn=lambda p: None,
+    )
+
+    events = []
+    while not q.empty():
+        events.append(q.get())
+    names = [e[0] for e in events]
+    assert "error" in names, "klaida turi tapti error event"
+    assert "__end__" in names, "turi būti __end__"
+    assert sem.acquire(blocking=False), "semaforas atlaisvintas net po klaidos"
