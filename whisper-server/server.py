@@ -48,6 +48,10 @@ _load_error = None
 # Semaforas riboja, kad neperkrautų VRAM/CPU (kiekvienas transcribe() naudoja modelį).
 _MAX_CONCURRENCY = int(os.environ.get("WHISPER_MAX_CONCURRENCY", "2"))
 _semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
+# Threading semaforas SSE worker'iui (jis sukasi atskirame thread, ne event loop'e).
+# TAS PATS limitas kaip _semaphore - kartu jie riboja bendrą vienalaikių transkribavimų
+# skaičių (async /transcribe + SSE /transcribe-stream) VRAM apsaugai.
+_thread_semaphore = _threading.Semaphore(_MAX_CONCURRENCY)
 
 
 def _get_model():
@@ -159,16 +163,30 @@ async def transcribe_stream(
     tmp.close()
 
     async def event_gen():
-        q: "_queue.Queue" = _queue.Queue()
+        q: "_queue.Queue" = _queue.Queue(maxsize=100)
+        stop = _threading.Event()  # signalas worker'iui stotis (kliento disconnect)
+        acquired = False
 
         def worker():
+            nonlocal acquired
+            # Concurrency limitas: TAS PATS threading semaforas kaip /transcribe VRAM
+            # apsaugai. Blokuojantis acquire su timeout - jei per ilgai laukia eilėje,
+            # grąžinam klaidą, ne kabinam amžinai.
+            wait_sec = int(os.environ.get("STREAM_QUEUE_WAIT_SEC", "300"))
+            if not _thread_semaphore.acquire(timeout=wait_sec):
+                q.put(("error", {"error": "Serveris užimtas (concurrency limitas). Bandykite vėliau."}))
+                q.put(("__end__", None))
+                return
+            acquired = True
             try:
-                async_acquire = None  # semaforo čia nenaudojam (atskiras thread); ribojimas per backend
                 for evt in _stream_transcription(model, tmp_path, language):
+                    if stop.is_set():  # klientas atsijungė - nutraukiam darbą
+                        break
                     q.put(evt)
             except Exception as e:  # noqa: BLE001
                 q.put(("error", {"error": f"{type(e).__name__}: {e}"}))
             finally:
+                _thread_semaphore.release()
                 q.put(("__end__", None))
 
         t = _threading.Thread(target=worker, daemon=True)
@@ -181,9 +199,20 @@ async def transcribe_stream(
                     break
                 name, payload = evt
                 yield f"event: {name}\ndata: {_json.dumps(payload)}\n\n"
+        except asyncio.CancelledError:
+            # Klientas atsijungė (disconnect) - signalizuojam worker'iui stotis.
+            stop.set()
+            raise
         finally:
+            stop.set()  # bet kokiu atveju - worker'is turi baigtis
+            # Temp failo valymas: laukiam, kol worker'is realiai baigs naudoti failą
+            # (kitaip trintume failą, kurį pipeline dar skaito). Trumpas join su timeout.
+            await asyncio.to_thread(t.join, 5)
             if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 

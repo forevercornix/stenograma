@@ -40,12 +40,21 @@ class FasterWhisperProvider extends TranscriptionProvider {
     // patikrintas) kelias liktų nepakeistas. NETESTUOTA su realiu GPU - žr. RUNPOD.md.
     const streamEnabled = process.env.WHISPER_STREAM_PROGRESS === "true";
     if (streamEnabled && typeof options.onProgress === "function") {
+      const progressState = { received: false };
       try {
-        return await this._transcribeStream(audioBuffer, options);
+        return await this._transcribeStream(audioBuffer, options, progressState);
       } catch (e) {
-        // Jei streaming'as krinta - grįžtam į įprastą kelią (progresas prarandamas,
-        // bet transkripcija įvyksta). Atsparumas svarbiau nei progresas.
-        console.warn(`[stenograma] Whisper streaming nepavyko (${e.message}), grįžtu į įprastą /transcribe.`);
+        // Fallback SAUGUS tik jei streaming'as krito ANKSTI (jokio progreso negauta) -
+        // tada įprastas /transcribe nekartoja jau padaryto darbo. Jei streaming'as krito
+        // ĮPUSĖJUS (progreso jau buvo), aklas fallback reikštų VISOS 4 val. transkripcijos
+        // kartojimą iš naujo (dvigubas GPU darbas). Tokiu atveju NEkartojam - metam klaidą.
+        if (progressState.received) {
+          throw new Error(
+            `Whisper streaming nutrūko įpusėjus (${e.message}). Nekartojam viso darbo - ` +
+            `pakartokite užklausą arba išjunkite WHISPER_STREAM_PROGRESS.`
+          );
+        }
+        console.warn(`[stenograma] Whisper streaming krito anksti (${e.message}), grįžtu į įprastą /transcribe.`);
       }
     }
 
@@ -92,7 +101,7 @@ class FasterWhisperProvider extends TranscriptionProvider {
    * kviečia options.onProgress(percent) kiekvienam progresui. Grąžina tą patį formatą
    * kaip įprastas kelias. NETESTUOTA su realiu GPU.
    */
-  async _transcribeStream(audioBuffer, options) {
+  async _transcribeStream(audioBuffer, options, progressState = {}) {
     const FormData = require("form-data");
     const form = new FormData();
     form.append("file", audioBuffer, { filename: options.filename || "audio.mp3" });
@@ -115,7 +124,6 @@ class FasterWhisperProvider extends TranscriptionProvider {
     const decoder = new TextDecoder();
     for await (const chunk of res.body) {
       buffer += decoder.decode(chunk, { stream: true });
-      // SSE įvykiai atskirti tuščia eilute
       let idx;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, idx);
@@ -123,6 +131,7 @@ class FasterWhisperProvider extends TranscriptionProvider {
         const evt = parseSseEvent(raw);
         if (!evt) continue;
         if (evt.event === "progress" && evt.data) {
+          progressState.received = true; // pažymim, kad darbas jau prasidėjo (fallback nebesaugus)
           try { options.onProgress(JSON.parse(evt.data)); } catch { /* ignoruojam blogą progresą */ }
         } else if (evt.event === "done" && evt.data) {
           done = JSON.parse(evt.data);
