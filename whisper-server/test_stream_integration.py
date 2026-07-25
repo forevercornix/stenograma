@@ -175,3 +175,111 @@ def test_semaforas_atlaisvinamas_po_klaidos(server_mod):
     events2 = _parse_sse(r2.text)
     assert any(e == "done" for (e, _) in events2), "antras kvietimas turi pavykti (semaforas atsilaisvino)"
     os.environ["WHISPER_MAX_CONCURRENCY"] = "2"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Papildomi patikimumo / regresijos testai (queue stress, lėtas modelis, daug
+# progress event, _safe_put elgesys). Iš trečio kritinio įvertinimo.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_safe_put_grazina_false_kai_queue_pilna_ir_stop(server_mod):
+    """P1: _safe_put NEturi amžinai blokuoti, jei queue pilna ir klientas dingo (stop).
+    Užpildom queue iki maxsize, nustatom stop -> _safe_put turi grąžinti False, ne kabinti."""
+    import queue as _q
+    small = _q.Queue(maxsize=2)
+    small.put(("x", 1))
+    small.put(("x", 2))  # dabar pilna
+    stop = threading.Event()
+    stop.set()  # klientas jau dingęs
+
+    start = time.time()
+    result = server_mod._safe_put(small, ("y", 3), stop, per_try=0.1)
+    elapsed = time.time() - start
+
+    assert result is False, "_safe_put turi grąžinti False, kai queue pilna ir stop"
+    assert elapsed < 2.0, f"_safe_put neturi kabinti (užtruko {elapsed:.1f}s)"
+
+
+def test_safe_put_pavyksta_kai_vieta_atsilaisvina(server_mod):
+    """_safe_put turi sėkmingai įdėti, kai queue atsilaisvina (worker'is nedingsta veltui)."""
+    import queue as _q
+    small = _q.Queue(maxsize=1)
+    small.put(("x", 1))  # pilna
+    stop = threading.Event()
+
+    # atskiras thread atlaisvina vietą po 0.3s
+    def drainer():
+        time.sleep(0.3)
+        small.get()
+    threading.Thread(target=drainer, daemon=True).start()
+
+    result = server_mod._safe_put(small, ("y", 2), stop, per_try=0.1)
+    assert result is True, "_safe_put turi pavykti, kai vieta atsilaisvina"
+
+
+def test_letas_modelis_daug_progress_event(server_mod):
+    """Lėto modelio su daug segmentų mock: patikrinam, kad SSE atlaiko daug progress
+    event'ų ir korektiškai baigia su done. Regresija dideliems failams."""
+    os.environ["WHISPER_MAX_CONCURRENCY"] = "2"
+    importlib.reload(server_mod)
+    # 50 segmentų, kiekvienas trumpai - imituoja ilgą failą su daug progresų
+    _install_model(server_mod, MockModel(n_segments=50, seg_delay=0.002))
+    client = TestClient(server_mod.app)
+    r = client.post("/transcribe-stream", files={"file": ("a.wav", b"x" * 100, "audio/wav")})
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    names = [e[0] for e in events]
+    assert names.count("started") == 1, "lygiai vienas started"
+    assert names.count("done") == 1, "lygiai vienas done"
+    # progress event'ų turi būti keli (ne būtinai 50 - server siunčia tik pasikeitus %)
+    assert names.count("progress") >= 1, "turi būti progress event'ų"
+    # done paskutinis prieš pabaigą
+    assert names[-1] == "done", "done turi būti paskutinis"
+
+
+def test_progress_procentai_dideja_ir_neperzengia_99(server_mod):
+    """Progreso % turi didėti monotoniškai ir neviršyti 99 (100 tik su done)."""
+    os.environ["WHISPER_MAX_CONCURRENCY"] = "2"
+    importlib.reload(server_mod)
+    _install_model(server_mod, MockModel(n_segments=20, seg_delay=0.001))
+    client = TestClient(server_mod.app)
+    r = client.post("/transcribe-stream", files={"file": ("a.wav", b"x" * 100, "audio/wav")})
+    events = _parse_sse(r.text)
+    import json
+    percents = [json.loads(d)["percent"] for (e, d) in events if e == "progress"]
+    assert percents == sorted(percents), "progresas turi didėti monotoniškai"
+    assert all(0 <= p <= 99 for p in percents), f"progresas turi būti 0-99, gauta: {percents}"
+
+
+def test_tuscias_audio_nesugriuva(server_mod):
+    """Kraštinis atvejis: modelis be segmentų (tyla/tuščia) - turi baigti su done, ne klaida."""
+    os.environ["WHISPER_MAX_CONCURRENCY"] = "2"
+    importlib.reload(server_mod)
+    _install_model(server_mod, MockModel(n_segments=0))
+    client = TestClient(server_mod.app)
+    r = client.post("/transcribe-stream", files={"file": ("a.wav", b"x" * 100, "audio/wav")})
+    assert r.status_code == 200
+    events = _parse_sse(r.text)
+    names = [e[0] for e in events]
+    assert "done" in names, "tuščias audio turi baigti su done (ne error)"
+
+
+def test_stop_signalas_nutraukia_darba_tarp_segmentu(server_mod):
+    """Disconnect (stop signalas) turi nutraukti darbą TARP segmentų (cooperative cancel).
+    Tiesioginis _safe_put + stop elgesio patikrinimas be pilno HTTP disconnect (kurio
+    TestClient nepalaiko). Tikrinam, kad kai stop nustatytas, _safe_put grąžina False -
+    tai signalas worker'io ciklui nutrūkti."""
+    import queue as _q
+    q = _q.Queue(maxsize=1)
+    q.put(("busy", 0))  # pilna
+    stop = threading.Event()
+
+    # simuliuojam: klientas dingsta (stop) kol worker'is bando dėti kitą segmentą
+    def disconnect_after():
+        time.sleep(0.2)
+        stop.set()
+    threading.Thread(target=disconnect_after, daemon=True).start()
+
+    # worker'is bandytų dėti, bet queue pilna; kai stop suveiks -> False (ciklas nutrūktų)
+    result = server_mod._safe_put(q, ("progress", {"percent": 50}), stop, per_try=0.1)
+    assert result is False, "kai klientas dingsta (stop), _safe_put grąžina False -> worker'is nutraukia"
