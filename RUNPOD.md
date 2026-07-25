@@ -179,7 +179,32 @@ API_TIMEOUT_MS=3600000 make gpu BACKEND_PORT=4001 PYANNOTE_PORT=9001   # 60 min
 ⚠️ Ilgi MP3 pyannote'ui problematiški (žr. §0). Ilgus įrašus konvertuokite į WAV:
 `ffmpeg -i input.mp3 -ar 16000 -ac 1 output.wav`.
 
-### 4c. Diarizacijos tikslumas ir halucinacijos (kokybės patarimai)
+### 4b-progress. SSE progresas ilgiems failams (EKSPERIMENTINIS)
+
+Ilgo failo progresą (`progress` laukas) galima įjungti `WHISPER_STREAM_PROGRESS=true`.
+Numatytai IŠJUNGTA. Prieš įjungiant produkcijoje - perskaitykite šias ribas.
+
+**Sąžininga testavimo riba.** Tikras HTTP atsijungimas SSE srauto viduryje automatiniuose
+testuose NĖRA padengtas. FastAPI `TestClient` SSE atsakymą perskaito sinchroniškai, todėl
+juo patikimai neimituojamas realus kliento ar tarpinio proxy ryšio nutrūkimas vykstant
+transkripcijai. Unit lygmenyje patikrinta, kad gavus `stop` signalą: `_safe_put()`
+neužstringa pilnoje queue, grąžina `False`, worker'io ciklas gali cooperative būdu baigti
+darbą, o temp failas paliekamas worker'iui ir neištrinamas, kol jis dar naudojamas. Tai
+patvirtina vidinę cancellation logiką, bet NEĮRODO visos realios HTTP grandinės elgesio.
+Tikras mid-stream disconnect per naršyklę → Node backend → RunPod proxy → Python SSE
+serverį lieka RunPod integraciniam testui.
+
+**Kodėl RunPod testas čia prasmingas (ne formalumas).** Atsijungimas priklauso nuo visos
+grandinės. Proxy gali: kurį laiką laikyti nutrūkusį ryšį atvirą; buferizuoti SSE; apie
+disconnect pranešti tik po timeout; nutraukti Node ryšį, bet ne iš karto Python ryšį.
+Realiame teste reikia patikrinti, ar atsijungimas iš tikrųjų sukelia Python generatoriaus
+`asyncio.CancelledError` ir todėl nustato `stop.set()`.
+
+**Cooperative cancellation.** `faster-whisper` cancellation yra cooperative: vykdymas
+sustabdomas tik TARP sugeneruojamų segmentų. Jau vykdomo modelio segmento hard
+cancellation NEpalaikomas (reikėtų atskiro proceso modelio).
+
+
 
 RASTA realiai testuojant (4 val. lietuviškas įrašas su prastesniu Teams garsu):
 

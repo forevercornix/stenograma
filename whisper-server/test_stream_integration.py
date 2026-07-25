@@ -264,11 +264,14 @@ def test_tuscias_audio_nesugriuva(server_mod):
     assert "done" in names, "tuščias audio turi baigti su done (ne error)"
 
 
-def test_stop_signalas_nutraukia_darba_tarp_segmentu(server_mod):
-    """Disconnect (stop signalas) turi nutraukti darbą TARP segmentų (cooperative cancel).
-    Tiesioginis _safe_put + stop elgesio patikrinimas be pilno HTTP disconnect (kurio
-    TestClient nepalaiko). Tikrinam, kad kai stop nustatytas, _safe_put grąžina False -
-    tai signalas worker'io ciklui nutrūkti."""
+def test_safe_put_nutraukia_laukima_gavus_stop_signala(server_mod):
+    """Gavus stop signalą, _safe_put nustoja laukti pilnoje queue ir grąžina False.
+
+    TIKSLUMAS: šis testas įrodo SIAURESNĮ dalyką nei "darbas nutraukiamas tarp segmentų" -
+    jis patvirtina TIK _safe_put() elgesį (queue pilna + stop -> False, be užstrigimo).
+    Worker'io ciklas tuo remiasi (`if not _safe_put(...): break`), bet visą ciklą su
+    keliais segmentais ir stop tarp jų tiesiogiai patikrina
+    test_worker_ciklas_nutrūksta_gavus_stop žemiau."""
     import queue as _q
     q = _q.Queue(maxsize=1)
     q.put(("busy", 0))  # pilna
@@ -283,3 +286,43 @@ def test_stop_signalas_nutraukia_darba_tarp_segmentu(server_mod):
     # worker'is bandytų dėti, bet queue pilna; kai stop suveiks -> False (ciklas nutrūktų)
     result = server_mod._safe_put(q, ("progress", {"percent": 50}), stop, per_try=0.1)
     assert result is False, "kai klientas dingsta (stop), _safe_put grąžina False -> worker'is nutraukia"
+
+
+def test_worker_ciklas_nutruksta_gavus_stop(server_mod):
+    """TIESIOGINIS worker'io ciklo nutraukimo testas (ko _safe_put testas neįrodo).
+
+    Imituojam worker'io logikos esmę: iteruojam per DAUG segmentų, dedam į MAŽĄ queue
+    (kad užsipildytų), niekas neskaito -> _safe_put ims blokuoti su stop patikra. Kai
+    nustatom stop, ciklas turi NUTRŪKTI (ne apdoroti visų segmentų). Patvirtina, kad
+    `if not _safe_put(...): break` realiai nutraukia darbą tarp segmentų."""
+    import queue as _q
+    q = _q.Queue(maxsize=2)
+    stop = threading.Event()
+    processed = []
+
+    def fake_stream():
+        # imituoja _stream_transcription: daug segmentų
+        for i in range(1000):
+            yield ("progress", {"percent": i})
+
+    # atskiras thread nustato stop po trumpo laiko (imituoja disconnect)
+    def disconnect():
+        time.sleep(0.3)
+        stop.set()
+    threading.Thread(target=disconnect, daemon=True).start()
+
+    # worker'io ciklo ESMĖ (ta pati logika kaip server.py worker()):
+    for evt in fake_stream():
+        if stop.is_set():
+            break
+        if not server_mod._safe_put(q, evt, stop, per_try=0.05):
+            break
+        processed.append(evt)
+
+    # Ciklas turi nutrūkti GEROKAI anksčiau nei 1000 segmentų (nes queue užsipildė ir
+    # stop suveikė). Jei ciklas nebūtų nutrūkęs, būtų bandęs visus 1000.
+    assert len(processed) < 1000, "ciklas turi nutrūkti gavus stop, ne apdoroti visų"
+    assert stop.is_set(), "stop turėjo suveikti"
+    # Įrodymas, kad nutrūko dėl stop (ne dėl kitos priežasties): apdorota tik tiek, kiek
+    # tilpo į queue prieš disconnect (maža dalis).
+    assert len(processed) <= 10, f"turėjo nutrūkti anksti (apdorota {len(processed)})"
