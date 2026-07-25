@@ -1,6 +1,7 @@
 const fileStorage = require("../utils/fileStorage");
 const { transcribeAudio } = require("../services/transcriptionService");
 const { generateProtocol } = require("../services/protocolService");
+const jobStore = require("../utils/jobStore");
 
 /**
  * Job processor'iai - bendras vykdymo kodas inline runner'iui IR BullMQ worker'iams.
@@ -30,6 +31,20 @@ async function transcriptionProcessor(payload, jobId) {
   // kitas bandymas vėl turi rasti audio. Trynimą atlieka worker/inline PO GALUTINIO
   // statuso (sėkmė ar išnaudoti bandymai) - žr. jobRunner._runInline ir workers/index.js.
   const buffer = await fileStorage.get(storageKey);
+
+  // Progreso callback: rašo į jobStore, kad GET /api/transcribe-jobs/:id rodytų %.
+  // Veikia tik jei transcription provider'is teikia progresą (SSE streaming) IR jobId
+  // yra. Throttle: rašom tik pasikeitus procentui (progresas ateina jau "throttled"
+  // iš whisper-server). NETESTUOTA su realiu GPU streaming'u - žr. RUNPOD.md.
+  const onProgress = jobId
+    ? (p) => {
+        const percent = typeof p === "number" ? p : p && p.percent;
+        if (percent == null) return;
+        // fire-and-forget: progreso rašymas neturi blokuoti/nutraukti transkripcijos
+        Promise.resolve(jobStore.update(jobId, { progress: percent })).catch(() => {});
+      }
+    : undefined;
+
   return await transcribeAudio({
     buffer,
     filename,
@@ -41,6 +56,7 @@ async function transcriptionProcessor(payload, jobId) {
     transcriptionProviderOverride,
     diarizationModeOverride,
     meetingId,
+    onProgress,
   });
 }
 

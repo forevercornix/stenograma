@@ -10,7 +10,7 @@ const apiKeyAuth = require("../middleware/apiKeyAuth");
 
 const router = express.Router();
 
-const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || "50", 10);
+const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || "500", 10);
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, os.tmpdir()),

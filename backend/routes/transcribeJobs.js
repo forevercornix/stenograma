@@ -15,7 +15,7 @@ const apiKeyAuth = require("../middleware/apiKeyAuth");
 
 const router = express.Router();
 
-const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || "50", 10);
+const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || "500", 10);
 
 // Tas pats whitelist principas kaip routes/transcribe.js (žr. ten pilną
 // paaiškinimą dėl video/mp4+webm sąmoningo leidimo).

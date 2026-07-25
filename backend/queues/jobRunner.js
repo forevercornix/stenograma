@@ -33,6 +33,7 @@ async function init() {
   if (!useBullMq) {
     _mode = "inline";
     console.log("[stenograma] Job runner: inline (in-proceso; be atskirų worker'ių - nustatykite REDIS_URL BullMQ eilei)");
+    warnIfInlineInProduction();
     return _mode;
   }
 
@@ -49,7 +50,27 @@ async function init() {
     }
     console.warn(`[stenograma] ⚠️  BullMQ init nepavyko (${e.message}). Grįžtu į inline runner'į (darbas vykdomas HTTP procese).`);
     _mode = "inline";
+    warnIfInlineInProduction();
     return _mode;
+  }
+}
+
+/**
+ * Inline režimas patogus dev/demo, BET produkcijoje pavojingas: job'ai vykdomi HTTP
+ * procese ir laikomi in-memory, tad backend'o restartas/kritimas apdorojimo metu
+ * PRARANDA darbą IR jo būseną, o retry nėra (skirtingai nuo BullMQ). Jei kas nors
+ * paleidžia inline su NODE_ENV=production - garsiai įspėjame (bet neblokuojame, kad
+ * neapribotume teisėtų small-scale scenarijų su REDIS_REQUIRED=false).
+ */
+function warnIfInlineInProduction() {
+  if (process.env.NODE_ENV === "production") {
+    console.warn(
+      "[stenograma] ⚠️  ⚠️  DĖMESIO: inline job runner PRODUKCIJOJE (NODE_ENV=production, be REDIS_URL).\n" +
+      "           Job'ai vykdomi HTTP procese ir laikomi ATMINTYJE - backend'o restartas ar\n" +
+      "           kritimas apdorojimo metu PRARANDA darbą ir būseną, retry NĖRA. Ilgiems failams\n" +
+      "           tai reiškia, kad valandų apdorojimas gali dingti. Produkcijai nustatykite REDIS_URL\n" +
+      "           (BullMQ: atskiri worker'iai, persistentus, atsparu restartams)."
+    );
   }
 }
 

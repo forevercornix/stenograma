@@ -6,6 +6,21 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ## Pataisyta (po realaus RunPod diegimo audito)
 
+- **VAD filtras + automatinis MP3→WAV + upload/inline nuoseklumas (kodo audito radiniai).**
+  Iš kritinio kodo įvertinimo ir 4 val. testo:
+  - `WHISPER_VAD_FILTER=true` (numatyta): faster-whisper VAD praleidžia tylą - šalina
+    halucinacijų PRIEŽASTĮ (ne tik pasekmę kaip post-filtras).
+  - `PYANNOTE_AUTO_WAV=true` (numatyta): pyannote-server automatiškai konvertuoja ne-WAV
+    į 16kHz mono WAV per ffmpeg prieš pipeline() - išsprendžia ilgo MP3 įstrigimą be
+    rankinio konvertavimo.
+  - `MAX_UPLOAD_MB` numatytasis suvienodintas (kodas 50 → 500, atitinka .env.example) -
+    ilgi failai nebeatmetami be konfigūracijos.
+  - Inline job runner produkcijoje (`NODE_ENV=production` be `REDIS_URL`) dabar garsiai
+    ĮSPĖJA apie duomenų praradimo/retry nebuvimo riziką.
+  - Progreso streaming (SSE) ilgiems failams: whisper-server `/transcribe-stream` +
+    backend SSE skaitymas + jobStore progress. EKSPERIMENTINIS, numatyta IŠJUNGTA
+    (`WHISPER_STREAM_PROGRESS=false`), NETESTUOTA su realiu GPU.
+
 - **`file`/`audio` laukų nenuoseklumas įkeliant.** `/api/transcribe` ir
   `/api/transcribe-jobs` priimdavo tik `audio` lauką, o `file` metė "Unexpected field"
   (RASTA realiai - natūralu bandyti `-F "file=@..."`). Dabar priimami ABU laukai.

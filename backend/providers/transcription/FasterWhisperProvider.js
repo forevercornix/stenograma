@@ -35,6 +35,20 @@ class FasterWhisperProvider extends TranscriptionProvider {
   }
 
   async transcribe(audioBuffer, options = {}) {
+    // SSE streaming kelias su progresu - TIK jei kviečiantysis pateikė onProgress IR
+    // įjungtas WHISPER_STREAM_PROGRESS=true. Numatyta IŠJUNGTA, kad numatytas (realiai
+    // patikrintas) kelias liktų nepakeistas. NETESTUOTA su realiu GPU - žr. RUNPOD.md.
+    const streamEnabled = process.env.WHISPER_STREAM_PROGRESS === "true";
+    if (streamEnabled && typeof options.onProgress === "function") {
+      try {
+        return await this._transcribeStream(audioBuffer, options);
+      } catch (e) {
+        // Jei streaming'as krinta - grįžtam į įprastą kelią (progresas prarandamas,
+        // bet transkripcija įvyksta). Atsparumas svarbiau nei progresas.
+        console.warn(`[stenograma] Whisper streaming nepavyko (${e.message}), grįžtu į įprastą /transcribe.`);
+      }
+    }
+
     const FormData = require("form-data");
     const form = new FormData();
     form.append("file", audioBuffer, { filename: options.filename || "audio.mp3" });
@@ -72,6 +86,78 @@ class FasterWhisperProvider extends TranscriptionProvider {
       provider: "faster-whisper-local",
     };
   }
+
+  /**
+   * SSE streaming variantas: kviečia /transcribe-stream, skaito progress/done event'us,
+   * kviečia options.onProgress(percent) kiekvienam progresui. Grąžina tą patį formatą
+   * kaip įprastas kelias. NETESTUOTA su realiu GPU.
+   */
+  async _transcribeStream(audioBuffer, options) {
+    const FormData = require("form-data");
+    const form = new FormData();
+    form.append("file", audioBuffer, { filename: options.filename || "audio.mp3" });
+    form.append("language", options.language || "lt");
+    form.append("diarize", String(!!options.diarize));
+
+    const streamUrl = this.url.replace(/\/transcribe$/, "/transcribe-stream");
+    const timeoutMs = timeoutForAudioBytes(audioBuffer.length);
+    const res = await fetchWithTimeout(streamUrl, {
+      method: "POST",
+      body: form.getBuffer(),
+      headers: form.getHeaders(),
+    }, timeoutMs);
+    if (!res.ok || !res.body) {
+      throw new Error(`Streaming serveris grąžino klaidą (${res.status}).`);
+    }
+
+    let done = null;
+    let buffer = "";
+    const decoder = new TextDecoder();
+    for await (const chunk of res.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      // SSE įvykiai atskirti tuščia eilute
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const evt = parseSseEvent(raw);
+        if (!evt) continue;
+        if (evt.event === "progress" && evt.data) {
+          try { options.onProgress(JSON.parse(evt.data)); } catch { /* ignoruojam blogą progresą */ }
+        } else if (evt.event === "done" && evt.data) {
+          done = JSON.parse(evt.data);
+        } else if (evt.event === "error") {
+          throw new Error(evt.data || "streaming error");
+        }
+      }
+    }
+    if (!done) throw new Error("Streaming baigėsi be 'done' įvykio.");
+
+    return {
+      text: done.text,
+      segments: (done.segments || []).map((s) => ({
+        start: s.start,
+        end: s.end,
+        text: s.text,
+        speaker: s.speaker || null,
+      })),
+      language: done.language || options.language || "lt",
+      confidence: done.avg_logprob ?? null,
+      diarization: !!options.diarize,
+      provider: "faster-whisper-local",
+    };
+  }
+}
+
+function parseSseEvent(raw) {
+  const lines = raw.split("\n");
+  let event = "message";
+  let data = "";
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  return { event, data };
 }
 
 module.exports = FasterWhisperProvider;

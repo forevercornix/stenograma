@@ -21,6 +21,8 @@ huggingface.co ir sugeneruoti tokeną).
 """
 import os
 import tempfile
+import subprocess
+import shutil
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
@@ -108,6 +110,37 @@ def health(probe: bool = False):
     return JSONResponse(status_code=status_code, content=body)
 
 
+def _convert_to_wav(src_path):
+    """
+    Konvertuoja audio į 16kHz mono WAV per ffmpeg. Grąžina naujo failo kelią arba None,
+    jei ffmpeg nėra arba konvertavimas nepavyko (tada kvietėjas naudos originalą).
+
+    KODĖL: pyannote/torchaudio ilgą MP3 apdoroja nestabiliai (MPEG_LAYER_III warning'ų
+    srautas, įstrigimas). 16kHz mono WAV - formatas, kurį pyannote mėgsta.
+    """
+    if not shutil.which("ffmpeg"):
+        return None
+    out_path = src_path + ".conv.wav"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", out_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=int(os.environ.get("FFMPEG_TIMEOUT_SEC", "600")),
+        )
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception:
+        # Konvertavimas nepavyko - grįžtam prie originalo (geriau bandyti nei klaida).
+        if os.path.exists(out_path):
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+    return None
+
+
 @app.post("/diarize")
 async def diarize(file: UploadFile = File(...), num_speakers: int = Form(None)):
     pipeline, err = _get_pipeline()
@@ -135,7 +168,24 @@ async def diarize(file: UploadFile = File(...), num_speakers: int = Form(None)):
         if num_speakers:
             kwargs["num_speakers"] = int(num_speakers)
 
-        diarization = pipeline(tmp_path, **kwargs)
+        # AUTOMATINIS konvertavimas į WAV, jei įėjimas ne WAV. RASTA realiai (4 val. MP3):
+        # ilgas MP3 pyannote/torchaudio kelyje sukelia begalinį MPEG_LAYER_III warning'ų
+        # srautą ir įstrigimą. WAV (16kHz mono) veikia švariai. Konvertuojame per ffmpeg;
+        # jei ffmpeg nėra ar konvertavimas krinta - bandome originalą (geriau bandyti nei
+        # iškart klaida). Išjungiama PYANNOTE_AUTO_WAV=false.
+        audio_path = tmp_path
+        converted_path = None
+        auto_wav = os.environ.get("PYANNOTE_AUTO_WAV", "true").lower() != "false"
+        if auto_wav and suffix.lower() != ".wav":
+            converted_path = _convert_to_wav(tmp_path)
+            if converted_path:
+                audio_path = converted_path
+
+        try:
+            diarization = pipeline(audio_path, **kwargs)
+        finally:
+            if converted_path and os.path.exists(converted_path):
+                os.unlink(converted_path)
 
         turns = [
             {"start": float(turn.start), "end": float(turn.end), "speaker": str(speaker)}

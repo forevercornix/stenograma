@@ -34,7 +34,10 @@ import os
 import tempfile
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+import json as _json
+import queue as _queue
+import threading as _threading
 
 app = FastAPI(title="Stenograma faster-whisper transcription")
 
@@ -126,11 +129,116 @@ async def transcribe(
             os.unlink(tmp_path)
 
 
+@app.post("/transcribe-stream")
+async def transcribe_stream(
+    file: UploadFile = File(...),
+    language: str = Form("lt"),
+    diarize: str = Form("false"),
+):
+    """
+    SSE (Server-Sent Events) variantas su PROGRESU. Siunčia:
+      event: progress  data: {"percent": 0-100, "processedSec": float, "totalSec": float}
+      event: done      data: {<pilnas rezultatas kaip /transcribe>}
+      event: error     data: {"error": "..."}
+    Skirtas ilgiems failams, kad backend galėtų rodyti progresą. Įprastas /transcribe
+    lieka nepakeistas (suderinamumui). NETESTUOTA su realiu GPU - žr. RUNPOD.md.
+    """
+    model, err = _get_model()
+    if model is None:
+        raise HTTPException(status_code=503, detail=f"Modelis neįkeltas: {err}")
+
+    suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp_path = tmp.name
+    CHUNK_SIZE = 1024 * 1024
+    while True:
+        chunk = await file.read(CHUNK_SIZE)
+        if not chunk:
+            break
+        tmp.write(chunk)
+    tmp.close()
+
+    async def event_gen():
+        q: "_queue.Queue" = _queue.Queue()
+
+        def worker():
+            try:
+                async_acquire = None  # semaforo čia nenaudojam (atskiras thread); ribojimas per backend
+                for evt in _stream_transcription(model, tmp_path, language):
+                    q.put(evt)
+            except Exception as e:  # noqa: BLE001
+                q.put(("error", {"error": f"{type(e).__name__}: {e}"}))
+            finally:
+                q.put(("__end__", None))
+
+        t = _threading.Thread(target=worker, daemon=True)
+        t.start()
+
+        try:
+            while True:
+                evt = await asyncio.to_thread(q.get)
+                if evt[0] == "__end__":
+                    break
+                name, payload = evt
+                yield f"event: {name}\ndata: {_json.dumps(payload)}\n\n"
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+def _stream_transcription(model, audio_path, language):
+    """Generatorius: yield'ina ('progress', {...}) segmentuojant ir ('done', {rezultatas}).
+    Progresas skaičiuojamas iš seg.end / bendros audio trukmės (info.duration)."""
+    lang = None if not language or language == "auto" else language
+    use_vad = os.environ.get("WHISPER_VAD_FILTER", "true").lower() != "false"
+    kwargs = {"language": lang}
+    if use_vad:
+        kwargs["vad_filter"] = True
+    segments_iter, info = model.transcribe(audio_path, **kwargs)
+    total = float(getattr(info, "duration", 0) or 0)
+
+    segments = []
+    text_parts = []
+    logprob_sum = 0.0
+    logprob_count = 0
+    last_pct = -1
+    for seg in segments_iter:
+        t = seg.text.strip()
+        segments.append({"start": float(seg.start), "end": float(seg.end), "text": t})
+        text_parts.append(t)
+        if getattr(seg, "avg_logprob", None) is not None:
+            logprob_sum += seg.avg_logprob
+            logprob_count += 1
+        if total > 0:
+            pct = min(99, int((float(seg.end) / total) * 100))
+            if pct != last_pct:  # siunčiam tik pasikeitus (mažiau triukšmo)
+                last_pct = pct
+                yield ("progress", {"percent": pct, "processedSec": float(seg.end), "totalSec": total})
+
+    yield ("done", {
+        "text": " ".join(text_parts),
+        "segments": segments,
+        "language": info.language,
+        "avg_logprob": (logprob_sum / logprob_count) if logprob_count else None,
+    })
+
+
 def _run_transcription(model, audio_path, language):
     """Sinchroninis transkribavimas (kviečiamas iš thread pool). Grąžina dict,
     atitinkantį FasterWhisperProvider.js laukiamą formatą."""
     lang = None if not language or language == "auto" else language
-    segments_iter, info = model.transcribe(audio_path, language=lang)
+
+    # VAD (voice activity detection) filtras: praleidžia tylą, kur Whisper "prasimano"
+    # tekstą (YouTube-titrų halucinacijos). RASTA realiai (4 val. įrašas): be VAD ~37%
+    # segmentų buvo halucinacijos tyliose vietose. VAD šalina PRIEŽASTĮ (ne pasekmę kaip
+    # backend'o post-filtras). Numatyta įjungta; išjungiama WHISPER_VAD_FILTER=false.
+    use_vad = os.environ.get("WHISPER_VAD_FILTER", "true").lower() != "false"
+    transcribe_kwargs = {"language": lang}
+    if use_vad:
+        transcribe_kwargs["vad_filter"] = True
+    segments_iter, info = model.transcribe(audio_path, **transcribe_kwargs)
 
     segments = []
     text_parts = []
