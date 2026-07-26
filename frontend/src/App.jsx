@@ -18,45 +18,16 @@ import {
   Info,
   Server,
 } from "lucide-react";
+// HTTP API sluoksnis iškeltas į api/stenogramaApi.js (grynos fetch funkcijos, be React
+// state). BACKEND_URL/API_KEY konfigūracija ir jos paaiškinimai - ten. Žr. tą failą dėl
+// dviejų deployment režimų (santykinis/absoliutus URL) ir VITE_API_KEY prigimties.
+import {
+  BACKEND_URL,
+  fetchHealth,
+  generateProtocol,
+  transcribeAudioJob,
+} from "./api/stenogramaApi";
 
-// ─────────────────────────────────────────────────────────────────────────
-// KONFIGŪRACIJA
-// Backend'as YRA PRIVALOMAS - šis frontend'as niekada nekviečia jokio LLM
-// tiesiai iš naršyklės (raktas niekada nekeliauja į klientą).
-//
-// DU deployment režimai:
-//  1) SANTYKINIS URL (rekomenduojama Docker/produkcijai): VITE_BACKEND_URL="" -
-//     tada BACKEND_URL="" ir fetch naudoja santykinį "/api/..." (ta pati kilmė kaip
-//     frontend). nginx tą "/api" proxy'ina į backendą. JOKIO CORS, JOKIO build-time
-//     domeno - tas pats frontend image tinka BET KURIAM domenui. Žr. nginx.conf ir
-//     docker-compose.runpod.yml.
-//  2) ABSOLIUTUS URL (dev, kai frontend :5173 ir backend :3001 atskirai): nustatykite
-//     VITE_BACKEND_URL=http://localhost:3001. Numatyta dev režimu (žr. žemiau).
-//
-// Numatyta: jei VITE_BACKEND_URL neapibrėžtas, dev režime naudojam localhost:3001,
-// o produkcijos build'e (import.meta.env.PROD) - santykinį "" (nginx proxy).
-// ─────────────────────────────────────────────────────────────────────────
-const BACKEND_URL =
-  import.meta.env.VITE_BACKEND_URL !== undefined
-    ? import.meta.env.VITE_BACKEND_URL
-    : import.meta.env.PROD
-      ? "" // produkcijos build be aiškaus URL -> santykinis /api (nginx proxy)
-      : "http://localhost:3001"; // dev -> tiesioginis backend'as
-
-// ─────────────────────────────────────────────────────────────────────────
-// PASTABA APIE API_KEY: jei backend'e nustatytas API_KEY (žr. backend/.env),
-// šis frontend'as gali jį siųsti per VITE_API_KEY - BET tai reiškia raktas bus
-// ĮKOMPILIUOTAS į viešai pasiekiamą JS bundle'ą ir matomas bet kam per naršyklės
-// dev tools. Tai priimtina TIK vidiniam/lokaliam naudojimui (intranet, VPN, savo
-// kompiuteris) - NIEKADA viešame internete. Viešam deployment'ui reikalingas
-// reverse proxy arba backend-for-frontend sluoksnis, kuris raktą prideda
-// SERVERIO pusėje (naršyklė jo niekada nemato), arba pilna sesijų/OAuth sistema.
-// Žr. backend/README.md skyrių "Autentifikacija ir viešas diegimas".
-// ─────────────────────────────────────────────────────────────────────────
-const API_KEY = import.meta.env.VITE_API_KEY || "";
-function withApiKeyHeader(headers = {}) {
-  return API_KEY ? { ...headers, "x-api-key": API_KEY } : headers;
-}
 
 const INK = "#1B2A41";
 const PAPER = "#F7F5F0";
@@ -124,11 +95,7 @@ export default function Stenograma() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${BACKEND_URL}/api/health`)
-      .then((r) => {
-        if (!r.ok) throw new Error();
-        return r.json();
-      })
+    fetchHealth()
       .then((data) => {
         if (cancelled) return;
         setBackendStatus("online");
@@ -256,35 +223,13 @@ export default function Stenograma() {
     setError("");
     setTranscribeProgress("");
     try {
-      const form = new FormData();
-      form.append("audio", audioFile);
-      form.append("language", "lt");
-      form.append("diarize", String(diarize));
-
-      const createRes = await fetch(`${BACKEND_URL}/api/transcribe-jobs`, {
-        method: "POST",
-        headers: withApiKeyHeader(),
-        body: form,
+      // HTTP + polling logika iškelta į transcribeAudioJob. Komponentas valdo TIK state:
+      // progresą (onProgress callback -> setTranscribeProgress) ir galutinį rezultatą.
+      const job = await transcribeAudioJob({
+        audioFile,
+        diarize,
+        onProgress: (j) => setTranscribeProgress(formatTranscribeProgress(j)),
       });
-      const createData = await createRes.json();
-      if (!createRes.ok) throw new Error(createData.error || "Nepavyko pradėti transkribavimo");
-
-      const jobId = createData.jobId;
-      let job = createData;
-      const pollIntervalMs = 3000;
-      const maxPolls = 1200; // 3s * 1200 = 1 val. maksimalus laukimas
-
-      for (let i = 0; i < maxPolls; i++) {
-        await new Promise((r) => setTimeout(r, pollIntervalMs));
-        const pollRes = await fetch(`${BACKEND_URL}/api/transcribe-jobs/${jobId}`, { headers: withApiKeyHeader() });
-        job = await pollRes.json();
-        if (!pollRes.ok) throw new Error(job.error || "Klaida tikrinant transkribavimo būseną");
-        setTranscribeProgress(formatTranscribeProgress(job));
-        if (job.status === "completed" || job.status === "failed") break;
-      }
-
-      if (job.status === "failed") throw new Error(job.error || "Transkribavimas nepavyko");
-      if (job.status !== "completed") throw new Error("Transkribavimas užtruko per ilgai (viršyta laukimo riba).");
 
       const data = job.result;
       const text = data.segments?.length
@@ -306,13 +251,12 @@ export default function Stenograma() {
     setIsGenerating(true);
     setStamped(false);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/generate`, {
-        method: "POST",
-        headers: withApiKeyHeader({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ title, date: formatDateLT(date), participants, transcript }),
+      const data = await generateProtocol({
+        title,
+        date: formatDateLT(date),
+        participants,
+        transcript,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Generavimo klaida");
       setProtocol(data.protocol);
       setMeta({ source: "backend", ...data.meta });
       setTimeout(() => setStamped(true), 200);

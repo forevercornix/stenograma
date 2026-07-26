@@ -39,6 +39,15 @@ pasiekiamas daugiau nei vienam žmogui.
 5. Jei naudojate `VITE_API_KEY` fronte - įsitikinkite, kad tinklas TIKRAI patikimas
    (VPN/intranet), nes raktas bus matomas kiekvienam su prieiga prie JS bundle'o.
 
+   ⚠️ **SVARBU dėl `VITE_API_KEY` prigimties:** tai **bendras diegimo sekretas / bazinis
+   prieigos barjeras, NE galutinio vartotojo autentifikacija** (*shared deployment secret /
+   basic access barrier, not end-user authentication*). Kadangi raktas patenka į viešą JS
+   bundle: (a) bet kuris vartotojas gali jį nuskaityti; (b) jis negali atskirti vartotojų
+   vieno nuo kito; (c) atšaukimas paveiktų VISUS; (d) nėra sesijų, teisių ar audito pagal
+   tapatybę. Lokaliam sekretoriaus diegimui arba už VPN - priimtina. **Viešam serveriui su
+   keliais vartotojais - NE:** tokiu atveju reikia tikros autentifikacijos (žr. lentelę
+   žemiau - OIDC/sesijos vietoj bendro rakto).
+
 **Nebūtina, bet verta apsvarstyti:**
 - Padidinti `MAX_UPLOAD_MB`, jei įrašai ilgesni nei numatyti 50MB.
 - Sumažinti `RATE_LIMIT_MAX_REQUESTS`, jei norite griežčiau kontroliuoti LLM išlaidas.
