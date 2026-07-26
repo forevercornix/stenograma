@@ -8,6 +8,7 @@ const jobStore = require("../utils/jobStore");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
+const { detectAudioMagic } = require("../utils/audioMagicBytes");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
@@ -89,11 +90,27 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
   let job = null;
 
   try {
-    // Įrašom audio į BENDRĄ storage (ne lokalų /tmp), gaunam storageKey. BullMQ
-    // režime atskiras worker procesas failą pasieks per šį raktą.
-    const buffer = await fs.readFile(req.file.path);
+    // ANKSTYVA magic-bytes patikra: skaitom TIK antraštę (64 baitus), ne visą failą.
+    // Jei turinys ne audio, atmetam IŠ KARTO - be viso failo skaitymo į RAM, be storage
+    // kopijos, be job'o/eilės apkrovimo (netikras failas anksčiau būdavo atmetamas tik
+    // worker'io viduje). Pilna patikra lieka transcriptionService (defense-in-depth).
+    const handle = await fs.open(req.file.path, "r");
+    try {
+      const header = Buffer.alloc(64);
+      await handle.read(header, 0, header.length, 0);
+      if (!detectAudioMagic(header)) {
+        return res.status(400).json({ error: "Failo turinys neatitinka palaikomo audio formato (magic bytes)." });
+      }
+    } finally {
+      await handle.close();
+    }
+
+    // Įrašom audio į BENDRĄ storage per FAILO KELIĄ (putFile) - NEįkeliant viso failo
+    // į RAM. put(buffer) su fs.readFile perskaitytų visą 500MB į atmintį; keli vienalaikiai
+    // įkėlimai sukeltų OOM. putFile kopijuoja OS lygmenyje. BullMQ režime atskiras worker
+    // procesas failą pasieks per šį raktą.
     const ext = path.extname(req.file.originalname || "") || "";
-    storageKey = await fileStorage.put(buffer, { ext });
+    storageKey = await fileStorage.putFile(req.file.path, { ext });
 
     job = await jobStore.create();
 

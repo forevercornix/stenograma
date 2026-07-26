@@ -46,13 +46,26 @@ function createWorker(queueName, processor) {
     async (job) => {
       const { jobId, payload } = job.data;
       // Pažymim PROCESSING su realiu attempt numeriu (BullMQ job.attemptsMade).
-      await jobStore.update(jobId, {
+      // update() grąžina null, jei jobo įrašo NĖRA (pvz. nesuderintas store, P1 scenarijus,
+      // arba job'as pasibaigė TTL). Tada BullMQ nemato problemos, bet vartotojo jobo įrašo
+      // nėra - klaidiname klientą. Todėl tikrinam ir metam, kad BullMQ pažymėtų failed +
+      // retry (ne tyliai "sėkmė" be įrašo).
+      const processingJob = await jobStore.update(jobId, {
         status: jobStore.STATUS.PROCESSING,
         attempt_count: job.attemptsMade + 1,
       });
+      if (!processingJob) {
+        throw new Error(`Job store įrašas nerastas (PROCESSING): ${jobId}. Galimai nesuderintas store/runner arba pasibaigęs TTL.`);
+      }
+
       const result = await processor(payload, jobId);
+
       // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
-      await jobStore.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+      const completedJob = await jobStore.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+      if (!completedJob) {
+        throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
+      }
+
       // SĖKMĖ - audio nebereikalingas, trinam iš storage (jei transkripcija).
       await _cleanupStorage(payload);
       return result;

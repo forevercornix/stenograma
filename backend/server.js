@@ -51,13 +51,39 @@ app.use("/api", jobsRoute);
 // /api/ready traffic'o nukreipimui, /api/health - proceso gyvybės patikrai.
 const readiness = { jobStore: false, jobRunner: false };
 
-app.get("/api/ready", (req, res) => {
-  const ready = readiness.jobStore && readiness.jobRunner;
+app.get("/api/ready", async (req, res) => {
+  const initReady = readiness.jobStore && readiness.jobRunner;
+  if (!initReady) {
+    return res.status(503).json({
+      ready: false,
+      components: { jobStore: readiness.jobStore, jobRunner: readiness.jobRunner },
+    });
+  }
+
+  // BullMQ režime init flag'ai NEUŽTENKA - jie tik reiškia "režimas pasirinktas". Realiam
+  // readiness reikia patikrinti, ar Redis TIKRAI pasiekiamas (kitaip queue.add pakibtų).
+  // Inline režime nieko papildomo netikrinam (viskas procese). PING su trumpu timeout.
+  let redisReachable = true;
+  if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
+    let conn = null;
+    try {
+      const { createQueueConnection } = require("./queues/config");
+      conn = createQueueConnection();
+      await conn.ping();
+    } catch {
+      redisReachable = false;
+    } finally {
+      if (conn) await conn.quit().catch(() => {});
+    }
+  }
+
+  const ready = initReady && redisReachable;
   res.status(ready ? 200 : 503).json({
     ready,
     components: {
       jobStore: readiness.jobStore,
       jobRunner: readiness.jobRunner,
+      redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
     },
   });
 });

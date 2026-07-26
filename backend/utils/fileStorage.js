@@ -39,6 +39,24 @@ async function put(buffer, { ext = "" } = {}) {
 }
 
 /**
+ * put variantas iš FAILO KELIO (ne buffer'io) - failas nukopijuojamas OS lygmenyje,
+ * NEįkeliant viso į Node.js RAM. Būtina dideliems failams (500MB, 4val įrašai): put()
+ * su fs.readFile perskaitytų visą failą į atmintį, o keli vienalaikiai įkėlimai
+ * lengvai sukeltų OOM. fs.copyFile naudoja OS copy (efektyvu, be user-space buffer'io).
+ *
+ * PASTABA: dabartinė storage implementacija - lokalus diskas. S3/MinIO atveju čia
+ * būtų multipart stream upload (interfeisas suderinamas).
+ */
+async function putFile(srcPath, { ext = "" } = {}) {
+  await _ensureDir();
+  const key = `uploads/${crypto.randomUUID()}${ext}`;
+  const fullPath = path.join(STORAGE_DIR, key);
+  await fs.mkdir(path.dirname(fullPath), { recursive: true });
+  await fs.copyFile(srcPath, fullPath); // OS-lygmens kopija, be viso failo į RAM
+  return key;
+}
+
+/**
  * Nuskaito failą pagal storage key -> Buffer. Worker'is tai naudoja audio gauti.
  */
 async function get(key) {
@@ -67,4 +85,4 @@ function _resolve(key) {
   return fullPath;
 }
 
-module.exports = { put, get, del, STORAGE_DIR };
+module.exports = { put, putFile, get, del, STORAGE_DIR };
