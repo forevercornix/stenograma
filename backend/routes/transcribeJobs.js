@@ -86,6 +86,7 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
 
   let storageKey = null;
   let enqueued = false;
+  let job = null;
 
   try {
     // Įrašom audio į BENDRĄ storage (ne lokalų /tmp), gaunam storageKey. BullMQ
@@ -94,7 +95,7 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     const ext = path.extname(req.file.originalname || "") || "";
     storageKey = await fileStorage.put(buffer, { ext });
 
-    const job = await jobStore.create();
+    job = await jobStore.create();
 
     // HTTP endpoint'as TIK įdeda jobą į eilę (ar inline) ir grąžina 202. Darbą
     // vykdo worker (BullMQ) arba setImmediate (inline). Backend nevykdo transkripcijos
@@ -120,6 +121,15 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     // (storageKey niekur nebenaudojamas, nes job'as neįvyko).
     if (storageKey && !enqueued) {
       await fileStorage.del(storageKey).catch(() => {});
+    }
+    // Jei job'as jau sukurtas, bet enqueue nepavyko - pažymim FAILED, kitaip jis liktų
+    // QUEUED amžinai (sweepExpired sąmoningai nešalina queued/processing jobų).
+    if (job && !enqueued) {
+      await jobStore.update(job.id, {
+        status: jobStore.STATUS.FAILED,
+        error: "Nepavyko įdėti darbo į vykdymo eilę.",
+        error_code: "enqueue_failed",
+      }).catch(() => {});
     }
     const message = e instanceof HttpError && e.statusCode !== 500 ? e.message : sanitizeServerError(e, "transcribe-jobs enqueue");
     res.status(500).json({ error: message });

@@ -78,26 +78,66 @@ test("sweepExpired: pašalina CANCELLED jobą po TTL", async () => {
   assert.equal(await jobStore.get(job.id), null, "CANCELLED jobas po TTL turi būti pašalintas");
 });
 
-test("init() lygiagrečiai kviečiamas grąžina TĄ PATĮ store (race apsauga)", async () => {
-  // RACE regresija: anksčiau initialized=true buvo nustatomas prieš await, tad
-  // lygiagretūs kviečiai galėjo gauti skirtingus store. Dabar visi laukia bendro
-  // initPromise. Be REDIS_URL abu turi būti tas pats memoryStore.
+test("TIKRA race: create() laukia neužbaigto Redis init (ne memory), kol connect() lėtas", async () => {
+  // Reviewer pastaba: ankstesni testai netikrino tikros race (init jau buvo užbaigtas).
+  // Čia injektuojam mock Redis su KONTROLIUOJAMU connect() - kol jis "kabo", pradedam
+  // create(). Tikrinam, kad create NElaukia memory, o laukia Redis init pabaigos.
+  jobStore._resetForTests();
+  process.env.REDIS_URL = "redis://mock:6379";
+
+  let releaseConnect;
+  const connectGate = new Promise((resolve) => { releaseConnect = resolve; });
+
+  // Mock ioredis: connect() laukia gate; kiti metodai - minimalus in-memory imitatorius,
+  // kad createRedisStore veiktų (testo esmė - connect() timing, ne pilnas Redis).
+  function MockRedis() {
+    const hashes = new Map();
+    const zsets = new Map();
+    return {
+      connect: () => connectGate, // KABO kol releaseConnect()
+      ping: async () => "PONG",
+      hset: async (k, obj) => { hashes.set(k, { ...(hashes.get(k) || {}), ...obj }); return 1; },
+      hgetall: async (k) => hashes.get(k) || {},
+      exists: async (k) => (hashes.has(k) ? 1 : 0),
+      expire: async () => 1,
+      zadd: async (k, score, member) => {
+        const z = zsets.get(k) || new Map(); z.set(member, score); zsets.set(k, z); return 1;
+      },
+      zcard: async (k) => (zsets.get(k)?.size || 0),
+      zrangebyscore: async () => [],
+      zrem: async (k, member) => { zsets.get(k)?.delete(member); return 1; },
+      on: () => {},
+      quit: async () => {},
+    };
+  }
+  jobStore._setRedisFactoryForTests(MockRedis);
+
+  // Pradedam init (kabo ties connect) ir IŠ KARTO create - create turi laukti init.
+  const initPromise = jobStore.init();
+  const createPromise = jobStore.create();
+
+  // Duodam event loop'ui pasisukti - jei create nelauktų init, jis jau būtų pabaigęs
+  // su memory store. Tikrinam, kad jis DAR nebaigė (laukia gate).
+  let createDone = false;
+  createPromise.then(() => { createDone = true; }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(createDone, false, "create() turi LAUKTI init (ne baigti su memory)");
+
+  // Atleidžiam connect - init baigiasi, create pagaliau vykdomas per Redis store.
+  releaseConnect();
+  await initPromise;
+  await createPromise;
+  assert.equal(createDone, true, "atleidus connect, create() užbaigiamas");
+  assert.equal(jobStore.getBackend(), "redis", "store turi būti Redis (ne memory)");
+
+  jobStore._resetForTests();
   delete process.env.REDIS_URL;
-  const [s1, s2, s3] = await Promise.all([
-    jobStore.init(),
-    jobStore.init(),
-    jobStore.init(),
-  ]);
-  assert.equal(s1, s2, "lygiagretūs init turi grąžinti tą patį store");
-  assert.equal(s2, s3, "lygiagretūs init turi grąžinti tą patį store");
 });
 
-test("lygiagretūs create po init grąžina rastą job'ą (ne 'nerastas')", async () => {
-  // Simuliuojam scenarijų iš review: create ir get lygiagrečiai iškart po starto.
-  // Su race apsauga - job'as sukurtas ir surandamas tame pačiame store.
+test("init() lygiagrečiai grąžina TĄ PATĮ store (initPromise dalinimasis)", async () => {
+  jobStore._resetForTests();
   delete process.env.REDIS_URL;
-  const created = await jobStore.create();
-  const found = await jobStore.get(created.id);
-  assert.ok(found, "sukurtas job'as turi būti randamas (ne dingęs dėl store pakeitimo)");
-  assert.equal(found.id, created.id);
+  const [s1, s2, s3] = await Promise.all([jobStore.init(), jobStore.init(), jobStore.init()]);
+  assert.equal(s1, s2);
+  assert.equal(s2, s3);
 });

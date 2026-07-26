@@ -30,7 +30,13 @@ async function readJsonResponse(res, fallbackMessage) {
   const contentType = res.headers.get("content-type") || "";
   let data = null;
   if (contentType.includes("application/json")) {
-    data = await res.json();
+    // Net su JSON content-type body gali būti tuščias/sugadintas (proxy nutraukė ryšį,
+    // dalinis atsakymas) -> res.json() mestų "Unexpected end of JSON input". Gaudom.
+    try {
+      data = await res.json();
+    } catch {
+      data = { error: `${fallbackMessage} (${res.status}): neteisingas JSON atsakymas` };
+    }
   } else {
     const text = await res.text().catch(() => "");
     data = { error: text || fallbackMessage };
@@ -67,19 +73,25 @@ export async function generateProtocol({ title, date, participants, transcript }
 }
 
 // Atšaukiamas delay: setTimeout, kurį galima nutraukti per AbortSignal (kad polling
-// laukimas irgi reaguotų į reset/unmount, ne tik fetch).
+// laukimas irgi reaguotų į reset/unmount, ne tik fetch). SVARBU: listeneris pašalinamas
+// IR po normalaus timeout, IR po abort - kitaip ilgam polling'ui (iki 1200 ciklų) prie
+// vieno signalo susikauptų iki 1200 listenerių (atminties nutekėjimas).
 function delay(ms, signal) {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true }
-    );
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort); // normalus timeout - šalinam listenerį
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

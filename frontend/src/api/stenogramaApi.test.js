@@ -146,4 +146,38 @@ describe("transcribeAudioJob polling", () => {
       })
     ).rejects.toThrow(/Aborted/i);
   });
+
+  it("abort nutraukia AKTYVŲ fetch (mock fetch reaguoja į signal)", async () => {
+    // Reviewer pastaba: ankstesnis testas tikrino tik delay(), ne fetch atšaukimą.
+    // Čia mock fetch pats atmeta AbortError, kai signalas nutraukiamas VYKSTANT fetch.
+    const controller = new AbortController();
+    global.fetch = vi.fn((url, opts) => {
+      return new Promise((resolve, reject) => {
+        const signal = opts?.signal;
+        if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        // create atsako iškart; simuliuojam, kad abort ateina fetch metu
+        if (!url.includes("/transcribe-jobs/")) {
+          setTimeout(() => resolve(jsonRes({ jobId: "j1", status: "queued" })), 5);
+        }
+        // poll fetch niekada neatsako - laukia abort
+      });
+    });
+    setTimeout(() => controller.abort(), 20);
+    await expect(
+      transcribeAudioJob({ audioFile: new Blob(["x"]), diarize: false, pollIntervalMs: 5, signal: controller.signal })
+    ).rejects.toThrow(/Aborted/i);
+  });
+
+  it("sugadintas JSON (content-type json, bet body sugadintas) apdorojamas informatyviai", async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 200,
+        headers: { get: () => "application/json" },
+        json: () => Promise.reject(new SyntaxError("Unexpected end of JSON input")),
+      })
+    );
+    await expect(generateProtocol({})).rejects.toThrow(/neteisingas JSON|200/i);
+  });
 });

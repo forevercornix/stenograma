@@ -86,7 +86,10 @@ export default function Stenograma() {
   }, []);
   useEffect(() => () => {
     stopRecording();
-    transcribeAbortRef.current?.abort(); // unmount - nutraukiam polling'ą (jokio setState po unmount)
+    // Unmount: TIK abort (ne cancelTranscription, nes setState po unmount negalima).
+    // Identiteto patikra handleAutoTranscribe finally užtikrina, kad senas rezultatas
+    // neįrašomas.
+    transcribeAbortRef.current?.abort();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Kiekvieną kartą pasikeitus audioURL (naujas failas arba reset), atlaisviname
@@ -215,9 +218,22 @@ export default function Stenograma() {
     setLevels([4, 4, 4, 4, 4, 4, 4, 4]);
   };
 
+  // Centralizuotas transkribavimo nutraukimas + būsenos valymas. Naudojamas visur, kur
+  // reikia nutraukti vykstantį polling'ą: naujas failas, reset, unmount. Vienoje vietoje -
+  // kad nesidubliuotų ir nebūtų praleista (reviewer pastaba: naujas failas nenutraukdavo).
+  const cancelTranscription = () => {
+    transcribeAbortRef.current?.abort();
+    transcribeAbortRef.current = null;
+    setIsTranscribing(false);
+    setTranscribeProgress("");
+  };
+
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Naujas failas nutraukia seno failo transkribavimą (kitaip A rezultatas įrašytų
+    // tekstą, nors UI jau rodo B failą).
+    cancelTranscription();
     setAudioFileName(file.name);
     setAudioFile(file);
     setAudioURL(URL.createObjectURL(file));
@@ -245,8 +261,17 @@ export default function Stenograma() {
         audioFile,
         diarize,
         signal: controller.signal,
-        onProgress: (j) => setTranscribeProgress(formatTranscribeProgress(j)),
+        onProgress: (j) => {
+          // Progresą rašom TIK jei šis controlleris vis dar aktyvus (ne senas).
+          if (transcribeAbortRef.current === controller) setTranscribeProgress(formatTranscribeProgress(j));
+        },
       });
+
+      // CONTROLLER IDENTITY: jei tuo tarpu prasidėjo naujas transkribavimas (arba reset/
+      // naujas failas nutraukė šį), transcribeAbortRef neberodo į mūsų controllerį - tad
+      // NErašom seno rezultato į naują būseną. Abort paprastai to neleistų, bet identiteto
+      // patikra apsaugo nuo VISŲ vėlyvų rezultatų (ne tik abort'intų).
+      if (transcribeAbortRef.current !== controller) return;
 
       const data = job.result;
       const text = data.segments?.length
@@ -255,12 +280,19 @@ export default function Stenograma() {
       setTranscript(text);
     } catch (e) {
       // AbortError - vartotojas sąmoningai nutraukė (reset/naujas failas), ne klaida.
-      if (e.name !== "AbortError") {
+      // Klaidą rodom tik jei šis controlleris dar aktyvus (senos užklausos klaida
+      // neturi perrašyti naujos būsenos).
+      if (e.name !== "AbortError" && transcribeAbortRef.current === controller) {
         setError("Automatinis transkribavimas nepavyko: " + e.message);
       }
     } finally {
-      setIsTranscribing(false);
-      setTranscribeProgress("");
+      // Būseną valo TIK dabartinis controlleris - senas (jau nutrauktas) NEliečia naujo
+      // transkribavimo state (kitaip A.finally išvalytų B progresą ir rodytų "baigta").
+      if (transcribeAbortRef.current === controller) {
+        transcribeAbortRef.current = null;
+        setIsTranscribing(false);
+        setTranscribeProgress("");
+      }
     }
   };
 
@@ -288,7 +320,7 @@ export default function Stenograma() {
   };
 
   const handleReset = () => {
-    transcribeAbortRef.current?.abort(); // nutraukiam vykstantį transkribavimo polling'ą
+    cancelTranscription(); // nutraukiam vykstantį transkribavimo polling'ą + valom būseną
     stopRecording();
     setTitle("");
     setDate(todayISO());

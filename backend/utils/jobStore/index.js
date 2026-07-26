@@ -18,6 +18,7 @@ const { STATUS, TTL_MS } = require("./common");
 
 let store = memoryStore; // numatyta, kol init() nepakeičia
 let initPromise = null;   // bendras inicijavimo Promise (žr. init() komentarą)
+let _redisFactoryForTests = null; // TESTAMS: injektuota Redis factory (žr. eksportus)
 
 /**
  * RACE CONDITION APSAUGA: anksčiau `initialized = true` buvo nustatomas IŠKART, o Redis
@@ -47,9 +48,9 @@ async function initializeStore() {
   }
 
   try {
-    // ioredis importuojamas TIK jei REDIS_URL yra - kad paketas nebūtų privalomas
-    // tiems, kas naudoja tik in-memory (nors jis package.json dependencies).
-    const Redis = require("ioredis");
+    // TESTAMS: injektuojama Redis factory (žr. _setRedisFactoryForTests). Produkcijoje -
+    // tikras ioredis. Tai leidžia testuoti tikrą race (lėtas connect() per gate).
+    const Redis = _redisFactoryForTests || require("ioredis");
     const { createRedisStore } = require("./redisStore");
 
     const client = new Redis(redisUrl, {
@@ -119,4 +120,15 @@ module.exports = {
   getBackend: () => store.backend || "memory",
   STATUS,
   TTL_MS,
+
+  // --- TIK TESTAMS (dependency injection tikrai race patikrai) ---
+  _resetForTests: () => {
+    initPromise = null;
+    store = memoryStore;
+    _redisFactoryForTests = null;
+  },
+  _setRedisFactoryForTests: (factory) => {
+    _redisFactoryForTests = factory;
+  },
+  _getStoreForTests: () => store,
 };
