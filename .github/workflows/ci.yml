@@ -28,6 +28,9 @@ jobs:
       - name: Sintaksės patikra (node --check)
         run: npm run check
 
+      - name: Lint (ESLint - React hooks, nenaudoti kintamieji, nepasiekiamas kodas)
+        run: npm run lint
+
       - name: Unit / route testai (mock tiekėjai, be jokių API raktų)
         run: npm test
 
@@ -72,6 +75,9 @@ jobs:
 
       - name: Unit testai (Vitest)
         run: npm test
+
+      - name: Lint (ESLint - React hooks deps, nenaudoti importai)
+        run: npm run lint
 
       - name: Build (vite build)
         env:
