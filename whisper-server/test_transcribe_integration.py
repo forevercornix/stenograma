@@ -96,6 +96,33 @@ def test_transcribe_perduoda_kalba_modeliui(client_with_mock):
     assert mock.last_language == "en"
 
 
+def test_transcribe_perduoda_vad_filter_modeliui(client_with_mock):
+    # NEpakanka, kad mock TOLERUOTŲ **kwargs - tikrinam, kad serveris REALIAI perduoda
+    # vad_filter=True (numatytai įjungtas, mažina halucinacijas). Be šio testo **kwargs
+    # paslėptų bug'ą, jei serveris perduotų blogą parametrą (pvz. vad_fiter opečatką).
+    client, mock = client_with_mock
+    client.post(
+        "/transcribe",
+        files={"file": ("m.wav", b"x", "audio/wav")},
+        data={"language": "lt"},
+    )
+    assert mock.last_kwargs.get("vad_filter") is True, \
+        f"serveris turi perduoti vad_filter=True, gauta: {mock.last_kwargs}"
+
+
+def test_transcribe_vad_filter_isjungiamas_env(client_with_mock, monkeypatch):
+    # WHISPER_VAD_FILTER=false -> serveris NEperduoda vad_filter (išjungta).
+    monkeypatch.setenv("WHISPER_VAD_FILTER", "false")
+    client, mock = client_with_mock
+    client.post(
+        "/transcribe",
+        files={"file": ("m.wav", b"x", "audio/wav")},
+        data={"language": "lt"},
+    )
+    assert "vad_filter" not in mock.last_kwargs, \
+        f"su WHISPER_VAD_FILTER=false neturi būti vad_filter, gauta: {mock.last_kwargs}"
+
+
 def test_transcribe_auto_kalba_perduoda_none(client_with_mock):
     client, mock = client_with_mock
     client.post(

@@ -43,6 +43,25 @@ app.use("/api", transcribeJobsRoute);
 app.use("/api", auditRoute);
 app.use("/api", jobsRoute);
 
+// Readiness sekimas: /api/health yra LIVENESS (procesas gyvas ir atsako), bet
+// job store/runner inicijuojami ASINCHRONIŠKAI PO app.listen (kad Redis prisijungimas
+// nesustabdytų starto). Tad /api/health 200 NEreiškia, kad job sistema paruošta -
+// ypač Redis/BullMQ režime. /api/ready atskiria READINESS: grąžina 200 tik kai job
+// store IR runner inicijuoti. Orkestratoriai (k8s, load balancer) turėtų naudoti
+// /api/ready traffic'o nukreipimui, /api/health - proceso gyvybės patikrai.
+const readiness = { jobStore: false, jobRunner: false };
+
+app.get("/api/ready", (req, res) => {
+  const ready = readiness.jobStore && readiness.jobRunner;
+  res.status(ready ? 200 : 503).json({
+    ready,
+    components: {
+      jobStore: readiness.jobStore,
+      jobRunner: readiness.jobRunner,
+    },
+  });
+});
+
 app.get("/api/health", (req, res) => {
   const healthDetailsMode = (process.env.HEALTH_DETAILS || "").toLowerCase();
   const isProduction = process.env.NODE_ENV === "production";
@@ -117,6 +136,7 @@ if (require.main === module) {
   // Async, tad .then/.catch - kad paleidimas nesustotų dėl Redis prisijungimo.
   jobStore.init().then(() => {
     console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
+    readiness.jobStore = true;
   }).catch((e) => {
     console.error(`[stenograma] Job store init klaida: ${e.message}`);
     if (process.env.REDIS_REQUIRED === "true") process.exit(1);
@@ -127,6 +147,7 @@ if (require.main === module) {
   registerProcessors();
   jobRunner.init().then(() => {
     console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
+    readiness.jobRunner = true;
   }).catch((e) => {
     console.error(`[stenograma] Job runner init klaida: ${e.message}`);
     if (process.env.REDIS_REQUIRED === "true") process.exit(1);
