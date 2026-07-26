@@ -39,8 +39,11 @@ class _MockModel:
         self._segments = segments
         self.last_language = None
 
-    def transcribe(self, audio_path, language=None):
+    def transcribe(self, audio_path, language=None, **kwargs):
+        # **kwargs: tikras faster-whisper priima vad_filter ir kt. - mock turi irgi,
+        # kad nesugriūtų, kai serveris perduoda naujus parametrus (pvz. vad_filter=True).
         self.last_language = language
+        self.last_kwargs = kwargs
         return iter(self._segments), _MockInfo()
 
 
@@ -129,9 +132,9 @@ def test_transcribe_didelis_failas_chunked_upload():
     written = {}
 
     class _SizeModel(_MockModel):
-        def transcribe(self, audio_path, language=None):
+        def transcribe(self, audio_path, language=None, **kwargs):
             written["bytes"] = os.path.getsize(audio_path)
-            return super().transcribe(audio_path, language)
+            return super().transcribe(audio_path, language, **kwargs)
 
     server._model = _SizeModel()
     server._load_error = None
