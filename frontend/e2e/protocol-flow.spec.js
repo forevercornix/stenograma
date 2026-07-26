@@ -33,8 +33,13 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
       "Ona: Petras paruoš ataskaitą iki penktadienio.";
     await page.getByPlaceholder(/Įklijuokite susitikimo transkripciją/).fill(transcript);
 
-    // 5. Generuoti protokolą.
-    await page.getByRole("button", { name: "Generuoti protokolą" }).click();
+    // 5. Generuoti protokolą. SVARBU: laukiam, kol mygtukas taps ENABLED prieš spausdami.
+    // canGenerate reikalauja backendStatus === "online" IR transcript.length > 20 - jei
+    // spaustume iš karto (kol backend health dar tikrinamas), mygtukas būtų disabled ir
+    // click'as timeout'intų. Tas pats modelis kaip klaidos testе (žemiau).
+    const generateBtn = page.getByRole("button", { name: "Generuoti protokolą" });
+    await expect(generateBtn).toBeEnabled({ timeout: 15_000 });
+    await generateBtn.click();
 
     // 6. Palaukti, kol protokolas sugeneruojamas (mock LLM - greita, bet async).
     //    "PARENGTA" antspaudas ir "Protokolas" antraštė rodo pabaigą.
