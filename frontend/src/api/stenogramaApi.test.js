@@ -69,6 +69,20 @@ describe("generateProtocol", () => {
     await expect(generateProtocol({})).rejects.toThrow(/502|ne JSON/i);
   });
 
+  it("priima application/problem+json (RFC 7807 klaidų formatą)", async () => {
+    // +json variantai (pvz. application/problem+json) turi būti priimami kaip JSON,
+    // ne atmesti kaip "ne JSON".
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 400,
+        headers: { get: () => "application/problem+json" },
+        json: () => Promise.resolve({ error: "Validacijos klaida" }),
+      })
+    );
+    await expect(generateProtocol({})).rejects.toThrow(/Validacijos klaida/);
+  });
+
   it("200 OK su HTML body (proxy login page) metamas kaip klaida, NE grąžinamas kaip sėkmė", async () => {
     // KRITINIS (review): reverse proxy gali grąžinti 200 OK + text/html (login page).
     // res.ok=true, tad ankstesnė logika grąžindavo {error: html} kaip SĖKMĘ, ir

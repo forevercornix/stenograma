@@ -28,15 +28,20 @@ export function withApiKeyHeader(headers = {}) {
 // Šis helperis tikrina content-type ir grąžina prasmingą žinutę.
 async function readJsonResponse(res, fallbackMessage) {
   const contentType = res.headers.get("content-type") || "";
+  // Priimam ir application/json, ir +json variantus (pvz. application/problem+json -
+  // RFC 7807 klaidų formatas). Nuosavas Express backend'as grąžina application/json,
+  // bet +json palaikymas apsaugo, jei prieš jį atsirastų proxy/gateway su tokiu formatu.
+  const isJson = contentType.includes("application/json") || contentType.includes("+json");
 
   // Visi šio API SĖKMINGI atsakymai yra JSON. Ne-JSON atsakymas (net su 200 OK) reiškia,
   // kad kažkas ne taip - dažniausiai reverse proxy grąžino HTML (login page, 502 Bad
   // Gateway). Metam klaidą, NE grąžinam {error: html} kaip duomenis (kitaip res.ok=true
   // atveju būtų "sėkmė" su data.protocol=undefined - simetriška sugadinto JSON klaidai).
-  if (!contentType.includes("application/json")) {
+  if (!isJson) {
     const text = await res.text().catch(() => "");
-    const preview = text ? `: serveris grąžino ne JSON atsakymą` : "";
-    throw new Error(`${fallbackMessage} (${res.status})${preview}`);
+    const hasBody = Boolean(text); // tik nustatom, ar body netuščias (viso HTML NEišvedam)
+    const detail = hasBody ? ": serveris grąžino ne JSON atsakymą" : "";
+    throw new Error(`${fallbackMessage} (${res.status})${detail}`);
   }
 
   let data;
