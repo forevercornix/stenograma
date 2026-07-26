@@ -42,6 +42,30 @@ class FakeRedis {
   async zcard(key) {
     return this.zsets.get(key)?.size || 0;
   }
+  async zrange(key, start, stop) {
+    const z = this.zsets.get(key);
+    if (!z) return [];
+    // Rūšiuojam pagal score (kaip Redis), grąžinam member'ius. start/stop: 0,-1 = visi.
+    const sorted = [...z.entries()].sort((a, b) => a[1] - b[1]).map(([m]) => m);
+    const end = stop === -1 ? sorted.length : stop + 1;
+    return sorted.slice(start, end);
+  }
+  pipeline() {
+    // Minimalus pipeline mock: kaupia komandas, exec() grąžina [[null, rezultatas], ...].
+    const cmds = [];
+    const self = this;
+    const p = {
+      exists(key) { cmds.push(["exists", key]); return p; },
+      async exec() {
+        const out = [];
+        for (const [cmd, key] of cmds) {
+          if (cmd === "exists") out.push([null, self.hashes.has(key) ? 1 : 0]);
+        }
+        return out;
+      },
+    };
+    return p;
+  }
   async exists(key) {
     return this.hashes.has(key) ? 1 : 0;
   }
@@ -113,4 +137,19 @@ test("Redis store: sweepExpired išvalo indeksą nuo expiravusių raktų", async
   const removed = await store.sweepExpired(Date.now() + 999 * 60 * 1000);
   assert.equal(removed, 1); // indeksas išvalytas
   assert.equal(await store.size(), 0);
+});
+
+test("Redis store: size() NEįskaito jobų, kurių hash išnyko (TTL), bet indekse liko", async () => {
+  // P3 regresija: zcard(INDEX_KEY) skaičiuotų ir "vaiduoklius" - jobus, kurių hash
+  // pasibaigė per TTL, bet indekso įrašas dar nepašalintas (sweepExpired daro periodiškai).
+  // size() dabar tikrina realų egzistavimą.
+  const fake = new FakeRedis();
+  const store = createRedisStore(fake);
+  const job1 = await store.create();
+  const job2 = await store.create();
+  assert.equal(await store.size(), 2, "du sukurti jobai");
+
+  // Simuliuojam TTL: job1 hash IŠNYKO (ištrinam iš hashes), bet indekse (zsets) LIEKA.
+  fake.hashes.delete("job:" + job1.id);
+  assert.equal(await store.size(), 1, "size() turi skaičiuoti tik realiai egzistuojantį (job2)");
 });

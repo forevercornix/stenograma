@@ -148,8 +148,14 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
         error_code: "enqueue_failed",
       }).catch(() => {});
     }
-    const message = e instanceof HttpError && e.statusCode !== 500 ? e.message : sanitizeServerError(e, "transcribe-jobs enqueue");
-    res.status(500).json({ error: message });
+    // HttpError (pvz. validacijos 400) grąžinamas su SAVO statusu, ne visada 500.
+    // Anksčiau parinkdavom teisingą žinutę, bet statusas likdavo 500 - klaidinanti kombinacija
+    // (klientas gautų "400-tinę" žinutę su 500 kodu). 500 klaidos vis tiek sanitizuojamos.
+    if (e instanceof HttpError) {
+      const message = e.statusCode === 500 ? sanitizeServerError(e, "transcribe-jobs enqueue") : e.message;
+      return res.status(e.statusCode).json({ error: message });
+    }
+    res.status(500).json({ error: sanitizeServerError(e, "transcribe-jobs enqueue") });
   } finally {
     // Multer laikiną failą visada ištrinam (audio jau nukopijuotas į storage).
     await fs.unlink(req.file.path).catch(() => {});

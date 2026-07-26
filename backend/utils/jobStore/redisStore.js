@@ -109,7 +109,17 @@ function createRedisStore(redisClient) {
   }
 
   async function size() {
-    return redisClient.zcard(INDEX_KEY);
+    // TIKSLUMAS: jobs:index (zcard) gali įtraukti jobus, kurių hash'ai JAU IŠNYKO per
+    // Redis TTL (EXPIRE), bet indekso įrašas dar nepašalintas (tai daro sweepExpired
+    // periodiškai). Kad size() nerodytų "vaiduoklių", suskaičiuojam tik REALIAI
+    // egzistuojančius. Naudojam pipeline (vienas round-trip), ne N atskirų exists.
+    const ids = await redisClient.zrange(INDEX_KEY, 0, -1);
+    if (!ids.length) return 0;
+    const pipeline = redisClient.pipeline();
+    for (const id of ids) pipeline.exists(JOB_PREFIX + id);
+    const results = await pipeline.exec();
+    // results: [[err, 0|1], ...] - skaičiuojam tuos, kur exists === 1.
+    return results.reduce((count, [, exists]) => count + (exists ? 1 : 0), 0);
   }
 
   async function close() {
