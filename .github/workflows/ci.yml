@@ -96,7 +96,7 @@ jobs:
         # mock testai (test_server.py, test_diarize_integration.py) tikrina /health
         # diagnostiką IR /diarize kontraktą su MOCK pipeline, kuriems modelio nereikia.
         # test_real_gpu.py automatiškai praleidžiamas be HUGGINGFACE_TOKEN.
-        run: pip install fastapi python-multipart pytest
+        run: pip install fastapi "httpx>=0.27" python-multipart pytest
 
       - name: Pyannote kontrakto testai (mock pipeline - /health + /diarize {turns:[...]})
         # test_diarize_integration.py BŪTENT tikrina tą kontraktą, kurio trūkumas
@@ -120,12 +120,12 @@ jobs:
         # Sąmoningai NEDIEGIAME faster-whisper (modelis + CUDA bibliotekos) - mock
         # testai tikrina /health diagnostiką IR /transcribe {text,segments} kontraktą
         # su MOCK modeliu, kuriems tikro modelio nereikia.
-        run: pip install fastapi python-multipart pytest
+        run: pip install fastapi "httpx>=0.27" python-multipart pytest
 
       - name: Whisper kontrakto testai (mock modelis - /health + /transcribe {text,segments})
         # test_transcribe_integration.py tikrina tą patį kontraktą, kurio trūkumas
         # (serverio realizacijos nebuvo) būtų sukėlęs transkribavimo klaidą server profilyje.
-        run: pytest test_server.py test_transcribe_integration.py -v
+        run: pytest test_server.py test_transcribe_integration.py test_stream_integration.py -v
 
   e2e:
     runs-on: ubuntu-latest
