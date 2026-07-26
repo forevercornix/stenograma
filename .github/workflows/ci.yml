@@ -44,7 +44,7 @@ jobs:
           node server.js &
           SERVER_PID=$!
           for i in $(seq 1 10); do
-            if curl -sf http://localhost:3001/api/health; then
+            if curl -sf http://localhost:3001/api/ready; then
               echo "Backend atsakė sėkmingai"
               kill $SERVER_PID
               exit 0
@@ -188,7 +188,7 @@ jobs:
         run: |
           docker compose up -d backend
           for i in $(seq 1 20); do
-            if curl -sf http://localhost:3001/api/health; then
+            if curl -sf http://localhost:3001/api/ready; then
               echo "Backend konteineryje atsakė sėkmingai"
               docker compose down
               exit 0

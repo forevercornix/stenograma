@@ -77,3 +77,27 @@ test("sweepExpired: pašalina CANCELLED jobą po TTL", async () => {
   await jobStore.sweepExpired(afterTtl);
   assert.equal(await jobStore.get(job.id), null, "CANCELLED jobas po TTL turi būti pašalintas");
 });
+
+test("init() lygiagrečiai kviečiamas grąžina TĄ PATĮ store (race apsauga)", async () => {
+  // RACE regresija: anksčiau initialized=true buvo nustatomas prieš await, tad
+  // lygiagretūs kviečiai galėjo gauti skirtingus store. Dabar visi laukia bendro
+  // initPromise. Be REDIS_URL abu turi būti tas pats memoryStore.
+  delete process.env.REDIS_URL;
+  const [s1, s2, s3] = await Promise.all([
+    jobStore.init(),
+    jobStore.init(),
+    jobStore.init(),
+  ]);
+  assert.equal(s1, s2, "lygiagretūs init turi grąžinti tą patį store");
+  assert.equal(s2, s3, "lygiagretūs init turi grąžinti tą patį store");
+});
+
+test("lygiagretūs create po init grąžina rastą job'ą (ne 'nerastas')", async () => {
+  // Simuliuojam scenarijų iš review: create ir get lygiagrečiai iškart po starto.
+  // Su race apsauga - job'as sukurtas ir surandamas tame pačiame store.
+  delete process.env.REDIS_URL;
+  const created = await jobStore.create();
+  const found = await jobStore.get(created.id);
+  assert.ok(found, "sukurtas job'as turi būti randamas (ne dingęs dėl store pakeitimo)");
+  assert.equal(found.id, created.id);
+});

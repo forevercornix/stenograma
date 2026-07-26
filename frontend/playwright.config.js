@@ -34,7 +34,7 @@ export default defineConfig({
   webServer: [
     {
       command: "cd ../backend && LLM_PROVIDER=mock TRANSCRIPTION_PROVIDER=mock DIARIZATION_PROVIDER=none npm start",
-      url: "http://localhost:3001/api/health",
+      url: "http://localhost:3001/api/ready",
       timeout: 30_000,
       reuseExistingServer: !process.env.CI,
     },

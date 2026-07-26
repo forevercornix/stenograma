@@ -13,11 +13,25 @@ import App from "./App.jsx";
  * eksportai, diarizacijos pasirinkimas ir pan.).
  */
 
-function mockFetchImplementation({ healthResponse, generateResponse, generateStatus = 200 }) {
+function jsonHeaders() {
+  return { get: (name) => (name.toLowerCase() === "content-type" ? "application/json" : null) };
+}
+
+function mockFetchImplementation({ healthResponse, generateResponse, generateStatus = 200, readyStatus = 200 }) {
   return vi.fn((url, options) => {
+    // /api/ready TIKRINAM PIRMA (nes "/api/health" substring irgi tiktų kai kuriems).
+    if (url.toString().includes("/api/ready")) {
+      return Promise.resolve({
+        ok: readyStatus < 400,
+        status: readyStatus,
+        headers: jsonHeaders(),
+        json: () => Promise.resolve({ ready: readyStatus < 400, components: { jobStore: true, jobRunner: true } }),
+      });
+    }
     if (url.toString().includes("/api/health")) {
       return Promise.resolve({
         ok: true,
+        headers: jsonHeaders(),
         json: () => Promise.resolve(healthResponse),
       });
     }
@@ -25,6 +39,7 @@ function mockFetchImplementation({ healthResponse, generateResponse, generateSta
       return Promise.resolve({
         ok: generateStatus < 400,
         status: generateStatus,
+        headers: jsonHeaders(),
         json: () => Promise.resolve(generateResponse),
       });
     }

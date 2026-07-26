@@ -84,12 +84,15 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
   const body = { ...req.body };
   const fileMeta = { filename: req.file.originalname, mimeType: req.file.mimetype };
 
+  let storageKey = null;
+  let enqueued = false;
+
   try {
     // Įrašom audio į BENDRĄ storage (ne lokalų /tmp), gaunam storageKey. BullMQ
     // režime atskiras worker procesas failą pasieks per šį raktą.
     const buffer = await fs.readFile(req.file.path);
     const ext = path.extname(req.file.originalname || "") || "";
-    const storageKey = await fileStorage.put(buffer, { ext });
+    storageKey = await fileStorage.put(buffer, { ext });
 
     const job = await jobStore.create();
 
@@ -109,8 +112,15 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
       meetingId: body.meetingId,
     });
 
+    enqueued = true;
     res.status(202).json({ jobId: job.id, status: job.status });
   } catch (e) {
+    // Jei enqueue nepavyko (Redis/BullMQ eilė krito, add() metė klaidą ir pan.), audio
+    // jau perkeltas į storage - reikia jį ištrinti, kad neliktų NAŠLAITINIS failas
+    // (storageKey niekur nebenaudojamas, nes job'as neįvyko).
+    if (storageKey && !enqueued) {
+      await fileStorage.del(storageKey).catch(() => {});
+    }
     const message = e instanceof HttpError && e.statusCode !== 500 ? e.message : sanitizeServerError(e, "transcribe-jobs enqueue");
     res.status(500).json({ error: message });
   } finally {

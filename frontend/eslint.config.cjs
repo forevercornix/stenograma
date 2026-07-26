@@ -23,6 +23,8 @@ const browserGlobals = {
   AudioContext: "readonly",
   requestAnimationFrame: "readonly",
   cancelAnimationFrame: "readonly",
+  AbortController: "readonly",
+  DOMException: "readonly",
   localStorage: "readonly",
   alert: "readonly",
   atob: "readonly",

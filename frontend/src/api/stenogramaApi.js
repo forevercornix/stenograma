@@ -23,29 +23,78 @@ export function withApiKeyHeader(headers = {}) {
   return API_KEY ? { ...headers, "x-api-key": API_KEY } : headers;
 }
 
-// --- Health ---
+// Saugus atsakymo skaitymas: jei reverse proxy grąžina HTML/tekstą (pvz. 502 Bad
+// Gateway), res.json() mestų "Unexpected token '<'" vietoj informatyvios klaidos.
+// Šis helperis tikrina content-type ir grąžina prasmingą žinutę.
+async function readJsonResponse(res, fallbackMessage) {
+  const contentType = res.headers.get("content-type") || "";
+  let data = null;
+  if (contentType.includes("application/json")) {
+    data = await res.json();
+  } else {
+    const text = await res.text().catch(() => "");
+    data = { error: text || fallbackMessage };
+  }
+  if (!res.ok) {
+    throw new Error(data.error || `${fallbackMessage} (${res.status})`);
+  }
+  return data;
+}
+
+// --- Health (LIVENESS - procesas gyvas) ---
 export async function fetchHealth() {
   const res = await fetch(`${BACKEND_URL}/api/health`);
-  if (!res.ok) throw new Error(`Health grąžino ${res.status}`);
-  return res.json();
+  return readJsonResponse(res, "Health nepasiekiamas");
+}
+
+// --- Readiness (job store + runner PARUOŠTI) ---
+// Naudokite ŠITĄ prieš leidžiant vartotojui pradėti darbą (ne /api/health): health yra
+// liveness (procesas gyvas), o /api/ready grąžina 200 tik kai job sistema tikrai paruošta.
+export async function fetchReadiness() {
+  const res = await fetch(`${BACKEND_URL}/api/ready`);
+  return readJsonResponse(res, "Backend dar neparuoštas");
 }
 
 // --- Protokolo generavimas (SINCHRONINIS /api/generate) ---
-export async function generateProtocol({ title, date, participants, transcript }) {
+export async function generateProtocol({ title, date, participants, transcript }, { signal } = {}) {
   const res = await fetch(`${BACKEND_URL}/api/generate`, {
     method: "POST",
     headers: withApiKeyHeader({ "Content-Type": "application/json" }),
     body: JSON.stringify({ title, date, participants, transcript }),
+    signal,
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Generavimo klaida");
-  return data; // { protocol, meta }
+  return readJsonResponse(res, "Generavimo klaida"); // { protocol, meta }
+}
+
+// Atšaukiamas delay: setTimeout, kurį galima nutraukti per AbortSignal (kad polling
+// laukimas irgi reaguotų į reset/unmount, ne tik fetch).
+function delay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true }
+    );
+  });
 }
 
 // --- Transkribavimas (ASINCHRONINIS /api/transcribe-jobs + polling) ---
-// onProgress(job) kviečiamas kiekvieno poll'o metu (komponentas formatuoja tekstą).
-// Grąžina galutinį completed job'ą arba meta klaidą.
-export async function transcribeAudioJob({ audioFile, diarize, onProgress, pollIntervalMs = 3000, maxPolls = 1200 }) {
+// onProgress(job) kviečiamas kiekvieno poll'o metu. signal (AbortSignal) nutraukia IR
+// fetch, IR laukimą tarp poll'ų - būtina, kad reset/naujas failas/unmount sustabdytų
+// senąjį polling'ą (kitaip senas rezultatas perrašytų naują UI būseną).
+export async function transcribeAudioJob({
+  audioFile,
+  diarize,
+  onProgress,
+  signal,
+  pollIntervalMs = 3000,
+  maxPolls = 1200,
+}) {
   const form = new FormData();
   form.append("audio", audioFile);
   form.append("language", "lt");
@@ -55,20 +104,20 @@ export async function transcribeAudioJob({ audioFile, diarize, onProgress, pollI
     method: "POST",
     headers: withApiKeyHeader(),
     body: form,
+    signal,
   });
-  const createData = await createRes.json();
-  if (!createRes.ok) throw new Error(createData.error || "Nepavyko pradėti transkribavimo");
+  const createData = await readJsonResponse(createRes, "Nepavyko pradėti transkribavimo");
 
   const jobId = createData.jobId;
   let job = createData;
 
   for (let i = 0; i < maxPolls; i++) {
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    await delay(pollIntervalMs, signal); // atšaukiamas laukimas
     const pollRes = await fetch(`${BACKEND_URL}/api/transcribe-jobs/${jobId}`, {
       headers: withApiKeyHeader(),
+      signal,
     });
-    job = await pollRes.json();
-    if (!pollRes.ok) throw new Error(job.error || "Klaida tikrinant transkribavimo būseną");
+    job = await readJsonResponse(pollRes, "Klaida tikrinant transkribavimo būseną");
     if (typeof onProgress === "function") onProgress(job);
     if (job.status === "completed" || job.status === "failed") break;
   }

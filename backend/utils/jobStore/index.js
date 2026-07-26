@@ -17,12 +17,28 @@ const { STATUS, TTL_MS } = require("./common");
  */
 
 let store = memoryStore; // numatyta, kol init() nepakeičia
-let initialized = false;
+let initPromise = null;   // bendras inicijavimo Promise (žr. init() komentarą)
 
+/**
+ * RACE CONDITION APSAUGA: anksčiau `initialized = true` buvo nustatomas IŠKART, o Redis
+ * prisijungimas (await) vyko vėliau. Tuo tarpu kita užklausa matydavo initialized=true,
+ * NElaukdavo Redis, ir naudodavo memoryStore. Job'as sukurtas atmintyje, po to store
+ * pakeičiamas į Redis, polling job'o Redis neranda -> "Jobas nerastas", nors buvo priimtas.
+ *
+ * Sprendimas: init() grąžina BENDRĄ initPromise. Visi create/get/update per ensureInit
+ * laukia TO PATIES vykstančio inicijavimo (ne boolean flag'o), tad store būna galutinis
+ * PRIEŠ pirmą operaciją.
+ */
 async function init() {
-  if (initialized) return store;
-  initialized = true;
+  if (initPromise) return initPromise;
+  initPromise = initializeStore().catch((error) => {
+    initPromise = null; // leidžiam pakartoti init po nesėkmės (ne užrakinam amžinai)
+    throw error;
+  });
+  return initPromise;
+}
 
+async function initializeStore() {
   const redisUrl = process.env.REDIS_URL;
   if (!redisUrl) {
     // Nėra REDIS_URL - tyliai naudojam in-memory (numatytas dev/demo režimas).
@@ -70,8 +86,9 @@ async function init() {
 
 // Proxy funkcijos - deleguoja į aktyvų backend'ą. init() iškviečiamas automatiškai
 // pirmo naudojimo metu, jei dar nebuvo (kad veiktų ir be aiškaus init server.js).
+// SVARBU: ensureInit LAUKIA init() Promise - tad store galutinis prieš operaciją.
 async function ensureInit() {
-  if (!initialized) await init();
+  await init();
 }
 
 module.exports = {

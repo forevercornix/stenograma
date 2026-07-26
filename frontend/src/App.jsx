@@ -24,6 +24,7 @@ import {
 import {
   BACKEND_URL,
   fetchHealth,
+  fetchReadiness,
   generateProtocol,
   transcribeAudioJob,
 } from "./api/stenogramaApi";
@@ -77,12 +78,16 @@ export default function Stenograma() {
   const analyserRef = useRef(null);
   const rafRef = useRef(null);
   const streamRef = useRef(null);
+  const transcribeAbortRef = useRef(null); // AbortController transkribavimo polling'ui
 
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) setSpeechSupported(false);
   }, []);
-  useEffect(() => () => stopRecording(), []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => {
+    stopRecording();
+    transcribeAbortRef.current?.abort(); // unmount - nutraukiam polling'ą (jokio setState po unmount)
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Kiekvieną kartą pasikeitus audioURL (naujas failas arba reset), atlaisviname
   // PREVIOUS blob URL - be šito naršyklė laikytų senus audio duomenis atmintyje
@@ -95,11 +100,17 @@ export default function Stenograma() {
 
   useEffect(() => {
     let cancelled = false;
-    fetchHealth()
-      .then((data) => {
+    // "online" reikalauja READINESS (job sistema paruošta), ne vien liveness. health
+    // naudojam tik info parodymui (koks tiekėjas). Taip vartotojas negali pradėti darbo,
+    // kol job store/runner dar neinicijuoti (žr. /api/ready backend'e).
+    Promise.all([
+      fetchReadiness(),
+      fetchHealth().catch(() => null), // info neprivaloma - jei krinta, tik nerodom detalių
+    ])
+      .then(([, healthData]) => {
         if (cancelled) return;
         setBackendStatus("online");
-        setBackendInfo(data);
+        if (healthData) setBackendInfo(healthData);
       })
       .catch(() => {
         if (!cancelled) setBackendStatus("offline");
@@ -219,6 +230,11 @@ export default function Stenograma() {
   // per sinchroninį kelią tokiu atveju niekada negrąžintų atsakymo laiku.
   const handleAutoTranscribe = async () => {
     if (!audioFile) return;
+    // Nutraukiam ankstesnį polling'ą (jei buvo) - kad senas rezultatas neperrašytų naujo.
+    transcribeAbortRef.current?.abort();
+    const controller = new AbortController();
+    transcribeAbortRef.current = controller;
+
     setIsTranscribing(true);
     setError("");
     setTranscribeProgress("");
@@ -228,6 +244,7 @@ export default function Stenograma() {
       const job = await transcribeAudioJob({
         audioFile,
         diarize,
+        signal: controller.signal,
         onProgress: (j) => setTranscribeProgress(formatTranscribeProgress(j)),
       });
 
@@ -237,7 +254,10 @@ export default function Stenograma() {
         : data.text;
       setTranscript(text);
     } catch (e) {
-      setError("Automatinis transkribavimas nepavyko: " + e.message);
+      // AbortError - vartotojas sąmoningai nutraukė (reset/naujas failas), ne klaida.
+      if (e.name !== "AbortError") {
+        setError("Automatinis transkribavimas nepavyko: " + e.message);
+      }
     } finally {
       setIsTranscribing(false);
       setTranscribeProgress("");
@@ -268,6 +288,7 @@ export default function Stenograma() {
   };
 
   const handleReset = () => {
+    transcribeAbortRef.current?.abort(); // nutraukiam vykstantį transkribavimo polling'ą
     stopRecording();
     setTitle("");
     setDate(todayISO());
