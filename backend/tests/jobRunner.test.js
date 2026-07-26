@@ -64,3 +64,16 @@ test("fileStorage: get ištrina po transkripcijos (processor finally)", async ()
   await fileStorage.del(key);
   await assert.rejects(() => fileStorage.get(key), /ENOENT|no such file/);
 });
+
+test("init({persistentStoreAvailable:false}) su REDIS_URL -> inline (NE BullMQ) - nuoseklumas", async () => {
+  // KRITINIS (review): jei jobStore Redis connect nepavyko ir fallback'ino į memory,
+  // jobRunner NETURI naudoti BullMQ (kitaip memory store + BullMQ = nesuderinta sistema,
+  // worker nemato atmintyje sukurtų jobų). persistentStoreAvailable=false verčia inline.
+  const prevUrl = process.env.REDIS_URL;
+  process.env.REDIS_URL = "redis://mock:6379"; // yra URL, bet store neprisijungė
+  delete require.cache[require.resolve("../queues/jobRunner")];
+  const jobRunner = require("../queues/jobRunner");
+  const mode = await jobRunner.init({ persistentStoreAvailable: false });
+  assert.equal(mode, "inline", "memory store fallback -> jobRunner turi būti inline, ne BullMQ");
+  if (prevUrl === undefined) delete process.env.REDIS_URL; else process.env.REDIS_URL = prevUrl;
+});

@@ -26,13 +26,33 @@ function registerProcessor(type, fn) {
   _processors[type] = fn;
 }
 
-async function init() {
+async function init(options = {}) {
   if (_mode) return _mode;
 
-  const useBullMq = !!process.env.REDIS_URL;
-  if (!useBullMq) {
+  // KRITIŠKA (nuoseklumas): BullMQ naudojamas TIK jei jobStore REALIAI prisijungė prie
+  // Redis. Anksčiau sprendėm vien pagal REDIS_URL buvimą - bet jei jobStore Redis connect
+  // nepavyko ir jis fallback'ino į memory, o jobRunner vis tiek naudotų BullMQ, gautume
+  // NESUDERINTĄ sistemą: HTTP procesas job'ą kuria atmintyje, siunčia į BullMQ, worker jo
+  // neranda. persistentStoreAvailable perduodamas iš server.js po jobStore.init().
+  // Jei nenurodyta (senas iškvietimas), fallback į REDIS_URL patikrą - bet server.js
+  // dabar visada perduoda.
+  const persistentStore =
+    options.persistentStoreAvailable !== undefined
+      ? options.persistentStoreAvailable
+      : !!process.env.REDIS_URL;
+
+  if (!persistentStore) {
     _mode = "inline";
-    console.log("[stenograma] Job runner: inline (in-proceso; be atskirų worker'ių - nustatykite REDIS_URL BullMQ eilei)");
+    // Jei REDIS_URL buvo nustatytas, bet persistentStore=false, reiškia jobStore Redis
+    // connect nepavyko - tai svarbi žinutė (ne tik "nėra REDIS_URL").
+    if (process.env.REDIS_URL) {
+      console.warn(
+        "[stenograma] ⚠️  REDIS_URL nustatytas, BET job store persistencija neprieinama " +
+          "(Redis connect nepavyko). Job runner naudoja INLINE - suderinta su memory store."
+      );
+    } else {
+      console.log("[stenograma] Job runner: inline (in-proceso; be atskirų worker'ių - nustatykite REDIS_URL BullMQ eilei)");
+    }
     warnIfInlineInProduction();
     return _mode;
   }

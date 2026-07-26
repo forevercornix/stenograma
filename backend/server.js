@@ -132,26 +132,38 @@ if (require.main === module) {
       .catch((e) => console.warn(`[stenograma] Self-check nepavyko: ${e.message}`));
   });
 
-  // Inicializuojam job store backend'ą (Redis jei REDIS_URL, kitaip in-memory).
-  // Async, tad .then/.catch - kad paleidimas nesustotų dėl Redis prisijungimo.
-  jobStore.init().then(() => {
-    console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
-    readiness.jobStore = true;
-  }).catch((e) => {
-    console.error(`[stenograma] Job store init klaida: ${e.message}`);
-    if (process.env.REDIS_REQUIRED === "true") process.exit(1);
-  });
-
-  // Registruojam job processor'ius (inline režimui) ir init jobRunner (BullMQ ar inline).
+  // SEKVENCINIS init (ne lygiagretus): jobRunner režimas turi PRIKLAUSYTI nuo to, ar
+  // jobStore REALIAI prisijungė prie Redis - kitaip gautume nesuderintą sistemą (memory
+  // store + BullMQ runner). Pirma jobStore, tada jobRunner su jos backend'u.
   const { registerProcessors } = require("./queues/register");
   registerProcessors();
-  jobRunner.init().then(() => {
-    console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
-    readiness.jobRunner = true;
-  }).catch((e) => {
-    console.error(`[stenograma] Job runner init klaida: ${e.message}`);
-    if (process.env.REDIS_REQUIRED === "true") process.exit(1);
-  });
+
+  (async () => {
+    // 1. Job store (Redis jei REDIS_URL ir connect pavyksta, kitaip in-memory fallback).
+    try {
+      await jobStore.init();
+      console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
+      readiness.jobStore = true;
+    } catch (e) {
+      console.error(`[stenograma] Job store init klaida: ${e.message}`);
+      if (process.env.REDIS_REQUIRED === "true") process.exit(1);
+      // Be REDIS_REQUIRED - tęsiam su memory (jobStore jau fallback'ino viduje).
+      readiness.jobStore = true;
+    }
+
+    // 2. Job runner - režimas SUDERINTAS su jobStore backend'u. persistentStoreAvailable
+    // užtikrina, kad BullMQ naudojamas TIK kai job store tikrai Redis (ne memory fallback).
+    const persistentStoreAvailable = jobStore.getBackend() === "redis";
+    try {
+      await jobRunner.init({ persistentStoreAvailable });
+      console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
+      readiness.jobRunner = true;
+    } catch (e) {
+      console.error(`[stenograma] Job runner init klaida: ${e.message}`);
+      if (process.env.REDIS_REQUIRED === "true") process.exit(1);
+      readiness.jobRunner = true;
+    }
+  })();
 
   // Periodiškai valome pasenusius (completed/failed) jobus - žr. utils/jobStore/
   // TTL logiką. Redis atveju daugiausiai no-op (Redis EXPIRE pats valo). Testų metu
