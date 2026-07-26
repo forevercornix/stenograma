@@ -60,12 +60,13 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
     await page.goto("/");
     await page.getByRole("button", { name: /Įklijuoti tekstą/ }).click();
 
-    // Be transkripcijos "Generuoti protokolą" arba neaktyvus, arba parodo klaidą.
+    // Be transkripcijos (ar <20 simbolių) "Generuoti protokolą" mygtukas yra DISABLED
+    // (canGenerate reikalauja transcript.trim().length > 20). Testuojam būtent išjungtą
+    // būseną - NEbandom spausti disabled mygtuko (Playwright lauktų, kol taps enabled,
+    // ir timeout'intų). Tai buvo ankstesnės šio testo klaidos priežastis.
     const generateBtn = page.getByRole("button", { name: "Generuoti protokolą" });
-    await generateBtn.click();
-
-    // Neturi atsirasti "PARENGTA" (protokolas nesugeneruotas iš tuščios įvesties).
-    await expect(page.getByText("PARENGTA")).not.toBeVisible({ timeout: 3_000 });
+    await expect(generateBtn).toBeDisabled();
+    await expect(page.getByText("PARENGTA")).not.toBeVisible();
   });
 
   test("protokolo generavimo klaida parodoma vartotojui (ne PARENGTA)", async ({ page }) => {
@@ -78,7 +79,14 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
     await page.getByPlaceholder(/Įklijuokite susitikimo transkripciją/).fill(
       "Pakankamai ilgas testinis tekstas su __FORCE_ERROR__ žyme, kad mock LLM mestų klaidą."
     );
-    await page.getByRole("button", { name: "Generuoti protokolą" }).click();
+
+    // SVARBU: laukiam, kol mygtukas taps ENABLED prieš spausdami. canGenerate reikalauja
+    // backendStatus === "online" - jei spaustume iš karto (kol backend health dar
+    // tikrinamas), mygtukas būtų disabled ir click'as timeout'intų. Tai buvo tikėtina
+    // ankstesnės šio testo klaidos priežastis.
+    const generateBtn = page.getByRole("button", { name: "Generuoti protokolą" });
+    await expect(generateBtn).toBeEnabled({ timeout: 15_000 });
+    await generateBtn.click();
 
     // Turi pasirodyti klaidos pranešimas, NE "PARENGTA".
     await expect(page.getByText(/nepavyko|klaida/i)).toBeVisible({ timeout: 30_000 });
