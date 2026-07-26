@@ -14,6 +14,7 @@ process.env.NODE_ENV = "test";
 
 const request = require("supertest");
 const app = require("../server");
+app._setReadyForTests(); // job route reikalauja readiness (startServer nevyksta testuose)
 
 test("rate limiting: 3-ia užklausa per langą (limitas=2) grąžina 429", async () => {
   const payload = { transcript: "Pakankamai ilgas testinis tekstas apie susitikimą, kad praeitų validaciją." };

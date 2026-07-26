@@ -19,6 +19,7 @@ process.env.SKIP_CONFIG_VALIDATION = "true";
 
 const request = require("supertest");
 const app = require("../server");
+app._setReadyForTests(); // job route reikalauja readiness (startServer nevyksta testuose)
 
 test("POST /api/generate - vidinė tiekėjo klaida (trūkstamas raktas) NEATSKLEIDŽIA raktų/konfigūracijos detalių klientui", async () => {
   const res = await request(app)

@@ -126,7 +126,27 @@ if (require.main === module) {
     console.error("[stenograma] Worker procesui reikia REDIS_URL (BullMQ). Be jo naudokite inline režimą (darbas HTTP procese).");
     process.exit(1);
   }
-  jobStore.init().then(startWorkers);
+
+  // KRITIŠKA: worker'iui NĖRA prasmingo memory fallback - jis klausytų Redis eilės, bet
+  // jobų būseną laikytų SAVO proceso atmintyje, nematytų backend proceso sukurtų jobų ->
+  // "Job store įrašas nerastas". Todėl jei jobStore.init fallback'ino į memory (Redis
+  // neprieinamas, REDIS_REQUIRED ne true), worker'is TURI atsisakyti startuoti - elgiamės
+  // kaip su REDIS_REQUIRED=true nepriklausomai nuo aplinkos.
+  (async () => {
+    try {
+      await jobStore.init();
+      if (jobStore.getBackend() !== "redis") {
+        throw new Error(
+          "BullMQ worker negali veikti be Redis job store (jobStore fallback'ino į memory). " +
+          "Patikrinkite REDIS_URL ir Redis pasiekiamumą."
+        );
+      }
+      startWorkers();
+    } catch (error) {
+      console.error(`[stenograma] Worker nepaleistas: ${error.message}`);
+      process.exit(1);
+    }
+  })();
 }
 
 module.exports = { createWorker, startWorkers };

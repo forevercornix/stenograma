@@ -105,8 +105,23 @@ function getMode() {
  * @param {string} jobId - jobStore jobo ID (jau sukurtas prieš tai)
  * @param {object} payload - { storageKey, filename, mimeType, language, diarize, ... }
  */
+/**
+ * Užtikrina, kad jobRunner inicijuotas NUOSEKLIAI su jobStore. Naudojamas enqueue*
+ * funkcijų kaip atsarginis kelias (jei server.js startServer dar neužbaigė - nors su
+ * init-prieš-listen tai nebeturėtų nutikti). SVARBU: init() kviečiamas su
+ * persistentStoreAvailable iš jobStore, NE pagal REDIS_URL - kad lazy init irgi
+ * negalėtų sukurti memory+BullMQ nesuderinimo.
+ */
+async function ensureInitialized() {
+  if (_mode) return _mode;
+  // jobStore.init() idempotentiškas (initPromise) - saugu kviesti; grąžina esamą store.
+  const jobStore = require("../utils/jobStore");
+  await jobStore.init();
+  return init({ persistentStoreAvailable: jobStore.getBackend() === "redis" });
+}
+
 async function enqueueTranscription(jobId, payload) {
-  await init();
+  await ensureInitialized();
   if (_mode === "bullmq") {
     const { addTranscriptionJob } = require("./transcriptionQueue");
     await addTranscriptionJob(jobId, payload);
@@ -117,7 +132,7 @@ async function enqueueTranscription(jobId, payload) {
 }
 
 async function enqueueProtocol(jobId, payload) {
-  await init();
+  await ensureInitialized();
   if (_mode === "bullmq") {
     const { addProtocolJob } = require("./protocolQueue");
     await addProtocolJob(jobId, payload);

@@ -9,6 +9,7 @@ process.env.NODE_ENV = "test";
 
 const request = require("supertest");
 const app = require("../server");
+app._setReadyForTests(); // job route reikalauja readiness (startServer nevyksta testuose)
 
 function wait(ms) {
   return new Promise((r) => setTimeout(r, ms));

@@ -37,19 +37,30 @@ if (corsOrigin === "*") {
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: "10mb" }));
 
+// Readiness sekimas: /api/health yra LIVENESS (procesas gyvas ir atsako). Job store/
+// runner init užbaigiamas PRIEŠ app.listen (žr. startServer), tad kai serveris priima
+// užklausas, readiness jau true. Šie flag'ai + requireJobSystemReady middleware yra
+// DEFENSE-IN-DEPTH: jei kada startup keistųsi (init po listen), job endpointai vis tiek
+// grąžintų 503, ne kurtų jobų nesuderintoje sistemoje.
+const readiness = { jobStore: false, jobRunner: false };
+app.locals.readiness = readiness; // route failai gali tikrinti be ciklinės priklausomybės
+
+function requireJobSystemReady(req, res, next) {
+  if (!readiness.jobStore || !readiness.jobRunner) {
+    return res.status(503).json({ error: "Job sistema dar inicializuojama. Bandykite dar kartą po kelių sekundžių." });
+  }
+  next();
+}
+
 app.use("/api", generateRoute);
 app.use("/api", transcribeRoute);
-app.use("/api", transcribeJobsRoute);
 app.use("/api", auditRoute);
+// requireJobSystemReady prijungtas per konkretų POST kelią (ne bendrą /api), kad
+// NEliestų /api/health ir /api/ready (kurie apibrėžti žemiau).
+app.post("/api/transcribe-jobs", requireJobSystemReady);
+app.post("/api/jobs", requireJobSystemReady);
+app.use("/api", transcribeJobsRoute);
 app.use("/api", jobsRoute);
-
-// Readiness sekimas: /api/health yra LIVENESS (procesas gyvas ir atsako), bet
-// job store/runner inicijuojami ASINCHRONIŠKAI PO app.listen (kad Redis prisijungimas
-// nesustabdytų starto). Tad /api/health 200 NEreiškia, kad job sistema paruošta -
-// ypač Redis/BullMQ režime. /api/ready atskiria READINESS: grąžina 200 tik kai job
-// store IR runner inicijuoti. Orkestratoriai (k8s, load balancer) turėtų naudoti
-// /api/ready traffic'o nukreipimui, /api/health - proceso gyvybės patikrai.
-const readiness = { jobStore: false, jobRunner: false };
 
 app.get("/api/ready", async (req, res) => {
   const initReady = readiness.jobStore && readiness.jobRunner;
@@ -140,14 +151,36 @@ app.get("/api/health/deep", async (req, res) => {
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3001;
-  app.listen(PORT, () => {
+
+  // KRITIŠKA (race apsauga): infrastruktūrą (jobStore + jobRunner) inicijuojam PILNAI
+  // PRIEŠ app.listen. Anksčiau listen startuodavo pirmas, o init vyko async po jo - tad
+  // ankstyva HTTP užklausa galėjo laimėti race: route per lazy ensureInit nustatydavo
+  // jobRunner režimą (pagal REDIS_URL) PRIEŠ mūsų sekvencinį init, ir memory+BullMQ
+  // nesuderinimas įvykdavo. Init prieš listen tai UŽDARO - serveris nepriima užklausų,
+  // kol job sistema nepilnai ir nuosekliai paruošta.
+  async function startServer() {
+    const { registerProcessors } = require("./queues/register");
+    registerProcessors();
+
+    // 1. Job store (Redis jei REDIS_URL ir connect pavyksta, kitaip in-memory fallback).
+    await jobStore.init();
+    console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
+    readiness.jobStore = true;
+
+    // 2. Job runner - režimas SUDERINTAS su jobStore backend'u (BullMQ tik kai tikrai Redis).
+    const persistentStoreAvailable = jobStore.getBackend() === "redis";
+    await jobRunner.init({ persistentStoreAvailable });
+    console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
+    readiness.jobRunner = true;
+
+    // 3. TIK dabar - kai job sistema paruošta - pradedam priimti HTTP užklausas.
+    await new Promise((resolve) => app.listen(PORT, resolve));
     console.log(`Stenograma backend veikia ant porto ${PORT}`);
     console.log(`  TRANSCRIPTION_PROVIDER = ${process.env.TRANSCRIPTION_PROVIDER || "mock"}`);
     console.log(`  LLM_PROVIDER           = ${process.env.LLM_PROVIDER || "mock"}`);
 
-    // MINKŠTAS self-check po starto: realiai patikrina komponentų pasiekiamumą
-    // ir spausdina ✅/❌ eilutes, bet NESTABDO serverio (išorinis servisas gali
-    // pasikelti vėliau). Tas pats rezultatas gaunamas per GET /api/health/deep.
+    // MINKŠTAS self-check po starto (NESTABDO serverio - išorinis servisas gali pakilti
+    // vėliau). Tas pats per GET /api/health/deep.
     runSelfChecks()
       .then((checks) => {
         for (const c of checks) console.log(`  ${c.ok ? "✅" : "❌"} ${c.name}: ${c.detail}`);
@@ -156,49 +189,24 @@ if (require.main === module) {
         }
       })
       .catch((e) => console.warn(`[stenograma] Self-check nepavyko: ${e.message}`));
+
+    // Periodinis pasenusių jobų valymas (Redis atveju daugiausiai no-op - EXPIRE pats valo).
+    setInterval(async () => {
+      const removed = await jobStore.sweepExpired();
+      if (removed > 0) console.log(`[stenograma] Išvalyta ${removed} pasenusių jobų (TTL=${jobStore.TTL_MS / 60000} min).`);
+    }, 5 * 60 * 1000).unref();
+  }
+
+  startServer().catch((error) => {
+    console.error(`[stenograma] Serverio paleidimas nepavyko: ${error.message}`);
+    process.exit(1);
   });
-
-  // SEKVENCINIS init (ne lygiagretus): jobRunner režimas turi PRIKLAUSYTI nuo to, ar
-  // jobStore REALIAI prisijungė prie Redis - kitaip gautume nesuderintą sistemą (memory
-  // store + BullMQ runner). Pirma jobStore, tada jobRunner su jos backend'u.
-  const { registerProcessors } = require("./queues/register");
-  registerProcessors();
-
-  (async () => {
-    // 1. Job store (Redis jei REDIS_URL ir connect pavyksta, kitaip in-memory fallback).
-    try {
-      await jobStore.init();
-      console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
-      readiness.jobStore = true;
-    } catch (e) {
-      console.error(`[stenograma] Job store init klaida: ${e.message}`);
-      if (process.env.REDIS_REQUIRED === "true") process.exit(1);
-      // Be REDIS_REQUIRED - tęsiam su memory (jobStore jau fallback'ino viduje).
-      readiness.jobStore = true;
-    }
-
-    // 2. Job runner - režimas SUDERINTAS su jobStore backend'u. persistentStoreAvailable
-    // užtikrina, kad BullMQ naudojamas TIK kai job store tikrai Redis (ne memory fallback).
-    const persistentStoreAvailable = jobStore.getBackend() === "redis";
-    try {
-      await jobRunner.init({ persistentStoreAvailable });
-      console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
-      readiness.jobRunner = true;
-    } catch (e) {
-      console.error(`[stenograma] Job runner init klaida: ${e.message}`);
-      if (process.env.REDIS_REQUIRED === "true") process.exit(1);
-      readiness.jobRunner = true;
-    }
-  })();
-
-  // Periodiškai valome pasenusius (completed/failed) jobus - žr. utils/jobStore/
-  // TTL logiką. Redis atveju daugiausiai no-op (Redis EXPIRE pats valo). Testų metu
-  // (require.main !== module) šis interval'as nesikuria, kad nepaliktų "kabančio"
-  // laikmačio po testų.
-  setInterval(async () => {
-    const removed = await jobStore.sweepExpired();
-    if (removed > 0) console.log(`[stenograma] Išvalyta ${removed} pasenusių jobų (TTL=${jobStore.TTL_MS / 60000} min).`);
-  }, 5 * 60 * 1000).unref();
 }
 
 module.exports = app;
+// TESTAMS: leidžia nustatyti readiness (testų kontekste startServer nevyksta, tad
+// readiness liktų false ir job route'ai grąžintų 503). Testai kviečia app._setReadyForTests().
+app._setReadyForTests = (value = true) => {
+  readiness.jobStore = value;
+  readiness.jobRunner = value;
+};
