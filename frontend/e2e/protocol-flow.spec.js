@@ -75,7 +75,9 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
     await page.getByPlaceholder("Susitikimo pavadinimas").fill("Klaidos testas");
 
     // __FORCE_ERROR__ žymė priverčia mock LLM mesti klaidą (žr. MockLLMProvider).
-    // Tikriname, kad jobo NESĖKMĖ parodoma vartotojui, ne tyliai kabo.
+    // Šis srautas naudoja SINCHRONINĮ POST /api/generate (ne asinchroninį /api/jobs
+    // polling, kurį naudoja transkribavimas). Tikriname, kad protokolo generavimo API
+    // klaida parodoma vartotojui, o UI nepereina į sėkmingą "PARENGTA" būseną.
     await page.getByPlaceholder(/Įklijuokite susitikimo transkripciją/).fill(
       "Pakankamai ilgas testinis tekstas su __FORCE_ERROR__ žyme, kad mock LLM mestų klaidą."
     );
@@ -92,7 +94,10 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
     await expect(page.getByText(/nepavyko|klaida/i)).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText("PARENGTA")).not.toBeVisible();
 
-    // KRITINIS: klaidos tekste NETURI būti paslapčių (sanitizacija veikia ir UI'e).
+    // Papildoma (defense-in-depth) UI patikra: klaidos tekste NETURI būti paslapčių.
+    // ĮRODO tik tiek, kad paslaptis nepasirodė MATOMAME DOM - NE kad jos nebuvo HTTP
+    // atsakyme ar console. Tikrąjį šaltinį (HTTP atsakymo kūną) tikrina backend testas
+    // backend/tests/errorSanitization.route.test.js. Čia - tik UI sluoksnio patvirtinimas.
     await expect(page.getByText(/ANTHROPIC_API_KEY/)).not.toBeVisible();
   });
 });
