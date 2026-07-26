@@ -66,7 +66,23 @@ describe("generateProtocol", () => {
 
   it("ne-JSON atsakymą (HTML 502) apdoroja informatyviai, ne 'Unexpected token'", async () => {
     global.fetch = vi.fn(() => Promise.resolve(textRes("<html>502 Bad Gateway</html>", { ok: false, status: 502 })));
-    await expect(generateProtocol({})).rejects.toThrow(/502|Bad Gateway/);
+    await expect(generateProtocol({})).rejects.toThrow(/502|ne JSON/i);
+  });
+
+  it("200 OK su HTML body (proxy login page) metamas kaip klaida, NE grąžinamas kaip sėkmė", async () => {
+    // KRITINIS (review): reverse proxy gali grąžinti 200 OK + text/html (login page).
+    // res.ok=true, tad ankstesnė logika grąžindavo {error: html} kaip SĖKMĘ, ir
+    // data.protocol taptų undefined. Dabar ne-JSON VISADA metamas (visi sėkmingi API
+    // atsakymai yra JSON). Ir NEišvedam viso proxy HTML vartotojui.
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => "text/html" },
+        text: () => Promise.resolve("<html>Proxy login page</html>"),
+      })
+    );
+    await expect(generateProtocol({})).rejects.toThrow(/ne JSON/i);
   });
 });
 

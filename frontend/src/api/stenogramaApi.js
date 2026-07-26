@@ -28,21 +28,26 @@ export function withApiKeyHeader(headers = {}) {
 // Šis helperis tikrina content-type ir grąžina prasmingą žinutę.
 async function readJsonResponse(res, fallbackMessage) {
   const contentType = res.headers.get("content-type") || "";
-  let data;
-  if (contentType.includes("application/json")) {
-    // Net su JSON content-type body gali būti tuščias/sugadintas (proxy nutraukė ryšį,
-    // dalinis atsakymas). SVARBU: metam klaidą IŠ KARTO, ne paverčiam į {error:...} - nes
-    // jei res.ok=true (200 su sugadintu body), toks error objektas būtų grąžintas kaip
-    // SĖKMĖ, ir data.protocol taptų undefined (RASTA review).
-    try {
-      data = await res.json();
-    } catch {
-      throw new Error(`${fallbackMessage} (${res.status}): neteisingas JSON atsakymas`);
-    }
-  } else {
+
+  // Visi šio API SĖKMINGI atsakymai yra JSON. Ne-JSON atsakymas (net su 200 OK) reiškia,
+  // kad kažkas ne taip - dažniausiai reverse proxy grąžino HTML (login page, 502 Bad
+  // Gateway). Metam klaidą, NE grąžinam {error: html} kaip duomenis (kitaip res.ok=true
+  // atveju būtų "sėkmė" su data.protocol=undefined - simetriška sugadinto JSON klaidai).
+  if (!contentType.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    data = { error: text || fallbackMessage };
+    const preview = text ? `: serveris grąžino ne JSON atsakymą` : "";
+    throw new Error(`${fallbackMessage} (${res.status})${preview}`);
   }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    // JSON content-type, bet body tuščias/sugadintas (proxy nutraukė ryšį, dalinis
+    // atsakymas). Metam iš karto - kitaip res.ok=true atveju būtų grąžinta kaip sėkmė.
+    throw new Error(`${fallbackMessage} (${res.status}): neteisingas JSON atsakymas`);
+  }
+
   if (!res.ok) {
     throw new Error(data?.error || `${fallbackMessage} (${res.status})`);
   }

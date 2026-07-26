@@ -126,7 +126,12 @@ module.exports = {
     // Uždarom aktyvų store (jei Redis) prieš pametant nuorodą - kitaip liktų atvira
     // jungtis / kabantis handle (testų procesas galėtų neužsibaigti).
     if (store && typeof store.close === "function") {
-      await store.close().catch(() => {});
+      try {
+        await store.close();
+      } catch (error) {
+        // Netylim visiškai - realus close() defektas (mock ar Redis) neturi likti paslėptas.
+        console.warn("[test cleanup] Nepavyko uždaryti job store:", error.message);
+      }
     }
     initPromise = null;
     store = memoryStore;
