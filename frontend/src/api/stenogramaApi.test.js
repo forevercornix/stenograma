@@ -169,15 +169,18 @@ describe("transcribeAudioJob polling", () => {
     ).rejects.toThrow(/Aborted/i);
   });
 
-  it("sugadintas JSON (content-type json, bet body sugadintas) apdorojamas informatyviai", async () => {
+  it("sugadintas JSON su 200 OK (ok:true) metamas kaip klaida, NE grąžinamas kaip sėkmė", async () => {
+    // KRITINIS (review): realus scenarijus - proxy grąžina 200 OK + json content-type,
+    // bet body sugadintas/tuščias. res.ok===true, tad ankstesnė logika grąžindavo
+    // {error:...} kaip SĖKMĘ, ir data.protocol taptų undefined. Dabar metam klaidą.
     global.fetch = vi.fn(() =>
       Promise.resolve({
-        ok: false,
+        ok: true, // TIKRAS 200 (ne prieštaringas ok:false/status:200)
         status: 200,
         headers: { get: () => "application/json" },
         json: () => Promise.reject(new SyntaxError("Unexpected end of JSON input")),
       })
     );
-    await expect(generateProtocol({})).rejects.toThrow(/neteisingas JSON|200/i);
+    await expect(generateProtocol({})).rejects.toThrow(/neteisingas JSON/i);
   });
 });

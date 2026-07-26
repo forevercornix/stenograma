@@ -122,7 +122,12 @@ module.exports = {
   TTL_MS,
 
   // --- TIK TESTAMS (dependency injection tikrai race patikrai) ---
-  _resetForTests: () => {
+  _resetForTests: async () => {
+    // Uždarom aktyvų store (jei Redis) prieš pametant nuorodą - kitaip liktų atvira
+    // jungtis / kabantis handle (testų procesas galėtų neužsibaigti).
+    if (store && typeof store.close === "function") {
+      await store.close().catch(() => {});
+    }
     initPromise = null;
     store = memoryStore;
     _redisFactoryForTests = null;

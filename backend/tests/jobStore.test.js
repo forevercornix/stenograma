@@ -78,12 +78,19 @@ test("sweepExpired: pašalina CANCELLED jobą po TTL", async () => {
   assert.equal(await jobStore.get(job.id), null, "CANCELLED jobas po TTL turi būti pašalintas");
 });
 
-test("TIKRA race: create() laukia neužbaigto Redis init (ne memory), kol connect() lėtas", async () => {
+test("TIKRA race: create() laukia neužbaigto Redis init (ne memory), kol connect() lėtas", async (t) => {
   // Reviewer pastaba: ankstesni testai netikrino tikros race (init jau buvo užbaigtas).
   // Čia injektuojam mock Redis su KONTROLIUOJAMU connect() - kol jis "kabo", pradedam
   // create(). Tikrinam, kad create NElaukia memory, o laukia Redis init pabaigos.
-  jobStore._resetForTests();
+  await jobStore._resetForTests();
   process.env.REDIS_URL = "redis://mock:6379";
+
+  // t.after: cleanup įvyksta NET jei assert kristų (kitaip REDIS_URL/mock factory/
+  // initPromise nutekėtų į kitus testus).
+  t.after(async () => {
+    await jobStore._resetForTests();
+    delete process.env.REDIS_URL;
+  });
 
   let releaseConnect;
   const connectGate = new Promise((resolve) => { releaseConnect = resolve; });
@@ -129,13 +136,11 @@ test("TIKRA race: create() laukia neužbaigto Redis init (ne memory), kol connec
   await createPromise;
   assert.equal(createDone, true, "atleidus connect, create() užbaigiamas");
   assert.equal(jobStore.getBackend(), "redis", "store turi būti Redis (ne memory)");
-
-  jobStore._resetForTests();
-  delete process.env.REDIS_URL;
+  // cleanup - per t.after (atsparus assert kritimui)
 });
 
 test("init() lygiagrečiai grąžina TĄ PATĮ store (initPromise dalinimasis)", async () => {
-  jobStore._resetForTests();
+  await jobStore._resetForTests();
   delete process.env.REDIS_URL;
   const [s1, s2, s3] = await Promise.all([jobStore.init(), jobStore.init(), jobStore.init()]);
   assert.equal(s1, s2);

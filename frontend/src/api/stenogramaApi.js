@@ -28,21 +28,23 @@ export function withApiKeyHeader(headers = {}) {
 // Šis helperis tikrina content-type ir grąžina prasmingą žinutę.
 async function readJsonResponse(res, fallbackMessage) {
   const contentType = res.headers.get("content-type") || "";
-  let data = null;
+  let data;
   if (contentType.includes("application/json")) {
     // Net su JSON content-type body gali būti tuščias/sugadintas (proxy nutraukė ryšį,
-    // dalinis atsakymas) -> res.json() mestų "Unexpected end of JSON input". Gaudom.
+    // dalinis atsakymas). SVARBU: metam klaidą IŠ KARTO, ne paverčiam į {error:...} - nes
+    // jei res.ok=true (200 su sugadintu body), toks error objektas būtų grąžintas kaip
+    // SĖKMĖ, ir data.protocol taptų undefined (RASTA review).
     try {
       data = await res.json();
     } catch {
-      data = { error: `${fallbackMessage} (${res.status}): neteisingas JSON atsakymas` };
+      throw new Error(`${fallbackMessage} (${res.status}): neteisingas JSON atsakymas`);
     }
   } else {
     const text = await res.text().catch(() => "");
     data = { error: text || fallbackMessage };
   }
   if (!res.ok) {
-    throw new Error(data.error || `${fallbackMessage} (${res.status})`);
+    throw new Error(data?.error || `${fallbackMessage} (${res.status})`);
   }
   return data;
 }
