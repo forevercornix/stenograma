@@ -66,7 +66,7 @@ test.describe("Stenograma - pilnas audio→DOCX srautas", () => {
 
     // 6. Generuoti protokolą.
     await page.getByRole("button", { name: "Generuoti protokolą" }).click();
-    await expect(page.getByText("PARENGTA")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Dokumentas dar neparengtas")).not.toBeVisible({ timeout: 30_000 });
 
     // 7. Eksportuoti DOCX.
     const downloadPromise = page.waitForEvent("download", { timeout: 15_000 });

@@ -42,8 +42,10 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
     await generateBtn.click();
 
     // 6. Palaukti, kol protokolas sugeneruojamas (mock LLM - greita, bet async).
-    //    "PARENGTA" antspaudas ir "Protokolas" antraštė rodo pabaigą.
-    await expect(page.getByText("PARENGTA")).toBeVisible({ timeout: 30_000 });
+    //    "PARENGTA" antspaudas ir "Protokolas" antraštė rodo pabaigą. Tikrinam, kad
+    //    placeholder "dar neparengtas" DINGO (protokolas sugeneruotas) - patikimiau nei
+    //    getByText("PARENGTA"), kuris substring'u sutampa su "neparengtas".
+    await expect(page.getByText("Dokumentas dar neparengtas")).not.toBeVisible({ timeout: 30_000 });
     await expect(page.getByText("Protokolas").first()).toBeVisible();
 
     // 7. Patikrinti, kad protokolo turinys realiai atsirado (ne tuščias).
@@ -71,7 +73,11 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
     // ir timeout'intų). Tai buvo ankstesnės šio testo klaidos priežastis.
     const generateBtn = page.getByRole("button", { name: "Generuoti protokolą" });
     await expect(generateBtn).toBeDisabled();
-    await expect(page.getByText("PARENGTA")).not.toBeVisible();
+    // NEtikrinam getByText("PARENGTA").not.toBeVisible() - "PARENGTA" yra SUBSTRING
+    // tekste "Dokumentas dar neparengtas" (placeholder), tad substring match visada
+    // rastų jį ir testas klaidingai kristų. Vietoj to tikrinam, kad placeholder ("dar
+    // neparengtas") VIS DAR matomas = protokolas nesugeneruotas.
+    await expect(page.getByText("Dokumentas dar neparengtas")).toBeVisible();
   });
 
   test("protokolo generavimo klaida parodoma vartotojui (ne PARENGTA)", async ({ page }) => {
@@ -95,9 +101,11 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
     await expect(generateBtn).toBeEnabled({ timeout: 15_000 });
     await generateBtn.click();
 
-    // Turi pasirodyti klaidos pranešimas, NE "PARENGTA".
+    // Turi pasirodyti klaidos pranešimas, NE sugeneruotas protokolas.
     await expect(page.getByText(/nepavyko|klaida/i)).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText("PARENGTA")).not.toBeVisible();
+    // Placeholder "dar neparengtas" turi likti = protokolas NEsugeneruotas. (NEtikrinam
+    // getByText("PARENGTA") - jis substring'u sutampa su "neparengtas", žr. :74 komentarą.)
+    await expect(page.getByText("Dokumentas dar neparengtas")).toBeVisible();
 
     // Papildoma (defense-in-depth) UI patikra: klaidos tekste NETURI būti paslapčių.
     // ĮRODO tik tiek, kad paslaptis nepasirodė MATOMAME DOM - NE kad jos nebuvo HTTP
