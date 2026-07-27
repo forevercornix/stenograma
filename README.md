@@ -1,6 +1,6 @@
 # Stenograma
 
-**Dabartinis stabilus leidimas: `v1.0.0`**
+**Status:** Stable (`v1.0.0`)
 
 **Susitikimų protokolų generatorius: garsas → transkripcija → struktūruotas protokolas.**
 
@@ -9,8 +9,8 @@ redaguojamą protokolą — su darbotvarke, aptartais klausimais, nutarimais ir 
 sąrašu su atsakingais asmenimis bei terminais.
 
 Projektas suprojektuotas kaip **provider architektūra**: transkribavimo ir LLM tiekėjai
-keičiami per konfigūraciją (`.env`), o ne kodo perrašymą. **Backend'as yra privalomas** —
-frontend'as niekada nekviečia jokio LLM tiesiai iš naršyklės.
+keičiami per konfigūraciją (`.env`), o ne kodo perrašymą. **Visa AI logika vykdoma
+backend'e** — frontend'as tiesiogiai nesikreipia į LLM API.
 
 ---
 
