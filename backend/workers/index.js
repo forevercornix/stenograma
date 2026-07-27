@@ -105,9 +105,18 @@ function startWorkers() {
   const workers = [startTranscriptionWorker(), startProtocolWorker()];
   console.log(`[stenograma] Worker'iai paleisti (concurrency=${WORKER_OPTIONS.concurrency}, stalled recovery=${WORKER_OPTIONS.stalledInterval}ms): transcription, protocol`);
 
+  // Heartbeat: worker rašo Redis raktą su TTL, /api/ready jį tikrina - taip readiness
+  // patvirtina, kad worker'is GYVAS (ne tik kad Redis pasiekiamas).
+  const { createQueueConnection } = require("../queues/config");
+  const { startHeartbeat } = require("../utils/workerHeartbeat");
+  const heartbeatConn = createQueueConnection();
+  const stopHeartbeat = startHeartbeat(heartbeatConn);
+
   // Graceful shutdown - laukiam vykdomo darbo pabaigos prieš uždarant.
   async function shutdown(signal) {
     console.log(`[stenograma] Worker gauna ${signal}, baigiu darbus...`);
+    stopHeartbeat();
+    await heartbeatConn.quit().catch(() => {});
     await Promise.all(workers.map((w) => w.close()));
     process.exit(0);
   }

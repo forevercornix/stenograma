@@ -72,15 +72,19 @@ app.get("/api/ready", async (req, res) => {
   }
 
   // BullMQ režime init flag'ai NEUŽTENKA - jie tik reiškia "režimas pasirinktas". Realiam
-  // readiness reikia patikrinti, ar Redis TIKRAI pasiekiamas (kitaip queue.add pakibtų).
-  // Inline režime nieko papildomo netikrinam (viskas procese). PING su trumpu timeout.
+  // readiness tikrinam: (a) ar Redis pasiekiamas (queue.add nepakibtų), (b) ar WORKER
+  // gyvas (heartbeat raktas šviežias) - kitaip jobai būtų priimami, bet liktų queued, nes
+  // niekas jų neapdoroja. Inline režime nieko papildomo (viskas tame pačiame procese).
   let redisReachable = true;
+  let workerAlive = true;
   if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
     let conn = null;
     try {
       const { createQueueConnection } = require("./queues/config");
+      const { isWorkerAlive } = require("./utils/workerHeartbeat");
       conn = createQueueConnection();
       await conn.ping();
+      workerAlive = await isWorkerAlive(conn); // heartbeat raktas su TTL
     } catch {
       redisReachable = false;
     } finally {
@@ -88,13 +92,14 @@ app.get("/api/ready", async (req, res) => {
     }
   }
 
-  const ready = initReady && redisReachable;
+  const ready = initReady && redisReachable && workerAlive;
   res.status(ready ? 200 : 503).json({
     ready,
     components: {
       jobStore: readiness.jobStore,
       jobRunner: readiness.jobRunner,
       redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
+      workerAlive,    // BullMQ režime rodo, ar worker heartbeat šviežias; inline - visada true
     },
   });
 });
