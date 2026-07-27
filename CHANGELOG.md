@@ -4,6 +4,69 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## v1.0.0 – Pirmas stabilus leidimas 🎉
+
+Pirmas stabilus viešas leidimas. Produkcijai orientuota architektūra AI pagalbiniam
+susitikimų transkribavimui ir protokolų generavimui. Šis leidimas įtvirtina patikimumą
+per išsamų kodo įvertinimą ir daugybę pataisymų.
+
+### Patikimumas (iš išsamaus kodo audito)
+
+- **Startavimo race condition uždaryta.** `jobStore`/`jobRunner` inicializacija dabar
+  vyksta PILNAI prieš `app.listen` (sekvencinis init), tad ankstyva HTTP užklausa nebegali
+  sukurti nesuderintos memory-store + BullMQ-runner sistemos. `jobStore.init` naudoja
+  bendrą `initPromise` (nebe boolean flag race). Regresiniai testai fiksuoja init tvarką.
+- **jobStore/jobRunner režimo nuoseklumas.** jobRunner BullMQ režimą renkasi tik kai
+  jobStore REALIAI prisijungė prie Redis (`persistentStoreAvailable`), ne vien pagal
+  `REDIS_URL` buvimą. Uždaro tylų gedimą, kai `/api/ready` meluotų `ready=true`.
+- **Worker paleidimo apsauga.** Worker'iai (visi trys entry point'ai per bendrą
+  `initializeWorkerOrFail`) atsisako startuoti, jei jobStore fallback'ino į memory - BullMQ
+  worker su memory store nematytų backend jobų.
+- **Readiness + worker heartbeat.** `/api/ready` (atskirtas nuo `/api/health` liveness)
+  BullMQ režime tikrina realų Redis ryšį IR worker heartbeat raktą (`stenograma:worker:
+  lastSeen`, TTL) - readiness nebegrąžina `true`, kai worker išjungtas.
+- **Saugus abort ir konkurencinės užklausos.** Frontend transkribavimo polling'as
+  nutraukiamas per AbortController su controller-identity apsauga (senas rezultatas
+  neperrašo naujos būsenos); naujas failas/reset/unmount nutraukia seną polling'ą;
+  `delay()` pašalina abort listenerį po timeout (be nutekėjimo).
+- **Klaidų apdorojimas.** `readJsonResponse` teisingai tvarko visus kraštinius atvejus:
+  ne-JSON atsakymai (proxy HTML/502) ir sugadintas/tuščias JSON metami kaip klaidos (ne
+  grąžinami kaip tyli `undefined` sėkmė), net su 200 OK; priimami `+json` variantai.
+- **Failo validacija prieš storage.** Async įkėlimo kelyje magic-bytes tikrinami skaitant
+  tik antraštę PRIEŠ pilną skaitymą/storage - netikras failas atmetamas 400 be storage/
+  eilės apkrovimo. Streaming `putFile` (be viso failo į RAM - OOM prevencija).
+- **Orphan valymas.** Enqueue nesėkmė ištrina audio iš storage ir pažymi jobą `failed`
+  (nebe amžinai `queued`). Worker tikrina `jobStore.update` rezultatą (ne tyli „sėkmė"
+  be įrašo).
+
+### Kokybė
+
+- **ESLint** backend + frontend su CI integracija (React hooks, nenaudoti importai,
+  nepasiekiamas kodas). **Redis `size()`** neįskaito TTL „vaiduoklių". **HttpError**
+  grąžina savo statusą (ne visada 500). Frontend `role="alert"` accessibility klaidų juostai.
+
+### Funkcijos (Milestone 1 pagrindas)
+
+- Asinchroniniai transkribavimo jobai (202 + polling); BullMQ + Redis eilė su inline
+  fallback; lokalus faster-whisper (embedded/server); konfigūruojami LLM tiekėjai
+  (Claude/GPT/Gemini/mock); pasirenkama kalbėtojų diarizacija (pyannote); health/readiness
+  endpointai; Docker diegimas (demo/cpu/gpu/server/runpod profiliai); provider architektūra;
+  automatinis temp failų valymas; hallucination filtras + VAD; proporcingas timeout.
+
+### Testai
+
+- Backend unit + route (~160); frontend unit + API (~40); Playwright E2E (6, Chromium);
+  Python kontraktų testai (pyannote + whisper); Docker build + smoke. Visi žali CI'e.
+
+### Sąžiningi apribojimai
+
+- GPU keliai (CUDA/Torch/Whisper/pyannote su `device=cuda`), BullMQ restart recovery su
+  tikru Redis, worker heartbeat srautas per tikrą Redis - logika parašyta, unit/statiškai
+  patikrinta, bet ne visi paleisti sandbox aplinkoje. Žr. DEPLOYMENT_CHECKLIST žinomus
+  apribojimus prieš production diegimą.
+
+---
+
 ## Pataisyta (po realaus RunPod diegimo audito)
 
 - **VAD filtras + automatinis MP3→WAV + upload/inline nuoseklumas (kodo audito radiniai).**

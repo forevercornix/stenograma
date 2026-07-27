@@ -1,5 +1,7 @@
 # Stenograma
 
+**Dabartinis stabilus leidimas: `v1.0.0`**
+
 **Susitikimų protokolų generatorius: garsas → transkripcija → struktūruotas protokolas.**
 
 Stenograma paverčia susitikimo garso įrašą (arba jau turimą transkripciją) į tvarkingą,
