@@ -91,11 +91,15 @@ test.describe("Stenograma - pilnas audio→DOCX srautas", () => {
   });
 
   test("backend nepasiekiamas rodo aiškų pranešimą", async ({ page }) => {
-    // Blokuojam /api/health, kad frontend manytų, jog backend offline.
-    await page.route("**/api/health", (route) => route.abort());
+    // Blokuojam VISĄ /api/** (ne tik /api/health), kad frontend manytų, jog backend offline.
+    // Frontend "online" statusą lemia /api/ready (readiness patikra) - jei blokuotume tik
+    // /api/health, /api/ready pavyktų ir statusas liktų "online" (testas klaidingai kristų).
+    // page.route PRIEŠ page.goto - kad blokavimas veiktų nuo pirmos užklausos.
+    await page.route("**/api/**", (route) => route.abort("connectionfailed"));
     await page.goto("/");
 
-    // Frontend turi parodyti "Backend'as nepasiekiamas" juostą.
-    await expect(page.getByText(/Backend'as.*nepasiekiamas/)).toBeVisible({ timeout: 15_000 });
+    // Frontend turi parodyti "Backend nepasiekiamas" juostą. Mažiau trapus regex:
+    // case-insensitive, be priklausomybės nuo apostrofo tipografijos ('as / 'as).
+    await expect(page.getByText(/backend.*nepasiekiamas/i)).toBeVisible({ timeout: 15_000 });
   });
 });
