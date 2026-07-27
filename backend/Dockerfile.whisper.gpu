@@ -15,10 +15,13 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 WORKDIR /app
 
 # Node 20 + Python + ffmpeg. nvidia/cuda image neturi nei Node, nei Python.
+# SVARBU: Ubuntu 22.04 sisteminis pip per senas --break-system-packages flag'ui
+# (PEP 668 flag'as atsirado pip 23.0+). Atnaujinam pip, kad flag'as egzistuotų.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates python3 python3-pip ffmpeg \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
+ && python3 -m pip install --upgrade pip \
  && rm -rf /var/lib/apt/lists/*
 
 # Python priklausomybės (faster-whisper) SU GPU CUDA bibliotekomis, UŽFIKSUOTOS
