@@ -1,6 +1,6 @@
 # Stenograma
 
-**Status:** Stable (`v1.0.0`)
+**Status:** Stable (`v1.0.1`)
 
 **Susitikimų protokolų generatorius: garsas → transkripcija → struktūruotas protokolas.**
 

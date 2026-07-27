@@ -4,6 +4,22 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## v1.0.1 – GHCR Docker publish pataisos
+
+Pataisytas `Publish images (GHCR)` workflow, kuris krito statant GPU Docker image'us.
+
+### Fixed
+- GPU Dockerfile'iai (backend / whisper / pyannote) naudoja `nvidia/cuda:...-ubuntu22.04`
+  bazę, kurios sisteminis pip per senas `--break-system-packages` flag'ui (jis atsirado
+  pip 23.0+). Pridėtas `pip install --upgrade pip` prieš priklausomybių diegimą.
+- CPU `backend/Dockerfile.whisper` – tas pats pip atnaujinimas prevenciškai (nuoseklumui
+  ir ateities CPU image publikavimui).
+
+Įprastas CI (`ci.yml`) buvo ir lieka žalias – jis GPU image'ų nestato; ši problema
+pasireiškė tik GHCR publish workflow'e, paleidžiamame su versijos tag'u.
+
+---
+
 ## v1.0.0 – Pirmas stabilus leidimas 🎉
 
 Pirmas stabilus viešas leidimas: produkcijai orientuota architektūra AI pagalbiniam
