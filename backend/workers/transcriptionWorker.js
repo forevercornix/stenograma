@@ -17,15 +17,19 @@ function startTranscriptionWorker() {
 }
 
 if (require.main === module) {
-  if (!process.env.REDIS_URL) {
-    console.error("[stenograma] transcriptionWorker reikia REDIS_URL (BullMQ).");
-    process.exit(1);
-  }
-  const jobStore = require("../utils/jobStore");
-  jobStore.init().then(() => {
-    startTranscriptionWorker();
-    console.log("[stenograma] Transkripcijos worker'is paleistas.");
-  });
+  // Naudojam bendrą apsaugą (workers/index.js) - atsisako startuoti, jei nėra REDIS_URL
+  // arba jobStore fallback'ino į memory (BullMQ worker su memory store nematytų backend
+  // jobų). Ta pati logika kaip index.js ir protocolWorker - viena vieta.
+  const { initializeWorkerOrFail } = require("./index");
+  initializeWorkerOrFail("Transkripcijos worker")
+    .then(() => {
+      startTranscriptionWorker();
+      console.log("[stenograma] Transkripcijos worker'is paleistas.");
+    })
+    .catch((error) => {
+      console.error(`[stenograma] Transkripcijos worker nepaleistas: ${error.message}`);
+      process.exit(1);
+    });
 }
 
 module.exports = { startTranscriptionWorker };

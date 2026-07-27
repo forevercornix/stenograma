@@ -4,6 +4,8 @@ const request = require("supertest");
 process.env.LLM_PROVIDER = process.env.LLM_PROVIDER || "mock";
 const app = require("../server");
 
+test.afterEach(() => app._setReadyForTests(true));
+
 // --- /api/ready (readiness vs liveness) ---
 test("GET /api/ready - grąžina 503 kol job store/runner neinicijuoti (readiness)", async () => {
   // Aiškiai nustatom readiness=false (kiti testų failai gali būti nustatę true - readiness

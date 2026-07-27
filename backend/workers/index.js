@@ -121,32 +121,35 @@ function startWorkers() {
 jobRunner.registerProcessor("transcription", transcriptionProcessor);
 jobRunner.registerProcessor("protocol", protocolProcessor);
 
-if (require.main === module) {
+/**
+ * Bendra worker paleidimo apsauga (naudoja index.js, transcriptionWorker.js,
+ * protocolWorker.js - kad nesidubliuotų 3 skirtingos realizacijos). Inicijuoja jobStore
+ * ir MET klaidą, jei jis fallback'ino į memory. Worker'iui NĖRA prasmingo memory
+ * fallback: jis klausytų Redis eilės, bet jobų būseną laikytų SAVO proceso atmintyje,
+ * nematytų backend proceso sukurtų jobų -> "Job store įrašas nerastas". Todėl elgiamės
+ * kaip su REDIS_REQUIRED=true nepriklausomai nuo aplinkos.
+ * @throws jei nėra REDIS_URL arba jobStore backend ne "redis".
+ */
+async function initializeWorkerOrFail(workerName) {
   if (!process.env.REDIS_URL) {
-    console.error("[stenograma] Worker procesui reikia REDIS_URL (BullMQ). Be jo naudokite inline režimą (darbas HTTP procese).");
-    process.exit(1);
+    throw new Error(`${workerName} reikia REDIS_URL (BullMQ). Be jo naudokite inline režimą (darbas HTTP procese).`);
   }
-
-  // KRITIŠKA: worker'iui NĖRA prasmingo memory fallback - jis klausytų Redis eilės, bet
-  // jobų būseną laikytų SAVO proceso atmintyje, nematytų backend proceso sukurtų jobų ->
-  // "Job store įrašas nerastas". Todėl jei jobStore.init fallback'ino į memory (Redis
-  // neprieinamas, REDIS_REQUIRED ne true), worker'is TURI atsisakyti startuoti - elgiamės
-  // kaip su REDIS_REQUIRED=true nepriklausomai nuo aplinkos.
-  (async () => {
-    try {
-      await jobStore.init();
-      if (jobStore.getBackend() !== "redis") {
-        throw new Error(
-          "BullMQ worker negali veikti be Redis job store (jobStore fallback'ino į memory). " +
-          "Patikrinkite REDIS_URL ir Redis pasiekiamumą."
-        );
-      }
-      startWorkers();
-    } catch (error) {
-      console.error(`[stenograma] Worker nepaleistas: ${error.message}`);
-      process.exit(1);
-    }
-  })();
+  await jobStore.init();
+  if (jobStore.getBackend() !== "redis") {
+    throw new Error(
+      `${workerName} negali veikti be Redis job store (jobStore fallback'ino į memory). ` +
+      "Patikrinkite REDIS_URL ir Redis pasiekiamumą."
+    );
+  }
 }
 
-module.exports = { createWorker, startWorkers };
+if (require.main === module) {
+  initializeWorkerOrFail("BullMQ worker")
+    .then(() => startWorkers())
+    .catch((error) => {
+      console.error(`[stenograma] Worker nepaleistas: ${error.message}`);
+      process.exit(1);
+    });
+}
+
+module.exports = { createWorker, startWorkers, initializeWorkerOrFail };

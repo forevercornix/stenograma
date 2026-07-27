@@ -15,15 +15,17 @@ function startProtocolWorker() {
 }
 
 if (require.main === module) {
-  if (!process.env.REDIS_URL) {
-    console.error("[stenograma] protocolWorker reikia REDIS_URL (BullMQ).");
-    process.exit(1);
-  }
-  const jobStore = require("../utils/jobStore");
-  jobStore.init().then(() => {
-    startProtocolWorker();
-    console.log("[stenograma] Protokolo worker'is paleistas.");
-  });
+  // Bendra apsauga (žr. workers/index.js) - ta pati kaip transcriptionWorker.
+  const { initializeWorkerOrFail } = require("./index");
+  initializeWorkerOrFail("Protokolo worker")
+    .then(() => {
+      startProtocolWorker();
+      console.log("[stenograma] Protokolo worker'is paleistas.");
+    })
+    .catch((error) => {
+      console.error(`[stenograma] Protokolo worker nepaleistas: ${error.message}`);
+      process.exit(1);
+    });
 }
 
 module.exports = { startProtocolWorker };

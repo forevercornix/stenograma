@@ -149,54 +149,59 @@ app.get("/api/health/deep", async (req, res) => {
   });
 });
 
+// KRITIŠKA (race apsauga): infrastruktūrą (jobStore + jobRunner) inicijuojam PILNAI PRIEŠ
+// app.listen. Anksčiau listen startuodavo pirmas, o init vyko async po jo - tad ankstyva
+// HTTP užklausa galėjo laimėti race per lazy ensureInit ir sukurti memory+BullMQ
+// nesuderinimą. Init prieš listen tai UŽDARO. Funkcija iškelta (su injektuojamu listen)
+// dėl testuojamumo - regresinis testas tikrina kvietimų TVARKĄ (store->runner->listen).
+async function startServer({ port, listen, onStep } = {}) {
+  const PORT = port || process.env.PORT || 3001;
+  const doListen = listen || ((p) => new Promise((resolve) => app.listen(p, resolve)));
+  const step = (name) => { if (typeof onStep === "function") onStep(name); };
+
+  const { registerProcessors } = require("./queues/register");
+  registerProcessors();
+
+  // 1. Job store (Redis jei REDIS_URL ir connect pavyksta, kitaip in-memory fallback).
+  await jobStore.init();
+  step("jobStore.init");
+  console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
+  readiness.jobStore = true;
+
+  // 2. Job runner - režimas SUDERINTAS su jobStore backend'u (BullMQ tik kai tikrai Redis).
+  const persistentStoreAvailable = jobStore.getBackend() === "redis";
+  await jobRunner.init({ persistentStoreAvailable });
+  step("jobRunner.init");
+  console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
+  readiness.jobRunner = true;
+
+  // 3. TIK dabar - kai job sistema paruošta - pradedam priimti HTTP užklausas.
+  await doListen(PORT);
+  step("listen");
+  console.log(`Stenograma backend veikia ant porto ${PORT}`);
+  console.log(`  TRANSCRIPTION_PROVIDER = ${process.env.TRANSCRIPTION_PROVIDER || "mock"}`);
+  console.log(`  LLM_PROVIDER           = ${process.env.LLM_PROVIDER || "mock"}`);
+
+  // MINKŠTAS self-check po starto (NESTABDO serverio). Tas pats per GET /api/health/deep.
+  runSelfChecks()
+    .then((checks) => {
+      for (const c of checks) console.log(`  ${c.ok ? "✅" : "❌"} ${c.name}: ${c.detail}`);
+      if (checks.some((c) => !c.ok)) {
+        console.log('  ℹ️  Detalesnei diagnostikai: "npm run doctor" arba GET /api/health/deep');
+      }
+    })
+    .catch((e) => console.warn(`[stenograma] Self-check nepavyko: ${e.message}`));
+
+  // Periodinis pasenusių jobų valymas (Redis atveju daugiausiai no-op - EXPIRE pats valo).
+  const sweepTimer = setInterval(async () => {
+    const removed = await jobStore.sweepExpired();
+    if (removed > 0) console.log(`[stenograma] Išvalyta ${removed} pasenusių jobų (TTL=${jobStore.TTL_MS / 60000} min).`);
+  }, 5 * 60 * 1000);
+  sweepTimer.unref();
+  return { sweepTimer };
+}
+
 if (require.main === module) {
-  const PORT = process.env.PORT || 3001;
-
-  // KRITIŠKA (race apsauga): infrastruktūrą (jobStore + jobRunner) inicijuojam PILNAI
-  // PRIEŠ app.listen. Anksčiau listen startuodavo pirmas, o init vyko async po jo - tad
-  // ankstyva HTTP užklausa galėjo laimėti race: route per lazy ensureInit nustatydavo
-  // jobRunner režimą (pagal REDIS_URL) PRIEŠ mūsų sekvencinį init, ir memory+BullMQ
-  // nesuderinimas įvykdavo. Init prieš listen tai UŽDARO - serveris nepriima užklausų,
-  // kol job sistema nepilnai ir nuosekliai paruošta.
-  async function startServer() {
-    const { registerProcessors } = require("./queues/register");
-    registerProcessors();
-
-    // 1. Job store (Redis jei REDIS_URL ir connect pavyksta, kitaip in-memory fallback).
-    await jobStore.init();
-    console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
-    readiness.jobStore = true;
-
-    // 2. Job runner - režimas SUDERINTAS su jobStore backend'u (BullMQ tik kai tikrai Redis).
-    const persistentStoreAvailable = jobStore.getBackend() === "redis";
-    await jobRunner.init({ persistentStoreAvailable });
-    console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
-    readiness.jobRunner = true;
-
-    // 3. TIK dabar - kai job sistema paruošta - pradedam priimti HTTP užklausas.
-    await new Promise((resolve) => app.listen(PORT, resolve));
-    console.log(`Stenograma backend veikia ant porto ${PORT}`);
-    console.log(`  TRANSCRIPTION_PROVIDER = ${process.env.TRANSCRIPTION_PROVIDER || "mock"}`);
-    console.log(`  LLM_PROVIDER           = ${process.env.LLM_PROVIDER || "mock"}`);
-
-    // MINKŠTAS self-check po starto (NESTABDO serverio - išorinis servisas gali pakilti
-    // vėliau). Tas pats per GET /api/health/deep.
-    runSelfChecks()
-      .then((checks) => {
-        for (const c of checks) console.log(`  ${c.ok ? "✅" : "❌"} ${c.name}: ${c.detail}`);
-        if (checks.some((c) => !c.ok)) {
-          console.log('  ℹ️  Detalesnei diagnostikai: "npm run doctor" arba GET /api/health/deep');
-        }
-      })
-      .catch((e) => console.warn(`[stenograma] Self-check nepavyko: ${e.message}`));
-
-    // Periodinis pasenusių jobų valymas (Redis atveju daugiausiai no-op - EXPIRE pats valo).
-    setInterval(async () => {
-      const removed = await jobStore.sweepExpired();
-      if (removed > 0) console.log(`[stenograma] Išvalyta ${removed} pasenusių jobų (TTL=${jobStore.TTL_MS / 60000} min).`);
-    }, 5 * 60 * 1000).unref();
-  }
-
   startServer().catch((error) => {
     console.error(`[stenograma] Serverio paleidimas nepavyko: ${error.message}`);
     process.exit(1);
@@ -204,6 +209,7 @@ if (require.main === module) {
 }
 
 module.exports = app;
+app.startServer = startServer; // testams ir programiniam paleidimui
 // TESTAMS: leidžia nustatyti readiness (testų kontekste startServer nevyksta, tad
 // readiness liktų false ir job route'ai grąžintų 503). Testai kviečia app._setReadyForTests().
 app._setReadyForTests = (value = true) => {
