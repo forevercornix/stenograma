@@ -90,16 +90,18 @@ test.describe("Stenograma - pilnas audio→DOCX srautas", () => {
     await expect(page.getByText(/nepavyko|klaida|formatas/i)).toBeVisible({ timeout: 30_000 });
   });
 
-  test("backend nepasiekiamas rodo aiškų pranešimą", async ({ page }) => {
-    // Blokuojam VISĄ /api/** (ne tik /api/health), kad frontend manytų, jog backend offline.
-    // Frontend "online" statusą lemia /api/ready (readiness patikra) - jei blokuotume tik
-    // /api/health, /api/ready pavyktų ir statusas liktų "online" (testas klaidingai kristų).
-    // page.route PRIEŠ page.goto - kad blokavimas veiktų nuo pirmos užklausos.
-    await page.route("**/api/**", (route) => route.abort("connectionfailed"));
+  test("kai backend nepasiekiamas paleidimo metu, rodomas aiškus pranešimas", async ({ page }) => {
+    // Frontend "online" statusą lemia /api/ready (readiness patikra komponento paleidimo
+    // metu). Blokuojam būtent jį - tiksliau nei visą /api/**, ir aiškiai patikrina readiness
+    // priklausomybę. page.route PRIEŠ page.goto - kad blokavimas veiktų nuo pirmos užklausos.
+    // PASTABA: tikrina STARTINĘ būseną (backend offline paleidimo metu), ne ryšio praradimą
+    // jau atidarytame lange - App.jsx nedaro periodinės health patikros (žr. DEPLOYMENT).
+    await page.route("**/api/ready", (route) => route.abort("connectionfailed"));
     await page.goto("/");
 
-    // Frontend turi parodyti "Backend nepasiekiamas" juostą. Mažiau trapus regex:
-    // case-insensitive, be priklausomybės nuo apostrofo tipografijos ('as / 'as).
-    await expect(page.getByText(/backend.*nepasiekiamas/i)).toBeVisible({ timeout: 15_000 });
+    // Tikrinam raudoną klaidos pranešimą per role="alert" - semantiška ir TIKSLU (regex
+    // /backend.*nepasiekiamas/ pagautų DU elementus: statuso žymą IR šį pranešimą ->
+    // Playwright strict mode violation. role="alert" nurodo būtent klaidos juostą.).
+    await expect(page.getByRole("alert")).toContainText(/backend.*nepasiekiamas/i, { timeout: 15_000 });
   });
 });

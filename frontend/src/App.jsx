@@ -565,7 +565,7 @@ export default function Stenograma() {
 
         {backendStatus === "offline" && (
           <div className="max-w-6xl mx-auto px-6 pb-4">
-            <div className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
+            <div role="alert" className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
               <AlertCircle size={16} className="shrink-0 mt-0.5" />
               <span>
                 Backend'as ({BACKEND_URL || "santykinis /api"}) nepasiekiamas. Paleiskite jį: <code>cd backend && npm install && npm start</code>.
