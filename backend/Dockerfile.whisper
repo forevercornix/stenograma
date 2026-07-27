@@ -13,6 +13,7 @@ WORKDIR /app
 # Python 3 + pip + ffmpeg lokaliai transkripcijai.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv ffmpeg \
+ && python3 -m pip install --upgrade pip \
  && rm -rf /var/lib/apt/lists/*
 
 # Python priklausomybės (faster-whisper), UŽFIKSUOTOS VERSIJOS - deterministinis build.
@@ -38,9 +39,11 @@ CMD ["node", "server.js"]
 #   FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 #   RUN apt-get update && apt-get install -y curl python3 python3-pip ffmpeg \
 #    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-#    && apt-get install -y nodejs
+#    && apt-get install -y nodejs \
+#    && python3 -m pip install --upgrade pip   # Ubuntu 22.04 pip per senas --break-system-packages
 #   RUN pip3 install --break-system-packages nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*
 #   ... (likusi dalis ta pati, + FASTER_WHISPER_DEVICE=cuda per env)
+#   (Realus GPU variantas jau paruoštas: backend/Dockerfile.whisper.gpu)
 #
 # Paleidimas su GPU: `docker run --gpus all ...` arba compose deploy.resources
 # (žr. docker-compose.gpu.yml). LD_LIBRARY_PATH nustato pats providerio kodas.
