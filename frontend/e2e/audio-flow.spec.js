@@ -101,7 +101,7 @@ test.describe("Stenograma - pilnas audio→DOCX srautas", () => {
 
     // Tikrinam raudoną klaidos pranešimą per role="alert" - semantiška ir TIKSLU (regex
     // /backend.*nepasiekiamas/ pagautų DU elementus: statuso žymą IR šį pranešimą ->
-    // Playwright strict mode violation. role="alert" nurodo būtent klaidos juostą.).
+    // Playwright strict mode violation. role="alert" nurodo būtent klaidos juostą).
     await expect(page.getByRole("alert")).toContainText(/backend.*nepasiekiamas/i, { timeout: 15_000 });
   });
 });
