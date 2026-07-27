@@ -14,21 +14,26 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 WORKDIR /app
 
-# Node 20 + Python + ffmpeg. nvidia/cuda image neturi nei Node, nei Python.
-# SVARBU: Ubuntu 22.04 sisteminis pip per senas --break-system-packages flag'ui
-# (PEP 668 flag'as atsirado pip 23.0+). Atnaujinam pip, kad flag'as egzistuotų.
+# Node 20 + Python 3.11 + ffmpeg. nvidia/cuda image neturi nei Node, nei Python.
+# SVARBU: Ubuntu 22.04 default python yra 3.10, BET lock failas reikalauja 3.11+
+# (av==18.0.0 ir kt.). Diegiam python3.11 per deadsnakes PPA. Atnaujinam pip, kad
+# --break-system-packages flag'as egzistuotų (jis atsirado pip 23.0+).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates python3 python3-pip ffmpeg \
+      curl ca-certificates software-properties-common ffmpeg \
+ && add-apt-repository -y ppa:deadsnakes/ppa \
+ && apt-get update && apt-get install -y --no-install-recommends \
+      python3.11 python3.11-venv python3.11-distutils \
+ && curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3.11 - \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
- && python3 -m pip install --upgrade pip \
+ && python3.11 -m pip install --upgrade pip \
  && rm -rf /var/lib/apt/lists/*
 
 # Python priklausomybės (faster-whisper) SU GPU CUDA bibliotekomis, UŽFIKSUOTOS
 # VERSIJOS (requirements-gpu.lock.txt) - deterministinis build, nesikeičia laikui bėgant.
 COPY scripts/requirements-gpu.lock.txt ./scripts/requirements-gpu.lock.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install --break-system-packages -r scripts/requirements-gpu.lock.txt
+    python3.11 -m pip install --break-system-packages -r scripts/requirements-gpu.lock.txt
 
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
@@ -37,7 +42,7 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY . .
 
 ENV NODE_ENV=production
-ENV FASTER_WHISPER_PYTHON_BIN=python3
+ENV FASTER_WHISPER_PYTHON_BIN=python3.11
 ENV FASTER_WHISPER_DEVICE=cuda
 ENV FASTER_WHISPER_COMPUTE_TYPE=float16
 # LD_LIBRARY_PATH (nvidia-cublas/cudnn keliui) automatiškai nustato pats

@@ -14,18 +14,25 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 WORKDIR /app
 
+# Ubuntu 22.04 default python yra 3.10, BET lock failas reikalauja 3.11+. Diegiam
+# python3.11 per deadsnakes ir padarom jį numatytu `python3` (CMD naudoja python3).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-pip ffmpeg \
- && python3 -m pip install --upgrade pip \
+      curl ca-certificates software-properties-common ffmpeg \
+ && add-apt-repository -y ppa:deadsnakes/ppa \
+ && apt-get update && apt-get install -y --no-install-recommends \
+      python3.11 python3.11-venv python3.11-distutils \
+ && curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3.11 - \
+ && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+ && python3.11 -m pip install --upgrade pip \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-gpu.lock.txt ./
 # GPU torch (CUDA 12.4) - įdiegiamas PRIEŠ pyannote.audio, kad pastarasis pasiimtų
 # jau esantį GPU torch. Versijos užfiksuotos deterministiniam build'ui.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install --break-system-packages \
+    python3.11 -m pip install --break-system-packages \
       torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
- && pip3 install --no-cache-dir --break-system-packages -r requirements-gpu.lock.txt
+ && python3.11 -m pip install --no-cache-dir --break-system-packages -r requirements-gpu.lock.txt
 
 COPY server.py ./
 
