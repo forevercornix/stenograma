@@ -16,12 +16,21 @@ WORKDIR /app
 
 # Ubuntu 22.04 default python yra 3.10, BET lock failas reikalauja 3.11+. Diegiam
 # python3.11 per deadsnakes ir padarom jį numatytu `python3` (CMD naudoja python3).
+#
+# PASTABA (svarbu): `add-apt-repository` traukia GPG raktą iš keyserver.ubuntu.com
+# per gpg/dirmngr, kuris NETURI numatytojo timeout - jei keyserver'is CI runner'yje
+# lėtai atsako, šis žingsnis gali kaboti VALANDŲ VALANDAS be jokios klaidos. Todėl
+# gaubiame `timeout` + retry ciklu: po 3 nesėkmingų bandymų build greitai failina.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates software-properties-common ffmpeg \
- && add-apt-repository -y ppa:deadsnakes/ppa \
+      curl ca-certificates software-properties-common gnupg ffmpeg \
+ && ( for i in 1 2 3; do \
+        timeout 60 add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "add-apt-repository bandymas $i nepavyko, kartojama..."; sleep 5; }; \
+        [ "$i" = 3 ] && { echo "add-apt-repository nepavyko po 3 bandymų"; exit 1; }; \
+      done ) \
  && apt-get update && apt-get install -y --no-install-recommends \
       python3.11 python3.11-venv python3.11-distutils \
- && curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3.11 - \
+ && curl -fsSL --connect-timeout 10 --max-time 60 https://bootstrap.pypa.io/get-pip.py | python3.11 - \
  && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
  && python3.11 -m pip install --upgrade pip \
  && rm -rf /var/lib/apt/lists/*
