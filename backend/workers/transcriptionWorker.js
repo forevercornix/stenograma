@@ -17,13 +17,12 @@ function startTranscriptionWorker() {
 }
 
 if (require.main === module) {
-  // Naudojam bendrą apsaugą (workers/index.js) - atsisako startuoti, jei nėra REDIS_URL
-  // arba jobStore fallback'ino į memory (BullMQ worker su memory store nematytų backend
-  // jobų). Ta pati logika kaip index.js ir protocolWorker - viena vieta.
-  const { initializeWorkerOrFail } = require("./index");
-  initializeWorkerOrFail("Transkripcijos worker")
+  // runWorkerProcess (workers/index.js): Redis job store patikra, heartbeat SU
+  // "transcription" tipu (kad /api/ready matytų šį worker'į gyvą), graceful
+  // shutdown (SIGTERM/SIGINT laukia vykdomo darbo prieš uždarant).
+  const { runWorkerProcess } = require("./index");
+  runWorkerProcess("Transkripcijos worker", startTranscriptionWorker, "transcription")
     .then(() => {
-      startTranscriptionWorker();
       console.log("[stenograma] Transkripcijos worker'is paleistas.");
     })
     .catch((error) => {

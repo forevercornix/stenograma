@@ -302,7 +302,19 @@ GitHub standartinis runner'is GPU neturi, o `test_real_gpu.py` be `HUGGINGFACE_T
 praleidžiamas. Tikslus atskyrimas:
 
 **✅ CI verified (automatiškai, kiekvienam push):**
-- backend: 128 `node:test` testai (mock tiekėjai; įsk. jobStore, jobRunner/BullMQ su fake Redis, fileStorage)
+- backend: `node:test` testai (mock tiekėjai; įsk. jobStore, jobRunner/BullMQ unit
+  testai su fake Redis, fileStorage)
+- **TIKRAS Redis/BullMQ restart + stalled recovery** (`tests/queueRecovery.integration.test.js`)
+  **ir worker heartbeat → `/api/ready` grandinė** (`tests/heartbeatReadiness.integration.test.js`)
+  - CI paleidžia tikrą `redis:7-alpine` servisą ir šiuos DU failus vykdo ATSKIRU
+  žingsniu (`npm run test:redis`) su `REDIS_URL` - TIK jiems, ne visam `npm test`
+  (route testai kitame žingsnyje lieka be `REDIS_URL`, kad neprarastų inline
+  vykdymo prielaidos). Testai VYKDOMI (ne `skip`) kiekvienam push/PR - pirmasis su
+  griežtu assertion (reikalauja TIKSLIAI sėkmingo `completed` statuso konkrečiam
+  BullMQ jobui pagal ID, ne bet kokio galutinio statuso ar bendrų eilės
+  skaitiklių), antrasis patvirtina, kad worker'io per TIKRĄ Redis rašytas
+  heartbeat raktas realiai matomas `/api/ready` route'e, o jam dingus - readiness
+  teisingai krenta į 503 (žr. `backend/README.md`)
 - frontend: 24 Vitest testai + `vite build`
 - pyannote: `/health` diagnostika + `/diarize` kontraktas su mock pipeline (9 testai)
 - whisper-server: `/health` + `/transcribe` kontraktas su mock modeliu (8 testai)
@@ -320,12 +332,13 @@ praleidžiamas. Tikslus atskyrimas:
 - CUDA image build (`Dockerfile.whisper.gpu`, `pyannote-server/Dockerfile.gpu`, `whisper-server/Dockerfile.gpu`)
 - reali GPU transkripcija (`device=cuda`) embedded IR server profiliuose
 - realaus pyannote modelio įkėlimas ir diarizacija
-- pilnas GPU end-to-end per `docker compose ... gpu.yml`
+- pilnas GPU end-to-end per `docker compose ... gpu.yml` (2026-07: `docker-compose.gpu.yml`
+  papildytas trūkstamais `transcription-worker`/`protocol-worker` servisais -
+  anksčiau backend nustatydavo `REDIS_URL` be jokio serviso, kuris apdorotų BullMQ
+  eilę, tad async jobai liktų amžinai "queued"; dabar ištaisyta (du atskiri,
+  nepriklausomai skaluojami worker servisai, ne vienas bendras), bet pats GPU
+  srautas su realiu GPU vis tiek nebuvo perleistas per šią konkrečią konfigūraciją)
 - Docker GPU passthrough patikra realioje GPU mašinoje
-- **BullMQ restart recovery su tikru Redis** (`tests/queueRecovery.integration.test.js`
-  praleidžiamas be `REDIS_URL`; logika testuota su fake Redis, bet realų „sustabdyk
-  backend, paleisk, patikrink ar jobas tęsiamas" reikia paleisti su tikru Redis:
-  `REDIS_URL=redis://localhost:6379 node --test tests/queueRecovery.integration.test.js`)
 - **E2E su tikra naršykle paleidžiamas per CI** (Playwright + Chromium, `e2e` job'as kiekvienam push/PR); lokalioje kūrimo aplinkoje Chromium atsisiuntimas buvo blokuotas, todėl ten testas tikrinamas tik struktūriškai (`playwright test --list`)
 
 ### Architektūros trade-off'ai (sąmoningi MVP apribojimai)
@@ -341,9 +354,13 @@ platesnį diegimą:
   procesas. Atskiros eilės (`queues/transcriptionQueue.js`, `protocolQueue.js`) ir
   worker'iai (`workers/transcriptionWorker.js`, `protocolWorker.js`) - galima skalauti
   nepriklausomai (transkripcija imlesnė GPU nei LLM). Tai duoda: restart recovery,
-  retry+backoff, stalled job recovery, dead-letter (failed po visų bandymų), kelis
-  worker'ius (atominis job reservation), bendrą audio storage (worker pasiekia failą
-  pagal raktą, ne lokalų /tmp; failas trinamas po galutinio statuso, ne tarp retry).
+  retry+backoff, stalled job recovery, kelis worker'ius (atominis job reservation),
+  bendrą audio storage (worker pasiekia failą pagal raktą, ne lokalų /tmp; failas
+  trinamas po galutinio statuso, ne tarp retry). **Terminijos tikslumas:** po visų
+  bandymų (`attempts`) išnaudojimo jobas lieka pažymėtas `failed` BullMQ eilėje ir
+  laikomas ilgiau diagnostikai (`removeOnFail.age`) - tai NĖRA atskira "dead-letter
+  queue" (izoliuota eilė), tik `failed` būsenos retencija. Detaliau -
+  [`backend/README.md`](backend/README.md#redisbullmq-architektūra-su-redis_url).
   Kas dar liko 2 etapui: PostgreSQL rezultatams, MinIO/S3 vietoj Docker volume.
 - **Job progresas nerodomas ilgiems failams (žinomas apribojimas).** Job'o būsena
   yra `queued`/`processing`/`completed`/`failed`, bet **be tarpinio progreso procento** -
@@ -476,7 +493,7 @@ generation pipeline, Docker deployment, health/readiness checks). Pilnas sąraš
 - [ ] Realios įrašo TRUKMĖS (ne tik failo dydžio) tikrinimas prieš apdorojimą (`ffprobe` ar panaši biblioteka) - žr. paaiškinimą `backend/README.md` "Faster-Whisper" skyriuje.
 - [x] ~~Playwright/Cypress E2E testas (naršyklė → audio upload → transcribe → generate → edit → export)~~ → **Milestone 1**: Playwright E2E (`frontend/e2e/`) dengia įklijuoto teksto IR pilno audio upload → polling → protokolas → DOCX srautus + klaidų kelius. Vykdomi CI'e su Chromium. Liko: redagavimo srautas, diarizacijos pasirinkimas naršyklėje.
 - [ ] Audit log perkėlimas iš atminties į SQLite/Postgres (su retention politika, PII redagavimu, paieška, eksportu). *(Milestone 2)*
-- [x] ~~Tikra job queue vietoj in-memory saugyklos~~ → **Milestone 1**: BullMQ eilė su atskirais worker procesais (`workers/transcriptionWorker.js`, `protocolWorker.js`), retry+backoff, dead-letter, stalled recovery, atominis job reservation; Redis-backed persistentus state su fallback į in-memory. Liko (Milestone 2): PostgreSQL ilgalaikiams rezultatams.
+- [x] ~~Tikra job queue vietoj in-memory saugyklos~~ → **Milestone 1**: BullMQ eilė su atskirais worker procesais (`workers/transcriptionWorker.js`, `protocolWorker.js`), retry+backoff, `failed` būsenos retencija po visų bandymų (ne atskira dead-letter eilė - žr. terminijos pastabą aukščiau), stalled recovery, atominis job reservation; Redis-backed persistentus state su fallback į in-memory. Liko (Milestone 2): PostgreSQL ilgalaikiams rezultatams.
 - [ ] Tikras audio streaming tiekėjui (šiuo metu visas failas skaitomas į RAM prieš siunčiant - žr. backend README).
 - [ ] Antivirusinis audio failų skenavimas (šiuo metu tik magic-bytes signature patikra, ne pilnas turinio skenavimas).
 - [ ] Realių `Azure`/`Google`/`GPT`/`Gemini`/`Whisper`/`Deepgram`/`pyannote-cloud`/`AssemblyAI` tiekėjų testavimas su mokamais raktais.
@@ -534,12 +551,18 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 make docker-gpu
 ```
 
-Tai prideda/keičia tris dalykus lyginant su baziniu compose: (1) backend statomas
+Tai prideda/keičia lyginant su baziniu compose: (1) backend statomas
 iš `backend/Dockerfile.whisper.gpu` (CUDA bazinis image + Node + Python + GPU CUDA
-bibliotekos, tad `FASTER_WHISPER_DEVICE=cuda` REALIAI veikia konteineryje); (2)
-pridedamas `pyannote` diarizacijos servisas iš `pyannote-server/Dockerfile.gpu`
-(CUDA image + GPU torch - `torch.cuda.is_available()` bus `True`); (3) GPU
-rezervavimas abiem servisams per `deploy.resources`.
+bibliotekos, tad `FASTER_WHISPER_DEVICE=cuda` REALIAI veikia konteineryje) -
+backend'as PATS transkribuoja/diarizuoja SINCHRONINIAM keliui (`/api/transcribe`,
+`/api/generate`), tad jam irgi reikia GPU/pyannote prieigos; (2) pridedamas
+`pyannote` diarizacijos servisas iš `pyannote-server/Dockerfile.gpu` (CUDA image +
+GPU torch - `torch.cuda.is_available()` bus `True`); (3) pridedamas `redis`
+(persistentus job store) IR DU ATSKIRI worker servisai - `transcription-worker`
+(GPU) ir `protocol-worker` (be GPU, tik LLM kvietimas) - kurie apdoroja BullMQ
+eilės jobus ASINCHRONINIAM keliui (`/api/transcribe-jobs`, `/api/jobs`); (4) GPU
+rezervavimas `backend`, `transcription-worker` ir `pyannote` servisams per
+`deploy.resources` (`protocol-worker` GPU negauna - nereikia).
 
 **Reikia:** NVIDIA GPU + draiveriai + `nvidia-container-toolkit` host mašinoje, ir
 `HUGGINGFACE_TOKEN` (pyannote modelis „gated"). Yra ir CPU variantai
@@ -578,9 +601,19 @@ git tag v1.0.0 && git push --tags   # paleidžia .github/workflows/publish-image
 ```
 
 Prieš pirmą kartą: repo Settings > Actions > Workflow permissions = "Read and write".
-Publikuojami: backend, whisper, pyannote (GPU) + frontend. Po to vartotojai naudoja
-`export REGISTRY=ghcr.io/jusu-vardas && make quickstart-gpu` ir traukia paruoštus
-image'us vietoj 15-30 min lokalaus build'o.
+Publikuojami PENKI image'ai: `backend` (GPU), `backend-base` (lengvas, be Python/
+CUDA - naudoja `protocol-worker`), `whisper` (GPU), `pyannote` (GPU), `frontend`.
+Po to vartotojai naudoja `export REGISTRY=ghcr.io/jusu-vardas && make quickstart-gpu`
+ir traukia paruoštus image'us vietoj 15-30 min lokalaus build'o.
+
+⚠️ **Release pilnumo rizika:** matricos `fail-fast: false` reiškia, kad DALIS
+image'ų gali sėkmingai publikuotis, o kitas (pvz. `backend-base`) - ne. Tokiu
+atveju `git tag`/release egzistuotų, bet `protocol-worker` su `REGISTRY` nustatytu
+kintamuoju bandytų traukti neegzistuojantį image'ą (404) - vietoj to reikėtų
+priverstinio lokalaus build'o (`BUILD=1 make quickstart-gpu`). **Prieš pasitikint
+publikuotu release'u, patikrinkite, kad VISI 5 matricos job'ai (GitHub Actions >
+"Publish images (GHCR)" workflow paleidimas) yra žali** - šiuo metu tam nėra
+atskiro automatinio manifest/completeness patikrinimo job'o.
 
 ### Build'o spartinimas (jau įdiegta)
 
@@ -707,9 +740,12 @@ jūsų mašinoje; į išorę keliauja tik galutinės transkripcijos tekstas prot
 **3. Docker (viena mašina, visas stackas):**
 ```
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
-   ├─ backend   (Node + Python + faster-whisper, GPU)
-   ├─ pyannote  (FastAPI + pyannote.audio, GPU)
-   └─ frontend  (nginx)
+   ├─ backend               (Node + Python + faster-whisper, GPU - sinchroniniai endpoint'ai)
+   ├─ transcription-worker  (Node + Python + faster-whisper, GPU - async eilė)
+   ├─ protocol-worker       (Node, LLM API kvietimas - async eilė, be GPU)
+   ├─ pyannote              (FastAPI + pyannote.audio, GPU)
+   ├─ redis                 (BullMQ eilė + job store)
+   └─ frontend              (nginx)
 ```
 `make docker-gpu`. Viskas viename `docker compose`, modelių cache bendrame volume.
 
@@ -745,32 +781,86 @@ flowchart TB
     subgraph host["Host mašina (NVIDIA GPU + nvidia-container-toolkit)"]
         subgraph compose["docker compose (-f docker-compose.yml -f docker-compose.gpu.yml)"]
             FE["frontend<br/>nginx :5173"]
-            BE["backend<br/>Node + Python :3001<br/>faster-whisper (GPU)"]
+            BE["backend<br/>Node + Python :3001 (GPU)<br/>SINCHRONINIAI /api/transcribe,<br/>/api/generate (frontend'as naudoja ŠĮ) +<br/>ASINCHRONINIAI /api/jobs (API klientams,<br/>frontend'as NENAUDOJA - žr. pastabą žemiau)"]
+            TWRK["transcription-worker<br/>Node + Python (GPU)<br/>faster-whisper embedded<br/>(ATSKIRAS procesas/konteineris)"]
+            PWRK["protocol-worker<br/>Node (be GPU)<br/>LLM/protokolo generavimas<br/>(ATSKIRAS procesas/konteineris)"]
+            RD[("redis<br/>BullMQ eilės + job store<br/>AOF persistencija")]
             PY["pyannote<br/>FastAPI :8001<br/>pyannote.audio (GPU)"]
             VOL[("stenograma-models<br/>volume: /models<br/>(MODEL_CACHE_DIR)")]
+            STOR[("stenograma-storage<br/>volume: /storage<br/>(bendras audio backend↔transcription-worker)")]
         end
         GPU["NVIDIA GPU"]
     end
     Browser([Naršyklė]) -->|"HTTP :5173"| FE
     FE -->|"proxy /api → :3001"| BE
-    BE -->|"HTTP :8001 /diarize<br/>(laukia service_healthy)"| PY
-    BE -.->|"HTTPS: tik protokolo tekstas"| Claude["Claude API<br/>(išorinis)"]
+    BE -->|"SINCHRONINIS: HTTP :8001 /diarize<br/>(diarize=true)"| PY
+    BE -->|"ASINCHRONINIS: queue.add() (202 iškart)"| RD
+    RD -->|"transcription-worker paima<br/>transkripcijos jobą"| TWRK
+    RD -->|"protocol-worker paima<br/>protokolo jobą"| PWRK
+    TWRK -->|"HTTP :8001 /diarize<br/>(laukia service_healthy)"| PY
+    PWRK -.->|"HTTPS: tik protokolo tekstas"| Claude["Claude API<br/>(išorinis)"]
+    BE -.->|"HTTPS (sinchroninis /api/generate)"| Claude
     BE --> GPU
+    TWRK --> GPU
     PY --> GPU
     BE --- VOL
+    TWRK --- VOL
     PY --- VOL
+    BE --- STOR
+    TWRK --- STOR
 
     style Browser fill:#e1f5ff
     style Claude fill:#ffe1e1
     style GPU fill:#e1ffe1
     style VOL fill:#f0f0f0
+    style STOR fill:#f0f0f0
+    style RD fill:#ffe8cc
 ```
 
-Svarbu srautui: backend laukia `pyannote` `service_healthy` (modelis realiai
-įkeltas) prieš startuodamas; audio ir transkripcija lieka konteineriuose, į išorę
-(Claude API) keliauja **tik** galutinės transkripcijos tekstas protokolui, ne garsas.
-Modelių cache bendrame volume — RunPod'e nukreipkite į persistent volume per
-`MODEL_CACHE_DIR`, kad keli GB nesiųstų kaskart.
+Svarbu srautui - DVI ATSKIROS DUOMENŲ TAKAI, priklausomai nuo naudojamo endpoint'o:
+
+- **Sinchroninis** (`POST /api/transcribe`, `POST /api/generate`): backend'as PATS
+  atlieka transkripciją/diarizaciją/LLM kvietimą TIESIOGIAI savo procese (todėl
+  jam reikia GPU ir pyannote prieigos). Klientas laiko atvirą HTTP ryšį, kol darbas
+  baigsis - tinka trumpiems įrašams, bet ilgesniems gali užtrukti ar timeout'inti.
+- **Asinchroninis** (`POST /api/transcribe-jobs`, `POST /api/jobs`): backend'as TIK
+  priima užklausą, įrašo audio į bendrą storage (transkripcijai) ir įdeda jobą į
+  BullMQ eilę (Redis), grąžina 202 IŠ KARTO. Realų darbą atlieka ATSKIRI
+  `transcription-worker`/`protocol-worker` konteineriai - tai reiškia, kad ŠIUO
+  KELIU backend'o restartas nenutraukia vykdomo darbo (žr. `backend/README.md`
+  "Ką TIKRAI reiškia 'restartas nenutraukia darbo'" dėl tikslaus scope - tai
+  negalioja sinchroniniam keliui).
+
+**⚠️ TIKSLINIMAS (anksčiau čia buvo klaidingas teiginys):** frontend'as PAGAL
+NUTYLĖJIMĄ naudoja `/api/transcribe-jobs` TIK transkripcijai
+(`handleAutoTranscribe`) - tai realiai patikrinta ir dokumentuota (žr.
+`backend/README.md` istoriją: RunPod HTTP proxy kietas 100s limitas privertė tai
+padaryti privalomu). **BET protokolo generavimui frontend'as VISADA naudoja
+SINCHRONINĮ `/api/generate`** (`App.jsx` `handleGenerate` → `generateProtocol()`),
+**NIEKADA** `/api/jobs` - patikrinta: jokios nuorodos į `/api/jobs` fronte
+nėra. Tai reiškia, kad tas pats RunPod 100s proxy limitas, kuris privertė
+padaryti transkripciją asinchronine, **TEORIŠKAI GALI PALIESTI IR PROTOKOLO
+GENERAVIMĄ** - itin ilgo (pvz. 4 val.) susitikimo transkripcijos siuntimas
+Claude API per `/api/generate` gali užtrukti ilgiau nei 100s per RunPod proxy,
+nors backend'as (ir dabar - `protocol-worker`) turi VISIŠKAI VEIKIANČIĄ
+asinchroninę alternatyvą (`/api/jobs`), kurios frontend'as tiesiog nenaudoja.
+**Tai NĖRA šios sesijos sukurta problema** - tai pre-egzistuojanti architektūrinė
+spraga, kurią ši Docker/CI peržiūra atskleidė netiesiogiai (tikrinant, kaip
+realiai naudojamas `protocol-worker`). Rekomenduojamas taisymas: pridėti
+`transcribeAudioJob`-analogišką `generateProtocolJob()` funkciją
+`stenogramaApi.js`, naudojančią `/api/jobs` + polling, ir perjungti
+`handleGenerate` ją naudoti - simetriškai su `handleAutoTranscribe`.
+
+`transcription-worker` ir `protocol-worker` yra ATSKIRI compose servisai (ne
+vienas bendras `worker`), tad skaluojami NEPRIKLAUSOMAI
+(`--scale transcription-worker=N`, `--scale protocol-worker=N`); GPU rezervuotas
+TIK `backend`, `transcription-worker` ir `pyannote` - `protocol-worker` (grynas
+LLM API kvietimas) GPU negauna. `transcription-worker` laukia `pyannote`
+`service_healthy` (modelis realiai įkeltas) prieš startuodamas; audio ir
+transkripcija lieka konteineriuose, į išorę (Claude API) keliauja **tik**
+galutinės transkripcijos tekstas protokolui, ne garsas. Modelių cache bendrame
+volume — RunPod'e nukreipkite į persistent volume per `MODEL_CACHE_DIR`, kad
+keli GB nesiųstų kaskart.
 
 ---
 

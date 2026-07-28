@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { startHeartbeat, isWorkerAlive, HEARTBEAT_KEY, HEARTBEAT_TTL_SEC } = require("../utils/workerHeartbeat");
+const { startHeartbeat, isWorkerAlive, getWorkerStatus, heartbeatKey, HEARTBEAT_KEY, HEARTBEAT_TTL_SEC } = require("../utils/workerHeartbeat");
 
 // Heartbeat logika unit-testuota su mock Redis. TIKRAS Redis srautas (worker rašo, ready
 // skaito per tinklą) NETESTUOTAS - sandbox neturi Redis.
@@ -56,4 +56,51 @@ test("stop() sustabdo heartbeat rašymą", async () => {
   // po stop - naujų rašymų neturi būti (interval sustabdytas). Palaukiam trumpai.
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(conn.store.has(HEARTBEAT_KEY), false, "po stop() naujų heartbeat rašymų nėra");
+});
+
+// --- Per-tipo raktai (transcription-worker/protocol-worker atskiri procesai) ---
+
+test("heartbeatKey grąžina skirtingus raktus skirtingiems worker tipams", () => {
+  assert.equal(heartbeatKey("transcription"), "stenograma:worker:transcription:lastSeen");
+  assert.equal(heartbeatKey("protocol"), "stenograma:worker:protocol:lastSeen");
+  assert.notEqual(heartbeatKey("transcription"), heartbeatKey("protocol"));
+});
+
+test("startHeartbeat su workerType rašo TIK to tipo raktą, ne legacy bendrą", async () => {
+  const conn = mockConnection();
+  const stop = startHeartbeat(conn, "transcription");
+  await new Promise((r) => setImmediate(r));
+  assert.ok(conn.store.has(heartbeatKey("transcription")), "transcription raktas turi būti parašytas");
+  assert.equal(conn.store.has(HEARTBEAT_KEY), false, "legacy bendras raktas NETURI būti rašomas, kai nurodytas konkretus tipas");
+  assert.equal(conn.store.has(heartbeatKey("protocol")), false, "kito tipo raktas neturi būti paliestas");
+  stop();
+});
+
+test("startHeartbeat su masyvu rašo ABU tipų raktus (workers/index.js kombinuotas režimas)", async () => {
+  const conn = mockConnection();
+  const stop = startHeartbeat(conn, ["transcription", "protocol"]);
+  await new Promise((r) => setImmediate(r));
+  assert.ok(conn.store.has(heartbeatKey("transcription")));
+  assert.ok(conn.store.has(heartbeatKey("protocol")));
+  stop();
+});
+
+test("isWorkerAlive su workerType tikrina TIK to tipo raktą", async () => {
+  const conn = mockConnection();
+  await conn.set(heartbeatKey("transcription"), String(Date.now()), "EX", HEARTBEAT_TTL_SEC);
+  assert.equal(await isWorkerAlive(conn, "transcription"), true);
+  assert.equal(await isWorkerAlive(conn, "protocol"), false, "protocol worker'io raktas neegzistuoja - turi būti false");
+});
+
+test("getWorkerStatus grąžina abiejų tipų būseną atskirai", async () => {
+  const conn = mockConnection();
+  await conn.set(heartbeatKey("transcription"), String(Date.now()), "EX", HEARTBEAT_TTL_SEC);
+  // protocol raktas SĄMONINGAI neparašytas - imituoja mirusį protocol-worker'į.
+  const status = await getWorkerStatus(conn);
+  assert.deepEqual(status, { transcription: true, protocol: false });
+});
+
+test("heartbeatKey meta klaidą su nežinomu worker tipu (fail-fast rašybos klaidai)", () => {
+  assert.throws(() => heartbeatKey("transcripton"), /Nežinomas worker tipas/);
+  assert.throws(() => heartbeatKey(""), /Nežinomas worker tipas/);
 });

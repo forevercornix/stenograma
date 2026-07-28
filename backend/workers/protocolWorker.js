@@ -15,11 +15,11 @@ function startProtocolWorker() {
 }
 
 if (require.main === module) {
-  // Bendra apsauga (žr. workers/index.js) - ta pati kaip transcriptionWorker.
-  const { initializeWorkerOrFail } = require("./index");
-  initializeWorkerOrFail("Protokolo worker")
+  // runWorkerProcess (workers/index.js): Redis job store patikra, heartbeat SU
+  // "protocol" tipu, graceful shutdown - žr. transcriptionWorker.js analogišką pastabą.
+  const { runWorkerProcess } = require("./index");
+  runWorkerProcess("Protokolo worker", startProtocolWorker, "protocol")
     .then(() => {
-      startProtocolWorker();
       console.log("[stenograma] Protokolo worker'is paleistas.");
     })
     .catch((error) => {

@@ -4,25 +4,71 @@
 # Naudojimas:
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.server.yml up -d --build
 #
-# SKIRTUMAS nuo docker-compose.gpu.yml: ten backend naudoja faster-whisper-EMBEDDED
-# (Node spawn'ina Python procesą kiekvienai užklausai, modelis kraunamas iš naujo).
-# ČIA backend naudoja faster-whisper-SERVER - kalbasi su persistentu whisper-server
-# per HTTP, modelis kraunamas VIENĄ kartą. Tinka daug vienalaikių vartotojų / bendram
-# serveriui. Simetriška pyannote architektūrai.
+# SKIRTUMAS nuo docker-compose.gpu.yml: ten backend/transcription-worker naudoja
+# faster-whisper-EMBEDDED (Node spawn'ina Python procesą kiekvienai užklausai,
+# modelis kraunamas iš naujo, reikia lokalaus GPU access). ČIA backend ir
+# transcription-worker naudoja faster-whisper-SERVER - kalbasi su persistentu
+# `whisper` servisu per HTTP, modelis kraunamas VIENĄ kartą TAME whisper servise.
+# Tinka daug vienalaikių vartotojų / bendram serveriui. Simetriška pyannote
+# architektūrai.
 #
 # ⚠️ GPU keliai NEBUVO build-testuoti be GPU aplinkos.
+#
+# ⚠️ KRITINĖ PASTABA dėl `!reset`/`!override` žymų šiame faile (naudojami
+# žemiau prie `backend` ir `transcription-worker`, kad pašalintų/pakeistų iš
+# `docker-compose.gpu.yml` paveldėtas `deploy.resources.reservations.devices`
+# (GPU) ir `volumes` reikšmes): įprastas Compose sujungimas sąrašo tipo laukus
+# (įsk. `devices`, `volumes`) PRIDEDA prie bazinio failo, NE pakeičia - paprastas
+# `devices: []` ar tiesiog naujas `volumes:` sąrašas NEPAŠALINTŲ bazinio failo
+# reikšmių (žr. https://docs.docker.com/reference/compose-file/merge/, skyrių
+# apie sekas). `!reset` (pašalina/tuština) ir `!override` (pilnai pakeičia)
+# yra oficialus mechanizmas tam, bet turi žinomų GitHub issues dėl nepatikimo
+# elgesio BŪTENT jungiant 3+ compose failus (kaip čia) - žr. docker/compose#11816,
+# docker/compose#10697.
+#
+# CI DABAR AUTOMATIŠKAI TIKRINA šio failo merge rezultatą (žr.
+# `.github/workflows/ci.yml` job'ą `compose-config-validate` - jis paleidžia
+# `docker compose ... config` GitHub Actions runner'yje, kur Docker realiai yra,
+# ir patikrina, kad GPU/volume paskirstymas po merge tikrai atitinka tai, kas
+# čia užrašyta). Lokaliai prieš naudojant šį profilį rekomenduojama:
+#   make preflight-gpu
+# (patikrina Docker Compose versiją - >= 2.24 reikalaujama DĖL KITOS priežasties,
+# `env_file: [{path, required}]` sintaksės, žr. scripts/preflight-gpu.sh; TA PATI
+# minimali versija TIKĖTINA apima ir `!reset`/`!override` palaikymą, bet tai
+# NĖRA ten atskirai/tiksliai patikrinta - jei šis profilis nepasileidžia su
+# neaiškia YAML klaida, patikrinkite rankiniu būdu:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#     -f docker-compose.server.yml config
+# ir peržiūrėkite, ar `backend`/`transcription-worker` sekcijose `deploy` ir
+# `volumes` tikrai atspindi TIK šio failo reikšmes (be GPU, be /models). Jei
+# ne - saugiausia alternatyva: priimti, kad GPU rezervacija/nenaudojamas
+# /models mount'as šiame profilyje yra nekenksmingi (tik nereikalingi), o ne
+# pasikliauti šiuo merge trikais.
 
 services:
   backend:
     environment:
-      # Perjungiam iš embedded į server profilį - backend kalbasi su whisper-server.
+      # Perjungiam iš embedded į server profilį - backend kalbasi su whisper-server
+      # per HTTP, NE spawn'ina lokalų Python procesą (žr. docker-compose.gpu.yml
+      # backend pastabą dėl SINCHRONINIŲ /api/transcribe, /api/generate - jie ir
+      # čia lieka veikiantys, tiesiog transkripcija dabar vyksta per HTTP, ne
+      # lokalų subprocess).
       TRANSCRIPTION_PROVIDER: faster-whisper-server
       FASTER_WHISPER_URL: http://whisper:8000/transcribe
-      # BullMQ eilė (atskiri worker'iai apačioje). Backend TIK įdeda į eilę.
+      # BullMQ eilė (atskiri worker'iai apačioje) ASINCHRONINIAM keliui. Backend
+      # sinchroniniam keliui (žr. aukščiau) eilės nenaudoja iš viso.
       REDIS_URL: redis://redis:6379
-      # Bendras storage, kad worker'is pasiektų audio (tas pats volume).
+      REDIS_REQUIRED: "true"
+      # Bendras storage, kad worker'iai pasiektų audio (tas pats volume).
       STORAGE_DIR: /storage
-    volumes:
+    # !override (NE paprastas sąrašas) - PILNAI pakeičia volumes iš
+    # docker-compose.gpu.yml, o ne prideda prie jo. Be šito backend'as šiame
+    # profilyje paveldėtų NENAUDOJAMĄ `${MODEL_CACHE_DIR}:/models` mount'ą iš
+    # gpu.yml (ten backend embedded profilyje TIKRAI skaito lokalius modelius;
+    # čia, server profilyje, modelis gyvena ATSKIRAME `whisper` servise, backend
+    # jo lokaliai neskaito - faster-whisper-server per HTTP). Nekenksminga
+    # (tik papildomas, niekad neskaitomas volume), bet klaidina konfigūraciją.
+    volumes: !override
       - stenograma-storage:/storage
     depends_on:
       whisper:
@@ -31,26 +77,35 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # SVARBU: šiame profilyje backend NEBEREIKIA lokalaus GPU access - jis
+    # transkripcijai naudoja `faster-whisper-server` per HTTP (aukščiau), ne
+    # embedded lokalų subprocess (skirtingai nuo docker-compose.gpu.yml bazinio
+    # "embedded" profilio, kur backend TIKRAI naudoja GPU tiesiogiai). Backend
+    # servisas PAVELDI GPU deploy.resources IR /models volume iš
+    # docker-compose.gpu.yml (nes šis failas jį overlay'ina) - žemiau
+    # EKSPLICITIŠKAI pašalinami/pakeičiami per `!reset`/`!override` (žr.
+    # KRITINĘ PASTABĄ failo viršuje dėl šio mechanizmo patikimumo išlygų).
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
 
-  # Atskiras worker procesas - vykdo BullMQ eilės jobus (transkripcija, protokolas).
-  # HTTP backend TIK įdeda jobus; ČIA jie realiai apdorojami. Restartavus backend'ą
-  # vykdomas darbas nenutraukiamas (jį daro šis servisas). Galima skalauti su
-  # `docker compose up --scale worker=N`.
-  worker:
+  # Transkripcijos worker (server profilis) - vykdo BullMQ TRANSCRIPTION eilės
+  # jobus, bet PATS transkripcijos nedaro - kviečia persistentų `whisper` servisą
+  # per HTTP (kaip ir backend aukščiau). Todėl GPU JAM NEREIKIA - GPU turi TIK
+  # `whisper` servisas žemiau. Atskiras nuo protocol-worker, skalaujamas
+  # nepriklausomai: `docker compose ... up --scale transcription-worker=3`.
+  transcription-worker:
     build:
       context: ./backend
-      # Tas pats image kaip backend (stenograma-backend:gpu) - worker naudoja TĄ PATĮ
-      # backend kodą, tik paleidžia workers/index.js. Su REGISTRY traukiamas publikuotas
-      # backend:gpu; be jo statomas lokaliai iš to paties Dockerfile.
       dockerfile: Dockerfile.whisper.gpu
     image: ${REGISTRY:+$REGISTRY/}stenograma-backend:gpu
-    command: ["node", "workers/index.js"]
+    command: ["node", "workers/transcriptionWorker.js"]
     environment:
       TRANSCRIPTION_PROVIDER: faster-whisper-server
       FASTER_WHISPER_URL: http://whisper:8000/transcribe
       DIARIZATION_PROVIDER: pyannote
       PYANNOTE_URL: http://pyannote:8001/diarize
-      LLM_PROVIDER: ${LLM_PROVIDER:-claude}
       REDIS_URL: redis://redis:6379
       REDIS_REQUIRED: "true"
       STORAGE_DIR: /storage
@@ -58,13 +113,49 @@ services:
     env_file:
       - path: ./backend/.env
         required: false
-    volumes:
+    # !override/!reset (žr. KRITINĘ PASTABĄ failo viršuje) - be jų paveldėtų
+    # nenaudojamą `${MODEL_CACHE_DIR}:/models` mount'ą IR GPU deploy.resources
+    # iš gpu.yml (modelis čia gyvena ATSKIRAME `whisper` servise, o
+    # transkripcija vyksta per HTTP - šiam worker'iui nei /models, nei GPU
+    # tiesiogiai nereikia).
+    volumes: !override
       - stenograma-storage:/storage
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
     depends_on:
       whisper:
         condition: service_healthy
       pyannote:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Protokolo worker (server profilis) - vykdo BullMQ PROTOCOL eilės jobus (LLM
+  # API kvietimas). Nereikia GPU, Whisper ar pyannote prieigos - tik Node + LLM
+  # tiekėjo HTTPS kvietimas. Atskiras nuo transcription-worker (žr. aukščiau) -
+  # skalaujamas nepriklausomai: `docker compose ... up --scale protocol-worker=3`.
+  protocol-worker:
+    # LENGVAS image (be Python/CUDA) - žr. paaiškinimą docker-compose.gpu.yml
+    # protocol-worker servise. Šiame ("server") profilyje tai dar aktualiau, nes
+    # transkripcija ČIA IR TAIP vyksta per atskirą `whisper` HTTP servisą - t.y.
+    # protocol-worker NIEKADA nebuvo naudojęs jokio Python/CUDA vietoje, net kai
+    # naudojo tą patį CUDA image.
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${REGISTRY:+$REGISTRY/}stenograma-backend:base
+    command: ["node", "workers/protocolWorker.js"]
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-claude}
+      REDIS_URL: redis://redis:6379
+      REDIS_REQUIRED: "true"
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+    env_file:
+      - path: ./backend/.env
+        required: false
+    depends_on:
       redis:
         condition: service_healthy
 
@@ -96,8 +187,9 @@ services:
               capabilities: [gpu]
 
 volumes:
-  # Bendras audio storage backend'ui ir worker'iui (kad worker pasiektų failą pagal
-  # storageKey). MVP - Docker volume; 2 etape keistina į MinIO/S3.
+  # Bendras audio storage backend'ui ir transcription-worker'iui (kad worker
+  # pasiektų failą pagal storageKey). MVP - Docker volume; 2 etape keistina į
+  # MinIO/S3.
   stenograma-storage:
   # Modelių cache (jei MODEL_CACHE_DIR nenustatytas - naudojamas šis named volume).
   stenograma-models:
