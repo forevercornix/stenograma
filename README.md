@@ -1,6 +1,16 @@
 # Stenograma
 
-**Status:** Stable (`v1.0.1`)
+**Status:** Portfolio reference implementation — `v1.0.2` (ne production-ready)
+
+| Komponentas | Statusas | Pagrindas |
+|---|---|---|
+| Backend (Node/API) | Testuota | Unit + route testai, smoke testas per CI |
+| Frontend (Vite/React) | Testuota | Vitest, ESLint, build per CI |
+| E2E srautas | Testuota | Playwright + Chromium per CI |
+| CPU Docker image'ai | Testuota | `docker compose build` + `/api/health` per CI |
+| GPU Docker image'ai | Build-testuota | `Publish images (GHCR)` workflow |
+| Pilnas GPU srautas | Testuota realiai | RunPod: Whisper + pyannote, ~4 val. įrašas iki protokolo |
+| Whisper / pyannote kontraktai | Mock lygiu | Kontrakto testai su mock modeliu / pipeline |
 
 **Susitikimų protokolų generatorius: garsas → transkripcija → struktūruotas protokolas.**
 
