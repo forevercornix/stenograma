@@ -316,7 +316,7 @@ praleidžiamas. Tikslus atskyrimas:
   praleidžiamas be `REDIS_URL`; logika testuota su fake Redis, bet realų „sustabdyk
   backend, paleisk, patikrink ar jobas tęsiamas" reikia paleisti su tikru Redis:
   `REDIS_URL=redis://localhost:6379 node --test tests/queueRecovery.integration.test.js`)
-- **E2E su tikra naršykle NEBUVO paleistas šioje kūrimo aplinkoje** (Chromium atsisiuntimas blokuotas); testas struktūriškai patikrintas (`playwright test --list`) ir paruoštas CI'ui
+- **E2E su tikra naršykle paleidžiamas per CI** (Playwright + Chromium, `e2e` job'as kiekvienam push/PR); lokalioje kūrimo aplinkoje Chromium atsisiuntimas buvo blokuotas, todėl ten testas tikrinamas tik struktūriškai (`playwright test --list`)
 
 ### Architektūros trade-off'ai (sąmoningi MVP apribojimai)
 
@@ -442,7 +442,7 @@ padengta: audio upload srautas, protokolo redagavimas po generavimo, eksportai
 (.docx/.csv/.txt), diarizacijos pasirinkimas, live įrašymas. Nėra ir Playwright/
 Cypress E2E testo (naršyklė → upload → transcribe → generate → edit → export) -
 tai aiškiai kitas žingsnis, ne baigtas darbas.
-**Konteinerizacija:** Docker (backend + frontend/nginx), `docker-compose.yml` (nebuvo build-testuota šioje aplinkoje - žr. skyrių „Docker").
+**Konteinerizacija:** Docker (backend + frontend/nginx), `docker-compose.yml` (build + smoke testas praeina per CI - žr. skyrių „Docker").
 **CI:** GitHub Actions.
 **Architektūros šablonas:** Strategy/Provider pattern LLM ir transkribavimo tiekėjams, config-driven factory.
 
@@ -626,10 +626,11 @@ versijos - rekomenduojamas suderinamas rinkinys (žr. failų komentarus dėl sta
 
 **Sąžiningai:** GPU Dockerfile'ai (CUDA baziniai image'ai, `torch --index-url .../cu124`,
 `nvidia-cublas-cu12`) parašyti pagal standartines faster-whisper/pyannote GPU diegimo
-instrukcijas, bet **NEBUVO build-testuoti šioje sandbox aplinkoje** (nėra Docker
-daemon nei GPU). Bazinio CUDA image tag'o ir CUDA/torch versijų suderinamumą
-patikrinkite pirmo build'o metu savo mašinoje. Pyannote serverio `/health` logika
-ir `/diarize` kontraktas - realiai išbandyti per FastAPI TestClient
+instrukcijas ir **realiai build-testuoti per GitHub Actions** (`Publish images (GHCR)`
+workflow - image'ai sėkmingai sukuriami ir publikuojami). Veikimas su tikru GPU
+patikrintas per RunPod: Whisper + pyannote apdorojo ~4 val. įrašą iki protokolo.
+
+Pyannote serverio `/health` logika ir `/diarize` kontraktas - realiai išbandyti per FastAPI TestClient
 (`pyannote-server/test_server.py`, 3 testai praeina).
 
 ## Paleidimo scenarijai (Makefile)

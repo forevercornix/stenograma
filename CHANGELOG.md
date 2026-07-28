@@ -4,6 +4,21 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## v1.0.2 – GPU build stabilumas + dokumentacijos tikslinimas
+
+### Fixed
+- GPU Dockerfile'iuose pridėti `ENV DEBIAN_FRONTEND=noninteractive` ir `ENV TZ=Etc/UTC`.
+  Be jų `tzdata` (python3.11 priklausomybė) interaktyviai klausdavo laiko zonos ir
+  build'as kabodavo iki workflow timeout'o.
+- `publish-images.yml`: timeout 30 -> 60 min (GPU image'ai su CUDA/torch statomi ilgai).
+
+### Changed
+- README / `backend/README.md`: pašalinti pasenę „NEBUVO testuota" teiginiai. GPU image'ai
+  dabar realiai statomi per GHCR workflow, E2E su Chromium sukasi CI'e, o RunPod srautas
+  (Whisper + pyannote, ~4 val. įrašas) patikrintas prieš v1.0.0 relizą.
+
+---
+
 ## v1.0.1 – GHCR Docker publish pataisos
 
 Pataisytas `Publish images (GHCR)` workflow, kuris krito statant GPU Docker image'us.

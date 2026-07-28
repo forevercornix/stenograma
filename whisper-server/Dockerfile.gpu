@@ -5,8 +5,9 @@
 # Reikia: NVIDIA GPU + nvidia-container-toolkit. Paleidimas su --gpus all arba
 # compose deploy.resources.
 #
-# ⚠️ NEBUVO build-testuota be GPU aplinkos - CUDA/versijų suderinamumą patikrinkite
-# pirmo build'o metu.
+# ✅ Build patikrintas GitHub Actions ("Publish images (GHCR)") - image sėkmingai
+# sukuriamas. Realus veikimas su GPU (nvidia-container-toolkit + draiveriai)
+# NEBUVO testuotas - patikrinkite pirmo paleidimo metu.
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC

@@ -318,10 +318,11 @@ Jei diegiate šioje aplinkoje per RunPod (ar panašią GPU nuomos platformą su 
    100s limitą visai, bet netenkate automatinio HTTPS ir gaunate kintantį IP/prievadą.
 3. **`CORS_ORIGIN`** turės būti nustatytas į jūsų frontend'o RunPod proxy URL
    (ne `http://localhost:5173`), kitaip naršyklė blokuos užklausas.
-4. Ši rekomendacija duota pagal RunPod's viešą dokumentaciją (100s HTTP proxy
-   limitas, TCP alternatyva) - NEBUVO patikrinta realiai su veikiančiu RunPod pod'u
-   šioje aplinkoje (nėra prieigos). Patikrinkite pirmą kartą su trumpu testiniu
-   failu prieš pasikliaudami ilgam realiam įrašui.
+4. Ši konfigūracija **patikrinta realiai su veikiančiu RunPod pod'u**: pilnas srautas
+   (Whisper transkripcija + pyannote diarizacija) apdorojo ~4 val. įrašą iki galutinio
+   protokolo. Testo metu rasti ir pataisyti defektai: fiksuotas 90s HTTP timeout (dabar
+   proporcingas failo trukmei), portų konfliktas su RunPod nginx, halucinacijų filtras
+   ir `numSpeakers` perdavimas. Žinomi apribojimai - žr. `RUNPOD.md`.
 
 **Kaip patikrinti #4 (LD_LIBRARY_PATH) veikia jūsų aplinkoje**, kai turėsite GPU:
 ```bash
