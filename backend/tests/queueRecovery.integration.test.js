@@ -133,18 +133,31 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     );
  });
 
+  console.log("[queueRecovery] test2 jobStore.init START");
   await jobStore.init();
-  await jobRunner.init();
+  console.log("[queueRecovery] test2 jobStore.init END");
 
+  console.log("[queueRecovery] test2 jobRunner.init START");
+  await jobRunner.init();
+  console.log("[queueRecovery] test2 jobRunner.init END");
+
+  console.log("[queueRecovery] test2 jobStore.create START");
   const job = await jobStore.create();
+  console.log("[queueRecovery] test2 jobStore.create END");
+
+  console.log("[queueRecovery] test2 enqueueProtocol START");
   await jobRunner.enqueueProtocol(job.id, { transcript: "pakankamai ilgas tekstas stalled testui" });
+  console.log("[queueRecovery] test2 enqueueProtocol END");
 
   // Queue instancija galutinei patikrai (konkretaus jobo būsena po užbaigimo).
+  console.log("[queueRecovery] test2 Queue create START");
   queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: createQueueConnection() });
+  console.log("[queueRecovery] test2 Queue create END");
 
   // 1. Pirmas worker'is PASIIMA jobą ir "užstringa" (imituojam kritimą vykdymo
   //    metu - processor'ius niekada neužbaigia, tada worker uždaromas be graceful).
   let firstWorkerGotJob = false;
+  console.log("[queueRecovery] test2 dyingWorker create START");
   dyingWorker = new Worker(
     QUEUE_NAMES.PROTOCOL,
     async () => {
@@ -162,9 +175,12 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
       stalledInterval: 1000,
     }
   );
+  console.log("[queueRecovery] test2 dyingWorker create END");
 
   // Palaukiam, kol pirmas worker'is pasiima jobą.
+  console.log("[queueRecovery] test2 wait firstWorkerGotJob START");
   for (let i = 0; i < 20 && !firstWorkerGotJob; i++) await new Promise((r) => setTimeout(r, 200));
+  console.log(`[queueRecovery] test2 wait firstWorkerGotJob END value=${firstWorkerGotJob}`);
   assert.ok(firstWorkerGotJob, "pirmas worker'is turi pasiimti jobą");
 
   // 2. "Sustabdom" pirmą worker'į vykdymo metu (force close - imituoja kritimą).
