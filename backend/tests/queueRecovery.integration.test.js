@@ -1,6 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+async function traceStep(label, action) {
+  console.log(`[queueRecovery] START ${label}`);
+  await action();
+  console.log(`[queueRecovery] END ${label}`);
+}
+
 /**
  * RESTART RECOVERY integracinis testas su TIKRU Redis + BullMQ.
  *
@@ -38,10 +44,18 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
   t.after(async () => {
     // close(TRUE) - ta pati priežastis kaip antrame teste žemiau: graceful
     // close() laukia aktyvaus darbo/blokuojančių Redis komandų pabaigos.
-    await worker?.close(true).catch(() => {});
-    await queue?.close().catch(() => {});
-    await jobRunner.close().catch(() => {});
-    await jobStore._resetForTests();
+    await traceStep("test1 worker.close(true)", () =>
+      worker?.close(true).catch(() => {})
+    );
+    await traceStep("test1 queue.close()", () =>
+      queue?.close().catch(() => {})
+    );
+    await traceStep("test1 jobRunner.close()", () =>
+      jobRunner.close().catch(() => {})
+    );
+    await traceStep("test1 jobStore._resetForTests()", () =>
+      jobStore._resetForTests()
+    );
   });
 
   await jobStore.init();
@@ -97,16 +111,26 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   t.after(async () => {
     // dyingWorker jau uždarytas (force) žemiau vykdymo metu, bet catch'inam bet
     // kokiu atveju - jei testas krito ANKSČIAU nei tas žingsnis, jis dar veiktų.
-    await dyingWorker?.close(true).catch(() => {});
+    await traceStep("test2 dyingWorker.close(true)", () =>
+      dyingWorker?.close(true).catch(() => {})
+    );
     // close(TRUE) - BŪTINA. Be `true` tai graceful uždarymas, kuris LAUKIA
     // aktyvaus darbo pabaigos (BullMQ: "force - use if you do not want to wait
     // for current jobs to be processed"). Po stalled scenarijaus worker'is lieka
     // būsenoje, kurioje graceful close() kabo neribotai - realiame CI stebėta
     // ~8 min. kabantis job'as būtent čia.
-    await recoveryWorker?.close(true).catch(() => {});
-    await queue?.close().catch(() => {});
-    await jobRunner.close().catch(() => {});
-    await jobStore._resetForTests(); 
+    await traceStep("test2 recoveryWorker.close(true)", () =>
+      recoveryWorker?.close(true).catch(() => {})
+    );
+    await traceStep("test2 queue.close()", () =>
+      queue?.close().catch(() => {})
+    );
+    await traceStep("test2 jobRunner.close()", () =>
+      jobRunner.close().catch(() => {})
+    );
+    await traceStep("test2 jobStore._resetForTests()", () =>
+      jobStore._resetForTests()
+    );
  });
 
   await jobStore.init();
@@ -144,7 +168,9 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   assert.ok(firstWorkerGotJob, "pirmas worker'is turi pasiimti jobą");
 
   // 2. "Sustabdom" pirmą worker'į vykdymo metu (force close - imituoja kritimą).
+  console.log("[queueRecovery] explicit dyingWorker.close(true) START");
   await dyingWorker.close(true);
+  console.log("[queueRecovery] explicit dyingWorker.close(true) END");
 
   // 3. Paleidžiam ANTRĄ worker'į (imituoja restartą). Jis turi pasiimti STALLED jobą
   //    (BullMQ po lockDuration+stalledInterval grąžina jį į eilę) ir užbaigti.
