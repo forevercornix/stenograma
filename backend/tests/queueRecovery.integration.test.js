@@ -12,7 +12,7 @@ const assert = require("node:assert/strict");
  * SVARBU: šis failas paleidžiamas ATSKIRAI nuo pagrindinio `npm test` (žr.
  * .github/workflows/ci.yml ir package.json "test:redis") - REDIS_URL NEGALI būti
  * nustatytas visam `npm test`, nes route testai (jobs.route.test.js ir kt.) tikisi
-await jobStore._resetForTests(); * INLINE vykdymo be worker'io; su realiu pasiekiamu Redis jie pereitų į BullMQ
+ * INLINE vykdymo be worker'io; su realiu pasiekiamu Redis jie pereitų į BullMQ
  * režimą ir amžinai liktų "queued".
  *
  * Ką tikrina (1 etapo priėmimo kriterijus "restart neturi nutraukti darbo"):
@@ -36,7 +36,9 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
   // t.after() vykdomas VISADA (net jei assertion krenta) - kitaip nepavykus testui
   // liktų atviras BullMQ worker'is/Redis ryšys/kabantis Node procesas.
   t.after(async () => {
-    await worker?.close().catch(() => {});
+    // close(TRUE) - ta pati priežastis kaip antrame teste žemiau: graceful
+    // close() laukia aktyvaus darbo/blokuojančių Redis komandų pabaigos.
+    await worker?.close(true).catch(() => {});
     await queue?.close().catch(() => {});
     await jobRunner.close().catch(() => {});
     await jobStore._resetForTests();
@@ -96,7 +98,12 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     // dyingWorker jau uždarytas (force) žemiau vykdymo metu, bet catch'inam bet
     // kokiu atveju - jei testas krito ANKSČIAU nei tas žingsnis, jis dar veiktų.
     await dyingWorker?.close(true).catch(() => {});
-    await recoveryWorker?.close().catch(() => {});
+    // close(TRUE) - BŪTINA. Be `true` tai graceful uždarymas, kuris LAUKIA
+    // aktyvaus darbo pabaigos (BullMQ: "force - use if you do not want to wait
+    // for current jobs to be processed"). Po stalled scenarijaus worker'is lieka
+    // būsenoje, kurioje graceful close() kabo neribotai - realiame CI stebėta
+    // ~8 min. kabantis job'as būtent čia.
+    await recoveryWorker?.close(true).catch(() => {});
     await queue?.close().catch(() => {});
     await jobRunner.close().catch(() => {});
     await jobStore._resetForTests(); 
@@ -118,7 +125,11 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     QUEUE_NAMES.PROTOCOL,
     async () => {
       firstWorkerGotJob = true;
-      await new Promise((r) => setTimeout(r, 100000)); // "kabo" - niekada nebaigia
+      // "Kabo" amžinai - imituoja worker'į, nukritusį darbo VIDURYJE. Naudojam
+      // niekada neišsipildantį Promise, o NE setTimeout: efektas tas pats
+      // (processor'ius niekada nebaigia), bet be nereikalingo 100s laikmačio,
+      // kuris papildomai laikytų event loop'ą gyvą.
+      await new Promise(() => {});
     },
     {
       connection: createQueueConnection(),
