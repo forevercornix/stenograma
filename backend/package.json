@@ -7,7 +7,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test",
-    "test:redis": "node --test tests/queueRecovery.integration.test.js tests/heartbeatReadiness.integration.test.js",
+    "test:redis": "node tests/queueRecovery.integration.test.js && node tests/heartbeatReadiness.integration.test.js",
     "check": "find . -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check",
     "lint": "eslint .",
     "doctor": "node scripts/doctor.js",
