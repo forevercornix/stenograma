@@ -5,12 +5,25 @@
 #   (arba: make docker-gpu)
 #
 # Ką prideda/keičia lyginant su baziniu docker-compose.yml:
-#   - backend statomas iš Dockerfile.whisper.gpu (CUDA bazinis image + Node +
-#     Python + GPU CUDA bibliotekos) ir naudoja lokalią faster-whisper transkripciją
-#     su GPU (device=cuda REALIAI veikia);
+#   - `backend` IR `transcription-worker` statomi iš Dockerfile.whisper.gpu (CUDA
+#     bazinis image + Node + Python + GPU CUDA bibliotekos) ir naudoja lokalią
+#     faster-whisper transkripciją su GPU (device=cuda REALIAI veikia). Backend'as
+#     GPU/pyannote reikia TODĖL, kad SINCHRONINIAI endpoint'ai (`POST /api/transcribe`,
+#     `POST /api/generate` - žr. `routes/transcribe.js`, `routes/generate.js`)
+#     kviečia transkripciją/generavimą TIESIOGIAI backend procese, VISIŠKAI
+#     APEIDAMI BullMQ eilę (nepriklausomai nuo REDIS_URL) - tik ASINCHRONINIS
+#     kelias (`/api/transcribe-jobs`, `/api/jobs`) eina per worker'ius;
 #   - pridedamas pyannote diarizacijos servisas iš Dockerfile.gpu (CUDA image +
 #     GPU torch) - lokalus, GDPR (jokie duomenys neišeina iš mašinos);
-#   - abu gauna GPU per deploy.resources (reikia nvidia-container-toolkit host'e).
+#   - GPU per deploy.resources gauna `backend`, `transcription-worker` ir
+#     `pyannote`. `protocol-worker` (TIK LLM API kvietimas, be jokio audio/GPU
+#     poreikio) GPU NEGAUNA - žr. pastabą prie jo serviso;
+#   - pridedami DU ATSKIRI worker servisai (`transcription-worker`,
+#     `protocol-worker`) ASINCHRONINIAM keliui - BŪTINI, nes backend čia naudoja
+#     REDIS_URL (taigi BullMQ eiles ASINCHRONINIAMS jobams), o BullMQ eiles
+#     apdoroja TIK worker'iai. Be jų `/api/jobs` ir `/api/transcribe-jobs`
+#     amžinai liktų "queued" (nors sinchroniniai `/api/transcribe`/`/api/generate`
+#     veiktų normaliai, nes jie apskritai nesinaudoja eile).
 #
 # ⚠️  Reikia:
 #   1) NVIDIA GPU + draiveriai + nvidia-container-toolkit host mašinoje;
@@ -34,6 +47,18 @@ services:
     # ⚠️ Paruošti image'ai dar NEPUBLIKUOTI - kol REGISTRY nenustatytas, naudojamas
     # lokalus build (make quickstart-gpu ar make docker-gpu-build). Žr. README
     # "Paruošti Docker image'ai (GHCR)".
+    #
+    # PASTABA dėl image'o: backend šiame profilyje NAUDOJA TĄ PATĮ GPU image
+    # (Dockerfile.whisper.gpu) kaip transcription-worker - build paprastumo dėlei
+    # (viena Dockerfile linija visam backend kodui). Tai TEISINGA, nes backend'as
+    # PATS transkribuoja/generuoja SINCHRONINIAMS endpoint'ams (žr. paaiškinimą
+    # failo viršuje) - jam GPU/Python REALIAI reikia, ne tik worker'iams.
+    # Asinchroniniuose endpoint'uose (`/api/transcribe-jobs`, `/api/jobs`) backend'as
+    # TIK įdeda jobus į eilę, o realų darbą atlieka worker'iai žemiau - bet tai
+    # negalioja sinchroniniams `/api/transcribe`/`/api/generate`. Jei norėtumėte
+    # plonesnio backend image (be Python/CUDA) TIK sinchroniniams endpoint'ams
+    # atsisakius, reikėtų atskiro lengvo Dockerfile ir tų endpoint'ų pašalinimo/
+    # nukreipimo į eilę (galimas kitas žingsnis, žr. root README roadmap).
     image: ${REGISTRY:+$REGISTRY/}stenograma-backend:gpu
     build:
       context: ./backend
@@ -45,34 +70,44 @@ services:
       # LITERALŪS (ne ${VAR:-...}) - profilio ESMĖ. Jei būtų perrašomi,
       # `TRANSCRIPTION_PROVIDER=mock make quickstart-gpu` paleistų GPU stacką, bet
       # backend naudotų mock - klaidinantis "GPU" režimas be realaus GPU darbo.
+      #
+      # SVARBU (kodėl backend VIS TIEK turi GPU/pyannote/faster-whisper env'us,
+      # NE TIK worker'iai žemiau): `routes/transcribe.js` (SINCHRONINIS
+      # POST /api/transcribe) ir `routes/generate.js` (SINCHRONINIS POST
+      # /api/generate) kviečia `transcribeAudio`/`generateProtocol` TIESIOGIAI
+      # ŠIAME procese, VISIŠKAI APEIDAMI jobRunner/eilę - nepriklausomai nuo
+      # REDIS_URL. Tik ASINCHRONINIS kelias (`/api/transcribe-jobs`, `/api/jobs`)
+      # eina per BullMQ į worker'ius. Taigi backend'as PATS transkribuoja/
+      # diarizuoja, kai kas nors kviečia sinchroninį endpoint'ą tiesiogiai (API
+      # klientas, ne numatytas frontend'as - žr. root README API lentelę,
+      # "Frontend'as naudoja ŠĮ [transcribe-jobs] pagal nutylėjimą" - bet
+      # /api/transcribe LIEKA VEIKIANTIS viešas endpoint'as).
       TRANSCRIPTION_PROVIDER: faster-whisper-embedded
       FASTER_WHISPER_DEVICE: cuda
       FASTER_WHISPER_COMPUTE_TYPE: float16
       DIARIZATION_PROVIDER: pyannote
       PYANNOTE_URL: http://pyannote:8001/diarize
-      # KONFIGŪRUOJAMI (tikslinimas, ne profilio esmė):
       FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-small}
-      # GPU atveju rekomenduojama concurrency=1 (kiekvienas subprocess kelia
-      # modelį į VRAM iš naujo - žr. .env.example pastabą).
       FASTER_WHISPER_MAX_CONCURRENCY: ${FASTER_WHISPER_MAX_CONCURRENCY:-1}
-      # Modelių cache tarp konteinerio perkrovimų (kad nereikėtų atsisiųsti iš naujo).
       HF_HOME: /models/hf
       # Persistentus job store per Redis (žr. redis servisą žemiau). Backend
       # automatiškai jį naudoja; be jo grįžtų į in-memory.
       REDIS_URL: redis://redis:6379
+      # GRIEŽTAS: jei Redis prisijungimas per startą nepavyksta, backend'as KRENTA,
+      # o ne tyliai grįžta į in-memory/inline. GPU/produkcijos profilyje tylus
+      # fallback reikštų persistencijos praradimą būtent tada, kai ji svarbiausia
+      # (ilgi GPU įrašai). Žr. backend/README.md "REDIS_REQUIRED - kada privaloma".
+      REDIS_REQUIRED: "true"
+      # Bendras storage su worker'iais (žemiau) - worker'iai, būdami ATSKIRI
+      # konteineriai, audio failą pasiekia per šį volume, ne per backend'o /tmp.
+      STORAGE_DIR: /storage
     volumes:
-      # MODEL_CACHE_DIR leidžia RunPod'e (ar kitur) nukreipti modelių cache į
-      # PERSISTENT network volume (pvz. /workspace/models), kad modeliai neišnyktų
-      # sunaikinus podą ir nereikėtų vėl siųsti kelių GB. Numatyta - įvardytas
-      # Docker volume (stenograma-models), kuris išlieka tarp restartų toje pačioje
-      # mašinoje, bet NE tarp podų perkūrimo debesyje.
       - ${MODEL_CACHE_DIR:-stenograma-models}:/models
+      - stenograma-storage:/storage
     depends_on:
       pyannote:
-        # NE tik "paleistas" (default), o "sveikas" - t.y. pyannote healthcheck
-        # (/health?probe=true) patvirtino, kad modelis REALIAI įkeltas. Be šito
-        # backend'as startuotų iš karto, ir pirmoji diarizacija galėtų nepavykti
-        # ar labai ilgai laukti, kol pyannote dar siunčiasi/krauna modelį.
+        # NE tik "paleistas" (default), o "sveikas" - reikalinga TIEK sinchroniniam
+        # /api/transcribe (diarize=true), TIEK transcription-worker'iui.
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -83,6 +118,95 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  # Transkripcijos worker - vykdo BullMQ TRANSCRIPTION eilės jobus (faster-whisper
+  # embedded + GPU). ATSKIRAS nuo protocol-worker, tad galima skalauti
+  # NEPRIKLAUSOMAI (transkripcija imlesnė GPU nei LLM protokolo generavimas):
+  #   docker compose ... up --scale transcription-worker=3
+  # Naudoja `workers/transcriptionWorker.js` (klausosi TIK transkripcijos eilės,
+  # ne abiejų kaip anksčiau `workers/index.js`).
+  transcription-worker:
+    image: ${REGISTRY:+$REGISTRY/}stenograma-backend:gpu
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.whisper.gpu
+    command: ["node", "workers/transcriptionWorker.js"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      TRANSCRIPTION_PROVIDER: faster-whisper-embedded
+      FASTER_WHISPER_DEVICE: cuda
+      FASTER_WHISPER_COMPUTE_TYPE: float16
+      DIARIZATION_PROVIDER: pyannote
+      PYANNOTE_URL: http://pyannote:8001/diarize
+      FASTER_WHISPER_MODEL: ${FASTER_WHISPER_MODEL:-small}
+      # GPU atveju rekomenduojama concurrency=1 (kiekvienas subprocess kelia
+      # modelį į VRAM iš naujo - žr. .env.example pastabą).
+      FASTER_WHISPER_MAX_CONCURRENCY: ${FASTER_WHISPER_MAX_CONCURRENCY:-1}
+      # Modelių cache tarp konteinerio perkrovimų (kad nereikėtų atsisiųsti iš naujo).
+      HF_HOME: /models/hf
+      REDIS_URL: redis://redis:6379
+      # Worker'iui REDIS_REQUIRED elgesys galioja VISADA (žr. workers/index.js
+      # initializeWorkerOrFail) - šis kintamasis čia tik dokumentacijai/nuoseklumui.
+      REDIS_REQUIRED: "true"
+      STORAGE_DIR: /storage
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+    volumes:
+      # MODEL_CACHE_DIR leidžia RunPod'e (ar kitur) nukreipti modelių cache į
+      # PERSISTENT network volume (pvz. /workspace/models), kad modeliai neišnyktų
+      # sunaikinus podą ir nereikėtų vėl siųsti kelių GB. Numatyta - įvardytas
+      # Docker volume (stenograma-models), kuris išlieka tarp restartų toje pačioje
+      # mašinoje, bet NE tarp podų perkūrimo debesyje.
+      - ${MODEL_CACHE_DIR:-stenograma-models}:/models
+      - stenograma-storage:/storage
+    depends_on:
+      pyannote:
+        # NE tik "paleistas" (default), o "sveikas" - t.y. pyannote healthcheck
+        # (/health?probe=true) patvirtino, kad modelis REALIAI įkeltas. Be šito
+        # pirmoji diarizacija galėtų nepavykti ar labai ilgai laukti.
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Protokolo worker - vykdo BullMQ PROTOCOL eilės jobus (LLM API kvietimas, pvz.
+  # Claude). NEREIKIA GPU/Python - tik Node + HTTPS kvietimas į LLM tiekėją, tad
+  # ČIA GPU deploy.resources SĄMONINGAI NENUSTATYTA. Naudoja tą patį image kaip
+  # transcription-worker (paprastumo dėlei - vienas Dockerfile), bet paleidžia
+  # TIK `workers/protocolWorker.js` (klausosi TIK protokolo eilės). Skalauti
+  # nepriklausomai: `docker compose ... up --scale protocol-worker=3`.
+  protocol-worker:
+    # LENGVAS image (node:20-slim, be Python/CUDA) - protocol-worker TIK kviečia
+    # LLM API (Claude), niekada nespawnina Python subprocess, tad jam nereikia
+    # Dockerfile.whisper.gpu (CUDA + Python + faster-whisper priklausomybių).
+    # Anksčiau naudojo TĄ PATĮ CUDA image kaip transcription-worker - veikė
+    # funkciškai, bet be reikalo didesnis build/image (daugiau CVE paviršiaus,
+    # ilgesnis build laikas, nereikalingos CUDA/Python priklausomybės procese,
+    # kuriam jos niekada nereikės).
+    image: ${REGISTRY:+$REGISTRY/}stenograma-backend:base
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["node", "workers/protocolWorker.js"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-claude}
+      REDIS_URL: redis://redis:6379
+      REDIS_REQUIRED: "true"
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+    depends_on:
+      redis:
+        condition: service_healthy
+    # JOKIOS GPU deploy.resources - žr. komentarą aukščiau.
 
   pyannote:
     image: ${REGISTRY:+$REGISTRY/}stenograma-pyannote:gpu
@@ -116,8 +240,9 @@ services:
               capabilities: [gpu]
 
   # Redis - persistentus job store (jobai išlieka perkrovus backendą, palaiko kelis
-  # worker'ius). Backend'as automatiškai jį naudoja per REDIS_URL (žemiau). Be šio
-  # serviso backend grįžtų į in-memory (jobai dingtų per restartą).
+  # worker'ius). Backend'as ir worker'iai automatiškai jį naudoja per REDIS_URL.
+  # Kadangi visi turi REDIS_REQUIRED=true (žr. aukščiau), jei šis servisas neveiktų
+  # per startą, jie KRISTŲ (garsiai), o ne tyliai grįžtų į in-memory.
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]  # AOF persistencija diske
@@ -132,3 +257,8 @@ services:
 volumes:
   stenograma-models:
   stenograma-redis:
+  # Bendras audio storage backend'ui ir transcription-worker'iui (kad worker
+  # pasiektų failą pagal storageKey - žr. backend/utils/fileStorage.js). MVP -
+  # Docker volume; 2 etape keistina į MinIO/S3 kelioms mašinoms (žr. root README
+  # "Architektūros trade-off'ai").
+  stenograma-storage:

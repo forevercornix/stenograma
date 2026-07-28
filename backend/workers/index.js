@@ -106,22 +106,39 @@ function startWorkers() {
   console.log(`[stenograma] Worker'iai paleisti (concurrency=${WORKER_OPTIONS.concurrency}, stalled recovery=${WORKER_OPTIONS.stalledInterval}ms): transcription, protocol`);
 
   // Heartbeat: worker rašo Redis raktą su TTL, /api/ready jį tikrina - taip readiness
-  // patvirtina, kad worker'is GYVAS (ne tik kad Redis pasiekiamas).
+  // patvirtina, kad worker'is GYVAS (ne tik kad Redis pasiekiamas). Kombinuotas
+  // procesas (šis, node workers/index.js) tvarko ABI eiles, tad rašo ABIEJŲ TIPŲ
+  // raktus (žr. utils/workerHeartbeat.js) - readiness mato abu kaip gyvus.
   const { createQueueConnection } = require("../queues/config");
   const { startHeartbeat } = require("../utils/workerHeartbeat");
   const heartbeatConn = createQueueConnection();
-  const stopHeartbeat = startHeartbeat(heartbeatConn);
+  const stopHeartbeat = startHeartbeat(heartbeatConn, ["transcription", "protocol"]);
 
-  // Graceful shutdown - laukiam vykdomo darbo pabaigos prieš uždarant.
+  // Graceful shutdown - laukiam vykdomo darbo pabaigos prieš uždarant. Idempotentiškas
+  // (shuttingDown flag'as) - jei SIGTERM ir SIGINT ateitų beveik vienu metu (ar tas
+  // pats signalas pakartotas), antras iškvietimas TIK palaukia pirmojo pabaigos, o ne
+  // kviečia worker.close()/heartbeatConn.quit() dar kartą (dvigubas quit() ant to
+  // paties Redis ryšio ar process.exit() lenktynės tarp dviejų shutdown() eigų).
+  let shuttingDown = null;
   async function shutdown(signal) {
-    console.log(`[stenograma] Worker gauna ${signal}, baigiu darbus...`);
-    stopHeartbeat();
-    await heartbeatConn.quit().catch(() => {});
-    await Promise.all(workers.map((w) => w.close()));
-    process.exit(0);
+    if (shuttingDown) return shuttingDown;
+    shuttingDown = (async () => {
+      console.log(`[stenograma] Worker gauna ${signal}, baigiu darbus...`);
+      stopHeartbeat();
+      process.removeListener("SIGTERM", onSigterm);
+      process.removeListener("SIGINT", onSigint);
+      await heartbeatConn.quit().catch((e) => console.error(`[stenograma] Heartbeat ryšio uždarymo klaida: ${e.message}`));
+      await Promise.all(
+        workers.map((w) => w.close().catch((e) => console.error(`[stenograma] Worker uždarymo klaida: ${e.message}`)))
+      );
+      process.exit(0);
+    })();
+    return shuttingDown;
   }
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  function onSigterm() { shutdown("SIGTERM"); }
+  function onSigint() { shutdown("SIGINT"); }
+  process.on("SIGTERM", onSigterm);
+  process.on("SIGINT", onSigint);
 
   return workers;
 }
@@ -152,6 +169,64 @@ async function initializeWorkerOrFail(workerName) {
   }
 }
 
+/**
+ * Paleidžia vienos eilės worker procesą (naudoja workers/transcriptionWorker.js,
+ * workers/protocolWorker.js): patikrina Redis job store, paleidžia konkretaus tipo
+ * heartbeat, užregistruoja graceful shutdown (SIGTERM/SIGINT).
+ *
+ * @param {string} workerName - žmogui skaitomas vardas klaidų pranešimams.
+ * @param {() => import("bullmq").Worker} startWorker - funkcija, kuri sukuria IR
+ *   grąžina VIENĄ BullMQ Worker (pvz. startTranscriptionWorker).
+ * @param {string} heartbeatType - "transcription" | "protocol" (žr.
+ *   utils/workerHeartbeat.js heartbeatKey) - KURIO tipo raktą šis procesas rašo.
+ * @returns {Promise<{worker: import("bullmq").Worker, shutdown: (opts?: {exit?: boolean}) => Promise<void>}>}
+ *   `shutdown` eksponuojama grąžinamoje reikšmėje (ne tik SIGTERM/SIGINT listener'iuose),
+ *   kad testai galėtų švariai sustabdyti heartbeat/worker BE process.exit() -
+ *   žr. tests/runWorkerProcess.test.js.
+ */
+async function runWorkerProcess(workerName, startWorker, heartbeatType) {
+  await initializeWorkerOrFail(workerName);
+
+  const worker = startWorker();
+
+  const { createQueueConnection } = require("../queues/config");
+  const { startHeartbeat } = require("../utils/workerHeartbeat");
+  const heartbeatConn = createQueueConnection();
+  const stopHeartbeat = startHeartbeat(heartbeatConn, heartbeatType);
+
+  // Idempotentiškas (žr. startWorkers() aukščiau dėl priežasties) IR testuojamas -
+  // { exit: false } leidžia testams sustabdyti heartbeat/worker BE process.exit(0).
+  let shuttingDown = null;
+  async function shutdown(signalOrOpts) {
+    if (shuttingDown) return shuttingDown;
+    const isTestCall = signalOrOpts && typeof signalOrOpts === "object";
+    const signal = isTestCall ? "manual" : signalOrOpts;
+    const shouldExit = isTestCall ? signalOrOpts.exit !== false : true;
+
+    shuttingDown = (async () => {
+      console.log(`[stenograma] ${workerName} gauna ${signal}, baigiu darbus...`);
+      stopHeartbeat();
+      process.removeListener("SIGTERM", onSigterm);
+      process.removeListener("SIGINT", onSigint);
+      await heartbeatConn.quit().catch((e) => console.error(`[stenograma] Heartbeat ryšio uždarymo klaida: ${e.message}`));
+      await worker.close().catch((e) => console.error(`[stenograma] Worker uždarymo klaida: ${e.message}`));
+      if (shouldExit) process.exit(0);
+    })();
+    return shuttingDown;
+  }
+  // Pavadintos funkcijos (ne anoniminės tiesiai process.on viduje), kad shutdown()
+  // galėtų jas pačias pašalinti (removeListener reikia TOS PAČIOS funkcijos
+  // nuorodos) - be to, testai (žr. tests/runWorkerProcess.test.js), kviesdami
+  // shutdown() rankiniu būdu, paliktų "kabančius" SIGTERM/SIGINT listener'ius ant
+  // bendro `process` objekto per visą testų failo vykdymo laiką.
+  function onSigterm() { shutdown("SIGTERM"); }
+  function onSigint() { shutdown("SIGINT"); }
+  process.on("SIGTERM", onSigterm);
+  process.on("SIGINT", onSigint);
+
+  return { worker, shutdown };
+}
+
 if (require.main === module) {
   initializeWorkerOrFail("BullMQ worker")
     .then(() => startWorkers())
@@ -161,4 +236,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { createWorker, startWorkers, initializeWorkerOrFail };
+module.exports = { createWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess };

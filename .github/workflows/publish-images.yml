@@ -42,6 +42,16 @@ jobs:
             context: ./backend
             dockerfile: ./backend/Dockerfile.whisper.gpu
             tag: stenograma-backend:gpu
+          # LENGVAS backend image (be Python/CUDA) - naudoja `protocol-worker`
+          # servisas (docker-compose.gpu.yml, docker-compose.server.yml), kuris
+          # tik kviečia LLM API, niekada nespawnina Python subprocess. BE ŠIO
+          # matricos įrašo, `protocol-worker` su REGISTRY nustatytu kintamuoju
+          # bandytų `docker compose pull` NEEGZISTUOJANTĮ image'ą (404) - vietoj
+          # to reikėtų priverstinio lokalaus build'o (`BUILD=1`).
+          - name: backend-base
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+            tag: stenograma-backend:base
           - name: whisper
             context: ./whisper-server
             dockerfile: ./whisper-server/Dockerfile.gpu

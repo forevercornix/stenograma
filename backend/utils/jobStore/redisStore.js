@@ -4,11 +4,17 @@ const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
  * procesus/replikas).
  *
- * Kodėl Redis, ne pilnas BullMQ: šiam etapui reikia PERSISTENT job BŪSENOS
- * (kad perkrovus backendą jobai neišnyktų) su ta pačia create/get/update sąsaja.
- * Redis hash'ai tai duoda minimaliai. Pilna BullMQ (su atskirais worker procesais,
- * dead-letter queue) būtų kitas žingsnis - žr. README roadmap. Ši abstrakcija
- * sąmoningai palieka kelią BullMQ (job'ai jau turi attempt_count, error_code).
+ * ATNAUJINTA: šis modulis teikia PERSISTENT job BŪSENOS saugyklą (create/get/update
+ * sąsaja) - ją naudoja TIEK inline/mock veiksena, TIEK tikra BullMQ eilė (žr.
+ * `queues/`, `workers/`). Tai NĖRA "kitas žingsnis prieš BullMQ" - BullMQ JAU
+ * implementuota atskirai (`queues/jobRunner.js` automatiškai renkasi BullMQ
+ * režimą su `REDIS_URL`); šis failas yra job BŪSENOS sluoksnis, kurį BullMQ
+ * worker'iai atnaujina (`workers/index.js`), ne pati eilės logika.
+ *
+ * "Dead-letter queue" terminijos pastaba: BullMQ pusėje po visų `attempts`
+ * išnaudojimo jobas lieka pažymėtas `failed` (ir čia, jobStore, atitinkamai
+ * `STATUS.FAILED`) - tai NĖRA atskira izoliuota dead-letter eilė, tik `failed`
+ * būsenos retencija (žr. `queues/config.js` `removeOnFail.age`).
  *
  * Raktų schema:
  *   job:{id}        -> Redis hash su job laukais (JSON reikšmės sudėtingoms)
@@ -17,6 +23,13 @@ const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
  * TTL: kiekvienam baigtam (completed/failed/cancelled) job'ui nustatomas Redis
  * EXPIRE = JOB_TTL_MINUTES, tad Redis pats išvalo pasenusius - sweepExpired lieka
  * suderinamumui, bet Redis atveju daugiausiai no-op (Redis EXPIRE atlieka darbą).
+ *
+ * TESTAVIMO PASTABA: `tests/jobStoreRedis.test.js` testuoja ŠIO failo logiką su
+ * FakeRedis (in-memory imitacija, ne tikras ioredis/Redis serveris) - tikrina
+ * serializaciją/raktų schemą, NE tikrą Redis tinklo elgesį. Realus Redis
+ * naudojamas tik `tests/queueRecovery.integration.test.js` (per BullMQ, ne
+ * tiesiogiai per šį modulį) - atskiro šio konkretaus modulio integracinio testo
+ * su tikru Redis šiuo metu nėra (žr. backend/README.md "Testai" pastabą).
  *
  * STATUS: parašyta pagal ioredis API, bet REALIAI NETESTUOTA su tikru Redis
  * serveriu šioje aplinkoje (nėra Redis daemon). Sąsajos logika testuota su

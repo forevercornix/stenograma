@@ -90,15 +90,30 @@ sąmoningai NEĮGYVENDINTA, žr. Roadmap. Jei jums svarbu apriboti apdorojimo
 LAIKĄ, o ne failo DYDĮ, tai yra prioritetinis kitas žingsnis prieš tikrą
 production naudojimą su ilgais (>1 val.) įrašais.
 
-## Asinchroninio job API abstrakcija ilgiems susitikimams
+## Asinchroninio job API - dvi realizacijos (inline fallback IR tikra BullMQ eilė)
 
-**Terminologijos tikslumas:** tai NĖRA "job queue" tikra prasme (Redis/BullMQ/SQS su
-worker'iais, retry politika, dead-letter queue) - tai asinchroninio API kontrakto
-(`POST /api/jobs` + `GET /api/jobs/:id`) abstrakcija su in-memory saugykla. Vykdymas
-vis tiek vyksta TAME PAČIAME Node procese, tik klientas negauna atsakymo per tą patį
-HTTP ryšį. Teisingas apibūdinimas pokalbyje: *"implementuota asinchroninio job API
-abstrakcija; dabartinė MVP saugykla yra in-memory, o production versijai reikėtų
-BullMQ/Redis ar cloud queue"* - ne "implementavau job queue".
+**Atnaujinta po Milestone 1 refaktoringo - žemiau esantis aprašymas pakeičia senesnę
+šio skyriaus versiją, kuri vis dar minėdavo `utils/jobStore.js` kaip in-memory `Map`.
+Tas failas nebeegzistuoja - jį pakeitė `utils/jobStore/` katalogas su dviem realiais
+backend'ais (žr. žemiau). Jei radote ankstesnę šio README kopiją ar senesnį commit'ą,
+kuriame parašyta "tai NĖRA job queue tikra prasme" - tai buvo teisinga TADA, bet
+nebeatitinka dabartinio kodo.**
+
+Sistema turi DVI vykdymo veiksenas, pasirenkamas automatiškai pagal `REDIS_URL`
+(žr. `utils/jobStore/index.js` ir `queues/jobRunner.js`):
+
+| | Be `REDIS_URL` (inline) | Su `REDIS_URL` (BullMQ) |
+|---|---|---|
+| Kur vykdomas darbas | TAME PAČIAME HTTP procese (`setImmediate`) | ATSKIRAME worker procese (`workers/index.js`) |
+| Būsenos saugykla | `utils/jobStore/memoryStore.js` (in-memory `Map`) | `utils/jobStore/redisStore.js` (Redis) |
+| HTTP backend restartas vykdymo metu | **PRARANDA** darbą ir būseną (retry nėra) | **NEnutraukia** - darbą baigia worker'is |
+| Retry / backoff | Nėra | Taip - `attempts` + eksponentinis backoff (`queues/config.js`) |
+| Stalled/crashed worker recovery | Nėra (nėra worker'io) | Taip - BullMQ `stalledInterval`/`maxStalledCount` |
+| Tinka | Dev/desktop, vienas vartotojas | Produkcija, keli worker'iai, ilgi (>1 val.) įrašai |
+
+Tai TIKRA job queue Redis/BullMQ prasme, su realiais worker'iais - ne tik asinchroninio
+API kontrakto abstrakcija. `bullmq`/`ioredis` yra realios (nors ir `optionalDependencies`)
+priklausomybės, ne tik paminėtos planuose.
 
 `POST /api/generate` yra sinchroninis - klientas laiko atvirą HTTP ryšį, kol LLM
 baigia. Trumpiems susitikimams tai paprasčiau ir greičiau, bet 1-2 val. įrašui
@@ -118,13 +133,150 @@ curl http://localhost:3001/api/jobs/<jobId>
 ```
 
 Abu keliai (`/api/generate` ir `/api/jobs`) naudoja tą pačią logiką
-(`services/protocolService.js`), kad nereikėtų palaikyti dviejų kopijų.
+(`services/protocolService.js`), kad nereikėtų palaikyti dviejų kopijų. Inline ir
+BullMQ veiksenos irgi naudoja TĄ PATĮ processor'ių kodą (`queues/processors.js`),
+tad elgesys nesiskiria priklausomai nuo to, kuris backend'as aktyvus.
 
-**MVP limitas:** `utils/jobStore.js` yra in-memory (`Map`) - veikia vienam serverio
-procesui; jei procesas persileidžia arba veikia kelios replikos už load balancer'io,
-jobas gali "dingti". Produkcijai reikėtų Redis/BullMQ/SQS su dalinama saugykla -
-sąsaja (`create`/`get`/`update`) sąmoningai suprojektuota taip, kad pakeitimas
-nereikalautų keisti `routes/jobs.js`.
+### Redis/BullMQ architektūra (su `REDIS_URL`)
+
+```
+HTTP backend  --queue.add()-->  Redis (BullMQ eilė)  <--paima jobą--  worker procesas
+     │                                                                        │
+     └── grąžina 202 IŠ KARTO                              vykdo processor'ių, rašo
+                                                             būseną atgal į jobStore (Redis)
+```
+
+- `queues/transcriptionQueue.js`, `queues/protocolQueue.js` - atskiros eilės (galima
+  skalauti transkripciją ir protokolo generavimą nepriklausomai).
+- `workers/transcriptionWorker.js`, `workers/protocolWorker.js` - ATSKIRI nuo HTTP
+  backend'o procesai, IR (Docker aplinkoje) ATSKIRI DU compose servisai -
+  `transcription-worker` ir `protocol-worker` (žr. `docker-compose.gpu.yml`,
+  `docker-compose.server.yml`). Kiekvieną galima skalauti NEPRIKLAUSOMAI:
+  `docker compose ... up --scale transcription-worker=3` arba
+  `--scale protocol-worker=3`. (`workers/index.js` egzistuoja kaip patogumas
+  paleisti ABU worker'ius viename procese - naudojamas TIK `node workers/index.js`
+  rankinio/ne-Docker paleidimo atveju, NE compose servisuose.)
+- **Retry + backoff:** `attempts` (numatyta 3) su eksponentiniu backoff
+  (`QUEUE_BACKOFF_MS`, numatyta 5000ms) - `queues/config.js`.
+- **Stalled recovery:** jei worker'is krenta vykdymo metu neatnaujinęs job lock'o
+  per `stalledInterval` (numatyta 30s), BullMQ grąžina jobą į eilę - kitas worker'is
+  (ar tas pats po restarto) jį pakartoja, iki `maxStalledCount` (numatyta 2) kartų.
+- **"Dead-letter" terminijos patikslinimas:** kodo komentaruose ir anksčiau šiame
+  README naudotas terminas "dead-letter queue" yra NETIKSLUS - **NĖRA** atskiros
+  dead-letter eilės, į kurią galutinai nepavykę jobai būtų perkeliami. Po visų
+  `attempts` išnaudojimo jobas tiesiog lieka pažymėtas `failed` BullMQ eilėje ir
+  `jobStore` (su `error`/`error_code`), tik ilgiau saugomas diagnostikai
+  (`removeOnFail.age = 24h` vs `removeOnComplete.age = 1h`, žr. `queues/config.js`).
+  Tikslesnis apibūdinimas: *"retry + exponential backoff; po visų bandymų jobas
+  paliekamas BullMQ `failed` būsenoje 24h diagnostikai"* - ne klasikinė izoliuota DLQ.
+- **Audio/storage saugumas retry metu:** transkripcijos audio failas TRINAMAS TIK po
+  galutinio statuso (sėkmės arba išnaudotų bandymų `failed`), NE po kiekvieno
+  nepavykusio bandymo - kitaip retry neturėtų ką apdoroti (`workers/index.js`
+  `_cleanupStorage`, kviečiamas iš `worker.on("failed")` tik kai `attemptsExhausted`).
+- **Bendras storage worker'iui:** kadangi worker'is - atskiras procesas/konteineris,
+  jis audio failą pasiekia per bendrą `STORAGE_DIR` (Docker volume), NE per HTTP
+  backend'o lokalų `/tmp` - žr. `utils/fileStorage.js`.
+
+### Ką TIKRAI reikšia "restartas nenutraukia darbo" (scope patikslinimas)
+
+Teiginys *"HTTP backend restartas nenutraukia vykdomo darbo"* yra TIKSLUS, bet TIK
+BullMQ veiksenoje IR TIK HTTP backend konteinerio/proceso atžvilgiu:
+
+- **HTTP backend restartas** (BullMQ režime): jobas saugus Redis'e, worker'is (kuris
+  NEbuvo restartuotas) tęsia arba pasiima jį iš eilės. ✅ Darbas nenutrūksta.
+- **Worker'io kritimas vykdymo metu**: jobas tampa "stalled", BullMQ grąžina jį į
+  eilę, kitas worker'is jį PAKARTOJA. Tai **NĖRA** checkpoint/resume - transkripcija
+  (faster-whisper) neturi tarpinio taško, iš kurio tęsti; pakartotas bandymas
+  pradeda apdoroti audio NUO PRADŽIŲ. Ilgam (pvz. 4 val.) įrašui tai reiškia visą
+  apdorojimo laiką iš naujo, ne tik trumpą "tęsimą".
+- **Visos infrastruktūros (Redis + visi worker'iai) išjungimas** (pvz. `docker
+  compose down` ar visa mašina išjungiama): darbas nutrūksta kaip ir bet kurioje
+  eilės sistemoje - jobas lieka Redis'e (jei Redis duomenys išliko/persistentūs) ir
+  bus pakartotas, kai infrastruktūra grįš, bet TAI JAU NE "gyvo proceso tęsimas",
+  o "eilės atkūrimas po infrastruktūros grąžinimo".
+- **Inline veiksenoje** (be `REDIS_URL`): joks iš aukščiau nurodytų teiginių
+  negalioja - HTTP backend restartas ar kritimas vykdymo metu PRARANDA darbą ir
+  būseną, retry nėra (žr. `queues/jobRunner.js` komentarą `warnIfInlineInProduction`).
+
+### REDIS_REQUIRED - kada privaloma, kada ne
+
+`REDIS_REQUIRED=true` verčia sistemą griežtai atsisakyti tylaus fallback'o į
+in-memory/inline, jei Redis nepasiekiamas per startą (kietas gedimas vietoj tylaus
+darbo praradimo). Worker procesas (`workers/index.js`) ELGIASI TAIP VISADA,
+nepriklausomai nuo šio env kintamojo - worker'iui nėra prasmingo memory fallback
+(jis matytų Redis eilę, bet laikytų būseną savo proceso atmintyje, nematytų HTTP
+backend'o sukurtų jobų). **HTTP backend'ui** `REDIS_REQUIRED=true` REKOMENDUOJAMA
+GPU/produkcijos Docker profiliuose (`docker-compose.gpu.yml`, `docker-compose.server.yml`)
+- be jo backend'as tyliai (su `console.warn`) grįžtų į inline, jei Redis prisijungimas
+per startą nepavyktų, o tai reikštų persistencijos praradimą būtent tada, kai ji
+labiausiai reikalinga (ilgi GPU įrašai).
+
+### Worker heartbeat ir /api/ready readiness politika
+
+BullMQ režime kiekvienas worker procesas (`transcription-worker`, `protocol-worker`)
+periodiškai rašo SAVO TIPO Redis raktą su TTL (`stenograma:worker:<tipas>:lastSeen`,
+žr. `utils/workerHeartbeat.js`). `/api/ready` tikrina ABU raktus atskirai ir grąžina:
+
+```json
+{
+  "ready": false,
+  "components": {
+    "workerAlive": false,
+    "workers": { "transcription": true, "protocol": false }
+  }
+}
+```
+
+**Sprendimas (dabartinis, tyčinis): `workerAlive` reikalauja, kad ABU worker tipai
+būtų gyvi** (`transcription && protocol`), NE tik tie, kurie realiai naudojami
+konkrečiame diegime. Tai atitinka dabartinius compose profilius
+(`docker-compose.gpu.yml`, `docker-compose.server.yml`), kurie VISADA deklaruoja
+abu worker servisus kartu.
+
+**Žinoma riba:** jei kada nors atsirastų diegimas, kuris sąmoningai naudoja TIK
+vieną worker tipą (pvz. tik transkripcijos servisą, o protokolai generuojami
+išimtinai per sinchroninį `/api/generate`), `/api/ready` visada rodytų `503` dėl
+trūkstamo (ir nereikalingo) protokolo worker'io heartbeat. Tokiu atveju reikėtų
+konfigūruojamo sąrašo (pvz. `REQUIRED_WORKERS=transcription,protocol` env
+kintamojo), kuris nurodytų, kurie worker tipai TIKRAI privalomi šiam konkrečiam
+diegimui - `getWorkerStatus()` (`utils/workerHeartbeat.js`) jau grąžina abiejų
+tipų būseną atskirai, tad tokį filtravimą būtų nesunku pridėti `server.js`
+`/api/ready` route'e, nekeičiant pačio heartbeat mechanizmo.
+
+### Testai (Redis/BullMQ specifiniai)
+
+- `tests/jobStore.test.js` - in-memory backend'as (TTL valymas) + Redis backend'o
+  perjungimo testai (naudoja MOCK Redis factory, žr. `_setRedisFactoryForTests`).
+- `tests/jobStoreRedis.test.js` - **NE su realiu Redis**, nepaisant pavadinimo -
+  testuoja `redisStore.js` LOGIKĄ (serializacija/deserializacija, raktų schema,
+  sweep) su rankiniu `FakeRedis` klase (in-memory imitacija ioredis API), kad
+  veiktų be tikro Redis serverio. Tikrina, kad kodas TEISINGAI naudoja Redis
+  komandas, bet NETIKRINA tikro Redis tinklo elgesio.
+- `tests/jobRunnerBullmq.test.js` - `jobRunner` BullMQ veiksenos unit testai su
+  MOCK `bullmq`/`ioredis` (per `Module._load` perėmimą), taip pat be tikro Redis.
+- `tests/queueRecovery.integration.test.js` - naudoja **TIKRĄ** Redis + tikrą
+  BullMQ `Queue`/`Worker` (restart recovery, stalled recovery).
+- `tests/heartbeatReadiness.integration.test.js` - naudoja **TIKRĄ** Redis:
+  worker'io `startHeartbeat()` rašo raktą PER TIKRĄ Redis, `GET /api/ready`
+  (per tikrą `server.js` + supertest) TĄ PATĮ raktą TIKRAI perskaito, o raktui
+  dingus (imituoja TTL expiry per tiesioginį `DEL`, be realaus 30s laukimo) -
+  readiness pereina į 503 su tiksliu `workers.{transcription,protocol}`
+  skaidymu. Anksčiau ŠI KONKREČIA grandinė (worker → Redis → /api/ready) buvo
+  testuota tik atskirai (heartbeat su mock Redis, arba readiness logika be
+  realaus rašymo/skaitymo per tinklą).
+  
+  Abu šie integraciniai testai PRALEIDŽIAMI be `REDIS_URL` (`skip`, ne fail).
+  **SVARBU:** CI TYČIA NEDUODA `REDIS_URL` visam `npm test` žingsniui (tai
+  sugadintų route testus, kurie tikisi inline vykdymo be worker'io) - abu šie
+  failai paleidžiami ATSKIRU CI žingsniu (`npm run test:redis`) su savo
+  `REDIS_URL`, žr. `.github/workflows/ci.yml`.
+
+  Jei reikėtų testo, kuris TIKRAI tikrina `redisStore.js` su realiu Redis (ne
+  FakeRedis) - tai būtų atskiras `tests/jobStoreRedis.integration.test.js`,
+  kurio šiuo metu NĖRA (galimas kitas žingsnis, jei prireiktų).
+- `tests/workerGuard.test.js`, `tests/workerHeartbeat.test.js` - worker paleidimo
+  apsauga (`initializeWorkerOrFail`) ir heartbeat mechanizmas (`/api/ready` patikrina,
+  kad worker'is GYVAS, ne tik kad Redis pasiekiamas).
 
 ## Testai
 
@@ -153,7 +305,15 @@ npm run check   # node --check kiekvienam .js failui
 - `tests/fasterWhisperConcurrency.test.js` — patikrina, kad `FASTER_WHISPER_MAX_CONCURRENCY` REALIAI serializuoja vienalaikes užklausas (matuojama laiko trukme, ne tik loginė patikra).
 - `tests/groundingCheck.test.js` — leksinio persidengimo grounding check heuristika (buvęs `factCheck.test.js`, pervadinta terminologijos tikslumui).
 
-CI (`.github/workflows/ci.yml`): `npm ci` → `node --check` → `npm test` → realaus serverio smoke testas prieš `/api/health`.
+CI (`.github/workflows/ci.yml`): `npm ci` → `node --check` → `npm test` (BE
+`REDIS_URL` - route testai tikisi inline vykdymo) → **atskiras** žingsnis
+`npm run test:redis` SU `REDIS_URL` (tikras Redis servisas CI runner'yje - dabar
+paleidžia DU failus: `tests/queueRecovery.integration.test.js` IR
+`tests/heartbeatReadiness.integration.test.js`) → realaus serverio smoke testas
+prieš `/api/health`. Šis atskyrimas BŪTINAS - jei `REDIS_URL` būtų visam `npm test`,
+route testai (pvz. `jobs.route.test.js`), kurie tikisi, kad jobas užsibaigs
+INLINE tame pačiame procese, pereitų į BullMQ režimą ir amžinai liktų "queued"
+(joks worker'is jų neapdorotų).
 
 ## Realaus audio testas (tikras 4 val. posėdžio įrašas)
 

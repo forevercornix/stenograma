@@ -13,6 +13,28 @@ jobs:
       run:
         working-directory: backend
 
+    # Tikras Redis servisas reikalingas DVIEM integraciniams testams (abu
+    # gated `!!process.env.REDIS_URL` - be šio serviso abu visada skip):
+    #   - tests/queueRecovery.integration.test.js (restart/stalled recovery)
+    #   - tests/heartbeatReadiness.integration.test.js (worker heartbeat -> /api/ready)
+    # Kiti Redis/BullMQ testai (tests/jobStoreRedis.test.js - naudoja FakeRedis;
+    # tests/jobRunnerBullmq.test.js - mock'ina bullmq/ioredis) NĖRA gated per
+    # REDIS_URL - jie vykdomi bendrame "Unit / route testai" žingsnyje BE šio
+    # serviso, nepriklausomai nuo jo (žr. backend/README.md "Testai" - detalus
+    # paaiškinimas, kuris testas ką TIKRAI naudoja).
+    # Anksčiau CI neturėjo šio serviso - "žalias" testų rezultatas neįrodydavo, kad
+    # BullMQ/Redis restart-recovery kelias realiai veikia, tik kad jis buvo praleistas.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,8 +53,28 @@ jobs:
       - name: Lint (ESLint - React hooks, nenaudoti kintamieji, nepasiekiamas kodas)
         run: npm run lint
 
-      - name: Unit / route testai (mock tiekėjai, be jokių API raktų)
+      # SVARBU: šis žingsnis TYČIA neturi REDIS_URL. Dauguma route testų
+      # (tests/jobs.route.test.js, tests/transcribeJobs.route.test.js,
+      # tests/jobStore.test.js "be REDIS_URL naudojamas in-memory" ir kt.)
+      # daro require("../server") ir tikisi INLINE vykdymo (job baigiasi tame
+      # pačiame procese be worker'io). Jei REDIS_URL būtų nustatytas čia (o CI
+      # Redis servisas realiai pasiekiamas), jobRunner automatiškai pereitų į
+      # BullMQ režimą - jobai liktų amžinai "queued", nes šiuose testuose joks
+      # worker'is jų neapdoroja. Tai buvo realus regresijos rizikos šaltinis,
+      # kai REDIS_URL anksčiau buvo nustatytas VISAM `npm test` žingsniui.
+      - name: Unit / route testai (inline režimas - be Redis)
         run: npm test
+
+      # ATSKIRAS žingsnis TIK realaus Redis/BullMQ integraciniams testams
+      # (tests/queueRecovery.integration.test.js - restart/stalled recovery;
+      # tests/heartbeatReadiness.integration.test.js - worker heartbeat -> /api/ready
+      # per TIKRĄ Redis) - abu PATYS patikrina process.env.REDIS_URL ir skip'ina
+      # save, jei nenustatytas, tad čia REDIS_URL saugu nustatyti TIK šiam
+      # žingsniui, neliečiant likusių (route testų) žingsnio aukščiau.
+      - name: Redis/BullMQ integraciniai testai (restart/stalled recovery + heartbeat readiness su tikru Redis)
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: npm run test:redis
 
       - name: Smoke test - paleisti serverį ir patikrinti /api/health
         env:
@@ -199,3 +241,115 @@ jobs:
           docker compose logs backend
           docker compose down
           exit 1
+
+  # Validuoja GPU/server profilių docker-compose MERGE rezultatą - NEBANDO jų
+  # realiai paleisti (GHA runner'is neturi GPU), bet `docker compose ... config`
+  # neturi tokio apribojimo (tai tik YAML merge/validacija, ne konteinerių
+  # paleidimas). BŪTINA, nes ankstesnėse šio projekto iteracijose būtent MERGE
+  # semantika (ne kodo logika) sukėlė realias klaidas, kurios "žaliame" `config`
+  # patikrinime būtų buvusios matomos iš karto:
+  #   - trūkstamas `worker` servisas gpu.yml (BullMQ eilė be nieko, kas ją apdoroja);
+  #   - `devices: []` NEPAŠALINDAVO paveldėtos GPU rezervacijos (Compose sujungia
+  #     sąrašus PRIDEDAMAI, ne pakeičiant - reikėjo `!reset`/`!override`, žr.
+  #     docker-compose.server.yml komentarus).
+  #
+  # Naudojam `config --format json` + Python STANDARTINĘ `json` biblioteką (NE
+  # PyYAML) - dviem priežastims: (1) neprireikia jokios papildomos pip
+  # priklausomybės (GHA `ubuntu-latest` runner'is jau turi sistemos python3);
+  # (2) JSON išvestis jau PILNAI IŠSPRĘSTA (be `!reset`/`!override` custom YAML
+  # tag'ų, kurių bendras YAML parseris - pvz. PyYAML - apskritai NEATPAŽINTŲ be
+  # papildomo custom loader'io).
+  compose-config-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose config - GPU profilis (embedded)
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config --format json > /tmp/gpu-compose.json
+          cat /tmp/gpu-compose.json
+
+      - name: docker compose config - server profilis (whisper-server + pyannote-server)
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.server.yml config --format json > /tmp/server-compose.json
+          cat /tmp/server-compose.json
+
+      - name: Patikrinti GPU/volume paskirstymą po merge (GPU profilis)
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+
+          with open("/tmp/gpu-compose.json") as f:
+              cfg = json.load(f)
+          svc = cfg["services"]
+
+          def has_gpu(name):
+              devices = (svc[name].get("deploy") or {}).get("resources", {}).get("reservations", {}).get("devices", [])
+              return any(d.get("driver") == "nvidia" for d in devices)
+
+          errors = []
+          # Embedded GPU profilyje backend IR transcription-worker TURI turėti GPU
+          # (sinchroniniai endpoint'ai ir embedded transkripcija - žr. docker-compose.gpu.yml).
+          if not has_gpu("backend"):
+              errors.append("GPU profilis: backend turi TURĖTI GPU (sinchroniniai /api/transcribe, /api/generate)")
+          if not has_gpu("transcription-worker"):
+              errors.append("GPU profilis: transcription-worker turi TURĖTI GPU (embedded faster-whisper)")
+          if has_gpu("protocol-worker"):
+              errors.append("GPU profilis: protocol-worker NETURI turėti GPU (tik LLM API kvietimas)")
+          if not has_gpu("pyannote"):
+              errors.append("GPU profilis: pyannote turi TURĖTI GPU")
+
+          if errors:
+              print("\n".join(errors), file=sys.stderr)
+              sys.exit(1)
+          print("OK: GPU profilio GPU paskirstymas teisingas.")
+          PYEOF
+
+      - name: Patikrinti GPU/volume paskirstymą po merge (server profilis)
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+
+          with open("/tmp/server-compose.json") as f:
+              cfg = json.load(f)
+          svc = cfg["services"]
+
+          def has_gpu(name):
+              devices = (svc[name].get("deploy") or {}).get("resources", {}).get("reservations", {}).get("devices", [])
+              return any(d.get("driver") == "nvidia" for d in devices)
+
+          def volume_targets(name):
+              """Grąžina servisio volume TARGET (konteinerio) kelius, aibe.
+              `docker compose config --format json` volumes visada JSON objektų
+              sąrašas su `target` raktu (long syntax) - jokio short "source:target"
+              string'o čia nebūna, tad papildomo string-parsing atvejo nereikia."""
+              return {v.get("target", "") for v in (svc[name].get("volumes") or [])}
+
+          errors = []
+          # Server profilyje backend IR transcription-worker naudoja whisper-server
+          # per HTTP - GPU jiems NEBEREIKIA (!reset override turi tai pašalinti).
+          if has_gpu("backend"):
+              errors.append("Server profilis: backend NETURI turėti GPU (naudoja whisper-server per HTTP) - !reset override neveikė!")
+          if has_gpu("transcription-worker"):
+              errors.append("Server profilis: transcription-worker NETURI turėti GPU (naudoja whisper-server per HTTP) - !reset override neveikė!")
+          if has_gpu("protocol-worker"):
+              errors.append("Server profilis: protocol-worker NETURI turėti GPU")
+          if not has_gpu("whisper"):
+              errors.append("Server profilis: whisper servisas TURI turėti GPU")
+
+          # /storage turi išlikti (audio worker'iui), /models NETURI likti backend/
+          # transcription-worker servisuose (!override turi jį pašalinti - modelis
+          # server profilyje gyvena TIK whisper servise).
+          for name in ("backend", "transcription-worker"):
+              targets = volume_targets(name)
+              if "/storage" not in targets:
+                  errors.append(f"Server profilis: {name} turi turėti /storage volume")
+              if "/models" in targets:
+                  errors.append(f"Server profilis: {name} NETURI turėti /models volume (!override neveikė?) - rasti targets: {targets}")
+
+          if errors:
+              print("\n".join(errors), file=sys.stderr)
+              sys.exit(1)
+          print("OK: server profilio GPU/volume paskirstymas teisingas.")
+          PYEOF
+

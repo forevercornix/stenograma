@@ -72,25 +72,28 @@ app.get("/api/ready", async (req, res) => {
   }
 
   // BullMQ režime init flag'ai NEUŽTENKA - jie tik reiškia "režimas pasirinktas". Realiam
-  // readiness tikrinam: (a) ar Redis pasiekiamas (queue.add nepakibtų), (b) ar WORKER
-  // gyvas (heartbeat raktas šviežias) - kitaip jobai būtų priimami, bet liktų queued, nes
+  // readiness tikrinam: (a) ar Redis pasiekiamas (queue.add nepakibtų), (b) ar ABU
+  // worker TIPAI gyvi (heartbeat raktai šviežias KIEKVIENAM atskirai - transkripcijos
+  // ir protokolo worker'iai gali būti ATSKIRI procesai/konteineriai, žr.
+  // utils/workerHeartbeat.js) - kitaip jobai būtų priimami, bet liktų queued, nes
   // niekas jų neapdoroja. Inline režime nieko papildomo (viskas tame pačiame procese).
   let redisReachable = true;
-  let workerAlive = true;
+  let workers = { transcription: true, protocol: true };
   if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
     let conn = null;
     try {
       const { createQueueConnection } = require("./queues/config");
-      const { isWorkerAlive } = require("./utils/workerHeartbeat");
+      const { getWorkerStatus } = require("./utils/workerHeartbeat");
       conn = createQueueConnection();
       await conn.ping();
-      workerAlive = await isWorkerAlive(conn); // heartbeat raktas su TTL
+      workers = await getWorkerStatus(conn); // { transcription: bool, protocol: bool }
     } catch {
       redisReachable = false;
     } finally {
       if (conn) await conn.quit().catch(() => {});
     }
   }
+  const workerAlive = workers.transcription && workers.protocol;
 
   const ready = initReady && redisReachable && workerAlive;
   res.status(ready ? 200 : 503).json({
@@ -99,7 +102,8 @@ app.get("/api/ready", async (req, res) => {
       jobStore: readiness.jobStore,
       jobRunner: readiness.jobRunner,
       redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
-      workerAlive,    // BullMQ režime rodo, ar worker heartbeat šviežias; inline - visada true
+      workerAlive,    // BullMQ režime: true TIK jei ABU worker tipai gyvi; inline - visada true
+      workers,        // detali būsena PER TIPĄ - kuri konkrečiai eilė (jei kuri) neturi gyvo worker'io
     },
   });
 });
