@@ -12,7 +12,7 @@ const assert = require("node:assert/strict");
  * SVARBU: šis failas paleidžiamas ATSKIRAI nuo pagrindinio `npm test` (žr.
  * .github/workflows/ci.yml ir package.json "test:redis") - REDIS_URL NEGALI būti
  * nustatytas visam `npm test`, nes route testai (jobs.route.test.js ir kt.) tikisi
- * INLINE vykdymo be worker'io; su realiu pasiekiamu Redis jie pereitų į BullMQ
+await jobStore._resetForTests(); * INLINE vykdymo be worker'io; su realiu pasiekiamu Redis jie pereitų į BullMQ
  * režimą ir amžinai liktų "queued".
  *
  * Ką tikrina (1 etapo priėmimo kriterijus "restart neturi nutraukti darbo"):
@@ -39,6 +39,7 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
     await worker?.close().catch(() => {});
     await queue?.close().catch(() => {});
     await jobRunner.close().catch(() => {});
+    await jobStore._resetForTests();
   });
 
   await jobStore.init();
@@ -98,7 +99,8 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     await recoveryWorker?.close().catch(() => {});
     await queue?.close().catch(() => {});
     await jobRunner.close().catch(() => {});
-  });
+    await jobStore._resetForTests(); 
+ });
 
   await jobStore.init();
   await jobRunner.init();
