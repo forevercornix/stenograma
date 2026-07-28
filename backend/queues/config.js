@@ -13,8 +13,8 @@
  * (jobRunner.js) - dabartinį in-proceso elgesį (fallback, tinka dev/desktop).
  */
 const QUEUE_NAMES = {
-  TRANSCRIPTION: "stenograma:transcription",
-  PROTOCOL: "stenograma:protocol",
+  TRANSCRIPTION: "stenograma-transcription",
+  PROTOCOL: "stenograma-protocol",
 };
 
 // BullMQ job'ų nustatymai - retry, backoff, valymas.
