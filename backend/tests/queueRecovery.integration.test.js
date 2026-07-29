@@ -173,6 +173,7 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
       // Trumpas lock/stalled testui, kad nereikėtų laukti 30s.
       lockDuration: 2000,
       stalledInterval: 1000,
+      skipLockRenewal: true,
     }
   );
   console.log("[queueRecovery] test2 dyingWorker create END");
