@@ -199,6 +199,11 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
         protocol: { pavadinimas: "Recovered" },
         meta: {},
       };
+    },
+    {
+      stalledInterval: 1000,
+      lockDuration: 2000,
+      maxStalledCount: 2,
     }
   );
   console.log("[queueRecovery] recovery worker CREATED");

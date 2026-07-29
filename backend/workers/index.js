@@ -37,7 +37,7 @@ async function _cleanupStorage(payload) {
  * Sukuria BullMQ Worker vienai eilei. Processor'ius vykdo darbą; on-events atnaujina
  * jobStore būseną (started/completed/failed su attempt_count).
  */
-function createWorker(queueName, processor) {
+function createWorker(queueName, processor, workerOptions = {}) {
   const { Worker } = require("bullmq");
   const connection = createQueueConnection();
 
@@ -70,7 +70,7 @@ function createWorker(queueName, processor) {
       await _cleanupStorage(payload);
       return result;
     },
-    { connection, ...WORKER_OPTIONS }
+    { connection, ...WORKER_OPTIONS, ...workerOptions }
   );
 
   worker.on("failed", async (job, err) => {
