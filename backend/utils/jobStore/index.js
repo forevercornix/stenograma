@@ -1,5 +1,5 @@
 const memoryStore = require("./memoryStore");
-const { STATUS, TTL_MS } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS } = require("./common");
 
 /**
  * Job store įėjimo taškas su AUTOMATINIU backend'o parinkimu:
@@ -94,9 +94,9 @@ async function ensureInit() {
 
 module.exports = {
   init,
-  create: async () => {
+  create: async (fields = {}) => {
     await ensureInit();
-    return store.create();
+    return store.create(fields);
   },
   get: async (id) => {
     await ensureInit();
@@ -123,6 +123,7 @@ module.exports = {
   },
   getBackend: () => store.backend || "memory",
   STATUS,
+  JOB_TYPES,
   TTL_MS,
 
   // --- TIK TESTAMS (dependency injection tikrai race patikrai) ---

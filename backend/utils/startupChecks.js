@@ -73,6 +73,18 @@ function validateConfig(env = process.env) {
     warnings.push("API_KEY nenustatytas - API atviras be autentifikacijos (tinka tik lokaliam naudojimui).");
   }
 
+  // Audito pseudonimizacijos druska. Produkcijoje tai KIETA klaida, ne įspėjimas:
+  // be jos naudojama repozitorijoje esanti vieša numatytoji reikšmė, tad bet kas,
+  // žinantis ar spėjantis job/meeting ID, gali apskaičiuoti tą patį HMAC ir
+  // "pseudonimizacija" nustoja ką nors saugoti.
+  if (env.NODE_ENV === "production" && !env.AUDIT_ID_SALT && env.PRIVACY_MODE !== "true") {
+    errors.push(
+      "AUDIT_ID_SALT nenustatytas, o NODE_ENV=production. Be jo audito subjectId " +
+        "pseudonimizacija atsukama (naudojama vieša numatytoji druska). " +
+        "Sugeneruokite: openssl rand -hex 32 (arba nustatykite PRIVACY_MODE=true, jei auditas nereikalingas)."
+    );
+  }
+
   return { errors, warnings };
 }
 

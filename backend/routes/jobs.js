@@ -28,7 +28,7 @@ router.post("/jobs", rateLimiter, apiKeyAuth, async (req, res) => {
     return res.status(400).json({ error: "Transkripcija per trumpa arba tuščia." });
   }
 
-  const job = await jobStore.create();
+  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
 
   // HTTP endpoint'as TIK įdeda jobą į eilę (BullMQ) arba paleidžia inline (be Redis)
   // ir grąžina 202. Protokolo generavimo (LLM) darbą vykdo worker procesas ar
@@ -74,6 +74,13 @@ router.delete("/jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
     return res.status(404).json({ error: "Jobas nerastas." });
   }
 
+  // Tipo patikra: abu endpoint'ai naudoja TĄ PATĮ jobStore, tad be jos transkripcijos
+  // jobo ID, pateiktas šiam endpoint'ui, būtų surastas, ištrintas iš jobStore, o
+  // valymas vyktų NE TOJE BullMQ eilėje - duomenys liktų, klientas gautų 204.
+  if (job.type !== jobStore.JOB_TYPES.PROTOCOL) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
   const deletableStatuses = new Set([
     jobStore.STATUS.COMPLETED,
     jobStore.STATUS.FAILED,
@@ -87,16 +94,29 @@ router.delete("/jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
     });
   }
 
-  const outcome = await eraseJob(job.id, "protocol");
+  const outcome = await eraseJob(job);
+
+  if (outcome.criticalFailure) {
+    // NEGRĄŽINAME 204: jobStore įrašas sąmoningai paliktas (deletion_pending),
+    // kad operaciją būtų galima pakartoti tuo pačiu ID. GDPR ištrynime serverio
+    // logas nėra pakankamas patvirtinimas - klientas turi matyti, kad nepavyko.
+    console.error(
+      `[stenograma] NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
+    );
+    return res.status(503).json({
+      error:
+        "Nepavyko visiškai ištrinti jobo duomenų. Jobas paliktas, kad užklausą būtų galima pakartoti.",
+      deletion: {
+        queueJobRemoved: outcome.queueJobRemoved,
+        storageRemoved: outcome.storageRemoved,
+        auditEntriesRemoved: outcome.auditEntriesRemoved,
+        errors: outcome.errors,
+      },
+    });
+  }
 
   if (!outcome.jobRemoved) {
     return res.status(404).json({ error: "Jobas nerastas." });
-  }
-
-  if (outcome.errors.length) {
-    console.error(
-      `[stenograma] Dalinis jobo ištrynimas (${job.id}): ${outcome.errors.join("; ")}`
-    );
   }
 
   return res.status(204).send();

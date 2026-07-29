@@ -51,7 +51,7 @@ test("transcribeAudio() susieja audito įrašą su jobId, tad jį galima ištrin
   assert.equal(entries[0].subjectId, auditLog.pseudonymizeIdentifier(jobId));
   assert.notEqual(entries[0].subjectId, jobId, "ID turi būti pseudonimizuotas");
 
-  assert.equal(auditLog.removeBySubjectIdentifier(jobId), 1);
+  assert.equal(await auditLog.removeBySubjectIdentifier(jobId), 1);
   assert.equal(auditLog.getAll().length, 0);
 });
 
@@ -75,7 +75,7 @@ test("generateProtocol() susieja audito įrašą su jobId", async () => {
     )
   );
 
-  assert.ok(auditLog.removeBySubjectIdentifier(jobId) >= 1);
+  assert.ok((await auditLog.removeBySubjectIdentifier(jobId)) >= 1);
   assert.equal(auditLog.getAll().length, 0);
 });
 
@@ -96,5 +96,5 @@ test("nesėkmingas transkribavimas irgi susiejamas su jobId", async () => {
   const entries = auditLog.getAll();
   assert.equal(entries.length, 1);
   assert.equal(entries[0].result, "failure");
-  assert.equal(auditLog.removeBySubjectIdentifier(jobId), 1);
+  assert.equal(await auditLog.removeBySubjectIdentifier(jobId), 1);
 });

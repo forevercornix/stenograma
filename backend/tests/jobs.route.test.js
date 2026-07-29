@@ -91,3 +91,22 @@ test("DELETE /api/jobs/:id - ištrina užbaigtą protokolo jobą ir jo auditą",
     0
   );
 });
+
+test("DELETE /api/jobs/:id - TRANSKRIPCIJOS jobo ID nepriimamas (404, jobas lieka)", async () => {
+  const jobStore = require("../utils/jobStore");
+
+  const transcriptionJob = await jobStore.create({
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+  });
+  await jobStore.update(transcriptionJob.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { text: "Jautri transkripcija" },
+  });
+
+  const res = await request(app).delete(`/api/jobs/${transcriptionJob.id}`);
+
+  assert.equal(res.status, 404);
+  assert.ok(await jobStore.get(transcriptionJob.id));
+
+  await jobStore.remove(transcriptionJob.id);
+});

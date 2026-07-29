@@ -113,7 +113,12 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     const ext = path.extname(req.file.originalname || "") || "";
     storageKey = await fileStorage.putFile(req.file.path, { ext });
 
-    job = await jobStore.create();
+    job = await jobStore.create({
+      type: jobStore.JOB_TYPES.TRANSCRIPTION,
+      // storageKey saugom JOBE, ne tik BullMQ payload'e - kad GDPR ištrynimas
+      // rastų likusį audio ir INLINE režime (ten BullMQ jobo išvis nėra).
+      storageKey,
+    });
 
     // HTTP endpoint'as TIK įdeda jobą į eilę (ar inline) ir grąžina 202. Darbą
     // vykdo worker (BullMQ) arba setImmediate (inline). Backend nevykdo transkripcijos
@@ -207,6 +212,13 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
     return res.status(404).json({ error: "Jobas nerastas." });
   }
 
+  // Tipo patikra: abu endpoint'ai naudoja TĄ PATĮ jobStore, tad be jos protokolo
+  // jobo ID, pateiktas šiam endpoint'ui, būtų surastas, ištrintas iš jobStore, o
+  // valymas vyktų NE TOJE BullMQ eilėje - duomenys liktų, klientas gautų 204.
+  if (job.type !== jobStore.JOB_TYPES.TRANSCRIPTION) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
   const deletableStatuses = new Set([
     jobStore.STATUS.COMPLETED,
     jobStore.STATUS.FAILED,
@@ -220,18 +232,29 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
     });
   }
 
-  const outcome = await eraseJob(job.id, "transcription");
+  const outcome = await eraseJob(job);
+
+  if (outcome.criticalFailure) {
+    // NEGRĄŽINAME 204: jobStore įrašas sąmoningai paliktas (deletion_pending),
+    // kad operaciją būtų galima pakartoti tuo pačiu ID. GDPR ištrynime serverio
+    // logas nėra pakankamas patvirtinimas - klientas turi matyti, kad nepavyko.
+    console.error(
+      `[stenograma] NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
+    );
+    return res.status(503).json({
+      error:
+        "Nepavyko visiškai ištrinti jobo duomenų. Jobas paliktas, kad užklausą būtų galima pakartoti.",
+      deletion: {
+        queueJobRemoved: outcome.queueJobRemoved,
+        storageRemoved: outcome.storageRemoved,
+        auditEntriesRemoved: outcome.auditEntriesRemoved,
+        errors: outcome.errors,
+      },
+    });
+  }
 
   if (!outcome.jobRemoved) {
     return res.status(404).json({ error: "Jobas nerastas." });
-  }
-
-  if (outcome.errors.length) {
-    // Klientui grąžinam 204 (jobo įrašas ir rezultatas pašalinti), bet dalinį
-    // nepavykimą BŪTINA matyti serverio loge - tai GDPR procedūros defektas.
-    console.error(
-      `[stenograma] Dalinis jobo ištrynimas (${job.id}): ${outcome.errors.join("; ")}`
-    );
   }
 
   return res.status(204).send();

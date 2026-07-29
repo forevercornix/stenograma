@@ -1,4 +1,4 @@
-const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -80,8 +80,8 @@ function deserialize(flat) {
 }
 
 function createRedisStore(redisClient) {
-  async function create() {
-    const job = newJob();
+  async function create(fields = {}) {
+    const job = newJob(fields);
     await redisClient.hset(JOB_PREFIX + job.id, serialize(job));
     await redisClient.zadd(INDEX_KEY, Date.now(), job.id);
     return job;
@@ -150,7 +150,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, get, update, remove, sweepExpired, size, close, STATUS, TTL_MS, backend: "redis" };
+  return { create, get, update, remove, sweepExpired, size, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize };

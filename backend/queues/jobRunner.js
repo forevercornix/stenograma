@@ -164,6 +164,9 @@ async function _runInline(type, jobId, payload) {
     if (payload && payload.storageKey) {
       const fileStorage = require("../utils/fileStorage");
       await fileStorage.del(payload.storageKey).catch(() => {});
+      // Pažymim, kad audio TIKRAI ištrintas - kitaip GDPR ištrynimas vėliau
+      // bandytų trinti jau nesantį raktą ir raportuotų netikrą "storageRemoved".
+      await jobStore.update(jobId, { storageKey: null }).catch(() => {});
     }
   }
 }

@@ -24,11 +24,8 @@ const log = [];
 const DEFAULT_RETENTION_DAYS = 30;
 const DEFAULT_MAX_ENTRIES = 5000;
 
-// Monotoniškas skaitiklis. Anksčiau ID buvo `log.length + 1`, tad po purge/remove
-// ID pradėdavo kartotis (realiai gauta seka: 1, 3, 3) - audito žurnale tai defektas.
-let nextId = 1;
-
 let saltWarningShown = false;
+let privacyPurgeWarningShown = false;
 
 function isPrivacyModeEnabled() {
   return String(process.env.PRIVACY_MODE || "").toLowerCase() === "true";
@@ -288,14 +285,17 @@ function record(entry = {}) {
     // Fail-safe: įjungus PRIVACY_MODE ne tik neberašom, bet ir nebelaikom to,
     // kas jau sukaupta atmintyje. Tas pats tikrinimas yra getAll() - kad
     // duomenys būtų nepasiekiami net jei naujų įvykių nebeateina.
-    clear();
+    purgeForPrivacyMode();
     return null;
   }
 
   purgeExpired();
 
   const row = Object.freeze({
-    id: nextId++,
+    // UUID, ne skaitiklis: `log.length + 1` kartodavosi po purge/remove, o
+    // monotoniškas skaitiklis lieka unikalus tik VIENO proceso gyvavimo metu
+    // (po restarto vėl nuo 1). UUID tinka ir perkėlus auditą į SQLite/Postgres.
+    id: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
     event: normalizeEvent(entry),
 
@@ -331,7 +331,7 @@ function record(entry = {}) {
 
 function getAll() {
   if (isPrivacyModeEnabled()) {
-    clear();
+    purgeForPrivacyMode();
     return [];
   }
 
@@ -345,11 +345,36 @@ function getAll() {
 
 function clear() {
   log.length = 0;
-  // nextId SĄMONINGAI neatstatomas - ID turi likti unikalūs viso proceso gyvavimo
-  // metu, kitaip ištrynus įrašus atsirastų besikartojantys audito ID.
 }
 
-function removeBySubjectIdentifier(value) {
+/**
+ * PRIVACY_MODE ištrynimas yra NEGRĮŽTAMAS, todėl jis nėra tylus: pirmą kartą,
+ * kai dėl vėliavos realiai kažkas išmetama, į logą rašomas aiškus įspėjimas.
+ * (Administratorius, laikinai įjungęs vėliavą, kitaip pamatytų tik tuščią
+ * /api/audit sąrašą ir nesuprastų, kad atmintis jau išvalyta.)
+ */
+function purgeForPrivacyMode() {
+  const removed = log.length;
+
+  clear();
+
+  if (removed > 0 && !privacyPurgeWarningShown) {
+    privacyPurgeWarningShown = true;
+    console.warn(
+      `[stenograma] PRIVACY_MODE=true - audito žurnalas išvalytas (${removed} įrašų). ` +
+        "Tai negrįžtama; išjungus vėliavą įrašai neatsistato."
+    );
+  }
+
+  return removed;
+}
+
+/**
+ * ASYNC sąmoningai, nors saugykla in-memory: eraseJob() ir maršrutai jau dabar
+ * kviečia su await, tad perkėlus auditą į SQLite/Postgres (Milestone 2) sąsaja
+ * nesikeis.
+ */
+async function removeBySubjectIdentifier(value) {
   const subjectId = pseudonymizeIdentifier(value);
   if (!subjectId) return 0;
 

@@ -21,10 +21,19 @@ const TTL_MS = parseInt(process.env.JOB_TTL_MINUTES || "60", 10) * 60 * 1000;
  *  - created_at / started_at / completed_at: gyvavimo ciklo laikai (diagnostikai);
  *  - error_code / error_message: struktūrizuota klaida (ne tik tekstas).
  */
-function newJob() {
+function newJob(fields = {}) {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
+    // Jobo TIPAS. Abu async endpoint'ai (transkripcija ir protokolas) naudoja TĄ
+    // PATĮ jobStore, tad be tipo DELETE /api/transcribe-jobs/:id priimdavo ir
+    // protokolo jobo ID: įrašas būdavo surandamas ir ištrinamas, o valymo kodas
+    // ieškodavo NE TOJE BullMQ eilėje - duomenys likdavo, klientas gaudavo 204.
+    type: fields.type || "transcription",
+    // Bendro audio storage raktas. Saugomas, kol failas TIKRAI ištrintas (tada
+    // nustatomas į null) - kad GDPR ištrynimas surastų likutį ir INLINE režime,
+    // kur BullMQ jobo (ir jo payload'o su storageKey) apskritai nėra.
+    storageKey: fields.storageKey || null,
     status: STATUS.QUEUED,
     result: null,
     progress: null,
@@ -76,8 +85,10 @@ function applyPatch(job, patch) {
   return next;
 }
 
+const JOB_TYPES = { TRANSCRIPTION: "transcription", PROTOCOL: "protocol" };
+
 function isFinished(status) {
   return status === STATUS.COMPLETED || status === STATUS.FAILED || status === STATUS.CANCELLED;
 }
 
-module.exports = { STATUS, TTL_MS, newJob, applyPatch, isFinished };
+module.exports = { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished };

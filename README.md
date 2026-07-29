@@ -450,7 +450,7 @@ jokio "demo" kelio per tiesioginį LLM kvietimą iš naršyklės nebėra.
 | `/api/generate` | POST (JSON) | Transkripcija → struktūruotas protokolas (SINCHRONINIS - žr. `/api/jobs` ilgiems susitikimams) | `API_KEY`, rate limit, provider/prompt override tik su `ALLOW_PROVIDER_OVERRIDE` |
 | `/api/jobs` | POST (JSON) | Asinchroninis `/api/generate` - grąžina `jobId` iš karto (202) | `API_KEY`, rate limit |
 | `/api/jobs/:id` | GET | Joba statuso/rezultato apklausa (polling) | `API_KEY`, rate limit |
-| `/api/transcribe-jobs/:id` | DELETE | GDPR ištrynimas: jobas, rezultatas, eilės įrašas, audio, auditas (tik terminalinės būsenos, kitaip 409) | `API_KEY`, rate limit |
+| `/api/transcribe-jobs/:id` | DELETE | GDPR ištrynimas: jobas, rezultatas, eilės įrašas, audio, auditas (tik terminalinės būsenos, kitaip 409; dalinis nepavykimas -> 503) | `API_KEY`, rate limit |
 | `/api/jobs/:id` | DELETE | GDPR ištrynimas protokolo jobui (analogiškai) | `API_KEY`, rate limit |
 | `/api/audit` | GET | Audit log įrašai | `x-audit-key` header (arba uždaryta produkcijoje) |
 
@@ -942,10 +942,17 @@ DELETE /api/jobs/:id                # protokolo jobas
 Atsakymai:
 
 - `204 No Content` – jobas ir susiję duomenys pašalinti;
-- `404 Not Found` – jobo nėra;
-- `409 Conflict` – jobas dar `queued`/`processing`.
+- `404 Not Found` – jobo nėra **arba jo tipas neatitinka endpoint'o**;
+- `409 Conflict` – jobas dar `queued`/`processing`;
+- `503 Service Unavailable` – dalinis ištrynimas: kritinis žingsnis nepavyko,
+  jobas paliktas su `deletion_pending`, užklausą galima pakartoti.
 
 Aktyvių jobų netrinam, nes worker'is dar gali juos skaityti ar atnaujinti.
+
+Jobo **tipas saugomas pačiame įraše** (`job.type`), o ne imamas iš URL. Be to
+protokolo jobo ID, pateiktas transkripcijos endpoint'ui, būtų surastas (abu
+endpoint'ai naudoja tą patį `jobStore`), ištrintas iš `jobStore`, o valymas
+vyktų ne toje BullMQ eilėje. Neatitinkantis tipas dabar grąžina `404`.
 
 Ištrynimas (`utils/jobErasure.js`) apima **visas keturias** duomenų vietas:
 
@@ -955,6 +962,16 @@ Ištrynimas (`utils/jobErasure.js`) apima **visas keturias** duomenų vietas:
 | BullMQ eilė (Redis) | `job.data` su `storageKey`, `meetingId` IR grąžintas rezultatas |
 | Audio storage | įkeltas garso failas (įprastai jau ištrintas po galutinio statuso) |
 | Audito žurnalas | įrašai pagal pseudonimizuotą `subjectId` |
+
+**Tvarka svarbi:** `jobStore` įrašas šalinamas PASKUTINIS ir tik tada, kai eilė
+bei storage jau išvalyti. Nepavykus kuriam nors kritiniam žingsniui, jobas
+paliekamas su `deletion_pending`, o endpoint'as grąžina **`503`** su struktūrizuotu
+`deletion` objektu – ne `204`. Kitaip prarastume vienintelį raktą operacijai
+pakartoti: klientas manytų, kad ištrinta, pakartotinis `DELETE` duotų `404`, o
+audio failas liktų našlaite.
+
+`storageKey` saugomas ir `jobStore` įraše (išvalomas į `null` po įprasto valymo),
+kad ištrynimas rastų likutį ir **inline režime**, kur BullMQ jobo išvis nėra.
 
 BullMQ dalis svarbi todėl, kad `removeOnComplete`/`removeOnFail` (žr.
 `queues/config.js`) palieka jobo duomenis Redis'e dar 1–24 val. po užbaigimo –

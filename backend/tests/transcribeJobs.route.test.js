@@ -165,3 +165,21 @@ test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> iš
   assert.equal(afterDelete.length, 0);
   assert.equal(await jobStore.get(jobId), null);
 });
+
+test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, jobas lieka)", async () => {
+  // Regresija: abu endpoint'ai naudoja tą patį jobStore. Be job.type patikros
+  // protokolo jobas būdavo surandamas, ištrinamas iš jobStore, o valymas vyktų
+  // ne toje BullMQ eilėje - duomenys liktų, o klientas gautų 204.
+  const protocolJob = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.update(protocolJob.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { protocol: { pavadinimas: "Jautrus protokolas" } },
+  });
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${protocolJob.id}`);
+
+  assert.equal(res.status, 404);
+  assert.ok(await jobStore.get(protocolJob.id), "protokolo jobas turi likti nepaliestas");
+
+  await jobStore.remove(protocolJob.id);
+});

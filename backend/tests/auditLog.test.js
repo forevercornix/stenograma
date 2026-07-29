@@ -92,7 +92,7 @@ test("purges audit entries older than configured retention", () => {
   delete process.env.AUDIT_RETENTION_DAYS;
 });
 
-test("removes audit entries belonging to a job identifier", () => {
+test("removes audit entries belonging to a job identifier", async () => {
   auditLog.record({
     event: "JOB_CREATED",
     jobId: "job-to-delete",
@@ -105,8 +105,7 @@ test("removes audit entries belonging to a job identifier", () => {
     success: true,
   });
 
-  const removed =
-    auditLog.removeBySubjectIdentifier("job-to-delete");
+  const removed = await auditLog.removeBySubjectIdentifier("job-to-delete");
 
   assert.equal(removed, 1);
   assert.equal(auditLog.getAll().length, 1);
@@ -200,16 +199,19 @@ test("URL kelias slepiamas, bet hostas lieka matomas", () => {
   assert.doesNotMatch(row.error, /10\.0\.0\.5/);
 });
 
-test("audito ID nesikartoja po ištrynimo", () => {
+test("audito ID nesikartoja po ištrynimo", async () => {
   const a = auditLog.record({ jobId: "a", success: true });
   auditLog.record({ jobId: "b", success: true });
-  auditLog.removeBySubjectIdentifier("b");
+  await auditLog.removeBySubjectIdentifier("b");
   const c = auditLog.record({ jobId: "c", success: true });
 
   const ids = auditLog.getAll().map((entry) => entry.id);
 
   assert.equal(new Set(ids).size, ids.length);
-  assert.ok(c.id > a.id);
+  // UUID, ne skaitiklis: skaitiklis lieka unikalus tik vieno proceso gyvavimo
+  // metu, o auditą perkėlus į SQLite/Postgres ID turi likti stabilus.
+  assert.match(a.id, /^[0-9a-f]{8}-[0-9a-f]{4}-/);
+  assert.notEqual(a.id, c.id);
 });
 
 test("getAll() taiko retenciją ir be naujų įrašų", () => {

@@ -1,4 +1,4 @@
-const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -15,8 +15,8 @@ const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
  */
 const jobs = new Map();
 
-async function create() {
-  const job = newJob();
+async function create(fields = {}) {
+  const job = newJob(fields);
   jobs.set(job.id, job);
   return job;
 }
@@ -56,4 +56,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, get, update, remove, sweepExpired, size, close, STATUS, TTL_MS, backend: "memory" };
+module.exports = { create, get, update, remove, sweepExpired, size, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
