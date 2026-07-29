@@ -83,8 +83,9 @@ const MAX_EVENT_LENGTH = 64;
 const EVENT_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 
 // Kontroliuojamiems laukams leidžiami simboliai. Tokių reikšmių pavyzdžiai:
-// "claude-3-5-sonnet-20241022", "faster-whisper-embedded (inline)", "meeting_v3".
-const CONTROLLED_DISALLOWED = /[^A-Za-z0-9 ._:+\-()/]/g;
+// "claude-3-5-sonnet-20241022", "faster-whisper-embedded (inline)", "meeting_v3",
+// "queue=deleted storage=none" (ištrynimo kvitas).
+const CONTROLLED_DISALLOWED = /[^A-Za-z0-9 ._:+\-()/=]/g;
 
 const SENSITIVE_KEY_PATTERN =
   /authorization|api[-_]?key|token|secret|password|cookie|transcript|prompt|audio|filename|filepath|requestbody/i;
@@ -321,6 +322,11 @@ function record(entry = {}) {
 
     // Klaida naudinga diagnostikai, bet prieš saugojimą išvaloma ir trumpinama.
     error: entry.success === false ? sanitizeScalar(entry.error) : null,
+
+    // Laisvas, bet KONTROLIUOJAMAS techninių detalių laukas. Šiuo metu naudojamas
+    // tik ištrynimo kvitui ("queue=deleted storage=none ..."). Ne laisvas tekstas -
+    // simbolių allowlist ir ilgio riba, kaip ir kitiems kontroliuojamiems laukams.
+    details: sanitizeControlled(entry.details, 200),
   });
 
   log.push(row);

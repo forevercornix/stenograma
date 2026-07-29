@@ -48,6 +48,19 @@ async function size() {
   return jobs.size;
 }
 
+/**
+ * Jobai, kurių ištrynimas nutrūko per pusę (`deletion_pending`). Naudoja
+ * periodinis pakartojimo procesas - žr. utils/deletionRetry.js.
+ */
+async function listPendingDeletions(limit = 100) {
+  const pending = [];
+  for (const job of jobs.values()) {
+    if (job.deletion_pending) pending.push(job);
+    if (pending.length >= limit) break;
+  }
+  return pending;
+}
+
 async function remove(id) {
   return jobs.delete(id);
 }
@@ -56,4 +69,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, get, update, remove, sweepExpired, size, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, get, update, remove, sweepExpired, size, listPendingDeletions, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

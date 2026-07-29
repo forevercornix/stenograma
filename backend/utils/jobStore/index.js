@@ -114,6 +114,12 @@ module.exports = {
     await ensureInit();
     return store.sweepExpired(now);
   },
+  listPendingDeletions: async (limit) => {
+    await ensureInit();
+    return typeof store.listPendingDeletions === "function"
+      ? store.listPendingDeletions(limit)
+      : [];
+  },
   size: async () => {
     await ensureInit();
     return store.size();

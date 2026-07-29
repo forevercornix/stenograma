@@ -127,7 +127,66 @@ async function eraseJob(job) {
     outcome.criticalFailure = true;
   }
 
+  writeDeletionReceipt(outcome);
+
   return outcome;
 }
 
-module.exports = { eraseJob };
+/**
+ * IŠTRYNIMO KVITAS (deletion receipt).
+ *
+ * Pašalinus audito įrašus nelieka jokio pėdsako, kad ištrynimas apskritai buvo
+ * atliktas - o atskaitomybei to reikia. Todėl rašomas atskiras įvykis BE jokios
+ * sąsajos su subjektu: `subjectId` yra `null`, job ID nesaugomas jokia forma.
+ * Dėl to jo nepašalina ir pakartotinis to paties jobo ištrynimas.
+ *
+ * APRIBOJIMAS: kvitas guli tame pačiame atmintiniame audito žurnale, tad
+ * galioja tos pačios retencijos ir restarto ribos (žr. README).
+ */
+function writeDeletionReceipt(outcome) {
+  if (outcome.criticalFailure) return;
+
+  try {
+    auditLog.record({
+      event: "DATA_ERASED",
+      success: true,
+      details:
+        `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
+        `storage=${outcome.storageRemoved ? "deleted" : "none"} ` +
+        `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
+        `audit=${outcome.auditEntriesRemoved}`,
+    });
+  } catch {
+    // Kvitas neturi versti ištrynimo nesėkme - duomenys jau pašalinti.
+  }
+}
+
+/**
+ * Ištrynimas, kai jobStore įrašo JAU NEBĖRA.
+ *
+ * Retencijos laikai nesutampa: jobStore TTL numatytai 60 min (JOB_TTL_MINUTES),
+ * BullMQ `removeOnFail` - 24 val., auditas - 30 dienų. Tad nepavykęs jobas po
+ * valandos dingsta iš jobStore, o jo payload, rezultatas ir audito įrašai dar
+ * egzistuoja. Anksčiau DELETE tokiu atveju iš karto grąžindavo 404 ir NIEKO
+ * nebeištrindavo - teisė ištrinti tapdavo neįgyvendinama, nors duomenys buvo.
+ *
+ * Todėl, nesant jobStore įrašo, ieškom tiesiogiai ABIEJOSE eilėse ir audite.
+ * Tipas nežinomas (jo šaltinis buvo jobStore), tad valom abi - BullMQ ID sutampa
+ * su mūsų UUID, tad ne toje eilėje operacija yra no-op.
+ *
+ * @returns {object} outcome; `found` - ar kur nors iš viso kas nors rasta
+ */
+async function eraseOrphanedJobData(jobId) {
+  const outcome = await eraseJob({ id: jobId, type: null, storageKey: null });
+
+  outcome.orphan = true;
+  outcome.found =
+    outcome.queueJobRemoved || outcome.storageRemoved || outcome.auditEntriesRemoved > 0;
+
+  // jobStore įrašo nebuvo - tai ne klaida, o šio kelio prielaida.
+  outcome.jobRemoved = false;
+
+  return outcome;
+}
+
+module.exports = { eraseJob, eraseOrphanedJobData };

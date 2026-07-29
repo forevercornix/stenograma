@@ -207,7 +207,13 @@ async function startServer({ port, listen, onStep } = {}) {
     if (removed > 0) console.log(`[stenograma] Išvalyta ${removed} pasenusių jobų (TTL=${jobStore.TTL_MS / 60000} min).`);
   }, 5 * 60 * 1000);
   sweepTimer.unref();
-  return { sweepTimer };
+
+  // Nebaigtų ištrynimų (deletion_pending) pakartojimas - kad nepavykęs GDPR
+  // DELETE nepasimestų, jei klientas užklausos nebekartoja.
+  const { startDeletionRetry } = require("./utils/deletionRetry");
+  const deletionRetryTimer = startDeletionRetry();
+
+  return { sweepTimer, deletionRetryTimer };
 }
 
 if (require.main === module) {

@@ -130,6 +130,25 @@ function createRedisStore(redisClient) {
     return removed;
   }
 
+  /**
+   * Jobai su `deletion_pending` vėliava. Redis'e nėra sekundinio indekso pagal
+   * šį lauką, tad einam per jobs:index (jame - tik gyvi jobai) ir tikrinam
+   * lauką. Riba (`limit`) apsaugo nuo didelio skenavimo.
+   */
+  async function listPendingDeletions(limit = 100) {
+    const ids = await redisClient.zrange(INDEX_KEY, 0, -1);
+    const pending = [];
+
+    for (const id of ids) {
+      if (pending.length >= limit) break;
+      const flat = await redisClient.hgetall(JOB_PREFIX + id);
+      const job = deserialize(flat);
+      if (job && job.deletion_pending) pending.push(job);
+    }
+
+    return pending;
+  }
+
   async function size() {
     // TIKSLUMAS: jobs:index (zcard) gali įtraukti jobus, kurių hash'ai JAU IŠNYKO per
     // Redis TTL (EXPIRE), bet indekso įrašas dar nepašalintas (tai daro sweepExpired
@@ -150,7 +169,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, get, update, remove, sweepExpired, size, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, get, update, remove, sweepExpired, size, listPendingDeletions, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize };

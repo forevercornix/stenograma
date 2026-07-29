@@ -118,7 +118,9 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
 
   assert.equal(res.status, 204);
   assert.equal(await jobStore.get(job.id), null);
-  assert.equal(auditLog.getAll().length, 0);
+  // DATA_ERASED kvitas SĄMONINGAI lieka - jis nesusietas su subjektu ir yra
+  // vienintelis įrodymas, kad ištrynimas įvyko (žr. utils/jobErasure.js).
+  assert.equal(auditLog.getAll().filter((e) => e.event !== "DATA_ERASED").length, 0);
 });
 
 test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> ištrynimas išvalo ir auditą", async () => {

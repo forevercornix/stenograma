@@ -60,29 +60,97 @@ async function putFile(srcPath, { ext = "" } = {}) {
  * Nuskaito failą pagal storage key -> Buffer. Worker'is tai naudoja audio gauti.
  */
 async function get(key) {
-  const fullPath = _resolve(key);
+  const fullPath = await _resolveExisting(key);
+
+  if (fullPath === null) {
+    // Pranešime paliekam ENOENT - tiek `error.code`, tiek tekste, kad
+    // iškviečiantis kodas ir logai elgtųsi kaip su įprasta fs klaida.
+    const error = new Error(`ENOENT: storage objektas nerastas: ${key}`);
+    error.code = "ENOENT";
+    throw error;
+  }
+
   return fs.readFile(fullPath);
 }
 
 /**
- * Ištrina failą pagal raktą (po apdorojimo ar pagal retention). Idempotentinis -
- * nesamo failo trynimas neklaida.
+ * Ištrina failą pagal raktą (po apdorojimo ar pagal retention).
+ *
+ * KLAIDŲ SEMANTIKA (rasta code review): ignoruojamas TIK `ENOENT` - failo nebėra,
+ * tad rezultatas jau pasiektas (idempotentiška). VISOS kitos klaidos (EACCES,
+ * EROFS, EIO, EPERM...) METAMOS AUKŠTYN. Anksčiau čia buvo `.catch(() => {})`,
+ * tad iškviečiantis kodas negalėdavo atskirti "failo nebėra" nuo "failo ištrinti
+ * NEPAVYKO" - ir `releaseAudio()` nunulindavo `storageKey`, nors audio likdavo
+ * diske. Tai paneigdavo visą "audio tikrai pašalintas" garantiją.
+ *
+ * @returns {boolean} true - failas realiai ištrintas; false - jo jau nebuvo
  */
 async function del(key) {
-  const fullPath = _resolve(key);
-  await fs.unlink(fullPath).catch(() => {});
+  const fullPath = await _resolveExisting(key);
+
+  if (fullPath === null) return false;
+
+  try {
+    await fs.unlink(fullPath);
+    return true;
+  } catch (e) {
+    if (e && e.code === "ENOENT") return false;
+    throw e;
+  }
 }
 
 /**
- * Saugus rakto -> kelio konvertavimas (apsauga nuo path traversal ../).
+ * Saugus rakto -> kelio konvertavimas (apsauga nuo path traversal `../`).
+ *
+ * Du pataisyti niuansai:
+ *  - STORAGE_DIR normalizuojamas per `path.resolve` ABIEJOSE pusėse. Anksčiau
+ *    buvo lyginamas `path.join(...)` (galimai reliatyvus, jei STORAGE_DIR
+ *    perduotas kaip reliatyvus env kintamasis) su `path.resolve(...)`.
+ *  - ribos tikrinimas su skyrikliu: be jo `/storage-evil` praeidavo `/storage`
+ *    patikrą (`startsWith`).
  */
 function _resolve(key) {
-  const normalized = path.normalize(key).replace(/^(\.\.(\/|\\|$))+/, "");
-  const fullPath = path.join(STORAGE_DIR, normalized);
-  if (!fullPath.startsWith(path.resolve(STORAGE_DIR))) {
+  const root = path.resolve(STORAGE_DIR);
+  const normalized = path.normalize(String(key)).replace(/^(\.\.(\/|\\|$))+/, "");
+  const fullPath = path.resolve(root, normalized);
+
+  if (fullPath !== root && !fullPath.startsWith(root + path.sep)) {
     throw new Error("Neteisingas storage raktas (path traversal)");
   }
+
   return fullPath;
 }
 
-module.exports = { put, putFile, get, del, STORAGE_DIR };
+/**
+ * Kaip _resolve(), bet papildomai patikrina REALŲ kelią (`realpath`) - tekstinė
+ * patikra neapsaugo nuo simbolinės nuorodos, kuri iš storage katalogo rodo į
+ * išorę. Grąžina `null`, jei failo nėra (tada nėra ir ką tikrinti).
+ */
+async function _resolveExisting(key) {
+  const fullPath = _resolve(key);
+  const root = path.resolve(STORAGE_DIR);
+
+  let realPath;
+  try {
+    realPath = await fs.realpath(fullPath);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return null;
+    throw e;
+  }
+
+  let realRoot;
+  try {
+    realRoot = await fs.realpath(root);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return fullPath;
+    throw e;
+  }
+
+  if (realPath !== realRoot && !realPath.startsWith(realRoot + path.sep)) {
+    throw new Error("Neteisingas storage raktas (symlink už storage katalogo ribų)");
+  }
+
+  return realPath;
+}
+
+module.exports = { put, putFile, get, del, STORAGE_DIR, _resolve };

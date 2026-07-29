@@ -914,10 +914,12 @@ AUDIT_MAX_ENTRIES=5000     # kieta atminties riba
 
 Pasenę įrašai šalinami tiek rašant naują įvykį, tiek skaitant `GET /api/audit`.
 
-**Apribojimas:** audito žurnalas šiuo metu yra **backend'o atmintyje**, tad po
-restarto jis ir taip tuščias. Retencija realiai reiškia „iki restarto arba iki N
-dienų, kas ateina pirmiau". Ilgalaikei atitikčiai reikia SQLite/PostgreSQL
-saugyklos su retention politika – žr. Roadmap (Milestone 2).
+**Apribojimas – tai NĖRA production-grade audit trail.** Žurnalas yra
+backend'o atmintyje, tad: dingsta po restarto; nesidalija tarp replikų; neturi
+DB transakcijų, tamper-resistance, prieigos žurnalo ar tikro retention
+scheduler'io. Retencija realiai reiškia „iki restarto arba iki N dienų, kas
+ateina pirmiau". Ilgalaikei atitikčiai reikia SQLite/PostgreSQL saugyklos –
+žr. Roadmap (Milestone 2).
 
 ### Privatumo režimas
 
@@ -932,7 +934,14 @@ PRIVACY_MODE=true
 - serverio klaidų logai papildomai sanitizuojami (`utils/sanitizeError.js`);
 - transkribavimas ir protokolų generavimas veikia įprastai.
 
-### Teisė būti pamirštam
+### Jobo duomenų ištrynimas (terminal job erasure)
+
+**Terminologija (svarbu):** tai **jobo lygmens** ištrynimas, ne pilna BDAR
+„teisė būti pamirštam". Endpointas trina pagal VIENĄ jobo ID; jis neatsako į
+klausimą „ištrinkite visus su šiuo asmeniu ar susitikimu susijusius duomenis".
+Jei tas pats susitikimas turi kelis jobus, reikia žinoti visus jų ID. Subjekto
+lygmens ištrynimui reikėtų susitikimo/subjekto indekso ir visų šaltinių
+registro – Milestone 2.
 
 ```http
 DELETE /api/transcribe-jobs/:id     # transkribavimo jobas
@@ -981,6 +990,24 @@ sėkmingo** `fileStorage.del()` (`utils/audioCleanup.js`) – kitaip nepavykus
 trynimui failas liktų storage, o raktas dingtų, ir audio taptų nepasiekiama
 našlaite.
 
+**Retencijos nesutampa** (`jobStore` TTL 60 min < BullMQ `removeOnFail` 24 val.
+< auditas 30 d.), todėl `jobStore` įrašas gali išnykti anksčiau už pačius
+duomenis. Tokiu atveju `DELETE` **nesustoja ties 404**: ieškoma tiesiogiai
+abiejose eilėse ir audite (`eraseOrphanedJobData`), ir tik nieko neradus
+grąžinamas `404`. Kitaip teisė ištrinti dingtų anksčiau nei duomenys.
+
+**Nebaigti ištrynimai** (`deletion_pending`) kartojami automatiškai –
+`utils/deletionRetry.js`, numatytai kas 10 min (`DELETION_RETRY_INTERVAL_MINUTES`).
+Po trijų nesėkmingų bandymų į logą rašomas įspėjimas, reikalaujantis rankinio
+įsikišimo. Sąžiningai: tai periodinis pakartojimas, ne garantuota dead-letter
+sistema su SLA.
+
+**Ištrynimo įrodymas:** po sėkmingo ištrynimo į auditą įrašomas `DATA_ERASED`
+kvitas su `subjectId: null` ir šaltinių suvestine (`queue=deleted storage=none
+...`). Jis nesusietas su jokiu subjektu, todėl jo nepašalina ir pakartotinis to
+paties jobo ištrynimas. Apribojimas: kvitas guli tame pačiame atmintiniame
+žurnale, tad galioja tos pačios restarto ir retencijos ribos.
+
 **Legacy jobai:** prieš šį pakeitimą sukurti (Redis'e išlikę) jobai `type` lauko
 neturi. Jie **nėra** atmetami – ištrynimas tokiu atveju valo abi BullMQ eiles
 (jobo ID sutampa su BullMQ ID, tad ne toje eilėje operacija yra no-op). Aklai
@@ -998,8 +1025,10 @@ vien `jobStore` įrašo ištrynimas jų nepašalintų.
 - vartotojo naršyklėje eksportuotų DOCX/CSV/TXT failų.
 
 **Autorizacija:** naudojamas bendras `API_KEY`, tad bet kuris rakto turėtojas gali
-ištrinti bet kurį jobą. Viešam diegimui su realiais vartotojais reikia per-user
-autentifikacijos – žr. `backend/README.md`.
+ištrinti bet kurį jobą. Nėra nei `ownerId`/`tenantId`, nei rolių, nei atskiros
+administratoriaus teisės. Tai galioja **visam** projekto API, ne tik šiems
+endpointams, ir viešam diegimui netinka – žr. `backend/README.md`
+„Autentifikacija ir viešas diegimas" bei Roadmap (per-user auth).
 
 ### Rekomendacijos diegiant su asmens duomenimis
 

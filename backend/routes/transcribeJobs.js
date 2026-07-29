@@ -5,7 +5,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const jobStore = require("../utils/jobStore");
-const { eraseJob } = require("../utils/jobErasure");
+const { eraseJob, eraseOrphanedJobData } = require("../utils/jobErasure");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
@@ -209,6 +209,24 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
   const job = await jobStore.get(req.params.id);
 
   if (!job) {
+    // jobStore įrašas galėjo dingti pagal TTL (numatytai 60 min), o BullMQ (iki
+    // 24 val.) ir auditas (iki 30 d.) duomenis dar laiko. Prieš 404 pabandom
+    // ištrinti tai, kas dar egzistuoja - kitaip teisė ištrinti dingtų anksčiau
+    // nei patys duomenys.
+    const orphan = await eraseOrphanedJobData(req.params.id);
+
+    if (orphan.criticalFailure) {
+      console.error(
+        `[stenograma] NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${orphan.errors.join("; ")}`
+      );
+      return res.status(503).json({
+        error: "Nepavyko visiškai ištrinti jobo duomenų. Užklausą galima pakartoti.",
+        deletion: orphan,
+      });
+    }
+
+    if (orphan.found) return res.status(204).send();
+
     return res.status(404).json({ error: "Jobas nerastas." });
   }
 
