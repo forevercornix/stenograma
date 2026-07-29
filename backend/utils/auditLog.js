@@ -14,6 +14,10 @@ const crypto = require("node:crypto");
 const log = [];
 const DEFAULT_RETENTION_DAYS = 30;
 
+function isPrivacyModeEnabled() {
+  return String(process.env.PRIVACY_MODE || "").toLowerCase() === "true";
+}
+
 function getRetentionDays() {
   const configured = Number(process.env.AUDIT_RETENTION_DAYS);
 
@@ -193,6 +197,11 @@ function sanitizeForLogging(value, seen = new WeakSet()) {
 }
 
 function record(entry = {}) {
+  if (isPrivacyModeEnabled()) {
+    clear();
+    return null;
+  }
+
   purgeExpired();
   const row = Object.freeze({
     id: log.length + 1,
@@ -272,4 +281,5 @@ module.exports = {
   pseudonymizeIdentifier,
   purgeExpired,
   getRetentionDays,
+  isPrivacyModeEnabled,
 };

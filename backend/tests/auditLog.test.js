@@ -105,3 +105,50 @@ test("removes audit entries belonging to a job identifier", () => {
     auditLog.pseudonymizeIdentifier("job-to-keep")
   );
 });
+
+test("privacy mode disables audit recording", () => {
+  process.env.PRIVACY_MODE = "true";
+  auditLog.clear();
+
+  const recorded = auditLog.record({
+    event: "JOB_CREATED",
+    jobId: "privacy-job",
+    success: true,
+  });
+
+  assert.equal(recorded, null);
+  assert.equal(auditLog.getAll().length, 0);
+
+  delete process.env.PRIVACY_MODE;
+});
+
+test("privacy mode clears previously accumulated audit entries", () => {
+  delete process.env.PRIVACY_MODE;
+  auditLog.clear();
+
+  auditLog.record({
+    event: "JOB_CREATED",
+    jobId: "existing-job",
+    success: true,
+  });
+
+  assert.equal(auditLog.getAll().length, 1);
+
+  process.env.PRIVACY_MODE = "true";
+
+  auditLog.record({
+    event: "JOB_CREATED",
+    jobId: "ignored-job",
+    success: true,
+  });
+
+  assert.equal(auditLog.getAll().length, 0);
+
+  delete process.env.PRIVACY_MODE;
+});
+
+test("privacy mode is disabled by default", () => {
+  delete process.env.PRIVACY_MODE;
+
+  assert.equal(auditLog.isPrivacyModeEnabled(), false);
+});
