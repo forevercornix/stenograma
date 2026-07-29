@@ -1,6 +1,6 @@
 {
   "name": "stenograma-backend",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Stenograma - susitikimų protokolų generatoriaus backend (pluggable transcription + LLM providers)",
   "main": "server.js",
   "scripts": {
