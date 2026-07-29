@@ -1056,6 +1056,27 @@ administratoriaus teisės. Tai galioja **visam** projekto API, ne tik šiems
 endpointams, ir viešam diegimui netinka – žr. `backend/README.md`
 „Autentifikacija ir viešas diegimas" bei Roadmap (per-user auth).
 
+### Žinomi apribojimai (privatumo / ištrynimo funkcionalumo)
+
+Sąrašas sąmoningai vienoje vietoje, kad nereikėtų kompromisų ieškoti pačiam.
+Visi punktai yra **žinomi ir apgalvoti**, ne atsitiktiniai.
+
+| # | Apribojimas | Ką tai reiškia praktiškai | Kur spręsti |
+|---|---|---|---|
+| 1 | **Auditas atmintyje** | Dingsta po restarto, nesidalija tarp replikų, be DB transakcijų, tamper-resistance ar prieigos žurnalo. Retencija = „iki restarto arba iki N dienų". | SQLite/PostgreSQL (Milestone 2) |
+| 2 | **`jobStore` atmintyje** (be `REDIS_URL`) | Jobai ir jų būsena neišgyvena restarto. | `REDIS_URL` arba PostgreSQL |
+| 3 | **Retry būsena nepersistuojama** | `deletion_pending` / `audio_cleanup_pending` gyvena `jobStore`. Su memory store procesui nukritus retry eilė dingsta kartu su jobais. Su Redis - išlieka. | persistentinė ištrynimo užklausų eilė (Milestone 2) |
+| 4 | **Bendras `API_KEY`, be nuosavybės** | Bet kuris rakto turėtojas gali ištrinti bet kurį jobą. Nėra `ownerId`/`tenantId`, rolių ar admin teisės. Galioja **visam** API. | per-user auth / OIDC (Milestone 2) |
+| 5 | **Terminal job erasure, ne subjekto lygmens** | Trinama pagal VIENĄ jobo ID. „Ištrinkite visus šio asmens duomenis" nepalaikoma - reikia žinoti visus ID. | subjekto/susitikimo indeksas (Milestone 2) |
+| 6 | **`DELETE` nėra ACID transakcija** | Eilė → storage → auditas → `jobStore` yra atskiri žingsniai. Procesui mirus tarp jų gaunamas dalinis rezultatas; jį gaudo `deletion_pending` + retry, bet tikros atominės transakcijos Node + failų sistema + Redis kombinacija turėti negali. | kita architektūra (ne planuojama) |
+| 7 | **`DATA_ERASED` kvitas nėra kriptografinis įrodymas** | Tai paprastas audito įrašas be HMAC, hash chain ar append-only garantijos, ir nesaistomas su konkrečia užklausa. | HMAC + immutable log, jei reikia formalaus GDPR evidence |
+| 8 | **Orphan ištrynimo nesėkmė nekartojama automatiškai** | Nesant `jobStore` įrašo nėra kur nustatyti vėliavos - pakartojimas priklauso nuo kliento (gavusio `503`). | ta pati persistentinė eilė (#3) |
+| 9 | **Eilių sąrašas ištrynime - rankinis** | `eraseOrphanedJobData()` tikrina abi eiles eksplicitiškai. Prie 10+ eilių reikėtų registro. | šiandien nereikia |
+
+Kas **NĖRA** apribojimas (dažnai klausiama): nepavykę ištrynimai ir audio valymai
+kartojami automatiškai su eksponentiniu backoff (10 → 20 → 40 → 80 min, riba ~5 val.),
+o pažymėti jobai neišmetami pagal TTL.
+
 ### Rekomendacijos diegiant su asmens duomenimis
 
 - nustatykite `API_KEY` ir `AUDIT_ID_SALT`;

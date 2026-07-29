@@ -16,14 +16,49 @@ const jobStore = require("./jobStore");
 
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS_BEFORE_ALERT = 3;
+const MAX_BACKOFF_MULTIPLIER = 32; // 10 min bazei -> ne daugiau kaip ~5 val.
+
+/**
+ * Eksponentinis backoff: 1x, 2x, 4x, 8x... bazinio intervalo, su riba.
+ * Be jo nuolat krentantis storage būtų kalamas kas 10 min be galo, o logai
+ * užsipildytų tuo pačiu įspėjimu.
+ */
+function _backoffMs(attempts, baseMs) {
+  const multiplier = Math.min(2 ** Math.max(0, attempts - 1), MAX_BACKOFF_MULTIPLIER);
+  return baseMs * multiplier;
+}
+
+function _baseIntervalMs() {
+  const configured = Number(process.env.DELETION_RETRY_INTERVAL_MINUTES);
+  return Number.isFinite(configured) && configured > 0
+    ? configured * 60 * 1000
+    : DEFAULT_INTERVAL_MS;
+}
+
+/**
+ * Ar bandymo laikas jau atėjo? `field` - ISO laiko žyma jobo įraše.
+ */
+function _isDue(job, field, now = Date.now()) {
+  const next = job[field] ? Date.parse(job[field]) : NaN;
+  return !Number.isFinite(next) || next <= now;
+}
+
+function _nextAttemptAt(attempts) {
+  return new Date(Date.now() + _backoffMs(attempts, _baseIntervalMs())).toISOString();
+}
 
 async function retryPendingDeletions({ limit = 50 } = {}) {
   const { eraseJob } = require("./jobErasure");
 
   const pending = await jobStore.listPendingDeletions(limit);
-  const summary = { attempted: pending.length, succeeded: 0, failed: 0 };
+  const summary = { attempted: pending.length, succeeded: 0, failed: 0, deferred: 0 };
 
   for (const job of pending) {
+    if (!_isDue(job, "deletion_next_attempt_at")) {
+      summary.deferred += 1;
+      continue;
+    }
+
     const attempts = (job.deletion_attempts || 0) + 1;
     const outcome = await eraseJob(job);
 
@@ -38,7 +73,11 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
     summary.failed += 1;
 
     await jobStore
-      .update(job.id, { deletion_pending: true, deletion_attempts: attempts })
+      .update(job.id, {
+        deletion_pending: true,
+        deletion_attempts: attempts,
+        deletion_next_attempt_at: _nextAttemptAt(attempts),
+      })
       .catch(() => {});
 
     const message =
@@ -71,9 +110,14 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
   const { releaseAudio } = require("./audioCleanup");
 
   const pending = await jobStore.listPendingAudioCleanups(limit);
-  const summary = { attempted: pending.length, succeeded: 0, failed: 0 };
+  const summary = { attempted: pending.length, succeeded: 0, failed: 0, deferred: 0 };
 
   for (const job of pending) {
+    if (!_isDue(job, "audio_cleanup_next_attempt_at")) {
+      summary.deferred += 1;
+      continue;
+    }
+
     const attempts = (job.audio_cleanup_attempts || 0) + 1;
 
     if (!job.storageKey) {
@@ -98,7 +142,10 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
 
     // releaseAudio jau iš naujo nustatė vėliavą; čia tik didinam skaitiklį.
     await jobStore
-      .update(job.id, { audio_cleanup_attempts: attempts })
+      .update(job.id, {
+        audio_cleanup_attempts: attempts,
+        audio_cleanup_next_attempt_at: _nextAttemptAt(attempts),
+      })
       .catch(() => {});
 
     const message =
@@ -121,9 +168,7 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
  * neblokuotų proceso pabaigos).
  */
 function startDeletionRetry({ intervalMs } = {}) {
-  const interval = Number(process.env.DELETION_RETRY_INTERVAL_MINUTES)
-    ? Number(process.env.DELETION_RETRY_INTERVAL_MINUTES) * 60 * 1000
-    : intervalMs || DEFAULT_INTERVAL_MS;
+  const interval = intervalMs || _baseIntervalMs();
 
   const timer = setInterval(() => {
     retryPendingDeletions().catch((e) =>
@@ -143,4 +188,5 @@ module.exports = {
   retryPendingAudioCleanups,
   startDeletionRetry,
   MAX_ATTEMPTS_BEFORE_ALERT,
+  _backoffMs, // testams
 };

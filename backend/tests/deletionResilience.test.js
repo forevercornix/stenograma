@@ -246,3 +246,78 @@ test("nežinomas ID nesukuria klaidingo DATA_ERASED kvito", async () => {
     "niekas nebuvo ištrinta - kvito būti neturi"
   );
 });
+
+test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
+  // Idempotencija turėtų tai padengti, bet be testo tai tik prielaida.
+  const { retryPendingDeletions } = require("../utils/deletionRetry");
+  const fileStorage = require("../utils/fileStorage");
+
+  auditLog.clear();
+
+  const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+    storageKey: key,
+  });
+  await jobStore.update(job.id, {
+    status: jobStore.STATUS.FAILED,
+    deletion_pending: true,
+  });
+  auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: false });
+
+  // Abu keliai startuoja vienu metu ir trina TĄ PATĮ jobą.
+  const [httpRes, retrySummary] = await Promise.all([
+    request(app).delete(`/api/transcribe-jobs/${job.id}`),
+    retryPendingDeletions(),
+  ]);
+
+  assert.ok(
+    [204, 404].includes(httpRes.status),
+    `netikėtas statusas: ${httpRes.status} ${JSON.stringify(httpRes.body)}`
+  );
+  assert.ok(retrySummary.attempted >= 1);
+
+  // Nesvarbu, kuris nugalėjo - galutinė būsena turi būti ta pati.
+  assert.equal(await jobStore.get(job.id), null);
+  assert.equal(
+    auditLog.getAll().filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(job.id))
+      .length,
+    0
+  );
+  assert.equal(await fileStorage.del(key), false, "audio failo neturi būti");
+});
+
+test("backoff: intervalas ilgėja su bandymais ir turi ribą", () => {
+  const { _backoffMs } = require("../utils/deletionRetry");
+  const base = 10 * 60 * 1000;
+
+  assert.equal(_backoffMs(1, base), base);
+  assert.equal(_backoffMs(2, base), 2 * base);
+  assert.equal(_backoffMs(4, base), 8 * base);
+  assert.equal(_backoffMs(50, base), 32 * base, "turi būti riba, ne begalinis augimas");
+});
+
+test("backoff: dar neatėjęs bandymo laikas praleidžiamas (deferred)", async () => {
+  const { retryPendingAudioCleanups } = require("../utils/deletionRetry");
+
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+    storageKey: "uploads/dar-ne.wav",
+  });
+  await jobStore.update(job.id, {
+    status: jobStore.STATUS.COMPLETED,
+    audio_cleanup_pending: true,
+    audio_cleanup_attempts: 2,
+    audio_cleanup_next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  });
+
+  const summary = await retryPendingAudioCleanups();
+
+  assert.ok(summary.deferred >= 1, "jobas turi būti atidėtas, o ne bandomas iš karto");
+
+  const untouched = await jobStore.get(job.id);
+  assert.equal(untouched.audio_cleanup_attempts, 2, "skaitliukas neturi keistis");
+
+  await jobStore.update(job.id, { audio_cleanup_pending: false });
+  await jobStore.remove(job.id);
+});
