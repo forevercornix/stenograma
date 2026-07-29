@@ -248,10 +248,26 @@ function clear() {
   log.length = 0;
 }
 
+function removeBySubjectIdentifier(value) {
+  const subjectId = pseudonymizeIdentifier(value);
+  if (!subjectId) return 0;
+
+  const originalLength = log.length;
+
+  for (let index = log.length - 1; index >= 0; index -= 1) {
+    if (log[index].subjectId === subjectId) {
+      log.splice(index, 1);
+    }
+  }
+
+  return originalLength - log.length;
+}
+
 module.exports = {
   record,
   getAll,
   clear,
+  removeBySubjectIdentifier,
   sanitizeForLogging,
   pseudonymizeIdentifier,
   purgeExpired,

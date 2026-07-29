@@ -81,3 +81,27 @@ test("purges audit entries older than configured retention", () => {
 
   delete process.env.AUDIT_RETENTION_DAYS;
 });
+
+test("removes audit entries belonging to a job identifier", () => {
+  auditLog.record({
+    event: "JOB_CREATED",
+    jobId: "job-to-delete",
+    success: true,
+  });
+
+  auditLog.record({
+    event: "JOB_CREATED",
+    jobId: "job-to-keep",
+    success: true,
+  });
+
+  const removed =
+    auditLog.removeBySubjectIdentifier("job-to-delete");
+
+  assert.equal(removed, 1);
+  assert.equal(auditLog.getAll().length, 1);
+  assert.equal(
+    auditLog.getAll()[0].subjectId,
+    auditLog.pseudonymizeIdentifier("job-to-keep")
+  );
+});

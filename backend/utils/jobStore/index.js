@@ -106,6 +106,10 @@ module.exports = {
     await ensureInit();
     return store.update(id, patch);
   },
+  remove: async (id) => {
+    await ensureInit();
+    return store.remove(id);
+  },
   sweepExpired: async (now) => {
     await ensureInit();
     return store.sweepExpired(now);

@@ -105,6 +105,15 @@ function createRedisStore(redisClient) {
     return next;
   }
 
+  async function remove(id) {
+    const existed = await redisClient.exists(JOB_PREFIX + id);
+
+    await redisClient.del(JOB_PREFIX + id);
+    await redisClient.zrem(INDEX_KEY, id);
+
+    return Boolean(existed);
+  }
+
   async function sweepExpired(now = Date.now()) {
     // Redis EXPIRE jau tvarko baigtų job'ų išvalymą. Čia papildomai išvalom
     // INDEX sorted set nuo raktų, kurių hash jau expiravo (kad indeksas neaugtų).
@@ -141,7 +150,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, get, update, sweepExpired, size, close, STATUS, TTL_MS, backend: "redis" };
+  return { create, get, update, remove, sweepExpired, size, close, STATUS, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize };

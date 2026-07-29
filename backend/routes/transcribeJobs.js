@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const jobStore = require("../utils/jobStore");
+const auditLog = require("../utils/auditLog");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
@@ -183,6 +184,45 @@ router.get("/transcribe-jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res)
     started_at: job.started_at,
     completed_at: job.completed_at,
   });
+});
+
+/**
+ * DELETE /api/transcribe-jobs/:id
+ *
+ * GDPR duomenų ištrynimas:
+ * - pašalina užbaigto jobo metaduomenis ir rezultatą;
+ * - pašalina susijusius pseudonimizuotus audito įrašus;
+ * - aktyvių jobų netrina, nes worker'is dar gali juos atnaujinti.
+ */
+router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
+  const job = await jobStore.get(req.params.id);
+
+  if (!job) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
+  const deletableStatuses = new Set([
+    jobStore.STATUS.COMPLETED,
+    jobStore.STATUS.FAILED,
+    jobStore.STATUS.CANCELLED,
+  ]);
+
+  if (!deletableStatuses.has(job.status)) {
+    return res.status(409).json({
+      error:
+        "Aktyvaus jobo ištrinti negalima. Palaukite, kol jis bus užbaigtas arba atšauktas.",
+    });
+  }
+
+  const removed = await jobStore.remove(job.id);
+
+  if (!removed) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
+  auditLog.removeBySubjectIdentifier(job.id);
+
+  return res.status(204).send();
 });
 
 module.exports = router;

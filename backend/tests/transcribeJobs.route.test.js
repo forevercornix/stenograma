@@ -11,6 +11,8 @@ process.env.NODE_ENV = "test";
 
 const request = require("supertest");
 const app = require("../server");
+const jobStore = require("../utils/jobStore");
+const auditLog = require("../utils/auditLog");
 app._setReadyForTests(); // job route reikalauja readiness (startServer nevyksta testuose)
 
 function wait(ms) {
@@ -71,4 +73,50 @@ test("POST /api/transcribe-jobs - atsakymo greitis: jobId grąžinamas GREITAI, 
   // (galimai kelias minutes trunkančio) transkribavimo - tai IR YRA šio
   // endpoint'o prasmė.
   assert.ok(elapsedMs < 2000, `Tikėtasi greito atsakymo (<2s), gauta ${elapsedMs}ms`);
+});
+
+test("DELETE /api/transcribe-jobs/:id - nežinomas jobas grąžina 404", async () => {
+  const res = await request(app).delete(
+    "/api/transcribe-jobs/unknown-delete-job"
+  );
+
+  assert.equal(res.status, 404);
+});
+
+test("DELETE /api/transcribe-jobs/:id - aktyvus jobas grąžina 409", async () => {
+  const job = await jobStore.create();
+
+  const res = await request(app).delete(
+    `/api/transcribe-jobs/${job.id}`
+  );
+
+  assert.equal(res.status, 409);
+  assert.ok(await jobStore.get(job.id));
+});
+
+test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą", async () => {
+  auditLog.clear();
+
+  const job = await jobStore.create();
+
+  await jobStore.update(job.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { text: "Jautrus transkripcijos rezultatas" },
+  });
+
+  auditLog.record({
+    event: "TRANSCRIPTION_COMPLETED",
+    jobId: job.id,
+    success: true,
+  });
+
+  assert.equal(auditLog.getAll().length, 1);
+
+  const res = await request(app).delete(
+    `/api/transcribe-jobs/${job.id}`
+  );
+
+  assert.equal(res.status, 204);
+  assert.equal(await jobStore.get(job.id), null);
+  assert.equal(auditLog.getAll().length, 0);
 });

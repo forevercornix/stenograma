@@ -69,6 +69,10 @@ class FakeRedis {
   async exists(key) {
     return this.hashes.has(key) ? 1 : 0;
   }
+
+  async del(key) {
+    return this.hashes.delete(key) ? 1 : 0;
+  }
   async expire(key, seconds) {
     this.expires.set(key, seconds);
     return 1;
@@ -152,4 +156,18 @@ test("Redis store: size() NEįskaito jobų, kurių hash išnyko (TTL), bet indek
   // Simuliuojam TTL: job1 hash IŠNYKO (ištrinam iš hashes), bet indekse (zsets) LIEKA.
   fake.hashes.delete("job:" + job1.id);
   assert.equal(await store.size(), 1, "size() turi skaičiuoti tik realiai egzistuojantį (job2)");
+});
+
+test("remove deletes redis job", async () => {
+  const redis = new FakeRedis();
+  const store = createRedisStore(redis);
+
+  const job = await store.create();
+
+  assert.ok(await store.get(job.id));
+
+  const removed = await store.remove(job.id);
+
+  assert.equal(removed, true);
+  assert.equal(await store.get(job.id), null);
 });

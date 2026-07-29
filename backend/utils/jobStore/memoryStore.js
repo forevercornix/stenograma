@@ -48,8 +48,12 @@ async function size() {
   return jobs.size;
 }
 
+async function remove(id) {
+  return jobs.delete(id);
+}
+
 async function close() {
   jobs.clear();
 }
 
-module.exports = { create, get, update, sweepExpired, size, close, STATUS, TTL_MS, backend: "memory" };
+module.exports = { create, get, update, remove, sweepExpired, size, close, STATUS, TTL_MS, backend: "memory" };
