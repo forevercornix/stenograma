@@ -5,7 +5,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const jobStore = require("../utils/jobStore");
-const auditLog = require("../utils/auditLog");
+const { eraseJob } = require("../utils/jobErasure");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
@@ -189,10 +189,16 @@ router.get("/transcribe-jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res)
 /**
  * DELETE /api/transcribe-jobs/:id
  *
- * GDPR duomenų ištrynimas:
- * - pašalina užbaigto jobo metaduomenis ir rezultatą;
- * - pašalina susijusius pseudonimizuotus audito įrašus;
- * - aktyvių jobų netrina, nes worker'is dar gali juos atnaujinti.
+ * GDPR duomenų ištrynimas. Pašalina VISUS jobo pėdsakus (žr. utils/jobErasure.js):
+ * jobStore įrašą su rezultatu, BullMQ jobą Redis'e (jo payload'e - storageKey,
+ * grąžintoje reikšmėje - transkripcija), likusį audio storage faile ir
+ * pseudonimizuotus audito įrašus.
+ *
+ * Aktyvių jobų netrina, nes worker'is dar gali juos atnaujinti.
+ *
+ * PASTABA dėl autorizacijos: naudojamas BENDRAS API_KEY (žr. middleware/apiKeyAuth.js),
+ * tad bet kuris rakto turėtojas gali ištrinti bet kurį jobą. Viešam diegimui su
+ * realiais vartotojais reikia per-user auth - žr. backend README.
  */
 router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
   const job = await jobStore.get(req.params.id);
@@ -214,13 +220,19 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
     });
   }
 
-  const removed = await jobStore.remove(job.id);
+  const outcome = await eraseJob(job.id, "transcription");
 
-  if (!removed) {
+  if (!outcome.jobRemoved) {
     return res.status(404).json({ error: "Jobas nerastas." });
   }
 
-  auditLog.removeBySubjectIdentifier(job.id);
+  if (outcome.errors.length) {
+    // Klientui grąžinam 204 (jobo įrašas ir rezultatas pašalinti), bet dalinį
+    // nepavykimą BŪTINA matyti serverio loge - tai GDPR procedūros defektas.
+    console.error(
+      `[stenograma] Dalinis jobo ištrynimas (${job.id}): ${outcome.errors.join("; ")}`
+    );
+  }
 
   return res.status(204).send();
 });

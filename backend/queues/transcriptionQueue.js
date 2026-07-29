@@ -24,6 +24,23 @@ async function addTranscriptionJob(jobId, payload) {
   return queue.add("transcribe", { jobId, payload }, { ...DEFAULT_JOB_OPTIONS, jobId });
 }
 
+/**
+ * Pašalina jobą IŠ EILĖS (BullMQ hash'ai Redis'e). Būtina GDPR ištrynimui:
+ * removeOnComplete/removeOnFail palieka job.data (storageKey, meetingId) ir
+ * grąžintą REZULTATĄ (transkripciją) Redis'e dar 1-24 val. po užbaigimo.
+ * Grąžina pašalinto jobo data (kad iškviečiantis galėtų dar išvalyti storage)
+ * arba null, jei jobo eilėje nebėra.
+ */
+async function removeTranscriptionJob(jobId) {
+  const queue = getTranscriptionQueue();
+  const job = await queue.getJob(jobId);
+  if (!job) return null;
+
+  const data = job.data;
+  await job.remove();
+  return data;
+}
+
 async function closeTranscriptionQueue() {
   if (_queue) {
     await _queue.close();
@@ -36,4 +53,4 @@ async function closeTranscriptionQueue() {
   }
 }
 
-module.exports = { getTranscriptionQueue, addTranscriptionJob, closeTranscriptionQueue };
+module.exports = { getTranscriptionQueue, addTranscriptionJob, removeTranscriptionJob, closeTranscriptionQueue };

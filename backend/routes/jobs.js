@@ -4,6 +4,7 @@ const jobRunner = require("../queues/jobRunner");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
+const { eraseJob } = require("../utils/jobErasure");
 
 const router = express.Router();
 
@@ -57,6 +58,48 @@ router.get("/jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res) => {
     started_at: job.started_at,
     completed_at: job.completed_at,
   });
+});
+
+/**
+ * DELETE /api/jobs/:id - GDPR ištrynimas protokolo jobams.
+ *
+ * Simetriškas DELETE /api/transcribe-jobs/:id. Buvo praleistas, nors būtent
+ * protokolo jobai laiko jautriausius duomenis: payload'e - visa TRANSKRIPCIJA
+ * ir dalyvių sąrašas, rezultate - sugeneruotas protokolas.
+ */
+router.delete("/jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
+  const job = await jobStore.get(req.params.id);
+
+  if (!job) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
+  const deletableStatuses = new Set([
+    jobStore.STATUS.COMPLETED,
+    jobStore.STATUS.FAILED,
+    jobStore.STATUS.CANCELLED,
+  ]);
+
+  if (!deletableStatuses.has(job.status)) {
+    return res.status(409).json({
+      error:
+        "Aktyvaus jobo ištrinti negalima. Palaukite, kol jis bus užbaigtas arba atšauktas.",
+    });
+  }
+
+  const outcome = await eraseJob(job.id, "protocol");
+
+  if (!outcome.jobRemoved) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
+  if (outcome.errors.length) {
+    console.error(
+      `[stenograma] Dalinis jobo ištrynimas (${job.id}): ${outcome.errors.join("; ")}`
+    );
+  }
+
+  return res.status(204).send();
 });
 
 module.exports = router;
