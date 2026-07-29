@@ -275,7 +275,9 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
     [204, 404].includes(httpRes.status),
     `netikėtas statusas: ${httpRes.status} ${JSON.stringify(httpRes.body)}`
   );
-  assert.ok(retrySummary.attempted >= 1);
+  // Ant `attempted` netikrinam: jei HTTP kelias nugalėjo pirmas, scheduler'is
+  // jobo tiesiog neberas. Svarbu, kad nė vienas bandymas nesukluptų.
+  assert.equal(retrySummary.failed, 0);
 
   // Nesvarbu, kuris nugalėjo - galutinė būsena turi būti ta pati.
   assert.equal(await jobStore.get(job.id), null);
@@ -320,4 +322,52 @@ test("backoff: dar neatėjęs bandymo laikas praleidžiamas (deferred)", async (
 
   await jobStore.update(job.id, { audio_cleanup_pending: false });
   await jobStore.remove(job.id);
+});
+
+test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
+  const { retryPendingAudioCleanups } = require("../utils/deletionRetry");
+  const fileStorage = require("../utils/fileStorage");
+
+  // Vienas jobas paruoštas bandymui, du - atidėti pagal backoff.
+  const dueKey = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
+  const due = await jobStore.create({
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+    storageKey: dueKey,
+  });
+  await jobStore.update(due.id, {
+    status: jobStore.STATUS.COMPLETED,
+    audio_cleanup_pending: true,
+  });
+
+  const notDue = [];
+  for (let i = 0; i < 2; i += 1) {
+    const job = await jobStore.create({
+      type: jobStore.JOB_TYPES.TRANSCRIPTION,
+      storageKey: `uploads/dar-ne-${i}.wav`,
+    });
+    await jobStore.update(job.id, {
+      status: jobStore.STATUS.COMPLETED,
+      audio_cleanup_pending: true,
+      audio_cleanup_attempts: 3,
+      audio_cleanup_next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    notDue.push(job);
+  }
+
+  const summary = await retryPendingAudioCleanups();
+
+  assert.equal(summary.scanned, 3, "rasta visi pažymėti jobai");
+  assert.equal(summary.attempted, 1, "bandytas tik tas, kurio laikas atėjo");
+  assert.equal(summary.deferred, 2);
+  assert.equal(summary.succeeded, 1);
+  assert.equal(
+    summary.attempted + summary.deferred,
+    summary.scanned,
+    "attempted ir deferred neturi persidengti"
+  );
+
+  for (const job of [due, ...notDue]) {
+    await jobStore.update(job.id, { audio_cleanup_pending: false }).catch(() => {});
+    await jobStore.remove(job.id);
+  }
 });

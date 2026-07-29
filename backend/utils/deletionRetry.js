@@ -51,13 +51,19 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
   const { eraseJob } = require("./jobErasure");
 
   const pending = await jobStore.listPendingDeletions(limit);
-  const summary = { attempted: pending.length, succeeded: 0, failed: 0, deferred: 0 };
+
+  // `scanned` - kiek pažymėtų jobų rasta; `attempted` - kiek REALIAI bandyta.
+  // Anksčiau attempted buvo pending.length, tad esant 10 pažymėtų ir 8 dar ne
+  // laiku gaudavosi {attempted: 10, deferred: 8} - metrika klaidinga.
+  const summary = { scanned: pending.length, attempted: 0, succeeded: 0, failed: 0, deferred: 0 };
 
   for (const job of pending) {
     if (!_isDue(job, "deletion_next_attempt_at")) {
       summary.deferred += 1;
       continue;
     }
+
+    summary.attempted += 1;
 
     const attempts = (job.deletion_attempts || 0) + 1;
     const outcome = await eraseJob(job);
@@ -110,7 +116,7 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
   const { releaseAudio } = require("./audioCleanup");
 
   const pending = await jobStore.listPendingAudioCleanups(limit);
-  const summary = { attempted: pending.length, succeeded: 0, failed: 0, deferred: 0 };
+  const summary = { scanned: pending.length, attempted: 0, succeeded: 0, failed: 0, deferred: 0 };
 
   for (const job of pending) {
     if (!_isDue(job, "audio_cleanup_next_attempt_at")) {
@@ -122,11 +128,14 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
 
     if (!job.storageKey) {
       // Nėra ką trinti - vėliava pasenusi (pvz. raktas jau išvalytas kitu keliu).
+      // Į `attempted` neįskaičiuojam: jokio trynimo nebuvo.
       await jobStore
         .update(job.id, { audio_cleanup_pending: false })
         .catch(() => {});
       continue;
     }
+
+    summary.attempted += 1;
 
     const removed = await releaseAudio(job.id, job.storageKey);
 
