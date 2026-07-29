@@ -11,6 +11,8 @@ process.env.NODE_ENV = "test";
 
 const request = require("supertest");
 const app = require("../server");
+const jobStore = require("../utils/jobStore");
+const auditLog = require("../utils/auditLog");
 app._setReadyForTests(); // job route reikalauja readiness (startServer nevyksta testuose)
 
 function wait(ms) {
@@ -71,4 +73,134 @@ test("POST /api/transcribe-jobs - atsakymo greitis: jobId grąžinamas GREITAI, 
   // (galimai kelias minutes trunkančio) transkribavimo - tai IR YRA šio
   // endpoint'o prasmė.
   assert.ok(elapsedMs < 2000, `Tikėtasi greito atsakymo (<2s), gauta ${elapsedMs}ms`);
+});
+
+test("DELETE /api/transcribe-jobs/:id - nežinomas jobas grąžina 404", async () => {
+  const res = await request(app).delete(
+    "/api/transcribe-jobs/unknown-delete-job"
+  );
+
+  assert.equal(res.status, 404);
+});
+
+test("DELETE /api/transcribe-jobs/:id - aktyvus jobas grąžina 409", async () => {
+  const job = await jobStore.create();
+
+  const res = await request(app).delete(
+    `/api/transcribe-jobs/${job.id}`
+  );
+
+  assert.equal(res.status, 409);
+  assert.ok(await jobStore.get(job.id));
+});
+
+test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą", async () => {
+  auditLog.clear();
+
+  const job = await jobStore.create();
+
+  await jobStore.update(job.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { text: "Jautrus transkripcijos rezultatas" },
+  });
+
+  auditLog.record({
+    event: "TRANSCRIPTION_COMPLETED",
+    jobId: job.id,
+    success: true,
+  });
+
+  assert.equal(auditLog.getAll().length, 1);
+
+  const res = await request(app).delete(
+    `/api/transcribe-jobs/${job.id}`
+  );
+
+  assert.equal(res.status, 204);
+  assert.equal(await jobStore.get(job.id), null);
+  // DATA_ERASED kvitas SĄMONINGAI lieka - jis nesusietas su subjektu ir yra
+  // vienintelis įrodymas, kad ištrynimas įvyko (žr. utils/jobErasure.js).
+  assert.equal(auditLog.getAll().filter((e) => e.event !== "DATA_ERASED").length, 0);
+});
+
+test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> ištrynimas išvalo ir auditą", async () => {
+  // Skirtingai nuo testo aukščiau, čia audito įrašą sukuria REALUS transkribavimo
+  // servisas (per jobRunner -> processors -> transcriptionService), o ne testas.
+  // Būtent šis kelias buvo neveikiantis: servisas rašydavo tik meetingId, tad
+  // removeBySubjectIdentifier(job.id) nieko nerasdavo.
+  auditLog.clear();
+
+  const wav = Buffer.alloc(64);
+  wav.write("RIFF", 0, "ascii");
+  wav.write("WAVE", 8, "ascii");
+
+  const createRes = await request(app)
+    .post("/api/transcribe-jobs")
+    .attach("audio", wav, { filename: "irasas.wav", contentType: "audio/wav" });
+
+  assert.equal(createRes.status, 202);
+  const jobId = createRes.body.jobId;
+
+  let status = null;
+  for (let i = 0; i < 40 && status !== "completed"; i += 1) {
+    await wait(50);
+    const poll = await request(app).get(`/api/transcribe-jobs/${jobId}`);
+    status = poll.body.status;
+    if (status === "failed") assert.fail(`Jobas krito: ${poll.body.error}`);
+  }
+  assert.equal(status, "completed");
+
+  const beforeDelete = auditLog
+    .getAll()
+    .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
+  assert.ok(
+    beforeDelete.length >= 1,
+    "realus transkribavimo srautas turi palikti su jobId susietą audito įrašą"
+  );
+
+  const delRes = await request(app).delete(`/api/transcribe-jobs/${jobId}`);
+  assert.equal(delRes.status, 204);
+
+  const afterDelete = auditLog
+    .getAll()
+    .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
+  assert.equal(afterDelete.length, 0);
+  assert.equal(await jobStore.get(jobId), null);
+});
+
+test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, jobas lieka)", async () => {
+  // Regresija: abu endpoint'ai naudoja tą patį jobStore. Be job.type patikros
+  // protokolo jobas būdavo surandamas, ištrinamas iš jobStore, o valymas vyktų
+  // ne toje BullMQ eilėje - duomenys liktų, o klientas gautų 204.
+  const protocolJob = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.update(protocolJob.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { protocol: { pavadinimas: "Jautrus protokolas" } },
+  });
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${protocolJob.id}`);
+
+  assert.equal(res.status, 404);
+  assert.ok(await jobStore.get(protocolJob.id), "protokolo jobas turi likti nepaliestas");
+
+  await jobStore.remove(protocolJob.id);
+});
+
+test("DELETE /api/transcribe-jobs/:id - LEGACY jobas be type ištrinamas (ne 404)", async () => {
+  // Suderinamumas: prieš `type` įvedimą sukurti jobai lauko neturi. Griežta
+  // patikra juos paverstų neištrinamais po deployment'o.
+  const legacy = await jobStore.create();
+  await jobStore.update(legacy.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { text: "Senas rezultatas" },
+    type: undefined,
+  });
+
+  const stored = await jobStore.get(legacy.id);
+  stored.type = undefined; // imituojam seną Redis įrašą be lauko
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${legacy.id}`);
+
+  assert.equal(res.status, 204);
+  assert.equal(await jobStore.get(legacy.id), null);
 });

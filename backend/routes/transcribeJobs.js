@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const jobStore = require("../utils/jobStore");
+const { eraseJob, eraseOrphanedJobData } = require("../utils/jobErasure");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
@@ -112,7 +113,12 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     const ext = path.extname(req.file.originalname || "") || "";
     storageKey = await fileStorage.putFile(req.file.path, { ext });
 
-    job = await jobStore.create();
+    job = await jobStore.create({
+      type: jobStore.JOB_TYPES.TRANSCRIPTION,
+      // storageKey saugom JOBE, ne tik BullMQ payload'e - kad GDPR ištrynimas
+      // rastų likusį audio ir INLINE režime (ten BullMQ jobo išvis nėra).
+      storageKey,
+    });
 
     // HTTP endpoint'as TIK įdeda jobą į eilę (ar inline) ir grąžina 202. Darbą
     // vykdo worker (BullMQ) arba setImmediate (inline). Backend nevykdo transkripcijos
@@ -183,6 +189,96 @@ router.get("/transcribe-jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res)
     started_at: job.started_at,
     completed_at: job.completed_at,
   });
+});
+
+/**
+ * DELETE /api/transcribe-jobs/:id
+ *
+ * GDPR duomenų ištrynimas. Pašalina VISUS jobo pėdsakus (žr. utils/jobErasure.js):
+ * jobStore įrašą su rezultatu, BullMQ jobą Redis'e (jo payload'e - storageKey,
+ * grąžintoje reikšmėje - transkripcija), likusį audio storage faile ir
+ * pseudonimizuotus audito įrašus.
+ *
+ * Aktyvių jobų netrina, nes worker'is dar gali juos atnaujinti.
+ *
+ * PASTABA dėl autorizacijos: naudojamas BENDRAS API_KEY (žr. middleware/apiKeyAuth.js),
+ * tad bet kuris rakto turėtojas gali ištrinti bet kurį jobą. Viešam diegimui su
+ * realiais vartotojais reikia per-user auth - žr. backend README.
+ */
+router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
+  const job = await jobStore.get(req.params.id);
+
+  if (!job) {
+    // jobStore įrašas galėjo dingti pagal TTL (numatytai 60 min), o BullMQ (iki
+    // 24 val.) ir auditas (iki 30 d.) duomenis dar laiko. Prieš 404 pabandom
+    // ištrinti tai, kas dar egzistuoja - kitaip teisė ištrinti dingtų anksčiau
+    // nei patys duomenys.
+    const orphan = await eraseOrphanedJobData(req.params.id);
+
+    if (orphan.criticalFailure) {
+      console.error(
+        `[stenograma] NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${orphan.errors.join("; ")}`
+      );
+      return res.status(503).json({
+        error: "Nepavyko visiškai ištrinti jobo duomenų. Užklausą galima pakartoti.",
+        deletion: orphan,
+      });
+    }
+
+    if (orphan.found) return res.status(204).send();
+
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
+  // Tipo patikra: abu endpoint'ai naudoja TĄ PATĮ jobStore, tad be jos protokolo
+  // jobo ID, pateiktas šiam endpoint'ui, būtų surastas, ištrintas iš jobStore, o
+  // valymas vyktų NE TOJE BullMQ eilėje - duomenys liktų, klientas gautų 204.
+  // Legacy jobai (sukurti prieš `type` įvedimą) lauko neturi - jų neatmetam,
+  // kitaip po deployment'o jau egzistuojantys jobai taptų neištrinami. Jiems
+  // eraseJob() valo ABI eiles (žr. utils/jobErasure.js).
+  if (job.type && job.type !== jobStore.JOB_TYPES.TRANSCRIPTION) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
+  const deletableStatuses = new Set([
+    jobStore.STATUS.COMPLETED,
+    jobStore.STATUS.FAILED,
+    jobStore.STATUS.CANCELLED,
+  ]);
+
+  if (!deletableStatuses.has(job.status)) {
+    return res.status(409).json({
+      error:
+        "Aktyvaus jobo ištrinti negalima. Palaukite, kol jis bus užbaigtas arba atšauktas.",
+    });
+  }
+
+  const outcome = await eraseJob(job);
+
+  if (outcome.criticalFailure) {
+    // NEGRĄŽINAME 204: jobStore įrašas sąmoningai paliktas (deletion_pending),
+    // kad operaciją būtų galima pakartoti tuo pačiu ID. GDPR ištrynime serverio
+    // logas nėra pakankamas patvirtinimas - klientas turi matyti, kad nepavyko.
+    console.error(
+      `[stenograma] NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
+    );
+    return res.status(503).json({
+      error:
+        "Nepavyko visiškai ištrinti jobo duomenų. Jobas paliktas, kad užklausą būtų galima pakartoti.",
+      deletion: {
+        queueJobRemoved: outcome.queueJobRemoved,
+        storageRemoved: outcome.storageRemoved,
+        auditEntriesRemoved: outcome.auditEntriesRemoved,
+        errors: outcome.errors,
+      },
+    });
+  }
+
+  if (!outcome.jobRemoved) {
+    return res.status(404).json({ error: "Jobas nerastas." });
+  }
+
+  return res.status(204).send();
 });
 
 module.exports = router;

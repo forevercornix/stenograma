@@ -162,8 +162,9 @@ async function _runInline(type, jobId, payload) {
     // Inline režimas neturi retry - tad audio galima trinti iškart po galutinio
     // statuso (sėkmė ar nesėkmė). Trinam tik jei payload turi storageKey (transkripcija).
     if (payload && payload.storageKey) {
-      const fileStorage = require("../utils/fileStorage");
-      await fileStorage.del(payload.storageKey).catch(() => {});
+      // storageKey nulinamas TIK po sėkmingo trynimo - žr. utils/audioCleanup.js.
+      const { releaseAudio } = require("../utils/audioCleanup");
+      await releaseAudio(jobId, payload.storageKey);
     }
   }
 }
@@ -197,6 +198,7 @@ module.exports = {
   enqueueProtocol,
   close,
   _classifyError, // eksportuojama testams
+  _runInline, // eksportuojama testams (audio valymo regresija)
 };
 
 // AUTO-registracija: processor'iai užregistruojami vos įkėlus modulį, kad inline

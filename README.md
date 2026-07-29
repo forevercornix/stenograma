@@ -450,6 +450,8 @@ jokio "demo" kelio per tiesioginį LLM kvietimą iš naršyklės nebėra.
 | `/api/generate` | POST (JSON) | Transkripcija → struktūruotas protokolas (SINCHRONINIS - žr. `/api/jobs` ilgiems susitikimams) | `API_KEY`, rate limit, provider/prompt override tik su `ALLOW_PROVIDER_OVERRIDE` |
 | `/api/jobs` | POST (JSON) | Asinchroninis `/api/generate` - grąžina `jobId` iš karto (202) | `API_KEY`, rate limit |
 | `/api/jobs/:id` | GET | Joba statuso/rezultato apklausa (polling) | `API_KEY`, rate limit |
+| `/api/transcribe-jobs/:id` | DELETE | GDPR ištrynimas: jobas, rezultatas, eilės įrašas, audio, auditas (tik terminalinės būsenos, kitaip 409; dalinis nepavykimas -> 503) | `API_KEY`, rate limit |
+| `/api/jobs/:id` | DELETE | GDPR ištrynimas protokolo jobui (analogiškai) | `API_KEY`, rate limit |
 | `/api/audit` | GET | Audit log įrašai | `x-audit-key` header (arba uždaryta produkcijoje) |
 
 Pilna dokumentacija: [`backend/README.md`](backend/README.md).
@@ -867,3 +869,221 @@ keli GB nesiųstų kaskart.
 ## Licencija
 
 MIT — žr. [`LICENSE`](LICENSE).
+
+## Privatumas ir GDPR kontrolės
+
+Stenograma apdoroja posėdžių įrašus, transkripcijas, kalbėtojų informaciją, vardus,
+kontaktus ir kitus asmens ar konfidencialius duomenis. Sistemoje yra techninės
+priemonės, mažinančios nereikalingą duomenų atskleidimą.
+
+**Sąžiningai:** šios priemonės padeda diegti sistemą privatumą gerbiančiai, bet
+**savaime NEUŽTIKRINA atitikties BDAR**. Teisinį pagrindą, saugojimo terminus,
+prieigos valdymą ir organizacines procedūras apibrėžia sistemą eksploatuojanti
+organizacija. Pseudonimizuoti duomenys pagal BDAR **vis dar yra asmens duomenys**.
+
+### Privatumą tausojantis auditas
+
+Audito įvykiai saugo pseudonimizuotą subjekto identifikatorių (HMAC-SHA256), ne
+patį jobo/susitikimo ID. Laisvo teksto laukai (klaidų pranešimai) prieš įrašymą
+praeina redakcijos grandinę: autentifikacijos duomenys, el. paštai, telefonai,
+asmens kodai, IP adresai, URL keliai ir failų keliai pakeičiami žymomis.
+
+Kontroliuojami laukai (`llmProvider`, `llmModel`, `promptVersion`,
+`transcriptionProvider`, `diarizationProvider`) **nepraeina PII heuristikų** – jiems
+taikomas tik simbolių allowlist. Tai sąmoningas sprendimas: bendras telefono
+šablonas `claude-3-5-sonnet-20241022` paversdavo `claude-3-5-sonnet-[PHONE_REDACTED]`
+ir sunaikindavo būtent tuos duomenis, dėl kurių auditas egzistuoja.
+
+Į auditą **nepatenka**: įkeltas garsas, transkripcijos, promptai, failų vardai,
+API raktai, pilni klaidų objektai.
+
+```env
+# Audito subjectId pseudonimizacijos druska. Produkcijoje BŪTINA nustatyti savo -
+# antraip naudojama repozitorijoje esanti numatytoji reikšmė ir spėjamiems
+# identifikatoriams pseudonimizacija tampa atsukama.
+# reikšmę sugeneruokite: openssl rand -hex 32
+AUDIT_ID_SALT=
+```
+
+### Audito retencija
+
+```env
+AUDIT_RETENTION_DAYS=30    # numatyta: 30
+AUDIT_MAX_ENTRIES=5000     # kieta atminties riba
+```
+
+Pasenę įrašai šalinami tiek rašant naują įvykį, tiek skaitant `GET /api/audit`.
+
+**Apribojimas – tai NĖRA production-grade audit trail.** Žurnalas yra
+backend'o atmintyje, tad: dingsta po restarto; nesidalija tarp replikų; neturi
+DB transakcijų, tamper-resistance, prieigos žurnalo ar tikro retention
+scheduler'io. Retencija realiai reiškia „iki restarto arba iki N dienų, kas
+ateina pirmiau". Ilgalaikei atitikčiai reikia SQLite/PostgreSQL saugyklos –
+žr. Roadmap (Milestone 2).
+
+### Privatumo režimas
+
+```env
+PRIVACY_MODE=true
+```
+
+Įjungus:
+
+- nauji audito įrašai nerašomi;
+- atmintyje sukaupti įrašai išvalomi (tiek rašant, tiek skaitant, tiek proceso starte);
+- serverio klaidų logai papildomai sanitizuojami (`utils/sanitizeError.js`);
+- transkribavimas ir protokolų generavimas veikia įprastai.
+
+### Jobo duomenų ištrynimas (terminal job erasure)
+
+**Terminologija (svarbu):** tai **jobo lygmens** ištrynimas, ne pilna BDAR
+„teisė būti pamirštam". Endpointas trina pagal VIENĄ jobo ID; jis neatsako į
+klausimą „ištrinkite visus su šiuo asmeniu ar susitikimu susijusius duomenis".
+Jei tas pats susitikimas turi kelis jobus, reikia žinoti visus jų ID. Subjekto
+lygmens ištrynimui reikėtų susitikimo/subjekto indekso ir visų šaltinių
+registro – Milestone 2.
+
+```http
+DELETE /api/transcribe-jobs/:id     # transkribavimo jobas
+DELETE /api/jobs/:id                # protokolo jobas
+```
+
+Atsakymai:
+
+- `204 No Content` – jobas ir susiję duomenys pašalinti;
+- `404 Not Found` – jobo nėra **arba jo tipas neatitinka endpoint'o**;
+- `409 Conflict` – jobas dar `queued`/`processing`;
+- `503 Service Unavailable` – dalinis ištrynimas: kritinis žingsnis nepavyko,
+  jobas paliktas su `deletion_pending`, užklausą galima pakartoti.
+
+**Kritiniais laikomi visi keturi žingsniai**, įskaitant audito įrašų šalinimą:
+pseudonimizuoti duomenys pagal BDAR vis tiek gali būti asmens duomenys, tad
+`204` grąžinti, kai audito įrašai liko, būtų netiesa. Visos operacijos
+idempotentiškos, todėl `DELETE` galima saugiai kartoti.
+
+Aktyvių jobų netrinam, nes worker'is dar gali juos skaityti ar atnaujinti.
+
+Jobo **tipas saugomas pačiame įraše** (`job.type`), o ne imamas iš URL. Be to
+protokolo jobo ID, pateiktas transkripcijos endpoint'ui, būtų surastas (abu
+endpoint'ai naudoja tą patį `jobStore`), ištrintas iš `jobStore`, o valymas
+vyktų ne toje BullMQ eilėje. Neatitinkantis tipas dabar grąžina `404`.
+
+Ištrynimas (`utils/jobErasure.js`) apima **visas keturias** duomenų vietas:
+
+| Vieta | Kas ten guli |
+|---|---|
+| `jobStore` (memory/Redis) | jobo metaduomenys + rezultatas (transkripcija/protokolas) |
+| BullMQ eilė (Redis) | `job.data` su `storageKey`, `meetingId` IR grąžintas rezultatas |
+| Audio storage | įkeltas garso failas (įprastai jau ištrintas po galutinio statuso) |
+| Audito žurnalas | įrašai pagal pseudonimizuotą `subjectId` |
+
+**Tvarka svarbi:** `jobStore` įrašas šalinamas PASKUTINIS ir tik tada, kai eilė
+bei storage jau išvalyti. Nepavykus kuriam nors kritiniam žingsniui, jobas
+paliekamas su `deletion_pending`, o endpoint'as grąžina **`503`** su struktūrizuotu
+`deletion` objektu – ne `204`. Kitaip prarastume vienintelį raktą operacijai
+pakartoti: klientas manytų, kad ištrinta, pakartotinis `DELETE` duotų `404`, o
+audio failas liktų našlaite.
+
+`storageKey` saugomas ir `jobStore` įraše, kad ištrynimas rastų likutį ir
+**inline režime**, kur BullMQ jobo išvis nėra. Į `null` jis nustatomas **tik po
+sėkmingo** `fileStorage.del()` (`utils/audioCleanup.js`) – kitaip nepavykus
+trynimui failas liktų storage, o raktas dingtų, ir audio taptų nepasiekiama
+našlaite.
+
+**Retencijos nesutampa** (`jobStore` TTL 60 min < BullMQ `removeOnFail` 24 val.
+< auditas 30 d.), todėl `jobStore` įrašas gali išnykti anksčiau už pačius
+duomenis. Tokiu atveju `DELETE` **nesustoja ties 404**: ieškoma tiesiogiai
+abiejose eilėse ir audite (`eraseOrphanedJobData`), ir tik nieko neradus
+grąžinamas `404`. Kitaip teisė ištrinti dingtų anksčiau nei duomenys.
+
+**Nebaigti valymai kartojami automatiškai** – `utils/deletionRetry.js`, numatytai
+kas 10 min (`DELETION_RETRY_INTERVAL_MINUTES`). Yra **dvi atskiros** vėliavos ir
+du atskiri ciklai, nes tai du skirtingi veiksmai:
+
+| Vėliava | Ką reiškia | Ką kartojimas daro |
+|---|---|---|
+| `deletion_pending` | vartotojo prašytas VISO jobo ištrynimas nutrūko | kartoja pilną `eraseJob()` |
+| `audio_cleanup_pending` | techninis audio valymas po sėkmingos transkripcijos nepavyko | trina TIK audio failą; jobo rezultatas lieka prieinamas |
+
+Painioti jų negalima: `deletion_pending` semantika ištrintų ir transkripciją,
+kurios vartotojas gal dar neatsiėmė.
+
+Kol bet kuri vėliava aktyvi, jobo įrašas **neišmetamas pagal TTL** (memory store
+jį praleidžia, Redis atveju kviečiamas `PERSIST`) – tai vienintelis šaltinis, iš
+kurio žinomas `storageKey`, kai BullMQ jobas jau pašalintas.
+
+Po trijų nesėkmingų bandymų į logą rašomas įspėjimas, reikalaujantis rankinio
+įsikišimo.
+
+**Ko automatinis kartojimas NEAPIMA (sąžiningai):** kartojami tik tie ištrynimai,
+kurių `jobStore` įrašas dar egzistuoja. Jei `jobStore` įrašo jau nebuvo (orphan
+kelias) ir ištrynimas nepavyko, klientas gauna `503`, bet vėliavos nustatyti
+nėra kur – pakartojimas priklauso nuo kliento. Pilnam sprendimui reikėtų
+atskiros persistentinės ištrynimo užklausų eilės (Milestone 2). Tai taip pat nėra
+garantuota dead-letter sistema su SLA.
+
+**Ištrynimo įrodymas:** kai kas nors realiai pašalinta, į auditą įrašomas
+`DATA_ERASED` kvitas su `subjectId: null` ir šaltinių suvestine
+(`queue=deleted storage=none ...`). Jis nesusietas su jokiu subjektu, todėl jo
+nepašalina ir pakartotinis to paties jobo ištrynimas. Nieko neradus kvitas
+**nerašomas** – kitaip užklausos nežinomais ID gamintų klaidingus įrašus ir per
+`AUDIT_MAX_ENTRIES` išstumtų tikruosius.
+
+Apribojimai: kvitas guli tame pačiame atmintiniame žurnale (tos pačios restarto
+ir retencijos ribos), ir jis **nesaistomas su konkrečia užklausa** – rodo, kad
+ištrynimas įvyko, bet ne kuriam prašymui. Atskiras `deletionRequestId`,
+grąžinamas klientui, būtų kitas žingsnis.
+
+**Legacy jobai:** prieš šį pakeitimą sukurti (Redis'e išlikę) jobai `type` lauko
+neturi. Jie **nėra** atmetami – ištrynimas tokiu atveju valo abi BullMQ eiles
+(jobo ID sutampa su BullMQ ID, tad ne toje eilėje operacija yra no-op). Aklai
+priskirti visiems `transcription` būtų klaida: protokolo jobai tada būtų valomi
+iš ne tos eilės.
+
+BullMQ dalis svarbi todėl, kad `removeOnComplete`/`removeOnFail` (žr.
+`queues/config.js`) palieka jobo duomenis Redis'e dar 1–24 val. po užbaigimo –
+vien `jobStore` įrašo ištrynimas jų nepašalintų.
+
+**Ko ištrynimas NEAPIMA (sąžiningai):**
+
+- serverio `console` logų (nebent `PRIVACY_MODE=true` – ir tada tik sanitizavimas, ne trynimas);
+- duomenų, kuriuos jau gavo išorinis LLM tiekėjas (Claude/GPT/Gemini) – jų retencija priklauso nuo tiekėjo sutarties;
+- vartotojo naršyklėje eksportuotų DOCX/CSV/TXT failų.
+
+**Autorizacija:** naudojamas bendras `API_KEY`, tad bet kuris rakto turėtojas gali
+ištrinti bet kurį jobą. Nėra nei `ownerId`/`tenantId`, nei rolių, nei atskiros
+administratoriaus teisės. Tai galioja **visam** projekto API, ne tik šiems
+endpointams, ir viešam diegimui netinka – žr. `backend/README.md`
+„Autentifikacija ir viešas diegimas" bei Roadmap (per-user auth).
+
+### Žinomi apribojimai (privatumo / ištrynimo funkcionalumo)
+
+Sąrašas sąmoningai vienoje vietoje, kad nereikėtų kompromisų ieškoti pačiam.
+Visi punktai yra **žinomi ir apgalvoti**, ne atsitiktiniai.
+
+| # | Apribojimas | Ką tai reiškia praktiškai | Kur spręsti |
+|---|---|---|---|
+| 1 | **Auditas atmintyje** | Dingsta po restarto, nesidalija tarp replikų, be DB transakcijų, tamper-resistance ar prieigos žurnalo. Retencija = „iki restarto arba iki N dienų". | SQLite/PostgreSQL (Milestone 2) |
+| 2 | **`jobStore` atmintyje** (be `REDIS_URL`) | Jobai ir jų būsena neišgyvena restarto. | `REDIS_URL` arba PostgreSQL |
+| 3 | **Retry būsena nepersistuojama** | `deletion_pending` / `audio_cleanup_pending` gyvena `jobStore`. Su memory store procesui nukritus retry eilė dingsta kartu su jobais. Su Redis - išlieka. | persistentinė ištrynimo užklausų eilė (Milestone 2) |
+| 4 | **Bendras `API_KEY`, be nuosavybės** | Bet kuris rakto turėtojas gali ištrinti bet kurį jobą. Nėra `ownerId`/`tenantId`, rolių ar admin teisės. Galioja **visam** API. | per-user auth / OIDC (Milestone 2) |
+| 5 | **Terminal job erasure, ne subjekto lygmens** | Trinama pagal VIENĄ jobo ID. „Ištrinkite visus šio asmens duomenis" nepalaikoma - reikia žinoti visus ID. | subjekto/susitikimo indeksas (Milestone 2) |
+| 6 | **`DELETE` nėra ACID transakcija** | Eilė → storage → auditas → `jobStore` yra atskiri žingsniai. Procesui mirus tarp jų gaunamas dalinis rezultatas; jį gaudo `deletion_pending` + retry, bet tikros atominės transakcijos Node + failų sistema + Redis kombinacija turėti negali. | kita architektūra (ne planuojama) |
+| 7 | **`DATA_ERASED` kvitas nėra kriptografinis įrodymas** | Tai paprastas audito įrašas be HMAC, hash chain ar append-only garantijos, ir nesaistomas su konkrečia užklausa. | HMAC + immutable log, jei reikia formalaus GDPR evidence |
+| 8 | **Orphan ištrynimo nesėkmė nekartojama automatiškai** | Nesant `jobStore` įrašo nėra kur nustatyti vėliavos - pakartojimas priklauso nuo kliento (gavusio `503`). | ta pati persistentinė eilė (#3) |
+| 9 | **Eilių sąrašas ištrynime - rankinis** | `eraseOrphanedJobData()` tikrina abi eiles eksplicitiškai. Prie 10+ eilių reikėtų registro. | šiandien nereikia |
+
+Kas **NĖRA** apribojimas (dažnai klausiama): nepavykę ištrynimai ir audio valymai
+kartojami automatiškai su eksponentiniu backoff (10 → 20 → 40 → 80 min, riba ~5 val.),
+o pažymėti jobai neišmetami pagal TTL.
+
+### Rekomendacijos diegiant su asmens duomenimis
+
+- nustatykite `API_KEY` ir `AUDIT_ID_SALT`;
+- naudokite HTTPS;
+- apribokite prieigą prie Redis, worker'ių ir storage;
+- laikykite audito ir jobų retenciją kiek įmanoma trumpesnę;
+- dokumentuokite išorinius AI tiekėjus ir duomenų perdavimus;
+- patikrinkite ištrynimo procedūrą REALIOJE produkcijos aplinkoje (ypač su Redis –
+  `tests/queueRecovery.integration.test.js` stiliaus patikra be tikro Redis praleidžiama);
+- nenaudokite realių asmens duomenų testuose ir kūrimo logeuose.

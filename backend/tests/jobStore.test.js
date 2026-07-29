@@ -146,3 +146,16 @@ test("init() lygiagrečiai grąžina TĄ PATĮ store (initPromise dalinimasis)",
   assert.equal(s1, s2);
   assert.equal(s2, s3);
 });
+
+test("remove deletes an existing job", async () => {
+  const store = require("../utils/jobStore");
+
+  const job = await store.create();
+
+  assert.ok(await store.get(job.id));
+
+  const removed = await store.remove(job.id);
+
+  assert.equal(removed, true);
+  assert.equal(await store.get(job.id), null);
+});

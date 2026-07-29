@@ -1,4 +1,4 @@
-const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -80,8 +80,8 @@ function deserialize(flat) {
 }
 
 function createRedisStore(redisClient) {
-  async function create() {
-    const job = newJob();
+  async function create(fields = {}) {
+    const job = newJob(fields);
     await redisClient.hset(JOB_PREFIX + job.id, serialize(job));
     await redisClient.zadd(INDEX_KEY, Date.now(), job.id);
     return job;
@@ -98,11 +98,27 @@ function createRedisStore(redisClient) {
     const next = applyPatch(existing, patch);
     await redisClient.hset(JOB_PREFIX + id, serialize(next));
     await redisClient.zadd(INDEX_KEY, Date.now(), id);
-    // Baigtiems job'ams - Redis EXPIRE, kad pats išvalytų po TTL.
-    if (isFinished(next.status)) {
+    // Baigtiems job'ams - Redis EXPIRE, kad pats išvalytų po TTL. IŠIMTIS:
+    // nebaigtas valymas (audio_cleanup_pending / deletion_pending) - tada
+    // PERSIST, nes šis įrašas yra vienintelis šaltinis, iš kurio žinomas
+    // storageKey. Redis pats jo išmesti neturi.
+    if (hasPendingCleanup(next)) {
+      if (typeof redisClient.persist === "function") {
+        await redisClient.persist(JOB_PREFIX + id);
+      }
+    } else if (isFinished(next.status)) {
       await redisClient.expire(JOB_PREFIX + id, TTL_SECONDS);
     }
     return next;
+  }
+
+  async function remove(id) {
+    const existed = await redisClient.exists(JOB_PREFIX + id);
+
+    await redisClient.del(JOB_PREFIX + id);
+    await redisClient.zrem(INDEX_KEY, id);
+
+    return Boolean(existed);
   }
 
   async function sweepExpired(now = Date.now()) {
@@ -119,6 +135,26 @@ function createRedisStore(redisClient) {
       }
     }
     return removed;
+  }
+
+  /**
+   * Jobai su nustatyta boolean vėliava (`deletion_pending`,
+   * `audio_cleanup_pending`). Redis'e nėra sekundinio indekso pagal šiuos
+   * laukus, tad einam per jobs:index (jame - tik gyvi jobai) ir tikrinam lauką.
+   * Riba (`limit`) apsaugo nuo didelio skenavimo.
+   */
+  async function listByFlag(field, limit = 100) {
+    const ids = await redisClient.zrange(INDEX_KEY, 0, -1);
+    const pending = [];
+
+    for (const id of ids) {
+      if (pending.length >= limit) break;
+      const flat = await redisClient.hgetall(JOB_PREFIX + id);
+      const job = deserialize(flat);
+      if (job && job[field]) pending.push(job);
+    }
+
+    return pending;
   }
 
   async function size() {
@@ -141,7 +177,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, get, update, sweepExpired, size, close, STATUS, TTL_MS, backend: "redis" };
+  return { create, get, update, remove, sweepExpired, size, listByFlag, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize };

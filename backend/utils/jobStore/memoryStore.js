@@ -1,4 +1,4 @@
-const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -15,8 +15,8 @@ const { STATUS, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
  */
 const jobs = new Map();
 
-async function create() {
-  const job = newJob();
+async function create(fields = {}) {
+  const job = newJob(fields);
   jobs.set(job.id, job);
   return job;
 }
@@ -36,6 +36,10 @@ async function update(id, patch) {
 async function sweepExpired(now = Date.now()) {
   let removed = 0;
   for (const [id, job] of jobs.entries()) {
+    // Nebaigto valymo jobų NEIŠMETAM - kitaip prarastume vienintelę nuorodą į
+    // likusį audio failą (žr. common.hasPendingCleanup).
+    if (hasPendingCleanup(job)) continue;
+
     if (isFinished(job.status) && now - new Date(job.updatedAt).getTime() > TTL_MS) {
       jobs.delete(id);
       removed++;
@@ -48,8 +52,26 @@ async function size() {
   return jobs.size;
 }
 
+/**
+ * Jobai su nustatyta boolean vėliava (`deletion_pending`,
+ * `audio_cleanup_pending`). Naudoja periodiniai pakartojimo procesai -
+ * žr. utils/deletionRetry.js.
+ */
+async function listByFlag(field, limit = 100) {
+  const pending = [];
+  for (const job of jobs.values()) {
+    if (job[field]) pending.push(job);
+    if (pending.length >= limit) break;
+  }
+  return pending;
+}
+
+async function remove(id) {
+  return jobs.delete(id);
+}
+
 async function close() {
   jobs.clear();
 }
 
-module.exports = { create, get, update, sweepExpired, size, close, STATUS, TTL_MS, backend: "memory" };
+module.exports = { create, get, update, remove, sweepExpired, size, listByFlag, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

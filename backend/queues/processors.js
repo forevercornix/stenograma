@@ -56,13 +56,16 @@ async function transcriptionProcessor(payload, jobId) {
     transcriptionProviderOverride,
     diarizationModeOverride,
     meetingId,
+    jobId,
     onProgress,
   });
 }
 
-async function protocolProcessor(payload) {
+async function protocolProcessor(payload, jobId) {
   // Protokolo generavimas neturi failo - visas payload jau JSON.
-  return generateProtocol(payload);
+  // jobId perduodamas TIK auditui (pseudonimizuotam subjectId), kad
+  // DELETE /api/jobs/:id galėtų surasti ir pašalinti susijusius įrašus.
+  return generateProtocol({ ...payload, jobId });
 }
 
 module.exports = { transcriptionProcessor, protocolProcessor };

@@ -41,6 +41,7 @@ async function transcribeAudio({
   transcriptionProviderOverride,
   diarizationModeOverride,
   meetingId,
+  jobId,
   onProgress,
 }) {
   const start = Date.now();
@@ -75,6 +76,8 @@ async function transcribeAudio({
 
   if (!detectAudioMagic(buffer)) {
     auditLog.record({
+      jobId,
+      meetingId,
       transcriptionProvider: null,
       processingTimeMs: Date.now() - start,
       success: false,
@@ -126,6 +129,7 @@ async function transcribeAudio({
     }
 
     auditLog.record({
+      jobId,
       meetingId,
       transcriptionProvider: transcriptionProvider.name,
       diarizationProvider: diarizationProviderUsed,
@@ -137,6 +141,7 @@ async function transcribeAudio({
   } catch (e) {
     if (e instanceof HttpError) throw e;
     auditLog.record({
+      jobId,
       meetingId,
       transcriptionProvider: transcriptionProvider.name,
       processingTimeMs: Date.now() - start,

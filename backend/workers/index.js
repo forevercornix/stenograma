@@ -26,10 +26,11 @@ const _classifyError = (e) => jobRunner._classifyError(e, "worker job");
 
 // Ištrina audio iš storage po GALUTINIO statuso (sėkmės ar išnaudotų bandymų).
 // NEtrina tarp retry - kad kitas bandymas rastų failą.
-async function _cleanupStorage(payload) {
+async function _cleanupStorage(payload, jobId) {
   if (payload && payload.storageKey) {
-    const fileStorage = require("../utils/fileStorage");
-    await fileStorage.del(payload.storageKey).catch(() => {});
+    // storageKey nulinamas TIK po sėkmingo trynimo - žr. utils/audioCleanup.js.
+    const { releaseAudio } = require("../utils/audioCleanup");
+    await releaseAudio(jobId, payload.storageKey);
   }
 }
 
@@ -72,7 +73,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
       }
 
       // SĖKMĖ - audio nebereikalingas, trinam iš storage (jei transkripcija).
-      await _cleanupStorage(payload);
+      await _cleanupStorage(payload, jobId);
       return result;
     },
     { connection, ...WORKER_OPTIONS, ...workerOptions }
@@ -87,7 +88,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
       // Galutinė nesėkmė po visų bandymų - jobas FAILED (dead-letter).
       await jobStore.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
       // Tik dabar (po VISŲ bandymų) trinam audio - kad retry turėtų failą.
-      await _cleanupStorage(payload);
+      await _cleanupStorage(payload, jobId);
     } else {
       // Dar bus retry - paliekam PROCESSING, audio NETRINAM (kitas bandymas jį naudos).
       await jobStore.update(jobId, { attempt_count: job.attemptsMade + 1, error: message, error_code: errorCode });
@@ -278,4 +279,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess };
+module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage };

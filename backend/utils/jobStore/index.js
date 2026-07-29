@@ -1,5 +1,5 @@
 const memoryStore = require("./memoryStore");
-const { STATUS, TTL_MS } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS } = require("./common");
 
 /**
  * Job store įėjimo taškas su AUTOMATINIU backend'o parinkimu:
@@ -94,9 +94,9 @@ async function ensureInit() {
 
 module.exports = {
   init,
-  create: async () => {
+  create: async (fields = {}) => {
     await ensureInit();
-    return store.create();
+    return store.create(fields);
   },
   get: async (id) => {
     await ensureInit();
@@ -106,9 +106,25 @@ module.exports = {
     await ensureInit();
     return store.update(id, patch);
   },
+  remove: async (id) => {
+    await ensureInit();
+    return store.remove(id);
+  },
   sweepExpired: async (now) => {
     await ensureInit();
     return store.sweepExpired(now);
+  },
+  listPendingDeletions: async (limit) => {
+    await ensureInit();
+    return typeof store.listByFlag === "function"
+      ? store.listByFlag("deletion_pending", limit)
+      : [];
+  },
+  listPendingAudioCleanups: async (limit) => {
+    await ensureInit();
+    return typeof store.listByFlag === "function"
+      ? store.listByFlag("audio_cleanup_pending", limit)
+      : [];
   },
   size: async () => {
     await ensureInit();
@@ -119,6 +135,7 @@ module.exports = {
   },
   getBackend: () => store.backend || "memory",
   STATUS,
+  JOB_TYPES,
   TTL_MS,
 
   // --- TIK TESTAMS (dependency injection tikrai race patikrai) ---

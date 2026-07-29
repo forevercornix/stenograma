@@ -22,6 +22,20 @@ async function addProtocolJob(jobId, payload) {
   return queue.add("generate", { jobId, payload }, { ...DEFAULT_JOB_OPTIONS, jobId });
 }
 
+/**
+ * Analogiškai transcriptionQueue.removeTranscriptionJob - pašalina protokolo
+ * jobą iš eilės kartu su jo payload'u (transkriptu!) ir rezultatu.
+ */
+async function removeProtocolJob(jobId) {
+  const queue = getProtocolQueue();
+  const job = await queue.getJob(jobId);
+  if (!job) return null;
+
+  const data = job.data;
+  await job.remove();
+  return data;
+}
+
 async function closeProtocolQueue() {
   if (_queue) {
     await _queue.close();
@@ -34,4 +48,4 @@ async function closeProtocolQueue() {
   }
 }
 
-module.exports = { getProtocolQueue, addProtocolJob, closeProtocolQueue };
+module.exports = { getProtocolQueue, addProtocolJob, removeProtocolJob, closeProtocolQueue };
