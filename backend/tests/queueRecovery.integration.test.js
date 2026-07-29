@@ -209,12 +209,41 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   );
   console.log("[queueRecovery] recovery worker CREATED");
 
+  recoveryWorker.on("active", (activeJob) => {
+    console.log(`[queueRecovery] recovery worker ACTIVE job=${activeJob?.id}`);
+  });
+
+  recoveryWorker.on("stalled", (stalledJobId) => {
+    console.log(`[queueRecovery] recovery worker STALLED job=${stalledJobId}`);
+  });
+
+  recoveryWorker.on("completed", (completedJob) => {
+    console.log(`[queueRecovery] recovery worker COMPLETED job=${completedJob?.id}`);
+  });
+
+  recoveryWorker.on("failed", (failedJob, err) => {
+    console.error(
+      `[queueRecovery] recovery worker FAILED job=${failedJob?.id}`,
+      err
+    );
+  });
+
+  recoveryWorker.on("error", (err) => {
+    console.error("[queueRecovery] recovery worker ERROR", err);
+  });
+
   let finalJob;
   for (let i = 0; i < 60; i++) {
     const j = await jobStore.get(job.id);
+    const bullJob = await queue.getJob(job.id);
+    const bullState = bullJob ? await bullJob.getState() : "missing";
+
     if (i % 4 === 0) {
-      console.log(`[queueRecovery] poll ${i}: status=${j?.status}`);
+      console.log(
+        `[queueRecovery] poll ${i}: jobStore=${j?.status}, bullMQ=${bullState}`
+      );
     }
+
     finalJob = j;
     if (j?.status === "completed" || j?.status === "failed") break;
     await new Promise((r) => setTimeout(r, 500));
