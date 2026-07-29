@@ -246,10 +246,13 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     const redis = await queue.client;
     const lockKey = `${queue.toKey(job.id)}:lock`;
     const lockTtl = await redis.pttl(lockKey);
+    const stalledCheckKey = queue.toKey("stalled-check");
+    const stalledCheckTtl = await redis.pttl(stalledCheckKey);
 
     if (i % 4 === 0) {
       console.log(
-        `[queueRecovery] poll ${i}: jobStore=${j?.status}, bullMQ=${bullState}, lockTtl=${lockTtl}ms`
+        `[queueRecovery] poll ${i}: jobStore=${j?.status}, bullMQ=${bullState}, ` +
+        `lockTtl=${lockTtl}ms, stalledCheckTtl=${stalledCheckTtl}ms`
       );
     }
 
