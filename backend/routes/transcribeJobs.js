@@ -215,7 +215,10 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
   // Tipo patikra: abu endpoint'ai naudoja TĄ PATĮ jobStore, tad be jos protokolo
   // jobo ID, pateiktas šiam endpoint'ui, būtų surastas, ištrintas iš jobStore, o
   // valymas vyktų NE TOJE BullMQ eilėje - duomenys liktų, klientas gautų 204.
-  if (job.type !== jobStore.JOB_TYPES.TRANSCRIPTION) {
+  // Legacy jobai (sukurti prieš `type` įvedimą) lauko neturi - jų neatmetam,
+  // kitaip po deployment'o jau egzistuojantys jobai taptų neištrinami. Jiems
+  // eraseJob() valo ABI eiles (žr. utils/jobErasure.js).
+  if (job.type && job.type !== jobStore.JOB_TYPES.TRANSCRIPTION) {
     return res.status(404).json({ error: "Jobas nerastas." });
   }
 

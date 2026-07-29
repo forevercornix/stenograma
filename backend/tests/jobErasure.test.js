@@ -213,9 +213,10 @@ test("jobStore klaida pažymima kaip kritinė", async () => {
   }
 });
 
-test("audito klaida NĖRA kritinė - jobo duomenys vis tiek pašalinami", async () => {
-  // Audito įrašai turi tik pseudonimizuotus metaduomenis, tad jų nepašalinimas
-  // neturi blokuoti paties turinio ištrynimo. Klaida raportuojama.
+test("audito klaida YRA kritinė - 204 būtų netiesa, jei audito įrašai liko", async () => {
+  // Pseudonimizuoti audito duomenys pagal BDAR vis tiek gali būti asmens
+  // duomenys, tad "ištrinta" negali reikšti "beveik ištrinta". Visi žingsniai
+  // idempotentiški, tad DELETE galima kartoti.
   const { eraseJob, calls, restore } = loadEraseJob({
     transcriptionQueue: { data: { payload: {} } },
     auditLog: { throws: "audit store offline" },
@@ -224,10 +225,66 @@ test("audito klaida NĖRA kritinė - jobo duomenys vis tiek pašalinami", async 
   try {
     const outcome = await eraseJob(completedJob());
 
-    assert.equal(outcome.criticalFailure, false);
-    assert.equal(outcome.jobRemoved, true);
-    assert.deepEqual(calls.jobRemove, ["job-1"]);
+    assert.equal(outcome.criticalFailure, true);
+    assert.equal(outcome.jobRemoved, false);
+    assert.deepEqual(calls.jobRemove, [], "jobStore įrašas turi likti pakartojimui");
     assert.match(outcome.errors[0], /^audit:/);
+  } finally {
+    restore();
+  }
+});
+
+test("LEGACY jobas be type - valomos ABI eilės", async () => {
+  // Prieš `type` įvedimą sukurti (Redis'e išlikę) jobai lauko neturi. Aklai
+  // priskyrus "transcription", protokolo jobas būtų valomas iš ne tos eilės.
+  const { eraseJob, calls, restore } = loadEraseJob({
+    transcriptionQueue: { data: null },
+    protocolQueue: { data: { payload: {} } },
+  });
+
+  try {
+    const job = completedJob();
+    delete job.type;
+
+    const outcome = await eraseJob(job);
+
+    assert.deepEqual(calls.transcriptionRemove, ["job-1"]);
+    assert.deepEqual(calls.protocolRemove, ["job-1"]);
+    assert.equal(outcome.type, "legacy");
+    assert.equal(outcome.queueJobRemoved, true);
+    assert.equal(outcome.jobRemoved, true);
+    assert.equal(outcome.criticalFailure, false);
+  } finally {
+    restore();
+  }
+});
+
+test("žinomas tipas NEliečia kitos eilės", async () => {
+  const { eraseJob, calls, restore } = loadEraseJob({
+    transcriptionQueue: { data: { payload: {} } },
+  });
+
+  try {
+    await eraseJob(completedJob({ type: "transcription" }));
+
+    assert.deepEqual(calls.protocolRemove, []);
+  } finally {
+    restore();
+  }
+});
+
+test("deletion_pending atnaujinimo klaida patenka į errors", async () => {
+  const { eraseJob, restore } = loadEraseJob({
+    transcriptionQueue: { throws: "Redis connection lost" },
+  });
+
+  try {
+    // jobStore.update stub'as nemeta, tad papildomai perrašom jį per outcome
+    // patikrą: svarbiausia, kad queue klaida jau pažymėta kritine.
+    const outcome = await eraseJob(completedJob());
+
+    assert.equal(outcome.criticalFailure, true);
+    assert.ok(outcome.errors.some((error) => error.startsWith("queue:")));
   } finally {
     restore();
   }

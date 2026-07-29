@@ -183,3 +183,22 @@ test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, joba
 
   await jobStore.remove(protocolJob.id);
 });
+
+test("DELETE /api/transcribe-jobs/:id - LEGACY jobas be type ištrinamas (ne 404)", async () => {
+  // Suderinamumas: prieš `type` įvedimą sukurti jobai lauko neturi. Griežta
+  // patikra juos paverstų neištrinamais po deployment'o.
+  const legacy = await jobStore.create();
+  await jobStore.update(legacy.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { text: "Senas rezultatas" },
+    type: undefined,
+  });
+
+  const stored = await jobStore.get(legacy.id);
+  stored.type = undefined; // imituojam seną Redis įrašą be lauko
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${legacy.id}`);
+
+  assert.equal(res.status, 204);
+  assert.equal(await jobStore.get(legacy.id), null);
+});

@@ -28,10 +28,9 @@ const _classifyError = (e) => jobRunner._classifyError(e, "worker job");
 // NEtrina tarp retry - kad kitas bandymas rastų failą.
 async function _cleanupStorage(payload, jobId) {
   if (payload && payload.storageKey) {
-    const fileStorage = require("../utils/fileStorage");
-    await fileStorage.del(payload.storageKey).catch(() => {});
-    // Sinchronizuojam jobStore: audio nebėra, tad GDPR ištrynimui nebereikia jo ieškoti.
-    if (jobId) await jobStore.update(jobId, { storageKey: null }).catch(() => {});
+    // storageKey nulinamas TIK po sėkmingo trynimo - žr. utils/audioCleanup.js.
+    const { releaseAudio } = require("../utils/audioCleanup");
+    await releaseAudio(jobId, payload.storageKey);
   }
 }
 
@@ -280,4 +279,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess };
+module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage };

@@ -31,7 +31,18 @@ const jobRunner = require("../queues/jobRunner");
  */
 async function eraseJob(job) {
   const jobId = job.id;
-  const type = job.type === jobStore.JOB_TYPES.PROTOCOL ? "protocol" : "transcription";
+
+  // LEGACY: prieš `job.type` įvedimą sukurti (ypač Redis'e išlikę) jobai šio
+  // lauko neturi. Aklai priskirti "transcription" NEGALIMA - protokolo jobas
+  // tada būtų valomas iš ne tos eilės. Todėl nežinomo tipo atveju valom ABI
+  // eiles: BullMQ jobo ID sutampa su mūsų UUID, tad `getJob` ne toje eilėje
+  // tiesiog grąžina null (no-op), o teisingoji eilė išsivalo.
+  const type =
+    job.type === jobStore.JOB_TYPES.PROTOCOL
+      ? "protocol"
+      : job.type === jobStore.JOB_TYPES.TRANSCRIPTION
+        ? "transcription"
+        : "legacy";
 
   const outcome = {
     jobId,
@@ -47,17 +58,25 @@ async function eraseJob(job) {
   // 1) Eilė - PIRMA, nes iš job.data gauname storageKey (BullMQ režime).
   let queueData = null;
   if (jobRunner.getMode() === "bullmq") {
-    try {
-      const remove =
-        type === "protocol"
-          ? require("../queues/protocolQueue").removeProtocolJob
-          : require("../queues/transcriptionQueue").removeTranscriptionJob;
+    const removers = [];
+    if (type !== "protocol") {
+      removers.push(require("../queues/transcriptionQueue").removeTranscriptionJob);
+    }
+    if (type !== "transcription") {
+      removers.push(require("../queues/protocolQueue").removeProtocolJob);
+    }
 
-      queueData = await remove(jobId);
-      outcome.queueJobRemoved = queueData !== null;
-    } catch (e) {
-      outcome.errors.push(`queue: ${e.message}`);
-      outcome.criticalFailure = true;
+    for (const remove of removers) {
+      try {
+        const data = await remove(jobId);
+        if (data !== null) {
+          queueData = data;
+          outcome.queueJobRemoved = true;
+        }
+      } catch (e) {
+        outcome.errors.push(`queue: ${e.message}`);
+        outcome.criticalFailure = true;
+      }
     }
   }
 
@@ -77,20 +96,27 @@ async function eraseJob(job) {
     }
   }
 
-  // 3) Audito įrašai. Ne kritiniai ištrynimo tęstinumui (jie nesaugo turinio,
-  //    tik pseudonimizuotus metaduomenis), bet klaidą raportuojam.
+  // 3) Audito įrašai. KRITINIAI: pseudonimizuoti duomenys pagal BDAR vis tiek
+  //    yra asmens duomenys, tad "204 - ištrinta" būtų netiesa, jei audito įrašai
+  //    liktų. Nepavykus - jobStore įrašas paliekamas, kad DELETE būtų pakartojamas
+  //    (visi žingsniai idempotentiški).
   try {
     outcome.auditEntriesRemoved = await auditLog.removeBySubjectIdentifier(jobId);
   } catch (e) {
     outcome.errors.push(`audit: ${e.message}`);
+    outcome.criticalFailure = true;
   }
 
   // 4) jobStore - TIK jei kritiniai šaltiniai išvalyti. Kitaip paliekam įrašą,
   //    kad operaciją būtų galima pakartoti su tuo pačiu ID.
   if (outcome.criticalFailure) {
-    await jobStore
-      .update(jobId, { deletion_pending: true, storageKey })
-      .catch(() => {});
+    try {
+      await jobStore.update(jobId, { deletion_pending: true, storageKey });
+    } catch (e) {
+      // Klientas ir taip gaus 503, bet garantijos, kad vėliava išsaugota, nėra -
+      // tad bent jau nenutylim (anksčiau čia buvo tuščias .catch()).
+      outcome.errors.push(`deletion_pending: ${e.message}`);
+    }
     return outcome;
   }
 

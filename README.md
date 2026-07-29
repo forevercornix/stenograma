@@ -947,6 +947,11 @@ Atsakymai:
 - `503 Service Unavailable` – dalinis ištrynimas: kritinis žingsnis nepavyko,
   jobas paliktas su `deletion_pending`, užklausą galima pakartoti.
 
+**Kritiniais laikomi visi keturi žingsniai**, įskaitant audito įrašų šalinimą:
+pseudonimizuoti duomenys pagal BDAR vis tiek gali būti asmens duomenys, tad
+`204` grąžinti, kai audito įrašai liko, būtų netiesa. Visos operacijos
+idempotentiškos, todėl `DELETE` galima saugiai kartoti.
+
 Aktyvių jobų netrinam, nes worker'is dar gali juos skaityti ar atnaujinti.
 
 Jobo **tipas saugomas pačiame įraše** (`job.type`), o ne imamas iš URL. Be to
@@ -970,8 +975,17 @@ paliekamas su `deletion_pending`, o endpoint'as grąžina **`503`** su struktūr
 pakartoti: klientas manytų, kad ištrinta, pakartotinis `DELETE` duotų `404`, o
 audio failas liktų našlaite.
 
-`storageKey` saugomas ir `jobStore` įraše (išvalomas į `null` po įprasto valymo),
-kad ištrynimas rastų likutį ir **inline režime**, kur BullMQ jobo išvis nėra.
+`storageKey` saugomas ir `jobStore` įraše, kad ištrynimas rastų likutį ir
+**inline režime**, kur BullMQ jobo išvis nėra. Į `null` jis nustatomas **tik po
+sėkmingo** `fileStorage.del()` (`utils/audioCleanup.js`) – kitaip nepavykus
+trynimui failas liktų storage, o raktas dingtų, ir audio taptų nepasiekiama
+našlaite.
+
+**Legacy jobai:** prieš šį pakeitimą sukurti (Redis'e išlikę) jobai `type` lauko
+neturi. Jie **nėra** atmetami – ištrynimas tokiu atveju valo abi BullMQ eiles
+(jobo ID sutampa su BullMQ ID, tad ne toje eilėje operacija yra no-op). Aklai
+priskirti visiems `transcription` būtų klaida: protokolo jobai tada būtų valomi
+iš ne tos eilės.
 
 BullMQ dalis svarbi todėl, kad `removeOnComplete`/`removeOnFail` (žr.
 `queues/config.js`) palieka jobo duomenis Redis'e dar 1–24 val. po užbaigimo –
