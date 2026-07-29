@@ -8,11 +8,13 @@ const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, createQueueConnection } = require("./c
  * Eilė sukuriama lazy (pirmo naudojimo metu), kad be REDIS_URL nebūtų bandoma jungtis.
  */
 let _queue = null;
+let _connection = null;
 
 function getTranscriptionQueue() {
   if (_queue) return _queue;
   const { Queue } = require("bullmq");
-  _queue = new Queue(QUEUE_NAMES.TRANSCRIPTION, { connection: createQueueConnection() });
+  _connection = createQueueConnection();
+  _queue = new Queue(QUEUE_NAMES.TRANSCRIPTION, { connection: _connection });
   return _queue;
 }
 
@@ -26,6 +28,11 @@ async function closeTranscriptionQueue() {
   if (_queue) {
     await _queue.close();
     _queue = null;
+  }
+
+  if (_connection) {
+    await _connection.quit();
+    _connection = null;
   }
 }
 

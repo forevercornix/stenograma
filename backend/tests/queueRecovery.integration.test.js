@@ -39,6 +39,7 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
 
   let worker;
   let queue;
+  let queueConnection;
   // t.after() vykdomas VISADA (net jei assertion krenta) - kitaip nepavykus testui
   // liktų atviras BullMQ worker'is/Redis ryšys/kabantis Node procesas.
   t.after(async () => {
@@ -47,8 +48,14 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
     await traceStep("test1 worker.close(true)", () =>
       worker?.close(true).catch(() => {})
     );
+    await traceStep("test1 worker Redis quit()", () =>
+      worker?.stenogramaConnection?.quit().catch(() => {})
+    );
     await traceStep("test1 queue.close()", () =>
       queue?.close().catch(() => {})
+    );
+    await traceStep("test1 queue Redis quit()", () =>
+      queueConnection?.quit().catch(() => {})
     );
     await traceStep("test1 jobRunner.close()", () =>
       jobRunner.close().catch(() => {})
@@ -71,7 +78,8 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
   await jobRunner.enqueueProtocol(job.id, { transcript: "pakankamai ilgas testinis tekstas" });
 
   // 2. Patikrinam, kad jobas TIKRAI laukia eilėje (Redis'e), ne dingęs.
-  queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: createQueueConnection() });
+  queueConnection = createQueueConnection();
+  queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: queueConnection });
   const waiting = await queue.getWaitingCount();
   assert.ok(waiting >= 1, "jobas turi laukti eilėje net be worker'io");
 
@@ -113,13 +121,18 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   const { Queue, Worker } = require("bullmq");
 
   let dyingWorker;
+  let dyingWorkerConnection;
   let recoveryWorker;
   let queue;
+  let queueConnection;
   t.after(async () => {
     // dyingWorker jau uždarytas (force) žemiau vykdymo metu, bet catch'inam bet
     // kokiu atveju - jei testas krito ANKSČIAU nei tas žingsnis, jis dar veiktų.
     await traceStep("test2 dyingWorker.close(true)", () =>
       dyingWorker?.close(true).catch(() => {})
+    );
+    await traceStep("test2 dyingWorker Redis quit()", () =>
+      dyingWorkerConnection?.quit().catch(() => {})
     );
     // close(TRUE) - BŪTINA. Be `true` tai graceful uždarymas, kuris LAUKIA
     // aktyvaus darbo pabaigos (BullMQ: "force - use if you do not want to wait
@@ -129,8 +142,14 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     await traceStep("test2 recoveryWorker.close(true)", () =>
       recoveryWorker?.close(true).catch(() => {})
     );
+    await traceStep("test2 recoveryWorker Redis quit()", () =>
+      recoveryWorker?.stenogramaConnection?.quit().catch(() => {})
+    );
     await traceStep("test2 queue.close()", () =>
       queue?.close().catch(() => {})
+    );
+    await traceStep("test2 queue Redis quit()", () =>
+      queueConnection?.quit().catch(() => {})
     );
     await traceStep("test2 jobRunner.close()", () =>
       jobRunner.close().catch(() => {})
@@ -158,13 +177,15 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
 
   // Queue instancija galutinei patikrai (konkretaus jobo būsena po užbaigimo).
   console.log("[queueRecovery] test2 Queue create START");
-  queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: createQueueConnection() });
+  queueConnection = createQueueConnection();
+  queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: queueConnection });
   console.log("[queueRecovery] test2 Queue create END");
 
   // 1. Pirmas worker'is PASIIMA jobą ir "užstringa" (imituojam kritimą vykdymo
   //    metu - processor'ius niekada neužbaigia, tada worker uždaromas be graceful).
   let firstWorkerGotJob = false;
   console.log("[queueRecovery] test2 dyingWorker create START");
+  dyingWorkerConnection = createQueueConnection();
   dyingWorker = new Worker(
     QUEUE_NAMES.PROTOCOL,
     async () => {
@@ -176,7 +197,7 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
       await new Promise(() => {});
     },
     {
-      connection: createQueueConnection(),
+      connection: dyingWorkerConnection,
       // Trumpas lock/stalled testui, kad nereikėtų laukti 30s.
       lockDuration: 2000,
       stalledInterval: 1000,

@@ -93,6 +93,11 @@ function createWorker(queueName, processor, workerOptions = {}) {
     console.error(`[worker:${queueName}] klaida:`, err.message);
   });
 
+  // createQueueConnection() grąžina išoriškai sukurtą Redis klientą.
+  // BullMQ Worker uždarymas nebūtinai uždaro šį perduotą klientą, todėl
+  // išsaugome nuorodą explicit shutdown/test cleanup veiksmams.
+  worker.stenogramaConnection = connection;
+
   return worker;
 }
 
