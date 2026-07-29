@@ -29,7 +29,7 @@ class HttpError extends Error {
  *
  * @throws {HttpError} su statusCode (400/403/500/502) ir žmogui skaitomu pranešimu.
  */
-async function generateProtocol({ title, date, participants, transcript, segments, meetingId, llmProviderOverride, promptVersionOverride }) {
+async function generateProtocol({ title, date, participants, transcript, segments, meetingId, jobId, llmProviderOverride, promptVersionOverride }) {
   const start = Date.now();
 
   if (!transcript || transcript.trim().length < 10) {
@@ -130,6 +130,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
 
     if (!result.success) {
       auditLog.record({
+        jobId,
         meetingId,
         promptVersion,
         llmProvider: llm.name,
@@ -154,6 +155,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
     const unverifiedCount = (checkedProtocol.veiksmai || []).filter((v) => v._grounding && !v._grounding.verified).length;
 
     auditLog.record({
+      jobId,
       meetingId,
       promptVersion,
       llmProvider: providerKey,
@@ -180,6 +182,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
   } catch (e) {
     if (e instanceof HttpError) throw e;
     auditLog.record({
+      jobId,
       meetingId,
       promptVersion,
       llmProvider: llm.name,
