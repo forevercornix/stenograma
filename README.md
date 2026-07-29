@@ -867,3 +867,87 @@ keli GB nesiųstų kaskart.
 ## Licencija
 
 MIT — žr. [`LICENSE`](LICENSE).
+
+## Privacy and GDPR-related controls
+
+Stenograma may process meeting recordings, transcripts, speaker information, names, contact details and other personal or confidential data. The system includes technical controls intended to reduce unnecessary data exposure.
+
+These controls support privacy-conscious deployment, but they do not by themselves guarantee GDPR compliance. The organisation operating the system remains responsible for defining the lawful basis, retention periods, access control and organisational procedures.
+
+### Privacy-safe audit logging
+
+Audit events use pseudonymised subject identifiers instead of storing raw identifiers. Sensitive fields and common secret formats are recursively redacted before an audit entry is stored.
+
+Audit logs must never contain uploaded audio, transcripts, API keys or complete exception objects.
+
+
+### Audit retention
+
+Audit entries are automatically removed after the configured retention period.
+
+```env
+AUDIT_RETENTION_DAYS=30
+The default retention period is 30 days.
+Privacy mode
+Audit logging can be disabled completely:
+PRIVACY_MODE=true
+When Privacy Mode is enabled:
+new audit entries are not recorded;
+previously accumulated in-memory audit entries are cleared;
+transcription jobs continue to function normally.
+
+### Audit retention
+
+Audit entries are automatically removed after the configured retention period.
+
+```env
+AUDIT_RETENTION_DAYS=30
+```
+
+The default retention period is 30 days.
+
+### Privacy mode
+
+Audit logging can be disabled completely:
+
+```env
+PRIVACY_MODE=true
+```
+
+When Privacy Mode is enabled:
+
+- new audit entries are not recorded;
+- previously accumulated in-memory audit entries are cleared;
+- transcription jobs continue to function normally.
+
+
+### Right to erasure
+
+A completed, failed or cancelled transcription job can be deleted using:
+
+```http
+DELETE /api/transcribe-jobs/:id
+```
+
+Possible responses:
+
+- `204 No Content` — the job and related audit entries were deleted;
+- `404 Not Found` — the job does not exist;
+- `409 Conflict` — the job is still queued or processing.
+
+Active jobs cannot be deleted because a worker may still be reading or updating them.
+
+Uploaded audio is removed by the file-storage cleanup after processing. Deleting a terminal job removes its metadata and result from the configured job store.
+
+### Deployment recommendations
+
+For deployments processing personal or confidential data:
+
+- configure `API_KEY`;
+- use HTTPS;
+- restrict access to Redis, workers and storage;
+- keep audit and job retention periods as short as practical;
+- document external AI providers and data transfers;
+- verify deletion procedures in the actual production environment;
+- do not use real personal data in tests or development logs.
+
