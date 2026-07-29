@@ -77,7 +77,14 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
 
   // 3. "Restartas": dabar paleidžiam worker'į - jis turi pasiimti laukiantį jobą.
   const { createWorker } = require("../workers");
-  worker = createWorker(QUEUE_NAMES.PROTOCOL, async () => ({ protocol: { pavadinimas: "Test" }, meta: {} }));
+  worker = createWorker(
+    QUEUE_NAMES.PROTOCOL,
+    async () => ({ protocol: { pavadinimas: "Test" }, meta: {} }),
+    {
+      stalledInterval: 1000,
+      lockDuration: 2000,
+    }
+  );
 
   // 4. Laukiam, kol jobas užbaigiamas (worker pasiima ir įvykdo).
   let finalStatus;
