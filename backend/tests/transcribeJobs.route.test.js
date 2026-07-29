@@ -120,3 +120,48 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
   assert.equal(await jobStore.get(job.id), null);
   assert.equal(auditLog.getAll().length, 0);
 });
+
+test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> ištrynimas išvalo ir auditą", async () => {
+  // Skirtingai nuo testo aukščiau, čia audito įrašą sukuria REALUS transkribavimo
+  // servisas (per jobRunner -> processors -> transcriptionService), o ne testas.
+  // Būtent šis kelias buvo neveikiantis: servisas rašydavo tik meetingId, tad
+  // removeBySubjectIdentifier(job.id) nieko nerasdavo.
+  auditLog.clear();
+
+  const wav = Buffer.alloc(64);
+  wav.write("RIFF", 0, "ascii");
+  wav.write("WAVE", 8, "ascii");
+
+  const createRes = await request(app)
+    .post("/api/transcribe-jobs")
+    .attach("audio", wav, { filename: "irasas.wav", contentType: "audio/wav" });
+
+  assert.equal(createRes.status, 202);
+  const jobId = createRes.body.jobId;
+
+  let status = null;
+  for (let i = 0; i < 40 && status !== "completed"; i += 1) {
+    await wait(50);
+    const poll = await request(app).get(`/api/transcribe-jobs/${jobId}`);
+    status = poll.body.status;
+    if (status === "failed") assert.fail(`Jobas krito: ${poll.body.error}`);
+  }
+  assert.equal(status, "completed");
+
+  const beforeDelete = auditLog
+    .getAll()
+    .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
+  assert.ok(
+    beforeDelete.length >= 1,
+    "realus transkribavimo srautas turi palikti su jobId susietą audito įrašą"
+  );
+
+  const delRes = await request(app).delete(`/api/transcribe-jobs/${jobId}`);
+  assert.equal(delRes.status, 204);
+
+  const afterDelete = auditLog
+    .getAll()
+    .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
+  assert.equal(afterDelete.length, 0);
+  assert.equal(await jobStore.get(jobId), null);
+});

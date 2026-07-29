@@ -450,6 +450,8 @@ jokio "demo" kelio per tiesioginį LLM kvietimą iš naršyklės nebėra.
 | `/api/generate` | POST (JSON) | Transkripcija → struktūruotas protokolas (SINCHRONINIS - žr. `/api/jobs` ilgiems susitikimams) | `API_KEY`, rate limit, provider/prompt override tik su `ALLOW_PROVIDER_OVERRIDE` |
 | `/api/jobs` | POST (JSON) | Asinchroninis `/api/generate` - grąžina `jobId` iš karto (202) | `API_KEY`, rate limit |
 | `/api/jobs/:id` | GET | Joba statuso/rezultato apklausa (polling) | `API_KEY`, rate limit |
+| `/api/transcribe-jobs/:id` | DELETE | GDPR ištrynimas: jobas, rezultatas, eilės įrašas, audio, auditas (tik terminalinės būsenos, kitaip 409) | `API_KEY`, rate limit |
+| `/api/jobs/:id` | DELETE | GDPR ištrynimas protokolo jobui (analogiškai) | `API_KEY`, rate limit |
 | `/api/audit` | GET | Audit log įrašai | `x-audit-key` header (arba uždaryta produkcijoje) |
 
 Pilna dokumentacija: [`backend/README.md`](backend/README.md).
@@ -868,86 +870,113 @@ keli GB nesiųstų kaskart.
 
 MIT — žr. [`LICENSE`](LICENSE).
 
-## Privacy and GDPR-related controls
+## Privatumas ir GDPR kontrolės
 
-Stenograma may process meeting recordings, transcripts, speaker information, names, contact details and other personal or confidential data. The system includes technical controls intended to reduce unnecessary data exposure.
+Stenograma apdoroja posėdžių įrašus, transkripcijas, kalbėtojų informaciją, vardus,
+kontaktus ir kitus asmens ar konfidencialius duomenis. Sistemoje yra techninės
+priemonės, mažinančios nereikalingą duomenų atskleidimą.
 
-These controls support privacy-conscious deployment, but they do not by themselves guarantee GDPR compliance. The organisation operating the system remains responsible for defining the lawful basis, retention periods, access control and organisational procedures.
+**Sąžiningai:** šios priemonės padeda diegti sistemą privatumą gerbiančiai, bet
+**savaime NEUŽTIKRINA atitikties BDAR**. Teisinį pagrindą, saugojimo terminus,
+prieigos valdymą ir organizacines procedūras apibrėžia sistemą eksploatuojanti
+organizacija. Pseudonimizuoti duomenys pagal BDAR **vis dar yra asmens duomenys**.
 
-### Privacy-safe audit logging
+### Privatumą tausojantis auditas
 
-Audit events use pseudonymised subject identifiers instead of storing raw identifiers. Sensitive fields and common secret formats are recursively redacted before an audit entry is stored.
+Audito įvykiai saugo pseudonimizuotą subjekto identifikatorių (HMAC-SHA256), ne
+patį jobo/susitikimo ID. Laisvo teksto laukai (klaidų pranešimai) prieš įrašymą
+praeina redakcijos grandinę: autentifikacijos duomenys, el. paštai, telefonai,
+asmens kodai, IP adresai, URL keliai ir failų keliai pakeičiami žymomis.
 
-Audit logs must never contain uploaded audio, transcripts, API keys or complete exception objects.
+Kontroliuojami laukai (`llmProvider`, `llmModel`, `promptVersion`,
+`transcriptionProvider`, `diarizationProvider`) **nepraeina PII heuristikų** – jiems
+taikomas tik simbolių allowlist. Tai sąmoningas sprendimas: bendras telefono
+šablonas `claude-3-5-sonnet-20241022` paversdavo `claude-3-5-sonnet-[PHONE_REDACTED]`
+ir sunaikindavo būtent tuos duomenis, dėl kurių auditas egzistuoja.
 
-
-### Audit retention
-
-Audit entries are automatically removed after the configured retention period.
-
-```env
-AUDIT_RETENTION_DAYS=30
-The default retention period is 30 days.
-Privacy mode
-Audit logging can be disabled completely:
-PRIVACY_MODE=true
-When Privacy Mode is enabled:
-new audit entries are not recorded;
-previously accumulated in-memory audit entries are cleared;
-transcription jobs continue to function normally.
-
-### Audit retention
-
-Audit entries are automatically removed after the configured retention period.
+Į auditą **nepatenka**: įkeltas garsas, transkripcijos, promptai, failų vardai,
+API raktai, pilni klaidų objektai.
 
 ```env
-AUDIT_RETENTION_DAYS=30
+# Audito subjectId pseudonimizacijos druska. Produkcijoje BŪTINA nustatyti savo -
+# antraip naudojama repozitorijoje esanti numatytoji reikšmė ir spėjamiems
+# identifikatoriams pseudonimizacija tampa atsukama.
+# reikšmę sugeneruokite: openssl rand -hex 32
+AUDIT_ID_SALT=
 ```
 
-The default retention period is 30 days.
+### Audito retencija
 
-### Privacy mode
+```env
+AUDIT_RETENTION_DAYS=30    # numatyta: 30
+AUDIT_MAX_ENTRIES=5000     # kieta atminties riba
+```
 
-Audit logging can be disabled completely:
+Pasenę įrašai šalinami tiek rašant naują įvykį, tiek skaitant `GET /api/audit`.
+
+**Apribojimas:** audito žurnalas šiuo metu yra **backend'o atmintyje**, tad po
+restarto jis ir taip tuščias. Retencija realiai reiškia „iki restarto arba iki N
+dienų, kas ateina pirmiau". Ilgalaikei atitikčiai reikia SQLite/PostgreSQL
+saugyklos su retention politika – žr. Roadmap (Milestone 2).
+
+### Privatumo režimas
 
 ```env
 PRIVACY_MODE=true
 ```
 
-When Privacy Mode is enabled:
+Įjungus:
 
-- new audit entries are not recorded;
-- previously accumulated in-memory audit entries are cleared;
-- transcription jobs continue to function normally.
+- nauji audito įrašai nerašomi;
+- atmintyje sukaupti įrašai išvalomi (tiek rašant, tiek skaitant, tiek proceso starte);
+- serverio klaidų logai papildomai sanitizuojami (`utils/sanitizeError.js`);
+- transkribavimas ir protokolų generavimas veikia įprastai.
 
-
-### Right to erasure
-
-A completed, failed or cancelled transcription job can be deleted using:
+### Teisė būti pamirštam
 
 ```http
-DELETE /api/transcribe-jobs/:id
+DELETE /api/transcribe-jobs/:id     # transkribavimo jobas
+DELETE /api/jobs/:id                # protokolo jobas
 ```
 
-Possible responses:
+Atsakymai:
 
-- `204 No Content` — the job and related audit entries were deleted;
-- `404 Not Found` — the job does not exist;
-- `409 Conflict` — the job is still queued or processing.
+- `204 No Content` – jobas ir susiję duomenys pašalinti;
+- `404 Not Found` – jobo nėra;
+- `409 Conflict` – jobas dar `queued`/`processing`.
 
-Active jobs cannot be deleted because a worker may still be reading or updating them.
+Aktyvių jobų netrinam, nes worker'is dar gali juos skaityti ar atnaujinti.
 
-Uploaded audio is removed by the file-storage cleanup after processing. Deleting a terminal job removes its metadata and result from the configured job store.
+Ištrynimas (`utils/jobErasure.js`) apima **visas keturias** duomenų vietas:
 
-### Deployment recommendations
+| Vieta | Kas ten guli |
+|---|---|
+| `jobStore` (memory/Redis) | jobo metaduomenys + rezultatas (transkripcija/protokolas) |
+| BullMQ eilė (Redis) | `job.data` su `storageKey`, `meetingId` IR grąžintas rezultatas |
+| Audio storage | įkeltas garso failas (įprastai jau ištrintas po galutinio statuso) |
+| Audito žurnalas | įrašai pagal pseudonimizuotą `subjectId` |
 
-For deployments processing personal or confidential data:
+BullMQ dalis svarbi todėl, kad `removeOnComplete`/`removeOnFail` (žr.
+`queues/config.js`) palieka jobo duomenis Redis'e dar 1–24 val. po užbaigimo –
+vien `jobStore` įrašo ištrynimas jų nepašalintų.
 
-- configure `API_KEY`;
-- use HTTPS;
-- restrict access to Redis, workers and storage;
-- keep audit and job retention periods as short as practical;
-- document external AI providers and data transfers;
-- verify deletion procedures in the actual production environment;
-- do not use real personal data in tests or development logs.
+**Ko ištrynimas NEAPIMA (sąžiningai):**
 
+- serverio `console` logų (nebent `PRIVACY_MODE=true` – ir tada tik sanitizavimas, ne trynimas);
+- duomenų, kuriuos jau gavo išorinis LLM tiekėjas (Claude/GPT/Gemini) – jų retencija priklauso nuo tiekėjo sutarties;
+- vartotojo naršyklėje eksportuotų DOCX/CSV/TXT failų.
+
+**Autorizacija:** naudojamas bendras `API_KEY`, tad bet kuris rakto turėtojas gali
+ištrinti bet kurį jobą. Viešam diegimui su realiais vartotojais reikia per-user
+autentifikacijos – žr. `backend/README.md`.
+
+### Rekomendacijos diegiant su asmens duomenimis
+
+- nustatykite `API_KEY` ir `AUDIT_ID_SALT`;
+- naudokite HTTPS;
+- apribokite prieigą prie Redis, worker'ių ir storage;
+- laikykite audito ir jobų retenciją kiek įmanoma trumpesnę;
+- dokumentuokite išorinius AI tiekėjus ir duomenų perdavimus;
+- patikrinkite ištrynimo procedūrą REALIOJE produkcijos aplinkoje (ypač su Redis –
+  `tests/queueRecovery.integration.test.js` stiliaus patikra be tikro Redis praleidžiama);
+- nenaudokite realių asmens duomenų testuose ir kūrimo logeuose.

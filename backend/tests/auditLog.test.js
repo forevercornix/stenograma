@@ -3,8 +3,18 @@ const assert = require("node:assert/strict");
 
 const auditLog = require("../utils/auditLog");
 
+const ENV_KEYS = ["AUDIT_RETENTION_DAYS", "AUDIT_MAX_ENTRIES", "PRIVACY_MODE", "AUDIT_ID_SALT"];
+
 test.beforeEach(() => {
+  // Anksčiau kiekvienas testas trynė env kintamuosius PATS, savo pabaigoje.
+  // Kritus assert'ui (pvz. PRIVACY_MODE=true testе) reikšmė nutekėdavo į kitus
+  // to paties failo testus - node:test juos vykdo TAME PAČIAME procese.
+  for (const key of ENV_KEYS) delete process.env[key];
   auditLog.clear();
+});
+
+test.afterEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key];
 });
 
 test("pseudonymizes job identifier", () => {
@@ -151,4 +161,81 @@ test("privacy mode is disabled by default", () => {
   delete process.env.PRIVACY_MODE;
 
   assert.equal(auditLog.isPrivacyModeEnabled(), false);
+});
+
+test("kontroliuojami laukai NEredaguojami kaip PII", () => {
+  // Regresija: bendras telefono šablonas "claude-3-5-sonnet-20241022" versdavo
+  // "claude-3-5-sonnet-[PHONE_REDACTED]" ir sunaikindavo modelio/kaštų auditą.
+  const row = auditLog.record({
+    llmProvider: "claude",
+    llmModel: "claude-3-5-sonnet-20241022",
+    promptVersion: "meeting_v3",
+    transcriptionProvider: "faster-whisper-embedded (inline)",
+    success: true,
+  });
+
+  assert.equal(row.llmModel, "claude-3-5-sonnet-20241022");
+  assert.equal(row.promptVersion, "meeting_v3");
+  assert.equal(row.transcriptionProvider, "faster-whisper-embedded (inline)");
+});
+
+test("diagnostikai naudingi skaičiai klaidose išlieka", () => {
+  const row = auditLog.record({
+    success: false,
+    error: "Whisper failed at 2026-07-29 13:09:51 after 12345678 ms",
+  });
+
+  assert.match(row.error, /2026-07-29 13:09:51/);
+  assert.match(row.error, /12345678 ms/);
+});
+
+test("URL kelias slepiamas, bet hostas lieka matomas", () => {
+  const row = auditLog.record({
+    success: false,
+    error: "connect ECONNREFUSED 10.0.0.5:8001 calling http://pyannote:8001/diarize",
+  });
+
+  assert.match(row.error, /http:\/\/pyannote:8001\/\[PATH_REDACTED\]/);
+  assert.match(row.error, /\[IP_REDACTED\]/);
+  assert.doesNotMatch(row.error, /10\.0\.0\.5/);
+});
+
+test("audito ID nesikartoja po ištrynimo", () => {
+  const a = auditLog.record({ jobId: "a", success: true });
+  auditLog.record({ jobId: "b", success: true });
+  auditLog.removeBySubjectIdentifier("b");
+  const c = auditLog.record({ jobId: "c", success: true });
+
+  const ids = auditLog.getAll().map((entry) => entry.id);
+
+  assert.equal(new Set(ids).size, ids.length);
+  assert.ok(c.id > a.id);
+});
+
+test("getAll() taiko retenciją ir be naujų įrašų", () => {
+  // Anksčiau purgeExpired() buvo kviečiamas TIK iš record(), tad nustojus
+  // srautui pasenę įrašai likdavo matomi per GET /api/audit.
+  process.env.AUDIT_RETENTION_DAYS = "1";
+
+  auditLog.record({ jobId: "senas", success: true });
+  assert.equal(auditLog.getAll().length, 1);
+
+  const realNow = Date.now;
+  Date.now = () => realNow() + 3 * 24 * 60 * 60 * 1000;
+
+  try {
+    assert.equal(auditLog.getAll().length, 0);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("AUDIT_MAX_ENTRIES riboja žurnalo dydį", () => {
+  process.env.AUDIT_MAX_ENTRIES = "3";
+
+  for (let i = 0; i < 10; i += 1) {
+    auditLog.record({ jobId: `job-${i}`, success: true });
+  }
+
+  assert.equal(auditLog.getAll().length, 3);
 });
