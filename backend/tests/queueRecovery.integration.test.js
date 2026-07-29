@@ -1,4 +1,4 @@
-const test = require("node:test");
+const { test, after } = require("node:test");
 const assert = require("node:assert/strict");
 
 async function traceStep(label, action) {
@@ -311,4 +311,52 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   // `_cleanupStorage` kviečiamas tik COMPLETED arba išnaudotų bandymų FAILED atveju).
   // Realiam patikrinimui su audio reikėtų atskiro testo su transcriptionProcessor
   // + fileStorage mock, ne šio (protocol) scenarijaus.
+});
+
+setTimeout(() => {
+  console.log(
+    "[queueRecovery] ACTIVE RESOURCES:",
+    process.getActiveResourcesInfo()
+  );
+
+  console.log(
+    "[queueRecovery] ACTIVE HANDLES:",
+    process._getActiveHandles().map((handle) => ({
+      type: handle.constructor?.name,
+      localAddress: handle.localAddress,
+      localPort: handle.localPort,
+      remoteAddress: handle.remoteAddress,
+      remotePort: handle.remotePort,
+      destroyed: handle.destroyed,
+      hasRef:
+        typeof handle.hasRef === "function"
+          ? handle.hasRef()
+          : undefined,
+    }))
+  );
+}, 5000).unref();
+
+after(() => {
+  console.log(
+    "[queueRecovery] ACTIVE RESOURCES:",
+    process.getActiveResourcesInfo()
+  );
+
+  console.log(
+    "[queueRecovery] ACTIVE HANDLES:",
+    process._getActiveHandles().map((h) => ({
+      type: h.constructor?.name,
+      localAddress: h.localAddress,
+      localPort: h.localPort,
+      remoteAddress: h.remoteAddress,
+      remotePort: h.remotePort,
+      destroyed: h.destroyed,
+      readableEnded: h.readableEnded,
+      writableEnded: h.writableEnded,
+      hasRef:
+        typeof h.hasRef === "function"
+          ? h.hasRef()
+          : undefined,
+    }))
+  );
 });
