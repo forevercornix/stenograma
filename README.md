@@ -996,17 +996,43 @@ duomenis. Tokiu atveju `DELETE` **nesustoja ties 404**: ieškoma tiesiogiai
 abiejose eilėse ir audite (`eraseOrphanedJobData`), ir tik nieko neradus
 grąžinamas `404`. Kitaip teisė ištrinti dingtų anksčiau nei duomenys.
 
-**Nebaigti ištrynimai** (`deletion_pending`) kartojami automatiškai –
-`utils/deletionRetry.js`, numatytai kas 10 min (`DELETION_RETRY_INTERVAL_MINUTES`).
-Po trijų nesėkmingų bandymų į logą rašomas įspėjimas, reikalaujantis rankinio
-įsikišimo. Sąžiningai: tai periodinis pakartojimas, ne garantuota dead-letter
-sistema su SLA.
+**Nebaigti valymai kartojami automatiškai** – `utils/deletionRetry.js`, numatytai
+kas 10 min (`DELETION_RETRY_INTERVAL_MINUTES`). Yra **dvi atskiros** vėliavos ir
+du atskiri ciklai, nes tai du skirtingi veiksmai:
 
-**Ištrynimo įrodymas:** po sėkmingo ištrynimo į auditą įrašomas `DATA_ERASED`
-kvitas su `subjectId: null` ir šaltinių suvestine (`queue=deleted storage=none
-...`). Jis nesusietas su jokiu subjektu, todėl jo nepašalina ir pakartotinis to
-paties jobo ištrynimas. Apribojimas: kvitas guli tame pačiame atmintiniame
-žurnale, tad galioja tos pačios restarto ir retencijos ribos.
+| Vėliava | Ką reiškia | Ką kartojimas daro |
+|---|---|---|
+| `deletion_pending` | vartotojo prašytas VISO jobo ištrynimas nutrūko | kartoja pilną `eraseJob()` |
+| `audio_cleanup_pending` | techninis audio valymas po sėkmingos transkripcijos nepavyko | trina TIK audio failą; jobo rezultatas lieka prieinamas |
+
+Painioti jų negalima: `deletion_pending` semantika ištrintų ir transkripciją,
+kurios vartotojas gal dar neatsiėmė.
+
+Kol bet kuri vėliava aktyvi, jobo įrašas **neišmetamas pagal TTL** (memory store
+jį praleidžia, Redis atveju kviečiamas `PERSIST`) – tai vienintelis šaltinis, iš
+kurio žinomas `storageKey`, kai BullMQ jobas jau pašalintas.
+
+Po trijų nesėkmingų bandymų į logą rašomas įspėjimas, reikalaujantis rankinio
+įsikišimo.
+
+**Ko automatinis kartojimas NEAPIMA (sąžiningai):** kartojami tik tie ištrynimai,
+kurių `jobStore` įrašas dar egzistuoja. Jei `jobStore` įrašo jau nebuvo (orphan
+kelias) ir ištrynimas nepavyko, klientas gauna `503`, bet vėliavos nustatyti
+nėra kur – pakartojimas priklauso nuo kliento. Pilnam sprendimui reikėtų
+atskiros persistentinės ištrynimo užklausų eilės (Milestone 2). Tai taip pat nėra
+garantuota dead-letter sistema su SLA.
+
+**Ištrynimo įrodymas:** kai kas nors realiai pašalinta, į auditą įrašomas
+`DATA_ERASED` kvitas su `subjectId: null` ir šaltinių suvestine
+(`queue=deleted storage=none ...`). Jis nesusietas su jokiu subjektu, todėl jo
+nepašalina ir pakartotinis to paties jobo ištrynimas. Nieko neradus kvitas
+**nerašomas** – kitaip užklausos nežinomais ID gamintų klaidingus įrašus ir per
+`AUDIT_MAX_ENTRIES` išstumtų tikruosius.
+
+Apribojimai: kvitas guli tame pačiame atmintiniame žurnale (tos pačios restarto
+ir retencijos ribos), ir jis **nesaistomas su konkrečia užklausa** – rodo, kad
+ištrynimas įvyko, bet ne kuriam prašymui. Atskiras `deletionRequestId`,
+grąžinamas klientui, būtų kitas žingsnis.
 
 **Legacy jobai:** prieš šį pakeitimą sukurti (Redis'e išlikę) jobai `type` lauko
 neturi. Jie **nėra** atmetami – ištrynimas tokiu atveju valo abi BullMQ eiles

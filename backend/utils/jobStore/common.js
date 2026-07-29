@@ -34,6 +34,12 @@ function newJob(fields = {}) {
     // nustatomas į null) - kad GDPR ištrynimas surastų likutį ir INLINE režime,
     // kur BullMQ jobo (ir jo payload'o su storageKey) apskritai nėra.
     storageKey: fields.storageKey || null,
+    // Techninis audio valymas nepavyko - laukiama pakartojimo. SĄMONINGAI
+    // ATSKIRTA nuo `deletion_pending`: ta vėliava reiškia VARTOTOJO prašytą
+    // viso jobo ištrynimą, o ši - tik nebereikalingo audio pašalinimą, kai
+    // transkripcijos rezultatas dar turi likti prieinamas.
+    audio_cleanup_pending: false,
+    audio_cleanup_attempts: 0,
     status: STATUS.QUEUED,
     result: null,
     progress: null,
@@ -87,8 +93,18 @@ function applyPatch(job, patch) {
 
 const JOB_TYPES = { TRANSCRIPTION: "transcription", PROTOCOL: "protocol" };
 
+/**
+ * Ar jobo dar NEGALIMA išmesti pagal TTL? Kol yra nebaigtas valymas, jobStore
+ * įrašas yra VIENINTELIS šaltinis, iš kurio žinomas `storageKey` (BullMQ jobas
+ * gali būti jau pašalintas). Išmetus jį per TTL, likęs audio failas taptų
+ * nebeatsekamas.
+ */
+function hasPendingCleanup(job) {
+  return Boolean(job && (job.audio_cleanup_pending || job.deletion_pending));
+}
+
 function isFinished(status) {
   return status === STATUS.COMPLETED || status === STATUS.FAILED || status === STATUS.CANCELLED;
 }
 
-module.exports = { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished };
+module.exports = { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup };

@@ -26,13 +26,42 @@ async function releaseAudio(jobId, storageKey) {
   } catch (e) {
     console.error(
       `[stenograma] Nepavyko ištrinti audio iš storage (job ${jobId}): ${e.message}. ` +
-        "storageKey PALIEKAMAS jobStore įraše, kad ištrynimą būtų galima pakartoti."
+        "storageKey PALIEKAMAS jobStore įraše, jobas pažymimas pakartojimui."
     );
+
+    // BŪTINA: vien rakto palikimo neužtenka. Be vėliavos nebaigto valymo niekas
+    // nepamato - deletionRetry ieško tik pažymėtų jobų, klientas DELETE gali
+    // niekada nekviesti, o po JOB_TTL_MINUTES jobStore įrašas išnyktų kartu su
+    // vieninteliu žinomu storageKey (BullMQ jobas iki tol gali būti pašalintas).
+    // Tada audio failas liktų diske be jokios nuorodos į jį.
+    //
+    // Vėliava SĄMONINGAI atskira nuo `deletion_pending`: pastaroji reiškia
+    // vartotojo prašytą VISO jobo ištrynimą, o čia transkripcijos rezultatas
+    // turi likti prieinamas - trinamas tik nebereikalingas audio.
+    if (jobId) {
+      try {
+        await jobStore.update(jobId, {
+          audio_cleanup_pending: true,
+          audio_cleanup_reason: "audio_cleanup_failed",
+          storageKey,
+        });
+      } catch (updateError) {
+        console.error(
+          `[stenograma] Nepavyko pažymėti jobo ${jobId} pakartotiniam audio valymui: ${updateError.message}`
+        );
+      }
+    }
+
     return false;
   }
 
   try {
-    if (jobId) await jobStore.update(jobId, { storageKey: null });
+    if (jobId) {
+      await jobStore.update(jobId, {
+        storageKey: null,
+        audio_cleanup_pending: false,
+      });
+    }
   } catch (e) {
     // Failas jau ištrintas - tai saugi pusė. Likęs raktas tik reikš, kad GDPR
     // ištrynimas bandys trinti nesantį objektą (idempotentiška operacija).

@@ -59,6 +59,64 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
 }
 
 /**
+ * TECHNINIS audio valymo pakartojimas - ATSKIRAS nuo viso jobo ištrynimo.
+ *
+ * Kai `releaseAudio()` nepavyksta po sėkmingos transkripcijos, jobas pažymimas
+ * `audio_cleanup_pending`. Čia trinamas TIK audio failas; jobo rezultatas
+ * (transkripcija) lieka prieinamas - vartotojas jo dar gali neatsiėmęs.
+ * Naudoti tą pačią `deletion_pending` semantiką būtų klaida: ji ištrintų
+ * visą jobą, nors vartotojas to neprašė.
+ */
+async function retryPendingAudioCleanups({ limit = 50 } = {}) {
+  const { releaseAudio } = require("./audioCleanup");
+
+  const pending = await jobStore.listPendingAudioCleanups(limit);
+  const summary = { attempted: pending.length, succeeded: 0, failed: 0 };
+
+  for (const job of pending) {
+    const attempts = (job.audio_cleanup_attempts || 0) + 1;
+
+    if (!job.storageKey) {
+      // Nėra ką trinti - vėliava pasenusi (pvz. raktas jau išvalytas kitu keliu).
+      await jobStore
+        .update(job.id, { audio_cleanup_pending: false })
+        .catch(() => {});
+      continue;
+    }
+
+    const removed = await releaseAudio(job.id, job.storageKey);
+
+    if (removed) {
+      summary.succeeded += 1;
+      console.log(
+        `[stenograma] Likęs jobo ${job.id} audio pašalintas pakartotinai (bandymas ${attempts}).`
+      );
+      continue;
+    }
+
+    summary.failed += 1;
+
+    // releaseAudio jau iš naujo nustatė vėliavą; čia tik didinam skaitiklį.
+    await jobStore
+      .update(job.id, { audio_cleanup_attempts: attempts })
+      .catch(() => {});
+
+    const message =
+      `[stenograma] Jobo ${job.id} audio vis dar nepavyksta ištrinti (bandymas ${attempts}).`;
+
+    if (attempts >= MAX_ATTEMPTS_BEFORE_ALERT) {
+      console.error(
+        `${message} ⚠️  REIKIA RANKINIO ĮSIKIŠIMO: audio failas tebėra storage.`
+      );
+    } else {
+      console.warn(message);
+    }
+  }
+
+  return summary;
+}
+
+/**
  * Paleidžia periodinį pakartojimą. Grąžina timer'į (jau `unref()`-intą, kad
  * neblokuotų proceso pabaigos).
  */
@@ -71,10 +129,18 @@ function startDeletionRetry({ intervalMs } = {}) {
     retryPendingDeletions().catch((e) =>
       console.error(`[stenograma] Ištrynimų pakartojimas nepavyko: ${e.message}`)
     );
+    retryPendingAudioCleanups().catch((e) =>
+      console.error(`[stenograma] Audio valymo pakartojimas nepavyko: ${e.message}`)
+    );
   }, interval);
 
   timer.unref();
   return timer;
 }
 
-module.exports = { retryPendingDeletions, startDeletionRetry, MAX_ATTEMPTS_BEFORE_ALERT };
+module.exports = {
+  retryPendingDeletions,
+  retryPendingAudioCleanups,
+  startDeletionRetry,
+  MAX_ATTEMPTS_BEFORE_ALERT,
+};

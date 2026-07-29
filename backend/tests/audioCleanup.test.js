@@ -67,13 +67,15 @@ test("sėkmingas trynimas: storageKey nulinamas", async () => {
 
     assert.equal(removed, true);
     assert.deepEqual(calls.del, ["audio-key"]);
-    assert.deepEqual(calls.update, [{ id: "job-1", patch: { storageKey: null } }]);
+    assert.deepEqual(calls.update, [
+      { id: "job-1", patch: { storageKey: null, audio_cleanup_pending: false } },
+    ]);
   } finally {
     restore();
   }
 });
 
-test("NEPAVYKĘS trynimas: storageKey LIEKA (jobStore neatnaujinamas)", async () => {
+test("NEPAVYKĘS trynimas: storageKey LIEKA + jobas pažymimas pakartojimui", async () => {
   const { releaseAudio, calls, restore } = loadReleaseAudio({ delThrows: "EACCES" });
 
   try {
@@ -81,10 +83,16 @@ test("NEPAVYKĘS trynimas: storageKey LIEKA (jobStore neatnaujinamas)", async ()
 
     assert.equal(removed, false);
     assert.deepEqual(calls.del, ["audio-key"]);
-    assert.deepEqual(
-      calls.update,
-      [],
-      "storageKey turi likti, kitaip failo nebesurastų nei GDPR DELETE, nei administratorius"
+
+    // Raktas turi LIKTI, o jobas - būti pažymėtas pakartojimui. Vien rakto
+    // palikimo neužtenka: be vėliavos nebaigto valymo niekas nepamatytų ir po
+    // jobStore TTL nuoroda į failą dingtų.
+    assert.equal(calls.update.length, 1);
+    assert.equal(calls.update[0].patch.audio_cleanup_pending, true);
+    assert.equal(calls.update[0].patch.storageKey, "audio-key");
+    assert.ok(
+      !calls.update.some((call) => call.patch.storageKey === null),
+      "storageKey neturi būti nulinamas"
     );
   } finally {
     restore();
@@ -156,8 +164,12 @@ test("inline runner: cleanup klaidos atveju storageKey lieka", async () => {
 
     assert.deepEqual(calls.del, ["audio-key"]);
     assert.ok(
-      !calls.update.some((call) => "storageKey" in call.patch),
+      !calls.update.some((call) => call.patch.storageKey === null),
       "nepavykus trynimui storageKey neturi būti nulinamas"
+    );
+    assert.ok(
+      calls.update.some((call) => call.patch.audio_cleanup_pending === true),
+      "jobas turi būti pažymėtas audio valymo pakartojimui"
     );
   } finally {
     for (const p of [fileStoragePath, jobStorePath, cleanupPath, runnerPath]) {
@@ -213,8 +225,12 @@ test("worker cleanup: klaidos atveju storageKey lieka", async () => {
 
     assert.deepEqual(calls.del, ["audio-key"]);
     assert.ok(
-      !calls.update.some((call) => "storageKey" in call.patch),
+      !calls.update.some((call) => call.patch.storageKey === null),
       "worker'yje nepavykus trynimui storageKey neturi būti nulinamas"
+    );
+    assert.ok(
+      calls.update.some((call) => call.patch.audio_cleanup_pending === true),
+      "jobas turi būti pažymėtas audio valymo pakartojimui"
     );
   } finally {
     for (const p of [fileStoragePath, jobStorePath, cleanupPath, workersPath]) {

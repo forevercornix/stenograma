@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -98,8 +98,15 @@ function createRedisStore(redisClient) {
     const next = applyPatch(existing, patch);
     await redisClient.hset(JOB_PREFIX + id, serialize(next));
     await redisClient.zadd(INDEX_KEY, Date.now(), id);
-    // Baigtiems job'ams - Redis EXPIRE, kad pats išvalytų po TTL.
-    if (isFinished(next.status)) {
+    // Baigtiems job'ams - Redis EXPIRE, kad pats išvalytų po TTL. IŠIMTIS:
+    // nebaigtas valymas (audio_cleanup_pending / deletion_pending) - tada
+    // PERSIST, nes šis įrašas yra vienintelis šaltinis, iš kurio žinomas
+    // storageKey. Redis pats jo išmesti neturi.
+    if (hasPendingCleanup(next)) {
+      if (typeof redisClient.persist === "function") {
+        await redisClient.persist(JOB_PREFIX + id);
+      }
+    } else if (isFinished(next.status)) {
       await redisClient.expire(JOB_PREFIX + id, TTL_SECONDS);
     }
     return next;
@@ -131,11 +138,12 @@ function createRedisStore(redisClient) {
   }
 
   /**
-   * Jobai su `deletion_pending` vėliava. Redis'e nėra sekundinio indekso pagal
-   * šį lauką, tad einam per jobs:index (jame - tik gyvi jobai) ir tikrinam
-   * lauką. Riba (`limit`) apsaugo nuo didelio skenavimo.
+   * Jobai su nustatyta boolean vėliava (`deletion_pending`,
+   * `audio_cleanup_pending`). Redis'e nėra sekundinio indekso pagal šiuos
+   * laukus, tad einam per jobs:index (jame - tik gyvi jobai) ir tikrinam lauką.
+   * Riba (`limit`) apsaugo nuo didelio skenavimo.
    */
-  async function listPendingDeletions(limit = 100) {
+  async function listByFlag(field, limit = 100) {
     const ids = await redisClient.zrange(INDEX_KEY, 0, -1);
     const pending = [];
 
@@ -143,7 +151,7 @@ function createRedisStore(redisClient) {
       if (pending.length >= limit) break;
       const flat = await redisClient.hgetall(JOB_PREFIX + id);
       const job = deserialize(flat);
-      if (job && job.deletion_pending) pending.push(job);
+      if (job && job[field]) pending.push(job);
     }
 
     return pending;
@@ -169,7 +177,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, get, update, remove, sweepExpired, size, listPendingDeletions, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, get, update, remove, sweepExpired, size, listByFlag, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize };

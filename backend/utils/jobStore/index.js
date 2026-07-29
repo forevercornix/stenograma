@@ -116,8 +116,14 @@ module.exports = {
   },
   listPendingDeletions: async (limit) => {
     await ensureInit();
-    return typeof store.listPendingDeletions === "function"
-      ? store.listPendingDeletions(limit)
+    return typeof store.listByFlag === "function"
+      ? store.listByFlag("deletion_pending", limit)
+      : [];
+  },
+  listPendingAudioCleanups: async (limit) => {
+    await ensureInit();
+    return typeof store.listByFlag === "function"
+      ? store.listByFlag("audio_cleanup_pending", limit)
       : [];
   },
   size: async () => {

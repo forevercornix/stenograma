@@ -146,6 +146,19 @@ async function eraseJob(job) {
 function writeDeletionReceipt(outcome) {
   if (outcome.criticalFailure) return;
 
+  // Kvitas rašomas TIK jei kažkas realiai pašalinta. Anksčiau sąlyga buvo vien
+  // `!criticalFailure`, tad `DELETE /api/.../neegzistuojantis-id` sukurdavo
+  // klaidingą DATA_ERASED įrašą - o kadangi kvitai neturi subjectId, jų srautas
+  // galėjo per AUDIT_MAX_ENTRIES išstumti tikrus audito įrašus. Tas pats galioja
+  // lenktynių atvejui, kai `jobStore.remove()` grąžina false.
+  const anythingRemoved =
+    outcome.jobRemoved ||
+    outcome.queueJobRemoved ||
+    outcome.storageRemoved ||
+    outcome.auditEntriesRemoved > 0;
+
+  if (!anythingRemoved) return;
+
   try {
     auditLog.record({
       event: "DATA_ERASED",

@@ -148,3 +148,101 @@ test("jobStore įrašas dingsta tarp del() ir update() - klaida netrikdo srauto"
 
   assert.equal(removed, true, "failas ištrintas - tai svarbiausia");
 });
+
+test("audio valymo klaida pažymima ATSKIRA vėliava (ne deletion_pending)", async () => {
+  // Regresija: anksčiau releaseAudio() tik palikdavo storageKey ir nieko
+  // nepažymėdavo, tad nebaigto valymo niekas nepamatydavo, o po jobStore TTL
+  // dingdavo vienintelė nuoroda į likusį audio failą.
+  const fileStorage = require("../utils/fileStorage");
+  const { releaseAudio } = require("../utils/audioCleanup");
+
+  const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+    storageKey: key,
+  });
+  await jobStore.update(job.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { text: "vertinga transkripcija" },
+  });
+
+  // Priverčiam del() kristi: raktas rodo į katalogą, ne failą.
+  const failingKey = "uploads";
+  assert.equal(await releaseAudio(job.id, failingKey), false);
+
+  const flagged = await jobStore.get(job.id);
+  assert.equal(flagged.audio_cleanup_pending, true);
+  assert.equal(
+    flagged.deletion_pending,
+    undefined,
+    "techninis audio valymas NETURI būti painiojamas su viso jobo ištrynimu"
+  );
+  assert.ok(flagged.result, "transkripcijos rezultatas turi likti prieinamas");
+
+  await fileStorage.del(key).catch(() => {});
+  await jobStore.remove(job.id);
+});
+
+test("audio valymo retry ištrina TIK audio, rezultatą palieka", async () => {
+  const fileStorage = require("../utils/fileStorage");
+  const { retryPendingAudioCleanups } = require("../utils/deletionRetry");
+
+  const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+    storageKey: key,
+  });
+  await jobStore.update(job.id, {
+    status: jobStore.STATUS.COMPLETED,
+    result: { text: "vertinga transkripcija" },
+    audio_cleanup_pending: true,
+  });
+
+  const summary = await retryPendingAudioCleanups();
+
+  assert.ok(summary.succeeded >= 1);
+
+  const after = await jobStore.get(job.id);
+  assert.ok(after, "jobas turi LIKTI - trinamas tik audio");
+  assert.equal(after.storageKey, null);
+  assert.equal(after.audio_cleanup_pending, false);
+  assert.ok(after.result, "rezultatas nepaliestas");
+
+  await jobStore.remove(job.id);
+});
+
+test("nebaigto valymo jobas neišmetamas per TTL", async () => {
+  // jobStore įrašas yra vienintelis šaltinis, iš kurio žinomas storageKey.
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+    storageKey: "uploads/likes.wav",
+  });
+  await jobStore.update(job.id, {
+    status: jobStore.STATUS.COMPLETED,
+    audio_cleanup_pending: true,
+  });
+
+  const farFuture = Date.now() + 10 * 24 * 60 * 60 * 1000;
+  await jobStore.sweepExpired(farFuture);
+
+  assert.ok(await jobStore.get(job.id), "pažymėtas jobas turi išlikti po TTL");
+
+  await jobStore.update(job.id, { audio_cleanup_pending: false });
+  await jobStore.sweepExpired(farFuture);
+  assert.equal(await jobStore.get(job.id), null, "be vėliavos - išmetamas normaliai");
+});
+
+test("nežinomas ID nesukuria klaidingo DATA_ERASED kvito", async () => {
+  auditLog.clear();
+
+  const res = await request(app).delete(
+    "/api/transcribe-jobs/00000000-1111-2222-3333-444444444444"
+  );
+
+  assert.equal(res.status, 404);
+  assert.equal(
+    auditLog.getAll().filter((entry) => entry.event === "DATA_ERASED").length,
+    0,
+    "niekas nebuvo ištrinta - kvito būti neturi"
+  );
+});
