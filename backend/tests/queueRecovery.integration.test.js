@@ -191,11 +191,24 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   // 3. Paleidžiam ANTRĄ worker'į (imituoja restartą). Jis turi pasiimti STALLED jobą
   //    (BullMQ po lockDuration+stalledInterval grąžina jį į eilę) ir užbaigti.
   const { createWorker } = require("../workers");
-  recoveryWorker = createWorker(QUEUE_NAMES.PROTOCOL, async () => ({ protocol: { pavadinimas: "Recovered" }, meta: {} }));
+  recoveryWorker = createWorker(
+    QUEUE_NAMES.PROTOCOL,
+    async () => {
+      console.log("[queueRecovery] recovery worker GOT JOB");
+      return {
+        protocol: { pavadinimas: "Recovered" },
+        meta: {},
+      };
+    }
+  );
+  console.log("[queueRecovery] recovery worker CREATED");
 
   let finalJob;
   for (let i = 0; i < 60; i++) {
     const j = await jobStore.get(job.id);
+    if (i % 4 === 0) {
+      console.log(`[queueRecovery] poll ${i}: status=${j?.status}`);
+    }
     finalJob = j;
     if (j?.status === "completed" || j?.status === "failed") break;
     await new Promise((r) => setTimeout(r, 500));
