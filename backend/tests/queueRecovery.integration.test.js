@@ -45,12 +45,10 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
   t.after(async () => {
     // close(TRUE) - ta pati priežastis kaip antrame teste žemiau: graceful
     // close() laukia aktyvaus darbo/blokuojančių Redis komandų pabaigos.
-    await traceStep("test1 worker.close(true)", () =>
-      worker?.close(true).catch(() => {})
-    );
-    await traceStep("test1 worker Redis quit()", () =>
-      worker?.stenogramaConnection?.quit().catch(() => {})
-    );
+    await traceStep("test1 shutdownWorker()", async () => {
+      const { shutdownWorker } = require("../workers");
+      await shutdownWorker(worker, { force: true }).catch(() => {});
+    });
     await traceStep("test1 queue.close()", () =>
       queue?.close().catch(() => {})
     );
@@ -128,23 +126,22 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   t.after(async () => {
     // dyingWorker jau uždarytas (force) žemiau vykdymo metu, bet catch'inam bet
     // kokiu atveju - jei testas krito ANKSČIAU nei tas žingsnis, jis dar veiktų.
-    await traceStep("test2 dyingWorker.close(true)", () =>
-      dyingWorker?.close(true).catch(() => {})
-    );
-    await traceStep("test2 dyingWorker Redis quit()", () =>
-      dyingWorkerConnection?.quit().catch(() => {})
-    );
+    await traceStep("test2 dyingWorker shutdownWorker()", async () => {
+      const { shutdownWorker } = require("../workers");
+      await shutdownWorker(dyingWorker, {
+        force: true,
+        connection: dyingWorkerConnection,
+      }).catch(() => {});
+    });
     // close(TRUE) - BŪTINA. Be `true` tai graceful uždarymas, kuris LAUKIA
     // aktyvaus darbo pabaigos (BullMQ: "force - use if you do not want to wait
     // for current jobs to be processed"). Po stalled scenarijaus worker'is lieka
     // būsenoje, kurioje graceful close() kabo neribotai - realiame CI stebėta
     // ~8 min. kabantis job'as būtent čia.
-    await traceStep("test2 recoveryWorker.close(true)", () =>
-      recoveryWorker?.close(true).catch(() => {})
-    );
-    await traceStep("test2 recoveryWorker Redis quit()", () =>
-      recoveryWorker?.stenogramaConnection?.quit().catch(() => {})
-    );
+    await traceStep("test2 recoveryWorker shutdownWorker()", async () => {
+      const { shutdownWorker } = require("../workers");
+      await shutdownWorker(recoveryWorker, { force: true }).catch(() => {});
+    });
     await traceStep("test2 queue.close()", () =>
       queue?.close().catch(() => {})
     );

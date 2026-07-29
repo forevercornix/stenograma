@@ -37,6 +37,11 @@ async function _cleanupStorage(payload) {
  * Sukuria BullMQ Worker vienai eilei. Processor'ius vykdo darbą; on-events atnaujina
  * jobStore būseną (started/completed/failed su attempt_count).
  */
+// Privatūs Redis ryšiai, priklausantys createWorker() sukurtiems workeriams.
+// WeakMap nepapildo BullMQ Worker objekto nestandartinėmis savybėmis ir
+// netrukdo garbage collection, kai worker'is daugiau nebenaudojamas.
+const workerConnections = new WeakMap();
+
 function createWorker(queueName, processor, workerOptions = {}) {
   const { Worker } = require("bullmq");
   const connection = createQueueConnection();
@@ -93,12 +98,44 @@ function createWorker(queueName, processor, workerOptions = {}) {
     console.error(`[worker:${queueName}] klaida:`, err.message);
   });
 
-  // createQueueConnection() grąžina išoriškai sukurtą Redis klientą.
-  // BullMQ Worker uždarymas nebūtinai uždaro šį perduotą klientą, todėl
-  // išsaugome nuorodą explicit shutdown/test cleanup veiksmams.
-  worker.stenogramaConnection = connection;
+  workerConnections.set(worker, connection);
 
   return worker;
+}
+
+/**
+ * Tvarkingai uždaro BullMQ Worker ir jam priklausantį Redis ryšį.
+ *
+ * `createWorker()` sukurto worker'io connection randamas privačiame WeakMap.
+ * Tiesiogiai teste ar kitur sukurtam Worker galima perduoti connection
+ * per options.connection.
+ */
+async function shutdownWorker(worker, options = {}) {
+  if (!worker) return;
+
+  const {
+    force = true,
+    connection: explicitConnection,
+  } = options;
+
+  const connection =
+    explicitConnection || workerConnections.get(worker);
+
+  try {
+    await worker.close(force);
+  } finally {
+    workerConnections.delete(worker);
+
+    if (connection) {
+      try {
+        await connection.quit();
+      } catch {
+        // Jeigu graceful QUIT nebeįmanomas, bent jau nutraukiame socketą,
+        // kad procesas neliktų kabėti shutdown arba testų cleanup metu.
+        connection.disconnect();
+      }
+    }
+  }
 }
 
 function startWorkers() {
@@ -241,4 +278,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { createWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess };
+module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess };
