@@ -185,9 +185,9 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   assert.ok(firstWorkerGotJob, "pirmas worker'is turi pasiimti jobą");
 
   // 2. "Sustabdom" pirmą worker'į vykdymo metu (force close - imituoja kritimą).
-  console.log("[queueRecovery] explicit dyingWorker.close(true) START");
-  await dyingWorker.close(true);
-  console.log("[queueRecovery] explicit dyingWorker.close(true) END");
+  console.log("[queueRecovery] explicit dyingWorker.disconnect() START");
+  await dyingWorker.disconnect();
+  console.log("[queueRecovery] explicit dyingWorker.disconnect() END");
 
   // 3. Paleidžiam ANTRĄ worker'į (imituoja restartą). Jis turi pasiimti STALLED jobą
   //    (BullMQ po lockDuration+stalledInterval grąžina jį į eilę) ir užbaigti.
