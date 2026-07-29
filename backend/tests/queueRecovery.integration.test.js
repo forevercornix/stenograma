@@ -208,6 +208,12 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     }
   );
   console.log("[queueRecovery] recovery worker CREATED");
+  console.log("[queueRecovery] recovery worker OPTIONS", {
+    lockDuration: recoveryWorker.opts.lockDuration,
+    stalledInterval: recoveryWorker.opts.stalledInterval,
+    maxStalledCount: recoveryWorker.opts.maxStalledCount,
+    skipStalledCheck: recoveryWorker.opts.skipStalledCheck,
+  });
 
   recoveryWorker.on("active", (activeJob) => {
     console.log(`[queueRecovery] recovery worker ACTIVE job=${activeJob?.id}`);
@@ -237,10 +243,13 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     const j = await jobStore.get(job.id);
     const bullJob = await queue.getJob(job.id);
     const bullState = bullJob ? await bullJob.getState() : "missing";
+    const redis = await queue.client;
+    const lockKey = `${queue.toKey(job.id)}:lock`;
+    const lockTtl = await redis.pttl(lockKey);
 
     if (i % 4 === 0) {
       console.log(
-        `[queueRecovery] poll ${i}: jobStore=${j?.status}, bullMQ=${bullState}`
+        `[queueRecovery] poll ${i}: jobStore=${j?.status}, bullMQ=${bullState}, lockTtl=${lockTtl}ms`
       );
     }
 
