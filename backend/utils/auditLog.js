@@ -12,6 +12,33 @@ const crypto = require("node:crypto");
  */
 
 const log = [];
+const DEFAULT_RETENTION_DAYS = 30;
+
+function getRetentionDays() {
+  const configured = Number(process.env.AUDIT_RETENTION_DAYS);
+
+  return Number.isFinite(configured) && configured >= 1
+    ? configured
+    : DEFAULT_RETENTION_DAYS;
+}
+
+function purgeExpired(now = Date.now()) {
+  const cutoff =
+    now - getRetentionDays() * 24 * 60 * 60 * 1000;
+
+  const originalLength = log.length;
+
+  for (let index = log.length - 1; index >= 0; index -= 1) {
+    const timestamp = Date.parse(log[index].timestamp);
+
+    if (!Number.isFinite(timestamp) || timestamp < cutoff) {
+      log.splice(index, 1);
+    }
+  }
+
+  return originalLength - log.length;
+}
+
 
 const MAX_ERROR_LENGTH = 300;
 const MAX_PROVIDER_LENGTH = 80;
@@ -166,6 +193,7 @@ function sanitizeForLogging(value, seen = new WeakSet()) {
 }
 
 function record(entry = {}) {
+  purgeExpired();
   const row = Object.freeze({
     id: log.length + 1,
     timestamp: new Date().toISOString(),
@@ -226,4 +254,6 @@ module.exports = {
   clear,
   sanitizeForLogging,
   pseudonymizeIdentifier,
+  purgeExpired,
+  getRetentionDays,
 };

@@ -57,3 +57,27 @@ test("sanitizeForLogging recursively redacts sensitive keys", () => {
   assert.equal(sanitized.nested.apiKey, "[REDACTED]");
   assert.equal(sanitized.nested.ok, true);
 });
+
+test("uses 30 day retention by default", () => {
+  delete process.env.AUDIT_RETENTION_DAYS;
+
+  assert.equal(auditLog.getRetentionDays(), 30);
+});
+
+test("purges audit entries older than configured retention", () => {
+  process.env.AUDIT_RETENTION_DAYS = "1";
+
+  auditLog.record({
+    event: "JOB_CREATED",
+    meetingId: "old-job",
+    success: true,
+  });
+
+  const twoDaysLater = Date.now() + 2 * 24 * 60 * 60 * 1000;
+  const removed = auditLog.purgeExpired(twoDaysLater);
+
+  assert.equal(removed, 1);
+  assert.equal(auditLog.getAll().length, 0);
+
+  delete process.env.AUDIT_RETENTION_DAYS;
+});
