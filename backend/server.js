@@ -6,6 +6,7 @@ const generateRoute = require("./routes/generate");
 const transcribeRoute = require("./routes/transcribe");
 const transcribeJobsRoute = require("./routes/transcribeJobs");
 const auditRoute = require("./routes/audit");
+const exportsRoute = require("./routes/exports");
 const jobsRoute = require("./routes/jobs");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
@@ -55,6 +56,7 @@ function requireJobSystemReady(req, res, next) {
 app.use("/api", generateRoute);
 app.use("/api", transcribeRoute);
 app.use("/api", auditRoute);
+app.use("/api", exportsRoute);
 // requireJobSystemReady prijungtas per konkretų POST kelią (ne bendrą /api), kad
 // NEliestų /api/health ir /api/ready (kurie apibrėžti žemiau).
 app.post("/api/transcribe-jobs", requireJobSystemReady);
@@ -129,11 +131,16 @@ app.get("/api/health", (req, res) => {
     return res.json({ status: "ok" });
   }
 
+  const { describeForDiagnostics } = require("./utils/privacyConfig");
+
   res.json({
     status: "ok",
     transcriptionProvider: process.env.TRANSCRIPTION_PROVIDER || "mock",
     diarizationProvider: process.env.DIARIZATION_PROVIDER || "none",
     llmProvider: process.env.LLM_PROVIDER || "mock",
+    // Efektyvios privatumo nuostatos (GDPR #5 DoD: "visible through diagnostics").
+    // Be paslapčių - tik profilis, ar leidžiami išoriniai tiekėjai ir retencija.
+    privacy: describeForDiagnostics(),
   });
 });
 
@@ -202,18 +209,24 @@ async function startServer({ port, listen, onStep } = {}) {
     .catch((e) => console.warn(`[stenograma] Self-check nepavyko: ${e.message}`));
 
   // Periodinis pasenusių jobų valymas (Redis atveju daugiausiai no-op - EXPIRE pats valo).
-  const sweepTimer = setInterval(async () => {
-    const removed = await jobStore.sweepExpired();
-    if (removed > 0) console.log(`[stenograma] Išvalyta ${removed} pasenusių jobų (TTL=${jobStore.TTL_MS / 60000} min).`);
-  }, 5 * 60 * 1000);
-  sweepTimer.unref();
 
   // Nebaigtų ištrynimų (deletion_pending) pakartojimas - kad nepavykęs GDPR
   // DELETE nepasimestų, jei klientas užklausos nebekartoja.
   const { startDeletionRetry } = require("./utils/deletionRetry");
   const deletionRetryTimer = startDeletionRetry();
 
-  return { sweepTimer, deletionRetryTimer };
+  // VIENAS centralizuotas retencijos mechanizmas (GDPR #2): pasenę jobai, nuskendę
+  // audio failai ir pasenę audito įrašai. Rašo RETENTION_PURGE į auditą.
+  //
+  // Anksčiau čia buvo ir atskiras sweepTimer, kas 5 min kvietęs
+  // jobStore.sweepExpired() - tą patį, ką daro ir retentionSweeper. Darbas
+  // dubliavosi, o RETENTION_SWEEP_INTERVAL_MINUTES nekontroliavo visų jobų valymo
+  // kvietimų. Senasis timer'is pašalintas; kad jobų valymo tankumas nesumažėtų,
+  // numatytasis retencijos intervalas yra 5 min (buvo 60).
+  const { startRetentionSweeper } = require("./utils/retentionSweeper");
+  const retentionTimer = startRetentionSweeper();
+
+  return { deletionRetryTimer, retentionTimer };
 }
 
 if (require.main === module) {

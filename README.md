@@ -452,6 +452,7 @@ jokio "demo" kelio per tiesioginį LLM kvietimą iš naršyklės nebėra.
 | `/api/jobs/:id` | GET | Joba statuso/rezultato apklausa (polling) | `API_KEY`, rate limit |
 | `/api/transcribe-jobs/:id` | DELETE | GDPR ištrynimas: jobas, rezultatas, eilės įrašas, audio, auditas (tik terminalinės būsenos, kitaip 409; dalinis nepavykimas -> 503) | `API_KEY`, rate limit |
 | `/api/jobs/:id` | DELETE | GDPR ištrynimas protokolo jobui (analogiškai) | `API_KEY`, rate limit |
+| `/api/exports` | POST (JSON) | Protokolo eksportas (`txt`/`csv`/`docx`). Generuojama SERVERYJE, kad eksportas patektų į audito žurnalą | `API_KEY`, rate limit |
 | `/api/audit` | GET | Audit log įrašai | `x-audit-key` header (arba uždaryta produkcijoje) |
 
 Pilna dokumentacija: [`backend/README.md`](backend/README.md).
@@ -888,6 +889,11 @@ patį jobo/susitikimo ID. Laisvo teksto laukai (klaidų pranešimai) prieš įra
 praeina redakcijos grandinę: autentifikacijos duomenys, el. paštai, telefonai,
 asmens kodai, IP adresai, URL keliai ir failų keliai pakeičiami žymomis.
 
+Redakcijos grandinė apima ir **URL prisijungimo duomenis bet kokioje schemoje**
+(`redis://naudotojas:slaptas@host`, `postgres://…`, `amqp://…`) – tai rasta
+realiai: neveikiančio Redis klaidos pranešimas su pilnu connection string
+patekdavo į serverio logą.
+
 Kontroliuojami laukai (`llmProvider`, `llmModel`, `promptVersion`,
 `transcriptionProvider`, `diarizationProvider`) **nepraeina PII heuristikų** – jiems
 taikomas tik simbolių allowlist. Tai sąmoningas sprendimas: bendras telefono
@@ -933,6 +939,178 @@ PRIVACY_MODE=true
 - atmintyje sukaupti įrašai išvalomi (tiek rašant, tiek skaitant, tiek proceso starte);
 - serverio klaidų logai papildomai sanitizuojami (`utils/sanitizeError.js`);
 - transkribavimas ir protokolų generavimas veikia įprastai.
+
+### Tiekėjų privatumo matrica
+
+Kiekvienas tiekėjas klasifikuotas: **lokalus** (duomenys neišeina iš mašinos) ar
+**išorinis** (siunčiama trečiajai šaliai), ir kokie duomenys siunčiami. Šaltinis
+kode – [`backend/utils/providerPrivacy.js`](backend/utils/providerPrivacy.js);
+`tests/providerPrivacy.test.js` **krenta**, jei registre atsiranda tiekėjas,
+neaprašytas nei čia, nei toje lentelėje – taip ji negali pasenti.
+
+**Transkribavimas** (`TRANSCRIPTION_PROVIDER`):
+
+| Tiekėjas | Apdorojimas | Ką siunčia | Kam | Pastabos |
+|---|---|---|---|---|
+| `mock` | 🟢 lokalus | – | – | Fiksuotas pavyzdys; įrašas net nenuskaitomas |
+| `faster-whisper-embedded` | 🟢 lokalus | – | – | Python subprocesas toje pačioje mašinoje |
+| `faster-whisper-server` | 🟢 lokalus | – | – | Atskiras HTTP servisas; laikykite savo tinkle |
+| `faster-whisper` | 🟢 lokalus | – | – | Alias `faster-whisper-server` |
+| `whisper` | 🔴 išorinis | **garso įrašas** | OpenAI | Visas failas įkeliamas į API |
+| `azure` | 🔴 išorinis | **garso įrašas** | Microsoft Azure | Regionas – `AZURE_SPEECH_REGION` |
+| `google` | 🔴 išorinis | **garso įrašas** | Google Cloud | Regionas – projekto konfigūracija |
+| `deepgram` | 🔴 išorinis | **garso įrašas** | Deepgram | – |
+
+**Diarizacija** (`DIARIZATION_PROVIDER`):
+
+| Tiekėjas | Apdorojimas | Ką siunčia | Kam | Pastabos |
+|---|---|---|---|---|
+| `none` | 🟢 lokalus | – | – | Diarizacija neatliekama |
+| `inline` | 🟡 priklauso | – | – | Atskiro kvietimo nėra; poveikis **toks pat kaip transkribavimo tiekėjo** |
+| `mock` | 🟢 lokalus | – | – | Deterministiniai intervalai testams |
+| `pyannote` | 🟢 lokalus | – | – | Lokalus FastAPI; modelis gated (`HUGGINGFACE_TOKEN`) |
+| `pyannote-cloud` | 🔴 išorinis | **garso įrašas** | pyannote.ai | – |
+| `assemblyai` | 🔴 išorinis | **garso įrašas** | AssemblyAI | – |
+
+**Protokolo generavimas** (`LLM_PROVIDER`):
+
+| Tiekėjas | Apdorojimas | Ką siunčia | Kam | Pastabos |
+|---|---|---|---|---|
+| `mock` | 🟢 lokalus | – | – | Regex heuristikos, ne modelis |
+| `claude` | 🔴 išorinis | **transkripcijos tekstas** | Anthropic | Garsas NEsiunčiamas |
+| `gpt` | 🔴 išorinis | **transkripcijos tekstas** | OpenAI | Garsas NEsiunčiamas |
+| `gemini` | 🔴 išorinis | **transkripcijos tekstas** | Google | Garsas NEsiunčiamas |
+
+**Paleidimo įspėjimai.** Pasirinkus išorinį tiekėją, `utils/startupChecks.js`
+išveda įspėjimą su tiekėju, duomenų kategorija ir gavėju. Tas pats matoma
+diagnostikoje – `GET /api/health` grąžina `privacy.externalProviders`.
+
+**Ko šis projektas NETVIRTINA.** Nė vienas išorinis tiekėjas nėra „GDPR
+compliant" dėl to, kad palaikomas šiame kode. Teisinis pagrindas, duomenų
+tvarkymo sutartis, subtiekėjai ir duomenų rezidencija priklauso nuo **jūsų**
+sutarties su tiekėju bei pasirinkto regiono, ir yra **deployment-specific** –
+tas pats `LLM_PROVIDER=claude` skirtingose organizacijose gali būti ir teisėtas,
+ir ne. Šis projektas tik parodo, kas kur siunčiama.
+
+**Pilnai lokali konfigūracija** (nieko neišeina iš mašinos):
+
+```env
+PRIVACY_PROFILE=local_only
+TRANSCRIPTION_PROVIDER=faster-whisper-embedded
+DIARIZATION_PROVIDER=pyannote      # arba none
+LLM_PROVIDER=mock
+```
+
+Pastaba dėl `LLM_PROVIDER=mock`: lokalaus LLM tiekėjo (pvz. Ollama/llama.cpp)
+šiame projekte **kol kas nėra**, tad pilnai lokalus režimas protokolą sudaro
+heuristikomis, ne modeliu. Tai sąmoningas apribojimas, ne paslėptas.
+
+### Privatumo konfigūracija ir startup validacija
+
+| Kintamasis | Numatyta | Ką daro |
+|---|---|---|
+| `PRIVACY_PROFILE` | `standard` | `local_only` – uždraudžia visus išorinius tiekėjus |
+| `ALLOW_EXTERNAL_PROVIDERS` | `true` | `false` – tas pats be viso profilio |
+| `PRIVACY_MODE` | `false` | `true` – išjungia audito žurnalą (**atskira** nuostata) |
+| `AUDIT_RETENTION_DAYS` | `30` | Leistinos ribos: 1–365 |
+| `JOB_TTL_MINUTES` | `60` | Jobo metaduomenų retencija |
+| `AUDIO_RETENTION_HOURS` | `24` | Po kiek nuskendę audio failai šalinami |
+| `RETENTION_SWEEP_INTERVAL_MINUTES` | `5` | Retencijos ciklo periodas (vienintelis jobų valymo mechanizmas) |
+
+**Prieštaringos ir neteisingos konfigūracijos serveriui startuoti neleidžia**
+(`validateConfig`): `PRIVACY_PROFILE=local_only` su `LLM_PROVIDER=claude` yra
+klaida, ne įspėjimas.
+
+Taip pat atmetamos **netaisyklingos reikšmės**, o ne tyliai pakeičiamos
+numatytosiomis: `JOB_TTL_MINUTES=abc`, `AUDIO_RETENTION_HOURS=-1`,
+`RETENTION_SWEEP_INTERVAL_MINUTES=0`, `ALLOW_EXTERNAL_PROVIDERS=maybe`. Priežastis
+privatumo: administratoriui atrodytų, kad nustatė 1 val. retenciją, o sistema
+naudotų 24. Ribos: `AUDIT_RETENTION_DAYS` 1–365, `JOB_TTL_MINUTES` 1–525600,
+`AUDIO_RETENTION_HOURS` 1–8760, intervalai 1–10080.
+
+**Dėl pavadinimų sąmoningai:** jau egzistuojantis `PRIVACY_MODE=true` reiškia
+„auditas išjungtas". Į jį antros reikšmės (`local_only`) nekraunam – dviprasmiška
+vėliava būtų būtent tai, ko šiame projekte vengiama. Tiekėjų ribojimui yra
+atskiras `PRIVACY_PROFILE`.
+
+**Numatytoji būsena yra lokali:** be jokių ENV veikia `mock`/`none`/`mock`, tad
+iš karto po klonavimo niekas iš mašinos neišeina. `ALLOW_EXTERNAL_PROVIDERS`
+numatytai `true` **sąmoningai** – kitaip atnaujinimas nutrauktų veikiančias
+Claude/Whisper konfigūracijas be įspėjimo. Privatumą užtikrina ne šis gaidukas,
+o numatytas tiekėjų pasirinkimas.
+
+### Automatinis retencijos šalinimas
+
+**Vienas** periodinis ciklas (`utils/retentionSweeper.js`, numatytai kas 5 min)
+šalina visus tris dalykus:
+
+1. **Pasenusius jobus** – metaduomenys + rezultatas (transkripcija/protokolas) po `JOB_TTL_MINUTES`.
+2. **Nuskendusius audio failus** – senesnius nei `AUDIO_RETENTION_HOURS` ir nepaminėtus nė viename gyvame jobe. Iki tol jų nešalino niekas: jei procesas nukrito tarp failo įkėlimo ir jobo užbaigimo, failas likdavo storage neribotai.
+3. **Pasenusius audito įrašus** – pagal `AUDIT_RETENTION_DAYS`, nepriklausomai nuo srauto.
+
+Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais (`jobs=2 audio=1 audit=5`),
+`subjectId: null` – be identifikatorių, failų vardų ar turinio. Įvykis rašomas
+**tik kai kas nors realiai pašalinta**, kitaip kas valandą rašomas tuščias įrašas
+per `AUDIT_MAX_ENTRIES` išstumtų naudinguosius.
+
+**Kas laikoma „nuskendusiu" failu.** Tik failas, kurio **nenaudoja nė vienas gyvas
+jobas** – nepriklausomai nuo jobo statuso (`queued`, `processing`, `completed`,
+`failed`) ar vėliavų. Amžius (`AUDIO_RETENTION_HOURS`) yra papildoma, ne vienintelė
+sąlyga. Tai svarbu: 4 val. įrašas, užstrigusi eilė ar GPU trūkumas reiškia, kad
+apdorojamo jobo failas gali būti senesnis už retenciją, bet jo trinti negalima.
+Jei saugykla neleidžia išvardyti jobų, šalinimas **praleidžiamas** (fail-safe).
+
+Nebaigto valymo jobai (`audio_cleanup_pending`, `deletion_pending`) irgi
+praleidžiami – jais rūpinasi `utils/deletionRetry.js` pagal savo backoff.
+
+**Pradinis ciklas** vykdomas praėjus 5 s po starto, po to periodiškai – kitaip po
+restarto pasenę duomenys liktų dar visą intervalą.
+
+**Tai vienintelis jobų valymo mechanizmas.** Anksčiau `server.js` turėjo dar ir
+atskirą `sweepTimer`, kas 5 min kvietusį tą patį `jobStore.sweepExpired()` –
+darbas dubliavosi, o `RETENTION_SWEEP_INTERVAL_MINUTES` nekontroliavo visų
+kvietimų. Senasis timer'is pašalintas, o numatytasis intervalas sumažintas iki
+5 min, kad jobų valymo tankumas nesumažėtų (kitaip faktinis šalinimas galėtų
+nusitęsti iki `JOB_TTL_MINUTES` + 60 min).
+
+### Eksporto auditas
+
+`.txt`, `.csv` ir `.docx` generuoja **backend'as** (`POST /api/exports`), ne
+naršyklė. Priežastis grynai audito: kol failai buvo kuriami naršyklėje, serveris
+apie eksportą nieko nežinojo, tad `EXPORT_*` įvykių audito žurnale negalėjo būti
+iš principo. Kliento pranešimu „aš eksportavau" audite pasitikėti negalima.
+
+Rašoma: `EXPORT_STARTED`, `EXPORT_COMPLETED` (su formatu ir baitų kiekiu) arba
+`EXPORT_FAILED`. Įvykiai siejami su **transkribavimo jobo** pseudonimu, tad
+`DELETE /api/transcribe-jobs/:id` pašalina ir eksporto įrašus (padengta testu).
+
+**Audito vientisumas:** `jobId` naudojamas tik jei toks jobas realiai egzistuoja
+ir yra transkribavimo tipo. Kitaip įvykis rašomas **be ryšio**, o nepatikrintas
+`jobId` niekur nesaugomas. `link=` reikšmė rodo tikslią priežastį, kad
+infrastruktūros problema neatrodytų kaip išgalvotas ID:
+
+| `link=` | Reiškia |
+|---|---|
+| `none` | `jobId` nepaduotas |
+| `job` | patvirtintas transkribavimo jobas – ryšys sukurtas |
+| `missing` | jobo nėra (dažniausiai išnyko pagal `JOB_TTL_MINUTES`) |
+| `invalid_type` | jobas yra, bet ne transkribavimo |
+| `store_error` | saugyklos klaida – papildomai rašomas **sanitizuotas** įspėjimas į serverio logą | Kitaip klientas
+galėtų savavališkai susieti savo eksportą su svetimu jobu, ir vėliau to jobo
+ištrynimas pašalintų jam nepriklausančius įrašus. Eksportas dėl nepatikrinto
+ryšio **nenutrūksta** (nėra 400): jobo įrašas gali būti teisėtai išnykęs pagal
+`JOB_TTL_MINUTES`, kol vartotojas dar redaguoja protokolą – tai audito, ne
+vartotojo veiksmo problema.
+
+**CSV formula injection.** `veiksmai` turinys ateina iš LLM arba vartotojo, tad
+reikšmė, prasidedanti `=`, `+`, `-` ar `@` (pvz.
+`=HYPERLINK("https://evil.example","...")`), Excel'yje ar LibreOffice'e būtų
+vykdoma kaip **formulė**. CSV eksportas naudoja `escapeFormulae: true`, tad tokios
+reikšmės lieka tekstu. Padengta regresiniu testu (patikrinta, kad be šios
+nuostatos jis krenta). TXT ir DOCX formatų tai neliečia. **Nerašoma:** protokolo turinys, pavadinimas, dalyvių vardai,
+failo vardas ar tiesioginis `jobId` (tik pseudonimas). Tai patikrinta testu, kuris
+per eksportą praleidžia realius PII pavyzdžius (el. paštą, telefoną, asmens kodą,
+API raktą) ir tikrina, kad nė vienas iš jų nepatenka į žurnalą.
 
 ### Jobo duomenų ištrynimas (terminal job erasure)
 
@@ -1071,6 +1249,8 @@ Visi punktai yra **žinomi ir apgalvoti**, ne atsitiktiniai.
 | 6 | **`DELETE` nėra ACID transakcija** | Eilė → storage → auditas → `jobStore` yra atskiri žingsniai. Procesui mirus tarp jų gaunamas dalinis rezultatas; jį gaudo `deletion_pending` + retry, bet tikros atominės transakcijos Node + failų sistema + Redis kombinacija turėti negali. | kita architektūra (ne planuojama) |
 | 7 | **`DATA_ERASED` kvitas nėra kriptografinis įrodymas** | Tai paprastas audito įrašas be HMAC, hash chain ar append-only garantijos, ir nesaistomas su konkrečia užklausa. | HMAC + immutable log, jei reikia formalaus GDPR evidence |
 | 8 | **Orphan ištrynimo nesėkmė nekartojama automatiškai** | Nesant `jobStore` įrašo nėra kur nustatyti vėliavos - pakartojimas priklauso nuo kliento (gavusio `503`). | ta pati persistentinė eilė (#3) |
+| 10 | **PII redagavimo (anonimizavimo) nėra** | Transkripcijos siunčiamos išoriniam LLM be redagavimo. Todėl neįgyvendinta ir „redaguoti prieš išorinį apdorojimą", ir anonimizuotas eksportas | GDPR issue #4, po jo – #8 |
+| 11 | **Persistentinės saugyklos negalima išjungti vienu jungtuku** | Retenciją galima trumpinti (`JOB_TTL_MINUTES`, `AUDIO_RETENTION_HOURS`), bet atskiro „nieko nerašyti į diską" režimo nėra | GDPR issue #5 liekanos |
 | 9 | **Eilių sąrašas ištrynime - rankinis** | `eraseOrphanedJobData()` tikrina abi eiles eksplicitiškai. Prie 10+ eilių reikėtų registro. | šiandien nereikia |
 
 Kas **NĖRA** apribojimas (dažnai klausiama): nepavykę ištrynimai ir audio valymai

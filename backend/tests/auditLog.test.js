@@ -241,3 +241,69 @@ test("AUDIT_MAX_ENTRIES riboja žurnalo dydį", () => {
 
   assert.equal(auditLog.getAll().length, 3);
 });
+
+test("URL prisijungimo duomenys redaguojami bet kokioje schemoje", () => {
+  // Rasta realiai: neveikiančio Redis klaidos pranešimas su pilnu connection
+  // string (`redis://naudotojas:slaptas@host`) patekdavo į serverio logą.
+  const cases = [
+    "connect ECONNREFUSED redis://naudotojas:slaptas@10.0.0.5:6379",
+    "postgres://admin:labaislaptas@db.internal:5432/stenograma",
+    "amqp://guest:guest@rabbit:5672",
+  ];
+
+  for (const message of cases) {
+    const sanitized = auditLog.sanitizeForLogging(new Error(message));
+
+    assert.match(sanitized.message, /\[CREDENTIALS_REDACTED\]/);
+    for (const secret of ["slaptas", "labaislaptas", "guest:guest"]) {
+      assert.ok(
+        !sanitized.message.includes(secret),
+        `${secret} nepašalintas iš: ${sanitized.message}`
+      );
+    }
+  }
+});
+
+test("URL be prisijungimo duomenų nekeičiamas be reikalo", () => {
+  const sanitized = auditLog.sanitizeForLogging(new Error("redis://localhost:6379"));
+
+  assert.equal(sanitized.message, "redis://localhost:6379");
+  assert.doesNotMatch(sanitized.message, /REDACTED/);
+});
+
+test("be AUDIT_ID_SALT naudojama ATSITIKTINĖ druska, ne vieša numatytoji", () => {
+  // Anksčiau čia buvo repozitorijoje matoma reikšmė - bet kas, žinantis job ID,
+  // galėjo apskaičiuoti tą patį HMAC, tad pseudonimizacija nesaugojo nieko.
+  delete process.env.AUDIT_ID_SALT;
+
+  const viesaSenaDruska = require("node:crypto")
+    .createHmac("sha256", "stenograma-local-audit-v1")
+    .update("job-1")
+    .digest("hex")
+    .slice(0, 20);
+
+  const actual = auditLog.pseudonymizeIdentifier("job-1");
+
+  assert.notEqual(actual, viesaSenaDruska, "negali sutapti su vieša repo reikšme");
+  assert.equal(actual, auditLog.pseudonymizeIdentifier("job-1"), "procese turi būti stabilu");
+});
+
+test("nustatytas AUDIT_ID_SALT turi pirmenybę prieš sugeneruotą", () => {
+  delete process.env.AUDIT_ID_SALT;
+  const generuotas = auditLog.pseudonymizeIdentifier("job-1");
+
+  process.env.AUDIT_ID_SALT = "aiskiai-nustatyta-druska";
+  const nustatytas = auditLog.pseudonymizeIdentifier("job-1");
+
+  assert.notEqual(nustatytas, generuotas);
+  assert.equal(
+    nustatytas,
+    require("node:crypto")
+      .createHmac("sha256", "aiskiai-nustatyta-druska")
+      .update("job-1")
+      .digest("hex")
+      .slice(0, 20)
+  );
+
+  delete process.env.AUDIT_ID_SALT;
+});

@@ -120,6 +120,16 @@ module.exports = {
       ? store.listByFlag("deletion_pending", limit)
       : [];
   },
+  /**
+   * Grąžina `null`, jei saugykla to nepalaiko - iškviečiantis kodas tada NETURI
+   * nieko trinti (fail-safe), o ne laikyti, kad nėra naudojamų failų.
+   */
+  listReferencedStorageKeys: async () => {
+    await ensureInit();
+    return typeof store.listReferencedStorageKeys === "function"
+      ? store.listReferencedStorageKeys()
+      : null;
+  },
   listPendingAudioCleanups: async (limit) => {
     await ensureInit();
     return typeof store.listByFlag === "function"
