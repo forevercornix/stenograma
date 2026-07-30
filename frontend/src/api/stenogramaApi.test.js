@@ -5,6 +5,7 @@ import {
   generateProtocol,
   transcribeAudioJob,
   withApiKeyHeader,
+  exportProtocol,
 } from "./stenogramaApi";
 
 // Tiesioginiai API modulio unit testai (ne per App komponentą). Dengia: API key header,
@@ -212,5 +213,83 @@ describe("transcribeAudioJob polling", () => {
       })
     );
     await expect(generateProtocol({})).rejects.toThrow(/neteisingas JSON/i);
+  });
+});
+
+describe("exportProtocol (GDPR #6 - eksporto auditas)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function fileRes({ filename = "protokolas_2026-07-30.docx" } = {}) {
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get: (n) =>
+          n.toLowerCase() === "content-disposition" ? `attachment; filename="${filename}"` : null,
+      },
+      blob: () => Promise.resolve(new Blob(["PK"])),
+    };
+  }
+
+  it("perduoda jobId, kad eksporto įvykiai būtų susieti su tuo pačiu subjektu", async () => {
+    // Be jobId eksportas audite liktų "be savininko" ir jo nepašalintų
+    // DELETE /api/transcribe-jobs/:id.
+    global.fetch = vi.fn(() => Promise.resolve(fileRes()));
+
+    await exportProtocol({ format: "docx", protocol: { pavadinimas: "T" }, jobId: "job-42" });
+
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toContain("/api/exports");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({
+      format: "docx",
+      protocol: { pavadinimas: "T" },
+      jobId: "job-42",
+    });
+  });
+
+  it("failo vardą ima iš serverio Content-Disposition", async () => {
+    global.fetch = vi.fn(() => Promise.resolve(fileRes({ filename: "veiksmai_2026-01-01.csv" })));
+
+    const result = await exportProtocol({ format: "csv", protocol: {} });
+
+    expect(result.filename).toBe("veiksmai_2026-01-01.csv");
+    expect(result.blob).toBeInstanceOf(Blob);
+  });
+
+  it("meta backend'o klaidos tekstą (be tylaus lokalaus fallback)", async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 503,
+        headers: { get: () => "application/json" },
+        json: () => Promise.resolve({ error: "Eksporto servisas nepasiekiamas." }),
+      })
+    );
+
+    await expect(exportProtocol({ format: "txt", protocol: {} })).rejects.toThrow(
+      "Eksporto servisas nepasiekiamas."
+    );
+  });
+});
+
+describe("transcribeAudioJob grąžina jobId", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("jobId prieinamas kviečiančiam kodui (eksporto audito sąsajai)", async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes({ jobId: "job-transkripcija", status: "queued" }))
+      .mockResolvedValueOnce(jsonRes({ status: "completed", result: { text: "tekstas" } }));
+
+    const job = await transcribeAudioJob({
+      // Blob, ne File: `File` nėra ESLint globals sąraše šiam projektui, o visi
+      // kiti šio failo testai irgi naudoja Blob.
+      audioFile: new Blob(["x"]),
+      pollIntervalMs: 1,
+    });
+
+    expect(job.jobId).toBe("job-transkripcija");
+    expect(job.result.text).toBe("tekstas");
   });
 });

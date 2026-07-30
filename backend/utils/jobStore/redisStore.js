@@ -44,6 +44,29 @@ const TTL_SECONDS = Math.ceil(TTL_MS / 1000);
 // Laukai, kuriuos saugom kaip JSON (objektai/masyvai); kiti - kaip paprastą tekstą.
 const JSON_FIELDS = new Set(["result", "progress"]);
 
+/**
+ * Redis hash'e VISKAS yra eilutė. Todėl laukus, kurių tipas turi reikšmę, būtina
+ * atstatyti - kitaip `false` grįžta kaip `"false"`, o TAI YRA TRUTHY.
+ *
+ * Ką tai laužė (rasta savo testu, Redis režime):
+ *   - `audio_cleanup_pending: "false"` -> listByFlag() grąžindavo VISUS jobus, o
+ *     retryPendingAudioCleanups() tada trindavo dar apdorojamų jobų audio;
+ *   - hasPendingCleanup() visada true -> update() kviesdavo PERSIST vietoj EXPIRE,
+ *     tad baigti jobai Redis'e NIEKADA neiškvėpdavo (retencija tyliai neveikė);
+ *   - `audio_cleanup_attempts: "0"` -> `("0" || 0) + 1` === "01" (eilučių
+ *     konkatenacija), tad bandymų skaitliukas ir alerto riba neveikė.
+ *
+ * `attempt_count` jau buvo apdorojamas atskirai - tai buvo užuomina, kad ši spąsta
+ * žinoma; naujus laukus reikėjo pridėti čia iš karto.
+ */
+const BOOLEAN_FIELDS = new Set(["audio_cleanup_pending", "deletion_pending"]);
+
+const NUMBER_FIELDS = new Set([
+  "attempt_count",
+  "audio_cleanup_attempts",
+  "deletion_attempts",
+]);
+
 function serialize(job) {
   const flat = {};
   for (const [k, v] of Object.entries(job)) {
@@ -70,7 +93,9 @@ function deserialize(flat) {
       } catch {
         job[k] = null;
       }
-    } else if (k === "attempt_count") {
+    } else if (BOOLEAN_FIELDS.has(k)) {
+      job[k] = String(v).toLowerCase() === "true";
+    } else if (NUMBER_FIELDS.has(k)) {
       job[k] = parseInt(v, 10) || 0;
     } else {
       job[k] = v;
@@ -143,18 +168,60 @@ function createRedisStore(redisClient) {
    * laukus, tad einam per jobs:index (jame - tik gyvi jobai) ir tikrinam lauką.
    * Riba (`limit`) apsaugo nuo didelio skenavimo.
    */
+  /**
+   * VISŲ gyvų jobų storage raktai (žr. memoryStore analogą dėl priežasties).
+   * jobs:index gali turėti "vaiduoklių", kurių hash'ai jau iškvėpė per Redis TTL -
+   * jie tiesiog praleidžiami (deserialize grąžina null), o jų failai tada teisėtai
+   * tampa orphan.
+   */
+  async function listReferencedStorageKeys() {
+    const jobs = await _scanJobs();
+    const keys = new Set();
+
+    for (const job of jobs) {
+      if (job.storageKey) keys.add(job.storageKey);
+    }
+
+    return [...keys];
+  }
+
   async function listByFlag(field, limit = 100) {
-    const ids = await redisClient.zrange(INDEX_KEY, 0, -1);
+    const jobs = await _scanJobs();
     const pending = [];
 
-    for (const id of ids) {
+    for (const job of jobs) {
       if (pending.length >= limit) break;
-      const flat = await redisClient.hgetall(JOB_PREFIX + id);
-      const job = deserialize(flat);
-      if (job && job[field]) pending.push(job);
+      if (job[field]) pending.push(job);
     }
 
     return pending;
+  }
+
+  /**
+   * Visi REALIAI egzistuojantys jobai iš jobs:index.
+   *
+   * Vienas round-trip per PIPELINE, o ne N atskirų HGETALL - prie tūkstančių jobų
+   * N kvietimų reikštų N tinklo apsikeitimų. Tas pats šablonas kaip size().
+   *
+   * jobs:index gali turėti "vaiduoklių", kurių hash'ai jau iškvėpė per Redis TTL
+   * (indekso įrašą vėliau pašalina sweepExpired) - deserialize jiems grąžina null
+   * ir jie praleidžiami.
+   */
+  async function _scanJobs() {
+    const ids = await redisClient.zrange(INDEX_KEY, 0, -1);
+    if (!ids.length) return [];
+
+    const pipeline = redisClient.pipeline();
+    for (const id of ids) pipeline.hgetall(JOB_PREFIX + id);
+    const results = await pipeline.exec();
+
+    const jobs = [];
+    for (const [, flat] of results) {
+      const job = deserialize(flat);
+      if (job) jobs.push(job);
+    }
+
+    return jobs;
   }
 
   async function size() {
@@ -177,7 +244,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, get, update, remove, sweepExpired, size, listByFlag, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, get, update, remove, sweepExpired, size, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
-module.exports = { createRedisStore, serialize, deserialize };
+module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

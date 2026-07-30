@@ -57,6 +57,23 @@ async function size() {
  * `audio_cleanup_pending`). Naudoja periodiniai pakartojimo procesai -
  * žr. utils/deletionRetry.js.
  */
+/**
+ * VISŲ gyvų jobų storage raktai - nepriklausomai nuo statuso ar vėliavų.
+ *
+ * Naudoja retencijos sweeper'is (utils/retentionSweeper.js). Anksčiau jis
+ * rinkdavo raktus tik iš `deletion_pending`/`audio_cleanup_pending` jobų, tad
+ * paprastas `queued`/`processing` jobas su senu audio (ilgas įrašas, užstrigusi
+ * eilė, GPU trūkumas) buvo palaikomas orphan ir jo failas IŠTRINAMAS dar
+ * apdorojant. Čia turi būti VISI jobai.
+ */
+async function listReferencedStorageKeys() {
+  const keys = new Set();
+  for (const job of jobs.values()) {
+    if (job.storageKey) keys.add(job.storageKey);
+  }
+  return [...keys];
+}
+
 async function listByFlag(field, limit = 100) {
   const pending = [];
   for (const job of jobs.values()) {
@@ -74,4 +91,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, get, update, remove, sweepExpired, size, listByFlag, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, get, update, remove, sweepExpired, size, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

@@ -56,13 +56,18 @@ class FakeRedis {
     const self = this;
     const p = {
       exists(key) { cmds.push(["exists", key]); return p; },
+      hgetall(key) { cmds.push(["hgetall", key]); return p; },
       async exec() {
         const out = [];
         for (const [cmd, key] of cmds) {
           if (cmd === "exists") out.push([null, self.hashes.has(key) ? 1 : 0]);
+          if (cmd === "hgetall") out.push([null, { ...(self.hashes.get(key) || {}) }]);
         }
         return out;
       },
+      // Kiek komandų sudėta - kad testas galėtų patikrinti, jog naudojamas
+      // VIENAS round-trip, o ne N atskirų kvietimų.
+      _commandCount: () => cmds.length,
     };
     return p;
   }
@@ -170,4 +175,115 @@ test("remove deletes redis job", async () => {
 
   assert.equal(removed, true);
   assert.equal(await store.get(job.id), null);
+});
+
+test("listReferencedStorageKeys naudoja VIENĄ pipeline round-trip", async () => {
+  // Prie tūkstančių jobų N atskirų HGETALL reikštų N tinklo apsikeitimų.
+  const client = new FakeRedis();
+  const store = createRedisStore(client);
+
+  const keys = [];
+  for (let i = 0; i < 5; i += 1) {
+    const job = await store.create({ storageKey: `uploads/audio-${i}.wav` });
+    keys.push(job.storageKey);
+  }
+  await store.create(); // be storageKey
+
+  let pipelinesCreated = 0;
+  const originalPipeline = client.pipeline.bind(client);
+  client.pipeline = () => {
+    pipelinesCreated += 1;
+    return originalPipeline();
+  };
+
+  const referenced = await store.listReferencedStorageKeys();
+
+  assert.deepEqual(referenced.sort(), keys.sort());
+  assert.equal(pipelinesCreated, 1, "turi būti vienas pipeline, ne N kvietimų");
+});
+
+test("listByFlag irgi eina per pipeline ir gaudo vėliavas", async () => {
+  const client = new FakeRedis();
+  const store = createRedisStore(client);
+
+  const plain = await store.create({ storageKey: "uploads/a.wav" });
+  const flagged = await store.create({ storageKey: "uploads/b.wav" });
+  await store.update(flagged.id, { status: "completed", audio_cleanup_pending: true });
+
+  const pending = await store.listByFlag("audio_cleanup_pending");
+
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].id, flagged.id);
+  assert.notEqual(pending[0].id, plain.id);
+});
+
+test("REGRESIJA: newJob() laukų TIPAI išgyvena Redis round-trip", async () => {
+  // Bendra apsauga, ne tik konkretiems laukams: Redis hash'e viskas yra eilutė, tad
+  // kiekvienas naujas boolean/number laukas privalo būti įrašytas į BOOLEAN_FIELDS
+  // arba NUMBER_FIELDS. Be to `false` grįžta kaip "false" - TRUTHY - ir tyliai
+  // sulaužo vėliavomis paremtą logiką.
+  const { newJob } = require("../utils/jobStore/common");
+
+  const job = newJob({ type: "transcription", storageKey: "uploads/a.wav" });
+  job.status = "completed";
+  job.deletion_pending = false;
+  job.deletion_attempts = 0;
+  job.attempt_count = 2;
+
+  const round = deserialize(serialize(job));
+
+  for (const [key, original] of Object.entries(job)) {
+    if (original === null || original === undefined) continue;
+
+    assert.equal(
+      typeof round[key],
+      typeof original,
+      `laukas "${key}": tipas pakito ${typeof original} -> ${typeof round[key]}. ` +
+        "Pridėkite jį į BOOLEAN_FIELDS arba NUMBER_FIELDS (redisStore.js)."
+    );
+  }
+
+  assert.equal(round.audio_cleanup_pending, false);
+  assert.equal(round.deletion_pending, false);
+  assert.equal(round.deletion_attempts, 0);
+  assert.equal(round.attempt_count, 2);
+});
+
+test("REGRESIJA: listByFlag negrąžina jobų su false vėliava", async () => {
+  // Iki pataisos "false" buvo truthy, tad ši funkcija grąžindavo VISUS jobus, o
+  // retryPendingAudioCleanups() tada trindavo dar apdorojamų jobų audio.
+  const client = new FakeRedis();
+  const store = createRedisStore(client);
+
+  const active = await store.create({ storageKey: "uploads/apdorojamas.wav" });
+  await store.update(active.id, { status: "processing" });
+
+  const flagged = await store.create({ storageKey: "uploads/nepavyko.wav" });
+  await store.update(flagged.id, { status: "completed", audio_cleanup_pending: true });
+
+  const pending = await store.listByFlag("audio_cleanup_pending");
+
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].id, flagged.id);
+  assert.equal(pending[0].audio_cleanup_pending, true);
+});
+
+test("REGRESIJA: baigtas jobas be vėliavų gauna EXPIRE, ne PERSIST", async () => {
+  // hasPendingCleanup() su "false" eilute buvo visada true, tad baigti jobai
+  // Redis'e niekada neiškvėpdavo - retencija tyliai neveikė.
+  const client = new FakeRedis();
+  const calls = { expire: [], persist: [] };
+  client.expire = async (key, ttl) => { calls.expire.push([key, ttl]); return 1; };
+  client.persist = async (key) => { calls.persist.push(key); return 1; };
+
+  const store = createRedisStore(client);
+
+  const job = await store.create({ storageKey: "uploads/a.wav" });
+  await store.update(job.id, { status: "completed" });
+
+  assert.equal(calls.expire.length, 1, "baigtam jobui turi būti nustatytas EXPIRE");
+  assert.equal(calls.persist.length, 0);
+
+  await store.update(job.id, { audio_cleanup_pending: true });
+  assert.equal(calls.persist.length, 1, "pažymėtam jobui - PERSIST, kad neprarastume storageKey");
 });

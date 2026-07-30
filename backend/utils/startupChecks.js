@@ -77,13 +77,24 @@ function validateConfig(env = process.env) {
   // be jos naudojama repozitorijoje esanti vieša numatytoji reikšmė, tad bet kas,
   // žinantis ar spėjantis job/meeting ID, gali apskaičiuoti tą patį HMAC ir
   // "pseudonimizacija" nustoja ką nors saugoti.
+  // SĄMONINGAI įspėjimas, ne klaida: be druskos generuojama atsitiktinė (žr.
+  // utils/auditLog.js), tad viešos numatytosios reikšmės problemos nebėra ir
+  // nėra pagrindo neleisti serveriui startuoti. Kieta klaida čia buvo sulaužiusi
+  // dokumentuotą `docker compose up` kelią - backend image'e ENV NODE_ENV=production,
+  // o druskos ten niekas nenustato, tad konteineris nebepasileisdavo.
   if (env.NODE_ENV === "production" && !env.AUDIT_ID_SALT && env.PRIVACY_MODE !== "true") {
-    errors.push(
-      "AUDIT_ID_SALT nenustatytas, o NODE_ENV=production. Be jo audito subjectId " +
-        "pseudonimizacija atsukama (naudojama vieša numatytoji druska). " +
-        "Sugeneruokite: openssl rand -hex 32 (arba nustatykite PRIVACY_MODE=true, jei auditas nereikalingas)."
+    warnings.push(
+      "AUDIT_ID_SALT nenustatytas, o NODE_ENV=production - naudojama atsitiktinė šiam " +
+        "procesui sugeneruota druska. Pseudonimai nebus vienodi po perkrovimo ar kitoje " +
+        "replikoje. Persistentiniam auditui nustatykite: openssl rand -hex 32."
     );
   }
+
+  // Privatumo konfigūracija (GDPR #5) ir išorinių tiekėjų įspėjimai (GDPR #7).
+  const { validatePrivacyConfig } = require("./privacyConfig");
+  const privacy = validatePrivacyConfig(env);
+  errors.push(...privacy.errors);
+  warnings.push(...privacy.warnings);
 
   return { errors, warnings };
 }

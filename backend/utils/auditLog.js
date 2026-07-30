@@ -25,6 +25,45 @@ const DEFAULT_RETENTION_DAYS = 30;
 const DEFAULT_MAX_ENTRIES = 5000;
 
 let saltWarningShown = false;
+
+/**
+ * Atsitiktinė druska, sugeneruojama VIENĄ kartą procese, kai `AUDIT_ID_SALT`
+ * nenustatytas.
+ *
+ * Anksčiau čia buvo vieša repozitorijos reikšmė ("stenograma-local-audit-v1") -
+ * tai reiškė, kad bet kas, žinantis ar spėjantis job/meeting ID, galėjo
+ * apskaičiuoti tą patį HMAC, ir pseudonimizacija nesaugojo nieko. Vėliau tai
+ * buvo pakeista į startą blokuojančią klaidą produkcijoje, bet ji sulaužė
+ * dokumentuotą `docker compose up` kelią (image'e ENV NODE_ENV=production, o
+ * druskos niekas nenustato) - konteineris tiesiog nebepasileisdavo.
+ *
+ * Atsitiktinė druska sprendžia abu dalykus: viešos reikšmės nebėra, o startas
+ * nenutrūksta. Kaina - pseudonimai nestabilūs tarp perkrovimų ir tarp replikų;
+ * šiandien tai nieko nekainuoja, nes audito žurnalas ir taip yra ATMINTYJE ir
+ * po restarto tuščias. Persistentinei audito saugyklai (Milestone 2)
+ * `AUDIT_ID_SALT` privalo būti nustatytas eksplicitiškai.
+ */
+let generatedSalt = null;
+
+function resolveSalt() {
+  const configured = process.env.AUDIT_ID_SALT;
+  if (configured) return configured;
+
+  if (!generatedSalt) {
+    generatedSalt = crypto.randomBytes(32).toString("hex");
+
+    if (!saltWarningShown) {
+      saltWarningShown = true;
+      console.warn(
+        "[stenograma] AUDIT_ID_SALT nenustatytas - sugeneruota ATSITIKTINĖ druska šiam procesui. " +
+          "Pseudonimai nebus vienodi po perkrovimo ar kitoje replikoje. Tai priimtina, kol auditas " +
+          "yra atmintyje; persistentinei saugyklai nustatykite AUDIT_ID_SALT (openssl rand -hex 32)."
+      );
+    }
+  }
+
+  return generatedSalt;
+}
 let privacyPurgeWarningShown = false;
 
 function isPrivacyModeEnabled() {
@@ -107,13 +146,23 @@ function redactString(value) {
     "$1=[REDACTED]"
   );
 
-  // 3) El. pašto adresai.
+  // 3) URL prisijungimo duomenys (userinfo): `redis://naudotojas:slaptas@host`,
+  //     `postgres://...`, `amqp://...`. Turi eiti PRIEŠ URL taisyklę, kitaip ta
+  //    paliktų visą "origin" kartu su slaptažodžiu, o el. pašto taisyklė suėstų
+  //    `slaptas@host` kaip adresą ir liktų klaidinga žymė. Rasta realiai: neveikiančio
+  //     Redis klaidos pranešimas su pilnu connection string patekdavo į logą.
+  sanitized = sanitized.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)[^\s:@/]+(?::[^\s@/]*)?@/gi,
+    "$1[CREDENTIALS_REDACTED]@"
+  );
+
+  // 4) El. pašto adresai.
   sanitized = sanitized.replace(
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
     "[EMAIL_REDACTED]"
   );
 
-  // 4) URL: schema ir hostas paliekami (naudinga diagnostikai), kelias/query -
+  // 5) URL: schema ir hostas paliekami (naudinga diagnostikai), kelias/query -
   //    slepiami. Turi eiti PIRMA už failų kelių taisyklę, kitaip
   //    "http://localhost:8001/diarize" virsdavo "http:/[PATH_REDACTED]".
   sanitized = sanitized.replace(
@@ -121,21 +170,21 @@ function redactString(value) {
     (match, origin, rest) => (rest ? `${origin}/[PATH_REDACTED]` : origin)
   );
 
-  // 5) Absoliutūs Unix ir Windows failų keliai. Lookbehind neleidžia įsikibti į
+  // 6) Absoliutūs Unix ir Windows failų keliai. Lookbehind neleidžia įsikibti į
   //    jau apdorotų URL vidų (":" arba "/" prieš atitikmenį).
   sanitized = sanitized.replace(
     /(?<![\w:/\\])(?:[A-Za-z]:\\|\/)(?:[^/\s\\]+[/\\])+[^/\s\\]*/g,
     "[PATH_REDACTED]"
   );
 
-  // 6) IPv4 adresai (pagal BDAR - asmens duomenys). Turi eiti PRIEŠ telefonus,
+  // 7) IPv4 adresai (pagal BDAR - asmens duomenys). Turi eiti PRIEŠ telefonus,
   //    kitaip "127.0.0.1" būtų palaikytas telefono numeriu.
   sanitized = sanitized.replace(
     /(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])/g,
     "[IP_REDACTED]"
   );
 
-  // 7) Telefono numeriai. SĄMONINGAI siauras šablonas: tik tarptautinis formatas
+  // 8) Telefono numeriai. SĄMONINGAI siauras šablonas: tik tarptautinis formatas
   //    su "+" arba LT nacionalinis mobilus (8 6XX XXXXX). Ankstesnis bendras
   //    "8+ skaitmenų" variantas rydavo laiko žymas, trukmes ms, modelių versijas
   //    ir portus - t. y. sugadindavo diagnostiką be jokios privatumo naudos.
@@ -148,10 +197,10 @@ function redactString(value) {
     "[PHONE_REDACTED]"
   );
 
-  // 8) Lietuvos asmens kodas: 11 skaitmenų, prasidedantis 1-6.
+  // 9) Lietuvos asmens kodas: 11 skaitmenų, prasidedantis 1-6.
   sanitized = sanitized.replace(/\b[1-6]\d{10}\b/g, "[PERSONAL_CODE_REDACTED]");
 
-  // 9) Kosmetika: gretimi "[REDACTED]" (pvz. "Authorization: Bearer xxx" pataiko
+  // 10) Kosmetika: gretimi "[REDACTED]" (pvz. "Authorization: Bearer xxx" pataiko
   //    į dvi taisykles) sujungiami į vieną.
   sanitized = sanitized.replace(/(\[REDACTED\])(?:\s+\[REDACTED\])+/g, "$1");
 
@@ -197,19 +246,8 @@ function sanitizeControlled(value, maxLength = MAX_PROVIDER_LENGTH) {
 function pseudonymizeIdentifier(value) {
   if (value === null || value === undefined || value === "") return null;
 
-  const salt = process.env.AUDIT_ID_SALT;
-
-  if (!salt && process.env.NODE_ENV === "production" && !saltWarningShown) {
-    saltWarningShown = true;
-    console.warn(
-      "[stenograma] ⚠️  AUDIT_ID_SALT nenustatytas produkcijoje - naudojama numatytoji " +
-        "repozitorijoje esanti reikšmė. Spėjamiems identifikatoriams pseudonimizacija " +
-        "tampa atsukama. Nustatykite atsitiktinį AUDIT_ID_SALT."
-    );
-  }
-
   return crypto
-    .createHmac("sha256", salt || "stenograma-local-audit-v1")
+    .createHmac("sha256", resolveSalt())
     .update(String(value))
     .digest("hex")
     .slice(0, 20);

@@ -156,3 +156,122 @@ describe("App - generavimo srautas (mocked /api/generate)", () => {
     });
   });
 });
+
+describe("App - eksportas per backend (GDPR audito reikalavimas)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const createdLinks = [];
+
+  const fakeProtocol = {
+    pavadinimas: "Eksporto testas",
+    data: "2026-07-30",
+    dalyviai: ["Jonas"],
+    darbotvarke: ["Punktas"],
+    aptarti_klausimai: [{ klausimas: "K", santrauka: "S" }],
+    nutarimai: ["N"],
+    veiksmai: [{ uzduotis: "U", atsakingas: "Jonas", terminas: "rytoj" }],
+  };
+
+  async function renderWithProtocol(exportHandler) {
+    const base = mockFetchImplementation({
+      healthResponse: { status: "ok", llmProvider: "mock", transcriptionProvider: "mock", diarizationProvider: "none" },
+      generateResponse: {
+        protocol: fakeProtocol,
+        meta: { promptVersion: "meeting_v2", llmProvider: "mock", jsonRepairAttempts: 0, processingTimeMs: 5 },
+      },
+    });
+
+    global.fetch = vi.fn((url, options) => {
+      if (url.toString().includes("/api/exports")) return exportHandler(url, options);
+      return base(url, options);
+    });
+
+    // URL.createObjectURL neegzistuoja jsdom'e.
+    global.URL.createObjectURL = vi.fn(() => "blob:mock");
+    global.URL.revokeObjectURL = vi.fn();
+
+    // Perimam sukurtas <a> nuorodas, kad galėtume patikrinti download failo vardą.
+    createdLinks.length = 0;
+    const realCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tag, ...rest) => {
+      const element = realCreateElement(tag, ...rest);
+      if (String(tag).toLowerCase() === "a") createdLinks.push(element);
+      return element;
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText(/Backend aktyvus/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Įklijuoti tekstą"));
+    fireEvent.change(screen.getByPlaceholderText(/Įklijuokite susitikimo transkripciją/), {
+      target: { value: "Jonas: Sveiki, pradedam susitikimą. Reikia parengti pasiūlymą iki penktadienio." },
+    });
+    fireEvent.click(screen.getByText("Generuoti protokolą"));
+    await waitFor(() => expect(screen.getByDisplayValue("Eksporto testas")).toBeInTheDocument());
+
+    return global.fetch;
+  }
+
+  it("eksportuoja per POST /api/exports, o ne generuoja failą naršyklėje", async () => {
+    // Tai NE kosmetika: kol failas kuriamas naršyklėje, serveris apie eksportą
+    // nežino ir EXPORT_* audito įrašo būti negali.
+    const fetchMock = await renderWithProtocol(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: {
+          get: (name) =>
+            name.toLowerCase() === "content-disposition"
+              ? 'attachment; filename="protokolas_2026-07-30.docx"'
+              : null,
+        },
+        blob: () => Promise.resolve(new Blob(["PK"])),
+      })
+    );
+
+    // Mygtuko pavadinimą tikrinam PER ROLE ir TIKSLIAI tokį, kokio ieško Playwright
+    // E2E (`getByRole("button", { name: "Word (.docx)" })`). Eksporto mygtukų tekstas
+    // dabar dinamiškas ("Ruošiama…"), tad be šito E2E galėtų nutrūkti, o jo šioje
+    // aplinkoje paleisti negalima (Chromium atsisiuntimas blokuojamas).
+    const docxButton = screen.getByRole("button", { name: "Word (.docx)" });
+    const txtButton = screen.getByRole("button", { name: ".txt" });
+    const csvButton = screen.getByRole("button", { name: "Veiksmai .csv" });
+    expect(docxButton).toBeInTheDocument();
+    expect(txtButton).toBeInTheDocument();
+    expect(csvButton).toBeInTheDocument();
+
+    fireEvent.click(docxButton);
+
+    await waitFor(() => {
+      const exportCall = fetchMock.mock.calls.find((call) => String(call[0]).includes("/api/exports"));
+      expect(exportCall).toBeTruthy();
+      expect(exportCall[1].method).toBe("POST");
+      expect(JSON.parse(exportCall[1].body).format).toBe("docx");
+    });
+
+    // E2E tikrina download.suggestedFilename() -> /\.docx$/. Naršyklėje tai yra
+    // <a download> atributas, tad tikrinam jį.
+    await waitFor(() => {
+      expect(createdLinks.some((a) => /\.docx$/.test(a.download))).toBe(true);
+    });
+  });
+
+  it("parodo klaidą, kai backend eksportas nepavyksta (be tylaus lokalaus fallback)", async () => {
+    await renderWithProtocol(() =>
+      Promise.resolve({
+        ok: false,
+        status: 503,
+        headers: { get: () => "application/json" },
+        json: () => Promise.resolve({ error: "Eksporto servisas nepasiekiamas." }),
+      })
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: ".txt" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("Eksporto servisas nepasiekiamas.");
+    });
+  });
+});

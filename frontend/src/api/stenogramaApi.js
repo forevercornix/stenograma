@@ -148,5 +148,44 @@ export async function transcribeAudioJob({
 
   if (job.status === "failed") throw new Error(job.error || "Transkribavimas nepavyko");
   if (job.status !== "completed") throw new Error("Transkribavimas užtruko per ilgai (viršyta laukimo riba).");
-  return job; // { status: "completed", result: { text, segments } }
+  // jobId grąžinamas SPECIALIAI: iš jo eksporto audito įrašai susiejami su tuo pačiu
+  // pseudonimizuotu subjektu kaip transkribavimas, tad DELETE /api/transcribe-jobs/:id
+  // pašalina ir eksporto įvykius. Be jo audite eksportas liktų "be savininko".
+  return { ...job, jobId }; // { status: "completed", result: { text, segments }, jobId }
+}
+
+/**
+ * Protokolo eksportas per BACKEND (GDPR #6).
+ *
+ * Anksčiau visi trys formatai buvo generuojami naršyklėje. Serveris apie eksportą
+ * nieko nežinojo, tad `EXPORT_*` audito įvykių iš principo negalėjo būti. Dabar
+ * failą generuoja backend'as ir pats užrašo įvykį - klientas jo "praneša" nebeturi.
+ *
+ * Grąžina { blob, filename } - failo vardą nustato serveris (Content-Disposition).
+ */
+export async function exportProtocol({ format, protocol, jobId }, { signal } = {}) {
+  const res = await fetch(`${BACKEND_URL}/api/exports`, {
+    method: "POST",
+    headers: withApiKeyHeader({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ format, protocol, jobId }),
+    signal,
+  });
+
+  if (!res.ok) {
+    // Klaidos atveju backend'as grąžina JSON.
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("json")) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error || `Eksportas nepavyko (${res.status})`);
+    }
+    throw new Error(`Eksportas nepavyko (${res.status})`);
+  }
+
+  const disposition = res.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+
+  return {
+    blob: await res.blob(),
+    filename: match ? match[1] : `eksportas.${format}`,
+  };
 }

@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from "react";
-import Papa from "papaparse";
 import {
   Mic,
   Square,
@@ -27,6 +26,7 @@ import {
   fetchReadiness,
   generateProtocol,
   transcribeAudioJob,
+  exportProtocol,
 } from "./api/stenogramaApi";
 
 
@@ -65,6 +65,12 @@ export default function Stenograma() {
   const [speechSupported, setSpeechSupported] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState("");
+
+  // Transkribavimo jobId - perduodamas eksporto auditui, kad EXPORT_* įvykiai
+  // būtų susieti su tuo pačiu pseudonimu kaip transkripcija.
+  const [transcriptionJobId, setTranscriptionJobId] = useState(null);
+  const [exporting, setExporting] = useState(null);
+  const [exportError, setExportError] = useState("");
   const [protocol, setProtocol] = useState(null);
   const [levels, setLevels] = useState([4, 4, 4, 4, 4, 4, 4, 4]);
   const [stamped, setStamped] = useState(false);
@@ -273,6 +279,8 @@ export default function Stenograma() {
       // patikra apsaugo nuo VISŲ vėlyvų rezultatų (ne tik abort'intų).
       if (transcribeAbortRef.current !== controller) return;
 
+      setTranscriptionJobId(job.jobId || null);
+
       const data = job.result;
       const text = data.segments?.length
         ? data.segments.map((s) => `${s.speaker ? s.speaker + ": " : ""}${s.text}`).join("\n")
@@ -335,6 +343,9 @@ export default function Stenograma() {
     setMeta(null);
     setStamped(false);
     setError("");
+    // Naujas darbas - senas jobId nebeturi būti siejamas su nauju eksportu.
+    setTranscriptionJobId(null);
+    setExportError("");
   };
 
   // ── Protokolo redagavimo pagalbinės funkcijos ──
@@ -367,129 +378,28 @@ export default function Stenograma() {
   const removeVeiksmas = (index) => updateField("veiksmai", (protocol.veiksmai || []).filter((_, i) => i !== index));
 
   // ── Eksportai ──
-  const downloadTxt = () => {
-    if (!protocol) return;
-    let out = `PROTOKOLAS\n${protocol.pavadinimas || ""}\nData: ${protocol.data || ""}\n\n`;
-    out += `DALYVIAI:\n${(protocol.dalyviai || []).map((d) => "- " + d).join("\n") || "Nenurodyta"}\n\n`;
-    out += `DARBOTVARKĖ:\n${(protocol.darbotvarke || []).map((d, i) => `${i + 1}. ${d}`).join("\n") || "Nenurodyta"}\n\n`;
-    out += `APTARTI KLAUSIMAI:\n${
-      (protocol.aptarti_klausimai || []).map((k, i) => `${i + 1}. ${k.klausimas}\n   ${k.santrauka}`).join("\n") ||
-      "Nenurodyta"
-    }\n\n`;
-    out += `NUTARIMAI:\n${(protocol.nutarimai || []).map((n, i) => `${i + 1}. ${n}`).join("\n") || "Nenurodyta"}\n\n`;
-    out += `VEIKSMAI:\n${
-      (protocol.veiksmai || [])
-        .map((v) => `- ${v.uzduotis} | Atsakingas: ${v.atsakingas} | Terminas: ${v.terminas}`)
-        .join("\n") || "Nenurodyta"
-    }\n`;
-    downloadBlob(out, `protokolas_${date}.txt`, "text/plain;charset=utf-8");
+  // Failus generuoja BACKEND (POST /api/exports), ne naršyklė. Priežastis - GDPR
+  // audito reikalavimas: kol .txt/.csv/.docx buvo kuriami čia, serveris apie
+  // eksportą nieko nežinojo, tad EXPORT_* įvykių audito žurnale negalėjo būti.
+  // Kliento "pranešiau, kad eksportavau" įrašu audite pasitikėti negalima.
+
+  const runExport = async (format) => {
+    if (!protocol || exporting) return;
+
+    setExporting(format);
+    setExportError("");
+
+    try {
+      const { blob, filename } = await exportProtocol({ format, protocol, jobId: transcriptionJobId });
+      saveBlob(blob, filename);
+    } catch (e) {
+      setExportError(e.message || "Eksportas nepavyko.");
+    } finally {
+      setExporting(null);
+    }
   };
 
-  const downloadCsv = () => {
-    if (!protocol) return;
-    const rows = (protocol.veiksmai || []).map((v) => ({
-      Užduotis: v.uzduotis,
-      Atsakingas: v.atsakingas,
-      Terminas: v.terminas,
-    }));
-    const csv = Papa.unparse(rows.length ? rows : [{ Užduotis: "", Atsakingas: "", Terminas: "" }]);
-    downloadBlob("\uFEFF" + csv, `veiksmai_${date}.csv`, "text/csv;charset=utf-8");
-  };
-
-  // Tikras OOXML .docx (ne HTML trick) - naudoja "docx" npm paketą, kuris veikia
-  // tiesiogiai naršyklėje (Packer.toBlob). Realus Word dokumentas su antraštėmis,
-  // lentele ir formatavimu, ne .html failas su .doc plėtiniu.
-  const downloadDocx = async () => {
-    if (!protocol) return;
-    const {
-      Document, Packer, Paragraph, TextRun, HeadingLevel,
-      Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType,
-    } = await import("docx");
-
-    const brassColor = "9C7A34";
-    const slateColor = "5B6472";
-
-    const heading2 = (text) =>
-      new Paragraph({ text, heading: HeadingLevel.HEADING_2, spacing: { before: 300, after: 120 } });
-
-    const bulletList = (items) =>
-      items.length
-        ? items.map((item) => new Paragraph({ text: item, bullet: { level: 0 } }))
-        : [new Paragraph({ children: [new TextRun({ text: "Nenurodyta", italics: true, color: slateColor })] })];
-
-    const cell = (text, opts = {}) =>
-      new TableCell({
-        width: { size: opts.width || 33, type: WidthType.PERCENTAGE },
-        children: [new Paragraph({ children: [new TextRun({ text: text || "", bold: opts.bold })] })],
-      });
-
-    const veiksmaiRows = [
-      new TableRow({
-        children: [cell("Užduotis", { bold: true }), cell("Atsakingas", { bold: true }), cell("Terminas", { bold: true })],
-      }),
-      ...((protocol.veiksmai || []).length
-        ? protocol.veiksmai.map((v) => new TableRow({ children: [cell(v.uzduotis), cell(v.atsakingas), cell(v.terminas)] }))
-        : [new TableRow({ children: [cell("Nenurodyta"), cell(""), cell("")] })]),
-    ];
-
-    const doc = new Document({
-      sections: [
-        {
-          properties: {},
-          children: [
-            new Paragraph({
-              children: [new TextRun({ text: "PROTOKOLAS", bold: true, size: 22, color: slateColor })],
-              spacing: { after: 200 },
-            }),
-            new Paragraph({
-              children: [new TextRun({ text: protocol.pavadinimas || "", bold: true, size: 32 })],
-            }),
-            new Paragraph({
-              children: [new TextRun({ text: `Data: ${protocol.data || ""}`, color: slateColor, size: 20 })],
-              spacing: { after: 200 },
-            }),
-
-            heading2("Dalyviai"),
-            new Paragraph({ text: (protocol.dalyviai || []).join(", ") || "Nenurodyta" }),
-
-            heading2("Darbotvarkė"),
-            ...bulletList(protocol.darbotvarke || []),
-
-            heading2("Aptarti klausimai"),
-            ...((protocol.aptarti_klausimai || []).length
-              ? protocol.aptarti_klausimai.flatMap((k) => [
-                  new Paragraph({ children: [new TextRun({ text: k.klausimas, bold: true })] }),
-                  new Paragraph({ text: k.santrauka, spacing: { after: 120 } }),
-                ])
-              : [new Paragraph({ children: [new TextRun({ text: "Nenurodyta", italics: true, color: slateColor })] })]),
-
-            heading2("Nutarimai"),
-            ...bulletList(protocol.nutarimai || []),
-
-            heading2("Veiksmai"),
-            new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: veiksmaiRows }),
-
-            new Paragraph({ text: "", spacing: { before: 600 } }),
-            new Paragraph({ text: "_____________________________" }),
-            new Paragraph({ text: "Protokolą parengė (parašas, vardas pavardė)", spacing: { before: 60 } }),
-          ],
-        },
-      ],
-    });
-
-    const blob = await Packer.toBlob(doc);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `protokolas_${date}.docx`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  const downloadBlob = (content, filename, mime) => {
-    const blob = new Blob([content], { type: mime });
+  const saveBlob = (blob, filename) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -925,16 +835,24 @@ export default function Stenograma() {
           </div>
 
           {protocol && !isGenerating && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button onClick={downloadTxt} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE, color: SLATE }}>
-                <Download size={13} /> .txt
-              </button>
-              <button onClick={downloadDocx} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE, color: SLATE }}>
-                <FileType size={13} /> Word (.docx)
-              </button>
-              <button onClick={downloadCsv} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE, color: SLATE }}>
-                <FileSpreadsheet size={13} /> Veiksmai .csv
-              </button>
+            <div className="mt-4">
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => runExport("txt")} disabled={Boolean(exporting)} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50" style={{ borderColor: LINE, color: SLATE }}>
+                  <Download size={13} /> {exporting === "txt" ? "Ruošiama…" : ".txt"}
+                </button>
+                <button onClick={() => runExport("docx")} disabled={Boolean(exporting)} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50" style={{ borderColor: LINE, color: SLATE }}>
+                  <FileType size={13} /> {exporting === "docx" ? "Ruošiama…" : "Word (.docx)"}
+                </button>
+                <button onClick={() => runExport("csv")} disabled={Boolean(exporting)} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50" style={{ borderColor: LINE, color: SLATE }}>
+                  <FileSpreadsheet size={13} /> {exporting === "csv" ? "Ruošiama…" : "Veiksmai .csv"}
+                </button>
+              </div>
+
+              {exportError && (
+                <p role="alert" className="mt-2 text-xs" style={{ color: REDINK }}>
+                  {exportError}
+                </p>
+              )}
             </div>
           )}
         </section>

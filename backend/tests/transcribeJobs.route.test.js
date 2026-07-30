@@ -110,7 +110,14 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
     success: true,
   });
 
-  assert.equal(auditLog.getAll().length, 1);
+  // Tikrinam ŠIO jobo įrašus, ne bendrą žurnalo ilgį: ankstesnių testų jobai
+  // apdorojami FONE (inline runner per setImmediate) ir gali įrašyti savo
+  // TRANSCRIPTION_COMPLETED jau po šio testo auditLog.clear() - dėl to bendro
+  // skaičiaus tikrinimas buvo flaky.
+  const subjectId = auditLog.pseudonymizeIdentifier(job.id);
+  const own = () => auditLog.getAll().filter((e) => e.subjectId === subjectId);
+
+  assert.equal(own().length, 1);
 
   const res = await request(app).delete(
     `/api/transcribe-jobs/${job.id}`
@@ -118,9 +125,14 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
 
   assert.equal(res.status, 204);
   assert.equal(await jobStore.get(job.id), null);
-  // DATA_ERASED kvitas SĄMONINGAI lieka - jis nesusietas su subjektu ir yra
-  // vienintelis įrodymas, kad ištrynimas įvyko (žr. utils/jobErasure.js).
-  assert.equal(auditLog.getAll().filter((e) => e.event !== "DATA_ERASED").length, 0);
+
+  // DATA_ERASED kvitas SĄMONINGAI lieka, bet jis nesusietas su subjektu
+  // (subjectId=null), tad į own() nepatenka - žr. utils/jobErasure.js.
+  assert.equal(own().length, 0);
+  assert.ok(
+    auditLog.getAll().some((e) => e.event === "DATA_ERASED"),
+    "turi likti įrodymas, kad ištrynimas įvyko"
+  );
 });
 
 test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> ištrynimas išvalo ir auditą", async () => {
