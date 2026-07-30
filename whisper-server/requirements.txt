@@ -1,10 +1,10 @@
 fastapi>=0.110
 uvicorn>=0.27
-python-multipart>=0.0.9
+python-multipart>=0.0.31
 faster-whisper>=1.0.0
 
 # Testavimui (pytest test_server.py, test_transcribe_integration.py):
-pytest>=8.0
+pytest>=9.0.3
 
 # ─────────────────────────────────────────────────────────────────────────
 # ⚠️  MINIMALIOS (>=) versijos - patogu vystymui, RIZIKINGA produkcijai. Determi-
