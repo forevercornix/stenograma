@@ -1,11 +1,11 @@
 fastapi>=0.110
 uvicorn>=0.27
-python-multipart>=0.0.9
+python-multipart>=0.0.31
 pyannote.audio>=3.1
 # torch įdiegiamas atskirai Dockerfile'e (CPU ar CUDA variantas priklauso nuo bazinio image)
 
 # Testavimui (pytest test_server.py, test_diarize_integration.py):
-pytest>=8.0
+pytest>=9.0.3
 
 # hf_transfer: paralelinis, atsparesnis modelių atsisiuntimas iš Hugging Face.
 # RunPod'e PRAKTIŠKAI BŪTINAS - be jo dideli modeliai dažnai timeout'ina/nutrūksta
