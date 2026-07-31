@@ -22,6 +22,7 @@ if (process.env.SKIP_CONFIG_VALIDATION !== "true") {
   // komponentams (GDPR #5 DoD). Bloga konfigūracija = serveris nestartuoja.
   initPrivacyPolicy();
 
+
   const { errors, warnings } = validateConfig();
   for (const w of warnings) console.warn(`[stenograma] ⚠️  ${w}`);
   if (errors.length > 0) {
@@ -202,6 +203,21 @@ app.get("/api/health/deep", async (req, res) => {
 // nesuderinimą. Init prieš listen tai UŽDARO. Funkcija iškelta (su injektuojamu listen)
 // dėl testuojamumo - regresinis testas tikrina kvietimų TVARKĄ (store->runner->listen).
 async function startServer({ port, listen, onStep } = {}) {
+  // STALE ĮKĖLIMŲ VALYMAS (#13). Čia, o ne modulio lygyje: reikia `await`, o
+  // CommonJS top-level await neleidžia. Ir semantiškai teisinga - valymas turi
+  // baigtis PRIEŠ priimant naujus įkėlimus, kitaip valytojas ir naujas įkėlimas
+  // varžytųsi dėl to paties katalogo.
+  try {
+    const { purgeStaleUploads } = require("./utils/uploadPath");
+    const { removed } = await purgeStaleUploads();
+    if (removed > 0) {
+      console.log(`[stenograma] Paleidimas: pašalinta ${removed} likusių laikinų įkėlimo failų.`);
+    }
+  } catch (e) {
+    // Valymo klaida NEGALI sustabdyti paleidimo - tai higiena, ne kritinis kelias.
+    console.warn("[stenograma] Nepavyko išvalyti likusių laikinų įkėlimo failų:", e.message);
+  }
+
   const PORT = port || process.env.PORT || 3001;
   const doListen = listen || ((p) => new Promise((resolve) => app.listen(p, resolve)));
   const step = (name) => { if (typeof onStep === "function") onStep(name); };
