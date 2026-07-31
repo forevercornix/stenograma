@@ -136,6 +136,13 @@ test("diagnostika rodo efektyvias nuostatas be paslapčių", () => {
     localOnly: true,
     externalProviders: false,
     auditEnabled: true,
+    persistentStorage: false,
+    redaction: { requiredBeforeExternal: false, componentDetected: false, configuredForEnforcement: false },
+    storage: {
+      jobState: "memory",
+      audit: "memory",
+      audio: "disk (trinamas po jobo pabaigos)",
+    },
     retention: { audit: "7d", jobs: "30m", audio: "6h" },
   });
 
@@ -437,4 +444,305 @@ test("NODE_ENV=production be AUDIT_ID_SALT NEBLOKUOJA starto (tik įspėjimas)",
     warnings.some((w) => w.includes("AUDIT_ID_SALT")),
     "bet administratorius turi būti įspėtas"
   );
+});
+
+/* ------------------------------------------------------------------ *
+ * GDPR #5: persistentinės saugyklos išjungimas (PERSISTENT_STORAGE)
+ * ------------------------------------------------------------------ */
+
+test("PERSISTENT_STORAGE nenustatyta - išvedama iš REDIS_URL", () => {
+  assert.equal(getPrivacyConfig({ ...LOCAL_ENV }).persistentStorage, false);
+  assert.equal(
+    getPrivacyConfig({ ...LOCAL_ENV, REDIS_URL: "redis://localhost:6379" }).persistentStorage,
+    true
+  );
+
+  // Išvedimas NĖRA prieštaravimas - esami diegimai su REDIS_URL turi startuoti.
+  const { errors } = validatePrivacyConfig({ ...LOCAL_ENV, REDIS_URL: "redis://localhost:6379" });
+  assert.deepEqual(errors, []);
+});
+
+test("PERSISTENT_STORAGE=false su REDIS_URL = startup KLAIDA (ne tylus ignoravimas)", () => {
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "false",
+    REDIS_URL: "redis://localhost:6379",
+  });
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /PERSISTENT_STORAGE=false/);
+  assert.match(errors[0], /REDIS_URL/);
+});
+
+test("PERSISTENT_STORAGE=false su REDIS_REQUIRED=true = klaida", () => {
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "false",
+    REDIS_REQUIRED: "true",
+  });
+
+  assert.ok(errors.some((e) => /REDIS_REQUIRED/.test(e)));
+});
+
+test("PERSISTENT_STORAGE=true be REDIS_URL = klaida (persistencija atmintyje būtų melas)", () => {
+  const { errors } = validatePrivacyConfig({ ...LOCAL_ENV, PERSISTENT_STORAGE: "true" });
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /REDIS_URL nenustatytas/);
+});
+
+test("PERSISTENT_STORAGE=false praeina ir įspėja apie duomenų praradimą po restarto", () => {
+  const { errors, warnings } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "false",
+  });
+
+  assert.deepEqual(errors, []);
+  assert.ok(warnings.some((w) => /tik atmintyje/.test(w)));
+});
+
+test("efemeriškame režime AUDIO_RETENTION_HOURS ribojama, o riba - matoma", () => {
+  const env = { ...LOCAL_ENV, PERSISTENT_STORAGE: "false", AUDIO_RETENTION_HOURS: "24" };
+  const config = getPrivacyConfig(env);
+
+  assert.equal(config.audioRetentionHours, 1, "efektyvi reikšmė apribota");
+  assert.equal(config.audioRetentionHoursConfigured, 24, "konfigūruota reikšmė išsaugota");
+
+  // Tyli neatitiktis būtų blogiau nei apribojimas - administratorius turi ją pamatyti.
+  const { warnings } = validatePrivacyConfig(env);
+  assert.ok(warnings.some((w) => /sumažinta iki 1/.test(w)));
+});
+
+test("PERSISTENT_STORAGE=maybe atmetama kaip netaisyklinga reikšmė", () => {
+  const { errors } = validatePrivacyConfig({ ...LOCAL_ENV, PERSISTENT_STORAGE: "maybe" });
+  assert.ok(errors.some((e) => /PERSISTENT_STORAGE/.test(e)));
+});
+
+test("diagnostika rodo, KUR konkrečiai duomenys gyvena", () => {
+  const ephemeral = describeForDiagnostics({ ...LOCAL_ENV, PERSISTENT_STORAGE: "false" });
+  assert.equal(ephemeral.persistentStorage, false);
+  assert.equal(ephemeral.storage.jobState, "memory");
+  assert.equal(ephemeral.storage.audit, "memory");
+
+  const persistent = describeForDiagnostics({ ...LOCAL_ENV, REDIS_URL: "redis://localhost:6379" });
+  assert.equal(persistent.storage.jobState, "redis");
+
+  // Paslapčių diagnostikoje būti negali.
+  assert.ok(!JSON.stringify(persistent).includes("redis://"));
+});
+
+test("startupChecks perima persistencijos prieštaravimą (serveris nestartuoja)", () => {
+  const { errors } = validateConfig({
+    ...LOCAL_ENV,
+    NODE_ENV: "development",
+    PERSISTENT_STORAGE: "false",
+    REDIS_URL: "redis://localhost:6379",
+  });
+
+  assert.ok(errors.some((e) => /PERSISTENT_STORAGE=false/.test(e)));
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * GDPR #5: redakcija prieš išorinį apdorojimą (REQUIRE_REDACTION_BEFORE_EXTERNAL)
+ *
+ * Nuostata konfigūruojama ČIA, bet realų redagavimą atlieka #4 komponentas.
+ * Todėl svarbiausias testas yra pirmasis: kol #4 nėra, vėliava NEGALI tyliai
+ * praeiti - kitaip ji būtų neįvykdomas saugumo pažadas.
+ * ---------------------------------------------------------------------------
+ */
+
+const privacyConfig = require("../utils/privacyConfig");
+const redactionComponent = require("../utils/redactionComponent");
+
+/** Suvaidina, kad #4 (utils/piiRedaction.js) jau egzistuoja arba dar ne. */
+function withRedaction(available, fn) {
+  redactionComponent._setLoaderForTests(
+    available ? () => ({ redact: (text) => text }) : null
+  );
+  try {
+    return fn();
+  } finally {
+    redactionComponent._setLoaderForTests(null);
+  }
+}
+
+test("redakcijos modulio (#4) šioje repo versijoje dar nėra", () => {
+  assert.equal(privacyConfig.isRedactionAvailable(), false);
+});
+
+test("REQUIRE_REDACTION_BEFORE_EXTERNAL=true be #4 modulio = startup KLAIDA", () => {
+  const { errors } = validatePrivacyConfig({
+    LLM_PROVIDER: "claude",
+    REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+  });
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /issue #4/);
+  assert.match(errors[0], /piiRedaction/);
+});
+
+test("startupChecks perima redakcijos prieštaravimą (serveris nestartuoja)", () => {
+  const { errors } = validateConfig({
+    LLM_PROVIDER: "claude",
+    REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+  });
+
+  assert.ok(errors.some((error) => /REQUIRE_REDACTION_BEFORE_EXTERNAL/.test(error)));
+});
+
+test("su įgyvendintu #4 ta pati konfigūracija praeina be klaidų", () => {
+  withRedaction(true, () => {
+    const { errors } = validatePrivacyConfig({
+      LLM_PROVIDER: "claude",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+
+    assert.deepEqual(errors, []);
+  });
+});
+
+test("reikalaujama redakcija be išorinių tiekėjų - įspėjimas apie nulinį efektą", () => {
+  withRedaction(true, () => {
+    const { errors, warnings } = validatePrivacyConfig({
+      ...LOCAL_ENV,
+      PRIVACY_PROFILE: "local_only",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+
+    assert.deepEqual(errors, []);
+    assert.ok(warnings.some((w) => /neturi jokio efekto/.test(w)));
+  });
+});
+
+test("#4 prieinamas, bet nuostata neįjungta - įspėjimas apie NEREDAGUOTUS duomenis", () => {
+  withRedaction(true, () => {
+    const { warnings } = validatePrivacyConfig({ LLM_PROVIDER: "claude" });
+
+    assert.ok(warnings.some((w) => /NEREDAGUOTA/.test(w)));
+  });
+});
+
+test("REGRESIJA: be #4 modulio ir be nuostatos jokio redakcijos triukšmo nėra", () => {
+  const { errors, warnings } = validatePrivacyConfig({ LLM_PROVIDER: "claude" });
+
+  assert.deepEqual(errors, []);
+  assert.ok(!warnings.some((w) => /NEREDAGUOTA/.test(w)));
+});
+
+test("REQUIRE_REDACTION_BEFORE_EXTERNAL=maybe atmetama kaip netaisyklinga reikšmė", () => {
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    REQUIRE_REDACTION_BEFORE_EXTERNAL: "maybe",
+  });
+
+  assert.ok(errors.some((e) => /REQUIRE_REDACTION_BEFORE_EXTERNAL/.test(e)));
+});
+
+test("diagnostika rodo IR reikalavimą, IR realų prieinamumą", () => {
+  const diagnostics = describeForDiagnostics({ ...LOCAL_ENV });
+
+  assert.deepEqual(diagnostics.redaction, {
+    requiredBeforeExternal: false,
+    componentDetected: false,
+    configuredForEnforcement: false,
+  });
+
+  withRedaction(true, () => {
+    const withModule = describeForDiagnostics({
+      ...LOCAL_ENV,
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+
+    // LOCAL_ENV naudoja LLM_PROVIDER=mock (lokalus) - reikalavimas yra, komponentas
+    // yra, bet apvynioti nėra ko: todėl tai atskiras laukas.
+    assert.deepEqual(withModule.redaction, {
+      requiredBeforeExternal: true,
+      componentDetected: true,
+      configuredForEnforcement: false,
+    });
+
+    const external = describeForDiagnostics({
+      LLM_PROVIDER: "claude",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+    assert.equal(external.redaction.configuredForEnforcement, true);
+  });
+});
+
+test("trys komponento būsenos duoda TRIS skirtingus pranešimus (ne vieną 'nėra')", () => {
+  const cases = [
+    [null, /issue #4/],
+    [
+      () => {
+        throw new SyntaxError("netikėtas simbolis");
+      },
+      /neįsikelia: netikėtas simbolis/,
+    ],
+    [() => ({}), /neeksportuoja redact\(\)/],
+  ];
+
+  for (const [loader, expected] of cases) {
+    redactionComponent._setLoaderForTests(loader);
+    try {
+      const { errors } = validatePrivacyConfig({
+        LLM_PROVIDER: "claude",
+        REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+      });
+      assert.ok(errors.some((e) => expected.test(e)), `laukta ${expected}, gauta: ${errors.join(" | ")}`);
+    } finally {
+      redactionComponent._setLoaderForTests(null);
+    }
+  }
+});
+
+test("reikalaujama redakcija + IŠORINIS transkribavimas = klaida (garso redaguoti negalima)", () => {
+  withRedaction(true, () => {
+    const { errors } = validatePrivacyConfig({
+      LLM_PROVIDER: "claude",
+      TRANSCRIPTION_PROVIDER: "whisper",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+
+    assert.ok(errors.some((e) => /transcription/.test(e) && /garso dengti negali/.test(e)));
+  });
+});
+
+test("reikalaujama redakcija + debesų diarizacija = klaida", () => {
+  withRedaction(true, () => {
+    const { errors } = validatePrivacyConfig({
+      LLM_PROVIDER: "claude",
+      TRANSCRIPTION_PROVIDER: "faster-whisper-embedded",
+      DIARIZATION_PROVIDER: "pyannote-cloud",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+
+    assert.ok(errors.some((e) => /diarization/.test(e)));
+  });
+});
+
+test("reikalaujama redakcija + LOKALUS audio kelias = praeina", () => {
+  withRedaction(true, () => {
+    const { errors } = validatePrivacyConfig({
+      LLM_PROVIDER: "claude",
+      TRANSCRIPTION_PROVIDER: "faster-whisper-embedded",
+      DIARIZATION_PROVIDER: "pyannote",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+
+    assert.deepEqual(errors, []);
+  });
+});
+
+test("įspėjimas apie NEREDAGUOTUS duomenis netaikomas, kai išorinis tik transkribavimas", () => {
+  withRedaction(true, () => {
+    const { warnings } = validatePrivacyConfig({
+      LLM_PROVIDER: "mock",
+      TRANSCRIPTION_PROVIDER: "whisper",
+    });
+
+    // `anyExternal` čia true (Whisper), bet LLM lokalus - pranešimas apie
+    // transkripcijos siuntimą LLM tiekėjui būtų klaidingas.
+    assert.ok(!warnings.some((w) => /NEREDAGUOTA/.test(w)));
+  });
 });

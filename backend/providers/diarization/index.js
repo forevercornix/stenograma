@@ -2,6 +2,7 @@ const MockDiarizationProvider = require("./MockDiarizationProvider");
 const PyannoteDiarizationProvider = require("./PyannoteDiarizationProvider");
 const PyannoteCloudDiarizationProvider = require("./PyannoteCloudDiarizationProvider");
 const AssemblyAIDiarizationProvider = require("./AssemblyAIDiarizationProvider");
+const { assertRawAudioProviderAllowed } = require("../../utils/privacyConfig");
 
 // "none" ir "inline" NĖRA klasės - tai specialūs režimai, tvarkomi routes/transcribe.js:
 //   none   - diarizacija apskritai neatliekama.
@@ -32,6 +33,11 @@ const SPECIAL_MODES = ["none", "inline"];
  */
 function getDiarizationProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.DIARIZATION_PROVIDER || "none").toLowerCase();
+
+  // FAIL-CLOSED (GDPR #5): startup validacija mato tik .env, o čia ateina ir
+  // UŽKLAUSOS override. Ta pati taisyklė, tas pats predikatas - žr.
+  // utils/privacyConfig.js assertRawAudioProviderAllowed().
+  assertRawAudioProviderAllowed("diarization", name);
   if (SPECIAL_MODES.includes(name)) return null;
   const ProviderClass = REGISTRY[name];
   if (!ProviderClass) {

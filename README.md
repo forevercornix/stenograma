@@ -1012,6 +1012,8 @@ heuristikomis, ne modeliu. Tai sąmoningas apribojimas, ne paslėptas.
 | `PRIVACY_PROFILE` | `standard` | `local_only` – uždraudžia visus išorinius tiekėjus |
 | `ALLOW_EXTERNAL_PROVIDERS` | `true` | `false` – tas pats be viso profilio |
 | `PRIVACY_MODE` | `false` | `true` – išjungia audito žurnalą (**atskira** nuostata) |
+| `PERSISTENT_STORAGE` | išvedama iš `REDIS_URL` | `false` – jobų būsena/rezultatai tik atmintyje (audio – laikinai diske) |
+| `REQUIRE_REDACTION_BEFORE_EXTERNAL` | `false` | `true` – į išorinį **LLM** tiekėją tik redaguotas payload'as (`redact()` iš issue #4) |
 | `AUDIT_RETENTION_DAYS` | `30` | Leistinos ribos: 1–365 |
 | `JOB_TTL_MINUTES` | `60` | Jobo metaduomenų retencija |
 | `AUDIO_RETENTION_HOURS` | `24` | Po kiek nuskendę audio failai šalinami |
@@ -1027,6 +1029,65 @@ numatytosiomis: `JOB_TTL_MINUTES=abc`, `AUDIO_RETENTION_HOURS=-1`,
 privatumo: administratoriui atrodytų, kad nustatė 1 val. retenciją, o sistema
 naudotų 24. Ribos: `AUDIT_RETENTION_DAYS` 1–365, `JOB_TTL_MINUTES` 1–525600,
 `AUDIO_RETENTION_HOURS` 1–8760, intervalai 1–10080.
+
+**Persistentinės saugyklos išjungimas.** `PERSISTENT_STORAGE=false` išjungia
+persistentinį **jobų būsenos, transkripcijų ir protokolų** saugojimą: šie duomenys
+laikomi tik proceso atmintyje ir dingsta po restarto. Audito žurnalas šiame MVP ir
+taip visada tik atmintyje.
+
+Audio **nėra** tik atmintyje: apdorojimo metu jis laikinai laikomas diske
+(`utils/fileStorage.js`) ir normaliai pašalinamas jobui pasibaigus
+(`utils/audioCleanup.js`). Po proceso kritimo likę failai efemeriškame režime
+valomi ne vėliau kaip pagal **vienos valandos** nuskendusių failų retenciją
+(vietoj numatytų 24 val.). Tai matyti ir diagnostikoje:
+`privacy.storage.audio` = „disk (trinamas po jobo pabaigos)".
+
+Vėliava yra **trijų būsenų sąmoningai**: nenustatyta → išvedama iš `REDIS_URL`
+(nieko nelaužo esamiems diegimams); `false` + `REDIS_URL` → **startup klaida**;
+`true` be `REDIS_URL` → taip pat klaida, nes „persistentinė" saugykla atmintyje
+būtų melas. Tylus `REDIS_URL` ignoravimas reikštų, kad administratorius mano, jog
+jobai išgyvena restartą, o jie neišgyvena. Efektyvi būsena matoma
+`GET /api/health` → `privacy.storage` (`jobState`/`audit`/`audio`).
+
+**Redakcija prieš išorinį apdorojimą.** `REQUIRE_REDACTION_BEFORE_EXTERNAL=true`
+reiškia, kad į išorinį LLM tiekėją siunčiamas payload'as pirma praleidžiamas per
+`redact()`. Vykdoma **dekoratoriumi ties pačiu tiekėjo kvietimu**
+(`providers/llm/RedactingLLMProvider.js`, įjungiamas `providers/llm/index.js`
+fabrikoje), o ne prompt'o sudarymo metu. Priežastys:
+
+- pro fabriką praeina **abu** vykdymo keliai – inline (`routes/generate.js`) ir
+  BullMQ (`queues/processors.js`), tad naujas kelias apsaugą gauna automatiškai;
+- **repair retry** siunčia antrą payload'ą su ta pačia transkripcija; redakcija
+  prompt'o sudarymo metu jį praleistų.
+
+**Fail-closed:** išorinis tiekėjas gauna **tik `redact()` rezultatą**. Jei redakcija
+nepavyksta arba grąžina netinkamą rezultatą, tiekėjas **nekviečiamas** ir operacija
+baigiasi aiškia klaida; originalus payload'as niekada nenaudojamas kaip fallback.
+Lokalūs tiekėjai neapvyniojami (duomenys ir taip neišeina).
+
+Dekoratorius **netikrina, ar rezultatas skiriasi** nuo įvesties: `redact()`,
+grąžinantis tekstą nepakeistą, praeis. Realią PII aptikimo kokybę užtikrina
+issue #4 – čia garantuojamas tik kelias, ne turinys.
+
+⚠️ **Aprėptis: tik tekstinis kelias.** Išorinis transkribavimas (`whisper`,
+`deepgram`, `azure`, `google`) ir debesų diarizacija (`pyannote-cloud`,
+`assemblyai`) gauna **žalią garso įrašą** su vardais ir asmens kodais, o tekstinė
+redakcija garso dengti negali. Todėl toks derinys su įjungta nuostata yra
+**startup klaida**, ne įspėjimas – kitaip vėliava žadėtų daugiau, nei dengia.
+Norint apsaugoti ir garsą, tinkamas įrankis yra `PRIVACY_PROFILE=local_only`.
+
+Komponento aptikimas turi **tris būsenas** (nėra / neįsikelia / netinkamas
+kontraktas), kad „modulis parašytas, bet turi `SyntaxError`" neatrodytų kaip
+„įgyvendinkite #4". Diagnostika (`GET /api/health` → `privacy.redaction`) skiria
+`componentDetected` (rastas modulis su `redact()`) nuo `configuredForEnforcement`
+(konfigūracija tokia, kad fabrika tiekėją apvynios). Antrasis laukas sąmoningai
+**nevadinamas** `enforced`: jis yra išvedamas iš konfigūracijos, o ne konkretaus
+objekto patikra, tad toks pavadinimas žadėtų faktą vietoj prognozės. Kad prognozė
+nuo tikrovės neatsiskirtų, fabrikos elgesį dengia testas, tikrinantis
+`provider.redactionEnforced`.
+
+⚠️ Kaina: efemeriškame režime nėra restart recovery – ilgas transkribavimas,
+nutrūkęs dėl restarto, prarandamas ir jį reikia kartoti.
 
 **Dėl pavadinimų sąmoningai:** jau egzistuojantis `PRIVACY_MODE=true` reiškia
 „auditas išjungtas". Į jį antros reikšmės (`local_only`) nekraunam – dviprasmiška
