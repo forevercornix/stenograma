@@ -4,7 +4,7 @@ const fs = require("fs").promises;
 const jobStore = require("./jobStore");
 const auditLog = require("./auditLog");
 const fileStorage = require("./fileStorage");
-const { getPrivacyConfig } = require("./privacyConfig");
+const { getPrivacyPolicy } = require("./privacyPolicy");
 
 /**
  * AUTOMATINIS RETENCIJOS ŠALINIMAS (GDPR issue #2).
@@ -32,7 +32,7 @@ const AUDIO_PREFIX = "uploads";
  * failą, kurio jobas dar tik kuriamas.
  */
 async function purgeOrphanedAudio({ now = Date.now(), retentionHours } = {}) {
-  const config = getPrivacyConfig();
+  const config = getPrivacyPolicy();
   const maxAgeMs = (retentionHours || config.audioRetentionHours) * 60 * 60 * 1000;
 
   const dir = path.join(path.resolve(fileStorage.STORAGE_DIR), AUDIO_PREFIX);
@@ -156,7 +156,7 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
  * Paleidžia periodinį retencijos šalinimą. Timer'is `unref()`-intas.
  */
 function startRetentionSweeper({ intervalMs, runImmediately = true } = {}) {
-  const config = getPrivacyConfig();
+  const config = getPrivacyPolicy();
   const interval = intervalMs || config.retentionSweepMinutes * 60 * 1000;
 
   // PRADINIS ciklas iškart po starto. Be jo po restarto pasenę duomenys liktų dar

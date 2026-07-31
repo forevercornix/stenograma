@@ -6,6 +6,7 @@ process.env.NODE_ENV = "test";
 const { REGISTRY } = require("../providers/llm");
 const { RedactionError } = require("../providers/llm/RedactingLLMProvider");
 const redactionComponent = require("../utils/redactionComponent");
+const privacyPolicy = require("../utils/privacyPolicy");
 const { generateProtocol } = require("../services/protocolService");
 
 /**
@@ -71,6 +72,10 @@ function withEnv(env, fn) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  // Politika UŽŠALDOMA (utils/privacyPolicy.js), tad po env pakeitimo ją reikia
+  // perkurti - produkcijoje tokio kelio nėra, ir būtent tai yra garantija.
+  privacyPolicy._resetForTests();
+
   return (async () => {
     try {
       return await fn();
@@ -79,6 +84,7 @@ function withEnv(env, fn) {
         if (v === undefined) delete process.env[k];
         else process.env[k] = v;
       }
+      privacyPolicy._resetForTests();
     }
   })();
 }

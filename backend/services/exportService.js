@@ -163,21 +163,81 @@ async function buildDocx(protocol) {
   };
 }
 
+class ExportPolicyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ExportPolicyError";
+    this.code = "EXPORT_ORIGINAL_FORBIDDEN";
+    this.statusCode = 403;
+  }
+}
+
+/**
+ * Rekursyviai pritaiko redact() kiekvienam teksto laukui, IŠSAUGANT struktūrą.
+ *
+ * Kodėl ne visam serializuotam dokumentui: DOCX yra dvejetainis, tad "redaguok
+ * galutinį failą" veiktų tik TXT/CSV. Redaguojant šaltinio objektą visi trys
+ * formatai gauna vienodą turinį - kitaip DOCX taptų tyliąja spraga.
+ */
+function _redactDeep(value, redact) {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) return value.map((item) => _redactDeep(item, redact));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, _redactDeep(v, redact)]));
+  }
+  return value;
+}
+
+/**
+ * EKSPORTO POLITIKOS VYKDYMAS (GDPR #5).
+ *
+ * Čia, o ne routes/exports.js: eksporto kūrimas yra vienintelis kelias iki failo,
+ * tad bet kuris būsimas kvietimo taškas apsaugą gauna automatiškai.
+ *
+ * FAIL-CLOSED: jei redakcija neprieinama arba krenta, failas NEGENERUOJAMAS.
+ * Grąžinti originalą būtų tiksliai tai, ką nuostata draudžia.
+ */
+function _enforceExportPolicy(protocol) {
+  const { getPrivacyPolicy } = require("../utils/privacyPolicy");
+  if (getPrivacyPolicy().exportAllowOriginal) return protocol;
+
+  const { probeRedactionComponent } = require("../utils/redactionComponent");
+  const probe = probeRedactionComponent();
+
+  if (probe.state !== "ok") {
+    throw new ExportPolicyError(
+      `EXPORT_ALLOW_ORIGINAL=false, bet PII redakcijos komponentas nepasiekiamas (${probe.state}). ` +
+        "Eksportas nutrauktas - neredaguotas originalas negali būti sugeneruotas."
+    );
+  }
+
+  try {
+    return _redactDeep(protocol, probe.redact);
+  } catch (e) {
+    throw new ExportPolicyError(
+      "PII redakcija nepavyko, todėl eksporto failas NEBUVO sugeneruotas " +
+        "(EXPORT_ALLOW_ORIGINAL=false)."
+    );
+  }
+}
+
 /**
  * @param {object} protocol - protokolo JSON (turinys NIEKUR nelogguojamas)
  * @param {"txt"|"csv"|"docx"} format
  */
 async function buildExport(protocol, format) {
+  const effective = _enforceExportPolicy(protocol);
+
   switch (String(format || "").toLowerCase()) {
     case FORMATS.TXT:
-      return buildTxt(protocol);
+      return buildTxt(effective);
     case FORMATS.CSV:
-      return buildCsv(protocol);
+      return buildCsv(effective);
     case FORMATS.DOCX:
-      return buildDocx(protocol);
+      return buildDocx(effective);
     default:
       return null;
   }
 }
 
-module.exports = { buildExport, buildTxt, buildCsv, buildDocx, FORMATS };
+module.exports = { buildExport, buildTxt, buildCsv, buildDocx, FORMATS, ExportPolicyError };

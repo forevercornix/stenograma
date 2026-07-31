@@ -4,7 +4,7 @@ const GeminiProvider = require("./GeminiProvider");
 const MockLLMProvider = require("./MockLLMProvider");
 const { RedactingLLMProvider, RedactionError } = require("./RedactingLLMProvider");
 const { isExternal } = require("../../utils/providerPrivacy");
-const { getPrivacyConfig } = require("../../utils/privacyConfig");
+const { getPrivacyPolicy } = require("../../utils/privacyPolicy");
 const { probeRedactionComponent } = require("../../utils/redactionComponent");
 
 const REGISTRY = {
@@ -48,7 +48,7 @@ function getLLMProvider(nameOverride, config = {}) {
  * redaguoti nėra ko saugoti, o redakcija be reikalo blogintų protokolo kokybę.
  */
 function _enforceRedaction(provider, name) {
-  const privacy = getPrivacyConfig();
+  const privacy = getPrivacyPolicy();
 
   if (!privacy.requireRedactionBeforeExternal) return provider;
   if (!isExternal("llm", name)) return provider;

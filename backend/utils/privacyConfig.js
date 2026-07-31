@@ -43,6 +43,7 @@ const BOOLEAN_SETTINGS = [
   "ALLOW_EXTERNAL_PROVIDERS",
   "PERSISTENT_STORAGE",
   "REQUIRE_REDACTION_BEFORE_EXTERNAL",
+  "EXPORT_ALLOW_ORIGINAL",
 ];
 
 function _bool(value, fallback) {
@@ -96,6 +97,11 @@ function getPrivacyConfig(env = process.env) {
     // redakcijos modulio tik blokuotų startą visiems. Kai #4 nusileis, verta
     // svarstyti numatytąją `true` išoriniams tiekėjams.
     requireRedactionBeforeExternal: _bool(env.REQUIRE_REDACTION_BEFORE_EXTERNAL, false),
+
+    // `false` = privacy-first: eksportuojamas tik redaguotas protokolas.
+    // Numatyta `true`, nes redakcijos komponento (#4) dar nėra - kitaip
+    // eksportas iš karto nustotų veikti visiems.
+    exportAllowOriginal: _bool(env.EXPORT_ALLOW_ORIGINAL, true),
 
     auditEnabled: !_bool(env.PRIVACY_MODE, false),
     auditRetentionDays: _int(env.AUDIT_RETENTION_DAYS, 30),
@@ -307,6 +313,22 @@ function validatePrivacyConfig(env = process.env) {
     );
   }
 
+  /**
+   * EKSPORTO POLITIKA (GDPR #5).
+   *
+   * Ta pati logika kaip su išoriniais tiekėjais: nuostata, kurios negalima
+   * įvykdyti, yra klaida, ne įspėjimas. Skirtumas tik toks, kad čia duomenys
+   * neišeina į tinklą, o atsiduria vartotojo faile - GDPR prasme tai irgi
+   * atskleidimas.
+   */
+  if (!config.exportAllowOriginal && probeRedactionComponent().state !== "ok") {
+    errors.push(
+      "EXPORT_ALLOW_ORIGINAL=false reikalauja PII redakcijos komponento " +
+        "(utils/piiRedaction.js su redact(), GDPR issue #4), o jo nėra. Be jo eksportuoti " +
+        "būtų galima tik neredaguotą originalą, t. y. tiksliai tai, ką nuostata draudžia."
+    );
+  }
+
   return { errors, warnings };
 }
 
@@ -334,8 +356,14 @@ class PrivacyConfigurationError extends Error {
 }
 
 /** Ar šis audio tiekėjas draudžiamas esamoje privatumo konfigūracijoje? */
-function isRawAudioProviderForbidden(kind, name, env = process.env) {
-  if (!getPrivacyConfig(env).requireRedactionBeforeExternal) return false;
+function isRawAudioProviderForbidden(kind, name, env = null) {
+  // env === null reiškia "naudok efektyvią politiką" (runtime kelias). Su
+  // eksplicitiniu env - startup validacija, kur politikos dar nėra.
+  const required = env
+    ? getPrivacyConfig(env).requireRedactionBeforeExternal
+    : require("./privacyPolicy").getPrivacyPolicy().requireRedactionBeforeExternal;
+
+  if (!required) return false;
 
   const provider = String(name || "").toLowerCase();
   // none/inline atskiro API kvietimo nedaro - garsas niekur nekeliauja.
@@ -344,7 +372,7 @@ function isRawAudioProviderForbidden(kind, name, env = process.env) {
   return isExternal(kind, provider);
 }
 
-function assertRawAudioProviderAllowed(kind, name, env = process.env) {
+function assertRawAudioProviderAllowed(kind, name, env = null) {
   if (!isRawAudioProviderForbidden(kind, name, env)) return;
 
   throw new PrivacyConfigurationError(
@@ -384,6 +412,13 @@ function describeForDiagnostics(env = process.env) {
         config.requireRedactionBeforeExternal &&
         isRedactionAvailable() &&
         isExternal("llm", (env.LLM_PROVIDER || "mock").toLowerCase()),
+    },
+    export: {
+      allowOriginal: config.exportAllowOriginal,
+      // Eksporto artefaktai NIEKUR nesaugomi (generuojami srautu į atsakymą),
+      // tad retencijai nėra ko dengti. Rodoma eksplicitiškai, kad administratorius
+      // nespėliotų, ar kažkur guli senų failų.
+      artifactsPersisted: false,
     },
     // Kur KONKREČIAI duomenys gyvena - be to administratorius negali patikrinti,
     // ar efemeriškas režimas tikrai efemeriškas.

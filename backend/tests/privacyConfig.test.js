@@ -138,6 +138,7 @@ test("diagnostika rodo efektyvias nuostatas be paslapčių", () => {
     auditEnabled: true,
     persistentStorage: false,
     redaction: { requiredBeforeExternal: false, componentDetected: false, configuredForEnforcement: false },
+    export: { allowOriginal: true, artifactsPersisted: false },
     storage: {
       jobState: "memory",
       audit: "memory",
@@ -167,6 +168,9 @@ test("retencijos ciklas šalina nuskendusius audio failus ir rašo audito įvyk�
   const storageDir = await fs.mkdtemp(path.join(os.tmpdir(), "stenograma-retention-"));
   const previous = process.env.STORAGE_DIR;
   process.env.STORAGE_DIR = storageDir;
+
+  // Politika užšaldyta - po AUDIO_RETENTION_HOURS pakeitimo ją reikia perkurti.
+  require("../utils/privacyPolicy")._resetForTests();
 
   delete require.cache[require.resolve("../utils/fileStorage")];
   delete require.cache[require.resolve("../utils/retentionSweeper")];
@@ -257,6 +261,9 @@ test("REGRESIJA: apdorojamo jobo audio NEšalinamas kaip nuskendęs", async () =
   const previousHours = process.env.AUDIO_RETENTION_HOURS;
   process.env.STORAGE_DIR = storageDir;
   process.env.AUDIO_RETENTION_HOURS = "1";
+
+  // Politika užšaldyta - po AUDIO_RETENTION_HOURS pakeitimo ją reikia perkurti.
+  require("../utils/privacyPolicy")._resetForTests();
 
   delete require.cache[require.resolve("../utils/fileStorage")];
   delete require.cache[require.resolve("../utils/retentionSweeper")];
