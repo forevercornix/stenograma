@@ -1014,6 +1014,7 @@ heuristikomis, ne modeliu. Tai sąmoningas apribojimas, ne paslėptas.
 | `PRIVACY_MODE` | `false` | `true` – išjungia audito žurnalą (**atskira** nuostata) |
 | `PERSISTENT_STORAGE` | išvedama iš `REDIS_URL` | `false` – jobų būsena/rezultatai tik atmintyje (audio – laikinai diske) |
 | `REQUIRE_REDACTION_BEFORE_EXTERNAL` | `false` | `true` – į išorinį **LLM** tiekėją tik redaguotas payload'as (`redact()` iš issue #4) |
+| `EXPORT_ALLOW_ORIGINAL` | `true` | `false` – DOCX/CSV/TXT tik iš redaguoto protokolo |
 | `AUDIT_RETENTION_DAYS` | `30` | Leistinos ribos: 1–365 |
 | `JOB_TTL_MINUTES` | `60` | Jobo metaduomenų retencija |
 | `AUDIO_RETENTION_HOURS` | `24` | Po kiek nuskendę audio failai šalinami |
@@ -1088,6 +1089,23 @@ nuo tikrovės neatsiskirtų, fabrikos elgesį dengia testas, tikrinantis
 
 ⚠️ Kaina: efemeriškame režime nėra restart recovery – ilgas transkribavimas,
 nutrūkęs dėl restarto, prarandamas ir jį reikia kartoti.
+
+**Eksporto politika.** `EXPORT_ALLOW_ORIGINAL=false` reiškia, kad eksporto failai
+generuojami tik iš redaguoto protokolo. Vykdoma `services/exportService.js`
+`buildExport()` – vienintelėje vietoje, pro kurią eina visi trys formatai.
+Redakcija taikoma **protokolo objektui**, ne galutiniam tekstui: DOCX yra
+dvejetainis, tad teksto lygio redagavimas jį tyliai praleistų.
+
+**Fail-closed:** jei redakcijos komponento nėra arba jis krenta, failas
+**negeneruojamas**, o ne grąžinamas originalas. Konfigūracija be `redact()`
+stabdo startą.
+
+**Dėl retencijos eksportams.** Eksporto artefaktai **niekur nesaugomi** –
+`buildExport()` grąžina buferį tiesiai į HTTP atsakymą, jokio failo diske ar
+duomenų bazėje nelieka. Todėl retencijai nėra ko dengti, ir tai užfiksuota testu
+(`tests/exportPolicy.test.js`), o ne priimta kaip prielaida. Diagnostikoje matoma
+kaip `privacy.export.artifactsPersisted: false`. Jei ateityje atsirastų
+atsisiunčiamų artefaktų saugykla, šis punktas turės būti perdarytas.
 
 **Dėl pavadinimų sąmoningai:** jau egzistuojantis `PRIVACY_MODE=true` reiškia
 „auditas išjungtas". Į jį antros reikšmės (`local_only`) nekraunam – dviprasmiška

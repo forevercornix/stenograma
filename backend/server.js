@@ -11,11 +11,16 @@ const jobsRoute = require("./routes/jobs");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
+const { initPrivacyPolicy } = require("./utils/privacyPolicy");
 
 // KIETA konfigūracijos validacija (vartotojo prašymas po realaus diegimo: "jei
 // kažko trūksta - aiškiai parašyti ir nestartuoti", o ne griūti pirmoje užklausoje).
 // Testų aplinkoje (mock provideriai) klaidų nebūna, tad testai nepaveikiami.
 if (process.env.SKIP_CONFIG_VALIDATION !== "true") {
+  // Politika sukuriama VIENĄ kartą ir nuo čia yra vienintelis šaltinis visiems
+  // komponentams (GDPR #5 DoD). Bloga konfigūracija = serveris nestartuoja.
+  initPrivacyPolicy();
+
   const { errors, warnings } = validateConfig();
   for (const w of warnings) console.warn(`[stenograma] ⚠️  ${w}`);
   if (errors.length > 0) {

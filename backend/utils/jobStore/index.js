@@ -46,8 +46,8 @@ async function initializeStore() {
   // net neprieinam - validateConfig() tokį derinį atmeta paleidžiant. Tai antras
   // apsaugos sluoksnis atvejams, kai serveris paleidžiamas apeinant validaciją
   // (testai, embedded naudojimas): efemeriškas režimas privalo likti efemeriškas.
-  const { getPrivacyConfig } = require("../privacyConfig");
-  const privacy = getPrivacyConfig();
+  const { getPrivacyPolicy } = require("../privacyPolicy");
+  const privacy = getPrivacyPolicy();
   if (privacy.persistentExplicit && !privacy.persistentStorage) {
     if (redisUrl) {
       console.warn(
