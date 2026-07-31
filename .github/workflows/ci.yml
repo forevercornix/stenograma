@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# CodeQL (actions/missing-workflow-permissions): be eksplicitinio bloko
+# GITHUB_TOKEN gauna repo numatytąsias teises, kurios gali būti write. Šis
+# workflow tik skaito kodą ir leidžia testus - rašymo jam nereikia niekur.
+# Nustatoma workflow lygiu, kad naujas job'as paveldėtų saugų numatytąjį.
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
