@@ -1050,6 +1050,27 @@ būtų melas. Tylus `REDIS_URL` ignoravimas reikštų, kad administratorius mano
 jobai išgyvena restartą, o jie neišgyvena. Efektyvi būsena matoma
 `GET /api/health` → `privacy.storage` (`jobState`/`audit`/`audio`).
 
+**Įkeltų failų priėmimas ir laikina saugykla.** Failai gula tik į serverio
+kontroliuojamą katalogą (`UPLOAD_TMP_DIR`, numatyta OS `tmp`), vardas generuojamas
+serveryje (`stenograma-<uuid>[.plėtinys]`), o vartotojo failo vardas naudojamas
+**tik kaip metaduomuo** – į kelią jis nepatenka. Iš jo paimamas tik plėtinys, ir
+tas pats praleidžiamas pro whitelist'ą.
+
+Ribos ir formatai: `MAX_UPLOAD_MB` (numatyta 500), leidžiami mp3/wav/m4a/mp4/webm/
+ogg/aac/flac. Naršyklės MIME **nėra vienintelis mechanizmas** – papildomai
+tikrinama failo turinio parašo antraštė (`utils/audioMagicBytes.js`), tad
+pervadintas tekstinis failas atmetamas.
+
+Kelias tikrinamas prieš **kiekvieną** operaciją (skaitymą ir trynimą), įskaitant
+`realpath` patikrą – tekstinė patikra nesustabdytų simbolinės nuorodos, vedančios
+iš katalogo į išorę. Vietiniai keliai niekada nepatenka į API atsakymus.
+
+Laikinas failas šalinamas po sėkmės, po validacijos klaidos ir po tiekėjo klaidos;
+abu maršrutai (`/api/transcribe` ir `/api/transcribe-jobs`) naudoja tą patį kelią.
+Po **restarto** likę failai valomi paleidžiant, prieš priimant naujus įkėlimus –
+sąmoningai tik tada, nes periodinis valymas pagal amžių ištrintų vykdomą ilgo
+įrašo įkėlimą.
+
 **Redakcija prieš išorinį apdorojimą.** `REQUIRE_REDACTION_BEFORE_EXTERNAL=true`
 reiškia, kad į išorinį LLM tiekėją siunčiamas payload'as pirma praleidžiamas per
 `redact()`. Vykdoma **dekoratoriumi ties pačiu tiekėjo kvietimu**
