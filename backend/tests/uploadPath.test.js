@@ -184,3 +184,58 @@ test("nuoroda į failą TO PATIES katalogo viduje lieka leistina", async () => {
     assert.equal(await resolveExistingUploadPath(link), await fsp.realpath(target));
   });
 });
+
+/**
+ * STALE ĮKĖLIMŲ VALYMAS PO RESTARTO (#13).
+ */
+
+const { purgeStaleUploads } = require("../utils/uploadPath");
+
+test("valo TIK mūsų šablono failus, svetimų neliečia", async () => {
+  await withUploadDir(async (dir) => {
+    const mine = path.join(dir, "stenograma-3f2b1a4c-5d6e-4f70-8a91-b2c3d4e5f607.mp3");
+    const mineNoExt = path.join(dir, "stenograma-11111111-2222-4333-8444-555555555555");
+    const foreign = path.join(dir, "kito-proceso-failas.mp3");
+    const alsoForeign = path.join(dir, "stenograma-be-uuid.mp3");
+
+    for (const f of [mine, mineNoExt, foreign, alsoForeign]) await fsp.writeFile(f, "x");
+
+    const { removed } = await purgeStaleUploads();
+
+    assert.equal(removed, 2);
+    assert.deepEqual((await fsp.readdir(dir)).sort(), ["kito-proceso-failas.mp3", "stenograma-be-uuid.mp3"]);
+  });
+});
+
+test("tuščias arba nesamas katalogas nėra klaida", async () => {
+  await withUploadDir(async () => {
+    assert.deepEqual(await purgeStaleUploads(), { removed: 0 });
+  });
+
+  const saved = process.env.UPLOAD_TMP_DIR;
+  process.env.UPLOAD_TMP_DIR = path.join(os.tmpdir(), `nera-tokio-katalogo-${Date.now()}`);
+  try {
+    assert.deepEqual(await purgeStaleUploads(), { removed: 0 });
+  } finally {
+    if (saved === undefined) delete process.env.UPLOAD_TMP_DIR;
+    else process.env.UPLOAD_TMP_DIR = saved;
+  }
+});
+
+test("simbolinė nuoroda į išorę NEIŠTRINAMA (tikslas lieka nepaliestas)", async () => {
+  await withUploadDir(async (dir) => {
+    const outside = path.join(os.tmpdir(), `stenograma-taikinys-${Date.now()}.txt`);
+    await fsp.writeFile(outside, "svarbu");
+
+    // Nuoroda ATITINKA mūsų vardų šabloną - tad valytojas ją apsvarstys.
+    const link = path.join(dir, "stenograma-99999999-8888-4777-8666-555555555555.mp3");
+    await fsp.symlink(outside, link);
+
+    const { removed } = await purgeStaleUploads();
+
+    assert.equal(removed, 0, "pabėgusi nuoroda neturi būti trinama");
+    assert.equal(await fsp.readFile(outside, "utf8"), "svarbu", "išorinis failas nepaliestas");
+
+    await fsp.rm(outside, { force: true });
+  });
+});

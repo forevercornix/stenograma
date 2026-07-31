@@ -99,11 +99,59 @@ async function resolveExistingUploadPath(filePath) {
   return realPath;
 }
 
+/** Vardų šablonas, kurį generuoja multer diskStorage (žr. routes/transcribe.js). */
+const UPLOAD_NAME = /^stenograma-[0-9a-f-]{36}(\.[a-z0-9]{1,8})?$/i;
+
+/**
+ * STALE FAILŲ VALYMAS PO RESTARTO (#13: "Restart-safe stale-file cleanup").
+ *
+ * Jei procesas nukrenta TARP multer įrašymo ir handler'io `finally`, laikinas
+ * failas lieka diske amžiams - jokia eilė apie jį nežino, nes jobas dar nebuvo
+ * sukurtas.
+ *
+ * Valoma TIK PALEIDŽIANT, ne periodiškai, ir tai sąmoninga: paleidimo metu joks
+ * įkėlimas negali būti vykdomas, tad kiekvienas rastas failas yra definityviai
+ * našlaitis. Periodinis valymas pagal amžių rizikuotų ištrinti VYKDOMĄ ilgo
+ * įrašo įkėlimą - tiksliai ta klaida, kurią retentionSweeper jau kartą darė su
+ * audio failais (žr. jo komentarą).
+ *
+ * Šalinami tik mūsų pačių šablono failai - katalogas gali būti bendras /tmp.
+ */
+async function purgeStaleUploads() {
+  const dir = uploadDir();
+
+  let entries;
+  try {
+    entries = await fs.readdir(dir);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return { removed: 0 };
+    throw e;
+  }
+
+  let removed = 0;
+  for (const entry of entries) {
+    if (!UPLOAD_NAME.test(entry)) continue;
+
+    try {
+      const resolved = await resolveExistingUploadPath(path.join(dir, entry));
+      if (!resolved) continue;
+      await fs.unlink(resolved);
+      removed += 1;
+    } catch {
+      // Neprieinamas ar įtartinas failas praleidžiamas - valymas neturi
+      // sustabdyti paleidimo.
+    }
+  }
+
+  return { removed };
+}
+
 module.exports = {
   uploadDir,
   safeExtension,
   isInsideUploadDir,
   assertInsideUploadDir,
   resolveExistingUploadPath,
+  purgeStaleUploads,
   UploadPathError,
 };

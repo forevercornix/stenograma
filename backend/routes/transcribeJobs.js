@@ -10,6 +10,7 @@ const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
 const { detectAudioMagic } = require("../utils/audioMagicBytes");
+const { resolveExistingUploadPath } = require("../utils/uploadPath");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
@@ -164,7 +165,11 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     res.status(500).json({ error: sanitizeServerError(e, "transcribe-jobs enqueue") });
   } finally {
     // Multer laikiną failą visada ištrinam (audio jau nukopijuotas į storage).
-    await fs.unlink(req.file.path).catch(() => {});
+    // Per TĄ PAČIĄ patikrą kaip /api/transcribe - kitaip apsauga nuo symlink
+    // pabėgimo galiotų viename maršrute, o kitame ne.
+    await resolveExistingUploadPath(req.file.path)
+      .then((resolved) => (resolved ? fs.unlink(resolved) : null))
+      .catch(() => {});
   }
 });
 
