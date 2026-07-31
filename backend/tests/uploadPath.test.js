@@ -110,3 +110,77 @@ test("UPLOAD_TMP_DIR keičia leidžiamą katalogą", () => {
     else process.env.UPLOAD_TMP_DIR = saved;
   }
 });
+
+/**
+ * SYMLINK ESCAPE (#13: "Symlink-based escape is prevented").
+ *
+ * Tekstinė patikra čia bejėgė: kelias `<upload>/stenograma-x.mp3` YRA įkėlimų
+ * kataloge, tad `path.resolve` jį praleidžia - net jei tai nuoroda į /etc/passwd.
+ */
+
+const fsp = require("fs/promises");
+const { resolveExistingUploadPath, UploadPathError } = require("../utils/uploadPath");
+
+async function withUploadDir(fn) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-upload-test-"));
+  const saved = process.env.UPLOAD_TMP_DIR;
+  process.env.UPLOAD_TMP_DIR = dir;
+
+  try {
+    return await fn(dir);
+  } finally {
+    if (saved === undefined) delete process.env.UPLOAD_TMP_DIR;
+    else process.env.UPLOAD_TMP_DIR = saved;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("simbolinė nuoroda IŠ įkėlimų katalogo į išorę atmetama", async () => {
+  await withUploadDir(async (dir) => {
+    const secret = path.join(os.tmpdir(), `stenograma-slaptas-${Date.now()}.txt`);
+    await fsp.writeFile(secret, "paslaptis");
+
+    const link = path.join(dir, "stenograma-atrodo-nekaltai.mp3");
+    await fsp.symlink(secret, link);
+
+    // Tekstinė patikra nuorodą praleidžia - būtent todėl jos neužtenka.
+    assert.equal(isInsideUploadDir(link), true);
+
+    await assert.rejects(
+      () => resolveExistingUploadPath(link),
+      (e) => e instanceof UploadPathError && e.code === "UPLOAD_PATH_FORBIDDEN"
+    );
+
+    await fsp.rm(secret, { force: true });
+  });
+});
+
+test("tikras failas įkėlimų kataloge praeina realpath patikrą", async () => {
+  await withUploadDir(async (dir) => {
+    const real = path.join(dir, "stenograma-tikras.mp3");
+    await fsp.writeFile(real, "audio");
+
+    const resolved = await resolveExistingUploadPath(real);
+    assert.equal(resolved, await fsp.realpath(real));
+  });
+});
+
+test("nesamas failas grąžina null, ne klaidą (cleanup jau įvyko)", async () => {
+  await withUploadDir(async (dir) => {
+    assert.equal(await resolveExistingUploadPath(path.join(dir, "nera.mp3")), null);
+  });
+});
+
+test("nuoroda į failą TO PATIES katalogo viduje lieka leistina", async () => {
+  await withUploadDir(async (dir) => {
+    const target = path.join(dir, "stenograma-tikslas.mp3");
+    await fsp.writeFile(target, "audio");
+
+    const link = path.join(dir, "stenograma-nuoroda.mp3");
+    await fsp.symlink(target, link);
+
+    // Apsauga skirta PABĖGIMUI, ne nuorodoms apskritai - kitaip ji būtų
+    // platesnė nei problema.
+    assert.equal(await resolveExistingUploadPath(link), await fsp.realpath(target));
+  });
+});

@@ -1,3 +1,4 @@
+const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
 
@@ -59,10 +60,50 @@ function assertInsideUploadDir(filePath) {
   return path.resolve(String(filePath));
 }
 
+/**
+ * Kaip assertInsideUploadDir(), bet papildomai išskleidžia SIMBOLINES NUORODAS.
+ *
+ * `path.resolve()` yra grynai tekstinė operacija: kelias
+ * `<upload>/stenograma-x.mp3`, kuris realiai yra nuoroda į `/etc/passwd`,
+ * tekstinę patikrą praeina. Tik `fs.realpath()` parodo, kur failas iš tikrųjų
+ * veda (#13: "Symlink-based escape is prevented").
+ *
+ * Tas pats šablonas jau naudojamas `utils/fileStorage.js` - čia jis pakartotas
+ * įkėlimų katalogui, o ne apibendrintas, nes katalogai skiriasi ir sujungimas
+ * susietų du nepriklausomus gyvavimo ciklus.
+ *
+ * Neegzistuojantis failas NĖRA klaida: `null` reiškia "nėra ko tikrinti"
+ * (pvz. cleanup jau įvyko), ir kviečiantysis tai traktuoja kaip sėkmę.
+ */
+async function resolveExistingUploadPath(filePath) {
+  const candidate = assertInsideUploadDir(filePath);
+
+  let realPath;
+  try {
+    realPath = await fs.realpath(candidate);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return null;
+    throw e;
+  }
+
+  let realRoot;
+  try {
+    realRoot = await fs.realpath(uploadDir());
+  } catch (e) {
+    if (e && e.code === "ENOENT") throw new UploadPathError(filePath);
+    throw e;
+  }
+
+  if (!realPath.startsWith(realRoot + path.sep)) throw new UploadPathError(filePath);
+
+  return realPath;
+}
+
 module.exports = {
   uploadDir,
   safeExtension,
   isInsideUploadDir,
   assertInsideUploadDir,
+  resolveExistingUploadPath,
   UploadPathError,
 };
