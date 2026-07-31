@@ -11,6 +11,7 @@ const jobsRoute = require("./routes/jobs");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
+const { pollRateLimiter } = require("./middleware/rateLimiter");
 const { initPrivacyPolicy } = require("./utils/privacyPolicy");
 
 // KIETA konfigūracijos validacija (vartotojo prašymas po realaus diegimo: "jei
@@ -69,7 +70,52 @@ app.post("/api/jobs", requireJobSystemReady);
 app.use("/api", transcribeJobsRoute);
 app.use("/api", jobsRoute);
 
-app.get("/api/ready", async (req, res) => {
+/**
+ * READINESS KEŠAS (CodeQL js/missing-rate-limiting).
+ *
+ * BullMQ režime KIEKVIENA /api/ready užklausa atidarydavo NAUJĄ Redis ryšį
+ * (createQueueConnection + ping + quit) - realus DoS vektorius neautentifikuotame
+ * endpointe.
+ *
+ * Sprendimas yra kešas, o NE vien rate limit: /api/ready yra Docker/K8s probe.
+ * Grąžinus 429 orkestruotojui, konteineris būtų pažymėtas nesveiku - saugumo
+ * pataisymas sugriautų diegimą. Kešas pašalina pačią brangią operaciją, o
+ * limiteris lieka tik antru sluoksniu su plačia riba.
+ *
+ * TTL trumpas sąmoningai: readiness turi reaguoti greitai, kai worker'is krenta.
+ */
+const READINESS_CACHE_MS = parseInt(process.env.READINESS_CACHE_MS || "2000", 10);
+let _readinessCache = { at: 0, value: null };
+
+async function probeRuntimeReadiness() {
+  const now = Date.now();
+  if (_readinessCache.value && now - _readinessCache.at < READINESS_CACHE_MS) {
+    return _readinessCache.value;
+  }
+
+  let redisReachable = true;
+  let workers = { transcription: true, protocol: true };
+
+  if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
+    let conn = null;
+    try {
+      const { createQueueConnection } = require("./queues/config");
+      const { getWorkerStatus } = require("./utils/workerHeartbeat");
+      conn = createQueueConnection();
+      await conn.ping();
+      workers = await getWorkerStatus(conn);
+    } catch {
+      redisReachable = false;
+    } finally {
+      if (conn) await conn.quit().catch(() => {});
+    }
+  }
+
+  _readinessCache = { at: now, value: { redisReachable, workers } };
+  return _readinessCache.value;
+}
+
+app.get("/api/ready", pollRateLimiter, async (req, res) => {
   const initReady = readiness.jobStore && readiness.jobRunner;
   if (!initReady) {
     return res.status(503).json({
@@ -84,22 +130,7 @@ app.get("/api/ready", async (req, res) => {
   // ir protokolo worker'iai gali būti ATSKIRI procesai/konteineriai, žr.
   // utils/workerHeartbeat.js) - kitaip jobai būtų priimami, bet liktų queued, nes
   // niekas jų neapdoroja. Inline režime nieko papildomo (viskas tame pačiame procese).
-  let redisReachable = true;
-  let workers = { transcription: true, protocol: true };
-  if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
-    let conn = null;
-    try {
-      const { createQueueConnection } = require("./queues/config");
-      const { getWorkerStatus } = require("./utils/workerHeartbeat");
-      conn = createQueueConnection();
-      await conn.ping();
-      workers = await getWorkerStatus(conn); // { transcription: bool, protocol: bool }
-    } catch {
-      redisReachable = false;
-    } finally {
-      if (conn) await conn.quit().catch(() => {});
-    }
-  }
+  const { redisReachable, workers } = await probeRuntimeReadiness();
   const workerAlive = workers.transcription && workers.protocol;
 
   const ready = initReady && redisReachable && workerAlive;
@@ -115,7 +146,7 @@ app.get("/api/ready", async (req, res) => {
   });
 });
 
-app.get("/api/health", (req, res) => {
+app.get("/api/health", pollRateLimiter, (req, res) => {
   const healthDetailsMode = (process.env.HEALTH_DETAILS || "").toLowerCase();
   const isProduction = process.env.NODE_ENV === "production";
 

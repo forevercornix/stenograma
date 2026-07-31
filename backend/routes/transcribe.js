@@ -7,14 +7,18 @@ const crypto = require("crypto");
 const { transcribeAudio, HttpError } = require("../services/transcriptionService");
 const rateLimiter = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
+const { uploadDir, safeExtension, assertInsideUploadDir } = require("../utils/uploadPath");
 
 const router = express.Router();
 
 const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || "500", 10);
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, os.tmpdir()),
-  filename: (req, file, cb) => cb(null, `stenograma-${crypto.randomUUID()}${path.extname(file.originalname || "")}`),
+  destination: (req, file, cb) => cb(null, uploadDir()),
+  // Plėtinys ateina iš VARTOTOJO failo vardo, tad praleidžiamas pro whitelist
+  // (utils/uploadPath.js) - kitaip vienintelė vartotojo valdoma kelio dalis
+  // liktų nepatikrinta.
+  filename: (req, file, cb) => cb(null, `stenograma-${crypto.randomUUID()}${safeExtension(file.originalname)}`),
 });
 
 // Leidžiami audio formatai - tikriname IR mimetype, IR plėtinį, nes naršyklės
@@ -82,7 +86,9 @@ function uploadSingleAudio(req, res, next) {
 
 async function safeUnlink(filePath) {
   try {
-    await fs.unlink(filePath);
+    // Trynimas irgi eina pro tą pačią patikrą - kitaip apsauga dengtų tik
+    // skaitymą, o pavojingesnė operacija liktų atvira.
+    await fs.unlink(assertInsideUploadDir(filePath));
   } catch (_) {
     // failas jau gali būti pašalintas arba niekada nebuvo sukurtas - nekritinga
   }
@@ -105,7 +111,10 @@ router.post("/transcribe", rateLimiter, apiKeyAuth, uploadSingleAudio, async (re
   if (!req.file) return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
 
   try {
-    const buffer = await fs.readFile(req.file.path);
+    // Kelias tikrinamas PRIEŠ skaitymą: multer jį sudaro pats, bet tai
+    // prielaida, o ne garantija (žr. utils/uploadPath.js).
+    const uploadedPath = assertInsideUploadDir(req.file.path);
+    const buffer = await fs.readFile(uploadedPath);
     const result = await transcribeAudio({
       buffer,
       filename: req.file.originalname,
