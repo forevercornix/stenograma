@@ -5,6 +5,7 @@ const FasterWhisperEmbeddedProvider = require("./FasterWhisperEmbeddedProvider")
 const AzureSpeechProvider = require("./AzureSpeechProvider");
 const GoogleSpeechProvider = require("./GoogleSpeechProvider");
 const DeepgramProvider = require("./DeepgramProvider");
+const { assertRawAudioProviderAllowed } = require("../../utils/privacyConfig");
 
 // "faster-whisper" PALIKTAS kaip atgalinio suderinamumo alias'as - jis visada
 // reiškė HTTP-serverio (server) profilį. "faster-whisper-server" yra tas pats,
@@ -37,12 +38,22 @@ const REGISTRY = {
  */
 function getTranscriptionProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.TRANSCRIPTION_PROVIDER || "mock").toLowerCase();
-  const ProviderClass = REGISTRY[name];
-  if (!ProviderClass) {
+
+  // FAIL-CLOSED (GDPR #5): startup validacija mato tik .env, o čia ateina ir
+  // UŽKLAUSOS override. Ta pati taisyklė, tas pats predikatas - žr.
+  // utils/privacyConfig.js assertRawAudioProviderAllowed().
+  assertRawAudioProviderAllowed("transcription", name);
+  if (!Object.prototype.hasOwnProperty.call(REGISTRY, name)) {
     throw new Error(
       `Nežinomas TRANSCRIPTION_PROVIDER: "${name}". Galimi: ${Object.keys(REGISTRY).join(", ")}`
     );
   }
+
+  const ProviderClass = REGISTRY[name];
+  if (typeof ProviderClass !== "function") {
+    throw new Error(`Nekorektiška transkribavimo tiekėjo registracija: "${name}" nėra konstruktorius.`);
+  }
+
   return new ProviderClass(config);
 }
 

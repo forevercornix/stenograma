@@ -41,6 +41,24 @@ async function init() {
 
 async function initializeStore() {
   const redisUrl = process.env.REDIS_URL;
+
+  // GDPR #5: centralizuota privatumo nuostata NUGALI REDIS_URL. Normaliai iki čia
+  // net neprieinam - validateConfig() tokį derinį atmeta paleidžiant. Tai antras
+  // apsaugos sluoksnis atvejams, kai serveris paleidžiamas apeinant validaciją
+  // (testai, embedded naudojimas): efemeriškas režimas privalo likti efemeriškas.
+  const { getPrivacyConfig } = require("../privacyConfig");
+  const privacy = getPrivacyConfig();
+  if (privacy.persistentExplicit && !privacy.persistentStorage) {
+    if (redisUrl) {
+      console.warn(
+        "[stenograma] ⚠️  PERSISTENT_STORAGE=false - REDIS_URL IGNORUOJAMAS, " +
+          "job store lieka atmintyje."
+      );
+    }
+    store = memoryStore;
+    return store;
+  }
+
   if (!redisUrl) {
     // Nėra REDIS_URL - tyliai naudojam in-memory (numatytas dev/demo režimas).
     store = memoryStore;

@@ -2,6 +2,7 @@ const MockDiarizationProvider = require("./MockDiarizationProvider");
 const PyannoteDiarizationProvider = require("./PyannoteDiarizationProvider");
 const PyannoteCloudDiarizationProvider = require("./PyannoteCloudDiarizationProvider");
 const AssemblyAIDiarizationProvider = require("./AssemblyAIDiarizationProvider");
+const { assertRawAudioProviderAllowed } = require("../../utils/privacyConfig");
 
 // "none" ir "inline" NĖRA klasės - tai specialūs režimai, tvarkomi routes/transcribe.js:
 //   none   - diarizacija apskritai neatliekama.
@@ -32,19 +33,29 @@ const SPECIAL_MODES = ["none", "inline"];
  */
 function getDiarizationProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.DIARIZATION_PROVIDER || "none").toLowerCase();
+
+  // FAIL-CLOSED (GDPR #5): startup validacija mato tik .env, o čia ateina ir
+  // UŽKLAUSOS override. Ta pati taisyklė, tas pats predikatas - žr.
+  // utils/privacyConfig.js assertRawAudioProviderAllowed().
+  assertRawAudioProviderAllowed("diarization", name);
   if (SPECIAL_MODES.includes(name)) return null;
-  const ProviderClass = REGISTRY[name];
-  if (!ProviderClass) {
+  if (!Object.prototype.hasOwnProperty.call(REGISTRY, name)) {
     throw new Error(
       `Nežinomas DIARIZATION_PROVIDER: "${name}". Galimi: ${[...SPECIAL_MODES, ...Object.keys(REGISTRY)].join(", ")}`
     );
   }
+
+  const ProviderClass = REGISTRY[name];
+  if (typeof ProviderClass !== "function") {
+    throw new Error(`Nekorektiška diarizacijos tiekėjo registracija: "${name}" nėra konstruktorius.`);
+  }
+
   return new ProviderClass(config);
 }
 
 function isKnownDiarizationMode(name) {
   const n = (name || "").toLowerCase();
-  return SPECIAL_MODES.includes(n) || n in REGISTRY;
+  return SPECIAL_MODES.includes(n) || Object.prototype.hasOwnProperty.call(REGISTRY, n);
 }
 
 module.exports = { getDiarizationProvider, isKnownDiarizationMode, REGISTRY, SPECIAL_MODES };

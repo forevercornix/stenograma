@@ -2,6 +2,10 @@ const ClaudeProvider = require("./ClaudeProvider");
 const GPTProvider = require("./GPTProvider");
 const GeminiProvider = require("./GeminiProvider");
 const MockLLMProvider = require("./MockLLMProvider");
+const { RedactingLLMProvider, RedactionError } = require("./RedactingLLMProvider");
+const { isExternal } = require("../../utils/providerPrivacy");
+const { getPrivacyConfig } = require("../../utils/privacyConfig");
+const { probeRedactionComponent } = require("../../utils/redactionComponent");
 
 const REGISTRY = {
   claude: ClaudeProvider,
@@ -17,11 +21,52 @@ const REGISTRY = {
  */
 function getLLMProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.LLM_PROVIDER || "mock").toLowerCase();
-  const ProviderClass = REGISTRY[name];
-  if (!ProviderClass) {
+  // hasOwnProperty, o NE `REGISTRY[name]` tiesiogiai: objekto literalas paveldi
+  // prototipą, tad "constructor"/"toString" praeidavo kaip "žinomi" tiekėjai ir
+  // grąžindavo Object vietoj providerio (CodeQL: unvalidated dynamic method call).
+  if (!Object.prototype.hasOwnProperty.call(REGISTRY, name)) {
     throw new Error(`Nežinomas LLM_PROVIDER: "${name}". Galimi: ${Object.keys(REGISTRY).join(", ")}`);
   }
-  return new ProviderClass(config);
+
+  const ProviderClass = REGISTRY[name];
+  if (typeof ProviderClass !== "function") {
+    throw new Error(`Nekorektiška LLM tiekėjo registracija: "${name}" nėra konstruktorius.`);
+  }
+  const provider = new ProviderClass(config);
+
+  return _enforceRedaction(provider, name);
 }
 
-module.exports = { getLLMProvider, REGISTRY };
+/**
+ * VIENINTELIS redakcijos vykdymo taškas (GDPR #5).
+ *
+ * Čia, o ne kvietimo vietose: pro šią fabriką praeina IR inline
+ * (routes/generate.js), IR BullMQ (queues/processors.js) keliai, tad naujas
+ * kelias apsaugą gauna automatiškai.
+ *
+ * Lokalūs tiekėjai (mock ir kt.) neliečiami - duomenys neišeina iš mašinos, tad
+ * redaguoti nėra ko saugoti, o redakcija be reikalo blogintų protokolo kokybę.
+ */
+function _enforceRedaction(provider, name) {
+  const privacy = getPrivacyConfig();
+
+  if (!privacy.requireRedactionBeforeExternal) return provider;
+  if (!isExternal("llm", name)) return provider;
+
+  const probe = probeRedactionComponent();
+
+  // Startup validacija tokį derinį jau turi būti sustabdžiusi. Jei atsidūrėm čia
+  // (pvz. env pakeista veikiant, ar tiekėjas perjungtas per override), fail-closed
+  // kartojam: geriau kristi, negu išsiųsti neredaguotus duomenis.
+  if (probe.state !== "ok") {
+    throw new RedactionError(
+      `REQUIRE_REDACTION_BEFORE_EXTERNAL=true, bet PII redakcijos komponentas nepasiekiamas ` +
+        `(${probe.state}${probe.detail ? `: ${probe.detail}` : ""}). Išorinis tiekėjas "${name}" nekviečiamas.`
+    );
+  }
+
+  return new RedactingLLMProvider(provider, probe.redact);
+}
+
+
+module.exports = { getLLMProvider, REGISTRY, RedactionError };

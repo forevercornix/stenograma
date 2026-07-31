@@ -42,7 +42,8 @@ async function generateProtocol({ title, date, participants, transcript, segment
       "Tiekėjo/prompt versijos keitimas per užklausą išjungtas (ALLOW_PROVIDER_OVERRIDE=false). Nustatoma tik per serverio LLM_PROVIDER/PROMPT_VERSION."
     );
   }
-  if (llmProviderOverride && !(llmProviderOverride in REGISTRY)) {
+  // `in` tikrina IR prototipą, tad "constructor" praeidavo whitelist'ą.
+  if (llmProviderOverride && !Object.prototype.hasOwnProperty.call(REGISTRY, llmProviderOverride)) {
     throw new HttpError(400, `Nežinomas LLM tiekėjas "${llmProviderOverride}". Galimi: ${Object.keys(REGISTRY).join(", ")}`);
   }
   if (promptVersionOverride && !(promptVersionOverride in PROMPTS)) {
