@@ -1,8 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
-const os = require("os");
-const path = require("path");
 
 process.env.NODE_ENV = "test";
 
@@ -117,23 +115,51 @@ test("diagnostika rodo eksporto politiką ir artefaktų būseną", () => {
   assert.deepEqual(diagnostics.export, { allowOriginal: true, artifactsPersisted: false });
 });
 
-test("RETENCIJA: eksportas NEPALIEKA artefaktų diske (todėl retencijai nėra ko valyti)", async () => {
-  const probeDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "stenograma-export-"));
+test("RETENCIJA: eksportas NERAŠO į diską (todėl retencijai nėra ko valyti)", async () => {
+  /**
+   * Ne katalogo skenavimas, o rašymo API perėmimas.
+   *
+   * Pirmoji šio testo versija lygino os.tmpdir() turinį prieš/po - ir buvo
+   * klaidinga: `node --test` failus leidžia LYGIAGREČIAI, tad į tą patį katalogą
+   * tuo metu rašo kiti testai (pvz. faster-whisper `stenograma-embedded-*.wav`).
+   * Testas matydavo svetimą failą ir kaltindavo eksportą.
+   *
+   * Perimant fs API tikrinama tiksliai ta savybė, kuri rūpi - ar ŠIS kodas rašo -
+   * ir rezultatas nepriklauso nuo to, kas vyksta aplinkui.
+   */
+  const attempts = [];
+  const targets = [
+    [fs, "writeFile"],
+    [fs, "writeFileSync"],
+    [fs, "appendFile"],
+    [fs, "appendFileSync"],
+    [fs, "createWriteStream"],
+    [fs, "openSync"],
+    [fs, "mkdtempSync"],
+    [fs.promises, "writeFile"],
+    [fs.promises, "appendFile"],
+    [fs.promises, "open"],
+    [fs.promises, "mkdtemp"],
+  ];
 
-  const before = new Set(await fs.promises.readdir(os.tmpdir()));
+  const saved = targets.map(([obj, key]) => [obj, key, obj[key]]);
+  for (const [obj, key] of targets) {
+    obj[key] = (...args) => {
+      attempts.push(`${key}(${String(args[0])})`);
+      throw new Error(`Eksportas bandė rašyti į diską: ${key}`);
+    };
+  }
 
-  await withPolicy({ EXPORT_ALLOW_ORIGINAL: undefined }, null, async () => {
-    for (const format of ["txt", "csv", "docx"]) {
-      const out = await buildExport(PROTOCOL, format);
-      assert.ok(out, `${format} turi būti sugeneruotas`);
-    }
-  });
+  try {
+    await withPolicy({ EXPORT_ALLOW_ORIGINAL: undefined }, null, async () => {
+      for (const format of ["txt", "csv", "docx"]) {
+        const out = await buildExport(PROTOCOL, format);
+        assert.ok(out && out.buffer, `${format} turi būti sugeneruotas atmintyje`);
+      }
+    });
+  } finally {
+    for (const [obj, key, original] of saved) obj[key] = original;
+  }
 
-  const after = await fs.promises.readdir(os.tmpdir());
-  const created = after.filter((entry) => !before.has(entry) && entry !== path.basename(probeDir));
-
-  assert.deepEqual(created, [], `eksportas sukūrė failų: ${created.join(", ")}`);
-  assert.deepEqual(await fs.promises.readdir(probeDir), []);
-
-  await fs.promises.rm(probeDir, { recursive: true, force: true });
+  assert.deepEqual(attempts, [], `eksportas rašė į diską: ${attempts.join(", ")}`);
 });
