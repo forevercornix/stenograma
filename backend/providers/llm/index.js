@@ -21,9 +21,16 @@ const REGISTRY = {
  */
 function getLLMProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.LLM_PROVIDER || "mock").toLowerCase();
-  const ProviderClass = REGISTRY[name];
-  if (!ProviderClass) {
+  // hasOwnProperty, o NE `REGISTRY[name]` tiesiogiai: objekto literalas paveldi
+  // prototipą, tad "constructor"/"toString" praeidavo kaip "žinomi" tiekėjai ir
+  // grąžindavo Object vietoj providerio (CodeQL: unvalidated dynamic method call).
+  if (!Object.prototype.hasOwnProperty.call(REGISTRY, name)) {
     throw new Error(`Nežinomas LLM_PROVIDER: "${name}". Galimi: ${Object.keys(REGISTRY).join(", ")}`);
+  }
+
+  const ProviderClass = REGISTRY[name];
+  if (typeof ProviderClass !== "function") {
+    throw new Error(`Nekorektiška LLM tiekėjo registracija: "${name}" nėra konstruktorius.`);
   }
   const provider = new ProviderClass(config);
 

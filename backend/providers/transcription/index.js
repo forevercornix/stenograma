@@ -43,12 +43,17 @@ function getTranscriptionProvider(nameOverride, config = {}) {
   // UŽKLAUSOS override. Ta pati taisyklė, tas pats predikatas - žr.
   // utils/privacyConfig.js assertRawAudioProviderAllowed().
   assertRawAudioProviderAllowed("transcription", name);
-  const ProviderClass = REGISTRY[name];
-  if (!ProviderClass) {
+  if (!Object.prototype.hasOwnProperty.call(REGISTRY, name)) {
     throw new Error(
       `Nežinomas TRANSCRIPTION_PROVIDER: "${name}". Galimi: ${Object.keys(REGISTRY).join(", ")}`
     );
   }
+
+  const ProviderClass = REGISTRY[name];
+  if (typeof ProviderClass !== "function") {
+    throw new Error(`Nekorektiška transkribavimo tiekėjo registracija: "${name}" nėra konstruktorius.`);
+  }
+
   return new ProviderClass(config);
 }
 

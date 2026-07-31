@@ -39,18 +39,23 @@ function getDiarizationProvider(nameOverride, config = {}) {
   // utils/privacyConfig.js assertRawAudioProviderAllowed().
   assertRawAudioProviderAllowed("diarization", name);
   if (SPECIAL_MODES.includes(name)) return null;
-  const ProviderClass = REGISTRY[name];
-  if (!ProviderClass) {
+  if (!Object.prototype.hasOwnProperty.call(REGISTRY, name)) {
     throw new Error(
       `Nežinomas DIARIZATION_PROVIDER: "${name}". Galimi: ${[...SPECIAL_MODES, ...Object.keys(REGISTRY)].join(", ")}`
     );
   }
+
+  const ProviderClass = REGISTRY[name];
+  if (typeof ProviderClass !== "function") {
+    throw new Error(`Nekorektiška diarizacijos tiekėjo registracija: "${name}" nėra konstruktorius.`);
+  }
+
   return new ProviderClass(config);
 }
 
 function isKnownDiarizationMode(name) {
   const n = (name || "").toLowerCase();
-  return SPECIAL_MODES.includes(n) || n in REGISTRY;
+  return SPECIAL_MODES.includes(n) || Object.prototype.hasOwnProperty.call(REGISTRY, n);
 }
 
 module.exports = { getDiarizationProvider, isKnownDiarizationMode, REGISTRY, SPECIAL_MODES };
