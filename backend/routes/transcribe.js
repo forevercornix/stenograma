@@ -7,7 +7,7 @@ const crypto = require("crypto");
 const { transcribeAudio, HttpError } = require("../services/transcriptionService");
 const rateLimiter = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
-const { uploadDir, safeExtension, assertInsideUploadDir } = require("../utils/uploadPath");
+const { uploadDir, safeExtension, resolveExistingUploadPath } = require("../utils/uploadPath");
 
 const router = express.Router();
 
@@ -88,7 +88,8 @@ async function safeUnlink(filePath) {
   try {
     // Trynimas irgi eina pro tą pačią patikrą - kitaip apsauga dengtų tik
     // skaitymą, o pavojingesnė operacija liktų atvira.
-    await fs.unlink(assertInsideUploadDir(filePath));
+    const resolved = await resolveExistingUploadPath(filePath);
+    if (resolved) await fs.unlink(resolved);
   } catch (_) {
     // failas jau gali būti pašalintas arba niekada nebuvo sukurtas - nekritinga
   }
@@ -111,9 +112,10 @@ router.post("/transcribe", rateLimiter, apiKeyAuth, uploadSingleAudio, async (re
   if (!req.file) return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
 
   try {
-    // Kelias tikrinamas PRIEŠ skaitymą: multer jį sudaro pats, bet tai
-    // prielaida, o ne garantija (žr. utils/uploadPath.js).
-    const uploadedPath = assertInsideUploadDir(req.file.path);
+    // Kelias tikrinamas PRIEŠ skaitymą, su realpath - tekstinė patikra
+    // nesustabdytų simbolinės nuorodos į išorę (žr. utils/uploadPath.js).
+    const uploadedPath = await resolveExistingUploadPath(req.file.path);
+    if (!uploadedPath) throw new HttpError(400, "Įkeltas failas nebepasiekiamas.");
     const buffer = await fs.readFile(uploadedPath);
     const result = await transcribeAudio({
       buffer,

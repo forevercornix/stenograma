@@ -71,28 +71,24 @@ app.use("/api", transcribeJobsRoute);
 app.use("/api", jobsRoute);
 
 /**
- * READINESS KEŠAS (CodeQL js/missing-rate-limiting).
+ * REALAUS READINESS PATIKRA (CodeQL js/missing-rate-limiting).
  *
- * BullMQ režime KIEKVIENA /api/ready užklausa atidarydavo NAUJĄ Redis ryšį
- * (createQueueConnection + ping + quit) - realus DoS vektorius neautentifikuotame
- * endpointe.
+ * BullMQ režime kiekviena užklausa atidaro Redis ryšį (createQueueConnection +
+ * ping + quit) - būtent dėl to endpointas ribojamas `pollRateLimiter` (120/min),
+ * o riba parinkta plati sąmoningai: /api/ready yra Docker/K8s probe, ir 429
+ * orkestruotojui reikštų nesveiką konteinerį.
  *
- * Sprendimas yra kešas, o NE vien rate limit: /api/ready yra Docker/K8s probe.
- * Grąžinus 429 orkestruotojui, konteineris būtų pažymėtas nesveiku - saugumo
- * pataisymas sugriautų diegimą. Kešas pašalina pačią brangią operaciją, o
- * limiteris lieka tik antru sluoksniu su plačia riba.
+ * KEŠO ČIA NĖRA, ir tai sąmoningas sprendimas. Pirmoji šio pataisymo versija
+ * kešavo rezultatą 2 s ir sulaužė `tests/heartbeatReadiness.integration.test.js`:
+ * worker'iui mirus /api/ready dar dvi sekundes tvirtino "200 OK". Readiness,
+ * kuris vėluoja, yra blogesnis už readiness, kuris kainuoja - orkestruotojas
+ * tuo metu siųstų srautą į konteinerį be gyvo worker'io.
  *
- * TTL trumpas sąmoningai: readiness turi reaguoti greitai, kai worker'is krenta.
+ * Tikras sprendimas būtų VIENAS ilgaamžis Redis ryšys vietoj naujo kiekvienai
+ * užklausai (šviežia informacija be TCP/auth kainos), bet tam reikia švaraus
+ * uždarymo srauto ir paleidimo su tikru Redis - atskiras darbas.
  */
-const READINESS_CACHE_MS = parseInt(process.env.READINESS_CACHE_MS || "2000", 10);
-let _readinessCache = { at: 0, value: null };
-
 async function probeRuntimeReadiness() {
-  const now = Date.now();
-  if (_readinessCache.value && now - _readinessCache.at < READINESS_CACHE_MS) {
-    return _readinessCache.value;
-  }
-
   let redisReachable = true;
   let workers = { transcription: true, protocol: true };
 
@@ -111,8 +107,7 @@ async function probeRuntimeReadiness() {
     }
   }
 
-  _readinessCache = { at: now, value: { redisReachable, workers } };
-  return _readinessCache.value;
+  return { redisReachable, workers };
 }
 
 app.get("/api/ready", pollRateLimiter, async (req, res) => {
