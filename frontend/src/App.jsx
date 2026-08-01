@@ -870,7 +870,20 @@ export default function Stenograma() {
                 Grupė duoda kontekstą nesugriaudama vardų.
               */}
               <p id="export-redacted-label" className="mono text-xs uppercase tracking-wide mb-2" style={{ color: SLATE }}>
-                Redaguotas (be asmens duomenų)
+                Redaguotas (jautrūs identifikatoriai pašalinti)
+              </p>
+              {/*
+                Etiketė SĄMONINGAI nesako „be asmens duomenų".
+
+                Pagal #4 aprėptį vardai lieka, adresai neaptinkami, o žodžiais
+                padiktuoti identifikatoriai gali praslysti. „Be asmens duomenų"
+                paskatintų vartotoją persiųsti dokumentą kaip anoniminį - o jis
+                toks nėra. Tikslesnis pažadas apsaugo geriau nei griežtesnis
+                filtras, kurio nėra.
+              */}
+              <p className="text-xs mb-2" style={{ color: SLATE }}>
+                Pašalinti asmens kodai, el. paštai, telefonai ir sąskaitų numeriai.
+                Vardai, adresai ir kiti netiesioginiai identifikatoriai gali likti.
               </p>
               <div className="flex flex-wrap gap-2" role="group" aria-labelledby="export-redacted-label">
                 {[
@@ -892,7 +905,7 @@ export default function Stenograma() {
 
               {/* ORIGINALAS - atskiras veiksmas su įspėjimu; patvirtinimas runExport viduje. */}
               <p id="export-original-label" className="mono text-xs uppercase tracking-wide mt-4 mb-2" style={{ color: REDINK }}>
-                Originalas (su asmens duomenimis)
+                Originalas (visi duomenys)
               </p>
               <div className="flex flex-wrap gap-2" role="group" aria-labelledby="export-original-label">
                 {[

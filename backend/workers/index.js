@@ -84,6 +84,9 @@ function createWorker(queueName, processor, workerOptions = {}) {
       return runWithContext(
         { requestId: processingJob.requestId || null, actor: processingJob.actor || null, execution: "worker" },
         async () => {
+          log.info("Darbas pradėtas", { stage: "processing", execution: "worker", jobId });
+          const startedAt = Date.now();
+
           const result = await processor(payload, jobId);
 
           // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
@@ -94,6 +97,14 @@ function createWorker(queueName, processor, workerOptions = {}) {
 
           // SĖKMĖ - audio nebereikalingas, trinam iš storage (jei transkripcija).
           await _cleanupStorage(payload, jobId);
+
+          log.info("Darbas baigtas", {
+            stage: "completed",
+            execution: "worker",
+            jobId,
+            durationMs: Date.now() - startedAt,
+          });
+
           return result;
         }
       );
@@ -126,6 +137,25 @@ function createWorker(queueName, processor, workerOptions = {}) {
   async function _handleFailure(job, err, jobId, payload) {
     const attemptsExhausted = job.attemptsMade >= (job.opts.attempts || DEFAULT_JOB_OPTIONS.attempts);
     const { errorCode, message } = _classifyError(err);
+
+    /**
+     * `failed` TIK galutinei nesėkmei (GDPR #17).
+     *
+     * BullMQ `failed` įvykis kviečiamas ir tarpiniam bandymui, po kurio jobas
+     * dar bus kartojamas. Žymint jį `failed`, grandinė atrodytų taip:
+     *   queued → processing → provider → failed → processing → completed
+     * t. y. logas rodytų galutinę nesėkmę ten, kur jos nebuvo. Tai tas pats
+     * meluojančio observability tipas, kurį jau ištaisėm inline kelyje.
+     */
+    log.warn(attemptsExhausted ? "Darbas nepavyko" : "Darbas bus kartojamas", {
+      stage: attemptsExhausted ? "failed" : "retrying",
+      execution: "worker",
+      jobId,
+      attempt: job.attemptsMade,
+      maxAttempts: job.opts.attempts || DEFAULT_JOB_OPTIONS.attempts,
+      errorCode,
+    });
+
     if (attemptsExhausted) {
       // Galutinė nesėkmė po visų bandymų - jobas FAILED (dead-letter).
       await jobStore.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });

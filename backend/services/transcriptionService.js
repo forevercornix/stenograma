@@ -92,6 +92,22 @@ async function transcribeAudio({
 
   try {
     const requestNativeDiarization = diarize && diarizationMode === "inline";
+    /**
+     * GRANDINĖS ĮVYKIS transkripcijos kelyje (GDPR #17).
+     *
+     * DoD reikalauja koreliacijos request → queue → worker → provider →
+     * completion, ir tai galioja ABIEM darbo tipams. Anksčiau `provider` etapas
+     * buvo tik protokolo (LLM) kelyje, tad transkripcijos grandinėje liko skylė
+     * būtent ten, kur laikas praleidžiamas ilgiausiai.
+     */
+    log.info("Tiekėjo kvietimas", {
+      stage: "provider",
+      providerType: "transcription",
+      provider: transcriptionProvider.name || null,
+      model: transcriptionProvider.model || null,
+      jobId,
+    });
+
     const transcription = await transcriptionProvider.transcribe(buffer, {
       filename,
       mimeType,
@@ -104,6 +120,14 @@ async function transcribeAudio({
     let diarizationProviderUsed = requestNativeDiarization ? `${transcriptionProvider.name} (inline)` : null;
     if (diarize && diarizationMode !== "none" && diarizationMode !== "inline") {
       const diarizationProvider = getDiarizationProvider(diarizationMode);
+
+      log.info("Tiekėjo kvietimas", {
+        stage: "provider",
+        providerType: "diarization",
+        provider: diarizationProvider.name || null,
+        jobId,
+      });
+
       const diarizationResult = await diarizationProvider.diarize(buffer, {
         filename,
         mimeType,

@@ -1186,6 +1186,25 @@ atkuriamas prieš vykdymą – ir inline, ir BullMQ worker'yje (atskirame proces
 HTTP konteksto paveldėti neįmanoma). Taip vienas ID sujungia užklausą, eilę,
 worker'į ir tiekėjo kvietimą.
 
+**Grandinės įvykiai.** Kiekvienas etapas rašo savo įvykį su `stage` lauku:
+`queued` → `processing` → `provider` → `completed`/`failed`. Tai galioja **abiem**
+darbo tipams – ir protokolo, ir transkripcijos; `provider` įvykis neša
+`providerType` (`llm`, `transcription`, `diarization`), `jobId` ir paskirtį
+(`source_transcript` ar `repair_prompt`).
+
+`failed` rašomas **tik galutinei** nesėkmei. BullMQ `failed` įvykis kviečiamas ir
+tarpiniam bandymui, po kurio jobas dar bus kartojamas – tokiu atveju rašoma
+`retrying` su bandymo numeriu. Priešingu atveju grandinė rodytų galutinę nesėkmę
+ten, kur jos nebuvo. `requestId`
+pridedamas automatiškai, tad viena užklausa loguose atsekama nuo HTTP iki
+tiekėjo kvietimo ir pabaigos – ir inline, ir worker režimu.
+
+Įvykiai rašomi ten, kur **baigtis realiai žinoma**, o ne apvyniojant vykdymą iš
+išorės: inline runner klaidas apdoroja viduje ir grįžta normaliai, tad išorinis
+apvalkalas rašydavo `completed` jobui, kurio statusas `failed`. Meluojantis
+observability įvykis blogesnis už jokio – juo remiantis tyrimas nueitų ne ta
+kryptimi.
+
 **Aktorius** audito įrašuose yra API rakto **scrypt atspaudas** (`key_<12 hex>`),
 ne pats raktas: audito įrašai gyvena ilgiau nei raktas.
 
@@ -1308,10 +1327,19 @@ patogu ir todėl pavojinga: vartotojas gautų kitą dokumentą nei prašė ir to
 nepastebėtų.
 
 Trūkstamas redaguotas turinys **niekada** nevirsta originalu: nesant redakcijos
-komponento užklausa nutraukiama, o ne patenkinama kitu variantu.
+komponento užklausa nutraukiama, o ne patenkinama kitu variantu. Atmetimo
+priežastys skiriamos: politikos draudimas → **403**
+(`EXPORT_ORIGINAL_FORBIDDEN`), laikinas redakcijos nepasiekiamumas → **503**
+(`EXPORT_REDACTION_UNAVAILABLE`), netinkama užklausa → **400**. Vienas kodas
+visiems atvejams klaidintų dviem kryptimis: vartotojui atrodytų, kad jam
+neleidžiama, o operatoriui gedimas atrodytų kaip normalus politikos atmetimas.
 
 **Sąsajoje** abu variantai rodomi atskiromis grupėmis su aiškiais pavadinimais
-(„Redaguotas (be asmens duomenų)" ir „Originalas (su asmens duomenimis)").
+(„Redaguotas (jautrūs identifikatoriai pašalinti)" ir „Originalas (visi
+duomenys)"). Etiketė sąmoningai **nesako** „be asmens duomenų": pagal #4 aprėptį
+vardai lieka, o adresai neaptinkami, tad toks pažadas paskatintų vartotoją
+persiųsti dokumentą kaip anoniminį. Po etikete nurodyta, kas konkrečiai pašalinta
+ir kas gali likti.
 Redaguota grupė yra pirma, o originalo mygtukai reikalauja patvirtinimo, kuriame
 įvardyta, kas liks faile. Numatytosios varianto reikšmės nėra nei sąsajoje, nei
 API sluoksnyje – kvietimas be varianto meta klaidą, o ne pasirenka už vartotoją.

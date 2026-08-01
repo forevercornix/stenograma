@@ -43,6 +43,16 @@ router.post("/jobs", rateLimiter, apiKeyAuth, async (req, res) => {
   // setImmediate - ne šis HTTP handler'is. Žr. queues/jobRunner.js.
   await jobRunner.enqueueProtocol(job.id, body);
 
+  /**
+   * GRANDINĖS ĮVYKIS (GDPR #17: „Logs correlate request, queue, worker,
+   * provider and completion events").
+   *
+   * `requestId` pridedamas AUTOMATIŠKAI iš konteksto, tad kiekviena grandis
+   * pati nurodo tik savo etapą. Be šių įvykių koreliacija egzistuotų tik
+   * teoriškai: ID keliautų, bet loguose nebūtų ką sujungti.
+   */
+  log.info("Jobas priimtas", { stage: "queued", jobType: "protocol", jobId: job.id });
+
   res.status(202).json({ jobId: job.id, status: job.status });
 });
 

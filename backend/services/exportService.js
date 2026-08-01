@@ -200,12 +200,30 @@ function exportFilename(base, variant, date, extension) {
     .replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
+/**
+ * Eksporto atmetimo PRIEŽASTYS skiriamos, nes jos reiškia skirtingus dalykus.
+ *
+ * Iki šiol visi atvejai gaudavo `EXPORT_ORIGINAL_FORBIDDEN` ir 403 - įskaitant
+ * „redakcijos komponentas neveikia". Tai klaidino dviem kryptimis: vartotojui
+ * atrodė, kad jam neleidžiama (nors leidžiama, tik sistema negali), o
+ * operatoriui gedimas atrodė kaip normalus politikos atmetimas ir nepatekdavo į
+ * jokį dėmesio lauką.
+ */
+const EXPORT_ERROR = {
+  // Politika draudžia prašomą variantą - vartotojo prašymas neteisėtas.
+  FORBIDDEN: { code: "EXPORT_ORIGINAL_FORBIDDEN", statusCode: 403 },
+  // Variantas leidžiamas, bet sistema jo dabar negali saugiai sukurti.
+  UNAVAILABLE: { code: "EXPORT_REDACTION_UNAVAILABLE", statusCode: 503 },
+  // Klientas nenurodė varianto arba nurodė nežinomą.
+  INVALID_REQUEST: { code: "EXPORT_VARIANT_INVALID", statusCode: 400 },
+};
+
 class ExportPolicyError extends Error {
-  constructor(message) {
+  constructor(message, kind = EXPORT_ERROR.FORBIDDEN) {
     super(message);
     this.name = "ExportPolicyError";
-    this.code = "EXPORT_ORIGINAL_FORBIDDEN";
-    this.statusCode = 403;
+    this.code = kind.code;
+    this.statusCode = kind.statusCode;
   }
 }
 
@@ -236,7 +254,8 @@ function _enforceExportPolicy(protocol, variant) {
   if (variant !== artefacts.VARIANT.ORIGINAL && variant !== artefacts.VARIANT.REDACTED) {
     throw new ExportPolicyError(
       `Eksporto variantas privalomas ir turi būti "${artefacts.VARIANT.ORIGINAL}" arba ` +
-        `"${artefacts.VARIANT.REDACTED}". Numanomos reikšmės nėra sąmoningai.`
+        `"${artefacts.VARIANT.REDACTED}". Numanomos reikšmės nėra sąmoningai.`,
+      EXPORT_ERROR.INVALID_REQUEST
     );
   }
 
@@ -257,7 +276,8 @@ function _enforceExportPolicy(protocol, variant) {
   if (probe.state !== "ok") {
     throw new ExportPolicyError(
       `Prašyta redaguoto varianto, bet PII redakcijos komponentas nepasiekiamas (${probe.state}). ` +
-        "Eksportas nutrauktas - originalas NEGRĄŽINAMAS."
+        "Eksportas nutrauktas - originalas NEGRĄŽINAMAS.",
+      EXPORT_ERROR.UNAVAILABLE
     );
   }
 
@@ -275,7 +295,8 @@ function _enforceExportPolicy(protocol, variant) {
     if (e instanceof ExportPolicyError) throw e;
 
     throw new ExportPolicyError(
-      "PII redakcija nepavyko, todėl eksporto failas NEBUVO sugeneruotas. Originalas NEGRĄŽINAMAS."
+      "PII redakcija nepavyko, todėl eksporto failas NEBUVO sugeneruotas. Originalas NEGRĄŽINAMAS.",
+      EXPORT_ERROR.UNAVAILABLE
     );
   }
 }
@@ -299,4 +320,4 @@ async function buildExport(protocol, format, variant) {
   }
 }
 
-module.exports = { buildExport, exportFilename, buildTxt, buildCsv, buildDocx, FORMATS, ExportPolicyError };
+module.exports = { buildExport, exportFilename, EXPORT_ERROR, buildTxt, buildCsv, buildDocx, FORMATS, ExportPolicyError };

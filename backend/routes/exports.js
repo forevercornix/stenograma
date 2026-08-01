@@ -161,7 +161,10 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
   } catch (error) {
     // Politikos atmetimas nėra serverio klaida - klientas turi matyti, kad
     // variantas neleidžiamas, o ne „kažkas sulūžo".
-    const status = error && error.code === "EXPORT_ORIGINAL_FORBIDDEN" ? 403 : 500;
+    // Statusas imamas iš pačios klaidos: politikos draudimas (403), laikinas
+    // nepasiekiamumas (503) ir netinkama užklausa (400) yra skirtingi dalykai,
+    // o vidinės klaidos lieka 500 ir sanitizuojamos.
+    const status = error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
 
     auditLog.record({
       event: "EXPORT_FAILED",
@@ -178,9 +181,9 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
     // sanitizeServerError logguoja pilną klaidą serveryje ir grąžina saugų tekstą.
     // Politikos atmetimo pranešimas yra saugus ir naudingas (jame nurodyta, kaip
     // gauti leidžiamą variantą); tik tikros vidinės klaidos sanitizuojamos.
-    return status === 403
-      ? res.status(403).json({ error: error.message })
-      : res.status(500).json({ error: sanitizeServerError(error, "eksportas") });
+    return status === 500
+      ? res.status(500).json({ error: sanitizeServerError(error, "eksportas") })
+      : res.status(status).json({ error: error.message });
   }
 });
 
