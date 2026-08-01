@@ -327,6 +327,8 @@ function sanitizeForLogging(value, seen = new WeakSet()) {
  * reikės sąmoningo veiksmo. Tai ta pati logika, dėl kurios visas auditas remiasi
  * whitelist'u, o ne juoduoju sąrašu.
  */
+const { getRequestId, getActor } = require("./requestContext");
+
 function sanitizeRedaction(redaction) {
   if (!redaction || typeof redaction !== "object") return null;
 
@@ -401,6 +403,17 @@ function record(entry = {}) {
     // skaičiai. Aptiktos PII reikšmės čia patekti negali net tada, jei kas nors
     // jas netyčia įdėtų į artefaktą.
     redaction: sanitizeRedaction(entry.redaction),
+
+    /**
+     * KORELIACIJA (GDPR #17). Numatytosios reikšmės imamos iš request konteksto,
+     * bet EKSPLICITINIS perdavimas turi pirmenybę: worker'iai ir ištrynimo kvitai
+     * kartais žino ID geriau nei aplinkinis scope (pvz. retry, vykstantis be
+     * jokios HTTP užklausos).
+     *
+     * `actor` yra rakto ATSPAUDAS, ne raktas - žr. utils/requestContext.js.
+     */
+    requestId: sanitizeControlled(entry.requestId ?? getRequestId(), 64),
+    actor: sanitizeControlled(entry.actor ?? getActor(), 40),
   });
 
   log.push(row);

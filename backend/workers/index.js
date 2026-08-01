@@ -64,17 +64,37 @@ function createWorker(queueName, processor, workerOptions = {}) {
         throw new Error(`Job store įrašas nerastas (PROCESSING): ${jobId}. Galimai nesuderintas store/runner arba pasibaigęs TTL.`);
       }
 
-      const result = await processor(payload, jobId);
+      /**
+       * KORELIACIJA (GDPR #17): worker'is yra atskiras PROCESAS, tad HTTP
+       * konteksto paveldėti negali. ID atkuriamas iš jobStore įrašo - taip
+       * worker'io logai susiejami su ta pačia užklausa.
+       */
+      const { runWithContext } = require("../utils/requestContext");
 
-      // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
-      const completedJob = await jobStore.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
-      if (!completedJob) {
-        throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
-      }
+      /**
+       * Kontekstas apgaubia VISĄ likusį vykdymą, ne vien `processor()`.
+       *
+       * Pirmoji versija apgaubė tik procesorių - tad COMPLETED įrašymas, audio
+       * valymas ir jų klaidos liktų be `requestId`. Būtent tie lifecycle įvykiai
+       * yra vertingiausi tiriant, o be koreliacijos jie tampa našlaičiais logo
+       * eilutėmis.
+       */
+      return runWithContext(
+        { requestId: processingJob.requestId || null, actor: processingJob.actor || null, execution: "worker" },
+        async () => {
+          const result = await processor(payload, jobId);
 
-      // SĖKMĖ - audio nebereikalingas, trinam iš storage (jei transkripcija).
-      await _cleanupStorage(payload, jobId);
-      return result;
+          // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
+          const completedJob = await jobStore.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+          if (!completedJob) {
+            throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
+          }
+
+          // SĖKMĖ - audio nebereikalingas, trinam iš storage (jei transkripcija).
+          await _cleanupStorage(payload, jobId);
+          return result;
+        }
+      );
     },
     { connection, ...WORKER_OPTIONS, ...workerOptions }
   );
@@ -82,6 +102,26 @@ function createWorker(queueName, processor, workerOptions = {}) {
   worker.on("failed", async (job, err) => {
     if (!job) return;
     const { jobId, payload } = job.data;
+
+    /**
+     * `failed` handler'is vykdomas UŽ jobo konteksto ribų (BullMQ jį kviečia
+     * atskirai), tad kontekstą atkuriam iš naujo - kitaip nesėkmės kelias,
+     * kuris tiriamas dažniausiai, liktų vienintelis be koreliacijos.
+     */
+    const { runWithContext } = require("../utils/requestContext");
+    const failedJob = await jobStore.get(jobId).catch(() => null);
+
+    return runWithContext(
+      {
+        requestId: (failedJob && failedJob.requestId) || null,
+        actor: (failedJob && failedJob.actor) || null,
+        execution: "worker",
+      },
+      () => _handleFailure(job, err, jobId, payload)
+    );
+  });
+
+  async function _handleFailure(job, err, jobId, payload) {
     const attemptsExhausted = job.attemptsMade >= (job.opts.attempts || DEFAULT_JOB_OPTIONS.attempts);
     const { errorCode, message } = _classifyError(err);
     if (attemptsExhausted) {
@@ -93,7 +133,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
       // Dar bus retry - paliekam PROCESSING, audio NETRINAM (kitas bandymas jį naudos).
       await jobStore.update(jobId, { attempt_count: job.attemptsMade + 1, error: message, error_code: errorCode });
     }
-  });
+  }
 
   worker.on("error", (err) => {
     console.error(`[worker:${queueName}] klaida:`, err.message);

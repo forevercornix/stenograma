@@ -5,6 +5,7 @@ const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { eraseJob, eraseOrphanedJobData } = require("../utils/jobErasure");
+const { getRequestId, getActor } = require("../utils/requestContext");
 
 const router = express.Router();
 
@@ -28,7 +29,12 @@ router.post("/jobs", rateLimiter, apiKeyAuth, async (req, res) => {
     return res.status(400).json({ error: "Transkripcija per trumpa arba tuščia." });
   }
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.PROTOCOL,
+    // Koreliacija su HTTP užklausa (GDPR #17).
+    requestId: getRequestId(),
+    actor: getActor(),
+  });
 
   // HTTP endpoint'as TIK įdeda jobą į eilę (BullMQ) arba paleidžia inline (be Redis)
   // ir grąžina 202. Protokolo generavimo (LLM) darbą vykdo worker procesas ar

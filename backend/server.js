@@ -13,6 +13,7 @@ const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
 const { pollRateLimiter } = require("./middleware/rateLimiter");
 const { initPrivacyPolicy } = require("./utils/privacyPolicy");
+const { requestContextMiddleware } = require("./utils/requestContext");
 
 // KIETA konfigūracijos validacija (vartotojo prašymas po realaus diegimo: "jei
 // kažko trūksta - aiškiai parašyti ir nestartuoti", o ne griūti pirmoje užklausoje).
@@ -42,6 +43,10 @@ const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
 if (corsOrigin === "*") {
   console.warn("[stenograma] CORS_ORIGIN=* - bet koks domenas gali kviesti šį API. Naudokite tik aiškiam demo.");
 }
+// PIRMAS middleware: request ID turi egzistuoti dar prieš CORS, rate limitą ir
+// maršrutus - kad ir atmesta užklausa turėtų identifikatorių (GDPR #17).
+app.use(requestContextMiddleware);
+
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: "10mb" }));
 
