@@ -5,6 +5,8 @@ const jobStore = require("./jobStore");
 const auditLog = require("./auditLog");
 const fileStorage = require("./fileStorage");
 const { getPrivacyPolicy } = require("./privacyPolicy");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("retention");
 
 /**
  * AUTOMATINIS RETENCIJOS ŠALINIMAS (GDPR issue #2).
@@ -58,7 +60,7 @@ async function purgeOrphanedAudio({ now = Date.now(), retentionHours } = {}) {
   if (referencedList === null) {
     // Saugykla neleidžia išvardyti jobų - tada NIEKO netrinam. Geriau likęs
     // failas nei ištrintas naudojamas.
-    console.warn(
+    log.warn(
       "[stenograma] Retencija: saugykla nepalaiko listReferencedStorageKeys() - " +
         "nuskendusių audio failų šalinimas praleidžiamas (fail-safe)."
     );
@@ -94,7 +96,7 @@ async function purgeOrphanedAudio({ now = Date.now(), retentionHours } = {}) {
       if (await fileStorage.del(key)) removed += 1;
     } catch (e) {
       // Nekritinė: bus pakartota kitą ciklą. Bet nenutylim.
-      console.error(`[stenograma] Retencija: nepavyko ištrinti ${key}: ${e.message}`);
+      log.error(`Retencija: nepavyko ištrinti ${key}: ${e.message}`);
       skipped += 1;
     }
   }
@@ -143,7 +145,7 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
       // Auditas neturi versti retencijos nesėkme.
     }
 
-    console.log(
+    log.info(
       `[stenograma] Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +
         `audito įrašų=${summary.auditEntries}.`
     );
@@ -165,14 +167,14 @@ function startRetentionSweeper({ intervalMs, runImmediately = true } = {}) {
   if (runImmediately) {
     setTimeout(() => {
       runRetentionSweep().catch((e) =>
-        console.error(`[stenograma] Pradinis retencijos ciklas nepavyko: ${e.message}`)
+        log.error(`Pradinis retencijos ciklas nepavyko: ${e.message}`)
       );
     }, 5000).unref();
   }
 
   const timer = setInterval(() => {
     runRetentionSweep().catch((e) =>
-      console.error(`[stenograma] Retencijos ciklas nepavyko: ${e.message}`)
+      log.error(`Retencijos ciklas nepavyko: ${e.message}`)
     );
   }, interval);
 

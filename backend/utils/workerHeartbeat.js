@@ -1,3 +1,5 @@
+const { createLogger } = require("../utils/logger");
+const log = createLogger("heartbeat");
 // Worker heartbeat: worker'is periodiškai rašo Redis raktą su TTL, o /api/ready tikrina,
 // ar raktas šviežias. Taip readiness patvirtina ne tik kad Redis pasiekiamas, bet ir kad
 // worker'is GYVAS ir apdoros jobus. Be šio - readiness galėtų rodyti ready=true, kai
@@ -69,7 +71,7 @@ function startHeartbeat(connection, workerType) {
       );
     } catch (e) {
       // Heartbeat rašymo klaida neturi griauti worker'io - tik logas.
-      console.warn(`[stenograma] Heartbeat rašymo klaida: ${e.message}`);
+      log.warn(`Heartbeat rašymo klaida: ${e.message}`);
     }
   }
   beat(); // rašom iškart (nelaukiam pirmo intervalo)

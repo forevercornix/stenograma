@@ -1118,6 +1118,42 @@ nuo tikrovės neatsiskirtų, fabrikos elgesį dengia testas, tikrinantis
 ⚠️ Kaina: efemeriškame režime nėra restart recovery – ilgas transkribavimas,
 nutrūkęs dėl restarto, prarandamas ir jį reikia kartoti.
 
+**Struktūruotas logas (`utils/logger.js`).** Kiekviena eilutė yra JSON su
+`ts`, `level`, `component`, `msg` ir – automatiškai – `requestId`, `actor`,
+`execution` iš request konteksto. Formatas: `json` produkcijoje, skaitomas
+`pretty` kūrimo metu (`LOG_FORMAT`), lygis per `LOG_LEVEL`. Abu formatai rodo
+**tą patį laukų rinkinį** – `pretty` tik perrikiuoja jį akiai. Skirtingas
+informacijos kiekis reikštų, kad dalis klaidų matoma tik produkcijoje, kur jas
+tirti sunkiausia.
+
+Logeris savas, o ne pino: reikėjo tik lygių, JSON eilutės, konteksto įtraukimo
+ir redakcijos, o pastarąją jau turim (`sanitizeForLogging`). Išorinė biblioteka
+atsineštų **antrą** tiesą apie tai, kas jautru – du sąrašus, kurie ilgainiui
+išsiskirtų.
+
+**Redaguojama IR `msg`, IR `data`.** Pirminis projektas sanitizavo tik `data`,
+laikydamas `msg` „mūsų pačių tekstu". Peržiūra parodė, kad 33 kvietimo vietos
+interpoliuoja kintamuosius į `msg`, o šešiose – `e.message`, kuriame realiai būna
+failų kelių. Rekomendacija dėti kintamuosius į `data` lieka, bet ji nebėra
+vienintelė apsauga.
+
+**`trust proxy` konfigūruojamas eksplicitiškai** per `TRUST_PROXY`, numatytai
+`false`. Už nginx/RunPod proxy be jo visi klientai atrodytų kaip `127.0.0.1`, ir
+rate limitas taptų bendras visiems; aklas `true` leistų klastoti
+`X-Forwarded-For` ir limitą apeiti. Rekomenduojama skaitinė reikšmė (nginx = `1`).
+
+Sanitizacija turi greitą kelią: pranešimai be `@`, kelio skirtuko ar ilgos
+skaitmenų sekos praleidžiami nepatikrinti (20 tūkst. paprastų eilučių ≈ 120 ms).
+Filtras sąmoningai platus – kilus abejonei, sanitizuojama.
+
+**IP adresai nesaugomi.** Rate limito įvykiai logina `ip_<12 hex>` – HMAC
+pseudonimą su ta pačia druska kaip audito ID (`AUDIT_ID_SALT`). Jis atsako į
+klausimą „ar tas pats klientas?", bet adreso neatkuria. Po restarto be nustatytos
+druskos pseudonimai pasikeičia – ilgaamžiam sekimui tai apribojimas, privatumui
+privalumas. `truncateIp()` (tinklo dalis: `/24` arba `/64`) yra alternatyva
+diegimams, kuriems reikia tinklo diagnostikos, bet numatytame kelyje ji
+nenaudojama – pseudonimas saugesnis.
+
 **Užklausų koreliacija (`utils/requestContext.js`).** Kiekviena užklausa gauna
 `X-Request-Id`: arba serverio sugeneruotą (`req_<uuid>`), arba kliento pateiktą,
 jei jis atitinka griežtą formatą (`[A-Za-z0-9_.:-]`, 8–64 simboliai). Ribos
@@ -1131,8 +1167,18 @@ atkuriamas prieš vykdymą – ir inline, ir BullMQ worker'yje (atskirame proces
 HTTP konteksto paveldėti neįmanoma). Taip vienas ID sujungia užklausą, eilę,
 worker'į ir tiekėjo kvietimą.
 
-**Aktorius** audito įrašuose yra API rakto **SHA-256 atspaudas** (`key_<12 hex>`),
-ne pats raktas: audito įrašai gyvena ilgiau nei raktas. `auditLog.record()` ima
+**Aktorius** audito įrašuose yra API rakto **scrypt atspaudas** (`key_<12 hex>`),
+ne pats raktas: audito įrašai gyvena ilgiau nei raktas.
+
+Kodėl KDF, o ne paprastas hash: `API_KEY` nustatomas ranka `.env` faile, tad gali
+būti mažos entropijos. Greitą atspaudą audito žurnale tokiu atveju galima
+brute-force'inti ir atkurti raktą. HMAC su druska čia nepakanka, nes
+`AUDIT_ID_SALT` gyvena **tame pačiame** `.env` faile – kas gavo vieną, turi ir
+kitą; scrypt apsaugo net turint druską.
+
+Kaina karštame kelyje nulinė: raktas yra konstanta, tad atspaudas skaičiuojamas
+vieną kartą (~120 ms) ir kešuojamas – 5 000 vėlesnių kvietimų užtrunka vienetus
+milisekundžių. `auditLog.record()` ima
 `requestId` ir `actor` iš konteksto automatiškai, bet eksplicitinis perdavimas
 turi pirmenybę – worker'io retry ir ištrynimo kvitai kartais žino ID geriau nei
 aplinkinis scope. Kontekste laikomi tik identifikatoriai – jokio turinio,

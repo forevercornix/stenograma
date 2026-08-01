@@ -18,6 +18,8 @@ const jobStore = require("../utils/jobStore");
 const jobRunner = require("../queues/jobRunner");
 const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
 const { transcriptionProcessor, protocolProcessor } = require("../queues/processors");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("worker");
 
 
 // Klaidos klasifikacija su sanitizacija - naudojam tą pačią kaip inline runner'is,
@@ -136,7 +138,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
   }
 
   worker.on("error", (err) => {
-    console.error(`[worker:${queueName}] klaida:`, err.message);
+    log.error(`[worker:${queueName}] klaida:`, err.message);
   });
 
   workerConnections.set(worker, connection);
@@ -186,7 +188,7 @@ function startWorkers() {
   const { startTranscriptionWorker } = require("./transcriptionWorker");
   const { startProtocolWorker } = require("./protocolWorker");
   const workers = [startTranscriptionWorker(), startProtocolWorker()];
-  console.log(`[stenograma] Worker'iai paleisti (concurrency=${WORKER_OPTIONS.concurrency}, stalled recovery=${WORKER_OPTIONS.stalledInterval}ms): transcription, protocol`);
+  log.info(`Worker'iai paleisti (concurrency=${WORKER_OPTIONS.concurrency}, stalled recovery=${WORKER_OPTIONS.stalledInterval}ms): transcription, protocol`);
 
   // Heartbeat: worker rašo Redis raktą su TTL, /api/ready jį tikrina - taip readiness
   // patvirtina, kad worker'is GYVAS (ne tik kad Redis pasiekiamas). Kombinuotas
@@ -206,13 +208,13 @@ function startWorkers() {
   async function shutdown(signal) {
     if (shuttingDown) return shuttingDown;
     shuttingDown = (async () => {
-      console.log(`[stenograma] Worker gauna ${signal}, baigiu darbus...`);
+      log.info(`Worker gauna ${signal}, baigiu darbus...`);
       stopHeartbeat();
       process.removeListener("SIGTERM", onSigterm);
       process.removeListener("SIGINT", onSigint);
-      await heartbeatConn.quit().catch((e) => console.error(`[stenograma] Heartbeat ryšio uždarymo klaida: ${e.message}`));
+      await heartbeatConn.quit().catch((e) => log.error(`Heartbeat ryšio uždarymo klaida: ${e.message}`));
       await Promise.all(
-        workers.map((w) => w.close().catch((e) => console.error(`[stenograma] Worker uždarymo klaida: ${e.message}`)))
+        workers.map((w) => w.close().catch((e) => log.error(`Worker uždarymo klaida: ${e.message}`)))
       );
       process.exit(0);
     })();
@@ -287,12 +289,12 @@ async function runWorkerProcess(workerName, startWorker, heartbeatType) {
     const shouldExit = isTestCall ? signalOrOpts.exit !== false : true;
 
     shuttingDown = (async () => {
-      console.log(`[stenograma] ${workerName} gauna ${signal}, baigiu darbus...`);
+      log.info(`${workerName} gauna ${signal}, baigiu darbus...`);
       stopHeartbeat();
       process.removeListener("SIGTERM", onSigterm);
       process.removeListener("SIGINT", onSigint);
-      await heartbeatConn.quit().catch((e) => console.error(`[stenograma] Heartbeat ryšio uždarymo klaida: ${e.message}`));
-      await worker.close().catch((e) => console.error(`[stenograma] Worker uždarymo klaida: ${e.message}`));
+      await heartbeatConn.quit().catch((e) => log.error(`Heartbeat ryšio uždarymo klaida: ${e.message}`));
+      await worker.close().catch((e) => log.error(`Worker uždarymo klaida: ${e.message}`));
       if (shouldExit) process.exit(0);
     })();
     return shuttingDown;
@@ -314,7 +316,7 @@ if (require.main === module) {
   initializeWorkerOrFail("BullMQ worker")
     .then(() => startWorkers())
     .catch((error) => {
-      console.error(`[stenograma] Worker nepaleistas: ${error.message}`);
+      log.error(`Worker nepaleistas: ${error.message}`);
       process.exit(1);
     });
 }

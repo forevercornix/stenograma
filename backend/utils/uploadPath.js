@@ -1,6 +1,8 @@
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("uploads");
 
 /**
  * ĮKELTŲ FAILŲ KELIO SUVALDYMAS (GDPR #13; CodeQL js/path-injection).
@@ -167,7 +169,7 @@ async function safeUnlinkUpload(filePath) {
     if (resolved) await fs.unlink(resolved);
     return true;
   } catch (e) {
-    console.warn(
+    log.warn(
       `[stenograma] Nepavyko pašalinti laikino įkėlimo failo (${e.code || e.name || "klaida"}). ` +
         "Failas liks iki kito paleidimo valymo."
     );

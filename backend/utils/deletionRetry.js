@@ -1,4 +1,6 @@
 const jobStore = require("./jobStore");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("deletion-retry");
 
 /**
  * Nebaigtų ištrynimų pakartojimas.
@@ -70,7 +72,7 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
 
     if (!outcome.criticalFailure) {
       summary.succeeded += 1;
-      console.log(
+      log.info(
         `[stenograma] Nebaigtas jobo ${job.id} ištrynimas pakartotas sėkmingai (bandymas ${attempts}).`
       );
       continue;
@@ -92,11 +94,11 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
 
     if (attempts >= MAX_ATTEMPTS_BEFORE_ALERT) {
       // Aiškiai atskiriam nuo įprastos klaidos - tai jau reikalauja žmogaus.
-      console.error(
+      log.error(
         `${message}. ⚠️  REIKIA RANKINIO ĮSIKIŠIMO: jautrūs duomenys tebėra saugomi.`
       );
     } else {
-      console.warn(message);
+      log.warn(message);
     }
   }
 
@@ -141,7 +143,7 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
 
     if (removed) {
       summary.succeeded += 1;
-      console.log(
+      log.info(
         `[stenograma] Likęs jobo ${job.id} audio pašalintas pakartotinai (bandymas ${attempts}).`
       );
       continue;
@@ -161,11 +163,11 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
       `[stenograma] Jobo ${job.id} audio vis dar nepavyksta ištrinti (bandymas ${attempts}).`;
 
     if (attempts >= MAX_ATTEMPTS_BEFORE_ALERT) {
-      console.error(
+      log.error(
         `${message} ⚠️  REIKIA RANKINIO ĮSIKIŠIMO: audio failas tebėra storage.`
       );
     } else {
-      console.warn(message);
+      log.warn(message);
     }
   }
 
@@ -181,10 +183,10 @@ function startDeletionRetry({ intervalMs } = {}) {
 
   const timer = setInterval(() => {
     retryPendingDeletions().catch((e) =>
-      console.error(`[stenograma] Ištrynimų pakartojimas nepavyko: ${e.message}`)
+      log.error(`Ištrynimų pakartojimas nepavyko: ${e.message}`)
     );
     retryPendingAudioCleanups().catch((e) =>
-      console.error(`[stenograma] Audio valymo pakartojimas nepavyko: ${e.message}`)
+      log.error(`Audio valymo pakartojimas nepavyko: ${e.message}`)
     );
   }, interval);
 

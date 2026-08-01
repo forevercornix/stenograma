@@ -1,5 +1,7 @@
 const fileStorage = require("./fileStorage");
 const jobStore = require("./jobStore");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("audio-cleanup");
 
 /**
  * Audio ištrynimas po GALUTINIO jobo statuso - bendras inline runner'iui
@@ -24,7 +26,7 @@ async function releaseAudio(jobId, storageKey) {
   try {
     await fileStorage.del(storageKey);
   } catch (e) {
-    console.error(
+    log.error(
       `[stenograma] Nepavyko ištrinti audio iš storage (job ${jobId}): ${e.message}. ` +
         "storageKey PALIEKAMAS jobStore įraše, jobas pažymimas pakartojimui."
     );
@@ -46,7 +48,7 @@ async function releaseAudio(jobId, storageKey) {
           storageKey,
         });
       } catch (updateError) {
-        console.error(
+        log.error(
           `[stenograma] Nepavyko pažymėti jobo ${jobId} pakartotiniam audio valymui: ${updateError.message}`
         );
       }
@@ -65,7 +67,7 @@ async function releaseAudio(jobId, storageKey) {
   } catch (e) {
     // Failas jau ištrintas - tai saugi pusė. Likęs raktas tik reikš, kad GDPR
     // ištrynimas bandys trinti nesantį objektą (idempotentiška operacija).
-    console.error(
+    log.error(
       `[stenograma] Audio ištrintas, bet nepavyko atnaujinti jobo ${jobId} storageKey: ${e.message}`
     );
   }

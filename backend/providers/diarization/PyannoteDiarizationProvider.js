@@ -1,5 +1,7 @@
 const DiarizationProvider = require("./DiarizationProvider");
 const { fetchWithTimeout, timeoutForAudioBytes } = require("../../utils/httpClient");
+const { createLogger } = require("../../utils/logger");
+const log = createLogger("provider:pyannote");
 
 /**
  * STATUS: interface implemented, integration not verified in this environment
@@ -45,7 +47,7 @@ class PyannoteDiarizationProvider extends DiarizationProvider {
       // Dabar: statusas + atsakymo kūnas (apkarpytas) + endpoint'as + dažniausių
       // priežasčių sąrašas patenka į klaidą; pilnas kūnas - į serverio logą.
       const body = await res.text().catch(() => "(nepavyko perskaityti atsakymo kūno)");
-      console.error(
+      log.error(
         `[stenograma] Pyannote klaida: POST ${this.url} -> ${res.status}\n` +
           `  Atsakymo kūnas (pilnas): ${body}\n` +
           `  Išsiųsta: multipart laukas "${this.fileField}" (${audioBuffer.length} baitų, filename=${options.filename || "audio.wav"})` +

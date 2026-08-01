@@ -1,4 +1,6 @@
 const jobStore = require("../utils/jobStore");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("job-runner");
 
 /**
  * Job runner - abstrakcija tarp HTTP endpoint'o ir darbo vykdymo.
@@ -46,12 +48,12 @@ async function init(options = {}) {
     // Jei REDIS_URL buvo nustatytas, bet persistentStore=false, reiškia jobStore Redis
     // connect nepavyko - tai svarbi žinutė (ne tik "nėra REDIS_URL").
     if (process.env.REDIS_URL) {
-      console.warn(
+      log.warn(
         "[stenograma] ⚠️  REDIS_URL nustatytas, BET job store persistencija neprieinama " +
           "(Redis connect nepavyko). Job runner naudoja INLINE - suderinta su memory store."
       );
     } else {
-      console.log("[stenograma] Job runner: inline (in-proceso; be atskirų worker'ių - nustatykite REDIS_URL BullMQ eilei)");
+      log.info("[stenograma] Job runner: inline (in-proceso; be atskirų worker'ių - nustatykite REDIS_URL BullMQ eilei)");
     }
     warnIfInlineInProduction();
     return _mode;
@@ -62,13 +64,13 @@ async function init(options = {}) {
     // pagal struktūros reikalavimą. Jos sukuriamos lazy pirmo add metu.
     require("bullmq"); // patikrinam, kad bullmq įdiegtas (mes fallback jei ne)
     _mode = "bullmq";
-    console.log("[stenograma] Job runner: BullMQ (atskiri worker procesai; atsparu restartams)");
+    log.info("[stenograma] Job runner: BullMQ (atskiri worker procesai; atsparu restartams)");
     return _mode;
   } catch (e) {
     if (process.env.REDIS_REQUIRED === "true") {
       throw new Error(`BullMQ init nepavyko (${e.message}), o REDIS_REQUIRED=true.`);
     }
-    console.warn(`[stenograma] ⚠️  BullMQ init nepavyko (${e.message}). Grįžtu į inline runner'į (darbas vykdomas HTTP procese).`);
+    log.warn(`⚠️  BullMQ init nepavyko (${e.message}). Grįžtu į inline runner'į (darbas vykdomas HTTP procese).`);
     _mode = "inline";
     warnIfInlineInProduction();
     return _mode;
@@ -84,7 +86,7 @@ async function init(options = {}) {
  */
 function warnIfInlineInProduction() {
   if (process.env.NODE_ENV === "production") {
-    console.warn(
+    log.warn(
       "[stenograma] ⚠️  ⚠️  DĖMESIO: inline job runner PRODUKCIJOJE (NODE_ENV=production, be REDIS_URL).\n" +
       "           Job'ai vykdomi HTTP procese ir laikomi ATMINTYJE - backend'o restartas ar\n" +
       "           kritimas apdorojimo metu PRARANDA darbą ir būseną, retry NĖRA. Ilgiems failams\n" +
@@ -148,7 +150,7 @@ async function enqueueProtocol(jobId, payload) {
 async function _runInline(type, jobId, payload) {
   const processor = _processors[type];
   if (!processor) {
-    console.error(`[stenograma] Nėra processor'iaus tipui '${type}'`);
+    log.error(`Nėra processor'iaus tipui '${type}'`);
     return;
   }
 

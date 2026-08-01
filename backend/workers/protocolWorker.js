@@ -1,6 +1,8 @@
 const { QUEUE_NAMES } = require("../queues/config");
 const { protocolProcessor } = require("../queues/processors");
 const { createWorker } = require("./index");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("worker:protocol");
 
 /**
  * Protokolo generavimo worker'is (atskiras modulis pagal struktūros reikalavimą).
@@ -20,10 +22,10 @@ if (require.main === module) {
   const { runWorkerProcess } = require("./index");
   runWorkerProcess("Protokolo worker", startProtocolWorker, "protocol")
     .then(() => {
-      console.log("[stenograma] Protokolo worker'is paleistas.");
+      log.info("[stenograma] Protokolo worker'is paleistas.");
     })
     .catch((error) => {
-      console.error(`[stenograma] Protokolo worker nepaleistas: ${error.message}`);
+      log.error(`Protokolo worker nepaleistas: ${error.message}`);
       process.exit(1);
     });
 }

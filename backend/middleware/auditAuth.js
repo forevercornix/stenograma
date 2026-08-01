@@ -1,3 +1,5 @@
+const { createLogger } = require("../utils/logger");
+const log = createLogger("auth:audit");
 /**
  * Apsaugo /api/audit nuo viešo pasiekiamumo be jokio patikrinimo.
  *
@@ -23,7 +25,7 @@ function auditAuth(req, res, next) {
     });
   }
 
-  console.warn(
+  log.warn(
     "[stenograma] AUDIT_API_KEY nenustatytas - /api/audit atviras be autentifikacijos (leidžiama tik NODE_ENV != production)."
   );
   return next();

@@ -1,4 +1,31 @@
 const rateLimit = require("express-rate-limit");
+const { createLogger } = require("../utils/logger");
+const { pseudonymizeIp } = require("../utils/clientIp");
+
+const log = createLogger("rate-limit");
+
+/**
+ * RATE LIMIT ĮVYKIS BE JAUTRAUS TURINIO (GDPR #17).
+ *
+ * Limito suveikimas yra piktnaudžiavimo signalas, tad jį reikia matyti. Bet
+ * pilnas IP yra asmens duomuo, o kelias ir kūnas gali turėti turinio - todėl
+ * loguojam PSEUDONIMĄ (HMAC su druska), maršruto pavadinimą ir nieko daugiau.
+ * Pseudonimas atsako į klausimą „ar tas pats klientas?", bet adreso neatkuria.
+ */
+function _onLimit(kind) {
+  return (req, res, next, options) => {
+    log.warn("Rate limitas viršytas", {
+      kind,
+      // `req.route?.path` vietoj `req.originalUrl`: pastarasis turi ID ir
+      // užklausos parametrus, kurie gali būti asmens duomenys.
+      route: (req.route && req.route.path) || req.baseUrl || "unknown",
+      method: req.method,
+      client: pseudonymizeIp(req.ip),
+    });
+
+    res.status(options.statusCode).json(options.message);
+  };
+}
 
 const windowMinutes = parseInt(process.env.RATE_LIMIT_WINDOW_MINUTES || "15", 10);
 const maxRequests = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "20", 10);
@@ -14,6 +41,7 @@ const expensiveEndpointLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: `Per daug užklausų. Limitas: ${maxRequests} per ${windowMinutes} min. Bandykite vėliau.` },
+  handler: _onLimit("expensive"),
 });
 
 /**
@@ -33,6 +61,7 @@ const pollRateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Per daug jobo statuso patikrinimų per trumpą laiką. Bandykite vėliau." },
+  handler: _onLimit("poll"),
 });
 
 module.exports = expensiveEndpointLimiter;

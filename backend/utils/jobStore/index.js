@@ -1,5 +1,7 @@
 const memoryStore = require("./memoryStore");
 const { STATUS, JOB_TYPES, TTL_MS } = require("./common");
+const { createLogger } = require("../../utils/logger");
+const log = createLogger("job-store");
 
 /**
  * Job store įėjimo taškas su AUTOMATINIU backend'o parinkimu:
@@ -50,7 +52,7 @@ async function initializeStore() {
   const privacy = getPrivacyPolicy();
   if (privacy.persistentExplicit && !privacy.persistentStorage) {
     if (redisUrl) {
-      console.warn(
+      log.warn(
         "[stenograma] ⚠️  PERSISTENT_STORAGE=false - REDIS_URL IGNORUOJAMAS, " +
           "job store lieka atmintyje."
       );
@@ -83,7 +85,7 @@ async function initializeStore() {
     await client.ping();
 
     store = createRedisStore(client);
-    console.log("[stenograma] Job store: Redis (persistentus, atsparus restartams)");
+    log.info("[stenograma] Job store: Redis (persistentus, atsparus restartams)");
     return store;
   } catch (err) {
     const msg = `Redis neprieinamas (${err.message}). `;
@@ -94,7 +96,7 @@ async function initializeStore() {
         `${msg}REDIS_REQUIRED=true, tad neparleidžiu su in-memory. Patikrinkite REDIS_URL ir Redis serverį.`
       );
     }
-    console.warn(
+    log.warn(
       `[stenograma] ⚠️  ${msg}Grįžtu į IN-MEMORY job store (jobai NEišliks perkrovus backendą). ` +
         `Produkcijai su persistencija - paleiskite Redis ir patikrinkite REDIS_URL.`
     );
@@ -175,7 +177,7 @@ module.exports = {
         await store.close();
       } catch (error) {
         // Netylim visiškai - realus close() defektas (mock ar Redis) neturi likti paslėptas.
-        console.warn("[test cleanup] Nepavyko uždaryti job store:", error.message);
+        log.warn("[test cleanup] Nepavyko uždaryti job store:", error.message);
       }
     }
     initPromise = null;
