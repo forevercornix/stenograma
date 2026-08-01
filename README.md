@@ -1118,6 +1118,94 @@ nuo tikrovės neatsiskirtų, fabrikos elgesį dengia testas, tikrinantis
 ⚠️ Kaina: efemeriškame režime nėra restart recovery – ilgas transkribavimas,
 nutrūkęs dėl restarto, prarandamas ir jį reikia kartoti.
 
+**PII redakcija (`utils/piiRedaction.js`).** Komponentas, kurio laukia abu
+apsaugos taškai – išorinis LLM ir eksportas. Kai jis yra, `redact()` pasiimamas
+automatiškai, be jokio perjungimo.
+
+**Dengiamos kategorijos:**
+
+| Kategorija | Placeholder | Aptikimas |
+|---|---|---|
+| Lietuviškas asmens kodas | `[ASMENS_KODAS]` | struktūra + data + **kontrolinė suma** |
+| El. pašto adresas | `[EL_PAŠTAS]` | šablonas |
+| Telefono numeris | `[TELEFONAS]` | kandidatas + validacija (`+370…`, `8…`, `(8-5)…`) |
+| Banko sąskaita (IBAN) | `[SĄSKAITA]` | šalies kodas + kontroliniai skaitmenys |
+
+**Vardai NEREDAGUOJAMI, ir tai sąmoningas sprendimas.** Susitikimo protokole
+dalyviai ir atsakingi asmenys yra pats dokumento turinys – „Dalyvis A
+įsipareigojo iki kovo 1 d." nėra protokolas. Pavojingas yra vardo **sujungimas**
+su asmens kodu, telefonu ar sąskaita; būtent tą jungtį komponentas ir nutraukia.
+
+⚠️ **Tarptautinių numerių aptikimas sąmoningai platus:** bet kokia 8–15 skaitmenų
+seka su `+` laikoma telefonu, tad `+12345678` (dokumento kodas) irgi bus
+redaguotas. Formatų pasaulyje per daug, kad juos patikimai atskirtum, o
+praleistas tikras numeris brangesnis už perteklinį redagavimą. Lietuviškoms
+formoms be `+` taisyklės griežtos (po `8` reikalingas realus srities kodas).
+
+⚠️ **Redaguotas artefaktas yra EFEMERIŠKAS.** Jis sukuriamas tik prieš išsiuntimą
+išoriniam LLM arba prieš eksportą ir niekur nesaugomas. Job store laiko **tik
+originalą**, o visi transkripcijos API atsakymai žymi `variant: "original"` –
+tad originalo ir redaguotos versijos supainioti saugykloje neįmanoma, nes
+redaguotos versijos ten paprasčiausiai nėra. Jei ateityje prireiktų redaguotą
+transkripciją grąžinti klientui ar išsaugoti, reikės atskiro gyvavimo ciklo
+(retencija, ištrynimas, `sourceArtefactId` ryšiai) – šiame etape to nėra
+sąmoningai.
+
+⚠️ **Rezultatas yra dalinai pseudonimizuotas, NE anonimizuotas** (GDPR 26
+konstatuojamosios dalies prasme). Žinomi apribojimai, taip pat surašyti kode
+(`LIMITATIONS`):
+
+- adresai neaptinkami – transkripcijoje jie rašomi laisva forma, tad patikimo
+  šablono nėra, o spėjimas duotų arba praleidimus, arba sugadintą tekstą;
+- transkripcija yra **šneka**: žodžiais padiktuotas asmens kodas neaptinkamas;
+- gimimo datos, pareigos ir darbovietės neredaguojamos – sujungtos su vardu jos
+  vis tiek gali identifikuoti asmenį.
+
+**Konfigūruojama elgsena.** `PII_REDACTION_CATEGORIES=personal_code,email`
+įjungia tik išvardytas kategorijas; nenustatyta – visos. Nežinomas pavadinimas
+**stabdo startą**, o ne praleidžiamas tyliai: `persnal_code` (rašybos klaida)
+kitaip reikštų „neredaguoti nieko", ir administratorius to nepastebėtų.
+Kategorijos yra dalis užšaldytos privatumo politikos (`privacy.redactionCategories`),
+ne atskiras `process.env` skaitymas – tad visi komponentai mato tą pačią elgseną.
+
+**Artefaktų modelis (`utils/redactedArtefact.js`).** Redaguotas turinys keliauja
+ne kaip eilutė, o kaip artefaktas su `variant`, `sourceArtefactId`,
+`redactionStatus`, `policyVersion` ir `createdAt`. Priežastis: eilutė apie save
+nieko nepasako – `redact()`, grąžinęs įvestį nepakeistą, atrodo lygiai taip pat
+kaip tikra redakcija. Guard'ai prieš išsiuntimą tikrina **variantą**, o ne
+prielaidą. Segmentų `speaker`, `start` ir `end` išlieka nepaliesti.
+
+**Variantų semantika – trys reikšmės, ne dvi.** Protokolas **nėra** redaguotas
+artefaktas: jis yra LLM **sugeneruotas** tekstas iš redaguoto įėjimo. Modelis gali
+įrašyti vardą, iš konteksto atkurtą numerį ar savo sugalvotą identifikatorių,
+kurio redaguotame įėjime nebuvo. Todėl `/api/generate` grąžina du atskirus laukus:
+
+```json
+{ "protocolVariant": "generated", "sourceTranscriptVariant": "redacted" }
+```
+
+Vienas bendras `variant: "redacted"` leistų klientui manyti, kad protokolas jau
+saugus platinti – o tai netiesa.
+
+Variantas nurodomas **kiekviename** atsakyme (`/api/transcribe`,
+`/api/transcribe-jobs` kūrimo ir būsenos), ne tik redaguotame. Jei žymėtume tik
+redaguotus, atsakymas be lauko būtų dviprasmis: arba originalas, arba senesnė API
+versija be lauko.
+
+Kai protokolo generavimui prireikia **repair retry** (LLM grąžino netinkamą JSON),
+tam pačiam tiekėjui siunčiamas antras payload'as – jis irgi redaguojamas, bet
+metaduomenys lieka **šaltinio transkripcijos**. Kitaip API rodytų repair prompto
+statistiką (`redactionStats: {}`) net tada, kai originale PII buvo rasta ir
+pašalinta.
+
+Auditas ir API atsakymai neša redakcijos būseną (`variant`, `redactionStatus`,
+`outcome`, `policyVersion`, kategorijų **skaičius**). Fiksuojama ir **nesėkmė**:
+kritus redakcijai audite atsiranda `redactionStatus: "failed"`, `outcome:
+"blocked"`, o serverio loge – atskiras įspėjimas. Be to „modelis neatsakė" ir
+„duomenys sąmoningai neišsiųsti" atrodytų vienodai. Aptiktų reikšmių niekur
+nėra: statistika konstruojama tik iš skaitliukų, o auditas naudoja laukų
+whitelist'ą.
+
 **Eksporto politika.** `EXPORT_ALLOW_ORIGINAL=false` reiškia, kad eksporto failai
 generuojami tik iš redaguoto protokolo. Vykdoma `services/exportService.js`
 `buildExport()` – vienintelėje vietoje, pro kurią eina visi trys formatai.

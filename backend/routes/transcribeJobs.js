@@ -8,6 +8,7 @@ const { HttpError } = require("../services/transcriptionService");
 const { detectAudioMagic } = require("../utils/audioMagicBytes");
 const { safeUnlinkUpload, safeExtension } = require("../utils/uploadPath");
 const { createAudioUpload } = require("../utils/uploadStorage");
+const { VARIANT } = require("../utils/redactedArtefact");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
@@ -113,7 +114,9 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     });
 
     enqueued = true;
-    res.status(202).json({ jobId: job.id, status: job.status });
+    // Variantas nurodomas JAU kuriant jobą: klientas turi žinoti, kokį turinį
+    // gaus, dar prieš pirmą polling'ą (GDPR #4).
+    res.status(202).json({ jobId: job.id, status: job.status, variant: VARIANT.ORIGINAL });
   } catch (e) {
     // Jei enqueue nepavyko (Redis/BullMQ eilė krito, add() metė klaidą ir pan.), audio
     // jau perkeltas į storage - reikia jį ištrinti, kad neliktų NAŠLAITINIS failas
@@ -158,6 +161,18 @@ router.get("/transcribe-jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res)
     jobId: job.id,
     status: job.status,
     progress: job.progress || null,
+    /**
+     * VARIANTAS KIEKVIENAME atsakyme, ne tik redaguotame (GDPR #4:
+     * „Original and redacted versions cannot be confused in API responses").
+     *
+     * Jei žymėtume tik redaguotus, atsakymas be lauko būtų dviprasmis: arba tai
+     * originalas, arba senesnė API versija, kuri lauko dar neturi. Klientas
+     * negalėtų atskirti - tad laukas privalomas abiem atvejais.
+     *
+     * Transkribavimo jobas visada duoda ORIGINALĄ: redakcija taikoma vėliau,
+     * ties išsiuntimu išoriniam tiekėjui arba eksportu.
+     */
+    variant: VARIANT.ORIGINAL,
     result: job.result,
     error: job.error,
     error_code: job.error_code,

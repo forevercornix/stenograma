@@ -173,22 +173,6 @@ class ExportPolicyError extends Error {
 }
 
 /**
- * Rekursyviai pritaiko redact() kiekvienam teksto laukui, IŠSAUGANT struktūrą.
- *
- * Kodėl ne visam serializuotam dokumentui: DOCX yra dvejetainis, tad "redaguok
- * galutinį failą" veiktų tik TXT/CSV. Redaguojant šaltinio objektą visi trys
- * formatai gauna vienodą turinį - kitaip DOCX taptų tyliąja spraga.
- */
-function _redactDeep(value, redact) {
-  if (typeof value === "string") return redact(value);
-  if (Array.isArray(value)) return value.map((item) => _redactDeep(item, redact));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, _redactDeep(v, redact)]));
-  }
-  return value;
-}
-
-/**
  * EKSPORTO POLITIKOS VYKDYMAS (GDPR #5).
  *
  * Čia, o ne routes/exports.js: eksporto kūrimas yra vienintelis kelias iki failo,
@@ -202,6 +186,7 @@ function _enforceExportPolicy(protocol) {
   if (getPrivacyPolicy().exportAllowOriginal) return protocol;
 
   const { probeRedactionComponent } = require("../utils/redactionComponent");
+  const artefacts = require("../utils/redactedArtefact");
   const probe = probeRedactionComponent();
 
   if (probe.state !== "ok") {
@@ -212,8 +197,22 @@ function _enforceExportPolicy(protocol) {
   }
 
   try {
-    return _redactDeep(protocol, probe.redact);
+    /**
+     * TAS PATS ARTEFAKTO GUARD'AS kaip išorinio tiekėjo kelyje.
+     *
+     * Anksčiau čia buvo tiesioginis `_redactDeep(protocol, probe.redact)` -
+     * eksportas pasitikėdavo tuo, kad `redact()` iškviestas, o LLM kelias jau
+     * tikrindavo artefakto variantą. Dviguba standartų sistema: silpnesnė
+     * apsauga ten, kur failas keliauja tiesiai vartotojui.
+     */
+    const original = artefacts.createOriginalArtefact({ text: "", data: protocol });
+    const redacted = artefacts.createRedactedArtefact(original, probe.module);
+    artefacts.assertRedacted(redacted, "eksportas");
+
+    return redacted.data;
   } catch (e) {
+    if (e instanceof ExportPolicyError) throw e;
+
     throw new ExportPolicyError(
       "PII redakcija nepavyko, todėl eksporto failas NEBUVO sugeneruotas " +
         "(EXPORT_ALLOW_ORIGINAL=false)."

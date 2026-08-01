@@ -319,6 +319,36 @@ function sanitizeForLogging(value, seen = new WeakSet()) {
   return sanitizeScalar(value);
 }
 
+/**
+ * Redakcijos metaduomenys auditui.
+ *
+ * Sąmoningai NEkopijuojam objekto: perrašom lauką po lauko. Jei ateityje
+ * artefaktas įgytų naują lauką su jautriu turiniu, jis čia NEPATEKS automatiškai -
+ * reikės sąmoningo veiksmo. Tai ta pati logika, dėl kurios visas auditas remiasi
+ * whitelist'u, o ne juoduoju sąrašu.
+ */
+function sanitizeRedaction(redaction) {
+  if (!redaction || typeof redaction !== "object") return null;
+
+  const stats = {};
+  for (const [key, value] of Object.entries(redaction.redactionStats || {})) {
+    // TIK skaičiai. Eilutė čia reikštų, kad kažkas bando įrašyti reikšmę.
+    if (Number.isInteger(value) && value >= 0) stats[sanitizeControlled(key, 40)] = value;
+  }
+
+  return {
+    variant: sanitizeControlled(redaction.variant, 20),
+    redactionStatus: sanitizeControlled(redaction.redactionStatus, 20),
+    policyVersion: sanitizeControlled(redaction.policyVersion, 20),
+    // Baigtis ("blocked" / "sent") - atskirai nuo statuso: statusas sako, kas
+    // nutiko redakcijai, baigtis - kas nutiko duomenims.
+    outcome: sanitizeControlled(redaction.outcome, 20),
+    artefactId: sanitizeControlled(redaction.artefactId, 40),
+    sourceArtefactId: sanitizeControlled(redaction.sourceArtefactId, 40),
+    redactionStats: stats,
+  };
+}
+
 function record(entry = {}) {
   if (isPrivacyModeEnabled()) {
     // Fail-safe: įjungus PRIVACY_MODE ne tik neberašom, bet ir nebelaikom to,
@@ -365,6 +395,12 @@ function record(entry = {}) {
     // tik ištrynimo kvitui ("queue=deleted storage=none ..."). Ne laisvas tekstas -
     // simbolių allowlist ir ilgio riba, kaip ir kitiems kontroliuojamiems laukams.
     details: sanitizeControlled(entry.details, 200),
+
+    // REDAKCIJOS BŪSENA (GDPR #4). Laukai eina pro TĄ PATĮ whitelist principą
+    // kaip ir visi kiti: eilutės - per sanitizeControlled, statistika - tik
+    // skaičiai. Aptiktos PII reikšmės čia patekti negali net tada, jei kas nors
+    // jas netyčia įdėtų į artefaktą.
+    redaction: sanitizeRedaction(entry.redaction),
   });
 
   log.push(row);

@@ -5,6 +5,7 @@ const rateLimiter = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { safeUnlinkUpload, resolveExistingUploadPath } = require("../utils/uploadPath");
 const { createAudioUpload } = require("../utils/uploadStorage");
+const { VARIANT } = require("../utils/redactedArtefact");
 
 const router = express.Router();
 
@@ -59,7 +60,13 @@ router.post("/transcribe", rateLimiter, apiKeyAuth, uploadSingleAudio, async (re
       transcriptionProviderOverride: req.body.provider,
       diarizationModeOverride: req.body.diarizationProvider,
     });
-    return res.json(result);
+    // VARIANTO ŽYMUO (GDPR #4: „Redacted API responses contain an explicit
+    // variant field and cannot be confused with original content").
+    //
+    // Šis endpointas grąžina ORIGINALĄ - ir būtent todėl laukas privalomas.
+    // Jei variantą žymėtų tik redaguoti atsakymai, klientas negalėtų atskirti
+    // „originalas" nuo „senesnė API versija, kuri lauko dar neturi".
+    return res.json({ ...result, variant: VARIANT.ORIGINAL });
   } catch (e) {
     if (e instanceof HttpError) {
       return res.status(e.statusCode).json({ error: e.message, details: e.details });

@@ -34,6 +34,16 @@ const PROTOCOL = {
   veiksmai: [{ uzduotis: "Parengti", atsakingas: `Jonas ${MARKER}`, terminas: "2026-02-01" }],
 };
 
+/** Žymuo „naudok TIKRĄ utils/piiRedaction.js", o ne testinį pakaitalą. */
+const REAL = Symbol("real-redaction-component");
+
+/** Simuliuoja „#4 komponento nėra" - jis dabar realiai egzistuoja. */
+function missingModuleLoader() {
+  const error = new Error("Cannot find module './piiRedaction'");
+  error.code = "MODULE_NOT_FOUND";
+  throw error;
+}
+
 function withPolicy(env, redact, fn) {
   const saved = {};
   for (const [k, v] of Object.entries(env)) {
@@ -41,7 +51,11 @@ function withPolicy(env, redact, fn) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  redactionComponent._setLoaderForTests(redact ? () => ({ redact }) : null);
+  // Trys būsenos, ne dvi: testinis redaktorius / REAL (tikras #4 komponentas) /
+  // nėra komponento. Dviejų neužtenka nuo tada, kai #4 realiai egzistuoja.
+  redactionComponent._setLoaderForTests(
+    redact === REAL ? null : redact ? () => ({ redact }) : missingModuleLoader
+  );
   privacyPolicy._resetForTests();
 
   return (async () => {
@@ -105,9 +119,41 @@ test("FAIL-CLOSED: redakcijai kritus originalas NEGRĄŽINAMAS", async () => {
   });
 });
 
-test("startup: EXPORT_ALLOW_ORIGINAL=false be #4 komponento = klaida", () => {
+test("startup: EXPORT_ALLOW_ORIGINAL=false be komponento = klaida", async () => {
+  await withPolicy({}, null, () => {
+    const { errors } = validatePrivacyConfig({ EXPORT_ALLOW_ORIGINAL: "false" });
+    assert.ok(errors.some((e) => /EXPORT_ALLOW_ORIGINAL/.test(e) && /issue #4/.test(e)));
+  });
+});
+
+test("startup: EXPORT_ALLOW_ORIGINAL=false su REALIU komponentu praeina", () => {
   const { errors } = validatePrivacyConfig({ EXPORT_ALLOW_ORIGINAL: "false" });
-  assert.ok(errors.some((e) => /EXPORT_ALLOW_ORIGINAL/.test(e) && /issue #4/.test(e)));
+  assert.deepEqual(errors, [], "įgyvendinus #4 eksporto politika nebeblokuoja starto");
+});
+
+test("REALUS komponentas: eksportas be identifikatorių, bet su vardais", async () => {
+  await withPolicy({ EXPORT_ALLOW_ORIGINAL: "false" }, REAL, async () => {
+    // NEpaveldim PROTOCOL: jo MARKER turi 11 skaitmenų seką, kuri PO ribos
+    // pataisymo teisingai redaguojama - tad paveldėjimas testą painiotų.
+    // (Ankstesnis komentaras teigė, kad kodas po brūkšnelio sąmoningai
+    // neaptinkamas; tai buvo defektas, ištaisytas šiame PR.)
+    const protocol = {
+      pavadinimas: "Posėdis",
+      data: "2026-01-01",
+      dalyviai: ["Jonas Jonaitis, a.k. 39001010000"],
+      darbotvarke: ["Ataskaita"],
+      aptarti_klausimai: [],
+      nutarimai: ["Susisiekti el. paštu jonas@imone.lt"],
+      veiksmai: [],
+    };
+
+    const txt = (await buildExport(protocol, "txt")).buffer.toString("utf8");
+
+    assert.ok(!txt.includes("39001010000"));
+    assert.ok(!txt.includes("jonas@imone.lt"));
+    assert.ok(txt.includes("[ASMENS_KODAS]"));
+    assert.ok(txt.includes("Jonas Jonaitis"), "vardai lieka - jie yra protokolo turinys");
+  });
 });
 
 test("diagnostika rodo eksporto politiką ir artefaktų būseną", () => {
@@ -162,4 +208,27 @@ test("RETENCIJA: eksportas NERAŠO į diską (todėl retencijai nėra ko valyti)
   }
 
   assert.deepEqual(attempts, [], `eksportas rašė į diską: ${attempts.join(", ")}`);
+});
+
+test("STRUKTŪRA: eksportas eina per ARTEFAKTO guard'ą, ne per gryną redact()", () => {
+  /**
+   * Anksčiau eksportas kvietė `_redactDeep(protocol, probe.redact)` - pasitikėjo
+   * tuo, kad `redact()` iškviestas, o LLM kelias jau tikrino artefakto variantą.
+   * Dviguba standartų sistema: silpnesnė apsauga ten, kur failas keliauja
+   * tiesiai vartotojui.
+   *
+   * Elgsenos testu to nepagausi: `assertRedacted()` negali kristi, nes artefaktą
+   * kuria pati sistema. Tikrinama STRUKTŪRA - tiksliai tai, kas buvo klaidinga.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const source = fs.readFileSync(path.join(__dirname, "../services/exportService.js"), "utf8");
+
+  assert.match(source, /createOriginalArtefact/, "eksportas turi kurti artefaktą");
+  assert.match(source, /createRedactedArtefact/, "eksportas turi kurti redaguotą artefaktą");
+  assert.match(source, /assertRedacted\(/, "eksportas turi tikrinti variantą");
+  assert.ok(
+    !/_redactDeep\s*\(/.test(source.replace(/\/\*[\s\S]*?\*\//g, "")),
+    "tiesioginis redact() apėjimas negali grįžti"
+  );
 });

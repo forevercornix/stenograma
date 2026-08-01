@@ -104,10 +104,14 @@ test("išorinis tiekėjas su standard profiliu duoda ĮSPĖJIMĄ (ne klaidą)", 
   const { errors, warnings } = validatePrivacyConfig({ LLM_PROVIDER: "claude" });
 
   assert.deepEqual(errors, []);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /IŠORINIS/);
-  assert.match(warnings[0], /Anthropic/);
-  assert.match(warnings[0], /priklauso nuo jūsų sutarties/);
+
+  // Po #4 čia yra DU įspėjimai: apie išorinį tiekėją ir apie tai, kad redakcija
+  // prieinama, bet neįjungta. Tikrinam turinį, o ne kiekį - kiekio tikrinimas
+  // laužtųsi kaskart pridėjus naują teisėtą įspėjimą.
+  const external = warnings.find((w) => /IŠORINIS/.test(w));
+  assert.ok(external, `laukta įspėjimo apie išorinį tiekėją, gauta: ${warnings.join(" | ")}`);
+  assert.match(external, /Anthropic/);
+  assert.match(external, /priklauso nuo jūsų sutarties/);
 });
 
 test("startupChecks perima privatumo klaidas (serveris nestartuoja)", () => {
@@ -137,7 +141,7 @@ test("diagnostika rodo efektyvias nuostatas be paslapčių", () => {
     externalProviders: false,
     auditEnabled: true,
     persistentStorage: false,
-    redaction: { requiredBeforeExternal: false, componentDetected: false, configuredForEnforcement: false },
+    redaction: { requiredBeforeExternal: false, componentDetected: true, configuredForEnforcement: false },
     export: { allowOriginal: true, artifactsPersisted: false },
     storage: {
       jobState: "memory",
@@ -562,10 +566,24 @@ test("startupChecks perima persistencijos prieštaravimą (serveris nestartuoja)
 const privacyConfig = require("../utils/privacyConfig");
 const redactionComponent = require("../utils/redactionComponent");
 
-/** Suvaidina, kad #4 (utils/piiRedaction.js) jau egzistuoja arba dar ne. */
+function _missingModuleLoader() {
+  const error = new Error("Cannot find module './piiRedaction'");
+  error.code = "MODULE_NOT_FOUND";
+  throw error;
+}
+
+/**
+ * Suvaidina, ar #4 komponentas prieinamas.
+ *
+ * SVARBU: `available=false` dabar reikalauja EKSPLICITINĖS simuliacijos, nes
+ * utils/piiRedaction.js realiai egzistuoja. Anksčiau užteko `null` (reali
+ * patikra nieko nerasdavo) - ta prielaida nebegalioja, ir būtent ji sulaužė 12
+ * testų, kai #4 nusileido. Tai teisingas testų elgesys: jie fiksavo laikiną
+ * būseną ir garsiai pranešė, kai ji pasikeitė.
+ */
 function withRedaction(available, fn) {
   redactionComponent._setLoaderForTests(
-    available ? () => ({ redact: (text) => text }) : null
+    available ? () => ({ redact: (text) => text }) : _missingModuleLoader
   );
   try {
     return fn();
@@ -574,28 +592,47 @@ function withRedaction(available, fn) {
   }
 }
 
-test("redakcijos modulio (#4) šioje repo versijoje dar nėra", () => {
-  assert.equal(privacyConfig.isRedactionAvailable(), false);
+test("redakcijos komponentas (#4) YRA įgyvendintas", () => {
+  assert.equal(privacyConfig.isRedactionAvailable(), true);
+
+  // Kontraktas, kurio tikisi utils/redactionComponent.js.
+  const mod = require("../utils/piiRedaction");
+  assert.equal(typeof mod.redact, "function");
+  assert.equal(typeof mod.POLICY_VERSION, "string");
 });
 
-test("REQUIRE_REDACTION_BEFORE_EXTERNAL=true be #4 modulio = startup KLAIDA", () => {
+test("REQUIRE_REDACTION_BEFORE_EXTERNAL=true be komponento = startup KLAIDA", () => {
+  // Komponentas dabar yra, tad „jo nėra" simuliuojama eksplicitiškai.
+  withRedaction(false, () => {
+    const { errors } = validatePrivacyConfig({
+      LLM_PROVIDER: "claude",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
+
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /issue #4/);
+    assert.match(errors[0], /piiRedaction/);
+  });
+});
+
+test("REQUIRE_REDACTION_BEFORE_EXTERNAL=true su REALIU komponentu praeina", () => {
   const { errors } = validatePrivacyConfig({
     LLM_PROVIDER: "claude",
     REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
   });
 
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /issue #4/);
-  assert.match(errors[0], /piiRedaction/);
+  assert.deepEqual(errors, [], "įgyvendinus #4 nuostata nebeblokuoja starto");
 });
 
 test("startupChecks perima redakcijos prieštaravimą (serveris nestartuoja)", () => {
-  const { errors } = validateConfig({
-    LLM_PROVIDER: "claude",
-    REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
-  });
+  withRedaction(false, () => {
+    const { errors } = validateConfig({
+      LLM_PROVIDER: "claude",
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
+    });
 
-  assert.ok(errors.some((error) => /REQUIRE_REDACTION_BEFORE_EXTERNAL/.test(error)));
+    assert.ok(errors.some((error) => /REQUIRE_REDACTION_BEFORE_EXTERNAL/.test(error)));
+  });
 });
 
 test("su įgyvendintu #4 ta pati konfigūracija praeina be klaidų", () => {
@@ -630,11 +667,20 @@ test("#4 prieinamas, bet nuostata neįjungta - įspėjimas apie NEREDAGUOTUS duo
   });
 });
 
-test("REGRESIJA: be #4 modulio ir be nuostatos jokio redakcijos triukšmo nėra", () => {
-  const { errors, warnings } = validatePrivacyConfig({ LLM_PROVIDER: "claude" });
+test("be komponento ir be nuostatos jokio redakcijos triukšmo nėra", () => {
+  withRedaction(false, () => {
+    const { errors, warnings } = validatePrivacyConfig({ LLM_PROVIDER: "claude" });
 
-  assert.deepEqual(errors, []);
-  assert.ok(!warnings.some((w) => /NEREDAGUOTA/.test(w)));
+    assert.deepEqual(errors, []);
+    assert.ok(!warnings.some((w) => /NEREDAGUOTA/.test(w)));
+  });
+});
+
+test("SU komponentu, bet be nuostatos - ĮSPĖJIMAS apie neredaguotus duomenis", () => {
+  // Naujas numatytasis elgesys po #4: komponentas yra, tad tyla būtų klaidinanti.
+  const { warnings } = validatePrivacyConfig({ LLM_PROVIDER: "claude" });
+
+  assert.ok(warnings.some((w) => /NEREDAGUOTA/.test(w)));
 });
 
 test("REQUIRE_REDACTION_BEFORE_EXTERNAL=maybe atmetama kaip netaisyklinga reikšmė", () => {
@@ -647,13 +693,16 @@ test("REQUIRE_REDACTION_BEFORE_EXTERNAL=maybe atmetama kaip netaisyklinga reikš
 });
 
 test("diagnostika rodo IR reikalavimą, IR realų prieinamumą", () => {
-  const diagnostics = describeForDiagnostics({ ...LOCAL_ENV });
-
-  assert.deepEqual(diagnostics.redaction, {
-    requiredBeforeExternal: false,
-    componentDetected: false,
-    configuredForEnforcement: false,
+  withRedaction(false, () => {
+    assert.deepEqual(describeForDiagnostics({ ...LOCAL_ENV }).redaction, {
+      requiredBeforeExternal: false,
+      componentDetected: false,
+      configuredForEnforcement: false,
+    });
   });
+
+  // Su įgyvendintu #4 komponentas aptinkamas be jokio perjungimo.
+  assert.equal(describeForDiagnostics({ ...LOCAL_ENV }).redaction.componentDetected, true);
 
   withRedaction(true, () => {
     const withModule = describeForDiagnostics({
@@ -679,7 +728,7 @@ test("diagnostika rodo IR reikalavimą, IR realų prieinamumą", () => {
 
 test("trys komponento būsenos duoda TRIS skirtingus pranešimus (ne vieną 'nėra')", () => {
   const cases = [
-    [null, /issue #4/],
+    [_missingModuleLoader, /issue #4/],
     [
       () => {
         throw new SyntaxError("netikėtas simbolis");
@@ -752,4 +801,39 @@ test("įspėjimas apie NEREDAGUOTUS duomenis netaikomas, kai išorinis tik trans
     // transkripcijos siuntimą LLM tiekėjui būtų klaidingas.
     assert.ok(!warnings.some((w) => /NEREDAGUOTA/.test(w)));
   });
+});
+
+test("STARTUP: nežinoma PII_REDACTION_CATEGORIES reikšmė stabdo startą", () => {
+  // README ir .env.example tai žada; iki šio pataisymo pažadas negaliojo -
+  // klaida iškildavo tik pirmos realios redakcijos metu, jau priiminėjant
+  // užklausas.
+  const { errors } = validatePrivacyConfig({ PII_REDACTION_CATEGORIES: "persnal_code" });
+
+  assert.ok(errors.some((e) => /PII_REDACTION_CATEGORIES/.test(e)));
+  assert.ok(errors.some((e) => /personal_code, email, phone, iban/.test(e)), "klaida turi rodyti galimas reikšmes");
+});
+
+test("STARTUP: startupChecks perima kategorijų klaidą (serveris nestartuoja)", () => {
+  const { errors } = validateConfig({ PII_REDACTION_CATEGORIES: "email,nesamas" });
+
+  assert.ok(errors.some((e) => /PII_REDACTION_CATEGORIES/.test(e)));
+});
+
+test("STARTUP: teisingos kategorijos praeina ir patenka į politiką", () => {
+  const { errors } = validatePrivacyConfig({ PII_REDACTION_CATEGORIES: "personal_code,email" });
+  assert.deepEqual(errors, []);
+
+  const { getPrivacyConfig } = require("../utils/privacyConfig");
+  assert.deepEqual(getPrivacyConfig({ PII_REDACTION_CATEGORIES: "personal_code,email" }).redactionCategories, [
+    "PERSONAL_CODE",
+    "EMAIL",
+  ]);
+});
+
+test("POLITIKA: kategorijos yra UŽŠALDYTOS, kaip ir likusi privatumo politika", () => {
+  const { getPrivacyConfig } = require("../utils/privacyConfig");
+  const categories = getPrivacyConfig({}).redactionCategories;
+
+  assert.equal(Object.isFrozen(categories), true);
+  assert.deepEqual(categories, ["PERSONAL_CODE", "EMAIL", "PHONE", "IBAN"]);
 });

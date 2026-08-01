@@ -1,5 +1,6 @@
 const express = require("express");
 const { generateProtocol, HttpError } = require("../services/protocolService");
+const { VARIANT } = require("../utils/redactedArtefact");
 const rateLimiter = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { sanitizeServerError } = require("../utils/sanitizeError");
@@ -24,7 +25,24 @@ const router = express.Router();
 router.post("/generate", rateLimiter, apiKeyAuth, async (req, res) => {
   try {
     const result = await generateProtocol(req.body || {});
-    return res.json(result);
+    /**
+     * VARIANTŲ SEMANTIKA (GDPR #4).
+     *
+     * Protokolas NĖRA redaguotas artefaktas - jis yra LLM SUGENERUOTAS tekstas,
+     * sukurtas iš redaguoto įėjimo. Tai ne tas pats: modelis gali įrašyti vardą,
+     * iš konteksto atkurtą numerį ar savo sugalvotą identifikatorių, kurio
+     * redaguotame įėjime nebuvo.
+     *
+     * Todėl žymim DU dalykus atskirai: kas yra pats protokolas
+     * (`protocolVariant: "generated"`) ir iš ko jis padarytas
+     * (`sourceTranscriptVariant`). Vienas bendras `variant: "redacted"` leistų
+     * klientui manyti, kad protokolas jau saugus platinti - o tai netiesa.
+     */
+    return res.json({
+      ...result,
+      protocolVariant: VARIANT.GENERATED,
+      sourceTranscriptVariant: result.redaction ? VARIANT.REDACTED : VARIANT.ORIGINAL,
+    });
   } catch (e) {
     // 400/403/502 iš HttpError yra saugūs, naudingi pranešimai (bloga užklausa,
     // override išjungtas, arba LLM negrąžino validaus JSON po repair bandymo -

@@ -40,8 +40,8 @@ function probeRedactionComponent() {
     const missing = e && e.code === "MODULE_NOT_FOUND" && String(e.message).includes(MODULE_PATH);
 
     return missing
-      ? { state: STATE.MISSING, detail: null, redact: null }
-      : { state: STATE.LOAD_ERROR, detail: e && e.message ? e.message : String(e), redact: null };
+      ? { state: STATE.MISSING, detail: null, redact: null, module: null }
+      : { state: STATE.LOAD_ERROR, detail: e && e.message ? e.message : String(e), redact: null, module: null };
   }
 
   if (!mod || typeof mod.redact !== "function") {
@@ -49,10 +49,11 @@ function probeRedactionComponent() {
       state: STATE.INVALID_CONTRACT,
       detail: `${MODULE_PATH} neturi eksportuojamos redact() funkcijos`,
       redact: null,
+      module: null,
     };
   }
 
-  return { state: STATE.OK, detail: null, redact: mod.redact };
+  return { state: STATE.OK, detail: null, redact: mod.redact, module: mod };
 }
 
 /** Trumpinys ten, kur svarbu tik "ar galima pasikliauti". */
