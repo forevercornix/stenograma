@@ -75,7 +75,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
     if (textResult.collapsedRuns > 0) {
       dedupInfo = { collapsedRuns: textResult.collapsedRuns, removedItems: textResult.removedItems };
       log.info(
-        `[stenograma] Transkripcijos dedup: sutraukta ${textResult.collapsedRuns} pasikartojimų serijų ` +
+        `Transkripcijos dedup: sutraukta ${textResult.collapsedRuns} pasikartojimų serijų ` +
           `(${textResult.removedItems} fragmentų, ${textResult.originalLength} -> ${textResult.dedupedLength} simbolių). ` +
           `Išjungti: TRANSCRIPT_DEDUP=false.`
       );
@@ -166,7 +166,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
       // redakcija). Rašom TIK politikos versiją ir baigtį - jokio turinio.
       const categories = Object.keys(redactionAuditMeta.redactionStats || {}).length;
       log.info(
-        `[stenograma] Redakcija atlikta: policy=${redactionAuditMeta.policyVersion}, ` +
+        `Redakcija atlikta: policy=${redactionAuditMeta.policyVersion}, ` +
           `outcome=sent, categories=${categories}`
       );
     }
@@ -230,7 +230,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
     if (isRedactionFailure) {
       // Application log atskirai nuo audito: jie skirti skirtingiems skaitytojams.
       log.warn(
-        `[stenograma] Redakcija NEPAVYKO (${e.code}) - išorinis tiekėjas nekviestas, duomenys neišsiųsti.`
+        `Redakcija NEPAVYKO (${e.code}) - išorinis tiekėjas nekviestas, duomenys neišsiųsti.`
       );
     }
 

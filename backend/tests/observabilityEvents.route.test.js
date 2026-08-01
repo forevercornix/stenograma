@@ -42,7 +42,7 @@ test("EKSPORTAS: įvykiai turi STRUKTŪRIZUOTUS variant/format/outcome", async (
 
   const res = await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: { pavadinimas: "Posėdis", data: "2026-01-01" } });
+    .send({ variant: "original", format: "txt", protocol: { pavadinimas: "Posėdis", data: "2026-01-01" } });
 
   assert.equal(res.status, 200);
 
@@ -117,7 +117,8 @@ test("EKSPORTAS: REALUS nesėkmės kelias turi visus struktūrizuotus laukus", a
 
   const res = await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: { pavadinimas: "Posėdis", data: "2026-01-01" } });
+    // Prašom REDAGUOTO varianto, kai komponento nėra - fail-closed kelias.
+    .send({ variant: "redacted", format: "txt", protocol: { pavadinimas: "Posėdis", data: "2026-01-01" } });
 
   assert.ok(res.status >= 400, `laukta klaidos, gauta ${res.status}`);
 

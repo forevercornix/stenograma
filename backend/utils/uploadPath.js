@@ -170,7 +170,7 @@ async function safeUnlinkUpload(filePath) {
     return true;
   } catch (e) {
     log.warn(
-      `[stenograma] Nepavyko pašalinti laikino įkėlimo failo (${e.code || e.name || "klaida"}). ` +
+      `Nepavyko pašalinti laikino įkėlimo failo (${e.code || e.name || "klaida"}). ` +
         "Failas liks iki kito paleidimo valymo."
     );
     return false;

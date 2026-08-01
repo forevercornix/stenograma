@@ -73,7 +73,7 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
     if (!outcome.criticalFailure) {
       summary.succeeded += 1;
       log.info(
-        `[stenograma] Nebaigtas jobo ${job.id} ištrynimas pakartotas sėkmingai (bandymas ${attempts}).`
+        `Nebaigtas jobo ${job.id} ištrynimas pakartotas sėkmingai (bandymas ${attempts}).`
       );
       continue;
     }
@@ -89,7 +89,7 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
       .catch(() => {});
 
     const message =
-      `[stenograma] Jobo ${job.id} ištrynimas vis dar nepavyksta ` +
+      `Jobo ${job.id} ištrynimas vis dar nepavyksta ` +
       `(bandymas ${attempts}): ${outcome.errors.join("; ")}`;
 
     if (attempts >= MAX_ATTEMPTS_BEFORE_ALERT) {
@@ -144,7 +144,7 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
     if (removed) {
       summary.succeeded += 1;
       log.info(
-        `[stenograma] Likęs jobo ${job.id} audio pašalintas pakartotinai (bandymas ${attempts}).`
+        `Likęs jobo ${job.id} audio pašalintas pakartotinai (bandymas ${attempts}).`
       );
       continue;
     }
@@ -160,7 +160,7 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
       .catch(() => {});
 
     const message =
-      `[stenograma] Jobo ${job.id} audio vis dar nepavyksta ištrinti (bandymas ${attempts}).`;
+      `Jobo ${job.id} audio vis dar nepavyksta ištrinti (bandymas ${attempts}).`;
 
     if (attempts >= MAX_ATTEMPTS_BEFORE_ALERT) {
       log.error(

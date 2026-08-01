@@ -26,7 +26,7 @@ function auditAuth(req, res, next) {
   }
 
   log.warn(
-    "[stenograma] AUDIT_API_KEY nenustatytas - /api/audit atviras be autentifikacijos (leidžiama tik NODE_ENV != production)."
+    "AUDIT_API_KEY nenustatytas - /api/audit atviras be autentifikacijos (leidžiama tik NODE_ENV != production)."
   );
   return next();
 }

@@ -37,7 +37,7 @@ function apiKeyAuth(req, res, next) {
   }
 
   log.warn(
-    `[stenograma] API_KEY nenustatytas - ${req.path} atviras be autentifikacijos (leidžiama tik NODE_ENV != production). Nediekite taip viešai.`
+    `API_KEY nenustatytas - ${req.path} atviras be autentifikacijos (leidžiama tik NODE_ENV != production). Nediekite taip viešai.`
   );
   return next();
 }

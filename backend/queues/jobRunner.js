@@ -49,11 +49,11 @@ async function init(options = {}) {
     // connect nepavyko - tai svarbi žinutė (ne tik "nėra REDIS_URL").
     if (process.env.REDIS_URL) {
       log.warn(
-        "[stenograma] ⚠️  REDIS_URL nustatytas, BET job store persistencija neprieinama " +
+        "⚠️  REDIS_URL nustatytas, BET job store persistencija neprieinama " +
           "(Redis connect nepavyko). Job runner naudoja INLINE - suderinta su memory store."
       );
     } else {
-      log.info("[stenograma] Job runner: inline (in-proceso; be atskirų worker'ių - nustatykite REDIS_URL BullMQ eilei)");
+      log.info("Job runner: inline (in-proceso; be atskirų worker'ių - nustatykite REDIS_URL BullMQ eilei)");
     }
     warnIfInlineInProduction();
     return _mode;
@@ -64,7 +64,7 @@ async function init(options = {}) {
     // pagal struktūros reikalavimą. Jos sukuriamos lazy pirmo add metu.
     require("bullmq"); // patikrinam, kad bullmq įdiegtas (mes fallback jei ne)
     _mode = "bullmq";
-    log.info("[stenograma] Job runner: BullMQ (atskiri worker procesai; atsparu restartams)");
+    log.info("Job runner: BullMQ (atskiri worker procesai; atsparu restartams)");
     return _mode;
   } catch (e) {
     if (process.env.REDIS_REQUIRED === "true") {
@@ -87,7 +87,7 @@ async function init(options = {}) {
 function warnIfInlineInProduction() {
   if (process.env.NODE_ENV === "production") {
     log.warn(
-      "[stenograma] ⚠️  ⚠️  DĖMESIO: inline job runner PRODUKCIJOJE (NODE_ENV=production, be REDIS_URL).\n" +
+      "⚠️  ⚠️  DĖMESIO: inline job runner PRODUKCIJOJE (NODE_ENV=production, be REDIS_URL).\n" +
       "           Job'ai vykdomi HTTP procese ir laikomi ATMINTYJE - backend'o restartas ar\n" +
       "           kritimas apdorojimo metu PRARANDA darbą ir būseną, retry NĖRA. Ilgiems failams\n" +
       "           tai reiškia, kad valandų apdorojimas gali dingti. Produkcijai nustatykite REDIS_URL\n" +

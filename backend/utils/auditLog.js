@@ -57,7 +57,7 @@ function resolveSalt() {
     if (!saltWarningShown) {
       saltWarningShown = true;
       logger.warn(
-        "[stenograma] AUDIT_ID_SALT nenustatytas - sugeneruota ATSITIKTINĖ druska šiam procesui. " +
+        "AUDIT_ID_SALT nenustatytas - sugeneruota ATSITIKTINĖ druska šiam procesui. " +
           "Pseudonimai nebus vienodi po perkrovimo ar kitoje replikoje. Tai priimtina, kol auditas " +
           "yra atmintyje; persistentinei saugyklai nustatykite AUDIT_ID_SALT (openssl rand -hex 32)."
       );
@@ -477,7 +477,7 @@ function purgeForPrivacyMode() {
   if (removed > 0 && !privacyPurgeWarningShown) {
     privacyPurgeWarningShown = true;
     logger.warn(
-      `[stenograma] PRIVACY_MODE=true - audito žurnalas išvalytas (${removed} įrašų). ` +
+      `PRIVACY_MODE=true - audito žurnalas išvalytas (${removed} įrašų). ` +
         "Tai negrįžtama; išjungus vėliavą įrašai neatsistato."
     );
   }

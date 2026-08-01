@@ -27,7 +27,7 @@ function _safeDate(protocol) {
   return cleaned || new Date().toISOString().slice(0, 10);
 }
 
-function buildTxt(protocol) {
+function buildTxt(protocol, variant) {
   const nested = (items) =>
     _list(items)
       .map((k, i) => `${i + 1}. ${k.klausimas}\n   ${k.santrauka}`)
@@ -47,10 +47,10 @@ function buildTxt(protocol) {
       .join("\n") || "Nenurodyta"
   }\n`;
 
-  return { buffer: Buffer.from(out, "utf8"), filename: `protokolas_${_safeDate(protocol)}.txt`, contentType: "text/plain; charset=utf-8" };
+  return { buffer: Buffer.from(out, "utf8"), filename: exportFilename("protokolas", variant, _safeDate(protocol), "txt"), contentType: "text/plain; charset=utf-8" };
 }
 
-function buildCsv(protocol) {
+function buildCsv(protocol, variant) {
   const rows = _list(protocol.veiksmai).map((v) => ({
     Užduotis: v.uzduotis,
     Atsakingas: v.atsakingas,
@@ -69,12 +69,12 @@ function buildCsv(protocol) {
   // BOM - kad Excel atidarytų UTF-8 teisingai (toks pat elgesys kaip anksčiau naršyklėje).
   return {
     buffer: Buffer.from("\uFEFF" + csv, "utf8"),
-    filename: `veiksmai_${_safeDate(protocol)}.csv`,
+    filename: exportFilename("veiksmai", variant, _safeDate(protocol), "csv"),
     contentType: "text/csv; charset=utf-8",
   };
 }
 
-async function buildDocx(protocol) {
+async function buildDocx(protocol, variant) {
   const {
     Document, Packer, Paragraph, TextRun, HeadingLevel,
     Table, TableRow, TableCell, WidthType,
@@ -158,9 +158,46 @@ async function buildDocx(protocol) {
 
   return {
     buffer: await Packer.toBuffer(doc),
-    filename: `protokolas_${_safeDate(protocol)}.docx`,
+    filename: exportFilename("protokolas", variant, _safeDate(protocol), "docx"),
     contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   };
+}
+
+/**
+ * Failo vardas generuojamas SERVERYJE ir neša variantą (GDPR #8).
+ *
+ * Variantas varde nėra kosmetika: atsisiuntus du failus, `protokolas.docx` ir
+ * `protokolas.docx (1)`, po savaitės neįmanoma pasakyti, kuris redaguotas.
+ * Failo vardas yra vienintelis kontekstas, keliaujantis kartu su dokumentu.
+ *
+ * Nė viena dalis neateina iš vartotojo: bazė ir plėtinys yra literalai, data -
+ * praleista pro `_safeDate`. Papildomai valom rezultatą, kad joks būsimas
+ * pakeitimas neįvestų kelio skirtukų ar valdymo simbolių.
+ */
+const LT_TRANSLITERATION = {
+  ą: "a", č: "c", ę: "e", ė: "e", į: "i", š: "s", ų: "u", ū: "u", ž: "z",
+  Ą: "A", Č: "C", Ę: "E", Ė: "E", Į: "I", Š: "S", Ų: "U", Ū: "U", Ž: "Z",
+};
+
+/**
+ * Lietuviškos raidės TRANSLITERUOJAMOS, ne išmetamos.
+ *
+ * Dabartiniai vardai diakritikų neturi, bet lokalizavus juos aklas
+ * `[^A-Za-z0-9]` filtras paverstų „posėdžio_protokolas" į „pos_d_io_protokolas" -
+ * failas taptų nebeskaitomas, o priežastis būtų nesuprantama.
+ *
+ * Kodėl ne palikti UTF-8: `Content-Disposition` antraštė ne-ASCII simboliams
+ * reikalauja RFC 5987 kodavimo, kurio ne visi klientai apdoroja vienodai.
+ * Transliteracija duoda skaitomą vardą be tos priklausomybės.
+ */
+function exportFilename(base, variant, date, extension) {
+  const label = variant === "redacted" ? "redaguotas" : "originalas";
+  const raw = `${base}_${label}_${date}.${extension}`;
+
+  return raw
+    .replace(/[ąčęėįšųūžĄČĘĖĮŠŲŪŽ]/g, (ch) => LT_TRANSLITERATION[ch])
+    // Visa kita, kas nėra saugu failo varde, virsta pabraukimu.
+    .replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
 class ExportPolicyError extends Error {
@@ -181,29 +218,53 @@ class ExportPolicyError extends Error {
  * FAIL-CLOSED: jei redakcija neprieinama arba krenta, failas NEGENERUOJAMAS.
  * Grąžinti originalą būtų tiksliai tai, ką nuostata draudžia.
  */
-function _enforceExportPolicy(protocol) {
+/**
+ * VARIANTO VYKDYMAS (GDPR #8).
+ *
+ * Variantas ateina iš UŽKLAUSOS ir yra privalomas - jis nėra išvedamas iš
+ * politikos ir niekada tyliai nepakeičiamas. Priežastis: „paprašiau redaguoto,
+ * gavau originalą" yra blogiausias įmanomas rezultatas, o tyliai pakeistas
+ * variantas atrodo lygiai taip pat kaip teisingas.
+ *
+ * Politika gali tik UŽDRAUSTI originalą (`EXPORT_ALLOW_ORIGINAL=false`), bet
+ * negali jo pasiūlyti vietoj redaguoto ar atvirkščiai.
+ */
+function _enforceExportPolicy(protocol, variant) {
   const { getPrivacyPolicy } = require("../utils/privacyPolicy");
-  if (getPrivacyPolicy().exportAllowOriginal) return protocol;
-
-  const { probeRedactionComponent } = require("../utils/redactionComponent");
   const artefacts = require("../utils/redactedArtefact");
+
+  if (variant !== artefacts.VARIANT.ORIGINAL && variant !== artefacts.VARIANT.REDACTED) {
+    throw new ExportPolicyError(
+      `Eksporto variantas privalomas ir turi būti "${artefacts.VARIANT.ORIGINAL}" arba ` +
+        `"${artefacts.VARIANT.REDACTED}". Numanomos reikšmės nėra sąmoningai.`
+    );
+  }
+
+  if (variant === artefacts.VARIANT.ORIGINAL) {
+    if (!getPrivacyPolicy().exportAllowOriginal) {
+      throw new ExportPolicyError(
+        "Neredaguoto varianto eksportas išjungtas (EXPORT_ALLOW_ORIGINAL=false). " +
+          "Redaguotą variantą galima eksportuoti atskiru veiksmu."
+      );
+    }
+    return protocol;
+  }
+
+  // REDACTED: fail-closed. Trūkstamas redaguotas turinys NIEKADA nevirsta originalu.
+  const { probeRedactionComponent } = require("../utils/redactionComponent");
   const probe = probeRedactionComponent();
 
   if (probe.state !== "ok") {
     throw new ExportPolicyError(
-      `EXPORT_ALLOW_ORIGINAL=false, bet PII redakcijos komponentas nepasiekiamas (${probe.state}). ` +
-        "Eksportas nutrauktas - neredaguotas originalas negali būti sugeneruotas."
+      `Prašyta redaguoto varianto, bet PII redakcijos komponentas nepasiekiamas (${probe.state}). ` +
+        "Eksportas nutrauktas - originalas NEGRĄŽINAMAS."
     );
   }
 
   try {
     /**
-     * TAS PATS ARTEFAKTO GUARD'AS kaip išorinio tiekėjo kelyje.
-     *
-     * Anksčiau čia buvo tiesioginis `_redactDeep(protocol, probe.redact)` -
-     * eksportas pasitikėdavo tuo, kad `redact()` iškviestas, o LLM kelias jau
-     * tikrindavo artefakto variantą. Dviguba standartų sistema: silpnesnė
-     * apsauga ten, kur failas keliauja tiesiai vartotojui.
+     * TAS PATS ARTEFAKTO GUARD'AS kaip išorinio tiekėjo kelyje: tikrinam
+     * FAKTĄ (`variant`), o ne tai, kad `redact()` buvo iškviestas.
      */
     const original = artefacts.createOriginalArtefact({ text: "", data: protocol });
     const redacted = artefacts.createRedactedArtefact(original, probe.module);
@@ -214,8 +275,7 @@ function _enforceExportPolicy(protocol) {
     if (e instanceof ExportPolicyError) throw e;
 
     throw new ExportPolicyError(
-      "PII redakcija nepavyko, todėl eksporto failas NEBUVO sugeneruotas " +
-        "(EXPORT_ALLOW_ORIGINAL=false)."
+      "PII redakcija nepavyko, todėl eksporto failas NEBUVO sugeneruotas. Originalas NEGRĄŽINAMAS."
     );
   }
 }
@@ -224,19 +284,19 @@ function _enforceExportPolicy(protocol) {
  * @param {object} protocol - protokolo JSON (turinys NIEKUR nelogguojamas)
  * @param {"txt"|"csv"|"docx"} format
  */
-async function buildExport(protocol, format) {
-  const effective = _enforceExportPolicy(protocol);
+async function buildExport(protocol, format, variant) {
+  const effective = _enforceExportPolicy(protocol, variant);
 
   switch (String(format || "").toLowerCase()) {
     case FORMATS.TXT:
-      return buildTxt(effective);
+      return buildTxt(effective, variant);
     case FORMATS.CSV:
-      return buildCsv(effective);
+      return buildCsv(effective, variant);
     case FORMATS.DOCX:
-      return buildDocx(effective);
+      return buildDocx(effective, variant);
     default:
       return null;
   }
 }
 
-module.exports = { buildExport, buildTxt, buildCsv, buildDocx, FORMATS, ExportPolicyError };
+module.exports = { buildExport, exportFilename, buildTxt, buildCsv, buildDocx, FORMATS, ExportPolicyError };

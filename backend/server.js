@@ -31,9 +31,9 @@ if (process.env.SKIP_CONFIG_VALIDATION !== "true") {
   const { errors, warnings } = validateConfig();
   for (const w of warnings) log.warn(`⚠️  ${w}`);
   if (errors.length > 0) {
-    log.error("[stenograma] ❌ Konfigūracijos klaidos - serveris NESTARTUOJA:");
+    log.error("❌ Konfigūracijos klaidos - serveris NESTARTUOJA:");
     for (const e of errors) log.error(`❌ ${e}`);
-    log.error("[stenograma] Pataisykite .env (žr. .env.example komentarus) arba, kraštutiniu atveju, SKIP_CONFIG_VALIDATION=true.");
+    log.error("Pataisykite .env (žr. .env.example komentarus) arba, kraštutiniu atveju, SKIP_CONFIG_VALIDATION=true.");
     if (require.main === module) process.exit(1);
     throw new Error("Konfigūracijos validacija nepavyko: " + errors.join(" | "));
   }
@@ -45,7 +45,7 @@ const app = express();
 // (pvz. viešam demo), niekada numatytoji reikšmė.
 const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
 if (corsOrigin === "*") {
-  log.warn("[stenograma] CORS_ORIGIN=* - bet koks domenas gali kviesti šį API. Naudokite tik aiškiam demo.");
+  log.warn("CORS_ORIGIN=* - bet koks domenas gali kviesti šį API. Naudokite tik aiškiam demo.");
 }
 // PIRMAS middleware: request ID turi egzistuoti dar prieš CORS, rate limitą ir
 // maršrutus - kad ir atmesta užklausa turėtų identifikatorių (GDPR #17).
@@ -231,7 +231,7 @@ async function startServer({ port, listen, onStep } = {}) {
     }
   } catch (e) {
     // Valymo klaida NEGALI sustabdyti paleidimo - tai higiena, ne kritinis kelias.
-    log.warn("[stenograma] Nepavyko išvalyti likusių laikinų įkėlimo failų:", e.message);
+    log.warn("Nepavyko išvalyti likusių laikinų įkėlimo failų:", e.message);
   }
 
   const PORT = port || process.env.PORT || 3001;

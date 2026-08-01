@@ -43,11 +43,11 @@ test.beforeEach(() => auditLog.clear());
 test("POST /api/exports - txt eksportas grąžina failą ir įrašo audito įvykius", async () => {
   const res = await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: protocolWithPII(), jobId: "job-abc" });
+    .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: "job-abc" });
 
   assert.equal(res.status, 200);
   assert.match(res.headers["content-type"], /text\/plain/);
-  assert.match(res.headers["content-disposition"], /attachment; filename="protokolas_2026-07-30\.txt"/);
+  assert.match(res.headers["content-disposition"], /attachment; filename="protokolas_originalas_2026-07-30\.txt"/);
   assert.equal(res.headers["cache-control"], "no-store");
   assert.ok(res.text.includes("PROTOKOLAS"));
 
@@ -58,7 +58,7 @@ test("POST /api/exports - txt eksportas grąžina failą ir įrašo audito įvyk
 test("POST /api/exports - csv eksportas su BOM ir veiksmų stulpeliais", async () => {
   const res = await request(app)
     .post("/api/exports")
-    .send({ format: "csv", protocol: protocolWithPII() });
+    .send({ variant: "original", format: "csv", protocol: protocolWithPII() });
 
   assert.equal(res.status, 200);
   assert.match(res.headers["content-type"], /text\/csv/);
@@ -70,7 +70,7 @@ test("POST /api/exports - docx yra TIKRAS OOXML, ne HTML", async () => {
   const res = await request(app)
     .post("/api/exports")
     .set("Accept", "application/octet-stream")
-    .send({ format: "docx", protocol: protocolWithPII() })
+    .send({ variant: "original", format: "docx", protocol: protocolWithPII() })
     .buffer()
     .parse((response, callback) => {
       const chunks = [];
@@ -95,12 +95,14 @@ test("POST /api/exports - nežinomas formatas atmetamas be audito įvykio", asyn
     .send({ format: "pdf", protocol: protocolWithPII() });
 
   assert.equal(res.status, 400);
-  assert.match(res.body.error, /Galimi/);
+  // Variantas tikrinamas PIRMA (jis privalomas), tad formato klaidai gauti
+  // reikia galiojančio varianto. Abu pranešimai vardija galimas reikšmes.
+  assert.match(res.body.error, /Galimi|Galimos/);
   assert.equal(auditLog.getAll().length, 0, "atmesta užklausa nėra eksporto įvykis");
 });
 
 test("POST /api/exports - be protocol grąžina 400", async () => {
-  const res = await request(app).post("/api/exports").send({ format: "txt" });
+  const res = await request(app).post("/api/exports").send({ variant: "original", format: "txt" });
 
   assert.equal(res.status, 400);
 });
@@ -110,7 +112,7 @@ test("audito įrašuose NĖRA jokio protokolo turinio ar PII", async () => {
   for (const format of ["txt", "csv", "docx"]) {
     await request(app)
       .post("/api/exports")
-      .send({ format, protocol: protocolWithPII(), jobId: "job-pii" });
+      .send({ variant: "original", format, protocol: protocolWithPII(), jobId: "job-pii" });
   }
 
   const serialized = JSON.stringify(auditLog.getAll());
@@ -124,7 +126,7 @@ test("audito įrašuose NĖRA jokio protokolo turinio ar PII", async () => {
 
   // Taip pat neturi būti nei protokolo pavadinimo, nei failo vardo, nei tiesioginio jobId.
   assert.ok(!serialized.includes("Slaptas posėdis"));
-  assert.ok(!serialized.includes("protokolas_2026-07-30"));
+  assert.ok(!serialized.includes("protokolas_originalas_2026-07-30"));
   assert.ok(!serialized.includes("job-pii"), "jobId turi būti pseudonimizuotas");
 
   // Bet naudingi techniniai metaduomenys - turi būti.
@@ -148,7 +150,7 @@ test("eksporto įvykiai susieti su jobId pseudonimu - ištrinami kartu su jobu",
 
   await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: protocolWithPII(), jobId: job.id });
+    .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: job.id });
 
   const subjectId = auditLog.pseudonymizeIdentifier(job.id);
   assert.ok(auditLog.getAll().every((entry) => entry.subjectId === subjectId));
@@ -163,11 +165,11 @@ test("failo vardas nepasiduoda path traversal per protokolo datą", async () => 
   const protocol = protocolWithPII();
   protocol.data = "../../etc/passwd";
 
-  const res = await request(app).post("/api/exports").send({ format: "txt", protocol });
+  const res = await request(app).post("/api/exports").send({ variant: "original", format: "txt", protocol });
 
   assert.equal(res.status, 200);
   assert.doesNotMatch(res.headers["content-disposition"], /\.\./);
-  assert.match(res.headers["content-disposition"], /filename="protokolas_[0-9A-Za-z-]+\.txt"/);
+  assert.match(res.headers["content-disposition"], /filename="protokolas_originalas_[0-9A-Za-z-]+\.txt"/);
 });
 
 test("DELETE /api/transcribe-jobs/:id pašalina ir EKSPORTO įvykius", async () => {
@@ -184,7 +186,7 @@ test("DELETE /api/transcribe-jobs/:id pašalina ir EKSPORTO įvykius", async () 
 
   await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: protocolWithPII(), jobId: job.id });
+    .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: job.id });
 
   const subjectId = auditLog.pseudonymizeIdentifier(job.id);
   assert.equal(auditLog.getAll().filter((e) => e.subjectId === subjectId).length, 2);
@@ -214,7 +216,7 @@ test("CSV: formulėmis prasidedančios reikšmės eksportuojamos kaip TEKSTAS", 
     ],
   };
 
-  const res = await request(app).post("/api/exports").send({ format: "csv", protocol });
+  const res = await request(app).post("/api/exports").send({ variant: "original", format: "csv", protocol });
 
   assert.equal(res.status, 200);
 
@@ -237,8 +239,7 @@ test("eksporto auditas NEsusiejamas su neegzistuojančiu jobId (link=missing)", 
   // svetimo jobo ištrynimas pašalintų ir jam nepriklausančius eksporto įrašus.
   auditLog.clear();
 
-  const res = await request(app).post("/api/exports").send({
-    format: "txt",
+  const res = await request(app).post("/api/exports").send({ variant: "original", format: "txt",
     protocol: protocolWithPII(),
     jobId: "issigalvotas-jobo-id",
   });
@@ -268,7 +269,7 @@ test("eksporto auditas NEsusiejamas su PROTOKOLO jobu (link=invalid_type)", asyn
 
   const res = await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: protocolWithPII(), jobId: protocolJob.id });
+    .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: protocolJob.id });
 
   assert.equal(res.status, 200);
   assert.ok(auditLog.getAll().every((e) => e.subjectId === null));
@@ -286,7 +287,7 @@ test("eksporto auditas SUSIEJAMAS su realiu transkribavimo jobu", async () => {
 
   const res = await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: protocolWithPII(), jobId: job.id });
+    .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: job.id });
 
   assert.equal(res.status, 200);
 
@@ -326,7 +327,7 @@ test("saugyklos klaida atskiriama nuo neegzistuojančio jobo (link=store_error +
   try {
     const res = await request(app)
       .post("/api/exports")
-      .send({ format: "txt", protocol: protocolWithPII(), jobId: "bet-koks-id" });
+      .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: "bet-koks-id" });
 
     // Eksportas neturi nutrūkti dėl audito ryšio patikros.
     assert.equal(res.status, 200);
@@ -356,13 +357,13 @@ test("visos link reikšmės yra iš žinomo rinkinio", async () => {
   const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
   await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED });
 
-  await request(app).post("/api/exports").send({ format: "txt", protocol: protocolWithPII() });
+  await request(app).post("/api/exports").send({ variant: "original", format: "txt", protocol: protocolWithPII() });
   await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: protocolWithPII(), jobId: job.id });
+    .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: job.id });
   await request(app)
     .post("/api/exports")
-    .send({ format: "txt", protocol: protocolWithPII(), jobId: "nera-tokio" });
+    .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: "nera-tokio" });
 
   const states = new Set(
     auditLog.getAll().map((entry) => (entry.details.match(/link=(\w+)/) || [])[1])

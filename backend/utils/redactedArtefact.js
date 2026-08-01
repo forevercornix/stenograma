@@ -47,6 +47,36 @@ const OUTCOME = {
   BLOCKED: "blocked",
 };
 
+/**
+ * Varianto reikšmės, kurias gali PRAŠYTI klientas.
+ *
+ * `GENERATED` čia sąmoningai nėra: jis apibūdina tai, ką sistema PAGAMINO
+ * (protokolą iš transkripcijos), ir prašyti jo kaip eksporto varianto neturi
+ * prasmės. Rinkinys atskiras nuo `VARIANT`, kad ta riba būtų matoma kode, o ne
+ * tik komentare.
+ */
+const REQUESTABLE_VARIANTS = Object.freeze([VARIANT.ORIGINAL, VARIANT.REDACTED]);
+
+/**
+ * Vienintelė vieta, kur kliento pateiktas variantas paverčiamas reikšme.
+ *
+ * Kol maršrutas vienas, atskiras helperis atrodo perteklinis. Bet variantų
+ * logika jau dabar yra dviejose vietose (maršrutas ir eksporto servisas), o
+ * pridėjus dar vieną endpointą trečia kopija atsirastų tyliai - ir skirtųsi.
+ *
+ * NIEKO NENUMANO: nežinoma reikšmė grąžina `null`, o ne artimiausią panašią.
+ * „Priartinimas prie panašiausios" reikštų, kad `originalas` (lietuviškai)
+ * tyliai virstų `original` - ir klientas net nesužinotų, kad rašė klaidingai.
+ *
+ * @returns {"original"|"redacted"|null}
+ */
+function parseRequestedVariant(value) {
+  if (typeof value !== "string") return null;
+
+  const normalized = value.trim().toLowerCase();
+  return REQUESTABLE_VARIANTS.includes(normalized) ? normalized : null;
+}
+
 class ArtefactVariantError extends Error {
   constructor(message) {
     super(message);
@@ -245,6 +275,8 @@ function toAuditRecord(artefact, outcome = OUTCOME.SENT) {
 
 module.exports = {
   VARIANT,
+  REQUESTABLE_VARIANTS,
+  parseRequestedVariant,
   STATUS,
   OUTCOME,
   ArtefactVariantError,

@@ -48,7 +48,7 @@ class PyannoteDiarizationProvider extends DiarizationProvider {
       // priežasčių sąrašas patenka į klaidą; pilnas kūnas - į serverio logą.
       const body = await res.text().catch(() => "(nepavyko perskaityti atsakymo kūno)");
       log.error(
-        `[stenograma] Pyannote klaida: POST ${this.url} -> ${res.status}\n` +
+        `Pyannote klaida: POST ${this.url} -> ${res.status}\n` +
           `  Atsakymo kūnas (pilnas): ${body}\n` +
           `  Išsiųsta: multipart laukas "${this.fileField}" (${audioBuffer.length} baitų, filename=${options.filename || "audio.wav"})` +
           (options.numSpeakers ? `, num_speakers=${options.numSpeakers}` : "")
