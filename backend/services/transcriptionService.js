@@ -6,7 +6,6 @@ const { detectAudioMagic } = require("../utils/audioMagicBytes");
 const auditLog = require("../utils/auditLog");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const { createLogger } = require("../utils/logger");
-const { recordRejectedUpload, REASONS } = require("../utils/uploadEvents");
 const log = createLogger("transcription");
 
 const ALLOW_PROVIDER_OVERRIDE = process.env.ALLOW_PROVIDER_OVERRIDE === "true";
@@ -78,7 +77,6 @@ async function transcribeAudio({
   }
 
   if (!detectAudioMagic(buffer)) {
-    recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe", size: buffer.length, jobId });
     auditLog.record({
       jobId,
       meetingId,

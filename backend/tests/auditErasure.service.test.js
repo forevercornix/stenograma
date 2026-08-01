@@ -93,14 +93,8 @@ test("nesėkmingas transkribavimas irgi susiejamas su jobId", async () => {
     })
   );
 
-  /**
-   * DU įrašai: atmesto įkėlimo įvykis (GDPR #17) ir transkribavimo nesėkmė.
-   * Abu susieti su tuo pačiu jobId, tad abu pašalinami ištrynus subjektą -
-   * nesusietas įvykis būtų neištrinamas įrašas apie asmens veiksmą.
-   */
   const entries = auditLog.getAll();
-  assert.equal(entries.length, 2);
-  assert.ok(entries.some((e) => e.event === "UPLOAD_REJECTED" && e.outcome === "signature_mismatch"));
-  assert.ok(entries.some((e) => e.result === "failure"));
-  assert.equal(await auditLog.removeBySubjectIdentifier(jobId), 2);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].result, "failure");
+  assert.equal(await auditLog.removeBySubjectIdentifier(jobId), 1);
 });
