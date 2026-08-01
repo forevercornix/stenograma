@@ -300,3 +300,25 @@ test("FAILO VARDAS: lietuviškos raidės TRANSLITERUOJAMOS, ne išmetamos", () =
   assert.match(hostile, /^[A-Za-z0-9_.-]+$/);
   assert.ok(hostile.startsWith("ace_originalas_"));
 });
+
+test("CORS: failo vardo ir requestId antraštės EKSPONUOJAMOS klientui", async () => {
+  /**
+   * Rasta per E2E: naršyklė cross-origin užklausoje `Content-Disposition`
+   * neperskaito, jei jos nėra `Access-Control-Expose-Headers`. Pasekmė buvo
+   * TYLI - serverio sugeneruotas vardas dingdavo, o klientas nusileisdavo į
+   * atsarginį `eksportas_redacted.docx`. Vietiniame nginx proxy diegime to
+   * nesimato (tas pats originas), tad defektas gyveno tik ten, kur frontend ir
+   * backend atskirti.
+   */
+  const res = await request(app)
+    .post("/api/exports")
+    .set("Origin", "http://localhost:5173")
+    .send({ variant: "redacted", format: "txt", protocol: protocolWithPii() });
+
+  assert.equal(res.status, 200);
+
+  const exposed = (res.headers["access-control-expose-headers"] || "").toLowerCase();
+
+  assert.ok(exposed.includes("content-disposition"), "be to failo vardas neprieinamas klientui");
+  assert.ok(exposed.includes("x-request-id"), "be to koreliacijos ID klientui nematomas");
+});

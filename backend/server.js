@@ -58,7 +58,26 @@ app.set("trust proxy", resolveTrustProxy());
 
 app.use(requestContextMiddleware);
 
-app.use(cors({ origin: corsOrigin }));
+/**
+ * EKSPONUOJAMOS ANTRAŠTĖS.
+ *
+ * Be `exposedHeaders` naršyklė cross-origin užklausoje leidžia skaityti tik
+ * saugųjį antraščių rinkinį - `Content-Disposition` ir `X-Request-Id` į jį
+ * NEĮEINA. Praktinė pasekmė buvo tyli: eksporto failo vardas visada krisdavo į
+ * atsarginį (`eksportas_redacted.docx`), o serverio sugeneruotas vardas su data
+ * ir variantu dingdavo. Tas pats ir su užklausos ID - klientas jo tiesiog
+ * nematydavo.
+ *
+ * Vietiniame diegime per nginx `/api` proxy to nesimato (tas pats originas),
+ * tad defektas pasireiškia tik ten, kur frontend ir backend atskirti - t. y.
+ * dokumentuotame `VITE_BACKEND_URL` scenarijuje.
+ */
+app.use(
+  cors({
+    origin: corsOrigin,
+    exposedHeaders: ["Content-Disposition", "X-Request-Id"],
+  })
+);
 app.use(express.json({ limit: "10mb" }));
 
 // Readiness sekimas: /api/health yra LIVENESS (procesas gyvas ir atsako). Job store/

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import App from "./App.jsx";
 
@@ -235,9 +235,15 @@ describe("App - eksportas per backend (GDPR audito reikalavimas)", () => {
     // E2E (`getByRole("button", { name: "Word (.docx)" })`). Eksporto mygtukų tekstas
     // dabar dinamiškas ("Ruošiama…"), tad be šito E2E galėtų nutrūkti, o jo šioje
     // aplinkoje paleisti negalima (Chromium atsisiuntimas blokuojamas).
-    const docxButton = screen.getByRole("button", { name: "Word (.docx)" });
-    const txtButton = screen.getByRole("button", { name: ".txt" });
-    const csvButton = screen.getByRole("button", { name: "Veiksmai .csv" });
+    /**
+     * Mygtukų dabar yra PO DU (redaguotas ir originalas), tad vardo nebeužtenka -
+     * reikia grupės (GDPR #8). Grupės pavadinimas yra ta pati informacija, kurią
+     * mato vartotojas, todėl selektorius lieka prasmingas, o ne techninis.
+     */
+    const redactedGroup = screen.getByRole("group", { name: /Redaguotas/ });
+    const docxButton = within(redactedGroup).getByRole("button", { name: "Word (.docx)" });
+    const txtButton = within(redactedGroup).getByRole("button", { name: ".txt" });
+    const csvButton = within(redactedGroup).getByRole("button", { name: "Veiksmai .csv" });
     expect(docxButton).toBeInTheDocument();
     expect(txtButton).toBeInTheDocument();
     expect(csvButton).toBeInTheDocument();
@@ -268,7 +274,9 @@ describe("App - eksportas per backend (GDPR audito reikalavimas)", () => {
       })
     );
 
-    fireEvent.click(screen.getByRole("button", { name: ".txt" }));
+    fireEvent.click(
+      within(screen.getByRole("group", { name: /Redaguotas/ })).getByRole("button", { name: ".txt" })
+    );
 
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveTextContent("Eksporto servisas nepasiekiamas.");
