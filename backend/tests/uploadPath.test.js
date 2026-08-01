@@ -239,3 +239,20 @@ test("simbolinė nuoroda į išorę NEIŠTRINAMA (tikslas lieka nepaliestas)", a
     await fsp.rm(outside, { force: true });
   });
 });
+
+test("stale valymas apima IR seną asinchroninio maršruto vardų šeimą", async () => {
+  await withUploadDir(async (dir) => {
+    // `stenograma-job-<uuid>` - senas /api/transcribe-jobs formatas. Po
+    // atnaujinimo diske dar gali gulėti tokių failų, ir jie irgi našlaičiai.
+    const legacy = path.join(dir, "stenograma-job-3f2b1a4c-5d6e-4f70-8a91-b2c3d4e5f607.wav");
+    const current = path.join(dir, "stenograma-11111111-2222-4333-8444-555555555555.mp3");
+
+    await fsp.writeFile(legacy, "x");
+    await fsp.writeFile(current, "x");
+
+    const { removed } = await purgeStaleUploads();
+
+    assert.equal(removed, 2, "abi vardų šeimos turi būti išvalytos");
+    assert.deepEqual(await fsp.readdir(dir), []);
+  });
+});

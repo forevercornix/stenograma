@@ -99,8 +99,14 @@ async function resolveExistingUploadPath(filePath) {
   return realPath;
 }
 
-/** Vardų šablonas, kurį generuoja multer diskStorage (žr. routes/transcribe.js). */
-const UPLOAD_NAME = /^stenograma-[0-9a-f-]{36}(\.[a-z0-9]{1,8})?$/i;
+/**
+ * Vardų šablonai, kuriuos gali turėti laikinas įkėlimo failas.
+ *
+ * `stenograma-job-` yra SENAS asinchroninio maršruto šablonas. Jis paliktas
+ * sąmoningai: po atnaujinimo diske dar gali gulėti failų, sukurtų ankstesnės
+ * versijos, ir jie taip pat turi būti išvalyti.
+ */
+const UPLOAD_NAME = /^stenograma-(job-)?[0-9a-f-]{36}(\.[a-z0-9]{1,8})?$/i;
 
 /**
  * STALE FAILŲ VALYMAS PO RESTARTO (#13: "Restart-safe stale-file cleanup").
@@ -146,6 +152,29 @@ async function purgeStaleUploads() {
   return { removed };
 }
 
+/**
+ * Saugus laikino įkėlimo failo trynimas su MATOMA klaida.
+ *
+ * Anksčiau abu maršrutai naudojo `.catch(() => {})`. Klientui tai saugu, bet
+ * būtent tokia tyla ir paslėpė realią regresiją: asinchroninis kelias rašė į
+ * kitą katalogą, patikra jį atmesdavo, klaida dingdavo, o failas likdavo diske
+ * neribotam laikui. Dabar nesėkmė bent pasimato loge - be kelio, kad jis
+ * nenutekėtų.
+ */
+async function safeUnlinkUpload(filePath) {
+  try {
+    const resolved = await resolveExistingUploadPath(filePath);
+    if (resolved) await fs.unlink(resolved);
+    return true;
+  } catch (e) {
+    console.warn(
+      `[stenograma] Nepavyko pašalinti laikino įkėlimo failo (${e.code || e.name || "klaida"}). ` +
+        "Failas liks iki kito paleidimo valymo."
+    );
+    return false;
+  }
+}
+
 module.exports = {
   uploadDir,
   safeExtension,
@@ -153,5 +182,6 @@ module.exports = {
   assertInsideUploadDir,
   resolveExistingUploadPath,
   purgeStaleUploads,
+  safeUnlinkUpload,
   UploadPathError,
 };

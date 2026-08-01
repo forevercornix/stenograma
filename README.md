@@ -1071,6 +1071,13 @@ Po **restarto** likę failai valomi paleidžiant, prieš priimant naujus įkėli
 sąmoningai tik tada, nes periodinis valymas pagal amžių ištrintų vykdomą ilgo
 įrašo įkėlimą.
 
+⚠️ **`UPLOAD_TMP_DIR` negali būti bendras tarp vienu metu veikiančių backend
+replikų.** Paleidimo valymas remiasi prielaida „šis procesas ką tik startavo,
+vadinasi joks įkėlimas nevyksta". Su dviem replikomis ta prielaida krinta: vienos
+starto metu kita gali kaip tik priiminėti failą, ir jis būtų pašalintas. Vienai
+replikai (dabartinis pilotas) tai saugu; skalaujant reikės arba atskiro katalogo
+kiekvienai replikai, arba proceso nuosavybės ir minimalaus amžiaus žymės.
+
 **Redakcija prieš išorinį apdorojimą.** `REQUIRE_REDACTION_BEFORE_EXTERNAL=true`
 reiškia, kad į išorinį LLM tiekėją siunčiamas payload'as pirma praleidžiamas per
 `redact()`. Vykdoma **dekoratoriumi ties pačiu tiekėjo kvietimu**

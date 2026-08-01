@@ -139,7 +139,23 @@ test("klaidos pranešime nėra vietinės failų sistemos kelio", async () => {
   assert.ok(!body.includes(os.tmpdir()), "joks vietinis kelias negali patekti į atsakymą");
 });
 
-test("asinchroninis maršrutas elgiasi VIENODAI (tas pats cleanup)", async () => {
+test("asinchroninis maršrutas elgiasi VIENODAI (tas pats cleanup)", async (t) => {
+  /**
+   * SVARBU: vien "katalogas tuščias" NEĮRODO nieko - jei maršrutas rašo į KITĄ
+   * katalogą, šis irgi bus tuščias. Būtent taip ankstesnė šio testo versija
+   * praėjo tuščiai, kol /api/transcribe-jobs rašė į os.tmpdir().
+   *
+   * Todėl papildomai perimamas console.warn: nepavykęs cleanup dabar palieka
+   * įspėjimą (utils/uploadPath.js safeUnlinkUpload), o jo nebuvimas reiškia,
+   * kad failas REALIAI buvo rastas ir pašalintas.
+   */
+  const warnings = [];
+  // t.mock.method, o NE rankinis priskyrimas: node:test atstato jį automatiškai
+  // net jei testas nutrūksta anksčiau. Rankinis `console.warn = originalWarn`
+  // testo gale po klaidos taip ir neįvyktų, o globalus console liktų pakeistas
+  // kitiems testams tame pačiame procese.
+  t.mock.method(console, "warn", (...args) => warnings.push(args.join(" ")));
+
   const ok = await request(app)
     .post("/api/transcribe-jobs")
     .attach("audio", wavBuffer(), { filename: "posedis.wav", contentType: "audio/wav" });
@@ -153,4 +169,10 @@ test("asinchroninis maršrutas elgiasi VIENODAI (tas pats cleanup)", async () =>
 
   assert.equal(rejected.status, 400);
   await assertUploadDirEmpty("atmestas asinchroninis įkėlimas irgi valomas");
+
+  assert.deepEqual(
+    warnings.filter((w) => w.includes("Nepavyko pašalinti laikino įkėlimo failo")),
+    [],
+    "cleanup neturi tyliai nepavykti - tai buvo ankstesnės regresijos slėptuvė"
+  );
 });
