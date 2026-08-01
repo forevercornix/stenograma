@@ -1,16 +1,13 @@
 const express = require("express");
-const multer = require("multer");
 const fs = require("fs/promises");
-const os = require("os");
-const path = require("path");
-const crypto = require("crypto");
 const jobStore = require("../utils/jobStore");
 const { eraseJob, eraseOrphanedJobData } = require("../utils/jobErasure");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
 const { detectAudioMagic } = require("../utils/audioMagicBytes");
-const { resolveExistingUploadPath } = require("../utils/uploadPath");
+const { safeUnlinkUpload, safeExtension } = require("../utils/uploadPath");
+const { createAudioUpload } = require("../utils/uploadStorage");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
@@ -18,36 +15,12 @@ const apiKeyAuth = require("../middleware/apiKeyAuth");
 
 const router = express.Router();
 
-const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || "500", 10);
 
 // Tas pats whitelist principas kaip routes/transcribe.js (žr. ten pilną
 // paaiškinimą dėl video/mp4+webm sąmoningo leidimo).
-const ALLOWED_MIME_TYPES = new Set([
-  "audio/mpeg", "audio/mp3", "audio/wav", "audio/wave", "audio/x-wav",
-  "audio/mp4", "video/mp4", "audio/x-m4a", "audio/m4a",
-  "audio/webm", "video/webm", "audio/ogg", "audio/aac", "audio/flac",
-]);
-const ALLOWED_EXTENSIONS = new Set([".mp3", ".wav", ".m4a", ".mp4", ".webm", ".ogg", ".aac", ".flac"]);
 
-function isAllowedAudio(file) {
-  const ext = path.extname(file.originalname || "").toLowerCase();
-  return ALLOWED_MIME_TYPES.has((file.mimetype || "").toLowerCase()) || ALLOWED_EXTENSIONS.has(ext);
-}
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, os.tmpdir()),
-  filename: (req, file, cb) => cb(null, `stenograma-job-${crypto.randomUUID()}${path.extname(file.originalname || "")}`),
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (!isAllowedAudio(file)) {
-      return cb(new Error(`Neleidžiamas failo formatas "${file.mimetype}" (${path.extname(file.originalname || "")}).`));
-    }
-    cb(null, true);
-  },
-});
+const upload = createAudioUpload();
 function uploadSingleAudio(req, res, next) {
   // Priimame IR "audio", IR "file" lauką - vartotojai natūraliai bando abu, o
   // .single("audio") mesdavo "Unexpected field", jei ateidavo "file" (RASTA realiai
@@ -111,7 +84,9 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     // į RAM. put(buffer) su fs.readFile perskaitytų visą 500MB į atmintį; keli vienalaikiai
     // įkėlimai sukeltų OOM. putFile kopijuoja OS lygmenyje. BullMQ režime atskiras worker
     // procesas failą pasieks per šį raktą.
-    const ext = path.extname(req.file.originalname || "") || "";
+    // safeExtension(), o NE path.extname(): raktas keliauja į fileStorage kelio
+    // sudarymą, tad vartotojo vardo dalis ir čia turi eiti pro tą patį whitelist'ą.
+    const ext = safeExtension(req.file.originalname);
     storageKey = await fileStorage.putFile(req.file.path, { ext });
 
     job = await jobStore.create({
@@ -167,9 +142,7 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     // Multer laikiną failą visada ištrinam (audio jau nukopijuotas į storage).
     // Per TĄ PAČIĄ patikrą kaip /api/transcribe - kitaip apsauga nuo symlink
     // pabėgimo galiotų viename maršrute, o kitame ne.
-    await resolveExistingUploadPath(req.file.path)
-      .then((resolved) => (resolved ? fs.unlink(resolved) : null))
-      .catch(() => {});
+    await safeUnlinkUpload(req.file.path);
   }
 });
 
