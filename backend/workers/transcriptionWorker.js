@@ -25,7 +25,7 @@ if (require.main === module) {
   const { runWorkerProcess } = require("./index");
   runWorkerProcess("Transkripcijos worker", startTranscriptionWorker, "transcription")
     .then(() => {
-      log.info("[stenograma] Transkripcijos worker'is paleistas.");
+      log.info("Transkripcijos worker'is paleistas.");
     })
     .catch((error) => {
       log.error(`Transkripcijos worker nepaleistas: ${error.message}`);

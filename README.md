@@ -1296,6 +1296,33 @@ kritus redakcijai audite atsiranda `redactionStatus: "failed"`, `outcome:
 nėra: statistika konstruojama tik iš skaitliukų, o auditas naudoja laukų
 whitelist'ą.
 
+**Eksportas: du atskiri variantai.** `POST /api/exports` reikalauja **privalomo**
+`variant` lauko (`original` arba `redacted`). Numatytosios reikšmės nėra
+sąmoningai: `redacted` tyliai pakeistų turinį senam klientui, `original` tyliai
+atiduotų neredaguotą. Abu blogiau už aiškią klaidą.
+
+Politika gali variantą **uždrausti**, bet niekada nepakeičia jo kitu.
+`EXPORT_ALLOW_ORIGINAL=false` originalo užklausą atmeta su **403**, o redaguotą
+variantą palieka prieinamą – „negali gauti originalo, štai redaguotas" būtų
+patogu ir todėl pavojinga: vartotojas gautų kitą dokumentą nei prašė ir to
+nepastebėtų.
+
+Trūkstamas redaguotas turinys **niekada** nevirsta originalu: nesant redakcijos
+komponento užklausa nutraukiama, o ne patenkinama kitu variantu.
+
+**Failo vardas** generuojamas serveryje ir neša variantą –
+`protokolas_redaguotas_2026-03-15.docx`. Tai ne kosmetika: atsisiuntus du failus,
+po savaitės neįmanoma pasakyti, kuris redaguotas, o failo vardas yra vienintelis
+kontekstas, keliaujantis kartu su dokumentu. Nė viena vardo dalis neateina iš
+vartotojo, ir rezultatas papildomai valomas nuo kelio skirtukų bei valdymo
+simbolių. Lietuviškos raidės **transliteruojamos** (`posėdžio` → `posedzio`), o ne
+išmetamos: aklas filtras paverstų vardą į `pos_d_io` be suprantamos priežasties,
+o UTF-8 palikimas reikalautų RFC 5987 kodavimo `Content-Disposition` antraštėje,
+kurį klientai apdoroja nevienodai.
+
+Varianto reikšmė parsinama **vienoje vietoje** (`parseRequestedVariant`), tad
+pridėjus naują endpointą logika nebus nukopijuota ir nepradės skirtis.
+
 **Eksporto politika.** `EXPORT_ALLOW_ORIGINAL=false` reiškia, kad eksporto failai
 generuojami tik iš redaguoto protokolo. Vykdoma `services/exportService.js`
 `buildExport()` – vienintelėje vietoje, pro kurią eina visi trys formatai.

@@ -22,7 +22,7 @@ if (require.main === module) {
   const { runWorkerProcess } = require("./index");
   runWorkerProcess("Protokolo worker", startProtocolWorker, "protocol")
     .then(() => {
-      log.info("[stenograma] Protokolo worker'is paleistas.");
+      log.info("Protokolo worker'is paleistas.");
     })
     .catch((error) => {
       log.error(`Protokolo worker nepaleistas: ${error.message}`);

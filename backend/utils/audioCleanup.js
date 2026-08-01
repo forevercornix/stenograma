@@ -27,7 +27,7 @@ async function releaseAudio(jobId, storageKey) {
     await fileStorage.del(storageKey);
   } catch (e) {
     log.error(
-      `[stenograma] Nepavyko ištrinti audio iš storage (job ${jobId}): ${e.message}. ` +
+      `Nepavyko ištrinti audio iš storage (job ${jobId}): ${e.message}. ` +
         "storageKey PALIEKAMAS jobStore įraše, jobas pažymimas pakartojimui."
     );
 
@@ -49,7 +49,7 @@ async function releaseAudio(jobId, storageKey) {
         });
       } catch (updateError) {
         log.error(
-          `[stenograma] Nepavyko pažymėti jobo ${jobId} pakartotiniam audio valymui: ${updateError.message}`
+          `Nepavyko pažymėti jobo ${jobId} pakartotiniam audio valymui: ${updateError.message}`
         );
       }
     }
@@ -68,7 +68,7 @@ async function releaseAudio(jobId, storageKey) {
     // Failas jau ištrintas - tai saugi pusė. Likęs raktas tik reikš, kad GDPR
     // ištrynimas bandys trinti nesantį objektą (idempotentiška operacija).
     log.error(
-      `[stenograma] Audio ištrintas, bet nepavyko atnaujinti jobo ${jobId} storageKey: ${e.message}`
+      `Audio ištrintas, bet nepavyko atnaujinti jobo ${jobId} storageKey: ${e.message}`
     );
   }
 

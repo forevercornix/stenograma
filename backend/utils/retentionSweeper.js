@@ -61,7 +61,7 @@ async function purgeOrphanedAudio({ now = Date.now(), retentionHours } = {}) {
     // Saugykla neleidžia išvardyti jobų - tada NIEKO netrinam. Geriau likęs
     // failas nei ištrintas naudojamas.
     log.warn(
-      "[stenograma] Retencija: saugykla nepalaiko listReferencedStorageKeys() - " +
+      "Retencija: saugykla nepalaiko listReferencedStorageKeys() - " +
         "nuskendusių audio failų šalinimas praleidžiamas (fail-safe)."
     );
     return { removed: 0, skipped: 0, skippedReason: "unsupported-store" };
@@ -146,7 +146,7 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     }
 
     log.info(
-      `[stenograma] Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +
+      `Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +
         `audito įrašų=${summary.auditEntries}.`
     );
   }

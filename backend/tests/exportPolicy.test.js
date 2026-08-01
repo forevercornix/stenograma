@@ -37,6 +37,15 @@ const PROTOCOL = {
 /** Žymuo „naudok TIKRĄ utils/piiRedaction.js", o ne testinį pakaitalą. */
 const REAL = Symbol("real-redaction-component");
 
+/**
+ * Variantas dabar PRIVALOMAS ir ateina iš užklausos (GDPR #8), o ne išvedamas
+ * iš politikos. Testuose jį parenkam pagal tai, ką politika leidžia - taip
+ * išlaikom pirminę testų prasmę („ką gauna vartotojas esant tokiai politikai").
+ */
+function expectedVariant() {
+  return process.env.EXPORT_ALLOW_ORIGINAL === "false" ? "redacted" : "original";
+}
+
 /** Simuliuoja „#4 komponento nėra" - jis dabar realiai egzistuoja. */
 function missingModuleLoader() {
   const error = new Error("Cannot find module './piiRedaction'");
@@ -74,7 +83,7 @@ function withPolicy(env, redact, fn) {
 
 test("numatytai (EXPORT_ALLOW_ORIGINAL=true) eksportas nepasikeičia", async () => {
   await withPolicy({ EXPORT_ALLOW_ORIGINAL: undefined }, null, async () => {
-    const txt = await buildExport(PROTOCOL, "txt");
+    const txt = await buildExport(PROTOCOL, "txt", expectedVariant());
     assert.ok(txt.buffer.toString("utf8").includes(MARKER), "be nuostatos originalas eksportuojamas kaip anksčiau");
   });
 });
@@ -83,16 +92,16 @@ test("EXPORT_ALLOW_ORIGINAL=false - VISI trys formatai gauna redaguotą turinį"
   const redact = (text) => text.replaceAll(MARKER, "[REDAGUOTA]");
 
   await withPolicy({ EXPORT_ALLOW_ORIGINAL: "false" }, redact, async () => {
-    const txt = (await buildExport(PROTOCOL, "txt")).buffer.toString("utf8");
+    const txt = (await buildExport(PROTOCOL, "txt", expectedVariant())).buffer.toString("utf8");
     assert.ok(!txt.includes(MARKER));
     assert.ok(txt.includes("[REDAGUOTA]"));
 
-    const csv = (await buildExport(PROTOCOL, "csv")).buffer.toString("utf8");
+    const csv = (await buildExport(PROTOCOL, "csv", expectedVariant())).buffer.toString("utf8");
     assert.ok(!csv.includes(MARKER));
 
     // DOCX yra dvejetainis (ZIP) - tikrinam patį buferį, nes būtent čia
     // "redaguok galutinį tekstą" požiūris būtų tyliai neveikęs.
-    const docx = await buildExport(PROTOCOL, "docx");
+    const docx = await buildExport(PROTOCOL, "docx", expectedVariant());
     assert.ok(!docx.buffer.toString("latin1").includes(MARKER), "DOCX negali turėti originalo");
   });
 });
@@ -100,7 +109,7 @@ test("EXPORT_ALLOW_ORIGINAL=false - VISI trys formatai gauna redaguotą turinį"
 test("FAIL-CLOSED: be #4 komponento failas apskritai negeneruojamas", async () => {
   await withPolicy({ EXPORT_ALLOW_ORIGINAL: "false" }, null, async () => {
     await assert.rejects(
-      () => buildExport(PROTOCOL, "txt"),
+      () => buildExport(PROTOCOL, "txt", expectedVariant()),
       (e) => e.code === "EXPORT_ORIGINAL_FORBIDDEN"
     );
   });
@@ -113,7 +122,7 @@ test("FAIL-CLOSED: redakcijai kritus originalas NEGRĄŽINAMAS", async () => {
 
   await withPolicy({ EXPORT_ALLOW_ORIGINAL: "false" }, redact, async () => {
     await assert.rejects(
-      () => buildExport(PROTOCOL, "txt"),
+      () => buildExport(PROTOCOL, "txt", expectedVariant()),
       (e) => e.code === "EXPORT_ORIGINAL_FORBIDDEN" && !e.message.includes(MARKER)
     );
   });
@@ -147,7 +156,7 @@ test("REALUS komponentas: eksportas be identifikatorių, bet su vardais", async 
       veiksmai: [],
     };
 
-    const txt = (await buildExport(protocol, "txt")).buffer.toString("utf8");
+    const txt = (await buildExport(protocol, "txt", expectedVariant())).buffer.toString("utf8");
 
     assert.ok(!txt.includes("39001010000"));
     assert.ok(!txt.includes("jonas@imone.lt"));
@@ -199,7 +208,7 @@ test("RETENCIJA: eksportas NERAŠO į diską (todėl retencijai nėra ko valyti)
   try {
     await withPolicy({ EXPORT_ALLOW_ORIGINAL: undefined }, null, async () => {
       for (const format of ["txt", "csv", "docx"]) {
-        const out = await buildExport(PROTOCOL, format);
+        const out = await buildExport(PROTOCOL, format, expectedVariant());
         assert.ok(out && out.buffer, `${format} turi būti sugeneruotas atmintyje`);
       }
     });

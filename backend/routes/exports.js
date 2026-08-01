@@ -7,7 +7,7 @@ const { sanitizeServerError } = require("../utils/sanitizeError");
 const { buildExport, FORMATS } = require("../services/exportService");
 const { createLogger } = require("../utils/logger");
 const { getPrivacyPolicy } = require("../utils/privacyPolicy");
-const { VARIANT } = require("../utils/redactedArtefact");
+const { VARIANT, REQUESTABLE_VARIANTS, parseRequestedVariant } = require("../utils/redactedArtefact");
 const log = createLogger("route:exports");
 
 const router = express.Router();
@@ -48,6 +48,22 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
   const protocol = req.body?.protocol;
   const jobId = typeof req.body?.jobId === "string" ? req.body.jobId : undefined;
 
+  /**
+   * VARIANTAS PRIVALOMAS (GDPR #8: „Require an explicit variant parameter and
+   * never infer or silently substitute it").
+   *
+   * Numatytosios reikšmės nėra sąmoningai. Jei numatytasis būtų `redacted`,
+   * senas klientas tyliai gautų kitą turinį nei tikėjosi; jei `original` -
+   * tyliai gautų neredaguotą. Abu atvejai blogesni už aiškią klaidą.
+   */
+  const variant = parseRequestedVariant(req.body?.variant);
+
+  if (!variant) {
+    return res.status(400).json({
+      error: `Privalomas 'variant' laukas. Galimos reikšmės: ${REQUESTABLE_VARIANTS.join(", ")}.`,
+    });
+  }
+
   if (!ALLOWED_FORMATS.has(format)) {
     return res.status(400).json({
       error: `Nežinomas eksporto formatas. Galimi: ${[...ALLOWED_FORMATS].join(", ")}.`,
@@ -79,7 +95,7 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
       // duomenų (pvz. redis://user:pass@host).
       const { sanitizeForLogging } = auditLog;
       log.warn(
-        "[stenograma] Eksporto audito ryšio patikra nepavyko (saugyklos klaida) - " +
+        "Eksporto audito ryšio patikra nepavyko (saugyklos klaida) - " +
           "įvykis rašomas be ryšio. Patikrinkite job saugyklą (Redis):",
         sanitizeForLogging(e)
       );
@@ -107,7 +123,8 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
    * reikalingas jau dabar: be jo klausimas „kas eksportavo NEREDAGUOTĄ
    * variantą" lieka neatsakomas net turint žurnalą.
    */
-  const exportVariant = getPrivacyPolicy().exportAllowOriginal ? VARIANT.ORIGINAL : VARIANT.REDACTED;
+  // Auditui fiksuojam TIKRAI PRAŠYTĄ variantą - jis nėra išvedamas iš politikos.
+  const exportVariant = variant;
 
   auditLog.record({
     event: "EXPORT_STARTED",
@@ -120,7 +137,7 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
   });
 
   try {
-    const result = await buildExport(protocol, format);
+    const result = await buildExport(protocol, format, variant);
 
     auditLog.record({
       event: "EXPORT_COMPLETED",
@@ -142,6 +159,10 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
 
     return res.status(200).send(result.buffer);
   } catch (error) {
+    // Politikos atmetimas nėra serverio klaida - klientas turi matyti, kad
+    // variantas neleidžiamas, o ne „kažkas sulūžo".
+    const status = error && error.code === "EXPORT_ORIGINAL_FORBIDDEN" ? 403 : 500;
+
     auditLog.record({
       event: "EXPORT_FAILED",
       success: false,
@@ -155,7 +176,11 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
     });
 
     // sanitizeServerError logguoja pilną klaidą serveryje ir grąžina saugų tekstą.
-    return res.status(500).json({ error: sanitizeServerError(error, "eksportas") });
+    // Politikos atmetimo pranešimas yra saugus ir naudingas (jame nurodyta, kaip
+    // gauti leidžiamą variantą); tik tikros vidinės klaidos sanitizuojamos.
+    return status === 403
+      ? res.status(403).json({ error: error.message })
+      : res.status(500).json({ error: sanitizeServerError(error, "eksportas") });
   }
 });
 

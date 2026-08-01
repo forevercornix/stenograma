@@ -232,7 +232,7 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
 
     if (orphan.criticalFailure) {
       log.error(
-        `[stenograma] NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${orphan.errors.join("; ")}`
+        `NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${orphan.errors.join("; ")}`
       );
       return res.status(503).json({
         error: "Nepavyko visiškai ištrinti jobo duomenų. Užklausą galima pakartoti.",
@@ -275,7 +275,7 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
     // kad operaciją būtų galima pakartoti tuo pačiu ID. GDPR ištrynime serverio
     // logas nėra pakankamas patvirtinimas - klientas turi matyti, kad nepavyko.
     log.error(
-      `[stenograma] NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
+      `NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
     );
     return res.status(503).json({
       error:

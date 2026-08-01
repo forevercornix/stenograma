@@ -53,7 +53,7 @@ async function initializeStore() {
   if (privacy.persistentExplicit && !privacy.persistentStorage) {
     if (redisUrl) {
       log.warn(
-        "[stenograma] ⚠️  PERSISTENT_STORAGE=false - REDIS_URL IGNORUOJAMAS, " +
+        "⚠️  PERSISTENT_STORAGE=false - REDIS_URL IGNORUOJAMAS, " +
           "job store lieka atmintyje."
       );
     }
@@ -85,7 +85,7 @@ async function initializeStore() {
     await client.ping();
 
     store = createRedisStore(client);
-    log.info("[stenograma] Job store: Redis (persistentus, atsparus restartams)");
+    log.info("Job store: Redis (persistentus, atsparus restartams)");
     return store;
   } catch (err) {
     const msg = `Redis neprieinamas (${err.message}). `;
@@ -97,7 +97,7 @@ async function initializeStore() {
       );
     }
     log.warn(
-      `[stenograma] ⚠️  ${msg}Grįžtu į IN-MEMORY job store (jobai NEišliks perkrovus backendą). ` +
+      `⚠️  ${msg}Grįžtu į IN-MEMORY job store (jobai NEišliks perkrovus backendą). ` +
         `Produkcijai su persistencija - paleiskite Redis ir patikrinkite REDIS_URL.`
     );
     store = memoryStore;

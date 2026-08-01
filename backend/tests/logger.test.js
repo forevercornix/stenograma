@@ -232,12 +232,21 @@ test("STRUKTŪRA: kvietimo vietose nebeliko dubliuoto [stenograma] prefikso", ()
   const offenders = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "tests") continue;
+      // scripts/ yra CLI įrankiai - ten prefiksas prasmingas (žmogui skirta išvestis).
+      if (["node_modules", "tests", "scripts"].includes(entry.name)) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (entry.name.endsWith(".js")) {
         const src = fs.readFileSync(full, "utf8");
-        if (/log\.(info|warn|error|debug)\(`\[stenograma\]/.test(src)) offenders.push(full);
+        /**
+         * Regex tikrina VISAS citavimo formas.
+         *
+         * Pirmoji versija matė tik backtick'us, tad praėjo žalia, nors prefiksas
+         * liko ~17 failų su dvigubomis kabutėmis ir daugiaeiliais sujungimais.
+         * Testas, tikrinantis siauresnę sąlygą nei deklaruoja, yra blogesnis už
+         * jokio testo - jis sukuria įspūdį, kad darbas baigtas.
+         */
+        if (/\[stenograma\]/.test(src)) offenders.push(full);
       }
     }
   };
