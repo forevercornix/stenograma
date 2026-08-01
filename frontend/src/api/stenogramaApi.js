@@ -163,11 +163,22 @@ export async function transcribeAudioJob({
  *
  * Grąžina { blob, filename } - failo vardą nustato serveris (Content-Disposition).
  */
-export async function exportProtocol({ format, protocol, jobId }, { signal } = {}) {
+export async function exportProtocol({ format, variant, protocol, jobId }, { signal } = {}) {
+  /**
+   * VARIANTAS PRIVALOMAS (GDPR #8).
+   *
+   * Numatytosios reikšmės nėra sąmoningai - nei čia, nei backend'e. Jei klientas
+   * jos nepateikia, tai klaida jo kode, o ne priežastis spėti: „paprašiau
+   * redaguoto, gavau originalą" atrodo lygiai taip pat kaip teisingas atsakymas.
+   */
+  if (variant !== "original" && variant !== "redacted") {
+    throw new Error('Eksporto variantas privalomas: "original" arba "redacted".');
+  }
+
   const res = await fetch(`${BACKEND_URL}/api/exports`, {
     method: "POST",
     headers: withApiKeyHeader({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ format, protocol, jobId }),
+    body: JSON.stringify({ format, variant, protocol, jobId }),
     signal,
   });
 
@@ -186,6 +197,6 @@ export async function exportProtocol({ format, protocol, jobId }, { signal } = {
 
   return {
     blob: await res.blob(),
-    filename: match ? match[1] : `eksportas.${format}`,
+    filename: match ? match[1] : `eksportas_${variant}.${format}`,
   };
 }

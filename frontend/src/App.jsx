@@ -383,14 +383,38 @@ export default function Stenograma() {
   // eksportą nieko nežinojo, tad EXPORT_* įvykių audito žurnale negalėjo būti.
   // Kliento "pranešiau, kad eksportavau" įrašu audite pasitikėti negalima.
 
-  const runExport = async (format) => {
+  /**
+   * EKSPORTAS SU EKSPLICITINIU VARIANTU (GDPR #8).
+   *
+   * Variantas PRIVALOMAS ir be numatytosios reikšmės.
+   *
+   * Numatytoji `redacted` atrodytų kaip saugiklis, bet UI ją visada perduoda,
+   * tad ji niekada nebūtų vykdoma - netestuojamas saugiklis yra tik įspūdis.
+   * Jei kada nors atsirastų kvietimas be varianto, `exportProtocol` mes aiškią
+   * klaidą, o ne tyliai pasirinks už vartotoją.
+   *
+   * Saugesnis kelias vis tiek yra numatytasis VIZUALIAI: redaguota grupė rodoma
+   * pirma. Originalas reikalauja atskiro veiksmo IR patvirtinimo - ne dėl to,
+   * kad draudžiamas, o dėl to, kad jį dažniausiai pasirenka netyčia, o klaida
+   * pastebima tik tada, kai failas jau išsiųstas.
+   */
+  const runExport = async (format, variant) => {
     if (!protocol || exporting) return;
 
-    setExporting(format);
+    if (variant === "original") {
+      const confirmed = window.confirm(
+        "Eksportuojate NEREDAGUOTĄ protokolą.\n\n" +
+          "Faile liks asmens kodai, el. paštai, telefonai ir sąskaitų numeriai, " +
+          "jei jie buvo transkripcijoje.\n\nTęsti?"
+      );
+      if (!confirmed) return;
+    }
+
+    setExporting(`${variant}:${format}`);
     setExportError("");
 
     try {
-      const { blob, filename } = await exportProtocol({ format, protocol, jobId: transcriptionJobId });
+      const { blob, filename } = await exportProtocol({ format, variant, protocol, jobId: transcriptionJobId });
       saveBlob(blob, filename);
     } catch (e) {
       setExportError(e.message || "Eksportas nepavyko.");
@@ -836,16 +860,56 @@ export default function Stenograma() {
 
           {protocol && !isGenerating && (
             <div className="mt-4">
-              <div className="flex flex-wrap gap-2">
-                <button onClick={() => runExport("txt")} disabled={Boolean(exporting)} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50" style={{ borderColor: LINE, color: SLATE }}>
-                  <Download size={13} /> {exporting === "txt" ? "Ruošiama…" : ".txt"}
-                </button>
-                <button onClick={() => runExport("docx")} disabled={Boolean(exporting)} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50" style={{ borderColor: LINE, color: SLATE }}>
-                  <FileType size={13} /> {exporting === "docx" ? "Ruošiama…" : "Word (.docx)"}
-                </button>
-                <button onClick={() => runExport("csv")} disabled={Boolean(exporting)} className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50" style={{ borderColor: LINE, color: SLATE }}>
-                  <FileSpreadsheet size={13} /> {exporting === "csv" ? "Ruošiama…" : "Veiksmai .csv"}
-                </button>
+              {/*
+                REDAGUOTAS - numatytasis kelias, pirmas sąraše.
+
+                Grupė turi `role="group"` su pavadinimu, o mygtukų tekstas lieka
+                nepakeistas. Alternatyva būtų `aria-label` ant kiekvieno mygtuko,
+                bet ji PERRAŠO prieinamą vardą - o nuo jo priklauso ir Playwright
+                E2E selektoriai (`getByRole("button", { name: "Word (.docx)" })`).
+                Grupė duoda kontekstą nesugriaudama vardų.
+              */}
+              <p id="export-redacted-label" className="mono text-xs uppercase tracking-wide mb-2" style={{ color: SLATE }}>
+                Redaguotas (be asmens duomenų)
+              </p>
+              <div className="flex flex-wrap gap-2" role="group" aria-labelledby="export-redacted-label">
+                {[
+                  ["txt", ".txt", Download],
+                  ["docx", "Word (.docx)", FileType],
+                  ["csv", "Veiksmai .csv", FileSpreadsheet],
+                ].map(([format, label, Icon]) => (
+                  <button
+                    key={`redacted-${format}`}
+                    onClick={() => runExport(format, "redacted")}
+                    disabled={Boolean(exporting)}
+                    className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50"
+                    style={{ borderColor: LINE, color: SLATE }}
+                  >
+                    <Icon size={13} /> {exporting === `redacted:${format}` ? "Ruošiama…" : label}
+                  </button>
+                ))}
+              </div>
+
+              {/* ORIGINALAS - atskiras veiksmas su įspėjimu; patvirtinimas runExport viduje. */}
+              <p id="export-original-label" className="mono text-xs uppercase tracking-wide mt-4 mb-2" style={{ color: REDINK }}>
+                Originalas (su asmens duomenimis)
+              </p>
+              <div className="flex flex-wrap gap-2" role="group" aria-labelledby="export-original-label">
+                {[
+                  ["txt", ".txt", Download],
+                  ["docx", "Word (.docx)", FileType],
+                  ["csv", "Veiksmai .csv", FileSpreadsheet],
+                ].map(([format, label, Icon]) => (
+                  <button
+                    key={`original-${format}`}
+                    onClick={() => runExport(format, "original")}
+                    disabled={Boolean(exporting)}
+                    className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50"
+                    style={{ borderColor: REDINK, color: REDINK }}
+                  >
+                    <Icon size={13} /> {exporting === `original:${format}` ? "Ruošiama…" : label}
+                  </button>
+                ))}
               </div>
 
               {exportError && (

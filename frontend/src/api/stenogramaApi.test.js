@@ -236,12 +236,14 @@ describe("exportProtocol (GDPR #6 - eksporto auditas)", () => {
     // DELETE /api/transcribe-jobs/:id.
     global.fetch = vi.fn(() => Promise.resolve(fileRes()));
 
-    await exportProtocol({ format: "docx", protocol: { pavadinimas: "T" }, jobId: "job-42" });
+    await exportProtocol({ variant: "redacted", format: "docx", protocol: { pavadinimas: "T" }, jobId: "job-42" });
 
     const [url, options] = global.fetch.mock.calls[0];
     expect(url).toContain("/api/exports");
     expect(options.method).toBe("POST");
     expect(JSON.parse(options.body)).toEqual({
+      // Variantas siunčiamas EKSPLICITIŠKAI - backend'as jo nenumano (GDPR #8).
+      variant: "redacted",
       format: "docx",
       protocol: { pavadinimas: "T" },
       jobId: "job-42",
@@ -251,7 +253,7 @@ describe("exportProtocol (GDPR #6 - eksporto auditas)", () => {
   it("failo vardą ima iš serverio Content-Disposition", async () => {
     global.fetch = vi.fn(() => Promise.resolve(fileRes({ filename: "veiksmai_2026-01-01.csv" })));
 
-    const result = await exportProtocol({ format: "csv", protocol: {} });
+    const result = await exportProtocol({ variant: "redacted", format: "csv", protocol: {} });
 
     expect(result.filename).toBe("veiksmai_2026-01-01.csv");
     expect(result.blob).toBeInstanceOf(Blob);
@@ -267,7 +269,7 @@ describe("exportProtocol (GDPR #6 - eksporto auditas)", () => {
       })
     );
 
-    await expect(exportProtocol({ format: "txt", protocol: {} })).rejects.toThrow(
+    await expect(exportProtocol({ variant: "redacted", format: "txt", protocol: {} })).rejects.toThrow(
       "Eksporto servisas nepasiekiamas."
     );
   });

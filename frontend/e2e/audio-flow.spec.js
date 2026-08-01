@@ -70,7 +70,7 @@ test.describe("Stenograma - pilnas audio→DOCX srautas", () => {
 
     // 7. Eksportuoti DOCX.
     const downloadPromise = page.waitForEvent("download", { timeout: 15_000 });
-    await page.getByRole("button", { name: "Word (.docx)" }).click();
+    await page.getByRole("group", { name: /Redaguotas/ }).getByRole("button", { name: "Word (.docx)" }).click();
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toMatch(/\.docx$/);
   });

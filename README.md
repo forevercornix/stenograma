@@ -1310,6 +1310,18 @@ nepastebėtų.
 Trūkstamas redaguotas turinys **niekada** nevirsta originalu: nesant redakcijos
 komponento užklausa nutraukiama, o ne patenkinama kitu variantu.
 
+**Sąsajoje** abu variantai rodomi atskiromis grupėmis su aiškiais pavadinimais
+(„Redaguotas (be asmens duomenų)" ir „Originalas (su asmens duomenimis)").
+Redaguota grupė yra pirma, o originalo mygtukai reikalauja patvirtinimo, kuriame
+įvardyta, kas liks faile. Numatytosios varianto reikšmės nėra nei sąsajoje, nei
+API sluoksnyje – kvietimas be varianto meta klaidą, o ne pasirenka už vartotoją.
+
+⚠️ Failo vardas ir `X-Request-Id` yra `Access-Control-Expose-Headers` sąraše.
+Be to naršyklė cross-origin užklausoje jų **neperskaito**, ir eksportas tyliai
+nusileidžia į bendrinį vardą. Vietiniame nginx `/api` proxy diegime to nesimato
+(tas pats originas), tad trūkumas pasireiškia tik atskirtame
+`VITE_BACKEND_URL` scenarijuje.
+
 **Failo vardas** generuojamas serveryje ir neša variantą –
 `protokolas_redaguotas_2026-03-15.docx`. Tai ne kosmetika: atsisiuntus du failus,
 po savaitės neįmanoma pasakyti, kuris redaguotas, o failo vardas yra vienintelis

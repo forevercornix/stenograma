@@ -50,15 +50,17 @@ test.describe("Stenograma - pilnas protokolo srautas", () => {
 
     // 7. Patikrinti, kad protokolo turinys realiai atsirado (ne tuščias).
     //    Mock provideris iš transkripcijos sudaro darbotvarkę/klausimus.
-    await expect(page.getByRole("button", { name: "Word (.docx)" })).toBeVisible();
+    await expect(page.getByRole("group", { name: /Redaguotas/ }).getByRole("button", { name: "Word (.docx)" })).toBeVisible();
 
     // 8. Eksportuoti DOCX - patikrinti, kad download realiai prasideda.
     const downloadPromise = page.waitForEvent("download", { timeout: 15_000 });
-    await page.getByRole("button", { name: "Word (.docx)" }).click();
+    await page.getByRole("group", { name: /Redaguotas/ }).getByRole("button", { name: "Word (.docx)" }).click();
     const download = await downloadPromise;
 
     // 9. Patikrinti, kad atsisiųstas failas yra .docx ir netuščias.
-    expect(download.suggestedFilename()).toMatch(/\.docx$/);
+    // Failo vardas neša VARIANTĄ (GDPR #8): atsisiuntus abu, po savaitės kitaip
+    // neatskirtum, kuris redaguotas.
+    expect(download.suggestedFilename()).toMatch(/_redaguotas_.*\.docx$/);
     const path = await download.path();
     expect(path).toBeTruthy();
   });
