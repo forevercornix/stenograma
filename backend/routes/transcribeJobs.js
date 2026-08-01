@@ -15,6 +15,8 @@ const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { createLogger } = require("../utils/logger");
+const { recordRejectedUpload, reasonFromMulterError, REASONS } = require("../utils/uploadEvents");
+const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
 const log = createLogger("route:transcribe-jobs");
 
 const router = express.Router();
@@ -34,7 +36,17 @@ function uploadSingleAudio(req, res, next) {
     { name: "file", maxCount: 1 },
   ]);
   handler(req, res, (err) => {
-    if (err) return res.status(400).json({ error: err.message });
+    if (err) {
+      const reason = reasonFromMulterError(err);
+      recordRejectedUpload(reason, {
+        route: "/api/transcribe-jobs",
+        // MIME išsaugotas fileFilter'yje - multer klaidos objekte jo nėra.
+        mimetype: req.uploadObservation && req.uploadObservation.mimetype,
+        // Faktinio dydžio multer nežino (nutraukia skaitymą), tad fiksuojam limitą.
+        limitBytes: reason === REASONS.TOO_LARGE ? MAX_UPLOAD_MB() * 1024 * 1024 : undefined,
+      });
+      return res.status(400).json({ error: err.message });
+    }
     const f = (req.files && (req.files.audio?.[0] || req.files.file?.[0])) || null;
     if (f) req.file = f;
     next();
@@ -59,7 +71,10 @@ function uploadSingleAudio(req, res, next) {
  * response: { jobId, status: "queued" }
  */
 router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
+  if (!req.file) {
+    recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe-jobs" });
+    return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
+  }
 
   const body = { ...req.body };
   const fileMeta = { filename: req.file.originalname, mimeType: req.file.mimetype };
@@ -78,6 +93,7 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
       const header = Buffer.alloc(64);
       await handle.read(header, 0, header.length, 0);
       if (!detectAudioMagic(header)) {
+        recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe-jobs", mimetype: req.file.mimetype });
         return res.status(400).json({ error: "Failo turinys neatitinka palaikomo audio formato (magic bytes)." });
       }
     } finally {
