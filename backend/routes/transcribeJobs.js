@@ -9,6 +9,7 @@ const { detectAudioMagic } = require("../utils/audioMagicBytes");
 const { safeUnlinkUpload, safeExtension } = require("../utils/uploadPath");
 const { createAudioUpload } = require("../utils/uploadStorage");
 const { VARIANT } = require("../utils/redactedArtefact");
+const { getRequestId, getActor } = require("../utils/requestContext");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
@@ -92,6 +93,9 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
 
     job = await jobStore.create({
       type: jobStore.JOB_TYPES.TRANSCRIPTION,
+      // Koreliacija su HTTP užklausa (GDPR #17).
+      requestId: getRequestId(),
+      actor: getActor(),
       // storageKey saugom JOBE, ne tik BullMQ payload'e - kad GDPR ištrynimas
       // rastų likusį audio ir INLINE režime (ten BullMQ jobo išvis nėra).
       storageKey,

@@ -12,6 +12,8 @@
  * - Jei API_KEY nenustatytas IR ne production: praleidžiama su įspėjimu konsolėje
  *   (patogu lokaliam kūrimui su savo backend'u).
  */
+const { setActor, actorFingerprint } = require("../utils/requestContext");
+
 function apiKeyAuth(req, res, next) {
   const configuredKey = process.env.API_KEY;
 
@@ -20,6 +22,9 @@ function apiKeyAuth(req, res, next) {
     if (provided !== configuredKey) {
       return res.status(401).json({ error: "Neteisingas arba trūkstamas x-api-key." });
     }
+    // AKTORIUS audito įrašams (GDPR #17). Saugom rakto HASH, ne patį raktą -
+    // audito įrašai gyvena ilgiau nei raktas.
+    setActor(actorFingerprint(configuredKey));
     return next();
   }
 

@@ -1118,6 +1118,31 @@ nuo tikrovės neatsiskirtų, fabrikos elgesį dengia testas, tikrinantis
 ⚠️ Kaina: efemeriškame režime nėra restart recovery – ilgas transkribavimas,
 nutrūkęs dėl restarto, prarandamas ir jį reikia kartoti.
 
+**Užklausų koreliacija (`utils/requestContext.js`).** Kiekviena užklausa gauna
+`X-Request-Id`: arba serverio sugeneruotą (`req_<uuid>`), arba kliento pateiktą,
+jei jis atitinka griežtą formatą (`[A-Za-z0-9_.:-]`, 8–64 simboliai). Ribos
+būtinos, nes ID patenka į logus ir auditą – be jų jis taptų log injekcijos
+kanalu. ID grąžinamas atsakymo antraštėje **taip pat ir atmestoms užklausoms**,
+kad klientas turėtų ką nurodyti kreipdamasis.
+
+ID keliauja per `AsyncLocalStorage`, tad servisams ir tiekėjams jo perduoti per
+parašus nereikia. Asinchroniniame kelyje jis saugomas jobo metaduomenyse ir
+atkuriamas prieš vykdymą – ir inline, ir BullMQ worker'yje (atskirame procese
+HTTP konteksto paveldėti neįmanoma). Taip vienas ID sujungia užklausą, eilę,
+worker'į ir tiekėjo kvietimą.
+
+**Aktorius** audito įrašuose yra API rakto **SHA-256 atspaudas** (`key_<12 hex>`),
+ne pats raktas: audito įrašai gyvena ilgiau nei raktas. `auditLog.record()` ima
+`requestId` ir `actor` iš konteksto automatiškai, bet eksplicitinis perdavimas
+turi pirmenybę – worker'io retry ir ištrynimo kvitai kartais žino ID geriau nei
+aplinkinis scope. Kontekste laikomi tik identifikatoriai – jokio turinio,
+antraščių ar IP.
+
+⚠️ Kliento pateiktą `X-Request-Id` galima pakartoti keliose užklausose, tad jis
+nėra unikalumo garantija – `requestIdSource` rodo, ar ID mūsų, ar kliento.
+Griežtesnis modelis (serverio unikalus ID + atskiras kliento `correlationId`)
+paliekamas vėlesniam etapui.
+
 **PII redakcija (`utils/piiRedaction.js`).** Komponentas, kurio laukia abu
 apsaugos taškai – išorinis LLM ir eksportas. Kai jis yra, `redact()` pasiimamas
 automatiškai, be jokio perjungimo.

@@ -34,6 +34,14 @@ function newJob(fields = {}) {
     // nustatomas į null) - kad GDPR ištrynimas surastų likutį ir INLINE režime,
     // kur BullMQ jobo (ir jo payload'o su storageKey) apskritai nėra.
     storageKey: fields.storageKey || null,
+    /**
+     * KORELIACIJA (GDPR #17). Užklausos ID ir aktoriaus atspaudas keliauja su
+     * jobu, kad worker'io logai ir audito įrašai būtų susiejami su HTTP
+     * užklausa, kuri jį sukūrė. Tai IDENTIFIKATORIAI, ne turinys - jokio
+     * transkripcijos, IP ar antraščių pėdsako čia nėra.
+     */
+    requestId: fields.requestId || null,
+    actor: fields.actor || null,
     // Techninis audio valymas nepavyko - laukiama pakartojimo. SĄMONINGAI
     // ATSKIRTA nuo `deletion_pending`: ta vėliava reiškia VARTOTOJO prašytą
     // viso jobo ištrynimą, o ši - tik nebereikalingo audio pašalinimą, kai

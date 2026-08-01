@@ -151,6 +151,31 @@ async function _runInline(type, jobId, payload) {
     console.error(`[stenograma] Nėra processor'iaus tipui '${type}'`);
     return;
   }
+
+  /**
+   * Inline vykdymas `setImmediate` metu jau NEBETURI HTTP užklausos konteksto -
+   * AsyncLocalStorage scope baigėsi kartu su atsakymu. Todėl kontekstą
+   * atkuriam iš jobo metaduomenų, lygiai kaip tai daro BullMQ worker'iai.
+   * Kitaip inline ir worker keliai duotų skirtingą koreliaciją.
+   */
+  const { runWithContext } = require("../utils/requestContext");
+
+  // Koreliacijos metaduomenys yra PAPILDOMI: jei jų gauti nepavyksta, darbas
+  // vis tiek turi vykti. Observability niekada negali tapti vykdymo sąlyga.
+  let job = null;
+  try {
+    if (typeof jobStore.get === "function") job = await jobStore.get(jobId);
+  } catch {
+    job = null;
+  }
+
+  return runWithContext(
+    { requestId: (job && job.requestId) || null, actor: (job && job.actor) || null, execution: "inline" },
+    () => _executeInline(type, processor, jobId, payload)
+  );
+}
+
+async function _executeInline(type, processor, jobId, payload) {
   try {
     await jobStore.update(jobId, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
     const result = await processor(payload, jobId);
