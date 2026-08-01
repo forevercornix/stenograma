@@ -407,27 +407,6 @@ function record(entry = {}) {
     redaction: sanitizeRedaction(entry.redaction),
 
     /**
-     * EKSPORTO/ĮKĖLIMO ĮVYKIŲ LAUKAI (GDPR #17, #8).
-     *
-     * Anksčiau `format` ir baigtis gyveno laisvos formos `details` eilutėje
-     * (`"format=docx link=ok bytes=1234"`). Auditą tokiu atveju galima skaityti
-     * akimis, bet ne filtruoti - o klausimas „kas ir kada eksportavo NEREDAGUOTĄ
-     * variantą" yra tiksliai tas, dėl kurio auditas ir egzistuoja.
-     *
-     * `variant` ir `outcome` yra enum'ai, ne laisvas tekstas: sanitizeControlled
-     * riboja simbolius, o trumpa riba neleidžia į juos įsprausti turinio.
-     */
-    variant: sanitizeControlled(entry.variant, 20),
-    format: sanitizeControlled(entry.format, 20),
-    outcome: sanitizeControlled(entry.outcome, 20),
-    route: sanitizeControlled(entry.route, 60),
-    mime: sanitizeControlled(entry.mime, 40),
-    // Dydžiai lieka SKAIČIAIS: sanitizeControlled juos paverstų tekstu, ir
-    // audito nefiltruotum pagal „didesnis nei X".
-    sizeBytes: Number.isFinite(entry.sizeBytes) ? entry.sizeBytes : null,
-    limitBytes: Number.isFinite(entry.limitBytes) ? entry.limitBytes : null,
-
-    /**
      * KORELIACIJA (GDPR #17). Numatytosios reikšmės imamos iš request konteksto,
      * bet EKSPLICITINIS perdavimas turi pirmenybę: worker'iai ir ištrynimo kvitai
      * kartais žino ID geriau nei aplinkinis scope (pvz. retry, vykstantis be

@@ -6,8 +6,6 @@ const jobStore = require("../utils/jobStore");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const { buildExport, FORMATS } = require("../services/exportService");
 const { createLogger } = require("../utils/logger");
-const { getPrivacyPolicy } = require("../utils/privacyPolicy");
-const { VARIANT } = require("../utils/redactedArtefact");
 const log = createLogger("route:exports");
 
 const router = express.Router();
@@ -99,24 +97,11 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
 
   const started = Date.now();
 
-  /**
-   * Kokį VARIANTĄ realiai gaus vartotojas.
-   *
-   * Šiame etape jį lemia politika (`EXPORT_ALLOW_ORIGINAL`), ne užklausa -
-   * eksplicitinis `variant` parametras ateis su #8. Bet audito laukas
-   * reikalingas jau dabar: be jo klausimas „kas eksportavo NEREDAGUOTĄ
-   * variantą" lieka neatsakomas net turint žurnalą.
-   */
-  const exportVariant = getPrivacyPolicy().exportAllowOriginal ? VARIANT.ORIGINAL : VARIANT.REDACTED;
-
   auditLog.record({
     event: "EXPORT_STARTED",
     success: true,
     jobId: linkedJobId,
-    format,
-    variant: exportVariant,
-    outcome: "started",
-    details: `link=${linkState}`,
+    details: `format=${format} link=${linkState}`,
   });
 
   try {
@@ -127,11 +112,7 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
       success: true,
       jobId: linkedJobId,
       processingTimeMs: Date.now() - started,
-      format,
-      variant: exportVariant,
-      outcome: "delivered",
-      // Baitų skaičius yra dydis, ne turinys - jis lieka naudingas diagnostikai.
-      details: `link=${linkState} bytes=${result.buffer.length}`,
+      details: `format=${format} link=${linkState} bytes=${result.buffer.length}`,
     });
 
     res.setHeader("Content-Type", result.contentType);
@@ -145,9 +126,6 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
     auditLog.record({
       event: "EXPORT_FAILED",
       success: false,
-      format,
-      variant: exportVariant,
-      outcome: "failed",
       jobId: linkedJobId,
       processingTimeMs: Date.now() - started,
       details: `format=${format} link=${linkState}`,

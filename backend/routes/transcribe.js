@@ -6,8 +6,6 @@ const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { safeUnlinkUpload, resolveExistingUploadPath } = require("../utils/uploadPath");
 const { createAudioUpload } = require("../utils/uploadStorage");
 const { VARIANT } = require("../utils/redactedArtefact");
-const { recordRejectedUpload, reasonFromMulterError, REASONS } = require("../utils/uploadEvents");
-const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
 
 const router = express.Router();
 
@@ -21,17 +19,7 @@ function uploadSingleAudio(req, res, next) {
     { name: "file", maxCount: 1 },
   ]);
   handler(req, res, (err) => {
-    if (err) {
-      const reason = reasonFromMulterError(err);
-      recordRejectedUpload(reason, {
-        route: "/api/transcribe",
-        // MIME išsaugotas fileFilter'yje - multer klaidos objekte jo nėra.
-        mimetype: req.uploadObservation && req.uploadObservation.mimetype,
-        // Faktinio dydžio multer nežino (nutraukia skaitymą), tad fiksuojam limitą.
-        limitBytes: reason === REASONS.TOO_LARGE ? MAX_UPLOAD_MB() * 1024 * 1024 : undefined,
-      });
-      return res.status(400).json({ error: err.message });
-    }
+    if (err) return res.status(400).json({ error: err.message });
     const f = (req.files && (req.files.audio?.[0] || req.files.file?.[0])) || null;
     if (f) req.file = f;
     next();
@@ -53,11 +41,7 @@ function uploadSingleAudio(req, res, next) {
  * services/transcriptionService.js pilną paaiškinimą.
  */
 router.post("/transcribe", rateLimiter, apiKeyAuth, uploadSingleAudio, async (req, res) => {
-  if (!req.file) {
-    // Ir šis kelias yra atmestas įkėlimas - be įvykio pėdsakas būtų dalinis.
-    recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe" });
-    return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
-  }
+  if (!req.file) return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
 
   try {
     // Kelias tikrinamas PRIEŠ skaitymą, su realpath - tekstinė patikra

@@ -129,11 +129,7 @@ test("audito įrašuose NĖRA jokio protokolo turinio ar PII", async () => {
 
   // Bet naudingi techniniai metaduomenys - turi būti.
   assert.match(serialized, /EXPORT_COMPLETED/);
-  // `format` persikėlė iš laisvos `details` eilutės į STRUKTŪRIZUOTĄ lauką -
-  // kitaip audito nefiltruotum pagal formatą ar variantą (GDPR #17).
-  assert.match(serialized, /"format":"docx"/);
-  assert.match(serialized, /"variant":"(original|redacted)"/);
-  assert.match(serialized, /"outcome":"delivered"/);
+  assert.match(serialized, /format=docx/);
   assert.match(serialized, /bytes=\d+/);
 });
 

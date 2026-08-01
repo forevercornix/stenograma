@@ -1146,25 +1146,6 @@ Sanitizacija turi greitą kelią: pranešimai be `@`, kelio skirtuko ar ilgos
 skaitmenų sekos praleidžiami nepatikrinti (20 tūkst. paprastų eilučių ≈ 120 ms).
 Filtras sąmoningai platus – kilus abejonei, sanitizuojama.
 
-**Eksporto ir įkėlimo įvykiai.** `EXPORT_STARTED/COMPLETED/FAILED` neša
-**struktūrizuotus** `format`, `variant` ir `outcome` laukus, ne laisvos formos
-`details` eilutę – kitaip klausimo „kas ir kada eksportavo neredaguotą variantą"
-audite neatsakytum, nors visi duomenys jame ir būtų.
-
-Atmesti įkėlimai (`UPLOAD_REJECTED`) fiksuojami visais keliais – trūkstamas
-failas, neleidžiamas formatas, per didelis failas, neatitinkantis turinio parašas.
-Laukai struktūrizuoti (`route`, `mime`, `outcome`, `sizeBytes`/`limitBytes`), o
-dydžiai lieka **skaičiais**, kad auditą būtų galima filtruoti.
-
-MIME išsaugomas `fileFilter` metu, **prieš** atmetimą – multer klaidos objekte jo
-nėra. Dydžio limito atveju fiksuojamas **sukonfigūruotas limitas**, ne tariamas
-faktinis dydis: multer nutraukia skaitymą peržengęs ribą ir realaus dydžio
-nežino.
-
-**Failo vardas neįrašomas** – jį pateikia vartotojas, ir jame dažnai būna
-asmenvardis („Jono Jonaičio pokalbis.mp3"). Įvykis susiejamas su `jobId`, kai jis
-jau egzistuoja, kad GDPR ištrynimas jį pasiektų.
-
 **IP adresai nesaugomi.** Rate limito įvykiai logina `ip_<12 hex>` – HMAC
 pseudonimą su ta pačia druska kaip audito ID (`AUDIT_ID_SALT`). Jis atsako į
 klausimą „ar tas pats klientas?", bet adreso neatkuria. Po restarto be nustatytos
