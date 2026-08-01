@@ -65,7 +65,7 @@ function _enforceRedaction(provider, name) {
     );
   }
 
-  return new RedactingLLMProvider(provider, probe.redact);
+  return new RedactingLLMProvider(provider, probe.redact, probe.module);
 }
 
 

@@ -90,7 +90,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
   let usage = null;
 
   try {
-    const first = await llm.generateProtocol(prompt);
+    const first = await llm.generateProtocol(prompt, { redactionPurpose: "source_transcript" });
     lastRaw = first.rawText;
     usage = first.usage;
 
@@ -111,7 +111,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
     if (!result.success) {
       repairAttempts = 1;
       const repairPrompt = buildRepairPrompt(lastRaw, result.errors);
-      const repaired = await llm.generateProtocol(repairPrompt);
+      const repaired = await llm.generateProtocol(repairPrompt, { redactionPurpose: "repair_prompt" });
       lastRaw = repaired.rawText;
       if (repaired.usage) {
         usage = {
@@ -155,6 +155,20 @@ async function generateProtocol({ title, date, participants, transcript, segment
     const checkedProtocol = groundingCheck(result.data, transcript);
     const unverifiedCount = (checkedProtocol.veiksmai || []).filter((v) => v._grounding && !v._grounding.verified).length;
 
+    const redactionAuditMeta = llm.sourceRedactionAudit || llm.lastRedactionAudit || null;
+
+    if (redactionAuditMeta) {
+      // Application log ir auditas - skirtingi kanalai skirtingiems skaitytojams.
+      // Nesėkmė jau logguojama; be sėkmės įrašo operatorius negali patvirtinti,
+      // kad apsauga apskritai veikia (tyla atrodytų identiškai kaip išjungta
+      // redakcija). Rašom TIK politikos versiją ir baigtį - jokio turinio.
+      const categories = Object.keys(redactionAuditMeta.redactionStats || {}).length;
+      console.log(
+        `[stenograma] Redakcija atlikta: policy=${redactionAuditMeta.policyVersion}, ` +
+          `outcome=sent, categories=${categories}`
+      );
+    }
+
     auditLog.record({
       jobId,
       meetingId,
@@ -166,7 +180,22 @@ async function generateProtocol({ title, date, participants, transcript, segment
       estimatedCostUsd: costUsd,
       jsonRepairAttempts: repairAttempts,
       success: true,
+      // REDAKCIJOS BŪSENA AUDITE (GDPR #4). Įrašomas artefakto metaduomuo -
+      // variantas, politikos versija ir kategorijų SKAIČIAI. Aptiktų reikšmių
+      // čia nėra ir negali būti: `stats` konstruojamas tik iš skaitliukų
+      // (žr. utils/piiRedaction.js), tad auditas lieka saugus skaityti.
+      ...(redactionAuditMeta ? { redaction: redactionAuditMeta } : {}),
     });
+
+    // Tie patys metaduomenys keliauja ir į API atsakymą - klientas turi žinoti,
+    // ar prieš jį originalo, ar redaguoto turinio pagrindu sudarytas protokolas.
+    /**
+     * ŠALTINIO transkripcijos metaduomenys, ne paskutinio kvietimo.
+     *
+     * Repair retry siunčia antrą payload'ą tam pačiam provideriui; jei imtume
+     * `lastRedactionAudit`, gautume repair prompto statistiką ir jo artefakto ID.
+     */
+    const redactionMeta = llm.sourceRedactionAudit || llm.lastRedactionAudit || null;
 
     return {
       protocol: checkedProtocol,
@@ -179,9 +208,32 @@ async function generateProtocol({ title, date, participants, transcript, segment
         processingTimeMs: Date.now() - start,
         grounding: { unverifiedActionsCount: unverifiedCount, totalActionsCount: (checkedProtocol.veiksmai || []).length },
       },
+      ...(redactionMeta ? { redaction: redactionMeta } : {}),
     };
   } catch (e) {
-    if (e instanceof HttpError) throw e;
+    /**
+     * REDAKCIJOS BAIGTIS IR NESĖKMĖS ATVEJU (GDPR #4: „logs record redaction
+     * status and outcome").
+     *
+     * Iki šiol redakcijos kritimas audite atrodė kaip bendra generavimo klaida -
+     * neįmanoma buvo atskirti „modelis neatsakė" nuo „duomenys sąmoningai
+     * neišsiųsti". Auditui tai skirtingi įvykiai: antrasis yra apsaugos
+     * suveikimas, ir jį reikia matyti.
+     *
+     * `error` čia eina pro auditLog sanitizaciją, o pati RedactionError savo
+     * pranešime originalaus teksto neturi (žr. RedactingLLMProvider).
+     */
+    const isRedactionFailure = e && (e.code === "REDACTION_FAILED" || e.code === "ARTEFACT_VARIANT_MISMATCH");
+
+    if (isRedactionFailure) {
+      // Application log atskirai nuo audito: jie skirti skirtingiems skaitytojams.
+      console.warn(
+        `[stenograma] Redakcija NEPAVYKO (${e.code}) - išorinis tiekėjas nekviestas, duomenys neišsiųsti.`
+      );
+    }
+
+    if (e instanceof HttpError && !isRedactionFailure) throw e;
+
     auditLog.record({
       jobId,
       meetingId,
@@ -190,7 +242,19 @@ async function generateProtocol({ title, date, participants, transcript, segment
       processingTimeMs: Date.now() - start,
       success: false,
       error: e.message,
+      ...(isRedactionFailure
+        ? {
+            redaction: {
+              variant: null,
+              redactionStatus: "failed",
+              policyVersion: (llm.lastRedactionAudit && llm.lastRedactionAudit.policyVersion) || null,
+              outcome: require("../utils/redactedArtefact").OUTCOME.BLOCKED,
+            },
+          }
+        : {}),
     });
+
+    if (e instanceof HttpError) throw e;
     throw new HttpError(500, e.message);
   }
 }

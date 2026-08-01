@@ -89,8 +89,15 @@ function withEnv(env, fn) {
   })();
 }
 
+/** Simuliuoja „#4 komponento nėra" - jis dabar realiai egzistuoja. */
+function missingModuleLoader() {
+  const error = new Error("Cannot find module './piiRedaction'");
+  error.code = "MODULE_NOT_FOUND";
+  throw error;
+}
+
 function withRedactor(redact, fn) {
-  redactionComponent._setLoaderForTests(redact ? () => ({ redact }) : null);
+  redactionComponent._setLoaderForTests(redact ? () => ({ redact }) : missingModuleLoader);
   return (async () => {
     try {
       return await fn();
@@ -153,7 +160,10 @@ test("netinkamas redact() rezultatas (undefined) taip pat blokuoja kvietimą", a
       withEnv(ENFORCED_ENV, () =>
         withRedactor(() => undefined, () => generateProtocol({ transcript: TRANSCRIPT }))
       ),
-    (e) => /netinkamą rezultatą|REDACTION_FAILED/i.test(e.message)
+    // Po #4 blokuoja artefakto guard'as (variantas negali būti sukurtas iš
+    // netinkamo rezultato); anksčiau - pats dekoratorius. Abu keliai teisingi,
+    // svarbu, kad tiekėjas NEKVIEČIAMAS.
+    (e) => /netinkamą rezultatą|REDACTION_FAILED|ne tekstą|ARTEFACT_VARIANT_MISMATCH/i.test(e.message + e.code)
   );
 
   assert.equal(received.length, 0);
@@ -212,16 +222,34 @@ test("REGRESIJA: be REQUIRE_REDACTION_BEFORE_EXTERNAL išorinis tiekėjas gauna 
   assert.ok(received[0].includes(ASMENS_KODAS));
 });
 
-test("įjungta vėliava be #4 modulio: tiekėjas nekviečiamas ir be startup validacijos", async (t) => {
+test("komponentui DINGUS: tiekėjas nekviečiamas ir be startup validacijos", async (t) => {
   const received = [];
   registerFakeProvider(t, received);
 
+  // Komponentas įgyvendintas, tad tikrinam scenarijų „jis dingo/sulūžo veikiant".
   await assert.rejects(
-    () => withEnv(ENFORCED_ENV, () => generateProtocol({ transcript: TRANSCRIPT })),
+    () => withEnv(ENFORCED_ENV, () => withRedactor(null, () => generateProtocol({ transcript: TRANSCRIPT }))),
     (e) => /redakcijos komponentas nepasiekiamas|missing/i.test(e.message)
   );
 
   assert.equal(received.length, 0);
+});
+
+test("REALUS #4 komponentas: asmens kodas nepasiekia išorinio tiekėjo", async (t) => {
+  const received = [];
+  registerFakeProvider(t, received);
+
+  // Be jokio testinio redaktoriaus - naudojamas tikras utils/piiRedaction.js.
+  await withEnv(ENFORCED_ENV, () =>
+    generateProtocol({ transcript: `Jonas Jonaitis, a.k. 39001010000, tel. +37060012345.` })
+  );
+
+  assert.equal(received.length, 1);
+  assert.ok(!received[0].includes("39001010000"), "asmens kodas negali pasiekti tiekėjo");
+  assert.ok(!received[0].includes("+37060012345"), "telefonas negali pasiekti tiekėjo");
+  assert.ok(received[0].includes("[ASMENS_KODAS]"));
+  // Vardas SĄMONINGAI lieka - žr. utils/piiRedaction.js aprėpties komentarą.
+  assert.ok(received[0].includes("Jonas Jonaitis"));
 });
 
 test("FAKTAS, o ne prognozė: fabrika grąžina apvyniotą tiekėją", async (t) => {
@@ -356,4 +384,203 @@ test("normalus kodas išsaugomas (normalizavimas nėra aklas trynimas)", () => {
 // testų ir jų taršos nebūtų pagavęs.
 test("REGISTRY po visų testų neturi likti užterštas", () => {
   assert.equal(Object.prototype.hasOwnProperty.call(REGISTRY, "fake_external"), false);
+});
+
+test("AUDITAS: redakcijos būsena įrašoma, PII reikšmių NĖRA", async (t) => {
+  const received = [];
+  registerFakeProvider(t, received);
+
+  const auditLog = require("../utils/auditLog");
+  const SECRET_CODE = "39001010000";
+
+  // auditLog kaupiasi VISO proceso metu, tad fiksuojam ribą: kitaip
+  // `find(e => e.redaction)` pagriebtų ankstesnio testo įrašą, sukurtą netikru
+  // redaktoriumi (policyVersion "custom"). Būtent taip ir nutiko pirmoje šio
+  // testo versijoje - jis matavo ne tai, ką tikrino.
+  const before = auditLog.getAll().length;
+
+  await withEnv(ENFORCED_ENV, () =>
+    generateProtocol({ transcript: `Jonas Jonaitis, a.k. ${SECRET_CODE}, pristatė ataskaitą.` })
+  );
+
+  const entries = auditLog.getAll().slice(before);
+  const withRedaction = entries.find((e) => e.redaction);
+
+  assert.ok(withRedaction, "audite turi būti redakcijos metaduomenys");
+  assert.equal(withRedaction.redaction.variant, "redacted");
+  assert.equal(withRedaction.redaction.redactionStatus, "redacted");
+  assert.match(withRedaction.redaction.policyVersion, /^pii-v\d+$/);
+  assert.ok(withRedaction.redaction.sourceArtefactId, "ryšys su originalu turi būti išsaugotas");
+
+  // Kategorijų SKAIČIAI naudingi, REIKŠMĖS - draudžiamos.
+  assert.equal(withRedaction.redaction.redactionStats.PERSONAL_CODE, 1);
+
+  const serialized = JSON.stringify(entries);
+  assert.ok(!serialized.includes(SECRET_CODE), "asmens kodas negali patekti į auditą");
+  assert.ok(!serialized.includes("pristatė ataskaitą"), "transkripcijos turinys negali patekti į auditą");
+});
+
+test("API ATSAKYMAS: variantas eksplicitiškas abiem atvejais", async (t) => {
+  const received = [];
+  registerFakeProvider(t, received);
+
+  const { VARIANT } = require("../utils/redactedArtefact");
+
+  // Su įjungta redakcija - protokolas neša redakcijos metaduomenis.
+  const enforced = await withEnv(ENFORCED_ENV, () =>
+    generateProtocol({ transcript: `Jonas, a.k. 39001010000, pristatė ataskaitą posėdyje.` })
+  );
+
+  assert.ok(enforced.redaction, "redaguotas rezultatas turi nešti metaduomenis");
+  assert.equal(enforced.redaction.variant, VARIANT.REDACTED);
+  // Artefakto variantas apibūdina TRANSKRIPCIJĄ, ne protokolą - protokolas yra
+  // išvestinis (`generated`), žr. routes/generate.js paaiškinimą.
+  assert.match(enforced.redaction.policyVersion, /^pii-v\d+$/);
+  assert.equal(enforced.redaction.redactionStats.PERSONAL_CODE, 1);
+
+  // Be nuostatos - metaduomenų nėra, ir tai NEGALI atrodyti kaip „redaguota".
+  const plain = await withEnv({ ...ENFORCED_ENV, REQUIRE_REDACTION_BEFORE_EXTERNAL: undefined }, () =>
+    generateProtocol({ transcript: `Jonas, a.k. 39001010000, pristatė ataskaitą posėdyje.` })
+  );
+
+  assert.equal(plain.redaction, undefined);
+});
+
+test("FAIL-CLOSED: artefaktų modulis yra PRIVALOMA priklausomybė, ne neprivaloma", () => {
+  /**
+   * Anksčiau `_tryLoadArtefacts()` gedimo atveju grąžindavo null ir kodas tyliai
+   * pereidavo prie `redact()` - tiekėjas būdavo kviečiamas BE assertRedacted(),
+   * be varianto patikros ir be audito.
+   *
+   * Elgsenos testu to nepagausi: modulis įkeliamas kartą proceso starte, o
+   * `require.cache` klastojimas nepakeičia jau paimtų nuorodų. Todėl tikrinama
+   * STRUKTŪRA - tiksliai tai, kas buvo klaidinga.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const source = fs.readFileSync(
+    path.join(__dirname, "../providers/llm/RedactingLLMProvider.js"),
+    "utf8"
+  );
+
+  assert.match(
+    source,
+    /^const artefacts = require\("\.\.\/\.\.\/utils\/redactedArtefact"\);$/m,
+    "artefaktų modulis turi būti importuojamas įprastai, failo lygyje"
+  );
+  assert.ok(
+    !/_tryLoadArtefacts/.test(source),
+    "fail-open fallback negali grįžti"
+  );
+  assert.ok(
+    !/catch\s*\{\s*return null;\s*\}/.test(source),
+    "modulio gedimas negali būti paverčiamas į `null`"
+  );
+});
+
+test("FAIL-CLOSED: sugadintas redaktorius neleidžia sukurti artefakto, tiekėjas nekviečiamas", async (t) => {
+  const received = [];
+  registerFakeProvider(t, received);
+
+  // Komponentas atrodo teisingas (turi `redact`), bet grąžina ne tekstą.
+  // Artefaktas tokiu atveju NEKURIAMAS - vietoj jo klaida.
+  await assert.rejects(
+    () =>
+      withEnv(ENFORCED_ENV, () =>
+        withRedactor(() => ({ netikras: "objektas" }), () => generateProtocol({ transcript: TRANSCRIPT }))
+      ),
+    (e) => {
+      assert.ok(!String(e.message).includes(ASMENS_KODAS), "klaidoje negali būti PII");
+      return /ne tekstą|ARTEFACT_VARIANT_MISMATCH|REDACTION_FAILED/.test(e.message + e.code);
+    }
+  );
+
+  assert.equal(received.length, 0, "be galiojančio artefakto tiekėjas NEGALI būti kviečiamas");
+});
+
+test("OBSERVABILITY: redakcijos nesėkmė audite atskiriama nuo bendros klaidos", async (t) => {
+  const received = [];
+  registerFakeProvider(t, received);
+
+  const auditLog = require("../utils/auditLog");
+  const before = auditLog.getAll().length;
+
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => warnings.push(args.join(" ")));
+
+  await withEnv(ENFORCED_ENV, () =>
+    withRedactor(
+      () => {
+        throw new Error("redakcijos modelis neveikia");
+      },
+      () => generateProtocol({ transcript: TRANSCRIPT }).catch(() => {})
+    )
+  );
+
+  const entries = auditLog.getAll().slice(before);
+  const failed = entries.find((e) => e.redaction && e.redaction.redactionStatus === "failed");
+
+  assert.ok(failed, "audite turi būti matoma, kad krito BŪTENT redakcija");
+  assert.equal(failed.redaction.outcome, "blocked");
+  assert.equal(failed.result, "failure");
+
+  // Application log - atskiras kanalas, skirtas kitam skaitytojui nei auditas.
+  assert.ok(
+    warnings.some((w) => /Redakcija NEPAVYKO/.test(w)),
+    `laukta įspėjimo loge, gauta: ${warnings.join(" | ")}`
+  );
+
+  const serialized = JSON.stringify(entries) + warnings.join(" ");
+  assert.ok(!serialized.includes(ASMENS_KODAS), "nei auditas, nei logas negali turėti PII");
+  assert.equal(received.length, 0);
+});
+
+test("REPAIR RETRY: metaduomenys aprašo ŠALTINIO transkripciją, ne repair prompt'ą", async (t) => {
+  /**
+   * Rasta code review ir patvirtinta: protocolService kviečia tą patį provider'į
+   * du kartus (pradinis + repair). Vienas `lastRedactionAudit` laukas antrą kartą
+   * perrašydavo pirmąjį, tad API ir auditas gaudavo repair prompto statistiką -
+   * `redactionStats: {}` net tada, kai originale asmens kodas BUVO pašalintas.
+   */
+  const received = [];
+  let call = 0;
+
+  registerFakeProvider(t, received, () => {
+    call += 1;
+    return { rawText: call === 1 ? "ne JSON" : VALID_PROTOCOL, usage: null, truncated: false };
+  });
+
+  const result = await withEnv(ENFORCED_ENV, () =>
+    generateProtocol({ transcript: `Jonas Jonaitis, a.k. ${ASMENS_KODAS}, pristatė ketvirčio ataskaitą.` })
+  );
+
+  assert.equal(received.length, 2, "turi būti pradinis kvietimas ir repair retry");
+
+  // Esmė: statistika apibūdina ŠALTINĮ, kur PII realiai buvo.
+  assert.equal(result.redaction.redactionStats.PERSONAL_CODE, 1);
+  assert.equal(result.redaction.purpose, "source_transcript");
+
+  // Ir abu payload'ai vis tiek redaguoti.
+  for (const payload of received) {
+    assert.ok(!payload.includes(ASMENS_KODAS), "nė vienas kvietimas negali turėti PII");
+  }
+});
+
+test("AUDITAS: sėkmingas įrašas turi outcome=sent", async (t) => {
+  const received = [];
+  registerFakeProvider(t, received);
+
+  const auditLog = require("../utils/auditLog");
+  const before = auditLog.getAll().length;
+
+  await withEnv(ENFORCED_ENV, () =>
+    generateProtocol({ transcript: `Jonas, a.k. ${ASMENS_KODAS}, pristatė ketvirčio ataskaitą.` })
+  );
+
+  const entry = auditLog.getAll().slice(before).find((e) => e.redaction);
+
+  assert.ok(entry, "sėkmės atveju audite turi būti redakcijos metaduomenys");
+  assert.equal(entry.redaction.redactionStatus, "redacted");
+  // Statusas sako, kas nutiko REDAKCIJAI; baigtis - kas nutiko DUOMENIMS.
+  assert.equal(entry.redaction.outcome, "sent");
 });

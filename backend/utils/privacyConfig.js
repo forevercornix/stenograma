@@ -46,6 +46,15 @@ const BOOLEAN_SETTINGS = [
   "EXPORT_ALLOW_ORIGINAL",
 ];
 
+function _safeCategories(env) {
+  const pii = require("./piiRedaction");
+  try {
+    return pii.resolveCategories(env);
+  } catch {
+    return [...pii.ALL_CATEGORIES];
+  }
+}
+
 function _bool(value, fallback) {
   if (value === undefined || value === "") return fallback;
   return String(value).toLowerCase() === "true";
@@ -97,6 +106,20 @@ function getPrivacyConfig(env = process.env) {
     // redakcijos modulio tik blokuotų startą visiems. Kai #4 nusileis, verta
     // svarstyti numatytąją `true` išoriniams tiekėjams.
     requireRedactionBeforeExternal: _bool(env.REQUIRE_REDACTION_BEFORE_EXTERNAL, false),
+
+    /**
+     * Kategorijos - dalis VALIDUOTOS politikos, ne atskiras env skaitymas.
+     *
+     * Anksčiau `redactDetailed()` kiekvieną kartą kreipdavosi tiesiai į
+     * `process.env`, tad efektyvi elgsena galėjo skirtis tarp komponentų arba
+     * pasikeisti proceso viduryje - būtent tai, ką `utils/privacyPolicy.js`
+     * ir buvo sukurtas panaikinti.
+     *
+     * Neteisinga reikšmė čia negali mesti klaidos (skaitymas turi veikti net su
+     * bloga konfigūracija - žr. privacyPolicy komentarą), tad grąžinam visas;
+     * startą sustabdo validacija aukščiau.
+     */
+    redactionCategories: Object.freeze(_safeCategories(env)),
 
     // `false` = privacy-first: eksportuojamas tik redaguotas protokolas.
     // Numatyta `true`, nes redakcijos komponento (#4) dar nėra - kitaip
@@ -311,6 +334,21 @@ function validatePrivacyConfig(env = process.env) {
       `PII redakcija prieinama, bet REQUIRE_REDACTION_BEFORE_EXTERNAL nenustatyta - ` +
         `NEREDAGUOTA transkripcija siunčiama išoriniam LLM tiekėjui "${(env.LLM_PROVIDER || "mock").toLowerCase()}".`
     );
+  }
+
+  /**
+   * PII KATEGORIJŲ VALIDACIJA (GDPR #4).
+   *
+   * README ir .env.example žada, kad nežinomas pavadinimas STABDO STARTĄ. Iki
+   * šiol tas pažadas negaliojo: kategorijos buvo skaitomos tik pirmos realios
+   * redakcijos metu, tad `persnal_code` praeidavo startup validaciją ir
+   * krisdavo tik vartotojo užklausoje. Fail-fast pažadas be fail-fast patikros
+   * yra tiksliai ta neatitiktis, kurios šis projektas kitur vengia.
+   */
+  try {
+    require("./piiRedaction").resolveCategories(env);
+  } catch (e) {
+    errors.push(e.message);
   }
 
   /**
