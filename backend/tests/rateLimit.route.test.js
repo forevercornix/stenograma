@@ -48,3 +48,43 @@ test("REGRESIJOS TESTAS (rastas realiai naudojant, ne teoriškai): GET /api/jobs
   }
   assert.equal(sawRateLimitOnPoll, false, "GET /api/jobs/:id NETURI būti ribojamas ta pačia griežta riba kaip POST /api/generate");
 });
+
+test("IP: REALUS rate limito įvykis logina pseudonimą, ne adresą", async () => {
+  /**
+   * SVARBU: kviečiam tikrą middleware, o ne imituojam jo turinį.
+   *
+   * Pirmoji šio testo versija atkartojo handler'io kūną testo viduje ir praėjo
+   * net pakeitus produkcinį kodą į žalią `req.ip` - t. y. tikrino savo pačios
+   * kopiją, o ne tai, kas realiai vykdoma.
+   */
+  const lines = [];
+  const originalWarn = console.warn;
+  const savedFormat = process.env.LOG_FORMAT;
+  const savedLevel = process.env.LOG_LEVEL;
+  process.env.LOG_FORMAT = "json";
+  process.env.LOG_LEVEL = "warn";
+  console.warn = (...args) => lines.push(args.join(" "));
+
+  try {
+    const payload = { transcript: "Pakankamai ilgas testinis tekstas apie susitikimą, kad praeitų validaciją." };
+    // Limitas jau išnaudotas ankstesnio testo - pirma pat užklausa duos 429.
+    const res = await request(app).post("/api/generate").send(payload);
+    assert.equal(res.status, 429);
+  } finally {
+    console.warn = originalWarn;
+    if (savedFormat === undefined) delete process.env.LOG_FORMAT;
+    else process.env.LOG_FORMAT = savedFormat;
+    if (savedLevel === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = savedLevel;
+  }
+
+  const output = lines.join("\n");
+
+  assert.match(output, /Rate limitas viršytas/, `laukta rate limito įvykio, gauta: ${output}`);
+  assert.match(output, /ip_[0-9a-f]{12}/, "klientas turi būti pseudonimas");
+
+  // Testinėje aplinkoje IP yra ::ffff:127.0.0.1 arba ::1 - nė vienas negali
+  // patekti į logą žalias.
+  assert.ok(!/127\.0\.0\.1/.test(output), "pilnas IPv4 negali patekti į logą");
+  assert.ok(!/"client":"::/.test(output), "pilnas IPv6 negali patekti į logą");
+});

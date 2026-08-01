@@ -14,6 +14,10 @@ const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
 const { pollRateLimiter } = require("./middleware/rateLimiter");
 const { initPrivacyPolicy } = require("./utils/privacyPolicy");
 const { requestContextMiddleware } = require("./utils/requestContext");
+const { resolveTrustProxy } = require("./utils/clientIp");
+const { createLogger } = require("./utils/logger");
+
+const log = createLogger("server");
 
 // KIETA konfigūracijos validacija (vartotojo prašymas po realaus diegimo: "jei
 // kažko trūksta - aiškiai parašyti ir nestartuoti", o ne griūti pirmoje užklausoje).
@@ -25,11 +29,11 @@ if (process.env.SKIP_CONFIG_VALIDATION !== "true") {
 
 
   const { errors, warnings } = validateConfig();
-  for (const w of warnings) console.warn(`[stenograma] ⚠️  ${w}`);
+  for (const w of warnings) log.warn(`⚠️  ${w}`);
   if (errors.length > 0) {
-    console.error("[stenograma] ❌ Konfigūracijos klaidos - serveris NESTARTUOJA:");
-    for (const e of errors) console.error(`[stenograma]   ❌ ${e}`);
-    console.error("[stenograma] Pataisykite .env (žr. .env.example komentarus) arba, kraštutiniu atveju, SKIP_CONFIG_VALIDATION=true.");
+    log.error("[stenograma] ❌ Konfigūracijos klaidos - serveris NESTARTUOJA:");
+    for (const e of errors) log.error(`❌ ${e}`);
+    log.error("[stenograma] Pataisykite .env (žr. .env.example komentarus) arba, kraštutiniu atveju, SKIP_CONFIG_VALIDATION=true.");
     if (require.main === module) process.exit(1);
     throw new Error("Konfigūracijos validacija nepavyko: " + errors.join(" | "));
   }
@@ -41,10 +45,17 @@ const app = express();
 // (pvz. viešam demo), niekada numatytoji reikšmė.
 const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
 if (corsOrigin === "*") {
-  console.warn("[stenograma] CORS_ORIGIN=* - bet koks domenas gali kviesti šį API. Naudokite tik aiškiam demo.");
+  log.warn("[stenograma] CORS_ORIGIN=* - bet koks domenas gali kviesti šį API. Naudokite tik aiškiam demo.");
 }
 // PIRMAS middleware: request ID turi egzistuoti dar prieš CORS, rate limitą ir
 // maršrutus - kad ir atmesta užklausa turėtų identifikatorių (GDPR #17).
+/**
+ * TRUST PROXY - eksplicitiškai (GDPR #17). Be jo už nginx/RunPod visi klientai
+ * atrodo kaip 127.0.0.1 ir rate limitas tampa bendras visiems; aklas `true`
+ * leistų suklastoti X-Forwarded-For. Žr. utils/clientIp.js.
+ */
+app.set("trust proxy", resolveTrustProxy());
+
 app.use(requestContextMiddleware);
 
 app.use(cors({ origin: corsOrigin }));
@@ -216,11 +227,11 @@ async function startServer({ port, listen, onStep } = {}) {
     const { purgeStaleUploads } = require("./utils/uploadPath");
     const { removed } = await purgeStaleUploads();
     if (removed > 0) {
-      console.log(`[stenograma] Paleidimas: pašalinta ${removed} likusių laikinų įkėlimo failų.`);
+      log.info(`Paleidimas: pašalinta ${removed} likusių laikinų įkėlimo failų.`);
     }
   } catch (e) {
     // Valymo klaida NEGALI sustabdyti paleidimo - tai higiena, ne kritinis kelias.
-    console.warn("[stenograma] Nepavyko išvalyti likusių laikinų įkėlimo failų:", e.message);
+    log.warn("[stenograma] Nepavyko išvalyti likusių laikinų įkėlimo failų:", e.message);
   }
 
   const PORT = port || process.env.PORT || 3001;
@@ -233,32 +244,32 @@ async function startServer({ port, listen, onStep } = {}) {
   // 1. Job store (Redis jei REDIS_URL ir connect pavyksta, kitaip in-memory fallback).
   await jobStore.init();
   step("jobStore.init");
-  console.log(`[stenograma] Job store backend'as: ${jobStore.getBackend()}`);
+  log.info(`Job store backend'as: ${jobStore.getBackend()}`);
   readiness.jobStore = true;
 
   // 2. Job runner - režimas SUDERINTAS su jobStore backend'u (BullMQ tik kai tikrai Redis).
   const persistentStoreAvailable = jobStore.getBackend() === "redis";
   await jobRunner.init({ persistentStoreAvailable });
   step("jobRunner.init");
-  console.log(`[stenograma] Job runner režimas: ${jobRunner.getMode()}`);
+  log.info(`Job runner režimas: ${jobRunner.getMode()}`);
   readiness.jobRunner = true;
 
   // 3. TIK dabar - kai job sistema paruošta - pradedam priimti HTTP užklausas.
   await doListen(PORT);
   step("listen");
-  console.log(`Stenograma backend veikia ant porto ${PORT}`);
-  console.log(`  TRANSCRIPTION_PROVIDER = ${process.env.TRANSCRIPTION_PROVIDER || "mock"}`);
-  console.log(`  LLM_PROVIDER           = ${process.env.LLM_PROVIDER || "mock"}`);
+  log.info(`Stenograma backend veikia ant porto ${PORT}`);
+  log.info(`  TRANSCRIPTION_PROVIDER = ${process.env.TRANSCRIPTION_PROVIDER || "mock"}`);
+  log.info(`  LLM_PROVIDER           = ${process.env.LLM_PROVIDER || "mock"}`);
 
   // MINKŠTAS self-check po starto (NESTABDO serverio). Tas pats per GET /api/health/deep.
   runSelfChecks()
     .then((checks) => {
-      for (const c of checks) console.log(`  ${c.ok ? "✅" : "❌"} ${c.name}: ${c.detail}`);
+      for (const c of checks) log.info(`  ${c.ok ? "✅" : "❌"} ${c.name}: ${c.detail}`);
       if (checks.some((c) => !c.ok)) {
-        console.log('  ℹ️  Detalesnei diagnostikai: "npm run doctor" arba GET /api/health/deep');
+        log.info('  ℹ️  Detalesnei diagnostikai: "npm run doctor" arba GET /api/health/deep');
       }
     })
-    .catch((e) => console.warn(`[stenograma] Self-check nepavyko: ${e.message}`));
+    .catch((e) => log.warn(`Self-check nepavyko: ${e.message}`));
 
   // Periodinis pasenusių jobų valymas (Redis atveju daugiausiai no-op - EXPIRE pats valo).
 
@@ -283,7 +294,7 @@ async function startServer({ port, listen, onStep } = {}) {
 
 if (require.main === module) {
   startServer().catch((error) => {
-    console.error(`[stenograma] Serverio paleidimas nepavyko: ${error.message}`);
+    log.error(`Serverio paleidimas nepavyko: ${error.message}`);
     process.exit(1);
   });
 }

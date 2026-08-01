@@ -1,6 +1,8 @@
 const { QUEUE_NAMES } = require("../queues/config");
 const { transcriptionProcessor } = require("../queues/processors");
 const { createWorker } = require("./index");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("worker:transcription");
 
 /**
  * Transkripcijos worker'is (atskiras modulis pagal 1 etapo struktūros reikalavimą).
@@ -23,10 +25,10 @@ if (require.main === module) {
   const { runWorkerProcess } = require("./index");
   runWorkerProcess("Transkripcijos worker", startTranscriptionWorker, "transcription")
     .then(() => {
-      console.log("[stenograma] Transkripcijos worker'is paleistas.");
+      log.info("[stenograma] Transkripcijos worker'is paleistas.");
     })
     .catch((error) => {
-      console.error(`[stenograma] Transkripcijos worker nepaleistas: ${error.message}`);
+      log.error(`Transkripcijos worker nepaleistas: ${error.message}`);
       process.exit(1);
     });
 }

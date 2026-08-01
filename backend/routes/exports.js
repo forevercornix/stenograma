@@ -5,6 +5,8 @@ const auditLog = require("../utils/auditLog");
 const jobStore = require("../utils/jobStore");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const { buildExport, FORMATS } = require("../services/exportService");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("route:exports");
 
 const router = express.Router();
 
@@ -74,7 +76,7 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
       // matyti. Pranešimas sanitizuojamas, nes jame gali būti prisijungimo
       // duomenų (pvz. redis://user:pass@host).
       const { sanitizeForLogging } = auditLog;
-      console.warn(
+      log.warn(
         "[stenograma] Eksporto audito ryšio patikra nepavyko (saugyklos klaida) - " +
           "įvykis rašomas be ryšio. Patikrinkite job saugyklą (Redis):",
         sanitizeForLogging(e)

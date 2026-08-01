@@ -1,3 +1,5 @@
+const { createLogger } = require("../utils/logger");
+const log = createLogger("errors");
 /**
  * Tiekėjų (LLM/ASR) klaidos gali atskleisti per daug (API endpoint'us, vidines
  * struktūras, kartais net raktų fragmentus klaidos tekste). Kliento pusei
@@ -19,7 +21,7 @@ function sanitizeServerError(error, context = "") {
   const { isPrivacyModeEnabled, sanitizeForLogging } = require("./auditLog");
   const loggable = isPrivacyModeEnabled() ? sanitizeForLogging(error) : error;
 
-  console.error(`[stenograma] Vidinė klaida${context ? ` (${context})` : ""}:`, loggable);
+  log.error(`Vidinė klaida${context ? ` (${context})` : ""}:`, loggable);
   return "Vidinė serverio klaida apdorojant užklausą. Pabandykite vėliau arba susisiekite su administratoriumi.";
 }
 

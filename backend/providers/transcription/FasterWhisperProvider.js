@@ -1,5 +1,7 @@
 const TranscriptionProvider = require("./TranscriptionProvider");
 const { fetchWithTimeout, timeoutForAudioBytes } = require("../../utils/httpClient");
+const { createLogger } = require("../../utils/logger");
+const log = createLogger("provider:faster-whisper");
 
 /**
  * STATUS: interface implemented, integration not verified in this environment
@@ -54,7 +56,7 @@ class FasterWhisperProvider extends TranscriptionProvider {
             `pakartokite užklausą arba išjunkite WHISPER_STREAM_PROGRESS.`
           );
         }
-        console.warn(`[stenograma] Whisper streaming krito anksti (${e.message}), grįžtu į įprastą /transcribe.`);
+        log.warn(`Whisper streaming krito anksti (${e.message}), grįžtu į įprastą /transcribe.`);
       }
     }
 

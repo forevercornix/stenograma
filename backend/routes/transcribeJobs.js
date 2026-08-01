@@ -14,6 +14,8 @@ const { sanitizeServerError } = require("../utils/sanitizeError");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("route:transcribe-jobs");
 
 const router = express.Router();
 
@@ -213,7 +215,7 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
     const orphan = await eraseOrphanedJobData(req.params.id);
 
     if (orphan.criticalFailure) {
-      console.error(
+      log.error(
         `[stenograma] NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${orphan.errors.join("; ")}`
       );
       return res.status(503).json({
@@ -256,7 +258,7 @@ router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) 
     // NEGRĄŽINAME 204: jobStore įrašas sąmoningai paliktas (deletion_pending),
     // kad operaciją būtų galima pakartoti tuo pačiu ID. GDPR ištrynime serverio
     // logas nėra pakankamas patvirtinimas - klientas turi matyti, kad nepavyko.
-    console.error(
+    log.error(
       `[stenograma] NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
     );
     return res.status(503).json({

@@ -5,6 +5,8 @@ const { filterHallucinations } = require("../utils/filterHallucinations");
 const { detectAudioMagic } = require("../utils/audioMagicBytes");
 const auditLog = require("../utils/auditLog");
 const { sanitizeServerError } = require("../utils/sanitizeError");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("transcription");
 
 const ALLOW_PROVIDER_OVERRIDE = process.env.ALLOW_PROVIDER_OVERRIDE === "true";
 
@@ -124,7 +126,7 @@ async function transcribeAudio({
       if (filtered.removed > 0) {
         transcription.text = filtered.text;
         transcription.hallucinationsRemoved = filtered.removed;
-        console.log(`[stenograma] Halucinacijų filtras: pašalinta ${filtered.removed}/${before} segmentų.`);
+        log.info(`Halucinacijų filtras: pašalinta ${filtered.removed}/${before} segmentų.`);
       }
     }
 

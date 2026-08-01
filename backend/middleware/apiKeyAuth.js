@@ -13,6 +13,8 @@
  *   (patogu lokaliam kūrimui su savo backend'u).
  */
 const { setActor, actorFingerprint } = require("../utils/requestContext");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("auth:api-key");
 
 function apiKeyAuth(req, res, next) {
   const configuredKey = process.env.API_KEY;
@@ -34,7 +36,7 @@ function apiKeyAuth(req, res, next) {
     });
   }
 
-  console.warn(
+  log.warn(
     `[stenograma] API_KEY nenustatytas - ${req.path} atviras be autentifikacijos (leidžiama tik NODE_ENV != production). Nediekite taip viešai.`
   );
   return next();

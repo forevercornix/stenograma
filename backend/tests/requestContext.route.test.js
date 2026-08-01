@@ -138,6 +138,51 @@ test("KONTEKSTAS: runWithContext atkuria ID be HTTP užklausos", async () => {
   assert.deepEqual(requestContext.getContext(), {});
 });
 
+test("AKTORIUS: atspaudas atsparus brute-force (CodeQL radinys)", () => {
+  /**
+   * `API_KEY` nustatomas ranka `.env` faile, tad gali būti mažos entropijos.
+   * Greitas atspaudas audito žurnale tokiu atveju brute-force'inamas.
+   *
+   * Nei grynas SHA-256, nei HMAC su druska čia nepakanka: `AUDIT_ID_SALT` gyvena
+   * TAME PAČIAME `.env` faile, kaip ir raktas - kas gavo vieną, turi ir kitą.
+   * scrypt apsaugo net turint druską, nes brangus yra pats skaičiavimas.
+   */
+  const crypto = require("crypto");
+  const key = "slaptas123";
+  const env = { AUDIT_ID_SALT: "druska" };
+
+  const fingerprint = requestContext.actorFingerprint(key, env);
+
+  const naiveSha = `key_${crypto.createHash("sha256").update(key).digest("hex").slice(0, 12)}`;
+  const naiveHmac = `key_${crypto.createHmac("sha256", env.AUDIT_ID_SALT).update(key).digest("hex").slice(0, 12)}`;
+
+  assert.notEqual(fingerprint, naiveSha, "negali sutapti su grynu SHA-256");
+  assert.notEqual(fingerprint, naiveHmac, "negali sutapti su HMAC - reikia KDF");
+
+  // Su ta pačia druska - stabilus (kitaip įrašų nesugrupuotum).
+  assert.equal(requestContext.actorFingerprint(key, env), fingerprint);
+  // Su kita druska - kitas (kitaip druska nieko nekeistų).
+  assert.notEqual(requestContext.actorFingerprint(key, { AUDIT_ID_SALT: "kita" }), fingerprint);
+});
+
+test("AKTORIUS: KDF kaina sumokama VIENĄ kartą, ne kas užklausą", () => {
+  /**
+   * Argumentas „KDF per brangus autentifikacijos kelyje" galiotų tik tuo atveju,
+   * jei kiekviena užklausa atsineštų SKIRTINGĄ slaptažodį. `API_KEY` yra
+   * konstanta, tad atspaudas kešuojamas.
+   */
+  const env = { AUDIT_ID_SALT: "nasumo-testas" };
+  const key = "raktas-nasumo-testui";
+
+  requestContext.actorFingerprint(key, env); // pirmas - brangus
+
+  const started = Date.now();
+  for (let i = 0; i < 5000; i += 1) requestContext.actorFingerprint(key, env);
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 200, `5000 kešuotų kvietimų užtruko ${elapsed} ms - kešas neveikia`);
+});
+
 test("AKTORIUS: saugomas rakto ATSPAUDAS, ne pats raktas", () => {
   const key = "labai-slaptas-api-raktas";
   const fingerprint = requestContext.actorFingerprint(key);

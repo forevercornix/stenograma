@@ -5,6 +5,8 @@ const auditLog = require("../utils/auditLog");
 const { estimateCost } = require("../utils/costEstimate");
 const { groundingCheck } = require("../utils/groundingCheck");
 const { dedupTranscriptText, dedupSegments } = require("../utils/transcriptDedup");
+const { createLogger } = require("../utils/logger");
+const log = createLogger("protocol");
 
 const ALLOW_PROVIDER_OVERRIDE = process.env.ALLOW_PROVIDER_OVERRIDE === "true";
 
@@ -72,7 +74,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
     }
     if (textResult.collapsedRuns > 0) {
       dedupInfo = { collapsedRuns: textResult.collapsedRuns, removedItems: textResult.removedItems };
-      console.log(
+      log.info(
         `[stenograma] Transkripcijos dedup: sutraukta ${textResult.collapsedRuns} pasikartojimų serijų ` +
           `(${textResult.removedItems} fragmentų, ${textResult.originalLength} -> ${textResult.dedupedLength} simbolių). ` +
           `Išjungti: TRANSCRIPT_DEDUP=false.`
@@ -163,7 +165,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
       // kad apsauga apskritai veikia (tyla atrodytų identiškai kaip išjungta
       // redakcija). Rašom TIK politikos versiją ir baigtį - jokio turinio.
       const categories = Object.keys(redactionAuditMeta.redactionStats || {}).length;
-      console.log(
+      log.info(
         `[stenograma] Redakcija atlikta: policy=${redactionAuditMeta.policyVersion}, ` +
           `outcome=sent, categories=${categories}`
       );
@@ -227,7 +229,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
 
     if (isRedactionFailure) {
       // Application log atskirai nuo audito: jie skirti skirtingiems skaitytojams.
-      console.warn(
+      log.warn(
         `[stenograma] Redakcija NEPAVYKO (${e.code}) - išorinis tiekėjas nekviestas, duomenys neišsiųsti.`
       );
     }

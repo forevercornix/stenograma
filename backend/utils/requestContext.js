@@ -93,13 +93,58 @@ function requestContextMiddleware(req, res, next) {
 /**
  * Aktoriaus atspaudas iš API rakto.
  *
- * Saugom HASH, ne patį raktą - audito įrašai gyvena ilgiau nei raktas, ir
- * paslapties kopijavimas į juos būtų tas pats, kas jos logginimas. Trumpas
- * prefiksas leidžia atskirti raktus tarpusavyje neatskleidžiant nė vieno.
+ * Saugom ne raktą, o jo pseudonimą: audito įrašai gyvena ilgiau nei raktas, ir
+ * paslapties kopijavimas į juos būtų tas pats, kas jos logginimas.
+ *
+ * KODĖL scrypt, o ne HMAC.
+ *
+ * `API_KEY` šiame projekte nustatomas ranka `.env` faile, tad realiai gali būti
+ * mažos entropijos (`slaptas123`). Greitas atspaudas audito žurnale tokiu atveju
+ * brute-force'inamas: užpuolikas, gavęs žurnalą, atkurtų patį raktą.
+ *
+ * Pirmas bandymas buvo HMAC su druska - jis uždaro ataką tik tol, kol druska
+ * lieka paslaptyje. Bet `AUDIT_ID_SALT` gyvena tame pačiame `.env` faile, kaip
+ * ir raktas: kas gavo vieną, greičiausiai turi ir kitą. scrypt apsaugo net
+ * TURINT druską, nes brangus yra pats skaičiavimas.
+ *
+ * KAINA - nulinė karštame kelyje. Raktas yra KONSTANTA, tad atspaudas
+ * apskaičiuojamas VIENĄ kartą ir kešuojamas. Ankstesnis argumentas „KDF pridėtų
+ * kainą kiekvienai užklausai" buvo klaidingas: jis galiotų tik tuo atveju, jei
+ * kiekviena užklausa atsineštų SKIRTINGĄ slaptažodį.
  */
-function actorFingerprint(apiKey) {
+const N = 1 << 14; // ~16 MB, ~50-100 ms - sumokama kartą per procesą
+const _fingerprintCache = new Map();
+
+function actorFingerprint(apiKey, env = process.env) {
   if (typeof apiKey !== "string" || apiKey.length === 0) return null;
-  return `key_${crypto.createHash("sha256").update(apiKey).digest("hex").slice(0, 12)}`;
+
+  const salt = env.AUDIT_ID_SALT || _processSalt();
+  const cacheKey = `${salt}\u0000${apiKey}`;
+
+  const cached = _fingerprintCache.get(cacheKey);
+  if (cached) return cached;
+
+  const derived = crypto.scryptSync(apiKey, salt, 32, { N, r: 8, p: 1 }).toString("hex");
+  const fingerprint = `key_${derived.slice(0, 12)}`;
+
+  // Raktų yra vienetai (bendras API_KEY), tad kešas nekontroliuojamai neauga.
+  // Riba vis tiek yra - kad testai ar klaidingas naudojimas neužpildytų atminties.
+  if (_fingerprintCache.size < 100) _fingerprintCache.set(cacheKey, fingerprint);
+
+  return fingerprint;
+}
+
+/**
+ * Atsitiktinė proceso druska, kai `AUDIT_ID_SALT` nenustatytas.
+ *
+ * Kaina: po restarto atspaudai pasikeičia, tad ilgaamžis to paties rakto
+ * sekimas nutrūksta. Tai sąmoningas kompromisas - be druskos atspaudas būtų
+ * lengviau atkuriamas, o tai blogiau nei prarasta koreliacija tarp paleidimų.
+ */
+let _salt = null;
+function _processSalt() {
+  if (!_salt) _salt = crypto.randomBytes(32).toString("hex");
+  return _salt;
 }
 
 /** Papildo esamą kontekstą (naudoja autentifikacijos middleware). */
