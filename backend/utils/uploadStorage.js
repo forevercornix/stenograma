@@ -98,6 +98,17 @@ function createAudioUpload() {
     storage,
     limits: { fileSize: MAX_UPLOAD_MB() * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
+      /**
+       * Saugūs metaduomenys išsaugomi PRIEŠ sprendimą.
+       *
+       * Multer klaidos objekte (`LIMIT_FILE_SIZE`) MIME tipo nėra, tad be šito
+       * atmetimo įvykis liktų be jokios techninės informacijos - kaip ir buvo
+       * pirmoje versijoje, kur perduodavom `undefined`.
+       *
+       * Įrašom TIK MIME: failo vardo ir kelio čia sąmoningai neliečiam.
+       */
+      req.uploadObservation = { mimetype: file.mimetype };
+
       if (!isAllowedAudio(file)) {
         return cb(
           new Error(
