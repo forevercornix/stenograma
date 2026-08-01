@@ -92,6 +92,22 @@ async function generateProtocol({ title, date, participants, transcript, segment
   let usage = null;
 
   try {
+    // `llm.name` vietoj `providerKey` - pastarasis apibrėžiamas vėliau, o čia mums
+    // reikia tiekėjo, kuris REALIAI kviečiamas (jis gali būti apvyniotas redakcija).
+    /**
+     * `jobId` būtinas: viena HTTP užklausa gali sukurti kelis darbus, o vien
+     * `requestId` tada nebeatsako, KURIAM iš jų priklauso tiekėjo kvietimas.
+     */
+    log.info("Tiekėjo kvietimas", {
+      stage: "provider",
+      providerType: "llm",
+      provider: llm.name,
+      model: llm.model || null,
+      purpose: "source_transcript",
+      attempt: 1,
+      jobId,
+    });
+
     const first = await llm.generateProtocol(prompt, { redactionPurpose: "source_transcript" });
     lastRaw = first.rawText;
     usage = first.usage;
@@ -113,6 +129,18 @@ async function generateProtocol({ title, date, participants, transcript, segment
     if (!result.success) {
       repairAttempts = 1;
       const repairPrompt = buildRepairPrompt(lastRaw, result.errors);
+      // Repair yra ANTRAS realus tiekėjo kvietimas - be atskiro įvykio jis
+      // grandinėje būtų nematomas, nors kainuoja tiek pat, kiek pirmasis.
+      log.info("Tiekėjo kvietimas", {
+        stage: "provider",
+        providerType: "llm",
+        provider: llm.name,
+        model: llm.model || null,
+        purpose: "repair_prompt",
+        attempt: 2,
+        jobId,
+      });
+
       const repaired = await llm.generateProtocol(repairPrompt, { redactionPurpose: "repair_prompt" });
       lastRaw = repaired.rawText;
       if (repaired.usage) {

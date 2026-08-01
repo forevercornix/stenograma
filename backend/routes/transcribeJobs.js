@@ -138,6 +138,8 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
     enqueued = true;
     // Variantas nurodomas JAU kuriant jobą: klientas turi žinoti, kokį turinį
     // gaus, dar prieš pirmą polling'ą (GDPR #4).
+    log.info("Jobas priimtas", { stage: "queued", jobType: "transcription", jobId: job.id });
+
     res.status(202).json({ jobId: job.id, status: job.status, variant: VARIANT.ORIGINAL });
   } catch (e) {
     // Jei enqueue nepavyko (Redis/BullMQ eilė krito, add() metė klaidą ir pan.), audio

@@ -96,8 +96,17 @@ describe("#8 frontend: eksporto variantai", () => {
     const original = screen.getByRole("group", { name: /Originalas/ });
 
     // Etiketės turi pasakyti, KUO variantai skiriasi, o ne tik kaip vadinasi.
-    expect(screen.getByText(/Redaguotas \(be asmens duomenų\)/)).toBeInTheDocument();
-    expect(screen.getByText(/Originalas \(su asmens duomenimis\)/)).toBeInTheDocument();
+    /**
+     * Etiketė NEGALI žadėti „be asmens duomenų": pagal #4 aprėptį vardai lieka,
+     * adresai neaptinkami. Toks pažadas paskatintų persiųsti dokumentą kaip
+     * anoniminį - tai privatumo defektas, ne teksto niuansas.
+     */
+    expect(screen.getByText(/Redaguotas \(jautrūs identifikatoriai pašalinti\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Vardai, adresai ir kiti netiesioginiai identifikatoriai gali likti/)).toBeInTheDocument();
+    expect(screen.getByText(/Originalas \(visi duomenys\)/)).toBeInTheDocument();
+
+    // Klaidinantis pažadas neturi grįžti.
+    expect(screen.queryByText(/be asmens duomenų/)).toBeNull();
 
     // Abu variantai palaiko tuos pačius formatus.
     for (const group of [redacted, original]) {

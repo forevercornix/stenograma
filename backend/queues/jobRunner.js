@@ -178,13 +178,43 @@ async function _runInline(type, jobId, payload) {
 }
 
 async function _executeInline(type, processor, jobId, payload) {
+  /**
+   * GRANDINĖS ĮVYKIAI rašomi ČIA, kur baigtis realiai žinoma (GDPR #17).
+   *
+   * Pirmoji versija apvyniojo šią funkciją iš išorės ir sprendė pagal tai, ar
+   * ji metė klaidą. Bet ji klaidas apdoroja VIDUJE - jobas pažymimas `failed`,
+   * o iškvietimas grįžta normaliai. Rezultatas: logas rašė `stage: completed`
+   * jobui, kurio statusas `failed`. Meluojantis observability įvykis blogesnis
+   * už jokio - juo remiantis tyrimas nueitų ne ta kryptimi.
+   */
+  const started = Date.now();
+  log.info("Darbas pradėtas", { stage: "processing", execution: "inline", jobType: type, jobId });
+
   try {
     await jobStore.update(jobId, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
     const result = await processor(payload, jobId);
     await jobStore.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+
+    log.info("Darbas baigtas", {
+      stage: "completed",
+      execution: "inline",
+      jobType: type,
+      jobId,
+      durationMs: Date.now() - started,
+    });
   } catch (e) {
     const { errorCode, message } = _classifyError(e, `${type} job`);
     await jobStore.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
+
+    // Pranešimas jau sanitizuotas `_classifyError`; kodas yra enum.
+    log.warn("Darbas nepavyko", {
+      stage: "failed",
+      execution: "inline",
+      jobType: type,
+      jobId,
+      errorCode,
+      durationMs: Date.now() - started,
+    });
   } finally {
     // Inline režimas neturi retry - tad audio galima trinti iškart po galutinio
     // statuso (sėkmė ar nesėkmė). Trinam tik jei payload turi storageKey (transkripcija).

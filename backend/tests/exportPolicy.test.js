@@ -110,7 +110,9 @@ test("FAIL-CLOSED: be #4 komponento failas apskritai negeneruojamas", async () =
   await withPolicy({ EXPORT_ALLOW_ORIGINAL: "false" }, null, async () => {
     await assert.rejects(
       () => buildExport(PROTOCOL, "txt", expectedVariant()),
-      (e) => e.code === "EXPORT_ORIGINAL_FORBIDDEN"
+      // Komponento nebuvimas yra NEPASIEKIAMUMAS (503), ne politikos draudimas:
+      // variantas leidžiamas, tik sistema jo dabar negali saugiai sukurti.
+      (e) => e.code === "EXPORT_REDACTION_UNAVAILABLE" && e.statusCode === 503
     );
   });
 });
@@ -123,7 +125,7 @@ test("FAIL-CLOSED: redakcijai kritus originalas NEGRĄŽINAMAS", async () => {
   await withPolicy({ EXPORT_ALLOW_ORIGINAL: "false" }, redact, async () => {
     await assert.rejects(
       () => buildExport(PROTOCOL, "txt", expectedVariant()),
-      (e) => e.code === "EXPORT_ORIGINAL_FORBIDDEN" && !e.message.includes(MARKER)
+      (e) => e.code === "EXPORT_REDACTION_UNAVAILABLE" && !e.message.includes(MARKER)
     );
   });
 });
