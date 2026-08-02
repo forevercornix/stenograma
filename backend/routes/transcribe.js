@@ -8,6 +8,7 @@ const { createAudioUpload } = require("../utils/uploadStorage");
 const { VARIANT } = require("../utils/redactedArtefact");
 const { recordRejectedUpload, reasonFromMulterError, REASONS } = require("../utils/uploadEvents");
 const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
+const { validate, schemas } = require("../middleware/validate");
 
 const router = express.Router();
 
@@ -52,7 +53,19 @@ function uploadSingleAudio(req, res, next) {
  * ARCHITEKTŪRA: transkribavimas ir diarizacija yra DU NEPRIKLAUSOMI etapai - žr.
  * services/transcriptionService.js pilną paaiškinimą.
  */
-router.post("/transcribe", rateLimiter, apiKeyAuth, uploadSingleAudio, async (req, res) => {
+/**
+ * Validacija eina PO rate limito, autentifikacijos ir įkėlimo.
+ *
+ * Prieš juos ji verstų schemas dirbti neautentifikuotam srautui, o multipart
+ * laukų iki `uploadSingleAudio` dar apskritai nėra.
+ */
+router.post(
+  "/transcribe",
+  rateLimiter,
+  apiKeyAuth,
+  uploadSingleAudio,
+  validate({ body: schemas.transcribeBody }),
+  async (req, res) => {
   if (!req.file) {
     // Ir šis kelias yra atmestas įkėlimas - be įvykio pėdsakas būtų dalinis.
     recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe" });
@@ -69,12 +82,14 @@ router.post("/transcribe", rateLimiter, apiKeyAuth, uploadSingleAudio, async (re
       buffer,
       filename: req.file.originalname,
       mimeType: req.file.mimetype,
-      language: req.body.language || "lt",
-      diarize: req.body.diarize === "true" || req.body.diarize === true,
-      audioUrl: req.body.audioUrl,
-      numSpeakers: req.body.numSpeakers ? parseInt(req.body.numSpeakers, 10) : undefined,
-      transcriptionProviderOverride: req.body.provider,
-      diarizationModeOverride: req.body.diarizationProvider,
+      // Reikšmės jau patikrintos ir konvertuotos schema (multipart laukai
+      // ateina kaip eilutės - žr. middleware/validate.js).
+      language: req.validated.body.language || "lt",
+      diarize: req.validated.body.diarize === true,
+      audioUrl: req.validated.body.audioUrl || undefined,
+      numSpeakers: req.validated.body.numSpeakers ?? undefined,
+      transcriptionProviderOverride: req.validated.body.provider || undefined,
+      diarizationModeOverride: req.validated.body.diarizationProvider || undefined,
     });
     // VARIANTO ŽYMUO (GDPR #4: „Redacted API responses contain an explicit
     // variant field and cannot be confused with original content").
@@ -89,8 +104,9 @@ router.post("/transcribe", rateLimiter, apiKeyAuth, uploadSingleAudio, async (re
     }
     return res.status(500).json({ error: e.message });
   } finally {
-    await safeUnlinkUpload(req.file.path);
+      await safeUnlinkUpload(req.file.path);
+    }
   }
-});
+);
 
 module.exports = router;

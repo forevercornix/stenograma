@@ -1204,6 +1204,17 @@ laukai **atmetami**, o ne ignoruojami: tyli ignoracija reikštų, kad
 pranešimą apie trūkstamą lauką, kurį ką tik nurodė. Kaina – naujas kliento laukas
 lūžta iškart, bet API sutartis lieka aiški abiem pusėms.
 
+Schemos taikomos **visuose** maršrutuose: `body` (`/api/generate`, `/api/jobs`,
+`/api/exports`, `/api/transcribe`, `/api/transcribe-jobs`) ir `params`
+(`:id` visuose jobų endpointuose). Middleware eina **po** rate limito ir
+autentifikacijos – priešingu atveju schemos dirbtų neautentifikuotam srautui.
+
+Multipart laukai ateina kaip **eilutės** (`diarize=true`, `numSpeakers=3`), tad
+schema priima abu pavidalus ir konvertuoja – klientui nereikia žinoti, kad JSON ir
+forma elgiasi skirtingai. `audioUrl` ribojamas iki `http`/`https`: `z.string().url()`
+praleistų `javascript:`, `file:` ir `data:`, o šis URL keliauja į transkribavimo
+tiekėją.
+
 Rezultatas dedamas į `req.validated`, ne į `req.body`: kitaip skaitytojas
 nebežinotų, ar mato žalią, ar patikrintą reikšmę.
 

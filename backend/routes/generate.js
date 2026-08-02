@@ -4,6 +4,7 @@ const { VARIANT } = require("../utils/redactedArtefact");
 const rateLimiter = require("../middleware/rateLimiter");
 const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { sanitizeServerError } = require("../utils/sanitizeError");
+const { validate, schemas } = require("../middleware/validate");
 
 const router = express.Router();
 
@@ -22,9 +23,9 @@ const router = express.Router();
  * pilnai - jos saugios ir naudingos. 5xx (tiekėjo/vidinės) klaidos sanitizuojamos
  * prieš siunčiant klientui, pilnas tekstas visada logguojamas serveryje.
  */
-router.post("/generate", rateLimiter, apiKeyAuth, async (req, res) => {
+router.post("/generate", rateLimiter, apiKeyAuth, validate({ body: schemas.generateBody }), async (req, res) => {
   try {
-    const result = await generateProtocol(req.body || {});
+    const result = await generateProtocol(req.validated.body);
     /**
      * VARIANTŲ SEMANTIKA (GDPR #4).
      *
