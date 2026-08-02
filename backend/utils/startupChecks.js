@@ -97,6 +97,51 @@ function validateConfig(env = process.env) {
   warnings.push(...privacy.warnings);
 
   /**
+   * AUTENTIFIKACIJOS KONFIGŪRACIJA (#18 PR1).
+   *
+   * `AUTH_USERS` yra NEPRIVALOMAS šiame etape (žr. utils/credentials.js
+   * komentarą - PR1 dar nekeičia esamų maršrutų apsaugos). Bet jei jis
+   * NUSTATYTAS, formatas turi būti teisingas VISADA, nepriklausomai nuo
+   * aplinkos - blogai suformuotas įrašas reikštų, kad administratorius mano
+   * turintis veikiantį vartotoją, kurio realiai nėra.
+   */
+  try {
+    require("./credentials").loadUsers(env);
+  } catch (e) {
+    errors.push(e.message);
+  }
+
+  /**
+   * SESIJOS LAIKO LIMITAI - ta pati logika kaip kitos skaitinės saugumo
+   * nuostatos (žr. securityBaseline.js requirePositiveInt): netinkama reikšmė
+   * turi stabdyti startą, o ne tyliai virsti NaN ir duoti nulinį ar begalinį
+   * galiojimą.
+   */
+  for (const [name, opts] of [
+    ["SESSION_IDLE_TIMEOUT_MINUTES", { min: 1, max: 24 * 60 }],
+    ["SESSION_ABSOLUTE_TIMEOUT_HOURS", { min: 1, max: 24 * 30 }],
+    /**
+     * LOGIN LIMITAI (#18 PR1, review pastaba).
+     *
+     * `parseInt(env.X || "30", 10)` tyliai priima šiukšlę: `parseInt("10xyz",
+     * 10) === 10`, o `parseInt("abc", 10) === NaN` (kas duotų `max: NaN` -
+     * `express-rate-limit` tada arba niekada neriboja, arba elgiasi
+     * neapibrėžtai). Ta pati taisyklė, kuri jau taikoma sesijos laiko
+     * limitams: netinkama saugumo konfigūracija stabdo startą, o ne tyliai
+     * pakeičia elgesį.
+     */
+    ["RATE_LIMIT_LOGIN_IP_MAX", { min: 1, max: 10_000 }],
+    ["RATE_LIMIT_LOGIN_ACCOUNT_MAX", { min: 1, max: 10_000 }],
+  ]) {
+    const raw = env[name];
+    if (raw === undefined || raw === "") continue;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < opts.min || value > opts.max) {
+      errors.push(`${name}="${raw}" netinkama - laukiamas sveikas skaičius nuo ${opts.min} iki ${opts.max}.`);
+    }
+  }
+
+  /**
    * PRODUKCIJOS SAUGUMO PATIKROS (#14: „Production startup fails when required
    * security configuration is unsafe").
    *

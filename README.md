@@ -1294,6 +1294,44 @@ klaidą (`open-pull-requests-limit:5` be tarpo), o GitHub tokį failą atmeta
 **tyliai** – nė viena priklausomybė nebuvo tikrinama, ir repozitorijoje niekas
 apie tai nepranešė. Todėl sintaksė dabar tikrinama CI.
 
+**Autentifikacija (#18, PR1: pamatas).** Naujas, atskiras mechanizmas nuo
+bendro `API_KEY`: server-side sesija su `HttpOnly` cookie. Pasirinkta (ne
+bearer tokenas), nes frontend ir backend diegiami tame pačiame domene –
+sesiją lengviau revokuoti, o naršyklės JavaScript niekada nemato jos reikšmės.
+
+```bash
+POST /api/auth/login   {username, password} -> sesijos cookie
+GET  /api/auth/me       -> {username, role} arba 401
+POST /api/auth/logout   -> revokuoja sesiją
+```
+
+Prisijungimo bandymai ribojami **dviem nepriklausomais** limiterias – vien
+IP+vardas limitas būtų apeinamas kaitaliojant vardą kiekvienam bandymui.
+
+Vartotojai konfigūruojami per `AUTH_USERS` (kableliais atskirtas
+`vardas:rolė:scrypt-maiša` sąrašas) – tai sąžiningas pilotinis apribojimas, ne
+pilna registracijos sistema. Maišą generuoja `scripts/hash-password.js`;
+slaptažodis niekada nelaikomas tekstu.
+
+Nežinomas vartotojas ir neteisingas slaptažodis atsako **vienodai** (401,
+tas pats pranešimas, panašus laikas) – priešingu atveju atsakymas išduotų,
+ar vartotojo vardas egzistuoja. Sesija baigiasi pagal du nepriklausomus
+limitus: neaktyvumo (`SESSION_IDLE_TIMEOUT_MINUTES`, numatyta 30 min) ir
+absoliutų (`SESSION_ABSOLUTE_TIMEOUT_HOURS`, numatyta 12 val., galioja net
+esant nuolatiniam aktyvumui).
+
+⚠️ **Šis PR tyčia neįgyvendina RBAC vykdymo.** `role` laukas saugomas ir
+grąžinamas per `/api/auth/me`, bet joks esamas endpointas (`/api/generate`,
+`/api/exports` ir kt.) jo dar netikrina – jie lieka apsaugoti tik `API_KEY`.
+Rolėmis grįsta autorizacija yra atskiro PR darbas.
+
+⚠️ **Sesijų saugykla – tik atmintyje, vienas procesas.** Sąmoningas
+pilotui pritaikytas sprendimas (patvirtinta): restartas atjungia visus
+vartotojus, o kelios backend replikos nesidalintų sesijomis. Kai prireiks
+kelių replikų, saugykla turės pereiti į Redis – ta pati async sąsaja tam jau
+paruošta (žr. `utils/jobStore/` kaip pavyzdį tos pačios memory→Redis
+migracijos).
+
 **API saugumo bazė (`utils/securityBaseline.js`).** Vienas modulis,
 registruojamas **prieš** maršrutus: `trust proxy`, saugumo antraštės (helmet su
 `default-src 'none'` CSP), CORS allow-list ir kūno limitai. Naujas endpointas bazę gauna automatiškai – o ne
