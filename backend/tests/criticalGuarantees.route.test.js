@@ -227,6 +227,14 @@ test("STRUKTŪRA: nė vienas maršrutas su įvestimi neliko be apiKeyAuth", () =
   /** Maršrutai, kurie sąmoningai vieši arba turi SAVO autentifikaciją. */
   const EXEMPT = {
     "audit.js": ["auditAuth"], // atskiras AUDIT_API_KEY
+    /**
+     * auth.js (#18 PR1) SĄMONINGAI be apiKeyAuth: prisijungimo endpoint'as
+     * PATS yra autentifikacijos mechanizmas - jam reikalauti API rakto būtų
+     * apskritai neįmanoma (vartotojas dar neturi sesijos). Apsaugotas kitaip:
+     * loginIpLimiter + loginAccountLimiter (bandymų ribojimas) ir
+     * requireSession (/me).
+     */
+    "auth.js": ["loginIpLimiter", "loginAccountLimiter", "requireSession", "logout"], // logout tikslingai idempotentinis be sesijos
   };
 
   const offenders = [];

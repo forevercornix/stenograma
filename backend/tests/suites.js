@@ -49,6 +49,8 @@ const privacy = [
  */
 const security = [
   "criticalGuarantees.route",
+  "authFoundation",
+  "authRoutes.route",
   "securityBaseline.route",
   "security.route",
   "rateLimit.route",

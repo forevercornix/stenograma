@@ -1,6 +1,8 @@
 const rateLimit = require("express-rate-limit");
+const { ipKeyGenerator } = require("express-rate-limit");
 const { createLogger } = require("../utils/logger");
 const { pseudonymizeIp } = require("../utils/clientIp");
+const { requirePositiveInt } = require("../utils/securityBaseline");
 
 const log = createLogger("rate-limit");
 
@@ -86,6 +88,58 @@ const generalApiLimiter = rateLimit({
   handler: _onLimit("general"),
 });
 
+/**
+ * KANONIZUOTAS vartotojo vardas rate-limit raktui.
+ *
+ * VIEN `.toLowerCase()` NEPAKANKA - `"admin"`, `"admin "`, `"admin	"` duotų
+ * SKIRTINGUS raktus, tad atakuotojas galėtų nuolat kaitalioti tarpus/tabuliaciją
+ * aplink tą patį vardą ir kiekvieną kartą gauti naują limito langą - t. y.
+ * praktiškai apeiti limitą pagal IP+vardą.
+ *
+ * Ši funkcija turi atitikti TĄ PAČIĄ normalizaciją, kurią naudoja
+ * `credentials.js verifyCredentials()` - kitaip rate limitas ir realus
+ * paieškos raktas galėtų nesutapti.
+ */
+function canonicalUsername(raw) {
+  return String(raw || "").trim().toLowerCase();
+}
+
+/**
+ * DU NEPRIKLAUSOMI limitai prisijungimui (#18 PR1, sugriežtinta po review).
+ *
+ * Vien IP+vardas limiteris yra APEINAMAS: atakuotojas, keičiantis vardą
+ * kiekvienam bandymui (`admin1`, `admin2`, `admin3`...), niekada nepasiekia
+ * to paties rakto, tad `loginAccountLimiter` vienas nesustabdytų brute-force
+ * paieškos per daug vardų.
+ *
+ * `loginIpLimiter` uždaro būtent šią spragą: jis SKAIČIUOJA TIK PAGAL IP,
+ * nepriklausomai nuo to, kokį vardą siunčia klientas. Abu limitai taikomi
+ * KARTU (žr. routes/auth.js) - IP limitas sustabdo plataus masto vardų
+ * perrinkimą, account limitas apsaugo VIENĄ vardą nuo tikslinio brute-force.
+ */
+const loginIpLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  max: requirePositiveInt(process.env, "RATE_LIMIT_LOGIN_IP_MAX", 30, { min: 1, max: 10_000 }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => ipKeyGenerator(req.ip),
+  message: { error: "Per daug prisijungimo bandymų iš šio adreso. Bandykite vėliau.", code: "LOGIN_RATE_LIMITED" },
+  handler: _onLimit("login_ip"),
+});
+
+const loginAccountLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  max: requirePositiveInt(process.env, "RATE_LIMIT_LOGIN_ACCOUNT_MAX", 10, { min: 1, max: 10_000 }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${canonicalUsername(req.body?.username)}`,
+  message: { error: "Per daug prisijungimo bandymų šiam vartotojui. Bandykite vėliau.", code: "LOGIN_RATE_LIMITED" },
+  handler: _onLimit("login_account"),
+});
+
+module.exports.canonicalUsername = canonicalUsername;
+module.exports.loginIpLimiter = loginIpLimiter;
+module.exports.loginAccountLimiter = loginAccountLimiter;
 module.exports.generalApiLimiter = generalApiLimiter;
 module.exports.expensiveEndpointLimiter = expensiveEndpointLimiter;
 module.exports.pollRateLimiter = pollRateLimiter;

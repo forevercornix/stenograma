@@ -8,6 +8,7 @@ const transcribeJobsRoute = require("./routes/transcribeJobs");
 const auditRoute = require("./routes/audit");
 const exportsRoute = require("./routes/exports");
 const jobsRoute = require("./routes/jobs");
+const authRoute = require("./routes/auth");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
@@ -74,6 +75,7 @@ function requireJobSystemReady(req, res, next) {
   next();
 }
 
+app.use("/api", authRoute);
 app.use("/api", generateRoute);
 app.use("/api", transcribeRoute);
 app.use("/api", auditRoute);

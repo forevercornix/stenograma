@@ -102,6 +102,32 @@ būtų paminėtas. Be to matrica ilgainiui virstų sąrašu to, ką kažkada tur
 | Dependabot poros ir sintaksė | `scripts/check-workflow-policy.mjs` | Įrašo ištrynimas, sintaksės klaida |
 | Priklausomybių auditas blokuoja PR | `ci.yml` `dependency-audit` | Rado realų `brace-expansion` high radinį |
 
+## #18 — autentifikacija ir prieigos kontrolė (PR1: pamatas)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Slaptažodžiai saugomi TIK kaip scrypt maiša su atsitiktine druska | `authFoundation` | Ta pati maiša tarp generavimų (turi skirtis) |
+| Netinkamas `AUTH_USERS` formatas stabdo startą | `authFoundation` | Nežinoma rolė, dublikuotas vardas |
+| Netinkami sesijos laiko limitai stabdo startą | `authFoundation` | `SESSION_IDLE_TIMEOUT_MINUTES=abc` |
+| Nežinomas vartotojas ir blogas slaptažodis atsako VIENODAI (nėra username enumeration) | `authFoundation`, `authRoutes.route` | Atsako laiko ir atsakymo turinio palyginimas |
+| Sesija baigiasi idle ir absoliučiu limitu, NEATGYJA | `authFoundation` | Expiry patikros pašalinimas |
+| Revokacija (logout, `destroyAllForUser`) realiai pašalina sesiją | `authFoundation`, `authRoutes.route` | `destroy()` pavertimas no-op |
+| Sesijos cookie: `HttpOnly`, `SameSite=Lax`, `Secure` tik produkcijoje | `authRoutes.route` | — |
+| 401 atsakymas vienodas visoms priežastims (nėra, pasibaigusi, suklastota) | `authRoutes.route` | — |
+| Slaptažodis niekada nepatenka į atsakymą ar auditą | `authRoutes.route` | — |
+| Prisijungimo bandymai riboti pagal IP+vardą, IPv6-saugiai | `authRoutes.route` | Struktūrinė patikra (`ipKeyGenerator`) |
+| Validacija: vienas formatas, nežinomi laukai atmetami | `authRoutes.route` | — |
+| `verifyPassword` niekada nemeta klaidos (griežtas N/r/p/druskos/maišos tikrinimas) | `authFoundation` | Netikslus N/r/p, ne-hex druska, netinkamas maišos ilgis |
+| Startup atmeta pavojingus scrypt parametrus TA PAČIA logika kaip runtime | `authFoundation` | `scrypt$999999999$999999$1$...` praeidavo startą |
+| Login limitas: DU nepriklausomi (IP-only + IP+vardas su canonicalizacija) | `authRoutes.route` | Vardo variantų (tarpai/registras) apėjimo bandymas HTTP lygiu |
+| Sugadinta cookie (blogas procentinis kodavimas) grąžina 401, ne 500 | `authRoutes.route` | `try/catch` pašalinimas aplink `decodeURIComponent` |
+| Pasibaigusios sesijos pašalinamos net be pakartotinio naudojimo (periodinis + kiekvieno `create()` sweep) | `authFoundation` | Sweep kvietimo pašalinimas iš `create()` |
+| Login rate-limit kintamieji validuojami startup metu (ne `parseInt` tyliai) | `authFoundation` | Startup patikros pašalinimas |
+
+⚠️ **Šis PR TYČIA neapima RBAC vykdymo.** `role` laukas saugomas ir grąžinamas,
+bet jokiam maršrutui dar nereikalaujamas – esami `apiKeyAuth` maršrutai
+(`/api/generate`, `/api/exports` ir kt.) šio PR nepaliesti. Tai #18 PR2 darbas.
+
 ## GDPR #17 — observability ir koreliacija
 
 | Garantija | Testai | Mutacijos įrodymas |

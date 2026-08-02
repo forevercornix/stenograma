@@ -463,6 +463,15 @@ test("AUDITAS: kiekvienas /api maršrutas turi rate limitą IR validaciją, kur 
   const path = require("path");
   const routesDir = path.join(__dirname, "../routes");
 
+  /**
+   * Maršrutai, kurie SĄMONINGAI neturi kūno schemos.
+   *
+   * Heuristika "kiekvienas POST/PUT/PATCH turi turėti body schemą" per plati:
+   * `/auth/logout` (#18 PR1) kūno apskritai nepriima - jis skaito TIK cookie.
+   * Priverstinė tuščia schema čia nieko neapsaugotų, tik pridėtų kodą dėl kodo.
+   */
+  const NO_BODY_ROUTES = new Set(["auth.js:/auth/logout"]);
+
   const offenders = [];
 
   for (const file of fs.readdirSync(routesDir)) {
@@ -473,11 +482,14 @@ test("AUDITAS: kiekvienas /api maršrutas turi rate limitą IR validaciją, kur 
     const routes = source.match(/router\.(get|post|delete|put|patch)\([\s\S]{0,400}?=>/g) || [];
 
     for (const route of routes) {
+      const pathMatch = route.match(/router\.\w+\("([^"]+)"/);
+      const routeKey = pathMatch ? `${file}:${pathMatch[1]}` : null;
+
       const hasParams = /:\w+/.test(route);
       const hasBody = /post|put|patch/.test(route.slice(0, 20));
       const hasValidation = /validate\(/.test(route);
 
-      if ((hasParams || hasBody) && !hasValidation) {
+      if ((hasParams || hasBody) && !hasValidation && !NO_BODY_ROUTES.has(routeKey)) {
         offenders.push(`${file}: ${route.split("\n")[0].slice(0, 80)}`);
       }
     }
