@@ -5,7 +5,7 @@ pyannote.audio>=3.1
 # torch įdiegiamas atskirai Dockerfile'e (CPU ar CUDA variantas priklauso nuo bazinio image)
 
 # Testavimui (pytest test_server.py, test_diarize_integration.py):
-pytest>=9.0.3
+pytest>=9.1.1
 
 # hf_transfer: paralelinis, atsparesnis modelių atsisiuntimas iš Hugging Face.
 # RunPod'e PRAKTIŠKAI BŪTINAS - be jo dideli modeliai dažnai timeout'ina/nutrūksta
