@@ -10,7 +10,7 @@ numpy==2.5.1
 huggingface-hub==1.23.0
 tokenizers==0.23.1
 av==18.0.0
-onnxruntime==1.27.0
+onnxruntime==1.28.0
 tqdm==4.68.4
 
 fastapi==0.115.6
