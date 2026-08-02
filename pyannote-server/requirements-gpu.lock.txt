@@ -21,7 +21,7 @@ huggingface-hub==0.27.1
 numpy==2.5.1
 
 # Testavimui:
-pytest==9.0.3
+pytest==9.1.1
 
 # PASTABA: torch==2.5.1 ir torchaudio==2.5.1 NĖRA šiame faile - juos įdiekite
 # ATSKIRAI su --index-url .../cu124 (žr. komentarą viršuje), nes PyPI numatytoji
