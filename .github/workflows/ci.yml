@@ -16,6 +16,8 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
@@ -44,6 +46,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -106,12 +110,16 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -135,12 +143,16 @@ jobs:
 
   pyannote-server:
     runs-on: ubuntu-latest
+    # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: pyannote-server
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -160,12 +172,16 @@ jobs:
 
   whisper-server:
     runs-on: ubuntu-latest
+    # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: whisper-server
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -184,11 +200,15 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # E2E ilgesnis: paleidžia du serverius ir naršyklę (#16).
+    timeout-minutes: 30
     # E2E paleidžia TIKRĄ backend'ą (mock provideriais) + frontend ir per naršyklę
     # atlieka pilną vartotojo srautą: įklijuoti tekstą -> generuoti protokolą ->
     # eksportuoti DOCX. Būtent ši testų klasė anksčiau buvo "NOT verified".
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -221,14 +241,23 @@ jobs:
         with:
           name: playwright-report
           path: frontend/playwright-report/
+          # Ataskaitose būna ekrano nuotraukų ir tinklo pėdsakų iš E2E srauto.
+          # Testai naudoja tik mock tiekėjus ir sintetinį tekstą, bet retencija
+          # vis tiek trumpa: artefaktas, gyvenantis 90 d. (numatytoji reikšmė),
+          # yra kopija, apie kurią niekas neprisimena (#16).
           retention-days: 7
+          if-no-files-found: ignore
 
   docker:
     runs-on: ubuntu-latest
+    # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
+    timeout-minutes: 20
     needs: [backend, frontend]
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: docker compose build (backend + frontend image build patikra)
         run: docker compose build
@@ -268,8 +297,12 @@ jobs:
   # papildomo custom loader'io).
   compose-config-validate:
     runs-on: ubuntu-latest
+    # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: docker compose config - GPU profilis (embedded)
         run: |
@@ -360,3 +393,77 @@ jobs:
           print("OK: server profilio GPU/volume paskirstymas teisingas.")
           PYEOF
 
+  workflow-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Politika, kurios niekas netikrina, galioja tik tol, kol visi ją prisimena.
+    # Šis job'as paverčia docs/ci-security-policy.md taisykles vykdomomis (#16).
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Įdiegti YAML parserį
+        working-directory: backend
+        run: npm ci
+
+      - name: Tikrinti workflow saugumo politiką
+        run: node scripts/check-workflow-policy.mjs
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # PR BLOKUOJANTIS auditas (#16).
+    #
+    # Dependabot NĖRA tas pats: jis periodiškai siūlo atnaujinimus, bet
+    # nepatikrina PR, kuris ĮVEDA žinomai pažeidžiamą priklausomybę. Be šio
+    # job'o nauja pažeidžiamybė patektų į main ir lauktų savaitinio ciklo.
+    #
+    # RIBA SKIRIASI PAGAL EKOSISTEMĄ (žr. docs/ci-security-policy.md):
+    #   npm    - high ir critical stabdo; moderate ir low rodomi, neblokuoja.
+    #   Python - BET KOKS radinys stabdo.
+    #
+    # `pip-audit` severity slenksčio neturi (`--strict` keičia priklausomybių
+    # surinkimo klaidų traktavimą, ne sunkumo ribą). Suvienodinti reikštų rašyti
+    # JSON filtrą, o Python advisory šaltiniai sunkumą pateikia nevienodai - tad
+    # filtras būtų tikslus tik iš pažiūros. Griežtesnė taisyklė sąžiningesnė.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: JavaScript auditas (backend)
+        working-directory: backend
+        run: npm audit --audit-level=high
+
+      - name: JavaScript auditas (frontend)
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: Įdiegti pip-audit
+        run: pip install pip-audit
+
+      # Python auditas kiekvienam katalogui atskirai: jie turi skirtingus
+      # requirements ir gali būti diegiami nepriklausomai.
+      # `--strict` lieka: jis stabdo ir tada, kai priklausomybių išvis nepavyko
+      # surinkti - tyliai praleistas katalogas atrodytų kaip švarus auditas.
+      - name: Python auditas (backend/scripts) - blokuoja BET KOKS radinys
+        run: pip-audit --requirement backend/scripts/requirements.txt --strict
+
+      - name: Python auditas (pyannote-server) - blokuoja BET KOKS radinys
+        run: pip-audit --requirement pyannote-server/requirements.txt --strict
+
+      - name: Python auditas (whisper-server) - blokuoja BET KOKS radinys
+        run: pip-audit --requirement whisper-server/requirements.txt --strict

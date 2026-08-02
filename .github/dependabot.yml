@@ -29,4 +29,16 @@ updates:
     directory: "/whisper-server"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit:5
+    open-pull-requests-limit: 5
+
+  # GitHub Actions ekosistema (#16).
+  #
+  # Be jos trečiųjų šalių action'ai niekada neatnaujinami - o būtent jie turi
+  # prieigą prie workflow konteksto ir paslapčių. Priklausomybių skenavimas be
+  # šios eilutės dengia tik aplikacijos kodą, bet ne tiekimo grandinę, per kurią
+  # tas kodas statomas.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
