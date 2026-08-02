@@ -73,8 +73,21 @@ jobs:
       # BullMQ režimą - jobai liktų amžinai "queued", nes šiuose testuose joks
       # worker'is jų neapdoroja. Tai buvo realus regresijos rizikos šaltinis,
       # kai REDIS_URL anksčiau buvo nustatytas VISAM `npm test` žingsniui.
-      - name: Unit / route testai (inline režimas - be Redis)
-        run: npm test
+      # Rinkiniai paleidžiami ATSKIRAI (#15), nors kartu jie sudaro tą patį
+      # `npm test`. Priežastis praktinė: kai CI krinta, iš žingsnio pavadinimo
+      # iškart matyti, ar lūžo privatumo garantija, ar tiekėjo formatavimas -
+      # o ne tenka ieškoti vienoje 545 testų išvestyje.
+      - name: Manifesto pilnumas (kiekvienas testas turi rinkinį)
+        run: npm run test:suites
+
+      - name: Privatumo regresijos testai
+        run: npm run test:privacy
+
+      - name: Saugumo regresijos testai
+        run: npm run test:security
+
+      - name: Funkciniai testai
+        run: npm run test:functional
 
       # ATSKIRAS žingsnis TIK realaus Redis/BullMQ integraciniams testams
       # (tests/queueRecovery.integration.test.js - restart/stalled recovery;
@@ -129,6 +142,10 @@ jobs:
 
       - name: Deterministinis diegimas (npm ci)
         run: npm ci
+
+      # Job jau turi defaults.run.working-directory: frontend.
+      - name: Vitest - saugumo/privatumo testai (XSS, eksporto variantai)
+        run: npm run test:security
 
       - name: Unit testai (Vitest)
         run: npm test

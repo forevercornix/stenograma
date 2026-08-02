@@ -10,7 +10,8 @@
     "test": "vitest run",
     "lint": "eslint src/",
     "test:e2e": "playwright test",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "test:security": "vitest run src/RedactionXss.test.jsx src/ExportVariants.test.jsx"
   },
   "dependencies": {
     "lucide-react": "^1.28.0",
