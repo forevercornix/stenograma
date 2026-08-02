@@ -6,12 +6,17 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test",
-    "test:redis": "node tests/queueRecovery.integration.test.js && node tests/heartbeatReadiness.integration.test.js",
+    "test": "node scripts/run-tests.mjs",
+    "test:redis": "node scripts/run-tests.mjs redis",
     "check": "find . -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check",
     "lint": "eslint .",
     "doctor": "node scripts/doctor.js",
-    "test-install": "node scripts/smoke.js"
+    "test-install": "node scripts/smoke.js",
+    "test:all": "node --test",
+    "test:security": "node scripts/run-tests.mjs security",
+    "test:privacy": "node scripts/run-tests.mjs privacy",
+    "test:functional": "node scripts/run-tests.mjs functional",
+    "test:suites": "node scripts/run-tests.mjs --list"
   },
   "engines": {
     "node": ">=22"

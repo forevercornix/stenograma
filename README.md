@@ -1196,6 +1196,32 @@ kontūras `2px solid #0000` su offsetu – identiška v3.
 deps leido tik React ≤18, tad vien React bump'as griūdavo ties `npm ci` su
 `ERESOLVE`. Abu keliami kartu – atskirai nė vienas neveikia.
 
+**Testų rinkiniai.** 545 backend testai suskirstyti į rinkinius pagal tai, ką
+jie saugo:
+
+| Komanda | Ką apima |
+|---|---|
+| `npm test` | privatumas + saugumas + funkciniai (numatyta) |
+| `npm run test:privacy` | PII redakcija, retencija, ištrynimas, eksporto variantai, auditas |
+| `npm run test:security` | prieigos kontrolė, validacija, priėmimo kelias, koreliacija, paleidimo patikros |
+| `npm run test:functional` | tiekėjai, formatai, eilės, pagalbinės funkcijos |
+| `npm run test:redis` | integraciniai testai su **tikru** Redis |
+| `npm run test:suites` | ką apima kiekvienas rinkinys |
+
+Priskyrimas gyvena `backend/tests/suites.js`, o `scripts/run-tests.mjs` prieš
+kiekvieną paleidimą tikrina, kad **kiekvienas** `tests/*.test.js` priklausytų
+bent vienam rinkiniui ir kad manifeste nebūtų neegzistuojančių įrašų. Be šios
+patikros naujas saugumo testas galėtų tyliai likti už `test:security` ribų, o
+komanda rodytų žalią būtent todėl, kad jo nepaleido.
+
+`npm test` **neapima** `redis` rinkinio sąmoningai: be `REDIS_URL` tie testai
+save praleidžia, ir įtraukus juos „3 skipped" taptų nuolatiniu triukšmu, kurį
+visi išmoktų ignoruoti. CI juos leidžia atskirai su tikru Redis servisu.
+
+CI paleidžia rinkinius **atskirais žingsniais**, nors kartu jie sudaro tą patį
+`npm test`: kai kas nors lūžta, iš žingsnio pavadinimo iškart matyti, ar tai
+privatumo garantija, ar tiekėjo formatavimas.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
