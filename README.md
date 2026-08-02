@@ -1,16 +1,19 @@
 # Stenograma
 
-**Status:** Portfolio reference implementation — `v1.0.2` (ne production-ready)
+**Status:** Portfolio reference implementation — `v1.2.0` (ne production-ready)
 
 | Komponentas | Statusas | Pagrindas |
 |---|---|---|
-| Backend (Node/API) | Testuota | Unit + route testai, smoke testas per CI |
+| Backend (Node/API) | Testuota | 558 testai (privatumo / saugumo / funkciniai rinkiniai) per CI |
+| Privatumo ir saugumo garantijos | Testuota + mutacijomis patikrinta | [`docs/security-test-matrix.md`](docs/security-test-matrix.md) |
 | Frontend (Vite/React) | Testuota | Vitest, ESLint, build per CI |
 | E2E srautas | Testuota | Playwright + Chromium per CI |
 | CPU Docker image'ai | Testuota | `docker compose build` + `/api/health` per CI |
 | GPU Docker image'ai | Build-testuota | `Publish images (GHCR)` workflow |
 | Pilnas GPU srautas | Testuota realiai | RunPod: Whisper + pyannote, ~4 val. įrašas iki protokolo |
 | Whisper / pyannote kontraktai | Mock lygiu | Kontrakto testai su mock modeliu / pipeline |
+| Redis / worker persistencija | Testuota realiai | Integraciniai testai su tikru Redis (`REQUIRE_REDIS=1` CI'e) |
+| PII redakcija | Dalinai pseudonimizuoja | Vardai paliekami, adresai neaptinkami — žr. matricos „Ko neapima" |
 
 **Susitikimų protokolų generatorius: garsas → transkripcija → struktūruotas protokolas.**
 
@@ -273,7 +276,7 @@ Ankstesnės versijos turėjo keletą MVP-lygio saugumo spragų, kurios dabar iš
 ```bash
 cd backend
 npm install
-npm test        # node --test - 118 testų, visi mock provideriais, be jokių API raktų
+npm test        # 558 testai (privatumas + saugumas + funkciniai), mock provideriai, be raktų
 npm run check   # node --check kiekvienam .js failui
 ```
 
@@ -463,7 +466,7 @@ Pilna dokumentacija: [`backend/README.md`](backend/README.md).
 
 **Frontend:** React + Vite, Tailwind (core utility klasės), Web Speech API, PapaParse (CSV eksportui), lucide-react.
 **Backend:** Node.js 20+, Express, Multer (diskStorage), express-rate-limit.
-**Testai:** backend — `node:test` (built-in) + Supertest (107 testai); frontend —
+**Testai:** backend — `node:test` (built-in) + Supertest (558 testai, plius 11 integracinių su tikru Redis); frontend —
 Vitest (24 testų: 19 grynoms `src/utils.js` funkcijoms + 5 komponento/integracijos
 testai `App.jsx` su React Testing Library ir mocked `fetch` - backend health
 statusas, generavimo srautas, klaidų rodymas). **Sąžiningai:** komponento testai

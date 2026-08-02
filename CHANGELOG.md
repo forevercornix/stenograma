@@ -4,6 +4,119 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## v1.2.0 – GDPR ir saugumo programa
+
+Šis leidimas nepridėjo naujų vartotojo funkcijų. Jis padarė kitą dalyką: pavertė
+esamas privatumo ir saugumo prielaidas **tikrinamomis garantijomis**.
+
+Pradžioje testų buvo 118, dabar **558** (plius 55 frontend ir 11 integracinių su
+tikru Redis). Bet svarbesnis skaičius kitas: kiekviena garantija turi mutacijos
+įrodymą – patikrinta, kad testas realiai krinta, kai saugoma savybė pašalinama.
+Šioje programoje ne kartą pasitaikė testų, kurie praeidavo ir tada, kai
+tikrinama savybė buvo pašalinta.
+
+### Added
+
+**PII redakcija (#4)** – `utils/piiRedaction.js`: LT asmens kodai su kontroline
+suma, el. paštas, telefonai, IBAN. Konfigūruojamos kategorijos. Redaguotas
+turinys keliauja kaip **artefaktas** su `variant`, `policyVersion` ir
+`sourceArtefactId` – guard'ai tikrina faktą, ne prielaidą.
+
+**Konfigūruojamas privatumo režimas (#5)** – užšaldyta `privacyPolicy`,
+`ALLOW_EXTERNAL_PROVIDERS`, `REQUIRE_REDACTION_BEFORE_EXTERNAL`,
+`EXPORT_ALLOW_ORIGINAL`. Netinkama konfigūracija stabdo startą.
+
+**Originalus ir redaguotas eksportas (#8)** – `variant` privalomas, be
+numatytosios reikšmės. Politika gali variantą **uždrausti**, bet niekada
+nepakeičia kitu. Failo vardas neša variantą. UI rodo abu variantus, originalui –
+atskiras veiksmas su patvirtinimu.
+
+**API saugumo bazė (#14)** – `utils/securityBaseline.js`: helmet su
+`default-src 'none'`, CORS allow-list su kilmių validacija, kūno limitai,
+bendras rate limitas, readiness timeout. Validacija per zod visuose maršrutuose,
+vienas klaidų formatas, nežinomi laukai atmetami.
+
+**Observability ir koreliacija (#17)** – `X-Request-Id`, propagavimas į jobus ir
+worker'ius per `AsyncLocalStorage`, struktūruotas JSON logas, grandinė
+`queued → processing → provider → completed/failed`, IP tik kaip pseudonimas,
+aktorius kaip scrypt atspaudas.
+
+**CI ir tiekimo grandinė (#16)** – `docs/ci-security-policy.md` plius
+`scripts/check-workflow-policy.mjs`, kuris politiką **vykdo**. PR blokuojantis
+priklausomybių auditas (npm + pip).
+
+**Saugumo testų matrica (#15)** – `docs/security-test-matrix.md`: kuris testas
+saugo kurią garantiją ir kokia mutacija tai įrodo. Su patikra, kad matrica
+nesenstų, ir skyriumi **„Ko ši matrica neapima"**.
+
+### Fixed
+
+Pakeliui rasti ir ištaisyti realūs defektai, ne tik pridėtos apsaugos:
+
+- **`.github/dependabot.yml` buvo sintaksiškai neteisingas** – GitHub jį atmetė
+  tyliai, tad nė viena priklausomybė niekada nebuvo tikrinama.
+- **`frontend` turėjo `high` pažeidžiamumą** (`brace-expansion`, GHSA-mh99-v99m-4gvg),
+  rastą pirmą kartą paleidus auditą.
+- **Eksporto guard'as pasitikėjo `redact()` rezultatu**, kai LLM kelias jau
+  tikrino artefakto variantą – dviguba standartų sistema ten, kur failas keliauja
+  tiesiai vartotojui.
+- **Repair retry perrašydavo šaltinio redakcijos metaduomenis** – API rodydavo
+  `redactionStats: {}`, nors originale PII buvo pašalinta.
+- **`Content-Disposition` ir `X-Request-Id` nebuvo `Access-Control-Expose-Headers`** –
+  cross-origin diegime failo vardas tyliai nusileisdavo į bendrinį.
+- **Worker'is žymėdavo `failed` ir tarpiniam bandymui**, po kurio jobas dar
+  būdavo kartojamas – grandinė rodydavo galutinę nesėkmę ten, kur jos nebuvo.
+- **Telefonų aptikimas laikė telefonais sutarčių ir dokumentų numerius**
+  (`812345678`, `800000001`), o asmens kodas po brūkšnelio (`AK-39001010000`)
+  praeidavo neredaguotas.
+- **Testai palikdavo `/tmp/stenograma-test-storage-*`** – rasta pridėjus švaros
+  patikrą.
+
+### Changed
+
+- Node 20 → **22** visose vietose (CI, Docker image'ai, `engines`, `.nvmrc`).
+- React 18 → **19** kartu su `lucide-react` (atskirai nė vienas neveikia).
+- Tailwind 3 → **4** su klasių pervadinimais, kad išvaizda nepasikeistų;
+  `outline-none` → `outline-hidden` ištaisė fokuso indikatorių prieinamumą.
+- Testai suskirstyti į rinkinius: `test:privacy`, `test:security`,
+  `test:functional`, `test:redis`.
+- Redis integraciniai testai nebėra „optional": CI nustato `REQUIRE_REDIS=1`, ir
+  tylus praleidimas tampa klaida.
+
+### Known limitations
+
+Rezultatas yra **dalinai pseudonimizuotas, ne anonimizuotas**: vardai paliekami
+sąmoningai, adresai neaptinkami, žodžiais padiktuoti identifikatoriai praeina.
+Pilnas sąrašas – `docs/security-test-matrix.md` skyriuje „Ko ši matrica neapima".
+
+---
+
+## v1.1.0 – GDPR ištrynimas ir audio retencija
+
+*Įrašas pridėtas atgaline data: leidimas buvo pažymėtas tag'u, bet CHANGELOG ir
+`package.json` versija liko neatnaujinti. Tai pastebėta ruošiant v1.2.0.*
+
+### Added
+- Pilnas jobo ištrynimas: `DELETE /api/jobs/:id` ir `/api/transcribe-jobs/:id`,
+  audio pašalinimas, ištrynimo kvitas.
+- `audio_cleanup_pending` vėliava ir retry su backoff nepavykusiems trynimams.
+
+### Fixed
+- `storageKey` nulinamas tik po **sėkmingo** audio ištrynimo.
+- Atskirti `scanned` ir `attempted` skaitliukai retry suvestinėse.
+
+---
+
+## v1.0.3 – BullMQ ryšių uždarymas
+
+*Įrašas pridėtas atgaline data (žr. v1.1.0 pastabą).*
+
+### Fixed
+- BullMQ Redis ryšiai korektiškai uždaromi; pridėtas worker shutdown helper.
+- Restart recovery testas naudoja trumpą stalled intervalą.
+
+---
+
 ## v1.0.2 – GPU build stabilumas + dokumentacijos tikslinimas
 
 ### Fixed
