@@ -22,5 +22,5 @@ tqdm==4.68.4
 
 fastapi==0.115.6
 uvicorn==0.52.0
-python-multipart==0.0.31
+python-multipart==0.0.32
 pytest==9.1.1
