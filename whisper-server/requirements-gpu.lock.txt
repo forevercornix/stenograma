@@ -13,7 +13,7 @@ huggingface-hub==1.25.1
 tokenizers==0.23.1
 av==18.0.0
 onnxruntime==1.28.0
-tqdm==4.68.4
+tqdm==4.70.0
 
 # CUDA runtime bibliotekos (ctranslate2 4.8.x reikalauja cuDNN 9.x).
 nvidia-cublas-cu12==12.9.2.10
