@@ -13,7 +13,7 @@ Realių diegimų metu šie dalykai dažniausiai suklaidina - jie visi **normalū
 - **Node.js 20+ NĖRA iš anksto įdiegtas.** RunPod PyTorch/CUDA image'ai turi Python ir
   CUDA, bet ne Node. Įsidiekite rankiniu būdu PRIEŠ `setup.sh` (žr. 2b, žemiau):
   ```bash
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
   ```
 - **GPU paketų diegimas gali kelias–keliolika minučių nerodyti JOKIO progreso.** `pip`
   atsisiunčia CUDA/Torch/pyannote (keli GB) tyliai - tai NĖRA strigimas. Palaukite; jei
@@ -113,8 +113,8 @@ perbuildinimo (santykinis `/api`).
 cd /workspace
 git clone <jūsų-repo> stenograma && cd stenograma
 
-# Node 20+ (PyTorch image jo neturi):
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+# Node 22+ (PyTorch image jo neturi):
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
 
 export HUGGINGFACE_TOKEN=hf_...
 ./setup.sh --gpu                  # įdiegia viską (+ pyannote venv) + paleidžia doctor

@@ -183,7 +183,7 @@ services:
   # TIK `workers/protocolWorker.js` (klausosi TIK protokolo eilės). Skalauti
   # nepriklausomai: `docker compose ... up --scale protocol-worker=3`.
   protocol-worker:
-    # LENGVAS image (node:20-slim, be Python/CUDA) - protocol-worker TIK kviečia
+    # LENGVAS image (node:22-slim, be Python/CUDA) - protocol-worker TIK kviečia
     # LLM API (Claude), niekada nespawnina Python subprocess, tad jam nereikia
     # Dockerfile.whisper.gpu (CUDA + Python + faster-whisper priklausomybių).
     # Anksčiau naudojo TĄ PATĮ CUDA image kaip transcription-worker - veikė

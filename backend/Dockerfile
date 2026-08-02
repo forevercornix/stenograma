@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # ^ BuildKit syntax - reikalinga RUN --mount=type=cache (npm cache tarp build'ų).
-FROM node:20-slim
+FROM node:22-slim
 
 WORKDIR /app
 
