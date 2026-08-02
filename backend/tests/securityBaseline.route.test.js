@@ -325,3 +325,122 @@ test("REGRESIJA: netinkamas jobId vis tiek atmetamas", () => {
     );
   }
 });
+
+/**
+ * ---------------------------------------------------------------------------
+ * #14 PR2: VALIDACIJA VISUOSE MARŠRUTUOSE.
+ * ---------------------------------------------------------------------------
+ */
+
+test("PARAMS: netinkamas jobId atmetamas prieš pasiekiant saugyklą", async () => {
+  /**
+   * Anksčiau `req.params.id` keliaudavo tiesiai į `jobStore.get()`. Saugykla su
+   * tuo susitvarko, bet tikrinti prie ribos pigiau ir aiškiau - klientas gauna
+   * validacijos klaidą, o ne 404 apie „nerastą" jobą, kurio ID iš viso negalimas.
+   */
+  for (const bad of ["../../etc/passwd", "a".repeat(100), "su tarpu"]) {
+    const res = await request(app).get(`/api/jobs/${encodeURIComponent(bad)}`);
+
+    assert.equal(res.status, 400, `turėjo būti atmesta: ${bad}`);
+    assert.equal(res.body.code, "VALIDATION_FAILED");
+  }
+});
+
+test("PARAMS: galiojantis ID praeina (validacija nėra aklas blokas)", async () => {
+  const res = await request(app).get("/api/jobs/job_123-abc");
+
+  // 404 reiškia, kad validaciją praėjo ir jobas tiesiog neegzistuoja.
+  assert.equal(res.status, 404);
+});
+
+test("MULTIPART: laukai konvertuojami iš eilučių", () => {
+  /**
+   * `diarize=true` per multipart yra TEKSTAS. Iki šiol maršrutas tikrino
+   * `req.body.diarize === "true" || req.body.diarize === true` rankomis - viena
+   * tokia patikra maršrute, kita kitur, ir jos ilgainiui išsiskirdavo.
+   */
+  const parsed = schemas.transcribeBody.parse({ diarize: "true", numSpeakers: "3", language: "lt" });
+
+  assert.equal(parsed.diarize, true);
+  assert.equal(parsed.numSpeakers, 3);
+  assert.equal(typeof parsed.numSpeakers, "number");
+
+  // JSON pavidalas veikia identiškai - klientui nereikia žinoti skirtumo.
+  assert.deepEqual(schemas.transcribeBody.parse({ diarize: true, numSpeakers: 3 }), {
+    diarize: true,
+    numSpeakers: 3,
+  });
+});
+
+test("AUDIO URL: tik http/https, ne bet koks `url()`", () => {
+  /**
+   * `z.string().url()` praleidžia `javascript:`, `file:` ir `data:`. Šis URL
+   * keliauja į transkribavimo tiekėją, tad schemų sąrašas turi būti baltas.
+   */
+  for (const bad of ["javascript:alert(1)", "file:///etc/passwd", "data:audio/wav;base64,AAA", "ne-urlas"]) {
+    assert.equal(
+      schemas.transcribeBody.safeParse({ audioUrl: bad }).success,
+      false,
+      `turėjo būti atmesta: ${bad}`
+    );
+  }
+
+  assert.equal(schemas.transcribeBody.safeParse({ audioUrl: "https://a.lt/f.wav" }).success, true);
+});
+
+test("SCHEMOS ATITINKA SERVISO PARAŠĄ, ne mūsų atmintį", () => {
+  /**
+   * Rasta rašant šį PR: pirmoji `protocolJobBody` versija neįtraukė `title`,
+   * `date`, `participants` ir `segments` - o juos naudoja `generateProtocol()`
+   * ir siunčia frontend. Griežtas režimas būtų atmetęs teisėtas užklausas.
+   *
+   * Testas lygina schemą su REALIU serviso parašu, kad neatitikimas iškiltų
+   * čia, o ne produkcijoje.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const source = fs.readFileSync(path.join(__dirname, "../services/protocolService.js"), "utf8");
+
+  const signature = source.match(/async function generateProtocol\(\{([^}]*)\}/);
+  assert.ok(signature, "nepavyko perskaityti generateProtocol parašo");
+
+  const serviceFields = signature[1]
+    .split(",")
+    .map((part) => part.trim().split(/[:=]/)[0].trim())
+    .filter(Boolean);
+
+  /**
+   * Tikrinamos ABI schemos: `/api/generate` ir `/api/jobs` maitina TĄ PATĮ
+   * servisą, tad praleistas laukas viename kelyje yra toks pat gedimas kaip
+   * kitame. Pirmoji šio testo versija tikrino tik `generateBody`, ir mutacija,
+   * pašalinusi laukus iš `protocolJobBody`, praėjo nepastebėta.
+   */
+  /**
+   * Serverio įterpiami laukai į schemas NEĮEINA sąmoningai.
+   *
+   * `/api/jobs` kelyje `jobId` sukuria serveris ir prideda processor'ius
+   * (`{ ...payload, jobId }`) - klientas jo siųsti negali ir neturi. Įtraukus jį
+   * į schemą, klientas galėtų primesti svetimą jobo ID audito įrašams.
+   */
+  const serverInjected = { protocolJobBody: ["jobId"], generateBody: [] };
+
+  for (const [name, schema] of [
+    ["generateBody", schemas.generateBody],
+    ["protocolJobBody", schemas.protocolJobBody],
+  ]) {
+    const schemaFields = Object.keys(schema.shape);
+
+    for (const field of serviceFields) {
+      if (serverInjected[name].includes(field)) continue;
+
+      // `promptVersionOverride` servise atitinka `promptVersion` schemoje.
+      const alias = field === "promptVersionOverride" ? "promptVersion" : field;
+
+      assert.ok(
+        schemaFields.includes(alias),
+        `${name}: servisas naudoja "${field}", bet schema jo nepriima - ` +
+          "griežtas režimas atmestų teisėtą užklausą"
+      );
+    }
+  }
+});

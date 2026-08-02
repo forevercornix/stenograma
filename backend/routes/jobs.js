@@ -7,6 +7,7 @@ const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { eraseJob, eraseOrphanedJobData } = require("../utils/jobErasure");
 const { getRequestId, getActor } = require("../utils/requestContext");
 const { createLogger } = require("../utils/logger");
+const { validate, schemas } = require("../middleware/validate");
 const log = createLogger("route:jobs");
 
 const router = express.Router();
@@ -25,11 +26,8 @@ const router = express.Router();
  * kaip struktūruoti async pipeline'ą, ne pilna production queue (Redis/BullMQ/
  * SQS) su retry politika, dead-letter queue ir keliais worker procesais.
  */
-router.post("/jobs", rateLimiter, apiKeyAuth, async (req, res) => {
-  const body = req.body || {};
-  if (!body.transcript || body.transcript.trim().length < 10) {
-    return res.status(400).json({ error: "Transkripcija per trumpa arba tuščia." });
-  }
+router.post("/jobs", rateLimiter, apiKeyAuth, validate({ body: schemas.protocolJobBody }), async (req, res) => {
+  const body = req.validated.body;
 
   const job = await jobStore.create({
     type: jobStore.JOB_TYPES.PROTOCOL,
@@ -60,7 +58,7 @@ router.post("/jobs", rateLimiter, apiKeyAuth, async (req, res) => {
  * GET /api/jobs/:id - būsenos/rezultato apklausa (polling).
  * response: { jobId, status: queued|processing|completed|failed, result?, error?, createdAt, updatedAt }
  */
-router.get("/jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res) => {
+router.get("/jobs/:id", pollRateLimiter, apiKeyAuth, validate({ params: schemas.jobIdParam }), async (req, res) => {
   const job = await jobStore.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Jobas nerastas (galbūt serveris persileido, o job store buvo tik atmintyje - persistencijai naudokite Redis)." });
 
@@ -85,7 +83,7 @@ router.get("/jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res) => {
  * protokolo jobai laiko jautriausius duomenis: payload'e - visa TRANSKRIPCIJA
  * ir dalyvių sąrašas, rezultate - sugeneruotas protokolas.
  */
-router.delete("/jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
+router.delete("/jobs/:id", rateLimiter, apiKeyAuth, validate({ params: schemas.jobIdParam }), async (req, res) => {
   const job = await jobStore.get(req.params.id);
 
   if (!job) {

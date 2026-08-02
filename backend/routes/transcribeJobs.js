@@ -17,6 +17,7 @@ const apiKeyAuth = require("../middleware/apiKeyAuth");
 const { createLogger } = require("../utils/logger");
 const { recordRejectedUpload, reasonFromMulterError, REASONS } = require("../utils/uploadEvents");
 const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
+const { validate, schemas } = require("../middleware/validate");
 const log = createLogger("route:transcribe-jobs");
 
 const router = express.Router();
@@ -70,13 +71,19 @@ function uploadSingleAudio(req, res, next) {
  *
  * response: { jobId, status: "queued" }
  */
-router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, async (req, res) => {
+router.post(
+  "/transcribe-jobs",
+  rateLimiter,
+  apiKeyAuth,
+  uploadSingleAudio,
+  validate({ body: schemas.transcribeBody }),
+  async (req, res) => {
   if (!req.file) {
     recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe-jobs" });
     return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
   }
 
-  const body = { ...req.body };
+  const body = { ...req.validated.body };
   const fileMeta = { filename: req.file.originalname, mimeType: req.file.mimetype };
 
   let storageKey = null;
@@ -177,7 +184,7 @@ router.post("/transcribe-jobs", rateLimiter, apiKeyAuth, uploadSingleAudio, asyn
  * GET /api/transcribe-jobs/:id - būsenos/rezultato apklausa (polling).
  * response: { jobId, status: queued|processing|completed|failed|cancelled, progress?, result?, error?, ... }
  */
-router.get("/transcribe-jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res) => {
+router.get("/transcribe-jobs/:id", pollRateLimiter, apiKeyAuth, validate({ params: schemas.jobIdParam }), async (req, res) => {
   const job = await jobStore.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Jobas nerastas (galbūt serveris persileido, o job store buvo tik atmintyje - persistencijai naudokite Redis)." });
 
@@ -222,7 +229,7 @@ router.get("/transcribe-jobs/:id", pollRateLimiter, apiKeyAuth, async (req, res)
  * tad bet kuris rakto turėtojas gali ištrinti bet kurį jobą. Viešam diegimui su
  * realiais vartotojais reikia per-user auth - žr. backend README.
  */
-router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, async (req, res) => {
+router.delete("/transcribe-jobs/:id", rateLimiter, apiKeyAuth, validate({ params: schemas.jobIdParam }), async (req, res) => {
   const job = await jobStore.get(req.params.id);
 
   if (!job) {

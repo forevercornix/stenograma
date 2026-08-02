@@ -39,6 +39,19 @@ const flexibleBoolean = z.union([
   z.enum(["true", "false"]).transform((value) => value === "true"),
 ]);
 
+/** Tik http/https - schemų sąrašas baltas, ne juodas. */
+const httpUrl = z
+  .string()
+  .trim()
+  .max(2048)
+  .refine((value) => {
+    try {
+      return ["http:", "https:"].includes(new URL(value).protocol);
+    } catch {
+      return false;
+    }
+  }, "laukiamas http arba https URL");
+
 const schemas = {
   identifier,
   flexibleBoolean,
@@ -62,9 +75,65 @@ const schemas = {
     })
     .strict(),
 
+  /**
+   * MULTIPART laukai ateina kaip EILUTĖS.
+   *
+   * `diarize=true` ir `numSpeakers=3` per `multipart/form-data` yra tekstas, ne
+   * boolean ir ne skaičius. Todėl schema priima abu pavidalus ir konvertuoja -
+   * kitaip klientas turėtų žinoti, kad JSON ir formos elgiasi skirtingai.
+   */
+  transcribeBody: z
+    .object({
+      language: z
+        .string()
+        .trim()
+        .regex(/^[a-z]{2}(-[A-Za-z]{2,4})?$/, "laukiamas kalbos kodas, pvz. lt arba lt-LT")
+        .nullish(),
+      diarize: flexibleBoolean.nullish(),
+      /**
+       * `z.string().url()` NEPAKANKA: ji praleidžia `javascript:`, `file:` ir
+       * `data:` schemas. Šis URL keliauja į transkribavimo tiekėją, tad
+       * schemų sąrašas turi būti baltas, ne juodas.
+       */
+      audioUrl: httpUrl.nullish(),
+      numSpeakers: z.coerce.number().int().min(1).max(50).nullish(),
+      provider: identifier.nullish(),
+      diarizationProvider: identifier.nullish(),
+      meetingId: identifier.nullish(),
+      jobId: identifier.nullish(),
+    })
+    .strict(),
+
+  protocolJobBody: z
+    .object({
+      /**
+       * `title`, `date`, `participants` ir `segments` NĖRA perteklius - juos
+       * naudoja `generateProtocol()`, ir frontend juos siunčia.
+       *
+       * Pirmoji šios schemos versija jų neįtraukė, ir griežtas režimas būtų
+       * atmetęs teisėtas užklausas: schema, aprašyta „iš atminties" o ne iš
+       * realaus serviso parašo, tampa gedimu, ne apsauga.
+       */
+      title: z.string().trim().max(500).nullish(),
+      date: z.string().trim().max(100).nullish(),
+      participants: z.union([z.string().max(2000), z.array(z.string().max(200)).max(200)]).nullish(),
+      segments: z.array(z.object({}).passthrough()).max(100_000).nullish(),
+      // Ta pati riba kaip `generateBody.transcript` - jie apdorojami to paties
+      // serviso, tad skirtingos ribos reikštų, kad kelias lemia turinį.
+      transcript: z.string().trim().min(10, "transkripcija per trumpa").max(2_000_000),
+      meetingId: identifier.nullish(),
+      llmProviderOverride: identifier.nullish(),
+      promptVersion: identifier.nullish(),
+    })
+    .strict(),
+
   generateBody: z
     .object({
-      transcript: z.string().min(1).max(2_000_000),
+      transcript: z.string().trim().min(10, "transkripcija per trumpa").max(2_000_000),
+      title: z.string().trim().max(500).nullish(),
+      date: z.string().trim().max(100).nullish(),
+      participants: z.union([z.string().max(2000), z.array(z.string().max(200)).max(200)]).nullish(),
+      segments: z.array(z.object({}).passthrough()).max(100_000).nullish(),
       meetingId: identifier.nullish(),
       jobId: identifier.nullish(),
       llmProviderOverride: identifier.nullish(),
