@@ -490,7 +490,7 @@ generation pipeline, Docker deployment, health/readiness checks). Pilnas sąraš
 - [x] ~~Automatinis fact-checking~~ → leksinis grounding check implementuotas (`utils/groundingCheck.js`). Liko: **semantinis** fact-checking (embedding similarity arba antras LLM validacijos žingsnis) - dabartinė heuristika nepagauna perfrazuotų (bet teisingų) teiginių.
 - [x] ~~Tikras OOXML `.docx` eksportas~~ → implementuota (`docx` npm paketas, generuojama naršyklėje). Liko: įmonės logotipas/šablonas/spalvos, jei reikia firminio stiliaus - dabar naudojamas bendras neutralus formatavimas.
 - [x] ~~Local transcription concurrency control~~ → `utils/concurrencyLimiter.js` semaforas ribojantis vienalaikius `faster-whisper-embedded` subprocess'us (`FASTER_WHISPER_MAX_CONCURRENCY`), patikrinta laiko matavimo testu.
-- [x] ~~Nereikalinga `node-fetch` priklausomybė~~ → pašalinta, naudojamas Node 20 native `fetch` (projektas jau reikalauja Node 20+).
+- [x] ~~Nereikalinga `node-fetch` priklausomybė~~ → pašalinta, naudojamas Node 22 native `fetch` (projektas jau reikalauja Node 22+).
 - [x] ~~Bent vienas frontend komponento/integracijos testas~~ → `frontend/src/App.test.jsx` (React Testing Library + mocked fetch): backend health statusas, generavimo srautas, klaidų rodymas. Liko neišbandyta: audio upload srautas, protokolo redagavimas, eksportai, diarizacijos pasirinkimas, live įrašymas.
 - [ ] PDF eksportas.
 - [ ] Realios įrašo TRUKMĖS (ne tik failo dydžio) tikrinimas prieš apdorojimą (`ffprobe` ar panaši biblioteka) - žr. paaiškinimą `backend/README.md` "Faster-Whisper" skyriuje.
