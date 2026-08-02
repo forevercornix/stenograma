@@ -1192,6 +1192,10 @@ Visos 27 naudojimo vietos pervadintos, o rezultatas patikrintas sugeneruotame
 CSS: `--radius-xs: .125rem`, šešėlis `0 1px 2px 0 #0000000d` (= 5 % alfa),
 kontūras `2px solid #0000` su offsetu – identiška v3.
 
+**React 19.** Atnaujinimas pareikalavo ir `lucide-react` kėlimo: `0.383.0` peer
+deps leido tik React ≤18, tad vien React bump'as griūdavo ties `npm ci` su
+`ERESOLVE`. Abu keliami kartu – atskirai nė vienas neveikia.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
