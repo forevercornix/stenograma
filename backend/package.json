@@ -37,7 +37,7 @@
     "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "bullmq": "^5.81.3",
+    "bullmq": "^6.0.0",
     "ioredis": "^5.11.1"
   },
   "devDependencies": {

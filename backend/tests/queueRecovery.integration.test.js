@@ -274,11 +274,25 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
     const j = await jobStore.get(job.id);
     const bullJob = await queue.getJob(job.id);
     const bullState = bullJob ? await bullJob.getState() : "missing";
-    const redis = await queue.client;
+    /**
+     * Diagnostika naudoja VIDINĮ BullMQ API, tad ji negali stabdyti testo.
+     *
+     * BullMQ 6 pašalino `queue.client`, ir testas krisdavo su
+     * `Cannot read properties of undefined (reading 'pttl')` - ne dėl to, kad
+     * atkūrimas neveikia, o dėl to, kad nepavyko atspausdinti lokų TTL.
+     * Diagnostinis kodas, galintis sulaužyti testą, meluoja apie tai, kas
+     * tikrinama.
+     */
+    let redis = null;
+    try {
+      redis = await queue.client;
+    } catch {
+      redis = null;
+    }
     const lockKey = `${queue.toKey(job.id)}:lock`;
-    const lockTtl = await redis.pttl(lockKey);
+    const lockTtl = redis ? await redis.pttl(lockKey) : -99;
     const stalledCheckKey = queue.toKey("stalled-check");
-    const stalledCheckTtl = await redis.pttl(stalledCheckKey);
+    const stalledCheckTtl = redis ? await redis.pttl(stalledCheckKey) : -99;
 
     if (i % 4 === 0) {
       console.log(
