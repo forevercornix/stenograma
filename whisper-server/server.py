@@ -96,6 +96,22 @@ def health(probe: bool = False):
     return JSONResponse(status_code=status_code, content=body)
 
 
+def _safe_error_detail(exc, context):
+    """
+    Klaidos pranešimas KLIENTUI - be vidinių detalių.
+
+    `f"{type(e).__name__}: {e}"` atiduodavo pilną išimties tekstą, o jame būna
+    failų kelių (`/tmp/stenograma-…`), modelio pavadinimų ir bibliotekų vidinių
+    detalių. Backend'e tam turim `utils/sanitizeError.js`; Python servisuose ta
+    pati taisyklė nebuvo taikoma, nors jie priima tas pačias užklausas.
+
+    Pilnas tekstas VISADA logguojamas serveryje - diagnostika nenukenčia, tik
+    persikelia ten, kur jai vieta.
+    """
+    print(f"[{context}] {type(exc).__name__}: {exc}", flush=True)
+    return f"{context} nepavyko. Detalės serverio loguose."
+
+
 @app.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
@@ -105,7 +121,8 @@ async def transcribe(
     model, err = _get_model()
     if model is None:
         # 503 - serverio pusės problema (modelis neįkeltas), ne kliento klaida.
-        raise HTTPException(status_code=503, detail=f"Modelis neįkeltas: {err}")
+        print(f"[whisper] Modelis neįkeltas: {err}", flush=True)
+        raise HTTPException(status_code=503, detail="Modelis neįkeltas. Detalės serverio loguose.")
 
     suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     tmp_path = None
@@ -135,7 +152,7 @@ async def transcribe(
             _gpu_semaphore.release()
         return JSONResponse(result)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Transkribavimo klaida: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=_safe_error_detail(e, "Transkribavimas"))
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -157,7 +174,8 @@ async def transcribe_stream(
     """
     model, err = _get_model()
     if model is None:
-        raise HTTPException(status_code=503, detail=f"Modelis neįkeltas: {err}")
+        print(f"[whisper] Modelis neįkeltas: {err}", flush=True)
+        raise HTTPException(status_code=503, detail="Modelis neįkeltas. Detalės serverio loguose.")
 
     suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)

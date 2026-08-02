@@ -110,6 +110,22 @@ def health(probe: bool = False):
     return JSONResponse(status_code=status_code, content=body)
 
 
+def _safe_error_detail(exc, context):
+    """
+    Klaidos pranešimas KLIENTUI - be vidinių detalių.
+
+    `f"{type(e).__name__}: {e}"` atiduodavo pilną išimties tekstą, o jame būna
+    failų kelių (`/tmp/stenograma-…`), modelio pavadinimų ir bibliotekų vidinių
+    detalių. Backend'e tam turim `utils/sanitizeError.js`; Python servisuose ta
+    pati taisyklė nebuvo taikoma, nors jie priima tas pačias užklausas.
+
+    Pilnas tekstas VISADA logguojamas serveryje - diagnostika nenukenčia, tik
+    persikelia ten, kur jai vieta.
+    """
+    print(f"[{context}] {type(exc).__name__}: {exc}", flush=True)
+    return f"{context} nepavyko. Detalės serverio loguose."
+
+
 def _convert_to_wav(src_path):
     """
     Konvertuoja audio į 16kHz mono WAV per ffmpeg. Grąžina naujo failo kelią arba None,
@@ -160,7 +176,9 @@ async def diarize(file: UploadFile = File(...), num_speakers: int = Form(None)):
     pipeline, err = _get_pipeline()
     if pipeline is None:
         # 503, ne 400 - problema serverio pusėje (modelis neįkeltas), ne kliento.
-        raise HTTPException(status_code=503, detail=f"Pipeline neįkeltas: {err}")
+        # `err` yra modelio įkėlimo klaida - joje būna HF tokeno ir kelių detalių.
+        print(f"[pyannote] Pipeline neįkeltas: {err}", flush=True)
+        raise HTTPException(status_code=503, detail="Pipeline neįkeltas. Detalės serverio loguose.")
 
     suffix = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
     tmp_path = None
@@ -207,7 +225,7 @@ async def diarize(file: UploadFile = File(...), num_speakers: int = Form(None)):
         ]
         return JSONResponse({"turns": turns})
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Diarizacijos klaida: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=_safe_error_detail(e, "Diarizacija"))
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
