@@ -462,7 +462,7 @@ export default function Stenograma() {
             <p className="mono text-[11px] tracking-[0.2em] uppercase flex items-center gap-2" style={{ color: SLATE }}>
               Susitikimų protokolų generatorius
               <span
-                className="mono text-[9px] px-1.5 py-0.5 rounded-sm flex items-center gap-1"
+                className="mono text-[9px] px-1.5 py-0.5 rounded-xs flex items-center gap-1"
                 style={{
                   background: backendStatus === "online" ? "#E9F2EA" : backendStatus === "offline" ? "#FBEDEA" : "#F1EADD",
                   color: backendStatus === "online" ? GREEN : backendStatus === "offline" ? REDINK : BRASS,
@@ -482,14 +482,14 @@ export default function Stenograma() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowAudit((s) => !s)}
-              className="flex items-center gap-1.5 text-sm mono px-3 py-1.5 rounded-sm border hover:bg-black/[0.03] transition-colors"
+              className="flex items-center gap-1.5 text-sm mono px-3 py-1.5 rounded-xs border hover:bg-black/[0.03] transition-colors"
               style={{ borderColor: LINE, color: SLATE }}
             >
               <Info size={13} /> Audit
             </button>
             <button
               onClick={handleReset}
-              className="flex items-center gap-1.5 text-sm mono px-3 py-1.5 rounded-sm border hover:bg-black/[0.03] transition-colors"
+              className="flex items-center gap-1.5 text-sm mono px-3 py-1.5 rounded-xs border hover:bg-black/[0.03] transition-colors"
               style={{ borderColor: LINE, color: SLATE }}
             >
               <RotateCcw size={13} /> Naujas protokolas
@@ -499,7 +499,7 @@ export default function Stenograma() {
 
         {backendStatus === "offline" && (
           <div className="max-w-6xl mx-auto px-6 pb-4">
-            <div role="alert" className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
+            <div role="alert" className="flex gap-2 text-sm p-3 rounded-xs" style={{ background: "#FBEDEA", color: REDINK }}>
               <AlertCircle size={16} className="shrink-0 mt-0.5" />
               <span>
                 Backend'as ({BACKEND_URL || "santykinis /api"}) nepasiekiamas. Paleiskite jį: <code>cd backend && npm install && npm start</code>.
@@ -512,7 +512,7 @@ export default function Stenograma() {
 
         {showAudit && (
           <div className="max-w-6xl mx-auto px-6 pb-4">
-            <div className="text-xs mono p-3 rounded-sm" style={{ background: "#FCFBF8", border: `1px solid ${LINE}`, color: SLATE }}>
+            <div className="text-xs mono p-3 rounded-xs" style={{ background: "#FCFBF8", border: `1px solid ${LINE}`, color: SLATE }}>
               {meta ? (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <div>promptVersion: <b style={{ color: INK }}>{meta.promptVersion}</b></div>
@@ -539,18 +539,18 @@ export default function Stenograma() {
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Susitikimo pavadinimas"
-              className="w-full serif text-lg font-medium bg-transparent border-b pb-2 outline-none placeholder:text-[#9a9488] focus:border-b-2"
+              className="w-full serif text-lg font-medium bg-transparent border-b pb-2 outline-hidden placeholder:text-[#9a9488] focus:border-b-2"
               style={{ borderColor: LINE }}
             />
             <div className="flex items-center gap-3">
               <label className="mono text-xs uppercase tracking-wide" style={{ color: SLATE }}>Data</label>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="mono text-sm bg-transparent border-b pb-1 outline-none" style={{ borderColor: LINE }} />
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="mono text-sm bg-transparent border-b pb-1 outline-hidden" style={{ borderColor: LINE }} />
             </div>
             <div>
               <label className="mono text-xs uppercase tracking-wide block mb-1.5" style={{ color: SLATE }}>Dalyviai (nebūtina)</label>
               <div className="flex flex-wrap gap-1.5 mb-1.5">
                 {participants.map((p) => (
-                  <span key={p} className="mono text-xs px-2 py-1 rounded-sm flex items-center gap-1" style={{ background: "#EFEADF", border: `1px solid ${LINE}` }}>
+                  <span key={p} className="mono text-xs px-2 py-1 rounded-xs flex items-center gap-1" style={{ background: "#EFEADF", border: `1px solid ${LINE}` }}>
                     {p}
                     <X size={11} className="cursor-pointer" onClick={() => removeParticipant(p)} />
                   </span>
@@ -562,10 +562,10 @@ export default function Stenograma() {
                   onChange={(e) => setParticipantInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addParticipant())}
                   placeholder="Vardas ir paspauskite Enter"
-                  className="flex-1 text-sm bg-transparent border-b pb-1 outline-none placeholder:text-[#9a9488]"
+                  className="flex-1 text-sm bg-transparent border-b pb-1 outline-hidden placeholder:text-[#9a9488]"
                   style={{ borderColor: LINE }}
                 />
-                <button onClick={addParticipant} className="p-1.5 rounded-sm border hover:bg-black/[0.03]" style={{ borderColor: LINE }} aria-label="Pridėti dalyvį">
+                <button onClick={addParticipant} className="p-1.5 rounded-xs border hover:bg-black/[0.03]" style={{ borderColor: LINE }} aria-label="Pridėti dalyvį">
                   <Plus size={14} />
                 </button>
               </div>
@@ -593,7 +593,7 @@ export default function Stenograma() {
             {mode === "record" && (
               <div className="space-y-4">
                 {!speechSupported ? (
-                  <div className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
+                  <div className="flex gap-2 text-sm p-3 rounded-xs" style={{ background: "#FBEDEA", color: REDINK }}>
                     <AlertCircle size={16} className="shrink-0 mt-0.5" />
                     <span>Jūsų naršyklė nepalaiko balso atpažinimo. Naudokite Chrome/Edge arba „Įklijuoti tekstą".</span>
                   </div>
@@ -602,7 +602,7 @@ export default function Stenograma() {
                     <div className="flex items-center gap-4">
                       <button
                         onClick={isRecording ? stopRecording : startRecording}
-                        className="flex items-center gap-2 px-4 py-2.5 rounded-sm text-sm font-medium transition-colors"
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-xs text-sm font-medium transition-colors"
                         style={{ background: isRecording ? REDINK : INK, color: PAPER }}
                       >
                         {isRecording ? <Square size={14} /> : <Mic size={14} />}
@@ -622,7 +622,7 @@ export default function Stenograma() {
                         </span>
                       )}
                     </div>
-                    <div className="text-sm p-3 rounded-sm min-h-[110px] leading-relaxed" style={{ background: "#FCFBF8", border: `1px solid ${LINE}` }}>
+                    <div className="text-sm p-3 rounded-xs min-h-[110px] leading-relaxed" style={{ background: "#FCFBF8", border: `1px solid ${LINE}` }}>
                       {transcript || <span style={{ color: "#B3ACA0" }}>Kalbėkite — tekstas rodysis čia realiu laiku…</span>}
                       {interim && <span style={{ color: SLATE }}> {interim}</span>}
                     </div>
@@ -633,7 +633,7 @@ export default function Stenograma() {
 
             {mode === "upload" && (
               <div className="space-y-4">
-                <label className="flex flex-col items-center justify-center gap-2 py-8 rounded-sm border-2 border-dashed cursor-pointer hover:bg-black/[0.02] transition-colors" style={{ borderColor: LINE }}>
+                <label className="flex flex-col items-center justify-center gap-2 py-8 rounded-xs border-2 border-dashed cursor-pointer hover:bg-black/[0.02] transition-colors" style={{ borderColor: LINE }}>
                   <FileAudio size={22} style={{ color: SLATE }} />
                   <span className="text-sm" style={{ color: SLATE }}>{audioFileName || "Pasirinkite garso arba video failą (garsas bus ištrauktas)"}</span>
                   <input type="file" accept="audio/*,video/mp4,video/webm,.mp4,.webm" className="hidden" onChange={handleFileUpload} />
@@ -647,7 +647,7 @@ export default function Stenograma() {
                 <button
                   onClick={handleAutoTranscribe}
                   disabled={!audioFile || isTranscribing || backendStatus !== "online"}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-medium"
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xs text-sm font-medium"
                   style={{ background: INK, color: PAPER, opacity: !audioFile || isTranscribing || backendStatus !== "online" ? 0.4 : 1 }}
                 >
                   {isTranscribing ? `Transkribuojama${transcribeProgress ? ` (${transcribeProgress})` : "…"}` : "Transkribuoti automatiškai"}
@@ -670,7 +670,7 @@ export default function Stenograma() {
                   value={transcript}
                   onChange={(e) => setTranscript(e.target.value)}
                   placeholder="Transkripcija (galite naudoti formatą „Vardas: tekstas” geresniam rezultatui) arba paspauskite „Transkribuoti automatiškai” aukščiau…"
-                  className="w-full text-sm p-3 rounded-sm min-h-[140px] leading-relaxed outline-none resize-y"
+                  className="w-full text-sm p-3 rounded-xs min-h-[140px] leading-relaxed outline-hidden resize-y"
                   style={{ background: "#FCFBF8", border: `1px solid ${LINE}` }}
                 />
               </div>
@@ -681,14 +681,14 @@ export default function Stenograma() {
                 value={transcript}
                 onChange={(e) => setTranscript(e.target.value)}
                 placeholder="Įklijuokite susitikimo transkripciją (formatas „Vardas: tekstas” padeda tiksliau nustatyti dalyvius)…"
-                className="w-full text-sm p-3 rounded-sm min-h-[220px] leading-relaxed outline-none resize-y"
+                className="w-full text-sm p-3 rounded-xs min-h-[220px] leading-relaxed outline-hidden resize-y"
                 style={{ background: "#FCFBF8", border: `1px solid ${LINE}` }}
               />
             )}
           </div>
 
           {error && (
-            <div className="flex gap-2 text-sm p-3 rounded-sm" style={{ background: "#FBEDEA", color: REDINK }}>
+            <div className="flex gap-2 text-sm p-3 rounded-xs" style={{ background: "#FBEDEA", color: REDINK }}>
               <AlertCircle size={16} className="shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>
@@ -697,7 +697,7 @@ export default function Stenograma() {
           <button
             onClick={handleGenerate}
             disabled={!canGenerate}
-            className="w-full flex items-center justify-center gap-2 py-3 rounded-sm text-sm font-medium transition-opacity"
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xs text-sm font-medium transition-opacity"
             style={{ background: INK, color: PAPER, opacity: canGenerate ? 1 : 0.4, cursor: canGenerate ? "pointer" : "not-allowed" }}
             title={backendStatus !== "online" ? "Backend nepasiekiamas" : undefined}
           >
@@ -714,7 +714,7 @@ export default function Stenograma() {
         </section>
 
         <section className="lg:col-span-3">
-          <div className="relative rounded-sm shadow-sm paper-lines" style={{ background: "#FEFEFC", border: `1px solid ${LINE}`, minHeight: 560, padding: "40px 44px" }}>
+          <div className="relative rounded-xs shadow-xs paper-lines" style={{ background: "#FEFEFC", border: `1px solid ${LINE}`, minHeight: 560, padding: "40px 44px" }}>
             {!protocol && !isGenerating && (
               <div className="h-full flex flex-col items-center justify-center text-center py-24">
                 <p className="serif text-lg" style={{ color: "#B3ACA0" }}>Dokumentas dar neparengtas</p>
@@ -744,7 +744,7 @@ export default function Stenograma() {
                 <div className="flex items-center justify-between pr-24">
                   <p className="mono text-[11px] tracking-[0.2em] uppercase" style={{ color: SLATE }}>Protokolas</p>
                   <span
-                    className="mono text-[10px] px-2 py-0.5 rounded-sm"
+                    className="mono text-[10px] px-2 py-0.5 rounded-xs"
                     title="Kiek laukų realiai užpildyta (ne 'Nenurodyta')"
                     style={{ background: score >= 70 ? "#E9F2EA" : "#FBEDEA", color: score >= 70 ? GREEN : REDINK }}
                   >
@@ -802,7 +802,7 @@ export default function Stenograma() {
                       Veiksmai
                       {meta?.grounding?.unverifiedActionsCount > 0 && (
                         <span
-                          className="mono text-[9px] normal-case px-1.5 py-0.5 rounded-sm"
+                          className="mono text-[9px] normal-case px-1.5 py-0.5 rounded-xs"
                           style={{ background: "#FBEDEA", color: REDINK }}
                           title="Šie veiksmai turi žemą leksinį persidengimą su transkripcija (grounding check) - peržiūrėkite prieš pasitikėdami"
                         >
@@ -895,7 +895,7 @@ export default function Stenograma() {
                     key={`redacted-${format}`}
                     onClick={() => runExport(format, "redacted")}
                     disabled={Boolean(exporting)}
-                    className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50"
+                    className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-xs border hover:bg-black/[0.03] disabled:opacity-50"
                     style={{ borderColor: LINE, color: SLATE }}
                   >
                     <Icon size={13} /> {exporting === `redacted:${format}` ? "Ruošiama…" : label}
@@ -917,7 +917,7 @@ export default function Stenograma() {
                     key={`original-${format}`}
                     onClick={() => runExport(format, "original")}
                     disabled={Boolean(exporting)}
-                    className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-sm border hover:bg-black/[0.03] disabled:opacity-50"
+                    className="flex items-center gap-2 mono text-xs uppercase tracking-wide px-4 py-2 rounded-xs border hover:bg-black/[0.03] disabled:opacity-50"
                     style={{ borderColor: REDINK, color: REDINK }}
                   >
                     <Icon size={13} /> {exporting === `original:${format}` ? "Ruošiama…" : label}

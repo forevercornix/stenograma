@@ -1173,6 +1173,25 @@ privalumas. `truncateIp()` (tinklo dalis: `/24` arba `/64`) yra alternatyva
 diegimams, kuriems reikia tinklo diagnostikos, bet numatytame kelyje ji
 nenaudojama – pseudonimas saugesnis.
 
+**Tailwind v4.** Stilių sistema perkelta į v4: PostCSS įskiepis gyvena atskirame
+`@tailwindcss/postcss` pakete, `src/index.css` naudoja vieną `@import "tailwindcss"`
+vietoj trijų `@tailwind` direktyvų, o `tailwind.config.js` pašalintas – projektas
+temos nekeitė, o v4 ją konfigūruoja CSS'e (`@theme`).
+
+⚠️ **v4 pervadino dalį utility klasių, ir senieji vardai liko galioti su
+KITOMIS reikšmėmis** – tai tylus pokytis, kurio nei build'as, nei testai
+nepamato:
+
+| v3 | v4 atitikmuo | Kodėl svarbu |
+|---|---|---|
+| `rounded-sm` | `rounded-xs` | v4 `rounded-sm` yra `0.25rem`, ne `0.125rem` |
+| `shadow-sm` | `shadow-xs` | v4 `shadow-sm` didesnis |
+| `outline-none` | `outline-hidden` | v4 `outline-none` **pašalina** kontūrą; v3 paliko permatomą, kad fokusas išliktų matomas didelio kontrasto režimu |
+
+Visos 27 naudojimo vietos pervadintos, o rezultatas patikrintas sugeneruotame
+CSS: `--radius-xs: .125rem`, šešėlis `0 1px 2px 0 #0000000d` (= 5 % alfa),
+kontūras `2px solid #0000` su offsetu – identiška v3.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
