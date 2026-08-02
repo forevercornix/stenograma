@@ -16,7 +16,7 @@
  */
 
 /** Testai, kuriems reikia TIKRO Redis (be jo jie patys save praleidžia). */
-const redis = ["queueRecovery.integration", "heartbeatReadiness.integration"];
+const redis = ["queueRecovery.integration", "heartbeatReadiness.integration", "redisConcurrency.integration"];
 
 /**
  * PRIVATUMAS: asmens duomenų apsauga - redakcija, retencija, ištrynimas,

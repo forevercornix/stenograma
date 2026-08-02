@@ -25,11 +25,17 @@ process.env.LLM_PROVIDER = process.env.LLM_PROVIDER || "mock";
  * rakto nėra - TTL ar rankinis DEL).
  */
 
-const HAS_REDIS = !!process.env.REDIS_URL;
+/**
+ * Praleidimo sąlyga - BENDRA (žr. tests/helpers/redisGuard.js).
+ *
+ * Su `REQUIRE_REDIS=1` (nustatoma CI) tylus praleidimas tampa klaida: kitaip
+ * dingęs `REDIS_URL` paliktų job'ą žalią, nors nieko nepatikrino.
+ */
+const { skipWithoutRedis } = require("./helpers/redisGuard");
 
 test(
   "heartbeat -> /api/ready: worker'io rašytas raktas TIKRAI matomas per Redis, o jam išnykus - readiness krenta į 503",
-  { skip: !HAS_REDIS ? "reikia REDIS_URL su tikru Redis" : false },
+  { skip: skipWithoutRedis() },
   async (t) => {
     const jobStore = require("../utils/jobStore");
     const jobRunner = require("../queues/jobRunner");

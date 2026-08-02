@@ -98,6 +98,13 @@ jobs:
       - name: Redis/BullMQ integraciniai testai (restart/stalled recovery + heartbeat readiness su tikru Redis)
         env:
           REDIS_URL: redis://localhost:6379
+          # REQUIRE_REDIS=1 paverčia TYLŲ praleidimą klaida (#15).
+          #
+          # Be jo dingęs REDIS_URL (env pervadinimas, servisas nepakilo,
+          # workflow refaktoringas) reikštų, kad testai praleidžia save, o
+          # job'as lieka ŽALIAS nieko nepatikrinęs. Prarasti dabar galima tik
+          # abu vienu metu - o tai jau matomas pakeitimas, ne atsitiktinumas.
+          REQUIRE_REDIS: "1"
         run: npm run test:redis
 
       - name: Smoke test - paleisti serverį ir patikrinti /api/health
