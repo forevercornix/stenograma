@@ -80,6 +80,17 @@ export default function Stenograma() {
   const [backendInfo, setBackendInfo] = useState(null);
 
   const recognitionRef = useRef(null);
+
+  /**
+   * „Antspaudo" animacijos laikmatis.
+   *
+   * Be nuorodos jo nebūtų kaip atšaukti: `setTimeout` iššaudavo po komponento
+   * išmontavimo ir bandydavo keisti būseną, kai `window` jau nebeegzistuoja.
+   * Testuose tai matėsi kaip `ReferenceError: window is not defined` PO to, kai
+   * visi 55 testai jau praėjo - klaida atrodė kaip testų aplinkos problema, nors
+   * buvo tikras resurso nutekėjimas komponente.
+   */
+  const stampTimerRef = useRef(null);
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
   const rafRef = useRef(null);
@@ -96,6 +107,10 @@ export default function Stenograma() {
     // Identiteto patikra handleAutoTranscribe finally užtikrina, kad senas rezultatas
     // neįrašomas.
     transcribeAbortRef.current?.abort();
+
+    // Antspaudo laikmatis - dėl tos pačios priežasties: iššovęs po unmount jis
+    // bandytų keisti būseną nebeegzistuojančiame komponente.
+    clearTimeout(stampTimerRef.current);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Kiekvieną kartą pasikeitus audioURL (naujas failas arba reset), atlaisviname
@@ -319,7 +334,8 @@ export default function Stenograma() {
       });
       setProtocol(data.protocol);
       setMeta({ source: "backend", ...data.meta });
-      setTimeout(() => setStamped(true), 200);
+      clearTimeout(stampTimerRef.current);
+      stampTimerRef.current = setTimeout(() => setStamped(true), 200);
     } catch (e) {
       setError("Nepavyko sugeneruoti protokolo: " + e.message);
     } finally {
