@@ -13,7 +13,14 @@
 
 faster-whisper==1.2.1
 ctranslate2==4.8.1
-numpy==2.5.1
+# numpy 2.5+ reikalauja Python >=3.12, o šie image'ai naudoja python3.11.
+# 2.4.6 yra PASKUTINĖ versija su Requires-Python >=3.11.
+#
+# Kėlimas į 3.12 kol kas nepadeda: `av` (audio dekodavimas) naujausioje 18.0.0
+# turi TIK cp311 wheel'ą, tad tektų jį nuleisti iki 15.1.0 - trys majorinės
+# versijos atgal pakete, kuris yra tiesiogiai audio kelyje. Grįžti prie 3.12
+# verta, kai `av` išleis cp312 wheel'ą; tada tai bus grynas kėlimas be nuleidimų.
+numpy==2.4.6
 huggingface-hub==1.25.1
 tokenizers==0.23.1
 av==18.0.0

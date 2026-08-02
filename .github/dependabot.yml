@@ -18,13 +18,25 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-
+    # numpy 2.5+ reikalauja Python >=3.12, o image'ai naudoja python3.11
+    # (žr. paaiškinimą requirements lock failuose). Be šios taisyklės Dependabot
+    # siūlytų tą patį neveikiantį atnaujinimą kas savaitę, o GPU build'as kristų
+    # kiekvieną kartą, kai jis būtų sumergintas.
+    ignore:
+      - dependency-name: "numpy"
+        versions: [">=2.5"]
   - package-ecosystem: "pip"
     directory: "/pyannote-server"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-
+    # numpy 2.5+ reikalauja Python >=3.12, o image'ai naudoja python3.11
+    # (žr. paaiškinimą requirements lock failuose). Be šios taisyklės Dependabot
+    # siūlytų tą patį neveikiantį atnaujinimą kas savaitę, o GPU build'as kristų
+    # kiekvieną kartą, kai jis būtų sumergintas.
+    ignore:
+      - dependency-name: "numpy"
+        versions: [">=2.5"]
   - package-ecosystem: "pip"
     directory: "/whisper-server"
     schedule:
@@ -37,6 +49,13 @@ updates:
   # prieigą prie workflow konteksto ir paslapčių. Priklausomybių skenavimas be
   # šios eilutės dengia tik aplikacijos kodą, bet ne tiekimo grandinę, per kurią
   # tas kodas statomas.
+    # numpy 2.5+ reikalauja Python >=3.12, o image'ai naudoja python3.11
+    # (žr. paaiškinimą requirements lock failuose). Be šios taisyklės Dependabot
+    # siūlytų tą patį neveikiantį atnaujinimą kas savaitę, o GPU build'as kristų
+    # kiekvieną kartą, kai jis būtų sumergintas.
+    ignore:
+      - dependency-name: "numpy"
+        versions: [">=2.5"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
