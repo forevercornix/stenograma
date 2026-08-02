@@ -20,7 +20,7 @@ av==18.0.0
 onnxruntime==1.28.0
 tqdm==4.68.4
 
-fastapi==0.115.6
+fastapi==0.141.1
 uvicorn==0.52.0
 python-multipart==0.0.31
 pytest==9.1.1
