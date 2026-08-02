@@ -80,6 +80,14 @@ jobs:
       - name: Manifesto pilnumas (kiekvienas testas turi rinkinį)
         run: npm run test:suites
 
+      # Matrica be patikros ilgainiui virsta sąrašu to, ką kažkada turėjom (#15).
+      - name: Saugumo matrica atitinka tikrovę
+        run: npm run test:matrix
+
+      # Momentinė kopija PRIEŠ testus - po jų tikrinsim, ar nieko neliko.
+      - name: Švaros momentinė kopija
+        run: node scripts/verify-clean.mjs --snapshot
+
       - name: Privatumo regresijos testai
         run: npm run test:privacy
 
@@ -106,6 +114,12 @@ jobs:
           # abu vienu metu - o tai jau matomas pakeitimas, ne atsitiktinumas.
           REQUIRE_REDIS: "1"
         run: npm run test:redis
+
+      # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
+      # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas
+      # kažko neištrina.
+      - name: Švara po testų (jokių likusių artefaktų)
+        run: npm run test:clean
 
       - name: Smoke test - paleisti serverį ir patikrinti /api/health
         env:

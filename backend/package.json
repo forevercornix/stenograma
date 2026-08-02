@@ -16,7 +16,10 @@
     "test:security": "node scripts/run-tests.mjs security",
     "test:privacy": "node scripts/run-tests.mjs privacy",
     "test:functional": "node scripts/run-tests.mjs functional",
-    "test:suites": "node scripts/run-tests.mjs --list"
+    "test:suites": "node scripts/run-tests.mjs --list",
+    "test:matrix": "node scripts/check-security-matrix.mjs",
+    "test:clean": "node scripts/verify-clean.mjs --verify",
+    "test:evidence": "node scripts/check-security-matrix.mjs && node scripts/run-tests.mjs --list"
   },
   "engines": {
     "node": ">=22"
