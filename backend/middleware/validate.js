@@ -58,6 +58,22 @@ const schemas = {
 
   jobIdParam: z.object({ id: identifier }),
 
+  /**
+   * QUERY parametrai.
+   *
+   * Iki šiol `/api/audit` grąžindavo VISUS įrašus be jokių ribų - o auditas
+   * auga su kiekviena užklausa. Puslapiavimas čia nėra patogumas: neribotas
+   * atsakymas yra pigi užklausa, kurios kaina auga laikui bėgant.
+   */
+  auditQuery: z
+    .object({
+      limit: z.coerce.number().int().min(1).max(1000).default(100),
+      offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+      event: identifier.nullish(),
+      requestId: identifier.nullish(),
+    })
+    .strict(),
+
   exportBody: z
     .object({
       variant: z.enum(["original", "redacted"]),

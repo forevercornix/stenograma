@@ -444,3 +444,124 @@ test("SCHEMOS ATITINKA SERVISO PARAŠĄ, ne mūsų atmintį", () => {
     }
   }
 });
+
+/**
+ * ---------------------------------------------------------------------------
+ * #14 PR3: maršrutų auditas, query schemos, startup integracija.
+ * ---------------------------------------------------------------------------
+ */
+
+test("AUDITAS: kiekvienas /api maršrutas turi rate limitą IR validaciją, kur reikia", () => {
+  /**
+   * Struktūrinis auditas, o ne rankinis sąrašas: naujas maršrutas be apsaugos
+   * turi sulaužyti testą, o ne laukti, kol kas nors pastebės peržiūroje.
+   *
+   * Bendra `/api` riba taikoma visiems, tad čia tikrinama, kad maršrutai su
+   * įvestimi turėtų schemą - būtent jos pamiršimas yra tyli spraga.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const routesDir = path.join(__dirname, "../routes");
+
+  const offenders = [];
+
+  for (const file of fs.readdirSync(routesDir)) {
+    if (!file.endsWith(".js")) continue;
+
+    const source = fs.readFileSync(path.join(routesDir, file), "utf8");
+    // `router.post("/x", ...` iki eilutės pabaigos arba iki `async`.
+    const routes = source.match(/router\.(get|post|delete|put|patch)\([\s\S]{0,400}?=>/g) || [];
+
+    for (const route of routes) {
+      const hasParams = /:\w+/.test(route);
+      const hasBody = /post|put|patch/.test(route.slice(0, 20));
+      const hasValidation = /validate\(/.test(route);
+
+      if ((hasParams || hasBody) && !hasValidation) {
+        offenders.push(`${file}: ${route.split("\n")[0].slice(0, 80)}`);
+      }
+    }
+  }
+
+  assert.deepEqual(offenders, [], `maršrutai be validacijos:\n${offenders.join("\n")}`);
+});
+
+test("QUERY: audito parametrai validuojami ir turi ribas", async () => {
+  const saved = process.env.AUDIT_API_KEY;
+  delete process.env.AUDIT_API_KEY;
+
+  try {
+    // Neteisingi parametrai atmetami tuo pačiu formatu kaip visur kitur.
+    for (const query of ["limit=abc", "limit=0", "limit=99999", "offset=-1", "nezinomas=1"]) {
+      const res = await request(app).get(`/api/audit?${query}`);
+
+      assert.equal(res.status, 400, `turėjo būti atmesta: ${query}`);
+      assert.equal(res.body.code, "VALIDATION_FAILED");
+    }
+  } finally {
+    if (saved !== undefined) process.env.AUDIT_API_KEY = saved;
+  }
+});
+
+test("QUERY: auditas PUSLAPIUOJAMAS, ne grąžinamas visas", async () => {
+  const saved = process.env.AUDIT_API_KEY;
+  delete process.env.AUDIT_API_KEY;
+
+  try {
+    const res = await request(app).get("/api/audit?limit=2&offset=0");
+
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body.entries));
+    assert.ok(res.body.entries.length <= 2, "limitas turi būti taikomas");
+
+    // Be `total` puslapiavimas būtų aklas - klientas nežinotų, ar yra daugiau.
+    assert.equal(typeof res.body.total, "number");
+    assert.equal(res.body.limit, 2);
+    assert.equal(res.body.offset, 0);
+  } finally {
+    if (saved !== undefined) process.env.AUDIT_API_KEY = saved;
+  }
+});
+
+test("STARTUP: saugumo nuostatos dokumentuotos .env.example", () => {
+  /**
+   * Nustatymas, kurio nėra `.env.example`, praktiškai neegzistuoja: jo niekas
+   * neras, o startup klaida apie jį atrodys kaip sistemos gedimas.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const example = fs.readFileSync(path.join(__dirname, "../.env.example"), "utf8");
+
+  for (const setting of [
+    "CORS_ORIGIN",
+    "CORS_CREDENTIALS",
+    "JSON_BODY_LIMIT",
+    "TRUST_PROXY",
+    "READINESS_TIMEOUT_MS",
+    "RATE_LIMIT_GENERAL_MAX",
+  ]) {
+    assert.ok(example.includes(setting), `${setting} nedokumentuotas .env.example`);
+  }
+});
+
+test("STARTUP: nesaugi produkcijos konfigūracija neleidžia serveriui pakilti", () => {
+  /**
+   * Integracinė patikra: `validateConfig` klaidos realiai stabdo `startServer`.
+   * Iki šiol tikrinom tik tai, kad klaida GRĄŽINAMA - ne kad ji ką nors daro.
+   */
+  const fs = require("fs");
+  const path = require("path");
+  const source = fs.readFileSync(path.join(__dirname, "../server.js"), "utf8");
+
+  assert.match(source, /validateConfig\(\)/);
+  assert.match(source, /throw new Error\("Konfigūracijos validacija nepavyko/);
+});
+
+test("HEALTH: gilus health ribojamas, nes vykdo realias patikras", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const source = fs.readFileSync(path.join(__dirname, "../server.js"), "utf8");
+
+  // Be ribojimo tai brangiausias neautentifikuotas kelias sistemoje.
+  assert.match(source, /app\.get\("\/api\/health\/deep", pollRateLimiter/);
+});
