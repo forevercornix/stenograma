@@ -1208,6 +1208,23 @@ jie saugo:
 | `npm run test:redis` | integraciniai testai su **tikru** Redis |
 | `npm run test:suites` | ką apima kiekvienas rinkinys |
 
+Du rinkiniai yra **kryžminiai** – jie netikrina naujos funkcijos, o tikrina, kad
+jau įgyvendintos garantijos galiotų **vienodai visur**:
+
+- `criticalGuarantees.route` – autentifikacija, middleware tvarka ir klaidų
+  sanitizacija per **visus** maršrutus. Iki tol autentifikacija buvo testuojama
+  tik `/api/generate` ir `/api/transcribe`, tad likę penki maršrutai galėjo ją
+  prarasti nepastebimai.
+- `failClosedMatrix` – **išorinio LLM ir redaguoto eksporto** keliai ×
+  kiekvienas gedimo tipas
+  (komponento nėra / krenta / grąžina šiukšlę). Fail-closed yra ne funkcija, o
+  savybė, kuri turi galioti kiekviename kelyje; kai kiekvienas kelias
+  testuojamas savo faile, lengva nepastebėti, kad vienas elgiasi kitaip –
+  būtent taip ir buvo su eksporto guard'u, kuris pasitikėjo `redact()`
+  rezultatu, kai LLM kelias jau tikrino artefakto variantą. API ir worker
+  paritetas lieka `redactionParity4.route` bei `correlationChain.integration`
+  testuose – matrica jų nedubliuoja.
+
 Priskyrimas gyvena `backend/tests/suites.js`, o `scripts/run-tests.mjs` prieš
 kiekvieną paleidimą tikrina, kad **kiekvienas** `tests/*.test.js` priklausytų
 bent vienam rinkiniui ir kad manifeste nebūtų neegzistuojančių įrašų. Be šios

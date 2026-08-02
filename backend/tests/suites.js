@@ -31,6 +31,7 @@ const privacy = [
   "redactionErrorLeak.route",
   "redactionParity.route",
   "redactionParity4.route",
+  "failClosedMatrix",
   "exportPolicy",
   "exportVariants.route",
   "exports.route",
@@ -47,6 +48,7 @@ const privacy = [
  * sanitizacija, koreliacija ir paleidimo patikros.
  */
 const security = [
+  "criticalGuarantees.route",
   "securityBaseline.route",
   "security.route",
   "rateLimit.route",
