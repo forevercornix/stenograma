@@ -45,7 +45,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -151,7 +151,7 @@ jobs:
         working-directory: frontend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -188,7 +188,7 @@ jobs:
         working-directory: pyannote-server
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -217,7 +217,7 @@ jobs:
         working-directory: whisper-server
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -244,7 +244,7 @@ jobs:
     # atlieka pilną vartotojo srautą: įklijuoti tekstą -> generuoti protokolą ->
     # eksportuoti DOCX. Būtent ši testų klasė anksčiau buvo "NOT verified".
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -293,7 +293,7 @@ jobs:
     needs: [backend, frontend]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -338,7 +338,7 @@ jobs:
     # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -437,7 +437,7 @@ jobs:
     # Politika, kurios niekas netikrina, galioja tik tol, kol visi ją prisimena.
     # Šis job'as paverčia docs/ci-security-policy.md taisykles vykdomomis (#16).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -470,7 +470,7 @@ jobs:
     # JSON filtrą, o Python advisory šaltiniai sunkumą pateikia nevienodai - tad
     # filtras būtų tikslus tik iš pažiūros. Griežtesnė taisyklė sąžiningesnė.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
