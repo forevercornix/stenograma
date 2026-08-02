@@ -49,3 +49,29 @@ def test_diarize_be_tokeno_grazina_503_ne_400(client):
     # (serverio pusės problema), NE 400 (kliento klaida).
     assert r.status_code == 503
     assert "detail" in r.json()
+
+
+def test_klaidos_detales_nenuteka_klientui(client, capsys):
+    """
+    Vidinės klaidos tekstas NEGALI patekti į HTTP atsakymą.
+
+    Anksčiau čia buvo `f"{type(e).__name__}: {e}"`, o išimčių tekstuose būna
+    failų kelių (`/tmp/stenograma-…`), modelio pavadinimų ir bibliotekų vidinių
+    detalių. Backend'e tam turim `utils/sanitizeError.js`; šie servisai priima
+    tas pačias užklausas, tad taisyklė turi galioti ir čia.
+
+    Rasta per CodeQL (`py/stack-trace-exposure`).
+    """
+    import server
+
+    secret = "/tmp/stenograma-slaptas-kelias/model.bin"
+    detail = server._safe_error_detail(RuntimeError(secret), "Diarizacija")
+
+    assert secret not in detail, "vidinis kelias negali patekti į atsakymą"
+    assert "RuntimeError" not in detail, "išimties tipas neatskleidžiamas klientui"
+    assert "Diarizacija" in detail, "klientas turi žinoti, KURIS veiksmas nepavyko"
+
+    # Bet serveryje pilnas tekstas IŠLIEKA - diagnostika nenukenčia.
+    logged = capsys.readouterr().out
+    assert secret in logged, "pilna klaida turi likti serverio loguose"
+    assert "RuntimeError" in logged
