@@ -1173,6 +1173,17 @@ privalumas. `truncateIp()` (tinklo dalis: `/24` arba `/64`) yra alternatyva
 diegimams, kuriems reikia tinklo diagnostikos, bet numatytame kelyje ji
 nenaudojama – pseudonimas saugesnis.
 
+**CI/CD ir tiekimo grandinė.** Taisyklės surašytos
+[`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
+`workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
+draudimas, action'ų prisegimo politika, job'ų laiko ribos, artefaktų retencija ir
+`dependabot.yml` sintaksė.
+
+⚠️ Paskutinis punktas atsirado neatsitiktinai: `dependabot.yml` turėjo sintaksės
+klaidą (`open-pull-requests-limit:5` be tarpo), o GitHub tokį failą atmeta
+**tyliai** – nė viena priklausomybė nebuvo tikrinama, ir repozitorijoje niekas
+apie tai nepranešė. Todėl sintaksė dabar tikrinama CI.
+
 **API saugumo bazė (`utils/securityBaseline.js`).** Vienas modulis,
 registruojamas **prieš** maršrutus: `trust proxy`, saugumo antraštės (helmet su
 `default-src 'none'` CSP), CORS allow-list ir kūno limitai. Naujas endpointas bazę gauna automatiškai – o ne
