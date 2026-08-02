@@ -29,9 +29,15 @@ async function traceStep(label, action) {
  * Tai imituoja "backend įdėjo jobą, tada nukrito/persileido, worker'is jį pabaigė".
  */
 
-const HAS_REDIS = !!process.env.REDIS_URL;
+/**
+ * Praleidimo sąlyga - BENDRA (žr. tests/helpers/redisGuard.js).
+ *
+ * Su `REQUIRE_REDIS=1` (nustatoma CI) tylus praleidimas tampa klaida: kitaip
+ * dingęs `REDIS_URL` paliktų job'ą žalią, nors nieko nepatikrino.
+ */
+const { skipWithoutRedis } = require("./helpers/redisGuard");
 
-test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'restarto'", { skip: !HAS_REDIS ? "reikia REDIS_URL su tikru Redis" : false }, async (t) => {
+test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'restarto'", { skip: skipWithoutRedis() }, async (t) => {
   const jobStore = require("../utils/jobStore");
   const jobRunner = require("../queues/jobRunner");
   const { QUEUE_NAMES, createQueueConnection } = require("../queues/config");
@@ -112,7 +118,7 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
   assert.equal(state, "completed", "BullMQ jobo būsena turi būti completed");
 });
 
-test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir pabaigiamas kito worker'io", { skip: !HAS_REDIS ? "reikia REDIS_URL su tikru Redis" : false }, async (t) => {
+test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir pabaigiamas kito worker'io", { skip: skipWithoutRedis() }, async (t) => {
   const jobStore = require("../utils/jobStore");
   const jobRunner = require("../queues/jobRunner");
   const { QUEUE_NAMES, createQueueConnection } = require("../queues/config");

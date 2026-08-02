@@ -1206,6 +1206,7 @@ jie saugo:
 | `npm run test:security` | prieigos kontrolė, validacija, priėmimo kelias, koreliacija, paleidimo patikros |
 | `npm run test:functional` | tiekėjai, formatai, eilės, pagalbinės funkcijos |
 | `npm run test:redis` | integraciniai testai su **tikru** Redis |
+
 | `npm run test:suites` | ką apima kiekvienas rinkinys |
 
 Du rinkiniai yra **kryžminiai** – jie netikrina naujos funkcijos, o tikrina, kad
@@ -1230,6 +1231,20 @@ kiekvieną paleidimą tikrina, kad **kiekvienas** `tests/*.test.js` priklausytų
 bent vienam rinkiniui ir kad manifeste nebūtų neegzistuojančių įrašų. Be šios
 patikros naujas saugumo testas galėtų tyliai likti už `test:security` ribų, o
 komanda rodytų žalią būtent todėl, kad jo nepaleido.
+
+**Redis testai nebėra „optional".** Jie vis dar praleidžia save be `REDIS_URL`
+(vietinei aplinkai reikalauti Redis kiekvienam `npm test` būtų nepatogu), bet CI
+nustato **`REQUIRE_REDIS=1`**, ir tada praleidimas tampa **klaida**. Be to
+dingęs `REDIS_URL` reikštų žalią job'ą, kuris nieko nepatikrino – konfigūracija
+sakytų „Redis testai vykdomi", o tikrovė ne.
+
+Rinkinys apima restart ir stalled recovery, worker heartbeat → readiness,
+koreliacijos laukų kelią per tikrą saugyklą, lygiagrečių jobų izoliaciją,
+konteksto atkūrimą **per realų vykdymo kelią** (Redis → jobStore → jobRunner →
+`runWithContext` → processor, ne `AsyncLocalStorage` tiesiogiai) ir ištrynimą,
+kuris **išgyvena restartą** – jobas ir jo pašalinimas tikrinami po ryšio
+atkūrimo, nes vien „ištrinta toje pačioje sesijoje" praeitų ir tada, jei
+trynimas veiktų tik atmintyje.
 
 `npm test` **neapima** `redis` rinkinio sąmoningai: be `REDIS_URL` tie testai
 save praleidžia, ir įtraukus juos „3 skipped" taptų nuolatiniu triukšmu, kurį
