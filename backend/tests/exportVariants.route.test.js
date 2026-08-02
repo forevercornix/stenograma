@@ -65,11 +65,19 @@ test("VARIANTAS PRIVALOMAS: be jo užklausa atmetama, o ne numanoma", async () =
     .send({ format: "txt", protocol: protocolWithPii() });
 
   assert.equal(res.status, 400);
-  assert.match(res.body.error, /variant/);
 
-  // Nė vienas numatytasis nebūtų teisingas: `redacted` tyliai pakeistų turinį
-  // senam klientui, `original` tyliai atiduotų neredaguotą.
-  assert.ok(!res.body.error.includes("numatyt"), "klaida neturi siūlyti numatytosios reikšmės");
+  /**
+   * Klaidų formatas dabar VIENAS visoms validacijoms (#14): `code` leidžia
+   * reaguoti programiškai, `details[].path` - parodyti, kuris laukas blogas.
+   */
+  assert.equal(res.body.code, "VALIDATION_FAILED");
+  assert.ok(
+    res.body.details.some((issue) => issue.path === "variant"),
+    `laukta nuorodos į variantą, gauta: ${JSON.stringify(res.body.details)}`
+  );
+
+  // Stack trace ar vidinių detalių atsakyme būti negali.
+  assert.ok(!JSON.stringify(res.body).includes("at "), "jokio stack trace");
 });
 
 test("VARIANTAS: nežinoma reikšmė atmetama, ne priartinama prie panašiausios", async () => {
@@ -79,6 +87,7 @@ test("VARIANTAS: nežinoma reikšmė atmetama, ne priartinama prie panašiausios
       .send({ variant, format: "txt", protocol: protocolWithPii() });
 
     assert.equal(res.status, 400, `turėjo būti atmesta: ${JSON.stringify(variant)}`);
+    assert.equal(res.body.code, "VALIDATION_FAILED");
   }
 });
 

@@ -97,7 +97,9 @@ test("POST /api/exports - nežinomas formatas atmetamas be audito įvykio", asyn
   assert.equal(res.status, 400);
   // Variantas tikrinamas PIRMA (jis privalomas), tad formato klaidai gauti
   // reikia galiojančio varianto. Abu pranešimai vardija galimas reikšmes.
-  assert.match(res.body.error, /Galimi|Galimos/);
+  // Vienas validacijos klaidų formatas (#14).
+  assert.equal(res.body.code, "VALIDATION_FAILED");
+  assert.ok(res.body.details.some((issue) => issue.path === "format"));
   assert.equal(auditLog.getAll().length, 0, "atmesta užklausa nėra eksporto įvykis");
 });
 

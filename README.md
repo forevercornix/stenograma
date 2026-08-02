@@ -1173,6 +1173,53 @@ privalumas. `truncateIp()` (tinklo dalis: `/24` arba `/64`) yra alternatyva
 diegimams, kuriems reikia tinklo diagnostikos, bet numatytame kelyje ji
 nenaudojama – pseudonimas saugesnis.
 
+**API saugumo bazė (`utils/securityBaseline.js`).** Vienas modulis,
+registruojamas **prieš** maršrutus: `trust proxy`, saugumo antraštės (helmet su
+`default-src 'none'` CSP), CORS allow-list ir kūno limitai. Naujas endpointas bazę gauna automatiškai – o ne
+tada, kai kas nors prisimena ją pridėti.
+
+| Nustatymas | Numatyta | Pastabos |
+|---|---|---|
+| `CORS_ORIGIN` | `http://localhost:5173` | Kableliais atskirtas **sąrašas**; kiekviena kilmė tikrinama (`scheme://host[:port]`, be kelio ir prisijungimo duomenų); `*` galimas, bet ne mišinyje |
+| `CORS_CREDENTIALS` | `false` | Su `*` – **startup klaida**, ne tylus derinys |
+| `JSON_BODY_LIMIT` | `1mb` | Audio eina per multipart, tad JSON gali būti mažas |
+| `RATE_LIMIT_GENERAL_MAX` | `300/min` | Bendra riba visiems `/api`; brangūs maršrutai turi griežtesnes |
+| `READINESS_TIMEOUT_MS` | `2000` | Be jo pakibęs Redis pakabintų ir `/api/ready` |
+
+CSP nustatoma **griežčiausia**, o ne išjungiama: HTML šis procesas nesiunčia, tad
+`default-src 'none'` nieko nelaužo, bet apsaugo klaidos puslapius ir bet kokį
+būsimą HTML atsakymą. `CORS_ORIGIN=*` grąžina **literalą**, o ne atspindi
+užklausos `Origin` – atspindėjimas tampa pavojingas vos kam nors įjungus
+credentials.
+
+Produkcijoje `CORS_ORIGIN=*` ir `TRUST_PROXY=true` **stabdo paleidimą**: pirmasis
+leistų bet kuriam domenui kviesti API vartotojo naršyklės vardu, antrasis –
+klastoti `X-Forwarded-For` ir apeiti rate limitą. Kūrimo aplinkoje abu lieka
+patogumu.
+
+**Validacija (`middleware/validate.js`).** Viena schemų sistema (zod) body, query
+ir parametrams, vienas klaidų formatas su `code` ir `details[].path`. Nežinomi
+laukai **atmetami**, o ne ignoruojami: tyli ignoracija reikštų, kad
+`{ varinat: "original" }` atrodo kaip užklausa be varianto, ir klientas gauna
+pranešimą apie trūkstamą lauką, kurį ką tik nurodė. Kaina – naujas kliento laukas
+lūžta iškart, bet API sutartis lieka aiški abiem pusėms.
+
+Rezultatas dedamas į `req.validated`, ne į `req.body`: kitaip skaitytojas
+nebežinotų, ar mato žalią, ar patikrintą reikšmę.
+
+⚠️ **Klientui siunčiami pranešimai kuriami mūsų, ne bibliotekos.** Zod
+`unrecognized_keys` pranešimas įtraukia kliento pateiktą lauko **pavadinimą** –
+`{ "Jonas_Jonaitis_39001010000": "x" }` grąžintų tą tekstą atsakyme, o iš ten jis
+patektų į frontend klaidos pranešimą ir logus. Todėl pranešimai formuojami pagal
+`issue.code`, o `path` segmentai, neatitinkantys lauko vardo formos, pakeičiami
+žymeniu.
+
+**Visos saugumo nuostatos validuojamos paleidžiant.** `READINESS_TIMEOUT_MS=abc`
+duotų `NaN` timeout (momentinį nutrūkimą, atrodantį kaip pakibęs Redis),
+`RATE_LIMIT_GENERAL_MAX=0` užblokuotų visą API, o netinkamas `JSON_BODY_LIMIT`
+nuverstų middleware registraciją be konteksto. Visi trys dabar yra startup
+klaidos.
+
 **Užklausų koreliacija (`utils/requestContext.js`).** Kiekviena užklausa gauna
 `X-Request-Id`: arba serverio sugeneruotą (`req_<uuid>`), arba kliento pateiktą,
 jei jis atitinka griežtą formatą (`[A-Za-z0-9_.:-]`, 8–64 simboliai). Ribos
