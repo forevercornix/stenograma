@@ -1,6 +1,9 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/*
+ * Tailwind v4: viena `@import` direktyva vietoj trijų `@tailwind`.
+ * Tema konfigūruojama CSS'e (`@theme`), o ne `tailwind.config.js` - šis
+ * projektas temos nekeitė, tad konfigūracijos failo nebereikia.
+ */
+@import "tailwindcss";
 
 html, body, #root {
   height: 100%;
