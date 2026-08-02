@@ -229,7 +229,12 @@ app.get("/api/health", pollRateLimiter, (req, res) => {
  * Apsaugotas ta pačia detalių slėpimo logika kaip /api/health (production'e
  * infrastruktūros detalės neatskleidžiamos be x-audit-key).
  */
-app.get("/api/health/deep", async (req, res) => {
+/**
+ * Gilus health vykdo REALIAS patikras (tiekėjų pasiekiamumas, Redis), tad be
+ * ribojimo jis yra brangiausias neautentifikuotas kelias sistemoje - tiksliai
+ * tai, ko #14 reikalauja išvengti.
+ */
+app.get("/api/health/deep", pollRateLimiter, async (req, res) => {
   const isProduction = process.env.NODE_ENV === "production";
   const authorized = process.env.AUDIT_API_KEY && req.header("x-audit-key") === process.env.AUDIT_API_KEY;
   if (isProduction && !authorized) {

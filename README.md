@@ -1215,6 +1215,13 @@ forma elgiasi skirtingai. `audioUrl` ribojamas iki `http`/`https`: `z.string().u
 praleistų `javascript:`, `file:` ir `data:`, o šis URL keliauja į transkribavimo
 tiekėją.
 
+`/api/audit` **puslapiuojamas** (`limit`, `offset`, filtrai `event` ir
+`requestId`) ir ribojamas rate limiteriu. Neribotas atsakymas čia buvo pigi
+užklausa, kurios kaina auga kartu su žurnalu, o pats auditas yra būtent tas
+endpointas, kurį užpuolikas norėtų nuskaityti daug kartų. `/api/health/deep`
+irgi ribojamas – jis vykdo realias tiekėjų ir Redis patikras, tad be ribojimo
+buvo brangiausias neautentifikuotas kelias sistemoje.
+
 Rezultatas dedamas į `req.validated`, ne į `req.body`: kitaip skaitytojas
 nebežinotų, ar mato žalią, ar patikrintą reikšmę.
 
