@@ -1254,6 +1254,32 @@ CI paleidžia rinkinius **atskirais žingsniais**, nors kartu jie sudaro tą pat
 `npm test`: kai kas nors lūžta, iš žingsnio pavadinimo iškart matyti, ar tai
 privatumo garantija, ar tiekėjo formatavimas.
 
+**Saugumo testų matrica.** [`docs/security-test-matrix.md`](docs/security-test-matrix.md)
+atsako, **kuris testas saugo kurią garantiją ir iš kur žinom, kad jis realiai ją
+saugo**. Trečias stulpelis – mutacijos įrodymas – yra svarbiausias: testas,
+kurio niekas nebandė sulaužyti, yra teiginys, ne įrodymas.
+
+`npm run test:matrix` tikrina matricą abiem kryptimis: kiekvienas joje minimas
+testas turi egzistuoti, ir kiekvienas `privacy`/`security` rinkinio testas turi
+būti paminėtas. Rašant šį dokumentą patikra iškart rado **14 testų**, kurių
+matricoje nebuvo – be jos ji būtų virtusi sąrašu to, ką kažkada turėjom.
+
+Matricoje yra ir skyrius **„Ko ši matrica neapima"**: semantinis PII aptikimas,
+vizualinė regresija, realus GPU kelias, apkrovos testai. Aprėpties dokumentas be
+ribų skyriaus klaidina labiau nei jokio dokumento.
+
+**Švara po testų.** `npm run test:clean` tikrina, kad testai nepaliktų artefaktų
+su **projekto prefiksais** (`stenograma-*`) `/tmp` kataloge. Bendras `/tmp`
+skaičiavimas duotų klaidingus signalus, nes ten rašo ir kiti procesai.
+
+Kad siauras sąrašas netaptų spraga, patikra papildomai **skenuoja testų failus**
+ir krinta, jei kuris nors naudoja laikiną prefiksą, kurio sąraše nėra. Be to
+teiginys būtų platesnis nei tikrinimas: „nepalieka artefaktų" iš tikrųjų
+reikštų „nepalieka artefaktų su šiais prefiksais". Rašant #15 rasta, kad `jobRunner` testas kūrė
+`stenograma-test-storage-*` ir jo netrindavo – kiekvienas paleidimas palikdavo
+naują. Kai tokių likučių prisikaupia, niekas nebemato, kad **produkcinis** kodas
+kažko neištrina.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

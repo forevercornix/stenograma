@@ -33,9 +33,37 @@ test("jobRunner._classifyError: vidinė (500) klaida sanitizuojama", () => {
   assert.match(message, /Vidinė serverio klaida/);
 });
 
+/**
+ * `fileStorage.del(key)` pašalina failą, bet ne katalogą, ir kiekvienas
+ * paleidimas palikdavo naują `/tmp/stenograma-test-storage-*`. Sandbox'e tai
+ * tik šiukšlės, bet kūrėjo mašinoje jos kaupiasi tyliai, o testas, kuris po
+ * savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus
+ * (žr. `scripts/verify-clean.mjs`).
+ */
+const createdStorageDirs = [];
+
+test.after(async () => {
+  const { rm } = require("fs/promises");
+  for (const dir of createdStorageDirs) {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 test("fileStorage: put -> get grąžina tą patį turinį", async () => {
   delete require.cache[require.resolve("../utils/fileStorage")];
-  process.env.STORAGE_DIR = path.join(require("os").tmpdir(), "stenograma-test-storage-" + Date.now());
+
+  const storageDir = path.join(require("os").tmpdir(), "stenograma-test-storage-" + Date.now());
+  process.env.STORAGE_DIR = storageDir;
+
+  /**
+   * Katalogas registruojamas valymui FAILO pabaigoje, ne šio testo.
+   *
+   * Pirmoji pataisymo versija naudojo `t.after` - katalogas būdavo ištrinamas
+   * po šio testo, o kitas (`del idempotentinis`) jį sukurdavo iš naujo, ir
+   * likutis vis tiek likdavo. Valymas turi vykti tada, kai jo niekas
+   * nebenaudoja.
+   */
+  createdStorageDirs.push(storageDir);
   const fileStorage = require("../utils/fileStorage");
   const data = Buffer.from("testinis audio turinys");
   const key = await fileStorage.put(data, { ext: ".wav" });
