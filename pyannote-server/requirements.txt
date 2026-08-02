@@ -11,7 +11,7 @@ pytest>=9.0.3
 # RunPod'e PRAKTIŠKAI BŪTINAS - be jo dideli modeliai dažnai timeout'ina/nutrūksta
 # atsisiunčiant, ir serveris nepasileidžia. Įjungiama: HF_HUB_ENABLE_HF_TRANSFER=1.
 # Rankiniam diegimui BŪTINAI į venv: pyannote-server/.venv/bin/python -m pip install hf_transfer
-hf_transfer>=0.1
+hf_transfer>=0.1.9
 
 # ─────────────────────────────────────────────────────────────────────────
 # ⚠️  ŠIS failas naudoja MINIMALIAS (>=) versijas - patogu vystymui, bet RIZIKINGA
