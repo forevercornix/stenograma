@@ -65,5 +65,27 @@ const pollRateLimiter = rateLimit({
 });
 
 module.exports = expensiveEndpointLimiter;
+/**
+ * BENDRAS API limiteris (#14).
+ *
+ * Brangūs maršrutai jau turi griežtus limitus, bet likę endpointai neturėjo
+ * jokių - t. y. bazė buvo „ribojama tik tai, ką kas nors prisiminė apriboti".
+ * Ši riba plati (300/min): ji skirta ne piktnaudžiavimui stabdyti, o tam, kad
+ * neribotų kelių apskritai neliktų.
+ */
+const generalApiLimiter = rateLimit({
+  windowMs: 60_000,
+  // `0` užblokuotų visą API, `abc` duotų NaN - abu tyliai. Žr. securityBaseline.
+  max: require("../utils/securityBaseline").requirePositiveInt(process.env, "RATE_LIMIT_GENERAL_MAX", 300, {
+    min: 1,
+    max: 1_000_000,
+  }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Per daug užklausų. Bandykite vėliau." },
+  handler: _onLimit("general"),
+});
+
+module.exports.generalApiLimiter = generalApiLimiter;
 module.exports.expensiveEndpointLimiter = expensiveEndpointLimiter;
 module.exports.pollRateLimiter = pollRateLimiter;

@@ -11,9 +11,10 @@ const jobsRoute = require("./routes/jobs");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
-const { pollRateLimiter } = require("./middleware/rateLimiter");
+const { pollRateLimiter, generalApiLimiter } = require("./middleware/rateLimiter");
 const { initPrivacyPolicy } = require("./utils/privacyPolicy");
 const { requestContextMiddleware } = require("./utils/requestContext");
+const { applySecurityBaseline } = require("./utils/securityBaseline");
 const { resolveTrustProxy } = require("./utils/clientIp");
 const { createLogger } = require("./utils/logger");
 
@@ -41,44 +42,22 @@ if (process.env.SKIP_CONFIG_VALIDATION !== "true") {
 
 const app = express();
 
-// CORS_ORIGIN numatyta į lokalią dev adresą - "*" turi būti sąmoningas pasirinkimas
-// (pvz. viešam demo), niekada numatytoji reikšmė.
-const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
-if (corsOrigin === "*") {
-  log.warn("CORS_ORIGIN=* - bet koks domenas gali kviesti šį API. Naudokite tik aiškiam demo.");
-}
-// PIRMAS middleware: request ID turi egzistuoti dar prieš CORS, rate limitą ir
-// maršrutus - kad ir atmesta užklausa turėtų identifikatorių (GDPR #17).
 /**
- * TRUST PROXY - eksplicitiškai (GDPR #17). Be jo už nginx/RunPod visi klientai
- * atrodo kaip 127.0.0.1 ir rate limitas tampa bendras visiems; aklas `true`
- * leistų suklastoti X-Forwarded-For. Žr. utils/clientIp.js.
+ * PIRMAS middleware: request ID turi egzistuoti dar prieš CORS, rate limitą ir
+ * maršrutus - kad ir atmesta užklausa turėtų identifikatorių (GDPR #17).
  */
-app.set("trust proxy", resolveTrustProxy());
-
 app.use(requestContextMiddleware);
 
 /**
- * EKSPONUOJAMOS ANTRAŠTĖS.
- *
- * Be `exposedHeaders` naršyklė cross-origin užklausoje leidžia skaityti tik
- * saugųjį antraščių rinkinį - `Content-Disposition` ir `X-Request-Id` į jį
- * NEĮEINA. Praktinė pasekmė buvo tyli: eksporto failo vardas visada krisdavo į
- * atsarginį (`eksportas_redacted.docx`), o serverio sugeneruotas vardas su data
- * ir variantu dingdavo. Tas pats ir su užklausos ID - klientas jo tiesiog
- * nematydavo.
- *
- * Vietiniame diegime per nginx `/api` proxy to nesimato (tas pats originas),
- * tad defektas pasireiškia tik ten, kur frontend ir backend atskirti - t. y.
- * dokumentuotame `VITE_BACKEND_URL` scenarijuje.
+ * SAUGUMO BAZĖ (#14): trust proxy, saugumo antraštės, CORS allow-list, kūno
+ * limitai. Viskas viename modulyje ir PRIEŠ maršrutus - kad naujas endpointas
+ * bazę gautų automatiškai, o ne tada, kai kas nors prisimena ją pridėti.
+ * Žr. utils/securityBaseline.js.
  */
-app.use(
-  cors({
-    origin: corsOrigin,
-    exposedHeaders: ["Content-Disposition", "X-Request-Id"],
-  })
-);
-app.use(express.json({ limit: "10mb" }));
+applySecurityBaseline(app);
+
+// Bendra riba VISIEMS /api maršrutams; griežtesnės lieka atskiruose endpointuose.
+app.use("/api", generalApiLimiter);
 
 // Readiness sekimas: /api/health yra LIVENESS (procesas gyvas ir atsako). Job store/
 // runner init užbaigiamas PRIEŠ app.listen (žr. startServer), tad kai serveris priima
@@ -124,6 +103,30 @@ app.use("/api", jobsRoute);
  * užklausai (šviežia informacija be TCP/auth kainos), bet tam reikia švaraus
  * uždarymo srauto ir paleidimo su tikru Redis - atskiras darbas.
  */
+const { requirePositiveInt } = require("./utils/securityBaseline");
+
+// Netinkama reikšmė čia reikštų NaN timeout - t. y. momentinį nutrūkimą, kuris
+// atrodytų kaip pakibęs Redis. Geriau aiški startup klaida.
+const READINESS_TIMEOUT_MS = requirePositiveInt(process.env, "READINESS_TIMEOUT_MS", 2000, {
+  min: 100,
+  max: 60_000,
+});
+
+/**
+ * Laukia pažado, bet ne ilgiau nei nurodyta.
+ *
+ * Redis klientas turi savo timeout'us, bet jie taikomi ryšiui, ne komandai -
+ * pakibusi komanda pakibtų kartu su užklausa.
+ */
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Readiness timeout (${label}, ${ms} ms)`)), ms);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function probeRuntimeReadiness() {
   let redisReachable = true;
   let workers = { transcription: true, protocol: true };
@@ -134,8 +137,16 @@ async function probeRuntimeReadiness() {
       const { createQueueConnection } = require("./queues/config");
       const { getWorkerStatus } = require("./utils/workerHeartbeat");
       conn = createQueueConnection();
-      await conn.ping();
-      workers = await getWorkerStatus(conn);
+
+      /**
+       * RIBOTAS LAUKIMAS (#14: „Readiness Redis operations have a bounded timeout").
+       *
+       * Be jo pakibęs Redis pakabina ir `/api/ready`: orkestruotojas vietoj
+       * aiškaus 503 gauna timeout, o konteineris kabo „tikrinamas" būsenoje.
+       * Readiness turi atsakyti VISADA - net jei atsakymas yra „neparuošta".
+       */
+      await withTimeout(conn.ping(), READINESS_TIMEOUT_MS, "redis ping");
+      workers = await withTimeout(getWorkerStatus(conn), READINESS_TIMEOUT_MS, "worker status");
     } catch {
       redisReachable = false;
     } finally {
@@ -319,6 +330,8 @@ if (require.main === module) {
 }
 
 module.exports = app;
+// TESTAMS: elgsenos patikrai (žr. tests/securityBaseline.route.test.js).
+module.exports._withTimeoutForTests = withTimeout;
 app.startServer = startServer; // testams ir programiniam paleidimui
 // TESTAMS: leidžia nustatyti readiness (testų kontekste startServer nevyksta, tad
 // readiness liktų false ir job route'ai grąžintų 503). Testai kviečia app._setReadyForTests().

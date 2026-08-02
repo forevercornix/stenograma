@@ -96,6 +96,52 @@ function validateConfig(env = process.env) {
   errors.push(...privacy.errors);
   warnings.push(...privacy.warnings);
 
+  /**
+   * PRODUKCIJOS SAUGUMO PATIKROS (#14: „Production startup fails when required
+   * security configuration is unsafe").
+   *
+   * Šios klaidos galioja TIK produkcijoje: kūrimo aplinkoje laisvesnis CORS ir
+   * nenustatytas API_KEY yra patogumas, o ne rizika. Produkcijoje tas pats
+   * derinys reiškia atvirą API su realiais raktais.
+   */
+  if (env.NODE_ENV === "production") {
+    if ((env.CORS_ORIGIN || "").trim() === "*") {
+      errors.push(
+        "CORS_ORIGIN=* produkcijoje neleidžiamas - bet koks domenas galėtų kviesti šį API " +
+          "vartotojo naršyklės vardu. Nurodykite konkrečias kilmes."
+      );
+    }
+
+    if (String(env.TRUST_PROXY || "").toLowerCase() === "true") {
+      errors.push(
+        "TRUST_PROXY=true produkcijoje leidžia bet kam klastoti X-Forwarded-For ir apeiti rate " +
+          "limitą. Nurodykite proxy šuolių skaičių (pvz. TRUST_PROXY=1) arba tinklą."
+      );
+    }
+  }
+
+  /**
+   * Saugumo konfigūracija tikrinama VISOSE aplinkose ir PALEIDŽIANT.
+   *
+   * Kitaip netinkama reikšmė pasirodytų tik registruojant middleware (kritimas
+   * be konteksto) arba pirmoje užklausoje - t. y. tada, kai serveris jau laikomas
+   * veikiančiu.
+   */
+  const security = require("./securityBaseline");
+
+  for (const check of [
+    () => security.resolveCorsOptions(env),
+    () => security.requireBodyLimit(env, "1mb"),
+    () => security.requirePositiveInt(env, "READINESS_TIMEOUT_MS", 2000, { min: 100, max: 60_000 }),
+    () => security.requirePositiveInt(env, "RATE_LIMIT_GENERAL_MAX", 300, { min: 1, max: 1_000_000 }),
+  ]) {
+    try {
+      check();
+    } catch (e) {
+      errors.push(e.message);
+    }
+  }
+
   return { errors, warnings };
 }
 

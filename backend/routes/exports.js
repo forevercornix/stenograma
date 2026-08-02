@@ -4,15 +4,13 @@ const apiKeyAuth = require("../middleware/apiKeyAuth");
 const auditLog = require("../utils/auditLog");
 const jobStore = require("../utils/jobStore");
 const { sanitizeServerError } = require("../utils/sanitizeError");
-const { buildExport, FORMATS } = require("../services/exportService");
+const { buildExport } = require("../services/exportService");
 const { createLogger } = require("../utils/logger");
-const { getPrivacyPolicy } = require("../utils/privacyPolicy");
-const { VARIANT, REQUESTABLE_VARIANTS, parseRequestedVariant } = require("../utils/redactedArtefact");
+const { validate, schemas } = require("../middleware/validate");
 const log = createLogger("route:exports");
 
 const router = express.Router();
 
-const ALLOWED_FORMATS = new Set(Object.values(FORMATS));
 
 /**
  * POST /api/exports - protokolo eksportas (txt / csv / docx).
@@ -43,10 +41,7 @@ const ALLOWED_FORMATS = new Set(Object.values(FORMATS));
  * audito, ne vartotojo veiksmo problema. Nepatikrintas `jobId` niekur nesaugomas
  * jokia forma.
  */
-router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
-  const format = String(req.body?.format || "").toLowerCase();
-  const protocol = req.body?.protocol;
-  const jobId = typeof req.body?.jobId === "string" ? req.body.jobId : undefined;
+router.post("/exports", rateLimiter, apiKeyAuth, validate({ body: schemas.exportBody }), async (req, res) => {
 
   /**
    * VARIANTAS PRIVALOMAS (GDPR #8: „Require an explicit variant parameter and
@@ -56,19 +51,12 @@ router.post("/exports", rateLimiter, apiKeyAuth, async (req, res) => {
    * senas klientas tyliai gautų kitą turinį nei tikėjosi; jei `original` -
    * tyliai gautų neredaguotą. Abu atvejai blogesni už aiškią klaidą.
    */
-  const variant = parseRequestedVariant(req.body?.variant);
-
-  if (!variant) {
-    return res.status(400).json({
-      error: `Privalomas 'variant' laukas. Galimos reikšmės: ${REQUESTABLE_VARIANTS.join(", ")}.`,
-    });
-  }
-
-  if (!ALLOWED_FORMATS.has(format)) {
-    return res.status(400).json({
-      error: `Nežinomas eksporto formatas. Galimi: ${[...ALLOWED_FORMATS].join(", ")}.`,
-    });
-  }
+  /**
+   * Reikšmės ateina iš `req.validated` - jos jau patikrintos schema, tad čia
+   * nebereikia nei `String()`, nei tipo patikros. `parseRequestedVariant` lieka
+   * naudojamas servise, kur schemos konteksto nėra.
+   */
+  const { variant, format, protocol, jobId } = req.validated.body;
 
   if (!protocol || typeof protocol !== "object" || Array.isArray(protocol)) {
     return res.status(400).json({ error: "Trūksta `protocol` objekto." });
