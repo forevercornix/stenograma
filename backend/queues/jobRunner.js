@@ -1,5 +1,6 @@
 const jobStore = require("../utils/jobStore");
 const { createLogger } = require("../utils/logger");
+const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
 const log = createLogger("job-runner");
 
 /**
@@ -172,8 +173,36 @@ async function _runInline(type, jobId, payload) {
   }
 
   return runWithContext(
-    { requestId: (job && job.requestId) || null, actor: (job && job.actor) || null, execution: "inline" },
-    () => _executeInline(type, processor, jobId, payload)
+    {
+      requestId: (job && job.requestId) || null,
+      actor: (job && job.actor) || null,
+      // Rolė keliauja kartu su kontekstu, kad servisai galėtų ja remtis
+      // nekviesdami saugyklos iš naujo (#18 PR3).
+      actorRole: (job && job.actorRole) || null,
+      execution: "inline",
+    },
+    async () => {
+      /**
+       * AUTORIZACIJA VYKDYMO METU (#18 PR3).
+       *
+       * HTTP sluoksnis patikrino teisę jobo KŪRIMO metu. Bet tarp kūrimo ir
+       * vykdymo gali praeiti daug laiko, per kurį vartotojas gali būti
+       * pašalintas ar jo rolė sumažinta. Tikrinam DABARTINĘ būklę - kitaip
+       * revokacija neveiktų eilėje laukiantiems darbams.
+       */
+      const decision = authorizeJobOrAudit(job, jobId);
+
+      if (!decision.allowed) {
+        await jobStore.update(jobId, {
+          status: jobStore.STATUS.FAILED,
+          error_code: "AUTHORIZATION_REVOKED",
+          error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
+        });
+        return;
+      }
+
+      return _executeInline(type, processor, jobId, payload);
+    }
   );
 }
 

@@ -51,6 +51,7 @@ const security = [
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",
+  "workerAuthorization",
   "authRoutes.route",
   "securityBaseline.route",
   "security.route",
