@@ -21,8 +21,19 @@ function jsonHeaders() {
   return { get: (name) => (name.toLowerCase() === "content-type" ? "application/json" : null) };
 }
 
+/** Prisijungęs administratorius - visi leidimai (#18 PR4). */
+const TEST_ADMIN = {
+  username: "testuotojas",
+  role: "administrator",
+  permissions: ["job:create", "job:read", "job:delete", "protocol:generate", "export:redacted", "export:original", "audit:read"],
+};
+
 function mockFetch({ generateResponse }) {
   return vi.fn((url) => {
+    // Sesija (#18 PR4) - be jos programa rodytų prisijungimo formą.
+    if (url.toString().includes("/api/auth/me")) {
+      return Promise.resolve({ ok: true, status: 200, headers: jsonHeaders(), json: () => Promise.resolve(TEST_ADMIN) });
+    }
     if (url.toString().includes("/api/ready")) {
       return Promise.resolve({ ok: true, status: 200, headers: jsonHeaders(), json: () => Promise.resolve({ status: "ok" }) });
     }

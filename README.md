@@ -1365,6 +1365,23 @@ darbus**. Geriau nutraukti teisėtą darbą, nei įvykdyti neteisėtą.
 ⚠️ **Atsijungimas (logout) darbo NENUTRAUKIA** – sesija yra prisijungimo, ne
 teisės, mechanizmas. Nutraukiama tik dingus pačiai tapatybei ar teisei.
 
+**Sąsaja pagal roles (#18 PR4).** Frontend gauna leidimus per `/api/auth/me` ir
+pagal juos rodo ar slepia veiksmus – originalo eksporto grupės operatorius
+tiesiog nemato. Rolė rodoma antraštėje, kad būtų aišku, **kodėl** kai kurių
+veiksmų nėra.
+
+⚠️ **UI nėra apsauga.** Paslėptas mygtukas tik gerina sąsają; kiekvieną užklausą
+tikrina backend. Regresijos testai tai įrodo tiesioginiais API kvietimais,
+apeinant naršyklę – jei UI būtų vienintelė riba, jie kristų.
+
+401 ir 403 apdorojami **skirtingai**: pasibaigusi sesija grąžina į prisijungimą
+su paaiškinimu, o teisių trūkumas rodo aiškų pranešimą su konkrečiu trūkstamu
+leidimu. Sumaišius juos, vartotojas matytų „neturite teisės" ten, kur tereikia
+prisijungti.
+
+Diegimo instrukcijos – rolės, sesijų trukmė, revokacija, kredencialų rotacija,
+bootstrap administratorius: [`docs/auth-deployment.md`](docs/auth-deployment.md).
+
 ⚠️ **Nuosavybės patikrų nėra.** Rolė sprendžia, kokius veiksmus galima atlikti,
 bet ne su kieno duomenimis – bet kuris administratorius gali ištrinti bet kurį
 darbą.

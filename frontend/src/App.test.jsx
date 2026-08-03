@@ -17,8 +17,45 @@ function jsonHeaders() {
   return { get: (name) => (name.toLowerCase() === "content-type" ? "application/json" : null) };
 }
 
-function mockFetchImplementation({ healthResponse, generateResponse, generateStatus = 200, readyStatus = 200 }) {
+/**
+ * NUMATYTASIS PRISIJUNGĘS VARTOTOJAS (#18 PR4).
+ *
+ * Po #18 programa prieš pagrindinį UI parodo prisijungimo formą, tad testams,
+ * kurie tikrina protokolų srautą, reikia sesijos. `administrator` pasirinktas
+ * todėl, kad turi VISUS leidimus – šie testai tikrina funkcionalumą, ne rolių
+ * ribas (toms yra atskiri testai `RolePermissions.test.jsx`).
+ */
+export const TEST_ADMIN = {
+  username: "testuotojas",
+  role: "administrator",
+  permissions: [
+    "job:create",
+    "job:read",
+    "job:delete",
+    "protocol:generate",
+    "export:redacted",
+    "export:original",
+    "audit:read",
+  ],
+};
+
+function mockFetchImplementation({
+  healthResponse,
+  generateResponse,
+  generateStatus = 200,
+  readyStatus = 200,
+  currentUser = TEST_ADMIN,
+}) {
   return vi.fn((url, options) => {
+    // Sesijos patikra - `null` reikštų neprisijungusį vartotoją.
+    if (url.toString().includes("/api/auth/me")) {
+      return Promise.resolve({
+        ok: Boolean(currentUser),
+        status: currentUser ? 200 : 401,
+        headers: jsonHeaders(),
+        json: () => Promise.resolve(currentUser || { error: "Reikalingas prisijungimas.", code: "SESSION_REQUIRED" }),
+      });
+    }
     // /api/ready TIKRINAM PIRMA (nes "/api/health" substring irgi tiktų kai kuriems).
     if (url.toString().includes("/api/ready")) {
       return Promise.resolve({
@@ -66,7 +103,19 @@ describe("App - backend health statusas", () => {
   });
 
   it('rodo "Backend nepasiekiamas" ir įspėjimą, kai /api/health kvietimas nepavyksta', async () => {
-    global.fetch = vi.fn(() => Promise.reject(new Error("network error")));
+    /**
+     * Sesija VEIKIA, o backend'as - ne.
+     *
+     * Šie testai tikrina „backend nepasiekiamas" būseną, ne „neprisijungęs".
+     * Jei `/api/auth/me` irgi kristų, programa parodytų prisijungimo formą, ir
+     * testas tikrintų visai kitą dalyką, nei sako jo pavadinimas.
+     */
+    global.fetch = vi.fn((url) => {
+      if (url.toString().includes("/api/auth/me")) {
+        return Promise.resolve({ ok: true, status: 200, headers: jsonHeaders(), json: () => Promise.resolve(TEST_ADMIN) });
+      }
+      return Promise.reject(new Error("network error"));
+    });
 
     render(<App />);
 
@@ -123,7 +172,19 @@ describe("App - generavimo srautas (mocked /api/generate)", () => {
   });
 
   it("generavimo mygtukas išjungtas, kai backend nepasiekiamas, net jei tekstas įvestas", async () => {
-    global.fetch = vi.fn(() => Promise.reject(new Error("network error")));
+    /**
+     * Sesija VEIKIA, o backend'as - ne.
+     *
+     * Šie testai tikrina „backend nepasiekiamas" būseną, ne „neprisijungęs".
+     * Jei `/api/auth/me` irgi kristų, programa parodytų prisijungimo formą, ir
+     * testas tikrintų visai kitą dalyką, nei sako jo pavadinimas.
+     */
+    global.fetch = vi.fn((url) => {
+      if (url.toString().includes("/api/auth/me")) {
+        return Promise.resolve({ ok: true, status: 200, headers: jsonHeaders(), json: () => Promise.resolve(TEST_ADMIN) });
+      }
+      return Promise.reject(new Error("network error"));
+    });
 
     render(<App />);
     await waitFor(() => expect(screen.getByText(/Backend nepasiekiamas/)).toBeInTheDocument());

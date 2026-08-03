@@ -93,7 +93,40 @@ router.post("/auth/logout", async (req, res) => {
  * kokia role – be jo kiekvienas puslapio įkėlimas turėtų spėti iš cookie
  * buvimo, kurio JS net negali perskaityti (HttpOnly).
  */
-router.get("/auth/me", requireSession, (req, res) => {
+/**
+ * DEV REŽIMO NUOSEKLUMAS (#18 PR4).
+ *
+ * Kai NĖRA nei `AUTH_USERS`, nei `API_KEY`, ir `NODE_ENV != production`,
+ * `middleware/authenticate.js` praleidžia VISAS užklausas su `administrator`
+ * role. Bet `/auth/me` su `requireSession` tokiu atveju grąžindavo 401, ir
+ * frontend rodydavo prisijungimo formą – vartotojas būdavo užblokuotas nuo
+ * sistemos, kuri realiai leidžia jam viską.
+ *
+ * Toks neatitikimas blogesnis nei bet kuris vienas sprendimas atskirai: UI
+ * sako „prisijunk", o prisijungti nėra kaip (vartotojų nesukonfigūruota), nors
+ * API veikia. Būtent tai sulaužė E2E testus.
+ *
+ * Šis middleware suvienodina abu kelius: jei autentifikacija nesukonfigūruota,
+ * `/auth/me` grąžina tą pačią dev tapatybę, kurią naudoja `authenticate`.
+ * `authConfigured: false` leidžia UI parodyti, kad tai NĖRA tikras
+ * prisijungimas.
+ */
+function devIdentityWhenUnconfigured(req, res, next) {
+  const hasUsers = Boolean((process.env.AUTH_USERS || "").trim());
+  const hasApiKey = Boolean(process.env.API_KEY);
+  const isProduction = process.env.NODE_ENV === "production";
+
+  if (hasUsers || hasApiKey || isProduction) return next();
+
+  return res.json({
+    username: "dev",
+    role: "administrator",
+    permissions: permissionsForRole("administrator"),
+    authConfigured: false,
+  });
+}
+
+router.get("/auth/me", devIdentityWhenUnconfigured, requireSession, (req, res) => {
   /**
    * LEIDIMAI grąžinami kartu su role (#18 PR2).
    *

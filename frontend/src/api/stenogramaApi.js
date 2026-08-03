@@ -23,6 +23,46 @@ export function withApiKeyHeader(headers = {}) {
   return API_KEY ? { ...headers, "x-api-key": API_KEY } : headers;
 }
 
+/**
+ * SESIJOS COOKIE SIUNTIMAS (#18 PR4).
+ *
+ * `credentials: "include"` būtina, nes sesijos cookie yra `HttpOnly` – JS jos
+ * net negali perskaityti, tad rankiniu būdu pridėti neįmanoma. Be šios
+ * nuostatos naršyklė cookie nesiųstų, kai frontend ir backend yra skirtinguose
+ * originuose (dev režimas: 5173 vs 3001), ir prisijungimas atrodytų veikiantis,
+ * bet kiekviena kita užklausa grįžtų 401.
+ *
+ * Ta pati kilmė (Docker/nginx proxy) veiktų ir be jo, bet tada elgesys
+ * skirtųsi tarp dev ir produkcijos – klaidų klasė, kurią sunkiausia gaudyti.
+ */
+export const WITH_SESSION = { credentials: "include" };
+
+/**
+ * KLAIDA, kuri neša HTTP statusą.
+ *
+ * 401 ir 403 reikalauja SKIRTINGO atsako UI: 401 – prisijunk iš naujo;
+ * 403 – prisijungimas nepadės, tiesiog neturi teisės. Be statuso komponentas
+ * negali jų atskirti ir rodytų prisijungimo formą vartotojui, kuris jau
+ * prisijungęs.
+ */
+export class ApiError extends Error {
+  constructor(message, status, code, requiredPermission) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.requiredPermission = requiredPermission;
+  }
+
+  get isUnauthenticated() {
+    return this.status === 401;
+  }
+
+  get isForbidden() {
+    return this.status === 403;
+  }
+}
+
 // Saugus atsakymo skaitymas: jei reverse proxy grąžina HTML/tekstą (pvz. 502 Bad
 // Gateway), res.json() mestų "Unexpected token '<'" vietoj informatyvios klaidos.
 // Šis helperis tikrina content-type ir grąžina prasmingą žinutę.
@@ -54,7 +94,23 @@ async function readJsonResponse(res, fallbackMessage) {
   }
 
   if (!res.ok) {
-    throw new Error(data?.error || `${fallbackMessage} (${res.status})`);
+    /**
+     * STATUSAS KELIAUJA SU KLAIDA (#18 PR4).
+     *
+     * Anksčiau visos nesėkmės tapdavo vienodu `Error` – ir UI negalėjo
+     * atskirti „prisijunk" (401) nuo „neturi teisės" (403). Rezultatas būtų
+     * prisijungimo forma, rodoma jau prisijungusiam vartotojui, arba
+     * „neturite teisės" ten, kur tiesiog pasibaigė sesija.
+     *
+     * `requiredPermission` ateina iš backend'o – jis leidžia UI paaiškinti,
+     * KOKIOS teisės trūksta, o ne rodyti bendrą atmetimą.
+     */
+    throw new ApiError(
+      data?.error || `${fallbackMessage} (${res.status})`,
+      res.status,
+      data?.code,
+      data?.requiredPermission
+    );
   }
   return data;
 }
@@ -77,6 +133,7 @@ export async function fetchReadiness() {
 export async function generateProtocol({ title, date, participants, transcript }, { signal } = {}) {
   const res = await fetch(`${BACKEND_URL}/api/generate`, {
     method: "POST",
+    ...WITH_SESSION,
     headers: withApiKeyHeader({ "Content-Type": "application/json" }),
     body: JSON.stringify({ title, date, participants, transcript }),
     signal,
@@ -126,6 +183,7 @@ export async function transcribeAudioJob({
 
   const createRes = await fetch(`${BACKEND_URL}/api/transcribe-jobs`, {
     method: "POST",
+    ...WITH_SESSION,
     headers: withApiKeyHeader(),
     body: form,
     signal,
@@ -138,6 +196,7 @@ export async function transcribeAudioJob({
   for (let i = 0; i < maxPolls; i++) {
     await delay(pollIntervalMs, signal); // atšaukiamas laukimas
     const pollRes = await fetch(`${BACKEND_URL}/api/transcribe-jobs/${jobId}`, {
+      ...WITH_SESSION,
       headers: withApiKeyHeader(),
       signal,
     });
@@ -177,19 +236,32 @@ export async function exportProtocol({ format, variant, protocol, jobId }, { sig
 
   const res = await fetch(`${BACKEND_URL}/api/exports`, {
     method: "POST",
+    ...WITH_SESSION,
     headers: withApiKeyHeader({ "Content-Type": "application/json" }),
     body: JSON.stringify({ format, variant, protocol, jobId }),
     signal,
   });
 
   if (!res.ok) {
-    // Klaidos atveju backend'as grąžina JSON.
+    /**
+     * STATUSAS TURI KELIAUTI IR ČIA (#18 PR4).
+     *
+     * `exportProtocol` neeina per `readJsonResponse`, nes sėkmės atveju grąžina
+     * `blob`, ne JSON. Todėl jo klaidų kelias buvo ATSKIRAS ir metė paprastą
+     * `Error` – o `handleAuthError` tokio atpažinti negali, ir 403 eksporte
+     * būtų parodytas kaip „eksportas nepavyko", tarsi problema būtų laikina.
+     */
     const contentType = res.headers.get("content-type") || "";
     if (contentType.includes("json")) {
       const data = await res.json().catch(() => null);
-      throw new Error(data?.error || `Eksportas nepavyko (${res.status})`);
+      throw new ApiError(
+        data?.error || `Eksportas nepavyko (${res.status})`,
+        res.status,
+        data?.code,
+        data?.requiredPermission
+      );
     }
-    throw new Error(`Eksportas nepavyko (${res.status})`);
+    throw new ApiError(`Eksportas nepavyko (${res.status})`, res.status);
   }
 
   const disposition = res.headers.get("content-disposition") || "";
@@ -199,4 +271,53 @@ export async function exportProtocol({ format, variant, protocol, jobId }, { sig
     blob: await res.blob(),
     filename: match ? match[1] : `eksportas_${variant}.${format}`,
   };
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * AUTENTIFIKACIJA IR LEIDIMAI (#18 PR4)
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Prisijungimas. Sesijos cookie nustato serveris – JS jos nemato ir neturi
+ * matyti (`HttpOnly`).
+ */
+export async function login(username, password) {
+  const res = await fetch(`${BACKEND_URL}/api/auth/login`, {
+    method: "POST",
+    ...WITH_SESSION,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+
+  const data = await readJsonResponse(res, "Prisijungti nepavyko.");
+
+  if (!res.ok) {
+    throw new ApiError(data.error || "Prisijungti nepavyko.", res.status, data.code);
+  }
+
+  return data;
+}
+
+export async function logout() {
+  await fetch(`${BACKEND_URL}/api/auth/logout`, { method: "POST", ...WITH_SESSION });
+}
+
+/**
+ * Kas prisijungęs ir ką jam leidžiama.
+ *
+ * Grąžina `null`, jei sesijos nėra – tai NORMALI būsena (dar neprisijungęs),
+ * ne klaida. Metant klaidą kiekvienas puslapio įkėlimas be sesijos atrodytų
+ * kaip gedimas.
+ */
+export async function fetchCurrentUser() {
+  const res = await fetch(`${BACKEND_URL}/api/auth/me`, WITH_SESSION);
+
+  if (res.status === 401) return null;
+
+  const data = await readJsonResponse(res, "Nepavyko nuskaityti vartotojo.");
+  if (!res.ok) throw new ApiError(data.error || "Nepavyko nuskaityti vartotojo.", res.status, data.code);
+
+  return data;
 }

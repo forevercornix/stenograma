@@ -1,0 +1,171 @@
+# Autentifikacijos ir prieigos kontrolės diegimas
+
+Šis dokumentas yra GDPR issue #18 rezultatas. Jis skirtas tam, kas **diegia**
+sistemą – ne tam, kas ją rašo.
+
+---
+
+## 1. Bootstrap: pirmas administratorius
+
+Vartotojai konfigūruojami per `AUTH_USERS` aplinkos kintamąjį. Registracijos
+srauto **nėra** – tai sąmoningas pilotinis apribojimas.
+
+```bash
+cd backend
+node scripts/hash-password.js sysadmin administrator
+# Slaptažodis: (įvedamas interaktyviai, nepatenka į shell istoriją)
+```
+
+Rezultatą įrašykite į `.env`:
+
+```bash
+AUTH_USERS=sysadmin:administrator:scrypt$16384$8$1$<druska>$<maiša>
+```
+
+Kelis vartotojus atskirkite kableliais:
+
+```bash
+AUTH_USERS=sysadmin:administrator:scrypt$...,darbuotojas:operator:scrypt$...
+```
+
+⚠️ **Slaptažodis niekada nelaikomas tekstu.** Netinkamai suformuota maiša
+**stabdo serverio startą** – tai sąmoninga, nes tyliai praleistas įrašas
+reikštų administratorių, manantį turintį veikiančią paskyrą, kurios nėra.
+
+---
+
+## 2. Rolės ir leidimai
+
+| Leidimas | Ką leidžia | operator | administrator |
+|---|---|:---:|:---:|
+| `job:create` | Kurti transkribavimo/protokolo darbus | ✅ | ✅ |
+| `job:read` | Skaityti darbo būseną ir rezultatą | ✅ | ✅ |
+| `protocol:generate` | Generuoti protokolą | ✅ | ✅ |
+| `export:redacted` | Eksportuoti redaguotą variantą | ✅ | ✅ |
+| `job:delete` | **GDPR ištrynimas** (negrįžtama) | ❌ | ✅ |
+| `export:original` | **Neredaguoti asmens duomenys** | ❌ | ✅ |
+| `audit:read` | Audito žurnalas | ❌ | ✅ |
+
+Žemėlapis gyvena `backend/utils/permissions.js` ir yra **deny-by-default**:
+naujas leidimas be eksplicitinio priskyrimo yra uždaras.
+
+---
+
+## 3. Sesijų trukmė
+
+| Nuostata | Numatyta | Ką reiškia |
+|---|---|---|
+| `SESSION_IDLE_TIMEOUT_MINUTES` | 30 | Neaktyvumo langas; kiekviena užklausa jį atnaujina |
+| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | 12 | Maksimali sesijos trukmė **nepriklausomai nuo aktyvumo** |
+
+Du limitai yra nepriklausomi. Absoliutus reikalingas todėl, kad vien idle
+langas leistų sesijai gyventi neribotai, jei ji nuolat naudojama.
+
+⚠️ **Sesijos saugomos tik atmintyje, viename procese.** Serverio restartas
+atjungia visus vartotojus, o kelios backend replikos sesijomis nesidalintų.
+Tai tinka pilotui; keliems replikams saugykla turės pereiti į Redis.
+
+---
+
+## 4. Revokacija
+
+| Ką norite pasiekti | Ką daryti | Poveikis |
+|---|---|---|
+| Atjungti vieną seansą | Vartotojas spaudžia „Atsijungti" | Ta sesija nebegalioja iš karto |
+| **Atimti prieigą visam laikui** | Pašalinti įrašą iš `AUTH_USERS` + restartas | Visos sesijos nebegalioja; **eilėje laukiantys darbai nutraukiami** |
+| Sumažinti teises | Pakeisti rolę `AUTH_USERS` + restartas | Naujos užklausos ribojamos; **eilėje laukiantys darbai su per aukšta teise nutraukiami** |
+
+**Asinchroniniai darbai:** teisės **perskaičiuojamos vykdymo metu**, ne
+užšaldomos kuriant darbą. Jobai gali laukti eilėje valandas – per tą laiką
+vartotojas gali būti pašalintas, ir būtent tada revokacija svarbiausia.
+
+⚠️ **Atsijungimas darbo nenutraukia.** Sesija yra prisijungimo, ne teisės,
+mechanizmas: vartotojas teisėtai pradėjo darbą ir uždaręs naršyklę jo
+neatšaukė. Nutraukiama tik dingus pačiai tapatybei ar teisei.
+
+---
+
+## 5. Kredencialų rotacija
+
+**Slaptažodžio keitimas:**
+
+```bash
+node scripts/hash-password.js <vardas> <rolė>   # nauja maiša
+# pakeisti AUTH_USERS įrašą, perkrauti serverį
+```
+
+Restartas išvalo sesijas, tad senas slaptažodis nebeveikia iš karto – atskiro
+„revoke all sessions" veiksmo nereikia.
+
+**`API_KEY` rotacija:** pakeisti reikšmę ir perkrauti. Senas raktas nustoja
+veikti nedelsiant; sesijos nenukenčia.
+
+⚠️ Rotacija reikalauja **restarto**, nes `AUTH_USERS` skaitomas iš aplinkos.
+Nulinio prastovos rotacijai reikėtų vartotojų saugyklos duomenų bazėje.
+
+---
+
+## 6. Du autentifikacijos mechanizmai
+
+Sistema priima **ir** sesijos cookie, **ir** bendrą `API_KEY`.
+
+**Sesija turi pirmenybę.** Jei užklausa neša abu, autoritetinga yra konkreti
+vartotojo tapatybė – priešingu atveju operatorius galėtų pasikelti teises vien
+pridėdamas raktą.
+
+```bash
+API_KEY_ROLE=administrator   # numatyta
+```
+
+⚠️ **Kol `API_KEY_ROLE=administrator`, RBAC neriboja rakto turėtojų.** Tai
+sąmoningas atgalinio suderinamumo sprendimas: iki #18 raktas galėjo viską, ir
+numatytoji `operator` tyliai sulaužytų veikiančią automatiką. Startup apie tai
+įspėja.
+
+**Realiam rolių atskyrimui** rinkitės vieną:
+
+- `API_KEY_ROLE=operator` – automatika netenka `job:delete` ir `export:original`
+- Visiškai pereiti prie sesijų ir `API_KEY` nenaudoti
+
+---
+
+## 7. Dev režimas be autentifikacijos
+
+Kai **nėra nei** `API_KEY`, **nei** `AUTH_USERS`, ir `NODE_ENV != production`,
+užklausos praleidžiamos su `administrator` role, o konsolėje rodomas
+įspėjimas.
+
+Produkcijoje tas pats kelias grąžina **503**, ne praleidžia.
+
+⚠️ Tai patogumas lokaliam kūrimui, ne diegimo režimas. Viešame diegime
+**visada** nustatykite bent vieną mechanizmą.
+
+---
+
+## 8. Diegimo patikros sąrašas
+
+Prieš viešą diegimą:
+
+- [ ] `AUTH_USERS` nustatytas su bent vienu administratoriumi
+- [ ] Slaptažodžiai sugeneruoti `hash-password.js`, ne rankomis
+- [ ] `API_KEY_ROLE` apsvarstytas (numatyta `administrator` = RBAC neriboja rakto)
+- [ ] `NODE_ENV=production`
+- [ ] HTTPS (be jo `Secure` cookie nekeliaus)
+- [ ] `CORS_ORIGIN` nurodytas konkrečiai, ne `*`
+- [ ] Sesijų trukmės atitinka jūsų politiką
+- [ ] `AUDIT_API_KEY` nustatytas arba prieiga per administratoriaus sesiją
+
+---
+
+## Ko šis modelis NEAPIMA
+
+Sąžiningumo dėlei – ribos, kurios lieka atviros:
+
+- **Nuosavybės patikrų nėra.** Rolė sprendžia, kokius veiksmus galima atlikti,
+  bet ne su kieno duomenimis: bet kuris administratorius gali ištrinti bet kurį
+  darbą.
+- **Registracijos ir vartotojų valdymo UI nėra** – tik `AUTH_USERS` ir
+  restartas.
+- **Slaptažodžio keitimo srauto nėra** – tik per konfigūraciją.
+- **Kelių replikų sesijos nepalaikomos** – saugykla tik atmintyje.
+- **MFA nėra.**
