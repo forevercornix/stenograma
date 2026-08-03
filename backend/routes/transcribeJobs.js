@@ -1,7 +1,8 @@
 const express = require("express");
 const fs = require("fs/promises");
 const jobStore = require("../utils/jobStore");
-const { eraseJob, eraseOrphanedJobData } = require("../utils/jobErasure");
+const { eraseOrphanedJobData } = require("../utils/jobErasure");
+const lifecycleService = require("../services/lifecycleService");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
 const { HttpError } = require("../services/transcriptionService");
@@ -286,29 +287,32 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
     });
   }
 
-  const outcome = await eraseJob(job);
+  /**
+   * KOORDINUOTAS IŠTRYNIMAS (#19 PR2) - TAS PATS kelias kaip `/api/jobs`.
+   *
+   * Abu maršrutai kviečia VIENĄ servisą. Anksčiau jie turėjo dvi identiškas
+   * kopijas to paties kodo, ir jos galėjo išsiskirti - būtent tai #19 vadina
+   * „single lifecycle service".
+   */
+  const result = await lifecycleService.deleteJobArtefacts(job, job.id, {
+    actor: req.authz ? req.authz.actor : null,
+  });
 
-  if (outcome.criticalFailure) {
-    // NEGRĄŽINAME 204: jobStore įrašas sąmoningai paliktas (deletion_pending),
-    // kad operaciją būtų galima pakartoti tuo pačiu ID. GDPR ištrynime serverio
-    // logas nėra pakankamas patvirtinimas - klientas turi matyti, kad nepavyko.
-    log.error(
-      `NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
-    );
+  if (!result.complete) {
+    /**
+     * ⚠️ KLAIDŲ TEKSTAI NEGRĄŽINAMI - juose būna failų kelių ir Redis raktų
+     * (#19). Klientas gauna tik kategorijas.
+     */
+    log.error(`NEPAVYKO visiškai ištrinti jobo ${job.id}: statusas=${result.status}`);
+
     return res.status(503).json({
       error:
         "Nepavyko visiškai ištrinti jobo duomenų. Jobas paliktas, kad užklausą būtų galima pakartoti.",
       deletion: {
-        queueJobRemoved: outcome.queueJobRemoved,
-        storageRemoved: outcome.storageRemoved,
-        auditEntriesRemoved: outcome.auditEntriesRemoved,
-        errors: outcome.errors,
+        status: result.status,
+        categories: result.categories,
       },
     });
-  }
-
-  if (!outcome.jobRemoved) {
-    return res.status(404).json({ error: "Jobas nerastas." });
   }
 
   return res.status(204).send();

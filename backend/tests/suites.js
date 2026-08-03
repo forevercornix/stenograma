@@ -41,6 +41,7 @@ const privacy = [
   "deletionResilience",
   "audioCleanup",
   "artefactInventory",
+  "lifecycleDeletion",
   "observabilityEvents.route",
 ];
 

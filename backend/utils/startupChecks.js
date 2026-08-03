@@ -131,6 +131,13 @@ function validateConfig(env = process.env) {
      * limitams: netinkama saugumo konfigūracija stabdo startą, o ne tyliai
      * pakeičia elgesį.
      */
+    /**
+     * Žymos TTL (#19). Ta pati taisyklė kaip kitoms saugumo nuostatoms:
+     * `parseInt("10xyz")` tyliai duotų 10, o `abc` – NaN, ir žyma galiotų
+     * neapibrėžtą laiką. Ištrynimo garantijai tai reikštų, kad vėluojanti
+     * eilės žinutė vėl galėtų kurti artefaktus.
+     */
+    ["DELETION_TOMBSTONE_TTL_HOURS", { min: 1, max: 24 * 365 }],
     ["RATE_LIMIT_LOGIN_IP_MAX", { min: 1, max: 10_000 }],
     ["RATE_LIMIT_LOGIN_ACCOUNT_MAX", { min: 1, max: 10_000 }],
   ]) {

@@ -6,7 +6,8 @@ const { pollRateLimiter } = require("../middleware/rateLimiter");
 const authenticate = require("../middleware/authenticate");
 const { requirePermission } = require("../middleware/authorize");
 const { PERMISSIONS } = require("../utils/permissions");
-const { eraseJob, eraseOrphanedJobData } = require("../utils/jobErasure");
+const { eraseOrphanedJobData } = require("../utils/jobErasure");
+const lifecycleService = require("../services/lifecycleService");
 const { getRequestId, getActor } = require("../utils/requestContext");
 const { createLogger } = require("../utils/logger");
 const { validate, schemas } = require("../middleware/validate");
@@ -137,29 +138,38 @@ router.delete("/jobs/:id", rateLimiter, authenticate, requirePermission(PERMISSI
     });
   }
 
-  const outcome = await eraseJob(job);
+  /**
+   * KOORDINUOTAS IŠTRYNIMAS PER GYVAVIMO CIKLO SERVISĄ (#19 PR2).
+   *
+   * Vienas įėjimo taškas vietoj tiesioginio `eraseJob`: jis uždeda žymą PRIEŠ
+   * šalinimą, klasifikuoja gedimus ir grąžina stabilų struktūrizuotą rezultatą.
+   */
+  const result = await lifecycleService.deleteJobArtefacts(job, job.id, {
+    actor: req.authz ? req.authz.actor : null,
+  });
 
-  if (outcome.criticalFailure) {
-    // NEGRĄŽINAME 204: jobStore įrašas sąmoningai paliktas (deletion_pending),
-    // kad operaciją būtų galima pakartoti tuo pačiu ID. GDPR ištrynime serverio
-    // logas nėra pakankamas patvirtinimas - klientas turi matyti, kad nepavyko.
-    log.error(
-      `NEPAVYKO visiškai ištrinti jobo ${job.id}: ${outcome.errors.join("; ")}`
-    );
+  if (!result.complete) {
+    /**
+     * NEGRĄŽINAME 204: jobStore įrašas sąmoningai paliktas, kad operaciją būtų
+     * galima pakartoti tuo pačiu ID. GDPR ištrynime serverio logas nėra
+     * pakankamas patvirtinimas – klientas turi matyti, kad nepavyko.
+     *
+     * ⚠️ KLAIDŲ TEKSTAI NEGRĄŽINAMI. Ankstesnė versija siuntė `outcome.errors`
+     * tiesiai klientui, o juose būna failų kelių, saugyklos raktų ir Redis
+     * raktų – tai prieštarauja #19 („expose no filesystem paths, storage keys,
+     * Redis keys, provider payloads or deleted content"). Klientas gauna TIK
+     * kategorijas; pilnas tekstas lieka serverio loguose.
+     */
+    log.error(`NEPAVYKO visiškai ištrinti jobo ${job.id}: statusas=${result.status}`);
+
     return res.status(503).json({
       error:
         "Nepavyko visiškai ištrinti jobo duomenų. Jobas paliktas, kad užklausą būtų galima pakartoti.",
       deletion: {
-        queueJobRemoved: outcome.queueJobRemoved,
-        storageRemoved: outcome.storageRemoved,
-        auditEntriesRemoved: outcome.auditEntriesRemoved,
-        errors: outcome.errors,
+        status: result.status,
+        categories: result.categories,
       },
     });
-  }
-
-  if (!outcome.jobRemoved) {
-    return res.status(404).json({ error: "Jobas nerastas." });
   }
 
   return res.status(204).send();
