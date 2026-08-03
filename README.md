@@ -1294,6 +1294,23 @@ worker'is paverstų ištrynimą laikinu), ir ištrynimas privalo eiti per
 `pending_deletion` (kitaip nelieka būsenos, kurioje worker'is pamatytų ištrynimo
 žymą).
 
+**Koordinuotas ištrynimas (#19).** Vienas įėjimo taškas
+(`services/lifecycleService.js`) vietoj dviejų identiškų kopijų maršrutuose.
+Tvarka svarbi: **žyma uždedama prieš šalinimą**, nes priešingu atveju liktų
+langas, kuriame worker'is dar nematytų žymos, o duomenų jau nebūtų – ir jis
+juos atkurtų.
+
+Žymos gyvena atskirai nuo jobo įrašo, nes turi atsakyti „ar šis ID buvo
+ištrintas?" **tada, kai įrašo nebėra**.
+
+Rezultatas – stabilus struktūrizuotas formatas su kategorijomis: `deleted`,
+`remaining`, `retryable`, `nonRetryable` ir `ephemeral`. Efemeriškos rodomos
+atskirai sąmoningai: „nėra ko trinti" ir „pamiršome ištrinti" turi atrodyti
+skirtingai.
+
+⚠️ Iki #19 abu maršrutai grąžindavo klaidų tekstus **tiesiai klientui**, o
+juose būna failų kelių ir Redis raktų. Dabar klientas gauna tik kategorijas.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

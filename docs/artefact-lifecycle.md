@@ -145,12 +145,131 @@ Redis režime masyvas grįžtų kaip tuščia eilutė, ir inventorius tyliai din
 
 ---
 
+## Koordinuotas ištrynimas
+
+Vienas įėjimo taškas: `services/lifecycleService.js` →
+`deleteJobArtefacts(job, jobId, { actor })`.
+
+Abu DELETE maršrutai (`/api/jobs/:id`, `/api/transcribe-jobs/:id`) kviečia
+**jį**, o ne trynimą tiesiogiai. Anksčiau jie turėjo identiškas kopijas to
+paties kodo, ir jos galėjo išsiskirti.
+
+### Žymos būsenos
+
+| Būsena | Ar galima kurti artefaktus? | Ar galima trumpinti kelią? |
+|---|:---:|:---:|
+| `deletion_pending` | ❌ | ❌ – operacija dar vyksta |
+| `deletion_failed` | ❌ | ❌ – **reikia kartoti** |
+| `deleted` | ❌ | ✅ |
+
+Perėjimai **vienkrypčiai**: `deleted` yra galutinė ir jos atšaukti negalima –
+kitaip programavimo klaida paverstų jau įrodytą ištrynimą neapibrėžtu. Bet
+`deletion_failed → deleted` **leidžiamas sąmoningai**: tai retry kelias, be
+kurio dalinis ištrynimas liktų amžinai neužbaigtas.
+
+⚠️ **Tik `deleted` leidžia grąžinti `already_deleted`.** Ankstesnė versija turėjo
+vieną reikšmę „pažymėta", ir tai laužė retry: po dalinės nesėkmės antras
+`DELETE` sustodavo ties žyma ir sakydavo „ištrinta", nors artefaktai liko.
+
+Du klausimai, kuriuos reikia atskirti:
+
+- **„Ar galima kurti artefaktus?"** → ne, jei yra **bet kokia** žyma
+- **„Ar galima trumpinti kelią?"** → tik jei ištrynimas **patvirtintas**
+
+### Tvarka: žyma PRIEŠ šalinimą
+
+```
+tombstone ──► eraseJob ──► struktūrizuotas rezultatas ──► auditas
+```
+
+Jei žyma atsirastų po šalinimo, tarp jų liktų langas, kuriame worker'is dar
+nematytų žymos, o duomenų jau nebūtų – ir jis juos atkurtų.
+
+Žymos gyvena **atskirai** nuo jobo įrašo (`utils/deletionTombstones.js`), nes
+turi atsakyti į klausimą „ar šis ID buvo ištrintas?" **tada, kai įrašo nebėra**.
+
+`DELETION_TOMBSTONE_TTL_HOURS` (numatyta 72) privalo viršyti ilgiausią eilės
+įrašo gyvavimo trukmę – BullMQ užbaigtus jobus laiko iki 24 val.
+
+### Struktūrizuotas rezultatas
+
+```js
+{
+  jobId, status, actor, complete,
+  requestedAt,   // kada PAPRAŠYTA - visada yra
+  completedAt,   // kada FAKTIŠKAI baigta - null, jei nepavyko
+  categories: {
+    deleted:      ["queue_record", "source_audio", "job_record", "transcript", "protocol"],
+    remaining:    [],
+    retryable:    [],   // verta bandyti dar kartą
+    nonRetryable: [],   // kartojimas nepadės, reikia žmogaus
+    ephemeral:    ["transcript_redacted", "export_redacted", "export_original"],
+    unverified:   ["upload_temp", "conversion_temp"],  // dar netikrinama
+  },
+}
+```
+
+| Statusas | Ką reiškia |
+|---|---|
+| `deleted` | Viskas pašalinta |
+| `already_deleted` | Žyma jau buvo – ištrynimas įvyko anksčiau |
+| `partial` | Liko kategorijų, bet gedimai **kartotini** |
+| `failed` | Gedimai galutiniai – reikia žmogaus |
+
+**Efemeriškos kategorijos rodomos atskirai** sąmoningai: „nėra ko trinti" ir
+„pamiršome ištrinti" turi atrodyti skirtingai. Ta pati logika galioja
+`unverified`: „dar nepatikrinta" ir „patikrinta ir švaru" irgi skiriasi.
+
+**Transkripcija ir protokolas seka savo konteinerį.** Jie neturi atskiro fizinio
+saugojimo vieneto – gyvena `job.result` viduje, tad pašalinami kartu su
+`job_record`. Bet rezultate jie **įvardijami**, nes nutylėti artefaktai
+neatskiriami nuo pamirštų.
+
+### Laikai: `requestedAt` ≠ `completedAt`
+
+`requestedAt` yra kada ištrynimo **paprašyta**, `completedAt` – kada jis
+**faktiškai baigtas**. Nesėkmės atveju `completedAt` lieka `null`: nepavykęs
+trynimas neturi apsimesti turintis ištrynimo laiką.
+
+### Lygiagretūs kvietimai
+
+Antras kvietimas **laukia** pirmojo rezultato, o ne grąžina savo. Be to jis
+matytų žymą ir iš karto sakytų „ištrinta", nors pirmasis trynimas dar vyktų ir
+galėtų baigtis daline nesėkme – klientas gautų patvirtinimą, kurio niekas
+nedavė.
+
+⚠️ Koordinavimas galioja **tik šiam procesui**. Kelioms replikoms reikėtų Redis
+užrakto.
+
+### `ENOENT` ištrynimo kontekste
+
+„Failo nebėra" trinant reiškia, kad tikslas **jau pasiektas**, ne gedimą.
+Klasifikavus jį kaip `permanent`, sėkmingas ištrynimas atrodytų kaip problema,
+reikalaujanti žmogaus. Taisyklė **kontekstinė**: tas pats `ENOENT` skaitant failą
+būtų tikras gedimas.
+
+⚠️ **Rezultate ir atsakymuose nėra kelių, raktų ar klaidų tekstų.** Iki #19
+abu maršrutai grąžindavo `outcome.errors` tiesiai klientui, o juose būna failų
+kelių ir Redis raktų. Dabar klientas gauna **tik kategorijas**; pilnas tekstas
+lieka serverio loguose.
+
+### Idempotentiškumas
+
+Pakartotinis ištrynimas nėra klaida – tai teisėtas veiksmas (tinklo
+pakartojimas, du administratoriai, retry politika). Lygiagretūs kvietimai
+konverguoja į vieną galutinę būseną, o **pirmasis `deletedAt` neperrašomas**:
+būtent jis atsako, kada duomenys buvo pašalinti.
+
 ## Ko šis etapas NEAPIMA
 
-- **Ištrynimo koordinavimo** – artefaktų registravimo į inventorių realiuose
-  keliuose dar nėra; tai kito etapo darbas.
+- **Artefaktų registravimo į inventorių realiuose keliuose** – `artefacts`
+  laukas yra, bet jo dar niekas nepildo.
 - **Retencijos terminų skaičiavimo** – laukas yra, politika dar netaikoma.
-- **Tombstone įrašymo** – būsena modelyje aprašyta, mechanizmo dar nėra.
+- **Žymos TIKRINIMO worker'iuose** – žyma uždedama ir išgyvena jobą, bet
+  eilės ir worker'iai jos dar netikrina. Iki tol vėluojanti žinutė vis dar
+  gali sukurti artefaktus.
+- **Žymų persistencijos** – saugykla tik atmintyje, vienas procesas. Restartas
+  žymas praranda, ta pati riba kaip sesijų saugykloje (#18).
 - **Našlaičių aptikimo** – inventoriaus skenavimas ateis su E2E patikromis.
 - **`sourceArtefactId` nuorodų validacijos** – laukas priimamas be patikros,
   nes jai reikia viso inventoriaus konteksto. Kitas etapas privalo patikrinti:

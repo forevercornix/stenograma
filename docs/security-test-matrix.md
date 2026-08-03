@@ -216,6 +216,34 @@ darbą. Tai lieka už #18 ribų.
 
 Modelis ir grafas: [`docs/artefact-lifecycle.md`](artefact-lifecycle.md).
 
+### #19 PR2 — koordinuotas ištrynimas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Žyma (tombstone) uždedama **prieš** šalinimą | `lifecycleDeletion` | Žymos pašalinimas → krinta 5 testai |
+| Žyma **išgyvena** jobo įrašą | `lifecycleDeletion` | — |
+| Pakartotinis ištrynimas nėra klaida (idempotentiškas) | `lifecycleDeletion` | Idempotentiškumo patikros pašalinimas |
+| **Po dalinio ištrynimo pakartojimas realiai trina** | `lifecycleDeletion` | „Bet kokia žyma trumpina kelią" → krinta 2 |
+| **Lygiagretus kvietimas LAUKIA, o ne skelbia sėkmę** | `lifecycleDeletion` | Koordinavimo pašalinimas |
+| `pending` blokuoja kūrimą, bet leidžia kartoti | `lifecycleDeletion` | — |
+| `deleted` yra **galutinė** – atšaukti negalima | `lifecycleDeletion` | `DELETED → FAILED` leidimas |
+| `failed → deleted` leidžiamas (retry kelias) | `lifecycleDeletion` | Retry kelio uždarymas → krinta 2 |
+| `completedAt` yra `null`, kol nepatvirtinta | `lifecycleDeletion` | — |
+| Aktorius realiai patenka į auditą (ir be HTTP konteksto) | `lifecycleDeletion` | — |
+| `ENOENT` ištrynime = sėkmė, ne gedimas | `lifecycleDeletion` | — |
+| Žymos TTL validuojamas startup metu | `lifecycleDeletion` | — |
+| Transkripcija ir protokolas seka konteinerį | `lifecycleDeletion` | — |
+| Laikini artefaktai pažymėti kaip dar nepatikrinti | `lifecycleDeletion` | — |
+| Stabilus struktūrizuotas formatas visiems atvejams | `lifecycleDeletion` | — |
+| Kartotini ir galutiniai gedimai atskiriami | `lifecycleDeletion` | — |
+| Efemeriškos kategorijos rodomos atskirai | `lifecycleDeletion` | — |
+| **Atsakymuose nėra kelių, raktų ar klaidų tekstų** | `lifecycleDeletion` | `errors` pridėjimas į atsakymą |
+| Abu DELETE maršrutai kviečia **vieną** servisą | `lifecycleDeletion` | Tiesioginis `eraseJob` apeinant servisą |
+| Auditas fiksuoja aktorių, rezultatą ir laiką be turinio | `lifecycleDeletion` | — |
+
+⚠️ **Žymos dar netikrinamos worker'iuose** – jos uždedamos ir išgyvena jobą, bet
+eilės jų dar neskaito. Iki tol vėluojanti žinutė vis dar gali sukurti artefaktus.
+
 ⚠️ **Šis etapas nieko netrina.** Registras, būsenų modelis ir koreliacija yra
 pagrindas koordinuotam ištrynimui, kuris ateina atskirai.
 
