@@ -256,6 +256,28 @@ Modelis ir grafas: [`docs/artefact-lifecycle.md`](artefact-lifecycle.md).
 | Retencija paleidžiama iškart po starto | `deletionEnforcement` | — |
 | Žymų restarto riba **užrašyta kode** | `deletionEnforcement` | — |
 
+### #19 PR4 — E2E patikra per tikrus produkcijos kelius
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Pilnas ciklas: įkėlimas → transkripcija → ištrynimas per **tikrus** maršrutus | `lifecycleE2E` | — |
+| Po ištrynimo **inventoriaus skenavimas** neranda nuorodų | `lifecycleE2E` | Audito valymo išjungimas → krinta 4 |
+| Audio pašalinamas iš **fizinės saugyklos** | `lifecycleE2E` | `fileStorage.del` išjungimas |
+| Protokolo ir transkripcijos jobai netampa našlaičiais | `lifecycleE2E` | — |
+| Eksportas nepalieka artefakto (efemeriškas) | `lifecycleE2E` | — |
+| Pakartotinis ištrynimas duoda tą pačią būseną | `lifecycleE2E` | — |
+| Ištrinto jobo ID negali būti atkurtas | `lifecycleE2E` | — |
+| Atšaukimas nebaigus darbo palieka švarią būseną | `lifecycleE2E` | — |
+| Atsakyme nėra kelių ar raktų (per **tikrą HTTP**) | `lifecycleE2E` | — |
+| Testai **nenaudoja išgalvotų ID** | `lifecycleE2E` | — |
+| **Kiekvienas** registro tipas turi skenavimo strategiją | `lifecycleE2E` | Strategijos pašalinimas → krinta 3 |
+| Praleisti tipai turi priežastį, ne tylą | `lifecycleE2E` | Priežasties pašalinimas |
+| Efemeriški tipai imami iš **registro**, ne strategijų sąrašo | `lifecycleE2E` | — |
+
+⚠️ **Visi identifikatoriai gaunami iš realių HTTP atsakymų.** Testas su
+išgalvotu `job_test_123` tikrintų savo paties fikciją ir „praeitų" net sulaužius
+produkcijos kelią – tam yra atskira sąžiningumo patikra.
+
 ⚠️ **Žymos restarto neišgyvena** – saugykla tik atmintyje. Po restarto vėluojanti
 eilės žinutė vėl galėtų kurti artefaktus.
 
