@@ -43,6 +43,7 @@ const privacy = [
   "artefactInventory",
   "lifecycleDeletion",
   "deletionEnforcement",
+  "lifecycleE2E",
   "observabilityEvents.route",
 ];
 

@@ -1329,6 +1329,14 @@ kol juos surinks retencija.
 ⚠️ Žymos gyvena tik atmintyje – **restarto neišgyvena**. Po jo vėluojanti žinutė
 vėl galėtų kurti artefaktus; restartui atspariam variantui reikia Redis.
 
+**E2E gyvavimo ciklo patikra (#19).** Ištrynimas tikrinamas per **tikrus**
+produkcijos maršrutus: realus įkėlimas, transkripcija, protokolas, eksportas ir
+`DELETE` – visi identifikatoriai gaunami iš HTTP atsakymų, ne sugalvoti.
+
+Po ištrynimo atliekamas **inventoriaus skenavimas**: tikrinama ne tik ar įrašas
+pasiekiamas pagal ID, bet ir ar jo nuorodų neliko kitur. Pamirštos nuorodos yra
+tai, kas paverčia ištrynimą nepilnu.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

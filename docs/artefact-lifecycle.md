@@ -298,6 +298,30 @@ ištrynimo žymos". Kvietėjui abi reiškia tą patį – **nerašyk toliau** �
 nesiskiria. Jei kada nors prireiks jas atskirti, reikės atskiro grąžinimo tipo,
 ne `null`.
 
+## Artefaktų skenavimas
+
+`utils/artefactScanner.js` eina per **visą** registrą, ne per pasirinktas
+saugyklas. Kiekvienas tipas privalo turėti strategiją; be jos
+`scanAllArtefacts` meta `INCOMPLETE_SCAN_COVERAGE`.
+
+| Tipas | Kaip skenuojamas |
+|---|---|
+| `job_record` | Tiesioginė paieška `jobStore` |
+| `audit_entry` | Per **pseudonimizuotą** `subjectId` – ta pati funkcija kaip ištrynime |
+| `source_audio` | Fizinė saugykla pagal raktą, užfiksuotą **prieš** ištrynimą |
+| `queue_record` | BullMQ eilės (inline režime nėra ko tikrinti) |
+| `transcript`, `protocol` | Praleidžiami – saugomi `job_record` viduje |
+| `*_redacted`, `export_*` | Praleidžiami – efemeriški |
+| `upload_temp`, `conversion_temp` | Praleidžiami – **dar neįgyvendinta** |
+
+⚠️ Praleisti tipai **privalo turėti priežastį**. „Nėra ko skenuoti" ir
+„pamiršome skenuoti" turi atrodyti skirtingai; praleidimas be priežasties yra
+tas pats, kas neskenuoti.
+
+Naujas artefakto tipas be strategijos **sulaužo testą** ir patenka į peržiūrą –
+priešingu atveju jis liktų neskenuotas tyliai, o testai ir toliau būtų žali,
+nors dengtų mažesnę dalį nei anksčiau.
+
 ### `ENOENT` ištrynimo kontekste
 
 „Failo nebėra" trinant reiškia, kad tikslas **jau pasiektas**, ne gedimą.
