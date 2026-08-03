@@ -120,6 +120,23 @@ function createRedisStore(redisClient) {
     return job;
   }
 
+  /**
+   * Įrašo jobą IŠSAUGANT jo ID (#20 PR2 – atkūrimui).
+   *
+   * `create()` generuoja naują ID; atkuriant to negalima – kopijos įrašai
+   * nurodo konkrečius identifikatorius, ir naujas ID nutrauktų visas sąsajas
+   * (audio raktus, audito įrašus, išvedimo grafą).
+   *
+   * ⚠️ `INDEX_KEY` atnaujinamas BŪTINAI: be jo įrašas egzistuotų, bet
+   * nepatektų nei į `listAll`, nei į retencijos valymą – taptų nematomu
+   * našlaičiu, kurio niekas niekada nepašalintų.
+   */
+  async function restoreRecord(job) {
+    await redisClient.hset(JOB_PREFIX + job.id, serialize(job));
+    await redisClient.zadd(INDEX_KEY, Date.now(), job.id);
+    return job;
+  }
+
   async function get(id) {
     const flat = await redisClient.hgetall(JOB_PREFIX + id);
     return deserialize(flat);
@@ -182,6 +199,16 @@ function createRedisStore(redisClient) {
    * jie tiesiog praleidžiami (deserialize grąžina null), o jų failai tada teisėtai
    * tampa orphan.
    */
+  /**
+   * VISI jobai – atsarginėms kopijoms (#20 PR2).
+   *
+   * Naudoja `_scanJobs`, kuris eina per `SCAN`, ne `KEYS` – pastarasis
+   * blokuotų Redis, kol pereina visą raktų erdvę.
+   */
+  async function listAll() {
+    return _scanJobs();
+  }
+
   async function listReferencedStorageKeys() {
     const jobs = await _scanJobs();
     const keys = new Set();
@@ -252,7 +279,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, get, update, remove, sweepExpired, size, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

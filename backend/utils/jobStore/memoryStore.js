@@ -74,6 +74,30 @@ async function listReferencedStorageKeys() {
   return [...keys];
 }
 
+/**
+ * VISI jobai – atsarginėms kopijoms (#20 PR2).
+ *
+ * Kitos enumeracijos (`listByFlag`, `listPendingDeletions`) grąžina filtruotus
+ * pogrupius. Kopijai reikia pilno vaizdo, tad ši funkcija sąmoningai neturi
+ * filtro – filtravimas pagal būseną yra kopijavimo serviso sprendimas, ne
+ * saugyklos.
+ */
+/**
+ * Įrašo jobą IŠSAUGANT jo ID (#20 PR2 – atkūrimui).
+ *
+ * `create()` generuoja naują ID; atkuriant to negalima – kopijos įrašai nurodo
+ * konkrečius identifikatorius, ir naujas ID nutrauktų visas sąsajas (audio
+ * raktus, audito įrašus, išvedimo grafą).
+ */
+async function restoreRecord(job) {
+  jobs.set(job.id, { ...job });
+  return job;
+}
+
+async function listAll() {
+  return [...jobs.values()];
+}
+
 async function listByFlag(field, limit = 100) {
   const pending = [];
   for (const job of jobs.values()) {
@@ -91,4 +115,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, get, update, remove, sweepExpired, size, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

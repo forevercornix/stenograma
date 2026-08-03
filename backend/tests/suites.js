@@ -42,6 +42,7 @@ const privacy = [
   "audioCleanup",
   "artefactInventory",
   "backupPolicy",
+  "backupRestore",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",

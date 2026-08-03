@@ -327,6 +327,38 @@ pasitikėjimą būtent ten, kur jo negalima turėti. Todėl jis tikrinamas testa
 | Retencijos terminas **manifeste**, ne skaičiuojamas atkuriant | `backupPolicy` | — |
 | `BACKUP_RETENTION_DAYS` validuojamas startup metu | `backupPolicy` | — |
 
+### #20 PR2 — kopijavimas ir atkūrimas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Vykdomi darbai praleidžiami ir **užfiksuojami manifeste** | `backupRestore` | „Viskas įtraukiama" |
+| Kopija apima `source_audio` – vienas režimas | `backupRestore` | — |
+| Atkūrimo grandinė vykdoma **nuosekliai** (6 žingsniai) | `backupRestore` | — |
+| Sugadintas turinys sustabdo atkūrimą | `backupRestore` | Sumos patikros pašalinimas |
+| Sustojus grandinei sistema **lieka nepaliesta** | `backupRestore` | — |
+| Naujesnis formatas ir nesuderinamas major atmetami | `backupRestore` | — |
+| Minor/patch skirtumai leidžiami | `backupRestore` | — |
+| **Ištrintas jobas NEGRĮŽTA iš kopijos** | `backupRestore` | Žymų patikros pašalinimas → krinta 2 |
+| Saugyklos raktas iš kopijos validuojamas (kelio apėjimas) | `backupRestore` | Apsaugos pašalinimas |
+| Kopijavimas ir atkūrimas audituojami su aktoriumi | `backupRestore` | — |
+| Nepavykęs atkūrimas fiksuoja **žingsnį** | `backupRestore` | — |
+| Audite ir rezultate nėra kelių, raktų ar turinio | `backupRestore` | — |
+| **Auditas į kopiją nepatenka** (su eksplicitine priežastimi) | `backupRestore` | Neįtraukimo pašalinimas |
+| Sena kopija su auditu **praleidžiama**, ne atkuriama | `backupRestore` | Audito atkūrimas |
+
+⚠️ **Atkūrimas gerbia #19 ištrynimo žymas.** Be to atsarginė kopija taptų būdu
+apeiti GDPR ištrynimą: pakaktų atkurti kopiją, kad ištrinti duomenys grįžtų.
+
+⚠️ **Auditas nekopijuojamas.** #19 ištrynimas šalina audito įrašus, o žymų
+apsauga dengia jobus pagal ID – audito įrašai saugo pseudonimizuotą subjektą,
+tad ta patikra jų neapima. Atkūrus auditą, GDPR ištrinti įrašai grįžtų.
+**Pasekmė:** po atkūrimo audito žurnale nebus įrašų apie tai, kas vyko iki
+kopijos – atkūrimas atstato duomenis, ne jų istoriją.
+
+⚠️ **Pritaikymas nėra transakcinis.** Patikros pašalina priežastis, dėl kurių
+atkūrimas nutrūktų, bet infrastruktūros gedimo (procesas nukrenta rašant) jos
+neapima.
+
 ⚠️ **Šis etapas nieko nekopijuoja.** Politika, manifestas ir suderinamumo
 patikros yra pagrindas kopijavimui ir atkūrimui, kurie ateina atskirai.
 

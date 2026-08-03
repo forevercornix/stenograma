@@ -1371,6 +1371,27 @@ galiojimo pabaigos.
 pakeitimo — kas gali pakeisti turinį, gali perskaičiuoti ir sumą. Iki parašų su
 raktu kopijų vientisumas remiasi **saugyklos prieigos kontrole**.
 
+**Kopijavimas ir atkūrimas (#20).** Kopija daroma be „freeze world":
+`snapshotTime` fiksuojamas pradžioje, vykdomi darbai praleidžiami, o manifeste
+įrašoma **kiek** jų praleista ir **kodėl**. Taip operatorius atskiria sąmoningą
+praleidimą nuo gedimo.
+
+Atkūrimas – **fail-closed grandinė**: manifestas → formatas → programos versija
+→ kontrolinė suma → turinys → **tik tada** rašymas. Iki paskutinio žingsnio
+veikianti sistema nepaliečiama, tad nutrūkęs atkūrimas jos nesugadina.
+
+⚠️ **Atkūrimas gerbia ištrynimo žymas (#19).** Kopija atkuria būklę, bet
+**negali atšaukti sprendimo ištrinti** — be to ji taptų būdu apeiti GDPR
+ištrynimą.
+
+⚠️ **Auditas nekopijuojamas** dėl tos pačios priežasties: jo įrašai saugo
+pseudonimizuotą subjektą, tad žymų patikra jų neapima, ir atkūrus GDPR ištrinti
+įrašai grįžtų. Po atkūrimo audito žurnale nebus istorijos iki kopijos —
+**atkuriami duomenys, ne jų istorija**.
+
+⚠️ Kadangi kopija visada apima `source_audio`, ji gali būti **ženkliai didesnė
+nei eksportas**: eksportas išneša rezultatus, kopija atkuria sistemą.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
