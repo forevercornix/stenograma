@@ -36,6 +36,10 @@ router.post("/jobs", rateLimiter, authenticate, requirePermission(PERMISSIONS.JO
     // Koreliacija su HTTP užklausa (GDPR #17).
     requestId: getRequestId(),
     actor: getActor(),
+    // Rolė ir mechanizmas - autorizacijai atkurti worker'yje (#18 PR3).
+    // Kredencialų (tokenų, cookie, slaptažodžių) čia NĖRA ir negali būti.
+    actorRole: req.authz ? req.authz.role : null,
+    actorSource: req.authz ? req.authz.source : null,
   });
 
   // HTTP endpoint'as TIK įdeda jobą į eilę (BullMQ) arba paleidžia inline (be Redis)

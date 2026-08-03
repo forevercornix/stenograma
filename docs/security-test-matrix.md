@@ -138,6 +138,24 @@ būtų paminėtas. Be to matrica ilgainiui virstų sąrašu to, ką kažkada tur
 | Kiekvienas maršrutas turi IR autentifikaciją, IR leidimo patikrą | `criticalGuarantees.route` | `requirePermission` pašalinimas iš DELETE |
 | `API_KEY_ROLE` validuojamas startup metu | `authFoundation` | — |
 
+### #18 PR3 — konteksto propagavimas ir revokacija
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Jobas neša aktoriaus ID, rolę ir šaltinį | `workerAuthorization` | `actorRole` neįrašymas |
+| Jobo įraše NĖRA slaptažodžių, sesijos ID ar cookie | `workerAuthorization` | — (tikrinamas visas serializuotas įrašas) |
+| Pašalintas vartotojas nebeįvykdo eilėje laukiančio jobo | `workerAuthorization` | Pasitikėjimas užšaldyta role → krinta 4 testai |
+| Sumažinta rolė atima teisę, nors jobe rašo senoji | `workerAuthorization` | Ta pati |
+| Logout NENUTRAUKIA jau pradėto darbo (sąmoninga riba) | `workerAuthorization` | — |
+| Jobai be aktoriaus (iki #18) vis tiek vykdomi | `workerAuthorization` | — |
+| Abu vykdymo keliai (inline + BullMQ) tikrina teises vienodai | `workerAuthorization` | Autorizacijos pašalinimas iš worker'io |
+| Atmestas vykdymas audituojamas be kredencialų | `workerAuthorization` | — |
+
+⚠️ **Revokacijos modelis:** teisės **perskaičiuojamos vykdymo metu**, ne
+užšaldomos kuriant jobą. Kaina: rolės sumažinimas nutraukia jau eilėje esančius
+darbus. Tai sąmoningai pasirinkta pusė — geriau nutraukti teisėtą darbą, nei
+įvykdyti neteisėtą.
+
 ⚠️ **Žinoma riba:** `API_KEY_ROLE` pagal nutylėjimą yra `administrator`
 (atgalinis suderinamumas – iki #18 rakto turėtojas galėjo viską). Kol taip yra,
 RBAC **neriboja** bendro rakto turėtojų. Startup įspėjimas apie tai praneša;

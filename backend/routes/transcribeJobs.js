@@ -124,6 +124,9 @@ router.post(
       // Koreliacija su HTTP užklausa (GDPR #17).
       requestId: getRequestId(),
       actor: getActor(),
+      // Rolė ir mechanizmas - autorizacijai atkurti worker'yje (#18 PR3).
+      actorRole: req.authz ? req.authz.role : null,
+      actorSource: req.authz ? req.authz.source : null,
       // storageKey saugom JOBE, ne tik BullMQ payload'e - kad GDPR ištrynimas
       // rastų likusį audio ir INLINE režime (ten BullMQ jobo išvis nėra).
       storageKey,

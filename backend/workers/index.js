@@ -19,6 +19,7 @@ const jobRunner = require("../queues/jobRunner");
 const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
 const { transcriptionProcessor, protocolProcessor } = require("../queues/processors");
 const { createLogger } = require("../utils/logger");
+const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
 const log = createLogger("worker");
 
 
@@ -82,8 +83,33 @@ function createWorker(queueName, processor, workerOptions = {}) {
        * eilutėmis.
        */
       return runWithContext(
-        { requestId: processingJob.requestId || null, actor: processingJob.actor || null, execution: "worker" },
+        {
+          requestId: processingJob.requestId || null,
+          actor: processingJob.actor || null,
+          actorRole: processingJob.actorRole || null,
+          execution: "worker",
+        },
         async () => {
+          /**
+           * AUTORIZACIJA VYKDYMO METU (#18 PR3) – TA PATI logika kaip inline
+           * kelyje (`queues/jobRunner.js`).
+           *
+           * Worker'is yra atskiras procesas, kuris jobą paima galbūt po ilgo
+           * laiko. Jei per tą laiką aktorius pašalintas ar jo rolė sumažinta,
+           * darbas neturi būti įvykdytas – priešingu atveju revokacija
+           * negaliotų būtent ten, kur ji svarbiausia.
+           */
+          const decision = authorizeJobOrAudit(processingJob, jobId);
+
+          if (!decision.allowed) {
+            await jobStore.update(jobId, {
+              status: jobStore.STATUS.FAILED,
+              error_code: "AUTHORIZATION_REVOKED",
+              error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
+            });
+            return;
+          }
+
           log.info("Darbas pradėtas", { stage: "processing", execution: "worker", jobId });
           const startedAt = Date.now();
 

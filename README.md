@@ -1349,6 +1349,22 @@ RBAC neriboja rakto turėtojų** – `job:delete` ir `export:original` apsaugos 
 negalioja. Startup apie tai įspėja. Realiam atskyrimui:
 `API_KEY_ROLE=operator` arba perėjimas prie sesijų.
 
+**Asinchroniniai darbai ir revokacija (#18 PR3).** Su jobu keliauja **tik**
+aktoriaus ID, rolė ir autentifikacijos mechanizmas – jokių tokenų, sesijos ID,
+cookie ar slaptažodžių. Jobas gyvena Redis'e ir BullMQ eilėse, tad paslaptis ten
+išgyventų kur kas ilgiau nei pati užklausa.
+
+Teisės **perskaičiuojamos vykdymo metu**, ne užšaldomos kuriant jobą. Jobai gali
+laukti eilėje valandas; per tą laiką vartotojas gali būti pašalintas iš
+`AUTH_USERS` arba jo rolė sumažinta – būtent tada, kai to labiausiai reikia.
+Užšaldytos teisės reikštų, kad revokacija neveikia jau sukurtiems darbams.
+
+⚠️ Kaina, priimta sąmoningai: **rolės sumažinimas nutraukia eilėje esančius
+darbus**. Geriau nutraukti teisėtą darbą, nei įvykdyti neteisėtą.
+
+⚠️ **Atsijungimas (logout) darbo NENUTRAUKIA** – sesija yra prisijungimo, ne
+teisės, mechanizmas. Nutraukiama tik dingus pačiai tapatybei ar teisei.
+
 ⚠️ **Nuosavybės patikrų nėra.** Rolė sprendžia, kokius veiksmus galima atlikti,
 bet ne su kieno duomenimis – bet kuris administratorius gali ištrinti bet kurį
 darbą.

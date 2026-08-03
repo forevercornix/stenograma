@@ -42,6 +42,29 @@ function newJob(fields = {}) {
      */
     requestId: fields.requestId || null,
     actor: fields.actor || null,
+    /**
+     * AKTORIAUS ROLĖ IR ŠALTINIS (#18 PR3).
+     *
+     * ⚠️ `actorRole` NĖRA AUTORITETINGAS. Tai ISTORINIS įrašas – „kokia rolė
+     * buvo kūrimo metu" – skirtas auditui ir diagnostikai, NE sprendimui, ar
+     * leidžiama vykdyti.
+     *
+     * Autorizacija VISADA perskaičiuoja dabartinę rolę iš kredencialų
+     * saugyklos (`utils/jobAuthorization.js resolveCurrentRole`). Jei kas nors
+     * kada nors ims spręsti pagal šį lauką, revokacija nustos veikti eilėje
+     * laukiantiems darbams – tyliai, ir be jokio klaidos pranešimo.
+     *
+     * Saugoma TIK tai, ko reikia autorizacijai ATKURTI: nekintamas aktoriaus
+     * ID (`actor`), rolės nuotrauka ir mechanizmas, kuriuo jis buvo
+     * autentifikuotas.
+     *
+     * KAS ČIA NEPATENKA IR KODĖL: jokių bearer tokenų, sesijos ID, cookie ar
+     * slaptažodžių. Jobas gyvena Redis'e, BullMQ eilėse ir logų kontekste –
+     * paslaptis ten išgyventų kur kas ilgiau nei pati užklausa, o revokacija
+     * jos nepasiektų.
+     */
+    actorRole: fields.actorRole || null,
+    actorSource: fields.actorSource || null,
     // Techninis audio valymas nepavyko - laukiama pakartojimo. SĄMONINGAI
     // ATSKIRTA nuo `deletion_pending`: ta vėliava reiškia VARTOTOJO prašytą
     // viso jobo ištrynimą, o ši - tik nebereikalingo audio pašalinimą, kai
