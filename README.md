@@ -1311,6 +1311,24 @@ skirtingai.
 ⚠️ Iki #19 abu maršrutai grąžindavo klaidų tekstus **tiesiai klientui**, o
 juose būna failų kelių ir Redis raktų. Dabar klientas gauna tik kategorijas.
 
+**Apsauga nuo atkūrimo po ištrynimo (#19).** Žymos nebe tik uždedamos – jos
+**tikrinamos**: `jobStore.update` viduje (vienintelis kelias, kuriuo įrašas
+keičiasi), BullMQ worker'yje ir inline kelyje. Be to vėluojanti eilės žinutė
+atkurtų artefaktus jau ištrintam jobui, ir ištrynimas būtų laikinas.
+
+Patikra `update` viduje sąmoningai, o ne prie kiekvieno kvietėjo: pastarasis
+variantas reikštų kelias dešimtis vietų, iš kurių viena būtų pamiršta, ir spraga
+būtų tyli.
+
+Apsauga garantuoja, kad **jobas nebus atnaujintas** po ištrynimo ir kad **naujas
+darbas nebus pradėtas**. Ji **negarantuoja**, kad jau vykdomas processor'ius
+sustos vidury: iki pirmojo `update` jis gali spėti iškviesti tiekėją ar parašyti
+laikiną failą. Rezultatas į jobą nepateks, bet tarpiniai pėdsakai gali likti,
+kol juos surinks retencija.
+
+⚠️ Žymos gyvena tik atmintyje – **restarto neišgyvena**. Po jo vėluojanti žinutė
+vėl galėtų kurti artefaktus; restartui atspariam variantui reikia Redis.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

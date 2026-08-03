@@ -1,6 +1,20 @@
 const memoryStore = require("./memoryStore");
 const { STATUS, JOB_TYPES, TTL_MS } = require("./common");
 const { createLogger } = require("../../utils/logger");
+const tombstones = require("../deletionTombstones");
+
+/**
+ * VIDINIS gyvavimo ciklo raktas (#19 PR3).
+ *
+ * TIK ištrynimo keliams, kurie privalo galėti keisti jobą po žymos uždėjimo.
+ * `Symbol` pasirinktas sąmoningai: jo negalima atspėti, atsitiktinai įrašyti
+ * ar perduoti iš konfigūracijos – reikia eksplicitiškai importuoti, o tai
+ * matoma peržiūroje.
+ *
+ * ⚠️ NENAUDOTI produkciniame kode už `services/lifecycleService.js` ribų.
+ * Struktūrinis testas tikrina, kurie failai jį mini.
+ */
+const LIFECYCLE_INTERNAL = Symbol("jobStore.lifecycleInternal");
 const log = createLogger("job-store");
 
 /**
@@ -122,8 +136,55 @@ module.exports = {
     await ensureInit();
     return store.get(id);
   },
-  update: async (id, patch) => {
+  /**
+   * @param {string} id
+   * @param {object} patch
+   * @param {{allowAfterDeletion?: boolean}} [options]
+   */
+  LIFECYCLE_INTERNAL,
+
+  /**
+   * @param {string} id
+   * @param {object} patch
+   * @param {{allowAfterDeletion?: symbol}} [options] - apėjimui reikia
+   *   `jobStore.LIFECYCLE_INTERNAL`, ne `true`
+   * @returns {Promise<object|null>} `null` reiškia DVI skirtingas situacijas:
+   *   jobo nėra ARBA atnaujinimas atmestas dėl ištrynimo žymos. Kvietėjui abi
+   *   reiškia „nerašyk toliau", tad jos nesiskiria; jei kada nors prireiks
+   *   atskirti, reikės atskiro grąžinimo tipo, ne `null`.
+   */
+  update: async (id, patch, options = {}) => {
     await ensureInit();
+
+    /**
+     * IŠTRYNIMO ŽYMOS PATIKRA – VIENAME TAŠKE (#19 PR3).
+     *
+     * Žyma iki šiol buvo tik uždedama, bet niekas jos netikrino: vėluojanti
+     * eilės žinutė ar pasenęs worker'is galėjo atkurti artefaktus jau
+     * ištrintam jobui, ir ištrynimas tapdavo laikinu.
+     *
+     * KODĖL ČIA, o ne prie kiekvieno kvietimo. `jobStore.update` yra
+     * VIENINTELIS kelias, kuriuo jobo įrašas keičiasi – tiek inline, tiek
+     * BullMQ worker'yje, tiek retencijoje. Patikra prie kiekvieno kvietėjo
+     * reikštų kelis dešimtis vietų, iš kurių viena anksčiau ar vėliau būtų
+     * pamiršta – ir spraga būtų tyli.
+     *
+     * APĖJIMAS REIKALAUJA SIMBOLIO, ne `true`.
+     *
+     * Pirmoji versija priėmė `{ allowAfterDeletion: true }` – ir tai buvo per
+     * galingas „escape hatch": bet kuris naujas kvietėjas galėjo jį parašyti
+     * netyčia (ar bandydamas „pataisyti" atmestą atnaujinimą) ir vėl atidaryti
+     * kelią artefaktų kūrimui po ištrynimo.
+     *
+     * `LIFECYCLE_INTERNAL` yra `Symbol` – jo negalima atspėti, atsitiktinai
+     * įrašyti ar gauti iš JSON konfigūracijos. Kad juo pasinaudotum, reikia
+     * eksplicitiškai importuoti iš `jobStore`, o tai matoma peržiūroje.
+     */
+    if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+      log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
+      return null;
+    }
+
     return store.update(id, patch);
   },
   remove: async (id) => {

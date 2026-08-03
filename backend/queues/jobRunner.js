@@ -1,6 +1,7 @@
 const jobStore = require("../utils/jobStore");
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
+const tombstones = require("../utils/deletionTombstones");
 const log = createLogger("job-runner");
 
 /**
@@ -190,6 +191,18 @@ async function _runInline(type, jobId, payload) {
        * pašalintas ar jo rolė sumažinta. Tikrinam DABARTINĘ būklę - kitaip
        * revokacija neveiktų eilėje laukiantiems darbams.
        */
+      /**
+       * IŠTRYNIMO ŽYMA – TIKRINAMA PIRMA (#19 PR3).
+       *
+       * Ta pati apsauga kaip BullMQ worker'yje. Abu keliai turi elgtis
+       * vienodai: priešingu atveju ištrynimo garantija priklausytų nuo to, ar
+       * sukonfigūruotas Redis – t. y. būtų nenuspėjama.
+       */
+      if (tombstones.isDeleted(jobId)) {
+        log.warn("Praleistas ištrinto jobo vykdymas", { stage: "skipped_deleted", jobId, execution: "inline" });
+        return;
+      }
+
       const decision = authorizeJobOrAudit(job, jobId);
 
       if (!decision.allowed) {

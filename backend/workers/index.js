@@ -20,6 +20,7 @@ const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection 
 const { transcriptionProcessor, protocolProcessor } = require("../queues/processors");
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
+const tombstones = require("../utils/deletionTombstones");
 const log = createLogger("worker");
 
 
@@ -54,6 +55,27 @@ function createWorker(queueName, processor, workerOptions = {}) {
     queueName,
     async (job) => {
       const { jobId, payload } = job.data;
+
+      /**
+       * IŠTRYNIMO ŽYMOS PATIKRA – PIRMAS DALYKAS (#19 PR3).
+       *
+       * Vėluojanti eilės žinutė ar pakartotinis bandymas gali atkeliauti jau
+       * po to, kai jobas ištrintas. Be šios patikros worker'is pradėtų darbą
+       * ir prikurtų artefaktų tam, ko kaip tik atsikratėme.
+       *
+       * NEMETAM klaidos: klaida priverstų BullMQ kartoti, o kartojimas čia
+       * niekada nepavyks – jobas ištrintas visam laikui. Tyliai užbaigiam,
+       * kad žinutė dingtų iš eilės.
+       *
+       * `jobStore.update` turi tą pačią apsaugą (žr. utils/jobStore/index.js),
+       * bet ji grąžintų `null`, o worker'is tai palaikytų „įrašas nerastas" ir
+       * mestų klaidą – teisingas rezultatas su klaidinga priežastimi.
+       */
+      if (tombstones.isDeleted(jobId)) {
+        log.warn("Praleistas ištrinto jobo vykdymas", { stage: "skipped_deleted", jobId });
+        return { skipped: "deleted" };
+      }
+
       // Pažymim PROCESSING su realiu attempt numeriu (BullMQ job.attemptsMade).
       // update() grąžina null, jei jobo įrašo NĖRA (pvz. nesuderintas store, P1 scenarijus,
       // arba job'as pasibaigė TTL). Tada BullMQ nemato problemos, bet vartotojo jobo įrašo
