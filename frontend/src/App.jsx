@@ -27,7 +27,10 @@ import {
   generateProtocol,
   transcribeAudioJob,
   exportProtocol,
+  fetchCurrentUser,
+  logout as logoutRequest,
 } from "./api/stenogramaApi";
+import LoginForm from "./LoginForm.jsx";
 
 
 const INK = "#1B2A41";
@@ -79,6 +82,23 @@ export default function Stenograma() {
   const [backendStatus, setBackendStatus] = useState("checking"); // checking | online | offline
   const [backendInfo, setBackendInfo] = useState(null);
 
+  /**
+   * AUTENTIFIKACIJOS BŪSENA (#18 PR4).
+   *
+   * `authState`: "checking" | "anonymous" | "authenticated"
+   *
+   * `user` neša `permissions` masyvą IŠ BACKEND'O – UI jų nespėlioja pagal
+   * rolės pavadinimą. Priešingu atveju rolių žemėlapis egzistuotų dviejose
+   * vietose (backend + UI), ir jos ilgainiui išsiskirtų.
+   *
+   * ⚠️ Šie leidimai valdo TIK ATVAIZDAVIMĄ. Kiekvieną užklausą tikrina
+   * backend – paslėptas mygtukas nėra apsauga, o tik švaresnė sąsaja.
+   */
+  const [authState, setAuthState] = useState("checking");
+  const [user, setUser] = useState(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [permissionError, setPermissionError] = useState("");
+
   const recognitionRef = useRef(null);
 
   /**
@@ -100,6 +120,29 @@ export default function Stenograma() {
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) setSpeechSupported(false);
+  }, []);
+
+  /**
+   * Kas prisijungęs? Klausiam backend'o – cookie yra `HttpOnly`, tad JS jos
+   * perskaityti negali ir spręsti pagal ją neturi kaip.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchCurrentUser()
+      .then((current) => {
+        if (cancelled) return;
+        setUser(current);
+        setAuthState(current ? "authenticated" : "anonymous");
+      })
+      .catch(() => {
+        // Backend nepasiekiamas - rodom prisijungimą, ne tuščią ekraną.
+        if (!cancelled) setAuthState("anonymous");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
   useEffect(() => () => {
     stopRecording();
@@ -319,7 +362,61 @@ export default function Stenograma() {
     }
   };
 
-  const canGenerate = transcript.trim().length > 20 && !isGenerating && backendStatus === "online";
+  /**
+   * LEIDIMO PATIKRA ATVAIZDAVIMUI (#18 PR4).
+   *
+   * ⚠️ Tai NĖRA apsauga. Backend tikrina kiekvieną užklausą nepriklausomai nuo
+   * to, ką rodo UI (žr. `middleware/authorize.js`). Ši funkcija tik neleidžia
+   * rodyti mygtukų, kurie garantuotai grąžins 403 – t. y. gerina sąsają, o ne
+   * saugumą.
+   *
+   * Leidimai ateina IŠ BACKEND'O per `/api/auth/me`, ne skaičiuojami pagal
+   * rolės pavadinimą – kitaip rolių žemėlapis būtų dviejose vietose.
+   */
+  const can = (permission) => Boolean(user?.permissions?.includes(permission));
+
+  /**
+   * Bendras 401/403 apdorojimas.
+   *
+   * 401 -> sesija pasibaigė ar revokuota: rodom prisijungimą su paaiškinimu.
+   * 403 -> vartotojas žinomas, bet neturi teisės: prisijungimas NEPADĖS, tad
+   *        rodom aiškų pranešimą vietoje, kur veiksmas buvo bandytas.
+   *
+   * Grąžina `true`, jei klaida buvo autentifikacijos/autorizacijos ir jau
+   * apdorota – kviečiantis kodas tada nerodo bendros klaidos dar kartą.
+   */
+  const handleAuthError = (err) => {
+    if (err?.status === 401) {
+      setUser(null);
+      setAuthState("anonymous");
+      setSessionExpired(true);
+      return true;
+    }
+
+    if (err?.status === 403) {
+      setPermissionError(
+        err.requiredPermission
+          ? `Neturite teisės atlikti šio veiksmo (reikia: ${err.requiredPermission}).`
+          : "Neturite teisės atlikti šio veiksmo."
+      );
+      return true;
+    }
+
+    return false;
+  };
+
+  const handleLogout = async () => {
+    await logoutRequest().catch(() => {});
+    setUser(null);
+    setAuthState("anonymous");
+    setSessionExpired(false);
+  };
+
+  const canGenerate =
+    transcript.trim().length > 20 &&
+    !isGenerating &&
+    backendStatus === "online" &&
+    can("protocol:generate");
 
   const handleGenerate = async () => {
     setError("");
@@ -337,7 +434,9 @@ export default function Stenograma() {
       clearTimeout(stampTimerRef.current);
       stampTimerRef.current = setTimeout(() => setStamped(true), 200);
     } catch (e) {
-      setError("Nepavyko sugeneruoti protokolo: " + e.message);
+      if (!handleAuthError(e)) {
+        setError("Nepavyko sugeneruoti protokolo: " + e.message);
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -433,7 +532,15 @@ export default function Stenograma() {
       const { blob, filename } = await exportProtocol({ format, variant, protocol, jobId: transcriptionJobId });
       saveBlob(blob, filename);
     } catch (e) {
-      setExportError(e.message || "Eksportas nepavyko.");
+      /**
+       * 401/403 apdorojami CENTRALIZUOTAI (#18 PR4).
+       *
+       * Be to sesijos pabaiga eksporto metu atrodytų kaip „eksportas
+       * nepavyko", o vartotojas bandytų iš naujo, gaudamas tą patį rezultatą.
+       */
+      if (!handleAuthError(e)) {
+        setExportError(e.message || "Eksportas nepavyko.");
+      }
     } finally {
       setExporting(null);
     }
@@ -451,6 +558,39 @@ export default function Stenograma() {
   };
 
   const score = completeness(protocol);
+
+  /**
+   * PRISIJUNGIMO VARTAI (#18 PR4).
+   *
+   * ⚠️ Tai NĖRA apsauga – tik sąsajos srautas. Backend atmeta kiekvieną
+   * neautentifikuotą užklausą nepriklausomai nuo to, ką rodo naršyklė (žr.
+   * `middleware/authenticate.js`). Būtent todėl regresijos testai tikrina
+   * TIESIOGINIUS API kvietimus, o ne vien UI elgesį.
+   */
+  if (authState === "checking") {
+    return (
+      <div
+        style={{ background: PAPER, color: INK, minHeight: "100vh", display: "grid", placeItems: "center" }}
+        role="status"
+      >
+        Tikrinama sesija…
+      </div>
+    );
+  }
+
+  if (authState === "anonymous") {
+    return (
+      <LoginForm
+        sessionExpired={sessionExpired}
+        onSuccess={(loggedIn) => {
+          setUser(loggedIn);
+          setAuthState("authenticated");
+          setSessionExpired(false);
+          setPermissionError("");
+        }}
+      />
+    );
+  }
 
   return (
     <div style={{ background: PAPER, fontFamily: "'IBM Plex Sans', sans-serif", color: INK }} className="min-h-screen w-full">
@@ -471,6 +611,30 @@ export default function Stenograma() {
         .editline:focus { border-bottom: 1px solid ${BRASS}; }
         ::selection { background: ${BRASS}33; }
       `}</style>
+
+      {permissionError && (
+        /**
+         * 403 PRANEŠIMAS (#18 PR4).
+         *
+         * Rodomas atskirai nuo klaidų laukų, nes leidimo trūkumas NĖRA
+         * veiksmo klaida - pakartojimas nepadės. Vartotojui reikia žinoti, kad
+         * problema yra jo teisėse, o ne įvestyje.
+         */
+        <div
+          role="alert"
+          className="text-sm px-6 py-3 border-b flex items-center justify-between gap-4"
+          style={{ background: "#FBEDEA", borderColor: "#E8C4BC", color: REDINK }}
+        >
+          <span>{permissionError}</span>
+          <button
+            onClick={() => setPermissionError("")}
+            aria-label="Uždaryti pranešimą"
+            style={{ background: "none", border: "none", cursor: "pointer", color: REDINK }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       <header className="border-b" style={{ borderColor: LINE }}>
         <div className="max-w-6xl mx-auto px-6 py-6 flex items-baseline justify-between flex-wrap gap-2">
@@ -494,6 +658,26 @@ export default function Stenograma() {
               </span>
             </p>
             <h1 className="serif text-3xl font-semibold tracking-tight">Stenograma</h1>
+
+            {/*
+              VARTOTOJO JUOSTA (#18 PR4). Rolė rodoma, kad vartotojas suprastų,
+              KODĖL kai kurių veiksmų nemato - be jos paslėpti mygtukai atrodo
+              kaip trūkstama funkcija.
+            */}
+            {user && (
+              <p className="mono text-[11px] mt-1 flex items-center gap-2" style={{ color: SLATE }}>
+                <span data-testid="current-user">
+                  {user.username} · {user.role === "administrator" ? "administratorius" : "operatorius"}
+                </span>
+                <button
+                  onClick={handleLogout}
+                  className="underline hover:no-underline"
+                  style={{ color: SLATE, background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                >
+                  Atsijungti
+                </button>
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -919,7 +1103,19 @@ export default function Stenograma() {
                 ))}
               </div>
 
-              {/* ORIGINALAS - atskiras veiksmas su įspėjimu; patvirtinimas runExport viduje. */}
+              {/*
+                ORIGINALAS - atskiras veiksmas su įspėjimu; patvirtinimas runExport viduje.
+
+                LEIDIMU RIBOTA GRUPĖ (#18 PR4): `export:original` grąžina
+                neredaguotus asmens duomenis, tad operatorius jo neturi. Grupė
+                slepiama, o ne rodoma išjungta - išjungtas mygtukas be
+                paaiškinimo atrodo kaip gedimas.
+
+                ⚠️ Slėpimas NĖRA apsauga: backend atmeta tokį eksportą su 403
+                nepriklausomai nuo to, ką rodo UI.
+              */}
+              {can("export:original") && (
+                <>
               <p id="export-original-label" className="mono text-xs uppercase tracking-wide mt-4 mb-2" style={{ color: REDINK }}>
                 Originalas (visi duomenys)
               </p>
@@ -940,6 +1136,8 @@ export default function Stenograma() {
                   </button>
                 ))}
               </div>
+                </>
+              )}
 
               {exportError && (
                 <p role="alert" className="mt-2 text-xs" style={{ color: REDINK }}>

@@ -172,32 +172,25 @@ test("BE TAPATYBĖS: kai autentifikacija SUKONFIGŪRUOTA, gaunam 401, NE 403", a
    * nepadės. Sumaišius juos, frontend rodytų „neturite teisės" ten, kur
    * realiai tereikia prisijungti.
    *
-   * SVARBU dėl aplinkos: šiame faile `API_KEY=""`, tad be papildomos
-   * konfigūracijos `authenticate` kristų į DEV režimą ir praleistų užklausą
-   * (žr. middleware/authenticate.js 3 punktą). Tai sąmoningas lokalaus
-   * kūrimo patogumas, bet reiškia, kad 401 galima tikrinti TIK kai
-   * autentifikacija realiai sukonfigūruota - todėl čia keliam atskirą app.
+   * `API_KEY` nustatomas LAIKINAI, be šviežio serverio: `authenticate` skaito
+   * `process.env.API_KEY` KIEKVIENOS UŽKLAUSOS metu, tad naujo egzemplioriaus
+   * kelti nereikia.
+   *
+   * Ankstesnė versija kūlė šviežią serverį per `delete require.cache` – ir tie
+   * papildomi egzemplioriai su savais laikmačiais periodiškai sulaužydavo Node
+   * testų vykdyklę FAILO lygiu („Unable to deserialize cloned data"), kas
+   * atrodė kaip atsitiktinis nestabilumas.
    */
-  delete require.cache[require.resolve("../server")];
-  delete require.cache[require.resolve("../middleware/authenticate")];
-
-  const savedKey = process.env.API_KEY;
+  const saved = process.env.API_KEY;
   process.env.API_KEY = "sukonfiguruotas-raktas";
 
   try {
-    const request2 = require("supertest");
-    const freshApp = require("../server");
-    freshApp._setReadyForTests();
-
-    const res = await request2(freshApp).post("/api/jobs").send({ transcript: TRANSCRIPT });
+    const res = await request(app).post("/api/jobs").send({ transcript: TRANSCRIPT });
 
     assert.equal(res.status, 401);
     assert.equal(res.body.code, "SESSION_REQUIRED");
   } finally {
-    if (savedKey === undefined) delete process.env.API_KEY;
-    else process.env.API_KEY = savedKey;
-    delete require.cache[require.resolve("../server")];
-    delete require.cache[require.resolve("../middleware/authenticate")];
+    process.env.API_KEY = saved;
   }
 });
 
@@ -224,30 +217,22 @@ test("ESKALACIJA: operatorius NEGALI pasikelti teisių pridėdamas API raktą", 
    * operatorius, kuriam kada nors buvo duotas `API_KEY` (pvz. seno skripto
    * konfigūracijoje), galėtų apeiti savo rolę vienu papildomu antraštės lauku.
    */
-  delete require.cache[require.resolve("../server")];
-  delete require.cache[require.resolve("../middleware/authenticate")];
-
   const savedKey = process.env.API_KEY;
+  const savedRole = process.env.API_KEY_ROLE;
+
   process.env.API_KEY = "bendras-raktas-su-admin-role";
   process.env.API_KEY_ROLE = "administrator";
 
   try {
-    const request2 = require("supertest");
-    const freshApp = require("../server");
-    freshApp._setReadyForTests();
+    const cookie = await loginAs("darbuotojas", "operator-slaptas-2");
 
-    const login = await request2(freshApp)
-      .post("/api/auth/login")
-      .send({ username: "darbuotojas", password: "operator-slaptas-2" });
-    const cookie = login.headers["set-cookie"][0];
-
-    const created = await request2(freshApp)
+    const created = await request(app)
       .post("/api/jobs")
       .set("Cookie", cookie)
       .set("x-api-key", "bendras-raktas-su-admin-role")
       .send({ transcript: TRANSCRIPT });
 
-    const deleted = await request2(freshApp)
+    const deleted = await request(app)
       .delete(`/api/jobs/${created.body.jobId}`)
       .set("Cookie", cookie)
       .set("x-api-key", "bendras-raktas-su-admin-role")
@@ -257,8 +242,145 @@ test("ESKALACIJA: operatorius NEGALI pasikelti teisių pridėdamas API raktą", 
   } finally {
     if (savedKey === undefined) delete process.env.API_KEY;
     else process.env.API_KEY = savedKey;
-    delete process.env.API_KEY_ROLE;
-    delete require.cache[require.resolve("../server")];
-    delete require.cache[require.resolve("../middleware/authenticate")];
+    if (savedRole === undefined) delete process.env.API_KEY_ROLE;
+    else process.env.API_KEY_ROLE = savedRole;
   }
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * #18 PR4: TIESIOGINIŲ API KVIETIMŲ REGRESIJA.
+ *
+ * Frontend slepia veiksmus, kurių vartotojas neturi. Šie testai įrodo, kad
+ * slėpimas NĖRA apsauga: kiekvienas kelias tikrinamas serveryje, nepaisant to,
+ * ką rodo ar nerodo naršyklė.
+ * ---------------------------------------------------------------------------
+ */
+
+test("APĖJIMAS: operatorius, kviečiantis API TIESIOGIAI, gauna 403", async () => {
+  /**
+   * Imituojam klientą, kuris apeina UI visiškai – curl, Postman, pakeistas JS
+   * arba senas skirtukas su pasenusiu leidimų sąrašu.
+   */
+  const cookie = await loginAs("darbuotojas", "operator-slaptas-2");
+
+  const forbidden = [
+    { method: "post", path: "/api/exports", body: { variant: "original", format: "txt", protocol: PROTOCOL } },
+  ];
+
+  for (const route of forbidden) {
+    const res = await request(app)[route.method](route.path).set("Cookie", cookie).send(route.body);
+
+    assert.equal(res.status, 403, `${route.path} turėjo grąžinti 403`);
+    assert.equal(res.body.code, "PERMISSION_DENIED");
+  }
+});
+
+test("APĖJIMAS: pakeistas kliento leidimų sąrašas NIEKO nekeičia serveryje", async () => {
+  /**
+   * Frontend gauna `permissions` per `/api/auth/me` ir pagal juos rodo UI.
+   * Bet tas sąrašas yra TIK ATVAIZDAVIMUI: klientas gali jį pakeisti
+   * naršyklės konsolėje ir pamatyti paslėptus mygtukus – serveris apie tai
+   * nieko nežino ir savo sprendimo nekeičia.
+   *
+   * Šis testas tai fiksuoja: ta pati sesija, tas pats vartotojas, o serverio
+   * atsakymas nepriklauso nuo to, ką klientas mano turintis.
+   */
+  const cookie = await loginAs("darbuotojas", "operator-slaptas-2");
+
+  const me = await request(app).get("/api/auth/me").set("Cookie", cookie);
+  assert.ok(!me.body.permissions.includes("export:original"), "operatorius neturi šio leidimo");
+
+  // Klientas "pasikeičia" savo leidimus - serveriui tai nematoma ir nesvarbu.
+  const res = await request(app)
+    .post("/api/exports")
+    .set("Cookie", cookie)
+    .set("x-permissions", "export:original") // išgalvota antraštė - serveris jos neskaito
+    .send({ variant: "original", format: "txt", protocol: PROTOCOL });
+
+  assert.equal(res.status, 403, "serveris sprendžia pagal SESIJĄ, ne pagal kliento teiginius");
+});
+
+test("APĖJIMAS: /api/auth/me leidimai SUTAMPA su tuo, ką serveris realiai vykdo", async () => {
+  /**
+   * Jei UI rodo veiksmą, kurio serveris neleidžia, vartotojas gauna 403 po
+   * paspaudimo – bloga patirtis. Jei UI slepia veiksmą, kurį serveris leistų,
+   * funkcija tampa nepasiekiama.
+   *
+   * Abi kryptys yra klaidos, todėl tikrinam SUTAPIMĄ, ne vien atmetimą.
+   */
+  const cookie = await loginAs("darbuotojas", "operator-slaptas-2");
+  const me = await request(app).get("/api/auth/me").set("Cookie", cookie);
+
+  // Leidimas YRA -> veiksmas turi praeiti (ne 403).
+  assert.ok(me.body.permissions.includes("export:redacted"));
+  const allowed = await request(app)
+    .post("/api/exports")
+    .set("Cookie", cookie)
+    .send({ variant: "redacted", format: "txt", protocol: PROTOCOL });
+  assert.notEqual(allowed.status, 403, "deklaruotas leidimas turi realiai veikti");
+
+  // Leidimo NĖRA -> veiksmas turi būti atmestas.
+  assert.ok(!me.body.permissions.includes("export:original"));
+  const denied = await request(app)
+    .post("/api/exports")
+    .set("Cookie", cookie)
+    .send({ variant: "original", format: "txt", protocol: PROTOCOL });
+  assert.equal(denied.status, 403, "nedeklaruotas leidimas turi būti atmestas");
+});
+
+/**
+ * BAIGIAMASIS VALYMAS.
+ *
+ * Sesijų saugykla paleidžia periodinį laikmatį, o job store gali laikyti
+ * atvirą ryšį. Be valymo vaikinis procesas kartais nespėdavo tvarkingai
+ * baigtis, ir Node testų vykdyklė krisdavo FAILO lygiu su „Unable to
+ * deserialize cloned data" – klaida, kuri neturi nieko bendro su testų turiniu
+ * ir todėl atrodo kaip atsitiktinis nestabilumas.
+ */
+test.after(async () => {
+  const sessionStore = require("../utils/sessionStore");
+  sessionStore._stopPeriodicSweepForTests();
+  await sessionStore._clearForTests();
+
+  const jobStore = require("../utils/jobStore");
+  if (typeof jobStore.close === "function") await jobStore.close().catch(() => {});
+});
+
+test("DEV NUOSEKLUMAS: be konfigūracijos /auth/me grąžina tapatybę, ne 401", async () => {
+  /**
+   * NEATITIKIMAS, kurį pagavo E2E (3 min timeout'ai, ne testų klaida).
+   *
+   * `authenticate` dev režime praleidžia VISAS užklausas su `administrator`
+   * role, bet `/auth/me` grąžindavo 401 – ir frontend rodydavo prisijungimo
+   * formą sistemai, kuri realiai leidžia viską. Vartotojas būdavo užblokuotas,
+   * o prisijungti nebūdavo kaip: vartotojų juk nesukonfigūruota.
+   *
+   * Toks neatitikimas blogesnis nei bet kuris vienas sprendimas atskirai.
+   */
+  const savedUsers = process.env.AUTH_USERS;
+  const savedKey = process.env.API_KEY;
+
+  process.env.AUTH_USERS = "";
+  process.env.API_KEY = "";
+
+  try {
+    const res = await request(app).get("/api/auth/me");
+
+    assert.equal(res.status, 200, "dev režime /auth/me turi grąžinti tapatybę");
+    assert.equal(res.body.role, "administrator");
+    assert.equal(res.body.authConfigured, false, "UI turi žinoti, kad tai NĖRA tikras prisijungimas");
+    assert.ok(res.body.permissions.includes("job:delete"));
+  } finally {
+    process.env.AUTH_USERS = savedUsers;
+    process.env.API_KEY = savedKey;
+  }
+});
+
+test("DEV NUOSEKLUMAS: SUKONFIGŪRAVUS autentifikaciją /auth/me vėl reikalauja sesijos", async () => {
+  // AUTH_USERS šiame faile nustatytas, tad dev nuolaida negalioja.
+  const res = await request(app).get("/api/auth/me");
+
+  assert.equal(res.status, 401);
+  assert.equal(res.body.code, "SESSION_REQUIRED");
 });

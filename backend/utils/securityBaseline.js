@@ -136,7 +136,34 @@ function resolveCorsOptions(env = process.env) {
     throw _configError("CORS_ORIGIN negali maišyti `*` su konkrečiomis kilmėmis - pasirinkite vieną.");
   }
 
-  return { origin: entries.map(assertValidOrigin), credentials, exposedHeaders: EXPOSED_HEADERS };
+  /**
+   * CREDENTIALS pagal nutylėjimą ĮJUNGTI allow-list režime (#18 PR4).
+   *
+   * Sesijos cookie yra `HttpOnly`, tad frontend siunčia ją per
+   * `credentials: "include"`. Naršyklė tokį atsakymą PRIIMA tik jei serveris
+   * grąžina `Access-Control-Allow-Credentials: true` – priešingu atveju ji
+   * atmeta jį TYLIAI, ir `fetch` krenta be jokio serverio klaidos pranešimo.
+   *
+   * Būtent tai sulaužė E2E: dev režime frontend (5173) ir backend (3001) yra
+   * skirtingos kilmės, `/api/auth/me` grąžindavo 200, bet naršyklė atsakymo
+   * neįsileisdavo, ir programa rodydavo prisijungimo formą.
+   *
+   * Saugumo požiūriu tai NEPRARANDA nieko: kilmės jau apribotos allow-list'u,
+   * o `*` su credentials ir toliau stabdo startą (žr. aukščiau). Numatytoji
+   * `false` reikšmė čia reiškė ne griežtesnę apsaugą, o neveikiančią sesiją.
+   *
+   * `CORS_CREDENTIALS=false` vis dar galima nustatyti eksplicitiškai.
+   */
+  const credentialsForAllowList =
+    env.CORS_CREDENTIALS === undefined || env.CORS_CREDENTIALS === ""
+      ? true
+      : credentials;
+
+  return {
+    origin: entries.map(assertValidOrigin),
+    credentials: credentialsForAllowList,
+    exposedHeaders: EXPOSED_HEADERS,
+  };
 }
 
 /**

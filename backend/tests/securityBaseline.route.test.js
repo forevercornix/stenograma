@@ -577,3 +577,51 @@ test("HEALTH: gilus health ribojamas, nes vykdo realias patikras", () => {
   // Be ribojimo tai brangiausias neautentifikuotas kelias sistemoje.
   assert.match(source, /app\.get\("\/api\/health\/deep", pollRateLimiter/);
 });
+
+test("CORS: sesijos cookie VEIKIA cross-origin (Allow-Credentials nustatytas)", async () => {
+  /**
+   * REGRESIJA, kurią pagavo E2E, o ne šie testai.
+   *
+   * Sesijos cookie yra `HttpOnly`, tad frontend siunčia ją per
+   * `credentials: "include"`. Naršyklė tokį atsakymą PRIIMA tik jei serveris
+   * grąžina `Access-Control-Allow-Credentials: true`; priešingu atveju ji
+   * atmeta jį TYLIAI – be serverio klaidos, be statuso, be jokio pėdsako
+   * loguose.
+   *
+   * Dev režime frontend (5173) ir backend (3001) yra skirtingos kilmės, tad
+   * `/api/auth/me` grąžindavo 200, kurio naršyklė neįsileisdavo, ir programa
+   * rodydavo prisijungimo formą. Visi 6 E2E testai kabodavo timeout'uose.
+   */
+  const res = await request(app).get("/api/health").set("Origin", "http://localhost:5173");
+
+  assert.equal(
+    res.headers["access-control-allow-credentials"],
+    "true",
+    "be šios antraštės sesijos cross-origin NEVEIKIA"
+  );
+  assert.equal(res.headers["access-control-allow-origin"], "http://localhost:5173");
+});
+
+test("CORS: `*` su credentials ir toliau stabdo startą", () => {
+  /**
+   * Numatytosios reikšmės pakeitimas NEGALI susilpninti #14 apsaugos:
+   * `*` kartu su credentials yra derinys, kurio naršyklė neleidžia, o
+   * konfigūracija sudarytų apsaugos įspūdį.
+   */
+  const { resolveCorsOptions } = require("../utils/securityBaseline");
+
+  assert.throws(
+    () => resolveCorsOptions({ CORS_ORIGIN: "*", CORS_CREDENTIALS: "true" }),
+    (e) => e.code === "CORS_UNSAFE_COMBINATION"
+  );
+
+  // `*` be credentials lieka leidžiamas ir credentials NEĮJUNGIAMI automatiškai.
+  assert.equal(resolveCorsOptions({ CORS_ORIGIN: "*" }).credentials, false);
+});
+
+test("CORS: eksplicitinis CORS_CREDENTIALS=false gerbiamas", () => {
+  const { resolveCorsOptions } = require("../utils/securityBaseline");
+
+  assert.equal(resolveCorsOptions({ CORS_CREDENTIALS: "false" }).credentials, false);
+  assert.equal(resolveCorsOptions({}).credentials, true, "numatytai įjungta, kad sesijos veiktų");
+});

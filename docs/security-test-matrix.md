@@ -151,6 +151,24 @@ būtų paminėtas. Be to matrica ilgainiui virstų sąrašu to, ką kažkada tur
 | Abu vykdymo keliai (inline + BullMQ) tikrina teises vienodai | `workerAuthorization` | Autorizacijos pašalinimas iš worker'io |
 | Atmestas vykdymas audituojamas be kredencialų | `workerAuthorization` | — |
 
+### #18 PR4 — sąsaja, regresijos ir dokumentacija
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Neprisijungus rodoma prisijungimo forma, ne pagrindinis UI | `frontend/src/RolePermissions.test.jsx` | — |
+| Operatorius nemato originalo eksporto; administratorius mato | `frontend/src/RolePermissions.test.jsx` | Leidimo sąlygos nuėmimas |
+| **UI nėra apsauga:** backend 403 parodomas kaip teisių, ne veiksmo klaida | `frontend/src/RolePermissions.test.jsx` | 403 apdorojimo pašalinimas |
+| 401 grąžina į prisijungimą su paaiškinimu (ne „neturite teisės") | `frontend/src/RolePermissions.test.jsx` | — |
+| Leidimai ateina iš backend'o, ne skaičiuojami pagal rolės pavadinimą | `frontend/src/RolePermissions.test.jsx` | — |
+| Tiesioginis API kvietimas apeinant UI gauna 403 | `rbac.route` | — |
+| `/api/auth/me` leidimai SUTAMPA su tuo, ką serveris vykdo | `rbac.route` | — |
+
+⚠️ **Frontend leidimai valdo tik atvaizdavimą.** Paslėptas mygtukas nėra
+apsauga – tikroji riba yra `middleware/authorize.js`. Būtent todėl regresijos
+testai tikrina tiesioginius API kvietimus, o ne vien UI elgesį.
+
+Diegimo instrukcijos: [`docs/auth-deployment.md`](auth-deployment.md).
+
 ⚠️ **Revokacijos modelis:** teisės **perskaičiuojamos vykdymo metu**, ne
 užšaldomos kuriant jobą. Kaina: rolės sumažinimas nutraukia jau eilėje esančius
 darbus. Tai sąmoningai pasirinkta pusė — geriau nutraukti teisėtą darbą, nei
