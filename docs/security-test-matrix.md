@@ -124,9 +124,28 @@ būtų paminėtas. Be to matrica ilgainiui virstų sąrašu to, ką kažkada tur
 | Pasibaigusios sesijos pašalinamos net be pakartotinio naudojimo (periodinis + kiekvieno `create()` sweep) | `authFoundation` | Sweep kvietimo pašalinimas iš `create()` |
 | Login rate-limit kintamieji validuojami startup metu (ne `parseInt` tyliai) | `authFoundation` | Startup patikros pašalinimas |
 
-⚠️ **Šis PR TYČIA neapima RBAC vykdymo.** `role` laukas saugomas ir grąžinamas,
-bet jokiam maršrutui dar nereikalaujamas – esami `apiKeyAuth` maršrutai
-(`/api/generate`, `/api/exports` ir kt.) šio PR nepaliesti. Tai #18 PR2 darbas.
+### #18 PR2 — rolėmis grįsta autorizacija
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Deny-by-default: nežinoma rolė ar leidimas visada atmetami | `rbac.route` | `hasPermission` pavertimas `true` → krinta 5 testai |
+| Operatorius NEGALI ištrinti darbo (403, ne 401) | `rbac.route` | Leidimo patikros pašalinimas iš DELETE |
+| Eksporto leidimas priklauso nuo VARIANTO, ne maršruto | `rbac.route` | Operatorius negauna `original` |
+| Sesija turi PIRMENYBĘ prieš bendrą raktą (nėra teisių eskalacijos) | `rbac.route` | Pirmenybės pašalinimas → krinta 3 testai |
+| Auditas: sesija su `audit:read` ARBA `x-audit-key`, operatoriui – nė vienas | `rbac.route` | — |
+| Esamas `x-audit-key` kelias veikia be sesijos (atgalinis suderinamumas) | `rbac.route` | — |
+| 401 vs 403 atskirti teisingai | `rbac.route` | — |
+| Kiekvienas maršrutas turi IR autentifikaciją, IR leidimo patikrą | `criticalGuarantees.route` | `requirePermission` pašalinimas iš DELETE |
+| `API_KEY_ROLE` validuojamas startup metu | `authFoundation` | — |
+
+⚠️ **Žinoma riba:** `API_KEY_ROLE` pagal nutylėjimą yra `administrator`
+(atgalinis suderinamumas – iki #18 rakto turėtojas galėjo viską). Kol taip yra,
+RBAC **neriboja** bendro rakto turėtojų. Startup įspėjimas apie tai praneša;
+realiam atskyrimui reikia `API_KEY_ROLE=operator` arba perėjimo prie sesijų.
+
+⚠️ **Nuosavybės patikrų NĖRA:** rolė sprendžia, KOKIUS veiksmus galima atlikti,
+bet ne SU KIENO duomenimis. Bet kuris administratorius gali ištrinti bet kurį
+darbą. Tai lieka už #18 ribų.
 
 ## GDPR #17 — observability ir koreliacija
 

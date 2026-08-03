@@ -6,6 +6,7 @@ const { loginIpLimiter, loginAccountLimiter } = require("../middleware/rateLimit
 const { validate, z } = require("../middleware/validate");
 const { createLogger } = require("../utils/logger");
 const auditLog = require("../utils/auditLog");
+const { permissionsForRole } = require("../utils/permissions");
 
 const log = createLogger("route:auth");
 const router = express.Router();
@@ -93,7 +94,21 @@ router.post("/auth/logout", async (req, res) => {
  * buvimo, kurio JS net negali perskaityti (HttpOnly).
  */
 router.get("/auth/me", requireSession, (req, res) => {
-  res.json({ username: req.user.username, role: req.user.role });
+  /**
+   * LEIDIMAI grąžinami kartu su role (#18 PR2).
+   *
+   * Frontend turi žinoti, kuriuos veiksmus rodyti - bet jis NETURI to spręsti
+   * pats pagal rolės pavadinimą. Priešingu atveju rolių žemėlapis egzistuotų
+   * dviejose vietose (backend ir UI), ir jos ilgainiui išsiskirtų.
+   *
+   * Backend lieka AUTORITETINGAS: šis sąrašas skirtas ATVAIZDAVIMUI, o ne
+   * apsaugai. Kiekvieną užklausą vis tiek tikrina `requirePermission`.
+   */
+  res.json({
+    username: req.user.username,
+    role: req.user.role,
+    permissions: permissionsForRole(req.user.role),
+  });
 });
 
 module.exports = router;
