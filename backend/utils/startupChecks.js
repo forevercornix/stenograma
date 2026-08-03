@@ -138,6 +138,13 @@ function validateConfig(env = process.env) {
      * eilės žinutė vėl galėtų kurti artefaktus.
      */
     ["DELETION_TOMBSTONE_TTL_HOURS", { min: 1, max: 24 * 365 }],
+    /**
+     * Kopijų retencija (#20). Ji apibrėžia FAKTINĮ ištrynimo langą: #19
+     * ištrynimas veikia gyvoje sistemoje, o kopijoje esantys duomenys lieka iki
+     * jos galiojimo pabaigos. Netinkama reikšmė tyliai virstų numatytąja, ir
+     * privatumo politikoje deklaruotas terminas neatitiktų tikrovės.
+     */
+    ["BACKUP_RETENTION_DAYS", { min: 1, max: 365 }],
     ["RATE_LIMIT_LOGIN_IP_MAX", { min: 1, max: 10_000 }],
     ["RATE_LIMIT_LOGIN_ACCOUNT_MAX", { min: 1, max: 10_000 }],
   ]) {
