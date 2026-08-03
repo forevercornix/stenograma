@@ -307,6 +307,32 @@ Operacinės garantijos: [`docs/deletion-guarantees.md`](deletion-guarantees.md).
 sistema daro – tai pavojingiau nei trūkstama funkcija, nes kuria klaidingą
 pasitikėjimą būtent ten, kur jo negalima turėti. Todėl jis tikrinamas testais.
 
+## #20 — atsarginės kopijos (PR1: politika ir manifestas)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Politika **išvedama iš artefaktų registro**, ne rašoma atskirai | `backupPolicy` | „Viskas įtraukiama" → krinta 4 |
+| Efemeriški artefaktai **niekada** nekopijuojami | `backupPolicy` | Ta pati |
+| Laikini artefaktai nekopijuojami | `backupPolicy` | Ta pati |
+| Eilės įrašas neįtraukiamas, nors persistent (su priežastimi) | `backupPolicy` | — |
+| Kiekvienas tipas yra **tiksliai viename** sąraše | `backupPolicy` | — |
+| Kopijos numatytai **išjungtos** | `backupPolicy` | — |
+| Manifeste **nėra asmens duomenų** – tik metaduomenys | `backupPolicy` | — |
+| Kūrimas atmeta tipus, kurių politika neleidžia | `backupPolicy` | Patikros pašalinimas |
+| Validacija **fail-closed**: trūkstamas laukas atmeta kopiją | `backupPolicy` | — |
+| **Naujesnė** kopija į senesnę sistemą atmetama | `backupPolicy` | Patikros pašalinimas |
+| Kontrolinė suma aptinka pakitusį turinį | `backupPolicy` | — |
+| `applicationVersion` atskiras nuo formato versijos | `backupPolicy` | Lauko pašalinimas → krinta 2 |
+| Dokumentuota, kad suma **neapsaugo nuo tyčinio pakeitimo** | `backupPolicy` | — |
+| Retencijos terminas **manifeste**, ne skaičiuojamas atkuriant | `backupPolicy` | — |
+| `BACKUP_RETENTION_DAYS` validuojamas startup metu | `backupPolicy` | — |
+
+⚠️ **Šis etapas nieko nekopijuoja.** Politika, manifestas ir suderinamumo
+patikros yra pagrindas kopijavimui ir atkūrimui, kurie ateina atskirai.
+
+⚠️ **`BACKUP_RETENTION_DAYS` apibrėžia faktinį ištrynimo langą** (#19): gyvoje
+sistemoje ištrinti duomenys kopijoje lieka iki jos galiojimo pabaigos.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

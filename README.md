@@ -1354,6 +1354,23 @@ pavojingiau nei trūkstama funkcija – todėl jis traktuojamas kaip kodas.
 kopiją prieš ištrynimą, jie ten liks iki jos galiojimo pabaigos; atkūrus – grįžtų.
 Kriptografinis ištrynimas per raktų valdymą priklauso #20.
 
+**Atsarginių kopijų politika (#20).** Kas kopijuojama, **išvedama iš #19
+artefaktų registro**, ne rašoma atskirai: `persistent` įtraukiama,
+`temporary` ir `ephemeral` – ne. Antras nepriklausomas sąrašas neišvengiamai
+išsiskirtų su registru, ir naujas artefakto tipas liktų nekopijuojamas tyliai.
+
+Viena išimtis, kuri neišplaukia iš klasės: **eilės įrašas neįtraukiamas**, nors
+yra `persistent`. Tai vykdymo būsena, ne duomenys – atkūrus ją, eilė bandytų
+tęsti darbus, kurių kontekstas nebeegzistuoja.
+
+⚠️ Kopijos numatytai **išjungtos**, o `BACKUP_RETENTION_DAYS` apibrėžia **faktinį
+ištrynimo langą**: gyvoje sistemoje ištrinti duomenys kopijoje lieka iki jos
+galiojimo pabaigos.
+
+⚠️ Manifesto kontrolinė suma apsaugo nuo **sugadinimo**, ne nuo tyčinio
+pakeitimo — kas gali pakeisti turinį, gali perskaičiuoti ir sumą. Iki parašų su
+raktu kopijų vientisumas remiasi **saugyklos prieigos kontrole**.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
