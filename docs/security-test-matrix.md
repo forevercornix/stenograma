@@ -241,8 +241,23 @@ Modelis ir grafas: [`docs/artefact-lifecycle.md`](artefact-lifecycle.md).
 | Abu DELETE maršrutai kviečia **vieną** servisą | `lifecycleDeletion` | Tiesioginis `eraseJob` apeinant servisą |
 | Auditas fiksuoja aktorių, rezultatą ir laiką be turinio | `lifecycleDeletion` | — |
 
-⚠️ **Žymos dar netikrinamos worker'iuose** – jos uždedamos ir išgyvena jobą, bet
-eilės jų dar neskaito. Iki tol vėluojanti žinutė vis dar gali sukurti artefaktus.
+### #19 PR3 — apsauga nuo atkūrimo po ištrynimo
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| `jobStore.update` atmeta atnaujinimą po ištrynimo | `deletionEnforcement` | Apsaugos pašalinimas → krinta 3 |
+| BullMQ worker'is nepradeda ištrinto jobo | `deletionEnforcement` | Patikros pašalinimas → krinta 2 |
+| Inline kelias elgiasi **vienodai** | `deletionEnforcement` | Patikros pašalinimas → krinta 1 |
+| Ištrynimas vykdymo metu neleidžia įrašyti rezultato | `deletionEnforcement` | — |
+| `pending` ir `failed` žymos irgi blokuoja | `deletionEnforcement` | — |
+| Apėjimui reikia **simbolio**, `true` neveikia | `deletionEnforcement` | Boolean apėjimo grąžinimas |
+| Vidinį raktą mini tik leidžiami failai | `deletionEnforcement` | — |
+| Worker'is nemeta klaidos (BullMQ nekartotų amžinai) | `deletionEnforcement` | — |
+| Retencija paleidžiama iškart po starto | `deletionEnforcement` | — |
+| Žymų restarto riba **užrašyta kode** | `deletionEnforcement` | — |
+
+⚠️ **Žymos restarto neišgyvena** – saugykla tik atmintyje. Po restarto vėluojanti
+eilės žinutė vėl galėtų kurti artefaktus.
 
 ⚠️ **Šis etapas nieko netrina.** Registras, būsenų modelis ir koreliacija yra
 pagrindas koordinuotam ištrynimui, kuris ateina atskirai.

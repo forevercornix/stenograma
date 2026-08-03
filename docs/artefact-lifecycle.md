@@ -241,6 +241,63 @@ nedavė.
 ⚠️ Koordinavimas galioja **tik šiam procesui**. Kelioms replikoms reikėtų Redis
 užrakto.
 
+## Apsauga nuo atkūrimo po ištrynimo
+
+Žymos ne tik uždedamos – jos **tikrinamos trijose vietose**:
+
+| Vieta | Ką saugo |
+|---|---|
+| `jobStore.update` | **Vienintelis** kelias, kuriuo jobo įrašas keičiasi |
+| BullMQ worker'is | Vėluojanti eilės žinutė nepradeda darbo |
+| Inline `jobRunner` | Tas pats be Redis – abu keliai elgiasi vienodai |
+
+Patikra `jobStore.update` viduje yra svarbiausia: ji dengia **visus** kelius –
+inline, worker'į ir retenciją. Patikra prie kiekvieno kvietėjo reikštų kelias
+dešimtis vietų, iš kurių viena anksčiau ar vėliau būtų pamiršta, ir spraga būtų
+tyli.
+
+Ištrynimo keliai turi **eksplicitinį** apėjimą `allowAfterDeletion` – jie privalo
+galėti pažymėti jobą prieš jį pašalindami. Apėjimas pavadintas taip, kad jį būtų
+matyti peržiūroje.
+
+⚠️ **Worker'is nemeta klaidos** dėl ištrinto jobo. Klaida priverstų BullMQ
+kartoti, o kartojimas niekada nepavyks – jobas ištrintas visam laikui. Žinutė
+tyliai užbaigiama, kad dingtų iš eilės.
+
+⚠️ **Blokuoja bet kokia žyma**, ne tik `deleted`. Kol ištrynimas vyksta
+(`pending`) ar nepavyko (`failed`), artefaktų kurti negalima – priešingu atveju
+nepavykęs trynimas prikurtų dar daugiau to, ką bandom pašalinti.
+
+### Ką apsauga TIKSLIAI garantuoja
+
+✅ **Jobo įrašas nebus atnaujintas** po žymos uždėjimo – nei rezultatu, nei
+būsena, nei jokiu kitu lauku.
+
+✅ **Naujas darbas nebus pradėtas** – nei worker'yje, nei inline kelyje.
+
+### Ko ji NEGARANTUOJA
+
+⚠️ **Jau pradėtas processor'ius nesustabdomas vidury darbo.** Jei ištrynimas
+įvyksta darbo metu, processor'ius gali spėti atlikti šalutinius veiksmus
+**iki pirmojo `update`**: iškviesti išorinį tiekėją, parašyti laikiną failą ar
+sukurti tarpinę kopiją.
+
+Rezultatas į jobą **nepateks** (`update` bus atmestas), bet tarpiniai pėdsakai
+gali likti, kol juos surinks retencijos valymas. Tai riba, ne defektas –
+sustabdyti vykdomą operaciją vidury reikėtų atšaukimo mechanizmo pačiuose
+tiekėjų adapteriuose.
+
+⚠️ **Žymos gyvena tik atmintyje ir restarto neišgyvena.** Po restarto vėluojanti
+eilės žinutė ištrintam jobui vėl galėtų kurti artefaktus. Tai ta pati riba kaip
+sesijų saugykloje (#18); restartui atspariam variantui reikia Redis.
+
+### `jobStore.update` grąžina `null` – dvi skirtingos priežastys
+
+`null` reiškia **arba** „jobo nėra", **arba** „atnaujinimas atmestas dėl
+ištrynimo žymos". Kvietėjui abi reiškia tą patį – **nerašyk toliau** – tad jos
+nesiskiria. Jei kada nors prireiks jas atskirti, reikės atskiro grąžinimo tipo,
+ne `null`.
+
 ### `ENOENT` ištrynimo kontekste
 
 „Failo nebėra" trinant reiškia, kad tikslas **jau pasiektas**, ne gedimą.
@@ -265,9 +322,7 @@ būtent jis atsako, kada duomenys buvo pašalinti.
 - **Artefaktų registravimo į inventorių realiuose keliuose** – `artefacts`
   laukas yra, bet jo dar niekas nepildo.
 - **Retencijos terminų skaičiavimo** – laukas yra, politika dar netaikoma.
-- **Žymos TIKRINIMO worker'iuose** – žyma uždedama ir išgyvena jobą, bet
-  eilės ir worker'iai jos dar netikrina. Iki tol vėluojanti žinutė vis dar
-  gali sukurti artefaktus.
+- **Žymų persistencijos** – žr. žemiau.
 - **Žymų persistencijos** – saugykla tik atmintyje, vienas procesas. Restartas
   žymas praranda, ta pati riba kaip sesijų saugykloje (#18).
 - **Našlaičių aptikimo** – inventoriaus skenavimas ateis su E2E patikromis.
