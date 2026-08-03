@@ -288,6 +288,25 @@ pagrindas koordinuotam ištrynimui, kuris ateina atskirai.
 konteksto, o realūs artefaktai dar neregistruojami. Kitam etapui reikalingi
 patikrinimai išvardyti `utils/artefactInventory.js` ir dokumentacijoje.
 
+### #19 PR5 — dokumentacija kaip tikrinamas pažadas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Dokumento **lentelės** reikšmės sutampa su `.env.example` | `deletionDocumentation` | `24 → 48` dokumente |
+| Kodo numatytoji `JOB_TTL_MINUTES` sutampa su dokumentuota | `deletionDocumentation` | — |
+| Kiekvienas artefakto tipas paminėtas dokumente | `deletionDocumentation` | — |
+| Visos ištrynimo ir žymos būsenos dokumentuotos | `deletionDocumentation` | — |
+| **Kiekviena žinoma riba įvardyta** | `deletionDocumentation` | Ribos pašalinimas iš dokumento |
+| Atsarginių kopijų riba nurodo į #20 | `deletionDocumentation` | — |
+| Pseudonimizacija paaiškinta (kitaip paieška nieko neras) | `deletionDocumentation` | — |
+| Dokumentuotas veiksmas nepavykus ištrynimui | `deletionDocumentation` | — |
+
+Operacinės garantijos: [`docs/deletion-guarantees.md`](deletion-guarantees.md).
+
+⚠️ **Dokumentas apie garantijas yra pažadas.** Pasenęs jis teigia daugiau, nei
+sistema daro – tai pavojingiau nei trūkstama funkcija, nes kuria klaidingą
+pasitikėjimą būtent ten, kur jo negalima turėti. Todėl jis tikrinamas testais.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

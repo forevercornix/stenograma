@@ -1337,6 +1337,23 @@ Po ištrynimo atliekamas **inventoriaus skenavimas**: tikrinama ne tik ar įraš
 pasiekiamas pagal ID, bet ir ar jo nuorodų neliko kitur. Pamirštos nuorodos yra
 tai, kas paverčia ištrynimą nepilnu.
 
+**Ištrynimo ir retencijos garantijos (#19).**
+[`docs/deletion-guarantees.md`](docs/deletion-guarantees.md) atsako
+eksploatuojančiam: ką ištrynimas garantuoja, ko **ne**, kiek duomenys saugomi ir
+ką galima parodyti auditoriui.
+
+Dokumentas **tikrinamas CI kiekvienam push'ui**: retencijos reikšmės lyginamos
+su `backend/.env.example`, kiekvienas artefakto tipas ir būsena turi būti
+paminėti, o kiekviena žinoma riba – įvardyta. Tad juo galima remtis planuojant
+retenciją: pasenti tyliai jis negali.
+
+Pasenęs garantijų dokumentas teigia daugiau, nei sistema daro, ir tai
+pavojingiau nei trūkstama funkcija – todėl jis traktuojamas kaip kodas.
+
+⚠️ Svarbiausia riba: **atsarginės kopijos nepasiekiamos**. Jei duomenys pateko į
+kopiją prieš ištrynimą, jie ten liks iki jos galiojimo pabaigos; atkūrus – grįžtų.
+Kriptografinis ištrynimas per raktų valdymą priklauso #20.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

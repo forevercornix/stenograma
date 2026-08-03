@@ -44,6 +44,7 @@ const privacy = [
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",
+  "deletionDocumentation",
   "observabilityEvents.route",
 ];
 
