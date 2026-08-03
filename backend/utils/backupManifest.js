@@ -136,8 +136,19 @@ function validateManifest(manifest) {
 
   if (errors.length > 0) return { valid: false, errors };
 
-  const compatibility = backupPolicy.checkRestoreCompatibility(manifest.formatVersion);
-  if (!compatibility.compatible) errors.push(compatibility.reason);
+  /**
+   * ⚠️ FORMATO VERSIJA ČIA NETIKRINAMA SĄMONINGAI.
+   *
+   * `validateManifest` atsako tik į STRUKTŪROS klausimą: ar manifestas turi
+   * visus laukus ir ar jų tipai teisingi. Versijų suderinamumas yra ATSKIRAS
+   * atkūrimo grandinės žingsnis (`restoreService`).
+   *
+   * Pirmoji versija tikrino ir čia, ir grandinėje – ir tai reiškė, kad
+   * grandinės „formato" žingsnis niekada nebuvo pasiekiamas: nesuderinama
+   * kopija krisdavo dar struktūros patikroje. Diagnostika tada meluodavo –
+   * operatorius matytų „manifestas netinkamas", nors manifestas buvo tvarkingas,
+   * tik iš naujesnės versijos.
+   */
 
   if (!Array.isArray(manifest.contents)) {
     errors.push("`contents` privalo būti masyvas");

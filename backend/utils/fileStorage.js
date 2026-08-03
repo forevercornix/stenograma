@@ -39,6 +39,40 @@ async function put(buffer, { ext = "" } = {}) {
 }
 
 /**
+ * Įrašo TURINĮ NURODYTU raktu (#20 PR2 – atkūrimui).
+ *
+ * `put()` generuoja naują raktą; atkuriant to negalima – jobo įrašas nurodo
+ * KONKRETŲ raktą, ir naujas jį paverstų našlaičiu: failas egzistuotų, bet
+ * niekas jo nerastų.
+ *
+ * ⚠️ Raktas VALIDUOJAMAS: jis ateina iš kopijos failo, tad negali būti
+ * pasitikimas. Be patikros `../../etc/passwd` tipo raktas leistų rašyti už
+ * saugyklos ribų.
+ */
+async function putAtKey(key, buffer) {
+  await _ensureDir();
+
+  if (typeof key !== "string" || !/^uploads\/[A-Za-z0-9._-]+$/.test(key)) {
+    const error = new Error("Netinkamas saugyklos raktas.");
+    error.code = "INVALID_STORAGE_KEY";
+    throw error;
+  }
+
+  const fullPath = path.join(STORAGE_DIR, key);
+
+  // Papildoma apsauga: sunormintas kelias privalo likti saugykloje.
+  if (!path.resolve(fullPath).startsWith(path.resolve(STORAGE_DIR))) {
+    const error = new Error("Raktas nukreipia už saugyklos ribų.");
+    error.code = "INVALID_STORAGE_KEY";
+    throw error;
+  }
+
+  await fs.mkdir(path.dirname(fullPath), { recursive: true });
+  await fs.writeFile(fullPath, buffer);
+  return key;
+}
+
+/**
  * put variantas iš FAILO KELIO (ne buffer'io) - failas nukopijuojamas OS lygmenyje,
  * NEįkeliant viso į Node.js RAM. Būtina dideliems failams (500MB, 4val įrašai): put()
  * su fs.readFile perskaitytų visą failą į atmintį, o keli vienalaikiai įkėlimai
@@ -153,4 +187,4 @@ async function _resolveExisting(key) {
   return realPath;
 }
 
-module.exports = { put, putFile, get, del, STORAGE_DIR, _resolve };
+module.exports = { put, putAtKey, putFile, get, del, STORAGE_DIR, _resolve };

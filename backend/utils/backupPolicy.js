@@ -44,6 +44,30 @@ const MIN_RESTORABLE_VERSION = 1;
  */
 const EXCLUDED_DESPITE_PERSISTENT = {
   [ARTEFACT_TYPES.QUEUE_RECORD.id]: "vykdymo būsena, ne duomenys – atkūrimas duotų klaidų srautą",
+
+  /**
+   * AUDITAS NEKOPIJUOJAMAS – trys nepriklausomos priežastys.
+   *
+   * 1. GDPR APEJIMAS. #19 ištrynimas ŠALINA audito įrašus
+   *    (`removeBySubjectIdentifier`). Žymų apsauga dengia jobus pagal ID, bet
+   *    audito įrašai saugo PSEUDONIMIZUOTĄ subjektą, tad ta pati patikra jų
+   *    neapima. Atkūrus auditą, GDPR ištrinti įrašai grįžtų – lygiai ta spraga,
+   *    kurią uždarėm jobams.
+   *
+   * 2. ATSKAITOMYBĖS ŽURNALAS NĖRA BŪSENA. Jis pridedamas, ne keičiamas.
+   *    Atkūrus seną auditą tektų arba PAKEISTI naujesnį (prarandant įrašus apie
+   *    tai, kas vyko po kopijos – įskaitant ištrynimų kvitus), arba SULIETI
+   *    (sukuriant dublikatus). Abu variantai audito vertę mažina, ne didina.
+   *
+   * 3. AUDITAS TURI SAVO RETENCIJĄ (`AUDIT_RETENTION_DAYS`) ir savo prieigos
+   *    kelią. Kopija jam nereikalinga kaip išsaugojimo priemonė.
+   *
+   * ⚠️ PASEKMĖ, kurią būtina dokumentuoti: po atkūrimo audito žurnale NEBUS
+   * įrašų apie tai, kas vyko iki kopijos. Atkūrimas atstato DUOMENIS, ne jų
+   * istoriją.
+   */
+  [ARTEFACT_TYPES.AUDIT_ENTRY.id]:
+    "atskaitomybės žurnalas, ne būsena – atkūrimas grąžintų GDPR ištrintus įrašus",
 };
 
 /** Ar šis artefakto tipas įtraukiamas į kopiją? */

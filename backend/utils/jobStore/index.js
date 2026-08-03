@@ -205,6 +205,44 @@ module.exports = {
    * Grąžina `null`, jei saugykla to nepalaiko - iškviečiantis kodas tada NETURI
    * nieko trinti (fail-safe), o ne laikyti, kad nėra naudojamų failų.
    */
+  /**
+   * VISI jobai – atsarginėms kopijoms (#20 PR2).
+   *
+   * ⚠️ Grąžina PILNĄ sąrašą, tad dideliuose diegimuose jis gali būti didelis.
+   * Skirtas kopijavimui, ne užklausų keliui.
+   */
+  /**
+   * Atkuria jobo įrašą IŠSAUGANT ID (#20 PR2).
+   *
+   * ⚠️ GERBIA IŠTRYNIMO ŽYMAS (#19). Jei ID pažymėtas ištrintu, atkūrimas jo
+   * NEATSTATO – priešingu atveju atsarginė kopija taptų būdu apeiti GDPR
+   * ištrynimą, ir visos #19 garantijos taptų laikinos.
+   *
+   * Tai svarbiausia šio metodo savybė, ne šalutinė: kopija atkuria BŪKLĘ, bet
+   * negali atšaukti sprendimo ištrinti.
+   */
+  restoreRecord: async (job) => {
+    await ensureInit();
+
+    if (!job || !job.id) {
+      const error = new Error("Atkuriamas jobas be identifikatoriaus.");
+      error.code = "RESTORE_RECORD_INVALID";
+      throw error;
+    }
+
+    if (tombstones.isDeleted(job.id)) {
+      log.warn("Atkūrimas praleido ištrintą jobą", { jobId: job.id });
+      return null;
+    }
+
+    return store.restoreRecord(job);
+  },
+
+  listAll: async () => {
+    await ensureInit();
+    return store.listAll();
+  },
+
   listReferencedStorageKeys: async () => {
     await ensureInit();
     return typeof store.listReferencedStorageKeys === "function"
