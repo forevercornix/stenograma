@@ -65,6 +65,21 @@ function newJob(fields = {}) {
      */
     actorRole: fields.actorRole || null,
     actorSource: fields.actorSource || null,
+
+    /**
+     * ARTEFAKTŲ INVENTORIUS (#19 PR1).
+     *
+     * Mašininiu būdu skaitomas sąrašas: tipas, savininkas, šaltinis, gyvavimo
+     * ciklo būsena, retencijos terminas ir ištrynimo būklė.
+     *
+     * KODĖL JOBO ĮRAŠE, o ne atskiroje saugykloje: koreliacija tampa
+     * automatinė – artefaktas negali tapti našlaičiu, nes gyvena kartu su tuo,
+     * kam priklauso. Atskira lentelė reikštų dvi saugyklas, kurios gali
+     * išsiskirti būtent tada, kai to labiausiai nenorim (dalinis ištrynimas).
+     *
+     * Formatas aprašytas `utils/artefactInventory.js`.
+     */
+    artefacts: fields.artefacts || [],
     // Techninis audio valymas nepavyko - laukiama pakartojimo. SĄMONINGAI
     // ATSKIRTA nuo `deletion_pending`: ta vėliava reiškia VARTOTOJO prašytą
     // viso jobo ištrynimą, o ši - tik nebereikalingo audio pašalinimą, kai

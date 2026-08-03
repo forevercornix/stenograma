@@ -200,6 +200,29 @@ darbą. Tai lieka už #18 ribų.
 
 ---
 
+## #19 — artefaktų inventorius ir gyvavimo ciklas (PR1: modelis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Kiekvienas artefakto tipas turi pilną apibrėžimą (savininkas, klasė) | `artefactInventory` | — |
+| Išvedimo grafe nėra ciklų, `derivedFrom` nurodo tikrus tipus | `artefactInventory` | — |
+| Eksportas atsekamas iki įkelto audio (pilnas grafas) | `artefactInventory` | — |
+| Efemeriški artefaktai nesaugomi (nėra antros PII kopijos) | `artefactInventory` | — |
+| **Iš `deleted` nėra kelio atgal** | `artefactInventory` | `DELETED → ACTIVE` leidimas → krinta 2 testai |
+| **Ištrynimas privalo eiti per `pending_deletion`** (tombstone pirma) | `artefactInventory` | Tiesioginio `ACTIVE → DELETED` leidimas |
+| Perėjimai deny-by-default | `artefactInventory` | — |
+| Artefaktas be savininko atmetamas (nėra našlaičių) | `artefactInventory` | — |
+| Inventorius išgyvena Redis serializaciją | `artefactInventory` | — |
+
+Modelis ir grafas: [`docs/artefact-lifecycle.md`](artefact-lifecycle.md).
+
+⚠️ **Šis etapas nieko netrina.** Registras, būsenų modelis ir koreliacija yra
+pagrindas koordinuotam ištrynimui, kuris ateina atskirai.
+
+⚠️ **`sourceArtefactId` dar nevaliduojamas** – patikrai reikia viso inventoriaus
+konteksto, o realūs artefaktai dar neregistruojami. Kitam etapui reikalingi
+patikrinimai išvardyti `utils/artefactInventory.js` ir dokumentacijoje.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
