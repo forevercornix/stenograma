@@ -212,13 +212,18 @@ test("KLAIDOS: 401 atsakyme nėra nei rakto, nei vidinių detalių", async () =>
   assert.ok(!/\bat \w+ \(/.test(serialized), "jokio stack trace");
 });
 
-test("STRUKTŪRA: nė vienas maršrutas su įvestimi neliko be apiKeyAuth", () => {
+test("STRUKTŪRA: nė vienas maršrutas su įvestimi neliko be autentifikacijos IR leidimo", () => {
   /**
    * Elgsenos testas dengia žinomus maršrutus; šis - būsimus.
    *
-   * Naujas maršrutas be `apiKeyAuth` praeitų visus aukščiau esančius testus,
-   * nes jų sąraše jo tiesiog nebūtų. Struktūrinė patikra tai pagauna nepaisant
-   * to, ar kas nors prisiminė papildyti sąrašą.
+   * Naujas maršrutas be apsaugos praeitų visus aukščiau esančius testus, nes
+   * jų sąraše jo tiesiog nebūtų. Struktūrinė patikra tai pagauna nepaisant to,
+   * ar kas nors prisiminė papildyti sąrašą.
+   *
+   * #18 PR2: tikrinami DU dalykai atskirai - `authenticate` (kas prašo) IR
+   * `requirePermission` (ar leidžiama). Vien autentifikacijos nebeužtenka:
+   * maršrutas su `authenticate`, bet be leidimo patikros, būtų atviras
+   * KIEKVIENAM prisijungusiam vartotojui, nepaisant rolės.
    */
   const fs = require("fs");
   const path = require("path");
@@ -226,16 +231,27 @@ test("STRUKTŪRA: nė vienas maršrutas su įvestimi neliko be apiKeyAuth", () =
 
   /** Maršrutai, kurie sąmoningai vieši arba turi SAVO autentifikaciją. */
   const EXEMPT = {
-    "audit.js": ["auditAuth"], // atskiras AUDIT_API_KEY
+    // atskiras AUDIT_API_KEY arba sesija su audit:read (žr. routes/audit.js auditAccess)
+    "audit.js": ["auditAccess"],
     /**
-     * auth.js (#18 PR1) SĄMONINGAI be apiKeyAuth: prisijungimo endpoint'as
-     * PATS yra autentifikacijos mechanizmas - jam reikalauti API rakto būtų
+     * auth.js (#18 PR1) SĄMONINGAI be authenticate: prisijungimo endpoint'as
+     * PATS yra autentifikacijos mechanizmas - jam reikalauti tapatybės būtų
      * apskritai neįmanoma (vartotojas dar neturi sesijos). Apsaugotas kitaip:
      * loginIpLimiter + loginAccountLimiter (bandymų ribojimas) ir
      * requireSession (/me).
      */
     "auth.js": ["loginIpLimiter", "loginAccountLimiter", "requireSession", "logout"], // logout tikslingai idempotentinis be sesijos
   };
+
+  /**
+   * Maršrutai su autentifikacija, bet SĄMONINGAI be `requirePermission`
+   * toje pačioje eilutėje.
+   *
+   * `/exports` leidimą tikrina PO validacijos (`authorizeExportVariant`), nes
+   * reikalingas leidimas priklauso nuo `variant` reikšmės - originalo
+   * eksportui reikia kitos teisės nei redaguotam.
+   */
+  const PERMISSION_CHECKED_ELSEWHERE = { "exports.js": ["authorizeExportVariant"] };
 
   const offenders = [];
 
@@ -247,7 +263,13 @@ test("STRUKTŪRA: nė vienas maršrutas su įvestimi neliko be apiKeyAuth", () =
 
     for (const route of routes) {
       const exemptGuards = EXEMPT[file] || [];
-      const guarded = /apiKeyAuth/.test(route) || exemptGuards.some((guard) => route.includes(guard));
+      if (exemptGuards.some((guard) => route.includes(guard))) continue;
+
+      const authenticated = /authenticate/.test(route);
+      const deferred = (PERMISSION_CHECKED_ELSEWHERE[file] || []).some((g) => route.includes(g));
+      const authorized = /requirePermission/.test(route) || deferred;
+
+      const guarded = authenticated && authorized;
 
       if (!guarded) offenders.push(`${file}: ${route.split("\n")[0].slice(0, 70)}`);
     }

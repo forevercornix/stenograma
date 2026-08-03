@@ -2,7 +2,9 @@ const express = require("express");
 const fs = require("fs/promises");
 const { transcribeAudio, HttpError } = require("../services/transcriptionService");
 const rateLimiter = require("../middleware/rateLimiter");
-const apiKeyAuth = require("../middleware/apiKeyAuth");
+const authenticate = require("../middleware/authenticate");
+const { requirePermission } = require("../middleware/authorize");
+const { PERMISSIONS } = require("../utils/permissions");
 const { safeUnlinkUpload, resolveExistingUploadPath } = require("../utils/uploadPath");
 const { createAudioUpload } = require("../utils/uploadStorage");
 const { VARIANT } = require("../utils/redactedArtefact");
@@ -62,7 +64,8 @@ function uploadSingleAudio(req, res, next) {
 router.post(
   "/transcribe",
   rateLimiter,
-  apiKeyAuth,
+  authenticate,
+  requirePermission(PERMISSIONS.JOB_CREATE),
   uploadSingleAudio,
   validate({ body: schemas.transcribeBody }),
   async (req, res) => {

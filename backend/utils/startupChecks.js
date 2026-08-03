@@ -15,6 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFile } = require("child_process");
+const { KNOWN_ROLES } = require("./credentials");
 
 const KNOWN_LLM = ["mock", "claude", "gpt", "gemini"];
 const KNOWN_TRANSCRIPTION = [
@@ -139,6 +140,52 @@ function validateConfig(env = process.env) {
     if (!Number.isInteger(value) || value < opts.min || value > opts.max) {
       errors.push(`${name}="${raw}" netinkama - laukiamas sveikas skaičius nuo ${opts.min} iki ${opts.max}.`);
     }
+  }
+
+  /**
+   * API_KEY_ROLE (#18 PR2).
+   *
+   * Rolė, kurią gauna bendro `API_KEY` turėtojas. Netinkama reikšmė turi
+   * stabdyti startą, o ne tyliai virsti `null` - tada `resolveIdentity()`
+   * grąžintų `null`, ir VISI rakto keliai duotų 401, atrodydami kaip
+   * autentifikacijos gedimas, o ne konfigūracijos klaida.
+   */
+  const apiKeyRole = (env.API_KEY_ROLE || "").trim().toLowerCase();
+  if (apiKeyRole && !KNOWN_ROLES.includes(apiKeyRole)) {
+    /**
+     * REIKŠMĖ NEĮTRAUKIAMA į pranešimą sąmoningai.
+     *
+     * CodeQL (`js/clear-text-logging`) pažymėjo ankstesnę versiją, kuri
+     * interpoliavo `env.API_KEY_ROLE` tiesiai į klaidą. Konkrečiai ŠI reikšmė
+     * yra rolės pavadinimas, ne paslaptis - bet taisyklė teisinga iš principo:
+     * aplinkos kintamojo reikšmės echo į logus yra šablonas, kurio verta
+     * vengti, o čia jos net nereikia.
+     *
+     * Diagnostika nenukenčia: administratorius mato, KURIS kintamasis blogas
+     * ir kokios reikšmės galimos - to pakanka ištaisyti, o pats įvedė reikšmę
+     * ir taip ją žino.
+     */
+    errors.push(
+      `API_KEY_ROLE reikšmė nežinoma. Galimos: ${KNOWN_ROLES.join(", ")}.`
+    );
+  }
+
+  /**
+   * ĮSPĖJIMAS (ne klaida): numatytoji `administrator` rolė bendram raktui.
+   *
+   * Tai SĄMONINGAS atgalinio suderinamumo sprendimas - iki #18 rakto turėtojas
+   * galėjo viską. Bet kol taip yra, RBAC rakto turėtojų NERIBOJA: `job:delete`
+   * ir `export:original` apsaugos jiems negalioja.
+   *
+   * Klaida čia būtų per griežta (sulaužytų veikiančius diegimus), tylėjimas -
+   * per švelnus (administratorius nepastebėtų, kad rolės neveikia).
+   */
+  if (env.API_KEY && !apiKeyRole) {
+    warnings.push(
+      "API_KEY nustatytas, bet API_KEY_ROLE - ne. Numatytai raktas gauna 'administrator' rolę, " +
+        "tad RBAC jo NERIBOJA (įskaitant DELETE ir originalo eksportą). " +
+        "Realiam rolių atskyrimui nustatykite API_KEY_ROLE=operator arba pereikite prie sesijų."
+    );
   }
 
   /**

@@ -1,6 +1,8 @@
 const express = require("express");
 const rateLimiter = require("../middleware/rateLimiter");
-const apiKeyAuth = require("../middleware/apiKeyAuth");
+const authenticate = require("../middleware/authenticate");
+const { requirePermission } = require("../middleware/authorize");
+const { PERMISSIONS } = require("../utils/permissions");
 const auditLog = require("../utils/auditLog");
 const jobStore = require("../utils/jobStore");
 const { sanitizeServerError } = require("../utils/sanitizeError");
@@ -41,7 +43,33 @@ const router = express.Router();
  * audito, ne vartotojo veiksmo problema. Nepatikrintas `jobId` niekur nesaugomas
  * jokia forma.
  */
-router.post("/exports", rateLimiter, apiKeyAuth, validate({ body: schemas.exportBody }), async (req, res) => {
+/**
+ * LEIDIMAS PRIKLAUSO NUO VARIANTO, ne nuo maršruto (#18 PR2).
+ *
+ * `original` grąžina NEREDAGUOTUS asmens duomenis - tą patį turinį, kurio
+ * apsaugai skirta visa #4/#5/#8 redakcijos sistema. `redacted` yra saugus
+ * kasdienis kelias. Vienas bendras leidimas abiem reikštų, kad redakcija tampa
+ * numatytąja parinktimi, o ne apsauga.
+ *
+ * Tikrinama PO validacijos, nes iki jos `variant` dar nėra patvirtintas - o
+ * spręsti apie leidimą pagal nevaliduotą įvestį reikštų pasitikėti tuo, ką
+ * klientas atsiuntė.
+ */
+function authorizeExportVariant(req, res, next) {
+  const variant = req.validated.body.variant;
+  const permission =
+    variant === "original" ? PERMISSIONS.EXPORT_ORIGINAL : PERMISSIONS.EXPORT_REDACTED;
+
+  return requirePermission(permission)(req, res, next);
+}
+
+router.post(
+  "/exports",
+  rateLimiter,
+  authenticate,
+  validate({ body: schemas.exportBody }),
+  authorizeExportVariant,
+  async (req, res) => {
 
   /**
    * VARIANTAS PRIVALOMAS (GDPR #8: „Require an explicit variant parameter and
@@ -172,7 +200,8 @@ router.post("/exports", rateLimiter, apiKeyAuth, validate({ body: schemas.export
     return status === 500
       ? res.status(500).json({ error: sanitizeServerError(error, "eksportas") })
       : res.status(status).json({ error: error.message });
+    }
   }
-});
+);
 
 module.exports = router;

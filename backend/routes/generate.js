@@ -2,7 +2,9 @@ const express = require("express");
 const { generateProtocol, HttpError } = require("../services/protocolService");
 const { VARIANT } = require("../utils/redactedArtefact");
 const rateLimiter = require("../middleware/rateLimiter");
-const apiKeyAuth = require("../middleware/apiKeyAuth");
+const authenticate = require("../middleware/authenticate");
+const { requirePermission } = require("../middleware/authorize");
+const { PERMISSIONS } = require("../utils/permissions");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const { validate, schemas } = require("../middleware/validate");
 
@@ -23,7 +25,7 @@ const router = express.Router();
  * pilnai - jos saugios ir naudingos. 5xx (tiekėjo/vidinės) klaidos sanitizuojamos
  * prieš siunčiant klientui, pilnas tekstas visada logguojamas serveryje.
  */
-router.post("/generate", rateLimiter, apiKeyAuth, validate({ body: schemas.generateBody }), async (req, res) => {
+router.post("/generate", rateLimiter, authenticate, requirePermission(PERMISSIONS.PROTOCOL_GENERATE), validate({ body: schemas.generateBody }), async (req, res) => {
   try {
     const result = await generateProtocol(req.validated.body);
     /**

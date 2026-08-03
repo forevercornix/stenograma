@@ -68,14 +68,24 @@ test("LOGIN: atsakymas ir auditas NIEKADA nešneša slaptažodžio", async () =>
   assert.ok(!serialized.includes(secret), "slaptažodis negali patekti nei į atsakymą, nei į auditą");
 });
 
-test("ME: su galiojančia sesija grąžina vartotoją ir rolę", async () => {
+test("ME: su galiojančia sesija grąžina vartotoją, rolę ir LEIDIMUS", async () => {
   const login = await request(app).post("/api/auth/login").send({ username: "operatorius", password: "kitas-slaptas-2" });
   const cookie = extractCookie(login);
 
   const me = await request(app).get("/api/auth/me").set("Cookie", cookie);
 
   assert.equal(me.status, 200);
-  assert.deepEqual(me.body, { username: "operatorius", role: "operator" });
+  assert.equal(me.body.username, "operatorius");
+  assert.equal(me.body.role, "operator");
+
+  /**
+   * Leidimai grąžinami frontend'ui ATVAIZDAVIMUI (#18 PR2) - kad UI
+   * nespėliotų pagal rolės pavadinimą ir rolių žemėlapis neegzistuotų
+   * dviejose vietose.
+   */
+  assert.ok(Array.isArray(me.body.permissions));
+  assert.ok(me.body.permissions.includes("job:read"), "operatorius turi galėti skaityti");
+  assert.ok(!me.body.permissions.includes("job:delete"), "operatorius NETURI trynimo teisės");
 });
 
 test("ME: be cookie grąžina vienodą 401", async () => {

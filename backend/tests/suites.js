@@ -50,6 +50,7 @@ const privacy = [
 const security = [
   "criticalGuarantees.route",
   "authFoundation",
+  "rbac.route",
   "authRoutes.route",
   "securityBaseline.route",
   "security.route",

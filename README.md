@@ -1320,10 +1320,38 @@ limitus: neaktyvumo (`SESSION_IDLE_TIMEOUT_MINUTES`, numatyta 30 min) ir
 absoliutų (`SESSION_ABSOLUTE_TIMEOUT_HOURS`, numatyta 12 val., galioja net
 esant nuolatiniam aktyvumui).
 
-⚠️ **Šis PR tyčia neįgyvendina RBAC vykdymo.** `role` laukas saugomas ir
-grąžinamas per `/api/auth/me`, bet joks esamas endpointas (`/api/generate`,
-`/api/exports` ir kt.) jo dar netikrina – jie lieka apsaugoti tik `API_KEY`.
-Rolėmis grįsta autorizacija yra atskiro PR darbas.
+**Rolėmis grįsta autorizacija (#18 PR2).** Leidimai gyvena viename registre
+(`utils/permissions.js`) ir yra **deny-by-default** – naujas leidimas be
+eksplicitinio priskyrimo yra uždaras.
+
+| Leidimas | operator | administrator |
+|---|:---:|:---:|
+| `job:create` – kurti darbus | ✅ | ✅ |
+| `job:read` – skaityti būseną ir rezultatą | ✅ | ✅ |
+| `protocol:generate` – generuoti protokolą | ✅ | ✅ |
+| `export:redacted` – eksportuoti redaguotą | ✅ | ✅ |
+| `job:delete` – **GDPR ištrynimas** | ❌ | ✅ |
+| `export:original` – **neredaguoti asmens duomenys** | ❌ | ✅ |
+| `audit:read` – audito žurnalas | ❌ | ✅ |
+
+Maršrutai nurodo **leidimą**, ne rolę – kitaip rolių žemėlapio pakeitimas
+reikštų kiekvieno maršruto redagavimą. `/api/exports` yra ypatingas: reikalingas
+leidimas priklauso nuo `variant` reikšmės, tad tikrinamas **po** validacijos.
+
+**Du autentifikacijos mechanizmai veikia lygiagrečiai.** Sesija turi
+**pirmenybę** prieš bendrą `API_KEY` – priešingu atveju operatorius galėtų
+pasikelti teises vien pridėdamas raktą prie užklausos.
+
+⚠️ **`API_KEY_ROLE` pagal nutylėjimą – `administrator`.** Tai sąmoningas
+atgalinio suderinamumo sprendimas: iki #18 rakto turėtojas galėjo viską, ir
+numatytoji `operator` tyliai sulaužytų veikiančią automatiką. **Kol taip yra,
+RBAC neriboja rakto turėtojų** – `job:delete` ir `export:original` apsaugos jiems
+negalioja. Startup apie tai įspėja. Realiam atskyrimui:
+`API_KEY_ROLE=operator` arba perėjimas prie sesijų.
+
+⚠️ **Nuosavybės patikrų nėra.** Rolė sprendžia, kokius veiksmus galima atlikti,
+bet ne su kieno duomenimis – bet kuris administratorius gali ištrinti bet kurį
+darbą.
 
 ⚠️ **Sesijų saugykla – tik atmintyje, vienas procesas.** Sąmoningas
 pilotui pritaikytas sprendimas (patvirtinta): restartas atjungia visus
