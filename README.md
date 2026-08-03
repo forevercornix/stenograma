@@ -1283,6 +1283,17 @@ reikštų „nepalieka artefaktų su šiais prefiksais". Rašant #15 rasta, kad 
 naują. Kai tokių likučių prisikaupia, niekas nebemato, kad **produkcinis** kodas
 kažko neištrina.
 
+**Artefaktų inventorius (#19).** Apdorojant vieną susitikimą sukuriama
+vienuolika artefaktų tipų – nuo įkelto audio iki eksporto. Iki šiol tas žinojimas
+buvo išbarstytas po kodą, tad naujas tipas galėjo likti **nematomas ištrynimui**,
+tyliai. Dabar registras, išvedimo grafas ir gyvavimo ciklo būsenos gyvena vienoje
+vietoje: [`docs/artefact-lifecycle.md`](docs/artefact-lifecycle.md).
+
+Dvi modelio taisyklės: iš `deleted` **nėra kelio atgal** (kitaip vėluojantis
+worker'is paverstų ištrynimą laikinu), ir ištrynimas privalo eiti per
+`pending_deletion` (kitaip nelieka būsenos, kurioje worker'is pamatytų ištrynimo
+žymą).
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

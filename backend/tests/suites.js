@@ -40,6 +40,7 @@ const privacy = [
   "jobErasure",
   "deletionResilience",
   "audioCleanup",
+  "artefactInventory",
   "observabilityEvents.route",
 ];
 

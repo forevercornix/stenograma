@@ -42,7 +42,15 @@ const INDEX_KEY = "jobs:index";
 const TTL_SECONDS = Math.ceil(TTL_MS / 1000);
 
 // Laukai, kuriuos saugom kaip JSON (objektai/masyvai); kiti - kaip paprastą tekstą.
-const JSON_FIELDS = new Set(["result", "progress"]);
+/**
+ * `artefacts` PRIVALO būti čia (#19 PR1).
+ *
+ * Redis hash'e viskas yra eilutė; be JSON serializacijos masyvas grįžtų kaip
+ * `"[object Object]"` arba `""`, ir inventorius tyliai dingtų. Šio failo
+ * komentaras žemiau būtent apie tai ir įspėja – nauji struktūriniai laukai
+ * pridedami ČIA iš karto, ne po to, kai kas nors pastebi.
+ */
+const JSON_FIELDS = new Set(["result", "progress", "artefacts"]);
 
 /**
  * Redis hash'e VISKAS yra eilutė. Todėl laukus, kurių tipas turi reikšmę, būtina
