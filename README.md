@@ -1449,6 +1449,18 @@ tarp jos ir pritaikymo worker'is gali paimti naują darbą. Todėl veikia
 ⚠️ Užraktas gyvena atmintyje, viename procese — keliems worker'ių procesams
 reikėtų Redis užrakto.
 
+**Atkūrimo runbook (#20).** [`docs/backup-runbook.md`](docs/backup-runbook.md)
+atsako eksploatuojančiam: kas patenka į kopiją, kaip ją sukurti ir atkurti, ką
+reiškia kiekvienas atsakymo kodas, kaip rotuoti raktus ir ką parodyti auditoriui.
+
+Dokumentas **tikrinamas CI**: artefaktų sąrašas lyginamas su politika, reikšmės
+su kodu, paslapčių skaičius su inventoriumi, o kiekviena žinoma riba privalo
+būti įvardyta.
+
+⚠️ Svarbiausias operacinis įspėjimas: **nerotuoti šifravimo raktų du kartus iš
+eilės**. Palaikomas tik vienas ankstesnis raktas — kopijos, šifruotos prieš dvi
+rotacijas, taps neatkuriamos.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
