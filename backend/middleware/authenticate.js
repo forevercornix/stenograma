@@ -53,7 +53,30 @@ async function authenticate(req, res, next) {
     return next();
   }
 
-  // 3. NĖ VIENO mechanizmo nesukonfigūruota.
+  /**
+   * 3. AR APSKRITAI KAS NORS SUKONFIGŪRUOTA?
+   *
+   * ⚠️ TIKRINAM IR `AUTH_USERS`, ne tik `API_KEY`.
+   *
+   * Ankstesnė versija žiūrėjo tik į raktą, tad sistema su SUKONFIGŪRUOTAIS
+   * vartotojais, bet be `API_KEY`, dev režime likdavo ATVIRA: anoniminė
+   * užklausa krisdavo į žemiau esantį praleidimą ir gaudavo `administrator`
+   * teises.
+   *
+   * Tai nebuvo teorinis atvejis – būtent tokia konfigūracija natūrali
+   * diegimui, pereinančiam nuo bendro rakto prie sesijų (#18). Rasta
+   * rašant #20 PR4 endpointų testus.
+   */
+  const hasUsers = Boolean((process.env.AUTH_USERS || "").trim());
+
+  if (hasUsers) {
+    /**
+     * Vartotojai sukonfigūruoti, bet galiojančios sesijos nėra – tai
+     * NEAUTENTIFIKUOTA užklausa, ne „nesukonfigūruota sistema".
+     */
+    return res.status(401).json({ error: "Reikalingas prisijungimas.", code: "SESSION_REQUIRED" });
+  }
+
   if (process.env.NODE_ENV === "production") {
     return res.status(503).json({
       error: "Endpoint'as uždarytas produkcijoje, kol nenustatytas nei API_KEY, nei AUTH_USERS.",

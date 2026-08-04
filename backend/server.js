@@ -75,6 +75,16 @@ function requireJobSystemReady(req, res, next) {
   next();
 }
 
+/**
+ * Kopijų endpoint'ai (#20 PR4) – registruojami tik jei kopijos ĮJUNGTOS.
+ *
+ * Neįjungus jų maršruto apskritai nėra: administracinis endpointas, kuris
+ * egzistuoja „tik grąžina 503", vis tiek yra atakos paviršius.
+ */
+if (require("./utils/backupPolicy").isEnabled()) {
+  app.use("/api", require("./routes/backup"));
+}
+
 app.use("/api", authRoute);
 app.use("/api", generateRoute);
 app.use("/api", transcribeRoute);

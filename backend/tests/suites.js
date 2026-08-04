@@ -44,6 +44,7 @@ const privacy = [
   "backupPolicy",
   "backupRestore",
   "backupSecurity",
+  "backupRoutes.route",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",

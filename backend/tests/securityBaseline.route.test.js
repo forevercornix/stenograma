@@ -470,7 +470,21 @@ test("AUDITAS: kiekvienas /api maršrutas turi rate limitą IR validaciją, kur 
    * `/auth/logout` (#18 PR1) kūno apskritai nepriima - jis skaito TIK cookie.
    * Priverstinė tuščia schema čia nieko neapsaugotų, tik pridėtų kodą dėl kodo.
    */
-  const NO_BODY_ROUTES = new Set(["auth.js:/auth/logout"]);
+  /**
+   * Maršrutai, kuriems zod `validate()` NETINKA.
+   *
+   * `/auth/logout` neturi kūno. Kopijų maršrutai priima MULTIPART, ne JSON:
+   * jų įvestį validuoja multer (dydžio ir laukų ribos) plius
+   * `assertExactlyTwoParts` – zod schema binariniam turiniui neturėtų prasmės.
+   *
+   * ⚠️ Įtraukimas čia NĖRA validacijos atsisakymas: `backupRoutes.route`
+   * testai tikrina trūkstamus, perteklinius ir per didelius laukus.
+   */
+  const NO_BODY_ROUTES = new Set([
+    "auth.js:/auth/logout",
+    "backup.js:/admin/backups",
+    "backup.js:/admin/backups/restore",
+  ]);
 
   const offenders = [];
 
@@ -482,7 +496,18 @@ test("AUDITAS: kiekvienas /api maršrutas turi rate limitą IR validaciją, kur 
     const routes = source.match(/router\.(get|post|delete|put|patch)\([\s\S]{0,400}?=>/g) || [];
 
     for (const route of routes) {
-      const pathMatch = route.match(/router\.\w+\("([^"]+)"/);
+      /**
+       * Kelias atpažįstamas ir DAUGIAEILIUOSE maršrutuose.
+       *
+       * Ankstesnė versija reikalavo `("` iškart po `router.post`, tad
+       * maršrutas, išskaidytas per kelias eilutes (kaip `routes/backup.js`),
+       * likdavo neatpažintas – `routeKey` būdavo `null`, išimčių sąrašas
+       * nesuveikdavo, ir auditas praneštų apie pažeidimą dėl FORMATAVIMO.
+       *
+       * Struktūrinė patikra neturi priklausyti nuo to, kaip kodas sulaužytas
+       * į eilutes.
+       */
+      const pathMatch = route.match(/router\.\w+\(\s*"([^"]+)"/);
       const routeKey = pathMatch ? `${file}:${pathMatch[1]}` : null;
 
       const hasParams = /:\w+/.test(route);

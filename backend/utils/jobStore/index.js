@@ -2,6 +2,7 @@ const memoryStore = require("./memoryStore");
 const { STATUS, JOB_TYPES, TTL_MS } = require("./common");
 const { createLogger } = require("../../utils/logger");
 const tombstones = require("../deletionTombstones");
+const maintenanceLock = require("../maintenanceLock");
 
 /**
  * VIDINIS gyvavimo ciklo raktas (#19 PR3).
@@ -129,6 +130,24 @@ async function ensureInit() {
 module.exports = {
   init,
   create: async (fields = {}) => {
+    /**
+     * PRIEŽIŪROS UŽRAKTAS (#20 PR4).
+     *
+     * Uždėtas užraktas reiškia, kad vyksta atkūrimas ar kita operacija,
+     * perrašanti būseną. Naujas darbas tuo metu arba dingtų kartu su
+     * perrašymu, arba liktų kaboti be konteksto – abu variantai blogesni nei
+     * atviras atsisakymas.
+     *
+     * Patikra ČIA, o ne maršrute: `create` yra vienintelis kelias, kuriuo
+     * atsiranda naujas jobas – ta pati logika kaip ištrynimo žymų patikra
+     * `update` viduje (#19 PR3).
+     */
+    if (maintenanceLock.isLocked()) {
+      const error = new Error("Vyksta priežiūros operacija – naujų darbų kurti negalima.");
+      error.code = "MAINTENANCE_IN_PROGRESS";
+      throw error;
+    }
+
     await ensureInit();
     return store.create(fields);
   },

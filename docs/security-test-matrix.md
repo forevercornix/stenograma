@@ -398,7 +398,26 @@ raktas privalo gyventi atskirai nuo kopijų.
 `base64` dekodavimą, bet iki tol failas jau perskaitytas ir išparsintas. Viso
 failo riba priklauso įėjimo taškui, kurio dar nėra.
 
-⚠️ **RBAC dar neprijungtas prie įėjimo taško.** HTTP maršrutų kopijoms nėra;
+### #20 PR4 — kopijų endpoint'ai
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Anonimas negauna nei kūrimo, nei atkūrimo (**401**) | `backupRoutes.route` | `AUTH_USERS` patikros pašalinimas → krinta 2 |
+| Operatorius negauna nei vieno (**403**) | `backupRoutes.route` | Leidimo pašalinimas → krinta 2 |
+| Leidimai tikrinami **atskirai** kūrimui ir atkūrimui | `backupRoutes.route` | — |
+| Serveris kopijų **nesaugo** | `backupRoutes.route` | — |
+| Trūkstamas, perteklinis ar per didelis laukas atmetamas (400/413) | `backupRoutes.route` | — |
+| Aktyvūs darbai blokuoja atkūrimą (**409**), be turinio | `backupRoutes.route` | — |
+| **Priežiūros užraktas uždaro TOCTOU langą** | `backupRoutes.route` | Užrakto pašalinimas |
+| Užraktas nuimamas net operacijai nepavykus | `backupRoutes.route` | — |
+| Užraktas turi maksimalią trukmę | `backupRoutes.route` | — |
+| Pilnas ciklas per tikrus endpoint'us | `backupRoutes.route` | — |
+
+⚠️ **`authenticate` defektas, rastas rašant PR4:** tikrinamas buvo tik `API_KEY`,
+tad sistema su sukonfigūruotais `AUTH_USERS`, bet be rakto, dev režime likdavo
+**atvira** — anoniminė užklausa gaudavo `administrator` teises. Ištaisyta.
+
+ HTTP maršrutų kopijoms nėra;
 leidimai užregistruoti iš anksto. Testas tikrina **lentelę**, ne operaciją —
 atsiradus maršrutui jis kris ir privers pakeisti jį integraciniu.
 
