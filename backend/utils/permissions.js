@@ -36,6 +36,36 @@ const PERMISSIONS = {
 
   /** Skaityti audito žurnalą. */
   AUDIT_READ: "audit:read",
+
+  /**
+   * ⚠️ ŠIE DU LEIDIMAI DAR NĖRA PRIJUNGTI PRIE JOKIO ĮĖJIMO TAŠKO.
+   *
+   * HTTP maršrutų kopijoms kol kas nėra – `backupService` ir `restoreService`
+   * kviečiami tiesiogiai. Leidimai užregistruoti IŠ ANKSTO, kad atsiradus
+   * maršrutui nereikėtų svarstyti, kam jis priklauso.
+   *
+   * Kol įėjimo taško nėra, teiginys „kopijos tik administratoriui" NĖRA
+   * įgyvendinta garantija – tai tik paruošta lentelė. Prijungimas ir jo
+   * integraciniai testai yra atskiro etapo darbas.
+   */
+
+  /**
+   * Kurti atsarginę kopiją (#20).
+   *
+   * Kopija yra VISŲ duomenų nuotrauka vienoje vietoje – galingiausias
+   * eksportas, koks apskritai įmanomas. Todėl teisė ją kurti yra atskira ir
+   * administratoriaus lygio, net jei operatorius gali skaityti tuos pačius
+   * duomenis po vieną.
+   */
+  BACKUP_CREATE: "backup:create",
+
+  /**
+   * Atkurti iš kopijos (#20).
+   *
+   * Destruktyviausia operacija sistemoje: ji PERRAŠO esamą būseną. Griežtesnė
+   * net už `job:delete`, nes paliečia ne vieną įrašą, o visus.
+   */
+  BACKUP_RESTORE: "backup:restore",
 };
 
 /**
@@ -68,6 +98,8 @@ const ROLE_PERMISSIONS = {
   ],
 
   administrator: [
+    PERMISSIONS.BACKUP_CREATE,
+    PERMISSIONS.BACKUP_RESTORE,
     PERMISSIONS.JOB_CREATE,
     PERMISSIONS.JOB_READ,
     PERMISSIONS.JOB_DELETE,

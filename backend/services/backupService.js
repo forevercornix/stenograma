@@ -5,6 +5,8 @@ const backupPolicy = require("../utils/backupPolicy");
 const backupManifest = require("../utils/backupManifest");
 const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
 const { createLogger } = require("../utils/logger");
+const backupEncryption = require("../utils/backupEncryption");
+const secretsInventory = require("../utils/secretsInventory");
 
 const log = createLogger("backup");
 
@@ -91,29 +93,64 @@ async function createBackup({ actor = null, env = process.env } = {}) {
     audio,
   };
 
-  const serialized = Buffer.from(JSON.stringify(data), "utf8");
+  const plaintext = Buffer.from(JSON.stringify(data), "utf8");
+
+  const encrypted = backupEncryption.isEnabled(env);
+
+  /**
+   * PASLAPČIŲ PATIKRA KŪRIMO METU (#20 PR3 v3).
+   *
+   * Anksčiau ji vykdavo TIK atkuriant – t. y. kopija su nutekėjusia paslaptimi
+   * būdavo sukuriama, laikoma visą retencijos laikotarpį, ir problema
+   * paaiškėdavo nelaimės metu, kai atkūrimas jau reikalingas.
+   *
+   * Atkūrimo momentas yra blogiausia vieta pirmą kartą sužinoti, kad kopija
+   * neatitinka politikos.
+   */
+  const leaked = secretsInventory.findLeakedSecrets(plaintext.toString("utf8"), env);
+  if (leaked.length > 0) {
+    _audit({ event: "BACKUP_REJECTED", actor, manifest: null, success: false, outcome: "secrets_present" });
+
+    // Pranešime - TIK vardai, niekada reikšmės.
+    throw _backupError(`Kopijoje aptikta paslapčių: ${leaked.join(", ")}. Kopija nesukurta.`, "BACKUP_SECRETS_PRESENT");
+  }
 
   const contents = [
     { type: ARTEFACT_TYPES.JOB_RECORD.id, count: stable.length, bytes: Buffer.byteLength(JSON.stringify(stable)) },
     { type: ARTEFACT_TYPES.SOURCE_AUDIO.id, count: audio.length, bytes: audio.reduce((sum, a) => sum + a.bytes, 0) },
   ];
 
+  /**
+   * MANIFESTAS SUDAROMAS PRIEŠ ŠIFRAVIMĄ.
+   *
+   * Jo saugumo laukai naudojami kaip AAD, tad turi būti žinomi šifruojant.
+   * Kontrolinė suma – vienintelis laukas, kuris priklauso nuo šifruoto turinio,
+   * todėl ji pridedama po to (ir į AAD nepatenka: ji apskaičiuojama nuo to
+   * paties ciphertext, kurį autentifikuoja GCM žyma).
+   */
   const manifest = backupManifest.createManifest({
     contents,
-    checksum: backupManifest.computeChecksum(serialized),
+    checksum: "pending",
     env,
   });
 
-  /**
-   * Momentinio vaizdo metaduomenys – manifeste, ne loguose.
-   *
-   * Logai rotuojasi; manifestas keliauja kartu su kopija. Operatorius, radęs
-   * kopiją po pusmečio, turi galėti atsakyti į klausimą „ko joje nėra"
-   * neieškodamas archyvuotų logų.
-   */
+  manifest.encrypted = encrypted;
+  manifest.encryptionAlgorithm = encrypted ? `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}` : null;
   manifest.snapshotTime = new Date(snapshotTime).toISOString();
   manifest.excludedInFlightJobs = inFlight.length;
   manifest.excludedReason = inFlight.length > 0 ? "in_progress" : null;
+
+  const serialized = encrypted
+    ? Buffer.from(JSON.stringify(backupEncryption.encrypt(plaintext, { env, manifest })), "utf8")
+    : plaintext;
+
+  /**
+   * Kontrolinė suma – nuo TO, KAS REALIAI SAUGOMA (šifruoto turinio).
+   *
+   * Taip sugadinimas aptinkamas IŠ KARTO, o ne po nepavykusio dešifravimo, kai
+   * priežastis jau dviprasmiška (sugadinta ar netinkamas raktas?).
+   */
+  manifest.checksum = backupManifest.computeChecksum(serialized);
 
   _audit({ event: "BACKUP_CREATED", actor, manifest, success: true });
 
@@ -121,6 +158,7 @@ async function createBackup({ actor = null, env = process.env } = {}) {
     jobs: stable.length,
     excludedInFlight: inFlight.length,
     audioFiles: audio.length,
+    encrypted,
   });
 
   return { manifest, data: serialized };

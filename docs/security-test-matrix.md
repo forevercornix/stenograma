@@ -349,6 +349,65 @@ pasitikėjimą būtent ten, kur jo negalima turėti. Todėl jis tikrinamas testa
 ⚠️ **Atkūrimas gerbia #19 ištrynimo žymas.** Be to atsarginė kopija taptų būdu
 apeiti GDPR ištrynimą: pakaktų atkurti kopiją, kad ištrinti duomenys grįžtų.
 
+### #20 PR3 — paslaptys, šifravimas ir atkūrimo validacija
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Paslapčių sąrašas **eksplicitinis**, ne pagal vardo šabloną | `backupSecurity` | — |
+| Kiekviena paslaptis turi `unlocks` ir `rotation` | `backupSecurity` | — |
+| Išorinės paslaptys atskirtos (rotacija per tiekėją) | `backupSecurity` | — |
+| Aptinkamos **reikšmės**, ne vardai; trumpos ignoruojamos | `backupSecurity` | — |
+| Šifravimas: **pakeistas turinys aptinkamas** (GCM žyma) | `backupSecurity` | — |
+| **Kopija realiai šifruojama** srauto lygiu | `backupSecurity` | Šifravimo atjungimas → krinta 2 |
+| Manifeste fiksuojama `encrypted` ir algoritmas | `backupSecurity` | — |
+| Šifruota kopija atkuriama per pilną grandinę | `backupSecurity` | — |
+| Netinkamas raktas neatkuria; raktas nepatenka į pranešimą | `backupSecurity` | — |
+| Rotacija veikia **per tikrą srautą**, ne vien modulyje | `backupSecurity` | — |
+| Kontrolinė suma dengia **šifruotą** turinį | `backupSecurity` | — |
+| **Rotacija išsaugo senas kopijas** | `backupSecurity` | Ankstesnio rakto pašalinimas |
+| Netinkamo ilgio raktas atmetamas, ne ištempiamas | `backupSecurity` | — |
+| Kopija su paslaptimi **atmetama**; pranešime tik vardas | `backupSecurity` | Patikros išjungimas → krinta 2 |
+| Netinkama konfigūracija sustabdo atkūrimą (**ta pati** kaip #14) | `backupSecurity` | — |
+| Neišsaugojimo režimas blokuoja atkūrimą | `backupSecurity` | — |
+| Įprastas režimas be Redis **neblokuojamas** | `backupSecurity` | — |
+| Leidimų **lentelėje** kopijos priskirtos tik administratoriui | `backupSecurity` | Teisės suteikimas operatoriui |
+| Kopijų maršruto **dar nėra** – garantija neįgyvendinta | `backupSecurity` | — |
+| **Manifestas susietas su turiniu (AAD)** – klastojimas laužo dešifravimą | `backupSecurity` | AAD pašalinimas → krinta 2 |
+| AAD pridėjimas **pakėlė formato versiją** į `v2` | `backupSecurity` | Grąžinimas į `v1` → krinta 16 |
+| Nebepalaikomas `v1` atmetamas su konkrečia priežastimi | `backupSecurity` | — |
+| **Manifesto downgrade** (`encrypted: true → false`) aptinkamas | `backupSecurity` | Aptikimo išjungimas |
+| `encrypted` privalo būti griežtas boolean | `backupSecurity` | Tipo patikros išjungimas |
+| `contents` klastojimas laužo dešifravimą; tvarka nesvarbi | `backupSecurity` | — |
+| AAD schema susieta su formato versija | `backupSecurity` | — |
+| Turinio sukeitimas tarp kopijų atmetamas | `backupSecurity` | — |
+| Nepalaikomas ar nenuoseklus algoritmas atmetamas | `backupSecurity` | — |
+| Netinkama envelope struktūra atmetama **prieš ciphertext base64 dekodavimą** | `backupSecurity` | — |
+| **`v2` reikalauja manifesto** – vienareikšmė formato sutartis | `backupSecurity` | Privalomumo pašalinimas → krinta 2 |
+| `v1` atmetamas su konkrečia priežastimi **pilname sraute** | `backupSecurity` | — |
+| `contents` schema tikrinama griežtai prieš AAD | `backupSecurity` | Patikros išjungimas |
+| **Paslaptys aptinkamos jau kuriant** kopiją | `backupSecurity` | Patikros išjungimas → krinta 2 |
+| Kopijų raktai yra paslapčių inventoriuje | `backupSecurity` | Rakto pašalinimas |
+| **Šifruota** kopija irgi negrąžina ištrinto jobo (#19) | `backupSecurity` | — |
+| Rotacijos kelias irgi gerbia žymas | `backupSecurity` | — |
+| Šifravimo raktai validuojami startup metu | `backupSecurity` | — |
+
+⚠️ **Šifravimas nepakeičia prieigos kontrolės.** Kas turi raktą, turi duomenis;
+raktas privalo gyventi atskirai nuo kopijų.
+
+⚠️ **Envelope dydžio patikra nėra viso failo apsauga.** Ji vyksta prieš
+`base64` dekodavimą, bet iki tol failas jau perskaitytas ir išparsintas. Viso
+failo riba priklauso įėjimo taškui, kurio dar nėra.
+
+⚠️ **RBAC dar neprijungtas prie įėjimo taško.** HTTP maršrutų kopijoms nėra;
+leidimai užregistruoti iš anksto. Testas tikrina **lentelę**, ne operaciją —
+atsiradus maršrutui jis kris ir privers pakeisti jį integraciniu.
+
+⚠️ **Paslapčių patikros ribos.** Ji aptinka **šiuo metu sukonfigūruotų**,
+inventoriuje esančių ir bent 8 simbolių paslapčių **tikslias reikšmes**. Ji
+neaptiks jau rotuoto rakto, paslapties iš kitos aplinkos ar nesukonfigūruoto
+tiekėjo rakto. Tai *best-effort* patikra, ne įrodymas, kad kopijoje paslapčių
+nėra.
+
 ⚠️ **Auditas nekopijuojamas.** #19 ištrynimas šalina audito įrašus, o žymų
 apsauga dengia jobus pagal ID – audito įrašai saugo pseudonimizuotą subjektą,
 tad ta patikra jų neapima. Atkūrus auditą, GDPR ištrinti įrašai grįžtų.

@@ -164,6 +164,39 @@ function validateConfig(env = process.env) {
    * grąžintų `null`, ir VISI rakto keliai duotų 401, atrodydami kaip
    * autentifikacijos gedimas, o ne konfigūracijos klaida.
    */
+  /**
+   * KOPIJŲ ŠIFRAVIMO RAKTAI (#20).
+   *
+   * Tikrinamas IR ankstesnis raktas: jei jo formatas netinkamas, `decrypt`
+   * mestų klaidą DAR PRIEŠ pradedant bandyti kandidatus – tad atkūrimas kristų
+   * net su TEISINGU dabartiniu raktu.
+   *
+   * Tai fail-closed, bet operaciškai netikėta, o sužinoti apie tai nelaimės
+   * metu yra blogiausias momentas.
+   */
+  for (const name of ["BACKUP_ENCRYPTION_KEY", "BACKUP_ENCRYPTION_KEY_PREVIOUS"]) {
+    const raw = env[name];
+    if (!raw) continue;
+
+    if (!/^[0-9a-fA-F]{64}$/.test(String(raw))) {
+      errors.push(`${name} netinkamo formato – privalo būti 64 hex simboliai (32 baitai).`);
+    }
+  }
+
+  /**
+   * ĮSPĖJIMAS: ankstesnis raktas be dabartinio.
+   *
+   * Toks derinys reiškia, kad naujos kopijos NEBUS šifruojamos, o senos dar
+   * dešifruojamos – dažniausiai tai nebaigta rotacija, ne sąmoningas
+   * sprendimas.
+   */
+  if (env.BACKUP_ENCRYPTION_KEY_PREVIOUS && !env.BACKUP_ENCRYPTION_KEY) {
+    warnings.push(
+      "BACKUP_ENCRYPTION_KEY_PREVIOUS nustatytas be BACKUP_ENCRYPTION_KEY – naujos kopijos NEBUS šifruojamos. " +
+        "Greičiausiai nebaigta rotacija."
+    );
+  }
+
   const apiKeyRole = (env.API_KEY_ROLE || "").trim().toLowerCase();
   if (apiKeyRole && !KNOWN_ROLES.includes(apiKeyRole)) {
     /**
