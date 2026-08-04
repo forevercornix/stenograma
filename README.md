@@ -1475,8 +1475,17 @@ Abu dokumentai **tikrinami CI**: komandose naudojami kintamieji ir minimi audito
 įvykiai turi realiai egzistuoti, endpoint'ai tikrinami HTTP užklausomis, o
 teiginiai apie sistemos elgesį — prieš kodą.
 
-⚠️ **Audito žurnalas gyvena tik atmintyje.** Restartas jį ištrina, todėl
-įrodymų išsaugojimas yra **pirmas** incidento žingsnis, ne vėlesnis.
+Po incidento —
+[`docs/operations/POSTMORTEM_AND_EXERCISES.md`](docs/operations/POSTMORTEM_AND_EXERCISES.md):
+peržiūros šablonas, pratybų planas ir **visų žinomų ribų santrauka** vienoje
+vietoje.
+
+⚠️ **Audito žurnalas gyvena tik atmintyje.** Restartas jį ištrina, todėl auditą
+būtina išsaugoti **prieš bet kokį restartą** ar kitą atminties būseną naikinantį
+veiksmą.
+
+Tai **nereiškia**, kad auditas visada pirmas: aktyvų poveikį galima ir reikia
+nedelsiant sulaikyti grįžtamais, įrodymų **nenaikinančiais** veiksmais.
 
 ⚠️ Sulaikymo veiksmai parinkti taip, kad **nenaikintų incidento įrodymų** —
 ištrinti logus ar perkurti aplinką negalima. Kai įmanoma, jie grįžtami; bet

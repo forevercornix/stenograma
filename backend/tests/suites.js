@@ -48,6 +48,7 @@ const privacy = [
   "backupDocumentation",
   "incidentRunbook",
   "operationalProcedures",
+  "postmortemTemplate",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",
