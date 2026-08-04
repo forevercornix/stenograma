@@ -46,6 +46,20 @@ function registerFakeProvider(t, received, respond) {
   const previous = REGISTRY.fake_external;
   const hadPrevious = Object.prototype.hasOwnProperty.call(REGISTRY, "fake_external");
 
+  /**
+   * Netikras tiekėjas privalo deklaruoti ir POLITIKĄ (#22.2) – lygiai kaip
+   * tikras. Priešingu atveju valdysena jį blokuotų, ir testas tikrintų
+   * neteisingą kelią.
+   */
+  const restoreGovernance = registerTestProvider("llm", "fake_external", {
+    region: "n/a",
+    retention: "n/a",
+    modelTraining: "n/a",
+    confidence: "verified",
+    approval: "not_required",
+    notes: "Testinis tiekėjas.",
+  });
+
   REGISTRY.fake_external = class FakeExternalProvider {
     constructor() {
       this.name = "fake_external";
@@ -288,6 +302,7 @@ test("FAKTAS, o ne prognozė: fabrika grąžina apvyniotą tiekėją", async (t)
 
 const { getTranscriptionProvider } = require("../providers/transcription");
 const { getDiarizationProvider } = require("../providers/diarization");
+const { registerTestProvider } = require("../utils/providerGovernance");
 
 const LOCAL_AUDIO_ENV = {
   REQUIRE_REDACTION_BEFORE_EXTERNAL: "true",
@@ -331,9 +346,44 @@ test("LOKALŪS override variantai praeina (apsauga nėra plataus veikimo blokas)
   });
 });
 
-test("be vėliavos runtime override nėra ribojamas (esamos elgsenos fiksavimas)", async () => {
+test("runtime override RIBOJAMAS tiekėjų valdysenos (#22.2)", async () => {
+  /**
+   * ⚠️ ELGSENA SĄMONINGAI PAKEISTA.
+   *
+   * Ankstesnė šio testo versija fiksavo, kad be `REQUIRE_REDACTION_BEFORE_EXTERNAL`
+   * runtime override NĖRA ribojamas — t. y. užklausa galėjo perjungti į
+   * `whisper` net tada, kai tiekėjas nepatvirtintas.
+   *
+   * #22.2 tai keičia: valdysena tikrinama FABRIKE, tad ji galioja ir
+   * override'ui. Redakcijos vėliava ir tiekėjų patvirtinimas yra DVI
+   * nepriklausomos kontrolės — pirmoji sprendžia, KAS siunčiama, antroji, KAM
+   * apskritai leidžiama siųsti.
+   */
   await withEnv(
     { ...LOCAL_AUDIO_ENV, REQUIRE_REDACTION_BEFORE_EXTERNAL: undefined, OPENAI_API_KEY: "sk-test" },
+    async () => {
+      assert.throws(
+        () => getTranscriptionProvider("whisper"),
+        (error) => error.code === "PROVIDER_NOT_APPROVED",
+        "nepatvirtintas tiekėjas neturi būti pasiekiamas per override"
+      );
+    }
+  );
+});
+
+test("runtime override LEIDŽIAMAS, kai tiekėjas patvirtintas", async () => {
+  /**
+   * Apsauga nėra aklas blokas: patvirtinus tiekėją, override veikia kaip ir
+   * anksčiau. Be šio testo #22.2 galėtų virsti visišku override draudimu, ir
+   * niekas to nepastebėtų.
+   */
+  await withEnv(
+    {
+      ...LOCAL_AUDIO_ENV,
+      REQUIRE_REDACTION_BEFORE_EXTERNAL: undefined,
+      OPENAI_API_KEY: "sk-test",
+      APPROVED_EXTERNAL_PROVIDERS: "whisper",
+    },
     async () => {
       assert.ok(getTranscriptionProvider("whisper"));
     }

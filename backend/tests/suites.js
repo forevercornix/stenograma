@@ -50,6 +50,7 @@ const privacy = [
   "operationalProcedures",
   "postmortemTemplate",
   "providerGovernance",
+  "providerEnforcement",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",

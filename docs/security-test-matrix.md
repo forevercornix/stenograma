@@ -568,6 +568,29 @@ reikia pasitikėti. Todėl jis tikrinamas CI.
 | Patvirtintų tiekėjų sąrašas dedublikuojamas | `providerGovernance` | Dedublikavimo pašalinimas → krinta |
 | `assumed` nenaudojamas, bet jo paskirtis dokumentuota | `providerGovernance` | — |
 
+### #22.2 — politikos vykdymas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Nepatvirtintas tiekėjas blokuojamas **visuose trijuose fabrikuose** | `providerEnforcement` | Patikros pašalinimas → krinta 5 |
+| Patvirtintas praeina — apsauga **nėra aklas blokas** | `providerEnforcement` | — |
+| Lokalūs veikia be patvirtinimo | `providerEnforcement` | — |
+| Patvirtinimas galioja **per tiekėją**, ne kategoriją | `providerEnforcement` | — |
+| **Užklausos override neapeina** valdysenos | `providerEnforcement` | — |
+| Neleistinas tiekėjas **stabdo paleidimą** | `providerEnforcement` | Startup patikros išjungimas → krinta 2 |
+| Tikrinami **visi trys** tiekėjų kintamieji | `providerEnforcement` | — |
+| Rašybos klaida duoda „nežinomas tiekėjas", ne valdysenos klaidą | `providerEnforcement` | Tvarkos sukeitimas → krinta 2 |
+| Visi fabrikai kviečia **tą pačią** patikrą | `providerEnforcement` | — |
+| Testinio tiekėjo registracija veikia tik `NODE_ENV=test` | `providerEnforcement` | — |
+| Fabrikai naudoja **vieną bendrą** patikrą, ne kopijas | `providerEnforcement` | Kopijos grąžinimas → krinta |
+| Startup ir fabrikai naudoja **tą patį parserį** | `providerEnforcement` | Savo parserio grąžinimas → krinta |
+| **Dublikatai rinkiniuose stabdo paleidimą** | `providerEnforcement` | Dublikato grąžinimas → paleidiklis krinta |
+
+⚠️ **Patikra dedama FABRIKE, ne maršrute** — tai vienintelis kelias, kuriuo
+tiekėjas atsiranda. Todėl ji automatiškai galioja HTTP maršrutams, inline
+vykdymui ir BullMQ worker'iams (ta pati logika kaip #19 žymų patikra
+`jobStore.update` viduje).
+
 Inventorius ir kontrolinis sąrašas:
 [`docs/provider-governance.md`](provider-governance.md).
 

@@ -6,6 +6,7 @@ const { RedactingLLMProvider, RedactionError } = require("./RedactingLLMProvider
 const { isExternal } = require("../../utils/providerPrivacy");
 const { getPrivacyPolicy } = require("../../utils/privacyPolicy");
 const { probeRedactionComponent } = require("../../utils/redactionComponent");
+const { assertProviderAllowed } = require("../../utils/providerGovernance");
 
 const REGISTRY = {
   claude: ClaudeProvider,
@@ -19,6 +20,7 @@ const REGISTRY = {
  *   LLM_PROVIDER=gpt node server.js
  *   LLM_PROVIDER=mock node server.js   (numatytoji, veikia be raktų)
  */
+
 function getLLMProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.LLM_PROVIDER || "mock").toLowerCase();
   // hasOwnProperty, o NE `REGISTRY[name]` tiesiogiai: objekto literalas paveldi
@@ -27,6 +29,15 @@ function getLLMProvider(nameOverride, config = {}) {
   if (!Object.prototype.hasOwnProperty.call(REGISTRY, name)) {
     throw new Error(`Nežinomas LLM_PROVIDER: "${name}". Galimi: ${Object.keys(REGISTRY).join(", ")}`);
   }
+
+  /**
+   * VALDYSENA tikrinama PO registro patikros.
+   *
+   * Tvarka svarbi diagnostikai: rašybos klaida („clade") turi duoti
+   * „nežinomas tiekėjas", ne „nėra valdysenos įrašo". Antrasis pranešimas
+   * siųstų operatorių taisyti valdysenos failo, nors problema – įvestyje.
+   */
+  assertProviderAllowed("llm", name);
 
   const ProviderClass = REGISTRY[name];
   if (typeof ProviderClass !== "function") {

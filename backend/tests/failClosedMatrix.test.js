@@ -3,6 +3,15 @@ const assert = require("node:assert/strict");
 
 process.env.NODE_ENV = "test";
 process.env.LLM_PROVIDER = "claude";
+
+/**
+ * Tiekėjų valdysena (#22.2): išorinis tiekėjas neveikia be patvirtinimo.
+ *
+ * Šis testas tikrina FAIL-CLOSED matricą redakcijos ir eksporto keliuose, tad
+ * patvirtinimas čia yra prielaida. Be jo testas tikrintų valdysenos bloką, ne
+ * tai, ką turi tikrinti.
+ */
+process.env.APPROVED_EXTERNAL_PROVIDERS = "claude";
 process.env.ANTHROPIC_API_KEY = "sk-ant-testinis";
 process.env.TRANSCRIPTION_PROVIDER = "mock";
 process.env.DIARIZATION_PROVIDER = "none";

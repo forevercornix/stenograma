@@ -1515,6 +1515,12 @@ tad konfigūracija nėra atitikties įrodymas.
 „nesaugu"** — tik tiek, kad **šis projektas jų netikrino**. `verified` be
 patikrinimo būtų neverifikuota sutartinė garantija.
 
+Politika **vykdoma dviem sluoksniais**: startup validacija stabdo paleidimą su
+neleistina konfigūracija, o patikra tiekėjų **fabrikuose** dengia užklausos
+override ir dinaminį pasirinkimą. Fabrikas pasirinktas sąmoningai — tai
+vienintelis kelias, kuriuo tiekėjas atsiranda, tad politika galioja vienodai
+maršrutams, inline vykdymui ir worker'iams.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

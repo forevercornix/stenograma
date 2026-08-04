@@ -8,15 +8,37 @@ test("validateConfig: mock provideriai be raktų - jokių klaidų (demo režimas
 });
 
 test("validateConfig: claude be ANTHROPIC_API_KEY - AIŠKI klaida startup metu, ne kritimas pirmoje užklausoje", () => {
+  /**
+   * ⚠️ Nuo #22.2 tokia konfigūracija duoda DVI klaidas, ir abi teisingos:
+   *   1. trūksta rakto;
+   *   2. tiekėjas nepatvirtintas valdysenos.
+   *
+   * Jos nepriklausomos: raktas yra techninė prielaida, patvirtinimas —
+   * organizacinis sprendimas. Turėti raktą dar nereiškia turėti leidimą.
+   */
   const { errors } = validateConfig({ LLM_PROVIDER: "claude" });
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /ANTHROPIC_API_KEY/);
+
+  assert.match(errors.join(" | "), /ANTHROPIC_API_KEY/, "rakto klaida turi likti");
+  assert.match(errors.join(" | "), /nepatvirtintas/, "valdysenos klaida turi atsirasti");
+
+  // Patvirtinus tiekėją lieka TIK rakto klaida.
+  const approved = validateConfig({ LLM_PROVIDER: "claude", APPROVED_EXTERNAL_PROVIDERS: "claude" });
+
+  assert.equal(approved.errors.length, 1, `laukta vienos klaidos: ${approved.errors.join(" | ")}`);
+  assert.match(approved.errors[0], /ANTHROPIC_API_KEY/);
 });
 
 test("validateConfig: nežinomas provideris - klaida su galimų sąrašu", () => {
   const { errors } = validateConfig({ LLM_PROVIDER: "chatgpt5000" });
+
+  /**
+   * Nežinomas tiekėjas duoda dvi klaidas: registro („nežinomas", su galimų
+   * sąrašu) ir valdysenos („neturi įrašo"). Pirmoji tikslesnė rašybos klaidai,
+   * antroji – naujam tiekėjui, pridėtam be politikos.
+   */
   assert.match(errors[0], /nežinomas/);
   assert.match(errors[0], /claude/);
+  assert.match(errors.join(" | "), /neturi valdysenos įrašo/);
 });
 
 test("validateConfig: FASTER_WHISPER_MODEL kaip neegzistuojantis kelias - klaida; kaip HF pavadinimas - ne", () => {
