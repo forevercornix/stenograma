@@ -550,6 +550,38 @@ informacija, dažnai ne to žmogaus, kuris jį rašė. Neteisingas kintamasis ar
 neveikianti komanda sukelia abejonę **visu dokumentu** būtent tada, kai juo
 reikia pasitikėti. Todėl jis tikrinamas CI.
 
+## #22.1 — tiekėjų inventorius ir valdysena
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Kiekvienas matricos tiekėjas turi valdysenos įrašą** | `providerGovernance` | — |
+| Valdysenoje nėra tiekėjų, kurių nėra matricoje | `providerGovernance` | — |
+| **Nežinoma savybė niekada nereiškia patvirtinimo** | `providerGovernance` | Patvirtinimo panaikinimas → krinta 2 |
+| Nė vienas **išorinis** tiekėjas nepažymėtas `verified` | `providerGovernance` | `verified` pažymėjimas → krinta |
+| Nežinomas tiekėjas ir tipas **neleidžiami** | `providerGovernance` | Leidimo suteikimas → krinta 2 |
+| Išorinis leidžiamas tik su `APPROVED_EXTERNAL_PROVIDERS` | `providerGovernance` | — |
+| Diagnostika rodo politiką **be paslapčių** | `providerGovernance` | — |
+| Kiekvienas tiekėjas paminėtas dokumente | `providerGovernance` | — |
+| Įvardyta, kad **techninė kontrolė ≠ teisinė atitiktis** | `providerGovernance` | — |
+| Sąrašas **įgyvendina** sprendimą, bet jo **neįrodo** | `providerGovernance` | Klaidinančios formuluotės grąžinimas → krinta |
+| `unknown` įvardytas kaip „nepatikrinta", ne „nesaugu" | `providerGovernance` | — |
+| Patvirtintų tiekėjų sąrašas dedublikuojamas | `providerGovernance` | Dedublikavimo pašalinimas → krinta |
+| `assumed` nenaudojamas, bet jo paskirtis dokumentuota | `providerGovernance` | — |
+
+Inventorius ir kontrolinis sąrašas:
+[`docs/provider-governance.md`](provider-governance.md).
+
+⚠️ **Visos išorinių tiekėjų savybės pažymėtos `unknown`** — tai ne spraga, o
+tiksli šio projekto būklė. Įrašyti `verified` be realaus patikrinimo reikštų
+teigti neverifikuotas sutartines garantijas.
+
+⚠️ **`APPROVED_EXTERNAL_PROVIDERS` nėra atitikties įrodymas.** Kodas negali
+atskirti apgalvoto sprendimo nuo neatsargaus `.env` pakeitimo — sąrašas
+sprendimą tik įgyvendina.
+
+⚠️ Šis etapas apibrėžia **politiką**; jos vykdymas — #22.2, apsauga nuo
+regreso — #22.3.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

@@ -1498,6 +1498,23 @@ produkcijoje**: palikus bet kurį vieną, gaunamas 401, o ne sustabdymas.
 Runbook tai pripažįsta, o testai tikrina ne tik vardų egzistavimą, bet ir
 **teiginių apie jų poveikį teisingumą** — įskaitant visą 503/401 matricą.
 
+**Tiekėjų valdysena (#22).**
+[`docs/provider-governance.md`](docs/provider-governance.md) — inventorius, kokie
+duomenys kam siunčiami, ir diegimo privatumo kontrolinis sąrašas.
+
+Kertinė taisyklė: **nežinoma savybė niekada nereiškia patvirtinimo.** Tiekėjas,
+apie kurio retenciją nieko nežinome, yra **nepatvirtintas**, kol duomenų
+valdytojas nenusprendžia kitaip.
+
+⚠️ Išorinis tiekėjas neveiks be įrašo `APPROVED_EXTERNAL_PROVIDERS`, **net jei
+raktas nustatytas**. Bet šis sąrašas sprendimą **įgyvendina, o ne įrodo** —
+kodas negali atskirti apgalvoto patvirtinimo nuo neatsargaus `.env` pakeitimo,
+tad konfigūracija nėra atitikties įrodymas.
+
+⚠️ Visų išorinių tiekėjų savybės pažymėtos `unknown`. Tai **nereiškia
+„nesaugu"** — tik tiek, kad **šis projektas jų netikrino**. `verified` be
+patikrinimo būtų neverifikuota sutartinė garantija.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
