@@ -562,32 +562,30 @@ test("GARANTIJOS: eilės vykdymo konfigūracija NEPATEIKIAMA kaip besąlyginė",
   assert.match(doc, /turėtų būti[\s\S]{0,80}vykdomi nauja konfigūracija/i, "sąlyginė formuluotė turi likti");
 });
 
-test("SEMANTIKA: produkcijoje be AUTH_USERS ir API_KEY darbai NEPRIIMAMI", async () => {
-  /**
-   * ⚠️ TIKRINAMA VIENINTELĖ REALI INTAKE STABDYMO PROCEDŪRA.
-   *
-   * Runbook teigia, kad produkcijoje pašalinus abu mechanizmus endpoint'ai
-   * grąžina 503. Iki šiol tai buvo TIK teiginys — testai tikrino leidimus ir
-   * `UPLOADS_ENABLED` nebuvimą, bet ne pačią procedūrą.
-   *
-   * Kadangi tai pateikiama kaip vienintelis būdas sustabdyti duomenų priėmimą,
-   * neįrodyta garantija čia pavojingesnė nei bet kur kitur.
-   *
-   * Vykdoma ATSKIRAME procese: `NODE_ENV=production` jau pakrautam moduliui
-   * nepakeistų elgesio, o globalios `process.env` mutacijos paliestų kitus
-   * testus.
-   */
+/**
+ * Paleidžia užklausą ATSKIRAME procese su nurodyta konfigūracija.
+ *
+ * Atskiras procesas būtinas dviem priežastim: `NODE_ENV=production` jau
+ * pakrautam moduliui elgesio nepakeistų, o globalios `process.env` mutacijos
+ * paliestų kitus testus.
+ */
+function productionRequest({ authUsers = "", apiKey = "" }) {
   const { execFileSync } = require("child_process");
 
   const script = `
     process.env.NODE_ENV = "production";
-    process.env.AUTH_USERS = "";
-    process.env.API_KEY = "";
     process.env.LOG_LEVEL = "error";
     process.env.LLM_PROVIDER = "mock";
     process.env.TRANSCRIPTION_PROVIDER = "mock";
     process.env.DIARIZATION_PROVIDER = "none";
-    process.env.CORS_ORIGIN = "http://localhost:5173";
+    process.env.CORS_ORIGIN = "https://pilotas.example.lt";
+
+    const { hashPassword } = require("./utils/credentials");
+    process.env.AUTH_USERS = ${JSON.stringify(authUsers)}.replace(
+      "__USERS__",
+      "petras:operator:" + hashPassword("slaptazodis-testui-1")
+    );
+    process.env.API_KEY = ${JSON.stringify(apiKey)};
 
     const request = require("supertest");
     const app = require("./server");
@@ -595,15 +593,9 @@ test("SEMANTIKA: produkcijoje be AUTH_USERS ir API_KEY darbai NEPRIIMAMI", async
 
     request(app)
       .post("/api/jobs")
-      .send({ transcript: "Jonas: Sveiki, pradedam susitikimą. Reikia ataskaitos." })
-      .then((res) => {
-        console.log(JSON.stringify({ status: res.status }));
-        process.exit(0);
-      })
-      .catch((error) => {
-        console.log(JSON.stringify({ error: error.message }));
-        process.exit(1);
-      });
+      .send({ transcript: "Jonas: Sveiki, pradedam susitikima. Reikia parengti ataskaita." })
+      .then((res) => { console.log(JSON.stringify({ status: res.status })); process.exit(0); })
+      .catch((error) => { console.log(JSON.stringify({ error: error.message })); process.exit(1); });
   `;
 
   const output = execFileSync(process.execPath, ["-e", script], {
@@ -612,11 +604,68 @@ test("SEMANTIKA: produkcijoje be AUTH_USERS ir API_KEY darbai NEPRIIMAMI", async
     timeout: 30000,
   });
 
-  const result = JSON.parse(output.trim().split("\n").pop());
+  return JSON.parse(output.trim().split("\n").pop());
+}
+
+test("SEMANTIKA: 503 atsiranda TIK pašalinus ABU mechanizmus", () => {
+  /**
+   * ⚠️ TIKRINAMA VIENINTELĖ REALI INTAKE STABDYMO PROCEDŪRA – ir jos
+   * PRIEŽASTINIS RYŠYS, ne viena būsena.
+   *
+   * Ankstesnė versija tikrino tik derinį „produkcija + abu tušti → 503".
+   * To NEPAKAKO: iš vieno atvejo neaišku, ar 503 lemia mechanizmų pašalinimas,
+   * ar vien `NODE_ENV=production`. Runbook teigia BŪTENT priežastinį ryšį
+   * („abu žingsniai būtini"), tad jį ir reikia įrodyti.
+   *
+   * Matrica atsako tiksliai:
+   *   abu pašalinti     -> 503 (paslauga nepriima)
+   *   liko API_KEY      -> 401 (kelias ATVIRAS turinčiam raktą)
+   *   liko AUTH_USERS   -> 401 (kelias ATVIRAS turinčiam sesiją)
+   *
+   * Būtent 401 atvejai įrodo, kodėl runbook reikalauja abiejų žingsnių:
+   * sustabdymas neįvyksta, kol lieka nors vienas mechanizmas.
+   */
+  assert.equal(
+    productionRequest({ authUsers: "", apiKey: "" }).status,
+    503,
+    "pašalinus abu mechanizmus paslauga turi nepriimti darbų"
+  );
 
   assert.equal(
-    result.status,
-    503,
-    `produkcijoje be abiejų mechanizmų darbų kūrimas turi grąžinti 503, gauta ${result.status}`
+    productionRequest({ authUsers: "", apiKey: "raktas-testui-123456" }).status,
+    401,
+    "likus API_KEY sustabdymo NĖRA – tik autentifikacijos reikalavimas"
+  );
+
+  assert.equal(
+    productionRequest({ authUsers: "__USERS__", apiKey: "" }).status,
+    401,
+    "likus AUTH_USERS sustabdymo NĖRA – tik autentifikacijos reikalavimas"
+  );
+});
+
+test("SEMANTIKA: startup validacija NEBLOKUOJA produkcijos be abiejų mechanizmų", () => {
+  /**
+   * Runbook siūlo procedūrą, kuri veiktų tik jei serveris po jos APSKRITAI
+   * pasileidžia. Jei `validateConfig` produkcijoje reikalautų bent vieno
+   * mechanizmo, siūloma procedūra reikštų neveikiantį serverį, ne sustabdytą
+   * priėmimą — o tai visai kitas incidentas.
+   */
+  const { validateConfig } = require("../utils/startupChecks");
+
+  const { errors } = validateConfig({
+    NODE_ENV: "production",
+    AUTH_USERS: "",
+    API_KEY: "",
+    LLM_PROVIDER: "mock",
+    TRANSCRIPTION_PROVIDER: "mock",
+    DIARIZATION_PROVIDER: "none",
+    CORS_ORIGIN: "https://pilotas.example.lt",
+  });
+
+  assert.deepEqual(
+    errors.filter((e) => /API_KEY|AUTH_USERS/.test(e)),
+    [],
+    "startas turi būti galimas – kitaip runbook procedūra duotų neveikiantį serverį"
   );
 });
