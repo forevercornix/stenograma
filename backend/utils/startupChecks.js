@@ -16,6 +16,7 @@ const fs = require("fs");
 const path = require("path");
 const { execFile } = require("child_process");
 const { KNOWN_ROLES } = require("./credentials");
+const { isProviderAllowed, approvedExternalProviders } = require("./providerGovernance");
 
 const KNOWN_LLM = ["mock", "claude", "gpt", "gemini"];
 const KNOWN_TRANSCRIPTION = [
@@ -195,6 +196,38 @@ function validateConfig(env = process.env) {
       "BACKUP_ENCRYPTION_KEY_PREVIOUS nustatytas be BACKUP_ENCRYPTION_KEY – naujos kopijos NEBUS šifruojamos. " +
         "Greičiausiai nebaigta rotacija."
     );
+  }
+
+  /**
+   * TIEKĖJŲ VALDYSENA (#22.2).
+   *
+   * Tikrinama PALEIDŽIANT, ne pirmoje užklausoje. Priešingu atveju sistema
+   * pasileistų su neleistina konfigūracija ir kristų tik tada, kai vartotojas
+   * jau atsiuntė failą — o tai reikštų, kad jo duomenys jau sistemoje.
+   *
+   * Fabrikų patikra (#22.2) lieka kaip antras sluoksnis: ji dengia užklausos
+   * override ir dinaminį pasirinkimą, kurių startup nemato.
+   */
+  /**
+   * Naudojamas TAS PATS parseris kaip fabrikuose.
+   *
+   * Pirmoji versija turėjo savo kopiją (`split`/`trim`/`filter`) — dvi vietos,
+   * parsinančios tą pačią konfigūraciją. Jos veikė vienodai TĄ DIENĄ, bet
+   * pridėjus dedublikavimą ar naujas taisykles startup ir fabrikai būtų
+   * išsiskyrę, ir sistema pasileistų su konfigūracija, kurios pati vėliau
+   * nepriimtų.
+   */
+  const approvedExternal = approvedExternalProviders(env);
+
+  for (const [variable, kind, fallback] of [
+    ["TRANSCRIPTION_PROVIDER", "transcription", "mock"],
+    ["DIARIZATION_PROVIDER", "diarization", "none"],
+    ["LLM_PROVIDER", "llm", "mock"],
+  ]) {
+    const selected = (env[variable] || fallback).toLowerCase();
+    const { allowed, reason } = isProviderAllowed(kind, selected, { approvedExternal });
+
+    if (!allowed) errors.push(`${variable}: ${reason}`);
   }
 
   const apiKeyRole = (env.API_KEY_ROLE || "").trim().toLowerCase();

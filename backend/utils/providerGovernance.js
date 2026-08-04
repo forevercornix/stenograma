@@ -249,13 +249,70 @@ function providersRequiringApproval() {
   return result;
 }
 
+/**
+ * Meta klaidą, jei tiekėjas neleidžiamas.
+ *
+ * ⚠️ VIENA implementacija visiems trims fabrikams.
+ *
+ * Pirmoji #22.2 versija turėjo po kopiją kiekviename fabrike — trys beveik
+ * identiškos funkcijos. Jos veikė vienodai, bet pakeitus vieną (pvz. pridėjus
+ * audito įrašą ar patikslinus pranešimą) kitos dvi tyliai atsiliktų, ir
+ * politika taptų nevienoda priklausomai nuo tiekėjo tipo.
+ */
+function assertProviderAllowed(kind, name, env = process.env) {
+  const { allowed, reason } = isProviderAllowed(kind, name, {
+    approvedExternal: approvedExternalProviders(env),
+  });
+
+  if (allowed) return;
+
+  const error = new Error(`Tiekėjas neleidžiamas: ${reason}`);
+  error.code = "PROVIDER_NOT_APPROVED";
+  throw error;
+}
+
+/**
+ * TESTINIO TIEKĖJO REGISTRACIJA.
+ *
+ * Testai injektuoja netikrus tiekėjus tiesiai į fabrikų `REGISTRY`. Kad
+ * valdysena jų neblokuotų, jie privalo užregistruoti ir POLITIKĄ — tai
+ * sąmoninga simetrija: netikras tiekėjas turi deklaruoti savo privatumo
+ * savybes lygiai taip, kaip tikras.
+ *
+ * ⚠️ Veikia TIK `NODE_ENV=test`. Produkcijoje tai būtų būdas apeiti visą
+ * valdyseną vienu kvietimu.
+ *
+ * @returns {Function} atstatymo funkcija (`finally` blokui)
+ */
+function registerTestProvider(kind, name, entry) {
+  if (process.env.NODE_ENV !== "test") {
+    const error = new Error("registerTestProvider veikia tik NODE_ENV=test.");
+    error.code = "TEST_ONLY";
+    throw error;
+  }
+
+  if (!GOVERNANCE[kind]) GOVERNANCE[kind] = {};
+
+  const had = Object.prototype.hasOwnProperty.call(GOVERNANCE[kind], name);
+  const previous = GOVERNANCE[kind][name];
+
+  GOVERNANCE[kind][name] = entry;
+
+  return () => {
+    if (had) GOVERNANCE[kind][name] = previous;
+    else delete GOVERNANCE[kind][name];
+  };
+}
+
 module.exports = {
   GOVERNANCE,
+  registerTestProvider,
   CONFIDENCE,
   APPROVAL,
   UNKNOWN,
   governanceFor,
   isProviderAllowed,
+  assertProviderAllowed,
   approvedExternalProviders,
   describeGovernance,
   providersRequiringApproval,

@@ -3,6 +3,7 @@ const PyannoteDiarizationProvider = require("./PyannoteDiarizationProvider");
 const PyannoteCloudDiarizationProvider = require("./PyannoteCloudDiarizationProvider");
 const AssemblyAIDiarizationProvider = require("./AssemblyAIDiarizationProvider");
 const { assertRawAudioProviderAllowed } = require("../../utils/privacyConfig");
+const { assertProviderAllowed } = require("../../utils/providerGovernance");
 
 // "none" ir "inline" NĖRA klasės - tai specialūs režimai, tvarkomi routes/transcribe.js:
 //   none   - diarizacija apskritai neatliekama.
@@ -31,6 +32,7 @@ const SPECIAL_MODES = ["none", "inline"];
  * Grąžina `null` "none"/"inline" atveju - kviečiantis kodas (routes/transcribe.js)
  * tuos du atvejus tvarko specialiai, nes jie nereikalauja atskiro API kvietimo.
  */
+
 function getDiarizationProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.DIARIZATION_PROVIDER || "none").toLowerCase();
 
@@ -44,6 +46,15 @@ function getDiarizationProvider(nameOverride, config = {}) {
       `Nežinomas DIARIZATION_PROVIDER: "${name}". Galimi: ${[...SPECIAL_MODES, ...Object.keys(REGISTRY)].join(", ")}`
     );
   }
+
+  /**
+   * VALDYSENA tikrinama PO registro patikros.
+   *
+   * Tvarka svarbi diagnostikai: rašybos klaida („clade") turi duoti
+   * „nežinomas tiekėjas", ne „nėra valdysenos įrašo". Antrasis pranešimas
+   * siųstų operatorių taisyti valdysenos failo, nors problema – įvestyje.
+   */
+  assertProviderAllowed("diarization", name);
 
   const ProviderClass = REGISTRY[name];
   if (typeof ProviderClass !== "function") {

@@ -45,6 +45,28 @@ function verifyManifest(discovered) {
   const assigned = new Set(Object.values(suites).flat());
   const problems = [];
 
+  /**
+   * DUBLIKATAI RINKINIUOSE.
+   *
+   * ⚠️ Paleidiklis juos dedublikuoja (`new Set(...)`), tad dublikatas yra
+   * TYLIAI NEKENKSMINGAS — testai vykdomi teisingai, ir niekas nepastebi.
+   *
+   * Būtent todėl jis prasprūdo į #22.2 peržiūrą: klaidą pamatė žmogus,
+   * skaitydamas diff'ą, o ne įrankis. Tyliai nekenksminga klaida vis tiek yra
+   * klaida — ji rodo, kad manifestas redaguotas neatidžiai, ir kitas
+   * redagavimas gali būti žalingesnis.
+   */
+  for (const [suiteName, names] of Object.entries(suites)) {
+    const seen = new Set();
+
+    for (const name of names) {
+      if (seen.has(name)) {
+        problems.push(`rinkinyje "${suiteName}" testas "${name}" nurodytas DU kartus`);
+      }
+      seen.add(name);
+    }
+  }
+
   for (const name of discovered) {
     if (!assigned.has(name)) {
       problems.push(`testas "${name}" nepriskirtas jokiam rinkiniui (tests/suites.js)`);

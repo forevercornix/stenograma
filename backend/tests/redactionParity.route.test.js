@@ -15,6 +15,16 @@ const assert = require("node:assert/strict");
 
 process.env.NODE_ENV = "test";
 process.env.LLM_PROVIDER = "claude";
+
+/**
+ * Tiekėjų valdysena (#22.2): išorinis tiekėjas neveikia be eksplicitinio
+ * patvirtinimo — nei startup metu, nei fabrike.
+ *
+ * Testas tikrina REDAKCIJOS elgesį su išoriniu tiekėju, tad patvirtinimas čia
+ * yra prielaida, ne tikrinamas dalykas. Be jo serveris apskritai
+ * nepasileistų.
+ */
+process.env.APPROVED_EXTERNAL_PROVIDERS = "claude";
 process.env.ANTHROPIC_API_KEY = "sk-ant-testinis";
 process.env.TRANSCRIPTION_PROVIDER = "mock";
 process.env.DIARIZATION_PROVIDER = "none";

@@ -6,6 +6,7 @@ const AzureSpeechProvider = require("./AzureSpeechProvider");
 const GoogleSpeechProvider = require("./GoogleSpeechProvider");
 const DeepgramProvider = require("./DeepgramProvider");
 const { assertRawAudioProviderAllowed } = require("../../utils/privacyConfig");
+const { assertProviderAllowed } = require("../../utils/providerGovernance");
 
 // "faster-whisper" PALIKTAS kaip atgalinio suderinamumo alias'as - jis visada
 // reiškė HTTP-serverio (server) profilį. "faster-whisper-server" yra tas pats,
@@ -36,6 +37,7 @@ const REGISTRY = {
  * abu "faster-whisper-*" variantai implementuoja tą patį TranscriptionProvider
  * kontraktą, tad likusiam kodui nesvarbu, kuris iš jų aktyvus.
  */
+
 function getTranscriptionProvider(nameOverride, config = {}) {
   const name = (nameOverride || process.env.TRANSCRIPTION_PROVIDER || "mock").toLowerCase();
 
@@ -48,6 +50,15 @@ function getTranscriptionProvider(nameOverride, config = {}) {
       `Nežinomas TRANSCRIPTION_PROVIDER: "${name}". Galimi: ${Object.keys(REGISTRY).join(", ")}`
     );
   }
+
+  /**
+   * VALDYSENA tikrinama PO registro patikros.
+   *
+   * Tvarka svarbi diagnostikai: rašybos klaida („clade") turi duoti
+   * „nežinomas tiekėjas", ne „nėra valdysenos įrašo". Antrasis pranešimas
+   * siųstų operatorių taisyti valdysenos failo, nors problema – įvestyje.
+   */
+  assertProviderAllowed("transcription", name);
 
   const ProviderClass = REGISTRY[name];
   if (typeof ProviderClass !== "function") {
