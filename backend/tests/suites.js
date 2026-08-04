@@ -46,6 +46,7 @@ const privacy = [
   "backupSecurity",
   "backupRoutes.route",
   "backupDocumentation",
+  "incidentRunbook",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",

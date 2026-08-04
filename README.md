@@ -1461,6 +1461,24 @@ būti įvardyta.
 eilės**. Palaikomas tik vienas ankstesnis raktas — kopijos, šifruotos prieš dvi
 rotacijas, taps neatkuriamos.
 
+**Incidentų valdymas (#21).**
+[`docs/operations/INCIDENT_RESPONSE.md`](docs/operations/INCIDENT_RESPONSE.md)
+apibrėžia incidentų klases, skubumo lygius su reagavimo terminais, reagavimo
+eigą, sulaikymo veiksmus ir GDPR pranešimo vertinimą.
+
+Dokumentas **tikrinamas CI**: komandose naudojami kintamieji ir minimi audito
+įvykiai turi realiai egzistuoti, endpoint'ai tikrinami HTTP užklausomis, o
+runbook privalo nurodyti aktualų išorinių paslapčių inventorių.
+
+⚠️ Sulaikymo veiksmai parinkti taip, kad **nenaikintų incidento įrodymų** —
+ištrinti logus ar perkurti aplinką negalima. Kai įmanoma, jie grįžtami; bet
+kompromituoto išorinio rakto atšaukimas **sąmoningai negrįžtamas**.
+
+⚠️ **Įkėlimų išjungimo jungiklio sistema neturi.** Runbook tai pripažįsta ir
+aprašo, ką galima padaryti realiai (atimti prieigą), o ne siūlo neegzistuojančio
+mechanizmo. Testai tikrina ne tik vardų egzistavimą, bet ir **teiginių apie jų
+poveikį teisingumą**.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
