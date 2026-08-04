@@ -84,4 +84,16 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`Saugumo matrica: ${mentioned.size} nuorodų, visos sutampa su tests/suites.js.`);
+/**
+ * ⚠️ Skaičiuojami UNIKALŪS testų failai, ne matricos eilutės.
+ *
+ * `mentioned` yra aibė: tas pats testų failas, minimas dešimtyje eilučių,
+ * skaičiuojamas vieną kartą. Ankstesnis pranešimas („N nuorodų") tai
+ * užtemdydavo – pridėjus eilučių tam pačiam failui skaičius nesikeisdavo, ir
+ * tai atrodydavo kaip klaida.
+ *
+ * Painiava buvo reali: per vieną peržiūrą du nepriklausomi skaitytojai padarė
+ * tą pačią neteisingą išvadą, o vienas jų dėl to „pataisė" teisingą skaičių į
+ * neteisingą. Kai klysta ne žmonės, o visi vienodai – kaltas pavadinimas.
+ */
+console.log(`Saugumo matrica: ${mentioned.size} unikalių testų failų, visi sutampa su tests/suites.js.`);

@@ -7,6 +7,12 @@ Pilotinėje stadijoje svarbu ne tai, ar pavyks išvengti kiekvieno gedimo, o tai
 ar komanda jį **greitai atpažins** ir sureaguos **neatskleisdama daugiau
 duomenų** ir **neprarasdama įrodymų**.
 
+Operacinės procedūros (kaip išsaugoti įrodymus, patikrinti atkūrimą, ką
+stebėti): [`OPERATIONAL_PROCEDURES.md`](OPERATIONAL_PROCEDURES.md).
+
+⚠️ **Prieš bet kokį restartą** perskaitykite ten esantį įrodymų išsaugojimo
+skyrių: audito žurnalas gyvena tik atmintyje.
+
 Susiję dokumentai:
 - Ištrynimo garantijos: [`../deletion-guarantees.md`](../deletion-guarantees.md)
 - Kopijų ir atkūrimo runbook: [`../backup-runbook.md`](../backup-runbook.md)
