@@ -413,6 +413,25 @@ failo riba priklauso įėjimo taškui, kurio dar nėra.
 | Užraktas turi maksimalią trukmę | `backupRoutes.route` | — |
 | Pilnas ciklas per tikrus endpoint'us | `backupRoutes.route` | — |
 
+### #20 PR5 — runbook kaip tikrinamas pažadas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Kopijuojamų artefaktų sąrašas sutampa su **politika** | `backupDocumentation` | Tipo pridėjimas be dokumentavimo |
+| Numatytosios reikšmės sutampa su **kodu** | `backupDocumentation` | Retencijos pakeitimas dokumente |
+| Paslapčių skaičius sutampa su **inventoriumi** | `backupDocumentation` | Paslapties pridėjimas → krinta |
+| **Visi** grandinės žingsniai dokumentuoti | `backupDocumentation` | — |
+| **Visi** maršrutų atsakymų kodai dokumentuoti | `backupDocumentation` | — |
+| **Kiekviena** žinoma riba įvardyta | `backupDocumentation` | — |
+| Įspėjimas apie dvigubą rotaciją išskirtas | `backupDocumentation` | Įspėjimo pašalinimas |
+| Įvardyta, kad atkūrimas negrąžina ištrintų duomenų | `backupDocumentation` | — |
+
+Runbook: [`docs/backup-runbook.md`](backup-runbook.md).
+
+⚠️ **Runbook yra pažadas operatoriui.** Pasenęs jis blogesnis nei jokio: žmogus
+nelaimės metu vykdys žingsnius, kurie nebeveikia, ir sužinos apie tai
+blogiausiu momentu. Todėl jis tikrinamas CI.
+
 ⚠️ **`authenticate` defektas, rastas rašant PR4:** tikrinamas buvo tik `API_KEY`,
 tad sistema su sukonfigūruotais `AUTH_USERS`, bet be rakto, dev režime likdavo
 **atvira** — anoniminė užklausa gaudavo `administrator` teises. Ištaisyta.
