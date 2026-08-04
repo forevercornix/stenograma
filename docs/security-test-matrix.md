@@ -487,6 +487,34 @@ sistemoje ištrinti duomenys kopijoje lieka iki jos galiojimo pabaigos.
 
 Runbook: [`docs/operations/INCIDENT_RESPONSE.md`](operations/INCIDENT_RESPONSE.md).
 
+### #21 PR2 — operacinės procedūros
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Auditas tikrai neišgyvena restarto** – ir taip pasakyta | `operationalProcedures` | Rašymo į diską pridėjimas → krinta |
+| Minimi endpoint'ai realiai atsako | `operationalProcedures` | — |
+| Minimi audito įvykiai egzistuoja kode | `operationalProcedures` | Neegzistuojantis įvykis → krinta |
+| `/api/audit` parametrai atitinka realią schemą | `operationalProcedures` | — |
+| Pseudonimizacijos įspėjimas atitinka realų lauką | `operationalProcedures` | — |
+| Audito retencija sutampa su `.env.example` | `operationalProcedures` | Reikšmės pakeitimas → krinta |
+| `ENOENT` ištrynime **tikrai** reiškia sėkmę | `operationalProcedures` | — |
+| Atkūrimo patikra turi visus šešis žingsnius **ta tvarka** | `operationalProcedures` | — |
+| Įvardyta, kad `mock` duoda sintetinius rezultatus | `operationalProcedures` | — |
+| Bash komandose nėra shell placeholder'ių | `operationalProcedures` | — |
+| Dokumente nėra paslapčių; raginama nekopijuoti `.env` | `operationalProcedures` | — |
+| **`--since` apribojimas įvardytas**, ne nutylėtas | `operationalProcedures` | Tylaus `--since` grąžinimas → krinta |
+| Baigiamoji taisyklė draudžia dalinį uždarymą | `operationalProcedures` | Taisyklės pašalinimas → krinta |
+| Įvardyta, kokiai aplinkai skirtos komandos | `operationalProcedures` | — |
+| **`.env` būsena skaitoma iš FAILO**, ne shell aplinkos | `operationalProcedures` | `printenv` grąžinimas → krinta |
+| `curl` **neišsaugo klaidos atsakymo** kaip įrodymo | `operationalProcedures` | `--fail-with-body` pašalinimas → krinta |
+| Dokumentas neteigia, kad shell komandos tikrinamos CI | `operationalProcedures` | — |
+| Draudimas liečia **restartą**, ne bet kokį sulaikymą | `operationalProcedures` | — |
+
+Procedūros: [`docs/operations/OPERATIONAL_PROCEDURES.md`](operations/OPERATIONAL_PROCEDURES.md).
+
+⚠️ **Auditas gyvena tik atmintyje.** Todėl jo išsaugojimas yra **pirmas**
+incidento žingsnis — anksčiau nei sulaikymo veiksmai, kurie reikalauja restarto.
+
 ⚠️ **Incidentų runbook skaitomas blogiausiu momentu:** skubant, su nepilna
 informacija, dažnai ne to žmogaus, kuris jį rašė. Neteisingas kintamasis ar
 neveikianti komanda sukelia abejonę **visu dokumentu** būtent tada, kai juo

@@ -1466,9 +1466,17 @@ rotacijas, taps neatkuriamos.
 apibrėžia incidentų klases, skubumo lygius su reagavimo terminais, reagavimo
 eigą, sulaikymo veiksmus ir GDPR pranešimo vertinimą.
 
-Dokumentas **tikrinamas CI**: komandose naudojami kintamieji ir minimi audito
+Operacinės procedūros —
+[`docs/operations/OPERATIONAL_PROCEDURES.md`](docs/operations/OPERATIONAL_PROCEDURES.md):
+įrodymų išsaugojimas, atkūrimo patikra, ką stebėti ir kurie signalai dažniausiai
+**nėra** incidentai.
+
+Abu dokumentai **tikrinami CI**: komandose naudojami kintamieji ir minimi audito
 įvykiai turi realiai egzistuoti, endpoint'ai tikrinami HTTP užklausomis, o
-runbook privalo nurodyti aktualų išorinių paslapčių inventorių.
+teiginiai apie sistemos elgesį — prieš kodą.
+
+⚠️ **Audito žurnalas gyvena tik atmintyje.** Restartas jį ištrina, todėl
+įrodymų išsaugojimas yra **pirmas** incidento žingsnis, ne vėlesnis.
 
 ⚠️ Sulaikymo veiksmai parinkti taip, kad **nenaikintų incidento įrodymų** —
 ištrinti logus ar perkurti aplinką negalima. Kai įmanoma, jie grįžtami; bet
