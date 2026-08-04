@@ -13,6 +13,10 @@ stebėti): [`OPERATIONAL_PROCEDURES.md`](OPERATIONAL_PROCEDURES.md).
 ⚠️ **Prieš bet kokį restartą** perskaitykite ten esantį įrodymų išsaugojimo
 skyrių: audito žurnalas gyvena tik atmintyje.
 
+Po incidento:
+[`POSTMORTEM_AND_EXERCISES.md`](POSTMORTEM_AND_EXERCISES.md) — peržiūros
+šablonas ir pratybos.
+
 Susiję dokumentai:
 - Ištrynimo garantijos: [`../deletion-guarantees.md`](../deletion-guarantees.md)
 - Kopijų ir atkūrimo runbook: [`../backup-runbook.md`](../backup-runbook.md)

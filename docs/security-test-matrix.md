@@ -513,6 +513,35 @@ Runbook: [`docs/operations/INCIDENT_RESPONSE.md`](operations/INCIDENT_RESPONSE.m
 
 Procedūros: [`docs/operations/OPERATIONAL_PROCEDURES.md`](operations/OPERATIONAL_PROCEDURES.md).
 
+### #21 PR3 — peržiūra, pratybos ir apimtis
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Kiekviena nuoroda į skyrių realiai egzistuoja** | `postmortemTemplate` | Neegzistuojantis §; pernumeravimas kitame dokumente |
+| Nuorodos veda į visus tris dokumentus | `postmortemTemplate` | — |
+| Šablonas turi visus privalomus skyrius | `postmortemTemplate` | — |
+| Laiko juosta apima „įrodymai išsaugoti" | `postmortemTemplate` | — |
+| Šablonas draudžia turinį, vardus ir raktus | `postmortemTemplate` | — |
+| Veiksmas be atsakingo įvardytas kaip netinkamas | `postmortemTemplate` | — |
+| Neišbandytas runbook **nėra procedūra** | `postmortemTemplate` | — |
+| Pratybų rezultatas — **ne „pavyko"** | `postmortemTemplate` | — |
+| **Visos aštuonios ribos** įvardytos santraukoje | `postmortemTemplate` | Ribos pašalinimas → krinta |
+| Ribos su šaltiniu tikrinamos **skyriuje**, eksplicitiniu šablonu | `postmortemTemplate` | Ribos pašalinimas iš **šaltinio** → krinta |
+| Ribos be šaltinio privalo turėti **priežastį** | `postmortemTemplate` | — |
+| Audito trumpalaikiškumas — **svarbiausia** riba | `postmortemTemplate` | — |
+| **Auditas NĖRA pateikiamas kaip absoliučiai pirmas** žingsnis | `postmortemTemplate` | Absoliučios taisyklės grąžinimas → krinta |
+| Prieigos pratyboms reikalaujamas `NODE_ENV=production` | `postmortemTemplate` | Sąlygos pašalinimas iš eilutės → krinta |
+| Rakto atšaukimo pratyboms — **testinis** kredencialas | `postmortemTemplate` | — |
+| „Out of scope" atitinka issue | `postmortemTemplate` | — |
+
+Peržiūra ir pratybos:
+[`docs/operations/POSTMORTEM_AND_EXERCISES.md`](operations/POSTMORTEM_AND_EXERCISES.md).
+
+⚠️ **Apimties lentelė sensta greičiausiai iš visko:** pakanka pervadinti skyrių
+kitame dokumente, ir nuoroda tampa melu. Todėl kiekviena `§` nuoroda tikrinama
+prieš tikslinį failą — ir būtent ši patikra aptiko, kad #120 buvo sumergintas
+be patvirtintų pataisymų.
+
 ⚠️ **Auditas gyvena tik atmintyje.** Todėl jo išsaugojimas yra **pirmas**
 incidento žingsnis — anksčiau nei sulaikymo veiksmai, kurie reikalauja restarto.
 

@@ -3,6 +3,10 @@
 Šis dokumentas tęsia [`INCIDENT_RESPONSE.md`](INCIDENT_RESPONSE.md): ten
 aprašyta **kas ir kada**, čia — **kaip**.
 
+Po incidento:
+[`POSTMORTEM_AND_EXERCISES.md`](POSTMORTEM_AND_EXERCISES.md) — peržiūros
+šablonas, pratybos ir žinomų ribų santrauka.
+
 Skirtas pilotinio diegimo operatoriui.
 
 Kode minimi endpoint'ai, audito įvykiai ir sistemos elgsenos teiginiai
