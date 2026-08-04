@@ -43,6 +43,7 @@ const privacy = [
   "artefactInventory",
   "backupPolicy",
   "backupRestore",
+  "backupSecurity",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",

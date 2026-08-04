@@ -127,7 +127,11 @@ test("ATKŪRIMAS: grandinė vykdoma NUOSEKLIAI ir fiksuoja žingsnius", async ()
     STEPS.FORMAT,
     STEPS.APPLICATION,
     STEPS.CHECKSUM,
+    STEPS.DECRYPTED,
     STEPS.CONTENT,
+    STEPS.SECRETS,
+    STEPS.CONFIGURATION,
+    STEPS.PRIVACY,
     STEPS.APPLIED,
   ]);
 });

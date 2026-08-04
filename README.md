@@ -1392,6 +1392,52 @@ pseudonimizuotą subjektą, tad žymų patikra jų neapima, ir atkūrus GDPR iš
 ⚠️ Kadangi kopija visada apima `source_audio`, ji gali būti **ženkliai didesnė
 nei eksportas**: eksportas išneša rezultatus, kopija atkuria sistemą.
 
+**Paslaptys, šifravimas ir atkūrimo validacija (#20).** Paslapčių sąrašas
+(`utils/secretsInventory.js`) **eksplicitinis**: taisyklė „viskas su `KEY`"
+klysta abiem kryptimis — `API_KEY_ROLE` yra rolės pavadinimas, o
+`HUGGINGFACE_TOKEN` neturi `KEY`, bet yra tikra paslaptis. Kiekviena įrašyta su
+tuo, **ką ji atrakina** ir **kaip ją pakeisti**.
+
+Kopijos šifruojamos AES-256-GCM, kai nustatytas `BACKUP_ENCRYPTION_KEY`.
+Manifeste fiksuojama `encrypted` ir algoritmo versija, kad atkūrimas nespėliotų.
+Kontrolinė suma skaičiuojama nuo **šifruoto** turinio — taip sugadinimas
+aptinkamas iš karto, o ne po nepavykusio dešifravimo, kai priežastis jau
+dviprasmiška. GCM pasirinktas dėl **autentiškumo**: jis
+uždaro spragą, kurią kontrolinė suma palieka — pakeitus turinį dešifravimas
+krinta, o ne grąžina šiukšles. `BACKUP_ENCRYPTION_KEY_PREVIOUS` išsaugo senas
+kopijas per rotaciją; be jo raktų keitimas padarytų jas šiukšlėmis būtent tada,
+kai jų gali prireikti.
+
+Atkūrimas tikrina konfigūraciją **ta pačia** `startupChecks.validateConfig` kaip
+paleidimas — dvi validacijos ilgainiui išsiskirtų, ir atkūrimas priimtų tai, ko
+paleidimas nepriimtų. Kopija su paslaptimi **atmetama**, o pranešime nurodomas
+tik jos vardas.
+
+Manifestas kriptografiškai **susietas** su šifruotu turiniu per AES-GCM AAD:
+pakeitus `encrypted`, `contents`, `snapshotTime` ar kitą sprendimams svarbų
+lauką, dešifravimas krinta. Kontrolinė suma to nepadarytų — kas gali pakeisti
+failus, gali ją perskaičiuoti.
+
+⚠️ AAD pridėjimas yra **formato pakeitimas**, tad versija pakelta į `v2`. GCM
+žyma skaičiuojama įtraukiant AAD, tad `v1` kopija (be jo) su nauju kodu
+nedešifruojama — palikus tą pačią versiją egzistuotų dvi semantiškai skirtingos
+kopijos tuo pačiu vardu. `v1` egzistavo tik neišleistose iteracijose ir
+atmetamas su konkrečia priežastimi.
+
+`v2` **reikalauja manifesto** ir šifruojant, ir dešifruojant: be to ta pati
+versija vėl reikštų du skirtingus formatus — su AAD ir be jo.
+
+Paslapčių patikra vykdoma **kuriant** kopiją, ne tik atkuriant: atkūrimo
+momentas yra blogiausia vieta pirmą kartą sužinoti, kad kopija neatitinka
+politikos.
+
+⚠️ **Patikros ribos:** ji aptinka tik **šiuo metu sukonfigūruotų** paslapčių
+tikslias reikšmes — ne jau rotuotą raktą ar paslaptį iš kitos aplinkos.
+
+⚠️ **RBAC leidimai paruošti, bet dar neprijungti:** HTTP maršrutų kopijoms nėra,
+tad `backup:create` ir `backup:restore` kol kas yra lentelė, ne veikianti
+garantija.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
