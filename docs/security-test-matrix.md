@@ -462,6 +462,36 @@ patikros yra pagrindas kopijavimui ir atkūrimui, kurie ateina atskirai.
 ⚠️ **`BACKUP_RETENTION_DAYS` apibrėžia faktinį ištrynimo langą** (#19): gyvoje
 sistemoje ištrinti duomenys kopijoje lieka iki jos galiojimo pabaigos.
 
+## #21 — incidentų valdymas (PR1: karkasas)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Dokumentas ten, kur reikalauja DoD | `incidentRunbook` | — |
+| **Komandose** naudojami kintamieji realiai egzistuoja | `incidentRunbook` | Komandos sugadinimas → krinta |
+| **`API_KEY_ROLE=operator` NESUSTABDO įkėlimų** – ir taip pasakyta | `incidentRunbook` | Klaidingos instrukcijos grąžinimas → krinta |
+| Įkėlimų jungiklio nėra – riba pripažinta | `incidentRunbook` | — |
+| SIGTERM apdorojimo **buvimas/nebuvimas** atitinka dokumentą | `incidentRunbook` | — |
+| Bash komandose **nėra shell placeholder'ių** | `incidentRunbook` | `<vardas>` grąžinimas → krinta |
+| Eilės konfigūracija **nepateikiama kaip besąlyginė** | `incidentRunbook` | Kategoriškos garantijos grąžinimas |
+| **Produkcijoje be abiejų mechanizmų darbai negaunami (503)** | `incidentRunbook` | — |
+| Minimi audito įvykiai egzistuoja kode | `incidentRunbook` | Neegzistuojantis įvykis → krinta |
+| Minimi endpoint'ai **realiai atsako** (HTTP, ne teksto paieška) | `incidentRunbook` | Neegzistuojantis kelias → krinta |
+| Nurodoma, **kur** rasti aktualų paslapčių sąrašą | `incidentRunbook` | — |
+| Įvardytas skirtumas tarp vidinių ir **išorinių** paslapčių | `incidentRunbook` | — |
+| Visi keturi skubumo lygiai su **terminais** | `incidentRunbook` | — |
+| Eigos žingsniai **ta pačia tvarka** | `incidentRunbook` | — |
+| GDPR pranešimas **nepateikiamas kaip automatinis** | `incidentRunbook` | — |
+| Sprendimą priima **duomenų valdytojas** (BDAR 33 str.) | `incidentRunbook` | — |
+| Sulaikymo veiksmai **nenaikina įrodymų**; negrįžtamos išimtys dokumentuotos | `incidentRunbook` | — |
+| Dokumente **nėra tikrų paslapčių** | `incidentRunbook` | — |
+
+Runbook: [`docs/operations/INCIDENT_RESPONSE.md`](operations/INCIDENT_RESPONSE.md).
+
+⚠️ **Incidentų runbook skaitomas blogiausiu momentu:** skubant, su nepilna
+informacija, dažnai ne to žmogaus, kuris jį rašė. Neteisingas kintamasis ar
+neveikianti komanda sukelia abejonę **visu dokumentu** būtent tada, kai juo
+reikia pasitikėti. Todėl jis tikrinamas CI.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
