@@ -473,7 +473,8 @@ sistemoje ištrinti duomenys kopijoje lieka iki jos galiojimo pabaigos.
 | SIGTERM apdorojimo **buvimas/nebuvimas** atitinka dokumentą | `incidentRunbook` | — |
 | Bash komandose **nėra shell placeholder'ių** | `incidentRunbook` | `<vardas>` grąžinimas → krinta |
 | Eilės konfigūracija **nepateikiama kaip besąlyginė** | `incidentRunbook` | Kategoriškos garantijos grąžinimas |
-| **Produkcijoje be abiejų mechanizmų darbai negaunami (503)** | `incidentRunbook` | — |
+| **503 atsiranda TIK pašalinus abu** mechanizmus (401 — kitais atvejais) | `incidentRunbook` | — |
+| Startup validacija neblokuoja produkcijos be abiejų | `incidentRunbook` | — |
 | Minimi audito įvykiai egzistuoja kode | `incidentRunbook` | Neegzistuojantis įvykis → krinta |
 | Minimi endpoint'ai **realiai atsako** (HTTP, ne teksto paieška) | `incidentRunbook` | Neegzistuojantis kelias → krinta |
 | Nurodoma, **kur** rasti aktualų paslapčių sąrašą | `incidentRunbook` | — |

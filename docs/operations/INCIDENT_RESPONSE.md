@@ -182,8 +182,13 @@ tiekėjo politikos ir sutarties.
 ⚠️ Mock režimas **nesustabdo įkėlimo priėmimo** ir lokalaus duomenų saugojimo —
 tik siuntimą į išorę.
 
-⚠️ **Tai SULAIKYMO režimas, ne normalus paslaugos režimas.** Rezultatai bus
-sintetiniai (mock LLM ir transkripcija) arba funkcija išjungta (diarizacija).
+⚠️ **Tai SULAIKYMO režimas, ne normalus paslaugos režimas.**
+
+| Nuostata | Elgesys sulaikymo režime |
+|---|---|
+| `LLM_PROVIDER=mock` | Grąžina **sintetinį** protokolą |
+| `TRANSCRIPTION_PROVIDER=mock` | Grąžina **sintetinę** transkripciją |
+| `DIARIZATION_PROVIDER=none` | Funkcija **išjungta** — kalbėtojai neskiriami |
 Jų **negalima pateikti naudotojams kaip tikrų** — priešingu atveju sulaikymas
 sukurtų naują incidentą: „sugadinta ar nepilna išvestis".
 
@@ -208,13 +213,36 @@ AUTH_USERS=
 API_KEY=
 ```
 
-Perkrauti. Abu žingsniai **būtini**: sistema palaiko abu autentifikacijos
-mechanizmus lygiagrečiai, tad vien `AUTH_USERS` išvalymas palieka `API_KEY`
-kelią atvirą.
+Perkrauti. **Abu žingsniai būtini** — sistema palaiko abu autentifikacijos
+mechanizmus lygiagrečiai.
 
-⚠️ Produkcijoje (`NODE_ENV=production`) be nė vieno mechanizmo endpoint'ai
-grąžina **503** — tai ir yra sustabdymas. Dev režime be jų sistema
-**praleidžia visas užklausas**, tad ten šis metodas **neveikia**.
+Ką duoda kiekvienas variantas produkcijoje (`NODE_ENV=production`):
+
+| Konfigūracija | Atsakymas | Ką tai reiškia |
+|---|---|---|
+| Abu pašalinti | **503** | Paslauga **nepriima** darbų — sustabdymas |
+| Liko `API_KEY` | 401 | ⚠️ **Ne sustabdymas** — raktą turintis toliau kuria darbus |
+| Liko `AUTH_USERS` | 401 | ⚠️ **Ne sustabdymas** — sesiją turintis toliau kuria darbus |
+
+⚠️ **401 nėra sustabdymas.** Jis reiškia tik „reikia prisijungti" — o incidento
+metu prisijungti gali kaip tik tas, kurio veiksmus bandote sustabdyti.
+
+⚠️ **Dev režime šis metodas NEVEIKIA.** Be nė vieno mechanizmo sistema
+**praleidžia visas užklausas** su `administrator` teisėmis.
+
+Jei incidentas liečia dev ar staging aplinką, prieigą reikia atimti **kitame
+sluoksnyje**:
+
+```bash
+# Sustabdyti visą servisą – vienintelis patikimas būdas dev režime
+docker compose stop backend
+```
+
+Arba uždaryti prieigą tinklo lygiu (reverse proxy, saugumo grupė). Tai
+griežčiau nei produkcijoje, bet dev režimas apsaugos nesuteikia iš principo.
+
+⚠️ Serveris po šio pakeitimo **pasileidžia normaliai** — startup validacija
+mechanizmų nereikalauja. Tai svarbu: procedūra sustabdo priėmimą, o ne serverį.
 
 > **Follow-up:** tikras įkėlimų/eksportų jungiklis (`UPLOADS_ENABLED`,
 > `EXPORTS_ENABLED`) yra atskiro darbo tema. Kol jo nėra, šis skyrius sąžiningai

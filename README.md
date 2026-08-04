@@ -1482,10 +1482,12 @@ teiginiai apie sistemos elgesį — prieš kodą.
 ištrinti logus ar perkurti aplinką negalima. Kai įmanoma, jie grįžtami; bet
 kompromituoto išorinio rakto atšaukimas **sąmoningai negrįžtamas**.
 
-⚠️ **Įkėlimų išjungimo jungiklio sistema neturi.** Runbook tai pripažįsta ir
-aprašo, ką galima padaryti realiai (atimti prieigą), o ne siūlo neegzistuojančio
-mechanizmo. Testai tikrina ne tik vardų egzistavimą, bet ir **teiginių apie jų
-poveikį teisingumą**.
+⚠️ **Įkėlimų išjungimo jungiklio sistema neturi.** Vienintelis būdas sustabdyti
+duomenų priėmimą — pašalinti **abu** autentifikacijos mechanizmus, ir **tik
+produkcijoje**: palikus bet kurį vieną, gaunamas 401, o ne sustabdymas.
+
+Runbook tai pripažįsta, o testai tikrina ne tik vardų egzistavimą, bet ir
+**teiginių apie jų poveikį teisingumą** — įskaitant visą 503/401 matricą.
 
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
