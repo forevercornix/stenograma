@@ -194,21 +194,41 @@ test("BE TAPATYBĖS: kai autentifikacija SUKONFIGŪRUOTA, gaunam 401, NE 403", a
   }
 });
 
-test("DEV REŽIMAS: be jokios sukonfigūruotos autentifikacijos užklausa PRALEIDŽIAMA", async () => {
+test("SUKONFIGŪRUOTI VARTOTOJAI uždaro dev praleidimą", async () => {
   /**
-   * Šis testas fiksuoja SĄMONINGĄ sprendimą, ne defektą.
+   * ⚠️ DEFEKTAS, RASTAS #20 PR4: `authenticate` tikrindavo tik `API_KEY`, tad
+   * sistema su SUKONFIGŪRUOTAIS vartotojais (`AUTH_USERS`), bet be rakto, dev
+   * režime likdavo ATVIRA – anoniminė užklausa gaudavo `administrator` teises.
    *
-   * Kai nėra nei `API_KEY`, nei sesijos, ir `NODE_ENV != production`,
-   * `authenticate` praleidžia su `administrator` role - kitaip lokalus
-   * kūrėjas negalėtų naudotis puse funkcijų be jokios saugumo naudos
-   * (apsaugos vis tiek nėra).
+   * Tai nebuvo teorinis atvejis: būtent tokia konfigūracija natūrali diegimui,
+   * pereinančiam nuo bendro rakto prie sesijų (#18).
    *
-   * Produkcijoje tas pats kelias grąžina 503, ne praleidžia - tai patikrinta
-   * atskirai `securityBaseline.route` testuose.
+   * Šiame faile `AUTH_USERS` nustatytas, tad anoniminė užklausa privalo gauti
+   * 401 – ne praleidimą.
    */
   const res = await request(app).post("/api/jobs").send({ transcript: TRANSCRIPT });
 
-  assert.equal(res.status, 202, "dev režime be konfigūracijos užklausa turi praeiti");
+  assert.equal(res.status, 401, "su sukonfigūruotais vartotojais anonimas neturi praeiti");
+  assert.equal(res.body.code, "SESSION_REQUIRED");
+});
+
+test("DEV REŽIMAS: be JOKIOS konfigūracijos užklausa vis dar praleidžiama", async () => {
+  /**
+   * Sąmoningas sprendimas lieka galioti: kai nėra NEI `API_KEY`, NEI
+   * `AUTH_USERS`, ir `NODE_ENV != production`, lokalus kūrėjas turi matyti
+   * viską – apsaugos vis tiek nėra.
+   *
+   * Produkcijoje tas pats kelias grąžina 503.
+   */
+  const savedUsers = process.env.AUTH_USERS;
+  process.env.AUTH_USERS = "";
+
+  try {
+    const res = await request(app).post("/api/jobs").send({ transcript: TRANSCRIPT });
+    assert.equal(res.status, 202, "be jokios konfigūracijos užklausa turi praeiti");
+  } finally {
+    process.env.AUTH_USERS = savedUsers;
+  }
 });
 
 test("ESKALACIJA: operatorius NEGALI pasikelti teisių pridėdamas API raktą", async () => {

@@ -1434,9 +1434,20 @@ politikos.
 ⚠️ **Patikros ribos:** ji aptinka tik **šiuo metu sukonfigūruotų** paslapčių
 tikslias reikšmes — ne jau rotuotą raktą ar paslaptį iš kitos aplinkos.
 
-⚠️ **RBAC leidimai paruošti, bet dar neprijungti:** HTTP maršrutų kopijoms nėra,
-tad `backup:create` ir `backup:restore` kol kas yra lentelė, ne veikianti
-garantija.
+**Kopijų endpoint'ai (#20 PR4).** `POST /api/admin/backups` grąžina kopiją
+atsakyme (`multipart/mixed`), serveris jos **nesaugo**.
+`POST /api/admin/backups/restore` priima `multipart/form-data` su `manifest` ir
+`data` laukais.
+
+Abu – **tik administratoriui**, ir tai dabar tikrinama per HTTP, ne vien
+leidimų lentelėje.
+
+Atkūrimas su aktyviais darbais grąžina **409**. Bet vien patikros neužtenka:
+tarp jos ir pritaikymo worker'is gali paimti naują darbą. Todėl veikia
+**priežiūros užraktas**, kuris naujų darbų nebepriima, kol atkūrimas vyksta.
+
+⚠️ Užraktas gyvena atmintyje, viename procese — keliems worker'ių procesams
+reikėtų Redis užrakto.
 
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`

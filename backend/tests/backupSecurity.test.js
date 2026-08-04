@@ -344,25 +344,27 @@ test("RBAC: leidimų LENTELĖ – kopijos priskirtos tik administratoriui", () =
   assert.equal(hasPermission("administrator", PERMISSIONS.BACKUP_RESTORE), true);
 });
 
-test("RBAC: įėjimo taško DAR NĖRA – garantija neįgyvendinta", () => {
+test("RBAC: įėjimo taškas JAU YRA – garantija tikrinama integraciniais testais", () => {
   /**
-   * Sąžiningumo patikra. Kai atsiras maršrutas, šis testas kris ir privers
-   * pakeisti jį realiu integraciniu testu – t. y. neleis garantijai likti
-   * neįrodytai.
+   * SARGINIS TESTAS SUVEIKĖ KAIP SUPROJEKTUOTA.
+   *
+   * PR3 jis krito iškart, kai atsirado `routes/backup.js` – ir taip privertė
+   * pakeisti jį realiu įrodymu, o ne palikti garantiją neįrodytą.
+   *
+   * Dabar tikrinam PRIEŠINGĄ dalyką: kad maršrutas egzistuoja IR kad jame yra
+   * leidimų patikros. Realus RBAC elgesys (401/403/leidžiama) tikrinamas per
+   * HTTP `backupRoutes.route` teste.
    */
   const fs = require("fs");
   const path = require("path");
-  const routesDir = path.join(__dirname, "..", "routes");
+  const routePath = path.join(__dirname, "..", "routes", "backup.js");
 
-  const backupRoutes = fs
-    .readdirSync(routesDir)
-    .filter((file) => /backup|restore/i.test(file));
+  assert.ok(fs.existsSync(routePath), "kopijų maršrutas turi egzistuoti");
 
-  assert.deepEqual(
-    backupRoutes,
-    [],
-    "atsirado kopijų maršrutas – dabar RBAC privalo būti tikrinamas per requirePermission, o šis testas pakeistas integraciniu"
-  );
+  const source = fs.readFileSync(routePath, "utf8");
+
+  assert.match(source, /requirePermission\(PERMISSIONS\.BACKUP_CREATE\)/, "kūrimas turi tikrinti leidimą");
+  assert.match(source, /requirePermission\(PERMISSIONS\.BACKUP_RESTORE\)/, "atkūrimas turi tikrinti leidimą");
 });
 
 test("RBAC: leidimai deny-by-default ir nežinomiems", () => {

@@ -21,6 +21,7 @@ const { transcriptionProcessor, protocolProcessor } = require("../queues/process
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
 const tombstones = require("../utils/deletionTombstones");
+const maintenanceLock = require("../utils/maintenanceLock");
 const log = createLogger("worker");
 
 
@@ -71,6 +72,22 @@ function createWorker(queueName, processor, workerOptions = {}) {
        * bet ji grąžintų `null`, o worker'is tai palaikytų „įrašas nerastas" ir
        * mestų klaidą – teisingas rezultatas su klaidinga priežastimi.
        */
+      /**
+       * PRIEŽIŪROS UŽRAKTAS (#20 PR4) – tikrinamas PRIEŠ žymą.
+       *
+       * Uždarome TOCTOU langą: atkūrimas patikrino, kad aktyvių darbų nėra, o
+       * worker'is be šios patikros galėtų paimti naują iš eilės būtent tarp
+       * patikros ir pritaikymo.
+       *
+       * NEMETAM klaidos – darbas lieka eilėje ir bus paimtas po priežiūros.
+       * Klaida priverstų BullMQ jį pažymėti nesėkme, nors nieko nepavyko tik
+       * dėl laiko.
+       */
+      if (maintenanceLock.isLocked()) {
+        log.warn("Praleistas darbas dėl priežiūros užrakto", { stage: "skipped_maintenance", jobId });
+        return;
+      }
+
       if (tombstones.isDeleted(jobId)) {
         log.warn("Praleistas ištrinto jobo vykdymas", { stage: "skipped_deleted", jobId });
         return { skipped: "deleted" };
