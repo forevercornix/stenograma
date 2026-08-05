@@ -21,6 +21,6 @@ onnxruntime==1.28.0
 tqdm==4.70.0
 
 fastapi==0.141.1
-uvicorn==0.52.0
+uvicorn==0.52.1
 python-multipart==0.0.32
 pytest==9.1.1
