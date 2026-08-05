@@ -691,6 +691,42 @@ senėjimas pavojingesnis: ja remiamasi priimant sprendimus apie asmens duomenis.
 chartoje, ir pirminiame dokumente. Kitaip santrauka teigtų tai, ko šaltinis
 nesako.
 
+## #24.1 — protokolo vertinimo rubrika
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Svoriai **netiesiniai** – kosmetinės nekompensuoja kritinių | `protocolRubric` | Tiesiniai svoriai → krinta |
+| **Kritinė klaida yra VETO** | `protocolRubric` | Veto pašalinimas → krinta |
+| Nežinomas sunkumas **metamas**, ne ignoruojamas | `protocolRubric` | — |
+| **Radinyje negali būti citatų** ar turinio | `protocolRubric` | Draudimo pašalinimas → krinta |
+| Nuoroda yra **pozicija, ne tekstas** | `protocolRubric` | — |
+| Nutarimai ir užduotys **reikalauja** nuorodos | `protocolRubric` | — |
+| Santrauka nuorodos nereikalauja | `protocolRubric` | — |
+| **Nepagrįstas teiginys yra gedimas** | `protocolRubric` | Patikros išjungimas → krinta 2 |
+| Modelio išvada **privalo būti pažymėta** | `protocolRubric` | — |
+| **Kilmės taisyklė duoda vienareikšmį atsakymą** | `protocolRubric` | — |
+| **Išvada irgi privalo turėti nuorodą** | `protocolRubric` | Reikalavimo susiaurinimas → krinta |
+| Nesutarus imamas **griežtesnis** sunkumas | `protocolRubric` | `Math.min` → krinta |
+| Nesutarus imama **konservatyvesnė** kilmė | `protocolRubric` | — |
+| Sutarimo dalis — **metodikos**, ne kokybės matas | `protocolRubric` | — |
+| Galutiniam rinkiniui **du vertintojai** | `protocolRubric` | — |
+| Atsekamumo dalis **nėra kokybės matas** | `protocolRubric` | — |
+| Balo negalima lyginti tarp skirtingo ilgio protokolų | `protocolRubric` | — |
+| Veto taikomas **pirmiau** nei balų riba | `protocolRubric` | — |
+| Fiksuojama konkreti **modelio versija** | `protocolRubric` | — |
+| Laukai realiai egzistuoja `meeting_v3` protokole | `protocolRubric` | — |
+| Svoriai ir laukai dokumente **sutampa su kodu** | `protocolRubric` | — |
+| **Determinizmo riba** įvardyta (LLM ≠ faster-whisper) | `protocolRubric` | — |
+| Rubrika **nepakeičia** žmogaus peržiūros | `protocolRubric` | — |
+
+Metodika: [`docs/protocol-evaluation-rubric.md`](protocol-evaluation-rubric.md).
+
+⚠️ **Protokolas nėra transkripcija.** Sistema gali turėti nepriekaištingą WER
+(#23) ir vis tiek generuoti protokolą su išgalvotu nutarimu.
+
+⚠️ Vertina **žmogus, bet pagal iš anksto apibrėžtus kriterijus**: „man atrodo
+neblogai" nėra vertinimas, o automatinė metrika neaptiktų prasmės iškraipymo.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

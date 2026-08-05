@@ -1559,6 +1559,25 @@ laikomas neįvykusiu.
 ⚠️ Charta įvardija **visas žinomas sistemos ribas** (#18–#22) vienoje vietoje, ir
 testai tikrina, kad sąrašas neatsiliktų nuo pirminių dokumentų.
 
+**Protokolo vertinimo metodika (#24).**
+[`docs/protocol-evaluation-rubric.md`](docs/protocol-evaluation-rubric.md) —
+šešios vertinimo dimensijos, klaidų sunkumo svoriai ir atsekamumo modelis.
+
+⚠️ **Kritinė klaida yra veto:** protokolas su išgalvotu nutarimu netinkamas,
+net jei visa kita nepriekaištinga. Svoriai netiesiniai — tiesinė skalė leistų
+„kompensuoti" išgalvotą nutarimą tvarkingu formatavimu.
+
+⚠️ Nuorodos į įrašą saugomos kaip **pozicijos, ne citatos**: priešingu atveju
+atsekamumo įrašas taptų transkripcijos kopija su visais asmens duomenimis.
+
+⚠️ **LLM nėra deterministinis** — skirtingai nei `faster-whisper` su fiksuotais
+parametrais. Vienas paleidimas nėra modelio kokybės matas.
+
+Galutinį rinkinį vertina **du nepriklausomi vertintojai**; nesutarus imama
+griežtesnė reikšmė. Sutarimo dalis pateikiama ataskaitoje — bet tai **metodikos,
+ne kokybės matas**: žemas sutarimas reiškia neaiškią rubriką, ne blogą
+protokolą.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

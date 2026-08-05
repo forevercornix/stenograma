@@ -54,6 +54,7 @@ const privacy = [
   "providerBypassGuards",
   "qualityMetrics",
   "pilotCharter",
+  "protocolRubric",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",
