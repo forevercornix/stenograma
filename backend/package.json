@@ -38,7 +38,7 @@
   },
   "optionalDependencies": {
     "bullmq": "^6.0.5",
-    "ioredis": "^5.11.1"
+    "ioredis": "^6.0.0"
   },
   "devDependencies": {
     "eslint": "^10.8.0",
