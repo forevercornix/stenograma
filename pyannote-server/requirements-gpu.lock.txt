@@ -13,7 +13,7 @@
 # ir realiu audio per /diarize. torch cu124 turi atitikti host CUDA - jei ne,
 # keiskite į savo cuXXX ir atitinkamai atnaujinkite šias versijas.
 
-pyannote.audio==3.3.2
+pyannote.audio==4.0.7
 fastapi==0.141.1
 uvicorn==0.52.1
 python-multipart==0.0.32
