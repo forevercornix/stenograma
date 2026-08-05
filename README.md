@@ -1546,6 +1546,19 @@ atkuriamumui ir nepakankamas duomenų atkūrimui.
 (#24).** Gera transkripcija yra būtina, bet nepakankama gero protokolo sąlyga —
 LLM sugeneruotų sprendimų teisingumas vertinamas atskirai.
 
+**Piloto charta (#28).**
+[`docs/pilot/PILOT_CHARTER.md`](docs/pilot/PILOT_CHARTER.md) apibrėžia piloto
+tikslą, keturias **paneigiamas** hipotezes, leidžiamus ir draudžiamus naudojimo
+atvejus, duomenų kategorijas ir apimties keitimo tvarką.
+
+⚠️ **Be užrašytos apimties ribotas pilotas palaipsniui virsta nedokumentuota
+produkcijos paslauga.** Tai nutinka ne dėl blogos valios — kiekvienas atskiras
+praplėtimas atrodo mažas. Todėl apimtis **užšaldyta**, o pakeitimas be įrašo
+laikomas neįvykusiu.
+
+⚠️ Charta įvardija **visas žinomas sistemos ribas** (#18–#22) vienoje vietoje, ir
+testai tikrina, kad sąrašas neatsiliktų nuo pirminių dokumentų.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`

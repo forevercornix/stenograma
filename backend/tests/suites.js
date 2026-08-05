@@ -53,6 +53,7 @@ const privacy = [
   "providerEnforcement",
   "providerBypassGuards",
   "qualityMetrics",
+  "pilotCharter",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",
