@@ -51,6 +51,7 @@ const privacy = [
   "postmortemTemplate",
   "providerGovernance",
   "providerEnforcement",
+  "providerBypassGuards",
   "lifecycleDeletion",
   "deletionEnforcement",
   "lifecycleE2E",

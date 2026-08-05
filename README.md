@@ -1515,6 +1515,11 @@ tad konfigūracija nėra atitikties įrodymas.
 „nesaugu"** — tik tiek, kad **šis projektas jų netikrino**. `verified` be
 patikrinimo būtų neverifikuota sutartinė garantija.
 
+Politikos **negalima apeiti**: struktūrinės sargybos tikrina, kad maršrutai,
+worker'iai ir eilės neimportuotų tiekėjų tiesiogiai, o servisai nekurtų jų
+konstruktoriumi. Naujas apėjimo kelias sulaužytų testą **prieš** patekdamas į
+produkciją.
+
 Politika **vykdoma dviem sluoksniais**: startup validacija stabdo paleidimą su
 neleistina konfigūracija, o patikra tiekėjų **fabrikuose** dengia užklausos
 override ir dinaminį pasirinkimą. Fabrikas pasirinktas sąmoningai — tai

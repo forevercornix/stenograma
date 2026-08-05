@@ -586,6 +586,23 @@ reikia pasitikėti. Todėl jis tikrinamas CI.
 | Startup ir fabrikai naudoja **tą patį parserį** | `providerEnforcement` | Savo parserio grąžinimas → krinta |
 | **Dublikatai rinkiniuose stabdo paleidimą** | `providerEnforcement` | Dublikato grąžinimas → paleidiklis krinta |
 
+### #22.3 — apsauga nuo apėjimo
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Maršrutai, worker'iai ir eilės **neimportuoja tiekėjų tiesiogiai** | `providerBypassGuards` | Tiesioginis importas → krinta 2 |
+| Fabrikai — **vienintelis kelias** į provider klases | `providerBypassGuards` | Ta pati |
+| Servisai kviečia fabrikus, **ne konstruktorius** | `providerBypassGuards` | `new XProvider()` → krinta |
+| Matrica, valdysena ir dokumentas **nesiskiria** | `providerBypassGuards` | Tiekėjo pašalinimas → krinta 3 |
+| **Kiekvienas `REGISTRY` tiekėjas** turi politiką | `providerBypassGuards` | Ta pati |
+| Diagnostika sutampa su **realiu** sprendimu | `providerBypassGuards` | — |
+| Nė vienam tiekėjui negrąžinamos paslaptys | `providerBypassGuards` | — |
+| README ir `.env.example` nesiskiria nuo kodo | `providerBypassGuards` | — |
+
+⚠️ **Skirtumas nuo #22.2:** tie testai tikrina, kad patikra **veikia**. Šie —
+kad nėra **kelio**, kuriuo ją būtų galima aplenkti. Elgsenos testas naujo
+apėjimo kelio nepagautų: jis tikrina esamus kelius, ne būsimus.
+
 ⚠️ **Patikra dedama FABRIKE, ne maršrute** — tai vienintelis kelias, kuriuo
 tiekėjas atsiranda. Todėl ji automatiškai galioja HTTP maršrutams, inline
 vykdymui ir BullMQ worker'iams (ta pati logika kaip #19 žymų patikra
