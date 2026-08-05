@@ -622,6 +622,42 @@ sprendimą tik įgyvendina.
 ⚠️ Šis etapas apibrėžia **politiką**; jos vykdymas — #22.2, apsauga nuo
 regreso — #22.3.
 
+## #23.1 — vertinimo karkasas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Lietuviški diakritikai išlaikomi** | `qualityMetrics` | Šalinimas → krinta 2 |
+| Skaitmenys nekeičiami į žodžius | `qualityMetrics` | — |
+| WER skaidomas į S/I/D (gedimų analizei) | `qualityMetrics` | — |
+| **WER gali viršyti 100%** – neapkerpamas | `qualityMetrics` | Apkirpimas → krinta |
+| Tuščias referencinis duoda `null`, ne 0 | `qualityMetrics` | — |
+| CER atskiria linksniavimą nuo nesuprasto žodžio | `qualityMetrics` | — |
+| Kalbėtojų vardų skirtumas nebaudžiamas | `qualityMetrics` | — |
+| Metrika **nevadinama standartiniu DER** | `qualityMetrics` | — |
+| **Prarasti segmentai negali duoti 100%** | `qualityMetrics` | Vardiklio pakeitimas į `min` → krinta 2 |
+| Pertekliniai segmentai irgi mažina tikslumą | `qualityMetrics` | — |
+| Kalbėtojų susiejimas **optimalus**, ne godus | `qualityMetrics` | — |
+| Tipografinė skyryba nekuria klaidų | `qualityMetrics` | — |
+| Brūkšnelis ir apostrofas **žodyje** paliekami | `qualityMetrics` | — |
+| **Turinio laukai manifeste neleidžiami** (allowlist) | `qualityMetrics` | Draudimo pašalinimas → krinta |
+| `split` privalomas ir ribotas | `qualityMetrics` | — |
+| Laukų tipai ir ribos tikrinami | `qualityMetrics` | — |
+| Atspaudas apima `origin` ir `split` | `qualityMetrics` | Laukų pašalinimas → krinta |
+| Manifesto **kilmė privaloma** ir ribota | `qualityMetrics` | Patikros išjungimas → krinta |
+| Aprėpties spragos įvardijamos, bet nestabdo | `qualityMetrics` | — |
+| Atspaudas nepriklauso nuo įrašų tvarkos | `qualityMetrics` | — |
+| **Manifeste nėra nei garso, nei transkripcijų** | `qualityMetrics` | — |
+| Protokolo taisyklės **sutampa su kodu** | `qualityMetrics` | — |
+
+Protokolas: [`docs/evaluation-protocol.md`](evaluation-protocol.md).
+
+⚠️ **Protokolas rašomas PRIEŠ matavimą.** Apibrėžus metodiką po to, kai
+rezultatai matomi, ji neišvengiamai pasirenkama taip, kad rezultatai atrodytų
+geriau — net be blogos valios.
+
+⚠️ Šis etapas nieko **nevertina** — jis paruošia matavimo priemones. Rezultatai
+yra #23.2, sprendimas dėl piloto — #23.3.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

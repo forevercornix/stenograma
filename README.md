@@ -1526,6 +1526,26 @@ override ir dinaminį pasirinkimą. Fabrikas pasirinktas sąmoningai — tai
 vienintelis kelias, kuriuo tiekėjas atsiranda, tad politika galioja vienodai
 maršrutams, inline vykdymui ir worker'iams.
 
+**Kokybės vertinimo karkasas (#23).**
+[`docs/evaluation-protocol.md`](docs/evaluation-protocol.md) apibrėžia, kaip
+matuojame transkribavimo (WER, CER) ir kalbėtojų priskyrimo kokybę.
+
+Du sprendimai sąmoningai **pablogina** mūsų skaičius, palyginti su agresyviau
+normalizuojančiomis sistemomis: **diakritikai išlaikomi** („šalis" ≠ „salis") ir
+**skaitmenys nekeičiami** („2026" ≠ „du tūkstančiai..."). Skaičius turi atspindėti
+tai, ką naudotojas realiai pamatys protokole.
+
+⚠️ Kalbėtojų metrika **nėra standartinis DER** — ji matuoja segmentų
+priskyrimą, ne laiko proporcijas, tad **nepalyginama** su publikuojamais DER
+skaičiais.
+
+⚠️ Repozitorijoje **nėra nei garso, nei transkripcijų**: manifestas pakankamas
+atkuriamumui ir nepakankamas duomenų atkūrimui.
+
+⚠️ **Šios metrikos matuoja TRANSKRIPCIJOS kokybę (#23), ne protokolo kokybę
+(#24).** Gera transkripcija yra būtina, bet nepakankama gero protokolo sąlyga —
+LLM sugeneruotų sprendimų teisingumas vertinamas atskirai.
+
 **CI/CD ir tiekimo grandinė.** Taisyklės surašytos
 [`docs/ci-security-policy.md`](docs/ci-security-policy.md), o `ci.yml`
 `workflow-policy` job'as jas **vykdo**: `GITHUB_TOKEN` teisės, `pull_request_target`
