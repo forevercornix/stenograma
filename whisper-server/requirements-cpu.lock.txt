@@ -14,7 +14,7 @@ ctranslate2==4.8.1
 # versijos atgal pakete, kuris yra tiesiogiai audio kelyje. Grįžti prie 3.12
 # verta, kai `av` išleis cp312 wheel'ą; tada tai bus grynas kėlimas be nuleidimų.
 numpy==2.4.6
-huggingface-hub==1.25.1
+huggingface-hub==1.26.0
 tokenizers==0.23.1
 av==18.0.0
 onnxruntime==1.28.0
