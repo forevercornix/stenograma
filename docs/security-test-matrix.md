@@ -658,6 +658,39 @@ geriau — net be blogos valios.
 ⚠️ Šis etapas nieko **nevertina** — jis paruošia matavimo priemones. Rezultatai
 yra #23.2, sprendimas dėl piloto — #23.3.
 
+## #28 PR1 — piloto charta
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Tiekėjų skaičiai sutampa su **realiu inventoriumi** | `pilotCharter` | Skaičiaus pakeitimas → krinta |
+| Minimi **tik egzistuojantys** privatumo profiliai | `pilotCharter` | `ephemeral` → krinta |
+| Minimi kintamieji egzistuoja `.env.example` | `pilotCharter` | — |
+| **Visos žinomos ribos** įvardytos IR patvirtintos šaltiniuose | `pilotCharter` | Ribos pašalinimas → krinta |
+| Nuorodos į issue realiai egzistuoja | `pilotCharter` | — |
+| Hipotezės **paneigiamos** ir turi tikrinimo būdą | `pilotCharter` | — |
+| Transkribavimo ir protokolo kokybė **atskirtos** | `pilotCharter` | — |
+| Ypatingų kategorijų draudimas su **teisiniu pagrindu** | `pilotCharter` | — |
+| Redakcija įvardyta kaip **apsauga, ne leidimas** | `pilotCharter` | — |
+| Apimties keitimas reikalauja **įrašo** | `pilotCharter` | — |
+| Kiekviena prielaida turi **pasekmę** | `pilotCharter` | — |
+| Pilotas **nėra automatinis perėjimas** į produkciją | `pilotCharter` | — |
+| **Įgyvendinta metodika atskirta nuo planuojamos** (#23 vs #24) | `pilotCharter` | #24 kaip esamas → krinta |
+| Sargybinis: atsiradus #24, charta privalės būti atnaujinta | `pilotCharter` | — |
+| H2 matuojamas **tas pats žmogus** | `pilotCharter` | — |
+| Valdysena **įgyvendina, bet neįrodo** organizacinio sprendimo | `pilotCharter` | Ribos pašalinimas → krinta |
+| Biometriniai identifikatoriai įvardyti atskirai | `pilotCharter` | — |
+| **Skubūs saugumo pakeitimai** nėra apimties pakeitimas | `pilotCharter` | Išimties pašalinimas → krinta |
+| Organizacijų sąrašui galioja ta pati keitimo tvarka | `pilotCharter` | — |
+
+Charta: [`docs/pilot/PILOT_CHARTER.md`](pilot/PILOT_CHARTER.md).
+
+⚠️ **Charta yra pažadas organizacijai**, ne techninė dokumentacija. Jos
+senėjimas pavojingesnis: ja remiamasi priimant sprendimus apie asmens duomenis.
+
+⚠️ Ribų sąrašas tikrinamas **abiem kryptimis** — kiekviena riba turi būti ir
+chartoje, ir pirminiame dokumente. Kitaip santrauka teigtų tai, ko šaltinis
+nesako.
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
