@@ -4,72 +4,141 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
-## v1.3.0 – licencijos modelis ir dokumentacijos tikslumas
+## v1.3.0 – Milestone 2: prieiga, duomenų valdymas ir operacinis pasirengimas
 
-Funkcinių pakeitimų nėra. Šis leidimas sutvarko tris dalykus, kurie iki šiol
-buvo netikslūs: licenciją, autorių teisių turėtoją ir dokumentacijoje
-nurodytus skaičius.
+Didžiausias leidimas iki šiol: **145 failai, +24 013 / −1 376 eilutės**. Backend
+testų nuo 558 iki **1042**, frontend nuo 55 iki **64**.
 
-### Changed
+Kryptis ta pati, kaip v1.2.0: ne naujos vartotojo funkcijos, o **prielaidų
+pavertimas tikrinamomis garantijomis** – tik šįkart ne privatumo, o prieigos,
+duomenų gyvavimo ciklo ir operacinio pasirengimo srityse.
 
-**Licencija: MIT → EUPL-1.2-or-later.** Nuo šios versijos projektas platinamas pagal
-European Union Public Licence 1.2 – Europos Komisijos parengtą, OSI patvirtintą
-reciprokinę licenciją su oficialiu lietuvišku vertimu.
+### Added – autentifikacija ir prieigos kontrolė
 
-Versijavimo politika nurodyta vienodai visuose dokumentuose: **EUPL-1.2 arba,
-gavėjo pasirinkimu, vėlesnė Komisijos patvirtinta EUPL versija**
-(EUPL-1.2-or-later; SPDX identifikatorius `EUPL-1.2`). `LICENSE` tekstas paimtas
-iš SPDX license-list-data canonical šaltinio be perrašymo.
+- **Sesijomis paremta autentifikacija** (`routes/auth.js`, `utils/sessionStore.js`,
+  `utils/credentials.js`, `middleware/sessionAuth.js`) – scrypt slaptažodžiai,
+  sesijos ID rotacija po prisijungimo, vartotojų enumeracijos apsauga.
+- **Centralizuota vaidmenimis paremta prieigos kontrolė** (`middleware/authorize.js`,
+  `utils/permissions.js`, `utils/jobAuthorization.js`) – leidimai apibrėžti vienoje
+  vietoje, ne išbarstyti po maršrutus.
+- **Aktoriaus kontekstas perduodamas worker'iams ir audit log'ui**
+  (`feat(auth): propagate safe actor context`) – asinchroninis jobas nebepraranda
+  informacijos, kas jį inicijavo.
+- RBAC frontend'e, regresijos testai (`RolePermissions.test.jsx`) ir diegimo
+  dokumentacija (`docs/auth-deployment.md`).
+
+### Added – duomenų gyvavimo ciklas ir GDPR ištrynimas
+
+- **Artefaktų inventorius ir gyvavimo ciklo modelis** (`utils/artefactInventory.js`,
+  `utils/artefactScanner.js`, `services/lifecycleService.js`) – kiekvienas sistemoje
+  atsirandantis duomenų artefaktas turi įvardytą savininką ir gyvavimo trukmę.
+- **Koordinuotas ištrynimas** (`feat(gdpr)`) – ištrynimas vykdomas per visus
+  saugojimo sluoksnius vienu metu, su `utils/deletionTombstones.js` žymėmis, kad
+  pakartotinis įrašymas po ištrynimo būtų aptinkamas.
+- **Sugriežtinta retencija ir valymas po restarto** (`feat(retention)`) – nutrūkęs
+  worker'is nebepalieka pakibusių audio failų.
+- Garantijos aprašytos `docs/artefact-lifecycle.md` ir `docs/deletion-guarantees.md`,
+  padengtos end-to-end testais.
+
+### Added – atsarginės kopijos ir atkūrimas
+
+- **Kopijų politika ir manifesto modelis** (`utils/backupPolicy.js`,
+  `utils/backupManifest.js`) – kas į kopiją patenka ir kas sąmoningai nepatenka.
+- **Kūrimas, šifravimas ir atkūrimas** (`services/backupService.js`,
+  `services/restoreService.js`, `utils/backupEncryption.js`, `routes/backup.js`).
+- **Gyvavimo ciklą suprantantis atkūrimas ir raktų valdymas** (`feat(security)`) –
+  atkūrimas negrąžina to, kas buvo teisėtai ištrinta. Tai buvo neakivaizdi vieta:
+  be jos GDPR ištrynimas būtų atšaukiamas viena „restore" komanda.
+- Procedūros: `docs/backup-runbook.md`, end-to-end atkūrimo scenarijų testai.
+
+### Added – tiekėjų valdysena
+
+- **Tiekėjų inventorius ir diegimo privatumo kontrolinis sąrašas**
+  (`utils/providerGovernance.js`, `docs/provider-governance.md`) – kuris tiekėjas
+  kokius duomenis mato ir kur jie fiziškai keliauja.
+- **Politikos taikymas paleidimo metu ir provider factory viduje** – netinkama
+  konfigūracija sustabdo startą, o ne tyliai praeina iki pirmos užklausos.
+- **Apėjimo apsaugų testai** (`test(governance): prove provider policy cannot be
+  bypassed`) – įrodyta, kad politikos negalima apeiti per override mechanizmus.
+
+### Added – kokybės vertinimas
+
+- **Vertinimo karkasas ir benchmark protokolas** (`docs/evaluation-protocol.md`,
+  `utils/evaluationManifest.js`, `utils/qualityMetrics.js`) – WER/CER metodika,
+  atkuriamumo reikalavimai.
+- **Protokolo vertinimo rubrika ir atsekamumo modelis** (`utils/protocolRubric.js`,
+  `utils/protocolTraceability.js`, `docs/protocol-evaluation-rubric.md`) – kaip
+  vertinti sugeneruoto protokolo kokybę, ne tik transkripcijos tikslumą.
+
+### Added – operacinis pasirengimas
+
+- **Incidentų valdymo karkasas** (`docs/operations/INCIDENT_RESPONSE.md`) –
+  klasifikacija, eskalavimas, pranešimo terminai.
+- **Įrodymų išsaugojimo ir atkūrimo procedūros**
+  (`docs/operations/OPERATIONAL_PROCEDURES.md`).
+- **Postmortem šablonas ir pratybos** (`docs/operations/POSTMORTEM_AND_EXERCISES.md`).
+- **Piloto chartija** (`docs/pilot/PILOT_CHARTER.md`) – apimtis, ribos ir sąlygos
+  pirmajam realiam diegimui.
+
+Šie dokumentai nėra vien tekstas: dalis jų tikrinama automatiniais testais
+(`backupDocumentation`, `incidentRunbook`, `operationalProcedures`,
+`postmortemTemplate`, `pilotCharter`), kurie lygina dokumentuose nurodytus
+skaičius su realiomis kodo konstantomis.
+
+### Changed – licencija
+
+**MIT → EUPL-1.2-or-later.** Nuo šios versijos projektas platinamas pagal European
+Union Public Licence 1.2 arba, gavėjo pasirinkimu, vėlesnę Komisijos patvirtintą
+EUPL versiją (SPDX identifikatorius `EUPL-1.2`). `LICENSE` tekstas paimtas iš SPDX
+license-list-data canonical šaltinio be perrašymo.
 
 **Versijos iki `v1.2.0` imtinai lieka MIT.** Ta licencija neatšaukiama ir toms
-versijoms galioja neterminuotai – tai aiškiai užfiksuota `LICENSE-HISTORY.md`,
-o originalus tekstas išsaugotas `LICENSE-MIT`.
+versijoms galioja neterminuotai – užfiksuota `LICENSE-HISTORY.md`, originalus
+tekstas išsaugotas `LICENSE-MIT`.
 
-**Autorių teisių turėtoja nurodyta tiksliai:** Juliana Vorono-Baranovska.
-Anksčiau `LICENSE` faile buvo įrašyta „Stenograma" – subjektas, kuris teisiškai
-neegzistuoja ir negalėtų būti sutarties šalimi.
+**Autorių teisių turėtoja nurodyta tiksliai:** Juliana Vorono-Baranovska. Anksčiau
+`LICENSE` faile buvo įrašyta „Stenograma" – subjektas, kuris teisiškai neegzistuoja.
+
+Pridėta: `CONTRIBUTING.md` su įnašų licencijavimo sąlygomis,
+`.github/pull_request_template.md` su patvirtinimo varnele, `LICENSE-COMMERCIAL.md`
+ir `AUTHORSHIP.md` (kas projektą sukūrė, kaip, ir ką reiškia kelios commit'ų
+tapatybės git istorijoje).
 
 ### Fixed
 
-Dokumentacijoje nurodyti skaičiai atsiliko nuo realybės. Patikrinta paleidus
-testus ir ištaisyta:
+- `fix(security)`: klaidų detalės sanitizuojamos ir Python servisuose – anksčiau
+  tik Node pusėje.
+- `fix(ui)`: laikmatis išvalomas komponentui išsimontuojant.
+- `fix(deps)`: `numpy` prisegtas prie 2.4.6 – 2.5+ reikalauja Python 3.12.
+- Dokumentacijos skaičiai suderinti su realybe: backend testai `558` → **1042**,
+  `backend/README` `107` → **1042**, frontend `24` → **64**, Node.js `20` → **22**
+  README ir RUNPOD.md (v1.2.0 CHANGELOG klaidingai teigė, kad Node versija
+  pakeista „visose vietose").
+- `nanoid` → 3.3.18 (GHSA-2v37-7h3g-55p8, tranzityvi per postcss).
 
-- backend testų skaičius: `558` → **1042** (README trijose vietose);
-- backend/README: `107` → **1042**;
-- frontend testų skaičius: `24` → **64** (6 failai, įskaitant
-  `src/api/stenogramaApi.test.js`, kurio aprašyme apskritai nebuvo);
-- Node.js versija README ir RUNPOD.md: `20` → **22**. CHANGELOG v1.2.0 teigė,
-  kad versija pakeista „visose vietose" – iš tikrųjų README ir RUNPOD.md liko
-  su senu skaičiumi.
+### Security
 
-Tai nėra kosmetika: šio projekto pagrindinis argumentas yra tas, kad
-dokumentacija atitinka kodą. Neteisingas skaičius README pirmoje lentelėje
-kenkia labiau nei jo nebuvimas.
-
-### Added
-
-- `CONTRIBUTING.md` su įnašų licencijavimo sąlygomis ir
-  `.github/pull_request_template.md` su patvirtinimo varnele – jie užtikrina,
-  kad priimant išorinius įnašus projektas išsaugotų dvigubos licencijos
-  modeliui reikalingas relicencijavimo teises. Šiuo metu išorinių įnašų nėra,
-  tad modelis veikia ir be jų – bet pirmas priimtas PR be teisių suteikimo
-  situaciją pakeistų. Tai lengvasvoris susitarimas, ne pasirašytas CLA –
-  taip ir įvardyta.
-- `LICENSE-COMMERCIAL.md` – kada EUPL pakanka ir kada reikia atskiros
-  licencijos, su kontaktais.
-- `SECURITY.md` – pridėtas realus kontaktinis el. paštas (anksčiau buvo tik
-  „contact the maintainer privately", nenurodant kaip).
-- `AUTHORSHIP.md` – kas projektą sukūrė, kaip jis kurtas (AI įrankiai su žmogaus
-  priežiūra), ir ką reiškia kelios commit'ų tapatybės git istorijoje. Visos jos
-  priklauso tai pačiai autorei; išorinių prisidėjusių asmenų nėra. Dokumentas
-  atsako į klausimus, kuriuos vertintojas vis tiek užduotų – geriau iš karto ir
-  tiksliai, nei vėliau ir spėliojant.
+- Laikina, dokumentuota `PYSEC-2026-3624` (CVE-2026-58659) išimtis pyannote
+  priklausomybių audite: `lightning <= 2.6.5` turi RCE spragą
+  `load_from_checkpoint` kelyje, tačiau pataisymas egzistuoja tik commit'e
+  `d710d68` ir į išleistą PyPI versiją dar nepateko. Pagrindimas ir šalinimo
+  sąlyga įrašyti `ci.yml`.
 
 ### Housekeeping
 
 Šaknyje gulėję vienkartiniai issue kūrimo skriptai perkelti į `scripts/dev/`,
 leidimo pastabos į `docs/releases/`, GitHub diegimo instrukcijos į `docs/`.
 Nieko neištrinta.
+
+### Ko šiame leidime NĖRA
+
+Sąžiningai, kad README ir CHANGELOG neklaidintų:
+
+- **Vertinimo karkasas yra, bet realių matavimų rezultatų dar nėra** – WER/CER
+  lietuvių kalbai neišmatuoti. Metodika aprašyta, skaičių nėra.
+- **PostgreSQL rezultatams ir MinIO/S3 objektams** – vis dar Milestone 2 likutis;
+  sesijos ir audit log tebėra atmintyje.
+- **Realaus piloto dar nebuvo** – chartija parašyta, diegimo neįvyko.
 
 ---
 
