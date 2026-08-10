@@ -1,10 +1,10 @@
 # Stenograma
 
-**Status:** Portfolio reference implementation — `v1.2.0` (ne production-ready)
+**Status:** Portfolio reference implementation — `v1.3.0` (ne production-ready)
 
 | Komponentas | Statusas | Pagrindas |
 |---|---|---|
-| Backend (Node/API) | Testuota | 558 testai (privatumo / saugumo / funkciniai rinkiniai) per CI |
+| Backend (Node/API) | Testuota | 1042 testai (privatumo / saugumo / funkciniai rinkiniai) per CI |
 | Privatumo ir saugumo garantijos | Testuota + mutacijomis patikrinta | [`docs/security-test-matrix.md`](docs/security-test-matrix.md) |
 | Frontend (Vite/React) | Testuota | Vitest, ESLint, build per CI |
 | E2E srautas | Testuota | Playwright + Chromium per CI |
@@ -69,7 +69,7 @@ komponentas žemiau pažymėtas viena iš trijų kategorijų:
 | **CPU** | 4 branduoliai | 8 branduoliai | CPU transkripcija (`small` modelis) veikia, bet lėčiau nei GPU |
 | **GPU** | nebūtina | RTX 3060+ (12 GB VRAM) | Tik GPU transkripcijai/diarizacijai. `small` modeliui užtenka ~2 GB VRAM, `large-v3` fp16 ~4–5 GB |
 | **Diskas** | 10 GB | 30 GB | Demo/CPU ~10 GB; GPU Docker image'ai (CUDA/Torch/pyannote) realiai 25–30 GB |
-| **Node.js** | 20 | 20 LTS | Backend + frontend |
+| **Node.js** | 22 | 22 LTS | Backend + frontend |
 | **Python** | 3.10 | 3.11 | pyannote/whisper servisai (jei naudojami) |
 
 Priklauso nuo profilio: **demo/mock** – veikia beveik bet kur (net be GPU, be Docker,
@@ -276,7 +276,7 @@ Ankstesnės versijos turėjo keletą MVP-lygio saugumo spragų, kurios dabar iš
 ```bash
 cd backend
 npm install
-npm test        # 558 testai (privatumas + saugumas + funkciniai), mock provideriai, be raktų
+npm test        # 1042 testai (privatumas + saugumas + funkciniai), mock provideriai, be raktų
 npm run check   # node --check kiekvienam .js failui
 ```
 
@@ -318,7 +318,7 @@ praleidžiamas. Tikslus atskyrimas:
   skaitiklių), antrasis patvirtina, kad worker'io per TIKRĄ Redis rašytas
   heartbeat raktas realiai matomas `/api/ready` route'e, o jam dingus - readiness
   teisingai krenta į 503 (žr. `backend/README.md`)
-- frontend: 24 Vitest testai + `vite build`
+- frontend: 64 Vitest testai + `vite build`
 - pyannote: `/health` diagnostika + `/diarize` kontraktas su mock pipeline (9 testai)
 - whisper-server: `/health` + `/transcribe` kontraktas su mock modeliu (8 testai)
 - **naršyklinis E2E (Playwright, Chromium): (a) įklijuoti tekstą → protokolas → DOCX; (b) pilnas audio upload → polling → protokolas → DOCX**
@@ -465,9 +465,9 @@ Pilna dokumentacija: [`backend/README.md`](backend/README.md).
 ## Technologijos
 
 **Frontend:** React + Vite, Tailwind (core utility klasės), Web Speech API, PapaParse (CSV eksportui), lucide-react.
-**Backend:** Node.js 20+, Express, Multer (diskStorage), express-rate-limit.
-**Testai:** backend — `node:test` (built-in) + Supertest (558 testai, plius 11 integracinių su tikru Redis); frontend —
-Vitest (24 testų: 19 grynoms `src/utils.js` funkcijoms + 5 komponento/integracijos
+**Backend:** Node.js 22+, Express, Multer (diskStorage), express-rate-limit.
+**Testai:** backend — `node:test` (built-in) + Supertest (1042 testai, plius 3 integraciniai su tikru Redis); frontend —
+Vitest (64 testai: 19 `src/utils.js`, 19 `src/api/stenogramaApi.js`, 26 komponento/integracijos
 testai `App.jsx` su React Testing Library ir mocked `fetch` - backend health
 statusas, generavimo srautas, klaidų rodymas). **Sąžiningai:** komponento testai
 apima tik dalį elgsenos (health status, paste→generate srautas, klaidos) - NĖRA
@@ -872,7 +872,24 @@ keli GB nesiųstų kaskart.
 
 ## Licencija
 
-MIT — žr. [`LICENSE`](LICENSE).
+Stenograma platinama pagal **EUPL-1.2 arba, gavėjo pasirinkimu, bet kurią
+vėlesnę Europos Komisijos patvirtintą EUPL versiją** (EUPL-1.2-or-later) —
+tai Komisijos parengta, OSI patvirtinta atvirojo kodo licencija su oficialiu
+lietuvišku vertimu. SPDX identifikatorius: `EUPL-1.2`. Žr. [`LICENSE`](LICENSE).
+
+Copyright (c) 2026 Juliana Vorono-Baranovska
+
+**Versijos iki `v1.2.0` imtinai buvo išleistos pagal MIT licenciją ir toms
+versijoms ji lieka galioti** — žr. [`LICENSE-HISTORY.md`](LICENSE-HISTORY.md).
+MIT tekstas išsaugotas faile [`LICENSE-MIT`](LICENSE-MIT).
+
+Organizacijoms, kurioms EUPL reciprokiškumo pareigos netinka (Stenograma ar
+jos modifikuotos versijos integravimas į uždarą produktą arba teikimas
+klientams neatskleidžiant pakeitimų), galima atskira komercinė licencija —
+žr. [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+
+Kas projektą sukūrė ir kaip (įskaitant AI įrankių naudojimą bei commit'ų
+tapatybių paaiškinimą) — [`AUTHORSHIP.md`](AUTHORSHIP.md).
 
 ## Privatumas ir GDPR kontrolės
 

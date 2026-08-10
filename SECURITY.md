@@ -20,7 +20,7 @@ Reporting a Vulnerability
 
 If you discover a potential security vulnerability, please do not report it through a public GitHub issue.
 
-If GitHub Private Vulnerability Reporting is enabled for this repository, please use it. Otherwise, contact the project maintainer privately.
+If GitHub Private Vulnerability Reporting is enabled for this repository, please use it. Otherwise, contact the project maintainer privately at juliana.vorono@gmail.com.
 
 When reporting a vulnerability, please include:
 

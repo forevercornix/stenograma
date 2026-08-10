@@ -4,6 +4,75 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## v1.3.0 – licencijos modelis ir dokumentacijos tikslumas
+
+Funkcinių pakeitimų nėra. Šis leidimas sutvarko tris dalykus, kurie iki šiol
+buvo netikslūs: licenciją, autorių teisių turėtoją ir dokumentacijoje
+nurodytus skaičius.
+
+### Changed
+
+**Licencija: MIT → EUPL-1.2-or-later.** Nuo šios versijos projektas platinamas pagal
+European Union Public Licence 1.2 – Europos Komisijos parengtą, OSI patvirtintą
+reciprokinę licenciją su oficialiu lietuvišku vertimu.
+
+Versijavimo politika nurodyta vienodai visuose dokumentuose: **EUPL-1.2 arba,
+gavėjo pasirinkimu, vėlesnė Komisijos patvirtinta EUPL versija**
+(EUPL-1.2-or-later; SPDX identifikatorius `EUPL-1.2`). `LICENSE` tekstas paimtas
+iš SPDX license-list-data canonical šaltinio be perrašymo.
+
+**Versijos iki `v1.2.0` imtinai lieka MIT.** Ta licencija neatšaukiama ir toms
+versijoms galioja neterminuotai – tai aiškiai užfiksuota `LICENSE-HISTORY.md`,
+o originalus tekstas išsaugotas `LICENSE-MIT`.
+
+**Autorių teisių turėtoja nurodyta tiksliai:** Juliana Vorono-Baranovska.
+Anksčiau `LICENSE` faile buvo įrašyta „Stenograma" – subjektas, kuris teisiškai
+neegzistuoja ir negalėtų būti sutarties šalimi.
+
+### Fixed
+
+Dokumentacijoje nurodyti skaičiai atsiliko nuo realybės. Patikrinta paleidus
+testus ir ištaisyta:
+
+- backend testų skaičius: `558` → **1042** (README trijose vietose);
+- backend/README: `107` → **1042**;
+- frontend testų skaičius: `24` → **64** (6 failai, įskaitant
+  `src/api/stenogramaApi.test.js`, kurio aprašyme apskritai nebuvo);
+- Node.js versija README ir RUNPOD.md: `20` → **22**. CHANGELOG v1.2.0 teigė,
+  kad versija pakeista „visose vietose" – iš tikrųjų README ir RUNPOD.md liko
+  su senu skaičiumi.
+
+Tai nėra kosmetika: šio projekto pagrindinis argumentas yra tas, kad
+dokumentacija atitinka kodą. Neteisingas skaičius README pirmoje lentelėje
+kenkia labiau nei jo nebuvimas.
+
+### Added
+
+- `CONTRIBUTING.md` su įnašų licencijavimo sąlygomis ir
+  `.github/pull_request_template.md` su patvirtinimo varnele – jie užtikrina,
+  kad priimant išorinius įnašus projektas išsaugotų dvigubos licencijos
+  modeliui reikalingas relicencijavimo teises. Šiuo metu išorinių įnašų nėra,
+  tad modelis veikia ir be jų – bet pirmas priimtas PR be teisių suteikimo
+  situaciją pakeistų. Tai lengvasvoris susitarimas, ne pasirašytas CLA –
+  taip ir įvardyta.
+- `LICENSE-COMMERCIAL.md` – kada EUPL pakanka ir kada reikia atskiros
+  licencijos, su kontaktais.
+- `SECURITY.md` – pridėtas realus kontaktinis el. paštas (anksčiau buvo tik
+  „contact the maintainer privately", nenurodant kaip).
+- `AUTHORSHIP.md` – kas projektą sukūrė, kaip jis kurtas (AI įrankiai su žmogaus
+  priežiūra), ir ką reiškia kelios commit'ų tapatybės git istorijoje. Visos jos
+  priklauso tai pačiai autorei; išorinių prisidėjusių asmenų nėra. Dokumentas
+  atsako į klausimus, kuriuos vertintojas vis tiek užduotų – geriau iš karto ir
+  tiksliai, nei vėliau ir spėliojant.
+
+### Housekeeping
+
+Šaknyje gulėję vienkartiniai issue kūrimo skriptai perkelti į `scripts/dev/`,
+leidimo pastabos į `docs/releases/`, GitHub diegimo instrukcijos į `docs/`.
+Nieko neištrinta.
+
+---
+
 ## v1.2.0 – GDPR ir saugumo programa
 
 Šis leidimas nepridėjo naujų vartotojo funkcijų. Jis padarė kitą dalyką: pavertė
