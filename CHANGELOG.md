@@ -6,8 +6,11 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ## v1.3.0 – Milestone 2: prieiga, duomenų valdymas ir operacinis pasirengimas
 
-Didžiausias leidimas iki šiol: **145 failai, +24 013 / −1 376 eilutės**. Backend
-testų nuo 558 iki **1042**, frontend nuo 55 iki **64**.
+Didžiausias leidimas iki šiol: **70 commit'ai** (36 be merge), **145 failai,
++24 013 / −1 376 eilutės**. Backend testų nuo 558 iki **1042**, frontend nuo
+55 iki **64**.
+
+Skaičiai matuoti intervale `v1.2.0..v1.3.0`.
 
 Kryptis ta pati, kaip v1.2.0: ne naujos vartotojo funkcijos, o **prielaidų
 pavertimas tikrinamomis garantijomis** – tik šįkart ne privatumo, o prieigos,
