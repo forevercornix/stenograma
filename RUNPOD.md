@@ -10,7 +10,7 @@ ką matote, pirmiausia paleiskite `npm run doctor`.
 
 Realių diegimų metu šie dalykai dažniausiai suklaidina - jie visi **normalūs**, ne gedimai:
 
-- **Node.js 20+ NĖRA iš anksto įdiegtas.** RunPod PyTorch/CUDA image'ai turi Python ir
+- **Node.js 22+ NĖRA iš anksto įdiegtas.** RunPod PyTorch/CUDA image'ai turi Python ir
   CUDA, bet ne Node. Įsidiekite rankiniu būdu PRIEŠ `setup.sh` (žr. 2b, žemiau):
   ```bash
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs

@@ -281,7 +281,7 @@ tipų būseną atskirai, tad tokį filtravimą būtų nesunku pridėti `server.j
 ## Testai
 
 ```bash
-npm test        # node --test (built-in) - 107 testų, mock provideriais, be jokių raktų
+npm test        # node --test (built-in) - 1042 testai, mock provideriais, be jokių raktų
 npm run check   # node --check kiekvienam .js failui
 ```
 
