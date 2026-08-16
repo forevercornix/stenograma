@@ -137,7 +137,7 @@ test("releaseAudio su TIKRU storage: nepavykus trynimui storageKey lieka", async
   const { releaseAudio } = require("../utils/audioCleanup");
 
   const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION, storageKey: key });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION, storageKey: key });
 
   const dir = path.dirname(path.join(storageDir, key));
   await fs.chmod(dir, 0o500);
@@ -145,11 +145,11 @@ test("releaseAudio su TIKRU storage: nepavykus trynimui storageKey lieka", async
   try {
     assert.equal(await releaseAudio(job.id, key), false);
 
-    const after = await jobStore.get(job.id);
+    const after = await jobStore.system.get(job.id);
     assert.equal(after.storageKey, key, "raktas turi likti, kad ištrynimą būtų galima pakartoti");
   } finally {
     await fs.chmod(dir, 0o700);
     await fileStorage.del(key).catch(() => {});
-    await jobStore.remove(job.id);
+    await jobStore.system.remove(job.id);
   }
 });

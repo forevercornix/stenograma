@@ -98,7 +98,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
       // arba job'as pasibaigė TTL). Tada BullMQ nemato problemos, bet vartotojo jobo įrašo
       // nėra - klaidiname klientą. Todėl tikrinam ir metam, kad BullMQ pažymėtų failed +
       // retry (ne tyliai "sėkmė" be įrašo).
-      const processingJob = await jobStore.update(jobId, {
+      const processingJob = await jobStore.system.update(jobId, {
         status: jobStore.STATUS.PROCESSING,
         attempt_count: job.attemptsMade + 1,
       });
@@ -141,7 +141,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
           const decision = authorizeJobOrAudit(processingJob, jobId);
 
           if (!decision.allowed) {
-            await jobStore.update(jobId, {
+            await jobStore.system.update(jobId, {
               status: jobStore.STATUS.FAILED,
               error_code: "AUTHORIZATION_REVOKED",
               error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
@@ -155,7 +155,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
           const result = await processor(payload, jobId);
 
           // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
-          const completedJob = await jobStore.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+          const completedJob = await jobStore.system.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
           if (!completedJob) {
             throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
           }
@@ -187,7 +187,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
      * kuris tiriamas dažniausiai, liktų vienintelis be koreliacijos.
      */
     const { runWithContext } = require("../utils/requestContext");
-    const failedJob = await jobStore.get(jobId).catch(() => null);
+    const failedJob = await jobStore.system.get(jobId).catch(() => null);
 
     return runWithContext(
       {
@@ -223,12 +223,12 @@ function createWorker(queueName, processor, workerOptions = {}) {
 
     if (attemptsExhausted) {
       // Galutinė nesėkmė po visų bandymų - jobas FAILED (dead-letter).
-      await jobStore.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
+      await jobStore.system.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
       // Tik dabar (po VISŲ bandymų) trinam audio - kad retry turėtų failą.
       await _cleanupStorage(payload, jobId);
     } else {
       // Dar bus retry - paliekam PROCESSING, audio NETRINAM (kitas bandymas jį naudos).
-      await jobStore.update(jobId, { attempt_count: job.attemptsMade + 1, error: message, error_code: errorCode });
+      await jobStore.system.update(jobId, { attempt_count: job.attemptsMade + 1, error: message, error_code: errorCode });
     }
   }
 

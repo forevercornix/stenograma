@@ -334,7 +334,7 @@ test("REGRESIJA: netinkamas jobId vis tiek atmetamas", () => {
 
 test("PARAMS: netinkamas jobId atmetamas prieš pasiekiant saugyklą", async () => {
   /**
-   * Anksčiau `req.params.id` keliaudavo tiesiai į `jobStore.get()`. Saugykla su
+   * Anksčiau `req.params.id` keliaudavo tiesiai į `jobStore.system.get()`. Saugykla su
    * tuo susitvarko, bet tikrinti prie ribos pigiau ir aiškiau - klientas gauna
    * validacijos klaidą, o ne 404 apie „nerastą" jobą, kurio ID iš viso negalimas.
    */

@@ -10,7 +10,7 @@ process.env.NODE_ENV = "test";
  * Anksčiau abu valymo keliai darė taip:
  *
  *   await fileStorage.del(payload.storageKey).catch(() => {});
- *   await jobStore.update(jobId, { storageKey: null }).catch(() => {});
+ *   await jobStore.system.update(jobId, { storageKey: null }).catch(() => {});
  *
  * Nepavykus `del()`, klaida buvo nutylima, bet raktas vis tiek dingdavo iš
  * jobStore - failas likdavo storage, o vėlesnis GDPR DELETE jo nebesurasdavo.
@@ -31,9 +31,12 @@ function loadReleaseAudio({ delThrows = null }) {
       },
     },
     "utils/jobStore": {
-      update: async (id, patch) => {
-        calls.update.push({ id, patch });
-        return { id, ...patch };
+      /** #159: audio valymas yra sisteminis kelias – privilegijuotas namespace. */
+      system: {
+        update: async (id, patch) => {
+          calls.update.push({ id, patch });
+          return { id, ...patch };
+        },
       },
     },
   };
@@ -148,10 +151,13 @@ test("inline runner: cleanup klaidos atveju storageKey lieka", async () => {
     loaded: true,
     exports: {
       STATUS: { QUEUED: "queued", PROCESSING: "processing", COMPLETED: "completed", FAILED: "failed" },
-      update: async (id, patch) => {
-        calls.update.push({ id, patch });
-        jobs.set(id, { ...(jobs.get(id) || { id }), ...patch });
-        return jobs.get(id);
+      /** #159: runner ir worker yra sisteminiai keliai. */
+      system: {
+        update: async (id, patch) => {
+          calls.update.push({ id, patch });
+          jobs.set(id, { ...(jobs.get(id) || { id }), ...patch });
+          return jobs.get(id);
+        },
       },
     },
   };
@@ -211,9 +217,12 @@ test("worker cleanup: klaidos atveju storageKey lieka", async () => {
     loaded: true,
     exports: {
       STATUS: { COMPLETED: "completed", FAILED: "failed", PROCESSING: "processing" },
-      update: async (id, patch) => {
-        calls.update.push({ id, patch });
-        return { id, ...patch };
+      /** #159: worker yra sisteminis kelias. */
+      system: {
+        update: async (id, patch) => {
+          calls.update.push({ id, patch });
+          return { id, ...patch };
+        },
       },
     },
   };

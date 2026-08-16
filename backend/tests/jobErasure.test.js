@@ -62,14 +62,22 @@ function loadEraseJob({
 
     "utils/jobStore": {
       JOB_TYPES: { TRANSCRIPTION: "transcription", PROTOCOL: "protocol" },
-      remove: async (id) => {
-        calls.jobRemove.push(id);
-        if (jobStore.throws) throw new Error(jobStore.throws);
-        return jobStore.removed ?? true;
-      },
-      update: async (id, patch) => {
-        calls.jobUpdate.push({ id, patch });
-        return { id, ...patch };
+      /**
+       * #159: `jobErasure` yra sisteminis kelias – jis valo artefaktus
+       * nepriklausomai nuo savininko, tad naudoja privilegijuotą namespace'ą.
+       * Dublis turi tą pačią formą, kitaip testas praeitų su sąsaja, kurios
+       * produkcijoje nebėra.
+       */
+      system: {
+        remove: async (id) => {
+          calls.jobRemove.push(id);
+          if (jobStore.throws) throw new Error(jobStore.throws);
+          return jobStore.removed ?? true;
+        },
+        update: async (id, patch) => {
+          calls.jobUpdate.push({ id, patch });
+          return { id, ...patch };
+        },
       },
     },
 

@@ -147,8 +147,8 @@ test("eksporto įvykiai susieti su jobId pseudonimu - ištrinami kartu su jobu",
 
   // Jobas turi REALIAI egzistuoti - nepatikrinto jobId ryšys nebekuriamas
   // (žr. audito vientisumo testus žemiau).
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
 
   await request(app)
     .post("/api/exports")
@@ -160,7 +160,7 @@ test("eksporto įvykiai susieti su jobId pseudonimu - ištrinami kartu su jobu",
   assert.equal(await auditLog.removeBySubjectIdentifier(job.id), 2);
   assert.equal(auditLog.getAll().length, 0);
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 });
 
 test("failo vardas nepasiduoda path traversal per protokolo datą", async () => {
@@ -180,8 +180,8 @@ test("DELETE /api/transcribe-jobs/:id pašalina ir EKSPORTO įvykius", async () 
   const jobStore = require("../utils/jobStore");
   auditLog.clear();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, {
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { text: "transkripcija" },
   });
@@ -266,8 +266,8 @@ test("eksporto auditas NEsusiejamas su PROTOKOLO jobu (link=invalid_type)", asyn
   const jobStore = require("../utils/jobStore");
   auditLog.clear();
 
-  const protocolJob = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(protocolJob.id, { status: jobStore.STATUS.COMPLETED });
+  const protocolJob = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(protocolJob.id, { status: jobStore.STATUS.COMPLETED });
 
   const res = await request(app)
     .post("/api/exports")
@@ -277,15 +277,15 @@ test("eksporto auditas NEsusiejamas su PROTOKOLO jobu (link=invalid_type)", asyn
   assert.ok(auditLog.getAll().every((e) => e.subjectId === null));
   assert.ok(auditLog.getAll().every((e) => /link=invalid_type/.test(e.details)));
 
-  await jobStore.remove(protocolJob.id);
+  await jobStore.system.remove(protocolJob.id);
 });
 
 test("eksporto auditas SUSIEJAMAS su realiu transkribavimo jobu", async () => {
   const jobStore = require("../utils/jobStore");
   auditLog.clear();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
 
   const res = await request(app)
     .post("/api/exports")
@@ -299,7 +299,7 @@ test("eksporto auditas SUSIEJAMAS su realiu transkribavimo jobu", async () => {
   assert.equal(own.length, 2);
   assert.ok(own.every((e) => /link=job/.test(e.details)));
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 });
 
 test("saugyklos klaida atskiriama nuo neegzistuojančio jobo (link=store_error + warning)", async () => {
@@ -356,8 +356,8 @@ test("visos link reikšmės yra iš žinomo rinkinio", async () => {
   const jobStore = require("../utils/jobStore");
   auditLog.clear();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
 
   await request(app).post("/api/exports").send({ variant: "original", format: "txt", protocol: protocolWithPII() });
   await request(app)
@@ -373,5 +373,5 @@ test("visos link reikšmės yra iš žinomo rinkinio", async () => {
 
   assert.deepEqual([...states].sort(), ["job", "missing", "none"]);
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 });

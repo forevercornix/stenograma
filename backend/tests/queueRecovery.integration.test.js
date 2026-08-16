@@ -78,7 +78,7 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
 
   // 1. Sukuriam jobą ir įdedam į eilę - BET worker'io DAR NEPALEIDŽIAM.
   //    (imituoja: backend įdėjo, tada nukrito prieš apdorojimą)
-  const job = await jobStore.create();
+  const job = await jobStore.create({ ownerKind: "unowned" });
   await jobRunner.enqueueProtocol(job.id, { transcript: "pakankamai ilgas testinis tekstas" });
 
   // 2. Patikrinam, kad jobas TIKRAI laukia eilėje (Redis'e), ne dingęs.
@@ -101,7 +101,7 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
   // 4. Laukiam, kol jobas užbaigiamas (worker pasiima ir įvykdo).
   let finalStatus;
   for (let i = 0; i < 40; i++) {
-    const j = await jobStore.get(job.id);
+    const j = await jobStore.system.get(job.id);
     finalStatus = j?.status;
     if (finalStatus === "completed" || finalStatus === "failed") break;
     await new Promise((r) => setTimeout(r, 250));
@@ -171,7 +171,7 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
   console.log("[queueRecovery] test2 jobRunner.init END");
 
   console.log("[queueRecovery] test2 jobStore.create START");
-  const job = await jobStore.create();
+  const job = await jobStore.create({ ownerKind: "unowned" });
   console.log("[queueRecovery] test2 jobStore.create END");
 
   console.log("[queueRecovery] test2 enqueueProtocol START");
@@ -271,7 +271,7 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
 
   let finalJob;
   for (let i = 0; i < 60; i++) {
-    const j = await jobStore.get(job.id);
+    const j = await jobStore.system.get(job.id);
     const bullJob = await queue.getJob(job.id);
     const bullState = bullJob ? await bullJob.getState() : "missing";
     /**

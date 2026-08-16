@@ -199,11 +199,11 @@ test("retencijos ciklas šalina nuskendusius audio failus ir rašo audito įvyk�
     // (c) senas, bet dar naudojamas jobo su nebaigtu valymu - NETURI būti šalinamas
     const referenced = await fileStorage.put(Buffer.from("naudojamas"), { ext: ".wav" });
     await fs.utimes(path.join(storageDir, referenced), old, old);
-    const job = await jobStore.create({
+    const job = await jobStore.create({ ownerKind: "unowned",
       type: jobStore.JOB_TYPES.TRANSCRIPTION,
       storageKey: referenced,
     });
-    await jobStore.update(job.id, {
+    await jobStore.system.update(job.id, {
       status: jobStore.STATUS.COMPLETED,
       audio_cleanup_pending: true,
     });
@@ -229,8 +229,8 @@ test("retencijos ciklas šalina nuskendusius audio failus ir rašo audito įvyk�
     assert.match(purgeEvents[0].details, /audio=\d+/);
     assert.ok(!JSON.stringify(purgeEvents).includes(another), "failo raktas negali būti audite");
 
-    await jobStore.update(job.id, { audio_cleanup_pending: false });
-    await jobStore.remove(job.id);
+    await jobStore.system.update(job.id, { audio_cleanup_pending: false });
+    await jobStore.system.remove(job.id);
   } finally {
     if (previous === undefined) delete process.env.STORAGE_DIR;
     else process.env.STORAGE_DIR = previous;
@@ -286,8 +286,8 @@ test("REGRESIJA: apdorojamo jobo audio NEšalinamas kaip nuskendęs", async () =
       const key = await fileStorage.put(Buffer.from(`irasas-${status}`), { ext: ".wav" });
       await fs.utimes(path.join(storageDir, key), old, old);
 
-      const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION, storageKey: key });
-      await jobStore.update(job.id, { status });
+      const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION, storageKey: key });
+      await jobStore.system.update(job.id, { status });
       created.push({ job, key, status });
     }
 
@@ -308,7 +308,7 @@ test("REGRESIJA: apdorojamo jobo audio NEšalinamas kaip nuskendęs", async () =
 
     await assert.rejects(() => fileStorage.get(orphanKey), "tikras orphan turi būti pašalintas");
   } finally {
-    for (const { job } of created) await jobStore.remove(job.id).catch(() => {});
+    for (const { job } of created) await jobStore.system.remove(job.id).catch(() => {});
 
     if (previousDir === undefined) delete process.env.STORAGE_DIR;
     else process.env.STORAGE_DIR = previousDir;
@@ -357,7 +357,12 @@ test("fail-safe: saugykla be listReferencedStorageKeys() nieko netrina", async (
     id: jobStorePath,
     filename: jobStorePath,
     loaded: true,
-    exports: { listReferencedStorageKeys: async () => null },
+    /**
+     * #159: retencijos sweeper'is kviečia privilegijuotą namespace'ą, tad
+     * dublis turi tą pačią formą. `null` = „saugykla nemoka išvardyti" ->
+     * fail-safe: nieko netrinti.
+     */
+    exports: { system: { listReferencedStorageKeys: async () => null } },
   };
 
   try {
@@ -421,14 +426,14 @@ test("centralizuotas retencijos ciklas išvalo ir pasenusius JOBUS", async () =>
   const jobStore = require("../utils/jobStore");
   const { runRetentionSweep } = require("../utils/retentionSweeper");
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
 
   const farFuture = Date.now() + 10 * 24 * 60 * 60 * 1000;
   const summary = await runRetentionSweep({ now: farFuture });
 
   assert.ok(summary.jobs >= 1, "retencijos ciklas turi šalinti pasenusius jobus");
-  assert.equal(await jobStore.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id), null);
 });
 
 test("numatytasis retencijos intervalas nesumažina jobų valymo tankumo", () => {

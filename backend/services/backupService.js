@@ -47,7 +47,7 @@ async function createBackup({ actor = null, env = process.env } = {}) {
   }
 
   const snapshotTime = Date.now();
-  const allJobs = await jobStore.listAll();
+  const allJobs = await jobStore.system.listAll();
 
   const stable = [];
   const inFlight = [];
@@ -221,4 +221,17 @@ function _backupError(message, code) {
   return error;
 }
 
-module.exports = { createBackup, STABLE_STATUSES, _audit };
+/**
+ * Aktyvių (nebaigtų) darbų skaičius – GLOBALIAI, per visus savininkus.
+ *
+ * Perkelta čia iš `routes/backup.js` (#159): tai priežiūros operacija, kuriai
+ * reikia sisteminio matymo, o `jobStore.system` maršrutų sluoksnyje uždraustas.
+ * Palikus ją maršrute, tektų daryti sargo išimtį – o viena išimtis greitai
+ * tampa dviem.
+ */
+async function countActiveJobs() {
+  const jobs = await jobStore.system.listAll();
+  return jobs.filter((job) => !["completed", "failed"].includes(job.status)).length;
+}
+
+module.exports = { createBackup, STABLE_STATUSES, countActiveJobs, _audit };

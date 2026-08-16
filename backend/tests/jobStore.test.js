@@ -11,7 +11,7 @@ test("jobStore backend: be REDIS_URL naudojamas in-memory", async () => {
 });
 
 test("create: naujas jobas turi visus production laukus", async () => {
-  const job = await jobStore.create();
+  const job = await jobStore.create({ ownerKind: "unowned" });
   assert.equal(job.status, jobStore.STATUS.QUEUED);
   assert.equal(job.attempt_count, 0);
   assert.ok(job.created_at);
@@ -21,22 +21,22 @@ test("create: naujas jobas turi visus production laukus", async () => {
 });
 
 test("update: PROCESSING nustato started_at automatiškai", async () => {
-  const job = await jobStore.create();
-  const updated = await jobStore.update(job.id, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
+  const job = await jobStore.create({ ownerKind: "unowned" });
+  const updated = await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
   assert.equal(updated.status, jobStore.STATUS.PROCESSING);
   assert.ok(updated.started_at, "started_at turi būti nustatytas");
   assert.equal(updated.attempt_count, 1);
 });
 
 test("update: COMPLETED nustato completed_at automatiškai", async () => {
-  const job = await jobStore.create();
-  const updated = await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { protocol: {} } });
+  const job = await jobStore.create({ ownerKind: "unowned" });
+  const updated = await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { protocol: {} } });
   assert.ok(updated.completed_at, "completed_at turi būti nustatytas");
 });
 
 test("update: FAILED su error_code, ir error <-> error_message sinchronizuojami", async () => {
-  const job = await jobStore.create();
-  const updated = await jobStore.update(job.id, {
+  const job = await jobStore.create({ ownerKind: "unowned" });
+  const updated = await jobStore.system.update(job.id, {
     status: jobStore.STATUS.FAILED,
     error: "kažkas nutiko",
     error_code: "internal_error",
@@ -48,34 +48,34 @@ test("update: FAILED su error_code, ir error <-> error_message sinchronizuojami"
 });
 
 test("sweepExpired: nešalina QUEUED/PROCESSING jobų, kad ir kokie seni", async () => {
-  const job = await jobStore.create();
-  await jobStore.update(job.id, { status: jobStore.STATUS.PROCESSING });
+  const job = await jobStore.create({ ownerKind: "unowned" });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING });
   const farFuture = Date.now() + 999 * 60 * 1000;
   await jobStore.sweepExpired(farFuture);
   // Tikrinam KONKRETŲ jobą (ne bendrą removed skaičių - kiti testai dalinasi ta
   // pačia in-memory saugykla): PROCESSING jobas turi IŠLIKTI, kad ir koks senas.
-  assert.ok(await jobStore.get(job.id), "PROCESSING jobas neturi būti pašalintas");
+  assert.ok(await jobStore.system.get(job.id), "PROCESSING jobas neturi būti pašalintas");
 });
 
 test("sweepExpired: pašalina COMPLETED jobą po TTL, bet ne prieš tai", async () => {
-  const job = await jobStore.create();
-  await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { protocol: {} } });
+  const job = await jobStore.create({ ownerKind: "unowned" });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { protocol: {} } });
 
   const beforeTtl = Date.now() + 30 * 1000; // 30s < 1 min TTL
   await jobStore.sweepExpired(beforeTtl);
-  assert.ok(await jobStore.get(job.id), "prieš TTL jobas dar turi būti");
+  assert.ok(await jobStore.system.get(job.id), "prieš TTL jobas dar turi būti");
 
   const afterTtl = Date.now() + 2 * 60 * 1000; // 2 min > 1 min TTL
   await jobStore.sweepExpired(afterTtl);
-  assert.equal(await jobStore.get(job.id), null, "po TTL jobas turi būti pašalintas");
+  assert.equal(await jobStore.system.get(job.id), null, "po TTL jobas turi būti pašalintas");
 });
 
 test("sweepExpired: pašalina CANCELLED jobą po TTL", async () => {
-  const job = await jobStore.create();
-  await jobStore.update(job.id, { status: jobStore.STATUS.CANCELLED });
+  const job = await jobStore.create({ ownerKind: "unowned" });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.CANCELLED });
   const afterTtl = Date.now() + 2 * 60 * 1000;
   await jobStore.sweepExpired(afterTtl);
-  assert.equal(await jobStore.get(job.id), null, "CANCELLED jobas po TTL turi būti pašalintas");
+  assert.equal(await jobStore.system.get(job.id), null, "CANCELLED jobas po TTL turi būti pašalintas");
 });
 
 test("TIKRA race: create() laukia neužbaigto Redis init (ne memory), kol connect() lėtas", async (t) => {
@@ -121,7 +121,7 @@ test("TIKRA race: create() laukia neužbaigto Redis init (ne memory), kol connec
 
   // Pradedam init (kabo ties connect) ir IŠ KARTO create - create turi laukti init.
   const initPromise = jobStore.init();
-  const createPromise = jobStore.create();
+  const createPromise = jobStore.create({ ownerKind: "unowned" });
 
   // Duodam event loop'ui pasisukti - jei create nelauktų init, jis jau būtų pabaigęs
   // su memory store. Tikrinam, kad jis DAR nebaigė (laukia gate).
@@ -150,12 +150,12 @@ test("init() lygiagrečiai grąžina TĄ PATĮ store (initPromise dalinimasis)",
 test("remove deletes an existing job", async () => {
   const store = require("../utils/jobStore");
 
-  const job = await store.create();
+  const job = await store.create({ ownerKind: "unowned" });
 
-  assert.ok(await store.get(job.id));
+  assert.ok(await store.system.get(job.id));
 
-  const removed = await store.remove(job.id);
+  const removed = await store.system.remove(job.id);
 
   assert.equal(removed, true);
-  assert.equal(await store.get(job.id), null);
+  assert.equal(await store.system.get(job.id), null);
 });

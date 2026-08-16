@@ -52,7 +52,7 @@ function _nextAttemptAt(attempts) {
 async function retryPendingDeletions({ limit = 50 } = {}) {
   const { eraseJob } = require("./jobErasure");
 
-  const pending = await jobStore.listPendingDeletions(limit);
+  const pending = await jobStore.system.listPendingDeletions(limit);
 
   // `scanned` - kiek pažymėtų jobų rasta; `attempted` - kiek REALIAI bandyta.
   // Anksčiau attempted buvo pending.length, tad esant 10 pažymėtų ir 8 dar ne
@@ -117,7 +117,7 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
 async function retryPendingAudioCleanups({ limit = 50 } = {}) {
   const { releaseAudio } = require("./audioCleanup");
 
-  const pending = await jobStore.listPendingAudioCleanups(limit);
+  const pending = await jobStore.system.listPendingAudioCleanups(limit);
   const summary = { scanned: pending.length, attempted: 0, succeeded: 0, failed: 0, deferred: 0 };
 
   for (const job of pending) {

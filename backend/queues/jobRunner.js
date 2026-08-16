@@ -169,7 +169,7 @@ async function _runInline(type, jobId, payload) {
   // vis tiek turi vykti. Observability niekada negali tapti vykdymo sąlyga.
   let job = null;
   try {
-    if (typeof jobStore.get === "function") job = await jobStore.get(jobId);
+    if (typeof jobStore.get === "function") job = await jobStore.system.get(jobId);
   } catch {
     job = null;
   }
@@ -223,7 +223,7 @@ async function _runInline(type, jobId, payload) {
       const decision = authorizeJobOrAudit(job, jobId);
 
       if (!decision.allowed) {
-        await jobStore.update(jobId, {
+        await jobStore.system.update(jobId, {
           status: jobStore.STATUS.FAILED,
           error_code: "AUTHORIZATION_REVOKED",
           error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
@@ -250,9 +250,9 @@ async function _executeInline(type, processor, jobId, payload) {
   log.info("Darbas pradėtas", { stage: "processing", execution: "inline", jobType: type, jobId });
 
   try {
-    await jobStore.update(jobId, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
+    await jobStore.system.update(jobId, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
     const result = await processor(payload, jobId);
-    await jobStore.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+    await jobStore.system.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
 
     log.info("Darbas baigtas", {
       stage: "completed",
@@ -263,7 +263,7 @@ async function _executeInline(type, processor, jobId, payload) {
     });
   } catch (e) {
     const { errorCode, message } = _classifyError(e, `${type} job`);
-    await jobStore.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
+    await jobStore.system.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
 
     // Pranešimas jau sanitizuotas `_classifyError`; kodas yra enum.
     log.warn("Darbas nepavyko", {

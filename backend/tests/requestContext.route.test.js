@@ -76,7 +76,7 @@ test("PROPAGAVIMAS: requestId patenka į jobo metaduomenis", async () => {
 
   assert.equal(res.status, 202);
 
-  const job = await jobStore.get(res.body.jobId);
+  const job = await jobStore.system.get(res.body.jobId);
   assert.equal(job.requestId, clientId, "jobas turi nešti užklausos ID");
 });
 
@@ -205,7 +205,7 @@ test("PRIVATUMAS: kontekste nėra nei turinio, nei IP, nei antraščių", async 
     .set("authorization", "Bearer slaptas-tokenas")
     .send({ transcript: "Jonas: Slapta transkripcija su asmens kodu 39001010000." });
 
-  const job = await jobStore.get(res.body.jobId);
+  const job = await jobStore.system.get(res.body.jobId);
 
   /**
    * Tikrinam KORELIACIJOS laukus, o ne visą jobą.

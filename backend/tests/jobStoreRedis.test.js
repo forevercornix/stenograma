@@ -112,7 +112,7 @@ test("deserialize: tuščias hash grąžina null (jobas nerastas)", () => {
 
 test("Redis store: create -> get grąžina tą patį jobą", async () => {
   const store = createRedisStore(new FakeRedis());
-  const job = await store.create();
+  const job = await store.create({ ownerKind: "unowned" });
   const fetched = await store.get(job.id);
   assert.equal(fetched.id, job.id);
   assert.equal(fetched.status, store.STATUS.QUEUED);
@@ -120,7 +120,7 @@ test("Redis store: create -> get grąžina tą patį jobą", async () => {
 
 test("Redis store: update išlaiko laukus ir nustato timestamps", async () => {
   const store = createRedisStore(new FakeRedis());
-  const job = await store.create();
+  const job = await store.create({ ownerKind: "unowned" });
   await store.update(job.id, { status: store.STATUS.PROCESSING, attempt_count: 1 });
   const updated = await store.update(job.id, { status: store.STATUS.COMPLETED, result: { ok: true } });
   assert.equal(updated.status, store.STATUS.COMPLETED);
@@ -137,7 +137,7 @@ test("Redis store: get nesamo jobo grąžina null", async () => {
 test("Redis store: sweepExpired išvalo indeksą nuo expiravusių raktų", async () => {
   const fake = new FakeRedis();
   const store = createRedisStore(fake);
-  const job = await store.create();
+  const job = await store.create({ ownerKind: "unowned" });
   await store.update(job.id, { status: store.STATUS.COMPLETED });
 
   // Imituojam, kad hash expiravo (Redis EXPIRE suveikė), bet zset įrašas liko.
@@ -154,8 +154,8 @@ test("Redis store: size() NEįskaito jobų, kurių hash išnyko (TTL), bet indek
   // size() dabar tikrina realų egzistavimą.
   const fake = new FakeRedis();
   const store = createRedisStore(fake);
-  const job1 = await store.create();
-  const job2 = await store.create();
+  const job1 = await store.create({ ownerKind: "unowned" });
+  const job2 = await store.create({ ownerKind: "unowned" });
   assert.equal(await store.size(), 2, "du sukurti jobai");
 
   // Simuliuojam TTL: job1 hash IŠNYKO (ištrinam iš hashes), bet indekse (zsets) LIEKA.
@@ -167,7 +167,7 @@ test("remove deletes redis job", async () => {
   const redis = new FakeRedis();
   const store = createRedisStore(redis);
 
-  const job = await store.create();
+  const job = await store.create({ ownerKind: "unowned" });
 
   assert.ok(await store.get(job.id));
 
@@ -184,10 +184,10 @@ test("listReferencedStorageKeys naudoja VIENĄ pipeline round-trip", async () =>
 
   const keys = [];
   for (let i = 0; i < 5; i += 1) {
-    const job = await store.create({ storageKey: `uploads/audio-${i}.wav` });
+    const job = await store.create({ ownerKind: "unowned", storageKey: `uploads/audio-${i}.wav` });
     keys.push(job.storageKey);
   }
-  await store.create(); // be storageKey
+  await store.create({ ownerKind: "unowned" }); // be storageKey
 
   let pipelinesCreated = 0;
   const originalPipeline = client.pipeline.bind(client);
@@ -206,8 +206,8 @@ test("listByFlag irgi eina per pipeline ir gaudo vėliavas", async () => {
   const client = new FakeRedis();
   const store = createRedisStore(client);
 
-  const plain = await store.create({ storageKey: "uploads/a.wav" });
-  const flagged = await store.create({ storageKey: "uploads/b.wav" });
+  const plain = await store.create({ ownerKind: "unowned", storageKey: "uploads/a.wav" });
+  const flagged = await store.create({ ownerKind: "unowned", storageKey: "uploads/b.wav" });
   await store.update(flagged.id, { status: "completed", audio_cleanup_pending: true });
 
   const pending = await store.listByFlag("audio_cleanup_pending");
@@ -255,10 +255,10 @@ test("REGRESIJA: listByFlag negrąžina jobų su false vėliava", async () => {
   const client = new FakeRedis();
   const store = createRedisStore(client);
 
-  const active = await store.create({ storageKey: "uploads/apdorojamas.wav" });
+  const active = await store.create({ ownerKind: "unowned", storageKey: "uploads/apdorojamas.wav" });
   await store.update(active.id, { status: "processing" });
 
-  const flagged = await store.create({ storageKey: "uploads/nepavyko.wav" });
+  const flagged = await store.create({ ownerKind: "unowned", storageKey: "uploads/nepavyko.wav" });
   await store.update(flagged.id, { status: "completed", audio_cleanup_pending: true });
 
   const pending = await store.listByFlag("audio_cleanup_pending");
@@ -278,7 +278,7 @@ test("REGRESIJA: baigtas jobas be vėliavų gauna EXPIRE, ne PERSIST", async () 
 
   const store = createRedisStore(client);
 
-  const job = await store.create({ storageKey: "uploads/a.wav" });
+  const job = await store.create({ ownerKind: "unowned", storageKey: "uploads/a.wav" });
   await store.update(job.id, { status: "completed" });
 
   assert.equal(calls.expire.length, 1, "baigtam jobui turi būti nustatytas EXPIRE");

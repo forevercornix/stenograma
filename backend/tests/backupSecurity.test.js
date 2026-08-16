@@ -45,8 +45,8 @@ function testManifest(overrides = {}) {
 
 async function backupOf() {
   await jobStore.init();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: 1 } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: 1 } });
   return backupService.createBackup({ actor: "sysadmin" });
 }
 
@@ -385,8 +385,8 @@ test("SRAUTAS: kopija REALIAI šifruojama, kai raktas nustatytas", async () => {
    * sukuria įspūdį, kad funkcija veikia.
    */
   await jobStore.init();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { slaptas: "PROTOKOLO TURINYS" } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { slaptas: "PROTOKOLO TURINYS" } });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const { manifest, data } = await backupService.createBackup({ actor: "sysadmin", env });
@@ -401,7 +401,7 @@ test("SRAUTAS: kopija REALIAI šifruojama, kai raktas nustatytas", async () => {
 
 test("SRAUTAS: be rakto kopija NEšifruojama ir tai matoma manifeste", async () => {
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: "" };
   const { manifest } = await backupService.createBackup({ actor: "sysadmin", env });
@@ -414,28 +414,28 @@ test("SRAUTAS: šifruota kopija ATKURIAMA per pilną grandinę", async () => {
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: 42 } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: 42 } });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin", env });
 
   assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
   assert.ok(result.completedSteps.includes(STEPS.DECRYPTED));
 
-  const restored = await jobStore.get(job.id);
+  const restored = await jobStore.system.get(job.id);
   assert.ok(restored, "jobas turi grįžti");
   assert.equal(restored.result.x, 42, "turinys turi būti teisingai dešifruotas");
 });
 
 test("SRAUTAS: šifruota kopija su NETINKAMU raktu neatkuriama", async () => {
   await jobStore.init();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: 1 } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: 1 } });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
@@ -455,8 +455,8 @@ test("SRAUTAS: ROTACIJA – kopija atkuriama ankstesniu raktu", async () => {
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: 7 } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: 7 } });
 
   const senas = backupEncryption.generateKey();
   const backup = await backupService.createBackup({
@@ -464,7 +464,7 @@ test("SRAUTAS: ROTACIJA – kopija atkuriama ankstesniu raktu", async () => {
     env: { ...process.env, BACKUP_ENCRYPTION_KEY: senas },
   });
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 
   // Raktas pakeistas; senasis paliktas rotacijai.
   const poRotacijos = {
@@ -476,7 +476,7 @@ test("SRAUTAS: ROTACIJA – kopija atkuriama ankstesniu raktu", async () => {
   const result = await restoreService.restoreBackup({ ...backup, env: poRotacijos });
 
   assert.equal(result.ok, true, `rotacija turi išsaugoti senas kopijas: ${result.reason}`);
-  assert.equal((await jobStore.get(job.id)).result.x, 7);
+  assert.equal((await jobStore.system.get(job.id)).result.x, 7);
 });
 
 test("SRAUTAS: kontrolinė suma dengia ŠIFRUOTĄ turinį", async () => {
@@ -487,7 +487,7 @@ test("SRAUTAS: kontrolinė suma dengia ŠIFRUOTĄ turinį", async () => {
    * priežastis jau dviprasmiška (sugadinta ar netinkamas raktas?).
    */
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
@@ -512,7 +512,7 @@ test("AAD: PAKEISTAS manifesto laukas sulaužo dešifravimą", async () => {
    * AAD tai paverčia neįmanomu.
    */
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
@@ -555,11 +555,11 @@ test("AAD: turinio SUKEITIMAS tarp dviejų kopijų atmetamas", async () => {
   await jobStore.init();
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
 
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
   const first = await backupService.createBackup({ actor: "sysadmin", env });
 
   await new Promise((r) => setTimeout(r, 5));
-  await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
   const second = await backupService.createBackup({ actor: "sysadmin", env });
 
   // Antros kopijos turinys su pirmos manifestu; suma perskaičiuota.
@@ -576,7 +576,7 @@ test("AAD: turinio SUKEITIMAS tarp dviejų kopijų atmetamas", async () => {
 
 test("ALGORITMAS: `encrypted: true` be algoritmo atmetamas", async () => {
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
@@ -595,7 +595,7 @@ test("ALGORITMAS: `encrypted: true` be algoritmo atmetamas", async () => {
 
 test("ALGORITMAS: nenuoseklus manifestas (`encrypted: false` su algoritmu) atmetamas", async () => {
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const backup = await backupService.createBackup({
     actor: "sysadmin",
@@ -659,8 +659,8 @@ test("PASLAPTYS: aptinkamos jau KURIANT kopiją, ne tik atkuriant", async () => 
    * neatitinka politikos.
    */
   await jobStore.init();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, {
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, {
     status: "completed",
     result: { pastaba: "raktas sk-ant-nutekejo-kuriant-999" },
   });
@@ -677,8 +677,8 @@ test("PASLAPTYS: aptinkamos jau KURIANT kopiją, ne tik atkuriant", async () => 
 
 test("PASLAPTYS: kūrimo klaidoje yra VARDAS, ne reikšmė", async () => {
   await jobStore.init();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: "sk-ant-slaptas-tekstas-777" } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: "sk-ant-slaptas-tekstas-777" } });
 
   try {
     await backupService.createBackup({
@@ -721,20 +721,20 @@ test("ŽYMOS: ŠIFRUOTA kopija irgi negrąžina ištrinto jobo", async () => {
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: 1 } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: 1 } });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
   tombstones.mark(job.id, { actor: "sysadmin" });
   tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin", env });
 
   assert.equal(result.ok, true, "atkūrimas pats pavyksta");
-  assert.equal(await jobStore.get(job.id), null, "bet ištrintas jobas NEGRĮŽTA net iš šifruotos kopijos");
+  assert.equal(await jobStore.system.get(job.id), null, "bet ištrintas jobas NEGRĮŽTA net iš šifruotos kopijos");
 });
 
 test("ŽYMOS: atkūrimas ANKSTESNIU raktu irgi gerbia žymas", async () => {
@@ -745,8 +745,8 @@ test("ŽYMOS: atkūrimas ANKSTESNIU raktu irgi gerbia žymas", async () => {
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: 1 } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: 1 } });
 
   const senas = backupEncryption.generateKey();
   const backup = await backupService.createBackup({
@@ -754,7 +754,7 @@ test("ŽYMOS: atkūrimas ANKSTESNIU raktu irgi gerbia žymas", async () => {
     env: { ...process.env, BACKUP_ENCRYPTION_KEY: senas },
   });
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
   tombstones.mark(job.id, { actor: "sysadmin" });
   tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
 
@@ -768,7 +768,7 @@ test("ŽYMOS: atkūrimas ANKSTESNIU raktu irgi gerbia žymas", async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.equal(await jobStore.get(job.id), null, "ištrintas jobas negrįžta ir per rotacijos kelią");
+  assert.equal(await jobStore.system.get(job.id), null, "ištrintas jobas negrįžta ir per rotacijos kelią");
 });
 
 test("STARTUP: netinkamas ANKSTESNIS raktas aptinkamas paleidžiant", () => {
@@ -841,7 +841,7 @@ test("FORMATAS: `v1` atmetamas su KONKREČIA priežastimi", () => {
 
 test("FORMATAS: manifesto algoritmas atitinka envelope versiją", async () => {
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const { manifest, data } = await backupService.createBackup({ actor: "sysadmin", env });
@@ -863,7 +863,7 @@ test("DOWNGRADE: `encrypted: true → false` atmetamas", async () => {
    * Apsauga apeinama tame pačiame žingsnyje, kurį ji turėtų saugoti.
    */
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
@@ -899,7 +899,7 @@ test("DOWNGRADE: `encrypted` privalo būti BOOLEAN", async () => {
    * kad downgrade galimas net be klastojimo, vien dėl tipo painiavos.
    */
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
@@ -930,7 +930,7 @@ test("AAD: `contents` klastojimas sulaužo dešifravimą", async () => {
    * duomenų, bet keistų sprendimą, ar apskritai pradėti atkūrimą.
    */
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
@@ -1047,7 +1047,7 @@ test("LEGACY: `v1` atmetamas su konkrečia priežastimi PILNAME sraute", async (
    * sugadinto failo.
    */
   await jobStore.init();
-  await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
   const backup = await backupService.createBackup({ actor: "sysadmin", env });

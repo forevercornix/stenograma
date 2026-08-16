@@ -85,7 +85,7 @@ test("DELETE /api/jobs/:id - ištrina užbaigtą protokolo jobą ir jo auditą",
   const delRes = await request(app).delete(`/api/jobs/${jobId}`);
   assert.equal(delRes.status, 204);
 
-  assert.equal(await jobStore.get(jobId), null);
+  assert.equal(await jobStore.system.get(jobId), null);
   assert.equal(
     auditLog.getAll().filter((entry) => entry.subjectId === subjectId).length,
     0
@@ -95,10 +95,10 @@ test("DELETE /api/jobs/:id - ištrina užbaigtą protokolo jobą ir jo auditą",
 test("DELETE /api/jobs/:id - TRANSKRIPCIJOS jobo ID nepriimamas (404, jobas lieka)", async () => {
   const jobStore = require("../utils/jobStore");
 
-  const transcriptionJob = await jobStore.create({
+  const transcriptionJob = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
   });
-  await jobStore.update(transcriptionJob.id, {
+  await jobStore.system.update(transcriptionJob.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { text: "Jautri transkripcija" },
   });
@@ -106,7 +106,7 @@ test("DELETE /api/jobs/:id - TRANSKRIPCIJOS jobo ID nepriimamas (404, jobas liek
   const res = await request(app).delete(`/api/jobs/${transcriptionJob.id}`);
 
   assert.equal(res.status, 404);
-  assert.ok(await jobStore.get(transcriptionJob.id));
+  assert.ok(await jobStore.system.get(transcriptionJob.id));
 
-  await jobStore.remove(transcriptionJob.id);
+  await jobStore.system.remove(transcriptionJob.id);
 });

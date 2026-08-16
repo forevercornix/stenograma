@@ -224,7 +224,7 @@ router.post(
      * paimti naują darbą (TOCTOU). Todėl pats atkūrimas vykdomas su priežiūros
      * užraktu, kuris naujų darbų nebepriima.
      */
-    const active = await countActiveJobs();
+    const active = await backupService.countActiveJobs();
     if (active > 0) {
       return res.status(409).json({
         // TIK skaičius, jokio darbų turinio.
@@ -240,7 +240,7 @@ router.post(
        * Pirmoji patikra buvo teisinga tuo momentu, kai ją atlikom. Ši –
        * galutinė: nuo šiol naujų darbų atsirasti nebegali.
        */
-      const stillActive = await countActiveJobs();
+      const stillActive = await backupService.countActiveJobs();
       if (stillActive > 0) return { conflict: stillActive };
 
       return restoreService.restoreBackup({
@@ -283,11 +283,5 @@ router.post(
     });
   }
 );
-
-/** Aktyvių (nebaigtų) darbų skaičius. */
-async function countActiveJobs() {
-  const jobs = await jobStore.listAll();
-  return jobs.filter((job) => !["completed", "failed"].includes(job.status)).length;
-}
 
 module.exports = router;

@@ -52,14 +52,14 @@ async function loginAs(username, password) {
 
 async function completedJob() {
   await jobStore.init();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: "completed", result: { x: 1 } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: "completed", result: { x: 1 } });
   return job;
 }
 
 async function clearJobs() {
   await jobStore.init();
-  for (const job of await jobStore.listAll()) await jobStore.remove(job.id);
+  for (const job of await jobStore.system.listAll()) await jobStore.system.remove(job.id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -247,7 +247,7 @@ test("ĮKĖLIMAS: netinkamas manifesto JSON atmetamas (400)", async () => {
 
 test("KONFLIKTAS: atkurti su AKTYVIAIS darbais negalima (409)", async () => {
   await clearJobs();
-  await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION }); // lieka `queued`
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION }); // lieka `queued`
 
   const cookie = await loginAs("sysadmin", ADMIN_PASSWORD);
 
@@ -263,8 +263,8 @@ test("KONFLIKTAS: atkurti su AKTYVIAIS darbais negalima (409)", async () => {
 
 test("KONFLIKTAS: pranešime tik SKAIČIUS, jokio darbų turinio", async () => {
   await clearJobs();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, { transcript: "slaptas susitikimo tekstas" });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, { transcript: "slaptas susitikimo tekstas" });
 
   const cookie = await loginAs("sysadmin", ADMIN_PASSWORD);
 
@@ -296,7 +296,7 @@ test("UŽRAKTAS: TOCTOU langas uždarytas – naujų darbų kurti negalima", asy
 
   try {
     await assert.rejects(
-      () => jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL }),
+      () => jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL }),
       (e) => e.code === "MAINTENANCE_IN_PROGRESS",
       "su užraktu naujų darbų kurti negalima"
     );
@@ -305,7 +305,7 @@ test("UŽRAKTAS: TOCTOU langas uždarytas – naujų darbų kurti negalima", asy
   }
 
   // Nuėmus užraktą – vėl galima.
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
   assert.ok(job, "po priežiūros darbai vėl priimami");
 });
 
@@ -369,8 +369,8 @@ test("E2E: kopija sukuriama ir atkuriama per TIKRUS endpoint'us", async () => {
   assert.ok(manifest.formatVersion, "manifestas turi būti perskaitomas");
 
   // 3. Ištrinam jobą ir atkuriam.
-  await jobStore.remove(job.id);
-  assert.equal(await jobStore.get(job.id), null);
+  await jobStore.system.remove(job.id);
+  assert.equal(await jobStore.system.get(job.id), null);
 
   const restored = await request(app)
     .post("/api/admin/backups/restore")
@@ -380,7 +380,7 @@ test("E2E: kopija sukuriama ir atkuriama per TIKRUS endpoint'us", async () => {
 
   assert.equal(restored.status, 200, `atkūrimas nepavyko: ${JSON.stringify(restored.body)}`);
   assert.ok(restored.body.completedSteps.includes("applied"));
-  assert.ok(await jobStore.get(job.id), "jobas turi grįžti");
+  assert.ok(await jobStore.system.get(job.id), "jobas turi grįžti");
 });
 
 /** Išskiria `manifest.json` ir `backup.data` iš `multipart/mixed` atsakymo. */

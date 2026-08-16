@@ -194,9 +194,9 @@ test("SAUGYKLA: inventorius išlieka jobo įraše", async () => {
   await jobStore.init();
 
   const record = createRecord({ type: "source_audio", ownerId: "placeholder" });
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION, artefacts: [record] });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION, artefacts: [record] });
 
-  const loaded = await jobStore.get(job.id);
+  const loaded = await jobStore.system.get(job.id);
 
   assert.ok(Array.isArray(loaded.artefacts), "inventorius turi būti masyvas");
   assert.equal(loaded.artefacts.length, 1);
@@ -212,8 +212,8 @@ test("SAUGYKLA: jobas be artefaktų turi TUŠČIĄ masyvą, ne undefined", async
   const jobStore = require("../utils/jobStore");
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  const loaded = await jobStore.get(job.id);
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  const loaded = await jobStore.system.get(job.id);
 
   assert.deepEqual(loaded.artefacts, []);
 });

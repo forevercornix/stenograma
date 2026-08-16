@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -169,6 +169,94 @@ function createRedisStore(redisClient) {
     return next;
   }
 
+  /* ───────────────────────────────────────────────────────────────────────
+   * NUOSAVYBE RIBOJAMOS OPERACIJOS (#159)
+   * ─────────────────────────────────────────────────────────────────────── */
+
+  /**
+   * Lua CAS: rašo TIK jei `ownerId` vis dar toks, kokio tikimasi.
+   *
+   * KODĖL LUA. Aplikacijos pusėje `update()` yra read-then-write, tad tarp
+   * `get()` ir `hset()` yra langas, per kurį savininkas galėtų pasikeisti.
+   * Rolė tikrinama vykdymo metu, todėl langas nėra teorinis.
+   *
+   * ATOMIŠKUMO RIBA. Atominė daroma TIK nuosavybės savybė: `HSET` neįvyksta,
+   * jei savininkas pasikeitė. Pats patch'as apskaičiuojamas iš galimai
+   * pasenusio įrašo - tai esama last-write-wins semantika, kurios #159
+   * sąmoningai nekeičia (žr. issue „Atomiškumas").
+   *
+   * `""` = „savininko nėra". Kanoninė forma iš `normalizeOwnerId()`, kad
+   * palyginimas nesiremtų Redis trūkstamo lauko ir Lua `nil` niuansais.
+   * `""` NĖRA wildcard - jis sutampa tik su `""`.
+   *
+   * TIKRINAMI ABU LAUKAI: `ownerId` IR `ownerKind`. Vien `ownerId` nepakanka -
+   * `""` yra teisėtas trims skirtingoms būsenoms (desktop, bendras raktas,
+   * legacy), tad be rūšies bendro rakto turėtojas taptų legacy job'ų savininku.
+   */
+  const CAS_UPDATE_LUA = `
+    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+    local id = redis.call('HGET', KEYS[1], 'ownerId')
+    if id == false or id == nil then id = '' end
+    local kind = redis.call('HGET', KEYS[1], 'ownerKind')
+    if kind == false or kind == nil then kind = '' end
+    if id ~= ARGV[1] or kind ~= ARGV[2] then return 0 end
+    redis.call('HSET', KEYS[1], unpack(ARGV, 3))
+    return 1
+  `;
+
+  const CAS_REMOVE_LUA = `
+    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+    local id = redis.call('HGET', KEYS[1], 'ownerId')
+    if id == false or id == nil then id = '' end
+    local kind = redis.call('HGET', KEYS[1], 'ownerKind')
+    if kind == false or kind == nil then kind = '' end
+    if id ~= ARGV[1] or kind ~= ARGV[2] then return 0 end
+    redis.call('DEL', KEYS[1])
+    return 1
+  `;
+
+  /** @returns {object|null|"FORBIDDEN"} */
+  async function getOwned(id, scope) {
+    const job = await get(id);
+    if (!job) return null;
+    return matchesOwner(job, scope) ? job : "FORBIDDEN";
+  }
+
+  /** @returns {object|null|"FORBIDDEN"} */
+  async function updateOwned(id, patch, scope) {
+    const existing = await get(id);
+    if (!existing) return null;
+    if (!matchesOwner(existing, scope)) return "FORBIDDEN";
+
+    const next = applyPatch(existing, patch);
+    const flat = serialize(next);
+    const args = [normalizeOwnerId(scope.ownerId), scope.ownerKind || ""];
+    for (const [k, v] of Object.entries(flat)) args.push(k, v);
+
+    const outcome = await redisClient.eval(CAS_UPDATE_LUA, 1, JOB_PREFIX + id, ...args);
+    if (Number(outcome) === -1) return null;
+    if (Number(outcome) === 0) return "FORBIDDEN";
+
+    await redisClient.zadd(INDEX_KEY, Date.now(), id);
+    if (hasPendingCleanup(next)) {
+      if (typeof redisClient.persist === "function") await redisClient.persist(JOB_PREFIX + id);
+    } else if (isFinished(next.status)) {
+      await redisClient.expire(JOB_PREFIX + id, TTL_SECONDS);
+    }
+    return next;
+  }
+
+  /** @returns {boolean|"FORBIDDEN"} */
+  async function removeOwned(id, scope) {
+    const outcome = await redisClient.eval(
+      CAS_REMOVE_LUA, 1, JOB_PREFIX + id, normalizeOwnerId(scope.ownerId), scope.ownerKind || ""
+    );
+    if (Number(outcome) === -1) return false;
+    if (Number(outcome) === 0) return "FORBIDDEN";
+    await redisClient.zrem(INDEX_KEY, id);
+    return true;
+  }
+
   async function remove(id) {
     const existed = await redisClient.exists(JOB_PREFIX + id);
 
@@ -286,7 +374,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

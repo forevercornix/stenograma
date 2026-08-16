@@ -5,6 +5,7 @@ const { requirePermission } = require("../middleware/authorize");
 const { PERMISSIONS } = require("../utils/permissions");
 const auditLog = require("../utils/auditLog");
 const jobStore = require("../utils/jobStore");
+const { getOwnerScope } = require("../utils/ownerScope");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const { buildExport } = require("../services/exportService");
 const { createLogger } = require("../utils/logger");
@@ -102,7 +103,8 @@ router.post(
     let storeFailed = false;
 
     try {
-      job = await jobStore.get(jobId);
+      const scope = getOwnerScope(req);
+      job = await jobStore.get({ jobId, ...scope });
     } catch (e) {
       storeFailed = true;
 
@@ -119,7 +121,16 @@ router.post(
 
     if (storeFailed) {
       linkState = "store_error";
-    } else if (!job) {
+    } else if (job === jobStore.FORBIDDEN || !job) {
+      /**
+       * #159: `FORBIDDEN` (svetimas job'as) traktuojamas TAIP PAT kaip
+       * nesantis - fail-closed.
+       *
+       * Be šios šakos `FORBIDDEN` (Symbol, taigi truthy) nukristų į `job.type`
+       * patikrą, `Symbol.type` būtų `undefined`, ir auditas užfiksuotų
+       * `invalid_type`. Tai atskleistų, kad job'as EGZISTUOJA, tik netinkamo
+       * tipo - t. y. svetimo įrašo buvimas nutekėtų per audito lauką.
+       */
       linkState = "missing";
     } else if (job.type !== jobStore.JOB_TYPES.TRANSCRIPTION) {
       linkState = "invalid_type";

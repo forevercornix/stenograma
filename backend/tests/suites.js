@@ -26,6 +26,11 @@ const redis = [
    * kiekvienas job'as tyliai atrodytų kaip legacy.
    */
   "actorEraRedis.integration",
+  /**
+   * #159: nuosavybės CAS. Objektuose atmintyje lenktynių lango nėra – jis
+   * atsiranda tik tarp Redis `get()` ir `eval()`.
+   */
+  "ownershipCasRedis.integration",
 ];
 
 /**
@@ -77,6 +82,9 @@ const privacy = [
  * sanitizacija, koreliacija ir paleidimo patikros.
  */
 const security = [
+  /** #159: nuosavybės filtras ir privilegijuoto namespace'o riba. */
+  "jobOwnership",
+  "systemNamespaceBoundary",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",
