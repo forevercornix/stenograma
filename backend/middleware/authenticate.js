@@ -26,7 +26,13 @@ async function authenticate(req, res, next) {
   if (sessionId) {
     const session = await sessionStore.touch(sessionId);
     if (session) {
-      req.user = { username: session.username, role: session.role };
+      /**
+       * `id` yra STABILI tapatybė (#158); `username` lieka, nes jį naudoja
+       * auditas ir logai. `setActor()` SĄMONINGAI nekeičiamas – jis maitina
+       * audito koreliaciją, kur skaitomas vardas yra vertingesnis už UUID
+       * (žr. sessionAuth.js komentarą prie setActor).
+       */
+      req.user = { id: session.userId || null, username: session.username, role: session.role };
       setActor(session.username);
       return next();
     }

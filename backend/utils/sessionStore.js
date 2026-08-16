@@ -48,8 +48,9 @@ function generateSessionId() {
 }
 
 /**
- * @param {{username: string, role: string}} identity
- * @returns {{id: string, username: string, role: string, createdAt: number, lastSeenAt: number}}
+ * @param {{id?: string, username: string, role: string}} identity
+ * @returns {{id: string, userId: string|null, username: string, role: string,
+ *            createdAt: number, lastSeenAt: number}}
  */
 async function create(identity, env = process.env) {
   // Pigus "gratis" valymas - naujos sesijos kūrimas yra natūralus taškas
@@ -61,6 +62,18 @@ async function create(identity, env = process.env) {
 
   const session = {
     id,
+    /**
+     * STABILI TAPATYBĖ (#158).
+     *
+     * `username` lieka – jį naudoja auditas, logai ir revokacija pagal vardą.
+     * Bet autoritetingas tapatybės raktas yra `userId`: vardas gali pasikeisti,
+     * ID – ne (žr. docs/decisions/0001-stable-user-identity.md).
+     *
+     * `null` galimas tik ten, kur tapatybė ateina ne iš `AUTH_USERS`
+     * (pvz. seni testų fixture'ai) – produkcijoje `verifyCredentials()` visada
+     * grąžina `id`.
+     */
+    userId: identity.id || null,
     username: identity.username,
     role: identity.role,
     createdAt: now,
@@ -149,10 +162,42 @@ function _startPeriodicSweep() {
 }
 _startPeriodicSweep();
 
+/**
+ * Revokacija pagal VARDĄ.
+ *
+ * Paliekama suderinamumui (#158): esami administravimo keliai ją naudoja, o jų
+ * migracija yra atskiras darbas. Naujiems tapatybe grįstiems keliams pirmenybė
+ * teikiama `destroyAllForUserId()` – po pervadinimo revokacija pagal seną vardą
+ * tampa semantiškai neteisinga (sesija priklauso tam pačiam žmogui, bet vardas
+ * jau kitas).
+ */
 async function destroyAllForUser(username) {
   let removed = 0;
   for (const [id, session] of sessions.entries()) {
     if (session.username === username) {
+      sessions.delete(id);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+/**
+ * Revokacija pagal STABILŲ `userId` (#158).
+ *
+ * Autoritetingas revokacijos raktas: veikia ir po pervadinimo. Pridėta
+ * ADITYVIAI, nelaužant `destroyAllForUser()` kontrakto, kad #155 / 7.3 sesijų
+ * perkėlimas į PostgreSQL jau turėtų teisingą raktą.
+ *
+ * Sesijos be `userId` (senos arba iš tapatybės be ID) NELIEČIAMOS – tyliai
+ * jas įtraukus, `null === null` sutaptų ir vienas kvietimas iškirstų visas
+ * tokias sesijas iš karto.
+ */
+async function destroyAllForUserId(userId) {
+  if (!userId) return 0;
+  let removed = 0;
+  for (const [id, session] of sessions.entries()) {
+    if (session.userId === userId) {
       sessions.delete(id);
       removed++;
     }
@@ -185,6 +230,7 @@ module.exports = {
   touch,
   destroy,
   destroyAllForUser,
+  destroyAllForUserId,
   sweepExpired,
   size,
   idleTimeoutMs,

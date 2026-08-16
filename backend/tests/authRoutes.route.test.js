@@ -11,9 +11,9 @@ process.env.RATE_LIMIT_GENERAL_MAX = "500";
 
 const { hashPassword } = require("../utils/credentials");
 
-process.env.AUTH_USERS = `admin:administrator:${hashPassword("teisingas-slaptas-1")},operatorius:operator:${hashPassword(
+process.env.AUTH_USERS = `admin:administrator:${hashPassword("teisingas-slaptas-1")}:22222222-2222-4222-8222-222222222222,operatorius:operator:${hashPassword(
   "kitas-slaptas-2"
-)}`;
+)}:55555555-5555-4555-8555-555555555555`;
 
 const request = require("supertest");
 const sessionStore = require("../utils/sessionStore");

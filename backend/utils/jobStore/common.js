@@ -25,6 +25,23 @@ function newJob(fields = {}) {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
+    /**
+     * ĮRAŠO ERA (#158) – nulemia, kaip `utils/jobAuthorization.js` sprendžia
+     * aktoriaus tapatybę. Repo turi TRIS eras, ne dvi:
+     *
+     *   nėra + actorSource nėra    → #17: NO_ACTOR passthrough
+     *   nėra + actorSource=session → #18: legacy username lookup
+     *   2    + actorSource=session → #158: ID lookup pagal userId
+     *
+     * ERA, o ne `actor` eilutės forma: vardo šablonas įleidžia UUID formos
+     * vardą, o API rakto aktorius (`key_<hex>`) irgi nėra UUID – forma negali
+     * nulemti lookup kelio.
+     *
+     * IMMUTABLE: `applyPatch()` šio lauko nekeičia. Era yra faktas apie tai,
+     * kaip įrašas buvo SUKURTAS; jos perrašymas reikštų, kad seno įrašo
+     * `actor` (username) staiga būtų aiškinamas kaip `userId`.
+     */
+    schemaVersion: 2,
     // Jobo TIPAS. Abu async endpoint'ai (transkripcija ir protokolas) naudoja TĄ
     // PATĮ jobStore, tad be tipo DELETE /api/transcribe-jobs/:id priimdavo ir
     // protokolo jobo ID: įrašas būdavo surandamas ir ištrinamas, o valymo kodas
@@ -112,6 +129,22 @@ function newJob(fields = {}) {
 function applyPatch(job, patch) {
   const now = new Date().toISOString();
   const next = { ...job, ...patch, updatedAt: now };
+
+  /**
+   * ERA IR ID YRA NEKEIČIAMI (#158).
+   *
+   * Patch'as ateina iš worker'ių ir maršrutų; netyčinis `schemaVersion`
+   * perrašymas pakeistų, kaip aiškinamas `actor` laukas – legacy įrašo
+   * username imtų atrodyti kaip userId. Grąžinama pradinė reikšmė, o ne
+   * metama klaida: patch'ai formuojami daug kur, ir tylus atsparumas čia
+   * saugesnis nei srauto nutraukimas.
+   */
+  next.id = job.id;
+  if ("schemaVersion" in job) {
+    next.schemaVersion = job.schemaVersion;
+  } else {
+    delete next.schemaVersion;
+  }
 
   // Laiko žymos pagal status perėjimą.
   if (patch.status === STATUS.PROCESSING && !job.started_at) {

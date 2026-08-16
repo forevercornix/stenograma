@@ -583,7 +583,9 @@ function productionRequest({ authUsers = "", apiKey = "" }) {
     const { hashPassword } = require("./utils/credentials");
     process.env.AUTH_USERS = ${JSON.stringify(authUsers)}.replace(
       "__USERS__",
-      "petras:operator:" + hashPassword("slaptazodis-testui-1")
+      // #158: AUTH_USERS reikalauja 4-o lauko (stabilaus userId).
+      "petras:operator:" + hashPassword("slaptazodis-testui-1") +
+        ":44444444-4444-4444-8444-444444444444"
     );
     process.env.API_KEY = ${JSON.stringify(apiKey)};
 

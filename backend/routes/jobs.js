@@ -13,6 +13,43 @@ const { createLogger } = require("../utils/logger");
 const { validate, schemas } = require("../middleware/validate");
 const log = createLogger("route:jobs");
 
+/**
+ * Job'o AKTORIUS (#158).
+ *
+ * `schemaVersion: 2` įrašuose `actor` yra STABILUS `userId`, ne vardas –
+ * todėl pervadinimas nebenutraukia eilėje laukiančio darbo.
+ *
+ * API rakto kelyje `req.user` nėra, ir `getActor()` grąžina rakto atspaudą
+ * (`key_<hex>`) – tai teisinga, nes tokį įrašą sprendžia `resolveApiKeyRole`.
+ *
+ * ANOMALIJA: sesija YRA, bet be `userId`. Po #158 diegimo taip neturi būti –
+ * `verifyCredentials()` visada grąžina `id`, o sesijos gyvena atmintyje ir
+ * restarto neišgyvena.
+ *
+ * KODĖL FAIL-FAST, NE ĮSPĖJIMAS. `newJob()` tokiam įrašui vis tiek duotų
+ * `schemaVersion: 2`, tad `jobAuthorization` aiškintų įrašytą VARDĄ kaip
+ * `userId`, ID paieška nepavyktų, ir darbas žūtų `ACTOR_UNKNOWN` – jau
+ * suvartojęs eilės vietą ir vartotojo laukimą. Iš anksto pasmerktas job'as
+ * yra blogesnis už atmestą užklausą, tad anomalija sustabdoma PRIEŠ enqueue.
+ *
+ * Desktop / no-auth režimas čia nepatenka: ten `req.user` išvis nėra.
+ *
+ * @returns {{ok: true, actor: string} | {ok: false}}
+ */
+function jobActor(req, log) {
+  if (req.user) {
+    if (req.user.id) return { ok: true, actor: req.user.id };
+
+    log.error(
+      { username: req.user.username },
+      "Sesija be stabilaus userId - job'as neku­riamas (#158 anomalija). " +
+        "Tikėtina priežastis: sesija sukurta iš tapatybės be AUTH_USERS userId lauko."
+    );
+    return { ok: false };
+  }
+  return { ok: true, actor: getActor() };
+}
+
 const router = express.Router();
 
 /**
@@ -32,11 +69,19 @@ const router = express.Router();
 router.post("/jobs", rateLimiter, authenticate, requirePermission(PERMISSIONS.JOB_CREATE), validate({ body: schemas.protocolJobBody }), async (req, res) => {
   const body = req.validated.body;
 
+  const actor = jobActor(req, log);
+  if (!actor.ok) {
+    return res.status(500).json({
+      error: "Nepavyko nustatyti stabilios vartotojo tapatybės. Kreipkitės į administratorių.",
+      code: "IDENTITY_UNAVAILABLE",
+    });
+  }
+
   const job = await jobStore.create({
     type: jobStore.JOB_TYPES.PROTOCOL,
     // Koreliacija su HTTP užklausa (GDPR #17).
     requestId: getRequestId(),
-    actor: getActor(),
+    actor: actor.actor,
     // Rolė ir mechanizmas - autorizacijai atkurti worker'yje (#18 PR3).
     // Kredencialų (tokenų, cookie, slaptažodžių) čia NĖRA ir negali būti.
     actorRole: req.authz ? req.authz.role : null,

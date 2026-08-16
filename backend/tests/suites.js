@@ -16,7 +16,17 @@
  */
 
 /** Testai, kuriems reikia TIKRO Redis (be jo jie patys save praleidžia). */
-const redis = ["queueRecovery.integration", "heartbeatReadiness.integration", "redisConcurrency.integration"];
+const redis = [
+  "queueRecovery.integration",
+  "heartbeatReadiness.integration",
+  "redisConcurrency.integration",
+  /**
+   * #158: trijų erų maršrutizavimas. Objektai atmintyje šito neatskleidžia -
+   * `schemaVersion` per Redis grįžta kaip string, ir be tipo konversijos
+   * kiekvienas job'as tyliai atrodytų kaip legacy.
+   */
+  "actorEraRedis.integration",
+];
 
 /**
  * PRIVATUMAS: asmens duomenų apsauga - redakcija, retencija, ištrynimas,

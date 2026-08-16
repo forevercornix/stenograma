@@ -38,7 +38,7 @@ test("CREDENTIALS: maiša niekada nesutampa tarp dviejų generavimų (atsitiktin
 test("CREDENTIALS: AUTH_USERS parsinamas teisingai", () => {
   const h1 = hashPassword("a1");
   const h2 = hashPassword("b2");
-  const env = { AUTH_USERS: `admin:administrator:${h1},petras:operator:${h2}` };
+  const env = { AUTH_USERS: `admin:administrator:${h1}:11111111-1111-4111-8111-111111111111,petras:operator:${h2}:44444444-4444-4444-8444-444444444444` };
 
   const users = loadUsers(env);
   assert.equal(users.size, 2);
@@ -47,11 +47,12 @@ test("CREDENTIALS: AUTH_USERS parsinamas teisingai", () => {
 });
 
 test("CREDENTIALS: netinkamas AUTH_USERS formatas meta klaidą su aiškia priežastimi", () => {
+  const H = hashPassword("x");
   const cases = [
-    ["be_dvitaskiu", /netinkamas/],
-    ["admin:superrole:scrypt$1$1$1$a$b", /rolė "superrole" nežinoma/],
-    ["Admin:operator:scrypt$1$1$1$a$b", /vardas "Admin" netinkamas/],
-    ["admin:operator:plaintext123", /neatitinka scrypt formato/],
+    ["be_dvitaskiu", /4 laukai/],
+    [`admin:superrole:${H}:11111111-1111-4111-8111-111111111111`, /rolė "superrole" nežinoma/],
+    [`Admin:operator:${H}:11111111-1111-4111-8111-111111111111`, /vardas "Admin" netinkamas/],
+    [`admin:operator:plaintext123:11111111-1111-4111-8111-111111111111`, /neatitinka scrypt formato/],
   ];
 
   for (const [entry, pattern] of cases) {
@@ -66,17 +67,22 @@ test("CREDENTIALS: netinkamas AUTH_USERS formatas meta klaidą su aiškia priež
 test("CREDENTIALS: dublikuotas vardas AUTH_USERS meta klaidą", () => {
   const h = hashPassword("x");
   assert.throws(
-    () => loadUsers({ AUTH_USERS: `admin:operator:${h},admin:administrator:${h}` }),
+    () => loadUsers({ AUTH_USERS: `admin:operator:${h}:11111111-1111-4111-8111-111111111111,admin:administrator:${h}:44444444-4444-4444-8444-444444444444` }),
     (e) => e instanceof CredentialConfigError && /daugiau nei kartą/.test(e.message)
   );
 });
 
 test("CREDENTIALS: verifyCredentials grąžina null vienodai nežinomam vardui ir blogam slaptažodžiui", () => {
-  const env = { AUTH_USERS: `admin:administrator:${hashPassword("teisingas")}` };
+  const env = { AUTH_USERS: `admin:administrator:${hashPassword("teisingas")}:22222222-2222-4222-8222-222222222222` };
 
   assert.equal(verifyCredentials("admin", "blogas", env), null);
   assert.equal(verifyCredentials("nera_tokio", "bet-kas", env), null);
+  /**
+   * #158: grąžinama ir `id` – stabili tapatybė. Vardas ir rolė lieka, nes juos
+   * naudoja auditas, logai ir sesijos cookie srautas.
+   */
   assert.deepEqual(verifyCredentials("admin", "teisingas", env), {
+    id: "22222222-2222-4222-8222-222222222222",
     username: "admin",
     role: "administrator",
   });
@@ -87,7 +93,7 @@ test("CREDENTIALS: atsako laikas panašus egzistuojančiam ir neegzistuojančiam
    * Laiko atakų apsauga: jei nežinomam vartotojui scrypt neskaičiuotume,
    * atsakymo laikas išduotų, kad vardo nėra duomenų bazėje.
    */
-  const env = { AUTH_USERS: `admin:administrator:${hashPassword("teisingas")}` };
+  const env = { AUTH_USERS: `admin:administrator:${hashPassword("teisingas")}:22222222-2222-4222-8222-222222222222` };
 
   const measure = (fn) => {
     const start = process.hrtime.bigint();
@@ -166,7 +172,7 @@ test("STARTUP: AUTH_USERS su pavojingais scrypt parametrais stabdo paleidimą", 
   const { validateConfig } = require("../utils/startupChecks");
 
   const dangerous = "scrypt$999999999$999999$1$aabbccddeeff00112233445566778899$" + "0".repeat(128);
-  const { errors } = validateConfig({ AUTH_USERS: `admin:administrator:${dangerous}` });
+  const { errors } = validateConfig({ AUTH_USERS: `admin:administrator:${dangerous}:11111111-1111-4111-8111-111111111111` });
 
   assert.ok(
     errors.some((e) => /neatitinka scrypt formato/.test(e)),
@@ -229,7 +235,7 @@ test("SESSION STORE: destroyAllForUser revokuoja tik nurodyto vartotojo sesijas"
 test("STARTUP: netinkamas AUTH_USERS formatas stabdo paleidimą", () => {
   const { validateConfig } = require("../utils/startupChecks");
 
-  const { errors } = validateConfig({ AUTH_USERS: "admin:superrole:scrypt$1$1$1$a$b" });
+  const { errors } = validateConfig({ AUTH_USERS: `admin:superrole:${hashPassword("x")}:11111111-1111-4111-8111-111111111111` });
   assert.ok(errors.some((e) => /rolė "superrole"/.test(e)));
 });
 
@@ -307,4 +313,267 @@ test("STARTUP: geros login rate-limit reikšmės nemeta klaidos", () => {
     errors.filter((e) => /RATE_LIMIT_LOGIN/.test(e)),
     []
   );
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #158: STABILUS TAPATYBĖS ŠALTINIS
+ *
+ * `AUTH_USERS` pereina prie TIKSLAUS 4 laukų kontrakto
+ * (`vardas:rolė:maiša:userId`). Šie testai saugo patį kontraktą, ne tik
+ * kraštinius atvejus – žr. komentarą prie „maiša su dvitaškiu".
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const { loadUsersById, USER_ID_PATTERN, UUID_LIKE_PATTERN, USERNAME_PATTERN } = require("../utils/credentials");
+
+const UID_A = "11111111-1111-4111-8111-111111111111";
+const UID_B = "44444444-4444-4444-8444-444444444444";
+
+test("#158 PARSERIS: 3 laukai (senas formatas) meta startup klaidą", () => {
+  const h = hashPassword("x");
+  assert.throws(
+    () => loadUsers({ AUTH_USERS: `admin:operator:${h}` }),
+    (e) => e instanceof CredentialConfigError && /4 laukai/.test(e.message),
+    "senas 3 laukų formatas turi kristi, ne būti tyliai priimtas"
+  );
+});
+
+test("#158 PARSERIS: 5+ laukų meta startup klaidą", () => {
+  const h = hashPassword("x");
+  assert.throws(
+    () => loadUsers({ AUTH_USERS: `admin:operator:${h}:${UID_A}:papildomas` }),
+    (e) => e instanceof CredentialConfigError && /4 laukai/.test(e.message)
+  );
+});
+
+test("#158 PARSERIS: netinkamas userId meta startup klaidą", () => {
+  const h = hashPassword("x");
+  const blogi = [
+    "ne-uuid",
+    "11111111-1111-1111-8111-111111111111", // versija 1, ne 4
+    "11111111-1111-4111-c111-111111111111", // blogas variantas
+    "11111111111141118111111111111111",     // be brūkšnelių
+  ];
+  for (const uid of blogi) {
+    assert.throws(
+      () => loadUsers({ AUTH_USERS: `admin:operator:${h}:${uid}` }),
+      (e) => e instanceof CredentialConfigError && /UUIDv4/.test(e.message),
+      `turėjo kristi: ${uid}`
+    );
+  }
+});
+
+test("#158 PARSERIS: teisingi 4 laukai praeina ir grąžina userId", () => {
+  const h = hashPassword("x");
+  const users = loadUsers({ AUTH_USERS: `admin:administrator:${h}:${UID_A}` });
+
+  assert.equal(users.size, 1);
+  assert.equal(users.get("admin").userId, UID_A);
+  assert.equal(users.get("admin").role, "administrator");
+});
+
+/**
+ * KONTRAKTO TESTAS, ne kraštinio atvejo testas.
+ *
+ * Anksčiau maiša buvo renkama godžiai (`hashParts.join(":")`). Godumas dabar
+ * pašalintas, bet be šio testo kas nors ateityje galėtų jį grąžinti
+ * „patogumo dėlei" – ir ketvirtas laukas vėl tyliai priliptų prie maišos.
+ */
+test("#158 PARSERIS: maiša su dvitaškiu meta klaidą (godumas nebegrąžinamas)", () => {
+  const h = hashPassword("x");
+  const suDvitaskiu = h.replace(/\$/g, ":");
+  assert.throws(
+    () => loadUsers({ AUTH_USERS: `admin:operator:${suDvitaskiu}:${UID_A}` }),
+    (e) => e instanceof CredentialConfigError,
+    "maiša su dvitaškiu turi kristi, o ne būti sudėliota atgal"
+  );
+});
+
+test("#158 PARSERIS: UUID formos vardas draudžiamas (defense-in-depth)", () => {
+  const h = hashPassword("x");
+  /**
+   * `USERNAME_PATTERN` tokį vardą įleistų: prasideda raide, tik [a-z0-9-],
+   * 36 simboliai. Maršrutizavimas nuo formos nepriklauso, bet vardas,
+   * neatskiriamas nuo ID, klaidintų logus ir auditą.
+   */
+  const uuidVardas = "a1b2c3d4-e29b-41d4-a716-446655440000";
+  assert.ok(USERNAME_PATTERN.test(uuidVardas), "prielaida: toks vardas atitiktų vardo šabloną");
+
+  assert.throws(
+    () => loadUsers({ AUTH_USERS: `${uuidVardas}:operator:${h}:${UID_A}` }),
+    (e) => e instanceof CredentialConfigError && /UUID formos/.test(e.message)
+  );
+});
+
+test("#158 PARSERIS: dublikuotas userId meta klaidą", () => {
+  const h = hashPassword("x");
+  assert.throws(
+    () => loadUsers({ AUTH_USERS: `admin:operator:${h}:${UID_A},petras:operator:${h}:${UID_A}` }),
+    (e) => e instanceof CredentialConfigError && /userId .* daugiau nei kartą/.test(e.message),
+    "du vardai su tuo pačiu ID reikštų, kad nuosavybė nurodo į dvi paskyras"
+  );
+});
+
+test("#158 TAPATYBĖ: userId nederivuojamas iš vardo – pervadinimas ID nekeičia", () => {
+  const h = hashPassword("x");
+  const pries = loadUsers({ AUTH_USERS: `senas-vardas:operator:${h}:${UID_A}` });
+  const po = loadUsers({ AUTH_USERS: `naujas-vardas:operator:${h}:${UID_A}` });
+
+  assert.equal(pries.get("senas-vardas").userId, po.get("naujas-vardas").userId);
+});
+
+test("#158 TAPATYBĖ: identity persists, session does not", () => {
+  const h = hashPassword("slaptas");
+  const env = { AUTH_USERS: `admin:administrator:${h}:${UID_A}` };
+
+  /**
+   * „Restartas" čia yra pakartotinis `AUTH_USERS` nuskaitymas iš tos pačios
+   * konfigūracijos. Sesijos NĖRA persistentinės (tai #155 / 7.3) – testuojama
+   * būtent tai, kad TAPATYBĖ ateina iš konfigūracijos, ne iš sesijos.
+   */
+  const pirmas = verifyCredentials("admin", "slaptas", env);
+  const antras = verifyCredentials("admin", "slaptas", env);
+
+  assert.equal(pirmas.id, UID_A);
+  assert.equal(antras.id, pirmas.id, "po pakartotinio nuskaitymo ID turi sutapti");
+});
+
+test("#158 TAPATYBĖ: verifyCredentials grąžina id kartu su vardu ir role", () => {
+  const h = hashPassword("slaptas");
+  const identity = verifyCredentials("admin", "slaptas", {
+    AUTH_USERS: `admin:administrator:${h}:${UID_A}`,
+  });
+
+  assert.deepEqual(identity, { id: UID_A, username: "admin", role: "administrator" });
+});
+
+test("#158 loadUsersById: indeksuoja pagal userId, ne pagal vardą", () => {
+  const h = hashPassword("x");
+  const env = { AUTH_USERS: `admin:administrator:${h}:${UID_A},petras:operator:${h}:${UID_B}` };
+
+  const byId = loadUsersById(env);
+  assert.equal(byId.size, 2);
+  assert.equal(byId.get(UID_A).username, "admin");
+  assert.equal(byId.get(UID_B).role, "operator");
+  assert.equal(byId.get("admin"), undefined, "vardas neturi būti raktas");
+});
+
+test("#158 loadUsersById: tuščias AUTH_USERS grąžina tuščią žemėlapį (desktop režimas)", () => {
+  assert.equal(loadUsersById({ AUTH_USERS: "" }).size, 0);
+  assert.equal(loadUsersById({}).size, 0);
+});
+
+test("#158 USER_ID_PATTERN: priima crypto.randomUUID() išvestį", () => {
+  for (let i = 0; i < 20; i++) {
+    assert.ok(USER_ID_PATTERN.test(require("node:crypto").randomUUID()));
+  }
+});
+
+test("#158 PARSERIS: UUIDv1/v7 formos vardas irgi draudžiamas (ne tik v4)", () => {
+  const h = hashPassword("x");
+  /**
+   * Vardo draudimas naudoja `UUID_LIKE_PATTERN` (bet kuri versija), o ne
+   * `USER_ID_PATTERN` (griežtai v4). Kitaip draudimas tyliai apimtų tik vieną
+   * versiją, nors loguose klaidintų bet kuri UUID forma.
+   */
+  const kitosVersijos = [
+    "a1b2c3d4-e29b-11d4-a716-446655440000", // v1
+    "a1b2c3d4-e29b-71d4-a716-446655440000", // v7
+  ];
+  for (const vardas of kitosVersijos) {
+    assert.equal(USER_ID_PATTERN.test(vardas), false, "prielaida: ne v4");
+    assert.ok(UUID_LIKE_PATTERN.test(vardas), "prielaida: UUID forma");
+    assert.throws(
+      () => loadUsers({ AUTH_USERS: `${vardas}:operator:${h}:${UID_A}` }),
+      (e) => e instanceof CredentialConfigError && /UUID formos/.test(e.message),
+      `turėjo kristi: ${vardas}`
+    );
+  }
+});
+
+test("#158 PARSERIS: userId privalo būti būtent v4, ne bet kuri UUID versija", () => {
+  const h = hashPassword("x");
+  assert.throws(
+    () => loadUsers({ AUTH_USERS: `admin:operator:${h}:a1b2c3d4-e29b-11d4-a716-446655440000` }),
+    (e) => e instanceof CredentialConfigError && /UUIDv4/.test(e.message),
+    "userId validacija lieka griežta, net kai vardo draudimas platesnis"
+  );
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #158 (3–4 žingsniai): TAPATYBĖS PROPAGAVIMAS Į SESIJĄ IR `req.user`
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("#158 SESIJA: create() išsaugo stabilų userId kartu su vardu", async () => {
+  const session = await sessionStore.create({
+    id: UID_A,
+    username: "admin",
+    role: "administrator",
+  });
+
+  assert.equal(session.userId, UID_A);
+  assert.equal(session.username, "admin", "vardas lieka – jį naudoja auditas ir logai");
+  await sessionStore._clearForTests();
+});
+
+test("#158 SESIJA: tapatybė be id duoda userId=null, o ne undefined", async () => {
+  const session = await sessionStore.create({ username: "senas", role: "operator" });
+
+  assert.equal(session.userId, null, "aiškus null, ne undefined – kad JSON srautuose nedingtų laukas");
+  await sessionStore._clearForTests();
+});
+
+test("#158 SESIJA: touch() grąžina userId (jį skaito req.user)", async () => {
+  const created = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
+  const touched = await sessionStore.touch(created.id);
+
+  assert.equal(touched.userId, UID_A);
+  await sessionStore._clearForTests();
+});
+
+test("#158 REVOKACIJA: destroyAllForUserId ištrina visas to paties ID sesijas", async () => {
+  await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
+  await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
+  await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
+
+  const removed = await sessionStore.destroyAllForUserId(UID_A);
+
+  assert.equal(removed, 2);
+  assert.equal(await sessionStore.size(), 1, "kito vartotojo sesija nepaliesta");
+  await sessionStore._clearForTests();
+});
+
+test("#158 REVOKACIJA: destroyAllForUserId veikia PO pervadinimo (vardu paremta – ne)", async () => {
+  /**
+   * Esminis skirtumas tarp dviejų revokacijos raktų. Sesija sukurta senu vardu;
+   * vartotojas pervadintas. Revokacija pagal NAUJĄ vardą nieko neranda, nors
+   * sesija priklauso tam pačiam žmogui. Revokacija pagal ID – randa.
+   */
+  await sessionStore.create({ id: UID_A, username: "senas-vardas", role: "operator" });
+
+  assert.equal(await sessionStore.destroyAllForUser("naujas-vardas"), 0);
+  assert.equal(await sessionStore.destroyAllForUserId(UID_A), 1);
+  await sessionStore._clearForTests();
+});
+
+test("#158 REVOKACIJA: destroyAllForUserId neliečia sesijų be userId", async () => {
+  /**
+   * Be šios apsaugos `null === null` sutaptų ir vienas kvietimas iškirstų
+   * VISAS senas sesijas iš karto.
+   */
+  await sessionStore.create({ username: "senas", role: "operator" });
+  await sessionStore.create({ username: "kitas", role: "operator" });
+
+  assert.equal(await sessionStore.destroyAllForUserId(null), 0);
+  assert.equal(await sessionStore.destroyAllForUserId(undefined), 0);
+  assert.equal(await sessionStore.size(), 2);
+  await sessionStore._clearForTests();
+});
+
+test("#158 REVOKACIJA: destroyAllForUser lieka suderinamas (vardu paremtas kelias)", async () => {
+  await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
+  await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
+
+  assert.equal(await sessionStore.destroyAllForUser("admin"), 1);
+  assert.equal(await sessionStore.size(), 1);
+  await sessionStore._clearForTests();
 });

@@ -92,7 +92,8 @@ async function requireSession(req, res, next) {
 
   if (!session) return unauthorized(res);
 
-  req.user = { username: session.username, role: session.role };
+  // `id` - stabili tapatybė (#158); `username` lieka auditui ir logams.
+  req.user = { id: session.userId || null, username: session.username, role: session.role };
   // AKTORIUS audito įrašams - vartotojo vardas, ne sesijos ID (žr. GDPR #17
   // requestContext modelį; scrypt atspaudas čia neprasmingas, nes vardas pats
   // savaime nėra paslaptis, kaip API raktas).
@@ -110,7 +111,9 @@ async function optionalSession(req, res, next) {
   const sessionId = readCookie(req, COOKIE_NAME);
   const session = await sessionStore.touch(sessionId);
 
-  req.user = session ? { username: session.username, role: session.role } : null;
+  req.user = session
+    ? { id: session.userId || null, username: session.username, role: session.role }
+    : null;
   if (session) setActor(session.username);
 
   next();
