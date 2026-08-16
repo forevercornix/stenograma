@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -31,6 +31,40 @@ async function update(id, patch) {
   const next = applyPatch(job, patch);
   jobs.set(id, next);
   return next;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * NUOSAVYBE RIBOJAMOS OPERACIJOS (#159)
+ *
+ * Atmintyje atomiškumo klausimo nėra: Node vykdo šias funkcijas be `await`
+ * tarp patikros ir rašymo, tad tarpo, per kurį savininkas pasikeistų,
+ * neatsiranda. Redis backend'ui to nepakanka - ten naudojama Lua CAS.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/** @returns {object|null|"FORBIDDEN"} */
+async function getOwned(id, scope) {
+  const job = jobs.get(id);
+  if (!job) return null;
+  return matchesOwner(job, scope) ? job : "FORBIDDEN";
+}
+
+/** @returns {object|null|"FORBIDDEN"} */
+async function updateOwned(id, patch, scope) {
+  const job = jobs.get(id);
+  if (!job) return null;
+  if (!matchesOwner(job, scope)) return "FORBIDDEN";
+  const next = applyPatch(job, patch);
+  jobs.set(id, next);
+  return next;
+}
+
+/** @returns {boolean|"FORBIDDEN"} */
+async function removeOwned(id, scope) {
+  const job = jobs.get(id);
+  if (!job) return false;
+  if (!matchesOwner(job, scope)) return "FORBIDDEN";
+  jobs.delete(id);
+  return true;
 }
 
 async function sweepExpired(now = Date.now()) {
@@ -115,4 +149,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, getOwned, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

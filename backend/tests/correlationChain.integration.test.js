@@ -63,7 +63,7 @@ async function waitForJob(jobId, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const job = await jobStore.get(jobId);
+    const job = await jobStore.system.get(jobId);
     if (job && ["completed", "failed"].includes(job.status)) return job;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

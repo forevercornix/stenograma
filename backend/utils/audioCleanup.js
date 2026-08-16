@@ -42,7 +42,7 @@ async function releaseAudio(jobId, storageKey) {
     // turi likti prieinamas - trinamas tik nebereikalingas audio.
     if (jobId) {
       try {
-        await jobStore.update(jobId, {
+        await jobStore.system.update(jobId, {
           audio_cleanup_pending: true,
           audio_cleanup_reason: "audio_cleanup_failed",
           storageKey,
@@ -59,7 +59,7 @@ async function releaseAudio(jobId, storageKey) {
 
   try {
     if (jobId) {
-      await jobStore.update(jobId, {
+      await jobStore.system.update(jobId, {
         storageKey: null,
         audio_cleanup_pending: false,
       });

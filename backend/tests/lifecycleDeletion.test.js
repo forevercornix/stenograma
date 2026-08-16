@@ -24,7 +24,7 @@ test.after(() => {
 
 async function createJob(overrides = {}) {
   await jobStore.init();
-  return jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL, ...overrides });
+  return jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL, ...overrides });
 }
 
 test("ŽYMA: uždedama PRIEŠ šalinimą", async () => {
@@ -53,7 +53,7 @@ test("ŽYMA: išgyvena jobo įrašo pašalinimą", async () => {
 
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
-  assert.equal(await jobStore.get(job.id), null, "jobo įrašo neturi likti");
+  assert.equal(await jobStore.system.get(job.id), null, "jobo įrašo neturi likti");
   assert.equal(tombstones.isDeleted(job.id), true, "bet žyma turi išlikti");
 });
 

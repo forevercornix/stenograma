@@ -127,8 +127,141 @@ async function ensureInit() {
   await init();
 }
 
+/**
+ * „Yra, bet ne tavo" (#159).
+ *
+ * ATSKIRAS nuo `null`, nes 152.3 pagal šį skirtumą sprendžia 403 vs 404.
+ * Sulieti į `null` reikštų, kad transporto sluoksnis nebeturi iš ko pasirinkti,
+ * o sprendimą tektų priimti iš naujo jau su prarasta informacija.
+ *
+ * `Symbol` - jo negalima atsitiktinai gauti iš JSON ar sumaišyti su job objektu.
+ */
+const FORBIDDEN = Symbol("jobStore.FORBIDDEN");
+
+const { OWNER_KIND, assertOwnerIdentity } = require("./common");
+
+/**
+ * Vartotojo lygio metodai reikalauja EKSPLICITINIO scope objekto.
+ *
+ * Pozicinis `id` argumentas atmetamas sąmoningai: jis tyliai praeitų su
+ * `undefined` savininku, ir filtras taptų dekoracija. Migracijos metu tai
+ * pagauna kiekvieną praleistą iškvietimo vietą iš karto, o ne produkcijoje.
+ *
+ * `ownerId: null` yra TEISĖTA reikšmė (desktop / no-auth), todėl tikrinama
+ * lauko BUVIMAS, ne truthiness.
+ */
+/**
+ * KŪRIMO KONTRAKTAS (#159).
+ *
+ * Dabartinis writer'is NETURI mokėti rašyti senos eros formato – tą pamoką
+ * davė #158 (`schemaVersion`). `ownerKind = null` reiškia LEGACY įrašą iš
+ * prieš #159; jei produkcinis kvietėjas jį praleistų, atsirastų naujas
+ * job'as, kuris store sluoksnyje elgtųsi kaip legacy ir būtų NEPASIEKIAMAS
+ * savo savininkui. Klaida būtų tyli: job'as sukuriamas sėkmingai, o dingsta
+ * tik prieiga.
+ *
+ * Legacy įrašai turi atsirasti TIK per `restoreRecord()` arba neapdorotą Redis
+ * fixture'ą – ne per normalų `create()`.
+ *
+ * Tikrinamas ir DERINYS, ne tik enum: `ownerKind` su nesuderinamu `ownerId`
+ * yra semantiškai prieštaringas įrašas, nors `matchesOwner()` jį techniškai
+ * palygintų.
+ */
+function assertCreateOwnership(fields) {
+  assertOwnerIdentity(fields, "jobStore.create()");
+}
+
+function assertScope(scope, method) {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+    throw new TypeError(
+      `jobStore.${method}() reikalauja scope objekto { jobId, ownerId }. ` +
+        "Sisteminiam keliui be savininko naudokite jobStore.system." + method + "()."
+    );
+  }
+  if (typeof scope.jobId !== "string" || !scope.jobId) {
+    throw new TypeError(`jobStore.${method}(): trūksta jobId.`);
+  }
+  if (!("ownerId" in scope)) {
+    throw new TypeError(
+      `jobStore.${method}(): trūksta ownerId. Desktop režime perduokite null EKSPLICITIŠKAI - ` +
+        "praleistas laukas neturi tyliai tapti „be savininko\"."
+    );
+  }
+  /**
+   * TAS PATS invariantas kaip `create()` (#159).
+   *
+   * `ownerId = null` yra teisėtas TRIMS skirtingoms būsenoms: desktop, bendras
+   * `API_KEY` ir legacy įrašas – todėl vien jo nepakanka principalui
+   * identifikuoti, o `ownerKind` be tinkamo `ownerId` yra prieštaringa tapatybė.
+   *
+   * Būsena, kurios negalima ĮRAŠYTI, neturi būti priimama ir kaip
+   * iškviečiančiojo TAPATYBĖ – kitaip dvi taisyklės ilgainiui išsiskirtų.
+   */
+  assertOwnerIdentity(scope, `jobStore.${method}()`);
+}
+
 module.exports = {
   init,
+  FORBIDDEN,
+  OWNER_KIND,
+
+  /**
+   * PRIVILEGIJUOTAS NAMESPACE (#159) - be nuosavybės filtro.
+   *
+   * Skirtas TIK fono keliams, kurie neturi ir negali turėti owner konteksto:
+   * `workers/`, `queues/`, retencijos ir valymo sweeper'iai. Jie VYKDO darbą,
+   * o ne aptarnauja užklausą.
+   *
+   * ⚠️ NENAUDOTI `routes/` ir `services/` sluoksniuose - tai apeitų nuosavybę.
+   * Draudimą prižiūri CI sargas (`tests/systemNamespaceBoundary.test.js`);
+   * be jo atskiras namespace taptų patogiu privilege escalation keliu.
+   */
+  system: {
+    get: async (id) => {
+      await ensureInit();
+      return store.get(id);
+    },
+    update: async (id, patch, options = {}) => {
+      await ensureInit();
+      if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+        log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
+        return null;
+      }
+      return store.update(id, patch);
+    },
+    remove: async (id) => {
+      await ensureInit();
+      return store.remove(id);
+    },
+    listPendingDeletions: async (limit) => {
+      await ensureInit();
+      return typeof store.listByFlag === "function"
+        ? store.listByFlag("deletion_pending", limit)
+        : [];
+    },
+    listAll: async () => {
+      await ensureInit();
+      return store.listAll();
+    },
+    /**
+     * Grąžina `null`, jei saugykla to nepalaiko - iškviečiantis kodas tada
+     * NETURI nieko trinti (fail-safe), o ne laikyti, kad naudojamų failų nėra.
+     * `[]` čia reikštų „nė vienas failas nenaudojamas" ir valytojas ištrintų viską.
+     */
+    listReferencedStorageKeys: async () => {
+      await ensureInit();
+      return typeof store.listReferencedStorageKeys === "function"
+        ? store.listReferencedStorageKeys()
+        : null;
+    },
+    listPendingAudioCleanups: async (limit) => {
+      await ensureInit();
+      return typeof store.listByFlag === "function"
+        ? store.listByFlag("audio_cleanup_pending", limit)
+        : [];
+    },
+  },
+
   create: async (fields = {}) => {
     /**
      * PRIEŽIŪROS UŽRAKTAS (#20 PR4).
@@ -148,12 +281,24 @@ module.exports = {
       throw error;
     }
 
+    assertCreateOwnership(fields);
     await ensureInit();
     return store.create(fields);
   },
-  get: async (id) => {
+  /**
+   * NUOSAVYBĖS RIBOJIMAS ĮJUNGTAS PAGAL NUTYLĖJIMĄ (#159).
+   *
+   * @param {{jobId: string, ownerId: string|null}} scope
+   * @returns {Promise<object|null|symbol>} `null` - nėra; `FORBIDDEN` - yra,
+   *   bet priklauso kitam. Du ATSKIRI rezultatai, nes 152.3 pagal juos
+   *   sprendžia 403 vs 404. Sulieti į `null` reikštų, kad transporto sluoksnis
+   *   nebeturi iš ko pasirinkti.
+   */
+  get: async (scope) => {
+    assertScope(scope, "get");
     await ensureInit();
-    return store.get(id);
+    const result = await store.getOwned(scope.jobId, scope);
+    return result === "FORBIDDEN" ? FORBIDDEN : result;
   },
   /**
    * @param {string} id
@@ -172,7 +317,9 @@ module.exports = {
    *   reiškia „nerašyk toliau", tad jos nesiskiria; jei kada nors prireiks
    *   atskirti, reikės atskiro grąžinimo tipo, ne `null`.
    */
-  update: async (id, patch, options = {}) => {
+  update: async (scope, patch, options = {}) => {
+    assertScope(scope, "update");
+    const id = scope.jobId;
     await ensureInit();
 
     /**
@@ -204,21 +351,22 @@ module.exports = {
       return null;
     }
 
-    return store.update(id, patch);
+    const result = await store.updateOwned(id, patch, scope);
+    return result === "FORBIDDEN" ? FORBIDDEN : result;
   },
-  remove: async (id) => {
+  /**
+   * @param {{jobId: string, ownerId: string|null}} scope
+   * @returns {Promise<boolean|symbol>}
+   */
+  remove: async (scope) => {
+    assertScope(scope, "remove");
     await ensureInit();
-    return store.remove(id);
+    const result = await store.removeOwned(scope.jobId, scope);
+    return result === "FORBIDDEN" ? FORBIDDEN : result;
   },
   sweepExpired: async (now) => {
     await ensureInit();
     return store.sweepExpired(now);
-  },
-  listPendingDeletions: async (limit) => {
-    await ensureInit();
-    return typeof store.listByFlag === "function"
-      ? store.listByFlag("deletion_pending", limit)
-      : [];
   },
   /**
    * Grąžina `null`, jei saugykla to nepalaiko - iškviečiantis kodas tada NETURI
@@ -257,23 +405,6 @@ module.exports = {
     return store.restoreRecord(job);
   },
 
-  listAll: async () => {
-    await ensureInit();
-    return store.listAll();
-  },
-
-  listReferencedStorageKeys: async () => {
-    await ensureInit();
-    return typeof store.listReferencedStorageKeys === "function"
-      ? store.listReferencedStorageKeys()
-      : null;
-  },
-  listPendingAudioCleanups: async (limit) => {
-    await ensureInit();
-    return typeof store.listByFlag === "function"
-      ? store.listByFlag("audio_cleanup_pending", limit)
-      : [];
-  },
   size: async () => {
     await ensureInit();
     return store.size();

@@ -24,7 +24,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test("jobStore TTL praėjo, bet audito įrašai liko - DELETE juos vis tiek ištrina", async () => {
   // Retencijos NESUTAMPA: jobStore TTL numatytai 60 min, BullMQ removeOnFail
-  // 24 val., auditas 30 d. Anksčiau DELETE pradėdavo nuo jobStore.get() ir,
+  // 24 val., auditas 30 d. Anksčiau DELETE pradėdavo nuo jobStore.system.get() ir,
   // jam grąžinus null, iškart atsakydavo 404 - teisė ištrinti dingdavo
   // ANKSČIAU nei patys duomenys.
   auditLog.clear();
@@ -32,7 +32,7 @@ test("jobStore TTL praėjo, bet audito įrašai liko - DELETE juos vis tiek išt
   const jobId = "11111111-2222-3333-4444-555555555555";
   auditLog.record({ jobId, transcriptionProvider: "mock", success: true });
 
-  assert.equal(await jobStore.get(jobId), null, "jobStore įrašo neturi būti");
+  assert.equal(await jobStore.system.get(jobId), null, "jobStore įrašo neturi būti");
   assert.equal(auditLog.getAll().length, 1);
 
   const res = await request(app).delete(`/api/transcribe-jobs/${jobId}`);
@@ -58,8 +58,8 @@ test("visiškai nežinomas ID vis dar grąžina 404", async () => {
 test("ištrynimo kvitas įrašomas ir NĖRA susietas su subjektu", async () => {
   auditLog.clear();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { text: "x" } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { text: "x" } });
   auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: true });
 
   const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
@@ -79,8 +79,8 @@ test("ištrynimo kvitas įrašomas ir NĖRA susietas su subjektu", async () => {
 test("deletion_pending jobas pakartojamas automatiškai", async () => {
   auditLog.clear();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, {
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.FAILED,
     deletion_pending: true,
   });
@@ -89,12 +89,12 @@ test("deletion_pending jobas pakartojamas automatiškai", async () => {
 
   assert.ok(summary.attempted >= 1);
   assert.ok(summary.succeeded >= 1);
-  assert.equal(await jobStore.get(job.id), null, "pakartojimas turi užbaigti ištrynimą");
+  assert.equal(await jobStore.system.get(job.id), null, "pakartojimas turi užbaigti ištrynimą");
 });
 
 test("lenktynės: du vienalaikiai DELETE - vienas 204, kitas 404, be avarijos", async () => {
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { text: "x" } });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { text: "x" } });
 
   const [first, second] = await Promise.all([
     request(app).delete(`/api/transcribe-jobs/${job.id}`),
@@ -107,7 +107,7 @@ test("lenktynės: du vienalaikiai DELETE - vienas 204, kitas 404, be avarijos", 
     statuses.every((status) => [204, 404].includes(status)),
     `netikėti statusai: ${statuses.join(", ")}`
   );
-  assert.equal(await jobStore.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id), null);
 });
 
 test("lenktynės: DELETE kol jobas dar aktyvus -> 409, jobas nepaliestas", async () => {
@@ -139,10 +139,10 @@ test("jobStore įrašas dingsta tarp del() ir update() - klaida netrikdo srauto"
   const fileStorage = require("../utils/fileStorage");
 
   const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION, storageKey: key });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION, storageKey: key });
 
   // Imituojam lenktynes: jobo nebėra, kai valymas bando nulinti storageKey.
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 
   const removed = await releaseAudio(job.id, key);
 
@@ -157,11 +157,11 @@ test("audio valymo klaida pažymima ATSKIRA vėliava (ne deletion_pending)", asy
   const { releaseAudio } = require("../utils/audioCleanup");
 
   const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
-  const job = await jobStore.create({
+  const job = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: key,
   });
-  await jobStore.update(job.id, {
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { text: "vertinga transkripcija" },
   });
@@ -170,7 +170,7 @@ test("audio valymo klaida pažymima ATSKIRA vėliava (ne deletion_pending)", asy
   const failingKey = "uploads";
   assert.equal(await releaseAudio(job.id, failingKey), false);
 
-  const flagged = await jobStore.get(job.id);
+  const flagged = await jobStore.system.get(job.id);
   assert.equal(flagged.audio_cleanup_pending, true);
   assert.equal(
     flagged.deletion_pending,
@@ -180,7 +180,7 @@ test("audio valymo klaida pažymima ATSKIRA vėliava (ne deletion_pending)", asy
   assert.ok(flagged.result, "transkripcijos rezultatas turi likti prieinamas");
 
   await fileStorage.del(key).catch(() => {});
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 });
 
 test("audio valymo retry ištrina TIK audio, rezultatą palieka", async () => {
@@ -188,11 +188,11 @@ test("audio valymo retry ištrina TIK audio, rezultatą palieka", async () => {
   const { retryPendingAudioCleanups } = require("../utils/deletionRetry");
 
   const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
-  const job = await jobStore.create({
+  const job = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: key,
   });
-  await jobStore.update(job.id, {
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { text: "vertinga transkripcija" },
     audio_cleanup_pending: true,
@@ -202,22 +202,22 @@ test("audio valymo retry ištrina TIK audio, rezultatą palieka", async () => {
 
   assert.ok(summary.succeeded >= 1);
 
-  const after = await jobStore.get(job.id);
+  const after = await jobStore.system.get(job.id);
   assert.ok(after, "jobas turi LIKTI - trinamas tik audio");
   assert.equal(after.storageKey, null);
   assert.equal(after.audio_cleanup_pending, false);
   assert.ok(after.result, "rezultatas nepaliestas");
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 });
 
 test("nebaigto valymo jobas neišmetamas per TTL", async () => {
   // jobStore įrašas yra vienintelis šaltinis, iš kurio žinomas storageKey.
-  const job = await jobStore.create({
+  const job = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: "uploads/likes.wav",
   });
-  await jobStore.update(job.id, {
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.COMPLETED,
     audio_cleanup_pending: true,
   });
@@ -225,11 +225,11 @@ test("nebaigto valymo jobas neišmetamas per TTL", async () => {
   const farFuture = Date.now() + 10 * 24 * 60 * 60 * 1000;
   await jobStore.sweepExpired(farFuture);
 
-  assert.ok(await jobStore.get(job.id), "pažymėtas jobas turi išlikti po TTL");
+  assert.ok(await jobStore.system.get(job.id), "pažymėtas jobas turi išlikti po TTL");
 
-  await jobStore.update(job.id, { audio_cleanup_pending: false });
+  await jobStore.system.update(job.id, { audio_cleanup_pending: false });
   await jobStore.sweepExpired(farFuture);
-  assert.equal(await jobStore.get(job.id), null, "be vėliavos - išmetamas normaliai");
+  assert.equal(await jobStore.system.get(job.id), null, "be vėliavos - išmetamas normaliai");
 });
 
 test("nežinomas ID nesukuria klaidingo DATA_ERASED kvito", async () => {
@@ -255,11 +255,11 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
   auditLog.clear();
 
   const key = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
-  const job = await jobStore.create({
+  const job = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: key,
   });
-  await jobStore.update(job.id, {
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.FAILED,
     deletion_pending: true,
   });
@@ -280,7 +280,7 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
   assert.equal(retrySummary.failed, 0);
 
   // Nesvarbu, kuris nugalėjo - galutinė būsena turi būti ta pati.
-  assert.equal(await jobStore.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id), null);
   assert.equal(
     auditLog.getAll().filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(job.id))
       .length,
@@ -302,11 +302,11 @@ test("backoff: intervalas ilgėja su bandymais ir turi ribą", () => {
 test("backoff: dar neatėjęs bandymo laikas praleidžiamas (deferred)", async () => {
   const { retryPendingAudioCleanups } = require("../utils/deletionRetry");
 
-  const job = await jobStore.create({
+  const job = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: "uploads/dar-ne.wav",
   });
-  await jobStore.update(job.id, {
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.COMPLETED,
     audio_cleanup_pending: true,
     audio_cleanup_attempts: 2,
@@ -317,11 +317,11 @@ test("backoff: dar neatėjęs bandymo laikas praleidžiamas (deferred)", async (
 
   assert.ok(summary.deferred >= 1, "jobas turi būti atidėtas, o ne bandomas iš karto");
 
-  const untouched = await jobStore.get(job.id);
+  const untouched = await jobStore.system.get(job.id);
   assert.equal(untouched.audio_cleanup_attempts, 2, "skaitliukas neturi keistis");
 
-  await jobStore.update(job.id, { audio_cleanup_pending: false });
-  await jobStore.remove(job.id);
+  await jobStore.system.update(job.id, { audio_cleanup_pending: false });
+  await jobStore.system.remove(job.id);
 });
 
 test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
@@ -330,22 +330,22 @@ test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
 
   // Vienas jobas paruoštas bandymui, du - atidėti pagal backoff.
   const dueKey = await fileStorage.put(Buffer.from("audio"), { ext: ".wav" });
-  const due = await jobStore.create({
+  const due = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: dueKey,
   });
-  await jobStore.update(due.id, {
+  await jobStore.system.update(due.id, {
     status: jobStore.STATUS.COMPLETED,
     audio_cleanup_pending: true,
   });
 
   const notDue = [];
   for (let i = 0; i < 2; i += 1) {
-    const job = await jobStore.create({
+    const job = await jobStore.create({ ownerKind: "unowned",
       type: jobStore.JOB_TYPES.TRANSCRIPTION,
       storageKey: `uploads/dar-ne-${i}.wav`,
     });
-    await jobStore.update(job.id, {
+    await jobStore.system.update(job.id, {
       status: jobStore.STATUS.COMPLETED,
       audio_cleanup_pending: true,
       audio_cleanup_attempts: 3,
@@ -367,7 +367,7 @@ test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
   );
 
   for (const job of [due, ...notDue]) {
-    await jobStore.update(job.id, { audio_cleanup_pending: false }).catch(() => {});
-    await jobStore.remove(job.id);
+    await jobStore.system.update(job.id, { audio_cleanup_pending: false }).catch(() => {});
+    await jobStore.system.remove(job.id);
   }
 });

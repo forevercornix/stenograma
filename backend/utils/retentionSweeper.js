@@ -55,7 +55,7 @@ async function purgeOrphanedAudio({ now = Date.now(), retentionHours } = {}) {
   // senesniu nei AUDIO_RETENTION_HOURS audio (4 val. įrašas, užstrigusi eilė, GPU
   // trūkumas, maža retencijos reikšmė) būdavo palaikomas orphan ir jo failas
   // IŠTRINAMAS dar apdorojant - jobas krisdavo be jokio ryšio su priežastimi.
-  const referencedList = await jobStore.listReferencedStorageKeys();
+  const referencedList = await jobStore.system.listReferencedStorageKeys();
 
   if (referencedList === null) {
     // Saugykla neleidžia išvardyti jobų - tada NIEKO netrinam. Geriau likęs

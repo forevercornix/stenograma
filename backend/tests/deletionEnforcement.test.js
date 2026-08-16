@@ -33,14 +33,14 @@ test("APSAUGA: `jobStore.update` atmeta atnaujinimą po ištrynimo", async () =>
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
-  assert.ok(await jobStore.update(job.id, { status: jobStore.STATUS.PROCESSING }), "prieš žymą – leidžiama");
+  assert.ok(await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING }), "prieš žymą – leidžiama");
 
   tombstones.mark(job.id, { actor: "sysadmin" });
 
   assert.equal(
-    await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED }),
+    await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED }),
     null,
     "po žymos atnaujinimas turi būti ATMESTAS"
   );
@@ -59,17 +59,17 @@ test("APSAUGA: apėjimui reikia SIMBOLIO, `true` neveikia", async () => {
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
   tombstones.mark(job.id, { actor: "sysadmin" });
 
   assert.equal(
-    await jobStore.update(job.id, { status: jobStore.STATUS.FAILED }, { allowAfterDeletion: true }),
+    await jobStore.system.update(job.id, { status: jobStore.STATUS.FAILED }, { allowAfterDeletion: true }),
     null,
     "`true` NETURI atidaryti apėjimo"
   );
 
   assert.ok(
-    await jobStore.update(
+    await jobStore.system.update(
       job.id,
       { status: jobStore.STATUS.FAILED },
       { allowAfterDeletion: jobStore.LIFECYCLE_INTERNAL }
@@ -124,13 +124,13 @@ test("APSAUGA: `pending` žyma irgi blokuoja – ne tik `deleted`", async () => 
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   tombstones.mark(job.id, { actor: "x" }); // status = deletion_pending
   assert.equal(tombstones.isConfirmedDeleted(job.id), false, "dar nepatvirtinta");
 
   assert.equal(
-    await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED }),
+    await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED }),
     null,
     "vykstant ištrynimui atnaujinimas irgi atmetamas"
   );
@@ -145,12 +145,12 @@ test("APSAUGA: nepavykęs ištrynimas NEATIDARO kelio atgal", async () => {
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
   tombstones.mark(job.id, { actor: "x" });
   tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.FAILED);
 
-  assert.equal(await jobStore.update(job.id, { status: jobStore.STATUS.COMPLETED }), null);
+  assert.equal(await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED }), null);
 });
 
 test("LENKTYNĖS: ištrynimas VYKDYMO metu neleidžia užbaigti darbo", async () => {
@@ -162,20 +162,20 @@ test("LENKTYNĖS: ištrynimas VYKDYMO metu neleidžia užbaigti darbo", async ()
   await tombstones._clearForTests();
   await jobStore.init();
 
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(job.id, { status: jobStore.STATUS.PROCESSING });
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING });
 
   // Ištrynimas įvyksta VIDURYJE darbo.
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
   // Worker'is bando įrašyti rezultatą.
-  const afterDeletion = await jobStore.update(job.id, {
+  const afterDeletion = await jobStore.system.update(job.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { protokolas: "neturėtų išlikti" },
   });
 
   assert.equal(afterDeletion, null, "rezultatas NEGALI būti įrašytas po ištrynimo");
-  assert.equal(await jobStore.get(job.id), null, "jobo įrašo neturi būti");
+  assert.equal(await jobStore.system.get(job.id), null, "jobo įrašo neturi būti");
 });
 
 test("STRUKTŪRA: ABU vykdymo keliai tikrina žymą PRIEŠ darbą", () => {

@@ -210,7 +210,7 @@ test("E2E: eksportas NEPALIEKA artefakto po atsakymo", async () => {
    * Po eksporto jobo įraše NETURI atsirasti naujo artefakto: failas
    * išsiųstas ir pamirštas.
    */
-  const afterExport = await jobStore.get(protocolId);
+  const afterExport = await jobStore.system.get(protocolId);
   /**
    * Jei jobo įrašo nebėra (TTL ar ankstesnis valymas), efemeriško artefakto
    * nebuvimas laikomas PATVIRTINTU: jis gali gyventi tik jobo įraše, tad
@@ -271,10 +271,10 @@ test("E2E: ištrinto jobo ID NEGALI būti atkurtas nauju darbu", async () => {
   await request(app).delete(`/api/transcribe-jobs/${jobId}`);
 
   // Bandymas atkurti per jobStore (imituoja vėluojantį worker'į).
-  const recreated = await jobStore.update(jobId, { status: "completed", result: { text: "neturi išlikti" } });
+  const recreated = await jobStore.system.update(jobId, { status: "completed", result: { text: "neturi išlikti" } });
 
   assert.equal(recreated, null, "ištrinto jobo atkurti negalima");
-  assert.equal(await jobStore.get(jobId), null);
+  assert.equal(await jobStore.system.get(jobId), null);
 });
 
 test("E2E: ATŠAUKIMAS – ištrynimas nebaigus darbo palieka švarią būseną", async () => {
@@ -327,7 +327,7 @@ test("E2E: saugykloje NELIEKA audio failo po ištrynimo", async () => {
    * ilgiau, nei trunka apdorojimas. Bet tai reiškia, kad raktą reikia užfiksuoti
    * anksčiau, o ne tikėtis rasti jį pabaigoje.
    */
-  const uploaded = await jobStore.get(jobId);
+  const uploaded = await jobStore.system.get(jobId);
   const storageKey = uploaded ? uploaded.storageKey : null;
 
   assert.ok(storageKey, "produkcijos kelias turi išsaugoti audio ir įrašyti storageKey");

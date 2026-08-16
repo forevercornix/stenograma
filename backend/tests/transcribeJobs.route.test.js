@@ -84,22 +84,22 @@ test("DELETE /api/transcribe-jobs/:id - nežinomas jobas grąžina 404", async (
 });
 
 test("DELETE /api/transcribe-jobs/:id - aktyvus jobas grąžina 409", async () => {
-  const job = await jobStore.create();
+  const job = await jobStore.create({ ownerKind: "unowned" });
 
   const res = await request(app).delete(
     `/api/transcribe-jobs/${job.id}`
   );
 
   assert.equal(res.status, 409);
-  assert.ok(await jobStore.get(job.id));
+  assert.ok(await jobStore.system.get(job.id));
 });
 
 test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą", async () => {
   auditLog.clear();
 
-  const job = await jobStore.create();
+  const job = await jobStore.create({ ownerKind: "unowned" });
 
-  await jobStore.update(job.id, {
+  await jobStore.system.update(job.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { text: "Jautrus transkripcijos rezultatas" },
   });
@@ -124,7 +124,7 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
   );
 
   assert.equal(res.status, 204);
-  assert.equal(await jobStore.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id), null);
 
   // DATA_ERASED kvitas SĄMONINGAI lieka, bet jis nesusietas su subjektu
   // (subjectId=null), tad į own() nepatenka - žr. utils/jobErasure.js.
@@ -177,15 +177,15 @@ test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> iš
     .getAll()
     .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
   assert.equal(afterDelete.length, 0);
-  assert.equal(await jobStore.get(jobId), null);
+  assert.equal(await jobStore.system.get(jobId), null);
 });
 
 test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, jobas lieka)", async () => {
   // Regresija: abu endpoint'ai naudoja tą patį jobStore. Be job.type patikros
   // protokolo jobas būdavo surandamas, ištrinamas iš jobStore, o valymas vyktų
   // ne toje BullMQ eilėje - duomenys liktų, o klientas gautų 204.
-  const protocolJob = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.update(protocolJob.id, {
+  const protocolJob = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await jobStore.system.update(protocolJob.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { protocol: { pavadinimas: "Jautrus protokolas" } },
   });
@@ -193,26 +193,26 @@ test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, joba
   const res = await request(app).delete(`/api/transcribe-jobs/${protocolJob.id}`);
 
   assert.equal(res.status, 404);
-  assert.ok(await jobStore.get(protocolJob.id), "protokolo jobas turi likti nepaliestas");
+  assert.ok(await jobStore.system.get(protocolJob.id), "protokolo jobas turi likti nepaliestas");
 
-  await jobStore.remove(protocolJob.id);
+  await jobStore.system.remove(protocolJob.id);
 });
 
 test("DELETE /api/transcribe-jobs/:id - LEGACY jobas be type ištrinamas (ne 404)", async () => {
   // Suderinamumas: prieš `type` įvedimą sukurti jobai lauko neturi. Griežta
   // patikra juos paverstų neištrinamais po deployment'o.
-  const legacy = await jobStore.create();
-  await jobStore.update(legacy.id, {
+  const legacy = await jobStore.create({ ownerKind: "unowned" });
+  await jobStore.system.update(legacy.id, {
     status: jobStore.STATUS.COMPLETED,
     result: { text: "Senas rezultatas" },
     type: undefined,
   });
 
-  const stored = await jobStore.get(legacy.id);
+  const stored = await jobStore.system.get(legacy.id);
   stored.type = undefined; // imituojam seną Redis įrašą be lauko
 
   const res = await request(app).delete(`/api/transcribe-jobs/${legacy.id}`);
 
   assert.equal(res.status, 204);
-  assert.equal(await jobStore.get(legacy.id), null);
+  assert.equal(await jobStore.system.get(legacy.id), null);
 });

@@ -41,7 +41,7 @@ async function transcriptionProcessor(payload, jobId) {
         const percent = typeof p === "number" ? p : p && p.percent;
         if (percent == null) return;
         // fire-and-forget: progreso rašymas neturi blokuoti/nutraukti transkripcijos
-        Promise.resolve(jobStore.update(jobId, { progress: percent })).catch(() => {});
+        Promise.resolve(jobStore.system.update(jobId, { progress: percent })).catch(() => {});
       }
     : undefined;
 

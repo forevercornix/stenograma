@@ -487,3 +487,72 @@ test("#158 SRAUTAS: sesija be stabilaus userId NEKURIA job'o (fail-fast)", async
   assert.equal(res.body.code, "IDENTITY_UNAVAILABLE");
   assert.equal(res.body.jobId, undefined, "job'as neturi būti sukurtas");
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #159: NUOSAVYBĖ PER TIKRĄ HTTP SRAUTĄ
+ *
+ * Store lygio testai įrodo, kad `FORBIDDEN` grąžinamas. Šie įrodo, kad
+ * maršrutai jį APDOROJA. Skirtumas kritinis: `FORBIDDEN` yra `Symbol`, o
+ * `Symbol` yra TRUTHY – įprasta `if (!job)` patikra jo nepagauna, ir svetimas
+ * įrašas praeitų toliau kaip savas, grąžindamas 200.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const jobStoreForOwnership = require("../utils/jobStore");
+
+test("#159 HTTP: A negauna B job'o (GET) ir neatskleidžiama, kad jis egzistuoja", async () => {
+  const cookieB = await loginAs("darbuotojas", "operator-slaptas-2");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookieB)
+    .send({ transcript: "Jonas: Sveiki, pradedam susitikima del ataskaitos." });
+  assert.equal(created.status, 202);
+  const jobId = created.body.jobId;
+
+  const cookieA = await loginAs("sysadmin", "admin-slaptas-1");
+  const stolen = await request(app).get(`/api/jobs/${jobId}`).set("Cookie", cookieA);
+
+  assert.notEqual(stolen.status, 200, "svetimas jobas NIEKADA neturi grįžti su 200");
+  assert.equal(stolen.status, 404, "fail-closed iki #160 politikos");
+  assert.equal(stolen.body.transcript, undefined);
+  assert.equal(stolen.body.result, undefined, "jokio turinio nutekėjimo");
+});
+
+test("#159 HTTP: A negali IŠTRINTI B job'o - jokio šalutinio poveikio", async () => {
+  const cookieB = await loginAs("darbuotojas", "operator-slaptas-2");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookieB)
+    .send({ transcript: "Petras: Aptariame biudzeta kitiems metams." });
+  const jobId = created.body.jobId;
+
+  const cookieA = await loginAs("sysadmin", "admin-slaptas-1");
+  const attempt = await request(app).delete(`/api/jobs/${jobId}`).set("Cookie", cookieA);
+
+  assert.notEqual(attempt.status, 200, "svetimo jobo trynimas negali pavykti");
+  assert.notEqual(attempt.status, 204);
+
+  /**
+   * ESMINĖ patikra: ne tik atsakymo kodas, bet ir tai, kad įrašas TIKRAI liko.
+   * `FORBIDDEN` neturi patekti į `eraseJob()` kaip tariamas job objektas –
+   * ten jis būtų aiškinamas kaip įrašas su `undefined` laukais ir galėtų
+   * paleisti valymą.
+   */
+  const still = await jobStoreForOwnership.system.get(jobId);
+  assert.ok(still, "B jobas turi likti store'e");
+  assert.notEqual(still.status, "deleted");
+
+  // Ir savininkas vis dar jį mato.
+  const ownerView = await request(app).get(`/api/jobs/${jobId}`).set("Cookie", cookieB);
+  assert.equal(ownerView.status, 200, "tikrasis savininkas neturi nukentėti");
+});
+
+test("#159 HTTP: savininkas savo job'ą gauna normaliai (regresija)", async () => {
+  const cookieB = await loginAs("darbuotojas", "operator-slaptas-2");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookieB)
+    .send({ transcript: "Ona: Reikia parengti protokola iki penktadienio." });
+
+  const own = await request(app).get(`/api/jobs/${created.body.jobId}`).set("Cookie", cookieB);
+  assert.equal(own.status, 200, "nuosavybės filtras neturi blokuoti tikrojo savininko");
+});

@@ -111,7 +111,7 @@ async function eraseJob(job) {
   //    kad operaciją būtų galima pakartoti su tuo pačiu ID.
   if (outcome.criticalFailure) {
     try {
-      await jobStore.update(jobId, { deletion_pending: true, storageKey });
+      await jobStore.system.update(jobId, { deletion_pending: true, storageKey });
     } catch (e) {
       // Klientas ir taip gaus 503, bet garantijos, kad vėliava išsaugota, nėra -
       // tad bent jau nenutylim (anksčiau čia buvo tuščias .catch()).
@@ -121,7 +121,7 @@ async function eraseJob(job) {
   }
 
   try {
-    outcome.jobRemoved = Boolean(await jobStore.remove(jobId));
+    outcome.jobRemoved = Boolean(await jobStore.system.remove(jobId));
   } catch (e) {
     outcome.errors.push(`jobStore: ${e.message}`);
     outcome.criticalFailure = true;
@@ -150,7 +150,7 @@ function writeDeletionReceipt(outcome) {
   // `!criticalFailure`, tad `DELETE /api/.../neegzistuojantis-id` sukurdavo
   // klaidingą DATA_ERASED įrašą - o kadangi kvitai neturi subjectId, jų srautas
   // galėjo per AUDIT_MAX_ENTRIES išstumti tikrus audito įrašus. Tas pats galioja
-  // lenktynių atvejui, kai `jobStore.remove()` grąžina false.
+  // lenktynių atvejui, kai `jobStore.system.remove()` grąžina false.
   const anythingRemoved =
     outcome.jobRemoved ||
     outcome.queueJobRemoved ||
@@ -189,8 +189,67 @@ function writeDeletionReceipt(outcome) {
  *
  * @returns {object} outcome; `found` - ar kur nors iš viso kas nors rasta
  */
-async function eraseOrphanedJobData(jobId) {
+async function eraseOrphanedJobData(jobId, options = {}) {
+  /**
+   * EKSPLICITINIS SCOPE (#159, variantas C).
+   *
+   * `jobErasure` yra VIENINTELIS sąmoningai mišrus sluoksnis: jį kviečia ir
+   * maršrutai (vartotojo užklausa), ir retencijos sweeper'is (sisteminis
+   * kelias). Mišrumas izoliuojamas ČIA, o ne grąžinamas į store kaip
+   * `{ system: true }` vėliava – store API lieka švarus, o vienintelė vieta,
+   * kur abu keliai susitinka, yra aiškiai įvardyta ir peržiūrima.
+   *
+   * `scope: "owner"` BE `ownerId` yra klaida, ne tylus nukritimas į sisteminį
+   * kelią: pamirštas laukas kitaip taptų privilegijų eskalacija per apsirikimą.
+   */
+  const { scope, ownerId, ownerKind } = options;
+  if (scope !== "owner" && scope !== "system") {
+    throw new TypeError(
+      'eraseOrphanedJobData() reikalauja { scope: "owner" | "system" }. ' +
+        "Numatytosios reikšmės nėra sąmoningai – ištrynimo apimtis turi būti nurodyta."
+    );
+  }
+  if (scope === "owner" && !("ownerId" in options)) {
+    throw new TypeError(
+      'eraseOrphanedJobData({ scope: "owner" }) reikalauja ownerId. ' +
+        "Desktop režime perduokite null EKSPLICITIŠKAI."
+    );
+  }
+  /**
+   * `ownerKind` PRIVALOMAS kartu su `ownerId` (#159).
+   *
+   * `ownerId = null` yra teisėtas trims skirtingoms būsenoms, tad vien jo
+   * nepakanka principalui identifikuoti. Sąsaja įvedama DABAR būtent tam, kad
+   * #160, pradėjęs tikrinti našlaičių nuosavybę, gautų PILNĄ principal
+   * kontekstą ir nereikėtų keisti kvietėjų.
+   */
+  if (scope === "owner" && !ownerKind) {
+    throw new TypeError(
+      'eraseOrphanedJobData({ scope: "owner" }) reikalauja ownerKind. ' +
+        "ownerId vienas neidentifikuoja principalo (žr. utils/jobStore/common.js)."
+    );
+  }
+
+  /**
+   * ⚠️ ŽINOMA SPRAGA (perduodama #160).
+   *
+   * „Našlaitis" reiškia, kad `jobStore` įrašo NEBĖRA – o kartu nebėra ir
+   * `ownerId`, su kuriuo būtų galima palyginti. Nuosavybės čia patikrinti
+   * neįmanoma iš principo: likę pėdsakai (BullMQ eilė, auditas) savininko
+   * nesaugo.
+   *
+   * Todėl `scope: "owner"` kelias šiuo metu valo tą patį, ką ir sisteminis.
+   * Elgesys NEKEIČIAMAS šiame PR sąmoningai – tai transporto lygio politikos
+   * klausimas (ar našlaičių valymas apskritai leidžiamas eiliniam vartotojui,
+   * ar tampa admin-only), sprendžiamas 152.3 kartu su 403/404 politika.
+   *
+   * Parametras įvedamas DABAR, kad ketinimas būtų matomas iškvietimo vietoje
+   * ir kad 152.3 nereikėtų keisti sąsajos.
+   */
   const outcome = await eraseJob({ id: jobId, type: null, storageKey: null });
+  outcome.scope = scope;
+  outcome.ownerKind = ownerKind ?? null;
+  outcome.ownershipVerified = false;
 
   outcome.orphan = true;
   outcome.found =

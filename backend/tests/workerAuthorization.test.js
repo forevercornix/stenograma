@@ -51,7 +51,7 @@ test("PROPAGAVIMAS: jobas neša aktoriaus ID, rolę ir šaltinį", async () => {
   const created = await request(app).post("/api/jobs").set("Cookie", cookie).send({ transcript: TRANSCRIPT });
   assert.equal(created.status, 202);
 
-  const job = await jobStore.get(created.body.jobId);
+  const job = await jobStore.system.get(created.body.jobId);
 
   /**
    * #158: `actor` yra STABILUS `userId`, ne vardas – todėl pervadinimas
@@ -78,7 +78,7 @@ test("KREDENCIALAI: jobo įraše NĖRA nei slaptažodžio, nei sesijos ID, nei c
   const sessionId = cookie.split(";")[0].split("=")[1];
 
   const created = await request(app).post("/api/jobs").set("Cookie", cookie).send({ transcript: TRANSCRIPT });
-  const job = await jobStore.get(created.body.jobId);
+  const job = await jobStore.system.get(created.body.jobId);
 
   const serialized = JSON.stringify(job);
 
@@ -134,7 +134,7 @@ test("REVOKACIJA: atsijungimas (logout) NENUTRAUKIA jobo", async () => {
 
   await request(app).post("/api/auth/logout").set("Cookie", cookie);
 
-  const job = await jobStore.get(created.body.jobId);
+  const job = await jobStore.system.get(created.body.jobId);
   const decision = authorizeJobExecution(job, PERMISSIONS.JOB_CREATE);
 
   assert.equal(decision.allowed, true, "logout neturi nutraukti jau pradėto darbo");

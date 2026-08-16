@@ -26,7 +26,7 @@ const { ARTEFACT_TYPES, PERSISTENCE, TYPES_BY_ID } = require("./artefactInventor
 const SCAN_STRATEGIES = {
   [ARTEFACT_TYPES.JOB_RECORD.id]: {
     async scan(jobId, { jobStore }) {
-      return Boolean(await jobStore.get(jobId));
+      return Boolean(await jobStore.system.get(jobId));
     },
   },
 

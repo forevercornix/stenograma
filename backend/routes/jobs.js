@@ -9,9 +9,35 @@ const { PERMISSIONS } = require("../utils/permissions");
 const { eraseOrphanedJobData } = require("../utils/jobErasure");
 const lifecycleService = require("../services/lifecycleService");
 const { getRequestId, getActor } = require("../utils/requestContext");
+const { getOwnerScope } = require("../utils/ownerScope");
 const { createLogger } = require("../utils/logger");
 const { validate, schemas } = require("../middleware/validate");
 const log = createLogger("route:jobs");
+
+/**
+ * SVETIMO JOB'O APDOROJIMAS (#159).
+ *
+ * `jobStore.get()` grąžina TRIS skirtingus rezultatus: job'ą, `null` (nėra) ir
+ * `jobStore.FORBIDDEN` (yra, bet svetimas). `FORBIDDEN` yra `Symbol`, o
+ * `Symbol` yra TRUTHY – todėl įprasta `if (!job)` patikra jo NEPAGAUNA ir
+ * svetimas įrašas praeitų toliau kaip savas.
+ *
+ * FAIL-CLOSED, LAIKINAI 404. Galutinę 403 vs 404 politiką (ir admin override)
+ * sprendžia #160. Iki tol grąžinamas 404: jis neatskleidžia, ar job'as
+ * egzistuoja, tad saugesnis pasirinkimas neapsisprendus. Store informacijos
+ * nepraranda – skirtumas tarp `null` ir `FORBIDDEN` išlieka kontrakte, tad
+ * #160 galės jį pakeisti nekeisdamas duomenų sluoksnio.
+ *
+ * @returns {boolean} ar užklausa jau atsakyta (kvietėjas privalo grįžti)
+ */
+function denyIfForbidden(job, res) {
+  if (job === jobStore.FORBIDDEN) {
+    res.status(404).json({ error: "Jobas nerastas." });
+    return true;
+  }
+  return false;
+}
+
 
 /**
  * Job'o AKTORIUS (#158).
@@ -81,6 +107,8 @@ router.post("/jobs", rateLimiter, authenticate, requirePermission(PERMISSIONS.JO
     type: jobStore.JOB_TYPES.PROTOCOL,
     // Koreliacija su HTTP užklausa (GDPR #17).
     requestId: getRequestId(),
+    // #159: DUOMENŲ nuosavybė - atskira nuo `actor` (vykdytojo tapatybės).
+    ...getOwnerScope(req),
     actor: actor.actor,
     // Rolė ir mechanizmas - autorizacijai atkurti worker'yje (#18 PR3).
     // Kredencialų (tokenų, cookie, slaptažodžių) čia NĖRA ir negali būti.
@@ -111,7 +139,9 @@ router.post("/jobs", rateLimiter, authenticate, requirePermission(PERMISSIONS.JO
  * response: { jobId, status: queued|processing|completed|failed, result?, error?, createdAt, updatedAt }
  */
 router.get("/jobs/:id", pollRateLimiter, authenticate, requirePermission(PERMISSIONS.JOB_READ), validate({ params: schemas.jobIdParam }), async (req, res) => {
-  const job = await jobStore.get(req.params.id);
+  const scope = getOwnerScope(req);
+  const job = await jobStore.get({ jobId: req.params.id, ...scope });
+  if (denyIfForbidden(job, res)) return;
   if (!job) return res.status(404).json({ error: "Jobas nerastas (galbūt serveris persileido, o job store buvo tik atmintyje - persistencijai naudokite Redis)." });
 
   res.json({
@@ -136,14 +166,16 @@ router.get("/jobs/:id", pollRateLimiter, authenticate, requirePermission(PERMISS
  * ir dalyvių sąrašas, rezultate - sugeneruotas protokolas.
  */
 router.delete("/jobs/:id", rateLimiter, authenticate, requirePermission(PERMISSIONS.JOB_DELETE), validate({ params: schemas.jobIdParam }), async (req, res) => {
-  const job = await jobStore.get(req.params.id);
+  const scope = getOwnerScope(req);
+  const job = await jobStore.get({ jobId: req.params.id, ...scope });
+  if (denyIfForbidden(job, res)) return;
 
   if (!job) {
     // jobStore įrašas galėjo dingti pagal TTL (numatytai 60 min), o BullMQ (iki
     // 24 val.) ir auditas (iki 30 d.) duomenis dar laiko. Prieš 404 pabandom
     // ištrinti tai, kas dar egzistuoja - kitaip teisė ištrinti dingtų anksčiau
     // nei patys duomenys.
-    const orphan = await eraseOrphanedJobData(req.params.id);
+    const orphan = await eraseOrphanedJobData(req.params.id, { scope: "owner", ownerId: scope.ownerId, ownerKind: scope.ownerKind });
 
     if (orphan.criticalFailure) {
       log.error(

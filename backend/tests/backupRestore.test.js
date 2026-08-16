@@ -24,9 +24,9 @@ test.after(() => {
 
 async function completedJob(overrides = {}) {
   await jobStore.init();
-  const job = await jobStore.create({ type: jobStore.JOB_TYPES.PROTOCOL, ...overrides });
-  await jobStore.update(job.id, { status: "completed", result: { pavadinimas: "Testas" } });
-  return jobStore.get(job.id);
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL, ...overrides });
+  await jobStore.system.update(job.id, { status: "completed", result: { pavadinimas: "Testas" } });
+  return jobStore.system.get(job.id);
 }
 
 test("KOPIJA: išjungta pagal nutylėjimą – reikia sąmoningo įjungimo", async () => {
@@ -45,7 +45,7 @@ test("MOMENTINIS VAIZDAS: vykdomi darbai PRALEIDŽIAMI ir užfiksuojami", async 
    */
   await jobStore.init();
   await completedJob();
-  await jobStore.create({ type: jobStore.JOB_TYPES.TRANSCRIPTION }); // lieka `queued`
+  await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION }); // lieka `queued`
 
   const { manifest } = await backupService.createBackup({ actor: "sysadmin" });
 
@@ -60,7 +60,7 @@ test("MOMENTINIS VAIZDAS: kai viskas stabilu, priežasties NĖRA", async () => {
    * skirtingus dalykus. Visada užpildyta priežastis nieko nesakytų.
    */
   await jobStore.init();
-  for (const job of await jobStore.listAll()) await jobStore.remove(job.id);
+  for (const job of await jobStore.system.listAll()) await jobStore.system.remove(job.id);
 
   await completedJob();
 
@@ -106,13 +106,13 @@ test("ATKŪRIMAS: pilnas ciklas grąžina jobą", async () => {
   const job = await completedJob();
 
   const backup = await backupService.createBackup({ actor: "sysadmin" });
-  await jobStore.remove(job.id);
-  assert.equal(await jobStore.get(job.id), null);
+  await jobStore.system.remove(job.id);
+  assert.equal(await jobStore.system.get(job.id), null);
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
   assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
-  assert.ok(await jobStore.get(job.id), "jobas turi grįžti");
+  assert.ok(await jobStore.system.get(job.id), "jobas turi grįžti");
 });
 
 test("ATKŪRIMAS: grandinė vykdoma NUOSEKLIAI ir fiksuoja žingsnius", async () => {
@@ -145,14 +145,14 @@ test("FAIL-CLOSED: SUGADINTAS turinys sustabdo atkūrimą", async () => {
   const job = await completedJob();
 
   const backup = await backupService.createBackup({ actor: "sysadmin" });
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
 
   const corrupted = Buffer.from(backup.data.toString("utf8").replace("completed", "corrupt!!"));
   const result = await restoreService.restoreBackup({ manifest: backup.manifest, data: corrupted });
 
   assert.equal(result.ok, false);
   assert.equal(result.failedStep, STEPS.CHECKSUM);
-  assert.equal(await jobStore.get(job.id), null, "sugadinta kopija NEGALI nieko atkurti");
+  assert.equal(await jobStore.system.get(job.id), null, "sugadinta kopija NEGALI nieko atkurti");
 });
 
 test("FAIL-CLOSED: sustojus grandinei sistema LIEKA NEPALIESTA", async () => {
@@ -172,14 +172,14 @@ test("FAIL-CLOSED: sustojus grandinei sistema LIEKA NEPALIESTA", async () => {
   const broken = { ...backup.manifest };
   delete broken.checksum;
 
-  const before = (await jobStore.listAll()).length;
+  const before = (await jobStore.system.listAll()).length;
   const result = await restoreService.restoreBackup({ manifest: broken, data: backup.data });
-  const after = (await jobStore.listAll()).length;
+  const after = (await jobStore.system.listAll()).length;
 
   assert.equal(result.ok, false);
   assert.equal(result.failedStep, STEPS.MANIFEST);
   assert.equal(after, before, "nepavykęs atkūrimas neturi keisti sistemos būklės");
-  assert.ok(await jobStore.get(survivor.id), "esami jobai turi likti");
+  assert.ok(await jobStore.system.get(survivor.id), "esami jobai turi likti");
 });
 
 test("FAIL-CLOSED: NAUJESNIS formatas atmetamas", async () => {
@@ -268,14 +268,14 @@ test("ŽYMOS: ištrintas jobas NEGRĮŽTA iš kopijos", async () => {
   const backup = await backupService.createBackup({ actor: "sysadmin" });
 
   // Ištrynimas su žyma.
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
   tombstones.mark(job.id, { actor: "sysadmin" });
   tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
   assert.equal(result.ok, true, "atkūrimas pats pavyksta");
-  assert.equal(await jobStore.get(job.id), null, "bet ištrintas jobas NEGRĮŽTA");
+  assert.equal(await jobStore.system.get(job.id), null, "bet ištrintas jobas NEGRĮŽTA");
 });
 
 test("ŽYMOS: `pending` žyma irgi blokuoja atkūrimą", async () => {
@@ -285,12 +285,12 @@ test("ŽYMOS: `pending` žyma irgi blokuoja atkūrimą", async () => {
   const job = await completedJob();
   const backup = await backupService.createBackup({ actor: "sysadmin" });
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
   tombstones.mark(job.id, { actor: "sysadmin" }); // dar `deletion_pending`
 
   await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
-  assert.equal(await jobStore.get(job.id), null, "vykstant ištrynimui atkūrimas irgi blokuojamas");
+  assert.equal(await jobStore.system.get(job.id), null, "vykstant ištrynimui atkūrimas irgi blokuojamas");
 });
 
 test("SAUGYKLA: raktas iš kopijos VALIDUOJAMAS (kelio apėjimas)", async () => {
@@ -460,13 +460,13 @@ test("AUDITAS: SENA kopija su auditu praleidžiama, ne atkuriama", async () => {
     checksum: backupManifest.computeChecksum(legacyData),
   };
 
-  await jobStore.remove(job.id);
+  await jobStore.system.remove(job.id);
   const before = auditLog.getAll().length;
 
   const result = await restoreService.restoreBackup({ manifest: legacyManifest, data: legacyData });
 
   assert.equal(result.ok, true, "sena kopija turi būti atkuriama");
-  assert.ok(await jobStore.get(job.id), "jobai atkuriami kaip įprasta");
+  assert.ok(await jobStore.system.get(job.id), "jobai atkuriami kaip įprasta");
 
   const restored = auditLog.getAll().slice(before);
   assert.ok(
