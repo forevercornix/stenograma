@@ -23,6 +23,43 @@ const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
 const { validate, schemas } = require("../middleware/validate");
 const log = createLogger("route:transcribe-jobs");
 
+/**
+ * Job'o AKTORIUS (#158).
+ *
+ * `schemaVersion: 2` įrašuose `actor` yra STABILUS `userId`, ne vardas –
+ * todėl pervadinimas nebenutraukia eilėje laukiančio darbo.
+ *
+ * API rakto kelyje `req.user` nėra, ir `getActor()` grąžina rakto atspaudą
+ * (`key_<hex>`) – tai teisinga, nes tokį įrašą sprendžia `resolveApiKeyRole`.
+ *
+ * ANOMALIJA: sesija YRA, bet be `userId`. Po #158 diegimo taip neturi būti –
+ * `verifyCredentials()` visada grąžina `id`, o sesijos gyvena atmintyje ir
+ * restarto neišgyvena.
+ *
+ * KODĖL FAIL-FAST, NE ĮSPĖJIMAS. `newJob()` tokiam įrašui vis tiek duotų
+ * `schemaVersion: 2`, tad `jobAuthorization` aiškintų įrašytą VARDĄ kaip
+ * `userId`, ID paieška nepavyktų, ir darbas žūtų `ACTOR_UNKNOWN` – jau
+ * suvartojęs eilės vietą ir vartotojo laukimą. Iš anksto pasmerktas job'as
+ * yra blogesnis už atmestą užklausą, tad anomalija sustabdoma PRIEŠ enqueue.
+ *
+ * Desktop / no-auth režimas čia nepatenka: ten `req.user` išvis nėra.
+ *
+ * @returns {{ok: true, actor: string} | {ok: false}}
+ */
+function jobActor(req, log) {
+  if (req.user) {
+    if (req.user.id) return { ok: true, actor: req.user.id };
+
+    log.error(
+      { username: req.user.username },
+      "Sesija be stabilaus userId - job'as neku­riamas (#158 anomalija). " +
+        "Tikėtina priežastis: sesija sukurta iš tapatybės be AUTH_USERS userId lauko."
+    );
+    return { ok: false };
+  }
+  return { ok: true, actor: getActor() };
+}
+
 const router = express.Router();
 
 
@@ -82,6 +119,19 @@ router.post(
   uploadSingleAudio,
   validate({ body: schemas.transcribeBody }),
   async (req, res) => {
+  /**
+   * TAPATYBĖ TIKRINAMA ANKSTI (#158) - prieš magic bytes patikrą ir prieš
+   * audio įrašymą į bendrą storage. Anomalija be to sukurtų storage įrašą,
+   * kurį tektų valyti, arba pasmerktą job'ą, žūsiantį autorizacijos metu.
+   */
+  const actor = jobActor(req, log);
+  if (!actor.ok) {
+    return res.status(500).json({
+      error: "Nepavyko nustatyti stabilios vartotojo tapatybės. Kreipkitės į administratorių.",
+      code: "IDENTITY_UNAVAILABLE",
+    });
+  }
+
   if (!req.file) {
     recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe-jobs" });
     return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
@@ -124,7 +174,7 @@ router.post(
       type: jobStore.JOB_TYPES.TRANSCRIPTION,
       // Koreliacija su HTTP užklausa (GDPR #17).
       requestId: getRequestId(),
-      actor: getActor(),
+      actor: actor.actor,
       // Rolė ir mechanizmas - autorizacijai atkurti worker'yje (#18 PR3).
       actorRole: req.authz ? req.authz.role : null,
       actorSource: req.authz ? req.authz.source : null,

@@ -8,8 +8,13 @@ const crypto = require("crypto");
  * ne praleidimas – jį reikia dokumentuoti, ne apsimesti, kad yra daugiau.
  *
  * FORMATAS: `AUTH_USERS` – kableliais atskirtas sąrašas
- * `vardas:rolė:scrypt$N$r$p$saltHex$hashHex`. Slaptažodžio maiša generuojama
- * atskiru skriptu (žr. `scripts/hash-password.mjs`), niekada nelaikoma tekstu.
+ * `vardas:rolė:scrypt$N$r$p$saltHex$hashHex:userId` (TIKSLIAI 4 laukai).
+ * Slaptažodžio maiša generuojama atskiru skriptu (žr. `scripts/hash-password.js`),
+ * niekada nelaikoma tekstu.
+ *
+ * `userId` (#158) yra STABILUS tapatybės raktas: vardas gali pasikeisti, ID – ne.
+ * Juo remiasi job aktoriaus sprendimas (`utils/jobAuthorization.js`), todėl
+ * pervadinimas nebenutraukia eilėje laukiančių darbų.
  *
  * KODĖL scrypt: šis projektas jau naudoja `crypto.scryptSync` API rakto
  * pseudonimizavimui (`utils/requestContext.js`). Ta pati priklausomybių
@@ -32,6 +37,27 @@ const HASH_HEX_PATTERN = /^[0-9a-f]{128}$/; // KEY_LEN=64 baitai = 128 hex simbo
 
 /** Vardo formos apribojimas – jis patenka į logus ir auditą. */
 const USERNAME_PATTERN = /^[a-z][a-z0-9_-]{1,63}$/;
+
+/**
+ * UUIDv4 – stabilaus `userId` forma (#158).
+ *
+ * Tikrinama VERSIJA (`4`) ir variantas (`[89ab]`), ne vien 36 simbolių forma:
+ * ID generuojame su `crypto.randomUUID()`, tad ranka sugalvota teisingo ilgio
+ * eilutė neturi tyliai praeiti kaip tapatybė.
+ */
+const USER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * BET KURIOS versijos UUID forma – naudojama TIK vardui atmesti (#158).
+ *
+ * Sąmoningai platesnis už `USER_ID_PATTERN`: `userId` turi būti griežtai v4,
+ * bet vardo draudimas yra defense-in-depth, ir UUIDv1 ar v7 formos vardas
+ * loguose bei audite klaidintų lygiai taip pat. Naudojant v4 šabloną abiem
+ * tikslams, draudimas tyliai apimtų tik vieną versiją.
+ */
+const UUID_LIKE_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const KNOWN_ROLES = ["administrator", "operator"];
 
 class CredentialConfigError extends Error {
@@ -123,24 +149,63 @@ function verifyPassword(password, storedHash) {
  * su nesuprastu rolės lauku.
  */
 function parseUserEntry(raw, index) {
+  /**
+   * TIKSLIAI 4 LAUKAI (#158).
+   *
+   * Anksčiau maiša buvo renkama GODŽIAI (`hashParts.join(":")`) – atsarga tam
+   * atvejui, jei maišoje atsirastų dvitaškis. Realiai scrypt serializacija yra
+   * `scrypt$N$r$p$saltHex$hashHex` ir dvitaškių NENAUDOJA, o `parseStoredHash()`
+   * tai griežtai validuoja.
+   *
+   * Godumas dabar tik kenktų: ketvirtas laukas (`userId`) būtų tyliai
+   * priklijuotas prie maišos, o klaida pasirodytų kaip klaidinantis
+   * „netinkamas scrypt formatas". Griežtą kontraktą saugo testas
+   * „maiša su dvitaškiu → klaida" – jis egzistuoja būtent tam, kad ateityje
+   * kas nors negrąžintų godaus parserio patogumo sumetimais.
+   */
   const parts = raw.split(":");
-  if (parts.length < 3) {
+  if (parts.length !== 4) {
     throw new CredentialConfigError(
-      `AUTH_USERS įrašas #${index + 1} netinkamas: laukiama "vardas:rolė:maiša", gauta "${raw}".`
+      `AUTH_USERS įrašas #${index + 1} netinkamas: laukiama ` +
+        `"vardas:rolė:maiša:userId" (4 laukai), gauta ${parts.length}.`
     );
   }
 
-  const [username, role, ...hashParts] = parts;
-  const passwordHash = hashParts.join(":");
+  const [username, role, passwordHash, userId] = parts;
 
   if (!USERNAME_PATTERN.test(username)) {
     throw new CredentialConfigError(
       `AUTH_USERS įrašas #${index + 1}: vardas "${username}" netinkamas (mažosios raidės, skaitmenys, _ -, 2-64 simboliai).`
     );
   }
+  /**
+   * UUID FORMOS VARDAS DRAUDŽIAMAS (defense-in-depth, #158).
+   *
+   * Maršrutizavimas nuo formos NEpriklauso – jį lemia job `schemaVersion`.
+   * Bet `USERNAME_PATTERN` UUID formos vardą įleidžia
+   * (`a1b2c3d4-e29b-41d4-a716-446655440000` prasideda raide, turi tik
+   * [a-z0-9-], 36 simboliai), o vardas, neatskiriamas nuo ID, yra spąstai
+   * bet kuriam būsimam kodui ir logų skaitytojui.
+   *
+   * Tikrinama `UUID_LIKE_PATTERN` (bet kuri versija), NE `USER_ID_PATTERN`
+   * (griežtai v4): draudimas turi apimti visas UUID formas, net tas, kurių
+   * `userId` lauke nepriimtume.
+   */
+  if (UUID_LIKE_PATTERN.test(username)) {
+    throw new CredentialConfigError(
+      `AUTH_USERS įrašas #${index + 1}: vardas negali būti UUID formos ` +
+        "(neatskiriamas nuo userId loguose ir audite)."
+    );
+  }
   if (!KNOWN_ROLES.includes(role)) {
     throw new CredentialConfigError(
       `AUTH_USERS įrašas #${index + 1}: rolė "${role}" nežinoma. Galimos: ${KNOWN_ROLES.join(", ")}.`
+    );
+  }
+  if (!USER_ID_PATTERN.test(userId)) {
+    throw new CredentialConfigError(
+      `AUTH_USERS įrašas #${index + 1} (vartotojas "${username}"): userId turi būti UUIDv4. ` +
+        "Sugeneruokite su scripts/hash-password.js, ne rankiniu tekstu."
     );
   }
   /**
@@ -161,7 +226,7 @@ function parseUserEntry(raw, index) {
     );
   }
 
-  return { username, role, passwordHash };
+  return { username, role, passwordHash, userId };
 }
 
 /**
@@ -176,16 +241,44 @@ function loadUsers(env = process.env) {
 
   const entries = raw.split(",").map((s) => s.trim()).filter(Boolean);
   const users = new Map();
+  const seenIds = new Set();
 
   entries.forEach((entry, index) => {
     const user = parseUserEntry(entry, index);
     if (users.has(user.username)) {
       throw new CredentialConfigError(`AUTH_USERS: vartotojas "${user.username}" nurodytas daugiau nei kartą.`);
     }
+    /**
+     * DUBLIUOTAS `userId` yra pavojingesnis už dubliuotą vardą: du vardai su
+     * tuo pačiu ID reikštų, kad job nuosavybė ir audito įrašai nurodo į dvi
+     * skirtingas paskyras, o `loadUsersById()` tyliai grąžintų paskutinę.
+     */
+    if (seenIds.has(user.userId)) {
+      throw new CredentialConfigError(`AUTH_USERS: userId "${user.userId}" nurodytas daugiau nei kartą.`);
+    }
+    seenIds.add(user.userId);
     users.set(user.username, user);
   });
 
   return users;
+}
+
+/**
+ * Tas pats sąrašas, indeksuotas pagal `userId` (#158).
+ *
+ * ATSKIRA funkcija, o ne `loadUsers()` grąžinimo tipo pakeitimas: `loadUsers()`
+ * naudoja `verifyCredentials()`, `utils/jobAuthorization.js` ir
+ * `utils/startupChecks.js` – kontrakto keitimas paliestų tris nesusijusius kelius.
+ *
+ * NAŠUMAS nesikeičia: `loadUsers()` kešo neturi ir jau dabar parsinamas
+ * kiekvienos job autorizacijos metu (`jobAuthorization.js`). Ši funkcija tą
+ * kvietimą PAKEIČIA, ne prideda. Kešas čia būtų atskiras darbas su savo
+ * invalidacijos klausimu (`AUTH_USERS` keitimas be restarto).
+ */
+function loadUsersById(env = process.env) {
+  const byId = new Map();
+  for (const user of loadUsers(env).values()) byId.set(user.userId, user);
+  return byId;
 }
 
 /**
@@ -229,7 +322,11 @@ function verifyCredentials(username, password, env = process.env) {
   const valid = verifyPassword(password, hashToCheck);
 
   if (!user || !valid) return null;
-  return { username: user.username, role: user.role };
+  /**
+   * `id` PIRMAS laukas – jis, o ne vardas, yra tapatybė (#158). Vardas lieka
+   * grąžinamas, nes jį naudoja auditas, logai ir sesijos cookie srautas.
+   */
+  return { id: user.userId, username: user.username, role: user.role };
 }
 
 module.exports = {
@@ -237,7 +334,10 @@ module.exports = {
   verifyPassword,
   verifyCredentials,
   loadUsers,
+  loadUsersById,
   CredentialConfigError,
   USERNAME_PATTERN,
+  USER_ID_PATTERN,
+  UUID_LIKE_PATTERN,
   KNOWN_ROLES,
 };

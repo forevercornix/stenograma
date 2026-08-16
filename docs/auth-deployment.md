@@ -19,14 +19,31 @@ node scripts/hash-password.js sysadmin administrator
 Rezultatą įrašykite į `.env`:
 
 ```bash
-AUTH_USERS=sysadmin:administrator:scrypt$16384$8$1$<druska>$<maiša>
+AUTH_USERS=sysadmin:administrator:scrypt$16384$8$1$<druska>$<maiša>:<userId>
 ```
 
 Kelis vartotojus atskirkite kableliais:
 
 ```bash
-AUTH_USERS=sysadmin:administrator:scrypt$...,darbuotojas:operator:scrypt$...
+AUTH_USERS=sysadmin:administrator:scrypt$...:<uuid1>,darbuotojas:operator:scrypt$...:<uuid2>
 ```
+
+⚠️ **`userId` (ketvirtas laukas) yra STABILI tapatybė.** Vardas gali keistis, ID – ne
+(žr. [ADR 0001](decisions/0001-stable-user-identity.md)).
+
+Naujam vartotojui ID sugeneruoja pats skriptas. **Esamam vartotojui** – keičiant
+slaptažodį ar vardą – perduokite jo dabartinį ID, kitaip job'ai ir audito įrašai
+atsies nuo paskyros:
+
+```bash
+# naujas vartotojas
+node scripts/hash-password.js petras operator
+
+# slaptažodžio ar vardo keitimas – ID IŠSAUGOMAS
+node scripts/hash-password.js petras operator --user-id <esamas-uuid>
+```
+
+Esamą ID rasite dabartiniame `AUTH_USERS` įraše (ketvirtas laukas).
 
 ⚠️ **Slaptažodis niekada nelaikomas tekstu.** Netinkamai suformuota maiša
 **stabdo serverio startą** – tai sąmoninga, nes tyliai praleistas įrašas
@@ -90,9 +107,15 @@ neatšaukė. Nutraukiama tik dingus pačiai tapatybei ar teisei.
 **Slaptažodžio keitimas:**
 
 ```bash
-node scripts/hash-password.js <vardas> <rolė>   # nauja maiša
-# pakeisti AUTH_USERS įrašą, perkrauti serverį
+# 1. Nusikopijuokite esamą userId iš AUTH_USERS (ketvirtas laukas)
+# 2. Sugeneruokite naują maišą IŠSAUGODAMI tą ID:
+node scripts/hash-password.js <vardas> <rolė> --user-id <esamas-uuid>
+# 3. Pakeisti AUTH_USERS įrašą, perkrauti serverį
 ```
+
+⚠️ **Be `--user-id` skriptas sukuria naują tapatybę.** Rotacijos metu tai atsietų
+vartotojo job'us ir audito įrašus nuo jo paskyros. Skriptas apie tai įspėja, bet
+įpratimas paleisti jį be argumentų yra pagrindinė šio srauto klaida.
 
 Restartas išvalo sesijas, tad senas slaptažodis nebeveikia iš karto – atskiro
 „revoke all sessions" veiksmo nereikia.

@@ -17,9 +17,9 @@ const { hashPassword } = require("../utils/credentials");
 const ADMIN_PASSWORD = "admin-kopijoms-slaptas-1";
 const OPERATOR_PASSWORD = "operator-kopijoms-slaptas-2";
 
-process.env.AUTH_USERS = `sysadmin:administrator:${hashPassword(ADMIN_PASSWORD)},darbuotojas:operator:${hashPassword(
+process.env.AUTH_USERS = `sysadmin:administrator:${hashPassword(ADMIN_PASSWORD)}:11111111-1111-4111-8111-111111111111,darbuotojas:operator:${hashPassword(
   OPERATOR_PASSWORD
-)}`;
+)}:33333333-3333-4333-8333-333333333333`;
 process.env.API_KEY = "";
 
 const request = require("supertest");

@@ -1,4 +1,4 @@
-const { loadUsers } = require("./credentials");
+const { loadUsers, loadUsersById } = require("./credentials");
 const { resolveApiKeyRole } = require("../middleware/authorize");
 const { hasPermission, PERMISSIONS } = require("./permissions");
 const { createLogger } = require("./logger");
@@ -42,6 +42,35 @@ const DENY_REASON = {
 };
 
 /**
+ * ĮRAŠO EROS INVARIANTAS (#158).
+ *
+ * Vienas šaltinis abiem įėjimams (`authorizeJobExecution` ir
+ * `resolveCurrentRole`). Dubliuota patikra dviejose vietose ilgainiui
+ * išsiskirtų, o skirtumas būtų būtent toks, kokį ši funkcija ir saugo:
+ * nežinoma era, tyliai apsimetusi žinoma.
+ *
+ * `== null` SĄMONINGAI: „eros nėra" yra teisėta pre-v2 būsena, o Redis lauko
+ * nebuvimą grąžina kaip `null` (tuščias string'as deserializacijoje), ne
+ * `undefined`. Griežta `undefined` patikra būtų metusi klaidą kiekvienam
+ * legacy job'ui iš Redis.
+ */
+function assertSupportedSchemaVersion(job) {
+  /**
+   * `null` job'as yra TEISĖTAS įėjimas – `authorizeJobExecution()` jį
+   * praleidžia kaip `NO_ACTOR` (žr. `!job ||` patikrą ten). Invariantas neturi
+   * to keisti: jis saugo nuo nežinomos EROS, ne nuo trūkstamo įrašo.
+   */
+  if (!job) return;
+
+  if (job.schemaVersion != null && job.schemaVersion !== 2) {
+    throw new Error(
+      `Nepalaikoma job schemaVersion: ${job.schemaVersion} (job ${job.id}). ` +
+        "Nauja era turi gauti savo maršrutizavimo šaką, ne paveldėti senąją."
+    );
+  }
+}
+
+/**
  * Perskaičiuoja aktoriaus rolę DABAR, o ne pasitiki jobo įrašu.
  *
  * @returns {string|null} dabartinė rolė arba `null`, jei aktoriaus nebėra.
@@ -61,14 +90,62 @@ function resolveCurrentRole(job, env = process.env) {
    * nepriklausomos apsaugos pigiau nei viena - ir, svarbiau, dvi kopijos tos
    * pačios logikos ilgainiui išsiskiria.
    */
+  /**
+   * Tikrinama PRIEŠ `actorSource` maršrutizavimą: `schemaVersion: 3` kitaip
+   * nukristų į legacy šaką, jo `actor` būtų aiškinamas kaip vardas, ir dar
+   * būtų užterštas legacy WARN signalas.
+   */
+  assertSupportedSchemaVersion(job);
+
   if (job.actorSource === "api-key") {
     return resolveApiKeyRole(env);
   }
 
   if (job.actorSource === "session" && job.actor) {
-    const users = loadUsers(env);
-    const user = users.get(job.actor);
+    /**
+     * ERA, NE FORMA (#158).
+     *
+     * Repo turi TRIS eras, ir jos skiriasi ne aktoriaus eilutės forma, o įrašo
+     * `schemaVersion`. Forma netiktų: vardo šablonas įleidžia UUID formos
+     * vardą, o API rakto aktorius (`key_<hex>`) irgi nėra UUID.
+     */
+    if (job.schemaVersion === 2) {
+      /**
+       * `actor` yra stabilus `userId`. Nerastas ID reiškia IŠTRINTĄ vartotoją
+       * → `ACTOR_UNKNOWN`.
+       *
+       * LEGACY FALLBACK ČIA BŪTŲ KLAIDA: ištrinto vartotojo įvykiai užterštų
+       * WARN signalą, pagal kurį sprendžiama, kada legacy šaką galima šalinti.
+       */
+      const user = loadUsersById(env).get(job.actor);
+      return user ? user.role : null;
+    }
+
+    /**
+     * LEGACY (#18 era, be `schemaVersion`): `actor` yra vartotojo vardas.
+     *
+     * Šaka šalinama ATSKIRU PR po maksimalaus job TTL / retencijos lango nuo
+     * diegimo. WARN leidžia stebėti, kada ji nustoja suveikti; jis SĄMONINGAI
+     * atskiras nuo `ACTOR_UNKNOWN`, kad du signalai nesimaišytų.
+     */
+    log.warn(
+      { jobId: job.id, event: "legacy_actor_lookup" },
+      "Job be schemaVersion - tapatybė sprendžiama pagal vardą (#158 legacy šaka)"
+    );
+    const user = loadUsers(env).get(job.actor);
     return user ? user.role : null;
+  }
+
+  /**
+   * ŽINOMA ERA, NEŽINOMAS `actorSource` → KONTROLIUOJAMA KLAIDA.
+   *
+   * Tylus `null` čia atrodytų kaip `ACTOR_UNKNOWN` (t. y. „vartotojas
+   * ištrintas") ir paslėptų konfigūracijos ar kodo klaidą. Pre-v2 įrašams
+   * paliekamas `null`: jų `actorSource` reikšmių rinkinys jau užfiksuotas
+   * istorijoje ir keistis nebegali.
+   */
+  if (job.schemaVersion === 2) {
+    throw new Error(`Nežinomas actorSource: ${job.actorSource}`);
   }
 
   return null;
@@ -80,6 +157,20 @@ function resolveCurrentRole(job, env = process.env) {
  * @returns {{allowed: boolean, reason?: string, role?: string}}
  */
 function authorizeJobExecution(job, permission = PERMISSIONS.JOB_CREATE, env = process.env) {
+  /**
+   * EROS INVARIANTAS TIKRINAMAS PIRMAS – VIRŠ #17 short-circuit'o.
+   *
+   * Žemiau esanti `!job.actorSource` šaka praleidžia įrašą su `allowed: true`
+   * ir niekada nekviečia `resolveCurrentRole()`. Be šios eilutės įrašas
+   * `{schemaVersion: 3, actorSource: null}` apeitų eros patikrą ir būtų
+   * PALEISTAS kaip #17 legacy – blogesnis atvejis nei klaidingas atmetimas,
+   * nes nežinomos eros darbas realiai įvyktų.
+   *
+   * #17 semantika nekeičiama: `schemaVersion` nesantis ar `null` toliau
+   * praeina į passthrough šaką.
+   */
+  assertSupportedSchemaVersion(job);
+
   /**
    * JOBAI BE `actorSource` PRALEIDŽIAMI.
    *

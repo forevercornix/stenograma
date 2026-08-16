@@ -73,6 +73,13 @@ const NUMBER_FIELDS = new Set([
   "attempt_count",
   "audio_cleanup_attempts",
   "deletion_attempts",
+  /**
+   * Įrašo era (#158). BŪTINA čia: Redis viską grąžina kaip string'ą, o
+   * `jobAuthorization` lygina `schemaVersion === 2`. Be konversijos "2" !== 2
+   * ir KIEKVIENAS Redis job'as tyliai atrodytų kaip legacy – t. y. jų tapatybė
+   * būtų sprendžiama pagal vardą, nors `actor` jau yra userId.
+   */
+  "schemaVersion",
 ]);
 
 function serialize(job) {

@@ -13,9 +13,9 @@ process.env.DIARIZATION_PROVIDER = "none";
 
 const { hashPassword } = require("../utils/credentials");
 
-process.env.AUTH_USERS = `sysadmin:administrator:${hashPassword("admin-slaptas-1")},darbuotojas:operator:${hashPassword(
+process.env.AUTH_USERS = `sysadmin:administrator:${hashPassword("admin-slaptas-1")}:11111111-1111-4111-8111-111111111111,darbuotojas:operator:${hashPassword(
   "operator-slaptas-2"
-)}`;
+)}:33333333-3333-4333-8333-333333333333`;
 // API_KEY IŠJUNGTAS šiame faile - tikrinam GRYNAI sesijų RBAC, be atsarginio
 // rakto kelio, kuris pagal nutylėjimą turi administrator rolę.
 process.env.API_KEY = "";
@@ -403,4 +403,87 @@ test("DEV NUOSEKLUMAS: SUKONFIGŪRAVUS autentifikaciją /auth/me vėl reikalauja
 
   assert.equal(res.status, 401);
   assert.equal(res.body.code, "SESSION_REQUIRED");
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #158: STABILI TAPATYBĖ PER TIKRĄ HTTP SRAUTĄ
+ *
+ * Vienetiniai testai tikrina grandies galus atskirai. Šie – visą kelią:
+ * login → verifyCredentials → sessionStore → cookie → middleware → req.user.
+ * Būtent tokio pobūdžio spraga (#17 laikų `actor` be `actorSource`) anksčiau
+ * praslydo pro vienetinius testus ir buvo rasta tik pilname sraute.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const sessionStoreForIdentity = require("../utils/sessionStore");
+
+const SYSADMIN_ID = "11111111-1111-4111-8111-111111111111";
+
+test("#158 SRAUTAS: login sukuria sesiją su stabiliu userId iš AUTH_USERS", async () => {
+  const login = await request(app)
+    .post("/api/auth/login")
+    .send({ username: "sysadmin", password: "admin-slaptas-1" });
+
+  assert.equal(login.status, 200);
+
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+  const sessionId = cookie.split("=")[1];
+  const session = await sessionStoreForIdentity.touch(sessionId);
+
+  assert.equal(session.userId, SYSADMIN_ID, "userId turi ateiti iš AUTH_USERS ketvirto lauko");
+  assert.equal(session.username, "sysadmin");
+});
+
+test("#158 SRAUTAS: /api/auth/me neatskleidžia userId klientui", async () => {
+  /**
+   * SĄMONINGAS sprendimas: `userId` yra vidinis stabilus identifikatorius.
+   * Jo atskleidimas naršyklei būtų API kontrakto pakeitimas be poreikio –
+   * nė vienas klientas jo nenaudoja. Jei kada prireiks, tai atskiras sprendimas.
+   */
+  const agent = request.agent(app);
+  await agent.post("/api/auth/login").send({ username: "sysadmin", password: "admin-slaptas-1" });
+
+  const me = await agent.get("/api/auth/me");
+
+  assert.equal(me.status, 200);
+  assert.equal(me.body.username, "sysadmin");
+  assert.equal(me.body.userId, undefined, "vidinis ID neturi nutekėti į atsakymą");
+  assert.equal(me.body.id, undefined);
+});
+
+test("#158 SRAUTAS: sesija be stabilaus userId NEKURIA job'o (fail-fast)", async () => {
+  /**
+   * ANOMALIJA, ne normalus kelias: po #158 `verifyCredentials()` visada
+   * grąžina `id`. Bet jei taip nutiktų, `newJob()` vis tiek pažymėtų įrašą
+   * kaip `schemaVersion: 2`, ir `jobAuthorization` aiškintų įrašytą VARDĄ kaip
+   * `userId` – job'as žūtų `ACTOR_UNKNOWN` jau suvartojęs eilės vietą ir
+   * vartotojo laukimą.
+   *
+   * Iš anksto pasmerktas job'as blogesnis už atmestą užklausą, tad anomalija
+   * sustabdoma PRIEŠ enqueue.
+   */
+  const agent = request.agent(app);
+  await agent.post("/api/auth/login").send({ username: "sysadmin", password: "admin-slaptas-1" });
+
+  // Imituojam anomaliją: sesijos įraše dingsta userId.
+  const sessions = sessionStoreForIdentity;
+  const before = await sessions.size();
+  assert.ok(before > 0, "prielaida: sesija sukurta");
+
+  const login2 = await request(app)
+    .post("/api/auth/login")
+    .send({ username: "sysadmin", password: "admin-slaptas-1" });
+  const cookie = login2.headers["set-cookie"][0].split(";")[0];
+  const sessionId = cookie.split("=")[1];
+
+  const session = await sessions.touch(sessionId);
+  session.userId = null; // in-memory įrašas - keičiam tiesiogiai
+
+  const res = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookie)
+    .send({ transcript: "Jonas: Sveiki, pradedam susitikima. Reikia parengti ataskaita." });
+
+  assert.equal(res.status, 500, "anomalija turi būti atmesta, o ne sukurti pasmerktą job'ą");
+  assert.equal(res.body.code, "IDENTITY_UNAVAILABLE");
+  assert.equal(res.body.jobId, undefined, "job'as neturi būti sukurtas");
 });
