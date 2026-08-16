@@ -380,7 +380,7 @@ test("#158 PARSERIS: teisingi 4 laukai praeina ir grąžina userId", () => {
  */
 test("#158 PARSERIS: maiša su dvitaškiu meta klaidą (godumas nebegrąžinamas)", () => {
   const h = hashPassword("x");
-  const suDvitaskiu = h.replace("$", ":");
+  const suDvitaskiu = h.replace(/\$/g, ":");
   assert.throws(
     () => loadUsers({ AUTH_USERS: `admin:operator:${suDvitaskiu}:${UID_A}` }),
     (e) => e instanceof CredentialConfigError,
