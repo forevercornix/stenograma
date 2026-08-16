@@ -727,6 +727,42 @@ Metodika: [`docs/protocol-evaluation-rubric.md`](protocol-evaluation-rubric.md).
 ⚠️ Vertina **žmogus, bet pagal iš anksto apibrėžtus kriterijus**: „man atrodo
 neblogai" nėra vertinimas, o automatinė metrika neaptiktų prasmės iškraipymo.
 
+## #159 — job nuosavybė (`ownerId` + `ownerKind`)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| A negauna, nekeičia ir neištrina B job'o | `jobOwnership` | `matchesOwner` rūšies patikros pašalinimas → krinta 4 |
+| Svetimas job'as neatskleidžiamas per HTTP (nei 200, nei turinys) | `rbac.route` | `denyIfForbidden` pašalinimas → krinta HTTP testas |
+| Svetimo job'o DELETE nepalieka šalutinio poveikio | `rbac.route` | Tikrinamas ne tik statusas, bet ir kad įrašas liko store'e |
+| `FORBIDDEN` ≠ `null` (403/404 sprendimas lieka #160) | `jobOwnership` | `Symbol` truthy: `if (!job)` jo nepagauna |
+| Bendras `API_KEY` NĖRA legacy job'o savininkas | `jobOwnership` | Be `ownerKind` abu normalizuojasi į `""` → savininkas |
+| `""` NĖRA wildcard (trys `null` deriniai) | `jobOwnership`, `ownershipCasRedis.integration` | Rūšies patikros pašalinimas |
+| Legacy įrašas nepriklauso NĖ VIENAI vartotojo rūšiai | `jobOwnership` | Fixture per `restoreRecord()`, ne `create()` |
+| `ownerId`/`ownerKind` nekeičiami per `applyPatch` | `jobOwnership` | Immutability pašalinimas → krinta 1 |
+| `create()` nepriima legacy formato ir prieštaringų derinių | `jobOwnership` | `assertCreateOwnership` pašalinimas → krinta 2 |
+| Tas pats invariantas kūrimui IR skaitymui | `jobOwnership` | Derinio patikros pašalinimas → krinta visas failas |
+| Pozicinis `id` atmetamas (scope privalomas) | `jobOwnership` | `assertScope` pašalinimas → krinta 1 |
+| Nuosavybės patikra ir rašymas **atominiai** | `ownershipCasRedis.integration` | Lua CAS pašalinimas → krinta race testas |
+| CAS tikrina IR rūšį, ne tik `ownerId` | `ownershipCasRedis.integration` | Lua `kind` patikros pašalinimas → krinta 1 |
+| Sisteminis sweep mato VISŲ savininkų job'us | `jobOwnership`, `ownershipCasRedis.integration` | Aklas scope'inimas nutildytų retenciją |
+| `jobStore.system` nepasiekiamas iš `routes/` | `systemNamespaceBoundary` | `jobStore.system.get()` įvedimas maršrute → krinta |
+| Dev-open ≠ bendras `API_KEY` | `exports.route`, `transcribeJobs.route` | `API_KEY` patikros pašalinimas → krinta 10 |
+
+⚠️ **Atomiškumo riba (sąmoninga).** Atominė yra TIK nuosavybės savybė: `HSET`
+neįvyksta, jei savininkas ar rūšis pasikeitė. Patch'as skaičiuojamas iš galimai
+pasenusio įrašo — tai esama last-write-wins semantika, kurios #159 nekeičia.
+
+⚠️ **Race testai turi eiti per Lua, ne per JS greitąjį kelią.** Pirmoji CAS testo
+versija keitė savininką PRIEŠ `updateOwned()`, tad suveikdavo JS pusės
+`matchesOwner()` ir mutacija liko nepagauta. Dabar rūšis/ID keičiami
+interceptinant pirmą `eval()`.
+
+⚠️ **Našlaičių nuosavybė NETIKRINAMA.** `eraseOrphanedJobData()` veikia tada, kai
+`jobStore` įrašo nebėra — kartu nebėra ir `ownerId`. Rezultatas žymimas
+`ownershipVerified: false`; politika (eilinis vartotojas ar admin-only) — #160.
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
