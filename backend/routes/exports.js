@@ -5,7 +5,11 @@ const { requirePermission } = require("../middleware/authorize");
 const { PERMISSIONS } = require("../utils/permissions");
 const auditLog = require("../utils/auditLog");
 const jobStore = require("../utils/jobStore");
-const { getOwnerScope } = require("../utils/ownerScope");
+const {
+  ACCESS_DECISION,
+  OPERATION,
+  resolveJobAccess,
+} = require("../utils/jobAccessTransport");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const { buildExport } = require("../services/exportService");
 const { createLogger } = require("../utils/logger");
@@ -103,8 +107,16 @@ router.post(
     let storeFailed = false;
 
     try {
-      const scope = getOwnerScope(req);
-      job = await jobStore.get({ jobId, ...scope });
+      /**
+       * #160: eksportas naudoja TĄ PATĮ politikos kelią kaip `GET` ir `DELETE`.
+       *
+       * Čia sprendimas nevirsta HTTP statusu – eksportas tęsiasi ir be job
+       * ryšio (`linkState`). Bet įėjimas turi būti tas pats, kad politika
+       * nesiskirtų: `FORBIDDEN` ir `null` abu duoda `missing`, tad svetimo
+       * job'o egzistavimas nenuteka net per audito lauką.
+       */
+      const { decision, job: owned } = await resolveJobAccess(req, jobId, OPERATION.EXPORT);
+      job = decision === ACCESS_DECISION.OWNER_ACCESS ? owned : null;
     } catch (e) {
       storeFailed = true;
 
@@ -121,15 +133,15 @@ router.post(
 
     if (storeFailed) {
       linkState = "store_error";
-    } else if (job === jobStore.FORBIDDEN || !job) {
+    } else if (!job) {
       /**
-       * #159: `FORBIDDEN` (svetimas job'as) traktuojamas TAIP PAT kaip
-       * nesantis - fail-closed.
+       * Svetimas job'as jau paverstas `null` aukščiau (#160 politikos kelias),
+       * tad čia lieka viena šaka.
        *
-       * Be šios šakos `FORBIDDEN` (Symbol, taigi truthy) nukristų į `job.type`
-       * patikrą, `Symbol.type` būtų `undefined`, ir auditas užfiksuotų
-       * `invalid_type`. Tai atskleistų, kad job'as EGZISTUOJA, tik netinkamo
-       * tipo - t. y. svetimo įrašo buvimas nutekėtų per audito lauką.
+       * ⚠️ Anksčiau `FORBIDDEN` (Symbol, taigi truthy) nukrisdavo į `job.type`
+       * patikrą, `Symbol.type` būdavo `undefined`, ir auditas užfiksuodavo
+       * `invalid_type` – tai atskleisdavo, kad job'as EGZISTUOJA, tik netinkamo
+       * tipo. Egzistavimas nutekėdavo per audito lauką.
        */
       linkState = "missing";
     } else if (job.type !== jobStore.JOB_TYPES.TRANSCRIPTION) {

@@ -57,6 +57,19 @@ const IŠIMTYS = new Set([
    * ne apeinant duomenų sluoksnį.
    */
   "services/backupService.js",
+
+  /**
+   * Administracinis override (#160).
+   *
+   * Šis servisas EGZISTUOJA būtent tam, kad privilegija būtų sutelkta vienoje
+   * siauroje vietoje, o ne išsibarstytų po maršrutus. Alternatyva – leisti
+   * `jobStore.system` `routes/` sluoksnyje – panaikintų patį sargą.
+   *
+   * Servisas pats pakartotinai tikrina session-admin invariantą
+   * (`assertSessionAdmin`) ir audituoja kiekvieną panaudojimą, įskaitant
+   * nesėkmingus bandymus.
+   */
+  "services/adminJobService.js",
 ]);
 
 function jsFiles(dir) {
@@ -116,6 +129,33 @@ test("#159 SARGAS: routes/ neturi NĖ VIENOS išimties", () => {
   for (const rel of IŠIMTYS) {
     assert.ok(!rel.startsWith("routes/"), `routes/ išimtys draudžiamos: ${rel}`);
   }
+});
+
+test("#160 SARGAS: maršrutai nesprendžia 403/404 patys", () => {
+  /**
+   * Politika turi gyventi VIENOJE vietoje (`utils/jobAccessPolicy.js` +
+   * `jobAccessTransport.js`). Jei maršrutas pats vers `FORBIDDEN` į statusą,
+   * politika išsiskirs, o skirtumas bus tyli spraga: vienas endpoint'as ims
+   * grąžinti 403 ten, kur kitas grąžina 404, ir atsiras egzistavimo orakulas
+   * per „lengvesnį" kelią.
+   */
+  const pažeidimai = [];
+
+  for (const rel of jsFiles("routes")) {
+    const src = fs.readFileSync(path.join(ROOT, rel), "utf8");
+    src.split("\n").forEach((line, i) => {
+      if (/jobStore\s*\.\s*FORBIDDEN/.test(line)) {
+        pažeidimai.push(`${rel}:${i + 1}: ${line.trim()}`);
+      }
+    });
+  }
+
+  assert.deepEqual(
+    pažeidimai,
+    [],
+    "Maršrutai neturi tiesiogiai lyginti su jobStore.FORBIDDEN – " +
+      "sprendimą priima decideJobAccess():\n" + pažeidimai.join("\n")
+  );
 });
 
 test("#159 SARGAS: kiekviena išimtis turi egzistuoti ir būti pagrįsta", () => {
