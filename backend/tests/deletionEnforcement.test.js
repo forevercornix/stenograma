@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -35,12 +36,12 @@ test("APSAUGA: `jobStore.update` atmeta atnaujinimą po ištrynimo", async () =>
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
-  assert.ok(await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING }), "prieš žymą – leidžiama");
+  assert.ok(await jobStore.system.restart(job.id), "prieš žymą – leidžiama");
 
   tombstones.mark(job.id, { actor: "sysadmin" });
 
   assert.equal(
-    await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED }),
+    await markCompleted(jobStore.system, job.id),
     null,
     "po žymos atnaujinimas turi būti ATMESTAS"
   );
@@ -62,8 +63,13 @@ test("APSAUGA: apėjimui reikia SIMBOLIO, `true` neveikia", async () => {
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
   tombstones.mark(job.id, { actor: "sysadmin" });
 
+  /**
+   * ⚠️ Šis testas tikrina APĖJIMO MECHANIZMĄ (`allowAfterDeletion`), ne fazių
+   * kontraktą. Todėl jis sąmoningai naudoja neutralų lauką, o ne `status` –
+   * po #154 statusą valdo state machine, ir `update()` jo nebepriima.
+   */
   assert.equal(
-    await jobStore.system.update(job.id, { status: jobStore.STATUS.FAILED }, { allowAfterDeletion: true }),
+    await jobStore.system.update(job.id, { attempt_count: 3 }, { allowAfterDeletion: true }),
     null,
     "`true` NETURI atidaryti apėjimo"
   );
@@ -71,7 +77,7 @@ test("APSAUGA: apėjimui reikia SIMBOLIO, `true` neveikia", async () => {
   assert.ok(
     await jobStore.system.update(
       job.id,
-      { status: jobStore.STATUS.FAILED },
+      { attempt_count: 3 },
       { allowAfterDeletion: jobStore.LIFECYCLE_INTERNAL }
     ),
     "tik simbolis leidžia apeiti"
@@ -130,7 +136,7 @@ test("APSAUGA: `pending` žyma irgi blokuoja – ne tik `deleted`", async () => 
   assert.equal(tombstones.isConfirmedDeleted(job.id), false, "dar nepatvirtinta");
 
   assert.equal(
-    await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED }),
+    await markCompleted(jobStore.system, job.id),
     null,
     "vykstant ištrynimui atnaujinimas irgi atmetamas"
   );
@@ -150,7 +156,7 @@ test("APSAUGA: nepavykęs ištrynimas NEATIDARO kelio atgal", async () => {
   tombstones.mark(job.id, { actor: "x" });
   tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.FAILED);
 
-  assert.equal(await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED }), null);
+  assert.equal(await markCompleted(jobStore.system, job.id), null);
 });
 
 test("LENKTYNĖS: ištrynimas VYKDYMO metu neleidžia užbaigti darbo", async () => {
@@ -163,16 +169,13 @@ test("LENKTYNĖS: ištrynimas VYKDYMO metu neleidžia užbaigti darbo", async ()
   await jobStore.init();
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING });
+  await jobStore.system.restart(job.id);
 
   // Ištrynimas įvyksta VIDURYJE darbo.
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
   // Worker'is bando įrašyti rezultatą.
-  const afterDeletion = await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { protokolas: "neturėtų išlikti" },
-  });
+  const afterDeletion = await markCompleted(jobStore.system, job.id, { result: { protokolas: "neturėtų išlikti" } });
 
   assert.equal(afterDeletion, null, "rezultatas NEGALI būti įrašytas po ištrynimo");
   assert.equal(await jobStore.system.get(job.id), null, "jobo įrašo neturi būti");

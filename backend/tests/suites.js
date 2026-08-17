@@ -99,6 +99,10 @@ const security = [
   "jobAccessTransport",
   /** #153: rezultatų ir artefaktų dydžio ribos (apsauga IŠĖJIME). */
   "resultLimits",
+  /** #154: fazių ir progreso state machine – gryna, be store ir HTTP. */
+  "jobPhase",
+  /** #154: fazių kontraktas per store – invariantai ir pavėlavę įvykiai. */
+  "jobPhaseStore",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",

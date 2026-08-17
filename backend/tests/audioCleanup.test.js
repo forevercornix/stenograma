@@ -33,6 +33,15 @@ function loadReleaseAudio({ delThrows = null }) {
     "utils/jobStore": {
       /** #159: audio valymas yra sisteminis kelias – privilegijuotas namespace. */
       system: {
+        /** #154: state machine metodai – dublis turi tą pačią formą kaip produkcija. */
+        finish: async (id, status, extra = {}) => {
+          calls.update.push({ id, patch: { status, ...extra } });
+          return { id, status, ...extra };
+        },
+        restart: async (id, extra = {}) => {
+          calls.update.push({ id, patch: { status: "processing", ...extra } });
+          return { id, status: "processing", ...extra };
+        },
         update: async (id, patch) => {
           calls.update.push({ id, patch });
           return { id, ...patch };
@@ -153,6 +162,15 @@ test("inline runner: cleanup klaidos atveju storageKey lieka", async () => {
       STATUS: { QUEUED: "queued", PROCESSING: "processing", COMPLETED: "completed", FAILED: "failed" },
       /** #159: runner ir worker yra sisteminiai keliai. */
       system: {
+        /** #154: state machine metodai – dublis turi tą pačią formą kaip produkcija. */
+        finish: async (id, status, extra = {}) => {
+          calls.update.push({ id, patch: { status, ...extra } });
+          return { id, status, ...extra };
+        },
+        restart: async (id, extra = {}) => {
+          calls.update.push({ id, patch: { status: "processing", ...extra } });
+          return { id, status: "processing", ...extra };
+        },
         update: async (id, patch) => {
           calls.update.push({ id, patch });
           jobs.set(id, { ...(jobs.get(id) || { id }), ...patch });
@@ -219,6 +237,15 @@ test("worker cleanup: klaidos atveju storageKey lieka", async () => {
       STATUS: { COMPLETED: "completed", FAILED: "failed", PROCESSING: "processing" },
       /** #159: worker yra sisteminis kelias. */
       system: {
+        /** #154: state machine metodai – dublis turi tą pačią formą kaip produkcija. */
+        finish: async (id, status, extra = {}) => {
+          calls.update.push({ id, patch: { status, ...extra } });
+          return { id, status, ...extra };
+        },
+        restart: async (id, extra = {}) => {
+          calls.update.push({ id, patch: { status: "processing", ...extra } });
+          return { id, status: "processing", ...extra };
+        },
         update: async (id, patch) => {
           calls.update.push({ id, patch });
           return { id, ...patch };

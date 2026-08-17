@@ -913,6 +913,54 @@ interpretuotas neteisingai.
 
 ---
 
+## #154 — job fazių ir progreso state machine
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Du ATSKIRI grafai** (`transcription` ≠ `protocol`) | `jobPhase` | Bendras grafas leistų `transcription → generating_protocol`, kurio kode nėra |
+| Nelegali `(type, phase)` pora atmetama | `jobPhase` | Patikros pašalinimas → `protocol + transcribing` praeitų |
+| **Pavėlavęs įvykis iš ankstesnės fazės ignoruojamas** | `jobPhase` | Patikros pašalinimas → krinta; realus BullMQ replay atvejis |
+| Monotoniškumas TIK `(jobId, phase)` ribose | `jobPhase` | `1000, 2000, 1500, 3000` → matomi `1000, 2000, 3000` |
+| Fazės pasikeitimas = NAUJA progreso epocha | `jobPhase` | Naujoje fazėje mažas skaičius nėra regresija |
+| Fazės perėjimas ATOMINIS progreso atžvilgiu | `jobPhase` | Atskiri `update()` paliktų matomą `diarizing + 4420/4420` |
+| Terminalus perėjimas išvalo fazės būseną | `jobPhase` | Be to liktų `failed + transcribing + 3900/4400` |
+| `progressKnown ↔ progress` invariantas | `jobPhase` | `true + null` atmetama — #155 kitaip persistintų dviprasmybę |
+| `{current, total}` validacija (baigtiniai, `total>0`, `0<=current<=total`) | `jobPhase` | Procentinis ir sekundžių šaltiniai duoda tą patį UI elgesį |
+| Helperis grynas — neturi vidinės būsenos, nekeičia įvesties | `jobPhase` | `Object.freeze` įvestis; determinizmo patikra |
+| **Terminalaus job'o fazės pradėti negalima** | `jobPhase` | Be `status` patikros `completed + phase=null` atrodo kaip grafo pradžia — job'as „atgytų" |
+| `queued + phase` ir `processing + phase=null` atmetami | `jobPhase` | Naujas writer'is neleistino derinio kurti negali |
+| `queued → completed` NELEIDŽIAMAS (`failed`/`cancelled` — taip) | `jobPhase` | Nevykdytas darbas negali būti baigtas sėkmingai; `queued → failed` yra realus enqueue klaidos kelias |
+| **`total` stabilus fazės epochoje** | `jobPhase` | `50/100 → 60/200`: `current` auga, bet UI procentas kristų 50 % → 30 % |
+| Grafas neeksportuojamas ir giliai užšaldytas | `jobPhase` | `Object.freeze` seklus — masyvus buvo galima papildyti runtime |
+
+### Store integracija (2 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Neapdorotas `status`/`phase`/`progress` rašymas ATMETAMAS** | `jobPhaseStore` | `status` išėmimas iš sargo → krinta 2. Invariantas yra `status × phase × progress × progressKnown`, ne vien trys laukai |
+| Sargas galioja IR vartotojo, IR sisteminiam `update()` | `jobPhaseStore` | Maršrutas kitaip sukurtų neteisingą terminalią būseną per nuosavybe ribotą kelią |
+| **Terminalaus statuso negalima įrašyti apeinant `finish()`** | `jobPhaseStore` | Sukurtų `completed + phase=transcribing + progress=50/100` |
+| `create()` NEGALI nustatyti fazės būsenos | `jobPhaseStore` | `fields.phase` priėmimas → antras writer'io apėjimas, šįkart per `create()` |
+| **Fazių metodai gerbia ištrynimo žymą** | `jobPhaseStore` | Jie kviečia `store.update()` tiesiogiai, tad fasado apsauga jų NEdengia — vėluojanti žinutė „atgaivintų" ištrintą job'ą |
+| `restart()` grąžina į grafo pradžią (BullMQ retry) | `jobPhaseStore`, `jobPhase` | `transcribing → validating` grafe nelegalus; perpaleidimas yra atskira operacija, ne atgalinis šuolis |
+| Fazės perėjimas per store resetina progresą | `jobPhaseStore` | Tikrinamas įrašas po `startPhase`, ne tik grąžintas patch'as |
+| Pavėlavęs įvykis nepakeičia įrašo | `jobPhaseStore` | `transcribing → diarizing →` pavėlavęs `transcribing` |
+| Terminalus perėjimas iš BET KURIOS fazės išvalo būseną | `jobPhaseStore` | Visi trys terminalūs statusai |
+| `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
+| **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
+
+⚠️ **Šis helperis yra GRYNAS ir to NEPAKANKA Redis kelyje.** `reportProgress()` priima
+sprendimą pagal perduotą job'o būseną, bet tarp skaitymo ir rašymo fazė gali pasikeisti.
+Late-event apsauga Redis'e privalo būti atominė — analogiškai #159 `ownerId` CAS. Vien
+JS `read → check → write` seka palieka TOCTOU langą, ir mutacinis testas
+(fazės pakeitimas prieš rašymą) tai atskleistų.
+
+⚠️ **Klaidos ir atšaukimo keliai privalo eiti per `finish()`.** Konstruojant neapdorotus
+`jobStore` patch'us `status × phase` invariantas galiotų normaliame sraute, bet būtų
+pažeidžiamas būtent klaidos metu — ten, kur diagnostika svarbiausia.
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

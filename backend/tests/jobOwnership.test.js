@@ -102,7 +102,7 @@ test("#159 FILTRAS: A negauna, nekeičia ir neištrina B job'o", async () => {
   const job = await jobStore.create({ ownerId: B, ownerKind: OWNER_KIND.USER });
 
   assert.equal(await jobStore.get({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }), jobStore.FORBIDDEN);
-  assert.equal(await jobStore.update({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }, { status: "failed" }), jobStore.FORBIDDEN);
+  assert.equal(await jobStore.update({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }, { attempt_count: 7 }), jobStore.FORBIDDEN);
   assert.equal(await jobStore.remove({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }), jobStore.FORBIDDEN);
 
   const still = await jobStore.system.get(job.id);
@@ -114,8 +114,8 @@ test("#159 FILTRAS: savininkas gauna, keičia ir ištrina savo job'ą", async ()
   const job = await jobStore.create({ ownerId: A, ownerKind: OWNER_KIND.USER });
 
   assert.equal((await jobStore.get({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER })).id, job.id);
-  const updated = await jobStore.update({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }, { status: "processing" });
-  assert.equal(updated.status, "processing");
+  const updated = await jobStore.update({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }, { attempt_count: 7 });
+  assert.equal(updated.attempt_count, 7, "savininkas gali keisti savo job\x27ą");
   assert.equal(await jobStore.remove({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }), true);
 });
 
@@ -171,7 +171,7 @@ test("#159 SYSTEM: get/update/remove veikia be owner konteksto", async () => {
   const job = await jobStore.create({ ownerId: B, ownerKind: OWNER_KIND.USER });
 
   assert.ok(await jobStore.system.get(job.id), "worker'is neturi ir negali turėti ownerId");
-  assert.ok(await jobStore.system.update(job.id, { status: "processing" }));
+  assert.ok(await jobStore.system.restart(job.id));
   assert.equal(await jobStore.system.remove(job.id), true);
 });
 
@@ -209,7 +209,7 @@ test("#159 KRITINIS: bendras API_KEY NĖRA legacy job'o savininkas", async () =>
    */
   const sharedPrincipal = { jobId: legacy.id, ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL };
   assert.equal(await jobStore.get(sharedPrincipal), jobStore.FORBIDDEN);
-  assert.equal(await jobStore.update(sharedPrincipal, { status: "failed" }), jobStore.FORBIDDEN);
+  assert.equal(await jobStore.finish(sharedPrincipal, "failed"), jobStore.FORBIDDEN);
   assert.equal(await jobStore.remove(sharedPrincipal), jobStore.FORBIDDEN);
 });
 

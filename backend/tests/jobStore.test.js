@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -22,7 +23,7 @@ test("create: naujas jobas turi visus production laukus", async () => {
 
 test("update: PROCESSING nustato started_at automatiškai", async () => {
   const job = await jobStore.create({ ownerKind: "unowned" });
-  const updated = await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
+  const updated = await jobStore.system.restart(job.id, { attempt_count: 1 });
   assert.equal(updated.status, jobStore.STATUS.PROCESSING);
   assert.ok(updated.started_at, "started_at turi būti nustatytas");
   assert.equal(updated.attempt_count, 1);
@@ -30,17 +31,14 @@ test("update: PROCESSING nustato started_at automatiškai", async () => {
 
 test("update: COMPLETED nustato completed_at automatiškai", async () => {
   const job = await jobStore.create({ ownerKind: "unowned" });
-  const updated = await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { protocol: {} } });
+  const updated = await markCompleted(jobStore.system, job.id, { result: { protocol: {} } });
   assert.ok(updated.completed_at, "completed_at turi būti nustatytas");
 });
 
 test("update: FAILED su error_code, ir error <-> error_message sinchronizuojami", async () => {
   const job = await jobStore.create({ ownerKind: "unowned" });
-  const updated = await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.FAILED,
-    error: "kažkas nutiko",
-    error_code: "internal_error",
-  });
+  const updated = await jobStore.system.finish(job.id, jobStore.STATUS.FAILED, { error: "kažkas nutiko",
+    error_code: "internal_error" });
   assert.equal(updated.error, "kažkas nutiko");
   assert.equal(updated.error_message, "kažkas nutiko"); // sinchronizuota
   assert.equal(updated.error_code, "internal_error");
@@ -49,7 +47,7 @@ test("update: FAILED su error_code, ir error <-> error_message sinchronizuojami"
 
 test("sweepExpired: nešalina QUEUED/PROCESSING jobų, kad ir kokie seni", async () => {
   const job = await jobStore.create({ ownerKind: "unowned" });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.PROCESSING });
+  await jobStore.system.restart(job.id);
   const farFuture = Date.now() + 999 * 60 * 1000;
   await jobStore.sweepExpired(farFuture);
   // Tikrinam KONKRETŲ jobą (ne bendrą removed skaičių - kiti testai dalinasi ta
@@ -59,7 +57,7 @@ test("sweepExpired: nešalina QUEUED/PROCESSING jobų, kad ir kokie seni", async
 
 test("sweepExpired: pašalina COMPLETED jobą po TTL, bet ne prieš tai", async () => {
   const job = await jobStore.create({ ownerKind: "unowned" });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { protocol: {} } });
+  await markCompleted(jobStore.system, job.id, { result: { protocol: {} } });
 
   const beforeTtl = Date.now() + 30 * 1000; // 30s < 1 min TTL
   await jobStore.sweepExpired(beforeTtl);
@@ -72,7 +70,7 @@ test("sweepExpired: pašalina COMPLETED jobą po TTL, bet ne prieš tai", async 
 
 test("sweepExpired: pašalina CANCELLED jobą po TTL", async () => {
   const job = await jobStore.create({ ownerKind: "unowned" });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.CANCELLED });
+  await jobStore.system.finish(job.id, jobStore.STATUS.CANCELLED);
   const afterTtl = Date.now() + 2 * 60 * 1000;
   await jobStore.sweepExpired(afterTtl);
   assert.equal(await jobStore.system.get(job.id), null, "CANCELLED jobas po TTL turi būti pašalintas");

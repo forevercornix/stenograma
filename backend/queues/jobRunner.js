@@ -251,7 +251,10 @@ async function _executeInline(type, processor, jobId, payload) {
   log.info("Darbas pradėtas", { stage: "processing", execution: "inline", jobType: type, jobId });
 
   try {
-    await jobStore.system.update(jobId, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
+    // #154: darbo pradžia eina per state machine – `restart()` nustato
+    // `processing` KARTU su pradine faze, tad `processing + phase=null`
+    // neatsiranda net akimirkai.
+    await jobStore.system.restart(jobId, { attempt_count: 1 });
     const result = await processor(payload, jobId);
 
     /**
@@ -268,7 +271,7 @@ async function _executeInline(type, processor, jobId, payload) {
      */
     assertResultWithinLimits(result);
 
-    await jobStore.system.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+    await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
 
     log.info("Darbas baigtas", {
       stage: "completed",
@@ -279,7 +282,7 @@ async function _executeInline(type, processor, jobId, payload) {
     });
   } catch (e) {
     const { errorCode, message } = _classifyError(e, `${type} job`);
-    await jobStore.system.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
+    await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, { error: message, error_code: errorCode });
 
     // Pranešimas jau sanitizuotas `_classifyError`; kodas yra enum.
     log.warn("Darbas nepavyko", {

@@ -59,6 +59,33 @@ function newJob(fields = {}) {
      */
     requestId: fields.requestId || null,
     /**
+     * FAZĖ IR PROGRESAS (#154).
+     *
+     * `phase` prasminga tik kai `status = processing`; kitais atvejais `null`.
+     * `progressKnown` yra ATSKIRAS laukas, ne `phase` išvestinė – šiandien
+     * pyannote progreso neteikia, bet kitas diarizacijos provideris ateityje
+     * gali.
+     *
+     * ⚠️ Šių laukų NEKEISTI tiesiogiai per `update()`. Perėjimus valdo
+     * `utils/jobPhase.js`, o store juos siūlo per `startPhase`, `reportProgress`
+     * ir `finish`. Neapdorotas patch'as apeitų `status × phase` invariantą.
+     */
+    /**
+     * ⚠️ `fields` ČIA NENAUDOJAMI SĄMONINGAI.
+     *
+     * Priimant `fields.phase` būtų galima sukurti `queued + phase=transcribing`
+     * – derinį, kurį `startPhase()` draudžia. Tai būtų antras writer'io
+     * apėjimas, šįkart per `create()`, ne per `update()`.
+     *
+     * Naujas job'as fazės būseną gauna TIK iš kontrakto pradžios. Perėjimus
+     * valdo `utils/jobPhase.js`.
+     *
+     * (`restoreRecord()` legacy įrašams eina kitu keliu ir čia nepatenka.)
+     */
+    phase: null,
+    progress: null,
+    progressKnown: false,
+    /**
      * DUOMENŲ NUOSAVYBĖ (#159).
      *
      * ⚠️ `ownerId` IR `actor` NĖRA TAS PATS, net kai reikšmė sutampa.
@@ -159,7 +186,8 @@ function newJob(fields = {}) {
     audio_cleanup_attempts: 0,
     status: STATUS.QUEUED,
     result: null,
-    progress: null,
+    // `progress` deklaruojamas aukščiau kartu su `phase` ir `progressKnown` –
+    // trys #154 kontrakto laukai laikomi vienoje vietoje.
     // Struktūrizuota klaida.
     error: null, // atgalinis suderinamumas (senas laukas) - lieka kaip error_message kopija
     error_code: null,

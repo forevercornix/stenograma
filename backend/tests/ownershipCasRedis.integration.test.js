@@ -45,8 +45,8 @@ test("#159 REDIS: savininkas keičia savo job'ą", { skip }, async () => {
   const { store, client } = await freshStore();
   try {
     const job = await store.create({ ownerId: A, ownerKind: K.USER });
-    const updated = await store.updateOwned(job.id, { status: "processing" }, user(A));
-    assert.equal(updated.status, "processing");
+    const updated = await store.updateOwned(job.id, { attempt_count: 7 }, user(A));
+    assert.equal(updated.attempt_count, 7, "savininkas gali keisti savo job\x27ą");
   } finally {
     await client.quit();
   }
@@ -57,7 +57,7 @@ test("#159 REDIS: svetimas savininkas gauna FORBIDDEN ir NIEKO nepakeičia", { s
   try {
     const job = await store.create({ ownerId: A, ownerKind: K.USER });
 
-    assert.equal(await store.updateOwned(job.id, { status: "failed" }, user(B)), "FORBIDDEN");
+    assert.equal(await store.updateOwned(job.id, { attempt_count: 7 }, user(B)), "FORBIDDEN");
 
     const still = await store.get(job.id);
     assert.notEqual(still.status, "failed", "atmestas rašymas neturi palikti pėdsako");
@@ -102,7 +102,7 @@ test("#159 REDIS CAS: savininko pakeitimas TARP skaitymo ir rašymo blokuoja HSE
     };
 
     const store = createRedisStore(racing);
-    const result = await store.updateOwned(job.id, { status: "failed" }, user(A));
+    const result = await store.updateOwned(job.id, { attempt_count: 7 }, user(A));
 
     assert.ok(hijacked, "prielaida: savininkas pakeistas būtent prieš Lua kvietimą");
     assert.equal(result, "FORBIDDEN", "CAS turi pamatyti, kad savininkas pasikeitė PO JS patikros");
@@ -164,7 +164,7 @@ test("#159 REDIS CAS: rūšies pakeitimas irgi blokuoja rašymą", { skip }, asy
     const store = createRedisStore(client);
     const apiJob = await store.create({ ownerId: null, ownerKind: K.API_KEY });
 
-    const result = await store.updateOwned(apiJob.id, { status: "failed" }, desktop);
+    const result = await store.updateOwned(apiJob.id, { attempt_count: 7 }, desktop);
     assert.equal(result, "FORBIDDEN", "tas pats `\"\"` ownerId, bet kita rūšis");
 
     const still = await client.hgetall(`job:${apiJob.id}`);
@@ -202,7 +202,7 @@ test("#159 REDIS CAS: RŪŠIES pakeitimas tarp skaitymo ir rašymo blokuoja HSET
     };
 
     const store = createRedisStore(racing);
-    const result = await store.updateOwned(job.id, { status: "failed" }, desktop);
+    const result = await store.updateOwned(job.id, { attempt_count: 7 }, desktop);
 
     assert.ok(hijacked, "prielaida: rūšis pakeista būtent prieš Lua kvietimą");
     assert.equal(result, "FORBIDDEN", "CAS turi tikrinti ir rūšį, ne tik ownerId");
@@ -224,11 +224,11 @@ test("#159 REDIS: ownerId=null semantika – trys atvejai", { skip }, async () =
     const desktopJob = await store.create({ ownerId: null, ownerKind: K.UNOWNED });
     const owned = await store.create({ ownerId: A, ownerKind: K.USER });
 
-    assert.ok(await store.updateOwned(desktopJob.id, { status: "processing" }, desktop),
+    assert.ok(await store.updateOwned(desktopJob.id, { attempt_count: 7 }, desktop),
       "null job'as + null lauktas → leidžiama");
-    assert.equal(await store.updateOwned(desktopJob.id, { status: "failed" }, user(A)), "FORBIDDEN",
+    assert.equal(await store.updateOwned(desktopJob.id, { attempt_count: 7 }, user(A)), "FORBIDDEN",
       "null job'as + UUID lauktas → atmetama");
-    assert.equal(await store.updateOwned(owned.id, { status: "failed" }, desktop), "FORBIDDEN",
+    assert.equal(await store.updateOwned(owned.id, { attempt_count: 7 }, desktop), "FORBIDDEN",
       "UUID job'as + null lauktas → atmetama (`\"\"` NĖRA wildcard)");
   } finally {
     await client.quit();
@@ -253,7 +253,7 @@ test("#159 REDIS: removeOwned taip pat CAS", { skip }, async () => {
 test("#159 REDIS: nesantis job'as duoda null, ne FORBIDDEN", { skip }, async () => {
   const { store, client } = await freshStore();
   try {
-    assert.equal(await store.updateOwned("nera-tokio", { status: "failed" }, user(A)), null);
+    assert.equal(await store.updateOwned("nera-tokio", { attempt_count: 7 }, user(A)), null);
     assert.equal(await store.removeOwned("nera-tokio", user(A)), false);
   } finally {
     await client.quit();
@@ -276,6 +276,7 @@ test("#159 REDIS: fono keliai apdoroja job'us su SKIRTINGAIS savininkais", { ski
     assert.equal(all.length, 3);
 
     for (const job of all) {
+      // Šis failas testuoja BACKEND'Ą tiesiogiai – fazių metodai gyvena fasade (#154).
       const updated = await store.update(job.id, { status: "processing" });
       assert.equal(updated.status, "processing", "sisteminis kelias neturi filtruoti pagal savininką");
     }
