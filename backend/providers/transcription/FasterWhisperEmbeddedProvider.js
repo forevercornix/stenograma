@@ -132,7 +132,7 @@ class FasterWhisperEmbeddedProvider extends TranscriptionProvider {
         );
       });
       this._cudaLibPathCache = output || null;
-    } catch (e) {
+    } catch {
       // nvidia-cublas-cu12/nvidia-cudnn-cu12 galbūt neįdiegti arba device=cpu
       // naudojamas ir taip - tai NĖRA klaida, tiesiog automatinis nustatymas negalimas.
       this._cudaLibPathCache = null;
@@ -195,7 +195,7 @@ class FasterWhisperEmbeddedProvider extends TranscriptionProvider {
               try {
                 const progress = JSON.parse(line.slice("PROGRESS:".length));
                 options.onProgress(progress);
-              } catch (_) {
+              } catch {
                 // nepavykus išparsinti progreso eilutės - nekritinga, tiesiog praleidžiama
               }
             }

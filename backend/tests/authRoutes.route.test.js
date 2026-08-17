@@ -16,7 +16,6 @@ process.env.AUTH_USERS = `admin:administrator:${hashPassword("teisingas-slaptas-
 )}:55555555-5555-4555-8555-555555555555`;
 
 const request = require("supertest");
-const sessionStore = require("../utils/sessionStore");
 const auditLog = require("../utils/auditLog");
 const app = require("../server");
 app._setReadyForTests();

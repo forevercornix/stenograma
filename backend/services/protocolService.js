@@ -64,7 +64,6 @@ async function generateProtocol({ title, date, participants, transcript, segment
   // promptą ir kainą. Įjungta pagal nutylėjimą; TRANSCRIPT_DEDUP=false išjungia.
   let effectiveTranscript = transcript;
   let effectiveSegments = segments;
-  let dedupInfo = null;
   if ((process.env.TRANSCRIPT_DEDUP || "true").toLowerCase() !== "false") {
     const textResult = dedupTranscriptText(transcript);
     effectiveTranscript = textResult.text;
@@ -73,7 +72,6 @@ async function generateProtocol({ title, date, participants, transcript, segment
       effectiveSegments = segResult.segments;
     }
     if (textResult.collapsedRuns > 0) {
-      dedupInfo = { collapsedRuns: textResult.collapsedRuns, removedItems: textResult.removedItems };
       log.info(
         `Transkripcijos dedup: sutraukta ${textResult.collapsedRuns} pasikartojimų serijų ` +
           `(${textResult.removedItems} fragmentų, ${textResult.originalLength} -> ${textResult.dedupedLength} simbolių). ` +

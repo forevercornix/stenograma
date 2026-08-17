@@ -51,7 +51,7 @@ function registerFakeProvider(t, received, respond) {
    * tikras. Priešingu atveju valdysena jį blokuotų, ir testas tikrintų
    * neteisingą kelią.
    */
-  const restoreGovernance = registerTestProvider("llm", "fake_external", {
+  registerTestProvider("llm", "fake_external", {
     region: "n/a",
     retention: "n/a",
     modelTraining: "n/a",
