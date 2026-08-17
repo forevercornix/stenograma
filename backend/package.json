@@ -43,7 +43,7 @@
     "ioredis": "^6.0.0"
   },
   "devDependencies": {
-    "eslint": "^10.8.0",
+    "eslint": "^10.8.1",
     "supertest": "^7.0.0",
     "yaml": "^2.9.0"
   }
