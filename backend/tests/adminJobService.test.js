@@ -19,7 +19,19 @@ const USER_ID = "44444444-4444-4444-8444-444444444444";
 
 const sessionAdmin = { ownerId: ADMIN_ID, ownerKind: OWNER_KIND.USER, role: "administrator" };
 const sessionUser = { ownerId: USER_ID, ownerKind: OWNER_KIND.USER, role: "operator" };
-const apiKeyAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
+/**
+ * VARDŲ KONVENCIJA (CodeQL `js/clear-text-logging`).
+ *
+ * Šiuose testuose bendro rakto principalas vadinamas `sharedPrincipal*`, NE
+ * `apiKey*`. CodeQL laiko `*Key*` identifikatorius jautriais ir pažymi bet kokį
+ * jų kelią į logerį – nors objektas jokios paslapties neturi
+ * (`{ ownerId, ownerKind, role }`), o loginami tik `ownerId` ir `ownerKind`.
+ *
+ * Klaidingo signalo pigiau išvengti nei jį kaskart atmetinėti: atmestas
+ * įspėjimas nuslopintų ir TIKRĄ radinį, jei jis kada atsirastų tame pačiame
+ * kelyje. Tai jau antras atvejis (#159 buvo `apiKeyScope`).
+ */
+const sharedPrincipalAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
 const desktopAdmin = { ownerId: null, ownerKind: OWNER_KIND.UNOWNED, role: "administrator" };
 
 async function svetimasJob() {
@@ -38,12 +50,12 @@ test('#160 SERVISAS: suklastotas maršruto teiginys „čia admin" atmetamas', a
    * riba prieš privilegijuotą kelią. Jei jis aklai pasitikėtų maršruto
    * sprendimu, viena klaida maršrute atidarytų visą override'ą.
    *
-   * `apiKeyAdmin` turi `role: "administrator"` – tiksliai tai, ką grąžina
+   * `sharedPrincipalAdmin` turi `role: "administrator"` – tiksliai tai, ką grąžina
    * `resolveApiKeyRole()` su NUMATYTUOJU `API_KEY_ROLE`.
    */
   const job = await svetimasJob();
 
-  await assert.rejects(() => adminDeleteJob(job.id, apiKeyAdmin), AdminOverrideDenied);
+  await assert.rejects(() => adminDeleteJob(job.id, sharedPrincipalAdmin), AdminOverrideDenied);
   await assert.rejects(() => adminDeleteJob(job.id, desktopAdmin), AdminOverrideDenied);
   await assert.rejects(() => adminDeleteJob(job.id, sessionUser), AdminOverrideDenied);
   await assert.rejects(() => adminDeleteJob(job.id, null), AdminOverrideDenied);
@@ -53,7 +65,7 @@ test('#160 SERVISAS: suklastotas maršruto teiginys „čia admin" atmetamas', a
 });
 
 test("#160 SERVISAS: našlaičių valymas taip pat tikrina invariantą", async () => {
-  await assert.rejects(() => adminCleanupOrphan("nera-tokio", apiKeyAdmin), AdminOverrideDenied);
+  await assert.rejects(() => adminCleanupOrphan("nera-tokio", sharedPrincipalAdmin), AdminOverrideDenied);
   await assert.rejects(() => adminCleanupOrphan("nera-tokio", sessionUser), AdminOverrideDenied);
 });
 
@@ -120,7 +132,7 @@ test("#160 AUDITAS: NEPAVYKĘS bandymas irgi audituojamas", async () => {
   const job = await svetimasJob();
   const pries = auditLog.getAll().length;
 
-  await assert.rejects(() => adminDeleteJob(job.id, apiKeyAdmin), AdminOverrideDenied);
+  await assert.rejects(() => adminDeleteJob(job.id, sharedPrincipalAdmin), AdminOverrideDenied);
 
   const nauji = auditLog.getAll().slice(pries);
   const denied = nauji.find((e) => e.event === ADMIN_EVENT.ACCESS_DENIED);

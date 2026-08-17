@@ -17,7 +17,19 @@ const UID = "11111111-1111-4111-8111-111111111111";
 
 const userActor = { ownerId: UID, ownerKind: OWNER_KIND.USER, role: "operator" };
 const adminActor = { ownerId: UID, ownerKind: OWNER_KIND.USER, role: "administrator" };
-const apiKeyAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
+/**
+ * VARDŲ KONVENCIJA (CodeQL `js/clear-text-logging`).
+ *
+ * Šiuose testuose bendro rakto principalas vadinamas `sharedPrincipal*`, NE
+ * `apiKey*`. CodeQL laiko `*Key*` identifikatorius jautriais ir pažymi bet kokį
+ * jų kelią į logerį – nors objektas jokios paslapties neturi
+ * (`{ ownerId, ownerKind, role }`), o loginami tik `ownerId` ir `ownerKind`.
+ *
+ * Klaidingo signalo pigiau išvengti nei jį kaskart atmetinėti: atmestas
+ * įspėjimas nuslopintų ir TIKRĄ radinį, jei jis kada atsirastų tame pačiame
+ * kelyje. Tai jau antras atvejis (#159 buvo `apiKeyScope`).
+ */
+const sharedPrincipalAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
 const desktopActor = { ownerId: null, ownerKind: OWNER_KIND.UNOWNED, role: "administrator" };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -33,16 +45,16 @@ test("#160 ADMIN: API rakto principalas NĖRA admin, net su administrator role",
    * kiekvienam bendro rakto turėtojui PAGAL NUTYLĖJIMĄ, be jokios
    * konfigūracijos klaidos.
    */
-  assert.equal(apiKeyAdmin.role, "administrator", "prielaida: raktas turi admin rolę");
-  assert.equal(isSessionAdmin(apiKeyAdmin), false);
+  assert.equal(sharedPrincipalAdmin.role, "administrator", "prielaida: raktas turi admin rolę");
+  assert.equal(isSessionAdmin(sharedPrincipalAdmin), false);
 
   assert.equal(
-    decideJobAccess({ input: IN.FORBIDDEN, actor: apiKeyAdmin, operation: OP.DELETE }),
+    decideJobAccess({ input: IN.FORBIDDEN, actor: sharedPrincipalAdmin, operation: OP.DELETE }),
     D.NOT_FOUND,
     "bendras raktas negauna trynimo override"
   );
   assert.equal(
-    decideJobAccess({ input: IN.MISSING, actor: apiKeyAdmin, operation: OP.DELETE }),
+    decideJobAccess({ input: IN.MISSING, actor: sharedPrincipalAdmin, operation: OP.DELETE }),
     D.NOT_FOUND,
     "bendras raktas negauna našlaičių valymo"
   );
@@ -245,7 +257,7 @@ test("#160 SAVYBĖ: savas job'as prieinamas NEPRIKLAUSOMAI nuo principalo rūši
   const visi = [
     userActor,
     adminActor,
-    apiKeyAdmin,
+    sharedPrincipalAdmin,
     desktopActor,
     { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "operator" },
   ];
@@ -270,14 +282,14 @@ test("#160 DESKTOP: bendras API_KEY negauna našlaičių valymo, nors ownerId ir
    * Abu principalai turi `ownerId: null` – skiria TIK rūšis.
    */
   const desktop = { ownerId: null, ownerKind: OWNER_KIND.UNOWNED, role: "operator" };
-  const apiKey = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
+  const sharedPrincipal = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
 
   assert.equal(
     decideJobAccess({ input: IN.MISSING, actor: desktop, operation: OP.DELETE }),
     D.DESKTOP_ORPHAN_CLEANUP
   );
   assert.equal(
-    decideJobAccess({ input: IN.MISSING, actor: apiKey, operation: OP.DELETE }),
+    decideJobAccess({ input: IN.MISSING, actor: sharedPrincipal, operation: OP.DELETE }),
     D.NOT_FOUND,
     "bendras raktas – ne vieno vartotojo režimas"
   );

@@ -799,6 +799,7 @@ interceptinant pirmą `eval()`.
 | Session-admin svetimą job'ą ištrina (override) | `rbac.route` | Du administratoriai – nuosavybė izoliuota nuo rolės |
 | Eilinis vartotojas NEVALO našlaičio | `rbac.route` | Elgesio pakeitimas: anksčiau valė bet kas |
 | Maršrutai NEsprendžia 403/404 patys | `systemNamespaceBoundary` | `jobStore.FORBIDDEN` maršrute → sargas krinta |
+| Principalo objektai nevadinami `apiKey*` (CodeQL FP prevencija) | `systemNamespaceBoundary` | Vardo grąžinimas → sargas krinta. Klaidingas įspėjimas krito CI du kartus (#159, #160) |
 | **EXPORT: svetimas ir neegzistuojantis job'as NEATSKIRIAMI** | `rbac.route` | Politikos apėjimas → `link=job`/`invalid_type` atskleistų egzistavimą |
 | EXPORT: admin svetimo job'o nesusieja (skaitymo override neleidžiamas) | `rbac.route` | Tikrinamas audito `link=`, ne statusas |
 | EXPORT: savininkas savo job'ą susieja (regresija) | `rbac.route` | `invalid_type` įrodo, kad savas job'as PASIEKIAMAS |

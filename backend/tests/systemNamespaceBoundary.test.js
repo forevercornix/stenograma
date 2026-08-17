@@ -158,6 +158,45 @@ test("#160 SARGAS: maršrutai nesprendžia 403/404 patys", () => {
   );
 });
 
+test("#160 SARGAS: nuosavybės objektai nevadinami `apiKey*` (CodeQL FP prevencija)", () => {
+  /**
+   * TRETIEJI GRĖBLIAI.
+   *
+   * CodeQL `js/clear-text-logging` laiko `*Key*` identifikatorius jautriais ir
+   * pažymi bet kokį jų kelią į logerį. Nuosavybės scope ir principalo objektai
+   * jokios paslapties neturi (`{ ownerId, ownerKind, role }`), bet pavadinus
+   * juos `apiKeyScope` (#159) ar `apiKeyAdmin` (#160) CI krito abu kartus.
+   *
+   * Sargas pigesnis nei kaskart atmetinėti įspėjimą – atmestas įspėjimas dar ir
+   * nuslopintų TIKRĄ radinį tame pačiame kelyje. Bendro rakto principalas
+   * vadinamas `sharedPrincipal*`.
+   */
+  /**
+   * Tikrinami TIK principalo/scope objektai – t. y. priskyrimai, kurių dešinėje
+   * yra `ownerKind`. `apiKeyRole` ar `apiKeyConfigured` yra teisėti vardai
+   * (rolė, konfigūracijos vėliava) ir į logerį objektų neveda.
+   */
+  const pažeidimai = [];
+  const šablonas = /\b(const|let|var)\s+(apiKey[A-Za-z]*)\s*=\s*\{[^}]*ownerKind/;
+
+  for (const dir of ["tests", "utils", "services", "routes"]) {
+    for (const rel of jsFiles(dir)) {
+      const src = fs.readFileSync(path.join(ROOT, rel), "utf8");
+      src.split("\n").forEach((line, i) => {
+        const m = šablonas.exec(line);
+        if (m) pažeidimai.push(`${rel}:${i + 1}: ${m[2]}`);
+      });
+    }
+  }
+
+  assert.deepEqual(
+    pažeidimai,
+    [],
+    "Nuosavybės/principalo objektų nevadinkite `apiKey*` – naudokite " +
+      "`sharedPrincipal*`:\n" + pažeidimai.join("\n")
+  );
+});
+
 test("#159 SARGAS: kiekviena išimtis turi egzistuoti ir būti pagrįsta", () => {
   /**
    * Neegzistuojantis failas išimčių sąraše reiškia, kad sargas tyliai
