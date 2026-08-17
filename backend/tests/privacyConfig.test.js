@@ -1,3 +1,4 @@
+const { markProcessing, markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs").promises;
@@ -203,10 +204,7 @@ test("retencijos ciklas šalina nuskendusius audio failus ir rašo audito įvyk�
       type: jobStore.JOB_TYPES.TRANSCRIPTION,
       storageKey: referenced,
     });
-    await jobStore.system.update(job.id, {
-      status: jobStore.STATUS.COMPLETED,
-      audio_cleanup_pending: true,
-    });
+    await markCompleted(jobStore.system, job.id, { audio_cleanup_pending: true });
 
     const result = await purgeOrphanedAudio();
     assert.equal(result.removed, 1, "pašalintas turi būti tik nuskendęs senas failas");
@@ -287,7 +285,10 @@ test("REGRESIJA: apdorojamo jobo audio NEšalinamas kaip nuskendęs", async () =
       await fs.utimes(path.join(storageDir, key), old, old);
 
       const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION, storageKey: key });
-      await jobStore.system.update(job.id, { status });
+      // #154: statusas nustatomas per state machine, ne neapdorotu patch'u.
+      if (status === jobStore.STATUS.PROCESSING) await markProcessing(jobStore.system, job.id);
+      else if (status === jobStore.STATUS.COMPLETED) await markCompleted(jobStore.system, job.id);
+      // QUEUED yra pradinė būsena – nieko daryti nereikia.
       created.push({ job, key, status });
     }
 
@@ -427,7 +428,7 @@ test("centralizuotas retencijos ciklas išvalo ir pasenusius JOBUS", async () =>
   const { runRetentionSweep } = require("../utils/retentionSweeper");
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  await markCompleted(jobStore.system, job.id);
 
   const farFuture = Date.now() + 10 * 24 * 60 * 60 * 1000;
   const summary = await runRetentionSweep({ now: farFuture });

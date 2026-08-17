@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -53,7 +54,7 @@ async function loginAs(username, password) {
 async function completedJob() {
   await jobStore.init();
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.system.update(job.id, { status: "completed", result: { x: 1 } });
+  await markCompleted(jobStore.system, job.id, { result: { x: 1 } });
   return job;
 }
 

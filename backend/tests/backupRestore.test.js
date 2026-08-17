@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -25,7 +26,7 @@ test.after(() => {
 async function completedJob(overrides = {}) {
   await jobStore.init();
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL, ...overrides });
-  await jobStore.system.update(job.id, { status: "completed", result: { pavadinimas: "Testas" } });
+  await markCompleted(jobStore.system, job.id, { result: { pavadinimas: "Testas" } });
   return jobStore.system.get(job.id);
 }
 

@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { fakeMp3Buffer } = require("./helpers/fakeAudio");
@@ -99,10 +100,7 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
 
   const job = await jobStore.create({ ownerKind: "unowned" });
 
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { text: "Jautrus transkripcijos rezultatas" },
-  });
+  await markCompleted(jobStore.system, job.id, { result: { text: "Jautrus transkripcijos rezultatas" } });
 
   auditLog.record({
     event: "TRANSCRIPTION_COMPLETED",
@@ -185,10 +183,7 @@ test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, joba
   // protokolo jobas būdavo surandamas, ištrinamas iš jobStore, o valymas vyktų
   // ne toje BullMQ eilėje - duomenys liktų, o klientas gautų 204.
   const protocolJob = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.system.update(protocolJob.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { protocol: { pavadinimas: "Jautrus protokolas" } },
-  });
+  await markCompleted(jobStore.system, protocolJob.id, { result: { protocol: { pavadinimas: "Jautrus protokolas" } } });
 
   const res = await request(app).delete(`/api/transcribe-jobs/${protocolJob.id}`);
 
@@ -202,11 +197,8 @@ test("DELETE /api/transcribe-jobs/:id - LEGACY jobas be type ištrinamas (ne 404
   // Suderinamumas: prieš `type` įvedimą sukurti jobai lauko neturi. Griežta
   // patikra juos paverstų neištrinamais po deployment'o.
   const legacy = await jobStore.create({ ownerKind: "unowned" });
-  await jobStore.system.update(legacy.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { text: "Senas rezultatas" },
-    type: undefined,
-  });
+  await markCompleted(jobStore.system, legacy.id, { result: { text: "Senas rezultatas" },
+    type: undefined });
 
   const stored = await jobStore.system.get(legacy.id);
   stored.type = undefined; // imituojam seną Redis įrašą be lauko

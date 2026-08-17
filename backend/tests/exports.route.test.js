@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -148,7 +149,7 @@ test("eksporto įvykiai susieti su jobId pseudonimu - ištrinami kartu su jobu",
   // Jobas turi REALIAI egzistuoti - nepatikrinto jobId ryšys nebekuriamas
   // (žr. audito vientisumo testus žemiau).
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  await markCompleted(jobStore.system, job.id);
 
   await request(app)
     .post("/api/exports")
@@ -181,10 +182,7 @@ test("DELETE /api/transcribe-jobs/:id pašalina ir EKSPORTO įvykius", async () 
   auditLog.clear();
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { text: "transkripcija" },
-  });
+  await markCompleted(jobStore.system, job.id, { result: { text: "transkripcija" } });
 
   await request(app)
     .post("/api/exports")
@@ -267,7 +265,7 @@ test("eksporto auditas NEsusiejamas su PROTOKOLO jobu (link=invalid_type)", asyn
   auditLog.clear();
 
   const protocolJob = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
-  await jobStore.system.update(protocolJob.id, { status: jobStore.STATUS.COMPLETED });
+  await markCompleted(jobStore.system, protocolJob.id);
 
   const res = await request(app)
     .post("/api/exports")
@@ -285,7 +283,7 @@ test("eksporto auditas SUSIEJAMAS su realiu transkribavimo jobu", async () => {
   auditLog.clear();
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  await markCompleted(jobStore.system, job.id);
 
   const res = await request(app)
     .post("/api/exports")
@@ -357,7 +355,7 @@ test("visos link reikšmės yra iš žinomo rinkinio", async () => {
   auditLog.clear();
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED });
+  await markCompleted(jobStore.system, job.id);
 
   await request(app).post("/api/exports").send({ variant: "original", format: "txt", protocol: protocolWithPII() });
   await request(app)

@@ -99,8 +99,10 @@ function createWorker(queueName, processor, workerOptions = {}) {
       // arba job'as pasibaigė TTL). Tada BullMQ nemato problemos, bet vartotojo jobo įrašo
       // nėra - klaidiname klientą. Todėl tikrinam ir metam, kad BullMQ pažymėtų failed +
       // retry (ne tyliai "sėkmė" be įrašo).
-      const processingJob = await jobStore.system.update(jobId, {
-        status: jobStore.STATUS.PROCESSING,
+      // #154: `restart()` grąžina job'ą į grafo pradžią. BullMQ retry paleidžia
+      // processor'ių iš naujo, o job'as gali būti bet kurioje fazėje – grįžimas
+      // atgal grafe nelegalus, tad perpaleidimas yra atskira operacija.
+      const processingJob = await jobStore.system.restart(jobId, {
         attempt_count: job.attemptsMade + 1,
       });
       if (!processingJob) {
@@ -184,7 +186,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
           }
 
           // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
-          const completedJob = await jobStore.system.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
+          const completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
           if (!completedJob) {
             throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
           }
@@ -263,7 +265,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
 
     if (attemptsExhausted) {
       // Galutinė nesėkmė po visų bandymų - jobas FAILED (dead-letter).
-      await jobStore.system.update(jobId, { status: jobStore.STATUS.FAILED, error: message, error_code: errorCode });
+      await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, { error: message, error_code: errorCode });
       // Tik dabar (po VISŲ bandymų) trinam audio - kad retry turėtų failą.
       await _cleanupStorage(payload, jobId);
     } else {

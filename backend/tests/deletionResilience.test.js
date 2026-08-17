@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -59,7 +60,7 @@ test("ištrynimo kvitas įrašomas ir NĖRA susietas su subjektu", async () => {
   auditLog.clear();
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { text: "x" } });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
   auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: true });
 
   const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
@@ -80,10 +81,7 @@ test("deletion_pending jobas pakartojamas automatiškai", async () => {
   auditLog.clear();
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.FAILED,
-    deletion_pending: true,
-  });
+  await jobStore.system.finish(job.id, jobStore.STATUS.FAILED, { deletion_pending: true });
 
   const summary = await retryPendingDeletions();
 
@@ -94,7 +92,7 @@ test("deletion_pending jobas pakartojamas automatiškai", async () => {
 
 test("lenktynės: du vienalaikiai DELETE - vienas 204, kitas 404, be avarijos", async () => {
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
-  await jobStore.system.update(job.id, { status: jobStore.STATUS.COMPLETED, result: { text: "x" } });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
 
   const [first, second] = await Promise.all([
     request(app).delete(`/api/transcribe-jobs/${job.id}`),
@@ -161,10 +159,7 @@ test("audio valymo klaida pažymima ATSKIRA vėliava (ne deletion_pending)", asy
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: key,
   });
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { text: "vertinga transkripcija" },
-  });
+  await markCompleted(jobStore.system, job.id, { result: { text: "vertinga transkripcija" } });
 
   // Priverčiam del() kristi: raktas rodo į katalogą, ne failą.
   const failingKey = "uploads";
@@ -192,11 +187,8 @@ test("audio valymo retry ištrina TIK audio, rezultatą palieka", async () => {
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: key,
   });
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { text: "vertinga transkripcija" },
-    audio_cleanup_pending: true,
-  });
+  await markCompleted(jobStore.system, job.id, { result: { text: "vertinga transkripcija" },
+    audio_cleanup_pending: true });
 
   const summary = await retryPendingAudioCleanups();
 
@@ -217,10 +209,7 @@ test("nebaigto valymo jobas neišmetamas per TTL", async () => {
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: "uploads/likes.wav",
   });
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.COMPLETED,
-    audio_cleanup_pending: true,
-  });
+  await markCompleted(jobStore.system, job.id, { audio_cleanup_pending: true });
 
   const farFuture = Date.now() + 10 * 24 * 60 * 60 * 1000;
   await jobStore.sweepExpired(farFuture);
@@ -259,10 +248,7 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: key,
   });
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.FAILED,
-    deletion_pending: true,
-  });
+  await jobStore.system.finish(job.id, jobStore.STATUS.FAILED, { deletion_pending: true });
   auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: false });
 
   // Abu keliai startuoja vienu metu ir trina TĄ PATĮ jobą.
@@ -306,12 +292,9 @@ test("backoff: dar neatėjęs bandymo laikas praleidžiamas (deferred)", async (
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: "uploads/dar-ne.wav",
   });
-  await jobStore.system.update(job.id, {
-    status: jobStore.STATUS.COMPLETED,
-    audio_cleanup_pending: true,
+  await markCompleted(jobStore.system, job.id, { audio_cleanup_pending: true,
     audio_cleanup_attempts: 2,
-    audio_cleanup_next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-  });
+    audio_cleanup_next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
 
   const summary = await retryPendingAudioCleanups();
 
@@ -334,10 +317,7 @@ test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
     storageKey: dueKey,
   });
-  await jobStore.system.update(due.id, {
-    status: jobStore.STATUS.COMPLETED,
-    audio_cleanup_pending: true,
-  });
+  await markCompleted(jobStore.system, due.id, { audio_cleanup_pending: true });
 
   const notDue = [];
   for (let i = 0; i < 2; i += 1) {
@@ -345,12 +325,9 @@ test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
       type: jobStore.JOB_TYPES.TRANSCRIPTION,
       storageKey: `uploads/dar-ne-${i}.wav`,
     });
-    await jobStore.system.update(job.id, {
-      status: jobStore.STATUS.COMPLETED,
-      audio_cleanup_pending: true,
+    await markCompleted(jobStore.system, job.id, { audio_cleanup_pending: true,
       audio_cleanup_attempts: 3,
-      audio_cleanup_next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-    });
+      audio_cleanup_next_attempt_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
     notDue.push(job);
   }
 

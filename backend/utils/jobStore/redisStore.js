@@ -67,7 +67,19 @@ const JSON_FIELDS = new Set(["result", "progress", "artefacts"]);
  * `attempt_count` jau buvo apdorojamas atskirai - tai buvo užuomina, kad ši spąsta
  * žinoma; naujus laukus reikėjo pridėti čia iš karto.
  */
-const BOOLEAN_FIELDS = new Set(["audio_cleanup_pending", "deletion_pending"]);
+const BOOLEAN_FIELDS = new Set([
+  "audio_cleanup_pending",
+  "deletion_pending",
+  /**
+   * #154. BŪTINA čia: Redis viską grąžina kaip string'ą, o `"false"` yra
+   * TRUTHY. Be konversijos `progressKnown === false` niekada nesuveiktų, ir
+   * diarizacijos fazė rodytų procentą vietoj „progresas neteikiamas".
+   *
+   * Klastingiau nei #158 `schemaVersion`: ten `"2" !== 2` bent jau krisdavo į
+   * kitą šaką, o čia klaidinga reikšmė atrodo visiškai validi.
+   */
+  "progressKnown",
+]);
 
 const NUMBER_FIELDS = new Set([
   "attempt_count",

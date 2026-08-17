@@ -1,3 +1,9 @@
+/**
+ * ⚠️ Šis failas testuoja REDIS BACKEND'Ą TIESIOGIAI (`createRedisStore`), ne
+ * `jobStore` fasadą. Backend'as fazių metodų (`startPhase`/`finish`) neturi –
+ * jie gyvena fasade (#154). Todėl čia `update({ status })` yra TEISINGAS
+ * kelias, o ne invarianto apėjimas.
+ */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -121,8 +127,8 @@ test("Redis store: create -> get grąžina tą patį jobą", async () => {
 test("Redis store: update išlaiko laukus ir nustato timestamps", async () => {
   const store = createRedisStore(new FakeRedis());
   const job = await store.create({ ownerKind: "unowned" });
-  await store.update(job.id, { status: store.STATUS.PROCESSING, attempt_count: 1 });
-  const updated = await store.update(job.id, { status: store.STATUS.COMPLETED, result: { ok: true } });
+  await store.update(job.id, { status: "processing", attempt_count: 1 });
+  const updated = await store.update(job.id, { status: "completed", result: { ok: true } });
   assert.equal(updated.status, store.STATUS.COMPLETED);
   assert.ok(updated.started_at);
   assert.ok(updated.completed_at);
@@ -138,7 +144,7 @@ test("Redis store: sweepExpired išvalo indeksą nuo expiravusių raktų", async
   const fake = new FakeRedis();
   const store = createRedisStore(fake);
   const job = await store.create({ ownerKind: "unowned" });
-  await store.update(job.id, { status: store.STATUS.COMPLETED });
+  await store.update(job.id, { status: "completed" });
 
   // Imituojam, kad hash expiravo (Redis EXPIRE suveikė), bet zset įrašas liko.
   fake._forceExpire("job:" + job.id);

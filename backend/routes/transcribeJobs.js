@@ -226,11 +226,19 @@ router.post(
     // Jei job'as jau sukurtas, bet enqueue nepavyko - pažymim FAILED, kitaip jis liktų
     // QUEUED amžinai (sweepExpired sąmoningai nešalina queued/processing jobų).
     if (job && !enqueued) {
-      await jobStore.update({ jobId: job.id, ...getOwnerScope(req) }, {
-        status: jobStore.STATUS.FAILED,
-        error: "Nepavyko įdėti darbo į vykdymo eilę.",
-        error_code: "enqueue_failed",
-      }).catch(() => {});
+      /**
+       * #154: `queued → failed` per state machine.
+       *
+       * Tai vienintelis kelias, kur job'as pereina į terminalų statusą niekada
+       * nepradėjęs vykdymo – `finish()` jį laiko legaliu (`queued → completed`
+       * NĖRA legalus, bet `failed` yra).
+       */
+      await jobStore
+        .finish({ jobId: job.id, ...getOwnerScope(req) }, jobStore.STATUS.FAILED, {
+          error: "Nepavyko įdėti darbo į vykdymo eilę.",
+          error_code: "enqueue_failed",
+        })
+        .catch(() => {});
     }
     // HttpError (pvz. validacijos 400) grąžinamas su SAVO statusu, ne visada 500.
     // Anksčiau parinkdavom teisingą žinutę, bet statusas likdavo 500 - klaidinanti kombinacija

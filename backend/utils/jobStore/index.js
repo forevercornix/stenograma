@@ -139,6 +139,65 @@ async function ensureInit() {
 const FORBIDDEN = Symbol("jobStore.FORBIDDEN");
 
 const { OWNER_KIND, assertOwnerIdentity } = require("./common");
+const jobPhase = require("../jobPhase");
+
+/**
+ * FAZĖS LAUKAI VALDOMI TIK PER `jobPhase` (#154).
+ *
+ * Neapdorotas `update({ phase, progress })` apeitų `status × phase` invariantą:
+ * fazės perėjimas turi ATOMINIAI resetinti progresą, terminalus – jį išvalyti,
+ * o pavėlavęs įvykis – būti atmestas. Patch'as, sukonstruotas ranka, nė vienos
+ * iš šių taisyklių nežino.
+ *
+ * Todėl store atmeta tokius patch'us ir siūlo `startPhase` / `reportProgress` /
+ * `finish`.
+ *
+ * Sargas gyvena FASADE. Fazės metodai kviečia backend'ą (`store.update`)
+ * tiesiogiai, tad jiems išimties nereikia – ir nereikia žymos, kurią kas nors
+ * galėtų perduoti iš išorės, kad sargą apeitų.
+ */
+const PHASE_STATE_FIELDS = ["status", "phase", "progress", "progressKnown"];
+
+/**
+ * IŠTRYNIMO ŽYMOS PATIKRA FAZIŲ KELIUI (#154 + #19).
+ *
+ * ⚠️ Fazių metodai kviečia `store.update()` TIESIOGIAI, tad `update()` fasado
+ * apsauga jų nedengia. Be šios patikros vėluojanti eilės žinutė galėtų
+ * „atgaivinti" jau ištrintą job'ą per `startPhase()` ar `finish()` – t. y.
+ * atkurti įrašą, kurio vartotojas paprašė nebeturėti.
+ *
+ * Grąžina `true`, jei operaciją reikia praleisti.
+ */
+function blockedByTombstone(id, method) {
+  if (!tombstones.isDeleted(id)) return false;
+  log.warn(`Atmestas jobo ${method}() po ištrynimo`, { jobId: id });
+  return true;
+}
+
+/**
+ * ⚠️ `status` ĮTRAUKTAS SĄMONINGAI.
+ *
+ * #154 invariantas nėra vien `phase`/`progress` invariantas – tai
+ * `status × phase × progress × progressKnown` invariantas. Saugant tik tris
+ * laukus, liktų atviras kelias:
+ *
+ *   update(id, { status: "completed" })
+ *
+ * kuris sukurtų `completed + phase=transcribing + progress=3900/4400` – būtent
+ * tą būseną, kurią `finish()` turėjo padaryti neįmanomą. Dokumentacija sakytų
+ * „klaidos keliai privalo eiti per finish()", bet store to neužtikrintų.
+ */
+function assertNoRawPhaseWrite(patch) {
+  const rasti = PHASE_STATE_FIELDS.filter(
+    (f) => patch && Object.prototype.hasOwnProperty.call(patch, f)
+  );
+  if (rasti.length === 0) return;
+
+  throw new TypeError(
+    `jobStore.update(): laukai [${rasti.join(", ")}] valdomi per jobPhase. ` +
+      "Naudokite startPhase() / restart() / reportProgress() / finish(), ne neapdorotą patch'ą."
+  );
+}
 
 /**
  * Vartotojo lygio metodai reikalauja EKSPLICITINIO scope objekto.
@@ -222,6 +281,7 @@ module.exports = {
       return store.get(id);
     },
     update: async (id, patch, options = {}) => {
+      assertNoRawPhaseWrite(patch);
       await ensureInit();
       if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
         log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
@@ -232,6 +292,70 @@ module.exports = {
     remove: async (id) => {
       await ensureInit();
       return store.remove(id);
+    },
+
+    /**
+     * Fazės pradžia. Grąžina atnaujintą job'ą arba `null`, jei jo nėra.
+     *
+     * ⚠️ MEMORY store atveju `get` ir `update` vyksta be `await` tarp jų, tad
+     * lenktynių lango nėra. REDIS atveju to NEPAKANKA – ten patikra ir rašymas
+     * turi būti viena atominė operacija (#154, 3 žingsnis).
+     */
+    startPhase: async (id, nextPhase, phaseOptions = {}) => {
+      await ensureInit();
+      if (blockedByTombstone(id, "startPhase")) return null;
+      const job = await store.get(id);
+      if (!job) return null;
+
+      const { extra = {}, ...opts } = phaseOptions;
+      const patch = jobPhase.startPhase(job, nextPhase, opts);
+      // `extra` PIRMA – kad negalėtų perrašyti fazės invarianto.
+      return store.update(id, { ...extra, ...patch });
+    },
+
+    /**
+     * Darbo (per)paleidimas – grąžina job'ą į grafo pradžią (`validating`).
+     *
+     * Skirta BullMQ retry: worker'is paleidžia processor'ių iš naujo, o job'as
+     * gali būti bet kurioje fazėje. Grįžimas atgal grafe nelegalus, tad
+     * perpaleidimas modeliuojamas kaip ATSKIRA operacija.
+     */
+    restart: async (id, extra = {}) => {
+      await ensureInit();
+      if (blockedByTombstone(id, "restart")) return null;
+      const job = await store.get(id);
+      if (!job) return null;
+
+      const patch = jobPhase.restart(job);
+      return store.update(id, { ...extra, ...patch });
+    },
+
+    /**
+     * Progreso įvykis. Grąžina atnaujintą job'ą, arba dabartinį įrašą be
+     * pakeitimų, jei įvykis atmestas (pavėlavęs, ne ta fazė, regresija).
+     *
+     * Atmetimas NĖRA klaida: BullMQ retry ir replay tai daro reguliariai.
+     */
+    reportProgress: async (id, event) => {
+      await ensureInit();
+      if (blockedByTombstone(id, "reportProgress")) return null;
+      const job = await store.get(id);
+      if (!job) return null;
+
+      const patch = jobPhase.reportProgress(job, event);
+      if (!patch) return job;
+      return store.update(id, patch);
+    },
+
+    /** Terminalus perėjimas – vienu patch'u išvalo fazės būseną. */
+    finish: async (id, status, extra = {}) => {
+      await ensureInit();
+      if (blockedByTombstone(id, "finish")) return null;
+      const job = await store.get(id);
+      if (!job) return null;
+
+      const patch = jobPhase.finish(job, status, extra);
+      return store.update(id, patch);
     },
     listPendingDeletions: async (limit) => {
       await ensureInit();
@@ -317,8 +441,31 @@ module.exports = {
    *   reiškia „nerašyk toliau", tad jos nesiskiria; jei kada nors prireiks
    *   atskirti, reikės atskiro grąžinimo tipo, ne `null`.
    */
+  /**
+   * Terminalus perėjimas VARTOTOJO kelyje (#154).
+   *
+   * Maršrutams `jobStore.system` uždraustas (#159 sargas), tad jiems reikia
+   * nuosavybe ribojamo varianto. Nuosavybės filtras taikomas PIRMA – svetimo
+   * job'o užbaigti negalima.
+   */
+  finish: async (scope, status, extra = {}) => {
+    assertScope(scope, "finish");
+    await ensureInit();
+    if (blockedByTombstone(scope.jobId, "finish")) return null;
+
+    const job = await store.getOwned(scope.jobId, scope);
+    if (!job) return null;
+    if (job === "FORBIDDEN") return FORBIDDEN;
+
+    const patch = jobPhase.finish(job, status, extra);
+    return store.update(scope.jobId, patch);
+  },
+
   update: async (scope, patch, options = {}) => {
     assertScope(scope, "update");
+    // #154: sargas galioja IR vartotojo keliui – kitaip maršrutas galėtų
+    // sukurti neteisingą terminalią būseną apeidamas `finish()`.
+    assertNoRawPhaseWrite(patch);
     const id = scope.jobId;
     await ensureInit();
 

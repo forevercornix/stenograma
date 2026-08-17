@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -271,7 +272,7 @@ test("E2E: ištrinto jobo ID NEGALI būti atkurtas nauju darbu", async () => {
   await request(app).delete(`/api/transcribe-jobs/${jobId}`);
 
   // Bandymas atkurti per jobStore (imituoja vėluojantį worker'į).
-  const recreated = await jobStore.system.update(jobId, { status: "completed", result: { text: "neturi išlikti" } });
+  const recreated = await markCompleted(jobStore.system, jobId, { result: { text: "neturi išlikti" } });
 
   assert.equal(recreated, null, "ištrinto jobo atkurti negalima");
   assert.equal(await jobStore.system.get(jobId), null);

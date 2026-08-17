@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -98,10 +99,7 @@ test("DELETE /api/jobs/:id - TRANSKRIPCIJOS jobo ID nepriimamas (404, jobas liek
   const transcriptionJob = await jobStore.create({ ownerKind: "unowned",
     type: jobStore.JOB_TYPES.TRANSCRIPTION,
   });
-  await jobStore.system.update(transcriptionJob.id, {
-    status: jobStore.STATUS.COMPLETED,
-    result: { text: "Jautri transkripcija" },
-  });
+  await markCompleted(jobStore.system, transcriptionJob.id, { result: { text: "Jautri transkripcija" } });
 
   const res = await request(app).delete(`/api/jobs/${transcriptionJob.id}`);
 
