@@ -31,6 +31,8 @@ const redis = [
    * atsiranda tik tarp Redis `get()` ir `eval()`.
    */
   "ownershipCasRedis.integration",
+  /** #154: atominis progreso CAS – TOCTOU lango uždarymas. */
+  "jobPhaseCasRedis.integration",
   /**
    * #153: rezultato riba TIKRAME BullMQ worker kelyje. Statinis sargas
    * `resultLimits` rinkinyje praeitų ir su `if (false)` – šis testas tikrina
