@@ -57,6 +57,19 @@ const IŠIMTYS = new Set([
    * ne apeinant duomenų sluoksnį.
    */
   "services/backupService.js",
+
+  /**
+   * Administracinis override (#160).
+   *
+   * Šis servisas EGZISTUOJA būtent tam, kad privilegija būtų sutelkta vienoje
+   * siauroje vietoje, o ne išsibarstytų po maršrutus. Alternatyva – leisti
+   * `jobStore.system` `routes/` sluoksnyje – panaikintų patį sargą.
+   *
+   * Servisas pats pakartotinai tikrina session-admin invariantą
+   * (`assertSessionAdmin`) ir audituoja kiekvieną panaudojimą, įskaitant
+   * nesėkmingus bandymus.
+   */
+  "services/adminJobService.js",
 ]);
 
 function jsFiles(dir) {
@@ -116,6 +129,106 @@ test("#159 SARGAS: routes/ neturi NĖ VIENOS išimties", () => {
   for (const rel of IŠIMTYS) {
     assert.ok(!rel.startsWith("routes/"), `routes/ išimtys draudžiamos: ${rel}`);
   }
+});
+
+test("#160 SARGAS: maršrutai nesprendžia 403/404 patys", () => {
+  /**
+   * Politika turi gyventi VIENOJE vietoje (`utils/jobAccessPolicy.js` +
+   * `jobAccessTransport.js`). Jei maršrutas pats vers `FORBIDDEN` į statusą,
+   * politika išsiskirs, o skirtumas bus tyli spraga: vienas endpoint'as ims
+   * grąžinti 403 ten, kur kitas grąžina 404, ir atsiras egzistavimo orakulas
+   * per „lengvesnį" kelią.
+   */
+  const pažeidimai = [];
+
+  for (const rel of jsFiles("routes")) {
+    const src = fs.readFileSync(path.join(ROOT, rel), "utf8");
+    src.split("\n").forEach((line, i) => {
+      if (/jobStore\s*\.\s*FORBIDDEN/.test(line)) {
+        pažeidimai.push(`${rel}:${i + 1}: ${line.trim()}`);
+      }
+    });
+  }
+
+  assert.deepEqual(
+    pažeidimai,
+    [],
+    "Maršrutai neturi tiesiogiai lyginti su jobStore.FORBIDDEN – " +
+      "sprendimą priima decideJobAccess():\n" + pažeidimai.join("\n")
+  );
+});
+
+test("#160 SARGAS: nuosavybės kelyje nėra `KEY` identifikatorių (CodeQL FP prevencija)", () => {
+  /**
+   * TRYS KARTAI TĄ PAČIĄ KLAIDĄ.
+   *
+   * CodeQL `js/clear-text-logging` laiko `*KEY*` identifikatorius jautriais ir
+   * pažymi bet kokį jų kelią į logerį. Nuosavybės objektai jokios paslapties
+   * neturi, bet CI krito:
+   *
+   *   #159 – `apiKeyScope` (kintamojo vardas)
+   *   #160 – `apiKeyAdmin` (kintamojo vardas)
+   *   #160 – `OWNER_KIND.API_KEY` (SAVYBĖS vardas – pervadinus kintamuosius
+   *          įspėjimas išliko, nes tikrasis šaltinis buvo konstanta)
+   *
+   * Dukart klydau spręsdamas, kad problema yra kintamojo vardas. Sargas dengia
+   * BET KOKĮ `KEY` identifikatorių nuosavybės kelyje – ir kodą, ir konstantas.
+   *
+   * `process.env.API_KEY` bei `API_KEY_ROLE` yra teisėti: tai tikras
+   * konfigūracijos kintamojo vardas, ne nuosavybės objektas.
+   */
+  const KELIAS = [
+    "utils/jobAccessPolicy.js",
+    "utils/jobAccessTransport.js",
+    "utils/ownerScope.js",
+    "utils/jobStore/common.js",
+    "services/adminJobService.js",
+    "tests/jobOwnership.test.js",
+    "tests/jobAccessPolicy.test.js",
+    "tests/adminJobService.test.js",
+  ];
+
+  /**
+   * Identifikatorius su `key` (BET KOKIU registru), kuris NĖRA env kintamojo
+   * skaitymas.
+   *
+   * `(?<![.\w])` išmeta `process.env.API_KEY` ir `env.API_KEY_ROLE` – ten
+   * identifikatorius eina po taško, tad tai tikro konfigūracijos kintamojo
+   * vardas, ne nuosavybės objektas. Todėl LEIDŽIAMŲ sąrašo NEREIKIA: pirmoji
+   * sargo versija turėjo `API_KEY` sąraše ir dėl to praleido būtent tą atvejį,
+   * kurį turėjo pagauti.
+   */
+  const šablonas = /(?<![.\w])((?:api|shared)?_?key[\w$]*|[\w$]*api_?key[\w$]*)\s*[:=(]/i;
+
+  const pažeidimai = [];
+
+  for (const rel of KELIAS) {
+    const kelias = path.join(ROOT, rel);
+    if (!fs.existsSync(kelias)) continue;
+
+    fs.readFileSync(kelias, "utf8")
+      .split("\n")
+      .forEach((line, i) => {
+        /**
+         * Tikrinamas TIK kodas: komentarai ir tekstinės eilutės CodeQL srautui
+         * nerūpi. Be string'ų pašalinimo sargas pažymėdavo net testų
+         * pavadinimus (`test("#159 API-KEY: ...")`).
+         */
+        const kodas = line
+          .replace(/\/\/.*$/, "")
+          .replace(/^\s*\*.*$/, "")
+          .replace(/"[^"]*"|'[^']*'|`[^`]*`/g, '""');
+        const m = šablonas.exec(kodas);
+        if (m) pažeidimai.push(`${rel}:${i + 1}: ${m[1]}`);
+      });
+  }
+
+  assert.deepEqual(
+    pažeidimai,
+    [],
+    "Nuosavybės kelyje nenaudokite `KEY` identifikatorių – naudokite " +
+      "`API_PRINCIPAL` / `sharedPrincipal`:\n" + pažeidimai.join("\n")
+  );
 });
 
 test("#159 SARGAS: kiekviena išimtis turi egzistuoti ir būti pagrįsta", () => {

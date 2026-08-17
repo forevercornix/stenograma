@@ -763,6 +763,76 @@ interceptinant pirmą `eval()`.
 
 ---
 
+## #160 — prieigos politika (403/404, admin override)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Bendras `API_KEY` NEGAUNA admin override, net su `administrator` role | `jobAccessPolicy` | `API_KEY_ROLE` numatytoji reikšmė YRA `administrator` — patikra vien pagal rolę atidarytų override pagal nutylėjimą |
+| Desktop principalas negauna override | `jobAccessPolicy` | `ownerKind` patikros pašalinimas |
+| Eilinis vartotojas NIEKADA negauna 403 (nėra egzistavimo orakulo) | `jobAccessPolicy` | Bet kuris `DENIED` ne-admin ląstelėje |
+| Admin NEGALI skaityti svetimo job'o (override tik `DELETE`) | `jobAccessPolicy` | `operation` patikros pašalinimas → `READ` gautų override |
+| `FORBIDDEN` ir `MISSING` duoda skirtingus sprendimus | `jobAccessPolicy` | Šakų sujungimas → legacy patektų į našlaičių valymą |
+| Našlaičių valymas admin-only | `jobAccessPolicy` | Ne-admin šakos pašalinimas |
+| Politika yra gryna funkcija (jokio šalutinio poveikio) | `jobAccessPolicy` | `actor` objekto mutacija; determinizmo patikra |
+| Nežinomas `input`/`operation` meta klaidą, ne tylų `NOT_FOUND` | `jobAccessPolicy` | Tylus fallback paslėptų kodo klaidą |
+
+### Administracinis override (`services/adminJobService.js`)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Servisas PATS tikrina session-admin, nepasitiki maršrutu | `adminJobService` | `assertSessionAdmin` pašalinimas → API-key admin ištrintų svetimą job'ą |
+| Atmesti bandymai nieko neištrina | `adminJobService` | Tikrinamas įrašas store'e, ne tik metama klaida |
+| Job'as dingęs tarp sprendimo ir trynimo → **fail-closed** | `adminJobService` | Tylus perėjimas į našlaičių valymą pakeistų operaciją be pėdsako |
+| Override turi SAVO audito įvykį | `adminJobService` | `ADMIN_DELETE_OVERRIDE` ≠ įprastas savininko trynimas |
+| **Nepavykęs** bandymas irgi audituojamas | `adminJobService` | Be to analizė matytų tik sėkmingus override'us |
+| Audite nėra job turinio nei neapdoroto ID | `adminJobService` | Tikrinamas serializuotas visas audito srautas |
+| Privilegijuotas kelias sutelktas VIENAME servise | `systemNamespaceBoundary` | Allowlist su pagrindimu; `routes/` išimčių neturi |
+| **Sėkmė išvedama iš rezultato, ne iš Promise** | `adminJobService` | `success: true` besąlygiškai → krinta: kritinė nesėkmė atrodytų kaip sėkmingas override |
+| Naudojamas TAS PATS sėkmės kriterijus kaip savininko kelyje | `adminJobService` | `lifecycleService.deleteJobArtefacts`, ne tiesioginis `eraseJob()` |
+
+### Transporto sluoksnis (`utils/jobAccessTransport.js`)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Eilinis vartotojas svetimam `GET` gauna 404, ne turinį | `rbac.route` | `respondToDenial` pašalinimas |
+| Session-admin svetimam `GET` gauna 403 BE turinio | `rbac.route` | `ADMIN_READ_NOT_ALLOWED` kodas; turinio laukai tikrinami |
+| Session-admin svetimą job'ą ištrina (override) | `rbac.route` | Du administratoriai – nuosavybė izoliuota nuo rolės |
+| Eilinis vartotojas NEVALO našlaičio | `rbac.route` | Elgesio pakeitimas: anksčiau valė bet kas |
+| Maršrutai NEsprendžia 403/404 patys | `systemNamespaceBoundary` | `jobStore.FORBIDDEN` maršrute → sargas krinta |
+| Nuosavybės kelyje nėra `apiKey`/`API_KEY` identifikatorių | `systemNamespaceBoundary` | Tikrinamos ABI formos: kintamasis IR konstantos savybė. `storageKey` ir `env.API_KEY` praeina |
+| **EXPORT: svetimas ir neegzistuojantis job'as NEATSKIRIAMI** | `rbac.route` | Politikos apėjimas → `link=job`/`invalid_type` atskleistų egzistavimą |
+| EXPORT: admin svetimo job'o nesusieja (skaitymo override neleidžiamas) | `rbac.route` | Tikrinamas audito `link=`, ne statusas |
+| EXPORT: savininkas savo job'ą susieja (regresija) | `rbac.route` | `invalid_type` įrodo, kad savas job'as PASIEKIAMAS |
+| Adapteris atsako TIK už neigiamus sprendimus | `jobAccessTransport` | Teigiami sprendimai nekeičia `res` |
+| Aktorius neša rūšį IR rolę | `jobAccessTransport` | Vien rolė → bendras raktas gautų override |
+| Desktop režimas: našlaičių valymas leidžiamas | `jobAccessPolicy`, `deletionResilience` | Admin-only politika desktop diegime jį padarytų neįmanomą |
+| Desktop išimtis NEGALIOJA bendram raktui | `jobAccessPolicy` | Abu turi `ownerId: null`; skiria tik rūšis |
+
+⚠️ **CodeQL `js/clear-text-logging` klaidingi signalai.** Ši taisyklė laiko `*key*`
+identifikatorius jautriais ir pažymi bet kokį jų kelią į logerį. Nuosavybės objektai
+paslapčių neturi (loginami tik `ownerId`, `ownerKind`, `operation`), bet CI krito tris
+kartus: `apiKeyScope` (#159), `apiKeyAdmin` (#160) ir `OWNER_KIND.API_KEY` (#160).
+**Trečiuoju atveju kintamųjų pervadinimas nepadėjo — tikrasis šaltinis buvo KONSTANTOS
+savybė.** Todėl sargas tikrina abi formas. Konstanta pervadinta į `API_PRINCIPAL`, o jos
+reikšmė (`"api-key"`) palikta: ji saugoma Redis'e, tad keitimas būtų duomenų migracija.
+
+⚠️ **EXPORT transporto semantika SKIRIASI nuo `GET`.** Eksportas nenaudoja
+`respondToDenial()`: `DENIED` ir `NOT_FOUND` abu virsta `linkState = "missing"`, o pats
+eksportas tęsiasi (protokolas ateina užklausos kūne). Todėl `GET` testai eksporto
+elgesio NEĮRODO ir jam reikia atskirų HTTP testų — jie tikrina audito `link=` reikšmę,
+ne HTTP statusą.
+
+⚠️ **Desktop išimtis.** Našlaičių valymas vieno vartotojo režime NĖRA override:
+grėsmės modelis („kitas vartotojas žino tavo job ID") ten negalioja. Todėl jis neturi
+atskiro `ADMIN_*` audito įvykio — privilegija nepanaudota, o patį ištrynimą dokumentuoja
+`DATA_ERASED` kvitas. Antras įrašas iškreiptų override statistiką.
+
+⚠️ **Politika atskirta nuo vykdymo.** `decideJobAccess()` grąžina sprendimą; store'o
+kvietimai, trynimas ir auditas lieka servise. Kitaip „HTTP mapping helperis" virstų
+authorization + deletion orchestration moduliu, o lenktynes taptų sunku testuoti izoliuotai.
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

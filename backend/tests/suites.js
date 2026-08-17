@@ -85,6 +85,12 @@ const security = [
   /** #159: nuosavybės filtras ir privilegijuoto namespace'o riba. */
   "jobOwnership",
   "systemNamespaceBoundary",
+  /** #160: prieigos politika – gryna funkcija, be store'o ir HTTP. */
+  "jobAccessPolicy",
+  /** #160: administracinis override – vienintelė privilegijuota vieta. */
+  "adminJobService",
+  /** #160: politikos → HTTP adapteris (vienas visiems maršrutams). */
+  "jobAccessTransport",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",

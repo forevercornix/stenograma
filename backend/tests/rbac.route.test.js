@@ -13,9 +13,22 @@ process.env.DIARIZATION_PROVIDER = "none";
 
 const { hashPassword } = require("../utils/credentials");
 
+/**
+ * ANTRAS ADMINISTRATORIUS (#160).
+ *
+ * `JOB_DELETE` turi TIK `administrator` rolė (`utils/permissions.js`), tad
+ * operatorius trynimo apskritai nepasiekia - jį sustabdo `requirePermission`
+ * PRIEŠ nuosavybės politiką.
+ *
+ * Vadinasi „svetimas DELETE" scenarijų galima patikrinti tik tarp DVIEJŲ
+ * administratorių. Be antro admin'o testas praeitų dėl rolės, o ne dėl
+ * nuosavybės - ir apie #159/#160 neįrodytų nieko.
+ */
 process.env.AUTH_USERS = `sysadmin:administrator:${hashPassword("admin-slaptas-1")}:11111111-1111-4111-8111-111111111111,darbuotojas:operator:${hashPassword(
   "operator-slaptas-2"
-)}:33333333-3333-4333-8333-333333333333`;
+)}:33333333-3333-4333-8333-333333333333,antrasadmin:administrator:${hashPassword(
+  "antras-slaptas-3"
+)}:55555555-5555-4555-8555-555555555555`;
 // API_KEY IŠJUNGTAS šiame faile - tikrinam GRYNAI sesijų RBAC, be atsarginio
 // rakto kelio, kuris pagal nutylėjimą turi administrator rolę.
 process.env.API_KEY = "";
@@ -500,7 +513,8 @@ test("#158 SRAUTAS: sesija be stabilaus userId NEKURIA job'o (fail-fast)", async
 const jobStoreForOwnership = require("../utils/jobStore");
 
 test("#159 HTTP: A negauna B job'o (GET) ir neatskleidžiama, kad jis egzistuoja", async () => {
-  const cookieB = await loginAs("darbuotojas", "operator-slaptas-2");
+  // Savininkas B = sysadmin; „vagis" A = eilinis operatorius.
+  const cookieB = await loginAs("sysadmin", "admin-slaptas-1");
   const created = await request(app)
     .post("/api/jobs")
     .set("Cookie", cookieB)
@@ -508,17 +522,29 @@ test("#159 HTTP: A negauna B job'o (GET) ir neatskleidžiama, kad jis egzistuoja
   assert.equal(created.status, 202);
   const jobId = created.body.jobId;
 
-  const cookieA = await loginAs("sysadmin", "admin-slaptas-1");
+  /**
+   * „Svetimas" vartotojas čia turi būti EILINIS (operator), ne administratorius:
+   * po #160 admin svetimam `GET` gauna 403, ne 404. Admin elgesys tikrinamas
+   * atskirai žemiau.
+   */
+  const cookieA = await loginAs("darbuotojas", "operator-slaptas-2");
   const stolen = await request(app).get(`/api/jobs/${jobId}`).set("Cookie", cookieA);
 
   assert.notEqual(stolen.status, 200, "svetimas jobas NIEKADA neturi grįžti su 200");
-  assert.equal(stolen.status, 404, "fail-closed iki #160 politikos");
+  assert.equal(stolen.status, 404, "eiliniam vartotojui - 404, jokio egzistavimo orakulo");
   assert.equal(stolen.body.transcript, undefined);
   assert.equal(stolen.body.result, undefined, "jokio turinio nutekėjimo");
 });
 
-test("#159 HTTP: A negali IŠTRINTI B job'o - jokio šalutinio poveikio", async () => {
-  const cookieB = await loginAs("darbuotojas", "operator-slaptas-2");
+test("#160 HTTP: admin B ištrina admin A job'ą TIK per override, ne kaip savininkas", async () => {
+  /**
+   * Abu vartotojai yra `administrator` – skiriasi TIK nuosavybė.
+   *
+   * ⚠️ Be antro admin'o šis testas praeitų dėl rolės: `JOB_DELETE` turi tik
+   * `administrator`, tad operatorių sustabdytų `requirePermission` dar prieš
+   * nuosavybės politiką, ir apie nuosavybę nebūtų įrodyta nieko.
+   */
+  const cookieB = await loginAs("antrasadmin", "antras-slaptas-3");
   const created = await request(app)
     .post("/api/jobs")
     .set("Cookie", cookieB)
@@ -528,8 +554,8 @@ test("#159 HTTP: A negali IŠTRINTI B job'o - jokio šalutinio poveikio", async 
   const cookieA = await loginAs("sysadmin", "admin-slaptas-1");
   const attempt = await request(app).delete(`/api/jobs/${jobId}`).set("Cookie", cookieA);
 
-  assert.notEqual(attempt.status, 200, "svetimo jobo trynimas negali pavykti");
-  assert.notEqual(attempt.status, 204);
+  // Session-admin GAUNA override – bet tai turi būti override, ne savininko kelias.
+  assert.equal(attempt.status, 204, "session-admin trynimo override leidžiamas");
 
   /**
    * ESMINĖ patikra: ne tik atsakymo kodas, bet ir tai, kad įrašas TIKRAI liko.
@@ -537,13 +563,15 @@ test("#159 HTTP: A negali IŠTRINTI B job'o - jokio šalutinio poveikio", async 
    * ten jis būtų aiškinamas kaip įrašas su `undefined` laukais ir galėtų
    * paleisti valymą.
    */
-  const still = await jobStoreForOwnership.system.get(jobId);
-  assert.ok(still, "B jobas turi likti store'e");
-  assert.notEqual(still.status, "deleted");
+  assert.equal(await jobStoreForOwnership.system.get(jobId), null, "realiai ištrinta");
 
-  // Ir savininkas vis dar jį mato.
-  const ownerView = await request(app).get(`/api/jobs/${jobId}`).set("Cookie", cookieB);
-  assert.equal(ownerView.status, 200, "tikrasis savininkas neturi nukentėti");
+  // Bet SKAITYTI to paties job'o admin A negalėjo – override tik trynimui.
+  const kitas = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookieB)
+    .send({ transcript: "Ona: Antras posedis del to paties klausimo." });
+  const read = await request(app).get(`/api/jobs/${kitas.body.jobId}`).set("Cookie", cookieA);
+  assert.equal(read.status, 403, "skaitymo override NELEIDŽIAMAS");
 });
 
 test("#159 HTTP: savininkas savo job'ą gauna normaliai (regresija)", async () => {
@@ -555,4 +583,237 @@ test("#159 HTTP: savininkas savo job'ą gauna normaliai (regresija)", async () =
 
   const own = await request(app).get(`/api/jobs/${created.body.jobId}`).set("Cookie", cookieB);
   assert.equal(own.status, 200, "nuosavybės filtras neturi blokuoti tikrojo savininko");
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #160: POLITIKA PER TIKRĄ HTTP SRAUTĄ
+ *
+ * `jobAccessPolicy` matrica įrodo, kad SPRENDIMAI teisingi. Šie testai įrodo,
+ * kad sprendimai realiai PASIEKIA atsaką — kad graži 18 ląstelių matrica
+ * išliko transporto sluoksnyje, o ne liko izoliuotame vienete.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+async function operatoriausJobas() {
+  const cookie = await loginAs("darbuotojas", "operator-slaptas-2");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookie)
+    .send({ transcript: "Ona: Aptariame projekto eiga ir terminus." });
+  assert.equal(created.status, 202);
+  return { cookie, jobId: created.body.jobId };
+}
+
+test("#160 HTTP: eilinis vartotojas svetimam GET gauna 404", async () => {
+  const { jobId } = await operatoriausJobas();
+  const kitas = await loginAs("sysadmin", "admin-slaptas-1");
+
+  // Sukuriam job'ą admin'ui ir bandom eiliniu - kad „svetimas" būtų tikras.
+  const adminJob = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", kitas)
+    .send({ transcript: "Petras: Vidinis pasitarimas del biudzeto." });
+
+  const operatorCookie = await loginAs("darbuotojas", "operator-slaptas-2");
+  const res = await request(app)
+    .get(`/api/jobs/${adminJob.body.jobId}`)
+    .set("Cookie", operatorCookie);
+
+  assert.equal(res.status, 404, "jokio egzistavimo orakulo eiliniam vartotojui");
+  assert.equal(res.body.code, undefined, "ir jokio 403 kodo");
+  assert.ok(jobId, "savas jobas liko nepaliestas");
+});
+
+test("#160 HTTP: session-admin svetimam GET gauna 403, NE turinį", async () => {
+  /**
+   * Override yra OPERACIJOS savybė: admin gali IŠTRINTI, bet negali SKAITYTI.
+   * 403 čia teisingas — administraciniame kontekste egzistavimo slėpimas nėra
+   * prioritetas, o skirtumas tarp „nėra" ir „yra, bet neleidžiama" vertingas.
+   */
+  const { jobId } = await operatoriausJobas();
+  const adminCookie = await loginAs("sysadmin", "admin-slaptas-1");
+
+  const res = await request(app).get(`/api/jobs/${jobId}`).set("Cookie", adminCookie);
+
+  assert.equal(res.status, 403);
+  assert.equal(res.body.code, "ADMIN_READ_NOT_ALLOWED");
+  assert.equal(res.body.transcript, undefined, "jokio turinio");
+  assert.equal(res.body.result, undefined);
+});
+
+test("#160 HTTP: session-admin svetimą job'ą IŠTRINA (override)", async () => {
+  const { jobId } = await operatoriausJobas();
+  const adminCookie = await loginAs("sysadmin", "admin-slaptas-1");
+
+  const res = await request(app).delete(`/api/jobs/${jobId}`).set("Cookie", adminCookie);
+
+  assert.equal(res.status, 204, "trynimo override leidžiamas");
+  assert.equal(await jobStoreForOwnership.system.get(jobId), null, "realiai ištrinta");
+});
+
+test("#160 HTTP: eilinis vartotojas NEVALO našlaičio", async () => {
+  /**
+   * ELGESIO PAKEITIMAS. Anksčiau `null` atveju našlaičių valymas vykdavo bet
+   * kuriam vartotojui — o kai store įrašo nebėra, nuosavybės patikrinti
+   * neįmanoma. Eilinis vartotojas, žinantis ID, galėjo ištrinti svetimus
+   * BullMQ ir audito pėdsakus.
+   */
+  const operatorCookie = await loginAs("darbuotojas", "operator-slaptas-2");
+
+  const res = await request(app)
+    .delete("/api/jobs/00000000-0000-4000-8000-000000000000")
+    .set("Cookie", operatorCookie);
+
+  /**
+   * Operatorius sustabdomas jau `requirePermission` (`JOB_DELETE` turi tik
+   * administratorius), tad iki našlaičių politikos jis nepasiekia. Svarbu
+   * REZULTATAS: jokio valymo neįvyko.
+   */
+  assert.ok([403, 404].includes(res.status), `netikėtas statusas: ${res.status}`);
+  assert.equal(res.body.deletion, undefined, "jokio valymo rezultato - valymas nevyko");
+});
+
+test("#160 HTTP: savininkas savo job'ą ir mato, ir ištrina (regresija)", async () => {
+  /**
+   * Savininkas turi būti `administrator`: `JOB_DELETE` operatoriui neprieinamas
+   * apskritai, tad su juo šis testas tikrintų tik `GET`.
+   */
+  const cookie = await loginAs("antrasadmin", "antras-slaptas-3");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookie)
+    .send({ transcript: "Rūta: Reikia suderinti kitos savaites darbotvarke." });
+
+  const get = await request(app).get(`/api/jobs/${created.body.jobId}`).set("Cookie", cookie);
+  assert.equal(get.status, 200, "politika neturi blokuoti tikrojo savininko");
+
+  const del = await request(app).delete(`/api/jobs/${created.body.jobId}`).set("Cookie", cookie);
+  assert.equal(del.status, 204, "savininko trynimas eina ĮPRASTU keliu, ne override");
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #160: EKSPORTO POLITIKA
+ *
+ * KODĖL ATSKIRAI NUO `GET`.
+ *
+ * Eksportas SĄMONINGAI nenaudoja `respondToDenial()` – jo transporto semantika
+ * kitokia: `DENIED` ir `NOT_FOUND` abu virsta `linkState = "missing"`, o pats
+ * eksportas tęsiasi (protokolas ateina užklausos kūne, ne iš job'o).
+ *
+ * Todėl `GET` testai eksporto elgesio NEĮRODO. Svarbu, kad svetimas job'as ir
+ * TIKRAI neegzistuojantis būtų NEATSKIRIAMI – kitaip audito `link=` laukas
+ * taptų egzistavimo orakulu.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const auditLogForExport = require("../utils/auditLog");
+
+const PROTOKOLAS = {
+  title: "Testinis posėdis",
+  date: "2026-08-17",
+  participants: ["Jonas"],
+  agenda: ["Klausimas"],
+  discussion: ["Aptarta"],
+  decisions: ["Nuspręsta"],
+  actions: [],
+};
+
+/** Grąžina `link=` reikšmę iš paskutinio eksporto audito įrašo. */
+function paskutinisLink(nuo) {
+  const įrašai = auditLogForExport
+    .getAll()
+    .slice(nuo)
+    .filter((e) => typeof e.details === "string" && e.details.includes("link="));
+  assert.ok(įrašai.length > 0, "eksportas turi palikti audito įrašą");
+  return /link=(\w+)/.exec(įrašai[įrašai.length - 1].details)[1];
+}
+
+test("#160 EXPORT: eilinis vartotojas svetimo job'o egzistavimo neatskleidžia", async () => {
+  const savininkas = await loginAs("sysadmin", "admin-slaptas-1");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", savininkas)
+    .send({ transcript: "Petras: Vidinis pasitarimas del strategijos." });
+  const svetimasId = created.body.jobId;
+
+  const operatorius = await loginAs("darbuotojas", "operator-slaptas-2");
+
+  const priesSvetimo = auditLogForExport.getAll().length;
+  const svetimas = await request(app)
+    .post("/api/exports")
+    .set("Cookie", operatorius)
+    .send({ variant: "redacted", format: "txt", protocol: PROTOKOLAS, jobId: svetimasId });
+  assert.equal(svetimas.status, 200, `eksportas turi pavykti: ${JSON.stringify(svetimas.body)}`);
+  const svetimoLink = paskutinisLink(priesSvetimo);
+
+  const priesNesamo = auditLogForExport.getAll().length;
+  const nesamas = await request(app)
+    .post("/api/exports")
+    .set("Cookie", operatorius)
+    .send({
+      variant: "redacted",
+      format: "txt",
+      protocol: PROTOKOLAS,
+      jobId: "00000000-0000-4000-8000-000000000000",
+    });
+  const nesamoLink = paskutinisLink(priesNesamo);
+
+  assert.equal(svetimas.status, nesamas.status, "statusas turi sutapti");
+  assert.equal(
+    svetimoLink,
+    nesamoLink,
+    "svetimas ir neegzistuojantis job'as turi būti NEATSKIRIAMI audite"
+  );
+  assert.equal(svetimoLink, "missing", "abu – missing, ne invalid_type ar job");
+});
+
+test("#160 EXPORT: session-admin svetimo job'o irgi nesusieja", async () => {
+  /**
+   * Admin `GET` gauna 403 (diagnostika), bet EKSPORTAS yra skaitymo operacija:
+   * override jai neleidžiamas. Susiejus job'ą, audito įrašas patvirtintų, kad
+   * svetimas job'as egzistuoja IR yra tinkamo tipo.
+   */
+  const operatorius = await loginAs("darbuotojas", "operator-slaptas-2");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", operatorius)
+    .send({ transcript: "Ona: Operatoriaus posedis del terminu." });
+
+  const adminCookie = await loginAs("sysadmin", "admin-slaptas-1");
+  const pries = auditLogForExport.getAll().length;
+
+  await request(app)
+    .post("/api/exports")
+    .set("Cookie", adminCookie)
+    .send({ variant: "redacted", format: "txt", protocol: PROTOKOLAS, jobId: created.body.jobId });
+
+  assert.equal(
+    paskutinisLink(pries),
+    "missing",
+    "admin neturi susieti svetimo job'o – skaitymo override neleidžiamas"
+  );
+});
+
+test("#160 EXPORT: savininkas savo job'ą susieja normaliai (regresija)", async () => {
+  const cookie = await loginAs("darbuotojas", "operator-slaptas-2");
+
+  /**
+   * Užtenka PROTOKOLO job'o: eksportui jo tipas netinka, tad savas job'as duoda
+   * `invalid_type`, o svetimas ar nesantis – `missing`. Būtent tas skirtumas ir
+   * įrodo, kad nuosavybės filtras savo savininko neblokuoja.
+   */
+  const protokolo = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookie)
+    .send({ transcript: "Rūta: Savas posedis." });
+
+  const pries = auditLogForExport.getAll().length;
+  await request(app)
+    .post("/api/exports")
+    .set("Cookie", cookie)
+    .send({ variant: "redacted", format: "txt", protocol: PROTOKOLAS, jobId: protokolo.body.jobId });
+
+  assert.equal(
+    paskutinisLink(pries),
+    "invalid_type",
+    "SAVAS job'as pasiekiamas – matomas tikras tipo neatitikimas, ne missing"
+  );
 });

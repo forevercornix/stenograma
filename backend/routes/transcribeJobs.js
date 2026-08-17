@@ -1,7 +1,6 @@
 const express = require("express");
 const fs = require("fs/promises");
 const jobStore = require("../utils/jobStore");
-const { eraseOrphanedJobData } = require("../utils/jobErasure");
 const lifecycleService = require("../services/lifecycleService");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
@@ -12,6 +11,13 @@ const { createAudioUpload } = require("../utils/uploadStorage");
 const { VARIANT } = require("../utils/redactedArtefact");
 const { getRequestId, getActor } = require("../utils/requestContext");
 const { getOwnerScope } = require("../utils/ownerScope");
+const {
+  ACCESS_DECISION,
+  OPERATION,
+  resolveJobAccess,
+  respondToDenial,
+} = require("../utils/jobAccessTransport");
+const adminJobService = require("../services/adminJobService");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
@@ -24,29 +30,6 @@ const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
 const { validate, schemas } = require("../middleware/validate");
 const log = createLogger("route:transcribe-jobs");
 
-/**
- * SVETIMO JOB'O APDOROJIMAS (#159).
- *
- * `jobStore.get()` grąžina TRIS skirtingus rezultatus: job'ą, `null` (nėra) ir
- * `jobStore.FORBIDDEN` (yra, bet svetimas). `FORBIDDEN` yra `Symbol`, o
- * `Symbol` yra TRUTHY – todėl įprasta `if (!job)` patikra jo NEPAGAUNA ir
- * svetimas įrašas praeitų toliau kaip savas.
- *
- * FAIL-CLOSED, LAIKINAI 404. Galutinę 403 vs 404 politiką (ir admin override)
- * sprendžia #160. Iki tol grąžinamas 404: jis neatskleidžia, ar job'as
- * egzistuoja, tad saugesnis pasirinkimas neapsisprendus. Store informacijos
- * nepraranda – skirtumas tarp `null` ir `FORBIDDEN` išlieka kontrakte, tad
- * #160 galės jį pakeisti nekeisdamas duomenų sluoksnio.
- *
- * @returns {boolean} ar užklausa jau atsakyta (kvietėjas privalo grįžti)
- */
-function denyIfForbidden(job, res) {
-  if (job === jobStore.FORBIDDEN) {
-    res.status(404).json({ error: "Jobas nerastas." });
-    return true;
-  }
-  return false;
-}
 
 
 /**
@@ -270,10 +253,15 @@ router.post(
  * response: { jobId, status: queued|processing|completed|failed|cancelled, progress?, result?, error?, ... }
  */
 router.get("/transcribe-jobs/:id", pollRateLimiter, authenticate, requirePermission(PERMISSIONS.JOB_READ), validate({ params: schemas.jobIdParam }), async (req, res) => {
-  const scope = getOwnerScope(req);
-  const job = await jobStore.get({ jobId: req.params.id, ...scope });
-  if (denyIfForbidden(job, res)) return;
-  if (!job) return res.status(404).json({ error: "Jobas nerastas (galbūt serveris persileido, o job store buvo tik atmintyje - persistencijai naudokite Redis)." });
+  const { decision, job } = await resolveJobAccess(req, req.params.id, OPERATION.READ);
+  if (
+    respondToDenial(decision, res, {
+      notFoundMessage:
+        "Jobas nerastas (galbūt serveris persileido, o job store buvo tik atmintyje - persistencijai naudokite Redis).",
+    })
+  ) {
+    return;
+  }
 
   res.json({
     jobId: job.id,
@@ -312,37 +300,57 @@ router.get("/transcribe-jobs/:id", pollRateLimiter, authenticate, requirePermiss
  *
  * Aktyvių jobų netrina, nes worker'is dar gali juos atnaujinti.
  *
- * PASTABA dėl autorizacijos (#18 PR2): reikalingas `job:delete` leidimas, kurį
- * turi TIK `administrator` rolė. Bet ⚠️ `API_KEY_ROLE` pagal nutylėjimą yra
- * `administrator`, tad bendro rakto turėtojas ir toliau gali ištrinti bet kurį
- * jobą - tai sąmoningas atgalinio suderinamumo sprendimas, ne praleidimas.
- * Realiam rolių atskyrimui `API_KEY_ROLE` reikia susiaurinti iki `operator`
- * arba pereiti prie sesijų. Nuosavybės patikros (kas kieno jobas) vis dar NĖRA.
+ * AUTORIZACIJA (#18 PR2 + #160): reikalingas `job:delete` leidimas, kurį turi
+ * TIK `administrator` rolė – ir PAPILDOMAI nuosavybės politika.
+ *
+ * ⚠️ `API_KEY_ROLE` pagal nutylėjimą yra `administrator`, tad rolės patikra
+ * bendro rakto NEsustabdo. Bet nuo #160 to nebepakanka: `decideJobAccess()`
+ * reikalauja SESIJOS tapatybės su stabiliu `userId`, todėl bendras raktas
+ * svetimo job'o ištrinti nebegali (`isSessionAdmin()` jam grąžina `false`).
+ *
+ * Nuosavybės patikra atliekama žemiau – `resolveJobAccess()`.
  */
 router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermission(PERMISSIONS.JOB_DELETE), validate({ params: schemas.jobIdParam }), async (req, res) => {
-  const scope = getOwnerScope(req);
-  const job = await jobStore.get({ jobId: req.params.id, ...scope });
-  if (denyIfForbidden(job, res)) return;
+  /**
+   * SPRENDIMŲ MEDIS (#160) – identiškas `routes/jobs.js`, nes politika viena.
+   *
+   *   job'as      → įprastas savininko DELETE
+   *   FORBIDDEN   → session-admin override; kitiems 404
+   *   nėra (null) → session-admin našlaičių valymas; kitiems 404 BE VALYMO
+   */
+  const { decision, job, actor } = await resolveJobAccess(req, req.params.id, OPERATION.DELETE);
+  if (respondToDenial(decision, res)) return;
 
-  if (!job) {
-    // jobStore įrašas galėjo dingti pagal TTL (numatytai 60 min), o BullMQ (iki
-    // 24 val.) ir auditas (iki 30 d.) duomenis dar laiko. Prieš 404 pabandom
-    // ištrinti tai, kas dar egzistuoja - kitaip teisė ištrinti dingtų anksčiau
-    // nei patys duomenys.
-    const orphan = await eraseOrphanedJobData(req.params.id, { scope: "owner", ownerId: scope.ownerId, ownerKind: scope.ownerKind });
+  if (decision === ACCESS_DECISION.ADMIN_DELETE_OVERRIDE) {
+    const result = await adminJobService.adminDeleteJob(req.params.id, actor);
+    if (result.deleted) return res.status(204).send();
+    if (result.reason === "vanished") {
+      return res.status(404).json({ error: "Jobas nerastas." });
+    }
+    return res.status(503).json({
+      error: "Nepavyko visiškai ištrinti jobo duomenų. Užklausą galima pakartoti.",
+      deletion: result.result,
+    });
+  }
 
-    if (orphan.criticalFailure) {
+  if (
+    decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP ||
+    decision === ACCESS_DECISION.DESKTOP_ORPHAN_CLEANUP
+  ) {
+    const result =
+      decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP
+        ? await adminJobService.adminCleanupOrphan(req.params.id, actor)
+        : await adminJobService.desktopCleanupOrphan(req.params.id, actor);
+    if (!result.cleaned) {
       log.error(
-        `NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${orphan.errors.join("; ")}`
+        `NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${result.outcome.errors.join("; ")}`
       );
       return res.status(503).json({
         error: "Nepavyko visiškai ištrinti jobo duomenų. Užklausą galima pakartoti.",
-        deletion: orphan,
+        deletion: result.outcome,
       });
     }
-
-    if (orphan.found) return res.status(204).send();
-
+    if (result.outcome.found) return res.status(204).send();
     return res.status(404).json({ error: "Jobas nerastas." });
   }
 

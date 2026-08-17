@@ -53,7 +53,7 @@ test("#159 ownerId ir actor yra ATSKIRI laukai", () => {
    * tapatybė (rolei perskaičiuoti), `ownerId` – duomenų nuosavybė (prieigai).
    * API rakto kelyje jie net nesutampa: actor = `key_<hex>`, owner = null.
    */
-  const job = newJob({ actor: "key_abc123", ownerId: null, ownerKind: OWNER_KIND.API_KEY });
+  const job = newJob({ actor: "key_abc123", ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL });
   assert.equal(job.actor, "key_abc123");
   assert.equal(job.ownerId, null);
 });
@@ -143,7 +143,7 @@ test("#159 API-KEY: bendro rakto job'ai gauna ownerId=null (sąmoningas kontrakt
    * `actor` tokiam job'ui YRA reikšmingas (rakto atspaudas auditui), bet
    * `ownerId` lieka `null`. Tai užrakina skirtumą tarp dviejų laukų.
    */
-  const job = await jobStore.create({ actor: "key_9f2c1a", ownerId: null, ownerKind: OWNER_KIND.API_KEY });
+  const job = await jobStore.create({ actor: "key_9f2c1a", ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL });
 
   assert.equal(job.ownerId, null, "bendras raktas neturi išgalvotos nuosavybės");
   assert.equal(job.actor, "key_9f2c1a", "auditui rakto atspaudas išlieka");
@@ -207,7 +207,7 @@ test("#159 KRITINIS: bendras API_KEY NĖRA legacy job'o savininkas", async () =>
    * išvengti nei jį kaskart atmetinėti. Atmestas įspėjimas dar ir nuslopintų
    * TIKRĄ radinį, jei jis kada atsirastų tame pačiame kelyje.
    */
-  const sharedPrincipal = { jobId: legacy.id, ownerId: null, ownerKind: OWNER_KIND.API_KEY };
+  const sharedPrincipal = { jobId: legacy.id, ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL };
   assert.equal(await jobStore.get(sharedPrincipal), jobStore.FORBIDDEN);
   assert.equal(await jobStore.update(sharedPrincipal, { status: "failed" }), jobStore.FORBIDDEN);
   assert.equal(await jobStore.remove(sharedPrincipal), jobStore.FORBIDDEN);
@@ -216,12 +216,12 @@ test("#159 KRITINIS: bendras API_KEY NĖRA legacy job'o savininkas", async () =>
 test("#159 KRITINIS: bendras API_KEY NĖRA desktop job'o savininkas", async () => {
   const desktop = await jobStore.create({ ownerId: null, ownerKind: OWNER_KIND.UNOWNED });
 
-  const sharedPrincipal = { jobId: desktop.id, ownerId: null, ownerKind: OWNER_KIND.API_KEY };
+  const sharedPrincipal = { jobId: desktop.id, ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL };
   assert.equal(await jobStore.get(sharedPrincipal), jobStore.FORBIDDEN, "abu `null`, bet rūšys skiriasi");
 });
 
 test("#159 KRITINIS: desktop iškviečiantysis NĖRA API-key job'o savininkas", async () => {
-  const apiJob = await jobStore.create({ ownerId: null, ownerKind: OWNER_KIND.API_KEY });
+  const apiJob = await jobStore.create({ ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL });
 
   const desktopScope = { jobId: apiJob.id, ownerId: null, ownerKind: OWNER_KIND.UNOWNED };
   assert.equal(await jobStore.get(desktopScope), jobStore.FORBIDDEN);
@@ -253,10 +253,10 @@ test("#159 SCOPE: praleistas ownerKind yra klaida", async () => {
 });
 
 test("#159 ownerKind NEKEIČIAMAS per applyPatch", () => {
-  const job = newJob({ ownerId: null, ownerKind: OWNER_KIND.API_KEY });
+  const job = newJob({ ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL });
   const patched = applyPatch(job, { ownerKind: OWNER_KIND.USER, ownerId: A });
 
-  assert.equal(patched.ownerKind, OWNER_KIND.API_KEY, "rūšis nustatoma TIK create() metu");
+  assert.equal(patched.ownerKind, OWNER_KIND.API_PRINCIPAL, "rūšis nustatoma TIK create() metu");
   assert.equal(patched.ownerId, null);
 });
 
@@ -285,7 +285,7 @@ test("#159 CREATE: rūšies ir ID derinys validuojamas, ne tik enum", async () =
     "vartotojas be stabilaus ID nėra tapatybė"
   );
   await assert.rejects(
-    () => jobStore.create({ ownerKind: OWNER_KIND.API_KEY, ownerId: A }),
+    () => jobStore.create({ ownerKind: OWNER_KIND.API_PRINCIPAL, ownerId: A }),
     /negali turėti ownerId/,
     "bendras raktas nėra individas"
   );
@@ -296,7 +296,7 @@ test("#159 CREATE: rūšies ir ID derinys validuojamas, ne tik enum", async () =
 
   // Galiojantys deriniai praeina.
   assert.ok(await jobStore.create({ ownerKind: OWNER_KIND.USER, ownerId: A }));
-  assert.ok(await jobStore.create({ ownerKind: OWNER_KIND.API_KEY, ownerId: null }));
+  assert.ok(await jobStore.create({ ownerKind: OWNER_KIND.API_PRINCIPAL, ownerId: null }));
   assert.ok(await jobStore.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null }));
 });
 
@@ -314,7 +314,7 @@ test("#159 INVARIANTAS: prieštaringa tapatybė atmetama IR skaitymo kelyje", as
    */
   const neįmanomos = [
     { ownerKind: OWNER_KIND.USER, ownerId: null },
-    { ownerKind: OWNER_KIND.API_KEY, ownerId: A },
+    { ownerKind: OWNER_KIND.API_PRINCIPAL, ownerId: A },
     { ownerKind: OWNER_KIND.UNOWNED, ownerId: A },
   ];
 
