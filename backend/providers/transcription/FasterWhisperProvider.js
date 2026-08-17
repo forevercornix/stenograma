@@ -1,6 +1,11 @@
 const TranscriptionProvider = require("./TranscriptionProvider");
 const { fetchWithTimeout, timeoutForAudioBytes } = require("../../utils/httpClient");
 const { createLogger } = require("../../utils/logger");
+const {
+  LIMIT_KIND,
+  assertWithinLimit,
+  assertTranscriptionWithinLimits,
+} = require("../../utils/resultLimits");
 const log = createLogger("provider:faster-whisper");
 
 /**
@@ -36,7 +41,21 @@ class FasterWhisperProvider extends TranscriptionProvider {
     this.url = config.url || process.env.FASTER_WHISPER_URL || "http://localhost:8000/transcribe";
   }
 
+  /**
+   * Vieša sąsaja: paleidžia transkribavimą ir PATIKRINA rezultato ribas (#153).
+   *
+   * ⚠️ Patikra ČIA, o ne kiekvienoje šakoje atskirai. Anksčiau ji buvo tik
+   * streaming kelyje, tad su `WHISPER_STREAM_PROGRESS=false` (numatyta!)
+   * `MAX_TRANSCRIPT_BYTES` ir `MAX_SEGMENTS` neveikdavo visai. Ribos elgesys
+   * negali priklausyti nuo transporto režimo pasirinkimo.
+   */
   async transcribe(audioBuffer, options = {}) {
+    const result = await this._transcribeAny(audioBuffer, options);
+    assertTranscriptionWithinLimits(result);
+    return result;
+  }
+
+  async _transcribeAny(audioBuffer, options = {}) {
     // SSE streaming kelias su progresu - TIK jei kviečiantysis pateikė onProgress IR
     // įjungtas WHISPER_STREAM_PROGRESS=true. Numatyta IŠJUNGTA, kad numatytas (realiai
     // patikrintas) kelias liktų nepakeistas. NETESTUOTA su realiu GPU - žr. RUNPOD.md.
@@ -50,6 +69,17 @@ class FasterWhisperProvider extends TranscriptionProvider {
         // tada įprastas /transcribe nekartoja jau padaryto darbo. Jei streaming'as krito
         // ĮPUSĖJUS (progreso jau buvo), aklas fallback reikštų VISOS 4 val. transkripcijos
         // kartojimą iš naujo (dvigubas GPU darbas). Tokiu atveju NEkartojam - metam klaidą.
+        /**
+         * RIBOS VIRŠIJIMAS PERDUODAMAS NEPAKEISTAS (#153).
+         *
+         * Apvyniojus jį į bendrą `Error`, prarandamas `kind`/`code`, ir
+         * `jobRunner._classifyError()` job'ą pažymėtų `internal_error` –
+         * operatorius nematytų, kad priežastis yra per didelis atsakymas, ne
+         * serverio klaida. Fallback čia bet kokiu atveju netinka: didesnis
+         * atsakymas per `/transcribe` netaptų mažesnis.
+         */
+        if (e && e.name === "ResultLimitError") throw e;
+
         if (progressState.received) {
           throw new Error(
             `Whisper streaming nutrūko įpusėjus (${e.message}). Nekartojam viso darbo - ` +
@@ -123,9 +153,58 @@ class FasterWhisperProvider extends TranscriptionProvider {
 
     let done = null;
     let buffer = "";
+    /**
+     * DVI INKREMENTINĖS RIBOS, MATUOJANČIOS SKIRTINGUS DALYKUS (#153).
+     *
+     * `STREAM_BUFFER_BYTES` – RAM apsauga: SSE parse buferio dydis IŠKART po
+     * chunk'o pridėjimo, dar PRIEŠ pilnų įvykių išėmimą. Matavimas sąmoningai
+     * konservatyvus – buferyje gali laikinai būti nebaigtas įvykis plius pilni
+     * įvykiai iš to paties chunk'o. Tikrinti po išėmimo būtų grynesnė
+     * semantika, bet silpnesnė apsauga: didelis chunk'as jau būtų sukauptas.
+     *
+     * ⚠️ TAI NĖRA PEAK-RAM HARD CAP. Chunk'as jau gautas, dekoduotas į JS
+     * string'ą ir prijungtas prie `buffer`, ir TIK tada tikrinama. Riba
+     * neleidžia parse buferiui augti TOLIAU, bet negarantuoja, kad proceso
+     * atmintis niekada neviršys ribos dėl vieno patologinio chunk'o. Tai
+     * ankstyviausias kontrolės taškas PO gauto chunk'o dekodavimo.
+     *
+     * Būtent čia atmintis auga nekontroliuojamai: patologinis `done` įvykis su
+     * 50 000 segmentų vienu JSON būtų sukauptas visas prieš `JSON.parse`.
+     *
+     * `STREAM_TOTAL_BYTES` – transporto kvota: kaupiami baitai nuo ryšio
+     * pradžios. NEsaugo atminties (pilni įvykiai iš buferio pašalinami iškart),
+     * bet riboja begalinį srautą.
+     *
+     * ⚠️ Ankstesnė versija turėjo TIK kaupiamą skaitiklį ir vadino jį RAM
+     * apsauga. Tai buvo neteisinga: siunčiant normalius `progress` įvykius
+     * buferio maksimumas yra 0 baitų, o skaitiklis auga.
+     */
+    let streamTotal = 0;
     const decoder = new TextDecoder();
     for await (const chunk of res.body) {
+      /**
+       * `byteLength`, BE fallback į `.length` (#153).
+       *
+       * `MAX_STREAM_TOTAL_BYTES` yra VIEŠAS env kontraktas, deklaruojantis
+       * baitus. `fetch()` Web Stream duoda `Uint8Array`, tad `byteLength`
+       * visada yra.
+       *
+       * ⚠️ Fallback `?? chunk.length` būtų panaikinęs pačią garantiją: jei
+       * chunk'as kada nors būtų ne baitų tipo (pvz. string'as), `.length`
+       * grąžintų SIMBOLIŲ skaičių, ir riba tyliai imtų reikšti ne baitus. Geriau
+       * aiški klaida nei neteisingai interpretuotas kontraktas.
+       */
+      if (typeof chunk.byteLength !== "number") {
+        throw new TypeError(
+          "SSE srautas grąžino ne baitų tipo chunk'ą – MAX_STREAM_TOTAL_BYTES " +
+            "kontraktas reikalauja baitų."
+        );
+      }
+      streamTotal += chunk.byteLength;
+      assertWithinLimit(LIMIT_KIND.STREAM_TOTAL_BYTES, streamTotal);
+
       buffer += decoder.decode(chunk, { stream: true });
+      assertWithinLimit(LIMIT_KIND.STREAM_BUFFER_BYTES, Buffer.byteLength(buffer, "utf8"));
       let idx;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, idx);

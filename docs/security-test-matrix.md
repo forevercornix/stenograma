@@ -833,6 +833,86 @@ authorization + deletion orchestration moduliu, o lenktynes taptų sunku testuot
 
 ---
 
+## #153 — rezultatų ir artefaktų dydžio ribos (apsauga IŠĖJIME)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Dydis matuojamas UTF-8 baitais, ne simboliais | `resultLimits` | `.length` duotų dvigubai laisvesnę ribą lietuviškam tekstui |
+| **`MAX_STREAM_BUFFER_BYTES` = RAM apsauga (SSE parse buferis)** | `fasterWhisperStream` | Testas siunčia NEUŽBAIGTĄ įvykį; patikros pašalinimas → „UŽSTRIGO", ne kabo |
+| `MAX_STREAM_TOTAL_BYTES` = transporto kvota, NE RAM | `fasterWhisperStream` | Pilni įvykiai buferio neaugina – testas tai ir įrodo |
+| Turinio ribos veikia IR be streaming (`WHISPER_STREAM_PROGRESS=false`) | `fasterWhisperStream` | Patikra iškelta į vieną viešą įėjimą; anksčiau numatytoje konfigūracijoje neveikė visai |
+| Diarizacijos riba tikrinama per TIKRĄ providerį | `resultLimits` | `assertWithinLimit` pašalinimas providerio viduje → krinta |
+| Env reikšmė validuojama VISA, ne prefiksu | `resultLimits` | `"20MB"` → 20 baitų riba tyliai sustabdytų sistemą |
+| Ribos viršijimas turi domeninį `kind`, ne transporto exception | `resultLimits` | Klasifikatoriaus šakos pašalinimas → `internal_error` |
+| Domeninė klaida NEapvyniojama providerio fallback sluoksnyje | `fasterWhisperStream` | Apvyniojus → `kind` prarandamas, job'as gauna `internal_error` |
+| Viršijus ribą job'as pereina į **terminalų** `failed` | `resultLimits` | Blogiausias variantas – pakibęs `processing` |
+| Job metaduomenys LIEKA, rezultato artefaktas – ne | `resultLimits` | Tikrinamos abi pusės |
+| `MAX_RESULT_BYTES` matuoja TIK `result`, ne job metaduomenis | `resultLimits` | Kitaip riba priklausytų nuo laiko žymų ir audito laukų |
+| Patikra ABIEJUOSE vykdymo keliuose (inline + BullMQ) | `resultLimits` (statinis sargas) + **`resultLimitsWorker.integration` (tikras Redis)** | Statinis sargas praeitų ir su `if (false)`; integracinis testas tikrina ELGESĮ produkcijos kelyje |
+| **Ribos viršijimas NEATKARTOJAMAS** (`UnrecoverableError`) | `resultLimitsWorker.integration` | Be jo BullMQ kartotų `attempts` kartus — kiekvienas bandymas = pilnas transkribavimas ar LLM kvietimas iš naujo |
+| Neatkartojama klaida yra GALUTINĖ iš karto | `resultLimitsWorker.integration` | `attemptsMade >= attempts` vieno nepakanka: job'as liktų amžinai `processing` |
+| `result` NEĮRAŠOMAS į store net su tikru Redis | `resultLimitsWorker.integration` | Patikra po `update` → per didelis rezultatas jau gulėtų DB (po #155) |
+| Skaitikliai matuoja BAITUS, ne `length` | `resultLimits`, `fasterWhisperStream` | `chunk.byteLength`, ne `chunk.length` — viešas env kontraktas deklaruoja baitus |
+| Tekstas ir JSON matuojami atskirais helperiais | `resultLimits` | `"abc"` = 3 baitai kaip tekstas, 5 kaip JSON — vienas helperis supainiotų ribas |
+| Netinkama env reikšmė grįžta prie numatytosios, ne prie `0` | `resultLimits` | `0` riba reikštų, kad viskas viršija – sistema sustotų |
+| Numatytos reikšmės nepertraukia normalaus srauto | `fasterWhisperStream` | Regresija prieš per griežtus defaults |
+
+### Ribų vykdymo momentai
+
+| Riba | Momentas |
+|---|---|
+| `MAX_STREAM_BUFFER_BYTES` | inkrementinis — transporto RAM apsauga |
+| `MAX_STREAM_TOTAL_BYTES` | inkrementinis — transporto kvota (ne RAM) |
+| `MAX_SEGMENTS` | post-`done` |
+| `MAX_TRANSCRIPT_BYTES` | post-payload |
+| `MAX_RESULT_BYTES` | prieš rašymą į store |
+| `MAX_DIARIZATION_TURNS` | post-response |
+
+⚠️ **Dvi inkrementinės ribos matuoja SKIRTINGUS dalykus.** `MAX_STREAM_BUFFER_BYTES` –
+SSE parse buferio dydis IŠKART po chunk'o pridėjimo, dar PRIEŠ pilnų įvykių išėmimą. Tad
+matavimas sąmoningai konservatyvus: buferyje gali laikinai būti nebaigtas įvykis plius
+pilni įvykiai iš to paties chunk'o. Tikrinti po išėmimo būtų grynesnė semantika, bet
+silpnesnė apsauga — didelis chunk'as jau būtų sukauptas atmintyje. Tai ankstyviausias
+įmanomas kontrolės taškas kliento pusėje.
+
+⚠️ **`MAX_STREAM_BUFFER_BYTES` nėra peak-RAM hard cap.** Chunk'as jau gautas,
+dekoduotas į JS string'ą ir prijungtas prie buferio, ir tik tada tikrinama. Riba neleidžia
+parse buferiui augti TOLIAU, bet negarantuoja, kad proceso atmintis niekada neviršys ribos
+dėl vieno patologinio chunk'o. Tai ankstyviausias kontrolės taškas **po gauto chunk'o
+dekodavimo**, ne absoliučiai ankstyviausias.
+
+⚠️ **Netinkama ribos konfigūracija fails safe į įmontuotą lubą** — ne į `0`/`Infinity`
+(riba dingtų arba viskas viršytų) ir ne į startup klaidą (tipografinė klaida env faile
+sustabdytų visą servisą). Sąmoningai pasirinktas prieinamumas su galiojančia luba.
+
+⚠️ **ŽINOMA TESTŲ APRĖPTIES RIBA.** Testai įrodo, kad riba SUVEIKIA, bet ne kad ji
+suveikia ankstyviausiu momentu. Perkėlus patikrą PO pilnų įvykių išėmimo visi testai
+praeina — skirtumas matomas tik piko atminties matavimu, kurio patikimai testuoti
+neįmanoma. Todėl patikros VIETA yra apsaugota tik kodo komentaru ir šia pastaba, ne testu.
+Keičiant tą eilutę verta perskaityti pagrindimą `FasterWhisperProvider._transcribeStream`.
+
+⚠️ Ši riba **NĖRA** transkripcijos dydžio riba ir **NEPADARO** `MAX_SEGMENTS` ar turinio
+ribų inkrementinėmis. `MAX_STREAM_TOTAL_BYTES` –
+kaupiami transporto baitai, kvota prieš begalinį srautą, bet **ne** RAM apsauga: pilni
+įvykiai iš buferio pašalinami iškart, tad siunčiant normalius `progress` įvykius buferio
+maksimumas yra 0 baitų. Visos turinio ribos
+(`MAX_TRANSCRIPT_BYTES`, `MAX_SEGMENTS`, `MAX_DIARIZATION_TURNS`) yra **post-response**:
+nei `/transcribe-stream`, nei `pyannote` HTTP kontraktas turinio inkrementiškai neatiduoda —
+`whisper-server/server.py` kaupia segmentus serverio pusėje ir siunčia juos terminaliame
+`done` įvykyje. Jos saugo downstream (store, protokolo generavimą), ne kliento RAM.
+Serverio pusės inkrementinės ribos — atskiras darbas.
+
+⚠️ **Transporto ribos ≠ turinio ribos.** SSE neša JSON envelope, įvykių metaduomenis ir
+`progress` įvykius. Vienas env, ribojantis transportą po turinio pavadinimu, po metų būtų
+interpretuotas neteisingai.
+
+⚠️ **Turinio ribos nepriklauso nuo transporto režimo.** `MAX_TRANSCRIPT_BYTES` ir
+`MAX_SEGMENTS` tikrinami viename viešame `transcribe()` įėjime, tad veikia ir su
+`WHISPER_STREAM_PROGRESS=false` (numatytoji būsena). Anksčiau jie buvo tik streaming
+šakoje — t. y. numatytoje konfigūracijoje neveikė visai.
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

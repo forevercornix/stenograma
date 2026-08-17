@@ -1,4 +1,5 @@
 const jobStore = require("../utils/jobStore");
+const { assertResultWithinLimits } = require("../utils/resultLimits");
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
 const tombstones = require("../utils/deletionTombstones");
@@ -252,6 +253,21 @@ async function _executeInline(type, processor, jobId, payload) {
   try {
     await jobStore.system.update(jobId, { status: jobStore.STATUS.PROCESSING, attempt_count: 1 });
     const result = await processor(payload, jobId);
+
+    /**
+     * REZULTATO RIBA PRIEŠ RAŠYMĄ Į STORE (#153).
+     *
+     * Vienoje vietoje SĄMONINGAI: taip memory ir Redis backend'ai matuoja
+     * vienodai, ir riba nepriklauso nuo serializacijos detalių. Matuojamas TIK
+     * `result` payload'as – ne visas job objektas su laiko žymomis, statusu ir
+     * audito laukais, kitaip riba imtų priklausyti nuo sistemos pridėtų
+     * metaduomenų, o ne nuo tiekėjo atsakymo dydžio.
+     *
+     * Metama PRIEŠ `update`, tad `catch` žemiau pažymi job'ą `failed` su
+     * `RESULT_TOO_LARGE`, o rezultato artefaktas neišsaugomas.
+     */
+    assertResultWithinLimits(result);
+
     await jobStore.system.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
 
     log.info("Darbas baigtas", {
@@ -291,6 +307,32 @@ async function _executeInline(type, processor, jobId, payload) {
 // override) yra saugu rodyti kaip yra.
 function _classifyError(e, context = "job") {
   const { sanitizeServerError } = require("../utils/sanitizeError");
+
+  /**
+   * RIBOS VIRŠIJIMAS TURI DOMENINĮ KODĄ (#153).
+   *
+   * Be šios šakos `ResultLimitError` būtų klasifikuotas kaip `internal_error`,
+   * o pranešimas – sanitizuotas. Vartotojas ir operatorius nematytų, KODĖL
+   * darbas nepavyko, nors priežastis yra visiškai konkreti ir ne serverio
+   * klaida: tiekėjo atsakymas per didelis.
+   *
+   * `kind`, `limit` ir `actual` yra saugūs rodyti – tai nėra vidinė
+   * informacija, o konfigūracijos reikšmės ir išmatuotas dydis.
+   */
+  /**
+   * `UnrecoverableError` gali gaubti `ResultLimitError` (#153): worker'is taip
+   * sustabdo retry grandinę. Originali klaida perduodama per `cause`, tad
+   * domeninis kodas turi būti imamas iš jos, ne iš gaubiančios klaidos.
+   */
+  const domeninė = e && e.cause && e.cause.name === "ResultLimitError" ? e.cause : e;
+
+  if (domeninė && domeninė.name === "ResultLimitError") {
+    return {
+      errorCode: domeninė.code,
+      message: `${domeninė.message} (riba: ${domeninė.kind})`,
+    };
+  }
+
   if (e && e.statusCode && e.statusCode !== 500) {
     return { errorCode: `http_${e.statusCode}`, message: e.message };
   }
