@@ -28,6 +28,7 @@ const log = createLogger("worker");
 // Klaidos klasifikacija su sanitizacija - naudojam tą pačią kaip inline runner'is,
 // kad worker'io ir inline elgesys būtų identiškas (paslaptys nepatenka į jobStore).
 const _classifyError = (e) => jobRunner._classifyError(e, "worker job");
+const { assertResultWithinLimits } = require("../utils/resultLimits");
 
 // Ištrina audio iš storage po GALUTINIO statuso (sėkmės ar išnaudotų bandymų).
 // NEtrina tarp retry - kad kitas bandymas rastų failą.
@@ -154,6 +155,34 @@ function createWorker(queueName, processor, workerOptions = {}) {
 
           const result = await processor(payload, jobId);
 
+          /**
+           * REZULTATO RIBA (#153) – ta pati kaip inline kelyje.
+           *
+           * BullMQ kelias yra produkcijos kelias su Redis, tad be šios patikros
+           * riba veiktų tik dev/desktop režime. Metama PRIEŠ `update`, tad
+           * žemesnis `catch` pažymi job'ą `failed` su `RESULT_TOO_LARGE`.
+           */
+          /**
+           * RIBOS VIRŠIJIMAS YRA NEATKARTOJAMAS (#153).
+           *
+           * `UnrecoverableError` sustabdo BullMQ retry grandinę iš karto. Be
+           * jo per didelis rezultatas būtų kartojamas `attempts` kartų – o
+           * kiekvienas bandymas reiškia PILNĄ transkribavimą arba LLM kvietimą
+           * iš naujo. Rezultatas nuo kartojimo nesumažės, tad tai tik
+           * švaistytų GPU/LLM darbą ir laikytų job'ą `processing` būsenoje.
+           *
+           * Originali klaida perduodama `cause`, kad `_classifyError()` matytų
+           * `ResultLimitError` ir priskirtų `RESULT_TOO_LARGE`.
+           */
+          try {
+            assertResultWithinLimits(result);
+          } catch (limitErr) {
+            const { UnrecoverableError } = require("bullmq");
+            const fatal = new UnrecoverableError(limitErr.message);
+            fatal.cause = limitErr;
+            throw fatal;
+          }
+
           // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
           const completedJob = await jobStore.system.update(jobId, { status: jobStore.STATUS.COMPLETED, result });
           if (!completedJob) {
@@ -200,7 +229,18 @@ function createWorker(queueName, processor, workerOptions = {}) {
   });
 
   async function _handleFailure(job, err, jobId, payload) {
-    const attemptsExhausted = job.attemptsMade >= (job.opts.attempts || DEFAULT_JOB_OPTIONS.attempts);
+    /**
+     * NEATKARTOJAMOS klaidos yra GALUTINĖS iš karto (#153).
+     *
+     * `job.attemptsMade >= attempts` vieno nepakanka: `UnrecoverableError`
+     * sustabdo BullMQ retry grandinę PIRMU bandymu, tad formaliai bandymai
+     * lieka „neišnaudoti". Be šios šakos job'as niekada negautų `failed` ir
+     * amžinai liktų `processing` – blogiausias įmanomas variantas, nes
+     * vartotojas lauktų neribotai.
+     */
+    const neatkartojama = err && err.name === "UnrecoverableError";
+    const attemptsExhausted =
+      neatkartojama || job.attemptsMade >= (job.opts.attempts || DEFAULT_JOB_OPTIONS.attempts);
     const { errorCode, message } = _classifyError(err);
 
     /**

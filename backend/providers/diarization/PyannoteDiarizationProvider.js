@@ -1,6 +1,7 @@
 const DiarizationProvider = require("./DiarizationProvider");
 const { fetchWithTimeout, timeoutForAudioBytes } = require("../../utils/httpClient");
 const { createLogger } = require("../../utils/logger");
+const { LIMIT_KIND, assertWithinLimit } = require("../../utils/resultLimits");
 const log = createLogger("provider:pyannote");
 
 /**
@@ -65,7 +66,22 @@ class PyannoteDiarizationProvider extends DiarizationProvider {
     const data = await res.json();
 
     return {
-      turns: (data.turns || []).map((t) => ({ start: t.start, end: t.end, speaker: t.speaker })),
+      turns: (() => {
+        /**
+         * POST-RESPONSE GUARD (#153), NE ATMINTIES APSAUGA.
+         *
+         * `pyannote` atsakymas ateina vienu HTTP POST, tad pilnas kūnas jau
+         * priimtas į RAM, kol turns apskritai galima suskaičiuoti. Ši riba saugo
+         * DOWNSTREAM – store, sujungimo logiką, protokolo generavimą – bet
+         * NEapsaugo nuo per didelio HTTP atsakymo atmintyje.
+         *
+         * Inkrementiniam vykdymui reikėtų streaming diarizacijos protokolo; tai
+         * už #153 ribų.
+         */
+        const turns = data.turns || [];
+        assertWithinLimit(LIMIT_KIND.DIARIZATION_TURNS, turns.length);
+        return turns.map((t) => ({ start: t.start, end: t.end, speaker: t.speaker }));
+      })(),
       provider: "pyannote-local",
     };
   }

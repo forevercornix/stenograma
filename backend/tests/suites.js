@@ -31,6 +31,12 @@ const redis = [
    * atsiranda tik tarp Redis `get()` ir `eval()`.
    */
   "ownershipCasRedis.integration",
+  /**
+   * #153: rezultato riba TIKRAME BullMQ worker kelyje. Statinis sargas
+   * `resultLimits` rinkinyje praeitų ir su `if (false)` – šis testas tikrina
+   * ELGESĮ, o BullMQ yra produkcijos kelias, kuris po #155 rašys į DB.
+   */
+  "resultLimitsWorker.integration",
 ];
 
 /**
@@ -91,6 +97,8 @@ const security = [
   "adminJobService",
   /** #160: politikos → HTTP adapteris (vienas visiems maršrutams). */
   "jobAccessTransport",
+  /** #153: rezultatų ir artefaktų dydžio ribos (apsauga IŠĖJIME). */
+  "resultLimits",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",
