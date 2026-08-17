@@ -949,11 +949,36 @@ interpretuotas neteisingai.
 | `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
 | **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
 
-⚠️ **Šis helperis yra GRYNAS ir to NEPAKANKA Redis kelyje.** `reportProgress()` priima
-sprendimą pagal perduotą job'o būseną, bet tarp skaitymo ir rašymo fazė gali pasikeisti.
-Late-event apsauga Redis'e privalo būti atominė — analogiškai #159 `ownerId` CAS. Vien
-JS `read → check → write` seka palieka TOCTOU langą, ir mutacinis testas
-(fazės pakeitimas prieš rašymą) tai atskleistų.
+### Atominis progreso CAS (3 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Fazės pakeitimas TARP skaitymo ir rašymo atmeta pasenusį progresą** | `jobPhaseCasRedis.integration` | Lua fazės patikros pašalinimas → krinta |
+| Monotoniškumas tikrinamas Lua viduje, ne tik JS | `jobPhaseCasRedis.integration` | Lua `current` patikros pašalinimas → krinta |
+| `total` stabilumas tikrinamas Lua viduje | `jobPhaseCasRedis.integration` | Lua `total` patikros pašalinimas → krinta |
+| **FASADAS naudoja atominį kelią, ne `store.update()`** | `jobPhaseCasRedis.integration` | Grąžinus `read → check → write` → krinta. Be šio testo kiti trys liktų žali, o langas atsivertų |
+| Normalus progresas praeina | `jobPhaseCasRedis.integration` | Apsauga nėra aklas blokas |
+| **Lygiagretus NESUSIJUSIO lauko pakeitimas IŠLIEKA** | `jobPhaseCasRedis.integration` | Platus `HSET` iš pasenusio snapshot'o → krinta. Kitaip progreso įvykis anuliuotų #159 `ownerId` CAS rezultatą |
+
+⚠️ **Lenktynių testas turi būti DETERMINISTINIS.** „Paleisti abu lygiagrečiai ir tikėtis
+lenktynių" nepakanka: `await` seka reiškia, kad fasadas spėja baigti prieš pakeitimą, ir
+testas praeina net be atomiškumo. Langas atidaromas perimant backend'o `get()` (fasado
+kelyje) arba `eval()` (tiesioginiame) — t. y. PO to, kai JS pusė jau priėmė sprendimą.
+Ta pati pamoka kaip #159 `ownerId` CAS.
+
+⚠️ **CAS rašo SIAURAI, ne visą job'ą.** Rašomi tik `progress`, `progressKnown` ir
+`updatedAt`. Pirmoji versija rašė visą serializuotą įrašą iš `get()` snapshot'o — tai
+būtų kitas TOCTOU variantas: lygiagretus `ownerId` CAS būtų atsuktas atgal. CAS, kuris
+saugo tris laukus, bet perrašo visus, nėra atominis mutavimas.
+
+⚠️ **Jokio `flushdb()` Redis testuose.** `node --test` failus vykdo LYGIAGREČIAI, tad
+viso DB išvalymas sunaikintų kitų testų būseną. Kiekvienas testas valo tik savo raktus —
+žr. `helpers/redisGuard.js`.
+
+⚠️ **Grynas helperis vienas NEPAKANKA.** `jobPhase.reportProgress()` sprendžia pagal
+perduotą būseną. Fasade jis paliekamas kaip greitasis kelias (atmeta akivaizdžiai
+netinkamus įvykius ir sutaupo Redis kvietimą), bet AUTORITETINGA patikra yra Lua viduje.
+Memory backend'e CAS nereikalingas: `get` ir `update` vyksta be `await` tarp jų.
 
 ⚠️ **Klaidos ir atšaukimo keliai privalo eiti per `finish()`.** Konstruojant neapdorotus
 `jobStore` patch'us `status × phase` invariantas galiotų normaliame sraute, bet būtų

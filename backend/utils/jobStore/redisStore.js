@@ -227,6 +227,115 @@ function createRedisStore(redisClient) {
     return 1
   `;
 
+  /**
+   * PROGRESO ĮVYKIO CAS (#154, 3 žingsnis).
+   *
+   * ⚠️ KODĖL LUA, O NE JS PATIKRA.
+   *
+   * `jobPhase.reportProgress()` yra gryna funkcija: ji sprendžia pagal
+   * PERDUOTĄ būseną. Fasade tai reiškia `GET → sprendimas → UPDATE`, ir tarp
+   * `GET` ir `UPDATE` kitas rašytojas gali pakeisti fazę:
+   *
+   *   worker A: GET (phase=transcribing)
+   *   worker B: startPhase(diarizing)          ← fazė pasikeitė
+   *   worker A: UPDATE progress=4200            ← pasenęs įvykis LAIMĖTŲ
+   *
+   * Rezultatas – `phase=diarizing` su transkripcijos progresu, t. y. būtent ta
+   * būsena, kurią #154 šalina. Tai TOCTOU, analogiškas #159 `ownerId` atvejui.
+   *
+   * Todėl patikra ir rašymas vyksta VIENOJE Redis operacijoje. Lua tikrina:
+   *   1. fazė nepasikeitė (pavėlavęs įvykis iš ankstesnės fazės);
+   *   2. `total` tas pats (fazės epocha nesikeitė);
+   *   3. `current` nemažėja (monotoniškumas).
+   *
+   * ⚠️ RAŠOMI TIK ŠIAM ĮVYKIUI PRIKLAUSANTYS LAUKAI.
+   *
+   * Pirmoji versija rašė VISĄ serializuotą job'ą (`serialize(next)`), sudarytą
+   * iš `get()` metu nuskaityto snapshot'o. Tai būtų kitas TOCTOU variantas:
+   *
+   *   A: GET (ownerId=X, progress=1000)
+   *   B: atominis ownerId CAS → ownerId=Y
+   *   A: Lua – fazė, statusas, progresas TINKA → HSET visas snapshot'as
+   *   → ownerId grįžta į X
+   *
+   * T. y. progreso įvykis būtų anuliavęs #159 `ownerId` CAS rezultatą. CAS
+   * apsaugotų tris laukus, o rašymas atsuktų atgal visus kitus.
+   *
+   * Todėl rašoma siaurai: `progress`, `progressKnown`, `updatedAt`. Kiti laukai
+   * nepaliečiami, ir šis CAS negali konkuruoti su kitais CAS.
+   *
+   * Grąžinamos reikšmės: `-1` job'o nėra, `0` įvykis atmestas, `1` įrašyta.
+   */
+  const CAS_PROGRESS_LUA = `
+    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+
+    local status = redis.call('HGET', KEYS[1], 'status')
+    if status ~= ARGV[1] then return 0 end
+
+    local phase = redis.call('HGET', KEYS[1], 'phase')
+    if phase == false or phase == nil then phase = '' end
+    if phase ~= ARGV[2] then return 0 end
+
+    local progress = redis.call('HGET', KEYS[1], 'progress')
+    if progress ~= false and progress ~= nil and progress ~= 'null' then
+      local total = string.match(progress, '"total"%s*:%s*(%-?%d+%.?%d*)')
+      local current = string.match(progress, '"current"%s*:%s*(%-?%d+%.?%d*)')
+      if total ~= nil and tonumber(total) ~= tonumber(ARGV[3]) then return 0 end
+      if current ~= nil and tonumber(ARGV[4]) < tonumber(current) then return 0 end
+    end
+
+    redis.call('HSET', KEYS[1],
+      'progress', ARGV[5],
+      'progressKnown', ARGV[6],
+      'updatedAt', ARGV[7])
+    return 1
+  `;
+
+  /**
+   * Atominis progreso įrašymas.
+   *
+   * @returns {object|null|"REJECTED"} atnaujintas job'as, `null` jei jo nėra,
+   *   `"REJECTED"` jei įvykis atmestas (pavėlavęs, kita fazė, regresija).
+   */
+  async function reportProgressAtomic(id, event) {
+    const existing = await get(id);
+    if (!existing) return null;
+
+    const now = Date.now();
+
+    /**
+     * Serializuojami TIK trys laukai, ne visas job'as. `serialize()` naudojamas
+     * jų formai (JSON laukai, boolean konversija), kad Redis reikšmės sutaptų
+     * su tuo, ką rašo `update()`.
+     */
+    const flat = serialize({ progress: event.progress, progressKnown: true, updatedAt: now });
+
+    const outcome = await redisClient.eval(
+      CAS_PROGRESS_LUA,
+      1,
+      JOB_PREFIX + id,
+      existing.status,
+      event.phase == null ? "" : String(event.phase),
+      String(event.progress.total),
+      String(event.progress.current),
+      flat.progress,
+      flat.progressKnown,
+      flat.updatedAt
+    );
+
+    if (Number(outcome) === -1) return null;
+    if (Number(outcome) === 0) return "REJECTED";
+
+    await redisClient.zadd(INDEX_KEY, now, id);
+
+    /**
+     * Grąžinamas ŠVIEŽIAS įrašas, ne lokaliai sukonstruotas `next`: tarp `get()`
+     * ir CAS kiti laukai galėjo teisėtai pasikeisti, ir kvietėjas turi matyti
+     * tikrą būseną, ne pasenusį snapshot'ą su nauju progresu.
+     */
+    return get(id);
+  }
+
   /** @returns {object|null|"FORBIDDEN"} */
   async function getOwned(id, scope) {
     const job = await get(id);
@@ -386,7 +495,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

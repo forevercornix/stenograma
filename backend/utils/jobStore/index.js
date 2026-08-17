@@ -261,6 +261,14 @@ function assertScope(scope, method) {
 
 module.exports = {
   init,
+  /**
+   * Prieiga prie backend'o TESTAMS.
+   *
+   * Reikalinga #154 TOCTOU testui: langą tarp `get()` ir rašymo galima atidaryti
+   * tik perimant patį backend'ą. Bandymas „paleisti lygiagrečiai ir tikėtis
+   * lenktynių" nėra deterministinis – testas praeitų ir be atomiškumo.
+   */
+  _storeForTests: () => store,
   FORBIDDEN,
   OWNER_KIND,
 
@@ -339,11 +347,31 @@ module.exports = {
     reportProgress: async (id, event) => {
       await ensureInit();
       if (blockedByTombstone(id, "reportProgress")) return null;
+
       const job = await store.get(id);
       if (!job) return null;
 
+      /**
+       * GRYNAS SPRENDIMAS PIRMA – jis atmeta akivaizdžiai netinkamus įvykius
+       * (ne `processing`, netinkama progreso forma) ir sutaupo Redis kvietimą.
+       *
+       * ⚠️ BET JO NEPAKANKA. Tarp `get()` ir rašymo fazė gali pasikeisti, ir
+       * pasenęs įvykis laimėtų lenktynes. Todėl, kai backend'as siūlo atominį
+       * kelią, PATIKRA KARTOJAMA Lua viduje – ten ji ir yra autoritetinga.
+       */
       const patch = jobPhase.reportProgress(job, event);
       if (!patch) return job;
+
+      if (typeof store.reportProgressAtomic === "function") {
+        const outcome = await store.reportProgressAtomic(id, event);
+        if (outcome === "REJECTED") return store.get(id);
+        return outcome;
+      }
+
+      /**
+       * Memory backend'as: `get` ir `update` vyksta be `await` tarp jų, tad
+       * lenktynių lango nėra ir CAS nereikalingas.
+       */
       return store.update(id, patch);
     },
 
