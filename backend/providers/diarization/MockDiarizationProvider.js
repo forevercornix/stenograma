@@ -8,7 +8,7 @@ const DiarizationProvider = require("./DiarizationProvider");
  * merge (utils/mergeDiarization.js) rezultatą būtų lengva patikrinti.
  */
 class MockDiarizationProvider extends DiarizationProvider {
-  async diarize(audioBuffer, options = {}) {
+  async diarize(audioBuffer, _options = {}) {
     return {
       turns: [
         { start: 0.0, end: 4.2, speaker: "Kalbėtojas A" },

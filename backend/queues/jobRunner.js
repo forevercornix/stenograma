@@ -367,7 +367,7 @@ try {
   const { transcriptionProcessor, protocolProcessor } = require("./processors");
   registerProcessor("transcription", transcriptionProcessor);
   registerProcessor("protocol", protocolProcessor);
-} catch (e) {
+} catch {
   // Jei processors dar neįkeliami (pvz. dalinė testų aplinka), tylим - server.js
   // vis tiek registruos per registerProcessors().
 }

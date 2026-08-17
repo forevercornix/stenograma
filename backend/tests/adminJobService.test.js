@@ -164,7 +164,6 @@ test("#160 AUDITAS: įrašuose NĖRA job turinio", async () => {
 
 /** Paleidžia servisą su pakeistu `fileStorage`, kad trynimas realiai nepavyktų. */
 async function suSugedusiaSaugykla(fn) {
-  const { resolve } = require("node:path");
   const storagePath = require.resolve("../utils/fileStorage");
   const original = require.cache[storagePath];
 

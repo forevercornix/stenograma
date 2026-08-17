@@ -16,7 +16,7 @@
  */
 const jobStore = require("../utils/jobStore");
 const jobRunner = require("../queues/jobRunner");
-const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
+const { DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
 const { transcriptionProcessor, protocolProcessor } = require("../queues/processors");
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");

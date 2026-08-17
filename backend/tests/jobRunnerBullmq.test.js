@@ -30,7 +30,7 @@ test("jobRunner BullMQ režime kviečia queue.add, nevykdo inline", async () => 
 
   // Perimame require("bullmq") ir require("ioredis").
   const origLoad = Module._load;
-  Module._load = function (request, parent, isMain) {
+  Module._load = function (request, _parent, _isMain) {
     if (request === "bullmq") return { Queue: MockQueue, Worker: class {} };
     if (request === "ioredis") return class MockRedis { constructor() {} };
     return origLoad.apply(this, arguments);

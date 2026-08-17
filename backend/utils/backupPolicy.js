@@ -1,4 +1,4 @@
-const { ARTEFACT_TYPES, PERSISTENCE, TYPES_BY_ID, typesByPersistence } = require("./artefactInventory");
+const { ARTEFACT_TYPES, PERSISTENCE, TYPES_BY_ID } = require("./artefactInventory");
 
 /**
  * ATSARGINIŲ KOPIJŲ POLITIKA (#20 PR1).

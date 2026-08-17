@@ -267,7 +267,7 @@ test("SESSION STORE: pasibaigusi sesija, kurios niekas nebeliečia, GALIAUSIAI p
   await sessionStore._clearForTests();
   const env = { SESSION_IDLE_TIMEOUT_MINUTES: "0.001" }; // ~60ms
 
-  const session = await sessionStore.create({ username: "a", role: "operator" }, env);
+  await sessionStore.create({ username: "a", role: "operator" }, env);
   await new Promise((r) => setTimeout(r, 100));
 
   // Niekas NEIŠKVIEČIA touch() - imituojam klientą, kuris niekada nebegrįžta.

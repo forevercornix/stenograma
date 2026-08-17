@@ -65,7 +65,6 @@ test("FasterWhisperEmbeddedProvider: procesas nutraukiamas po timeout (kabantis 
 
 test("FasterWhisperEmbeddedProvider: laikinas audio failas ištrinamas po apdorojimo (sėkmės ir klaidos atveju)", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
   const fsp = require("fs/promises");
-  const os = require("os");
   const fsSync = require("fs");
 
   // DETERMINISTINIS patikrinimas (be race condition): stebime KONKRETŲ failą,
@@ -87,7 +86,7 @@ test("FasterWhisperEmbeddedProvider: laikinas audio failas ištrinamas po apdoro
     const provider = new FasterWhisperEmbeddedProvider({ scriptPath: SUCCESS_SCRIPT });
     await provider.transcribe(Buffer.from("x"), { filename: "test.wav" });
 
-    const providerErr = new FasterWhisperEmbeddedProvider({ scriptPath: ERROR_SCRIPT });
+    new FasterWhisperEmbeddedProvider({ scriptPath: ERROR_SCRIPT });
     await provider.transcribe(Buffer.from("x"), { filename: "test.wav" }).catch(() => {});
 
     // Turi būti užfiksuoti bent 2 sukurti keliai (sėkmės + klaidos atvejai).

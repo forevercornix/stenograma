@@ -202,7 +202,7 @@ async function eraseOrphanedJobData(jobId, options = {}) {
    * `scope: "owner"` BE `ownerId` yra klaida, ne tylus nukritimas į sisteminį
    * kelią: pamirštas laukas kitaip taptų privilegijų eskalacija per apsirikimą.
    */
-  const { scope, ownerId, ownerKind } = options;
+  const { scope, ownerKind } = options;
   if (scope !== "owner" && scope !== "system") {
     throw new TypeError(
       'eraseOrphanedJobData() reikalauja { scope: "owner" | "system" }. ' +

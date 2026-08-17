@@ -249,7 +249,7 @@ function redactDetailed(input, options = {}) {
 
   // Tvarka svarbi: IBAN ir el. paštas gali turėti skaitmenų sekas, kurias
   // telefono šablonas kitaip nukirstų viduryje.
-  if (enabled("IBAN")) text = text.replace(IBAN, (match) => {
+  if (enabled("IBAN")) text = text.replace(IBAN, () => {
     count("IBAN");
     return PLACEHOLDERS.IBAN;
   });

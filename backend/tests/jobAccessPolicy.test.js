@@ -118,7 +118,7 @@ test("#160 MATRICA: eilinis vartotojas NIEKADA negauna 403 (jokio egzistavimo or
    * 403 patvirtintų, kad objektas EGZISTUOJA. Jei ID nuspėjamas, tai
    * egzistavimo orakulas – todėl eiliniam vartotojui visi keliai veda į 404.
    */
-  for (const [input, kas, actor, operation, laukiama] of MATRICA) {
+  for (const [input, kas, , operation, laukiama] of MATRICA) {
     if (kas !== "eilinis") continue;
     assert.notEqual(laukiama, D.DENIED, `${input} × ${operation} neturi grąžinti DENIED`);
   }

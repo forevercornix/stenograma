@@ -7,7 +7,6 @@
  */
 require("dotenv").config();
 const os = require("os");
-const fs = require("fs");
 const { execFile } = require("child_process");
 const { validateConfig, runSelfChecks } = require("../utils/startupChecks");
 
@@ -67,7 +66,7 @@ async function main() {
       const availGB = parseInt(df.out.split("\n").pop(), 10);
       results.push(availGB > 5 ? OK("Diskas (tmp)", `${availGB}GB laisva`) : WARN("Diskas (tmp)", `tik ${availGB}GB - dideliems audio failams ir modeliams gali pritrūkti`));
     }
-  } catch (_) { /* Windows - df nėra, praleidžiame */ }
+  } catch { /* Windows - df nėra, praleidžiame */ }
 
   // --- Konfigūracija ---
   const { errors, warnings } = validateConfig();

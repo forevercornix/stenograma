@@ -155,7 +155,7 @@ test("Redis store: size() NEįskaito jobų, kurių hash išnyko (TTL), bet indek
   const fake = new FakeRedis();
   const store = createRedisStore(fake);
   const job1 = await store.create({ ownerKind: "unowned" });
-  const job2 = await store.create({ ownerKind: "unowned" });
+  await store.create({ ownerKind: "unowned" });
   assert.equal(await store.size(), 2, "du sukurti jobai");
 
   // Simuliuojam TTL: job1 hash IŠNYKO (ištrinam iš hashes), bet indekse (zsets) LIEKA.

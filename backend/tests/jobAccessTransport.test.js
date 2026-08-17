@@ -8,7 +8,6 @@ const jobStore = require("../utils/jobStore");
 const { OWNER_KIND } = require("../utils/jobStore/common");
 const {
   ACCESS_DECISION,
-  OPERATION,
   respondToDenial,
   getAccessActor,
   toAccessInput,

@@ -1,8 +1,6 @@
 const sessionStore = require("../utils/sessionStore");
 const { setActor } = require("../utils/requestContext");
-const { createLogger } = require("../utils/logger");
 
-const log = createLogger("auth:session");
 
 /**
  * SESIJOS AUTENTIFIKACIJA (#18 PR1).

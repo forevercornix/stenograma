@@ -13,6 +13,34 @@
  * `REQUIRE_REDIS=1` paverčia praleidimą KLAIDA. CI jį nustato kartu su
  * `REDIS_URL`, tad prarasti galima tik abu vienu metu - o tai jau matomas
  * pakeitimas, ne atsitiktinumas.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * ⚠️ RAŠANT NAUJĄ REDIS TESTĄ: EILĖS IR ENV YRA BENDRI (#153 pamoka)
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * Visi šio rinkinio testai dalijasi VIENU Redis. Tai reiškia du spąstus:
+ *
+ * 1. BENDROS EILĖS. Worker'is, paleistas ant `QUEUE_NAMES.PROTOCOL`, pasiima
+ *    BET KURĮ toje eilėje esantį job'ą – ir kitų testų. #153 metu testas su
+ *    sumažinta `MAX_RESULT_BYTES` riba pasiėmė `stalled recovery` testo job'ą
+ *    ir numarino jį su `RESULT_TOO_LARGE`. Krito SVETIMAS testas, o priežastis
+ *    buvo visai kitame faile.
+ *
+ *    → Naudokite UNIKALŲ eilės pavadinimą:
+ *        const queueName = `test-<sritis>-${process.pid}-${Date.now()}`;
+ *      ir dėkite job'ą tiesiai per savo `Queue`, ne per `jobRunner.enqueue*`.
+ *
+ * 2. GLOBALŪS `process.env` POKYČIAI. Ribos, vėliavos ir režimai, nustatyti
+ *    per `process.env`, veikia visą procesą. Jei testas keičia elgesį,
+ *    geriau parinkti ĮVESTĮ, kuri viršija numatytąją reikšmę, nei mažinti
+ *    ribą globaliai.
+ *
+ * ⚠️ ABU spąstai NEMATOMI paleidžiant testą PO VIENĄ. #153 lokaliai praėjo,
+ * o CI krito – nes CI paleidžia visą rinkinį. Prieš push'ą paleiskite:
+ *
+ *     REDIS_URL=... npm run test:redis
+ *
+ * ne atskirą failą.
  */
 
 const REDIS_URL = process.env.REDIS_URL;

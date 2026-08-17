@@ -922,6 +922,13 @@ interpretuotas neteisingai.
 | Koreliacija išgyvena saugyklos ratą | `redisConcurrency.integration` | `null` round-trip mutacija |
 | Ištrynimas **išgyvena restartą** | `redisConcurrency.integration` | `remove()` no-op → krinta 2 |
 
+⚠️ **Redis testai dalijasi eilėmis ir `process.env`.** Worker'is, paleistas ant bendros
+eilės, pasiima BET KURĮ joje esantį job'ą — įskaitant kitų testų. #153 metu testas su
+sumažinta `MAX_RESULT_BYTES` riba numarino `stalled recovery` testo job'ą; krito svetimas
+testas, o priežastis buvo kitame faile. Naujuose testuose naudokite unikalų eilės
+pavadinimą ir venkite globalių `process.env` pakeitimų — abu spąstai nematomi paleidžiant
+testą po vieną. Detaliau: `tests/helpers/redisGuard.js`.
+
 ⚠️ Šie testai praleidžia save be `REDIS_URL`, bet CI nustato **`REQUIRE_REDIS=1`**,
 ir tada praleidimas tampa klaida. Be to dingęs `REDIS_URL` reikštų žalią job'ą,
 kuris nieko nepatikrino.

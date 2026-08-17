@@ -9,7 +9,6 @@ const backupService = require("../services/backupService");
 const restoreService = require("../services/restoreService");
 const backupPolicy = require("../utils/backupPolicy");
 const maintenanceLock = require("../utils/maintenanceLock");
-const jobStore = require("../utils/jobStore");
 const { createLogger } = require("../utils/logger");
 
 const log = createLogger("backup-routes");

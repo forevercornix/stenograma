@@ -1,6 +1,5 @@
 require("dotenv").config();
 const express = require("express");
-const cors = require("cors");
 
 const generateRoute = require("./routes/generate");
 const transcribeRoute = require("./routes/transcribe");
@@ -16,7 +15,6 @@ const { pollRateLimiter, generalApiLimiter } = require("./middleware/rateLimiter
 const { initPrivacyPolicy } = require("./utils/privacyPolicy");
 const { requestContextMiddleware } = require("./utils/requestContext");
 const { applySecurityBaseline } = require("./utils/securityBaseline");
-const { resolveTrustProxy } = require("./utils/clientIp");
 const { createLogger } = require("./utils/logger");
 
 const log = createLogger("server");
