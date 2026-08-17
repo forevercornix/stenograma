@@ -19,6 +19,19 @@ const { skipWithoutRedis } = require("./helpers/redisGuard");
  *
  * ⚠️ Praleidžiamas be `REDIS_URL`; CI nustato `REQUIRE_REDIS=1`, tad ten
  * praleidimas tampa klaida.
+ *
+ * ⚠️ IZOLIUOTA EILĖ – BŪTINA.
+ *
+ * Pirmoji versija naudojo bendrą `QUEUE_NAMES.PROTOCOL` ir nustatė
+ * `MAX_RESULT_BYTES=500` per `process.env`. CI'e visi Redis testai dalijasi tuo
+ * pačiu Redis, tad šio testo worker'is pasiėmė KITO testo (`stalled recovery`)
+ * job'ą ir numarino jį su `RESULT_TOO_LARGE`. Lokaliai to nesimatė, nes testai
+ * buvo paleisti po vieną.
+ *
+ * Todėl: (1) unikalus eilės pavadinimas kiekvienam paleidimui, (2) riba
+ * NEkeičiama per env – processor'ius grąžina rezultatą, viršijantį NUMATYTĄ
+ * 20 MB lubą. Taip testas nepaliečia nei kitų eilių, nei globalios
+ * konfigūracijos.
  */
 
 test(
@@ -27,7 +40,7 @@ test(
   async (t) => {
     const jobStore = require("../utils/jobStore");
     const jobRunner = require("../queues/jobRunner");
-    const { QUEUE_NAMES, createQueueConnection } = require("../queues/config");
+    const { createQueueConnection } = require("../queues/config");
     const { Queue } = require("bullmq");
 
     let worker;
@@ -41,21 +54,24 @@ test(
       await queueConnection?.quit().catch(() => {});
       await jobRunner.close().catch(() => {});
       await jobStore._resetForTests();
-      delete process.env.MAX_RESULT_BYTES;
     });
 
     await jobStore.init();
     await jobRunner.init();
     assert.equal(jobRunner.getMode(), "bullmq", "testas prasmingas tik BullMQ režime");
 
-    // Riba, kurią tikrai viršys žemiau grąžinamas rezultatas.
-    process.env.MAX_RESULT_BYTES = "500";
+    /** Unikali eilė – kad worker'is nepasiimtų kitų testų job'ų. */
+    const queueName = `test-limits-${process.pid}-${Date.now()}`;
 
     const job = await jobStore.create({ ownerKind: "unowned" });
-    await jobRunner.enqueueProtocol(job.id, { transcript: "pakankamai ilgas testinis tekstas" });
 
     queueConnection = createQueueConnection();
-    queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: queueConnection });
+    queue = new Queue(queueName, { connection: queueConnection });
+    await queue.add(
+      "protocol",
+      { jobId: job.id, payload: { transcript: "pakankamai ilgas testinis tekstas" } },
+      { jobId: job.id }
+    );
 
     /**
      * Processor'ius grąžina TEISINGĄ rezultatą – tik per didelį. Klaidos jis
@@ -63,9 +79,13 @@ test(
      */
     const { createWorker } = require("../workers");
     worker = createWorker(
-      QUEUE_NAMES.PROTOCOL,
+      queueName,
       async () => ({
-        protocol: { pavadinimas: "Per didelis", turinys: "x".repeat(5000) },
+        /**
+         * Viršija NUMATYTĄ 20 MB lubą – env nekeičiamas, tad kitiems testams
+         * riba lieka normali.
+         */
+        protocol: { pavadinimas: "Per didelis", turinys: "x".repeat(25 * 1024 * 1024) },
         meta: {},
       }),
       { stalledInterval: 1000, lockDuration: 2000 }
@@ -101,7 +121,7 @@ test(
   async (t) => {
     const jobStore = require("../utils/jobStore");
     const jobRunner = require("../queues/jobRunner");
-    const { QUEUE_NAMES, createQueueConnection } = require("../queues/config");
+    const { createQueueConnection } = require("../queues/config");
     const { Queue } = require("bullmq");
 
     let worker;
@@ -120,15 +140,21 @@ test(
     await jobStore.init();
     await jobRunner.init();
 
+    /** Unikali eilė – ta pati priežastis kaip pirmame teste. */
+    const queueName = `test-limits-ok-${process.pid}-${Date.now()}`;
     const job = await jobStore.create({ ownerKind: "unowned" });
-    await jobRunner.enqueueProtocol(job.id, { transcript: "pakankamai ilgas testinis tekstas" });
 
     queueConnection = createQueueConnection();
-    queue = new Queue(QUEUE_NAMES.PROTOCOL, { connection: queueConnection });
+    queue = new Queue(queueName, { connection: queueConnection });
+    await queue.add(
+      "protocol",
+      { jobId: job.id, payload: { transcript: "pakankamai ilgas testinis tekstas" } },
+      { jobId: job.id }
+    );
 
     const { createWorker } = require("../workers");
     worker = createWorker(
-      QUEUE_NAMES.PROTOCOL,
+      queueName,
       async () => ({ protocol: { pavadinimas: "Normalus" }, meta: {} }),
       { stalledInterval: 1000, lockDuration: 2000 }
     );
