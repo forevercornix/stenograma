@@ -31,7 +31,7 @@ const sessionUser = { ownerId: USER_ID, ownerKind: OWNER_KIND.USER, role: "opera
  * įspėjimas nuslopintų ir TIKRĄ radinį, jei jis kada atsirastų tame pačiame
  * kelyje. Tai jau antras atvejis (#159 buvo `apiKeyScope`).
  */
-const sharedPrincipalAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
+const sharedPrincipalAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL, role: "administrator" };
 const desktopAdmin = { ownerId: null, ownerKind: OWNER_KIND.UNOWNED, role: "administrator" };
 
 async function svetimasJob() {

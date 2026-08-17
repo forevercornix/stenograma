@@ -35,9 +35,9 @@ function getOwnerScope(req) {
    * jokio rakto. Tai desktop režimas, ne bendras raktas – ir be šios patikros
    * visi lokalūs job'ai taptų nepasiekiami jų kūrėjui.
    */
-  const apiKeyConfigured = Boolean((process.env.API_KEY || "").trim());
-  if (apiKeyConfigured && req.authz && req.authz.source === "api-key") {
-    return { ownerId: null, ownerKind: jobStore.OWNER_KIND.API_KEY };
+  const sharedCredentialConfigured = Boolean((process.env.API_KEY || "").trim());
+  if (sharedCredentialConfigured && req.authz && req.authz.source === "api-key") {
+    return { ownerId: null, ownerKind: jobStore.OWNER_KIND.API_PRINCIPAL };
   }
 
   return { ownerId: null, ownerKind: jobStore.OWNER_KIND.UNOWNED };

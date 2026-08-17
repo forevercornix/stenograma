@@ -100,7 +100,7 @@ function newJob(fields = {}) {
      * API rakto kelyje perduoda būtent `ownerId: null`.
      *
      *   OWNER_KIND.USER    – sesijos vartotojas; `ownerId` yra stabilus UUID
-     *   OWNER_KIND.API_KEY – bendras raktas; `ownerId` NĖRA (raktas nėra individas)
+     *   OWNER_KIND.API_PRINCIPAL – bendras raktas; `ownerId` NĖRA (raktas nėra individas)
      *   OWNER_KIND.UNOWNED – desktop / no-auth; autentifikacijos apskritai nėra
      *   `null` (laukas nesantis) – LEGACY įrašas iš prieš #159; `create()`
      *                                jo NEPRIIMA, tik `restoreRecord()`
@@ -204,7 +204,22 @@ function normalizeOwnerId(value) {
 /** Nuosavybės rūšys – žr. `newJob().ownerKind`. */
 const OWNER_KIND = Object.freeze({
   USER: "user",
-  API_KEY: "api-key",
+  /**
+   * Bendro `API_KEY` principalas.
+   *
+   * SAVYBĖS pavadinimas yra `API_PRINCIPAL`, ne `API_KEY`, dėl dviejų priežasčių:
+   *
+   * 1. TIKSLUMAS. Konstanta aprašo nuosavybės RŪŠĮ – kas yra job'o savininkas –
+   *    o ne kredencialą. „Owner kind = API key" konceptualiai neteisinga:
+   *    savininkas yra principalas, kuriam raktas priklauso.
+   * 2. CodeQL `js/clear-text-logging` laiko `*KEY*` identifikatorius jautriais
+   *    ir pažymi bet kokį jų kelią į logerį. Ši konstanta jokios paslapties
+   *    neturi, bet klaidingas įspėjimas krito CI du kartus.
+   *
+   * REIKŠMĖ (`"api-key"`) NEKEIČIAMA: ji jau saugoma Redis'e job įrašuose, tad
+   * pakeitimas būtų duomenų migracija be jokios naudos.
+   */
+  API_PRINCIPAL: "api-key",
   UNOWNED: "unowned",
 });
 

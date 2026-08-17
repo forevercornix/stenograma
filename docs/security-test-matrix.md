@@ -799,7 +799,7 @@ interceptinant pirmą `eval()`.
 | Session-admin svetimą job'ą ištrina (override) | `rbac.route` | Du administratoriai – nuosavybė izoliuota nuo rolės |
 | Eilinis vartotojas NEVALO našlaičio | `rbac.route` | Elgesio pakeitimas: anksčiau valė bet kas |
 | Maršrutai NEsprendžia 403/404 patys | `systemNamespaceBoundary` | `jobStore.FORBIDDEN` maršrute → sargas krinta |
-| Principalo objektai nevadinami `apiKey*` (CodeQL FP prevencija) | `systemNamespaceBoundary` | Vardo grąžinimas → sargas krinta. Klaidingas įspėjimas krito CI du kartus (#159, #160) |
+| Nuosavybės kelyje nėra `apiKey`/`API_KEY` identifikatorių | `systemNamespaceBoundary` | Tikrinamos ABI formos: kintamasis IR konstantos savybė. `storageKey` ir `env.API_KEY` praeina |
 | **EXPORT: svetimas ir neegzistuojantis job'as NEATSKIRIAMI** | `rbac.route` | Politikos apėjimas → `link=job`/`invalid_type` atskleistų egzistavimą |
 | EXPORT: admin svetimo job'o nesusieja (skaitymo override neleidžiamas) | `rbac.route` | Tikrinamas audito `link=`, ne statusas |
 | EXPORT: savininkas savo job'ą susieja (regresija) | `rbac.route` | `invalid_type` įrodo, kad savas job'as PASIEKIAMAS |
@@ -807,6 +807,14 @@ interceptinant pirmą `eval()`.
 | Aktorius neša rūšį IR rolę | `jobAccessTransport` | Vien rolė → bendras raktas gautų override |
 | Desktop režimas: našlaičių valymas leidžiamas | `jobAccessPolicy`, `deletionResilience` | Admin-only politika desktop diegime jį padarytų neįmanomą |
 | Desktop išimtis NEGALIOJA bendram raktui | `jobAccessPolicy` | Abu turi `ownerId: null`; skiria tik rūšis |
+
+⚠️ **CodeQL `js/clear-text-logging` klaidingi signalai.** Ši taisyklė laiko `*key*`
+identifikatorius jautriais ir pažymi bet kokį jų kelią į logerį. Nuosavybės objektai
+paslapčių neturi (loginami tik `ownerId`, `ownerKind`, `operation`), bet CI krito tris
+kartus: `apiKeyScope` (#159), `apiKeyAdmin` (#160) ir `OWNER_KIND.API_KEY` (#160).
+**Trečiuoju atveju kintamųjų pervadinimas nepadėjo — tikrasis šaltinis buvo KONSTANTOS
+savybė.** Todėl sargas tikrina abi formas. Konstanta pervadinta į `API_PRINCIPAL`, o jos
+reikšmė (`"api-key"`) palikta: ji saugoma Redis'e, tad keitimas būtų duomenų migracija.
 
 ⚠️ **EXPORT transporto semantika SKIRIASI nuo `GET`.** Eksportas nenaudoja
 `respondToDenial()`: `DENIED` ir `NOT_FOUND` abu virsta `linkState = "missing"`, o pats

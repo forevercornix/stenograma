@@ -158,42 +158,76 @@ test("#160 SARGAS: maršrutai nesprendžia 403/404 patys", () => {
   );
 });
 
-test("#160 SARGAS: nuosavybės objektai nevadinami `apiKey*` (CodeQL FP prevencija)", () => {
+test("#160 SARGAS: nuosavybės kelyje nėra `KEY` identifikatorių (CodeQL FP prevencija)", () => {
   /**
-   * TRETIEJI GRĖBLIAI.
+   * TRYS KARTAI TĄ PAČIĄ KLAIDĄ.
    *
-   * CodeQL `js/clear-text-logging` laiko `*Key*` identifikatorius jautriais ir
-   * pažymi bet kokį jų kelią į logerį. Nuosavybės scope ir principalo objektai
-   * jokios paslapties neturi (`{ ownerId, ownerKind, role }`), bet pavadinus
-   * juos `apiKeyScope` (#159) ar `apiKeyAdmin` (#160) CI krito abu kartus.
+   * CodeQL `js/clear-text-logging` laiko `*KEY*` identifikatorius jautriais ir
+   * pažymi bet kokį jų kelią į logerį. Nuosavybės objektai jokios paslapties
+   * neturi, bet CI krito:
    *
-   * Sargas pigesnis nei kaskart atmetinėti įspėjimą – atmestas įspėjimas dar ir
-   * nuslopintų TIKRĄ radinį tame pačiame kelyje. Bendro rakto principalas
-   * vadinamas `sharedPrincipal*`.
+   *   #159 – `apiKeyScope` (kintamojo vardas)
+   *   #160 – `apiKeyAdmin` (kintamojo vardas)
+   *   #160 – `OWNER_KIND.API_KEY` (SAVYBĖS vardas – pervadinus kintamuosius
+   *          įspėjimas išliko, nes tikrasis šaltinis buvo konstanta)
+   *
+   * Dukart klydau spręsdamas, kad problema yra kintamojo vardas. Sargas dengia
+   * BET KOKĮ `KEY` identifikatorių nuosavybės kelyje – ir kodą, ir konstantas.
+   *
+   * `process.env.API_KEY` bei `API_KEY_ROLE` yra teisėti: tai tikras
+   * konfigūracijos kintamojo vardas, ne nuosavybės objektas.
    */
-  /**
-   * Tikrinami TIK principalo/scope objektai – t. y. priskyrimai, kurių dešinėje
-   * yra `ownerKind`. `apiKeyRole` ar `apiKeyConfigured` yra teisėti vardai
-   * (rolė, konfigūracijos vėliava) ir į logerį objektų neveda.
-   */
-  const pažeidimai = [];
-  const šablonas = /\b(const|let|var)\s+(apiKey[A-Za-z]*)\s*=\s*\{[^}]*ownerKind/;
+  const KELIAS = [
+    "utils/jobAccessPolicy.js",
+    "utils/jobAccessTransport.js",
+    "utils/ownerScope.js",
+    "utils/jobStore/common.js",
+    "services/adminJobService.js",
+    "tests/jobOwnership.test.js",
+    "tests/jobAccessPolicy.test.js",
+    "tests/adminJobService.test.js",
+  ];
 
-  for (const dir of ["tests", "utils", "services", "routes"]) {
-    for (const rel of jsFiles(dir)) {
-      const src = fs.readFileSync(path.join(ROOT, rel), "utf8");
-      src.split("\n").forEach((line, i) => {
-        const m = šablonas.exec(line);
-        if (m) pažeidimai.push(`${rel}:${i + 1}: ${m[2]}`);
+  /**
+   * Identifikatorius su `key` (BET KOKIU registru), kuris NĖRA env kintamojo
+   * skaitymas.
+   *
+   * `(?<![.\w])` išmeta `process.env.API_KEY` ir `env.API_KEY_ROLE` – ten
+   * identifikatorius eina po taško, tad tai tikro konfigūracijos kintamojo
+   * vardas, ne nuosavybės objektas. Todėl LEIDŽIAMŲ sąrašo NEREIKIA: pirmoji
+   * sargo versija turėjo `API_KEY` sąraše ir dėl to praleido būtent tą atvejį,
+   * kurį turėjo pagauti.
+   */
+  const šablonas = /(?<![.\w])((?:api|shared)?_?key[\w$]*|[\w$]*api_?key[\w$]*)\s*[:=(]/i;
+
+  const pažeidimai = [];
+
+  for (const rel of KELIAS) {
+    const kelias = path.join(ROOT, rel);
+    if (!fs.existsSync(kelias)) continue;
+
+    fs.readFileSync(kelias, "utf8")
+      .split("\n")
+      .forEach((line, i) => {
+        /**
+         * Tikrinamas TIK kodas: komentarai ir tekstinės eilutės CodeQL srautui
+         * nerūpi. Be string'ų pašalinimo sargas pažymėdavo net testų
+         * pavadinimus (`test("#159 API-KEY: ...")`).
+         */
+        const kodas = line
+          .replace(/\/\/.*$/, "")
+          .replace(/^\s*\*.*$/, "")
+          .replace(/"[^"]*"|'[^']*'|`[^`]*`/g, '""');
+        const m = šablonas.exec(kodas);
+        if (m) pažeidimai.push(`${rel}:${i + 1}: ${m[1]}`);
       });
-    }
   }
 
   assert.deepEqual(
     pažeidimai,
     [],
-    "Nuosavybės/principalo objektų nevadinkite `apiKey*` – naudokite " +
-      "`sharedPrincipal*`:\n" + pažeidimai.join("\n")
+    "Nuosavybės kelyje nenaudokite `KEY` identifikatorių – naudokite " +
+      "`API_PRINCIPAL` / `sharedPrincipal`:\n" + pažeidimai.join("\n")
   );
 });
 

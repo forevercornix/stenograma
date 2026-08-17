@@ -29,7 +29,7 @@ const adminActor = { ownerId: UID, ownerKind: OWNER_KIND.USER, role: "administra
  * įspėjimas nuslopintų ir TIKRĄ radinį, jei jis kada atsirastų tame pačiame
  * kelyje. Tai jau antras atvejis (#159 buvo `apiKeyScope`).
  */
-const sharedPrincipalAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
+const sharedPrincipalAdmin = { ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL, role: "administrator" };
 const desktopActor = { ownerId: null, ownerKind: OWNER_KIND.UNOWNED, role: "administrator" };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -208,7 +208,7 @@ test("#160 SAVYBĖ: ne-session principalai NIEKADA negauna DENIED ar override", 
    * pradėtų remtis vien role, šis testas kris pirmas.
    */
   const neSesijos = [
-    ["api-key", { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" }],
+    ["api-key", { ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL, role: "administrator" }],
     ["desktop", { ownerId: null, ownerKind: OWNER_KIND.UNOWNED, role: "administrator" }],
     ["user be ID", { ownerId: null, ownerKind: OWNER_KIND.USER, role: "administrator" }],
   ];
@@ -259,7 +259,7 @@ test("#160 SAVYBĖ: savas job'as prieinamas NEPRIKLAUSOMAI nuo principalo rūši
     adminActor,
     sharedPrincipalAdmin,
     desktopActor,
-    { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "operator" },
+    { ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL, role: "operator" },
   ];
 
   for (const actor of visi) {
@@ -282,7 +282,7 @@ test("#160 DESKTOP: bendras API_KEY negauna našlaičių valymo, nors ownerId ir
    * Abu principalai turi `ownerId: null` – skiria TIK rūšis.
    */
   const desktop = { ownerId: null, ownerKind: OWNER_KIND.UNOWNED, role: "operator" };
-  const sharedPrincipal = { ownerId: null, ownerKind: OWNER_KIND.API_KEY, role: "administrator" };
+  const sharedPrincipal = { ownerId: null, ownerKind: OWNER_KIND.API_PRINCIPAL, role: "administrator" };
 
   assert.equal(
     decideJobAccess({ input: IN.MISSING, actor: desktop, operation: OP.DELETE }),
