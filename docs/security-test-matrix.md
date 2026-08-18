@@ -949,6 +949,42 @@ interpretuotas neteisingai.
 | `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
 | **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
 
+### Naršyklės fazių testas su perimtu API (8 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Fazių perėjimai matomi naršyklėje** | `phase-transitions.spec.js` (Playwright) | Frontend'ui ignoruojant `phase` → krinta: matomas tik vienas tekstas |
+| **Pasenęs 100 % DINGSTA perėjus į diarizaciją** | `phase-transitions.spec.js` | Palikus procentą → krinta. Būtent „užstrigęs 100 %" ir buvo #154 pradinė problema |
+| Mygtuko tekstas neprieštarauja fazei | `phase-transitions.spec.js` | Anksčiau šablonas `Transkribuojama (${progresas})` diarizacijos metu rodė „Transkribuojama (Atliekama diarizacija...)" |
+| Užbaigus transkripcija patenka į formą | `phase-transitions.spec.js` | Regresija: fazių rodymas neturi sulaužyti rezultato kelio |
+
+⚠️ **TAI NĖRA PILNAS E2E.** `GET /api/transcribe-jobs/:id` yra **perimtas**
+(`page.route()`), tad backend fazių gamintojas čia netikrinamas — jį dengia 4–6 žingsnių
+testai (`jobPhasePipeline`, `jobPhaseStore`, `jobPhaseApi`). Šis testas tikrina **naršyklės
+reakciją į fazių kontraktą ir pasenusio progreso dingimą**, ne fazių gamybą ar
+persistenciją.
+
+⚠️ **Seka valdoma STATE'U SU ACKNOWLEDGEMENT.** Skaičiuoti „trečias poll'as grąžina
+diarizaciją" būtų trapu: UI gali pollinti 1, 2 ar 4 kartus iki pirmojo patikrinimo. Bet ir
+vien state pakeitimas nepakanka — tai ne handshake su polling mechanizmu. `route` handler'is
+praneša, KURIĄ būseną grąžino, ir testas laukia to patvirtinimo prieš tikrindamas DOM.
+Be jo kritęs testas neleistų atskirti „UI negavo naujos būsenos" nuo „UI gavo, bet
+neatvaizdavo". Handshake turi SAVO 15 s timeout — kitaip polling'ui sustojus laukimą
+nutrauktų tik bendras testo timeout, ir CI rodytų „testas užstrigo" vietoj
+„diarizing poll neįvyko per 15 s". Mock provideris transkribuoja per milisekundes, tad be perimto API fazių
+keitimasis įvyktų greičiau, nei Playwright spėtų perskaityti UI.
+
+⚠️ **PIRMAS REALUS PLAYWRIGHT CI PALEIDIMAS BUVO RAUDONAS PRIEŠ FAZIŲ LOGIKĄ.**
+Testas sustojo ties `page.setInputFiles('input[type="file"]', ...)`: po `page.goto("/")`
+failo input'as dar nebuvo renderintas. Esamas žalias `audio-flow.spec.js` parodė tikrą
+UI precondition: pirma reikia pasirinkti režimą **„Įkelti failą“**, tik tada atsiranda
+`input[type="file"]`. Step 8 testas dabar naudoja tą patį setup'ą.
+
+Šis CI kritimas **nepatikrino** phase route/polling/ACK/DOM perėjimų — testas jų nepasiekė.
+**Step 8 laikytinas įrodytu tik po žalio Playwright CI rerun'o.**
+
+---
+
 ### Frontend (7 žingsnis)
 
 | Garantija | Testai | Mutacijos įrodymas |
