@@ -329,6 +329,23 @@ function _classifyError(e, context = "job") {
    */
   const domeninė = e && e.cause && e.cause.name === "ResultLimitError" ? e.cause : e;
 
+  /**
+   * FAZĖS KLAIDA TURI SAVO KODĄ (#154).
+   *
+   * Nelegalus perėjimas ar `status × phase` pažeidimas produkcijoje reiškia
+   * state corruption arba programavimo klaidą – ne laikiną tiekėjo gedimą.
+   * Be atskiros šakos tai virstų `internal_error` ir taptų neatskiriama nuo
+   * bet kokios kitos vidinės klaidos, nors reikalauja visiškai kitokio
+   * tyrimo.
+   *
+   * `code` yra enum (`ILLEGAL_TRANSITION`, `PHASE_NOT_ALLOWED_FOR_TYPE`,
+   * `JOB_ALREADY_TERMINAL`, …), o pranešime nėra vidinės informacijos – tik
+   * fazių pavadinimai ir job tipas.
+   */
+  if (domeninė && domeninė.name === "JobPhaseError") {
+    return { errorCode: domeninė.code, message: domeninė.message };
+  }
+
   if (domeninė && domeninė.name === "ResultLimitError") {
     return {
       errorCode: domeninė.code,

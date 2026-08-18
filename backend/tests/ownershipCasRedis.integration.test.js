@@ -37,7 +37,6 @@ async function freshStore() {
   const { createRedisStore } = require("../utils/jobStore/redisStore");
   const IORedis = require("ioredis");
   const client = new IORedis(REDIS_URL);
-  await client.flushdb();
   return { store: createRedisStore(client), client };
 }
 
@@ -84,7 +83,6 @@ test("#159 REDIS CAS: savininko pakeitimas TARP skaitymo ir rašymo blokuoja HSE
   const { createRedisStore } = require("../utils/jobStore/redisStore");
   const IORedis = require("ioredis");
   const client = new IORedis(REDIS_URL);
-  await client.flushdb();
 
   try {
     const plain = createRedisStore(client);
@@ -124,7 +122,6 @@ test("#159 REDIS CAS: Lua yra vienintelė garantija, ne JS greitasis kelias", { 
   const { createRedisStore } = require("../utils/jobStore/redisStore");
   const IORedis = require("ioredis");
   const client = new IORedis(REDIS_URL);
-  await client.flushdb();
 
   try {
     const store = createRedisStore(client);
@@ -158,7 +155,6 @@ test("#159 REDIS CAS: rūšies pakeitimas irgi blokuoja rašymą", { skip }, asy
   const { createRedisStore } = require("../utils/jobStore/redisStore");
   const IORedis = require("ioredis");
   const client = new IORedis(REDIS_URL);
-  await client.flushdb();
 
   try {
     const store = createRedisStore(client);
@@ -185,7 +181,6 @@ test("#159 REDIS CAS: RŪŠIES pakeitimas tarp skaitymo ir rašymo blokuoja HSET
   const { createRedisStore } = require("../utils/jobStore/redisStore");
   const IORedis = require("ioredis");
   const client = new IORedis(REDIS_URL);
-  await client.flushdb();
 
   try {
     const plain = createRedisStore(client);
@@ -267,20 +262,35 @@ test("#159 REDIS: fono keliai apdoroja job'us su SKIRTINGAIS savininkais", { ski
    * retencija tyliai praleistų dalį įrašų.
    */
   const { store, client } = await freshStore();
+  const sukurti = [];
   try {
-    await store.create({ ownerId: A, ownerKind: K.USER });
-    await store.create({ ownerId: B, ownerKind: K.USER });
-    await store.create({ ownerId: null, ownerKind: K.UNOWNED });
+    /**
+     * ⚠️ TIKRINAMI SAVI job'ai, ne `all.length`.
+     *
+     * Anksčiau testas rėmėsi tuo, kad `flushdb()` paliko tuščią DB. Bet
+     * `node --test` failus vykdo LYGIAGREČIAI: kitas failas tuo metu kuria
+     * savo įrašus, ir `listAll().length` tampa nenuspėjamas – matėme 4 ir 9
+     * vietoj 3. Dar blogiau, pats `flushdb()` naikino kitų failų būseną
+     * vidury jų darbo.
+     */
+    sukurti.push(await store.create({ ownerId: A, ownerKind: K.USER }));
+    sukurti.push(await store.create({ ownerId: B, ownerKind: K.USER }));
+    sukurti.push(await store.create({ ownerId: null, ownerKind: K.UNOWNED }));
 
     const all = await store.listAll();
-    assert.equal(all.length, 3);
+    const musu = all.filter((j) => sukurti.some((s) => s.id === j.id));
+    assert.equal(musu.length, 3, "sisteminis kelias mato VISŲ savininkų job'us");
 
-    for (const job of all) {
+    for (const job of musu) {
       // Šis failas testuoja BACKEND'Ą tiesiogiai – fazių metodai gyvena fasade (#154).
       const updated = await store.update(job.id, { status: "processing" });
       assert.equal(updated.status, "processing", "sisteminis kelias neturi filtruoti pagal savininką");
     }
   } finally {
+    for (const job of sukurti) {
+      await client.del(`job:${job.id}`).catch(() => {});
+      await client.zrem("jobs:index", job.id).catch(() => {});
+    }
     await client.quit();
   }
 });

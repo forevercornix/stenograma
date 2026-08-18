@@ -105,6 +105,8 @@ const security = [
   "jobPhase",
   /** #154: fazių kontraktas per store – invariantai ir pavėlavę įvykiai. */
   "jobPhaseStore",
+  /** #154: fazės realiame pipeline – onPhase blokuoja, onProgress ne. */
+  "jobPhasePipeline",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",

@@ -22,6 +22,12 @@ const { skipWithoutRedis } = require("./helpers/redisGuard");
  * išvalymas sunaikintų kitų testų būseną – tai būtų tas pats bendro Redis
  * spąstas, kurį aprašo `helpers/redisGuard.js`, tik agresyvesnis. Kiekvienas
  * testas kuria SAVO job'ą ir po savęs išsivalo.
+ *
+ * ⚠️ `flushdb()` PAŠALINTAS IŠ VISŲ Redis testų. Jis realiai griovė lygiagrečiai
+ * vykdomus failus: klaidos keitėsi kas paleidimą (`listAll` grąžindavo 4 arba 9
+ * vietoj 3, koreliacijos laukai tapdavo `null`), nes rezultatas priklausė nuo
+ * failų tarpusavio laiko, ne nuo kodo. Testai, rėmęsi „DB yra tuščias", dabar
+ * tikrina TIK savo įrašus.
  */
 
 const K = require("../utils/jobStore/common").OWNER_KIND;
@@ -245,14 +251,30 @@ test(
     const IORedis = require("ioredis");
     const client = new IORedis(process.env.REDIS_URL);
 
+    let sukurtasId = null;
+
     t.after(async () => {
+      /**
+       * ⚠️ VALYMAS BŪTINAS. Be `flushdb()` job'ai lieka DB, ir kiti testai
+       * (pvz. `ownershipCasRedis` `listAll()`) mato svetimus įrašus. Tai buvo
+       * reali klaida: `listAll()` grąžino 4 vietoj 3.
+       */
+      if (sukurtasId) await isvalyti(client, sukurtasId);
       await client.quit().catch(() => {});
       await jobStore._resetForTests();
     });
 
+    /**
+     * ⚠️ `_resetForTests()` PRIEŠ `init()`. Kitas testas galėjo palikti
+     * inicializuotą fasadą su KITU store egzemplioriumi – tada
+     * `_storeForTests()` grąžintų ne tą, kurio `get()` perimam, ir langas
+     * neatsidarytų (`perimta` liktų `false`).
+     */
+    await jobStore._resetForTests();
     await jobStore.init();
 
     const job = await jobStore.create({ type: "transcription", ownerKind: K.UNOWNED });
+    sukurtasId = job.id;
     await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
     await jobStore.system.startPhase(job.id, PHASE.TRANSCRIBING, {
       progress: { current: 1000, total: 4420 },

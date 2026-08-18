@@ -422,7 +422,25 @@ test("SCHEMOS ATITINKA SERVISO PARAŠĄ, ne mūsų atmintį", () => {
    * (`{ ...payload, jobId }`) - klientas jo siųsti negali ir neturi. Įtraukus jį
    * į schemą, klientas galėtų primesti svetimą jobo ID audito įrašams.
    */
-  const serverInjected = { protocolJobBody: ["jobId"], generateBody: [] };
+  /**
+   * Parametrai, kurių klientas NESIUNČIA, tad schemoje jų neturi būti.
+   *
+   * Du skirtingi tipai, sąmoningai viename sąraše:
+   *
+   *   `jobId`   – serverio įterpiamas DUOMENŲ laukas;
+   *   `onPhase` – vidinė PRIKLAUSOMYBĖ (callback'as), kurią processor'ius
+   *               prijungia prie `jobStore.system.startPhase`.
+   *
+   * ⚠️ Sąrašas neturi tapti vieta, kur suverčiamas kiekvienas naujas DI
+   * callback'as. Jei jų atsirastų daugiau, teisingesnis sprendimas – atskirti
+   * serviso PRIKLAUSOMYBES nuo jo DUOMENŲ parametrų (pvz. antru argumentu),
+   * kad sargas jų iš viso nematytų. Kol yra vienas, atskira abstrakcija
+   * kainuotų daugiau nei duotų.
+   */
+  const serverInjected = {
+    protocolJobBody: ["jobId", "onPhase"],
+    generateBody: ["onPhase"],
+  };
 
   for (const [name, schema] of [
     ["generateBody", schemas.generateBody],

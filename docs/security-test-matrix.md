@@ -949,6 +949,34 @@ interpretuotas neteisingai.
 | `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
 | **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
 
+### Pipeline prijungimas (4 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **`onPhase` yra AWAITED ir blokuojantis** | `jobPhasePipeline` | Pavertus fire-and-forget → krinta. Fazei X priklausantis darbas gali prasidėti TIK po to, kai fazę X priėmė state machine |
+| Fazės klaida SUSTABDO REALŲ diarizacijos darbą | `jobPhasePipeline` | Tikrinamas `diarize()` kvietimas per REGISTRY pakeitimą, ne `getDiarizationProvider` šnipas — servisas jį destruktūrizuoja, tad šnipas niekada nesuveiktų |
+| Su veikiančiu `onPhase` diarizacija realiai vyksta | `jobPhasePipeline` | Kad ankstesnis testas neįrodinėtų vien to, jog diarizacija apskritai nevyksta |
+| **PROCESSOR → STORE: progresas su faze ir `{current,total}`** | `jobPhasePipeline` | Adapteris gyvena processor'iuje, ne servise — kviečiant servisą tiesiogiai jis apeinamas. Tikrinama GALUTINĖ store būsena |
+| Neteisinga fazė adapteryje = progresas dingsta | `jobPhasePipeline` | `TRANSCRIBING → DIARIZING` mutacija → krinta |
+| **Protokolo fazė pradedama TIK po validacijos** | `jobPhasePipeline` | `generateProtocol()` atlieka 5 patikras; perėjus prieš jas UI rodytų „generuojamas protokolas" validacijos metu |
+| **Fazės klaidos pranešime NĖRA vidinės informacijos** | `jobPhasePipeline` | `_classifyError()` `JobPhaseError.message` NESANITIZUOJA — tikrinami DABARTINIAI 10 padengtų kelių prieš kelius, raktus, stack trace. ⚠️ Sąrašas rankinis — naujas metimo kelias automatiškai nepatenka |
+| `onProgress` lieka BEST-EFFORT | `jobPhasePipeline` | Progreso klaida transkripcijos nenutraukia — semantiškai nelygiavertis `onPhase` |
+| Fazių tvarka atitinka realų srautą | `jobPhasePipeline` | `merging` pašalinimas → krinta; jis seka PO diarizacijos, nes sujungia jos rezultatą |
+| Be diarizacijos praleidžiamos ABI fazės | `jobPhasePipeline` | `DIARIZATION_PROVIDER=none` |
+| **Fazės pažeidimas gauna SAVO klaidos kodą** | `jobPhasePipeline` | Klasifikatoriaus šakos pašalinimas → `internal_error`, ir state corruption taptų neatskiriama nuo bet kokios vidinės klaidos |
+| Progreso įvykis neša FAZĘ | `jobPhasePipeline` | Be jos store negali atskirti pavėlavusio įvykio iš ankstesnės fazės |
+
+⚠️ **`onPhase` ir `onProgress` NĖRA lygiaverčiai.** Progreso įvykis gali dingti, pavėluoti
+ar būti atmestas — rezultatas nenukenčia. Fazė yra state machine BŪSENA: jei perėjimas
+neįsirašo, o darbas tęsiasi, store lieka senoje fazėje ir visi nauji įvykiai atrodo kaip
+svetimos fazės. Rezultatas gali būti teisingas, o observability modelis — melagingas.
+
+⚠️ **Servisas `jobStore` priklausomybės NETURI.** Jis tik laukia callback'o; store
+prijungia `queues/processors.js`. Taip atominė state machine nelieka dekoracija, kurią
+pipeline galėtų ignoruoti, bet sluoksniavimas išlieka.
+
+---
+
 ### Atominis progreso CAS (3 žingsnis)
 
 | Garantija | Testai | Mutacijos įrodymas |
@@ -971,9 +999,13 @@ Ta pati pamoka kaip #159 `ownerId` CAS.
 būtų kitas TOCTOU variantas: lygiagretus `ownerId` CAS būtų atsuktas atgal. CAS, kuris
 saugo tris laukus, bet perrašo visus, nėra atominis mutavimas.
 
-⚠️ **Jokio `flushdb()` Redis testuose.** `node --test` failus vykdo LYGIAGREČIAI, tad
-viso DB išvalymas sunaikintų kitų testų būseną. Kiekvienas testas valo tik savo raktus —
-žr. `helpers/redisGuard.js`.
+⚠️ **`flushdb()` pašalintas iš VISŲ Redis testų.** `node --test` failus vykdo
+LYGIAGREČIAI, tad viso DB išvalymas naikina kitų failų būseną vidury darbo. Tai nebuvo
+teorinė rizika: #154 metu pasireiškė kaip nestabilūs testai, kurių klaidos keitėsi kas
+paleidimą (`listAll()` grąžindavo 4 arba 9 vietoj 3, koreliacijos laukai tapdavo `null`).
+Testai, rėmęsi „DB yra tuščias", perrašyti tikrinti tik savo įrašus; kiekvienas valo tik
+savo raktus. Patikrinta trimis paleidimais ant vis nešvaresnio DB — žr.
+`helpers/redisGuard.js`.
 
 ⚠️ **Grynas helperis vienas NEPAKANKA.** `jobPhase.reportProgress()` sprendžia pagal
 perduotą būseną. Fasade jis paliekamas kaip greitasis kelias (atmeta akivaizdžiai
