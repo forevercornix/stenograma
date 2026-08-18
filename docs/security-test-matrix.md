@@ -949,6 +949,37 @@ interpretuotas neteisingai.
 | `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
 | **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
 
+### Frontend (7 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Progresas NĖRA sekundės — rodomas tik procentas** | `utils.test.js` (Vitest) | Laiko formatavimo grąžinimas → krinta 2. Backend siunčia `{42, 100}`; `formatSecondsToMMSS` būtų rodęs „00:42 / 01:40" — IŠGALVOTĄ trukmę |
+| `progressKnown=false` NERODO procento NET kai `progress` yra | `utils.test.js` | Patikros pašalinimas → krinta. ⚠️ Su `progress: null` testas praeitų ir be `progressKnown` — reikia duomenų, kurie YRA, bet nebegalioja |
+| **Procentas rodomas TIK kai `progressKnown === true`** | `utils.test.js` | `!== true` → truthiness krinta. `"false"` yra truthy: su truthiness patikra duotų „Atliekama diarizacija... 100 %" |
+| Visos PENKIOS fazės turi savo tekstą | `utils.test.js` | `transcribing` pašalinimas → krinta 3. Parametrizuotas testas apima visas penkias |
+| Nežinoma fazė duoda saugų fallback | `utils.test.js` | `undefined` grąžinimas → krinta. Backend gali pridėti fazę anksčiau nei frontend'as bus įdiegtas |
+| `queued` nerodo vykdymo fazės teksto | `utils.test.js` | `status × phase` invariantas matomas ir UI |
+| Netinkami progreso duomenys nesugriauna rodymo | `utils.test.js` | `NaN`, `total: 0`, trūkstami laukai |
+
+⚠️ **Dvi ribos, viena reikšmė.** Backend riba FAIL-FAST'ina (`normalizeProgressKnown`
+meta klaidą), UI riba FAIL-CLOSED'ina (`!== true` → procento nerodo). Frontend neturi
+kurti silpnesnės to paties kontrakto interpretacijos: `"false"` yra truthy, ir jei backend
+riba kada nors regresuotų, truthiness patikra parodytų 100 % ten, kur progresas nežinomas.
+(Frontend Redis nemato — jis gauna HTTP JSON; rizika kyla iš backend normalizavimo, ne iš
+saugyklos tiesiogiai.) Renderinimo metu mesti klaidą
+būtų blogiau nei parodyti mažiau.
+
+⚠️ **UI vienetų NEINTERPRETUOJA.** `progress` yra fazei lokalūs darbo vienetai (#154);
+UI skaičiuoja tik santykį. Laiko rodymas reikalautų `unit` lauko, kuris paliestų API
+kontraktą, memory/Redis modelį, state machine validaciją, CAS ir #155 schemą — ir dar
+reikėtų apibrėžti, ar `current` yra apdoroto audio laikas, paskutinio segmento `end` ar
+providerio offset. Tai atskiras darbas, ne frontend patobulinimas.
+
+`formatSecondsToMMSS()` NEPAŠALINTAS — jis turi savo testus ir gali praversti tikroms
+sekundėms; tik atsietas nuo job progreso.
+
+---
+
 ### HTTP/API reprezentacija (6 žingsnis)
 
 | Garantija | Testai | Mutacijos įrodymas |

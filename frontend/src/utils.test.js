@@ -134,23 +134,179 @@ describe("formatTranscribeProgress", () => {
     expect(formatTranscribeProgress({ status: "queued" })).toBe("eilėje...");
   });
 
-  it("grąžina tuščią eilutę, kai jobas completed/failed (progresas nebeaktualus)", () => {
-    expect(formatTranscribeProgress({ status: "completed" })).toBe("");
-    expect(formatTranscribeProgress({ status: "failed" })).toBe("");
+  it("queued NERODO vykdymo fazės teksto", () => {
+    // `queued` job'as fazės neturi (#154) – net jei laukas kažkaip atsirastų.
+    const r = formatTranscribeProgress({ status: "queued", phase: "transcribing" });
+    expect(r).toBe("eilėje...");
+    expect(r).not.toContain("Transkribuojama");
   });
 
-  it('grąžina "apdorojama..." kai processing, bet progreso duomenų dar nėra (pvz. tiekėjas jo neteikia)', () => {
-    expect(formatTranscribeProgress({ status: "processing" })).toBe("apdorojama...");
-    expect(formatTranscribeProgress({ status: "processing", progress: null })).toBe("apdorojama...");
+  it("terminaliuose statusuose progreso UI nebėra", () => {
+    for (const status of ["completed", "failed", "cancelled"]) {
+      expect(formatTranscribeProgress({ status })).toBe("");
+    }
   });
 
-  it("REALIAI PATIKRINTA formatavimas: rodo laiko poziciją ir procentą, kai progreso duomenys yra", () => {
-    const result = formatTranscribeProgress({ status: "processing", progress: { current: 90, total: 600 } });
-    expect(result).toBe("1:30 / 10:00 · 15%");
+  it("REGRESIJA: progresas NĖRA sekundės – rodomas TIK procentas", () => {
+    /**
+     * ⚠️ Ankstesnė versija formatavo `progress` kaip laiką
+     * (`formatSecondsToMMSS`), nors backend siunčia procentinę skalę
+     * `{current: 42, total: 100}`. Vartotojas būtų matęs „00:42 / 01:40" –
+     * IŠGALVOTĄ trukmę.
+     *
+     * `progress` yra fazei lokalūs darbo vienetai (#154); UI jų
+     * neinterpretuoja.
+     */
+    const r = formatTranscribeProgress({
+      status: "processing",
+      phase: "transcribing",
+      progressKnown: true,
+      progress: { current: 42, total: 100 },
+    });
+
+    expect(r).toBe("Transkribuojama... 42 %");
+    expect(r).not.toContain("00:42");
+    expect(r).not.toContain("01:40");
+    expect(r).not.toContain(":");
   });
 
-  it("apriboja procentą iki 100%, jei current viršija total (apsauga nuo paskutinio segmento zigzago)", () => {
-    const result = formatTranscribeProgress({ status: "processing", progress: { current: 601, total: 600 } });
-    expect(result).toContain("100%");
+  it("progressKnown=false NERODO procento NET kai progress yra", () => {
+    /**
+     * ⚠️ ESMINIS ATVEJIS. Jei testas duotų `progress: null`, jis praeitų ir
+     * tada, kai `progressKnown` visai ignoruojamas – užtektų, kad duomenų nėra.
+     *
+     * Čia duomenys YRA, bet `progressKnown=false` sako, kad jie nebegalioja
+     * (pvz. pasenę iš ankstesnės fazės). Procento rodyti negalima.
+     */
+    const r = formatTranscribeProgress({
+      status: "processing",
+      phase: "diarizing",
+      progressKnown: false,
+      progress: { current: 4420, total: 4420 },
+    });
+
+    expect(r).toBe("Atliekama diarizacija...");
+    expect(r).not.toContain("%");
+    expect(r).not.toContain("100");
+  });
+
+  it("progressKnown=false su tuščiu progresu – tas pats rezultatas", () => {
+    /**
+     * Būtent „užstrigęs 100 %" ir buvo #154 pradinė problema: transkripcija
+     * baigėsi, diarizacija progreso neteikia, ir vartotojui atrodė, kad darbas
+     * pakibo.
+     */
+    const r = formatTranscribeProgress({
+      status: "processing",
+      phase: "diarizing",
+      progressKnown: false,
+      progress: null,
+    });
+
+    expect(r).toBe("Atliekama diarizacija...");
+    expect(r).not.toContain("%");
+  });
+
+  it("procentas rodomas TIK kai progressKnown yra boolean true", () => {
+    /**
+     * FAIL-CLOSED riba (#154, Step 7).
+     *
+     * ⚠️ Truthiness patikra (`!job.progressKnown`) praleistų `"false"`, kuris
+     * yra truthy. Frontend gauna HTTP JSON, ne Redis reikšmes – bet jei backend
+     * normalizavimo riba regresuotų ir tokia reikšmė pasiektų UI,
+     * `progressKnown: "false"` duotų „Atliekama diarizacija... 100 %", t. y.
+     * būtent tą klaidingą būseną, nuo kurios #154 saugo.
+     *
+     * Backend riba fail-fast'ina (Step 6), UI – fail-closed'ina. Abi turi
+     * reikšti tą patį.
+     */
+    for (const progressKnown of [false, null, undefined, 0, 1, "false", "true", "1"]) {
+      const r = formatTranscribeProgress({
+        status: "processing",
+        phase: "diarizing",
+        progressKnown,
+        progress: { current: 100, total: 100 },
+      });
+
+      expect(r).toBe("Atliekama diarizacija...");
+      expect(r).not.toContain("%");
+    }
+
+    // Tik eksplicitinis boolean `true` leidžia procentą.
+    expect(
+      formatTranscribeProgress({
+        status: "processing",
+        phase: "diarizing",
+        progressKnown: true,
+        progress: { current: 100, total: 100 },
+      })
+    ).toBe("Atliekama diarizacija... 100 %");
+  });
+
+  it("VISOS penkios fazės turi savo tekstą", () => {
+    const atvejai = [
+      ["validating", "Tikrinami duomenys..."],
+      ["transcribing", "Transkribuojama..."],
+      ["diarizing", "Atliekama diarizacija..."],
+      ["merging", "Jungiami kalbėtojai su transkripcija..."],
+      ["generating_protocol", "Generuojamas protokolas..."],
+    ];
+
+    for (const [phase, laukiama] of atvejai) {
+      expect(
+        formatTranscribeProgress({ status: "processing", phase, progressKnown: false })
+      ).toBe(laukiama);
+    }
+  });
+
+  it("nežinoma fazė duoda saugų fallback, ne crash", () => {
+    /**
+     * Backend gali pridėti fazę anksčiau nei frontend'as bus įdiegtas.
+     * Vartotojas tada turi matyti bendrą tekstą, ne `undefined`.
+     */
+    expect(
+      formatTranscribeProgress({ status: "processing", phase: "nauja_faze", progressKnown: false })
+    ).toBe("Apdorojama...");
+
+    expect(formatTranscribeProgress({ status: "processing" })).toBe("Apdorojama...");
+  });
+
+  it("netinkami progreso duomenys NESUGRIAUNA rodymo", () => {
+    // `progressKnown: true`, bet duomenys sugadinti – rodom fazę be procento.
+    const blogi = [
+      { current: 5 },
+      { current: NaN, total: 10 },
+      { current: 1, total: 0 },
+      null,
+    ];
+
+    for (const progress of blogi) {
+      expect(
+        formatTranscribeProgress({
+          status: "processing",
+          phase: "transcribing",
+          progressKnown: true,
+          progress,
+        })
+      ).toBe("Transkribuojama...");
+    }
+  });
+
+  it("procentas apribojamas 0–100 ribose", () => {
+    const virs = formatTranscribeProgress({
+      status: "processing",
+      phase: "transcribing",
+      progressKnown: true,
+      progress: { current: 601, total: 600 },
+    });
+    expect(virs).toContain("100 %");
+
+    const zemiau = formatTranscribeProgress({
+      status: "processing",
+      phase: "transcribing",
+      progressKnown: true,
+      progress: { current: -5, total: 600 },
+    });
+    expect(zemiau).toContain("0 %");
   });
 });

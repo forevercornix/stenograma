@@ -58,7 +58,13 @@ export function escapeHtml(str) {
     .replace(/>/g, "&gt;");
 }
 
-// M:SS formatas sekundėms - naudojama transkribavimo progreso rodymui.
+/**
+ * M:SS formatas TIKROMS sekundžių reikšmėms.
+ *
+ * ⚠️ #154: NENAUDOTI su `job.progress` – jo vienetai NĖRA sekundės, o fazei
+ * lokalūs darbo vienetai. Anksčiau šis helperis buvo naudojamas būtent ten ir
+ * rodė išgalvotą trukmę (`{current: 42, total: 100}` → „00:42 / 01:40").
+ */
 export function formatSecondsToMMSS(seconds) {
   if (seconds == null || Number.isNaN(seconds)) return "0:00";
   const total = Math.max(0, Math.floor(seconds));
@@ -71,14 +77,66 @@ export function formatSecondsToMMSS(seconds) {
 // atsakymo. Realus progresas ateina iš faster-whisper-embedded providerio
 // (žr. backend FasterWhisperEmbeddedProvider.js) - kiti tiekėjai (mock, HTTP
 // tiekėjai) progreso negrąžina, tad tokiu atveju rodomas tik bendras statusas.
+/**
+ * Fazių tekstai (#154).
+ *
+ * ⚠️ Nežinoma fazė NĖRA klaida. Backend gali pridėti naują fazę anksčiau nei
+ * frontend'as bus įdiegtas, ir vartotojas tada turi matyti bendrą tekstą, ne
+ * tuščią eilutę ar `undefined`.
+ */
+const PHASE_TEKSTAI = {
+  validating: "Tikrinami duomenys",
+  transcribing: "Transkribuojama",
+  diarizing: "Atliekama diarizacija",
+  merging: "Jungiami kalbėtojai su transkripcija",
+  generating_protocol: "Generuojamas protokolas",
+};
+
+const APDOROJAMA = "Apdorojama";
+
+/**
+ * Job progreso tekstas vartotojui.
+ *
+ * ⚠️ `progress` yra FAZEI LOKALŪS DARBO VIENETAI, ne sekundės (#154).
+ *
+ * Ankstesnė versija formatavo juos kaip laiką (`formatSecondsToMMSS`), nors
+ * backend siunčia procentinę skalę (`{current: 42, total: 100}`) – vartotojas
+ * būtų matęs „00:42 / 01:40", t. y. IŠGALVOTĄ trukmę. Realiai tai nepasireiškė
+ * tik todėl, kad backend rašė skaičių, o ne objektą, ir sąlyga visada krisdavo
+ * į „apdorojama…".
+ *
+ * UI vienetų NEINTERPRETUOJA – jis skaičiuoja tik santykį.
+ *
+ * `progressKnown=false` → procentas NErodomas. Ne 0 % ir ne 100 %: abu būtų
+ * klaidinantys, o būtent „užstrigęs 100 %" ir buvo #154 pradinė problema.
+ */
 export function formatTranscribeProgress(job) {
   if (!job) return "";
   if (job.status === "queued") return "eilėje...";
   if (job.status !== "processing") return "";
-  if (!job.progress || job.progress.total == null || job.progress.total <= 0) {
-    return "apdorojama...";
+
+  const faze = job.phase ? PHASE_TEKSTAI[job.phase] || APDOROJAMA : APDOROJAMA;
+
+  /**
+   * ⚠️ `!== true`, ne `!job.progressKnown`.
+   *
+   * Truthiness patikra praleistų `"false"`, kuris yra TRUTHY. Frontend Redis
+   * nemato – jis gauna HTTP JSON, ir backend riba (`normalizeProgressKnown`)
+   * tokią reikšmę atmeta. Bet UI neturi kurti SILPNESNĖS to paties kontrakto
+   * interpretacijos: jei ta riba kada nors regresuotų, `progressKnown: "false"`
+   * duotų „Atliekama diarizacija... 100 %" – būtent tą klaidingą būseną, nuo
+   * kurios #154 saugo.
+   *
+   * Backend riba: FAIL-FAST (meta klaidą). UI riba: FAIL-CLOSED (nerodo
+   * procento). Renderinimo metu mesti klaidą būtų blogiau nei parodyti mažiau.
+   */
+  if (job.progressKnown !== true) return `${faze}...`;
+
+  const { current, total } = job.progress || {};
+  if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 0) {
+    return `${faze}...`;
   }
-  const { current, total } = job.progress;
-  const pct = Math.min(100, Math.round((current / total) * 100));
-  return `${formatSecondsToMMSS(current)} / ${formatSecondsToMMSS(total)} · ${pct}%`;
+
+  const pct = Math.min(100, Math.max(0, Math.round((current / total) * 100)));
+  return `${faze}... ${pct} %`;
 }
