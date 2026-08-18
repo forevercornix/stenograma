@@ -949,6 +949,34 @@ interpretuotas neteisingai.
 | `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
 | **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
 
+### Terminalūs, retry ir recovery keliai (5 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Tiesioginio `update(id, { status })` šablono nėra | `jobPhaseTerminal` (**greitasis grep**, ne pilna garantija) | Skenuojamas VISAS failas — eilučių skenavimas praleido daugiaeilius kvietimus. ⚠️ Neaptinka subkatalogų ir netiesioginės formos (`const patch = {...}`); tikroji apsauga yra store sargas |
+| **INLINE atšaukimo kelias REALIAI pažymi `failed`** | `jobPhaseTerminal` | Elgesio testas per `_runInline()` su natūraliai atmesta autorizacija; `update({ status })` grąžinimas → krinta 3 |
+| WORKER atšaukimo kelias naudoja tą patį `finish()` | `jobPhaseTerminal` (**struktūrinis**, ne elgesio) | Source-level mutacija krinta, bet runtime kelias NEVYKDOMAS — jam reikėtų tikro BullMQ |
+| Retry iš BET KURIOS fazės grąžina į `validating` | `jobPhaseTerminal` | Tikrinamos visos keturios fazės |
+| **Terminalaus job'o perpaleisti negalima** | `jobPhaseTerminal` | Patikros pašalinimas → `completed` grįžtų į `processing`, ir vartotojas matytų pažangą baigtame darbe |
+| Nelegalus perėjimas job'ą pažymi SAVO kodu | `jobPhaseTerminal` | `ILLEGAL_TRANSITION`, ne `internal_error` |
+| Nutrūkęs job'as lieka `processing` SU faze | `jobPhaseTerminal` | `processing + phase=null` neatsiranda net krentant worker'iui |
+| **Progresas resetinamas per retry** | `jobPhaseTerminal` | Palikus jį UI rodytų 42 %, kai realus darbas ties 0 % — monotoniškumas NĖRA media-level resume |
+
+⚠️ **Du atšaukimo keliai padengti SKIRTINGAI.** `jobRunner` (inline) turi ELGESIO testą:
+`_runInline()` vykdomas realiai, autorizacija atmetama natūraliai, tikrinama galutinė store
+būsena. `workers/index.js` turi tik STRUKTŪRINĮ: tikrinama, kad artimiausias kvietimas
+prieš `AUTHORIZATION_REVOKED` yra `finish()`. Abu turi savo mutaciją, bet tai source-level
+įrodymas, ne dviejų produkcijos kelių behavior coverage. Worker'io elgesio testas
+reikalautų tikro BullMQ — verta pridėti, jei šis kelias kada nors išsiskirs su inline.
+
+⚠️ **Rasta reali regresija.** Abu autorizacijos atšaukimo keliai (`jobRunner`, `workers`)
+rašė `update({ status: FAILED })`, kurį #154 sargas meta — produkcijoje jie būtų kritę.
+`workerAuthorization.test.js` to nepagavo, nes tikrino kodo TEKSTĄ
+(`grep AUTHORIZATION_REVOKED`), ne elgesį: tekstas nepasikeitė, testas liko žalias.
+Statinis sargas dabar tikrina priešingą kryptį — kad tokio rašymo apskritai nėra.
+
+---
+
 ### Pipeline prijungimas (4 žingsnis)
 
 | Garantija | Testai | Mutacijos įrodymas |
