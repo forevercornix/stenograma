@@ -974,15 +974,14 @@ nutrauktų tik bendras testo timeout, ir CI rodytų „testas užstrigo" vietoj
 „diarizing poll neįvyko per 15 s". Mock provideris transkribuoja per milisekundes, tad be perimto API fazių
 keitimasis įvyktų greičiau, nei Playwright spėtų perskaityti UI.
 
-⚠️ **LOKALIAI NEPALEISTAS — ŠIS ĮRAŠAS NEĮRODO VEIKIMO.** Chromium atsisiuntimas šioje
-aplinkoje blokuotas (žr. README „Ką realiai patikrina CI"). Patikrinta tik:
-`playwright test --list` (sintaksė ir discovery), selektorių atitikimas realiems mygtuko
-tekstams per `formatTranscribeProgress`, ir ACK handshake logika izoliuotai.
+⚠️ **PIRMAS REALUS PLAYWRIGHT CI PALEIDIMAS BUVO RAUDONAS PRIEŠ FAZIŲ LOGIKĄ.**
+Testas sustojo ties `page.setInputFiles('input[type="file"]', ...)`: po `page.goto("/")`
+failo input'as dar nebuvo renderintas. Esamas žalias `audio-flow.spec.js` parodė tikrą
+UI precondition: pirma reikia pasirinkti režimą **„Įkelti failą“**, tik tada atsiranda
+`input[type="file"]`. Step 8 testas dabar naudoja tą patį setup'ą.
 
-NEPATIKRINTA iki pirmo žalio CI paleidimo: ar selektorius realiai pataiko į mygtuką, ar
-`route` šablonas sutampa su tikrais frontend užklausų URL, ar `textarea` gauna rezultatą,
-ar polling vyksta kaip tikėtasi. **Step 8 laikytinas įrodytu tik po žalio Playwright CI
-job'o.**
+Šis CI kritimas **nepatikrino** phase route/polling/ACK/DOM perėjimų — testas jų nepasiekė.
+**Step 8 laikytinas įrodytu tik po žalio Playwright CI rerun'o.**
 
 ---
 

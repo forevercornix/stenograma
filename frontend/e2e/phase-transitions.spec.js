@@ -159,6 +159,20 @@ test("fazių perėjimai matomi naršyklėje, o pasenęs progresas dingsta", asyn
   }
 
   await page.goto("/");
+
+  /**
+   * CI #154 Step 8 pirmas realus paleidimas parodė, kad failo input'as dar
+   * NĖRA DOM'e iš karto po page.goto("/"). Jis renderinamas tik pasirinkus
+   * režimą „Įkelti failą“.
+   *
+   * Naudojame tą patį setup'ą kaip jau žalias audio-flow.spec.js:
+   *   goto → „Įkelti failą“ → setInputFiles.
+   *
+   * Be šio žingsnio Playwright 60 s laukė neegzistuojančio input[type=file]
+   * ir testas net nepasiekė fazių/polling logikos.
+   */
+  await page.getByRole("button", { name: /Įkelti failą/ }).click();
+
   await page.setInputFiles('input[type="file"]', wavPath);
   await page.getByRole("button", { name: /Transkribuoti automatiškai/i }).click();
 
