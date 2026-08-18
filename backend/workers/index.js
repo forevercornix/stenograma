@@ -144,8 +144,11 @@ function createWorker(queueName, processor, workerOptions = {}) {
           const decision = authorizeJobOrAudit(processingJob, jobId);
 
           if (!decision.allowed) {
-            await jobStore.system.update(jobId, {
-              status: jobStore.STATUS.FAILED,
+            /**
+             * #154: terminalus perėjimas per state machine – žr. jobRunner.js.
+             * Neapdorotas `update({ status })` čia irgi būtų kritęs.
+             */
+            await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
               error_code: "AUTHORIZATION_REVOKED",
               error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
             });

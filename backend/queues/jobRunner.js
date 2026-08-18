@@ -224,8 +224,14 @@ async function _runInline(type, jobId, payload) {
       const decision = authorizeJobOrAudit(job, jobId);
 
       if (!decision.allowed) {
-        await jobStore.system.update(jobId, {
-          status: jobStore.STATUS.FAILED,
+        /**
+         * #154: terminalus perėjimas per state machine.
+         *
+         * ⚠️ Neapdorotas `update({ status })` po #154 sargo META klaidą – šis
+         * kelias produkcijoje būtų kritęs. Testas to nepagavo, nes tikrino tik
+         * kodo TEKSTĄ (`grep AUTHORIZATION_REVOKED`), ne elgesį.
+         */
+        await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
           error_code: "AUTHORIZATION_REVOKED",
           error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
         });

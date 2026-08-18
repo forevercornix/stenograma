@@ -107,6 +107,8 @@ const security = [
   "jobPhaseStore",
   /** #154: fazės realiame pipeline – onPhase blokuoja, onProgress ne. */
   "jobPhasePipeline",
+  /** #154: terminalūs, retry ir recovery keliai. */
+  "jobPhaseTerminal",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",
