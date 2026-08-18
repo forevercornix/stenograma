@@ -1,6 +1,7 @@
 const { getLLMProvider, REGISTRY } = require("../providers/llm");
 const { buildPrompt, PROMPTS } = require("../prompts");
 const { tryParse, buildRepairPrompt } = require("../schema/protocolSchema");
+const { PHASE } = require("../utils/jobPhase");
 const auditLog = require("../utils/auditLog");
 const { estimateCost } = require("../utils/costEstimate");
 const { groundingCheck } = require("../utils/groundingCheck");
@@ -31,7 +32,7 @@ class HttpError extends Error {
  *
  * @throws {HttpError} su statusCode (400/403/500/502) ir žmogui skaitomu pranešimu.
  */
-async function generateProtocol({ title, date, participants, transcript, segments, meetingId, jobId, llmProviderOverride, promptVersionOverride }) {
+async function generateProtocol({ title, date, participants, transcript, segments, meetingId, jobId, llmProviderOverride, promptVersionOverride, onPhase }) {
   const start = Date.now();
 
   if (!transcript || transcript.trim().length < 10) {
@@ -58,6 +59,21 @@ async function generateProtocol({ title, date, participants, transcript, segment
   } catch (e) {
     throw new HttpError(500, e.message);
   }
+
+  /**
+   * FAZĖS PERĖJIMAS PO VALIDACIJOS (#154).
+   *
+   * ⚠️ Aukščiau esančios patikros (transkripcijos ilgis, dalyvių formatas,
+   * tiekėjo ir prompt versijos vardai, LLM fabrikas) semantiškai priklauso
+   * `validating` fazei. Kviečiant `startPhase(GENERATING_PROTOCOL)` iš
+   * processor'iaus PRIEŠ šį servisą, UI rodytų „generuojamas protokolas", kol
+   * realiai dar vyksta validacija – ir 400 klaida ateitų iš fazės, kuri
+   * niekada neprasidėjo.
+   *
+   * AWAITED ir blokuojantis, kaip transkripcijos kelyje: darbas prasideda tik
+   * po to, kai fazę priėmė state machine.
+   */
+  await onPhase?.(PHASE.GENERATING_PROTOCOL);
 
   // DEDUPLIKACIJA (rasta su realiu 4 val. įrašu - žr. utils/transcriptDedup.js):
   // Whisper haliucinacinės kilpos (ta pati frazė šimtus kartų iš eilės) išpučia

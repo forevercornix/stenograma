@@ -41,6 +41,19 @@
  *     REDIS_URL=... npm run test:redis
  *
  * ne atskirą failą.
+ *
+ * 3. `flushdb()` NENAUDOTINAS. Jis išvalo VISĄ DB, tad lygiagrečiai vykdomi
+ *    failai netenka savo būsenos VIDURY darbo. Tai nebuvo teorinė rizika –
+ *    #154 metu ji pasireiškė kaip nestabilūs testai, kurių klaidos keitėsi
+ *    kas paleidimą (`listAll` 4 arba 9 vietoj 3, `requestId` tapdavo `null`).
+ *
+ *    Valykite TIK savo raktus:
+ *
+ *        await client.del(`job:${id}`);
+ *        await client.zrem("jobs:index", id);
+ *
+ *    Ir NETIKRINKITE globalių skaičių (`listAll().length`) – filtruokite
+ *    pagal savo sukurtus ID.
  */
 
 const REDIS_URL = process.env.REDIS_URL;

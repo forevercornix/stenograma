@@ -2,6 +2,7 @@ const fileStorage = require("../utils/fileStorage");
 const { transcribeAudio } = require("../services/transcriptionService");
 const { generateProtocol } = require("../services/protocolService");
 const jobStore = require("../utils/jobStore");
+const { PHASE } = require("../utils/jobPhase");
 
 /**
  * Job processor'iai - bendras vykdymo kodas inline runner'iui IR BullMQ worker'iams.
@@ -26,6 +27,22 @@ async function transcriptionProcessor(payload, jobId) {
     meetingId,
   } = payload;
 
+  /**
+   * FAZIŲ PRIJUNGIMAS (#154).
+   *
+   * `restart()` jau nustatė `validating` – tai apima payload'o tikrinimą ir
+   * audio gavimą iš saugyklos. Tolesnes fazes deklaruoja servisas per
+   * `onPhase`, o čia jos paverčiamos store perėjimais.
+   *
+   * ⚠️ AWAITED, ne fire-and-forget. Jei perėjimas neįsirašo, servisas TOLESNIO
+   * darbo nepradeda: fazei X priklausantis darbas gali prasidėti tik po to, kai
+   * fazę X priėmė state machine. Priešingu atveju atominė state machine būtų
+   * dekoracija, kurią pipeline gali ignoruoti.
+   */
+  const onPhase = jobId
+    ? (phase, options) => jobStore.system.startPhase(jobId, phase, options)
+    : undefined;
+
   // Gauname audio iš bendro storage pagal raktą (veikia ir atskirame worker'yje).
   // SVARBU: failo ČIA NETRINAM. Jei transkripcija krenta ir BullMQ bando retry,
   // kitas bandymas vėl turi rasti audio. Trynimą atlieka worker/inline PO GALUTINIO
@@ -41,7 +58,20 @@ async function transcriptionProcessor(payload, jobId) {
         const percent = typeof p === "number" ? p : p && p.percent;
         if (percent == null) return;
         // fire-and-forget: progreso rašymas neturi blokuoti/nutraukti transkripcijos
-        Promise.resolve(jobStore.system.update(jobId, { progress: percent })).catch(() => {});
+        /**
+         * BEST-EFFORT, priešingai nei `onPhase`. Progreso įvykis gali dingti ar
+         * būti atmestas (pavėlavęs, kita fazė, regresija) – transkripcijos tai
+         * nenutraukia.
+         *
+         * ⚠️ Perduodama IR fazė: be jos store negali atskirti pavėlavusio
+         * įvykio iš ankstesnės fazės (#154).
+         */
+        Promise.resolve(
+          jobStore.system.reportProgress(jobId, {
+            phase: PHASE.TRANSCRIBING,
+            progress: { current: percent, total: 100 },
+          })
+        ).catch(() => {});
       }
     : undefined;
 
@@ -58,14 +88,29 @@ async function transcriptionProcessor(payload, jobId) {
     meetingId,
     jobId,
     onProgress,
+    onPhase,
   });
 }
 
 async function protocolProcessor(payload, jobId) {
+  /**
+   * Protokolo job'as turi TIK `validating → generating_protocol` (#154).
+   * `transcribing`, `diarizing` ir `merging` jam state machine yra NELEGALIOS.
+   *
+   * ⚠️ Perėjimą kviečia SERVISAS, ne šis processor'ius – `generateProtocol()`
+   * pradžioje atlieka penkias validacijas (transkripcijos ilgis, dalyviai,
+   * tiekėjo ir prompt versijos vardai, LLM fabrikas), kurios semantiškai
+   * priklauso `validating` fazei. Perėjus čia, UI rodytų „generuojamas
+   * protokolas", kol dar vyksta validacija.
+   */
+  const onPhase = jobId
+    ? (phase, options) => jobStore.system.startPhase(jobId, phase, options)
+    : undefined;
+
   // Protokolo generavimas neturi failo - visas payload jau JSON.
   // jobId perduodamas TIK auditui (pseudonimizuotam subjectId), kad
   // DELETE /api/jobs/:id galėtų surasti ir pašalinti susijusius įrašus.
-  return generateProtocol({ ...payload, jobId });
+  return generateProtocol({ ...payload, jobId, onPhase });
 }
 
 module.exports = { transcriptionProcessor, protocolProcessor };

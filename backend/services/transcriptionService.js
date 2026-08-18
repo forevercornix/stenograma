@@ -1,6 +1,7 @@
 const { getTranscriptionProvider, REGISTRY: TRANSCRIPTION_REGISTRY } = require("../providers/transcription");
 const { getDiarizationProvider, isKnownDiarizationMode } = require("../providers/diarization");
 const { mergeDiarization } = require("../utils/mergeDiarization");
+const { PHASE } = require("../utils/jobPhase");
 const { filterHallucinations } = require("../utils/filterHallucinations");
 const { detectAudioMagic } = require("../utils/audioMagicBytes");
 const auditLog = require("../utils/auditLog");
@@ -43,6 +44,22 @@ async function transcribeAudio({
   numSpeakers,
   transcriptionProviderOverride,
   diarizationModeOverride,
+  /**
+   * FAZĖS PERĖJIMAS (#154) – AWAITED IR BLOKUOJANTIS.
+   *
+   * ⚠️ Semantiškai NELYGIAVERTIS `onProgress`. Progreso įvykis gali dingti,
+   * pavėluoti ar būti atmestas – darbas nuo to nenukenčia. Fazė yra state
+   * machine BŪSENA: jei `transcribing → diarizing` neįsirašo, o servisas vis
+   * tiek pradeda diarizaciją, store lieka `transcribing`, ir visi diarizacijos
+   * įvykiai bus laikomi svetimos fazės įvykiais. Rezultatas gali būti teisingas,
+   * bet observability modelis – melagingas.
+   *
+   * INVARIANTAS: fazei X priklausantis darbas gali prasidėti TIK po to, kai
+   * fazę X priėmė state machine.
+   *
+   * Servisas `jobStore` priklausomybės NETURI – jis tik laukia callback'o.
+   */
+  onPhase,
   meetingId,
   jobId,
   onProgress,
@@ -108,6 +125,8 @@ async function transcribeAudio({
       jobId,
     });
 
+    await onPhase?.(PHASE.TRANSCRIBING);
+
     const transcription = await transcriptionProvider.transcribe(buffer, {
       filename,
       mimeType,
@@ -119,6 +138,13 @@ async function transcribeAudio({
 
     let diarizationProviderUsed = requestNativeDiarization ? `${transcriptionProvider.name} (inline)` : null;
     if (diarize && diarizationMode !== "none" && diarizationMode !== "inline") {
+      /**
+       * `progressKnown: false` – pyannote progreso neteikia. Tai RUNTIME
+       * savybė, ne `phase` išvestinė: kitas provideris ateityje gali jį teikti,
+       * ir tada čia bus perduota pradinė `progress` reikšmė.
+       */
+      await onPhase?.(PHASE.DIARIZING);
+
       const diarizationProvider = getDiarizationProvider(diarizationMode);
 
       log.info("Tiekėjo kvietimas", {
@@ -135,6 +161,7 @@ async function transcribeAudio({
         audioUrl,
         numSpeakers,
       });
+      await onPhase?.(PHASE.MERGING);
       transcription.segments = mergeDiarization(transcription.segments, diarizationResult.turns);
       transcription.diarization = true;
       diarizationProviderUsed = diarizationProvider.name;
