@@ -1,6 +1,7 @@
 const express = require("express");
 const fs = require("fs/promises");
 const jobStore = require("../utils/jobStore");
+const { serializeJob } = require("../utils/jobResponse");
 const lifecycleService = require("../services/lifecycleService");
 const jobRunner = require("../queues/jobRunner");
 const fileStorage = require("../utils/fileStorage");
@@ -271,31 +272,25 @@ router.get("/transcribe-jobs/:id", pollRateLimiter, authenticate, requirePermiss
     return;
   }
 
-  res.json({
-    jobId: job.id,
-    status: job.status,
-    progress: job.progress || null,
-    /**
-     * VARIANTAS KIEKVIENAME atsakyme, ne tik redaguotame (GDPR #4:
-     * „Original and redacted versions cannot be confused in API responses").
-     *
-     * Jei žymėtume tik redaguotus, atsakymas be lauko būtų dviprasmis: arba tai
-     * originalas, arba senesnė API versija, kuri lauko dar neturi. Klientas
-     * negalėtų atskirti - tad laukas privalomas abiem atvejais.
-     *
-     * Transkribavimo jobas visada duoda ORIGINALĄ: redakcija taikoma vėliau,
-     * ties išsiuntimu išoriniam tiekėjui arba eksportu.
-     */
-    variant: VARIANT.ORIGINAL,
-    result: job.result,
-    error: job.error,
-    error_code: job.error_code,
-    attempt_count: job.attempt_count,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    started_at: job.started_at,
-    completed_at: job.completed_at,
-  });
+  /**
+   * #154: bendras serializatorius. `variant` lieka endpoint'ui specifinis.
+   */
+  res.json(
+    serializeJob(job, {
+      /**
+       * VARIANTAS KIEKVIENAME atsakyme, ne tik redaguotame (GDPR #4:
+       * „Original and redacted versions cannot be confused in API responses").
+       *
+       * Jei žymėtume tik redaguotus, atsakymas be lauko būtų dviprasmis: arba
+       * tai originalas, arba senesnė API versija, kuri lauko dar neturi.
+       * Klientas negalėtų atskirti - tad laukas privalomas abiem atvejais.
+       *
+       * Transkribavimo jobas visada duoda ORIGINALĄ: redakcija taikoma vėliau,
+       * ties išsiuntimu išoriniam tiekėjui arba eksportu.
+       */
+      variant: VARIANT.ORIGINAL,
+    })
+  );
 });
 
 /**

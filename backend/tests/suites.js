@@ -109,6 +109,8 @@ const security = [
   "jobPhasePipeline",
   /** #154: terminalūs, retry ir recovery keliai. */
   "jobPhaseTerminal",
+  /** #154: fazės HTTP atsakyme – vienodas kontraktas abiejuose endpoint'uose. */
+  "jobPhaseApi",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",
