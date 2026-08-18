@@ -1,5 +1,6 @@
 const express = require("express");
 const jobStore = require("../utils/jobStore");
+const { serializeJob } = require("../utils/jobResponse");
 const jobRunner = require("../queues/jobRunner");
 const rateLimiter = require("../middleware/rateLimiter");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
@@ -132,18 +133,9 @@ router.get("/jobs/:id", pollRateLimiter, authenticate, requirePermission(PERMISS
     return;
   }
 
-  res.json({
-    jobId: job.id,
-    status: job.status,
-    result: job.result,
-    error: job.error,
-    error_code: job.error_code,
-    attempt_count: job.attempt_count,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    started_at: job.started_at,
-    completed_at: job.completed_at,
-  });
+  // #154: bendras serializatorius – fazių ir progreso kontraktas vienodas
+  // abiejuose endpoint'uose (anksčiau `progress` grąžindavo tik vienas).
+  res.json(serializeJob(job));
 });
 
 /**

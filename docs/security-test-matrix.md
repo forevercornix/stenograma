@@ -949,6 +949,33 @@ interpretuotas neteisingai.
 | `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
 | **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
 
+### HTTP/API reprezentacija (6 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **ABU endpoint'ai grąžina tą patį fazių kontraktą** | `jobPhaseApi` | Atsakymai buvo sudaromi rankiniu būdu ir jau išsiskyrę: `progress` grąžindavo tik `/api/transcribe-jobs` |
+| `phase`, `progress`, `progressKnown` pasiekia klientą | `jobPhaseApi` | `phase` pašalinimas iš serializatoriaus → krinta 5 |
+| Diarizacijos fazė rodoma su `progressKnown=false` | `jobPhaseApi` | Būtent tas atvejis, dėl kurio #154 pradėtas: „užstrigo ties 100 %" |
+| Terminalus job'as fazės nebeturi | `jobPhaseApi` | `status × phase` invariantas matomas ir per HTTP |
+| **Vidiniai laukai į atsakymą NEPATENKA** | `jobPhaseApi` | `{ ...job }` vietoj allowlist → krinta. Su spread'u kiekvienas NAUJAS įrašo laukas automatiškai taptų viešas |
+| Kiekvienas endpoint'as tikrinamas su SAVO tipo job'u ir 200 | `jobPhaseApi` | Vienas endpoint'as → 500 krinta 4. ⚠️ Ankstesnis `if (status !== 200) continue` bet kokią regresiją būtų pavertęs „praėjo" |
+| **`extra` negali perrašyti kanoninių laukų** | `jobPhaseApi` | Grąžinus `...extra` į pabaigą → krinta. Endpoint'as galėtų perduoti `{ status: "completed" }` ir pakeisti state machine rezultatą atsakyme |
+| **Ne-boolean `progressKnown` yra KLAIDA, ne tylus vertimas** | `jobPhaseApi` | `Boolean("false") === true` — tylus konvertavimas paverstų „nežinomas" į „žinomas", ir neteisinga reikšmė atrodytų validi |
+| `REZERVUOTI` sąrašas sinchronizuotas su realiais laukais | `jobPhaseApi` | Naujas laukas be sąrašo įrašo → krinta. Rankinis sąrašas be šios patikros būtų skola |
+| `NEVIEŠI_LAUKAI` sąraše nėra pasenusių įrašų | `jobPhaseApi` | Nebeegzistuojantis laukas → krinta. Tikrinama prieš store KODĄ, ne `newJob()` formą — dalis laukų pridedama vėliau |
+
+⚠️ **API riba FAIL-FAST'ina, ne taiso tyliai.** `progressKnown` ne-boolean reikšmė
+reiškia, kad store normalizacija neveikia (laukas iškrito iš `BOOLEAN_FIELDS`) — tai
+programavimo klaida, ne vartotojo įvestis. `undefined`/`null` lieka teisėti: legacy įrašai
+lauko neturi.
+
+⚠️ **Serializatorius naudoja ALLOWLIST.** Job įrašas turi tapatybės (`actor`, `ownerId`,
+`actorSource`) ir saugyklos (`storageKey`) detalių. Su `{ ...job }` jos nutekėtų, o naujas
+laukas įraše taptų viešas be jokio sprendimo. `NEVIEŠI_LAUKAI` sąrašas naudojamas teste —
+tai greitasis sargas, ne pilna garantija: allowlist pati yra tikroji apsauga.
+
+---
+
 ### Terminalūs, retry ir recovery keliai (5 žingsnis)
 
 | Garantija | Testai | Mutacijos įrodymas |
