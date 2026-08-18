@@ -202,7 +202,19 @@ test("fazių perėjimai matomi naršyklėje, o pasenęs progresas dingsta", asyn
 
   // 4. Pabaiga – transkripcija patenka į formą.
   await pereitiĮFazę("completed");
-  await expect(page.locator("textarea").first()).toContainText("Testinė transkripcija", {
-    timeout: 15000,
-  });
+  /**
+   * ⚠️ `getByPlaceholder`, ne `locator("textarea").first()`.
+   *
+   * Puslapyje yra DVI `textarea` (transkripcijos laukas `App.jsx:883` ir
+   * įklijavimo `App.jsx:894`), tad `.first()` priklausytų nuo DOM tvarkos.
+   * Naudojamas tas pats selektorius kaip jau žaliame `audio-flow.spec.js`.
+   *
+   * ⚠️ `toHaveValue`, ne `toContainText`: `textarea` turinys yra `value`
+   * atributas, ne tekstinis mazgas – `toContainText` čia nesuveiktų net su
+   * teisingu elementu.
+   */
+  await expect(page.getByPlaceholder(/Transkripcija/)).toHaveValue(
+    /Testinė transkripcija/,
+    { timeout: 15000 }
+  );
 });

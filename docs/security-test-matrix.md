@@ -981,6 +981,17 @@ UI precondition: pirma reikia pasirinkti režimą **„Įkelti failą“**, tik 
 `input[type="file"]`. Step 8 testas dabar naudoja tą patį setup'ą.
 
 Šis CI kritimas **nepatikrino** phase route/polling/ACK/DOM perėjimų — testas jų nepasiekė.
+
+Peržiūrint testą po to rasti dar DU selektoriai, kurie būtų kritę kitame žingsnyje:
+`locator("textarea").first()` (puslapyje DVI `textarea` — `App.jsx:883` ir `894`, tad
+`.first()` priklauso nuo DOM tvarkos) ir `toContainText` (`textarea` turinys yra `value`,
+ne tekstinis mazgas). Abu pakeisti tais pačiais, kuriuos naudoja žalias
+`audio-flow.spec.js`.
+
+⚠️ **Tai antras kartas, kai selektoriaus klaida iškyla tik CI'e.** `playwright test --list`
+tikrina sintaksę ir discovery, bet ne tai, ar selektorius pataiko. Rašant naują Playwright
+testą verta sekti jau žalio testo selektorius pažodžiui, o ne pasirinkti „panašų".
+
 **Step 8 laikytinas įrodytu tik po žalio Playwright CI rerun'o.**
 
 ---
