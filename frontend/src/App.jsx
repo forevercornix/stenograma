@@ -850,7 +850,18 @@ export default function Stenograma() {
                   className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xs text-sm font-medium"
                   style={{ background: INK, color: PAPER, opacity: !audioFile || isTranscribing || backendStatus !== "online" ? 0.4 : 1 }}
                 >
-                  {isTranscribing ? `Transkribuojama${transcribeProgress ? ` (${transcribeProgress})` : "…"}` : "Transkribuoti automatiškai"}
+                  {/**
+                   * #154: FAZĖS TEKSTAS RODOMAS TIESIOGIAI, ne skliaustuose po
+                   * „Transkribuojama".
+                   *
+                   * ⚠️ Anksčiau šablonas buvo `Transkribuojama (${progresas})`,
+                   * tad diarizacijos metu vartotojas matydavo prieštaravimą:
+                   * „Transkribuojama (Atliekama diarizacija...)". Fazės tekstas
+                   * jau pats pasako, kas vyksta – jo gaubti nebereikia.
+                   */}
+                  {isTranscribing
+                    ? transcribeProgress || "Transkribuojama…"
+                    : "Transkribuoti automatiškai"}
                 </button>
                 {backendInfo?.transcriptionProvider === "mock" && (
                   <p className="text-xs" style={{ color: SLATE }}>
