@@ -1311,6 +1311,19 @@ worker'is paverstų ištrynimą laikinu), ir ištrynimas privalo eiti per
 `pending_deletion` (kitaip nelieka būsenos, kurioje worker'is pamatytų ištrynimo
 žymą).
 
+**Job fazės ir progresas (#154).** `processing` anksčiau reiškė bet ką –
+validaciją, transkripciją, diarizaciją ar protokolo generavimą. Vartotojui tai
+atrodė kaip „kažkas vyksta", o transkripcijai pasiekus 100 % ir diarizacijai
+progreso neteikiant – kaip **pakibimas ties 100 %**. Dabar job'as neša `phase`,
+`progress` ir `progressKnown`, o būsenų grafas gyvena vienoje vietoje:
+[`docs/job-lifecycle.md`](docs/job-lifecycle.md).
+
+Trys esminės taisyklės: `transcription` ir `protocol` turi **atskirus** fazių
+grafus (vienas job'as nuo transkripcijos iki protokolo neina); progresas yra
+**fazei lokalūs darbo vienetai**, ne sekundės; ir monotoniškumas neleidžia
+pasenusiam įvykiui sumažinti rodomo progreso, bet **negarantuoja**, kad po
+restarto apdorojimas tęsis nuo persistinto taško.
+
 **Koordinuotas ištrynimas (#19).** Vienas įėjimo taškas
 (`services/lifecycleService.js`) vietoj dviejų identiškų kopijų maršrutuose.
 Tvarka svarbi: **žyma uždedama prieš šalinimą**, nes priešingu atveju liktų

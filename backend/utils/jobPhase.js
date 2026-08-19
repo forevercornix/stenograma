@@ -53,6 +53,29 @@ const GRAPHS = Object.freeze({
   }),
 });
 
+/**
+ * Legalūs perėjimai kaip BRIAUNŲ sąrašas.
+ *
+ * `[from, to]`, kur `from === null` reiškia grafo pradžią.
+ *
+ * KODĖL ATSKIRAS NUO `phasesForType()`. Fazių AIBĖ nepasako, kokia tvarka jos
+ * leidžiamos: `validating → diarizing → transcribing → merging` turi tas pačias
+ * fazes kaip teisingas kelias, bet state machine jį atmeta. Dokumentacijos
+ * sargas, lyginantis tik aibes, tokio nukrypimo nepastebėtų.
+ *
+ * Grąžinamas naujas masyvas – grafas lieka nepasiekiamas iš išorės.
+ */
+function transitionsForType(type) {
+  const graph = GRAPHS[type];
+  if (!graph) return [];
+
+  const briaunos = [];
+  for (const [from, toList] of Object.entries(graph)) {
+    for (const to of toList) briaunos.push([from === "null" ? null : from, to]);
+  }
+  return briaunos;
+}
+
 /** Kurios fazės apskritai egzistuoja duotam tipui. */
 function phasesForType(type) {
   const graph = GRAPHS[type];
@@ -94,19 +117,65 @@ function assertPhaseAllowedForType(type, phase) {
  * kaip sekundžių ar segmentų – jis skaičiuoja tik santykį. Provideris, duodantis
  * vien procentą, naudoja `{current: 37, total: 100}`.
  */
+/**
+ * Progreso invariantai MAŠININIU BŪDU SKAITOMA forma.
+ *
+ * KODĖL EKSPORTUOJAMA. Dokumentacijos sargas turi tikrinti, ar
+ * `docs/job-lifecycle.md` mini visas galiojančias sąlygas. Pirmoji versija tai
+ * darė parsindama `assertValidProgress()` ŠALTINĮ regex'u – tad priklausė nuo
+ * sintaksės, ne nuo kontrakto: daugiaeilis `if (`, sąlygos iškėlimas į helperį
+ * ar `&&` sujungimas būtų sulaužę parserį nepakeitę elgesio.
+ *
+ * Čia deklaruojamas KONTRAKTAS. `assertValidProgress()` jį vykdo, o testai
+ * tikrina ir tai, kad abu neišsiskirtų.
+ */
+const PROGRESS_INVARIANTS = Object.freeze([
+  Object.freeze({
+    raiska: "Number.isFinite(current)",
+    tikrinti: (p) => Number.isFinite(p.current),
+    zinute: "progress.current privalo būti baigtinis skaičius.",
+  }),
+  Object.freeze({
+    raiska: "Number.isFinite(total)",
+    tikrinti: (p) => Number.isFinite(p.total),
+    zinute: "progress.total privalo būti baigtinis skaičius.",
+  }),
+  Object.freeze({
+    raiska: "total > 0",
+    tikrinti: (p) => p.total > 0,
+    zinute: "progress.total privalo būti > 0 – kitaip santykis beprasmis.",
+  }),
+  Object.freeze({
+    raiska: "current >= 0",
+    tikrinti: (p) => p.current >= 0,
+    zinute: "progress.current privalo būti >= 0.",
+  }),
+  Object.freeze({
+    raiska: "current <= total",
+    tikrinti: (p) => p.current <= p.total,
+    zinute: "progress.current privalo būti <= progress.total.",
+  }),
+]);
+
 function assertValidProgress(progress) {
   if (progress == null || typeof progress !== "object") {
     throw new JobPhaseError("progress privalo būti { current, total }.", "INVALID_PROGRESS");
   }
-  const { current, total } = progress;
-  if (!Number.isFinite(current) || !Number.isFinite(total)) {
-    throw new JobPhaseError("progress.current ir progress.total privalo būti baigtiniai skaičiai.", "INVALID_PROGRESS");
-  }
-  if (total <= 0) {
-    throw new JobPhaseError("progress.total privalo būti > 0 – kitaip santykis beprasmis.", "INVALID_PROGRESS");
-  }
-  if (current < 0 || current > total) {
-    throw new JobPhaseError("progress.current privalo tenkinti 0 <= current <= total.", "INVALID_PROGRESS");
+
+  /**
+   * ⚠️ VYKDOMI EKSPORTUOTI PREDIKATAI, ne jų kopija.
+   *
+   * Ankstesnė versija `PROGRESS_INVARIANTS` deklaravo, o čia tas pačias sąlygas
+   * įgyvendino ANTRĄ kartą `if` sakiniais. Tai atkūrė būtent tą deklaracijos ir
+   * vykdymo nuokrypį, kurį eksportas turėjo pašalinti: pakeitus runtime patikrą
+   * į `current < -0.5`, sinchronizacijos testas vis tiek praeitų (jis ima po
+   * VIENĄ pažeidžiančią reikšmę predikatui – `-1` atmetama, `5` priimama), o
+   * `-0.3` būtų priimta, nors eksportuotas kontraktas ją draudžia.
+   *
+   * Dabar deklaracija YRA vykdymas – nuokrypis neįmanomas iš principo.
+   */
+  for (const { tikrinti, zinute } of PROGRESS_INVARIANTS) {
+    if (!tikrinti(progress)) throw new JobPhaseError(zinute, "INVALID_PROGRESS");
   }
 }
 
@@ -299,6 +368,55 @@ function finish(job, status, extra = {}) {
       "JOB_ALREADY_TERMINAL"
     );
   }
+
+  /**
+   * ⚠️ FAIL-CLOSED NEŽINOMAM ŠALTINIO STATUSUI.
+   *
+   * Ankstesnė versija atmetė TIK jau terminalius ir `queued → completed`. Tad
+   * `status: null`, `undefined` ar bet kokia neatpažinta reikšmė – pvz. iš
+   * atkurto legacy įrašo ar būsimos schemos versijos – galėjo tapti
+   * `completed`, apeidama `queued → completed` draudimą.
+   *
+   * Leidžiami TIK eksplicitiškai žinomi šaltiniai. Nežinomas statusas reiškia,
+   * kad nežinome, ar perėjimas legalus – o spėti terminalaus perėjimo atveju
+   * negalima.
+   */
+  const LEISTINI_SALTINIAI = [STATUS.QUEUED, STATUS.PROCESSING];
+  if (!LEISTINI_SALTINIAI.includes(from)) {
+    throw new JobPhaseError(
+      `finish(): nežinomas šaltinio statusas "${String(from)}". ` +
+        `Leistini: ${LEISTINI_SALTINIAI.join(", ")}.`,
+      "UNKNOWN_SOURCE_STATUS"
+    );
+  }
+
+  /**
+   * ⚠️ TIKRINAMA IR PILNA ŠALTINIO BŪSENA, ne tik `status`.
+   *
+   * Statuso allowlist viena nepakanka: įrašas su atpažintu `processing`, bet
+   * nežinomu tipu, trūkstama faze arba SVETIMO grafo faze
+   * (`type=protocol, phase=transcribing`) būdavo priimamas, ir `finish()` jį
+   * paversdavo iš pažiūros galiojančiu `completed`.
+   *
+   * `restoreService` validuoja įrašus tik pagal ID, tad nepalaikoma persistinta
+   * fazės ir tipo būsena gali pasiekti šią funkciją.
+   */
+  if (from === STATUS.PROCESSING) {
+    if (job.phase == null) {
+      throw new JobPhaseError(
+        "finish(): processing job'as be fazės – nekonsistentiška šaltinio būsena.",
+        "INVALID_STATUS_PHASE"
+      );
+    }
+    // Meta `UNKNOWN_JOB_TYPE` arba `PHASE_NOT_ALLOWED_FOR_TYPE`.
+    assertPhaseAllowedForType(job.type, job.phase);
+  } else if (job.phase != null) {
+    throw new JobPhaseError(
+      `finish(): "${from}" job'as neturi turėti fazės (rasta: ${job.phase}).`,
+      "INVALID_STATUS_PHASE"
+    );
+  }
+
   if (from === STATUS.QUEUED && status === STATUS.COMPLETED) {
     throw new JobPhaseError(
       "queued → completed neleidžiamas: nevykdytas darbas negali būti baigtas sėkmingai.",
@@ -333,8 +451,24 @@ function restart(job) {
       "JOB_ALREADY_TERMINAL"
     );
   }
-  if (status !== null && status !== STATUS.QUEUED && status !== STATUS.PROCESSING) {
-    throw new JobPhaseError(`Nežinomas statusas: ${String(status)}`, "INVALID_STATUS_PHASE");
+  /**
+   * ⚠️ FAIL-CLOSED, kaip ir `finish()`.
+   *
+   * Ankstesnė versija leido `null` (`job.status ?? null`), tad atkurtas legacy
+   * įrašas be `status` lauko TYLIAI virsdavo `processing/validating`. Tai
+   * prieštarauja dokumentuotam teiginiui, kad perpaleidimas legalus tik iš
+   * `queued` ir `processing`.
+   *
+   * Nežinomas statusas reiškia, kad nežinome, ar darbas apskritai gali būti
+   * paleistas iš naujo – spėti negalima.
+   */
+  const LEISTINI_SALTINIAI = [STATUS.QUEUED, STATUS.PROCESSING];
+  if (!LEISTINI_SALTINIAI.includes(status)) {
+    throw new JobPhaseError(
+      `restart(): nežinomas šaltinio statusas "${String(status)}". ` +
+        `Leistini: ${LEISTINI_SALTINIAI.join(", ")}.`,
+      "UNKNOWN_SOURCE_STATUS"
+    );
   }
 
   assertPhaseAllowedForType(job.type, PHASE.VALIDATING);
@@ -370,9 +504,11 @@ module.exports = {
   TERMINAL,
   JobPhaseError,
   phasesForType,
+  transitionsForType,
   assertPhaseAllowedForType,
   assertValidProgress,
   assertProgressInvariant,
+  PROGRESS_INVARIANTS,
   startPhase,
   restart,
   reportProgress,

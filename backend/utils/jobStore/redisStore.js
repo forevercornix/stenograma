@@ -278,8 +278,11 @@ function createRedisStore(redisClient) {
 
     local progress = redis.call('HGET', KEYS[1], 'progress')
     if progress ~= false and progress ~= nil and progress ~= 'null' then
-      local total = string.match(progress, '"total"%s*:%s*(%-?%d+%.?%d*)')
-      local current = string.match(progress, '"current"%s*:%s*(%-?%d+%.?%d*)')
+      -- Skaiciai gali buti ir EKSPONENTINE forma (JSON.stringify emituoja
+      -- 1e-7). Desimtainis sablonas toki perskaitytu kaip 1, ir nepakites
+      -- total atrodytu pasikeites - velesni atnaujinimai butu atmetami.
+      local total = string.match(progress, '"total"%s*:%s*(%-?[%d%.]+[eE]?[%+%-]?%d*)')
+      local current = string.match(progress, '"current"%s*:%s*(%-?[%d%.]+[eE]?[%+%-]?%d*)')
       if total ~= nil and tonumber(total) ~= tonumber(ARGV[3]) then return 0 end
       if current ~= nil and tonumber(ARGV[4]) < tonumber(current) then return 0 end
     end

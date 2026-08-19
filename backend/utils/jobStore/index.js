@@ -369,8 +369,17 @@ module.exports = {
       }
 
       /**
-       * Memory backend'as: `get` ir `update` vyksta be `await` tarp jų, tad
-       * lenktynių lango nėra ir CAS nereikalingas.
+       * ⚠️ ATSARGINIS KELIAS – naudojamas tik jei backend'as atominio metodo
+       * NETURI.
+       *
+       * Anksčiau čia buvo komentaras, teigiantis, kad memory backend'ui CAS
+       * nereikalingas, nes „`get` ir `update` vyksta be `await` tarp jų". Tai
+       * buvo neteisinga: `await store.get(id)` aukščiau ATVERIA langą, ir
+       * lygiagretūs progreso callback'ai abu nuskaito tą patį snapshot'ą
+       * (50 → vienu metu 60 ir 55 → išsaugoma 55).
+       *
+       * Abu backend'ai dabar turi `reportProgressAtomic()`, tad ši šaka
+       * praktiškai nepasiekiama – ji lieka kaip apsauga naujam backend'ui.
        */
       return store.update(id, patch);
     },
