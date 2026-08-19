@@ -950,6 +950,65 @@ interpretuotas neteisingai.
 | `queued → completed` atmetamas store lygmenyje | `jobPhaseStore` | `queued → failed` (enqueue klaida) lieka legalus |
 | **`progressKnown` per Redis išlieka boolean** | `jobStoreRedis` | Pašalinus iš `BOOLEAN_FIELDS` → `"false"` yra truthy, diarizacija rodytų procentą |
 
+### Dokumentacija (9 žingsnis)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Duomenų modelio blokas: `status` ir `phase` parsinami ATSKIRAI | `jobLifecycleDocumentation` | Sukeitus sąjungas vietomis bendra aibė nepakisdavo — testas praeidavo su neteisinga schema |
+| Draudžiamos fazės IŠVEDAMOS iš `phasesForType()` | `jobLifecycleDocumentation` | Tikrinta tik pirmoji; `diarizing`/`merging` buvo galima ištrinti iš sąrašo |
+| Įgyvendinimo lentelė: servisų keliai KONKRETŪS | `jobLifecycleDocumentation` | `backend/services/` neatitiko `.js` šablono, tad eilutės pašalinimo sargas nematė | Trūkstama fazė IR neegzistuojanti reikšmė → krinta. ⚠️ Pakeitė du testus, kurie tikrino `doc.includes()` ir niekada nekrisdavo, kai kiti praeina |
+| **KIEKVIENO tipo PERĖJIMAI atitinka `transitionsForType()` ABIEM kryptim** | `jobLifecycleDocumentation` | Lyginamos BRIAUNOS. Mutacijos: neteisinga tvarka → krinta; nauja legali briauna `GRAPHS` be dokumento → krinta |
+| Sinchroninis `generateProtocol()` kvietėjas paminėtas | `jobLifecycleDocumentation` | `routes/generate.js` kviečia servisą be job'o ir be `onPhase`; pagal senąjį aprašymą servisą būtų galima padaryti priklausomą nuo eilės ir sulaužyti `POST /api/generate` |
+| **VISOS griežtumo lentelės eilutės** lyginamos su elgesiu | `jobLifecycleDocumentation` | Anksčiau tikrinta tik `finish()` celė — `restart`/`startPhase` eilutėse buvo galima parašyti „jokios" |
+| Diarizacijos celės tikrina SEMANTIKĄ, ne raktažodžius | `jobLifecycleDocumentation` | `mode != "inline"` irgi turi „inline"; neigimas tenkindavo tą patį šabloną |
+| Nežinomi terminalūs tikslai ATMETAMI, ne išfiltruojami | `jobLifecycleDocumentation` | `.filter(TERMINAL.includes)` tyliai išmesdavo neteisėtą `queued` |
+| CAS kontraktas — struktūrinė žymė, ne teigiamas šablonas | `jobLifecycleDocumentation` | „Tai NĖRA reikalinga IR memory backend'ui" tenkindavo teigiamą regex |
+| Kvietėjo blokas reikalauja FAZIŲ frazės atskirai | `jobLifecycleDocumentation` | Alternatyva `sinchronin\|be job'o\|...` tenkinta kitų variantų |
+| Visos diarizacijos praleidimo sąlygos ATVEJŲ LENTELĖJE | `jobLifecycleDocumentation` | Trys atvejai, ne vienas. ⚠️ Sąlygos IŠVARDYTOS teste, ne parsinamos iš šaltinio — lygiavertis refactoringas (`const shouldDiarize = ...`) testo nebelaužo |
+| Įgyvendinimo lentelė PILNA, ne tik neklaidinga | `jobLifecycleDocumentation` | Autoritetinis sąrašas, keliai imami TIK iš „Kur tai įgyvendinta" skyriaus. Mutacija: eilutės pašalinimas net paminėjus tą failą kitur dokumente → krinta |
+| **UI tekstai susieti su FAZĖS RAKTU** | `jobLifecycleDocumentation` | Lyginamos poros, ne tekstų aibė. Mutacija: dviejų fazių tekstų sukeitimas → krinta |
+| **Terminalūs PERĖJIMAI lyginami POROMIS su `finish()`** | `jobLifecycleDocumentation` | Tikrinama prieš realų `finish()` elgesį. Mutacija: viso `TERMINAL-TRANSITIONS` bloko pašalinimas → krinta (anksčiau statusų žodžiai liktų duomenų modelio lentelėje) |
+| Progreso taisyklės sutampa su eksportuotu kontraktu | `jobLifecycleDocumentation` | Sąlygos imamos iš `PROGRESS_INVARIANTS`, ne šaltinio teksto. Dokumento nukrypimas → krinta |
+| **`assertValidProgress()` VYKDO eksportuotus predikatus** | `jobPhase` | Deklaracija yra vykdymas — nuokrypis neįmanomas. Mutacija: grąžinus dubliuotas `if` sąlygas su `current < -0.5` → krinta |
+| Tikrinamos RIBINĖS reikšmės, ne po vieną pavyzdį | `jobPhase` | `-0.3`, `-EPSILON`, `10.1/10`: vieno pavyzdžio predikatui nepakanka — susilpninta riba jį vis tiek atmestų |
+| **Dokumentas NEPERŽADA media-level resume** | `jobLifecycleDocumentation` | Paneigimo pašalinimas → krinta. Persistintas `1872/4420` atrodo kaip resume taškas |
+| Nurodyti įgyvendinimo failai realiai egzistuoja | `jobLifecycleDocumentation` | Pervadinus failą lentelė tyliai taptų klaidinga |
+| **UI tekstai sutampa su frontend kodu** | `jobLifecycleDocumentation` | Pakeitus formuluotę tik viename — krinta |
+
+⚠️ **Penki peržiūros raundai rado tą patį struktūrinį defektą.** `startPhase()`,
+`finish()` ir `restart()` turėjo po DALINĘ tos pačios „ar įrašas nuoseklus?" patikros
+kopiją, ir kiekvienas raundas rasdavo trūkstamą gabalą kitoje funkcijoje. Ištraukus
+`assertConsistentJobRecord()` klausimas atsakomas vienoje vietoje — tai buvo pigiau
+padaryti po pirmo raundo nei po penkto.
+
+⚠️ **Dokumentas, kuris tyliai pasensta, yra blogesnis nei jo nebuvimas** — skaitytojas juo
+pasitiki. Todėl tikrinamas SUTAPIMAS su kodu (`PHASE`, `STATUS`, `TERMINAL`,
+`phasesForType()`, `assertValidProgress()`, `frontend/src/utils.js`), ne teksto
+egzistavimas.
+
+⚠️ **Šie sargai perėjo tris versijas, ir pirmosios dvi buvo silpnesnės už savo deklaraciją.**
+
+1. Grafų patikra rėmėsi `doc.includes(faze)` — `protocol` grafe buvo galima įrašyti
+   `transcribing`, nes ta fazė teisėtai minima `transcription` skyriuje. Ištaisyta:
+   mašininiu būdu skaitomos `<!-- PHASE-GRAPH -->` žymės.
+2. Progreso sąlygos buvo rankinis keturių elementų sąrašas, nors kodas turi penkias.
+   Antroji versija parsino `assertValidProgress()` **šaltinį** regex'u — bet tai tikrino
+   SINTAKSĘ, ne kontraktą: daugiaeilis `if (` ar sąlygos iškėlimas į helperį būtų sulaužę
+   parserį nepakeitę elgesio. Ištaisyta: `jobPhase.js` eksportuoja `PROGRESS_INVARIANTS`,
+   o atskiras testas tikrina, kad deklaracija neišsiskirtų su vykdymu.
+
+3. Trečioji versija (eksportuotas kontraktas) vis tiek turėjo nuokrypį: `PROGRESS_INVARIANTS`
+   deklaravo sąlygas, o `assertValidProgress()` jas įgyvendino ANTRĄ kartą `if` sakiniais.
+   Susilpninus runtime patikrą į `current < -0.5`, sinchronizacijos testas praeidavo (jis
+   ėmė po vieną pažeidžiančią reikšmę), o `-0.3` būtų priimta. Ištaisyta: validatorius
+   VYKDO eksportuotus predikatus, plius ribinių reikšmių testai.
+
+Tai tas pats defektų tipas, kurį fiksuoja `AGENTS.md` §9.1 — testas, kuris praeina, bet
+nekristų pašalinus saugomą elgesį. Šįkart jis pasireiškė **tris kartus iš eilės**,
+kiekviename bandyme jį taisyti. Visi trys rasti peržiūros, ne testų.
+
+---
+
 ### Naršyklės fazių testas su perimtu API (8 žingsnis)
 
 | Garantija | Testai | Mutacijos įrodymas |
@@ -998,8 +1057,9 @@ testą verta sekti jau žalio testo selektorius pažodžiui, o ne pasirinkti „
 <!-- CI-EVIDENCE:step8 -->
 | | |
 |---|---|
-| Workflow run | `#367` (PR #174) |
-| Job | `e2e` — succeeded, 1 m 1 s |
+| Workflow run | [`#367`](https://github.com/forevercornix/stenograma/actions/runs/32235568074) (PR #174) |
+| `e2e` job | [job/96014632889](https://github.com/forevercornix/stenograma/actions/runs/32235568074/job/96014632889) |
+| Rezultatas | succeeded, 1 m 1 s |
 | Žingsnis | „E2E testai (mock provideriai - pilnas srautas per naršyklę)" — 24 s |
 | Chromium | „Diegti Playwright Chromium" — 22 s, sėkmingai |
 | Ataskaita | „Įkelti Playwright ataskaitą (jei nepavyko)" — praleista (nebuvo kritimo) |
