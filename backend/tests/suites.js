@@ -113,6 +113,8 @@ const security = [
   "jobPhaseTerminal",
   /** #154: fazės HTTP atsakyme – vienodas kontraktas abiejuose endpoint'uose. */
   "jobPhaseApi",
+  /** #154: dokumentacija, kuri negali išsiskirti su kodu. */
+  "jobLifecycleDocumentation",
   "criticalGuarantees.route",
   "authFoundation",
   "rbac.route",
