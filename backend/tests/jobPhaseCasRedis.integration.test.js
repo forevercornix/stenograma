@@ -391,3 +391,44 @@ test(
     }
   }
 );
+
+test(
+  "#154 CAS: EKSPONENTINĖ skaičiaus forma neatmetama klaidingai",
+  { skip: skipWithoutRedis() },
+  async () => {
+    /**
+     * `JSON.stringify(1e-7)` duoda `"1e-7"`, ne `"0.0000001"`. Dešimtainis Lua
+     * šablonas `(%-?%d+%.?%d*)` tokį perskaitytų kaip `1`, tad NEPAKITĘS
+     * `total` atrodytų pasikeitęs, ir visi vėlesni progreso įvykiai būtų
+     * atmetami kaip „kita epocha".
+     *
+     * Reikšmės mažos, bet kontraktas leidžia BET KOKĮ baigtinį skaičių
+     * (`Number.isFinite`), tad riba turi būti tikra, ne prielaida apie formatą.
+     */
+    const { client, store } = await paruosti();
+    let jobId = null;
+
+    try {
+      const job = await store.create({ type: "transcription", ownerKind: K.UNOWNED });
+      jobId = job.id;
+
+      await client.hset(`job:${job.id}`, {
+        status: "processing",
+        phase: PHASE.TRANSCRIBING,
+        progress: JSON.stringify({ current: 1e-9, total: 1e-7 }),
+        progressKnown: "true",
+      });
+
+      const outcome = await store.reportProgressAtomic(job.id, {
+        phase: PHASE.TRANSCRIBING,
+        progress: { current: 5e-8, total: 1e-7 },
+      });
+
+      assert.notEqual(outcome, "REJECTED", "nepakitęs eksponentinis total neturi atrodyti pakitęs");
+      assert.equal(outcome.progress.current, 5e-8);
+    } finally {
+      if (jobId) await isvalyti(client, jobId);
+      await client.quit();
+    }
+  }
+);

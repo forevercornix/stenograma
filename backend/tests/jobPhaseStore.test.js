@@ -282,3 +282,54 @@ test("#154 STORE: fazių metodai gerbia IŠTRYNIMO ŽYMĄ", async () => {
     await tombstones._clearForTests();
   }
 });
+
+test("#154 LENKTYNĖS: lygiagretūs progreso įvykiai IŠLAIKO monotoniškumą", async () => {
+  /**
+   * ⚠️ MEMORY BACKEND'UI CAS IRGI REIKALINGAS.
+   *
+   * Komentaras anksčiau teigė, kad čia lenktynių nėra, nes „`get` ir `update`
+   * vyksta be `await` tarp jų". Tai buvo neteisinga: fasadas daro
+   * `await store.get(id)`, ir tas `await` atveria langą. Du lygiagretūs
+   * callback'ai nuskaito TĄ PATĮ snapshot'ą:
+   *
+   *   pradžia 50 → vienu metu 60 ir 55 → išsaugoma 55
+   *
+   * Progreso kelias yra fire-and-forget (`queues/processors.js`), tad toks
+   * persidengimas vyksta natūraliai, ne teoriškai.
+   */
+  const job = await naujas();
+  await jobStore.system.restart(job.id);
+  await jobStore.system.startPhase(job.id, PHASE.TRANSCRIBING, {
+    progress: { current: 50, total: 100 },
+  });
+
+  // Naujesnis ir senesnis įvykis PALEIDŽIAMI VIENU METU.
+  await Promise.all([
+    jobStore.system.reportProgress(job.id, {
+      phase: PHASE.TRANSCRIBING,
+      progress: { current: 60, total: 100 },
+    }),
+    jobStore.system.reportProgress(job.id, {
+      phase: PHASE.TRANSCRIBING,
+      progress: { current: 55, total: 100 },
+    }),
+  ]);
+
+  const po = await jobStore.system.get(job.id);
+  assert.equal(po.progress.current, 60, "senesnis įvykis NETURI perrašyti naujesnio");
+});
+
+test("#154 LENKTYNĖS: abu backend'ai turi atominį progreso kelią", () => {
+  /**
+   * Fasadas renkasi `store.reportProgressAtomic()`, jei backend'as jį turi.
+   * Trūkstant metodo tyliai grįžtama į `read → check → write`, tad
+   * monotoniškumas lūžtų be jokio signalo.
+   */
+  const memory = require("../utils/jobStore/memoryStore");
+  const { createRedisStore } = require("../utils/jobStore/redisStore");
+
+  assert.equal(typeof memory.reportProgressAtomic, "function", "memory backend");
+
+  const redis = createRedisStore({ on: () => {}, defineCommand: () => {} });
+  assert.equal(typeof redis.reportProgressAtomic, "function", "redis backend");
+});

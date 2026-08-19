@@ -929,6 +929,7 @@ interpretuotas neteisingai.
 | Helperis grynas — neturi vidinės būsenos, nekeičia įvesties | `jobPhase` | `Object.freeze` įvestis; determinizmo patikra |
 | **Terminalaus job'o fazės pradėti negalima** | `jobPhase` | Be `status` patikros `completed + phase=null` atrodo kaip grafo pradžia — job'as „atgytų" |
 | `queued + phase` ir `processing + phase=null` atmetami | `jobPhase` | Naujas writer'is neleistino derinio kurti negali |
+| **`finish()` fail-closed'ina nežinomam šaltinio statusui** | `jobPhase` | `null`, `undefined` ar neatpažinta reikšmė (atkurtas legacy įrašas, būsima schema) tapdavo `completed`, apeidama `queued → completed` draudimą |
 | `queued → completed` NELEIDŽIAMAS (`failed`/`cancelled` — taip) | `jobPhase` | Nevykdytas darbas negali būti baigtas sėkmingai; `queued → failed` yra realus enqueue klaidos kelias |
 | **`total` stabilus fazės epochoje** | `jobPhase` | `50/100 → 60/200`: `current` auga, bet UI procentas kristų 50 % → 30 % |
 | Grafas neeksportuojamas ir giliai užšaldytas | `jobPhase` | `Object.freeze` seklus — masyvus buvo galima papildyti runtime |
@@ -992,7 +993,25 @@ ne tekstinis mazgas). Abu pakeisti tais pačiais, kuriuos naudoja žalias
 tikrina sintaksę ir discovery, bet ne tai, ar selektorius pataiko. Rašant naują Playwright
 testą verta sekti jau žalio testo selektorius pažodžiui, o ne pasirinkti „panašų".
 
-**Step 8 laikytinas įrodytu tik po žalio Playwright CI rerun'o.**
+✅ **PATVIRTINTA CI PALEIDIMU.**
+
+<!-- CI-EVIDENCE:step8 -->
+| | |
+|---|---|
+| Workflow run | `#367` (PR #174) |
+| Job | `e2e` — succeeded, 1 m 1 s |
+| Žingsnis | „E2E testai (mock provideriai - pilnas srautas per naršyklę)" — 24 s |
+| Chromium | „Diegti Playwright Chromium" — 22 s, sėkmingai |
+| Ataskaita | „Įkelti Playwright ataskaitą (jei nepavyko)" — praleista (nebuvo kritimo) |
+<!-- /CI-EVIDENCE -->
+
+Tai vienintelis įrodymas, kurio Step 8 reikalauja: naršyklės vykdymas su realiai įdiegtu
+Chromium. Ankstesnis paleidimas (#328) krito ties `setInputFiles`, tad žalias `e2e` job'as
+reiškia, kad testas praėjo režimo perjungimą, `route` perėmimą, ACK handshake ir visus
+keturis fazių perėjimus.
+
+⚠️ **Teiginys „CI praėjo" be nuorodos į konkretų paleidimą nebūtų įrodymas** (`AGENTS.md`
+§14). Ankstesnėje šio įrašo versijoje būtent taip ir buvo — Codex peržiūra tai pagavo.
 
 ---
 
@@ -1038,6 +1057,19 @@ sekundėms; tik atsietas nuo job progreso.
 | **Vidiniai laukai į atsakymą NEPATENKA** | `jobPhaseApi` | `{ ...job }` vietoj allowlist → krinta. Su spread'u kiekvienas NAUJAS įrašo laukas automatiškai taptų viešas |
 | Kiekvienas endpoint'as tikrinamas su SAVO tipo job'u ir 200 | `jobPhaseApi` | Vienas endpoint'as → 500 krinta 4. ⚠️ Ankstesnis `if (status !== 200) continue` bet kokią regresiją būtų pavertęs „praėjo" |
 | **`extra` negali perrašyti kanoninių laukų** | `jobPhaseApi` | Grąžinus `...extra` į pabaigą → krinta. Endpoint'as galėtų perduoti `{ status: "completed" }` ir pakeisti state machine rezultatą atsakyme |
+| **`progress` grąžina TIK viešus laukus** | `jobPhaseApi` | `{current, total, secret}` praeidavo nepakeistas — papildomi metaduomenys nutekėdavo pro abu endpoint'us |
+| **Atmetus progresą, `progressKnown` TAIP PAT tampa `false`** | `jobPhaseApi` | Laukai skaičiuojami KARTU; atskirai API emitavo uždraustą `true + null` derinį |
+| **VISI KETURI įėjimai naudoja `assertConsistentJobRecord()`** | `jobPhase` | `reportProgress()` buvo ketvirtas su sava patikra — progresas būdavo rašomas į sugadintą įrašą. Ten grąžinamas `null`, ne metama: fire-and-forget kelias |
+| **Terminalus perėjimas nepavyksta NIEKADA dėl šaltinio būsenos** | `jobPhase` | `finish()` kviečiamas klaidos apdorojime; mesdamas jis prarasdavo pirminę klaidą ir palikdavo job'ą `processing` amžinai. Mutacija: grąžinus šaltinio patikrą → krinta 3 |
+| Griežtumas atitinka išvesties priklausomybę nuo šaltinio | `jobPhase` | `restart()` tikrina (išvestis remiasi grafu), `finish()` — ne. Mutacija abiem kryptim → krinta |
+| **Legacy įrašas TURI kelią iš `processing`** | `jobPhase` | ⚠️ Griežtinimas įvedė regresiją: `processing + phase=null` (iš prieš #154) nebegalėjo nei baigtis, nei būti perpaleistas. Tolerancija TIK atsigavimo keliams (`finish`, `restart`), ne pažangai (`startPhase`) |
+| Tolerancija netaikoma SUGADINTIEMS įrašams | `jobPhase` | Svetimo grafo fazė ir nežinomas tipas atmetami visada. Mutacija: praplėtus toleranciją → krinta 2 |
+| **VISI trys perėjimų įėjimai naudoja `assertConsistentJobRecord()`** | `jobPhase` | `restart()` priimdavo `queued + phase` ir svetimo grafo fazę, kurias `finish()`/`startPhase()` atmesdavo. Mutacija: grąžinus dalinę patikrą → krinta |
+
+| **Netinkamas progress OBJEKTAS irgi normalizuojamas** | `jobPhaseApi` | Objektiškumo nepakanka: `{}`, `{current:2,total:1}` ir galiojantis objektas su `progressKnown=false` praeidavo. Tikrinamos tos pačios sąlygos, kurias vykdo state machine |
+| **`restart()` fail-closed'ina nežinomam statusui** | `jobPhase` | `finish()` jau buvo pataisytas, `restart()` ne — legacy įrašas be `status` tyliai virsdavo `processing/validating` |
+| **CAS priima EKSPONENTINĘ skaičiaus formą** | `jobPhaseCasRedis.integration` | `JSON.stringify(1e-7)` duoda `"1e-7"`; dešimtainis Lua šablonas skaitė kaip `1`, tad nepakitęs `total` atrodydavo pasikeitęs |
+| **Legacy skaitinis `progress` normalizuojamas į `null`** | `jobPhaseApi` | Iki #154 rašytas neapdorotas procentas praeidavo nepakeistas — klientas gaudavo `progress: 42` su `progressKnown: false`, būseną už deklaruoto tipo ribų. NEverčiamas į `{current,total}`: `total` nežinomas |
 | **Ne-boolean `progressKnown` yra KLAIDA, ne tylus vertimas** | `jobPhaseApi` | `Boolean("false") === true` — tylus konvertavimas paverstų „nežinomas" į „žinomas", ir neteisinga reikšmė atrodytų validi |
 | `REZERVUOTI` sąrašas sinchronizuotas su realiais laukais | `jobPhaseApi` | Naujas laukas be sąrašo įrašo → krinta. Rankinis sąrašas be šios patikros būtų skola |
 | `NEVIEŠI_LAUKAI` sąraše nėra pasenusių įrašų | `jobPhaseApi` | Nebeegzistuojantis laukas → krinta. Tikrinama prieš store KODĄ, ne `newJob()` formą — dalis laukų pridedama vėliau |
@@ -1110,6 +1142,28 @@ pipeline galėtų ignoruoti, bet sluoksniavimas išlieka.
 
 ---
 
+### Backend'ų kontrakto ekvivalentumas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Abu backend'ai duoda TĄ PATĮ rezultatą 7 scenarijams** | `jobStoreBackendContract.integration` | Grąžinus Redis į būseną prieš pataisymą → krinta |
+| Abu deklaruoja tą pačią metodų aibę | `jobStoreBackendContract.integration` | Metodo pašalinimas → krinta 3. Trūkstamas metodas reikštų tylų grįžimą į atsarginį kelią |
+
+⚠️ **BACKEND'AI BUVO IŠSISKYRĘ, IR TESTO NEBUVO.** `reportProgressAtomic()` sugadintam
+įrašui (`protocol` su svetimo grafo faze) memory ATMESDAVO, o Redis PRIIMDAVO —
+`memoryStore` kviečia `jobPhase.reportProgress()`, o Lua tokios patikros neturėjo.
+Fasadas tai maskavo (tikrina pirmas), bet backend'o kontraktas yra kontraktas.
+
+Pataisyta **be ketvirtos taisyklių kopijos**: `redisStore` jau skaito įrašą prieš Lua, tad
+kviečia tą pačią gryną funkciją. Konsistencija nėra lenktynėms jautri savybė — tipas
+nekinta, o fazės pasikeitimą Lua tikrina atskirai.
+
+⚠️ **#155 PRIDĖS TREČIĄ REALIZACIJĄ.** `postgresStore` privalo gauti įrašą `BACKENDAI`
+sąraše šiame teste. ADR 7.2b tai reikalauja; dabar žinoma, kad reikalavimas nėra teorinis —
+divergencija atsirado jau su dviem.
+
+---
+
 ### Atominis progreso CAS (3 žingsnis)
 
 | Garantija | Testai | Mutacijos įrodymas |
@@ -1117,6 +1171,7 @@ pipeline galėtų ignoruoti, bet sluoksniavimas išlieka.
 | **Fazės pakeitimas TARP skaitymo ir rašymo atmeta pasenusį progresą** | `jobPhaseCasRedis.integration` | Lua fazės patikros pašalinimas → krinta |
 | Monotoniškumas tikrinamas Lua viduje, ne tik JS | `jobPhaseCasRedis.integration` | Lua `current` patikros pašalinimas → krinta |
 | `total` stabilumas tikrinamas Lua viduje | `jobPhaseCasRedis.integration` | Lua `total` patikros pašalinimas → krinta |
+| **Memory backend'as TAIP PAT turi atominį progreso kelią** | `jobPhaseStore` | Fasado `await store.get()` atveria langą: 50 → vienu metu 60 ir 55 → išsaugoma 55. Komentaras anksčiau teigė, kad CAS čia nereikalingas |
 | **FASADAS naudoja atominį kelią, ne `store.update()`** | `jobPhaseCasRedis.integration` | Grąžinus `read → check → write` → krinta. Be šio testo kiti trys liktų žali, o langas atsivertų |
 | Normalus progresas praeina | `jobPhaseCasRedis.integration` | Apsauga nėra aklas blokas |
 | **Lygiagretus NESUSIJUSIO lauko pakeitimas IŠLIEKA** | `jobPhaseCasRedis.integration` | Platus `HSET` iš pasenusio snapshot'o → krinta. Kitaip progreso įvykis anuliuotų #159 `ownerId` CAS rezultatą |
@@ -1140,10 +1195,12 @@ Testai, rėmęsi „DB yra tuščias", perrašyti tikrinti tik savo įrašus; ki
 savo raktus. Patikrinta trimis paleidimais ant vis nešvaresnio DB — žr.
 `helpers/redisGuard.js`.
 
+⚠️ **CAS reikalingas ABIEM backend'ams.** Teiginys „memory backend'e lenktynių nėra, nes `get` ir `update` vyksta be `await` tarp jų" buvo neteisingas: fasadas daro `await store.get(id)`, ir tas `await` atveria langą. Progreso kelias yra fire-and-forget, tad persidengimas vyksta natūraliai. Abu backend'ai dabar turi `reportProgressAtomic()`.
+
 ⚠️ **Grynas helperis vienas NEPAKANKA.** `jobPhase.reportProgress()` sprendžia pagal
 perduotą būseną. Fasade jis paliekamas kaip greitasis kelias (atmeta akivaizdžiai
-netinkamus įvykius ir sutaupo Redis kvietimą), bet AUTORITETINGA patikra yra Lua viduje.
-Memory backend'e CAS nereikalingas: `get` ir `update` vyksta be `await` tarp jų.
+netinkamus įvykius ir sutaupo Redis kvietimą), bet AUTORITETINGA patikra yra atominiame
+backend'o metode — abiejuose, žr. įrašą apie `reportProgressAtomic()` aukščiau.
 
 ⚠️ **Klaidos ir atšaukimo keliai privalo eiti per `finish()`.** Konstruojant neapdorotus
 `jobStore` patch'us `status × phase` invariantas galiotų normaliame sraute, bet būtų

@@ -14,6 +14,7 @@ const {
   assertProgressInvariant,
   startPhase,
   reportProgress,
+  restart,
   finish,
   initialState,
 } = require("../utils/jobPhase");
@@ -108,7 +109,7 @@ test("#154 SRAUTAS: protocol job'as", () => {
 });
 
 test("#154 PERĖJIMAI: neleistinas perėjimas grafo viduje atmetamas", () => {
-  const job = { type: T, phase: PHASE.VALIDATING };
+  const job = { type: T, status: STATUS.PROCESSING, phase: PHASE.VALIDATING };
 
   // validating → diarizing (praleista transcribing)
   assert.throws(
@@ -118,7 +119,7 @@ test("#154 PERĖJIMAI: neleistinas perėjimas grafo viduje atmetamas", () => {
 
   // atgal
   assert.throws(
-    () => startPhase({ type: T, phase: PHASE.MERGING }, PHASE.TRANSCRIBING),
+    () => startPhase({ type: T, status: STATUS.PROCESSING, phase: PHASE.MERGING }, PHASE.TRANSCRIBING),
     (e) => e.code === "ILLEGAL_TRANSITION"
   );
 });
@@ -135,6 +136,7 @@ test("#154 ATOMIŠKUMAS: fazės perėjimas vienu patch'u resetina progresą", ()
    */
   const job = {
     type: T,
+    status: STATUS.PROCESSING,
     phase: PHASE.TRANSCRIBING,
     progress: { current: 4420, total: 4420 },
     progressKnown: true,
@@ -148,7 +150,7 @@ test("#154 ATOMIŠKUMAS: fazės perėjimas vienu patch'u resetina progresą", ()
 });
 
 test("#154 ATOMIŠKUMAS: fazė su žinomu progresu gauna VALIDŽIĄ pradinę būseną", () => {
-  const job = { type: T, phase: PHASE.VALIDATING };
+  const job = { type: T, status: STATUS.PROCESSING, phase: PHASE.VALIDATING };
   const patch = startPhase(job, PHASE.TRANSCRIBING, { progress: { current: 0, total: 4420 } });
 
   assert.equal(patch.progressKnown, true);
@@ -168,6 +170,84 @@ test("#154 INVARIANTAS: progressKnown=true su progress=null NELEIDŽIAMA", () =>
   assert.doesNotThrow(() =>
     assertProgressInvariant({ progressKnown: true, progress: { current: 1, total: 2 } })
   );
+});
+
+test("#154 INVARIANTAI: deklaracija ir VYKDYMAS neišsiskiria", () => {
+  /**
+   * `PROGRESS_INVARIANTS` eksportuojamas dokumentacijos sargui. Bet deklaracija
+   * be patikros tik PERKELTŲ problemą: sąrašas galėtų pasenti taip pat, kaip
+   * anksčiau pasendavo dokumentas.
+   *
+   * Todėl kiekvienam invariantui parenkama reikšmė, kuri PAŽEIDŽIA būtent jį,
+   * ir tikrinama, kad `assertValidProgress()` ją atmestų. Jei deklaracija liktų,
+   * o kodas nustotų tikrinti, testas kris.
+   */
+  const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
+
+  /** Reikšmė, pažeidžianti tik nurodytą invariantą. */
+  const pažeidimai = {
+    "Number.isFinite(current)": { current: NaN, total: 10 },
+    "Number.isFinite(total)": { current: 1, total: Infinity },
+    "total > 0": { current: 0, total: 0 },
+    "current >= 0": { current: -1, total: 10 },
+    "current <= total": { current: 11, total: 10 },
+  };
+
+  assert.equal(
+    PROGRESS_INVARIANTS.length,
+    Object.keys(pažeidimai).length,
+    "kiekvienas deklaruotas invariantas turi turėti pažeidimo pavyzdį"
+  );
+
+  for (const { raiska, tikrinti } of PROGRESS_INVARIANTS) {
+    const bloga = pažeidimai[raiska];
+    assert.ok(bloga, `nėra pažeidimo pavyzdžio invariantui "${raiska}"`);
+
+    // Deklaruotas predikatas šią reikšmę atmeta...
+    assert.equal(tikrinti(bloga), false, `predikatas "${raiska}" turėjo atmesti`);
+
+    // ...ir realus kodas taip pat.
+    assert.throws(
+      () => assertValidProgress(bloga),
+      JobPhaseError,
+      `assertValidProgress() nebetikrina "${raiska}"`
+    );
+  }
+
+  /**
+   * ⚠️ RIBINĖS REIKŠMĖS, ne tik po vieną pavyzdį.
+   *
+   * Vienos pažeidžiančios reikšmės predikatui nepakanka: pakeitus runtime
+   * patikrą į `current < -0.5`, `-1` vis tiek būtų atmesta, `5` priimta, ir
+   * testas praeitų – o `-0.3` būtų priimta, nors eksportuotas kontraktas ją
+   * draudžia.
+   *
+   * Todėl tikrinamos reikšmės, esančios TIK PER PLAUKĄ už ribos.
+   */
+  const ribiniai = [
+    { p: { current: -0.3, total: 10 }, kodel: "current tik truputį < 0" },
+    { p: { current: -Number.EPSILON, total: 10 }, kodel: "current mažiausiai < 0" },
+    { p: { current: 10.1, total: 10 }, kodel: "current tik truputį > total" },
+    { p: { current: 1, total: -0.5 }, kodel: "total tik truputį < 0" },
+  ];
+
+  for (const { p, kodel } of ribiniai) {
+    const pažeisti = PROGRESS_INVARIANTS.filter(({ tikrinti }) => !tikrinti(p));
+    assert.ok(pažeisti.length > 0, `prielaida: ${kodel} pažeidžia kontraktą`);
+
+    assert.throws(
+      () => assertValidProgress(p),
+      JobPhaseError,
+      `${kodel}: kontraktas draudžia, bet assertValidProgress() priėmė`
+    );
+  }
+
+  // Galiojanti reikšmė tenkina VISUS deklaruotus invariantus.
+  const gera = { current: 5, total: 10 };
+  for (const { raiska, tikrinti } of PROGRESS_INVARIANTS) {
+    assert.equal(tikrinti(gera), true, `galiojanti reikšmė pažeidžia "${raiska}"`);
+  }
+  assert.doesNotThrow(() => assertValidProgress(gera));
 });
 
 test("#154 PROGRESAS: validacija – baigtiniai, total>0, 0<=current<=total", () => {
@@ -297,7 +377,8 @@ test("#154 TERMINALŪS: iš KIEKVIENOS fazės į kiekvieną terminalų statusą"
 });
 
 test("#154 TERMINALŪS: papildomi laukai išsaugomi, bet invarianto nepakeičia", () => {
-  const patch = finish({ type: T, phase: PHASE.TRANSCRIBING }, STATUS.FAILED, {
+  // `status` PRIVALOMAS: `finish()` fail-closed'ina nežinomam šaltiniui.
+  const patch = finish({ type: T, status: STATUS.PROCESSING, phase: PHASE.TRANSCRIBING }, STATUS.FAILED, {
     error: "kažkas nepavyko",
     error_code: "internal_error",
   });
@@ -308,7 +389,7 @@ test("#154 TERMINALŪS: papildomi laukai išsaugomi, bet invarianto nepakeičia"
 
 test("#154 TERMINALŪS: ne-terminalus statusas atmetamas", () => {
   assert.throws(
-    () => finish({ type: T, phase: PHASE.TRANSCRIBING }, STATUS.PROCESSING),
+    () => finish({ type: T, status: STATUS.PROCESSING, phase: PHASE.TRANSCRIBING }, STATUS.PROCESSING),
     (e) => e.code === "NOT_TERMINAL"
   );
 });
@@ -476,4 +557,181 @@ test("#154 GRAFAS: neeksportuojamas ir nemodifikuojamas iš išorės", () => {
   const a = phasesForType(T);
   a.push("isgalvota");
   assert.equal(phasesForType(T).includes("isgalvota"), false, "grąžinamas masyvas nekeičia grafo");
+});
+
+test("#154 TERMINALŪS: nežinomas šaltinio statusas atmetamas (fail-closed)", () => {
+  /**
+   * Atkurtas legacy įrašas arba būsimos schemos versija gali turėti `status`,
+   * kurio šis kodas neatpažįsta. Ankstesnė versija tikrino tik jau terminalius
+   * ir `queued → completed`, tad `null` ar nežinoma reikšmė TAPDAVO
+   * `completed`, apeidama draudimą.
+   *
+   * Spėti terminalaus perėjimo atveju negalima: nežinomas statusas reiškia,
+   * kad nežinome, ar perėjimas legalus.
+   */
+  for (const nezinomas of [null, undefined, "isgalvotas", "", 0]) {
+    for (const status of TERMINAL) {
+      assert.throws(
+        () => finish({ type: T, status: nezinomas }, status),
+        (e) => e.code === "UNKNOWN_SOURCE_STATUS",
+        `${JSON.stringify(nezinomas)} → ${status} turi būti atmestas`
+      );
+    }
+  }
+
+  // Žinomi šaltiniai su KONSISTENTIŠKA būsena veikia.
+  assert.doesNotThrow(() =>
+    finish({ type: T, status: STATUS.PROCESSING, phase: PHASE.VALIDATING }, STATUS.COMPLETED)
+  );
+  assert.doesNotThrow(() => finish({ type: T, status: STATUS.QUEUED, phase: null }, STATUS.FAILED));
+});
+
+test("#154 RESTART: nežinomas šaltinio statusas atmetamas (fail-closed)", () => {
+  /**
+   * `finish()` jau fail-closed'ino, bet `restart()` ne: `job.status ?? null`
+   * paversdavo trūkstamą lauką `null` ir LEISDAVO operaciją. Atkurtas legacy
+   * įrašas be `status` tyliai virsdavo `processing/validating`, nors
+   * dokumentas teigia, kad perpaleidimas legalus tik iš `queued` ir
+   * `processing`.
+   */
+  const { restart } = require("../utils/jobPhase");
+
+  for (const nezinomas of [null, undefined, "isgalvotas", "", 0]) {
+    assert.throws(
+      () => restart({ type: T, status: nezinomas }),
+      (e) => e.code === "UNKNOWN_SOURCE_STATUS",
+      `${JSON.stringify(nezinomas)} turi būti atmestas`
+    );
+  }
+
+  assert.doesNotThrow(() => restart({ type: T, status: STATUS.QUEUED }));
+  assert.doesNotThrow(() => restart({ type: T, status: STATUS.PROCESSING, phase: PHASE.MERGING }));
+});
+
+test("#154 GRIEŽTUMAS priklauso nuo to, ar išvestis remiasi šaltiniu", () => {
+  /**
+   * ⚠️ NE STILIAUS PASIRINKIMAS, o iš funkcijų prigimties išplaukiantis skirtumas.
+   *
+   *   `startPhase()` – išvestis PRIKLAUSO nuo šaltinio (grafo briauna);
+   *   `restart()`    – išvestis remiasi TIPO grafu;
+   *   `finish()`     – išvestis vienoda BET KOKIAM šaltiniui.
+   *
+   * Todėl `finish()` šaltinio validacija neturi apsauginės vertės — ji negali
+   * sukurti nekonsistentiškos būsenos. Ji tik kurtų gedimo režimus.
+   */
+  const sugadinti = [
+    [{ type: P, status: STATUS.PROCESSING, phase: PHASE.TRANSCRIBING }, "svetimo grafo fazė"],
+    [{ type: "isgalvotas", status: STATUS.PROCESSING, phase: PHASE.VALIDATING }, "nežinomas tipas"],
+    [{ type: T, status: STATUS.PROCESSING, phase: null }, "legacy be fazės"],
+    [{ type: T, status: STATUS.QUEUED, phase: PHASE.VALIDATING }, "queued su faze"],
+  ];
+
+  for (const [job, kodel] of sugadinti) {
+    // `finish()` – VISADA praeina: iš bet kokios būsenos turi būti išėjimas.
+    for (const status of TERMINAL) {
+      if (job.status === STATUS.QUEUED && status === STATUS.COMPLETED) continue;
+      assert.doesNotThrow(() => finish(job, status), `${kodel} → ${status}`);
+    }
+
+    // `restart()` ir `startPhase()` – atmeta: jų išvestis remiasi šaltiniu.
+    assert.throws(() => restart(job), JobPhaseError, `${kodel}: restart`);
+    assert.throws(
+      () => startPhase(job, PHASE.TRANSCRIBING),
+      JobPhaseError,
+      `${kodel}: startPhase`
+    );
+  }
+});
+
+test("#154 TERMINALUS PERĖJIMAS negali nepavykti dėl būsenos, iš kurios išeina", () => {
+  /**
+   * ⚠️ REALUS DEFEKTAS, RASTAS TREČIOJE PERŽIŪROJE.
+   *
+   * `finish()` kviečiamas KLAIDOS APDOROJIME (`jobRunner.js:291`). Kai jis
+   * mesdavo sugadintam įrašui:
+   *
+   *   1. pirminė providerio klaida DINGDAVO;
+   *   2. `PHASE_NOT_ALLOWED_FOR_TYPE` iškrisdavo iš `_runInline`;
+   *   3. job'as likdavo `processing` AMŽINAI.
+   *
+   * Rezultatas blogesnis nei būsena, nuo kurios sargas saugojo.
+   */
+  const sugadinti = [
+    { type: P, status: STATUS.PROCESSING, phase: PHASE.TRANSCRIBING },
+    { type: "isgalvotas", status: STATUS.PROCESSING, phase: PHASE.VALIDATING },
+    { type: T, status: STATUS.PROCESSING, phase: null },
+    { type: undefined, status: STATUS.PROCESSING, phase: "bet kas" },
+  ];
+
+  for (const job of sugadinti) {
+    const patch = finish(job, STATUS.FAILED, { error_code: "x" });
+
+    // Išvestis VISADA švari, nepriklausomai nuo to, kas buvo įraše.
+    assert.equal(patch.status, STATUS.FAILED);
+    assert.equal(patch.phase, null);
+    assert.equal(patch.progress, null);
+    assert.equal(patch.progressKnown, false);
+  }
+
+  // Bet jau terminalus job'as vis tiek atmetamas – tai idempotencijos klausimas.
+  assert.throws(
+    () => finish({ type: T, status: STATUS.COMPLETED, phase: null }, STATUS.FAILED),
+    (e) => e.code === "JOB_ALREADY_TERMINAL"
+  );
+});
+
+test("#154 PROGRESAS: nekonsistentiškas įrašas progreso NEGAUNA", () => {
+  /**
+   * `reportProgress()` buvo ketvirtas įėjimas su sava daline patikra, tad
+   * progresas būdavo rašomas ir į sugadintą įrašą — blogos būsenos
+   * įtvirtinimas.
+   *
+   * Skirtingai nei kiti trys, čia grąžinamas `null`, ne metama klaida:
+   * progreso kelias yra fire-and-forget.
+   */
+  const blogi = [
+    { type: P, status: STATUS.PROCESSING, phase: PHASE.TRANSCRIBING },
+    { type: "isgalvotas", status: STATUS.PROCESSING, phase: PHASE.VALIDATING },
+  ];
+
+  for (const job of blogi) {
+    const r = reportProgress(
+      { ...job, progress: null, progressKnown: false },
+      { phase: job.phase, progress: { current: 5, total: 10 } }
+    );
+    assert.equal(r, null, `${job.type}/${job.phase}: progresas neturi būti rašomas`);
+  }
+
+  // Tvarkingas įrašas progresą gauna.
+  assert.ok(
+    reportProgress(
+      { type: T, status: STATUS.PROCESSING, phase: PHASE.TRANSCRIBING, progress: null, progressKnown: false },
+      { phase: PHASE.TRANSCRIBING, progress: { current: 5, total: 10 } }
+    )
+  );
+});
+
+test("#154 LEGACY: užstrigęs įrašas TURI kelią iš processing", () => {
+  /**
+   * `processing + phase=null` (iš prieš #154) yra realybė atkurtose kopijose.
+   *
+   * ⚠️ Griežtinant buvo įvesta regresija: toks įrašas negalėjo nei baigtis, nei
+   * būti perpaleistas — užstrigdavo VISAM LAIKUI. Griežtumas turi neleisti
+   * KURTI blogos būsenos, ne uždaryti kelio iš jos.
+   *
+   * Kelias yra `finish()`: jo išvestis nepriklauso nuo šaltinio. `restart()`
+   * tokio įrašo nepriima, nes jo išvestis remiasi grafu, o dabartinė fazė
+   * nežinoma — atstatymas nuo nežinomo taško neapibrėžtas.
+   */
+  const legacy = { type: T, status: STATUS.PROCESSING, phase: null };
+
+  for (const status of TERMINAL) {
+    assert.doesNotThrow(() => finish(legacy, status), `legacy → ${status}`);
+  }
+
+  assert.throws(
+    () => restart(legacy),
+    (e) => e.code === "INVALID_STATUS_PHASE",
+    "restart reikalauja žinomos dabartinės fazės – kelias yra finish()"
+  );
 });

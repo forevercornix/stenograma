@@ -31,6 +31,8 @@ const redis = [
    * atsiranda tik tarp Redis `get()` ir `eval()`.
    */
   "ownershipCasRedis.integration",
+  /** Backend'ų kontrakto ekvivalentumas – #155 pridės trečią realizaciją. */
+  "jobStoreBackendContract.integration",
   /** #154: atominis progreso CAS – TOCTOU lango uždarymas. */
   "jobPhaseCasRedis.integration",
   /**

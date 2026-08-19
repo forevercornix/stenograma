@@ -220,7 +220,8 @@ test("#154 SERIALIZATORIUS: ne-boolean progressKnown yra KLAIDA, ne tylus vertim
 
   for (const bloga of ["false", "true", 0, 1, "", "yes"]) {
     assert.throws(
-      () => serializeJob({ ...bazė, progressKnown: bloga }),
+      // `progress` nėra – tikrinama TIK `progressKnown` tipo patikra.
+      () => serializeJob({ ...bazė, progressKnown: bloga, progress: null }),
       (e) => e instanceof TypeError && /BOOLEAN_FIELDS/.test(e.message),
       `${JSON.stringify(bloga)} turi būti atmesta`
     );
@@ -229,7 +230,16 @@ test("#154 SERIALIZATORIUS: ne-boolean progressKnown yra KLAIDA, ne tylus vertim
   // `undefined`/`null` – legacy įrašai, jiems `false` teisinga.
   assert.equal(serializeJob({ ...bazė }).progressKnown, false);
   assert.equal(serializeJob({ ...bazė, progressKnown: null }).progressKnown, false);
-  assert.equal(serializeJob({ ...bazė, progressKnown: true }).progressKnown, true);
+  /**
+   * ⚠️ `progressKnown: true` BE galiojančio `progress` duoda `false` – laukai
+   * skaičiuojami kartu, tad uždraustas `true + null` derinys API nepasiekia.
+   */
+  assert.equal(serializeJob({ ...bazė, progressKnown: true }).progressKnown, false);
+  assert.equal(
+    serializeJob({ ...bazė, progressKnown: true, progress: { current: 1, total: 2 } })
+      .progressKnown,
+    true
+  );
 });
 
 test("#154 SERIALIZATORIUS: REZERVUOTI sąrašas SUTAMPA su realiais laukais", () => {
@@ -300,4 +310,119 @@ test("#154 SERIALIZATORIUS: NEVIEŠI_LAUKAI realiai egzistuoja job įraše", () 
     [],
     `NEVIEŠI_LAUKAI mini laukus, kurių jobStore kode nebėra: ${pasenę.join(", ")}`
   );
+});
+
+test("#154 LEGACY: skaitinis progress normalizuojamas į null, ne perduodamas", async () => {
+  /**
+   * Iki #154 `queues/processors.js` rašė `progress: percent` – neapdorotą
+   * skaičių. Toks job'as, atkurtas iš Redis ar atsarginės kopijos, per
+   * serializatorių praeidavo NEPAKEISTAS: klientas gaudavo `progress: 42` su
+   * `progressKnown: false` – būseną, kurios nėra nei deklaruotame tipe
+   * (`{current,total} | null`), nei `progressKnown=false → progress=null`
+   * invariante.
+   *
+   * Skaičius NEVERČIAMAS į `{current, total}`: `total` nežinomas, o spėti
+   * reikštų išgalvoti duomenis.
+   */
+  const { serializeJob } = require("../utils/jobResponse");
+
+  for (const legacy of [42, 0, 100, "42", [1, 2]]) {
+    const res = serializeJob({ id: "x", status: STATUS.PROCESSING, progress: legacy });
+
+    assert.equal(
+      res.progress,
+      null,
+      `legacy progress ${JSON.stringify(legacy)} turi tapti null`
+    );
+    assert.equal(res.progressKnown, false, "invariantas: false → progress=null");
+  }
+
+  // Teisinga forma perduodama nepakeista.
+  const geras = serializeJob({
+    id: "x",
+    status: STATUS.PROCESSING,
+    progress: { current: 5, total: 10 },
+    progressKnown: true,
+  });
+  assert.deepEqual(geras.progress, { current: 5, total: 10 });
+});
+
+test("#154 API: netinkamas progress OBJEKTAS irgi normalizuojamas į null", async () => {
+  /**
+   * ⚠️ OBJEKTIŠKUMO NEPAKANKA.
+   *
+   * Ankstesnė versija priimdavo bet kokį ne-masyvą, tad pro API praeidavo `{}`,
+   * `{current: 2, total: 1}` ir net galiojantis objektas su
+   * `progressKnown: false` – pastarasis tiesiogiai pažeidžia deklaruotą
+   * `false → null` invariantą.
+   *
+   * Tikrinamos tos pačios sąlygos, kurias vykdo state machine.
+   */
+  const { serializeJob } = require("../utils/jobResponse");
+
+  const blogi = [
+    [{}, true, "tuščias objektas"],
+    [{ current: 2 }, true, "trūksta total"],
+    [{ current: 2, total: 1 }, true, "current > total"],
+    [{ current: -1, total: 10 }, true, "neigiamas current"],
+    [{ current: 1, total: 0 }, true, "total = 0"],
+    [{ current: 5, total: 10 }, false, "galiojantis, bet progressKnown=false"],
+  ];
+
+  for (const [progress, progressKnown, kodel] of blogi) {
+    const res = serializeJob({ id: "x", status: STATUS.PROCESSING, progress, progressKnown });
+    assert.equal(res.progress, null, `${kodel}: turi tapti null`);
+  }
+
+  // Galiojantis objektas su `progressKnown: true` perduodamas.
+  const geras = serializeJob({
+    id: "x",
+    status: STATUS.PROCESSING,
+    progress: { current: 5, total: 10 },
+    progressKnown: true,
+  });
+  assert.deepEqual(geras.progress, { current: 5, total: 10 });
+});
+
+test("#154 API: progress grąžina TIK viešus laukus", async () => {
+  /**
+   * Atkurtas ar būsimos schemos įrašas gali turėti papildomų metaduomenų.
+   * Anksčiau objektas būdavo perduodamas NEPAKEISTAS, tad pro abu job
+   * endpoint'us nutekėtų viskas, ką kas nors kada nors į jį įdėjo.
+   */
+  const { serializeJob } = require("../utils/jobResponse");
+
+  const res = serializeJob({
+    id: "x",
+    status: STATUS.PROCESSING,
+    progressKnown: true,
+    progress: { current: 1, total: 2, secret: "NETURI NUTEKĖTI", internalOffset: 99 },
+  });
+
+  assert.deepEqual(Object.keys(res.progress).sort(), ["current", "total"]);
+  assert.equal("secret" in res.progress, false);
+  assert.equal(JSON.stringify(res).includes("NETURI NUTEKĖTI"), false);
+});
+
+test("#154 API: atmetus progresą, progressKnown TAIP PAT tampa false", async () => {
+  /**
+   * ⚠️ Laukai turi būti skaičiuojami KARTU.
+   *
+   * Kai `progressKnown: true`, o `progress` netinkamas, normalizavimas
+   * grąžindavo `null`, bet gretimas laukas likdavo `true` — API emitavo BŪTENT
+   * tą uždraustą `true + null` derinį, nuo kurio saugo invariantas.
+   */
+  const { serializeJob } = require("../utils/jobResponse");
+
+  for (const blogas of [{ current: 2, total: 1 }, {}, { current: -1, total: 5 }, 42]) {
+    const res = serializeJob({
+      id: "x",
+      status: STATUS.PROCESSING,
+      progressKnown: true,
+      progress: blogas,
+    });
+
+    assert.equal(res.progress, null, `${JSON.stringify(blogas)}: progress`);
+    assert.equal(res.progressKnown, false, `${JSON.stringify(blogas)}: progressKnown`);
+  }
 });
