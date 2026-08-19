@@ -325,7 +325,7 @@ function startPhase(job, nextPhase, options = {}) {
    * Įrašo konsistencija – bendra patikra (žr. `assertConsistentJobRecord`).
    * Anksčiau čia buvo dalinė jos kopija.
    */
-  const status = assertConsistentJobRecord(job, {
+  assertConsistentJobRecord(job, {
     leistiniStatusai: [STATUS.QUEUED, STATUS.PROCESSING],
   });
 
