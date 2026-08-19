@@ -31,9 +31,90 @@ const { STATUS } = require("./jobStore/common");
 function phaseFields(job) {
   return {
     phase: job.phase ?? null,
-    progress: job.progress ?? null,
-    progressKnown: normalizeProgressKnown(job.progressKnown),
+    // `progress` ir `progressKnown` – iš vienos vietos, žr. `progressFields()`.
+    ...progressFields(job),
   };
+}
+
+/**
+ * `progress` API riboje PRIVALO būti `{current, total}` arba `null`.
+ *
+ * ⚠️ LEGACY ĮRAŠAI NEŠA SKAIČIŲ. Iki #154 `queues/processors.js` rašė
+ * `progress: percent` – neapdorotą procentą. Toks job'as, atkurtas iš Redis ar
+ * atsarginės kopijos, per serializatorių praeidavo NEPAKEISTAS, ir klientas
+ * gaudavo `progress: 42` su `progressKnown: false` – būseną, kurios nėra nei
+ * deklaruotame tipe, nei `progressKnown=false → progress=null` invariante.
+ *
+ * Skaičius NEVERČIAMAS į `{current, total}`: nežinome, koks buvo `total`, o
+ * spėti reikštų išgalvoti duomenis. Legacy reikšmė normalizuojama į `null` –
+ * tai teisingas atsakymas „progreso nežinome".
+ *
+ * ⚠️ Skirtingai nei `progressKnown`, čia NE fail-fast: legacy įrašas yra
+ * laukiama realybė, ne programavimo klaida. Jis natūraliai išnyksta per TTL.
+ */
+/**
+ * `progress` ir `progressKnown` skaičiuojami KARTU.
+ *
+ * ⚠️ Atskirai jie gali išsiskirti. Jei `progressKnown: true`, o `progress`
+ * netinkamas (`{current: 2, total: 1}`), normalizavimas grąžindavo `null`, bet
+ * gretimas laukas likdavo `true` – t. y. API emitavo BŪTENT tą uždraustą
+ * `true + null` derinį, nuo kurio saugo invariantas.
+ *
+ * Vienas laukas negali būti teisingas be kito, tad ir skaičiuojami vienoje
+ * vietoje.
+ */
+function progressFields(job) {
+  const known = normalizeProgressKnown(job.progressKnown);
+  const progress = normalizeProgress(job.progress, known);
+
+  return {
+    progress,
+    // Atmetus progresą, „žinomas" nebegalioja.
+    progressKnown: progress === null ? false : known,
+  };
+}
+
+function normalizeProgress(reiksme, progressKnown) {
+  if (reiksme == null) return null;
+
+  /**
+   * ⚠️ OBJEKTIŠKUMO NEPAKANKA.
+   *
+   * Ankstesnė versija priimdavo bet kokį ne-masyvą, tad pro API praeidavo
+   * `{}`, `{current: 2, total: 1}` ir net galiojantis objektas su
+   * `progressKnown: false` – pastarasis tiesiogiai pažeidžia deklaruotą
+   * `false → null` invariantą.
+   *
+   * Tikrinamos TOS PAČIOS sąlygos, kurias vykdo state machine
+   * (`PROGRESS_INVARIANTS`), tad API riba ir domenas negali išsiskirti.
+   */
+  const { PROGRESS_INVARIANTS } = require("./jobPhase");
+
+  const galioja =
+    typeof reiksme === "object" &&
+    !Array.isArray(reiksme) &&
+    PROGRESS_INVARIANTS.every(({ tikrinti }) => tikrinti(reiksme));
+
+  if (!galioja) return null;
+
+  /**
+   * `progressKnown=false` reiškia „progresas nežinomas", tad rodyti reikšmę
+   * būtų prieštaringa net jei ji pati galiojanti.
+   */
+  if (progressKnown !== true) return null;
+
+  /**
+   * ⚠️ GRĄŽINAMI TIK VIEŠI LAUKAI.
+   *
+   * Atkurtas ar būsimos schemos įrašas gali turėti papildomų metaduomenų
+   * (`{current, total, secret}`), ir anksčiau objektas būdavo perduodamas
+   * NEPAKEISTAS – tad pro abu job endpoint'us nutekėtų viskas, ką kas nors
+   * kada nors į jį įdėjo.
+   *
+   * Tai ta pati allowlist taisyklė kaip `serializeJob()`: naujas laukas
+   * viešu netampa savaime.
+   */
+  return { current: reiksme.current, total: reiksme.total };
 }
 
 /**

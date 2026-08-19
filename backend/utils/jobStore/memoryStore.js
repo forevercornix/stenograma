@@ -25,6 +25,44 @@ async function get(id) {
   return jobs.get(id) || null;
 }
 
+/**
+ * ATOMINIS progreso įrašymas (#154).
+ *
+ * ⚠️ REIKALINGAS IR MEMORY BACKEND'E.
+ *
+ * Ankstesnis komentaras teigė, kad CAS čia nereikalingas, nes „`get` ir
+ * `update` vyksta be `await` tarp jų". Tai buvo neteisinga: fasado
+ * `reportProgress()` daro `await store.get(id)`, ir tas `await` atveria langą.
+ * Lygiagretūs progreso callback'ai abu nuskaito tą patį snapshot'ą:
+ *
+ *   pradžia 50, vienu metu pranešama 60 ir 55 → išsaugoma 55
+ *
+ * t. y. dokumentuotas monotoniškumas lūžta. Fire-and-forget progreso kelias
+ * (`queues/processors.js`) tokį persidengimą sukuria natūraliai.
+ *
+ * Ši funkcija skaito, tikrina ir rašo BE `await` – JS vienos gijos modelyje tai
+ * atominė operacija.
+ *
+ * @returns {object|null|"REJECTED"}
+ */
+function reportProgressAtomicSync(id, event, jobPhase) {
+  const job = jobs.get(id);
+  if (!job) return null;
+
+  const patch = jobPhase.reportProgress(job, event);
+  if (!patch) return "REJECTED";
+
+  const next = applyPatch(job, patch);
+  jobs.set(id, next);
+  return next;
+}
+
+async function reportProgressAtomic(id, event) {
+  // `jobPhase` importuojamas čia, kad nebūtų ciklinės priklausomybės.
+  const jobPhase = require("../jobPhase");
+  return reportProgressAtomicSync(id, event, jobPhase);
+}
+
 async function update(id, patch) {
   const job = jobs.get(id);
   if (!job) return null;
@@ -149,4 +187,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, getOwned, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, getOwned, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

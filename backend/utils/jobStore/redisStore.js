@@ -1,3 +1,4 @@
+const jobPhase = require("../jobPhase");
 const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner } = require("./common");
 
 /**
@@ -272,16 +273,37 @@ function createRedisStore(redisClient) {
     local status = redis.call('HGET', KEYS[1], 'status')
     if status ~= ARGV[1] then return 0 end
 
+    -- TIPAS irgi turi nepakisti tarp get() ir eval().
+    --
+    -- JS pusej tipas patikrinamas grynaja funkcija, bet jei irasas tuo metu
+    -- pakeiciamas (restoreRecord perraso hash'a), Lua to nepastebedavo - CAS
+    -- lygino tik statusa, faze ir progresa. Rezultatai issiskirdavo.
+    local jobType = redis.call('HGET', KEYS[1], 'type')
+    if jobType ~= ARGV[8] then return 0 end
+
     local phase = redis.call('HGET', KEYS[1], 'phase')
     if phase == false or phase == nil then phase = '' end
     if phase ~= ARGV[2] then return 0 end
 
     local progress = redis.call('HGET', KEYS[1], 'progress')
     if progress ~= false and progress ~= nil and progress ~= 'null' then
-      local total = string.match(progress, '"total"%s*:%s*(%-?%d+%.?%d*)')
-      local current = string.match(progress, '"current"%s*:%s*(%-?%d+%.?%d*)')
-      if total ~= nil and tonumber(total) ~= tonumber(ARGV[3]) then return 0 end
-      if current ~= nil and tonumber(ARGV[4]) < tonumber(current) then return 0 end
+      -- DEKODUOJAMAS JSON, ne ieskoma teksto sablonu.
+      --
+      -- Sablonine paieska rasdavo pirma '"total"' bet kur eiluteje - iskaitant
+      -- IDETUS objektus. Irasas {metadata:{total:20},current:5,total:10} Redis
+      -- pusej duodavo 20, o memory pusej 10, ir backend'ai issiskirdavo.
+      -- Tas pats sablonas nepataikydavo ir i eksponentine forma.
+      local ok, p = pcall(cjson.decode, progress)
+      if ok and type(p) == 'table' then
+        -- TIPO GRIEZTUMAS: lyginami tik JSON SKAICIAI.
+        --
+        -- tonumber() konvertuoja ir eilutes, tad {current:"8",total:"10"}
+        -- Redis pusej buvo atmetamas, o memory pusej priimamas: ten
+        -- Number.isFinite("8") yra false, ir gryna funkcija tokio progreso
+        -- nelaiko galiojanciu. Backend'ai issiskirdavo.
+        if type(p.total) == 'number' and p.total ~= tonumber(ARGV[3]) then return 0 end
+        if type(p.current) == 'number' and tonumber(ARGV[4]) < p.current then return 0 end
+      end
     end
 
     redis.call('HSET', KEYS[1],
@@ -300,6 +322,27 @@ function createRedisStore(redisClient) {
   async function reportProgressAtomic(id, event) {
     const existing = await get(id);
     if (!existing) return null;
+
+    /**
+     * ĮRAŠO KONSISTENCIJA – ta pati gryna funkcija kaip memory backend'e.
+     *
+     * ⚠️ BACKEND'AI BUVO IŠSISKYRĘ. `memoryStore.reportProgressAtomic()` kviečia
+     * `jobPhase.reportProgress()`, kuris tikrina įrašo konsistenciją; Lua tokios
+     * patikros neturėjo. Sugadintam įrašui (`protocol` su `phase=transcribing`)
+     * memory ATMESDAVO, o Redis PRIIMDAVO – progresas būdavo rašomas į įrašą,
+     * kurio būsena neteisėta.
+     *
+     * Šiandien fasadas tai maskuoja (jis tikrina pirmas), bet backend'o
+     * kontraktas yra kontraktas – #155 pridės TREČIĄ realizaciją.
+     *
+     * ⚠️ NEDUBLIUOJAMA Į LUA. Taisyklės liktų ketvirta kopija (predikatai,
+     * `assertValidProgress`, `normalizeProgress`, SQL). Konsistencija nėra
+     * lenktynėms jautri savybė – tipas nekinta, o fazės pasikeitimą Lua
+     * patikrina atskirai. Todėl sprendimas priimamas čia, o Lua lieka tik
+     * lenktynėms jautrios patikros.
+     */
+    const sprendimas = jobPhase.reportProgress(existing, event);
+    if (!sprendimas) return "REJECTED";
 
     const now = Date.now();
 
@@ -320,7 +363,9 @@ function createRedisStore(redisClient) {
       String(event.progress.current),
       flat.progress,
       flat.progressKnown,
-      flat.updatedAt
+      flat.updatedAt,
+      // ARGV[8] – tipas, kurio pagrindu JS pusėje priimtas sprendimas.
+      existing.type == null ? "" : String(existing.type)
     );
 
     if (Number(outcome) === -1) return null;

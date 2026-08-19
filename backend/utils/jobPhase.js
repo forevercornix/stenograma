@@ -53,10 +53,132 @@ const GRAPHS = Object.freeze({
   }),
 });
 
+/**
+ * Legalūs perėjimai kaip BRIAUNŲ sąrašas.
+ *
+ * `[from, to]`, kur `from === null` reiškia grafo pradžią.
+ *
+ * KODĖL ATSKIRAS NUO `phasesForType()`. Fazių AIBĖ nepasako, kokia tvarka jos
+ * leidžiamos: `validating → diarizing → transcribing → merging` turi tas pačias
+ * fazes kaip teisingas kelias, bet state machine jį atmeta. Dokumentacijos
+ * sargas, lyginantis tik aibes, tokio nukrypimo nepastebėtų.
+ *
+ * Grąžinamas naujas masyvas – grafas lieka nepasiekiamas iš išorės.
+ */
+function transitionsForType(type) {
+  const graph = GRAPHS[type];
+  if (!graph) return [];
+
+  const briaunos = [];
+  for (const [from, toList] of Object.entries(graph)) {
+    for (const to of toList) briaunos.push([from === "null" ? null : from, to]);
+  }
+  return briaunos;
+}
+
 /** Kurios fazės apskritai egzistuoja duotam tipui. */
 function phasesForType(type) {
   const graph = GRAPHS[type];
   return graph ? Object.keys(graph).filter((k) => k !== "null") : [];
+}
+
+/**
+ * ĮRAŠO KONSISTENCIJOS PATIKRA – vienas šaltinis visiems įėjimams.
+ *
+ * ⚠️ KODĖL BENDRA FUNKCIJA. Anksčiau `startPhase()`, `finish()` ir `restart()`
+ * turėjo po dalinę tos pačios patikros kopiją, ir kiekviena peržiūra rasdavo
+ * trūkstamą gabalą KITOJE funkcijoje:
+ *
+ *   `finish()`   – nežinomas statusas, tada `(type, phase)`, tada tipas `queued` šakoje;
+ *   `restart()`  – nežinomas statusas;
+ *   `startPhase()` – `status × phase` derinys.
+ *
+ * Rezultatas: `restart()` priimdavo įrašus, kuriuos abu kiti atmesdavo –
+ * `queued + phase=transcribing` ir `protocol + phase=transcribing`. Atkurtas
+ * įrašas su svetimo grafo faze per perpaleidimą tapdavo „švarus".
+ *
+ * Klausimas yra vienas: **ar šis įrašas nuoseklus?** Todėl ir atsakymas vienas.
+ *
+ * ⚠️ GRIEŽTUMAS PRIKLAUSO NUO TO, AR IŠVESTIS PRIKLAUSO NUO ŠALTINIO.
+ *
+ * Tai ne stiliaus pasirinkimas, o iš funkcijų prigimties išplaukiantis skirtumas:
+ *
+ *   `startPhase()`  – išvestis PRIKLAUSO nuo šaltinio (grafo briauna nuo
+ *                     dabartinės fazės), tad šaltinis privalo būti galiojantis;
+ *   `restart()`     – išvestis visada `processing/validating`, priklauso tik
+ *                     nuo TIPO (fazė turi egzistuoti jo grafe);
+ *   `finish()`      – išvestis visada `{status, phase:null, progress:null}`,
+ *                     NEPRIKLAUSO nuo šaltinio VISAI.
+ *
+ * Todėl `finish()` šaltinio validacija neturi apsauginės vertės – ji negali
+ * sukurti nekonsistentiškos būsenos, kad ir kas būtų įraše. Ji tik kuria
+ * gedimo režimus.
+ *
+ * ⚠️ TAI IŠTAISO REALŲ DEFEKTĄ. `finish()` kviečiamas KLAIDOS APDOROJIME
+ * (`jobRunner.js:291`). Sugadintam įrašui jis mesdavo, pirminė providerio
+ * klaida dingdavo, o job'as likdavo `processing` AMŽINAI – blogiau nei būsena,
+ * nuo kurios sargas saugojo.
+ *
+ * Principas: **terminalus perėjimas negali nepavykti dėl būsenos, iš kurios
+ * bando išeiti.** Kitaip nebelieka kelio iš jokios sugadintos būsenos.
+ *
+ * ⚠️ LEGACY ĮRAŠAI. `processing + phase=null` (iš prieš #154) yra realybė
+ * atkurtose kopijose. `finish()` juos priima savaime (šaltinio netikrina), tad
+ * užstrigęs job'as visada turi kelią į terminalią būseną. `restart()` juos
+ * atmeta – jo išvestis remiasi grafu, ir be žinomos dabartinės fazės
+ * atstatymas nėra apibrėžtas; tokiam įrašui kelias yra `finish()`.
+ *
+ * @param {object} job
+ * @param {{leistiniStatusai: string[], tikrintiSaltiniBusena?: boolean}} options
+ */
+function assertConsistentJobRecord(job, { leistiniStatusai, tikrintiSaltiniBusena = true }) {
+  const status = job && job.status !== undefined ? job.status : null;
+
+  if (TERMINAL.includes(status)) {
+    throw new JobPhaseError(
+      `Job'as jau terminalus (${status}).`,
+      "JOB_ALREADY_TERMINAL"
+    );
+  }
+
+  if (!leistiniStatusai.includes(status)) {
+    throw new JobPhaseError(
+      `Nežinomas arba neleistinas šaltinio statusas "${String(status)}". ` +
+        `Leistini: ${leistiniStatusai.join(", ")}.`,
+      "UNKNOWN_SOURCE_STATUS"
+    );
+  }
+
+  /**
+   * ŠALTINIO BŪSENOS PATIKRA – praleidžiama, kai išvestis nuo jos nepriklauso.
+   *
+   * `finish()` ją praleidžia visiškai: jo išvestis vienoda bet kokiam šaltiniui,
+   * tad nėra ko apsaugoti, o metimas paverstų sugadintą job'ą neišsprendžiamu.
+   */
+  if (!tikrintiSaltiniBusena) return status;
+
+  /** Tipas: reikalingas, kai išvestis remiasi grafu. */
+  if (!GRAPHS[job.type]) {
+    throw new JobPhaseError(`Nežinomas job tipas: ${String(job.type)}`, "UNKNOWN_JOB_TYPE");
+  }
+
+  /** `status × phase` invariantas (#154, 1 punktas). */
+  if (status === STATUS.PROCESSING) {
+    if (job.phase == null) {
+      throw new JobPhaseError(
+        "processing job'as be fazės – nekonsistentiška būsena.",
+        "INVALID_STATUS_PHASE"
+      );
+    }
+    assertPhaseAllowedForType(job.type, job.phase);
+  } else if (job.phase != null) {
+    throw new JobPhaseError(
+      `"${status}" job'as neturi turėti fazės (rasta: ${job.phase}).`,
+      "INVALID_STATUS_PHASE"
+    );
+  }
+
+  return status;
 }
 
 class JobPhaseError extends Error {
@@ -94,19 +216,65 @@ function assertPhaseAllowedForType(type, phase) {
  * kaip sekundžių ar segmentų – jis skaičiuoja tik santykį. Provideris, duodantis
  * vien procentą, naudoja `{current: 37, total: 100}`.
  */
+/**
+ * Progreso invariantai MAŠININIU BŪDU SKAITOMA forma.
+ *
+ * KODĖL EKSPORTUOJAMA. Dokumentacijos sargas turi tikrinti, ar
+ * `docs/job-lifecycle.md` mini visas galiojančias sąlygas. Pirmoji versija tai
+ * darė parsindama `assertValidProgress()` ŠALTINĮ regex'u – tad priklausė nuo
+ * sintaksės, ne nuo kontrakto: daugiaeilis `if (`, sąlygos iškėlimas į helperį
+ * ar `&&` sujungimas būtų sulaužę parserį nepakeitę elgesio.
+ *
+ * Čia deklaruojamas KONTRAKTAS. `assertValidProgress()` jį vykdo, o testai
+ * tikrina ir tai, kad abu neišsiskirtų.
+ */
+const PROGRESS_INVARIANTS = Object.freeze([
+  Object.freeze({
+    raiska: "Number.isFinite(current)",
+    tikrinti: (p) => Number.isFinite(p.current),
+    zinute: "progress.current privalo būti baigtinis skaičius.",
+  }),
+  Object.freeze({
+    raiska: "Number.isFinite(total)",
+    tikrinti: (p) => Number.isFinite(p.total),
+    zinute: "progress.total privalo būti baigtinis skaičius.",
+  }),
+  Object.freeze({
+    raiska: "total > 0",
+    tikrinti: (p) => p.total > 0,
+    zinute: "progress.total privalo būti > 0 – kitaip santykis beprasmis.",
+  }),
+  Object.freeze({
+    raiska: "current >= 0",
+    tikrinti: (p) => p.current >= 0,
+    zinute: "progress.current privalo būti >= 0.",
+  }),
+  Object.freeze({
+    raiska: "current <= total",
+    tikrinti: (p) => p.current <= p.total,
+    zinute: "progress.current privalo būti <= progress.total.",
+  }),
+]);
+
 function assertValidProgress(progress) {
   if (progress == null || typeof progress !== "object") {
     throw new JobPhaseError("progress privalo būti { current, total }.", "INVALID_PROGRESS");
   }
-  const { current, total } = progress;
-  if (!Number.isFinite(current) || !Number.isFinite(total)) {
-    throw new JobPhaseError("progress.current ir progress.total privalo būti baigtiniai skaičiai.", "INVALID_PROGRESS");
-  }
-  if (total <= 0) {
-    throw new JobPhaseError("progress.total privalo būti > 0 – kitaip santykis beprasmis.", "INVALID_PROGRESS");
-  }
-  if (current < 0 || current > total) {
-    throw new JobPhaseError("progress.current privalo tenkinti 0 <= current <= total.", "INVALID_PROGRESS");
+
+  /**
+   * ⚠️ VYKDOMI EKSPORTUOTI PREDIKATAI, ne jų kopija.
+   *
+   * Ankstesnė versija `PROGRESS_INVARIANTS` deklaravo, o čia tas pačias sąlygas
+   * įgyvendino ANTRĄ kartą `if` sakiniais. Tai atkūrė būtent tą deklaracijos ir
+   * vykdymo nuokrypį, kurį eksportas turėjo pašalinti: pakeitus runtime patikrą
+   * į `current < -0.5`, sinchronizacijos testas vis tiek praeitų (jis ima po
+   * VIENĄ pažeidžiančią reikšmę predikatui – `-1` atmetama, `5` priimama), o
+   * `-0.3` būtų priimta, nors eksportuotas kontraktas ją draudžia.
+   *
+   * Dabar deklaracija YRA vykdymas – nuokrypis neįmanomas iš principo.
+   */
+  for (const { tikrinti, zinute } of PROGRESS_INVARIANTS) {
+    if (!tikrinti(progress)) throw new JobPhaseError(zinute, "INVALID_PROGRESS");
   }
 }
 
@@ -153,29 +321,13 @@ function startPhase(job, nextPhase, options = {}) {
    * kurti negali. Legacy įrašams tai READ-compatibility klausimas, ne writer'io
    * kontraktas.
    */
-  const status = job.status ?? null;
-
-  if (TERMINAL.includes(status)) {
-    throw new JobPhaseError(
-      `Terminalaus job'o (${status}) fazės pradėti negalima – jis jau baigtas.`,
-      "JOB_ALREADY_TERMINAL"
-    );
-  }
-  if (status === STATUS.QUEUED && job.phase != null) {
-    throw new JobPhaseError(
-      `queued job'as negali turėti fazės (rasta: ${job.phase}).`,
-      "INVALID_STATUS_PHASE"
-    );
-  }
-  if (status === STATUS.PROCESSING && job.phase == null) {
-    throw new JobPhaseError(
-      "processing job'as be fazės – naujas writer'is tokio derinio kurti negali.",
-      "INVALID_STATUS_PHASE"
-    );
-  }
-  if (status !== null && status !== STATUS.QUEUED && status !== STATUS.PROCESSING) {
-    throw new JobPhaseError(`Nežinomas statusas: ${String(status)}`, "INVALID_STATUS_PHASE");
-  }
+  /**
+   * Įrašo konsistencija – bendra patikra (žr. `assertConsistentJobRecord`).
+   * Anksčiau čia buvo dalinė jos kopija.
+   */
+  const status = assertConsistentJobRecord(job, {
+    leistiniStatusai: [STATUS.QUEUED, STATUS.PROCESSING],
+  });
 
   const current = job.phase ?? null;
   const allowed = GRAPHS[type][current === null ? "null" : current];
@@ -226,6 +378,23 @@ function startPhase(job, nextPhase, options = {}) {
 function reportProgress(job, event) {
   if (!event || typeof event !== "object") return null;
   if (job.status !== STATUS.PROCESSING) return null;
+
+  /**
+   * ⚠️ ĮRAŠO KONSISTENCIJA – ta pati patikra, bet be metimo.
+   *
+   * Anksčiau ši funkcija buvo KETVIRTAS įėjimas su sava daline patikra, tad
+   * progresas būdavo rašomas ir į sugadintą įrašą (`protocol` su
+   * `phase=transcribing`) – blogos būsenos įtvirtinimas, o ne ištaisymas.
+   *
+   * Skirtingai nei kiti trys, čia NEMETAMA: progreso kelias yra
+   * fire-and-forget, ir viena bloga būsena neturi nutraukti darbo. Grąžinamas
+   * `null` reiškia „įvykis atmestas" – tas pats, ką jau daro pavėlavęs įvykis.
+   */
+  try {
+    assertConsistentJobRecord(job, { leistiniStatusai: [STATUS.PROCESSING] });
+  } catch {
+    return null;
+  }
 
   // Pavėlavęs įvykis iš ankstesnės fazės.
   if (event.phase !== job.phase) return null;
@@ -291,14 +460,22 @@ function finish(job, status, extra = {}) {
    * vykdomas, negali būti sėkmingai baigtas. Be šios patikros tokia būsena
    * atsirastų tyliai.
    */
-  const from = job && job.status !== undefined ? job.status : null;
+  /**
+   * ⚠️ TA PATI patikra kaip `startPhase()` ir `restart()`.
+   *
+   * Anksčiau ši funkcija turėjo šešis nuoseklius patikrinimus, sukauptus per
+   * penkis peržiūros raundus, o `restart()` – tik dalį jų.
+   */
+  const from = assertConsistentJobRecord(job, {
+    leistiniStatusai: [STATUS.QUEUED, STATUS.PROCESSING],
+    /**
+     * Išvestis nepriklauso nuo šaltinio, tad jo validacija tik kurtų gedimo
+     * režimus. Terminalus perėjimas negali nepavykti dėl būsenos, iš kurios
+     * bando išeiti – kitaip sugadintas job'as tampa neišsprendžiamas.
+     */
+    tikrintiSaltiniBusena: false,
+  });
 
-  if (TERMINAL.includes(from)) {
-    throw new JobPhaseError(
-      `Job'as jau terminalus (${from}) – pakartotinis finish() neleidžiamas.`,
-      "JOB_ALREADY_TERMINAL"
-    );
-  }
   if (from === STATUS.QUEUED && status === STATUS.COMPLETED) {
     throw new JobPhaseError(
       "queued → completed neleidžiamas: nevykdytas darbas negali būti baigtas sėkmingai.",
@@ -325,17 +502,18 @@ function finish(job, status, extra = {}) {
  * Legalus iš `queued` ir `processing`; iš terminalaus – ne.
  */
 function restart(job) {
-  const status = job.status ?? null;
-
-  if (TERMINAL.includes(status)) {
-    throw new JobPhaseError(
-      `Terminalaus job'o (${status}) perpaleisti negalima.`,
-      "JOB_ALREADY_TERMINAL"
-    );
-  }
-  if (status !== null && status !== STATUS.QUEUED && status !== STATUS.PROCESSING) {
-    throw new JobPhaseError(`Nežinomas statusas: ${String(status)}`, "INVALID_STATUS_PHASE");
-  }
+  /**
+   * ⚠️ ANKSČIAU ČIA BUVO SILPNIAUSIA PATIKRA.
+   *
+   * Tikrintas tik statusas, tad praeidavo `queued + phase=transcribing` ir
+   * `protocol + phase=transcribing` – įrašai, kuriuos `finish()` ir
+   * `startPhase()` atmesdavo. Atkurtas įrašas su svetimo grafo faze per
+   * perpaleidimą tapdavo „švarus".
+   */
+  assertConsistentJobRecord(job, {
+    // Išvestis (`validating`) remiasi TIPO grafu, tad šaltinis tikrinamas.
+    leistiniStatusai: [STATUS.QUEUED, STATUS.PROCESSING],
+  });
 
   assertPhaseAllowedForType(job.type, PHASE.VALIDATING);
 
@@ -370,9 +548,11 @@ module.exports = {
   TERMINAL,
   JobPhaseError,
   phasesForType,
+  transitionsForType,
   assertPhaseAllowedForType,
   assertValidProgress,
   assertProgressInvariant,
+  PROGRESS_INVARIANTS,
   startPhase,
   restart,
   reportProgress,
