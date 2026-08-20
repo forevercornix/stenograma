@@ -241,6 +241,33 @@ Modelis ir grafas: [`docs/artefact-lifecycle.md`](artefact-lifecycle.md).
 | Abu DELETE maršrutai kviečia **vieną** servisą | `lifecycleDeletion` | Tiesioginis `eraseJob` apeinant servisą |
 | Auditas fiksuoja aktorių, rezultatą ir laiką be turinio | `lifecycleDeletion` | — |
 
+### #196 — nepavykę ištrynimo bandymai apskaitomi
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Eskalacija įvyksta NET kritus `jobStore.update()`** | `deletionRetryPersistence` | Grąžinus `.catch(() => {})` → krinta 3 |
+| **Bandymų skaitiklis auga be persistencijos** | `deletionRetryPersistence` | Pašalinus atsarginį skaitiklį → krinta |
+| **Kritus saugyklai pakartojimas ATIDEDAMAS, ne kartojamas** | `deletionRetryPersistence` | Atsarginėje aibėje laikomas IR terminas: be jo `_isDue()` praleistų kiekvieną sweep'ą, ir outage'o metu neveikianti saugykla būtų daužoma be pertraukos. Mutacija: nesaugant termino arba jo neskaitant `_isDue()` → krinta |
+| **Ta pati garantija galioja AUDIO valymo keliui** | `deletionRetryPersistence` | Helperis bendras abiem keliams; pirmoji testų versija tikrino tik ištrynimą |
+| **Po visų testų `jobStore` NEPALIKTAS perimtas** | `deletionRetryPersistence` | Nešvarus cleanup neduoda kritimo tame teste, kuris jį sukėlė — jis pasireiškia KITAME, ir tik tam tikra tvarka. Mutacija: išsaugojus mock'ą vietoj tikros funkcijos → krinta |
+| **Be `storageKey` bandymas NESKAIČIUOJAMAS** | `deletionRetryPersistence` | Jokio trynimo nebuvo — skaitiklio didinimas klaidingai artintų eskalaciją. Mutacija: pridėjus `audio_cleanup_attempts` į patch'ą → krinta |
+| Nepavykęs įrašymas patenka į logą su `jobId` ir kodu | `deletionRetryPersistence` | |
+| Pavykus įrašymui atsarginis skaitiklis išvalomas | `deletionRetryPersistence` | |
+
+⚠️ **PRARYJAMAS BUVO BŪTENT TAS ATNAUJINIMAS, KURIS DARO GEDIMĄ MATOMĄ.**
+`jobStore.update()` dažniausiai krinta per tą patį Redis sutrikimą, kuris ir
+sukėlė ištrynimo nesėkmę. Tada `deletion_attempts` liko `0`,
+`next_attempt_at` neatnaujintas (jokio backoff), o
+`MAX_ATTEMPTS_BEFORE_ALERT` **niekada nepasiekiamas** — GDPR ištrynimas
+nepavyksta tyliai.
+
+Vienintelis apsauginis mechanizmas negali priklausyti nuo to paties komponento,
+kuris ką tik krito, todėl skaitiklis dubliuojamas atmintyje. Restartas ją
+praranda — priimtina: persistintas laukas vėl tampa autoritetu, o eskalacija tik
+atidedama.
+
+---
+
 ### #19 PR3 — apsauga nuo atkūrimo po ištrynimo
 
 | Garantija | Testai | Mutacijos įrodymas |
