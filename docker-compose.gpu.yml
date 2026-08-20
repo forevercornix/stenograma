@@ -93,6 +93,21 @@ services:
       # Persistentus job store per Redis (žr. redis servisą žemiau). Backend
       # automatiškai jį naudoja; be jo grįžtų į in-memory.
       REDIS_URL: redis://redis:6379
+      # PostgreSQL infrastruktūra (#155).
+      #
+      # 7.1 paruošia DB ir migracijų karkasą; `jobStore` šio kintamojo DAR
+      # NENAUDOJA - `postgresStore` prijungiamas 7.2a. Iki tol backend'as
+      # renkasi Redis arba in-memory, kaip iki šiol.
+      # ⚠️ ATSKIRI `PG*` KINTAMIEJI, ne sukonstruotas URL.
+      #
+      # Slaptažodis su URI simboliais (`/`, `?`, `#`, `@`) PostgreSQL'e veikia,
+      # bet URL'e reikštų kitką arba jį sugadintų - migracijos ir diagnostika
+      # nebeautentifikuotų. `pg` biblioteka `PG*` skaito be jokio kodavimo.
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-stenograma}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-stenograma}
       # GRIEŽTAS: jei Redis prisijungimas per startą nepavyksta, backend'as KRENTA,
       # o ne tyliai grįžta į in-memory/inline. GPU/produkcijos profilyje tylus
       # fallback reikštų persistencijos praradimą būtent tada, kai ji svarbiausia
@@ -111,6 +126,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # ⚠️ `postgres` SĄMONINGAI NĖRA `depends_on` (#155, 7.1).
+      #
+      # 7.1 metu nė vienas procesas PostgreSQL nenaudoja - `jobStore` renkasi
+      # Redis arba in-memory. `condition: service_healthy` reikštų, kad
+      # migracijų infrastruktūros gedimas išjungia VISĄ GPU stacką dar prieš
+      # tai, kai DB apskritai reikalinga.
+      #
+      # Priklausomybė pridedama 7.2a, kai `postgresStore` realiai atsiranda.
     deploy:
       resources:
         reservations:
@@ -147,6 +170,20 @@ services:
       # Modelių cache tarp konteinerio perkrovimų (kad nereikėtų atsisiųsti iš naujo).
       HF_HOME: /models/hf
       REDIS_URL: redis://redis:6379
+      # PostgreSQL infrastruktūra (#155).
+      #
+      # 7.1 paruošia DB ir migracijų karkasą; `jobStore` šio kintamojo DAR
+      # NENAUDOJA - `postgresStore` prijungiamas 7.2a. Iki tol backend'as
+      # renkasi Redis arba in-memory, kaip iki šiol.
+      # ⚠️ `PG*` KINTAMŲJŲ WORKER'IAI NEGAUNA (#155, 7.1).
+      #
+      # Jie PostgreSQL nenaudoja - migracijos ir diagnostika vykdomos backend'e.
+      # Duoti jiems DB inicializacijos kredencialus reikštų, kad transkripcijos
+      # ar provider'iams atviro worker'io kompromitacija leistų keisti DB būseną
+      # be jokios funkcinės priežasties.
+      #
+      # Kai 7.2a įves `postgresStore`, worker'iai gaus ATSKIRĄ mažiausios
+      # privilegijos rolę, ne `POSTGRES_USER`.
       # Worker'iui REDIS_REQUIRED elgesys galioja VISADA (žr. workers/index.js
       # initializeWorkerOrFail) - šis kintamasis čia tik dokumentacijai/nuoseklumui.
       REDIS_REQUIRED: "true"
@@ -168,6 +205,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # ⚠️ `postgres` SĄMONINGAI NĖRA `depends_on` (#155, 7.1).
+      #
+      # 7.1 metu nė vienas procesas PostgreSQL nenaudoja - `jobStore` renkasi
+      # Redis arba in-memory. `condition: service_healthy` reikštų, kad
+      # migracijų infrastruktūros gedimas išjungia VISĄ GPU stacką dar prieš
+      # tai, kai DB apskritai reikalinga.
+      #
+      # Priklausomybė pridedama 7.2a, kai `postgresStore` realiai atsiranda.
     deploy:
       resources:
         reservations:
@@ -201,11 +246,33 @@ services:
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-claude}
       REDIS_URL: redis://redis:6379
+      # PostgreSQL infrastruktūra (#155).
+      #
+      # 7.1 paruošia DB ir migracijų karkasą; `jobStore` šio kintamojo DAR
+      # NENAUDOJA - `postgresStore` prijungiamas 7.2a. Iki tol backend'as
+      # renkasi Redis arba in-memory, kaip iki šiol.
+      # ⚠️ `PG*` KINTAMŲJŲ WORKER'IAI NEGAUNA (#155, 7.1).
+      #
+      # Jie PostgreSQL nenaudoja - migracijos ir diagnostika vykdomos backend'e.
+      # Duoti jiems DB inicializacijos kredencialus reikštų, kad transkripcijos
+      # ar provider'iams atviro worker'io kompromitacija leistų keisti DB būseną
+      # be jokios funkcinės priežasties.
+      #
+      # Kai 7.2a įves `postgresStore`, worker'iai gaus ATSKIRĄ mažiausios
+      # privilegijos rolę, ne `POSTGRES_USER`.
       REDIS_REQUIRED: "true"
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
     depends_on:
       redis:
         condition: service_healthy
+      # ⚠️ `postgres` SĄMONINGAI NĖRA `depends_on` (#155, 7.1).
+      #
+      # 7.1 metu nė vienas procesas PostgreSQL nenaudoja - `jobStore` renkasi
+      # Redis arba in-memory. `condition: service_healthy` reikštų, kad
+      # migracijų infrastruktūros gedimas išjungia VISĄ GPU stacką dar prieš
+      # tai, kai DB apskritai reikalinga.
+      #
+      # Priklausomybė pridedama 7.2a, kai `postgresStore` realiai atsiranda.
     # JOKIOS GPU deploy.resources - žr. komentarą aukščiau.
 
   pyannote:
@@ -254,9 +321,53 @@ services:
       timeout: 3s
       retries: 5
 
+  # PostgreSQL infrastruktūra (#155).
+  #
+  # ⚠️ 7.1 APIMTIS: servisas, volume ir migracijų karkasas. `postgresStore` DAR
+  # NEEGZISTUOJA - pagal ADR jis prijungiamas 7.2a kaip TREČIAS `jobStore`
+  # backend'as, ir tik tada PostgreSQL tampa autoritetinga saugykla.
+  #
+  # SĄMONINGAI NE baziniame docker-compose.yml: desktop/demo režimas turi likti
+  # paleidžiamas be jokios infrastruktūros (memoryStore). Bazė reiškia
+  # "minimalus paleidimas", ir Postgres ten paverstų ją reikalaujančia DB.
+  #
+  # `server.yml` šio serviso NEDUBLIUOJA - jis naudojamas kartu su `gpu.yml`
+  # (`-f base -f gpu -f server`, žr. README ir ci.yml compose-config-validate),
+  # tad paveldi tą patį apibrėžimą. Dubliuotas aprašas anksčiau ar vėliau
+  # išsiskirtų versijomis.
+  postgres:
+    image: postgres:16-alpine
+    # ⚠️ SUSIETA SU `127.0.0.1`, ne `0.0.0.0` (#155, 7.1).
+    #
+    # Migracijos ir `make doctor` vykdomi HOST'e (`docs/migrations.md`,
+    # `.env.example` rodo `localhost:5432`), tad be publikuoto prievado tos
+    # instrukcijos neveiktų, o schema liktų nepritaikyta.
+    #
+    # Loopback pasirinktas sąmoningai - tas pats principas kaip baziniame
+    # `docker-compose.yml`: prieinama TIK iš šios mašinos, ne iš tinklo.
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stenograma}
+      POSTGRES_USER: ${POSTGRES_USER:-stenograma}
+      # Slaptažodis PRIVALOMAS - be numatytosios reikšmės, kad atsitiktinai
+      # neatsirastų produkcijoje. `docker compose up` kris su aiškia klaida.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD privalomas}
+    volumes:
+      - stenograma-postgres:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` be -h: tikrina TIK vietinį socket'ą, tad healthcheck
+      # nepraeina, kol serveris dar priima tik loopback jungtis inicializacijos
+      # metu (Postgres image paleidžia laikiną serverį init skriptams).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stenograma} -d ${POSTGRES_DB:-stenograma}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
 volumes:
   stenograma-models:
   stenograma-redis:
+  stenograma-postgres:
   # Bendras audio storage backend'ui ir transcription-worker'iui (kad worker
   # pasiektų failą pagal storageKey - žr. backend/utils/fileStorage.js). MVP -
   # Docker volume; 2 etape keistina į MinIO/S3 kelioms mašinoms (žr. root README

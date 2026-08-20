@@ -5,7 +5,21 @@
  * paleisti sistemą - vietoj to, kad problemos išlįstų po pirmos užklausos.
  * Grąžina exit code 1, jei yra kritinių (❌) problemų.
  */
+/**
+ * ⚠️ DU `.env` FAILAI.
+ *
+ * `dotenv.config()` be kelio skaito TIK `backend/.env` (nes `doctor` paleidžiamas
+ * iš `backend/`). Bet PostgreSQL kintamieji dokumentuoti ŠAKNINIAME `.env` —
+ * tą patį failą skaito `docker compose` ir `preflight-gpu.sh`.
+ *
+ * Be šito vartotojas, nustatęs `DATABASE_URL` ten, kur instrukcija liepia,
+ * `make doctor` išvestyje PostgreSQL eilutės nematytų visai.
+ *
+ * Backend'o failas skaitomas PIRMAS ir turi pirmenybę (`dotenv` neperrašo jau
+ * nustatytų reikšmių).
+ */
 require("dotenv").config();
+require("dotenv").config({ path: require("path").resolve(__dirname, "..", "..", ".env") });
 const os = require("os");
 const { execFile } = require("child_process");
 const { validateConfig, runSelfChecks } = require("../utils/startupChecks");
@@ -67,6 +81,27 @@ async function main() {
       results.push(availGB > 5 ? OK("Diskas (tmp)", `${availGB}GB laisva`) : WARN("Diskas (tmp)", `tik ${availGB}GB - dideliems audio failams ir modeliams gali pritrūkti`));
     }
   } catch { /* Windows - df nėra, praleidžiame */ }
+
+  /**
+   * ⚠️ PostgreSQL patikros ČIA NĖRA SĄMONINGAI.
+   *
+   * Ji gyvena `runSelfChecks()` (`utils/startupChecks.js`), kurį `doctor`
+   * kviečia žemiau kartu su visomis kitomis komponentų patikromis.
+   *
+   * Anksčiau čia buvo ATSKIRA realizacija su savo `pg.Client`, ir jos elgesys
+   * skyrėsi nuo `runSelfChecks()`:
+   *
+   *   be DATABASE_URL   doctor: OK eilutė      | selfChecks: eilutės nėra
+   *   be migracijų      doctor: OK             | selfChecks: FAIL
+   *   klaida            doctor: e.message      | selfChecks: tik hostas
+   *
+   * Paskutinis skirtumas buvo ir saugumo klausimas: `e.message` gali turėti
+   * vartotojo vardą (`password authentication failed for user "x"`), o
+   * diagnostikos išvestis keliauja į support-bundle.
+   *
+   * Du diagnostikos kontraktai tam pačiam dalykui reiškia, kad testas,
+   * tikrinantis vieną, nieko nesako apie kitą.
+   */
 
   // --- Konfigūracija ---
   const { errors, warnings } = validateConfig();

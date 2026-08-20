@@ -53,6 +53,20 @@ if [ -z "${HUGGINGFACE_TOKEN:-}" ] && [ -z "${HF_TOKEN:-}" ]; then
   fi
 fi
 
+# PostgreSQL slaptažodis (#155, 7.1). Compose jį deklaruoja kaip PRIVALOMĄ
+# (`${POSTGRES_PASSWORD:?}`), tad be jo `docker compose` nutrūksta DAR PRIEŠ
+# ką nors paleisdamas - `make quickstart-gpu` kristų su neaiškia klaida.
+#
+# Skaitoma iš šakninio .env taip pat, kaip HUGGINGFACE_TOKEN.
+if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+  _root_env="$(dirname "$0")/../.env"
+  _pg_from_file=$(_read_env_var "POSTGRES_PASSWORD" "$_root_env" || true)
+  if [ -n "${_pg_from_file:-}" ]; then
+    export POSTGRES_PASSWORD="$_pg_from_file"
+    echo "   (POSTGRES_PASSWORD perskaitytas iš šakninio .env)"
+  fi
+fi
+
 # --- Host GPU ---
 if command -v nvidia-smi >/dev/null 2>&1; then
   ok "Host GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
@@ -125,6 +139,25 @@ fi
 # tampa unhealthy -> backend laukia service_healthy -> visas quickstart nepasileidžia.
 # Todėl ten trūkstamas tokenas yra KRITINĖ klaida, ne įspėjimas. Native diegime
 # (setup.sh --gpu be --require-hf) diarizacija gali būti pasirenkama, tad įspėjimas.
+# PostgreSQL slaptažodis - tokia pat kritinė klaida GPU Docker profilyje.
+# Compose deklaruoja jį kaip PRIVALOMĄ, tad `docker compose` nutrūksta dar
+# prieš ką nors paleisdamas, ir vartotojas mato interpoliacijos klaidą vietoj
+# aiškaus paaiškinimo.
+if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+  if [ "$REQUIRE_HF" = true ]; then
+    bad "POSTGRES_PASSWORD nenustatytas - docker compose NUTRŪKS dar prieš startą"
+    bad "  (compose jį deklaruoja kaip privalomą). Nustatykite šakniniame .env:"
+    # `tr -d /+=` palikta dėl shell citavimo patogumo, NE dėl URL saugumo:
+    # compose naudoja `PG*`, tad specialūs simboliai slaptažodyje veiktų.
+    bad "    echo 'POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -d /+=)' >> .env"
+    PROBLEMS=$((PROBLEMS+1))
+  else
+    warn "POSTGRES_PASSWORD nenustatytas - Docker GPU profiliui jis privalomas."
+  fi
+else
+  ok "POSTGRES_PASSWORD nustatytas"
+fi
+
 HF="${HUGGINGFACE_TOKEN:-${HF_TOKEN:-}}"
 if [ -z "$HF" ]; then
   if [ "$REQUIRE_HF" = true ]; then

@@ -44,6 +44,23 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # PostgreSQL migracijų testams (#155, 7.1). Kaip ir Redis - servisas
+      # veikia VISAME job'e, bet `DATABASE_URL` perduodamas TIK migracijų
+      # žingsniui: kiti testai jo nemato ir toliau naudoja in-memory store.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v7
         with:
@@ -114,6 +131,15 @@ jobs:
           # abu vienu metu - o tai jau matomas pakeitimas, ne atsitiktinumas.
           REQUIRE_REDIS: "1"
         run: npm run test:redis
+
+      - name: PostgreSQL migracijų testai (tuščia DB → schema, idempotentiškumas)
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+          # REQUIRE_POSTGRES=1 paverčia TYLŲ praleidimą klaida - kitaip CI
+          # liktų žalias niekada nepaleidęs nė vieno DB testo.
+          REQUIRE_POSTGRES: "1"
+        run: npm run test:postgres
 
       # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
       # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas
@@ -342,17 +368,144 @@ jobs:
         with:
           persist-credentials: false
 
+      # ⚠️ `POSTGRES_PASSWORD` neturi numatytosios reikšmės (`:?` compose faile),
+      # kad tuščias slaptažodis niekada nepatektų į produkciją. Todėl net
+      # `docker compose config` be jo krinta.
+      #
+      # Čia tikrinama tik SINTAKSĖ, tad fiktyvi reikšmė sąžininga — ji niekur
+      # nesijungia. Tas pats principas kaip `services.postgres` job'e aukščiau.
       - name: docker compose config - GPU profilis (embedded)
+        env:
+          POSTGRES_PASSWORD: ci-syntax-check-only
         run: |
           docker compose -f docker-compose.yml -f docker-compose.gpu.yml config --format json > /tmp/gpu-compose.json
-          cat /tmp/gpu-compose.json
+          # ⚠️ NESPAUSDINAM. Sujungtoje konfigūracijoje yra DATABASE_URL su
+          # slaptažodžiu, o job'o logas viešas. Klaidos atveju žr. artefaktą.
+          jq -r '.services | keys[]' /tmp/gpu-compose.json
 
       - name: docker compose config - server profilis (whisper-server + pyannote-server)
+        env:
+          POSTGRES_PASSWORD: ci-syntax-check-only
         run: |
           docker compose -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.server.yml config --format json > /tmp/server-compose.json
-          cat /tmp/server-compose.json
+          jq -r '.services | keys[]' /tmp/server-compose.json
+
+      - name: PostgreSQL paritetas abiejuose profiliuose (#155, 7.1)
+        env:
+          POSTGRES_PASSWORD: ci-syntax-check-only
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+
+          # ⚠️ TIKRINAMA PO COMPOSE MERGE, ne YAML failuose atskirai.
+          #
+          # `server.yml` PERRAŠO `backend`, `transcription-worker` ir
+          # `protocol-worker`, ir jo `depends_on` sąrašuose `postgres` NĖRA.
+          # Compose ilgąją sintaksę turėtų sulieti, bet be šios patikros
+          # prielaida netikrinama - o pakeitus sintaksę į trumpąją
+          # priklausomybė dingtų tyliai.
+          klaidos = []
+
+          for profilis, kelias in [
+              ("gpu", "/tmp/gpu-compose.json"),
+              ("server", "/tmp/server-compose.json"),
+          ]:
+              with open(kelias) as f:
+                  svc = json.load(f)["services"]
+
+              if "postgres" not in svc:
+                  klaidos.append(f"{profilis}: postgres serviso NĖRA po merge")
+                  continue
+
+              # Tas pats image abiejuose - kitaip po kelių mėnesių turėsime
+              # skirtingas versijas skirtinguose profiliuose.
+              img = svc["postgres"].get("image", "")
+              if not img.startswith("postgres:16"):
+                  klaidos.append(f"{profilis}: netikėtas postgres image: {img}")
+
+              if not svc["postgres"].get("healthcheck"):
+                  klaidos.append(f"{profilis}: postgres be healthcheck")
+
+              for vardas in ("backend", "transcription-worker", "protocol-worker"):
+                  if vardas not in svc:
+                      continue
+                  env = svc[vardas].get("environment") or {}
+                  # `PG*` kintamieji, ne sukonstruotas URL: slaptažodis su URI
+                  # simboliais URL'e reikštų kitką.
+                  # ⚠️ TIK `backend` gauna DB kredencialus (7.1).
+                  #
+                  # Worker'iai PostgreSQL nenaudoja - migracijos ir diagnostika
+                  # vykdomos backend'e. Duoti jiems DB inicializacijos
+                  # kredencialus reikštų, kad worker'io kompromitacija leidžia
+                  # keisti DB be jokios funkcinės priežasties.
+                  #
+                  # 7.2a metu worker'iai gaus ATSKIRĄ mažiausios privilegijos
+                  # rolę, ir ši patikra pasikeis.
+                  if vardas == "backend":
+                      trūkstami = [k for k in ("PGHOST", "PGUSER", "PGPASSWORD", "PGDATABASE")
+                                   if k not in env]
+                      if trūkstami:
+                          klaidos.append(f"{profilis}/{vardas}: trūksta {', '.join(trūkstami)}")
+                  else:
+                      pertekliniai = [k for k in ("PGPASSWORD", "PGUSER") if k in env]
+                      if pertekliniai:
+                          klaidos.append(
+                              f"{profilis}/{vardas}: TURI {', '.join(pertekliniai)}, "
+                              "bet PostgreSQL nenaudoja (mažiausia privilegija)"
+                          )
+
+                  # ⚠️ `depends_on: postgres` SĄMONINGAI NĖRA (7.1).
+                  #
+                  # Nė vienas procesas PostgreSQL dar nenaudoja, tad migracijų
+                  # infrastruktūros gedimas neturi išjungti viso stacko.
+                  # Priklausomybė pridedama 7.2a - tada ši patikra apsiverčia.
+                  dep = svc[vardas].get("depends_on") or {}
+                  if "postgres" in dep:
+                      klaidos.append(
+                          f"{profilis}/{vardas}: depends_on TURI postgres, bet 7.1 metu "
+                          "jo niekas nenaudoja - stackas kristų dėl nereikalingos DB"
+                      )
+
+          if klaidos:
+              print("PostgreSQL paritetas PAŽEISTAS:")
+              for k in klaidos:
+                  print("  -", k)
+              sys.exit(1)
+
+          print("PostgreSQL paritetas: gpu ir server profiliai sutampa.")
+          PYEOF
+
+      - name: Bazinis profilis PostgreSQL NEPALEIDŽIA (#155, 7.1)
+        env:
+          POSTGRES_PASSWORD: ci-syntax-check-only
+        run: |
+          docker compose -f docker-compose.yml config --format json > /tmp/base-compose.json
+          python3 - <<'PYEOF'
+          import json, sys
+
+          # Desktop/demo režimas turi likti paleidžiamas BE infrastruktūros
+          # (memoryStore). Postgres bazėje reikštų, kad "minimalus paleidimas"
+          # nustoja būti minimalus.
+          with open("/tmp/base-compose.json") as f:
+              svc = json.load(f)["services"]
+
+          if "postgres" in svc:
+              print("Bazinis docker-compose.yml NETURI apibrėžti postgres.")
+              sys.exit(1)
+
+          for vardas, s in svc.items():
+              env = s.get("environment") or {}
+              for k in ("DATABASE_URL", "PGHOST", "PGPASSWORD"):
+                  if k in env:
+                      print(f"Bazinis profilis: {vardas} turi {k} - neturėtų.")
+                      sys.exit(1)
+
+          print("Bazinis profilis be PostgreSQL - kaip ir turi būti.")
+          PYEOF
 
       - name: Patikrinti GPU/volume paskirstymą po merge (GPU profilis)
+        env:
+          POSTGRES_PASSWORD: ci-syntax-check-only
         run: |
           python3 - <<'PYEOF'
           import json, sys
@@ -384,6 +537,8 @@ jobs:
           PYEOF
 
       - name: Patikrinti GPU/volume paskirstymą po merge (server profilis)
+        env:
+          POSTGRES_PASSWORD: ci-syntax-check-only
         run: |
           python3 - <<'PYEOF'
           import json, sys
