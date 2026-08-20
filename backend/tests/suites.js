@@ -92,6 +92,8 @@ const privacy = [
  * sanitizacija, koreliacija ir paleidimo patikros.
  */
 const security = [
+  /** #196: nepavykę ištrynimo bandymai apskaitomi net kritus saugyklai. */
+  "deletionRetryPersistence",
   /** #159: nuosavybės filtras ir privilegijuoto namespace'o riba. */
   "jobOwnership",
   "systemNamespaceBoundary",
