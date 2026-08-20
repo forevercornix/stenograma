@@ -10,6 +10,10 @@
     "dev": "node --watch server.js",
     "test": "node scripts/run-tests.mjs",
     "test:redis": "node scripts/run-tests.mjs redis",
+    "test:postgres": "node scripts/run-tests.mjs postgres",
+    "migrate:up": "node-pg-migrate up",
+    "migrate:down": "node-pg-migrate down",
+    "migrate:create": "node-pg-migrate create",
     "check": "find . -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check",
     "lint": "eslint .",
     "doctor": "node scripts/doctor.js",
@@ -35,7 +39,9 @@
     "form-data": "^4.0.0",
     "helmet": "^8.3.0",
     "multer": "^2.0.0",
+    "node-pg-migrate": "^9.0.0",
     "papaparse": "^5.6.0",
+    "pg": "^8.23.0",
     "zod": "^4.4.3"
   },
   "optionalDependencies": {

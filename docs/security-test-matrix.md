@@ -1229,10 +1229,57 @@ pipeline galėtų ignoruoti, bet sluoksniavimas išlieka.
 
 ---
 
+### CI workflow struktūra
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **Jokių DUBLIUOTŲ YAML raktų** | `workflowIntegrity` | Grąžinus nuslinkusį `run:` → krinta |
+| **Kiekvienas step'as turi `run` arba `uses`** | `workflowIntegrity` | Pašalinus `run` → krinta |
+| **`docs/decisions/` nuorodos tikrinamos IR `.env.example`, IR compose failuose** | `workflowIntegrity` | Pirmoji versija skenavo tik `README.md` ir `docs/*.md`, tad nutrūkusi nuoroda `.env.example` praėjo — o būtent ten vartotojas ją pamato pirmiausia |
+| **Sprendimų įrašai (ADR) egzistuoja, nuorodos galioja** | `workflowIntegrity` | `rm -rf docs/decisions` generuojant pataisą ištrynė SEKAMUS failus, ir kitas `git add -A` tą užfiksavo. Mutacija: pašalinus ADR 0001 → krinta |
+| **`docker compose config` žingsniai turi PRIVALOMUS kintamuosius** | `workflowIntegrity` | `${POSTGRES_PASSWORD:?}` neturi numatytosios reikšmės, tad net `config` be jo krinta — job'as krito CI'e. Mutacija: pašalinus `env` → krinta |
+
+⚠️ **REALI KLAIDA, KURIĄ TAI PAGAVO.** Pridedant PostgreSQL žingsnį,
+`run: npm run test:redis` nuslinko į kitą step'ą: Redis liko BE `run` (nieko
+nevykdė), o Postgres gavo DU `run` raktus — YAML pasilieka paskutinį, tad
+`npm run test:postgres` niekada nebūtų paleistas. **Abu žingsniai būtų likę
+žali.**
+
+YAML 1.2 dublikuotus raktus DRAUDŽIA, bet `js-yaml` ir PyYAML numatytai jų
+neatmeta — tyliai pasilieka paskutinę reikšmę. Todėl tikrinama TEKSTU, ne
+parseriu.
+
+---
+
+### PostgreSQL karkasas (#155, 7.1)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Tuščia DB → dabartinė schema | `migrations.integration` | Paleista prieš TIKRĄ PostgreSQL, ne praleista |
+| Antras `migrate:up` = no-op | `migrations.integration` | ⚠️ Su TIKRA fixture migracija: be jos abi užklausos grąžintų tuščias aibes ir testas praeitų nieko netikrindamas. Mutacija: pašalinus fixture → krinta |
+| **Be `DATABASE_URL` PostgreSQL eilutės NĖRA** | `postgresDoctor.integration` | Desktop režimu „nepasiekiamas" būtų klaidinantis įspėjimas. Mutacija: rodyti visada → krinta |
+| **Prisijungimo eilutė NEPATENKA į diagnostiką** | `postgresDoctor.integration` | `DATABASE_URL` turi slaptažodį, o išvestis keliauja į support-bundle. Rodomas tik hostas. Mutacija: rodyti visą URL → krinta |
+| **`doctor.js` KVIEČIA `runSelfChecks()`, ne tik mini** | `postgresDoctor.integration` | Komentarai pašalinami prieš tikrinant: paaiškinimas mini `runSelfChecks` tris kartus, tad pašalinus kvietimą sargas liktų žalias. Mutacija: pašalinus importą+kvietimą → krinta |
+| **`doctor.js` neturi TIESIOGINĖS `pg` patikros** | `postgresDoctor.integration` | Turėjo, ir elgesys skyrėsi: be DATABASE_URL rodė OK, be migracijų rodė OK, o klaidoje – `e.message` su vartotojo vardu. Mutacija: grąžinus `require("pg")` → krinta. ⚠️ Testas saugo nuo TIESIOGINIO `pg`, ne nuo bet kokio antro kelio (pvz. atskiro modulio) |
+| **`DATABASE_URL` + `PG*` kartu = KLAIDA, ne pirmenybė** | `postgresDoctor.integration` | Docker naudoja `PG*`, o `.env` dažnai turi `DATABASE_URL`; `doctor` skaito abu failus, tad tikrintų NE TĄ DB. Diagnostika, rodanti kitą duomenų bazę, blogesnė nei jos nebuvimas |
+| **Komponento vardas NEŽADA neįgyvendintų integracijų** | `postgresDoctor.integration` | 7.1 metu jobStore, sesijos ir auditas PostgreSQL nenaudoja; „job store, sesijos, auditas" reikštų, kad įrašai jau persistenti |
+| **Prisijungimo klaidos atskiriamos pagal kodą** | `postgresDoctor.integration` | `28P01`, `3D000`, `42501` reikalauja skirtingų veiksmų; viena „ar servisas paleistas?" siuntė klaidinga kryptimi |
+| **Veikianti DB be migracijų atskiriama nuo neveikiančios** | `postgresDoctor.integration` | Du gedimai, du skirtingi veiksmai. Mutacija: praleisti `pgmigrations` patikrą → krinta |
+
+⚠️ **Šie testai ilgai buvo NEMATOMI.** `migrations.integration` egzistavo, bet be
+`DATABASE_URL` visada praleisdavo save, o matricos sargas tikrino tik `privacy` ir
+`security` rinkinius — tad `redis` ir `postgres` testai galėjo atsirasti be nė vieno
+įrašo. Sargas dabar apima visus invariantų rinkinius.
+
+`functional` sąmoningai neįtrauktas: tai saugumo matrica, ne visų testų registras.
+
+---
+
 ### Backend'ų kontrakto ekvivalentumas
 
 | Garantija | Testai | Mutacijos įrodymas |
 |---|---|---|
+| Aktoriaus eros CAS Redis'e | `actorEraRedis.integration` | Pasenusios eros įvykiai atmetami atomiškai |
 | **Abu backend'ai duoda TĄ PATĮ rezultatą 7 scenarijams** | `jobStoreBackendContract.integration` | Grąžinus Redis į būseną prieš pataisymą → krinta |
 | Abu deklaruoja tą pačią metodų aibę | `jobStoreBackendContract.integration` | Metodo pašalinimas → krinta 3. Trūkstamas metodas reikštų tylų grįžimą į atsarginį kelią |
 

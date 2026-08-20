@@ -94,6 +94,8 @@ const privacy = [
 const security = [
   /** #196: nepavykę ištrynimo bandymai apskaitomi net kritus saugyklai. */
   "deletionRetryPersistence",
+  /** CI workflow struktūra: dublikuotas raktas tyliai išjungtų testų žingsnį. */
+  "workflowIntegrity",
   /** #159: nuosavybės filtras ir privilegijuoto namespace'o riba. */
   "jobOwnership",
   "systemNamespaceBoundary",
@@ -173,8 +175,22 @@ const functional = [
   "workerHeartbeat",
 ];
 
+/**
+ * PostgreSQL integraciniai testai (#155).
+ *
+ * Atskiras rinkinys dėl tos pačios priežasties kaip `redis`: be `DATABASE_URL`
+ * jie save praleidžia, tad `npm test` sudėtyje virstų nuolatiniu „skipped"
+ * triukšmu. CI paleidžia su `REQUIRE_POSTGRES=1`, kuris praleidimą paverčia
+ * klaida.
+ */
+const postgres = [
+  "migrations.integration",
+  /** #155: PostgreSQL būsena doctor/health išvestyje. */
+  "postgresDoctor.integration",
+];
+
 module.exports = {
-  suites: { privacy, security, functional, redis },
+  suites: { privacy, security, functional, redis, postgres },
 
   /**
    * Rinkiniai, kuriuos apima `npm test`.

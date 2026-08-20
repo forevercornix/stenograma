@@ -376,7 +376,210 @@ async function runSelfChecks(env = process.env) {
     checks.push({ name: `Diarizacija (${diar})`, ok: true, detail: "išorinis API" });
   }
 
+  /**
+   * PostgreSQL (#155, 7.1).
+   *
+   * Rodoma TIK kai `DATABASE_URL` nustatytas: be jo backend'as naudoja Redis
+   * arba in-memory store, ir „PostgreSQL nepasiekiamas" būtų klaidinantis
+   * įspėjimas desktop režimu.
+   *
+   * Tikrinama ne tik prisijungimas, bet ir MIGRACIJŲ būsena: veikianti DB su
+   * nepritaikyta schema yra kita problema nei neveikianti DB, ir operatorius
+   * turi jas atskirti.
+   */
+  /**
+   * ⚠️ DU KONFIGŪRAVIMO BŪDAI.
+   *
+   * Docker profiliai naudoja atskirus `PG*` kintamuosius, nes slaptažodis su
+   * URI simboliais (`/`, `?`, `#`) sukonstruotame URL reikštų kitką. Lokaliai
+   * ir CI patogiau vienas `DATABASE_URL`.
+   *
+   * `pg` biblioteka `PG*` skaito pati, kai `connectionString` neperduodamas.
+   */
+  if (env.DATABASE_URL || env.PGHOST) {
+    /**
+     * ⚠️ ABU KONFIGŪRAVIMO BŪDAI KARTU = KLAIDA, ne pirmenybė.
+     *
+     * Docker profiliai backend'ui perduoda `PG*`, o `.env` failuose dažnai
+     * lieka `DATABASE_URL`. `doctor` skaito ABU failus, tad operatorius gali
+     * turėti abu vienu metu — ir tada `doctor` tikrintų VISAI KITĄ DB nei tą,
+     * su kuria dirba stackas.
+     *
+     * Tyli pirmenybė čia blogesnė už klaidą: diagnostika, rodanti ne tą
+     * duomenų bazę, yra blogesnė nei diagnostikos nebuvimas.
+     */
+    if (env.DATABASE_URL && env.PGHOST) {
+      checks.push({
+        name: "PostgreSQL (migracijų infrastruktūra)",
+        ok: false,
+        detail:
+          "KONFLIKTAS: nustatyti IR `DATABASE_URL`, IR `PGHOST` - neaišku, kuri DB " +
+          "tikrinama. Docker profiliai naudoja `PG*`; palikite tik vieną būdą.",
+      });
+    } else {
+      checks.push(await postgresReachability(env));
+    }
+  }
+
   return checks;
+}
+
+/** Prisijungimas + migracijų būsena. Klaidos pranešime NĖRA prisijungimo eilutės. */
+async function postgresReachability(env) {
+  /**
+   * ⚠️ VARDAS SAKO „migracijų infrastruktūra", ne „job store".
+   *
+   * 7.1 metu `jobStore` PostgreSQL dar nenaudoja, sesijos ir auditas irgi ne.
+   * Žalia varnelė su vardu „job store, sesijos, auditas" operatoriui reikštų,
+   * kad tie įrašai jau persistenti — o jie nėra. Vardas pasikeis 7.2a–7.4,
+   * kai integracijos realiai atsiras.
+   */
+  const name = "PostgreSQL (migracijų infrastruktūra)";
+  let client;
+
+  try {
+    const { Client } = require("pg");
+    /**
+     * ⚠️ `PG*` PERDUODAMI EKSPLICITIŠKAI.
+     *
+     * `pg` numatytai skaito `process.env`, o ne šiai funkcijai perduotą `env`.
+     * Testams ir bet kokiam kvietimui su kitokia konfigūracija tai reikštų,
+     * kad tikrinama NE ta duomenų bazė, kurią nurodė kvietėjas.
+     */
+    client = new Client({
+      connectionString: env.DATABASE_URL || undefined,
+      ...(env.DATABASE_URL
+        ? {}
+        : {
+            host: env.PGHOST,
+            port: env.PGPORT ? Number(env.PGPORT) : 5432,
+            user: env.PGUSER,
+            password: env.PGPASSWORD,
+            database: env.PGDATABASE,
+          }),
+      connectionTimeoutMillis: 5000,
+      /**
+       * ⚠️ UŽKLAUSŲ TIMEOUT ATSKIRAI. `connectionTimeoutMillis` galioja tik
+       * prisijungimui: jei serveris priima jungtį, bet nustoja atsakinėti,
+       * kiekviena `query()` lauktų neribotai — `make doctor` pakibtų, o
+       * `/api/health/deep` užklausos liktų atviros.
+       */
+      statement_timeout: 5000,
+      query_timeout: 5000,
+    });
+    await client.connect();
+
+    const versija = (await client.query("SHOW server_version")).rows[0].server_version;
+
+    /**
+     * `pgmigrations` nebuvimas reiškia, kad `npm run migrate:up` dar
+     * nepaleistas — DB veikia, bet schemos nėra.
+     */
+    const lentelė = await client.query(
+      "SELECT to_regclass('public.pgmigrations') IS NOT NULL AS yra"
+    );
+
+    if (!lentelė.rows[0].yra) {
+      return {
+        name,
+        ok: false,
+        detail: `prisijungta (PostgreSQL ${versija}), bet MIGRACIJOS NEPRITAIKYTOS - paleiskite \`npm run migrate:up\``,
+      };
+    }
+
+    /**
+     * ⚠️ LYGINAMA SU REPO MIGRACIJOMIS, ne tik skaičiuojama.
+     *
+     * `pgmigrations` egzistavimas reiškia, kad migracijos KAŽKADA paleistos.
+     * DB, kurioje pritaikyta tik senesnė migracija, be šio palyginimo grąžintų
+     * `ok: true`, ir `/api/health/deep` rodytų 200, kol užklausos ims kristi.
+     */
+    const pritaikytos = new Set(
+      (await client.query("SELECT name FROM pgmigrations")).rows.map((r) => r.name)
+    );
+
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const katalogas = path.resolve(__dirname, "..", "migrations");
+
+    const repo = fs.existsSync(katalogas)
+      ? fs
+          .readdirSync(katalogas)
+          .filter((f) => /\.(js|sql)$/.test(f))
+          .map((f) => f.replace(/\.(js|sql)$/, ""))
+      : [];
+
+    const laukia = repo.filter((m) => !pritaikytos.has(m));
+    const nežinomos = [...pritaikytos].filter((m) => !repo.includes(m));
+
+    if (laukia.length > 0) {
+      return {
+        name,
+        ok: false,
+        detail:
+          `prisijungta (PostgreSQL ${versija}), bet LAUKIA ${laukia.length} migracijų ` +
+          `(${laukia.slice(0, 3).join(", ")}${laukia.length > 3 ? "..." : ""}) - ` +
+          "paleiskite `npm run migrate:up`",
+      };
+    }
+
+    if (nežinomos.length > 0) {
+      /**
+       * DB turi migracijų, kurių repo nėra — tikėtina, kad kodas senesnis nei
+       * schema (rollback ar mišrus diegimas). Tai kita problema nei trūkstamos.
+       */
+      return {
+        name,
+        ok: false,
+        detail:
+          `prisijungta (PostgreSQL ${versija}), bet DB turi ${nežinomos.length} NEŽINOMŲ ` +
+          "migracijų - ar kodas senesnis nei schema?",
+      };
+    }
+
+    return {
+      name,
+      ok: true,
+      detail: `PostgreSQL ${versija}, pritaikyta migracijų: ${pritaikytos.size}`,
+    };
+  } catch (e) {
+    /**
+     * ⚠️ `DATABASE_URL` NERODOMAS — jame yra slaptažodis. Rodomas tik hostas ir
+     * klaidos kodas, kaip `httpReachability` atveju.
+     */
+    let host = "(nežinomas host)";
+    try {
+      host = env.DATABASE_URL
+        ? new URL(env.DATABASE_URL).host
+        : `${env.PGHOST}:${env.PGPORT || 5432}`;
+    } catch {
+      /* netinkamas URL - hosto nerodom */
+    }
+
+    /**
+     * ⚠️ SKIRTINGI GEDIMAI REIKALAUJA SKIRTINGŲ VEIKSMŲ.
+     *
+     * Ankstesnė versija viską vadino „NEPASIEKIAMAS: ar servisas paleistas?".
+     * Bet neteisingas slaptažodis, nesanti DB ar trūkstamos teisės reiškia, kad
+     * servisas VEIKIA — operatorius siųstas klaidinga kryptimi.
+     */
+    const PAGAL_KODĄ = {
+      "28P01": "neteisingi prisijungimo duomenys (POSTGRES_PASSWORD?)",
+      "28000": "prisijungimas atmestas (pg_hba.conf ar vartotojas?)",
+      "3D000": "tokios duomenų bazės NĖRA (POSTGRES_DB?)",
+      "42501": "trūksta teisių skaityti `pgmigrations`",
+      "57P03": "serveris paleidžiamas - dar nepriima jungčių",
+    };
+
+    const paaiškinimas = PAGAL_KODĄ[e.code];
+    if (paaiškinimas) {
+      return { name, ok: false, detail: `${host}: ${paaiškinimas} (${e.code})` };
+    }
+
+    return { name, ok: false, detail: `${host} NEPASIEKIAMAS (${e.code || e.name}): ar servisas paleistas?` };
+  } finally {
+    if (client) await client.end().catch(() => {});
+  }
 }
 
 // Pasiekiamumo patikra: bandome bazinį URL (be kelio) su trumpu timeout - mums

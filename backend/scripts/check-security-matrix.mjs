@@ -65,8 +65,28 @@ for (const name of mentioned) {
   }
 }
 
-// 2. Ar kiekvienas saugumo/privatumo testas paminėtas?
-for (const suite of ["privacy", "security"]) {
+// 2. Ar kiekvienas testas paminėtas?
+//
+// ⚠️ ANKSČIAU BUVO TIK `privacy` ir `security`.
+//
+// Todėl `redis` ir `postgres` rinkinių testai galėjo atsirasti be nė vieno
+// įrašo matricoje, ir sargas to nematė: patikra buvo VIENPUSĖ (matrica →
+// suites, bet ne atvirkščiai visiems rinkiniams). Rasta pridedant
+// `postgresDoctor.integration` — matricos skaičius nepasikeitė.
+//
+// Integraciniai testai saugo tokias pat garantijas kaip vienetiniai; tai, kad
+// jiems reikia išorinio serviso, nedaro jų mažiau dokumentuotinų.
+//
+// ⚠️ `functional` SĄMONINGAI NEĮTRAUKTAS. Tai SAUGUMO matrica, ne visų testų
+// registras: reikalavimas dokumentuoti kiekvieną funkcinį testą (šiandien jų
+// nepaminėta 20+) paverstų matricą apyvartos dokumentu ir nuvertintų įrašus,
+// kurie tikrai aprašo saugumo garantiją.
+//
+// `redis` ir `postgres` įtraukti, nes juose gyvena nuosavybės CAS, fazių CAS ir
+// backend'ų kontraktas — invariantai, ne funkcijos.
+const DOKUMENTUOJAMI = ["privacy", "security", "redis", "postgres"];
+
+for (const suite of DOKUMENTUOJAMI) {
   for (const name of suites[suite]) {
     if (!mentioned.has(name)) {
       problems.push(
