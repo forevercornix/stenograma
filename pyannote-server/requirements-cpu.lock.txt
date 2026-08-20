@@ -13,7 +13,7 @@
 # torch/torchaudio NĖRA čia (įdiegiami atskirai su tinkamu index-url CPU/GPU) -
 # žr. komentarą viršuje ir Dockerfile'us.
 
-pyannote.audio==3.3.2
+pyannote.audio==4.0.7
 fastapi==0.141.1
 uvicorn==0.52.3
 python-multipart==0.0.32

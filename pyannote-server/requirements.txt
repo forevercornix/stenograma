@@ -1,7 +1,7 @@
 fastapi>=0.141.1
 uvicorn>=0.52.3
 python-multipart>=0.0.32
-pyannote.audio>=3.1
+pyannote.audio>=4.0.7
 # torch įdiegiamas atskirai Dockerfile'e (CPU ar CUDA variantas priklauso nuo bazinio image)
 
 # Testavimui (pytest test_server.py, test_diarize_integration.py):
