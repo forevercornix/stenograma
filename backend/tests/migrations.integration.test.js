@@ -135,7 +135,7 @@ test(
      *
      * `-m` nurodo `node-pg-migrate` kitą katalogą; repo turinys nepaliečiamas.
      */
-    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "steno-migr-"));
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-migr-"));
     const fixtureVardas = `9999999999999_test_idempotency`;
     const fixtureKelias = path.join(fixtureDir, `${fixtureVardas}.js`);
 
