@@ -123,7 +123,12 @@ async function ensureInitialized() {
   // jobStore.init() idempotentiškas (initPromise) - saugu kviesti; grąžina esamą store.
   const jobStore = require("../utils/jobStore");
   await jobStore.init();
-  return init({ persistentStoreAvailable: jobStore.getBackend() === "redis" });
+  /**
+   * ⚠️ TAS PATS SPRENDIMAS KAIP `server.js` ir `workers/index.js` (#155, 7.2a).
+   * `getBackend() === "redis"` čia reikštų, kad PostgreSQL metaduomenys
+   * nukreiptų tinginį inicijavimą į inline režimą, nors Redis eilė veikia.
+   */
+  return init({ persistentStoreAvailable: jobStore.hasQueueBackend() });
 }
 
 async function enqueueTranscription(jobId, payload) {

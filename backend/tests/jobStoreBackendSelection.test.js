@@ -2,6 +2,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const jobStore = require("../utils/jobStore");
+const {
+  SHARED_BACKENDS,
+  selectBackend,
+  canUseQueue,
+  isPersistentBackend,
+} = require("../utils/jobStore/backendSelection");
 
 /**
  * BACKEND'O PARINKIMAS IR AKTYVAVIMO BARJERAS (#155, 7.2a).
@@ -35,7 +41,7 @@ test("parinkimas: JOB_STORE_BACKEND perrašo išvedimą", () => {
     "memory"
   );
   assert.equal(
-    resolveBackendChoice({ JOB_STORE_BACKEND: "redis", DATABASE_URL: PG }).norimas,
+    resolveBackendChoice({ JOB_STORE_BACKEND: "redis", DATABASE_URL: PG, REDIS_URL: REDIS }).norimas,
     "redis"
   );
 });
@@ -76,7 +82,11 @@ test("BARJERAS: eksplicitinis JOB_STORE_BACKEND=postgres yra KLAIDA, ne įspėji
    * nurodymas reiškia tik viena. Jį ignoruoti tyliai būtų blogiau nei kristi.
    */
   assert.throws(
-    () => applyActivationBarrier(resolveBackendChoice({ JOB_STORE_BACKEND: "postgres" }), {}),
+    () =>
+      applyActivationBarrier(
+        resolveBackendChoice({ JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }),
+        {}
+      ),
     /aktyvavimo barjeras|barjeras/i
   );
 });
@@ -88,20 +98,176 @@ test("BARJERAS: memory ir redis pasirinkimai praeina nepakitę", () => {
   }
 });
 
-test("EILĖ: hasQueueBackend() eksportuojamas ir nepriklauso nuo getBackend()", () => {
-  /**
-   * ⚠️ `server.js` anksčiau įjungdavo BullMQ tik kai
-   * `jobStore.getBackend() === "redis"`. Pasirinkus PostgreSQL metaduomenims,
-   * vykdymas nukristų į inline režimą NORS REDIS VEIKIA: sukurti eilės job'ai
-   * liktų nesuvartoti, o naujas darbas taptų nepatvarus.
-   */
-  assert.equal(typeof jobStore.hasQueueBackend, "function");
+/* ── EILĖS ATSIEJIMAS ─────────────────────────────────────────────────────── */
 
+/**
+ * ⚠️ TIKRINAMA GRYNOJI `canUseQueue()`, ne jos apvalkalas.
+ *
+ * Ankstesnė šio bloko versija turėjo testinį helperį, kartojantį tą pačią
+ * sąlygą, ir `toString()` patikrą, ieškančią dviejų žodžių funkcijos tekste.
+ * Abu buvo blogi: helperis yra ANTRA taisyklės kopija (testai liktų žali
+ * realizacijai apsivertus), o `toString()` tikrina formą, ne elgesį —
+ * `return !SHARED_BACKENDS.includes(...)` turėtų abu terminus ir praeitų.
+ *
+ * Visi šeši deriniai tikrinami tiesiogiai prieš tikrą funkciją.
+ */
+
+const REDIS_YRA = { REDIS_URL: REDIS };
+const REDIS_NĖRA = {};
+
+test("EILĖ: DATABASE_URL + REDIS_URL → BullMQ ĮJUNGTAS", () => {
+  /**
+   * ⚠️ ESMINIS DoD SCENARIJUS, dėl kurio visas atsiejimas ir daromas.
+   *
+   * Anksčiau `server.js` klausė `getBackend() === "redis"`. Pasirinkus
+   * PostgreSQL metaduomenims vykdymas nukristų į inline režimą NORS REDIS
+   * VEIKIA: sukurti BullMQ job'ai liktų nesuvartoti, o naujas darbas taptų
+   * nepatvarus.
+   */
+  const env = { DATABASE_URL: PG, REDIS_URL: REDIS };
+
+  // Barjeras šiandien palieka metaduomenis Redis'e...
+  assert.equal(selectBackend(env).norimas, "redis");
+  assert.equal(canUseQueue(env, "redis"), true);
+
+  // ...o barjerą atidarius jie taps postgres - eilė privalo LIKTI įjungta.
+  assert.equal(canUseQueue(env, "postgres"), true, "postgres metaduomenys neturi išjungti eilės");
+});
+
+test("EILĖ: su REDIS_URL bendras metaduomenų backend'as duoda true", () => {
+  assert.equal(canUseQueue(REDIS_YRA, "redis"), true);
+  assert.equal(canUseQueue(REDIS_YRA, "postgres"), true);
+});
+
+test("EILĖ: be REDIS_URL visada false, nepriklausomai nuo metaduomenų", () => {
+  /** BullMQ gyvena Redis'e - bendra metaduomenų saugykla jo nepakeičia. */
+  assert.equal(canUseQueue(REDIS_NĖRA, "redis"), false);
+  assert.equal(canUseQueue(REDIS_NĖRA, "postgres"), false);
+  assert.equal(canUseQueue(REDIS_NĖRA, "memory"), false);
+  assert.equal(canUseQueue({ DATABASE_URL: PG }, "postgres"), false);
+});
+
+test("EILĖ: REDIS_URL + memory metaduomenys → false (SĄMONINGA IŠIMTIS)", () => {
+  /**
+   * ⚠️ TAI NĖRA NENUOSEKLUMAS SU „eilė nereikalauja BŪTENT Redis".
+   *
+   * BullMQ vykdo darbą ATSKIRAME worker procese. Su `memory` metaduomenimis
+   * tas procesas atnaujintų savo atminties kopiją, o HTTP procesas jos
+   * nematytų: klientas amžinai apklausinėtų `queued` job'ą, kuris kitame
+   * procese jau baigtas. Reikalavimas yra „BENDRAS backend'as" - ir `memory`
+   * bendras nėra.
+   */
+  assert.equal(canUseQueue(REDIS_YRA, "memory"), false);
+  assert.equal(SHARED_BACKENDS.includes("memory"), false);
+
+  const env = { REDIS_URL: REDIS, JOB_STORE_BACKEND: "memory" };
+  assert.equal(selectBackend(env).norimas, "memory");
+});
+
+test("EILĖ: hasQueueBackend() deleguoja į canUseQueue be savo sąlygos", () => {
+  /**
+   * Apvalkalas skaito `process.env` ir aktyvaus store backend'ą. Čia
+   * tikrinama, kad jis grąžina TĄ PATĮ atsakymą kaip gryna funkcija tomis
+   * pačiomis įvestimis - kitaip apvalkale galėtų atsirasti antra sąlyga.
+   */
   const be = { ...process.env };
   delete process.env.REDIS_URL;
   try {
-    assert.equal(jobStore.hasQueueBackend(), false, "be REDIS_URL eilės nėra");
+    assert.equal(
+      jobStore.hasQueueBackend(),
+      canUseQueue(process.env, jobStore.getBackend()),
+      "apvalkalas nukrypo nuo grynosios funkcijos"
+    );
+    assert.equal(jobStore.hasQueueBackend(), false);
   } finally {
     Object.assign(process.env, be);
   }
+});
+
+
+/* ── FAIL-CLOSED ──────────────────────────────────────────────────────────── */
+
+/**
+ * ⚠️ ŠIŲ TESTŲ APIMTIS RIBOTA SĄMONINGAI.
+ *
+ * DoD reikalauja, kad pasirinkus PostgreSQL prisijungimo klaida nutrauktų
+ * startą arba readiness, o ne pereitų į memory. Aktyvavimo barjeras
+ * PostgreSQL dar neparenka, tad PILNO produkcinio kelio
+ * (`DATABASE_URL` → startas nutrūksta) šiame PR NĖRA - jo galutinis
+ * acceptance priklauso aktyvavimo etapui.
+ *
+ * Ką ŠIE testai vis dėlto įrodo: kad gedimo kelias egzistuoja, kad jis META
+ * klaidą ir kad jis NEGRĮŽTA į memory. Be jų kriterijus neturėtų jokio
+ * įrodymo, o neišbandytas gedimo kelias, įsijungiantis 7.2b momentu, yra
+ * blogesnis nei neparašytas - jis atrodo padengtas.
+ */
+test("FAIL-CLOSED: neprieinamas PostgreSQL meta klaidą, o ne grįžta į memory", async () => {
+  const buves = process.env.DATABASE_URL;
+  // Rezervuotas TEST-NET-1 adresas (RFC 5737) - garantuotai neatsakys.
+  process.env.DATABASE_URL = "postgres://n:n@192.0.2.1:5432/nera?connect_timeout=1";
+
+  try {
+    await assert.rejects(
+      () => jobStore._initializePostgresForTests(),
+      (err) => /PostgreSQL neprieinamas/.test(err.message) && /split-brain/.test(err.message),
+      "prisijungimo klaida privalo nutraukti, ne pereiti kitur"
+    );
+
+    assert.notEqual(
+      jobStore.getBackend(),
+      "postgres",
+      "nepavykęs prisijungimas neturi palikti aktyvaus PostgreSQL store'o"
+    );
+  } finally {
+    if (buves === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = buves;
+  }
+});
+
+test("FAIL-CLOSED: Redis kelias fallback'ą IŠLAIKO (elgesys skiriasi sąmoningai)", () => {
+  /**
+   * Skirtumas nėra nenuoseklumas: Redis fallback praranda tik NAUJUS job'us,
+   * o esami įrašai lieka Redis'e. Su PostgreSQL tas pats elgesys reikštų, kad
+   * nauji job'ai rašomi į atmintį, o autoritetingi lieka DB - split-brain,
+   * kuris „išnyksta" DB atsistačius, palikdamas dvi tikroves.
+   */
+  const env = { REDIS_URL: REDIS };
+  assert.equal(applyActivationBarrier(resolveBackendChoice(env), env).norimas, "redis");
+});
+
+/* ── EKSPLICITINIS BACKEND'AS BE PRIKLAUSOMYBĖS ───────────────────────────── */
+
+test("PARINKIMAS: JOB_STORE_BACKEND=redis be REDIS_URL yra KLAIDA", () => {
+  /**
+   * ⚠️ Be šios patikros eksplicitinis pasirinkimas tyliai virstų atmintimi:
+   * operatorius paprašytų Redis, servisas sėkmingai pakiltų, ir kiekvienas
+   * job'as dingtų po restarto - net be prisijungimo įspėjimo, nes jungtis
+   * nė nebandoma.
+   */
+  assert.throws(
+    () => resolveBackendChoice({ JOB_STORE_BACKEND: "redis" }),
+    /REDIS_URL nenustatytas/
+  );
+});
+
+test("PARINKIMAS: JOB_STORE_BACKEND=postgres be DATABASE_URL yra KLAIDA", () => {
+  assert.throws(
+    () => resolveBackendChoice({ JOB_STORE_BACKEND: "postgres" }),
+    /DATABASE_URL nenustatytas/
+  );
+});
+
+test("PARINKIMAS: eksplicitinis redis SU REDIS_URL praeina", () => {
+  assert.equal(resolveBackendChoice({ JOB_STORE_BACKEND: "redis", REDIS_URL: REDIS }).norimas, "redis");
+});
+
+test("PERSISTENCIJA: JOB_STORE_BACKEND=memory + DATABASE_URL nėra persistentinis", () => {
+  /**
+   * ⚠️ Antras kelias į tą patį melą kaip vien `DATABASE_URL`: eksplicitiškai
+   * pasirinkta atmintis, o `Boolean(DATABASE_URL)` skelbtų persistenciją.
+   */
+  assert.equal(
+    isPersistentBackend({ JOB_STORE_BACKEND: "memory", DATABASE_URL: PG, REDIS_URL: REDIS }),
+    false
+  );
 });

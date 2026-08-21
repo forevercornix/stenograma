@@ -28,10 +28,11 @@ test("initializeWorkerOrFail meta klaidą, jei jobStore fallback'ino į memory",
     ...realJobStore,
     init: async () => {},
     getBackend: () => "memory", // simuliuojam fallback
+    hasQueueBackend: () => false,
   };
 
   const { initializeWorkerOrFail } = require("../workers/index");
-  await assert.rejects(() => initializeWorkerOrFail("Test worker"), /negali veikti be Redis/);
+  await assert.rejects(() => initializeWorkerOrFail("Test worker"), /negali veikti be BENDROS/);
 
   // atkuriam
   delete require.cache[jobStorePath];
@@ -49,6 +50,35 @@ test("initializeWorkerOrFail praeina, kai jobStore backend = redis", async () =>
     ...realJobStore,
     init: async () => {},
     getBackend: () => "redis", // Redis pavyko
+    hasQueueBackend: () => true,
+  };
+
+  const { initializeWorkerOrFail } = require("../workers/index");
+  await assert.doesNotReject(() => initializeWorkerOrFail("Test worker"));
+
+  delete require.cache[jobStorePath];
+  if (prevUrl === undefined) delete process.env.REDIS_URL; else process.env.REDIS_URL = prevUrl;
+});
+
+test("initializeWorkerOrFail praeina su PostgreSQL metaduomenimis + Redis eile", async () => {
+  /**
+   * ⚠️ #155, 7.2a. Anksčiau čia buvo `getBackend() !== "redis"`, tad atidarius
+   * aktyvavimo barjerą su nustatytais IR `DATABASE_URL`, IR `REDIS_URL` HTTP
+   * procesas dėtų job'us į BullMQ (`hasQueueBackend()` → `true`), o KIEKVIENAS
+   * atskiras worker'is kristų starte: vartotojo darbas liktų eilėje amžinai,
+   * be nė vieno vykdytojo.
+   */
+  const prevUrl = process.env.REDIS_URL;
+  process.env.REDIS_URL = "redis://mock:6379";
+
+  delete require.cache[require.resolve("../workers/index")];
+  const jobStorePath = require.resolve("../utils/jobStore");
+  const realJobStore = require("../utils/jobStore");
+  require.cache[jobStorePath].exports = {
+    ...realJobStore,
+    init: async () => {},
+    getBackend: () => "postgres",
+    hasQueueBackend: () => true,
   };
 
   const { initializeWorkerOrFail } = require("../workers/index");

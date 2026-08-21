@@ -509,41 +509,92 @@ test("PERSISTENT_STORAGE=true be jokios patvarios saugyklos = klaida (persistenc
 });
 
 /**
- * #155, 7.2a: po PostgreSQL etapo persistencija nebėra vien Redis klausimas.
+ * #155, 7.2a: PERSISTENCIJA IŠVEDAMA IŠ FAKTINIO BACKEND'O.
  *
- * Be šių atvejų diegimas su vienu `DATABASE_URL` arba reikalautų nesamo
- * `REDIS_URL`, arba praneštų patvarią saugyklą kaip efemerišką - t. y.
- * meluotų apie save būtent tam, kas privatumo nuostatas skaito.
+ * ⚠️ ŠIE TESTAI PRIKLAUSO NUO AKTYVAVIMO BARJERO IR TAI SĄMONINGA.
+ *
+ * Kol barjeras uždarytas, vien `DATABASE_URL` job'us palieka ATMINTYJE, tad
+ * persistencijos jis NEDUODA. Barjerą atidarius (7.5b/7.6) šie lūkesčiai
+ * apsiverčia - ir turi apsiversti pastebimai: testas, parašytas taip, kad
+ * praeitų abiem atvejais, nebetikrintų nieko.
+ *
+ * Ankstesnė realizacija čia melavo: `Boolean(REDIS_URL || DATABASE_URL)`
+ * pranešdavo `persistentStorage=true`, nors job'ai dingtų po restarto.
  */
-test("PERSISTENT_STORAGE=true su DATABASE_URL (be Redis) praeina", () => {
-  const { errors } = validatePrivacyConfig({
-    ...LOCAL_ENV,
-    PERSISTENT_STORAGE: "true",
-    DATABASE_URL: "postgres://localhost:5432/steno",
-  });
-
-  assert.deepEqual(errors, []);
-});
-
-test("DATABASE_URL vienas išveda persistentStorage=true", () => {
+test("vien DATABASE_URL NEDUODA persistencijos, kol galioja aktyvavimo barjeras", () => {
   const config = getPrivacyConfig({
     ...LOCAL_ENV,
     DATABASE_URL: "postgres://localhost:5432/steno",
+  });
+
+  assert.equal(
+    config.persistentStorage,
+    false,
+    "barjeras palieka job'us atmintyje - pranešti persistenciją reikštų meluoti operatoriui"
+  );
+});
+
+test("DATABASE_URL + REDIS_URL išveda persistentStorage=true (job'ai Redis'e)", () => {
+  const config = getPrivacyConfig({
+    ...LOCAL_ENV,
+    DATABASE_URL: "postgres://localhost:5432/steno",
+    REDIS_URL: "redis://localhost:6379",
   });
 
   assert.equal(config.persistentStorage, true);
   assert.equal(config.persistentExplicit, false);
 });
 
-test("PERSISTENT_STORAGE=false su DATABASE_URL = prieštaravimas", () => {
+test("PERSISTENT_STORAGE=true su vienu DATABASE_URL = KLAIDA", () => {
+  /**
+   * Be šios patikros diegimas paleistų su nuostata „viskas saugoma", o job'ai
+   * dingtų per pirmą restartą.
+   */
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "true",
+    DATABASE_URL: "postgres://localhost:5432/steno",
+  });
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /nei REDIS_URL, nei DATABASE_URL nenustatytas/);
+});
+
+test("PERSISTENT_STORAGE=true su DATABASE_URL + REDIS_URL praeina", () => {
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "true",
+    DATABASE_URL: "postgres://localhost:5432/steno",
+    REDIS_URL: "redis://localhost:6379",
+  });
+
+  assert.deepEqual(errors, []);
+});
+
+test("PERSISTENT_STORAGE=false su vienu DATABASE_URL NĖRA prieštaravimas", () => {
+  /**
+   * Niekas patvaraus neįjungta, tad prieštaravimo nėra. Klaida čia verstų
+   * operatorių šalinti `DATABASE_URL`, reikalingą migracijoms ir 7.3 sesijoms.
+   */
   const { errors } = validatePrivacyConfig({
     ...LOCAL_ENV,
     PERSISTENT_STORAGE: "false",
     DATABASE_URL: "postgres://localhost:5432/steno",
   });
 
+  assert.deepEqual(errors, []);
+});
+
+test("PERSISTENT_STORAGE=false su DATABASE_URL + REDIS_URL = prieštaravimas", () => {
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "false",
+    DATABASE_URL: "postgres://localhost:5432/steno",
+    REDIS_URL: "redis://localhost:6379",
+  });
+
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /DATABASE_URL/);
+  assert.match(errors[0], /REDIS_URL/);
 });
 
 test("PERSISTENT_STORAGE=false praeina ir įspėja apie duomenų praradimą po restarto", () => {

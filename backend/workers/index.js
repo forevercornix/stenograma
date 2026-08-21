@@ -386,10 +386,23 @@ async function initializeWorkerOrFail(workerName) {
     throw new Error(`${workerName} reikia REDIS_URL (BullMQ). Be jo naudokite inline režimą (darbas HTTP procese).`);
   }
   await jobStore.init();
-  if (jobStore.getBackend() !== "redis") {
+  /**
+   * ⚠️ TIKRINAMA EILĖS GALIMYBĖ, NE KONKRETUS BACKEND'AS (#155, 7.2a).
+   *
+   * Anksčiau čia buvo `getBackend() !== "redis"`. Atidarius PostgreSQL
+   * aktyvavimo barjerą su nustatytais IR `DATABASE_URL`, IR `REDIS_URL`,
+   * HTTP procesas dėtų job'us į BullMQ (`hasQueueBackend()` grąžintų `true`),
+   * o KIEKVIENAS atskiras worker'is kristų starte - vartotojo darbas liktų
+   * eilėje amžinai, be nė vieno vykdytojo.
+   *
+   * Sprendimą priima ta pati `canUseQueue()`, kurią naudoja `server.js`.
+   */
+  if (!jobStore.hasQueueBackend()) {
     throw new Error(
-      `${workerName} negali veikti be Redis job store (jobStore fallback'ino į memory). ` +
-      "Patikrinkite REDIS_URL ir Redis pasiekiamumą."
+      `${workerName} negali veikti be BENDROS job saugyklos (dabar: ` +
+      `"${jobStore.getBackend()}"). BullMQ reikia REDIS_URL ir bendro ` +
+      "metaduomenų backend'o (redis arba postgres) - su atmintimi worker'is " +
+      "atnaujintų savo proceso kopiją, o HTTP procesas jos nematytų."
     );
   }
 }

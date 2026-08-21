@@ -1,4 +1,5 @@
 const { describeSelection, isExternal } = require("./providerPrivacy");
+const { isPersistentBackend } = require("./jobStore/backendSelection");
 const { probeRedactionComponent, isRedactionAvailable } = require("./redactionComponent");
 
 /**
@@ -81,18 +82,22 @@ function getPrivacyConfig(env = process.env) {
    * tokios tylios neatitikties šiame projekte vengiam - geriau kieta klaida.
    */
   /**
-   * ⚠️ IŠVEDAMA IR IŠ `DATABASE_URL` (#155, 7.2a).
+   * ⚠️ IŠVEDAMA IŠ FAKTINIO BACKEND'O, NE IŠ ENV KINTAMŲJŲ (#155, 7.2a).
    *
-   * Anksčiau persistencija buvo išvedama TIK iš `REDIS_URL`. Po #155 job
-   * metaduomenys, sesijos ir auditas gali gyventi PostgreSQL'e, tad diegimas
-   * su vienu `DATABASE_URL` pranešdavo saugyklą kaip EFEMERIŠKĄ - t. y.
-   * meluodavo apie save būtent tam, kas privatumo nuostatas skaito.
+   * `Boolean(env.REDIS_URL || env.DATABASE_URL)` atrodo teisingai, bet MELUOJA:
+   * su `DATABASE_URL` be `REDIS_URL` aktyvavimo barjeras palieka job'us
+   * ATMINTYJE, o ši reikšmė būtų `true`. Operatorius pagrįstai manytų, kad
+   * job'ai išgyvens restartą, ir prarastų metaduomenis bei rezultatus.
+   *
+   * Klausimas „ar job store persistentinis?" turi VIENĄ autoritetingą
+   * atsakymą - `jobStore/backendSelection.js`, tas pats, kuriuo remiasi ir
+   * pati inicijacija. Barjerą atidarius ši eilutė nesikeičia.
    */
   const persistentRaw = env.PERSISTENT_STORAGE;
   const persistentExplicit = persistentRaw !== undefined && persistentRaw !== "";
   const persistentStorage = persistentExplicit
     ? _bool(persistentRaw, false)
-    : Boolean(env.REDIS_URL || env.DATABASE_URL);
+    : isPersistentBackend(env);
 
   const audioRetentionHours = _int(env.AUDIO_RETENTION_HOURS, 24);
 
@@ -198,8 +203,15 @@ function validatePrivacyConfig(env = process.env) {
   // --- Persistentinė saugykla (GDPR #5: "persistent storage can be disabled") ---
   const redisConfigured = Boolean(env.REDIS_URL);
   const postgresConfigured = Boolean(env.DATABASE_URL);
-  /** Bet kuri patvari saugykla - ne tik Redis (#155). */
-  const persistentConfigured = redisConfigured || postgresConfigured;
+  /**
+   * ⚠️ NE `REDIS_URL || DATABASE_URL`.
+   *
+   * Validacija privalo remtis tuo, kas REALIAI bus naudojama. Kol aktyvavimo
+   * barjeras uždarytas, vien `DATABASE_URL` patvarios saugyklos NEDUODA, tad
+   * `PERSISTENT_STORAGE=true` su juo vienu būtų būtent tas melas, kurį ši
+   * patikra turi gaudyti.
+   */
+  const persistentConfigured = isPersistentBackend(env);
 
   if (config.persistentExplicit && !config.persistentStorage && persistentConfigured) {
     const kuris = [redisConfigured && "REDIS_URL", postgresConfigured && "DATABASE_URL"]

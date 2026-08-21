@@ -79,6 +79,14 @@ function rowToJob(row) {
     ownerId: row.owner_id,
     ownerKind: row.owner_kind,
     tenantId: tenantFromDb(row.tenant_id),
+    /**
+     * ⚠️ HIDRATUOJAMAS BŪTINAI. `jobToRow()` jį rašo, o be atgalinio susiejimo
+     * pirmas gyvavimo ciklo `update()` perrašytų stulpelį į `NULL`: dalinis
+     * indeksas `NULL` eilučių neapima, tad pakartotinis `create()` su tuo pačiu
+     * raktu praeitų vietoj `DuplicateJobError`. Idempotency dingtų per
+     * ĮPRASTĄ round-trip, ne per kraštutinį atvejį.
+     */
+    idempotencyKey: row.idempotency_key,
     actor: row.actor,
     actorRole: row.actor_role,
     actorSource: row.actor_source,
@@ -312,7 +320,13 @@ function createPostgresStore(pool) {
      * atominiai autorizuoja kaip savininkas A. Sąrašas ribojamas ir SQL pusėje.
      */
     const mutable = COLUMNS.filter(
-      (c) => !["id", "owner_id", "owner_kind", "tenant_id", "created_at"].includes(c)
+      /**
+       * ⚠️ `idempotency_key` TAIP PAT NEKINTAMAS. Jis identifikuoja KŪRIMO
+       * ketinimą; leidus jį keisti, du skirtingi ketinimai galėtų susilieti
+       * arba vienas atsilaisvintų pakartotiniam naudojimui.
+       */
+      (c) =>
+        !["id", "owner_id", "owner_kind", "tenant_id", "idempotency_key", "created_at"].includes(c)
     );
     const sets = mutable.map((c, i) => `"${c}" = $${i + 2}`).join(", ");
 

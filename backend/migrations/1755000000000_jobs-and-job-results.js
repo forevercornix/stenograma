@@ -125,16 +125,25 @@ exports.up = (pgm) => {
   /**
    * `status × phase`.
    *
-   * ⚠️ LEGACY `processing + phase = NULL` NEATMETAMAS. #154 tai eksplicitiškai
-   * laiko realiu pre-#154 atsarginių kopijų formatu: `finish()` tokį įrašą
-   * terminalizuoja, o `restoreService` perduoda `restoreRecord()` nepakeistą.
-   * Constraint'as, atmetantis šią būseną, sulaužytų atkūrimo kontraktą ir
-   * galėtų nutraukti restore per pusę.
+   * ⚠️ LEGACY `processing + phase = NULL` NEATMETAMAS, BET IŠIMTIS SIAURA.
+   *
+   * #154 tai eksplicitiškai laiko realiu pre-#154 atsarginių kopijų formatu:
+   * `finish()` tokį įrašą terminalizuoja, o `restoreService` perduoda
+   * `restoreRecord()` nepakeistą. Constraint'as, atmetantis šią būseną,
+   * sulaužytų atkūrimo kontraktą.
+   *
+   * ⚠️ BET IŠIMTIS RIBOJAMA `schema_version IS NULL`. Besąlyginė ji priimtų ir
+   * DABARTINĮ (`schema_version = 2`) įrašą tokioje būsenoje - o
+   * `assertConsistentJobRecord()` (`jobPhase.js:166`) jį atmeta kaip
+   * `INVALID_STATUS_PHASE`. Sugadinta nauja kopija būtų sėkmingai įrašyta ir
+   * UŽSTRIGTŲ: `finish()` ją dar terminalizuotų, bet progreso ir perėjimų
+   * apdorojimas mestų. Era yra tikslus legacy žymuo - `newJob()` nuo #158
+   * visada nustato `2`, o pre-#154 įrašai lauko neturi.
    */
   pgm.addConstraint("jobs", "jobs_status_phase", {
     check: `
       CASE
-        WHEN status = 'processing' THEN true
+        WHEN status = 'processing' THEN phase IS NOT NULL OR schema_version IS NULL
         ELSE phase IS NULL
       END
     `,

@@ -170,8 +170,8 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
 
   await t.test("get/getOwned/listAll grąžina rezultatą iš job_results", async () => {
     const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
-    await store.update(job.id, { status: "processing" });
-    await store.update(job.id, { status: "completed", result: { text: "transkripcija" } });
+    await store.update(job.id, { status: "processing", phase: "transcribing" });
+    await store.update(job.id, { status: "completed", phase: null, result: { text: "transkripcija" } });
 
     const scope = { ownerKind: OWNER_KIND.UNOWNED, ownerId: null };
     assert.deepEqual((await store.get(job.id)).result, { text: "transkripcija" });
@@ -181,8 +181,8 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
 
   await t.test("job_results ištrinami kartu su job'u (ON DELETE CASCADE)", async () => {
     const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
-    await store.update(job.id, { status: "processing" });
-    await store.update(job.id, { status: "completed", result: { a: 1 } });
+    await store.update(job.id, { status: "processing", phase: "transcribing" });
+    await store.update(job.id, { status: "completed", phase: null, result: { a: 1 } });
 
     await store.remove(job.id);
 
@@ -195,7 +195,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
   await t.test("listReferencedStorageKeys grąžina queued IR processing raktus", async () => {
     const a = await store.create({ ownerKind: OWNER_KIND.UNOWNED, storageKey: "audio/a.wav" });
     const b = await store.create({ ownerKind: OWNER_KIND.UNOWNED, storageKey: "audio/b.wav" });
-    await store.update(b.id, { status: "processing" });
+    await store.update(b.id, { status: "processing", phase: "transcribing" });
 
     const raktai = (await store.listReferencedStorageKeys()).sort();
 
@@ -213,8 +213,8 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
 
   await t.test("sweepExpired NEŠALINA jobų su nebaigtu valymu", async () => {
     const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, storageKey: "audio/x.wav" });
-    await store.update(job.id, { status: "processing" });
-    await store.update(job.id, { status: "completed", audio_cleanup_pending: true });
+    await store.update(job.id, { status: "processing", phase: "transcribing" });
+    await store.update(job.id, { status: "completed", phase: null, audio_cleanup_pending: true });
 
     assert.equal(await store.sweepExpired(Date.now() + 999e6), 0);
     assert.ok(await store.get(job.id), "jobStore įrašas yra vienintelis storageKey šaltinis");
@@ -291,6 +291,39 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     );
   });
 
+  await t.test("idempotency_key IŠLIEKA po gyvavimo ciklo update()", async () => {
+    /**
+     * ⚠️ REGRESIJOS TESTAS. Ankstesnė versija `rowToJob()` šio lauko
+     * nehidratavo, tad pirmas `update()` perrašydavo stulpelį į `NULL` -
+     * dalinis indeksas `NULL` neapima, ir pakartotinis `create()` PRAEIDAVO.
+     * Idempotency dingdavo per ĮPRASTĄ round-trip.
+     *
+     * Ankstesnis testas to nepagavo, nes tarp dviejų `create()` nedarė
+     * jokio `update()`.
+     */
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, idempotencyKey: "gyvas" });
+    assert.equal(job.idempotencyKey, "gyvas", "create() negrąžino rakto");
+    assert.equal((await store.get(job.id)).idempotencyKey, "gyvas", "get() prarado raktą");
+
+    await store.update(job.id, { status: "processing", phase: "transcribing" });
+    await store.update(job.id, { status: "completed", phase: null, result: { a: 1 } });
+
+    const { rows } = await pool.query("SELECT idempotency_key FROM jobs WHERE id = $1", [job.id]);
+    assert.equal(rows[0].idempotency_key, "gyvas", "update() ištrynė raktą");
+
+    await assert.rejects(
+      () => store.create({ ownerKind: OWNER_KIND.UNOWNED, idempotencyKey: "gyvas" }),
+      (err) => err instanceof DuplicateJobError
+    );
+  });
+
+  await t.test("idempotency_key NEKINTAMAS per update()", async () => {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, idempotencyKey: "pradinis" });
+    const po = await store.update(job.id, { idempotencyKey: "kitas" });
+
+    assert.equal(po.idempotencyKey, "pradinis", "kūrimo ketinimo raktas neturi būti keičiamas");
+  });
+
   await t.test("null idempotency_key nekonfliktuoja (dalinis indeksas)", async () => {
     await store.create({ ownerKind: OWNER_KIND.UNOWNED });
     await store.create({ ownerKind: OWNER_KIND.UNOWNED });
@@ -328,6 +361,19 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     await atmeta({ status: "completed", phase: "transcribing" }, "completed su faze");
   });
 
+  await t.test("DABARTINIS (schema_version=2) processing + phase=NULL ATMETAMAS", async () => {
+    /**
+     * ⚠️ Išimtis skirta TIK pre-#154 kopijoms. Besąlyginė ji priimtų ir
+     * dabartinį įrašą, kurį `assertConsistentJobRecord()` atmeta kaip
+     * `INVALID_STATUS_PHASE` - sugadinta nauja kopija būtų įrašyta ir
+     * užstrigtų.
+     */
+    await atmeta(
+      { status: "processing", phase: null, schema_version: 2 },
+      "dabartinės eros processing be fazės"
+    );
+  });
+
   await t.test("LEGACY processing + phase=NULL PRIIMAMAS", async () => {
     /**
      * ⚠️ #154 tai eksplicitiškai laiko realiu pre-#154 atsarginių kopijų
@@ -336,7 +382,10 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
      * būseną, sulaužytų atkūrimo kontraktą ir galėtų nutraukti restore per
      * pusę.
      */
-    await priima({ status: "processing", phase: null }, "legacy processing");
+    await priima(
+      { status: "processing", phase: null, schema_version: null },
+      "legacy processing (be eros žymens)"
+    );
   });
 
   /* ── CHECK: NOT NULL kaip UNKNOWN apsauga ────────────────────────────── */
@@ -367,7 +416,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
      * `PROGRESS_INVARIANTS` šio kryžminio ryšio neaprėpia.
      */
     await atmeta(
-      { status: "completed", progress_known: true, progress_current: 5, progress_total: 10 },
+      { status: "completed", phase: null, progress_known: true, progress_current: 5, progress_total: 10 },
       "terminalus job'as su progresu"
     );
     await atmeta(
