@@ -271,3 +271,45 @@ test("PERSISTENCIJA: JOB_STORE_BACKEND=memory + DATABASE_URL nėra persistentini
     false
   );
 });
+
+test("EILĖ: jobRunner be argumento klausia hasQueueBackend(), ne REDIS_URL", async () => {
+  /**
+   * ⚠️ REGRESIJOS TESTAS, ELGESIO (ne teksto) lygmeniu.
+   *
+   * `jobRunner.init()` atsarginis kelias anksčiau buvo
+   * `!!process.env.REDIS_URL`. Kelias negyvas TIK netiesiogiai - `server.js`
+   * visada perduoda `persistentStoreAvailable`. Pirmas kvietėjas, praleidęs
+   * argumentą, būtų gavęs `true` VIEN dėl `REDIS_URL`, net jei metaduomenys
+   * atmintyje: HTTP procesas kurtų job'ą atmintyje, siųstų į BullMQ, o
+   * worker'is jo nerastų.
+   *
+   * Scenarijus: `REDIS_URL` YRA, bet job store liko `memory`. Teisingas
+   * atsakymas - `inline`.
+   */
+  const buves = process.env.REDIS_URL;
+  process.env.REDIS_URL = "redis://mock:6379";
+
+  delete require.cache[require.resolve("../queues/jobRunner")];
+  const jobStorePath = require.resolve("../utils/jobStore");
+  const tikras = require("../utils/jobStore");
+  require.cache[jobStorePath].exports = {
+    ...tikras,
+    init: async () => {},
+    getBackend: () => "memory",
+    hasQueueBackend: () => false,
+  };
+
+  try {
+    const jobRunner = require("../queues/jobRunner");
+    assert.equal(
+      await jobRunner.init(),
+      "inline",
+      "su REDIS_URL, bet memory saugykla, BullMQ būtų nesuderinta sistema"
+    );
+  } finally {
+    delete require.cache[jobStorePath];
+    delete require.cache[require.resolve("../queues/jobRunner")];
+    if (buves === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = buves;
+  }
+});
