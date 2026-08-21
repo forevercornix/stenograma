@@ -718,7 +718,7 @@ Nebūtinai kiekviename CI — gali būti atskiras integracinis workflow.
 
 ## ⚠️ AKTYVAVIMO BARJERAS
 
-Peržiūros rado **keturias** atskiras tvarkos klaidas, ir visos to paties
+Peržiūros rado **šešias** atskiras tvarkos klaidas, ir visos to paties
 pavidalo: etapas, kuris PostgreSQL padaro autoritetingu, buvo suplanuotas
 anksčiau nei etapas, kuris tą režimą padaro atstatomu.
 
@@ -736,6 +736,8 @@ atsistatyti iš kopijos, neprarasti rezultatų ir neprikelti ištrintų duomenų
 | **Persistentės ištrynimo žymos** (7.5a dalis) | `deletionTombstones` yra proceso atmintis (`deletionTombstones.js:46`) — atkūrus naujame procese jos DINGSTA, tad restore pratybos negali įvykdyti savo pačių ištrinto job'o scenarijaus |
 | **Transakcinis rezultatų įrašymas** (7.5b dalis) | Be jo nutrūkęs procesas palieka `completed` be `job_results`; kitas bandymas atsimuša į `restart()` terminalų sargą, audio lieka, o klientas transkripcijos neturi |
 | **Idempotentiškas užbaigimas su konfliktų sprendimu** (7.5b dalis) | Transakcijos vienos NEPAKANKA — žr. žemiau |
+| **Fail-closed startas, patikrintas REALIAI** (7.2a `[F2]`) | `initializePostgres()` neturi fallback į atmintį, bet kol barjeras uždarytas, funkcija produkcijoje NEPASIEKIAMA — įrodyta tik unit lygmeniu (`_initializePostgresForTests`). Barjerą atidarius pirmas realus startas su neprieinama DB ir BŪTŲ tas testas |
+| **Eilės prieinamumas patikrintas prieš skelbiant** (7.2a) | `hasQueueBackend()` grąžina `true` neprobindamas Redis. Su PostgreSQL metaduomenimis prisijungimo prie Redis NIEKAS nedaro (`initializePostgres()` jo neliečia), tad `server.js` pažymėtų runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų ar kristų. Kol backend'as yra Redis, klausimas nekyla — prisijungimas jau įvyko inicijuojant |
 
 ⚠️ **TRANSAKCIJA NEIŠSPRENDŽIA LYGIAGRETUMO.**
 
@@ -757,6 +759,50 @@ RETURNING *
 
 Nulis eilučių reiškia, kad kas nors jau baigė — tada rezultatas **lyginamas**, o
 ne perrašomas. Skirtingas rezultatas yra klaida, ne sėkmė.
+
+### ⚠️ DVI PASKUTINĖS PRIELAIDOS YRA KITOKIOS
+
+Pirmos keturios yra **neįgyvendintas darbas**. Dvi paskutinės — **įgyvendintas
+kodas, kurio negalima patikrinti, kol barjeras uždarytas**.
+
+Skirtumas svarbus peržiūrai: 7.2a jas įvykdė tiek, kiek šiame etape įmanoma, ir
+uždaryti #179 jos neblokuoja. Bet jos NEGALI dingti tarp etapų — neišbandytas
+gedimo kelias, įsijungiantis būtent barjero atidarymo momentu, yra blogesnis
+nei neparašytas: jis atrodo padengtas.
+
+Todėl barjerą atidarantis PR privalo turėti jas savo DoD, ne tik nuorodą į
+7.5b/7.6.
+
+## ⚠️ DB IR RUNTIME AIBĖS PRIVALO SUTAPTI
+
+Atskira taisyklė, išvesta iš trijų iš eilės peržiūros radinių, kurie visi buvo
+tas pats defektas skirtingose vietose: `schema_version` priėmė `1`, `type`
+priėmė bet ką ne-`processing` eilutėse, `phase` priėmė bet kokį tekstą.
+
+> **Kiekviena uždara aibė, kurią runtime laiko autoritetinga, privalo turėti
+> ATITINKAMĄ `CHECK` constraint'ą — ir atitikimas tikrinamas IŠVEDANT sąrašą iš
+> runtime konstantos, ne surašant ranka.**
+
+Kryptis svarbi. **Griežtesnė DB** nei runtime atmeta teisėtą įrašą — matoma
+iškart ir garsiai. **Laisvesnė DB** yra tyli: eilutė įrašoma sėkmingai, restore
+praneša SĖKMĘ, o gedimas išlenda vėliau ir kitoje vietoje — dažniausiai kaip
+`UNKNOWN_JOB_TYPE`, `INVALID_STATUS_PHASE` ar `Nepalaikoma job schemaVersion`
+ant įrašo, kurio niekas nebegali nei paleisti, nei ištaisyti.
+
+Autoritetai ir jų aibės:
+
+| Aibė | Runtime autoritetas | `CHECK` |
+|---|---|---|
+| `type` | `JOB_TYPES` (`common.js`) | `jobs_type_values` |
+| `status` | `STATUS` (`common.js`) | `jobs_status_values` |
+| `phase` | `phasesForType()` (`jobPhase.js`) | `jobs_status_phase` |
+| `owner_kind` | `OWNER_KIND` (`common.js`) | `jobs_owner_identity` |
+| `schema_version` | `assertSupportedSchemaVersion()` (`jobAuthorization.js`) | `jobs_schema_version_supported` |
+| progreso invariantai | `PROGRESS_INVARIANTS` (`jobPhase.js`) | `jobs_progress_invariants` |
+
+Paritetą tikrina `tests/dbRuntimeParity.integration.test.js`. Sąrašai jame
+IŠVEDAMI, tad naujas tipas, statusas ar fazė be atitinkamos migracijos krinta
+iškart — o ne po to, kai sugadinta kopija bus įrašyta į produkciją.
 
 ⚠️ `version` stulpelis ir pilnas optimistic locking lieka 7.5b, bet **ši
 konkreti sąlyga** yra aktyvavimo prielaida.

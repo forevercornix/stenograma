@@ -336,3 +336,58 @@ test("PARINKIMAS: memory be REDIS_REQUIRED praeina", () => {
     "memory"
   );
 });
+
+test("FAIL-CLOSED: PostgreSQL startas turi BAIGTINĘ prisijungimo ribą", async () => {
+  /**
+   * ⚠️ `pg` numatytasis `connectionTimeoutMillis` yra 0 = BE RIBOS.
+   *
+   * KODĖL NEPAKANKA NEPASIEKIAMO ADRESO. Nemaršrutizuojamas IP krinta GREITAI
+   * (`EHOSTUNREACH`), tad ribos neišbando visai - testas praeitų ir be jos.
+   * Pavojingas scenarijus kitoks: endpoint'as PRIIMA TCP jungtį, bet niekada
+   * neatsako. Tada `pg` laukia handshake'o, o be ribos - amžinai, ir
+   * NIEKADA nepasiekia `catch` bloko su aiškia fail-closed klaida.
+   *
+   * Čia toks endpoint'as sukuriamas realiai: lizdas, kuris priima jungtį ir
+   * tyli.
+   */
+  const net = require("net");
+  /**
+   * Jungtys sekamos, kad `close()` galėtų realiai užsibaigti: `pg` savo lizdo
+   * nepaleidžia, o serveris su atvira jungtimi laikytų event loop'ą gyvą ir
+   * testas niekada nesibaigtų.
+   */
+  const jungtys = new Set();
+  const server = net.createServer((socket) => {
+    /* priimam jungtį ir NIEKO nedarom - būtent tai ir tikrinama */
+    jungtys.add(socket);
+    socket.on("close", () => jungtys.delete(socket));
+  });
+
+  await new Promise((res) => server.listen(0, "127.0.0.1", res));
+  const { port } = server.address();
+
+  const buves = { url: process.env.DATABASE_URL, riba: process.env.DB_CONNECT_TIMEOUT_MS };
+  process.env.DATABASE_URL = `postgres://n:n@127.0.0.1:${port}/nera`;
+  process.env.DB_CONNECT_TIMEOUT_MS = "300";
+
+  const pradzia = Date.now();
+  try {
+    await assert.rejects(
+      () => jobStore._initializePostgresForTests(),
+      "tylintis endpoint'as privalo nutraukti startą, ne kabinti jį"
+    );
+
+    const truko = Date.now() - pradzia;
+    assert.ok(
+      truko < 5000,
+      `startas nutrūko per ${truko} ms - be connectionTimeoutMillis jis kabotų neribotai`
+    );
+  } finally {
+    if (buves.url === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = buves.url;
+    if (buves.riba === undefined) delete process.env.DB_CONNECT_TIMEOUT_MS;
+    else process.env.DB_CONNECT_TIMEOUT_MS = buves.riba;
+    for (const socket of jungtys) socket.destroy();
+    await new Promise((res) => server.close(res));
+  }
+});

@@ -232,4 +232,14 @@ function authorizeJobOrAudit(job, jobId, permission = PERMISSIONS.JOB_CREATE, en
   return decision;
 }
 
-module.exports = { authorizeJobExecution, authorizeJobOrAudit, resolveCurrentRole, DENY_REASON };
+module.exports = {
+  authorizeJobExecution,
+  authorizeJobOrAudit,
+  resolveCurrentRole,
+  DENY_REASON,
+  /**
+   * Eksportuojama, kad DB `CHECK` aibė būtų tikrinama prieš ŠĮ autoritetą, o ne
+   * prieš jo kopiją teste (`tests/dbRuntimeParity.integration.test.js`).
+   */
+  assertSupportedSchemaVersion,
+};

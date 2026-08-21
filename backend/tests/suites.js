@@ -201,6 +201,14 @@ const postgres = [
    * praeitų nieko netikrindami.
    */
   "postgresStore.integration",
+  /**
+   * #155, 7.2a: DB CHECK aibės vs runtime autoritetai.
+   *
+   * ⚠️ Sąrašai IŠVEDAMI iš runtime konstantų, ne surašomi - naujas job tipas,
+   * statusas ar fazė be atitinkamos migracijos krinta iškart, o ne po to, kai
+   * sugadinta kopija bus įrašyta.
+   */
+  "dbRuntimeParity.integration",
 ];
 
 module.exports = {

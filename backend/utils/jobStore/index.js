@@ -152,11 +152,37 @@ async function initializeStore() {
  * Todėl prisijungimo klaida nutraukia startą. Tai galioja jau dabar, nors
  * barjeras PostgreSQL dar neparenka — kad 7.2b tereikėtų barjerą atidaryti.
  */
+/**
+ * `DB_CONNECT_TIMEOUT_MS` su saugia numatytąja reikšme.
+ *
+ * ⚠️ Parsuojama VIETOJE, ne per `utils/securityBaseline`. Tas modulis traukia
+ * `cors` ir kitą Express infrastruktūrą; `jobStore` nuo jos priklausyti neturi -
+ * jį įkelia ir worker procesai, kuriems HTTP sluoksnio nereikia.
+ */
+function connectTimeoutMs() {
+  const raw = Number(process.env.DB_CONNECT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
+}
+
 async function initializePostgres() {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  /**
+   * ⚠️ BAIGTINIS PRISIJUNGIMO LAUKIMAS.
+   *
+   * `pg` numatytasis `connectionTimeoutMillis` yra 0 = BE RIBOS. Endpoint'as,
+   * kuris TCP srautą tyliai numeta (o ne atmeta), paliktų startą kabantį
+   * neribotai ir NIEKADA nepasiektų `catch` bloko, kuris pateikia aiškią
+   * fail-closed klaidą - procesas liktų nepasiekiamas be jokio paaiškinimo.
+   *
+   * Simetriška Redis keliui, kuris irgi neleidžia sau laukti amžinai
+   * (`maxRetriesPerRequest`, `retryStrategy`).
+   */
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    connectionTimeoutMillis: connectTimeoutMs(),
+  });
 
   try {
     await pool.query("SELECT 1");
