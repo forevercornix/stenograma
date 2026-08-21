@@ -388,6 +388,88 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     );
   });
 
+  await t.test("fazė privalo tikti JOB TIPUI, ne tik būti ne-NULL", async () => {
+    /**
+     * ⚠️ `phase IS NOT NULL` vieno nepakanka: praeitų
+     * `type='protocol', phase='transcribing'` arba tiesiog `'bogus'`, o
+     * `assertPhaseAllowedForType()` tokią porą atmeta. Sugadinta kopija būtų
+     * įrašyta, o progreso ir perkrovimo operacijos ant jos kristų.
+     */
+    await atmeta(
+      { type: "protocol", status: "processing", phase: "transcribing", schema_version: 2 },
+      "protocol su transcription faze"
+    );
+    await atmeta(
+      { type: "transcription", status: "processing", phase: "generating_protocol", schema_version: 2 },
+      "transcription su protocol faze"
+    );
+    await atmeta(
+      { type: "transcription", status: "processing", phase: "bogus", schema_version: 2 },
+      "nežinoma fazė"
+    );
+
+    await priima(
+      { type: "protocol", status: "processing", phase: "generating_protocol", schema_version: 2 },
+      "protocol su savo faze"
+    );
+  });
+
+  await t.test("CHECK fazių aibė SUTAMPA su phasesForType()", async () => {
+    /**
+     * ⚠️ Aibės dubliuojamos SQL'e ir JS'e; be šio testo nauja fazė būtų
+     * pridėta `jobPhase.js`, o migracija liktų sena - ir DB tyliai atmestų
+     * teisėtą būseną.
+     */
+    const { phasesForType } = require("../utils/jobPhase");
+
+    for (const tipas of ["transcription", "protocol"]) {
+      for (const faze of phasesForType(tipas)) {
+        await priima(
+          { type: tipas, status: "processing", phase: faze, schema_version: 2 },
+          `${tipas}/${faze} turi būti priimama`
+        );
+      }
+    }
+  });
+
+  await t.test("schema_version tik iš palaikomos aibės", async () => {
+    /**
+     * ⚠️ Neapribotas `integer` priimtų `schemaVersion: 3` iš ateities kopijos:
+     * atkūrimas praneštų SĖKMĘ, o `authorizeJobExecution()` vėliau mestų
+     * „Nepalaikoma job schemaVersion" - job'as niekada nepasileistų.
+     */
+    await atmeta({ schema_version: 3 }, "ateities era");
+    await atmeta({ schema_version: 0 }, "nulinė era");
+    await atmeta({ schema_version: -1 }, "neigiama era");
+
+    await priima({ schema_version: null }, "legacy be eros");
+    await priima({ schema_version: 2 }, "dabartinė era");
+  });
+
+  await t.test("valymo pakartojimo TERMINAI išgyvena round-trip", async () => {
+    /**
+     * ⚠️ `utils/deletionRetry.js` juos rašo per `jobStore.update()`, o
+     * memory/Redis bet kokį patch'o lauką išsaugo (`{ ...job, ...patch }`).
+     * Be stulpelio PostgreSQL juos išmestų TYLIAI: `update()` pavyktų, o kitas
+     * praėjimas job'ą laikytų iškart vykdytinu - eksponentinis backoff nustotų
+     * veikti, ir taip po KIEKVIENO restarto.
+     */
+    const terminas = new Date(Date.now() + 3600e3).toISOString();
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+
+    await store.update(job.id, {
+      deletion_pending: true,
+      deletion_attempts: 2,
+      deletion_next_attempt_at: terminas,
+      audio_cleanup_next_attempt_at: terminas,
+    });
+
+    const po = await store.get(job.id);
+    assert.equal(po.deletion_next_attempt_at, terminas);
+    assert.equal(po.audio_cleanup_next_attempt_at, terminas);
+    assert.equal((await store.listByFlag("deletion_pending"))[0].deletion_next_attempt_at, terminas);
+  });
+
   /* ── CHECK: NOT NULL kaip UNKNOWN apsauga ────────────────────────────── */
 
   await t.test("status ir progress_known yra NOT NULL (kitaip CHECK duotų UNKNOWN)", async () => {

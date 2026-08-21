@@ -107,15 +107,42 @@ exports.up = (pgm) => {
 
     attempt_count: { type: "integer", notNull: true, default: 0 },
 
+    /**
+     * VALYMO PAKARTOJIMAI IR JŲ TERMINAI.
+     *
+     * ⚠️ `*_next_attempt_at` PRIVALO TURĖTI STULPELĮ. `utils/deletionRetry.js`
+     * juos rašo per `jobStore.update()`, o memory/Redis saugyklos bet kokį
+     * patch'o lauką išsaugo (`{ ...job, ...patch }`). PostgreSQL rašo tik
+     * `COLUMNS` sąrašą, tad be šių stulpelių terminas dingtų TYLIAI:
+     * `update()` pavyktų, `_išsaugotiBandymą()` išvalytų atsarginę kopiją
+     * atmintyje, o kitas praėjimas job'ą laikytų iškart vykdytinu -
+     * eksponentinis backoff nustotų veikti, ir taip po KIEKVIENO restarto.
+     */
     audio_cleanup_pending: { type: "boolean", notNull: true, default: false },
     audio_cleanup_attempts: { type: "integer", notNull: true, default: 0 },
+    audio_cleanup_next_attempt_at: { type: "timestamptz" },
     deletion_pending: { type: "boolean", notNull: true, default: false },
     deletion_attempts: { type: "integer", notNull: true, default: 0 },
+    deletion_next_attempt_at: { type: "timestamptz" },
 
     created_at: { type: "timestamptz", notNull: true },
     updated_at: { type: "timestamptz", notNull: true },
     started_at: { type: "timestamptz" },
     completed_at: { type: "timestamptz" },
+  });
+
+  /**
+   * ⚠️ ERA TIK IŠ PALAIKOMOS AIBĖS.
+   *
+   * Neapribotas `integer` priimtų `schemaVersion: 3` iš ateities kopijos:
+   * `_validateContent()` tikrina tik ID buvimą, `restoreRecord()` įrašo, ir
+   * atkūrimas praneštų SĖKMĘ - o `authorizeJobExecution()` vėliau mestų
+   * „Nepalaikoma job schemaVersion", ir atkurtas job'as niekada nepasileistų.
+   *
+   * `NULL` = pre-#158 legacy įrašas (žr. stulpelio komentarą).
+   */
+  pgm.addConstraint("jobs", "jobs_schema_version_supported", {
+    check: "schema_version IS NULL OR schema_version IN (1, 2)",
   });
 
   pgm.addConstraint("jobs", "jobs_status_values", {
@@ -143,8 +170,11 @@ exports.up = (pgm) => {
   pgm.addConstraint("jobs", "jobs_status_phase", {
     check: `
       CASE
-        WHEN status = 'processing' THEN phase IS NOT NULL OR schema_version IS NULL
-        ELSE phase IS NULL
+        WHEN status <> 'processing' THEN phase IS NULL
+        WHEN phase IS NULL          THEN schema_version IS NULL
+        WHEN type = 'transcription' THEN phase IN ('validating', 'transcribing', 'diarizing', 'merging')
+        WHEN type = 'protocol'      THEN phase IN ('validating', 'generating_protocol')
+        ELSE false
       END
     `,
   });

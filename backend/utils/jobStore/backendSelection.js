@@ -98,6 +98,25 @@ function resolveBackendChoice(env = process.env) {
       );
     }
 
+    /**
+     * ⚠️ `REDIS_REQUIRED=true` YRA KIETA GARANTIJA, ne pageidavimas.
+     *
+     * `jobStore/index.js:128` ją supranta kaip „fallback į atmintį yra kritinė
+     * klaida". Bet `JOB_STORE_BACKEND=memory` atmintį parenka PRIEŠ bandant
+     * Redis, tad garantija būtų apeita nė karto nesuveikusi: servisas
+     * pakiltų inline režimu ir prarastų job'us, nors konfigūracija
+     * eksplicitiškai draudžia būtent tai.
+     *
+     * Du prieštaraujantys nurodymai negali būti tyliai sutaikyti - krintame.
+     */
+    if (eksplicitinis === "memory" && env.REDIS_REQUIRED === "true") {
+      throw new Error(
+        "JOB_STORE_BACKEND=memory kartu su REDIS_REQUIRED=true - prieštaringa " +
+          "konfigūracija. REDIS_REQUIRED draudžia darbą su in-memory saugykla, o " +
+          "JOB_STORE_BACKEND ją parenka. Pašalinkite vieną iš jų."
+      );
+    }
+
     return { norimas: eksplicitinis, priezastis: "JOB_STORE_BACKEND", eksplicitinis: true };
   }
 

@@ -313,3 +313,26 @@ test("EILĖ: jobRunner be argumento klausia hasQueueBackend(), ne REDIS_URL", as
     else process.env.REDIS_URL = buves;
   }
 });
+
+/* ── PRIEŠTARINGOS KONFIGŪRACIJOS ─────────────────────────────────────────── */
+
+test("PARINKIMAS: JOB_STORE_BACKEND=memory + REDIS_REQUIRED=true yra KLAIDA", () => {
+  /**
+   * ⚠️ `REDIS_REQUIRED=true` (`jobStore/index.js:128`) reiškia „fallback į
+   * atmintį yra kritinė klaida". Eksplicitinis `memory` atmintį parenka PRIEŠ
+   * bandant Redis, tad garantija būtų apeita nė karto nesuveikusi: servisas
+   * pakiltų inline režimu ir prarastų job'us - būtent tai, ką konfigūracija
+   * draudžia.
+   */
+  assert.throws(
+    () => resolveBackendChoice({ JOB_STORE_BACKEND: "memory", REDIS_URL: REDIS, REDIS_REQUIRED: "true" }),
+    /prieštaringa konfigūracija/
+  );
+});
+
+test("PARINKIMAS: memory be REDIS_REQUIRED praeina", () => {
+  assert.equal(
+    resolveBackendChoice({ JOB_STORE_BACKEND: "memory", REDIS_URL: REDIS }).norimas,
+    "memory"
+  );
+});

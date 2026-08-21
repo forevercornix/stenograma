@@ -545,21 +545,6 @@ test("DATABASE_URL + REDIS_URL išveda persistentStorage=true (job'ai Redis'e)",
   assert.equal(config.persistentExplicit, false);
 });
 
-test("PERSISTENT_STORAGE=true su vienu DATABASE_URL = KLAIDA", () => {
-  /**
-   * Be šios patikros diegimas paleistų su nuostata „viskas saugoma", o job'ai
-   * dingtų per pirmą restartą.
-   */
-  const { errors } = validatePrivacyConfig({
-    ...LOCAL_ENV,
-    PERSISTENT_STORAGE: "true",
-    DATABASE_URL: "postgres://localhost:5432/steno",
-  });
-
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /nei REDIS_URL, nei DATABASE_URL nenustatytas/);
-});
-
 test("PERSISTENT_STORAGE=true su DATABASE_URL + REDIS_URL praeina", () => {
   const { errors } = validatePrivacyConfig({
     ...LOCAL_ENV,
@@ -931,4 +916,21 @@ test("POLITIKA: kategorijos yra UŽŠALDYTOS, kaip ir likusi privatumo politika"
 
   assert.equal(Object.isFrozen(categories), true);
   assert.deepEqual(categories, ["PERSONAL_CODE", "EMAIL", "PHONE", "IBAN"]);
+});
+
+test("PERSISTENT_STORAGE=true su DATABASE_URL: klaida įvardija BARJERĄ, ne trūkstamą URL", () => {
+  /**
+   * ⚠️ Bendrinis tekstas „nei REDIS_URL, nei DATABASE_URL nenustatytas" čia
+   * būtų NETIESA ir siūlytų veiksmą, kuris nepadėtų: `DATABASE_URL` jau yra,
+   * o startas vis tiek kristų. Klaida privalo nurodyti tikrą priežastį.
+   */
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "true",
+    DATABASE_URL: "postgres://localhost:5432/steno",
+  });
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /aktyvavimo barjeras/);
+  assert.doesNotMatch(errors[0], /nei DATABASE_URL nenustatytas/);
 });

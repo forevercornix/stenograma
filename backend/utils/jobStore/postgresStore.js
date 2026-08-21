@@ -105,8 +105,10 @@ function rowToJob(row) {
     attempt_count: row.attempt_count,
     audio_cleanup_pending: row.audio_cleanup_pending,
     audio_cleanup_attempts: row.audio_cleanup_attempts,
+    audio_cleanup_next_attempt_at: isoFromDb(row.audio_cleanup_next_attempt_at),
     deletion_pending: row.deletion_pending,
     deletion_attempts: row.deletion_attempts,
+    deletion_next_attempt_at: isoFromDb(row.deletion_next_attempt_at),
     created_at: isoFromDb(row.created_at),
     started_at: isoFromDb(row.started_at),
     completed_at: isoFromDb(row.completed_at),
@@ -158,8 +160,10 @@ function jobToRow(job) {
     attempt_count: job.attempt_count ?? 0,
     audio_cleanup_pending: Boolean(job.audio_cleanup_pending),
     audio_cleanup_attempts: job.audio_cleanup_attempts ?? 0,
+    audio_cleanup_next_attempt_at: job.audio_cleanup_next_attempt_at ?? null,
     deletion_pending: Boolean(job.deletion_pending),
     deletion_attempts: job.deletion_attempts ?? 0,
+    deletion_next_attempt_at: job.deletion_next_attempt_at ?? null,
     created_at: job.created_at || job.createdAt || new Date().toISOString(),
     updated_at: job.updatedAt || new Date().toISOString(),
     started_at: job.started_at ?? null,
@@ -173,8 +177,8 @@ const COLUMNS = [
   "owner_kind", "owner_id", "tenant_id", "idempotency_key",
   "actor", "actor_role", "actor_source", "request_id", "storage_key",
   "artefacts", "error_code", "error_message", "attempt_count",
-  "audio_cleanup_pending", "audio_cleanup_attempts",
-  "deletion_pending", "deletion_attempts",
+  "audio_cleanup_pending", "audio_cleanup_attempts", "audio_cleanup_next_attempt_at",
+  "deletion_pending", "deletion_attempts", "deletion_next_attempt_at",
   "created_at", "updated_at", "started_at", "completed_at",
 ];
 
@@ -457,8 +461,19 @@ function createPostgresStore(pool) {
       );
     }
 
+    /**
+     * ⚠️ BE REZULTATŲ PRIJUNGIMO. `SELECT_JOB` daro `LEFT JOIN job_results` ir
+     * deserializuoja KIEKVIENO job'o `payload`, nors abu valymo ciklai naudoja
+     * tik metaduomenis (vėliava, bandymai, terminas, `storageKey`).
+     *
+     * Su numatytu `limit = 100` ir 20 MiB rezultato riba vienas periodinis
+     * praėjimas be reikalo pertemptų kelis GiB - tiesiogiai prieštaraudamas
+     * priežasčiai, dėl kurios rezultatai iškelti į atskirą lentelę.
+     *
+     * `result` čia lieka `null`; jei kada prireiks, imamas per `get()`.
+     */
     const { rows } = await pool.query(
-      `${SELECT_JOB} WHERE j."${field}" ORDER BY j.updated_at LIMIT $1`,
+      `SELECT j.* FROM jobs j WHERE j."${field}" ORDER BY j.updated_at LIMIT $1`,
       [limit]
     );
     return rows.map(rowToJob);

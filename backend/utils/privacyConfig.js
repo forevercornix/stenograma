@@ -233,10 +233,22 @@ function validatePrivacyConfig(env = process.env) {
   }
 
   if (config.persistentExplicit && config.persistentStorage && !persistentConfigured) {
+    /**
+     * ⚠️ ŽINUTĖ PRIVALO ATITIKTI PRIEŽASTĮ.
+     *
+     * Su vienu `DATABASE_URL` bendrinis tekstas „nei REDIS_URL, nei
+     * DATABASE_URL nenustatytas" yra NETIESA ir siūlo veiksmą, kuris
+     * nepadėtų: `DATABASE_URL` jau yra, o startas vis tiek kristų. Priežastis
+     * kita - aktyvavimo barjeras PostgreSQL dar neparenka.
+     */
     errors.push(
-      "PERSISTENT_STORAGE=true, bet nei REDIS_URL, nei DATABASE_URL nenustatytas - be jų " +
-        "jobų būsena lieka ATMINTYJE ir dingsta po restarto. Nustatykite vieną iš jų arba " +
-        "PERSISTENT_STORAGE=false."
+      postgresConfigured
+        ? "PERSISTENT_STORAGE=true su DATABASE_URL, bet PostgreSQL job saugykla dar " +
+            "NEAKTYVUOTA (#155 aktyvavimo barjeras), tad jobų būsena lieka ATMINTYJE. " +
+            "Nustatykite REDIS_URL arba PERSISTENT_STORAGE=false."
+        : "PERSISTENT_STORAGE=true, bet nei REDIS_URL, nei DATABASE_URL nenustatytas - be jų " +
+            "jobų būsena lieka ATMINTYJE ir dingsta po restarto. Nustatykite vieną iš jų arba " +
+            "PERSISTENT_STORAGE=false."
     );
   }
 
