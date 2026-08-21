@@ -56,6 +56,13 @@ async function init() {
   return initPromise;
 }
 
+const {
+  canUseQueue,
+  resolveBackendChoice,
+  applyActivationBarrier,
+  selectBackend,
+} = require("./backendSelection");
+
 async function initializeStore() {
   const redisUrl = process.env.REDIS_URL;
 
@@ -76,7 +83,21 @@ async function initializeStore() {
     return store;
   }
 
-  if (!redisUrl) {
+  const choice = selectBackend();
+
+  if (choice.barjeras) {
+    log.warn(
+      `⚠️  DATABASE_URL nustatytas, bet job metaduomenys LIEKA "${choice.norimas}" backend'e. ` +
+        "PostgreSQL kaip autoritetinga saugykla dar neaktyvuota (#155 aktyvavimo barjeras). " +
+        (choice.norimas === "memory"
+          ? "Job'ai NEIŠGYVENS restarto - persistencijai reikia REDIS_URL."
+          : "Job'ai saugomi Redis'e, kaip iki šiol.")
+    );
+  }
+
+  if (choice.norimas === "postgres") return initializePostgres();
+
+  if (choice.norimas === "memory" || !redisUrl) {
     // Nėra REDIS_URL - tyliai naudojam in-memory (numatytas dev/demo režimas).
     store = memoryStore;
     return store;
@@ -118,6 +139,82 @@ async function initializeStore() {
     store = memoryStore;
     return store;
   }
+}
+
+/**
+ * PostgreSQL inicijavimas — FAIL-CLOSED.
+ *
+ * ⚠️ JOKIO FALLBACK Į MEMORY. Redis kelias krinta į atmintį sąmoningai:
+ * prarandami tik nauji job'ai, o Redis įrašai lieka. Su PostgreSQL tas pats
+ * elgesys reikštų, kad NAUJI job'ai rašomi į atmintį, o AUTORITETINGI lieka
+ * DB — split-brain, kuris „išnyksta" DB atsistačius, palikdamas dvi tikroves.
+ *
+ * Todėl prisijungimo klaida nutraukia startą. Tai galioja jau dabar, nors
+ * barjeras PostgreSQL dar neparenka — kad 7.2b tereikėtų barjerą atidaryti.
+ */
+async function initializePostgres() {
+  const { Pool } = require("pg");
+  const { createPostgresStore } = require("./postgresStore");
+
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+  try {
+    await pool.query("SELECT 1");
+  } catch (err) {
+    await pool.end().catch(() => {});
+    throw new Error(
+      `PostgreSQL neprieinamas (${err.message}). Pasirinkus PostgreSQL job ` +
+        "metaduomenims, grįžimas į atmintį sukurtų split-brain (nauji job'ai " +
+        "atmintyje, autoritetingi - DB), todėl startas nutraukiamas."
+    );
+  }
+
+  /**
+   * ⚠️ PASIEKIAMUMO NEPAKANKA - SCHEMA PRIVALO EGZISTUOTI.
+   *
+   * `SELECT 1` pavyksta ir tada, kai DB veikia, bet migracijos nepaleistos.
+   * Tokiu atveju `server.js` pažymėtų `readiness.jobStore = true`, serveris
+   * imtų klausytis, o PIRMA job operacija kristų su
+   * `relation "jobs" does not exist` - jau priėmus vartotojo failą.
+   *
+   * Readiness, kuris teigia „pasiruošęs" prieš tai, kas iš tikrųjų reikalinga,
+   * yra blogesnis nei readiness, kurio nėra: orkestruotojas nukreipia srautą.
+   */
+  const BUTINOS = ["jobs", "job_results"];
+  try {
+    const { rows } = await pool.query(
+      `SELECT table_name FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name = ANY($1)`,
+      [BUTINOS]
+    );
+    const rastos = rows.map((r) => r.table_name);
+    const truksta = BUTINOS.filter((t) => !rastos.includes(t));
+
+    if (truksta.length > 0) {
+      throw new Error(
+        `PostgreSQL pasiekiamas, bet trūksta lentelių: ${truksta.join(", ")}. ` +
+          "Paleiskite `npm run migrate:up` prieš startą."
+      );
+    }
+  } catch (err) {
+    await pool.end().catch(() => {});
+    throw err;
+  }
+
+  store = createPostgresStore(pool);
+  log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)");
+  return store;
+}
+
+/**
+ * Ar galima naudoti BullMQ eilę? Sprendimą priima gryna `canUseQueue()`
+ * (`backendSelection.js`) — čia tik surenkamos jos dvi įvestys.
+ *
+ * ⚠️ SĄLYGOS ČIA NEKARTOTI. Įrašyta tiesiogiai, ji taptų antra taisyklės
+ * kopija, kurios testai nepasiekia: jie tikrina grynąją funkciją.
+ */
+function hasQueueBackend() {
+  return canUseQueue(process.env, store.backend);
 }
 
 // Proxy funkcijos - deleguoja į aktyvų backend'ą. init() iškviečiamas automatiškai
@@ -597,6 +694,30 @@ module.exports = {
     if (store && typeof store.close === "function") await store.close();
   },
   getBackend: () => store.backend || "memory",
+  /**
+   * Eilės (BullMQ) prieinamumas — ATSKIRAS klausimas nuo metaduomenų
+   * backend'o. Žr. `hasQueueBackend()` komentarą.
+   */
+  hasQueueBackend,
+  /**
+   * Backend'o parinkimo politika be šalutinių efektų — kad testai galėtų
+   * tikrinti KIEKVIENĄ env derinį neinicijuodami tikros saugyklos.
+   */
+  resolveBackendChoice,
+  applyActivationBarrier,
+  /**
+   * ⚠️ EKSPORTUOJAMA TESTAMS, nes produkcijoje ši funkcija dar NEPASIEKIAMA.
+   *
+   * Vienintelį jos kvietimo tašką (`initializeStore()`) uždaro aktyvavimo
+   * barjeras, tad be eksporto fail-closed elgesys neturėtų JOKIO įrodymo -
+   * nei runtime, nei testo. Neišbandytas gedimo kelias, kuris įsijungs 7.2b
+   * momentu, yra blogesnis nei neparašytas: jis atrodo padengtas.
+   *
+   * Unit lygmuo įrodo, KAD prisijungimo klaida atmetama ir NĖRA fallback į
+   * memory. Produkcinio kelio (`DATABASE_URL` → startas nutrūksta) galutinis
+   * acceptance priklauso aktyvavimo etapui, ne šiam PR.
+   */
+  _initializePostgresForTests: initializePostgres,
   STATUS,
   JOB_TYPES,
   TTL_MS,

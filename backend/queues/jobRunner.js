@@ -9,7 +9,7 @@ const log = createLogger("job-runner");
 /**
  * Job runner - abstrakcija tarp HTTP endpoint'o ir darbo vykdymo.
  *
- * DU REŽIMAI (parenkama automatiškai pagal REDIS_URL, kaip jobStore):
+ * DU REŽIMAI (parenkama per `jobStore.hasQueueBackend()`: REDIS_URL IR bendra saugykla):
  *
  *  1) BULLMQ (su REDIS_URL): endpoint'as tik queue.add() ir grąžina 202. Darbą
  *     vykdo ATSKIRAS worker procesas (workers/). HTTP backend restartas nenutraukia
@@ -35,17 +35,27 @@ function registerProcessor(type, fn) {
 async function init(options = {}) {
   if (_mode) return _mode;
 
-  // KRITIŠKA (nuoseklumas): BullMQ naudojamas TIK jei jobStore REALIAI prisijungė prie
-  // Redis. Anksčiau sprendėm vien pagal REDIS_URL buvimą - bet jei jobStore Redis connect
-  // nepavyko ir jis fallback'ino į memory, o jobRunner vis tiek naudotų BullMQ, gautume
-  // NESUDERINTĄ sistemą: HTTP procesas job'ą kuria atmintyje, siunčia į BullMQ, worker jo
-  // neranda. persistentStoreAvailable perduodamas iš server.js po jobStore.init().
-  // Jei nenurodyta (senas iškvietimas), fallback į REDIS_URL patikrą - bet server.js
-  // dabar visada perduoda.
+  /**
+   * KRITIŠKA (nuoseklumas): BullMQ naudojamas TIK jei jobStore REALIAI turi BENDRĄ
+   * saugyklą. Jei jobStore Redis connect nepavyko ir jis fallback'ino į memory, o
+   * jobRunner vis tiek naudotų BullMQ, gautume NESUDERINTĄ sistemą: HTTP procesas
+   * job'ą kuria atmintyje, siunčia į BullMQ, worker jo neranda.
+   *
+   * ⚠️ ATSARGINIS KELIAS NEBEREMIASI `REDIS_URL` BUVIMU (#155, 7.2a).
+   *
+   * Anksčiau čia buvo `!!process.env.REDIS_URL`. Šiandien `server.js` visada
+   * perduoda `persistentStoreAvailable`, tad kelias negyvas - bet negyvas
+   * netiesiogiai, o ne pagal konstrukciją: pirmas kvietėjas, praleidęs
+   * argumentą, gautų `true` VIEN dėl to, kad nustatytas `REDIS_URL`, net jei
+   * metaduomenys atmintyje arba PostgreSQL'e be bendros eilės sąlygos.
+   *
+   * `hasQueueBackend()` yra tas pats autoritetas, kurį naudoja `server.js` ir
+   * `workers/index.js` - tad numatytoji reikšmė sutampa su eksplicitine.
+   */
   const persistentStore =
     options.persistentStoreAvailable !== undefined
       ? options.persistentStoreAvailable
-      : !!process.env.REDIS_URL;
+      : jobStore.hasQueueBackend();
 
   if (!persistentStore) {
     _mode = "inline";
@@ -123,7 +133,12 @@ async function ensureInitialized() {
   // jobStore.init() idempotentiškas (initPromise) - saugu kviesti; grąžina esamą store.
   const jobStore = require("../utils/jobStore");
   await jobStore.init();
-  return init({ persistentStoreAvailable: jobStore.getBackend() === "redis" });
+  /**
+   * ⚠️ TAS PATS SPRENDIMAS KAIP `server.js` ir `workers/index.js` (#155, 7.2a).
+   * `getBackend() === "redis"` čia reikštų, kad PostgreSQL metaduomenys
+   * nukreiptų tinginį inicijavimą į inline režimą, nors Redis eilė veikia.
+   */
+  return init({ persistentStoreAvailable: jobStore.hasQueueBackend() });
 }
 
 async function enqueueTranscription(jobId, payload) {

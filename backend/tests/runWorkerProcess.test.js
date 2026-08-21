@@ -43,6 +43,7 @@ function setupTest(t, setCalls, quitCalls) {
     ...realJobStore,
     init: async () => {},
     getBackend: () => "redis",
+    hasQueueBackend: () => true,
   };
 
   delete require.cache[require.resolve("../workers/index")];

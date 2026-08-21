@@ -1,4 +1,5 @@
 const { describeSelection, isExternal } = require("./providerPrivacy");
+const { isPersistentBackend } = require("./jobStore/backendSelection");
 const { probeRedactionComponent, isRedactionAvailable } = require("./redactionComponent");
 
 /**
@@ -80,11 +81,23 @@ function getPrivacyConfig(env = process.env) {
    * kad administratorius mano, jog jobai išgyvena restartą, o jie neišgyvena. Būtent
    * tokios tylios neatitikties šiame projekte vengiam - geriau kieta klaida.
    */
+  /**
+   * ⚠️ IŠVEDAMA IŠ FAKTINIO BACKEND'O, NE IŠ ENV KINTAMŲJŲ (#155, 7.2a).
+   *
+   * `Boolean(env.REDIS_URL || env.DATABASE_URL)` atrodo teisingai, bet MELUOJA:
+   * su `DATABASE_URL` be `REDIS_URL` aktyvavimo barjeras palieka job'us
+   * ATMINTYJE, o ši reikšmė būtų `true`. Operatorius pagrįstai manytų, kad
+   * job'ai išgyvens restartą, ir prarastų metaduomenis bei rezultatus.
+   *
+   * Klausimas „ar job store persistentinis?" turi VIENĄ autoritetingą
+   * atsakymą - `jobStore/backendSelection.js`, tas pats, kuriuo remiasi ir
+   * pati inicijacija. Barjerą atidarius ši eilutė nesikeičia.
+   */
   const persistentRaw = env.PERSISTENT_STORAGE;
   const persistentExplicit = persistentRaw !== undefined && persistentRaw !== "";
   const persistentStorage = persistentExplicit
     ? _bool(persistentRaw, false)
-    : Boolean(env.REDIS_URL);
+    : isPersistentBackend(env);
 
   const audioRetentionHours = _int(env.AUDIO_RETENTION_HOURS, 24);
 
@@ -189,12 +202,26 @@ function validatePrivacyConfig(env = process.env) {
 
   // --- Persistentinė saugykla (GDPR #5: "persistent storage can be disabled") ---
   const redisConfigured = Boolean(env.REDIS_URL);
+  const postgresConfigured = Boolean(env.DATABASE_URL);
+  /**
+   * ⚠️ NE `REDIS_URL || DATABASE_URL`.
+   *
+   * Validacija privalo remtis tuo, kas REALIAI bus naudojama. Kol aktyvavimo
+   * barjeras uždarytas, vien `DATABASE_URL` patvarios saugyklos NEDUODA, tad
+   * `PERSISTENT_STORAGE=true` su juo vienu būtų būtent tas melas, kurį ši
+   * patikra turi gaudyti.
+   */
+  const persistentConfigured = isPersistentBackend(env);
 
-  if (config.persistentExplicit && !config.persistentStorage && redisConfigured) {
+  if (config.persistentExplicit && !config.persistentStorage && persistentConfigured) {
+    const kuris = [redisConfigured && "REDIS_URL", postgresConfigured && "DATABASE_URL"]
+      .filter(Boolean)
+      .join(" ir ");
     errors.push(
-      "PERSISTENT_STORAGE=false, bet nustatytas REDIS_URL - prieštaringa konfigūracija. " +
-        "Jobų būsena ir rezultatai (transkripcija, protokolas) atsidurtų Redis'e, nors " +
-        "prašoma nieko nesaugoti. Pašalinkite REDIS_URL arba nustatykite PERSISTENT_STORAGE=true."
+      `PERSISTENT_STORAGE=false, bet nustatytas ${kuris} - prieštaringa konfigūracija. ` +
+        "Jobų būsena ir rezultatai (transkripcija, protokolas) atsidurtų patvarioje " +
+        `saugykloje, nors prašoma nieko nesaugoti. Pašalinkite ${kuris} arba nustatykite ` +
+        "PERSISTENT_STORAGE=true."
     );
   }
 
@@ -205,10 +232,23 @@ function validatePrivacyConfig(env = process.env) {
     );
   }
 
-  if (config.persistentExplicit && config.persistentStorage && !redisConfigured) {
+  if (config.persistentExplicit && config.persistentStorage && !persistentConfigured) {
+    /**
+     * ⚠️ ŽINUTĖ PRIVALO ATITIKTI PRIEŽASTĮ.
+     *
+     * Su vienu `DATABASE_URL` bendrinis tekstas „nei REDIS_URL, nei
+     * DATABASE_URL nenustatytas" yra NETIESA ir siūlo veiksmą, kuris
+     * nepadėtų: `DATABASE_URL` jau yra, o startas vis tiek kristų. Priežastis
+     * kita - aktyvavimo barjeras PostgreSQL dar neparenka.
+     */
     errors.push(
-      "PERSISTENT_STORAGE=true, bet REDIS_URL nenustatytas - be jo jobų būsena lieka " +
-        "ATMINTYJE ir dingsta po restarto. Nustatykite REDIS_URL arba PERSISTENT_STORAGE=false."
+      postgresConfigured
+        ? "PERSISTENT_STORAGE=true su DATABASE_URL, bet PostgreSQL job saugykla dar " +
+            "NEAKTYVUOTA (#155 aktyvavimo barjeras), tad jobų būsena lieka ATMINTYJE. " +
+            "Nustatykite REDIS_URL arba PERSISTENT_STORAGE=false."
+        : "PERSISTENT_STORAGE=true, bet nei REDIS_URL, nei DATABASE_URL nenustatytas - be jų " +
+            "jobų būsena lieka ATMINTYJE ir dingsta po restarto. Nustatykite vieną iš jų arba " +
+            "PERSISTENT_STORAGE=false."
     );
   }
 

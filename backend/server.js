@@ -292,8 +292,21 @@ async function startServer({ port, listen, onStep } = {}) {
   log.info(`Job store backend'as: ${jobStore.getBackend()}`);
   readiness.jobStore = true;
 
-  // 2. Job runner - režimas SUDERINTAS su jobStore backend'u (BullMQ tik kai tikrai Redis).
-  const persistentStoreAvailable = jobStore.getBackend() === "redis";
+  /**
+   * 2. Job runner.
+   *
+   * ⚠️ EILĖS PASIRINKIMAS ATSIETAS NUO METADUOMENŲ BACKEND'O (#155, 7.2a).
+   *
+   * Anksčiau čia buvo `jobStore.getBackend() === "redis"`. Su trimis
+   * backend'ais tai reikštų: pasirinkus PostgreSQL metaduomenims, vykdymas
+   * nukristų į inline režimą NORS REDIS VEIKIA — sukurti BullMQ job'ai liktų
+   * nesuvartoti, o naujas darbas taptų nepatvarus.
+   *
+   * BullMQ priklauso nuo REDIS, ne nuo to, kur laikomi metaduomenys. Todėl
+   * klausiama `jobStore.hasQueueBackend()`, kuris žiūri į `REDIS_URL` ir į tai,
+   * ar prisijungimas realiai pavyko.
+   */
+  const persistentStoreAvailable = jobStore.hasQueueBackend();
   await jobRunner.init({ persistentStoreAvailable });
   step("jobRunner.init");
   log.info(`Job runner režimas: ${jobRunner.getMode()}`);

@@ -132,7 +132,7 @@ jobs:
           REQUIRE_REDIS: "1"
         run: npm run test:redis
 
-      - name: PostgreSQL migracijų testai (tuščia DB → schema, idempotentiškumas)
+      - name: PostgreSQL testai (migracijos, postgresStore kontraktas, CHECK invariantai)
         working-directory: backend
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres

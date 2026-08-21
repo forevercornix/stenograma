@@ -150,6 +150,11 @@ const security = [
  * Jie nėra „mažiau svarbūs", tik ne apie saugumą ar privatumą.
  */
 const functional = [
+  /**
+   * #155, 7.2a: trijų backend'ų parinkimo politika ir aktyvavimo barjeras.
+   * DB NEREIKIA - tikrinama politika, ne saugykla (žr. failo komentarą).
+   */
+  "jobStoreBackendSelection",
   "concurrencyLimiter",
   "diarization.route",
   "fasterWhisperConcurrency",
@@ -187,6 +192,15 @@ const postgres = [
   "migrations.integration",
   /** #155: PostgreSQL būsena doctor/health išvestyje. */
   "postgresDoctor.integration",
+  /**
+   * #155, 7.2a: trečias `jobStore` backend'as.
+   *
+   * ⚠️ TIKRAS PostgreSQL BŪTINAS, ne mock. Testuojami dalykai gyvena būtent
+   * DB pusėje: `CHECK` constraint'ų `UNKNOWN` semantika, dalinio `UNIQUE`
+   * indekso elgesys su `NULL` ir `ON DELETE CASCADE`. Su mock'u jie visi
+   * praeitų nieko netikrindami.
+   */
+  "postgresStore.integration",
 ];
 
 module.exports = {

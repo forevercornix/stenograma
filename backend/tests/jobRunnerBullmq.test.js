@@ -42,7 +42,17 @@ test("jobRunner BullMQ režime kviečia queue.add, nevykdo inline", async () => 
     delete require.cache[require.resolve("../queues/config")];
     const jobRunner = require("../queues/jobRunner");
 
-    await jobRunner.init();
+    /**
+     * ⚠️ `persistentStoreAvailable` PERDUODAMAS EKSPLICITIŠKAI (#155, 7.2a).
+     *
+     * Anksčiau šis testas rėmėsi `init()` atsarginiu keliu, kuris režimą
+     * spręsdavo pagal `!!process.env.REDIS_URL`. Tai buvo klaidinga semantika:
+     * `REDIS_URL` buvimas nereiškia, kad job store REALIAI turi bendrą
+     * saugyklą. Dabar numatytoji reikšmė eina per `hasQueueBackend()`, o
+     * testas, norintis BullMQ režimo, jį nurodo tiesiogiai - lygiai taip, kaip
+     * daro `server.js`.
+     */
+    await jobRunner.init({ persistentStoreAvailable: true });
     assert.equal(jobRunner.getMode(), "bullmq");
 
     await jobRunner.enqueueProtocol("job-1", { transcript: "tekstas" });
@@ -82,7 +92,10 @@ test("jobRunner BullMQ režime, REDIS_REQUIRED=true, init klysta jei bullmq neve
     process.env.REDIS_REQUIRED = "true";
     delete require.cache[require.resolve("../queues/jobRunner")];
     const jobRunner = require("../queues/jobRunner");
-    await assert.rejects(() => jobRunner.init(), /REDIS_REQUIRED/);
+    await assert.rejects(
+      () => jobRunner.init({ persistentStoreAvailable: true }),
+      /REDIS_REQUIRED/
+    );
   } finally {
     Module._load = origLoad;
     delete process.env.REDIS_URL;
