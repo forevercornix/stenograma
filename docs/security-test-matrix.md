@@ -1266,6 +1266,43 @@ parseriu.
 | **Prisijungimo klaidos atskiriamos pagal kodą** | `postgresDoctor.integration` | `28P01`, `3D000`, `42501` reikalauja skirtingų veiksmų; viena „ar servisas paleistas?" siuntė klaidinga kryptimi |
 | **Veikianti DB be migracijų atskiriama nuo neveikiančios** | `postgresDoctor.integration` | Du gedimai, du skirtingi veiksmai. Mutacija: praleisti `pgmigrations` patikrą → krinta |
 
+---
+
+### PostgreSQL job store (#155, 7.2a)
+
+⚠️ **KODĖL SAUGUMO MATRICOJE.** `postgresStore` saugo ne vien duomenų
+korektiškumą: `owner_kind × owner_id` yra nuosavybės riba (#159), o
+`persistentStorage` yra tai, ką operatorius skaito priimdamas sprendimą, ar
+jautrūs įrašai išgyvena restartą. Klaida bet kurioje iš šių vietų yra saugumo
+arba duomenų praradimo klaida, ne stiliaus.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **`owner_kind = NULL` + `owner_id` ATMETAMAS DB lygmenyje** | `postgresStore.integration` | `CHECK` atmeta tik `FALSE`, o `UNKNOWN` **priima**. Mutacija: `CASE` → `OR` grandinė → DB priima nuosavybės būseną, kurios `assertOwnerIdentity()` sukurti negali → krinta |
+| **`status` ir `progress_known` yra `NOT NULL`** | `postgresStore.integration` | Su `NULL` abi `CHECK` šakos duotų `UNKNOWN`, ir eilutė, kurią `assertConsistentJobRecord()` atmeta, būtų patvirtinta. Mutacija: nuimti `NOT NULL` → krinta |
+| **Nuosavybė NEPERDUODAMA per `updateOwned`** | `postgresStore.integration` | Realizacija, atvaizduojanti patch'ą tiesiai į `SET`, autorizuotų kaip savininkas A ir perduotų eilutę savininkui B. Mutacija: įtraukti `owner_id` į `SET` → krinta |
+| **`unowned` ir `api-key` NESUSILIEJA** | `postgresStore.integration` | Abu turi `owner_id IS NULL`; be `ownerKind` palyginimo desktop scope pasiektų bendro rakto job'us. Mutacija: lyginti tik `owner_id` → krinta |
+| **`getOwned` skiria `null` (404) nuo `FORBIDDEN` (403)** | `postgresStore.integration` | Sulieti reikštų atskleisti job'o egzistavimą arba slėpti savo paties. Mutacija: grąžinti `null` abiem → krinta |
+| **Rezultatas grąžinamas, ne tyliai prarandamas** | `postgresStore.integration` | Transkripcijos gyvena `job_results`, o `jobResponse.js` skaito `job.result`: be `LEFT JOIN` realizacija sėkmingai IŠSAUGOTŲ transkripciją ir grąžintų `result: null` KIEKVIENAM klientui. Mutacija: pašalinti hidrataciją → krinta |
+| **`listReferencedStorageKeys()` grąžina GYVUS raktus** | `postgresStore.integration` | `retentionSweeper` reikšmę traktuoja kaip įrodymą, kad joks job'as neberodo į audio, ir failus IŠTRINA. Mutacija: grąžinti `[]` → metodų aibės patikra praeitų, šis krinta |
+| **Nebaigto valymo job'ai NEŠALINAMI per TTL** | `postgresStore.integration` | Toks įrašas gali būti vienintelis `storageKey` šaltinis; jį išmetus audio taptų nebeatsekamas. Mutacija: nuimti `audio_cleanup_pending` filtrą → krinta |
+| **Idempotency raktas atmetamas DB, ne aplikacijoje** | `postgresStore.integration` | ⚠️ `newJob()` neturėjo `idempotencyKey`, tad `INSERT` siųstų `NULL`, o dalinis indeksas `NULL` neapima — indeksas būtų dekoracija. Mutacija: pašalinti lauką iš `newJob()` → krinta |
+| **Legacy `processing + phase=NULL` PRIIMAMAS** | `postgresStore.integration` | #154 laiko jį realiu pre-#154 kopijų formatu; `CHECK`, jį atmetantis, nutrauktų restore per pusę. Mutacija: uždrausti → krinta |
+| **`schemaVersion` išgyvena round-trip; legacy jo NEGAUNA** | `postgresStore.integration` | `resolveCurrentRole()` pagal jį sprendžia, ar `actor` yra UUID; pametus — job'as eitų legacy keliu ir vykdymas būtų atmestas. `null` ≠ nesantis: `applyPatch()` tikrina `"schemaVersion" in job` |
+| **DB `CHECK` atitinka VISUS `PROGRESS_INVARIANTS`** | `postgresStore.integration` | Sąrašas IŠVEDAMAS iš `PROGRESS_INVARIANTS`, ne surašomas: naujas invariantas be atitikmens krinta ties `deepEqual`, o ne lieka žalias. `NaN` gaudomas per `<> 'NaN'::float8`, nes PostgreSQL'e `NaN = NaN` yra TRUE |
+
+### Backend'o parinkimas ir aktyvavimo barjeras (#155, 7.2a)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| **`DATABASE_URL` NEPERJUNGIA job metaduomenų** | `jobStoreBackendSelection` | Aktyvavimo barjeras; rollback į Redis nepalaikomas. Mutacija: `POSTGRES_AKTYVAVIMAS_LEISTAS = true` → krinta 7 testai (sąmoningai pastebimai) |
+| **Eksplicitinis `JOB_STORE_BACKEND=postgres` = KLAIDA** | `jobStoreBackendSelection` | Numanomą `DATABASE_URL` galima aiškinti kaip „reikia DB sesijoms"; eksplicitinį nurodymą ignoruoti tyliai negalima |
+| **Nežinoma `JOB_STORE_BACKEND` reikšmė = klaida, ne fallback** | `jobStoreBackendSelection` | Rašybos klaida (`postgress`) tyliai virstų in-memory režimu, o operatorius manytų, kad job'ai išgyvena restartą |
+| **`persistentStorage` išvedamas iš FAKTINIO backend'o** | `privacyConfig`, `jobStoreBackendSelection` | ⚠️ Tarpinė šio darbo versija naudojo `Boolean(REDIS_URL \|\| DATABASE_URL)` ir MELAVO: su vienu `DATABASE_URL` job'ai lieka atmintyje, o nuostatos skelbė persistenciją. Mutacija: grąžinti env išvedimą → krinta 3 testai |
+| **Eilė reikalauja `REDIS_URL` IR bendro backend'o** | `jobStoreBackendSelection` | Gryna `canUseQueue(env, backend)` — visi 6 deriniai tiesiogiai. Mutacija: apversta semantika → krinta 5; „būtent Redis" → 2; kiekvienos sąlygos pašalinimas → po 1 |
+| **`memory` metaduomenys IŠJUNGIA BullMQ (sąmoninga išimtis)** | `jobStoreBackendSelection` | Worker'is atskirame procese atnaujintų savo atminties kopiją; klientas amžinai apklausinėtų `queued` job'ą, kuris kitur jau baigtas |
+| **Prisijungimo klaida NEGRĮŽTA į memory (fail-closed)** | `jobStoreBackendSelection` | Fallback reikštų split-brain: nauji job'ai atmintyje, autoritetingi — DB. ⚠️ **PARTIAL:** įrodyta unit lygmeniu (`_initializePostgresForTests`); pilnas produkcinis kelias nepasiekiamas, kol barjeras uždarytas — acceptance perkeltas į aktyvavimo etapą |
+
 ⚠️ **Šie testai ilgai buvo NEMATOMI.** `migrations.integration` egzistavo, bet be
 `DATABASE_URL` visada praleisdavo save, o matricos sargas tikrino tik `privacy` ir
 `security` rinkinius — tad `redis` ir `postgres` testai galėjo atsirasti be nė vieno
