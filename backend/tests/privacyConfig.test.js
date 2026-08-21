@@ -501,11 +501,49 @@ test("PERSISTENT_STORAGE=false su REDIS_REQUIRED=true = klaida", () => {
   assert.ok(errors.some((e) => /REDIS_REQUIRED/.test(e)));
 });
 
-test("PERSISTENT_STORAGE=true be REDIS_URL = klaida (persistencija atmintyje būtų melas)", () => {
+test("PERSISTENT_STORAGE=true be jokios patvarios saugyklos = klaida (persistencija atmintyje būtų melas)", () => {
   const { errors } = validatePrivacyConfig({ ...LOCAL_ENV, PERSISTENT_STORAGE: "true" });
 
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /REDIS_URL nenustatytas/);
+  assert.match(errors[0], /nei REDIS_URL, nei DATABASE_URL nenustatytas/);
+});
+
+/**
+ * #155, 7.2a: po PostgreSQL etapo persistencija nebėra vien Redis klausimas.
+ *
+ * Be šių atvejų diegimas su vienu `DATABASE_URL` arba reikalautų nesamo
+ * `REDIS_URL`, arba praneštų patvarią saugyklą kaip efemerišką - t. y.
+ * meluotų apie save būtent tam, kas privatumo nuostatas skaito.
+ */
+test("PERSISTENT_STORAGE=true su DATABASE_URL (be Redis) praeina", () => {
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "true",
+    DATABASE_URL: "postgres://localhost:5432/steno",
+  });
+
+  assert.deepEqual(errors, []);
+});
+
+test("DATABASE_URL vienas išveda persistentStorage=true", () => {
+  const config = getPrivacyConfig({
+    ...LOCAL_ENV,
+    DATABASE_URL: "postgres://localhost:5432/steno",
+  });
+
+  assert.equal(config.persistentStorage, true);
+  assert.equal(config.persistentExplicit, false);
+});
+
+test("PERSISTENT_STORAGE=false su DATABASE_URL = prieštaravimas", () => {
+  const { errors } = validatePrivacyConfig({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "false",
+    DATABASE_URL: "postgres://localhost:5432/steno",
+  });
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /DATABASE_URL/);
 });
 
 test("PERSISTENT_STORAGE=false praeina ir įspėja apie duomenų praradimą po restarto", () => {

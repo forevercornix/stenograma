@@ -56,6 +56,80 @@ async function init() {
   return initPromise;
 }
 
+/**
+ * BACKEND'O PARINKIMAS — EKSPLICITINĖ PIRMENYBĖ (#155, 7.2a).
+ *
+ * ⚠️ Iki #155 rinkimasis rėmėsi vien `REDIS_URL` buvimu. Su TRIMIS backend'ais
+ * tyli pirmenybė reikštų, kad veikiantis režimas priklauso nuo to, kurie env
+ * kintamieji atsitiktinai nustatyti — ir diegimas, pridėjęs `DATABASE_URL`
+ * sesijoms (7.3), netyčia perjungtų ir job metaduomenis.
+ *
+ * `JOB_STORE_BACKEND` yra eksplicitinis perrašymas; be jo galioja
+ * `DATABASE_URL > REDIS_URL > memory`.
+ *
+ * @returns {{norimas: string, priezastis: string, eksplicitinis: boolean}}
+ */
+function resolveBackendChoice(env = process.env) {
+  const eksplicitinis = env.JOB_STORE_BACKEND;
+
+  if (eksplicitinis) {
+    const leistini = ["postgres", "redis", "memory"];
+    if (!leistini.includes(eksplicitinis)) {
+      throw new Error(
+        `JOB_STORE_BACKEND="${eksplicitinis}" nežinomas. Galimos reikšmės: ${leistini.join(", ")}.`
+      );
+    }
+    return { norimas: eksplicitinis, priezastis: "JOB_STORE_BACKEND", eksplicitinis: true };
+  }
+
+  if (env.DATABASE_URL) return { norimas: "postgres", priezastis: "DATABASE_URL", eksplicitinis: false };
+  if (env.REDIS_URL) return { norimas: "redis", priezastis: "REDIS_URL", eksplicitinis: false };
+  return { norimas: "memory", priezastis: "numatyta", eksplicitinis: false };
+}
+
+/**
+ * ⚠️ AKTYVAVIMO BARJERAS (ADR „AKTYVAVIMO BARJERAS").
+ *
+ * `postgresStore` šiame etape yra ĮGYVENDINTAS, bet NEPARENKAMAS produkcijoje.
+ * ADR sako, kad rollback į Redis nepalaikomas, tad PostgreSQL negali tapti
+ * autoritetingas anksčiau, nei egzistuoja kelias tą režimą atlaikyti:
+ *
+ *   1. patikrintas restore (7.6 dalis);
+ *   2. persistentės ištrynimo žymos (7.5a) — `deletionTombstones` yra proceso
+ *      atmintis, tad restore pratybos negali įvykdyti savo ištrinto job'o
+ *      scenarijaus;
+ *   3. transakcinis + SĄLYGINIS rezultatų užbaigimas (7.5b) — kitaip nutrūkęs
+ *      procesas palieka `completed` be `job_results`.
+ *
+ * Kol barjeras galioja, `DATABASE_URL` NETYLI perjungia srauto: jis parenka
+ * ankstesnį backend'ą su aiškiu įspėjimu. Eksplicitinis
+ * `JOB_STORE_BACKEND=postgres` yra KLAIDA, ne įspėjimas — nurodymo ignoruoti
+ * tyliai negalima.
+ */
+const POSTGRES_AKTYVAVIMAS_LEISTAS = false;
+
+function applyActivationBarrier(choice, env = process.env) {
+  if (choice.norimas !== "postgres") return choice;
+  if (POSTGRES_AKTYVAVIMAS_LEISTAS) return choice;
+
+  if (choice.eksplicitinis) {
+    throw new Error(
+      "JOB_STORE_BACKEND=postgres dar neleidžiamas: PostgreSQL backend'as " +
+        "įgyvendintas (#155, 7.2a), bet aktyvavimo barjeras reikalauja " +
+        "patikrinto restore (7.6), persistentinių ištrynimo žymų (7.5a) ir " +
+        "sąlyginio transakcinio užbaigimo (7.5b). Žr. " +
+        "docs/decisions/155-postgres-authority.md."
+    );
+  }
+
+  const atsarginis = env.REDIS_URL ? "redis" : "memory";
+  log.warn(
+    `⚠️  DATABASE_URL nustatytas, bet job metaduomenys LIEKA "${atsarginis}" backend'e. ` +
+      "PostgreSQL kaip autoritetinga saugykla dar neaktyvuota (#155 aktyvavimo barjeras)."
+  );
+  return { norimas: atsarginis, priezastis: `${choice.priezastis} (barjeras)`, eksplicitinis: false };
+}
+
 async function initializeStore() {
   const redisUrl = process.env.REDIS_URL;
 
@@ -76,7 +150,11 @@ async function initializeStore() {
     return store;
   }
 
-  if (!redisUrl) {
+  const choice = applyActivationBarrier(resolveBackendChoice());
+
+  if (choice.norimas === "postgres") return initializePostgres();
+
+  if (choice.norimas === "memory" || !redisUrl) {
     // Nėra REDIS_URL - tyliai naudojam in-memory (numatytas dev/demo režimas).
     store = memoryStore;
     return store;
@@ -118,6 +196,57 @@ async function initializeStore() {
     store = memoryStore;
     return store;
   }
+}
+
+/**
+ * PostgreSQL inicijavimas — FAIL-CLOSED.
+ *
+ * ⚠️ JOKIO FALLBACK Į MEMORY. Redis kelias krinta į atmintį sąmoningai:
+ * prarandami tik nauji job'ai, o Redis įrašai lieka. Su PostgreSQL tas pats
+ * elgesys reikštų, kad NAUJI job'ai rašomi į atmintį, o AUTORITETINGI lieka
+ * DB — split-brain, kuris „išnyksta" DB atsistačius, palikdamas dvi tikroves.
+ *
+ * Todėl prisijungimo klaida nutraukia startą. Tai galioja jau dabar, nors
+ * barjeras PostgreSQL dar neparenka — kad 7.2b tereikėtų barjerą atidaryti.
+ */
+async function initializePostgres() {
+  const { Pool } = require("pg");
+  const { createPostgresStore } = require("./postgresStore");
+
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+  try {
+    await pool.query("SELECT 1");
+  } catch (err) {
+    await pool.end().catch(() => {});
+    throw new Error(
+      `PostgreSQL neprieinamas (${err.message}). Pasirinkus PostgreSQL job ` +
+        "metaduomenims, grįžimas į atmintį sukurtų split-brain (nauji job'ai " +
+        "atmintyje, autoritetingi - DB), todėl startas nutraukiamas."
+    );
+  }
+
+  store = createPostgresStore(pool);
+  log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)");
+  return store;
+}
+
+/**
+ * Ar yra EILĖS backend'as (BullMQ)?
+ *
+ * ⚠️ ATSAKYMAS PRIKLAUSO NUO `REDIS_URL`, NE NUO `getBackend()`.
+ *
+ * BullMQ gyvena Redis'e nepriklausomai nuo to, kur laikomi job metaduomenys.
+ * Sujungus šiuos du klausimus (kaip buvo `server.js:296`), diegimas su
+ * `DATABASE_URL` + `REDIS_URL` nukristų į inline vykdymą: sukurti eilės job'ai
+ * liktų nesuvartoti, o darbas taptų nepatvarus, NORS REDIS VEIKIA.
+ *
+ * Kai metaduomenys jau Redis'e, klausimas tas pats kaip anksčiau - ar
+ * prisijungimas pavyko.
+ */
+function hasQueueBackend() {
+  if (!process.env.REDIS_URL) return false;
+  return store.backend === "redis" || store.backend === "postgres";
 }
 
 // Proxy funkcijos - deleguoja į aktyvų backend'ą. init() iškviečiamas automatiškai
@@ -597,6 +726,17 @@ module.exports = {
     if (store && typeof store.close === "function") await store.close();
   },
   getBackend: () => store.backend || "memory",
+  /**
+   * Eilės (BullMQ) prieinamumas — ATSKIRAS klausimas nuo metaduomenų
+   * backend'o. Žr. `hasQueueBackend()` komentarą.
+   */
+  hasQueueBackend,
+  /**
+   * Backend'o parinkimo politika be šalutinių efektų — kad testai galėtų
+   * tikrinti KIEKVIENĄ env derinį neinicijuodami tikros saugyklos.
+   */
+  resolveBackendChoice,
+  applyActivationBarrier,
   STATUS,
   JOB_TYPES,
   TTL_MS,

@@ -80,11 +80,19 @@ function getPrivacyConfig(env = process.env) {
    * kad administratorius mano, jog jobai išgyvena restartą, o jie neišgyvena. Būtent
    * tokios tylios neatitikties šiame projekte vengiam - geriau kieta klaida.
    */
+  /**
+   * ⚠️ IŠVEDAMA IR IŠ `DATABASE_URL` (#155, 7.2a).
+   *
+   * Anksčiau persistencija buvo išvedama TIK iš `REDIS_URL`. Po #155 job
+   * metaduomenys, sesijos ir auditas gali gyventi PostgreSQL'e, tad diegimas
+   * su vienu `DATABASE_URL` pranešdavo saugyklą kaip EFEMERIŠKĄ - t. y.
+   * meluodavo apie save būtent tam, kas privatumo nuostatas skaito.
+   */
   const persistentRaw = env.PERSISTENT_STORAGE;
   const persistentExplicit = persistentRaw !== undefined && persistentRaw !== "";
   const persistentStorage = persistentExplicit
     ? _bool(persistentRaw, false)
-    : Boolean(env.REDIS_URL);
+    : Boolean(env.REDIS_URL || env.DATABASE_URL);
 
   const audioRetentionHours = _int(env.AUDIO_RETENTION_HOURS, 24);
 
@@ -189,12 +197,19 @@ function validatePrivacyConfig(env = process.env) {
 
   // --- Persistentinė saugykla (GDPR #5: "persistent storage can be disabled") ---
   const redisConfigured = Boolean(env.REDIS_URL);
+  const postgresConfigured = Boolean(env.DATABASE_URL);
+  /** Bet kuri patvari saugykla - ne tik Redis (#155). */
+  const persistentConfigured = redisConfigured || postgresConfigured;
 
-  if (config.persistentExplicit && !config.persistentStorage && redisConfigured) {
+  if (config.persistentExplicit && !config.persistentStorage && persistentConfigured) {
+    const kuris = [redisConfigured && "REDIS_URL", postgresConfigured && "DATABASE_URL"]
+      .filter(Boolean)
+      .join(" ir ");
     errors.push(
-      "PERSISTENT_STORAGE=false, bet nustatytas REDIS_URL - prieštaringa konfigūracija. " +
-        "Jobų būsena ir rezultatai (transkripcija, protokolas) atsidurtų Redis'e, nors " +
-        "prašoma nieko nesaugoti. Pašalinkite REDIS_URL arba nustatykite PERSISTENT_STORAGE=true."
+      `PERSISTENT_STORAGE=false, bet nustatytas ${kuris} - prieštaringa konfigūracija. ` +
+        "Jobų būsena ir rezultatai (transkripcija, protokolas) atsidurtų patvarioje " +
+        `saugykloje, nors prašoma nieko nesaugoti. Pašalinkite ${kuris} arba nustatykite ` +
+        "PERSISTENT_STORAGE=true."
     );
   }
 
@@ -205,10 +220,11 @@ function validatePrivacyConfig(env = process.env) {
     );
   }
 
-  if (config.persistentExplicit && config.persistentStorage && !redisConfigured) {
+  if (config.persistentExplicit && config.persistentStorage && !persistentConfigured) {
     errors.push(
-      "PERSISTENT_STORAGE=true, bet REDIS_URL nenustatytas - be jo jobų būsena lieka " +
-        "ATMINTYJE ir dingsta po restarto. Nustatykite REDIS_URL arba PERSISTENT_STORAGE=false."
+      "PERSISTENT_STORAGE=true, bet nei REDIS_URL, nei DATABASE_URL nenustatytas - be jų " +
+        "jobų būsena lieka ATMINTYJE ir dingsta po restarto. Nustatykite vieną iš jų arba " +
+        "PERSISTENT_STORAGE=false."
     );
   }
 

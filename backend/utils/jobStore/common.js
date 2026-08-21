@@ -139,6 +139,19 @@ function newJob(fields = {}) {
     ownerKind: fields.ownerKind ?? null,
     /** Paruošta multi-tenancy etapui; kol kas visada `null`. */
     tenantId: fields.tenantId ?? null,
+    /**
+     * IDEMPOTENCY RAKTAS (#155, 7.2a).
+     *
+     * Bendro kontrakto laukas, ne PostgreSQL detalė: unikalumą užtikrina DB
+     * dalinis indeksas `(tenant_id, idempotency_key)`, bet lauko privalo turėti
+     * VISI backend'ai — kitaip `postgresStore` skaitytų `job.idempotencyKey`,
+     * kurio `newJob()` nematerializuoja, ir indeksas liktų dekoracija: kiekvienas
+     * `INSERT` siųstų `NULL`, o dalinis indeksas `NULL` eilučių neapima.
+     *
+     * Šiandien nė vienas kviečiantysis jo neperduoda — laukas paruoštas, bet
+     * neaktyvus. Unikalumo garantija tikrinama 7.2a integraciniame teste.
+     */
+    idempotencyKey: fields.idempotencyKey ?? null,
     actor: fields.actor || null,
     /**
      * AKTORIAUS ROLĖ IR ŠALTINIS (#18 PR3).
