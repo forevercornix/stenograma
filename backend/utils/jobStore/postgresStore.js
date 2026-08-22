@@ -183,6 +183,36 @@ const COLUMNS = [
 ];
 
 /** `j.*` su prijungtu rezultatu — vienintelė skaitymo forma (žr. hidrataciją). */
+/**
+ * STULPELIAI, KURIŲ `UPDATE ... SET` NIEKADA NELIEČIA.
+ *
+ * Tapatybė (`id`), nuosavybė (#159), nuoma, kūrimo ketinimas
+ * (`idempotency_key`), įrašo era (#158) ir sukūrimo laikas nustatomi TIK
+ * `create()` / `restoreRecord()` metu.
+ *
+ * ⚠️ SĄŽININGAI: ŠIANDIEN ŠIS FILTRAS NEPASIEKIAMAS.
+ *
+ * `writePatched()` visada eina per `applyPatch()`, kuris tapatybę, nuosavybę
+ * ir erą atstato iš originalaus job'o, o `jobToRow()` skaito tik camelCase
+ * laukus - tad `snake_case` patch'as row builder'io nepasiekia. Vadinasi,
+ * pakeisti šių laukų per esamą kelią NEĮMANOMA ir be šio filtro.
+ *
+ * Filtras vis tiek reikalingas: garantija, kurią duoda vien helperis, dingsta
+ * pirmam keliui, kuris jo neiškviečia - o 7.2b kaip tik įveda naujus SQL
+ * mutacijų kelius (`UPDATE ... WHERE ... RETURNING`), kuriuose `applyPatch()`
+ * gali nebedalyvauti. Aibė tikrinama kontrakto testu, ne elgesiu, nes elgesio
+ * kelio kol kas nėra.
+ */
+const IMMUTABLE_COLUMNS = new Set([
+  "id",
+  "owner_id",
+  "owner_kind",
+  "tenant_id",
+  "idempotency_key",
+  "schema_version",
+  "created_at",
+]);
+
 const SELECT_JOB = `
   SELECT j.*, r.payload AS result
     FROM jobs j
@@ -323,15 +353,8 @@ function createPostgresStore(pool) {
      * kelią, kuris jo neiškviečia — o `updateOwned` čia tuo pačiu keliu
      * atominiai autorizuoja kaip savininkas A. Sąrašas ribojamas ir SQL pusėje.
      */
-    const mutable = COLUMNS.filter(
-      /**
-       * ⚠️ `idempotency_key` TAIP PAT NEKINTAMAS. Jis identifikuoja KŪRIMO
-       * ketinimą; leidus jį keisti, du skirtingi ketinimai galėtų susilieti
-       * arba vienas atsilaisvintų pakartotiniam naudojimui.
-       */
-      (c) =>
-        !["id", "owner_id", "owner_kind", "tenant_id", "idempotency_key", "created_at"].includes(c)
-    );
+    const mutable = COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c));
+
     const sets = mutable.map((c, i) => `"${c}" = $${i + 2}`).join(", ");
 
     await client.query(
@@ -524,6 +547,7 @@ function createPostgresStore(pool) {
 
 module.exports = {
   createPostgresStore,
+  IMMUTABLE_COLUMNS,
   rowToJob,
   jobToRow,
   tenantToDb,
