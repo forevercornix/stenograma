@@ -209,6 +209,20 @@ const postgres = [
    * sugadinta kopija bus įrašyta.
    */
   "dbRuntimeParity.integration",
+  /**
+   * ⚠️ REGISTRUOTAS ABIEJUOSE RINKINIUOSE (`redis` ir `postgres`).
+   *
+   * CI turi du atskirus žingsnius su skirtingomis priklausomybėmis
+   * (`test:redis` su `REDIS_URL`, `test:postgres` su `DATABASE_URL`). Failas,
+   * likęs tik `redis` rinkinyje, PostgreSQL žingsnyje NEBŪTŲ paleistas, o
+   * `redis` žingsnyje `DATABASE_URL` nėra - tad 7.2b pridėtas PostgreSQL
+   * adapteris pats save praleistų, ir CI tikrintų du backend'us iš trijų.
+   *
+   * Šiandien PostgreSQL adapterio dar nėra (jį prideda 7.2b); registracija
+   * atlikta iš anksto, kad tas darbas neliktų nepastebėtas. Redis scenarijai
+   * šiame žingsnyje teisėtai praleidžiami - `REDIS_URL` čia nėra.
+   */
+  "jobStoreBackendContract.integration",
 ];
 
 module.exports = {
