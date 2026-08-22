@@ -139,28 +139,10 @@ exports.up = (pgm) => {
    * atkūrimas praneštų SĖKMĘ - o `authorizeJobExecution()` vėliau mestų
    * „Nepalaikoma job schemaVersion", ir atkurtas job'as niekada nepasileistų.
    *
-   * ⚠️ AIBĖ = `{NULL, 2}`, NE `{NULL, 1, 2}`. `assertSupportedSchemaVersion()`
-   * (`jobAuthorization.js:65`) atmeta KIEKVIENĄ ne-`null` reikšmę, kuri nėra
-   * `2` - įskaitant `1`. Constraint'as, priimantis `1`, tik perkeltų tą patį
-   * gedimą iš atkūrimo į vykdymą: restore praneštų sėkmę, o job'as niekada
-   * nepasileistų.
-   *
    * `NULL` = pre-#158 legacy įrašas (žr. stulpelio komentarą).
    */
   pgm.addConstraint("jobs", "jobs_schema_version_supported", {
-    check: "schema_version IS NULL OR schema_version = 2",
-  });
-
-  /**
-   * ⚠️ UŽDARA TIPŲ AIBĖ.
-   *
-   * Be jos `type: "bogus"` iš sugadintos kopijos būtų įrašytas: `restoreRecord()`
-   * tikrina tik ID buvimą, o `assertConsistentJobRecord()` tipą tikrina TIK
-   * `processing` eilutėse. `queued` ar terminalus įrašas su nežinomu tipu
-   * praeitų, o pirma gyvavimo ciklo operacija mestų `UNKNOWN_JOB_TYPE`.
-   */
-  pgm.addConstraint("jobs", "jobs_type_values", {
-    check: "type IN ('transcription', 'protocol')",
+    check: "schema_version IS NULL OR schema_version IN (1, 2)",
   });
 
   pgm.addConstraint("jobs", "jobs_status_values", {

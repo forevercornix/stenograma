@@ -737,7 +737,7 @@ atsistatyti iš kopijos, neprarasti rezultatų ir neprikelti ištrintų duomenų
 | **Transakcinis rezultatų įrašymas** (7.5b dalis) | Be jo nutrūkęs procesas palieka `completed` be `job_results`; kitas bandymas atsimuša į `restart()` terminalų sargą, audio lieka, o klientas transkripcijos neturi |
 | **Idempotentiškas užbaigimas su konfliktų sprendimu** (7.5b dalis) | Transakcijos vienos NEPAKANKA — žr. žemiau |
 | **Fail-closed startas, patikrintas REALIAI** (7.2a `[F2]`) | `initializePostgres()` neturi fallback į atmintį, bet kol barjeras uždarytas, funkcija produkcijoje NEPASIEKIAMA — įrodyta tik unit lygmeniu (`_initializePostgresForTests`). Barjerą atidarius pirmas realus startas su neprieinama DB ir BŪTŲ tas testas |
-| **Eilės prieinamumas patikrintas prieš skelbiant** (7.2a) | `hasQueueBackend()` grąžina `true` neprobindamas Redis. Su PostgreSQL metaduomenimis prisijungimo prie Redis NIEKAS nedaro (`initializePostgres()` jo neliečia), tad `server.js` pažymėtų runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų ar kristų. Kol backend'as yra Redis, klausimas nekyla — prisijungimas jau įvyko inicijuojant |
+| **Eilės prieinamumo preflight** — ⚠️ **NEĮGYVENDINTA** | `hasQueueBackend()` vertina TIK konfigūraciją (`jobStore/index.js`), `jobRunner.init()` tikrina tik ar `bullmq` modulį galima `require` (`jobRunner.js:76-82`), o jungtis kuriama LAZY pirmo `add` metu (`transcriptionQueue.js:13-24`). Su PostgreSQL metaduomenimis prie Redis nesijungia NIEKAS, tad `server.js` pažymėtų runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų ar kristų. Reikia realaus probe prieš pradedant klausytis |
 
 ⚠️ **TRANSAKCIJA NEIŠSPRENDŽIA LYGIAGRETUMO.**
 
@@ -760,18 +760,33 @@ RETURNING *
 Nulis eilučių reiškia, kad kas nors jau baigė — tada rezultatas **lyginamas**, o
 ne perrašomas. Skirtingas rezultatas yra klaida, ne sėkmė.
 
-### ⚠️ DVI PASKUTINĖS PRIELAIDOS YRA KITOKIOS
+### ⚠️ PRIELAIDOS SKIRSTOMOS Į DVI RŪŠIS
 
-Pirmos keturios yra **neįgyvendintas darbas**. Dvi paskutinės — **įgyvendintas
-kodas, kurio negalima patikrinti, kol barjeras uždarytas**.
+Painioti jas pavojinga: „trūksta įrodymo" ir „trūksta kodo" reikalauja skirtingo
+darbo, o antrąją nurašius kaip pirmąją, barjeras būtų atidarytas su spraga.
 
-Skirtumas svarbus peržiūrai: 7.2a jas įvykdė tiek, kiek šiame etape įmanoma, ir
-uždaryti #179 jos neblokuoja. Bet jos NEGALI dingti tarp etapų — neišbandytas
-gedimo kelias, įsijungiantis būtent barjero atidarymo momentu, yra blogesnis
-nei neparašytas: jis atrodo padengtas.
+**A. Neįgyvendintas darbas** — kodo dar nėra:
 
-Todėl barjerą atidarantis PR privalo turėti jas savo DoD, ne tik nuorodą į
-7.5b/7.6.
+- patikrintas restore (7.6);
+- persistentės ištrynimo žymos (7.5a);
+- transakcinis + sąlyginis užbaigimas (7.5b);
+- **eilės prieinamumo preflight** (7.2a paliko neįgyvendintą).
+
+**B. Įgyvendintas kodas, kurio negalima patikrinti, kol barjeras uždarytas** —
+tik `[F2]` fail-closed startas. `initializePostgres()` fallback'o į atmintį
+neturi ir turi baigtinę prisijungimo ribą, bet produkcijoje funkcija
+NEPASIEKIAMA, tad įrodyta tik unit lygmeniu.
+
+⚠️ **Eilės preflight priklauso A, ne B.** `hasQueueBackend()` vertina tik
+konfigūraciją; nė vienoje vietoje nėra kodo, kuris prieš pradedant klausytis
+patikrintų, ar eilė realiai pasiekiama. Klasifikavus jį kaip „laukiantį
+išorinio įrodymo", vėlesnė aktyvavimo peržiūra trūkstamą kodą palaikytų
+trūkstamu patvirtinimu.
+
+Uždaryti #179 nė viena iš jų neblokuoja, bet abi privalo būti barjerą
+atidarančio PR DoD — neišbandytas ar neparašytas gedimo kelias, įsijungiantis
+būtent tuo momentu, yra blogesnis nei akivaizdžiai nesantis: jis atrodo
+padengtas.
 
 ## ⚠️ DB IR RUNTIME AIBĖS PRIVALO SUTAPTI
 

@@ -77,6 +77,38 @@ async function irasyti(perrasymai = {}) {
   );
 }
 
+/**
+ * Grąžina VISAS teksto konstantas, minimas constraint'o apibrėžime.
+ *
+ * ⚠️ SKAITOMAS TIKRAS `pg_get_constraintdef()`, ne testo prielaida.
+ *
+ * Be to „laisvesnės DB" pusė lieka neapsaugota: jei SQL įsileistų PAPILDOMĄ
+ * runtime nepripažįstamą reikšmę (pvz. `summary`), o fiksuotą sentinelį
+ * (`bogus`) toliau atmestų, testas su vienu sentineliu liktų ŽALIAS - t. y.
+ * negintų būtent tos divergencijos krypties, dėl kurios visas rinkinys ir
+ * egzistuoja.
+ *
+ * Lyginant AIBES, bet koks DB allowlist'o pasikeitimas krinta.
+ */
+async function constraintKonstantos(conname) {
+  const { rows } = await pool.query(
+    "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1",
+    [conname]
+  );
+  assert.equal(rows.length, 1, `constraint "${conname}" nerastas - pervadintas ar pamestas?`);
+  return new Set([...rows[0].def.matchAll(/'([^']*)'/g)].map((m) => m[1]));
+}
+
+/** Skaitinės konstantos (pvz. `schema_version = 2`). */
+async function constraintSkaiciai(conname) {
+  const { rows } = await pool.query(
+    "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1",
+    [conname]
+  );
+  assert.equal(rows.length, 1, `constraint "${conname}" nerastas`);
+  return new Set([...rows[0].def.matchAll(/=\s*\(?(-?\d+)/g)].map((m) => Number(m[1])));
+}
+
 async function priima(eilute, kodel) {
   await assert.doesNotReject(
     () => irasyti(eilute),
@@ -139,6 +171,19 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
     }
   });
 
+  await t.test("type: DB ALLOWLIST aibė sutampa su JOB_TYPES", async () => {
+    /**
+     * ⚠️ MUTACIJAI ATSPARI PUSĖ. Vieno sentinelio (`"bogus"`) atmetimas
+     * neįrodo, kad DB neįsileido KITOS runtime nepripažįstamos reikšmės -
+     * `summary` pridėjimas SQL'e tokį testą paliktų žalią.
+     */
+    assert.deepEqual(
+      [...(await constraintKonstantos("jobs_type_values"))].sort(),
+      Object.values(JOB_TYPES).sort(),
+      "DB tipų aibė nesutampa su JOB_TYPES"
+    );
+  });
+
   /* ── status ──────────────────────────────────────────────────────────── */
 
   await t.test("status: DB priima KIEKVIENĄ STATUS reikšmę", async () => {
@@ -150,6 +195,14 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
 
   await t.test("status: nežinomas atmetamas", async () => {
     await atmeta({ status: "paused" }, "nežinomas statusas");
+  });
+
+  await t.test("status: DB ALLOWLIST aibė sutampa su STATUS", async () => {
+    assert.deepEqual(
+      [...(await constraintKonstantos("jobs_status_values"))].sort(),
+      Object.values(STATUS).sort(),
+      "DB statusų aibė nesutampa su STATUS"
+    );
   });
 
   /* ── phase ───────────────────────────────────────────────────────────── */
@@ -187,6 +240,25 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
     }
   });
 
+  await t.test("phase: DB ALLOWLIST aibė sutampa su phasesForType() ∪ JOB_TYPES", async () => {
+    /**
+     * `jobs_status_phase` apibrėžime minimi IR tipai (`WHEN type = ...`), IR
+     * fazės, tad lyginama su sąjunga. Bet kokia papildoma konstanta - naujas
+     * tipas ar fazė be runtime atitikmens - krinta.
+     */
+    const laukiama = new Set([
+      ...Object.values(JOB_TYPES),
+      ...Object.values(JOB_TYPES).flatMap((t2) => phasesForType(t2)),
+      "processing",
+    ]);
+
+    assert.deepEqual(
+      [...(await constraintKonstantos("jobs_status_phase"))].sort(),
+      [...laukiama].sort(),
+      "DB fazių/tipų aibė nesutampa su runtime"
+    );
+  });
+
   /* ── owner_kind ──────────────────────────────────────────────────────── */
 
   await t.test("owner_kind: DB priima KIEKVIENĄ OWNER_KIND reikšmę", async () => {
@@ -198,6 +270,14 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
 
   await t.test("owner_kind: nežinoma rūšis atmetama", async () => {
     await atmeta({ owner_kind: "service", owner_id: null }, "nežinoma nuosavybės rūšis");
+  });
+
+  await t.test("owner_kind: DB ALLOWLIST aibė sutampa su OWNER_KIND", async () => {
+    assert.deepEqual(
+      [...(await constraintKonstantos("jobs_owner_identity"))].sort(),
+      Object.values(OWNER_KIND).sort(),
+      "DB nuosavybės rūšių aibė nesutampa su OWNER_KIND"
+    );
   });
 
   /* ── schema_version ──────────────────────────────────────────────────── */
@@ -229,6 +309,19 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
       () => assertSupportedSchemaVersion({ id: "x", schemaVersion: 2 }),
       "dabartinė era privalo būti priimama - kitaip klasifikatorius sugedęs"
     );
+
+    /**
+     * ⚠️ DB PUSĖ IRGI IŠVEDAMA. Fiksuotas kandidačių sąrašas gintų tik nuo tų
+     * reikšmių, kurias kas nors sugalvojo įrašyti; DB, įsileidusi ketvirtą
+     * erą, liktų nepastebėta.
+     */
+    const dbLeidzia = await constraintSkaiciai("jobs_schema_version_supported");
+    for (const versija of dbLeidzia) {
+      assert.doesNotThrow(
+        () => assertSupportedSchemaVersion({ id: "x", schemaVersion: versija }),
+        `DB leidžia erą ${versija}, kurios runtime nepripažįsta - tyli divergencija`
+      );
+    }
 
     for (const versija of [null, 1, 2, 3, 0, -1, 99]) {
       let runtimePriima = true;
