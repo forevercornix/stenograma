@@ -23,18 +23,24 @@ const { OWNER_KIND, JOB_TYPES } = require("../utils/jobStore/common");
  * Šis testas paleidžia TĄ PAČIĄ scenarijų aibę prieš abu backend'us ir
  * reikalauja vienodo rezultato.
  *
- * ⚠️ #155 PRIDĖS TREČIĄ REALIZACIJĄ (`postgresStore`).
+ * ⚠️ #155 (7.2b) PRIDĖS TREČIĄ REALIZACIJĄ (`postgresStore`) IR
+ * PARAMETRIZUOS ŠĮ FAILĄ.
  *
- * Backend'ai čia NĖRA parametrizuoti – memory ir Redis turi po atskirą testą,
- * nes jų paruošimas skiriasi (memory rašo objektą, Redis – Redis hash'ą).
- * Pridedant `postgresStore` reikia:
+ * Šiandien backend'ai NĖRA parametrizuoti – memory ir Redis turi po atskirą
+ * testą, nes jų paruošimas skiriasi (memory rašo objektą, Redis – Redis
+ * hash'ą). Tai LAIKINA būsena.
  *
- *   1. naujo `paruostiBusena` adapterio (SQL INSERT/UPDATE);
- *   2. trečio testo, lyginančio jį su memory rezultatais, kaip daro Redis;
- *   3. `SCENARIJAI` sąrašo NEKEISTI – jis bendras.
+ * 7.2b reikalauja adapterio modelio (`{ name, setup, store, prepareState,
+ * cleanup }`) ir TO PATIES scenarijų rinkinio prieš visus tris backend'us.
+ * Ketvirto atskiro testo pridėti NEREIKIA – kopijuotas testas yra būtent tai,
+ * ką 7.2b šalina.
  *
- * Šito praleidimas nebūtų automatiškai pastebimas, todėl ADR 7.2b tai įvardija
- * kaip eksplicitinį DoD punktą.
+ * `SCENARIJAI` sąrašas gali būti PLEČIAMAS (7.2b prideda `updateOwned`,
+ * `removeOwned` ir `getOwned` scenarijus), bet lieka BENDRAS visiems
+ * backend'ams – atskirų sąrašų vienam backend'ui būti negali.
+ *
+ * Failas jau registruotas IR `redis`, IR `postgres` rinkiniuose
+ * (`tests/suites.js`), tad PostgreSQL adapteris bus realiai vykdomas CI'e.
  */
 
 /** Scenarijai, kurių rezultatas turi sutapti VISUOSE backend'uose. */
