@@ -403,3 +403,26 @@ test("applyPatch: nekintamų laukų aibė sutampa su postgresStore IMMUTABLE_COL
     );
   }
 });
+
+test("newJob: schemaVersion normalizuojamas į skaičių (backend'ų paritetas)", () => {
+  /**
+   * ⚠️ `assertSupportedSchemaVersion()` lygina `=== 2`, tad `"2"` runtime
+   * ATMETA. Redis eilutę konvertuoja (`NUMERIC_FIELDS`), PostgreSQL - per
+   * `integer` stulpelį, o memory be normalizavimo paliktų `"2"`: tas pats
+   * įrašas būtų vykdomas dviejuose backend'uose ir nevykdomas trečiame.
+   */
+  assert.equal(newJob({ ownerKind: OWNER_KIND.UNOWNED }).schemaVersion, 2);
+
+  /**
+   * ⚠️ KVIETĖJO REIKŠMĖ IGNORUOJAMA. `create()` neturi galimybės pagaminti
+   * legacy (`null`) ar nežinomos (`3`, `"x"`) eros įrašo - toks job'as
+   * autorizacijoje būtų arba palaikytas senoviniu, arba atmestas.
+   */
+  for (const bandymas of ["2", "x", null, 3, undefined]) {
+    assert.equal(
+      newJob({ ownerKind: OWNER_KIND.UNOWNED, schemaVersion: bandymas }).schemaVersion,
+      2,
+      `schemaVersion=${bandymas} neturi paveikti naujo job'o eros`
+    );
+  }
+});
