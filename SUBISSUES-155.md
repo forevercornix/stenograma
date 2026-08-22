@@ -401,17 +401,30 @@ CAS turi apsaugoti visas reikšmes, nuo kurių priklauso progreso sprendimas,
 - `status`;
 - `phase`;
 - esamą `progressKnown`;
-- esamą progreso epochą (`current` / `total`).
+- esamą progreso snapshot'ą (`progress_known`, `progress_current`,
+  `progress_total`).
 
-⚠️ **BE „KAI JI AKTUALI" IŠLYGOS.** Ankstesnė formuluotė buvo dviprasmiška ir
-paliko realizacijai spręsti, kada progreso lauką tikrinti. CAS `WHERE` sąlyga
-privalo VISADA lyginti `progress_known`, `progress_current` ir `progress_total`
-su perskaityta būsena, naudodama NULL-safe `IS NOT DISTINCT FROM`.
+⚠️ **PROGRESO SNAPSHOT'AS TIKRINAMAS VISAIS ATVEJAIS, BE IŠLYGŲ.**
 
-Priežastis: `progress_current` ir `progress_total` yra `NULL` kiekvienai
-`progressKnown = false` eilutei, o `= NULL` duoda `UNKNOWN` — sąlyginis
-`UPDATE` neatitiktų NĖ VIENOS eilutės, ir pirmasis progreso pranešimas visada
-grįžtų `"REJECTED"`.
+Reikalaujama `WHERE` dalis:
+
+```sql
+progress_known   IS NOT DISTINCT FROM $expectedProgressKnown
+AND progress_current IS NOT DISTINCT FROM $expectedProgressCurrent
+AND progress_total   IS NOT DISTINCT FROM $expectedProgressTotal
+```
+
+(arba įrodytas semantiškai lygiavertis sprendimas).
+
+Visi TRYS laukai lyginami kiekvienu atveju — įskaitant `progressKnown = false`,
+kai snapshot'as yra `(false, NULL, NULL)`. Formuluotė „kai aktualu" NETAIKOMA:
+senas event negali būti pritaikytas, jei pasikeitė BET KURI snapshot'o progreso
+reikšmė.
+
+⚠️ `IS NOT DISTINCT FROM`, NE `=`. `progress_current` ir `progress_total` yra
+`NULL` kiekvienai `progressKnown = false` eilutei, o `= NULL` duoda `UNKNOWN` —
+sąlyginis `UPDATE` neatitiktų NĖ VIENOS eilutės, ir PIRMASIS progreso
+pranešimas visada grįžtų `"REJECTED"`.
 
 Jeigu kuri nors iš sprendimui naudotų reikšmių pasikeičia tarp bandymų, senas
 event negali būti pritaikytas naujai būsenai.
@@ -472,30 +485,42 @@ naudingos žinutės.
       nuo švarios būsenos).
 - [ ] Rinkinys užsibaigia be `--force-exit` ar analogiškų priemonių.
 
-Pašalinti / atnaujinti dabartinį pasenusį testo komentarą, kuriame nurodoma
-PostgreSQL pridėti kaip trečią atskirą testą ir nekeisti `SCENARIJAI`.
+⚠️ **AS-IS: komentaras JAU ATNAUJINTAS.** Sena instrukcija („pridėti
+PostgreSQL kaip TREČIĄ ATSKIRĄ testą", „`SCENARIJAI` NEKEISTI") pašalinta —
+ji tiesiogiai prieštaravo šiam sub-issue.
+
+7.2b kriterijus yra REGRESIJOS: komentaras privalo likti suderintas su
+parametrizuotu modeliu ir negali grąžinti senos „trečio atskiro testo"
+instrukcijos.
 
 ### 8. ⚠️ RINKINYS PRIVALO REALIAI PALEISTI VISUS TRIS CI'E
 
-Šiandien `jobStoreBackendContract.integration` yra **tik `redis` rinkinyje**
-(`tests/suites.js:35`), o CI turi DU atskirus žingsnius:
+⚠️ **AS-IS: registracija JAU ATLIKTA.** `jobStoreBackendContract.integration`
+šiuo metu registruotas IR `redis`, IR `postgres` rinkiniuose
+(`tests/suites.js`) — paruošta iš anksto, kad 7.2b darbas neliktų
+nepastebėtas.
+
+7.2b privalo šią registraciją **IŠLAIKYTI** ir pridėti PostgreSQL adapterį
+taip, kad `npm run test:postgres` realiai vykdytų visus PostgreSQL
+`SCENARIJAI`, o ne juos praleistų.
+
+Kodėl tai svarbu — CI turi DU atskirus žingsnius:
 
 | Žingsnis | Env | Kas vykdoma |
 |---|---|---|
 | `npm run test:redis` | `REDIS_URL`, `REQUIRE_REDIS=1` | `redis` rinkinys |
 | `npm run test:postgres` | `DATABASE_URL`, `REQUIRE_POSTGRES=1` | `postgres` rinkinys |
 
-Failas, likęs tik `redis` rinkinyje, PostgreSQL žingsnyje NEBUS paleistas, o
-`redis` žingsnyje `DATABASE_URL` nėra — tad PostgreSQL adapteris **pats save
-praleis**.
+Failas, iškritęs iš `postgres` rinkinio, PostgreSQL žingsnyje NEBŪTŲ
+paleistas, o `redis` žingsnyje `DATABASE_URL` nėra — tad PostgreSQL adapteris
+**pats save praleistų**.
 
 Rezultatas: visi 7 punkto kriterijai būtų formaliai įvykdyti, o CI realiai
 tikrintų DU backend'us iš trijų. Tyliai — tas pats šablonas, kurį #155 jau du
 kartus pagavo (`migrations.integration` prefiksas, matricos įrašai).
 
-- [ ] Rinkinys registruotas taip, kad KIEKVIENAS backend'as būtų vykdomas
-      žingsnyje, kuriame yra jo priklausomybė: arba failas įtraukiamas į abu
-      rinkinius, arba suskaidomas pagal backend'ą.
+- [ ] Registracija abiejuose rinkiniuose IŠLAIKYTA (regresijos kriterijus, ne
+      naujas darbas).
 - [ ] Praleidimas nėra tylus: be atitinkamo URL adapteris praleidžiamas su
       aiškiu `skip`, o CI naudoja `REQUIRE_REDIS=1` / `REQUIRE_POSTGRES=1`.
 - [ ] **Testas:** `npm run test:postgres` išvestyje matomi PostgreSQL
@@ -757,11 +782,10 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
 - [ ] Bendras rinkinys papildytas `removeOwned()` scenarijais.
 - [ ] Bendras rinkinys papildytas `getOwned()` scenarijais.
 - [ ] Visi trys backend'ai deklaruoja tą pačią 15 metodų aibę.
-- [ ] Pasenęs `jobStoreBackendContract.integration.test.js` komentaras
-      atnaujintas pagal trijų backend'ų parametrizuotą architektūrą.
-      ⚠️ Dabartinis tekstas nurodo PostgreSQL pridėti kaip TREČIĄ ATSKIRĄ
-      testą ir `SCENARIJAI` NEKEISTI — tai tiesiogiai prieštarauja šiam
-      sub-issue, tad palikus jį Codex gautų du priešingus nurodymus.
+- [ ] `jobStoreBackendContract.integration.test.js` komentaras LIEKA
+      suderintas su parametrizuotu modeliu; sena „trečio atskiro testo"
+      instrukcija negrąžinama (regresijos kriterijus — komentaras jau
+      atnaujintas).
 
 **CI ir matrica**
 
@@ -787,6 +811,13 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
 - [ ] Esami #159 ownership kontrakto testai lieka žali.
 - [ ] PostgreSQL specifiniai integraciniai testai lieka žali.
 - [ ] Memory ir Redis regresijų nėra.
+- [ ] `common.js` `applyPatch()` išlaiko `id`, `ownerId`, `ownerKind`,
+      `tenantId`, `idempotencyKey`, `schemaVersion` ir kūrimo laiko laukų
+      nekintamumą memory/Redis keliuose; bendras kontraktų rinkinys neleidžia
+      šiai garantijai išsiskirti tarp backend'ų.
+- [ ] `reportProgressAtomic()` CAS VISADA NULL-safe lygina ankstesnius
+      `progress_known`, `progress_current` ir `progress_total` su DB būsena —
+      įskaitant `(false, NULL, NULL)` snapshot'ą.
 - [ ] `POSTGRES_AKTYVAVIMAS_LEISTAS` šiame PR lieka `false`.
 - [ ] 7.2b neprideda `jobs.version` ir neįgyvendina 7.5b bendro
       optimistic-locking kontrakto.
