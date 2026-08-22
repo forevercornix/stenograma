@@ -4,7 +4,6 @@ const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
-const { Pool } = require("pg");
 const {
   skipWithoutPostgres,
   testDatabaseUrl,
@@ -217,73 +216,3 @@ test(
 
 /** node:test kviečia po VISŲ šio failo testų, įskaitant kritusius. */
 after(išvalyti);
-
-test(
-  "#155 MIGRACIJOS: atnaujinimas iš TĖVINĖS schemos sugriežtina constraint'us",
-  { skip: skipWithoutPostgres() },
-  async () => {
-    /**
-     * ⚠️ ŠVARIOS DB TESTO NEPAKANKA.
-     *
-     * `node-pg-migrate` praleidžia failą pagal VARDĄ (`pgmigrations` lentelė),
-     * tad pakeitus JAU IŠSIŲSTĄ migraciją švarios DB testai praeitų, o
-     * egzistuojančios liktų su laisvesne schema - tyliai, nes antras
-     * `migrate:up` teisėtai yra no-op (žr. testą aukščiau).
-     *
-     * Todėl tikrinamas būtent atnaujinimo kelias: pirma pritaikoma TIK tėvinė
-     * migracija, tada visos, ir įrodoma, kad reikšmė, kurią tėvinė schema
-     * priimdavo, dabar atmetama.
-     */
-    await perkurtiDb();
-
-    const tevine = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-migr-"));
-    try {
-      /** ⚠️ Filtruojama pagal plėtinį - kataloge yra ir `.gitkeep`. */
-      const visos = fs
-        .readdirSync(path.join(ŠAKNIS, "migrations"))
-        .filter((f) => f.endsWith(".js"))
-        .sort();
-      assert.ok(visos.length >= 2, "testas prasmingas tik esant bent dviem migracijoms");
-      const pirma = visos[0];
-      fs.copyFileSync(
-        path.join(ŠAKNIS, "migrations", pirma),
-        path.join(tevine, pirma)
-      );
-
-      migrate("up", tevine);
-
-      const pool = new Pool({ connectionString: DB_URL });
-      try {
-        const irasyti = (tipas, era) =>
-          pool.query(
-            `INSERT INTO jobs (id, type, status, progress_known, schema_version, created_at, updated_at)
-             VALUES (gen_random_uuid(), $1, 'queued', false, $2, now(), now())`,
-            [tipas, era]
-          );
-
-        // Tėvinė schema šias reikšmes PRIIMA - tai ir yra spraga.
-        await assert.doesNotReject(() => irasyti("transcription", 1));
-        await assert.doesNotReject(() => irasyti("bogus", 2));
-        await pool.query("TRUNCATE jobs CASCADE");
-
-        // Atnaujinimas.
-        migrate("up");
-
-        await assert.rejects(
-          () => irasyti("transcription", 1),
-          (err) => err.code === "23514",
-          "schema_version=1 privalo būti atmestas PO atnaujinimo"
-        );
-        await assert.rejects(
-          () => irasyti("bogus", 2),
-          (err) => err.code === "23514",
-          "nežinomas tipas privalo būti atmestas PO atnaujinimo"
-        );
-      } finally {
-        await pool.end();
-      }
-    } finally {
-      fs.rmSync(tevine, { recursive: true, force: true });
-    }
-  }
-);

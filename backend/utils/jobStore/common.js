@@ -370,32 +370,6 @@ function applyPatch(job, patch) {
     delete next.schemaVersion;
   }
 
-  /**
-   * NUOMA IR KŪRIMO KETINIMAS NEKEIČIAMI (#155).
-   *
-   * ⚠️ BE ŠIŲ EILUČIŲ BACKEND'AI IŠSISKIRIA. `postgresStore` juos išbraukia iš
-   * `UPDATE ... SET` (`IMMUTABLE_COLUMNS`), tad DB pasilieka senas reikšmes ir
-   * `get()` grąžina jas. Memory ir Redis remiasi TIK šiuo helperiu, tad tas
-   * pats patch'as ten reikšmę pakeistų - stebimas elgesys skirtųsi
-   * priklausomai nuo backend'o.
-   *
-   * `tenantId` yra izoliacijos riba (būsimai multi-tenancy), o
-   * `idempotencyKey` identifikuoja KŪRIMO ketinimą: leidus jį keisti, du
-   * skirtingi ketinimai galėtų susilieti arba vienas atsilaisvintų
-   * pakartotiniam naudojimui.
-   */
-  if ("tenantId" in job) next.tenantId = job.tenantId;
-  if ("idempotencyKey" in job) next.idempotencyKey = job.idempotencyKey;
-
-  /**
-   * SUKŪRIMO LAIKAS NEKEIČIAMAS. Ta pati priežastis: `postgresStore` jį
-   * išbraukia iš `SET`, tad patch'as ten neturėtų poveikio, o memory/Redis
-   * jį pakeistų. Nė vienas produkcinis kelias `created_at` per patch'ą
-   * nesiunčia - riba įvedama, kol nekainuoja.
-   */
-  if ("created_at" in job) next.created_at = job.created_at;
-  if ("createdAt" in job) next.createdAt = job.createdAt;
-
   // Laiko žymos pagal status perėjimą.
   if (patch.status === STATUS.PROCESSING && !job.started_at) {
     next.started_at = now;

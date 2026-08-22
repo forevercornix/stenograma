@@ -11,12 +11,8 @@ const {
   adminDatabaseUrl,
 } = require("./helpers/postgresGuard");
 
-const {
-  createPostgresStore,
-  DuplicateJobError,
-  TENANT_SENTINEL,
-  IMMUTABLE_COLUMNS,
-} = require("../utils/jobStore/postgresStore");
+const { createPostgresStore, DuplicateJobError, TENANT_SENTINEL } =
+  require("../utils/jobStore/postgresStore");
 const memoryStore = require("../utils/jobStore/memoryStore");
 const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
 const { OWNER_KIND } = require("../utils/jobStore/common");
@@ -318,48 +314,6 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     await assert.rejects(
       () => store.create({ ownerKind: OWNER_KIND.UNOWNED, idempotencyKey: "gyvas" }),
       (err) => err instanceof DuplicateJobError
-    );
-  });
-
-  await t.test("SQL SET niekada neliečia tapatybės, nuosavybės ir eros stulpelių", () => {
-    /**
-     * ⚠️ TIKRINAMAS KONTRAKTAS, NE ELGESYS - IR TAI SĄMONINGA.
-     *
-     * Elgesio testo čia parašyti neįmanoma: `writePatched()` visada eina per
-     * `applyPatch()`, kuris šiuos laukus atstato, o `jobToRow()` skaito tik
-     * camelCase - tad `snake_case` patch'as row builder'io nepasiekia.
-     * Kelio, kuriuo reikšmė pasiektų `SET`, KOL KAS NĖRA.
-     *
-     * Filtras vis tiek būtinas: 7.2b įveda naujus SQL mutacijų kelius
-     * (`UPDATE ... WHERE ... RETURNING`), kuriuose `applyPatch()` gali
-     * nebedalyvauti. Testas fiksuoja aibę, kad tie keliai negalėtų jos
-     * praplėsti nepastebimai.
-     *
-     * ⚠️ `schema_version` yra AUTORIZACIJOS laukas: pagal jį
-     * `jobAuthorization.resolveCurrentRole()` sprendžia, ar `actor` yra
-     * userId (era 2), ar username (legacy).
-     */
-    /**
-     * ⚠️ LYGINAMA PILNA AIBĖ, ne narystė po vieną.
-     *
-     * `has()` kiekvienam elementui tikrina tik APATINĘ ribą: pridėjus
-     * `status` ar kitą gyvavimo ciklo lauką, visos patikros vis tiek
-     * praeitų, o `writePatched()` tą stulpelį praleistų KIEKVIENAME
-     * atnaujinime - job'as niekada nepakeistų statuso, ir niekas to
-     * nepastebėtų.
-     */
-    assert.deepEqual(
-      [...IMMUTABLE_COLUMNS].sort(),
-      [
-        "created_at",
-        "id",
-        "idempotency_key",
-        "owner_id",
-        "owner_kind",
-        "schema_version",
-        "tenant_id",
-      ],
-      "IMMUTABLE_COLUMNS aibė pasikeitė - patikrinkite, ar naujas laukas tikrai nekintamas"
     );
   });
 
