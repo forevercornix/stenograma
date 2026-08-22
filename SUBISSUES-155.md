@@ -211,6 +211,10 @@ jos 7.2b kartu su kontraktų testais.
 
 **Tėvinis:** #155 · **Priklauso nuo:** 7.2a
 
+⚠️ **PRIELAIDA:** šis aprašymas remiasi `IMMUTABLE_COLUMNS` konstanta
+(`postgresStore.js`), kuri įvedama 7.2a follow-up PR'e. Jei tas PR dar
+nesumergintas, pirmas 7.2b žingsnis — jį sumerginti, o ne kurti aibę iš naujo.
+
 `postgresStore` jau egzistuoja kaip trečias `jobStore` backend'as ir turi visas
 15 kontrakto operacijų. Trys atominės operacijos šiuo metu yra sąmoningai
 laikinos:
@@ -336,6 +340,22 @@ Bendras rinkinys turi tikrinti:
 - `created_at` / `createdAt`;
 - `schemaVersion`.
 
+⚠️ `IMMUTABLE_COLUMNS` (`postgresStore.js`) jau egzistuoja ir apima visus šiuos
+laukus, įskaitant `schema_version`. 7.2b reikalavimas — kad NAUJI SQL mutacijų
+keliai (`UPDATE ... WHERE ... RETURNING`) jos LAIKYTŲSI, o ne kad aibė būtų
+sukurta iš naujo. `SET` sąrašas privalo būti generuojamas per tą pačią aibę.
+
+⚠️ **TAS PATS GALIOJA REDIS LUA CAS.** Šiandien nekintamumą visuose trijuose
+backend'uose realiai teikia `applyPatch()`; nė vienas backend'as savo
+apsaugos neturi (PostgreSQL `IMMUTABLE_COLUMNS` yra defense-in-depth, o ne
+vienintelė kliūtis). 7.2b įveda kelius, kuriuose `applyPatch()` gali
+nebedalyvauti — Redis Lua skriptas rašo tiesiai, kaip ir SQL `SET`.
+
+Nekintamumo garantija privalo galioti KIEKVIENAME naujame mutacijos kelyje, ne
+tik PostgreSQL. Bendras kontraktų rinkinys tai tikrina vienodai visiems trims:
+patch'as, bandantis pakeisti nuosavybę ar erą, negali jos pakeisti nė viename
+backend'e.
+
 ⚠️ `schemaVersion` NEKEIČIAMAS per įprastą `update`/`updateOwned` kelią. Tai
 įrašo ERA (7.2a): `newJob()` nustato `2`, o `jobAuthorization.resolveCurrentRole()`
 pagal ją interpretuoja `actor`. Legacy ir atkūrimas eina ATSKIRU keliu
@@ -416,6 +436,17 @@ Tas pats scenarijų rinkinys turi būti vykdomas prieš:
 1. memory;
 2. Redis;
 3. PostgreSQL.
+
+⚠️ **ADAPTERIAI PRIVALO PO SAVĘS SUTVARKYTI.** Trys backend'ai viename faile
+reiškia tris išorinių resursų rinkinius. Neuždaryta `pg` pool jungtis ar
+`ioredis` klientas laiko event loop'ą gyvą, ir `node --test` procesas
+nebesibaigia — testas ne krinta, o KABO, o CI tai parodo kaip timeout'ą be
+naudingos žinutės.
+
+- [ ] Kiekvienas adapteris turi `cleanup`, kuris uždaro savo jungtis.
+- [ ] Vieno backend'o būsena neteka į kitą (kiekvienas scenarijus pradedamas
+      nuo švarios būsenos).
+- [ ] Rinkinys užsibaigia be `--force-exit` ar analogiškų priemonių.
 
 Pašalinti / atnaujinti dabartinį pasenusį testo komentarą, kuriame nurodoma
 PostgreSQL pridėti kaip trečią atskirą testą ir nekeisti `SCENARIJAI`.
@@ -501,6 +532,34 @@ reikšmingą lauką prieš CAS ir įrodyti, kad stale event atmetamas.
 > yra `phase` pakeitimas (jį keičia `startPhase()`) — bet tada scenarijus
 > nebedengia `type` lauko, todėl geriau turėti abu.
 
+### 9b. ⚠️ ĮRODYMAI, KURIŲ REIKALAUJA PRE-REVIEW
+
+Du kriterijai, be kurių DoD galima įvykdyti formaliai, nepakeitus esmės.
+
+**A. CAS saugumas nebesiremia `SELECT ... FOR UPDATE`.**
+
+Nepakanka pridėti `UPDATE ... WHERE ...`, jei prieš jį vis tiek atliekamas
+pesimistinis užraktas — tada saugumą teikia užraktas, o sąlyginis sakinys yra
+dekoracija, ir 7.2b tikslas nepasiektas.
+
+- [ ] `reportProgressAtomic()` PostgreSQL integracinis concurrency testas
+      įrodo, kad operacija NESIREMIA `SELECT ... FOR UPDATE`: konkurentinis
+      saugomos būsenos (`status`, `phase` arba progreso tuple) pakeitimas
+      PRIEŠ CAS rašymą deterministiškai grąžina `"REJECTED"`.
+- [ ] Testas deterministinis: konkurentinė mutacija įterpiama kontroliuojamai
+      (pvz. per adapterio hook), ne pasikliaujant scheduler'iu.
+
+**B. PostgreSQL scenarijai realiai įvykdomi, ne praleisti.**
+
+- [ ] Kai `DATABASE_URL` nustatytas, kontrakto rinkinys FAIL-CLOSED patvirtina,
+      kad įvykdyti VISI PostgreSQL scenarijai: įvykdytų skaičius lyginamas su
+      `SCENARIJAI.length`.
+- [ ] PostgreSQL adapterio `skip` arba nulis įvykdytų scenarijų su nustatytu
+      `DATABASE_URL` yra testo NESĖKMĖ, ne tyli praleistis.
+
+⚠️ Skaičius čia lyginamas su `SCENARIJAI.length` DINAMIŠKAI, ne su konstanta —
+kitaip kriterijus pasentų pridėjus scenarijų (žr. 7 punktą).
+
 ### 10. Transakcijų atomika
 
 Jei atominė job mutacija kartu keičia `job_results` ar kitą susietą
@@ -560,6 +619,8 @@ apsauga.
 - [ ] Matricos įrašai `updateOwned` / `removeOwned` / `getOwned` nuosavybės
       garantijoms — kiekvienas su evidence stulpeliu pagal ESAMĄ matricos
       formatą.
+- [ ] Matricos įrašas `removeOwned` nuosavybės CAS.
+- [ ] Matricos įrašas `reportProgressAtomic` CAS.
 - [ ] Matricos įrašas parametrizuoto rinkinio trijų backend'ų ekvivalentumui.
 
 ⚠️ „Mutacijos įrodymas" yra matricos stulpelio KONVENCIJA (kas nutiktų, jei
@@ -621,6 +682,16 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
 - [ ] `postgresStore` nebeturi `SELECT ... FOR UPDATE` kaip VIENINTELĖS
       apsaugos nė vienoje iš trijų operacijų (užraktas leidžiamas tik kaip
       priedas prie sąlyginio sakinio).
+- [ ] ⚠️ `reportProgressAtomic()` concurrency testas ĮRODO, kad CAS nesiremia
+      `FOR UPDATE`: konkurentinis `status`/`phase`/progreso pakeitimas prieš
+      CAS rašymą deterministiškai duoda `"REJECTED"`.
+- [ ] ⚠️ Nauji SQL mutacijų keliai laikosi `IMMUTABLE_COLUMNS` aibės
+      (`postgresStore.js`) — `SET` generuojamas per ją, o ne per naują sąrašą.
+      `schema_version` yra AUTORIZACIJOS laukas
+      (`jobAuthorization.resolveCurrentRole()`).
+- [ ] ⚠️ Nekintamumas galioja VISUOSE TRIJUOSE backend'uose, ne tik
+      PostgreSQL: Redis Lua CAS irgi rašo tiesiai, apeidamas `applyPatch()`.
+      Bendras rinkinys tai tikrina vienodai visiems trims.
 
 **Rezultatų kontraktai**
 
@@ -657,6 +728,9 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
 - [ ] Visi trys backend'ai deklaruoja tą pačią 15 metodų aibę.
 - [ ] Pasenęs `jobStoreBackendContract.integration.test.js` komentaras
       atnaujintas pagal trijų backend'ų parametrizuotą architektūrą.
+      ⚠️ Dabartinis tekstas nurodo PostgreSQL pridėti kaip TREČIĄ ATSKIRĄ
+      testą ir `SCENARIJAI` NEKEISTI — tai tiesiogiai prieštarauja šiam
+      sub-issue, tad palikus jį Codex gautų du priešingus nurodymus.
 
 **CI ir matrica**
 
@@ -664,6 +738,13 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
       žingsniuose (žr. 8 punktą).
 - [ ] `npm run test:postgres` išvestyje matomi PostgreSQL adapterio
       scenarijai, ne `skip`.
+- [ ] ⚠️ `jobStoreBackendContract.integration` REGISTRUOTAS `postgres`
+      rinkinyje (`tests/suites.js`). Šiandien jis tik `redis` rinkinyje, tad
+      vien adapterio pridėjimas testo faile PostgreSQL CI žingsnyje jo
+      nepaleistų.
+- [ ] ⚠️ FAIL-CLOSED vykdymo įrodymas: su nustatytu `DATABASE_URL` įvykdytų
+      PostgreSQL scenarijų skaičius lyginamas su `SCENARIJAI.length`; `skip`
+      arba nulis įvykdytų yra NESĖKMĖ.
 - [ ] Matricos įrašai nuosavybės CAS garantijoms su mutacijos įrodymais.
 - [ ] `npm run test:matrix` žalias.
 
@@ -682,8 +763,13 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
       atominių operacijų.
 - [ ] Queue/backend selection regresijų nėra (`canUseQueue()` semantika
       nepakitusi).
+- [ ] Kiekvienas adapteris uždaro savo jungtis; rinkinys užsibaigia be
+      pakibimo ir be `--force-exit`.
+- [ ] Vieno backend'o būsena neteka į kitą.
 - [ ] `npm test` ir visi privalomi CI scenarijai žali (`check`, `lint`,
       `test:suites`, `test:matrix`, `test:evidence`, `test:clean`).
+- [ ] README apribojimų / Roadmap eilutės atnaujintos, jei 7.2b keičia tai, kas
+      ten deklaruota apie job saugyklos būseną.
 
 ## Ko NEAPIMA
 
