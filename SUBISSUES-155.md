@@ -158,12 +158,17 @@ Likę trys (`updateOwned`, `removeOwned`, `reportProgressAtomic`) — 7.2b.
       sesijos aktorių kaip stabilų UUID. Pametus jį per PostgreSQL round-trip,
       job'as eitų legacy vardo keliu ir jo vykdymas būtų atmestas. Reikia
       stulpelio, `null`/legacy vertimo ir nekintamumo taisyklės.
-- [ ] ⚠️ **PostgreSQL NEPARENKAMAS iki 7.2b.** Šis PR įgyvendina 12 ne-atominių
-      metodų; nuosavybės mutacijos kviečia `updateOwned`/`removeOwned`
-      tiesiogiai, o progresas be `reportProgressAtomic` grįžtų į silpnesnį
-      ne-atominį kelią. Diegimas su `DATABASE_URL` po 7.2a arba mestų įprastose
-      operacijose, arba prarastų CAS semantiką. Backend'o parinkimas įjungiamas
-      7.2b, ne čia.
+- [ ] ⚠️ **PostgreSQL NEPARENKAMAS NEI 7.2a, NEI 7.2b.** Šis PR įgyvendina
+      12 ne-atominių metodų; nuosavybės mutacijos kviečia
+      `updateOwned`/`removeOwned` tiesiogiai, o progresas be
+      `reportProgressAtomic` grįžtų į silpnesnį ne-atominį kelią.
+
+      ⚠️ 7.2b UŽBAIGIA atominių operacijų kontraktą, bet AKTYVAVIMO NEĮJUNGIA.
+      Barjeras atidaromas tik įvykdžius VISAS ADR prielaidas (žr. ADR
+      „AKTYVAVIMO BARJERAS" — sąrašas autoritetingas ten, o ne čia, kad
+      dubliuotas skaičius nepasentų). Ankstesnė šio punkto formuluotė
+      („parinkimas įjungiamas 7.2b") prieštaravo 7.2b tekstui ir buvo
+      klaidinga.
 - [ ] ⚠️ **FAIL-CLOSED prisijungimo klaidai.** `jobStore.initializeStore()`
       šiandien iš neprieinamo Redis krenta į memory. Toks pat elgesys su
       PostgreSQL reikštų, kad nauji job'ai rašomi į memory, o autoritetingi
@@ -175,10 +180,14 @@ Likę trys (`updateOwned`, `removeOwned`, `reportProgressAtomic`) — 7.2b.
       ⚠️ Šiandien renkamasi tik pagal `REDIS_URL` buvimą — su trimis
       backend'ais tyli pirmenybė reikštų priklausomybę nuo atsitiktinių env.
 - [ ] ⚠️ **AKTYVAVIMO BARJERAS.** `postgresStore` gali būti ĮGYVENDINTAS čia,
-      bet **PARENKAMAS** tik kai baigtos trys prielaidos (žr. ADR „Aktyvavimo
-      barjeras"): patikrintas restore, persistentės ištrynimo žymos ir
-      transakcinis rezultatų įrašymas. Kitaip diegimas įjungtų negrįžtamą režimą
-      be atsistatymo kelio.
+      bet **PARENKAMAS** tik įvykdžius visas prielaidas, išvardytas
+      `docs/decisions/155-postgres-authority.md` skyriuje „AKTYVAVIMO
+      BARJERAS". Kitaip diegimas įjungtų negrįžtamą režimą be atsistatymo kelio.
+
+      ⚠️ SĄRAŠAS ČIA NEDUBLIUOJAMAS SĄMONINGAI. Ankstesnė versija minėjo „tris
+      prielaidas"; ADR jų dabar turi daugiau (fail-closed startas, eilės
+      preflight), ir fiksuotas skaičius sub-issue tekste pasentų nė vienam kodo
+      pakeitimui neįvykus. Autoritetas — ADR.
 - [ ] ⚠️ **EILĖS PASIRINKIMAS ATSIEJAMAS NUO METADUOMENŲ BACKEND'O.**
       `server.js:296` įjungia BullMQ tik kai `jobStore.getBackend() === "redis"`.
       Pasirinkus PostgreSQL, vykdymas nukristų į inline režimą: sukurti BullMQ
@@ -202,69 +211,511 @@ jos 7.2b kartu su kontraktų testais.
 
 **Tėvinis:** #155 · **Priklauso nuo:** 7.2a
 
-#159 ir #154 CAS yra Redis-Lua specifiniai. PostgreSQL reikia **trečios
-nepriklausomos** tų pačių invariantų realizacijos.
+`postgresStore` jau egzistuoja kaip trečias `jobStore` backend'as ir turi visas
+15 kontrakto operacijų. Trys atominės operacijos šiuo metu yra sąmoningai
+laikinos:
 
-| Operacija | Redis | PostgreSQL |
+- `updateOwned()`
+- `removeOwned()`
+- `reportProgressAtomic()`
+
+Jos realizuotos per `SELECT ... FOR UPDATE` transakciją. Tai išlaiko bazinį
+korektiškumą, tačiau nėra galutinė 7.2b CAS realizacija.
+
+Šio sub-issue tikslas — pakeisti laikiną locking realizaciją SQL sąlyginiais
+atominių mutacijų sakiniais ir įrodyti, kad memory, Redis ir PostgreSQL
+backend'ai turi tą patį observable kontraktą, įskaitant concurrency/race
+atvejus.
+
+## Funkciniai reikalavimai
+
+### 1. `updateOwned()`
+
+Operacija turi atominiu būdu:
+
+1. nustatyti, ar job egzistuoja;
+2. patikrinti `ownerKind` ir `ownerId`;
+3. pritaikyti leidžiamą patch;
+4. išsaugoti pakeitimą tik jei nuosavybė tebėra ta pati.
+
+PostgreSQL CAS turi naudoti SQL sąlygą, ekvivalenčią:
+
+```sql
+owner_id IS NOT DISTINCT FROM $expectedOwnerId
+AND owner_kind = $expectedOwnerKind
+```
+
+Privaloma `IS NOT DISTINCT FROM`, ne `=`, nes `unowned` ir `api-key` job'ai
+teisėtai turi `owner_id IS NULL`.
+
+Rezultato kontraktas turi likti toks pats kaip kituose backend'uose:
+
+- job neegzistuoja → `null`;
+- job egzistuoja, bet scope svetimas → `"FORBIDDEN"`;
+- scope atitinka ir update pavyko → atnaujintas job objektas.
+
+`null` ir `"FORBIDDEN"` turi būti atskiriami be TOCTOU lango. Negalima daryti
+nesaugaus:
+
+1. `UPDATE ...`;
+2. jei `rowCount === 0`, atskiro neužrakinto `SELECT`.
+
+⚠️ **PATI MUTACIJA PRIVALO BŪTI SĄLYGINĖ.**
+
+Reikalaujama forma:
+
+```sql
+UPDATE jobs
+   SET <filtruoti laukai>
+ WHERE id = $1
+   AND owner_id IS NOT DISTINCT FROM $2
+   AND owner_kind = $3
+RETURNING *
+```
+
+CAS preconditions gyvena `WHERE` sąlygoje, ne JS patikroje prieš rašymą.
+
+**Ko NEPAKANKA:** dabartinis `SELECT ... FOR UPDATE` → JS patikra → BESĄLYGINIS
+`UPDATE`. Formaliai tai transakcija su užraktu ir „snapshot semantiką"
+garantuoja, tad frazė „arba transakcija/užraktas" leistų teigti, jog kriterijus
+įvykdytas NIEKO NEPAKEITUS — o būtent šios realizacijos pakeitimas ir yra 7.2b
+tikslas.
+
+**Kas leidžiama papildomai:** užrakinta transakcija aplink sąlyginį sakinį —
+bet TIK jei jos reikia `null` vs `"FORBIDDEN"` atskyrimui atominiu būdu
+(`UPDATE ... RETURNING` pasako tik tiek, ar eilutė pakeista). Užraktas yra
+priedas prie sąlyginės mutacijos, ne jos pakaitalas.
+
+### 2. `removeOwned()`
+
+Ta pati nuosavybės CAS semantika kaip `updateOwned()`.
+
+Rezultato kontraktas:
+
+- job neegzistuoja → `false`;
+- job egzistuoja, bet scope svetimas → `"FORBIDDEN"`;
+- job priklauso scope ir pašalintas → `true`.
+
+`false` ir `"FORBIDDEN"` taip pat turi būti atskiriami be TOCTOU lango.
+
+⚠️ Ta pati sąlyginės mutacijos taisyklė kaip 1 punkte:
+`DELETE FROM jobs WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND
+owner_kind = $3 RETURNING id`. `SELECT ... FOR UPDATE` + besąlyginis `DELETE`
+nėra galutinis sprendimas.
+
+### 3. `getOwned()` — SKAITYMO KELIAS
+
+⚠️ **Nepamiršti trečios nuosavybės operacijos.**
+
+`getOwned()` nėra atominė mutacija, tad jos CAS keisti nereikia — bet fasadas
+ją kviečia **besąlygiškai** kiekvienam nuosavybės skaitymui, ir ji grąžina tą
+pačią trišakę (`null` / `"FORBIDDEN"` / job). Jei ji vienintelė liks už
+parametrizuoto rinkinio ribų, backend'ai galės išsiskirti būtent DAŽNIAUSIAI
+naudojamame kelyje, o mutacijų paritetas to nepagaus.
+
+Bendras rinkinys turi tikrinti:
+
+- owner sutampa → job objektas;
+- owner nesutampa → `"FORBIDDEN"`;
+- neegzistuojantis job → `null`;
+- `ownerId = null` + `unowned` veikia;
+- `ownerId = null` + `api-key` NEPRIEINAMAS `unowned` scope'ui (abu turi
+  `owner_id IS NULL`, tad be `ownerKind` palyginimo jie susilietų);
+- baigtas job'as grąžinamas SU rezultatu visuose backend'uose (PostgreSQL
+  rezultatai gyvena atskiroje `job_results` lentelėje).
+
+### 4. Nuosavybė ir kiti immutable laukai
+
+`updateOwned()` negali leisti patch'u pakeisti:
+
+- `id`;
+- `ownerId`;
+- `ownerKind`;
+- `tenantId`;
+- `idempotencyKey`;
+- `created_at` / `createdAt`;
+- `schemaVersion`.
+
+⚠️ `schemaVersion` NEKEIČIAMAS per įprastą `update`/`updateOwned` kelią. Tai
+įrašo ERA (7.2a): `newJob()` nustato `2`, o `jobAuthorization.resolveCurrentRole()`
+pagal ją interpretuoja `actor`. Legacy ir atkūrimas eina ATSKIRU keliu
+(`restoreRecord()`), kuris erą perduoda nepakeistą — tai vienintelė vieta, kur
+lauko reikšmė gali skirtis nuo `2`.
+
+Ši garantija turi galioti pačioje backend'o mutacijoje, o ne vien dėl to, kad
+dabartinis `applyPatch()` atsitiktinai ją užtikrina.
+
+SQL `SET` sąrašas negali būti generuojamas tiesiogiai iš nefiltruotų patch
+laukų.
+
+### 5. `reportProgressAtomic()`
+
+Rezultato kontraktas turi likti:
+
+- job neegzistuoja → `null`;
+- event nebegalioja dabartinei job būsenai → `"REJECTED"`;
+- event galioja → atnaujintas job objektas.
+
+Sprendimas ir mutacija turi būti viena atominė operacija dabartinės DB būsenos
+atžvilgiu — sąlyginis `UPDATE ... WHERE <perskaitytos reikšmės nepakito>
+... RETURNING`, ne užrakinta read-modify-write seka.
+
+CAS turi apsaugoti visas reikšmes, nuo kurių priklauso progreso sprendimas,
+įskaitant bent:
+
+- job `type`;
+- `status`;
+- `phase`;
+- esamą `progressKnown`;
+- esamą progreso epochą (`current` / `total`), kai ji aktuali.
+
+Jeigu kuri nors iš sprendimui naudotų reikšmių pasikeičia tarp bandymų, senas
+event negali būti pritaikytas naujai būsenai.
+
+### 6. Progreso invariantai
+
+PostgreSQL elgesys turi sutapti su `jobPhase.reportProgress()` ir kitais
+backend'ais:
+
+- svetimo job grafo fazė → reject;
+- `processing` be teisėtos fazės → reject pagal dabartinį kontraktą;
+- pavėlavęs ankstesnės fazės event → reject;
+- `current` regresija → reject;
+- pasikeitęs `total` toje pačioje progreso epochoje → reject;
+- ne-`processing` job → reject;
+- nested metadata neturi būti interpretuojami kaip top-level progress;
+- eksponentinė skaičiaus forma išlaikoma;
+- skaitinės eilutės nėra tyliai perinterpretuojamos kaip JS skaičiai;
+- teisėtas monotoniškas progresas → accepted.
+
+Race testai turi būti deterministiniai.
+
+### 7. Backend kontrakto rinkinys
+
+`tests/jobStoreBackendContract.integration.test.js` turi tapti parametrizuotu
+backend kontrakto rinkiniu.
+
+Dabartinėje `main` versijoje yra **visi esami** `reportProgressAtomic()`
+scenarijai (`SCENARIJAI` masyvas) ir atskiri memory/Redis testai.
+
+> ⚠️ Scenarijų SKAIČIUS DoD'e nefiksuojamas sąmoningai. Fiksuotas skaičius
+> pasensta pridėjus scenarijų, ir kriterijus tampa klaidingas nė vienam kodo
+> pakeitimui neįvykus. Reikalavimas — kad **visi** `SCENARIJAI` elementai būtų
+> vykdomi prieš visus tris backend'us, o ne kad jų būtų N.
+
+Refaktorizuoti į adapterio modelį, pvz.:
+
+```js
+{ name, setup, store, prepareState, cleanup }
+```
+
+arba semantiškai lygiavertę struktūrą.
+
+Tas pats scenarijų rinkinys turi būti vykdomas prieš:
+
+1. memory;
+2. Redis;
+3. PostgreSQL.
+
+Pašalinti / atnaujinti dabartinį pasenusį testo komentarą, kuriame nurodoma
+PostgreSQL pridėti kaip trečią atskirą testą ir nekeisti `SCENARIJAI`.
+
+### 8. ⚠️ RINKINYS PRIVALO REALIAI PALEISTI VISUS TRIS CI'E
+
+Šiandien `jobStoreBackendContract.integration` yra **tik `redis` rinkinyje**
+(`tests/suites.js:35`), o CI turi DU atskirus žingsnius:
+
+| Žingsnis | Env | Kas vykdoma |
 |---|---|---|
-| `updateOwned` / `removeOwned` | Lua CAS | `UPDATE ... WHERE owner_id IS NOT DISTINCT FROM $1 AND owner_kind = $2` |
-| `reportProgressAtomic` | Lua CAS | `UPDATE ... WHERE phase = $1 AND ...` |
+| `npm run test:redis` | `REDIS_URL`, `REQUIRE_REDIS=1` | `redis` rinkinys |
+| `npm run test:postgres` | `DATABASE_URL`, `REQUIRE_POSTGRES=1` | `postgres` rinkinys |
 
-⚠️ **`IS NOT DISTINCT FROM`, NE `=`.** Desktop (`unowned`) ir bendro rakto
-(`api-key`) job'ai turi `owner_id IS NULL`. Su `= $1`, kai `$1` irgi `NULL`,
-sąlyga duoda `UNKNOWN`, ir `UPDATE` neatitinka nė vienos eilutės — operacijos
-lūžtų KIEKVIENAM ne-vartotojo job'ui.
+Failas, likęs tik `redis` rinkinyje, PostgreSQL žingsnyje NEBUS paleistas, o
+`redis` žingsnyje `DATABASE_URL` nėra — tad PostgreSQL adapteris **pats save
+praleis**.
 
-### DoD
+Rezultatas: visi 7 punkto kriterijai būtų formaliai įvykdyti, o CI realiai
+tikrintų DU backend'us iš trijų. Tyliai — tas pats šablonas, kurį #155 jau du
+kartus pagavo (`migrations.integration` prefiksas, matricos įrašai).
 
-⚠️ **RINKINYS EGZISTUOJA, BET NĖRA PARAMETRIZUOTAS.**
+- [ ] Rinkinys registruotas taip, kad KIEKVIENAS backend'as būtų vykdomas
+      žingsnyje, kuriame yra jo priklausomybė: arba failas įtraukiamas į abu
+      rinkinius, arba suskaidomas pagal backend'ą.
+- [ ] Praleidimas nėra tylus: be atitinkamo URL adapteris praleidžiamas su
+      aiškiu `skip`, o CI naudoja `REQUIRE_REDIS=1` / `REQUIRE_POSTGRES=1`.
+- [ ] **Testas:** `npm run test:postgres` išvestyje matomi PostgreSQL
+      adapterio scenarijai, ne `skip`.
 
-`tests/jobStoreBackendContract.integration.test.js` paleidžia **9 scenarijus**
-prieš memory ir Redis, ir jis jau rado keturias divergencijas. Bet:
+### 9. Concurrency
 
-- backend'ai turi po **atskirą testą** (jų paruošimas skiriasi);
-- scenarijai kviečia tik `reportProgressAtomic()` — `updateOwned()` ir
-  `removeOwned()` **nedengiami**.
+Privalomi deterministiniai PostgreSQL integraciniai testai.
 
-Tad vien adapterio pridėjimas trijų backend'ų atominio pariteto **neįrodytų**.
-Užduotis apima tris dalykus:
+Du lygiagretūs konfliktuojantys rašymai turi turėti apibrėžtą rezultatą:
 
-- [ ] **Parametrizuoti** rinkinį: adapteris `{ paruošti, store }` vietoj
-      kopijuoto testo.
-- [ ] **Praplėsti scenarijus** `updateOwned` / `removeOwned` atvejais —
-      nuosavybės CAS šiandien netikrinamas nė viename backend'e per šį rinkinį.
-- [ ] `postgresStore` praeina VISUS scenarijus (9 esamus + naujus nuosavybės).
-- [ ] Backend'ai deklaruoja tą pačią metodų aibę (**15**) — esamas testas.
-- [ ] Atominis statuso perėjimas: neleistinas atmetamas DB lygmenyje.
-- [ ] Concurrent update: du lygiagretūs rašymai → vienas laimi, kitas gauna
-      konfliktą, duomenys nesugadinti.
-- [ ] Progreso monotoniškumas išlaikomas lenktynių sąlygomis (deterministinis
-      testas, ne tikimybinis — žr. #154 patirtį).
-- [ ] Duplicate write → kontroliuojama klaida (tas pats `idempotency_key` toje
-      pačioje nuomoje).
-- [ ] Failed transaction → rollback, dalinio įrašo nelieka.
-- [ ] DB laikinai nepasiekiama → retryable klaida, ne 500 su stack trace.
-- [ ] 6 nuosavybės testai (#159) praeina su `postgresStore`.
-- [ ] ⚠️ **`updateOwned` NEPERDUODA `ownerId`/`ownerKind` į `SET`.** Dabartiniai
-      backend'ai tą garantiją gauna iš `applyPatch()`, o esami testai tikrina
-      nekintamumą TIK ant to helperio. PostgreSQL realizacija, atvaizduojanti
-      patch'o laukus tiesiai į `SET`, galėtų atominiai autorizuoti kaip
-      savininkas A ir **perduoti eilutę savininkui B**. Nekintamumą privalo
-      užtikrinti pati backend'o operacija; mutacijai atsparus scenarijus —
-      trijų backend'ų rinkinyje.
-- [ ] ⚠️ **`null` ir `FORBIDDEN` ATSKIRIAMI VIENU SAKINIU.** Fasado kontraktas
-      skiria nesantį job'ą (`null` → 404) nuo svetimo (`FORBIDDEN` → 403), o
-      `UPDATE ... WHERE owner_id IS NOT DISTINCT FROM $1` pasako tik tiek, ar
-      eilutė pakeista. Papildoma egzistavimo užklausa po nulio eilučių įveda
-      TOCTOU lenktynes su lygiagrečiu ištrynimu ar atkūrimu. Sprendimas —
-      `UPDATE ... RETURNING` kartu su egzistavimo patikra viename sakinyje arba
-      užrakintoje transakcijoje. Testas: abu rezultatai lygiagretumo sąlygomis.
-- [ ] ⚠️ **DB-ONLY DIEGIMAS REIKALAUJA EILĖS.** BullMQ naudojamas tik kai yra
-      `REDIS_URL`; kitaip darbas vykdomas inline. Diegimas su vienu
-      `DATABASE_URL` sustojus procesui paliktų `processing` eilutę, kurios
-      niekas nebeperims — job'as užstrigtų, nors diagnostika rodytų
-      „persistentinė saugykla". Arba reikalauti Redis eilės šiam režimui, arba
-      apibrėžti startinį atkūrimą, saugiai perleidžiantį ne-terminalius job'us.
+- vienas laimi;
+- kitas gauna rezultatą, numatytą ESAMAME tos operacijos kontrakte;
+- nėra lost update;
+- nėra dalinai įrašytos būsenos;
+- job po race tenkina visus DB ir domeno invariantus.
+
+⚠️ **NAUJO VIEŠO `"CONFLICT"` SENTINELIO PRIDĖTI NEGALIMA.**
+
+`updateOwned()` kontraktas turi tris rezultatus (`null` / `"FORBIDDEN"` /
+job), `removeOwned()` — (`false` / `"FORBIDDEN"` / `true`),
+`reportProgressAtomic()` — (`null` / `"REJECTED"` / job). Ketvirtas sentinelis
+pakeistų VIEŠĄ API ir priverstų keisti visus kvietėjus bei kitus du
+backend'us.
+
+CAS nesėkmė verčiama į jau egzistuojančią semantiką pagal AKTUALIĄ eilutės
+būseną: eilutės nebėra → `null` / `false`; eilutė priklauso kitam → 
+`"FORBIDDEN"`; event nebegalioja → `"REJECTED"`. Jei nesėkmės priežastis yra
+infrastruktūrinė, o ne domeno — ji keliauja kaip klaida (12 punktas), ne kaip
+sentinelis.
+
+Bendras version-conflict kontraktas, jo tipas ir retry politika priklauso
+**7.5b**.
+
+⚠️ **7.2b NEĮVEDA `jobs.version` IR BENDRO OPTIMISTIC-LOCKING MECHANIZMO.**
+
+Šiame sub-issue CAS preconditions saugo TIK konkrečios atominės operacijos
+sprendimui reikalingą perskaitytą būseną (nuosavybę, fazę, progreso epochą).
+Bendras `jobs.version` stulpelis, `WHERE version = $n` semantika, konflikto
+tipas ir kvietėjo retry politika yra **7.5b** apimtis — jų realizavimas čia
+sukurtų dalinį, netestuotą 7.5b variantą, kurį vėliau reikėtų perdaryti.
+
+`reportProgressAtomic()` race teste privaloma kontroliuojamai įterpti
+konkurentinę mutaciją tarp senos būsenos ir CAS bandymo, o ne pasikliauti
+schedulerio sėkme.
+
+Bent vienas testas turi keisti job `type` arba kitą progreso sprendimui
+reikšmingą lauką prieš CAS ir įrodyti, kad stale event atmetamas.
+
+> ⚠️ **`type` keitimas yra SINTETINIS scenarijus.** `type` produkcijoje
+> nekintamas — nė vienas kelias jo nekeičia, ir `updateOwned` jį eksplicitiškai
+> saugo (4 punktas). Testas kuria būseną, kurios realiai nebūna, ir tai
+> SĄMONINGA: tikrinama, ar CAS remiasi PERSKAITYTA būsena, ar tyliai
+> pasikliauja tuo, kad ji nepasikeis. Recenzentas neturi ieškoti realaus kelio —
+> jo nėra.
+>
+> Jei sintetinis scenarijus atrodo per dirbtinis, lygiavertis realus pakaitalas
+> yra `phase` pakeitimas (jį keičia `startPhase()`) — bet tada scenarijus
+> nebedengia `type` lauko, todėl geriau turėti abu.
+
+### 10. Transakcijų atomika
+
+Jei atominė job mutacija kartu keičia `job_results` ar kitą susietą
+persistentinę būseną, visi tos loginės operacijos pakeitimai turi būti vienoje
+transakcijoje.
+
+Priverstinai sukėlus klaidą operacijos viduryje:
+
+- transakcija rollbackinama;
+- job nelieka dalinai pakeistas;
+- `job_results` nelieka nesuderintas su job būsena;
+- DB connection grąžinamas pool'ui.
+
+### 11. Idempotency
+
+Tas pats ne-null `idempotencyKey` toje pačioje `tenantId` erdvėje turi duoti
+kontroliuojamą `DuplicateJobError` / `DUPLICATE_JOB`.
+
+Kitos PostgreSQL `unique_violation` klaidos negali būti klaidingai pervadintos
+į duplicate-job klaidą.
+
+Šis kriterijus tikrinamas kaip bendro PostgreSQL kontrakto regresijos apsauga;
+nereikia perrašyti 7.2a jau veikiančios realizacijos, jei ji kriterijų atitinka.
+
+### 12. PostgreSQL klaidų klasifikacija
+
+Laikinas DB/network sutrikimas neturi būti supainiotas su domeno rezultatais:
+
+- negrąžinti `null`;
+- negrąžinti `"FORBIDDEN"`;
+- negrąžinti `"REJECTED"`.
+
+Klaida keliauja aukštyn kaip klaida — su MAŠININIU požymiu (`code` ir/ar
+`cause`), kad kvietėjas galėtų ją atskirti nuo domeno rezultato.
+
+⚠️ **NAUJOS KLAIDŲ HIERARCHIJOS KURTI NEREIKIA.** Repo neturi bendros
+`RetryableDatabaseError` klasės, ir jos įvedimas paliestų visus klaidų kelius —
+tai atskiras darbas, ne 7.2b. Pakanka arba perduoti originalią `pg` klaidą, arba
+ją įvynioti išsaugant `code`/`cause` (kaip daro `DuplicateJobError`).
+
+Vienintelis griežtas reikalavimas: DB sutrikimas NIEKADA netampa domeno
+sentineliu.
+
+HTTP atsakymo sanitizacija nėra `postgresStore` atsakomybė; tačiau backend'as
+neturi nutekinti DB klaidos kaip domeno rezultato.
+
+### 13. Saugumo testų matrica
+
+⚠️ `scripts/check-security-matrix.mjs` reikalauja, kad KIEKVIENAS rinkinio
+testas turėtų įrašą `docs/security-test-matrix.md` — be jo CI krinta
+(taip nutiko #199).
+
+Nuosavybės CAS nėra vien korektiškumo klausimas: tai riba, skirianti vieno
+vartotojo job'us nuo kito (#159). Neaprašytas testas atrodytų kaip veikianti
+apsauga.
+
+- [ ] Matricos įrašai `updateOwned` / `removeOwned` / `getOwned` nuosavybės
+      garantijoms — kiekvienas su evidence stulpeliu pagal ESAMĄ matricos
+      formatą.
+- [ ] Matricos įrašas parametrizuoto rinkinio trijų backend'ų ekvivalentumui.
+
+⚠️ „Mutacijos įrodymas" yra matricos stulpelio KONVENCIJA (kas nutiktų, jei
+apsauga būtų pašalinta), ne reikalavimas, kad pati operacija būtų mutacija.
+`getOwned()` yra skaitymas, ir jo evidence yra atitinkamas: pvz. „mutacija:
+grąžinti job'ą nepatikrinus scope → krinta". Sargas
+(`scripts/check-security-matrix.mjs`) tikrina TIK ar testas paminėtas — stulpelio
+turinys yra dokumentacijos kokybės, ne mašininis reikalavimas.
+- [ ] `npm run test:matrix` žalias.
+
+### 14. Backend aktyvavimas
+
+7.2b **NEATIDARO** PostgreSQL aktyvavimo barjero.
+
+`POSTGRES_AKTYVAVIMAS_LEISTAS` lieka `false`, kol įvykdytos ADR nurodytos
+vėlesnės prielaidos, įskaitant:
+
+- persistentines deletion tombstones;
+- sąlyginį/transakcinį rezultatų užbaigimą;
+- patikrintą restore;
+- fail-closed starto reikalavimus;
+- eilės prieinamumo preflight (ADR: **neįgyvendinta**, ne „neįrodyta").
+
+7.2b gali paruošti backend'ą produkciniam naudojimui, bet negali padaryti
+PostgreSQL autoritetingu anksčiau už ADR nustatytą aktyvavimo tašką.
+
+### 15. Queue ir metadata store lieka nepriklausomi
+
+7.2b neturi grąžinti senos priklausomybės:
+
+```
+BullMQ ⇔ jobStore backend == redis
+```
+
+BullMQ tinkamumas ir toliau nustatomas per `canUseQueue()` — `REDIS_URL` IR
+bendras metaduomenų backend'as (`redis` arba `postgres`).
+
+`DATABASE_URL + REDIS_URL` būsimas PostgreSQL režimas turi galėti naudoti:
+
+- PostgreSQL job metaduomenims;
+- Redis BullMQ eilei.
+
+PostgreSQL-only režimas be Redis naudoja inline vykdymą; jo restart/recovery
+politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
+
+## Definition of Done
+
+**Atominės operacijos**
+
+- [ ] `postgresStore.updateOwned()` turi galutinę SQL CAS realizaciją.
+- [ ] `postgresStore.removeOwned()` turi galutinę SQL CAS realizaciją.
+- [ ] `postgresStore.reportProgressAtomic()` turi galutinę SQL CAS realizaciją.
+- [ ] `owner_id` palyginimui naudojama NULL-safe semantika
+      (`IS NOT DISTINCT FROM` arba įrodytas lygiavertis sprendimas).
+- [ ] ⚠️ VISOSE TRIJOSE operacijose CAS preconditions yra SQL `WHERE`
+      sąlygoje, o mutacija naudoja `RETURNING`. `SELECT ... FOR UPDATE` +
+      besąlyginis rašymas NEATITINKA kriterijaus, net jei elgesys teisingas —
+      būtent šios formos pakeitimas yra 7.2b tikslas.
+- [ ] `postgresStore` nebeturi `SELECT ... FOR UPDATE` kaip VIENINTELĖS
+      apsaugos nė vienoje iš trijų operacijų (užraktas leidžiamas tik kaip
+      priedas prie sąlyginio sakinio).
+
+**Rezultatų kontraktai**
+
+- [ ] `updateOwned`: success / `null` / `"FORBIDDEN"` kontraktas išlaikytas.
+- [ ] `removeOwned`: `true` / `false` / `"FORBIDDEN"` kontraktas išlaikytas.
+- [ ] `getOwned`: job / `null` / `"FORBIDDEN"` kontraktas išlaikytas.
+- [ ] `reportProgressAtomic`: object / `null` / `"REJECTED"` kontraktas
+      išlaikytas.
+- [ ] `null` ir `"FORBIDDEN"` atskiriami be TOCTOU lango.
+- [ ] `updateOwned` negali pakeisti ownership ir kitų immutable identity laukų.
+
+**Race sąlygos**
+
+- [ ] Progreso CAS saugo nuo stale `type`, `status`, `phase` ir progreso
+      epochos.
+- [ ] Deterministinis concurrent progress testas įrodo monotoniškumą.
+- [ ] Deterministinis stale-state race testas atmeta pasenusį event
+      (sintetinis `type` scenarijus IR realus `phase` scenarijus).
+- [ ] Deterministinis ownership concurrency testas neleidžia mutacijos po
+      scope pasikeitimo.
+- [ ] Du lygiagretūs teisėti `removeOwned()` bandymai → vienas `true`, kitas
+      `false`; antrasis NEGALI virsti `"FORBIDDEN"` vien dėl to, kad pirmasis
+      jau ištrynė eilutę.
+- [ ] Failed transaction visiškai rollbackinama, connection grąžinamas pool'ui.
+
+**Kontrakto rinkinys**
+
+- [ ] `jobStoreBackendContract.integration.test.js` parametrizuotas.
+- [ ] VISI esami `SCENARIJAI` vykdomi prieš memory, Redis ir PostgreSQL
+      (skaičius nefiksuojamas — žr. 7 punktą).
+- [ ] Bendras rinkinys papildytas `updateOwned()` scenarijais.
+- [ ] Bendras rinkinys papildytas `removeOwned()` scenarijais.
+- [ ] Bendras rinkinys papildytas `getOwned()` scenarijais.
+- [ ] Visi trys backend'ai deklaruoja tą pačią 15 metodų aibę.
+- [ ] Pasenęs `jobStoreBackendContract.integration.test.js` komentaras
+      atnaujintas pagal trijų backend'ų parametrizuotą architektūrą.
+
+**CI ir matrica**
+
+- [ ] Rinkinys realiai vykdomas IR `test:redis`, IR `test:postgres`
+      žingsniuose (žr. 8 punktą).
+- [ ] `npm run test:postgres` išvestyje matomi PostgreSQL adapterio
+      scenarijai, ne `skip`.
+- [ ] Matricos įrašai nuosavybės CAS garantijoms su mutacijos įrodymais.
+- [ ] `npm run test:matrix` žalias.
+
+**Regresijos**
+
+- [ ] Duplicate idempotency write duoda kontroliuojamą `DUPLICATE_JOB`.
+- [ ] Laikina PostgreSQL infrastruktūros klaida nėra paverčiama domeno
+      rezultatu.
+- [ ] Esami #159 ownership kontrakto testai lieka žali.
+- [ ] PostgreSQL specifiniai integraciniai testai lieka žali.
+- [ ] Memory ir Redis regresijų nėra.
+- [ ] `POSTGRES_AKTYVAVIMAS_LEISTAS` šiame PR lieka `false`.
+- [ ] 7.2b neprideda `jobs.version` ir neįgyvendina 7.5b bendro
+      optimistic-locking kontrakto.
+- [ ] Nepridėtas naujas viešas `"CONFLICT"` sentinelis nė vienoje iš trijų
+      atominių operacijų.
+- [ ] Queue/backend selection regresijų nėra (`canUseQueue()` semantika
+      nepakitusi).
+- [ ] `npm test` ir visi privalomi CI scenarijai žali (`check`, `lint`,
+      `test:suites`, `test:matrix`, `test:evidence`, `test:clean`).
+
+## Ko NEAPIMA
+
+- PostgreSQL aktyvavimo barjero atidarymo.
+- Eilės prieinamumo preflight (ADR aktyvavimo prielaida, ne 7.2b).
+- `jobs.version`, bendro optimistic locking ir konflikto semantikos — 7.5b.
+- Bendros klaidų hierarchijos (`RetryableDatabaseError` ir pan.) įvedimo.
+- Persistentinių sesijų — 7.3.
+- Audito perkėlimo — 7.4.
+- Persistentinių deletion tombstones — 7.5a.
+- Galutinio rezultatų užbaigimo / retention darbų, priklausančių 7.5b.
+- Restore / disaster-recovery pratybų — 7.6.
+- Redis BullMQ pakeitimo PostgreSQL eile.
+- Bendro jobStore API perprojektavimo, jei to nereikia aukščiau aprašytam
+  trijų backend'ų kontraktui.
+
+## Implementavimo principas
+
+Codex neturi kurti ketvirtos domeno taisyklių kopijos SQL'e.
+
+Kur įmanoma:
+
+- bendros domeno taisyklės lieka `common.js` / `jobPhase.js`;
+- PostgreSQL SQL užtikrina atomiką ir CAS preconditions;
+- DB constraints užtikrina persistentinės būsenos invariantus;
+- parametrizuotas kontraktų rinkinys įrodo observable elgesio ekvivalentumą
+  tarp memory, Redis ir PostgreSQL.
+
+⚠️ Jei implementuojant paaiškėja, kad dabartinis memory arba Redis backend'as
+neatitinka bendro kontrakto, testas **neturi būti silpninamas** vien tam, kad
+visi trys taptų žali. Pirmiausia nustatomas autoritetingas domeno kontraktas ir
+pataisoma nukrypstanti realizacija.
 
 ---
 
