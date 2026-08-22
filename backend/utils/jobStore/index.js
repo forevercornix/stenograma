@@ -150,13 +150,44 @@ async function initializeStore() {
  * DB — split-brain, kuris „išnyksta" DB atsistačius, palikdamas dvi tikroves.
  *
  * Todėl prisijungimo klaida nutraukia startą. Tai galioja jau dabar, nors
- * barjeras PostgreSQL dar neparenka — kad 7.2b tereikėtų barjerą atidaryti.
+ * barjeras PostgreSQL dar neparenka — kad barjerą atidarant nereikėtų keisti
+ * šio kelio.
+ *
+ * ⚠️ BARJERO NEATIDARO NEI 7.2a, NEI 7.2b. 7.2b užbaigia atominių operacijų
+ * kontraktą, bet aktyvavimas priklauso VISOMS ADR prielaidoms
+ * (`docs/decisions/155-postgres-authority.md`, „AKTYVAVIMO BARJERAS").
  */
+/**
+ * `DB_CONNECT_TIMEOUT_MS` su saugia numatytąja reikšme.
+ *
+ * ⚠️ Parsuojama VIETOJE, ne per `utils/securityBaseline`. Tas modulis traukia
+ * `cors` ir kitą Express infrastruktūrą; `jobStore` nuo jos priklausyti neturi -
+ * jį įkelia ir worker procesai, kuriems HTTP sluoksnio nereikia.
+ */
+function connectTimeoutMs() {
+  const raw = Number(process.env.DB_CONNECT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
+}
+
 async function initializePostgres() {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  /**
+   * ⚠️ BAIGTINIS PRISIJUNGIMO LAUKIMAS.
+   *
+   * `pg` numatytasis `connectionTimeoutMillis` yra 0 = BE RIBOS. Endpoint'as,
+   * kuris TCP srautą tyliai numeta (o ne atmeta), paliktų startą kabantį
+   * neribotai ir NIEKADA nepasiektų `catch` bloko, kuris pateikia aiškią
+   * fail-closed klaidą - procesas liktų nepasiekiamas be jokio paaiškinimo.
+   *
+   * Simetriška Redis keliui, kuris irgi neleidžia sau laukti amžinai
+   * (`maxRetriesPerRequest`, `retryStrategy`).
+   */
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    connectionTimeoutMillis: connectTimeoutMs(),
+  });
 
   try {
     await pool.query("SELECT 1");
@@ -710,8 +741,8 @@ module.exports = {
    *
    * Vienintelį jos kvietimo tašką (`initializeStore()`) uždaro aktyvavimo
    * barjeras, tad be eksporto fail-closed elgesys neturėtų JOKIO įrodymo -
-   * nei runtime, nei testo. Neišbandytas gedimo kelias, kuris įsijungs 7.2b
-   * momentu, yra blogesnis nei neparašytas: jis atrodo padengtas.
+   * nei runtime, nei testo. Neišbandytas gedimo kelias, kuris įsijungs
+   * barjerą atidarius, yra blogesnis nei neparašytas: jis atrodo padengtas.
    *
    * Unit lygmuo įrodo, KAD prisijungimo klaida atmetama ir NĖRA fallback į
    * memory. Produkcinio kelio (`DATABASE_URL` → startas nutrūksta) galutinis

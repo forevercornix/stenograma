@@ -37,15 +37,16 @@ const ALLOWED_BACKENDS = Object.freeze(["postgres", "redis", "memory"]);
  *
  * `postgresStore` yra ĮGYVENDINTAS, bet NEPARENKAMAS. ADR sako, kad rollback
  * į Redis nepalaikomas, tad PostgreSQL negali tapti autoritetingas anksčiau,
- * nei egzistuoja kelias tą režimą atlaikyti:
+ * nei egzistuoja kelias tą režimą atlaikyti.
  *
- *   1. patikrintas restore (7.6 dalis);
- *   2. persistentės ištrynimo žymos (7.5a) — `deletionTombstones` yra proceso
- *      atmintis, tad restore pratybos negali įvykdyti savo ištrinto job'o
- *      scenarijaus;
- *   3. transakcinis + SĄLYGINIS rezultatų užbaigimas (7.5b) — kitaip nutrūkęs
- *      procesas palieka `completed` be `job_results`;
- *   4. fail-closed prisijungimas, patikrintas realiu startu (7.2a `[F2]`).
+ * ⚠️ PRIELAIDŲ SĄRAŠAS ČIA NEDUBLIUOJAMAS. Autoritetas —
+ * `docs/decisions/155-postgres-authority.md`, skyrius „AKTYVAVIMO BARJERAS".
+ * Ankstesnė šio komentaro versija sąrašą kartojo ir jau buvo pasenusi:
+ * ADR tuo metu pridėjo eilės prieinamumo preflight, o kopija čia liko be jo.
+ * Kopija, kurios niekas netikrina, ilgainiui pradeda meluoti.
+ *
+ * ⚠️ BARJERO NEATIDARO NEI 7.2a, NEI 7.2b. 7.2b užbaigia atominių operacijų
+ * kontraktą; aktyvavimas priklauso VISOMS ADR prielaidoms.
  *
  * ⚠️ KONSTANTA, NE ENV KINTAMASIS. `ALLOW_POSTGRES=1` reikštų, kad barjerą
  * galima apeiti diegimo metu, nepraėjus nė vienos prielaidos ir be jokios
@@ -140,10 +141,9 @@ function applyActivationBarrier(choice, env = process.env) {
   if (choice.eksplicitinis) {
     throw new Error(
       "JOB_STORE_BACKEND=postgres dar neleidžiamas: PostgreSQL backend'as " +
-        "įgyvendintas (#155, 7.2a), bet aktyvavimo barjeras reikalauja " +
-        "patikrinto restore (7.6), persistentinių ištrynimo žymų (7.5a), " +
-        "sąlyginio transakcinio užbaigimo (7.5b) ir fail-closed starto " +
-        "patikros. Žr. docs/decisions/155-postgres-authority.md."
+        "įgyvendintas (#155, 7.2a), bet aktyvavimo barjeras dar galioja. " +
+        "Prielaidų sąrašas: docs/decisions/155-postgres-authority.md, " +
+        "skyrius \"AKTYVAVIMO BARJERAS\"."
     );
   }
 

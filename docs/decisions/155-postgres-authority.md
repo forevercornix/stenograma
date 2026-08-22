@@ -718,7 +718,7 @@ Nebūtinai kiekviename CI — gali būti atskiras integracinis workflow.
 
 ## ⚠️ AKTYVAVIMO BARJERAS
 
-Peržiūros rado **keturias** atskiras tvarkos klaidas, ir visos to paties
+Peržiūros rado **šešias** atskiras tvarkos klaidas, ir visos to paties
 pavidalo: etapas, kuris PostgreSQL padaro autoritetingu, buvo suplanuotas
 anksčiau nei etapas, kuris tą režimą padaro atstatomu.
 
@@ -736,6 +736,8 @@ atsistatyti iš kopijos, neprarasti rezultatų ir neprikelti ištrintų duomenų
 | **Persistentės ištrynimo žymos** (7.5a dalis) | `deletionTombstones` yra proceso atmintis (`deletionTombstones.js:46`) — atkūrus naujame procese jos DINGSTA, tad restore pratybos negali įvykdyti savo pačių ištrinto job'o scenarijaus |
 | **Transakcinis rezultatų įrašymas** (7.5b dalis) | Be jo nutrūkęs procesas palieka `completed` be `job_results`; kitas bandymas atsimuša į `restart()` terminalų sargą, audio lieka, o klientas transkripcijos neturi |
 | **Idempotentiškas užbaigimas su konfliktų sprendimu** (7.5b dalis) | Transakcijos vienos NEPAKANKA — žr. žemiau |
+| **Fail-closed startas, patikrintas REALIAI** (7.2a `[F2]`) | `initializePostgres()` neturi fallback į atmintį, bet kol barjeras uždarytas, funkcija produkcijoje NEPASIEKIAMA — įrodyta tik unit lygmeniu (`_initializePostgresForTests`). Barjerą atidarius pirmas realus startas su neprieinama DB ir BŪTŲ tas testas |
+| **Eilės prieinamumo preflight** — ⚠️ **NEĮGYVENDINTA** | `hasQueueBackend()` vertina TIK konfigūraciją (`jobStore/index.js`), `jobRunner.init()` tikrina tik ar `bullmq` modulį galima `require` (`jobRunner.js:76-82`), o jungtis kuriama LAZY pirmo `add` metu (`transcriptionQueue.js:13-24`). Su PostgreSQL metaduomenimis prie Redis nesijungia NIEKAS, tad `server.js` pažymėtų runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų ar kristų. Reikia realaus probe prieš pradedant klausytis |
 
 ⚠️ **TRANSAKCIJA NEIŠSPRENDŽIA LYGIAGRETUMO.**
 
@@ -757,6 +759,65 @@ RETURNING *
 
 Nulis eilučių reiškia, kad kas nors jau baigė — tada rezultatas **lyginamas**, o
 ne perrašomas. Skirtingas rezultatas yra klaida, ne sėkmė.
+
+### ⚠️ PRIELAIDOS SKIRSTOMOS Į DVI RŪŠIS
+
+Painioti jas pavojinga: „trūksta įrodymo" ir „trūksta kodo" reikalauja skirtingo
+darbo, o antrąją nurašius kaip pirmąją, barjeras būtų atidarytas su spraga.
+
+**A. Neįgyvendintas darbas** — kodo dar nėra:
+
+- patikrintas restore (7.6);
+- persistentės ištrynimo žymos (7.5a);
+- transakcinis + sąlyginis užbaigimas (7.5b);
+- **eilės prieinamumo preflight** (7.2a paliko neįgyvendintą).
+
+**B. Įgyvendintas kodas, kurio negalima patikrinti, kol barjeras uždarytas** —
+tik `[F2]` fail-closed startas. `initializePostgres()` fallback'o į atmintį
+neturi ir turi baigtinę prisijungimo ribą, bet produkcijoje funkcija
+NEPASIEKIAMA, tad įrodyta tik unit lygmeniu.
+
+⚠️ **Eilės preflight priklauso A, ne B.** `hasQueueBackend()` vertina tik
+konfigūraciją; nė vienoje vietoje nėra kodo, kuris prieš pradedant klausytis
+patikrintų, ar eilė realiai pasiekiama. Klasifikavus jį kaip „laukiantį
+išorinio įrodymo", vėlesnė aktyvavimo peržiūra trūkstamą kodą palaikytų
+trūkstamu patvirtinimu.
+
+Uždaryti #179 nė viena iš jų neblokuoja, bet abi privalo būti barjerą
+atidarančio PR DoD — neišbandytas ar neparašytas gedimo kelias, įsijungiantis
+būtent tuo momentu, yra blogesnis nei akivaizdžiai nesantis: jis atrodo
+padengtas.
+
+## ⚠️ DB IR RUNTIME AIBĖS PRIVALO SUTAPTI
+
+Atskira taisyklė, išvesta iš trijų iš eilės peržiūros radinių, kurie visi buvo
+tas pats defektas skirtingose vietose: `schema_version` priėmė `1`, `type`
+priėmė bet ką ne-`processing` eilutėse, `phase` priėmė bet kokį tekstą.
+
+> **Kiekviena uždara aibė, kurią runtime laiko autoritetinga, privalo turėti
+> ATITINKAMĄ `CHECK` constraint'ą — ir atitikimas tikrinamas IŠVEDANT sąrašą iš
+> runtime konstantos, ne surašant ranka.**
+
+Kryptis svarbi. **Griežtesnė DB** nei runtime atmeta teisėtą įrašą — matoma
+iškart ir garsiai. **Laisvesnė DB** yra tyli: eilutė įrašoma sėkmingai, restore
+praneša SĖKMĘ, o gedimas išlenda vėliau ir kitoje vietoje — dažniausiai kaip
+`UNKNOWN_JOB_TYPE`, `INVALID_STATUS_PHASE` ar `Nepalaikoma job schemaVersion`
+ant įrašo, kurio niekas nebegali nei paleisti, nei ištaisyti.
+
+Autoritetai ir jų aibės:
+
+| Aibė | Runtime autoritetas | `CHECK` |
+|---|---|---|
+| `type` | `JOB_TYPES` (`common.js`) | `jobs_type_values` |
+| `status` | `STATUS` (`common.js`) | `jobs_status_values` |
+| `phase` | `phasesForType()` (`jobPhase.js`) | `jobs_status_phase` |
+| `owner_kind` | `OWNER_KIND` (`common.js`) | `jobs_owner_identity` |
+| `schema_version` | `assertSupportedSchemaVersion()` (`jobAuthorization.js`) | `jobs_schema_version_supported` |
+| progreso invariantai | `PROGRESS_INVARIANTS` (`jobPhase.js`) | `jobs_progress_invariants` |
+
+Paritetą tikrina `tests/dbRuntimeParity.integration.test.js`. Sąrašai jame
+IŠVEDAMI, tad naujas tipas, statusas ar fazė be atitinkamos migracijos krinta
+iškart — o ne po to, kai sugadinta kopija bus įrašyta į produkciją.
 
 ⚠️ `version` stulpelis ir pilnas optimistic locking lieka 7.5b, bet **ši
 konkreti sąlyga** yra aktyvavimo prielaida.
