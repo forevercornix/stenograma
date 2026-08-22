@@ -211,17 +211,20 @@ jos 7.2b kartu su kontraktų testais.
 
 **Tėvinis:** #155 · **Priklauso nuo:** 7.2a
 
-⚠️ **PRIELAIDA — 7.2a FOLLOW-UP PR PRIVALO BŪTI SUMERGINTAS PIRMA.**
+⚠️ **AS-IS: PARUOŠIMAS JAU ATLIKTAS `main` ŠAKOJE.**
 
-Šis aprašymas remiasi dviem dalykais, kurių `main` šakoje DAR NĖRA:
+Šis aprašymas remiasi keturiais dalykais, kurie **jau sumerginti**:
 
-- `IMMUTABLE_COLUMNS` konstanta (`postgresStore.js`) su `schema_version`;
-- `applyPatch()` apsauga `tenantId`, `idempotencyKey` ir `created_at` laukams
-  (`common.js`) — be jos memory ir Redis leidžia juos keisti, o PostgreSQL ne.
+| Prielaida | Kur | PR |
+|---|---|---|
+| `IMMUTABLE_COLUMNS` su `schema_version` | `postgresStore.js` | #200, #204 |
+| `applyPatch()` saugo `tenantId`, `idempotencyKey`, `created_at` | `common.js` | #200 |
+| `jobStoreBackendContract.integration` registruotas IR `postgres` rinkinyje | `tests/suites.js` | #207 |
+| Pasenęs „trečio atskiro testo" komentaras pašalintas | `jobStoreBackendContract...test.js` | #207 |
 
-Abu įvedami 7.2a follow-up PR'e. **Pirmas 7.2b žingsnis — jį sumerginti**, o ne
-kurti tas apsaugas iš naujo. Pre-review, paleistas prieš `main`, šias
-prielaidas pagrįstai pažymės kaip neįvykdytas.
+7.2b šių apsaugų **nekuria iš naujo** — jis jomis remiasi ir privalo jas
+IŠLAIKYTI. Atitinkami DoD punktai žemiau yra REGRESIJOS kriterijai, ne naujas
+darbas.
 
 `postgresStore` jau egzistuoja kaip trečias `jobStore` backend'as ir turi visas
 15 kontrakto operacijų. Trys atominės operacijos šiuo metu yra sąmoningai
@@ -793,10 +796,10 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
       žingsniuose (žr. 8 punktą).
 - [ ] `npm run test:postgres` išvestyje matomi PostgreSQL adapterio
       scenarijai, ne `skip`.
-- [ ] ⚠️ `jobStoreBackendContract.integration` REGISTRUOTAS `postgres`
-      rinkinyje (`tests/suites.js`). Šiandien jis tik `redis` rinkinyje, tad
-      vien adapterio pridėjimas testo faile PostgreSQL CI žingsnyje jo
-      nepaleistų.
+- [ ] ⚠️ `jobStoreBackendContract.integration` LIEKA registruotas IR `redis`,
+      IR `postgres` rinkiniuose (`tests/suites.js`). Registracija jau atlikta
+      (#207) - tai regresijos kriterijus: iškritus iš `postgres`, adapteris
+      PostgreSQL CI žingsnyje pats save praleistų.
 - [ ] ⚠️ FAIL-CLOSED vykdymo įrodymas: su nustatytu `DATABASE_URL` įvykdytų
       PostgreSQL scenarijų skaičius lyginamas su `SCENARIJAI.length`; `skip`
       arba nulis įvykdytų yra NESĖKMĖ.
