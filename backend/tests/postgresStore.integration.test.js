@@ -339,20 +339,28 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
      * `jobAuthorization.resolveCurrentRole()` sprendžia, ar `actor` yra
      * userId (era 2), ar username (legacy).
      */
-    for (const stulpelis of [
-      "id",
-      "owner_id",
-      "owner_kind",
-      "tenant_id",
-      "idempotency_key",
-      "schema_version",
-      "created_at",
-    ]) {
-      assert.ok(
-        IMMUTABLE_COLUMNS.has(stulpelis),
-        `"${stulpelis}" privalo likti už UPDATE ... SET ribų`
-      );
-    }
+    /**
+     * ⚠️ LYGINAMA PILNA AIBĖ, ne narystė po vieną.
+     *
+     * `has()` kiekvienam elementui tikrina tik APATINĘ ribą: pridėjus
+     * `status` ar kitą gyvavimo ciklo lauką, visos patikros vis tiek
+     * praeitų, o `writePatched()` tą stulpelį praleistų KIEKVIENAME
+     * atnaujinime - job'as niekada nepakeistų statuso, ir niekas to
+     * nepastebėtų.
+     */
+    assert.deepEqual(
+      [...IMMUTABLE_COLUMNS].sort(),
+      [
+        "created_at",
+        "id",
+        "idempotency_key",
+        "owner_id",
+        "owner_kind",
+        "schema_version",
+        "tenant_id",
+      ],
+      "IMMUTABLE_COLUMNS aibė pasikeitė - patikrinkite, ar naujas laukas tikrai nekintamas"
+    );
   });
 
   await t.test("idempotency_key NEKINTAMAS per update()", async () => {

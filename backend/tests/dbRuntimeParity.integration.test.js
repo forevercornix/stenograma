@@ -106,7 +106,15 @@ async function constraintSkaiciai(conname) {
     [conname]
   );
   assert.equal(rows.length, 1, `constraint "${conname}" nerastas`);
-  return new Set([...rows[0].def.matchAll(/=\s*\(?(-?\d+)/g)].map((m) => Number(m[1])));
+  /**
+   * ⚠️ IMAMI VISI SVEIKIEJI, ne tik po `=`.
+   *
+   * PostgreSQL deparsina `IN (2, 4)` kaip `= ANY (ARRAY[2, 4])`, tad šablonas
+   * `=\s*\(?(-?\d+)` iš jo NEIŠTRAUKTŲ NIEKO: aibė liktų tuščia, ciklas
+   * neatliktų nė vienos patikros, ir testas praeitų, nors DB priimtų runtime
+   * nepripažįstamą erą. Būtent tą kryptį šis rinkinys ir turi ginti.
+   */
+  return new Set([...rows[0].def.matchAll(/(-?\d+)/g)].map((m) => Number(m[1])));
 }
 
 async function priima(eilute, kodel) {
@@ -278,6 +286,39 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
       Object.values(OWNER_KIND).sort(),
       "DB nuosavybės rūšių aibė nesutampa su OWNER_KIND"
     );
+  });
+
+  /* ── actor_source ────────────────────────────────────────────────────── */
+
+  await t.test("actor_source: DB aibė sutampa su resolveCurrentRole() elgesiu", async () => {
+    /**
+     * ⚠️ AUTORITETAS KLAUSIAMAS TIESIOGIAI, ne kartojamas.
+     *
+     * Kiekviena kandidatė paduodama TIKRAM `authorizeJobExecution()`, ir DB
+     * lūkestis išvedamas iš jo atsakymo. Autoritetui pasikeitus testas kris.
+     *
+     * ⚠️ `null` yra TEISĖTAS: `newJob()` jo nenurodžius palieka `null`, o
+     * autorizacija tokį įrašą praleidžia kaip `no_actor` passthrough. DB
+     * privalo jį priimti, kitaip dauguma job'ų taptų neįrašomi.
+     */
+    const { authorizeJobExecution } = require("../utils/jobAuthorization");
+    const { newJob } = require("../utils/jobStore/common");
+
+    for (const saltinis of [null, "api-key", "session", "service", "cron"]) {
+      const job = newJob({ ownerKind: OWNER_KIND.UNOWNED });
+      let runtimePriima = true;
+      try {
+        authorizeJobExecution({ ...job, actorSource: saltinis, actor: "aktorius" });
+      } catch {
+        runtimePriima = false;
+      }
+
+      if (runtimePriima) {
+        await priima({ actor_source: saltinis }, `actor_source=${saltinis} (runtime priima)`);
+      } else {
+        await atmeta({ actor_source: saltinis }, `actor_source=${saltinis} (runtime atmeta)`);
+      }
+    }
   });
 
   /* ── schema_version ──────────────────────────────────────────────────── */

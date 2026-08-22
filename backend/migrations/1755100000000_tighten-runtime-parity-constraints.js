@@ -46,9 +46,32 @@ exports.up = (pgm) => {
   pgm.addConstraint("jobs", "jobs_type_values", {
     check: "type IN ('transcription', 'protocol')",
   });
+
+  /**
+   * 3. Uždara `actor_source` reikšmių aibė.
+   *
+   * `resultCurrentRole()` maršrutizuoja pagal `actorSource` ir, jei era yra
+   * `2`, o reikšmė nežinoma, meta `Nežinomas actorSource`
+   * (`jobAuthorization.js:148`). `_validateContent()` tikrina tik job ID, tad
+   * atkurta eilutė su `actor_source = 'service'` būtų įrašyta, restore
+   * praneštų SĖKMĘ, o job'as niekada nepasileistų - ta pati DB/runtime
+   * divergencija, kurią ši migracija ir šalina.
+   *
+   * ⚠️ `NULL` LIEKA LEISTINAS, IR TAI PATIKRINTA.
+   *
+   * `newJob()` `actorSource` nenurodžius palieka `null`, o
+   * `authorizeJobExecution()` tokį įrašą praleidžia su
+   * `{allowed: true, reason: "no_actor"}` (#17 passthrough). Constraint'as,
+   * reikalaujantis ne-`NULL` erai 2, atmestų DAUGUMĄ teisėtų job'ų - todėl
+   * ribojama tik REIKŠMIŲ AIBĖ, ne buvimas.
+   */
+  pgm.addConstraint("jobs", "jobs_actor_source_values", {
+    check: "actor_source IS NULL OR actor_source IN ('api-key', 'session')",
+  });
 };
 
 exports.down = (pgm) => {
+  pgm.dropConstraint("jobs", "jobs_actor_source_values");
   pgm.dropConstraint("jobs", "jobs_type_values");
 
   pgm.dropConstraint("jobs", "jobs_schema_version_supported");
