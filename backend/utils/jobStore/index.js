@@ -169,6 +169,29 @@ function connectTimeoutMs() {
   return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
 }
 
+/**
+ * VISI `jobs` lentelės `CHECK` invariantai, be kurių saugykla negali veikti.
+ *
+ * ⚠️ SĄRAŠAS PILNAS, NE PAVYZDINIS. Dalinis sąrašas leistų pasenusiai ar
+ * nukrypusiai schemai praeiti startą, nors ji priima būsenas, kurias runtime
+ * kontraktas atmeta (nežinomas statusas, progresas ant baigto job'o).
+ *
+ * Pilnumą tikrina `tests/migrations.integration.test.js`: jis nuskaito VISUS
+ * `contype = 'c'` constraint'us iš šviežiai migruotos DB ir lygina su šiuo
+ * sąrašu. Pridėjus constraint'ą migracijoje ir pamiršus čia - testas krinta.
+ */
+const REQUIRED_JOB_CONSTRAINTS = [
+  "jobs_actor_source_values",
+  "jobs_owner_identity",
+  "jobs_progress_invariants",
+  "jobs_progress_known",
+  "jobs_progress_only_processing",
+  "jobs_schema_version_supported",
+  "jobs_status_phase",
+  "jobs_status_values",
+  "jobs_type_values",
+];
+
 async function initializePostgres() {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
@@ -241,21 +264,17 @@ async function initializePostgres() {
      * sąrašas auga, o šis rinkinys įvardija tai, kas realiai būtina saugyklai
      * veikti teisingai.
      */
-    const BUTINI_CONSTRAINTAI = [
-      "jobs_type_values",
-      "jobs_schema_version_supported",
-      "jobs_actor_source_values",
-      "jobs_owner_identity",
-      "jobs_status_phase",
-      "jobs_progress_invariants",
-    ];
-
     const { rows: cRows } = await pool.query(
-      "SELECT conname FROM pg_constraint WHERE conname = ANY($1)",
-      [BUTINI_CONSTRAINTAI]
+      `SELECT c.conname
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'jobs'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'`
     );
     const rastiC = cRows.map((r) => r.conname);
-    const trukstaC = BUTINI_CONSTRAINTAI.filter((c) => !rastiC.includes(c));
+    const trukstaC = REQUIRED_JOB_CONSTRAINTS.filter((c) => !rastiC.includes(c));
 
     if (trukstaC.length > 0) {
       throw new Error(
@@ -786,6 +805,7 @@ module.exports = {
    * acceptance priklauso aktyvavimo etapui, ne šiam PR.
    */
   _initializePostgresForTests: initializePostgres,
+  REQUIRED_JOB_CONSTRAINTS,
   STATUS,
   JOB_TYPES,
   TTL_MS,

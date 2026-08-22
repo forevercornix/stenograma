@@ -337,3 +337,47 @@ test(
     }
   }
 );
+
+test(
+  "#155 STARTAS: REQUIRED_JOB_CONSTRAINTS apima VISUS migracijų sukurtus invariantus",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ DALINIS SĄRAŠAS YRA TYLI SPRAGA.
+     *
+     * Startas tikrina tik tuos constraint'us, kurie surašyti
+     * `REQUIRED_JOB_CONSTRAINTS`. Praleidus bent vieną (taip ir buvo:
+     * trūko `jobs_status_values`, `jobs_progress_known`,
+     * `jobs_progress_only_processing`), nukrypusi schema praeitų startą, nors
+     * priima būsenas, kurias runtime atmeta.
+     *
+     * Sąrašas IŠVEDAMAS iš šviežiai migruotos DB, ne surašomas teste - tad
+     * naujas constraint'as migracijoje be įrašo sąraše krinta iškart.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const { REQUIRED_JOB_CONSTRAINTS } = require("../utils/jobStore");
+    const pool = new Pool({ connectionString: DB_URL });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT c.conname
+           FROM pg_constraint c
+           JOIN pg_class t     ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE t.relname = 'jobs'
+            AND n.nspname = current_schema()
+            AND c.contype = 'c'`
+      );
+
+      assert.deepEqual(
+        rows.map((r) => r.conname).sort(),
+        [...REQUIRED_JOB_CONSTRAINTS].sort(),
+        "migracijų sukurtų CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
+      );
+    } finally {
+      await pool.end();
+    }
+  }
+);

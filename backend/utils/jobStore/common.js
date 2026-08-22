@@ -24,6 +24,11 @@ const TTL_MS = parseInt(process.env.JOB_TTL_MINUTES || "60", 10) * 60 * 1000;
 /**
  * ERA NORMALIZUOJAMA Į SKAIČIŲ (#155).
  *
+ * ⚠️ `newJob()` NAUDOJA TIK EILUTĖS ATVAIZDO NORMALIZAVIMĄ. Naujas job'as
+ * VISADA gauna erą `2`; `null`, `3` ar `"x"` iš kviečiančiojo nepriimami.
+ * Kitaip `create()` galėtų pagaminti įrašą, kurį autorizacija laiko legacy
+ * (`null`) arba visai atmeta - t. y. job'ą, kuris niekada nepasileis.
+ *
  * ⚠️ BE ŠITO BACKEND'AI IŠSISKIRIA. `assertSupportedSchemaVersion()` lygina
  * `=== 2`, tad `"2"` runtime ATMETA. Redis eilutę konvertuoja
  * (`redisStore.js` NUMERIC_FIELDS), PostgreSQL - per `integer` stulpelio tipą,
@@ -34,12 +39,13 @@ const TTL_MS = parseInt(process.env.JOB_TTL_MINUTES || "60", 10) * 60 * 1000;
  * `assertSupportedSchemaVersion()` ir DB `CHECK`.
  */
 function normalizeSchemaVersion(value) {
-  if (value === undefined) return 2;
-  if (value === null) return null;
+  if (value === undefined || value === null) return value;
 
   const skaicius = Number(value);
   return Number.isInteger(skaicius) ? skaicius : value;
 }
+
+const CURRENT_SCHEMA_VERSION = 2;
 
 function newJob(fields = {}) {
   const now = new Date().toISOString();
@@ -61,7 +67,16 @@ function newJob(fields = {}) {
      * kaip įrašas buvo SUKURTAS; jos perrašymas reikštų, kad seno įrašo
      * `actor` (username) staiga būtų aiškinamas kaip `userId`.
      */
-    schemaVersion: normalizeSchemaVersion(fields.schemaVersion),
+    /**
+     * ⚠️ ERA NEPRIKLAUSO NUO KVIETĖJO. `fields.schemaVersion` SĄMONINGAI
+     * ignoruojamas: `create()` neturi galimybės pagaminti legacy (`null`) ar
+     * nežinomos (`3`, `"x"`) eros įrašo, kurį autorizacija vėliau atmestų arba
+     * interpretuotų kaip senovinį.
+     *
+     * Eilutės atvaizdo normalizavimas (`"2"` → `2`) reikalingas ATKŪRIMO
+     * kelyje, ne čia - žr. `normalizeSchemaVersion()`.
+     */
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     // Jobo TIPAS. Abu async endpoint'ai (transkripcija ir protokolas) naudoja TĄ
     // PATĮ jobStore, tad be tipo DELETE /api/transcribe-jobs/:id priimdavo ir
     // protokolo jobo ID: įrašas būdavo surandamas ir ištrinamas, o valymo kodas
@@ -458,6 +473,7 @@ function isFinished(status) {
 
 module.exports = {
   normalizeSchemaVersion,
+  CURRENT_SCHEMA_VERSION,
   STATUS,
   JOB_TYPES,
   TTL_MS,

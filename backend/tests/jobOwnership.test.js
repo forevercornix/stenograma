@@ -412,9 +412,17 @@ test("newJob: schemaVersion normalizuojamas į skaičių (backend'ų paritetas)"
    * įrašas būtų vykdomas dviejuose backend'uose ir nevykdomas trečiame.
    */
   assert.equal(newJob({ ownerKind: OWNER_KIND.UNOWNED }).schemaVersion, 2);
-  assert.equal(newJob({ ownerKind: OWNER_KIND.UNOWNED, schemaVersion: "2" }).schemaVersion, 2);
-  assert.equal(newJob({ ownerKind: OWNER_KIND.UNOWNED, schemaVersion: null }).schemaVersion, null);
 
-  /** Ne skaitinė reikšmė NEKEIČIAMA - ją atmes autoritetas ir DB `CHECK`. */
-  assert.equal(newJob({ ownerKind: OWNER_KIND.UNOWNED, schemaVersion: "x" }).schemaVersion, "x");
+  /**
+   * ⚠️ KVIETĖJO REIKŠMĖ IGNORUOJAMA. `create()` neturi galimybės pagaminti
+   * legacy (`null`) ar nežinomos (`3`, `"x"`) eros įrašo - toks job'as
+   * autorizacijoje būtų arba palaikytas senoviniu, arba atmestas.
+   */
+  for (const bandymas of ["2", "x", null, 3, undefined]) {
+    assert.equal(
+      newJob({ ownerKind: OWNER_KIND.UNOWNED, schemaVersion: bandymas }).schemaVersion,
+      2,
+      `schemaVersion=${bandymas} neturi paveikti naujo job'o eros`
+    );
+  }
 });
