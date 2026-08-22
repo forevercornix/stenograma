@@ -60,8 +60,12 @@ test("parinkimas: nežinomas JOB_STORE_BACKEND yra klaida, ne tylus fallback", (
 test("BARJERAS: DATABASE_URL vienas NEPERJUNGIA srauto į PostgreSQL", () => {
   /**
    * ⚠️ ESMINIS 7.2a TESTAS. `postgresStore` yra įgyvendintas, bet ADR
-   * aktyvavimo barjeras reikalauja patikrinto restore (7.6), persistentinių
-   * ištrynimo žymų (7.5a) ir sąlyginio transakcinio užbaigimo (7.5b). Iki tol
+   * aktyvavimo barjeras dar galioja.
+   *
+   * Prielaidų sąrašas gyvena TIK ADR'e - dubliuota kopija komentare
+   * neišvengiamai pasensta (taip ir nutiko: ADR pridėjo eilės preflight, o
+   * kopijos čia ir `backendSelection.js` liko be jo).
+   *
    * `DATABASE_URL` (kurio gali prireikti 7.3 sesijoms ar 7.4 auditui) neturi
    * perjungti job metaduomenų į negrįžtamą režimą.
    */

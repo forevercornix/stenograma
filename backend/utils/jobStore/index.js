@@ -150,7 +150,12 @@ async function initializeStore() {
  * DB — split-brain, kuris „išnyksta" DB atsistačius, palikdamas dvi tikroves.
  *
  * Todėl prisijungimo klaida nutraukia startą. Tai galioja jau dabar, nors
- * barjeras PostgreSQL dar neparenka — kad 7.2b tereikėtų barjerą atidaryti.
+ * barjeras PostgreSQL dar neparenka — kad barjerą atidarant nereikėtų keisti
+ * šio kelio.
+ *
+ * ⚠️ BARJERO NEATIDARO NEI 7.2a, NEI 7.2b. 7.2b užbaigia atominių operacijų
+ * kontraktą, bet aktyvavimas priklauso VISOMS ADR prielaidoms
+ * (`docs/decisions/155-postgres-authority.md`, „AKTYVAVIMO BARJERAS").
  */
 /**
  * `DB_CONNECT_TIMEOUT_MS` su saugia numatytąja reikšme.
@@ -736,8 +741,8 @@ module.exports = {
    *
    * Vienintelį jos kvietimo tašką (`initializeStore()`) uždaro aktyvavimo
    * barjeras, tad be eksporto fail-closed elgesys neturėtų JOKIO įrodymo -
-   * nei runtime, nei testo. Neišbandytas gedimo kelias, kuris įsijungs 7.2b
-   * momentu, yra blogesnis nei neparašytas: jis atrodo padengtas.
+   * nei runtime, nei testo. Neišbandytas gedimo kelias, kuris įsijungs
+   * barjerą atidarius, yra blogesnis nei neparašytas: jis atrodo padengtas.
    *
    * Unit lygmuo įrodo, KAD prisijungimo klaida atmetama ir NĖRA fallback į
    * memory. Produkcinio kelio (`DATABASE_URL` → startas nutrūksta) galutinis
