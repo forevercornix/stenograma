@@ -211,9 +211,17 @@ jos 7.2b kartu su kontraktų testais.
 
 **Tėvinis:** #155 · **Priklauso nuo:** 7.2a
 
-⚠️ **PRIELAIDA:** šis aprašymas remiasi `IMMUTABLE_COLUMNS` konstanta
-(`postgresStore.js`), kuri įvedama 7.2a follow-up PR'e. Jei tas PR dar
-nesumergintas, pirmas 7.2b žingsnis — jį sumerginti, o ne kurti aibę iš naujo.
+⚠️ **PRIELAIDA — 7.2a FOLLOW-UP PR PRIVALO BŪTI SUMERGINTAS PIRMA.**
+
+Šis aprašymas remiasi dviem dalykais, kurių `main` šakoje DAR NĖRA:
+
+- `IMMUTABLE_COLUMNS` konstanta (`postgresStore.js`) su `schema_version`;
+- `applyPatch()` apsauga `tenantId`, `idempotencyKey` ir `created_at` laukams
+  (`common.js`) — be jos memory ir Redis leidžia juos keisti, o PostgreSQL ne.
+
+Abu įvedami 7.2a follow-up PR'e. **Pirmas 7.2b žingsnis — jį sumerginti**, o ne
+kurti tas apsaugas iš naujo. Pre-review, paleistas prieš `main`, šias
+prielaidas pagrįstai pažymės kaip neįvykdytas.
 
 `postgresStore` jau egzistuoja kaip trečias `jobStore` backend'as ir turi visas
 15 kontrakto operacijų. Trys atominės operacijos šiuo metu yra sąmoningai
@@ -345,11 +353,17 @@ laukus, įskaitant `schema_version`. 7.2b reikalavimas — kad NAUJI SQL mutacij
 keliai (`UPDATE ... WHERE ... RETURNING`) jos LAIKYTŲSI, o ne kad aibė būtų
 sukurta iš naujo. `SET` sąrašas privalo būti generuojamas per tą pačią aibę.
 
-⚠️ **TAS PATS GALIOJA REDIS LUA CAS.** Šiandien nekintamumą visuose trijuose
-backend'uose realiai teikia `applyPatch()`; nė vienas backend'as savo
-apsaugos neturi (PostgreSQL `IMMUTABLE_COLUMNS` yra defense-in-depth, o ne
-vienintelė kliūtis). 7.2b įveda kelius, kuriuose `applyPatch()` gali
-nebedalyvauti — Redis Lua skriptas rašo tiesiai, kaip ir SQL `SET`.
+⚠️ **TAS PATS GALIOJA REDIS LUA CAS.** Memory ir Redis nekintamumą gauna TIK
+iš `applyPatch()`; PostgreSQL `IMMUTABLE_COLUMNS` yra antras sluoksnis. 7.2b
+įveda kelius, kuriuose `applyPatch()` gali nebedalyvauti — Redis Lua skriptas
+rašo tiesiai, kaip ir SQL `SET`.
+
+⚠️ **DVI AIBĖS PRIVALO SUTAPTI.** `applyPatch()` saugo camelCase laukus,
+`IMMUTABLE_COLUMNS` — snake_case stulpelius. Jei jos išsiskirtų, atsirastų
+laukas, kurį vienas backend'as keičia, o kitas ne. Taip jau buvo: `tenantId`,
+`idempotencyKey` ir `created_at` buvo nekintami PostgreSQL'e, bet keičiami
+memory/Redis pusėje — divergencija patvirtinta eksperimentu ir ištaisyta 7.2a
+follow-up PR'e (`tests/jobOwnership.test.js` dabar tikrina aibių sutapimą).
 
 Nekintamumo garantija privalo galioti KIEKVIENAME naujame mutacijos kelyje, ne
 tik PostgreSQL. Bendras kontraktų rinkinys tai tikrina vienodai visiems trims:
@@ -387,7 +401,17 @@ CAS turi apsaugoti visas reikšmes, nuo kurių priklauso progreso sprendimas,
 - `status`;
 - `phase`;
 - esamą `progressKnown`;
-- esamą progreso epochą (`current` / `total`), kai ji aktuali.
+- esamą progreso epochą (`current` / `total`).
+
+⚠️ **BE „KAI JI AKTUALI" IŠLYGOS.** Ankstesnė formuluotė buvo dviprasmiška ir
+paliko realizacijai spręsti, kada progreso lauką tikrinti. CAS `WHERE` sąlyga
+privalo VISADA lyginti `progress_known`, `progress_current` ir `progress_total`
+su perskaityta būsena, naudodama NULL-safe `IS NOT DISTINCT FROM`.
+
+Priežastis: `progress_current` ir `progress_total` yra `NULL` kiekvienai
+`progressKnown = false` eilutei, o `= NULL` duoda `UNKNOWN` — sąlyginis
+`UPDATE` neatitiktų NĖ VIENOS eilutės, ir pirmasis progreso pranešimas visada
+grįžtų `"REJECTED"`.
 
 Jeigu kuri nors iš sprendimui naudotų reikšmių pasikeičia tarp bandymų, senas
 event negali būti pritaikytas naujai būsenai.
@@ -548,6 +572,11 @@ dekoracija, ir 7.2b tikslas nepasiektas.
       PRIEŠ CAS rašymą deterministiškai grąžina `"REJECTED"`.
 - [ ] Testas deterministinis: konkurentinė mutacija įterpiama kontroliuojamai
       (pvz. per adapterio hook), ne pasikliaujant scheduler'iu.
+- [ ] ⚠️ Testas įrodo MECHANIZMĄ, ne tik rezultatą: konkurentinis pakeitimas
+      įterpiamas TARP pradinio skaitymo ir CAS `UPDATE`, ir tikrinama, kad
+      `UPDATE` pakeitė **0 eilučių**, o operacija grąžino `"REJECTED"`.
+      Vien `"REJECTED"` grąžinimo nepakanka — jį duotų ir JS patikra prieš
+      rašymą, t. y. būtent ta realizacija, kurią 7.2b keičia.
 
 **B. PostgreSQL scenarijai realiai įvykdomi, ne praleisti.**
 
@@ -619,7 +648,6 @@ apsauga.
 - [ ] Matricos įrašai `updateOwned` / `removeOwned` / `getOwned` nuosavybės
       garantijoms — kiekvienas su evidence stulpeliu pagal ESAMĄ matricos
       formatą.
-- [ ] Matricos įrašas `removeOwned` nuosavybės CAS.
 - [ ] Matricos įrašas `reportProgressAtomic` CAS.
 - [ ] Matricos įrašas parametrizuoto rinkinio trijų backend'ų ekvivalentumui.
 
@@ -715,6 +743,9 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
 - [ ] Du lygiagretūs teisėti `removeOwned()` bandymai → vienas `true`, kitas
       `false`; antrasis NEGALI virsti `"FORBIDDEN"` vien dėl to, kad pirmasis
       jau ištrynė eilutę.
+- [ ] ⚠️ Nė vienas iš dviejų lygiagrečių `removeOwned()` NEMETA klaidos.
+      `false` privalo atsirasti iš NULL-safe eilutės nebuvimo, ne iš pagautos
+      DB išimties — kitaip TOCTOU langas tebėra, tik paslėptas `catch` bloke.
 - [ ] Failed transaction visiškai rollbackinama, connection grąžinamas pool'ui.
 
 **Kontrakto rinkinys**
