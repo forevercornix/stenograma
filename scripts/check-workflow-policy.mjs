@@ -54,6 +54,7 @@ const TRUSTED_PUBLISHERS = ["actions/", "docker/", "github/"];
  */
 const ALLOWED_JOB_WRITES = {
   "publish-images.yml": { "build-and-push": ["packages"] },
+  "gemini-pre-review.yml": { publish: ["issues"] },
 };
 
 /** Privalomos dependabot poros: ekosistema + katalogas. */
