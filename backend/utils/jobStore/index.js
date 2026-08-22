@@ -227,6 +227,43 @@ async function initializePostgres() {
           "Paleiskite `npm run migrate:up` prieš startą."
       );
     }
+
+    /**
+     * ⚠️ LENTELIŲ BUVIMO NEPAKANKA - TIKRINAMI IR INVARIANTAI.
+     *
+     * DB, kurioje paleista TIK `1755000000000`, abi lenteles jau turi, tad
+     * pirmoji patikra praeitų. Bet `jobs_type_values` tada dar nėra, o
+     * `jobs_schema_version_supported` vis dar priima `1`. Diegimas, praleidęs
+     * naujausią `migrate:up`, paskelbtų saugyklą pasiruošusia ir priiminėtų
+     * būtent tuos įrašus, kuriuos vėlesnė migracija turi blokuoti.
+     *
+     * Tikrinami CONSTRAINT'AI, ne `pgmigrations` eilučių skaičius: migracijų
+     * sąrašas auga, o šis rinkinys įvardija tai, kas realiai būtina saugyklai
+     * veikti teisingai.
+     */
+    const BUTINI_CONSTRAINTAI = [
+      "jobs_type_values",
+      "jobs_schema_version_supported",
+      "jobs_actor_source_values",
+      "jobs_owner_identity",
+      "jobs_status_phase",
+      "jobs_progress_invariants",
+    ];
+
+    const { rows: cRows } = await pool.query(
+      "SELECT conname FROM pg_constraint WHERE conname = ANY($1)",
+      [BUTINI_CONSTRAINTAI]
+    );
+    const rastiC = cRows.map((r) => r.conname);
+    const trukstaC = BUTINI_CONSTRAINTAI.filter((c) => !rastiC.includes(c));
+
+    if (trukstaC.length > 0) {
+      throw new Error(
+        `PostgreSQL schema pasenusi - trūksta invariantų: ${trukstaC.join(", ")}. ` +
+          "Paleiskite `npm run migrate:up`: be jų DB priimtų įrašus, kurių " +
+          "runtime nepripažįsta (nežinomas tipas, nepalaikoma era, nežinomas actor source)."
+      );
+    }
   } catch (err) {
     await pool.end().catch(() => {});
     throw err;

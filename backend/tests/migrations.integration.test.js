@@ -287,3 +287,53 @@ test(
     }
   }
 );
+
+test(
+  "#155 STARTAS: pasenusi schema (tik tėvinė migracija) nutraukia initializePostgres()",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ LENTELIŲ BUVIMO NEPAKANKA.
+     *
+     * DB, kurioje paleista TIK `1755000000000`, abi lenteles jau turi, tad
+     * `SELECT 1` + lentelių patikra praeitų: `readiness.jobStore` taptų
+     * `true`, serveris imtų klausytis, o DB priiminėtų įrašus, kuriuos
+     * naujesnė migracija turi blokuoti (nežinomas tipas, era `1`, nežinomas
+     * actor source).
+     */
+    await perkurtiDb();
+
+    const tevine = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-migr-"));
+    const buves = process.env.DATABASE_URL;
+
+    try {
+      const pirma = fs
+        .readdirSync(path.join(ŠAKNIS, "migrations"))
+        .filter((f) => f.endsWith(".js"))
+        .sort()[0];
+      fs.copyFileSync(path.join(ŠAKNIS, "migrations", pirma), path.join(tevine, pirma));
+      migrate("up", tevine);
+
+      process.env.DATABASE_URL = DB_URL;
+      delete require.cache[require.resolve("../utils/jobStore")];
+      const jobStore = require("../utils/jobStore");
+
+      await assert.rejects(
+        () => jobStore._initializePostgresForTests(),
+        /trūksta invariantų/,
+        "pasenusi schema privalo nutraukti startą, ne būti paskelbta pasiruošusia"
+      );
+
+      // Paleidus visas migracijas startas praeina.
+      migrate("up");
+      const store = await jobStore._initializePostgresForTests();
+      assert.equal(store.backend, "postgres");
+      await store.close();
+    } finally {
+      delete require.cache[require.resolve("../utils/jobStore")];
+      if (buves === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = buves;
+      fs.rmSync(tevine, { recursive: true, force: true });
+    }
+  }
+);

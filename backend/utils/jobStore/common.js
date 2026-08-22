@@ -21,6 +21,26 @@ const TTL_MS = parseInt(process.env.JOB_TTL_MINUTES || "60", 10) * 60 * 1000;
  *  - created_at / started_at / completed_at: gyvavimo ciklo laikai (diagnostikai);
  *  - error_code / error_message: struktūrizuota klaida (ne tik tekstas).
  */
+/**
+ * ERA NORMALIZUOJAMA Į SKAIČIŲ (#155).
+ *
+ * ⚠️ BE ŠITO BACKEND'AI IŠSISKIRIA. `assertSupportedSchemaVersion()` lygina
+ * `=== 2`, tad `"2"` runtime ATMETA. Redis eilutę konvertuoja
+ * (`redisStore.js` NUMERIC_FIELDS), PostgreSQL - per `integer` stulpelio tipą,
+ * o memory paliktų `"2"` ir job'as taptų nevykdomas TIK atmintyje.
+ *
+ * Konvertuojama, o ne atmetama, nes du backend'ai tai jau daro - atmetimas
+ * pakeistų jų elgesį. Ne skaitinė reikšmė paliekama nepakeista: ją atmes
+ * `assertSupportedSchemaVersion()` ir DB `CHECK`.
+ */
+function normalizeSchemaVersion(value) {
+  if (value === undefined) return 2;
+  if (value === null) return null;
+
+  const skaicius = Number(value);
+  return Number.isInteger(skaicius) ? skaicius : value;
+}
+
 function newJob(fields = {}) {
   const now = new Date().toISOString();
   return {
@@ -41,7 +61,7 @@ function newJob(fields = {}) {
      * kaip įrašas buvo SUKURTAS; jos perrašymas reikštų, kad seno įrašo
      * `actor` (username) staiga būtų aiškinamas kaip `userId`.
      */
-    schemaVersion: 2,
+    schemaVersion: normalizeSchemaVersion(fields.schemaVersion),
     // Jobo TIPAS. Abu async endpoint'ai (transkripcija ir protokolas) naudoja TĄ
     // PATĮ jobStore, tad be tipo DELETE /api/transcribe-jobs/:id priimdavo ir
     // protokolo jobo ID: įrašas būdavo surandamas ir ištrinamas, o valymo kodas
@@ -437,6 +457,7 @@ function isFinished(status) {
 }
 
 module.exports = {
+  normalizeSchemaVersion,
   STATUS,
   JOB_TYPES,
   TTL_MS,
