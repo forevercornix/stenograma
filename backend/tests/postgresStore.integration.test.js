@@ -686,6 +686,43 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
   });
 
 
+  await t.test("7.2b progreso CAS atmeta tarp read ir UPDATE pasikeitusį tipą", async () => {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+    await store.update(job.id, {
+      status: "processing", phase: "transcribing", progressKnown: true,
+      progress: { current: 1, total: 10 },
+    });
+    let intercepted = false;
+    let casRowCount = null;
+    const racingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return { release: () => client.release(), query: async (sql, params) => {
+          if (!intercepted && /^UPDATE jobs SET/.test(sql) && /type = \$2/.test(sql)) {
+            intercepted = true;
+            await pool.query(
+              "UPDATE jobs SET type = 'protocol', phase = 'generating_protocol', " +
+                "progress_known = false, progress_current = NULL, progress_total = NULL WHERE id = $1",
+              [job.id]
+            );
+            const result = await client.query(sql, params);
+            casRowCount = result.rowCount;
+            return result;
+          }
+          return client.query(sql, params);
+        } };
+      }, end: async () => {},
+    };
+    const outcome = await createPostgresStore(racingPool).reportProgressAtomic(job.id, {
+      phase: "transcribing", progress: { current: 5, total: 10 },
+    });
+    assert.equal(intercepted, true, "tipas pakeistas tarp initial read ir CAS UPDATE");
+    assert.equal(casRowCount, 0, "stale type CAS UPDATE privalo pakeisti 0 eilučių");
+    assert.equal(outcome, "REJECTED");
+    assert.equal((await store.get(job.id)).type, "protocol");
+  });
+
+
   await t.test("7.2b ownership CAS atmeta scope pakeitimą tarp read ir UPDATE", async () => {
     const scope = { ownerKind: "user", ownerId: UUID_A };
     const job = await store.create({ ownerKind: scope.ownerKind, ownerId: scope.ownerId });
@@ -735,6 +772,75 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     assert.equal(outcome, true,
       "matching eilutė turi būti pakartotinai mutuota, ne klaidingai klasifikuota FORBIDDEN");
     assert.equal(await store.get(id), null);
+  });
+
+
+  await t.test("7.2b klaida po job CAS rollbackina job ir result, o connection grįžta pool'ui", async () => {
+    const scope = { ownerKind: OWNER_KIND.UNOWNED, ownerId: null };
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+    await store.update(job.id, { result: { version: "before" } });
+    const cyclic = {};
+    cyclic.self = cyclic;
+
+    await assert.rejects(
+      () => store.updateOwned(job.id, { requestId: "must-rollback", result: cyclic }, scope),
+      (err) => err instanceof TypeError
+    );
+    const after = await store.get(job.id);
+    assert.equal(after.requestId, null, "jobs UPDATE turi būti rollbackintas");
+    assert.deepEqual(after.result, { version: "before" }, "job_results turi likti suderintas");
+    assert.equal(pool.waitingCount, 0, "connection neturi likti laukianti pool'e");
+    await assert.doesNotReject(() => pool.query("SELECT 1"),
+      "connection po rollback turi būti grąžintas pool'ui");
+  });
+
+
+  await t.test("7.2b concurrent progress CAS deterministiškai išlaiko monotoniškumą", async () => {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+    await store.update(job.id, { status: "processing", phase: "transcribing",
+      progressKnown: true, progress: { current: 1, total: 10 } });
+    let casRowCount = null;
+    const racingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return { release: () => client.release(), query: async (sql, params) => {
+          if (casRowCount === null && /^UPDATE jobs SET/.test(sql) && /progress_current IS NOT DISTINCT FROM/.test(sql)) {
+            await pool.query("UPDATE jobs SET progress_current = 7 WHERE id = $1", [job.id]);
+            const result = await client.query(sql, params);
+            casRowCount = result.rowCount;
+            return result;
+          }
+          return client.query(sql, params);
+        } };
+      }, end: async () => {},
+    };
+    const stale = await createPostgresStore(racingPool).reportProgressAtomic(job.id, {
+      phase: "transcribing", progress: { current: 5, total: 10 },
+    });
+    assert.equal(casRowCount, 0);
+    assert.equal(stale, "REJECTED");
+    assert.deepEqual((await store.get(job.id)).progress, { current: 7, total: 10 });
+  });
+
+  await t.test("7.2b PostgreSQL infrastruktūros klaida netampa domeno sentineliu", async () => {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+    await store.update(job.id, { status: "processing", phase: "transcribing" });
+    const expected = Object.assign(new Error("connection lost"), { code: "08006" });
+    const failingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return { release: () => client.release(), query: async (sql, params) => {
+          if (/^UPDATE jobs SET/.test(sql) && /progress_known IS NOT DISTINCT FROM/.test(sql)) throw expected;
+          return client.query(sql, params);
+        } };
+      }, end: async () => {},
+    };
+    await assert.rejects(
+      () => createPostgresStore(failingPool).reportProgressAtomic(job.id, {
+        phase: "transcribing", progress: { current: 1, total: 10 },
+      }),
+      (err) => err === expected && err.code === "08006"
+    );
   });
 
 });

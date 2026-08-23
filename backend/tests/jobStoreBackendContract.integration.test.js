@@ -26,20 +26,12 @@ const { OWNER_KIND, JOB_TYPES } = require("../utils/jobStore/common");
  * jis tikrina pirmas ir grąžina anksti – bet backend'o kontraktas yra
  * kontraktas.
  *
- * Šis testas paleidžia TĄ PAČIĄ scenarijų aibę prieš abu backend'us ir
- * reikalauja vienodo rezultato.
+ * Testas per adapterius paleidžia TĄ PAČIĄ scenarijų aibę prieš memory,
+ * Redis ir PostgreSQL backend'us bei reikalauja vienodo rezultato.
  *
- * ⚠️ #155 (7.2b) PRIDĖS TREČIĄ REALIZACIJĄ (`postgresStore`) IR
- * PARAMETRIZUOS ŠĮ FAILĄ.
- *
- * Šiandien backend'ai NĖRA parametrizuoti – memory ir Redis turi po atskirą
- * testą, nes jų paruošimas skiriasi (memory rašo objektą, Redis – Redis
- * hash'ą). Tai LAIKINA būsena.
- *
- * 7.2b reikalauja adapterio modelio (`{ name, setup, store, prepareState,
- * cleanup }`) ir TO PATIES scenarijų rinkinio prieš visus tris backend'us.
- * Ketvirto atskiro testo pridėti NEREIKIA – kopijuotas testas yra būtent tai,
- * ką 7.2b šalina.
+ * Adapterio modelis (`{ name, setup, store, prepareState, cleanup }`) laiko
+ * išorinių resursų paruošimą ir uždarymą greta, o scenarijų sąrašas lieka
+ * vienas visiems trims backend'ams.
  *
  * `SCENARIJAI` sąrašas gali būti PLEČIAMAS (7.2b prideda `updateOwned`,
  * `removeOwned` ir `getOwned` scenarijus), bet lieka BENDRAS visiems
@@ -253,16 +245,48 @@ for (const adapter of ADAPTERIAI) {
 
         const scope = { ownerKind: OWNER_KIND.UNOWNED, ownerId: null };
         const apiScope = { ownerKind: OWNER_KIND.API_PRINCIPAL, ownerId: null };
-        const owned = await ctx.store.create({ ownerKind: OWNER_KIND.UNOWNED });
+        const tenantId = "33333333-3333-3333-3333-333333333333";
+        const owned = await ctx.store.create({
+          ownerKind: OWNER_KIND.UNOWNED,
+          tenantId,
+          idempotencyKey: `contract-${adapter.name}`,
+        });
         assert.equal((await ctx.store.getOwned(owned.id, scope)).id, owned.id);
         assert.equal(await ctx.store.getOwned(owned.id, apiScope), "FORBIDDEN");
         assert.equal(await ctx.store.getOwned(crypto.randomUUID(), scope), null);
         const updated = await ctx.store.updateOwned(owned.id, {
-          requestId: "contract", ownerKind: OWNER_KIND.API_PRINCIPAL, schemaVersion: 999,
+          id: crypto.randomUUID(),
+          requestId: "contract",
+          ownerId: crypto.randomUUID(),
+          ownerKind: OWNER_KIND.API_PRINCIPAL,
+          tenantId: crypto.randomUUID(),
+          idempotencyKey: "replaced",
+          createdAt: "2000-01-01T00:00:00.000Z",
+          created_at: "2000-01-01T00:00:00.000Z",
+          schemaVersion: 999,
         }, scope);
         assert.equal(updated.requestId, "contract");
+        assert.equal(updated.id, owned.id);
+        assert.equal(updated.ownerId, null);
         assert.equal(updated.ownerKind, OWNER_KIND.UNOWNED);
+        assert.equal(updated.tenantId, tenantId);
+        assert.equal(updated.idempotencyKey, `contract-${adapter.name}`);
+        assert.equal(updated.createdAt, owned.createdAt);
+        assert.equal(updated.created_at, owned.created_at);
         assert.equal(updated.schemaVersion, 2);
+
+        await ctx.store.update(owned.id, {
+          status: "processing", phase: PHASE.TRANSCRIBING,
+        });
+        const expectedResult = { transcript: `result-${adapter.name}` };
+        await ctx.store.update(owned.id, {
+          status: "completed", phase: null, progress: null,
+          progressKnown: false, result: expectedResult,
+        });
+        const completed = await ctx.store.getOwned(owned.id, scope);
+        assert.equal(completed.status, "completed");
+        assert.deepEqual(completed.result, expectedResult,
+          `${adapter.name}: getOwned() privalo hidratuoti užbaigto job'o rezultatą`);
         assert.equal(await ctx.store.updateOwned(owned.id, {}, apiScope), "FORBIDDEN");
         assert.equal(await ctx.store.removeOwned(owned.id, apiScope), "FORBIDDEN");
         assert.equal(await ctx.store.removeOwned(owned.id, scope), true);
@@ -271,22 +295,25 @@ for (const adapter of ADAPTERIAI) {
     });
 }
 
-test("KONTRAKTAS: abu backend'ai deklaruoja TĄ PAČIĄ metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 15 metodų aibę", () => {
   /**
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
    * ilgai nebuvo memory backend'e.
    */
   const redis = createRedisStore({ on: () => {}, defineCommand: () => {} });
+  const postgres = createPostgresStore({});
 
-  const memoryMetodai = Object.keys(memoryStore).filter((k) => typeof memoryStore[k] === "function");
-  const redisMetodai = Object.keys(redis).filter((k) => typeof redis[k] === "function");
+  const metodai = (store) => Object.keys(store)
+    .filter((key) => typeof store[key] === "function")
+    .sort();
+  const expected = metodai(memoryStore);
 
-  const trukstaRedis = memoryMetodai.filter((m) => !redisMetodai.includes(m));
-  const trukstaMemory = redisMetodai.filter((m) => !memoryMetodai.includes(m));
-
-  assert.deepEqual(trukstaRedis, [], `Redis backend'e trūksta: ${trukstaRedis.join(", ")}`);
-  assert.deepEqual(trukstaMemory, [], `memory backend'e trūksta: ${trukstaMemory.join(", ")}`);
+  assert.equal(expected.length, 15, "jobStore kontraktas privalo turėti tiksliai 15 metodų");
+  assert.deepEqual(metodai(redis), expected,
+    "Redis metodų aibė privalo tiksliai sutapti su memory");
+  assert.deepEqual(metodai(postgres), expected,
+    "PostgreSQL metodų aibė privalo tiksliai sutapti su memory");
 });
 
 test(
