@@ -620,4 +620,96 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       "normalus progresas"
     );
   });
+
+  await t.test("7.2b ownership CAS kontraktai ir lygiagretus delete", async () => {
+    const scope = { ownerKind: "user", ownerId: UUID_A };
+    const svetimas = { ownerKind: "user", ownerId: UUID_B };
+    const job = await store.create({ ownerKind: scope.ownerKind, ownerId: scope.ownerId });
+
+    assert.equal(await store.getOwned("00000000-0000-0000-0000-000000000099", scope), null);
+    assert.equal(await store.getOwned(job.id, svetimas), "FORBIDDEN");
+    assert.equal((await store.getOwned(job.id, scope)).id, job.id);
+    assert.equal(await store.updateOwned(job.id, { requestId: "x" }, svetimas), "FORBIDDEN");
+    assert.equal((await store.updateOwned(job.id, { requestId: "x", ownerId: UUID_B,
+      schemaVersion: 999 }, scope)).requestId, "x");
+    const nepakites = await store.get(job.id);
+    assert.equal(nepakites.ownerId, UUID_A);
+    assert.equal(nepakites.schemaVersion, 2);
+
+    const outcomes = await Promise.all([
+      store.removeOwned(job.id, scope),
+      store.removeOwned(job.id, scope),
+    ]);
+    assert.deepEqual(outcomes.sort(), [false, true]);
+  });
+
+  await t.test("7.2b progreso CAS deterministiškai atmeta tarp read ir UPDATE pasikeitusią fazę", async () => {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+    await store.update(job.id, {
+      status: "processing", phase: "transcribing", progressKnown: true,
+      progress: { current: 1, total: 10 },
+    });
+
+    let intercepted = false;
+    let casRowCount = null;
+    const racingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          release: () => client.release(),
+          query: async (sql, params) => {
+            if (!intercepted && /^UPDATE jobs SET/.test(sql) && /progress_known IS NOT DISTINCT FROM/.test(sql)) {
+              intercepted = true;
+              await pool.query(
+                "UPDATE jobs SET phase = 'diarizing', progress_known = false, " +
+                  "progress_current = NULL, progress_total = NULL WHERE id = $1",
+                [job.id]
+              );
+              const result = await client.query(sql, params);
+              casRowCount = result.rowCount;
+              return result;
+            }
+            return client.query(sql, params);
+          },
+        };
+      },
+      end: async () => {},
+    };
+    const racingStore = createPostgresStore(racingPool);
+    const outcome = await racingStore.reportProgressAtomic(job.id, {
+      phase: "transcribing", progress: { current: 5, total: 10 },
+    });
+
+    assert.equal(intercepted, true, "prielaida: mutacija įterpta tarp read ir CAS");
+    assert.equal(casRowCount, 0, "stale CAS UPDATE privalo pakeisti 0 eilučių");
+    assert.equal(outcome, "REJECTED");
+  });
+
+
+  await t.test("7.2b ownership CAS atmeta scope pakeitimą tarp read ir UPDATE", async () => {
+    const scope = { ownerKind: "user", ownerId: UUID_A };
+    const job = await store.create({ ownerKind: scope.ownerKind, ownerId: scope.ownerId });
+    let casRowCount = null;
+    const racingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return { release: () => client.release(), query: async (sql, params) => {
+          if (casRowCount === null && /^UPDATE jobs SET/.test(sql) && /owner_id IS NOT DISTINCT FROM/.test(sql)) {
+            await pool.query("UPDATE jobs SET owner_id = $2 WHERE id = $1", [job.id, UUID_B]);
+            const result = await client.query(sql, params);
+            casRowCount = result.rowCount;
+            return result;
+          }
+          return client.query(sql, params);
+        } };
+      }, end: async () => {},
+    };
+    const outcome = await createPostgresStore(racingPool).updateOwned(
+      job.id, { requestId: "must-not-write" }, scope
+    );
+    assert.equal(casRowCount, 0);
+    assert.equal(outcome, "FORBIDDEN");
+    assert.equal((await store.get(job.id)).requestId, null);
+  });
+
 });

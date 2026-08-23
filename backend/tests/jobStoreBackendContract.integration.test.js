@@ -1,12 +1,18 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const { skipWithoutRedis } = require("./helpers/redisGuard");
+const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
+const { Pool } = require("pg");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
 const memoryStore = require("../utils/jobStore/memoryStore");
 const { createRedisStore } = require("../utils/jobStore/redisStore");
+const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { PHASE } = require("../utils/jobPhase");
 const { OWNER_KIND, JOB_TYPES } = require("../utils/jobStore/common");
 
@@ -160,64 +166,110 @@ async function paleisti(store, paruostiBusena) {
   return rezultatai;
 }
 
-test("KONTRAKTAS: memory backend'as atitinka scenarijų lūkesčius", async () => {
-  const r = await paleisti(memoryStore, async (id, busena) => {
-    await memoryStore.update(id, busena);
-  });
-
-  for (const { kodel, gauta, laukiama } of r) {
-    assert.equal(gauta, laukiama, `memory: ${kodel}`);
-  }
-});
-
-test(
-  "KONTRAKTAS: Redis backend'as duoda TĄ PATĮ rezultatą kaip memory",
-  { skip: skipWithoutRedis() },
-  async (t) => {
-    /**
-     * ⚠️ Lyginami ne tik lūkesčiai, bet ir backend'ai TARPUSAVYJE.
-     *
-     * Jei abu būtų klaidingi vienodai, pirmasis testas kristų. Jei išsiskirtų –
-     * kris šis. Kartu jie uždaro abu variantus.
-     */
-    const IORedis = require("ioredis");
-    const client = new IORedis(process.env.REDIS_URL);
-    const store = createRedisStore(client);
-    const sukurti = [];
-
-    t.after(async () => {
-      for (const id of sukurti) {
-        await client.del(`job:${id}`).catch(() => {});
-        await client.zrem("jobs:index", id).catch(() => {});
-      }
-      await client.quit().catch(() => {});
-    });
-
-    const redisR = await paleisti(store, async (id, busena) => {
-      sukurti.push(id);
-      await client.hset(`job:${id}`, {
-        status: busena.status,
-        phase: busena.phase == null ? "" : busena.phase,
-        progress: busena.progress == null ? "null" : JSON.stringify(busena.progress),
-        progressKnown: String(Boolean(busena.progressKnown)),
+const ADAPTERIAI = [
+  {
+    name: "memory",
+    skip: false,
+    async setup() {
+      return { store: memoryStore, prepareState: (id, state) => memoryStore.update(id, state),
+        cleanup: async () => {} };
+    },
+  },
+  {
+    name: "redis",
+    skip: skipWithoutRedis(),
+    async setup() {
+      const IORedis = require("ioredis");
+      const client = new IORedis(process.env.REDIS_URL);
+      const ids = [];
+      return {
+        store: createRedisStore(client),
+        prepareState: async (id, state) => {
+          ids.push(id);
+          await client.hset(`job:${id}`, { status: state.status,
+            phase: state.phase == null ? "" : state.phase,
+            progress: state.progress == null ? "null" : JSON.stringify(state.progress),
+            progressKnown: String(Boolean(state.progressKnown)) });
+        },
+        cleanup: async () => {
+          for (const id of ids) { await client.del(`job:${id}`); await client.zrem("jobs:index", id); }
+          await client.quit();
+        },
+      };
+    },
+  },
+  {
+    name: "postgres",
+    skip: skipWithoutPostgres(),
+    async setup() {
+      const url = testDatabaseUrl("backend_contract");
+      const dbName = new URL(url).pathname.slice(1);
+      const admin = new Pool({ connectionString: adminDatabaseUrl() });
+      await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+      await admin.query(`CREATE DATABASE "${dbName}"`);
+      await admin.end();
+      execFileSync("npx", ["node-pg-migrate", "up"], {
+        cwd: path.resolve(__dirname, ".."), env: { ...process.env, DATABASE_URL: url },
+        stdio: ["ignore", "pipe", "pipe"],
       });
-    });
+      const pool = new Pool({ connectionString: url });
+      // Kontrakto scenarijai sąmoningai apima sugadintas būsenas, kurių
+      // produkciniai CHECK'ai neleidžia sukurti. Ši izoliuota DB tikrina store
+      // sprendimą, o constraint'ai atskirai tikrinami postgresStore rinkinyje.
+      await pool.query(`ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase`);
+      const store = createPostgresStore(pool);
+      return {
+        store,
+        prepareState: async (id, state) => {
+          const known = state.progressKnown === true && state.progress != null &&
+            typeof state.progress.current === "number" && typeof state.progress.total === "number";
+          await pool.query(`UPDATE jobs SET status=$2, phase=$3, progress_known=$4,
+            progress_current=$5, progress_total=$6 WHERE id=$1`, [id, state.status,
+            state.phase, known, known && state.progress ? state.progress.current : null,
+            known && state.progress ? state.progress.total : null]);
+        },
+        cleanup: async () => {
+          await store.close();
+          const a = new Pool({ connectionString: adminDatabaseUrl() });
+          await a.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+          await a.end();
+        },
+      };
+    },
+  },
+];
 
-    const memoryR = await paleisti(memoryStore, async (id, busena) => {
-      await memoryStore.update(id, busena);
-    });
+for (const adapter of ADAPTERIAI) {
+  test(`KONTRAKTAS: ${adapter.name} vykdo bendrą backend scenarijų rinkinį`,
+    { skip: adapter.skip }, async () => {
+      const ctx = await adapter.setup();
+      try {
+        const results = await paleisti(ctx.store, ctx.prepareState);
+        assert.equal(results.length, SCENARIJAI.length,
+          `${adapter.name}: privalo įvykdyti VISUS scenarijus`);
+        for (const { kodel, gauta, laukiama } of results) {
+          assert.equal(gauta, laukiama, `${adapter.name}: ${kodel}`);
+        }
 
-    for (let i = 0; i < SCENARIJAI.length; i += 1) {
-      assert.equal(
-        redisR[i].gauta,
-        memoryR[i].gauta,
-        `BACKEND'AI IŠSISKYRĖ ties "${SCENARIJAI[i].kodel}": ` +
-          `redis=${redisR[i].gauta}, memory=${memoryR[i].gauta}`
-      );
-      assert.equal(redisR[i].gauta, SCENARIJAI[i].laukiama, `redis: ${SCENARIJAI[i].kodel}`);
-    }
-  }
-);
+        const scope = { ownerKind: OWNER_KIND.UNOWNED, ownerId: null };
+        const apiScope = { ownerKind: OWNER_KIND.API_PRINCIPAL, ownerId: null };
+        const owned = await ctx.store.create({ ownerKind: OWNER_KIND.UNOWNED });
+        assert.equal((await ctx.store.getOwned(owned.id, scope)).id, owned.id);
+        assert.equal(await ctx.store.getOwned(owned.id, apiScope), "FORBIDDEN");
+        assert.equal(await ctx.store.getOwned(crypto.randomUUID(), scope), null);
+        const updated = await ctx.store.updateOwned(owned.id, {
+          requestId: "contract", ownerKind: OWNER_KIND.API_PRINCIPAL, schemaVersion: 999,
+        }, scope);
+        assert.equal(updated.requestId, "contract");
+        assert.equal(updated.ownerKind, OWNER_KIND.UNOWNED);
+        assert.equal(updated.schemaVersion, 2);
+        assert.equal(await ctx.store.updateOwned(owned.id, {}, apiScope), "FORBIDDEN");
+        assert.equal(await ctx.store.removeOwned(owned.id, apiScope), "FORBIDDEN");
+        assert.equal(await ctx.store.removeOwned(owned.id, scope), true);
+        assert.equal(await ctx.store.removeOwned(owned.id, scope), false);
+      } finally { await ctx.cleanup(); }
+    });
+}
 
 test("KONTRAKTAS: abu backend'ai deklaruoja TĄ PAČIĄ metodų aibę", () => {
   /**

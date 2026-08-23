@@ -20,13 +20,9 @@ const {
  * `listByFlag` / `listReferencedStorageKeys` maitina laukiančio valymo paiešką
  * ir retenciją. Backend'as su trumpesniu sąrašu lūžtų įprastose užklausose.
  *
- * ⚠️ TRYS ATOMINĖS OPERACIJOS ČIA YRA LAIKINOS (`updateOwned`, `removeOwned`,
- * `reportProgressAtomic`). Jos įgyvendintos per `SELECT ... FOR UPDATE`
- * transakcijoje — korektiška, bet ne ta forma, kurios reikalauja 7.2b
- * (`UPDATE ... WHERE ... RETURNING` vienu sakiniu) ir kurios ekvivalentumą
- * trims backend'ams įrodo parametrizuotas kontraktų rinkinys. Palikti jas
- * neįgyvendintas nebūtų buvę saugiau: metodų aibė vis tiek privalo sutapti, o
- * ne-atominis read-modify-write be užrakto tyliai prarastų CAS semantiką.
+ * Atominės `updateOwned`, `removeOwned` ir `reportProgressAtomic` operacijos
+ * sprendimo preconditions laiko SQL mutacijos `WHERE` dalyje ir naudoja
+ * `RETURNING`; jų ekvivalentumą trims backend'ams tikrina bendras rinkinys.
  */
 
 /**
@@ -373,63 +369,67 @@ function createPostgresStore(pool) {
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }
 
-  /* ─────────────────────────────────────────────────────────────────────────
-   * LAIKINOS ATOMINĖS OPERACIJOS — galutinė forma 7.2b.
-   *
-   * `SELECT ... FOR UPDATE` užrakina eilutę iki transakcijos pabaigos, tad
-   * skaitymas, patikra ir rašymas vyksta be lango. 7.2b pakeis tai vieno
-   * sakinio CAS forma (`UPDATE ... WHERE owner_id IS NOT DISTINCT FROM $1
-   * ... RETURNING`) ir įrodys ekvivalentumą parametrizuotu kontraktų rinkiniu.
-   *
-   * ⚠️ `IS NOT DISTINCT FROM`, NE `=` — jau dabar svarbu suprasti, kodėl:
-   * desktop (`unowned`) ir bendro rakto (`api-key`) job'ai turi
-   * `owner_id IS NULL`, tad `= $1` su `NULL` duotų `UNKNOWN` ir operacija
-   * nerastų NĖ VIENOS eilutės. Šioje versijoje palyginimą daro
-   * `matchesOwner()`, kuris normalizuoja abi puses.
-   * ───────────────────────────────────────────────────────────────────────── */
-
-  async function lockJob(client, id) {
-    const { rows } = await client.query(
-      `${SELECT_JOB} WHERE j.id = $1 FOR UPDATE OF j`,
-      [id]
-    );
-    return rowToJob(rows[0]);
-  }
-
   /** @returns {object|null|"FORBIDDEN"} */
   async function updateOwned(id, patch, scope) {
     return inTransaction(async (client) => {
-      const current = await lockJob(client, id);
+      const current = await readJob(client, id);
       if (!current) return null;
       if (!matchesOwner(current, scope)) return "FORBIDDEN";
-      return writePatched(client, current, patch);
+      const row = jobToRow(applyPatch(current, patch));
+      const mutable = COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c));
+      const sets = mutable.map((c, i) => `"${c}" = $${i + 4}`).join(", ");
+      const result = await client.query(
+        `UPDATE jobs SET ${sets}
+          WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
+        RETURNING id`,
+        [id, scope.ownerId ?? null, scope.ownerKind, ...mutable.map((c) => row[c])]
+      );
+      if (result.rowCount === 0) return (await readJob(client, id)) ? "FORBIDDEN" : null;
+      await upsertResult(client, id, patch.result);
+      return readJob(client, id);
     });
   }
 
   /** @returns {boolean|"FORBIDDEN"} */
   async function removeOwned(id, scope) {
     return inTransaction(async (client) => {
-      const current = await lockJob(client, id);
-      if (!current) return false;
-      if (!matchesOwner(current, scope)) return "FORBIDDEN";
-      await client.query("DELETE FROM jobs WHERE id = $1", [id]);
-      return true;
+      const result = await client.query(
+        `DELETE FROM jobs WHERE id = $1
+            AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
+        RETURNING id`,
+        [id, scope.ownerId ?? null, scope.ownerKind]
+      );
+      if (result.rowCount > 0) return true;
+      return (await readJob(client, id)) ? "FORBIDDEN" : false;
     });
   }
 
   /** @returns {object|null|"REJECTED"} */
   async function reportProgressAtomic(id, event) {
-    // Importuojama viduje, kad nebūtų ciklinės priklausomybės (kaip memory).
     const jobPhase = require("../jobPhase");
-
     return inTransaction(async (client) => {
-      const current = await lockJob(client, id);
+      const current = await readJob(client, id);
       if (!current) return null;
-
       const patch = jobPhase.reportProgress(current, event);
       if (!patch) return "REJECTED";
-
-      return writePatched(client, current, patch);
+      const row = jobToRow(applyPatch(current, patch));
+      const expected = jobToRow(current);
+      const mutable = COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c));
+      const sets = mutable.map((c, i) => `"${c}" = $${i + 8}`).join(", ");
+      const result = await client.query(
+        `UPDATE jobs SET ${sets}
+          WHERE id = $1 AND type = $2 AND status = $3
+            AND phase IS NOT DISTINCT FROM $4
+            AND progress_known IS NOT DISTINCT FROM $5
+            AND progress_current IS NOT DISTINCT FROM $6
+            AND progress_total IS NOT DISTINCT FROM $7
+        RETURNING id`,
+        [id, expected.type, expected.status, expected.phase, expected.progress_known,
+          expected.progress_current, expected.progress_total,
+          ...mutable.map((c) => row[c])]
+      );
+      if (result.rowCount === 0) return (await readJob(client, id)) ? "REJECTED" : null;
+      return readJob(client, id);
     });
   }
 

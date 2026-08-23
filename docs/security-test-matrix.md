@@ -1439,3 +1439,12 @@ Sąžiningumo dėlei — ribos, kurios lieka atviros:
   apkrova.
 - **BullMQ worker procesas.** `redisConcurrency` konteksto atkūrimą tikrina per
   inline kelią; atskirą procesą dengia `queueRecovery.integration`.
+
+### #180 — SQL CAS ir trijų backend'ų kontrakto ekvivalentumas
+
+| Garantija | Testas | Mutacijos įrodymas |
+|---|---|---|
+| Memory, Redis ir PostgreSQL vykdo tą patį progreso scenarijų rinkinį | `jobStoreBackendContract.integration` | Pašalinus backend'o progreso guard arba praleidus scenarijų dalį → krinta lūkesčiai arba dinaminė `SCENARIJAI.length` patikra |
+| `updateOwned` / `removeOwned` nuosavybės CAS ir immutable laukai sutampa | `jobStoreBackendContract.integration`, `postgresStore.integration` | Pašalinus scope iš mutacijos sąlygos arba leidus patch'ui keisti nuosavybę / erą → svetimas scope mutuoja job'ą arba immutable assertions krinta |
+| `getOwned` atskiria owner, svetimą scope ir neegzistuojantį job | `jobStoreBackendContract.integration` | Grąžinus job'ą nepatikrinus abiejų scope laukų → `api-key` ir `unowned` neigiamas scenarijus krinta |
+| PostgreSQL progreso CAS lygina pilną perskaitytą snapshot'ą | `postgresStore.integration` | Kontroliuojamai pakeitus fazę tarp read ir CAS → `UPDATE` turi pakeisti 0 eilučių ir grąžinti `REJECTED` |
