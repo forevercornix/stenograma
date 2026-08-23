@@ -209,6 +209,109 @@ const IMMUTABLE_COLUMNS = new Set([
   "created_at",
 ]);
 
+/**
+ * SIAURAS RAŠYMAS: stulpeliai, kuriuos ši operacija REALIAI keičia.
+ *
+ * ⚠️ PLATUS `SET` YRA PRARASTAS ATNAUJINIMAS (#180 P1-1).
+ *
+ * Sąlyginė mutacija saugo tik tuos stulpelius, kurie yra jos `WHERE` dalyje.
+ * Jei `SET` sąrašas platesnis už predikatą, kiekvienas jame esantis, bet
+ * predikate nesantis stulpelis įrašomas iš PASENUSIO snapshot'o - ir
+ * konkurentinis, jau užcommitintas pakeitimas tyliai atsukamas atgal:
+ *
+ *   A: readJob()                       (deletion_pending = false)
+ *   B: UPDATE ... deletion_pending = true   COMMIT
+ *   A: CAS UPDATE - progreso predikatas nepakito, tad PAVYKSTA
+ *      → deletion_pending vėl false, o B pakeitimas dingo
+ *
+ * Tai ne teorinis atvejis: `jobErasure.js` tokiu būdu pažymi job'ą
+ * pakartotiniam ištrynimui, o `listByFlag("deletion_pending")` jo nebematytų.
+ *
+ * ⚠️ TAS PATS SPRENDIMAS KAIP REDIS PUSĖJE. `redisStore.CAS_PROGRESS_LUA` rašo
+ * TIK `progress`, `progressKnown` ir `updatedAt` būtent dėl šios priežasties
+ * (žr. komentarą „Pirmoji versija rašė VISĄ serializuotą job'ą"). Memory
+ * backend'as lango neturi, nes dirba be `await`. Platus `SET` PostgreSQL'e
+ * padarytų jį VIENINTELIU backend'u, kuris atsuka svetimus laukus.
+ *
+ * Sąrašas skaičiuojamas iš SKIRTUMO, ne iš fiksuoto vardų sąrašo: taip jis
+ * lieka teisingas, jei domeno taisyklė (`jobPhase`) kada nors grąžins platesnį
+ * patch'ą, ir nesukuria antros vietos, kurią reikėtų prižiūrėti rankomis.
+ *
+ * `updated_at` įtraukiamas VISADA - dėl to sąrašas niekada nebūna tuščias
+ * (tuščias `SET` būtų SQL sintaksės klaida), o sėkmingas rašymas visada
+ * pastumia įrašo laiką.
+ *
+ * ⚠️ NEKINTAMI STULPELIAI Į SĄRAŠĄ NEPATENKA NIEKADA - filtruojama per tą pačią
+ * `IMMUTABLE_COLUMNS` aibę (#180, 4 punktas).
+ */
+function changedColumns(expected, row) {
+  return COLUMNS.filter(
+    (c) => !IMMUTABLE_COLUMNS.has(c) && (c === "updated_at" || row[c] !== expected[c])
+  );
+}
+
+/**
+ * SĄLYGINĖ MUTACIJA IR JOS NESĖKMĖS KLASIFIKACIJA VIENAME SAKINYJE (#180 P2-3).
+ *
+ * ⚠️ ATSKIRAS SKAITYMAS PO NEPAVYKUSIO CAS YRA TOCTOU.
+ *
+ * Ankstesnė forma buvo: `UPDATE/DELETE ... WHERE <CAS>` → `rowCount === 0` →
+ * ATSKIRAS `SELECT ... FOR UPDATE` → klasifikacija. `READ COMMITTED` režime
+ * antrasis sakinys gauna NAUJĄ snapshot'ą, tad grąžinamas sentinelis aprašo
+ * VĖLESNĘ eilutės būseną, o ne tą, dėl kurios mutacija nepavyko:
+ *
+ *   A: DELETE ... WHERE owner = A   → 0 eilučių (eilutė jau ištrinta)
+ *   B: INSERT to paties id eilutę su savininku B   COMMIT
+ *   A: SELECT ... FOR UPDATE        → mato B eilutę → grąžina "FORBIDDEN"
+ *
+ * Kvietėjas gauna „svetimas job'as", nors iš tikrųjų JO job'o nebėra. Teisingas
+ * atsakymas yra `false`.
+ *
+ * SPRENDIMAS: mutacija įvyniojama į duomenis keičiantį CTE, o nesėkmės
+ * priežastis skaičiuojama TAME PAČIAME sakinyje. PostgreSQL visiems `WITH`
+ * sub-sakiniams ir pagrindinei užklausai duoda VIENĄ snapshot'ą, tad
+ * klasifikacija remiasi būtent ta būsena, kurios atžvilgiu buvo įvertintas CAS
+ * predikatas. Vėlesni kitų rašytojų pakeitimai jos paveikti nebegali.
+ *
+ * ⚠️ MUTACIJA LIEKA SĄLYGINĖ. CTE viduje yra tas pats `UPDATE`/`DELETE ...
+ * WHERE <CAS predikatas> RETURNING`; CTE nieko nepalengvina ir nepakeičia
+ * užraktu (#180 reikalavimas).
+ *
+ * ⚠️ `rowCount` REIKŠMĖ PASIKEITĖ. Išorinis `SELECT` visada grąžina VIENĄ
+ * eilutę, tad realų pakeistų eilučių skaičių sako `rows[0].pakeista`, ne
+ * `result.rowCount`.
+ *
+ * @param {string} mutacija - sąlyginis `UPDATE`/`DELETE ... RETURNING` sakinys
+ * @param {string} priezastis - `SELECT count(*)`, apibrėžiantis nesėkmės rūšį
+ */
+function casSuKlasifikacija(mutacija, priezastis) {
+  return `WITH mutacija AS (
+${mutacija}
+    )
+    SELECT (SELECT count(*) FROM mutacija)::int AS pakeista,
+           (${priezastis})::int AS priezastis`;
+}
+
+/**
+ * „Eilutė YRA, bet nuosavybė NESUTAMPA" - `updateOwned`/`removeOwned` nesėkmės
+ * priežastis, atskirianti `"FORBIDDEN"` nuo `null`/`false`.
+ *
+ * ⚠️ ČIA `owner_kind IS NOT DISTINCT FROM`, nors mutacijos predikate yra `=`.
+ * Tai NE neatitikimas, o trivertės logikos reikalavimas: legacy eilutėje
+ * `owner_kind IS NULL`, tad `owner_kind = $3` duotų `UNKNOWN`, `NOT (UNKNOWN)`
+ * irgi `UNKNOWN`, ir eilutė NEBŪTŲ suskaičiuota - legacy job'as staiga
+ * atrodytų „neegzistuojantis" vietoj `"FORBIDDEN"`. Mutacijos pusėje `=` yra
+ * teisingas (legacy eilutė neturi būti keičiama), o klasifikacijai reikia
+ * tikslaus „egzistuoja, bet netinka" atsakymo.
+ */
+const SVETIMAS_SCOPE = `SELECT count(*) FROM jobs
+            WHERE id = $1
+              AND NOT (owner_id IS NOT DISTINCT FROM $2
+                       AND owner_kind IS NOT DISTINCT FROM $3)`;
+
+/** „Eilutė YRA" - `reportProgressAtomic` nesėkmės priežastis (`"REJECTED"` vs `null`). */
+const EILUTE_YRA = `SELECT count(*) FROM jobs WHERE id = $1`;
+
 const SELECT_JOB = `
   SELECT j.*, r.payload AS result
     FROM jobs j
@@ -386,27 +489,73 @@ function createPostgresStore(pool) {
   async function updateOwned(id, patch, scope) {
     return inTransaction(async (client) => {
       let current = await readJob(client, id);
+      /**
+       * Eilutės nėra - patch'o net nėra iš ko suskaičiuoti (`applyPatch()`
+       * remiasi esama eilute). Tai NE klasifikacija po nepavykusio CAS: joks
+       * CAS dar nebuvo bandytas, tad P2-3 lango čia nėra.
+       */
       if (!current) return null;
-      if (!matchesOwner(current, scope)) return "FORBIDDEN";
-      const mutable = COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c));
-      const sets = mutable.map((c, i) => `"${c}" = $${i + 4}`).join(", ");
+      /**
+       * ⚠️ NUOSAVYBĖS SPRENDIMO JS PUSĖJE NEBĖRA. Anksčiau čia buvo
+       * `if (!matchesOwner(current, scope)) return "FORBIDDEN"` - aplikacijos
+       * lygmens palyginimas, tapęs rezultato autoritetu. Dabar `"FORBIDDEN"`
+       * gali kilti TIK iš SQL klasifikacijos, atominės su pačiu CAS.
+       * `matchesOwner()` lieka naudojamas tik kaip pakartojimo sąlyga žemiau.
+       */
 
       let result;
       for (;;) {
+        /**
+         * ⚠️ SIAURAS `SET` (#180 P2-2). Nuosavybės CAS predikatas saugo TIK
+         * nuosavybę, o ji nekintama - vadinasi, jis sutampa su KIEKVIENU
+         * konkurentiniu rašymu. Platus `SET` čia reikštų, kad bet koks
+         * užcommitintas svetimas pakeitimas (`status`, `phase`, progresas,
+         * `deletion_pending`, `attempt_count`, klaidų laukai) būtų atsuktas
+         * atgal iš pasenusio snapshot'o - CAS to NEPAGAUTŲ, nes nuosavybė
+         * nepasikeitė.
+         *
+         * Rašomi tik patch'o REALIAI pakeisti stulpeliai, tad nepaliesti
+         * laukai lieka tokie, kokius paliko konkurentas.
+         *
+         * ⚠️ SĄRAŠAS SKAIČIUOJAMAS CIKLO VIDUJE. Po pakartotinio skaitymo
+         * (`readJobForUpdate`) `current` yra kita eilutė, tad ir skirtumas
+         * kitas; vienkartinis skaičiavimas prieš ciklą rašytų pasenusį sąrašą.
+         *
+         * ⚠️ `SET` NIEKADA nesudaromas iš neatfiltruotų patch'o laukų:
+         * `applyPatch()` atstato tapatybę, nuosavybę ir erą, `jobToRow()` skaito
+         * tik žinomus laukus, o `changedColumns()` papildomai išbraukia
+         * `IMMUTABLE_COLUMNS` (#180, 4 punktas).
+         */
         const row = jobToRow(applyPatch(current, patch));
+        const rasomi = changedColumns(jobToRow(current), row);
+        const sets = rasomi.map((c, i) => `"${c}" = $${i + 4}`).join(", ");
         result = await client.query(
-          `UPDATE jobs SET ${sets}
+          casSuKlasifikacija(
+            `      UPDATE jobs SET ${sets}
             WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
           RETURNING id`,
-          [id, scope.ownerId ?? null, scope.ownerKind, ...mutable.map((c) => row[c])]
+            SVETIMAS_SCOPE
+          ),
+          [id, scope.ownerId ?? null, scope.ownerKind, ...rasomi.map((c) => row[c])]
         );
-        if (result.rowCount > 0) break;
+        const { pakeista, priezastis } = result.rows[0];
+        if (pakeista > 0) break;
+        /** Eilutė YRA, bet svetima - nustatyta tuo pačiu snapshot'u kaip CAS. */
+        if (priezastis > 0) return "FORBIDDEN";
 
-        current = await readJobForUpdate(client, id);
-        if (!current) return null;
-        if (!matchesOwner(current, scope)) return "FORBIDDEN";
-        // Eilutė tuo pačiu scope atsirado / grįžo po pirmo CAS. Užrakinta
-        // eilutė nebegali pasikeisti, todėl pakartotinis CAS yra saugus.
+        /**
+         * CAS snapshot'e eilutės NEBUVO. Tai jau galutinė klasifikacija
+         * (`null`), IŠSKYRUS vieną atvejį: tinkama eilutė galėjo atsirasti po
+         * mūsų snapshot'o, ir tada kvietėjo patch'as dar gali būti pritaikytas.
+         *
+         * ⚠️ ŠIS SKAITYMAS NĖRA KLASIFIKATORIUS. Jis gali TIK nuspręsti, ar
+         * kartoti CAS. Jei eilutė atsirado su svetima nuosavybe, grąžinamas
+         * `null` (CAS snapshot'e jos nebuvo), o NE `"FORBIDDEN"` - būtent tokį
+         * klaidingą atsakymą duodavo senoji realizacija.
+         */
+        const atsiradusi = await readJobForUpdate(client, id);
+        if (!atsiradusi || !matchesOwner(atsiradusi, scope)) return null;
+        current = atsiradusi;
       }
       await upsertResult(client, id, patch.result);
       return readJob(client, id);
@@ -418,19 +567,26 @@ function createPostgresStore(pool) {
     return inTransaction(async (client) => {
       for (;;) {
         const result = await client.query(
-          `DELETE FROM jobs WHERE id = $1
+          casSuKlasifikacija(
+            `      DELETE FROM jobs WHERE id = $1
               AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
           RETURNING id`,
+            SVETIMAS_SCOPE
+          ),
           [id, scope.ownerId ?? null, scope.ownerKind]
         );
-        if (result.rowCount > 0) return true;
+        const { pakeista, priezastis } = result.rows[0];
+        if (pakeista > 0) return true;
+        /** Eilutė YRA, bet svetima - tas pats snapshot'as kaip DELETE. */
+        if (priezastis > 0) return "FORBIDDEN";
 
-        const current = await readJobForUpdate(client, id);
-        if (!current) return false;
-        if (!matchesOwner(current, scope)) return "FORBIDDEN";
-        // Matching eilutė atsirado tarp CAS ir klasifikavimo. Ji dabar
-        // užrakinta, todėl kartojame sąlyginę DELETE, o ne klaidingai
-        // grąžiname FORBIDDEN.
+        /**
+         * CAS snapshot'e eilutės nebuvo. Kaip ir `updateOwned()`, šis skaitymas
+         * yra TIK pakartojimo sąlyga, ne klasifikatorius: atsiradusi svetima
+         * eilutė duoda `false` (mūsų snapshot'e jos nebuvo), ne `"FORBIDDEN"`.
+         */
+        const atsiradusi = await readJobForUpdate(client, id);
+        if (!atsiradusi || !matchesOwner(atsiradusi, scope)) return false;
       }
     });
   }
@@ -445,23 +601,38 @@ function createPostgresStore(pool) {
       if (!patch) return "REJECTED";
       const row = jobToRow(applyPatch(current, patch));
       const expected = jobToRow(current);
-      const mutable = COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c));
-      const sets = mutable.map((c, i) => `"${c}" = $${i + 8}`).join(", ");
+      /**
+       * ⚠️ TIK PAKEISTI STULPELIAI (žr. `changedColumns()`). Platus `SET`
+       * atsuktų atgal kiekvieną konkurentinį pakeitimą, kurio nėra žemiau
+       * esančiame predikate.
+       */
+      const rasomi = changedColumns(expected, row);
+      const sets = rasomi.map((c, i) => `"${c}" = $${i + 8}`).join(", ");
       const result = await client.query(
-        `UPDATE jobs SET ${sets}
+        casSuKlasifikacija(
+          `      UPDATE jobs SET ${sets}
           WHERE id = $1 AND type = $2 AND status = $3
             AND phase IS NOT DISTINCT FROM $4
             AND progress_known IS NOT DISTINCT FROM $5
             AND progress_current IS NOT DISTINCT FROM $6
             AND progress_total IS NOT DISTINCT FROM $7
         RETURNING id`,
+          EILUTE_YRA
+        ),
         [id, expected.type, expected.status, expected.phase, expected.progress_known,
           expected.progress_current, expected.progress_total,
-          ...mutable.map((c) => row[c])]
+          ...rasomi.map((c) => row[c])]
       );
-      if (result.rowCount === 0) {
-        return (await readJobForUpdate(client, id)) ? "REJECTED" : null;
-      }
+      const { pakeista, priezastis } = result.rows[0];
+      /**
+       * ⚠️ KLASIFIKACIJA IŠ TO PATIES SAKINIO (#180 P2-3).
+       *
+       * `priezastis` yra eilutės egzistavimas CAS snapshot'e, ne vėlesniame
+       * skaityme. Senoji forma (`readJobForUpdate()` po nepavykusio CAS)
+       * grąžindavo `null`, jei eilutę kas nors ištrindavo PO to, kai įvykis jau
+       * buvo atmestas kaip pasenęs - t. y. „job'o nėra" vietoj `"REJECTED"`.
+       */
+      if (pakeista === 0) return priezastis > 0 ? "REJECTED" : null;
       return readJob(client, id);
     });
   }

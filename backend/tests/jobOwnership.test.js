@@ -426,3 +426,120 @@ test("newJob: schemaVersion normalizuojamas į skaičių (backend'ų paritetas)"
     );
   }
 });
+
+test("#180 P2-2: postgresStore.updateOwned() rašo TIK patch'o stulpelius, nuosavybė lieka WHERE dalyje", async () => {
+  /**
+   * ⚠️ FAKE POOL, NE TIKRAS PostgreSQL - IR TAI SĄMONINGA.
+   *
+   * Elgesį su tikru DB (konkurentinė mutacija tarp read ir CAS) įrodo
+   * `postgresStore.integration` lenktynių testas, bet jis be `DATABASE_URL`
+   * praleidžiamas. Šis testas tikrina SUGENERUOTĄ mutaciją ir veikia
+   * KIEKVIENAME `npm test` paleidime, tad regresija pagaunama iš karto, o ne
+   * tik PostgreSQL CI žingsnyje.
+   *
+   * Tikrinamos keturios savybės:
+   *   1. `SET` turi patch'o pakeistus stulpelius;
+   *   2. `SET` NETURI nepakeistų (pasenusių) stulpelių;
+   *   3. `SET` NETURI nė vieno `IMMUTABLE_COLUMNS` nario;
+   *   4. nuosavybės CAS lieka `WHERE` dalyje su NULL-safe `owner_id`.
+   */
+  const {
+    createPostgresStore,
+    jobToRow,
+    IMMUTABLE_COLUMNS,
+  } = require("../utils/jobStore/postgresStore");
+
+  const scope = { ownerKind: OWNER_KIND.USER, ownerId: A };
+  const esamas = newJob({ ownerKind: scope.ownerKind, ownerId: scope.ownerId });
+  Object.assign(esamas, {
+    status: "processing",
+    phase: "transcribing",
+    attempt_count: 4,
+    deletion_pending: true,
+    storageKey: "audio/senas",
+  });
+
+  let pagauta = null;
+  const client = {
+    query: async (sql, params) => {
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [], rowCount: 0 };
+      if (/^\s*SELECT j\.\*/.test(sql)) {
+        const eilute = jobToRow(esamas);
+        eilute.artefacts = [];        // pg jsonb grąžinamas jau dekoduotas
+        return { rows: [eilute], rowCount: 1 };
+      }
+      /**
+       * #180 P2-3: mutacija dabar įvyniota į duomenis keičiantį CTE, o nesėkmės
+       * klasifikacija skaičiuojama TAME PAČIAME sakinyje. Išorinis `SELECT`
+       * grąžina vieną eilutę su `pakeista`/`priezastis`.
+       */
+      if (/^WITH mutacija AS/.test(sql)) {
+        pagauta = { sql, params };
+        return { rows: [{ pakeista: 1, priezastis: 0 }], rowCount: 1 };
+      }
+      throw new Error(`netikėta SQL užklausa: ${sql}`);
+    },
+    release: () => {},
+  };
+
+  const store = createPostgresStore({ connect: async () => client });
+
+  /** Patch'e YRA ir priešiškų nekintamų laukų - jie neturi patekti į `SET`. */
+  const outcome = await store.updateOwned(
+    esamas.id,
+    {
+      requestId: "naujas",
+      error_code: "PROVIDER_TIMEOUT",
+      ownerId: "99999999-9999-4999-8999-999999999999",
+      ownerKind: OWNER_KIND.API_PRINCIPAL,
+      tenantId: "88888888-8888-4888-8888-888888888888",
+      idempotencyKey: "pakeista",
+      schemaVersion: 999,
+      createdAt: "2000-01-01T00:00:00.000Z",
+      id: "77777777-7777-4777-8777-777777777777",
+    },
+    scope
+  );
+
+  assert.notEqual(outcome, null);
+  assert.notEqual(outcome, "FORBIDDEN");
+  assert.ok(pagauta, "sąlyginė mutacija privalo būti įvykdyta");
+
+  const setDalis = pagauta.sql.slice(0, pagauta.sql.indexOf("WHERE"));
+  const stulpeliai = [...setDalis.matchAll(/"([a-z_]+)" = \$/g)].map((m) => m[1]);
+
+  // 1) Patch'o pakeisti stulpeliai YRA.
+  for (const laukiamas of ["request_id", "error_code", "updated_at"]) {
+    assert.ok(stulpeliai.includes(laukiamas), `SET privalo turėti "${laukiamas}"`);
+  }
+  // 2) Nepakeisti (pasenę) stulpeliai NEPATENKA - būtent jie buvo atsukami.
+  for (const draudziamas of ["status", "phase", "attempt_count", "deletion_pending",
+    "deletion_attempts", "storage_key", "artefacts", "progress_known",
+    "progress_current", "progress_total", "started_at", "completed_at",
+    "error_message"]) {
+    assert.equal(
+      stulpeliai.includes(draudziamas),
+      false,
+      `SET neturi liesti nepakeisto stulpelio "${draudziamas}" - platus SET atsuka konkurentų darbą`
+    );
+  }
+
+  // 3) Nė vienas nekintamas stulpelis - net kai patch'as jų aiškiai prašo.
+  for (const nekintamas of IMMUTABLE_COLUMNS) {
+    assert.equal(
+      stulpeliai.includes(nekintamas),
+      false,
+      `NEKINTAMAS stulpelis "${nekintamas}" niekada negali patekti į SET`
+    );
+  }
+
+  // 4) Nuosavybės CAS lieka `WHERE` dalyje, NULL-safe, su teisingais parametrais.
+  assert.match(pagauta.sql, /WHERE id = \$1/);
+  assert.match(pagauta.sql, /owner_id IS NOT DISTINCT FROM \$2/);
+  assert.match(pagauta.sql, /owner_kind = \$3/);
+  assert.equal(pagauta.params[0], esamas.id);
+  assert.equal(pagauta.params[1], scope.ownerId);
+  assert.equal(pagauta.params[2], scope.ownerKind);
+  assert.equal(pagauta.params.length, 3 + stulpeliai.length,
+    "parametrų skaičius privalo atitikti SET sąrašą");
+});

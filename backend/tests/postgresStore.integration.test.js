@@ -658,7 +658,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
         return {
           release: () => client.release(),
           query: async (sql, params) => {
-            if (!intercepted && /^UPDATE jobs SET/.test(sql) && /progress_known IS NOT DISTINCT FROM/.test(sql)) {
+            if (!intercepted && /^WITH mutacija AS/.test(sql) && /progress_known IS NOT DISTINCT FROM/.test(sql)) {
               intercepted = true;
               await pool.query(
                 "UPDATE jobs SET phase = 'diarizing', progress_known = false, " +
@@ -666,7 +666,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
                 [job.id]
               );
               const result = await client.query(sql, params);
-              casRowCount = result.rowCount;
+              casRowCount = result.rows[0].pakeista;
               return result;
             }
             return client.query(sql, params);
@@ -698,7 +698,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       connect: async () => {
         const client = await pool.connect();
         return { release: () => client.release(), query: async (sql, params) => {
-          if (!intercepted && /^UPDATE jobs SET/.test(sql) && /type = \$2/.test(sql)) {
+          if (!intercepted && /^WITH mutacija AS/.test(sql) && /type = \$2/.test(sql)) {
             intercepted = true;
             await pool.query(
               "UPDATE jobs SET type = 'protocol', phase = 'generating_protocol', " +
@@ -706,7 +706,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
               [job.id]
             );
             const result = await client.query(sql, params);
-            casRowCount = result.rowCount;
+            casRowCount = result.rows[0].pakeista;
             return result;
           }
           return client.query(sql, params);
@@ -731,10 +731,10 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       connect: async () => {
         const client = await pool.connect();
         return { release: () => client.release(), query: async (sql, params) => {
-          if (casRowCount === null && /^UPDATE jobs SET/.test(sql) && /owner_id IS NOT DISTINCT FROM/.test(sql)) {
+          if (casRowCount === null && /^WITH mutacija AS/.test(sql) && /owner_id IS NOT DISTINCT FROM/.test(sql)) {
             await pool.query("UPDATE jobs SET owner_id = $2 WHERE id = $1", [job.id, UUID_B]);
             const result = await client.query(sql, params);
-            casRowCount = result.rowCount;
+            casRowCount = result.rows[0].pakeista;
             return result;
           }
           return client.query(sql, params);
@@ -804,10 +804,10 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       connect: async () => {
         const client = await pool.connect();
         return { release: () => client.release(), query: async (sql, params) => {
-          if (casRowCount === null && /^UPDATE jobs SET/.test(sql) && /progress_current IS NOT DISTINCT FROM/.test(sql)) {
+          if (casRowCount === null && /^WITH mutacija AS/.test(sql) && /progress_current IS NOT DISTINCT FROM/.test(sql)) {
             await pool.query("UPDATE jobs SET progress_current = 7 WHERE id = $1", [job.id]);
             const result = await client.query(sql, params);
-            casRowCount = result.rowCount;
+            casRowCount = result.rows[0].pakeista;
             return result;
           }
           return client.query(sql, params);
@@ -830,7 +830,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       connect: async () => {
         const client = await pool.connect();
         return { release: () => client.release(), query: async (sql, params) => {
-          if (/^UPDATE jobs SET/.test(sql) && /progress_known IS NOT DISTINCT FROM/.test(sql)) throw expected;
+          if (/^WITH mutacija AS/.test(sql) && /progress_known IS NOT DISTINCT FROM/.test(sql)) throw expected;
           return client.query(sql, params);
         } };
       }, end: async () => {},
@@ -842,5 +842,673 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       (err) => err === expected && err.code === "08006"
     );
   });
+
+  await t.test(
+    "#180 P1-1: pavykęs progreso CAS NEATSUKA konkurentinių ne-predikato stulpelių",
+    async () => {
+      /**
+       * ⚠️ PRARASTO ATNAUJINIMO REGRESIJA.
+       *
+       * Kiti šio failo lenktynių testai tikrina CAS NESĖKMĘ (`rowCount = 0`,
+       * `"REJECTED"`) - t. y. atvejį, kai konkurentas pakeitė PREDIKATO lauką.
+       * Čia tikrinamas priešingas ir pavojingesnis atvejis: konkurentas keičia
+       * lauką, kurio predikate NĖRA, tad CAS teisėtai PAVYKSTA - ir klausimas
+       * yra, ką tas sėkmingas `UPDATE` įrašo į LIKUSIUS stulpelius.
+       *
+       * Platus `SET` (visi `COLUMNS` be `IMMUTABLE_COLUMNS`) juos rašo iš
+       * PASENUSIO snapshot'o, tad `deletion_pending = true` tyliai virstų
+       * `false`, o `listByFlag("deletion_pending")` job'o nebematytų -
+       * pakartotinis ištrynimas (`jobErasure.js`) niekada neįvyktų.
+       *
+       * MUTACIJOS ĮRODYMAS: grąžinus `changedColumns()` į
+       * `COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c))`, trys žemiau esantys
+       * `po.*` tikrinimai krinta (`deletion_pending`, `deletion_attempts`,
+       * `storageKey` atsisuka į pradines reikšmes). Vien `outcome` tikrinimo
+       * NEPAKAKTŲ - jis praeitų ir su plačiu `SET`.
+       *
+       * DETERMINISTIŠKUMAS: konkurentinė mutacija įterpiama per adapterio hook'ą
+       * TIKSLIAI tarp pradinio `readJob()` ir CAS `UPDATE`, ne pasikliaujant
+       * scheduler'iu.
+       */
+      const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+      await store.update(job.id, {
+        status: "processing", phase: "transcribing", progressKnown: true,
+        progress: { current: 1, total: 10 },
+      });
+
+      let intercepted = false;
+      let casRowCount = null;
+      let casSql = null;
+      const racingPool = {
+        connect: async () => {
+          const client = await pool.connect();
+          return {
+            release: () => client.release(),
+            query: async (sql, params) => {
+              if (
+                !intercepted &&
+                /^WITH mutacija AS/.test(sql) &&
+                /progress_known IS NOT DISTINCT FROM/.test(sql)
+              ) {
+                intercepted = true;
+                /**
+                 * Nė vieno iš šių stulpelių NĖRA progreso CAS predikate, tad
+                 * CAS privalo pavykti - ir jų nepaliesti.
+                 */
+                await pool.query(
+                  `UPDATE jobs SET deletion_pending = true, deletion_attempts = 3,
+                     storage_key = 'konkurentinis', attempt_count = 7
+                   WHERE id = $1`,
+                  [job.id]
+                );
+                const result = await client.query(sql, params);
+                casSql = sql;
+                casRowCount = result.rows[0].pakeista;
+                return result;
+              }
+              return client.query(sql, params);
+            },
+          };
+        },
+        end: async () => {},
+      };
+
+      const outcome = await createPostgresStore(racingPool).reportProgressAtomic(job.id, {
+        phase: "transcribing", progress: { current: 5, total: 10 },
+      });
+
+      assert.equal(intercepted, true,
+        "prielaida: konkurentinė mutacija įterpta tarp read ir CAS UPDATE");
+      assert.equal(casRowCount, 1,
+        "CAS privalo PAVYKTI - nė vienas predikato stulpelis nepasikeitė");
+      assert.notEqual(outcome, "REJECTED");
+      assert.notEqual(outcome, null);
+      assert.deepEqual(outcome.progress, { current: 5, total: 10 },
+        "progresas privalo būti pritaikytas");
+
+      /**
+       * ⚠️ ESMINIAI TIKRINIMAI. Konkurentinės reikšmės privalo IŠLIKTI - jos
+       * užcommitintos PO to, kai `reportProgressAtomic()` nuskaitė savo
+       * snapshot'ą.
+       */
+      const po = await store.get(job.id);
+      assert.deepEqual(po.progress, { current: 5, total: 10 });
+      assert.equal(po.deletion_pending, true,
+        "konkurentinis deletion_pending atsuktas atgal - prarastas atnaujinimas");
+      assert.equal(po.deletion_attempts, 3,
+        "konkurentinis deletion_attempts atsuktas atgal - prarastas atnaujinimas");
+      assert.equal(po.storageKey, "konkurentinis",
+        "konkurentinis storage_key atsuktas atgal - prarastas atnaujinimas");
+      assert.equal(po.attempt_count, 7,
+        "konkurentinis attempt_count atsuktas atgal - prarastas atnaujinimas");
+
+      /**
+       * ⚠️ TRIPWIRE, ne elgesio įrodymas (AGENTS.md §9.2). Elgesį įrodo `po.*`
+       * tikrinimai aukščiau; ši eilutė tik greičiau parodo PRIEŽASTĮ, jei
+       * `SET` sąrašas kada nors vėl išplistų.
+       */
+      const setDalis = casSql.slice(0, casSql.indexOf("WHERE"));
+      for (const stulpelis of ["deletion_pending", "storage_key", "attempt_count"]) {
+        assert.equal(setDalis.includes(`"${stulpelis}"`), false,
+          `SET sąrašas neturi liesti nepakeisto stulpelio "${stulpelis}"`);
+      }
+      /** Grąžinamas objektas irgi privalo rodyti TIKRĄ būseną, ne snapshot'ą. */
+      assert.equal(outcome.deletion_pending, true,
+        "grąžinamas job'as privalo rodyti konkurentinę būseną, ne pasenusį snapshot'ą");
+    }
+  );
+
+  await t.test(
+    "#180 P2-2: pavykęs nuosavybės CAS NEATSUKA konkurentinių ne-patch'o stulpelių",
+    async () => {
+      /**
+       * ⚠️ PRARASTO ATNAUJINIMO REGRESIJA NUOSAVYBĖS KELYJE.
+       *
+       * `updateOwned()` CAS predikatas tikrina TIK nuosavybę, o nuosavybė yra
+       * NEKINTAMA (`IMMUTABLE_COLUMNS`). Vadinasi, predikatas sutampa su
+       * KIEKVIENU konkurentiniu rašymu - jis niekada nepagaus svetimo
+       * pakeitimo. Tai iš esmės skiriasi nuo progreso CAS, kur pats predikatas
+       * atmeta pasenusį įvykį.
+       *
+       * Todėl vienintelė apsauga yra `SET` sąrašo siaurumas: rašomi tik
+       * patch'o REALIAI pakeisti stulpeliai. Platus `SET` (visi `COLUMNS` be
+       * `IMMUTABLE_COLUMNS`) tyliai atsuktų `phase`, `attempt_count`,
+       * `deletion_pending` ir `deletion_attempts` į pasenusias reikšmes, o
+       * operacija vis tiek grąžintų sėkmę.
+       *
+       * MUTACIJOS ĮRODYMAS: grąžinus `changedColumns(...)` į
+       * `COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c))`, keturi `po.*`
+       * tikrinimai krinta. Vien `outcome.requestId` tikrinimo NEPAKAKTŲ - jis
+       * praeitų ir su plačiu `SET`.
+       *
+       * DETERMINISTIŠKUMAS: konkurentinė mutacija įterpiama per adapterio
+       * hook'ą TIKSLIAI tarp `readJob()` ir sąlyginio `UPDATE`.
+       */
+      const scope = { ownerKind: "user", ownerId: UUID_A };
+      const job = await store.create({
+        ownerKind: scope.ownerKind,
+        ownerId: scope.ownerId,
+      });
+      await store.update(job.id, {
+        status: "processing", phase: "transcribing", attempt_count: 1,
+      });
+
+      let intercepted = false;
+      let casRowCount = null;
+      let casSql = null;
+      let casParams = null;
+      const racingPool = {
+        connect: async () => {
+          const client = await pool.connect();
+          return {
+            release: () => client.release(),
+            query: async (sql, params) => {
+              if (
+                !intercepted &&
+                /^WITH mutacija AS/.test(sql) &&
+                /owner_id IS NOT DISTINCT FROM/.test(sql)
+              ) {
+                intercepted = true;
+                /**
+                 * NUOSAVYBĖ NEKEIČIAMA - CAS privalo pavykti. Keičiami tik
+                 * laukai, kurių NĖRA nei predikate, nei prašomame patch'e.
+                 */
+                await pool.query(
+                  `UPDATE jobs SET phase = 'diarizing', attempt_count = 9,
+                     deletion_pending = true, deletion_attempts = 3
+                   WHERE id = $1`,
+                  [job.id]
+                );
+                const result = await client.query(sql, params);
+                casSql = sql;
+                casParams = params;
+                casRowCount = result.rows[0].pakeista;
+                return result;
+              }
+              return client.query(sql, params);
+            },
+          };
+        },
+        end: async () => {},
+      };
+
+      const outcome = await createPostgresStore(racingPool).updateOwned(
+        job.id,
+        { requestId: "patch-taikomas", ownerId: UUID_B, schemaVersion: 999 },
+        scope
+      );
+
+      assert.equal(intercepted, true,
+        "prielaida: konkurentinė mutacija įterpta tarp read ir CAS UPDATE");
+      assert.equal(casRowCount, 1,
+        "nuosavybė nepakito, tad nuosavybės CAS privalo PAVYKTI");
+      assert.notEqual(outcome, "FORBIDDEN");
+      assert.notEqual(outcome, null);
+
+      /** Nuosavybės CAS privalo likti mutacijos `WHERE` dalyje. */
+      assert.match(casSql, /owner_id IS NOT DISTINCT FROM \$2/);
+      assert.match(casSql, /owner_kind = \$3/);
+      assert.equal(casParams[1], UUID_A);
+      assert.equal(casParams[2], scope.ownerKind);
+
+      const po = await store.get(job.id);
+
+      /** 1) Prašomas patch'as pritaikytas. */
+      assert.equal(po.requestId, "patch-taikomas", "patch'as privalo būti pritaikytas");
+
+      /** 2) ⚠️ ESMĖ: konkurentinės reikšmės privalo IŠLIKTI. */
+      assert.equal(po.phase, "diarizing",
+        "konkurentinė phase atsukta atgal - prarastas atnaujinimas");
+      assert.equal(po.attempt_count, 9,
+        "konkurentinis attempt_count atsuktas atgal - prarastas atnaujinimas");
+      assert.equal(po.deletion_pending, true,
+        "konkurentinis deletion_pending atsuktas atgal - prarastas atnaujinimas");
+      assert.equal(po.deletion_attempts, 3,
+        "konkurentinis deletion_attempts atsuktas atgal - prarastas atnaujinimas");
+
+      /** 3) Nekintami laukai lieka nekintami NET su priešišku patch'u. */
+      assert.equal(po.ownerId, UUID_A, "nuosavybė patch'u nekeičiama");
+      assert.equal(po.ownerKind, "user");
+      assert.equal(po.schemaVersion, 2, "įrašo era patch'u nekeičiama");
+      assert.equal(po.id, job.id);
+
+      /**
+       * ⚠️ TRIPWIRE, ne elgesio įrodymas (AGENTS.md §9.2). Elgesį įrodo `po.*`
+       * tikrinimai; ši eilutė greičiau parodo PRIEŽASTĮ, jei `SET` išplistų.
+       */
+      const setDalis = casSql.slice(0, casSql.indexOf("WHERE"));
+      for (const stulpelis of ["phase", "attempt_count", "deletion_pending",
+        "deletion_attempts", "status", "storage_key"]) {
+        assert.equal(setDalis.includes(`"${stulpelis}"`), false,
+          `SET neturi liesti nepakeisto stulpelio "${stulpelis}"`);
+      }
+      for (const stulpelis of IMMUTABLE_COLUMNS) {
+        assert.equal(setDalis.includes(`"${stulpelis}"`), false,
+          `NEKINTAMAS stulpelis "${stulpelis}" niekada negali patekti į SET`);
+      }
+    }
+  );
+
+  /* ───────────────────────────────────────────────────────────────────────
+   * #180 P2-3 - KLASIFIKACIJA ATOMINĖ SU NEPAVYKUSIA MUTACIJA
+   *
+   * Šie trys testai tikrina NE mutacijos rezultatą, o SENTINELIO TEISINGUMĄ,
+   * kai eilutė pasikeičia PO nepavykusio CAS. Senoji forma (`rowCount === 0`
+   * → atskiras `readJobForUpdate()` → klasifikacija) grąžindavo sentinelį,
+   * aprašantį VĖLESNĘ eilutės būseną, ne tą, dėl kurios CAS nepavyko.
+   * ─────────────────────────────────────────────────────────────────────── */
+
+  /* ───────────────────────────────────────────────────────────────────────
+   * #180 P2-6 - KIEKVIENAS CAS PREDIKATO KOMPONENTAS ATSKIRAI
+   *
+   * Ankstesni lenktynių testai keisdavo KELIS saugomus laukus vienu metu
+   * (pvz. `type` KARTU su `phase` ir progresu), tad pašalinus TIK vieną
+   * predikatą CAS vis tiek nerasdavo eilutės ir testas likdavo žalias. Todėl
+   * DoD teiginys „progreso CAS saugo nuo pasenusio type/status/phase/epochos"
+   * buvo stipresnis už turimus įrodymus.
+   *
+   * Žemiau kiekvienam IZOLIUOJAMAM komponentui keičiamas TIKSLIAI VIENAS
+   * laukas, ir tai TIKRINAMA, o ne teigiama komentare: CAS snapshot'as imamas
+   * iš TIKRŲ `$2..$7` parametrų, eilutės būsena perskaitoma iš karto po
+   * injekcijos, ir skirtumų aibė privalo būti lygiai `[<komponentas>]`.
+   * ─────────────────────────────────────────────────────────────────────── */
+
+  /** Laukai, kuriuos saugo progreso CAS predikatas (`$2..$7`). */
+  const SAUGOMI_LAUKAI = [
+    "type", "status", "phase",
+    "progress_known", "progress_current", "progress_total",
+  ];
+
+  /** NULL-safe skirtumų aibė tarp CAS snapshot'o ir realios eilutės būsenos. */
+  function skiriasiSaugomi(snapshot, eilute) {
+    return SAUGOMI_LAUKAI.filter((k) => {
+      const a = snapshot[k];
+      const b = eilute[k];
+      if (a == null && b == null) return false;
+      return a !== b;
+    });
+  }
+
+  /**
+   * Deterministinė izoliuota CAS lenktynė.
+   *
+   * ⚠️ SNAPSHOT'AS IMAMAS IŠ PRODUKCINIŲ PARAMETRŲ, ne iš testo prielaidos:
+   * `params[1..6]` yra būtent tos reikšmės, kurias `reportProgressAtomic()`
+   * įrašė į CAS predikatą. Todėl izoliacijos tikrinimas negali „sutapti" su
+   * klaidinga prielaida apie perskaitytą būseną.
+   *
+   * ⚠️ Skaitoma `rows[0].pakeista` (P2-3 CTE), NE išorinio sakinio `rowCount`.
+   */
+  async function izoliuotaCasLenktyne({ pradineBusena, injekcija, ivykis }) {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+    await store.update(job.id, pradineBusena);
+
+    let perimta = false;
+    let snapshot = null;
+    let poInjekcijos = null;
+    let pakeista = null;
+
+    const racingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          release: () => client.release(),
+          query: async (sql, params) => {
+            if (
+              !perimta &&
+              /^WITH mutacija AS/.test(sql) &&
+              /progress_known IS NOT DISTINCT FROM/.test(sql)
+            ) {
+              perimta = true;
+              snapshot = {
+                type: params[1], status: params[2], phase: params[3],
+                progress_known: params[4], progress_current: params[5],
+                progress_total: params[6],
+              };
+              await pool.query(injekcija, [job.id]);
+              poInjekcijos = (await pool.query(
+                `SELECT ${SAUGOMI_LAUKAI.join(", ")} FROM jobs WHERE id = $1`,
+                [job.id]
+              )).rows[0];
+              const result = await client.query(sql, params);
+              pakeista = result.rows[0].pakeista;
+              return result;
+            }
+            return client.query(sql, params);
+          },
+        };
+      },
+      end: async () => {},
+    };
+
+    const outcome = await createPostgresStore(racingPool).reportProgressAtomic(job.id, ivykis);
+    return { job, perimta, snapshot, poInjekcijos, pakeista, outcome };
+  }
+
+  /** Bendra pradinė būsena: visi saugomi laukai apibrėžti ir teisėti. */
+  const P26_BUSENA = (phase = "transcribing") => ({
+    status: "processing", phase, progressKnown: true, progress: { current: 5, total: 10 },
+  });
+
+  /** Bendri tikrinimai kiekvienai izoliuotai lenktynei. */
+  async function tikrintiIzoliacija(r, komponentas) {
+    assert.equal(r.perimta, true, `${komponentas}: prielaida - CAS perimtas`);
+    assert.deepEqual(skiriasiSaugomi(r.snapshot, r.poInjekcijos), [komponentas],
+      `${komponentas}: IZOLIACIJA - nuo CAS snapshot'o privalo skirtis TIKSLIAI šis laukas`);
+    assert.equal(r.pakeista, 0, `${komponentas}: sąlyginis UPDATE privalo pakeisti 0 eilučių`);
+    assert.equal(r.outcome, "REJECTED", `${komponentas}: kontraktas - pasenęs įvykis atmetamas`);
+    /** P1-1: atmestas CAS negali perrašyti konkurentinio pakeitimo. */
+    const po = await store.get(r.job.id);
+    assert.deepEqual(po.progress, { current: 5, total: 10 },
+      `${komponentas}: atmestas progresas negali patekti į saugyklą`);
+    return po;
+  }
+
+  await t.test("#180 P2-6: CAS atmeta, kai pasikeitė TIK `type`", async () => {
+    /**
+     * ⚠️ `validating` FAZĖ PARINKTA SĄMONINGAI. Ji teisėta ABIEM grafams
+     * (transcription ir protocol), tad `type` gali pasikeisti NEPAŽEIDŽIANT
+     * `jobs_status_phase` ir NEPAKEIČIANT `phase`. Su `transcribing` tektų
+     * keisti ir fazę - būtent to trūkumo ir buvo P2-6.
+     *
+     * `type` produkcijoje nekintamas; scenarijus sintetinis pagal #180 9 punktą.
+     */
+    const r = await izoliuotaCasLenktyne({
+      pradineBusena: P26_BUSENA("validating"),
+      injekcija: "UPDATE jobs SET type = 'protocol' WHERE id = $1",
+      ivykis: { phase: "validating", progress: { current: 7, total: 10 } },
+    });
+    const po = await tikrintiIzoliacija(r, "type");
+    assert.equal(po.type, "protocol", "type: konkurentinis pakeitimas privalo išlikti");
+  });
+
+  await t.test("#180 P2-6: CAS atmeta, kai pasikeitė TIK `phase`", async () => {
+    /** `transcribing` → `diarizing`: abi teisėtos transcription grafui. */
+    const r = await izoliuotaCasLenktyne({
+      pradineBusena: P26_BUSENA("transcribing"),
+      injekcija: "UPDATE jobs SET phase = 'diarizing' WHERE id = $1",
+      ivykis: { phase: "transcribing", progress: { current: 7, total: 10 } },
+    });
+    const po = await tikrintiIzoliacija(r, "phase");
+    assert.equal(po.phase, "diarizing", "phase: konkurentinis pakeitimas privalo išlikti");
+  });
+
+  await t.test("#180 P2-6: CAS atmeta, kai pasikeitė TIK `progress_current`", async () => {
+    /**
+     * Esamas monotoniškumo testas jau keitė vien `progress_current`, bet
+     * izoliacijos NETIKRINO. Čia ta pati savybė įrodoma eksplicitiškai.
+     */
+    const r = await izoliuotaCasLenktyne({
+      pradineBusena: P26_BUSENA("transcribing"),
+      injekcija: "UPDATE jobs SET progress_current = 7 WHERE id = $1",
+      ivykis: { phase: "transcribing", progress: { current: 8, total: 10 } },
+    });
+    assert.equal(r.perimta, true);
+    assert.deepEqual(skiriasiSaugomi(r.snapshot, r.poInjekcijos), ["progress_current"]);
+    assert.equal(r.pakeista, 0);
+    assert.equal(r.outcome, "REJECTED");
+    const po = await store.get(r.job.id);
+    assert.deepEqual(po.progress, { current: 7, total: 10 },
+      "progress_current: konkurentinė reikšmė privalo išlikti, o atmesta - ne");
+  });
+
+  await t.test("#180 P2-6: CAS atmeta, kai pasikeitė TIK `progress_total`", async () => {
+    /** `current = 5 <= total = 20`, tad `jobs_progress_invariants` tenkinamas. */
+    const r = await izoliuotaCasLenktyne({
+      pradineBusena: P26_BUSENA("transcribing"),
+      injekcija: "UPDATE jobs SET progress_total = 20 WHERE id = $1",
+      ivykis: { phase: "transcribing", progress: { current: 7, total: 10 } },
+    });
+    assert.equal(r.perimta, true);
+    assert.deepEqual(skiriasiSaugomi(r.snapshot, r.poInjekcijos), ["progress_total"]);
+    assert.equal(r.pakeista, 0);
+    assert.equal(r.outcome, "REJECTED");
+    const po = await store.get(r.job.id);
+    assert.deepEqual(po.progress, { current: 5, total: 20 },
+      "progress_total: konkurentinė reikšmė privalo išlikti");
+  });
+
+  await t.test(
+    "#180 P2-6: `status` ir `progress_known` NEIZOLIUOJAMI - schema draudžia vieno lauko skirtumą",
+    async () => {
+      /**
+       * ⚠️ TAI ĮRODYMAS, NE PASITEISINIMAS.
+       *
+       * Šiems dviem komponentams elgesio izoliuoto testo parašyti NEĮMANOMA:
+       * produkcinė schema neleidžia egzistuoti eilutei, kurioje nuo snapshot'o
+       * skirtųsi TIK `status` arba TIK `progress_known`. Vietoj komentaro
+       * tikrinama pati riba - jei constraint'as kada nors dings, šis testas
+       * praeis ir aiškiai parodys, kad izoliuotą testą jau galima parašyti.
+       */
+      const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+      await store.update(job.id, P26_BUSENA("transcribing"));
+
+      /**
+       * `status` vienas: `jobs_status_phase` reikalauja `phase IS NULL` ne
+       * `processing` eilutėje, o `jobs_progress_only_processing` draudžia
+       * `progress_known` už `processing` ribų. Vienintelis statusas, suderinamas
+       * su ne-NULL faze IR progresu, yra `processing`.
+       */
+      await assert.rejects(
+        () => pool.query("UPDATE jobs SET status = 'queued' WHERE id = $1", [job.id]),
+        (e) => e.code === "23514",
+        "status vienas privalo būti draudžiamas CHECK constraint'o"
+      );
+
+      /**
+       * `progress_known` vienas: `jobs_progress_known` sieja jį su
+       * `progress_current`/`progress_total` (true ⇒ abu ne-NULL, false ⇒ abu NULL).
+       */
+      await assert.rejects(
+        () => pool.query("UPDATE jobs SET progress_known = false WHERE id = $1", [job.id]),
+        (e) => e.code === "23514",
+        "progress_known vienas privalo būti draudžiamas CHECK constraint'o"
+      );
+
+      /** Eilutė privalo likti nepakitusi - nė vienas bandymas nepraėjo. */
+      const po = await store.get(job.id);
+      assert.equal(po.status, "processing");
+      assert.equal(po.progressKnown, true);
+      assert.deepEqual(po.progress, { current: 5, total: 10 });
+    }
+  );
+
+  await t.test(
+    "#180 P2-3: pasenusio progreso REJECTED nevirsta null, kai eilutė ištrinama po CAS",
+    async () => {
+      /**
+       * SCENARIJUS (3 → 4 pagal issue race sąrašą): CAS nepavyksta, nes
+       * progreso snapshot'as pasenęs; eilutė ištrinama IŠ KART po to.
+       *
+       * SENOJI REALIZACIJA: `readJobForUpdate()` eilutės nebranda → `null`,
+       * t. y. „job'o nėra", nors iš tikrųjų įvykis buvo ATMESTAS kaip pasenęs.
+       * Kvietėjas (`queues/processors.js`) šias reikšmes traktuoja skirtingai.
+       *
+       * MUTACIJOS ĮRODYMAS: grąžinus
+       * `if (result.rowCount === 0) return (await readJobForUpdate(...)) ? "REJECTED" : null;`
+       * šis testas gauna `null` vietoj `"REJECTED"` ir krinta.
+       */
+      const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+      await store.update(job.id, {
+        status: "processing", phase: "transcribing", progressKnown: true,
+        progress: { current: 1, total: 10 },
+      });
+
+      let intercepted = false;
+      let casPakeista = null;
+      const racingPool = {
+        connect: async () => {
+          const client = await pool.connect();
+          return {
+            release: () => client.release(),
+            query: async (sql, params) => {
+              if (
+                !intercepted &&
+                /^WITH mutacija AS/.test(sql) &&
+                /progress_known IS NOT DISTINCT FROM/.test(sql)
+              ) {
+                intercepted = true;
+                /** 1) padarome perskaitytą progreso snapshot'ą pasenusį */
+                await pool.query(
+                  "UPDATE jobs SET progress_current = 7 WHERE id = $1", [job.id]
+                );
+                /** 2) CAS - privalo pakeisti 0 eilučių IR čia pat klasifikuoti */
+                const result = await client.query(sql, params);
+                casPakeista = result.rows[0].pakeista;
+                /** 3) eilutė dingsta PO nepavykusio CAS (senosios formos langas) */
+                await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+                return result;
+              }
+              return client.query(sql, params);
+            },
+          };
+        },
+        end: async () => {},
+      };
+
+      const outcome = await createPostgresStore(racingPool).reportProgressAtomic(job.id, {
+        phase: "transcribing", progress: { current: 5, total: 10 },
+      });
+
+      assert.equal(intercepted, true, "prielaida: CAS perimtas");
+      assert.equal(casPakeista, 0, "pasenęs progreso CAS privalo pakeisti 0 eilučių");
+      assert.equal(await store.get(job.id), null, "prielaida: eilutė realiai ištrinta po CAS");
+      assert.equal(outcome, "REJECTED",
+        "sentinelis privalo aprašyti CAS nesėkmės priežastį (pasenęs snapshot'as), " +
+          "o ne vėlesnį eilutės ištrynimą");
+    }
+  );
+
+  await t.test(
+    "#180 P2-3: removeOwned neatiduoda FORBIDDEN dėl eilutės, atsiradusios PO CAS",
+    async () => {
+      /**
+       * SCENARIJUS (1 → 5 pagal issue race sąrašą): CAS metu eilutės NĖRA;
+       * iš karto po to tuo pačiu id atsiranda SVETIMO savininko eilutė.
+       *
+       * SENOJI REALIZACIJA: `readJobForUpdate()` mato B eilutę → `"FORBIDDEN"`,
+       * t. y. „šis job'as ne tavo", nors kvietėjo job'o apskritai nebuvo.
+       * Teisingas atsakymas - `false`.
+       *
+       * MUTACIJOS ĮRODYMAS: grąžinus po-CAS klasifikaciją
+       * (`if (!current) return false; if (!matchesOwner(...)) return "FORBIDDEN";`)
+       * šis testas gauna `"FORBIDDEN"` vietoj `false` ir krinta.
+       */
+      const id = crypto.randomUUID();
+      const scope = { ownerKind: "user", ownerId: UUID_A };
+
+      let intercepted = false;
+      let casPakeista = null;
+      let casPriezastis = null;
+      const racingPool = {
+        connect: async () => {
+          const client = await pool.connect();
+          return {
+            release: () => client.release(),
+            query: async (sql, params) => {
+              if (!intercepted && /^WITH mutacija AS/.test(sql) && /DELETE FROM jobs/.test(sql)) {
+                intercepted = true;
+                /** CAS vykdomas TUŠČIAI būsenai - eilutės dar nėra. */
+                const result = await client.query(sql, params);
+                casPakeista = result.rows[0].pakeista;
+                casPriezastis = result.rows[0].priezastis;
+                /** Tik DABAR atsiranda SVETIMO savininko eilutė tuo pačiu id. */
+                await rawInsert(bazineEilute({ id, owner_kind: "user", owner_id: UUID_B }));
+                return result;
+              }
+              return client.query(sql, params);
+            },
+          };
+        },
+        end: async () => {},
+      };
+
+      const outcome = await createPostgresStore(racingPool).removeOwned(id, scope);
+
+      assert.equal(intercepted, true, "prielaida: CAS perimtas");
+      assert.equal(casPakeista, 0, "CAS privalo pakeisti 0 eilučių");
+      assert.equal(casPriezastis, 0,
+        "CAS snapshot'e eilutės NEBUVO - klasifikacija negali sakyti „svetima\"");
+      assert.equal(outcome, false,
+        "eilutė, atsiradusi PO CAS, negali paversti atsakymo į FORBIDDEN");
+
+      /** ⚠️ Ir svetima eilutė privalo LIKTI - jos trinti niekas neprašė. */
+      const svetima = await store.get(id);
+      assert.notEqual(svetima, null, "svetimo savininko eilutė negali būti ištrinta");
+      assert.equal(svetima.ownerId, UUID_B);
+      await pool.query("DELETE FROM jobs WHERE id = $1", [id]);
+    }
+  );
+
+  await t.test(
+    "#180 P2-3: updateOwned grąžina null, kai eilutė dingsta prieš CAS ir atgimsta svetima",
+    async () => {
+      /**
+       * SCENARIJUS (4 + 5 pagal issue race sąrašą): eilutė perskaitoma (sava),
+       * dingsta PRIEŠ CAS, o PO CAS tuo pačiu id atgimsta su kitu savininku.
+       *
+       * SENOJI REALIZACIJA: po `rowCount === 0` skaitomas užrakintas įrašas,
+       * matoma B eilutė → `"FORBIDDEN"`. Bet CAS momentu eilutės nebuvo, tad
+       * kontraktas reikalauja `null`.
+       *
+       * MUTACIJOS ĮRODYMAS: grąžinus po-CAS `readJobForUpdate()` klasifikaciją
+       * gaunamas `"FORBIDDEN"` vietoj `null` ir testas krinta.
+       */
+      const scope = { ownerKind: "user", ownerId: UUID_A };
+      const job = await store.create({
+        ownerKind: scope.ownerKind, ownerId: scope.ownerId,
+      });
+
+      let intercepted = false;
+      let casPakeista = null;
+      let casPriezastis = null;
+      const racingPool = {
+        connect: async () => {
+          const client = await pool.connect();
+          return {
+            release: () => client.release(),
+            query: async (sql, params) => {
+              if (
+                !intercepted &&
+                /^WITH mutacija AS/.test(sql) &&
+                /owner_id IS NOT DISTINCT FROM/.test(sql)
+              ) {
+                intercepted = true;
+                /** 1) sava eilutė dingsta PRIEŠ CAS */
+                await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+                /** 2) CAS tuščiai būsenai */
+                const result = await client.query(sql, params);
+                casPakeista = result.rows[0].pakeista;
+                casPriezastis = result.rows[0].priezastis;
+                /** 3) tuo pačiu id atgimsta SVETIMA eilutė */
+                await rawInsert(bazineEilute({
+                  id: job.id, owner_kind: "user", owner_id: UUID_B,
+                }));
+                return result;
+              }
+              return client.query(sql, params);
+            },
+          };
+        },
+        end: async () => {},
+      };
+
+      const outcome = await createPostgresStore(racingPool).updateOwned(
+        job.id, { requestId: "neturi-buti-irasyta" }, scope
+      );
+
+      assert.equal(intercepted, true, "prielaida: CAS perimtas");
+      assert.equal(casPakeista, 0, "CAS privalo pakeisti 0 eilučių");
+      assert.equal(casPriezastis, 0, "CAS snapshot'e eilutės nebuvo");
+      assert.equal(outcome, null,
+        "atgimusi svetima eilutė negali paversti atsakymo į FORBIDDEN");
+
+      /** Svetima eilutė privalo likti NEPALIESTA. */
+      const svetima = await store.get(job.id);
+      assert.equal(svetima.ownerId, UUID_B);
+      assert.equal(svetima.requestId, null, "svetimas job'as negalėjo būti mutuotas");
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  );
 
 });
