@@ -1744,4 +1744,60 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     }
   );
 
+  await t.test(
+    "#180 CAS: po užrakto laukimo updated_at NEATSUKAMAS atgal",
+    async () => {
+      /**
+       * ⚠️ LAIKO ŽYMA SKAIČIUOJAMA RAŠYMO METU.
+       *
+       * `applyPatch()` `updatedAt` užfiksuoja PRIEŠ CAS. Jei sakinys paskui
+       * laukia svetimo eilutės užrakto, o tas rašytojas per tą laiką įrašo
+       * NAUJESNĘ žymą, pasenusi JS reikšmė ją perrašytų atgal. Užlaikymui
+       * viršijus `TTL_MS`, ką tik commit'inta eilutė iš karto taptų tinkama
+       * `sweepExpired()` valymui.
+       */
+      const scope = { ownerKind: "user", ownerId: UUID_A };
+      const job = await store.create({
+        ownerKind: scope.ownerKind, ownerId: scope.ownerId,
+      });
+
+      const t1 = await pool.connect();
+      let uzdaryta = false;
+      try {
+        await t1.query("BEGIN");
+        await t1.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE", [job.id]);
+
+        /** CAS startuoja ir blokuojasi ties T1 užraktu. */
+        const veikia = store.updateOwned(job.id, { requestId: "po-laukimo" }, scope);
+        await laukiantUzblokuotoUzrakto("%WITH mutacija AS%", "nuosavybės CAS UPDATE");
+
+        /** Konkurentas įrašo NAUJESNĘ žymą ir atlaisvina užraktą. */
+        await t1.query(
+          "UPDATE jobs SET updated_at = clock_timestamp() + interval '1 hour' WHERE id = $1",
+          [job.id]
+        );
+        const { rows: [konkurento] } = await t1.query(
+          "SELECT updated_at FROM jobs WHERE id = $1", [job.id]
+        );
+        await t1.query("COMMIT");
+        uzdaryta = true;
+
+        const outcome = await veikia;
+        assert.notEqual(outcome, null);
+        assert.notEqual(outcome, "FORBIDDEN");
+        assert.equal(outcome.requestId, "po-laukimo", "patch'as privalo būti pritaikytas");
+
+        const { rows: [po] } = await pool.query(
+          "SELECT updated_at FROM jobs WHERE id = $1", [job.id]
+        );
+        assert.ok(new Date(po.updated_at) >= new Date(konkurento.updated_at),
+          `updated_at atsuktas atgal: ${po.updated_at} < ${konkurento.updated_at}`);
+      } finally {
+        if (!uzdaryta) await t1.query("ROLLBACK").catch(() => {});
+        t1.release();
+        await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]).catch(() => {});
+      }
+    }
+  );
+
 });

@@ -8,6 +8,7 @@ const startupChecks = require("../utils/startupChecks");
 const privacyConfig = require("../utils/privacyConfig");
 const backupEncryption = require("../utils/backupEncryption");
 const auditLog = require("../utils/auditLog");
+const tombstones = require("../utils/deletionTombstones");
 
 const log = createLogger("restore");
 
@@ -481,13 +482,35 @@ async function _validateContent(parsed) {
    * tas pats autoritetingas validatorius, kurį `restoreRecord()` kviečia kaip
    * gynybą giliai viduje - tik anksčiau ir visiems iš karto.
    */
-  for (const job of parsed.jobs) {
+  for (const [i, job] of parsed.jobs.entries()) {
+    /**
+     * ⚠️ TIKRINAMA TIK TAI, KĄ `_apply()` REALIAI ATKURS.
+     *
+     * `jobStore.restoreRecord()` tombstone'intą įrašą SĄMONINGAI praleidžia
+     * (#19: kopija negali atšaukti ištrynimo). Jei preflight jį vis tiek
+     * vertintų, viena neatstovaujama pre-būsena JAU IŠTRINTAME įraše
+     * užblokuotų VISĄ kopiją, ir teisėti job'ai bei audio liktų neatkurti.
+     */
+    if (job && job.id && tombstones.isDeleted(job.id)) continue;
+
     try {
       await jobStore.assertRestorable(job);
     } catch (e) {
+      /**
+       * ⚠️ PRIEŽASTIS BE KOPIJOS TURINIO.
+       *
+       * `assertAtstovaujamasProgresas()` klaidoje įvardija ATMESTĄ reikšmę
+       * (`JSON.stringify(progress)`). Persiuntus `e.message` čia, ta reikšmė
+       * patektų į `_fail()` žurnalą ir į HTTP atsakymą - o paslapčių skenavimas
+       * (`STEPS.SECRETS`) vykdomas VĖLIAU, tad jo apsauga būtų apeita.
+       *
+       * Todėl grąžinamas tik įrašo INDEKSAS ir klaidos kodas: nė vienas baitas
+       * iš kopijos turinio nepaliekamas atsakyme.
+       */
       return {
         valid: false,
-        reason: `jobas ${job.id} neatstovaujamas aktyvioje saugykloje: ${e.message}`,
+        reason: `kopijos įrašas #${i} neatstovaujamas aktyvioje saugykloje ` +
+          `(${e.code || "UNSUPPORTED"})`,
       };
     }
   }

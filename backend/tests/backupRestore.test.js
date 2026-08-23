@@ -564,8 +564,18 @@ test("#180 P2-E: neatstovaujamas įrašas atmetamas PRIEŠ bet kokią atkūrimo 
      * arba mestų `SyntaxError`, arba TYLIAI imtų reikšti ką kita. `includes()`
      * lygina tiksliai ir metaženklų neinterpretuoja.
      */
-    assert.ok(result.reason.includes(neatstovaujamas),
-      `priežastis privalo įvardyti neatstovaujamą įrašą: ${result.reason}`);
+    /**
+     * ⚠️ PRIEŽASTIS NEIŠDUODA KOPIJOS TURINIO.
+     *
+     * Anksčiau čia buvo tikrinama, kad priežastyje YRA job'o `id`. Bet
+     * `_fail()` šią eilutę rašo į žurnalą ir grąžina HTTP atsakyme, o paslapčių
+     * skenavimas vykdomas VĖLIAU - tad bet koks kopijos turinys priežastyje
+     * apeitų tą apsaugą. Dabar tikrinama PRIEŠINGA savybė.
+     */
+    assert.ok(result.reason.includes("UNSUPPORTED_PROGRESS_REPRESENTATION"),
+      `priežastis privalo įvardyti klaidos KODĄ: ${result.reason}`);
+    assert.equal(result.reason.includes(neatstovaujamas), false,
+      "priežastis NEGALI atskleisti kopijos turinio (nė job'o identifikatoriaus)");
 
     /** ⚠️ ESMĖ: patikrinti VISI, pritaikyta NIEKO. */
     assert.ok(tikrinta >= 2,
@@ -711,4 +721,60 @@ test("SAUGUMAS: teisėtas UUID identifikatorius atkuriamas be pakitimų (regresi
 
   assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
   assert.ok(await jobStore.system.get(job.id), "teisėtas UUID job'as privalo grįžti");
+});
+
+test("#180 P2-E: ištrintas (tombstone) įrašas neblokuoja likusios kopijos atkūrimo", async () => {
+  /**
+   * ⚠️ PREFLIGHT TIKRINA TIK TAI, KĄ `_apply()` REALIAI ATKURS.
+   *
+   * `restoreRecord()` sąmoningai PRALEIDŽIA tombstone'intą įrašą (#19: kopija
+   * negali atšaukti ištrynimo). Jei preflight jį vis tiek validuotų, viena
+   * neatstovaujama pre-būsena JAU IŠTRINTAME įraše užblokuotų VISĄ kopiją -
+   * ir teisėti job'ai bei audio liktų neatkurti.
+   *
+   * MUTACIJOS ĮRODYMAS: pašalinus `tombstones.isDeleted()` praleidimą iš
+   * preflight ciklo, ištrinto įrašo `id` patenka į `tikrinti` ir testas krinta.
+   */
+  await jobStore.init();
+  const istrintas = await completedJob();
+  const liekantis = await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  /** Vienas įrašas ištrinamas PO kopijos - jo tombstone lieka. */
+  await jobStore.system.remove(istrintas.id);
+  tombstones.mark(istrintas.id, { actor: "sysadmin" });
+  tombstones.complete(istrintas.id, tombstones.TOMBSTONE_STATUS.DELETED);
+  await jobStore.system.remove(liekantis.id);
+
+  /**
+   * ⚠️ TIKRINAMAS MECHANIZMAS, NE TIK REZULTATAS. Preflight privalo tombstone'intą
+   * įrašą PRALEISTI - t. y. `assertRestorable()` jam neturi būti kviečiamas.
+   * Be to atkūrimo rezultatas atrodytų teisingas ir tada, kai praleidimo nėra
+   * (memory backend'e nuosavybės/progreso patikra tyli), tad testas nieko
+   * neįrodytų.
+   */
+  const tikrasis = jobStore.assertRestorable;
+  const tikrinti = [];
+  let result;
+  try {
+    jobStore.assertRestorable = async (job) => {
+      tikrinti.push(job.id);
+      return tikrasis(job);
+    };
+    result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
+  } finally {
+    jobStore.assertRestorable = tikrasis;
+  }
+  assert.equal(jobStore.assertRestorable, tikrasis, "perimtas metodas privalo būti atstatytas");
+
+  assert.equal(tikrinti.includes(istrintas.id), false,
+    "tombstone'intas įrašas NEGALI patekti į preflight - `_apply()` jo vis tiek neatkurs");
+  assert.ok(tikrinti.includes(liekantis.id),
+    "atkuriamas įrašas PRIVALO būti patikrintas preflight fazėje");
+
+  assert.equal(result.ok, true, `atkūrimas privalo pavykti: ${result.reason}`);
+  assert.ok(await jobStore.system.get(liekantis.id),
+    "teisėtas job'as privalo grįžti, nepaisant tombstone'into kaimyno");
+  assert.equal(await jobStore.system.get(istrintas.id), null,
+    "tombstone'intas job'as NEGALI būti prikeltas");
 });

@@ -509,9 +509,15 @@ test("#180 P2-2: postgresStore.updateOwned() rašo TIK patch'o stulpelius, nuosa
   const stulpeliai = [...setDalis.matchAll(/"([a-z_]+)" = \$/g)].map((m) => m[1]);
 
   // 1) Patch'o pakeisti stulpeliai YRA.
-  for (const laukiamas of ["request_id", "error_code", "updated_at"]) {
+  for (const laukiamas of ["request_id", "error_code"]) {
     assert.ok(stulpeliai.includes(laukiamas), `SET privalo turėti "${laukiamas}"`);
   }
+  /**
+   * ⚠️ `updated_at` nebėra PARAMETRAS - jį rašo SQL išraiška rašymo metu, kad
+   * po užrakto laukimo neperrašytų konkurento naujesnės žymos.
+   */
+  assert.ok(setDalis.includes("clock_timestamp()"),
+    "updated_at privalo būti skaičiuojamas rašymo metu");
   // 2) Nepakeisti (pasenę) stulpeliai NEPATENKA - būtent jie buvo atsukami.
   for (const draudziamas of ["status", "phase", "attempt_count", "deletion_pending",
     "deletion_attempts", "storage_key", "artefacts", "progress_known",
@@ -541,7 +547,7 @@ test("#180 P2-2: postgresStore.updateOwned() rašo TIK patch'o stulpelius, nuosa
   assert.equal(pagauta.params[1], scope.ownerId);
   assert.equal(pagauta.params[2], scope.ownerKind);
   assert.equal(pagauta.params.length, 3 + stulpeliai.length,
-    "parametrų skaičius privalo atitikti SET sąrašą");
+    "parametrų skaičius privalo atitikti parametrizuotų SET stulpelių skaičių");
 });
 
 test("#180 P2-C: PostgreSQL atkūrimas KRENTA UŽDARAI dėl neatstovaujamo progreso", async () => {
@@ -608,4 +614,135 @@ test("#180 P2-C: PostgreSQL atkūrimas KRENTA UŽDARAI dėl neatstovaujamo progr
     await store.restoreRecord({ ...bazinis, ...progresas });
     assert.ok(vykdytos.length > 0, `${pavadinimas}: teisėtas įrašas privalo būti atkurtas`);
   }
+});
+
+test("#180 P2-C: PostgreSQL atkūrimas atmeta NE-BOOLEAN progressKnown", async () => {
+  /**
+   * ⚠️ TYLUS PRASMĖS PAKEITIMAS.
+   *
+   * Ranka redaguota kopija su `progressKnown: "true"` (EILUTE) anksčiau
+   * praeidavo: `!== true` ją laikė „progreso nėra" šaka, o `jobToRow()` paskui
+   * įrašydavo `progress_known = false`. Įrašas atkuriamas TYLIAI pakeista
+   * prasme - būtent tai #180 6 punktas draudžia.
+   *
+   * MUTACIJOS ĮRODYMAS: pašalinus boolean patikrą, `"true"` ir `1` praeina.
+   */
+  const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+  const vykdytos = [];
+  const pool = {
+    connect: async () => ({
+      query: async (sql) => { vykdytos.push(String(sql).slice(0, 12)); return { rows: [], rowCount: 0 }; },
+      release: () => {},
+    }),
+    query: async () => ({ rows: [] }),
+  };
+  const store = createPostgresStore(pool);
+  const bazinis = {
+    id: "44444444-4444-4444-8444-444444444444",
+    type: "transcription", status: "processing", phase: "transcribing",
+    ownerKind: OWNER_KIND.UNOWNED, ownerId: null, tenantId: null, artefacts: [],
+    created_at: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  for (const bloga of ["true", "false", 1, 0, null]) {
+    vykdytos.length = 0;
+    await assert.rejects(
+      () => store.restoreRecord({ ...bazinis, progressKnown: bloga, progress: null }),
+      (e) => e.code === "UNSUPPORTED_PROGRESS_REPRESENTATION" && /nėra boolean/.test(e.message),
+      `progressKnown=${JSON.stringify(bloga)} privalo būti atmestas`
+    );
+    assert.deepEqual(vykdytos, [], "patikra privalo įvykti PRIEŠ destruktyvų DELETE");
+  }
+
+  /** Teisėtos formos: tikras boolean arba visai nesantis laukas (legacy). */
+  for (const gera of [{ progressKnown: false, progress: null }, { progress: null }]) {
+    vykdytos.length = 0;
+    await store.restoreRecord({ ...bazinis, ...gera });
+    assert.ok(vykdytos.length > 0, `teisėta forma privalo būti atkurta: ${JSON.stringify(gera)}`);
+  }
+});
+
+test("#180 CAS: PATCH_STULPELIAI dengia KIEKVIENĄ kintamą stulpelį", () => {
+  /**
+   * ⚠️ PRALEISTAS LAUKAS = TYLIAI NEĮRAŠYTAS PATCH'AS.
+   *
+   * `changedColumns()` `SET` sąrašą sudaro iš patch'o paliestų stulpelių. Jei
+   * kuris nors kintamas stulpelis šiame atvaizdavime neturėtų patch rakto, jį
+   * keičiantis patch'as būtų tyliai praleistas, kai reikšmė sutampa su pasenusiu
+   * snapshot'u. Todėl aibė tikrinama, o ne prižiūrima iš atminties.
+   */
+  const { PATCH_STULPELIAI, IMMUTABLE_COLUMNS } = require("../utils/jobStore/postgresStore");
+  const { COLUMNS } = require("../utils/jobStore/postgresStore");
+
+  const dengiami = new Set();
+  for (const stulpeliai of Object.values(PATCH_STULPELIAI)) {
+    for (const c of stulpeliai) dengiami.add(c);
+  }
+
+  /** Kiekvienas atvaizduotas stulpelis privalo realiai egzistuoti. */
+  for (const c of dengiami) {
+    assert.ok((COLUMNS || []).includes(c) || c === "updated_at",
+      `PATCH_STULPELIAI nurodo nežinomą stulpelį "${c}"`);
+  }
+
+  /** Ir kiekvienas KINTAMAS stulpelis privalo turėti bent vieną patch raktą. */
+  const kintami = (COLUMNS || []).filter((c) => !IMMUTABLE_COLUMNS.has(c));
+  const nedengiami = kintami.filter((c) => !dengiami.has(c));
+  assert.deepEqual(nedengiami, [],
+    `stulpeliai be patch rakto (patch'as jiems būtų tyliai prarastas): ${nedengiami.join(", ")}`);
+});
+
+test("#180 CAS: eksplicitiškai nurodytas laukas rašomas NET jei sutampa su snapshot'u", () => {
+  /**
+   * ⚠️ TIKSLIAI TAS ATVEJIS, KURIO SKIRTUMO SĄRAŠAS NEPAGAUDAVO.
+   *
+   * Kvietėjas nustato `requestId` į TĄ PAČIĄ reikšmę, kurią ką tik perskaitė.
+   * Skirtumo nėra, tad senoji realizacija stulpelį praleisdavo - o jei konkurentas
+   * jį tuo tarpu pakeitė, CAS pavykdavo ir grąžindavo SĖKMĘ paliekant svetimą
+   * reikšmę. Patch'as būdavo tyliai prarastas.
+   *
+   * MUTACIJOS ĮRODYMAS: grąžinus `changedColumns()` prie vien skirtumo,
+   * `request_id` iškrenta iš `SET` ir šis testas krinta.
+   */
+  const { createPostgresStore, jobToRow } = require("../utils/jobStore/postgresStore");
+
+  const esamas = newJob({ ownerKind: OWNER_KIND.USER, ownerId: A });
+  esamas.requestId = "nepakitusi-reiksme";
+
+  let pagauta = null;
+  const client = {
+    query: async (sql, params) => {
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [], rowCount: 0 };
+      if (/^\s*SELECT j\.\*/.test(sql)) {
+        const r = jobToRow(esamas);
+        r.artefacts = [];
+        return { rows: [r], rowCount: 1 };
+      }
+      if (/^WITH mutacija AS/.test(sql)) {
+        pagauta = { sql, params };
+        return { rows: [{ pakeista: 1, priezastis: 0, buvo: 1 }], rowCount: 1 };
+      }
+      throw new Error(`netikėta SQL: ${sql.slice(0, 40)}`);
+    },
+    release: () => {},
+  };
+
+  return createPostgresStore({ connect: async () => client })
+    .updateOwned(esamas.id, { requestId: "nepakitusi-reiksme" },
+      { ownerKind: OWNER_KIND.USER, ownerId: A })
+    .then(() => {
+      assert.ok(pagauta, "sąlyginė mutacija privalo būti įvykdyta");
+      const setDalis = pagauta.sql.slice(0, pagauta.sql.indexOf("WHERE"));
+      assert.ok(setDalis.includes('"request_id"'),
+        `eksplicitiškai nurodytas stulpelis privalo patekti į SET: ${setDalis}`);
+
+      /**
+       * ⚠️ LAIKO ŽYMA - SQL IŠRAIŠKA, NE PASENĘS PARAMETRAS. Prieš CAS
+       * užfiksuota JS reikšmė po užrakto laukimo perrašytų konkurento naujesnę.
+       */
+      assert.ok(setDalis.includes("clock_timestamp()"),
+        `updated_at privalo būti skaičiuojamas rašymo metu: ${setDalis}`);
+      assert.equal(/"updated_at" = \$\d/.test(setDalis), false,
+        "updated_at negali būti perduodamas kaip pasenęs parametras");
+    });
 });

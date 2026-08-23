@@ -186,18 +186,23 @@ const COLUMNS = [
  * (`idempotency_key`), įrašo era (#158) ir sukūrimo laikas nustatomi TIK
  * `create()` / `restoreRecord()` metu.
  *
- * ⚠️ SĄŽININGAI: ŠIANDIEN ŠIS FILTRAS NEPASIEKIAMAS.
+ * ⚠️ FILTRAS YRA VYKDOMAS KELYJE (7.2b jau sumergintas).
  *
- * `writePatched()` visada eina per `applyPatch()`, kuris tapatybę, nuosavybę
- * ir erą atstato iš originalaus job'o, o `jobToRow()` skaito tik camelCase
- * laukus - tad `snake_case` patch'as row builder'io nepasiekia. Vadinasi,
- * pakeisti šių laukų per esamą kelią NEĮMANOMA ir be šio filtro.
+ * Anksčiau čia rašė, kad filtras nepasiekiamas: tuo metu vienintelis kelias
+ * buvo `writePatched()`, kuris visada eina per `applyPatch()` - o šis tapatybę,
+ * nuosavybę ir erą atstato iš originalaus job'o, tad `jobToRow()` iki
+ * `snake_case` patch'o net nepriėjo.
  *
- * Filtras vis tiek reikalingas: garantija, kurią duoda vien helperis, dingsta
- * pirmam keliui, kuris jo neiškviečia - o 7.2b kaip tik įveda naujus SQL
- * mutacijų kelius (`UPDATE ... WHERE ... RETURNING`), kuriuose `applyPatch()`
- * gali nebedalyvauti. Aibė tikrinama kontrakto testu, ne elgesiu, nes elgesio
- * kelio kol kas nėra.
+ * 7.2b tą pakeitė. `changedColumns()` filtruoja per ŠIĄ aibę, ir per jį eina
+ * abu sąlyginiai CAS keliai (`updateOwned()`, `reportProgressAtomic()`), o
+ * `writePatched()` - per tą pačią aibę tiesiogiai. Nekintamumas dabar
+ * tikrinamas ELGESIU: bendras kontraktų rinkinys siunčia patch'ą, bandantį
+ * pakeisti tapatybę, nuosavybę ir erą, ir reikalauja, kad nė vienas backend'as
+ * jos nepakeistų.
+ *
+ * `jobOwnership.test.js` papildomai tikrina, kad ši aibė sutampa su
+ * `applyPatch()` saugomais camelCase laukais - kitaip atsirastų laukas, kurį
+ * vienas backend'as keičia, o kitas ne.
  */
 const IMMUTABLE_COLUMNS = new Set([
   "id",
@@ -208,6 +213,52 @@ const IMMUTABLE_COLUMNS = new Set([
   "schema_version",
   "created_at",
 ]);
+
+/**
+ * PATCH LAUKAS → STULPELIAI, KURIUOS JIS RAŠO.
+ *
+ * ⚠️ SKIRTUMO NEPAKANKA (#180, Codex „Preserve explicitly patched columns").
+ *
+ * Anksčiau `SET` sąrašas buvo vien REIKŠMIŲ SKIRTUMAS tarp perskaitytos ir
+ * pataisytos eilutės. Jei kvietėjas eksplicitiškai nustato lauką į TĄ PAČIĄ
+ * reikšmę, kurią ką tik matė, o konkurentas ją tuo tarpu pakeitė, skirtumo
+ * nėra - stulpelis iškrenta iš `SET`, CAS pavyksta, ir operacija praneša SĖKMĘ,
+ * nors prašytas patch'as NEBUVO pritaikytas. Konkurento reikšmė lieka.
+ *
+ * Todėl `SET` sudaro SĄJUNGA: patch'o paliesti stulpeliai ∪ realiai pasikeitę.
+ *
+ * ⚠️ AIBĖS PILNUMAS TIKRINAMAS TESTU. Praleistas laukas reikštų tyliai
+ * neįrašomą patch'ą, tad `jobOwnership.test.js` reikalauja, kad kiekvienas
+ * NEKINTAMU nelaikomas `COLUMNS` stulpelis turėtų bent vieną patch raktą.
+ */
+const PATCH_STULPELIAI = Object.freeze({
+  type: ["type"],
+  status: ["status"],
+  phase: ["phase"],
+  /** `progress` ir `progressKnown` yra viena trijų stulpelių būsena. */
+  progress: ["progress_known", "progress_current", "progress_total"],
+  progressKnown: ["progress_known", "progress_current", "progress_total"],
+  actor: ["actor"],
+  actorRole: ["actor_role"],
+  actorSource: ["actor_source"],
+  requestId: ["request_id"],
+  storageKey: ["storage_key"],
+  artefacts: ["artefacts"],
+  /** Senas `error` yra `error_message` sinonimas (žr. `applyPatch()`). */
+  error: ["error_message"],
+  error_message: ["error_message"],
+  error_code: ["error_code"],
+  attempt_count: ["attempt_count"],
+  audio_cleanup_pending: ["audio_cleanup_pending"],
+  audio_cleanup_attempts: ["audio_cleanup_attempts"],
+  audio_cleanup_next_attempt_at: ["audio_cleanup_next_attempt_at"],
+  deletion_pending: ["deletion_pending"],
+  deletion_attempts: ["deletion_attempts"],
+  deletion_next_attempt_at: ["deletion_next_attempt_at"],
+  started_at: ["started_at"],
+  completed_at: ["completed_at"],
+  updatedAt: ["updated_at"],
+});
 
 /**
  * SIAURAS RAŠYMAS: stulpeliai, kuriuos ši operacija REALIAI keičia.
@@ -244,11 +295,37 @@ const IMMUTABLE_COLUMNS = new Set([
  * ⚠️ NEKINTAMI STULPELIAI Į SĄRAŠĄ NEPATENKA NIEKADA - filtruojama per tą pačią
  * `IMMUTABLE_COLUMNS` aibę (#180, 4 punktas).
  */
-function changedColumns(expected, row) {
+function changedColumns(expected, row, patch = {}) {
+  const patchStulpeliai = new Set();
+  for (const raktas of Object.keys(patch || {})) {
+    for (const stulpelis of PATCH_STULPELIAI[raktas] || []) patchStulpeliai.add(stulpelis);
+  }
+
+  /**
+   * ⚠️ `updated_at` ČIA NEBEĮTRAUKIAMAS. Jį rašo SQL išraiška rašymo METU
+   * (žr. `LAIKO_ZYMA`), ne pasenusi JS reikšmė - todėl jis nėra parametras.
+   */
   return COLUMNS.filter(
-    (c) => !IMMUTABLE_COLUMNS.has(c) && (c === "updated_at" || row[c] !== expected[c])
+    (c) => !IMMUTABLE_COLUMNS.has(c) && c !== "updated_at" &&
+      (patchStulpeliai.has(c) || row[c] !== expected[c])
   );
 }
+
+/**
+ * ⚠️ LAIKO ŽYMA SKAIČIUOJAMA RAŠYMO METU, NE PRIEŠ UŽRAKTO LAUKIMĄ.
+ *
+ * `applyPatch()` `updatedAt` užfiksuoja PRIEŠ CAS. Jei sąlyginis sakinys paskui
+ * laukia svetimo eilutės užrakto, įrašoma reikšmė būna SENESNĖ už konkurento ką
+ * tik įrašytą - monotoniškumas lūžta. Užlaikymui viršijus `TTL_MS`, ką tik
+ * commit'inta eilutė iš karto taptų tinkama `sweepExpired()` valymui.
+ *
+ * `clock_timestamp()` (ne `now()`) grąžina TIKRĄ laiką eilutės rašymo momentu -
+ * `now()` yra transakcijos pradžios žyma, tad laukimo neapimtų. `GREATEST`
+ * garantuoja, kad reikšmė niekada nesumažėja net ir laikrodžiui pašokus atgal.
+ *
+ * `SET` dėl šios išraiškos NIEKADA nebūna tuščias.
+ */
+const LAIKO_ZYMA = `"updated_at" = GREATEST(updated_at, clock_timestamp())`;
 
 /**
  * SĄLYGINĖ MUTACIJA IR JOS NESĖKMĖS KLASIFIKACIJA VIENAME SAKINYJE (#180 P2-3).
@@ -458,6 +535,22 @@ function assertAtstovaujamasProgresas(job) {
    * reikšmių stulpeliai būtų `NULL`, tad bet kokia progreso reikšmė čia būtų
    * tyliai prarasta.
    */
+  /**
+   * ⚠️ `progressKnown` PRIVALO BŪTI TIKRAS BOOLEAN (arba visai nebūti).
+   *
+   * Ranka redaguota kopija su `progressKnown: "true"` (eilute) anksčiau
+   * praeidavo: `!== true` ją laikydavo „progreso nėra" šaka, o `jobToRow()`
+   * paskui įrašydavo `progress_known = false` - TYLIAI pakeisdamas įrašo
+   * prasmę atkūrimo metu. Legacy įrašai lauko išvis neturi, tad `undefined`
+   * lieka leistinas.
+   */
+  if (job.progressKnown !== undefined && typeof job.progressKnown !== "boolean") {
+    throw new UnsupportedProgressError(
+      `progressKnown = ${JSON.stringify(job.progressKnown)} nėra boolean; ` +
+        "tipizuotas progress_known stulpelis reikšmę tyliai perinterpretuotų"
+    );
+  }
+
   if (job.progressKnown !== true) {
     if (p == null) return;
     throw new UnsupportedProgressError(
@@ -679,8 +772,11 @@ function createPostgresStore(pool) {
          * `IMMUTABLE_COLUMNS` (#180, 4 punktas).
          */
         const row = jobToRow(applyPatch(current, patch));
-        const rasomi = changedColumns(jobToRow(current), row);
-        const sets = rasomi.map((c, i) => `"${c}" = $${i + 4}`).join(", ");
+        const rasomi = changedColumns(jobToRow(current), row, patch);
+        const sets = [
+          ...rasomi.map((c, i) => `"${c}" = $${i + 4}`),
+          LAIKO_ZYMA,
+        ].join(", ");
         result = await client.query(
           casSuKlasifikacija(
             `      UPDATE jobs SET ${sets}
@@ -791,8 +887,11 @@ function createPostgresStore(pool) {
        * atsuktų atgal kiekvieną konkurentinį pakeitimą, kurio nėra žemiau
        * esančiame predikate.
        */
-      const rasomi = changedColumns(expected, row);
-      const sets = rasomi.map((c, i) => `"${c}" = $${i + 8}`).join(", ");
+      const rasomi = changedColumns(expected, row, patch);
+      const sets = [
+        ...rasomi.map((c, i) => `"${c}" = $${i + 8}`),
+        LAIKO_ZYMA,
+      ].join(", ");
       const result = await client.query(
         casSuKlasifikacija(
           `      UPDATE jobs SET ${sets}
@@ -951,7 +1050,9 @@ module.exports = {
   tenantToDb,
   tenantFromDb,
   TENANT_SENTINEL,
+  COLUMNS,
   DuplicateJobError,
+  PATCH_STULPELIAI,
   UnsupportedProgressError,
   assertAtstovaujamasProgresas,
 };
