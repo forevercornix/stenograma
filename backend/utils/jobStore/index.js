@@ -756,6 +756,28 @@ module.exports = {
    * Tai svarbiausia šio metodo savybė, ne šalutinė: kopija atkuria BŪKLĘ, bet
    * negali atšaukti sprendimo ištrinti.
    */
+  /**
+   * ATKŪRIMO PREFLIGHT: ar įrašas ATSTOVAUJAMAS aktyviame backend'e (#180 P2-E).
+   *
+   * ⚠️ KODĖL FASADE, NE STORE OBJEKTE. `jobStore` backend'ai turi tiksliai
+   * sutampančią metodų aibę (kontrakto testas ją tikrina), tad metodo pridėjimas
+   * tik PostgreSQL'ui tą paritetą sulaužytų. Taisyklė yra backend'o savybė, bet
+   * kvietimo taškas - fasadas.
+   *
+   * ⚠️ VIENAS AUTORITETINGAS VALIDATORIUS. Naudojama TA PATI funkcija, kurią
+   * `postgresStore.restoreRecord()` kviečia kaip gynybą giliai viduje
+   * (`assertAtstovaujamasProgresas`). Antra taisyklių kopija neišvengiamai
+   * išsiskirtų.
+   *
+   * Backend'ams, kurie įrašą atstovauja (memory, Redis), tai tuščias veiksmas.
+   */
+  assertRestorable: async (job) => {
+    await ensureInit();
+    if (!store || store.backend !== "postgres") return;
+    const { assertAtstovaujamasProgresas } = require("./postgresStore");
+    assertAtstovaujamasProgresas(job);
+  },
+
   restoreRecord: async (job) => {
     await ensureInit();
 

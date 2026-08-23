@@ -487,3 +487,95 @@ test("POLITIKA: auditas turi EKSPLICITINĘ neįtraukimo priežastį", () => {
   assert.ok(excluded, "auditas turi būti neįtrauktų sąraše");
   assert.match(excluded.reason, /atskaitomybės|GDPR/i, "priežastis turi paaiškinti KODĖL");
 });
+
+test("#180 P2-E: neatstovaujamas įrašas atmetamas PRIEŠ bet kokią atkūrimo mutaciją", async () => {
+  /**
+   * ⚠️ DALINIS ATKŪRIMAS BUVO REALUS.
+   *
+   * `_apply()` pirma įrašo VISĄ audio, paskui job'us po vieną. Kol
+   * atstovaujamumas buvo tikrinamas tik `restoreRecord()` viduje, sugadintas
+   * TREČIAS įrašas nutraukdavo atkūrimą jau PO to, kai audio ir pirmi du job'ai
+   * buvo pritaikyti - deterministinė turinio klaida virsdavo daline mutacija.
+   *
+   * Dabar visi įrašai tikrinami „dar NIEKO nekeičiam" fazėje. Testas tikrina
+   * būtent EILIŠKUMĄ: nė vienas ankstesnis elementas neturi būti pritaikytas.
+   */
+  await jobStore.init();
+
+  const a = await completedJob();
+  const b = await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  /** Gyva būsena, kuri privalo likti nepaliesta. */
+  await jobStore.system.remove(a.id);
+  await jobStore.system.remove(b.id);
+  const gyvas = await completedJob();
+  const gyvasPries = await jobStore.system.get(gyvas.id);
+
+  const tikriVeiksmai = {
+    assertRestorable: jobStore.assertRestorable,
+    restoreRecord: jobStore.restoreRecord,
+    putAtKey: fileStorage.putAtKey,
+  };
+  let atkurta = 0;
+  let irasytaAudio = 0;
+  let tikrinta = 0;
+
+  try {
+    /**
+     * Seamas, per kurį backend'as praneša „šio įrašo atstovauti negaliu".
+     * Krenta TIK ties PASKUTINIU job'u, tad ankstesni jau būtų pritaikyti, jei
+     * patikra vyktų mutacijos metu.
+     */
+    /**
+     * Nesėkmė ties `b`, kuris kopijoje eina PO `a`. Jei patikra vyktų mutacijos
+     * metu, `a` jau būtų atkurtas - būtent tai ir tikrinama žemiau.
+     */
+    const neatstovaujamas = b.id;
+    jobStore.assertRestorable = async (job) => {
+      tikrinta += 1;
+      if (job.id === neatstovaujamas) {
+        const e = new Error("progress.current = \"8\" nėra baigtinis SKAIČIUS");
+        e.code = "UNSUPPORTED_PROGRESS_REPRESENTATION";
+        throw e;
+      }
+    };
+    jobStore.restoreRecord = async (...args) => {
+      atkurta += 1;
+      return tikriVeiksmai.restoreRecord(...args);
+    };
+    fileStorage.putAtKey = async (...args) => {
+      irasytaAudio += 1;
+      return tikriVeiksmai.putAtKey(...args);
+    };
+
+    const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
+
+    assert.equal(result.ok, false, "neatstovaujamas įrašas privalo nutraukti atkūrimą");
+    assert.equal(result.failedStep, STEPS.CONTENT,
+      "klaida privalo kilti TURINIO patikros fazėje, ne pritaikymo metu");
+    assert.match(result.reason, /neatstovaujamas aktyvioje saugykloje/);
+    assert.match(result.reason, new RegExp(neatstovaujamas));
+
+    /** ⚠️ ESMĖ: patikrinti VISI, pritaikyta NIEKO. */
+    assert.ok(tikrinta >= 2,
+      "preflight privalo pasiekti bent `a` ir `b` PRIEŠ bet kokią mutaciją");
+    assert.equal(atkurta, 0, "nė vienas ankstesnis job'as negali būti atkurtas");
+    assert.equal(irasytaAudio, 0, "audio negali būti įrašytas prieš patikrą");
+
+    /** Gyva būsena nepakitusi; kopijos job'ai neatsirado. */
+    assert.deepEqual(await jobStore.system.get(gyvas.id), gyvasPries,
+      "gyvas įrašas privalo likti nepakitęs");
+    assert.equal(await jobStore.system.get(a.id), null, "A negalėjo būti atkurtas");
+    assert.equal(await jobStore.system.get(b.id), null, "B negalėjo būti atkurtas");
+  } finally {
+    jobStore.assertRestorable = tikriVeiksmai.assertRestorable;
+    jobStore.restoreRecord = tikriVeiksmai.restoreRecord;
+    fileStorage.putAtKey = tikriVeiksmai.putAtKey;
+  }
+
+  /** Perimti veiksmai privalo būti realiai atstatyti (AGENTS.md §9.3). */
+  assert.equal(jobStore.assertRestorable, tikriVeiksmai.assertRestorable);
+  assert.equal(jobStore.restoreRecord, tikriVeiksmai.restoreRecord);
+  assert.equal(fileStorage.putAtKey, tikriVeiksmai.putAtKey);
+});

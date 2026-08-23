@@ -335,6 +335,39 @@ const SVETIMAS_SCOPE = `SELECT count(*) FROM jobs
 const EILUTE_YRA = `SELECT count(*) FROM jobs WHERE id = $1`;
 
 /**
+ * PROGRESO CAS PREDIKATAS - VIENAS ŠALTINIS (#180 P2-D).
+ *
+ * Naudojamas DU kartus tame pačiame sakinyje: sąlyginėje mutacijoje ir
+ * `atitiko` klasifikacijoje. Dvi kopijos neišvengiamai išsiskirtų, o tada
+ * klasifikacija atsakytų apie KITĄ sąlygą nei mutacija.
+ */
+const PROGRESO_CAS_PREDIKATAS = `id = $1 AND type = $2 AND status = $3
+            AND phase IS NOT DISTINCT FROM $4
+            AND progress_known IS NOT DISTINCT FROM $5
+            AND progress_current IS NOT DISTINCT FROM $6
+            AND progress_total IS NOT DISTINCT FROM $7`;
+
+/**
+ * „Eilutė ATITIKO CAS predikatą snapshot'e."
+ *
+ * ⚠️ KODĖL TO NEPAKANKA `EILUTE_YRA` (#180 P2-D).
+ *
+ * `EILUTE_YRA` sako tik tiek, kad eilutė snapshot'e buvo. Jei konkurentinis
+ * `DELETE` įsipatvirtina PO snapshot'o, bet PRIEŠ tai, kai CAS `UPDATE` gauna
+ * eilutės užraktą, `EvalPlanQual` mutaciją palieka be eilučių (`pakeista = 0`),
+ * o skaliarinis `EILUTE_YRA` tebemato SENĄ tuple'ą fiksuotame snapshot'e
+ * (`priezastis = 1`). Rezultatas būtų `"REJECTED"`, nors eilutės nebėra -
+ * kontraktas reikalauja `null`.
+ *
+ * `atitiko` atskiria dvi iš esmės skirtingas `pakeista = 0` priežastis:
+ *   - `atitiko = 0` → predikatas snapshot'e NESUTAPO: įvykis tikrai pasenęs;
+ *   - `atitiko = 1` → predikatas SUTAPO, bet mutacija vis tiek nepavyko, t. y.
+ *     eilutė sakinio metu buvo ištrinta arba pakeista (EPQ). Tik ŠIOJE
+ *     nesuderintoje šakoje reikia užrakinto perskaitymo.
+ */
+const EILUTE_ATITIKO = `SELECT count(*) FROM jobs WHERE ${PROGRESO_CAS_PREDIKATAS}`;
+
+/**
  * Kiek kartų kartojamas CAS po nesuderintos baigties.
  *
  * ⚠️ RIBA YRA ĮRODYMAS, NE ATSARGA. Kartojama TIK tada, kai `readJobForUpdate()`
@@ -763,29 +796,38 @@ function createPostgresStore(pool) {
       const result = await client.query(
         casSuKlasifikacija(
           `      UPDATE jobs SET ${sets}
-          WHERE id = $1 AND type = $2 AND status = $3
-            AND phase IS NOT DISTINCT FROM $4
-            AND progress_known IS NOT DISTINCT FROM $5
-            AND progress_current IS NOT DISTINCT FROM $6
-            AND progress_total IS NOT DISTINCT FROM $7
+          WHERE ${PROGRESO_CAS_PREDIKATAS}
         RETURNING id`,
-          EILUTE_YRA
+          EILUTE_YRA,
+          { atitiko: EILUTE_ATITIKO }
         ),
         [id, expected.type, expected.status, expected.phase, expected.progress_known,
           expected.progress_current, expected.progress_total,
           ...rasomi.map((c) => row[c])]
       );
-      const { pakeista, priezastis } = result.rows[0];
+      const { pakeista, priezastis, atitiko } = result.rows[0];
+      if (pakeista > 0) return readJob(client, id);
+
       /**
-       * ⚠️ KLASIFIKACIJA IŠ TO PATIES SAKINIO (#180 P2-3).
+       * ⚠️ KLASIFIKACIJA IŠ TO PATIES SAKINIO (#180 P2-3), PATIKSLINTA P2-D.
        *
-       * `priezastis` yra eilutės egzistavimas CAS snapshot'e, ne vėlesniame
-       * skaityme. Senoji forma (`readJobForUpdate()` po nepavykusio CAS)
-       * grąžindavo `null`, jei eilutę kas nors ištrindavo PO to, kai įvykis jau
-       * buvo atmestas kaip pasenęs - t. y. „job'o nėra" vietoj `"REJECTED"`.
+       * Predikatas snapshot'e NESUTAPO - baigtinis atsakymas, jokio vėlesnio
+       * skaitymo. `priezastis` skiria „eilutė buvo, bet įvykis pasenęs" nuo
+       * „eilutės apskritai nebuvo".
        */
-      if (pakeista === 0) return priezastis > 0 ? "REJECTED" : null;
-      return readJob(client, id);
+      if (atitiko === 0) return priezastis > 0 ? "REJECTED" : null;
+
+      /**
+       * ⚠️ NESUDERINTA BAIGTIS (EPQ): predikatas snapshot'e SUTAPO, tad mutacija
+       * turėjo pavykti, bet nepavyko. Vienintelė priežastis - eilutė sakinio
+       * metu ištrinta arba pakeista konkurentinės transakcijos.
+       *
+       * ⚠️ TAI NĖRA NEUŽRAKINTAS PO-CAS `SELECT`. Skaitymas užrakina eilutę ir
+       * kviečiamas TIK šioje jau įrodytai nesuderintoje šakoje - jis atskiria
+       * dvi likusias galimybes, o ne klasifikuoja bendrai.
+       */
+      const dabartine = await readJobForUpdate(client, id);
+      return dabartine ? "REJECTED" : null;
     });
   }
 

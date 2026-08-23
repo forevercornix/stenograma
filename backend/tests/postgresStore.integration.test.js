@@ -57,6 +57,37 @@ async function vykdyti(url, sql) {
  */
 const injekcijaSuRiba = sukurtiInjektoriu(() => pool);
 
+/**
+ * Laukia, kol kuri nors užklausa REALIAI užsiblokuoja ties eilutės užraktu.
+ *
+ * ⚠️ NE `sleep`. Tikrinama tikra sąlyga (`pg_stat_activity.wait_event_type =
+ * 'Lock'`), o riba egzistuoja tik tam, kad testas kristų su aiškia žinute, o ne
+ * kabotų, jei blokavimo taip ir neatsirastų.
+ */
+const UZRAKTO_RIBA_MS = 5000;
+
+async function laukiantUzblokuotoUzrakto(sablonas, kontekstas) {
+  const iki = Date.now() + UZRAKTO_RIBA_MS;
+  for (;;) {
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND state = 'active'
+          AND wait_event_type = 'Lock'
+          AND query LIKE $1`,
+      [sablonas]
+    );
+    if (rows[0].n > 0) return;
+    if (Date.now() > iki) {
+      throw new Error(
+        `${kontekstas}: per ${UZRAKTO_RIBA_MS} ms neužsiblokavo ties eilutės užraktu - ` +
+          "lenktynių eiliškumas nesusidarė, tad testas nieko neįrodytų"
+      );
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 async function rawInsert(stulpeliai) {
   const laukai = Object.keys(stulpeliai);
   const params = laukai.map((_, i) => `$${i + 1}`).join(", ");
@@ -1653,6 +1684,63 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       }
 
       await pool.query("DELETE FROM jobs WHERE id = $1", [id]);
+    }
+  );
+
+  await t.test(
+    "#180 P2-D: konkurentinis DELETE, kol CAS laukia užrakto, grąžina null (ne REJECTED)",
+    async () => {
+      /**
+       * ⚠️ TIKSLIAI TA EILIŠKUMO ATKARPA, KURIOS TRŪKO.
+       *
+       * Esami P2-3 testai ištrina eilutę PO to, kai CAS sakinys jau grąžino
+       * rezultatą. Čia `DELETE` įsipatvirtina TADA, KAI CAS `UPDATE` jau laukia
+       * eilutės užrakto:
+       *
+       *   1. T1 užrakina eilutę (`SELECT ... FOR UPDATE`);
+       *   2. `reportProgressAtomic()` pradedamas - jo CAS `UPDATE` blokuojasi;
+       *   3. T1 ištrina eilutę ir COMMIT'ina;
+       *   4. CAS atsiblokuoja, `EvalPlanQual` randa eilutę dingusią.
+       *
+       * Tada `pakeista = 0`, o skaliarinis `EILUTE_YRA` fiksuotame snapshot'e
+       * TEBEMATO seną tuple'ą. Be `atitiko` stulpelio rezultatas būtų
+       * `"REJECTED"`, nors eilutės nebėra - kontraktas reikalauja `null`.
+       *
+       * ⚠️ BLOKAVIMO LAUKIAMA PAGAL REALIĄ SĄLYGĄ (`pg_stat_activity`
+       * `wait_event_type = 'Lock'`), ne pagal fiksuotą `sleep`.
+       */
+      const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED });
+      await store.update(job.id, {
+        status: "processing", phase: "transcribing",
+        progressKnown: true, progress: { current: 1, total: 10 },
+      });
+
+      const t1 = await pool.connect();
+      let uzdaryta = false;
+      try {
+        await t1.query("BEGIN");
+        await t1.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE", [job.id]);
+
+        /** CAS startuoja ir užsiblokuoja ties T1 užraktu. */
+        const veikia = store.reportProgressAtomic(job.id, {
+          phase: "transcribing", progress: { current: 5, total: 10 },
+        });
+
+        await laukiantUzblokuotoUzrakto("%WITH mutacija AS%", "progreso CAS UPDATE");
+
+        /** Eilutė dingsta, kol CAS TEBELAUKIA. */
+        await t1.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+        await t1.query("COMMIT");
+        uzdaryta = true;
+
+        const outcome = await veikia;
+        assert.equal(outcome, null,
+          'eilutės nebėra - kontraktas reikalauja null, ne "REJECTED"');
+        assert.equal(await store.get(job.id), null, "prielaida: eilutė realiai ištrinta");
+      } finally {
+        if (!uzdaryta) await t1.query("ROLLBACK").catch(() => {});
+        t1.release();
+      }
     }
   );
 

@@ -234,7 +234,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
     return _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: "turinys nėra galiojantis JSON" });
   }
 
-  const contentCheck = _validateContent(parsed);
+  const contentCheck = await _validateContent(parsed);
   if (!contentCheck.valid) {
     return _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: contentCheck.reason });
   }
@@ -439,7 +439,7 @@ function _majorOf(version) {
 }
 
 /** Ar turinio struktūra tokia, kokios tikimės? */
-function _validateContent(parsed) {
+async function _validateContent(parsed) {
   if (!parsed || typeof parsed !== "object") return { valid: false, reason: "turinys nėra objektas" };
 
   for (const field of ["jobs", "audio"]) {
@@ -466,6 +466,29 @@ function _validateContent(parsed) {
   for (const job of parsed.jobs) {
     if (!job || typeof job !== "object" || !job.id) {
       return { valid: false, reason: "jobo įrašas be identifikatoriaus" };
+    }
+  }
+
+  /**
+   * ⚠️ BACKEND'O ATSTOVAUJAMUMO PREFLIGHT (#180 P2-E).
+   *
+   * `_apply()` pirma įrašo VISĄ audio, paskui job'us po vieną. Jei
+   * neatstovaujamas įrašas būtų pastebėtas tik jį pasiekus, ankstesni job'ai ir
+   * visas audio JAU BŪTŲ pritaikyti - deterministinė turinio klaida virstų
+   * DALINIU atkūrimu.
+   *
+   * Todėl VISI įrašai tikrinami ČIA, „dar NIEKO nekeičiam" fazėje. Naudojamas
+   * tas pats autoritetingas validatorius, kurį `restoreRecord()` kviečia kaip
+   * gynybą giliai viduje - tik anksčiau ir visiems iš karto.
+   */
+  for (const job of parsed.jobs) {
+    try {
+      await jobStore.assertRestorable(job);
+    } catch (e) {
+      return {
+        valid: false,
+        reason: `jobas ${job.id} neatstovaujamas aktyvioje saugykloje: ${e.message}`,
+      };
     }
   }
 
