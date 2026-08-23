@@ -644,3 +644,71 @@ test("SAUGUMAS: manifesto laukas su regex metaženklais NEPAVERČIAMAS reguliari
   assert.equal(result.completedSteps.includes(STEPS.APPLIED), false,
     "atmestas atkūrimas negali nieko pritaikyti");
 });
+
+test("SAUGUMAS: kopija su suklastotu job identifikatoriumi atmetama PRIEŠ bet kokią mutaciją", async () => {
+  /**
+   * ⚠️ CodeQL taint pėdsakas ėjo per BENDRĄ `memoryStore` `Map`.
+   *
+   * `restoreRecord()` priima kopijos turinį pažodžiui: `jobs.set(job.id, {...job})`
+   * be jokios `id` patikros (fasadas tikrino tik truthiness). Ranka redaguota
+   * kopija galėjo įrašyti bet kokią eilutę kaip identifikatorių, ir ji gyventų
+   * saugykloje - ją grąžintų `get()`, `listAll()`, ji patektų į atsakymus,
+   * žurnalus ir vėlesnes kopijas. Būtent taip užpuoliko valdoma reikšmė
+   * pasiekdavo `job.id` skaitytojus.
+   *
+   * Šiandien nė vienas produkcinis kelias iš `job.id` nekuria reguliariojo
+   * reiškinio, tad tai gynyba į gylį. Bet riba privalo būti uždara.
+   */
+  await jobStore.init();
+  await completedJob();
+
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  /** Suklastojam PIRMO job'o id ir perskaičiuojam kontrolinę sumą. */
+  const turinys = JSON.parse(backup.data.toString("utf8"));
+  assert.ok(turinys.jobs.length > 0, "prielaida: kopijoje yra bent vienas job'as");
+  const kenksmingasId = "(a+)+$|[";
+  turinys.jobs[0].id = kenksmingasId;
+
+  const naujiDuomenys = Buffer.from(JSON.stringify(turinys), "utf8");
+  const suklastotas = {
+    ...backup.manifest,
+    checksum: backupManifest.computeChecksum(naujiDuomenys),
+  };
+
+  const kiekPries = await jobStore.size();
+
+  const result = await restoreService.restoreBackup({
+    manifest: suklastotas,
+    data: naujiDuomenys,
+    actor: "sysadmin",
+  });
+
+  /** 1) Atmetama turinio patikros fazėje - PRIEŠ `_apply()`. */
+  assert.equal(result.ok, false, "suklastotas identifikatorius privalo nutraukti atkūrimą");
+  assert.equal(result.failedStep, STEPS.CONTENT,
+    "atmetimas privalo įvykti turinio patikros fazėje, kai dar niekas nepakeista");
+  assert.equal(result.completedSteps.includes(STEPS.APPLIED), false,
+    "atmestas atkūrimas negali nieko pritaikyti");
+
+  /** 2) ⚠️ ESMĖ: kenksminga reikšmė NEPATEKO į saugyklą. */
+  assert.equal(await jobStore.system.get(kenksmingasId), null,
+    "suklastotas identifikatorius negali atsidurti saugykloje");
+  assert.equal(await jobStore.size(), kiekPries,
+    "saugyklos dydis privalo likti nepakitęs - nė vienas įrašas nepritaikytas");
+});
+
+test("SAUGUMAS: teisėtas UUID identifikatorius atkuriamas be pakitimų (regresija)", async () => {
+  /** Riba negali atmesti nė vienos TEISĖTOS formos. */
+  await jobStore.init();
+  const job = await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  await jobStore.system.remove(job.id);
+  assert.equal(await jobStore.system.get(job.id), null, "prielaida: job'as pašalintas");
+
+  const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
+
+  assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
+  assert.ok(await jobStore.system.get(job.id), "teisėtas UUID job'as privalo grįžti");
+});

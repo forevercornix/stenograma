@@ -443,6 +443,40 @@ function assertScope(scope, method) {
   assertOwnerIdentity(scope, `jobStore.${method}()`);
 }
 
+/**
+ * ATKURIAMO ĮRAŠO TAPATYBĖ.
+ *
+ * ⚠️ `restoreRecord()` PRIIMA KOPIJOS TURINĮ PAŽODŽIUI.
+ *
+ * `memoryStore.restoreRecord()` daro `jobs.set(job.id, { ...job })`, o Redis -
+ * `hset` be jokios `id` patikros. Anksčiau čia buvo tik `!job.id` (truthiness),
+ * tad ranka redaguota kopija galėjo įrašyti BET KOKIĄ eilutę kaip identifikatorių
+ * ir ji gyventų saugykloje: ją grąžintų `get()`, `listAll()`, ji patektų į
+ * atsakymus, žurnalus ir vėlesnes kopijas.
+ *
+ * Tai išaiškėjo iš CodeQL „Regular expression injection" pėdsako: taint kelias
+ * ėjo per BENDRĄ `memoryStore` `Map` - t. y. iš atkurtos kopijos į bet kurį
+ * `job.id` skaitytoją. Produkcijoje šiandien nė vienas kelias iš `job.id`
+ * nekuria reguliariojo reiškinio, tad tai gynyba į gylį, ne aktyvi spraga.
+ *
+ * ⚠️ UUID, NE „NETUŠČIA". `newJob()` visada generuoja `crypto.randomUUID()`, o
+ * PostgreSQL stulpelis yra `uuid` - tad tai nesusiaurina nė vienos TEISĖTOS
+ * formos, tik uždaro memory/Redis kelią, kuriame tikrinimo nebuvo.
+ */
+const RESTORE_ID_FORMA =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertRestorableId(job) {
+  if (!job || typeof job !== "object" || typeof job.id !== "string" ||
+      !RESTORE_ID_FORMA.test(job.id)) {
+    const error = new Error(
+      "Atkuriamas jobas be galiojančio identifikatoriaus (laukiamas UUID)."
+    );
+    error.code = "RESTORE_RECORD_INVALID";
+    throw error;
+  }
+}
+
 module.exports = {
   init,
   /**
@@ -773,6 +807,7 @@ module.exports = {
    */
   assertRestorable: async (job) => {
     await ensureInit();
+    assertRestorableId(job);
     if (!store || store.backend !== "postgres") return;
     const { assertAtstovaujamasProgresas } = require("./postgresStore");
     assertAtstovaujamasProgresas(job);
@@ -781,11 +816,7 @@ module.exports = {
   restoreRecord: async (job) => {
     await ensureInit();
 
-    if (!job || !job.id) {
-      const error = new Error("Atkuriamas jobas be identifikatoriaus.");
-      error.code = "RESTORE_RECORD_INVALID";
-      throw error;
-    }
+    assertRestorableId(job);
 
     if (tombstones.isDeleted(job.id)) {
       log.warn("Atkūrimas praleido ištrintą jobą", { jobId: job.id });
