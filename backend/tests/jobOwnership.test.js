@@ -782,3 +782,52 @@ test("#180 P2-6: progreso CAS predikatas saugo TIKSLIAI žinomus komponentus", (
     "progress_total",
   ], "pasikeitus CAS predikatui privaloma atnaujinti ir izoliuotus lenktynių testus");
 });
+
+test("#180 CAS: update() taip pat stampuoja updated_at RAŠYMO metu", () => {
+  /**
+   * ⚠️ TAS PATS GEDIMAS KAIP CAS KELIUOSE.
+   *
+   * `update()` (per `writePatched()`) daro neužrakintą skaitymą ir po jo
+   * besąlyginį `UPDATE`. Laukiant svetimo eilutės užrakto, `applyPatch()` dar
+   * prieš laukimą užfiksuota `updatedAt` perrašytų konkurento naujesnę žymą
+   * atgal; užlaikymui viršijus `TTL_MS`, ką tik commit'inta eilutė iš karto
+   * taptų tinkama `sweepExpired()` valymui.
+   *
+   * MUTACIJOS ĮRODYMAS: grąžinus `updated_at` į parametrų sąrašą, `SET` vėl
+   * turi `"updated_at" = $n`, ir šis testas krinta.
+   */
+  const { createPostgresStore, jobToRow } = require("../utils/jobStore/postgresStore");
+
+  const esamas = newJob({ ownerKind: OWNER_KIND.UNOWNED });
+  let pagauta = null;
+  const client = {
+    query: async (sql) => {
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return { rows: [], rowCount: 0 };
+      if (/^\s*SELECT j\.\*/.test(sql)) {
+        const r = jobToRow(esamas);
+        r.artefacts = [];
+        return { rows: [r], rowCount: 1 };
+      }
+      if (/^UPDATE jobs SET/.test(sql)) {
+        pagauta = sql;
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => {},
+  };
+
+  return createPostgresStore({ connect: async () => client })
+    .update(esamas.id, { attempt_count: 3 })
+    .then(() => {
+      assert.ok(pagauta, "mutacija privalo būti įvykdyta");
+      const setDalis = pagauta.slice(0, pagauta.indexOf("WHERE"));
+      assert.ok(setDalis.includes("clock_timestamp()"),
+        `updated_at privalo būti skaičiuojamas rašymo metu: ${setDalis}`);
+      assert.equal(/"updated_at" = \$\d/.test(setDalis), false,
+        "updated_at negali būti perduodamas kaip pasenęs parametras");
+      /** Likę stulpeliai privalo likti parametrizuoti (be SQL injekcijos rizikos). */
+      assert.ok(setDalis.includes('"attempt_count" = $'),
+        "kiti stulpeliai privalo likti parametrais");
+    });
+});

@@ -348,6 +348,14 @@ function changedColumns(expected, row, patch = {}) {
 const LAIKO_ZYMA = `"updated_at" = GREATEST(updated_at, clock_timestamp())`;
 
 /**
+ * Rašomi stulpeliai BE `updated_at` - jį visada rašo `LAIKO_ZYMA` išraiška,
+ * tad parametru jis nebeperduodamas nė viename kelyje.
+ */
+const KINTAMI_BE_LAIKO = Object.freeze(
+  KINTAMI_STULPELIAI.filter((c) => c !== "updated_at")
+);
+
+/**
  * SĄLYGINĖ MUTACIJA IR JOS NESĖKMĖS KLASIFIKACIJA VIENAME SAKINYJE (#180 P2-3).
  *
  * ⚠️ ATSKIRAS SKAITYMAS PO NEPAVYKUSIO CAS YRA TOCTOU.
@@ -730,9 +738,21 @@ function createPostgresStore(pool) {
      * kelią, kuris jo neiškviečia — o `updateOwned` čia tuo pačiu keliu
      * atominiai autorizuoja kaip savininkas A. Sąrašas ribojamas ir SQL pusėje.
      */
-    const mutable = KINTAMI_STULPELIAI;
+    const mutable = KINTAMI_BE_LAIKO;
 
-    const sets = mutable.map((c, i) => `"${c}" = $${i + 2}`).join(", ");
+    /**
+     * ⚠️ LAIKO ŽYMA - RAŠYMO METU, ne prieš užrakto laukimą.
+     *
+     * `update()` daro neužrakintą skaitymą ir po jo BESĄLYGINĮ `UPDATE`. Jei tas
+     * `UPDATE` laukia svetimo eilutės užrakto, `applyPatch()` dar prieš laukimą
+     * užfiksuota `updatedAt` perrašytų konkurento naujesnę žymą atgal - tas pats
+     * gedimas kaip abiejuose CAS keliuose. Užlaikymui viršijus `TTL_MS`, ką tik
+     * commit'inta eilutė iš karto taptų tinkama `sweepExpired()` valymui.
+     */
+    const sets = [
+      ...mutable.map((c, i) => `"${c}" = $${i + 2}`),
+      LAIKO_ZYMA,
+    ].join(", ");
 
     await client.query(
       `UPDATE jobs SET ${sets} WHERE id = $1`,
