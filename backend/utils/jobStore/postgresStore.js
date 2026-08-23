@@ -193,12 +193,20 @@ const COLUMNS = [
  * nuosavybę ir erą atstato iš originalaus job'o, tad `jobToRow()` iki
  * `snake_case` patch'o net nepriėjo.
  *
- * 7.2b tą pakeitė. `changedColumns()` filtruoja per ŠIĄ aibę, ir per jį eina
- * abu sąlyginiai CAS keliai (`updateOwned()`, `reportProgressAtomic()`), o
- * `writePatched()` - per tą pačią aibę tiesiogiai. Nekintamumas dabar
- * tikrinamas ELGESIU: bendras kontraktų rinkinys siunčia patch'ą, bandantį
- * pakeisti tapatybę, nuosavybę ir erą, ir reikalauja, kad nė vienas backend'as
- * jos nepakeistų.
+ * 7.2b tą pakeitė. Filtras dabar YRA vykdomame kelyje: per `KINTAMI_STULPELIAI`
+ * eina abu sąlyginiai CAS keliai (`changedColumns()`) ir `writePatched()`.
+ *
+ * ⚠️ BET SĄŽININGAI: JIS TEBĖRA GYNYBA Į GYLĮ, NE VIENINTELĖ APSAUGA.
+ *
+ * Nekintamų stulpelių į `SET` neįleidžia ir be jo: `applyPatch()` tapatybę,
+ * nuosavybę bei erą atstato iš originalaus job'o (tad reikšmė nesiskiria ir į
+ * skirtumą nepatenka), o `PATCH_STULPELIAI` neturi nė vieno nekintamo lauko
+ * rakto. Patikrinta mutacija: pašalinus filtrą iš šios aibės, nė vienas testas
+ * NEKRINTA - nes elgesys nepasikeičia.
+ *
+ * Todėl bendro kontrakto testas („patch'as negali pakeisti tapatybės") įrodo
+ * REZULTATĄ, o ne šį filtrą atskirai. Filtras laikomas dėl to, kad garantija,
+ * kurią duoda vien `applyPatch()`, dingtų pirmam keliui, kuris jo neiškviečia.
  *
  * `jobOwnership.test.js` papildomai tikrina, kad ši aibė sutampa su
  * `applyPatch()` saugomais camelCase laukais - kitaip atsirastų laukas, kurį
@@ -213,6 +221,19 @@ const IMMUTABLE_COLUMNS = new Set([
   "schema_version",
   "created_at",
 ]);
+
+/**
+ * STULPELIAI, KURIUOS APSKRITAI GALIMA RAŠYTI.
+ *
+ * ⚠️ VIENA IŠVESTIS, NE KELIOS KOPIJOS (#180 P3-12). Filtras
+ * `COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c))` anksčiau buvo perrašytas
+ * kiekviename mutacijos kelyje. Trys kopijos to paties sprendimo neišvengiamai
+ * išsiskiria - pakanka vienoje vietoje pamiršti `IMMUTABLE_COLUMNS`, ir
+ * nekintamumo garantija dingsta būtent tame kelyje.
+ */
+const KINTAMI_STULPELIAI = Object.freeze(
+  COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c))
+);
 
 /**
  * PATCH LAUKAS → STULPELIAI, KURIUOS JIS RAŠO.
@@ -305,9 +326,8 @@ function changedColumns(expected, row, patch = {}) {
    * ⚠️ `updated_at` ČIA NEBEĮTRAUKIAMAS. Jį rašo SQL išraiška rašymo METU
    * (žr. `LAIKO_ZYMA`), ne pasenusi JS reikšmė - todėl jis nėra parametras.
    */
-  return COLUMNS.filter(
-    (c) => !IMMUTABLE_COLUMNS.has(c) && c !== "updated_at" &&
-      (patchStulpeliai.has(c) || row[c] !== expected[c])
+  return KINTAMI_STULPELIAI.filter(
+    (c) => c !== "updated_at" && (patchStulpeliai.has(c) || row[c] !== expected[c])
   );
 }
 
@@ -710,7 +730,7 @@ function createPostgresStore(pool) {
      * kelią, kuris jo neiškviečia — o `updateOwned` čia tuo pačiu keliu
      * atominiai autorizuoja kaip savininkas A. Sąrašas ribojamas ir SQL pusėje.
      */
-    const mutable = COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c));
+    const mutable = KINTAMI_STULPELIAI;
 
     const sets = mutable.map((c, i) => `"${c}" = $${i + 2}`).join(", ");
 
@@ -1053,6 +1073,7 @@ module.exports = {
   COLUMNS,
   DuplicateJobError,
   PATCH_STULPELIAI,
+  PROGRESO_CAS_PREDIKATAS,
   UnsupportedProgressError,
   assertAtstovaujamasProgresas,
 };

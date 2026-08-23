@@ -746,3 +746,39 @@ test("#180 CAS: eksplicitiškai nurodytas laukas rašomas NET jei sutampa su sna
         "updated_at negali būti perduodamas kaip pasenęs parametras");
     });
 });
+
+test("#180 P2-6: progreso CAS predikatas saugo TIKSLIAI žinomus komponentus", () => {
+  /**
+   * ⚠️ SARGAS PRIEŠ TYLŲ NUOKRYPĮ.
+   *
+   * `postgresStore.integration` izoliacijos testai tikrina po VIENĄ predikato
+   * komponentą. Jų saugomų laukų sąrašas išvedamas iš paties predikato, tad
+   * rankinio nuokrypio nebėra - bet naujas komponentas vis tiek liktų BE
+   * izoliuoto testo, o pašalintas dingtų nepastebėtas.
+   *
+   * Šis tikrinimas veikia BE PostgreSQL, tad krinta jau `npm test` metu ir
+   * priverčia sąmoningai atnaujinti įrodymus.
+   *
+   * ⚠️ TAI STRUKTŪRINIS SARGAS (AGENTS.md §9.2), ne elgesio įrodymas: jis sako,
+   * KURIE komponentai saugomi, o ne kad kiekvienas realiai atmeta pasenusį
+   * įvykį. Elgesį įrodo izoliuoti lenktynių testai.
+   */
+  const { PROGRESO_CAS_PREDIKATAS } = require("../utils/jobStore/postgresStore");
+
+  const komponentai = [
+    ...new Set(
+      [...PROGRESO_CAS_PREDIKATAS.matchAll(/([a-z_]+)\s+(?:IS NOT DISTINCT FROM|=)\s+\$/g)]
+        .map((m) => m[1])
+    ),
+  ];
+
+  assert.deepEqual(komponentai, [
+    "id",
+    "type",
+    "status",
+    "phase",
+    "progress_known",
+    "progress_current",
+    "progress_total",
+  ], "pasikeitus CAS predikatui privaloma atnaujinti ir izoliuotus lenktynių testus");
+});

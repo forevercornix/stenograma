@@ -17,6 +17,7 @@ const {
   DuplicateJobError,
   TENANT_SENTINEL,
   IMMUTABLE_COLUMNS,
+  PROGRESO_CAS_PREDIKATAS,
 } = require("../utils/jobStore/postgresStore");
 const memoryStore = require("../utils/jobStore/memoryStore");
 const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
@@ -1237,10 +1238,23 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
    * injekcijos, ir skirtumų aibė privalo būti lygiai `[<komponentas>]`.
    * ─────────────────────────────────────────────────────────────────────── */
 
-  /** Laukai, kuriuos saugo progreso CAS predikatas (`$2..$7`). */
+  /**
+   * Laukai, kuriuos saugo progreso CAS predikatas.
+   *
+   * ⚠️ IŠVEDAMA IŠ PRODUKCINIO PREDIKATO, NE PERRAŠOMA RANKA (#180 P2-6).
+   *
+   * Rankinis sąrašas tyliai atsiliktų: pridėjus septintą komponentą į CAS,
+   * izoliacijos tikrinimai jo tiesiog nebedengtų, o testai liktų žali. Dabar
+   * vardai imami iš to paties `PROGRESO_CAS_PREDIKATAS`, kurį vykdo store, tad
+   * nuokrypis neįmanomas iš principo. `id` praleidžiamas - jis parenka eilutę,
+   * o ne saugo kintamą būseną.
+   */
   const SAUGOMI_LAUKAI = [
-    "type", "status", "phase",
-    "progress_known", "progress_current", "progress_total",
+    ...new Set(
+      [...PROGRESO_CAS_PREDIKATAS.matchAll(/([a-z_]+)\s+(?:IS NOT DISTINCT FROM|=)\s+\$/g)]
+        .map((m) => m[1])
+        .filter((c) => c !== "id")
+    ),
   ];
 
   /** NULL-safe skirtumų aibė tarp CAS snapshot'o ir realios eilutės būsenos. */
