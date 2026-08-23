@@ -555,7 +555,17 @@ test("#180 P2-E: neatstovaujamas įrašas atmetamas PRIEŠ bet kokią atkūrimo 
     assert.equal(result.failedStep, STEPS.CONTENT,
       "klaida privalo kilti TURINIO patikros fazėje, ne pritaikymo metu");
     assert.match(result.reason, /neatstovaujamas aktyvioje saugykloje/);
-    assert.match(result.reason, new RegExp(neatstovaujamas));
+    /**
+     * ⚠️ LITERALUS PALYGINIMAS, NE `new RegExp(kintamasis)`.
+     *
+     * Anksčiau čia buvo `assert.match(result.reason, new RegExp(neatstovaujamas))`.
+     * Dinamiškai kuriamas reguliarusis reiškinys iš kintamojo yra regex
+     * injekcijos šablonas: reikšmei kada nors turint metaženklų, tikrinimas
+     * arba mestų `SyntaxError`, arba TYLIAI imtų reikšti ką kita. `includes()`
+     * lygina tiksliai ir metaženklų neinterpretuoja.
+     */
+    assert.ok(result.reason.includes(neatstovaujamas),
+      `priežastis privalo įvardyti neatstovaujamą įrašą: ${result.reason}`);
 
     /** ⚠️ ESMĖ: patikrinti VISI, pritaikyta NIEKO. */
     assert.ok(tikrinta >= 2,
@@ -578,4 +588,59 @@ test("#180 P2-E: neatstovaujamas įrašas atmetamas PRIEŠ bet kokią atkūrimo 
   assert.equal(jobStore.assertRestorable, tikriVeiksmai.assertRestorable);
   assert.equal(jobStore.restoreRecord, tikriVeiksmai.restoreRecord);
   assert.equal(fileStorage.putAtKey, tikriVeiksmai.putAtKey);
+});
+
+test("SAUGUMAS: manifesto laukas su regex metaženklais NEPAVERČIAMAS reguliariuoju reiškiniu", async () => {
+  /**
+   * ⚠️ CodeQL „Regular expression injection" HIGH radinys (PR #208).
+   *
+   * Užpuoliko valdomas `manifest` ateina tiesiai iš `req.files.manifest[0]`
+   * (`routes/backup.js`) ir nefiltruotas pasiekia `restoreService`. Šis testas
+   * fiksuoja PRODUKCINĘ ribą: nė vienas manifesto laukas neturi patekti į
+   * reguliariojo reiškinio SINTAKSĘ.
+   *
+   * ⚠️ NAUDOJAMAS SĄMONINGAI NEGALIOJANTIS ŠABLONAS. `(a+)+$|[` turi
+   * neuždarytą simbolių klasę, tad `new RegExp()` jam mestų `SyntaxError`.
+   * Jei kuris nors kelias jį kompiliuotų, testas kristų su išimtimi - o
+   * `(a+)+` dar ir sukeltų katastrofinį grįžimą atgal (ReDoS), kurį pagautų
+   * laiko riba. Tai, kad atkūrimas ramiai grąžina klaidą, įrodo LITERALŲ
+   * apdorojimą (`String.prototype.replace()` su eilute, ne su regex).
+   */
+  await jobStore.init();
+  await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  const kenksmingas = "aes-256-gcm-(a+)+$|[";
+  const suklastotas = {
+    ...backup.manifest,
+    encrypted: true,
+    encryptionAlgorithm: kenksmingas,
+  };
+
+  const pradzia = Date.now();
+  const result = await restoreService.restoreBackup({
+    manifest: suklastotas,
+    data: backup.data,
+    actor: "sysadmin",
+  });
+  const truko = Date.now() - pradzia;
+
+  /** 1) Atmetama kontroliuojamai, be išimties. */
+  assert.equal(result.ok, false, "suklastotas algoritmas privalo būti atmestas");
+  assert.equal(result.failedStep, STEPS.DECRYPTED,
+    "atmetimas privalo įvykti šifravimo patikros žingsnyje");
+
+  /**
+   * 2) ⚠️ ESMĖ: reikšmė grąžinama PAŽODŽIUI. Jei ji būtų buvusi kompiliuota ar
+   * interpretuota kaip šablonas, čia matytume arba išimtį, arba pakeistą tekstą.
+   */
+  assert.ok(result.reason.includes(kenksmingas),
+    `metaženklai privalo išlikti nepakeisti: ${result.reason}`);
+
+  /** 3) Jokio katastrofinio grįžimo atgal - `(a+)+` niekada nebuvo vykdomas. */
+  assert.ok(truko < 2000, `atkūrimas užtruko ${truko} ms - įtartina dėl ReDoS`);
+
+  /** 4) Gyva būsena nepaliesta. */
+  assert.equal(result.completedSteps.includes(STEPS.APPLIED), false,
+    "atmestas atkūrimas negali nieko pritaikyti");
 });
