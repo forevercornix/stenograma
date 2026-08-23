@@ -44,9 +44,28 @@ function sukurtiResursuKruva() {
   const irasai = [];
 
   return {
-    /** Registruoja jau SUKURTĄ resursą. Kviesti iš karto po sukūrimo. */
+    /**
+     * Registruoja jau SUKURTĄ resursą. Kviesti iš karto po sukūrimo.
+     *
+     * ⚠️ GRĄŽINA UŽDARYMO RANKENĄ, IR TAI SVARBU.
+     *
+     * Kai kuriuos resursus sėkmės kelias uždaro ANKSTI (pvz. admin `Pool`
+     * nebereikalingas iš karto po `CREATE DATABASE`). Uždarius juos TIESIOGIAI
+     * (`admin.end()`), krūva apie tai nesužino: `vienaKarta()` skaičiuoja tik
+     * per JĄ einančius kvietimus, tad `isvalyti()` vėliau iškviestų `end()`
+     * ANTRĄ kartą. Tikras `pg.Pool` tokiu atveju meta
+     * „Called end on pool more than once".
+     *
+     * Todėl ankstyvas uždarymas privalo eiti per ŠIĄ rankeną - tada nuosavybė
+     * lieka viena, o `isvalyti()` tampa tuščiu veiksmu.
+     *
+     * @returns {() => Promise<boolean>} `true` - uždaryta dabar, `false` - jau
+     *   buvo uždaryta anksčiau.
+     */
     registruoti(kas, veiksmas) {
-      irasai.push({ kas, veiksmas: vienaKarta(veiksmas) });
+      const uzdaryti = vienaKarta(veiksmas);
+      irasai.push({ kas, veiksmas: uzdaryti });
+      return uzdaryti;
     },
 
     /** Kiek resursų šiuo metu laikoma (diagnostikai ir testams). */

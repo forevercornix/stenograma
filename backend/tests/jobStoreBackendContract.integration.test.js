@@ -385,11 +385,12 @@ const ADAPTERIAI = [
       const url = testDatabaseUrl("backend_contract");
       const dbName = new URL(url).pathname.slice(1);
       const admin = new Pool({ connectionString: adminDatabaseUrl() });
-      resursai.registruoti("admin pool", () => admin.end());
+      const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
       await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
       await admin.query(`CREATE DATABASE "${dbName}"`);
       resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
-      await admin.end();
+      /** ⚠️ Uždaroma PER KRŪVOS RANKENĄ - kitaip `isvalyti()` uždarytų antrą kartą. */
+      await uzdarytiAdmin();
       execFileSync("npx", ["node-pg-migrate", "up"], {
         cwd: path.resolve(__dirname, ".."), env: { ...process.env, DATABASE_URL: url },
         stdio: ["ignore", "pipe", "pipe"],
@@ -651,11 +652,12 @@ test(
     const url = testDatabaseUrl("backend_contract_sintetine");
     const dbName = new URL(url).pathname.slice(1);
     const admin = new Pool({ connectionString: adminDatabaseUrl() });
-    resursai.registruoti("admin pool", () => admin.end());
+    const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
     await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
     await admin.query(`CREATE DATABASE "${dbName}"`);
     resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
-    await admin.end();
+    /** ⚠️ Uždaroma PER KRŪVOS RANKENĄ (žr. produkcinės schemos adapterį). */
+    await uzdarytiAdmin();
     execFileSync("npx", ["node-pg-migrate", "up"], {
       cwd: path.resolve(__dirname, ".."),
       env: { ...process.env, DATABASE_URL: url },
@@ -722,6 +724,66 @@ test(
  * darbinis pool'as. Tikras serveris tam nereikalingas ir jo laukimas paliktų
  * mechanizmą neišbandytą.
  */
+/**
+ * Netikras resursas, ELGIANTIS KAIP `pg.Pool` (#180 P2-A regresija).
+ *
+ * ⚠️ ANKSTESNIS NETIKRAS RESURSAS BUVO PER ATLAIDUS. Jis tik pridėdavo įrašą į
+ * masyvą, tad ANTRAS uždarymas atrodydavo nekaltas. Tikras `pg.Pool` tokiu
+ * atveju meta „Called end on pool more than once" - ir būtent tai nutiko realiame
+ * PostgreSQL CI, kai admin pool'as buvo uždaromas TIESIOGIAI, o paskui dar kartą
+ * per krūvą. Netikras resursas privalo būti toks pat griežtas, kitaip ta pati
+ * regresija vėl praeitų pro testus.
+ */
+function netikrasResursas(vardas, zurnalas) {
+  let uzdarytas = false;
+  return async () => {
+    if (uzdarytas) {
+      throw new Error(`Called end on pool more than once: ${vardas}`);
+    }
+    uzdarytas = true;
+    zurnalas.push(vardas);
+  };
+}
+
+/**
+ * #180 P2-A: TIKROJI setup gyvavimo seka - ankstyvas uždarymas + valymas.
+ *
+ * ⚠️ ŠI SEKA IR SUGEDO REALIAME CI. `admin` pool'as buvo registruojamas krūvoje,
+ * o paskui sėkmės kelyje uždaromas TIESIOGIAI (`admin.end()`). `vienaKarta()`
+ * skaičiuoja tik per krūvą einančius kvietimus, tad `isvalyti()` uždarydavo jį
+ * ANTRĄ kartą ir abu PostgreSQL kontrakto testai krisdavo su
+ * „resursų valymas nepavyko: admin pool: Called end on pool more than once".
+ *
+ * Dabar ankstyvas uždarymas eina PER `registruoti()` grąžintą rankeną, tad
+ * nuosavybė lieka viena.
+ */
+test("KONTRAKTAS: anksti uždarytas resursas nebeuždaromas per valymą (P2-A)", async () => {
+  const uzdaryta = [];
+  const resursai = sukurtiResursuKruva();
+
+  const uzdarytiAdmin = resursai.registruoti("admin pool", netikrasResursas("admin pool", uzdaryta));
+  resursai.registruoti("laikina DB", netikrasResursas("laikina DB", uzdaryta));
+  resursai.registruoti("darbinis pool", netikrasResursas("darbinis pool", uzdaryta));
+
+  /** Sėkmės kelias: admin pool'as nebereikalingas iš karto po DB sukūrimo. */
+  assert.equal(await uzdarytiAdmin(), true, "pirmas uždarymas privalo realiai uždaryti");
+  assert.deepEqual(uzdaryta, ["admin pool"]);
+
+  /** Pakartotinis ankstyvas uždarymas irgi saugus - rankena idempotentiška. */
+  assert.equal(await uzdarytiAdmin(), false, "antras uždarymas privalo būti tuščias veiksmas");
+
+  /**
+   * ⚠️ ESMĖ: `isvalyti()` NEGALI uždaryti admin pool'o dar kartą. Su tiesioginiu
+   * `admin.end()` čia būtų mesta „Called end on pool more than once", ir klaida
+   * atkeliautų kaip `resursų valymas nepavyko: …`.
+   */
+  await resursai.isvalyti();
+
+  assert.deepEqual(uzdaryta, ["admin pool", "darbinis pool", "laikina DB"],
+    "kiekvienas resursas privalo būti uždarytas TIKSLIAI kartą, likusieji - atvirkštine tvarka");
+  assert.equal(resursai.kiek(), 0, "krūva po valymo privalo būti tuščia");
+});
+
 test("KONTRAKTAS: nebaigtas setup() sutvarko jau sukurtus resursus (P2-A)", async () => {
   const etapai = ["admin pool", "laikina DB", "darbinis pool"];
 
@@ -733,7 +795,7 @@ test("KONTRAKTAS: nebaigtas setup() sutvarko jau sukurtus resursus (P2-A)", asyn
     let gauta = null;
     try {
       for (let i = 0; i < etapai.length; i++) {
-        resursai.registruoti(etapai[i], async () => uzdaryta.push(etapai[i]));
+        resursai.registruoti(etapai[i], netikrasResursas(etapai[i], uzdaryta));
         if (i === luzta) throw pirmine;
       }
     } catch (e) {
