@@ -543,3 +543,69 @@ test("#180 P2-2: postgresStore.updateOwned() rašo TIK patch'o stulpelius, nuosa
   assert.equal(pagauta.params.length, 3 + stulpeliai.length,
     "parametrų skaičius privalo atitikti SET sąrašą");
 });
+
+test("#180 P2-C: PostgreSQL atkūrimas KRENTA UŽDARAI dėl neatstovaujamo progreso", async () => {
+  /**
+   * ⚠️ VEIKIA BE PostgreSQL - ir todėl paleidžiamas kiekviename `npm test`.
+   *
+   * `restoreRecord()` yra vienintelis kelias, aplenkiantis progreso validaciją
+   * (`restoreService._validateContent()` tikrina tik `id`). Ranka redaguota ar
+   * sugadinta kopija su skaitinėmis EILUTĖMIS arba įdėtais metaduomenimis
+   * pasiektų `double precision` parametrus ir būtų TYLIAI perinterpretuota /
+   * nukirpta. Option C tokias būsenas laiko struktūriškai neatstovaujamomis,
+   * tad atkūrimas privalo kristi.
+   *
+   * ⚠️ TIKRINAMA IR TAI, KAD NIEKO NEBUVO VYKDOMA. `restoreRecord()` daro
+   * `DELETE` + `INSERT`; jei patikra būtų PO destruktyvaus žingsnio, netinkamas
+   * įrašas ištrintų esamą ir tik tada kristų.
+   */
+  const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+
+  const bazinis = {
+    id: "33333333-3333-4333-8333-333333333333",
+    type: "transcription", status: "processing", phase: "transcribing",
+    ownerKind: OWNER_KIND.UNOWNED, ownerId: null, tenantId: null, artefacts: [],
+    created_at: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  const vykdytos = [];
+  const pool = {
+    connect: async () => ({
+      query: async (sql) => { vykdytos.push(String(sql).trim().slice(0, 24)); return { rows: [], rowCount: 0 }; },
+      release: () => {},
+    }),
+    query: async () => ({ rows: [] }),
+  };
+  const store = createPostgresStore(pool);
+
+  const netinkami = [
+    ["skaitinės eilutės", { progressKnown: true, progress: { current: "8", total: "10" } }, /nėra baigtinis SKAIČIUS/],
+    ["įdėti metaduomenys", { progressKnown: true, progress: { metadata: { total: 20 }, current: 5, total: 10 } }, /laisvos formos raktų/],
+    ["progressKnown be progreso", { progressKnown: true, progress: null }, /reikalauja \{ current, total \}/],
+    ["progresas be progressKnown", { progressKnown: false, progress: { current: 5, total: 10 } }, /tyliai prarastos/],
+    ["NaN reikšmė", { progressKnown: true, progress: { current: NaN, total: 10 } }, /nėra baigtinis SKAIČIUS/],
+  ];
+
+  for (const [pavadinimas, progresas, sablonas] of netinkami) {
+    vykdytos.length = 0;
+    await assert.rejects(
+      () => store.restoreRecord({ ...bazinis, ...progresas }),
+      (e) => e.code === "UNSUPPORTED_PROGRESS_REPRESENTATION" && sablonas.test(e.message),
+      `${pavadinimas}: atkūrimas privalo kristi uždarai`
+    );
+    /** ⚠️ ESMĖ: nė viena užklausa - taigi nė vienas `DELETE` - neįvyko. */
+    assert.deepEqual(vykdytos, [],
+      `${pavadinimas}: patikra privalo įvykti PRIEŠ destruktyvų DELETE`);
+  }
+
+  /** Teisėtos formos privalo praeiti nepakitusios. */
+  for (const [pavadinimas, progresas] of [
+    ["skaitinis progresas", { progressKnown: true, progress: { current: 5, total: 10 } }],
+    ["be progreso", { progressKnown: false, progress: null }],
+    ["legacy be progressKnown", {}],
+  ]) {
+    vykdytos.length = 0;
+    await store.restoreRecord({ ...bazinis, ...progresas });
+    assert.ok(vykdytos.length > 0, `${pavadinimas}: teisėtas įrašas privalo būti atkurtas`);
+  }
+});

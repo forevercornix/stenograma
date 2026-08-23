@@ -4,6 +4,7 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const { sukurtiInjektoriu } = require("./helpers/raceInjection");
 
 const {
   skipWithoutPostgres,
@@ -50,6 +51,12 @@ async function vykdyti(url, sql) {
 }
 
 /** Įrašo eilutę APEINANT store'ą - kad būtų tikrinamas DB, ne JS. */
+/**
+ * Lenktynių injekcija su laiko riba (#180 P3-10) - žr. `helpers/raceInjection.js`.
+ * Pool'as imamas tingiai: jis priskiriamas tik testo paruošime.
+ */
+const injekcijaSuRiba = sukurtiInjektoriu(() => pool);
+
 async function rawInsert(stulpeliai) {
   const laukai = Object.keys(stulpeliai);
   const params = laukai.map((_, i) => `$${i + 1}`).join(", ");
@@ -660,11 +667,11 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
           query: async (sql, params) => {
             if (!intercepted && /^WITH mutacija AS/.test(sql) && /progress_known IS NOT DISTINCT FROM/.test(sql)) {
               intercepted = true;
-              await pool.query(
+              await injekcijaSuRiba(
                 "UPDATE jobs SET phase = 'diarizing', progress_known = false, " +
                   "progress_current = NULL, progress_total = NULL WHERE id = $1",
-                [job.id]
-              );
+                [job.id],
+                "progreso CAS: pasikeitusi faze");
               const result = await client.query(sql, params);
               casRowCount = result.rows[0].pakeista;
               return result;
@@ -700,11 +707,11 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
         return { release: () => client.release(), query: async (sql, params) => {
           if (!intercepted && /^WITH mutacija AS/.test(sql) && /type = \$2/.test(sql)) {
             intercepted = true;
-            await pool.query(
+            await injekcijaSuRiba(
               "UPDATE jobs SET type = 'protocol', phase = 'generating_protocol', " +
                 "progress_known = false, progress_current = NULL, progress_total = NULL WHERE id = $1",
-              [job.id]
-            );
+              [job.id],
+              "progreso CAS: pasikeites tipas");
             const result = await client.query(sql, params);
             casRowCount = result.rows[0].pakeista;
             return result;
@@ -732,7 +739,8 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
         const client = await pool.connect();
         return { release: () => client.release(), query: async (sql, params) => {
           if (casRowCount === null && /^WITH mutacija AS/.test(sql) && /owner_id IS NOT DISTINCT FROM/.test(sql)) {
-            await pool.query("UPDATE jobs SET owner_id = $2 WHERE id = $1", [job.id, UUID_B]);
+            await injekcijaSuRiba("UPDATE jobs SET owner_id = $2 WHERE id = $1", [job.id, UUID_B],
+              "nuosavybes CAS: pasikeites scope");
             const result = await client.query(sql, params);
             casRowCount = result.rows[0].pakeista;
             return result;
@@ -750,30 +758,72 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
   });
 
 
-  await t.test("7.2b removeOwned neklasifikuoja naujai atsiradusio matching job kaip FORBIDDEN", async () => {
-    const id = crypto.randomUUID();
-    const scope = { ownerKind: "user", ownerId: UUID_A };
-    let inserted = false;
-    const racingPool = {
-      connect: async () => {
-        const client = await pool.connect();
-        return { release: () => client.release(), query: async (sql, params) => {
-          if (!inserted && /FOR UPDATE OF j/.test(sql)) {
-            inserted = true;
-            await rawInsert(bazineEilute({ id, owner_kind: scope.ownerKind, owner_id: scope.ownerId }));
-          }
-          return client.query(sql, params);
-        } };
-      }, end: async () => {},
-    };
+  await t.test(
+    "#180 P2-B: po CAS atsiradusi eilutė NEIŠTRINAMA ir nevirsta FORBIDDEN",
+    async () => {
+      /**
+       * ⚠️ ŠIS TESTAS PAKEITĖ ANKSTESNĮ 7.2b VARIANTĄ.
+       *
+       * Anksčiau čia buvo tikrinama, kad po CAS atsiradusi SAVA eilutė
+       * pakartotinai ištrinama ir grąžinama `true`. MVCC peržiūra parodė, kad
+       * tai neteisinga: eilutės, atsiradusios JAU PO operacijos snapshot'o,
+       * kvietėjas niekada neprašė šalinti - `restoreRecord()` (DELETE + INSERT)
+       * ką tik atkurtas įrašas būtų tyliai sunaikintas, o atsakymas skelbtų
+       * sėkmę.
+       *
+       * Kontraktas (#180, 2 punktas): „job neegzistuoja → false". CAS
+       * snapshot'e eilutės nebuvo, tad `false`.
+       *
+       * MUTACIJOS ĮRODYMAS: pašalinus `buvo === 0` trumpąjį kelią ir grąžinus
+       * pakartojimą per `readJobForUpdate()`, `outcome` taptų `true`, o įterpta
+       * eilutė - ištrinta; abu žemiau esantys tikrinimai krinta.
+       */
+      const id = crypto.randomUUID();
+      const scope = { ownerKind: "user", ownerId: UUID_A };
 
-    const outcome = await createPostgresStore(racingPool).removeOwned(id, scope);
-    assert.equal(inserted, true, "matching eilutė įterpta tarp CAS ir klasifikavimo");
-    assert.equal(outcome, true,
-      "matching eilutė turi būti pakartotinai mutuota, ne klaidingai klasifikuota FORBIDDEN");
-    assert.equal(await store.get(id), null);
-  });
+      let intercepted = false;
+      let casBuvo = null;
+      let casPakeista = null;
+      const racingPool = {
+        connect: async () => {
+          const client = await pool.connect();
+          return {
+            release: () => client.release(),
+            query: async (sql, params) => {
+              if (!intercepted && /^WITH mutacija AS/.test(sql) && /DELETE FROM jobs/.test(sql)) {
+                intercepted = true;
+                const result = await client.query(sql, params);
+                casBuvo = result.rows[0].buvo;
+                casPakeista = result.rows[0].pakeista;
+                /** SAVA eilutė atsiranda TIK PO CAS - jos snapshot'e nebuvo. */
+                await rawInsert(bazineEilute({
+                  id, owner_kind: scope.ownerKind, owner_id: scope.ownerId,
+                }));
+                return result;
+              }
+              return client.query(sql, params);
+            },
+          };
+        },
+        end: async () => {},
+      };
 
+      const outcome = await createPostgresStore(racingPool).removeOwned(id, scope);
+
+      assert.equal(intercepted, true, "prielaida: CAS perimtas");
+      assert.equal(casPakeista, 0, "CAS privalo pakeisti 0 eilučių");
+      assert.equal(casBuvo, 0, "CAS snapshot'e eilutės NEBUVO");
+      assert.equal(outcome, false,
+        "po snapshot'o atsiradusi eilutė negali paversti atsakymo į true (nei į FORBIDDEN)");
+
+      /** ⚠️ ESMĖ: naujoji inkarnacija privalo IŠLIKTI. */
+      const naujoji = await store.get(id);
+      assert.notEqual(naujoji, null,
+        "eilutė, sukurta po operacijos snapshot'o, negali būti ištrinta");
+      assert.equal(naujoji.ownerId, UUID_A);
+      await pool.query("DELETE FROM jobs WHERE id = $1", [id]);
+    }
+  );
 
   await t.test("7.2b klaida po job CAS rollbackina job ir result, o connection grįžta pool'ui", async () => {
     const scope = { ownerKind: OWNER_KIND.UNOWNED, ownerId: null };
@@ -782,16 +832,58 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     const cyclic = {};
     cyclic.self = cyclic;
 
+    /**
+     * ⚠️ SENOS JUNGTIES PATIKROS BUVO TIESA IR GEDIMO ATVEJU (#180 P3-9).
+     *
+     * `pool.waitingCount === 0` galioja visada, kol pool'as neišsemtas, o
+     * `pool.query("SELECT 1")` pavyksta net nutekėjus vienam klientui
+     * (numatytas `max` = 10). Abi patikros praeidavo IR tada, kai `release()`
+     * nebūdavo iškviestas - t. y. „connection grąžintas" buvo TEIGIAMA, ne
+     * įrodoma.
+     *
+     * Dabar sekamas KONKRETUS transakcijos klientas: `release()` privalo būti
+     * iškviestas lygiai vieną kartą. Vienos jungties nutekėjimas krinta iš
+     * karto, nelaukiant, kol pool'as išseks.
+     */
+    let prisijungimai = 0;
+    let atlaisvinimai = 0;
+    const stebimasPool = {
+      connect: async () => {
+        prisijungimai++;
+        const klientas = await pool.connect();
+        return {
+          query: (...a) => klientas.query(...a),
+          release: (...a) => { atlaisvinimai++; return klientas.release(...a); },
+        };
+      },
+      end: async () => {},
+    };
+
+    const laisviPries = pool.idleCount;
+
     await assert.rejects(
-      () => store.updateOwned(job.id, { requestId: "must-rollback", result: cyclic }, scope),
+      () => createPostgresStore(stebimasPool)
+        .updateOwned(job.id, { requestId: "must-rollback", result: cyclic }, scope),
       (err) => err instanceof TypeError
     );
+
+    /** Rollback įrodymas nepakito. */
     const after = await store.get(job.id);
     assert.equal(after.requestId, null, "jobs UPDATE turi būti rollbackintas");
     assert.deepEqual(after.result, { version: "before" }, "job_results turi likti suderintas");
-    assert.equal(pool.waitingCount, 0, "connection neturi likti laukianti pool'e");
-    await assert.doesNotReject(() => pool.query("SELECT 1"),
-      "connection po rollback turi būti grąžintas pool'ui");
+
+    /** ⚠️ ESMINIS P3-9 ĮRODYMAS. */
+    assert.equal(prisijungimai, 1, "transakcija privalo paimti tiksliai vieną klientą");
+    assert.equal(atlaisvinimai, 1,
+      "klientas privalo būti grąžintas pool'ui lygiai kartą - `release()` neiškviestas");
+
+    /**
+     * Antras, nepriklausomas patvirtinimas: pool'o laisvų jungčių skaičius
+     * atsistatė. Skirtingai nei `waitingCount`, ši reikšmė realiai sumažėja
+     * nutekėjus klientui.
+     */
+    assert.equal(pool.idleCount, laisviPries,
+      "pool'o laisvų jungčių skaičius po rollback privalo atsistatyti");
   });
 
 
@@ -805,7 +897,8 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
         const client = await pool.connect();
         return { release: () => client.release(), query: async (sql, params) => {
           if (casRowCount === null && /^WITH mutacija AS/.test(sql) && /progress_current IS NOT DISTINCT FROM/.test(sql)) {
-            await pool.query("UPDATE jobs SET progress_current = 7 WHERE id = $1", [job.id]);
+            await injekcijaSuRiba("UPDATE jobs SET progress_current = 7 WHERE id = $1", [job.id],
+              "progreso CAS: monotoniskumas");
             const result = await client.query(sql, params);
             casRowCount = result.rows[0].pakeista;
             return result;
@@ -895,12 +988,12 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
                  * Nė vieno iš šių stulpelių NĖRA progreso CAS predikate, tad
                  * CAS privalo pavykti - ir jų nepaliesti.
                  */
-                await pool.query(
+                await injekcijaSuRiba(
                   `UPDATE jobs SET deletion_pending = true, deletion_attempts = 3,
                      storage_key = 'konkurentinis', attempt_count = 7
                    WHERE id = $1`,
-                  [job.id]
-                );
+                  [job.id],
+                  "P1-1: ne-predikato stulpeliai");
                 const result = await client.query(sql, params);
                 casSql = sql;
                 casRowCount = result.rows[0].pakeista;
@@ -1013,12 +1106,12 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
                  * NUOSAVYBĖ NEKEIČIAMA - CAS privalo pavykti. Keičiami tik
                  * laukai, kurių NĖRA nei predikate, nei prašomame patch'e.
                  */
-                await pool.query(
+                await injekcijaSuRiba(
                   `UPDATE jobs SET phase = 'diarizing', attempt_count = 9,
                      deletion_pending = true, deletion_attempts = 3
                    WHERE id = $1`,
-                  [job.id]
-                );
+                  [job.id],
+                  "P2-2: ne-patcho stulpeliai");
                 const result = await client.query(sql, params);
                 casSql = sql;
                 casParams = params;
@@ -1165,7 +1258,8 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
                 progress_known: params[4], progress_current: params[5],
                 progress_total: params[6],
               };
-              await pool.query(injekcija, [job.id]);
+              await injekcijaSuRiba(injekcija, [job.id],
+                "P2-6 izoliuota lenktyne");
               poInjekcijos = (await pool.query(
                 `SELECT ${SAUGOMI_LAUKAI.join(", ")} FROM jobs WHERE id = $1`,
                 [job.id]
@@ -1349,9 +1443,9 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
               ) {
                 intercepted = true;
                 /** 1) padarome perskaitytą progreso snapshot'ą pasenusį */
-                await pool.query(
-                  "UPDATE jobs SET progress_current = 7 WHERE id = $1", [job.id]
-                );
+                await injekcijaSuRiba(
+                  "UPDATE jobs SET progress_current = 7 WHERE id = $1", [job.id],
+                  "P2-3: pasenes progreso snapshotas");
                 /** 2) CAS - privalo pakeisti 0 eilučių IR čia pat klasifikuoti */
                 const result = await client.query(sql, params);
                 casPakeista = result.rows[0].pakeista;
@@ -1475,7 +1569,8 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
               ) {
                 intercepted = true;
                 /** 1) sava eilutė dingsta PRIEŠ CAS */
-                await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+                await injekcijaSuRiba("DELETE FROM jobs WHERE id = $1", [job.id],
+                  "P2-3: eilute dingsta pries CAS");
                 /** 2) CAS tuščiai būsenai */
                 const result = await client.query(sql, params);
                 casPakeista = result.rows[0].pakeista;
@@ -1508,6 +1603,56 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       assert.equal(svetima.ownerId, UUID_B);
       assert.equal(svetima.requestId, null, "svetimas job'as negalėjo būti mutuotas");
       await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  );
+
+  await t.test(
+    "#180 P2-C: atkūrimo riba - neatstovaujamas progresas krinta ir NESUNAIKINA esamo įrašo",
+    async () => {
+      /**
+       * A/B/C/D vienoje vietoje: teisėtas atkūrimas pavyksta; skaitinės eilutės
+       * ir įdėti metaduomenys krinta PRIEŠ destruktyvų `DELETE`; esamas įrašas
+       * lieka nepaliestas.
+       */
+      const id = crypto.randomUUID();
+
+      /** A. Teisėtas skaitinis progresas atkuriamas. */
+      await store.restoreRecord({
+        id, type: "transcription", status: "processing", phase: "transcribing",
+        progressKnown: true, progress: { current: 5, total: 10 },
+        ownerKind: OWNER_KIND.UNOWNED, ownerId: null, tenantId: null, artefacts: [],
+        schemaVersion: 2,
+        created_at: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+      const pries = await store.get(id);
+      assert.deepEqual(pries.progress, { current: 5, total: 10 });
+
+      const sugadinti = [
+        ["B. skaitinės eilutės", { current: "8", total: "10" }],
+        ["C. įdėti metaduomenys", { metadata: { total: 20 }, current: 7, total: 10 }],
+      ];
+
+      for (const [pavadinimas, progresas] of sugadinti) {
+        await assert.rejects(
+          () => store.restoreRecord({
+            id, type: "transcription", status: "processing", phase: "transcribing",
+            progressKnown: true, progress: progresas,
+            ownerKind: OWNER_KIND.UNOWNED, ownerId: null, tenantId: null, artefacts: [],
+            schemaVersion: 2,
+            created_at: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+          }),
+          (e) => e.code === "UNSUPPORTED_PROGRESS_REPRESENTATION",
+          `${pavadinimas}: privalo kristi, o ne tyliai perinterpretuoti`
+        );
+
+        /** D. ⚠️ ESMĖ: esamas įrašas privalo išlikti NEPAKITĘS. */
+        const po = await store.get(id);
+        assert.notEqual(po, null, `${pavadinimas}: esamas įrašas negali būti ištrintas`);
+        assert.deepEqual(po.progress, { current: 5, total: 10 },
+          `${pavadinimas}: esamas progresas privalo likti nepakitęs`);
+      }
+
+      await pool.query("DELETE FROM jobs WHERE id = $1", [id]);
     }
   );
 

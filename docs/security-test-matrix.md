@@ -1444,7 +1444,9 @@ Sąžiningumo dėlei — ribos, kurios lieka atviros:
 
 | Garantija | Testas | Mutacijos įrodymas |
 |---|---|---|
-| Memory, Redis ir PostgreSQL vykdo tą patį progreso scenarijų rinkinį | `jobStoreBackendContract.integration` | Pašalinus backend'o progreso guard arba praleidus scenarijų dalį → krinta lūkesčiai arba dinaminė `SCENARIJAI.length` patikra |
+| Memory ir Redis vykdo VISUS progreso scenarijus; PostgreSQL - visus, kuriuos jo schema atstovauja (likusieji EKSPLICITIŠKAI deklaruoti, ne tyliai praleisti) | `jobStoreBackendContract.integration` | Pašalinus backend'o progreso guard arba ištrynus privalomą scenarijų → krinta lūkesčiai arba `PRIVALOMI_SCENARIJAI` pilnumo patikra įvardija trūkstamą `id` |
+| ⚠️ PostgreSQL kontrakto paleidimas naudoja NEPAKEISTĄ produkcinę schemą; dvi sąmoningai sugadintos būsenos (`svetimo-grafo-faze`, `processing-be-fazes`) vykdomos ATSKIROJE sintetinės schemos DB be `jobs_status_phase` ir NĖRA produkcinės schemos įrodymas | `jobStoreBackendContract.integration` | Grąžinus `DROP CONSTRAINT` į bendrą kontrakto DB → krinta `jobs_status_phase` buvimo patikra adapterio paruošime |
+| ⚠️ Dvi pre-būsenos (`skaitines-eilutes`, `ideti-metaduomenys`) PostgreSQL'e NEATSTOVAUJAMOS ir jo NEVYKDOMOS; padengimas skaičiuojamas kaip įvykdyta / eksplicitiškai neatstovaujama / trūksta | `jobStoreBackendContract.integration` | Pašalinus `neatstovaujama` deklaraciją → scenarijus tampa MISSING ir pilnumo patikra krinta pagal `id` |
 | `updateOwned` / `removeOwned` nuosavybės CAS ir immutable laukai sutampa | `jobStoreBackendContract.integration`, `postgresStore.integration` | Pašalinus scope iš mutacijos sąlygos arba leidus patch'ui keisti nuosavybę / erą → svetimas scope mutuoja job'ą arba immutable assertions krinta |
 | `getOwned` atskiria owner, svetimą scope ir neegzistuojantį job | `jobStoreBackendContract.integration` | Grąžinus job'ą nepatikrinus abiejų scope laukų → `api-key` ir `unowned` neigiamas scenarijus krinta |
 | PostgreSQL progreso CAS lygina pilną perskaitytą snapshot'ą | `postgresStore.integration` | Kontroliuojamai pakeitus fazę tarp read ir CAS → `UPDATE` turi pakeisti 0 eilučių ir grąžinti `REJECTED` |

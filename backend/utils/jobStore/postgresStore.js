@@ -284,12 +284,15 @@ function changedColumns(expected, row) {
  * @param {string} mutacija - sąlyginis `UPDATE`/`DELETE ... RETURNING` sakinys
  * @param {string} priezastis - `SELECT count(*)`, apibrėžiantis nesėkmės rūšį
  */
-function casSuKlasifikacija(mutacija, priezastis) {
+function casSuKlasifikacija(mutacija, priezastis, papildomi = {}) {
+  const extra = Object.entries(papildomi)
+    .map(([vardas, uzklausa]) => `,\n           (${uzklausa})::int AS ${vardas}`)
+    .join("");
   return `WITH mutacija AS (
 ${mutacija}
     )
     SELECT (SELECT count(*) FROM mutacija)::int AS pakeista,
-           (${priezastis})::int AS priezastis`;
+           (${priezastis})::int AS priezastis${extra}`;
 }
 
 /**
@@ -309,8 +312,37 @@ const SVETIMAS_SCOPE = `SELECT count(*) FROM jobs
               AND NOT (owner_id IS NOT DISTINCT FROM $2
                        AND owner_kind IS NOT DISTINCT FROM $3)`;
 
-/** „Eilutė YRA" - `reportProgressAtomic` nesėkmės priežastis (`"REJECTED"` vs `null`). */
+/**
+ * „Eilutė YRA" snapshot'e.
+ *
+ * Naudojama dviem tikslams:
+ *   - `reportProgressAtomic` nesėkmės priežastis (`"REJECTED"` vs `null`);
+ *   - nuosavybės operacijose - `buvo` stulpelis, atskiriantis „eilutės CAS
+ *     snapshot'e NEBUVO" nuo „buvo, bet mutacija vis tiek nepavyko".
+ *
+ * ⚠️ KODĖL `buvo` BŪTINAS (MVCC / EvalPlanQual).
+ *
+ * `READ COMMITTED` režime VISOS vieno sakinio dalys naudoja tą patį snapshot'ą,
+ * BET duomenis keičianti dalis papildomai daro `EvalPlanQual`: sutikusi
+ * konkurenčiai pakeistą eilutę, ji PERSKAITO naujausią patvirtintą versiją ir
+ * predikatą įvertina jai. `SELECT` dalys to NEDARO - jos lieka prie snapshot'o.
+ *
+ * Tad įmanoma nesuderinta baigtis: `pakeista = 0` (EPQ versija nebeatitinka)
+ * kartu su `priezastis = 0` (snapshot'o versija buvo SAVA). Be `buvo` ši baigtis
+ * nesiskirtų nuo „eilutės apskritai nebuvo", ir savininko pasikeitimas sakinio
+ * viduryje būtų klaidingai paskelbtas `false`/`null` vietoj `"FORBIDDEN"`.
+ */
 const EILUTE_YRA = `SELECT count(*) FROM jobs WHERE id = $1`;
+
+/**
+ * Kiek kartų kartojamas CAS po nesuderintos baigties.
+ *
+ * ⚠️ RIBA YRA ĮRODYMAS, NE ATSARGA. Kartojama TIK tada, kai `readJobForUpdate()`
+ * eilutę UŽRAKINO ir ji tebėra sava - užrakinta eilutė pasikeisti nebegali, tad
+ * antras CAS privalo pavykti. Riba paverčia tai tikrinamu faktu: jei ciklas
+ * kada nors nesuartėtų, gausime aiškią klaidą, o ne begalinį suktuką.
+ */
+const CAS_BANDYMU_RIBA = 2;
 
 const SELECT_JOB = `
   SELECT j.*, r.payload AS result
@@ -341,6 +373,91 @@ class DuplicateJobError extends Error {
     super(`Job su idempotency_key="${key}" toje pačioje nuomoje jau egzistuoja.`);
     this.name = "DuplicateJobError";
     this.code = "DUPLICATE_JOB";
+  }
+}
+
+/**
+ * ATKŪRIMO RIBOS SARGAS: PostgreSQL progreso reprezentacija (#180 P2-C).
+ *
+ * ⚠️ `restoreRecord()` YRA VIENINTELIS KELIAS, APLENKIANTIS VALIDACIJĄ.
+ *
+ * Visi įprasti keliai progreso reikšmes filtruoja: `newJob()` jį visada
+ * materializuoja kaip `null`, fasado `update()` atmeta neapdorotus
+ * `progress`/`progressKnown` patch'us (`assertNoRawPhaseWrite`), o progreso
+ * įvykiai eina per `jobPhase.assertValidProgress()` (`Number.isFinite`).
+ *
+ * `restoreRecord()` - ne: `restoreService._validateContent()` tikrina tik tai,
+ * ar job'as yra objektas su `id`, ir įrašas keliauja tiesiai į `jobToRow()`.
+ * Ranka redaguota ar sugadinta kopija su
+ *
+ *     progressKnown: true, progress: { current: "8", total: "10" }
+ *
+ * pasiektų `double precision` parametrus, ir PostgreSQL TYLIAI paverstų eilutes
+ * skaičiais - būtent tai, ką #180 6 punktas draudžia. Įdėti progreso
+ * metaduomenys tuo pačiu keliu būtų TYLIAI nukirpti.
+ *
+ * Option C sprendimas: tokios būsenos PostgreSQL produkciniame modelyje yra
+ * struktūriškai neatstovaujamos, todėl atkūrimas KRENTA UŽDARAI, o ne
+ * perinterpretuoja. Sargas taikomas TIK PostgreSQL - memory ir Redis šias
+ * formas atstovauja ir jų elgesys nekeičiamas.
+ *
+ * ⚠️ TIKRINAMA PRIEŠ DESTRUKTYVŲ PAKEITIMĄ. `restoreRecord()` daro
+ * `DELETE` + `INSERT`; patikra vykdoma PRIEŠ transakciją, tad netinkamas
+ * įrašas negali ištrinti esamo.
+ */
+class UnsupportedProgressError extends Error {
+  constructor(zinute) {
+    super(`postgresStore.restoreRecord: ${zinute}`);
+    this.name = "UnsupportedProgressError";
+    this.code = "UNSUPPORTED_PROGRESS_REPRESENTATION";
+  }
+}
+
+/** Vieninteliai raktai, kuriuos atstovauja `progress_current`/`progress_total`. */
+const ATSTOVAUJAMI_PROGRESO_RAKTAI = new Set(["current", "total"]);
+
+function assertAtstovaujamasProgresas(job) {
+  const p = job.progress;
+
+  /**
+   * `progressKnown !== true` - legacy ir terminalinės formos. Jos teisėtos TIK
+   * su tuščiu progresu: `jobs_progress_known` CHECK reikalauja, kad tada abu
+   * reikšmių stulpeliai būtų `NULL`, tad bet kokia progreso reikšmė čia būtų
+   * tyliai prarasta.
+   */
+  if (job.progressKnown !== true) {
+    if (p == null) return;
+    throw new UnsupportedProgressError(
+      `progressKnown=${JSON.stringify(job.progressKnown)} su ne tuščiu progresu ` +
+        `${JSON.stringify(p)} - reikšmės būtų tyliai prarastos (jobs_progress_known)`
+    );
+  }
+
+  if (p == null || typeof p !== "object" || Array.isArray(p)) {
+    throw new UnsupportedProgressError(
+      `progressKnown=true reikalauja { current, total }, gauta ${JSON.stringify(p)}`
+    );
+  }
+
+  const perteklius = Object.keys(p).filter((k) => !ATSTOVAUJAMI_PROGRESO_RAKTAI.has(k));
+  if (perteklius.length > 0) {
+    throw new UnsupportedProgressError(
+      `progrese yra laisvos formos raktų [${perteklius.join(", ")}], kurių produkcinė ` +
+        "schema neturi kur saugoti - jie būtų tyliai nukirpti"
+    );
+  }
+
+  /**
+   * ⚠️ `Number.isFinite("8")` yra `false`. Būtent tai atmeta skaitines EILUTES,
+   * kurias `double precision` riba tyliai paverstų skaičiais.
+   */
+  for (const raktas of ["current", "total"]) {
+    if (!Number.isFinite(p[raktas])) {
+      throw new UnsupportedProgressError(
+        `progress.${raktas} = ${JSON.stringify(p[raktas])} nėra baigtinis SKAIČIUS; ` +
+          "tipizuotas double precision stulpelis jį perinterpretuotų tyliai"
+      );
+    }
   }
 }
 
@@ -431,6 +548,8 @@ function createPostgresStore(pool) {
    * `ownerKind = null`), kurias schema priima sąmoningai.
    */
   async function restoreRecord(job) {
+    /** ⚠️ PRIEŠ transakciją - netinkamas įrašas negali ištrinti esamo. */
+    assertAtstovaujamasProgresas(job);
     return inTransaction(async (client) => {
       await client.query("DELETE FROM jobs WHERE id = $1", [job.id]);
       await client.query(insertSql(), insertValues(job));
@@ -504,7 +623,7 @@ function createPostgresStore(pool) {
        */
 
       let result;
-      for (;;) {
+      for (let bandymas = 1; ; bandymas++) {
         /**
          * ⚠️ SIAURAS `SET` (#180 P2-2). Nuosavybės CAS predikatas saugo TIK
          * nuosavybę, o ji nekintama - vadinasi, jis sutampa su KIEKVIENU
@@ -534,28 +653,45 @@ function createPostgresStore(pool) {
             `      UPDATE jobs SET ${sets}
             WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
           RETURNING id`,
-            SVETIMAS_SCOPE
+            SVETIMAS_SCOPE,
+            { buvo: EILUTE_YRA }
           ),
           [id, scope.ownerId ?? null, scope.ownerKind, ...rasomi.map((c) => row[c])]
         );
-        const { pakeista, priezastis } = result.rows[0];
+        const { pakeista, priezastis, buvo } = result.rows[0];
         if (pakeista > 0) break;
         /** Eilutė YRA, bet svetima - nustatyta tuo pačiu snapshot'u kaip CAS. */
         if (priezastis > 0) return "FORBIDDEN";
 
         /**
-         * CAS snapshot'e eilutės NEBUVO. Tai jau galutinė klasifikacija
-         * (`null`), IŠSKYRUS vieną atvejį: tinkama eilutė galėjo atsirasti po
-         * mūsų snapshot'o, ir tada kvietėjo patch'as dar gali būti pritaikytas.
+         * ⚠️ CAS SNAPSHOT'E EILUTĖS NEBUVO - GALUTINIS `null`.
          *
-         * ⚠️ ŠIS SKAITYMAS NĖRA KLASIFIKATORIUS. Jis gali TIK nuspręsti, ar
-         * kartoti CAS. Jei eilutė atsirado su svetima nuosavybe, grąžinamas
-         * `null` (CAS snapshot'e jos nebuvo), o NE `"FORBIDDEN"` - būtent tokį
-         * klaidingą atsakymą duodavo senoji realizacija.
+         * Vėliau atsiradusi eilutė yra KITA įrašo inkarnacija: jos nebuvo, kai
+         * operacija buvo įvertinta. Ankstesnė versija tokiu atveju kartodavo CAS
+         * ir mutuodavo eilutę, sukurtą JAU PO kvietimo - t. y. keisdavo įrašą,
+         * kurio kvietėjas niekada neprašė. Kontraktas aiškus: „job neegzistuoja
+         * → null" (#180, 1 punktas).
          */
-        const atsiradusi = await readJobForUpdate(client, id);
-        if (!atsiradusi || !matchesOwner(atsiradusi, scope)) return null;
-        current = atsiradusi;
+        if (buvo === 0) return null;
+
+        /**
+         * ⚠️ NESUDERINTA BAIGTIS: snapshot'e eilutė BUVO SAVA, bet mutacija
+         * nepavyko. Vienintelė priežastis - `EvalPlanQual`: eilutė sakinio metu
+         * buvo konkurenčiai ištrinta arba jos nuosavybė pasikeitė.
+         *
+         * ⚠️ ŠIS SKAITYMAS NĖRA BENDRAS KLASIFIKATORIUS. Jis kviečiamas TIK
+         * šioje siauroje, jau atmestoje šakoje ir tik tam, kad atskirtų dvi
+         * likusias galimybes.
+         */
+        const dabartine = await readJobForUpdate(client, id);
+        if (!dabartine) return null;
+        if (!matchesOwner(dabartine, scope)) return "FORBIDDEN";
+        if (bandymas >= CAS_BANDYMU_RIBA) {
+          throw new Error(
+            `postgresStore.updateOwned: CAS nesuartėjo per ${CAS_BANDYMU_RIBA} bandymus`
+          );
+        }
+        current = dabartine;
       }
       await upsertResult(client, id, patch.result);
       return readJob(client, id);
@@ -565,28 +701,44 @@ function createPostgresStore(pool) {
   /** @returns {boolean|"FORBIDDEN"} */
   async function removeOwned(id, scope) {
     return inTransaction(async (client) => {
-      for (;;) {
+      for (let bandymas = 1; ; bandymas++) {
         const result = await client.query(
           casSuKlasifikacija(
             `      DELETE FROM jobs WHERE id = $1
               AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
           RETURNING id`,
-            SVETIMAS_SCOPE
+            SVETIMAS_SCOPE,
+            { buvo: EILUTE_YRA }
           ),
           [id, scope.ownerId ?? null, scope.ownerKind]
         );
-        const { pakeista, priezastis } = result.rows[0];
+        const { pakeista, priezastis, buvo } = result.rows[0];
         if (pakeista > 0) return true;
         /** Eilutė YRA, bet svetima - tas pats snapshot'as kaip DELETE. */
         if (priezastis > 0) return "FORBIDDEN";
 
         /**
-         * CAS snapshot'e eilutės nebuvo. Kaip ir `updateOwned()`, šis skaitymas
-         * yra TIK pakartojimo sąlyga, ne klasifikatorius: atsiradusi svetima
-         * eilutė duoda `false` (mūsų snapshot'e jos nebuvo), ne `"FORBIDDEN"`.
+         * ⚠️ CAS SNAPSHOT'E EILUTĖS NEBUVO - GALUTINIS `false`.
+         *
+         * Vėliau tuo pačiu id atsiradusi eilutė yra KITA inkarnacija. Ankstesnė
+         * versija ją ištrindavo ir grąžindavo `true` - t. y. sunaikindavo įrašą,
+         * sukurtą jau PO kvietimo (pvz. `restoreRecord()` atkurtą). Kontraktas:
+         * „job neegzistuoja → false" (#180, 2 punktas).
          */
-        const atsiradusi = await readJobForUpdate(client, id);
-        if (!atsiradusi || !matchesOwner(atsiradusi, scope)) return false;
+        if (buvo === 0) return false;
+
+        /**
+         * ⚠️ NESUDERINTA BAIGTIS (`EvalPlanQual`) - žr. `EILUTE_YRA`.
+         * Skaitymas TIK atskiria „ištrinta" nuo „nuosavybė pasikeitė".
+         */
+        const dabartine = await readJobForUpdate(client, id);
+        if (!dabartine) return false;
+        if (!matchesOwner(dabartine, scope)) return "FORBIDDEN";
+        if (bandymas >= CAS_BANDYMU_RIBA) {
+          throw new Error(
+            `postgresStore.removeOwned: CAS nesuartėjo per ${CAS_BANDYMU_RIBA} bandymus`
+          );
+        }
       }
     });
   }
@@ -758,4 +910,6 @@ module.exports = {
   tenantFromDb,
   TENANT_SENTINEL,
   DuplicateJobError,
+  UnsupportedProgressError,
+  assertAtstovaujamasProgresas,
 };

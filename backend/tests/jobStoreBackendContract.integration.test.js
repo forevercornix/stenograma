@@ -2,6 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const { skipWithoutRedis } = require("./helpers/redisGuard");
+const { sukurtiResursuKruva } = require("./helpers/resourceStack");
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
 const { Pool } = require("pg");
 const path = require("node:path");
@@ -41,11 +42,32 @@ const { OWNER_KIND, JOB_TYPES } = require("../utils/jobStore/common");
  * (`tests/suites.js`), tad PostgreSQL adapteris bus realiai vykdomas CI'e.
  */
 
+/** Laikinos DB nuleidimas per atskirą admin jungtį (tas pats kelias visur). */
+async function nuleistiDb(dbName) {
+  const a = new Pool({ connectionString: adminDatabaseUrl() });
+  try {
+    await a.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+  } finally {
+    await a.end();
+  }
+}
+
 /** Scenarijai, kurių rezultatas turi sutapti VISUOSE backend'uose. */
 const SCENARIJAI = [
   {
     id: "svetimo-grafo-faze",
     kodel: "sugadintas įrašas: svetimo grafo fazė",
+    /**
+     * ⚠️ REIKIA SINTETINĖS SCHEMOS (#180 P3-7).
+     * `jobs_status_phase` neleidžia `protocol` job'ui turėti `transcribing`
+     * fazės - būsena sąmoningai sugadinta, tad PRODUKCINĖJE schemoje jos
+     * sukurti neįmanoma. Vykdoma atskiroje sintetinės schemos DB.
+     */
+    sintetineSchema: {
+      postgres:
+        "jobs_status_phase CHECK neleidžia protocol + transcribing derinio; " +
+        "scenarijus vykdomas atskiroje sintetinės schemos duomenų bazėje",
+    },
     type: JOB_TYPES.PROTOCOL,
     busena: { status: "processing", phase: PHASE.TRANSCRIBING, progressKnown: true },
     progress: { current: 1, total: 10 },
@@ -55,6 +77,16 @@ const SCENARIJAI = [
   {
     id: "processing-be-fazes",
     kodel: "sugadintas įrašas: processing be fazės",
+    /**
+     * ⚠️ REIKIA SINTETINĖS SCHEMOS (#180 P3-7).
+     * `jobs_status_phase` leidžia `processing` be fazės TIK legacy įrašui
+     * (`schema_version IS NULL`), o šis scenarijus reikalauja eros 2.
+     */
+    sintetineSchema: {
+      postgres:
+        "jobs_status_phase CHECK leidžia processing be fazės tik kai " +
+        "schema_version IS NULL; scenarijus vykdomas sintetinės schemos DB",
+    },
     type: JOB_TYPES.TRANSCRIPTION,
     busena: { status: "processing", phase: null, progressKnown: true },
     progress: { current: 1, total: 10 },
@@ -259,7 +291,14 @@ async function paleisti(store, paruostiBusena, backendas) {
   const atsisakyta = new Map();
 
   for (const s of SCENARIJAI) {
-    const priezastis = s.neatstovaujama && s.neatstovaujama[backendas];
+    /**
+     * Du eksplicitinių išimčių šaltiniai, abu SCENARIJAUS lokalūs:
+     *   `neatstovaujama`   - backend'as pre-būsenos atstovauti NEGALI (P2-5);
+     *   `sintetineSchema`  - pre-būsena neįmanoma PRODUKCINĖJE schemoje ir
+     *                        vykdoma atskiroje sintetinės schemos DB (P3-7).
+     */
+    const priezastis = (s.neatstovaujama && s.neatstovaujama[backendas]) ||
+      (s.sintetineSchema && s.sintetineSchema[backendas]);
     if (priezastis) {
       atsisakyta.set(s.id, priezastis);
       continue;
@@ -334,64 +373,77 @@ const ADAPTERIAI = [
     name: "postgres",
     skip: skipWithoutPostgres(),
     async setup() {
+      /**
+       * ⚠️ RESURSAI REGISTRUOJAMI IŠ KARTO PO SUKŪRIMO (#180 P2-A).
+       *
+       * Jei `setup()` kristų prieš grąžindamas `ctx`, kvietėjo `finally` niekada
+       * neįvyktų ir jau sukurti resursai nutekėtų. Krūva tai išsprendžia toje
+       * pačioje vietoje, kur resursas sukuriamas.
+       */
+      const resursai = sukurtiResursuKruva();
+      try {
       const url = testDatabaseUrl("backend_contract");
       const dbName = new URL(url).pathname.slice(1);
       const admin = new Pool({ connectionString: adminDatabaseUrl() });
+      resursai.registruoti("admin pool", () => admin.end());
       await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
       await admin.query(`CREATE DATABASE "${dbName}"`);
+      resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
       await admin.end();
       execFileSync("npx", ["node-pg-migrate", "up"], {
         cwd: path.resolve(__dirname, ".."), env: { ...process.env, DATABASE_URL: url },
         stdio: ["ignore", "pipe", "pipe"],
       });
       const pool = new Pool({ connectionString: url });
-      // Kontrakto scenarijai sąmoningai apima sugadintas būsenas, kurių
-      // produkciniai CHECK'ai neleidžia sukurti. Ši izoliuota DB tikrina store
-      // sprendimą, o constraint'ai atskirai tikrinami postgresStore rinkinyje.
-      await pool.query(`ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase`);
+      resursai.registruoti("darbinis pool", () => pool.end());
+      /**
+       * ⚠️ PRODUKCINĖ SCHEMA NELIEČIAMA (#180 P3-7).
+       *
+       * Anksčiau čia buvo `ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase`,
+       * kad tilptų du sąmoningai sugadintų būsenų scenarijai. Tai reiškė, kad
+       * VISAS PostgreSQL kontrakto paleidimas vyko su nusilpninta schema, nors
+       * įrodymai skambėjo kaip produkcinės schemos paritetas.
+       *
+       * Dabar tie du scenarijai deklaruoja `sintetineSchema.postgres` ir
+       * vykdomi ATSKIROJE DB; čia constraint'as LIEKA, ir tai patikrinama.
+       */
+      const { rows: [{ yra }] } = await pool.query(
+        `SELECT count(*)::int AS yra FROM pg_constraint WHERE conname = 'jobs_status_phase'`
+      );
+      assert.equal(yra, 1,
+        "PostgreSQL kontrakto DB privalo turėti PRODUKCINĮ jobs_status_phase CHECK");
       const store = createPostgresStore(pool);
       return {
         store,
         prepareState: async (id, state) => {
-          const known = state.progressKnown === true;
           /**
-           * ⚠️ ATSISAKOMA, O NE TYLIAI KEIČIAMA (#180 P2-5, 3 reikalavimas).
+           * ⚠️ JOKIO SAUGOJIMO MODELIO DUBLIKATO (#180 P2-C / Option C).
            *
-           * Ankstesnė versija skaičiavo
-           * `known = progressKnown === true && typeof current === "number" && ...`,
-           * tad neatstovaujamą pre-būseną TYLIAI paversdavo atstovaujama:
-           * `{current:"8"}` → `progressKnown=false, progress=null`, o
-           * `{metadata,current,total}` → progresas be `metadata`. Scenarijus
-           * vis tiek pranešdavo apie įvykdymą tuo pačiu `id`.
+           * Ankstesnė versija čia rankomis aprašinėjo, ką PostgreSQL geba
+           * atstovauti (`Object.keys(progress).length === 2`, `typeof … ===
+           * "number"`), t. y. laikė ANTRĄ, rankiniu būdu prižiūrimą schemos
+           * aprašą testų sluoksnyje.
            *
-           * Dabar toks scenarijus privalo būti deklaruotas `neatstovaujama`
-           * ir iki čia nė nepasiekia. Jei pasiekė - tai NEDEKLARUOTA išimtis,
-           * ir paruošimas krinta GARSIAI, o ne pakeičia semantiką.
+           * Dabar atstovaujamumą lemia TIK eksplicitinė scenarijaus deklaracija
+           * (`neatstovaujama` / `sintetineSchema`), o paruošimas rašo tai, ką
+           * gavo. Jei nedeklaruotą pre-būseną saugykla iškraipytų, tai pagauna
+           * REPREZENTACIJOS EKVIVALENTUMO SARGAS `paleisti()` viduje: jis
+           * palygina perskaitytą būseną su bendru scenarijumi ir krinta.
+           * Elgesys yra autoritetas, ne rankinis schemos modelis.
            */
-          if (known) {
-            const p = state.progress;
-            const tik2 = p != null && Object.keys(p).length === 2;
-            if (!tik2 || typeof p.current !== "number" || typeof p.total !== "number") {
-              throw new Error(
-                `postgres prepareState: pre-būsena ${JSON.stringify(p)} neatstovaujama ` +
-                  "tipizuotuose progress_current/progress_total stulpeliuose. " +
-                  "Scenarijus privalo deklaruoti `neatstovaujama.postgres`, " +
-                  "o ne būti tyliai pakeistas."
-              );
-            }
-          }
+          const known = state.progressKnown === true;
           await pool.query(`UPDATE jobs SET status=$2, phase=$3, progress_known=$4,
             progress_current=$5, progress_total=$6 WHERE id=$1`, [id, state.status,
             state.phase, known, known && state.progress ? state.progress.current : null,
             known && state.progress ? state.progress.total : null]);
         },
-        cleanup: async () => {
-          await store.close();
-          const a = new Pool({ connectionString: adminDatabaseUrl() });
-          await a.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-          await a.end();
-        },
+        /** Sėkmės kelias naudoja TĄ PAČIĄ krūvą - viena valymo realizacija. */
+        cleanup: async () => resursai.isvalyti(),
       };
+      } catch (klaida) {
+        await resursai.isvalyti(klaida);
+        throw klaida;
+      }
     },
   },
 ];
@@ -415,7 +467,9 @@ for (const adapter of ADAPTERIAI) {
         for (const [id, priezastis] of atsisakyta) {
           const scenarijus = SCENARIJAI.find((x) => x.id === id);
           assert.ok(scenarijus, `${adapter.name}: atsisakyta nežinomo scenarijaus "${id}"`);
-          const deklaruota = scenarijus.neatstovaujama && scenarijus.neatstovaujama[adapter.name];
+          const deklaruota =
+            (scenarijus.neatstovaujama && scenarijus.neatstovaujama[adapter.name]) ||
+            (scenarijus.sintetineSchema && scenarijus.sintetineSchema[adapter.name]);
           assert.equal(typeof deklaruota, "string",
             `${adapter.name}/${id}: atsisakyta BE deklaracijos - tai MISSING, ne išimtis`);
           assert.notEqual(deklaruota.trim(), "",
@@ -564,6 +618,186 @@ test("KONTRAKTAS: kiekvienas PRIVALOMAS #180 scenarijus turi realizaciją", () =
 });
 
 /**
+ * #180 P3-7: SINTETINĖS SCHEMOS SCENARIJAI - ATSKIRAI IR EKSPLICITIŠKAI.
+ *
+ * ⚠️ KODĖL ATSKIRA DUOMENŲ BAZĖ.
+ *
+ * Du scenarijai reikalauja būsenų, kurių `jobs_status_phase` CHECK produkcijoje
+ * neleidžia (`protocol` su `transcribing` faze; `processing` be fazės eros 2
+ * įraše). Anksčiau dėl jų constraint'as būdavo pašalinamas iš BENDROS kontrakto
+ * DB, tad VISAS PostgreSQL kontrakto paleidimas vykdavo su nusilpninta schema.
+ *
+ * Dabar įprastas PostgreSQL adapteris dirba su NEPAKEISTA produkcine schema, o
+ * šie du scenarijai vykdomi čia - savo DB, kurioje constraint'as pašalinamas
+ * eksplicitiškai ir tik po to, kai patikrinama, kad jis apskritai buvo.
+ *
+ * ⚠️ KĄ ŠIS TESTAS ĮRODO IR KO NE. Jis įrodo store SPRENDIMĄ dviem sugadintoms
+ * būsenoms. Jis NĖRA produkcinės schemos vykdymo įrodymas ir negali būti
+ * skaičiuojamas kaip toks.
+ */
+test(
+  "KONTRAKTAS: PostgreSQL sintetinės schemos scenarijai (P3-7)",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    const sintetiniai = SCENARIJAI.filter(
+      (x) => x.sintetineSchema && x.sintetineSchema.postgres
+    );
+    assert.notEqual(sintetiniai.length, 0,
+      "sintetinės schemos rinkinys negali būti tuščias - kitaip du #180 invariantai dingtų");
+
+    /** Ta pati resursų nuosavybės disciplina kaip įprastame adapteryje (P2-A). */
+    const resursai = sukurtiResursuKruva();
+    try {
+    const url = testDatabaseUrl("backend_contract_sintetine");
+    const dbName = new URL(url).pathname.slice(1);
+    const admin = new Pool({ connectionString: adminDatabaseUrl() });
+    resursai.registruoti("admin pool", () => admin.end());
+    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+    await admin.query(`CREATE DATABASE "${dbName}"`);
+    resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
+    await admin.end();
+    execFileSync("npx", ["node-pg-migrate", "up"], {
+      cwd: path.resolve(__dirname, ".."),
+      env: { ...process.env, DATABASE_URL: url },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const pool = new Pool({ connectionString: url });
+    resursai.registruoti("darbinis pool", () => pool.end());
+    const store = createPostgresStore(pool);
+    try {
+      /** Constraint'as PRIVALO egzistuoti prieš pašalinant - kitaip migracija pasikeitė. */
+      const pries = await pool.query(
+        `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'jobs_status_phase'`);
+      assert.equal(pries.rows[0].n, 1,
+        "prielaida: produkcinė migracija sukuria jobs_status_phase");
+
+      await pool.query("ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase");
+
+      const po = await pool.query(
+        `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'jobs_status_phase'`);
+      assert.equal(po.rows[0].n, 0, "sintetinė DB privalo būti be jobs_status_phase");
+
+      for (const sc of sintetiniai) {
+        const job = await store.create({ type: sc.type, ownerKind: OWNER_KIND.UNOWNED });
+        await pool.query(
+          `UPDATE jobs SET status = $2, phase = $3, progress_known = $4,
+             progress_current = $5, progress_total = $6 WHERE id = $1`,
+          [job.id, sc.busena.status, sc.busena.phase, sc.busena.progressKnown === true,
+            sc.progress ? sc.progress.current : null,
+            sc.progress ? sc.progress.total : null]
+        );
+
+        /** Ta pati semantinė projekcija kaip produkcinės schemos kelyje. */
+        assert.deepEqual(
+          sutartineBusena((await store.get(job.id)) || {}),
+          sutartineBusena({ ...sc.busena, progress: sc.progress }),
+          `${sc.id}: sintetinė paruošta būsena privalo atitikti bendrą scenarijų`
+        );
+
+        const r = await store.reportProgressAtomic(job.id, sc.ivykis);
+        const gauta = r === "REJECTED" ? "REJECTED" : r == null ? "NULL" : "OK";
+        assert.equal(gauta, sc.laukiama, `${sc.id} (sintetinė schema)`);
+      }
+
+      console.log(
+        `[#180 apskaita] postgres-sintetine: įvykdyta ${sintetiniai.length} ` +
+          `(${sintetiniai.map((x) => x.id).join(", ")})`
+      );
+    } finally {
+      await resursai.isvalyti();
+    }
+    } catch (klaida) {
+      await resursai.isvalyti(klaida);
+      throw klaida;
+    }
+  }
+);
+
+/**
+ * #180 P2-A: resursų nuosavybė, kai `setup()` krenta nebaigęs.
+ *
+ * ⚠️ VEIKIA BE PostgreSQL. Tikrinamas JS nuosavybės mechanizmas su netikrais
+ * resursais - būtent jis lemia, ar nutekės admin pool'as, laikina DB ir
+ * darbinis pool'as. Tikras serveris tam nereikalingas ir jo laukimas paliktų
+ * mechanizmą neišbandytą.
+ */
+test("KONTRAKTAS: nebaigtas setup() sutvarko jau sukurtus resursus (P2-A)", async () => {
+  const etapai = ["admin pool", "laikina DB", "darbinis pool"];
+
+  for (let luzta = 0; luzta < etapai.length; luzta++) {
+    const uzdaryta = [];
+    const resursai = sukurtiResursuKruva();
+    const pirmine = new Error(`setup nutrūko po etapo: ${etapai[luzta]}`);
+
+    let gauta = null;
+    try {
+      for (let i = 0; i < etapai.length; i++) {
+        resursai.registruoti(etapai[i], async () => uzdaryta.push(etapai[i]));
+        if (i === luzta) throw pirmine;
+      }
+    } catch (e) {
+      await resursai.isvalyti(e);
+      gauta = e;
+    }
+
+    /** 1) Sutvarkyta VISKAS, kas jau buvo sukurta - ir tik tai. */
+    assert.deepEqual(uzdaryta, etapai.slice(0, luzta + 1).reverse(),
+      `${etapai[luzta]}: privalo būti išvalyti visi jau sukurti resursai atvirkštine tvarka`);
+
+    /** 2) Pirminė klaida NEUŽDENGTA. */
+    assert.equal(gauta, pirmine, `${etapai[luzta]}: pirminė setup klaida privalo išlikti`);
+    assert.equal(gauta.valymoKlaidos, undefined, "sėkmingas valymas nepalieka pėdsakų");
+
+    /** 3) Pakartotinis valymas nieko nedaro DAR KARTĄ. */
+    await resursai.isvalyti();
+    assert.deepEqual(uzdaryta, etapai.slice(0, luzta + 1).reverse(),
+      `${etapai[luzta]}: valymas negali įvykti du kartus`);
+    assert.equal(resursai.kiek(), 0, "krūva po valymo privalo būti tuščia");
+  }
+});
+
+test("KONTRAKTAS: valymo klaida neuždengia pirminės setup klaidos (P2-A)", async () => {
+  const resursai = sukurtiResursuKruva();
+  resursai.registruoti("geras resursas", async () => {});
+  resursai.registruoti("blogas resursas", async () => { throw new Error("close failed"); });
+
+  const pirmine = new Error("tikroji setup priežastis");
+  await resursai.isvalyti(pirmine);
+
+  assert.equal(pirmine.message, "tikroji setup priežastis",
+    "pirminė klaida privalo likti nepakitusi");
+  assert.deepEqual(pirmine.valymoKlaidos, ["blogas resursas: close failed"],
+    "valymo nesėkmė privalo likti MATOMA, bet atskirai nuo pirminės priežasties");
+});
+
+/**
+ * #180 P3-7: sintetinės schemos išimtys yra eksplicitinės ir ribotos.
+ */
+test("KONTRAKTAS: sintetinės schemos scenarijai deklaruoti ir apriboti (P3-7)", () => {
+  const sintetiniai = SCENARIJAI.filter((x) => x.sintetineSchema && x.sintetineSchema.postgres);
+
+  assert.deepEqual(sintetiniai.map((x) => x.id).sort(),
+    ["processing-be-fazes", "svetimo-grafo-faze"],
+    "sintetinės schemos gali reikalauti TIK du #180 scenarijai");
+
+  for (const sc of sintetiniai) {
+    assert.ok(PRIVALOMI_SCENARIJAI.includes(sc.id),
+      `${sc.id}: privalo LIKTI privalomas - P3-7 sprendžiamas izoliacija, ne panaikinimu`);
+    assert.notEqual(sc.sintetineSchema.postgres.trim(), "",
+      `${sc.id}: sintetinės schemos priežastis negali būti tuščia`);
+    assert.match(sc.sintetineSchema.postgres, /jobs_status_phase/,
+      `${sc.id}: priežastis privalo įvardyti KONKRETŲ constraint'ą`);
+    /** Memory ir Redis šias būsenas atstovauja be jokios schemos - jie VYKDO. */
+    assert.equal(sc.sintetineSchema.memory, undefined, `${sc.id}: memory privalo VYKDYTI`);
+    assert.equal(sc.sintetineSchema.redis, undefined, `${sc.id}: Redis privalo VYKDYTI`);
+    /** Sintetinė schema NĖRA neatstovaujamumas - kategorijos nesumaišomos. */
+    assert.equal(sc.neatstovaujama, undefined,
+      `${sc.id}: sintetinės schemos scenarijus nėra „neatstovaujamas"`);
+  }
+});
+
+/**
  * #180 P2-5 (Option A): NEATSTOVAUJAMUMO DEKLARACIJOS.
  *
  * ⚠️ VEIKIA BE JOKIO BACKEND'O, tad išimčių higiena tikrinama abiejuose
@@ -576,7 +810,30 @@ test("KONTRAKTAS: kiekvienas PRIVALOMAS #180 scenarijus turi realizaciją", () =
 test("KONTRAKTAS: neatstovaujamumo deklaracijos yra eksplicitinės ir pagrįstos", () => {
   const vardai = new Set(ADAPTERIAI.map((a) => a.name));
 
+  /** Abu deklaracijų šaltiniai tikrinami vienodai (P2-5 ir P3-7). */
   for (const s of SCENARIJAI) {
+    /**
+     * ⚠️ TIKSLIAI VIENA BAIGTINĖ BŪSENA (#180 7a punktas). Scenarijus negali
+     * tam pačiam backend'ui vienu metu būti ir „neatstovaujamas", ir
+     * „reikalaujantis sintetinės schemos" - tada apskaita nebeturėtų
+     * vienareikšmės būsenos.
+     */
+    for (const backendas of Object.keys(s.neatstovaujama || {})) {
+      assert.equal((s.sintetineSchema || {})[backendas], undefined,
+        `${s.id}/${backendas}: dvi deklaracijos tam pačiam backend'ui - baigtinė būsena neapibrėžta`);
+    }
+
+    if (s.sintetineSchema !== undefined) {
+      for (const [backendas, priezastis] of Object.entries(s.sintetineSchema)) {
+        assert.ok(vardai.has(backendas),
+          `${s.id}: nežinomas backend'as "${backendas}" sintetineSchema deklaracijoje`);
+        assert.equal(typeof priezastis, "string", `${s.id}/${backendas}: priežastis privalo būti eilutė`);
+        assert.notEqual(priezastis.trim(), "", `${s.id}/${backendas}: priežastis negali būti tuščia`);
+      }
+      assert.notEqual(Object.keys(s.sintetineSchema).length, vardai.size,
+        `${s.id}: sintetinės schemos reikalauti VISIEMS backend'ams negalima`);
+    }
+
     if (s.neatstovaujama === undefined) continue;
 
     assert.equal(typeof s.neatstovaujama, "object",
