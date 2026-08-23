@@ -265,6 +265,19 @@ function createPostgresStore(pool) {
   }
 
   /**
+   * Naudojama tik nepavykus sąlyginei mutacijai: užraktas stabilizuoja
+   * klasifikavimo rezultatą iki transakcijos pabaigos. Pati mutacija ir toliau
+   * yra CAS sakinys; šis skaitymas nėra jos autorizacijos pakaitalas.
+   */
+  async function readJobForUpdate(client, id) {
+    const { rows } = await client.query(
+      `${SELECT_JOB} WHERE j.id = $1 FOR UPDATE OF j`,
+      [id]
+    );
+    return rowToJob(rows[0]);
+  }
+
+  /**
    * Transakcija su garantuotu `ROLLBACK` ir kliento grąžinimu.
    *
    * Be `finally` bloko nutrūkęs `await` paliktų klientą su atvira transakcija,
@@ -372,19 +385,29 @@ function createPostgresStore(pool) {
   /** @returns {object|null|"FORBIDDEN"} */
   async function updateOwned(id, patch, scope) {
     return inTransaction(async (client) => {
-      const current = await readJob(client, id);
+      let current = await readJob(client, id);
       if (!current) return null;
       if (!matchesOwner(current, scope)) return "FORBIDDEN";
-      const row = jobToRow(applyPatch(current, patch));
       const mutable = COLUMNS.filter((c) => !IMMUTABLE_COLUMNS.has(c));
       const sets = mutable.map((c, i) => `"${c}" = $${i + 4}`).join(", ");
-      const result = await client.query(
-        `UPDATE jobs SET ${sets}
-          WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
-        RETURNING id`,
-        [id, scope.ownerId ?? null, scope.ownerKind, ...mutable.map((c) => row[c])]
-      );
-      if (result.rowCount === 0) return (await readJob(client, id)) ? "FORBIDDEN" : null;
+
+      let result;
+      for (;;) {
+        const row = jobToRow(applyPatch(current, patch));
+        result = await client.query(
+          `UPDATE jobs SET ${sets}
+            WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
+          RETURNING id`,
+          [id, scope.ownerId ?? null, scope.ownerKind, ...mutable.map((c) => row[c])]
+        );
+        if (result.rowCount > 0) break;
+
+        current = await readJobForUpdate(client, id);
+        if (!current) return null;
+        if (!matchesOwner(current, scope)) return "FORBIDDEN";
+        // Eilutė tuo pačiu scope atsirado / grįžo po pirmo CAS. Užrakinta
+        // eilutė nebegali pasikeisti, todėl pakartotinis CAS yra saugus.
+      }
       await upsertResult(client, id, patch.result);
       return readJob(client, id);
     });
@@ -393,14 +416,22 @@ function createPostgresStore(pool) {
   /** @returns {boolean|"FORBIDDEN"} */
   async function removeOwned(id, scope) {
     return inTransaction(async (client) => {
-      const result = await client.query(
-        `DELETE FROM jobs WHERE id = $1
-            AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
-        RETURNING id`,
-        [id, scope.ownerId ?? null, scope.ownerKind]
-      );
-      if (result.rowCount > 0) return true;
-      return (await readJob(client, id)) ? "FORBIDDEN" : false;
+      for (;;) {
+        const result = await client.query(
+          `DELETE FROM jobs WHERE id = $1
+              AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
+          RETURNING id`,
+          [id, scope.ownerId ?? null, scope.ownerKind]
+        );
+        if (result.rowCount > 0) return true;
+
+        const current = await readJobForUpdate(client, id);
+        if (!current) return false;
+        if (!matchesOwner(current, scope)) return "FORBIDDEN";
+        // Matching eilutė atsirado tarp CAS ir klasifikavimo. Ji dabar
+        // užrakinta, todėl kartojame sąlyginę DELETE, o ne klaidingai
+        // grąžiname FORBIDDEN.
+      }
     });
   }
 
@@ -428,7 +459,9 @@ function createPostgresStore(pool) {
           expected.progress_current, expected.progress_total,
           ...mutable.map((c) => row[c])]
       );
-      if (result.rowCount === 0) return (await readJob(client, id)) ? "REJECTED" : null;
+      if (result.rowCount === 0) {
+        return (await readJobForUpdate(client, id)) ? "REJECTED" : null;
+      }
       return readJob(client, id);
     });
   }

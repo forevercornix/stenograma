@@ -712,4 +712,29 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     assert.equal((await store.get(job.id)).requestId, null);
   });
 
+
+  await t.test("7.2b removeOwned neklasifikuoja naujai atsiradusio matching job kaip FORBIDDEN", async () => {
+    const id = crypto.randomUUID();
+    const scope = { ownerKind: "user", ownerId: UUID_A };
+    let inserted = false;
+    const racingPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return { release: () => client.release(), query: async (sql, params) => {
+          if (!inserted && /FOR UPDATE OF j/.test(sql)) {
+            inserted = true;
+            await rawInsert(bazineEilute({ id, owner_kind: scope.ownerKind, owner_id: scope.ownerId }));
+          }
+          return client.query(sql, params);
+        } };
+      }, end: async () => {},
+    };
+
+    const outcome = await createPostgresStore(racingPool).removeOwned(id, scope);
+    assert.equal(inserted, true, "matching eilutė įterpta tarp CAS ir klasifikavimo");
+    assert.equal(outcome, true,
+      "matching eilutė turi būti pakartotinai mutuota, ne klaidingai klasifikuota FORBIDDEN");
+    assert.equal(await store.get(id), null);
+  });
+
 });
