@@ -591,3 +591,275 @@ test("LAIKAS: terminai skaičiuojami DB laikrodžiu, ne proceso", { skip: SKIP }
     await ctx.resursai.isvalyti();
   }
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * PASTUMTAS PROCESO LAIKRODIS (#181, „VIENAS LAIKO ŠALTINIS: DB LAIKRODIS")
+ *
+ * ⚠️ KODĖL ANKSTESNIO `LAIKAS:` TESTO NEPAKAKO.
+ *
+ * Jis lygino `now() - created_at < 5 s`. CI runner'is ir `postgres` konteineris
+ * dalijasi to paties host'o laikrodžiu, tad ta patikra praeitų IR tada, jei
+ * terminai būtų skaičiuojami `Date.now()` proceso pusėje - t. y. ji neatskyrė
+ * dviejų šaltinių ir nebuvo atspari mutacijai.
+ *
+ * Šie trys testai laikrodžius IŠSKIRIA dirbtinai: proceso `Date.now()`
+ * pastumiamas, o DB laikrodis lieka tikras. Realizacija, rašanti terminus
+ * proceso laiku, iškart duoda kitokias reikšmes.
+ *
+ * ⚠️ `Date.now` KEIČIAMAS TIK APLINK TIKRINAMĄ KVIETIMĄ ir grąžinamas
+ * `finally` bloke - kitaip pastumtas laikrodis nutekėtų į `pg` vidinius
+ * timeout'us ir `node:test` apskaitą.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Įvykdo `veiksmas()` su pastumtu proceso laikrodžiu ir VISADA jį atstato. */
+async function suPastumtuLaikrodziu(poslinkisMs, veiksmas) {
+  const tikras = Date.now;
+  Date.now = () => tikras.call(Date) + poslinkisMs;
+  try {
+    return await veiksmas();
+  } finally {
+    Date.now = tikras;
+  }
+}
+
+const VALANDA_S = 3600;
+
+test("LAIKAS: procesas su PIRMYN pastumtu laikrodžiu - terminai lieka DB laiko", { skip: SKIP }, async () => {
+  /**
+   * Proceso laikrodis pastumtas +24 val. Realizacija su `Date.now()` įrašytų
+   * `expires_at = dabar + 24 val + 12 val`, t. y. sesija galiotų 36 valandas
+   * vietoj 12 - absoliutus langas taptų trigubai ilgesnis, o niekas to
+   * nepastebėtų, nes eilutė atrodo tvarkinga.
+   */
+  const ctx = await paruostiDb("session_clock_fwd");
+  try {
+    const sukurta = await suPastumtuLaikrodziu(24 * VALANDA_S * 1000, () =>
+      ctx.store.create(ADMIN, ENV)
+    );
+    const tikrasDabar = Date.now();
+
+    const { rows } = await ctx.pool.query(
+      `SELECT extract(epoch FROM (created_at - now()))      AS sukurta_s,
+              extract(epoch FROM (expires_at - now()))      AS absoliutus_s,
+              extract(epoch FROM (idle_expires_at - now())) AS idle_s
+         FROM sessions`
+    );
+    const r = rows[0];
+
+    assert.ok(
+      Math.abs(Number(r.sukurta_s)) < 10,
+      `created_at privalo būti DB dabartis, o ne +24 val (gauta ${r.sukurta_s} s)`
+    );
+    assert.ok(
+      Math.abs(Number(r.absoliutus_s) - 12 * VALANDA_S) < 10,
+      `absoliutus langas privalo likti 12 val., ne 36 (gauta ${Number(r.absoliutus_s) / VALANDA_S} val.)`
+    );
+    assert.ok(
+      Math.abs(Number(r.idle_s) - 30 * 60) < 10,
+      `neveiklumo langas privalo likti 30 min. (gauta ${Number(r.idle_s) / 60} min.)`
+    );
+
+    /** Ir grąžinamas objektas neša DB laiką, ne proceso. */
+    assert.ok(
+      Math.abs(sukurta.session.createdAt - tikrasDabar) < 10_000,
+      "create() grąžintas createdAt privalo ateiti iš DB eilutės"
+    );
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+
+test("LAIKAS: procesas su ATGAL pastumtu laikrodžiu - sesija VIS TIEK galioja", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TAI TIKSLIAI #181 ĮVARDYTAS TESTAS: „sesija, sukurta procesui su
+   * pastumtu laikrodžiu, galioja pagal DB laiką".
+   *
+   * Proceso laikrodis pastumtas −2 val., o neveiklumo langas yra 30 min.
+   * Realizacija su `Date.now()` įrašytų `idle_expires_at = dabar − 2 val +
+   * 30 min = dabar − 1,5 val`, t. y. sesija gimtų JAU PASIBAIGUSI, ir
+   * vartotojas būtų atjungtas iš karto po prisijungimo.
+   */
+  const ctx = await paruostiDb("session_clock_back");
+  try {
+    const { token } = await suPastumtuLaikrodziu(-2 * VALANDA_S * 1000, () =>
+      ctx.store.create(ADMIN, ENV)
+    );
+
+    const session = await ctx.store.touch(token, ENV);
+
+    assert.ok(
+      session,
+      "sesija privalo galioti pagal DB laikrodį, nepaisant pastumto proceso laikrodžio"
+    );
+    assert.equal(session.userId, UID_A);
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+
+test("LAIKAS: create() ir touch() naudoja TĄ PATĮ šaltinį", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ DU ŠALTINIAI SULAUŽYTŲ SPRENDIMĄ NET JEI KIEKVIENAS ATSKIRAI ATRODYTŲ
+   * TEISINGAS.
+   *
+   * `create()` vykdomas su +6 val., `touch()` - su −6 val. pastumtu procesu.
+   * Jei bent vienas iš jų remtųsi proceso laikrodžiu, `last_seen_at` arba
+   * naujas `idle_expires_at` nutoltų 6 valandas nuo DB dabarties, ir
+   * neveiklumo langas nustotų reikšti 30 minučių.
+   */
+  const ctx = await paruostiDb("session_clock_same");
+  try {
+    const { token } = await suPastumtuLaikrodziu(6 * VALANDA_S * 1000, () =>
+      ctx.store.create(ADMIN, ENV)
+    );
+    const session = await suPastumtuLaikrodziu(-6 * VALANDA_S * 1000, () =>
+      ctx.store.touch(token, ENV)
+    );
+
+    assert.ok(session, "prielaida: sesija galioja");
+
+    const { rows } = await ctx.pool.query(
+      `SELECT extract(epoch FROM (last_seen_at - now()))                AS matyta_s,
+              extract(epoch FROM (idle_expires_at - last_seen_at))      AS idle_langas_s,
+              extract(epoch FROM (expires_at - created_at))             AS abs_langas_s
+         FROM sessions`
+    );
+    const r = rows[0];
+
+    assert.ok(
+      Math.abs(Number(r.matyta_s)) < 10,
+      `touch() last_seen_at privalo būti DB dabartis (gauta ${r.matyta_s} s)`
+    );
+    assert.ok(
+      Math.abs(Number(r.idle_langas_s) - 30 * 60) < 10,
+      `neveiklumo langas nuo last_seen_at privalo būti 30 min. (gauta ${Number(r.idle_langas_s) / 60} min.)`
+    );
+    assert.ok(
+      Math.abs(Number(r.abs_langas_s) - 12 * VALANDA_S) < 10,
+      "absoliutus langas nuo created_at privalo likti 12 val."
+    );
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ATSKIRI NODE PROCESAI (#181, „LOGOUT / REVOKACIJA YRA GLOBALI")
+ *
+ * ⚠️ DU POOL'AI VIENAME PROCESE NĖRA DU PROCESAI.
+ *
+ * `LENKTYNĖS:` testas aukščiau naudoja dvi saugyklas viename Node procese.
+ * Modulio lygio cache (kurio šiandien nėra) jį apeitų nepastebėtas. #181
+ * reikalauja „du procesai ARBA restartas, ne vien įrašas DB yra", tad čia
+ * paleidžiami TIKRI atskiri `node` procesai su savo moduliais, savo atmintimi
+ * ir savo jungtimis.
+ *
+ * Šviežias procesas, skaitantis sesiją, kurios jis pats nekūrė, kartu yra ir
+ * RESTARTO įrodymas: proceso atmintyje nėra nieko, iš ko sesiją būtų galima
+ * atkurti.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Vaiko skriptas: `touch` arba `destroy` per TIKRĄ produkcinę saugyklą.
+ *
+ * ⚠️ `process.exitCode` NENUSTATOMAS net klaidos atveju - kitaip `execFileSync`
+ * mestų, ir testas praneštų apie proceso kritimą vietoj to, ką vaikas realiai
+ * atsakė. Rezultatas visada grąžinamas per `stdout`.
+ */
+const VAIKO_SKRIPTAS = `
+const { Pool } = require("pg");
+const { createPostgresStore } = require("./utils/sessionStore/postgresStore");
+
+(async () => {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    const store = createPostgresStore(pool);
+    if (process.env.VEIKSMAS === "destroy") {
+      const ok = await store.destroy(process.env.SESIJOS_TOKENAS);
+      process.stdout.write("DESTROY:" + String(ok));
+      return;
+    }
+    const s = await store.touch(process.env.SESIJOS_TOKENAS);
+    process.stdout.write(s ? "OK:" + s.userId + ":" + s.role : "NULL");
+  } finally {
+    await pool.end();
+  }
+})().catch((e) => process.stdout.write("KLAIDA:" + e.message));
+`;
+
+function kitameProcese(url, token, veiksmas = "touch") {
+  return execFileSync(process.execPath, ["-e", VAIKO_SKRIPTAS], {
+    cwd: path.resolve(__dirname, ".."),
+    env: {
+      ...process.env,
+      DATABASE_URL: url,
+      SESIJOS_TOKENAS: token,
+      VEIKSMAS: veiksmas,
+      AUTH_USERS: ENV.AUTH_USERS,
+      SESSION_IDLE_TIMEOUT_MINUTES: ENV.SESSION_IDLE_TIMEOUT_MINUTES,
+      SESSION_ABSOLUTE_TIMEOUT_HOURS: ENV.SESSION_ABSOLUTE_TIMEOUT_HOURS,
+      NODE_ENV: "test",
+      LOG_LEVEL: "error",
+    },
+    encoding: "utf8",
+    timeout: 60_000,
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+test("GLOBALI REVOKACIJA: ATSKIRAS Node procesas nustoja priimti tą pačią cookie", { skip: SKIP }, async () => {
+  const ctx = await paruostiDb("session_kiti_procesai");
+  try {
+    const { token } = await ctx.store.create(ADMIN, ENV);
+
+    /**
+     * 1. RESTARTO ATITIKMUO: procesas, kuris sesijos NEKŪRĖ ir jos atmintyje
+     *    neturi, ją randa ir autentifikuoja.
+     */
+    assert.equal(
+      kitameProcese(ctx.url, token),
+      `OK:${UID_A}:administrator`,
+      "šviežias procesas privalo atkurti sesiją iš DB"
+    );
+
+    /** 2. Atsijungimas VIENAME procese (šiame). */
+    assert.equal(await ctx.store.destroy(token), true);
+
+    /**
+     * 3. KITAS šviežias procesas jos nebepriima. Proceso lokalus cache čia
+     *    padėti negalėtų - vaikas paleidžiamas iš naujo ir bendros atminties
+     *    su tėvu neturi.
+     */
+    assert.equal(
+      kitameProcese(ctx.url, token),
+      "NULL",
+      "revokacija privalo galioti visuose procesuose, ne tik tame, kuris ją atliko"
+    );
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+
+test("GLOBALI REVOKACIJA: ATSKIRAME procese atlikta revokacija matoma ir čia", { skip: SKIP }, async () => {
+  /**
+   * Priešinga kryptis. Be jos testas įrodytų tik tai, kad vaikas mato tėvo
+   * revokaciją - bet ne tai, kad tėvas mato vaiko, o būtent taip atrodo
+   * atsijungimas kitoje replikoje.
+   */
+  const ctx = await paruostiDb("session_kiti_procesai_atv");
+  try {
+    const { token } = await ctx.store.create(ADMIN, ENV);
+    assert.ok(await ctx.store.touch(token, ENV), "prielaida: sesija galioja");
+
+    assert.equal(kitameProcese(ctx.url, token, "destroy"), "DESTROY:true");
+
+    assert.equal(
+      await ctx.store.touch(token, ENV),
+      null,
+      "kitame procese atlikta revokacija privalo galioti iš karto"
+    );
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+

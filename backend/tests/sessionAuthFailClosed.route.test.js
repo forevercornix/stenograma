@@ -19,6 +19,8 @@ const auditLog = require("../utils/auditLog");
 const sessionStore = require("../utils/sessionStore");
 const memoryStore = require("../utils/sessionStore/memoryStore");
 const { hashSessionToken } = require("../utils/sessionStore/tokens");
+const { spawnSync } = require("node:child_process");
+const path = require("node:path");
 const app = require("../server");
 app._setReadyForTests();
 
@@ -601,3 +603,160 @@ test("AKTORIUS: ištrintas vartotojas duoda APIBRĖŽTĄ rezultatą, ne `undefin
     else process.env.API_KEY = senasRaktas;
   }
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * PLIKAS TOKEN'AS: VISOS KETURIOS #181 ĮVARDYTOS ARTEFAKTŲ KLASĖS
+ *
+ * #181 reikalauja, kad plikas token'as nepatektų į:
+ *   1. logus            — dengia `PLIKAS TOKEN'AS: neatsiranda nei audite…`
+ *   2. auditą           — tas pats testas
+ *   3. klaidų metaduomenis  — žemiau
+ *   4. `support-bundle` — žemiau
+ *
+ * Pirmieji du buvo padengti; likę du - ne, ir uždarymo peržiūra tai įvardijo
+ * kaip pervertinimą (PASS vietoj PARTIAL). Šie du testai tą spragą uždaro.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Ar tekste nėra NEI plikojo token'o, NEI jo maišos. */
+function beTokeno(tekstas, token, kur) {
+  assert.ok(!tekstas.includes(token), `${kur}: plikas token'as nutekėjo`);
+  assert.ok(
+    !tekstas.includes(hashSessionToken(token)),
+    `${kur}: token'o maiša neturi ko veikti už autentikacijos ribos`
+  );
+}
+
+test("PLIKAS TOKEN'AS: KLAIDŲ ATSAKYMŲ kūnuose ir antraštėse jo nėra", async () => {
+  /**
+   * ⚠️ KLAIDOS KELIAS YRA TAS, KURIAME PASLAPTIS DAŽNIAUSIAI NUTEKA.
+   *
+   * Sėkmingas atsakymas token'o neturi savaime; bet klaidų tvarkyklė,
+   * „naudingumo dėlei" pridėjusi užklausos kontekstą (antraštes, cookie,
+   * `req` santrauką), atiduotų bearer'į klientui - ir, per naršyklės devtools
+   * ar klaidų telemetriją, visiems, kas tą atsakymą pamato.
+   *
+   * Tikrinami VISI keliai, kuriuose užklausa NEŠA token'ą ir gauna klaidą:
+   * 401 (revokuota), 503 (saugykla neveikia) trijuose middleware'uose ir
+   * bendras 404, kurį formuoja Express, o ne mūsų maršrutas.
+   *
+   * ⚠️ SĖKMINGO `login` ATSAKYMO ČIA NĖRA SĄMONINGAI: jo `Set-Cookie` neša
+   * token'ą pagal apibrėžimą - tai pristatymo kanalas, ne nutekėjimas.
+   */
+  const { optionalSession } = require("../middleware/sessionAuth");
+
+  const login = await prisijungti();
+  const cookie = cookieIs(login);
+  const token = decodeURIComponent(cookie.split("=")[1]);
+
+  const atsakymai = [];
+
+  /** 404 su galiojančia cookie - bendras Express kelias, ne mūsų maršrutas. */
+  atsakymai.push(["404", await request(app).get("/api/neegzistuojantis").set("Cookie", cookie)]);
+
+  /** 503 iš `requireSession` ir iš `logout`, kai saugykla neveikia. */
+  let grazinti = sessionStore._setStoreForTests(krentantiSaugykla());
+  try {
+    atsakymai.push(["503 requireSession", await request(app).get("/api/auth/me").set("Cookie", cookie)]);
+    atsakymai.push(["503 logout", await request(app).post("/api/auth/logout").set("Cookie", cookie)]);
+  } finally {
+    grazinti();
+  }
+
+  /** 401 po revokacijos - ta pati cookie, jau negaliojanti. */
+  await request(app).post("/api/auth/logout").set("Cookie", cookie);
+  atsakymai.push(["401", await request(app).get("/api/auth/me").set("Cookie", cookie)]);
+
+  for (const [kur, res] of atsakymai) {
+    assert.ok(res.status >= 400, `${kur}: prielaida - tai klaidos atsakymas (gauta ${res.status})`);
+    beTokeno(JSON.stringify(res.body ?? null), token, `${kur} kūnas`);
+    beTokeno(res.text || "", token, `${kur} tekstas`);
+    beTokeno(JSON.stringify(res.headers), token, `${kur} antraštės`);
+  }
+
+  /**
+   * `optionalSession` 503 tikrinamas per middleware TIESIOGIAI - produkciniuose
+   * maršrutuose jis šiandien neprijungtas, tad per HTTP jo klaidos kūno
+   * pasiekti neįmanoma.
+   */
+  grazinti = sessionStore._setStoreForTests(krentantiSaugykla());
+  try {
+    let kunas = null;
+    const res = {
+      status() {
+        return this;
+      },
+      json(b) {
+        kunas = b;
+        return this;
+      },
+    };
+    await optionalSession({ headers: { cookie } }, res, () => {});
+    beTokeno(JSON.stringify(kunas), token, "503 optionalSession kūnas");
+  } finally {
+    grazinti();
+  }
+});
+
+test("PLIKAS TOKEN'AS: SUPPORT-BUNDLE artefaktuose jo nėra", async () => {
+  /**
+   * ⚠️ KAS ČIA YRA „SUPPORT-BUNDLE".
+   *
+   * `scripts/doctor.js` savo komentare tai įvardija tiesiogiai: „diagnostikos
+   * išvestis keliauja į support-bundle". Jo ataskaita sudaroma iš DVIEJŲ
+   * šaltinių - `validateConfig()` ir `runSelfChecks()` - plius statinių eilučių;
+   * tas pats `runSelfChecks()` maitina ir `GET /api/health/deep`.
+   *
+   * ⚠️ SVORIS TENKA PIRMIEMS TRIMS TIKRINIMAMS, NE `doctor` PALEIDIMUI.
+   *
+   * `validateConfig()`, `runSelfChecks()` ir `/api/health/deep` vykdomi TAME
+   * PAČIAME procese, kuriame gyvena sesijų saugykla, tad jie REALIAI galėtų
+   * pasiekti sesijos būseną - būtent todėl jų tikrinimas yra prasmingas.
+   * `doctor` paleidžiamas atskirame procese ir tėvo atminties nemato; jo
+   * patikra fiksuoja būtent tą struktūrinę garantiją ir pagauna regresiją,
+   * jei jis kada nors imtų dump'inti aplinkos reikšmes ar sesijų būseną.
+   */
+  const { validateConfig, runSelfChecks } = require("../utils/startupChecks");
+
+  const login = await prisijungti();
+  const cookie = cookieIs(login);
+  const token = decodeURIComponent(cookie.split("=")[1]);
+
+  /** Prielaida: sesija GYVA - kitaip tikrintume diagnostiką be ko tikrinti. */
+  assert.equal((await request(app).get("/api/auth/me").set("Cookie", cookie)).status, 200);
+
+  const konfig = validateConfig();
+  beTokeno(JSON.stringify(konfig), token, "validateConfig()");
+
+  const patikros = await runSelfChecks();
+  beTokeno(JSON.stringify(patikros), token, "runSelfChecks()");
+
+  /**
+   * ⚠️ DIAGNOSTIKA, PRAŠOMA SU CREDENTIAL'U.
+   *
+   * Būsena netikrinama sąlyginiu praleidimu (200 ar 503 - abu teisėti);
+   * tikrinamas turinys, kad `if (status !== 200) return` neparverstų regresijos
+   * praėjimu (AGENTS.md §9.1).
+   */
+  const deep = await request(app).get("/api/health/deep").set("Cookie", cookie);
+  beTokeno(JSON.stringify(deep.body ?? null), token, "/api/health/deep kūnas");
+  beTokeno(deep.text || "", token, "/api/health/deep tekstas");
+  beTokeno(JSON.stringify(deep.headers), token, "/api/health/deep antraštės");
+
+  /**
+   * TIKRAS `npm run doctor` paleidimas. `spawnSync`, ne `execFileSync`:
+   * doctor teisėtai baigia su ne nuliniu kodu, kai kokia nors patikra krinta,
+   * o mums reikia jo IŠVESTIES, ne baigties kodo.
+   */
+  const vykdymas = spawnSync(process.execPath, ["scripts/doctor.js"], {
+    cwd: path.resolve(__dirname, ".."),
+    env: { ...process.env, LOG_LEVEL: "error" },
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+
+  assert.equal(vykdymas.error, undefined, `doctor nepasileido: ${vykdymas.error && vykdymas.error.message}`);
+  const isvestis = `${vykdymas.stdout || ""}\n${vykdymas.stderr || ""}`;
+  assert.ok(isvestis.includes("Stenograma doctor"), "prielaida: doctor realiai sugeneravo ataskaitą");
+  beTokeno(isvestis, token, "scripts/doctor.js išvestis");
+});
+
