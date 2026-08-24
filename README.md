@@ -1648,8 +1648,12 @@ esant nuolatiniam aktyvumui).
 
 **Persistentinės sesijos (#155, 7.3).** `SESSION_STORE_BACKEND=postgres`
 perkelia sesijas į duomenų bazę: jos išgyvena restartą, veikia keliose
-replikose, o atsijungimas ir vartotojo pašalinimas iš `AUTH_USERS` galioja
-**globaliai ir be restarto**. Cookie'je keliauja 256 bitų bearer token'as, o
+replikose, o **atsijungimas galioja globaliai** – kitas procesas tos pačios
+cookie nebepriima. Vartotojo pašalinimas iš `AUTH_USERS` tebereikalauja
+**restarto**, nes `AUTH_USERS` skaitomas iš proceso aplinkos; naujovė ta, kad
+rolė ir tapatybė tikrinamos prieš gyvą konfigūraciją kiekvienos užklausos metu,
+tad persistentinė sesija negali išgyventi su pasenusia role.
+Cookie'je keliauja 256 bitų bearer token'as, o
 lentelėje saugoma tik jo SHA-256 maiša – nutekėjusi `sessions` lentelė
 nesuteikia galimybės perimti sesijų. Jungiklis **eksplicitinis**: vien
 `DATABASE_URL` autentifikacijos režimo nekeičia. Numatyta lieka `memory`

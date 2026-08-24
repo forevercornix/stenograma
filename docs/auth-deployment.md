@@ -119,14 +119,27 @@ migracija būtų token'ų perrašymas be jokio saugumo pagrindo.
 | Ką norite pasiekti | Ką daryti | Poveikis |
 |---|---|---|
 | Atjungti vieną seansą | Vartotojas spaudžia „Atsijungti" | Ta sesija nebegalioja iš karto – **ir visuose procesuose**, jei backend'as `postgres` |
-| **Atimti prieigą visam laikui** | Pašalinti įrašą iš `AUTH_USERS` | Sesijos nebegalioja **iš karto, be restarto**; **eilėje laukiantys darbai nutraukiami** |
-| Sumažinti teises | Pakeisti rolę `AUTH_USERS` | Sesijos su senu rolės snapshot'u nutraukiamos **iš karto, be restarto**; **eilėje laukiantys darbai su per aukšta teise nutraukiami** |
+| **Atimti prieigą visam laikui** | Pašalinti įrašą iš `AUTH_USERS` + restartas | Visos sesijos nebegalioja; **eilėje laukiantys darbai nutraukiami** |
+| Sumažinti teises | Pakeisti rolę `AUTH_USERS` + restartas | Sesijos su senu rolės snapshot'u nutraukiamos; **eilėje laukiantys darbai su per aukšta teise nutraukiami** |
 
-⚠️ **Revokacija nebelaukia restarto (#155, 7.3).** Kiekvienas `touch()` tikrina
-`user_id` ir rolę prieš **gyvą** `AUTH_USERS`: dingęs vartotojas ar pasikeitusi
-rolė reiškia, kad sesija atmetama ir pažymima atšaukta. Restartas papildomai
-atlieka **startinį suderinimą** – jis dengia sesijas, kurių niekas nenaudojo
-tarp konfigūracijos pakeitimo ir perkrovimo.
+⚠️ **RESTARTAS TEBĖRA BŪTINAS, ir tai ne redakcinė smulkmena.** `AUTH_USERS`
+skaitomas iš proceso aplinkos, o veikiančio proceso aplinkos kintamojo pakeisti
+iš išorės negalima – konfigūracijos perkrovimo mechanizmo šis projektas neturi
+(žr. 5 skyrių). Todėl operatoriaus procedūra yra ir lieka „pakeisti `AUTH_USERS`
++ perkrauti".
+
+⚠️ **Ką 7.3 realiai pakeitė:** kiekvienas `touch()` tikrina `user_id` ir rolę
+prieš **tuo metu galiojantį** `AUTH_USERS`, ne prieš sesijoje įrašytą
+snapshot'ą. Nauda dvejopa:
+
+- **nėra lango tarp starto ir suderinimo** – net jei sesija bandoma panaudoti
+  anksčiau, nei baigtas startinis suderinimas, ji vis tiek tikrinama;
+- **pasenusi rolė negali išgyventi** – persistentinė sesija po restarto neša
+  seną rolės snapshot'ą, ir be šios patikros ji autorizuotų senomis teisėmis.
+
+Startinis suderinimas papildomai revokuoja sesijas, kurių niekas nenaudojo tarp
+konfigūracijos pakeitimo ir perkrovimo, kad jos nebūtų aptinkamos tik pirmo
+panaudojimo metu.
 
 ⚠️ **Atšaukta sesija NEIŠTRINAMA iš karto.** Ji saugoma iki savo `expires_at`,
 kad būtų galima atsakyti, ar cookie buvo **atšaukta**, ar jos **niekada
@@ -240,6 +253,8 @@ Sąžiningumo dėlei – ribos, kurios lieka atviros:
 - **Kelių replikų sesijos** veikia tik su `SESSION_STORE_BACKEND=postgres`;
   numatytoji atminties saugykla lieka viename procese.
 - **Vartotojų saugyklos DB nėra** – `AUTH_USERS` tebėra konfigūracijoje, tad
-  vartotojų sąrašo keitimas vis dar reikalauja aplinkos pakeitimo (nors
-  revokacija po jo suveikia be restarto).
+  vartotojų sąrašo keitimas reikalauja aplinkos pakeitimo **ir restarto**.
+  Konfigūracijos perkrovimo mechanizmo nėra; `touch()` tikrina rolę prieš gyvą
+  `AUTH_USERS` tik tam, kad procese, kuris naują konfigūraciją jau turi, negalėtų
+  išlikti sesija su pasenusia role.
 - **MFA nėra.**

@@ -125,24 +125,46 @@ const SCENARIJAI = [
   {
     id: "touch-pratesia-tik-idle",
     kodel: "touch pratęsia neveiklumo langą, bet NE absoliutų",
-    async run({ store, env }) {
+    async run({ store, env, pastumti, perskaityti }) {
       const { session, token } = await store.create(ADMIN, env);
       const pradinisAbsoliutus = session.expiresAt;
 
-      let paskutinis = null;
-      for (let i = 0; i < 3; i++) {
-        paskutinis = await store.touch(token, env);
-        assert.ok(paskutinis);
+      /**
+       * ⚠️ ANKSTESNĖ ŠIO TIKRINIMO VERSIJA BUVO TUŠČIA.
+       *
+       * Ji lygino `paskutinis.idleExpiresAt >= session.idleExpiresAt`. Atminties
+       * backend'e `create()` ir `touch()` grąžina TĄ PATĮ objektą, tad tai buvo
+       * `x >= x` - teisinga net tada, kai `touch()` neveiklumo lango apskritai
+       * nebepratęsia. PostgreSQL pusėje `>=` irgi praeitų, jei abu kvietimai
+       * pataikytų į tą pačią sekundę.
+       *
+       * Dabar terminas dirbtinai pastumiamas į ARTIMĄ ateitį, nuskaitomas iš
+       * saugyklos kaip SKALIARAS ir reikalaujamas GRIEŽTAI didesnis - tad
+       * `idle_expires_at` atnaujinimo pašalinimas iš bet kurio backend'o šį
+       * scenarijų sulaužo.
+       */
+      await pastumti(token, { idleSekundes: 5 });
+      const priesTai = (await perskaityti(token)).idleExpiresAt;
+
+      const paskutinis = await store.touch(token, env);
+      assert.ok(paskutinis, "prielaida: sesija dar galioja");
+
+      const poTo = (await perskaityti(token)).idleExpiresAt;
+      assert.ok(
+        poTo > priesTai,
+        `touch() privalo pratęsti neveiklumo langą (buvo ${priesTai}, tapo ${poTo})`
+      );
+
+      /** Absoliutus langas nepajuda nė po kelių kvietimų. */
+      assert.equal(paskutinis.expiresAt, pradinisAbsoliutus);
+      for (let i = 0; i < 2; i++) {
+        const dar = await store.touch(token, env);
         assert.equal(
-          paskutinis.expiresAt,
+          dar.expiresAt,
           pradinisAbsoliutus,
           "absoliutus langas negali slinkti - kitaip aktyvi sesija niekada nepasibaigtų"
         );
       }
-      assert.ok(
-        paskutinis.idleExpiresAt >= session.idleExpiresAt,
-        "neveiklumo langas privalo slinkti pirmyn"
-      );
     },
   },
   {

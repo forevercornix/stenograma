@@ -105,9 +105,47 @@ test("TOKEN: entropija ≥ 256 bitų ir forma NĖRA uuid", () => {
     "dekoduotas token'as privalo turėti bent 32 baitus atsitiktinumo"
   );
 
-  /** Skirtingi kvietimai negali kartotis - tai atmestų fiksuotą ar skaitiklinį generatorių. */
+  /**
+   * ⚠️ 200 SKIRTINGŲ REIKŠMIŲ ENTROPIJOS NEĮRODO.
+   *
+   * Ankstesnė šio tikrinimo versija tvirtino, kad unikalumas „atmestų fiksuotą
+   * ar skaitiklinį generatorių". Skaitiklis, užkoduotas į 32 baitus, duotų
+   * lygiai tokius pat 200 unikalių token'ų - teiginys buvo stipresnis už
+   * įrodymą (AGENTS.md §12.1).
+   *
+   * Unikalumas lieka kaip pigus sargas nuo FIKSUOTOS reikšmės, o entropijos
+   * ŠALTINIS tikrinamas ties riba: `generateSessionToken()` privalo kviesti
+   * `crypto.randomBytes` ir prašyti ne mažiau kaip 32 baitų.
+   */
   const aibė = new Set(Array.from({ length: 200 }, () => generateSessionToken()));
-  assert.equal(aibė.size, 200);
+  assert.equal(aibė.size, 200, "fiksuota reikšmė ar per siauras šaltinis duotų dublikatų");
+
+  /**
+   * ⚠️ INTERCEPCIJA TIES RIBA, NE ŠALTINIO TEKSTO PAIEŠKA.
+   *
+   * `tokens.js` kviečia `crypto.randomBytes(...)` per modulio objektą, tad
+   * pakeitus `crypto.randomBytes` kvietimas realiai perimamas. Skaitiklio ar
+   * `Math.random()` realizacija čia nieko neužregistruotų ir testas kristų.
+   */
+  const cryptoModulis = require("crypto");
+  const originalusRandomBytes = cryptoModulis.randomBytes;
+  const prasytiBaitai = [];
+  cryptoModulis.randomBytes = (n, ...likę) => {
+    prasytiBaitai.push(n);
+    return originalusRandomBytes(n, ...likę);
+  };
+  try {
+    generateSessionToken();
+  } finally {
+    cryptoModulis.randomBytes = originalusRandomBytes;
+  }
+
+  assert.deepEqual(
+    prasytiBaitai,
+    [SESSION_TOKEN_BYTES],
+    "token'as privalo ateiti iš VIENO crypto.randomBytes kvietimo"
+  );
+  assert.ok(prasytiBaitai[0] >= 32, "kriptografinis šaltinis privalo duoti bent 256 bitus");
 });
 
 test("TRYS REIKŠMĖS: cookie token'as NĖRA nei `session.id`, nei `token_hash`", async () => {
