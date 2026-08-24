@@ -1423,6 +1423,16 @@ atmestų teisėtą įrašą.
 ⚠️ Kiekvienam invariantui reikia atskiro testo, įrašančio pažeidžiančią eilutę
 APEINANT store'ą — kitaip tikrinamas JS, ne DB.
 
+- [ ] ⚠️ **`REQUIRED_SESSION_CONSTRAINTS` PILNUMAS IŠVEDAMAS.**
+
+      Testas `tests/migrations.integration.test.js` nuskaito VISUS
+      `contype = 'c'` constraint'us ant `sessions` iš šviežiai migruotos DB ir
+      lygina su tikrinamu sąrašu per `deepEqual`.
+
+      Tas pats modelis kaip `REQUIRED_JOB_CONSTRAINTS` (#155, 7.2a), kur
+      dalinis sąrašas praleido tris invariantus, ir tai pastebėjo tik peržiūra.
+      Narystės patikra po vieną tikrintų tik apatinę ribą.
+
 ### Suderinamumas ir cutover
 
 - [ ] Restartas: ta pati cookie, sesija randama DB, `req.user` atkuriamas.
@@ -1537,6 +1547,43 @@ APEINANT store'ą — kitaip tikrinamas JS, ne DB.
       tikrinami `utils/startupChecks.js`: neigiamos, nulinės ar ne skaitinės
       reikšmės atmetamos starte, o ne tyliai virsta numatytosiomis ar
       begaliniais langais.
+
+- [ ] **`SESSION_STORE_BACKEND` VALIDUOJAMAS STARTE.**
+
+      `utils/startupChecks.js` šiandien tikrina sesijų timeout'us
+      (133–140 eil.), bet nė vieno backend'o jungiklio. Neteisinga reikšmė ar
+      `postgres` be `DATABASE_URL` praeitų konfigūracijos patikrą ir kristų
+      vėliau, inicijavimo metu — su prastesniu pranešimu ir po to, kai dalis
+      sistemos jau pakilusi.
+
+      Validuojama kartu su timeout'ais: reikšmė yra `memory` arba `postgres`;
+      pasirinkus `postgres`, `DATABASE_URL` privalomas.
+
+      ⚠️ `JOB_STORE_BACKEND` šiandien irgi nevaliduojamas `startupChecks`, bet
+      jo apsauga yra `resolveBackendChoice()` (#155, 7.2a), kuri meta klaidą
+      ties nežinoma reikšme. Sesijoms reikia to paties lygio apsaugos — ar
+      `startupChecks`, ar analogiškame resolveryje, bet NE tyliai.
+
+- [ ] **`destroyAllForUser(username)` ELGESYS PostgreSQL REŽIME APIBRĖŽTAS.**
+
+      ⚠️ Produkcinis kodas jo NEKVIEČIA — vieninteliai kvietėjai yra
+      `tests/authFoundation.test.js` (221, 227, 553, 576 eil.), tarp jų #158
+      suderinamumo testas. Tai ne veikianti administracinė funkcija, o
+      atgalinio suderinamumo paviršius.
+
+      Todėl reikalavimas yra APIBRĖŽTUMAS, ne funkcionalumas. Priimtinas bet
+      kuris vienas, bet pasirinkimas eksplicitinis:
+
+      1. įgyvendinti per `loadUsers(env)` → `user_id` → `revoked_at = now()`;
+      2. mesti apibrėžtą klaidą PostgreSQL režime, jei metodas laikomas
+         legacy.
+
+      ⚠️ Ko NEGALIMA: tyliai grąžinti `0`. Tai atrodytų kaip „vartotojas
+      neturėjo sesijų", o realiai reikštų neįvykusią revokaciją — tas pats
+      tylaus nesuveikimo šablonas, kurį #155 gaudė keturis kartus.
+
+      **Testas:** esami `authFoundation` testai praeina prieš PASIRINKTĄ
+      semantiką be silpninimo.
 
 
 ## Ko NEAPIMA
