@@ -1059,6 +1059,48 @@ atmestų teisėtą įrašą.
       Testas: DB rašymo klaida per `create()` → nėra galiojančios cookie, nėra
       dalinės sesijos, o audite įvykis pažymėtas kaip nesėkmė.
 
+- [ ] ⚠️ **`token_hash` ALGORITMAS FIKSUOTAS: SHA-256, LOWERCASE HEX.**
+
+      ```text
+      token_hash = SHA-256(raw bearer token)   // crypto.createHash("sha256")
+      ```
+
+      Tas pats VIENAS helperis naudojamas visuose sesiją identifikuojančiuose
+      keliuose (`create`, `touch`, `destroy`).
+
+      ⚠️ **LĖTI KDF GRIEŽTAI DRAUDŽIAMI — TAI DoS, NE STILIUS.**
+      `utils/credentials.js` naudoja `crypto.scryptSync` su
+      `SCRYPT_N = 1 << 14` (50–100 ms vienam skaičiavimui). Panaudojus tą patį
+      helperį sesijoms, KIEKVIENA autentifikuota užklausa kainuotų 50–100 ms
+      CPU, nes `touch()` kviečiamas kiekvienai — thread pool išsektų iš karto.
+
+      Lėti KDF reikalingi MAŽOS entropijos slaptažodžiams. Bearer token'as turi
+      ≥256 bitų `crypto.randomBytes` ir yra atsparus brute-force pagal
+      konstrukciją, tad jam reikia GREITOS vienkryptės maišos.
+
+      **Testai:** tas pats token'as duoda tą patį hash; skirtingi — skirtingą;
+      DB reikšmė yra SHA-256 hex; `touch()` trukmė < 1 ms.
+
+- [ ] ⚠️ **GALUTINIS PUBLIC KONTRAKTAS.**
+
+      ```js
+      create(identity, env)        -> { session, token }
+      touch(token, env)            -> session | null
+      destroy(token)               -> boolean
+      destroyAllForUserId(userId)  -> number
+      sweepExpired(env)            -> number
+      size()                       -> number
+      ```
+
+      `create()` grąžinamas `token` yra VIENINTELĖ klientui siunčiama reikšmė.
+
+      PostgreSQL backend'e `destroy(token)` ir `destroyAllForUserId()` reiškia
+      LOGINĘ revokaciją per `revoked_at`, ne fizinį `DELETE`; fizinis šalinimas
+      priklauso tik retencijos keliui po `expires_at`.
+
+      `destroyAllForUser(username)` lieka tik memory suderinamumui; naujas
+      PostgreSQL kodas naudoja stabilų `user_id`.
+
 ### Galiojimo langai
 
 - [ ] ⚠️ **IDLE IR ABSOLIUTUS GALIOJIMAS IŠLIEKA ATSKIRI.**
@@ -1294,6 +1336,49 @@ atmestų teisėtą įrašą.
       **Testas:** autentikacijos kelias atlieka VIENĄ sesijų užklausą; dvi
       (skaitymas + mutacija) yra nesėkmė.
 
+- [ ] ⚠️ **AUTENTIKACIJOS KELYJE NĖRA `findByToken()` → `touch()` SEKOS.**
+
+      `touch(token)` YRA pati autentikacijos operacija: vienu sąlyginiu SQL
+      sakiniu ji randa pagal `token_hash`, tikrina `revoked_at IS NULL`,
+      absoliutų ir idle galiojimą, pratęsia TIK idle langą ir grąžina per
+      `RETURNING *`.
+
+      Draudžiamas modelis:
+
+      ```text
+      findByToken(token) -> patikrinti JS -> touch(token) -> autorizuoti
+      ```
+
+      Tarp skaitymo ir mutacijos atsiranda revokacijos TOCTOU langas.
+
+- [ ] ⚠️ **`touch()` TIKRINA `AUTH_USERS` DINAMIŠKAI, NE TIK STARTE.**
+
+      Startinis suderinimas dengia TIK restartą. Vartotojas, ištrintas iš
+      `AUTH_USERS` arba pažemintas RUNTIME metu, su galiojančia sesija toliau
+      autorizuotų užklausas SENA role iki kito restarto — privilegijų
+      eskalavimas.
+
+      `middleware/sessionAuth.js:89` ir `middleware/authenticate.js:27` kviečia
+      `touch()`; nei jie, nei `sessionStore` šiandien `AUTH_USERS` netikrina.
+
+      Radus sesiją DB, store'as privalo patikrinti `user_id` prieš gyvą
+      `loadUsersById()` (`credentials.js:278`). Vartotojo nėra arba rolė
+      nesutampa su sesijos snapshot'u → fail-closed: `null` IR
+      `revoked_at = now()`.
+
+      **Testas:** vartotojo ištrynimas iš `AUTH_USERS` BE restarto → kitas
+      `touch()` grąžina `null`, o DB įrašas pažymimas revokuotu.
+
+- [ ] ⚠️ **`sessionStore` POOL GYVAVIMO CIKLAS.**
+
+      `jobStore/index.js` jau turi modelį: `connectionTimeoutMillis`, o klaidos
+      atveju `pool.end().catch(() => {})` prieš metant. Be to paties sesijų
+      pusėje nepavykusi inicijacija paliktų atviras jungtis, ir integraciniai
+      testai KABOTŲ vietoj kritimo.
+
+      Init'as ir invariantų užklausos apgaubiamos `try/catch` su garantuotu
+      pool uždarymu; store'as eksportuoja švarų išjungimo kelią.
+
 ### Retencija
 
 - [ ] ⚠️ **RETENCIJOS SEMANTIKA EKSPLICITINĖ.** Vien „`expires_at` +
@@ -1393,6 +1478,46 @@ APEINANT store'ą — kitaip tikrinamas JS, ne DB.
       suderinimas kaip readiness barjeras; globali revokacija.
 
       **Kriterijus:** `npm run test:matrix` žalias.
+
+- [ ] ⚠️ **SESIJŲ BACKEND'Ų KONTRAKTO EKVIVALENTUMAS.**
+
+      `tests/authFoundation.test.js` šiandien tikrina TIK memory. Du atskiri
+      keliai be bendro rinkinio išsiskiria tyliai — tai jau įvyko job store
+      pusėje (#155: `tenantId`, `idempotencyKey`, `created_at`, tipų
+      konvertavimas).
+
+      Reikalingas `sessionStoreBackendContract.integration.test.js` pagal tą
+      patį adapterio modelį kaip `jobStoreBackendContract`: identiški
+      scenarijai (kūrimas, `touch`, revokacija, idle ir absoliutus
+      pasibaigimas, retencija) prieš memory IR PostgreSQL.
+
+      Registruojamas ABIEJUOSE rinkiniuose, kad `test:postgres` jį realiai
+      vykdytų; adapteriai po savęs uždaro jungtis.
+
+- [ ] ⚠️ **PostgreSQL SESIJA VISADA TURI STABILŲ `user_id`.**
+
+      `sessions.user_id` yra `NOT NULL`, tad PostgreSQL režimas NEGALI kurti
+      sesijos be stabilaus ID. `create(identity)` reikalauja galiojančio
+      `identity.id` iš `AUTH_USERS` (#158). Jo nėra ar netinkamas → sesija
+      NESUKURIAMA, cookie NEIŠSIUNČIAMA, login nesėkmingas, fail-closed.
+
+      Memory backend'as gali išlaikyti `userId: null` toleranciją tik legacy
+      testams; produkciniame PostgreSQL `user_id IS NULL` sesijų NĖRA.
+
+- [ ] ⚠️ **PLIKAS TOKEN'AS NEPATENKA Į LOGUS IR AUDITĄ — TIKRINAMA.**
+
+      Reikalavimas „token'as nerandamas nė viename diagnostikos artefakte" be
+      testo yra deklaracija. Testas perima logavimo ir audito išvestį ir
+      tikrina, kad plikas token'as niekada neperduodamas — IR sėkmingame, IR
+      nesėkmingame autentikacijos kelyje.
+
+- [ ] **SESIJŲ TIMEOUT'Ų KONFIGŪRACIJA VALIDUOJAMA STARTE.**
+
+      `SESSION_IDLE_TIMEOUT_MINUTES` ir `SESSION_ABSOLUTE_TIMEOUT_HOURS`
+      tikrinami `utils/startupChecks.js`: neigiamos, nulinės ar ne skaitinės
+      reikšmės atmetamos starte, o ne tyliai virsta numatytosiomis ar
+      begaliniais langais.
+
 
 ## Ko NEAPIMA
 
