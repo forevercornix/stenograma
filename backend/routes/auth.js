@@ -1,7 +1,14 @@
 const express = require("express");
 const { verifyCredentials, USERNAME_PATTERN } = require("../utils/credentials");
 const sessionStore = require("../utils/sessionStore");
-const { requireSession, setSessionCookie, clearSessionCookie, readCookie, COOKIE_NAME } = require("../middleware/sessionAuth");
+const {
+  requireSession,
+  setSessionCookie,
+  clearSessionCookie,
+  sessionStoreUnavailable,
+  readCookie,
+  COOKIE_NAME,
+} = require("../middleware/sessionAuth");
 const { loginIpLimiter, loginAccountLimiter } = require("../middleware/rateLimiter");
 const { validate, z } = require("../middleware/validate");
 const { createLogger } = require("../utils/logger");
@@ -54,8 +61,43 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
     return res.status(401).json({ error: "Neteisingas vartotojo vardas arba slaptažodis.", code: "INVALID_CREDENTIALS" });
   }
 
-  const session = await sessionStore.create(identity);
-  setSessionCookie(res, session.id, sessionStore.absoluteTimeoutMs());
+  /**
+   * ⚠️ SESIJOS KŪRIMAS YRA FAIL-CLOSED, IR TVARKA SVARBI (#155, 7.3).
+   *
+   * `Set-Cookie` išsiunčiamas TIK po patvirtinto įrašymo. Cookie prieš tai
+   * paliktų klientą su bearer token'u, kurio saugykloje nėra: vartotojas
+   * atrodytų prisijungęs iki pirmos užklausos, o auditas rodytų sėkmę.
+   *
+   * `create()` grąžina `{ session, token }`. Į cookie keliauja TOKEN'AS -
+   * `session.id` yra DB pirminis raktas ir klientui nerodomas niekada.
+   */
+  let sukurta;
+  try {
+    sukurta = await sessionStore.create(identity);
+  } catch (err) {
+    auditLog.record({
+      event: "LOGIN_FAILED",
+      success: false,
+      outcome: err.code === "IDENTITY_UNAVAILABLE" ? "identity_unavailable" : "session_store_unavailable",
+      details: `username=${identity.username} role=${identity.role}`,
+    });
+    log.error(`Sesijos sukurti nepavyko: ${err.message}`);
+
+    /**
+     * Tapatybės trūkumas yra KONFIGŪRACIJOS, ne prieinamumo problema, tad
+     * atsakymai skiriasi (AGENTS.md §11): 503 reiškia „bandykite vėliau",
+     * o čia pakartojimas nepadėtų.
+     */
+    if (err.code === "IDENTITY_UNAVAILABLE") {
+      return res.status(500).json({
+        error: "Prisijungimas negalimas: vartotojo tapatybė nepilna.",
+        code: "IDENTITY_UNAVAILABLE",
+      });
+    }
+    return sessionStoreUnavailable(res);
+  }
+
+  setSessionCookie(res, sukurta.token, sessionStore.absoluteTimeoutMs());
 
   auditLog.record({
     event: "LOGIN_SUCCESS",
@@ -75,10 +117,30 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
  * galėjo jau būti atsijungęs kitame skirtuke.
  */
 router.post("/auth/logout", async (req, res) => {
-  const sessionId = readCookie(req, COOKIE_NAME);
+  /**
+   * ⚠️ COOKIE REIKŠMĖ YRA TOKEN'AS, NE `session.id` (#155, 7.3).
+   *
+   * Palikus seną `destroy(sessionId)` semantiką, atsijungimas TYLIAI nustotų
+   * veikti: `destroy()` gautų token'ą, ieškotų pagal `id`, nerastų eilutės,
+   * grąžintų `false`, o cookie liktų galiojanti.
+   */
+  const token = readCookie(req, COOKIE_NAME);
 
-  if (sessionId) {
-    await sessionStore.destroy(sessionId);
+  if (token) {
+    /**
+     * ⚠️ REVOKACIJOS KLAIDA NEGALI VIRSTI „atsijungta".
+     *
+     * Išvalyta cookie be revokacijos reikštų, kad ta pati reikšmė kitame
+     * procese vis dar autentifikuoja - būtent to globali revokacija ir
+     * neleidžia. Todėl gedimas grąžinamas klientui, o ne nutylimas.
+     */
+    try {
+      await sessionStore.destroy(token);
+    } catch (err) {
+      auditLog.record({ event: "LOGOUT", success: false, outcome: "session_store_unavailable" });
+      log.error(`Atsijungimas nepavyko: ${err.message}`);
+      return sessionStoreUnavailable(res);
+    }
     auditLog.record({ event: "LOGOUT", success: true, outcome: "session_destroyed" });
   }
 

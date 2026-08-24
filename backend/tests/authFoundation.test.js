@@ -182,25 +182,30 @@ test("STARTUP: AUTH_USERS su pavojingais scrypt parametrais stabdo paleidimą", 
 
 test("SESSION STORE: sukurta sesija patvirtinama ir neša teisingus laukus", async () => {
   await sessionStore._clearForTests();
-  const session = await sessionStore.create({ username: "admin", role: "administrator" });
+  /**
+   * #155 / 7.3: `create()` grąžina `{ session, token }`. Bearer token'as yra
+   * VIENINTELĖ klientui siunčiama reikšmė; `session.id` - DB surogatas.
+   */
+  const { session, token } = await sessionStore.create({ username: "admin", role: "administrator" });
 
-  assert.ok(session.id.length > 20);
-  const touched = await sessionStore.touch(session.id);
+  assert.ok(token.length > 20);
+  const touched = await sessionStore.touch(token);
   assert.equal(touched.username, "admin");
   assert.equal(touched.role, "administrator");
+  assert.notEqual(token, session.id, "cookie reikšmė negali sutapti su DB pirminiu raktu");
 });
 
 test("SESSION STORE: idle timeout baigia sesiją ir ji NEATGYJA", async () => {
   await sessionStore._clearForTests();
   const env = { SESSION_IDLE_TIMEOUT_MINUTES: "0.001" }; // ~60ms
 
-  const session = await sessionStore.create({ username: "a", role: "operator" }, env);
-  assert.ok(await sessionStore.touch(session.id, env));
+  const { token } = await sessionStore.create({ username: "a", role: "operator" }, env);
+  assert.ok(await sessionStore.touch(token, env));
 
   await new Promise((r) => setTimeout(r, 100));
 
-  assert.equal(await sessionStore.touch(session.id, env), null, "sesija turėjo pasibaigti");
-  assert.equal(await sessionStore.touch(session.id, env), null, "pasibaigusi sesija negali atgyti pakartotinai");
+  assert.equal(await sessionStore.touch(token, env), null, "sesija turėjo pasibaigti");
+  assert.equal(await sessionStore.touch(token, env), null, "pasibaigusi sesija negali atgyti pakartotinai");
 });
 
 test("SESSION STORE: absoliutus timeout galioja NEPRIKLAUSOMAI nuo aktyvumo", async () => {
@@ -212,10 +217,10 @@ test("SESSION STORE: absoliutus timeout galioja NEPRIKLAUSOMAI nuo aktyvumo", as
   await sessionStore._clearForTests();
   const env = { SESSION_IDLE_TIMEOUT_MINUTES: "60", SESSION_ABSOLUTE_TIMEOUT_HOURS: "0.00003" }; // ~100ms
 
-  const session = await sessionStore.create({ username: "a", role: "operator" }, env);
+  const { token } = await sessionStore.create({ username: "a", role: "operator" }, env);
   await new Promise((r) => setTimeout(r, 150));
 
-  assert.equal(await sessionStore.touch(session.id, env), null, "absoliutus limitas turėjo baigti sesiją");
+  assert.equal(await sessionStore.touch(token, env), null, "absoliutus limitas turėjo baigti sesiją");
 });
 
 test("SESSION STORE: destroyAllForUser revokuoja tik nurodyto vartotojo sesijas", async () => {
@@ -227,9 +232,9 @@ test("SESSION STORE: destroyAllForUser revokuoja tik nurodyto vartotojo sesijas"
   const removed = await sessionStore.destroyAllForUser("a");
 
   assert.equal(removed, 2);
-  assert.equal(await sessionStore.touch(s1.id), null);
-  assert.equal(await sessionStore.touch(s2.id), null);
-  assert.ok(await sessionStore.touch(s3.id), "kito vartotojo sesija neturėjo būti paliesta");
+  assert.equal(await sessionStore.touch(s1.token), null);
+  assert.equal(await sessionStore.touch(s2.token), null);
+  assert.ok(await sessionStore.touch(s3.token), "kito vartotojo sesija neturėjo būti paliesta");
 });
 
 test("STARTUP: netinkamas AUTH_USERS formatas stabdo paleidimą", () => {
@@ -504,7 +509,7 @@ test("#158 PARSERIS: userId privalo būti būtent v4, ne bet kuri UUID versija",
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 test("#158 SESIJA: create() išsaugo stabilų userId kartu su vardu", async () => {
-  const session = await sessionStore.create({
+  const { session } = await sessionStore.create({
     id: UID_A,
     username: "admin",
     role: "administrator",
@@ -516,7 +521,7 @@ test("#158 SESIJA: create() išsaugo stabilų userId kartu su vardu", async () =
 });
 
 test("#158 SESIJA: tapatybė be id duoda userId=null, o ne undefined", async () => {
-  const session = await sessionStore.create({ username: "senas", role: "operator" });
+  const { session } = await sessionStore.create({ username: "senas", role: "operator" });
 
   assert.equal(session.userId, null, "aiškus null, ne undefined – kad JSON srautuose nedingtų laukas");
   await sessionStore._clearForTests();
@@ -524,21 +529,28 @@ test("#158 SESIJA: tapatybė be id duoda userId=null, o ne undefined", async () 
 
 test("#158 SESIJA: touch() grąžina userId (jį skaito req.user)", async () => {
   const created = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  const touched = await sessionStore.touch(created.id);
+  const touched = await sessionStore.touch(created.token);
 
   assert.equal(touched.userId, UID_A);
   await sessionStore._clearForTests();
 });
 
 test("#158 REVOKACIJA: destroyAllForUserId ištrina visas to paties ID sesijas", async () => {
-  await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
+  const a1 = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
+  const a2 = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
+  const b = await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
 
   const removed = await sessionStore.destroyAllForUserId(UID_A);
 
   assert.equal(removed, 2);
-  assert.equal(await sessionStore.size(), 1, "kito vartotojo sesija nepaliesta");
+  /**
+   * #155 / 7.3: revokacija LOGINĖ, ne fizinis šalinimas - `size()` skaičiuoja
+   * eilutes, ne aktyvias sesijas. Todėl „nepaliesta" tikrinama tuo, kas
+   * realiai svarbu: ar cookie dar autentifikuoja.
+   */
+  assert.equal(await sessionStore.touch(a1.token), null);
+  assert.equal(await sessionStore.touch(a2.token), null);
+  assert.ok(await sessionStore.touch(b.token), "kito vartotojo sesija nepaliesta");
   await sessionStore._clearForTests();
 });
 
@@ -570,10 +582,11 @@ test("#158 REVOKACIJA: destroyAllForUserId neliečia sesijų be userId", async (
 });
 
 test("#158 REVOKACIJA: destroyAllForUser lieka suderinamas (vardu paremtas kelias)", async () => {
-  await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
+  const a = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
+  const b = await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
 
   assert.equal(await sessionStore.destroyAllForUser("admin"), 1);
-  assert.equal(await sessionStore.size(), 1);
+  assert.equal(await sessionStore.touch(a.token), null);
+  assert.ok(await sessionStore.touch(b.token), "kito vartotojo sesija nepaliesta");
   await sessionStore._clearForTests();
 });

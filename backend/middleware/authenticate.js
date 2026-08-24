@@ -1,5 +1,5 @@
 const sessionStore = require("../utils/sessionStore");
-const { readCookie, COOKIE_NAME } = require("./sessionAuth");
+const { readCookie, COOKIE_NAME, sessionStoreUnavailable } = require("./sessionAuth");
 const { setActor, actorFingerprint } = require("../utils/requestContext");
 const { createLogger } = require("../utils/logger");
 
@@ -22,9 +22,26 @@ const log = createLogger("auth");
  */
 async function authenticate(req, res, next) {
   // 1. SESIJA (pirmenybė).
-  const sessionId = readCookie(req, COOKIE_NAME);
-  if (sessionId) {
-    const session = await sessionStore.touch(sessionId);
+  const token = readCookie(req, COOKIE_NAME);
+  if (token) {
+    /**
+     * ⚠️ SESIJŲ SAUGYKLOS GEDIMAS NEKRENTA Į RAKTO ŠAKĄ (#155, 7.3).
+     *
+     * Žemiau esantis fallback remiasi prielaida „cookie yra, bet ji NEGALIOJA".
+     * DB gedimo atveju ta prielaida neteisinga: būsenos nežinome. Leidus
+     * kristi toliau, sesija autentifikuotas vartotojas tyliai virstų bendro
+     * `API_KEY` tapatybe (kita rolė, kitas audito aktorius) - autorizacijos
+     * šaka pasikeistų dėl infrastruktūros gedimo.
+     */
+    if (!sessionStore.isReady()) return sessionStoreUnavailable(res);
+
+    let session;
+    try {
+      session = await sessionStore.touch(token);
+    } catch {
+      return sessionStoreUnavailable(res);
+    }
+
     if (session) {
       /**
        * `id` yra STABILI tapatybė (#158); `username` lieka, nes jį naudoja

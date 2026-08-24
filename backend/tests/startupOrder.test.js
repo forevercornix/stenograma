@@ -10,7 +10,14 @@ const app = require("../server");
 // Regresinis testas P1 pataisymui: startServer TURI inicijuoti jobStore ir jobRunner
 // PRIEŠ listen (kitaip ankstyva užklausa galėtų laimėti race ir sukurti memory+BullMQ).
 // Tikrinam kvietimų TVARKĄ per injektuotą listen + onStep.
-test("startServer: jobStore.init -> jobRunner.init -> listen (tvarka)", async () => {
+//
+// ⚠️ #155 / 7.3 PRAPLĖTĖ SEKĄ. `sessionStore.init()` ir startinis `AUTH_USERS`
+// suderinimas yra SESIJŲ AUTORITETO paruošimas: `authRoute` prijungtas be
+// `requireJobSystemReady`, tad readiness middleware vienas paliktų
+// `/api/auth/login` landą į pusiau inicijuotą saugyklą. Todėl abu žingsniai
+// privalo baigtis PRIEŠ `listen`, ir tvarka tikrinama `deepEqual`, ne
+// „yra sąraše" - įterptas žingsnis po `listen` praeitų narystės patikrą.
+test("startServer: jobStore -> sessionStore.init -> suderinimas -> jobRunner -> listen (tvarka)", async () => {
   const events = [];
   let listenCalledAt = null;
 
@@ -21,11 +28,55 @@ test("startServer: jobStore.init -> jobRunner.init -> listen (tvarka)", async ()
   });
 
   // Tvarka turi būti tiksliai ši:
-  assert.deepEqual(events, ["jobStore.init", "jobRunner.init", "listen"],
-    "init turi vykti PRIEŠ listen, nuoseklia tvarka");
+  assert.deepEqual(
+    events,
+    ["jobStore.init", "sessionStore.init", "sessionStore.reconcile", "jobRunner.init", "listen"],
+    "init turi vykti PRIEŠ listen, nuoseklia tvarka"
+  );
 
-  // listen kviečiamas PASKUTINIS (po abiejų init).
-  assert.equal(listenCalledAt, 2, "listen turi būti po jobStore ir jobRunner init");
+  // listen kviečiamas PASKUTINIS (po visų init žingsnių).
+  assert.equal(listenCalledAt, events.length - 1, "listen turi būti paskutinis žingsnis");
+  assert.ok(
+    events.indexOf("sessionStore.reconcile") < events.indexOf("listen"),
+    "sesijų suderinimas privalo baigtis prieš pirmą aptarnautą užklausą"
+  );
+});
+
+test("startServer: sesijų suderinimo klaida reiškia, kad listen NEKVIEČIAMAS", async () => {
+  /**
+   * ⚠️ NEPAVYKĘS SUDERINIMAS NEGALI VIRSTI APTARNAUJAMU SRAUTU.
+   *
+   * Suderinimas revokuoja sesijas, kurių rolė `AUTH_USERS` pasikeitė arba
+   * kurių vartotojo nebėra. Jei jis nutrūksta, o serveris vis tiek pakyla,
+   * būtent tos sesijos - pažemintos ir pašalintos - toliau autorizuoja
+   * užklausas sena role.
+   *
+   * Klaida injektuojama į `sessionStore.reconcile`, t. y. į TĄ PATĮ kvietimą,
+   * kurį daro `startServer()`, o ne į žemesnį sluoksnį: kitaip testas
+   * praeitų ir tada, kai `startServer()` suderinimo apskritai nekviečia.
+   */
+  const sessionStore = require("../utils/sessionStore");
+  const originalus = sessionStore.reconcile;
+  sessionStore.reconcile = async () => {
+    throw new Error("suderinimas nutrūko ties 3-ia partija");
+  };
+
+  const events = [];
+  try {
+    await assert.rejects(
+      () =>
+        app.startServer({
+          port: 0,
+          listen: async () => { events.push("listen"); },
+          onStep: (name) => events.push(name),
+        }),
+      /suderinimas nutrūko/
+    );
+  } finally {
+    sessionStore.reconcile = originalus;
+  }
+
+  assert.ok(!events.includes("listen"), "listen negali įvykti po nepavykusio suderinimo");
 });
 
 test("startServer: readiness=true PRIEŠ listen (job endpointai nebus 503 kai serveris klauso)", async () => {

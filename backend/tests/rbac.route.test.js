@@ -439,8 +439,9 @@ test("#158 SRAUTAS: login sukuria sesiją su stabiliu userId iš AUTH_USERS", as
   assert.equal(login.status, 200);
 
   const cookie = login.headers["set-cookie"][0].split(";")[0];
-  const sessionId = cookie.split("=")[1];
-  const session = await sessionStoreForIdentity.touch(sessionId);
+  /** #155 / 7.3: cookie reikšmė yra BEARER TOKEN'AS, ne `session.id`. */
+  const token = decodeURIComponent(cookie.split("=")[1]);
+  const session = await sessionStoreForIdentity.touch(token);
 
   assert.equal(session.userId, SYSADMIN_ID, "userId turi ateiti iš AUTH_USERS ketvirto lauko");
   assert.equal(session.username, "sysadmin");
@@ -486,9 +487,9 @@ test("#158 SRAUTAS: sesija be stabilaus userId NEKURIA job'o (fail-fast)", async
     .post("/api/auth/login")
     .send({ username: "sysadmin", password: "admin-slaptas-1" });
   const cookie = login2.headers["set-cookie"][0].split(";")[0];
-  const sessionId = cookie.split("=")[1];
+  const token = decodeURIComponent(cookie.split("=")[1]);
 
-  const session = await sessions.touch(sessionId);
+  const session = await sessions.touch(token);
   session.userId = null; // in-memory įrašas - keičiam tiesiogiai
 
   const res = await request(app)

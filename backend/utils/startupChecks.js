@@ -158,6 +158,29 @@ function validateConfig(env = process.env) {
   }
 
   /**
+   * SESIJŲ BACKEND'O JUNGIKLIS (#155, 7.3).
+   *
+   * ⚠️ TIKRINAMA KARTU SU TIMEOUT'AIS, NE VĖLIAU.
+   *
+   * `startupChecks` iki 7.3 tikrino sesijų laiko limitus, bet nė vieno
+   * backend'o jungiklio. Neteisinga reikšmė ar `postgres` be `DATABASE_URL`
+   * praeitų konfigūracijos patikrą ir kristų tik inicijavimo metu - su
+   * prastesniu pranešimu ir po to, kai dalis sistemos jau pakilusi.
+   *
+   * ⚠️ `SESSION_STORE_BACKEND` YRA ATSKIRAS NUO `JOB_STORE_BACKEND`. Vien
+   * `DATABASE_URL` sesijų režimo nekeičia: jis gali būti įvestas migracijoms
+   * ar auditui (7.4), ir neturi netikėtai perjungti AUTENTIKACIJOS.
+   */
+  {
+    const { resolveSessionBackend } = require("./sessionStore/backendSelection");
+    try {
+      resolveSessionBackend(env);
+    } catch (e) {
+      errors.push(e.message);
+    }
+  }
+
+  /**
    * API_KEY_ROLE (#18 PR2).
    *
    * Rolė, kurią gauna bendro `API_KEY` turėtojas. Netinkama reikšmė turi
