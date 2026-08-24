@@ -8,6 +8,7 @@ const startupChecks = require("../utils/startupChecks");
 const privacyConfig = require("../utils/privacyConfig");
 const backupEncryption = require("../utils/backupEncryption");
 const auditLog = require("../utils/auditLog");
+const tombstones = require("../utils/deletionTombstones");
 
 const log = createLogger("restore");
 
@@ -234,7 +235,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
     return _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: "turinys nėra galiojantis JSON" });
   }
 
-  const contentCheck = _validateContent(parsed);
+  const contentCheck = await _validateContent(parsed);
   if (!contentCheck.valid) {
     return _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: contentCheck.reason });
   }
@@ -439,7 +440,7 @@ function _majorOf(version) {
 }
 
 /** Ar turinio struktūra tokia, kokios tikimės? */
-function _validateContent(parsed) {
+async function _validateContent(parsed) {
   if (!parsed || typeof parsed !== "object") return { valid: false, reason: "turinys nėra objektas" };
 
   for (const field of ["jobs", "audio"]) {
@@ -466,6 +467,51 @@ function _validateContent(parsed) {
   for (const job of parsed.jobs) {
     if (!job || typeof job !== "object" || !job.id) {
       return { valid: false, reason: "jobo įrašas be identifikatoriaus" };
+    }
+  }
+
+  /**
+   * ⚠️ BACKEND'O ATSTOVAUJAMUMO PREFLIGHT (#180 P2-E).
+   *
+   * `_apply()` pirma įrašo VISĄ audio, paskui job'us po vieną. Jei
+   * neatstovaujamas įrašas būtų pastebėtas tik jį pasiekus, ankstesni job'ai ir
+   * visas audio JAU BŪTŲ pritaikyti - deterministinė turinio klaida virstų
+   * DALINIU atkūrimu.
+   *
+   * Todėl VISI įrašai tikrinami ČIA, „dar NIEKO nekeičiam" fazėje. Naudojamas
+   * tas pats autoritetingas validatorius, kurį `restoreRecord()` kviečia kaip
+   * gynybą giliai viduje - tik anksčiau ir visiems iš karto.
+   */
+  for (const [i, job] of parsed.jobs.entries()) {
+    /**
+     * ⚠️ TIKRINAMA TIK TAI, KĄ `_apply()` REALIAI ATKURS.
+     *
+     * `jobStore.restoreRecord()` tombstone'intą įrašą SĄMONINGAI praleidžia
+     * (#19: kopija negali atšaukti ištrynimo). Jei preflight jį vis tiek
+     * vertintų, viena neatstovaujama pre-būsena JAU IŠTRINTAME įraše
+     * užblokuotų VISĄ kopiją, ir teisėti job'ai bei audio liktų neatkurti.
+     */
+    if (job && job.id && tombstones.isDeleted(job.id)) continue;
+
+    try {
+      await jobStore.assertRestorable(job);
+    } catch (e) {
+      /**
+       * ⚠️ PRIEŽASTIS BE KOPIJOS TURINIO.
+       *
+       * `assertAtstovaujamasProgresas()` klaidoje įvardija ATMESTĄ reikšmę
+       * (`JSON.stringify(progress)`). Persiuntus `e.message` čia, ta reikšmė
+       * patektų į `_fail()` žurnalą ir į HTTP atsakymą - o paslapčių skenavimas
+       * (`STEPS.SECRETS`) vykdomas VĖLIAU, tad jo apsauga būtų apeita.
+       *
+       * Todėl grąžinamas tik įrašo INDEKSAS ir klaidos kodas: nė vienas baitas
+       * iš kopijos turinio nepaliekamas atsakyme.
+       */
+      return {
+        valid: false,
+        reason: `kopijos įrašas #${i} neatstovaujamas aktyvioje saugykloje ` +
+          `(${e.code || "UNSUPPORTED"})`,
+      };
     }
   }
 

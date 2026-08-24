@@ -487,3 +487,294 @@ test("POLITIKA: auditas turi EKSPLICITINĘ neįtraukimo priežastį", () => {
   assert.ok(excluded, "auditas turi būti neįtrauktų sąraše");
   assert.match(excluded.reason, /atskaitomybės|GDPR/i, "priežastis turi paaiškinti KODĖL");
 });
+
+test("#180 P2-E: neatstovaujamas įrašas atmetamas PRIEŠ bet kokią atkūrimo mutaciją", async () => {
+  /**
+   * ⚠️ DALINIS ATKŪRIMAS BUVO REALUS.
+   *
+   * `_apply()` pirma įrašo VISĄ audio, paskui job'us po vieną. Kol
+   * atstovaujamumas buvo tikrinamas tik `restoreRecord()` viduje, sugadintas
+   * TREČIAS įrašas nutraukdavo atkūrimą jau PO to, kai audio ir pirmi du job'ai
+   * buvo pritaikyti - deterministinė turinio klaida virsdavo daline mutacija.
+   *
+   * Dabar visi įrašai tikrinami „dar NIEKO nekeičiam" fazėje. Testas tikrina
+   * būtent EILIŠKUMĄ: nė vienas ankstesnis elementas neturi būti pritaikytas.
+   */
+  await jobStore.init();
+
+  const a = await completedJob();
+  const b = await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  /** Gyva būsena, kuri privalo likti nepaliesta. */
+  await jobStore.system.remove(a.id);
+  await jobStore.system.remove(b.id);
+  const gyvas = await completedJob();
+  const gyvasPries = await jobStore.system.get(gyvas.id);
+
+  const tikriVeiksmai = {
+    assertRestorable: jobStore.assertRestorable,
+    restoreRecord: jobStore.restoreRecord,
+    putAtKey: fileStorage.putAtKey,
+  };
+  let atkurta = 0;
+  let irasytaAudio = 0;
+  let tikrinta = 0;
+
+  try {
+    /**
+     * Seamas, per kurį backend'as praneša „šio įrašo atstovauti negaliu".
+     * Krenta TIK ties PASKUTINIU job'u, tad ankstesni jau būtų pritaikyti, jei
+     * patikra vyktų mutacijos metu.
+     */
+    /**
+     * Nesėkmė ties `b`, kuris kopijoje eina PO `a`. Jei patikra vyktų mutacijos
+     * metu, `a` jau būtų atkurtas - būtent tai ir tikrinama žemiau.
+     */
+    const neatstovaujamas = b.id;
+    jobStore.assertRestorable = async (job) => {
+      tikrinta += 1;
+      if (job.id === neatstovaujamas) {
+        const e = new Error("progress.current = \"8\" nėra baigtinis SKAIČIUS");
+        e.code = "UNSUPPORTED_PROGRESS_REPRESENTATION";
+        throw e;
+      }
+    };
+    jobStore.restoreRecord = async (...args) => {
+      atkurta += 1;
+      return tikriVeiksmai.restoreRecord(...args);
+    };
+    fileStorage.putAtKey = async (...args) => {
+      irasytaAudio += 1;
+      return tikriVeiksmai.putAtKey(...args);
+    };
+
+    const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
+
+    assert.equal(result.ok, false, "neatstovaujamas įrašas privalo nutraukti atkūrimą");
+    assert.equal(result.failedStep, STEPS.CONTENT,
+      "klaida privalo kilti TURINIO patikros fazėje, ne pritaikymo metu");
+    assert.match(result.reason, /neatstovaujamas aktyvioje saugykloje/);
+    /**
+     * ⚠️ LITERALUS PALYGINIMAS, NE `new RegExp(kintamasis)`.
+     *
+     * Anksčiau čia buvo `assert.match(result.reason, new RegExp(neatstovaujamas))`.
+     * Dinamiškai kuriamas reguliarusis reiškinys iš kintamojo yra regex
+     * injekcijos šablonas: reikšmei kada nors turint metaženklų, tikrinimas
+     * arba mestų `SyntaxError`, arba TYLIAI imtų reikšti ką kita. `includes()`
+     * lygina tiksliai ir metaženklų neinterpretuoja.
+     */
+    /**
+     * ⚠️ PRIEŽASTIS NEIŠDUODA KOPIJOS TURINIO.
+     *
+     * Anksčiau čia buvo tikrinama, kad priežastyje YRA job'o `id`. Bet
+     * `_fail()` šią eilutę rašo į žurnalą ir grąžina HTTP atsakyme, o paslapčių
+     * skenavimas vykdomas VĖLIAU - tad bet koks kopijos turinys priežastyje
+     * apeitų tą apsaugą. Dabar tikrinama PRIEŠINGA savybė.
+     */
+    assert.ok(result.reason.includes("UNSUPPORTED_PROGRESS_REPRESENTATION"),
+      `priežastis privalo įvardyti klaidos KODĄ: ${result.reason}`);
+    assert.equal(result.reason.includes(neatstovaujamas), false,
+      "priežastis NEGALI atskleisti kopijos turinio (nė job'o identifikatoriaus)");
+
+    /** ⚠️ ESMĖ: patikrinti VISI, pritaikyta NIEKO. */
+    assert.ok(tikrinta >= 2,
+      "preflight privalo pasiekti bent `a` ir `b` PRIEŠ bet kokią mutaciją");
+    assert.equal(atkurta, 0, "nė vienas ankstesnis job'as negali būti atkurtas");
+    assert.equal(irasytaAudio, 0, "audio negali būti įrašytas prieš patikrą");
+
+    /** Gyva būsena nepakitusi; kopijos job'ai neatsirado. */
+    assert.deepEqual(await jobStore.system.get(gyvas.id), gyvasPries,
+      "gyvas įrašas privalo likti nepakitęs");
+    assert.equal(await jobStore.system.get(a.id), null, "A negalėjo būti atkurtas");
+    assert.equal(await jobStore.system.get(b.id), null, "B negalėjo būti atkurtas");
+  } finally {
+    jobStore.assertRestorable = tikriVeiksmai.assertRestorable;
+    jobStore.restoreRecord = tikriVeiksmai.restoreRecord;
+    fileStorage.putAtKey = tikriVeiksmai.putAtKey;
+  }
+
+  /** Perimti veiksmai privalo būti realiai atstatyti (AGENTS.md §9.3). */
+  assert.equal(jobStore.assertRestorable, tikriVeiksmai.assertRestorable);
+  assert.equal(jobStore.restoreRecord, tikriVeiksmai.restoreRecord);
+  assert.equal(fileStorage.putAtKey, tikriVeiksmai.putAtKey);
+});
+
+test("SAUGUMAS: manifesto laukas su regex metaženklais NEPAVERČIAMAS reguliariuoju reiškiniu", async () => {
+  /**
+   * ⚠️ CodeQL „Regular expression injection" HIGH radinys (PR #208).
+   *
+   * Užpuoliko valdomas `manifest` ateina tiesiai iš `req.files.manifest[0]`
+   * (`routes/backup.js`) ir nefiltruotas pasiekia `restoreService`. Šis testas
+   * fiksuoja PRODUKCINĘ ribą: nė vienas manifesto laukas neturi patekti į
+   * reguliariojo reiškinio SINTAKSĘ.
+   *
+   * ⚠️ NAUDOJAMAS SĄMONINGAI NEGALIOJANTIS ŠABLONAS. `(a+)+$|[` turi
+   * neuždarytą simbolių klasę, tad `new RegExp()` jam mestų `SyntaxError`.
+   * Jei kuris nors kelias jį kompiliuotų, testas kristų su išimtimi - o
+   * `(a+)+` dar ir sukeltų katastrofinį grįžimą atgal (ReDoS), kurį pagautų
+   * laiko riba. Tai, kad atkūrimas ramiai grąžina klaidą, įrodo LITERALŲ
+   * apdorojimą (`String.prototype.replace()` su eilute, ne su regex).
+   */
+  await jobStore.init();
+  await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  const kenksmingas = "aes-256-gcm-(a+)+$|[";
+  const suklastotas = {
+    ...backup.manifest,
+    encrypted: true,
+    encryptionAlgorithm: kenksmingas,
+  };
+
+  const pradzia = Date.now();
+  const result = await restoreService.restoreBackup({
+    manifest: suklastotas,
+    data: backup.data,
+    actor: "sysadmin",
+  });
+  const truko = Date.now() - pradzia;
+
+  /** 1) Atmetama kontroliuojamai, be išimties. */
+  assert.equal(result.ok, false, "suklastotas algoritmas privalo būti atmestas");
+  assert.equal(result.failedStep, STEPS.DECRYPTED,
+    "atmetimas privalo įvykti šifravimo patikros žingsnyje");
+
+  /**
+   * 2) ⚠️ ESMĖ: reikšmė grąžinama PAŽODŽIUI. Jei ji būtų buvusi kompiliuota ar
+   * interpretuota kaip šablonas, čia matytume arba išimtį, arba pakeistą tekstą.
+   */
+  assert.ok(result.reason.includes(kenksmingas),
+    `metaženklai privalo išlikti nepakeisti: ${result.reason}`);
+
+  /** 3) Jokio katastrofinio grįžimo atgal - `(a+)+` niekada nebuvo vykdomas. */
+  assert.ok(truko < 2000, `atkūrimas užtruko ${truko} ms - įtartina dėl ReDoS`);
+
+  /** 4) Gyva būsena nepaliesta. */
+  assert.equal(result.completedSteps.includes(STEPS.APPLIED), false,
+    "atmestas atkūrimas negali nieko pritaikyti");
+});
+
+test("SAUGUMAS: kopija su suklastotu job identifikatoriumi atmetama PRIEŠ bet kokią mutaciją", async () => {
+  /**
+   * ⚠️ CodeQL taint pėdsakas ėjo per BENDRĄ `memoryStore` `Map`.
+   *
+   * `restoreRecord()` priima kopijos turinį pažodžiui: `jobs.set(job.id, {...job})`
+   * be jokios `id` patikros (fasadas tikrino tik truthiness). Ranka redaguota
+   * kopija galėjo įrašyti bet kokią eilutę kaip identifikatorių, ir ji gyventų
+   * saugykloje - ją grąžintų `get()`, `listAll()`, ji patektų į atsakymus,
+   * žurnalus ir vėlesnes kopijas. Būtent taip užpuoliko valdoma reikšmė
+   * pasiekdavo `job.id` skaitytojus.
+   *
+   * Šiandien nė vienas produkcinis kelias iš `job.id` nekuria reguliariojo
+   * reiškinio, tad tai gynyba į gylį. Bet riba privalo būti uždara.
+   */
+  await jobStore.init();
+  await completedJob();
+
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  /** Suklastojam PIRMO job'o id ir perskaičiuojam kontrolinę sumą. */
+  const turinys = JSON.parse(backup.data.toString("utf8"));
+  assert.ok(turinys.jobs.length > 0, "prielaida: kopijoje yra bent vienas job'as");
+  const kenksmingasId = "(a+)+$|[";
+  turinys.jobs[0].id = kenksmingasId;
+
+  const naujiDuomenys = Buffer.from(JSON.stringify(turinys), "utf8");
+  const suklastotas = {
+    ...backup.manifest,
+    checksum: backupManifest.computeChecksum(naujiDuomenys),
+  };
+
+  const kiekPries = await jobStore.size();
+
+  const result = await restoreService.restoreBackup({
+    manifest: suklastotas,
+    data: naujiDuomenys,
+    actor: "sysadmin",
+  });
+
+  /** 1) Atmetama turinio patikros fazėje - PRIEŠ `_apply()`. */
+  assert.equal(result.ok, false, "suklastotas identifikatorius privalo nutraukti atkūrimą");
+  assert.equal(result.failedStep, STEPS.CONTENT,
+    "atmetimas privalo įvykti turinio patikros fazėje, kai dar niekas nepakeista");
+  assert.equal(result.completedSteps.includes(STEPS.APPLIED), false,
+    "atmestas atkūrimas negali nieko pritaikyti");
+
+  /** 2) ⚠️ ESMĖ: kenksminga reikšmė NEPATEKO į saugyklą. */
+  assert.equal(await jobStore.system.get(kenksmingasId), null,
+    "suklastotas identifikatorius negali atsidurti saugykloje");
+  assert.equal(await jobStore.size(), kiekPries,
+    "saugyklos dydis privalo likti nepakitęs - nė vienas įrašas nepritaikytas");
+});
+
+test("SAUGUMAS: teisėtas UUID identifikatorius atkuriamas be pakitimų (regresija)", async () => {
+  /** Riba negali atmesti nė vienos TEISĖTOS formos. */
+  await jobStore.init();
+  const job = await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  await jobStore.system.remove(job.id);
+  assert.equal(await jobStore.system.get(job.id), null, "prielaida: job'as pašalintas");
+
+  const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
+
+  assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
+  assert.ok(await jobStore.system.get(job.id), "teisėtas UUID job'as privalo grįžti");
+});
+
+test("#180 P2-E: ištrintas (tombstone) įrašas neblokuoja likusios kopijos atkūrimo", async () => {
+  /**
+   * ⚠️ PREFLIGHT TIKRINA TIK TAI, KĄ `_apply()` REALIAI ATKURS.
+   *
+   * `restoreRecord()` sąmoningai PRALEIDŽIA tombstone'intą įrašą (#19: kopija
+   * negali atšaukti ištrynimo). Jei preflight jį vis tiek validuotų, viena
+   * neatstovaujama pre-būsena JAU IŠTRINTAME įraše užblokuotų VISĄ kopiją -
+   * ir teisėti job'ai bei audio liktų neatkurti.
+   *
+   * MUTACIJOS ĮRODYMAS: pašalinus `tombstones.isDeleted()` praleidimą iš
+   * preflight ciklo, ištrinto įrašo `id` patenka į `tikrinti` ir testas krinta.
+   */
+  await jobStore.init();
+  const istrintas = await completedJob();
+  const liekantis = await completedJob();
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  /** Vienas įrašas ištrinamas PO kopijos - jo tombstone lieka. */
+  await jobStore.system.remove(istrintas.id);
+  tombstones.mark(istrintas.id, { actor: "sysadmin" });
+  tombstones.complete(istrintas.id, tombstones.TOMBSTONE_STATUS.DELETED);
+  await jobStore.system.remove(liekantis.id);
+
+  /**
+   * ⚠️ TIKRINAMAS MECHANIZMAS, NE TIK REZULTATAS. Preflight privalo tombstone'intą
+   * įrašą PRALEISTI - t. y. `assertRestorable()` jam neturi būti kviečiamas.
+   * Be to atkūrimo rezultatas atrodytų teisingas ir tada, kai praleidimo nėra
+   * (memory backend'e nuosavybės/progreso patikra tyli), tad testas nieko
+   * neįrodytų.
+   */
+  const tikrasis = jobStore.assertRestorable;
+  const tikrinti = [];
+  let result;
+  try {
+    jobStore.assertRestorable = async (job) => {
+      tikrinti.push(job.id);
+      return tikrasis(job);
+    };
+    result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
+  } finally {
+    jobStore.assertRestorable = tikrasis;
+  }
+  assert.equal(jobStore.assertRestorable, tikrasis, "perimtas metodas privalo būti atstatytas");
+
+  assert.equal(tikrinti.includes(istrintas.id), false,
+    "tombstone'intas įrašas NEGALI patekti į preflight - `_apply()` jo vis tiek neatkurs");
+  assert.ok(tikrinti.includes(liekantis.id),
+    "atkuriamas įrašas PRIVALO būti patikrintas preflight fazėje");
+
+  assert.equal(result.ok, true, `atkūrimas privalo pavykti: ${result.reason}`);
+  assert.ok(await jobStore.system.get(liekantis.id),
+    "teisėtas job'as privalo grįžti, nepaisant tombstone'into kaimyno");
+  assert.equal(await jobStore.system.get(istrintas.id), null,
+    "tombstone'intas job'as NEGALI būti prikeltas");
+});

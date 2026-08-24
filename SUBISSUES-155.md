@@ -460,8 +460,8 @@ scenarijai (`SCENARIJAI` masyvas) ir atskiri memory/Redis testai.
 
 > ⚠️ Scenarijų SKAIČIUS DoD'e nefiksuojamas sąmoningai. Fiksuotas skaičius
 > pasensta pridėjus scenarijų, ir kriterijus tampa klaidingas nė vienam kodo
-> pakeitimui neįvykus. Reikalavimas — kad **visi** `SCENARIJAI` elementai būtų
-> vykdomi prieš visus tris backend'us, o ne kad jų būtų N.
+> pakeitimui neįvykus. Reikalavimas — kad **kiekvienas** `SCENARIJAI` elementas
+> turėtų APIBRĖŽTĄ baigtinę būseną prieš KIEKVIENĄ backend'ą, o ne kad jų būtų N.
 
 Refaktorizuoti į adapterio modelį, pvz.:
 
@@ -471,11 +471,86 @@ Refaktorizuoti į adapterio modelį, pvz.:
 
 arba semantiškai lygiavertę struktūrą.
 
-Tas pats scenarijų rinkinys turi būti vykdomas prieš:
+Tas pats scenarijų rinkinys taikomas visiems trims backend'ams:
 
 1. memory;
 2. Redis;
 3. PostgreSQL.
+
+#### 7a. Baigtinės būsenos: `EXECUTED` / `EXPLICITLY_INAPPLICABLE` / `MISSING`
+
+⚠️ **PATIKSLINTA (Option C).** Ankstesnė formuluotė reikalavo, kad VISI
+scenarijai būtų ĮVYKDYTI prieš visus tris backend'us. Ji neįgyvendinama:
+`skaitines-eilutes` ir `ideti-metaduomenys` reikalauja pre-būsenų, kurių
+PostgreSQL PRODUKCINIS saugojimo modelis atstovauti negali (žr. 7b). Rinktis
+tarp „tyliai pakeisti būseną" ir „pakeisti schemą" nereikia: reikalavimas
+patikslinamas taip, kad liktų griežtas, skaičiuojamas ir fail-closed.
+
+Kiekvienai privalomai porai `(scenarijus, backend'as)` privalo būti užfiksuota
+TIKSLIAI VIENA baigtinė būsena:
+
+1. **`EXECUTED`** — scenarijus realiai įvykdytas prieš tą backend'ą, o
+   reikalaujama pre-būsena atstovauta BE semantinio pakeitimo.
+
+2. **`EXPLICITLY_INAPPLICABLE`** — leidžiama TIK tada, kai reikalaujama
+   pre-būsena yra struktūriškai neatstovaujama to backend'o **PRODUKCINIAME**
+   saugojimo modelyje. Deklaracija privalo:
+   - būti eksplicitinė ir susieta su konkrečiu `scenarijaus id`;
+   - turėti NETUŠČIĄ, backend'ui specifinę priežastį;
+   - įvardyti TIKSLŲ reprezentacijos neatitikimą.
+
+   Ši būsena NEGALI būti naudojama todėl, kad paruošimas nepatogus, realizacija
+   nebaigta, testas krinta arba backend'as elgiasi kitaip. Ji NEGALI būti
+   nustatoma automatiškai iš testo nesėkmės.
+
+3. **`MISSING`** — nei įvykdyta, nei teisėtai deklaruota neatstovaujama.
+   MISSING privalo **KRISTI**.
+
+Fail-closed invariantai:
+
+- `EXECUTED ∪ EXPLICITLY_INAPPLICABLE` privalo padengti VISĄ privalomą
+  inventorių; nė viena pora negali likti be būsenos;
+- bet kuri `MISSING` pora — nesėkmė;
+- tuščia priežastis — nesėkmė;
+- nežinomas `scenarijaus id` — nesėkmė;
+- nežinomas backend'o vardas — nesėkmė;
+- neautorizuotas atsisakymas (vykdymo logika atsisako be deklaracijos) —
+  nesėkmė;
+- backend'as NEGALI atsisakyti visų privalomų scenarijų;
+- scenarijus, kurio pre-būsena YRA atstovaujama, PRIVALO būti įvykdytas —
+  atsisakyti jo negalima;
+- atstovaujamos būsenos pakeitimas kita būsena ir jos įvykdymas
+  **NETENKINA** reikalavimo (tai tylus pakeitimas, ne įvykdymas);
+- SINTETINĖS schemos vykdymas yra įrodymas TIK apie sintetinę būseną ir
+  **NESKAIČIUOJAMAS** kaip produkcinės schemos `EXECUTED`;
+- struktūrinis neatstovaujamumas visada nurodo PRODUKCINĮ saugojimo modelį, ne
+  testų aplinką ir ne laikinas realizacijos spragas.
+
+#### 7b. Dabartinės baigtinės būsenos
+
+Memory ir Redis saugo progresą laisvos formos verte, tad visas dabartines
+pre-būsenas atstovauja. Todėl jie privalo **ĮVYKDYTI VISUS** privalomus
+scenarijus; nė vienas atsisakymas jiems dabar negalioja.
+
+PostgreSQL:
+
+- visi struktūriškai atstovaujami scenarijai privalo būti įvykdyti su
+  **NEPAKEISTA PRODUKCINE SCHEMA**;
+- `skaitines-eilutes` gali būti `EXPLICITLY_INAPPLICABLE`: `progress_current` ir
+  `progress_total` yra `double precision`, tad skaitinė EILUTĖ (`"8"`) negali
+  išlikti eilute — tipų riba ją paverstų skaičiumi, o būtent šio skirtumo
+  scenarijus ir reikalauja;
+- `ideti-metaduomenys` gali būti `EXPLICITLY_INAPPLICABLE`: produkcinėje schemoje
+  nėra laisvos formos progreso metaduomenų stulpelio, tad įdėti raktai
+  neišvengiamai dingtų;
+- abi deklaracijos privalo likti eksplicitinės ir atsparios mutacijai (jų
+  pašalinimas privalo paversti scenarijų `MISSING`).
+
+⚠️ **SAUGOJIMO MODELIS NEKEIČIAMAS.** Ši išimtis egzistuoja būtent todėl, kad
+PostgreSQL progresas saugomas TIPIZUOTAIS stulpeliais. Invariantas, kurį saugo
+šie du scenarijai, yra laisvos formos saugyklos savybė; įvesti JSONB progresą
+vien tam, kad skaičiai sutaptų, reikštų susilpninti sąmoningą schemos sprendimą
+(žr. `1755000000000_jobs-and-job-results.js` komentarą).
 
 ⚠️ **ADAPTERIAI PRIVALO PO SAVĘS SUTVARKYTI.** Trys backend'ai viename faile
 reiškia tris išorinių resursų rinkinius. Neuždaryta `pg` pool jungtis ar
@@ -609,13 +684,19 @@ dekoracija, ir 7.2b tikslas nepasiektas.
 **B. PostgreSQL scenarijai realiai įvykdomi, ne praleisti.**
 
 - [ ] Kai `DATABASE_URL` nustatytas, kontrakto rinkinys FAIL-CLOSED patvirtina,
-      kad įvykdyti VISI PostgreSQL scenarijai: įvykdytų skaičius lyginamas su
-      `SCENARIJAI.length`.
+      kad kiekvienas PostgreSQL scenarijus turi baigtinę būseną:
+      `įvykdyti + eksplicitiškai neatstovaujami = SCENARIJAI.length`, o
+      `MISSING` aibė TUŠČIA (žr. 7a punktą).
 - [ ] PostgreSQL adapterio `skip` arba nulis įvykdytų scenarijų su nustatytu
       `DATABASE_URL` yra testo NESĖKMĖ, ne tyli praleistis.
+- [ ] Eksplicitiškai neatstovaujamų scenarijų aibė tikrinama POIMENIUI, ne tik
+      skaičiumi: deklaracijos pašalinimas privalo paversti scenarijų `MISSING`,
+      o atstovaujamo scenarijaus deklaravimas — nesėkme.
 
-⚠️ Skaičius čia lyginamas su `SCENARIJAI.length` DINAMIŠKAI, ne su konstanta —
+⚠️ Skaičiai čia lyginami su `SCENARIJAI.length` DINAMIŠKAI, ne su konstanta —
 kitaip kriterijus pasentų pridėjus scenarijų (žr. 7 punktą).
+
+⚠️ Sintetinės schemos vykdymas į `įvykdyti` NESKAIČIUOJAMAS (7a punktas).
 
 ### 10. Transakcijų atomika
 
@@ -779,8 +860,14 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
 **Kontrakto rinkinys**
 
 - [ ] `jobStoreBackendContract.integration.test.js` parametrizuotas.
-- [ ] VISI esami `SCENARIJAI` vykdomi prieš memory, Redis ir PostgreSQL
-      (skaičius nefiksuojamas — žr. 7 punktą).
+- [ ] Kiekvienas `SCENARIJAI` elementas turi APIBRĖŽTĄ baigtinę būseną prieš
+      memory, Redis ir PostgreSQL: `EXECUTED` arba `EXPLICITLY_INAPPLICABLE`;
+      `MISSING` krinta (skaičius nefiksuojamas — žr. 7 ir 7a punktus).
+- [ ] Memory ir Redis įvykdo VISUS privalomus scenarijus (jų pre-būsenos
+      atstovaujamos).
+- [ ] PostgreSQL įvykdo visus struktūriškai atstovaujamus scenarijus su
+      nepakeista produkcine schema; `skaitines-eilutes` ir `ideti-metaduomenys`
+      deklaruoti `EXPLICITLY_INAPPLICABLE` su tiksliomis priežastimis.
 - [ ] Bendras rinkinys papildytas `updateOwned()` scenarijais.
 - [ ] Bendras rinkinys papildytas `removeOwned()` scenarijais.
 - [ ] Bendras rinkinys papildytas `getOwned()` scenarijais.
@@ -801,7 +888,8 @@ politika nėra sprendžiama apeinant aktyvavimo barjerą šiame sub-issue.
       (#207) - tai regresijos kriterijus: iškritus iš `postgres`, adapteris
       PostgreSQL CI žingsnyje pats save praleistų.
 - [ ] ⚠️ FAIL-CLOSED vykdymo įrodymas: su nustatytu `DATABASE_URL` įvykdytų
-      PostgreSQL scenarijų skaičius lyginamas su `SCENARIJAI.length`; `skip`
+      PostgreSQL `įvykdyti + neatstovaujami` lyginami su `SCENARIJAI.length`
+      ir `MISSING` privalo būti tuščias; `skip`
       arba nulis įvykdytų yra NESĖKMĖ.
 - [ ] Matricos įrašai nuosavybės CAS garantijoms su mutacijos įrodymais.
 - [ ] `npm run test:matrix` žalias.
