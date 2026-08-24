@@ -373,6 +373,9 @@ const ADAPTERIAI = [
         env: { ...ENV },
         isvalyti: () => memoryStore._clearForTests(),
         pastumti: async (token, { idleSekundes, absoliutusSekundes }) => {
+          if (idleSekundes === undefined && absoliutusSekundes === undefined) {
+            throw new Error("pastumti(): reikia bent vieno termino");
+          }
           const s = irasas(token);
           if (idleSekundes !== undefined) s.idleExpiresAt = Date.now() + idleSekundes * 1000;
           if (absoliutusSekundes !== undefined) s.expiresAt = Date.now() + absoliutusSekundes * 1000;
@@ -439,6 +442,15 @@ const ADAPTERIAI = [
            * sutampa - o ši realizacija kaip tik sąmoningai naudoja DB laiką.
            */
           pastumti: async (token, { idleSekundes, absoliutusSekundes }) => {
+            /**
+             * ⚠️ BE ŠIOS PATIKROS TUŠČIAS KVIETIMAS SUKURTŲ SQL, KURIS
+             * `created_at` skaičiuotų iš `$1` (token maišos). Klaida ateitų iš
+             * draiverio ir atrodytų kaip realizacijos, o ne testo paruošimo,
+             * problema.
+             */
+            if (idleSekundes === undefined && absoliutusSekundes === undefined) {
+              throw new Error("pastumti(): reikia bent vieno termino");
+            }
             const sets = [];
             const args = [hashSessionToken(token)];
             if (idleSekundes !== undefined) {
