@@ -500,8 +500,15 @@ TIKSLIAI VIENA baigtinė būsena:
    - įvardyti TIKSLŲ reprezentacijos neatitikimą.
 
    Ši būsena NEGALI būti naudojama todėl, kad paruošimas nepatogus, realizacija
-   nebaigta, testas krinta arba backend'as elgiasi kitaip. Ji NEGALI būti
-   nustatoma automatiškai iš testo nesėkmės.
+   nebaigta, testas krinta, backend'as elgiasi kitaip arba CI/aplinka
+   nepasiekiama. Ji NEGALI būti nustatoma automatiškai iš testo nesėkmės ir
+   NEGALI būti naudojama paslėpti scenarijų, kurio pre-būseną backend'as
+   ATSTOVAUJA.
+
+   ⚠️ Tai NĖRA bendras praleidimo mechanizmas. Tai patikslinimas, KAIP
+   apskaitomas privalomas scenarijus, kurio pre-būsenos produkcinis saugojimo
+   modelis struktūriškai atstovauti negali. Visais kitais atvejais galioja
+   `EXECUTED` arba `MISSING`.
 
 3. **`MISSING`** — nei įvykdyta, nei teisėtai deklaruota neatstovaujama.
    MISSING privalo **KRISTI**.
@@ -524,7 +531,11 @@ Fail-closed invariantai:
 - SINTETINĖS schemos vykdymas yra įrodymas TIK apie sintetinę būseną ir
   **NESKAIČIUOJAMAS** kaip produkcinės schemos `EXECUTED`;
 - struktūrinis neatstovaujamumas visada nurodo PRODUKCINĮ saugojimo modelį, ne
-  testų aplinką ir ne laikinas realizacijos spragas.
+  testų aplinką ir ne laikinas realizacijos spragas;
+- ⚠️ PRIVALOMŲ SCENARIJŲ INVENTORIUS LIEKA VIENAS IR BENDRAS visiems
+  backend'ams. Baigtinė būsena skiriasi PER BACKEND'Ą, bet pats sąrašas — ne:
+  atskirų, siauresnių sąrašų vienam backend'ui būti negali, ir scenarijaus
+  pašalinimas iš inventoriaus nėra `EXPLICITLY_INAPPLICABLE` pakaitalas.
 
 #### 7b. Dabartinės baigtinės būsenos
 
@@ -544,7 +555,13 @@ PostgreSQL:
   nėra laisvos formos progreso metaduomenų stulpelio, tad įdėti raktai
   neišvengiamai dingtų;
 - abi deklaracijos privalo likti eksplicitinės ir atsparios mutacijai (jų
-  pašalinimas privalo paversti scenarijų `MISSING`).
+  pašalinimas privalo paversti scenarijų `MISSING`);
+- ⚠️ BET KURIS KITAS PostgreSQL `EXPLICITLY_INAPPLICABLE` scenarijus privalo
+  turėti NEPRIKLAUSOMAI PAGRĮSTĄ produkcinės schemos struktūrinę priežastį.
+  Šie du nėra precedentas — jie yra baigtinis, įvardytas sąrašas;
+- ⚠️ SINTETINĖS schemos vykdymas privalo likti AIŠKIAI ATSKIRTAS nuo produkcinio:
+  jis įrodo tik sintetinę būseną ir į produkcinį `EXECUTED` neįskaičiuojamas
+  (žr. 7a).
 
 ⚠️ **SAUGOJIMO MODELIS NEKEIČIAMAS.** Ši išimtis egzistuoja būtent todėl, kad
 PostgreSQL progresas saugomas TIPIZUOTAIS stulpeliais. Invariantas, kurį saugo
