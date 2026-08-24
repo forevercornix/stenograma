@@ -269,6 +269,28 @@ module.exports = {
   idleTimeoutMs,
   absoluteTimeoutMs,
 
+  /**
+   * TESTAMS: pakeisti FAKTINĮ backend'ą.
+   *
+   * ⚠️ INTERCEPCIJA VYKSTA TEN, KUR YRA TIKRINAMA RIBA (AGENTS.md §9.1).
+   *
+   * Gedimo scenarijai (`touch()` meta, DB nepasiekiama) turi būti matomi
+   * VISIEMS kvietėjams - `middleware/sessionAuth.js`, `authenticate.js`,
+   * `routes/auth.js`, `routes/audit.js`. Pakeitus `module.exports.touch`,
+   * fasado vidiniai kvietimai liktų nepaliesti; pakeitus `store`, keičiasi
+   * būtent tai, ką visi jie realiai kviečia.
+   */
+  _setStoreForTests: (naujas) => {
+    const buves = store;
+    store = naujas;
+    return () => {
+      store = buves;
+    };
+  },
+  _setReadyForTests: (value) => {
+    paruosta = value;
+  },
+
   _clearForTests: () => memoryStore._clearForTests(),
   _sweepForTests: (env) => memoryStore._sweepForTests(env),
   _getByTokenForTests: (token) => memoryStore._getByTokenForTests(token),

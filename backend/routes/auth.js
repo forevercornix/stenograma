@@ -78,7 +78,8 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
     auditLog.record({
       event: "LOGIN_FAILED",
       success: false,
-      outcome: err.code === "IDENTITY_UNAVAILABLE" ? "identity_unavailable" : "session_store_unavailable",
+      /** ⚠️ `outcome` audite trumpinamas iki 20 simbolių (`auditLog.js`) - ilgesnė reikšmė taptų nebeatpažįstama. */
+      outcome: err.code === "IDENTITY_UNAVAILABLE" ? "identity_unavailable" : "store_unavailable",
       details: `username=${identity.username} role=${identity.role}`,
     });
     log.error(`Sesijos sukurti nepavyko: ${err.message}`);
@@ -137,7 +138,7 @@ router.post("/auth/logout", async (req, res) => {
     try {
       await sessionStore.destroy(token);
     } catch (err) {
-      auditLog.record({ event: "LOGOUT", success: false, outcome: "session_store_unavailable" });
+      auditLog.record({ event: "LOGOUT", success: false, outcome: "store_unavailable" });
       log.error(`Atsijungimas nepavyko: ${err.message}`);
       return sessionStoreUnavailable(res);
     }
