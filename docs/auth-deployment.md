@@ -78,9 +78,39 @@ naujas leidimas be eksplicitinio priskyrimo yra uždaras.
 Du limitai yra nepriklausomi. Absoliutus reikalingas todėl, kad vien idle
 langas leistų sesijai gyventi neribotai, jei ji nuolat naudojama.
 
-⚠️ **Sesijos saugomos tik atmintyje, viename procese.** Serverio restartas
-atjungia visus vartotojus, o kelios backend replikos sesijomis nesidalintų.
-Tai tinka pilotui; keliems replikams saugykla turės pereiti į Redis.
+### Sesijų saugykla: atmintis arba PostgreSQL (#155, 7.3)
+
+| Nuostata | Numatyta | Ką reiškia |
+|---|---|---|
+| `SESSION_STORE_BACKEND` | `memory` | `memory` arba `postgres`. Nežinoma reikšmė **stabdo startą**, ne virsta numatytąja |
+
+⚠️ **Jungiklis EKSPLICITINIS.** Vien `DATABASE_URL` sesijų režimo **nekeičia** –
+jis gali būti įvestas dėl migracijų ar audito, ir neturi netikėtai perjungti
+autentifikacijos. `SESSION_STORE_BACKEND` yra **atskiras** nuo
+`JOB_STORE_BACKEND`: job metaduomenų perkėlimas į PostgreSQL ir sesijų
+persistencija yra du nesusiję sprendimai.
+
+`SESSION_STORE_BACKEND=postgres` reikalauja `DATABASE_URL` ir paleistų
+migracijų (`npm run migrate:up`). Trūkstama `sessions` lentelė arba trūkstamas
+laiko invariantas **nutraukia startą** – grįžimo į atmintį nėra, nes jis tyliai
+atimtų globalią revokaciją.
+
+| | `memory` | `postgres` |
+|---|---|---|
+| Išgyvena restartą | ne | **taip** |
+| Kelios replikos | ne | **taip** |
+| Atsijungimas galioja kitame procese | ne | **taip** |
+| Reikia `DATABASE_URL` | ne | **taip** |
+
+**Paleidimo tvarka.** `sessionStore.init()`, schemos invariantų patikra ir
+startinis `AUTH_USERS` suderinimas baigiami **prieš** `app.listen()`. Kol jie
+nebaigti, kiekvienas sesiją liečiantis maršrutas grąžina `503`
+`SESSION_STORE_UNAVAILABLE` – niekada `401`. Nepavykęs suderinimas reiškia, kad
+serveris srauto **nepriima apskritai**.
+
+⚠️ **Cutover: esamos sesijos NEPERKELIAMOS.** Perjungus į `postgres`, visi
+prisijungia iš naujo. Atminties sesijos gyvena tik proceso viduje, tad jų
+migracija būtų token'ų perrašymas be jokio saugumo pagrindo.
 
 ---
 
@@ -88,9 +118,19 @@ Tai tinka pilotui; keliems replikams saugykla turės pereiti į Redis.
 
 | Ką norite pasiekti | Ką daryti | Poveikis |
 |---|---|---|
-| Atjungti vieną seansą | Vartotojas spaudžia „Atsijungti" | Ta sesija nebegalioja iš karto |
-| **Atimti prieigą visam laikui** | Pašalinti įrašą iš `AUTH_USERS` + restartas | Visos sesijos nebegalioja; **eilėje laukiantys darbai nutraukiami** |
-| Sumažinti teises | Pakeisti rolę `AUTH_USERS` + restartas | Naujos užklausos ribojamos; **eilėje laukiantys darbai su per aukšta teise nutraukiami** |
+| Atjungti vieną seansą | Vartotojas spaudžia „Atsijungti" | Ta sesija nebegalioja iš karto – **ir visuose procesuose**, jei backend'as `postgres` |
+| **Atimti prieigą visam laikui** | Pašalinti įrašą iš `AUTH_USERS` | Sesijos nebegalioja **iš karto, be restarto**; **eilėje laukiantys darbai nutraukiami** |
+| Sumažinti teises | Pakeisti rolę `AUTH_USERS` | Sesijos su senu rolės snapshot'u nutraukiamos **iš karto, be restarto**; **eilėje laukiantys darbai su per aukšta teise nutraukiami** |
+
+⚠️ **Revokacija nebelaukia restarto (#155, 7.3).** Kiekvienas `touch()` tikrina
+`user_id` ir rolę prieš **gyvą** `AUTH_USERS`: dingęs vartotojas ar pasikeitusi
+rolė reiškia, kad sesija atmetama ir pažymima atšaukta. Restartas papildomai
+atlieka **startinį suderinimą** – jis dengia sesijas, kurių niekas nenaudojo
+tarp konfigūracijos pakeitimo ir perkrovimo.
+
+⚠️ **Atšaukta sesija NEIŠTRINAMA iš karto.** Ji saugoma iki savo `expires_at`,
+kad būtų galima atsakyti, ar cookie buvo **atšaukta**, ar jos **niekada
+nebuvo**. Po `expires_at` retencija ją pašalina kartu su pasibaigusiomis.
 
 **Asinchroniniai darbai:** teisės **perskaičiuojamos vykdymo metu**, ne
 užšaldomos kuriant darbą. Jobai gali laukti eilėje valandas – per tą laiką
@@ -117,8 +157,11 @@ node scripts/hash-password.js <vardas> <rolė> --user-id <esamas-uuid>
 vartotojo job'us ir audito įrašus nuo jo paskyros. Skriptas apie tai įspėja, bet
 įpratimas paleisti jį be argumentų yra pagrindinė šio srauto klaida.
 
-Restartas išvalo sesijas, tad senas slaptažodis nebeveikia iš karto – atskiro
-„revoke all sessions" veiksmo nereikia.
+`memory` režime restartas išvalo sesijas, tad senas slaptažodis nebeveikia iš
+karto. `postgres` režime sesijos restartą **išgyvena**, bet slaptažodžio maiša
+sesijoje nesaugoma: prieigą atima tik vartotojo pašalinimas ar rolės keitimas
+`AUTH_USERS` (žr. 4 skyrių). Rotuojant slaptažodį ir norint atjungti esamus
+seansus, `userId` turi būti pakeistas arba vartotojas laikinai pašalintas.
 
 **`API_KEY` rotacija:** pakeisti reikšmę ir perkrauti. Senas raktas nustoja
 veikti nedelsiant; sesijos nenukenčia.
@@ -177,6 +220,10 @@ Prieš viešą diegimą:
 - [ ] `CORS_ORIGIN` nurodytas konkrečiai, ne `*`
 - [ ] Sesijų trukmės atitinka jūsų politiką
 - [ ] `AUDIT_API_KEY` nustatytas arba prieiga per administratoriaus sesiją
+- [ ] `SESSION_STORE_BACKEND` pasirinktas sąmoningai (`postgres` reikalauja
+      `DATABASE_URL` ir paleistų migracijų)
+- [ ] Perjungiant į `postgres`: naudotojai įspėti, kad reikės prisijungti iš
+      naujo (esamos sesijos neperkeliamos)
 
 ---
 
@@ -190,5 +237,9 @@ Sąžiningumo dėlei – ribos, kurios lieka atviros:
 - **Registracijos ir vartotojų valdymo UI nėra** – tik `AUTH_USERS` ir
   restartas.
 - **Slaptažodžio keitimo srauto nėra** – tik per konfigūraciją.
-- **Kelių replikų sesijos nepalaikomos** – saugykla tik atmintyje.
+- **Kelių replikų sesijos** veikia tik su `SESSION_STORE_BACKEND=postgres`;
+  numatytoji atminties saugykla lieka viename procese.
+- **Vartotojų saugyklos DB nėra** – `AUTH_USERS` tebėra konfigūracijoje, tad
+  vartotojų sąrašo keitimas vis dar reikalauja aplinkos pakeitimo (nors
+  revokacija po jo suveikia be restarto).
 - **MFA nėra.**
