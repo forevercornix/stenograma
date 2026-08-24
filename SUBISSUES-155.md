@@ -1087,6 +1087,24 @@ atmestų teisėtą įrašą.
       naudojama sesija niekada nepasibaigtų, ir absoliutus timeout taptų
       dekoracija. Testas: po daugkartinio `touch` `expires_at` NEPASIKEITĘS.
 
+- [ ] ⚠️ **VIENAS LAIKO ŠALTINIS: DB LAIKRODIS.**
+
+      `expires_at` ir `idle_expires_at` skaičiuojami DB pusėje
+      (`now() + $interval`), ne `Date.now()` proceso pusėje.
+
+      Priežastis: atominis `touch` `UPDATE` tikrina `expires_at > now()` ir
+      `idle_expires_at > now()` — DB laikrodžiu. Jei reikšmės rašomos proceso
+      laikrodžiu, tas pats sprendimas remiasi DVIEM šaltiniais, ir jų poslinkis
+      nutrauks sesijas anksčiau ar vėliau nei nustatyta, o daugiaprocesėje
+      aplinkoje — nevienodai.
+
+      ⚠️ Poslinkis šiame projekte JAU pripažintas realiu: būtent dėl jo
+      `last_seen_at <= expires_at` sąmoningai nėra `CHECK`. Negalima to
+      pripažinti viename kriterijuje ir ignoruoti kitame.
+
+      **Testai:** sesija, sukurta procesui su pastumtu laikrodžiu, galioja
+      pagal DB laiką; `create()` ir `touch()` naudoja tą patį šaltinį.
+
 ### Versijavimas
 
 - [ ] ⚠️ **`schema_version` tikrinama kaip UŽDARA palaikomų versijų AIBĖ.**
@@ -1100,6 +1118,16 @@ atmestų teisėtą įrašą.
 - [ ] ⚠️ **Reikšmė NORMALIZUOJAMA prieš `has()`.** Draiveris gali grąžinti
       `"1"` kaip eilutę, o `PALAIKOMOS.has("1")` yra `false` — galiojanti
       sesija būtų atmesta. Konversija eksplicitinė, su testu abiem tipams.
+
+- [ ] ⚠️ **SESIJŲ PALAIKOMŲ VERSIJŲ AIBĖ YRA `{1}`.**
+
+      Schema nustato `default 1`, tad `PALAIKOMOS` = `{1}` — ne `{2}` ir ne
+      „viskas iki dabartinės".
+
+      ⚠️ **NESUSIJĘ SU `jobs.schema_version`.** Tas naudoja `{NULL, 2}` ir žymi
+      ĮRAŠO ERĄ (#158, `actor` interpretavimą); sesijų `schema_version` žymi
+      SESIJOS EILUTĖS formatą. Dvi nepriklausomos numeracijos — jų suderinimas
+      „tvarkos dėlei" sulaužytų vieną iš jų.
 
 ### Tapatybė ir revokacija
 
@@ -1175,6 +1203,33 @@ atmestų teisėtą įrašą.
       Testas: lenktynės ties draiverio riba — revokacija privalo suveikti iš
       karto (fail-closed).
 
+- [ ] ⚠️ **`destroy()` KVIETIMO VIETA: `routes/auth.js:81`.**
+
+      Atsijungimas šiandien kviečia `sessionStore.destroy(sessionId)`, kur
+      `sessionId` yra cookie reikšmė (dabartinis `session.id`). Po 7.3 cookie
+      turės TOKEN'Ą, tad ši vieta privalo būti suderinta kartu su kontraktu.
+
+      Palikus nepakeistą, atsijungimas TYLIAI nustotų veikti: `destroy()`
+      gautų token'ą, ieškotų pagal `id`, nerastų eilutės, grąžintų `false`, o
+      cookie liktų galiojanti.
+
+      **Testas:** atsijungimas revokuoja sesiją; ta pati cookie po jo
+      NEAUTENTIFIKUOJA.
+
+- [ ] ⚠️ **RECONCILIATION SĖKMĖ YRA VISAS CIKLAS, NE DALINĖ BŪSENA.**
+
+      Suderinimas laikomas sėkmingu tik patikrinus VISAS aktualias
+      nerevokuotas sesijas. Nutrūkus viduryje, `sessionReconcile` readiness
+      NETAMPA `true` ir serveris srauto nepriima.
+
+      Jau atliktos revokacijos gali likti committed — vienos transakcijos
+      NEREIKALAUJAMA (dideliam kiekiui ji būtų blogesnė). Reikalaujama, kad
+      operacija būtų IDEMPOTENTINĖ, tad pakartotinis startas saugiai užbaigtų
+      likusią dalį.
+
+      **Testas:** klaida ciklo viduryje → not-ready arba startas nutrūksta;
+      pakartotinis suderinimas vykdomas saugiai.
+
 ### Gedimai
 
 - [ ] ⚠️ **SESSION STORE GEDIMAS = FAIL-CLOSED.** Kai PostgreSQL yra sesijų
@@ -1191,6 +1246,53 @@ atmestų teisėtą įrašą.
 
       **Testas:** egzistuojanti galiojanti sesija + DB tampa nepasiekiama →
       užklausa NEAUTORIZUOJAMA, atsakymas atskiriamas nuo 401 „nėra sesijos".
+
+- [ ] ⚠️ **`optionalSession` TAIP PAT FAIL-CLOSED, JEI COOKIE YRA.**
+
+      `middleware/sessionAuth.js:110` `optionalSession` daro tą patį
+      `await sessionStore.touch(sessionId)` kaip `requireSession`. Semantika
+      priklauso nuo to, ar klientas pateikė credential'ą:
+
+      - cookie NĖRA → tęsiama su `req.user = null`;
+      - cookie YRA, bet sesija neegzistuoja / pasibaigusi / revokuota →
+        tęsiama su `req.user = null` (esamas kontraktas);
+      - cookie YRA, bet PostgreSQL NEGALI patikrinti būsenos (timeout,
+        connection, query klaida) → **503 `SESSION_STORE_UNAVAILABLE`**.
+
+      DB gedimas NEGALI virsti „vartotojas neprisijungęs": tai paverstų
+      autentifikuotą užklausą anonimine ir nukreiptų ją į kitą autorizacijos
+      šaką.
+
+      **Testas:** optional maršrutas + galiojanti cookie + DB nepasiekiama →
+      503, ne anoniminis vykdymas.
+
+- [ ] ⚠️ **SESIJŲ INVARIANTAI TIKRINAMI INICIJUOJANT.**
+
+      `jobStore` PostgreSQL init'as jau tikrina `REQUIRED_JOB_CONSTRAINTS`
+      (#155, 7.2a): lentelės buvimo nepakanka, nes DB su dalimi migracijų
+      lenteles turi, o invariantų — ne, ir readiness paskelbtų saugyklą
+      pasiruošusia.
+
+      7.3 prideda KETURIS `sessions` `CHECK` invariantus; ta pati spraga
+      galioja jiems. Sesijų init'as tikrina savo privalomų constraint'ų
+      rinkinį taip pat. Sąrašo pilnumą tikrina testas, IŠVEDANTIS jį iš
+      šviežiai migruotos DB (`contype = 'c'` ant `sessions`), ne surašantis
+      ranka.
+
+      **Testas:** migracija be sesijų invariantų → startas nutrūksta.
+
+- [ ] ⚠️ **DRAUDIMAS TURI SARGĄ, NE TIK FORMULUOTĘ.**
+
+      Reikalavimas „`sessionAuth` negali naudoti `findByToken()`" be patikros
+      yra komentaras: pirmas refaktoringas jį apeis, o TOCTOU langas grįš
+      tyliai.
+
+      Priimtinas bet kuris vienas: (1) `findByToken` NEEKSPORTUOJAMAS, tad jo
+      panaudoti fiziškai neįmanoma; (2) eksportuojamas su `_`-prefiksu IR yra
+      testas, kad `middleware/sessionAuth.js` jo nekviečia.
+
+      **Testas:** autentikacijos kelias atlieka VIENĄ sesijų užklausą; dvi
+      (skaitymas + mutacija) yra nesėkmė.
 
 ### Retencija
 
@@ -1243,10 +1345,60 @@ APEINANT store'ą — kitaip tikrinamas JS, ne DB.
       `postgres` + veikianti DB → PostgreSQL; eksplicitinis `postgres` +
       neveikianti DB → startas arba readiness krinta.
 
+- [ ] ⚠️ **SESSION AUTHORITY PARUOŠIAMAS PRIEŠ `app.listen()`.**
+
+      `startServer()` jau turi stiprią garantiją: `jobStore.init()` ir
+      `jobRunner.init()` baigiami PRIEŠ `app.listen()`. 7.3 įsijungia į tą
+      patį modelį:
+
+      ```text
+      jobStore.init()
+      -> sessionStore.init()
+      -> sesijų schemos/invariantų validacija
+      -> AUTH_USERS suderinimas
+      -> jobRunner.init()
+      -> app.listen()
+      ```
+
+      Tiksli `jobRunner` pozicija gali keistis, bet `sessionStore.init()` +
+      validacija + suderinimas PRIVALO būti sėkmingai baigti prieš `listen()`.
+
+      ⚠️ **VIEN READINESS MIDDLEWARE NEPAKANKA.** `authRoute` prijungtas
+      `server.js:86` BE `requireJobSystemReady`, tad middleware sprendimas
+      paliktų `/api/auth/login` landą į pusiau inicijuotą sesijų saugyklą.
+      Readiness vėliava lieka defense-in-depth, ne pakaitalas.
+
+      **Testas:** kvietimų tvarka įrodo, kad `listen` nevyksta, kol
+      suderinimas nebaigtas; suderinimo klaida reiškia, kad `listen`
+      apskritai nekviečiamas.
+
+- [ ] ⚠️ **SESIJŲ MIGRACIJA — NAUJAS LAIKO ŽYMĖS FAILAS.**
+
+      `node-pg-migrate` praleidžia failą pagal VARDĄ, tad jau migruotoje DB
+      pakeista esama migracija NEBŪTŲ pritaikyta: švarios DB testai praeitų, o
+      egzistuojančios liktų be `sessions` — tyliai, nes antras `migrate:up`
+      teisėtai yra no-op. Tai jau įvyko #155 darbe (#200).
+
+      **Testas:** atnaujinimas iš dabartinės `main` schemos sukuria `sessions`
+      su visais invariantais (ne tik švari DB → pilna schema).
+
+- [ ] ⚠️ **SAUGUMO TESTŲ MATRICA PAPILDYTA.**
+
+      `scripts/check-security-matrix.mjs` reikalauja įrašo KIEKVIENAM
+      `security` rinkinio testui — be jo CI krinta (#199).
+
+      Būtini įrašai su evidence stulpeliu: hash-only saugojimas (cookie ≠ `id`
+      ir ≠ `token_hash`); autentikacija ir `touch` kaip viena sąlyginė
+      operacija; idle IR absoliutus langas; gedimas → 503, ne 401; startinis
+      suderinimas kaip readiness barjeras; globali revokacija.
+
+      **Kriterijus:** `npm run test:matrix` žalias.
+
 ## Ko NEAPIMA
 
 Audito perkėlimo (7.4) ir job metaduomenų (7.2a/7.2b). Sesijų lentelė
 nepriklausoma nuo `jobs` — FK tarp jų nėra.
+
 
 ---
 
