@@ -1078,8 +1078,28 @@ atmestų teisėtą įrašą.
       ≥256 bitų `crypto.randomBytes` ir yra atsparus brute-force pagal
       konstrukciją, tad jam reikia GREITOS vienkryptės maišos.
 
-      **Testai:** tas pats token'as duoda tą patį hash; skirtingi — skirtingą;
-      DB reikšmė yra SHA-256 hex; `touch()` trukmė < 1 ms.
+      **Testai — TRYS, IR NĖ VIENAS NEMATUOJA `touch()`:**
+
+      1. **Determinizmas:** tas pats token'as visada duoda tą patį hash.
+         ⚠️ Šis testas VIENAS jau atmeta `bcrypt`, `argon2` ir įprastą
+         `scrypt`: jie naudoja atsitiktinę druską, tad tos pačios įvesties
+         rezultatas skiriasi kaskart. Lieka pridengti tik fiksuotos druskos
+         atvejį.
+      2. **Formatas:** rezultatas yra 64 simbolių lowercase hex (SHA-256
+         išvestis). `scryptSync` su projekto parametrais duoda kitokį ilgį.
+      3. **Greitis — IZOLIUOTAS HELPERIS, ne `touch()`:** 1000 hash'ų
+         skaičiavimų trunka < 100 ms. SHA-256 tai atlieka per kelias
+         milisekundes, o `scrypt` su `SCRYPT_N = 1 << 14` — apie 50–100
+         SEKUNDŽIŲ. Riba parinkta su ~1000× atsarga sąmoningai.
+
+      ⚠️ **`touch()` TRUKMĖ NEMATUOJAMA.** Ji apima PostgreSQL round-trip, tad
+      bet kokia riba būtų flaky CI aplinkoje ir kristų prie TEISINGOS
+      realizacijos. Matuojamas tik hash helperis, kur skirtumas tarp SHA-256 ir
+      KDF yra keturios eilės, o ne matavimo triukšmas.
+
+      ⚠️ Šaltinio teksto tikrinti („ar nėra `scrypt`") NEREIKIA: trys testai
+      aukščiau tikrina ELGESĮ, ir jų neapeis nė viena lėta ar nedeterministinė
+      realizacija.
 
 - [ ] ⚠️ **GALUTINIS PUBLIC KONTRAKTAS.**
 
