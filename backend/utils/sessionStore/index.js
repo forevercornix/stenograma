@@ -49,7 +49,17 @@ function isReady(env = process.env) {
     return false;
   }
   if (backend === "memory") return true;
-  return paruosta;
+
+  /**
+   * ⚠️ VĖLIAVOS VIENOS NEPAKANKA - TIKRINAMA IR FAKTINĖ SAUGYKLA.
+   *
+   * `paruosta` lieka `true` po ankstesnio (atminties) inicijavimo. Jei
+   * konfigūracija po to nurodo `postgres`, o `init()` dar neįvyko, vien
+   * vėliavos patikra paskelbtų autoritetą pasiruošusiu, o užklausas
+   * aptarnautų ATMINTIES saugykla - t. y. persistentinis režimas tyliai
+   * veiktų kaip vienprocesis, be globalios revokacijos.
+   */
+  return paruosta === true && store.backend === "postgres";
 }
 
 /**

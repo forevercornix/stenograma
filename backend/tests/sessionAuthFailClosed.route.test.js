@@ -216,8 +216,16 @@ test("PARUOŠTUMAS: PostgreSQL režimas be baigto suderinimo → 503, ne autenti
   process.env.SESSION_STORE_BACKEND = "postgres";
   process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://neveikia:1@127.0.0.1:1/none";
   const buvoUrl = process.env.DATABASE_URL;
-  sessionStore._setReadyForTests(false);
   try {
+    /**
+     * ⚠️ VĖLIAVA ČIA SĄMONINGAI NEKEIČIAMA.
+     *
+     * Ankstesni šio failo testai jau įvykdė atminties režimo kelią, tad
+     * `paruosta` gali būti `true`. Sargas privalo suveikti VIS TIEK - nes
+     * faktinė saugykla tebėra atmintis, o konfigūracija prašo PostgreSQL.
+     * Nustačius vėliavą į `false` rankomis, testas praeitų ir su fail-open
+     * realizacija, kuri žiūri tik į vėliavą.
+     */
     assert.equal(sessionStore.isReady(), false, "prielaida: autoritetas dar nepasiruošęs");
 
     const res = await request(app).get("/api/auth/me").set("Cookie", cookie);
@@ -510,4 +518,86 @@ test("VARDAS: `req.user.username` išvedamas iš AUTH_USERS, ne iš persistuoto 
   assert.equal(session.username, "naujasvardas", "vardas turi ateiti iš AUTH_USERS pagal user_id");
   assert.notEqual(session.username, undefined, "aktorius audite negali būti undefined");
   await memoryStore._clearForTests();
+});
+
+test("AKTORIUS: authorize.js aktorius seka AUTH_USERS pervadinimą per TIKRĄ HTTP", async () => {
+  /**
+   * ⚠️ VARDAS NEBEPERSISTINAMAS, TAD JIS PRIVALO ATEITI IŠ `AUTH_USERS`.
+   *
+   * `middleware/authorize.js resolveIdentity()` naudoja `req.user.username`
+   * kaip AUDITO AKTORIŲ. Realizacija, kuri vardą laikytų sesijoje, po
+   * pervadinimo rašytų į auditą SENĄ vardą - ir incidento tyrimas remtųsi
+   * tapatybe, kurios nebėra.
+   *
+   * Tikrinamas VISAS kelias: cookie → `sessionStore.touch()` → `req.user` →
+   * `resolveIdentity()`. Vienetinė saugyklos patikra įrodytų tik saugyklos
+   * semantiką, ne tai, kad produkcinis kelias ja naudojasi (AGENTS.md §9.1).
+   */
+  const { resolveIdentity } = require("../middleware/authorize");
+  const { requireSession } = require("../middleware/sessionAuth");
+
+  const login = await prisijungti();
+  const cookie = cookieIs(login);
+
+  const pries = await request(app).get("/api/auth/me").set("Cookie", cookie);
+  assert.equal(pries.body.username, "admin", "prielaida: pradinis vardas");
+
+  const senasAuth = process.env.AUTH_USERS;
+  try {
+    /** TAS PATS `userId`, kitas vardas - tapatybė nesikeičia. */
+    process.env.AUTH_USERS = `naujasvardas:administrator:${hashPassword("teisingas-slaptas-1")}:${ADMIN_ID}`;
+
+    const po = await request(app).get("/api/auth/me").set("Cookie", cookie);
+    assert.equal(po.status, 200, "pervadinimas nėra revokacijos priežastis");
+    assert.equal(po.body.username, "naujasvardas", "req.user.username privalo ateiti iš AUTH_USERS");
+
+    /** Ir tas pats vardas pasiekia autorizacijos aktorių. */
+    const req = { headers: { cookie } };
+    await requireSession(req, { status: () => ({ json: () => {} }) }, () => {});
+    const tapatybe = resolveIdentity(req);
+
+    assert.equal(tapatybe.source, "session");
+    assert.equal(tapatybe.actor, "naujasvardas", "audito aktorius seka AUTH_USERS");
+    assert.equal(tapatybe.role, "administrator");
+  } finally {
+    process.env.AUTH_USERS = senasAuth;
+  }
+});
+
+test("AKTORIUS: ištrintas vartotojas duoda APIBRĖŽTĄ rezultatą, ne `undefined` aktorių", async () => {
+  /**
+   * ⚠️ `undefined` AKTORIUS AUDITE YRA BLOGIAUSIA IŠEITIS.
+   *
+   * Vartotojas, dingęs iš `AUTH_USERS`, negali virsti eilute be aktoriaus.
+   * Apibrėžtas rezultatas čia yra 401: sesija nutraukiama, `req.user`
+   * apskritai nesukuriamas, tad nėra ko įrašyti kaip `undefined`.
+   */
+  const { resolveIdentity } = require("../middleware/authorize");
+  const { requireSession } = require("../middleware/sessionAuth");
+
+  const login = await prisijungti();
+  const cookie = cookieIs(login);
+
+  const senasAuth = process.env.AUTH_USERS;
+  const senasRaktas = process.env.API_KEY;
+  try {
+    process.env.API_KEY = "";
+    process.env.AUTH_USERS = `kitas:operator:${hashPassword("kitas-1")}:44444444-4444-4444-8444-444444444444`;
+
+    const po = await request(app).get("/api/auth/me").set("Cookie", cookie);
+    assert.equal(po.status, 401, "ištrinto vartotojo sesija nutraukiama");
+    assert.equal(po.body.code, "SESSION_REQUIRED");
+
+    const req = { headers: { cookie }, apiKeyAuthenticated: false };
+    let atmesta = false;
+    await requireSession(req, { status: () => ({ json: () => { atmesta = true; } }) }, () => {});
+
+    assert.equal(atmesta, true);
+    assert.equal(req.user, undefined, "req.user nesukuriamas - nėra ko paversti undefined aktoriumi");
+    assert.equal(resolveIdentity(req), null, "aktorius yra apibrėžtas `null`, ne `undefined` vardas");
+  } finally {
+    process.env.AUTH_USERS = senasAuth;
+    if (senasRaktas === undefined) delete process.env.API_KEY;
+    else process.env.API_KEY = senasRaktas;
+  }
 });
