@@ -274,4 +274,21 @@ Sąžiningumo dėlei – ribos, kurios lieka atviros:
 - **Administracinio sesijų revokacijos endpoint'o nėra.** `destroyAllForUserId()`
   yra saugykloje, bet jo neiškviečia nė vienas maršrutas; seansams atjungti
   operatorius naudoja `AUTH_USERS` + restartą (žr. 5 skyrių).
+- **PostgreSQL sesijos Docker Compose profiliuose neaktyvuojamos.**
+  `SESSION_STORE_BACKEND=postgres` reikalauja `DATABASE_URL`, o oficialūs
+  GPU/server profiliai sąmoningai naudoja `PG*` kintamuosius ir nurodo
+  `DATABASE_URL` palikti tuščią (`.env.example`), be to `postgres` nėra
+  backend'o `depends_on` ir profiliai neturi restart politikos. Persistentinės
+  sesijos šiandien diegiamos tik ten, kur `DATABASE_URL` nustatomas
+  eksplicitiškai. Tas pats apribojimas nuo 7.2a galioja ir
+  `JOB_STORE_BACKEND=postgres`, tad tai ne 7.3 įvesta regresija.
+
+  ⚠️ **Sprendimas NEKEISTI to 7.3 metu yra sąmoningas, ne praleidimas.** #181
+  Docker profilių nemini nė karto (§7.1 ir §7.4 juos mini eksplicitiškai, tad
+  tyla §7.3 yra pasirinkimas), o `PG*` priėmimas pažeistų jo kriterijų
+  „pasirinkus `postgres`, `DATABASE_URL` privalomas". Prieš įjungiant
+  persistentines sesijas Docker'yje reikia atskiro sprendimo: arba profiliai
+  gauna `DATABASE_URL` ir `depends_on: postgres` su `condition: service_healthy`,
+  arba backend'o parinkimas išmoksta `PG*` – pastarasis reikalautų pakeisti
+  #181 priėmimo kriterijų.
 - **MFA nėra.**
