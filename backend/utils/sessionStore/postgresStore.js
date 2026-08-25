@@ -322,23 +322,64 @@ function createPostgresStore(pool) {
   }
 
   /**
-   * READINESS ZONDAS - GYVA priklausomybės būsena, ne starto vėliava.
+   * PRIVILEGIJOS, KURIŲ REIKALAUJA SESIJŲ OPERACIJOS.
+   *
+   * `create()` → `INSERT`; `touch()`, `destroy()`, `destroyAllForUserId()`,
+   * `reconcile()` → `UPDATE`; `sweepExpired()` → `DELETE`; `size()`,
+   * `reconcile()` skaitymas ir visi `RETURNING` → `SELECT`.
+   *
+   * Sąrašas yra tikslus operacijų atspindys: platesnis reikalautų teisių, kurių
+   * saugykla nenaudoja (ir be reikalo neleistų paleisti su minimaliomis
+   * teisėmis), siauresnis praleistų režimą, kuriame `/api/ready` sako „gerai",
+   * o pirmas `create()` krinta `permission denied`.
+   */
+  const BUTINOS_PRIVILEGIJOS = Object.freeze(["INSERT", "UPDATE", "DELETE"]);
+
+  /**
+   * READINESS ZONDAS - GYVA SESIJŲ AUTORITETO būsena, ne vien DB pasiekiamumas.
    *
    * ⚠️ STARTO VĖLIAVOS NEPAKANKA (#181, „SESSION STORE GEDIMAS = FAIL-CLOSED":
    * „readiness rodo, kad autentikacijos priklausomybė neveikia").
-   *
    * `sessionReconcile` užsidega vieną kartą per startą ir daugiau nebekinta.
-   * Jei DB nukrenta VĖLIAU, kiekviena cookie autentikuota užklausa gauna 503,
-   * o `/api/ready` be šio zondo toliau atsakinėtų 200 - orkestruotojas siųstų
-   * srautą į konteinerį, kuriame autentikacija neveikia.
+   *
+   * ⚠️ `SELECT 1` NEPAKANKA. Jis įrodo tik tai, kad DB atsako. Jei po starto
+   * dingsta `sessions` lentelė, pasikeičia `search_path` arba iš aplikacijos
+   * rolės atimamos teisės, `SELECT 1` toliau pavyktų, `/api/ready` sakytų 200,
+   * o KIEKVIENA autentifikuota užklausa kristų. Zondas turi tikrinti tą
+   * priklausomybę, kurią realiai naudoja `create`/`touch`/`destroy`.
+   *
+   * ⚠️ `SELECT 1 FROM sessions LIMIT 1` TAIP PAT NEPAKANKA. Jis įrodo `SELECT`,
+   * bet ne `INSERT`/`UPDATE`/`DELETE`: rolė su atimta `UPDATE` teise praeitų
+   * zondą, o `touch()` - t. y. pati autentikacija - kristų.
+   *
+   * ⚠️ ZONDAS NEMUTUOJA. Rašymo teisės tikrinamos per `has_table_privilege()`
+   * katalogo funkciją, ne bandomuoju įrašu: readiness kviečiamas kiekvieno
+   * orkestruotojo probe metu, ir bandomasis `INSERT`/`DELETE` reikštų nuolatinį
+   * sesijų lentelės šiukšlinimą bei WAL srautą dėl diagnostikos.
+   *
+   * VIENAS round-trip:
+   *   - `FROM sessions LIMIT 1` - lentelė egzistuoja, matoma per `search_path`
+   *     ir realiai skenuojama (be `SELECT` teisės čia gaunamas `permission
+   *     denied`, be lentelės - `does not exist`; abu virsta `false`);
+   *   - `has_table_privilege(...)` - rašymo teisės, kurių reikia mutacijoms.
    *
    * Klaida NEGAUDOMA čia: fail-closed sprendimą priima vienas kvietėjas
    * (`sessionStore.probe()`), kad „pasiekiama" negalėtų atsirasti iš tylaus
    * `catch` viduryje.
    */
   async function probe() {
-    await pool.query("SELECT 1");
-    return true;
+    const stulpeliai = BUTINOS_PRIVILEGIJOS.map(
+      (p, i) => `has_table_privilege('sessions', $${i + 1}) AS "${p.toLowerCase()}"`
+    ).join(", ");
+
+    const { rows } = await pool.query(
+      `WITH skaitymas AS (SELECT 1 FROM sessions LIMIT 1)
+       SELECT (SELECT count(*) FROM skaitymas)::int AS perskaityta, ${stulpeliai}`,
+      [...BUTINOS_PRIVILEGIJOS]
+    );
+
+    const eilute = rows[0];
+    return BUTINOS_PRIVILEGIJOS.every((p) => eilute[p.toLowerCase()] === true);
   }
 
   return {
@@ -351,6 +392,7 @@ function createPostgresStore(pool) {
     sweepExpired,
     size,
     probe,
+    BUTINOS_PRIVILEGIJOS,
     reconcile,
   };
 }

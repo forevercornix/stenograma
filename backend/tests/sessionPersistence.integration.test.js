@@ -898,3 +898,140 @@ test("POOL: užklausų riba REALIAI nutraukia kabantį sakinį", { skip: SKIP },
   }
 });
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * READINESS ZONDAS TIKRINA SESIJŲ AUTORITETĄ, NE VIEN DB (Codex P2 #1)
+ *
+ * ⚠️ `SELECT 1` ĮRODO TIK TAI, KAD DB ATSAKO.
+ *
+ * Jei po starto dingsta `sessions` lentelė arba iš aplikacijos rolės atimamos
+ * teisės, `SELECT 1` toliau pavyksta, `/api/ready` sako 200, o KIEKVIENA
+ * autentifikuota užklausa krinta. Zondas privalo tikrinti tą pačią
+ * priklausomybę, kurią naudoja `create`/`touch`/`destroy`.
+ *
+ * ⚠️ ZONDAS NEMUTUOJA: rašymo teisės tikrinamos `has_table_privilege()`
+ * katalogo funkcija, ne bandomuoju įrašu.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("ZONDAS: sveika lentelė ir teisės → true", { skip: SKIP }, async () => {
+  const ctx = await paruostiDb("session_probe_ok");
+  try {
+    assert.equal(await ctx.store.probe(), true);
+
+    /** Prielaida, kurią tikrina likę du testai: zondas SKIRIA sveiką būseną nuo gedimo. */
+    const { rows } = await ctx.pool.query(
+      `SELECT has_table_privilege('sessions','INSERT') AS i,
+              has_table_privilege('sessions','UPDATE') AS u,
+              has_table_privilege('sessions','DELETE') AS d`
+    );
+    assert.deepEqual(rows[0], { i: true, u: true, d: true });
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+
+test("ZONDAS: dingusi `sessions` lentelė po starto → readiness false", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TIKRINAMA VISA GRANDINĖ, ne vien saugyklos metodas.
+   *
+   * `sessionStore.init()` + `reconcile()` atliekami su SVEIKA schema, tad
+   * `isReady()` tampa `true`. Tik tada lentelė numetama - imituojama migracija,
+   * `search_path` pokytis ar klaidingas `DROP` VEIKIANČIOJE sistemoje.
+   * Realizacija su `SELECT 1` čia ir toliau grąžintų `true`.
+   */
+  const ctx = await paruostiDb("session_probe_drop");
+  const sessionStore = require("../utils/sessionStore");
+  const senasBackend = process.env.SESSION_STORE_BACKEND;
+  const senasUrl = process.env.DATABASE_URL;
+  const senasAuth = process.env.AUTH_USERS;
+  try {
+    process.env.SESSION_STORE_BACKEND = "postgres";
+    process.env.DATABASE_URL = ctx.url;
+    process.env.AUTH_USERS = ENV.AUTH_USERS;
+    await sessionStore.shutdown();
+    await sessionStore.init();
+    await sessionStore.reconcile();
+
+    assert.equal(sessionStore.isReady(), true, "prielaida: startas baigtas");
+    assert.equal(await sessionStore.probe(), true, "prielaida: sveika schema duoda true");
+
+    await ctx.pool.query("DROP TABLE sessions");
+
+    assert.equal(
+      await sessionStore.probe(),
+      false,
+      "dingus lentelei readiness privalo kristi - `SELECT 1` to nepastebėtų"
+    );
+  } finally {
+    await sessionStore.shutdown();
+    if (senasBackend === undefined) delete process.env.SESSION_STORE_BACKEND;
+    else process.env.SESSION_STORE_BACKEND = senasBackend;
+    if (senasUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = senasUrl;
+    if (senasAuth === undefined) delete process.env.AUTH_USERS;
+    else process.env.AUTH_USERS = senasAuth;
+    await ctx.resursai.isvalyti();
+  }
+});
+
+test("ZONDAS: atimta `UPDATE` teisė → readiness false, nors `SELECT` veikia", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TAI ATVEJIS, KURIO `SELECT 1 FROM sessions LIMIT 1` NEPAGAUTŲ.
+   *
+   * Rolė, turinti `SELECT`, bet ne `UPDATE`, praeitų skaitymo zondą - o
+   * `touch()`, t. y. PATI AUTENTIKACIJA, kristų `permission denied`. Todėl
+   * zondas privalo tikrinti rašymo teises atskirai.
+   *
+   * Jungiamasi TIKRA atskira role (ne `SET ROLE`), kad būtų tikrinamas realus
+   * prisijungimo kelias, kurį naudotų aplikacija.
+   */
+  const ctx = await paruostiDb("session_probe_priv");
+  const role = `sesijos_zondas_${Date.now().toString(36)}`;
+  try {
+    const dbVardas = new URL(ctx.url).pathname.slice(1);
+
+    await ctx.pool.query(`CREATE ROLE "${role}" LOGIN PASSWORD 'zondas'`);
+    ctx.resursai.registruoti("testinė rolė", async () => {
+      const valytojas = new Pool({ connectionString: ctx.url });
+      try {
+        await valytojas.query(`DROP OWNED BY "${role}"`).catch(() => {});
+        await valytojas.query(`DROP ROLE IF EXISTS "${role}"`).catch(() => {});
+      } finally {
+        await valytojas.end();
+      }
+    });
+
+    await ctx.pool.query(`GRANT CONNECT ON DATABASE "${dbVardas}" TO "${role}"`);
+    await ctx.pool.query(`GRANT USAGE ON SCHEMA public TO "${role}"`);
+    await ctx.pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON sessions TO "${role}"`);
+
+    const url = new URL(ctx.url);
+    url.username = role;
+    url.password = "zondas";
+    const roleUrl = url.toString();
+
+    /** 1. Su VISOMIS teisėmis zondas teigiamas - kitaip testas nieko neatskirtų. */
+    const pilnas = new Pool({ connectionString: roleUrl });
+    ctx.resursai.registruoti("rolės pool (pilnos teisės)", () => pilnas.end());
+    assert.equal(await createPostgresStore(pilnas).probe(), true, "prielaida: pilnos teisės duoda true");
+
+    /** 2. Atimam TIK `UPDATE` - `SELECT` lieka. */
+    await ctx.pool.query(`REVOKE UPDATE ON sessions FROM "${role}"`);
+
+    const ribotas = new Pool({ connectionString: roleUrl });
+    ctx.resursai.registruoti("rolės pool (be UPDATE)", () => ribotas.end());
+    const ribotasStore = createPostgresStore(ribotas);
+
+    /** Skaitymas TEBEVEIKIA - todėl skaitymo zondas šio gedimo nepagautų. */
+    const { rows } = await ribotas.query("SELECT count(*)::int AS n FROM sessions");
+    assert.equal(rows[0].n, 0, "prielaida: SELECT teisė nepaliesta");
+
+    assert.equal(
+      await ribotasStore.probe(),
+      false,
+      "be UPDATE teisės touch() kristų, tad readiness privalo rodyti neparuošta"
+    );
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+

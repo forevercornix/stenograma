@@ -71,6 +71,26 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
    * `create()` grąžina `{ session, token }`. Į cookie keliauja TOKEN'AS -
    * `session.id` yra DB pirminis raktas ir klientui nerodomas niekada.
    */
+  /**
+   * ⚠️ TAS PATS PARUOŠTUMO SARGAS KAIP ATSIJUNGIME.
+   *
+   * Iki `init()` fasadas rodo į atmintį. Sukonfigūravus `postgres`, bet dar
+   * nebaigus inicijavimo, `create()` SĖKMINGAI sukurtų sesiją ATMINTYJE ir
+   * išsiųstų galiojančią cookie, kurios nėra DB: ji neišgyventų restarto ir
+   * jos nematytų kitas procesas - t. y. tyliai veiktų režimas, kurio
+   * operatorius eksplicitiškai atsisakė.
+   */
+  if (!sessionStore.isReady()) {
+    auditLog.record({
+      event: "LOGIN_FAILED",
+      success: false,
+      outcome: "store_not_ready",
+      details: `username=${identity.username} role=${identity.role}`,
+    });
+    log.error("Prisijungimas atmestas: sesijų autoritetas dar nepasiruošęs.");
+    return sessionStoreUnavailable(res);
+  }
+
   let sukurta;
   try {
     sukurta = await sessionStore.create(identity);
@@ -128,6 +148,31 @@ router.post("/auth/logout", async (req, res) => {
   const token = readCookie(req, COOKIE_NAME);
 
   if (token) {
+    /**
+     * ⚠️ PARUOŠTUMO SARGAS PRIEŠ REVOKACIJĄ.
+     *
+     * `sessionStore` fasadas iki `init()` rodo į ATMINTIES saugyklą. Jei
+     * sukonfigūruotas `SESSION_STORE_BACKEND=postgres`, bet inicijavimas /
+     * suderinimas dar nebaigtas (embedded naudojimas, testai, ankstyva užklausa),
+     * `destroy(token)` nueitų į atmintį, nerastų persistentinio token'o,
+     * grąžintų `false` BE klaidos - ir žemiau esantis kelias išvalytų cookie bei
+     * atsakytų `{ ok: true }`. Vartotojui būtų pasakyta „atsijungta", nors
+     * persistentinė sesija liktų galiojanti kiekviename procese.
+     *
+     * Tas pats sargas jau saugo `requireSession`, `optionalSession`,
+     * `authenticate` ir audito kelią; atsijungimas negali būti vienintelė
+     * išimtis (AGENTS.md §16).
+     *
+     * ⚠️ SARGAS YRA VIDUJE `if (token)`. Be cookie atsijungimas lieka
+     * IDEMPOTENTINIS ir grąžina 200 net tada, kai saugykla nepasiruošusi -
+     * klientas neturi ko revokuoti, tad nėra ir ko nepavykti.
+     */
+    if (!sessionStore.isReady()) {
+      auditLog.record({ event: "LOGOUT", success: false, outcome: "store_not_ready" });
+      log.error("Atsijungimas atmestas: sesijų autoritetas dar nepasiruošęs.");
+      return sessionStoreUnavailable(res);
+    }
+
     /**
      * ⚠️ REVOKACIJOS KLAIDA NEGALI VIRSTI „atsijungta".
      *

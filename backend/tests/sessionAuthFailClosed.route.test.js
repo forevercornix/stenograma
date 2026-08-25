@@ -983,3 +983,103 @@ test("POOL: sesijų jungtis turi BAIGTINES ribas - jungimuisi IR užklausoms", (
   }
 });
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * PARUOŠTUMO SARGAS PRIEŠ REVOKACIJĄ (Codex P2 #2)
+ *
+ * ⚠️ FASADAS IKI `init()` RODO Į ATMINTĮ.
+ *
+ * Sukonfigūravus `SESSION_STORE_BACKEND=postgres`, bet dar nebaigus
+ * inicijavimo / suderinimo, `destroy(token)` nueitų į atminties saugyklą,
+ * persistentinio token'o nerastų, grąžintų `false` BE klaidos - ir maršrutas
+ * išvalytų cookie bei atsakytų `{ ok: true }`. Vartotojui pasakyta
+ * „atsijungta", o persistentinė sesija liktų galiojanti VISUOSE procesuose.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Įjungia „sukonfigūruota postgres, bet neinicijuota" būseną ir po savęs sutvarko. */
+async function suNeinicijuotuPostgres(veiksmas) {
+  const buvoBackend = process.env.SESSION_STORE_BACKEND;
+  const buvoUrl = process.env.DATABASE_URL;
+  process.env.SESSION_STORE_BACKEND = "postgres";
+  process.env.DATABASE_URL = buvoUrl || "postgres://neveikia:1@127.0.0.1:1/none";
+  try {
+    /**
+     * ⚠️ `await`, NE `return veiksmas()`. Be jo `finally` atstatytų aplinką
+     * SINCHRONIŠKAI, dar prieš užklausai pasiekiant maršrutą - `isReady()`
+     * matytų atminties režimą, testas gautų 200 ir tyliai nieko netikrintų.
+     */
+    return await veiksmas();
+  } finally {
+    if (buvoBackend === undefined) delete process.env.SESSION_STORE_BACKEND;
+    else process.env.SESSION_STORE_BACKEND = buvoBackend;
+    if (!buvoUrl) delete process.env.DATABASE_URL;
+  }
+}
+
+test("LOGOUT: neinicijuota PostgreSQL saugykla → 503, cookie NEIŠVALOMA", async () => {
+  /**
+   * ⚠️ REGRESIJOS ESMĖ: token'as NETURI būti melagingai paskelbtas revokuotu.
+   *
+   * Tikrinama trys dalykai iš karto: statusas, kodas ir tai, kad atsakyme NĖRA
+   * cookie valymo antraštės. Be paskutinio patikrinimo realizacija galėtų
+   * grąžinti 503 IR vis tiek išvalyti cookie - klientas liktų be credential'o,
+   * o serveryje sesija galiotų toliau.
+   */
+  const login = await prisijungti();
+  const cookie = cookieIs(login);
+
+  const res = await suNeinicijuotuPostgres(() =>
+    request(app).post("/api/auth/logout").set("Cookie", cookie)
+  );
+
+  assert.equal(res.status, 503, "neparuošta saugykla negali atrodyti kaip sėkmingas atsijungimas");
+  assert.equal(res.body.code, "SESSION_STORE_UNAVAILABLE");
+  assert.equal(res.body.ok, undefined, "atsakyme negali būti sėkmės žymės");
+  assert.equal(
+    res.headers["set-cookie"],
+    undefined,
+    "cookie negali būti valoma, kai revokacija neįvyko"
+  );
+
+  /** Ir sesija realiai tebegalioja - būtent todėl klientas turi apie tai sužinoti. */
+  assert.equal((await request(app).get("/api/auth/me").set("Cookie", cookie)).status, 200);
+});
+
+test("LOGOUT: BE cookie lieka IDEMPOTENTINIS net neparuošus saugyklos", async () => {
+  /**
+   * ⚠️ SARGAS NEGALI SULAUŽYTI IDEMPOTENTIŠKUMO.
+   *
+   * Atsijungimas be aktyvios sesijos nėra klaida - klientas galėjo jau būti
+   * atsijungęs kitame skirtuke. Neturint ko revokuoti, nėra ir ko nepavykti,
+   * tad paruoštumas čia nesvarbus. Realizacija, tikrinanti `isReady()` PRIEŠ
+   * `if (token)`, šį testą sulaužytų.
+   */
+  const res = await suNeinicijuotuPostgres(() => request(app).post("/api/auth/logout"));
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { ok: true });
+  assert.match(res.headers["set-cookie"][0], /Max-Age=0/, "cookie valymas lieka");
+});
+
+test("LOGIN: neinicijuota PostgreSQL saugykla → 503, jokios atminties sesijos", async () => {
+  /**
+   * Ta pati spraga kitame gale: be sargo `create()` sėkmingai sukurtų sesiją
+   * ATMINTYJE ir išsiųstų galiojančią cookie, kurios nėra DB - ji neišgyventų
+   * restarto ir jos nematytų kitas procesas, nors operatorius eksplicitiškai
+   * pasirinko persistentinį režimą.
+   */
+  const priesTai = await sessionStore.size();
+
+  const res = await suNeinicijuotuPostgres(() =>
+    request(app).post("/api/auth/login").send({ username: "admin", password: "teisingas-slaptas-1" })
+  );
+
+  assert.equal(res.status, 503);
+  assert.equal(res.body.code, "SESSION_STORE_UNAVAILABLE");
+  assert.equal(res.headers["set-cookie"], undefined, "cookie negali būti išduota");
+  assert.equal(
+    await sessionStore.size(),
+    priesTai,
+    "atminties saugykloje negali atsirasti naujos sesijos"
+  );
+});
+
