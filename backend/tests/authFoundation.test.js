@@ -333,6 +333,31 @@ const { loadUsersById, USER_ID_PATTERN, UUID_LIKE_PATTERN, USERNAME_PATTERN } = 
 const UID_A = "11111111-1111-4111-8111-111111111111";
 const UID_B = "44444444-4444-4444-8444-444444444444";
 
+/**
+ * TAPATYBIŲ APLINKA #158 SESIJŲ TESTAMS (#155, 7.3).
+ *
+ * ⚠️ KODĖL JOS ANKSČIAU NEREIKĖJO, O DABAR REIKIA.
+ *
+ * Iki 7.3 `touch()` grąžindavo sesijos įrašą nieko netikrindamas. Dabar jis
+ * tikrina `userId` prieš GYVĄ `AUTH_USERS` (#181, „touch() TIKRINA AUTH_USERS
+ * DINAMIŠKAI"), tad sesija su stabiliu ID, kurio vartotojų sąraše nėra,
+ * teisingai atmetama - lygiai taip pat, kaip ją atmestų PostgreSQL.
+ *
+ * Todėl šie testai nurodo aplinką, kurioje jų tapatybės REALIAI egzistuoja.
+ * Tai NE lūkesčių susilpninimas: visos assercijos lieka tokios pačios, o
+ * pridėta tik prielaida, kurios kontraktas dabar reikalauja. Sesijos be `id`
+ * (legacy fixture'ai) toliau tikrinamos be jokios aplinkos.
+ *
+ * ⚠️ `env` PERDUODAMAS ARGUMENTU, ne per `process.env`. Testai vykdomi
+ * lygiagrečiai, ir `process.env` keitimas taptų matomas kitiems failams
+ * (AGENTS.md §9.3).
+ */
+const TAPATYBIU_ENV = {
+  AUTH_USERS:
+    `admin:administrator:${hashPassword("nesvarbu-1")}:${UID_A},` +
+    `petras:operator:${hashPassword("nesvarbu-2")}:${UID_B}`,
+};
+
 test("#158 PARSERIS: 3 laukai (senas formatas) meta startup klaidą", () => {
   const h = hashPassword("x");
   assert.throws(
@@ -528,17 +553,20 @@ test("#158 SESIJA: tapatybė be id duoda userId=null, o ne undefined", async () 
 });
 
 test("#158 SESIJA: touch() grąžina userId (jį skaito req.user)", async () => {
-  const created = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  const touched = await sessionStore.touch(created.token);
+  const created = await sessionStore.create(
+    { id: UID_A, username: "admin", role: "administrator" },
+    TAPATYBIU_ENV
+  );
+  const touched = await sessionStore.touch(created.token, TAPATYBIU_ENV);
 
   assert.equal(touched.userId, UID_A);
   await sessionStore._clearForTests();
 });
 
 test("#158 REVOKACIJA: destroyAllForUserId ištrina visas to paties ID sesijas", async () => {
-  const a1 = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  const a2 = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  const b = await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
+  const a1 = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" }, TAPATYBIU_ENV);
+  const a2 = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" }, TAPATYBIU_ENV);
+  const b = await sessionStore.create({ id: UID_B, username: "petras", role: "operator" }, TAPATYBIU_ENV);
 
   const removed = await sessionStore.destroyAllForUserId(UID_A);
 
@@ -548,9 +576,9 @@ test("#158 REVOKACIJA: destroyAllForUserId ištrina visas to paties ID sesijas",
    * eilutes, ne aktyvias sesijas. Todėl „nepaliesta" tikrinama tuo, kas
    * realiai svarbu: ar cookie dar autentifikuoja.
    */
-  assert.equal(await sessionStore.touch(a1.token), null);
-  assert.equal(await sessionStore.touch(a2.token), null);
-  assert.ok(await sessionStore.touch(b.token), "kito vartotojo sesija nepaliesta");
+  assert.equal(await sessionStore.touch(a1.token, TAPATYBIU_ENV), null);
+  assert.equal(await sessionStore.touch(a2.token, TAPATYBIU_ENV), null);
+  assert.ok(await sessionStore.touch(b.token, TAPATYBIU_ENV), "kito vartotojo sesija nepaliesta");
   await sessionStore._clearForTests();
 });
 
@@ -582,11 +610,11 @@ test("#158 REVOKACIJA: destroyAllForUserId neliečia sesijų be userId", async (
 });
 
 test("#158 REVOKACIJA: destroyAllForUser lieka suderinamas (vardu paremtas kelias)", async () => {
-  const a = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" });
-  const b = await sessionStore.create({ id: UID_B, username: "petras", role: "operator" });
+  const a = await sessionStore.create({ id: UID_A, username: "admin", role: "administrator" }, TAPATYBIU_ENV);
+  const b = await sessionStore.create({ id: UID_B, username: "petras", role: "operator" }, TAPATYBIU_ENV);
 
   assert.equal(await sessionStore.destroyAllForUser("admin"), 1);
-  assert.equal(await sessionStore.touch(a.token), null);
-  assert.ok(await sessionStore.touch(b.token), "kito vartotojo sesija nepaliesta");
+  assert.equal(await sessionStore.touch(a.token, TAPATYBIU_ENV), null);
+  assert.ok(await sessionStore.touch(b.token, TAPATYBIU_ENV), "kito vartotojo sesija nepaliesta");
   await sessionStore._clearForTests();
 });

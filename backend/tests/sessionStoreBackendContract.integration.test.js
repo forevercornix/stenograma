@@ -241,6 +241,37 @@ const SCENARIJAI = [
     },
   },
   {
+    id: "auth-users-istustintas",
+    kodel: "pašalinus PASKUTINĮ vartotoją, sesija su stabiliu userId nebeautentifikuoja",
+    async run({ store, env }) {
+      /**
+       * ⚠️ REGRESIJA, KURIĄ ŠIS SCENARIJUS UŽDARO (Codex peržiūra, P1).
+       *
+       * Atminties backend'as tapatybės patikrą praleisdavo, kai `AUTH_USERS`
+       * TUŠČIAS - t. y. būtent tada, kai atliekamas stipriausias įmanomas
+       * prieigos atėmimas: pašalinamas paskutinis vartotojas. Sesija toliau
+       * autentifikuodavo su savo įrašytu vardu ir role, o PostgreSQL ją
+       * atmesdavo. Du backend'ai išsiskirdavo revokacijos kelyje - tiksliai
+       * ten, kur skirtumo kaina didžiausia.
+       *
+       * Tuščias vartotojų sąrašas reiškia „tokio vartotojo nebėra", ne
+       * „netikrinam".
+       */
+      const { token } = await store.create(ADMIN, env);
+      assert.ok(await store.touch(token, env), "prielaida: sesija galioja");
+
+      const tuscias = { ...env, AUTH_USERS: "" };
+      assert.equal(
+        await store.touch(token, tuscias),
+        null,
+        "pašalinus visus vartotojus, sesija privalo būti atmesta"
+      );
+
+      /** Ir tai loginė revokacija: grąžinus AUTH_USERS, sesija NEATGYJA. */
+      assert.equal(await store.touch(token, env), null, "revokuota sesija negali atgyti");
+    },
+  },
+  {
     id: "role-pazeminta-runtime",
     kodel: "rolės pažeminimas AUTH_USERS nutraukia sesiją su senu snapshot'u",
     async run({ store, env }) {
@@ -562,6 +593,12 @@ test("KONTRAKTAS: abu backend'ai deklaruoja tą patį viešą paviršių", () =>
     "destroyAllForUserId",
     "sweepExpired",
     "size",
+    /**
+     * ⚠️ NE #181 kliento kontrakto dalis, o readiness afordansas: `/api/ready`
+     * kviečia jį VIENODAI abiem backend'ams, kad nereikėtų šakoti pagal
+     * `backend` reikšmę - toks šakojimas palieka vieną režimą nepatikrintą.
+     */
+    "probe",
   ];
 
   for (const metodas of KONTRAKTAS) {

@@ -38,9 +38,22 @@ const sessions = new Map();
  * produkciniame PostgreSQL `user_id` yra `NOT NULL`, tad sesijų be stabilaus
  * ID ten NĖRA. Tokioms sesijoms tapatybės patikra prieš `AUTH_USERS`
  * neatliekama (nėra pagal ką), ir vardas lieka tas, su kuriuo jos sukurtos.
+ *
+ * ⚠️ TUŠČIAS `AUTH_USERS` NĖRA PRALEIDIMO PRIEŽASTIS.
+ *
+ * Ankstesnė versija reikalavo dar ir `env.AUTH_USERS` netuštumo. Pašalinus
+ * PASKUTINĮ vartotoją - t. y. atlikus stipriausią įmanomą prieigos atėmimą -
+ * sąlyga tapdavo `false`, patikra būdavo praleidžiama, ir sesija toliau
+ * autentifikuodavo su savo įrašytu vardu bei role. PostgreSQL tokią sesiją
+ * atmeta (vartotojo nėra `loadUsersById()` rezultate), tad du backend'ai
+ * išsiskirdavo būtent revokacijos kelyje.
+ *
+ * Dabar lemia VIENAS klausimas: ar sesija turi stabilų `userId`. Jei turi, ji
+ * tikrinama prieš gyvą vartotojų sąrašą - ir tuščias sąrašas teisingai reiškia
+ * „tokio vartotojo nebėra", ne „netikrinam".
  */
-function arTikrintiTapatybe(session, env) {
-  return Boolean(session.userId) && Boolean((env.AUTH_USERS || "").trim());
+function arTikrintiTapatybe(session) {
+  return Boolean(session.userId);
 }
 
 async function create(identity, env = process.env) {
@@ -97,7 +110,7 @@ async function touch(token, env = process.env) {
   if (session.expiresAt <= now) return null;
   if (session.idleExpiresAt <= now) return null;
 
-  if (arTikrintiTapatybe(session, env)) {
+  if (arTikrintiTapatybe(session)) {
     const patikra = patikrintiTapatybe(session.userId, session.role, env);
     if (!patikra.ok) {
       /** Fail-closed IR revokacija - kitaip ta pati cookie bandytų vėl kitą sekundę. */
@@ -213,6 +226,18 @@ async function size() {
   return sessions.size;
 }
 
+/**
+ * READINESS ZONDAS.
+ *
+ * Atminties saugykla išorinės priklausomybės neturi: jei procesas gyvas, ji
+ * pasiekiama. Metodas egzistuoja tam, kad `/api/ready` kelias būtų VIENODAS
+ * abiem backend'ams ir nereikėtų šakoti pagal `backend` reikšmę - toks šakojimas
+ * yra vieta, kur vienas režimas tyliai lieka nepatikrintas.
+ */
+async function probe() {
+  return true;
+}
+
 /** Testams: pilnas išvalymas be serverio restarto. */
 async function _clearForTests() {
   sessions.clear();
@@ -237,6 +262,7 @@ module.exports = {
   destroyAllForUserId,
   sweepExpired,
   size,
+  probe,
   _clearForTests,
   _sweepForTests,
   _getByTokenForTests,

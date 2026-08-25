@@ -8,6 +8,12 @@ const auditRoute = require("./routes/audit");
 const exportsRoute = require("./routes/exports");
 const jobsRoute = require("./routes/jobs");
 const authRoute = require("./routes/auth");
+/**
+ * ⚠️ MODULIO LYGYJE, ne `startServer()` viduje: `/api/ready` zondas kviečia
+ * `sessionStore.probe()` KIEKVIENOS užklausos metu, tad nuoroda turi egzistuoti
+ * ir tada, kai `startServer()` šiame procese nevykdomas (testai, embedded).
+ */
+const sessionStore = require("./utils/sessionStore");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
@@ -149,6 +155,33 @@ async function probeRuntimeReadiness() {
   let redisReachable = true;
   let workers = { transcription: true, protocol: true };
 
+  /**
+   * SESIJŲ AUTORITETO GYVA BŪSENA (#155, 7.3; #181 „SESSION STORE GEDIMAS").
+   *
+   * ⚠️ `readiness.sessionReconcile` YRA STARTO VĖLIAVA, NE SVEIKATA. Ji
+   * užsidega kartą ir nebekinta. Nukritus DB po starto, sesijų middleware
+   * grąžina 503 kiekvienai cookie autentikuotai užklausai, o `/api/ready` be
+   * šio zondo toliau sakytų 200 - orkestruotojas laikytų konteinerį sveiku ir
+   * siųstų į jį srautą, kuriame neveikia autentikacija.
+   *
+   * ⚠️ FAIL-CLOSED PAGAL NUTYLĖJIMĄ: `false` tampa `true` TIK po sėkmingo ir
+   * laiku grąžinusio zondo. Atminties režime zondas visada teigiamas, tad
+   * elgesys nesikeičia.
+   *
+   * Riba ta pati kaip Redis keliui - readiness privalo atsakyti VISADA, net jei
+   * priklausomybė kabo (žr. `withTimeout` komentarą žemiau).
+   */
+  let sessionStoreReachable = false;
+  try {
+    sessionStoreReachable = await withTimeout(
+      sessionStore.probe(),
+      READINESS_TIMEOUT_MS,
+      "sesijų saugykla"
+    );
+  } catch {
+    sessionStoreReachable = false;
+  }
+
   if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
     let conn = null;
     try {
@@ -172,7 +205,7 @@ async function probeRuntimeReadiness() {
     }
   }
 
-  return { redisReachable, workers };
+  return { redisReachable, workers, sessionStoreReachable };
 }
 
 app.get("/api/ready", pollRateLimiter, async (req, res) => {
@@ -194,10 +227,10 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
   // ir protokolo worker'iai gali būti ATSKIRI procesai/konteineriai, žr.
   // utils/workerHeartbeat.js) - kitaip jobai būtų priimami, bet liktų queued, nes
   // niekas jų neapdoroja. Inline režime nieko papildomo (viskas tame pačiame procese).
-  const { redisReachable, workers } = await probeRuntimeReadiness();
+  const { redisReachable, workers, sessionStoreReachable } = await probeRuntimeReadiness();
   const workerAlive = workers.transcription && workers.protocol;
 
-  const ready = initReady && redisReachable && workerAlive;
+  const ready = initReady && redisReachable && workerAlive && sessionStoreReachable;
   res.status(ready ? 200 : 503).json({
     ready,
     components: {
@@ -207,6 +240,7 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
       redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
       workerAlive,    // BullMQ režime: true TIK jei ABU worker tipai gyvi; inline - visada true
       workers,        // detali būsena PER TIPĄ - kuri konkrečiai eilė (jei kuri) neturi gyvo worker'io
+      sessionStoreReachable, // GYVA sesijų autoriteto būsena; atmintyje - visada true
     },
   });
 });
@@ -319,7 +353,6 @@ async function startServer({ port, listen, onStep } = {}) {
    * Klaida keliama į viršų ir `startServer()` nutrūksta - dalinis suderinimas
    * negali virsti aptarnaujamu srautu.
    */
-  const sessionStore = require("./utils/sessionStore");
   await sessionStore.init();
   step("sessionStore.init");
   const suderinimas = await sessionStore.reconcile();

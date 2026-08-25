@@ -211,6 +211,42 @@ async function reconcile(env = process.env) {
   return { ...rezultatas, backend: store.backend };
 }
 
+/**
+ * GYVA SESIJŲ AUTORITETO BŪSENA - `/api/ready` įvestis.
+ *
+ * ⚠️ TAI NE `isReady()`. `isReady()` atsako „ar startas baigtas ir jungiklis
+ * teisingas" - tai VIENKARTINĖ vėliava. Ši funkcija atsako „ar priklausomybė
+ * veikia DABAR", ir būtent to reikalauja #181 („readiness rodo, kad
+ * autentikacijos priklausomybė neveikia"). Be jos DB, nukritusi PO starto,
+ * paliktų `/api/ready` atsakinėjantį 200, nors kiekviena autentifikuota
+ * užklausa jau gauna 503.
+ *
+ * ⚠️ FAIL-CLOSED IR BE IŠIMČIŲ. Grąžinama `false` bet kokiu neapibrėžtumo
+ * atveju: startas nebaigtas, jungiklis netinkamas, užklausa krito. Funkcija
+ * NIEKADA nemeta - readiness endpoint'as privalo atsakyti visada, net kai
+ * atsakymas yra „neparuošta".
+ *
+ * ⚠️ KLAIDOS TEKSTAS NELOGINAMAS. `pg` pranešime gali būti vartotojo vardas
+ * (`password authentication failed for user "x"`), o readiness kviečiamas
+ * kiekvieno probe - tai būtų nuolatinis kredencialų srautas į logus.
+ */
+async function probe(env = process.env) {
+  if (!isReady(env)) return false;
+  try {
+    /**
+     * ⚠️ GRĄŽINTA REIKŠMĖ TIKRINAMA, ne vien išimties nebuvimas.
+     *
+     * `await store.probe(); return true;` paskelbtų saugyklą pasiekiama ir
+     * tada, kai zondas eksplicitiškai atsakė `false` - fail-open, kurio
+     * `try/catch` nepagauna. `=== true` reiškia, kad „pasiekiama" gali ateiti
+     * TIK iš teigiamo atsakymo, ne iš klaidos nebuvimo.
+     */
+    return (await store.probe()) === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Švarus išjungimo kelias - be jo integraciniai testai kabotų su atviromis jungtimis. */
 async function shutdown() {
   if (_pool) {
@@ -262,6 +298,7 @@ module.exports = {
   reconcile,
   shutdown,
   isReady,
+  probe,
   REQUIRED_SESSION_CONSTRAINTS,
 
   get backend() {

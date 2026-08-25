@@ -321,6 +321,26 @@ function createPostgresStore(pool) {
     return { patikrinta, revokuota };
   }
 
+  /**
+   * READINESS ZONDAS - GYVA priklausomybės būsena, ne starto vėliava.
+   *
+   * ⚠️ STARTO VĖLIAVOS NEPAKANKA (#181, „SESSION STORE GEDIMAS = FAIL-CLOSED":
+   * „readiness rodo, kad autentikacijos priklausomybė neveikia").
+   *
+   * `sessionReconcile` užsidega vieną kartą per startą ir daugiau nebekinta.
+   * Jei DB nukrenta VĖLIAU, kiekviena cookie autentikuota užklausa gauna 503,
+   * o `/api/ready` be šio zondo toliau atsakinėtų 200 - orkestruotojas siųstų
+   * srautą į konteinerį, kuriame autentikacija neveikia.
+   *
+   * Klaida NEGAUDOMA čia: fail-closed sprendimą priima vienas kvietėjas
+   * (`sessionStore.probe()`), kad „pasiekiama" negalėtų atsirasti iš tylaus
+   * `catch` viduryje.
+   */
+  async function probe() {
+    await pool.query("SELECT 1");
+    return true;
+  }
+
   return {
     backend: "postgres",
     create,
@@ -330,6 +350,7 @@ function createPostgresStore(pool) {
     destroyAllForUserId,
     sweepExpired,
     size,
+    probe,
     reconcile,
   };
 }

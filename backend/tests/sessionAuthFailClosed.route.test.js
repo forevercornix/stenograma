@@ -8,6 +8,12 @@ process.env.RATE_LIMIT_LOGIN_IP_MAX = "500";
 process.env.RATE_LIMIT_LOGIN_ACCOUNT_MAX = "500";
 process.env.RATE_LIMIT_MAX_REQUESTS = "500";
 process.env.RATE_LIMIT_GENERAL_MAX = "500";
+/**
+ * ⚠️ NUSTATOMA PRIEŠ `require("../server")`: `READINESS_TIMEOUT_MS` nuskaitomas
+ * modulio įkėlimo metu. Trumpa riba reikalinga „kabančio zondo" testui - su
+ * numatytomis 2 s jis lėtintų kiekvieną paleidimą.
+ */
+process.env.READINESS_TIMEOUT_MS = "300";
 
 const { hashPassword } = require("../utils/credentials");
 
@@ -758,5 +764,181 @@ test("PLIKAS TOKEN'AS: SUPPORT-BUNDLE artefaktuose jo nėra", async () => {
   const isvestis = `${vykdymas.stdout || ""}\n${vykdymas.stderr || ""}`;
   assert.ok(isvestis.includes("Stenograma doctor"), "prielaida: doctor realiai sugeneravo ataskaitą");
   beTokeno(isvestis, token, "scripts/doctor.js išvestis");
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * READINESS ATSPINDI SESIJŲ AUTORITETO GYVĄ BŪSENĄ
+ *
+ * #181: „Užklausa atmetama kontroliuojama klaida, o READINESS RODO, kad
+ * autentikacijos priklausomybė neveikia."
+ *
+ * ⚠️ STARTO VĖLIAVA TO NEPADARO. `readiness.sessionReconcile` užsidega kartą
+ * per startą; nukritus DB vėliau, kiekviena cookie autentikuota užklausa gauna
+ * 503, o `/api/ready` be gyvo zondo toliau sakytų 200 - orkestruotojas
+ * konteinerį laikytų sveiku ir siųstų į jį srautą.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Saugykla, kurios zondas krinta; visa kita veikia normaliai. */
+function saugyklaSuKritusiuZondu(zondas) {
+  return {
+    backend: "postgres",
+    create: async () => {
+      throw new Error("nenaudojama");
+    },
+    touch: async () => null,
+    destroy: async () => false,
+    destroyAllForUser: async () => 0,
+    destroyAllForUserId: async () => 0,
+    sweepExpired: async () => 0,
+    size: async () => 0,
+    probe: zondas,
+  };
+}
+
+test("READINESS: veikianti sesijų saugykla → 200 ir sessionStoreReachable=true", async () => {
+  const res = await request(app).get("/api/ready");
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ready, true);
+  assert.equal(
+    res.body.components.sessionStoreReachable,
+    true,
+    "atminties režime priklausomybės nėra - zondas visada teigiamas"
+  );
+});
+
+test("READINESS: nepasiekiama sesijų saugykla → 503, nors visa kita paruošta", async () => {
+  /**
+   * ⚠️ TIKRINAMA, KAD BŪTENT SESIJŲ SAUGYKLA APVERTĖ SPRENDIMĄ.
+   *
+   * Be `jobStore`/`jobRunner`/`workerAlive` patikrų testas praeitų ir tada, jei
+   * 503 ateitų iš visai kitos priežasties, o naujasis komponentas readiness
+   * sprendime nedalyvautų.
+   */
+  const grazinti = sessionStore._setStoreForTests(
+    saugyklaSuKritusiuZondu(async () => {
+      throw new Error("connect ETIMEDOUT");
+    })
+  );
+  try {
+    const res = await request(app).get("/api/ready");
+
+    assert.equal(res.status, 503, "readiness privalo rodyti, kad autentikacijos priklausomybė neveikia");
+    assert.equal(res.body.ready, false);
+    assert.equal(res.body.components.sessionStoreReachable, false);
+
+    assert.equal(res.body.components.jobStore, true, "kiti komponentai lieka paruošti");
+    assert.equal(res.body.components.jobRunner, true);
+    assert.equal(res.body.components.sessionReconcile, true);
+    assert.equal(res.body.components.workerAlive, true);
+  } finally {
+    grazinti();
+  }
+});
+
+test("READINESS: kabantis zondas NEPAKABINA /api/ready - riba baigtinė", async () => {
+  /**
+   * ⚠️ READINESS PRIVALO ATSAKYTI VISADA, net kai atsakymas yra „neparuošta".
+   *
+   * Zondas, kuris niekada neišsisprendžia (tyliai numestas TCP srautas), be
+   * `withTimeout` paliktų orkestruotoją laukiantį vietoj aiškaus 503.
+   */
+  const grazinti = sessionStore._setStoreForTests(
+    saugyklaSuKritusiuZondu(() => new Promise(() => {}))
+  );
+  try {
+    const pradzia = Date.now();
+    const res = await request(app).get("/api/ready");
+    const trukmeMs = Date.now() - pradzia;
+
+    assert.equal(res.status, 503);
+    assert.equal(res.body.components.sessionStoreReachable, false);
+    assert.ok(trukmeMs < 5000, `readiness privalo grįžti su riba, o ne kabėti (truko ${trukmeMs} ms)`);
+  } finally {
+    grazinti();
+  }
+});
+
+test("READINESS: zondas, grąžinęs `false`, taip pat reiškia NEPARUOŠTA", async () => {
+  /**
+   * Fail-closed reiškia, kad `true` atsiranda TIK po sėkmingo zondo. Realizacija,
+   * kuri tikrintų vien išimtis (`try/catch`), praleistų `false` ir paskelbtų
+   * konteinerį sveiku.
+   */
+  const grazinti = sessionStore._setStoreForTests(saugyklaSuKritusiuZondu(async () => false));
+  try {
+    const res = await request(app).get("/api/ready");
+    assert.equal(res.status, 503);
+    assert.equal(res.body.components.sessionStoreReachable, false);
+  } finally {
+    grazinti();
+  }
+});
+
+test("READINESS: PostgreSQL režimas be baigto suderinimo → NEPARUOŠTA", async () => {
+  /**
+   * `probe()` privalo remtis IR `isReady()` vėliava: kol startinis suderinimas
+   * nebaigtas, sesijų autoritetas nėra paruoštas, net jei DB atsakinėja.
+   */
+  const buvoUrl = process.env.DATABASE_URL;
+  process.env.SESSION_STORE_BACKEND = "postgres";
+  process.env.DATABASE_URL = buvoUrl || "postgres://neveikia:1@127.0.0.1:1/none";
+  try {
+    assert.equal(await sessionStore.probe(), false, "nebaigtas startas = nepasiekiama");
+
+    const res = await request(app).get("/api/ready");
+    assert.equal(res.status, 503);
+    assert.equal(res.body.components.sessionStoreReachable, false);
+  } finally {
+    delete process.env.SESSION_STORE_BACKEND;
+    if (!buvoUrl) delete process.env.DATABASE_URL;
+    assert.equal(await sessionStore.probe(), true, "atminties režimu zondas vėl teigiamas");
+  }
+});
+
+test("TAPATYBĖ: ištuštintas AUTH_USERS revokuoja sesiją su stabiliu userId", async () => {
+  /**
+   * ⚠️ CODEX P1 REGRESIJA.
+   *
+   * Atminties backend'as praleisdavo tapatybės patikrą, kai `AUTH_USERS`
+   * tuščias - t. y. kai pašalinamas PASKUTINIS vartotojas. Bendras backend'ų
+   * scenarijus tai tikrina abiem realizacijoms; čia papildomai tikrinamas
+   * fasado kelias, kuriuo naudojasi produkcija.
+   */
+  await sessionStore._clearForTests();
+  const env = { AUTH_USERS: `admin:administrator:${hashPassword("x")}:${ADMIN_ID}` };
+  const { token } = await sessionStore.create(
+    { id: ADMIN_ID, username: "admin", role: "administrator" },
+    env
+  );
+  assert.ok(await sessionStore.touch(token, env), "prielaida: sesija galioja");
+
+  assert.equal(
+    await sessionStore.touch(token, { AUTH_USERS: "" }),
+    null,
+    "pašalinus visus vartotojus, sesija privalo būti atmesta"
+  );
+  assert.notEqual(
+    sessionStore._getByTokenForTests(token).revokedAt,
+    null,
+    "atmetimas privalo būti loginė revokacija, ne vienkartinis `null`"
+  );
+  await sessionStore._clearForTests();
+});
+
+test("TAPATYBĖ: sesija BE userId lieka legacy tolerancijoje", async () => {
+  /**
+   * #181 leidžia `userId: null` toleranciją TIK atminties backend'ui. Be šio
+   * testo F1 pataisymas galėtų tyliai išplisti ir į legacy fixture'us, ir
+   * kiekvienas senas testas kristų be aiškios priežasties.
+   */
+  await sessionStore._clearForTests();
+  const { token } = await sessionStore.create({ username: "senas", role: "operator" }, { AUTH_USERS: "" });
+
+  const session = await sessionStore.touch(token, { AUTH_USERS: "" });
+  assert.ok(session, "sesija be stabilaus ID netikrinama prieš AUTH_USERS");
+  assert.equal(session.userId, null);
+  assert.equal(session.username, "senas", "vardas lieka tas, su kuriuo ji sukurta");
+  await sessionStore._clearForTests();
 });
 
