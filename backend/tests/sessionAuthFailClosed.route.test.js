@@ -942,3 +942,44 @@ test("TAPATYBĖ: sesija BE userId lieka legacy tolerancijoje", async () => {
   await sessionStore._clearForTests();
 });
 
+test("POOL: sesijų jungtis turi BAIGTINES ribas - jungimuisi IR užklausoms", () => {
+  /**
+   * ⚠️ `connectionTimeoutMillis` VIENAS NEPAKANKA.
+   *
+   * Jis galioja tik jungties gavimui. `pg` numatytieji `statement_timeout` ir
+   * `query_timeout` yra NERIBOTI, tad serveris, priėmęs jungtį ir nustojęs
+   * atsakinėti (arba `UPDATE`, laukiantis užrakto), paliktų `touch()` kaboti
+   * amžinai - o #181 reikalauja, kad „PostgreSQL NEGALI patikrinti būsenos
+   * (timeout, connection, query klaida) → 503". Kabanti užklausa 503 niekada
+   * nesukelia.
+   *
+   * Tikrinami NUSTATYMAI, o ne `new Pool(...)` vidus: pastarasis testui
+   * nepasiekiamas, ir vienintelis likęs įrodymas būtų šaltinio teksto paieška.
+   * Elgesio pusę - kad riba realiai suveikia - tikrina
+   * `sessionPersistence.integration` su `pg_sleep()`.
+   */
+  const n = sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "postgres://x/y" });
+
+  for (const raktas of ["connectionTimeoutMillis", "statement_timeout", "query_timeout"]) {
+    assert.equal(typeof n[raktas], "number", `${raktas} privalo būti skaičius`);
+    assert.ok(Number.isFinite(n[raktas]) && n[raktas] > 0, `${raktas} privalo būti baigtinis ir teigiamas`);
+  }
+
+  /** Konfigūruojama, bet be tylaus virtimo begalybe prie šiukšlinės reikšmės. */
+  const senas = process.env.DB_QUERY_TIMEOUT_MS;
+  try {
+    process.env.DB_QUERY_TIMEOUT_MS = "1500";
+    assert.equal(sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x" }).query_timeout, 1500);
+
+    process.env.DB_QUERY_TIMEOUT_MS = "abc";
+    assert.equal(
+      sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x" }).query_timeout,
+      5000,
+      "netinkama reikšmė grįžta į saugią numatytąją, o ne į neribotą laukimą"
+    );
+  } finally {
+    if (senas === undefined) delete process.env.DB_QUERY_TIMEOUT_MS;
+    else process.env.DB_QUERY_TIMEOUT_MS = senas;
+  }
+});
+

@@ -863,3 +863,38 @@ test("GLOBALI REVOKACIJA: ATSKIRAME procese atlikta revokacija matoma ir čia", 
   }
 });
 
+test("POOL: užklausų riba REALIAI nutraukia kabantį sakinį", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ELGESIO PUSĖ, ne nustatymų.
+   *
+   * `sessionAuthFailClosed.route` tikrina, kad ribos baigtinės; čia tikrinama,
+   * kad jos SUVEIKIA. Be jų `pg` lauktų neribotai, ir #181 reikalaujamas
+   * „timeout → 503" kelias niekada nebūtų pasiektas - užklausa tiesiog kabotų.
+   *
+   * `pg_sleep(30)` imituoja serverį, kuris jungtį priėmė, bet sakinio
+   * nebaigia. Riba nustatoma ta pačia funkcija, kurią naudoja produkcinis
+   * `initializePostgres()`, tad testas krinta, jei ji nustotų jas grąžinti.
+   */
+  const ctx = await paruostiDb("session_query_timeout");
+  const sessionStore = require("../utils/sessionStore");
+  const nustatymai = sessionStore.sesijuPoolNustatymai({ DATABASE_URL: ctx.url });
+  const ribotas = new Pool({ ...nustatymai, statement_timeout: 500, query_timeout: 500 });
+  ctx.resursai.registruoti("ribotas pool", () => ribotas.end());
+  try {
+    const pradzia = Date.now();
+    await assert.rejects(
+      () => ribotas.query("SELECT pg_sleep(30)"),
+      /timeout|canceling statement/i,
+      "kabantis sakinys privalo būti nutrauktas, ne laukiamas neribotai"
+    );
+    const trukmeMs = Date.now() - pradzia;
+    assert.ok(trukmeMs < 10_000, `riba privalo suveikti greitai (truko ${trukmeMs} ms)`);
+
+    /** Ta pati jungtis po nutraukimo lieka naudotina - pool'as nesugadintas. */
+    const { rows } = await ribotas.query("SELECT 1 AS x");
+    assert.equal(rows[0].x, 1);
+  } finally {
+    await ctx.resursai.isvalyti();
+  }
+});
+

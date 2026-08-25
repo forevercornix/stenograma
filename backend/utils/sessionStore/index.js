@@ -92,14 +92,51 @@ function connectTimeoutMs() {
   return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
 }
 
+/**
+ * ⚠️ UŽKLAUSŲ RIBA ATSKIRAI NUO PRISIJUNGIMO RIBOS.
+ *
+ * `connectionTimeoutMillis` galioja TIK jungties gavimui. Jei serveris jungtį
+ * priima, bet nustoja atsakinėti (arba `UPDATE` laukia užrakto), `pg`
+ * numatytieji `statement_timeout` ir `query_timeout` yra NERIBOTI - `create`,
+ * `touch` ir `destroy` liktų kaboti amžinai.
+ *
+ * Pasekmės būtų tiesiogiai priešingos #181 reikalavimui: „cookie YRA, bet
+ * PostgreSQL NEGALI patikrinti būsenos (timeout, connection, query klaida) →
+ * 503". Be ribos `catch` blokas NIEKADA nesuveikia, tad 503 neatsiranda -
+ * užklausa tiesiog kabo, o pakartotiniai autentikacijos, readiness ir valymo
+ * kvietimai palaipsniui užima visą pool'ą.
+ *
+ * Du parametrai, ne vienas: `statement_timeout` nutraukia darbą SERVERIO
+ * pusėje (atlaisvina užraktus), `query_timeout` - KLIENTO pusėje (apsaugo, jei
+ * serveris nebeatsako apskritai). Ta pati pora ir tos pačios numatytosios
+ * reikšmės kaip `utils/startupChecks.js` diagnostikos jungtyje.
+ */
+function queryTimeoutMs() {
+  const raw = Number(process.env.DB_QUERY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
+}
+
+/**
+ * Sesijų pool'o nustatymai VIENOJE vietoje.
+ *
+ * Iškelta iš `initializePostgres()`, kad ribų buvimą būtų galima patikrinti be
+ * tikros DB: `new Pool(...)` viduje jos liktų nepasiekiamos testui, ir
+ * vienintelis įrodymas būtų šaltinio teksto paieška (AGENTS.md §9.2).
+ */
+function sesijuPoolNustatymai(env = process.env) {
+  return {
+    connectionString: env.DATABASE_URL,
+    connectionTimeoutMillis: connectTimeoutMs(),
+    statement_timeout: queryTimeoutMs(),
+    query_timeout: queryTimeoutMs(),
+  };
+}
+
 async function initializePostgres(env) {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
 
-  const pool = new Pool({
-    connectionString: env.DATABASE_URL,
-    connectionTimeoutMillis: connectTimeoutMs(),
-  });
+  const pool = new Pool(sesijuPoolNustatymai(env));
 
   try {
     await pool.query("SELECT 1");
@@ -299,6 +336,7 @@ module.exports = {
   shutdown,
   isReady,
   probe,
+  sesijuPoolNustatymai,
   REQUIRED_SESSION_CONSTRAINTS,
 
   get backend() {

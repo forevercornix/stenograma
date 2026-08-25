@@ -171,10 +171,24 @@ vartotojo job'us ir audito įrašus nuo jo paskyros. Skriptas apie tai įspėja,
 įpratimas paleisti jį be argumentų yra pagrindinė šio srauto klaida.
 
 `memory` režime restartas išvalo sesijas, tad senas slaptažodis nebeveikia iš
-karto. `postgres` režime sesijos restartą **išgyvena**, bet slaptažodžio maiša
-sesijoje nesaugoma: prieigą atima tik vartotojo pašalinimas ar rolės keitimas
-`AUTH_USERS` (žr. 4 skyrių). Rotuojant slaptažodį ir norint atjungti esamus
-seansus, `userId` turi būti pakeistas arba vartotojas laikinai pašalintas.
+karto. `postgres` režime sesijos restartą **išgyvena**, o slaptažodžio maiša
+sesijoje nesaugoma – tad slaptažodžio pakeitimas pats savaime esamų seansų
+NENUTRAUKIA.
+
+⚠️ **`userId` KEISTI NEGALIMA – NET IR SEANSAMS ATJUNGTI.**
+`docs/decisions/0001-stable-user-identity.md` tai draudžia tiesiogiai: pakeistas
+ketvirtas laukas yra NAUJA tapatybė, tad vartotojo job'ai ir audito įrašai
+atsietų nuo jo paskyros, o eilėje laukiantys darbai kristų kaip `ACTOR_UNKNOWN`.
+Rotacija privalo naudoti `hash-password.js --user-id <esamas-uuid>` (žr. aukščiau).
+
+**Kaip atjungti esamus seansus IŠSAUGANT stabilų ID:** laikinai pašalinti
+vartotojo įrašą iš `AUTH_USERS`, perkrauti (startinis suderinimas revokuoja jo
+sesijas), tada grąžinti įrašą su **tuo pačiu `userId`** ir perkrauti dar kartą.
+Tapatybė nesikeičia, tad job'ai ir auditas lieka pririšti prie jos.
+
+⚠️ Tai vienintelis šiandien palaikomas operatoriaus kelias. `destroyAllForUserId()`
+saugykloje egzistuoja ir yra teisingas revokacijos primityvas, bet
+administracinio endpoint'o jam dar nėra – žr. „Ko šis modelis NEAPIMA".
 
 **`API_KEY` rotacija:** pakeisti reikšmę ir perkrauti. Senas raktas nustoja
 veikti nedelsiant; sesijos nenukenčia.
@@ -257,4 +271,7 @@ Sąžiningumo dėlei – ribos, kurios lieka atviros:
   Konfigūracijos perkrovimo mechanizmo nėra; `touch()` tikrina rolę prieš gyvą
   `AUTH_USERS` tik tam, kad procese, kuris naują konfigūraciją jau turi, negalėtų
   išlikti sesija su pasenusia role.
+- **Administracinio sesijų revokacijos endpoint'o nėra.** `destroyAllForUserId()`
+  yra saugykloje, bet jo neiškviečia nė vienas maršrutas; seansams atjungti
+  operatorius naudoja `AUTH_USERS` + restartą (žr. 5 skyrių).
 - **MFA nėra.**

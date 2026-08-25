@@ -300,8 +300,27 @@ export async function login(username, password) {
   return data;
 }
 
+/**
+ * Atsijungimas.
+ *
+ * ⚠️ NESĖKMĖ PRIVALO BŪTI MATOMA KVIETĖJUI (#155, 7.3).
+ *
+ * Ankstesnė versija ignoravo `res.ok` ir visada grįždavo tyliai. Po 7.3
+ * serveris grąžina `503 SESSION_STORE_UNAVAILABLE`, kai revokacijos įrašyti
+ * nepavyksta – ir SĄMONINGAI NEIŠVALO cookie, nes ji tebegalioja. Nutylėjus tą
+ * atsakymą, UI parodytų „atsijungta", o bearer token'as liktų naršyklėje ir vėl
+ * imtų veikti DB atsistačius: vartotojui pasakyta viena, o realybė kita.
+ */
 export async function logout() {
-  await fetch(`${BACKEND_URL}/api/auth/logout`, { method: "POST", ...WITH_SESSION });
+  const res = await fetch(`${BACKEND_URL}/api/auth/logout`, { method: "POST", ...WITH_SESSION });
+
+  const data = await readJsonResponse(res, "Atsijungti nepavyko.");
+
+  if (!res.ok) {
+    throw new ApiError(data.error || "Atsijungti nepavyko.", res.status, data.code);
+  }
+
+  return data;
 }
 
 /**
