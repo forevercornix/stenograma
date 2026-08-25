@@ -267,6 +267,65 @@ describe("#18 PR4: rolėmis grįsta sąsaja", () => {
     expect(screen.getByText(/Originalas \(visi duomenys\)/i)).toBeInTheDocument();
   });
 
+  it("ATSIJUNGIMAS: nepavykusi revokacija NEPERJUNGIA į anoniminę būseną", async () => {
+    /**
+     * ⚠️ REGRESIJA, KURIĄ ŠIS TESTAS UŽDARO (#155, 7.3).
+     *
+     * Po 7.3 serveris grąžina `503 SESSION_STORE_UNAVAILABLE`, kai sesijos
+     * revokuoti nepavyksta, ir SĄMONINGAI NEIŠVALO cookie – ji tebegalioja.
+     * `logout()` ignoravo `res.ok`, o `handleLogout` turėjo `.catch(() => {})`
+     * ir vis tiek nustatydavo anoniminę būseną: vartotojui parodoma
+     * „atsijungta", o bearer token'as lieka naršyklėje ir vėl ima veikti DB
+     * atsistačius.
+     *
+     * Tikrinama, kad UI LIEKA prisijungęs ir parodo klaidą – ne kad kvietimas
+     * įvyko.
+     */
+    global.fetch = vi.fn((url) => {
+      const target = url.toString();
+      if (target.includes("/api/auth/logout")) {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          headers: jsonHeaders(),
+          json: () =>
+            Promise.resolve({
+              error: "Sesijų saugykla nepasiekiama.",
+              code: "SESSION_STORE_UNAVAILABLE",
+            }),
+        });
+      }
+      if (target.includes("/api/auth/me")) {
+        return Promise.resolve({ ok: true, status: 200, headers: jsonHeaders(), json: () => Promise.resolve(ADMIN) });
+      }
+      if (target.includes("/api/ready")) {
+        return Promise.resolve({ ok: true, status: 200, headers: jsonHeaders(), json: () => Promise.resolve({ status: "ok" }) });
+      }
+      if (target.includes("/api/health")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: jsonHeaders(),
+          json: () => Promise.resolve({ status: "ok", llmProvider: "mock" }),
+        });
+      }
+      return Promise.reject(new Error(`Netikėtas URL: ${target}`));
+    });
+
+    render(<App />);
+    await screen.findByTestId("current-user");
+
+    fireEvent.click(screen.getByRole("button", { name: /atsijungti/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Sesija TEBEGALIOJA/i)).toBeInTheDocument();
+    });
+
+    /** Prisijungimo forma NEATSIRADO - vartotojas tebėra autentifikuotas. */
+    expect(screen.queryByLabelText("Vartotojo vardas")).not.toBeInTheDocument();
+    expect(screen.getByTestId("current-user")).toBeInTheDocument();
+  });
+
   it("ATSIJUNGIMAS grąžina į prisijungimo formą", async () => {
     global.fetch = vi.fn((url) => {
       const target = url.toString();

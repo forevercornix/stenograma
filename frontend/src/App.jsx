@@ -406,7 +406,29 @@ export default function Stenograma() {
   };
 
   const handleLogout = async () => {
-    await logoutRequest().catch(() => {});
+    /**
+     * ⚠️ NEPAVYKUSI REVOKACIJA NEGALI ATRODYTI KAIP ATSIJUNGIMAS (#155, 7.3).
+     *
+     * Serveris grąžina 503, kai sesijos revokuoti nepavyko, ir cookie tada
+     * LIEKA galiojanti. Ankstesnis `.catch(() => {})` tą atsakymą nurydavo ir
+     * vis tiek perjungdavo UI į anoniminę būseną – vartotojas manytų, kad
+     * atsijungė, o credential'as liktų naršyklėje ir vėl veiktų DB atsistačius.
+     *
+     * Todėl klaidos atveju tapatybė NEIŠVALOMA: vartotojas lieka prisijungęs ir
+     * mato, kad atsijungti nepavyko.
+     */
+    try {
+      await logoutRequest();
+    } catch (e) {
+      setError(
+        e.status === 503
+          ? "Atsijungti nepavyko: sesijų saugykla nepasiekiama. Sesija TEBEGALIOJA - bandykite dar kartą."
+          : `Atsijungti nepavyko: ${e.message}`
+      );
+      return;
+    }
+
+    setError("");
     setUser(null);
     setAuthState("anonymous");
     setSessionExpired(false);

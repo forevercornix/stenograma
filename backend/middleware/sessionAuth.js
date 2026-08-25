@@ -55,12 +55,19 @@ function readCookie(req, name) {
  * `Secure` - TIK produkcijoje: lokaliam HTTP kūrimui priverstinis Secure
  * reikštų, kad cookie niekada nebūtų išsiųsta, ir prisijungimas tyliai
  * neveiktų.
+ *
+ * ⚠️ COOKIE REIKŠMĖ YRA BEARER TOKEN'AS, NE `session.id` (#155, 7.3).
+ *
+ * Iki 7.3 abi reikšmės sutapo. Su persistentine schema `session.id` yra DB
+ * pirminis raktas: jį įrašius į cookie, saugoma reikšmė taptų paslaptimi ir
+ * hash-only garantija dingtų. Parametras pavadintas `token`, kad kvietėjas
+ * negalėtų perduoti `session.id` nepastebėdamas.
  */
-function setSessionCookie(res, sessionId, maxAgeMs) {
+function setSessionCookie(res, token, maxAgeMs) {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   res.setHeader(
     "Set-Cookie",
-    `${COOKIE_NAME}=${encodeURIComponent(sessionId)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(
+    `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(
       maxAgeMs / 1000
     )}${secure}`
   );
@@ -82,11 +89,49 @@ function unauthorized(res) {
 }
 
 /**
+ * SESIJŲ SAUGYKLOS GEDIMAS - ATSKIRAS ATSAKYMAS NUO 401 (#155, 7.3).
+ *
+ * ⚠️ TAI DRAUDIMAS, NE PATOGUMAS. Kai PostgreSQL yra sesijų autoritetas, DB
+ * timeout ar prisijungimo klaida NEGALI virsti „sesijos nėra": `catch { return
+ * null; }` paverstų gedimą TYLIU neautorizavimu, neatskiriamu nuo neprisijungusio
+ * kliento, o `optionalSession` atveju - ANONIMINIU vykdymu, t. y. nukreiptų
+ * autentifikuotą užklausą į kitą autorizacijos šaką.
+ *
+ * 503 yra teisingas kodas: priklausomybė neveikia, būsena nežinoma, bandykite
+ * vėliau. 401 tvirtintų, kad vartotojas neprisijungęs - o to mes nežinome.
+ */
+function sessionStoreUnavailable(res) {
+  return res.status(503).json({
+    error: "Sesijų saugykla nepasiekiama. Bandykite dar kartą po kelių sekundžių.",
+    code: "SESSION_STORE_UNAVAILABLE",
+  });
+}
+
+/**
+ * Sesijų autoritetas dar nepasiruošęs (PostgreSQL režimas prieš startinį
+ * suderinimą). Tas pats atsakymas kaip gedimui: būsena nežinoma.
+ */
+function sessionAuthorityNotReady(res) {
+  return res.status(503).json({
+    error: "Sesijų autoritetas dar inicializuojamas. Bandykite dar kartą po kelių sekundžių.",
+    code: "SESSION_STORE_UNAVAILABLE",
+  });
+}
+
+/**
  * PRIVALOMA sesija – naudoti maršrutuose, kuriems būtinas žinomas vartotojas.
  */
 async function requireSession(req, res, next) {
-  const sessionId = readCookie(req, COOKIE_NAME);
-  const session = await sessionStore.touch(sessionId);
+  if (!sessionStore.isReady()) return sessionAuthorityNotReady(res);
+
+  const token = readCookie(req, COOKIE_NAME);
+
+  let session;
+  try {
+    session = await sessionStore.touch(token);
+  } catch {
+    return sessionStoreUnavailable(res);
+  }
 
   if (!session) return unauthorized(res);
 
@@ -106,8 +151,31 @@ async function requireSession(req, res, next) {
  * vartotoją, jei jis yra, bet nereikalauti to.
  */
 async function optionalSession(req, res, next) {
-  const sessionId = readCookie(req, COOKIE_NAME);
-  const session = await sessionStore.touch(sessionId);
+  const token = readCookie(req, COOKIE_NAME);
+
+  /**
+   * ⚠️ SEMANTIKA PRIKLAUSO NUO TO, AR KLIENTAS PATEIKĖ CREDENTIAL'Ą.
+   *
+   *  - cookie NĖRA → tęsiama su `req.user = null` (esamas kontraktas);
+   *  - cookie YRA, bet sesija negalioja → tęsiama su `req.user = null`;
+   *  - cookie YRA, bet būsenos PATIKRINTI NEGALIMA → 503.
+   *
+   * Trečias atvejis negali virsti pirmuoju: DB gedimas paverstų autentifikuotą
+   * užklausą anonimine ir nukreiptų ją į kitą autorizacijos šaką.
+   */
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+
+  if (!sessionStore.isReady()) return sessionAuthorityNotReady(res);
+
+  let session;
+  try {
+    session = await sessionStore.touch(token);
+  } catch {
+    return sessionStoreUnavailable(res);
+  }
 
   req.user = session
     ? { id: session.userId || null, username: session.username, role: session.role }
@@ -120,6 +188,7 @@ async function optionalSession(req, res, next) {
 module.exports = {
   requireSession,
   optionalSession,
+  sessionStoreUnavailable,
   setSessionCookie,
   clearSessionCookie,
   readCookie,

@@ -8,6 +8,12 @@ const auditRoute = require("./routes/audit");
 const exportsRoute = require("./routes/exports");
 const jobsRoute = require("./routes/jobs");
 const authRoute = require("./routes/auth");
+/**
+ * ⚠️ MODULIO LYGYJE, ne `startServer()` viduje: `/api/ready` zondas kviečia
+ * `sessionStore.probe()` KIEKVIENOS užklausos metu, tad nuoroda turi egzistuoti
+ * ir tada, kai `startServer()` šiame procese nevykdomas (testai, embedded).
+ */
+const sessionStore = require("./utils/sessionStore");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
@@ -63,7 +69,15 @@ app.use("/api", generalApiLimiter);
 // užklausas, readiness jau true. Šie flag'ai + requireJobSystemReady middleware yra
 // DEFENSE-IN-DEPTH: jei kada startup keistųsi (init po listen), job endpointai vis tiek
 // grąžintų 503, ne kurtų jobų nesuderintoje sistemoje.
-const readiness = { jobStore: false, jobRunner: false };
+/**
+ * ⚠️ TREČIA VĖLIAVA: `sessionReconcile` (#155, 7.3).
+ *
+ * Startinis sesijų suderinimas su `AUTH_USERS` yra READINESS BARJERAS, ne fono
+ * darbas: tame lange persistentinė sesija su ATŠAUKTA role dar autorizuotų
+ * užklausas. Vėliavos AUTORITETAS yra `sessionStore.isReady()` - čia laikoma
+ * kopija skirta `/api/ready` išvesčiai.
+ */
+const readiness = { jobStore: false, jobRunner: false, sessionReconcile: false };
 app.locals.readiness = readiness; // route failai gali tikrinti be ciklinės priklausomybės
 
 function requireJobSystemReady(req, res, next) {
@@ -141,6 +155,33 @@ async function probeRuntimeReadiness() {
   let redisReachable = true;
   let workers = { transcription: true, protocol: true };
 
+  /**
+   * SESIJŲ AUTORITETO GYVA BŪSENA (#155, 7.3; #181 „SESSION STORE GEDIMAS").
+   *
+   * ⚠️ `readiness.sessionReconcile` YRA STARTO VĖLIAVA, NE SVEIKATA. Ji
+   * užsidega kartą ir nebekinta. Nukritus DB po starto, sesijų middleware
+   * grąžina 503 kiekvienai cookie autentikuotai užklausai, o `/api/ready` be
+   * šio zondo toliau sakytų 200 - orkestruotojas laikytų konteinerį sveiku ir
+   * siųstų į jį srautą, kuriame neveikia autentikacija.
+   *
+   * ⚠️ FAIL-CLOSED PAGAL NUTYLĖJIMĄ: `false` tampa `true` TIK po sėkmingo ir
+   * laiku grąžinusio zondo. Atminties režime zondas visada teigiamas, tad
+   * elgesys nesikeičia.
+   *
+   * Riba ta pati kaip Redis keliui - readiness privalo atsakyti VISADA, net jei
+   * priklausomybė kabo (žr. `withTimeout` komentarą žemiau).
+   */
+  let sessionStoreReachable = false;
+  try {
+    sessionStoreReachable = await withTimeout(
+      sessionStore.probe(),
+      READINESS_TIMEOUT_MS,
+      "sesijų saugykla"
+    );
+  } catch {
+    sessionStoreReachable = false;
+  }
+
   if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
     let conn = null;
     try {
@@ -164,15 +205,19 @@ async function probeRuntimeReadiness() {
     }
   }
 
-  return { redisReachable, workers };
+  return { redisReachable, workers, sessionStoreReachable };
 }
 
 app.get("/api/ready", pollRateLimiter, async (req, res) => {
-  const initReady = readiness.jobStore && readiness.jobRunner;
+  const initReady = readiness.jobStore && readiness.jobRunner && readiness.sessionReconcile;
   if (!initReady) {
     return res.status(503).json({
       ready: false,
-      components: { jobStore: readiness.jobStore, jobRunner: readiness.jobRunner },
+      components: {
+        jobStore: readiness.jobStore,
+        jobRunner: readiness.jobRunner,
+        sessionReconcile: readiness.sessionReconcile,
+      },
     });
   }
 
@@ -182,18 +227,20 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
   // ir protokolo worker'iai gali būti ATSKIRI procesai/konteineriai, žr.
   // utils/workerHeartbeat.js) - kitaip jobai būtų priimami, bet liktų queued, nes
   // niekas jų neapdoroja. Inline režime nieko papildomo (viskas tame pačiame procese).
-  const { redisReachable, workers } = await probeRuntimeReadiness();
+  const { redisReachable, workers, sessionStoreReachable } = await probeRuntimeReadiness();
   const workerAlive = workers.transcription && workers.protocol;
 
-  const ready = initReady && redisReachable && workerAlive;
+  const ready = initReady && redisReachable && workerAlive && sessionStoreReachable;
   res.status(ready ? 200 : 503).json({
     ready,
     components: {
       jobStore: readiness.jobStore,
       jobRunner: readiness.jobRunner,
+      sessionReconcile: readiness.sessionReconcile,
       redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
       workerAlive,    // BullMQ režime: true TIK jei ABU worker tipai gyvi; inline - visada true
       workers,        // detali būsena PER TIPĄ - kuri konkrečiai eilė (jei kuri) neturi gyvo worker'io
+      sessionStoreReachable, // GYVA sesijų autoriteto būsena; atmintyje - visada true
     },
   });
 });
@@ -293,6 +340,30 @@ async function startServer({ port, listen, onStep } = {}) {
   readiness.jobStore = true;
 
   /**
+   * 1b. SESIJŲ AUTORITETAS - PRIEŠ `app.listen()`.
+   *
+   * ⚠️ VIEN READINESS MIDDLEWARE NEPAKANKA. `authRoute` prijungtas be
+   * `requireJobSystemReady`, tad middleware sprendimas paliktų
+   * `/api/auth/login` landą į pusiau inicijuotą sesijų saugyklą. Todėl
+   * `init()` + schemos/invariantų validacija + `AUTH_USERS` suderinimas
+   * PRIVALO būti sėkmingai baigti čia; readiness vėliava lieka
+   * defense-in-depth, ne pakaitalas.
+   *
+   * ⚠️ SUDERINIMO KLAIDA REIŠKIA, KAD `listen` NEKVIEČIAMAS APSKRITAI.
+   * Klaida keliama į viršų ir `startServer()` nutrūksta - dalinis suderinimas
+   * negali virsti aptarnaujamu srautu.
+   */
+  await sessionStore.init();
+  step("sessionStore.init");
+  const suderinimas = await sessionStore.reconcile();
+  step("sessionStore.reconcile");
+  readiness.sessionReconcile = true;
+  log.info(
+    `Sesijų saugykla: ${sessionStore.backend} ` +
+      `(suderinta ${suderinimas.patikrinta}, revokuota ${suderinimas.revokuota})`
+  );
+
+  /**
    * 2. Job runner.
    *
    * ⚠️ EILĖS PASIRINKIMAS ATSIETAS NUO METADUOMENŲ BACKEND'O (#155, 7.2a).
@@ -366,4 +437,5 @@ app.startServer = startServer; // testams ir programiniam paleidimui
 app._setReadyForTests = (value = true) => {
   readiness.jobStore = value;
   readiness.jobRunner = value;
+  readiness.sessionReconcile = value;
 };

@@ -78,9 +78,39 @@ naujas leidimas be eksplicitinio priskyrimo yra uždaras.
 Du limitai yra nepriklausomi. Absoliutus reikalingas todėl, kad vien idle
 langas leistų sesijai gyventi neribotai, jei ji nuolat naudojama.
 
-⚠️ **Sesijos saugomos tik atmintyje, viename procese.** Serverio restartas
-atjungia visus vartotojus, o kelios backend replikos sesijomis nesidalintų.
-Tai tinka pilotui; keliems replikams saugykla turės pereiti į Redis.
+### Sesijų saugykla: atmintis arba PostgreSQL (#155, 7.3)
+
+| Nuostata | Numatyta | Ką reiškia |
+|---|---|---|
+| `SESSION_STORE_BACKEND` | `memory` | `memory` arba `postgres`. Nežinoma reikšmė **stabdo startą**, ne virsta numatytąja |
+
+⚠️ **Jungiklis EKSPLICITINIS.** Vien `DATABASE_URL` sesijų režimo **nekeičia** –
+jis gali būti įvestas dėl migracijų ar audito, ir neturi netikėtai perjungti
+autentifikacijos. `SESSION_STORE_BACKEND` yra **atskiras** nuo
+`JOB_STORE_BACKEND`: job metaduomenų perkėlimas į PostgreSQL ir sesijų
+persistencija yra du nesusiję sprendimai.
+
+`SESSION_STORE_BACKEND=postgres` reikalauja `DATABASE_URL` ir paleistų
+migracijų (`npm run migrate:up`). Trūkstama `sessions` lentelė arba trūkstamas
+laiko invariantas **nutraukia startą** – grįžimo į atmintį nėra, nes jis tyliai
+atimtų globalią revokaciją.
+
+| | `memory` | `postgres` |
+|---|---|---|
+| Išgyvena restartą | ne | **taip** |
+| Kelios replikos | ne | **taip** |
+| Atsijungimas galioja kitame procese | ne | **taip** |
+| Reikia `DATABASE_URL` | ne | **taip** |
+
+**Paleidimo tvarka.** `sessionStore.init()`, schemos invariantų patikra ir
+startinis `AUTH_USERS` suderinimas baigiami **prieš** `app.listen()`. Kol jie
+nebaigti, kiekvienas sesiją liečiantis maršrutas grąžina `503`
+`SESSION_STORE_UNAVAILABLE` – niekada `401`. Nepavykęs suderinimas reiškia, kad
+serveris srauto **nepriima apskritai**.
+
+⚠️ **Cutover: esamos sesijos NEPERKELIAMOS.** Perjungus į `postgres`, visi
+prisijungia iš naujo. Atminties sesijos gyvena tik proceso viduje, tad jų
+migracija būtų token'ų perrašymas be jokio saugumo pagrindo.
 
 ---
 
@@ -88,9 +118,32 @@ Tai tinka pilotui; keliems replikams saugykla turės pereiti į Redis.
 
 | Ką norite pasiekti | Ką daryti | Poveikis |
 |---|---|---|
-| Atjungti vieną seansą | Vartotojas spaudžia „Atsijungti" | Ta sesija nebegalioja iš karto |
+| Atjungti vieną seansą | Vartotojas spaudžia „Atsijungti" | Ta sesija nebegalioja iš karto – **ir visuose procesuose**, jei backend'as `postgres` |
 | **Atimti prieigą visam laikui** | Pašalinti įrašą iš `AUTH_USERS` + restartas | Visos sesijos nebegalioja; **eilėje laukiantys darbai nutraukiami** |
-| Sumažinti teises | Pakeisti rolę `AUTH_USERS` + restartas | Naujos užklausos ribojamos; **eilėje laukiantys darbai su per aukšta teise nutraukiami** |
+| Sumažinti teises | Pakeisti rolę `AUTH_USERS` + restartas | Sesijos su senu rolės snapshot'u nutraukiamos; **eilėje laukiantys darbai su per aukšta teise nutraukiami** |
+
+⚠️ **RESTARTAS TEBĖRA BŪTINAS, ir tai ne redakcinė smulkmena.** `AUTH_USERS`
+skaitomas iš proceso aplinkos, o veikiančio proceso aplinkos kintamojo pakeisti
+iš išorės negalima – konfigūracijos perkrovimo mechanizmo šis projektas neturi
+(žr. 5 skyrių). Todėl operatoriaus procedūra yra ir lieka „pakeisti `AUTH_USERS`
++ perkrauti".
+
+⚠️ **Ką 7.3 realiai pakeitė:** kiekvienas `touch()` tikrina `user_id` ir rolę
+prieš **tuo metu galiojantį** `AUTH_USERS`, ne prieš sesijoje įrašytą
+snapshot'ą. Nauda dvejopa:
+
+- **nėra lango tarp starto ir suderinimo** – net jei sesija bandoma panaudoti
+  anksčiau, nei baigtas startinis suderinimas, ji vis tiek tikrinama;
+- **pasenusi rolė negali išgyventi** – persistentinė sesija po restarto neša
+  seną rolės snapshot'ą, ir be šios patikros ji autorizuotų senomis teisėmis.
+
+Startinis suderinimas papildomai revokuoja sesijas, kurių niekas nenaudojo tarp
+konfigūracijos pakeitimo ir perkrovimo, kad jos nebūtų aptinkamos tik pirmo
+panaudojimo metu.
+
+⚠️ **Atšaukta sesija NEIŠTRINAMA iš karto.** Ji saugoma iki savo `expires_at`,
+kad būtų galima atsakyti, ar cookie buvo **atšaukta**, ar jos **niekada
+nebuvo**. Po `expires_at` retencija ją pašalina kartu su pasibaigusiomis.
 
 **Asinchroniniai darbai:** teisės **perskaičiuojamos vykdymo metu**, ne
 užšaldomos kuriant darbą. Jobai gali laukti eilėje valandas – per tą laiką
@@ -117,8 +170,25 @@ node scripts/hash-password.js <vardas> <rolė> --user-id <esamas-uuid>
 vartotojo job'us ir audito įrašus nuo jo paskyros. Skriptas apie tai įspėja, bet
 įpratimas paleisti jį be argumentų yra pagrindinė šio srauto klaida.
 
-Restartas išvalo sesijas, tad senas slaptažodis nebeveikia iš karto – atskiro
-„revoke all sessions" veiksmo nereikia.
+`memory` režime restartas išvalo sesijas, tad senas slaptažodis nebeveikia iš
+karto. `postgres` režime sesijos restartą **išgyvena**, o slaptažodžio maiša
+sesijoje nesaugoma – tad slaptažodžio pakeitimas pats savaime esamų seansų
+NENUTRAUKIA.
+
+⚠️ **`userId` KEISTI NEGALIMA – NET IR SEANSAMS ATJUNGTI.**
+`docs/decisions/0001-stable-user-identity.md` tai draudžia tiesiogiai: pakeistas
+ketvirtas laukas yra NAUJA tapatybė, tad vartotojo job'ai ir audito įrašai
+atsietų nuo jo paskyros, o eilėje laukiantys darbai kristų kaip `ACTOR_UNKNOWN`.
+Rotacija privalo naudoti `hash-password.js --user-id <esamas-uuid>` (žr. aukščiau).
+
+**Kaip atjungti esamus seansus IŠSAUGANT stabilų ID:** laikinai pašalinti
+vartotojo įrašą iš `AUTH_USERS`, perkrauti (startinis suderinimas revokuoja jo
+sesijas), tada grąžinti įrašą su **tuo pačiu `userId`** ir perkrauti dar kartą.
+Tapatybė nesikeičia, tad job'ai ir auditas lieka pririšti prie jos.
+
+⚠️ Tai vienintelis šiandien palaikomas operatoriaus kelias. `destroyAllForUserId()`
+saugykloje egzistuoja ir yra teisingas revokacijos primityvas, bet
+administracinio endpoint'o jam dar nėra – žr. „Ko šis modelis NEAPIMA".
 
 **`API_KEY` rotacija:** pakeisti reikšmę ir perkrauti. Senas raktas nustoja
 veikti nedelsiant; sesijos nenukenčia.
@@ -177,6 +247,10 @@ Prieš viešą diegimą:
 - [ ] `CORS_ORIGIN` nurodytas konkrečiai, ne `*`
 - [ ] Sesijų trukmės atitinka jūsų politiką
 - [ ] `AUDIT_API_KEY` nustatytas arba prieiga per administratoriaus sesiją
+- [ ] `SESSION_STORE_BACKEND` pasirinktas sąmoningai (`postgres` reikalauja
+      `DATABASE_URL` ir paleistų migracijų)
+- [ ] Perjungiant į `postgres`: naudotojai įspėti, kad reikės prisijungti iš
+      naujo (esamos sesijos neperkeliamos)
 
 ---
 
@@ -190,5 +264,31 @@ Sąžiningumo dėlei – ribos, kurios lieka atviros:
 - **Registracijos ir vartotojų valdymo UI nėra** – tik `AUTH_USERS` ir
   restartas.
 - **Slaptažodžio keitimo srauto nėra** – tik per konfigūraciją.
-- **Kelių replikų sesijos nepalaikomos** – saugykla tik atmintyje.
+- **Kelių replikų sesijos** veikia tik su `SESSION_STORE_BACKEND=postgres`;
+  numatytoji atminties saugykla lieka viename procese.
+- **Vartotojų saugyklos DB nėra** – `AUTH_USERS` tebėra konfigūracijoje, tad
+  vartotojų sąrašo keitimas reikalauja aplinkos pakeitimo **ir restarto**.
+  Konfigūracijos perkrovimo mechanizmo nėra; `touch()` tikrina rolę prieš gyvą
+  `AUTH_USERS` tik tam, kad procese, kuris naują konfigūraciją jau turi, negalėtų
+  išlikti sesija su pasenusia role.
+- **Administracinio sesijų revokacijos endpoint'o nėra.** `destroyAllForUserId()`
+  yra saugykloje, bet jo neiškviečia nė vienas maršrutas; seansams atjungti
+  operatorius naudoja `AUTH_USERS` + restartą (žr. 5 skyrių).
+- **PostgreSQL sesijos Docker Compose profiliuose neaktyvuojamos.**
+  `SESSION_STORE_BACKEND=postgres` reikalauja `DATABASE_URL`, o oficialūs
+  GPU/server profiliai sąmoningai naudoja `PG*` kintamuosius ir nurodo
+  `DATABASE_URL` palikti tuščią (`.env.example`), be to `postgres` nėra
+  backend'o `depends_on` ir profiliai neturi restart politikos. Persistentinės
+  sesijos šiandien diegiamos tik ten, kur `DATABASE_URL` nustatomas
+  eksplicitiškai. Tas pats apribojimas nuo 7.2a galioja ir
+  `JOB_STORE_BACKEND=postgres`, tad tai ne 7.3 įvesta regresija.
+
+  ⚠️ **Sprendimas NEKEISTI to 7.3 metu yra sąmoningas, ne praleidimas.** #181
+  Docker profilių nemini nė karto (§7.1 ir §7.4 juos mini eksplicitiškai, tad
+  tyla §7.3 yra pasirinkimas), o `PG*` priėmimas pažeistų jo kriterijų
+  „pasirinkus `postgres`, `DATABASE_URL` privalomas". Prieš įjungiant
+  persistentines sesijas Docker'yje reikia atskiro sprendimo: arba profiliai
+  gauna `DATABASE_URL` ir `depends_on: postgres` su `condition: service_healthy`,
+  arba backend'o parinkimas išmoksta `PG*` – pastarasis reikalautų pakeisti
+  #181 priėmimo kriterijų.
 - **MFA nėra.**

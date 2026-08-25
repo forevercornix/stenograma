@@ -71,13 +71,15 @@ async function išvalyti() {
 }
 
 /**
- * @param {string} kryptis
+ * @param {string} kryptis komanda su neprivalomu kiekiu, pvz. `"up"` arba `"up 2"`.
+ *   ⚠️ Skaidoma per tarpą: `execFileSync` argumentų NESKAIDO, tad `"up 2"`
+ *   nueitų kaip VIENAS argumentas ir CLI jo neatpažintų.
  * @param {string} [dir] – migracijų katalogas. Numatytai repo `migrations/`.
  */
 function migrate(kryptis = "up", dir) {
   return execFileSync(
     "npx",
-    ["node-pg-migrate", kryptis, ...(dir ? ["-m", dir] : [])],
+    ["node-pg-migrate", ...kryptis.split(/\s+/).filter(Boolean), ...(dir ? ["-m", dir] : [])],
     {
       cwd: ŠAKNIS,
       env: { ...process.env, DATABASE_URL: DB_URL },
@@ -334,6 +336,100 @@ test(
       if (buves === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = buves;
       fs.rmSync(tevine, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "#155 7.3 STARTAS: REQUIRED_SESSION_CONSTRAINTS apima VISUS `sessions` invariantus",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ TAS PATS MODELIS KAIP `REQUIRED_JOB_CONSTRAINTS` (#155, 7.2a).
+     *
+     * Ten dalinis sąrašas praleido tris invariantus, ir tai pastebėjo tik
+     * peržiūra. Narystės patikra po vieną tikrintų tik APATINĘ ribą: sąrašas
+     * galėtų būti trumpesnis už schemą, ir startas praleistų DB, kurioje
+     * sesijų laiko invariantų nėra.
+     *
+     * Todėl sąrašas IŠVEDAMAS iš šviežiai migruotos DB ir lyginamas
+     * `deepEqual` - naujas `CHECK` migracijoje be įrašo sąraše krinta iškart.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const { REQUIRED_SESSION_CONSTRAINTS } = require("../utils/sessionStore");
+    const pool = new Pool({ connectionString: DB_URL });
+
+    try {
+      const { rows } = await pool.query(
+        `SELECT c.conname
+           FROM pg_constraint c
+           JOIN pg_class t     ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE t.relname = 'sessions'
+            AND n.nspname = current_schema()
+            AND c.contype = 'c'`
+      );
+
+      assert.deepEqual(
+        rows.map((r) => r.conname).sort(),
+        [...REQUIRED_SESSION_CONSTRAINTS].sort(),
+        "migracijų sukurtų sesijų CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
+      );
+    } finally {
+      await pool.end();
+    }
+  }
+);
+
+test(
+  "#155 7.3 MIGRACIJA: atnaujinimas iš PRIEŠ-7.3 schemos sukuria `sessions` su invariantais",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ ŠVARIOS DB TESTO NEPAKANKA.
+     *
+     * `node-pg-migrate` praleidžia failą pagal VARDĄ, tad jau migruotoje DB
+     * pakeista SENA migracija nebūtų pritaikyta: „tuščia DB → pilna schema"
+     * praeitų, o egzistuojanti DB liktų be `sessions` - tyliai, nes antras
+     * `migrate:up` teisėtai yra no-op. Tai jau įvyko #155 darbe (#200).
+     *
+     * Todėl tikrinamas būtent ATNAUJINIMO kelias: pirma pakeliama schema iki
+     * 7.2b būsenos (dvi migracijos), tada paleidžiamas likęs `up`.
+     */
+    await perkurtiDb();
+
+    /** Iki 7.3: `jobs` + `job_results` ir runtime pariteto sugriežtinimas. */
+    migrate("up 2");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const { rows: pries } = await pool.query(
+        `SELECT to_regclass(current_schema() || '.sessions') AS yra`
+      );
+      assert.equal(pries[0].yra, null, "prielaida: prieš 7.3 sesijų lentelės nėra");
+
+      migrate("up");
+
+      const { REQUIRED_SESSION_CONSTRAINTS } = require("../utils/sessionStore");
+      const { rows } = await pool.query(
+        `SELECT c.conname
+           FROM pg_constraint c
+           JOIN pg_class t     ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE t.relname = 'sessions'
+            AND n.nspname = current_schema()
+            AND c.contype = 'c'`
+      );
+
+      assert.deepEqual(
+        rows.map((r) => r.conname).sort(),
+        [...REQUIRED_SESSION_CONSTRAINTS].sort(),
+        "atnaujinta DB privalo gauti VISUS sesijų invariantus, ne tik lentelę"
+      );
+    } finally {
+      await pool.end();
     }
   }
 );

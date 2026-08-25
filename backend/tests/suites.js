@@ -121,6 +121,24 @@ const security = [
   "jobLifecycleDocumentation",
   "criticalGuarantees.route",
   "authFoundation",
+  /** #155, 7.3: bearer token'as, SHA-256 maiša ir uždara `schemaVersion` aibė. */
+  "sessionTokenHash",
+  /**
+   * #155, 7.3: sesijų gedimo semantika per tikrą HTTP.
+   *
+   * ⚠️ 503 vs 401 skirtumas yra visa šio kriterijaus esmė: `catch { return
+   * null; }` paverstų DB gedimą tyliu neautorizavimu.
+   */
+  "sessionAuthFailClosed.route",
+  /**
+   * #155, 7.3: sesijų backend'ų kontrakto ekvivalentumas.
+   *
+   * ⚠️ REGISTRUOTAS IR `postgres` RINKINYJE. `security` paleidžia atminties
+   * adapterį kiekviename `npm test`; `postgres` - PostgreSQL adapterį su tikru
+   * `DATABASE_URL`. Failas, likęs tik viename, tikrintų vieną backend'ą iš
+   * dviejų, o divergencija būtų būtent ta, kurios niekas nemato.
+   */
+  "sessionStoreBackendContract.integration",
   "rbac.route",
   "workerAuthorization",
   "authRoutes.route",
@@ -222,6 +240,14 @@ const postgres = [
    * žingsnyje teisėtai praleidžiami, nes `REDIS_URL` čia nėra.
    */
   "jobStoreBackendContract.integration",
+  /** #155, 7.3: bendras sesijų scenarijų rinkinys - PostgreSQL adapteris. */
+  "sessionStoreBackendContract.integration",
+  /**
+   * #155, 7.3: garantijos, kurių atmintyje NĖRA - hash-only saugojimas, DB
+   * laiko invariantai, viena sąlyginė autentikacijos užklausa, revokacija
+   * tarp procesų ir startinis suderinimas.
+   */
+  "sessionPersistence.integration",
 ];
 
 module.exports = {

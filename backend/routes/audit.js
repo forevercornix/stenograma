@@ -4,7 +4,7 @@ const auditAuth = require("../middleware/auditAuth");
 const { pollRateLimiter } = require("../middleware/rateLimiter");
 const { validate, schemas } = require("../middleware/validate");
 const sessionStore = require("../utils/sessionStore");
-const { readCookie, COOKIE_NAME } = require("../middleware/sessionAuth");
+const { readCookie, COOKIE_NAME, sessionStoreUnavailable } = require("../middleware/sessionAuth");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 
 const router = express.Router();
@@ -25,10 +25,25 @@ const router = express.Router();
  * `x-audit-key` yra atskira paslaptis, kurios jam neturi būti duota.
  */
 async function auditAccess(req, res, next) {
-  const sessionId = readCookie(req, COOKIE_NAME);
+  const token = readCookie(req, COOKIE_NAME);
 
-  if (sessionId) {
-    const session = await sessionStore.touch(sessionId);
+  if (token) {
+    /**
+     * ⚠️ SESIJŲ SAUGYKLOS GEDIMAS NEKRENTA Į `x-audit-key` ŠAKĄ (#155, 7.3).
+     *
+     * Fallback žemiau reiškia „sesijos nėra arba ji neturi teisės". DB gedimo
+     * atveju to nežinome, tad kritimas toliau paverstų nepatikrinamą sesiją
+     * kitokia autorizacijos šaka.
+     */
+    if (!sessionStore.isReady()) return sessionStoreUnavailable(res);
+
+    let session;
+    try {
+      session = await sessionStore.touch(token);
+    } catch {
+      return sessionStoreUnavailable(res);
+    }
+
     if (session && hasPermission(session.role, PERMISSIONS.AUDIT_READ)) {
       req.user = { username: session.username, role: session.role };
       return next();
