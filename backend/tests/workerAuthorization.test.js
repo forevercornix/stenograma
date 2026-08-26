@@ -29,6 +29,7 @@ const request = require("supertest");
 const jobStore = require("../utils/jobStore");
 const auditLog = require("../utils/auditLog");
 const { PERMISSIONS } = require("../utils/permissions");
+const { beKomentaru } = require("../utils/auditEvents");
 const { authorizeJobExecution, resolveCurrentRole, DENY_REASON } = require("../utils/jobAuthorization");
 const app = require("../server");
 app._setReadyForTests();
@@ -201,12 +202,12 @@ test("API RAKTAS: netinkama API_KEY_ROLE reikšmė yra FAIL-CLOSED", () => {
 
 test("AUDITAS: atmestas vykdymas fiksuojamas BE kredencialų", async () => {
   const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const job = { actor: "dinges-vartotojas", actorSource: "session", actorRole: "operator" };
-  authorizeJobOrAudit(job, "job_testinis", PERMISSIONS.JOB_CREATE);
+  await authorizeJobOrAudit(job, "job_testinis", PERMISSIONS.JOB_CREATE);
 
-  const nauji = auditLog.getAll().slice(before);
+  const nauji = (await auditLog.getAll()).slice(before);
   const denied = nauji.find((e) => e.event === "JOB_EXECUTION_DENIED");
 
   assert.ok(denied, "atmestas vykdymas turi būti audituojamas - kitaip jis atrodo kaip techninis gedimas");
@@ -239,10 +240,78 @@ test("STRUKTŪRA: abu vykdymo keliai naudoja TĄ PAČIĄ autorizacijos funkciją
      */
     assert.match(
       source,
-      /const\s+decision\s*=\s*authorizeJobOrAudit\(/,
-      `${file} turi REALIAI iškviesti autorizaciją vykdymo metu`
+      /**
+       * ⚠️ `await` YRA DALIS REIKALAVIMO NUO 7.4a (#210).
+       *
+       * ⚠️ `const` NEPRIVALOMAS, `await` - PRIVALOMAS. `queues/jobRunner.js`
+       * naudoja `let decision;` + `try/catch`, nes blokuojantis auditas gali
+       * atmesti, ir inline kelias privalo job'ą perkelti į terminalią būseną
+       * (`AUDIT_UNAVAILABLE`). Deklaracijos forma nesvarbi; svarbu, kad
+       * kvietimas būtų su argumentais IR laukiamas.
+       *
+       * `authorizeJobOrAudit()` tapo async, nes `JOB_EXECUTION_DENIED` yra
+       * BLOKUOJANTIS audito įvykis. Be `await` kvietimas grąžintų Promise,
+       * `decision.allowed` būtų `undefined`, ir job'as būtų nutrauktas kaip
+       * neautorizuotas - arba, blogiau, praeitų. Šablonas sugriežtintas, ne
+       * susilpnintas: dabar reikalaujama IR kvietimo su argumentais, IR laukimo.
+       */
+      /(?:const\s+)?decision\s*=\s*await\s+authorizeJobOrAudit\(/,
+      `${file} turi REALIAI iškviesti IR palaukti autorizacijos vykdymo metu`
     );
     assert.match(source, /AUTHORIZATION_REVOKED/, `${file} turi pažymėti jobą kaip nutrauktą`);
+
+    /**
+     * ⚠️ TRIPWIRE, NE ELGSENOS ĮRODYMAS (AGENTS.md §9.2).
+     *
+     * Tikrinamos abi NUTRAUKIMO šakos - audito/autorizacijos klaida ir
+     * atšauktos teisės. Jos grįžta anksčiau nei bendras `finally`, tad turi
+     * pačios: (a) padaryti VIENĄ terminalų perėjimą ir (b) atlaisvinti
+     * šaltinio audio.
+     *
+     * ELGSENĄ dengia `auditAsyncCutover` testai, bet TIK inline kelyje: BullMQ
+     * šakai reikia Redis, tad jos elgsena šioje aplinkoje lieka nepatikrinta.
+     * Ši patikra saugo nuo to, kad du keliai išsiskirtų tyliai.
+     *
+     * ⚠️ Anksčiuojamasi prie KONKREČIOS šakos, ne prie failo. Pirmoji versija
+     * skaičiavo `_cleanupStorage` kiekį visame faile ir mutacijos NEPAGAVO:
+     * įprasti sėkmės ir nesėkmės keliai valymą kviečia savaime.
+     */
+    const svarus = beKomentaru(source);
+
+    const NUTRAUKIMO_SAKOS = [
+      ["autorizacijos klaida", "const auditoGedimas"],
+      ["atšauktos teisės", "if (!decision.allowed)"],
+    ];
+
+    for (const [pavadinimas, zyme] of NUTRAUKIMO_SAKOS) {
+      const pradzia = svarus.indexOf(zyme);
+      assert.notEqual(pradzia, -1, `${file}: nerasta šaka „${pavadinimas}"`);
+
+      const pabaiga = svarus.indexOf("return;", pradzia);
+      assert.notEqual(pabaiga, -1, `${file}: šaka „${pavadinimas}" be ankstyvo return`);
+
+      const saka = svarus.slice(pradzia, pabaiga);
+
+      /**
+       * ⚠️ LYGIAI VIENAS terminalus perėjimas.
+       *
+       * Antras `finish()` bandytų užbaigti JAU terminalų job'ą, o state machine
+       * tai atmeta - klaida iškiltų PRIEŠ valymą ir `return`, grįžtų į BullMQ
+       * pakartojimų apdorojimą, o šaltinio audio liktų susietas. Būtent tokį
+       * dublikatą paliko skriptinis redagavimas #210 eigoje.
+       */
+      assert.equal(
+        (saka.match(/system\.finish\(/g) || []).length,
+        1,
+        `${file}: šaka „${pavadinimas}" turi daryti LYGIAI VIENĄ terminalų perėjimą`
+      );
+
+      assert.match(
+        saka,
+        /(?:_cleanupStorage|_atlaisvintiSaltini)\(/,
+        `${file}: šaka „${pavadinimas}" grįžta neatlaisvinusi šaltinio audio`
+      );
+    }
   }
 });
 

@@ -52,7 +52,7 @@ test("POST /api/exports - txt eksportas grąžina failą ir įrašo audito įvyk
   assert.equal(res.headers["cache-control"], "no-store");
   assert.ok(res.text.includes("PROTOKOLAS"));
 
-  const events = auditLog.getAll().map((entry) => entry.event);
+  const events = (await auditLog.getAll()).map((entry) => entry.event);
   assert.deepEqual(events, ["EXPORT_STARTED", "EXPORT_COMPLETED"]);
 });
 
@@ -101,7 +101,7 @@ test("POST /api/exports - nežinomas formatas atmetamas be audito įvykio", asyn
   // Vienas validacijos klaidų formatas (#14).
   assert.equal(res.body.code, "VALIDATION_FAILED");
   assert.ok(res.body.details.some((issue) => issue.path === "format"));
-  assert.equal(auditLog.getAll().length, 0, "atmesta užklausa nėra eksporto įvykis");
+  assert.equal((await auditLog.getAll()).length, 0, "atmesta užklausa nėra eksporto įvykis");
 });
 
 test("POST /api/exports - be protocol grąžina 400", async () => {
@@ -118,7 +118,7 @@ test("audito įrašuose NĖRA jokio protokolo turinio ar PII", async () => {
       .send({ variant: "original", format, protocol: protocolWithPII(), jobId: "job-pii" });
   }
 
-  const serialized = JSON.stringify(auditLog.getAll());
+  const serialized = JSON.stringify((await auditLog.getAll()));
 
   for (const [label, value] of Object.entries(PII)) {
     assert.ok(
@@ -156,10 +156,10 @@ test("eksporto įvykiai susieti su jobId pseudonimu - ištrinami kartu su jobu",
     .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: job.id });
 
   const subjectId = auditLog.pseudonymizeIdentifier(job.id);
-  assert.ok(auditLog.getAll().every((entry) => entry.subjectId === subjectId));
+  assert.ok((await auditLog.getAll()).every((entry) => entry.subjectId === subjectId));
 
   assert.equal(await auditLog.removeBySubjectIdentifier(job.id), 2);
-  assert.equal(auditLog.getAll().length, 0);
+  assert.equal((await auditLog.getAll()).length, 0);
 
   await jobStore.system.remove(job.id);
 });
@@ -189,13 +189,13 @@ test("DELETE /api/transcribe-jobs/:id pašalina ir EKSPORTO įvykius", async () 
     .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: job.id });
 
   const subjectId = auditLog.pseudonymizeIdentifier(job.id);
-  assert.equal(auditLog.getAll().filter((e) => e.subjectId === subjectId).length, 2);
+  assert.equal((await auditLog.getAll()).filter((e) => e.subjectId === subjectId).length, 2);
 
   const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
   assert.equal(res.status, 204);
 
   assert.equal(
-    auditLog.getAll().filter((e) => e.subjectId === subjectId).length,
+    (await auditLog.getAll()).filter((e) => e.subjectId === subjectId).length,
     0,
     "eksporto įvykiai turi būti pašalinti kartu su jobu"
   );
@@ -246,7 +246,7 @@ test("eksporto auditas NEsusiejamas su neegzistuojančiu jobId (link=missing)", 
 
   assert.equal(res.status, 200, "eksportas neturi nutrūkti dėl audito ryšio");
 
-  const entries = auditLog.getAll();
+  const entries = (await auditLog.getAll());
   assert.equal(entries.length, 2);
 
   for (const entry of entries) {
@@ -272,8 +272,8 @@ test("eksporto auditas NEsusiejamas su PROTOKOLO jobu (link=invalid_type)", asyn
     .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: protocolJob.id });
 
   assert.equal(res.status, 200);
-  assert.ok(auditLog.getAll().every((e) => e.subjectId === null));
-  assert.ok(auditLog.getAll().every((e) => /link=invalid_type/.test(e.details)));
+  assert.ok((await auditLog.getAll()).every((e) => e.subjectId === null));
+  assert.ok((await auditLog.getAll()).every((e) => /link=invalid_type/.test(e.details)));
 
   await jobStore.system.remove(protocolJob.id);
 });
@@ -292,7 +292,7 @@ test("eksporto auditas SUSIEJAMAS su realiu transkribavimo jobu", async () => {
   assert.equal(res.status, 200);
 
   const subjectId = auditLog.pseudonymizeIdentifier(job.id);
-  const own = auditLog.getAll().filter((e) => e.subjectId === subjectId);
+  const own = (await auditLog.getAll()).filter((e) => e.subjectId === subjectId);
 
   assert.equal(own.length, 2);
   assert.ok(own.every((e) => /link=job/.test(e.details)));
@@ -332,7 +332,7 @@ test("saugyklos klaida atskiriama nuo neegzistuojančio jobo (link=store_error +
     // Eksportas neturi nutrūkti dėl audito ryšio patikros.
     assert.equal(res.status, 200);
 
-    const entries = auditLog.getAll();
+    const entries = (await auditLog.getAll());
     assert.ok(entries.every((e) => /link=store_error/.test(e.details)));
     assert.ok(entries.every((e) => e.subjectId === null));
 
@@ -366,7 +366,7 @@ test("visos link reikšmės yra iš žinomo rinkinio", async () => {
     .send({ variant: "original", format: "txt", protocol: protocolWithPII(), jobId: "nera-tokio" });
 
   const states = new Set(
-    auditLog.getAll().map((entry) => (entry.details.match(/link=(\w+)/) || [])[1])
+    (await auditLog.getAll()).map((entry) => (entry.details.match(/link=(\w+)/) || [])[1])
   );
 
   assert.deepEqual([...states].sort(), ["job", "missing", "none"]);

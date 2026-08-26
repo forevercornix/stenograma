@@ -113,11 +113,11 @@ test("#160 SERVISAS: job'as dingęs tarp sprendimo ir trynimo – FAIL-CLOSED", 
 
 test("#160 AUDITAS: override atskiriamas nuo įprasto savininko trynimo", async () => {
   const job = await svetimasJob();
-  const pries = auditLog.getAll().length;
+  const pries = (await auditLog.getAll()).length;
 
   await adminDeleteJob(job.id, sessionAdmin);
 
-  const nauji = auditLog.getAll().slice(pries);
+  const nauji = (await auditLog.getAll()).slice(pries);
   const override = nauji.find((e) => e.event === ADMIN_EVENT.DELETE_OVERRIDE);
 
   assert.ok(override, "override turi turėti SAVO įvykio tipą");
@@ -130,11 +130,11 @@ test("#160 AUDITAS: NEPAVYKĘS bandymas irgi audituojamas", async () => {
    * juos gauti liktų visiškai nematomi.
    */
   const job = await svetimasJob();
-  const pries = auditLog.getAll().length;
+  const pries = (await auditLog.getAll()).length;
 
   await assert.rejects(() => adminDeleteJob(job.id, sharedPrincipalAdmin), AdminOverrideDenied);
 
-  const nauji = auditLog.getAll().slice(pries);
+  const nauji = (await auditLog.getAll()).slice(pries);
   const denied = nauji.find((e) => e.event === ADMIN_EVENT.ACCESS_DENIED);
 
   assert.ok(denied, "atmestas bandymas turi palikti pėdsaką");
@@ -148,12 +148,12 @@ test("#160 AUDITAS: įrašuose NĖRA job turinio", async () => {
     type: "protocol",
     transcript: "Jonas: slaptas posėdžio turinys apie biudžetą.",
   });
-  const pries = auditLog.getAll().length;
+  const pries = (await auditLog.getAll()).length;
 
   await adminDeleteJob(job.id, sessionAdmin);
   await assert.rejects(() => adminDeleteJob(job.id, sessionUser), AdminOverrideDenied);
 
-  const serialized = JSON.stringify(auditLog.getAll().slice(pries));
+  const serialized = JSON.stringify((await auditLog.getAll()).slice(pries));
   assert.equal(/slaptas posėdžio turinys/.test(serialized), false, "jokio turinio audite");
   assert.equal(serialized.includes(job.id), false, "ir jokio neapdoroto job ID");
 });
@@ -220,21 +220,21 @@ test("#160 SĖKMĖ: kritinė trynimo nesėkmė NEGALI atrodyti kaip sėkmingas o
     type: "transcription",
     storageKey: "audio/neistrinamas.wav",
   });
-  const pries = auditLog.getAll().length;
+  const pries = (await auditLog.getAll()).length;
 
   const result = await suSugedusiaSaugykla((svc) => svc.adminDeleteJob(job.id, sessionAdmin));
 
   assert.equal(result.deleted, false, "nepilnas trynimas nėra sėkmė");
   assert.equal(result.reason, "erasure_incomplete");
 
-  const nauji = auditLog.getAll().slice(pries);
+  const nauji = (await auditLog.getAll()).slice(pries);
   const override = nauji.find((e) => e.event === ADMIN_EVENT.DELETE_OVERRIDE);
   assert.ok(override, "įvykis vis tiek registruojamas");
   assert.equal(override.result, "failure", "bet pažymėtas kaip NESĖKMĖ");
 });
 
 test("#160 SĖKMĖ: našlaičių valymas laikosi tos pačios taisyklės", async () => {
-  const pries = auditLog.getAll().length;
+  const pries = (await auditLog.getAll()).length;
 
   const result = await suSugedusiaSaugykla((svc) =>
     svc.adminCleanupOrphan("nera-tokio-jobo", sessionAdmin)
@@ -244,7 +244,7 @@ test("#160 SĖKMĖ: našlaičių valymas laikosi tos pačios taisyklės", async 
   assert.ok("cleaned" in result, "grąžinamas eksplicitinis sėkmės požymis");
   assert.ok("reason" in result);
 
-  const nauji = auditLog.getAll().slice(pries);
+  const nauji = (await auditLog.getAll()).slice(pries);
   const cleanup = nauji.find((e) => e.event === ADMIN_EVENT.ORPHAN_CLEANUP);
   assert.ok(cleanup);
   assert.equal(

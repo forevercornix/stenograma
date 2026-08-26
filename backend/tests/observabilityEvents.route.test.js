@@ -38,7 +38,7 @@ function captureWarnings(fn) {
 }
 
 test("EKSPORTAS: įvykiai turi STRUKTŪRIZUOTUS variant/format/outcome", async () => {
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const res = await request(app)
     .post("/api/exports")
@@ -46,7 +46,7 @@ test("EKSPORTAS: įvykiai turi STRUKTŪRIZUOTUS variant/format/outcome", async (
 
   assert.equal(res.status, 200);
 
-  const entries = auditLog.getAll().slice(before);
+  const entries = (await auditLog.getAll()).slice(before);
   const started = entries.find((e) => e.event === "EXPORT_STARTED");
   const completed = entries.find((e) => e.event === "EXPORT_COMPLETED");
 
@@ -63,7 +63,7 @@ test("EKSPORTAS: įvykiai turi STRUKTŪRIZUOTUS variant/format/outcome", async (
 });
 
 test("EKSPORTAS: nežinomas formatas atmetamas PRIEŠ pradedant (įvykio nėra)", async () => {
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const res = await request(app)
     .post("/api/exports")
@@ -73,7 +73,7 @@ test("EKSPORTAS: nežinomas formatas atmetamas PRIEŠ pradedant (įvykio nėra)"
 
   // Eksportas neprasidėjo, tad nėra ko fiksuoti. Tai NE nesėkmės kelio testas -
   // žr. kitą testą.
-  const entries = auditLog.getAll().slice(before);
+  const entries = (await auditLog.getAll()).slice(before);
   assert.equal(entries.filter((e) => e.event === "EXPORT_STARTED").length, 0);
 });
 
@@ -113,7 +113,7 @@ test("EKSPORTAS: REALUS nesėkmės kelias turi visus struktūrizuotus laukus", a
     privacyPolicy._resetForTests();
   });
 
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const res = await request(app)
     .post("/api/exports")
@@ -122,7 +122,7 @@ test("EKSPORTAS: REALUS nesėkmės kelias turi visus struktūrizuotus laukus", a
 
   assert.ok(res.status >= 400, `laukta klaidos, gauta ${res.status}`);
 
-  const failed = auditLog.getAll().slice(before).find((e) => e.event === "EXPORT_FAILED");
+  const failed = (await auditLog.getAll()).slice(before).find((e) => e.event === "EXPORT_FAILED");
 
   assert.ok(failed, "nesėkmė turi palikti įvykį");
   assert.equal(failed.format, "txt");
@@ -135,7 +135,7 @@ test("EKSPORTAS: REALUS nesėkmės kelias turi visus struktūrizuotus laukus", a
 });
 
 test("ĮKĖLIMAS: atmetimas fiksuojamas BE failo vardo ir turinio", async () => {
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const { lines } = captureWarnings(() => {});
   void lines;
@@ -157,7 +157,7 @@ test("ĮKĖLIMAS: atmetimas fiksuojamas BE failo vardo ir turinio", async () => 
     console.warn = originalWarn;
   }
 
-  const entries = auditLog.getAll().slice(before);
+  const entries = (await auditLog.getAll()).slice(before);
   const rejected = entries.find((e) => e.event === "UPLOAD_REJECTED");
 
   assert.ok(rejected, "atmestas įkėlimas turi palikti pėdsaką");
@@ -172,7 +172,7 @@ test("ĮKĖLIMAS: atmetimas fiksuojamas BE failo vardo ir turinio", async () => 
 });
 
 test("ĮKĖLIMAS: neleidžiamas formatas taip pat fiksuojamas", async () => {
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const res = await request(app)
     .post("/api/transcribe")
@@ -180,20 +180,20 @@ test("ĮKĖLIMAS: neleidžiamas formatas taip pat fiksuojamas", async () => {
 
   assert.equal(res.status, 400);
 
-  const rejected = auditLog.getAll().slice(before).find((e) => e.event === "UPLOAD_REJECTED");
+  const rejected = (await auditLog.getAll()).slice(before).find((e) => e.event === "UPLOAD_REJECTED");
   assert.ok(rejected);
   assert.equal(rejected.outcome, REASONS.FORMAT);
 });
 
-test("ĮKĖLIMAS: MIME rodomas tik jei atitinka MIME formą", () => {
-  const before = auditLog.getAll().length;
+test("ĮKĖLIMAS: MIME rodomas tik jei atitinka MIME formą", async () => {
+  const before = (await auditLog.getAll()).length;
 
   const captured = [];
   const originalWarn = console.warn;
   console.warn = (...args) => captured.push(args.join(" "));
 
   try {
-    recordRejectedUpload(REASONS.FORMAT, {
+    await recordRejectedUpload(REASONS.FORMAT, {
       route: "/api/transcribe",
       mimetype: "<script>alert(1)</script>" + "A".repeat(300),
     });
@@ -201,7 +201,7 @@ test("ĮKĖLIMAS: MIME rodomas tik jei atitinka MIME formą", () => {
     console.warn = originalWarn;
   }
 
-  const output = JSON.stringify(auditLog.getAll().slice(before)) + captured.join("\n");
+  const output = JSON.stringify((await auditLog.getAll()).slice(before)) + captured.join("\n");
 
   assert.ok(!output.includes("<script>"), "laisvas kliento tekstas negali patekti");
   assert.ok(output.includes("unknown"), "neatpažįstamas MIME pakeičiamas žymeniu");
@@ -215,7 +215,7 @@ test("ĮKĖLIMAS: įvykis susiejamas su jobId, kad GDPR ištrynimas jį pasiekt�
   console.warn = (...args) => captured.push(args.join(" "));
 
   try {
-    recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe", jobId: "job-erasure-test" });
+    await recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe", jobId: "job-erasure-test" });
   } finally {
     console.warn = originalWarn;
   }
@@ -228,12 +228,12 @@ test("ĮKĖLIMAS: trūkstamas failas TAIP PAT fiksuojamas (abu maršrutai)", asy
   // `missing_file` priežastis buvo apibrėžta, bet niekur nekviečiama - dalis
   // atmestų bandymų likdavo be pėdsako, nors mechanizmas deklaruotas bendras.
   for (const route of ["/api/transcribe", "/api/transcribe-jobs"]) {
-    const before = auditLog.getAll().length;
+    const before = (await auditLog.getAll()).length;
 
     const res = await request(app).post(route).send({});
     assert.equal(res.status, 400, `${route} turėjo grąžinti 400`);
 
-    const rejected = auditLog.getAll().slice(before).find((e) => e.event === "UPLOAD_REJECTED");
+    const rejected = (await auditLog.getAll()).slice(before).find((e) => e.event === "UPLOAD_REJECTED");
 
     assert.ok(rejected, `${route}: trūkstamas failas turi palikti įvykį`);
     assert.equal(rejected.outcome, REASONS.MISSING);
@@ -242,7 +242,7 @@ test("ĮKĖLIMAS: trūkstamas failas TAIP PAT fiksuojamas (abu maršrutai)", asy
 });
 
 test("ĮKĖLIMAS: MIME ir dydžio metaduomenys realiai užpildomi", async () => {
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const res = await request(app)
     .post("/api/transcribe")
@@ -250,7 +250,7 @@ test("ĮKĖLIMAS: MIME ir dydžio metaduomenys realiai užpildomi", async () => 
 
   assert.equal(res.status, 400);
 
-  const rejected = auditLog.getAll().slice(before).find((e) => e.event === "UPLOAD_REJECTED");
+  const rejected = (await auditLog.getAll()).slice(before).find((e) => e.event === "UPLOAD_REJECTED");
 
   // Pirmoji versija perduodavo `err.field ? undefined : undefined` - visada
   // undefined, tad audite likdavo mime=unknown. MIME dabar išsaugomas
@@ -259,15 +259,15 @@ test("ĮKĖLIMAS: MIME ir dydžio metaduomenys realiai užpildomi", async () => 
   assert.equal(rejected.route, "/api/transcribe");
 });
 
-test("ĮKĖLIMAS: per didelis failas fiksuoja LIMITĄ, ne tariamą dydį", () => {
-  const before = auditLog.getAll().length;
+test("ĮKĖLIMAS: per didelis failas fiksuoja LIMITĄ, ne tariamą dydį", async () => {
+  const before = (await auditLog.getAll()).length;
 
   const captured = [];
   const originalWarn = console.warn;
   console.warn = (...args) => captured.push(args.join(" "));
 
   try {
-    recordRejectedUpload(REASONS.TOO_LARGE, {
+    await recordRejectedUpload(REASONS.TOO_LARGE, {
       route: "/api/transcribe",
       mimetype: "audio/wav",
       limitBytes: 50 * 1024 * 1024,
@@ -276,7 +276,7 @@ test("ĮKĖLIMAS: per didelis failas fiksuoja LIMITĄ, ne tariamą dydį", () =>
     console.warn = originalWarn;
   }
 
-  const rejected = auditLog.getAll().slice(before).find((e) => e.event === "UPLOAD_REJECTED");
+  const rejected = (await auditLog.getAll()).slice(before).find((e) => e.event === "UPLOAD_REJECTED");
 
   // Faktinio dydžio multer nežino (nutraukia skaitymą peržengęs ribą), tad
   // sąžiningiau fiksuoti limitą nei apsimesti, kad žinom dydį.

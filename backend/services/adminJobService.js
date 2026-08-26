@@ -1,5 +1,5 @@
 const jobStore = require("../utils/jobStore");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 const { eraseOrphanedJobData } = require("../utils/jobErasure");
 const lifecycleService = require("./lifecycleService");
 const { isSessionAdmin } = require("../utils/jobAccessPolicy");
@@ -51,10 +51,14 @@ class AdminOverrideDenied extends Error {
  * matytų tik sėkmingus override'us, o bandymai juos gauti liktų nematomi.
  * Įraše NĖRA jokio job turinio – tik pseudonimas ir aktorius.
  */
-function assertSessionAdmin(actor, operation, jobId) {
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210). `ADMIN_ACCESS_DENIED` yra BLOKUOJANTIS: atmetimas
+ * negali būti grąžintas anksčiau, nei patvirtintas audito įrašas.
+ */
+async function assertSessionAdmin(actor, operation, jobId) {
   if (isSessionAdmin(actor)) return;
 
-  auditLog.record({
+  await rasytiAudita({
     event: ADMIN_EVENT.ACCESS_DENIED,
     jobId,
     actor: actor ? actor.ownerId : null,
@@ -82,7 +86,7 @@ function assertSessionAdmin(actor, operation, jobId) {
  * @param {{ownerId: string|null, ownerKind: string, role: string}} actor
  */
 async function adminDeleteJob(jobId, actor) {
-  assertSessionAdmin(actor, "delete", jobId);
+  await assertSessionAdmin(actor, "delete", jobId);
 
   const job = await jobStore.system.get(jobId);
   if (!job) {
@@ -113,7 +117,7 @@ async function adminDeleteJob(jobId, actor) {
     actor: actor.ownerId,
   });
 
-  auditLog.record({
+  await rasytiAudita({
     event: ADMIN_EVENT.DELETE_OVERRIDE,
     jobId,
     actor: actor.ownerId,
@@ -138,7 +142,7 @@ async function adminDeleteJob(jobId, actor) {
  * ID, galėtų ištrinti svetimus pėdsakus.
  */
 async function adminCleanupOrphan(jobId, actor) {
-  assertSessionAdmin(actor, "orphan_cleanup", jobId);
+  await assertSessionAdmin(actor, "orphan_cleanup", jobId);
 
   const outcome = await eraseOrphanedJobData(jobId, { scope: "system" });
 
@@ -149,7 +153,7 @@ async function adminCleanupOrphan(jobId, actor) {
    */
   const success = !outcome.criticalFailure;
 
-  auditLog.record({
+  await rasytiAudita({
     event: ADMIN_EVENT.ORPHAN_CLEANUP,
     jobId,
     actor: actor.ownerId,
@@ -173,7 +177,7 @@ async function adminCleanupOrphan(jobId, actor) {
  */
 async function desktopCleanupOrphan(jobId, actor) {
   if (!actor || actor.ownerKind !== OWNER_KIND.UNOWNED) {
-    auditLog.record({
+    await rasytiAudita({
       event: ADMIN_EVENT.ACCESS_DENIED,
       jobId,
       actor: actor ? actor.ownerId : null,

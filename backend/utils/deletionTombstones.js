@@ -123,7 +123,7 @@ const ALLOWED_TOMBSTONE_TRANSITIONS = {
  *
  * @param {"deleted"|"deletion_failed"} status
  */
-function complete(jobId, status) {
+function complete(jobId, status, { completedAt = null } = {}) {
   const record = tombstones.get(jobId);
   if (!record) return null;
 
@@ -137,7 +137,11 @@ function complete(jobId, status) {
   record.status = status;
   // `completedAt` nustatomas TIK sėkmės atveju - nepavykęs trynimas neturi
   // apsimesti turintis ištrynimo laiką.
-  record.completedAt = status === TOMBSTONE_STATUS.DELETED ? Date.now() : null;
+  //
+  // Kvietėjas gali perduoti SAVO laiko žymą (#210): `lifecycleService` užbaigia
+  // žymą tik PO audito, tad rezultate ir žymoje turi likti tas pats momentas.
+  record.completedAt =
+    status === TOMBSTONE_STATUS.DELETED ? completedAt || Date.now() : null;
 
   log.info("Ištrynimo žyma užbaigta", { jobId, status });
   return record;

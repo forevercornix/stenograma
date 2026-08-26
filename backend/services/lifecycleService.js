@@ -2,7 +2,7 @@ const { eraseJob } = require("../utils/jobErasure");
 const tombstones = require("../utils/deletionTombstones");
 const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
 const { createLogger } = require("../utils/logger");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 
 const log = createLogger("lifecycle");
 
@@ -252,27 +252,40 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
    * negalima, bet trynimą KARTOTI galima – be to dalinis ištrynimas taptų
    * negrįžtamai neužbaigtas.
    */
-  tombstones.complete(
-    jobId,
+  const zymosBusena =
     status === DELETION_STATUS.DELETED
       ? tombstones.TOMBSTONE_STATUS.DELETED
-      : tombstones.TOMBSTONE_STATUS.FAILED
-  );
+      : tombstones.TOMBSTONE_STATUS.FAILED;
 
-  const finished = tombstones.get(jobId);
+  const completedAt = status === DELETION_STATUS.DELETED ? Date.now() : null;
 
   const result = buildResult({
     jobId,
     status,
     actor,
     requestedAt: marker.requestedAt,
-    completedAt: finished ? finished.completedAt : null,
+    completedAt,
     deleted,
     remaining,
     failures,
   });
 
-  writeAudit(result);
+  /**
+   * ⚠️ AUDITAS RAŠOMAS PRIEŠ ŽYMOS UŽBAIGIMĄ (#210).
+   *
+   * `deleted` yra GALUTINĖ žymos būsena (žr. ALLOWED_TOMBSTONE_TRANSITIONS) -
+   * atgal jos pasukti nebegalima. Jei žymą užbaigtume pirma ir tik tada kristų
+   * auditas, kitas to paties jobo kvietimas `isConfirmedDeleted()` trumpuoju
+   * keliu grąžintų `already_deleted` su `complete: true` ir gyvavimo ciklo
+   * įvykis dingtų NEGRĮŽTAMAI - tyliai, nes atsakymas atrodytų sėkmingas.
+   *
+   * Kritus auditui žyma lieka `deletion_pending`: artefaktų kurti vis dar
+   * negalima, trumpinimo kelio nėra, o pakartotinis kvietimas idempotentiškai
+   * pakartos ir trynimą, ir auditą.
+   */
+  await writeAudit(result);
+
+  tombstones.complete(jobId, zymosBusena, { completedAt });
 
   return result;
 }
@@ -367,31 +380,46 @@ function buildResult({ jobId, status, actor, requestedAt, completedAt, deleted, 
  * ištrynimą ir kuo jis baigėsi – to reikalauja #19 („audit events record
  * deletion request, actor, result and timestamp").
  */
-function writeAudit(result) {
-  try {
-    auditLog.record({
-      event: "LIFECYCLE_DELETION",
-      success: result.complete,
-      outcome: result.status,
-      /**
-       * AKTORIUS PERDUODAMAS EKSPLICITIŠKAI.
-       *
-       * `auditLog.record` turi fallback į užklausos kontekstą (`getActor()`),
-       * bet gyvavimo ciklo servisą galima kviesti IR BE HTTP konteksto –
-       * retencijos valymo, worker'io ar skripto keliais. Tada aktorius tyliai
-       * taptų `null`, ir audito įrašas neatsakytų į klausimą „kas ištrynė".
-       */
-      actor: result.actor || undefined,
-      details:
-        `status=${result.status} deleted=${result.categories.deleted.length} ` +
-        `remaining=${result.categories.remaining.length} ` +
-        `retryable=${result.categories.retryable.length} ` +
-        `nonRetryable=${result.categories.nonRetryable.length}`,
-    });
-  } catch {
-    // Auditas neturi versti ištrynimo nesėkme - duomenys jau pašalinti.
-  }
-
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210 eksplicitiškai įvardija šią funkciją).
+ *
+ * `LIFECYCLE_DELETION` yra BLOKUOJANTIS: gyvavimo ciklo ištrynimas be
+ * patvirtinto audito reikštų asmens duomenų šalinimą be pėdsako.
+ */
+async function writeAudit(result) {
+  /**
+   * ⚠️ AUDITO KLAIDA PROPAGUOJAMA (#155, 7.4a / #210).
+   *
+   * Anksčiau čia buvo `catch {}` su paaiškinimu „duomenys jau pašalinti".
+   * Argumentas suprantamas, bet jis paverčia `LIFECYCLE_DELETION` klasifikaciją
+   * BEPRASME: `utils/auditEvents.js` sako BLOKUOJANTIS, o kodas elgiasi kaip
+   * neblokuojantis. #210 GDPR ištrynimą įvardija blokuojančia šeima -
+   * „klaida arba timeout → veiksmas atmetamas".
+   *
+   * Ištrynimo neatšauksi, bet SĖKMĖS DEKLARAVIMĄ atšaukti galima ir būtina:
+   * kvietėjas gauna klaidą, ištrynimas nelaikomas patvirtintu, o pakartojimas
+   * yra idempotentinis (žr. `tombstones`). Priešingu atveju asmens duomenys
+   * dingtų be jokio pėdsako - būtent tai, ką auditas turi neleisti.
+   */
+  await rasytiAudita({
+    event: "LIFECYCLE_DELETION",
+    success: result.complete,
+    outcome: result.status,
+    /**
+     * AKTORIUS PERDUODAMAS EKSPLICITIŠKAI.
+     *
+     * `auditLog.record` turi fallback į užklausos kontekstą (`getActor()`),
+     * bet gyvavimo ciklo servisą galima kviesti IR BE HTTP konteksto –
+     * retencijos valymo, worker'io ar skripto keliais. Tada aktorius tyliai
+     * taptų `null`, ir audito įrašas neatsakytų į klausimą „kas ištrynė".
+     */
+    actor: result.actor || undefined,
+    details:
+      `status=${result.status} deleted=${result.categories.deleted.length} ` +
+      `remaining=${result.categories.remaining.length} ` +
+      `retryable=${result.categories.retryable.length} ` +
+      `nonRetryable=${result.categories.nonRetryable.length}`,
+  });
   log.info("Gyvavimo ciklo ištrynimas", { status: result.status, complete: result.complete });
 }
 

@@ -14,6 +14,7 @@
  *
  * Būsena rašoma per jobStore (Redis), tad HTTP GET /api/jobs/:id mato progresą.
  */
+const { AuditWriteError } = require("../utils/auditWrite");
 const jobStore = require("../utils/jobStore");
 const jobRunner = require("../queues/jobRunner");
 const { DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
@@ -141,7 +142,58 @@ function createWorker(queueName, processor, workerOptions = {}) {
            * darbas neturi būti įvykdytas – priešingu atveju revokacija
            * negaliotų būtent ten, kur ji svarbiausia.
            */
-          const decision = authorizeJobOrAudit(processingJob, jobId);
+          /**
+           * ⚠️ TA PATI SEMANTIKA KAIP INLINE KELYJE (#155, 7.4a).
+           *
+           * Blokuojantis `JOB_EXECUTION_DENIED` auditas gali atmesti. Be šio
+           * sargo klaida nukristų tiesiai į BullMQ retry mechanizmą, o
+           * išnaudojus bandymus `_handleFailure()` ją klasifikuotų kaip
+           * `internal_error` - tuo tarpu inline kelias tą patį gedimą iškart
+           * užbaigia su `AUDIT_UNAVAILABLE`.
+           *
+           * Rezultatas: išoriškai matoma gedimo priežastis ir bandymų elgesys
+           * skirtųsi TIK pagal tai, ar sukonfigūruotas Redis. Tas pats
+           * domeno sprendimas privalo atrodyti vienodai abiejuose keliuose.
+           */
+          let decision;
+          try {
+            decision = await authorizeJobOrAudit(processingJob, jobId);
+          } catch (error) {
+            /**
+             * ⚠️ GAUDOMA VISKAS, BET ŽYMIMA TIKSLIAI (#210 peržiūra).
+             *
+             * `authorizeJobOrAudit()` meta ir dėl nesuderinamos PERSISTUOTOS
+             * būsenos (nepalaikoma `schemaVersion`, nežinomas `actorSource`) -
+             * dar PRIEŠ bet kokį audito rašymą. Vadinti tai
+             * `AUDIT_UNAVAILABLE` reikštų siųsti operatorių ieškoti audito
+             * infrastruktūros problemos, kurios nėra, o tikrąją priežastį -
+             * duomenų migracijos skolą - paslėpti.
+             *
+             * Terminali būsena garantuojama abiem atvejais; skiriasi tik
+             * `error_code`.
+             */
+            const auditoGedimas = error instanceof AuditWriteError;
+
+            log.error("Autorizacija nepavyko - vykdymas nutraukiamas", {
+              stage: auditoGedimas ? "audit_unavailable" : "authorization_error",
+              jobId,
+              execution: "worker",
+              klaida: error && error.message,
+            });
+            await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+              error_code: auditoGedimas ? "AUDIT_UNAVAILABLE" : "AUTHORIZATION_ERROR",
+              error_message: auditoGedimas
+                ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
+                : "Vykdymas nutrauktas: autorizacijos nepavyko įvertinti.",
+            });
+            /**
+             * ⚠️ ŠALTINIO AUDIO ATLAISVINAMAS. Terminalus job'as be valymo
+             * paliktų įkeltą failą pririštą prie jo, o retencijos valytojas
+             * tokių sąmoningai neliečia, kol nepasibaigia metaduomenys.
+             */
+            await _cleanupStorage(payload, jobId);
+            return;
+          }
 
           if (!decision.allowed) {
             /**
@@ -152,6 +204,18 @@ function createWorker(queueName, processor, workerOptions = {}) {
               error_code: "AUTHORIZATION_REVOKED",
               error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
             });
+            /**
+             * ⚠️ ŠALTINIO AUDIO ATLAISVINAMAS IR ČIA (gretima pataisa, #210
+             * recenzija).
+             *
+             * Anksčiau ši šaka grįždavo be valymo: sąmoningai nutrauktas
+             * vykdymas palikdavo įkeltą failą saugykloje neribotam laikui, nes
+             * retencijos valytojas jo neliečia, kol raktą nurodo gyvas job'o
+             * įrašas (`listReferencedStorageKeys`). Iš išorės matoma baigtis
+             * nesikeičia - job'as ir taip baigiasi ta pačia galutine nesėkme;
+             * suvienodinamas tik resursų valymas su gretima audito gedimo šaka.
+             */
+            await _cleanupStorage(payload, jobId);
             return;
           }
 

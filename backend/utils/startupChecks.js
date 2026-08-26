@@ -158,6 +158,23 @@ function validateConfig(env = process.env) {
   }
 
   /**
+   * AUDITO ĮVYKIŲ KLASIFIKACIJOS PILNUMAS (#155, 7.4a / #210).
+   *
+   * ⚠️ NEKLASIFIKUOTAS ĮVYKIS PRIVALO KRISTI STARTE, NE PIRMO ĮVYKIO METU.
+   *
+   * `utils/auditWrite.js` nežinomam įvykiui meta - tai teisinga, bet gedimas
+   * tada iškiltų tik tada, kai tas įvykis realiai įvyksta (pvz. pirmo GDPR
+   * ištrynimo metu). Startinė patikra perkelia jį į diegimo momentą.
+   *
+   * Tikrinami ir `normalizeEvent()` IŠVEDAMI įvykiai, kurių nė viename call
+   * site'e nėra literalo - statinė paieška jų nerastų.
+   */
+  {
+    const { validateAuditEvents } = require("./auditEvents");
+    for (const klaida of validateAuditEvents()) errors.push(klaida);
+  }
+
+  /**
    * SESIJŲ BACKEND'O JUNGIKLIS (#155, 7.3).
    *
    * ⚠️ TIKRINAMA KARTU SU TIMEOUT'AIS, NE VĖLIAU.

@@ -29,6 +29,8 @@ const { createLogger } = require("../utils/logger");
 const { recordRejectedUpload, reasonFromMulterError, REASONS } = require("../utils/uploadEvents");
 const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
 const { validate, schemas } = require("../middleware/validate");
+const { AuditWriteError } = require("../utils/auditWrite");
+const { auditoGedimas } = require("../utils/auditHttp");
 const log = createLogger("route:transcribe-jobs");
 
 
@@ -78,7 +80,8 @@ const router = express.Router();
 
 
 const upload = createAudioUpload();
-function uploadSingleAudio(req, res, next) {
+/** ⚠️ ASYNC NUO 7.4a: `await recordRejectedUpload()` dabar async (#210). */
+async function uploadSingleAudio(req, res, next) {
   // Priimame IR "audio", IR "file" lauką - vartotojai natūraliai bando abu, o
   // .single("audio") mesdavo "Unexpected field", jei ateidavo "file" (RASTA realiai
   // testuojant). .fields() leidžia abu; normalizuojame į req.file.
@@ -86,10 +89,11 @@ function uploadSingleAudio(req, res, next) {
     { name: "audio", maxCount: 1 },
     { name: "file", maxCount: 1 },
   ]);
-  handler(req, res, (err) => {
+  /** ⚠️ ASYNC NUO 7.4a: `recordRejectedUpload()` dabar async (#210). */
+  handler(req, res, async (err) => {
     if (err) {
       const reason = reasonFromMulterError(err);
-      recordRejectedUpload(reason, {
+      await recordRejectedUpload(reason, {
         route: "/api/transcribe-jobs",
         // MIME išsaugotas fileFilter'yje - multer klaidos objekte jo nėra.
         mimetype: req.uploadObservation && req.uploadObservation.mimetype,
@@ -143,7 +147,7 @@ router.post(
   }
 
   if (!req.file) {
-    recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe-jobs" });
+    await recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe-jobs" });
     return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
   }
 
@@ -164,7 +168,7 @@ router.post(
       const header = Buffer.alloc(64);
       await handle.read(header, 0, header.length, 0);
       if (!detectAudioMagic(header)) {
-        recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe-jobs", mimetype: req.file.mimetype });
+        await recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe-jobs", mimetype: req.file.mimetype });
         return res.status(400).json({ error: "Failo turinys neatitinka palaikomo audio formato (magic bytes)." });
       }
     } finally {
@@ -325,7 +329,22 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
   if (respondToDenial(decision, res)) return;
 
   if (decision === ACCESS_DECISION.ADMIN_DELETE_OVERRIDE) {
-    const result = await adminJobService.adminDeleteJob(req.params.id, actor);
+      /**
+       * ⚠️ BLOKUOJANTIS ADMIN AUDITAS GALI ATMESTI (#155, 7.4a / #210).
+       *
+       * `ADMIN_DELETE_OVERRIDE`, `ADMIN_ORPHAN_CLEANUP` ir `ADMIN_ACCESS_DENIED`
+       * yra blokuojantys. Be šio sargo `AuditWriteError` nukristų į Express
+       * numatytąjį kelią - klientas gautų 500/HTML vietoj dokumentuoto
+       * sanitizuoto `503 AUDIT_WRITE_FAILED`, o ne produkcijoje atsakyme galėtų
+       * atsirasti ir pirminė backend'o klaida iš stack trace.
+       */
+    let result;
+    try {
+      result = await adminJobService.adminDeleteJob(req.params.id, actor);
+    } catch (error) {
+      if (error instanceof AuditWriteError) return auditoGedimas(res, error, "transcribe-jobs admin auditas");
+      throw error;
+    }
     if (result.deleted) return res.status(204).send();
     if (result.reason === "vanished") {
       return res.status(404).json({ error: "Jobas nerastas." });
@@ -340,10 +359,16 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
     decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP ||
     decision === ACCESS_DECISION.DESKTOP_ORPHAN_CLEANUP
   ) {
-    const result =
-      decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP
-        ? await adminJobService.adminCleanupOrphan(req.params.id, actor)
-        : await adminJobService.desktopCleanupOrphan(req.params.id, actor);
+    let result;
+    try {
+      result =
+        decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP
+          ? await adminJobService.adminCleanupOrphan(req.params.id, actor)
+          : await adminJobService.desktopCleanupOrphan(req.params.id, actor);
+    } catch (error) {
+      if (error instanceof AuditWriteError) return auditoGedimas(res, error, "transcribe-jobs admin auditas");
+      throw error;
+    }
     if (!result.cleaned) {
       log.error(
         `NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${result.outcome.errors.join("; ")}`
@@ -387,9 +412,25 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
    * kopijas to paties kodo, ir jos galėjo išsiskirti - būtent tai #19 vadina
    * „single lifecycle service".
    */
-  const result = await lifecycleService.deleteJobArtefacts(job, job.id, {
-    actor: req.authz ? req.authz.actor : null,
-  });
+  /**
+   * ⚠️ IŠTRYNIMO AUDITAS YRA BLOKUOJANTIS, TAD GALI ATMESTI.
+   *
+   * `LIFECYCLE_DELETION` (ir jo viduje `DATA_ERASED`) po 7.4a laukia
+   * patvirtinto įrašo. Be šio sargo `AuditWriteError` nukristų į Express
+   * numatytąjį kelią - klientas gautų 500/HTML vietoj dokumentuoto
+   * `503 AUDIT_WRITE_FAILED`, o ne produkcijoje atsakyme galėtų atsirasti
+   * pirminė backend'o klaida. Administraciniai keliai šį sargą jau turi;
+   * savininko kelias negali būti išimtis (AGENTS.md §16).
+   */
+  let result;
+  try {
+    result = await lifecycleService.deleteJobArtefacts(job, job.id, {
+      actor: req.authz ? req.authz.actor : null,
+    });
+  } catch (error) {
+    if (error instanceof AuditWriteError) return auditoGedimas(res, error, "transcribe-jobs ištrynimo auditas");
+    throw error;
+  }
 
   if (!result.complete) {
     /**

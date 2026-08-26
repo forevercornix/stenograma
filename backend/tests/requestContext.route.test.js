@@ -286,28 +286,34 @@ test("WORKER: kontekstas apima VISĄ vykdymą, ne tik processor()", async () => 
 
 test("AUDITAS: requestId ir actor patenka iš konteksto automatiškai", async () => {
   const auditLog = require("../utils/auditLog");
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   await requestContext.runWithContext(
     { requestId: "req_audito_testas", actor: "key_audito123" },
     async () => {
-      auditLog.record({ jobId: "job-audito-testas", success: true });
+      await auditLog.record({ jobId: "job-audito-testas", success: true });
     }
   );
 
-  const entry = auditLog.getAll().slice(before).pop();
+  const entry = (await auditLog.getAll()).slice(before).pop();
 
   assert.equal(entry.requestId, "req_audito_testas");
   assert.equal(entry.actor, "key_audito123");
 });
 
-test("AUDITAS: eksplicitinės reikšmės turi pirmenybę prieš kontekstą", () => {
+test("AUDITAS: eksplicitinės reikšmės turi pirmenybę prieš kontekstą", async () => {
   // Worker'io retry ir ištrynimo kvitai kartais žino ID geriau nei aplinkinis
   // scope - tad eksplicitinis perdavimas negali būti perrašytas.
   const auditLog = require("../utils/auditLog");
 
-  requestContext.runWithContext({ requestId: "req_konteksto", actor: "key_konteksto" }, () => {
-    const entry = auditLog.record({ jobId: "j", requestId: "req_eksplicitinis", actor: "key_eksplicitinis" });
+  /**
+   * ⚠️ `await` BŪTINAS NUO 7.4a. `record()` tapus async, callback'as irgi tapo
+   * async, o `runWithContext()` grąžina jo Promise. Be laukimo testas
+   * baigtųsi PRIEŠ abi assercijas - regresija, palikusi Promise pakibusį,
+   * praeitų nieko nepatikrinusi (AGENTS.md §9.1).
+   */
+  await requestContext.runWithContext({ requestId: "req_konteksto", actor: "key_konteksto" }, async () => {
+    const entry = await auditLog.record({ jobId: "j", requestId: "req_eksplicitinis", actor: "key_eksplicitinis" });
 
     assert.equal(entry.requestId, "req_eksplicitinis");
     assert.equal(entry.actor, "key_eksplicitinis");
@@ -320,7 +326,7 @@ test("AUDITAS: žalias API raktas NIEKADA nepatenka į įrašą", async () => {
 
   const saved = process.env.API_KEY;
   process.env.API_KEY = RAW_KEY;
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   try {
     await request(app)
@@ -329,7 +335,7 @@ test("AUDITAS: žalias API raktas NIEKADA nepatenka į įrašą", async () => {
       .set("x-request-id", "req_rakto_testas")
       .send({ transcript: "Jonas: Sveiki, pradedam posėdį ir aptariam ketvirčio rezultatus." });
 
-    const entries = auditLog.getAll().slice(before);
+    const entries = (await auditLog.getAll()).slice(before);
     const serialized = JSON.stringify(entries);
 
     assert.ok(!serialized.includes(RAW_KEY), "raktas negali patekti į auditą");

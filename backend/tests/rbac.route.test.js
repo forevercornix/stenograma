@@ -718,9 +718,8 @@ const PROTOKOLAS = {
 };
 
 /** Grąžina `link=` reikšmę iš paskutinio eksporto audito įrašo. */
-function paskutinisLink(nuo) {
-  const įrašai = auditLogForExport
-    .getAll()
+async function paskutinisLink(nuo) {
+  const įrašai = (await auditLogForExport.getAll())
     .slice(nuo)
     .filter((e) => typeof e.details === "string" && e.details.includes("link="));
   assert.ok(įrašai.length > 0, "eksportas turi palikti audito įrašą");
@@ -737,15 +736,15 @@ test("#160 EXPORT: eilinis vartotojas svetimo job'o egzistavimo neatskleidžia",
 
   const operatorius = await loginAs("darbuotojas", "operator-slaptas-2");
 
-  const priesSvetimo = auditLogForExport.getAll().length;
+  const priesSvetimo = (await auditLogForExport.getAll()).length;
   const svetimas = await request(app)
     .post("/api/exports")
     .set("Cookie", operatorius)
     .send({ variant: "redacted", format: "txt", protocol: PROTOKOLAS, jobId: svetimasId });
   assert.equal(svetimas.status, 200, `eksportas turi pavykti: ${JSON.stringify(svetimas.body)}`);
-  const svetimoLink = paskutinisLink(priesSvetimo);
+  const svetimoLink = await paskutinisLink(priesSvetimo);
 
-  const priesNesamo = auditLogForExport.getAll().length;
+  const priesNesamo = (await auditLogForExport.getAll()).length;
   const nesamas = await request(app)
     .post("/api/exports")
     .set("Cookie", operatorius)
@@ -755,7 +754,7 @@ test("#160 EXPORT: eilinis vartotojas svetimo job'o egzistavimo neatskleidžia",
       protocol: PROTOKOLAS,
       jobId: "00000000-0000-4000-8000-000000000000",
     });
-  const nesamoLink = paskutinisLink(priesNesamo);
+  const nesamoLink = await paskutinisLink(priesNesamo);
 
   assert.equal(svetimas.status, nesamas.status, "statusas turi sutapti");
   assert.equal(
@@ -779,7 +778,7 @@ test("#160 EXPORT: session-admin svetimo job'o irgi nesusieja", async () => {
     .send({ transcript: "Ona: Operatoriaus posedis del terminu." });
 
   const adminCookie = await loginAs("sysadmin", "admin-slaptas-1");
-  const pries = auditLogForExport.getAll().length;
+  const pries = (await auditLogForExport.getAll()).length;
 
   await request(app)
     .post("/api/exports")
@@ -787,7 +786,7 @@ test("#160 EXPORT: session-admin svetimo job'o irgi nesusieja", async () => {
     .send({ variant: "redacted", format: "txt", protocol: PROTOKOLAS, jobId: created.body.jobId });
 
   assert.equal(
-    paskutinisLink(pries),
+    await paskutinisLink(pries),
     "missing",
     "admin neturi susieti svetimo job'o – skaitymo override neleidžiamas"
   );
@@ -806,14 +805,14 @@ test("#160 EXPORT: savininkas savo job'ą susieja normaliai (regresija)", async 
     .set("Cookie", cookie)
     .send({ transcript: "Rūta: Savas posedis." });
 
-  const pries = auditLogForExport.getAll().length;
+  const pries = (await auditLogForExport.getAll()).length;
   await request(app)
     .post("/api/exports")
     .set("Cookie", cookie)
     .send({ variant: "redacted", format: "txt", protocol: PROTOKOLAS, jobId: protokolo.body.jobId });
 
   assert.equal(
-    paskutinisLink(pries),
+    await paskutinisLink(pries),
     "invalid_type",
     "SAVAS job'as pasiekiamas – matomas tikras tipo neatitikimas, ne missing"
   );

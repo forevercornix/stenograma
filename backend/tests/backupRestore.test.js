@@ -315,12 +315,12 @@ test("AUDITAS: kopijavimas ir atkūrimas fiksuojami su aktoriumi", async () => {
   await jobStore.init();
   await completedJob();
 
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const backup = await backupService.createBackup({ actor: "sysadmin" });
   await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
-  const nauji = auditLog.getAll().slice(before);
+  const nauji = (await auditLog.getAll()).slice(before);
 
   const created = nauji.find((e) => e.event === "BACKUP_CREATED");
   const restored = nauji.find((e) => e.event === "BACKUP_RESTORED");
@@ -340,7 +340,7 @@ test("AUDITAS: nepavykęs atkūrimas fiksuojamas su ŽINGSNIU", async () => {
   await completedJob();
 
   const backup = await backupService.createBackup({ actor: "sysadmin" });
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   await restoreService.restoreBackup({
     manifest: { ...backup.manifest, formatVersion: 999 },
@@ -348,8 +348,7 @@ test("AUDITAS: nepavykęs atkūrimas fiksuojamas su ŽINGSNIU", async () => {
     actor: "sysadmin",
   });
 
-  const failed = auditLog
-    .getAll()
+  const failed = (await auditLog.getAll())
     .slice(before)
     .find((e) => e.event === "BACKUP_RESTORE_FAILED");
 
@@ -364,11 +363,11 @@ test("SAUGUMAS: audite ir rezultate NĖRA kelių, raktų ar turinio", async () =
   const key = await fileStorage.put(Buffer.from("slaptas audio"), { ext: ".mp3" });
   await completedJob({ storageKey: key });
 
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
   const backup = await backupService.createBackup({ actor: "sysadmin" });
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
-  const auditSerialized = JSON.stringify(auditLog.getAll().slice(before));
+  const auditSerialized = JSON.stringify((await auditLog.getAll()).slice(before));
   const resultSerialized = JSON.stringify(result);
 
   for (const [name, serialized] of [
@@ -462,14 +461,14 @@ test("AUDITAS: SENA kopija su auditu praleidžiama, ne atkuriama", async () => {
   };
 
   await jobStore.system.remove(job.id);
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const result = await restoreService.restoreBackup({ manifest: legacyManifest, data: legacyData });
 
   assert.equal(result.ok, true, "sena kopija turi būti atkuriama");
   assert.ok(await jobStore.system.get(job.id), "jobai atkuriami kaip įprasta");
 
-  const restored = auditLog.getAll().slice(before);
+  const restored = (await auditLog.getAll()).slice(before);
   assert.ok(
     !restored.some((e) => e.event === "SENAS_ISTRINTAS_IRASAS"),
     "senas audito įrašas NEGALI grįžti"

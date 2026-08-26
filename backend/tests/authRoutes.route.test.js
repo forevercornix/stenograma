@@ -58,12 +58,12 @@ test("LOGIN: nežinomas vartotojas grąžina TĄ PATĮ atsakymą kaip blogas sla
 });
 
 test("LOGIN: atsakymas ir auditas NIEKADA nešneša slaptažodžio", async () => {
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
   const secret = "labai-slaptas-tekstas-xyz";
 
   const res = await request(app).post("/api/auth/login").send({ username: "admin", password: secret });
 
-  const serialized = JSON.stringify(res.body) + JSON.stringify(auditLog.getAll().slice(before));
+  const serialized = JSON.stringify(res.body) + JSON.stringify((await auditLog.getAll()).slice(before));
   assert.ok(!serialized.includes(secret), "slaptažodis negali patekti nei į atsakymą, nei į auditą");
 });
 

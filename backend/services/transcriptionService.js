@@ -4,7 +4,7 @@ const { mergeDiarization } = require("../utils/mergeDiarization");
 const { PHASE } = require("../utils/jobPhase");
 const { filterHallucinations } = require("../utils/filterHallucinations");
 const { detectAudioMagic } = require("../utils/audioMagicBytes");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 const { sanitizeServerError } = require("../utils/sanitizeError");
 const { createLogger } = require("../utils/logger");
 const { recordRejectedUpload, REASONS } = require("../utils/uploadEvents");
@@ -95,8 +95,8 @@ async function transcribeAudio({
   }
 
   if (!detectAudioMagic(buffer)) {
-    recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe", size: buffer.length, jobId });
-    auditLog.record({
+    await recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe", size: buffer.length, jobId });
+    await rasytiAudita({
       jobId,
       meetingId,
       transcriptionProvider: null,
@@ -183,7 +183,7 @@ async function transcribeAudio({
       }
     }
 
-    auditLog.record({
+    await rasytiAudita({
       jobId,
       meetingId,
       transcriptionProvider: transcriptionProvider.name,
@@ -195,7 +195,7 @@ async function transcribeAudio({
     return { ...transcription, diarizationProvider: diarizationProviderUsed };
   } catch (e) {
     if (e instanceof HttpError) throw e;
-    auditLog.record({
+    await rasytiAudita({
       jobId,
       meetingId,
       transcriptionProvider: transcriptionProvider.name,

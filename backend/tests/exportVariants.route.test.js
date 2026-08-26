@@ -194,13 +194,13 @@ test("FAIL-CLOSED: nesant redakcijos komponento originalas NEGRĄŽINAMAS", asyn
 });
 
 test("AUDITAS fiksuoja PRAŠYTĄ variantą, ne išvestą iš politikos", async () => {
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   await request(app)
     .post("/api/exports")
     .send({ variant: "redacted", format: "csv", protocol: protocolWithPii() });
 
-  const completed = auditLog.getAll().slice(before).find((e) => e.event === "EXPORT_COMPLETED");
+  const completed = (await auditLog.getAll()).slice(before).find((e) => e.event === "EXPORT_COMPLETED");
 
   assert.ok(completed);
   assert.equal(completed.variant, "redacted");

@@ -447,13 +447,13 @@ test("AUDITAS: redakcijos būsena įrašoma, PII reikšmių NĖRA", async (t) =>
   // `find(e => e.redaction)` pagriebtų ankstesnio testo įrašą, sukurtą netikru
   // redaktoriumi (policyVersion "custom"). Būtent taip ir nutiko pirmoje šio
   // testo versijoje - jis matavo ne tai, ką tikrino.
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   await withEnv(ENFORCED_ENV, () =>
     generateProtocol({ transcript: `Jonas Jonaitis, a.k. ${SECRET_CODE}, pristatė ataskaitą.` })
   );
 
-  const entries = auditLog.getAll().slice(before);
+  const entries = (await auditLog.getAll()).slice(before);
   const withRedaction = entries.find((e) => e.redaction);
 
   assert.ok(withRedaction, "audite turi būti redakcijos metaduomenys");
@@ -553,7 +553,7 @@ test("OBSERVABILITY: redakcijos nesėkmė audite atskiriama nuo bendros klaidos"
   registerFakeProvider(t, received);
 
   const auditLog = require("../utils/auditLog");
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const warnings = [];
   t.mock.method(console, "warn", (...args) => warnings.push(args.join(" ")));
@@ -567,7 +567,7 @@ test("OBSERVABILITY: redakcijos nesėkmė audite atskiriama nuo bendros klaidos"
     )
   );
 
-  const entries = auditLog.getAll().slice(before);
+  const entries = (await auditLog.getAll()).slice(before);
   const failed = entries.find((e) => e.redaction && e.redaction.redactionStatus === "failed");
 
   assert.ok(failed, "audite turi būti matoma, kad krito BŪTENT redakcija");
@@ -621,13 +621,13 @@ test("AUDITAS: sėkmingas įrašas turi outcome=sent", async (t) => {
   registerFakeProvider(t, received);
 
   const auditLog = require("../utils/auditLog");
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   await withEnv(ENFORCED_ENV, () =>
     generateProtocol({ transcript: `Jonas, a.k. ${ASMENS_KODAS}, pristatė ketvirčio ataskaitą.` })
   );
 
-  const entry = auditLog.getAll().slice(before).find((e) => e.redaction);
+  const entry = (await auditLog.getAll()).slice(before).find((e) => e.redaction);
 
   assert.ok(entry, "sėkmės atveju audite turi būti redakcijos metaduomenys");
   assert.equal(entry.redaction.redactionStatus, "redacted");

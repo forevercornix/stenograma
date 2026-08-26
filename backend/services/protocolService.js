@@ -2,7 +2,7 @@ const { getLLMProvider, REGISTRY } = require("../providers/llm");
 const { buildPrompt, PROMPTS } = require("../prompts");
 const { tryParse, buildRepairPrompt } = require("../schema/protocolSchema");
 const { PHASE } = require("../utils/jobPhase");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 const { estimateCost } = require("../utils/costEstimate");
 const { groundingCheck } = require("../utils/groundingCheck");
 const { dedupTranscriptText, dedupSegments } = require("../utils/transcriptDedup");
@@ -174,7 +174,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
     }
 
     if (!result.success) {
-      auditLog.record({
+      await rasytiAudita({
         jobId,
         meetingId,
         promptVersion,
@@ -213,7 +213,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
       );
     }
 
-    auditLog.record({
+    await rasytiAudita({
       jobId,
       meetingId,
       promptVersion,
@@ -278,7 +278,7 @@ async function generateProtocol({ title, date, participants, transcript, segment
 
     if (e instanceof HttpError && !isRedactionFailure) throw e;
 
-    auditLog.record({
+    await rasytiAudita({
       jobId,
       meetingId,
       promptVersion,

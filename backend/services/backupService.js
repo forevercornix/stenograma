@@ -1,5 +1,5 @@
 const jobStore = require("../utils/jobStore");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 const fileStorage = require("../utils/fileStorage");
 const backupPolicy = require("../utils/backupPolicy");
 const backupManifest = require("../utils/backupManifest");
@@ -109,7 +109,7 @@ async function createBackup({ actor = null, env = process.env } = {}) {
    */
   const leaked = secretsInventory.findLeakedSecrets(plaintext.toString("utf8"), env);
   if (leaked.length > 0) {
-    _audit({ event: "BACKUP_REJECTED", actor, manifest: null, success: false, outcome: "secrets_present" });
+    await _audit({ event: "BACKUP_REJECTED", actor, manifest: null, success: false, outcome: "secrets_present" });
 
     // Pranešime - TIK vardai, niekada reikšmės.
     throw _backupError(`Kopijoje aptikta paslapčių: ${leaked.join(", ")}. Kopija nesukurta.`, "BACKUP_SECRETS_PRESENT");
@@ -152,7 +152,7 @@ async function createBackup({ actor = null, env = process.env } = {}) {
    */
   manifest.checksum = backupManifest.computeChecksum(serialized);
 
-  _audit({ event: "BACKUP_CREATED", actor, manifest, success: true });
+  await _audit({ event: "BACKUP_CREATED", actor, manifest, success: true });
 
   log.info("Kopija sukurta", {
     jobs: stable.length,
@@ -194,9 +194,15 @@ async function _collectAudio(jobs) {
   return collected;
 }
 
-function _audit({ event, actor, manifest, success, outcome = null }) {
-  try {
-    auditLog.record({
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210). Anksčiau čia buvo `try { auditLog.record(...) }
+ * catch {}` - po `record()` async pakeitimo tas `catch` nebebūtų pagavęs
+ * atmesto Promise, ir kvietimas taptų fire-and-forget. `BACKUP_*` yra
+ * NEBLOKUOJANTYS, tad gedimo politiką (logas + skaitiklis) pritaiko
+ * `rasytiAudita()`, o ne tylus `catch`.
+ */
+async function _audit({ event, actor, manifest, success, outcome = null }) {
+  await rasytiAudita({
       event,
       success,
       outcome,
@@ -209,10 +215,7 @@ function _audit({ event, actor, manifest, success, outcome = null }) {
         `formatVersion=${manifest ? manifest.formatVersion : "?"} ` +
         `appVersion=${manifest ? manifest.applicationVersion : "?"} ` +
         `excludedInFlight=${manifest ? manifest.excludedInFlightJobs : "?"}`,
-    });
-  } catch {
-    // Auditas neturi versti kopijavimo nesėkme.
-  }
+  });
 }
 
 function _backupError(message, code) {

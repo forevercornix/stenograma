@@ -1,5 +1,6 @@
 const jobStore = require("./jobStore");
 const auditLog = require("./auditLog");
+const { rasytiAudita } = require("./auditWrite");
 const fileStorage = require("./fileStorage");
 const jobRunner = require("../queues/jobRunner");
 
@@ -127,7 +128,7 @@ async function eraseJob(job) {
     outcome.criticalFailure = true;
   }
 
-  writeDeletionReceipt(outcome);
+  await writeDeletionReceipt(outcome);
 
   return outcome;
 }
@@ -143,7 +144,11 @@ async function eraseJob(job) {
  * APRIBOJIMAS: kvitas guli tame pačiame atmintiniame audito žurnale, tad
  * galioja tos pačios retencijos ir restarto ribos (žr. README).
  */
-function writeDeletionReceipt(outcome) {
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210). `DATA_ERASED` yra BLOKUOJANTIS: ištrynimo kvitas
+ * be patvirtinto audito reikštų, kad duomenys dingo, o pėdsako nėra.
+ */
+async function writeDeletionReceipt(outcome) {
   if (outcome.criticalFailure) return;
 
   // Kvitas rašomas TIK jei kažkas realiai pašalinta. Anksčiau sąlyga buvo vien
@@ -159,19 +164,22 @@ function writeDeletionReceipt(outcome) {
 
   if (!anythingRemoved) return;
 
-  try {
-    auditLog.record({
-      event: "DATA_ERASED",
-      success: true,
-      details:
-        `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
-        `storage=${outcome.storageRemoved ? "deleted" : "none"} ` +
-        `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
-        `audit=${outcome.auditEntriesRemoved}`,
-    });
-  } catch {
-    // Kvitas neturi versti ištrynimo nesėkme - duomenys jau pašalinti.
-  }
+  /**
+   * ⚠️ AUDITO KLAIDA PROPAGUOJAMA (#155, 7.4a / #210).
+   *
+   * `DATA_ERASED` yra BLOKUOJANTIS. Buvęs `catch {}` („duomenys jau pašalinti")
+   * reiškė, kad ištrynimo kvitas galėjo nedingti tyliai, o operacija vis tiek
+   * praneštų sėkmę - t. y. GDPR ištrynimas be įrodymo, kad jis įvyko.
+   */
+  await rasytiAudita({
+    event: "DATA_ERASED",
+    success: true,
+    details:
+      `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
+      `storage=${outcome.storageRemoved ? "deleted" : "none"} ` +
+      `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
+      `audit=${outcome.auditEntriesRemoved}`,
+  });
 }
 
 /**
