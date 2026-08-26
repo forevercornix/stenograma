@@ -1201,3 +1201,63 @@ test("ŠALTINIO AUDIO: terminalus audito gedimas ATLAISVINA įkeltą failą", as
     fileStorage.del = originalusDel;
   }
 });
+
+test("ŠALTINIO AUDIO: ATŠAUKTOS TEISĖS irgi atlaisvina įkeltą failą", async () => {
+  /**
+   * ⚠️ GRETIMA PATAISA, RASTA #210 RECENZIJOS METU.
+   *
+   * Ši šaka (`AUTHORIZATION_REVOKED`, `workers/index.js:180` ir jos inline
+   * atitikmuo) NĖRA 7.4a dalis - ji egzistavo iki async perėjimo ir turėjo TĄ
+   * PATĮ nutekėjimą kaip gretima audito gedimo šaka: grįždavo be `releaseAudio`,
+   * palikdama įkeltą audio saugykloje neribotam laikui (retencijos valytojas jo
+   * neliečia, kol raktą nurodo gyvas job'o įrašas).
+   *
+   * Iš išorės matoma baigtis NESIKEIČIA - job'as ir taip baigdavosi ta pačia
+   * galutine nesėkme. Suvienodinamas tik resursų valymas, kad dvi gretimos
+   * šakos nesielgtų skirtingai be priežasties.
+   *
+   * ⚠️ Auditas ČIA NEKRENTA - kitaip testas tikrintų audito gedimo šaką ir
+   * gretimos pataisos neapsaugotų.
+   */
+  const jobRunner = require("../queues/jobRunner");
+  const jobStore = require("../utils/jobStore");
+  const fileStorage = require("../utils/fileStorage");
+
+  await jobStore.init();
+
+  /** Aktorius, kurio `AUTH_USERS` nepažįsta → sprendimas `allowed: false`. */
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.PROTOCOL,
+    ownerKind: "unowned",
+    actor: "dinges-vartotojas",
+    actorSource: "session",
+    actorRole: "operator",
+  });
+
+  const storageKey = "uploads/atsauktos-teises-testas.wav";
+  const istrinti = [];
+  const originalusDel = fileStorage.del;
+  fileStorage.del = async (key) => {
+    istrinti.push(key);
+    return true;
+  };
+
+  try {
+    await jobRunner._runInline("protocol", job.id, { storageKey });
+
+    const poVykdymo = await jobStore.system.get(job.id);
+    assert.equal(poVykdymo.status, jobStore.STATUS.FAILED);
+    assert.equal(
+      poVykdymo.errorCode || poVykdymo.error_code,
+      "AUTHORIZATION_REVOKED",
+      "prielaida: tikrinama BŪTENT atšauktų teisių šaka, ne audito gedimo"
+    );
+
+    assert.ok(
+      istrinti.includes(storageKey),
+      "nutraukus vykdymą dėl atšauktų teisių šaltinio audio privalo būti atlaisvintas"
+    );
+  } finally {
+    fileStorage.del = originalusDel;
+  }
+});

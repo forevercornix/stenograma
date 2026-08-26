@@ -458,4 +458,9 @@ module.exports = {
   arBlokuojantis,
   validateAuditEvents,
   producerIvykiai,
+  /**
+   * Eksportuojama testams: statinės patikros PRIVALO nuskusti komentarus, kitaip
+   * jos pagauna savo pačių dokumentaciją (taip jau nutiko #210 eigoje).
+   */
+  beKomentaru,
 };

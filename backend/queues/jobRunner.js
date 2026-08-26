@@ -303,13 +303,8 @@ async function _runInline(type, jobId, payload) {
             ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
             : "Vykdymas nutrauktas: autorizacijos nepavyko įvertinti.",
         });
-        /** ⚠️ Šaltinio audio atlaisvinamas - `_executeInline` `finally` čia nepasiekiamas. */
-        if (payload && payload.storageKey) {
-          const { releaseAudio } = require("../utils/audioCleanup");
-          await releaseAudio(jobId, payload.storageKey).catch((e) =>
-            log.error(`Nepavyko atlaisvinti audio po audito gedimo: ${e.message}`)
-          );
-        }
+        /** ⚠️ `_executeInline` `finally` čia nepasiekiamas - valom patys. */
+        await _atlaisvintiSaltini(jobId, payload);
         return;
       }
 
@@ -325,11 +320,32 @@ async function _runInline(type, jobId, payload) {
           error_code: "AUTHORIZATION_REVOKED",
           error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
         });
+        /**
+         * ⚠️ Gretima pataisa (#210 recenzija): anksčiau ši šaka grįždavo be
+         * valymo. Žr. `workers/index.js` paaiškinimą - iš išorės matoma baigtis
+         * nesikeičia, suvienodinamas tik resursų valymas.
+         */
+        await _atlaisvintiSaltini(jobId, payload);
         return;
       }
 
       return _executeInline(type, processor, jobId, payload);
     }
+  );
+}
+
+/**
+ * Atlaisvina šaltinio audio TERMINALIOSE šakose, kurios grįžta anksčiau nei
+ * `_executeInline()` su savo `finally`. Klaida čia nenutraukia terminalaus
+ * perėjimo: job'as jau pažymėtas, o nepavykęs valymas kartojamas per
+ * `deletionRetry`.
+ */
+async function _atlaisvintiSaltini(jobId, payload) {
+  if (!payload || !payload.storageKey) return;
+
+  const { releaseAudio } = require("../utils/audioCleanup");
+  await releaseAudio(jobId, payload.storageKey).catch((e) =>
+    log.error(`Nepavyko atlaisvinti audio nutraukus vykdymą (job ${jobId}): ${e.message}`)
   );
 }
 

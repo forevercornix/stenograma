@@ -29,6 +29,7 @@ const request = require("supertest");
 const jobStore = require("../utils/jobStore");
 const auditLog = require("../utils/auditLog");
 const { PERMISSIONS } = require("../utils/permissions");
+const { beKomentaru } = require("../utils/auditEvents");
 const { authorizeJobExecution, resolveCurrentRole, DENY_REASON } = require("../utils/jobAuthorization");
 const app = require("../server");
 app._setReadyForTests();
@@ -258,6 +259,39 @@ test("STRUKTŪRA: abu vykdymo keliai naudoja TĄ PAČIĄ autorizacijos funkciją
       `${file} turi REALIAI iškviesti IR palaukti autorizacijos vykdymo metu`
     );
     assert.match(source, /AUTHORIZATION_REVOKED/, `${file} turi pažymėti jobą kaip nutrauktą`);
+
+    /**
+     * ⚠️ TRIPWIRE, NE ELGSENOS ĮRODYMAS (AGENTS.md §9.2).
+     *
+     * Nutraukto vykdymo šakos grįžta anksčiau nei bendras `finally`, tad
+     * šaltinio audio jos privalo atlaisvinti PAČIOS - kitaip įkeltas failas
+     * lieka saugykloje neribotai (retencijos valytojas jo neliečia, kol raktą
+     * nurodo gyvas job'o įrašas).
+     *
+     * ELGSENĄ dengia `auditAsyncCutover` testai, bet TIK inline kelyje: BullMQ
+     * šakai reikia Redis, tad šioje aplinkoje ji lieka nepatikrinta elgsena.
+     * Ši patikra saugo nuo to, kad du keliai vėl išsiskirtų tyliai.
+     *
+     * ⚠️ Tikrinamas ne `_cleanupStorage` KIEKIS faile - pirmoji versija taip ir
+     * darė, ir mutacija, pašalinusi valymą iš atšauktų teisių šakos, PRAĖJO:
+     * įprasti sėkmės ir nesėkmės keliai valymą kviečia savaime. Anksčiuojamės
+     * prie KONKREČIOS šakos: nuo jos `error_code` iki jos `return`.
+     */
+    const svarus = beKomentaru(source);
+
+    for (const sakosZyme of ["AUTHORIZATION_REVOKED", "AUDIT_UNAVAILABLE"]) {
+      const pradzia = svarus.indexOf(`"${sakosZyme}"`);
+      assert.notEqual(pradzia, -1, `${file}: nerasta ${sakosZyme} šaka`);
+
+      const pabaiga = svarus.indexOf("return;", pradzia);
+      assert.notEqual(pabaiga, -1, `${file}: ${sakosZyme} šaka neturi ankstyvo return`);
+
+      assert.match(
+        svarus.slice(pradzia, pabaiga),
+        /(?:_cleanupStorage|_atlaisvintiSaltini)\(/,
+        `${file}: ${sakosZyme} šaka grįžta neatlaisvinusi šaltinio audio`
+      );
+    }
   }
 });
 

@@ -208,6 +208,18 @@ function createWorker(queueName, processor, workerOptions = {}) {
               error_code: "AUTHORIZATION_REVOKED",
               error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
             });
+            /**
+             * ⚠️ ŠALTINIO AUDIO ATLAISVINAMAS IR ČIA (gretima pataisa, #210
+             * recenzija).
+             *
+             * Anksčiau ši šaka grįždavo be valymo: sąmoningai nutrauktas
+             * vykdymas palikdavo įkeltą failą saugykloje neribotam laikui, nes
+             * retencijos valytojas jo neliečia, kol raktą nurodo gyvas job'o
+             * įrašas (`listReferencedStorageKeys`). Iš išorės matoma baigtis
+             * nesikeičia - job'as ir taip baigiasi ta pačia galutine nesėkme;
+             * suvienodinamas tik resursų valymas su gretima audito gedimo šaka.
+             */
+            await _cleanupStorage(payload, jobId);
             return;
           }
 
