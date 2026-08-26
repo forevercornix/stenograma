@@ -263,33 +263,53 @@ test("STRUKTŪRA: abu vykdymo keliai naudoja TĄ PAČIĄ autorizacijos funkciją
     /**
      * ⚠️ TRIPWIRE, NE ELGSENOS ĮRODYMAS (AGENTS.md §9.2).
      *
-     * Nutraukto vykdymo šakos grįžta anksčiau nei bendras `finally`, tad
-     * šaltinio audio jos privalo atlaisvinti PAČIOS - kitaip įkeltas failas
-     * lieka saugykloje neribotai (retencijos valytojas jo neliečia, kol raktą
-     * nurodo gyvas job'o įrašas).
+     * Tikrinamos abi NUTRAUKIMO šakos - audito/autorizacijos klaida ir
+     * atšauktos teisės. Jos grįžta anksčiau nei bendras `finally`, tad turi
+     * pačios: (a) padaryti VIENĄ terminalų perėjimą ir (b) atlaisvinti
+     * šaltinio audio.
      *
      * ELGSENĄ dengia `auditAsyncCutover` testai, bet TIK inline kelyje: BullMQ
-     * šakai reikia Redis, tad šioje aplinkoje ji lieka nepatikrinta elgsena.
-     * Ši patikra saugo nuo to, kad du keliai vėl išsiskirtų tyliai.
+     * šakai reikia Redis, tad jos elgsena šioje aplinkoje lieka nepatikrinta.
+     * Ši patikra saugo nuo to, kad du keliai išsiskirtų tyliai.
      *
-     * ⚠️ Tikrinamas ne `_cleanupStorage` KIEKIS faile - pirmoji versija taip ir
-     * darė, ir mutacija, pašalinusi valymą iš atšauktų teisių šakos, PRAĖJO:
-     * įprasti sėkmės ir nesėkmės keliai valymą kviečia savaime. Anksčiuojamės
-     * prie KONKREČIOS šakos: nuo jos `error_code` iki jos `return`.
+     * ⚠️ Anksčiuojamasi prie KONKREČIOS šakos, ne prie failo. Pirmoji versija
+     * skaičiavo `_cleanupStorage` kiekį visame faile ir mutacijos NEPAGAVO:
+     * įprasti sėkmės ir nesėkmės keliai valymą kviečia savaime.
      */
     const svarus = beKomentaru(source);
 
-    for (const sakosZyme of ["AUTHORIZATION_REVOKED", "AUDIT_UNAVAILABLE"]) {
-      const pradzia = svarus.indexOf(`"${sakosZyme}"`);
-      assert.notEqual(pradzia, -1, `${file}: nerasta ${sakosZyme} šaka`);
+    const NUTRAUKIMO_SAKOS = [
+      ["autorizacijos klaida", "const auditoGedimas"],
+      ["atšauktos teisės", "if (!decision.allowed)"],
+    ];
+
+    for (const [pavadinimas, zyme] of NUTRAUKIMO_SAKOS) {
+      const pradzia = svarus.indexOf(zyme);
+      assert.notEqual(pradzia, -1, `${file}: nerasta šaka „${pavadinimas}"`);
 
       const pabaiga = svarus.indexOf("return;", pradzia);
-      assert.notEqual(pabaiga, -1, `${file}: ${sakosZyme} šaka neturi ankstyvo return`);
+      assert.notEqual(pabaiga, -1, `${file}: šaka „${pavadinimas}" be ankstyvo return`);
+
+      const saka = svarus.slice(pradzia, pabaiga);
+
+      /**
+       * ⚠️ LYGIAI VIENAS terminalus perėjimas.
+       *
+       * Antras `finish()` bandytų užbaigti JAU terminalų job'ą, o state machine
+       * tai atmeta - klaida iškiltų PRIEŠ valymą ir `return`, grįžtų į BullMQ
+       * pakartojimų apdorojimą, o šaltinio audio liktų susietas. Būtent tokį
+       * dublikatą paliko skriptinis redagavimas #210 eigoje.
+       */
+      assert.equal(
+        (saka.match(/system\.finish\(/g) || []).length,
+        1,
+        `${file}: šaka „${pavadinimas}" turi daryti LYGIAI VIENĄ terminalų perėjimą`
+      );
 
       assert.match(
-        svarus.slice(pradzia, pabaiga),
+        saka,
         /(?:_cleanupStorage|_atlaisvintiSaltini)\(/,
-        `${file}: ${sakosZyme} šaka grįžta neatlaisvinusi šaltinio audio`
+        `${file}: šaka „${pavadinimas}" grįžta neatlaisvinusi šaltinio audio`
       );
     }
   }

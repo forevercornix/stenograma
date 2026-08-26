@@ -1261,3 +1261,62 @@ test("ŠALTINIO AUDIO: ATŠAUKTOS TEISĖS irgi atlaisvina įkeltą failą", asyn
     fileStorage.del = originalusDel;
   }
 });
+
+test("SKAITIKLIS: VIENAS lėtas rašymas duoda VIENĄ didinimą (abiejose kategorijose)", async () => {
+  /**
+   * ⚠️ #210 recenzija (P2): DVIGUBAS SKAIČIAVIMAS.
+   *
+   * `Promise.race` rašymo nenutraukia. Kai neblokuojantis rašymas peržengia
+   * ribą, o VĖLIAU vis tiek įsirašo, suveikia du keliai: timeout politika
+   * (`rasytiAudita`) ir vėluojančios sėkmės apdorojimas (`suRiba`). Anksčiau
+   * abu didino skaitiklį, tad vienas lėtas `EXPORT_*` ar `UPLOAD_REJECTED`
+   * rašymas praneštų DU gedimus ir iškreiptų stebėjimą.
+   *
+   * Invariantas: vienas rašymo bandymas → ne daugiau kaip vienas didinimas.
+   * Tikrinamos ABI kategorijos, nes jos didina SKIRTINGUOSE taškuose.
+   */
+  const veluojantisBackend = (vėlavimasMs) => ({
+    normalizeEvent: auditLog.normalizeEvent,
+    record: (entry) =>
+      new Promise((resolve) => {
+        setTimeout(() => resolve({ id: "velyvas", event: auditLog.normalizeEvent(entry) }), vėlavimasMs);
+      }),
+  });
+
+  /** Kad vėluojanti sėkmė spėtų suveikti dar testo metu. */
+  const palauk = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 10));
+  };
+
+  // ── (a) NEBLOKUOJANTIS: didina timeout politika, vėluojanti sėkmė - ne.
+  _resetAuditCountersForTests();
+  await suTrumpaRiba(40, async () => {
+    assert.equal(
+      await rasytiAudita({ event: "EXPORT_FAILED", success: false }, { auditLog: veluojantisBackend(90) }),
+      null,
+      "neblokuojantis timeout NENUMUŠA operacijos"
+    );
+  });
+  await palauk();
+  assert.equal(
+    getAuditCounters().auditWriteFailures,
+    1,
+    "vienas lėtas neblokuojantis rašymas negali būti suskaičiuotas du kartus"
+  );
+
+  // ── (b) BLOKUOJANTIS: timeout NEDIDINA, tad vėluojanti sėkmė lieka
+  //        vienintelis didinimas - neatitikimas privalo likti matomas.
+  _resetAuditCountersForTests();
+  await suTrumpaRiba(40, async () => {
+    await assert.rejects(
+      () => rasytiAudita({ event: "LOGIN_SUCCESS", success: true }, { auditLog: veluojantisBackend(90) }),
+      AuditWriteError
+    );
+  });
+  await palauk();
+  assert.equal(
+    getAuditCounters().auditWriteFailures,
+    1,
+    "blokuojantis vėlyvas įrašas privalo likti MATOMAS: kvietėjui pasakyta 503, o pėdsakas atsirado"
+  );
+});

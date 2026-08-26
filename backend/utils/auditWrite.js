@@ -112,7 +112,20 @@ function suRiba(promise, ribaMs, event, blokuojantis) {
    *    atveju veiksmas jau ATŠAUKTAS (pvz. `LOGIN_SUCCESS` → sesija revokuota,
    *    503). Jei įrašas vis tiek įsirašo, audito pėdsakas tvirtina įvykus tai,
    *    kas buvo atsukta. Ištrinti jo negalim, tad jis daromas MATOMU:
-   *    `error` logas + skaitiklis, kad neatitikimą būtų galima rasti.
+   *    `error` logas visada, o skaitiklis - TIK blokuojančiam keliui.
+   *
+   * ⚠️ INVARIANTAS: VIENAS rašymo bandymas → NE DAUGIAU KAIP VIENAS skaitiklio
+   * didinimas.
+   *
+   *   neblokuojantis: timeout jau padidino (`rasytiAudita` politikoje),
+   *                   tad vėluojanti sėkmė NEBEDIDINA;
+   *   blokuojantis:   timeout NEDIDINA (skaitiklis - neblokuojančių signalas,
+   *                   žr. `getAuditCounters` testus), tad vėluojanti sėkmė
+   *                   lieka vienintelis didinimas.
+   *
+   * Be šio atskyrimo vienas lėtas `EXPORT_*` ar `UPLOAD_REJECTED` rašymas
+   * praneštų DU gedimus ir iškreiptų bet kokį stebėjimą, pastatytą ant šio
+   * skaitiklio.
    *
    * ⚠️ TIKRAS SPRENDIMAS - deadline'o perdavimas į saugyklą arba atšaukiamas
    * rašymas - priklauso nuo backend'o, kurio dar nėra. Namai: SUBISSUES-155.md
@@ -123,7 +136,8 @@ function suRiba(promise, ribaMs, event, blokuojantis) {
     (eilute) => {
       if (laikmatis) return; // spėjo laiku - rezultatą grąžino `Promise.race`
       if (eilute === null) return; // privacy mode - nieko neįrašyta
-      skaitikliai.auditWriteFailures += 1;
+      /** ⚠️ Žr. invariantą aukščiau: neblokuojančiam keliui timeout jau padidino. */
+      if (blokuojantis) skaitikliai.auditWriteFailures += 1;
       log.error("Audito įrašas įsirašė JAU PO timeout - kvietėjui pasakyta, kad nepavyko", {
         event,
         blokuojantis,

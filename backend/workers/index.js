@@ -186,10 +186,6 @@ function createWorker(queueName, processor, workerOptions = {}) {
                 ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
                 : "Vykdymas nutrauktas: autorizacijos nepavyko įvertinti.",
             });
-            await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
-              error_code: "AUDIT_UNAVAILABLE",
-              error_message: "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo.",
-            });
             /**
              * ⚠️ ŠALTINIO AUDIO ATLAISVINAMAS. Terminalus job'as be valymo
              * paliktų įkeltą failą pririštą prie jo, o retencijos valytojas
