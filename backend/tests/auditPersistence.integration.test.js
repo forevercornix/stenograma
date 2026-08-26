@@ -578,6 +578,48 @@ test("POOL: `shutdown()` uždaro jungtis - kabančių sesijų nelieka", { skip: 
   }
 });
 
+test("STARTAS: postgres režimas ĮSPĖJA apie neveikiančią retenciją", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TIKRINAMA, KAD ĮSPĖJIMAS REALIAI LOGINAMAS, ne tik kad konstanta egzistuoja.
+   *
+   * Turinį tikrina `auditStoreFields` (be DB). Čia - kad `init()` jį praleidžia
+   * pro `log.warn`, ir kad startas dėl to NENUTRŪKSTA: neribotas augimas yra
+   * matomumo, o ne blokavimo klausimas.
+   */
+  const auditStore = require("../utils/auditStore");
+  const { RETENCIJOS_ISPEJIMAS } = auditStore;
+  const { url, resursai } = await paruostiDb("audit_retencijos_ispejimas");
+
+  const pagauta = [];
+  const originalus = console.warn;
+  console.warn = (...args) => pagauta.push(args.join(" "));
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init({
+      ...process.env,
+      AUDIT_BACKEND: "postgres",
+      DATABASE_URL: url,
+      AUDIT_ID_SALT: "testine-druska",
+      AUDIT_ID_SALT_ID: HASH_KEY_ID,
+      PRIVACY_MODE: "false",
+    });
+
+    console.warn = originalus;
+
+    assert.equal(auditStore.backend(), "postgres", "startas privalo pavykti - tai ĮSPĖJIMAS, ne klaida");
+    assert.ok(
+      pagauta.some((eil) => eil.includes("AUDIT_RETENTION_DAYS") && eil.includes("7.4d")),
+      "postgres startas privalo įspėti apie neveikiančią retenciją"
+    );
+    assert.ok(RETENCIJOS_ISPEJIMAS.length > 50, "prielaida: konstanta nėra tuščia");
+  } finally {
+    console.warn = originalus;
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
 test("POOL: nustatymuose YRA laiko ribos, ir jos MAŽESNĖS už fasado langą", { skip: SKIP }, async () => {
   /**
    * ⚠️ TIKRINAMA PRIEŠ TIKRĄ ELGESĮ, ne tik konfigūraciją.
@@ -792,6 +834,83 @@ test("STARTAS: nukritęs append-only trigeris NUTRAUKIA startą", { skip: SKIP }
         }),
       new RegExp(REQUIRED_AUDIT_TRIGGER),
       "be append-only trigerio auditas taptų redaguojamas"
+    );
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("RESTARTAS: auditas išlieka per PILNĄ `init → shutdown → init` ciklą", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TAI ATSKIRAS TESTAS, NE „IŠVEDIMAS IŠ IŠLIKIMO".
+   *
+   * Ankstesnis „išgyvena restartą" teiginys rėmėsi tuo, kad pool'o uždarymas yra
+   * vienintelis proceso ryšys su DB. Tai TIESA, bet neišbandyta: restartas
+   * praeina ir per `shutdown()`, ir per PAKARTOTINĮ `init()` - o būtent
+   * pakartotinis `init()` iš naujo tikrina lentelę, invariantus ir trigerį, iš
+   * naujo skaito `AUDIT_ID_SALT_ID` ir kuria naują pool'ą. Bet kuris iš tų
+   * žingsnių galėtų sulaužyti tęstinumą, o `pool.end()` testas to nepamatytų.
+   *
+   * ⚠️ KO ŠIS TESTAS NEĮRODO: konteinerio restarto. Image sluoksniai, volume'ai
+   * ir orkestruotojo tvarka lieka nepatikrinti - tam reikėtų Docker, kurio šioje
+   * aplinkoje kelti negalima. Žr. ataskaitos §PostgreSQL evidence.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, resursai } = await paruostiDb("audit_restartas");
+
+  const env = {
+    ...process.env,
+    AUDIT_BACKEND: "postgres",
+    DATABASE_URL: url,
+    /** ⚠️ TA PATI druska abiem paleidimams - kitaip pseudonimai nesutaptų. */
+    AUDIT_ID_SALT: "stabili-druska-per-restarta",
+    AUDIT_ID_SALT_ID: HASH_KEY_ID,
+    PRIVACY_MODE: "false",
+  };
+
+  try {
+    /* ── Pirmas „paleidimas" ─────────────────────────────────────────────── */
+    await auditStore.shutdown();
+    await auditStore.init(env);
+
+    await auditLog.record({
+      event: "PROCESSING_COMPLETED",
+      jobId: "job-per-restarta",
+      success: true,
+      details: "pries-restarta",
+    });
+
+    const priesRestarta = await auditLog.getAll();
+    assert.equal(priesRestarta.length, 1, "prielaida: įrašas realiai pateko į DB");
+
+    /* ── „Restartas": visa saugykla nuleidžiama ir keliama iš naujo ──────── */
+    await auditStore.shutdown();
+    assert.equal(auditStore.backend(), "memory", "po shutdown saugykla atsijungia");
+
+    await auditStore.init(env);
+    assert.equal(auditStore.backend(), "postgres", "pakartotinis init privalo pavykti");
+
+    /* ── Antras „paleidimas" mato TĄ PATĮ įrašą ──────────────────────────── */
+    const poRestarto = await auditLog.getAll();
+
+    assert.equal(poRestarto.length, 1, "auditas privalo išlikti per restartą");
+    assert.equal(poRestarto[0].id, priesRestarta[0].id, "tas pats įrašas, ne naujas");
+    assert.equal(poRestarto[0].details, "pries-restarta");
+
+    /**
+     * ⚠️ IR SVARBIAUSIA - GDPR KELIAS VEIKIA PO RESTARTO.
+     *
+     * Būtent dėl to `AUDIT_ID_SALT` tapo privaloma: su procesui lokalia
+     * atsitiktine druska antrasis paleidimas skaičiuotų KITĄ pseudonimą, ir
+     * `removeBySubjectIdentifier()` senų įrašų nerastų - grąžintų „ištrinta 0"
+     * tyliai.
+     */
+    assert.equal(
+      await auditLog.removeBySubjectIdentifier("job-per-restarta"),
+      1,
+      "po restarto GDPR ištrynimas privalo rasti PRIEŠ restartą sukurtą įrašą"
     );
   } finally {
     await auditStore.shutdown();

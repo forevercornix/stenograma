@@ -152,3 +152,111 @@ test("SKENERIO IŠIMTIS: saugyklos sluoksnis realiai NĖRA producer'is", () => {
     );
   }
 });
+
+test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRAUDŽIAMI", () => {
+  /**
+   * ⚠️ TRIPWIRE (AGENTS.md §9.2), ne elgsenos įrodymas.
+   *
+   * `getAll()` grąžina VISĄ žurnalą be ribos. Kontraktas išlaikytas sąmoningai:
+   * dešimtys esamų testų juo remiasi, o #211 reikalauja, kad jie praeitų be
+   * modifikacijų. Bet persistentiniame režime tai reiškia pilną `audit_log`
+   * lentelės perkėlimą per tinklą - o auditas yra būtent ta lentelė, kuri auga
+   * be ribos.
+   *
+   * Produkciniai keliai turi naudoti `query({limit, ...})` arba `hasSubject()`.
+   * Šiandien NĖ VIENAS produkcinis kelias `getAll()` nekviečia, tad whitelist'as
+   * TUŠČIAS - stipriausia įmanoma forma. Naujas kvietėjas privalo laužyti šį
+   * testą ir būti pridėtas čia SĄMONINGAI, su paaiškinimu, o ne atsirasti tyliai.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  /**
+   * Žinomi kvietėjai. Kiekvienas įrašas privalo turėti priežastį - be jos
+   * whitelist'as taptų vieta, kur riba tyliai plečiama.
+   *
+   * @type {Array<{failas: string, kodel: string}>}
+   */
+  const LEIDZIAMI = [];
+
+  const PRODUKCINIAI = ["utils", "services", "middleware", "routes", "workers", "queues"];
+  const saknis = path.join(__dirname, "..");
+
+  /** Fasado apibrėžimas ir saugyklos sluoksnis nėra kvietėjai. */
+  const NE_KVIETEJAI = ["utils/auditLog.js", "utils/auditStore/"];
+
+  const rasti = [];
+
+  for (const katalogas of PRODUKCINIAI) {
+    const dir = path.join(saknis, katalogas);
+    let irasai;
+    try {
+      irasai = fs.readdirSync(dir, { recursive: true });
+    } catch {
+      continue;
+    }
+
+    for (const irasas of irasai) {
+      const santykinis = `${katalogas}/${String(irasas)}`;
+      if (!santykinis.endsWith(".js")) continue;
+      if (NE_KVIETEJAI.some((k) => santykinis.startsWith(k))) continue;
+
+      const svarus = beKomentaru(fs.readFileSync(path.join(dir, String(irasas)), "utf8"));
+
+      if (/auditLog\s*\.\s*getAll\s*\(/.test(svarus)) rasti.push(santykinis);
+    }
+  }
+
+  const netiketi = rasti.filter((f) => !LEIDZIAMI.some((l) => l.failas === f));
+
+  assert.deepEqual(
+    netiketi,
+    [],
+    "naujas neribotas audito skaitymas produkciniame kelyje: " +
+      `${netiketi.join(", ")}. Naudokite \`query({limit})\` arba \`hasSubject()\`; ` +
+      "jei neribotas skaitymas tikrai būtinas - pridėkite į LEIDZIAMI su priežastimi"
+  );
+
+  /**
+   * ⚠️ IR ATVIRKŠČIAI: whitelist'as, atsilikęs nuo kodo, tyliai leistų grąžinti
+   * pašalintą kvietėją. Kiekvienas įrašas privalo atitikti realų failą.
+   */
+  for (const leidžiamas of LEIDZIAMI) {
+    assert.ok(
+      rasti.includes(leidžiamas.failas),
+      `${leidžiamas.failas} whitelist'e, bet \`getAll()\` nebekviečia - įrašą pašalinkite`
+    );
+    assert.ok(leidžiamas.kodel && leidžiamas.kodel.length > 10, "whitelist įrašas be priežasties");
+  }
+});
+
+test("RETENCIJOS ĮSPĖJIMAS: turinys įvardija TIKSLIAI tai, ko operatorius nežino", () => {
+  /**
+   * ⚠️ TURINIO PATIKRA VYKDOMA VIETOJE; kad įspėjimas realiai LOGINAMAS starte,
+   * tikrina `auditPersistence.integration` (reikia tikros DB).
+   *
+   * Postgres režime `audit_log` neribotai auga iki [7.4d]. Diegimas, matantis
+   * `AUDIT_RETENTION_DAYS=30` konfigūracijoje, pagrįstai manytų, kad ji galioja -
+   * todėl įspėjimas privalo pasakyti abu dalykus: kad NEVEIKIA ir kad lentelė AUGS.
+   */
+  const { RETENCIJOS_ISPEJIMAS } = require("../utils/auditStore");
+
+  for (const privalomas of [
+    "AUDIT_RETENTION_DAYS",
+    "AUDIT_MAX_ENTRIES",
+    "audit_log",
+    "7.4d",
+    "docs/audit-storage.md",
+  ]) {
+    assert.ok(
+      RETENCIJOS_ISPEJIMAS.includes(privalomas),
+      `įspėjime turi būti „${privalomas}" - kitaip operatorius nežinotų, ko ieškoti`
+    );
+  }
+
+  assert.match(RETENCIJOS_ISPEJIMAS, /neribotai|nešalinamos/i, "poveikis turi būti įvardytas");
+
+  /** ⚠️ Ne klaida, o įspėjimas - startas privalo tęstis. */
+  assert.doesNotMatch(RETENCIJOS_ISPEJIMAS, /NUTRAUK|startas negalimas/i);
+});

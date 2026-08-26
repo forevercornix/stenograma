@@ -35,6 +35,28 @@ const REQUIRED_AUDIT_CONSTRAINTS = Object.freeze([
 /** Append-only trigeris - pagrindinė šios lentelės garantija. */
 const REQUIRED_AUDIT_TRIGGER = "audit_log_no_update";
 
+/**
+ * ⚠️ NERIBOTAS AUGIMAS - MATOMUMAS, NE STARTO KLAIDA (#155, 7.4b).
+ *
+ * `AUDIT_RETENTION_DAYS` ir `AUDIT_MAX_ENTRIES` galioja TIK atminties režimui:
+ * jie taikomi masyvui `auditLog` viduje, o persistentinės retencijos savininkas
+ * yra [7.4d]. Postgres režime `audit_log` eilutės automatiškai NEŠALINAMOS.
+ *
+ * Startas dėl to nenutraukiamas: persistentinis auditas be retencijos vis tiek
+ * geriau nei jokio audito, ir operatorius gali turėti savo valymo politiką. Bet
+ * tylėti negalima - diegimas, matantis `AUDIT_RETENTION_DAYS=30` konfigūracijoje,
+ * pagrįstai manytų, kad ji galioja.
+ *
+ * ⚠️ EKSPORTUOJAMA KONSTANTA, ne inline eilutė: turinį reikia tikrinti BE tikros
+ * DB, nes pats `init()` postgres šakoje be jos nevykdomas.
+ */
+const RETENCIJOS_ISPEJIMAS =
+  "Audito retencija NEVEIKIA postgres režime: AUDIT_RETENTION_DAYS ir " +
+  "AUDIT_MAX_ENTRIES taikomi tik atminties backend'ui, tad `audit_log` " +
+  "eilutės automatiškai nešalinamos ir lentelė augs neribotai. " +
+  "Persistentinę retenciją įgyvendina [7.4d]; iki tol reikalinga išorinė " +
+  "valymo politika. Žr. docs/audit-storage.md §9.";
+
 let store = memoryStore;
 let _pool = null;
 let initPromise = null;
@@ -169,6 +191,9 @@ async function init(env = process.env) {
     _pool = pool;
     paruosta = true;
     log.info("Audito saugykla: PostgreSQL (persistentinė, append-only)");
+
+    log.warn(RETENCIJOS_ISPEJIMAS);
+
     return store;
   })().catch((error) => {
     initPromise = null; // leidžiam pakartoti init po nesėkmės
@@ -224,4 +249,5 @@ module.exports = {
   auditoPoolNustatymai,
   REQUIRED_AUDIT_CONSTRAINTS,
   REQUIRED_AUDIT_TRIGGER,
+  RETENCIJOS_ISPEJIMAS,
 };
