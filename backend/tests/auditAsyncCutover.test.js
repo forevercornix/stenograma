@@ -1029,6 +1029,47 @@ test("VARDŲ KONTRAKTAS: netaisyklingas eksplicitinis įvykis ATMETAMAS, o ne i�
   await rasytiAudita({ event: "LOGIN_SUCCESS", success: true, actor: "x" });
 });
 
+test("VARDŲ KONTRAKTAS: atmetama KIEKVIENA netinkama reikšmė, ne tik eilutė", async () => {
+  /**
+   * ⚠️ #210 recenzija (P2): sargyba tikrino `typeof === "string"`.
+   *
+   * Producer'is, kurio `event` ateina iš parsintos konfigūracijos ar kito
+   * dinaminio šaltinio, gali perduoti `null`, skaičių ar objektą. Tokia reikšmė
+   * eilutės patikros neatitikdavo, sargybą apeidavo, ir `normalizeEvent()` vėl
+   * tyliai išvesdavo `PROCESSING_COMPLETED`/`PROCESSING_FAILED` - t. y. tas pats
+   * nutekėjimas, tik kitu tipu.
+   *
+   * Nepateiktu vardas laikomas TIK tada, kai realiai praleistas.
+   */
+  const ciklinis = { pavadinimas: "LOGIN_SUCCESS" };
+  ciklinis.pats = ciklinis;
+
+  const netinkamos = [
+    ["null", null],
+    ["skaičius", 42],
+    ["objektas", { event: "LOGIN_SUCCESS" }],
+    ["masyvas", ["LOGIN_SUCCESS"]],
+    ["loginė", true],
+    /** Ciklinis: `JSON.stringify()` mestų, ir klaidos konstruktorius kristų. */
+    ["ciklinis objektas", ciklinis],
+  ];
+
+  for (const [pavadinimas, reiksme] of netinkamos) {
+    await assert.rejects(
+      () => rasytiAudita({ event: reiksme, success: true }),
+      (e) => e.code === "AUDIT_EVENT_MALFORMED",
+      `${pavadinimas} turi būti atmestas, o ne tyliai išvestas`
+    );
+  }
+
+  /**
+   * PRALEISTAS vardas lieka teisėtas: išvedimas iš kitų laukų yra sąmoningas
+   * mechanizmas, ir sugriežtinimas jo neuždaro.
+   */
+  assert.ok(await rasytiAudita({ success: true, jobId: "praleistas-vardas" }));
+  assert.ok(await rasytiAudita({ event: undefined, success: true, jobId: "aiskus-undefined" }));
+});
+
 test("POST-HOC AUTORITETAS: apima VISUS įvykius, rašomus po negrįžtamo veiksmo", async () => {
   /**
    * ⚠️ TIKRINAMA PRIEŠ KODĄ, NE PRIEŠ SĄRAŠĄ.

@@ -219,8 +219,23 @@ function arPostHoc(event) {
  */
 class MalformedAuditEventError extends Error {
   constructor(vardas) {
+    /**
+     * ⚠️ Į žinutę patenka TIPAS, o ne svetima reikšmė.
+     *
+     * Reikšmė gali ateiti iš dinaminio šaltinio ir nešti naudotojo duomenų, o
+     * `JSON.stringify()` ciklinį objektą apskritai mestų - klaidos konstruktorius
+     * kristų vietoj to, kad praneštų problemą. Eilutė rodoma pilnai (ji jau
+     * neatitinka šablono, tad PII joje netelpa) ir apkarpoma dėl logų higienos.
+     */
+    const aprasas =
+      typeof vardas === "string"
+        ? JSON.stringify(vardas.slice(0, 64))
+        : vardas === null
+          ? "null"
+          : `tipas ${typeof vardas}`;
+
     super(
-      `Audito įvykio vardas neatitinka kontrakto: ${JSON.stringify(vardas)}. ` +
+      `Audito įvykio vardas neatitinka kontrakto: ${aprasas}. ` +
         "Laukiama VERSALIAIS su pabraukimais (pvz. LOGIN_SUCCESS)."
     );
     this.name = "MalformedAuditEventError";

@@ -194,9 +194,26 @@ async function rasytiAudita(entry, { auditLog = require("./auditLog") } = {}) {
    * Šablonas imamas iš `auditEvents` - klasifikacijos autoriteto, o ne iš
    * `auditLog`: pastarasis testuose pakeičiamas dubliu, ir sargyba tyliai
    * nustotų veikti būtent ten, kur ją norim patikrinti.
+   *
+   * ⚠️ ATMETAMA KIEKVIENA NETINKAMA REIKŠMĖ, NE TIK EILUTĖ.
+   *
+   * Pirmoji versija tikrino `typeof entry.event === "string"`, tad `null`,
+   * skaičius ar objektas - kokie ir ateina iš parsintos konfigūracijos ar kito
+   * dinaminio šaltinio - sargybą apeidavo ir vėl nutekėdavo į išvedimą.
+   * Nepateiktu vardas laikomas TIK tada, kai jis realiai praleistas
+   * (`undefined`); bet kuri kita reikšmė yra ketinimas nurodyti įvykį, ir
+   * netinkamas ketinimas turi būti klaida, o ne tylus išvedimas.
+   *
+   * Į logą rašomas tik reikšmės TIPAS: dinaminis šaltinis gali atnešti
+   * naudotojo duomenų, o `MalformedAuditEventError` žinutė lieka vidinė.
    */
-  if (typeof entry.event === "string" && !EVENT_PATTERN.test(entry.event)) {
-    log.error("Netaisyklingas audito įvykio vardas", { ivykioVardas: entry.event });
+  const vardasPateiktas = entry.event !== undefined;
+  const vardasTinkamas = typeof entry.event === "string" && EVENT_PATTERN.test(entry.event);
+
+  if (vardasPateiktas && !vardasTinkamas) {
+    log.error("Netaisyklingas audito įvykio vardas", {
+      ivykioVardas: entry.event === null ? "null" : typeof entry.event,
+    });
     skaitikliai.auditWriteFailures += 1;
     throw new MalformedAuditEventError(entry.event);
   }
