@@ -121,7 +121,8 @@ const MAX_ERROR_LENGTH = 300;
 const MAX_PROVIDER_LENGTH = 80;
 const MAX_EVENT_LENGTH = 64;
 
-const EVENT_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+/** Vienas vardų kontrakto autoritetas - žr. `auditEvents.js`. */
+const { EVENT_PATTERN } = require("./auditEvents");
 
 // Kontroliuojamiems laukams leidžiami simboliai. Tokių reikšmių pavyzdžiai:
 // "claude-3-5-sonnet-20241022", "faster-whisper-embedded (inline)", "meeting_v3",

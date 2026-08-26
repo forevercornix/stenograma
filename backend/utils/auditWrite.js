@@ -1,5 +1,10 @@
 const { createLogger } = require("./logger");
-const { arBlokuojantis, kategorija } = require("./auditEvents");
+const {
+  arBlokuojantis,
+  kategorija,
+  MalformedAuditEventError,
+  EVENT_PATTERN,
+} = require("./auditEvents");
 const { getRequestId } = require("./requestContext");
 
 const log = createLogger("audit-write");
@@ -163,6 +168,25 @@ function suRiba(promise, ribaMs, event, blokuojantis) {
  */
 async function rasytiAudita(entry, { auditLog = require("./auditLog") } = {}) {
   const { normalizeEvent } = auditLog;
+
+  /**
+   * ⚠️ NETAISYKLINGAS VARDAS ATMETAMAS PRIEŠ IŠVEDIMĄ (#210).
+   *
+   * Be šios sargybos `normalizeEvent()` tyliai ignoruotų neatitinkantį
+   * `entry.event` ir išvestų įvykį iš kitų laukų - žr.
+   * `MalformedAuditEventError` paaiškinimą. Klaida NĖRA `AuditWriteError`:
+   * tai programavimo, o ne infrastruktūros gedimas, tad neturi virsti 503
+   * „auditas neprieinamas" ir būti palaikyta laikina.
+   * Šablonas imamas iš `auditEvents` - klasifikacijos autoriteto, o ne iš
+   * `auditLog`: pastarasis testuose pakeičiamas dubliu, ir sargyba tyliai
+   * nustotų veikti būtent ten, kur ją norim patikrinti.
+   */
+  if (typeof entry.event === "string" && !EVENT_PATTERN.test(entry.event)) {
+    log.error("Netaisyklingas audito įvykio vardas", { ivykioVardas: entry.event });
+    skaitikliai.auditWriteFailures += 1;
+    throw new MalformedAuditEventError(entry.event);
+  }
+
   const event = normalizeEvent(entry);
 
   /**

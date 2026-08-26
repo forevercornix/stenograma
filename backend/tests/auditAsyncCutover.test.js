@@ -114,14 +114,15 @@ test("KLASIFIKACIJA: kiekvienas žinomas įvykis turi vieną iš DVIEJŲ kategor
   assert.ok(Object.keys(AUDIT_EVENTS).length >= 20, "klasifikacija negali tyliai susitraukti");
 });
 
-test("POST-HOC: keturi ištrynimo įvykiai įvardyti eksplicitiškai ir LIEKA blokuojantys", () => {
+test("POST-HOC: visi po-veiksmo įvykiai įvardyti eksplicitiškai ir LIEKA blokuojantys", () => {
   /**
    * ⚠️ ŠIS TESTAS SAUGO TERMINŲ ATSKYRIMĄ, NE ELGESĮ.
    *
    * `BLOKUOJANTIS` ir `fail-closed` anksčiau buvo sulipę viename komentare, ir
    * skaitytojas pagrįstai suprasdavo, kad audito gedimas apsaugo DUOMENIS.
-   * Šiuose keturiuose keliuose auditas rašomas JAU PO trynimo, tad apsaugo tik
-   * ataskaitą.
+   * Šiuose keliuose auditas rašomas JAU PO veiksmo, tad apsaugo tik ataskaitą:
+   * keturi ištrynimo keliai, `LOGOUT` (sesija atšaukta ir cookie išvalytas dar
+   * prieš įrašą) ir `ADMIN_DELETE_OVERRIDE` (artefaktai jau pašalinti).
    *
    * Rinkinys laikomas kode (ne vien prozoje), kad jį būtų galima tikrinti:
    *  - kiekvienas jo narys PRIVALO likti blokuojantis (kitaip prarastume ir
@@ -131,7 +132,14 @@ test("POST-HOC: keturi ištrynimo įvykiai įvardyti eksplicitiškai ir LIEKA bl
    */
   assert.deepEqual(
     [...POST_HOC_IVYKIAI].sort(),
-    ["ADMIN_ORPHAN_CLEANUP", "DATA_ERASED", "LIFECYCLE_DELETION", "RETENTION_PURGE"],
+    [
+      "ADMIN_DELETE_OVERRIDE",
+      "ADMIN_ORPHAN_CLEANUP",
+      "DATA_ERASED",
+      "LIFECYCLE_DELETION",
+      "LOGOUT",
+      "RETENTION_PURGE",
+    ],
     "post-hoc aibė pasikeitė - patikrink, ar naujas kelias tikrai rašo auditą po veiksmo"
   );
 
@@ -977,5 +985,219 @@ test("unhandledRejection: VĖLUOJANTI backend klaida po timeout nesukelia reject
     assert.deepEqual(pagauti, [], "vėluojanti klaida privalo būti suvaldyta");
   } finally {
     process.off("unhandledRejection", handler);
+  }
+});
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * #210 peržiūros pataisos: siauras catch, post-hoc pilnumas, vardų kontraktas,
+ * žymos tvarka.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+test("VARDŲ KONTRAKTAS: netaisyklingas eksplicitinis įvykis ATMETAMAS, o ne išvedamas", async () => {
+  /**
+   * ⚠️ KODĖL TAI SAUGOS TESTAS, O NE RAŠYBOS.
+   *
+   * `normalizeEvent()` neatitinkantį `entry.event` ignoruoja ir įvykį išveda iš
+   * kitų laukų. Rašybos klaida autentikacijos įvykyje („login_success") taip
+   * virsdavo `PROCESSING_COMPLETED` - NEBLOKUOJANČIU. Blokuojanti garantija
+   * dingdavo tyliai, be jokio signalo.
+   *
+   * Pirma parodom, kad išvedimas realiai duotų neblokuojantį įvykį - kitaip
+   * testas gintų nuo nieko.
+   */
+  assert.equal(
+    auditLog.normalizeEvent({ event: "login_success", success: true }),
+    "PROCESSING_COMPLETED",
+    "prielaida: netaisyklingas vardas išvedamas į neblokuojantį įvykį"
+  );
+  assert.equal(arBlokuojantis("PROCESSING_COMPLETED"), false);
+
+  await assert.rejects(
+    () => rasytiAudita({ event: "login_success", success: true }),
+    (e) => e.code === "AUDIT_EVENT_MALFORMED",
+    "netaisyklingas vardas turi būti kontroliuojama klaida"
+  );
+
+  // NE `AuditWriteError`: programavimo klaida neturi virsti 503 „laikinas
+  // audito gedimas" ir būti kartojama kaip infrastruktūros problema.
+  await assert.rejects(
+    () => rasytiAudita({ event: "login_success", success: true }),
+    (e) => !(e instanceof AuditWriteError)
+  );
+
+  // Taisyklingas vardas nepaliečiamas.
+  await rasytiAudita({ event: "LOGIN_SUCCESS", success: true, actor: "x" });
+});
+
+test("POST-HOC AUTORITETAS: apima VISUS įvykius, rašomus po negrįžtamo veiksmo", async () => {
+  /**
+   * ⚠️ TIKRINAMA PRIEŠ KODĄ, NE PRIEŠ SĄRAŠĄ.
+   *
+   * `LOGOUT` rašomas po `destroy()` + cookie valymo, `ADMIN_DELETE_OVERRIDE` -
+   * po `deleteJobArtefacts()`. Jei jų nėra `POST_HOC_IVYKIAI`, dokumentacija ir
+   * matrica teigia „fail-closed" ten, kur veiksmas jau negrįžtamai įvykęs.
+   */
+  for (const event of ["LOGOUT", "ADMIN_DELETE_OVERRIDE"]) {
+    assert.ok(arBlokuojantis(event), `${event} turi likti blokuojantis`);
+    assert.ok(arPostHoc(event), `${event} rašomas PO veiksmo - turi būti post-hoc`);
+  }
+});
+
+test("ŽYMOS TVARKA: kritęs auditas NEPALIEKA patvirtintos ištrynimo žymos", async () => {
+  /**
+   * ⚠️ P1 REGRESIJA (#210 peržiūra).
+   *
+   * `deleted` yra GALUTINĖ žymos būsena. Jei žymą užbaigtume PRIEŠ auditą, po
+   * kritusio audito liktų `deleted`, ir kitas to paties jobo kvietimas
+   * `isConfirmedDeleted()` trumpuoju keliu grąžintų `already_deleted` su
+   * `complete: true`. Kvietėjas gautų SĖKMĘ, o gyvavimo ciklo įvykis dingtų
+   * negrįžtamai - tyliai.
+   *
+   * Testas tikrina abi puses: (a) žyma neužfiksuota, (b) pakartojimas realiai
+   * atlieka trynimą ir PARAŠO auditą, o ne trumpina kelią.
+   */
+  const lifecycleService = require("../services/lifecycleService");
+  const tombstones = require("../utils/deletionTombstones");
+  const jobStore = require("../utils/jobStore");
+
+  await jobStore.init();
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+
+  await suKrentanciuRecord(
+    async () => {
+      await assert.rejects(
+        () => lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" }),
+        (e) => e instanceof AuditWriteError
+      );
+    },
+    ["LIFECYCLE_DELETION"]
+  );
+
+  assert.equal(
+    tombstones.isConfirmedDeleted(job.id),
+    false,
+    "be patvirtinto audito žyma NEGALI būti `deleted` - kitaip pėdsakas prarandamas negrįžtamai"
+  );
+
+  // Artefaktų kūrimas vis tiek užblokuotas: žyma lieka `deletion_pending`.
+  assert.ok(tombstones.isDeleted(job.id), "žyma privalo likti - trynimas jau vyko");
+
+  // Pakartojimas: auditas nebekrinta, tad turi būti PARAŠYTAS, o ne praleistas.
+  const priesTai = (await auditLog.getAll()).length;
+  const antras = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
+
+  const nauji = (await auditLog.getAll()).slice(priesTai);
+  assert.ok(
+    nauji.some((e) => e.event === "LIFECYCLE_DELETION"),
+    "pakartotinis kvietimas privalo užfiksuoti prarastą įvykį, o ne grąžinti `already_deleted`"
+  );
+  assert.notEqual(antras.status, "already_deleted");
+  assert.equal(tombstones.isConfirmedDeleted(job.id), true, "dabar žyma patvirtinta");
+});
+
+test("SIAURAS CATCH: NE audito klaida NEVADINAMA `AUDIT_UNAVAILABLE`", async () => {
+  /**
+   * ⚠️ #210 peržiūra (P2).
+   *
+   * `authorizeJobOrAudit()` meta ir dėl nesuderinamos PERSISTUOTOS būsenos
+   * (nepalaikoma `schemaVersion`, nežinomas `actorSource`) - dar PRIEŠ bet kokį
+   * audito rašymą. Platus `catch (error)` tokį gedimą pažymėtų
+   * `AUDIT_UNAVAILABLE`: operatorius ieškotų audito infrastruktūros problemos,
+   * kurios nėra, o tikroji priežastis (duomenų migracijos skola) liktų
+   * nematoma.
+   *
+   * Auditas čia NEKRENTA - klaidą duoda pati autorizacija.
+   */
+  const jobRunner = require("../queues/jobRunner");
+  const jobStore = require("../utils/jobStore");
+
+  await jobStore.init();
+
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.PROTOCOL,
+    ownerKind: "unowned",
+    actor: "kazkas",
+    actorSource: "session",
+    actorRole: "operator",
+  });
+
+  /**
+   * `schemaVersion` nustatomas TIESIOGIAI saugykloje: `create()` jo nepriima,
+   * o mus domina būtent PERSISTUOTAS nesuderinamas įrašas.
+   */
+  const issaugotas = await jobStore.system.get(job.id);
+  issaugotas.schemaVersion = 99;
+
+  const pagauti = [];
+  const handler = (p) => pagauti.push(p);
+  process.on("unhandledRejection", handler);
+
+  try {
+    await jobRunner._runInline("protocol", job.id, {});
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(pagauti, [], "inline kelias vis tiek negali palikti nesuvaldyto Promise");
+
+    const poVykdymo = await jobStore.system.get(job.id);
+    assert.equal(poVykdymo.status, jobStore.STATUS.FAILED, "job'as privalo tapti terminalus");
+    assert.notEqual(
+      poVykdymo.errorCode || poVykdymo.error_code,
+      "AUDIT_UNAVAILABLE",
+      "schemos nesuderinamumas NĖRA audito gedimas - platus catch klaidingai jį taip pavadintų"
+    );
+  } finally {
+    process.off("unhandledRejection", handler);
+  }
+});
+
+test("ŠALTINIO AUDIO: terminalus audito gedimas ATLAISVINA įkeltą failą", async () => {
+  /**
+   * ⚠️ #210 peržiūra (P2).
+   *
+   * Audito gedimo šaka `return`-ina anksčiau nei `_executeInline()` su savo
+   * `finally { releaseAudio }`. Be atskiro valymo įkeltas audio failas liktų
+   * saugykloje neribotam laikui: retencijos valytojas jo neliestų, nes raktą
+   * vis dar nurodo gyvas job'o įrašas (`listReferencedStorageKeys`). Sąmoningai
+   * atmestas vykdymas neturi palikti asmens duomenų.
+   */
+  const jobRunner = require("../queues/jobRunner");
+  const jobStore = require("../utils/jobStore");
+  const fileStorage = require("../utils/fileStorage");
+
+  await jobStore.init();
+
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.PROTOCOL,
+    ownerKind: "unowned",
+    actor: "dinges-vartotojas",
+    actorSource: "session",
+    actorRole: "operator",
+  });
+
+  const storageKey = "uploads/audito-gedimas-testas.wav";
+  const istrinti = [];
+  const originalusDel = fileStorage.del;
+  fileStorage.del = async (key) => {
+    istrinti.push(key);
+    return true;
+  };
+
+  try {
+    await suKrentanciuRecord(
+      async () => {
+        await jobRunner._runInline("protocol", job.id, { storageKey });
+      },
+      ["JOB_EXECUTION_DENIED"]
+    );
+
+    const poVykdymo = await jobStore.system.get(job.id);
+    assert.equal(poVykdymo.status, jobStore.STATUS.FAILED);
+    assert.equal(poVykdymo.errorCode || poVykdymo.error_code, "AUDIT_UNAVAILABLE");
+
+    assert.ok(
+      istrinti.includes(storageKey),
+      "atmetus vykdymą šaltinio audio privalo būti atlaisvintas, o ne paliktas saugykloje"
+    );
+  } finally {
+    fileStorage.del = originalusDel;
   }
 });

@@ -14,6 +14,7 @@
  *
  * Būsena rašoma per jobStore (Redis), tad HTTP GET /api/jobs/:id mato progresą.
  */
+const { AuditWriteError } = require("../utils/auditWrite");
 const jobStore = require("../utils/jobStore");
 const jobRunner = require("../queues/jobRunner");
 const { DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
@@ -158,16 +159,43 @@ function createWorker(queueName, processor, workerOptions = {}) {
           try {
             decision = await authorizeJobOrAudit(processingJob, jobId);
           } catch (error) {
-            log.error("Autorizacijos auditas nepavyko - vykdymas nutraukiamas", {
-              stage: "audit_unavailable",
+            /**
+             * ⚠️ GAUDOMA VISKAS, BET ŽYMIMA TIKSLIAI (#210 peržiūra).
+             *
+             * `authorizeJobOrAudit()` meta ir dėl nesuderinamos PERSISTUOTOS
+             * būsenos (nepalaikoma `schemaVersion`, nežinomas `actorSource`) -
+             * dar PRIEŠ bet kokį audito rašymą. Vadinti tai
+             * `AUDIT_UNAVAILABLE` reikštų siųsti operatorių ieškoti audito
+             * infrastruktūros problemos, kurios nėra, o tikrąją priežastį -
+             * duomenų migracijos skolą - paslėpti.
+             *
+             * Terminali būsena garantuojama abiem atvejais; skiriasi tik
+             * `error_code`.
+             */
+            const auditoGedimas = error instanceof AuditWriteError;
+
+            log.error("Autorizacija nepavyko - vykdymas nutraukiamas", {
+              stage: auditoGedimas ? "audit_unavailable" : "authorization_error",
               jobId,
               execution: "worker",
               klaida: error && error.message,
             });
             await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+              error_code: auditoGedimas ? "AUDIT_UNAVAILABLE" : "AUTHORIZATION_ERROR",
+              error_message: auditoGedimas
+                ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
+                : "Vykdymas nutrauktas: autorizacijos nepavyko įvertinti.",
+            });
+            await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
               error_code: "AUDIT_UNAVAILABLE",
               error_message: "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo.",
             });
+            /**
+             * ⚠️ ŠALTINIO AUDIO ATLAISVINAMAS. Terminalus job'as be valymo
+             * paliktų įkeltą failą pririštą prie jo, o retencijos valytojas
+             * tokių sąmoningai neliečia, kol nepasibaigia metaduomenys.
+             */
+            await _cleanupStorage(payload, jobId);
             return;
           }
 

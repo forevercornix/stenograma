@@ -252,27 +252,40 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
    * negalima, bet trynimą KARTOTI galima – be to dalinis ištrynimas taptų
    * negrįžtamai neužbaigtas.
    */
-  tombstones.complete(
-    jobId,
+  const zymosBusena =
     status === DELETION_STATUS.DELETED
       ? tombstones.TOMBSTONE_STATUS.DELETED
-      : tombstones.TOMBSTONE_STATUS.FAILED
-  );
+      : tombstones.TOMBSTONE_STATUS.FAILED;
 
-  const finished = tombstones.get(jobId);
+  const completedAt = status === DELETION_STATUS.DELETED ? Date.now() : null;
 
   const result = buildResult({
     jobId,
     status,
     actor,
     requestedAt: marker.requestedAt,
-    completedAt: finished ? finished.completedAt : null,
+    completedAt,
     deleted,
     remaining,
     failures,
   });
 
+  /**
+   * ⚠️ AUDITAS RAŠOMAS PRIEŠ ŽYMOS UŽBAIGIMĄ (#210).
+   *
+   * `deleted` yra GALUTINĖ žymos būsena (žr. ALLOWED_TOMBSTONE_TRANSITIONS) -
+   * atgal jos pasukti nebegalima. Jei žymą užbaigtume pirma ir tik tada kristų
+   * auditas, kitas to paties jobo kvietimas `isConfirmedDeleted()` trumpuoju
+   * keliu grąžintų `already_deleted` su `complete: true` ir gyvavimo ciklo
+   * įvykis dingtų NEGRĮŽTAMAI - tyliai, nes atsakymas atrodytų sėkmingas.
+   *
+   * Kritus auditui žyma lieka `deletion_pending`: artefaktų kurti vis dar
+   * negalima, trumpinimo kelio nėra, o pakartotinis kvietimas idempotentiškai
+   * pakartos ir trynimą, ir auditą.
+   */
   await writeAudit(result);
+
+  tombstones.complete(jobId, zymosBusena, { completedAt });
 
   return result;
 }

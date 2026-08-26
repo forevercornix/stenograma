@@ -15,6 +15,16 @@
  * `record()` kvietėjas priklauso vienai iš dviejų."
  */
 
+/**
+ * ĮVYKIO VARDO KONTRAKTAS.
+ *
+ * Gyvena ČIA, o ne `auditLog.js`, dėl vienos priežasties: `auditLog` testuose
+ * pakeičiamas dubliu (ir per require cache, ir per injekciją), o vardų
+ * kontraktas yra sistemos, ne backend'o savybė. Iš dublio jį imant sargyba
+ * tyliai nustotų veikti būtent ten, kur ją norim patikrinti.
+ */
+const EVENT_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+
 const KATEGORIJA = Object.freeze({
   /**
    * BLOKUOJANTIS: sėkmė negali būti deklaruota anksčiau, nei patvirtintas
@@ -174,6 +184,19 @@ const POST_HOC_IVYKIAI = Object.freeze([
   "LIFECYCLE_DELETION",
   "RETENTION_PURGE",
   "ADMIN_ORPHAN_CLEANUP",
+  /**
+   * Sesija jau atšaukta ir cookie išvalytas, kai rašomas `LOGOUT`. Atmesti
+   * atsijungimo nebegalima - o ir nereikėtų: neatšaukta sesija būtų blogesnė
+   * pusė. Kvietėjas vis tiek gauna 503 (sėkmė nedeklaruojama), bet veiksmas
+   * jau įvykęs, tad tai post-hoc, ne fail-closed.
+   */
+  "LOGOUT",
+  /**
+   * `ADMIN_DELETE_OVERRIDE` rašomas PO `deleteJobArtefacts()` - artefaktai jau
+   * pašalinti. Autorizacijos sprendimas čia priimtas anksčiau, bet įrašas apie
+   * jį - ne, tad veiksmo atmesti nebegalima.
+   */
+  "ADMIN_DELETE_OVERRIDE",
 ]);
 
 /** Ar šio įvykio auditas rašomas jau po negrįžtamo veiksmo? */
@@ -182,6 +205,29 @@ function arPostHoc(event) {
 }
 
 /** Nežinomas įvykis - kontroliuojama klaida, ne numatytoji kategorija. */
+/**
+ * Eksplicitiškai nurodytas įvykio vardas nesilaiko vardų kontrakto.
+ *
+ * ⚠️ KODĖL TAI ATSKIRA KLAIDA, O NE TYLUS NUKRITIMAS Į IŠVEDIMĄ (#210).
+ *
+ * `normalizeEvent()` naudoja `entry.event` tik tada, kai jis atitinka
+ * `EVENT_PATTERN`. Neatitinkantis (pvz. `"login_success"` vietoj
+ * `"LOGIN_SUCCESS"`) būdavo TYLIAI ignoruojamas, o įvykis išvedamas iš kitų
+ * laukų - autentikacijos įvykis su rašybos klaida taip paveldėdavo
+ * `PROCESSING_COMPLETED` ir kartu NEBLOKUOJANČIĄ semantiką. Blokuojanti
+ * garantija dingdavo be jokio signalo.
+ */
+class MalformedAuditEventError extends Error {
+  constructor(vardas) {
+    super(
+      `Audito įvykio vardas neatitinka kontrakto: ${JSON.stringify(vardas)}. ` +
+        "Laukiama VERSALIAIS su pabraukimais (pvz. LOGIN_SUCCESS)."
+    );
+    this.name = "MalformedAuditEventError";
+    this.code = "AUDIT_EVENT_MALFORMED";
+  }
+}
+
 class UnclassifiedAuditEventError extends Error {
   constructor(event) {
     super(
@@ -400,6 +446,8 @@ function validateAuditEvents() {
 }
 
 module.exports = {
+  EVENT_PATTERN,
+  MalformedAuditEventError,
   KATEGORIJA,
   AUDIT_EVENTS,
   IŠVEDAMI_ĮVYKIAI,

@@ -1,3 +1,4 @@
+const { AuditWriteError } = require("../utils/auditWrite");
 const jobStore = require("../utils/jobStore");
 const { assertResultWithinLimits } = require("../utils/resultLimits");
 const { createLogger } = require("../utils/logger");
@@ -275,16 +276,40 @@ async function _runInline(type, jobId, payload) {
       try {
         decision = await authorizeJobOrAudit(job, jobId);
       } catch (error) {
-        log.error("Autorizacijos auditas nepavyko - vykdymas nutraukiamas", {
-          stage: "audit_unavailable",
+        /**
+         * ⚠️ GAUDOMA VISKAS, BET ŽYMIMA TIKSLIAI (#210 peržiūra).
+         *
+         * `authorizeJobOrAudit()` meta ir dėl nesuderinamos PERSISTUOTOS
+         * būsenos (nepalaikoma `schemaVersion`, nežinomas `actorSource`) - dar
+         * PRIEŠ bet kokį audito rašymą. Vadinti tai `AUDIT_UNAVAILABLE` reikštų
+         * siųsti operatorių ieškoti audito infrastruktūros problemos, kurios
+         * nėra, o tikrąją priežastį - duomenų migracijos skolą - paslėpti.
+         *
+         * Persiųsti klaidą aukštyn NEGALIMA: šis kelias paleidžiamas per
+         * `setImmediate`, tad job'as liktų NETERMINALUS. Todėl terminali
+         * būsena garantuojama visada, o skiriasi tik `error_code`.
+         */
+        const auditoGedimas = error instanceof AuditWriteError;
+
+        log.error("Autorizacija nepavyko - vykdymas nutraukiamas", {
+          stage: auditoGedimas ? "audit_unavailable" : "authorization_error",
           jobId,
           execution: "inline",
           klaida: error && error.message,
         });
         await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
-          error_code: "AUDIT_UNAVAILABLE",
-          error_message: "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo.",
+          error_code: auditoGedimas ? "AUDIT_UNAVAILABLE" : "AUTHORIZATION_ERROR",
+          error_message: auditoGedimas
+            ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
+            : "Vykdymas nutrauktas: autorizacijos nepavyko įvertinti.",
         });
+        /** ⚠️ Šaltinio audio atlaisvinamas - `_executeInline` `finally` čia nepasiekiamas. */
+        if (payload && payload.storageKey) {
+          const { releaseAudio } = require("../utils/audioCleanup");
+          await releaseAudio(jobId, payload.storageKey).catch((e) =>
+            log.error(`Nepavyko atlaisvinti audio po audito gedimo: ${e.message}`)
+          );
+        }
         return;
       }
 
