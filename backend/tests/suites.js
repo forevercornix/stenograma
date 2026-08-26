@@ -121,6 +121,16 @@ const security = [
   "jobLifecycleDocumentation",
   "criticalGuarantees.route",
   "authFoundation",
+  /**
+   * #155, 7.4a: audito fasado async cutover.
+   *
+   * ⚠️ `auditAsyncCutover` tikrina POLITIKĄ (klasifikacija, timeout, skaitiklis,
+   * `unhandledRejection`), o `auditBlockingRoutes.route` - kad produkcinis HTTP
+   * kelias ja REALIAI naudojasi. Vienas be kito praeitų su fire-and-forget
+   * kvietimu maršrute.
+   */
+  "auditAsyncCutover",
+  "auditBlockingRoutes.route",
   /** #155, 7.3: bearer token'as, SHA-256 maiša ir uždara `schemaVersion` aibė. */
   "sessionTokenHash",
   /**

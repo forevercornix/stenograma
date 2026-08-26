@@ -31,16 +31,16 @@ test("jobStore TTL praėjo, bet audito įrašai liko - DELETE juos vis tiek išt
   auditLog.clear();
 
   const jobId = "11111111-2222-3333-4444-555555555555";
-  auditLog.record({ jobId, transcriptionProvider: "mock", success: true });
+  await auditLog.record({ jobId, transcriptionProvider: "mock", success: true });
 
   assert.equal(await jobStore.system.get(jobId), null, "jobStore įrašo neturi būti");
-  assert.equal(auditLog.getAll().length, 1);
+  assert.equal((await auditLog.getAll()).length, 1);
 
   const res = await request(app).delete(`/api/transcribe-jobs/${jobId}`);
 
   assert.equal(res.status, 204);
   assert.equal(
-    auditLog.getAll().filter((entry) => entry.event !== "DATA_ERASED").length,
+    (await auditLog.getAll()).filter((entry) => entry.event !== "DATA_ERASED").length,
     0,
     "likę audito įrašai turi būti pašalinti"
   );
@@ -61,12 +61,12 @@ test("ištrynimo kvitas įrašomas ir NĖRA susietas su subjektu", async () => {
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
   await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
-  auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: true });
+  await auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: true });
 
   const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
   assert.equal(res.status, 204);
 
-  const receipts = auditLog.getAll().filter((entry) => entry.event === "DATA_ERASED");
+  const receipts = (await auditLog.getAll()).filter((entry) => entry.event === "DATA_ERASED");
 
   assert.equal(receipts.length, 1, "turi likti įrodymas, kad ištrynimas įvyko");
   assert.equal(receipts[0].subjectId, null, "kvitas negali būti susietas su subjektu");
@@ -74,7 +74,7 @@ test("ištrynimo kvitas įrašomas ir NĖRA susietas su subjektu", async () => {
 
   // Pakartotinis to paties jobo ištrynimas kvito nepašalina.
   assert.equal(await auditLog.removeBySubjectIdentifier(job.id), 0);
-  assert.equal(auditLog.getAll().filter((e) => e.event === "DATA_ERASED").length, 1);
+  assert.equal((await auditLog.getAll()).filter((e) => e.event === "DATA_ERASED").length, 1);
 });
 
 test("deletion_pending jobas pakartojamas automatiškai", async () => {
@@ -230,7 +230,7 @@ test("nežinomas ID nesukuria klaidingo DATA_ERASED kvito", async () => {
 
   assert.equal(res.status, 404);
   assert.equal(
-    auditLog.getAll().filter((entry) => entry.event === "DATA_ERASED").length,
+    (await auditLog.getAll()).filter((entry) => entry.event === "DATA_ERASED").length,
     0,
     "niekas nebuvo ištrinta - kvito būti neturi"
   );
@@ -249,7 +249,7 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
     storageKey: key,
   });
   await jobStore.system.finish(job.id, jobStore.STATUS.FAILED, { deletion_pending: true });
-  auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: false });
+  await auditLog.record({ jobId: job.id, transcriptionProvider: "mock", success: false });
 
   // Abu keliai startuoja vienu metu ir trina TĄ PATĮ jobą.
   const [httpRes, retrySummary] = await Promise.all([
@@ -268,7 +268,7 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
   // Nesvarbu, kuris nugalėjo - galutinė būsena turi būti ta pati.
   assert.equal(await jobStore.system.get(job.id), null);
   assert.equal(
-    auditLog.getAll().filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(job.id))
+    (await auditLog.getAll()).filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(job.id))
       .length,
     0
   );

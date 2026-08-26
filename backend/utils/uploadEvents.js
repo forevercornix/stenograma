@@ -1,4 +1,4 @@
-const auditLog = require("./auditLog");
+const { rasytiAudita } = require("./auditWrite");
 const { createLogger } = require("./logger");
 
 const log = createLogger("upload");
@@ -41,7 +41,12 @@ function _safeMime(value) {
  * @param {string} reason - viena iš REASONS reikšmių
  * @param {{route?: string, mimetype?: string, size?: number}} [details]
  */
-function recordRejectedUpload(reason, details = {}) {
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210). `UPLOAD_REJECTED` yra NEBLOKUOJANTIS - audito
+ * gedimas atmetimo nepakeičia, bet Promise vis tiek laukiamas, kad
+ * `rasytiAudita()` spėtų jį suloginti ir suskaičiuoti.
+ */
+async function recordRejectedUpload(reason, details = {}) {
   // `jobId` perduodamas, kai jis jau egzistuoja: kitaip įvykis liktų nesusietas
   // su subjektu ir jo NEPASIEKTŲ GDPR ištrynimas. PII jame nėra, bet
   // „neištrinamas įrašas apie asmens veiksmą" yra pati problema, kurios vengiam.
@@ -62,7 +67,7 @@ function recordRejectedUpload(reason, details = {}) {
 
   log.warn("Įkėlimas atmestas", payload);
 
-  auditLog.record({
+  await rasytiAudita({
     event: "UPLOAD_REJECTED",
     success: false,
     jobId: details.jobId || null,

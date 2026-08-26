@@ -1,7 +1,8 @@
 const { hasPermission } = require("../utils/permissions");
 const { KNOWN_ROLES } = require("../utils/credentials");
 const { createLogger } = require("../utils/logger");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita, AuditWriteError } = require("../utils/auditWrite");
+const { auditoGedimas } = require("../utils/auditHttp");
 
 const log = createLogger("authz");
 
@@ -64,7 +65,13 @@ function resolveIdentity(req) {
  * reikštų kiekvieno maršruto redagavimą, ir dvi vietos ilgainiui išsiskirtų.
  */
 function requirePermission(permission) {
-  return function authorize(req, res, next) {
+  /**
+   * ⚠️ ASYNC NUO 7.4a (#210). `AUTHORIZATION_DENIED` yra BLOKUOJANTIS įvykis:
+   * 403 negali būti grąžintas anksčiau, nei patvirtintas audito įrašas - kitaip
+   * bandymai viršyti teises liktų be pėdsako būtent tada, kai audito labiausiai
+   * reikia. Express 5 palaiko async middleware.
+   */
+  return async function authorize(req, res, next) {
     const identity = resolveIdentity(req);
 
     /**
@@ -81,17 +88,23 @@ function requirePermission(permission) {
     }
 
     if (!hasPermission(identity.role, permission)) {
+      /** Audito gedimas čia reiškia, kad 403 negali būti deklaruotas - žr. `auditoGedimas`. */
       /**
        * AUDITAS: atmestas leidimas yra saugumo įvykis (#17 modelis) – be jo
        * nematytume nei bandymų viršyti teises, nei per siaurai sukonfigūruotų
        * rolių, kurios trukdo teisėtam darbui.
        */
-      auditLog.record({
-        event: "AUTHORIZATION_DENIED",
-        success: false,
-        outcome: "forbidden",
-        details: `permission=${permission} role=${identity.role} source=${identity.source}`,
-      });
+      try {
+        await rasytiAudita({
+          event: "AUTHORIZATION_DENIED",
+          success: false,
+          outcome: "forbidden",
+          details: `permission=${permission} role=${identity.role} source=${identity.source}`,
+        });
+      } catch (error) {
+        if (error instanceof AuditWriteError) return auditoGedimas(res, error, "authorize auditas");
+        throw error;
+      }
       log.warn("Prieiga atmesta", { permission, role: identity.role, source: identity.source });
 
       return res.status(403).json({

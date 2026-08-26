@@ -1471,3 +1471,17 @@ Sąžiningumo dėlei — ribos, kurios lieka atviros:
 | `/api/ready` atspindi GYVĄ sesijų autoriteto būseną, ne starto vėliavą; fail-closed ir su baigtine riba | `sessionAuthFailClosed.route` | Pašalinus `sessionStoreReachable` iš `ready` sprendimo → krinta 4 readiness testai; `await store.probe(); return true` (neignoruojant grąžintos reikšmės) → krinta „zondas, grąžinęs `false`" testas |
 | Ištuštinus `AUTH_USERS`, sesija su stabiliu `userId` revokuojama ABIEJUOSE backend'uose | `sessionStoreBackendContract.integration`, `sessionAuthFailClosed.route` | Grąžinus sąlygą `Boolean(env.AUTH_USERS.trim())` į tapatybės patikrą → krinta bendras scenarijus `auth-users-istustintas` ir fasado testas |
 | Memory ir PostgreSQL vykdo TĄ PATĮ scenarijų rinkinį | `sessionStoreBackendContract.integration` | Backend'ų semantikai išsiskyrus (pvz. fizinis vs loginis šalinimas) → krinta atitinkamas bendras scenarijus; pašalinus scenarijų → krinta pilnumo patikra pagal `id` |
+
+### #210 — audito fasado async cutover (#155, 7.4a)
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Kiekvienas žinomas audito įvykis turi VIENĄ autoritetingą klasifikaciją (blokuojantis / neblokuojantis); trečios kategorijos nėra | `auditAsyncCutover` | Pridėjus `normalizeEvent()` šaką ar `event:` literalą be įrašo `utils/auditEvents.js` → krinta išvedimo ir tripwire testai; `default: "non-blocking"` → krinta neklasifikuoto įvykio testas |
+| Neklasifikuotas įvykis aptinkamas PALEIDIMO metu, ne pirmo įvykio metu | `auditAsyncCutover` | Pašalinus `validateAuditEvents()` iš `startupChecks` → startas nebepraneša apie neklasifikuotą `normalizeEvent()` išvestį |
+| Blokuojantis audito gedimas ATMETA saugomą veiksmą (fail-closed) | `auditAsyncCutover`, `auditBlockingRoutes.route` | Pakeitus `LOGIN_SUCCESS` į neblokuojantį → prisijungimas grąžina 200 be audito įrašo; pašalinus `await` maršrute → cookie išduodama nepatvirtinus audito |
+| Sėkmė nedeklaruojama anksčiau už auditą: `Set-Cookie` siunčiama TIK po patvirtinto įrašo | `auditBlockingRoutes.route` | Grąžinus `setSessionCookie()` prieš `rasytiAudita()` → krinta „sesijos cookie negali būti išduota" |
+| Neblokuojantis gedimas NENUMUŠA operacijos, bet didina skaitiklį ir loguojamas `error` lygiu | `auditAsyncCutover`, `auditBlockingRoutes.route` | Nutylėjus rejection → skaitiklis lieka 0; pavertus gedimą 500 → krinta „užklausa nekrenta" patikra |
+| Skaitiklis nedvigubinamas, kai viena klaida praeina per kelis helperių sluoksnius | `auditAsyncCutover` | Perkėlus inkrementą į `writeAudit()` / `authorizeJobOrAudit()` → vienas gedimas duoda 2+ |
+| Audito rašymas turi BAIGTINĘ ribą (`AUDIT_WRITE_TIMEOUT_MS`, numatyta 2000) abiejose kategorijose | `auditAsyncCutover`, `auditBlockingRoutes.route` | Pašalinus `suRiba()` → kabantis backend'as užstoja užklausą; `unref()` ant laikmačio → procesas išsenka nesulaukęs timeout |
+| Nė vienas audito kelias nesukelia `unhandledRejection` (fire-and-forget detektorius) | `auditAsyncCutover`, `auditBlockingRoutes.route` | Pašalinus `await` bet kuriame call site'e → registruotas `process.on("unhandledRejection")` suveikia |
+| Backend'o klaidos tekstas NEPATENKA į HTTP atsakymą (sanitizacija per `utils/sanitizeError.js`) | `auditBlockingRoutes.route` | Grąžinus `error.message` klientui → sentinel su `host=`, `user=`, `password=` randamas atsakyme |

@@ -4,6 +4,7 @@ const authenticate = require("../middleware/authenticate");
 const { requirePermission } = require("../middleware/authorize");
 const { PERMISSIONS } = require("../utils/permissions");
 const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 const jobStore = require("../utils/jobStore");
 const {
   ACCESS_DECISION,
@@ -165,7 +166,7 @@ router.post(
   // Auditui fiksuojam TIKRAI PRAŠYTĄ variantą - jis nėra išvedamas iš politikos.
   const exportVariant = variant;
 
-  auditLog.record({
+  await rasytiAudita({
     event: "EXPORT_STARTED",
     success: true,
     jobId: linkedJobId,
@@ -178,7 +179,7 @@ router.post(
   try {
     const result = await buildExport(protocol, format, variant);
 
-    auditLog.record({
+    await rasytiAudita({
       event: "EXPORT_COMPLETED",
       success: true,
       jobId: linkedJobId,
@@ -205,7 +206,7 @@ router.post(
     // o vidinės klaidos lieka 500 ir sanitizuojamos.
     const status = error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
 
-    auditLog.record({
+    await rasytiAudita({
       event: "EXPORT_FAILED",
       success: false,
       format,

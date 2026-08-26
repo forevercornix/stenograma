@@ -221,7 +221,7 @@ test("retencijos ciklas šalina nuskendusius audio failus ir rašo audito įvyk�
     const summary = await runRetentionSweep();
     assert.ok(summary.audio >= 1);
 
-    const purgeEvents = auditLog.getAll().filter((entry) => entry.event === "RETENTION_PURGE");
+    const purgeEvents = (await auditLog.getAll()).filter((entry) => entry.event === "RETENTION_PURGE");
     assert.equal(purgeEvents.length, 1);
     assert.equal(purgeEvents[0].subjectId, null, "šalinimo įvykis nesiejamas su subjektu");
     assert.match(purgeEvents[0].details, /audio=\d+/);
@@ -247,7 +247,7 @@ test("retencijos ciklas be pašalinimų NERAŠO audito įvykio", async () => {
   await runRetentionSweep();
 
   assert.equal(
-    auditLog.getAll().filter((entry) => entry.event === "RETENTION_PURGE").length,
+    (await auditLog.getAll()).filter((entry) => entry.event === "RETENTION_PURGE").length,
     0,
     "kas valandą rašomas tuščias įvykis išstumtų naudingus per AUDIT_MAX_ENTRIES"
   );

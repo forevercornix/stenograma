@@ -353,7 +353,16 @@ function sanitizeRedaction(redaction) {
   };
 }
 
-function record(entry = {}) {
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210). Backend'as lieka ATMINTYJE - `async` čia nieko
+ * nelaukia, bet sąsaja jau tokia, kad 7.4b galėtų pakeisti saugojimo
+ * realizaciją nebekartodamas viso call-site cutover.
+ *
+ * ⚠️ PRODUKCINIS KODAS ŠIOS FUNKCIJOS TIESIOGIAI NEKVIEČIA. Vienintelis kelias
+ * yra `utils/auditWrite.js rasytiAudita()`, kuris pritaiko blokuojančio /
+ * neblokuojančio įvykio politiką ir baigtinę laukimo ribą.
+ */
+async function record(entry = {}) {
   if (isPrivacyModeEnabled()) {
     // Fail-safe: įjungus PRIVACY_MODE ne tik neberašom, bet ir nebelaikom to,
     // kas jau sukaupta atmintyje. Tas pats tikrinimas yra getAll() - kad
@@ -445,7 +454,8 @@ function record(entry = {}) {
   return row;
 }
 
-function getAll() {
+/** ⚠️ ASYNC NUO 7.4a (#210) - žr. `record()` komentarą. */
+async function getAll() {
   if (isPrivacyModeEnabled()) {
     purgeForPrivacyMode();
     return [];
@@ -511,6 +521,12 @@ if (isPrivacyModeEnabled()) clear();
 module.exports = {
   record,
   getAll,
+  /**
+   * ⚠️ EKSPORTUOJAMA 7.4a: `utils/auditWrite.js` privalo žinoti ĮVYKIO VARDĄ
+   * prieš rašydamas, kad galėtų pritaikyti klasifikaciją. Be to jis turėtų
+   * atkartoti `normalizeEvent` logiką - antra kopija išsiskirtų tyliai.
+   */
+  normalizeEvent,
   clear,
   removeBySubjectIdentifier,
   sanitizeForLogging,

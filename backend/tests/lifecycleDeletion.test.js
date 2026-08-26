@@ -196,12 +196,12 @@ test("SAUGUMAS: rezultate NĖRA kelių, raktų ar klaidų tekstų", async () => 
 
 test("AUDITAS: fiksuojamas aktorius, rezultatas ir laikas BE turinio", async () => {
   await tombstones._clearForTests();
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
   const job = await createJob();
 
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
-  const nauji = auditLog.getAll().slice(before);
+  const nauji = (await auditLog.getAll()).slice(before);
   const entry = nauji.find((e) => e.event === "LIFECYCLE_DELETION");
 
   assert.ok(entry, "ištrynimas turi būti audituojamas");
@@ -444,12 +444,12 @@ test("AUDITAS: aktorius REALIAI patenka į įrašą, net be HTTP konteksto", asy
    * Ankstesnis testas to netikrino visai.
    */
   await tombstones._clearForTests();
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
   const job = await createJob();
 
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
-  const entry = auditLog.getAll().slice(before).find((e) => e.event === "LIFECYCLE_DELETION");
+  const entry = (await auditLog.getAll()).slice(before).find((e) => e.event === "LIFECYCLE_DELETION");
 
   assert.ok(entry, "ištrynimas turi būti audituojamas");
   assert.equal(entry.actor, "sysadmin", "aktorius privalo patekti į įrašą");

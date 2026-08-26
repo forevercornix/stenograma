@@ -236,7 +236,7 @@ async function _runInline(type, jobId, payload) {
         return;
       }
 
-      const decision = authorizeJobOrAudit(job, jobId);
+      const decision = await authorizeJobOrAudit(job, jobId);
 
       if (!decision.allowed) {
         /**

@@ -254,7 +254,7 @@ test("LOGIN: sesijos įrašymo klaida → NĖRA Set-Cookie, o auditas žymi NES�
    * PRIEŠ patvirtintą įrašymą, paliktų klientą su token'u, kurio saugykloje
    * nėra - vartotojas atrodytų prisijungęs iki pirmos užklausos.
    */
-  const priesTai = auditLog.getAll().length;
+  const priesTai = (await auditLog.getAll()).length;
   const grazinti = sessionStore._setStoreForTests(krentantiSaugykla());
   let res;
   try {
@@ -267,7 +267,7 @@ test("LOGIN: sesijos įrašymo klaida → NĖRA Set-Cookie, o auditas žymi NES�
   assert.equal(res.body.code, "SESSION_STORE_UNAVAILABLE");
   assert.equal(res.headers["set-cookie"], undefined, "dalinė sesija negali palikti galiojančios cookie");
 
-  const nauji = auditLog.getAll().slice(priesTai);
+  const nauji = (await auditLog.getAll()).slice(priesTai);
   const login = nauji.find((e) => e.event === "LOGIN_FAILED");
   assert.ok(login, "nesėkmingas prisijungimas privalo patekti į auditą");
   assert.equal(login.result, "failure", "auditas privalo žymėti NESĖKMĘ, ne sėkmę");
@@ -371,7 +371,7 @@ test("PLIKAS TOKEN'AS: neatsiranda nei audite, nei loguose - IR sėkmėje, IR ne
     };
   };
 
-  const priesTai = auditLog.getAll().length;
+  const priesTai = (await auditLog.getAll()).length;
   const senasLygis = process.env.LOG_LEVEL;
   process.env.LOG_LEVEL = "debug";
 
@@ -400,7 +400,7 @@ test("PLIKAS TOKEN'AS: neatsiranda nei audite, nei loguose - IR sėkmėje, IR ne
   assert.ok(token && token.length > 20, "prielaida: token'as gautas");
   assert.ok(!logai.includes(token), "plikas token'as negali patekti į logus");
 
-  const auditas = JSON.stringify(auditLog.getAll().slice(priesTai));
+  const auditas = JSON.stringify((await auditLog.getAll()).slice(priesTai));
   assert.ok(!auditas.includes(token), "plikas token'as negali patekti į auditą");
   assert.ok(
     !auditas.includes(hashSessionToken(token)),

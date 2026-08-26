@@ -102,7 +102,7 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
 
   await markCompleted(jobStore.system, job.id, { result: { text: "Jautrus transkripcijos rezultatas" } });
 
-  auditLog.record({
+  await auditLog.record({
     event: "TRANSCRIPTION_COMPLETED",
     jobId: job.id,
     success: true,
@@ -113,9 +113,9 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
   // TRANSCRIPTION_COMPLETED jau po šio testo auditLog.clear() - dėl to bendro
   // skaičiaus tikrinimas buvo flaky.
   const subjectId = auditLog.pseudonymizeIdentifier(job.id);
-  const own = () => auditLog.getAll().filter((e) => e.subjectId === subjectId);
+  const own = async () => (await auditLog.getAll()).filter((e) => e.subjectId === subjectId);
 
-  assert.equal(own().length, 1);
+  assert.equal((await own()).length, 1);
 
   const res = await request(app).delete(
     `/api/transcribe-jobs/${job.id}`
@@ -126,9 +126,9 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
 
   // DATA_ERASED kvitas SĄMONINGAI lieka, bet jis nesusietas su subjektu
   // (subjectId=null), tad į own() nepatenka - žr. utils/jobErasure.js.
-  assert.equal(own().length, 0);
+  assert.equal((await own()).length, 0);
   assert.ok(
-    auditLog.getAll().some((e) => e.event === "DATA_ERASED"),
+    (await auditLog.getAll()).some((e) => e.event === "DATA_ERASED"),
     "turi likti įrodymas, kad ištrynimas įvyko"
   );
 });
@@ -160,8 +160,7 @@ test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> iš
   }
   assert.equal(status, "completed");
 
-  const beforeDelete = auditLog
-    .getAll()
+  const beforeDelete = (await auditLog.getAll())
     .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
   assert.ok(
     beforeDelete.length >= 1,
@@ -171,8 +170,7 @@ test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> iš
   const delRes = await request(app).delete(`/api/transcribe-jobs/${jobId}`);
   assert.equal(delRes.status, 204);
 
-  const afterDelete = auditLog
-    .getAll()
+  const afterDelete = (await auditLog.getAll())
     .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
   assert.equal(afterDelete.length, 0);
   assert.equal(await jobStore.system.get(jobId), null);

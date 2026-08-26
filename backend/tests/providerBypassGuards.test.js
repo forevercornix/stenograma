@@ -194,7 +194,7 @@ test("PILNUMAS: KIEKVIENAS registro tiekėjas turi politiką", () => {
 /* AUDITAS                                                             */
 /* ------------------------------------------------------------------ */
 
-test("AUDITAS: atmestas tiekėjas fiksuojamas BE paslapčių", () => {
+test("AUDITAS: atmestas tiekėjas fiksuojamas BE paslapčių", async () => {
   /**
    * #22 reikalauja, kad politikos sprendimai būtų matomi audite, kur
    * techniškai įmanoma.
@@ -204,16 +204,16 @@ test("AUDITAS: atmestas tiekėjas fiksuojamas BE paslapčių", () => {
    * turi pasekmę vartotojui — atmetus jobą.
    */
   const auditLog = require("../utils/auditLog");
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
-  auditLog.record({
+  await auditLog.record({
     event: "PROVIDER_REJECTED",
     success: false,
     outcome: "not_approved",
     details: "llm=claude",
   });
 
-  const entry = auditLog.getAll().slice(before)[0];
+  const entry = (await auditLog.getAll()).slice(before)[0];
 
   assert.ok(entry, "įvykis turi būti užfiksuotas");
   assert.equal(entry.event, "PROVIDER_REJECTED");

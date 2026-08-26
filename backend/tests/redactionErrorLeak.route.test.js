@@ -89,7 +89,7 @@ test("redakcijos klaida: žymuo nepatenka NEI į atsakymą, NEI į auditą, NEI 
   assert.ok(!body.includes(MARKER), `žymuo rastas atsakyme: ${body}`);
 
   // 2. Audito žurnalas
-  const audit = JSON.stringify(auditLog.getAll());
+  const audit = JSON.stringify((await auditLog.getAll()));
   assert.ok(!audit.includes(MARKER), "žymuo rastas audito įraše");
 
   // 3. Serverio logas

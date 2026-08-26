@@ -3,6 +3,7 @@ const fs = require("fs").promises;
 
 const jobStore = require("./jobStore");
 const auditLog = require("./auditLog");
+const { rasytiAudita } = require("./auditWrite");
 const fileStorage = require("./fileStorage");
 const { getPrivacyPolicy } = require("./privacyPolicy");
 const { createLogger } = require("../utils/logger");
@@ -135,7 +136,7 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
   // įvykį ir per AUDIT_MAX_ENTRIES išstumtume naudingus įrašus.
   if (removedAnything) {
     try {
-      auditLog.record({
+      await rasytiAudita({
         event: "RETENTION_PURGE",
         success: summary.errors.length === 0,
         error: summary.errors.length ? summary.errors.join("; ") : null,

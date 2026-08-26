@@ -156,7 +156,7 @@ test("TURINYS: nė vienoje grandyje nėra transkripcijos ar PII", async () => {
 
 test("AUDITAS: įrašai susieti su tuo pačiu requestId ir be turinio", async () => {
   const requestId = "grandines-testas-4";
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const res = await request(app)
     .post("/api/jobs")
@@ -165,7 +165,7 @@ test("AUDITAS: įrašai susieti su tuo pačiu requestId ir be turinio", async ()
 
   await waitForJob(res.body.jobId);
 
-  const entries = auditLog.getAll().slice(before);
+  const entries = (await auditLog.getAll()).slice(before);
   const mine = entries.filter((entry) => entry.requestId === requestId);
 
   assert.ok(mine.length >= 1, "audito įrašai turi nešti requestId");

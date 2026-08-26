@@ -78,7 +78,8 @@ const router = express.Router();
 
 
 const upload = createAudioUpload();
-function uploadSingleAudio(req, res, next) {
+/** ⚠️ ASYNC NUO 7.4a: `await recordRejectedUpload()` dabar async (#210). */
+async function uploadSingleAudio(req, res, next) {
   // Priimame IR "audio", IR "file" lauką - vartotojai natūraliai bando abu, o
   // .single("audio") mesdavo "Unexpected field", jei ateidavo "file" (RASTA realiai
   // testuojant). .fields() leidžia abu; normalizuojame į req.file.
@@ -86,10 +87,11 @@ function uploadSingleAudio(req, res, next) {
     { name: "audio", maxCount: 1 },
     { name: "file", maxCount: 1 },
   ]);
-  handler(req, res, (err) => {
+  /** ⚠️ ASYNC NUO 7.4a: `recordRejectedUpload()` dabar async (#210). */
+  handler(req, res, async (err) => {
     if (err) {
       const reason = reasonFromMulterError(err);
-      recordRejectedUpload(reason, {
+      await recordRejectedUpload(reason, {
         route: "/api/transcribe-jobs",
         // MIME išsaugotas fileFilter'yje - multer klaidos objekte jo nėra.
         mimetype: req.uploadObservation && req.uploadObservation.mimetype,
@@ -143,7 +145,7 @@ router.post(
   }
 
   if (!req.file) {
-    recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe-jobs" });
+    await recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe-jobs" });
     return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
   }
 
@@ -164,7 +166,7 @@ router.post(
       const header = Buffer.alloc(64);
       await handle.read(header, 0, header.length, 0);
       if (!detectAudioMagic(header)) {
-        recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe-jobs", mimetype: req.file.mimetype });
+        await recordRejectedUpload(REASONS.SIGNATURE, { route: "/api/transcribe-jobs", mimetype: req.file.mimetype });
         return res.status(400).json({ error: "Failo turinys neatitinka palaikomo audio formato (magic bytes)." });
       }
     } finally {

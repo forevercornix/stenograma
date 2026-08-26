@@ -17,8 +17,8 @@ test.afterEach(() => {
   for (const key of ENV_KEYS) delete process.env[key];
 });
 
-test("pseudonymizes job identifier", () => {
-  const row = auditLog.record({
+test("pseudonymizes job identifier", async () => {
+  const row = await auditLog.record({
     event: "JOB_CREATED",
     meetingId: "abc123",
     success: true,
@@ -30,8 +30,8 @@ test("pseudonymizes job identifier", () => {
   assert.equal("meetingId" in row, false);
 });
 
-test("redacts secrets and personal data from errors", () => {
-  const row = auditLog.record({
+test("redacts secrets and personal data from errors", async () => {
+  const row = await auditLog.record({
     success: false,
     error:
       "jonas@example.com +37061234567 39001010001 " +
@@ -74,10 +74,10 @@ test("uses 30 day retention by default", () => {
   assert.equal(auditLog.getRetentionDays(), 30);
 });
 
-test("purges audit entries older than configured retention", () => {
+test("purges audit entries older than configured retention", async () => {
   process.env.AUDIT_RETENTION_DAYS = "1";
 
-  auditLog.record({
+  await auditLog.record({
     event: "JOB_CREATED",
     meetingId: "old-job",
     success: true,
@@ -87,19 +87,19 @@ test("purges audit entries older than configured retention", () => {
   const removed = auditLog.purgeExpired(twoDaysLater);
 
   assert.equal(removed, 1);
-  assert.equal(auditLog.getAll().length, 0);
+  assert.equal((await auditLog.getAll()).length, 0);
 
   delete process.env.AUDIT_RETENTION_DAYS;
 });
 
 test("removes audit entries belonging to a job identifier", async () => {
-  auditLog.record({
+  await auditLog.record({
     event: "JOB_CREATED",
     jobId: "job-to-delete",
     success: true,
   });
 
-  auditLog.record({
+  await auditLog.record({
     event: "JOB_CREATED",
     jobId: "job-to-keep",
     success: true,
@@ -108,50 +108,50 @@ test("removes audit entries belonging to a job identifier", async () => {
   const removed = await auditLog.removeBySubjectIdentifier("job-to-delete");
 
   assert.equal(removed, 1);
-  assert.equal(auditLog.getAll().length, 1);
+  assert.equal((await auditLog.getAll()).length, 1);
   assert.equal(
-    auditLog.getAll()[0].subjectId,
+    (await auditLog.getAll())[0].subjectId,
     auditLog.pseudonymizeIdentifier("job-to-keep")
   );
 });
 
-test("privacy mode disables audit recording", () => {
+test("privacy mode disables audit recording", async () => {
   process.env.PRIVACY_MODE = "true";
   auditLog.clear();
 
-  const recorded = auditLog.record({
+  const recorded = await auditLog.record({
     event: "JOB_CREATED",
     jobId: "privacy-job",
     success: true,
   });
 
   assert.equal(recorded, null);
-  assert.equal(auditLog.getAll().length, 0);
+  assert.equal((await auditLog.getAll()).length, 0);
 
   delete process.env.PRIVACY_MODE;
 });
 
-test("privacy mode clears previously accumulated audit entries", () => {
+test("privacy mode clears previously accumulated audit entries", async () => {
   delete process.env.PRIVACY_MODE;
   auditLog.clear();
 
-  auditLog.record({
+  await auditLog.record({
     event: "JOB_CREATED",
     jobId: "existing-job",
     success: true,
   });
 
-  assert.equal(auditLog.getAll().length, 1);
+  assert.equal((await auditLog.getAll()).length, 1);
 
   process.env.PRIVACY_MODE = "true";
 
-  auditLog.record({
+  await auditLog.record({
     event: "JOB_CREATED",
     jobId: "ignored-job",
     success: true,
   });
 
-  assert.equal(auditLog.getAll().length, 0);
+  assert.equal((await auditLog.getAll()).length, 0);
 
   delete process.env.PRIVACY_MODE;
 });
@@ -162,10 +162,10 @@ test("privacy mode is disabled by default", () => {
   assert.equal(auditLog.isPrivacyModeEnabled(), false);
 });
 
-test("kontroliuojami laukai NEredaguojami kaip PII", () => {
+test("kontroliuojami laukai NEredaguojami kaip PII", async () => {
   // Regresija: bendras telefono šablonas "claude-3-5-sonnet-20241022" versdavo
   // "claude-3-5-sonnet-[PHONE_REDACTED]" ir sunaikindavo modelio/kaštų auditą.
-  const row = auditLog.record({
+  const row = await auditLog.record({
     llmProvider: "claude",
     llmModel: "claude-3-5-sonnet-20241022",
     promptVersion: "meeting_v3",
@@ -178,8 +178,8 @@ test("kontroliuojami laukai NEredaguojami kaip PII", () => {
   assert.equal(row.transcriptionProvider, "faster-whisper-embedded (inline)");
 });
 
-test("diagnostikai naudingi skaičiai klaidose išlieka", () => {
-  const row = auditLog.record({
+test("diagnostikai naudingi skaičiai klaidose išlieka", async () => {
+  const row = await auditLog.record({
     success: false,
     error: "Whisper failed at 2026-07-29 13:09:51 after 12345678 ms",
   });
@@ -188,8 +188,8 @@ test("diagnostikai naudingi skaičiai klaidose išlieka", () => {
   assert.match(row.error, /12345678 ms/);
 });
 
-test("URL kelias slepiamas, bet hostas lieka matomas", () => {
-  const row = auditLog.record({
+test("URL kelias slepiamas, bet hostas lieka matomas", async () => {
+  const row = await auditLog.record({
     success: false,
     error: "connect ECONNREFUSED 10.0.0.5:8001 calling http://pyannote:8001/diarize",
   });
@@ -200,12 +200,12 @@ test("URL kelias slepiamas, bet hostas lieka matomas", () => {
 });
 
 test("audito ID nesikartoja po ištrynimo", async () => {
-  const a = auditLog.record({ jobId: "a", success: true });
-  auditLog.record({ jobId: "b", success: true });
+  const a = await auditLog.record({ jobId: "a", success: true });
+  await auditLog.record({ jobId: "b", success: true });
   await auditLog.removeBySubjectIdentifier("b");
-  const c = auditLog.record({ jobId: "c", success: true });
+  const c = await auditLog.record({ jobId: "c", success: true });
 
-  const ids = auditLog.getAll().map((entry) => entry.id);
+  const ids = (await auditLog.getAll()).map((entry) => entry.id);
 
   assert.equal(new Set(ids).size, ids.length);
   // UUID, ne skaitiklis: skaitiklis lieka unikalus tik vieno proceso gyvavimo
@@ -214,32 +214,32 @@ test("audito ID nesikartoja po ištrynimo", async () => {
   assert.notEqual(a.id, c.id);
 });
 
-test("getAll() taiko retenciją ir be naujų įrašų", () => {
+test("getAll() taiko retenciją ir be naujų įrašų", async () => {
   // Anksčiau purgeExpired() buvo kviečiamas TIK iš record(), tad nustojus
   // srautui pasenę įrašai likdavo matomi per GET /api/audit.
   process.env.AUDIT_RETENTION_DAYS = "1";
 
-  auditLog.record({ jobId: "senas", success: true });
-  assert.equal(auditLog.getAll().length, 1);
+  await auditLog.record({ jobId: "senas", success: true });
+  assert.equal((await auditLog.getAll()).length, 1);
 
   const realNow = Date.now;
   Date.now = () => realNow() + 3 * 24 * 60 * 60 * 1000;
 
   try {
-    assert.equal(auditLog.getAll().length, 0);
+    assert.equal((await auditLog.getAll()).length, 0);
   } finally {
     Date.now = realNow;
   }
 });
 
-test("AUDIT_MAX_ENTRIES riboja žurnalo dydį", () => {
+test("AUDIT_MAX_ENTRIES riboja žurnalo dydį", async () => {
   process.env.AUDIT_MAX_ENTRIES = "3";
 
   for (let i = 0; i < 10; i += 1) {
-    auditLog.record({ jobId: `job-${i}`, success: true });
+    await auditLog.record({ jobId: `job-${i}`, success: true });
   }
 
-  assert.equal(auditLog.getAll().length, 3);
+  assert.equal((await auditLog.getAll()).length, 3);
 });
 
 test("URL prisijungimo duomenys redaguojami bet kokioje schemoje", () => {

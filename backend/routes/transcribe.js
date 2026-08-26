@@ -17,16 +17,18 @@ const router = express.Router();
 
 const upload = createAudioUpload();
 
-function uploadSingleAudio(req, res, next) {
+/** ⚠️ ASYNC NUO 7.4a: `await recordRejectedUpload()` dabar async (#210). */
+async function uploadSingleAudio(req, res, next) {
   // Priimame IR "audio", IR "file" lauką (žr. transcribeJobs.js paaiškinimą).
   const handler = upload.fields([
     { name: "audio", maxCount: 1 },
     { name: "file", maxCount: 1 },
   ]);
-  handler(req, res, (err) => {
+  /** ⚠️ ASYNC NUO 7.4a: `recordRejectedUpload()` dabar async (#210). */
+  handler(req, res, async (err) => {
     if (err) {
       const reason = reasonFromMulterError(err);
-      recordRejectedUpload(reason, {
+      await recordRejectedUpload(reason, {
         route: "/api/transcribe",
         // MIME išsaugotas fileFilter'yje - multer klaidos objekte jo nėra.
         mimetype: req.uploadObservation && req.uploadObservation.mimetype,
@@ -71,7 +73,7 @@ router.post(
   async (req, res) => {
   if (!req.file) {
     // Ir šis kelias yra atmestas įkėlimas - be įvykio pėdsakas būtų dalinis.
-    recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe" });
+    await recordRejectedUpload(REASONS.MISSING, { route: "/api/transcribe" });
     return res.status(400).json({ error: "Trūksta audio failo (laukas 'audio')." });
   }
 

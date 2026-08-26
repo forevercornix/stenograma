@@ -46,13 +46,13 @@ test("transcribeAudio() susieja audito įrašą su jobId, tad jį galima ištrin
     jobId,
   });
 
-  const entries = auditLog.getAll();
+  const entries = (await auditLog.getAll());
   assert.equal(entries.length, 1);
   assert.equal(entries[0].subjectId, auditLog.pseudonymizeIdentifier(jobId));
   assert.notEqual(entries[0].subjectId, jobId, "ID turi būti pseudonimizuotas");
 
   assert.equal(await auditLog.removeBySubjectIdentifier(jobId), 1);
-  assert.equal(auditLog.getAll().length, 0);
+  assert.equal((await auditLog.getAll()).length, 0);
 });
 
 test("generateProtocol() susieja audito įrašą su jobId", async () => {
@@ -67,7 +67,7 @@ test("generateProtocol() susieja audito įrašą su jobId", async () => {
     jobId,
   });
 
-  const entries = auditLog.getAll();
+  const entries = (await auditLog.getAll());
   assert.ok(entries.length >= 1);
   assert.ok(
     entries.every(
@@ -76,7 +76,7 @@ test("generateProtocol() susieja audito įrašą su jobId", async () => {
   );
 
   assert.ok((await auditLog.removeBySubjectIdentifier(jobId)) >= 1);
-  assert.equal(auditLog.getAll().length, 0);
+  assert.equal((await auditLog.getAll()).length, 0);
 });
 
 test("nesėkmingas transkribavimas irgi susiejamas su jobId", async () => {
@@ -98,7 +98,7 @@ test("nesėkmingas transkribavimas irgi susiejamas su jobId", async () => {
    * Abu susieti su tuo pačiu jobId, tad abu pašalinami ištrynus subjektą -
    * nesusietas įvykis būtų neištrinamas įrašas apie asmens veiksmą.
    */
-  const entries = auditLog.getAll();
+  const entries = (await auditLog.getAll());
   assert.equal(entries.length, 2);
   assert.ok(entries.some((e) => e.event === "UPLOAD_REJECTED" && e.outcome === "signature_mismatch"));
   assert.ok(entries.some((e) => e.result === "failure"));

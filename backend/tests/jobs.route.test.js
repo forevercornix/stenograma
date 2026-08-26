@@ -81,14 +81,14 @@ test("DELETE /api/jobs/:id - ištrina užbaigtą protokolo jobą ir jo auditą",
   assert.equal(status, "completed");
 
   const subjectId = auditLog.pseudonymizeIdentifier(jobId);
-  assert.ok(auditLog.getAll().some((entry) => entry.subjectId === subjectId));
+  assert.ok((await auditLog.getAll()).some((entry) => entry.subjectId === subjectId));
 
   const delRes = await request(app).delete(`/api/jobs/${jobId}`);
   assert.equal(delRes.status, 204);
 
   assert.equal(await jobStore.system.get(jobId), null);
   assert.equal(
-    auditLog.getAll().filter((entry) => entry.subjectId === subjectId).length,
+    (await auditLog.getAll()).filter((entry) => entry.subjectId === subjectId).length,
     0
   );
 });

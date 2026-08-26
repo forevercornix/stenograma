@@ -2,7 +2,7 @@ const { loadUsers, loadUsersById } = require("./credentials");
 const { resolveApiKeyRole } = require("../middleware/authorize");
 const { hasPermission, PERMISSIONS } = require("./permissions");
 const { createLogger } = require("./logger");
-const auditLog = require("./auditLog");
+const { rasytiAudita } = require("./auditWrite");
 
 const log = createLogger("job-authz");
 
@@ -213,11 +213,19 @@ function authorizeJobExecution(job, permission = PERMISSIONS.JOB_CREATE, env = p
  * Audito įrašas čia būtinas: jobo nutraukimas dėl revokacijos atrodo lygiai
  * taip pat kaip techninis gedimas, jei niekur nefiksuojama priežastis.
  */
-function authorizeJobOrAudit(job, jobId, permission = PERMISSIONS.JOB_CREATE, env = process.env) {
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210 eksplicitiškai įvardija šią funkciją).
+ *
+ * Iki cutover ji kvietė `auditLog.record()` sinchroniškai ir NELAUKĖ. Po
+ * `record()` async pakeitimo tas pats kodas taptų fire-and-forget: job'as būtų
+ * atmestas, o audito įrašas galėtų niekada neatsirasti. `JOB_EXECUTION_DENIED`
+ * yra BLOKUOJANTIS - atmetimas negali būti deklaruotas be patvirtinto įrašo.
+ */
+async function authorizeJobOrAudit(job, jobId, permission = PERMISSIONS.JOB_CREATE, env = process.env) {
   const decision = authorizeJobExecution(job, permission, env);
 
   if (!decision.allowed) {
-    auditLog.record({
+    await rasytiAudita({
       event: "JOB_EXECUTION_DENIED",
       success: false,
       outcome: decision.reason,

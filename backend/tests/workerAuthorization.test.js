@@ -201,12 +201,12 @@ test("API RAKTAS: netinkama API_KEY_ROLE reikšmė yra FAIL-CLOSED", () => {
 
 test("AUDITAS: atmestas vykdymas fiksuojamas BE kredencialų", async () => {
   const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
-  const before = auditLog.getAll().length;
+  const before = (await auditLog.getAll()).length;
 
   const job = { actor: "dinges-vartotojas", actorSource: "session", actorRole: "operator" };
-  authorizeJobOrAudit(job, "job_testinis", PERMISSIONS.JOB_CREATE);
+  await authorizeJobOrAudit(job, "job_testinis", PERMISSIONS.JOB_CREATE);
 
-  const nauji = auditLog.getAll().slice(before);
+  const nauji = (await auditLog.getAll()).slice(before);
   const denied = nauji.find((e) => e.event === "JOB_EXECUTION_DENIED");
 
   assert.ok(denied, "atmestas vykdymas turi būti audituojamas - kitaip jis atrodo kaip techninis gedimas");
@@ -239,8 +239,17 @@ test("STRUKTŪRA: abu vykdymo keliai naudoja TĄ PAČIĄ autorizacijos funkciją
      */
     assert.match(
       source,
-      /const\s+decision\s*=\s*authorizeJobOrAudit\(/,
-      `${file} turi REALIAI iškviesti autorizaciją vykdymo metu`
+      /**
+       * ⚠️ `await` YRA DALIS REIKALAVIMO NUO 7.4a (#210).
+       *
+       * `authorizeJobOrAudit()` tapo async, nes `JOB_EXECUTION_DENIED` yra
+       * BLOKUOJANTIS audito įvykis. Be `await` kvietimas grąžintų Promise,
+       * `decision.allowed` būtų `undefined`, ir job'as būtų nutrauktas kaip
+       * neautorizuotas - arba, blogiau, praeitų. Šablonas sugriežtintas, ne
+       * susilpnintas: dabar reikalaujama IR kvietimo su argumentais, IR laukimo.
+       */
+      /const\s+decision\s*=\s*await\s+authorizeJobOrAudit\(/,
+      `${file} turi REALIAI iškviesti IR palaukti autorizacijos vykdymo metu`
     );
     assert.match(source, /AUTHORIZATION_REVOKED/, `${file} turi pažymėti jobą kaip nutrauktą`);
   }

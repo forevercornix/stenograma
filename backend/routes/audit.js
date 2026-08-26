@@ -5,6 +5,7 @@ const { pollRateLimiter } = require("../middleware/rateLimiter");
 const { validate, schemas } = require("../middleware/validate");
 const sessionStore = require("../utils/sessionStore");
 const { readCookie, COOKIE_NAME, sessionStoreUnavailable } = require("../middleware/sessionAuth");
+const { sanitizeServerError } = require("../utils/sanitizeError");
 const { hasPermission, PERMISSIONS } = require("../utils/permissions");
 
 const router = express.Router();
@@ -62,10 +63,24 @@ async function auditAccess(req, res, next) {
  * žurnalu. Audito endpointas yra būtent tas, kurį užpuolikas norėtų nuskaityti
  * daug kartų.
  */
-router.get("/audit", pollRateLimiter, auditAccess, validate({ query: schemas.auditQuery }), (req, res) => {
+router.get("/audit", pollRateLimiter, auditAccess, validate({ query: schemas.auditQuery }), async (req, res) => {
   const { limit, offset, event, requestId } = req.validated.query;
 
-  let entries = auditLog.getAll();
+  /**
+   * ⚠️ `getAll()` YRA ASYNC NUO 7.4a (#210), TAD JIS GALI ATMESTI.
+   *
+   * Repo neturi globalaus Express klaidų handlerio. Neapdorotas rejection
+   * nukristų į Express numatytąjį kelią, kuris ne produkcijoje grąžina klaidos
+   * tekstą ir stack trace - o čia tai būtų audito saugyklos vidinė
+   * diagnostika. `getAll()` šiandien yra atmintyje ir nekrenta, bet 7.4b
+   * pakeis realizaciją į DB; sargas turi egzistuoti PRIEŠ tai, ne po.
+   */
+  let entries;
+  try {
+    entries = await auditLog.getAll();
+  } catch (error) {
+    return res.status(500).json({ error: sanitizeServerError(error, "GET /api/audit") });
+  }
 
   // Filtrai taikomi PRIEŠ puslapiavimą - kitaip `limit` reikštų skirtingus
   // dalykus su filtru ir be jo.

@@ -2,7 +2,7 @@ const { eraseJob } = require("../utils/jobErasure");
 const tombstones = require("../utils/deletionTombstones");
 const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
 const { createLogger } = require("../utils/logger");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 
 const log = createLogger("lifecycle");
 
@@ -272,7 +272,7 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
     failures,
   });
 
-  writeAudit(result);
+  await writeAudit(result);
 
   return result;
 }
@@ -367,9 +367,15 @@ function buildResult({ jobId, status, actor, requestedAt, completedAt, deleted, 
  * ištrynimą ir kuo jis baigėsi – to reikalauja #19 („audit events record
  * deletion request, actor, result and timestamp").
  */
-function writeAudit(result) {
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210 eksplicitiškai įvardija šią funkciją).
+ *
+ * `LIFECYCLE_DELETION` yra BLOKUOJANTIS: gyvavimo ciklo ištrynimas be
+ * patvirtinto audito reikštų asmens duomenų šalinimą be pėdsako.
+ */
+async function writeAudit(result) {
   try {
-    auditLog.record({
+    await rasytiAudita({
       event: "LIFECYCLE_DELETION",
       success: result.complete,
       outcome: result.status,

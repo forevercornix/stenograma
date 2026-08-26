@@ -41,7 +41,7 @@ const SCAN_STRATEGIES = {
       const subjectId = auditLog.pseudonymizeIdentifier(jobId);
       if (!subjectId) return false;
 
-      return auditLog.getAll().some((entry) => entry.subjectId === subjectId);
+      return (await auditLog.getAll()).some((entry) => entry.subjectId === subjectId);
     },
   },
 

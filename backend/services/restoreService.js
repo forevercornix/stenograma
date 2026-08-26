@@ -7,7 +7,7 @@ const secretsInventory = require("../utils/secretsInventory");
 const startupChecks = require("../utils/startupChecks");
 const privacyConfig = require("../utils/privacyConfig");
 const backupEncryption = require("../utils/backupEncryption");
-const auditLog = require("../utils/auditLog");
+const { rasytiAudita } = require("../utils/auditWrite");
 const tombstones = require("../utils/deletionTombstones");
 
 const log = createLogger("restore");
@@ -65,27 +65,27 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
   // 1. MANIFESTAS
   const manifestCheck = backupManifest.validateManifest(manifest);
   if (!manifestCheck.valid) {
-    return _fail({ actor, manifest, completedSteps, step: STEPS.MANIFEST, reason: manifestCheck.errors.join("; ") });
+    return await _fail({ actor, manifest, completedSteps, step: STEPS.MANIFEST, reason: manifestCheck.errors.join("; ") });
   }
   completedSteps.push(STEPS.MANIFEST);
 
   // 2. FORMATO VERSIJA
   const compatibility = backupPolicy.checkRestoreCompatibility(manifest.formatVersion);
   if (!compatibility.compatible) {
-    return _fail({ actor, manifest, completedSteps, step: STEPS.FORMAT, reason: compatibility.reason });
+    return await _fail({ actor, manifest, completedSteps, step: STEPS.FORMAT, reason: compatibility.reason });
   }
   completedSteps.push(STEPS.FORMAT);
 
   // 3. PROGRAMOS VERSIJA
   const appCheck = _checkApplicationVersion(manifest.applicationVersion);
   if (!appCheck.compatible) {
-    return _fail({ actor, manifest, completedSteps, step: STEPS.APPLICATION, reason: appCheck.reason });
+    return await _fail({ actor, manifest, completedSteps, step: STEPS.APPLICATION, reason: appCheck.reason });
   }
   completedSteps.push(STEPS.APPLICATION);
 
   // 4. KONTROLINĖ SUMA
   if (!Buffer.isBuffer(data)) {
-    return _fail({ actor, manifest, completedSteps, step: STEPS.CHECKSUM, reason: "turinys nėra Buffer" });
+    return await _fail({ actor, manifest, completedSteps, step: STEPS.CHECKSUM, reason: "turinys nėra Buffer" });
   }
   if (!backupManifest.verifyChecksum(manifest, data)) {
     /**
@@ -95,7 +95,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
      * sugadinimą aptinka – ir tokiu atveju atkūrimas turi sustoti, o ne
      * bandyti „kiek pavyks".
      */
-    return _fail({ actor, manifest, completedSteps, step: STEPS.CHECKSUM, reason: "kontrolinė suma nesutampa" });
+    return await _fail({ actor, manifest, completedSteps, step: STEPS.CHECKSUM, reason: "kontrolinė suma nesutampa" });
   }
   completedSteps.push(STEPS.CHECKSUM);
 
@@ -127,7 +127,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
    * klastojimo, vien dėl tipo painiavos.
    */
   if (typeof manifest.encrypted !== "boolean") {
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -148,7 +148,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
     const legacyFormat = String(manifest.encryptionAlgorithm || "").replace(`${backupEncryption.ALGORITHM}-`, "");
     const legacyReason = backupEncryption.UNSUPPORTED_FORMATS[legacyFormat];
 
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -171,7 +171,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
    * Kontrolinė suma to nesustabdo: ją galima perskaičiuoti.
    */
   if (!manifest.encrypted && _looksLikeEnvelope(data)) {
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -181,7 +181,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
   }
 
   if (!manifest.encrypted && manifest.encryptionAlgorithm) {
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -215,7 +215,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
         });
       }
     } catch (error) {
-      return _fail({
+      return await _fail({
         actor,
         manifest,
         completedSteps,
@@ -232,12 +232,12 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
   try {
     parsed = JSON.parse(payload.toString("utf8"));
   } catch {
-    return _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: "turinys nėra galiojantis JSON" });
+    return await _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: "turinys nėra galiojantis JSON" });
   }
 
   const contentCheck = await _validateContent(parsed);
   if (!contentCheck.valid) {
-    return _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: contentCheck.reason });
+    return await _fail({ actor, manifest, completedSteps, step: STEPS.CONTENT, reason: contentCheck.reason });
   }
   completedSteps.push(STEPS.CONTENT);
 
@@ -257,7 +257,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
      * Pranešime — tik VARDAI, niekada reikšmės. Priešingu atveju klaidos
      * tekstas taptų antru nutekėjimo kanalu.
      */
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -281,7 +281,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
    */
   const configCheck = startupChecks.validateConfig(env);
   if (configCheck.errors.length > 0) {
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -322,7 +322,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
   const noPersistenceMode = privacy.persistentExplicit && !privacy.persistentStorage;
 
   if (noPersistenceMode) {
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -333,7 +333,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
 
   const privacyCheck = privacyConfig.validatePrivacyConfig(env);
   if (privacyCheck && Array.isArray(privacyCheck.errors) && privacyCheck.errors.length > 0) {
-    return _fail({
+    return await _fail({
       actor,
       manifest,
       completedSteps,
@@ -352,7 +352,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
   const applied = await _apply(parsed, { env });
   completedSteps.push(STEPS.APPLIED);
 
-  _audit({
+  await _audit({
     event: "BACKUP_RESTORED",
     actor,
     manifest,
@@ -501,7 +501,7 @@ async function _validateContent(parsed) {
        *
        * `assertAtstovaujamasProgresas()` klaidoje įvardija ATMESTĄ reikšmę
        * (`JSON.stringify(progress)`). Persiuntus `e.message` čia, ta reikšmė
-       * patektų į `_fail()` žurnalą ir į HTTP atsakymą - o paslapčių skenavimas
+       * patektų į `await _fail()` žurnalą ir į HTTP atsakymą - o paslapčių skenavimas
        * (`STEPS.SECRETS`) vykdomas VĖLIAU, tad jo apsauga būtų apeita.
        *
        * Todėl grąžinamas tik įrašo INDEKSAS ir klaidos kodas: nė vienas baitas
@@ -549,17 +549,24 @@ async function _apply(parsed, { env }) {
   return { jobs, audio };
 }
 
-function _fail({ actor, manifest, completedSteps, step, reason }) {
-  _audit({ event: "BACKUP_RESTORE_FAILED", actor, manifest, success: false, outcome: step, details: `step=${step}` });
+/** ⚠️ ASYNC NUO 7.4a: `_audit()` dabar async (#210). */
+async function _fail({ actor, manifest, completedSteps, step, reason }) {
+  await _audit({ event: "BACKUP_RESTORE_FAILED", actor, manifest, success: false, outcome: step, details: `step=${step}` });
 
   log.error("Atkūrimas sustabdytas", { step, reason });
 
   return { ok: false, completedSteps, failedStep: step, reason };
 }
 
-function _audit({ event, actor, manifest, success, outcome = null, details = "" }) {
-  try {
-    auditLog.record({
+/**
+ * ⚠️ ASYNC NUO 7.4a (#210). Anksčiau čia buvo `try { auditLog.record(...) }
+ * catch {}` - po `record()` async pakeitimo tas `catch` nebebūtų pagavęs
+ * atmesto Promise, ir kvietimas taptų fire-and-forget. `BACKUP_*` yra
+ * NEBLOKUOJANTYS, tad gedimo politiką (logas + skaitiklis) pritaiko
+ * `rasytiAudita()`, o ne tylus `catch`.
+ */
+async function _audit({ event, actor, manifest, success, outcome = null, details = "" }) {
+  await rasytiAudita({
       event,
       success,
       outcome,
@@ -567,10 +574,7 @@ function _audit({ event, actor, manifest, success, outcome = null, details = "" 
       details:
         `formatVersion=${manifest ? manifest.formatVersion : "?"} ` +
         `appVersion=${manifest ? manifest.applicationVersion : "?"} ${details}`.trim(),
-    });
-  } catch {
-    // Auditas neturi versti atkūrimo nesėkme.
-  }
+  });
 }
 
 module.exports = { restoreBackup, STEPS };

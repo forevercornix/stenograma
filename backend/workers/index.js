@@ -141,7 +141,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
            * darbas neturi būti įvykdytas – priešingu atveju revokacija
            * negaliotų būtent ten, kur ji svarbiausia.
            */
-          const decision = authorizeJobOrAudit(processingJob, jobId);
+          const decision = await authorizeJobOrAudit(processingJob, jobId);
 
           if (!decision.allowed) {
             /**
