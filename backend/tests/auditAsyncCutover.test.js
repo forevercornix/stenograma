@@ -65,6 +65,38 @@ function suTrumpaRiba(ms, veiksmas) {
   return Promise.resolve(veiksmas()).finally(grazinti);
 }
 
+/**
+ * Produkciniai `.js` failai - BE SHELL'O.
+ *
+ * ⚠️ ANKSČIAU ČIA BUVO `execFileSync("sh", ["-c", `cd ${...} && find ...`])`.
+ *
+ * CodeQL `js/shell-command-injection-from-environment` tai pagavo teisingai:
+ * absoliutus repo kelias buvo interpoliuojamas į shell eilutę, tad kelias su
+ * tarpu ar shell metasimboliu būtų pakeitęs komandos prasmę. Sprendimas -
+ * ne ekranavimas, o shell'o pašalinimas: Node `fs` apėjimas to klausimo
+ * apskritai neturi ir nepriklauso nuo `sh`, `find`, `xargs` ar `grep` buvimo.
+ */
+const PRODUKCINIAI_KATALOGAI = ["utils", "services", "middleware", "routes", "workers", "queues"];
+
+function produkciniaiFailai() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const šaknis = path.resolve(__dirname, "..");
+  const failai = [];
+
+  for (const katalogas of PRODUKCINIAI_KATALOGAI) {
+    const dir = path.join(šaknis, katalogas);
+    if (!fs.existsSync(dir)) continue;
+    for (const įrašas of fs.readdirSync(dir, { recursive: true })) {
+      const kelias = path.join(dir, String(įrašas));
+      if (!String(įrašas).endsWith(".js")) continue;
+      if (!fs.statSync(kelias).isFile()) continue;
+      failai.push({ kelias, turinys: fs.readFileSync(kelias, "utf8") });
+    }
+  }
+  return failai;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 1. KLASIFIKACIJOS PILNUMAS
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -133,21 +165,12 @@ test("KLASIFIKACIJA: visi produkciniai `event:` literalai klasifikuoti (tripwire
    * call site'ą su neklasifikuotu įvykiu PRIEŠ jam pirmą kartą suveikiant
    * produkcijoje. Elgsenos pusę dengia `rasytiAudita()` testai žemiau.
    */
-  const { execFileSync } = require("node:child_process");
-  const path = require("node:path");
+  const literalai = new Set();
+  for (const { turinys } of produkciniaiFailai()) {
+    for (const m of turinys.matchAll(/event:\s*"([A-Z_0-9]+)"/g)) literalai.add(m[1]);
+  }
 
-  const išvestis = execFileSync(
-    "sh",
-    [
-      "-c",
-      `cd ${path.resolve(__dirname, "..")} && find . -name '*.js' -not -path './node_modules/*' ` +
-        `-not -path './tests/*' -print0 | xargs -0 grep -ho 'event: "[A-Z_0-9]*"' | sort -u`,
-    ],
-    { encoding: "utf8" }
-  );
-
-  const literalai = [...išvestis.matchAll(/event: "([A-Z_0-9]+)"/g)].map((m) => m[1]);
-  assert.ok(literalai.length >= 15, "paieška turi rasti realius call site'us");
+  assert.ok(literalai.size >= 15, `paieška turi rasti realius call site'us (rado ${literalai.size})`);
 
   for (const įvykis of literalai) {
     assert.doesNotThrow(
@@ -195,29 +218,16 @@ test("KLASIFIKACIJA: NAUJAS konstantos šaltinis negali praslysti nepastebėtas"
    * lauko vardas pasitaiko ir Zod schemose (`middleware/validate.js` audito
    * užklausos filtre), o tai NĖRA audito įvykio šaltinis.
    */
-  const fs = require("node:fs");
-  const path = require("node:path");
-
-  const šaknis = path.resolve(__dirname, "..");
-  const katalogai = ["utils", "services", "middleware", "routes", "workers", "queues"];
   const šaltiniai = new Set();
 
-  for (const katalogas of katalogai) {
-    const dir = path.join(šaknis, katalogas);
-    if (!fs.existsSync(dir)) continue;
-    for (const failas of fs.readdirSync(dir, { recursive: true })) {
-      if (!String(failas).endsWith(".js")) continue;
-      const kelias = path.join(dir, String(failas));
-      if (!fs.statSync(kelias).isFile()) continue;
-
-      const eilutės = fs.readFileSync(kelias, "utf8").split("\n");
-      eilutės.forEach((eilutė, idx) => {
-        if (!eilutė.includes("rasytiAudita(")) return;
-        const blokas = eilutės.slice(idx, idx + 12).join("\n");
-        const m = /event:\s*([A-Za-z_][A-Za-z_.]*)/.exec(blokas);
-        if (m && m[1].includes(".")) šaltiniai.add(m[1]);
-      });
-    }
+  for (const { turinys } of produkciniaiFailai()) {
+    const eilutės = turinys.split("\n");
+    eilutės.forEach((eilutė, idx) => {
+      if (!eilutė.includes("rasytiAudita(")) return;
+      const blokas = eilutės.slice(idx, idx + 12).join("\n");
+      const m = /event:\s*([A-Za-z_][A-Za-z_.]*)/.exec(blokas);
+      if (m && m[1].includes(".")) šaltiniai.add(m[1]);
+    });
   }
 
   assert.deepEqual(
