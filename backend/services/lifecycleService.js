@@ -374,30 +374,39 @@ function buildResult({ jobId, status, actor, requestedAt, completedAt, deleted, 
  * patvirtinto audito reikštų asmens duomenų šalinimą be pėdsako.
  */
 async function writeAudit(result) {
-  try {
-    await rasytiAudita({
-      event: "LIFECYCLE_DELETION",
-      success: result.complete,
-      outcome: result.status,
-      /**
-       * AKTORIUS PERDUODAMAS EKSPLICITIŠKAI.
-       *
-       * `auditLog.record` turi fallback į užklausos kontekstą (`getActor()`),
-       * bet gyvavimo ciklo servisą galima kviesti IR BE HTTP konteksto –
-       * retencijos valymo, worker'io ar skripto keliais. Tada aktorius tyliai
-       * taptų `null`, ir audito įrašas neatsakytų į klausimą „kas ištrynė".
-       */
-      actor: result.actor || undefined,
-      details:
-        `status=${result.status} deleted=${result.categories.deleted.length} ` +
-        `remaining=${result.categories.remaining.length} ` +
-        `retryable=${result.categories.retryable.length} ` +
-        `nonRetryable=${result.categories.nonRetryable.length}`,
-    });
-  } catch {
-    // Auditas neturi versti ištrynimo nesėkme - duomenys jau pašalinti.
-  }
-
+  /**
+   * ⚠️ AUDITO KLAIDA PROPAGUOJAMA (#155, 7.4a / #210).
+   *
+   * Anksčiau čia buvo `catch {}` su paaiškinimu „duomenys jau pašalinti".
+   * Argumentas suprantamas, bet jis paverčia `LIFECYCLE_DELETION` klasifikaciją
+   * BEPRASME: `utils/auditEvents.js` sako BLOKUOJANTIS, o kodas elgiasi kaip
+   * neblokuojantis. #210 GDPR ištrynimą įvardija blokuojančia šeima -
+   * „klaida arba timeout → veiksmas atmetamas".
+   *
+   * Ištrynimo neatšauksi, bet SĖKMĖS DEKLARAVIMĄ atšaukti galima ir būtina:
+   * kvietėjas gauna klaidą, ištrynimas nelaikomas patvirtintu, o pakartojimas
+   * yra idempotentinis (žr. `tombstones`). Priešingu atveju asmens duomenys
+   * dingtų be jokio pėdsako - būtent tai, ką auditas turi neleisti.
+   */
+  await rasytiAudita({
+    event: "LIFECYCLE_DELETION",
+    success: result.complete,
+    outcome: result.status,
+    /**
+     * AKTORIUS PERDUODAMAS EKSPLICITIŠKAI.
+     *
+     * `auditLog.record` turi fallback į užklausos kontekstą (`getActor()`),
+     * bet gyvavimo ciklo servisą galima kviesti IR BE HTTP konteksto –
+     * retencijos valymo, worker'io ar skripto keliais. Tada aktorius tyliai
+     * taptų `null`, ir audito įrašas neatsakytų į klausimą „kas ištrynė".
+     */
+    actor: result.actor || undefined,
+    details:
+      `status=${result.status} deleted=${result.categories.deleted.length} ` +
+      `remaining=${result.categories.remaining.length} ` +
+      `retryable=${result.categories.retryable.length} ` +
+      `nonRetryable=${result.categories.nonRetryable.length}`,
+  });
   log.info("Gyvavimo ciklo ištrynimas", { status: result.status, complete: result.complete });
 }
 

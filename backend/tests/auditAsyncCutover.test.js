@@ -300,6 +300,185 @@ test("BLOKUOJANTIS: neklasifikuotas įvykis irgi atmeta veiksmą", async () => {
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * 2b. BLOKUOJANTYS HELPERIAI NEIŠSISPRENDŽIA ANKSČIAU UŽ AUDITĄ
+ *
+ * ⚠️ SPRAGA, KURIĄ ŠIE TESTAI UŽDARO.
+ *
+ * `authorizeJobOrAudit()` ir `lifecycleService.writeAudit()` yra tos dvi
+ * vietos, kurias #210 įvardija atskirai. Jų VIDINIS `await` iki šiol nebuvo
+ * ginamas: mutacija `await rasytiAudita(...)` → `rasytiAudita(...)` PRAEIDAVO
+ * visą 1396 testų suitą. Praktiškai tai reiškia, kad kas nors ateityje gali
+ * „optimizuoti" tą eilutę, ir atmesti job'ai liktų be audito įrašo - tyliai,
+ * be jokio kritimo. Tai ta pati fire-and-forget klasė, tik viena eilute giliau
+ * nei call site'as.
+ *
+ * `workerAuthorization` regex gina KVIETĖJO `await`; šie testai gina VIDINĮ.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Audito backend'as, kurio įrašymą atlaisvina testas - leidžia tikrinti TVARKĄ. */
+function atidedamasBackendas() {
+  let atlaisvinti;
+  const laukiantis = new Promise((r) => {
+    atlaisvinti = r;
+  });
+  const originalus = auditLog.record;
+  auditLog.record = async (entry) => {
+    await laukiantis;
+    return originalus.call(auditLog, entry);
+  };
+  return {
+    atlaisvinti,
+    grazinti: () => {
+      auditLog.record = originalus;
+    },
+  };
+}
+
+/**
+ * Audito backend'as, kuris krinta - per TIKRĄ modulio objektą, be injekcijos.
+ *
+ * ⚠️ `tikTiemsIvykiams` YRA BŪTINAS IZOLIACIJAI, ne patogumas.
+ *
+ * Ištrynimo kelias rašo DU blokuojančius įvykius: `DATA_ERASED`
+ * (`utils/jobErasure.js`) ir `LIFECYCLE_DELETION` (`services/lifecycleService.js`).
+ * Jei kristų abu, testas praeitų net pašalinus `await` iš `writeAudit()` -
+ * atmetimą duotų pirmasis kelias, ir mutacija liktų nepastebėta. Patikrinta:
+ * taip ir buvo, kol filtras neegzistavo.
+ */
+function suKrentanciuRecord(veiksmas, tikTiemsIvykiams = null) {
+  const originalus = auditLog.record;
+  auditLog.record = async (entry) => {
+    const event = auditLog.normalizeEvent(entry);
+    if (!tikTiemsIvykiams || tikTiemsIvykiams.includes(event)) {
+      throw new Error(SENTINEL);
+    }
+    return originalus.call(auditLog, entry);
+  };
+  return Promise.resolve(veiksmas()).finally(() => {
+    auditLog.record = originalus;
+  });
+}
+
+test("BLOKUOJANTIS: `authorizeJobOrAudit()` NEIŠSISPRENDŽIA prieš patvirtintą auditą", async () => {
+  /**
+   * ⚠️ TIKRINAMA TVARKA, NE REZULTATAS.
+   *
+   * Su in-memory backend'u įrašas atsiranda taip greitai, kad turinio patikra
+   * praeitų ir be `await`. Todėl rašymas dirbtinai atidedamas: jei `await`
+   * pašalintas, funkcija išsisprendžia iš karto, ir `isspresta` tampa `true`
+   * dar prieš atlaisvinant auditą.
+   */
+  const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
+  const { PERMISSIONS } = require("../utils/permissions");
+
+  await auditLog.clear();
+  const { atlaisvinti, grazinti } = atidedamasBackendas();
+
+  try {
+    const job = { actor: "dinges-vartotojas", actorSource: "session", actorRole: "operator" };
+
+    let isspresta = false;
+    const vykdymas = authorizeJobOrAudit(job, "job_tvarkos_testas", PERMISSIONS.JOB_CREATE).then(
+      (v) => {
+        isspresta = true;
+        return v;
+      }
+    );
+
+    /** Kelios mikrouždavinių eilės - pakanka, kad be `await` funkcija jau būtų baigusi. */
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+
+    assert.equal(
+      isspresta,
+      false,
+      "autorizacija negali deklaruoti sprendimo, kol audito įrašas nepatvirtintas"
+    );
+
+    atlaisvinti();
+    const decision = await vykdymas;
+
+    assert.equal(isspresta, true);
+    assert.equal(decision.allowed, false, "prielaida: nežinomas aktorius atmetamas");
+
+    const įrašai = await auditLog.getAll();
+    assert.ok(
+      įrašai.some((e) => e.event === "JOB_EXECUTION_DENIED"),
+      "atmetimas privalo palikti audito įrašą"
+    );
+  } finally {
+    grazinti();
+  }
+});
+
+test("BLOKUOJANTIS: `authorizeJobOrAudit()` ATMETA, kai auditas krinta (fail-closed)", async () => {
+  /**
+   * Antra to paties `await` pusė: be jo `rasytiAudita()` atmetimas taptų
+   * `unhandledRejection`, o funkcija grąžintų sprendimą taip, tarsi auditas
+   * būtų pavykęs.
+   */
+  const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
+  const { PERMISSIONS } = require("../utils/permissions");
+
+  const pagauti = [];
+  const handler = (p) => pagauti.push(p);
+  process.on("unhandledRejection", handler);
+
+  try {
+    await suKrentanciuRecord(async () => {
+      const job = { actor: "dinges-vartotojas", actorSource: "session", actorRole: "operator" };
+      await assert.rejects(
+        () => authorizeJobOrAudit(job, "job_fail_closed", PERMISSIONS.JOB_CREATE),
+        (e) => e instanceof AuditWriteError
+      );
+    });
+
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(pagauti, [], "be `await` atmetimas taptų unhandledRejection");
+  } finally {
+    process.off("unhandledRejection", handler);
+  }
+});
+
+test("BLOKUOJANTIS: `lifecycleService` ištrynimas ATMETA, kai auditas krinta", async () => {
+  /**
+   * `lifecycleService.writeAudit()` neeksportuojamas, tad tikrinama per VIEŠĄ
+   * `deleteJobArtefacts()` kelią - tai stipresnis įrodymas nei vidinės
+   * funkcijos kvietimas, nes dengia ir tai, kad produkcinis kelias ja naudojasi.
+   *
+   * `LIFECYCLE_DELETION` yra BLOKUOJANTIS: asmens duomenų šalinimas be
+   * patvirtinto audito reikštų ištrynimą be pėdsako.
+   */
+  const lifecycleService = require("../services/lifecycleService");
+  const jobStore = require("../utils/jobStore");
+
+  await jobStore.init();
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+
+  const pagauti = [];
+  const handler = (p) => pagauti.push(p);
+  process.on("unhandledRejection", handler);
+
+  try {
+    await suKrentanciuRecord(
+      async () => {
+        await assert.rejects(
+          () => lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" }),
+          (e) => e instanceof AuditWriteError,
+          "ištrynimas negali būti paskelbtas sėkmingu be patvirtinto audito"
+        );
+      },
+      /** TIK `LIFECYCLE_DELETION` - kad atmetimą duotų būtent `writeAudit()`. */
+      ["LIFECYCLE_DELETION"]
+    );
+
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(pagauti, [], "be `await` atmetimas taptų unhandledRejection");
+  } finally {
+    process.off("unhandledRejection", handler);
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * 3. NEBLOKUOJANTIS KELIAS
  * ═══════════════════════════════════════════════════════════════════════════ */
 

@@ -32,6 +32,7 @@ function loadEraseJob({
     jobRemove: [],
     jobUpdate: [],
     auditRemove: [],
+    auditRecord: [],
   };
 
   const stubs = {
@@ -81,7 +82,24 @@ function loadEraseJob({
       },
     },
 
+    /**
+     * ⚠️ STUB'AS PRIVALO TURĖTI VISĄ NAUDOJAMĄ PAVIRŠIŲ (#155, 7.4a).
+     *
+     * Iki 7.4a čia buvo tik `removeBySubjectIdentifier`, nors
+     * `writeDeletionReceipt()` kvietė ir `record()`. Trūkstamas metodas metė
+     * `TypeError`, kurį NURYDAVO tuometinis `catch {}` aplink auditą - testai
+     * atrodė žali, o ištrynimo kvito kelias realiai nebuvo vykdomas.
+     *
+     * Pašalinus tą `catch` (auditas dabar BLOKUOJANTIS), spraga tapo matoma.
+     * `normalizeEvent` imamas iš TIKRO modulio, kad stub'as neturėtų savo,
+     * ilgainiui išsiskiriančios, įvykio vardų kopijos.
+     */
     "utils/auditLog": {
+      normalizeEvent: require("../utils/auditLog").normalizeEvent,
+      record: async (entry) => {
+        calls.auditRecord.push(entry);
+        return entry;
+      },
       removeBySubjectIdentifier: async (id) => {
         calls.auditRemove.push(id);
         if (auditLog.throws) throw new Error(auditLog.throws);

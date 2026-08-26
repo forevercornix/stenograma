@@ -164,19 +164,22 @@ async function writeDeletionReceipt(outcome) {
 
   if (!anythingRemoved) return;
 
-  try {
-    await rasytiAudita({
-      event: "DATA_ERASED",
-      success: true,
-      details:
-        `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
-        `storage=${outcome.storageRemoved ? "deleted" : "none"} ` +
-        `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
-        `audit=${outcome.auditEntriesRemoved}`,
-    });
-  } catch {
-    // Kvitas neturi versti ištrynimo nesėkme - duomenys jau pašalinti.
-  }
+  /**
+   * ⚠️ AUDITO KLAIDA PROPAGUOJAMA (#155, 7.4a / #210).
+   *
+   * `DATA_ERASED` yra BLOKUOJANTIS. Buvęs `catch {}` („duomenys jau pašalinti")
+   * reiškė, kad ištrynimo kvitas galėjo nedingti tyliai, o operacija vis tiek
+   * praneštų sėkmę - t. y. GDPR ištrynimas be įrodymo, kad jis įvyko.
+   */
+  await rasytiAudita({
+    event: "DATA_ERASED",
+    success: true,
+    details:
+      `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
+      `storage=${outcome.storageRemoved ? "deleted" : "none"} ` +
+      `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
+      `audit=${outcome.auditEntriesRemoved}`,
+  });
 }
 
 /**

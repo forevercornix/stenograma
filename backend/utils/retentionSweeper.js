@@ -135,17 +135,20 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
   // Įrašom TIK kai kažkas realiai pašalinta - kitaip kas valandą rašytume tuščią
   // įvykį ir per AUDIT_MAX_ENTRIES išstumtume naudingus įrašus.
   if (removedAnything) {
-    try {
-      await rasytiAudita({
-        event: "RETENTION_PURGE",
-        success: summary.errors.length === 0,
-        error: summary.errors.length ? summary.errors.join("; ") : null,
-        details: `jobs=${summary.jobs} audio=${summary.audio} audit=${summary.auditEntries}`,
-      });
-    } catch {
-      // Auditas neturi versti retencijos nesėkme.
-    }
-
+    /**
+     * ⚠️ AUDITO KLAIDA PROPAGUOJAMA (#155, 7.4a / #210).
+     *
+     * `RETENTION_PURGE` yra BLOKUOJANTIS: automatinis asmens duomenų šalinimas
+     * be patvirtinto įrašo yra tas pats trūkumas kaip ir rankinis. Ciklas
+     * nutrūksta, o `startRetentionSweeper` klaidą sulogina - kitas ciklas
+     * kartos.
+     */
+    await rasytiAudita({
+      event: "RETENTION_PURGE",
+      success: summary.errors.length === 0,
+      error: summary.errors.length ? summary.errors.join("; ") : null,
+      details: `jobs=${summary.jobs} audio=${summary.audio} audit=${summary.auditEntries}`,
+    });
     log.info(
       `Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +
         `audito įrašų=${summary.auditEntries}.`
