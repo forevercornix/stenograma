@@ -13,6 +13,7 @@ const { sukurtiResursuKruva } = require("./helpers/resourceStack");
 const { createPostgresStore } = require("../utils/auditStore/postgresStore");
 const {
   REQUIRED_AUDIT_CONSTRAINTS,
+  REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,
   REQUIRED_AUDIT_TRIGGER,
   auditoPoolNustatymai,
 } = require("../utils/auditStore");
@@ -127,6 +128,25 @@ test("SCHEMA: `REQUIRED_AUDIT_CONSTRAINTS` sąrašas yra PILNAS", { skip: SKIP }
       [...REQUIRED_AUDIT_CONSTRAINTS].sort(),
       "starto barjero sąrašas ir migracijos invariantai išsiskyrė - " +
         "barjeras praleistų DB be dalies apsaugų"
+    );
+
+    /**
+     * ⚠️ UNIKALUMO INVARIANTAI TIKRINAMI ATSKIRAI: jie yra `contype = 'u'`, tad
+     * `CHECK` užklausa jų NEMATO. Be `audit_log_seq_unique` tiesioginis INSERT
+     * galėtų pakartoti `seq`, ir deklaruotas tvarkos autoritetas nustotų galioti.
+     */
+    const { rows: uRows } = await pool.query(
+      `SELECT c.conname
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'audit_log' AND n.nspname = current_schema() AND c.contype = 'u'`
+    );
+
+    assert.deepEqual(
+      uRows.map((r) => r.conname).sort(),
+      [...REQUIRED_AUDIT_UNIQUE_CONSTRAINTS].sort(),
+      "unikalumo invariantų sąrašas išsiskyrė su migracija"
     );
   } finally {
     await resursai.isvalyti();
@@ -936,6 +956,116 @@ test("RESTARTAS: auditas išlieka per PILNĄ `init → shutdown → init` ciklą
     );
   } finally {
     await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("STARTAS: REPLICA-ONLY trigeris NEPRALEIDŽIAMAS", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ `ENABLE REPLICA TRIGGER` YRA PAVOJINGIAUSIAS ATVEJIS.
+   *
+   * Skirtingai nei `DISABLE`, jis palieka `pg_trigger` eilutę ĮJUNGTĄ atrodančią
+   * (`tgenabled = 'R'`), bet trigeris suveikia TIK kai
+   * `session_replication_role = 'replica'`. Aplikacijos sesijos veikia kaip
+   * `origin`, tad `UPDATE` praeina.
+   *
+   * Testas tikrina ABI puses: kad startas atmeta IR kad `UPDATE` tokioje DB
+   * realiai praeitų - kitaip tikrintume tik `tgenabled` raidę, o ne priežastį,
+   * dėl kurios ji svarbi.
+   */
+  const auditStore = require("../utils/auditStore");
+  const { url, pool, resursai } = await paruostiDb("audit_replica_trigger");
+
+  try {
+    const store = createPostgresStore(pool, { hashKeyId: HASH_KEY_ID });
+    const irasas = await store.append(eilute({ details: "originalas" }));
+
+    await pool.query(`ALTER TABLE audit_log ENABLE REPLICA TRIGGER ${REQUIRED_AUDIT_TRIGGER}`);
+
+    /** PRIELAIDA: būtent dėl to režimas nepriimtinas - `UPDATE` nebestabdomas. */
+    await pool.query("UPDATE audit_log SET result = 'failure' WHERE id = $1", [irasas.id]);
+    const { rows } = await pool.query("SELECT result FROM audit_log WHERE id = $1", [irasas.id]);
+    assert.equal(rows[0].result, "failure", "prielaida: replica režimu append-only NEBEVEIKIA");
+
+    await auditStore.shutdown();
+
+    await assert.rejects(
+      () =>
+        auditStore.init({
+          ...process.env,
+          AUDIT_BACKEND: "postgres",
+          DATABASE_URL: url,
+          AUDIT_ID_SALT: "testine-druska",
+          AUDIT_ID_SALT_ID: HASH_KEY_ID,
+          PRIVACY_MODE: "false",
+        }),
+      /tgenabled="R"|neapsaugo/,
+      "replica-only trigeris privalo nutraukti startą, o ne būti palaikytas veikiančiu"
+    );
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("STARTAS: trūkstamas `seq` unikalumas NUTRAUKIA startą", { skip: SKIP }, async () => {
+  /**
+   * `ORDER BY seq` yra deklaruotas skaitymo tvarkos autoritetas. Be unikalumo
+   * tiesioginis INSERT gali pakartoti `seq`, ir tvarka tampa neapibrėžta -
+   * o `CHECK` invariantų patikra šio constraint'o nemato (`contype = 'u'`).
+   */
+  const auditStore = require("../utils/auditStore");
+  const { url, pool, resursai } = await paruostiDb("audit_be_seq_unique");
+
+  try {
+    await pool.query(`ALTER TABLE audit_log DROP CONSTRAINT ${REQUIRED_AUDIT_UNIQUE_CONSTRAINTS[0]}`);
+    await auditStore.shutdown();
+
+    await assert.rejects(
+      () =>
+        auditStore.init({
+          ...process.env,
+          AUDIT_BACKEND: "postgres",
+          DATABASE_URL: url,
+          AUDIT_ID_SALT: "testine-druska",
+          AUDIT_ID_SALT_ID: HASH_KEY_ID,
+          PRIVACY_MODE: "false",
+        }),
+      new RegExp(REQUIRED_AUDIT_UNIQUE_CONSTRAINTS[0]),
+      "be `seq` unikalumo skaitymo tvarka nebegarantuojama"
+    );
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("BENDRAS TRYNIMAS: `clear()` produkcijoje ATMETAMAS", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ Deklaruota riba („store eksponuoja tik subjektu apribotą trynimą") turi
+   * būti VYKDOMA, ne vien parašyta. Neribotas `DELETE FROM audit_log`
+   * produkcijoje sunaikintų visą pėdsaką.
+   */
+  const { pool, resursai } = await paruostiDb("audit_clear_guard");
+
+  const savedEnv = process.env.NODE_ENV;
+  try {
+    const store = createPostgresStore(pool, { hashKeyId: HASH_KEY_ID });
+    await store.append(eilute({ details: "lieka" }));
+
+    process.env.NODE_ENV = "production";
+    await assert.rejects(() => store.clear(), /TIK testuose|removeBySubjectIdentifier/);
+
+    const { rows } = await pool.query("SELECT COUNT(*)::int AS n FROM audit_log");
+    assert.equal(rows[0].n, 1, "atmestas `clear()` negali nieko ištrinti");
+
+    /** Testų režime jis privalo veikti - kitaip nebūtų kaip valyti tarp testų. */
+    process.env.NODE_ENV = "test";
+    await store.clear();
+    const { rows: po } = await pool.query("SELECT COUNT(*)::int AS n FROM audit_log");
+    assert.equal(po[0].n, 0);
+  } finally {
+    process.env.NODE_ENV = savedEnv;
     await resursai.isvalyti();
   }
 });

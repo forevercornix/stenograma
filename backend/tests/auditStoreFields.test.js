@@ -314,7 +314,19 @@ test("WORKER'IAI: `initializeWorkerOrFail` inicijuoja IR audito saugyklą", asyn
   const auditStore = require("../utils/auditStore");
   const jobStore = require("../utils/jobStore");
 
-  const saved = { redis: process.env.REDIS_URL, init: auditStore.init, jobInit: jobStore.init };
+  /**
+   * ⚠️ IŠSAUGOMI VISI PERRAŠOMI METODAI (AGENTS.md §9.3).
+   *
+   * Pirmoji versija išsaugojo `init`, bet ne `hasQueueBackend` - tad visi
+   * vėlesni šio failo testai matytų suklastotą eilės galimybę, ir naujo testo
+   * pridėjimas ar pertvarkymas tyliai sukurtų klaidingą praėjimą.
+   */
+  const saved = {
+    redis: process.env.REDIS_URL,
+    init: auditStore.init,
+    jobInit: jobStore.init,
+    hasQueue: jobStore.hasQueueBackend,
+  };
   process.env.REDIS_URL = "redis://testas:6379";
 
   /** `jobStore.init()` neturi bandyti tikro Redis - mus domina TIK audito šaka. */
@@ -337,6 +349,7 @@ test("WORKER'IAI: `initializeWorkerOrFail` inicijuoja IR audito saugyklą", asyn
   } finally {
     auditStore.init = saved.init;
     jobStore.init = saved.jobInit;
+    jobStore.hasQueueBackend = saved.hasQueue;
     if (saved.redis === undefined) delete process.env.REDIS_URL;
     else process.env.REDIS_URL = saved.redis;
   }

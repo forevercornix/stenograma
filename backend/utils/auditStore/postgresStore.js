@@ -58,8 +58,17 @@ function createPostgresStore(pool, { hashKeyId }) {
      * `RETURNING`, tad kvietėjas mato TIKRĄJĮ įrašytą laiką, ne savo spėjimą.
      *
      * ⚠️ `ON CONFLICT (id) DO NOTHING` - at-least-once idempotencija (#211).
-     * Pakartotas rašymas (retry po timeout) nesukuria antros eilutės. `id`
-     * generuoja aplikacija būtent todėl, kad tai būtų įmanoma.
+     * `id` generuoja aplikacija būtent todėl, kad pakartojimas būtų įmanomas be
+     * dublikato.
+     *
+     * ⚠️ RIBA, KURIĄ BŪTINA ĮVARDYTI (AGENTS.md §12.1): tai SAUGYKLOS lygio
+     * savybė, o ne end-to-end garantija. `auditLog.record()` kiekvieno kvietimo
+     * metu generuoja NAUJĄ `randomUUID()`, o `rasytiAudita()` pakartojimo kilpos
+     * neturi - tad šiandien produkcinis kelias šios šakos NEPASIEKIA. Ji
+     * egzistuoja būsimam pakartojimo mechanizmui (patvari eilė, [7.5b]), kuris
+     * per pakartojimo ribą privalės nešti STABILŲ `id`. Iki tol teigti
+     * „pakartotas rašymas nesukuria antros eilutės" apie visą sistemą būtų
+     * stipriau, nei kodas daro.
      */
     async append(eilute) {
       const { rows } = await pool.query(
@@ -137,27 +146,38 @@ function createPostgresStore(pool, { hashKeyId }) {
         ribos.push(`OFFSET $${reiksmes.length}`);
       }
 
+      /**
+       * ⚠️ PUSLAPIS IR BENDRAS KIEKIS - VIENAME MOMENTINIAME VAIZDE.
+       *
+       * Ankstesnė versija tuščiam puslapiui darė ATSKIRĄ `COUNT(*)` užklausą.
+       * Auditas rašomas nuolat ir lygiagrečiai, tad tarp dviejų užklausų galėjo
+       * atsirasti atitinkantis įrašas, ir atsakymas grąžindavo `entries: []` su
+       * `total: 1` net esant `offset: 0` - klientas matytų prieštaringą puslapį.
+       *
+       * CTE išsprendžia tai be transakcijos: `kiekis` visada duoda VIENĄ eilutę,
+       * o `LEFT JOIN LATERAL` prie jos prikabina puslapį. Kai puslapis tuščias,
+       * lieka ta viena eilutė su `NULL` stulpeliais - tad `total` gaunamas net
+       * tada, kai eilučių nėra.
+       */
       const { rows } = await pool.query(
-        `SELECT ${STULPELIU_SARASAS}, meta, COUNT(*) OVER () AS _total
-           FROM audit_log ${where}
-          ORDER BY seq ASC ${ribos.join(" ")}`,
+        `WITH filtruoti AS (
+           SELECT ${STULPELIU_SARASAS}, meta, seq FROM audit_log ${where}
+         ),
+         kiekis AS (SELECT COUNT(*)::int AS total FROM filtruoti)
+         SELECT k.total, f.*
+           FROM kiekis k
+           LEFT JOIN LATERAL (
+             SELECT * FROM filtruoti ORDER BY seq ASC ${ribos.join(" ")}
+           ) f ON true`,
         reiksmes
       );
 
-      /**
-       * Tuščiam puslapiui lango funkcija eilučių negrąžina, tad `total` reikia
-       * atskirai - bet TIK tada, kai puslapis tuščias. Dažniausiu atveju antros
-       * užklausos nėra.
-       */
-      if (rows.length === 0) {
-        const { rows: c } = await pool.query(
-          `SELECT COUNT(*)::int AS total FROM audit_log ${where}`,
-          reiksmes.slice(0, salygos.length)
-        );
-        return { entries: [], total: c[0].total };
-      }
+      const total = rows.length ? Number(rows[0].total) : 0;
 
-      return { entries: rows.map(iEilute), total: Number(rows[0]._total) };
+      /** `f.*` esant tuščiam puslapiui duoda `NULL` - tokia eilutė nėra įrašas. */
+      const entries = rows.filter((r) => r.id !== null).map(iEilute);
+
+      return { entries, total };
     },
 
     /**
@@ -195,10 +215,26 @@ function createPostgresStore(pool, { hashKeyId }) {
     },
 
     /**
-     * ⚠️ TIK TESTŲ VALYMUI. Produkciniame kelyje nekviečiama - `auditLog.clear()`
-     * kvietėjai yra testai (žr. `docs/audit-storage.md`).
+     * ⚠️ NEPRIEINAMA PRODUKCINIAM KODUI - TAI NĖRA VIEN KOMENTARAS.
+     *
+     * Deklaruota vientisumo riba sako, kad store'as eksponuoja TIK subjektu
+     * apribotą trynimą. Bet `clear()` vykdo neribotą `DELETE FROM audit_log`, o
+     * `auditLog.clear()` jį persiunčia - tad atsitiktinis produkcinis kvietėjas
+     * ištrintų VISĄ persistentinį audito pėdsaką, nepaisant dokumentuoto
+     * apribojimo.
+     *
+     * Todėl riba tampa vykdoma: už testų ribų metama klaida. Šiandien
+     * produkcinių `auditLog.clear()` kvietėjų nėra (patikrinta), tad tai nieko
+     * nelaužo - bet ateities kvietėjas kris iškart, o ne ištrins žurnalą.
      */
     async clear() {
+      if (process.env.NODE_ENV !== "test") {
+        throw new Error(
+          "auditStore.clear() persistentiniame režime leidžiamas TIK testuose: " +
+            "neribotas `DELETE FROM audit_log` sunaikintų visą audito pėdsaką. " +
+            "GDPR ištrynimui naudokite `removeBySubjectIdentifier()`."
+        );
+      }
       await pool.query("DELETE FROM audit_log");
     },
 

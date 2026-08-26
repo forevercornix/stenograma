@@ -32,6 +32,17 @@ const REQUIRED_AUDIT_CONSTRAINTS = Object.freeze([
   "audit_log_result_allowed",
 ]);
 
+/**
+ * ⚠️ UNIKALUMO INVARIANTAI TIKRINAMI ATSKIRAI NUO `CHECK`.
+ *
+ * `audit_log_seq_unique` yra `contype = 'u'`, tad `CHECK` užklausa jo NEMATO -
+ * lygiai kaip nemato ir append-only trigerio. Be jo tiesioginis INSERT galėtų
+ * pakartoti `seq`, ir `ORDER BY seq` taptų neapibrėžtas - o būtent `seq` yra
+ * deklaruotas skaitymo tvarkos autoritetas (žr. migraciją ir
+ * `docs/audit-storage.md` §5).
+ */
+const REQUIRED_AUDIT_UNIQUE_CONSTRAINTS = Object.freeze(["audit_log_seq_unique"]);
+
 /** Append-only trigeris - pagrindinė šios lentelės garantija. */
 const REQUIRED_AUDIT_TRIGGER = "audit_log_no_update";
 
@@ -139,6 +150,27 @@ async function initializePostgres(env) {
       );
     }
 
+    const { rows: uRows } = await pool.query(
+      `SELECT c.conname
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'audit_log'
+          AND n.nspname = current_schema()
+          AND c.contype = 'u'`
+    );
+    const trukstaU = REQUIRED_AUDIT_UNIQUE_CONSTRAINTS.filter(
+      (c) => !uRows.map((r) => r.conname).includes(c)
+    );
+
+    if (trukstaU.length > 0) {
+      throw new Error(
+        `PostgreSQL audito schemai trūksta unikalumo invariantų: ${trukstaU.join(", ")}. ` +
+          "Be jų tiesioginis INSERT galėtų pakartoti `seq`, ir skaitymo tvarka " +
+          "(`ORDER BY seq`) taptų neapibrėžta. Paleiskite `npm run migrate:up`."
+      );
+    }
+
     /**
      * ⚠️ TRIGERIS TIKRINAMAS ATSKIRAI NUO `CHECK` INVARIANTŲ.
      *
@@ -184,12 +216,32 @@ async function initializePostgres(env) {
       );
     }
 
-    if (trigeriai[0].tgenabled === "D") {
+    /**
+     * ⚠️ TIKRINAMA BALTASIS SĄRAŠAS, NE `!== "D"`.
+     *
+     * `tgenabled` turi keturias reikšmes, ir tik dvi apsaugo šį darbo krūvį:
+     *
+     *   `O` origin  - suveikia įprastoms sesijoms          ✓
+     *   `A` always  - suveikia visada                      ✓
+     *   `R` replica - suveikia TIK kai `session_replication_role = 'replica'`;
+     *                 aplikacijos sesijos veikia kaip `origin`, tad trigeris
+     *                 NESUVEIKIA ir `UPDATE` praeina                        ✗
+     *   `D` disabled                                                        ✗
+     *
+     * Ankstesnė versija atmetė tik `D`, tad
+     * `ALTER TABLE ... ENABLE REPLICA TRIGGER` paliktų startą paskelbusį
+     * append-only barjerą veikiančiu, nors įprastos sesijos jį apeitų.
+     */
+    const APSAUGANTYS_REZIMAI = ["O", "A"];
+
+    if (!APSAUGANTYS_REZIMAI.includes(trigeriai[0].tgenabled)) {
       throw new Error(
-        `PostgreSQL append-only trigeris \`${REQUIRED_AUDIT_TRIGGER}\` yra IŠJUNGTAS ` +
-          "(ALTER TABLE ... DISABLE TRIGGER). Jis egzistuoja, bet `UPDATE` nebestabdo, " +
-          "tad audito įrašai redaguojami. Įjunkite: " +
-          `ALTER TABLE audit_log ENABLE TRIGGER ${REQUIRED_AUDIT_TRIGGER}`
+        `PostgreSQL append-only trigeris \`${REQUIRED_AUDIT_TRIGGER}\` neapsaugo šio ` +
+          `darbo krūvio: tgenabled="${trigeriai[0].tgenabled}" ` +
+          '(reikia "O" arba "A"). "D" reiškia išjungtą, "R" - kad jis suveikia tik ' +
+          "replikos vaidmeniu, o aplikacijos sesijos veikia kaip `origin`. Abiem " +
+          "atvejais `UPDATE` praeina, ir audito įrašai redaguojami. Įjunkite: " +
+          `ALTER TABLE audit_log ENABLE ALWAYS TRIGGER ${REQUIRED_AUDIT_TRIGGER}`
       );
     }
   } catch (err) {
@@ -280,6 +332,7 @@ module.exports = {
   current,
   auditoPoolNustatymai,
   REQUIRED_AUDIT_CONSTRAINTS,
+  REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,
   REQUIRED_AUDIT_TRIGGER,
   RETENCIJOS_ISPEJIMAS,
 };
