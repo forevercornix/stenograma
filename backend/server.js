@@ -14,6 +14,7 @@ const authRoute = require("./routes/auth");
  * ir tada, kai `startServer()` šiame procese nevykdomas (testai, embedded).
  */
 const sessionStore = require("./utils/sessionStore");
+const auditStore = require("./utils/auditStore");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
@@ -77,7 +78,7 @@ app.use("/api", generalApiLimiter);
  * užklausas. Vėliavos AUTORITETAS yra `sessionStore.isReady()` - čia laikoma
  * kopija skirta `/api/ready` išvesčiai.
  */
-const readiness = { jobStore: false, jobRunner: false, sessionReconcile: false };
+const readiness = { jobStore: false, jobRunner: false, sessionReconcile: false, auditStore: false };
 app.locals.readiness = readiness; // route failai gali tikrinti be ciklinės priklausomybės
 
 function requireJobSystemReady(req, res, next) {
@@ -362,6 +363,24 @@ async function startServer({ port, listen, onStep } = {}) {
     `Sesijų saugykla: ${sessionStore.backend} ` +
       `(suderinta ${suderinimas.patikrinta}, revokuota ${suderinimas.revokuota})`
   );
+
+  /**
+   * 1c. AUDITO AUTORITETAS - PRIEŠ `app.listen()` (#155, 7.4b).
+   *
+   * ⚠️ FAIL-CLOSED. `AUDIT_BACKEND=postgres` su nepasiekiama DB, netaikyta
+   * migracija, trūkstamu invariantu ar nukritusiu append-only trigeriu NUTRAUKIA
+   * startą. Tylus grįžimas į atmintį reikštų, kad operatorius paprašė
+   * persistentinio audito, servisas pakilo, o žurnalas dingsta per restartą -
+   * ir tai paaiškėtų tik tada, kai audito prireiks.
+   *
+   * ⚠️ PRIEŠ `listen()`, ne po. Auditas rašomas iš `/api/auth/login` - kelio,
+   * kuris prijungtas be `requireJobSystemReady`. Inicijavus jį fone, tame lange
+   * blokuojantis autentikacijos įvykis kristų su `AUDIT_WRITE_FAILED`.
+   */
+  await auditStore.init();
+  step("auditStore.init");
+  log.info(`Audito saugykla: ${auditStore.backend()}`);
+  readiness.auditStore = true;
 
   /**
    * 2. Job runner.

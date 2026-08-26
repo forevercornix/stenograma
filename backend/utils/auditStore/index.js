@@ -1,0 +1,227 @@
+/**
+ * AUDITO SAUGYKLOS FASADAS (#155, 7.4b / #211).
+ *
+ * ⚠️ NUMATYTASIS BACKEND'AS YRA ATMINTIS, IR JIS VEIKIA BE `init()`.
+ *
+ * Auditas rašomas iš daugybės kelių, įskaitant tokius, kurie sukasi be jokios
+ * HTTP užklausos (worker'iai, retencijos ciklas). Reikalavimas kviesti `init()`
+ * juos sulaužytų be jokios naudos: atminties režimu inicijuoti nėra ko.
+ *
+ * ⚠️ JOKIO FALLBACK Į ATMINTĮ PO PostgreSQL GEDIMO. `init()` klaida
+ * propaguojama. Tylus grįžimas reikštų, kad operatorius paprašė persistentinio
+ * audito, servisas pakilo ir rašo į vietą, kuri dingsta per restartą.
+ */
+
+const { createLogger } = require("../logger");
+const { resolveAuditBackend } = require("./backendSelection");
+const { auditTimeoutBudget } = require("./timeouts");
+const memoryStore = require("./memoryStore");
+
+const log = createLogger("audit-store");
+
+/**
+ * ⚠️ INVARIANTAI, KURIŲ SĄRAŠO PILNUMĄ TIKRINA MIGRACIJŲ TESTAS.
+ *
+ * Sąrašas čia yra STARTO barjeras: DB su dalimi migracijų lentelę turi, o
+ * invariantų - ne. Jo PILNUMĄ (kad nė vienas migracijos `CHECK` nebūtų pamirštas)
+ * išveda `tests/migrations.integration.test.js` iš šviežiai migruotos DB, o ne
+ * šis rankinis sąrašas - žr. AGENTS.md §12.1.
+ */
+const REQUIRED_AUDIT_CONSTRAINTS = Object.freeze([
+  "audit_log_event_pattern",
+  "audit_log_result_allowed",
+]);
+
+/** Append-only trigeris - pagrindinė šios lentelės garantija. */
+const REQUIRED_AUDIT_TRIGGER = "audit_log_no_update";
+
+let store = memoryStore;
+let _pool = null;
+let initPromise = null;
+let paruosta = false;
+
+function isReady(env = process.env) {
+  try {
+    /** Netinkamas jungiklis - fail-closed. `startupChecks` tai pagauna anksčiau. */
+    return resolveAuditBackend(env) === "memory" ? true : paruosta;
+  } catch {
+    return false;
+  }
+}
+
+/** Dabartinis backend'as - naudinga diagnostikai ir testams. */
+function backend() {
+  return store.backend;
+}
+
+/**
+ * AUDITO POOL'O NUSTATYMAI VIENOJE VIETOJE.
+ *
+ * Iškelta iš `initializePostgres()`, kad ribų buvimą būtų galima patikrinti be
+ * tikros DB: `new Pool(...)` viduje jos liktų nepasiekiamos testui, ir
+ * vienintelis įrodymas būtų šaltinio teksto paieška (AGENTS.md §9.2).
+ *
+ * ⚠️ RIBOS ATEINA IŠ BENDRO BIUDŽETO, ne iš atskirų kintamųjų - žr.
+ * `timeouts.js`. `statement_timeout` sąmoningai MAŽESNIS už
+ * `AUDIT_WRITE_TIMEOUT_MS`, kad DB spėtų nutraukti užklausą anksčiau, nei
+ * fasadas nustos jos laukti.
+ */
+function auditoPoolNustatymai(env = process.env) {
+  const { poolAcquireMs, statementMs } = auditTimeoutBudget(env);
+
+  return {
+    connectionString: env.DATABASE_URL,
+    connectionTimeoutMillis: poolAcquireMs,
+    statement_timeout: statementMs,
+    query_timeout: statementMs,
+  };
+}
+
+async function initializePostgres(env) {
+  const { Pool } = require("pg");
+  const { createPostgresStore } = require("./postgresStore");
+
+  const pool = new Pool(auditoPoolNustatymai(env));
+
+  try {
+    await pool.query("SELECT 1");
+
+    const { rows: lenteles } = await pool.query(
+      `SELECT table_name FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name = 'audit_log'`
+    );
+    if (lenteles.length === 0) {
+      throw new Error(
+        "PostgreSQL pasiekiamas, bet trūksta `audit_log` lentelės. " +
+          "Paleiskite `npm run migrate:up` prieš startą."
+      );
+    }
+
+    const { rows: cRows } = await pool.query(
+      `SELECT c.conname
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'audit_log'
+          AND n.nspname = current_schema()
+          AND c.contype = 'c'`
+    );
+    const rasti = cRows.map((r) => r.conname);
+    const truksta = REQUIRED_AUDIT_CONSTRAINTS.filter((c) => !rasti.includes(c));
+
+    if (truksta.length > 0) {
+      throw new Error(
+        `PostgreSQL audito schema pasenusi - trūksta invariantų: ${truksta.join(", ")}. ` +
+          "Paleiskite `npm run migrate:up`: be jų DB priimtų įrašus su nežinomu " +
+          "įvykiu ar neleistina baigtimi."
+      );
+    }
+
+    /**
+     * ⚠️ TRIGERIS TIKRINAMAS ATSKIRAI NUO `CHECK` INVARIANTŲ.
+     *
+     * Append-only nėra `CHECK` - jis gyvena `BEFORE UPDATE` trigeryje, tad
+     * `contype = 'c'` užklausa jo NEMATO. Be šios patikros DB, kurioje trigeris
+     * nukrito (rankinis `DROP`, dalinė migracija), startuotų sėkmingai, o
+     * audito įrašai taptų redaguojami - tyliai.
+     */
+    const { rows: trigeriai } = await pool.query(
+      `SELECT tgname FROM pg_trigger tg
+         JOIN pg_class t ON t.oid = tg.tgrelid
+        WHERE t.relname = 'audit_log' AND tg.tgname = $1 AND NOT tg.tgisinternal`,
+      [REQUIRED_AUDIT_TRIGGER]
+    );
+    if (trigeriai.length === 0) {
+      throw new Error(
+        `PostgreSQL audito lentelė be \`${REQUIRED_AUDIT_TRIGGER}\` trigerio: įrašai ` +
+          "būtų redaguojami. Auditas, kurį galima pataisyti, nėra auditas. " +
+          "Paleiskite `npm run migrate:up`."
+      );
+    }
+  } catch (err) {
+    await pool.end().catch(() => {});
+    throw err;
+  }
+
+  return { store: createPostgresStore(pool, { hashKeyId: env.AUDIT_ID_SALT_ID }), pool };
+}
+
+/**
+ * ⚠️ `init()` GRĄŽINA BENDRĄ PROMISE - tas pats modelis kaip `jobStore.init()`
+ * ir `sessionStore.init()`: lygiagretūs kvietėjai laukia TO PATIES vykstančio
+ * inicijavimo, ne boolean vėliavos, kuri jau `true`, kol jungtis dar keliama.
+ */
+async function init(env = process.env) {
+  if (initPromise) return initPromise;
+
+  initPromise = (async () => {
+    const backendas = resolveAuditBackend(env);
+
+    if (backendas === "memory") {
+      store = memoryStore;
+      paruosta = true;
+      log.info("Audito saugykla: atmintis (vienas procesas, dingsta per restartą)");
+      return store;
+    }
+
+    const { store: pgStore, pool } = await initializePostgres(env);
+    store = pgStore;
+    _pool = pool;
+    paruosta = true;
+    log.info("Audito saugykla: PostgreSQL (persistentinė, append-only)");
+    return store;
+  })().catch((error) => {
+    initPromise = null; // leidžiam pakartoti init po nesėkmės
+    paruosta = false;
+    throw error;
+  });
+
+  return initPromise;
+}
+
+/**
+ * GYVA AUDITO AUTORITETO BŪSENA. Fail-closed ir NIEKADA nemeta - readiness
+ * privalo atsakyti visada, net kai atsakymas yra „neparuošta".
+ *
+ * ⚠️ KLAIDOS TEKSTAS NELOGINAMAS: `pg` pranešime gali būti vartotojo vardas.
+ */
+async function probe(env = process.env) {
+  if (!isReady(env)) return false;
+  try {
+    return (await store.probe()) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Švarus išjungimo kelias - be jo integraciniai testai kabotų su atviromis
+ * jungtimis, o konteinerio stabdymas paliktų neuždarytas DB sesijas.
+ */
+async function shutdown() {
+  if (_pool) {
+    const pool = _pool;
+    _pool = null;
+    await pool.end().catch(() => {});
+  }
+  store = memoryStore;
+  paruosta = false;
+  initPromise = null;
+}
+
+/** Aktyvus store'as - `auditLog` fasadui. */
+function current() {
+  return store;
+}
+
+module.exports = {
+  init,
+  shutdown,
+  isReady,
+  probe,
+  backend,
+  current,
+  auditoPoolNustatymai,
+  REQUIRED_AUDIT_CONSTRAINTS,
+  REQUIRED_AUDIT_TRIGGER,
+};

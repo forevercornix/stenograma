@@ -198,6 +198,32 @@ function validateConfig(env = process.env) {
   }
 
   /**
+   * AUDITO BACKEND'AS (#155, 7.4b).
+   *
+   * ⚠️ TRETIEJI NEPRIKLAUSOMI JUNGIKLIS. Nei `JOB_STORE_BACKEND`, nei
+   * `SESSION_STORE_BACKEND`, nei vien `DATABASE_URL` audito režimo nekeičia.
+   *
+   * Tikrinama ČIA, o ne tik `auditStore.init()` metu, dėl tos pačios
+   * priežasties kaip sesijoms: trūkstama `AUDIT_ID_SALT` ar prieštaringas
+   * `PRIVACY_MODE` derinys turi būti pasakytas kartu su visomis kitomis
+   * konfigūracijos klaidomis, o ne po to, kai dalis sistemos jau pakilusi.
+   *
+   * ⚠️ Kartu tikrinamas ir LAIKO BIUDŽETAS: per mažas `AUDIT_WRITE_TIMEOUT_MS`
+   * reikštų, kad DB nespėtų nutraukti užklausos anksčiau nei fasadas nustotų
+   * laukti, ir vėlyvas rašymas taptų neišvengiamas.
+   */
+  {
+    const { resolveAuditBackend } = require("./auditStore/backendSelection");
+    const { auditTimeoutBudget } = require("./auditStore/timeouts");
+    try {
+      resolveAuditBackend(env);
+      auditTimeoutBudget(env);
+    } catch (e) {
+      errors.push(e.message);
+    }
+  }
+
+  /**
    * API_KEY_ROLE (#18 PR2).
    *
    * Rolė, kurią gauna bendro `API_KEY` turėtojas. Netinkama reikšmė turi

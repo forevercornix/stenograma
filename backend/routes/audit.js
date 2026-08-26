@@ -75,23 +75,31 @@ router.get("/audit", pollRateLimiter, auditAccess, validate({ query: schemas.aud
    * diagnostika. `getAll()` šiandien yra atmintyje ir nekrenta, bet 7.4b
    * pakeis realizaciją į DB; sargas turi egzistuoti PRIEŠ tai, ne po.
    */
-  let entries;
+  /**
+   * ⚠️ RIBA IR FILTRAI TAIKOMI SAUGYKLOJE, NE ČIA (#155, 7.4b / #211).
+   *
+   * Iki 7.4b maršrutas atsiimdavo VISĄ žurnalą, filtruodavo Node'e ir tik tada
+   * `slice()`-indavo. Persistentiniame režime tai reikštų pilną lentelės
+   * perkėlimą kiekvienai užklausai.
+   *
+   * ⚠️ FILTRAI PERKELTI KARTU SU RIBA, NE ATSKIRAI. Palikus juos Node'e, o ribą
+   * perkėlus į SQL, būtų filtruojamas PUSLAPIS, ne aibė - ir filtruotas
+   * atsakymas taptų tyliai neteisingas. `event` ir `request_id` turi savo
+   * indeksus būtent todėl. NAUJI filtrai (`from`, `to`, `action`, `job_id`)
+   * lieka 7.4c.
+   */
+  let rezultatas;
   try {
-    entries = await auditLog.getAll();
+    rezultatas = await auditLog.query({ limit, offset, event, requestId });
   } catch (error) {
     return res.status(500).json({ error: sanitizeServerError(error, "GET /api/audit") });
   }
 
-  // Filtrai taikomi PRIEŠ puslapiavimą - kitaip `limit` reikštų skirtingus
-  // dalykus su filtru ir be jo.
-  if (event) entries = entries.filter((entry) => entry.event === event);
-  if (requestId) entries = entries.filter((entry) => entry.requestId === requestId);
-
   res.json({
-    entries: entries.slice(offset, offset + limit),
+    entries: rezultatas.entries,
     // Bendras skaičius leidžia klientui suprasti, ar yra daugiau - be jo
     // puslapiavimas būtų aklas.
-    total: entries.length,
+    total: rezultatas.total,
     limit,
     offset,
   });
