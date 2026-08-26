@@ -592,9 +592,29 @@ test("STARTAS: postgres režimas ĮSPĖJA apie neveikiančią retenciją", { ski
 
   const pagauta = [];
   const originalus = console.warn;
+
+  /**
+   * ⚠️ `LOG_LEVEL` LAIKINAI SUŠVELNINAMAS - BE TO TESTAS MATUOJA TYLĄ.
+   *
+   * Šio failo viršuje nustatyta `LOG_LEVEL = "error"`, kad PostgreSQL testų
+   * išvestis liktų skaitoma. Bet `log.warn()` tada FILTRUOJAMAS (`warn` 30 <
+   * `error` 40, žr. `utils/logger.js`), ir `console.warn` niekada nekviečiamas:
+   * pirmoji šio testo versija krito CI būtent dėl to, o ne dėl produkcinio kodo.
+   *
+   * Lygis skaitomas KIEKVIENO rašymo metu (`logger.js:92`), tad laikinas
+   * perrašymas veikia ir grąžinamas `finally` bloke.
+   */
+  const savedLogLevel = process.env.LOG_LEVEL;
+  process.env.LOG_LEVEL = "warn";
   console.warn = (...args) => pagauta.push(args.join(" "));
 
   try {
+    /** Prielaida eksplicitiškai: jei lygis vėl užgoštų `warn`, testas turi kristi kaip klaida, ne praeiti. */
+    assert.ok(
+      process.env.LOG_LEVEL === "warn",
+      "prielaida: `warn` lygis įjungtas - kitaip testas tikrintų tylą"
+    );
+
     await auditStore.shutdown();
     await auditStore.init({
       ...process.env,
@@ -615,6 +635,8 @@ test("STARTAS: postgres režimas ĮSPĖJA apie neveikiančią retenciją", { ski
     assert.ok(RETENCIJOS_ISPEJIMAS.length > 50, "prielaida: konstanta nėra tuščia");
   } finally {
     console.warn = originalus;
+    if (savedLogLevel === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = savedLogLevel;
     await auditStore.shutdown();
     await resursai.isvalyti();
   }
