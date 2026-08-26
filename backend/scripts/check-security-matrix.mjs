@@ -97,6 +97,55 @@ for (const suite of DOKUMENTUOJAMI) {
   }
 }
 
+/**
+ * ⚠️ LENTELIŲ VIENTISUMAS.
+ *
+ * Rasta realiai: skriptinis redagavimas praleido eilutės lūžį, ir dvi gretimos
+ * eilutės susijungė per `||`. Markdown tada traktuoja jas kaip vieną eilutę su
+ * pertekliniais langeliais, o ANTROJI GARANTIJA IŠ MATRICOS TIESIOG DINGSTA -
+ * ne su klaida, o tyliai. Matrica yra autoritetinis sąrašas, tad tylus eilutės
+ * praradimas yra blogiau nei neteisinga eilutė: jos niekas nebeieško.
+ *
+ * Tikrinamos VISOS lentelės: eilučių langelių skaičius turi sutapti su tos
+ * lentelės antrašte. Tuščias langelis leistinas, `||` viduryje - ne.
+ */
+{
+  const eilutes = matrix.split("\n");
+  let antrastesLangeliai = null;
+  let antrastesEilute = 0;
+
+  /** Langelių skaičius: kraštiniai `|` neskaitomi, ekranuotas `\|` - ne skirtukas. */
+  const langeliai = (eilute) =>
+    eilute.trim().replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/).length;
+
+  for (let i = 0; i < eilutes.length; i += 1) {
+    const eilute = eilutes[i];
+
+    if (!eilute.trim().startsWith("|")) {
+      antrastesLangeliai = null;
+      continue;
+    }
+
+    if (antrastesLangeliai === null) {
+      antrastesLangeliai = langeliai(eilute);
+      antrastesEilute = i + 1;
+      continue;
+    }
+
+    /** Skirtuko eilutė (`|---|---|`) praleidžiama. */
+    if (/^\|[\s:|-]+\|$/.test(eilute.trim())) continue;
+
+    const rasta = langeliai(eilute);
+    if (rasta !== antrastesLangeliai) {
+      problems.push(
+        `docs/security-test-matrix.md:${i + 1}: eilutėje ${rasta} langeliai, ` +
+          `o lentelės antraštėje (eil. ${antrastesEilute}) - ${antrastesLangeliai}. ` +
+          "Dažniausia priežastis - praleistas eilutės lūžis, sujungęs dvi eilutes per `||`."
+      );
+    }
+  }
+}
+
 if (problems.length > 0) {
   console.error("Saugumo matrica nesutampa su tikrove:\n");
   for (const problem of problems) console.error(`  - ${problem}`);
