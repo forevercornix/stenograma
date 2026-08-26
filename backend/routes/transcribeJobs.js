@@ -412,9 +412,25 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
    * kopijas to paties kodo, ir jos galėjo išsiskirti - būtent tai #19 vadina
    * „single lifecycle service".
    */
-  const result = await lifecycleService.deleteJobArtefacts(job, job.id, {
-    actor: req.authz ? req.authz.actor : null,
-  });
+  /**
+   * ⚠️ IŠTRYNIMO AUDITAS YRA BLOKUOJANTIS, TAD GALI ATMESTI.
+   *
+   * `LIFECYCLE_DELETION` (ir jo viduje `DATA_ERASED`) po 7.4a laukia
+   * patvirtinto įrašo. Be šio sargo `AuditWriteError` nukristų į Express
+   * numatytąjį kelią - klientas gautų 500/HTML vietoj dokumentuoto
+   * `503 AUDIT_WRITE_FAILED`, o ne produkcijoje atsakyme galėtų atsirasti
+   * pirminė backend'o klaida. Administraciniai keliai šį sargą jau turi;
+   * savininko kelias negali būti išimtis (AGENTS.md §16).
+   */
+  let result;
+  try {
+    result = await lifecycleService.deleteJobArtefacts(job, job.id, {
+      actor: req.authz ? req.authz.actor : null,
+    });
+  } catch (error) {
+    if (error instanceof AuditWriteError) return auditoGedimas(res, error, "transcribe-jobs ištrynimo auditas");
+    throw error;
+  }
 
   if (!result.complete) {
     /**

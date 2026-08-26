@@ -215,9 +215,20 @@ test("KLASIFIKACIJA: visi produkciniai `event:` literalai klasifikuoti (tripwire
    * `producerIvykiai()` nuvalo komentarus; be to patikra pagauna savo pačios
    * dokumentacijos pavyzdžius (AGENTS.md §9.2) - taip ir nutiko rašant šį testą.
    */
-  const literalai = producerIvykiai();
+  const { rasti: literalai, nezinomiSaltiniai } = producerIvykiai();
 
   assert.ok(literalai.size >= 15, `paieška turi rasti realius call site'us (rado ${literalai.size})`);
+  assert.deepEqual(
+    [...nezinomiSaltiniai],
+    [],
+    "neišspręstas konstantos šaltinis reiškia, kad pilnumo patikrinti neįmanoma"
+  );
+
+  /** ⚠️ Per KONSTANTĄ nurodomi `ADMIN_*` irgi privalo patekti į šią aibę. */
+  assert.ok(
+    [...literalai].filter((e) => e.startsWith("ADMIN_")).length >= 3,
+    "startinis skeneris privalo išspręsti ADMIN_EVENT konstantas"
+  );
 
   for (const įvykis of literalai) {
     assert.doesNotThrow(
@@ -822,6 +833,60 @@ test("TIMEOUT: `AUDIT_WRITE_TIMEOUT_MS` numatyta 2000 ir konfigūruojama", () =>
   assert.equal(auditWriteTimeoutMs({ AUDIT_WRITE_TIMEOUT_MS: "abc" }), 2000);
   assert.equal(auditWriteTimeoutMs({ AUDIT_WRITE_TIMEOUT_MS: "0" }), 2000);
   assert.equal(auditWriteTimeoutMs({ AUDIT_WRITE_TIMEOUT_MS: "-5" }), 2000);
+});
+
+test("TIMEOUT: vėluojanti SĖKMĖ po timeout tampa MATOMA, ne tyliai įrašyta", async () => {
+  /**
+   * ⚠️ `Promise.race` NENUTRAUKIA rašymo.
+   *
+   * Blokuojančiu atveju kvietėjui jau pasakyta, kad nepavyko, o veiksmas
+   * atšauktas (`LOGIN_SUCCESS` → sesija revokuota, 503). Jei įrašas vis tiek
+   * įsirašo, audito pėdsakas tvirtina įvykus tai, kas buvo atsukta - ir be šio
+   * sargo tas neatitikimas liktų nematomas.
+   *
+   * Ištrinti įrašo negalim, tad tikrinama, kad jis bent tampa RANDAMAS:
+   * `error` logas + skaitiklis.
+   */
+  const eilutės = [];
+  const originalusError = console.error;
+  const senasLygis = process.env.LOG_LEVEL;
+  console.error = (...args) => eilutės.push(args.map(String).join(" "));
+  process.env.LOG_LEVEL = "error";
+  _resetAuditCountersForTests();
+
+  /** Backend'as, kuris SĖKMINGAI įsirašo, bet per vėlai. */
+  const veluojantisSekmingas = {
+    normalizeEvent: auditLog.normalizeEvent,
+    record: (entry) =>
+      new Promise((resolve) => setTimeout(() => resolve({ id: "velyvas", ...entry }), 60)),
+  };
+
+  try {
+    await suTrumpaRiba(15, async () => {
+      await assert.rejects(
+        () => rasytiAudita({ event: "LOGIN_SUCCESS", success: true }, { auditLog: veluojantisSekmingas }),
+        /timeout/
+      );
+    });
+
+    /** Laukiam, kol vėluojantis rašymas realiai baigsis. */
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    console.error = originalusError;
+    if (senasLygis === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = senasLygis;
+  }
+
+  assert.match(
+    eilutės.join("\n"),
+    /JAU PO timeout/,
+    "po timeout įsirašęs blokuojantis įvykis privalo palikti `error` pėdsaką"
+  );
+  assert.equal(
+    getAuditCounters().auditWriteFailures,
+    1,
+    "neatitikimas privalo būti randamas ir per skaitiklį"
+  );
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════

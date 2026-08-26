@@ -141,7 +141,35 @@ function createWorker(queueName, processor, workerOptions = {}) {
            * darbas neturi būti įvykdytas – priešingu atveju revokacija
            * negaliotų būtent ten, kur ji svarbiausia.
            */
-          const decision = await authorizeJobOrAudit(processingJob, jobId);
+          /**
+           * ⚠️ TA PATI SEMANTIKA KAIP INLINE KELYJE (#155, 7.4a).
+           *
+           * Blokuojantis `JOB_EXECUTION_DENIED` auditas gali atmesti. Be šio
+           * sargo klaida nukristų tiesiai į BullMQ retry mechanizmą, o
+           * išnaudojus bandymus `_handleFailure()` ją klasifikuotų kaip
+           * `internal_error` - tuo tarpu inline kelias tą patį gedimą iškart
+           * užbaigia su `AUDIT_UNAVAILABLE`.
+           *
+           * Rezultatas: išoriškai matoma gedimo priežastis ir bandymų elgesys
+           * skirtųsi TIK pagal tai, ar sukonfigūruotas Redis. Tas pats
+           * domeno sprendimas privalo atrodyti vienodai abiejuose keliuose.
+           */
+          let decision;
+          try {
+            decision = await authorizeJobOrAudit(processingJob, jobId);
+          } catch (error) {
+            log.error("Autorizacijos auditas nepavyko - vykdymas nutraukiamas", {
+              stage: "audit_unavailable",
+              jobId,
+              execution: "worker",
+              klaida: error && error.message,
+            });
+            await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+              error_code: "AUDIT_UNAVAILABLE",
+              error_message: "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo.",
+            });
+            return;
+          }
 
           if (!decision.allowed) {
             /**

@@ -264,11 +264,45 @@ function beKomentaru(turinys) {
     .join("\n");
 }
 
+/**
+ * Randa `IDENT.PROP` reikšmę to paties failo `const IDENT = Object.freeze({...})`
+ * (arba paprasto objekto) deklaracijoje.
+ *
+ * ⚠️ SĄMONINGAI PAPRASTA. Tikslas - padengti repo naudojamą formą, ne parašyti
+ * JS parserį. Ko neišsprendžia, tas patenka į `nezinomiSaltiniai` ir tampa
+ * MATOMA starto klaida, o ne tyliu praleidimu.
+ */
+function konstantosReiksme(turinys, identifikatorius, laukas) {
+  const dekl = new RegExp(
+    `(?:const|let|var)\\s+${identifikatorius}\\s*=\\s*(?:Object\\.freeze\\()?\\{`,
+    "m"
+  ).exec(turinys);
+  if (!dekl) return null;
+
+  let gylis = 0;
+  let pradzia = -1;
+  for (let i = dekl.index; i < turinys.length; i++) {
+    if (turinys[i] === "{") {
+      if (gylis === 0) pradzia = i;
+      gylis++;
+    } else if (turinys[i] === "}") {
+      gylis--;
+      if (gylis === 0) {
+        const kunas = turinys.slice(pradzia, i + 1);
+        const m = new RegExp(`\\b${laukas}\\s*:\\s*"([A-Z_0-9]+)"`).exec(kunas);
+        return m ? m[1] : null;
+      }
+    }
+  }
+  return null;
+}
+
 function producerIvykiai() {
   const fs = require("node:fs");
   const path = require("node:path");
   const saknis = path.resolve(__dirname, "..");
   const rasti = new Set();
+  const nezinomiSaltiniai = new Set();
 
   for (const katalogas of PRODUKCINIAI_KATALOGAI) {
     const dir = path.join(saknis, katalogas);
@@ -287,16 +321,60 @@ function producerIvykiai() {
       } catch {
         continue;
       }
-      for (const m of beKomentaru(turinys).matchAll(/event:\s*"([A-Z_0-9]+)"/g)) rasti.add(m[1]);
+      const svarus = beKomentaru(turinys);
+
+      /** Tiesioginiai literalai: `event: "DATA_ERASED"`. */
+      for (const m of svarus.matchAll(/event:\s*"([A-Z_0-9]+)"/g)) rasti.add(m[1]);
+
+      /**
+       * ⚠️ PER KONSTANTĄ NURODOMI ĮVYKIAI: `event: ADMIN_EVENT.ACCESS_DENIED`.
+       *
+       * Be šito startas jų NEMATYTŲ: keturi administraciniai call site'ai
+       * naudoja būtent šią formą, tad pakeitus `ADMIN_EVENT` reikšmę į
+       * neklasifikuotą `validateConfig()` praeitų, o gedimas iškiltų tik per
+       * pirmą administracinę operaciją.
+       *
+       * Reikšmė išvedama iš PAČIOS konstantos deklaracijos, ne iš ranka
+       * prižiūrimo sąrašo - todėl naujas konstantos šaltinis padengiamas
+       * automatiškai, be jokio įrašo čia.
+       */
+      /**
+       * ⚠️ `(?![\w$])(?!\s*\()` SKIRIA KONSTANTOS NUORODĄ NUO FUNKCIJOS KVIETIMO.
+       *
+       * `(?![\w$])` PRIVALOMAS: be jo regex atgaliniu sekimu sutrumpina
+       * identifikatorių (`nullish` → `nullis`), kad antrasis lookahead
+       * pavyktų - ir klaidingas teigiamas grįžta kitu pavidalu. Patikrinta.
+       *
+       * `middleware/validate.js` Zod schemoje yra `event: identifier.nullish()` -
+       * be šio patikslinimo jis patektų į „nežinomų šaltinių" sąrašą ir
+       * SUSTABDYTŲ STARTĄ dėl lauko, kuris su auditu neturi nieko bendra.
+       * Patikrinta - būtent taip ir nutiko.
+       */
+      for (const m of svarus.matchAll(
+        /event:\s*([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)(?![\w$])(?!\s*\()/g
+      )) {
+        const reiksme = konstantosReiksme(svarus, m[1], m[2]);
+        if (reiksme) rasti.add(reiksme);
+        else nezinomiSaltiniai.add(`${m[1]}.${m[2]}`);
+      }
     }
   }
-  return rasti;
+  return { rasti, nezinomiSaltiniai };
 }
 
 function validateAuditEvents() {
   const klaidos = [];
 
-  for (const įvykis of producerIvykiai()) {
+  const { rasti, nezinomiSaltiniai } = producerIvykiai();
+
+  for (const šaltinis of nezinomiSaltiniai) {
+    klaidos.push(
+      `Audito įvykis nurodomas per konstantą "${šaltinis}", kurios reikšmės nepavyko išvesti. ` +
+        "Klasifikacijos pilnumo patikrinti neįmanoma - perkelkite reikšmę į literalą arba papildykite `konstantosReiksme()`."
+    );
+  }
+
+  for (const įvykis of rasti) {
     if (!Object.prototype.hasOwnProperty.call(AUDIT_EVENTS, įvykis)) {
       klaidos.push(
         `Audito įvykis "${įvykis}" rašomas produkciniame call site'e, bet neklasifikuotas utils/auditEvents.js.`

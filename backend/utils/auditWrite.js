@@ -77,7 +77,7 @@ function _resetAuditCountersForTests() {
  * jau pranešatas timeout keliu, tad skaitiklis čia NEDIDINAMAS (kitaip vienas
  * gedimas būtų suskaičiuotas du kartus).
  */
-function suRiba(promise, ribaMs, event) {
+function suRiba(promise, ribaMs, event, blokuojantis) {
   let laikmatis;
   const timeout = new Promise((_, reject) => {
     /**
@@ -93,13 +93,46 @@ function suRiba(promise, ribaMs, event) {
     );
   });
 
-  promise.catch((klaida) => {
-    if (laikmatis) return; // dar nepasibaigė - klaidą apdoros `Promise.race`
-    log.error("Audito rašymas krito jau po timeout", {
-      event,
-      klaida: klaida && klaida.message,
-    });
-  });
+  /**
+   * ⚠️ `Promise.race` NENUTRAUKIA rašymo - jis tik nustoja jo laukti.
+   *
+   * Todėl abi vėluojančios baigtys turi būti apdorotos, ir jos NĖRA
+   * lygiavertės:
+   *
+   *  - vėluojanti KLAIDA: gedimas jau praneštas timeout keliu, tad ji tik
+   *    logginama (skaitiklis nedidinamas - kitaip vienas gedimas būtų
+   *    suskaičiuotas du kartus);
+   *
+   *  - vėluojanti SĖKMĖ: kvietėjui jau pasakyta, kad nepavyko, o blokuojančiu
+   *    atveju veiksmas jau ATŠAUKTAS (pvz. `LOGIN_SUCCESS` → sesija revokuota,
+   *    503). Jei įrašas vis tiek įsirašo, audito pėdsakas tvirtina įvykus tai,
+   *    kas buvo atsukta. Ištrinti jo negalim, tad jis daromas MATOMU:
+   *    `error` logas + skaitiklis, kad neatitikimą būtų galima rasti.
+   *
+   * ⚠️ TIKRAS SPRENDIMAS - deadline'o perdavimas į saugyklą arba atšaukiamas
+   * rašymas - priklauso nuo backend'o, kurio dar nėra. Namai: SUBISSUES-155.md
+   * [7.4b] (`audit_log` schema) ir [7.5b] („AUDITO RAŠYMO KLAIDOS
+   * NEPRARANDAMOS").
+   */
+  promise.then(
+    (eilute) => {
+      if (laikmatis) return; // spėjo laiku - rezultatą grąžino `Promise.race`
+      if (eilute === null) return; // privacy mode - nieko neįrašyta
+      skaitikliai.auditWriteFailures += 1;
+      log.error("Audito įrašas įsirašė JAU PO timeout - kvietėjui pasakyta, kad nepavyko", {
+        event,
+        blokuojantis,
+        irasoId: eilute && eilute.id,
+      });
+    },
+    (klaida) => {
+      if (laikmatis) return; // dar nepasibaigė - klaidą apdoros `Promise.race`
+      log.error("Audito rašymas krito jau po timeout", {
+        event,
+        klaida: klaida && klaida.message,
+      });
+    }
+  );
 
   return Promise.race([promise, timeout]).finally(() => {
     clearTimeout(laikmatis);
@@ -152,7 +185,8 @@ async function rasytiAudita(entry, { auditLog = require("./auditLog") } = {}) {
     const eilute = await suRiba(
       Promise.resolve().then(() => auditLog.record(entry)),
       riba,
-      event
+      event,
+      blokuojantis
     );
 
     /**
