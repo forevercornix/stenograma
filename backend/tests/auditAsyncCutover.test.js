@@ -656,21 +656,67 @@ test("SKAITIKLIS: sėkmingas rašymas jo NEDIDINA", async () => {
   assert.equal(getAuditCounters().auditWriteFailures, 0);
 });
 
-test("SKAITIKLIS: viena klaida per kelis helperių sluoksnius NEDVIGUBINAMA", async () => {
+test("SKAITIKLIS: viena klaida per TIKRUS produkcinius helperius NEDVIGUBINAMA", async () => {
   /**
-   * ⚠️ `lifecycleService.writeAudit()` ir `authorizeJobOrAudit()` yra helperiai
-   * VIRŠ `rasytiAudita()`. Jei kiekvienas sluoksnis skaičiuotų pats, vienas
-   * gedimas atrodytų kaip keli, ir signalas prarastų prasmę.
+   * ⚠️ ANKSTESNĖ VERSIJA NIEKO NEĮRODĖ.
+   *
+   * Ji kūrė du LOKALIUS pass-through helperius ir per juos kvietė
+   * `rasytiAudita()`. Tokie sluoksniai savo klaidų apdorojimo neturi, tad
+   * pridėjus antrą inkrementą į `recordRejectedUpload()` ar bet kurį kitą
+   * PRODUKCINĮ helperį, testas - ir jį remianti saugumo matricos garantija -
+   * liktų žali.
+   *
+   * Dabar naudojamas tikras `utils/uploadEvents.js recordRejectedUpload()`,
+   * kuris produkcijoje kviečiamas iš maršrutų ir `transcriptionService`.
    */
+  const { recordRejectedUpload, REASONS } = require("../utils/uploadEvents");
+
   _resetAuditCountersForTests();
 
-  const helperis = () =>
-    rasytiAudita({ event: "UPLOAD_REJECTED", success: false }, { auditLog: krentantisBackend() });
-  const perDuSluoksnius = () => helperis();
+  await suKrentanciuRecord(async () => {
+    await recordRejectedUpload(REASONS.SIGNATURE, {
+      route: "/api/transcribe",
+      jobId: "job_skaitiklio_testas",
+    });
+  });
 
-  await perDuSluoksnius();
+  assert.equal(
+    getAuditCounters().auditWriteFailures,
+    1,
+    "vienas gedimas per tikrą helperį = vienas inkrementas"
+  );
+});
 
-  assert.equal(getAuditCounters().auditWriteFailures, 1, "vienas gedimas = vienas inkrementas");
+test("SKAITIKLIS: BLOKUOJANTIS gedimas jo NEDIDINA (skaitiklis - neblokuojančių signalas)", async () => {
+  /**
+   * ⚠️ KOMPLEMENTARI PUSĖ, IR JI GINA TĄ PATĮ NEDVIGUBINIMĄ.
+   *
+   * #210 skaitiklį sieja su NEBLOKUOJANČIAIS gedimais: blokuojantis jau
+   * praneštas kvietėjui klaida, tad papildomas skaičiavimas signalą iškreiptų.
+   * Testas naudoja TIKRĄ `authorizeJobOrAudit()` - jei kas nors pridėtų
+   * inkrementą jame ar `rasytiAudita()` blokuojančioje šakoje, čia kristų.
+   */
+  const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
+  const { PERMISSIONS } = require("../utils/permissions");
+
+  _resetAuditCountersForTests();
+
+  await suKrentanciuRecord(
+    async () => {
+      const job = { actor: "dinges-vartotojas", actorSource: "session", actorRole: "operator" };
+      await assert.rejects(
+        () => authorizeJobOrAudit(job, "job_skaitiklio_blok", PERMISSIONS.JOB_CREATE),
+        AuditWriteError
+      );
+    },
+    ["JOB_EXECUTION_DENIED"]
+  );
+
+  assert.equal(
+    getAuditCounters().auditWriteFailures,
+    0,
+    "blokuojantis gedimas jau grąžintas klaida - skaitiklio jis nedidina"
+  );
 });
 
 test("PRIVACY_MODE: blokuojantis įvykis NEĮRAŠOMAS, bet tai EKSPLICITINĖ išimtis", async () => {

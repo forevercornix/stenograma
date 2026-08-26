@@ -143,13 +143,30 @@ test("NEBLOKUOJANTIS HTTP: audito gedimas NENUMUŠA užklausos, bet DIDINA skait
   assert.equal(login.status, 200, "prielaida: prisijungimas veikia");
   const cookie = login.headers["set-cookie"][0].split(";")[0];
 
+  /** Atskaitos taškas: TAS PATS kvietimas su veikiančiu auditu. */
+  const sveikas = await request(app)
+    .post("/api/transcribe-jobs")
+    .set("Cookie", cookie)
+    .field("meetingId", "be-failo");
+
   _resetAuditCountersForTests();
 
   const res = await suKrentanciuAuditu(() =>
     request(app).post("/api/transcribe-jobs").set("Cookie", cookie).field("meetingId", "be-failo")
   );
 
-  assert.ok(res.status >= 400 && res.status < 500, `laukiamas kliento klaidos atsakymas, gauta ${res.status}`);
+  /**
+   * ⚠️ LYGINAMA SU ATSAKYMU PRIEŠ GEDIMĄ, ne su „bet koks 4xx".
+   *
+   * `status >= 400 && status < 500` praeitų, jei audito gedimas paverstų 400 į
+   * 401, 403 ar 404 - t. y. testas nutylėtų būtent tai, ką turi įrodyti:
+   * neblokuojantis audito gedimas PAGRINDINĖS operacijos nekeičia. Todėl tas
+   * pats kvietimas pirma atliekamas su veikiančiu auditu, ir tikrinamas
+   * TIKSLUS sutapimas.
+   */
+  assert.equal(res.status, sveikas.status, "audito gedimas negali pakeisti statuso");
+  assert.deepEqual(res.body, sveikas.body, "audito gedimas negali pakeisti atsakymo turinio");
+  assert.equal(res.status, 400, "prielaida: trūkstamas failas yra 400");
   assert.ok(!JSON.stringify(res.body).includes("SENTINEL"), "audito klaida negali nutekėti");
   assert.equal(
     getAuditCounters().auditWriteFailures,
