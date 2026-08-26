@@ -16,6 +16,7 @@ process.env.AUTH_USERS = `admin:administrator:${hashPassword("teisingas-slaptas-
 const request = require("supertest");
 const auditLog = require("../utils/auditLog");
 const { getAuditCounters, _resetAuditCountersForTests } = require("../utils/auditWrite");
+const sessionStoreModulis = require("../utils/sessionStore");
 const app = require("../server");
 app._setReadyForTests();
 
@@ -108,22 +109,76 @@ test("BLOKUOJANTIS HTTP: timeout atmeta prisijungimą per RIBOTĄ laiką", async
   assert.ok(!`${JSON.stringify(res.body)}`.includes("SENTINEL"));
 });
 
-test("BLOKUOJANTIS HTTP: atsijungimas su kritusiu auditu NEIŠVALO cookie", async () => {
+test("BLOKUOJANTIS HTTP: atsijungimas su kritusiu auditu IŠVALO cookie ir grąžina 503", async () => {
   /**
-   * Ta pati logika kaip 7.3 revokacijos kelyje: jei negalim patvirtinti audito,
-   * negalim ir pasakyti „atsijungta". Cookie valymas tokiu atveju paliktų
-   * klientą be credential'o, o serveryje sesija liktų.
+   * ⚠️ SĄMONINGAS KONTRAKTO PAKEITIMAS, NE TESTO SUSILPNINIMAS.
+   *
+   * Ankstesnė versija reikalavo, kad cookie NEBŪTŲ valoma. Tai kūrė TREČIĄ
+   * nesutampančią būseną: serveryje sesija JAU atšaukta (`destroy()` pavyko),
+   * kliente lieka negaliojantis cookie, o atsakymas sako „nepavyko".
+   *
+   * Taisyklė abiem #210 keliams viena: sėkmė nedeklaruojama be patvirtinto
+   * audito, BET negrįžtamas darbas neatšaukiamas ir nemaskuojamas. Cookie
+   * valymas nėra sėkmės deklaravimas - sėkmę deklaruoja `{ ok: true }` su 200.
+   *
+   * Testas dabar GRIEŽTESNIS: tikrina, kad visos trys būsenos sutampa.
    */
   const login = await prisijungti();
   const cookie = login.headers["set-cookie"][0].split(";")[0];
+  const token = decodeURIComponent(cookie.split("=")[1]);
 
   const res = await suKrentanciuAuditu(() =>
     request(app).post("/api/auth/logout").set("Cookie", cookie)
   );
 
+  /** 1. Klientas sužino, kad audito užfiksuoti nepavyko. */
   assert.equal(res.status, 503);
   assert.equal(res.body.code, "AUDIT_WRITE_FAILED");
-  assert.equal(res.headers["set-cookie"], undefined, "cookie negali būti valoma");
+
+  /** 2. Bet jis LIEKA ATSIJUNGĘS - credential'as pašalintas. */
+  assert.ok(res.headers["set-cookie"], "cookie valymo antraštė privaloma");
+  assert.match(res.headers["set-cookie"][0], /Max-Age=0/, "cookie privalo būti išvalyta");
+
+  /** 3. Ir serveryje sesija realiai atšaukta - trys būsenos sutampa. */
+  const sessionStore = require("../utils/sessionStore");
+  assert.equal(
+    await sessionStore.touch(token),
+    null,
+    "revokacija įvyko prieš auditą - ji negali būti atšaukta atgal"
+  );
+});
+
+test("BLOKUOJANTIS HTTP: kai revokacija NEĮVYKO, cookie LIEKA", async () => {
+  /**
+   * ⚠️ KOMPLEMENTARI PUSĖ - be jos viršutinis testas leistų valyti cookie
+   * VISADA, įskaitant kelius, kuriuose sesija tebegalioja.
+   *
+   * Čia krinta pati saugykla, tad `destroy()` neįvyksta. Cookie privalo likti:
+   * ta pati reikšmė kitame procese vis dar autentifikuoja, ir klientas negali
+   * manyti, kad atsijungė.
+   */
+  const login = await prisijungti();
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+
+  const originalusDestroy = sessionStoreModulis.destroy;
+  sessionStoreModulis.destroy = async () => {
+    throw new Error("saugykla nepasiekiama");
+  };
+
+  let res;
+  try {
+    res = await request(app).post("/api/auth/logout").set("Cookie", cookie);
+  } finally {
+    sessionStoreModulis.destroy = originalusDestroy;
+  }
+
+  assert.equal(res.status, 503);
+  assert.equal(res.headers["set-cookie"], undefined, "neįvykus revokacijai cookie valyti negalima");
+  assert.equal(
+    (await request(app).get("/api/auth/me").set("Cookie", cookie)).status,
+    200,
+    "sesija tebegalioja - būtent todėl cookie ir lieka"
+  );
 });
 
 test("NEBLOKUOJANTIS HTTP: audito gedimas NENUMUŠA užklausos, bet DIDINA skaitiklį", async () => {

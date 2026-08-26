@@ -224,10 +224,29 @@ router.post("/auth/logout", async (req, res) => {
         log.error(`Atsijungimas nepavyko: ${err.message}`);
         return sessionStoreUnavailable(res);
       }
+      /**
+       * ⚠️ COOKIE VALOMA IŠ KARTO PO REVOKACIJOS, PRIEŠ AUDITĄ.
+       *
+       * Cookie valymas NĖRA sėkmės deklaravimas - sėkmę deklaruoja `{ ok: true }`
+       * su 200. Sesija serveryje jau atšaukta, tad palikus klientui negaliojantį
+       * cookie atsirastų TREČIA nesutampanti būsena (serveris: atšaukta;
+       * klientas: turi credential'ą; atsakymas: „nepavyko") be jokios naudos.
+       *
+       * Todėl tvarka yra: revokacija → cookie išvalymas → auditas. Kritus
+       * auditui žemiau esantis `catch` grąžina 503, o cookie jau pašalinta:
+       * klientas žino, kad kažkas nepavyko, bet lieka atsijungęs.
+       *
+       * ⚠️ ANKSTESNI GEDIMO KELIAI COOKIE NEVALO IR NETURI: ten revokacija
+       * NEĮVYKO, tad credential'as tebegalioja ir privalo likti pas klientą.
+       */
+      clearSessionCookie(res);
+
       await rasytiAudita({ event: "LOGOUT", success: true, outcome: "session_destroyed" });
+    } else {
+      /** Idempotentinis kelias: nėra ko revokuoti, bet cookie vis tiek valoma. */
+      clearSessionCookie(res);
     }
 
-    clearSessionCookie(res);
     res.json({ ok: true });
   } catch (error) {
     if (error instanceof AuditWriteError) return auditoGedimas(res, error, "auth/logout auditas");
