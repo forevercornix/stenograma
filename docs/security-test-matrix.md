@@ -1474,6 +1474,17 @@ Sąžiningumo dėlei — ribos, kurios lieka atviros:
 
 ### #210 — audito fasado async cutover (#155, 7.4a)
 
+⚠️ **DU TERMINAI, KURIE NĖRA SINONIMAI.** Skaitant šią lentelę:
+
+- **`BLOKUOJANTIS`** — „sėkmė NEDEKLARUOJAMA be patvirtinto audito įrašo".
+  Galioja visiems blokuojantiems įvykiams.
+- **`fail-closed`** — „veiksmas ATMETAMAS", t. y. apskritai neįvyksta.
+  Galioja tik ten, kur auditas rašomas PRIEŠ veiksmą (autentikacija,
+  autorizacija).
+
+Keturiems ištrynimo įvykiams galioja tik pirmasis — žr. „RIBA" eilutę žemiau.
+Autoritetas kode: `utils/auditEvents.js` `POST_HOC_IVYKIAI`.
+
 | Garantija | Testai | Mutacijos įrodymas |
 |---|---|---|
 | Kiekvienas žinomas audito įvykis turi VIENĄ autoritetingą klasifikaciją (blokuojantis / neblokuojantis); trečios kategorijos nėra | `auditAsyncCutover` | Pridėjus `normalizeEvent()` šaką ar `event:` literalą be įrašo `utils/auditEvents.js` → krinta išvedimo ir tripwire testai; `default: "non-blocking"` → krinta neklasifikuoto įvykio testas |
@@ -1484,7 +1495,8 @@ Sąžiningumo dėlei — ribos, kurios lieka atviros:
 | Skaitiklis nedvigubinamas: viena klaida per TIKRĄ produkcinį helperį (`recordRejectedUpload`) = vienas inkrementas, o blokuojantis gedimas jo NEDIDINA | `auditAsyncCutover` | Pridėjus antrą inkrementą į `recordRejectedUpload()` → krinta; pridėjus inkrementą į blokuojančią `rasytiAudita()` šaką → krinta komplementarus testas |
 | Audito rašymas turi BAIGTINĘ ribą (`AUDIT_WRITE_TIMEOUT_MS`, numatyta 2000) abiejose kategorijose | `auditAsyncCutover`, `auditBlockingRoutes.route` | Pašalinus `suRiba()` → kabantis backend'as užstoja užklausą; `unref()` ant laikmačio → procesas išsenka nesulaukęs timeout |
 | Blokuojantys helperiai (`authorizeJobOrAudit`, `lifecycleService.writeAudit`) NEIŠSISPRENDŽIA anksčiau nei patvirtintas audito įrašas | `auditAsyncCutover` | Pašalinus `await` VIDUJE helperio → atidėto backend'o testas rodo, kad sprendimas grąžintas per anksti, o fail-closed testas — kad klaida nebepropaguojama |
-| GDPR ištrynimo keliai (`DATA_ERASED`, `LIFECYCLE_DELETION`, `RETENTION_PURGE`) NENURYJA audito klaidos | `auditAsyncCutover`, `jobErasure` | Grąžinus `catch {}` aplink auditą → ištrynimas praneša sėkmę be patvirtinto įrašo; testas izoliuoja įvykį, kad atmetimą duotų būtent tikrinamas kelias |
+| GDPR ištrynimo keliai (`DATA_ERASED`, `LIFECYCLE_DELETION`, `RETENTION_PURGE`) NENURYJA audito klaidos — sėkmė NEDEKLARUOJAMA be patvirtinto įrašo (`DELETE` grąžina 503, ne 204) | `auditAsyncCutover`, `jobErasure` | Grąžinus `catch {}` aplink auditą → ištrynimas praneša sėkmę be patvirtinto įrašo; testas izoliuoja įvykį, kad atmetimą duotų būtent tikrinamas kelias |
+| ⚠️ **RIBA:** šie keturi (+ `ADMIN_ORPHAN_CLEANUP`) yra **post-hoc pagal konstrukciją** — auditas rašomas JAU PO trynimo, tad gedimas apsaugo **ataskaitą, ne duomenis**. `BLOKUOJANTIS` čia reiškia „sėkmė nedeklaruojama", NE „veiksmas atmetamas". Perrikiavimas atidėtas į [7.4b] (persistentis `audit_log`, `AUDIT_ID_SALT`) ir [7.5b] („AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS") | `auditAsyncCutover` | Pašalinus įvykį iš `POST_HOC_IVYKIAI` arba pakeitus jo kategoriją → krinta post-hoc aibės ir kategorijos patikra |
 | Inline vykdymas: audito gedimas autorizacijoje perkelia job'ą į TERMINALIĄ būseną (`AUDIT_UNAVAILABLE`), o ne palieka pakibusį | `auditAsyncCutover` | Pašalinus `try/catch` aplink `authorizeJobOrAudit()` → `_runInline` atmeta, job'as lieka neterminalus, `setImmediate` paleidėjas duoda `unhandledRejection` |
 | Administraciniai DELETE keliai audito gedimą grąžina kaip sanitizuotą `503 AUDIT_WRITE_FAILED`, ne Express numatytąjį 500 | `auditBlockingRoutes.route` | Pašalinus `auditoGedimas()` iš abiejų `routes/jobs.js` šakų → atsakymas tampa 500, o ne produkcijoje į jį patenka pirminė klaida |
 | Neklasifikuotas PRODUKCINIS `event:` literalas sustabdo STARTĄ (ne tik CI tripwire) | `auditAsyncCutover` | Pakeitus bet kurį call site'o įvykį į neklasifikuotą → `startupChecks.validateConfig()` grąžina klaidą; skeneris nuvalo komentarus, kad nepagautų savo dokumentacijos |

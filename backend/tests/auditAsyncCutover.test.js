@@ -13,6 +13,8 @@ const {
   arBlokuojantis,
   validateAuditEvents,
   producerIvykiai,
+  POST_HOC_IVYKIAI,
+  arPostHoc,
   UnclassifiedAuditEventError,
 } = require("../utils/auditEvents");
 const {
@@ -110,6 +112,45 @@ test("KLASIFIKACIJA: kiekvienas žinomas įvykis turi vieną iš DVIEJŲ kategor
     "trečios kategorijos nėra (#210)"
   );
   assert.ok(Object.keys(AUDIT_EVENTS).length >= 20, "klasifikacija negali tyliai susitraukti");
+});
+
+test("POST-HOC: keturi ištrynimo įvykiai įvardyti eksplicitiškai ir LIEKA blokuojantys", () => {
+  /**
+   * ⚠️ ŠIS TESTAS SAUGO TERMINŲ ATSKYRIMĄ, NE ELGESĮ.
+   *
+   * `BLOKUOJANTIS` ir `fail-closed` anksčiau buvo sulipę viename komentare, ir
+   * skaitytojas pagrįstai suprasdavo, kad audito gedimas apsaugo DUOMENIS.
+   * Šiuose keturiuose keliuose auditas rašomas JAU PO trynimo, tad apsaugo tik
+   * ataskaitą.
+   *
+   * Rinkinys laikomas kode (ne vien prozoje), kad jį būtų galima tikrinti:
+   *  - kiekvienas jo narys PRIVALO likti blokuojantis (kitaip prarastume ir
+   *    tai, ką `9af1690` laimėjo - 503 vietoj tylaus 204);
+   *  - naujas post-hoc kelias be įrašo čia liktų nepažymėtas, tad sąrašas
+   *    lyginamas su tikslia aibe.
+   */
+  assert.deepEqual(
+    [...POST_HOC_IVYKIAI].sort(),
+    ["ADMIN_ORPHAN_CLEANUP", "DATA_ERASED", "LIFECYCLE_DELETION", "RETENTION_PURGE"],
+    "post-hoc aibė pasikeitė - patikrink, ar naujas kelias tikrai rašo auditą po veiksmo"
+  );
+
+  for (const įvykis of POST_HOC_IVYKIAI) {
+    assert.equal(
+      kategorija(įvykis),
+      KATEGORIJA.BLOKUOJANTIS,
+      `${įvykis} privalo likti blokuojantis: sėkmė nedeklaruojama be patvirtinto įrašo`
+    );
+    assert.ok(arPostHoc(įvykis));
+  }
+
+  /** Autentikacijos ir autorizacijos keliai NĖRA post-hoc - jiems fail-closed galioja pilnai. */
+  for (const įvykis of ["LOGIN_SUCCESS", "AUTHORIZATION_DENIED", "JOB_EXECUTION_DENIED"]) {
+    assert.ok(
+      !arPostHoc(įvykis),
+      `${įvykis} rašomas PRIEŠ veiksmą - jo negalima žymėti post-hoc`
+    );
+  }
 });
 
 test("KLASIFIKACIJA: neklasifikuotas įvykis yra KONTROLIUOJAMA klaida, ne numatytoji kategorija", () => {

@@ -18,7 +18,21 @@
 const KATEGORIJA = Object.freeze({
   /**
    * BLOKUOJANTIS: sėkmė negali būti deklaruota anksčiau, nei patvirtintas
-   * audito įrašas. Klaida arba timeout → veiksmas atmetamas (fail-closed).
+   * audito įrašas.
+   *
+   * ⚠️ DU TERMINAI, KURIUOS BŪTINA SKIRTI - ANKSČIAU JIE ČIA BUVO SULIPĘ.
+   *
+   *   BLOKUOJANTIS  „sėkmė NEDEKLARUOJAMA be patvirtinto įrašo".
+   *                 Tai, ką kodas realiai daro VISUOSE keliuose: klaida ar
+   *                 timeout → kvietėjas gauna klaidą, ne 2xx/`true`.
+   *
+   *   FAIL-CLOSED   „veiksmas ATMETAMAS", t. y. jis apskritai neįvyksta.
+   *                 Tai galioja TIK ten, kur auditas rašomas PRIEŠ veiksmą
+   *                 (autentikacija, autorizacija).
+   *
+   * Kur veiksmas negrįžtamas ir jau įvykęs (žr. `POST_HOC_IVYKIAI`), galioja
+   * TIK pirmasis. Sulipdžius juos į vieną, skaitytojas pagrįstai suprastų, kad
+   * audito gedimas apsaugo DUOMENIS - o jis apsaugo tik ATASKAITĄ.
    */
   BLOKUOJANTIS: "blocking",
   /**
@@ -67,7 +81,11 @@ const AUDIT_EVENTS = Object.freeze({
   /**
    * Visi keturi ŠALINA asmens duomenis. Ištrynimas be patvirtinto audito yra
    * būtent tas atvejis, kuriam auditas ir egzistuoja: po jo nebelieka ko
-   * tikrinti. Fail-closed čia reiškia „netrinam", ne „prarandam duomenis".
+   * tikrinti.
+   *
+   * ⚠️ BET ČIA JIE YRA POST-HOC - žr. `POST_HOC_IVYKIAI`. Šiuose keturiuose
+   * keliuose auditas rašomas JAU PO trynimo, tad audito gedimas neleidžia
+   * deklaruoti sėkmės, bet duomenų nebeapsaugo.
    */
   DATA_ERASED: KATEGORIJA.BLOKUOJANTIS,
   LIFECYCLE_DELETION: KATEGORIJA.BLOKUOJANTIS,
@@ -119,6 +137,49 @@ const IŠVEDAMI_ĮVYKIAI = Object.freeze([
   "PROCESSING_COMPLETED",
   "PROCESSING_FAILED",
 ]);
+
+/**
+ * ĮVYKIAI, KURIŲ AUDITAS RAŠOMAS PO NEGRĮŽTAMO VEIKSMO.
+ *
+ * ⚠️ TAI KONSTRUKCIJOS SAVYBĖ, NE PRALEIDIMAS.
+ *
+ * Šiuose keliuose destruktyvus darbas jau būna atliktas, kai `rasytiAudita()`
+ * kviečiamas:
+ *
+ *   utils/jobErasure.js          saugykla → audito įrašai → job'as → AUDITAS
+ *   services/lifecycleService.js ištrynimas → rezultatas   → AUDITAS
+ *   utils/retentionSweeper.js    job'ai → audio → įrašai    → AUDITAS
+ *   services/adminJobService.js  eraseOrphanedJobData()     → AUDITAS
+ *
+ * Todėl jiems galioja BLOKUOJANTIS („sėkmė nedeklaruojama"), bet NEGALIOJA
+ * fail-closed („veiksmas atmetamas"): atmesti nebėra ko. Praktinė nauda išlieka
+ * reali - `DELETE` grąžina 503 vietoj 204, ir operatorius sužino, kad pėdsako
+ * nėra. Bet duomenų tai nebeapsaugo, ir to tvirtinti negalima.
+ *
+ * ⚠️ PERRIKIAVIMAS SĄMONINGAI ATIDĖTAS, SU ADRESU.
+ *
+ * Auditas šiandien gyvena ATMINTYJE tame pačiame procese, tad „patvirtintas"
+ * įrašas neduoda patvarumo - jį praranda restartas. Rašyti auditą PRIEŠ
+ * trynimą dabar reikštų naują gedimo režimą (nepavykęs trynimas paliktų
+ * melagingą „ištrinta" pėdsaką) negaunant realios garantijos.
+ *
+ * Namai perrikiavimui jau egzistuoja:
+ *   SUBISSUES-155.md [7.4b] - `audit_log` schema, `AUDIT_ID_SALT`, persistentis
+ *                             auditas (tada atsiranda patvarumas ir transakcija);
+ *   SUBISSUES-155.md [7.5b] - „AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS" (patvari
+ *                             eilė su eksplicitiniu klaidų pranešimu).
+ */
+const POST_HOC_IVYKIAI = Object.freeze([
+  "DATA_ERASED",
+  "LIFECYCLE_DELETION",
+  "RETENTION_PURGE",
+  "ADMIN_ORPHAN_CLEANUP",
+]);
+
+/** Ar šio įvykio auditas rašomas jau po negrįžtamo veiksmo? */
+function arPostHoc(event) {
+  return POST_HOC_IVYKIAI.includes(event);
+}
 
 /** Nežinomas įvykis - kontroliuojama klaida, ne numatytoji kategorija. */
 class UnclassifiedAuditEventError extends Error {
@@ -265,6 +326,8 @@ module.exports = {
   AUDIT_EVENTS,
   IŠVEDAMI_ĮVYKIAI,
   UnclassifiedAuditEventError,
+  POST_HOC_IVYKIAI,
+  arPostHoc,
   kategorija,
   arBlokuojantis,
   validateAuditEvents,

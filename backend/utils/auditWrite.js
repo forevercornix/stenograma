@@ -111,7 +111,11 @@ function suRiba(promise, ribaMs, event) {
  * VIENINTELIS produkcinis audito rašymo kelias.
  *
  * Blokuojantis įvykis: klaida ar timeout → METAMA `AuditWriteError`, tad
- * saugomas veiksmas negali deklaruoti sėkmės (fail-closed).
+ * saugomas veiksmas negali deklaruoti sėkmės.
+ *
+ * ⚠️ „Sėkmė nedeklaruojama" NĖRA tas pats, kas „veiksmas atmetamas". Ten, kur
+ * auditas rašomas po negrįžtamo veiksmo (`auditEvents.POST_HOC_IVYKIAI`),
+ * galioja tik pirmasis - žr. to rinkinio komentarą.
  *
  * Neblokuojantis įvykis: klaida ar timeout → `error` logas (su `request_id` iš
  * request konteksto per `utils/logger.js`), skaitiklis +1, ir kvietimas
