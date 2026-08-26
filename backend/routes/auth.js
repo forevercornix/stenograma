@@ -131,12 +131,31 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
      * sesijos įrašymui (`create()` → cookie); 7.4a prideda auditą į tą pačią
      * grandinę: sesija → auditas → cookie.
      */
-    await rasytiAudita({
-      event: "LOGIN_SUCCESS",
-      success: true,
-      outcome: "session_created",
-      details: `username=${identity.username} role=${identity.role}`,
-    });
+    try {
+      await rasytiAudita({
+        event: "LOGIN_SUCCESS",
+        success: true,
+        outcome: "session_created",
+        details: `username=${identity.username} role=${identity.role}`,
+      });
+    } catch (error) {
+      /**
+       * ⚠️ SESIJA ATŠAUKIAMA, KAI AUDITAS KRINTA.
+       *
+       * `create()` jau įvyko, tad be šio atšaukimo liktų GYVA sesija, kurios
+       * token'as niekam neišsiųstas: klientas jos revokuoti negali, o per
+       * audito gedimo langą pakartotiniai bandymai jų prikauptų. Atmintyje tai
+       * nutekėjimas, PostgreSQL režime - eilutės, kurios gyvuoja iki
+       * `expires_at`.
+       *
+       * Revokacijos klaida NENUSLEPIA audito klaidos: pastaroji yra priežastis,
+       * dėl kurios prisijungimas atmetamas, tad ji ir keliama toliau.
+       */
+      await sessionStore.destroy(sukurta.token).catch((revokacijosKlaida) =>
+        log.error(`Nepavyko atšaukti sesijos po audito gedimo: ${revokacijosKlaida.message}`)
+      );
+      throw error;
+    }
 
     setSessionCookie(res, sukurta.token, sessionStore.absoluteTimeoutMs());
     log.info("Prisijungta", { role: identity.role });

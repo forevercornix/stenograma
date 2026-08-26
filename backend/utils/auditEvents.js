@@ -158,8 +158,90 @@ function arBlokuojantis(event) {
  *
  * @returns {string[]} klaidų sąrašas (tuščias - viskas gerai).
  */
+/**
+ * PRODUKCINIŲ `rasytiAudita()` KVIETIMŲ ĮVYKIAI - iš ŠALTINIO, ne iš sąrašo.
+ *
+ * ⚠️ KODĖL TO REIKIA STARTE.
+ *
+ * Be šios patikros `rasytiAudita({ event: "NAUJAS" })` pridėjimas nesukeltų
+ * JOKIOS starto klaidos: validatorius apeidavo tik ranka prižiūrimą išvedamų
+ * įvykių sąrašą ir jau esančius `AUDIT_EVENTS` įrašus. Gedimas iškiltų tik tada,
+ * kai tas kelias realiai suveiktų - o #210 reikalauja „neklasifikuotas → klaida
+ * STARTO metu". CI tripwire testas to nepakeičia: jis nėra paleidimo garantija.
+ *
+ * ⚠️ NEKRINTA, JEI ŠALTINIŲ NĖRA. Supakuotame ar apkarpytame diegime katalogų
+ * gali nebūti; tada patikra tiesiog neturi ką tikrinti ir NEGALI virsti
+ * klaidingu starto gedimu.
+ */
+const PRODUKCINIAI_KATALOGAI = Object.freeze([
+  "utils",
+  "services",
+  "middleware",
+  "routes",
+  "workers",
+  "queues",
+]);
+
+/**
+ * ⚠️ KOMENTARAI PAŠALINAMI PRIEŠ SKENUOJANT (AGENTS.md §9.2).
+ *
+ * Be to patikra pagauna SAVO PAČIOS dokumentaciją: šio failo komentare yra
+ * pavyzdys `rasytiAudita({ event: "NAUJAS" })`, ir startas kristų dėl įvykio,
+ * kurio nė vienas call site'as nerašo. Tai patikrinta - būtent taip ir nutiko.
+ *
+ * Šalinami blokiniai komentarai ir eilutės, prasidedančios `*` arba `//`;
+ * kodo eilučių neliečiam, kad `event: "X"` literalai išliktų.
+ */
+function beKomentaru(turinys) {
+  return turinys
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((eilutė) => {
+      const t = eilutė.trim();
+      return !t.startsWith("*") && !t.startsWith("//");
+    })
+    .join("\n");
+}
+
+function producerIvykiai() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const saknis = path.resolve(__dirname, "..");
+  const rasti = new Set();
+
+  for (const katalogas of PRODUKCINIAI_KATALOGAI) {
+    const dir = path.join(saknis, katalogas);
+    let irasai;
+    try {
+      irasai = fs.readdirSync(dir, { recursive: true });
+    } catch {
+      continue; // katalogo nėra - žr. komentarą aukščiau
+    }
+    for (const irasas of irasai) {
+      if (!String(irasas).endsWith(".js")) continue;
+      const kelias = path.join(dir, String(irasas));
+      let turinys;
+      try {
+        turinys = fs.readFileSync(kelias, "utf8");
+      } catch {
+        continue;
+      }
+      for (const m of beKomentaru(turinys).matchAll(/event:\s*"([A-Z_0-9]+)"/g)) rasti.add(m[1]);
+    }
+  }
+  return rasti;
+}
+
 function validateAuditEvents() {
   const klaidos = [];
+
+  for (const įvykis of producerIvykiai()) {
+    if (!Object.prototype.hasOwnProperty.call(AUDIT_EVENTS, įvykis)) {
+      klaidos.push(
+        `Audito įvykis "${įvykis}" rašomas produkciniame call site'e, bet neklasifikuotas utils/auditEvents.js.`
+      );
+    }
+  }
 
   for (const įvykis of IŠVEDAMI_ĮVYKIAI) {
     if (!Object.prototype.hasOwnProperty.call(AUDIT_EVENTS, įvykis)) {
@@ -186,4 +268,5 @@ module.exports = {
   kategorija,
   arBlokuojantis,
   validateAuditEvents,
+  producerIvykiai,
 };

@@ -12,6 +12,7 @@ const {
   kategorija,
   arBlokuojantis,
   validateAuditEvents,
+  producerIvykiai,
   UnclassifiedAuditEventError,
 } = require("../utils/auditEvents");
 const {
@@ -165,10 +166,15 @@ test("KLASIFIKACIJA: visi produkciniai `event:` literalai klasifikuoti (tripwire
    * call site'ą su neklasifikuotu įvykiu PRIEŠ jam pirmą kartą suveikiant
    * produkcijoje. Elgsenos pusę dengia `rasytiAudita()` testai žemiau.
    */
-  const literalai = new Set();
-  for (const { turinys } of produkciniaiFailai()) {
-    for (const m of turinys.matchAll(/event:\s*"([A-Z_0-9]+)"/g)) literalai.add(m[1]);
-  }
+  /**
+   * ⚠️ NAUDOJAMAS TAS PATS SKENERIS, KURĮ VYKDO STARTAS.
+   *
+   * Antras, testui skirtas skeneris ilgainiui išsiskirtų su produkciniu - ir
+   * testas tikrintų ne tą, ką realiai tikrina `startupChecks`. Be to
+   * `producerIvykiai()` nuvalo komentarus; be to patikra pagauna savo pačios
+   * dokumentacijos pavyzdžius (AGENTS.md §9.2) - taip ir nutiko rašant šį testą.
+   */
+  const literalai = producerIvykiai();
 
   assert.ok(literalai.size >= 15, `paieška turi rasti realius call site'us (rado ${literalai.size})`);
 
@@ -220,14 +226,36 @@ test("KLASIFIKACIJA: NAUJAS konstantos šaltinis negali praslysti nepastebėtas"
    */
   const šaltiniai = new Set();
 
+  /**
+   * ⚠️ PILNA KVIETIMO IŠRAIŠKA, NE FIKSUOTAS EILUČIŲ LANGAS.
+   *
+   * Ankstesnė versija žiūrėjo 12 eilučių nuo `rasytiAudita(`. Konstanta,
+   * atsidūrusi toliau (pridėjus komentarą ar laukų), iškristų iš lango, ir
+   * testas praeitų nepastebėjęs neklasifikuoto šaltinio. Dabar skaitomi
+   * SUBALANSUOTI skliaustai - kvietimo pabaiga nustatoma struktūriškai.
+   */
+  const kvietimoTurinys = (turinys, nuo) => {
+    let gylis = 0;
+    for (let i = nuo; i < turinys.length; i++) {
+      if (turinys[i] === "(") gylis++;
+      else if (turinys[i] === ")") {
+        gylis--;
+        if (gylis === 0) return turinys.slice(nuo, i + 1);
+      }
+    }
+    return turinys.slice(nuo);
+  };
+
   for (const { turinys } of produkciniaiFailai()) {
-    const eilutės = turinys.split("\n");
-    eilutės.forEach((eilutė, idx) => {
-      if (!eilutė.includes("rasytiAudita(")) return;
-      const blokas = eilutės.slice(idx, idx + 12).join("\n");
-      const m = /event:\s*([A-Za-z_][A-Za-z_.]*)/.exec(blokas);
+    let nuo = 0;
+    for (;;) {
+      const idx = turinys.indexOf("rasytiAudita(", nuo);
+      if (idx === -1) break;
+      const kvietimas = kvietimoTurinys(turinys, idx + "rasytiAudita".length);
+      const m = /event:\s*([A-Za-z_][A-Za-z_.]*)/.exec(kvietimas);
       if (m && m[1].includes(".")) šaltiniai.add(m[1]);
-    });
+      nuo = idx + 1;
+    }
   }
 
   assert.deepEqual(
@@ -643,6 +671,55 @@ test("SKAITIKLIS: viena klaida per kelis helperių sluoksnius NEDVIGUBINAMA", as
   await perDuSluoksnius();
 
   assert.equal(getAuditCounters().auditWriteFailures, 1, "vienas gedimas = vienas inkrementas");
+});
+
+test("PRIVACY_MODE: blokuojantis įvykis NEĮRAŠOMAS, bet tai EKSPLICITINĖ išimtis", async () => {
+  /**
+   * ⚠️ ČIA FIKSUOJAMAS SĄMONINGAS KOMPROMISAS, NE PRAĖJIMAS PRO ŠALĮ.
+   *
+   * Įjungus `PRIVACY_MODE=true`, `record()` nieko neįrašo ir grąžina `null`.
+   * Blokuojančiam įvykiui tai reiškia, kad garantija „sėkmė tik po patvirtinto
+   * įrašo" tokiu režimu NEGALIOJA - patvirtinti nėra ko.
+   *
+   * Veiksmas NEATMETAMAS sąmoningai: kitaip `PRIVACY_MODE` sulaužytų
+   * prisijungimą, autorizaciją ir ištrynimą, t. y. paverstų privatumo režimą
+   * neveikiančia sistema. Bet tylėti negalima - režimas fiksuojamas `warn`
+   * lygiu, o skaitiklis NEDIDINAMAS, nes tai konfigūracija, ne gedimas.
+   *
+   * Testas egzistuoja tam, kad šis kompromisas būtų MATOMAS ir negalėtų būti
+   * netyčia pakeistas - ne tam, kad jį pateisintų.
+   */
+  const senas = process.env.PRIVACY_MODE;
+  const senasLygis = process.env.LOG_LEVEL;
+  const eilutės = [];
+  const originalusWarn = console.warn;
+
+  process.env.PRIVACY_MODE = "true";
+  process.env.LOG_LEVEL = "warn";
+  console.warn = (...args) => eilutės.push(args.map(String).join(" "));
+  _resetAuditCountersForTests();
+
+  let rezultatas;
+  try {
+    rezultatas = await rasytiAudita({ event: "LOGIN_SUCCESS", success: true });
+  } finally {
+    console.warn = originalusWarn;
+    if (senas === undefined) delete process.env.PRIVACY_MODE;
+    else process.env.PRIVACY_MODE = senas;
+    if (senasLygis === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = senasLygis;
+  }
+
+  assert.equal(rezultatas, null, "privatumo režimu įrašo nėra");
+  assert.equal(
+    getAuditCounters().auditWriteFailures,
+    0,
+    "tai konfigūracija, ne gedimas - skaitiklis nedidinamas"
+  );
+  assert.ok(
+    eilutės.join("\n").includes("PRIVACY_MODE"),
+    "režimas privalo būti matomas loge, kad nebūtų painiojamas su veikiančiu auditu"
+  );
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════

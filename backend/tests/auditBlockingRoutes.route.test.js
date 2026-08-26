@@ -216,3 +216,49 @@ test("ADMIN: override audito gedimas duoda SANITIZUOTĄ 503, ne Express numatyt�
   assert.ok(!/at\s+\w+\s+\(/.test(visas), "stack trace nutekėjo");
 });
 
+test("LOGIN: audito gedimas ATŠAUKIA jau sukurtą sesiją (jokių našlaičių)", async () => {
+  /**
+   * ⚠️ REGRESIJA, KURIĄ ŠIS TESTAS UŽDARO.
+   *
+   * `sessionStore.create()` įvyksta PRIEŠ `LOGIN_SUCCESS` auditą. Kai auditas
+   * krinta, maršrutas grąžina 503 ir cookie neišduoda - bet sesija jau
+   * egzistuoja. Be atšaukimo ji liktų GYVA su token'u, kurio niekas negavo:
+   * klientas jos revokuoti negali, o per audito gedimo langą pakartotiniai
+   * bandymai jų prikauptų (atmintyje - nutekėjimas, PostgreSQL - eilutės iki
+   * `expires_at`).
+   */
+  const sessionStore = require("../utils/sessionStore");
+
+  /**
+   * ⚠️ `size()` ČIA NETINKA. Nuo 7.3 revokacija yra LOGINĖ, o `size()`
+   * skaičiuoja FIZINES eilutes - jos nemažėja net teisingai atšaukus. Todėl
+   * perimamas pats `create()`, kad testas turėtų token'ą, kurio klientas
+   * niekada negavo, ir galėtų patikrinti tai, kas realiai svarbu: ar jis dar
+   * autentifikuoja.
+   */
+  const originalusCreate = sessionStore.create;
+  let sukurtasToken = null;
+  sessionStore.create = async (...args) => {
+    const rezultatas = await originalusCreate.apply(sessionStore, args);
+    sukurtasToken = rezultatas.token;
+    return rezultatas;
+  };
+
+  let res;
+  try {
+    res = await suKrentanciuAuditu(() => prisijungti());
+  } finally {
+    sessionStore.create = originalusCreate;
+  }
+
+  assert.equal(res.status, 503, "prielaida: audito gedimas atmeta prisijungimą");
+  assert.equal(res.headers["set-cookie"], undefined, "prielaida: cookie neišduota");
+  assert.ok(sukurtasToken, "prielaida: sesija buvo sukurta prieš audito gedimą");
+
+  assert.equal(
+    await sessionStore.touch(sukurtasToken),
+    null,
+    "sesija be savininko privalo būti atšaukta, o ne palikta autentifikuoti"
+  );
+});
+

@@ -145,7 +145,33 @@ async function rasytiAudita(entry, { auditLog = require("./auditLog") } = {}) {
   const riba = auditWriteTimeoutMs();
 
   try {
-    return await suRiba(Promise.resolve().then(() => auditLog.record(entry)), riba, event);
+    const eilute = await suRiba(
+      Promise.resolve().then(() => auditLog.record(entry)),
+      riba,
+      event
+    );
+
+    /**
+     * ⚠️ `PRIVACY_MODE` YRA EKSPLICITINĖ IŠIMTIS, NE TYLUS PRAĖJIMAS.
+     *
+     * Įjungus `PRIVACY_MODE=true`, `auditLog.record()` SĄMONINGAI nieko
+     * neįrašo ir grąžina `null`. Blokuojančiam įvykiui tai reiškia, kad
+     * patvirtinti nėra ko - garantija „sėkmė tik po patvirtinto įrašo" tokiu
+     * režimu neegzistuoja, nes operatorius auditą išjungė visai sistemai.
+     *
+     * Veiksmo ČIA neatmetame: `PRIVACY_MODE` sulaužytų prisijungimą,
+     * autorizaciją ir ištrynimą, t. y. paverstų privatumo režimą neveikiančia
+     * sistema. Bet tylėti irgi negalima - režimas fiksuojamas `warn` lygiu,
+     * kad diegime jis nebūtų painiojamas su veikiančiu auditu.
+     *
+     * ⚠️ Skaitiklis NEDIDINAMAS: tai ne gedimas, o sąmoninga konfigūracija.
+     * Šis kompromisas įvardytas ir `docs/security-test-matrix.md`.
+     */
+    if (eilute === null && blokuojantis && auditLog.isPrivacyModeEnabled()) {
+      log.warn("PRIVACY_MODE: blokuojantis audito įvykis NEĮRAŠOMAS", { event });
+    }
+
+    return eilute;
   } catch (klaida) {
     if (blokuojantis) {
       /**
