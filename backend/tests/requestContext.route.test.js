@@ -301,12 +301,18 @@ test("AUDITAS: requestId ir actor patenka iš konteksto automatiškai", async ()
   assert.equal(entry.actor, "key_audito123");
 });
 
-test("AUDITAS: eksplicitinės reikšmės turi pirmenybę prieš kontekstą", () => {
+test("AUDITAS: eksplicitinės reikšmės turi pirmenybę prieš kontekstą", async () => {
   // Worker'io retry ir ištrynimo kvitai kartais žino ID geriau nei aplinkinis
   // scope - tad eksplicitinis perdavimas negali būti perrašytas.
   const auditLog = require("../utils/auditLog");
 
-  requestContext.runWithContext({ requestId: "req_konteksto", actor: "key_konteksto" }, async () => {
+  /**
+   * ⚠️ `await` BŪTINAS NUO 7.4a. `record()` tapus async, callback'as irgi tapo
+   * async, o `runWithContext()` grąžina jo Promise. Be laukimo testas
+   * baigtųsi PRIEŠ abi assercijas - regresija, palikusi Promise pakibusį,
+   * praeitų nieko nepatikrinusi (AGENTS.md §9.1).
+   */
+  await requestContext.runWithContext({ requestId: "req_konteksto", actor: "key_konteksto" }, async () => {
     const entry = await auditLog.record({ jobId: "j", requestId: "req_eksplicitinis", actor: "key_eksplicitinis" });
 
     assert.equal(entry.requestId, "req_eksplicitinis");

@@ -242,13 +242,19 @@ test("STRUKTŪRA: abu vykdymo keliai naudoja TĄ PAČIĄ autorizacijos funkciją
       /**
        * ⚠️ `await` YRA DALIS REIKALAVIMO NUO 7.4a (#210).
        *
+       * ⚠️ `const` NEPRIVALOMAS, `await` - PRIVALOMAS. `queues/jobRunner.js`
+       * naudoja `let decision;` + `try/catch`, nes blokuojantis auditas gali
+       * atmesti, ir inline kelias privalo job'ą perkelti į terminalią būseną
+       * (`AUDIT_UNAVAILABLE`). Deklaracijos forma nesvarbi; svarbu, kad
+       * kvietimas būtų su argumentais IR laukiamas.
+       *
        * `authorizeJobOrAudit()` tapo async, nes `JOB_EXECUTION_DENIED` yra
        * BLOKUOJANTIS audito įvykis. Be `await` kvietimas grąžintų Promise,
        * `decision.allowed` būtų `undefined`, ir job'as būtų nutrauktas kaip
        * neautorizuotas - arba, blogiau, praeitų. Šablonas sugriežtintas, ne
        * susilpnintas: dabar reikalaujama IR kvietimo su argumentais, IR laukimo.
        */
-      /const\s+decision\s*=\s*await\s+authorizeJobOrAudit\(/,
+      /(?:const\s+)?decision\s*=\s*await\s+authorizeJobOrAudit\(/,
       `${file} turi REALIAI iškviesti IR palaukti autorizacijos vykdymo metu`
     );
     assert.match(source, /AUTHORIZATION_REVOKED/, `${file} turi pažymėti jobą kaip nutrauktą`);

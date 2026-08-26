@@ -478,6 +478,62 @@ test("BLOKUOJANTIS: `lifecycleService` ištrynimas ATMETA, kai auditas krinta", 
   }
 });
 
+test("INLINE: audito gedimas autorizacijoje perkelia job'ą į TERMINALIĄ būseną", async () => {
+  /**
+   * ⚠️ REGRESIJA, KURIĄ ŠIS TESTAS UŽDARO.
+   *
+   * `_runInline` paleidžiamas per `setImmediate(() => ...)`, tad jo Promise
+   * niekas nelaiko. Kai `authorizeJobOrAudit()` po 7.4a ėmė laukti BLOKUOJANČIO
+   * `JOB_EXECUTION_DENIED` įrašo, audito gedimas čia taptų
+   * `unhandledRejection`, job'as liktų NETERMINALUS (vartotojas amžinai
+   * apklausinėtų `processing`), o naujesnės Node nuostatos procesą nutrauktų.
+   *
+   * Fail-closed reiškia „nevykdom", bet job'as PRIVALO pasiekti terminalią
+   * būseną - todėl tikrinama ir tai, kad `_runInline` NEATMETA, ir konkretus
+   * `error_code`.
+   */
+  const jobRunner = require("../queues/jobRunner");
+  const jobStore = require("../utils/jobStore");
+
+  await jobStore.init();
+
+  /** Aktorius, kurio `AUTH_USERS` nepažįsta → `JOB_EXECUTION_DENIED`. */
+  const job = await jobStore.create({
+    type: jobStore.JOB_TYPES.PROTOCOL,
+    ownerKind: "unowned",
+    actor: "dinges-vartotojas",
+    actorSource: "session",
+    actorRole: "operator",
+  });
+
+  const pagauti = [];
+  const handler = (p) => pagauti.push(p);
+  process.on("unhandledRejection", handler);
+
+  try {
+    await suKrentanciuRecord(
+      async () => {
+        await jobRunner._runInline("protocol", job.id, {});
+      },
+      /** TIK autorizacijos įvykis - kad gedimas ateitų būtent iš šio kelio. */
+      ["JOB_EXECUTION_DENIED"]
+    );
+
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual(pagauti, [], "inline kelias negali palikti nesuvaldyto Promise");
+
+    const poVykdymo = await jobStore.system.get(job.id);
+    assert.equal(poVykdymo.status, jobStore.STATUS.FAILED, "job'as privalo tapti terminalus");
+    assert.equal(
+      poVykdymo.errorCode || poVykdymo.error_code,
+      "AUDIT_UNAVAILABLE",
+      "priežastis atskiriama nuo AUTHORIZATION_REVOKED - ten teisės atimtos, čia sprendimo neužfiksavom"
+    );
+  } finally {
+    process.off("unhandledRejection", handler);
+  }
+});
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 3. NEBLOKUOJANTIS KELIAS
  * ═══════════════════════════════════════════════════════════════════════════ */

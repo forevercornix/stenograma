@@ -178,3 +178,41 @@ test("unhandledRejection: HTTP keliai su kritusiu auditu jo nesukelia", async ()
     process.off("unhandledRejection", handler);
   }
 });
+
+test("ADMIN: override audito gedimas duoda SANITIZUOTĄ 503, ne Express numatytąjį 500", async () => {
+  /**
+   * ⚠️ REGRESIJA, KURIĄ ŠIS TESTAS UŽDARO.
+   *
+   * `adminDeleteJob()` / `adminCleanupOrphan()` meta `AuditWriteError`, o
+   * DELETE maršrutai neturėjo `catch`; repo neturi ir globalaus Express klaidų
+   * handlerio. Klientas gaudavo Express numatytąjį 500/HTML vietoj
+   * dokumentuoto `503 AUDIT_WRITE_FAILED`, o ne produkcijoje atsakyme galėjo
+   * atsirasti pirminė backend'o klaida iš stack trace.
+   *
+   * Tikrinamas administracinis kelias: `ADMIN_ACCESS_DENIED` rašomas dar
+   * `assertSessionAdmin()` metu, tad audito gedimas pasiekia maršrutą net
+   * neegzistuojančiam job'ui.
+   */
+  const login = await prisijungti();
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+
+  const res = await suKrentanciuAuditu(() =>
+    request(app).delete("/api/jobs/00000000-0000-4000-8000-000000000000").set("Cookie", cookie)
+  );
+
+  /**
+   * ⚠️ JOKIŲ SĄLYGINIŲ ASSERCIJŲ (AGENTS.md §9.1).
+   *
+   * `if (res.status === 503) { ... }` paverstų 500/HTML atsakymą PRAĖJIMU -
+   * t. y. testas nutylėtų būtent tą regresiją, kurią turi gaudyti.
+   */
+  assert.equal(res.status, 503, "audito gedimas privalo duoti dokumentuotą 503, ne Express numatytąjį 500");
+  assert.equal(res.body.code, "AUDIT_WRITE_FAILED");
+
+  const visas = `${JSON.stringify(res.body)}\n${res.text || ""}\n${JSON.stringify(res.headers)}`;
+  assert.ok(!visas.includes("SENTINEL"), "sentinel tekstas nutekėjo į atsakymą");
+  assert.ok(!visas.includes("db.internal"), "prisijungimo informacija nutekėjo");
+  assert.ok(!visas.includes("slaptas"), "slaptažodis nutekėjo");
+  assert.ok(!/at\s+\w+\s+\(/.test(visas), "stack trace nutekėjo");
+});
+

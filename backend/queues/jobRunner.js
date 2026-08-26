@@ -148,7 +148,7 @@ async function enqueueTranscription(jobId, payload) {
     await addTranscriptionJob(jobId, payload);
   } else {
     // Inline: vykdom po atsakymo (setImmediate), kad neblokuotų HTTP atsakymo.
-    setImmediate(() => _runInline("transcription", jobId, payload));
+    setImmediate(() => _paleistiInline("transcription", jobId, payload));
   }
 }
 
@@ -158,7 +158,7 @@ async function enqueueProtocol(jobId, payload) {
     const { addProtocolJob } = require("./protocolQueue");
     await addProtocolJob(jobId, payload);
   } else {
-    setImmediate(() => _runInline("protocol", jobId, payload));
+    setImmediate(() => _paleistiInline("protocol", jobId, payload));
   }
 }
 
@@ -166,6 +166,27 @@ async function enqueueProtocol(jobId, payload) {
  * Inline vykdymas - naudoja tą patį processor'ių, kaip BullMQ worker'iai, kad
  * kodas nesidubliuotų. Būsena rašoma per jobStore (kaip ir worker'iuose).
  */
+/**
+ * INLINE PALEIDĖJO SARGAS (#155, 7.4a).
+ *
+ * ⚠️ `setImmediate(() => _runInline(...))` GRĄŽINTO PROMISE NIEKAS NELAIKO.
+ *
+ * `_runInline` viduje yra `await` kvietimų (autorizacija, `jobStore.system.finish`),
+ * kurių atmetimas be šio sargo taptų `unhandledRejection`. Tai NĖRA tylus
+ * nurijimas: kelias jau turi savo deterministinį perėjimą, o čia lieka tik
+ * paskutinė riba, kuri gedimą PARODO, o ne paslepia.
+ */
+function _paleistiInline(type, jobId, payload) {
+  return _runInline(type, jobId, payload).catch((error) =>
+    log.error("Inline vykdymas nutrūko netikėtai", {
+      stage: "inline_launch_failed",
+      jobId,
+      type,
+      klaida: error && error.message,
+    })
+  );
+}
+
 async function _runInline(type, jobId, payload) {
   const processor = _processors[type];
   if (!processor) {
@@ -236,7 +257,36 @@ async function _runInline(type, jobId, payload) {
         return;
       }
 
-      const decision = await authorizeJobOrAudit(job, jobId);
+      /**
+       * ⚠️ BLOKUOJANTIS AUDITAS GALI ATMESTI (#155, 7.4a / #210).
+       *
+       * `authorizeJobOrAudit()` po cutover laukia `JOB_EXECUTION_DENIED`
+       * įrašo patvirtinimo. Inline režimu `_runInline` paleidžiamas per
+       * `setImmediate(() => ...)`, tad jo Promise NIEKAS nelaiko: atmetimas
+       * čia taptų `unhandledRejection`, job'as liktų neterminalus, o naujesnės
+       * Node numatytosios nuostatos procesą nutrauktų.
+       *
+       * Fail-closed reiškia „nevykdom", bet job'as PRIVALO pasiekti terminalią
+       * būseną - kitaip vartotojas amžinai apklausinėtų `processing`.
+       * Atskiras `error_code` nuo `AUTHORIZATION_REVOKED`: ten teisės realiai
+       * atimtos, o čia sprendimo tiesiog nepavyko užfiksuoti.
+       */
+      let decision;
+      try {
+        decision = await authorizeJobOrAudit(job, jobId);
+      } catch (error) {
+        log.error("Autorizacijos auditas nepavyko - vykdymas nutraukiamas", {
+          stage: "audit_unavailable",
+          jobId,
+          execution: "inline",
+          klaida: error && error.message,
+        });
+        await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+          error_code: "AUDIT_UNAVAILABLE",
+          error_message: "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo.",
+        });
+        return;
+      }
 
       if (!decision.allowed) {
         /**

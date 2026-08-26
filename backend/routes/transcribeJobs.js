@@ -29,6 +29,8 @@ const { createLogger } = require("../utils/logger");
 const { recordRejectedUpload, reasonFromMulterError, REASONS } = require("../utils/uploadEvents");
 const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
 const { validate, schemas } = require("../middleware/validate");
+const { AuditWriteError } = require("../utils/auditWrite");
+const { auditoGedimas } = require("../utils/auditHttp");
 const log = createLogger("route:transcribe-jobs");
 
 
@@ -327,7 +329,22 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
   if (respondToDenial(decision, res)) return;
 
   if (decision === ACCESS_DECISION.ADMIN_DELETE_OVERRIDE) {
-    const result = await adminJobService.adminDeleteJob(req.params.id, actor);
+      /**
+       * ⚠️ BLOKUOJANTIS ADMIN AUDITAS GALI ATMESTI (#155, 7.4a / #210).
+       *
+       * `ADMIN_DELETE_OVERRIDE`, `ADMIN_ORPHAN_CLEANUP` ir `ADMIN_ACCESS_DENIED`
+       * yra blokuojantys. Be šio sargo `AuditWriteError` nukristų į Express
+       * numatytąjį kelią - klientas gautų 500/HTML vietoj dokumentuoto
+       * sanitizuoto `503 AUDIT_WRITE_FAILED`, o ne produkcijoje atsakyme galėtų
+       * atsirasti ir pirminė backend'o klaida iš stack trace.
+       */
+    let result;
+    try {
+      result = await adminJobService.adminDeleteJob(req.params.id, actor);
+    } catch (error) {
+      if (error instanceof AuditWriteError) return auditoGedimas(res, error, "transcribe-jobs admin auditas");
+      throw error;
+    }
     if (result.deleted) return res.status(204).send();
     if (result.reason === "vanished") {
       return res.status(404).json({ error: "Jobas nerastas." });
@@ -342,10 +359,16 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
     decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP ||
     decision === ACCESS_DECISION.DESKTOP_ORPHAN_CLEANUP
   ) {
-    const result =
-      decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP
-        ? await adminJobService.adminCleanupOrphan(req.params.id, actor)
-        : await adminJobService.desktopCleanupOrphan(req.params.id, actor);
+    let result;
+    try {
+      result =
+        decision === ACCESS_DECISION.ADMIN_ORPHAN_CLEANUP
+          ? await adminJobService.adminCleanupOrphan(req.params.id, actor)
+          : await adminJobService.desktopCleanupOrphan(req.params.id, actor);
+    } catch (error) {
+      if (error instanceof AuditWriteError) return auditoGedimas(res, error, "transcribe-jobs admin auditas");
+      throw error;
+    }
     if (!result.cleaned) {
       log.error(
         `NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${result.outcome.errors.join("; ")}`
