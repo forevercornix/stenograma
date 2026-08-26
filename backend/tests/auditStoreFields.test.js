@@ -89,11 +89,45 @@ test("`meta` ALLOWLIST: nežinomas laukas NUTYLIMAS, ne persistinamas", () => {
   }
 });
 
-test("`meta` ALLOWLIST: `undefined` nevirsta raktu (paritetas su memory)", () => {
-  const meta = isrinktiMeta({ details: undefined, error: null });
+test("`meta`: nei `undefined`, nei `null` nerašomi į JSONB, bet round-trip duoda `null`", () => {
+  /**
+   * ⚠️ KONTRAKTAS SĄMONINGAI SUGRIEŽTINTAS (#211 peržiūra, P2).
+   *
+   * `record()` beveik visiems neprivalomiems laukams priskiria `null`. Anksčiau
+   * `isrinktiMeta()` praleisdavo tik `undefined`, tad KIEKVIENA eilutė nešdavo
+   * visus 21 allowlist raktą - minimaliam prisijungimo įvykiui ~385 simboliai
+   * JSON dar prieš JSONB pridėtinę kainą. Postgres režime retencijos nėra
+   * (7.4d), tad ši kaina kaupiasi neribotai augančioje lentelėje.
+   *
+   * ⚠️ API KONTRAKTAS NESIKEIČIA, ir būtent tai čia tikrinama: praleistas raktas
+   * skaitant atkuriamas kaip `null`. Be šios antros pusės sutaupymas būtų
+   * pirktas backend'ų divergencijos kaina.
+   */
+  const meta = isrinktiMeta({ details: "yra", error: null, route: undefined, sizeBytes: 0 });
 
-  assert.ok(!("details" in meta), "`undefined` neturi sukurti rakto JSONB'e");
-  assert.equal(meta.error, null, "`null` yra reikšmė ir privalo išlikti");
+  assert.equal(meta.details, "yra");
+  assert.ok(!("error" in meta), "`null` neturi užimti vietos JSONB'e");
+  assert.ok(!("route" in meta), "`undefined` neturi sukurti rakto");
+
+  /** ⚠️ `0` ir `""` NĖRA `null` - falsy reikšmės privalo išlikti. */
+  assert.equal(meta.sizeBytes, 0, "nulis yra reikšmė, ne trūkstamas laukas");
+
+  /** Round-trip: postgres skaitymas praleistus raktus atkuria kaip `null`. */
+  const { iEilute } = require("../utils/auditStore/postgresStore");
+  const atkurta = iEilute({
+    id: "x",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    event: "LOGIN_SUCCESS",
+    subject_id: null,
+    result: "success",
+    request_id: null,
+    meta,
+  });
+
+  assert.equal(atkurta.error, null, "praleistas raktas privalo grįžti kaip `null`");
+  assert.equal(atkurta.route, null);
+  assert.equal(atkurta.sizeBytes, 0, "reikšmė `0` negali virsti `null`");
+  assert.deepEqual(Object.keys(atkurta).sort(), visiLaukai().sort(), "raktų aibė nesikeičia");
 });
 
 test("ĮVYKIO ŠABLONAS: migracija naudoja `auditEvents` autoritetą, ne savo kopiją", () => {
@@ -259,4 +293,51 @@ test("RETENCIJOS ĮSPĖJIMAS: turinys įvardija TIKSLIAI tai, ko operatorius ne�
 
   /** ⚠️ Ne klaida, o įspėjimas - startas privalo tęstis. */
   assert.doesNotMatch(RETENCIJOS_ISPEJIMAS, /NUTRAUK|startas negalimas/i);
+});
+
+test("WORKER'IAI: `initializeWorkerOrFail` inicijuoja IR audito saugyklą", async () => {
+  /**
+   * ⚠️ P1 (#211 peržiūra): worker'iai rašo auditą, bet jo neinicijuodavo.
+   *
+   * `transcriptionService` ir `protocolService` kviečiami BULLMQ worker'io
+   * procese ir rašo audito įvykius. Be `auditStore.init()` tame procese
+   * `auditStore` liktų numatytoji ATMINTIS: su `AUDIT_BACKEND=postgres`
+   * worker'io įvykiai niekada nepasiektų DB ir dingtų per restartą - tyliai,
+   * nes HTTP procese viskas atrodytų teisingai. Be to worker'is pakiltų net
+   * tada, kai audito DB nepasiekiama.
+   *
+   * ⚠️ TIKRINAMA ELGSENA: klaida injektuojama į TĄ PATĮ `auditStore.init`,
+   * kurį kviečia produkcinis kelias. Teksto paieška (`grep auditStore.init`)
+   * praeitų ir tada, kai kvietimas yra, bet jo rezultatas ignoruojamas.
+   */
+  const workers = require("../workers");
+  const auditStore = require("../utils/auditStore");
+  const jobStore = require("../utils/jobStore");
+
+  const saved = { redis: process.env.REDIS_URL, init: auditStore.init, jobInit: jobStore.init };
+  process.env.REDIS_URL = "redis://testas:6379";
+
+  /** `jobStore.init()` neturi bandyti tikro Redis - mus domina TIK audito šaka. */
+  jobStore.init = async () => {};
+  jobStore.hasQueueBackend = () => true;
+
+  let kviesta = false;
+  auditStore.init = async () => {
+    kviesta = true;
+    throw new Error("audito saugykla nepasiekiama");
+  };
+
+  try {
+    await assert.rejects(
+      () => workers.initializeWorkerOrFail("testinis-worker"),
+      /audito saugykla nepasiekiama/,
+      "worker'is negali pakilti, kai audito saugykla neprieinama"
+    );
+    assert.ok(kviesta, "`auditStore.init()` privalo būti kviečiamas worker'io starte");
+  } finally {
+    auditStore.init = saved.init;
+    jobStore.init = saved.jobInit;
+    if (saved.redis === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = saved.redis;
+  }
 });

@@ -147,17 +147,49 @@ async function initializePostgres(env) {
      * nukrito (rankinis `DROP`, dalinė migracija), startuotų sėkmingai, o
      * audito įrašai taptų redaguojami - tyliai.
      */
+    /**
+     * ⚠️ TIKRINAMA IR SCHEMA, IR AR TRIGERIS ĮJUNGTAS.
+     *
+     * Dvi spragos, kurias tai uždaro:
+     *
+     *  1. `ALTER TABLE audit_log DISABLE TRIGGER audit_log_no_update` trigerio
+     *     NEPAŠALINA - `pg_trigger` eilutė lieka, tik `tgenabled` tampa `D`.
+     *     Be šios patikros startas paskelbtų append-only barjerą veikiančiu, o
+     *     `UPDATE` praeitų.
+     *  2. Be `pg_namespace` apribojimo tiktų ir to paties vardo trigeris ant
+     *     `audit_log` KITOJE schemoje - o dirbame su `current_schema()`.
+     *     Gretima invariantų užklausa schemą riboja; ši nuo jos buvo atsilikusi
+     *     (AGENTS.md §16).
+     *
+     * `tgenabled`: `O` (origin), `R` (replica), `A` (always) - įjungtas;
+     * `D` - išjungtas.
+     */
     const { rows: trigeriai } = await pool.query(
-      `SELECT tgname FROM pg_trigger tg
-         JOIN pg_class t ON t.oid = tg.tgrelid
-        WHERE t.relname = 'audit_log' AND tg.tgname = $1 AND NOT tg.tgisinternal`,
+      `SELECT tg.tgname, tg.tgenabled
+         FROM pg_trigger tg
+         JOIN pg_class t     ON t.oid = tg.tgrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'audit_log'
+          AND n.nspname = current_schema()
+          AND tg.tgname = $1
+          AND NOT tg.tgisinternal`,
       [REQUIRED_AUDIT_TRIGGER]
     );
+
     if (trigeriai.length === 0) {
       throw new Error(
         `PostgreSQL audito lentelė be \`${REQUIRED_AUDIT_TRIGGER}\` trigerio: įrašai ` +
           "būtų redaguojami. Auditas, kurį galima pataisyti, nėra auditas. " +
           "Paleiskite `npm run migrate:up`."
+      );
+    }
+
+    if (trigeriai[0].tgenabled === "D") {
+      throw new Error(
+        `PostgreSQL append-only trigeris \`${REQUIRED_AUDIT_TRIGGER}\` yra IŠJUNGTAS ` +
+          "(ALTER TABLE ... DISABLE TRIGGER). Jis egzistuoja, bet `UPDATE` nebestabdo, " +
+          "tad audito įrašai redaguojami. Įjunkite: " +
+          `ALTER TABLE audit_log ENABLE TRIGGER ${REQUIRED_AUDIT_TRIGGER}`
       );
     }
   } catch (err) {

@@ -16,6 +16,7 @@
  */
 const { AuditWriteError } = require("../utils/auditWrite");
 const jobStore = require("../utils/jobStore");
+const auditStore = require("../utils/auditStore");
 const jobRunner = require("../queues/jobRunner");
 const { DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
 const { transcriptionProcessor, protocolProcessor } = require("../queues/processors");
@@ -450,6 +451,21 @@ async function initializeWorkerOrFail(workerName) {
     throw new Error(`${workerName} reikia REDIS_URL (BullMQ). Be jo naudokite inline režimą (darbas HTTP procese).`);
   }
   await jobStore.init();
+
+  /**
+   * ⚠️ AUDITO SAUGYKLA INICIJUOJAMA IR ČIA (#155, 7.4b / #211 peržiūra).
+   *
+   * Worker'io procesoriai kviečia `transcriptionService` ir `protocolService`,
+   * o šie rašo auditą. Be `init()` šiame procese `auditStore` liktų NUMATYTOJI
+   * ATMINTIS, tad su `AUDIT_BACKEND=postgres` worker'io sugeneruoti įvykiai
+   * niekada nepasiektų DB ir dingtų per worker'io restartą - tyliai, nes HTTP
+   * procese viskas atrodytų teisingai.
+   *
+   * ⚠️ IR FAIL-CLOSED: be šito worker'is pakiltų net tada, kai audito DB
+   * nepasiekiama, ir imtų vykdyti darbus be pėdsako. Klaida propaguojama - tą
+   * pačią semantiką turi `server.js`.
+   */
+  await auditStore.init();
   /**
    * ⚠️ TIKRINAMA EILĖS GALIMYBĖ, NE KONKRETUS BACKEND'AS (#155, 7.2a).
    *
@@ -512,6 +528,13 @@ async function runWorkerProcess(workerName, startWorker, heartbeatType) {
       process.removeListener("SIGINT", onSigint);
       await heartbeatConn.quit().catch((e) => log.error(`Heartbeat ryšio uždarymo klaida: ${e.message}`));
       await worker.close().catch((e) => log.error(`Worker uždarymo klaida: ${e.message}`));
+      /**
+       * ⚠️ AUDITO POOL'AS UŽDAROMAS PO `worker.close()`.
+       *
+       * Tvarka svarbi: `close()` laukia, kol baigsis vykdomi darbai, o jie dar
+       * gali rašyti auditą. Uždarius pool'ą pirma, paskutiniai įvykiai kristų.
+       */
+      await auditStore.shutdown().catch((e) => log.error(`Audito saugyklos uždarymo klaida: ${e.message}`));
       if (shouldExit) process.exit(0);
     })();
     return shuttingDown;

@@ -939,14 +939,25 @@ AUDIT_RETENTION_DAYS=30    # numatyta: 30
 AUDIT_MAX_ENTRIES=5000     # kieta atminties riba
 ```
 
-Pasenę įrašai šalinami tiek rašant naują įvykį, tiek skaitant `GET /api/audit`.
+⚠️ **Abi reikšmės galioja TIK `AUDIT_BACKEND=memory` režimui.**
 
-**Apribojimas – tai NĖRA production-grade audit trail.** Žurnalas yra
+**`memory` (numatytasis).** Pasenę įrašai šalinami tiek rašant naują įvykį, tiek
+skaitant `GET /api/audit`, tiek periodiniu retencijos ciklu. Žurnalas yra
 backend'o atmintyje, tad: dingsta po restarto; nesidalija tarp replikų; neturi
-DB transakcijų, tamper-resistance, prieigos žurnalo ar tikro retention
-scheduler'io. Retencija realiai reiškia „iki restarto arba iki N dienų, kas
-ateina pirmiau". Ilgalaikei atitikčiai reikia SQLite/PostgreSQL saugyklos –
-žr. Roadmap (Milestone 2).
+DB transakcijų ar tamper-resistance. Retencija realiai reiškia „iki restarto
+arba iki N dienų, kas ateina pirmiau".
+
+**`postgres` (#155, 7.4b).** Žurnalas persistentinis, dalijamas tarp replikų ir
+append-only (`UPDATE` atmeta DB trigeris). Bet **`AUDIT_RETENTION_DAYS` ir
+`AUDIT_MAX_ENTRIES` čia NEGALIOJA**: `audit_log` eilutės automatiškai
+**nešalinamos**, ir lentelė auga neribotai. Startas dėl to įspėja `warn` lygiu.
+
+> Operatoriui tai reiškia: nustatyta 30 dienų reikšmė **nėra** taikoma, tad be
+> išorinės valymo politikos asmens duomenys audite išliks neribotai. Tai
+> tiesioginė GDPR saugojimo ribojimo rizika.
+
+Persistentinę retenciją įgyvendina **[7.4d]**. Konfigūracija ir sprendimai –
+`docs/audit-storage.md`.
 
 ### Privatumo režimas
 
@@ -1659,6 +1670,21 @@ nesuteikia galimybės perimti sesijų. Jungiklis **eksplicitinis**: vien
 `DATABASE_URL` autentifikacijos režimo nekeičia. Numatyta lieka `memory`
 (vienas procesas). Diegimo detalės – `docs/auth-deployment.md`.
 
+**Persistentinis auditas (#155, 7.4b).** `AUDIT_BACKEND=postgres` perkelia
+audito žurnalą į duomenų bazę: jis išgyvena restartą, dalijamas tarp replikų ir
+yra **append-only** – `UPDATE` atmeta DB trigeris, tad įrašo apie neteisėtą
+veiksmą nebegalima pataisyti net per `psql`. `DELETE` sąmoningai **neribojamas**,
+nes GDPR ištrynimas eilutes fiziškai trina; riba gyvena API lygmenyje.
+
+Jungiklis **eksplicitinis** ir atskiras nuo dviejų kitų: vien `DATABASE_URL`
+audito režimo nekeičia. `postgres` papildomai reikalauja `AUDIT_ID_SALT` ir
+`AUDIT_ID_SALT_ID` – be stabilios druskos pseudonimai skirtųsi tarp restartų, ir
+GDPR ištrynimas senų įrašų nerastų. Trūkstant bet kurio, startas **nutrūksta**;
+grįžimo į atmintį nėra.
+
+⚠️ Retencija persistentiniame režime **neveikia** iki [7.4d] – žr. „Audito
+retencija". Sprendimai ir diegimo detalės – `docs/audit-storage.md`.
+
 **Rolėmis grįsta autorizacija (#18 PR2).** Leidimai gyvena viename registre
 (`utils/permissions.js`) ir yra **deny-by-default** – naujas leidimas be
 eksplicitinio priskyrimo yra uždaras.
@@ -2023,6 +2049,8 @@ o numatytas tiekėjų pasirinkimas.
 1. **Pasenusius jobus** – metaduomenys + rezultatas (transkripcija/protokolas) po `JOB_TTL_MINUTES`.
 2. **Nuskendusius audio failus** – senesnius nei `AUDIO_RETENTION_HOURS` ir nepaminėtus nė viename gyvame jobe. Iki tol jų nešalino niekas: jei procesas nukrito tarp failo įkėlimo ir jobo užbaigimo, failas likdavo storage neribotai.
 3. **Pasenusius audito įrašus** – pagal `AUDIT_RETENTION_DAYS`, nepriklausomai nuo srauto.
+   ⚠️ **Tik `AUDIT_BACKEND=memory` režimu.** Su `postgres` ciklas audito eilučių
+   NEŠALINA (jos gyvena DB, o ne atmintyje) – žr. „Audito retencija" ir [7.4d].
 
 Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais (`jobs=2 audio=1 audit=5`),
 `subjectId: null` – be identifikatorių, failų vardų ar turinio. Įvykis rašomas

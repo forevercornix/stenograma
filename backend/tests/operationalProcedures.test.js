@@ -202,6 +202,30 @@ test("RETENCIJA: dokumentuota audito reikšmė SUTAMPA su .env.example", () => {
     Number(actual[1]),
     "dokumentuota retencija išsiskyrė su konfigūracija"
   );
+
+  /**
+   * ⚠️ REIKŠMĖS SUTAPIMO NEBEPAKANKA (#155, 7.4b).
+   *
+   * Nuo `AUDIT_BACKEND=postgres` ta pati 30 dienų reikšmė NEBEGALIOJA:
+   * `audit_log` eilutės automatiškai nešalinamos. Runbook'as, nurodantis tik
+   * skaičių, siųstų operatorių manyti, kad ištrynimo langas užtikrintas, o
+   * asmens duomenys audite liktų neribotai - tiesioginė GDPR saugojimo
+   * ribojimo rizika.
+   *
+   * Todėl tikrinama ir tai, kad dokumentas ĮVARDIJA priklausomybę nuo
+   * backend'o, o ne tik reikšmę.
+   */
+  assert.match(doc, /AUDIT_BACKEND/, "runbook'as privalo įvardyti, nuo ko retencija priklauso");
+  assert.match(
+    doc,
+    /postgres/i,
+    "persistentinis režimas privalo būti paminėtas - jame reikšmė negalioja"
+  );
+  assert.match(
+    doc,
+    /NEGALIOJA|nešalinamos|neribotai/,
+    "runbook'as privalo pasakyti, kad postgres režime retencija neveikia"
+  );
 });
 
 test("KLAIDINGI TEIGINIAI: `ENOENT` ištrynime tikrai reiškia sėkmę", () => {

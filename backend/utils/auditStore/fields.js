@@ -80,9 +80,21 @@ function visiLaukai() {
 function isrinktiMeta(eilute) {
   const meta = {};
 
+  /**
+   * ⚠️ `null` NERAŠOMAS, KAIP IR `undefined`.
+   *
+   * `record()` beveik visiems neprivalomiems laukams eksplicitiškai priskiria
+   * `null`, tad be šios sąlygos KIEKVIENA eilutė neštų visus 21 allowlist raktą -
+   * ~385 simbolių JSON minimaliam prisijungimo įvykiui, dar prieš JSONB pridėtinę
+   * kainą. Postgres režime retencijos NĖRA (7.4d), tad ši kaina kaupiasi
+   * neribotai augančioje lentelėje.
+   *
+   * API kontraktas nesikeičia: `iEilute()` praleistus raktus atkuria kaip `null`,
+   * o bendras backend'ų kontraktas tikrina būtent raktų aibę.
+   */
   for (const laukas of META_LAUKAI) {
     const reiksme = eilute[laukas];
-    if (reiksme !== undefined) meta[laukas] = reiksme;
+    if (reiksme !== undefined && reiksme !== null) meta[laukas] = reiksme;
   }
 
   return meta;
@@ -114,7 +126,16 @@ function normalizuoti(eilute) {
     rezultatas[laukas] = eilute[laukas] === undefined ? null : eilute[laukas];
   }
 
-  return rezultatas;
+  /**
+   * ⚠️ UŽŠALDOMA - KITAIP ATMINTIES BACKEND'AS PRARASTŲ NEKEIČIAMUMĄ.
+   *
+   * `record()` savo eilutę užšaldo (`Object.freeze`) sąmoningai. Grąžinus iš čia
+   * naują KEIČIAMĄ objektą, bet kuris procese esantis kvietėjas galėtų
+   * `saved.event = ...` ir taip pataisyti JAU ĮRAŠYTĄ audito įrašą. PostgreSQL
+   * pusėje tai neįmanoma - saugo append-only trigeris - tad be užšaldymo
+   * numatytasis backend'as būtų silpnesnis už persistentinį.
+   */
+  return Object.freeze(rezultatas);
 }
 
 module.exports = { STULPELIAI, META_LAUKAI, visiLaukai, isrinktiMeta, normalizuoti };
