@@ -1996,6 +1996,240 @@ secrets-management platformos ir kitų #155 etapų acceptance criteria keitimo.
 
 ---
 
+## [7.4e] Audito ištrynimo galutinumas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.1, 7.4b · **Rasta:** #211 (7.4b) peržiūros metu
+**Prioritetas:** P1 (duomenų gyvavimo ciklas / privatumas)
+
+⚠️ **`7.4c` yra SĄLYGINĖ priklausomybė — tik variantui C.** Rakto rotacija
+keičia `subject_id`, tad barjeras, raktuotas pagal pseudonimą ir suprojektuotas
+rotacijos nežinant, tyliai nustotų veikti. Variantuose A ir B žymos raktuojamos
+`job_id`, ir 7.4c šiam darbui neaktualus. Žr. 6 sprendimą.
+
+### Statusas
+
+**NĖRA 7.4b regresija.** Defektas egzistavo iki #211: 7.4a atminties
+realizacijoje `removeBySubjectIdentifier()` iteravo masyvą ir šalino matomus
+elementus (`log.splice()`), be barjero vėlesniems rašymams. #211 elgesio
+nepakeitė — jis pakeitė **pasekmę**.
+
+Perkelta iš #211 sąmoningai: sprendimas liečia naują būseną ir naujus gedimo
+režimus, o #211 apimtis buvo užšaldyta.
+
+### Kodėl atskiras [7.4e]
+
+**Ne 7.4d:** ten retencija, privatumo režimas, readiness ir CI. Nauja lentelė su
+savo migracija ir gedimo režimais netelpa — tai lygiai tas apimties išsipūtimas,
+kurio vengiam.
+
+**Ne 7.5a:** ta sekcija jau turi 14 DoD punktų, o šis pridėtų dar aštuonis.
+Svarbiau: sujungus, sąlyginė 7.4c priklausomybė užkabintų VISĄ 7.5a, o variantas
+C taptų faktiškai negalimas — architektūrinis sprendimas būtų priimtas issue
+struktūra, ne argumentu.
+
+**Ne 7.4c:** ten barjeras natūraliai virstų pseudonimų kalba, t. y. variantu C —
+brangiausiu ir tuo, kurio rekomenduojama NESIRINKTI pirmiausia. Be to rotacija
+reikalinga savarankiškai (istoriniai raktai, paieška per senus raktus) ir
+neturi laukti visai kito klausimo.
+
+**Bet [7.5a] suderinamumas privalo likti eksplicitinis**, ne prielaida: ji jau
+įveda `erasure_marks (job_id, marked_at, reason)`, ir dvi tombstone lentelės tam
+pačiam GDPR ištrynimui būtų būsima nesuderinamumo vieta — kuri yra autoritetas,
+kai jos nesutampa? Žr. DoD.
+
+### Problema
+
+`removeBySubject(subjectId)` ištrina **tik eilutes, matomas ištrynimo momentu**.
+Barjero vėlesniems to paties subjekto rašymams nėra.
+
+Scenarijus (`backend/routes/exports.js`):
+
+1. Užklausa išsprendžia `linkedJobId`.
+2. Rašomas `EXPORT_STARTED` su tuo `jobId`.
+3. Generuojamas eksportas — gali trukti ilgai.
+4. **Lygiagrečiai** vykdomas job'o ištrynimas: `removeBySubjectIdentifier()`
+   pašalina `EXPORT_STARTED` ir grąžina **204**.
+5. Eksportas baigiasi → rašomas `EXPORT_COMPLETED` su **tuo pačiu** subjektu.
+
+Ištrynimas paskelbtas sėkmingu, o subjektas lentelėje vėl turi įrašą.
+`EXPORT_*` yra iliustracija: bet kuri ilgai trunkanti operacija, kuri subjektą
+išsprendžia anksčiau, nei rašo baigties įvykį, turi tą pačią savybę.
+
+### Ką 7.4b pakeitė (ir ko ne)
+
+**Nepakeitė:** pačių lenktynių vienoje instancijoje.
+
+**Pablogino:**
+
+1. **Likusi eilutė IŠLIEKA.** Atmintyje pralaimėtų lenktynių pasekmė mirdavo su
+   procesu. DB ji lieka neribotai — juolab kad persistentinės retencijos iki
+   7.4d nėra.
+2. **Lenktynės tapo TARP INSTANCIJŲ.** 7.4a `const log = []` buvo procesui
+   lokalus, tad ištrynimas ir rašymas privalėjo vykti **tame pačiame** procese.
+   Bendroje DB instancija A trina, kol B rašo. Langas realiai išsiplėtė.
+
+**Pagerino:** vėlyvo rašymo po timeout kelią susiaurina #211 įvestas
+`statement_timeout` (0.7 × `AUDIT_WRITE_TIMEOUT_MS`) — DB užklausą **nutraukia**.
+`rasytiAudita()` pakartojimo kilpos neturi, tad at-least-once / `ON CONFLICT`
+naujo vektoriaus nesukuria.
+
+---
+
+## Sprendimo variantai — nuo pigiausio
+
+⚠️ **Pradėti nuo A, ne nuo C.** Brangiausias variantas nėra automatiškai
+teisingas, o C įveda naują būseną kiekviename audito rašyme.
+
+### A. Patikra OPERACIJOJE, ne audito sluoksnyje
+
+Ilgai trunkanti operacija prieš rašydama baigties įvykį pasitikrina, ar job'as
+dar egzistuoja — per [7.5a] žymą, kuri jau bus.
+
+- Naujos lentelės **nereikia**.
+- Audito rašymo kelias lieka nepaliestas: jokios papildomos užklausos, jokio
+  naujo gedimo režimo kiekviename `append()`.
+- `EXPORT_COMPLETED` ištrintam job'ui yra **klaida ir be audito konteksto** —
+  eksportas neturėtų baigtis sėkmingai, jei jo objektas ištrintas.
+- Rakto rotacija (6 sprendimas) šiam variantui **negalioja**: patikra remiasi
+  `job_id`, ne pseudonimu.
+
+Riba: gina tik tuos kelius, kurie patikrą atlieka. Naujas ilgai trunkantis
+kelias ją pamirštų — tad reikia tripwire, analogiško #211 `getAll()` sargybai.
+
+### B. Barjeras `erasure_marks` pagrindu, tikrinamas audito rašyme
+
+Panaudojama [7.5a] žyma; audito `append()` ją tikrina.
+
+- Viena tombstone abstrakcija, ne dvi.
+- Žyma raktuojama `job_id`, tad rotacijos problema **išnyksta** (žr. 6).
+- Kaina: audito rašymas įgyja priklausomybę nuo job'o būsenos ir naują gedimo
+  režimą.
+
+### C. Atskiras audito tombstone, raktuotas pagal `subject_id`
+
+Pilnas barjeras audito sluoksnyje.
+
+- Vienintelis variantas, dengiantis subjektus **be** job'o.
+- Kaina didžiausia: nauja lentelė, nauja migracija, nauja būsena kiekviename
+  rašyme **ir** rotacijos problema visu ūgiu (t. y. 7.4c tampa kieta
+  priklausomybe).
+
+---
+
+## Reikalingi eksplicitiniai sprendimai
+
+Šis issue **nepriima** sprendimo už įgyvendintoją.
+
+1. **Barjero vieta ir forma** — A, B ar C. Jei ne A, pagrindimas, kodėl A
+   nepakanka.
+2. **Atomiškumas / tvarka tarp ištrynimo ir rašymo.** Ar patikra vyksta prieš
+   kiekvieną INSERT (papildoma užklausa), ar užtenka `INSERT ... WHERE NOT
+   EXISTS` vienoje operacijoje? Ar reikia serializuojamos izoliacijos?
+3. **Elgesys, kai barjero patikra KRINTA** — naujas gedimo režimas, kurio
+   šiandien nėra.
+
+   ⚠️ **Politika privalo būti ATSKIRA post-hoc ir pre-veiksmo įvykiams.**
+   `utils/auditEvents.js` `POST_HOC_IVYKIAI` (šešiems: keturi ištrynimo keliai,
+   `LOGOUT`, `ADMIN_DELETE_OVERRIDE`) fail-closed yra **neįmanomas iš principo** —
+   veiksmas jau negrįžtamai įvykęs, tad „atmesti" nebėra ko. Tai tas pats
+   skirtumas, kurį 7.4a atskyrė: `BLOKUOJANTIS` („sėkmė nedeklaruojama") ≠
+   `fail-closed` („veiksmas atmetamas"). Politika, parašyta tik pre-veiksmo
+   įvykiams, post-hoc keliuose arba neveiks, arba blokuos tai, ko blokuoti
+   nebeįmanoma.
+4. **Ar rašymai po ištrynimo privalo kristi fail-closed** (pre-veiksmo įvykiams).
+   Jei subjektas ištrintas, o kodas vis tiek bando rašyti — programos klaida ar
+   normali lenktynių baigtis? Nuo to priklauso, ar tai `error` logas, ar
+   kvietėjo klaida.
+
+**5–6 taikomi TIK variantams B/C.** Variante A barjero lentelės nėra, tad nei
+gyvavimo trukmės, nei rotacijos klausimas nekyla — tada prie jų rašoma
+„netaikoma (variantas A)", o ne ieškoma atsakymo.
+
+5. **Barjero gyvavimo trukmė.** Negali galioti amžinai (lentelė augtų), bet
+   negali pasibaigti anksčiau nei ilgiausia vykdoma operacija. Riba
+   **IŠVEDAMA**, ne surašyta ranka — analogiškai [7.5a] `revivalHorizonsMs()`.
+6. **⚠️ SĄVEIKA SU RAKTO ROTACIJA ([7.4c]) — SPRĘSTI KARTU SU 7.4c, NE PO JO.**
+
+   `subject_id` yra HMAC su `AUDIT_ID_SALT`. [7.4c] įveda rotaciją ir istorinius
+   raktus. Po rotacijos tas pats job'as duoda kitą `subject_id`, tad barjeras,
+   raktuotas pagal `subject_id`, naujų rašymų **nebeblokuotų** — tyliai.
+   Ištrynimas liktų paskelbtas sėkmingu, o apsauga dingtų be jokio signalo.
+
+   Variantai: raktuoti pagal `(hash_key_id, subject_id)` porą su paieška per
+   visus istorinius raktus, arba raktuoti pagal visus žinomus raktus rašymo
+   metu.
+
+   **Pastaba:** variantuose A ir B ši problema **išnyksta**, nes [7.5a]
+   `erasure_marks` raktuojama `job_id` — stabiliu identifikatoriumi, kurio
+   rotacija neliečia. Tai savarankiškas argumentas prieš C.
+
+---
+
+## DoD
+
+- [ ] Sprendimas 1–4 punktams (ir 5–6, jei pasirinktas B/C) — užrašytas kode ir
+      `docs/audit-storage.md`, ne tik issue komentaruose.
+- [ ] Jei pasirinktas B/C: barjeras per naują migraciją; esamos nekeičiamos.
+- [ ] Jei pasirinktas B/C: barjerą tikrina **abu** backend'ai — kitaip privatumo
+      garantija priklausytų nuo `AUDIT_BACKEND` reikšmės (tą pačią klaidą #211
+      peržiūroje rado bendras kontrakto rinkinys).
+- [ ] Jei pasirinktas A: tripwire, draudžiantis naują ilgai trunkantį kelią be
+      patikros — analogiškas #211 `getAll()` sargybai, su tuščiu whitelist'u.
+- [ ] ⚠️ **SUDERINAMUMAS SU [7.5a] `erasure_marks` — EKSPLICITINIS.**
+      Jei įvedama nauja būsena, DoD privalo pasakyti, kuri žyma yra AUTORITETAS,
+      kai jos nesutampa, ir kodėl dviejų reikia. Jei panaudojama esama —
+      pasakyti, kad naujos lentelės nėra.
+- [ ] ⚠️ **IŠVARDIJAMOS SUBJEKTŲ KLASĖS, KURIŲ BARJERAS NEDENGIA.**
+
+      Variantai A ir B remiasi `job_id`. Kiekvienas subjektas, kuris NĖRA
+      job'as, lieka be barjero — ir tai bus SUNKIAU pastebėti nei pradinis
+      defektas, nes „ištrynimo galutinumas" atrodys išspręstas.
+
+      `auditLog.record()` subjektą išveda taip:
+      `pseudonymizeIdentifier(entry.jobId ?? entry.meetingId ?? null)`.
+
+      Patikrinta #211 peržiūros metu:
+
+      - **`meetingId` atsarginis kelias** — gyvas kodas. Visi APŽIŪRĖTI
+        produkciniai kvietėjai (`transcriptionService`, `protocolService`)
+        perduoda IR `jobId`, tad šiandien laimi `jobId`. Bet kelias be job'o
+        (pvz. inline `/api/generate`) duotų `HMAC(meetingId)` — subjektą, kurio
+        `erasure_marks(job_id)` neatpažįsta. **Reikia patikrinti pasiekiamumą,
+        ne priimti šios pastabos kaip galutinės.**
+      - **`RETENTION_PURGE` ir eksportai be `linkedJobId`** — pasitikrinta:
+        subjekto jie NETURI (`subjectId = null`), tad tai NĖRA neapsaugotų
+        subjektų klasė. Įtraukta, kad įgyvendintojas jų neieškotų be reikalo.
+
+      DoD: klasės išvardijamos, ir kiekvienai eksplicitiškai patvirtinama, kad
+      likti be barjero priimtina, ARBA numatomas atskiras kelias. Tylus
+      praleidimas neleistinas.
+- [ ] ⚠️ **DETERMINISTINIS lygiagretumo testas.**
+
+      Konkurentinis rašymas įterpiamas **kontroliuojamai, ties draiverio riba**
+      (adapterio hook), TARP barjero patikros ir INSERT — ne pasikliaujant
+      scheduler'iu ir **ne kartojant iteracijas**.
+
+      Tikimybinis „paleisk 1000 kartų" testas čia netinka: [7.2b] reikalauja
+      deterministinių race testų, [7.5b] tą pačią ribą vadina „lenktynės ties
+      draiverio riba", o AGENTS.md §14.1 sako, kad vienas sėkmingas
+      lygiagretumo testo paleidimas įrodo mažai.
+
+      Testas privalo įrodyti **MECHANIZMĄ**, ne tik rezultatą: kad INSERT po
+      ištrynimo realiai atmetamas, o ne kad jis „paprastai nespėja".
+- [ ] Tas pats deterministinis testas **tarp-instanciniam** atvejui: du atskiri
+      pool'ai toje pačioje DB.
+- [ ] Barjero patikros **GEDIMO** kelias padengtas testu — abiem įvykių
+      kategorijoms (post-hoc ir pre-veiksmo), ne tik sėkmės kelias.
+- [ ] Mutacija: pašalinus barjerą, lygiagretumo testas krinta.
+- [ ] `docs/security-test-matrix.md` eilutė su mutacijos įrodymu.
+
+### Apimties riba
+
+Sprendžiamas **tik** audito ištrynimo galutinumas. Retencija, `PRIVACY_MODE`
+logika ir readiness lieka 7.4d.
+
+---
+
 ## [7.5a] Persistentės ištrynimo žymos
 
 **Tėvinis:** #155 · **Priklauso nuo:** 7.1
