@@ -31,3 +31,5 @@ frontend/e2e/fixtures/
 # Python servisų venv (pyannote/whisper - jei kas paleido lokaliai)
 pyannote-server/.venv/
 whisper-server/.venv/
+*.bak.*
+downloads/

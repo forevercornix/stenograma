@@ -1596,31 +1596,403 @@ nepriklausoma nuo `jobs` — FK tarp jų nėra.
 
 ## [7.4] Persistentinis audit log
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.1
+Išskaidyta. Darbo tekstai gyvena vaikuose žemiau:
+
+| Sub-PR | Issue | Apimtis |
+|---|---|---|
+| `7.4a` | #210 | Audit fasado async cutover |
+| `7.4b` | #211 | `audit_log` schema ir postgres backend |
+| `7.4c` | #212 | Rakto rotacija ir audit užklausos |
+| `7.4d` | #213 | Retencija, privatumo režimas, readiness ir CI |
+
+Šioje sekcijoje DoD punktų nebelaikome - kitaip tas pats darbas turėtų
+dvi versijas spec'e.
+
+---
+
+## [7.4a] Audit fasado async cutover
+
+**Tėvinis:** #155 · **Priklauso nuo:** — · **Blokuoja:** 7.4b
+
+Mechaninis, bet plataus poveikio žingsnis: `record()` ir `getAll()` tampa async, kad
+PostgreSQL backend'as apskritai būtų įmanomas. **Backend'as lieka memory, išorinis
+elgesys nesikeičia.** Atskirtas į savo PR'ą, nes liečia kiekvieną call site'ą — kartu
+su schema review taptų neįmanomas, o regresija — nepastebima.
+
+### Užfiksuoti sprendimai
+
+Agentas jų NEKEIČIA ir nesirenka alternatyvų:
+
+- Audit write timeout: `AUDIT_WRITE_TIMEOUT_MS`, numatyta `2000`.
+- **Blokuojantys įvykiai** (sėkmė negali būti deklaruota prieš patvirtintą write):
+  autentikacija/autorizacija, GDPR ištrynimas, provider override, rakto rotacija.
+  Klaida arba timeout → veiksmas atmetamas (fail-closed).
+- **Neblokuojantys**: job gyvavimo ciklo įvykiai. Klaida → užklausa nekrenta, bet
+  logginama `error` lygiu su `request_id` ir didinamas skaitiklis. Niekada nenutylima.
+- Trečios kategorijos nėra: kiekvienas `record()` kvietėjas priklauso vienai iš dviejų.
 
 ### DoD
 
-- [ ] `audit_log` su `subject_id`, **be plikojo `job_id`** — testas įrašo job'ą
-      ir tikrina, kad jo ID lentelėje nerandamas nė viename stulpelyje ar `meta`
-      JSONB lauke.
-- [ ] `audit_log` neturi transkripcijos teksto — testas.
-- [ ] Esami `auditLog.test.js` ir `auditErasure.service.test.js` praeina su
-      `postgresStore` **be modifikacijų**.
-- [ ] `hash_key_id` užpildomas; rakto rotacijos testas rodo, kad seni įrašai
-      lieka koreliuojami.
-- [ ] `GET /api/audit?job_id=` randa įrašą, sukurtą PRIEŠ rakto rotaciją — API
-      moka ieškoti ir su istoriniu raktu.
-- [ ] `GET /api/audit` filtrai (`from`, `to`, `action`, `request_id`, `job_id`)
-      + puslapiavimas. `job_id` filtras pseudonimizuoja gautą ID ir ieško pagal
-      `subject_id` — filtras NĖRA priežastis grąžinti plikąjį stulpelį.
-- [ ] Auditas išgyvena `docker compose restart backend`.
-- [ ] Retencija: N dienų pagal `privacyConfig`.
+- [ ] `record()` ir `getAll()` async; `removeBySubjectIdentifier()` jau async.
+- [ ] Visi produkciniai call site'ai migruoti — pilnas sąrašas PR body.
+- [ ] ⚠️ **NĖ VIENO fire-and-forget kvietimo.** Testas: backend meta klaidą;
+      blokuojančiame kelyje veiksmas atmetamas, neblokuojančiame — sulogginama, ir
+      NEI VIENU atveju nekyla `unhandledRejection`. Teste registruojamas
+      `process.on("unhandledRejection")` ir tikrinama, kad nesuveikė.
+- [ ] ⚠️ **`authorizeJobOrAudit()` ir `lifecycleService.writeAudit()`** šiandien
+      kviečia sinchroniškai ir NELAUKIA. Po cutover jie arba `await`, arba
+      eksplicitiškai apdoroja klaidą pagal savo kategoriją — tylus tęsimas neleidžiamas.
+- [ ] **Vienas autoritetingas įvykių klasifikacijos žemėlapis** (blokuojantis /
+      neblokuojantis), ne sprendimas kiekviename call site'e. Testas: kiekvienas
+      žinomas audit event turi klasifikaciją; neklasifikuotas → klaida starto metu.
+- [ ] Timeout testas: backend kabo ilgiau nei `AUDIT_WRITE_TIMEOUT_MS` → blokuojantis
+      kelias atmeta per ribotą laiką, užklausa neužstringa.
+- [ ] ⚠️ **Klaidos objektas nepatenka į atsakymą.** Audit gedimo pranešimas klientui
+      eina per `utils/sanitizeError.js`; pilnas tekstas tik serverio loge.
+- [ ] Nė vieno naujo `catch {}` ar `.catch(() => {})` apie audit kvietimą — grep'as
+      PR body.
+- [ ] Esami `auditLog.test.js` ir `auditErasure.service.test.js` praeina. Leidžiama
+      TIK `await` pridėjimas harness'e; assertion'ų šalinimas ar lūkesčių keitimas — ne.
+
+### Ko NEAPIMA
+
+PostgreSQL. Jokios schemos, jokio `DATABASE_URL`, jokios naujos priklausomybės.
+
+---
+
+## [7.4b] audit_log schema ir postgres backend
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.1, 7.4a
+
+`audit_log` lentelė, `postgresAuditStore` ir eksplicitinis backend pasirinkimas.
+Rotacija, filtrai ir retencija — 7.4c/7.4d.
+
+### Užfiksuoti sprendimai
+
+- Backend renkamas per `AUDIT_BACKEND` (`memory` | `postgres`). Nežinoma
+  reikšmė → startup klaida. `postgres` be `DATABASE_URL` → startup klaida.
+  Init klaida NIEKADA nekrenta į memory.
+- `timestamp` autoritetas — DB `now()` (`DEFAULT now()`), aplikacija jo
+  neperduoda. Dvi replikos su prasilenkiančiais laikrodžiais kitaip sulaužytų
+  `from`/`to` ir tvarką.
+- `hash_key_id` — operatoriaus priskirta etiketė iš `AUDIT_ID_SALT_ID`
+  (pvz. `2026-01`), ne išvestinė iš paties rakto. Reversibilumo klausimas taip
+  pat neiškyla. Šiame etape užpildomas aktyvaus rakto etikete; istorinių raktų
+  logika — 7.4c.
+
+### Schema ir migracija
+
+- [ ] `audit_log` įvedama NAUJU migration failu per 7.1 mechanizmą; jau
+      pritaikytos migracijos neredaguojamos.
+- [ ] Atskiri indeksuojami stulpeliai: `id`, `timestamp`, `event`,
+      `subject_id`, `hash_key_id`, `result`, `request_id`. Likę allowlisted
+      laukai — `meta jsonb`.
+- [ ] `id` išlaiko globaliai unikalaus UUID semantiką.
+- [ ] ⚠️ **Plaintext `job_id` stulpelio NĖRA.** Taip pat nėra transkripcijos,
+      prompt'o ar audio turinio laukų.
+- [ ] ⚠️ **Filtruojami laukai neindeksuojami per pilną JSONB skenavimą** —
+      indeksas ant kiekvieno filtruojamo stulpelio, ne `meta ->> ...`.
+- [ ] `audit_log_result_values` CHECK: `result IN ('success', 'failure')`.
+- [ ] `audit_log_event_pattern` CHECK ant `event`.
+      ⚠️ **Šablonas NEDUBLIUOJAMAS.** 7.4a `EVENT_PATTERN` perkėlė į
+      `utils/auditEvents.js` ir tai yra vienintelis autoritetas. Migracijoje
+      įrašytas literalas leistinas, BET privalomas paritetо testas: kiekvienas
+      `AUDIT_EVENTS` raktas praeina DB CHECK, ir kiekviena runtime atmetama
+      reikšmė atmetama ir DB. Be jo runtime priimtų įvykį, kurį DB atmes, ir
+      klientas gautų 500 vietoj audito įrašo.
+- [ ] ⚠️ **APPEND-ONLY DB LYGMENYJE.** `audit_log_no_update` BEFORE UPDATE
+      trigger'is, atmetantis bet kokį `UPDATE` (`RAISE EXCEPTION`). Be jo
+      auditas yra žurnalas tik pagal susitarimą.
+- [ ] ⚠️ **`DELETE` — SPRENDIMAS EKSPLICITINIS.** `BEFORE UPDATE` trigger'is
+      `DELETE` neriboja NIEKAIP, tad formuluotė „DELETE leidžiamas tik
+      retencijos/erasure keliu" tuo mechanizmu NEĮGYVENDINAMA. Pasirenkama
+      viena: (a) atskira DB rolė su grant'ais, arba (b) dokumentuojama
+      sąžiningai — „DELETE DB lygmenyje neribojamas; apribojimas galioja tik
+      per store API". Neapibrėžta likti negali.
+- [ ] Migration integration testas: švari DB → migrate → schema egzistuoja;
+      antras `migrate:up` = teisėtas no-op; reikiami constraint'ai ir indeksai
+      egzistuoja.
+- [ ] ⚠️ **`REQUIRED_AUDIT_CONSTRAINTS` PILNUMAS IŠVEDAMAS.** Testas nuskaito
+      VISUS `contype='c'` constraint'us ant `audit_log` iš šviežiai migruotos DB
+      ir lygina pilną aibę per `deepEqual`. Narystės patikra po vieną gina tik
+      apatinę ribą.
+- [ ] ⚠️ **DB invariantai tikrinami TIESIOGINIU SQL, apeinant store.** Kitaip
+      testas įrodo JS validaciją, ne DB garantiją. Kur runtime ir DB turi
+      uždaras reikšmių aibes (`event`, `result`), paritetas IŠVEDAMAS iš
+      runtime autoriteto, ne dubliuojamas rankiniu sąrašu.
+
+### Backend
+
+- [ ] `postgresAuditStore` deklaruoja tą pačią metodų aibę kaip memory.
 - [ ] ⚠️ **`AUDIT_ID_SALT` TAMPA PRIVALOMA.** `auditLog.resolveSalt()`
       sąmoningai generuoja atsitiktinę procesui lokalią druską, kai jos nėra —
-      tai saugu TIK kol auditas atmintyje. Persistuojant restartas ar antra
-      replika skaičiuotų kitą pseudonimą, ir `removeBySubjectIdentifier(jobId)`
-      senų įrašų nerastų, tad GDPR ištrynimas jų nepasiektų. Reikia startinės
-      validacijos ir migracijos/cutover reikalavimo.
+      tai saugu TIK atmintyje. Persistuojant restartas ar antra replika
+      skaičiuotų kitą pseudonimą, ir `removeBySubjectIdentifier(jobId)` senų
+      įrašų neberastų, tad GDPR ištrynimas jų nepasiektų. `postgres` režime be
+      jos — startup FAIL. Random fallback lieka galioti TIK memory režimui.
+      Startup testas.
+- [ ] ⚠️ **VIENAS pool visam procesui**, valdomas centralizuotai ir uždaromas
+      per shutdown ir test teardown. Naujas pool kiekvienai audit operacijai —
+      ne.
+- [ ] ⚠️ **`meta` ALLOWLIST TAIKOMAS RAŠANT**, ne pasitikint kvietėju.
+      Nežinomas laukas NUTYLIMAS, ne persistinamas — testas, nes 7.4c/7.4d
+      pridės call site'ų. Papildomai: `meta` dydžio riba ir eilučių truncation,
+      kad klaidos tekste atsidūręs transkripcijos fragmentas nepatektų į
+      lentelę.
+- [ ] Backend pasirinkimo logika turi VIENĄ autoritetingą vietą; tie patys env
+      kintamieji neinterpretuojami nepriklausomai skirtingose sistemos vietose.
+- [ ] ⚠️ **LIMITAS TAIKOMAS SQL'E, NE PO NUSKAITYMO.** Memory versija turi
+      maksimalios ribos capping'ą. PostgreSQL atitikmuo negali traukti visos
+      lentelės ir tada `slice()` — tas pats kontraktas privalo virsti `LIMIT`
+      užklausoje. Filtrai — 7.4c, bet riba privaloma dabar. Testas: didelė
+      lentelė, tikrinama, kad į procesą nepatenka daugiau eilučių nei riba.
+- [ ] ⚠️ **DETERMINISTINĖ SKAITYMO TVARKA.** `now()` yra TRANSAKCIJOS laikas —
+      dvi eilutės vienoje transakcijoje gauna IDENTIŠKĄ `timestamp`, o `id` yra
+      UUID, tad rikiavimas pagal jį atsitiktinis. Memory backend'as rikiuoja
+      pagal įterpimo tvarką. Be monotoniško stulpelio (`bigserial` seq) arba
+      `clock_timestamp()` pariteto reikalavimas dėl `ordering` bus flaky.
+      Sprendimas eksplicitinis; testas: N įrašų vienoje transakcijoje → abu
+      backend'ai grąžina tą pačią tvarką.
+
+### Async kontraktas ir esamų call-site'ų migracija
+
+- [ ] ⚠️ `postgresAuditStore` operacijos yra asinchroninės, todėl 7.4b
+      sąmoningai migruoja audit store kontraktą į async. Bendras `memory` /
+      `postgres` kontraktas ir bendras parametrizuotas testų rinkinys naudoja
+      `await` visoms store operacijoms. Negalima palikti skirtingos sync/async
+      viešo kontrakto semantikos pagal pasirinktą backend'ą.
+- [ ] ⚠️ Inventorizuojami ir pritaikomi visi produkciniai `auditLog.getAll()`
+      ir kitų read operacijų call-site'ai. Konkrečiai `/api/audit` turi
+      `await`inti `auditLog.getAll()`. Negalima PostgreSQL `Promise` perduoti
+      tolesnei sinchroninei logikai (`slice()`, filtravimui ir pan.).
+- [ ] ⚠️ Inventorizuojami visi produkciniai `auditLog.record()` call-site'ai ir
+      aiškiai apibrėžiama write-failure semantika. PostgreSQL write `Promise`
+      negali likti neapdorotas ir sukelti `unhandledRejection`. Call-site'as
+      arba `await`ina operaciją, arba sąmoningas compatibility boundary pagauna
+      klaidą ir ją aiškiai logina. DB write klaidos negalima tyliai
+      swallow'inti.
+- [ ] ⚠️ Backend paritetas reiškia ne tik vienodą metodų aibę, bet ir vienodą
+      observable kontraktą. Bendras parametrizuotas testų rinkinys tikrina
+      grąžinamų objektų shape, key naming, reikšmes, `null` / optional laukų
+      semantiką, ordering ir bendrą error semantiką. PostgreSQL backend negali
+      išleisti raw DB `snake_case` eilučių, jei memory backend viešas
+      rezultatas yra kitoks.
+- [ ] ⚠️ Pool lifecycle yra proceso lifecycle dalis. Audit PostgreSQL backend
+      turi aiškų `shutdown()` / lygiavertį teardown kelią, naudojantį
+      centralizuotai valdomo pool uždarymą. Jis prijungiamas prie application
+      shutdown ir integration-test teardown. Po testų neturi likti audit
+      backend sukurtų atvirų PostgreSQL handle'ų.
+
+### RAW privatumo testai
+
+- [ ] ⚠️ **Plikojo `job_id` nėra NIEKUR.** Testas: sukuriamas žinomas unikalus
+      job ID → audit įrašas per REALŲ produkcinį kelią → apeinant fasadą
+      nuskaitoma DB eilutė → tikrinami VISI stulpeliai IR rekursyviai `meta`
+      JSONB → įrodoma, kad originalaus ID nėra nė vienoje reikšmėje. Patikra,
+      kad nėra `job_id` stulpelio, NEPAKANKA.
+- [ ] ⚠️ **Transkripcijos sentinel testas** su atpažįstamu tekstu, per realų
+      produkcinį kelią, RAW eilutėje ir JSONB. Tikrinama reali DB, ne
+      `getAll()`.
+- [ ] ⚠️ **RAW `meta` allowlist testas:** sąmoningai perduodami neleistini
+      laukai (unikalūs sentinel'ai) ir tiesioginiu SQL patikrinama, kad jų nėra
+      persistintame `meta` JSONB.
+
+### Restart, multi-instance, paritetas
+
+- [ ] Integration scenarijus: instancija A → `record()` → A sunaikinama → nauja
+      instancija B prieš tą pačią DB → įrašas randamas. Testas negali išlaikyti
+      seno process-local `log[]` ir tada teigti, kad įrodė persistenciją.
+- [ ] Dvi atskiros store instancijos prieš tą pačią DB mato viena kitos įrašus.
+- [ ] Auditas išgyvena `docker compose restart backend`.
+- [ ] ⚠️ **Bendras elgesys — VIENAS parametrizuotas rinkinys** prieš `memory` ir
+      `postgres`, visiškai asinchroninis. Backend-specific testai lieka tik
+      realioms DB savybėms (constraints, indeksai, migracijos, raw-row privacy,
+      restart, SQL concurrency). Dubliuoti tą patį elgesį į du nepriklausomus
+      rinkinius, kurie vėliau išsiskirs, negalima.
+- [ ] ⚠️ **Nėra bendros transakcijos su job store.** Auditas PostgreSQL'e,
+      job'as gali būti Redis'e — atominio „veiksmas + auditas" NĖRA. Semantika:
+      at-least-once, idempotencija pagal `id`, ir dokumentuota, ką reiškia
+      auditas be veiksmo.
+
+### 7.4a paliktos skolos, kurios apmokamos ČIA
+
+- [ ] ⚠️ **`AUDIT_WRITE_TIMEOUT_MS` PERŽIŪRIMAS PRIEŠ REALIĄ DB.** 7.4a nustatė
+      2000 ms ir fail-closed blokuojantiems įvykiams, bet atmintyje ta riba
+      niekada nesuveikdavo. Su PostgreSQL į tą patį langą telpa jungties
+      paėmimas iš pool'o, tad išsemtas pool'as reikštų, kad prisijungimas ima
+      grąžinti 503 dėl APKROVOS, ne dėl gedimo. Reikia peržiūrėtos ribos,
+      suderinto `statement_timeout` DB pusėje ir testo su realiai išsemtu
+      pool'u, ne su fake vėlinimu.
+- [ ] ⚠️ **VĖLYVAS ĮRAŠAS PO TIMEOUT.** `Promise.race` rašymo NENUTRAUKIA.
+      `LOGIN_SUCCESS` gali įsirašyti jau PO to, kai sesija atšaukta ir grąžinta
+      503 — autoritetingas žurnalas tvirtintų įvykus tai, kas atsukta. 7.4a šį
+      klausimą eksplicitiškai adresavo į 7.4b. Sprendimas: per-query
+      `statement_timeout`, `AbortSignal` arba kompensuojantis įrašas. Jei
+      nesprendžiama — perkeliama į 7.4d SU PRIEŽASTIMI, ne paliekama kabanti
+      nuoroda.
+- [ ] ⚠️ **POST-HOC TVARKOS PAŽADAS PATIKSLINAMAS.** 7.4a atidėjo „auditas
+      prieš trynimą" į 7.4b argumentu „atsiras patvarumas ir transakcija". Bet
+      bendros transakcijos su job store NĖRA (žr. aukščiau). Tad pažadas
+      įvykdomas tik iš dalies. Šis PR privalo pasakyti, kurie iš keturių
+      `POST_HOC_IVYKIAI` realiai tampa fail-closed, o kurie lieka post-hoc ir
+      kodėl — kitaip 7.4a nuoroda tampa mirusi.
+- [ ] ⚠️ **`PRIVACY_MODE` × `postgres` DERINYS APIBRĖŽIAMAS.** 7.4a jį padarė
+      EKSPLICITINE blokuojančios garantijos išimtimi (įrašo nėra, veiksmas
+      tęsiamas). Pilna režimo logika — 7.4d, bet startinė taisyklė reikalinga
+      dabar: ar `PRIVACY_MODE=true` + `AUDIT_BACKEND=postgres` yra
+      prieštaravimas (startup klaida), ar leistinas derinys.
+
+### Backup politika
+
+- [ ] ⚠️ **`audit_log` IŠBRAUKIAMAS IŠ ATKŪRIMO TAME PAČIAME PR.** 7.6
+      garantuoja, kad atkūrus kopiją GDPR ištrinti audito įrašai NEGRĮŽTA. Iki
+      šiol tai galiojo savaime — auditas gyveno atmintyje ir į `pg_dump`
+      nepatekdavo. Nuo 7.4b jis lentelėje, tad numatytoji kopija jį ĮTRAUKS, o
+      garantija lūš tyliai. `utils/backupPolicy.js` atnaujinamas kartu su
+      migracija; testas: prieš kopiją įrašoma unikaliai atpažįstama audito
+      eilutė, po restore jos NĖRA.
+
+### Papildomi DoD įrodymai
+
+- [ ] Testas įrodo, kad PostgreSQL write failure iš produkcinio audit kelio
+      nesukelia `unhandledRejection` ir nėra tyliai prarandamas.
+- [ ] Tiesioginiu SQL vykdomas `UPDATE audit_log ...` ir įrodoma, kad DB
+      append-only mechanizmas jį atmeta; store API `update()` metodo nebuvimas
+      nelaikomas pakankamu įrodymu.
+- [ ] Tiesioginiu SQL bandoma įrašyti neteisingas reikšmes į `result` ir
+      `event` ir įrodoma, kad CHECK constraint'ai jas atmeta.
+- [ ] PostgreSQL startup testas įrodo, kad `AUDIT_BACKEND=postgres` be
+      `AUDIT_ID_SALT` baigiasi startup klaida, o ne random salt fallback.
+- [ ] Pool teardown testas / integration teardown įrodo, kad audit PostgreSQL
+      resursai korektiškai uždaromi ir testų procesas nelieka kabėti dėl atvirų
+      DB jungčių.
+
+### Darbo eigos reikalavimai
+
+- [ ] **APIMTIS UŽŠALDYTA.** Peržiūros radiniai, kurie nėra šio PR paliestų
+      kelių regresijos, eina į 7.4c/7.4d, ne į šį diff'ą. Įrašoma į PR body.
+- [ ] **KIEKVIENAS DoD PUNKTAS TURI MUTACIJOS PORĄ.** Pateikiama konkreti
+      mutacija, kurią atšaukus testas KRINTA. Punktas be jos laikomas
+      neįvykdytu.
+
+### Ko NEAPIMA
+
+Rakto rotacijos ir istorinių raktų (7.4c). `GET /api/audit` filtrų (7.4c).
+Retencijos, pilnos `PRIVACY_MODE` logikos, readiness (7.4d).
+
+---
+
+## [7.4c] Rakto rotacija ir audit užklausos
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.4b
+
+`hash_key_id` gyvavimo ciklas, istoriniai raktai, `GET /api/audit` filtrai ir GDPR
+ištrynimas per visas dar taikomas rakto generacijas.
+
+### Užfiksuoti sprendimai
+
+- Istoriniai raktai: `AUDIT_ID_SALT_PREVIOUS` — kableliais atskirtas `id:reikšmė`
+  sąrašas. **Maksimum 5** generacijos; daugiau → startup klaida.
+- Puslapiavimas — **keyset kursorius** `(timestamp, id)`, ne `OFFSET`.
+
+### DoD
+
+- [ ] Kiekvienas pseudonimizuotas persistentinis įrašas turi `hash_key_id`.
+- [ ] `hash_key_id` nėra pats secret'as ir iš jo secret'o atkurti negalima.
+- [ ] ⚠️ **VIENAS autoritetingas raktų resolveris** aktyviam ir istoriniams raktams.
+      Sugadintas ar dubliuotų `id` sąrašas → startup klaida, ne tylus praleidimas.
+- [ ] Rotacijos scenarijus: `key A` → `record(job X)` → rotacija į `B` → `record`.
+      Po rotacijos senas įrašas lieka DB, jo `hash_key_id` lieka `A`, nauji naudoja `B`.
+- [ ] ⚠️ **Paieška ir ištrynimas NENAUDOJA tik aktyvaus rakto.** `job_id` filtras
+      veikia per `job_id → aktyvus + taikomi istoriniai raktai → candidate
+      subject_id[] → užklausa pagal subject_id`.
+- [ ] `GET /api/audit?job_id=` randa įrašą, sukurtą PRIEŠ rakto rotaciją.
+- [ ] ⚠️ **`job_id` filtras NĖRA priežastis** persistinti plaintext `job_id`, grąžinti
+      jį atsakyme ar pridėti plaintext lookup lentelę.
+- [ ] `GET /api/audit` filtrai: `from`, `to`, `action`, `request_id`, `job_id` +
+      puslapiavimas. Filtrai **komponuojami** tarpusavyje — testas su bent trimis vienu metu.
+- [ ] ⚠️ **PUSLAPIAVIMAS STABILUS LYGIAGRETAUS RAŠYMO METU.** `OFFSET` su
+      konkurenciniais `INSERT` dubliuoja ir praleidžia eilutes. Testas: puslapiuojama
+      per rinkinį, tuo metu rašomi nauji įrašai, ir nė vienas esamas įrašas nedingsta
+      ir nepasikartoja.
+- [ ] ⚠️ **FAN-OUT RIBOTAS.** N istorinių raktų = N kandidatinių `subject_id` kiekvienai
+      užklausai ir kiekvienam ištrynimui. Užklausa vykdoma vienu `WHERE subject_id =
+      ANY($1)`, ne N atskirų; riba tikrinama starto metu.
+- [ ] GDPR: `record X` su `A` → rotacija → `record X` su `B` →
+      `removeBySubjectIdentifier(X)` → RAW DB nebelieka NEI `A`, NEI `B` įrašų.
+- [ ] ⚠️ **Rotacija negali sukurti įrašų, kurių GDPR kelias neberanda** — testas
+      būtent per RAW eilutes, ne per `getAll()`.
+- [ ] `auditErasure.service.test.js` behavioural expectations neišsilpninti.
+
+### Ko NEAPIMA
+
+Retencijos, `PRIVACY_MODE`, `AUDIT_MAX_ENTRIES`, readiness (7.4d).
+
+---
+
+## [7.4d] Retencija, privatumo režimas, readiness ir CI
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.4b
+
+Operacinis 7.4 uždarymas: retencija, `PRIVACY_MODE`, readiness, kabliukas 7.6 atkūrimui,
+CI registracija ir dokumentacija.
+
+### Užfiksuoti sprendimai
+
+- `AUDIT_MAX_ENTRIES` PostgreSQL režime **NETAIKOMA**. Tai buvo apsauga nuo RAM
+  augimo; ribos „palik paskutinius N" į DB neperkeliame. Dokumentuojama eksplicitiškai.
+- Retencijos riba: `timestamp < cutoff` → šalinama, `timestamp == cutoff` → **lieka**.
+- `PRIVACY_MODE=true` PostgreSQL režime: naujų įrašų nerašo IR starto metu išvalo
+  esamas `audit_log` eilutes — atitinka dabartinį in-memory kontraktą, kuris žada
+  ištrynimą, ne tik nutildymą.
+
+### DoD
+
+- [ ] ⚠️ **Retencijos autoritetas lieka `privacyConfig` / centralizuota retention
+      architektūra.** Antras nepriklausomas mechanizmas vien auditui nekuriamas;
+      persistentinis auditas įtraukiamas į ESAMĄ retention kelią.
+- [ ] Retencijos testas su **kontroliuojamu laiko šaltiniu**: `< cutoff` pašalinamas,
+      `== cutoff` lieka, `> cutoff` lieka.
+- [ ] ⚠️ **Sweep BATCH'AIS.** Vienas `DELETE` ant išaugusios lentelės laiko ilgą
+      lock'ą. Ribotas batch dydis + indeksas ant `timestamp`; testas, kad kelių batch'ų
+      ciklas baigiasi ir nepalieka likučių.
+- [ ] Retencijos ir append-only sąveika: retencija ir erasure yra vieninteliai
+      leidžiami `DELETE` keliai — testas, kad kitas kelias atmetamas.
+- [ ] `PRIVACY_MODE` semantika įgyvendinta pagal aukščiau užfiksuotą sprendimą.
+      ⚠️ **Privalomas RAW PostgreSQL testas:** negali likti būsenos, kur
+      `GET /api/audit` grąžina `[]`, o `audit_log` tebeturi senus įrašus.
+- [ ] `AUDIT_MAX_ENTRIES` PostgreSQL semantika testuota ir dokumentuota.
+- [ ] ⚠️ **Readiness liečia realų `audit_log`, ne `SELECT 1`.** Scenarijus: DB
+      pasiekiama, `audit_log` trūksta arba neprieinama → NOT ready.
+- [ ] ⚠️ **Readiness probe nebrangus.** Kviečiamas kas health poll'ą — teisės
+      tikrinamos per `has_table_privilege()`, be šiukšlinių eilučių rašymo, su
+      rezultato cache trumpam intervalui.
+- [ ] `/api/health` DB ir audit backend detalių produkcijoje pagal nutylėjimą NErodo
+      (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
+- [ ] ⚠️ **KABLIUKAS 7.6 ATKŪRIMUI.** `utils/backupPolicy.js` jau sąmoningai išbraukia
+      auditą iš atkūrimo: atkūrus, GDPR ištrinti įrašai grįžtų, o naujesni append-only
+      įvykiai būtų perrašyti. 7.4d privalo `audit_log` į tą politiką užregistruoti —
+      kitaip 7.6 DoD („prieš kopiją įrašyta unikali audito eilutė po restore NERANDAMA")
+      neįgyvendinamas.
+- [ ] ⚠️ **`REQUIRE_POSTGRES=1`** — simetriškas esamam `REQUIRE_REDIS=1`. PostgreSQL
+      CI job'e privalomas scenarijus, kuris `skip`'inasi, laikomas GEDIMU, ne sėkme.
+- [ ] PostgreSQL integration testai realiai registruoti PostgreSQL CI rinkinyje —
+      tikrinamas faktinis vykdymas su `DATABASE_URL`, ne failo egzistavimas.
+- [ ] ⚠️ **CUTOVER IR ROLLBACK.** Esami in-memory įrašai NEPERKELIAMI. Grįžimas
+      `postgres → memory` reiškia, kad seni įrašai lieka DB ir nauji į juos nebepatenka —
+      įrašyta į diegimo pastabas kaip sąmoningas, ne atsitiktinis elgesys.
+- [ ] Dokumentacija atnaujinta: `.env.example`, startup/config, privacy/audit dokai,
+      security/evidence matrix (jei repo sargai to reikalauja). Aprašyta: kaip
+      generuojamas `AUDIT_ID_SALT`, kada privalomas, rotacijos modelis, istorinių raktų
+      konfigūracija, `hash_key_id` paskirtis, ką operatorius privalo išsaugoti per
+      rotaciją, kokios pasekmės pašalinus istorinį raktą.
+- [ ] Secret reikšmės nepatenka į logus ar health/readiness atsakymus — testas.
+- [ ] README apribojimų lentelės eilutė ir Roadmap punktas atnaujinti.
+
+### Ko NEAPIMA
+
+Job store architektūros, sesijų persistencijos, authentication redesign, bendros
+secrets-management platformos ir kitų #155 etapų acceptance criteria keitimo.
 
 ---
 
