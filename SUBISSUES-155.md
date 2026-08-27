@@ -1603,7 +1603,9 @@ Išskaidyta. Darbo tekstai gyvena vaikuose žemiau:
 | `7.4a` | #210 | Audit fasado async cutover |
 | `7.4b` | #211 | `audit_log` schema ir postgres backend |
 | `7.4c` | #212 | Rakto rotacija ir audit užklausos |
-| `7.4d` | #213 | Retencija, privatumo režimas, readiness ir CI |
+| `7.4d` | #213 | Retencija ir privatumo režimas |
+| `7.4e` | #216 | Audito ištrynimo galutinumas |
+| `7.4f` | — | Readiness, backup ir CI registracija |
 
 Šioje sekcijoje DoD punktų nebelaikome - kitaip tas pats darbas turėtų
 dvi versijas spec'e.
@@ -1930,7 +1932,7 @@ Retencijos, `PRIVACY_MODE`, `AUDIT_MAX_ENTRIES`, readiness (7.4d).
 
 ---
 
-## [7.4d] Retencija, privatumo režimas, readiness ir CI
+## [7.4d] Retencija ir privatumo režimas
 
 **Tėvinis:** #155 · **Priklauso nuo:** 7.4b
 
@@ -2227,6 +2229,89 @@ gyvavimo trukmės, nei rotacijos klausimas nekyla — tada prie jų rašoma
 
 Sprendžiamas **tik** audito ištrynimo galutinumas. Retencija, `PRIVACY_MODE`
 logika ir readiness lieka 7.4d.
+
+---
+
+## [7.4f] Audit readiness, backup ir CI registracija
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.4b · **Lygiagretus:** 7.4c, 7.4d, 7.4e
+· **Blokuoja:** 7.6, #212 uždarymą
+
+Operacinis 7.4 uždarymas: readiness, kabliukas 7.6 atkūrimui, PostgreSQL CI
+registracija, cutover/rollback ir operatoriaus dokumentacija.
+
+⚠️ **Kodėl atskirai.** Ši apimtis anksčiau buvo suplanuota kaip 7.4e, bet §7.4e
+buvo skirta audito ištrynimo galutinumui (#216). Todėl readiness, backup
+politika ir CI wiring liko be savo issue, nors nuo jų priklauso du dalykai:
+7.6 DoD reikalauja, kad `audit_log` būtų `backupPolicy` išbraukimų sąraše, o
+#212 negali būti uždarytas be `REQUIRE_POSTGRES=1` CI paleidimo.
+
+### Readiness ir health
+
+- [ ] ⚠️ **Readiness liečia realų `audit_log`, ne `SELECT 1`.** Scenarijus: DB
+      pasiekiama, `audit_log` trūksta arba neprieinama → NOT ready.
+- [ ] ⚠️ **Probe nebrangus.** Kviečiamas kas health poll'ą — teisės tikrinamos
+      per `has_table_privilege()`, be šiukšlinių eilučių rašymo, su rezultato
+      cache trumpam intervalui. Testas, kad pakartotiniai kvietimai negeneruoja
+      užklausos kiekvienam poll'ui.
+- [ ] Readiness apima ir 7.4c raktų būseną: neišsprendžiama `hash_key_id`
+      generacija reiškia NOT ready, net kai procesas paleistas su
+      `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`. Vėliavėlė leidžia
+      startuoti, bet nedeklaruoja sistemos sveika.
+- [ ] `/api/health` DB ir audit backend detalių produkcijoje pagal nutylėjimą
+      NErodo (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
+- [ ] ⚠️ **Secret reikšmės nepatenka į logus, health ar readiness atsakymus** —
+      testas, apimantis ir startup klaidų tekstus iš 7.4c raktų validacijos.
+
+### Backup ir 7.6 sąsaja
+
+- [ ] ⚠️ **KABLIUKAS 7.6 ATKŪRIMUI.** `utils/backupPolicy.js` sąmoningai
+      išbraukia auditą iš atkūrimo: atkūrus, GDPR ištrinti įrašai grįžtų, o
+      naujesni append-only įvykiai būtų perrašyti arba dubliuoti. `audit_log`
+      privalo būti į tą politiką užregistruotas — kitaip 7.6 DoD („prieš kopiją
+      įrašyta unikali audito eilutė po restore NERANDAMA") neįgyvendinamas.
+- [ ] Testas, kad `audit_log` yra išbraukimų sąraše ir kad sąrašas IŠVEDAMAS,
+      ne surašytas rankiniu būdu.
+- [ ] ⚠️ **Rakto konfigūracija NĖRA atsarginėse kopijose, bet be jos kopija
+      bevertė.** Atkūrus `audit_log` be `AUDIT_ID_SALT_PREVIOUS`, visos
+      generacijos tampa neišsprendžiamos (7.4c fail-closed). Backup runbook'e
+      privalo būti eksplicitiškai įrašyta, kad raktų rinkinys saugomas atskirai
+      ir atkuriamas kartu.
+
+### PostgreSQL CI
+
+- [ ] ⚠️ **`REQUIRE_POSTGRES=1`** — simetriškas esamam `REQUIRE_REDIS=1`.
+      PostgreSQL CI job'e privalomas scenarijus, kuris `skip`'inasi, laikomas
+      GEDIMU, ne sėkme.
+- [ ] ⚠️ **Žalias `npm run test:postgres` be DB NĖRA įrodymas.** Šiandien jis
+      praeina su ~75 praleistais testais. CI job'as privalo tikrinti, kad
+      konkretūs privalomi testai pasirodė kaip `ok`, ne kad job'as žalias.
+- [ ] Visi 7.4b–7.4e PostgreSQL integration testai realiai registruoti
+      PostgreSQL CI rinkinyje — tikrinamas faktinis vykdymas su `DATABASE_URL`,
+      ne failo egzistavimas.
+- [ ] ⚠️ **Registracija IŠVEDAMA, ne surašoma.** Fiksuotas failų sąrašas reiškia,
+      kad naujas PG testas liktų nepaleistas, kol kas nors rankiniu būdu jį
+      pridės. Rinkinys sudaromas iš failų šablono arba žymos.
+- [ ] Testas ant pačios CI konfigūracijos: „PostgreSQL unavailable" negali
+      duoti žalio rezultato.
+
+### Cutover ir dokumentacija
+
+- [ ] ⚠️ **CUTOVER IR ROLLBACK.** Esami in-memory įrašai NEPERKELIAMI. Grįžimas
+      `postgres → memory` reiškia, kad seni įrašai lieka DB ir nauji į juos
+      nebepatenka — įrašyta į diegimo pastabas kaip sąmoningas, ne atsitiktinis
+      elgesys.
+- [ ] `.env.example` ir operatoriaus dokumentacija pilna 7.4 kintamųjų aibė:
+      `AUDIT_BACKEND`, `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID`,
+      `AUDIT_ID_SALT_PREVIOUS`, `AUDIT_WRITE_TIMEOUT_MS`,
+      `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS`.
+- [ ] Security/evidence matrix atnaujinta, jei to reikalauja repo sargai.
+- [ ] README apribojimų lentelės eilutė ir Roadmap punktas atnaujinti.
+
+### Ko NEAPIMA
+
+Retencijos ir `PRIVACY_MODE` (7.4d), ištrynimo galutinumo barjero (7.4e),
+rakto rotacijos (7.4c). Job store, sesijų ir authentication pakeitimų.
 
 ---
 
