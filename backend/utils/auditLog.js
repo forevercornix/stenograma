@@ -101,7 +101,10 @@ function isPrivacyModeEnabled() {
 }
 
 function getRetentionDays() {
-  const configured = Number(process.env.AUDIT_RETENTION_DAYS);
+  /** ⚠️ Injektuota konfigūracija turi pirmenybę - žr. `auditStore` KONFIG_RAKTAI. */
+  const k = auditStore.konfiguracijaReiksme();
+  const nustatyta = k && k.retentionDays !== null ? k.retentionDays : process.env.AUDIT_RETENTION_DAYS;
+  const configured = Number(nustatyta);
 
   return Number.isFinite(configured) && configured >= 1
     ? configured
@@ -109,7 +112,10 @@ function getRetentionDays() {
 }
 
 function getMaxEntries() {
-  const configured = Number(process.env.AUDIT_MAX_ENTRIES);
+  /** ⚠️ Injektuota konfigūracija turi pirmenybę - žr. `auditStore` KONFIG_RAKTAI. */
+  const k = auditStore.konfiguracijaReiksme();
+  const nustatyta = k && k.maxEntries !== null ? k.maxEntries : process.env.AUDIT_MAX_ENTRIES;
+  const configured = Number(nustatyta);
 
   return Number.isFinite(configured) && configured >= 1
     ? Math.floor(configured)

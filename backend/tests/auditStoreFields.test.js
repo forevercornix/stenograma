@@ -604,3 +604,114 @@ test("POOL: neveiklios jungties klaida NENUŽUDO proceso", () => {
     pool.end().catch(() => {});
   }
 });
+
+test("POOL'AI: VISI TRYS registruoja `error` klausytoją", () => {
+  /**
+   * ⚠️ TRIPWIRE (AGENTS.md §9.2) VISIEMS TRIMS PRODUKCINIAMS POOL'AMS.
+   *
+   * `pg-pool` neveiklios jungties klaidą skelbia kaip `error` įvykį ant pool'o.
+   * `EventEmitter` neapdorotą `error` META, tad Node nutraukia visą procesą -
+   * ne užklausą, o HTTP serverį ar worker'į.
+   *
+   * Spraga buvo VIENODA visuose trijuose (`jobStore`, `sessionStore`,
+   * `auditStore`), tad ir sargyba bendra: naujas pool'as be klausytojo krinta
+   * čia, o ne produkcijoje per pirmą DB restartą.
+   *
+   * Elgseną (kad `emit` su klausytoju NEMETA) tikrina atskiras testas žemiau.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  const FAILAI = [
+    "utils/jobStore/index.js",
+    "utils/sessionStore/index.js",
+    "utils/auditStore/index.js",
+  ];
+
+  for (const santykinis of FAILAI) {
+    const svarus = beKomentaru(fs.readFileSync(path.join(__dirname, "..", santykinis), "utf8"));
+
+    const poolKurimai = (svarus.match(/new Pool\(/g) || []).length;
+    const klausytojai = (svarus.match(/pool\.on\(\s*["']error["']/g) || []).length;
+
+    assert.ok(poolKurimai > 0, `${santykinis}: prielaida - failas kuria pool'ą`);
+    assert.equal(
+      klausytojai,
+      poolKurimai,
+      `${santykinis}: kiekvienas \`new Pool()\` privalo turėti \`error\` klausytoją - ` +
+        "be jo neveikli jungtis nužudo procesą"
+    );
+  }
+});
+
+test("KONFIGŪRACIJA: audito moduliai NESKAITO `process.env` už autoriteto ribų", () => {
+  /**
+   * ⚠️ SARGYBA NUO KETVIRTO SIMPTOMO.
+   *
+   * #211 peržiūroje trys atskiri radiniai pasirodė esą tos pačios šaknies:
+   * `init(env)` atrodo priimantis pilną konfigūraciją, bet dalis jos toliau
+   * skaitoma iš `process.env`. Kiekvienas simptomas atrodė nesusijęs su
+   * ankstesniais (`AUDIT_ID_SALT`, tada `PRIVACY_MODE`, tada
+   * `AUDIT_WRITE_TIMEOUT_MS`), ir kiekvienas buvo pastebėtas atskirai.
+   *
+   * Ši patikra išveda taisyklę iš `KONFIG_RAKTAI`: audito moduliuose neturi
+   * likti nė vieno `process.env.AUDIT_*` ar `PRIVACY_MODE` skaitymo, kurio
+   * nedengia autoritetas.
+   *
+   * ⚠️ TRIPWIRE, ne elgsenos įrodymas (AGENTS.md §9.2). Elgseną - kad injektuota
+   * reikšmė realiai laimi - tikrina atskiras testas aukščiau.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+  const { KONFIG_RAKTAI } = require("../utils/auditStore");
+
+  const MODULIAI = [
+    "utils/auditLog.js",
+    "utils/auditWrite.js",
+    "utils/auditStore/index.js",
+    "utils/auditStore/backendSelection.js",
+    "utils/auditStore/timeouts.js",
+    "utils/auditStore/memoryStore.js",
+    "utils/auditStore/postgresStore.js",
+    "utils/auditStore/fields.js",
+  ];
+
+  /**
+   * `NODE_ENV` NĖRA audito konfigūracija - tai vykdymo režimas, kurį naudoja
+   * `clear()` sargyba. Įtraukta eksplicitiškai, kad išimtis būtų matoma.
+   */
+  const LEIDZIAMI_NE_KONFIG = ["NODE_ENV"];
+
+  for (const santykinis of MODULIAI) {
+    const svarus = beKomentaru(fs.readFileSync(path.join(__dirname, "..", santykinis), "utf8"));
+
+    for (const m of svarus.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)) {
+      const raktas = m[1];
+
+      if (LEIDZIAMI_NE_KONFIG.includes(raktas)) continue;
+
+      assert.ok(
+        KONFIG_RAKTAI.includes(raktas),
+        `${santykinis}: \`process.env.${raktas}\` nėra tarp KONFIG_RAKTAI. ` +
+          "Arba pridėkite jį prie autoriteto (`init(env)` fiksuoja, vartotojai skaito " +
+          "iš ten), arba - jei tai ne audito konfigūracija - prie LEIDZIAMI_NE_KONFIG " +
+          "su priežastimi."
+      );
+    }
+  }
+
+  /** ⚠️ IR ATVIRKŠČIAI: kiekvienas deklaruotas raktas privalo būti realiai naudojamas. */
+  const visasTurinys = MODULIAI.map((f) =>
+    beKomentaru(fs.readFileSync(path.join(__dirname, "..", f), "utf8"))
+  ).join("\n");
+
+  for (const raktas of KONFIG_RAKTAI) {
+    assert.match(
+      visasTurinys,
+      new RegExp(raktas),
+      `${raktas} deklaruotas KONFIG_RAKTAI, bet niekur nenaudojamas - sąrašas atsiliko nuo kodo`
+    );
+  }
+});

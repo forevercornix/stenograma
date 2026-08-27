@@ -45,6 +45,23 @@ const REQUIRED_AUDIT_CONSTRAINTS = Object.freeze([
  */
 const REQUIRED_AUDIT_UNIQUE_CONSTRAINTS = Object.freeze(["audit_log_seq_unique"]);
 
+/**
+ * ⚠️ AUDITO KONFIGŪRACIJOS RAKTAI - VIENAS SĄRAŠAS.
+ *
+ * Kiekvienas jų per `init(env)` tampa autoritetingas, o `process.env` lieka tik
+ * atsarga. Sąrašas eksportuojamas todėl, kad testas galėtų tikrinti ATVIRKŠČIAI:
+ * jokio audito modulio `process.env.AUDIT_*` skaitymo, kurio nėra šiame sąraše.
+ * Be tokios sargybos ketvirtas „dvi konfigūracijos" simptomas atsirastų vėliau
+ * ir atrodytų nesusijęs su ankstesniais trimis.
+ */
+const KONFIG_RAKTAI = Object.freeze([
+  "AUDIT_ID_SALT",
+  "PRIVACY_MODE",
+  "AUDIT_WRITE_TIMEOUT_MS",
+  "AUDIT_RETENTION_DAYS",
+  "AUDIT_MAX_ENTRIES",
+]);
+
 /** Append-only trigeris - pagrindinė šios lentelės garantija. */
 const REQUIRED_AUDIT_TRIGGER = "audit_log_no_update";
 
@@ -422,6 +439,8 @@ async function init(env = process.env) {
       salt: env.AUDIT_ID_SALT || null,
       privacyMode: env.PRIVACY_MODE === undefined ? null : String(env.PRIVACY_MODE).toLowerCase() === "true",
       writeTimeoutMs: env.AUDIT_WRITE_TIMEOUT_MS === undefined ? null : env.AUDIT_WRITE_TIMEOUT_MS,
+      retentionDays: env.AUDIT_RETENTION_DAYS === undefined ? null : env.AUDIT_RETENTION_DAYS,
+      maxEntries: env.AUDIT_MAX_ENTRIES === undefined ? null : env.AUDIT_MAX_ENTRIES,
     });
 
     if (backendas === "memory") {
@@ -515,6 +534,7 @@ module.exports = {
   auditoPoolNustatymai,
   konfiguruotaDruskaReiksme,
   konfiguracijaReiksme,
+  KONFIG_RAKTAI,
   REQUIRED_AUDIT_CONSTRAINTS,
   REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,
   REQUIRED_AUDIT_TRIGGER,
