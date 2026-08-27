@@ -22,7 +22,17 @@ const logger = createLogger("audit");
  *     taikoma pilna redakcijos grandinė.
  */
 
-const log = [];
+/**
+ * ⚠️ ATMINTIES MASYVAS PRIKLAUSO `memoryStore`, NE ŠIAM FAILUI (#155, 7.4b).
+ *
+ * Nuoroda išlaikoma todėl, kad retencija (`purgeExpired`) ir atminties riba
+ * (`enforceMaxEntries`) yra 7.4a elgesys, galiojantis TIK atminties režimui.
+ * PostgreSQL režime šis masyvas lieka tuščias, tad abi funkcijos savaime tampa
+ * no-op - persistentinės retencijos savininkas yra 7.4d, ir jos įvedimas čia
+ * būtų scope creep.
+ */
+const auditStore = require("./auditStore");
+const log = require("./auditStore/memoryStore")._eilutes;
 const DEFAULT_RETENTION_DAYS = 30;
 const DEFAULT_MAX_ENTRIES = 5000;
 
@@ -48,7 +58,14 @@ let saltWarningShown = false;
 let generatedSalt = null;
 
 function resolveSalt() {
-  const configured = process.env.AUDIT_ID_SALT;
+  /**
+   * ⚠️ INJEKTUOTA KONFIGŪRACIJA TURI PIRMENYBĘ (#211 peržiūra).
+   *
+   * `auditStore.init(env)` priima druską kaip objekto lauką. Skaitant tik
+   * `process.env`, `hash_key_id` ir `subject_id` galėtų būti skaičiuojami
+   * SKIRTINGAIS raktais - žr. `auditStore/index.js` paaiškinimą.
+   */
+  const configured = auditStore.konfiguruotaDruskaReiksme() || process.env.AUDIT_ID_SALT;
   if (configured) return configured;
 
   if (!generatedSalt) {
@@ -69,11 +86,25 @@ function resolveSalt() {
 let privacyPurgeWarningShown = false;
 
 function isPrivacyModeEnabled() {
-  return String(process.env.PRIVACY_MODE || "").toLowerCase() === "true";
+  /**
+   * ⚠️ INJEKTUOTA KONFIGŪRACIJA TURI PIRMENYBĘ (#211 peržiūra).
+   *
+   * `auditStore.init(env)` priima `PRIVACY_MODE` kaip objekto lauką. Skaitant
+   * tik `process.env`, įterptinis kvietėjas galėtų perduoti `false`, o globalus
+   * `true` TYLIAI mestų kiekvieną įrašą: procesas praneštų apie sėkmingai
+   * paruoštą persistentinę saugyklą, kuri lieka amžinai tuščia.
+   */
+  const k = auditStore.konfiguracijaReiksme();
+  if (k && k.privacyMode !== null) return k.privacyMode;
+
+  return String(process.env.PRIVACY_MODE).toLowerCase() === "true";
 }
 
 function getRetentionDays() {
-  const configured = Number(process.env.AUDIT_RETENTION_DAYS);
+  /** ⚠️ Injektuota konfigūracija turi pirmenybę - žr. `auditStore` KONFIG_RAKTAI. */
+  const k = auditStore.konfiguracijaReiksme();
+  const nustatyta = k && k.retentionDays !== null ? k.retentionDays : process.env.AUDIT_RETENTION_DAYS;
+  const configured = Number(nustatyta);
 
   return Number.isFinite(configured) && configured >= 1
     ? configured
@@ -81,7 +112,10 @@ function getRetentionDays() {
 }
 
 function getMaxEntries() {
-  const configured = Number(process.env.AUDIT_MAX_ENTRIES);
+  /** ⚠️ Injektuota konfigūracija turi pirmenybę - žr. `auditStore` KONFIG_RAKTAI. */
+  const k = auditStore.konfiguracijaReiksme();
+  const nustatyta = k && k.maxEntries !== null ? k.maxEntries : process.env.AUDIT_MAX_ENTRIES;
+  const configured = Number(nustatyta);
 
   return Number.isFinite(configured) && configured >= 1
     ? Math.floor(configured)
@@ -449,10 +483,18 @@ async function record(entry = {}) {
     actor: sanitizeControlled(entry.actor ?? getActor(), 40),
   });
 
-  log.push(row);
+  /**
+   * ⚠️ GRĄŽINAMA SAUGYKLOS EILUTĖ, NE VIETINIS OBJEKTAS.
+   *
+   * PostgreSQL režime `timestamp` parenka DB (`DEFAULT now()`), tad `row.timestamp`
+   * yra tik programos spėjimas. Grąžinus jį, kvietėjas matytų vieną laiką, o
+   * lentelėje gulėtų kitas - ir du atsakymai apie tą patį įrašą nesutaptų.
+   */
+  const issaugota = await auditStore.current().append(row);
+
   enforceMaxEntries();
 
-  return row;
+  return issaugota || row;
 }
 
 /** ⚠️ ASYNC NUO 7.4a (#210) - žr. `record()` komentarą. */
@@ -466,12 +508,65 @@ async function getAll() {
   // /api/audit tol, kol neateina naujas įvykis.
   purgeExpired();
 
-  // Negrąžiname vidinio masyvo, kad išorinis kodas jo nepakeistų.
-  return log.map((entry) => ({ ...entry }));
+  /**
+   * ⚠️ BE RIBOS - SĄMONINGAI.
+   *
+   * `getAll()` kontraktas (masyvas, visi įrašai) išlaikomas nepakeistas: jį
+   * naudoja dešimtys esamų testų, o #211 reikalauja, kad jie praeitų BE
+   * modifikacijų. Produkcinis skaitymo kelias su riba yra `query()`, ir būtent
+   * jį naudoja `/api/audit`.
+   */
+  return (await auditStore.current().list()).entries;
 }
 
+/**
+ * RIBOTAS SKAITYMAS - PRODUKCINIS KELIAS (#211).
+ *
+ * ⚠️ RIBA IR FILTRAI TAIKOMI SAUGYKLOJE, NE ČIA. PostgreSQL režime tai reiškia
+ * `WHERE ... ORDER BY seq LIMIT`, o ne visos lentelės perkėlimą į Node'ą.
+ * Atminties režimu taikoma ta pati tvarka, kad abu backend'ai grąžintų tą patį.
+ *
+ * @returns {Promise<{entries: object[], total: number}>} `total` - kiekis PO
+ *   filtrų, bet PRIEŠ ribą.
+ */
+async function query(options = {}) {
+  if (isPrivacyModeEnabled()) {
+    purgeForPrivacyMode();
+    return { entries: [], total: 0 };
+  }
+
+  purgeExpired();
+
+  return auditStore.current().query
+    ? auditStore.current().query(options)
+    : auditStore.current().list(options);
+}
+
+/**
+ * Ar subjektas turi bent vieną įrašą?
+ *
+ * ⚠️ ATSKIRAS NUO `getAll()` SĄMONINGAI. `artefactScanner` anksčiau atsiimdavo
+ * VISĄ žurnalą ir ieškodavo Node'e - persistentiniame režime tai reikštų pilną
+ * lentelės perkėlimą per tinklą kiekvienai artefaktų patikrai.
+ */
+async function hasSubject(value) {
+  const subjectId = pseudonymizeIdentifier(value);
+  if (!subjectId) return false;
+
+  return (await auditStore.current().countBySubject(subjectId)) > 0;
+}
+
+/**
+ * ⚠️ NE `async`, NORS GRĄŽINA PROMISE.
+ *
+ * Atminties backend'e `clear()` kūnas neturi `await`, tad masyvas išvalomas
+ * SINCHRONIŠKAI dar prieš grąžinant promise'ą. Dešimtys esamų testų kviečia
+ * `auditLog.clear()` be `await` (pvz. `beforeEach`), ir #211 reikalauja, kad jie
+ * praeitų be modifikacijų. `async function` čia atidėtų valymą į kitą mikrotaską
+ * ir tie testai imtų matyti ankstesnio testo įrašus.
+ */
 function clear() {
-  log.length = 0;
+  return auditStore.current().clear();
 }
 
 /**
@@ -505,15 +600,7 @@ async function removeBySubjectIdentifier(value) {
   const subjectId = pseudonymizeIdentifier(value);
   if (!subjectId) return 0;
 
-  const originalLength = log.length;
-
-  for (let index = log.length - 1; index >= 0; index -= 1) {
-    if (log[index].subjectId === subjectId) {
-      log.splice(index, 1);
-    }
-  }
-
-  return originalLength - log.length;
+  return auditStore.current().removeBySubject(subjectId);
 }
 
 // Jei procesas startuoja jau su PRIVACY_MODE=true, nieko nekaupiame nuo pat pradžių.
@@ -522,6 +609,8 @@ if (isPrivacyModeEnabled()) clear();
 module.exports = {
   record,
   getAll,
+  query,
+  hasSubject,
   /**
    * ⚠️ EKSPORTUOJAMA 7.4a: `utils/auditWrite.js` privalo žinoti ĮVYKIO VARDĄ
    * prieš rašydamas, kad galėtų pritaikyti klasifikaciją. Be to jis turėtų

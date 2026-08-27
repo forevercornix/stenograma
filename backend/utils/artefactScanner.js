@@ -38,10 +38,15 @@ const SCAN_STRATEGIES = {
        * Naudojam TĄ PAČIĄ funkciją, kurią naudoja pats ištrynimas – kitaip
        * skeneris ieškotų to, ko ten iš principo nėra, ir visada rastų „švaru".
        */
-      const subjectId = auditLog.pseudonymizeIdentifier(jobId);
-      if (!subjectId) return false;
-
-      return (await auditLog.getAll()).some((entry) => entry.subjectId === subjectId);
+      /**
+       * ⚠️ EGZISTAVIMO PATIKRA, NE VISO ŽURNALO ATSIĖMIMAS (#155, 7.4b).
+       *
+       * Anksčiau čia buvo `getAll().some(...)`. Persistentiniame režime tai
+       * reikštų, kad kiekviena artefaktų patikra perkelia per tinklą visą
+       * `audit_log` lentelę - o ji auga be ribos. `hasSubject()` skaičiuoja
+       * SQL pusėje ir pats pseudonimizuoja ID.
+       */
+      return auditLog.hasSubject(jobId);
     },
   },
 

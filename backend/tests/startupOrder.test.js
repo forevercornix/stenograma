@@ -17,7 +17,14 @@ const app = require("../server");
 // `/api/auth/login` landą į pusiau inicijuotą saugyklą. Todėl abu žingsniai
 // privalo baigtis PRIEŠ `listen`, ir tvarka tikrinama `deepEqual`, ne
 // „yra sąraše" - įterptas žingsnis po `listen` praeitų narystės patikrą.
-test("startServer: jobStore -> sessionStore.init -> suderinimas -> jobRunner -> listen (tvarka)", async () => {
+//
+// ⚠️ #155 / 7.4b PRAPLĖTĖ SEKĄ DAR KARTĄ. `auditStore.init()` yra AUDITO
+// AUTORITETO paruošimas: `AUDIT_BACKEND=postgres` su nepasiekiama DB, netaikyta
+// migracija ar nukritusiu append-only trigeriu privalo NUTRAUKTI startą. Be to
+// auditas rašomas iš `/api/auth/login` - kelio be `requireJobSystemReady` - tad
+// inicijavus jį fone, tame lange blokuojantis autentikacijos įvykis kristų su
+// `AUDIT_WRITE_FAILED`.
+test("startServer: jobStore -> sessionStore -> auditStore -> jobRunner -> listen (tvarka)", async () => {
   const events = [];
   let listenCalledAt = null;
 
@@ -30,7 +37,14 @@ test("startServer: jobStore -> sessionStore.init -> suderinimas -> jobRunner -> 
   // Tvarka turi būti tiksliai ši:
   assert.deepEqual(
     events,
-    ["jobStore.init", "sessionStore.init", "sessionStore.reconcile", "jobRunner.init", "listen"],
+    [
+      "jobStore.init",
+      "sessionStore.init",
+      "sessionStore.reconcile",
+      "auditStore.init",
+      "jobRunner.init",
+      "listen",
+    ],
     "init turi vykti PRIEŠ listen, nuoseklia tvarka"
   );
 
@@ -40,6 +54,47 @@ test("startServer: jobStore -> sessionStore.init -> suderinimas -> jobRunner -> 
     events.indexOf("sessionStore.reconcile") < events.indexOf("listen"),
     "sesijų suderinimas privalo baigtis prieš pirmą aptarnautą užklausą"
   );
+  assert.ok(
+    events.indexOf("auditStore.init") < events.indexOf("listen"),
+    "audito saugykla privalo būti paruošta prieš pirmą aptarnautą užklausą"
+  );
+});
+
+test("startServer: audito saugyklos klaida reiškia, kad listen NEKVIEČIAMAS", async () => {
+  /**
+   * ⚠️ JOKIO FALLBACK Į ATMINTĮ (#211).
+   *
+   * `AUDIT_BACKEND=postgres` su nepasiekiama DB privalo nutraukti startą. Tylus
+   * grįžimas į atmintį reikštų, kad operatorius paprašė persistentinio audito,
+   * servisas pakilo ir rašo į vietą, kuri dingsta per restartą - o paaiškėtų
+   * tai tik tada, kai audito prireiks.
+   *
+   * Klaida injektuojama į TĄ PATĮ `auditStore.init`, kurį kviečia
+   * `startServer()`: kitaip testas praeitų ir tada, kai jis apskritai
+   * nekviečiamas.
+   */
+  const auditStore = require("../utils/auditStore");
+  const originalus = auditStore.init;
+  auditStore.init = async () => {
+    throw new Error("audito saugykla nepasiekiama");
+  };
+
+  const events = [];
+  try {
+    await assert.rejects(
+      () =>
+        app.startServer({
+          port: 0,
+          listen: async () => { events.push("listen"); },
+          onStep: (name) => events.push(name),
+        }),
+      /audito saugykla nepasiekiama/
+    );
+  } finally {
+    auditStore.init = originalus;
+  }
+
+  assert.ok(!events.includes("listen"), "kritus auditui serveris negali pradėti aptarnauti srauto");
 });
 
 test("startServer: sesijų suderinimo klaida reiškia, kad listen NEKVIEČIAMAS", async () => {

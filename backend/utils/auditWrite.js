@@ -34,8 +34,31 @@ const DEFAULT_AUDIT_WRITE_TIMEOUT_MS = 2000;
  * per `process.env`, ir modulio lygio konstanta reikštų, kad deterministinis
  * timeout testas priklauso nuo `require` tvarkos.
  */
-function auditWriteTimeoutMs(env = process.env) {
-  const raw = Number(env.AUDIT_WRITE_TIMEOUT_MS);
+function auditWriteTimeoutMs(env = null) {
+  /**
+   * ⚠️ INJEKTUOTA KONFIGŪRACIJA TURI PIRMENYBĘ (#211 peržiūra).
+   *
+   * `auditStore.init(env)` iš to paties objekto skaičiuoja pool'o ir
+   * `statement_timeout` biudžetą. Jei fasadas imtų reikšmę iš `process.env`, o
+   * pool'as - iš injektuotos, jie išsiskirtų: pvz. injektuoti 2000 ms su
+   * globaliais 100 ms reikštų, kad fasadas praneša nesėkmę gerokai anksčiau,
+   * nei DB spėja nutraukti savo ~1100 ms užklausą - vėlyvo rašymo langas, kurio
+   * biudžetas kaip tik ir vengia, grįžtų.
+   *
+   * `require` viduje SĄMONINGAI: `auditStore` per `timeouts.js` importuoja šį
+   * modulį, tad viršutinio lygio importas sukurtų ciklą.
+   */
+  if (env === null) {
+    const { konfiguracijaReiksme } = require("./auditStore");
+    const k = konfiguracijaReiksme();
+    if (k && k.writeTimeoutMs !== null) {
+      const injektuota = Number(k.writeTimeoutMs);
+      if (Number.isFinite(injektuota) && injektuota > 0) return injektuota;
+    }
+  }
+
+  const saltinis = env || process.env;
+  const raw = Number(saltinis.AUDIT_WRITE_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_AUDIT_WRITE_TIMEOUT_MS;
 }
 

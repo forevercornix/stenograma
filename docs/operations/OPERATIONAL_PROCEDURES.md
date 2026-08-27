@@ -232,8 +232,18 @@ galima pamatyti turimomis priemonėmis.
 | `AUTHORIZATION_DENIED` dažnio pokytis | Kas savaitę | Staigus šuolis — arba klaida, arba zondavimas |
 | `/api/health/deep` | Kasdien | Anksti parodo tiekėjų problemas |
 
-⚠️ **Audito retencija — 30 d.** (`AUDIT_RETENTION_DAYS`). Senesnių įvykių
-analizei reikia iš anksto išsaugotų kopijų.
+⚠️ **Audito retencija priklauso nuo `AUDIT_BACKEND`.**
+
+- **`memory`** (numatytasis): audito retencija — 30 d. pagal
+  `AUDIT_RETENTION_DAYS`. Senesnių įvykių analizei reikia iš anksto išsaugotų
+  kopijų.
+- **`postgres`**: `AUDIT_RETENTION_DAYS` **NEGALIOJA** – `audit_log` eilutės
+  automatiškai nešalinamos, ir lentelė auga neribotai (persistentinę retenciją
+  įgyvendina [7.4d]). Startas įspėja `warn` lygiu.
+
+  **Operatoriaus veiksmas:** iki 7.4d reikalinga IŠORINĖ valymo politika.
+  Priešingu atveju asmens duomenys audite išliks neribotai, nors konfigūracijoje
+  matoma 30 dienų reikšmė – tiesioginė GDPR saugojimo ribojimo rizika.
 
 ---
 

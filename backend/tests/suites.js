@@ -62,6 +62,8 @@ const privacy = [
   "exports.route",
   "auditErasure.service",
   "auditLog",
+  "auditStoreFields",
+  "auditStoreBackendContract.integration",
   "jobErasure",
   "deletionResilience",
   "audioCleanup",
@@ -149,6 +151,11 @@ const security = [
    * dviejų, o divergencija būtų būtent ta, kurios niekas nemato.
    */
   "sessionStoreBackendContract.integration",
+  /**
+   * ⚠️ #155, 7.4b: TAS PATS DVIGUBAS REGISTRAVIMAS. `security` paleidžia audito
+   * atminties adapterį kiekviename `npm test`; `postgres` - PostgreSQL adapterį.
+   */
+  "auditStoreBackendContract.integration",
   "rbac.route",
   "workerAuthorization",
   "authRoutes.route",
@@ -252,6 +259,14 @@ const postgres = [
   "jobStoreBackendContract.integration",
   /** #155, 7.3: bendras sesijų scenarijų rinkinys - PostgreSQL adapteris. */
   "sessionStoreBackendContract.integration",
+  /** #155, 7.4b: bendras audito scenarijų rinkinys - PostgreSQL adapteris. */
+  "auditStoreBackendContract.integration",
+  /**
+   * #155, 7.4b: garantijos, kurių atmintyje NĖRA - schema, invariantai,
+   * append-only trigeris, RAW eilučių privatumas, pool'o gyvavimo ciklas,
+   * išlikimas po restarto ir kelių instancijų matomumas.
+   */
+  "auditPersistence.integration",
   /**
    * #155, 7.3: garantijos, kurių atmintyje NĖRA - hash-only saugojimas, DB
    * laiko invariantai, viena sąlyginė autentikacijos užklausa, revokacija

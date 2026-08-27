@@ -173,11 +173,20 @@ const IŠVEDAMI_ĮVYKIAI = Object.freeze([
  * trynimą dabar reikštų naują gedimo režimą (nepavykęs trynimas paliktų
  * melagingą „ištrinta" pėdsaką) negaunant realios garantijos.
  *
- * Namai perrikiavimui jau egzistuoja:
- *   SUBISSUES-155.md [7.4b] - `audit_log` schema, `AUDIT_ID_SALT`, persistentis
- *                             auditas (tada atsiranda patvarumas ir transakcija);
- *   SUBISSUES-155.md [7.5b] - „AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS" (patvari
- *                             eilė su eksplicitiniu klaidų pranešimu).
+ * ⚠️ 7.4b SPRENDIMAS (#211): PERRIKIAVIMO ČIA NĖRA, IR TAI SĄMONINGA.
+ *
+ * [7.4b] persistentinį auditą jau įgyvendino - įrašas išgyvena restartą. Bet
+ * PATVARUMAS NĖRA PERRIKIAVIMAS. Kad šie įvykiai taptų tikrai fail-closed,
+ * auditas turėtų būti rašomas PRIEŠ veiksmą, o tai keičia ištrynimo semantiką:
+ * nepavykęs trynimas paliktų melagingą „ištrinta" pėdsaką, jei nebūtų
+ * kompensacinio mechanizmo.
+ *
+ * Toks mechanizmas - patvari eilė su eksplicitiniu klaidų pranešimu - yra
+ * SUBISSUES-155.md [7.5b] („AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS"). Iki tol
+ * perrikiavimas pakeistų vieną gedimo režimą kitu, negaunant realios garantijos.
+ *
+ * Pagrindimas užrašytas ČIA ir `docs/audit-storage.md` §12, o ne issue
+ * komentare, kad jo nereikėtų atkurti iš išorinių šaltinių.
  */
 const POST_HOC_IVYKIAI = Object.freeze([
   "DATA_ERASED",
@@ -305,6 +314,20 @@ const PRODUKCINIAI_KATALOGAI = Object.freeze([
 ]);
 
 /**
+ * ⚠️ SAUGYKLOS SLUOKSNIS NĖRA PRODUCER'IS (#155, 7.4b).
+ *
+ * `utils/auditStore/*` įvykių NEKURIA - jis atvaizduoja jau sukurtą eilutę į DB
+ * ir atgal (`event: row.event`, `event: eilute.event`). Skeneriui tai atrodo
+ * kaip įvykis, nurodomas per neišsprendžiamą konstantą, ir startas krinta.
+ *
+ * ⚠️ IŠIMTIS TIKRINAMA, NE PASITIKIMA. Katalogas išbraukiamas tik tol, kol
+ * jame realiai nėra nė vieno rašymo kvietimo; tai tikrina
+ * `tests/auditStoreFields.test.js`. Be tokios sargybos išimtis taptų vieta,
+ * kurioje klasifikacijos patikra tyliai nustotų galioti.
+ */
+const NE_PRODUCER_KELIAI = Object.freeze(["auditStore"]);
+
+/**
  * ⚠️ KOMENTARAI PAŠALINAMI PRIEŠ SKENUOJANT (AGENTS.md §9.2).
  *
  * Be to patikra pagauna SAVO PAČIOS dokumentaciją: šio failo komentare yra
@@ -375,6 +398,7 @@ function producerIvykiai() {
     }
     for (const irasas of irasai) {
       if (!String(irasas).endsWith(".js")) continue;
+      if (NE_PRODUCER_KELIAI.some((k) => String(irasas).startsWith(`${k}/`))) continue;
       const kelias = path.join(dir, String(irasas));
       let turinys;
       try {
@@ -473,6 +497,7 @@ module.exports = {
   arBlokuojantis,
   validateAuditEvents,
   producerIvykiai,
+  NE_PRODUCER_KELIAI,
   /**
    * Eksportuojama testams: statinės patikros PRIVALO nuskusti komentarus, kitaip
    * jos pagauna savo pačių dokumentaciją (taip jau nutiko #210 eigoje).

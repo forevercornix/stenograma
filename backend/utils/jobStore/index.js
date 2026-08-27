@@ -212,6 +212,23 @@ async function initializePostgres() {
     connectionTimeoutMillis: connectTimeoutMs(),
   });
 
+  /**
+   * ⚠️ NEVEIKLIOS JUNGTIES KLAIDA NETURI NUŽUDYTI PROCESO (#155, 7.4b peržiūra).
+   *
+   * `pg-pool` klaidą neveiklioje jungtyje (PostgreSQL restartas, tinklo trūkis)
+   * skelbia kaip `error` įvykį ANT POOL'O. `EventEmitter` neapdorotą `error`
+   * meta, tad Node nutraukia visą procesą - ne užklausą, o serverį ar worker'į.
+   * Klausytojas paverčia tai tuo, kas jis ir yra: pašalinta jungtis plius logas.
+   *
+   * ⚠️ LOGINAMAS TIK KODAS: `pg` pranešime gali būti vartotojo vardas
+   * (`password authentication failed for user "x"`).
+   */
+  pool.on("error", (klaida) => {
+    log.error("Job pool'o neveiklios jungties klaida - jungtis pašalinta", {
+      klaida: klaida && klaida.code ? klaida.code : "nežinoma",
+    });
+  });
+
   try {
     await pool.query("SELECT 1");
   } catch (err) {
