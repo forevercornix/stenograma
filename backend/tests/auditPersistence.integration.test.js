@@ -676,11 +676,27 @@ test("POOL: nustatymuose YRA laiko ribos, ir jos MAŽESNĖS už fasado langą", 
     const env = { ...process.env, DATABASE_URL: url, AUDIT_WRITE_TIMEOUT_MS: "2000" };
     const nustatymai = auditoPoolNustatymai(env);
 
-    assert.equal(nustatymai.statement_timeout, 1400);
-    assert.equal(nustatymai.connectionTimeoutMillis, 400);
+    /**
+     * ⚠️ TIKRINAMI INVARIANTAI, ne tik trys skaičiai.
+     *
+     * Pirmoji versija tikrino tik konkrečias reikšmes, ir kai biudžeto dalys
+     * buvo perdalytos (0.2/0.7 → 0.15/0.55/0.70), testas kritо CI - o lokaliai
+     * jis praleidžiamas, tad drift'as pasimatė tik po push'o. Dabar konkretūs
+     * skaičiai lieka kaip kanarėlė, bet PAGRINDINIS tikrinimas yra santykiai,
+     * kurie ir yra tikroji garantija.
+     */
+    assert.equal(nustatymai.connectionTimeoutMillis, 300, "pool 0.15 × T");
+    assert.equal(nustatymai.statement_timeout, 1100, "serveris 0.55 × T");
+    assert.equal(nustatymai.query_timeout, 1400, "klientas 0.70 × T");
+
+    /** SERVERIS suveikia PIRMAS - kitaip `pg` atmestų, o užklausa liktų vykdoma. */
     assert.ok(
-      nustatymai.connectionTimeoutMillis + nustatymai.statement_timeout < 2000,
-      "pool ir užklausos ribos privalo tilpti į fasado langą"
+      nustatymai.statement_timeout < nustatymai.query_timeout,
+      "serverio riba privalo būti ANKSTESNĖ už kliento"
+    );
+    assert.ok(
+      nustatymai.connectionTimeoutMillis + nustatymai.query_timeout < 2000,
+      "pool ir kliento ribos privalo tilpti į fasado langą"
     );
 
     /** ELGSENA: DB realiai nutraukia užklausą, viršijusią `statement_timeout`. */

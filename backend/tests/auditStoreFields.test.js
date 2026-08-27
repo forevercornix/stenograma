@@ -421,6 +421,44 @@ test("BIUDŽETAS: DB laiko invariantas NEGALIOJA atminties režimui", () => {
   assert.equal(pgKlaidos.length, 1, "postgres režimu biudžeto invariantas privalo galioti");
 });
 
+test("BIUDŽETAS: ribų TVARKA tikrinama LOKALIAI, ne tik prieš tikrą DB", () => {
+  /**
+   * ⚠️ ŠIS TESTAS EGZISTUOJA DĖL REALIOS KLAIDOS.
+   *
+   * Biudžeto dalys buvo perdalytos (0.2/0.7 → 0.15/0.55/0.70), bet konkretūs
+   * skaičiai gyveno TIK PostgreSQL teste, kuris be `DATABASE_URL` praleidžiamas.
+   * Lokaliai viskas atrodė žalia, o drift'as pasimatė tik CI - po push'o.
+   *
+   * Santykiai nepriklauso nuo DB, tad ir tikrinami čia:
+   *
+   *   serveris < klientas   - kitaip `pg` atmestų PIRMAS, o serverio užklausa
+   *                           liktų vykdoma; INSERT, spėjęs įsirašyti, būtų
+   *                           praneštas kaip nepavykęs, o `suRiba()` vėlyvos
+   *                           sėkmės logas ir skaitiklis liktų nepasiekti;
+   *   pool + klientas < T   - kitaip fasadas suveiktų anksčiau už abu.
+   */
+  const { auditTimeoutBudget } = require("../utils/auditStore/timeouts");
+
+  for (const T of [500, 2000, 10000]) {
+    const b = auditTimeoutBudget({ AUDIT_WRITE_TIMEOUT_MS: String(T) });
+
+    assert.equal(b.facadeMs, T);
+    assert.ok(b.statementMs < b.clientMs, `T=${T}: serverio riba privalo būti ankstesnė už kliento`);
+    assert.ok(
+      b.poolAcquireMs + b.clientMs < b.facadeMs,
+      `T=${T}: pool ir kliento ribos privalo tilpti į fasado langą`
+    );
+  }
+
+  /** Kanarėlė: numatytoji reikšmė duoda būtent tą trejetą, kurį tikrina PG testas. */
+  const numatyta = auditTimeoutBudget({});
+  assert.deepEqual(
+    [numatyta.poolAcquireMs, numatyta.statementMs, numatyta.clientMs],
+    [300, 1100, 1400],
+    "pakeitus dalis - atnaujinkite IR `auditPersistence.integration` reikšmes"
+  );
+});
+
 test("DRUSKA: `init(env)` perduota druska galioja IR pseudonimizacijai", async () => {
   /**
    * ⚠️ #211 peržiūra (P2): DU AUTORITETAI TAM PAČIAM RAKTUI.
