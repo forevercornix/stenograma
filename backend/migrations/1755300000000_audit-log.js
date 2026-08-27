@@ -21,15 +21,20 @@
  */
 
 /**
- * ⚠️ ĮVYKIO ŠABLONAS IŠVEDAMAS, NE PERRAŠOMAS.
+ * ⚠️ ĮVYKIO ŠABLONAS ČIA UŽŠALDYTAS SĄMONINGAI - NEIMPORTUOJAMAS.
  *
- * `EVENT_PATTERN` autoritetas yra `utils/auditEvents.js` (7.4a). Įrašius čia
- * antrą kopiją, du šaltiniai išsiskirtų tyliai: runtime priimtų įvykį, kurio
- * DB nebepriima, ir rašymas kristų tik produkcijoje. `.source` konvertuojamas
- * tiesiogiai - JS ir POSIX ERE šiam šablonui sutampa, o paritetą tikrina
- * atskiras testas prieš TIKRĄ DB.
+ * Pirmoji versija darė `require("../utils/auditEvents")`, kad autoritetas liktų
+ * vienas. Bet migracija yra ISTORIJOS ĮRAŠAS: pakeitus `EVENT_PATTERN` vėlesnėje
+ * versijoje, šviežia DB gautų NAUJĄ constraint'ą, o atnaujinta - liktų su SENU,
+ * nes `node-pg-migrate` šią migraciją jau pažymėjo pritaikyta. Abi startuotų
+ * (vardas tas pats), bet priimtų SKIRTINGAS įvykių aibes - audito elgesys imtų
+ * priklausyti nuo diegimo istorijos.
+ *
+ * Autoritetas nedingsta: `auditStore.init()` starte lygina TIKRĄ constraint'o
+ * apibrėžimą su dabartiniu `EVENT_PATTERN`, tad neatitikimas pastebimas iškart,
+ * o ne po pirmo atmesto rašymo. Pasikeitus šablonui reikia NAUJOS migracijos.
  */
-const { EVENT_PATTERN } = require("../utils/auditEvents");
+const EVENT_PATTERN_FROZEN = "^[A-Z][A-Z0-9_]{1,63}$";
 
 /** Vienintelės leistinos `result` reikšmės - žr. `auditLog.record()`. */
 const RESULTS = ["success", "failure"];
@@ -102,7 +107,7 @@ exports.up = (pgm) => {
    * žr. failo antraštę.
    */
   pgm.addConstraint("audit_log", "audit_log_event_pattern", {
-    check: `event ~ '${EVENT_PATTERN.source}'`,
+    check: `event ~ '${EVENT_PATTERN_FROZEN}'`,
   });
 
   /**

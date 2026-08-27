@@ -130,30 +130,62 @@ test("`meta`: nei `undefined`, nei `null` nerašomi į JSONB, bet round-trip duo
   assert.deepEqual(Object.keys(atkurta).sort(), visiLaukai().sort(), "raktų aibė nesikeičia");
 });
 
-test("ĮVYKIO ŠABLONAS: migracija naudoja `auditEvents` autoritetą, ne savo kopiją", () => {
+test("ĮVYKIO ŠABLONAS: migracijoje UŽŠALDYTAS, bet dabartinį šabloną PADENGIA migracija", () => {
   /**
-   * ⚠️ TRIPWIRE (AGENTS.md §9.2), ne elgsenos įrodymas.
+   * ⚠️ KONTRAKTAS PASIKEITĖ PO #211 PERŽIŪROS - IR TAI SĄMONINGA.
    *
-   * Elgseną - kad DB realiai atmeta neatitinkantį įvykį - tikrina integracinis
-   * testas prieš tikrą DB. Čia saugoma tik nuo antros šablono kopijos
-   * atsiradimo: ji išsiskirtų tyliai, ir runtime priimtų įvykį, kurio DB
-   * nebepriima.
+   * Pirmoji versija migracijoje `require`-ino `EVENT_PATTERN`, kad autoritetas
+   * liktų vienas. Bet migracija yra ISTORIJOS ĮRAŠAS: pakeitus šabloną, šviežia
+   * DB gautų NAUJĄ constraint'ą, o atnaujinta liktų su SENU - `node-pg-migrate`
+   * migraciją jau pažymėjo pritaikyta. Abi startuotų (vardas tas pats), bet
+   * priimtų SKIRTINGAS įvykių aibes: audito elgesys imtų priklausyti nuo
+   * diegimo istorijos.
+   *
+   * Dabar: migracijose šablonas UŽŠALDYTAS literalu, o šis testas reikalauja,
+   * kad dabartinį `EVENT_PATTERN` PADENGTŲ bent viena migracija. Pakeitus
+   * šabloną be naujos migracijos - testas krinta ir pasako, ko trūksta.
+   *
+   * ELGSENĄ (kad DB ir runtime priima tą pačią aibę) tikrina
+   * `auditPersistence.integration`, o startas lygina TIKRĄ constraint'o
+   * apibrėžimą su `EVENT_PATTERN`.
    */
   const fs = require("node:fs");
   const path = require("node:path");
-  const kelias = path.join(__dirname, "..", "migrations", "1755300000000_audit-log.js");
-  const turinys = fs.readFileSync(kelias, "utf8");
+  const { beKomentaru } = require("../utils/auditEvents");
+  const dir = path.join(__dirname, "..", "migrations");
 
-  assert.match(
-    turinys,
-    /require\("\.\.\/utils\/auditEvents"\)/,
-    "migracija privalo IMPORTUOTI šabloną, o ne jį perrašyti"
+  const uzsaldyti = [];
+  for (const failas of fs.readdirSync(dir)) {
+    if (!failas.endsWith(".js")) continue;
+
+    /**
+     * ⚠️ KOMENTARAI NUSKUTAMI (AGENTS.md §9.2). Migracijos komentaras PAAIŠKINA,
+     * kodėl importo nebėra, ir jame ta eilutė paminėta - be nuskutimo patikra
+     * pagautų savo pačios dokumentaciją. Taip jau nutiko šiam testui.
+     */
+    const turinys = beKomentaru(fs.readFileSync(path.join(dir, failas), "utf8"));
+
+    for (const m of turinys.matchAll(/EVENT_PATTERN_FROZEN\s*=\s*"([^"]+)"/g)) {
+      uzsaldyti.push({ failas, sablonas: m[1] });
+    }
+
+    /** ⚠️ Importas migracijoje reikštų, kad istorijos įrašas vėl kinta su kodu. */
+    assert.doesNotMatch(
+      turinys,
+      /require\(["'][^"']*auditEvents["']\)/,
+      `${failas}: migracija NEGALI importuoti \`EVENT_PATTERN\` - žr. testo paaiškinimą`
+    );
+  }
+
+  assert.ok(uzsaldyti.length > 0, "bent viena migracija privalo apibrėžti įvykių šabloną");
+
+  assert.ok(
+    uzsaldyti.some((u) => u.sablonas === EVENT_PATTERN.source),
+    `dabartinio \`EVENT_PATTERN\` (${EVENT_PATTERN.source}) nepadengia nė viena migracija. ` +
+      `Užšaldyti: ${uzsaldyti.map((u) => `${u.failas}: ${u.sablonas}`).join("; ")}. ` +
+      "Pakeitus šabloną reikia NAUJOS migracijos - senoji jau pažymėta pritaikyta."
   );
-  assert.doesNotMatch(
-    turinys,
-    /\^\[A-Z\]\[A-Z0-9_\]/,
-    "šablono literalas migracijoje reikštų antrą autoritetą"
-  );
+
   assert.ok(EVENT_PATTERN.source.startsWith("^"), "šablonas turi būti pririštas prie eilutės pradžios");
 });
 

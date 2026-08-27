@@ -44,11 +44,23 @@ function resolveAuditBackend(env = process.env) {
    * žurnalas dingtų per pirmą restartą - t. y. dingtų būtent tai, dėl ko
    * persistencija ir įjungiama.
    */
-  if (!env.DATABASE_URL) {
+  /**
+   * ⚠️ PRIIMAMOS ABI KONFIGŪRACIJOS FORMOS.
+   *
+   * Dokumentuotas Compose diegimas DB perduoda per `PGHOST` ir kitus `PG*`, o ne
+   * per `DATABASE_URL` - sąmoningai, nes slaptažodis su URI simboliais URL'e
+   * reikštų kitką arba jį sugadintų. Reikalavus tik `DATABASE_URL`,
+   * `AUDIT_BACKEND=postgres` dokumentuotame diegime NEĮSIJUNGTŲ: startas kristų
+   * konfigūracijoje, kuri realiai yra teisinga.
+   *
+   * `pg` `PG*` skaito pats, tad `auditoPoolNustatymai()` `connectionString`
+   * perduoda tik tada, kai URL realiai yra.
+   */
+  if (!env.DATABASE_URL && !env.PGHOST) {
     throw new Error(
-      "AUDIT_BACKEND=postgres, bet DATABASE_URL nenustatytas. Eksplicitinis " +
-        "backend'as negali tyliai virsti atmintimi - audito žurnalas dingtų " +
-        "per pirmą restartą be jokio įspėjimo."
+      "AUDIT_BACKEND=postgres, bet nei DATABASE_URL, nei PGHOST nenustatyti. " +
+        "Eksplicitinis backend'as negali tyliai virsti atmintimi - audito " +
+        "žurnalas dingtų per pirmą restartą be jokio įspėjimo."
     );
   }
 

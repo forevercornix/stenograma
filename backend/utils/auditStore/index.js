@@ -15,6 +15,7 @@
 const { createLogger } = require("../logger");
 const { resolveAuditBackend } = require("./backendSelection");
 const { auditTimeoutBudget } = require("./timeouts");
+const { EVENT_PATTERN } = require("../auditEvents");
 const memoryStore = require("./memoryStore");
 
 const log = createLogger("audit-store");
@@ -116,14 +117,27 @@ function backend() {
  * fasadas nustos jos laukti.
  */
 function auditoPoolNustatymai(env = process.env) {
-  const { poolAcquireMs, statementMs } = auditTimeoutBudget(env);
+  const { poolAcquireMs, statementMs, clientMs } = auditTimeoutBudget(env);
 
-  return {
-    connectionString: env.DATABASE_URL,
+  /**
+   * ⚠️ `connectionString` TIK KAI `DATABASE_URL` REALIAI YRA (#211 peržiūra).
+   *
+   * Dokumentuotas Compose diegimas perduoda `PGHOST`/`PGPORT`/`PGUSER`/
+   * `PGPASSWORD`/`PGDATABASE`, o ne URL - sąmoningai, nes slaptažodis su URI
+   * simboliais (`/`, `?`, `#`, `@`) URL'e reikštų kitką. `pg` tuos kintamuosius
+   * skaito pats, bet TIK kai `connectionString` neperduotas: `undefined` čia
+   * nėra tas pats, kas lauko nebuvimas.
+   */
+  const nustatymai = {
     connectionTimeoutMillis: poolAcquireMs,
+    /** ⚠️ Serveris NUTRAUKIA anksčiau, klientas - tik atsarga. Žr. `timeouts.js`. */
     statement_timeout: statementMs,
-    query_timeout: statementMs,
+    query_timeout: clientMs,
   };
+
+  if (env.DATABASE_URL) nustatymai.connectionString = env.DATABASE_URL;
+
+  return nustatymai;
 }
 
 async function initializePostgres(env) {
@@ -259,6 +273,76 @@ async function initializePostgres(env) {
           "atvejais `UPDATE` praeina, ir audito įrašai redaguojami. Įjunkite: " +
           `ALTER TABLE audit_log ENABLE ALWAYS TRIGGER ${REQUIRED_AUDIT_TRIGGER}`
       );
+    }
+    /**
+     * ⚠️ ĮVYKIO ŠABLONO PARITETAS TIKRINAMAS PAGAL APIBRĖŽIMĄ, NE PAGAL VARDĄ.
+     *
+     * Migracijoje šablonas UŽŠALDYTAS (istorijos įrašas nekeičiamas). Pakeitus
+     * `EVENT_PATTERN` be naujos migracijos, šviežia ir atnaujinta DB priimtų
+     * SKIRTINGAS įvykių aibes, o vardas abiejose liktų tas pats - startas to
+     * nepastebėtų. Todėl lyginamas tikrasis `CHECK` tekstas.
+     */
+    const { rows: cDef } = await pool.query(
+      `SELECT pg_get_constraintdef(c.oid) AS apibrezimas
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'audit_log' AND n.nspname = current_schema()
+          AND c.conname = 'audit_log_event_pattern'`
+    );
+
+    if (!cDef.length || !cDef[0].apibrezimas.includes(EVENT_PATTERN.source)) {
+      throw new Error(
+        "PostgreSQL įvykių šablonas išsiskyrė su runtime `EVENT_PATTERN`: DB priima " +
+          `kitą aibę nei aplikacija (${cDef[0] ? cDef[0].apibrezimas : "constraint'o nėra"}). ` +
+          "Pakeitus šabloną reikia NAUJOS migracijos - senoji jau pažymėta pritaikyta, " +
+          "tad atnaujintoje DB ji nebeperrašoma."
+      );
+    }
+
+    /**
+     * ⚠️ APPEND-ONLY TIKRINAMAS ELGSENA, NE METADUOMENIMIS.
+     *
+     * `tgname` + `tgenabled` patikra praleistų to paties vardo trigerį, kuris
+     * kabo ant kitos operacijos (`BEFORE INSERT`) arba kviečia pakeistą, nieko
+     * nedarančią funkciją. Abiem atvejais startas paskelbtų barjerą veikiančiu,
+     * o `UPDATE` praeitų. Metaduomenų tikrinimas čia turi tą pačią ydą kaip
+     * statinė patikra teste (AGENTS.md §9.2): jis įrodo, kad kažkas parašyta, o
+     * ne kad veikia.
+     *
+     * Zondas vyksta transakcijoje, kuri VISADA atsukama, tad eilučių nelieka.
+     * `seq` sekos reikšmė sunaudojama (sekos netransakcinės) - tarpai tvarkos
+     * nekeičia, nes reikalingas tik monotoniškumas.
+     */
+    const klientas = await pool.connect();
+    try {
+      await klientas.query("BEGIN");
+      const zondoId = require("node:crypto").randomUUID();
+
+      await klientas.query(
+        `INSERT INTO audit_log (id, event, hash_key_id, result)
+         VALUES ($1, 'STARTUP_APPEND_ONLY_PROBE', $2, 'success')`,
+        [zondoId, env.AUDIT_ID_SALT_ID]
+      );
+
+      let updatePraejo = false;
+      try {
+        await klientas.query("UPDATE audit_log SET result = 'failure' WHERE id = $1", [zondoId]);
+        updatePraejo = true;
+      } catch {
+        /** Laukiamas kelias: trigeris atmetė. */
+      }
+
+      if (updatePraejo) {
+        throw new Error(
+          "PostgreSQL append-only barjeras NEVEIKIA: bandomasis `UPDATE` praėjo. " +
+            `Trigeris \`${REQUIRED_AUDIT_TRIGGER}\` egzistuoja, bet arba kabo ant kitos ` +
+            "operacijos, arba kviečia pakeistą funkciją. Audito įrašai redaguojami."
+        );
+      }
+    } finally {
+      await klientas.query("ROLLBACK").catch(() => {});
+      klientas.release();
     }
   } catch (err) {
     await pool.end().catch(() => {});

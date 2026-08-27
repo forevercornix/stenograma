@@ -158,6 +158,20 @@ services:
       - path: ./backend/.env
         required: false
     environment:
+      # PostgreSQL - BŪTINA, kai AUDIT_BACKEND=postgres (#155, 7.4b).
+      #
+      # ⚠️ WORKER'IAI RAŠO AUDITĄ. Jų procesoriai per `transcriptionService` ir
+      # `protocolService` kuria audito įvykius, tad `auditStore.init()` vyksta ir
+      # čia. Be DB konfigūracijos worker'is su `AUDIT_BACKEND=postgres` NEPAKILTŲ
+      # (fail-closed), o su `memory` jo įvykiai dingtų per restartą.
+      #
+      # ⚠️ ATSKIRI `PG*`, ne URL - ta pati priežastis kaip backend'e: slaptažodis
+      # su URI simboliais URL'e reikštų kitką.
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-stenograma}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-stenograma}
       TRANSCRIPTION_PROVIDER: faster-whisper-embedded
       FASTER_WHISPER_DEVICE: cuda
       FASTER_WHISPER_COMPUTE_TYPE: float16
@@ -244,6 +258,20 @@ services:
       - path: ./backend/.env
         required: false
     environment:
+      # PostgreSQL - BŪTINA, kai AUDIT_BACKEND=postgres (#155, 7.4b).
+      #
+      # ⚠️ WORKER'IAI RAŠO AUDITĄ. Jų procesoriai per `transcriptionService` ir
+      # `protocolService` kuria audito įvykius, tad `auditStore.init()` vyksta ir
+      # čia. Be DB konfigūracijos worker'is su `AUDIT_BACKEND=postgres` NEPAKILTŲ
+      # (fail-closed), o su `memory` jo įvykiai dingtų per restartą.
+      #
+      # ⚠️ ATSKIRI `PG*`, ne URL - ta pati priežastis kaip backend'e: slaptažodis
+      # su URI simboliais URL'e reikštų kitką.
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-stenograma}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-stenograma}
       LLM_PROVIDER: ${LLM_PROVIDER:-claude}
       REDIS_URL: redis://redis:6379
       # PostgreSQL infrastruktūra (#155).
