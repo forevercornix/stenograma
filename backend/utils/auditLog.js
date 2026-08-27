@@ -86,7 +86,18 @@ function resolveSalt() {
 let privacyPurgeWarningShown = false;
 
 function isPrivacyModeEnabled() {
-  return String(process.env.PRIVACY_MODE || "").toLowerCase() === "true";
+  /**
+   * ⚠️ INJEKTUOTA KONFIGŪRACIJA TURI PIRMENYBĘ (#211 peržiūra).
+   *
+   * `auditStore.init(env)` priima `PRIVACY_MODE` kaip objekto lauką. Skaitant
+   * tik `process.env`, įterptinis kvietėjas galėtų perduoti `false`, o globalus
+   * `true` TYLIAI mestų kiekvieną įrašą: procesas praneštų apie sėkmingai
+   * paruoštą persistentinę saugyklą, kuri lieka amžinai tuščia.
+   */
+  const k = auditStore.konfiguracijaReiksme();
+  if (k && k.privacyMode !== null) return k.privacyMode;
+
+  return String(process.env.PRIVACY_MODE).toLowerCase() === "true";
 }
 
 function getRetentionDays() {

@@ -501,3 +501,106 @@ test("SKAITYMAS: nepalaikoma `meta` forma NEPAVERČIA puslapio 500 klaida", () =
   /** Teisinga forma nepaliečiama. */
   assert.equal(iEilute({ ...bazė, meta: { details: "ok" } }).details, "ok");
 });
+
+test("KONFIGŪRACIJA: `init(env)` yra VIENAS autoritetas visiems trims laukams", async () => {
+  /**
+   * ⚠️ #211 peržiūra (P2 ×2). Ta pati yda kaip su druska, tik kituose laukuose.
+   *
+   *   `PRIVACY_MODE`: `init()` priimtų `false`, o `auditLog` skaitytų globalų
+   *   `true` ir TYLIAI mestų kiekvieną įrašą - procesas praneštų apie sėkmingai
+   *   paruoštą persistentinę saugyklą, kuri lieka amžinai tuščia.
+   *
+   *   `AUDIT_WRITE_TIMEOUT_MS`: pool'o biudžetas skaičiuotųsi iš injektuotos
+   *   reikšmės, o `rasytiAudita()` - iš globalios. Fasadas praneštų nesėkmę
+   *   anksčiau, nei DB spėtų nutraukti užklausą, ir vėlyvo rašymo langas, kurio
+   *   biudžetas kaip tik ir vengia, grįžtų.
+   */
+  const auditStore = require("../utils/auditStore");
+  const { auditWriteTimeoutMs } = require("../utils/auditWrite");
+
+  const saved = {
+    privacy: process.env.PRIVACY_MODE,
+    timeout: process.env.AUDIT_WRITE_TIMEOUT_MS,
+  };
+
+  /** Globali aplinka sąmoningai PRIEŠTARAUJA injektuotai. */
+  process.env.PRIVACY_MODE = "true";
+  process.env.AUDIT_WRITE_TIMEOUT_MS = "100";
+
+  try {
+    await auditStore.shutdown();
+
+    /** Prielaida: be `init()` galioja globalios reikšmės. */
+    assert.equal(auditLog.isPrivacyModeEnabled(), true, "prielaida: globalus PRIVACY_MODE veikia");
+    assert.equal(auditWriteTimeoutMs(), 100, "prielaida: globalus timeout veikia");
+
+    await auditStore.init({
+      AUDIT_BACKEND: "memory",
+      PRIVACY_MODE: "false",
+      AUDIT_WRITE_TIMEOUT_MS: "2000",
+    });
+
+    assert.equal(
+      auditLog.isPrivacyModeEnabled(),
+      false,
+      "injektuotas PRIVACY_MODE=false privalo galioti - kitaip saugykla liktų tyliai tuščia"
+    );
+    assert.equal(
+      auditWriteTimeoutMs(),
+      2000,
+      "injektuotas timeout privalo galioti - kitaip fasadas ir pool'as skaičiuotų skirtingus langus"
+    );
+
+    /** Po `shutdown()` autoritetas grįžta į aplinką. */
+    await auditStore.shutdown();
+    assert.equal(auditLog.isPrivacyModeEnabled(), true);
+    assert.equal(auditWriteTimeoutMs(), 100);
+  } finally {
+    await auditStore.shutdown();
+    for (const [raktas, reiksme] of [
+      ["PRIVACY_MODE", saved.privacy],
+      ["AUDIT_WRITE_TIMEOUT_MS", saved.timeout],
+    ]) {
+      if (reiksme === undefined) delete process.env[raktas];
+      else process.env[raktas] = reiksme;
+    }
+  }
+});
+
+test("POOL: neveiklios jungties klaida NENUŽUDO proceso", () => {
+  /**
+   * ⚠️ #211 peržiūra (P1).
+   *
+   * `pg-pool` neveiklios jungties klaidą (DB restartas, tinklo trūkis) skelbia
+   * kaip `error` įvykį ant pool'o. `EventEmitter` neapdorotą `error` META, tad
+   * Node nutraukia visą procesą - HTTP serverį arba worker'į. Tai apeitų įprastą
+   * klaidų apdorojimą abiem įvykių kategorijoms: proceso tiesiog nebeliktų.
+   *
+   * ⚠️ TIKRINAMAS PRODUKCINIS KELIAS, ne atskiras `EventEmitter`: naudojamas
+   * TAS PATS `pg.Pool` su tais pačiais nustatymais, kuriuos kuria
+   * `auditoPoolNustatymai()`. Klausytojas registruojamas `initializePostgres()`,
+   * tad čia atkartojama ta pati registracija ir tikrinama, kad `emit` nemeta.
+   */
+  const { Pool } = require("pg");
+  const { auditoPoolNustatymai } = require("../utils/auditStore");
+
+  const pool = new Pool(auditoPoolNustatymai({ PGHOST: "nepasiekiamas-hostas" }));
+
+  try {
+    /** BE klausytojo tai mestų ir nužudytų procesą. */
+    assert.throws(
+      () => pool.emit("error", new Error("idle client error")),
+      /idle client error/,
+      "prielaida: be klausytojo `error` įvykis META"
+    );
+
+    pool.on("error", () => {});
+
+    assert.doesNotThrow(
+      () => pool.emit("error", new Error("idle client error")),
+      "su klausytoju procesas privalo išgyventi"
+    );
+  } finally {
+    pool.end().catch(() => {});
+  }
+});

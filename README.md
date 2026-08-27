@@ -1672,9 +1672,17 @@ nesuteikia galimybės perimti sesijų. Jungiklis **eksplicitinis**: vien
 
 **Persistentinis auditas (#155, 7.4b).** `AUDIT_BACKEND=postgres` perkelia
 audito žurnalą į duomenų bazę: jis išgyvena restartą, dalijamas tarp replikų ir
-yra **append-only** – `UPDATE` atmeta DB trigeris, tad įrašo apie neteisėtą
-veiksmą nebegalima pataisyti net per `psql`. `DELETE` sąmoningai **neribojamas**,
-nes GDPR ištrynimas eilutes fiziškai trina; riba gyvena API lygmenyje.
+yra **append-only `UPDATE` atžvilgiu** – jį atmeta DB trigeris, tad esamos
+eilutės pataisyti nebegalima net per `psql`.
+
+⚠️ **Tai NĖRA pilna tamper-resistance garantija.** `DELETE` DB lygmenyje
+sąmoningai **neribojamas**, nes GDPR ištrynimas eilutes fiziškai trina. Vadinasi
+aplikacijos DB rolės turėtojas gali įrašą **ištrinti** arba ištrinti ir įrašyti
+pakeistą – `UPDATE` trigeris tokio kelio nemato. Riba, ribojanti trynimą iki
+subjekto, gyvena API lygmenyje, ne duomenų bazėje.
+
+Pilnai apsaugai reikėtų atskiros DB rolės be `DELETE` teisės, o tai sulaužytų
+GDPR ištrynimą – kompromisas aprašytas `docs/audit-storage.md` §4.
 
 Jungiklis **eksplicitinis** ir atskiras nuo dviejų kitų: vien `DATABASE_URL`
 audito režimo nekeičia. `postgres` papildomai reikalauja `AUDIT_ID_SALT` ir

@@ -77,6 +77,12 @@ Apribojimas gyvena duomenų bazėje, o ne store'e, todėl galioja ir tiesioginia
 `psql` prisijungimui — būtent tokiu keliu užpuolikas taisytų įrašą apie savo
 veiksmą.
 
+⚠️ **Garantijos ribos tikslus formulavimas.** Tai append-only **`UPDATE`
+atžvilgiu**, o ne pilna tamper-resistance. Kadangi `DELETE` lieka neribotas (§
+žemiau), aplikacijos DB rolės turėtojas gali eilutę ištrinti arba ištrinti ir
+įrašyti pakeistą — trigeris tokio kelio nemato. Teigti daugiau reikštų teiginį,
+stipresnį už kodą (AGENTS.md §12.1).
+
 Trigerio buvimas tikrinamas **starto metu**: jis nėra `CHECK`, tad
 `REQUIRED_AUDIT_CONSTRAINTS` patikra jo nemato, ir be atskiro barjero DB su
 nukritusiu trigeriu startuotų sėkmingai.

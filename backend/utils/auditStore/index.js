@@ -85,8 +85,22 @@ let _pool = null;
  *
  * Sugeneruota procesui lokali druska `shutdown()` išgyvena, tad restarto testas
  * šį neatitikimą UŽDENGDAVO.
+ *
+ * ⚠️ TA PATI YDA GALIOJA VISIEMS `init(env)` LAUKAMS, ne tik druskai:
+ *
+ *   `PRIVACY_MODE`          - `init()` priimtų `false`, o `auditLog` skaitytų
+ *                             globalų `true` ir TYLIAI mestų kiekvieną įrašą;
+ *                             procesas praneštų apie sėkmingai paruoštą
+ *                             persistentinę saugyklą, kuri lieka tuščia.
+ *   `AUDIT_WRITE_TIMEOUT_MS` - pool'o biudžetas skaičiuotųsi iš injektuotos
+ *                             reikšmės, o `rasytiAudita()` - iš globalios;
+ *                             fasadas praneštų nesėkmę anksčiau, nei DB spėtų
+ *                             nutraukti užklausą, ir vėlyvo rašymo langas, kurio
+ *                             biudžetas kaip tik ir vengia, grįžtų.
+ *
+ * Todėl fiksuojama VISA reikšminga konfigūracija, o vartotojai ją skaito PIRMA.
  */
-let konfiguruotaDruska = null;
+let konfiguracija = null;
 let initPromise = null;
 let paruosta = false;
 
@@ -146,6 +160,25 @@ async function initializePostgres(env) {
 
   const pool = new Pool(auditoPoolNustatymai(env));
 
+  /**
+   * ⚠️ BE ŠIO KLAUSYTOJO PROCESAS KRENTA (#211 peržiūra, P1).
+   *
+   * `pg-pool` neveiklios jungties klaidą (PostgreSQL restartas, tinklo trūkis)
+   * skelbia kaip `error` įvykį ANT POOL'O. `EventEmitter` neapdorotą `error`
+   * meta, tad Node nutraukia visą procesą - HTTP serverį arba worker'į. Tai
+   * apeitų įprastą store'o klaidų apdorojimą abiem įvykių kategorijoms: nei
+   * blokuojantis atmetimas, nei neblokuojantis skaitiklis nebesuveiktų, nes
+   * proceso nebeliktų.
+   *
+   * ⚠️ KLAIDOS TEKSTAS NELOGINAMAS ŽALIAS: `pg` pranešime gali būti vartotojo
+   * vardas (`password authentication failed for user "x"`).
+   */
+  pool.on("error", (klaida) => {
+    log.error("Audito pool'o neveiklios jungties klaida - jungtis pašalinta", {
+      klaida: klaida && klaida.code ? klaida.code : "nežinoma",
+    });
+  });
+
   try {
     await pool.query("SELECT 1");
 
@@ -181,7 +214,7 @@ async function initializePostgres(env) {
     }
 
     const { rows: uRows } = await pool.query(
-      `SELECT c.conname
+      `SELECT c.conname, pg_get_constraintdef(c.oid) AS apibrezimas
          FROM pg_constraint c
          JOIN pg_class t     ON t.oid = c.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
@@ -198,6 +231,23 @@ async function initializePostgres(env) {
         `PostgreSQL audito schemai trūksta unikalumo invariantų: ${trukstaU.join(", ")}. ` +
           "Be jų tiesioginis INSERT galėtų pakartoti `seq`, ir skaitymo tvarka " +
           "(`ORDER BY seq`) taptų neapibrėžta. Paleiskite `npm run migrate:up`."
+      );
+    }
+
+    /**
+     * ⚠️ TIKRINAMAS APIBRĖŽIMAS, NE VARDAS.
+     *
+     * Nuklydusi DB gali turėti to paties vardo unikalumo constraint'ą ant KITO
+     * stulpelio - vardo patikra tokį praleistų, o `seq` dublikatai liktų
+     * teisėti, ir `ORDER BY seq` taptų neapibrėžtas. Ta pati yda kaip tikrinti
+     * trigerį pagal vardą.
+     */
+    const seqDef = uRows.find((r) => r.conname === "audit_log_seq_unique");
+    if (seqDef && !/UNIQUE\s*\(\s*seq\s*\)/i.test(seqDef.apibrezimas)) {
+      throw new Error(
+        "PostgreSQL `audit_log_seq_unique` dengia NE `seq` stulpelį " +
+          `(${seqDef.apibrezimas}). \`seq\` dublikatai liktų teisėti, ir skaitymo ` +
+          "tvarka - deklaruotas jos autoritetas - taptų neapibrėžta."
       );
     }
 
@@ -368,7 +418,11 @@ async function init(env = process.env) {
      * autoritetas neatsižvelgiant į backend'ą. Neperdavus - lieka `process.env`
      * kelias, tad esamas elgesys nesikeičia.
      */
-    konfiguruotaDruska = env.AUDIT_ID_SALT || null;
+    konfiguracija = Object.freeze({
+      salt: env.AUDIT_ID_SALT || null,
+      privacyMode: env.PRIVACY_MODE === undefined ? null : String(env.PRIVACY_MODE).toLowerCase() === "true",
+      writeTimeoutMs: env.AUDIT_WRITE_TIMEOUT_MS === undefined ? null : env.AUDIT_WRITE_TIMEOUT_MS,
+    });
 
     if (backendas === "memory") {
       store = memoryStore;
@@ -423,7 +477,7 @@ async function shutdown() {
   store = memoryStore;
   paruosta = false;
   initPromise = null;
-  konfiguruotaDruska = null;
+  konfiguracija = null;
 }
 
 /**
@@ -433,7 +487,17 @@ async function shutdown() {
  * `hash_key_id` galėtų remtis skirtingais raktais.
  */
 function konfiguruotaDruskaReiksme() {
-  return konfiguruotaDruska;
+  return konfiguracija ? konfiguracija.salt : null;
+}
+
+/**
+ * Visa per `init(env)` perduota konfigūracija arba `null`.
+ *
+ * `auditLog` ir `auditWrite` ja remiasi PIRMIAUSIA - kitaip tas pats sprendimas
+ * būtų priimamas iš dviejų skirtingų šaltinių.
+ */
+function konfiguracijaReiksme() {
+  return konfiguracija;
 }
 
 /** Aktyvus store'as - `auditLog` fasadui. */
@@ -450,6 +514,7 @@ module.exports = {
   current,
   auditoPoolNustatymai,
   konfiguruotaDruskaReiksme,
+  konfiguracijaReiksme,
   REQUIRED_AUDIT_CONSTRAINTS,
   REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,
   REQUIRED_AUDIT_TRIGGER,
