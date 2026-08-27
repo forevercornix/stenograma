@@ -341,6 +341,51 @@ const SCENARIJAI = [
     },
   },
   {
+    id: "kursorius-vienodi-timestamp",
+    kodel: "VIENU MOMENTU įrašytos eilutės puslapiuojamos teisingai - `seq`, ne `timestamp`",
+    async run({ store, vienuMomentu }) {
+      /**
+       * ⚠️ ŠIS SCENARIJUS YRA #212 „ordering-key collision" REIKALAVIMAS.
+       *
+       * Ankstesnis tvarkos scenarijus tikrina `list()` (ASC) - kursoriaus jis
+       * neliečia. Čia tos pačios vienoje transakcijoje įrašytos eilutės, kurių
+       * `timestamp` SUTAMPA, puslapiuojamos per `queryPage()`.
+       *
+       * ⚠️ `Date.now()` mock'as čia netiktų: postgres pusėje laiko autoritetas
+       * yra DB (`DEFAULT now()`), tad vienodus laikus sukuria transakcija, ne
+       * proceso laikrodis. Todėl naudojamas adapterio `vienuMomentu`.
+       */
+      const zymos = ["a", "b", "c", "d", "e"];
+      await vienuMomentu(zymos.map((z) => eilute({ details: z })));
+
+      /** Prielaida: laikai realiai sutampa - kitaip scenarijus tikrintų ne tai. */
+      const { entries: visi } = await store.list();
+      assert.equal(
+        new Set(visi.map((e) => e.timestamp)).size,
+        1,
+        "prielaida: vienoje transakcijoje visi `timestamp` vienodi"
+      );
+
+      const matyti = [];
+      let cursor = null;
+      let puslapiu = 0;
+
+      do {
+        const r = await store.queryPage({ limit: 2, afterSeq: cursor });
+        matyti.push(...r.entries.map((e) => e.details));
+        cursor = r.nextAfterSeq;
+        puslapiu += 1;
+      } while (cursor !== null && puslapiu < 10);
+
+      assert.equal(new Set(matyti).size, matyti.length, "vienodi laikai negali duoti dublikatų");
+      assert.deepEqual(
+        matyti,
+        ["e", "d", "c", "b", "a"],
+        "tvarka apibrėžta `seq`, nors `timestamp` visoms eilutėms vienodas"
+      );
+    },
+  },
+  {
     id: "kursorius-filtrai-komponuojasi",
     kodel: "filtrai veikia KARTU viename užklausos kelyje, ne vienas kitą pakeisdami",
     async run({ store }) {
@@ -456,9 +501,18 @@ const ADAPTERIAI = [
     async setup() {
       return {
         store: memoryStore,
-        /** Atmintyje „vienas momentas" yra tiesiog nuoseklus įrašymas - laikrodis nedalyvauja. */
+        /**
+         * ⚠️ „VIENAS MOMENTAS" REIŠKIA VIENODĄ `timestamp`, ne tik nuoseklų įrašymą.
+         *
+         * PostgreSQL pusėje tai duoda transakcija: `now()` visoms eilutėms
+         * grąžina tą patį momentą. Atmintyje ekvivalentas - ta pati laiko žyma
+         * visoms eilutėms. Anksčiau čia buvo tiesiog ciklas, tad laikai
+         * skirdavosi, ir tvarkos scenarijus atmintyje tikrindavo silpnesnę
+         * sąlygą nei postgres.
+         */
         vienuMomentu: async (eilutes) => {
-          for (const e of eilutes) await memoryStore.append(e);
+          const momentas = new Date().toISOString();
+          for (const e of eilutes) await memoryStore.append({ ...e, timestamp: momentas });
         },
         cleanup: async () => memoryStore.clear(),
       };
@@ -587,7 +641,7 @@ test("KONTRAKTAS: scenarijų sąrašas yra VIENAS ir be dublikatų", () => {
   const ids = SCENARIJAI.map((s) => s.id);
 
   assert.equal(new Set(ids).size, ids.length, "dublikuotas id paslėptų vieną scenarijų");
-  assert.ok(ids.length >= 20, "rinkinys negali tyliai susitraukti");
+  assert.ok(ids.length >= 21, "rinkinys negali tyliai susitraukti");
 
   for (const s of SCENARIJAI) {
     assert.ok(s.kodel && s.kodel.length > 10, `${s.id}: scenarijus be paaiškinimo`);

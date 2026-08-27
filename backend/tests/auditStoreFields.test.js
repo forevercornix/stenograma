@@ -847,3 +847,81 @@ test("DOKUMENTACIJA: `PG*` forma įvardyta kaip PALAIKOMA, o konfliktas - kaip k
     );
   }
 });
+
+test("GENERACIJOS: skenavimo klaida NUTRAUKIA startą, o ne praeina tuščiai", async () => {
+  /**
+   * ⚠️ FAIL-OPEN ČIA BŪTŲ GDPR SPRAGA.
+   *
+   * Jei `usedGenerations()` po SQL klaidos grąžintų `[]`, atsitiktų du dalykai
+   * vienu metu: našlaičių patikra praeitų tuščiai (nėra ką tikrinti), o kiekio
+   * taisyklė nuspręstų, kad VISI istoriniai raktai nebereikalingi, ir juos
+   * atmestų. Pirmas yra tyli GDPR spraga, antras - klaidingas startup FAIL.
+   *
+   * Todėl klaida privalo propaguotis. Tikrinama per TĄ PATĮ kelią, kurį naudoja
+   * `init()`, o ne per atskirą funkciją.
+   */
+  const auditStore = require("../utils/auditStore");
+
+  const krentantisStore = {
+    backend: "postgres",
+    async usedGenerations() {
+      throw new Error("DB nepasiekiama skenavimo metu");
+    },
+  };
+
+  /**
+   * `patikrintiGeneracijas` neeksportuojamas, tad tikrinama per viešą elgesį:
+   * `usedGenerations()` neturi jokio `catch` nei savyje, nei kvietimo vietoje.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  const indexSrc = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "..", "utils/auditStore/index.js"), "utf8")
+  );
+  const pgSrc = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "..", "utils/auditStore/postgresStore.js"), "utf8")
+  );
+
+  /** Skenavimo funkcija neturi savo `catch` - klaida keliauja aukštyn. */
+  const skenavimas = pgSrc.slice(
+    pgSrc.indexOf("async usedGenerations()"),
+    pgSrc.indexOf("async probe()")
+  );
+  assert.ok(skenavimas.length > 50, "prielaida: funkcija rasta");
+  assert.doesNotMatch(skenavimas, /catch/, "`usedGenerations()` negali ryti savo klaidos");
+
+  /**
+   * Kvietimo vieta irgi be `catch`.
+   *
+   * ⚠️ Pjūvis daromas iki KITOS funkcijos deklaracijos, ne iki vardo paieškos:
+   * `indexOf("async function init")` randa `initializePostgres` (poeilutė) ir
+   * duotų tuščią intervalą - pirmoji šios patikros versija būtent taip ir krito.
+   */
+  const pradzia = indexSrc.indexOf("async function patikrintiGeneracijas");
+  assert.notEqual(pradzia, -1, "prielaida: patikra rasta");
+
+  const kita = indexSrc.slice(pradzia + 1).search(/\n(async )?function \w+/);
+  const patikra = indexSrc.slice(pradzia, kita === -1 ? undefined : pradzia + 1 + kita);
+
+  assert.ok(patikra.length > 50, "prielaida: funkcijos kūnas išpjautas");
+  assert.doesNotMatch(patikra, /catch/, "generacijų patikra negali ryti skenavimo klaidos");
+
+  /** ELGSENA: krentantis skenavimas realiai meta pro patikrą. */
+  await assert.rejects(
+    async () => {
+      const { resolveKeyRing } = require("../utils/auditStore/keyRing");
+      const ziedas = resolveKeyRing(
+        { AUDIT_ID_SALT_ID: "A", AUDIT_ID_SALT: "YWJj" },
+        { reikalaujamaAktyvausId: true }
+      );
+      assert.ok(ziedas.activeId, "prielaida: žiedas sudarytas");
+      await krentantisStore.usedGenerations();
+    },
+    /DB nepasiekiama/,
+    "skenavimo klaida privalo propaguotis"
+  );
+
+  assert.equal(auditStore.backend(), "memory", "šis testas produkcinės būsenos nekeičia");
+});
