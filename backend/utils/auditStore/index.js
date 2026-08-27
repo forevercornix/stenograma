@@ -166,7 +166,38 @@ function auditoPoolNustatymai(env = process.env) {
     query_timeout: clientMs,
   };
 
-  if (env.DATABASE_URL) nustatymai.connectionString = env.DATABASE_URL;
+  if (env.DATABASE_URL) {
+    nustatymai.connectionString = env.DATABASE_URL;
+    return nustatymai;
+  }
+
+  /**
+   * ⚠️ `PG*` PERSIUNČIAMI EKSPLICITIŠKAI, NE PALIEKAMI `pg` NUOŽIŪRAI.
+   *
+   * `pg` `PG*` skaito iš `process.env`, o `init(env)` priima konfigūraciją kaip
+   * OBJEKTĄ. Įterptinis kvietėjas, perdavęs `PGHOST` tik objekte,
+   * `resolveAuditBackend()` praeitų (jis žiūri į tą patį objektą), o pool'as
+   * jungtųsi prie GLOBALIOS aplinkos nurodytos - arba numatytosios - duomenų
+   * bazės. Tai ta pati „dvi konfigūracijos" šeima kaip druska, `PRIVACY_MODE` ir
+   * timeout, tik čia antrasis skaitytojas yra ne mūsų kodas, o pati biblioteka -
+   * todėl `process.env` tripwire jos nepagauna.
+   *
+   * Persiunčiama TIK kai `DATABASE_URL` nėra: kartu su `connectionString` `pg`
+   * taikytų juos abu, ir pirmenybė taptų neakivaizdi.
+   */
+  const PG_ATITIKMENYS = {
+    PGHOST: "host",
+    PGPORT: "port",
+    PGUSER: "user",
+    PGPASSWORD: "password",
+    PGDATABASE: "database",
+  };
+
+  for (const [envRaktas, poolRaktas] of Object.entries(PG_ATITIKMENYS)) {
+    if (env[envRaktas] !== undefined) {
+      nustatymai[poolRaktas] = poolRaktas === "port" ? Number(env[envRaktas]) : env[envRaktas];
+    }
+  }
 
   return nustatymai;
 }

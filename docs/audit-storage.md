@@ -155,22 +155,36 @@ pseudonimą.
 7.4a `suRiba()` vienas negali užtikrinti, kad įrašas neatsiras jau po to, kai
 kvietėjui pasakyta „nepavyko".
 
-Biudžetas dalijamas į tris dalis (`utils/auditStore/timeouts.js`):
+Biudžetas dalijamas į **tris** dalis (`utils/auditStore/timeouts.js`):
 
 ```
-pool'o laukimas   0.2 × T   connectionTimeoutMillis
-užklausa          0.7 × T   statement_timeout (DB NUTRAUKIA)
-────────────────────────
-blogiausiu atveju 0.9 × T   <   T = AUDIT_WRITE_TIMEOUT_MS
+pool'o laukimas   0.15 × T   connectionTimeoutMillis
+serveris          0.55 × T   statement_timeout   ← DB NUTRAUKIA
+klientas          0.70 × T   query_timeout       ← tik jei serveris nebeatsako
+─────────────────────────
+blogiausiu atveju 0.85 × T   <   T = AUDIT_WRITE_TIMEOUT_MS
 ```
 
-Lygios reikšmės neveiktų: `suRiba()` skaičiuoja nuo `rasytiAudita()` iškvietimo,
-į kurio langą patenka ir laukimas eilėje prie jungties, o `statement_timeout` —
-tik nuo užklausos pradžios. Su lygiomis reikšmėmis fasadas visada suveiktų
-pirmas, ir DB nespėtų nutraukti nė vienos užklausos: antra gynybos linija taptų
-pirmąja, o pirmoji — negaliojančia.
+**Kodėl trys, o ne dvi.** Lygios reikšmės neveiktų dviem skirtingais būdais:
 
-Invariantas tikrinamas vykdymo metu ir starto patikroje, ne komentare.
+1. **Fasadas vs serveris.** `suRiba()` skaičiuoja nuo `rasytiAudita()`
+   iškvietimo, į kurio langą patenka ir laukimas eilėje prie jungties, o
+   `statement_timeout` — tik nuo užklausos pradžios. Sulyginus juos, fasadas
+   visada suveiktų pirmas, ir DB nespėtų nutraukti nė vienos užklausos: antra
+   gynybos linija taptų pirmąja, o pirmoji — negaliojančia.
+
+2. **Klientas vs serveris.** `pg` kliento `query_timeout` pradedamas skaičiuoti,
+   kai užklausa IŠSIUNČIAMA, o serverio `statement_timeout` — kai serveris
+   pradeda ją VYKDYTI. Sulyginus, klientas suveikia pirmas: `pg` atmeta žadėjimą
+   ir nustoja laukti, bet serverio užklausos NENUTRAUKIA. INSERT, spėjęs
+   įsirašyti per tą tarpą, kvietėjui praneštas kaip nepavykęs, o `suRiba()`
+   vėlyvos sėkmės apdorojimas (logas + skaitiklis) apskritai nepasiekiamas —
+   neatitikimas tampa nematomas. Todėl serveris visada turi suspėti pirmas.
+
+Invariantai (`serveris < klientas`, `pool + klientas < T`) tikrinami vykdymo metu
+ir starto patikroje, o santykiai — atskiru testu, kuris veikia BE duomenų bazės.
+Ankstesnė versija konkrečias reikšmes tikrino tik PostgreSQL teste, ir perdalijus
+biudžetą drift'as pasimatė tik CI.
 
 7.4a vėlyvos sėkmės apdorojimas (`error` logas + skaitiklis) lieka kaip antra
 gynybos linija tam atvejui, kai DB vis dėlto spėja įrašyti.

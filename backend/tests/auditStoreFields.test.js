@@ -753,3 +753,42 @@ test("KONFIGŪRACIJA: audito moduliai NESKAITO `process.env` už autoriteto rib�
     );
   }
 });
+
+test("POOL: injektuoti `PG*` PERSIUNČIAMI, ne paliekami bibliotekos nuožiūrai", () => {
+  /**
+   * ⚠️ #211 peržiūra (P2). TA PATI „dvi konfigūracijos" ŠEIMA, KITAS SKAITYTOJAS.
+   *
+   * `pg` `PGHOST` ir kitus skaito iš `process.env`, o `init(env)` konfigūraciją
+   * priima kaip OBJEKTĄ. Įterptinis kvietėjas, perdavęs `PGHOST` tik objekte,
+   * praeitų `resolveAuditBackend()` (jis žiūri į tą patį objektą), bet pool'as
+   * jungtųsi prie GLOBALIOS aplinkos nurodytos - arba numatytosios - duomenų
+   * bazės. Auditas rašytųsi ne ten, kur operatorius nurodė.
+   *
+   * ⚠️ `process.env` tripwire šito NEPAGAUNA: antrasis skaitytojas čia ne mūsų
+   * kodas, o pati biblioteka. Todėl reikalinga atskira patikra.
+   */
+  const { auditoPoolNustatymai } = require("../utils/auditStore");
+
+  const n = auditoPoolNustatymai({
+    PGHOST: "injektuotas-hostas",
+    PGPORT: "5433",
+    PGUSER: "injektuotas-vartotojas",
+    PGPASSWORD: "injektuotas-slaptazodis",
+    PGDATABASE: "injektuota-baze",
+  });
+
+  assert.equal(n.host, "injektuotas-hostas");
+  assert.equal(n.port, 5433, "portas privalo būti SKAIČIUS, ne tekstas");
+  assert.equal(n.user, "injektuotas-vartotojas");
+  assert.equal(n.password, "injektuotas-slaptazodis");
+  assert.equal(n.database, "injektuota-baze");
+
+  /**
+   * ⚠️ SU `DATABASE_URL` `PG*` NEPERSIUNČIAMI: `pg` taikytų juos abu, ir
+   * pirmenybė taptų neakivaizdi. URL yra vienas autoritetas.
+   */
+  const suUrl = auditoPoolNustatymai({ DATABASE_URL: "postgres://a/b", PGHOST: "kitas" });
+
+  assert.equal(suUrl.connectionString, "postgres://a/b");
+  assert.equal(suUrl.host, undefined, "su URL `PG*` neturi būti maišomi");
+});
