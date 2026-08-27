@@ -792,3 +792,57 @@ test("POOL: injektuoti `PG*` PERSIUNČIAMI, ne paliekami bibliotekos nuožiūrai
   assert.equal(suUrl.connectionString, "postgres://a/b");
   assert.equal(suUrl.host, undefined, "su URL `PG*` neturi būti maišomi");
 });
+
+test("KONFLIKTAS: `DATABASE_URL` IR `PGHOST` kartu NUTRAUKIA startą", () => {
+  /**
+   * ⚠️ #211 peržiūra (P2). Repo tai JAU deklaruoja (`startupChecks.js`: „ABU
+   * KONFIGŪRAVIMO BŪDAI KARTU = KLAIDA, ne pirmenybė"), bet tik MINKŠTAME
+   * self-check'e, kuris vykdomas PO `listen()`.
+   *
+   * Auditui to nepakanka: `auditoPoolNustatymai()` tyliai teiktų pirmenybę
+   * `DATABASE_URL`, tad servisas paskelbtų readiness ir rašytų auditą į VISAI
+   * KITĄ duomenų bazę nei ta, kurią nurodo Compose `PG*`. Auditas yra būtent ta
+   * lentelė, apie kurią klausiama po incidento - „į kurią DB jis rašė" negali
+   * priklausyti nuo tylios pirmenybės.
+   */
+  const { resolveAuditBackend } = require("../utils/auditStore/backendSelection");
+
+  const bazė = { AUDIT_BACKEND: "postgres", AUDIT_ID_SALT: "s", AUDIT_ID_SALT_ID: "i" };
+
+  /** Kiekvienas atskirai - teisėtas. */
+  assert.equal(resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://a/b" }), "postgres");
+  assert.equal(resolveAuditBackend({ ...bazė, PGHOST: "postgres" }), "postgres");
+
+  assert.throws(
+    () => resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://a/b", PGHOST: "kitas" }),
+    /IR DATABASE_URL, IR PGHOST|TIK VIENĄ/,
+    "abu kartu privalo nutraukti startą, o ne tyliai pasirinkti vieną"
+  );
+});
+
+test("DOKUMENTACIJA: `PG*` forma įvardyta kaip PALAIKOMA, o konfliktas - kaip klaida", () => {
+  /**
+   * ⚠️ AGENTS.md §12.1: dokumentacija negali teigti kitaip nei kodas.
+   *
+   * `resolveAuditBackend()` priima `PG*` be `DATABASE_URL`, bet dokumentacija
+   * sakė, kad `DATABASE_URL` privalomas. Operatorius, sekantis ją su Compose
+   * `PG*`, arba be reikalo konstruotų URL (įskaitant slaptažodį, kurio
+   * rezervuoti simboliai pakeičia URI reikšmę), arba manytų, kad konfigūracija
+   * neteisinga.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const saknis = path.join(__dirname, "..", "..");
+
+  const doc = fs.readFileSync(path.join(saknis, "docs", "audit-storage.md"), "utf8");
+  const env = fs.readFileSync(path.join(__dirname, "..", ".env.example"), "utf8");
+
+  for (const [pavadinimas, turinys] of [["docs/audit-storage.md", doc], [".env.example", env]]) {
+    assert.match(turinys, /PGHOST/, `${pavadinimas}: \`PG*\` forma turi būti įvardyta`);
+    assert.match(
+      turinys,
+      /ABU KARTU/,
+      `${pavadinimas}: konfliktas turi būti įvardytas kaip klaida, ne pirmenybė`
+    );
+  }
+});

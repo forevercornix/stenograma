@@ -56,6 +56,26 @@ function resolveAuditBackend(env = process.env) {
    * `pg` `PG*` skaito pats, tad `auditoPoolNustatymai()` `connectionString`
    * perduoda tik tada, kai URL realiai yra.
    */
+  /**
+   * ⚠️ ABU BŪDAI KARTU - KLAIDA, NE PIRMENYBĖ.
+   *
+   * Repo tai jau deklaruoja (`startupChecks.js`: „ABU KONFIGŪRAVIMO BŪDAI KARTU
+   * = KLAIDA, ne pirmenybė"), bet TIK minkštame self-check'e, kuris vykdomas PO
+   * `listen()`. Auditui to nepakanka: `auditoPoolNustatymai()` tyliai teikia
+   * pirmenybę `DATABASE_URL`, tad servisas galėtų paskelbti readiness ir rašyti
+   * auditą į VISAI KITĄ duomenų bazę nei ta, kurią nurodo Compose `PG*`.
+   *
+   * Auditas yra būtent ta lentelė, apie kurią klausiama po incidento - „į kurią
+   * DB jis rašė" negali priklausyti nuo tylios pirmenybės.
+   */
+  if (env.DATABASE_URL && env.PGHOST) {
+    throw new Error(
+      "AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST. " +
+        "Neaišku, į kurią DB rašomas auditas: pool'as teiktų pirmenybę " +
+        "DATABASE_URL, o Compose profiliai naudoja PG*. Palikite TIK VIENĄ būdą."
+    );
+  }
+
   if (!env.DATABASE_URL && !env.PGHOST) {
     throw new Error(
       "AUDIT_BACKEND=postgres, bet nei DATABASE_URL, nei PGHOST nenustatyti. " +

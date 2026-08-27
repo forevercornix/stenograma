@@ -35,6 +35,23 @@ const REQUIRED_AUDIT_CONSTRAINTS = Object.freeze([
 ]);
 
 /**
+ * ⚠️ KIEKVIENO INVARIANTO APIBRĖŽIMAS, NE TIK VARDAS.
+ *
+ * Nuklydusi DB gali turėti to paties vardo constraint'ą su susilpninta išraiška
+ * (`CHECK (true)`). Vardo patikra tokį praleistų, ir tiesioginis ar senesnis
+ * rašytojas galėtų išsaugoti skaliarinį `meta` arba nepalaikomą `result` -
+ * startas paskelbtų schemą sveika. Ta pati pamoka kaip su trigeriu ir `seq`.
+ *
+ * Reikšmė - fragmentas, PRIVALANTIS būti `pg_get_constraintdef` išvestyje.
+ * `audit_log_event_pattern` tikrinamas atskirai: jo fragmentas yra dabartinis
+ * `EVENT_PATTERN.source`, kuris nėra konstanta.
+ */
+const REQUIRED_CONSTRAINT_FRAGMENTS = Object.freeze({
+  audit_log_meta_is_object: "jsonb_typeof(meta)",
+  audit_log_result_allowed: "'success'",
+});
+
+/**
  * ⚠️ UNIKALUMO INVARIANTAI TIKRINAMI ATSKIRAI NUO `CHECK`.
  *
  * `audit_log_seq_unique` yra `contype = 'u'`, tad `CHECK` užklausa jo NEMATO -
@@ -373,6 +390,29 @@ async function initializePostgres(env) {
       );
     }
     /**
+     * ⚠️ VISŲ `CHECK` INVARIANTŲ APIBRĖŽIMAI - žr. `REQUIRED_CONSTRAINT_FRAGMENTS`.
+     */
+    const { rows: visiDef } = await pool.query(
+      `SELECT c.conname, pg_get_constraintdef(c.oid) AS apibrezimas
+         FROM pg_constraint c
+         JOIN pg_class t     ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'audit_log' AND n.nspname = current_schema() AND c.contype = 'c'`
+    );
+
+    for (const [vardas, fragmentas] of Object.entries(REQUIRED_CONSTRAINT_FRAGMENTS)) {
+      const def = visiDef.find((r) => r.conname === vardas);
+
+      if (!def || !def.apibrezimas.includes(fragmentas)) {
+        throw new Error(
+          `PostgreSQL invariantas \`${vardas}\` susilpnintas arba pakeistas: ` +
+            `apibrėžime nerasta \`${fragmentas}\` (${def ? def.apibrezimas : "constraint'o nėra"}). ` +
+            "Vardo sutapimo nepakanka - DB priimtų įrašus, kuriuos invariantas turi atmesti."
+        );
+      }
+    }
+
+    /**
      * ⚠️ ĮVYKIO ŠABLONO PARITETAS TIKRINAMAS PAGAL APIBRĖŽIMĄ, NE PAGAL VARDĄ.
      *
      * Migracijoje šablonas UŽŠALDYTAS (istorijos įrašas nekeičiamas). Pakeitus
@@ -427,8 +467,17 @@ async function initializePostgres(env) {
       try {
         await klientas.query("UPDATE audit_log SET result = 'failure' WHERE id = $1", [zondoId]);
         updatePraejo = true;
-      } catch {
-        /** Laukiamas kelias: trigeris atmetė. */
+      } catch (klaida) {
+        /**
+         * ⚠️ TIK LAUKIAMAS SQLSTATE LAIKOMAS ĮRODYMU.
+         *
+         * Trigeris kelia `restrict_violation` (`23001`). Bet kuri kita klaida -
+         * nutrūkusi jungtis, `statement_timeout`, teisių trūkumas - reiškia, kad
+         * zondas NIEKO NEĮRODĖ. Anksčiau tuščias `catch` bet kokį gedimą laikė
+         * patvirtinimu, tad startas galėjo pavykti su NEPATIKRINTA arba
+         * neprieinama audito DB - tiksliai priešingai, nei zondas skirtas.
+         */
+        if (klaida.code !== "23001") throw klaida;
       }
 
       if (updatePraejo) {
@@ -439,9 +488,21 @@ async function initializePostgres(env) {
         );
       }
     } finally {
-      await klientas.query("ROLLBACK").catch(() => {});
+      await klientas
+        .query("ROLLBACK")
+        .catch((e) => log.error("Zondo transakcijos atsukimas nepavyko", { klaida: e && e.code }));
       klientas.release();
     }
+
+    /**
+     * ⚠️ PO ZONDO PATIKRINAMA, KAD POOL'AS DAR VEIKIA.
+     *
+     * Zondas dirbo su viena jungtimi. Jei ji nutrūko ties `ROLLBACK`, klaida
+     * tik loginama - kitaip užgožtume pirminę priežastį. Todėl prieinamumas
+     * patvirtinamas atskira, paprasta užklausa: startas neturi pavykti su
+     * saugykla, kurios paskutinis realus kontaktas buvo nesėkmingas.
+     */
+    await pool.query("SELECT 1");
   } catch (err) {
     await pool.end().catch(() => {});
     throw err;

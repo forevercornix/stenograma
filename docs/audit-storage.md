@@ -21,7 +21,7 @@ tikslui, neturi netikėtai pradėti persistinti audito.
 
 | Kintamasis | Kodėl privalomas |
 |---|---|
-| `DATABASE_URL` | be jo eksplicitinis pasirinkimas tyliai virstų atmintimi |
+| `DATABASE_URL` **arba** `PG*` | be jų eksplicitinis pasirinkimas tyliai virstų atmintimi |
 | `AUDIT_ID_SALT` | žr. §2 |
 | `AUDIT_ID_SALT_ID` | žr. §3 |
 | pritaikytos migracijos | `audit_log`, invariantai, append-only trigeris |
@@ -30,6 +30,30 @@ Trūkstant bet kurio — **startas nutrūksta**. Grįžimo į atmintį nėra: ji
 reikštų, kad operatorius paprašė persistentinio audito, servisas pakilo, o
 žurnalas dingsta per pirmą restartą — ir tai paaiškėtų tik tada, kai audito
 prireiks.
+
+### Dvi lygiavertės prisijungimo formos
+
+DB adresą galima nurodyti **vienu iš dviejų** būdų:
+
+| Forma | Kada | Pastaba |
+|---|---|---|
+| `DATABASE_URL` | lokaliai, CI | vienas kintamasis, patogu |
+| `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` | Docker Compose | **rekomenduojama produkcijai** |
+
+Compose profiliai naudoja `PG*` **sąmoningai**: slaptažodis su URI simboliais
+(`/`, `?`, `#`, `@`) sukonstruotame URL reikštų kitką arba jį sugadintų. `pg`
+`PG*` skaito be jokio kodavimo.
+
+⚠️ **ABU KARTU — KLAIDA, ne pirmenybė.** `AUDIT_BACKEND=postgres` su abiem
+nustatytais **nutraukia startą**. Priežastis: pool'as teiktų pirmenybę
+`DATABASE_URL`, o operatorius, matantis Compose `PG*`, pagrįstai manytų kitaip —
+ir auditas rašytųsi į kitą duomenų bazę, nei atrodo. Auditas yra būtent ta
+lentelė, apie kurią klausiama po incidento, tad „į kurią DB jis rašė" negali
+priklausyti nuo tylios pirmenybės.
+
+⚠️ Įterptiniams kvietėjams: `init(env)` perduoti `PG*` **persiunčiami** į pool'ą,
+o ne paliekami `pg` skaityti iš `process.env` — kitaip konfigūracija būtų priimta
+iš vieno šaltinio, o jungtis sukurta pagal kitą.
 
 `PRIVACY_MODE=true` kartu su `AUDIT_BACKEND=postgres` taip pat nutraukia startą.
 Prašymai prieštarauja: vienas draudžia rašyti auditą, kitas reikalauja jį
