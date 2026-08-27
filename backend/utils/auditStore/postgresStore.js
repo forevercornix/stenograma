@@ -195,6 +195,67 @@ function createPostgresStore(pool, { hashKeyId }) {
     },
 
     /**
+     * KEYSET PUSLAPIS: `seq DESC`, filtrai VIENOJE užklausoje.
+     *
+     * ⚠️ `seq`, NE `timestamp`. `now()` vienoje transakcijoje visoms eilutėms
+     * grąžina tą patį momentą, tad `timestamp` kursoriui netiktų. `seq` unikalus
+     * ir monotoniškas - laužtuko nereikia (7.4b tvarkos autoritetas, #212).
+     *
+     * ⚠️ `subject_id = ANY($n)` - VIENAS set-based predikatas, ne po užklausą
+     * kiekvienai raktų generacijai. Kandidatus apskaičiuoja `keyRing`, o jų aibę
+     * apibrėžia DB esančios generacijos.
+     *
+     * ⚠️ JOKIO `OFFSET`. `limit + 1` peržvalga pasako, ar yra kitas puslapis, tad
+     * tuščio paskutinio puslapio nebūna, o lygiagretūs INSERT'ai eilučių
+     * nepraleidžia ir nedubliuoja: riba yra `seq`, ne pozicija.
+     */
+    async queryPage({
+      limit = 100,
+      afterSeq = null,
+      action = null,
+      requestId = null,
+      from = null,
+      to = null,
+      subjectIds = null,
+    } = {}) {
+      const salygos = [];
+      const reiksmes = [];
+
+      const pridėti = (sablonas, reiksme) => {
+        reiksmes.push(reiksme);
+        salygos.push(sablonas.replace("$n", `$${reiksmes.length}`));
+      };
+
+      if (action) pridėti("event = $n", action);
+      if (requestId) pridėti("request_id = $n", requestId);
+      if (from) pridėti('"timestamp" >= $n', from);
+      if (to) pridėti('"timestamp" <= $n', to);
+      if (subjectIds) pridėti("subject_id = ANY($n)", subjectIds);
+      if (afterSeq !== null) pridėti("seq < $n", afterSeq);
+
+      reiksmes.push(limit + 1);
+      const limitPlaceholder = `$${reiksmes.length}`;
+
+      const where = salygos.length ? `WHERE ${salygos.join(" AND ")}` : "";
+
+      const { rows } = await pool.query(
+        `SELECT ${STULPELIU_SARASAS}, meta, seq
+           FROM audit_log ${where}
+          ORDER BY seq DESC
+          LIMIT ${limitPlaceholder}`,
+        reiksmes
+      );
+
+      const yraDaugiau = rows.length > limit;
+      const grazinami = yraDaugiau ? rows.slice(0, limit) : rows;
+
+      return {
+        entries: grazinami.map(iEilute),
+        nextAfterSeq: yraDaugiau ? Number(grazinami[grazinami.length - 1].seq) : null,
+      };
+    },
+
+    /**
      * ⚠️ VIENINTELIS TRYNIMO KELIAS - APRIBOTAS SUBJEKTU.
      *
      * Bendro `delete`/`truncate` store'as NEEKSPONUOJA sąmoningai: append-only
@@ -203,10 +264,20 @@ function createPostgresStore(pool, { hashKeyId }) {
      * API lygmenyje. Žr. `docs/audit-storage.md`.
      */
     async removeBySubject(subjectId) {
-      if (!subjectId) return 0;
+      /**
+       * ⚠️ PRIIMA IR MASYVĄ - VIENAS `DELETE`, NE PO UŽKLAUSĄ GENERACIJAI (#212).
+       *
+       * Rotavus raktą tas pats job'as turi skirtingą `subject_id` kiekvienoje
+       * generacijoje. Ištrynimas privalo pasiekti visas; N atskirų `DELETE` būtų
+       * ir lėta, ir neatomiška - dalis generacijų galėtų likti.
+       *
+       * Vieno ID forma išlaikoma, kad 7.4b paritetų rinkinys liktų nepakeistas.
+       */
+      const sarasas = (Array.isArray(subjectId) ? subjectId : [subjectId]).filter(Boolean);
+      if (sarasas.length === 0) return 0;
 
-      const { rowCount } = await pool.query("DELETE FROM audit_log WHERE subject_id = $1", [
-        subjectId,
+      const { rowCount } = await pool.query("DELETE FROM audit_log WHERE subject_id = ANY($1)", [
+        sarasas,
       ]);
       return rowCount;
     },
@@ -250,6 +321,37 @@ function createPostgresStore(pool, { hashKeyId }) {
         );
       }
       await pool.query("DELETE FROM audit_log");
+    },
+
+    /**
+     * Generacijos (`hash_key_id`), FAKTIŠKAI esančios lentelėje.
+     *
+     * ⚠️ LOOSE INDEX SCAN, NE `SELECT DISTINCT` (#212).
+     *
+     * `DISTINCT` kas startą būtų pilnas augančios lentelės skenavimas. Rekursyvus
+     * CTE šokinėja per 7.4b `hash_key_id` indeksą: viena eilutė kiekvienai
+     * generacijai, ne viena kiekvienam įrašui. Naujos lentelės nekuriama.
+     *
+     * ⚠️ Iš ŠIO vieno skenavimo išvedamos ABI starto taisyklės - ir našlaitės
+     * generacijos, ir kiekio riba. Antros užklausos nereikia.
+     */
+    async usedGenerations() {
+      const { rows } = await pool.query(
+        `WITH RECURSIVE gen AS (
+           (SELECT hash_key_id FROM audit_log ORDER BY hash_key_id LIMIT 1)
+           UNION ALL
+           SELECT (SELECT a.hash_key_id
+                     FROM audit_log a
+                    WHERE a.hash_key_id > g.hash_key_id
+                    ORDER BY a.hash_key_id
+                    LIMIT 1)
+             FROM gen g
+            WHERE g.hash_key_id IS NOT NULL
+         )
+         SELECT hash_key_id FROM gen WHERE hash_key_id IS NOT NULL`
+      );
+
+      return rows.map((r) => r.hash_key_id);
     },
 
     async probe() {

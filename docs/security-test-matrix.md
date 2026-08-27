@@ -1594,3 +1594,46 @@ kad job'as žalias (AGENTS.md §14). Run'e `33044931167` audito testų: **25 `ok
 | ⚠️ **RIBA:** append-only galioja `UPDATE` ATŽVILGIU, ne kaip pilna tamper-resistance. `DELETE` DB lygmenyje neribotas, tad DB rolės turėtojas gali eilutę ištrinti arba ištrinti ir įrašyti pakeistą | README, `docs/audit-storage.md` §4 | Teigti daugiau reikštų teiginį, stipresnį už kodą (AGENTS.md §12.1). Pilnai apsaugai reikėtų rolės be `DELETE`, o tai sulaužytų GDPR ištrynimą |
 | ⚠️ **RIBA:** retencija (`AUDIT_RETENTION_DAYS`, `AUDIT_MAX_ENTRIES`) galioja TIK `memory` režimui. `postgres` režime įrašai automatiškai NEŠALINAMI — savininkas [7.4d] | `docs/audit-storage.md` §9 | Skirtumas dokumentuojamas, o ne slepiamas: teiginys „retencija veikia visur" būtų stipresnis už kodą (AGENTS.md §12.1) |
 | ⚠️ **RIBA:** `POST_HOC_IVYKIAI` NETAMPA fail-closed 7.4b metu. Patvarumas ≠ perrikiavimas; kompensacinis mechanizmas yra [7.5b] | `auditAsyncCutover` (post-hoc aibė), `docs/audit-storage.md` §12 | Pagrindimas užrašytas `auditEvents.js` komentare ir dokumentacijoje, ne issue komentare |
+
+### #212 — rakto rotacija ir audito užklausos (#155, 7.4c)
+
+⚠️ **KUR ATEINA ĮRODYMAS.** Garantijos, reikalaujančios tikros PostgreSQL,
+pažymėtos **[PG NOT RUN]** — jos įgyvendintos ir padengtos testais, bet
+vietinėje aplinkoje egzemplioriaus nėra, o provizionavimas uždraustas. Jos NĖRA
+`PASS` iki CI įrodymo (AGENTS.md §14).
+
+⚠️ **ATMINTIS NĖRA ROTACIJOS ĮRODYMAS.** Atminties backend'as `hash_key_id`
+nesaugo, tad `auditRotation` tikrina TIK fan-out logiką. RAW DB įrodymą duoda
+`auditPersistence.integration`.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| VIENAS aktyvaus ir istorinių raktų autoritetas — `AUDIT_ID_SALT_PREVIOUS` niekur kitur neparsinamas | `auditKeyRing` | Antra parsinimo kopija užklausoje ar ištrynime → kandidatų aibės išsiskirtų, ir dalis įrašų taptų nepasiekiami GDPR keliui |
+| Netaisyklinga raktų konfigūracija NUTRAUKIA startą: tuščias/blogo formato ID, tuščias secret'as, elementas be dvitaškio, dublikatas, kolizija su aktyviu | `auditKeyRing` (10 atvejų) | Praleidus bet kurią patikrą → tas pats `hash_key_id` atitiktų du secret'us, ir pseudonimo atkūrimas taptų neapibrėžtas |
+| Secret'ai NIEKADA nepatenka į klaidų tekstus | `auditKeyRing` | Įdėjus reikšmę į pranešimą → ji nutekėtų į logus ir orkestruotojo išvestį būtent tada, kai operatorius kopijuoja klaidą |
+| Fan-out autoritetas — DB generacijos, ne env sąrašo ilgis; tuščias sąrašas reiškia „nežinoma", ne „nėra" | `auditKeyRing` | Traktavus tuščią sąrašą kaip „nėra" → atmintyje po rotacijos seni įrašai taptų NEIŠTRINAMI |
+| Kiekviena generacija duoda SKIRTINGĄ pseudonimą | `auditKeyRing`, `auditRotation` | Sutampantys pseudonimai reikštų, kad rotacija nieko nekeičia, o `hash_key_id` yra dekoracija |
+| Kiekio riba (10) atmeta TIK nebereikalingus raktus — reikalingo neatmeta niekada | `auditKeyRing`, `auditPersistence.integration` **[PG NOT RUN]** | Naivus derinys „maks. N" + „negalima pašalinti, kol yra įrašų" duotų nepaleidžiamą backend'ą be teisėto išėjimo |
+| Raktas su DB įrašais PAMIRŠTAS → startas nutrūksta (fail-closed) | `auditPersistence.integration` **[PG NOT RUN]** | Be patikros egzistuotų eilutės, kurių `subject_id` neįmanoma atkurti — GDPR ištrynimas jų nepasiektų, o atsakymas būtų sėkmingas |
+| Priešinga pusė: raktas BE įrašų gali būti pašalintas, ir startas pavyksta | `auditPersistence.integration` **[PG NOT RUN]** | Be jos ankstesnė garantija praeitų ir tada, kai startas krinta VISADA — fail-closed be išėjimo būtų spąstai, ne apsauga |
+| `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` paleidžia, bet ĮSPĖJA kiekvieno starto metu | `auditPersistence.integration` **[PG NOT RUN]** | Be vėliavos negrįžtamai prarastas secret'as reikštų amžinai nepaleidžiamą backend'ą; be `warn` — tylų GDPR garantijos laužymą |
+| Generacijų skenavimas naudoja INDEKSĄ (`EXPLAIN` be `Seq Scan`) | `auditPersistence.integration` **[PG NOT RUN]** | `SELECT DISTINCT hash_key_id` kas startą būtų pilnas augančios lentelės skenavimas |
+| RAW: rotavus raktą senas įrašas LIEKA su sava generacija, naujas gauna aktyvią, o jų `subject_id` SKIRIASI | `auditPersistence.integration` **[PG NOT RUN]** | Vien `hash_key_id` buvimo nepakanka — tikrinamos abi pusės |
+| RAW GDPR: ištrynimas pašalina įrašus iš VISŲ generacijų; įrodyta per raw eilutes, ne `getAll()` | `auditPersistence.integration` **[PG NOT RUN]**, `auditRotation` (tik fan-out logika) | Filtravimo realizacija praeitų ir su likusiomis našlaitėmis: jos neatrodo grąžinamos, nors fiziškai lentelėje yra |
+| Be istorinio rakto senas įrašas LIEKA — ir tai matoma | `auditRotation` | Be neigiamos pusės teigiama nieko neįrodo: ištrynimas galėtų „pavykti" ir dėl sutampančių pseudonimų |
+| Ištrynimas ir paieška naudoja VIENĄ set-based predikatą (`subject_id = ANY($1)`), ne po užklausą generacijai | `auditStoreBackendContract.integration`, `auditPersistence.integration` **[PG NOT RUN]** | N atskirų `DELETE` būtų ir lėta, ir neatomiška — dalis generacijų galėtų likti |
+| `job_id` filtras randa įrašą, sukurtą PRIEŠ rotaciją | `auditRotation`, `auditQuery.route`, `auditPersistence.integration` **[PG NOT RUN]** | Skaičiuojant tik aktyviu raktu senesni įrašai taptų nerandami, o operatorius manytų, kad jų nėra |
+| `job_id` NIEKADA netampa plaintext: nei stulpeliu, nei `meta` lauku, nei atsakymo lauku, nei kursoriaus turiniu | `auditQuery.route`, `auditRotation`, `auditCursor` | Įdėjus ID į atsakymą ar kursorių → jis keliautų URL'e ir patektų į nginx access logus |
+| Kursoriuje NĖRA filtrų reikšmių — susiejimas per HMAC-SHA256 atspaudą (16 baitų) | `auditCursor` | Užkodavus filtrus → „opaque" reikštų tik base64, ir `job_id` būtų atkoduojamas trivialiai |
+| Kursorius su PAKEISTA filtrų aibe ar kryptimi → 400, ne tylūs kiti rezultatai | `auditCursor`, `auditQuery.route` | Be susiejimo klientas gautų puslapį iš kitos aibės ir manytų, kad puslapiuoja tą pačią |
+| Po aktyvaus rakto rotacijos seni kursoriai nustoja galioti → 400 | `auditCursor` | Sąmoninga pasekmė; be jos atspaudas turėtų būti raktuotas kažkuo nekintančiu, o tokio rakto nėra |
+| Sugadintas, nepilnas ar semantiškai netinkamas kursorius → 400, NE 500 | `auditCursor` (10 formų), `auditQuery.route` | Bet kuri kita klaidos rūšis nukristų į bendrą `catch`, ir kliento klaida atrodytų kaip serverio gedimas |
+| Kursoriaus klaidoje NĖRA kliento duomenų | `auditCursor` | `JSON.parse` klaidos tekste atsiduria dalis įvesties — persiuntus ją, sugadintas tokenas grįžtų atsakyme |
+| Rikiavimas — `seq` MAŽĖJIMO tvarka; `next_cursor = null` tiksliai kai kito puslapio nėra, tuščio paskutinio puslapio nebūna | `auditStoreBackendContract.integration` (memory + pg), `auditQuery.route` | `ORDER BY timestamp` → `now()` vienoje transakcijoje duoda vienodus laikus, ir tvarka tampa neapibrėžta |
+| ⚠️ DESC galioja TIK `query()`/`GET /api/audit`; `getAll()` ir `list()` lieka ASC — 7.4b paritetas nekeičiamas | `auditStoreBackendContract.integration` | Pakeitus `list()` tvarką → lūžtų 7.4b rinkinys ir ~40 testų, kurie remiasi įrašymo tvarka |
+| Lygiagretus puslapiavimas: kiekvienas pradinis įrašas grąžinamas LYGIAI KARTĄ, nors tarp puslapių įterpiama IR trinama | `auditStoreBackendContract.integration` (memory + pg) | Pakeitus `seq` ribą pozicija (OFFSET semantika) → INSERT priekyje duoda dublikatus, DELETE lange — praleidimus. Patikrinta mutacija: gauta būtent `pradinis-8, pradinis-7` dublikatai plius prasiskverbęs `naujas-0` |
+| Filtrai komponuojasi viename užklausos kelyje, ne pakeičia vienas kito | `auditStoreBackendContract.integration`, `auditQuery.route`, `auditPersistence.integration` **[PG NOT RUN]** | Pakeitus kompoziciją į „paskutinis laimi" → `job_id` + `action` grąžintų per plačią aibę |
+| `from`/`to` validuojami kaip ISO-8601, o `from > to` → 400 | `auditQuery.route`, `operationalProcedures` | Praleidus `from > to` → klientas gautų 200 su tuščiu sąrašu ir manytų, kad įrašų nėra |
+| MIGRACIJA: `offset` ir `event` po 7.4c → 400, ne tylus ignoravimas | `auditQuery.route`, `securityBaseline.route`, `operationalProcedures` | Schema yra `.strict()`, tad tai savaime veikia — bet politikos pakeitimas tikrinamas eksplicitiškai, kad nebūtų šalutinis efektas |
+| `total` pašalintas iš atsakymo kartu su `offset` | `auditQuery.route`, `securityBaseline.route` | Keyset režime jis reikštų `COUNT` per visą filtruotą aibę KIEKVIENAM puslapiui |
+| Runbook'as migruotas: `cursor` ciklas, `offset` → 400 paaiškintas, filtrai išvardyti | `operationalProcedures` | Grąžinus „Kartokite su `offset`" → operatorius vykdytų komandą, kuri grąžina 400, ir manytų, kad audito nėra |

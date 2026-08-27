@@ -714,6 +714,7 @@ test("KONFIGŪRACIJA: audito moduliai NESKAITO `process.env` už autoriteto rib�
     "utils/auditStore/memoryStore.js",
     "utils/auditStore/postgresStore.js",
     "utils/auditStore/fields.js",
+    "utils/auditStore/keyRing.js",
   ];
 
   /**

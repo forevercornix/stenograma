@@ -20,6 +20,17 @@ const { normalizuoti } = require("./fields");
 const eilutes = [];
 
 /**
+ * ⚠️ `seq` LAIKOMAS ŠALIA EILUTĖS, NE JOJE (#155, 7.4c).
+ *
+ * Eilutės yra `Object.freeze`-intos, o jų raktų aibę valdo `fields.js` ir tikrina
+ * paritetų testas - `seq` lauko į jas dėti negalima. `WeakMap` duoda tą patį
+ * monotonišką raktą, kurį postgres pusėje duoda `BIGSERIAL`, ir lieka nematomas
+ * per `list()`, `getAll()` bei `/api/audit` atsakymą.
+ */
+const seqPagalEilute = new WeakMap();
+let kitasSeq = 1;
+
+/**
  * Filtrai taikomi PRIEŠ ribojimą - kitaip `limit` reikštų skirtingus dalykus
  * su filtru ir be jo. Ta pati tvarka kaip SQL `WHERE ... LIMIT`.
  */
@@ -53,6 +64,9 @@ const memoryStore = {
     /** ⚠️ Allowlist taikomas ir čia - žr. `normalizuoti()` paaiškinimą. */
     const svari = normalizuoti(eilute);
 
+    seqPagalEilute.set(svari, kitasSeq);
+    kitasSeq += 1;
+
     eilutes.push(svari);
     return svari;
   },
@@ -73,16 +87,70 @@ const memoryStore = {
   },
 
   async removeBySubject(subjectId) {
-    if (!subjectId) return 0;
+    /** ⚠️ Priima ir masyvą - žr. `postgresStore` paaiškinimą (#212). */
+    const sarasas = (Array.isArray(subjectId) ? subjectId : [subjectId]).filter(Boolean);
+    if (sarasas.length === 0) return 0;
+
+    const ieskomi = new Set(sarasas);
 
     let pasalinta = 0;
     for (let i = eilutes.length - 1; i >= 0; i -= 1) {
-      if (eilutes[i].subjectId === subjectId) {
+      if (ieskomi.has(eilutes[i].subjectId)) {
         eilutes.splice(i, 1);
         pasalinta += 1;
       }
     }
     return pasalinta;
+  },
+
+  /**
+   * KEYSET PUSLAPIS: `seq` MAŽĖJIMO tvarka (naujausi pirma).
+   *
+   * ⚠️ DESC GALIOJA TIK ČIA. `list()` ir per jį `getAll()` lieka saugyklos (ASC)
+   * tvarka - 7.4b paritetų rinkinys ir jo testai nekeičiami (#212).
+   *
+   * `limit + 1` peržvalga: `nextAfterSeq` grąžinamas tiksliai tada, kai kitas
+   * puslapis realiai egzistuoja, tad tuščio paskutinio puslapio nebūna.
+   */
+  async queryPage({
+    limit = 100,
+    afterSeq = null,
+    action = null,
+    requestId = null,
+    from = null,
+    to = null,
+    subjectIds = null,
+  } = {}) {
+    const nuo = from ? Date.parse(from) : null;
+    const iki = to ? Date.parse(to) : null;
+    const subjektai = subjectIds ? new Set(subjectIds) : null;
+
+    const tinka = (e) => {
+      if (action && e.event !== action) return false;
+      if (requestId && e.requestId !== requestId) return false;
+      if (subjektai && !subjektai.has(e.subjectId)) return false;
+      if (nuo !== null || iki !== null) {
+        const t = Date.parse(e.timestamp);
+        if (nuo !== null && t < nuo) return false;
+        if (iki !== null && t > iki) return false;
+      }
+      return true;
+    };
+
+    const surikiuoti = eilutes
+      .filter((e) => tinka(e))
+      .map((e) => ({ eilute: e, seq: seqPagalEilute.get(e) }))
+      .sort((a, b) => b.seq - a.seq)
+      .filter((x) => afterSeq === null || x.seq < afterSeq);
+
+    const puslapis = surikiuoti.slice(0, limit + 1);
+    const yraDaugiau = puslapis.length > limit;
+    const grazinami = yraDaugiau ? puslapis.slice(0, limit) : puslapis;
+
+    return {
+      entries: grazinami.map((x) => ({ ...x.eilute })),
+      nextAfterSeq: yraDaugiau ? grazinami[grazinami.length - 1].seq : null,
+    };
   },
 
   async countBySubject(subjectId) {
@@ -92,6 +160,17 @@ const memoryStore = {
 
   async clear() {
     eilutes.length = 0;
+    /** ⚠️ `seq` NEATSTATOMAS: kursoriai iš ankstesnio rinkinio neturi netikėtai atgyti. */
+  },
+
+  /**
+   * ⚠️ ATMINTIS GENERACIJŲ NETURI (#212: patikra yra postgres-only).
+   *
+   * `hash_key_id` atmintyje niekur nerašomas - jis egzistuoja tik persistentinėje
+   * eilutėje. Tuščias sąrašas reiškia „nėra ką tikrinti", ne „nežinoma".
+   */
+  async usedGenerations() {
+    return [];
   },
 
   async probe() {

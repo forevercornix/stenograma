@@ -16,6 +16,7 @@ const { createLogger } = require("../logger");
 const { resolveAuditBackend } = require("./backendSelection");
 const { auditTimeoutBudget } = require("./timeouts");
 const { EVENT_PATTERN } = require("../auditEvents");
+const { resolveKeyRing, HISTORICAL_SOFT_LIMIT } = require("./keyRing");
 const memoryStore = require("./memoryStore");
 
 const log = createLogger("audit-store");
@@ -77,6 +78,9 @@ const KONFIG_RAKTAI = Object.freeze([
   "AUDIT_WRITE_TIMEOUT_MS",
   "AUDIT_RETENTION_DAYS",
   "AUDIT_MAX_ENTRIES",
+  /** #155, 7.4c (#212): istoriniai raktai ir sąmoningas GDPR garantijos laužymas. */
+  "AUDIT_ID_SALT_PREVIOUS",
+  "AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS",
 ]);
 
 /** Append-only trigeris - pagrindinė šios lentelės garantija. */
@@ -135,6 +139,7 @@ let _pool = null;
  * Todėl fiksuojama VISA reikšminga konfigūracija, o vartotojai ją skaito PIRMA.
  */
 let konfiguracija = null;
+let keyRing = null;
 let initPromise = null;
 let paruosta = false;
 
@@ -512,6 +517,79 @@ async function initializePostgres(env) {
 }
 
 /**
+ * DB GENERACIJŲ PATIKRA (#155, 7.4c / #212).
+ *
+ * ⚠️ RAKTO NEGALIMA PAMIRŠTI, KOL DB YRA JUO PSEUDONIMIZUOTŲ ĮRAŠŲ.
+ *
+ * Tai GDPR korektiškumo, ne konfigūracijos higienos reikalavimas. Praradus
+ * secret'ą, `removeBySubjectIdentifier(jobId)` nebegali apskaičiuoti tų eilučių
+ * `subject_id` - jos tampa amžinai nepasiekiamos ištrynimui, nors fiziškai
+ * egzistuoja. Todėl startas nutraukiamas FAIL-CLOSED.
+ *
+ * ⚠️ ABI TAISYKLĖS IŠVEDAMOS IŠ VIENO SKENAVIMO. `usedGenerations()` grąžina
+ * generacijas, faktiškai esančias lentelėje; iš to matyti ir našlaitės, ir tai,
+ * kurie istoriniai raktai dar reikalingi.
+ */
+async function patikrintiGeneracijas(pgStore, env) {
+  const dbGeneracijos = await pgStore.usedGenerations();
+  const zinomos = keyRing.visi;
+
+  const nasliaites = dbGeneracijos.filter((id) => !zinomos.has(id));
+
+  if (nasliaites.length > 0) {
+    /**
+     * ⚠️ ATSISTATYMO KELIAS PRIVALOMAS (#212).
+     *
+     * Negrįžtamai praradus secret'ą fail-closed kitaip reikštų amžinai
+     * nepaleidžiamą backend'ą. Vėliava paleidžia sistemą, bet KIEKVIENO starto
+     * metu rėkia - tai sąmoningas GDPR garantijos laužymas, ne konfigūracijos
+     * niuansas.
+     */
+    if (String(env.AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS).toLowerCase() === "true") {
+      log.warn(
+        "GDPR GARANTIJA LAUŽOMA SĄMONINGAI: `audit_log` yra įrašų, kurių generacijai " +
+          `neturime rakto (${nasliaites.join(", ")}). Šių įrašų ` +
+          "`removeBySubjectIdentifier()` NEBEPASIEKS - asmens duomenų ištrynimas jų " +
+          "nepašalins. Leista per AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true. " +
+          "Žr. docs/audit-storage.md."
+      );
+    } else {
+      throw new Error(
+        "PostgreSQL `audit_log` yra įrašų, kurių generacijai neturime rakto: " +
+          `${nasliaites.join(", ")}. Jų \`subject_id\` nebeįmanoma atkurti, tad GDPR ` +
+          "ištrynimas jų NEPASIEKS. Grąžinkite raktą į AUDIT_ID_SALT_PREVIOUS " +
+          "(formatas `id:secret`) arba, negrįžtamai jį praradus, paleiskite su " +
+          "AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true - tai dokumentuotas " +
+          "sąmoningas garantijos laužymas."
+      );
+    }
+  }
+
+  /**
+   * ⚠️ KIEKIO RIBA ATMETA TIK NEBEREIKALINGUS RAKTUS (#212).
+   *
+   * Naivus derinys „maks. N" + „negalima pašalinti, kol yra įrašų" duotų
+   * nepaleidžiamą sistemą: pasukus raktą N+1 kartų greičiau nei suveikia
+   * retencija, viršijimas blokuoja startą, o pašalinti nė vieno negalima.
+   * Todėl riba pažeidžiama tik tada, kai bent vienas istorinis raktas DB įrašų
+   * NEBETURI - tokį pašalinti saugu, ir operatorius turi realų išėjimą.
+   */
+  if (keyRing.historicalCount > HISTORICAL_SOFT_LIMIT) {
+    const naudojamos = new Set(dbGeneracijos);
+    const nebereikalingi = keyRing.historical.filter((k) => !naudojamos.has(k.id)).map((k) => k.id);
+
+    if (nebereikalingi.length > 0) {
+      throw new Error(
+        `AUDIT_ID_SALT_PREVIOUS turi ${keyRing.historicalCount} generacijas (riba - ` +
+          `${HISTORICAL_SOFT_LIMIT}), o šios DB įrašų nebeturi: ${nebereikalingi.join(", ")}. ` +
+          "Pašalinkite jas iš konfigūracijos. Raktai, kurie DB įrašų DAR TURI, " +
+          "neatmetami niekada - riba jų neliečia."
+      );
+    }
+  }
+}
+
+/**
  * ⚠️ `init()` GRĄŽINA BENDRĄ PROMISE - tas pats modelis kaip `jobStore.init()`
  * ir `sessionStore.init()`: lygiagretūs kvietėjai laukia TO PATIES vykstančio
  * inicijavimo, ne boolean vėliavos, kuri jau `true`, kol jungtis dar keliama.
@@ -535,6 +613,15 @@ async function init(env = process.env) {
       maxEntries: env.AUDIT_MAX_ENTRIES === undefined ? null : env.AUDIT_MAX_ENTRIES,
     });
 
+    /**
+     * ⚠️ ŽIEDAS SUDAROMAS ABIEM BACKEND'AMS, bet aktyvaus ID reikalaujama tik
+     * persistentiniam: atmintyje `hash_key_id` niekur nerašomas.
+     */
+    keyRing = resolveKeyRing(env, {
+      aktyvusSecret: konfiguracija.salt || env.AUDIT_ID_SALT || null,
+      reikalaujamaAktyvausId: backendas === "postgres",
+    });
+
     if (backendas === "memory") {
       store = memoryStore;
       paruosta = true;
@@ -543,6 +630,9 @@ async function init(env = process.env) {
     }
 
     const { store: pgStore, pool } = await initializePostgres(env);
+
+    await patikrintiGeneracijas(pgStore, env);
+
     store = pgStore;
     _pool = pool;
     paruosta = true;
@@ -589,6 +679,7 @@ async function shutdown() {
   paruosta = false;
   initPromise = null;
   konfiguracija = null;
+  keyRing = null;
 }
 
 /**
@@ -611,6 +702,16 @@ function konfiguracijaReiksme() {
   return konfiguracija;
 }
 
+/**
+ * Aktyvus raktų žiedas arba `null`, jei `init()` dar nevykdytas.
+ *
+ * ⚠️ VIENINTELIS KELIAS PRIE ISTORINIŲ RAKTŲ. Užklausa ir ištrynimas jį ima iš
+ * čia; `AUDIT_ID_SALT_PREVIOUS` niekur kitur neparsinamas (#212).
+ */
+function keyRingReiksme() {
+  return keyRing;
+}
+
 /** Aktyvus store'as - `auditLog` fasadui. */
 function current() {
   return store;
@@ -626,6 +727,7 @@ module.exports = {
   auditoPoolNustatymai,
   konfiguruotaDruskaReiksme,
   konfiguracijaReiksme,
+  keyRingReiksme,
   KONFIG_RAKTAI,
   REQUIRED_AUDIT_CONSTRAINTS,
   REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,

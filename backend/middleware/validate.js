@@ -65,14 +65,41 @@ const schemas = {
    * auga su kiekviena užklausa. Puslapiavimas čia nėra patogumas: neribotas
    * atsakymas yra pigi užklausa, kurios kaina auga laikui bėgant.
    */
+  /**
+   * ⚠️ 7.4c (#212) PAKEITĖ ŠIO MARŠRUTO KONTRAKTĄ.
+   *
+   * `offset` PAŠALINTAS. Schema yra `.strict()`, tad nežinomas parametras
+   * atmetamas su 400 - tylaus fallback į `OFFSET` nelieka. Tai SĄMONINGAS
+   * politikos pakeitimas: neribotai augančioje lentelėje `OFFSET` daro senesnius
+   * įrašus nepasiekiamus (ankstesnė riba buvo 1 000 000) ir lygiagrečių INSERT'ų
+   * metu praleidžia arba dubliuoja eilutes.
+   *
+   * `event` pakeistas į `action`. Persistentinis stulpelis lieka `event`;
+   * `action` yra TIK užklausos parametro vardas. Du vardai tam pačiam filtrui
+   * būtų būtent ta drift'o rūšis, kurios #212 vengia, tad senasis nebepriimamas -
+   * maršrutas ir taip turi breaking change langą dėl `offset`.
+   */
   auditQuery: z
     .object({
       limit: z.coerce.number().int().min(1).max(1000).default(100),
-      offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
-      event: identifier.nullish(),
+      /** Opaque tokenas; klientas jo nekonstruoja ir neinterpretuoja. */
+      cursor: z.string().min(1).max(512).nullish(),
+      action: identifier.nullish(),
       requestId: identifier.nullish(),
+      jobId: identifier.nullish(),
+      from: z.string().datetime({ offset: true }).nullish(),
+      to: z.string().datetime({ offset: true }).nullish(),
     })
-    .strict(),
+    .strict()
+    /**
+     * ⚠️ `from > to` yra tuščia užklausa, ne filtras. Praleidus ją, klientas
+     * gautų 200 su tuščiu sąrašu ir manytų, kad įrašų nėra - o klaida buvo jo
+     * paties intervale.
+     */
+    .refine((q) => !(q.from && q.to && Date.parse(q.from) > Date.parse(q.to)), {
+      message: "`from` negali būti vėlesnis už `to`",
+      path: ["from"],
+    }),
 
   exportBody: z
     .object({

@@ -239,11 +239,142 @@ atkuriamas.
 
 ---
 
+## 13. Rakto rotacija ir istoriniai raktai (7.4c)
+
+### Kodėl rotacija apskritai reikalinga
+
+`subject_id` yra `HMAC(AUDIT_ID_SALT, jobId)`. Nutekėjus druskai, turintis
+lentelę galėtų tikrinti spėjimus („ar šis pseudonimas atitinka job X"). Rotacija
+tą nutraukia: naujiems įrašams naudojamas naujas secret'as, o senieji lieka su
+savo generacija.
+
+### Konfigūracija
+
+| Kintamasis | Reikšmė |
+|---|---|
+| `AUDIT_ID_SALT_ID` | aktyvios generacijos etiketė, rašoma į `hash_key_id` |
+| `AUDIT_ID_SALT` | aktyvus secret'as — **niekada nepersistinamas** |
+| `AUDIT_ID_SALT_PREVIOUS` | istoriniai raktai: `id:secret,id:secret` |
+
+ID formatas — `[A-Za-z0-9_.-]{1,64}`; secret'as — base64url arba hex. Kablelio
+ir dvitaškio secret'e būti negali, todėl sąrašo skaidymas vienareikšmis.
+
+Aktyvaus ir istorinių ID aibė privalo būti **unikali**: dublikatas reikštų, kad
+tas pats `hash_key_id` atitinka du secret'us, ir pseudonimo atkūrimas taptų
+neapibrėžtas. Kolizija, tuščias ID, tuščias secret'as ar netinkamas formatas —
+**startas nutraukiamas**.
+
+⚠️ **Vienintelis autoritetas — `utils/auditStore/keyRing.js`.**
+`AUDIT_ID_SALT_PREVIOUS` niekur kitur neparsinamas. Trys kopijos (užklausa,
+ištrynimas, startas) išsiskirtų tyliai, o kaina būtų GDPR: ištrynimas
+apskaičiuotų kitą kandidatų aibę nei paieška.
+
+### Rotacijos procedūra
+
+1. Sugeneruokite naują secret'ą: `openssl rand -hex 32`.
+2. **Senąjį perkelkite** į `AUDIT_ID_SALT_PREVIOUS` kaip `<senas-id>:<senas-secret>`.
+3. Nustatykite naują `AUDIT_ID_SALT` ir naują `AUDIT_ID_SALT_ID`.
+4. Perkraukite.
+
+⚠️ **2 žingsnis nėra pasirinktinis.** Praleidus jį, senos generacijos įrašų
+`subject_id` nebeįmanoma atkurti, ir GDPR ištrynimas jų nebepasieks. Startas tai
+aptinka ir **nutraukiamas** — žr. §14.
+
+### Kada raktą galima išimti
+
+Tik kai DB nebeliko nė vieno įrašo su ta generacija. Patikrinti:
+
+```sql
+SELECT COUNT(*) FROM audit_log WHERE hash_key_id = '<generacijos-id>';
+```
+
+**Riba — 10 istorinių generacijų, bet ji atmeta tik nebereikalingus raktus.**
+Viršijus ją, startas krinta tik jei bent vienas istorinis raktas DB įrašų
+nebeturi. Reikalingo rakto riba neatmeta niekada.
+
+> Priežastis: naivus derinys „maks. N" + „negalima pašalinti, kol yra įrašų"
+> duotų spąstus. Pasukus raktą N+1 kartų greičiau nei suveikia retencija,
+> viršijimas blokuotų startą, o pašalinti nė vieno nebūtų galima — backend'as
+> taptų nepaleidžiamas be teisėto išėjimo.
+
+Generacijos skenuojamos **loose index scan** būdu (rekursyvus CTE ant 7.4b
+`hash_key_id` indekso): viena eilutė generacijai, ne viena įrašui. Naujos
+lentelės nekuriama.
+
+---
+
+## 14. Kai secret'as prarastas negrįžtamai
+
+`AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` leidžia startuoti, kai DB yra
+įrašų, kurių generacijos rakto nebeturime. Kiekvieno starto metu rašomas `warn`.
+
+⚠️ **Tai dokumentuotas sąmoningas GDPR garantijos laužymas**, ne konfigūracijos
+niuansas. Įjungus jį:
+
+- tų įrašų `removeBySubjectIdentifier()` **nebepasieks**;
+- asmens duomenų ištrynimo prašymas jų **nepašalins**, nors atsakymas bus sėkmingas;
+- įrašai lieka DB iki retencijos (7.4d).
+
+**Atsistatymo kelias:** jei secret'as dar kur nors yra (slaptažodžių saugykla,
+kopijos, kito diegimo `.env`), grąžinkite jį į `AUDIT_ID_SALT_PREVIOUS` ir
+išjunkite vėliavą. Alternatyva — palaukti, kol retencija tas eilutes pašalins,
+ir tada išimti generaciją.
+
+Vėliava egzistuoja todėl, kad be jos fail-closed taisyklė reikštų **amžinai
+nepaleidžiamą backend'ą**.
+
+---
+
+## 15. `GET /api/audit` — filtrai ir kursorius (7.4c)
+
+### Filtrai
+
+| Parametras | Ką filtruoja |
+|---|---|
+| `action` | persistentinį `event` stulpelį (atskiro `action` stulpelio nėra) |
+| `request_id` | `request_id` stulpelį |
+| `job_id` | pseudonimizuotą `subject_id` — žr. žemiau |
+| `from` / `to` | `timestamp`; ISO-8601, `from > to` → 400 |
+
+Filtrai **komponuojasi** viename užklausos kelyje.
+
+⚠️ **`job_id` niekada netampa plaintext paieška.** Resolveris vieną kartą
+apskaičiuoja kandidatinius `subject_id` aktyviai ir visoms DB esančioms
+generacijoms, o užklausa naudoja **vieną** set-based predikatą
+(`subject_id = ANY($1)`), ne po užklausą generacijai. Todėl `?job_id=` randa ir
+įrašus, sukurtus **prieš** rotaciją.
+
+### Kursorius
+
+`OFFSET` po 7.4c **nebepalaikomas** — `offset` grąžina 400. Priežastis: neribotai
+augančioje lentelėje jis padarydavo senesnius įrašus nepasiekiamus, o
+lygiagrečių įrašymų metu praleisdavo arba dubliuodavo eilutes.
+
+- Rikiavimas — pagal **`seq`** (7.4b tvarkos autoritetas), **mažėjimo** tvarka.
+  `timestamp` netinka: `now()` vienoje transakcijoje duoda vienodus laikus.
+- ⚠️ **DESC galioja tik `query()` / `GET /api/audit`.** `getAll()` ir `list()`
+  lieka saugyklos (ASC) tvarka.
+- `next_cursor` — opaque tokenas arba `null`. `null` grąžinamas tiksliai tada,
+  kai kito puslapio nėra; tuščio paskutinio puslapio nebūna.
+- Sugadintas ar nepilnas kursorius → **400**, ne 500.
+
+⚠️ **Kursoriuje NĖRA filtrų reikšmių.** „Opaque" nereiškia „šifruotas": jis
+keliauja URL'e ir patenka į access logus. Filtrų aibė susiejama **HMAC-SHA256
+atspaudu** (keyed aktyviu `AUDIT_ID_SALT`, 16 baitų). Payload'e — tik `seq` ir
+atspaudas.
+
+⚠️ **Pasukus aktyvų raktą anksčiau išduoti kursoriai nustoja galioti** (atspaudas
+nebesutampa) → 400. Sąmoninga pasekmė: alternatyva būtų raktuoti atspaudą kažkuo
+nekintančiu, o tokio bendro rakto sistemoje nėra. Klientas pradeda puslapiavimą
+iš naujo.
+
+---
+
 ## 11. Kas lieka vėlesniems etapams
 
 | Etapas | Kas |
 |---|---|
-| **[7.4c]** | rakto rotacija, istoriniai raktai, nauji `GET /api/audit` filtrai (`from`, `to`, `action`, `job_id`) |
+| **[7.4c]** | ✅ įgyvendinta — žr. §13–§15 |
 | **[7.4d]** | persistentinė retencija, pilna `PRIVACY_MODE` logika, readiness |
 | **[7.5b]** | `POST_HOC_IVYKIAI` perrikiavimas — žr. §12 |
 
