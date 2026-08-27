@@ -37,9 +37,23 @@ function iEilute(row) {
     requestId: row.request_id,
   };
 
-  const meta = row.meta || {};
+  /**
+   * ⚠️ ANTRA GYNYBOS LINIJA: NEPALAIKOMA FORMA NORMALIZUOJAMA, NE METAMA.
+   *
+   * Schema reikalauja `jsonb_typeof(meta) = 'object'`, bet ta patikra galioja
+   * tik naujoms eilutėms. DB, migruota anksčiau, arba eilutė, įrašyta prieš
+   * constraint'ą, gali turėti skaliarą - ir `laukas in meta` tada mestų
+   * `TypeError`, paverčiantį visą audito puslapį 500 klaida.
+   *
+   * Skaitymas yra netinkama vieta kristi: viena bloga eilutė neturi padaryti
+   * neperskaitomo viso žurnalo.
+   */
+  const svarusMeta = row.meta !== null && typeof row.meta === "object" && !Array.isArray(row.meta)
+    ? row.meta
+    : {};
+
   for (const laukas of META_LAUKAI) {
-    eilute[laukas] = laukas in meta ? meta[laukas] : null;
+    eilute[laukas] = laukas in svarusMeta ? svarusMeta[laukas] : null;
   }
 
   return eilute;

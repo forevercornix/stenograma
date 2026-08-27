@@ -216,8 +216,18 @@ function validateConfig(env = process.env) {
     const { resolveAuditBackend } = require("./auditStore/backendSelection");
     const { auditTimeoutBudget } = require("./auditStore/timeouts");
     try {
-      resolveAuditBackend(env);
-      auditTimeoutBudget(env);
+      /**
+       * ⚠️ BIUDŽETAS TIKRINAMAS TIK TAM REŽIMUI, KURIAM JIS GALIOJA.
+       *
+       * `auditTimeoutBudget()` dalija langą tarp pool'o laukimo ir
+       * `statement_timeout` - abu egzistuoja tik su PostgreSQL. Atminties režimu
+       * `AUDIT_WRITE_TIMEOUT_MS=3` yra visiškai teisėta reikšmė
+       * (`auditWriteTimeoutMs()` ją priima, ir `suRiba()` su ja veikia), tad
+       * besąlyginė patikra nutraukdavo startą dėl DB invarianto, kurio toje
+       * konfigūracijoje apskritai nėra.
+       */
+      const auditoBackendas = resolveAuditBackend(env);
+      if (auditoBackendas === "postgres") auditTimeoutBudget(env);
     } catch (e) {
       errors.push(e.message);
     }

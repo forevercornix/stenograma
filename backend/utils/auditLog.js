@@ -58,7 +58,14 @@ let saltWarningShown = false;
 let generatedSalt = null;
 
 function resolveSalt() {
-  const configured = process.env.AUDIT_ID_SALT;
+  /**
+   * ⚠️ INJEKTUOTA KONFIGŪRACIJA TURI PIRMENYBĘ (#211 peržiūra).
+   *
+   * `auditStore.init(env)` priima druską kaip objekto lauką. Skaitant tik
+   * `process.env`, `hash_key_id` ir `subject_id` galėtų būti skaičiuojami
+   * SKIRTINGAIS raktais - žr. `auditStore/index.js` paaiškinimą.
+   */
+  const configured = auditStore.konfiguruotaDruskaReiksme() || process.env.AUDIT_ID_SALT;
   if (configured) return configured;
 
   if (!generatedSalt) {

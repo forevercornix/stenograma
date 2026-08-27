@@ -29,6 +29,7 @@ const log = createLogger("audit-store");
  */
 const REQUIRED_AUDIT_CONSTRAINTS = Object.freeze([
   "audit_log_event_pattern",
+  "audit_log_meta_is_object",
   "audit_log_result_allowed",
 ]);
 
@@ -70,6 +71,21 @@ const RETENCIJOS_ISPEJIMAS =
 
 let store = memoryStore;
 let _pool = null;
+
+/**
+ * ⚠️ VIENAS DRUSKOS AUTORITETAS (#211 peržiūra).
+ *
+ * `init(env)` priima konfigūraciją kaip objektą, o `auditLog.resolveSalt()`
+ * skaitė TIK `process.env`. Įterptinis kvietėjas (ir PostgreSQL integraciniai
+ * testai) taip gaudavo `hash_key_id` iš injektuotos konfigūracijos, o
+ * `subject_id` - iš KITOS, galimai atsitiktinai sugeneruotos druskos. Po tikro
+ * proceso restarto `removeBySubjectIdentifier()` senų eilučių neberastų, ir
+ * GDPR ištrynimas jų nepasiektų - tyliai.
+ *
+ * Sugeneruota procesui lokali druska `shutdown()` išgyvena, tad restarto testas
+ * šį neatitikimą UŽDENGDAVO.
+ */
+let konfiguruotaDruska = null;
 let initPromise = null;
 let paruosta = false;
 
@@ -263,6 +279,13 @@ async function init(env = process.env) {
   initPromise = (async () => {
     const backendas = resolveAuditBackend(env);
 
+    /**
+     * Užfiksuojama ABIEM režimams: jei kvietėjas druską perdavė, ji yra
+     * autoritetas neatsižvelgiant į backend'ą. Neperdavus - lieka `process.env`
+     * kelias, tad esamas elgesys nesikeičia.
+     */
+    konfiguruotaDruska = env.AUDIT_ID_SALT || null;
+
     if (backendas === "memory") {
       store = memoryStore;
       paruosta = true;
@@ -316,6 +339,17 @@ async function shutdown() {
   store = memoryStore;
   paruosta = false;
   initPromise = null;
+  konfiguruotaDruska = null;
+}
+
+/**
+ * Druska, perduota per `init(env)`, arba `null`.
+ *
+ * `auditLog.resolveSalt()` ja remiasi PIRMIAUSIA - kitaip pseudonimizacija ir
+ * `hash_key_id` galėtų remtis skirtingais raktais.
+ */
+function konfiguruotaDruskaReiksme() {
+  return konfiguruotaDruska;
 }
 
 /** Aktyvus store'as - `auditLog` fasadui. */
@@ -331,6 +365,7 @@ module.exports = {
   backend,
   current,
   auditoPoolNustatymai,
+  konfiguruotaDruskaReiksme,
   REQUIRED_AUDIT_CONSTRAINTS,
   REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,
   REQUIRED_AUDIT_TRIGGER,

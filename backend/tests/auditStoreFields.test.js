@@ -354,3 +354,118 @@ test("WORKER'IAI: `initializeWorkerOrFail` inicijuoja IR audito saugyklą", asyn
     else process.env.REDIS_URL = saved.redis;
   }
 });
+
+test("BIUDŽETAS: DB laiko invariantas NEGALIOJA atminties režimui", () => {
+  /**
+   * ⚠️ #211 peržiūra (P2).
+   *
+   * `auditTimeoutBudget()` dalija langą tarp pool'o laukimo ir
+   * `statement_timeout` - abu egzistuoja TIK su PostgreSQL. Atminties režimu
+   * `AUDIT_WRITE_TIMEOUT_MS=3` yra teisėta reikšmė: `auditWriteTimeoutMs()` ją
+   * priima, ir `suRiba()` su ja veikia. Besąlyginė patikra nutraukdavo startą
+   * dėl DB invarianto, kurio toje konfigūracijoje apskritai nėra.
+   */
+  const { validateConfig } = require("../utils/startupChecks");
+
+  const bazė = { NODE_ENV: "test", LLM_PROVIDER: "mock", TRANSCRIPTION_PROVIDER: "mock" };
+  const auditoKlaidos = (env) =>
+    (validateConfig(env).errors || []).filter((e) => /AUDIT_WRITE_TIMEOUT_MS/.test(e));
+
+  assert.deepEqual(
+    auditoKlaidos({ ...bazė, AUDIT_WRITE_TIMEOUT_MS: "3" }),
+    [],
+    "atminties režimu maža riba yra teisėta - startas negali dėl jos kristi"
+  );
+
+  /** Bet postgres režimu ta pati reikšmė reiškia, kad DB nespėtų nutraukti užklausos. */
+  const pgKlaidos = auditoKlaidos({
+    ...bazė,
+    AUDIT_BACKEND: "postgres",
+    DATABASE_URL: "postgres://x",
+    AUDIT_ID_SALT: "s",
+    AUDIT_ID_SALT_ID: "i",
+    AUDIT_WRITE_TIMEOUT_MS: "3",
+  });
+  assert.equal(pgKlaidos.length, 1, "postgres režimu biudžeto invariantas privalo galioti");
+});
+
+test("DRUSKA: `init(env)` perduota druska galioja IR pseudonimizacijai", async () => {
+  /**
+   * ⚠️ #211 peržiūra (P2): DU AUTORITETAI TAM PAČIAM RAKTUI.
+   *
+   * `init(env)` validuodavo `env.AUDIT_ID_SALT`, o `auditLog.resolveSalt()`
+   * skaitė TIK `process.env`. Įterptinis kvietėjas taip gaudavo `hash_key_id`
+   * iš injektuotos konfigūracijos, o `subject_id` - iš kitos, galimai
+   * atsitiktinės druskos. Po TIKRO proceso restarto
+   * `removeBySubjectIdentifier()` senų eilučių neberastų.
+   *
+   * Sugeneruota procesui lokali druska `shutdown()` išgyvena, tad restarto
+   * testas šį neatitikimą uždengdavo - todėl tikrinama čia, tiesiogiai.
+   */
+  const auditStore = require("../utils/auditStore");
+  const crypto = require("node:crypto");
+
+  const savedSalt = process.env.AUDIT_ID_SALT;
+  delete process.env.AUDIT_ID_SALT;
+
+  const INJEKTUOTA = "injektuota-druska-nera-process-env";
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init({ AUDIT_BACKEND: "memory", AUDIT_ID_SALT: INJEKTUOTA });
+
+    const laukiama = crypto
+      .createHmac("sha256", INJEKTUOTA)
+      .update("job-druskos-testas")
+      .digest("hex")
+      .slice(0, 20);
+
+    assert.equal(
+      auditLog.pseudonymizeIdentifier("job-druskos-testas"),
+      laukiama,
+      "pseudonimizacija privalo naudoti PERDUOTĄ druską, ne sugeneruotą"
+    );
+  } finally {
+    await auditStore.shutdown();
+    if (savedSalt === undefined) delete process.env.AUDIT_ID_SALT;
+    else process.env.AUDIT_ID_SALT = savedSalt;
+  }
+});
+
+test("SKAITYMAS: nepalaikoma `meta` forma NEPAVERČIA puslapio 500 klaida", () => {
+  /**
+   * ⚠️ #211 peržiūra (P2). JSONB teisėtai priima skaliarus (`42`, `"tekstas"`,
+   * `true`). Tokia eilutė - tiesioginio SQL rašytojo ar senesnio producer'io
+   * palikimas - versdavo `laukas in meta` mesti `TypeError`, ir VISAS
+   * `GET /api/audit` puslapis grąžindavo 500. Vienas įrašas taptų nuodinga
+   * eilute, kurios per API nebeperskaitytum.
+   *
+   * Schema tokių nebepriima (`audit_log_meta_is_object`), bet skaitymas privalo
+   * atlaikyti jau esamas: viena bloga eilutė neturi padaryti neperskaitomo viso
+   * žurnalo.
+   */
+  const { iEilute } = require("../utils/auditStore/postgresStore");
+
+  const bazė = {
+    id: "x",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    event: "LOGIN_SUCCESS",
+    subject_id: null,
+    result: "success",
+    request_id: null,
+  };
+
+  for (const bloga of [42, "tekstas", true, null, ["a"]]) {
+    const eilute = iEilute({ ...bazė, meta: bloga });
+
+    assert.deepEqual(
+      Object.keys(eilute).sort(),
+      visiLaukai().sort(),
+      `meta=${JSON.stringify(bloga)}: raktų aibė privalo likti pilna`
+    );
+    assert.equal(eilute.details, null, "nepalaikoma forma virsta tuščiais laukais, ne klaida");
+  }
+
+  /** Teisinga forma nepaliečiama. */
+  assert.equal(iEilute({ ...bazė, meta: { details: "ok" } }).details, "ok");
+});

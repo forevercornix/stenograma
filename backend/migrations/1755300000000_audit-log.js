@@ -105,6 +105,19 @@ exports.up = (pgm) => {
     check: `event ~ '${EVENT_PATTERN.source}'`,
   });
 
+  /**
+   * ⚠️ `meta` PRIVALO BŪTI JSON OBJEKTAS, NE BET KOKS JSONB.
+   *
+   * JSONB teisėtai priima ir skaliarus (`42`, `"tekstas"`, `true`). Tiesioginis
+   * SQL rašytojas ar senesnis producer'is tokią eilutę įrašytų, o skaitymo
+   * sluoksnis, tikrindamas `laukas in meta`, mestų `TypeError` - ir VISAS
+   * `GET /api/audit` puslapis, kuriame ta eilutė pasitaiko, grąžintų 500.
+   * Vienas įrašas taptų nuodinga eilute, kurios per API nebeperskaitytum.
+   */
+  pgm.addConstraint("audit_log", "audit_log_meta_is_object", {
+    check: "jsonb_typeof(meta) = 'object'",
+  });
+
   pgm.addConstraint("audit_log", "audit_log_result_allowed", {
     check: `result IN (${RESULTS.map((r) => `'${r}'`).join(", ")})`,
   });
