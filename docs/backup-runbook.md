@@ -171,6 +171,43 @@ SELECT DISTINCT hash_key_id FROM audit_log;
 Kiekvienas rezultatas privalo turėti raktą aktyviame arba istoriniame sąraše.
 Trūkstant bent vieno, startas nutrūks — tai apsauga, ne kliūtis.
 
+### Jei raktas prarastas negrįžtamai
+
+1. Paleiskite su `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`. Procesas
+   pakils; `/api/health` grąžins **200**, o `/api/ready` — **503**. Taip ir
+   turi būti: vėliavėlė leidžia *paleisti*, ne deklaruoti sveikatą, o liveness
+   lieka, kad orkestruotojas neperkrautų podo cikle ir šis langas apskritai
+   atsivertų.
+
+2. Pašalinkite paveiktas eilutes:
+
+   ```sql
+   DELETE FROM audit_log WHERE hash_key_id = '<prarasta-generacija>';
+   ```
+
+   ⚠️ Tai **negrįžtama** ir reiškia, kad tų įvykių audito pėdsako nebeliks.
+   Alternatyvos nėra: be rakto jų `subject_id` neatkuriamas, tad GDPR
+   ištrynimas jų vis tiek nebepasiektų.
+
+3. Išjunkite `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS` ir pašalinkite
+   generaciją iš `AUDIT_ID_SALT_PREVIOUS`, jei ji ten dar yra.
+
+4. ⚠️ **PERKRAUKITE.** Be šio žingsnio `/api/ready` **liks 503**, nors eilutės
+   jau išvalytos.
+
+   Priežastis: neišsprendžiamų generacijų sąrašas yra **starto momento
+   snapshot'as**, ne gyva būsena. Jis atsinaujina tik per paleidimą — pilnas
+   generacijų skenavimas kiekvieno readiness poll'o metu būtų būtent ta
+   operacija, kurios visa schema ir vengia.
+
+   Patikrinkite po perkrovimo:
+
+   ```bash
+   curl -s localhost:3000/api/ready | grep -o '"auditKeysResolvable":[a-z]*'
+   ```
+
+   Turi būti `true`.
+
 ## 5. Ko atkūrimas NEGRĄŽINA
 
 ⚠️ **Ištrintų duomenų.** Atkūrimas gerbia #19 žymas: jei jobas buvo ištrintas,

@@ -172,3 +172,77 @@ test("PRIVATUMAS: nei readiness, nei health neatskleidžia raktų ar generacijų
     else process.env.AUDIT_ID_SALT = savedSalt;
   }
 });
+
+test("PRODUKCIJA: `/api/health` NEATSKLEIDŽIA backend'ų detalių pagal nutylėjimą", async () => {
+  /**
+   * ⚠️ ĮVYKDYTAS ĮRODYMAS, NE „by construction" (#231, punktas 8).
+   *
+   * Teiginys „mes nieko nepridėjome, tad neatskleidžia" yra argumentas.
+   * Argumentas nėra įrodymas: `HEALTH_DETAILS` logika sudėtinga (trys šakos plius
+   * `x-audit-key` išimtis), ir bet kuris būsimas laukas gali į ją įkristi.
+   *
+   * Tikrinama, kad produkcijos režimu atsakymas yra MINIMALUS - ne kad jame
+   * nėra konkretaus žodžio. Naujas laukas, pridėtas neapgalvotai, krinta čia.
+   */
+  const savedEnv = process.env.NODE_ENV;
+  const savedMode = process.env.HEALTH_DETAILS;
+  const savedKey = process.env.AUDIT_API_KEY;
+
+  process.env.NODE_ENV = "production";
+  delete process.env.HEALTH_DETAILS;
+  delete process.env.AUDIT_API_KEY;
+
+  try {
+    const res = await request(app).get("/api/health");
+
+    assert.equal(res.status, 200, "liveness lieka");
+    assert.deepEqual(
+      Object.keys(res.body),
+      ["status"],
+      "produkcijoje atsakymas privalo būti TIK `status` - joks backend'o, DB ar audito laukas"
+    );
+
+    const serializuota = JSON.stringify(res.body);
+    for (const nutekejimas of ["postgres", "memory", "audit", "redis", "Provider"]) {
+      assert.ok(
+        !serializuota.toLowerCase().includes(nutekejimas.toLowerCase()),
+        `"${nutekejimas}" negali patekti į produkcinį health atsakymą`
+      );
+    }
+  } finally {
+    process.env.NODE_ENV = savedEnv;
+    if (savedMode === undefined) delete process.env.HEALTH_DETAILS;
+    else process.env.HEALTH_DETAILS = savedMode;
+    if (savedKey === undefined) delete process.env.AUDIT_API_KEY;
+    else process.env.AUDIT_API_KEY = savedKey;
+  }
+});
+
+test("PRODUKCIJA: `/api/ready` komponentai yra BŪSENOS, ne infrastruktūros vardai", async () => {
+  /**
+   * Readiness produkcijoje detalių neslepia sąmoningai - orkestruotojui reikia
+   * žinoti, KURI priklausomybė krito. Bet komponentai privalo likti loginėmis
+   * būsenomis (`true`/`false`), ne backend'ų pavadinimais ar generacijų ID.
+   */
+  const savedEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+
+  try {
+    const res = await request(app).get("/api/ready");
+    const komponentai = res.body.components;
+
+    for (const [raktas, reiksme] of Object.entries(komponentai)) {
+      if (raktas === "workers") continue; // objektas su boolean laukais
+      assert.equal(
+        typeof reiksme,
+        "boolean",
+        `komponentas "${raktas}" yra ${typeof reiksme} - readiness atsako BŪSENOMIS, ne vardais`
+      );
+    }
+
+    const serializuota = JSON.stringify(res.body);
+    assert.ok(!/postgres|audit_log|hash_key/i.test(serializuota), "jokių infrastruktūros detalių");
+  } finally {
+    process.env.NODE_ENV = savedEnv;
+  }
+});

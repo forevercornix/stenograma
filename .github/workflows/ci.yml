@@ -139,7 +139,23 @@ jobs:
           # REQUIRE_POSTGRES=1 paverčia TYLŲ praleidimą klaida - kitaip CI
           # liktų žalias niekada nepaleidęs nė vieno DB testo.
           REQUIRE_POSTGRES: "1"
-        run: npm run test:postgres
+        # ⚠️ TAP išsaugomas, nes vien exit kodo NEPAKANKA (#155, 7.4f / #231).
+        #
+        # `npm run test:postgres` grąžina 0 ir tada, kai KIEKVIENAS testas
+        # praleido save dėl trūkstamo `DATABASE_URL`. Tokia būsena atrodo
+        # identiškai sėkmei, bet neįrodo nieko - o būtent ji ir slepia
+        # neveikiantį DB kelią.
+        run: npm run test:postgres 2>&1 | tee /tmp/postgres-suite.tap; exit "${PIPESTATUS[0]}"
+
+      - name: PostgreSQL testai TIKRAI vykdyti (ne praleisti)
+        working-directory: backend
+        # ⚠️ ATSKIRAS ŽINGSNIS, ne dalis ankstesnio.
+        #
+        # Skriptas skaito TAP ir reikalauja NEPRALEISTO `ok` kiekvienam išvesto
+        # postgres rinkinio failui. Be jo `verify-postgres-suite-ran.mjs` būtų
+        # skriptas, kurio niekas nekviečia - o nuo šios garantijos priklauso
+        # 7.4b/7.4c/7.4d/7.4e uždarymas.
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/postgres-suite.tap
 
       # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
       # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas
