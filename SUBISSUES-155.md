@@ -1605,7 +1605,7 @@ Išskaidyta. Darbo tekstai gyvena vaikuose žemiau:
 | `7.4c` | #212 | Rakto rotacija ir audit užklausos |
 | `7.4d` | #213 | Retencija ir privatumo režimas |
 | `7.4e` | #216 | Audito ištrynimo galutinumas |
-| `7.4f` | — | Readiness, backup ir CI registracija |
+| `7.4f` | #231 | Readiness, backup ir CI registracija |
 
 Šioje sekcijoje DoD punktų nebelaikome - kitaip tas pats darbas turėtų
 dvi versijas spec'e.
