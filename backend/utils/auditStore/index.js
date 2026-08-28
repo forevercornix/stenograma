@@ -140,6 +140,22 @@ let _pool = null;
  */
 let konfiguracija = null;
 let keyRing = null;
+
+/**
+ * ⚠️ STARTO MOMENTO SNAPSHOT'AS, NE GYVA BŪSENA (#155, 7.4f / #231).
+ *
+ * Čia lieka generacijos, kurioms `init()` metu neturėjome rakto ir kurias
+ * praleido `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`. Readiness jomis
+ * remiasi, tad būtina suprasti ribą: sąrašas NESEKA DB pokyčių. Išvalius
+ * eilutes ar grąžinus raktą, jis atsinaujina tik per RESTARTĄ - ir taip turi
+ * būti, nes pilnas generacijų skenavimas kiekvieno poll'o metu yra būtent tai,
+ * ko 7.4c loose index scan vengia.
+ *
+ * ⚠️ VĖLIAVĖLĖ SNAPSHOT'O NEKEIČIA. Su `true` procesas startuoja, bet sąrašas
+ * lieka toks pat, ir `/api/ready` toliau grąžina 503. Vėliavėlė leidžia
+ * PAKILTI, ne deklaruoti sveikatą.
+ */
+let nasliaitesSnapshot = [];
 let initPromise = null;
 let paruosta = false;
 
@@ -546,6 +562,8 @@ async function patikrintiGeneracijas(pgStore, env) {
      * niuansas.
      */
     if (String(env.AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS).toLowerCase() === "true") {
+      nasliaitesSnapshot = [...nasliaites];
+
       log.warn(
         "GDPR GARANTIJA LAUŽOMA SĄMONINGAI: `audit_log` yra įrašų, kurių generacijai " +
           `neturime rakto (${nasliaites.join(", ")}). Šių įrašų ` +
@@ -697,6 +715,7 @@ async function shutdown() {
   initPromise = null;
   konfiguracija = null;
   keyRing = null;
+  nasliaitesSnapshot = [];
 }
 
 /**
@@ -729,6 +748,18 @@ function keyRingReiksme() {
   return keyRing;
 }
 
+/**
+ * Generacijos, kurioms starto metu neturėjome rakto (tuščias masyvas - viskas
+ * išsprendžiama).
+ *
+ * ⚠️ SNAPSHOT'AS - žr. `nasliaitesSnapshot` paaiškinimą. Readiness jį naudoja,
+ * kad `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` paleistas procesas
+ * NEDEKLARUOTŲ sveikatos, nors liveness lieka 200.
+ */
+function nasliaitesGeneracijos() {
+  return [...nasliaitesSnapshot];
+}
+
 /** Aktyvus store'as - `auditLog` fasadui. */
 function current() {
   return store;
@@ -745,6 +776,7 @@ module.exports = {
   konfiguruotaDruskaReiksme,
   konfiguracijaReiksme,
   keyRingReiksme,
+  nasliaitesGeneracijos,
   KONFIG_RAKTAI,
   REQUIRED_AUDIT_CONSTRAINTS,
   REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,

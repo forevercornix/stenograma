@@ -183,6 +183,43 @@ async function probeRuntimeReadiness() {
     sessionStoreReachable = false;
   }
 
+  /**
+   * AUDITO AUTORITETO GYVA BŪSENA (#155, 7.4f / #231).
+   *
+   * ⚠️ `readiness.auditStore` YRA STARTO VĖLIAVA, NE SVEIKATA - lygiai kaip
+   * `sessionReconcile`. DB kritimas ar teisių atėmimas PO starto ja nesimato, o
+   * instancija toliau priima audito generuojančias užklausas (pvz.
+   * prisijungimus), kurių blokuojantis auditas kris su `AUDIT_WRITE_FAILED`.
+   *
+   * ⚠️ ZONDAS TIKRINA TEISES, ne vien ryšį - žr. `auditStore/postgresStore.js`.
+   * Atminties režime jis visada teigiamas, tad elgesys nesikeičia.
+   */
+  let auditStoreReachable = false;
+  try {
+    auditStoreReachable = await withTimeout(
+      auditStore.probe(),
+      READINESS_TIMEOUT_MS,
+      "audito saugykla"
+    );
+  } catch {
+    auditStoreReachable = false;
+  }
+
+  /**
+   * ⚠️ NEIŠSPRENDŽIAMOS GENERACIJOS → NOT READY, NORS PROCESAS PAKILO.
+   *
+   * `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` leidžia STARTUOTI, kad
+   * operatorius turėtų langą išvalyti senas eilutes. Bet sveikatos ji
+   * nedeklaruoja: tų įrašų `removeBySubjectIdentifier()` nepasiekia, tad
+   * instancija negali būti laikoma paruošta srautui.
+   *
+   * ⚠️ LIVENESS (`/api/health`) LIEKA 200. Priešingu atveju orkestruotojas
+   * perkraudinėtų podą cikle, ir atsistatymo langas, dėl kurio vėliavėlė
+   * egzistuoja, niekada neatsivertų - ji būtų paneigta.
+   */
+  const nasliaites = auditStore.nasliaitesGeneracijos();
+  const auditKeysResolvable = nasliaites.length === 0;
+
   if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
     let conn = null;
     try {
@@ -206,11 +243,20 @@ async function probeRuntimeReadiness() {
     }
   }
 
-  return { redisReachable, workers, sessionStoreReachable };
+  return { redisReachable, workers, sessionStoreReachable, auditStoreReachable, auditKeysResolvable };
 }
 
 app.get("/api/ready", pollRateLimiter, async (req, res) => {
-  const initReady = readiness.jobStore && readiness.jobRunner && readiness.sessionReconcile;
+  /**
+   * ⚠️ `auditStore` ĮTRAUKTAS Į `initReady` (#155, 7.4f / #231).
+   *
+   * Iki tol čia buvo tik `jobStore && jobRunner && sessionReconcile`. Kritus
+   * `auditStore.init()` serveris grąžindavo 200 ir priimdavo srautą - t. y.
+   * fail-closed audito apsauga, dėl kurios startas ir nutraukiamas, būdavo
+   * apeinama readiness lygyje.
+   */
+  const initReady =
+    readiness.jobStore && readiness.jobRunner && readiness.sessionReconcile && readiness.auditStore;
   if (!initReady) {
     return res.status(503).json({
       ready: false,
@@ -218,6 +264,7 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
         jobStore: readiness.jobStore,
         jobRunner: readiness.jobRunner,
         sessionReconcile: readiness.sessionReconcile,
+        auditStore: readiness.auditStore,
       },
     });
   }
@@ -228,20 +275,43 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
   // ir protokolo worker'iai gali būti ATSKIRI procesai/konteineriai, žr.
   // utils/workerHeartbeat.js) - kitaip jobai būtų priimami, bet liktų queued, nes
   // niekas jų neapdoroja. Inline režime nieko papildomo (viskas tame pačiame procese).
-  const { redisReachable, workers, sessionStoreReachable } = await probeRuntimeReadiness();
+  const {
+    redisReachable,
+    workers,
+    sessionStoreReachable,
+    auditStoreReachable,
+    auditKeysResolvable,
+  } = await probeRuntimeReadiness();
   const workerAlive = workers.transcription && workers.protocol;
 
-  const ready = initReady && redisReachable && workerAlive && sessionStoreReachable;
+  const ready =
+    initReady &&
+    redisReachable &&
+    workerAlive &&
+    sessionStoreReachable &&
+    auditStoreReachable &&
+    auditKeysResolvable;
+
   res.status(ready ? 200 : 503).json({
     ready,
     components: {
       jobStore: readiness.jobStore,
       jobRunner: readiness.jobRunner,
       sessionReconcile: readiness.sessionReconcile,
+      auditStore: readiness.auditStore,
       redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
       workerAlive,    // BullMQ režime: true TIK jei ABU worker tipai gyvi; inline - visada true
       workers,        // detali būsena PER TIPĄ - kuri konkrečiai eilė (jei kuri) neturi gyvo worker'io
       sessionStoreReachable, // GYVA sesijų autoriteto būsena; atmintyje - visada true
+      auditStoreReachable,   // GYVA audito saugyklos būsena su TEISIŲ patikra; atmintyje - visada true
+      /**
+       * ⚠️ STARTO MOMENTO SNAPSHOT'AS, ne gyva būsena. `false` reiškia, kad
+       * procesas pakilo su `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`, ir
+       * dalies įrašų GDPR ištrynimas nebepasiekia. Generacijų sąrašas ČIA
+       * NERODOMAS - jis yra `hash_key_id` etikečių aibė, o readiness atsakymas
+       * yra viešesnis nei logai.
+       */
+      auditKeysResolvable,
     },
   });
 });
@@ -457,4 +527,23 @@ app._setReadyForTests = (value = true) => {
   readiness.jobStore = value;
   readiness.jobRunner = value;
   readiness.sessionReconcile = value;
+  /**
+   * ⚠️ `auditStore` ČIA PRIVALO BŪTI (#155, 7.4f).
+   *
+   * Nuo 7.4f `/api/ready` jo reikalauja. Palikus jį `false`, kiekvienas testas,
+   * kuris tik „pažymi sistemą paruošta", gautų 503 - ir tai atrodytų kaip
+   * readiness regresija, nors realiai trūktų vėliavos pačiame pagalbininke.
+   */
+  readiness.auditStore = value;
+};
+
+/**
+ * ⚠️ ATSKIRAS PAGALBININKAS AUDITO VĖLIAVAI (#155, 7.4f).
+ *
+ * `_setReadyForTests(false)` nuleidžia VISKĄ, tad readiness kristų ir be audito.
+ * Norint įrodyti, kad būtent `auditStore` įtrauktas į patikrą, reikia nuleisti
+ * TIK jį, paliekant kitus žalius.
+ */
+app._setAuditReadyForTests = (value = true) => {
+  readiness.auditStore = value;
 };

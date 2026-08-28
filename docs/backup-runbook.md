@@ -34,6 +34,22 @@ sugadinta**.
 
 ---
 
+⚠️ **RAKTAI Į KOPIJĄ NEPATENKA, BET BE JŲ KOPIJA BEVERTĖ** (#155, 7.4f).
+
+`AUDIT_ID_SALT` ir `AUDIT_ID_SALT_PREVIOUS` yra **paslaptys**, todėl jų kopijoje
+nėra ir būti negali. Bet jie saugomi **atskirai ir atkuriami kartu** su duomenų
+kopija.
+
+Priežastis nėra patogumas. Atkūrus `audit_log` be atitinkamų raktų, visos
+persistuotos generacijos tampa **neišsprendžiamos**: 7.4c startas fail-closed
+nutraukia paleidimą, o įjungus `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`
+sistema pakyla, bet tų eilučių `removeBySubjectIdentifier()` **nebepasiekia** —
+GDPR ištrynimas nebeįmanomas.
+
+**Praktiškai:** kai darote duomenų kopiją, tuo pačiu metu užfiksuokite ir tuo
+metu galiojusius `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID` bei
+`AUDIT_ID_SALT_PREVIOUS` — savo paslapčių saugykloje, ne kopijos faile.
+
 ## 2. Įjungimas
 
 Kopijos numatytai **išjungtos** — jos yra papildoma asmens duomenų saugykla.
@@ -143,6 +159,18 @@ Redis užrakto.
 
 ---
 
+### Raktai atkuriami PRIEŠ duomenis
+
+Prieš keliant `audit_log` turinį, įsitikinkite, kad `AUDIT_ID_SALT_PREVIOUS`
+turi VISAS generacijas, kurios toje kopijoje pasitaiko:
+
+```sql
+SELECT DISTINCT hash_key_id FROM audit_log;
+```
+
+Kiekvienas rezultatas privalo turėti raktą aktyviame arba istoriniame sąraše.
+Trūkstant bent vieno, startas nutrūks — tai apsauga, ne kliūtis.
+
 ## 5. Ko atkūrimas NEGRĄŽINA
 
 ⚠️ **Ištrintų duomenų.** Atkūrimas gerbia #19 žymas: jei jobas buvo ištrintas,
@@ -159,6 +187,10 @@ Tai galioja **ir šifruotoms kopijoms, ir rotacijos keliui**.
 prarastais.
 
 ---
+
+⚠️ **Atkūrimas negrąžina ir audito raktų.** Jie nėra kopijos dalis (žr. §1).
+Praradus juos kartu su duomenimis, `audit_log` eilutės lieka fiziškai, bet tampa
+neišsprendžiamos: nei paieška pagal `job_id`, nei GDPR ištrynimas jų nebepasiekia.
 
 ## 6. Raktų rotacija
 

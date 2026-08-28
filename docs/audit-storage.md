@@ -376,6 +376,66 @@ iš naujo.
 
 ---
 
+## 16. Readiness, liveness ir cutover (7.4f)
+
+### Ką tikrina `/api/ready`
+
+| Etapas | Tikrinama |
+|---|---|
+| Starto vėliavos | `jobStore`, `jobRunner`, `sessionReconcile`, **`auditStore`** |
+| Gyvi zondai | Redis, worker'iai, sesijų saugykla, **audito saugykla** (su teisių patikra) |
+| Raktų būsena | **neišsprendžiamų generacijų nėra** |
+
+Bet kuris nepavykęs → **503**.
+
+### ⚠️ Ready ≠ live
+
+`/api/health` (liveness) **lieka 200** net kai readiness krinta dėl audito.
+
+Tai nėra nuolaida. `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` egzistuoja
+tam, kad operatorius galėtų **paleisti** sistemą, kurios raktų medžiaga
+prarasta, ir išvalyti paveiktas eilutes. Jei kartu kristų ir liveness,
+orkestruotojas perkraudinėtų podą cikle, tas atsistatymo langas niekada
+neatsivertų, ir vėliavėlė būtų paneigta.
+
+### Zondas tikrina TEISES, ne ryšį
+
+`SELECT 1` įrodo tik tiek, kad jungtis gyva. Rolė su atimta `DELETE` teise jį
+praeitų, o GDPR ištrynimas kristų vykdymo metu — su žaliais sveikatos signalais.
+
+Zondas per `has_table_privilege()` tikrina `SELECT`, `INSERT` ir `DELETE` ant
+`audit_log`, vienu round-trip'u, ir **nemutuoja**: bandomasis įrašas reikštų
+nuolatinį lentelės šiukšlinimą dėl diagnostikos, o append-only trigeris tokios
+eilutės dar ir neleistų ištrinti be pėdsako.
+
+Rezultatas kešuojamas 2 s. **Kešuojamas tik teigiamas** — atsistačiusi DB turi
+būti pastebėta per kitą poll'ą, ne po TTL. Nuo apkrovos krentant DB saugo
+**single-flight**: vykstant zondui visi kiti kvietėjai gauna tą patį promise'ą,
+tad lygiagrečios užklausos apribotos iki vienos, o atsistatymo aptikimas
+neatidedamas.
+
+### ⚠️ Generacijų būsena yra STARTO SNAPSHOT'AS
+
+`auditKeysResolvable` rodo `init()` momento rezultatą, **ne dabartinę DB**.
+Išvalius eilutes ar grąžinus raktą, jis atsinaujina tik per **restartą** — ir
+taip turi būti: pilnas generacijų skenavimas kiekvieno poll'o metu yra būtent
+tai, ko §13 loose index scan vengia.
+
+Vėliavėlės reikšmė snapshot'o **nekeičia**: su `true` procesas startuoja, bet
+sąrašas toks pat, ir `/api/ready` toliau grąžina 503.
+
+### Cutover ir rollback
+
+⚠️ **Esami įrašai NEPERKELIAMI.** Perjungus `memory → postgres`, atmintyje buvę
+įrašai lieka atmintyje ir dingsta su procesu; `audit_log` pradedamas tuščias.
+
+⚠️ **Grįžimas `postgres → memory` nėra simetriškas.** Seni įrašai lieka DB, o
+nauji į juos nebepatenka. `/api/audit` rodys tik naujus, atmintinius, ir po
+restarto jų neliks. Tai sąmoningas elgesys, ne defektas — bet grįžtant verta
+žinoti, kad DB eilutės lieka ir toliau reikalauja savo raktų (žr. §13).
+
+---
+
 ## 11. Kas lieka vėlesniems etapams
 
 | Etapas | Kas |

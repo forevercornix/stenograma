@@ -916,3 +916,158 @@ test("GENERACIJOS: skenavimo KLAIDA metama, o ne verčiama į tuščią sąraš�
   assert.ok(patikra.length > 50, "prielaida: funkcijos kūnas išpjautas");
   assert.doesNotMatch(patikra, /catch/, "generacijų patikra negali ryti skenavimo klaidos");
 });
+
+test("ZONDAS: tikrina TEISES (SELECT/INSERT/DELETE), ne vien ryšį", () => {
+  /**
+   * ⚠️ `SELECT 1` ĮRODO TIK TIEK, KAD JUNGTIS GYVA (#155, 7.4f / #231).
+   *
+   * Rolė su atimta `DELETE` teise jį praeitų, o `removeBySubjectIdentifier()`
+   * kristų VYKDYMO metu - GDPR ištrynimas lūžtų tyliai, o visi sveikatos
+   * signalai liktų žali. Būtent todėl `DELETE` yra būtinųjų aibėje.
+   */
+  const { BUTINOS_PRIVILEGIJOS } = require("../utils/auditStore/postgresStore");
+
+  assert.deepEqual(
+    [...BUTINOS_PRIVILEGIJOS].sort(),
+    ["DELETE", "INSERT", "SELECT"],
+    "trūkstama privilegija reikštų tyliai lūžtantį kelią"
+  );
+});
+
+test("ZONDAS: kiekvienos trūkstamos teisės pakanka, kad zondas grąžintų `false`", async () => {
+  const { createPostgresStore, BUTINOS_PRIVILEGIJOS } = require("../utils/auditStore/postgresStore");
+
+  const suTeisemis = (atimta) => ({
+    query: async () => ({
+      rows: [
+        BUTINOS_PRIVILEGIJOS.reduce(
+          (acc, p) => ({ ...acc, [p.toLowerCase()]: p !== atimta }),
+          { perskaityta: 0 }
+        ),
+      ],
+    }),
+  });
+
+  assert.equal(
+    await createPostgresStore(suTeisemis(null), { hashKeyId: "A" }).probe(),
+    true,
+    "su visomis teisėmis zondas teigiamas"
+  );
+
+  for (const privilegija of BUTINOS_PRIVILEGIJOS) {
+    const store = createPostgresStore(suTeisemis(privilegija), { hashKeyId: "A" });
+    assert.equal(
+      await store.probe(),
+      false,
+      `be ${privilegija} zondas privalo grąžinti false - kitaip gedimas liktų nematomas`
+    );
+  }
+});
+
+test("ZONDAS: NEMUTUOJA - jokio INSERT ar DELETE bandomojo įrašo", () => {
+  /**
+   * Readiness kviečiamas kiekvieno orkestruotojo probe metu. Bandomasis įrašas
+   * reikštų nuolatinį audito lentelės šiukšlinimą ir WAL srautą dėl
+   * diagnostikos - o append-only trigeris tokios eilutės dar ir neleistų
+   * ištrinti be pėdsako.
+   */
+  const uzklausos = [];
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const pool = {
+    query: async (sql) => {
+      uzklausos.push(sql);
+      return { rows: [{ perskaityta: 0, select: true, insert: true, delete: true }] };
+    },
+  };
+
+  return createPostgresStore(pool, { hashKeyId: "A" })
+    .probe()
+    .then(() => {
+      assert.equal(uzklausos.length, 1, "vienas round-trip");
+
+      /**
+       * ⚠️ Tikrinami SAKINIAI, ne žodžiai: `has_table_privilege(...) AS "insert"`
+       * teisėtai turi žodį `insert` stulpelio pseudonime. Pirmoji šios patikros
+       * versija būtent taip ir krito.
+       */
+      assert.doesNotMatch(uzklausos[0], /\bINSERT\s+INTO\b/i, "zondas negali rašyti");
+      assert.doesNotMatch(uzklausos[0], /\bDELETE\s+FROM\b/i, "zondas negali trinti");
+      assert.doesNotMatch(uzklausos[0], /\bUPDATE\s+\w+\s+SET\b/i, "zondas negali keisti");
+      assert.match(uzklausos[0], /has_table_privilege/, "teisės tikrinamos per katalogą");
+    });
+});
+
+test("KEŠAS: įrodomas `pool.query` SKAIČIUMI, ne laiko matavimu", async () => {
+  /**
+   * ⚠️ REALIZACIJA SU `Date.now()`, BET BE FAKTINIO PRALEIDIMO, PRAEITŲ NAIVŲ TESTĄ.
+   *
+   * Laiko matavimas parodytų, kad antras kvietimas greitas - bet jis būtų
+   * greitas ir tada, kai užklausa vis tiek išsiunčiama į vietinę DB. Vienintelis
+   * įrodymas yra kvietimų SKAIČIUS.
+   */
+  const { createPostgresStore, PROBE_CACHE_TTL_MS } = require("../utils/auditStore/postgresStore");
+
+  let kiek = 0;
+  const pool = {
+    query: async () => {
+      kiek += 1;
+      return { rows: [{ perskaityta: 0, select: true, insert: true, delete: true }] };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A" });
+
+  for (let i = 0; i < 5; i += 1) assert.equal(await store.probe(), true);
+  assert.equal(kiek, 1, "penki kvietimai kešo lange privalo duoti VIENĄ užklausą");
+
+  /**
+   * ⚠️ IR KEŠAS PRIVALO BAIGTI GALIOTI. Amžinai kešuotas „sveikas" slėptų
+   * dingusią DB - readiness rodytų 200, kol procesas gyvas.
+   */
+  store._resetProbeCacheForTests();
+  await store.probe();
+  assert.equal(kiek, 2, "pasibaigus galiojimui užklausa privalo pasikartoti");
+  assert.ok(PROBE_CACHE_TTL_MS > 0 && PROBE_CACHE_TTL_MS <= 5000, "TTL turi būti trumpas");
+});
+
+test("KEŠAS: NEIGIAMAS rezultatas NEKEŠUOJAMAS, bet lygiagretūs zondai sujungiami", async () => {
+  /**
+   * ⚠️ DU PRIEŠINGI REIKALAVIMAI, IR ABU BŪTINI.
+   *
+   * Neigiamo kešuoti negalima: atsistačiusi DB turi būti pastebėta per kitą
+   * poll'ą, ne po TTL. Bet be jokios apsaugos krentanti DB gautų užklausą
+   * kiekvienam poll'ui - tas pats apkrovos kelias, kurio kešas ir vengia.
+   *
+   * Sprendimas - SINGLE-FLIGHT, ne trumpas neigiamas TTL: jis apriboja
+   * LYGIAGREČIAS užklausas iki vienos, bet atsistatymo aptikimo neatideda.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  let kiek = 0;
+  let atsakymas = false;
+  const pool = {
+    query: async () => {
+      kiek += 1;
+      await new Promise((r) => setImmediate(r));
+      return { rows: [{ perskaityta: 0, select: true, insert: true, delete: atsakymas }] };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A" });
+
+  /** Nuoseklūs neigiami kvietimai - kiekvienas klausia DB iš naujo. */
+  assert.equal(await store.probe(), false);
+  assert.equal(await store.probe(), false);
+  assert.equal(kiek, 2, "neigiamas rezultatas NEGALI būti kešuojamas");
+
+  /** Lygiagretūs - viena užklausa visiems. */
+  kiek = 0;
+  const [a, b, c] = await Promise.all([store.probe(), store.probe(), store.probe()]);
+  assert.deepEqual([a, b, c], [false, false, false]);
+  assert.equal(kiek, 1, "lygiagretūs zondai privalo dalintis viena užklausa");
+
+  /** Atsistačius DB - pastebima IŠ KARTO, be TTL laukimo. */
+  atsakymas = true;
+  assert.equal(await store.probe(), true, "atsistatymas neturi būti atidėtas");
+});

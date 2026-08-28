@@ -9,6 +9,18 @@
 
 const { STULPELIAI, META_LAUKAI, isrinktiMeta } = require("./fields");
 
+/**
+ * PRIVILEGIJOS, BE KURIŲ AUDITAS NEVEIKIA (#155, 7.4f / #231).
+ *
+ * `DELETE` čia nėra perteklius: be jos `removeBySubjectIdentifier()` lūžtų
+ * VYKDYMO metu, o visi sveikatos signalai liktų žali - GDPR ištrynimas kristų
+ * tyliai, tiksliai tada, kai jo prireiktų.
+ */
+const BUTINOS_PRIVILEGIJOS = Object.freeze(["SELECT", "INSERT", "DELETE"]);
+
+/** Teigiamo zondo rezultato galiojimas. Orkestruotojo poll'ai kitaip generuotų SQL kiekvienam. */
+const PROBE_CACHE_TTL_MS = 2000;
+
 /** DB stulpelių sąrašas SELECT'ui - tvarka nesvarbi, bet vienoda abiem kryptim. */
 const STULPELIU_SARASAS = Object.values(STULPELIAI)
   .map((s) => `"${s}"`)
@@ -60,6 +72,10 @@ function iEilute(row) {
 }
 
 function createPostgresStore(pool, { hashKeyId }) {
+  /** Zondo būsena - VIENAM store'ui, ne moduliui: du pool'ai neturi dalintis kešu. */
+  let kesas = null;
+  let vykstantisZondas = null;
+
   return {
     backend: "postgres",
 
@@ -354,9 +370,79 @@ function createPostgresStore(pool, { hashKeyId }) {
       return rows.map((r) => r.hash_key_id);
     },
 
+    /**
+     * READINESS ZONDAS: TIKRINA TEISES, NE VIEN RYŠĮ (#155, 7.4f / #231).
+     *
+     * ⚠️ `SELECT 1` ĮRODO TIK TIEK, KAD JUNGTIS GYVA. Rolė su atimta `DELETE`
+     * teise jį praeitų, o GDPR ištrynimas kristų. Tas pats galioja `SELECT 1
+     * FROM audit_log LIMIT 1`: jis įrodo skaitymą, bet ne rašymą.
+     *
+     * ⚠️ ZONDAS NEMUTUOJA. Teisės tikrinamos per `has_table_privilege()`
+     * katalogo funkciją, ne bandomuoju įrašu: readiness kviečiamas kiekvieno
+     * orkestruotojo probe metu, ir bandomasis `INSERT`/`DELETE` reikštų nuolatinį
+     * audito lentelės šiukšlinimą bei WAL srautą dėl diagnostikos. Append-only
+     * trigeris tokių eilučių dar ir neleistų ištrinti be pėdsako.
+     *
+     * VIENAS round-trip:
+     *   - `FROM audit_log LIMIT 1` - lentelė egzistuoja ir realiai skenuojama
+     *     (be `SELECT` teisės - `permission denied`, be lentelės - `does not
+     *     exist`; abu virsta klaida, kurią sprendžia kvietėjas);
+     *   - `has_table_privilege(...)` - teisės, kurių reikia rašymui ir trynimui.
+     *
+     * Šablonas tas pats kaip `sessionStore/postgresStore.js` - antra realizacija
+     * išsiskirtų tyliai.
+     */
     async probe() {
-      await pool.query("SELECT 1");
-      return true;
+      /**
+       * ⚠️ KEŠUOJAMAS TIK TEIGIAMAS REZULTATAS.
+       *
+       * Neigiamo kešuoti negalima: atsistačiusi DB turi būti pastebėta per kitą
+       * poll'ą, ne po TTL. Bet be jokios apsaugos krentanti DB gautų užklausą
+       * kiekvienam poll'ui - tas pats apkrovos kelias, kurio kešas ir vengia,
+       * tik blogiausiu momentu.
+       *
+       * Sprendimas - SINGLE-FLIGHT, ne trumpas neigiamas TTL: vykstant zondui
+       * visi kiti kvietėjai gauna TĄ PATĮ promise'ą. Tai apriboja lygiagrečias
+       * užklausas iki VIENOS nepriklausomai nuo poll'ų dažnio, ir, skirtingai
+       * nei neigiamas TTL, atsistatymo aptikimo NEATIDEDA nė milisekunde.
+       */
+      const dabar = Date.now();
+
+      if (kesas && kesas.rezultatas === true && dabar - kesas.laikas < PROBE_CACHE_TTL_MS) {
+        return true;
+      }
+
+      if (vykstantisZondas) return vykstantisZondas;
+
+      vykstantisZondas = (async () => {
+        const stulpeliai = BUTINOS_PRIVILEGIJOS.map(
+          (p, i) => `has_table_privilege('audit_log', $${i + 1}) AS "${p.toLowerCase()}"`
+        ).join(", ");
+
+        const { rows } = await pool.query(
+          `WITH skaitymas AS (SELECT 1 FROM audit_log LIMIT 1)
+           SELECT (SELECT count(*) FROM skaitymas)::int AS perskaityta, ${stulpeliai}`,
+          [...BUTINOS_PRIVILEGIJOS]
+        );
+
+        const eilute = rows[0];
+        return BUTINOS_PRIVILEGIJOS.every((p) => eilute[p.toLowerCase()] === true);
+      })();
+
+      try {
+        const rezultatas = await vykstantisZondas;
+        /** Kešuojam tik `true` - žr. paaiškinimą aukščiau. */
+        kesas = rezultatas === true ? { rezultatas, laikas: Date.now() } : null;
+        return rezultatas;
+      } finally {
+        vykstantisZondas = null;
+      }
+    },
+
+    /** ⚠️ Tik testams: leidžia įrodyti, kad kešas realiai baigia galioti. */
+    _resetProbeCacheForTests() {
+      kesas = null;
+      vykstantisZondas = null;
     },
 
     async close() {
@@ -365,4 +451,4 @@ function createPostgresStore(pool, { hashKeyId }) {
   };
 }
 
-module.exports = { createPostgresStore, iEilute };
+module.exports = { createPostgresStore, iEilute, BUTINOS_PRIVILEGIJOS, PROBE_CACHE_TTL_MS };

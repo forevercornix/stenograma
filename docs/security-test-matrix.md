@@ -1640,3 +1640,27 @@ nesaugo, tad `auditRotation` tikrina TIK fan-out logiką. RAW DB įrodymą duoda
 | MIGRACIJA: `offset` ir `event` po 7.4c → 400, ne tylus ignoravimas | `auditQuery.route`, `securityBaseline.route`, `operationalProcedures` | Schema yra `.strict()`, tad tai savaime veikia — bet politikos pakeitimas tikrinamas eksplicitiškai, kad nebūtų šalutinis efektas |
 | `total` pašalintas iš atsakymo kartu su `offset` | `auditQuery.route`, `securityBaseline.route` | Keyset režime jis reikštų `COUNT` per visą filtruotą aibę KIEKVIENAM puslapiui |
 | Runbook'as migruotas: `cursor` ciklas, `offset` → 400 paaiškintas, filtrai išvardyti | `operationalProcedures` | Grąžinus „Kartokite su `offset`" → operatorius vykdytų komandą, kuri grąžina 400, ir manytų, kad audito nėra |
+
+### #231 — audito readiness, backup ir CI registracija (#155, 7.4f)
+
+⚠️ **KUR ATEINA ĮRODYMAS.** Garantijos, reikalaujančios tikros PostgreSQL,
+pažymėtos **[PG NOT RUN]**. Vietinėje aplinkoje egzemplioriaus nėra, o
+provizionavimas uždraustas; jos NĖRA `PASS` iki CI įrodymo (AGENTS.md §14).
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| `/api/ready` tikrina `readiness.auditStore` — be jo instancija NĖRA paruošta | `auditReadiness.route` | Pašalinus `auditStore` iš `initReady` → kritus `auditStore.init()` serveris grąžintų 200 ir priimtų srautą, apeidamas fail-closed audito apsaugą readiness lygyje |
+| Gyvas audito zondas `probeRuntimeReadiness()` viduje su `READINESS_TIMEOUT_MS` riba | `auditReadiness.route` (zondas `false` → 503; kabantis zondas → 503 per ribą) | Be zondo DB kritimas ar teisių atėmimas PO starto liktų nepastebėtas: starto vėliava vienkartinė, o instancija toliau priimtų audito generuojančias užklausas |
+| ⚠️ Neišsprendžiamos generacijos → `/api/ready` **503**, o `/api/health` **200** — tikrinama TAME PAČIAME scenarijuje | `auditReadiness.route` | Jei liveness kristų kartu, orkestruotojas perkraudinėtų podą cikle, ir atsistatymo langas, dėl kurio `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS` egzistuoja, niekada neatsivertų — vėliavėlė būtų paneigta |
+| Zondas tikrina TEISES (`SELECT`, `INSERT`, `DELETE`) per `has_table_privilege()`, ne `SELECT 1` | `auditStoreFields` (kiekviena atimta teisė → `false`) | Be `DELETE` patikros rolė be trynimo teisės praeitų zondą, o `removeBySubjectIdentifier()` kristų vykdymo metu — GDPR ištrynimas lūžtų tyliai su žaliais sveikatos signalais |
+| Zondas NEMUTUOJA — jokio `INSERT INTO`, `DELETE FROM` ar `UPDATE ... SET` | `auditStoreFields` | Bandomasis įrašas reikštų nuolatinį lentelės šiukšlinimą ir WAL srautą dėl diagnostikos; append-only trigeris tokios eilutės dar ir neleistų ištrinti be pėdsako |
+| Kešas įrodomas `pool.query` SKAIČIUMI: 5 kvietimai lange → **1** užklausa; kešas BAIGIA galioti | `auditStoreFields` | Realizacija su `Date.now()`, bet be faktinio praleidimo, praeitų laiko matavimo testą — antras kvietimas būtų greitas ir tada, kai užklausa vis tiek išsiunčiama |
+| NEIGIAMAS rezultatas nekešuojamas, bet lygiagretūs zondai sujungiami (single-flight) | `auditStoreFields` | Kešuojant neigiamą → atsistačiusi DB pastebima tik po TTL; be single-flight → krentanti DB gautų užklausą kiekvienam poll'ui, t. y. tas pats apkrovos kelias blogiausiu momentu |
+| Nei readiness, nei health neatskleidžia secret'ų ar `hash_key_id` generacijų vardų | `auditReadiness.route` | Readiness atsakymą skaito orkestruotojas, monitoringas ir dažnai load balanceris — generacijų sąrašas atskleistų rotacijos istoriją |
+| `excludedTables()` IŠVEDAMAS iš politikos; testas gauna aibę iš jos, ne iš literalo | `backupPolicy` | Įrašius `audit_log` literalu → politika galėtų pakeisti išbraukimą, o testas toliau tvirtintų seną tiesą. Tai 7.6 DoD kabliukas |
+| `TABLE_BY_TYPE` IŠSAMUS: kiekvienas `ARTEFACT_TYPES` narys turi įrašą (`null` leistinas, trūkstamas raktas — ne) | `backupPolicy` | Naujas tipas be įrašo → tyliai iškristų iš `excludedTables()`, ir vietoj rankinio sąrašo TESTE gautume rankinį žemėlapį KODE. Patikrinta mutacija |
+| PostgreSQL rinkinys `suites.js` IŠVEDAMAS iš `postgresGuard` importų, ne surašomas | `suiteDerivation` (round-trip + tripwire prieš literalų masyvą) | Naujas integracinis testas, nepridėtas ranka, niekada nebūtų paleistas su tikra DB — ir tai nebūtų pastebėta: manifesto pilnumo patikra tyli, `npm test` žalias |
+| Kiekvienas `pg` naudojantis testas yra postgres rinkinyje arba turi išimtį su PRIEŽASTIMI | `suiteDerivation` | Testas, kuris jungiasi prie DB be `postgresGuard`, iškristų iš rinkinio ir su `REQUIRE_POSTGRES=1` net nepraneštų apie trūkstamą `DATABASE_URL` |
+| VYKDYMO ĮRODYMAS: `verify-postgres-suite-ran.mjs` atmeta TAP, kuriame testai praleisti | `suiteDerivation` (skriptas testuojamas sintetiniu TAP — BE duomenų bazės) | `npm run test:postgres` grąžina 0 ir tada, kai KIEKVIENAS testas praleido save dėl trūkstamo `DATABASE_URL`. Žalias job'as su praleistais testais nėra sėkmė |
+| ⚠️ **RIBA:** `auditKeysResolvable` yra STARTO snapshot'as, ne gyva būsena — atsinaujina tik per restartą | `docs/audit-storage.md` §16 | Pilnas generacijų skenavimas kiekvieno poll'o metu yra būtent tai, ko 7.4c loose index scan vengia. Vėliavėlės reikšmė snapshot'o nekeičia |
+| Backup runbook įvardija, kad `AUDIT_ID_SALT` ir `AUDIT_ID_SALT_PREVIOUS` saugomi ATSKIRAI ir atkuriami KARTU | `docs/backup-runbook.md` §1, §4, §5 | Atkūrus `audit_log` be raktų visos generacijos tampa neišsprendžiamos, ir GDPR ištrynimas nebeįmanomas — kopija atrodo pilna, bet yra bevertė |

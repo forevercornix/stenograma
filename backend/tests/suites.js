@@ -67,6 +67,8 @@ const privacy = [
   "auditCursor",
   "auditQuery.route",
   "auditRotation",
+  "suiteDerivation",
+  "auditReadiness.route",
   "auditStoreBackendContract.integration",
   "jobErasure",
   "deletionResilience",
@@ -227,57 +229,53 @@ const functional = [
  * triukšmu. CI paleidžia su `REQUIRE_POSTGRES=1`, kuris praleidimą paverčia
  * klaida.
  */
-const postgres = [
-  "migrations.integration",
-  /** #155: PostgreSQL būsena doctor/health išvestyje. */
-  "postgresDoctor.integration",
-  /**
-   * #155, 7.2a: trečias `jobStore` backend'as.
-   *
-   * ⚠️ TIKRAS PostgreSQL BŪTINAS, ne mock. Testuojami dalykai gyvena būtent
-   * DB pusėje: `CHECK` constraint'ų `UNKNOWN` semantika, dalinio `UNIQUE`
-   * indekso elgesys su `NULL` ir `ON DELETE CASCADE`. Su mock'u jie visi
-   * praeitų nieko netikrindami.
-   */
-  "postgresStore.integration",
-  /**
-   * #155, 7.2a: DB CHECK aibės vs runtime autoritetai.
-   *
-   * ⚠️ Sąrašai IŠVEDAMI iš runtime konstantų, ne surašomi - naujas job tipas,
-   * statusas ar fazė be atitinkamos migracijos krinta iškart, o ne po to, kai
-   * sugadinta kopija bus įrašyta.
-   */
-  "dbRuntimeParity.integration",
-  /**
-   * ⚠️ REGISTRUOTAS ABIEJUOSE RINKINIUOSE (`redis` ir `postgres`).
-   *
-   * CI turi du atskirus žingsnius su skirtingomis priklausomybėmis
-   * (`test:redis` su `REDIS_URL`, `test:postgres` su `DATABASE_URL`). Failas,
-   * likęs tik `redis` rinkinyje, PostgreSQL žingsnyje NEBŪTŲ paleistas, o
-   * `redis` žingsnyje `DATABASE_URL` nėra - tad 7.2b pridėtas PostgreSQL
-   * adapteris pats save praleistų, ir CI tikrintų du backend'us iš trijų.
-   *
-   * PostgreSQL adapteris vykdomas šiame rinkinyje; Redis scenarijai šiame
-   * žingsnyje teisėtai praleidžiami, nes `REDIS_URL` čia nėra.
-   */
-  "jobStoreBackendContract.integration",
-  /** #155, 7.3: bendras sesijų scenarijų rinkinys - PostgreSQL adapteris. */
-  "sessionStoreBackendContract.integration",
-  /** #155, 7.4b: bendras audito scenarijų rinkinys - PostgreSQL adapteris. */
-  "auditStoreBackendContract.integration",
-  /**
-   * #155, 7.4b: garantijos, kurių atmintyje NĖRA - schema, invariantai,
-   * append-only trigeris, RAW eilučių privatumas, pool'o gyvavimo ciklas,
-   * išlikimas po restarto ir kelių instancijų matomumas.
-   */
-  "auditPersistence.integration",
-  /**
-   * #155, 7.3: garantijos, kurių atmintyje NĖRA - hash-only saugojimas, DB
-   * laiko invariantai, viena sąlyginė autentikacijos užklausa, revokacija
-   * tarp procesų ir startinis suderinimas.
-   */
-  "sessionPersistence.integration",
-];
+/**
+ * TESTAI, KURIEMS REIKIA TIKRO PostgreSQL - IŠVEDAMI, NE SURAŠOMI (#155, 7.4f / #231).
+ *
+ * ⚠️ RANKINIS SĄRAŠAS ČIA BUVO REALI SPRAGA.
+ *
+ * Naujas integracinis testas, kurio kas nors nepridėtų ranka, NIEKADA nebūtų
+ * paleistas: `npm run test:postgres` jo nematytų, CI liktų žalias, o kodas -
+ * nepatikrintas. Skirtingai nuo kitų rinkinių, čia klaida nematoma - failas
+ * priklauso `privacy` ar `security`, tad manifesto pilnumo patikra nesiskundžia,
+ * o vienintelis dalykas, kurio trūksta, yra vykdymas su tikra DB.
+ *
+ * ⚠️ KRITERIJUS - `postgresGuard` IMPORTAS, NE `.integration` VARDAS.
+ *
+ * Spec'as siūlė „vardas su `.integration` ARBA `postgresGuard` importas", bet
+ * vardo kriterijus surenka ir REDIS integracinius testus (`actorEraRedis`,
+ * `queueRecovery`, `ownershipCasRedis`...), kuriems PostgreSQL nereikia. Jie
+ * postgres žingsnyje praleistų save dėl `REDIS_URL` trūkumo, ir vykdymo
+ * įrodymas („kiekvienam failui bent vienas `ok`") kristų dėl testų, kurie ten
+ * apskritai nepriklauso.
+ *
+ * `postgresGuard` importas yra TIKROJI priklausomybė ir duoda tiksliai tą aibę,
+ * kuri anksčiau buvo surašyta ranka. Nuo naujo PG testo, pamiršusio guard'ą,
+ * saugo atskira patikra `tests/suiteDerivation.test.js`: kiekvienas failas,
+ * importuojantis `pg` arba guard'ą, privalo atsidurti šiame rinkinyje.
+ *
+ * ⚠️ VYKDYMO ĮRODYMAS ATSKIRAI. Sąrašo sudarymas neįrodo, kad testai pasileido:
+ * su `REQUIRE_POSTGRES=1` kiekvienam rinkinio failui privalo pasirodyti bent
+ * vienas `ok` (žr. `tests/suiteDerivation.test.js`). Žalias job'as su
+ * praleistais testais nėra sėkmė.
+ */
+function isvestiPostgresRinkini() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const dir = __dirname;
+
+  return fs
+    .readdirSync(dir)
+    .filter((failas) => failas.endsWith(".test.js"))
+    .filter((failas) => {
+      const turinys = fs.readFileSync(path.join(dir, failas), "utf8");
+      return /require\((["'])[^"']*postgresGuard\1\)/.test(turinys);
+    })
+    .map((failas) => failas.replace(/\.test\.js$/, ""))
+    .sort();
+}
+
+const postgres = isvestiPostgresRinkini();
 
 module.exports = {
   suites: { privacy, security, functional, redis, postgres },
@@ -289,5 +287,7 @@ module.exports = {
    * įtraukus juos čia „3 skipped" taptų nuolatiniu triukšmu, kurį visi išmoktų
    * ignoruoti. Jie paleidžiami atskirai (`npm run test:redis`) ir CI.
    */
+  isvestiPostgresRinkini,
+
   defaultSuites: ["privacy", "security", "functional"],
 };

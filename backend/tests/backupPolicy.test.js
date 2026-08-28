@@ -347,3 +347,71 @@ test("KONTROLINĖ SUMA: dokumentuota, kad ji NEAPSAUGO nuo tyčinio pakeitimo", 
   assert.match(source, /NE NUO PAKEITIMO|neapsaugo nuo tyčinio/i, "riba turi būti įvardyta kode");
   assert.match(source, /paraš|HMAC/i, "turi būti nurodytas sprendimas (parašas su raktu)");
 });
+
+test("7.6 KABLIUKAS: `audit_log` išbraukimas IŠVEDAMAS iš politikos, ne surašytas", () => {
+  /**
+   * ⚠️ TAI KABLIUKAS, KURIO REIKIA 7.6 DoD („prieš kopiją įrašyta unikali audito
+   * eilutė po restore NERANDAMA").
+   *
+   * Testas privalo gauti aibę IŠ POLITIKOS. Įrašius `audit_log` literalu, jis
+   * taptų rankomis palaikomu sąrašu, kuris tyliai išsiskiria: politika galėtų
+   * pakeisti išbraukimą, o testas toliau tvirtintų seną tiesą.
+   */
+  const { excludedTables, excludedTypes, TABLE_BY_TYPE } = require("../utils/backupPolicy");
+  const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
+
+  const lentelės = excludedTables();
+
+  assert.ok(
+    lentelės.includes(TABLE_BY_TYPE[ARTEFACT_TYPES.AUDIT_ENTRY.id]),
+    "audito lentelė privalo būti išbraukimų aibėje"
+  );
+
+  /** ⚠️ Aibė ateina iš politikos: išbraukus tipą, dingsta ir lentelė. */
+  const išbrauktiTipai = excludedTypes().map((į) => į.type);
+  assert.ok(
+    išbrauktiTipai.includes(ARTEFACT_TYPES.AUDIT_ENTRY.id),
+    "prielaida: auditas išbrauktas politikos lygiu"
+  );
+
+  for (const lentelė of lentelės) {
+    const tipas = Object.entries(TABLE_BY_TYPE).find(([, l]) => l === lentelė);
+    assert.ok(tipas, `${lentelė} nėra susieta su jokiu artefakto tipu`);
+    assert.ok(
+      išbrauktiTipai.includes(tipas[0]),
+      `${lentelė} aibėje, nors jos tipas ${tipas[0]} NĖRA išbrauktas - aibė nebeišvedama`
+    );
+  }
+});
+
+test("ŽEMĖLAPIS: KIEKVIENAS artefakto tipas turi lentelės įrašą", () => {
+  /**
+   * ⚠️ BE ŠIOS PATIKROS PROBLEMA TIK PERSIKELTŲ.
+   *
+   * Rankomis palaikomas sąrašas teste būtų pakeistas rankomis palaikomu
+   * žemėlapiu kode. Naujas `ARTEFACT_TYPES` narys be įrašo `TABLE_BY_TYPE`
+   * tyliai iškristų iš `excludedTables()`, ir 7.6 patikra jo nebematytų.
+   *
+   * `null` yra TEISĖTA reikšmė - „šis tipas neturi savo lentelės". Trūkstamas
+   * raktas - ne.
+   */
+  const { TABLE_BY_TYPE } = require("../utils/backupPolicy");
+  const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
+
+  const trūksta = Object.values(ARTEFACT_TYPES)
+    .map((t) => t.id)
+    .filter((id) => !(id in TABLE_BY_TYPE));
+
+  assert.deepEqual(
+    trūksta,
+    [],
+    `TABLE_BY_TYPE neturi įrašo: ${trūksta.join(", ")}. Pridėkite lentelės vardą arba ` +
+      "eksplicitinį `null`, jei tipas savo lentelės neturi."
+  );
+
+  /** Ir atvirkščiai: žemėlapyje neturi likti tipų, kurių nebėra. */
+  const žinomi = new Set(Object.values(ARTEFACT_TYPES).map((t) => t.id));
+  for (const id of Object.keys(TABLE_BY_TYPE)) {
+    assert.ok(žinomi.has(id), `TABLE_BY_TYPE mini nežinomą tipą "${id}"`);
+  }
+});
