@@ -297,31 +297,42 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
   }
 });
 
-test("RETENCIJOS ĮSPĖJIMAS: turinys įvardija TIKSLIAI tai, ko operatorius nežino", () => {
+test("RETENCIJOS ĮSPĖJIMAS: turinys atitinka 7.4d elgesį, o ne senąjį", () => {
   /**
-   * ⚠️ TURINIO PATIKRA VYKDOMA VIETOJE; kad įspėjimas realiai LOGINAMAS starte,
-   * tikrina `auditPersistence.integration` (reikia tikros DB).
+   * ⚠️ ŠIS TESTAS PERRAŠYTAS 7.4d (#213), NES JO DALYKAS PASIKEITĖ.
    *
-   * Postgres režime `audit_log` neribotai auga iki [7.4d]. Diegimas, matantis
-   * `AUDIT_RETENTION_DAYS=30` konfigūracijoje, pagrįstai manytų, kad ji galioja -
-   * todėl įspėjimas privalo pasakyti abu dalykus: kad NEVEIKIA ir kad lentelė AUGS.
+   * Iki 7.4d įspėjimas skelbė, kad retencija postgres režime NEVEIKIA ir kad
+   * lentelė augs neribotai - tada tai buvo tiesa. Įgyvendinus persistentinę
+   * retenciją tas pats tekstas taptų MELU, o melas šioje vietoje brangus:
+   * operatorius arba pridėtų antrą išorinę valymo politiką, arba nepasitikėtų
+   * veikiančiu mechanizmu.
+   *
+   * Todėl tikrinama, kad tekstas skelbia NAUJĄ elgesį ir nebeskelbia senojo.
+   * Turinio patikra vykdoma vietoje; kad įspėjimas realiai loginamas starte,
+   * tikrina `auditPersistence.integration` (reikia tikros DB).
    */
   const { RETENCIJOS_ISPEJIMAS } = require("../utils/auditStore");
 
-  for (const privalomas of [
-    "AUDIT_RETENTION_DAYS",
-    "AUDIT_MAX_ENTRIES",
-    "audit_log",
-    "7.4d",
-    "docs/audit-storage.md",
-  ]) {
+  for (const privalomas of ["AUDIT_RETENTION_DAYS", "AUDIT_MAX_ENTRIES", "docs/audit-storage.md"]) {
     assert.ok(
       RETENCIJOS_ISPEJIMAS.includes(privalomas),
       `įspėjime turi būti „${privalomas}" - kitaip operatorius nežinotų, ko ieškoti`
     );
   }
 
-  assert.match(RETENCIJOS_ISPEJIMAS, /neribotai|nešalinamos/i, "poveikis turi būti įvardytas");
+  /** ⚠️ Skirtumas, dėl kurio įspėjimas apskritai lieka: kiekio riba NĖRA retencija. */
+  assert.match(
+    RETENCIJOS_ISPEJIMAS,
+    /NETAIKOMA|nešalinamos vien dėl kiekio/i,
+    "`AUDIT_MAX_ENTRIES` netaikymas persistentinėms eilutėms privalo būti įvardytas"
+  );
+
+  /** ⚠️ SENASIS TEIGINYS NEGALI GRĮŽTI. */
+  assert.doesNotMatch(
+    RETENCIJOS_ISPEJIMAS,
+    /retencija NEVEIKIA|augs neribotai|iki tol reikalinga išorinė/i,
+    "tekstas skelbia elgesį, kurio 7.4d nebeturi"
+  );
 
   /** ⚠️ Ne klaida, o įspėjimas - startas privalo tęstis. */
   assert.doesNotMatch(RETENCIJOS_ISPEJIMAS, /NUTRAUK|startas negalimas/i);

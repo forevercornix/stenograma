@@ -101,12 +101,21 @@ const REQUIRED_AUDIT_TRIGGER = "audit_log_no_update";
  * ⚠️ EKSPORTUOJAMA KONSTANTA, ne inline eilutė: turinį reikia tikrinti BE tikros
  * DB, nes pats `init()` postgres šakoje be jos nevykdomas.
  */
+/**
+ * ⚠️ TEKSTAS PAKEISTAS 7.4d (#213), NES SENASIS TAPO MELU.
+ *
+ * Iki 7.4d jis skelbė, kad retencija postgres režime NEVEIKIA. Nuo šio darbo
+ * `AUDIT_RETENTION_DAYS` taikoma ir persistentinei lentelei per centralizuotą
+ * sweep'ą. Palikus seną tekstą, operatorius manytų, kad reikia išorinės valymo
+ * politikos - ir arba pridėtų antrą trynimo mechanizmą, arba nepasitikėtų
+ * veikiančiu. Dokumentacija, stipresnė ar silpnesnė už kodą, abiem atvejais
+ * klaidina (AGENTS.md §12.1).
+ */
 const RETENCIJOS_ISPEJIMAS =
-  "Audito retencija NEVEIKIA postgres režime: AUDIT_RETENTION_DAYS ir " +
-  "AUDIT_MAX_ENTRIES taikomi tik atminties backend'ui, tad `audit_log` " +
-  "eilutės automatiškai nešalinamos ir lentelė augs neribotai. " +
-  "Persistentinę retenciją įgyvendina [7.4d]; iki tol reikalinga išorinė " +
-  "valymo politika. Žr. docs/audit-storage.md §9.";
+  "Audito retencija postgres režime taikoma per centralizuotą sweep'ą " +
+  "(AUDIT_RETENTION_DAYS). `AUDIT_MAX_ENTRIES` yra TIK atminties apsauga ir " +
+  "persistentinėms eilutėms NETAIKOMA - eilutės nešalinamos vien dėl kiekio. " +
+  "Žr. docs/audit-storage.md §9.";
 
 let store = memoryStore;
 let _pool = null;
@@ -689,6 +698,31 @@ async function init(env = process.env) {
     }
 
     const { store: pgStore, pool } = await initializePostgres(env);
+
+    /**
+     * `PRIVACY_MODE` STARTO BARJERAS (#155, 7.4d / #213).
+     *
+     * ⚠️ TVARKA NĖRA STILIAUS KLAUSIMAS. Purge eina PRIEŠ
+     * `patikrintiGeneracijas()`: išvalius eilutes `usedGenerations()` grąžina
+     * `[]`, tad 7.4c fail-closed taisyklė nebeturi ko atmesti. Priešinga tvarka
+     * sustabdytų startą dėl našlaičių generacijų, kurias purge tuoj pat būtų
+     * ištrynęs - t. y. dėl eilučių, kurių po sekundės nebebūtų.
+     *
+     * ⚠️ FAIL-CLOSED IR `await`INTA. Jokio `catch`: tęsti su
+     * `PRIVACY_MODE=true` ir senomis eilutėmis DB reikštų, kad vėliava žada
+     * ištrynimą, o duoda nutildymą. Fire-and-forget čia reikštų tą patį, tik
+     * nematomai.
+     *
+     * Vieta pasirinkta sąmoningai: DB pool paruoštas, schema ir invariantai
+     * patikrinti, store sukurtas - anksčiau valyti reikštų lenktynes.
+     */
+    if (String(env.PRIVACY_MODE).toLowerCase() === "true") {
+      const kiek = await pgStore.purgeAllForPrivacy();
+      log.warn(
+        `PRIVACY_MODE=true - persistentinis auditas išvalytas starto metu (${kiek} eilučių). ` +
+          "Tai negrįžtama; kol vėliava įjungta, nauji įrašai nepersistinami."
+      );
+    }
 
     await patikrintiGeneracijas(pgStore, env);
 

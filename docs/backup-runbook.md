@@ -59,6 +59,32 @@ užfiksuokite ir tuo metu galiojusius `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID` bei
 `AUDIT_ID_SALT_PREVIOUS` — savo paslapčių saugykloje, ne kopijos faile. Jie
 saugomi **atskirai ir atkuriami kartu** su ta kopija.
 
+### ⚠️ `pg_dump` audito duomenų NEIMA (7.4d)
+
+```bash
+pg_dump --exclude-table-data=audit_log "$DATABASE_URL" > kopija.sql
+```
+
+⚠️ **Be šio parametro kopija paneigia dvi ištrynimo garantijas vienu metu.**
+`audit_log` yra įprasta lentelė, tad `pg_dump` ją įtraukia pagal nutylėjimą.
+Atkūrus tokį dump'ą grįžta:
+
+- **GDPR ištrinti** įrašai — `removeBySubjectIdentifier()` juos fiziškai
+  pašalino, o atkūrimas grąžina;
+- **retencijos pašalinti** įrašai — jie dingo pasibaigus `AUDIT_RETENTION_DAYS`,
+  ir atkūrimas atsuka tą terminą atgal.
+
+Abiem atvejais sistemoje atsiranda pseudonimizuotų asmens duomenų, kurių ten
+neturi būti, ir niekas apie tai nepraneša.
+
+⚠️ **`--exclude-table-data`, NE `--exclude-table`.** Pirmasis praleidžia
+duomenis, bet palieka lentelės schemą; antrasis pašalintų ir ją, o atkurta DB
+liktų be `audit_log` — startas tada nutrūktų fail-closed, nes `auditStore.init()`
+reikalauja lentelės ir jos invariantų.
+
+Schema atkuriama, duomenys — ne: būtent to ir norima, nes auditas yra
+atskaitomybės žurnalas, o ne atkuriama būsena (žr. `docs/audit-storage.md` §10).
+
 ## 2. Įjungimas
 
 Kopijos numatytai **išjungtos** — jos yra papildoma asmens duomenų saugykla.

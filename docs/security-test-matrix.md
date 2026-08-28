@@ -1641,6 +1641,30 @@ nesaugo, tad `auditRotation` tikrina TIK fan-out logiką. RAW DB įrodymą duoda
 | `total` pašalintas iš atsakymo kartu su `offset` | `auditQuery.route`, `securityBaseline.route` | Keyset režime jis reikštų `COUNT` per visą filtruotą aibę KIEKVIENAM puslapiui |
 | Runbook'as migruotas: `cursor` ciklas, `offset` → 400 paaiškintas, filtrai išvardyti | `operationalProcedures` | Grąžinus „Kartokite su `offset`" → operatorius vykdytų komandą, kuri grąžina 400, ir manytų, kad audito nėra |
 
+### #213 — audito retencija ir `PRIVACY_MODE` (#155, 7.4d)
+
+⚠️ **KUR ATEINA ĮRODYMAS.** Garantijos, reikalaujančios tikros PostgreSQL,
+pažymėtos **[PG NOT RUN]**. Vietinėje aplinkoje egzemplioriaus nėra, o
+provizionavimas uždraustas; jos NĖRA `PASS` iki CI įrodymo (AGENTS.md §14).
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ `PRIVACY_MODE=true` su postgres **NEBEKRENTA GAMYBOJE** — `purgeForPrivacyMode()` persistentiniame režime yra saugus no-op | `auditRetention` (testas sukasi su `NODE_ENV=production`) | Grąžinus `clear()` kvietimą → `record()`, `getAll()` ir `query()` mestų `auditStore.clear() … TIK testuose` ir procesas kristų per pirmą audito operaciją. Su `NODE_ENV=test` defekto pamatyti NEĮMANOMA — būtent todėl jis išgyveno iki #213 |
+| Retencijos riba apskaičiuojama **VIENĄ kartą** sweep'ui ir ta pati keliauja į visus batch'us | `auditRetention` | Perskaičiuojant `now()` kiekvienam batch'ui → ilgo sweep'o metu naikinama aibė slenka, ir rezultatas priklauso nuo trukmės, ne nuo politikos |
+| Batch'ų ciklas kartoja, kol saugykla grąžina mažiau nei limitas | `auditRetention` | Be ciklo pilnas batch'as reikštų tyliai nebaigtą valymą: expired eilutės liktų iki kito sweep'o, o `RETENTION_PURGE` įrašas praneštų sėkmę |
+| Batch dydis turi **vieną autoritetingą šaltinį** (`RETENCIJOS_BATCH`); testas jį importuoja | `auditRetention` | Ranka įrašius skaičių ir kode, ir teste → pakeitus vieną, testas liktų žalias su senuoju dydžiu (ta pati rankomis palaikomo sąrašo klasė, kurią 7.4f pašalino kitur) |
+| ⚠️ `retentionSweeper` **`await`ina** `purgeExpired()`; grąžinamas baigtinis sveikasis skaičius | `auditRetention` | Be `await` → `RETENTION_PURGE` įrašas rodytų `[object Promise]` vietoj skaičiaus, o klaida taptų neapdorotu rejection — tyliu būtent tame kelyje, kuris turi įrodyti asmens duomenų pašalinimą |
+| ⚠️ Vienos instancijos sweep'ai **NEPERSIDENGIA** — matuojamas lygiagretumas, ne vėliavos egzistavimas | `auditRetention` (lygiagrečių įėjimų skaitiklis) | Be apsaugos lėtas sweep'as ir trumpas intervalas duotų du ciklus viename procese: jie konkuruotų dėl tų pačių eilučių, o `RETENTION_PURGE` įrašai persidengtų |
+| Riba GRIEŽTA: `< cutoff` šalinama, **`== cutoff` lieka**, `> cutoff` lieka | `auditRetention` (atmintis), `auditStoreBackendContract` (paritetas) · **[PG NOT RUN]** `auditPersistence.integration` | `<=` vietoj `<` → vienas negrįžtamai ištrintas įrašas ties riba; akimi nematomas skirtumas, kurio joks kiekio testas nepagauna |
+| `limit` riboja VIENĄ kvietimą, ne visą aibę | `auditRetention`, `auditStoreBackendContract` · **[PG NOT RUN]** `auditPersistence.integration` (skaičiuojami `DELETE` kvietimai) | Neribotas `DELETE` duotų tą patį galutinį vaizdą, bet užrakintų lentelę visam trynimo laikui — riba egzistuoja dėl transakcijos trukmės |
+| **[PG NOT RUN]** Dvi instancijos lygiagrečiai: be deadlock'o, be likučių, kiekviena eilutė pašalinta tiksliai kartą | `auditPersistence.integration` | Be `FOR UPDATE SKIP LOCKED` antroji instancija lauktų pirmosios užrakintų eilučių arba susidurtų deadlock'e; proceso lokali spyna multi-instance atveju negalioja |
+| **[PG NOT RUN]** Retencija **atrakina rakto išėmimą**: `A` įrašai pašalinti → `A` išimamas iš `AUDIT_ID_SALT_PREVIOUS` → startas praeina | `auditPersistence.integration` | Be šio ciklo 7.4c fail-closed taisyklė taptų spąstais: istorinių raktų sąrašas galėtų tik augti, nes įrašai neišnyktų niekada |
+| **[PG NOT RUN]** `PRIVACY_MODE` starto purge: RAW sentinel eilutė FIZIŠKAI dingsta, nauji įvykiai eilučių nepalieka, `true → false` seni negrįžta | `auditPersistence.integration` | Įrodymas per `GET /api/audit` nieko nereikštų: fasadas `PRIVACY_MODE` metu grąžina tuščią sąrašą nepriklausomai nuo to, ar eilutės ištrintos — nutildymas atrodytų kaip ištrynimas |
+| **[PG NOT RUN]** Purge `await`inamas **PRIEŠ** `patikrintiGeneracijas()` | `auditPersistence.integration` (DB su našlaičių generacija + `PRIVACY_MODE=true` → startas praeina) | Priešinga tvarka nutrauktų startą fail-closed dėl eilučių, kurias purge tuoj pat ištrintų — instancija nepakiltų dėl duomenų, kurių po sekundės nebebūtų |
+| **[PG NOT RUN]** `AUDIT_MAX_ENTRIES` postgres režime NĖRA retencijos taisyklė — daugiau nei N eilučių išlieka | `auditPersistence.integration` | Perkėlus ribą į DB → audito įrašas dingtų ne dėl retencijos termino, o dėl to, kad po jo atėjo pakankamai naujų: tylus naikinimas be politikos |
+| Atminties `AUDIT_MAX_ENTRIES` semantika NEREGRESUOJA | `auditRetention`, `auditLog` | 7.4d liečia persistentinį kelią; atminties riba yra 7.4a elgesys, ir jos pakeitimas būtų nematomas regresas viename procese |
+| **[PG NOT RUN]** Trys teisėti šalinimo keliai yra (`removeBySubject`, `purgeExpired`, `purgeAllForPrivacy`), bendras `clear()` produkcijoje toliau META, append-only trigeris nepaliestas | `auditPersistence.integration` | 7.4b apsauga gyvena store API (DB `DELETE` sąmoningai atviras). Pridėjus bendrą trynimo primityvą → atsitiktinis produkcinis kvietėjas ištrintų visą audito pėdsaką |
+
 ### #231 — audito readiness, backup ir CI registracija (#155, 7.4f)
 
 ⚠️ **KUR ATEINA ĮRODYMAS.** Garantijos, reikalaujančios tikros PostgreSQL,

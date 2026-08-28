@@ -84,9 +84,16 @@ test("purges audit entries older than configured retention", async () => {
   });
 
   const twoDaysLater = Date.now() + 2 * 24 * 60 * 60 * 1000;
-  const removed = auditLog.purgeExpired(twoDaysLater);
+
+  /**
+   * ⚠️ `await` NUO 7.4d (#213): `purgeExpired()` tapo asinchroninė, nes
+   * persistentiniame režime ji vykdo ribotus DB batch'us. Be `await` čia būtų
+   * lyginamas `Promise`, o sweeper'is logintų `[object Promise]`.
+   */
+  const removed = await auditLog.purgeExpired(twoDaysLater);
 
   assert.equal(removed, 1);
+  assert.ok(Number.isInteger(removed), "grąžinamas baigtinis sveikasis skaičius");
   assert.equal((await auditLog.getAll()).length, 0);
 
   delete process.env.AUDIT_RETENTION_DAYS;

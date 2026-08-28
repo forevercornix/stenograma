@@ -32,6 +32,19 @@ const BUTINOS_PRIVILEGIJOS = Object.freeze(["SELECT", "INSERT", "DELETE"]);
  */
 const SEKOS_PRIVILEGIJOS = Object.freeze(["USAGE", "UPDATE"]);
 
+/**
+ * RETENCIJOS BATCH DYDIS - VIENAS AUTORITETAS (#155, 7.4d / #213).
+ *
+ * ⚠️ SKAIČIUS GYVENA ČIA, NE KODE IR TESTE ATSKIRAI. Ranka įrašytas dydis
+ * dviejose vietose yra ta pati rankomis palaikomo sąrašo klasė, kurią 7.4f
+ * pašalino kitur: testas praeitų su viena reikšme, o produkcija naudotų kitą.
+ *
+ * Dydis riboja VIENĄ `DELETE` kvietimą, ne visą sweep'ą - ilgą trynimą sweep'as
+ * baigia keliais kvietimais. Prasmė - trumpos transakcijos ir trumpi užraktai,
+ * o ne bendras šalinimo limitas.
+ */
+const RETENCIJOS_BATCH = 500;
+
 /** Teigiamo zondo rezultato galiojimas. Orkestruotojo poll'ai kitaip generuotų SQL kiekvienam. */
 const PROBE_CACHE_TTL_MS = 2000;
 
@@ -353,6 +366,66 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
     },
 
     /**
+     * RETENCIJA: VIENAS RIBOTAS BATCH'AS (#155, 7.4d / #213).
+     *
+     * ⚠️ KANDIDATAI ATRENKAMI DB PUSĖJE. Parsisiųsti expired eilutes į Node ir
+     * trinti po vieną reikštų O(n) round-trip'ų ir nekontroliuojamą trukmę.
+     * `DELETE` neturi paprasto `LIMIT`, tad riba taikoma kandidatų CTE.
+     *
+     * ⚠️ `FOR UPDATE SKIP LOCKED` - MULTI-INSTANCE KOREKTIŠKUMAS. Dvi instancijos
+     * gali sweep'inti tą pačią lentelę vienu metu. Be `SKIP LOCKED` antroji
+     * lauktų pirmosios užrakintų eilučių arba susidurtų deadlock'e; su juo ji
+     * tiesiog praleidžia užimtas eilutes ir paima kitas. Rezultatas
+     * idempotentiškas: jau ištrinta eilutė nebeatrenkama.
+     *
+     * ⚠️ `timestamp < $1` - riba GRIEŽTA. `== cutoff` LIEKA (fiksuotas #213
+     * sprendimas). Indeksas `timestamp` sukurtas 7.4b migracijoje.
+     *
+     * @returns {Promise<number>} kiek eilučių pašalinta ŠIUO kvietimu.
+     */
+    async purgeExpired(cutoffIso, limit = RETENCIJOS_BATCH) {
+      const riba = Number(limit);
+
+      if (!Number.isInteger(riba) || riba < 1) {
+        throw new Error(`Retencijos batch dydis privalo būti teigiamas sveikasis (gauta: ${limit}).`);
+      }
+
+      const { rowCount } = await pool.query(
+        `WITH kandidatai AS (
+           SELECT id FROM audit_log
+            WHERE timestamp < $1
+            ORDER BY seq
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+         )
+         DELETE FROM audit_log a USING kandidatai k WHERE a.id = k.id`,
+        [cutoffIso, riba]
+      );
+
+      return rowCount;
+    },
+
+    /**
+     * `PRIVACY_MODE` STARTO VALYMAS (#155, 7.4d / #213).
+     *
+     * ⚠️ ATSKIRAS METODAS, NE `clear()` SU IŠIMTIMI. `clear()` yra testų
+     * įrankis, kuris produkcijoje SĄMONINGAI meta klaidą (žr. žemiau). Privacy
+     * valymas yra teisėtas produkcinis kelias, bet tik VIENAS: jį kviečia
+     * `auditStore.init()` starto metu ir daugiau niekas.
+     *
+     * Atskiras vardas išlaiko 7.4b ribą: bendro `DELETE FROM audit_log`
+     * primityvo produkcinis kvietėjas negauna - jis gauna tris tikslinius kelius
+     * (erasure, retencija, privacy purge), kurių kiekvieno prasmė matoma iš
+     * pavadinimo.
+     *
+     * @returns {Promise<number>} pašalintų eilučių skaičius.
+     */
+    async purgeAllForPrivacy() {
+      const { rowCount } = await pool.query("DELETE FROM audit_log");
+      return rowCount;
+    },
+
+    /**
      * ⚠️ NEPRIEINAMA PRODUKCINIAM KODUI - TAI NĖRA VIEN KOMENTARAS.
      *
      * Deklaruota vientisumo riba sako, kad store'as eksponuoja TIK subjektu
@@ -546,6 +619,7 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
 module.exports = {
   createPostgresStore,
   iEilute,
+  RETENCIJOS_BATCH,
   BUTINOS_PRIVILEGIJOS,
   SEKOS_PRIVILEGIJOS,
   PROBE_CACHE_TTL_MS,

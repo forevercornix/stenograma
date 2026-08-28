@@ -158,6 +158,55 @@ const memoryStore = {
     return eilutes.filter((e) => e.subjectId === subjectId).length;
   },
 
+  /**
+   * RETENCIJA - TAS PATS KONTRAKTAS KAIP POSTGRES (#155, 7.4d / #213).
+   *
+   * ⚠️ RIBA GRIEŽTA IR VIENODA ABIEJUOSE BACKEND'UOSE: `< cutoff` šalinama,
+   * `== cutoff` lieka. Skirtinga riba čia reikštų, kad tas pats įrašas išgyvena
+   * atmintyje ir dingsta DB - tokį nukrypimą pagauna bendras paritetų rinkinys.
+   *
+   * ⚠️ `limit` gerbiamas, nors atmintyje jis nebūtinas. Kontraktas turi būti
+   * vienodas: sweep'o ciklas nežino, kuris backend'as po juo, ir jo elgesys
+   * neturi priklausyti nuo to.
+   *
+   * ⚠️ NETINKAMO `timestamp` eilutės ČIA NEŠALINAMOS - tai daro `auditLog`
+   * atminties kelias (7.4a elgesys). Postgres pusėje `timestamp` yra `NOT NULL
+   * timestamptz`, tad netinkamos reikšmės negali atsirasti, ir šis metodas
+   * abiejuose backend'uose reiškia tą patį.
+   */
+  async purgeExpired(cutoffIso, limit = Infinity) {
+    const riba = Date.parse(cutoffIso);
+    if (!Number.isFinite(riba)) throw new Error(`Netinkamas retencijos cutoff: ${cutoffIso}`);
+
+    const pasalinti = [];
+
+    for (const eilute of eilutes) {
+      if (pasalinti.length >= limit) break;
+
+      const laikas = Date.parse(eilute.timestamp);
+      if (Number.isFinite(laikas) && laikas < riba) pasalinti.push(eilute);
+    }
+
+    for (const eilute of pasalinti) {
+      const vieta = eilutes.indexOf(eilute);
+      if (vieta !== -1) eilutes.splice(vieta, 1);
+    }
+
+    return pasalinti.length;
+  },
+
+  /**
+   * `PRIVACY_MODE` starto valymas - simetriškas postgres keliui.
+   *
+   * Atmintyje jis sutampa su `clear()`, bet vardas išlaikomas atskiras: sweep'o
+   * ir init'o kodas neturi šakotis pagal backend'ą.
+   */
+  async purgeAllForPrivacy() {
+    const kiek = eilutes.length;
+    eilutes.length = 0;
+    return kiek;
+  },
+
   async clear() {
     eilutes.length = 0;
     /** ⚠️ `seq` NEATSTATOMAS: kursoriai iš ankstesnio rinkinio neturi netikėtai atgyti. */

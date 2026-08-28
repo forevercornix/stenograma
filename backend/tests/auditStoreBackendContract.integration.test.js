@@ -463,6 +463,54 @@ const SCENARIJAI = [
       assert.equal(await store.probe(), true);
     },
   },
+  {
+    id: "retencija-salina-tik-pries-cutoff",
+    kodel: "purgeExpired() riba reiškia TĄ PATĮ abiejuose backend'uose (#213)",
+    async run({ store }) {
+      await store.append(eilute());
+      await store.append(eilute());
+
+      /**
+       * ⚠️ Praeities riba negali pašalinti nieko. Backend'as, kuris čia ištrina,
+       * traktuoja `cutoff` kaip „viską iki dabar" - ir tyliai naikintų šviežius
+       * įrašus.
+       */
+      const praeitis = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      assert.equal(await store.purgeExpired(praeitis, 100), 0, "praeities riba nešalina nieko");
+      assert.equal((await store.list()).total, 2);
+
+      const ateitis = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      assert.equal(await store.purgeExpired(ateitis, 100), 2, "riba po įrašų - abu pašalinami");
+      assert.equal((await store.list()).total, 0);
+    },
+  },
+  {
+    id: "retencija-gerbia-batch-limita",
+    kodel: "purgeExpired() limit riboja VIENĄ kvietimą abiejuose backend'uose (#213)",
+    async run({ store }) {
+      for (let i = 0; i < 3; i += 1) await store.append(eilute());
+
+      const ateitis = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+      assert.equal(await store.purgeExpired(ateitis, 2), 2, "ne daugiau nei limitas");
+      assert.equal(await store.purgeExpired(ateitis, 2), 1, "likutis");
+      assert.equal(await store.purgeExpired(ateitis, 2), 0, "aibė išsemta");
+    },
+  },
+  {
+    id: "privacy-purge-isvalo-viska",
+    kodel: "purgeAllForPrivacy() yra teisėtas starto kelias abiejuose backend'uose (#213)",
+    async run({ store }) {
+      await store.append(eilute());
+      await store.append(eilute());
+
+      assert.equal(await store.purgeAllForPrivacy(), 2, "grąžinamas pašalintų kiekis");
+      assert.equal((await store.list()).total, 0);
+
+      /** Idempotentiška: pakartotinis startas su ta pačia vėliava nekrenta. */
+      assert.equal(await store.purgeAllForPrivacy(), 0);
+    },
+  },
 ];
 
 async function paleisti(ctx, pavadinimas) {

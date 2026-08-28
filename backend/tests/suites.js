@@ -48,6 +48,8 @@ const redis = [
  * eksporto variantai, auditas be turinio.
  */
 const privacy = [
+  /** #155, 7.4d: persistentinė retencija ir `PRIVACY_MODE` postgres režime. */
+  "auditRetention",
   "piiRedaction",
   "privacyConfig",
   "privacyPolicy",
