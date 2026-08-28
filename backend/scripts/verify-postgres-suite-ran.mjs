@@ -1,59 +1,72 @@
 #!/usr/bin/env node
 /**
- * ĮRODYMAS, KAD PostgreSQL TESTAI TIKRAI VYKDYTI (#155, 7.4f / #231).
+ * ĮRODYMAS, KAD POSTGRES RINKINYS REALIAI VYKDYTAS (#155, 7.4f / #231).
  *
- * ⚠️ ŽALIAS JOB'AS SU PRALEISTAIS TESTAIS NĖRA SĖKMĖ.
+ * ⚠️ ŽALIAS JOB'AS NĖRA ĮRODYMAS.
  *
- * `npm run test:postgres` grąžina 0 ir tada, kai KIEKVIENAS testas praleido
- * save dėl trūkstamo `DATABASE_URL`. Tokia CI būsena atrodo identiškai sėkmei,
- * bet neįrodo nieko - ir būtent ji slepia neveikiantį DB kelią.
+ * `test:postgres` grąžina 0 ir tada, kai kiekvienas testas praleido save dėl
+ * trūkstamo `DATABASE_URL`. Tokia CI būsena atrodo identiškai sėkmei, bet
+ * neįrodo nieko - ir būtent ji slepia neveikiantį DB kelią.
  *
- * ⚠️ GRANULIARUMO RIBA, KURIĄ BŪTINA ŽINOTI.
+ * ⚠️ TIKRINAMA PER FAILĄ, NE PER SRAUTĄ.
  *
- * Pirmoji šio skripto versija reikalavo „bent vienas nepraleistas `ok`
- * KIEKVIENAM rinkinio failui". Tai neįmanoma: Node 18 `node --test <failai>`
- * duoda PLOKŠČIĄ TAP srautą, kuriame failų vardų nėra apskritai - tik testų
- * pavadinimai. Ta versija krisdavo VISADA, nepriklausomai nuo to, ar testai
- * realiai vykdyti; CI kritimas buvo jos pačios klaida.
+ * Pirmoji versija skaitė VIENĄ bendrą TAP ir bandė iš jo atpažinti failų
+ * vardus. Tai neįmanoma: Node 18 `node --test <failai>` duoda plokščią srautą
+ * be failų atributikos. Antroji versija to atsisakė, bet kartu susilpnino
+ * kriterijų iki „rinkinyje yra bent vienas įvykdytas testas" - failas, nutilęs
+ * dėl klaidingo importo ar praleisto `describe`, praeidavo, jei kiti sukasi.
  *
- * Todėl tikrinama tai, ką šis formatas leidžia įrodyti, ir kas atitinka TIKRĄJĮ
- * gedimo režimą:
- *   1. nė vienas testas nepraleistas dėl trūkstamo `DATABASE_URL`;
- *   2. realiai įvykdytų testų yra.
+ * Dabar `run-tests.mjs --tap-dir` paleidžia KIEKVIENĄ failą atskiru procesu ir
+ * rašo `<dir>/<vardas>.tap`. Atributika yra failo vardas, tad kriterijus
+ * grįžta prie #231 formuluotės - bent vienas NEPRALEISTAS `ok` KIEKVIENAM
+ * rinkinio failui - ir nebepriklauso nuo Node versijos ar reporterio.
  *
- * Su nustatytu `DATABASE_URL` postgres rinkinyje praleidimų būti neturi, tad
- * (1) yra lygiavertis reikalavimui. Failų lygio atributikos NĖRA, ir šis
- * komentaras egzistuoja tam, kad kitas skaitytojas jos čia neieškotų.
+ * Naudojimas:
+ *   node scripts/run-tests.mjs postgres --tap-dir=/tmp/pg-tap
+ *   node scripts/verify-postgres-suite-ran.mjs /tmp/pg-tap
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { suites } = require("../tests/suites.js");
+const here = path.dirname(fileURLToPath(import.meta.url));
+const { suites } = require(path.join(here, "..", "tests", "suites.js"));
 
-const kelias = process.argv[2];
+const katalogas = process.argv[2];
 
-if (!kelias) {
-  console.error("Naudojimas: node scripts/verify-postgres-suite-ran.mjs <tap-failas>");
+if (!katalogas) {
+  console.error("Naudojimas: verify-postgres-suite-ran.mjs <tap-katalogas>");
   process.exit(2);
 }
 
-const eilutes = fs.readFileSync(kelias, "utf8").split("\n");
-
-const okEilutes = eilutes.filter((eil) => /^\s*ok \d+ - /.test(eil));
+if (!fs.existsSync(katalogas) || !fs.statSync(katalogas).isDirectory()) {
+  console.error(
+    `\`${katalogas}\` nėra katalogas. Šis tikrintuvas skaito PER-FAILO TAP, kurį ` +
+      "rašo `run-tests.mjs --tap-dir=<katalogas>`. Vienas bendras TAP netinka: " +
+      "jame nėra failų atributikos, tad per-failo įrodymo iš jo gauti neįmanoma."
+  );
+  process.exit(2);
+}
 
 /**
- * ⚠️ Praleidimai atpažįstami pagal `postgresGuard` pranešimą, ne pagal bet kokį
- * `# SKIP`. Testas gali būti praleistas ir dėl kitos priežasties (Redis, tyčinis
- * `skip: true`), o tokie čia nesvarbūs - klausimas yra siauras: ar praleista dėl
- * TRŪKSTAMOS DUOMENŲ BAZĖS.
+ * ⚠️ Praleidimai atpažįstami pagal `postgresGuard` pranešime esantį
+ * `DATABASE_URL`, ne pagal bet kokį `# SKIP`. Testas gali būti praleistas ir dėl
+ * kitos priežasties (Redis, tyčinis `skip: true`), o tokie čia nesvarbūs -
+ * klausimas siauras: ar praleista dėl TRŪKSTAMOS DUOMENŲ BAZĖS.
  */
-const praleistiDelDb = okEilutes.filter(
-  (eil) => /#\s*SKIP/i.test(eil) && eil.includes("DATABASE_URL")
-);
+function ivertintiFaila(turinys) {
+  const okEilutes = turinys.split("\n").filter((eil) => /^\s*ok \d+ - /.test(eil));
 
-const realiaiIvykdyti = okEilutes.filter((eil) => !/#\s*SKIP/i.test(eil));
+  return {
+    ivykdyti: okEilutes.filter((eil) => !/#\s*SKIP/i.test(eil)).length,
+    praleistiDelDb: okEilutes.filter(
+      (eil) => /#\s*SKIP/i.test(eil) && eil.includes("DATABASE_URL")
+    ).length,
+  };
+}
 
 const klaidos = [];
 
@@ -64,16 +77,28 @@ if (suites.postgres.length === 0) {
   );
 }
 
-if (praleistiDelDb.length > 0) {
-  klaidos.push(
-    `${praleistiDelDb.length} test. praleista dėl trūkstamo \`DATABASE_URL\`. Su ` +
-      "nustatyta duomenų baze praleidimų būti negali. Pavyzdys:\n    " +
-      praleistiDelDb[0].trim().slice(0, 120)
-  );
-}
+for (const testas of suites.postgres) {
+  const kelias = path.join(katalogas, `${testas}.tap`);
 
-if (realiaiIvykdyti.length === 0) {
-  klaidos.push("Nė vieno realiai įvykdyto testo - TAP tuščias arba viskas praleista.");
+  if (!fs.existsSync(kelias)) {
+    klaidos.push(`${testas}: TAP failo nėra - šis failas NEBUVO paleistas.`);
+    continue;
+  }
+
+  const { ivykdyti, praleistiDelDb } = ivertintiFaila(fs.readFileSync(kelias, "utf8"));
+
+  if (praleistiDelDb > 0) {
+    klaidos.push(
+      `${testas}: ${praleistiDelDb} test. praleista dėl trūkstamo \`DATABASE_URL\`.`
+    );
+  }
+
+  if (ivykdyti === 0) {
+    klaidos.push(
+      `${testas}: nė vieno nepraleisto \`ok\`. Failas arba nulūžo dar importo metu, ` +
+        "arba visi jo testai praleisti."
+    );
+  }
 }
 
 if (klaidos.length > 0) {
@@ -86,6 +111,6 @@ if (klaidos.length > 0) {
 }
 
 console.log(
-  `PostgreSQL rinkinys (${suites.postgres.length} failai): ` +
-    `${realiaiIvykdyti.length} testų realiai įvykdyta, 0 praleista dėl DB.`
+  `PostgreSQL rinkinys: visi ${suites.postgres.length} failai realiai įvykdyti ` +
+    "(kiekvienas turi bent vieną nepraleistą `ok`, nė vieno praleidimo dėl DB)."
 );

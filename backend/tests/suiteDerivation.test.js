@@ -103,83 +103,162 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
   }
 });
 
-test("VYKDYMO ĮRODYMAS: skriptas atmeta TAP su praleidimais dėl DB", () => {
-  /**
-   * ⚠️ TAI PAGRINDINĖ 7.4f CI GARANTIJA.
-   *
-   * `npm run test:postgres` grąžina 0 ir tada, kai kiekvienas testas praleido
-   * save dėl trūkstamo `DATABASE_URL`. Skriptas skaito TAP ir tokią būseną
-   * atmeta.
-   *
-   * ⚠️ GRANULIARUMO RIBA. Pirmoji versija reikalavo `ok` KIEKVIENAM rinkinio
-   * failui, bet Node 18 `node --test <failai>` duoda PLOKŠČIĄ TAP be failų
-   * vardų - ta versija krisdavo visada, ir CI kritimas buvo jos pačios klaida.
-   * Dabar tikrinama tai, ką formatas leidžia įrodyti ir kas atitinka tikrąjį
-   * gedimo režimą: praleidimų dėl DB nėra, ir įvykdytų testų yra.
-   *
-   * ⚠️ JOKIO `RegExp` (CodeQL). Ankstesnė versija konstravo šabloną iš failo
-   * vardo su `replace(/\./g, "\\.")` - toks ekranavimas dengia tik taškus, o
-   * bet kuris kitas metasimbolis liktų neekranuotas. Čia pakanka eilučių
-   * lyginimo, tad `RegExp` atsisakoma visiškai, o ne taisomas ekranavimas.
-   */
-  const skriptas = path.join(TESTU_KATALOGAS, "..", "scripts", "verify-postgres-suite-ran.mjs");
-  const tmp = path.join(require("node:os").tmpdir(), `pg-tap-${process.pid}`);
+const SKRIPTAS = path.join(TESTU_KATALOGAS, "..", "scripts", "verify-postgres-suite-ran.mjs");
+const PALEIDIKLIS = path.join(TESTU_KATALOGAS, "..", "scripts", "run-tests.mjs");
 
-  const paleisti = (tapTurinys) => {
-    fs.writeFileSync(tmp, tapTurinys, "utf8");
-    try {
-      return { kodas: 0, isvestis: execFileSync("node", [skriptas, tmp], { encoding: "utf8" }) };
-    } catch (e) {
-      return { kodas: e.status, isvestis: (e.stderr || "") + (e.stdout || "") };
-    } finally {
-      fs.unlinkSync(tmp);
+/** Laikinas katalogas su per-failo TAP; `turinys` - `{failoVardas: tapTekstas}`. */
+function suTapKatalogu(turinys, veiksmas) {
+  const katalogas = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "pg-tap-"));
+  try {
+    for (const [vardas, tekstas] of Object.entries(turinys)) {
+      fs.writeFileSync(path.join(katalogas, `${vardas}.tap`), tekstas, "utf8");
     }
-  };
+    return veiksmas(katalogas);
+  } finally {
+    fs.rmSync(katalogas, { recursive: true, force: true });
+  }
+}
 
-  const PRALEIDIMO_PRIEZASTIS = "# SKIP reikia DATABASE_URL su tikru Postgres";
+function paleistiTikrintuva(katalogas) {
+  try {
+    return { kodas: 0, isvestis: execFileSync("node", [SKRIPTAS, katalogas], { encoding: "utf8" }) };
+  } catch (e) {
+    return { kodas: e.status, isvestis: (e.stderr || "") + (e.stdout || "") };
+  }
+}
 
-  /** ── Viskas praleista dėl DB: turi KRISTI ──────────────────────────────── */
-  const praleista = ["TAP version 13"]
-    .concat(suites.postgres.map((_, i) => `ok ${i + 1} - koks nors testas ${PRALEIDIMO_PRIEZASTIS}`))
-    .join("\n");
+/** Sveikas TAP: keli įvykdyti testai, jokių praleidimų. */
+const SVEIKAS_TAP = ["TAP version 13", "ok 1 - pirmas", "ok 2 - antras", "# pass 2"].join("\n");
 
-  const blogas = paleisti(praleista);
-  assert.notEqual(blogas.kodas, 0, "vien praleidimai NEGALI būti laikomi sėkme");
-  assert.ok(blogas.isvestis.includes("NEBUVO realiai įvykdytas"), blogas.isvestis);
-  assert.ok(blogas.isvestis.includes("DATABASE_URL"), "pranešime turi būti priežastis");
+function sveikasKatalogas(perrasymai = {}) {
+  const turinys = {};
+  for (const testas of suites.postgres) turinys[testas] = SVEIKAS_TAP;
+  return { ...turinys, ...perrasymai };
+}
 
-  /** ── Realiai įvykdyta: turi PRAEITI ────────────────────────────────────── */
-  const ivykdyti = ["TAP version 13"]
-    .concat(suites.postgres.map((_, i) => `ok ${i + 1} - realus testas`))
-    .join("\n");
+test("VYKDYMO ĮRODYMAS: reikalaujama nepraleisto `ok` KIEKVIENAM rinkinio failui", () => {
+  /**
+   * ⚠️ TAI PAGRINDINĖ 7.4f CI GARANTIJA (#231, DoD 14).
+   *
+   * `test:postgres` grąžina 0 ir tada, kai kiekvienas testas praleido save dėl
+   * trūkstamo `DATABASE_URL`. Tikrintuvas tokią būseną atmeta.
+   *
+   * ⚠️ KRITERIJUS YRA PER FAILĄ, IR TAI ESMINGA. Tarpinė versija tikrino tik
+   * „rinkinyje yra bent vienas įvykdytas testas" - failas, nutilęs dėl klaidingo
+   * importo, ją praeidavo, jei kiti sukasi. Per-failo TAP (`--tap-dir`) tą
+   * spragą uždaro: atributika yra failo vardas, ne srauto turinys, tad ji
+   * nepriklauso nuo Node versijos ar reporterio formato.
+   *
+   * ⚠️ JOKIO `RegExp` IŠ KINTAMŲJŲ (CodeQL). Failų vardai lyginami
+   * `.includes()` - konstruoti šabloną iš vardo su `replace(/\./g, "\\.")`
+   * reikštų nepilną ekranavimą, o čia jo apskritai nereikia.
+   */
 
-  const geras = paleisti(ivykdyti);
-  assert.equal(geras.kodas, 0, `įvykdytas rinkinys turi praeiti: ${geras.isvestis}`);
-  assert.ok(geras.isvestis.includes("realiai įvykdyta"), geras.isvestis);
+  /** ── Visi failai realiai įvykdyti: PRAEINA ─────────────────────────────── */
+  const geras = suTapKatalogu(sveikasKatalogas(), paleistiTikrintuva);
+  assert.equal(geras.kodas, 0, `sveikas rinkinys turi praeiti: ${geras.isvestis}`);
+  assert.ok(geras.isvestis.includes("realiai įvykdyti"), geras.isvestis);
 
-  /** ── MIŠRUS: dalis įvykdyta, dalis praleista dėl DB - vis tiek KRINTA ──── */
-  const misrus = [
-    "TAP version 13",
-    "ok 1 - realus testas",
-    `ok 2 - kitas testas ${PRALEIDIMO_PRIEZASTIS}`,
-  ].join("\n");
+  /** ── Vieno failo TAP NĖRA: KRINTA ir ĮVARDIJA, kurio ───────────────────── */
+  const dingesFailas = suites.postgres[0];
+  const beFailo = sveikasKatalogas();
+  delete beFailo[dingesFailas];
 
-  const dalinis = paleisti(misrus);
-  assert.notEqual(dalinis.kodas, 0, "net vienas praleidimas dėl DB reiškia neįvykdytą rinkinį");
+  const truksta = suTapKatalogu(beFailo, paleistiTikrintuva);
+  assert.notEqual(truksta.kodas, 0, "nepaleistas failas NEGALI būti laikomas sėkme");
+  assert.ok(
+    truksta.isvestis.includes(dingesFailas),
+    `pranešime turi būti įvardytas KURIS failas neįvykdytas: ${truksta.isvestis}`
+  );
+  assert.ok(truksta.isvestis.includes("NEBUVO paleistas"), truksta.isvestis);
 
-  /** ── Praleidimas dėl KITOS priežasties (Redis) nekliudo ────────────────── */
-  const kitasSkip = [
-    "TAP version 13",
-    "ok 1 - realus testas",
-    "ok 2 - redis testas # SKIP reikia REDIS_URL su tikru Redis",
-  ].join("\n");
+  /** ── Vieno failo testai praleisti dėl DB: KRINTA ───────────────────────── */
+  const praleistas = suites.postgres[suites.postgres.length - 1];
+  const suPraleidimu = sveikasKatalogas({
+    [praleistas]: ["TAP version 13", "ok 1 - testas # SKIP reikia DATABASE_URL su tikru Postgres"].join("\n"),
+  });
 
-  assert.equal(
-    paleisti(kitasSkip).kodas,
-    0,
-    "praleidimas ne dėl DB yra teisėtas - klausimas siauras"
+  const suSkip = suTapKatalogu(suPraleidimu, paleistiTikrintuva);
+  assert.notEqual(suSkip.kodas, 0, "net vieno failo praleidimas dėl DB reiškia neįvykdytą rinkinį");
+  assert.ok(suSkip.isvestis.includes(praleistas), suSkip.isvestis);
+  assert.ok(suSkip.isvestis.includes("DATABASE_URL"), "pranešime turi būti priežastis");
+
+  /** ── Failas nulūžo importo metu (TAP be nė vieno `ok`): KRINTA ─────────── */
+  const nulužes = suTapKatalogu(
+    sveikasKatalogas({
+      [praleistas]: ["TAP version 13", "not ok 1 - Error: Cannot find module", "# fail 1"].join("\n"),
+    }),
+    paleistiTikrintuva
   );
 
-  /** ── Tuščias TAP: KRINTA ───────────────────────────────────────────────── */
-  assert.notEqual(paleisti("TAP version 13").kodas, 0, "tuščias TAP nėra sėkmė");
+  assert.notEqual(nulužes.kodas, 0, "nulūžęs failas be `ok` NEGALI praeiti");
+  assert.ok(nulužes.isvestis.includes(praleistas), nulužes.isvestis);
+
+  /** ── Praleidimas dėl KITOS priežasties (Redis) nekliudo ────────────────── */
+  const kitasSkip = suTapKatalogu(
+    sveikasKatalogas({
+      [praleistas]: ["TAP version 13", "ok 1 - realus", "ok 2 - kitas # SKIP reikia REDIS_URL"].join("\n"),
+    }),
+    paleistiTikrintuva
+  );
+
+  assert.equal(kitasSkip.kodas, 0, "praleidimas ne dėl DB yra teisėtas - klausimas siauras");
+});
+
+test("VYKDYMO ĮRODYMAS: vienas bendras TAP ATMETAMAS, ne interpretuojamas", () => {
+  /**
+   * ⚠️ REGRESIJOS SARGAS. Ankstesnė versija priiminėjo vieną bendrą TAP failą ir
+   * bandė iš jo atpažinti failų vardus - to Node 18 plokščiame sraute nėra, tad
+   * tikrinimas arba krisdavo visada, arba (antroji versija) įrodydavo mažiau,
+   * nei reikalauja #231.
+   *
+   * Grąžinus tokį iškvietimą tikrintuvas privalo AIŠKIAI atsisakyti, o ne
+   * pabandyti ir tyliai praleisti.
+   */
+  const tmp = path.join(require("node:os").tmpdir(), `bendras-tap-${process.pid}`);
+  fs.writeFileSync(tmp, "TAP version 13\nok 1 - kažkas\n", "utf8");
+
+  try {
+    const res = paleistiTikrintuva(tmp);
+
+    assert.equal(res.kodas, 2, "bendras TAP failas yra naudojimo klaida, ne testų kritimas");
+    assert.ok(res.isvestis.includes("nėra katalogas"), res.isvestis);
+    assert.ok(res.isvestis.includes("failų atributikos"), "pranešimas turi paaiškinti KODĖL");
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+});
+
+test("PALEIDIKLIS: `--tap-dir` rašo TAP kiekvienam failui ir IŠVALO senus", () => {
+  /**
+   * ⚠️ SENŲ ARTEFAKTŲ VALYMAS YRA SAUGUMO SAVYBĖ, NE TVARKINGUMAS.
+   *
+   * Be jo praėjusio paleidimo `.tap` liktų kataloge, ir vykdymo tikrintuvas
+   * praeitų dėl failo, kuris ŠĮKART nebuvo paleistas apskritai. Tikrinimas,
+   * praeinantis dėl seno įrodymo, blogesnis už jokį - jis atrodo kaip garantija.
+   *
+   * ⚠️ NAUDOJAMAS `redis` RINKINYS, NE `postgres`. Savybė yra paleidiklio, ne
+   * konkretaus rinkinio; `redis` mažesnis ir be DB praeina per kelias sekundes.
+   */
+  const katalogas = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "tap-dir-"));
+  const senas = path.join(katalogas, "seno-paleidimo-artefaktas.tap");
+
+  try {
+    fs.writeFileSync(senas, "TAP version 13\nok 1 - senas melas\n", "utf8");
+
+    execFileSync("node", [PALEIDIKLIS, "redis", `--tap-dir=${katalogas}`], {
+      encoding: "utf8",
+      cwd: path.join(TESTU_KATALOGAS, ".."),
+    });
+
+    assert.ok(!fs.existsSync(senas), "senas `.tap` privalo būti pašalintas PRIEŠ paleidimą");
+
+    for (const testas of suites.redis) {
+      const kelias = path.join(katalogas, `${testas}.tap`);
+      assert.ok(fs.existsSync(kelias), `trūksta TAP failo: ${testas}`);
+      assert.ok(fs.readFileSync(kelias, "utf8").includes("TAP version"), `${testas}: TAP tuščias`);
+    }
+  } finally {
+    fs.rmSync(katalogas, { recursive: true, force: true });
+  }
 });
