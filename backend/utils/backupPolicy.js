@@ -70,6 +70,52 @@ const EXCLUDED_DESPITE_PERSISTENT = {
     "atskaitomybės žurnalas, ne būsena – atkūrimas grąžintų GDPR ištrintus įrašus",
 };
 
+/**
+ * ARTEFAKTO TIPAS → PERSISTENTINĖS LENTELĖS VARDAS (#155, 7.4f / #231).
+ *
+ * ⚠️ KODĖL ŠIS ŽEMĖLAPIS APSKRITAI REIKALINGAS.
+ *
+ * Politika operuoja ARTEFAKTŲ TIPAIS, o 7.6 atkūrimo DoD klausia apie
+ * LENTELES („prieš kopiją įrašyta unikali audito eilutė po restore
+ * NERANDAMA"). Be atvaizdavimo testas turėtų įrašyti `audit_log` literalu, o
+ * toks sąrašas tyliai išsiskiria su politika - būtent to 7.4f ir vengia.
+ *
+ * ⚠️ ŽEMĖLAPIS PRIVALO BŪTI IŠSAMUS. Naujas `ARTEFACT_TYPES` narys be įrašo čia
+ * krinta testu: kitaip vietoj rankomis palaikomo sąrašo TESTE gautume rankomis
+ * palaikomą žemėlapį KODE, ir problema tik persikeltų.
+ *
+ * `null` yra teisėta reikšmė - ji reiškia „šis tipas neturi savo lentelės"
+ * (failai saugykloje, laikini artefaktai). Ji SĄMONINGA, ne praleista.
+ */
+const TABLE_BY_TYPE = Object.freeze({
+  [ARTEFACT_TYPES.SOURCE_AUDIO.id]: null,
+  [ARTEFACT_TYPES.UPLOAD_TEMP.id]: null,
+  [ARTEFACT_TYPES.CONVERSION_TEMP.id]: null,
+  [ARTEFACT_TYPES.TRANSCRIPT.id]: "job_results",
+  [ARTEFACT_TYPES.TRANSCRIPT_REDACTED.id]: null,
+  [ARTEFACT_TYPES.PROTOCOL.id]: "job_results",
+  [ARTEFACT_TYPES.EXPORT_REDACTED.id]: null,
+  [ARTEFACT_TYPES.EXPORT_ORIGINAL.id]: null,
+  [ARTEFACT_TYPES.QUEUE_RECORD.id]: null,
+  [ARTEFACT_TYPES.JOB_RECORD.id]: "jobs",
+  [ARTEFACT_TYPES.AUDIT_ENTRY.id]: "audit_log",
+});
+
+/**
+ * Lentelės, kurių kopija NEAPIMA.
+ *
+ * ⚠️ IŠVEDAMA IŠ POLITIKOS, ne surašoma. `excludedTypes()` jau žino, kas
+ * išbraukta ir kodėl; čia tik pridedamas lentelės vardas. 7.6 testas gauna
+ * aibę iš ČIA, o ne iš literalo.
+ */
+function excludedTables() {
+  return excludedTypes()
+    .map((įrašas) => TABLE_BY_TYPE[įrašas.type])
+    .filter((lentelė) => lentelė !== null && lentelė !== undefined)
+    .filter((lentelė, i, visos) => visos.indexOf(lentelė) === i)
+    .sort();
+}
+
 /** Ar šis artefakto tipas įtraukiamas į kopiją? */
 function isIncluded(typeId) {
   const type = TYPES_BY_ID[typeId];
@@ -189,6 +235,8 @@ module.exports = {
   isIncluded,
   includedTypes,
   excludedTypes,
+  excludedTables,
+  TABLE_BY_TYPE,
   retentionDays,
   isEnabled,
   policySnapshot,

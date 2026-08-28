@@ -140,6 +140,22 @@ let _pool = null;
  */
 let konfiguracija = null;
 let keyRing = null;
+
+/**
+ * ⚠️ STARTO MOMENTO SNAPSHOT'AS, NE GYVA BŪSENA (#155, 7.4f / #231).
+ *
+ * Čia lieka generacijos, kurioms `init()` metu neturėjome rakto ir kurias
+ * praleido `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`. Readiness jomis
+ * remiasi, tad būtina suprasti ribą: sąrašas NESEKA DB pokyčių. Išvalius
+ * eilutes ar grąžinus raktą, jis atsinaujina tik per RESTARTĄ - ir taip turi
+ * būti, nes pilnas generacijų skenavimas kiekvieno poll'o metu yra būtent tai,
+ * ko 7.4c loose index scan vengia.
+ *
+ * ⚠️ VĖLIAVĖLĖ SNAPSHOT'O NEKEIČIA. Su `true` procesas startuoja, bet sąrašas
+ * lieka toks pat, ir `/api/ready` toliau grąžina 503. Vėliavėlė leidžia
+ * PAKILTI, ne deklaruoti sveikatą.
+ */
+let nasliaitesSnapshot = [];
 let initPromise = null;
 let paruosta = false;
 
@@ -513,7 +529,21 @@ async function initializePostgres(env) {
     throw err;
   }
 
-  return { store: createPostgresStore(pool, { hashKeyId: env.AUDIT_ID_SALT_ID }), pool };
+  /**
+   * ⚠️ READINESS BIUDŽETAS PERDUODAMAS, NE ATKARTOJAMAS (#233 Codex raundas 2, #3).
+   *
+   * Zondo single-flight įrašas galioja tol, kol maršrutas dar laukia. Reikšmė
+   * imama iš to paties `READINESS_TIMEOUT_MS`, kurį skaito `server.js` - antra
+   * konstanta store'e reikštų dvi konfigūracijos tiesas, o jos išsiskyrimo
+   * niekas nepastebėtų (7.4b peržiūra tą ydą rado keturis kartus).
+   */
+  return {
+    store: createPostgresStore(pool, {
+      hashKeyId: env.AUDIT_ID_SALT_ID,
+      readinessBudgetMs: env.READINESS_TIMEOUT_MS,
+    }),
+    pool,
+  };
 }
 
 /**
@@ -546,6 +576,8 @@ async function patikrintiGeneracijas(pgStore, env) {
      * niuansas.
      */
     if (String(env.AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS).toLowerCase() === "true") {
+      nasliaitesSnapshot = [...nasliaites];
+
       log.warn(
         "GDPR GARANTIJA LAUŽOMA SĄMONINGAI: `audit_log` yra įrašų, kurių generacijai " +
           `neturime rakto (${nasliaites.join(", ")}). Šių įrašų ` +
@@ -598,6 +630,16 @@ async function init(env = process.env) {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    /**
+     * ⚠️ SNAPSHOT'AS VALOMAS KIEKVIENO BANDYMO PRADŽIOJE (#231 Codex peržiūra, P2).
+     *
+     * `init()` po nesėkmės leidžiamas pakartoti be `shutdown()` (žr. `catch`
+     * žemiau). Be valymo pirmo bandymo našlaičių ID išliktų: operatorius
+     * pataisytų konfigūraciją, antras bandymas pavyktų, o `/api/ready` liktų 503
+     * dėl seno bandymo duomenų - iki restarto, kurio niekas nesuprastų reikiant.
+     */
+    nasliaitesSnapshot = [];
+
     const backendas = resolveAuditBackend(env);
 
     /**
@@ -697,6 +739,7 @@ async function shutdown() {
   initPromise = null;
   konfiguracija = null;
   keyRing = null;
+  nasliaitesSnapshot = [];
 }
 
 /**
@@ -729,6 +772,18 @@ function keyRingReiksme() {
   return keyRing;
 }
 
+/**
+ * Generacijos, kurioms starto metu neturėjome rakto (tuščias masyvas - viskas
+ * išsprendžiama).
+ *
+ * ⚠️ SNAPSHOT'AS - žr. `nasliaitesSnapshot` paaiškinimą. Readiness jį naudoja,
+ * kad `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` paleistas procesas
+ * NEDEKLARUOTŲ sveikatos, nors liveness lieka 200.
+ */
+function nasliaitesGeneracijos() {
+  return [...nasliaitesSnapshot];
+}
+
 /** Aktyvus store'as - `auditLog` fasadui. */
 function current() {
   return store;
@@ -745,6 +800,7 @@ module.exports = {
   konfiguruotaDruskaReiksme,
   konfiguracijaReiksme,
   keyRingReiksme,
+  nasliaitesGeneracijos,
   KONFIG_RAKTAI,
   REQUIRED_AUDIT_CONSTRAINTS,
   REQUIRED_AUDIT_UNIQUE_CONSTRAINTS,

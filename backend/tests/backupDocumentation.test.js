@@ -211,3 +211,96 @@ test("RUNBOOK: atkūrimo pratybos įvardytos kaip BŪTINOS", () => {
   assert.match(doc, /niekada nebuvo atkurta/i);
   assert.match(doc, /seniausia/i, "seniausios kopijos testas turi būti įvardytas");
 });
+
+test("RUNBOOK: audito raktų reikalavimas susietas su TEISINGA kopijos rūšimi", () => {
+  /**
+   * ⚠️ DOKUMENTACIJA NEGALI PRIEŠTARAUTI POLITIKAI (#231 Codex peržiūra, P2).
+   *
+   * Runbook'as §1 teigė, kad „be raktų kopija bevertė", ir liepė tikrinti
+   * kopijos `audit_log`. Bet `createBackup()` serializuoja tik `jobs` ir
+   * `audio`, o `audit_entry` yra išbrauktųjų sąraše - aplikacijos kopijoje
+   * audito eilučių NĖRA. Nurodymas buvo neįvykdomas, o įspėjimas - klaidinantis
+   * būtent ten, kur operatorius jį skaito atkūrimo metu.
+   *
+   * Tikrinama ne frazė, o SĄSAJA: jei politika audito įrašus išbraukia, tekstas
+   * privalo tai pasakyti ir reikalavimą priskirti pilnai PostgreSQL kopijai.
+   */
+  const backupPolicy = require("../utils/backupPolicy");
+  const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
+
+  const auditoTipas = ARTEFACT_TYPES.AUDIT_ENTRY.id;
+
+  assert.ok(
+    backupPolicy.excludedTypes().some((i) => i.type === auditoTipas),
+    "prielaida: politika audito įrašus išbraukia"
+  );
+
+  assert.ok(
+    backupPolicy.excludedTables().includes("audit_log"),
+    "prielaida: išbraukta ir lentelė, ne tik tipas"
+  );
+
+  const doc = fs.readFileSync(path.join(__dirname, "..", "..", "docs/backup-runbook.md"), "utf8");
+
+  assert.ok(
+    /aplikacijos kopijoje audito eilučių\s+\*\*apskritai nėra\*\*|audito eilučių \*\*apskritai nėra\*\*/i.test(
+      doc.replace(/\n/g, " ")
+    ),
+    "runbook'as privalo pasakyti, kad aplikacijos kopijoje audito eilučių nėra"
+  );
+
+  assert.ok(
+    doc.includes("PILNAI PostgreSQL kopijai") || doc.includes("pilnos PostgreSQL kopijos"),
+    "raktų reikalavimas privalo būti priskirtas pilnai PostgreSQL kopijai"
+  );
+
+  /** Ir nurodymas tikrinti `audit_log` negali likti be to konteksto. */
+  const patikra = doc.indexOf("SELECT DISTINCT hash_key_id FROM audit_log");
+  assert.notEqual(patikra, -1, "prielaida: patikros užklausa dokumentuota");
+
+  const skyrius = doc.lastIndexOf("### ", patikra);
+  assert.ok(
+    doc.slice(skyrius, patikra).includes("pilnos PostgreSQL kopijos"),
+    "`audit_log` patikra privalo būti aiškiai priskirta pilnai PostgreSQL kopijai"
+  );
+});
+
+test("RUNBOOK: generacijų patikra eina PO dump'o pakėlimo, ne prieš", () => {
+  /**
+   * ⚠️ NETEISINGA TVARKA VEDA TIESIAI Į GEDIMĄ (#233 Codex raundas 2, #5).
+   *
+   * Ankstesnė versija liepė tikrinti generacijas PRIEŠ pakeliant dump'ą. Tuščioje
+   * avarinio atkūrimo duomenų bazėje `SELECT DISTINCT hash_key_id` grąžina
+   * nieko ir KLAIDINGAI patvirtina, kad raktų žiedas pilnas. Startas paskui
+   * krenta fail-closed ties generacijomis, kurių operatorius net nematė -
+   * būtent tada, kai klaidos kaina didžiausia.
+   *
+   * Tikrinama TVARKA dokumente, ne frazės buvimas: instrukcija, kurios žingsniai
+   * teisingi, bet eilė ne, yra lygiai tokia pat neveikianti.
+   */
+  const doc = fs.readFileSync(path.join(__dirname, "..", "..", "docs/backup-runbook.md"), "utf8");
+
+  const sustabdymas = doc.indexOf("Servisas SUSTABDYTAS");
+  const pakelimas = doc.indexOf("Pakelkite dump");
+  const patikra = doc.indexOf("SELECT DISTINCT hash_key_id FROM audit_log");
+  const raktai = doc.indexOf("Surinkite trūkstamus raktus");
+  const startas = doc.indexOf("Tik tada startuokite servisą");
+
+  for (const [vardas, poz] of [
+    ["servisas sustabdytas", sustabdymas],
+    ["dump'o pakėlimas", pakelimas],
+    ["generacijų patikra", patikra],
+    ["raktų surinkimas", raktai],
+    ["serviso startas", startas],
+  ]) {
+    assert.notEqual(poz, -1, `runbook'e trūksta žingsnio: ${vardas}`);
+  }
+
+  assert.ok(sustabdymas < pakelimas, "dump'as keliamas tik sustabdžius servisą");
+  assert.ok(
+    pakelimas < patikra,
+    "generacijų užklausa privalo eiti PO dump'o - kitaip ji klausia tuščios lentelės"
+  );
+  assert.ok(patikra < raktai, "raktai renkami pagal patikros rezultatą");
+  assert.ok(raktai < startas, "servisas startuoja tik surinkus raktus");
+});

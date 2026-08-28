@@ -139,7 +139,45 @@ jobs:
           # REQUIRE_POSTGRES=1 paverčia TYLŲ praleidimą klaida - kitaip CI
           # liktų žalias niekada nepaleidęs nė vieno DB testo.
           REQUIRE_POSTGRES: "1"
-        run: npm run test:postgres
+        # ⚠️ `--tap-dir` = KIEKVIENAS FAILAS ATSKIRU PROCESU (#155, 7.4f / #231).
+        #
+        # Vien exit kodo nepakanka: `test:postgres` grąžina 0 ir tada, kai visi
+        # testai praleido save dėl trūkstamo `DATABASE_URL`.
+        #
+        # Bet ir vieno bendro TAP nepakanka. Node 18 `node --test <failai>` duoda
+        # PLOKŠČIĄ srautą be failų vardų, tad iš jo įmanoma įrodyti tik „kažkas
+        # rinkinyje vykdyta". Failas, nutilęs dėl klaidingo importo, tokį
+        # tikrinimą praeitų, jei kiti sukasi - o #231 reikalauja įrodymo
+        # KIEKVIENAM failui.
+        #
+        # Todėl kiekvienas failas paleidžiamas atskirai, o jo TAP rašomas į
+        # `/tmp/pg-tap/<vardas>.tap`. Atributika yra failo vardas, tad ji
+        # nepriklauso nuo Node versijos ar reporterio formato. Kaina -
+        # prarandamas lygiagretumas; rinkinys tam pakankamai mažas.
+        #
+        # ⚠️ BE PIPE IR BE `PIPESTATUS`. Ankstesnė versija naudojo
+        # `... | tee ...; exit "${PIPESTATUS[0]}"` - ji teisinga su dabartiniu
+        # numatytuoju `bash -e`, bet priklauso nuo shell nustatymo: pakeitus
+        # `shell:` reikšmę kritusi rinktinė galėtų tyliai tapti žalia. Tai
+        # tiksliai ta tylaus sulūžimo rūšis, kurios visas šis žingsnis ir vengia.
+        #
+        # `|| status=$?` reikalingas dėl `set -e`: be jo skriptas nutrūktų dar
+        # neparodęs TAP, ir CI loge nebūtų matyti, KURIS testas krito.
+        run: |
+          status=0
+          npm run test:postgres -- --tap-dir=/tmp/pg-tap || status=$?
+          exit "$status"
+
+      - name: PostgreSQL testai TIKRAI vykdyti (ne praleisti)
+        working-directory: backend
+        # ⚠️ ATSKIRAS ŽINGSNIS, ne dalis ankstesnio.
+        #
+        # Skriptas reikalauja NEPRALEISTO `ok` KIEKVIENAM išvesto postgres
+        # rinkinio failui - trūkstamas `<vardas>.tap` arba TAP be nė vieno `ok`
+        # yra klaida. Be šio žingsnio tikrintuvas būtų skriptas, kurio niekas
+        # nekviečia, o nuo šios garantijos priklauso 7.4b/7.4c/7.4d/7.4e
+        # uždarymas.
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/pg-tap
 
       # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
       # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas

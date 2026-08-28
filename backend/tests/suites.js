@@ -67,6 +67,8 @@ const privacy = [
   "auditCursor",
   "auditQuery.route",
   "auditRotation",
+  "suiteDerivation",
+  "auditReadiness.route",
   "auditStoreBackendContract.integration",
   "jobErasure",
   "deletionResilience",
@@ -227,57 +229,181 @@ const functional = [
  * triukšmu. CI paleidžia su `REQUIRE_POSTGRES=1`, kuris praleidimą paverčia
  * klaida.
  */
-const postgres = [
-  "migrations.integration",
-  /** #155: PostgreSQL būsena doctor/health išvestyje. */
-  "postgresDoctor.integration",
-  /**
-   * #155, 7.2a: trečias `jobStore` backend'as.
-   *
-   * ⚠️ TIKRAS PostgreSQL BŪTINAS, ne mock. Testuojami dalykai gyvena būtent
-   * DB pusėje: `CHECK` constraint'ų `UNKNOWN` semantika, dalinio `UNIQUE`
-   * indekso elgesys su `NULL` ir `ON DELETE CASCADE`. Su mock'u jie visi
-   * praeitų nieko netikrindami.
-   */
-  "postgresStore.integration",
-  /**
-   * #155, 7.2a: DB CHECK aibės vs runtime autoritetai.
-   *
-   * ⚠️ Sąrašai IŠVEDAMI iš runtime konstantų, ne surašomi - naujas job tipas,
-   * statusas ar fazė be atitinkamos migracijos krinta iškart, o ne po to, kai
-   * sugadinta kopija bus įrašyta.
-   */
-  "dbRuntimeParity.integration",
-  /**
-   * ⚠️ REGISTRUOTAS ABIEJUOSE RINKINIUOSE (`redis` ir `postgres`).
-   *
-   * CI turi du atskirus žingsnius su skirtingomis priklausomybėmis
-   * (`test:redis` su `REDIS_URL`, `test:postgres` su `DATABASE_URL`). Failas,
-   * likęs tik `redis` rinkinyje, PostgreSQL žingsnyje NEBŪTŲ paleistas, o
-   * `redis` žingsnyje `DATABASE_URL` nėra - tad 7.2b pridėtas PostgreSQL
-   * adapteris pats save praleistų, ir CI tikrintų du backend'us iš trijų.
-   *
-   * PostgreSQL adapteris vykdomas šiame rinkinyje; Redis scenarijai šiame
-   * žingsnyje teisėtai praleidžiami, nes `REDIS_URL` čia nėra.
-   */
-  "jobStoreBackendContract.integration",
-  /** #155, 7.3: bendras sesijų scenarijų rinkinys - PostgreSQL adapteris. */
-  "sessionStoreBackendContract.integration",
-  /** #155, 7.4b: bendras audito scenarijų rinkinys - PostgreSQL adapteris. */
-  "auditStoreBackendContract.integration",
-  /**
-   * #155, 7.4b: garantijos, kurių atmintyje NĖRA - schema, invariantai,
-   * append-only trigeris, RAW eilučių privatumas, pool'o gyvavimo ciklas,
-   * išlikimas po restarto ir kelių instancijų matomumas.
-   */
-  "auditPersistence.integration",
-  /**
-   * #155, 7.3: garantijos, kurių atmintyje NĖRA - hash-only saugojimas, DB
-   * laiko invariantai, viena sąlyginė autentikacijos užklausa, revokacija
-   * tarp procesų ir startinis suderinimas.
-   */
-  "sessionPersistence.integration",
-];
+/**
+ * TESTAI, KURIEMS REIKIA TIKRO PostgreSQL - IŠVEDAMI, NE SURAŠOMI (#155, 7.4f / #231).
+ *
+ * ⚠️ RANKINIS SĄRAŠAS ČIA BUVO REALI SPRAGA.
+ *
+ * Naujas integracinis testas, kurio kas nors nepridėtų ranka, NIEKADA nebūtų
+ * paleistas: `npm run test:postgres` jo nematytų, CI liktų žalias, o kodas -
+ * nepatikrintas. Skirtingai nuo kitų rinkinių, čia klaida nematoma - failas
+ * priklauso `privacy` ar `security`, tad manifesto pilnumo patikra nesiskundžia,
+ * o vienintelis dalykas, kurio trūksta, yra vykdymas su tikra DB.
+ *
+ * ⚠️ KRITERIJUS - `postgresGuard` IMPORTAS, NE `.integration` VARDAS.
+ *
+ * Spec'as siūlė „vardas su `.integration` ARBA `postgresGuard` importas", bet
+ * vardo kriterijus surenka ir REDIS integracinius testus (`actorEraRedis`,
+ * `queueRecovery`, `ownershipCasRedis`...), kuriems PostgreSQL nereikia. Jie
+ * postgres žingsnyje praleistų save dėl `REDIS_URL` trūkumo, ir vykdymo
+ * įrodymas („kiekvienam failui bent vienas `ok`") kristų dėl testų, kurie ten
+ * apskritai nepriklauso.
+ *
+ * `postgresGuard` importas yra TIKROJI priklausomybė ir duoda tiksliai tą aibę,
+ * kuri anksčiau buvo surašyta ranka. Nuo naujo PG testo, pamiršusio guard'ą,
+ * saugo atskira patikra `tests/suiteDerivation.test.js`: kiekvienas failas,
+ * importuojantis `pg` arba guard'ą, privalo atsidurti šiame rinkinyje.
+ *
+ * ⚠️ VYKDYMO ĮRODYMAS ATSKIRAI. Sąrašo sudarymas neįrodo, kad testai pasileido:
+ * su `REQUIRE_POSTGRES=1` kiekvienam rinkinio failui privalo pasirodyti bent
+ * vienas `ok` (žr. `tests/suiteDerivation.test.js`). Žalias job'as su
+ * praleistais testais nėra sėkmė.
+ */
+/**
+ * Failo `require()` argumentai.
+ *
+ * ⚠️ VIENAS PRAĖJIMAS SIMBOLIAIS, NE REGEX GRANDINĖ (#233 Codex raundas 2, #1).
+ *
+ * Ankstesnė versija komentarus nuimdavo PRIEŠ atpažindama literalus. Tvarka
+ * neteisinga iš principo: komentaro ir literalo atpažinimas yra tarpusavyje
+ * priklausomas, tad regex grandinė lūžta ABIEM kryptimis, ir abi buvo realios:
+ *
+ *   1. `'// require("./helpers/postgresGuard");'` - eilutė, ne komentaras. Iš
+ *      jos nuimtas „komentaras" nuplėšia uždarančią kabutę, ir skeneris randa
+ *      importą, kurio nėra. Šitaip `suiteDerivation` ĮKRITO į postgres rinkinį -
+ *      dėl savo paties sintetinio testo duomenų.
+ *   2. `const marker = '//'; require('./helpers/postgresGuard')` - čia `//` yra
+ *      eilutėje, bet senoji versija nuo jos nuplėšdavo likusią eilutę kartu su
+ *      TIKRU importu. Realus PostgreSQL testas tyliai iškristų iš CI.
+ *
+ * Todėl einama simboliais su būsena: kodas, `'`/`"`/`` ` `` literalas, eilutės
+ * komentaras, bloko komentaras, reguliarusis reiškinys. Pilno JS parserio
+ * nereikia - reikia tik teisingos atpažinimo tvarkos.
+ *
+ * ⚠️ REGULIARIEJI REIŠKINIAI ATPAŽĮSTAMI SĄMONINGAI. Testų failuose pilna
+ * šablonų su kabutėmis (`/["']/`). Be šito pirmoji tokio šablono kabutė
+ * pradėtų „eilutę", kuri surytų kodą iki kitos kabutės - kartu su tikrais
+ * importais. Tai ta pati 2 klaida, tik kita priežastimi.
+ *
+ * ⚠️ Šablonas NEKONSTRUOJAMAS iš kintamųjų (CodeQL): grąžinami visi importai, o
+ * kvietėjas lygina eilutes.
+ *
+ * RIBOS, kurias verta žinoti: šablonine eilute su `${...}`, kurioje yra dar
+ * viena atgalinė kabutė, tokenizatorius suklystų; tokio kodo repozitorijoje
+ * nėra, o `pg` naudojimo patikra `suiteDerivation.test.js` dengia tą kelią
+ * nepriklausomai.
+ */
+function importuotiModuliai(saltinis) {
+  const literalai = [];
+  let skeletas = "";
+  let i = 0;
+  let pries = "";
+
+  /** Po identifikatoriaus, skaičiaus ar uždarančio skliausto `/` yra dalyba. */
+  const PO_REIKSMES = /[\w$)\]]/;
+
+  while (i < saltinis.length) {
+    const c = saltinis[i];
+    const kitas = saltinis[i + 1];
+
+    if (c === "/" && kitas === "/") {
+      while (i < saltinis.length && saltinis[i] !== "\n") i += 1;
+      skeletas += " ";
+      continue;
+    }
+
+    if (c === "/" && kitas === "*") {
+      i += 2;
+      while (i < saltinis.length && !(saltinis[i] === "*" && saltinis[i + 1] === "/")) i += 1;
+      i += 2;
+      skeletas += " ";
+      continue;
+    }
+
+    if (c === "/" && !PO_REIKSMES.test(pries)) {
+      i += 1;
+      let simboliuKlase = false;
+      while (i < saltinis.length) {
+        const r = saltinis[i];
+        if (r === "\\") {
+          i += 2;
+          continue;
+        }
+        if (r === "\n") break;
+        if (r === "[") simboliuKlase = true;
+        else if (r === "]") simboliuKlase = false;
+        else if (r === "/" && !simboliuKlase) {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      skeletas += " ";
+      /** Po šablono einantis `/` yra dalyba, ne naujas šablonas. */
+      pries = ")";
+      continue;
+    }
+
+    if (c === '"' || c === "'" || c === "`") {
+      const kabute = c;
+      let turinys = "";
+      i += 1;
+      while (i < saltinis.length) {
+        const r = saltinis[i];
+        if (r === "\\") {
+          turinys += saltinis[i + 1] === undefined ? "" : saltinis[i + 1];
+          i += 2;
+          continue;
+        }
+        if (r === kabute) {
+          i += 1;
+          break;
+        }
+        /** Nebaigtas vienos eilutės literalas - nutraukiam, kad nesurytume failo. */
+        if (kabute !== "`" && r === "\n") break;
+        turinys += r;
+        i += 1;
+      }
+      skeletas += ` ${literalai.length} `;
+      literalai.push(turinys);
+      pries = ")";
+      continue;
+    }
+
+    skeletas += c;
+    if (!/\s/.test(c)) pries = c;
+    i += 1;
+  }
+
+  const rasti = [];
+  const sablonas = /require\s*\(\s* (\d+) \s*\)/g;
+
+  let atitikmuo = sablonas.exec(skeletas);
+  while (atitikmuo !== null) {
+    rasti.push(literalai[Number(atitikmuo[1])]);
+    atitikmuo = sablonas.exec(skeletas);
+  }
+
+  return rasti;
+}
+
+function isvestiPostgresRinkini() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const dir = __dirname;
+
+  return fs
+    .readdirSync(dir)
+    .filter((failas) => failas.endsWith(".test.js"))
+    .filter((failas) => {
+      const turinys = fs.readFileSync(path.join(dir, failas), "utf8");
+      return importuotiModuliai(turinys).some((kelias) => kelias.endsWith("postgresGuard"));
+    })
+    .map((failas) => failas.replace(/\.test\.js$/, ""))
+    .sort();
+}
+
+const postgres = isvestiPostgresRinkini();
 
 module.exports = {
   suites: { privacy, security, functional, redis, postgres },
@@ -289,5 +415,8 @@ module.exports = {
    * įtraukus juos čia „3 skipped" taptų nuolatiniu triukšmu, kurį visi išmoktų
    * ignoruoti. Jie paleidžiami atskirai (`npm run test:redis`) ir CI.
    */
+  isvestiPostgresRinkini,
+  importuotiModuliai,
+
   defaultSuites: ["privacy", "security", "functional"],
 };

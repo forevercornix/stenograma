@@ -376,6 +376,99 @@ iš naujo.
 
 ---
 
+## 16. Readiness, liveness ir cutover (7.4f)
+
+### Ką tikrina `/api/ready`
+
+| Etapas | Tikrinama |
+|---|---|
+| Starto vėliavos | `jobStore`, `jobRunner`, `sessionReconcile`, **`auditStore`** |
+| Gyvi zondai | Redis, worker'iai, sesijų saugykla, **audito saugykla** (su teisių patikra) |
+| Raktų būsena | **neišsprendžiamų generacijų nėra** |
+
+Bet kuris nepavykęs → **503**.
+
+### ⚠️ Ready ≠ live
+
+`/api/health` (liveness) **lieka 200** net kai readiness krinta dėl audito.
+
+Tai nėra nuolaida. `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` egzistuoja
+tam, kad operatorius galėtų **paleisti** sistemą, kurios raktų medžiaga
+prarasta, ir išvalyti paveiktas eilutes. Jei kartu kristų ir liveness,
+orkestruotojas perkraudinėtų podą cikle, tas atsistatymo langas niekada
+neatsivertų, ir vėliavėlė būtų paneigta.
+
+### Zondas tikrina TEISES, ne ryšį
+
+`SELECT 1` įrodo tik tiek, kad jungtis gyva. Rolė su atimta `DELETE` teise jį
+praeitų, o GDPR ištrynimas kristų vykdymo metu — su žaliais sveikatos signalais.
+
+Zondas vienu round-trip'u tikrina **dvi** teisių aibes ir **nemutuoja**:
+bandomasis įrašas reikštų nuolatinį lentelės šiukšlinimą dėl diagnostikos, o
+append-only trigeris tokios eilutės dar ir neleistų ištrinti be pėdsako.
+
+| Objektas | Teisės | Kaip tikrinama |
+|---|---|---|
+| `audit_log` lentelė | `SELECT`, `INSERT`, `DELETE` — **visos trys būtinos** | `has_table_privilege()` |
+| `audit_log.seq` seką maitinantis objektas | `USAGE` **ARBA** `UPDATE` — pakanka bet kurios | `pg_get_serial_sequence()` + `has_sequence_privilege()` |
+
+⚠️ **`INSERT` ant lentelės NEPAKANKA.** `seq` yra `BIGSERIAL`, tad kiekvienas
+rašymas kviečia `nextval()` ant **atskiro sekos objekto**, kurio teisės
+suteikiamos atskirai. Rolė su `INSERT`, bet be teisės ant sekos, zondą praeitų
+žalią, o kiekvienas `append()` kristų vykdymo metu.
+
+`nextval()` priima ir `USAGE`, ir `UPDATE`, todėl zondas reikalauja **bet
+kurios** — reikalavimas turėti būtent `USAGE` klaidingai nudažytų raudonai
+veikiantį diegimą. Seka randama per katalogą, o ne pagal vardą:
+`audit_log_seq_seq` yra numatytoji forma, bet ne garantija.
+
+Minimali veikianti rolė:
+
+```sql
+GRANT SELECT, INSERT, DELETE ON audit_log TO stenograma_app;
+
+-- Sekos vardo nespėliokite - paklauskite katalogo:
+SELECT pg_get_serial_sequence('audit_log', 'seq');
+GRANT USAGE ON SEQUENCE audit_log_seq_seq TO stenograma_app;   -- arba UPDATE
+```
+
+⚠️ Rolė, sukonfigūruota be sekos teisės, lieka **amžinai not-ready**, o
+`/api/ready` priežasties neatskleidžia (ji būtų infrastruktūros detalė viešame
+atsakyme). Diagnostika — starto logai ir ši lentelė.
+
+Rezultatas kešuojamas 2 s. **Kešuojamas tik teigiamas** — atsistačiusi DB turi
+būti pastebėta per kitą poll'ą, ne po TTL. Nuo apkrovos krentant DB saugo
+**single-flight**: vykstant zondui kiti kvietėjai gauna tą patį promise'ą, tad
+lygiagrečios užklausos apribotos iki vienos.
+
+⚠️ **Single-flight turi SENATĮ, lygią `READINESS_TIMEOUT_MS`.** Kai užklausa
+kabo ilgiau, nei maršrutas jos laukia, dalintis nebėra ko: kitas poll'as pradeda
+savo užklausą. Be šios ribos kabanti užklausa užrakintų readiness tol, kol
+pagaliau baigsis — atsistačiusi DB liktų nepastebėta dešimtis sekundžių, t. y.
+priešingai, nei single-flight skirtas.
+
+### ⚠️ Generacijų būsena yra STARTO SNAPSHOT'AS
+
+`auditKeysResolvable` rodo `init()` momento rezultatą, **ne dabartinę DB**.
+Išvalius eilutes ar grąžinus raktą, jis atsinaujina tik per **restartą** — ir
+taip turi būti: pilnas generacijų skenavimas kiekvieno poll'o metu yra būtent
+tai, ko §13 loose index scan vengia.
+
+Vėliavėlės reikšmė snapshot'o **nekeičia**: su `true` procesas startuoja, bet
+sąrašas toks pat, ir `/api/ready` toliau grąžina 503.
+
+### Cutover ir rollback
+
+⚠️ **Esami įrašai NEPERKELIAMI.** Perjungus `memory → postgres`, atmintyje buvę
+įrašai lieka atmintyje ir dingsta su procesu; `audit_log` pradedamas tuščias.
+
+⚠️ **Grįžimas `postgres → memory` nėra simetriškas.** Seni įrašai lieka DB, o
+nauji į juos nebepatenka. `/api/audit` rodys tik naujus, atmintinius, ir po
+restarto jų neliks. Tai sąmoningas elgesys, ne defektas — bet grįžtant verta
+žinoti, kad DB eilutės lieka ir toliau reikalauja savo raktų (žr. §13).
+
+---
+
 ## 11. Kas lieka vėlesniems etapams
 
 | Etapas | Kas |

@@ -34,6 +34,31 @@ sugadinta**.
 
 ---
 
+⚠️ **AUDITO RAKTAI: KAM TAIKOMA IR KAM NETAIKOMA** (#155, 7.4f).
+
+Šis skyrius anksčiau teigė, kad „be raktų kopija bevertė". **Aplikacijos kopijai
+tai netaikoma**, ir tvirtinimas buvo klaidinantis.
+
+`createBackup()` serializuoja tik `jobs` ir `audio`; `audit_entry` yra
+`backupPolicy` **išbrauktųjų** sąraše. Vadinasi, aplikacijos kopijoje audito
+eilučių **apskritai nėra** — nei su raktais, nei be jų. Atkūrus tokią kopiją
+audito raktų neprireiks, nes nėra ką jais išspręsti.
+
+Reikalavimas galioja **atskirai PILNAI PostgreSQL kopijai** (`pg_dump`, PITR ar
+tomo momentinė kopija), kuri `audit_log` lentelę apima. Tokioje kopijoje audito
+eilutės yra, o `AUDIT_ID_SALT` ir `AUDIT_ID_SALT_PREVIOUS` — **paslaptys**,
+todėl jų ten nėra ir būti negali.
+
+Atkūrus `audit_log` be atitinkamų raktų, jo generacijos tampa
+**neišsprendžiamos**: 7.4c startas fail-closed nutraukia paleidimą, o įjungus
+`AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` sistema pakyla, bet tų eilučių
+`removeBySubjectIdentifier()` **nebepasiekia** — GDPR ištrynimas nebeįmanomas.
+
+**Praktiškai:** darydami **pilną PostgreSQL kopiją**, tuo pačiu metu
+užfiksuokite ir tuo metu galiojusius `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID` bei
+`AUDIT_ID_SALT_PREVIOUS` — savo paslapčių saugykloje, ne kopijos faile. Jie
+saugomi **atskirai ir atkuriami kartu** su ta kopija.
+
 ## 2. Įjungimas
 
 Kopijos numatytai **išjungtos** — jos yra papildoma asmens duomenų saugykla.
@@ -143,6 +168,88 @@ Redis užrakto.
 
 ---
 
+### Audito raktai atkuriant PILNĄ PostgreSQL kopiją
+
+⚠️ **Šis poskyris NĖRA apie `POST /api/backup/restore`.** Aplikacijos kopijoje
+audito eilučių nėra (žr. §1), tad jos atkūrimas audito raktų neliečia. Žemiau
+aprašytas kelias galioja **pilnos PostgreSQL kopijos** atkūrimui — tik ji
+grąžina `audit_log` turinį.
+
+⚠️ **SEKA SVARBI, IR ANKSTESNĖ ŠIO RUNBOOK'O VERSIJA BUVO NETEISINGA.** Ji liepė
+patikrinti generacijas *prieš* pakeliant dump'ą. Tuščioje avarinio atkūrimo
+duomenų bazėje ta užklausa grąžina **nieko** ir klaidingai patvirtina, kad raktų
+žiedas pilnas; startas paskui krenta fail-closed ties generacijomis, kurių
+operatorius net nematė — būtent tada, kai klaidos kaina didžiausia.
+
+Teisinga seka:
+
+1. **Servisas SUSTABDYTAS.** Fail-closed startas su nepilnu raktų žiedu nutrauks
+   paleidimą, o pusiau pakelta DB kartu su bandančiu kilti procesu tik apsunkina
+   diagnostiką.
+
+2. **Pakelkite dump'ą** į tikslinę duomenų bazę.
+
+3. **Tik dabar klauskite, kokios generacijos kopijoje yra** — užklausa
+   prasminga tik po žingsnio 2, nes iki tol ji rodo senos arba tuščios lentelės
+   turinį:
+
+   ```sql
+   SELECT DISTINCT hash_key_id FROM audit_log;
+   ```
+
+4. **Surinkite trūkstamus raktus** į `AUDIT_ID_SALT_PREVIOUS` (formatas
+   `id:secret`, kableliais). Kiekvienas žingsnio 3 rezultatas privalo turėti
+   raktą aktyviame arba istoriniame sąraše.
+
+5. **Tik tada startuokite servisą.** Trūkstant bent vieno rakto, startas
+   nutrūks — tai apsauga, ne kliūtis; žr. „Jei raktas prarastas negrįžtamai".
+
+⚠️ **Kodėl ne „fiksuoti generacijų sąrašą kopijos darymo metu".** Toks sąrašas
+būtų patogesnis, bet jo negalime garantuoti: pilną PostgreSQL kopiją paprastai
+daro DBA įrankiai (`pg_dump`, PITR, tomo momentinė kopija), kurių ši aplikacija
+nevaldo, o aplikacijos kopija audito lentelės neapima apskritai. Sąrašas tada
+egzistuotų tik dalyje kopijų, ir operatorius negalėtų žinoti, ar jo nebuvimas
+reiškia „nėra generacijų", ar „niekas jo neužfiksavo". Žingsnių tvarka veikia su
+**bet kokiu** dump'u, iš bet kokio šaltinio, todėl pasirinkta ji. Sąrašo
+fiksavimas kopijos metu lieka naudingas **papildomas** patogumas, ne pakaitalas.
+
+### Jei raktas prarastas negrįžtamai
+
+1. Paleiskite su `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`. Procesas
+   pakils; `/api/health` grąžins **200**, o `/api/ready` — **503**. Taip ir
+   turi būti: vėliavėlė leidžia *paleisti*, ne deklaruoti sveikatą, o liveness
+   lieka, kad orkestruotojas neperkrautų podo cikle ir šis langas apskritai
+   atsivertų.
+
+2. Pašalinkite paveiktas eilutes:
+
+   ```sql
+   DELETE FROM audit_log WHERE hash_key_id = '<prarasta-generacija>';
+   ```
+
+   ⚠️ Tai **negrįžtama** ir reiškia, kad tų įvykių audito pėdsako nebeliks.
+   Alternatyvos nėra: be rakto jų `subject_id` neatkuriamas, tad GDPR
+   ištrynimas jų vis tiek nebepasiektų.
+
+3. Išjunkite `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS` ir pašalinkite
+   generaciją iš `AUDIT_ID_SALT_PREVIOUS`, jei ji ten dar yra.
+
+4. ⚠️ **PERKRAUKITE.** Be šio žingsnio `/api/ready` **liks 503**, nors eilutės
+   jau išvalytos.
+
+   Priežastis: neišsprendžiamų generacijų sąrašas yra **starto momento
+   snapshot'as**, ne gyva būsena. Jis atsinaujina tik per paleidimą — pilnas
+   generacijų skenavimas kiekvieno readiness poll'o metu būtų būtent ta
+   operacija, kurios visa schema ir vengia.
+
+   Patikrinkite po perkrovimo:
+
+   ```bash
+   curl -s localhost:3000/api/ready | grep -o '"auditKeysResolvable":[a-z]*'
+   ```
+
+   Turi būti `true`.
+
 ## 5. Ko atkūrimas NEGRĄŽINA
 
 ⚠️ **Ištrintų duomenų.** Atkūrimas gerbia #19 žymas: jei jobas buvo ištrintas,
@@ -159,6 +266,13 @@ Tai galioja **ir šifruotoms kopijoms, ir rotacijos keliui**.
 prarastais.
 
 ---
+
+⚠️ **Aplikacijos atkūrimas negrąžina audito — nei įrašų, nei raktų.** Audito
+eilučių kopijoje nėra (žr. §1), tad raktų klausimas čia neiškyla.
+
+Jis iškyla atkuriant **pilną PostgreSQL kopiją**: praradus raktus kartu su
+duomenimis, `audit_log` eilutės lieka fiziškai, bet tampa neišsprendžiamos —
+nei paieška pagal `job_id`, nei GDPR ištrynimas jų nebepasiekia.
 
 ## 6. Raktų rotacija
 

@@ -916,3 +916,377 @@ test("GENERACIJOS: skenavimo KLAIDA metama, o ne verčiama į tuščią sąraš�
   assert.ok(patikra.length > 50, "prielaida: funkcijos kūnas išpjautas");
   assert.doesNotMatch(patikra, /catch/, "generacijų patikra negali ryti skenavimo klaidos");
 });
+
+test("ZONDAS: tikrina TEISES (SELECT/INSERT/DELETE), ne vien ryšį", () => {
+  /**
+   * ⚠️ `SELECT 1` ĮRODO TIK TIEK, KAD JUNGTIS GYVA (#155, 7.4f / #231).
+   *
+   * Rolė su atimta `DELETE` teise jį praeitų, o `removeBySubjectIdentifier()`
+   * kristų VYKDYMO metu - GDPR ištrynimas lūžtų tyliai, o visi sveikatos
+   * signalai liktų žali. Būtent todėl `DELETE` yra būtinųjų aibėje.
+   */
+  const { BUTINOS_PRIVILEGIJOS } = require("../utils/auditStore/postgresStore");
+
+  assert.deepEqual(
+    [...BUTINOS_PRIVILEGIJOS].sort(),
+    ["DELETE", "INSERT", "SELECT"],
+    "trūkstama privilegija reikštų tyliai lūžtantį kelią"
+  );
+});
+
+test("ZONDAS: kiekvienos trūkstamos teisės pakanka, kad zondas grąžintų `false`", async () => {
+  const { createPostgresStore, BUTINOS_PRIVILEGIJOS } = require("../utils/auditStore/postgresStore");
+
+  const suTeisemis = (atimta) => ({
+    query: async () => ({
+      rows: [
+        BUTINOS_PRIVILEGIJOS.reduce(
+          (acc, p) => ({ ...acc, [p.toLowerCase()]: p !== atimta }),
+          { perskaityta: 0, seka_leidziama: true }
+        ),
+      ],
+    }),
+  });
+
+  assert.equal(
+    await createPostgresStore(suTeisemis(null), { hashKeyId: "A" }).probe(),
+    true,
+    "su visomis teisėmis zondas teigiamas"
+  );
+
+  for (const privilegija of BUTINOS_PRIVILEGIJOS) {
+    const store = createPostgresStore(suTeisemis(privilegija), { hashKeyId: "A" });
+    assert.equal(
+      await store.probe(),
+      false,
+      `be ${privilegija} zondas privalo grąžinti false - kitaip gedimas liktų nematomas`
+    );
+  }
+});
+
+test("ZONDAS: NEMUTUOJA - jokio INSERT ar DELETE bandomojo įrašo", () => {
+  /**
+   * Readiness kviečiamas kiekvieno orkestruotojo probe metu. Bandomasis įrašas
+   * reikštų nuolatinį audito lentelės šiukšlinimą ir WAL srautą dėl
+   * diagnostikos - o append-only trigeris tokios eilutės dar ir neleistų
+   * ištrinti be pėdsako.
+   */
+  const uzklausos = [];
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const pool = {
+    query: async (sql) => {
+      uzklausos.push(sql);
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+      };
+    },
+  };
+
+  return createPostgresStore(pool, { hashKeyId: "A" })
+    .probe()
+    .then(() => {
+      assert.equal(uzklausos.length, 1, "vienas round-trip");
+
+      /**
+       * ⚠️ Tikrinami SAKINIAI, ne žodžiai: `has_table_privilege(...) AS "insert"`
+       * teisėtai turi žodį `insert` stulpelio pseudonime. Pirmoji šios patikros
+       * versija būtent taip ir krito.
+       */
+      assert.doesNotMatch(uzklausos[0], /\bINSERT\s+INTO\b/i, "zondas negali rašyti");
+      assert.doesNotMatch(uzklausos[0], /\bDELETE\s+FROM\b/i, "zondas negali trinti");
+      assert.doesNotMatch(uzklausos[0], /\bUPDATE\s+\w+\s+SET\b/i, "zondas negali keisti");
+      assert.match(uzklausos[0], /has_table_privilege/, "teisės tikrinamos per katalogą");
+    });
+});
+
+test("ZONDAS: SEKOS teisė tikrinama - be jos kiekvienas `append()` kristų", async () => {
+  /**
+   * ⚠️ `INSERT` ANT LENTELĖS NEPAKANKA (#231 Codex peržiūra, P1).
+   *
+   * `seq BIGSERIAL` kiekvieno rašymo metu kviečia `nextval()` ant ATSKIRO sekos
+   * objekto, kurio teisės suteikiamos atskirai. Rolė su `INSERT` ant lentelės,
+   * bet be teisės ant sekos, praeitų senąjį zondą žalią, o kiekvienas
+   * `append()` kristų vykdymo metu - tas pats tylaus gedimo režimas, dėl kurio
+   * privilegijų zondas ir daromas.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const suSeka = (leidziama) => ({
+    query: async () => ({
+      rows: [
+        {
+          perskaityta: 0,
+          select: true,
+          insert: true,
+          delete: true,
+          seka_leidziama: leidziama,
+        },
+      ],
+    }),
+  });
+
+  assert.equal(
+    await createPostgresStore(suSeka(true), { hashKeyId: "A" }).probe(),
+    true,
+    "su visomis teisėmis zondas teigiamas"
+  );
+
+  assert.equal(
+    await createPostgresStore(suSeka(false), { hashKeyId: "A" }).probe(),
+    false,
+    "be teisės ant sekos zondas PRIVALO būti raudonas"
+  );
+
+  /**
+   * ⚠️ `NULL` (sekos nėra) yra fail-closed, ne „nežinoma". Stulpelis be sekos
+   * reiškia kitokią schemą, nei ta, kuriai rašytas `append()`.
+   */
+  assert.equal(
+    await createPostgresStore(suSeka(null), { hashKeyId: "A" }).probe(),
+    false,
+    "dingusi seka negali reikšti sveikos būsenos"
+  );
+});
+
+test("ZONDAS: seka randama per katalogą, o abu iškvietimai NEMUTUOJA", async () => {
+  /**
+   * ⚠️ Sekos vardas NESPĖLIOJAMAS. `audit_log_seq_seq` yra numatytoji forma, bet
+   * ne garantija - pervadinta ar perkelta seka reikštų zondą, tikrinantį
+   * neegzistuojantį objektą, t. y. tylų `false` visai sveikam diegimui.
+   *
+   * ⚠️ Ir svarbiausia: patikra negali kviesti `nextval()`. Tai sunaudotų sekos
+   * reikšmes kiekvieno readiness poll'o metu ir paliktų `seq` spragas.
+   */
+  const uzklausos = [];
+  const { createPostgresStore, SEKOS_PRIVILEGIJOS } = require("../utils/auditStore/postgresStore");
+
+  const pool = {
+    query: async (sql) => {
+      uzklausos.push(sql);
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+      };
+    },
+  };
+
+  await createPostgresStore(pool, { hashKeyId: "A" }).probe();
+
+  assert.equal(uzklausos.length, 1, "vienas round-trip - seka netampa antra užklausa");
+  assert.match(uzklausos[0], /pg_get_serial_sequence/, "seka randama per katalogą");
+  assert.match(uzklausos[0], /has_sequence_privilege/, "tikrinama sekos teisė");
+  assert.doesNotMatch(uzklausos[0], /\bnextval\b/i, "zondas negali sunaudoti sekos reikšmės");
+  assert.doesNotMatch(uzklausos[0], /\bsetval\b/i, "zondas negali perstatyti sekos");
+
+  /**
+   * `nextval()` reikalauja `USAGE` ARBA `UPDATE`. Reikalauti vien `USAGE`
+   * reikštų klaidingai raudoną zondą veikiančiam diegimui.
+   */
+  assert.deepEqual([...SEKOS_PRIVILEGIJOS].sort(), ["UPDATE", "USAGE"]);
+  for (const privilegija of SEKOS_PRIVILEGIJOS) {
+    assert.ok(
+      uzklausos[0].includes(`'${privilegija}'`),
+      `${privilegija} privalo dalyvauti patikroje`
+    );
+  }
+});
+
+test("SINGLE-FLIGHT: kabanti užklausa NEUŽRAKINA readiness po biudžeto", async () => {
+  /**
+   * ⚠️ BE RIBOS SINGLE-FLIGHT VIRSTA UŽRAKTU (#233 Codex raundas 2, #3).
+   *
+   * Kai `READINESS_TIMEOUT_MS` trumpesnis už pool'o `query_timeout`, maršrutas
+   * nutrūksta, o užklausa lieka kaboti. Kiekvienas kitas poll'as gaudavo TĄ PATĮ
+   * pažadą - tad net atsistačiusios DB readiness nepamatydavo, kol sena užklausa
+   * pagaliau baigsis. Rezultatas priešingas single-flight tikslui: vietoj
+   * apribotos apkrovos gaudavom neapribotą prastovą.
+   *
+   * Tikrinama UŽKLAUSŲ SKAIČIUMI, ne laiku: antras poll'as po biudžeto privalo
+   * inicijuoti NAUJĄ užklausą.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const BIUDZETAS_MS = 60;
+  let kiek = 0;
+  let atrakintiAntra = null;
+
+  const pool = {
+    query: async () => {
+      kiek += 1;
+      /** Pirma užklausa KABO - kaip DB, kuri nebeatsako. */
+      if (kiek === 1) return new Promise(() => {});
+      return new Promise((resolve) => {
+        atrakintiAntra = () =>
+          resolve({
+            rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+          });
+      });
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A", readinessBudgetMs: BIUDZETAS_MS });
+
+  /** ⚠️ Nelaukiam: maršrutas šio pažado jau atsisakė. */
+  store.probe().catch(() => {});
+
+  /** Iškart po jo - dalijamės, nes biudžetas dar nepasibaigęs. */
+  store.probe().catch(() => {});
+  assert.equal(kiek, 1, "biudžeto ribose lygiagretūs poll'ai privalo dalintis viena užklausa");
+
+  await new Promise((r) => setTimeout(r, BIUDZETAS_MS + 20));
+
+  const treciasZondas = store.probe();
+  assert.equal(kiek, 2, "po biudžeto naujas poll'as privalo pradėti SAVO užklausą");
+
+  atrakintiAntra();
+  assert.equal(await treciasZondas, true, "atsistačiusi DB pastebima nelaukiant senos užklausos");
+});
+
+test("KEŠAS: PASENĘS zondas negali jo užpildyti - net grąžinęs `true`", async () => {
+  /**
+   * ⚠️ ŠIĄ SPRAGĄ ĮNEŠĖ PATS SINGLE-FLIGHT TAISYMAS (#233 Codex raundas 3, #1).
+   *
+   * Seka, kuri readiness padaro žalią su atimtomis teisėmis:
+   *   1. zondas A startuoja ir kabo;
+   *   2. praėjus biudžetui poll'as paleidžia zondą B;
+   *   3. B grąžina `false` - teisės atimtos;
+   *   4. A PAVĖLUOTAI baigiasi su senu `true` ir įrašo jį į kešą;
+   *   5. kitas poll'as gauna `true` iš kešo, NEIŠSIUNTĘS jokios užklausos.
+   *
+   * Tai tas pats tylus gedimas, dėl kurio privilegijų zondas apskritai daromas,
+   * tik per savo paties kešą - todėl P1, ne kešavimo smulkmena.
+   *
+   * Įrodymas - UŽKLAUSŲ SKAIČIUS: jei kešas būtų užterštas, trečio poll'o
+   * užklausos nebūtų.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const BIUDZETAS_MS = 60;
+  let kiek = 0;
+  let baigtiPirma = null;
+
+  const pool = {
+    query: async () => {
+      kiek += 1;
+
+      /** Pirma užklausa kabo, o vėliau grąžina SENĄ „viskas gerai". */
+      if (kiek === 1) {
+        return new Promise((resolve) => {
+          baigtiPirma = () =>
+            resolve({
+              rows: [
+                { perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true },
+              ],
+            });
+        });
+      }
+
+      /** Tuo metu teisės jau atimtos - visos vėlesnės užklausos tai mato. */
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: false, seka_leidziama: true }],
+      };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A", readinessBudgetMs: BIUDZETAS_MS });
+
+  const pasenes = store.probe();
+
+  await new Promise((r) => setTimeout(r, BIUDZETAS_MS + 20));
+
+  assert.equal(await store.probe(), false, "prielaida: naujas zondas mato atimtas teises");
+  assert.equal(kiek, 2, "prielaida: pasenęs įrašas nebedalinamas");
+
+  /** ── Pasenęs zondas baigiasi PO to, su senu `true` ────────────────────── */
+  baigtiPirma();
+
+  assert.equal(
+    await pasenes,
+    false,
+    "pasenusio zondo atsakymas per senas, kad juo remtųsi readiness - fail-closed"
+  );
+
+  /** ── Ir svarbiausia: kešas privalo likti TUŠČIAS ──────────────────────── */
+  assert.equal(await store.probe(), false, "readiness negali tapti žalia dėl seno atsakymo");
+  assert.equal(kiek, 3, "trečias poll'as PRIVALO klausti DB - kešas negali būti užterštas");
+});
+
+test("KEŠAS: įrodomas `pool.query` SKAIČIUMI, ne laiko matavimu", async () => {
+  /**
+   * ⚠️ REALIZACIJA SU `Date.now()`, BET BE FAKTINIO PRALEIDIMO, PRAEITŲ NAIVŲ TESTĄ.
+   *
+   * Laiko matavimas parodytų, kad antras kvietimas greitas - bet jis būtų
+   * greitas ir tada, kai užklausa vis tiek išsiunčiama į vietinę DB. Vienintelis
+   * įrodymas yra kvietimų SKAIČIUS.
+   */
+  const { createPostgresStore, PROBE_CACHE_TTL_MS } = require("../utils/auditStore/postgresStore");
+
+  let kiek = 0;
+  const pool = {
+    query: async () => {
+      kiek += 1;
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+      };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A" });
+
+  for (let i = 0; i < 5; i += 1) assert.equal(await store.probe(), true);
+  assert.equal(kiek, 1, "penki kvietimai kešo lange privalo duoti VIENĄ užklausą");
+
+  /**
+   * ⚠️ IR KEŠAS PRIVALO BAIGTI GALIOTI. Amžinai kešuotas „sveikas" slėptų
+   * dingusią DB - readiness rodytų 200, kol procesas gyvas.
+   */
+  store._resetProbeCacheForTests();
+  await store.probe();
+  assert.equal(kiek, 2, "pasibaigus galiojimui užklausa privalo pasikartoti");
+  assert.ok(PROBE_CACHE_TTL_MS > 0 && PROBE_CACHE_TTL_MS <= 5000, "TTL turi būti trumpas");
+});
+
+test("KEŠAS: NEIGIAMAS rezultatas NEKEŠUOJAMAS, bet lygiagretūs zondai sujungiami", async () => {
+  /**
+   * ⚠️ DU PRIEŠINGI REIKALAVIMAI, IR ABU BŪTINI.
+   *
+   * Neigiamo kešuoti negalima: atsistačiusi DB turi būti pastebėta per kitą
+   * poll'ą, ne po TTL. Bet be jokios apsaugos krentanti DB gautų užklausą
+   * kiekvienam poll'ui - tas pats apkrovos kelias, kurio kešas ir vengia.
+   *
+   * Sprendimas - SINGLE-FLIGHT, ne trumpas neigiamas TTL: jis apriboja
+   * LYGIAGREČIAS užklausas iki vienos, bet atsistatymo aptikimo neatideda.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  let kiek = 0;
+  let atsakymas = false;
+  const pool = {
+    query: async () => {
+      kiek += 1;
+      await new Promise((r) => setImmediate(r));
+      return {
+        rows: [
+          { perskaityta: 0, select: true, insert: true, delete: atsakymas, seka_leidziama: true },
+        ],
+      };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A" });
+
+  /** Nuoseklūs neigiami kvietimai - kiekvienas klausia DB iš naujo. */
+  assert.equal(await store.probe(), false);
+  assert.equal(await store.probe(), false);
+  assert.equal(kiek, 2, "neigiamas rezultatas NEGALI būti kešuojamas");
+
+  /** Lygiagretūs - viena užklausa visiems. */
+  kiek = 0;
+  const [a, b, c] = await Promise.all([store.probe(), store.probe(), store.probe()]);
+  assert.deepEqual([a, b, c], [false, false, false]);
+  assert.equal(kiek, 1, "lygiagretūs zondai privalo dalintis viena užklausa");
+
+  /** Atsistačius DB - pastebima IŠ KARTO, be TTL laukimo. */
+  atsakymas = true;
+  assert.equal(await store.probe(), true, "atsistatymas neturi būti atidėtas");
+});

@@ -226,3 +226,149 @@ test("KIEKIO RIBA: pati savaime NEATMETA konfigūracijos", () => {
   assert.equal(ring.historicalCount, HISTORICAL_SOFT_LIMIT + 1, "riba čia neturi mesti");
   assert.equal(HISTORICAL_SOFT_LIMIT, 10, "riba pagal #212");
 });
+
+/**
+ * NAŠLAIČIŲ SNAPSHOT'AS TARP `init()` BANDYMŲ (#231 Codex peržiūra, P2).
+ *
+ * ⚠️ KODĖL ČIA REIKIA NETIKRO `pg`, O NE TIKROS DB.
+ *
+ * Snapshot'as užpildomas TIK persistentiniame kelyje, tad atminties režimu šio
+ * gedimo pamatyti neįmanoma. O tikros DB šioje aplinkoje nėra. Netikras `pg`
+ * modulis leidžia įvykdyti PILNĄ `init()` seką - schemos patikras, append-only
+ * zondą ir generacijų skenavimą - ir įrodyti elgseną, o ne perskaityti kodą.
+ *
+ * Riba, kurią būtina žinoti: tai NĖRA įrodymas, kad SQL teisingas. Užklausų
+ * teisingumą tikrina `auditPersistence.integration.test.js` prieš tikrą
+ * PostgreSQL. Čia tikrinama tik `init()` būsenos valdymo logika.
+ */
+function netikrasPg({ generacijos }) {
+  const klientas = {
+    query: async (sql) => {
+      if (/^UPDATE\s+audit_log/i.test(sql)) {
+        const klaida = new Error("append-only trigeris");
+        klaida.code = "23001";
+        throw klaida;
+      }
+      return { rows: [] };
+    },
+    release() {},
+  };
+
+  class NetikrasPool {
+    constructor() {
+      this.baigtas = false;
+    }
+    on() {}
+    async connect() {
+      return klientas;
+    }
+    async end() {
+      this.baigtas = true;
+    }
+    async query(sql) {
+      if (/information_schema\.tables/.test(sql)) return { rows: [{ table_name: "audit_log" }] };
+
+      if (/contype = 'u'/.test(sql)) {
+        return { rows: [{ conname: "audit_log_seq_unique", apibrezimas: "UNIQUE (seq)" }] };
+      }
+
+      if (/conname = 'audit_log_event_pattern'/.test(sql)) {
+        const { EVENT_PATTERN } = require("../utils/auditEvents");
+        return { rows: [{ apibrezimas: `CHECK (event ~ '${EVENT_PATTERN.source}')` }] };
+      }
+
+      if (/contype = 'c'/.test(sql)) {
+        const { EVENT_PATTERN } = require("../utils/auditEvents");
+        return {
+          rows: [
+            { conname: "audit_log_event_pattern", apibrezimas: `CHECK (event ~ '${EVENT_PATTERN.source}')` },
+            { conname: "audit_log_meta_is_object", apibrezimas: "CHECK (jsonb_typeof(meta) = 'object')" },
+            { conname: "audit_log_result_allowed", apibrezimas: "CHECK (result IN ('success', 'failure'))" },
+          ],
+        };
+      }
+
+      if (/pg_trigger/.test(sql)) {
+        return { rows: [{ tgname: "audit_log_no_update", tgenabled: "O" }] };
+      }
+
+      if (/WITH RECURSIVE gen/.test(sql)) {
+        return { rows: generacijos.map((hash_key_id) => ({ hash_key_id })) };
+      }
+
+      return { rows: [{}] };
+    }
+  }
+
+  return { Pool: NetikrasPool };
+}
+
+test("SNAPSHOT: nepavykęs `init()` nepalieka našlaičių kitam bandymui", async () => {
+  /**
+   * ⚠️ BE VALYMO `/api/ready` LIEKA 503 IKI RESTARTO.
+   *
+   * `init()` po nesėkmės kartojamas be `shutdown()` (jis pats nuvalo
+   * `initPromise`). Pirmas bandymas su vėliava užfiksuoja našlaites ir tik PO TO
+   * krenta ties raktų kiekio riba. Operatorius pataiso konfigūraciją, antras
+   * bandymas pavyksta - bet `nasliaitesGeneracijos()` vis dar grąžina PIRMO
+   * bandymo ID, ir readiness lieka 503 be jokios matomos priežasties.
+   */
+  const auditStore = require("../utils/auditStore");
+  const pgKelias = require.resolve("pg");
+  const originalus = require.cache[pgKelias];
+
+  /** ⚠️ 11 istorinių raktų > `HISTORICAL_SOFT_LIMIT`, ir DB jų nebenaudoja. */
+  const perDaug = Array.from({ length: HISTORICAL_SOFT_LIMIT + 1 }, (_, i) => `H${i}:${AKTYVUS}`).join(",");
+
+  const bazine = {
+    AUDIT_BACKEND: "postgres",
+    DATABASE_URL: "postgres://netikras/netikra",
+    AUDIT_ID_SALT: AKTYVUS,
+    AUDIT_ID_SALT_ID: "AKTYVUS",
+    AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS: "true",
+  };
+
+  try {
+    await auditStore.shutdown();
+
+    /** ── 1 bandymas: našlaitė UŽFIKSUOJAMA, po to startas krenta ─────────── */
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: ["NASLAITE"] }),
+    };
+
+    await assert.rejects(
+      () => auditStore.init({ ...bazine, AUDIT_ID_SALT_PREVIOUS: perDaug }),
+      /kiekio riba|nebeturi|AUDIT_ID_SALT_PREVIOUS/i,
+      "prielaida: pirmas bandymas krenta PO generacijų skenavimo"
+    );
+
+    assert.deepEqual(
+      auditStore.nasliaitesGeneracijos(),
+      ["NASLAITE"],
+      "prielaida: nepavykęs bandymas snapshot'ą jau užfiksavo"
+    );
+
+    /** ── 2 bandymas: konfigūracija pataisyta, DB be našlaičių ────────────── */
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: ["AKTYVUS"] }),
+    };
+
+    await auditStore.init(bazine);
+
+    assert.deepEqual(
+      auditStore.nasliaitesGeneracijos(),
+      [],
+      "sėkmingas startas NEGALI paveldėti ankstesnio bandymo našlaičių"
+    );
+  } finally {
+    if (originalus) require.cache[pgKelias] = originalus;
+    else delete require.cache[pgKelias];
+    await auditStore.shutdown();
+  }
+});

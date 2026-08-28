@@ -9,6 +9,48 @@
 
 const { STULPELIAI, META_LAUKAI, isrinktiMeta } = require("./fields");
 
+/**
+ * PRIVILEGIJOS, BE KURIŲ AUDITAS NEVEIKIA (#155, 7.4f / #231).
+ *
+ * `DELETE` čia nėra perteklius: be jos `removeBySubjectIdentifier()` lūžtų
+ * VYKDYMO metu, o visi sveikatos signalai liktų žali - GDPR ištrynimas kristų
+ * tyliai, tiksliai tada, kai jo prireiktų.
+ */
+const BUTINOS_PRIVILEGIJOS = Object.freeze(["SELECT", "INSERT", "DELETE"]);
+
+/**
+ * SEKOS PRIVILEGIJOS - PAKANKA BET KURIOS (#231 Codex peržiūra, P1).
+ *
+ * ⚠️ `INSERT` ANT LENTELĖS NEPAKANKA. `seq BIGSERIAL` kiekvieno `append()` metu
+ * kviečia `nextval()` ant atskiro sekos objekto, o sekos teisės suteikiamos
+ * atskirai nuo lentelės. Rolė su atimta teise ant sekos zondą praeitų žalią, o
+ * kiekvienas rašymas kristų vykdymo metu - tiksliai tas tylaus gedimo režimas,
+ * dėl kurio privilegijų zondas apskritai daromas.
+ *
+ * `nextval()` reikalauja `USAGE` ARBA `UPDATE`, tad reikalauti vien `USAGE`
+ * reikštų klaidingai raudoną zondą veikiančiam diegimui.
+ */
+const SEKOS_PRIVILEGIJOS = Object.freeze(["USAGE", "UPDATE"]);
+
+/** Teigiamo zondo rezultato galiojimas. Orkestruotojo poll'ai kitaip generuotų SQL kiekvienam. */
+const PROBE_CACHE_TTL_MS = 2000;
+
+/**
+ * KIEK ILGAI SINGLE-FLIGHT PAŽADAS DAR GALI BŪTI DALINAMAS (#233 Codex raundas 2, #3).
+ *
+ * ⚠️ BE RIBOS SINGLE-FLIGHT VIRSTA UŽRAKTU. Kai `READINESS_TIMEOUT_MS`
+ * trumpesnis už pool'o `query_timeout`, maršrutas nutrūksta, o kabanti užklausa
+ * lieka. Kiekvienas kitas poll'as gaudavo TĄ PATĮ pažadą, tad atsistačiusios
+ * DB readiness nepamatydavo, kol sena užklausa pagaliau baigsis - galimai
+ * dešimtimis sekundžių vėliau. Tai atvirkščias tikslas nei tas, dėl kurio
+ * single-flight ir daromas.
+ *
+ * Numatytoji reikšmė sutampa su `READINESS_TIMEOUT_MS` numatytąja: kol maršrutas
+ * dar laukia, dalintis prasminga; kai jis jau pasidavė, įrašas nebegalioja pagal
+ * konstrukciją. Tikslią biudžeto reikšmę perduoda `init()`.
+ */
+const PROBE_SINGLE_FLIGHT_MAX_MS = 2000;
+
 /** DB stulpelių sąrašas SELECT'ui - tvarka nesvarbi, bet vienoda abiem kryptim. */
 const STULPELIU_SARASAS = Object.values(STULPELIAI)
   .map((s) => `"${s}"`)
@@ -59,7 +101,18 @@ function iEilute(row) {
   return eilute;
 }
 
-function createPostgresStore(pool, { hashKeyId }) {
+function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
+  /**
+   * Readiness biudžetas ateina iš `init(env)` - to paties `READINESS_TIMEOUT_MS`,
+   * kurį naudoja maršrutas. Antra reikšmė čia reikštų dvi konfigūracijos tiesas.
+   */
+  const singleFlightMaxMs =
+    Number(readinessBudgetMs) > 0 ? Number(readinessBudgetMs) : PROBE_SINGLE_FLIGHT_MAX_MS;
+
+  /** Zondo būsena - VIENAM store'ui, ne moduliui: du pool'ai neturi dalintis kešu. */
+  let kesas = null;
+  let vykstantisZondas = null;
+
   return {
     backend: "postgres",
 
@@ -354,9 +407,134 @@ function createPostgresStore(pool, { hashKeyId }) {
       return rows.map((r) => r.hash_key_id);
     },
 
+    /**
+     * READINESS ZONDAS: TIKRINA TEISES, NE VIEN RYŠĮ (#155, 7.4f / #231).
+     *
+     * ⚠️ `SELECT 1` ĮRODO TIK TIEK, KAD JUNGTIS GYVA. Rolė su atimta `DELETE`
+     * teise jį praeitų, o GDPR ištrynimas kristų. Tas pats galioja `SELECT 1
+     * FROM audit_log LIMIT 1`: jis įrodo skaitymą, bet ne rašymą.
+     *
+     * ⚠️ ZONDAS NEMUTUOJA. Teisės tikrinamos per `has_table_privilege()`
+     * katalogo funkciją, ne bandomuoju įrašu: readiness kviečiamas kiekvieno
+     * orkestruotojo probe metu, ir bandomasis `INSERT`/`DELETE` reikštų nuolatinį
+     * audito lentelės šiukšlinimą bei WAL srautą dėl diagnostikos. Append-only
+     * trigeris tokių eilučių dar ir neleistų ištrinti be pėdsako.
+     *
+     * VIENAS round-trip:
+     *   - `FROM audit_log LIMIT 1` - lentelė egzistuoja ir realiai skenuojama
+     *     (be `SELECT` teisės - `permission denied`, be lentelės - `does not
+     *     exist`; abu virsta klaida, kurią sprendžia kvietėjas);
+     *   - `has_table_privilege(...)` - teisės, kurių reikia rašymui ir trynimui.
+     *
+     * Šablonas tas pats kaip `sessionStore/postgresStore.js` - antra realizacija
+     * išsiskirtų tyliai.
+     */
     async probe() {
-      await pool.query("SELECT 1");
-      return true;
+      /**
+       * ⚠️ KEŠUOJAMAS TIK TEIGIAMAS REZULTATAS.
+       *
+       * Neigiamo kešuoti negalima: atsistačiusi DB turi būti pastebėta per kitą
+       * poll'ą, ne po TTL. Bet be jokios apsaugos krentanti DB gautų užklausą
+       * kiekvienam poll'ui - tas pats apkrovos kelias, kurio kešas ir vengia,
+       * tik blogiausiu momentu.
+       *
+       * Sprendimas - SINGLE-FLIGHT, ne trumpas neigiamas TTL: vykstant zondui
+       * visi kiti kvietėjai gauna TĄ PATĮ promise'ą. Tai apriboja lygiagrečias
+       * užklausas iki VIENOS nepriklausomai nuo poll'ų dažnio, ir, skirtingai
+       * nei neigiamas TTL, atsistatymo aptikimo NEATIDEDA nė milisekunde.
+       */
+      const dabar = Date.now();
+
+      if (kesas && kesas.rezultatas === true && dabar - kesas.laikas < PROBE_CACHE_TTL_MS) {
+        return true;
+      }
+
+      /**
+       * ⚠️ DALINAMASI TIK NEPASENUSIU ĮRAŠU. Senesnis už readiness biudžetą
+       * reiškia užklausą, kurios atsakymo niekas nebelaukia - naujas poll'as
+       * privalo pradėti savo, kitaip atsistatymas lieka nematomas.
+       */
+      if (vykstantisZondas && dabar - vykstantisZondas.pradzia < singleFlightMaxMs) {
+        return vykstantisZondas.pazadas;
+      }
+
+      const irasas = { pradzia: dabar, pazadas: null };
+
+      irasas.pazadas = (async () => {
+        const stulpeliai = BUTINOS_PRIVILEGIJOS.map(
+          (p, i) => `has_table_privilege('audit_log', $${i + 1}) AS "${p.toLowerCase()}"`
+        ).join(", ");
+
+        /**
+         * ⚠️ SEKA RANDAMA PER KATALOGĄ, NE PAGAL VARDĄ. `pg_get_serial_sequence`
+         * grąžina faktinį objektą (`audit_log_seq_seq` yra numatytoji forma, bet
+         * ne garantija). `NULL` reiškia, kad stulpelis nebeturi sekos - schema
+         * ne ta, kurios laukiam, tad fail-closed.
+         *
+         * Abu iškvietimai nemutuojantys: tai katalogo funkcijos, ne `nextval()`.
+         */
+        const { rows } = await pool.query(
+          `WITH skaitymas AS (SELECT 1 FROM audit_log LIMIT 1),
+                seka AS (SELECT pg_get_serial_sequence('audit_log', 'seq') AS vardas)
+           SELECT (SELECT count(*) FROM skaitymas)::int AS perskaityta,
+                  COALESCE(
+                    (SELECT has_sequence_privilege(vardas, 'USAGE')
+                         OR has_sequence_privilege(vardas, 'UPDATE')
+                       FROM seka WHERE vardas IS NOT NULL),
+                    false
+                  ) AS seka_leidziama,
+                  ${stulpeliai}`,
+          [...BUTINOS_PRIVILEGIJOS]
+        );
+
+        const eilute = rows[0];
+
+        return (
+          BUTINOS_PRIVILEGIJOS.every((p) => eilute[p.toLowerCase()] === true) &&
+          eilute.seka_leidziama === true
+        );
+      })();
+
+      vykstantisZondas = irasas;
+
+      try {
+        const rezultatas = await irasas.pazadas;
+
+        /**
+         * ⚠️ KEŠĄ PILDO TIK TUO METU REGISTRUOTAS ZONDAS (#233 Codex raundas 3, #1).
+         *
+         * Šią spragą įnešė pats single-flight senaties taisymas. Scenarijus:
+         * zondas A pasensta, poll'as paleidžia zondą B, B grąžina „trūksta
+         * teisių" (`false`), ir tada A PAVĖLUOTAI baigiasi su senu `true` bei
+         * įrašo jį į kešą. Readiness dvi sekundes rodo žalią - be jokios
+         * užklausos ir su atimtomis teisėmis.
+         *
+         * Tai tiksliai tas tylaus gedimo režimas, dėl kurio privilegijų zondas
+         * apskritai daromas, tik dabar per savo paties kešą.
+         *
+         * Pasenusio įrašo rezultatas ATMETAMAS, o ne kešuojamas, ir kvietėjui
+         * grąžinamas `false`: atsakymas, kurio niekas nebelaukia, yra per senas,
+         * kad juo remtųsi readiness. Fail-closed - kitas poll'as tiesiog
+         * paklaus iš naujo.
+         */
+        if (vykstantisZondas !== irasas) return false;
+
+        /** Kešuojam tik `true` - žr. paaiškinimą aukščiau. */
+        kesas = rezultatas === true ? { rezultatas, laikas: Date.now() } : null;
+        return rezultatas;
+      } finally {
+        /**
+         * ⚠️ TIK SAVO ĮRAŠĄ. Pavėluotai pasibaigusi sena užklausa kitaip
+         * nutrintų naujesnę, ir kitas poll'as be reikalo pradėtų trečią.
+         */
+        if (vykstantisZondas === irasas) vykstantisZondas = null;
+      }
+    },
+
+    /** ⚠️ Tik testams: leidžia įrodyti, kad kešas realiai baigia galioti. */
+    _resetProbeCacheForTests() {
+      kesas = null;
+      vykstantisZondas = null;
     },
 
     async close() {
@@ -365,4 +543,11 @@ function createPostgresStore(pool, { hashKeyId }) {
   };
 }
 
-module.exports = { createPostgresStore, iEilute };
+module.exports = {
+  createPostgresStore,
+  iEilute,
+  BUTINOS_PRIVILEGIJOS,
+  SEKOS_PRIVILEGIJOS,
+  PROBE_CACHE_TTL_MS,
+  PROBE_SINGLE_FLIGHT_MAX_MS,
+};
