@@ -2038,67 +2038,171 @@ Retencijos, `PRIVACY_MODE`, `AUDIT_MAX_ENTRIES`, readiness (7.4d).
 
 ## [7.4d] Retencija ir privatumo režimas
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.4b
+**Tėvinis:** #155 · **Priklauso nuo:** 7.4b, 7.4f · **Lygiagretus:** 7.4e
 
-Operacinis 7.4 uždarymas: retencija, `PRIVACY_MODE`, readiness, kabliukas 7.6 atkūrimui,
-CI registracija ir dokumentacija.
+Persistentinio audito duomenų gyvavimo ciklo uždarymas: retencija ir
+`PRIVACY_MODE`.
+
+⚠️ **APIMTIS SUSIAURINTA.** Readiness, backup/7.6 kabliukas, PostgreSQL CI
+registracija, cutover ir operatoriaus dokumentacija įgyvendinti **7.4f (#231)**
+ir čia NEKARTOJAMI. Ankstesnė šio issue redakcija juos apėmė; jei kur nors
+matote tuos reikalavimus, autoritetas yra #231.
 
 ### Užfiksuoti sprendimai
 
-- `AUDIT_MAX_ENTRIES` PostgreSQL režime **NETAIKOMA**. Tai buvo apsauga nuo RAM
-  augimo; ribos „palik paskutinius N" į DB neperkeliame. Dokumentuojama eksplicitiškai.
-- Retencijos riba: `timestamp < cutoff` → šalinama, `timestamp == cutoff` → **lieka**.
-- `PRIVACY_MODE=true` PostgreSQL režime: naujų įrašų nerašo IR starto metu išvalo
-  esamas `audit_log` eilutes — atitinka dabartinį in-memory kontraktą, kuris žada
-  ištrynimą, ne tik nutildymą.
+- `AUDIT_MAX_ENTRIES` PostgreSQL režime **NETAIKOMA** kaip retencijos taisyklė.
+  Tai buvo apsauga nuo RAM augimo; ribos „palik paskutinius N" į DB
+  neperkeliame.
+- Retencijos riba: `timestamp < cutoff` → šalinama, `timestamp == cutoff` →
+  **lieka**, `timestamp > cutoff` → lieka.
+- `PRIVACY_MODE=true` PostgreSQL režime: naujų įrašų nerašo IR starto metu
+  fiziškai išvalo esamas `audit_log` eilutes — atitinka dabartinį in-memory
+  kontraktą, kuris žada ištrynimą, ne nutildymą.
+- Batch dydis **nefiksuojamas skaičiumi šiame issue**. Reikalaujama „ribotas
+  batch su viena autoritetinga numatytąja reikšme"; konkretų dydį parenka
+  realizacija pagal repo konvencijas ir jį testuoja.
+
+### Retencijos vykdymo kontraktas
+
+- Retencijos autoritetas — esama centralizuota `privacyConfig` /
+  `retentionSweeper` architektūra. Auditui nekuriamas atskiras timer'is,
+  scheduler'is ar antra retention konfigūracija.
+- Cutoff apskaičiuojamas **VIENĄ kartą** sweep ciklo pradžioje iš kontroliuojamo
+  laiko šaltinio: `cutoff = now − retention`. Visi to paties sweep batch'ai
+  naudoja tą pačią reikšmę. ⚠️ Perskaičiuojant `now()` kiekvienam batch'ui,
+  ilgo sweep metu keistųsi naikinamų eilučių aibė.
+- Sweep vykdomas ribotais batch'ais. Vienas DB kvietimas pašalina ne daugiau
+  nei batch limitas; pilnas sweep kartoja, kol pašalinta mažiau nei limitas
+  arba nulis.
+- ⚠️ **Batch dydis turi VIENĄ autoritetingą šaltinį** — konstantą arba
+  konfigūraciją store/retention sluoksnyje. Ranka įrašyti skirtingi dydžiai
+  kode ir teste yra ta pati rankomis palaikomo sąrašo klasė, kurią 7.4f
+  pašalino kitur.
+- ⚠️ **Kandidatų atranka deterministinė ir indeksu palaikoma.** Negalima
+  parsisiųsti visų expired eilučių į Node ir trinti po vieną. PostgreSQL
+  `DELETE` neturi paprasto `LIMIT` — reikalingas kandidatų CTE/subquery.
+  Issue fiksuoja REZULTATĄ, ne SQL sintaksę.
+- ⚠️ **SWEEP CIKLAI NEPERSIDENGIA VIENOJE INSTANCIJOJE.** Jei ankstesnis sweep
+  dar vyksta, scheduler'io kitas tick'as nepradeda antro. Įrodoma elgsenos
+  testu, ne `isSweeping` kintamojo egzistavimu.
+- ⚠️ **Proceso lokali spyna NĖRA multi-instance korektiškumo garantija.** Dvi
+  instancijos gali trinti tą pačią expired aibę vienu metu; rezultatas privalo
+  likti korektiškas ir idempotentiškas. Jei reikia stipresnio mechanizmo
+  (advisory lock), tai eksplicitinis sprendimas su pagrindimu, ne prielaida.
+
+### `PRIVACY_MODE` startup kontraktas
+
+- `PRIVACY_MODE=true` su PostgreSQL yra **STARTUP BARJERAS**, ne foninis
+  best-effort valymas.
+- Init seka: DB/pool paruoštas → migracijos pritaikytos → audit store
+  inicializuotas → `PRIVACY_MODE` RAW valymas **`await`intas** → tik tada
+  instancija gali aptarnauti srautą.
+- ⚠️ **Valymas negali vykti prieš migracijas ar store init** — kitaip startas
+  griūva lenktynėse.
+- ⚠️ **Purge nesėkmė → startup FAIL-CLOSED.** Negalima tęsti su
+  `PRIVACY_MODE=true` ir senomis eilutėmis DB.
+- ⚠️ **Tvarka su 7.4c naslaičių patikra apibrėžiama eksplicitiškai.** Abu vyksta
+  audit store init metu: generacijų skenavimas ir privacy purge. Jei purge
+  ištrina visas eilutes, naslaičių nebelieka — bet jei skenavimas eina pirmas,
+  startas gali kristi dėl generacijų, kurias purge tuoj pat būtų pašalinęs.
+  Pasirink tvarką, pagrįsk ir testuok.
+- Kol `PRIVACY_MODE=true`, nauji audit įrašai nepersistinami.
+- Režimo keitimas vyksta per proceso restartą / init semantiką. Runtime
+  hot-toggle nekuriamas, jei repo kontrakte tokio nėra.
+- `true → false` neprikelia ištrintų įrašų; po normalaus starto tiesiog vėl
+  leidžiami nauji.
+
+### `DELETE` kelių kontraktas
+
+- Teisėti aukšto lygio šalinimo keliai persistentiniame audite: **subject
+  erasure**, **retencija**, **`PRIVACY_MODE` startup purge**.
+- ⚠️ **Suderinama su FAKTINE 7.4b append-only apsauga.** 7.4d neapeina jos
+  „specialiu raw SQL hack'u". Jei 7.4b pasirinko store-API enforcement — visi
+  trys keliai eina per kontroliuojamą store API; jei DB roles/grants — per tam
+  skirtą leistiną kelią. Prieš rašant kodą įvardyti, kuris mechanizmas
+  faktiškai galioja.
+- Bendras produkcinis audit caller'is negauna laisvo `DELETE FROM audit_log`
+  primityvo.
+
+### `AUDIT_MAX_ENTRIES`
+
+- Memory backend išlaiko esamą semantiką.
+- PostgreSQL backend šio limito nelaiko retencijos taisykle: eilutės netrinamos
+  vien todėl, kad jų skaičius viršijo N.
+- ⚠️ Testas įrodo **faktinį elgesį**, ne config parse: į DB įrašoma daugiau nei
+  `AUDIT_MAX_ENTRIES`, ir eilutės išlieka, kol jų nepaliečia laiko retencija,
+  erasure ar privacy purge.
 
 ### DoD
 
-- [ ] ⚠️ **Retencijos autoritetas lieka `privacyConfig` / centralizuota retention
-      architektūra.** Antras nepriklausomas mechanizmas vien auditui nekuriamas;
-      persistentinis auditas įtraukiamas į ESAMĄ retention kelią.
-- [ ] Retencijos testas su **kontroliuojamu laiko šaltiniu**: `< cutoff` pašalinamas,
-      `== cutoff` lieka, `> cutoff` lieka.
-- [ ] ⚠️ **Sweep BATCH'AIS.** Vienas `DELETE` ant išaugusios lentelės laiko ilgą
-      lock'ą. Ribotas batch dydis + indeksas ant `timestamp`; testas, kad kelių batch'ų
-      ciklas baigiasi ir nepalieka likučių.
-- [ ] Retencijos ir append-only sąveika: retencija ir erasure yra vieninteliai
-      leidžiami `DELETE` keliai — testas, kad kitas kelias atmetamas.
-- [ ] `PRIVACY_MODE` semantika įgyvendinta pagal aukščiau užfiksuotą sprendimą.
-      ⚠️ **Privalomas RAW PostgreSQL testas:** negali likti būsenos, kur
-      `GET /api/audit` grąžina `[]`, o `audit_log` tebeturi senus įrašus.
-- [ ] `AUDIT_MAX_ENTRIES` PostgreSQL semantika testuota ir dokumentuota.
-- [ ] ⚠️ **Readiness liečia realų `audit_log`, ne `SELECT 1`.** Scenarijus: DB
-      pasiekiama, `audit_log` trūksta arba neprieinama → NOT ready.
-- [ ] ⚠️ **Readiness probe nebrangus.** Kviečiamas kas health poll'ą — teisės
-      tikrinamos per `has_table_privilege()`, be šiukšlinių eilučių rašymo, su
-      rezultato cache trumpam intervalui.
-- [ ] `/api/health` DB ir audit backend detalių produkcijoje pagal nutylėjimą NErodo
-      (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
-- [ ] ⚠️ **KABLIUKAS 7.6 ATKŪRIMUI.** `utils/backupPolicy.js` jau sąmoningai išbraukia
-      auditą iš atkūrimo: atkūrus, GDPR ištrinti įrašai grįžtų, o naujesni append-only
-      įvykiai būtų perrašyti. 7.4d privalo `audit_log` į tą politiką užregistruoti —
-      kitaip 7.6 DoD („prieš kopiją įrašyta unikali audito eilutė po restore NERANDAMA")
-      neįgyvendinamas.
-- [ ] ⚠️ **`REQUIRE_POSTGRES=1`** — simetriškas esamam `REQUIRE_REDIS=1`. PostgreSQL
-      CI job'e privalomas scenarijus, kuris `skip`'inasi, laikomas GEDIMU, ne sėkme.
-- [ ] PostgreSQL integration testai realiai registruoti PostgreSQL CI rinkinyje —
-      tikrinamas faktinis vykdymas su `DATABASE_URL`, ne failo egzistavimas.
-- [ ] ⚠️ **CUTOVER IR ROLLBACK.** Esami in-memory įrašai NEPERKELIAMI. Grįžimas
-      `postgres → memory` reiškia, kad seni įrašai lieka DB ir nauji į juos nebepatenka —
-      įrašyta į diegimo pastabas kaip sąmoningas, ne atsitiktinis elgesys.
-- [ ] Dokumentacija atnaujinta: `.env.example`, startup/config, privacy/audit dokai,
-      security/evidence matrix (jei repo sargai to reikalauja). Aprašyta: kaip
-      generuojamas `AUDIT_ID_SALT`, kada privalomas, rotacijos modelis, istorinių raktų
-      konfigūracija, `hash_key_id` paskirtis, ką operatorius privalo išsaugoti per
-      rotaciją, kokios pasekmės pašalinus istorinį raktą.
-- [ ] Secret reikšmės nepatenka į logus ar health/readiness atsakymus — testas.
-- [ ] README apribojimų lentelės eilutė ir Roadmap punktas atnaujinti.
+**Retencija**
+
+- [ ] ⚠️ Retencijos autoritetas lieka `privacyConfig` / centralizuota
+      architektūra. Antras mechanizmas vien auditui nekuriamas.
+- [ ] Cutoff apskaičiuojamas vieną kartą sweep ciklui ir tas pats perduodamas
+      visiems batch'ams — testas.
+- [ ] RAW PostgreSQL ribos testas su kontroliuojamu laiku: `< cutoff`
+      pašalinama, `== cutoff` lieka, `> cutoff` lieka.
+- [ ] Vienas DB batch kvietimas pašalina ne daugiau nei batch limitas; testas
+      įrodo, kad didesnei expired aibei atliekami keli atskiri DB kvietimai.
+- [ ] Batch dydis turi vieną autoritetingą šaltinį; testas jį naudoja, o ne
+      kartoja skaičių.
+- [ ] Vienos instancijos sweep'ai nepersidengia — elgsenos testas, ne vėliavos
+      egzistavimas.
+- [ ] Dviejų instancijų lygiagretus sweep prieš tą pačią DB nepalieka expired
+      eilučių ir nesukelia korektiškumo klaidos.
+- [ ] ⚠️ **RETENCIJA ATRAKINA RAKTO IŠĖMIMĄ.** 7.4c fail-closed taisyklė
+      neleidžia pašalinti rakto, kol DB yra jo `hash_key_id` įrašų. Testas
+      užbaigia ciklą: retencija pašalina visus `A` generacijos įrašus → `A`
+      išimamas iš `AUDIT_ID_SALT_PREVIOUS` → startas sėkmingas.
+- [ ] Retencija taikoma vienodai visoms generacijoms — senas `hash_key_id`
+      nėra priežastis įrašą palikti ar pašalinti anksčiau.
+
+**`PRIVACY_MODE`**
+
+- [ ] Purge vykdomas tik PO DB/migracijų/store init ir PRIEŠ instancijai tampant
+      pasiruošusia aptarnauti srautą.
+- [ ] Purge `await`inamas; fire-and-forget nėra.
+- [ ] Purge klaida → startup FAIL, procesas nepradeda aptarnauti užklausų.
+- [ ] ⚠️ RAW PostgreSQL testas: prieš startą DB turi žinomą sentinel eilutę →
+      startas su `PRIVACY_MODE=true` → RAW `audit_log` sentinel eilutės nėra.
+- [ ] Tame pačiame scenarijuje audit įvykio generavimas po starto nepalieka
+      naujos RAW eilutės.
+- [ ] `true → false`: seni įrašai negrįžta, nauji vėl persistinami.
+- [ ] Tvarka su 7.4c naslaičių patikra apibrėžta ir testuota.
+
+**`DELETE` politika ir `AUDIT_MAX_ENTRIES`**
+
+- [ ] Retencija, erasure ir privacy purge integruoti su 7.4b apsauga per
+      autoritetingą leistiną kelią; bendras neautorizuotas `DELETE` lieka
+      nepasiekiamas — testas.
+- [ ] PostgreSQL režime daugiau nei `AUDIT_MAX_ENTRIES` įrašų vien dėl kiekio
+      nėra ištrinami — elgsenos testas.
+- [ ] Memory `AUDIT_MAX_ENTRIES` elgesys neregresuoja.
+
+**Regresija ir sąveika**
+
+- [ ] 7.4d nedubliuoja ir nekeičia 7.4f readiness/backup/CI/dokumentacijos
+      funkcionalumo; 7.4f laikomas prerequisite baseline.
+- [ ] ⚠️ **PATIKRINTI PRIEŠ RAŠANT:** `postgresDoctor.integration.test.js`
+      turi tripwire (`/job store|sesij|audit/i`), draudžiantį žadėti
+      neįgyvendintas integracijas. Jei retencija/privacy keičia doctor
+      pranešimą, testas krenta. Nustatyti, ar jis dar galioja po 7.4b/7.4f, ir
+      atnaujinti kartu, ne aklai.
+- [ ] ⚠️ **PATIKRINTI PRIEŠ RAŠANT:** `backupPolicy` dirba su **artefaktų
+      tipais**, o `audit_log` yra **DB lentelė**. 7.4f pridėjo `excludedTables()`,
+      bet fizinė `pg_dump` kopija pagal nutylėjimą įtrauktų `audit_log` duomenis,
+      ir atkūrus GDPR ištrinti įrašai grįžtų. Nustatyti, ar 7.4f runbook'as tai
+      jau dengia (`--exclude-table-data=audit_log`). Jei ne — tai NĖRA 7.4d
+      apimtis, bet privalo būti užregistruota kaip atskiras radinys, ne tyliai
+      praleista.
 
 ### Ko NEAPIMA
 
-Job store architektūros, sesijų persistencijos, authentication redesign, bendros
-secrets-management platformos ir kitų #155 etapų acceptance criteria keitimo.
+Readiness, `/api/health`, backup politikos kabliuko, PostgreSQL CI registracijos,
+cutover ir operatoriaus dokumentacijos (visa tai — 7.4f/#231). Rakto rotacijos
+(7.4c). Ištrynimo galutinumo barjero (7.4e/#216). 7.6 atkūrimo. Job store,
+sesijų ir authentication pakeitimų.
 
 ---
 
