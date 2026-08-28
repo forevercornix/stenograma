@@ -64,44 +64,38 @@ async function auditAccess(req, res, next) {
  * daug kartų.
  */
 router.get("/audit", pollRateLimiter, auditAccess, validate({ query: schemas.auditQuery }), async (req, res) => {
-  const { limit, offset, event, requestId } = req.validated.query;
+  const { limit, cursor, action, requestId, jobId, from, to } = req.validated.query;
 
   /**
-   * ⚠️ `getAll()` YRA ASYNC NUO 7.4a (#210), TAD JIS GALI ATMESTI.
+   * ⚠️ SUGADINTAS KURSORIUS - 400, NE 500 (#212).
    *
-   * Repo neturi globalaus Express klaidų handlerio. Neapdorotas rejection
-   * nukristų į Express numatytąjį kelią, kuris ne produkcijoje grąžina klaidos
-   * tekstą ir stack trace - o čia tai būtų audito saugyklos vidinė
-   * diagnostika. `getAll()` šiandien yra atmintyje ir nekrenta, bet 7.4b
-   * pakeis realizaciją į DB; sargas turi egzistuoti PRIEŠ tai, ne po.
-   */
-  /**
-   * ⚠️ RIBA IR FILTRAI TAIKOMI SAUGYKLOJE, NE ČIA (#155, 7.4b / #211).
+   * `CursorError` yra kliento klaida: tokenas sugadintas, nepilnas arba
+   * priklauso kitai filtrų aibei. Be atskiro apdorojimo jis nukristų į bendrą
+   * `catch` ir virstų 500 - serverio gedimu, kurio nėra.
    *
-   * Iki 7.4b maršrutas atsiimdavo VISĄ žurnalą, filtruodavo Node'e ir tik tada
-   * `slice()`-indavo. Persistentiniame režime tai reikštų pilną lentelės
-   * perkėlimą kiekvienai užklausai.
-   *
-   * ⚠️ FILTRAI PERKELTI KARTU SU RIBA, NE ATSKIRAI. Palikus juos Node'e, o ribą
-   * perkėlus į SQL, būtų filtruojamas PUSLAPIS, ne aibė - ir filtruotas
-   * atsakymas taptų tyliai neteisingas. `event` ir `request_id` turi savo
-   * indeksus būtent todėl. NAUJI filtrai (`from`, `to`, `action`, `job_id`)
-   * lieka 7.4c.
+   * ⚠️ Rotavus aktyvų raktą anksčiau išduoti kursoriai irgi tampa negaliojantys
+   * (atspaudas nebesutampa). Tai sąmoninga #212 pasekmė; klientas pradeda
+   * puslapiavimą iš naujo.
    */
   let rezultatas;
   try {
-    rezultatas = await auditLog.query({ limit, offset, event, requestId });
+    rezultatas = await auditLog.query({ limit, cursor, action, requestId, jobId, from, to });
   } catch (error) {
+    if (error && error.code === "AUDIT_CURSOR_INVALID") {
+      return res.status(400).json({ error: error.message, code: error.code });
+    }
     return res.status(500).json({ error: sanitizeServerError(error, "GET /api/audit") });
   }
 
+  /**
+   * ⚠️ `total` PAŠALINTAS kartu su `offset`. Keyset puslapiavime jis reikštų
+   * `COUNT` per visą filtruotą aibę KIEKVIENAM puslapiui, o `next_cursor` tą
+   * patį klausimą („ar yra daugiau") atsako pigiai ir tiksliai.
+   */
   res.json({
     entries: rezultatas.entries,
-    // Bendras skaičius leidžia klientui suprasti, ar yra daugiau - be jo
-    // puslapiavimas būtų aklas.
-    total: rezultatas.total,
+    next_cursor: rezultatas.nextCursor,
     limit,
-    offset,
   });
 });
 

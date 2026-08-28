@@ -245,6 +245,206 @@ const SCENARIJAI = [
     },
   },
   {
+    id: "kursorius-desc-ir-be-tuscio-puslapio",
+    kodel: "queryPage() eina `seq` MAŽĖJIMO tvarka, o `nextAfterSeq` yra null tiksliai kai kito puslapio nėra",
+    async run({ store }) {
+      /**
+       * ⚠️ DESC GALIOJA TIK ČIA. `list()` toje pačioje saugykloje lieka ASC -
+       * tai tikrina scenarijai aukščiau, ir 7.4b paritetas nekeičiamas (#212).
+       */
+      for (let i = 0; i < 7; i += 1) await store.append(eilute({ details: `nr-${i}` }));
+
+      const matyti = [];
+      let cursor = null;
+      let puslapiu = 0;
+
+      do {
+        const r = await store.queryPage({ limit: 3, afterSeq: cursor });
+        puslapiu += 1;
+
+        assert.ok(r.entries.length > 0, "tuščias puslapis neleidžiamas");
+        matyti.push(...r.entries.map((e) => e.details));
+        cursor = r.nextAfterSeq;
+      } while (cursor !== null && puslapiu < 10);
+
+      assert.equal(matyti[0], "nr-6", "naujausias pirmas");
+      assert.deepEqual(matyti, ["nr-6", "nr-5", "nr-4", "nr-3", "nr-2", "nr-1", "nr-0"]);
+      assert.equal(puslapiu, 3, "7 įrašai po 3 = 3 puslapiai, be ketvirto tuščio");
+
+      /** ASC kelias nepaliestas. */
+      assert.equal((await store.list()).entries[0].details, "nr-0", "`list()` lieka ASC");
+    },
+  },
+  {
+    id: "lygiagretus-insert-ir-delete-tarp-puslapiu",
+    kodel: "pradinio rinkinio įrašai grąžinami LYGIAI KARTĄ, nors tarp puslapių įterpiama IR trinama",
+    async run({ store }) {
+      /**
+       * ⚠️ DU PRIEŠINGI GEDIMO REŽIMAI, TODĖL DU VEIKSMAI.
+       *
+       * `OFFSET` su `seq DESC`:
+       *   INSERT priekyje → viskas pasislenka, ir puslapis 2 grąžina jau matytus
+       *                     įrašus (DUBLIKATAI);
+       *   DELETE lange    → rinkinys trumpėja, langas slenka atgal, ir dalis
+       *                     įrašų PRALEIDŽIAMA.
+       *
+       * Vien INSERT scenarijus pagautų tik pirmąjį. Keyset kursorius abu
+       * išsprendžia, nes riba yra `seq`, ne pozicija.
+       */
+      const pradiniai = [];
+      for (let i = 0; i < 9; i += 1) {
+        pradiniai.push(await store.append(eilute({ details: `pradinis-${i}`, subjectId: `s-${i}` })));
+      }
+
+      const matyti = [];
+      let cursor = null;
+      let zingsnis = 0;
+
+      do {
+        const r = await store.queryPage({ limit: 2, afterSeq: cursor });
+        matyti.push(...r.entries.map((e) => e.details));
+        cursor = r.nextAfterSeq;
+        zingsnis += 1;
+
+        if (zingsnis === 1) {
+          /** INSERT PRIEKYJE: nauji gauna didesnį `seq` ir lieka UŽ kursoriaus. */
+          for (let i = 0; i < 3; i += 1) await store.append(eilute({ details: `naujas-${i}` }));
+        }
+
+        if (zingsnis === 2) {
+          /** DELETE KURSORIAUS LANGE: dar nepasiektas įrašas dingsta. */
+          await store.removeBySubject("s-1");
+        }
+      } while (cursor !== null && zingsnis < 20);
+
+      /** Nė vieno dublikato - tai griūtų su OFFSET po INSERT. */
+      assert.equal(new Set(matyti).size, matyti.length, `dublikatai: ${matyti.join(",")}`);
+
+      /** Nauji įrašai į pradinį traversalą NEPATENKA. */
+      assert.ok(!matyti.some((d) => d.startsWith("naujas-")), "nauji įrašai neturi patekti");
+
+      /**
+       * Visi pradiniai grąžinti lygiai kartą, IŠSKYRUS sąmoningai ištrintą.
+       * Ištrintasis - `pradinis-1`; jis buvo dar nepasiektas, tad jo nebūti YRA
+       * teisingas rezultatas, o ne praleidimas.
+       */
+      const laukiami = pradiniai
+        .map((e) => e.details)
+        .filter((d) => d !== "pradinis-1")
+        .sort();
+
+      assert.deepEqual(
+        matyti.filter((d) => d.startsWith("pradinis-")).sort(),
+        laukiami,
+        "kiekvienas neištrintas pradinis įrašas privalo būti grąžintas lygiai kartą"
+      );
+    },
+  },
+  {
+    id: "kursorius-vienodi-timestamp",
+    kodel: "VIENU MOMENTU įrašytos eilutės puslapiuojamos teisingai - `seq`, ne `timestamp`",
+    async run({ store, vienuMomentu }) {
+      /**
+       * ⚠️ ŠIS SCENARIJUS YRA #212 „ordering-key collision" REIKALAVIMAS.
+       *
+       * Ankstesnis tvarkos scenarijus tikrina `list()` (ASC) - kursoriaus jis
+       * neliečia. Čia tos pačios vienoje transakcijoje įrašytos eilutės, kurių
+       * `timestamp` SUTAMPA, puslapiuojamos per `queryPage()`.
+       *
+       * ⚠️ `Date.now()` mock'as čia netiktų: postgres pusėje laiko autoritetas
+       * yra DB (`DEFAULT now()`), tad vienodus laikus sukuria transakcija, ne
+       * proceso laikrodis. Todėl naudojamas adapterio `vienuMomentu`.
+       */
+      const zymos = ["a", "b", "c", "d", "e"];
+      await vienuMomentu(zymos.map((z) => eilute({ details: z })));
+
+      /** Prielaida: laikai realiai sutampa - kitaip scenarijus tikrintų ne tai. */
+      const { entries: visi } = await store.list();
+      assert.equal(
+        new Set(visi.map((e) => e.timestamp)).size,
+        1,
+        "prielaida: vienoje transakcijoje visi `timestamp` vienodi"
+      );
+
+      const matyti = [];
+      let cursor = null;
+      let puslapiu = 0;
+
+      do {
+        const r = await store.queryPage({ limit: 2, afterSeq: cursor });
+        matyti.push(...r.entries.map((e) => e.details));
+        cursor = r.nextAfterSeq;
+        puslapiu += 1;
+      } while (cursor !== null && puslapiu < 10);
+
+      assert.equal(new Set(matyti).size, matyti.length, "vienodi laikai negali duoti dublikatų");
+      assert.deepEqual(
+        matyti,
+        ["e", "d", "c", "b", "a"],
+        "tvarka apibrėžta `seq`, nors `timestamp` visoms eilutėms vienodas"
+      );
+    },
+  },
+  {
+    id: "kursorius-filtrai-komponuojasi",
+    kodel: "filtrai veikia KARTU viename užklausos kelyje, ne vienas kitą pakeisdami",
+    async run({ store }) {
+      await store.append(eilute({ event: "LOGIN_SUCCESS", requestId: "req-a", subjectId: "pseudo-1" }));
+      await store.append(eilute({ event: "LOGIN_SUCCESS", requestId: "req-b", subjectId: "pseudo-1" }));
+      await store.append(eilute({ event: "LOGIN_FAILED", requestId: "req-a", subjectId: "pseudo-1" }));
+      await store.append(eilute({ event: "LOGIN_SUCCESS", requestId: "req-a", subjectId: "pseudo-2" }));
+
+      /** Trys filtrai vienu metu - #212 reikalauja bent `job_id` + du kitus. */
+      const r = await store.queryPage({
+        limit: 50,
+        action: "LOGIN_SUCCESS",
+        requestId: "req-a",
+        subjectIds: ["pseudo-1"],
+      });
+
+      assert.equal(r.entries.length, 1, "visi trys filtrai privalo susikirsti, ne pakeisti vienas kitą");
+      assert.equal(r.entries[0].event, "LOGIN_SUCCESS");
+      assert.equal(r.entries[0].requestId, "req-a");
+      assert.equal(r.entries[0].subjectId, "pseudo-1");
+    },
+  },
+  {
+    id: "kursorius-fan-out-aibe",
+    kodel: "subjectIds aibė atrenka VISUS jos narius vienu predikatu",
+    async run({ store }) {
+      /**
+       * Rotavus raktą tas pats job'as skirtingose generacijose turi skirtingą
+       * `subject_id`. Paieška privalo rasti abu - vienu set-based predikatu.
+       */
+      await store.append(eilute({ subjectId: "generacija-A", details: "senas" }));
+      await store.append(eilute({ subjectId: "generacija-B", details: "naujas" }));
+      await store.append(eilute({ subjectId: "kitas-subjektas", details: "svetimas" }));
+
+      const r = await store.queryPage({ limit: 50, subjectIds: ["generacija-A", "generacija-B"] });
+
+      assert.deepEqual(
+        r.entries.map((e) => e.details).sort(),
+        ["naujas", "senas"],
+        "abi generacijos randamos, svetimas subjektas - ne"
+      );
+    },
+  },
+  {
+    id: "trynimas-per-kelias-generacijas",
+    kodel: "removeBySubject priima MASYVĄ ir pašalina visas generacijas vienu kartu",
+    async run({ store }) {
+      await store.append(eilute({ subjectId: "gen-A" }));
+      await store.append(eilute({ subjectId: "gen-B" }));
+      await store.append(eilute({ subjectId: "gen-C-kito-jobo" }));
+
+      assert.equal(await store.removeBySubject(["gen-A", "gen-B"]), 2);
+
+      const { entries } = await store.list();
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0].subjectId, "gen-C-kito-jobo", "svetimo subjekto liesti negalima");
+    },
+  },
+  {
     id: "valymas",
     kodel: "clear() ištuština žurnalą abiejuose backend'uose",
     async run({ store }) {
@@ -301,9 +501,18 @@ const ADAPTERIAI = [
     async setup() {
       return {
         store: memoryStore,
-        /** Atmintyje „vienas momentas" yra tiesiog nuoseklus įrašymas - laikrodis nedalyvauja. */
+        /**
+         * ⚠️ „VIENAS MOMENTAS" REIŠKIA VIENODĄ `timestamp`, ne tik nuoseklų įrašymą.
+         *
+         * PostgreSQL pusėje tai duoda transakcija: `now()` visoms eilutėms
+         * grąžina tą patį momentą. Atmintyje ekvivalentas - ta pati laiko žyma
+         * visoms eilutėms. Anksčiau čia buvo tiesiog ciklas, tad laikai
+         * skirdavosi, ir tvarkos scenarijus atmintyje tikrindavo silpnesnę
+         * sąlygą nei postgres.
+         */
         vienuMomentu: async (eilutes) => {
-          for (const e of eilutes) await memoryStore.append(e);
+          const momentas = new Date().toISOString();
+          for (const e of eilutes) await memoryStore.append({ ...e, timestamp: momentas });
         },
         cleanup: async () => memoryStore.clear(),
       };
@@ -407,7 +616,17 @@ test("KONTRAKTAS: abu backend'ai deklaruoja tą patį viešą paviršių", () =>
     hashKeyId: HASH_KEY_ID,
   });
 
-  const KONTRAKTAS = ["append", "list", "removeBySubject", "countBySubject", "clear", "probe", "close"];
+  const KONTRAKTAS = [
+    "append",
+    "list",
+    "queryPage",
+    "removeBySubject",
+    "countBySubject",
+    "usedGenerations",
+    "clear",
+    "probe",
+    "close",
+  ];
 
   for (const metodas of KONTRAKTAS) {
     assert.equal(typeof memoryStore[metodas], "function", `memory: trūksta ${metodas}`);
@@ -422,7 +641,7 @@ test("KONTRAKTAS: scenarijų sąrašas yra VIENAS ir be dublikatų", () => {
   const ids = SCENARIJAI.map((s) => s.id);
 
   assert.equal(new Set(ids).size, ids.length, "dublikuotas id paslėptų vieną scenarijų");
-  assert.ok(ids.length >= 15, "rinkinys negali tyliai susitraukti");
+  assert.ok(ids.length >= 21, "rinkinys negali tyliai susitraukti");
 
   for (const s of SCENARIJAI) {
     assert.ok(s.kodel && s.kodel.length > 10, `${s.id}: scenarijus be paaiškinimo`);

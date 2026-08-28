@@ -152,19 +152,54 @@ test("AUDITAS: minimi įvykiai egzistuoja kode", () => {
 
 test("AUDITAS: `/api/audit` parametrai atitinka realią schemą", () => {
   /**
-   * Įrodymų rinkimo komanda naudoja `limit` ir `offset`. Jei schema jų
-   * nepriimtų, komanda grąžintų 400 — o operatorius manytų, kad audito nėra.
+   * Įrodymų rinkimo komanda runbook'e privalo veikti. Jei schema jos parametrų
+   * nepriimtų, komanda grąžintų 400 - o operatorius manytų, kad audito nėra.
+   *
+   * ⚠️ 7.4c (#212) pakeitė kontraktą: `offset` → `cursor`, `event` → `action`.
+   * Runbook'as migruotas kartu; testas tikrina ABI puses, kad dokumentas ir
+   * schema neišsiskirtų.
    */
   const doc = procedures();
   const { schemas } = require("../middleware/validate");
 
   assert.ok(schemas.auditQuery, "audito užklausos schema turi egzistuoti");
 
-  const parsed = schemas.auditQuery.safeParse({ limit: "1000", offset: "0" });
-  assert.equal(parsed.success, true, "schema turi priimti `limit` ir `offset`");
+  const geras = schemas.auditQuery.safeParse({ limit: "1000", action: "LOGIN_SUCCESS" });
+  assert.equal(geras.success, true, "schema turi priimti `limit` ir `action`");
+
+  const suKursoriumi = schemas.auditQuery.safeParse({ limit: "10", cursor: "abc" });
+  assert.equal(suKursoriumi.success, true, "schema turi priimti `cursor`");
+
+  /** ⚠️ Pašalinti parametrai privalo būti ATMETAMI, ne tyliai nukerpami. */
+  for (const pasenes of [{ offset: "0" }, { event: "LOGIN_SUCCESS" }]) {
+    assert.equal(
+      schemas.auditQuery.safeParse({ limit: "10", ...pasenes }).success,
+      false,
+      `${Object.keys(pasenes)[0]} po 7.4c nebepriimamas`
+    );
+  }
+
+  /** `from > to` yra tuščia užklausa, ne filtras. */
+  assert.equal(
+    schemas.auditQuery.safeParse({
+      from: "2026-08-02T00:00:00Z",
+      to: "2026-08-01T00:00:00Z",
+    }).success,
+    false,
+    "`from > to` privalo būti 400"
+  );
 
   assert.match(doc, /limit=/, "komanda turi naudoti limit");
-  assert.match(doc, /offset/, "puslapiavimas turi būti paaiškintas");
+  assert.match(doc, /cursor/, "puslapiavimas kursoriumi turi būti paaiškintas");
+  assert.match(doc, /next_cursor/, "atsakymo laukas turi būti įvardytas");
+
+  /**
+   * ⚠️ `offset` runbook'e MINĖTI GALIMA - bet tik kaip paaiškinimą, kodėl jis
+   * nebeveikia. Operatorius, radęs seną komandą kitur, turi suprasti gautą 400.
+   * Draudžiama tik INSTRUKCIJA jį naudoti.
+   */
+  assert.match(doc, /offset[^\n]*400|400[^\n]*offset/i, "400 dėl `offset` turi būti paaiškintas");
+  assert.doesNotMatch(doc, /Kartokite su `offset`/, "instrukcijos naudoti `offset` likti negali");
 });
 
 test("PSEUDONIMIZACIJA: įspėjimas atitinka realų audito lauką", () => {

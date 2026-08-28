@@ -1085,3 +1085,349 @@ test("BENDRAS TRYNIMAS: `clear()` produkcijoje ATMETAMAS", { skip: SKIP }, async
     await resursai.isvalyti();
   }
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 7.4c: RAKTO ROTACIJA, GENERACIJŲ SAUGA IR GDPR (#212)
+ *
+ * ⚠️ ČIA GYVENA RAW DB ĮRODYMAI. `auditRotation.test.js` tikrina TIK fan-out
+ * logiką atmintyje ir rotacijos NEĮRODO: atminties backend'as `hash_key_id`
+ * nesaugo. Ataskaitoje tai dvi atskiros eilutės.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const RAKTAS_A = "cm90YWNpamEtcmFrdGFzLUE";
+const RAKTAS_B = "cm90YWNpamEtcmFrdGFzLUI";
+
+/** PostgreSQL aplinka su nurodyta aktyvia generacija ir istoriniais raktais. */
+function pgAplinka(url, { aktyvusId, aktyvusSecret, istoriniai = null, leistiNasliaites = false }) {
+  const env = {
+    ...process.env,
+    AUDIT_BACKEND: "postgres",
+    DATABASE_URL: url,
+    AUDIT_ID_SALT: aktyvusSecret,
+    AUDIT_ID_SALT_ID: aktyvusId,
+    PRIVACY_MODE: "false",
+  };
+  if (istoriniai) env.AUDIT_ID_SALT_PREVIOUS = istoriniai;
+  if (leistiNasliaites) env.AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS = "true";
+  return env;
+}
+
+test("ROTACIJA: RAW eilutės rodo ABI generacijas su teisingu `hash_key_id`", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TIKRINAMOS ABI PUSĖS. Vien `hash_key_id` buvimo nepakanka: reikia, kad
+   * SENAS įrašas liktų su `A`, o NAUJAS gautų `B`, ir kad jų `subject_id`
+   * SKIRTŲSI - kitaip rotacija būtų dekoracija.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, pool, resursai } = await paruostiDb("audit_rotacija");
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "A", aktyvusSecret: RAKTAS_A }));
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-X", success: true });
+
+    await auditStore.shutdown();
+    await auditStore.init(
+      pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B, istoriniai: `A:${RAKTAS_A}` })
+    );
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-X", success: true });
+
+    const { rows } = await pool.query(
+      "SELECT hash_key_id, subject_id FROM audit_log ORDER BY seq ASC"
+    );
+
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].hash_key_id, "A", "senas įrašas privalo LIKTI su savo generacija");
+    assert.equal(rows[1].hash_key_id, "B", "naujas rašomas aktyvia generacija");
+    assert.notEqual(
+      rows[0].subject_id,
+      rows[1].subject_id,
+      "tas pats job'as skirtingose generacijose privalo turėti SKIRTINGĄ pseudonimą"
+    );
+
+    /** ⚠️ Ir nė vienoje eilutėje nėra plikojo ID. */
+    const { rows: visa } = await pool.query("SELECT to_jsonb(t)::text AS visa FROM audit_log t");
+    for (const r of visa) assert.ok(!r.visa.includes("job-X"), "plikas job ID RAW eilutėje");
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("GDPR RAW: ištrynimas pašalina ĮRAŠUS IŠ VISŲ GENERACIJŲ", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ĮRODYMAS PER RAW EILUTES, NE `getAll()` (#212).
+   *
+   * Filtravimo realizacija galėtų praeiti ir su likusiomis našlaitėmis: jei
+   * `getAll()` ar `query()` senos generacijos nerodo, jos atrodo ištrintos, nors
+   * fiziškai lentelėje yra. GDPR klausimas yra apie eilutes, ne apie atsakymą.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, pool, resursai } = await paruostiDb("audit_gdpr_rotacija");
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "A", aktyvusSecret: RAKTAS_A }));
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-X", success: true });
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-LIEKA", success: true });
+
+    await auditStore.shutdown();
+    await auditStore.init(
+      pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B, istoriniai: `A:${RAKTAS_A}` })
+    );
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-X", success: true });
+
+    const { rows: pries } = await pool.query("SELECT COUNT(*)::int AS n FROM audit_log");
+    assert.equal(pries[0].n, 3, "prielaida: trys eilutės, `job-X` dviejose generacijose");
+
+    const pasalinta = await auditLog.removeBySubjectIdentifier("job-X");
+    assert.equal(pasalinta, 2, "privalo dingti abi `job-X` generacijos");
+
+    /** ── RAW patikra ─────────────────────────────────────────────────────── */
+    const { rows: liko } = await pool.query(
+      "SELECT hash_key_id, subject_id FROM audit_log ORDER BY seq ASC"
+    );
+
+    assert.equal(liko.length, 1, "lentelėje privalo likti TIK svetimo job'o eilutė");
+    assert.equal(liko[0].hash_key_id, "A", "likusi eilutė yra `job-LIEKA` iš A generacijos");
+
+    const { candidateSubjectIds, resolveKeyRing } = require("../utils/auditStore/keyRing");
+    const ziedas = resolveKeyRing(
+      pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B, istoriniai: `A:${RAKTAS_A}` }),
+      { reikalaujamaAktyvausId: true }
+    );
+
+    for (const kandidatas of candidateSubjectIds(ziedas, "job-X", ["A", "B"])) {
+      const { rows } = await pool.query(
+        "SELECT COUNT(*)::int AS n FROM audit_log WHERE subject_id = $1",
+        [kandidatas]
+      );
+      assert.equal(rows[0].n, 0, `generacijos pseudonimas ${kandidatas} privalo būti pašalintas`);
+    }
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("SAUGA: raktas su DB įrašais PAMIRŠTAS - startas NUTRŪKSTA", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TAI GDPR KORREKTIŠKUMO, NE HIGIENOS TAISYKLĖ.
+   *
+   * Praradus secret'ą, tų eilučių `subject_id` nebeįmanoma atkurti -
+   * `removeBySubjectIdentifier()` jų NEBEPASIEKS, nors fiziškai jos egzistuoja.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, resursai } = await paruostiDb("audit_nasliaite");
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "A", aktyvusSecret: RAKTAS_A }));
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-X", success: true });
+
+    await auditStore.shutdown();
+
+    /** `A` pašalintas iš konfigūracijos, nors DB jo įrašų dar turi. */
+    await assert.rejects(
+      () => auditStore.init(pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B })),
+      /neturime rakto|A/,
+      "raktas su DB įrašais negali būti pamirštas"
+    );
+
+    assert.equal(auditStore.backend(), "memory", "kritus init'ui pusiau paruoštos būsenos nelieka");
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("SAUGA: raktas BE DB įrašų gali būti pašalintas - startas pavyksta", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ PRIEŠINGA PUSĖ. Be jos ankstesnis testas galėtų praeiti ir tada, kai
+   * startas krinta VISADA - fail-closed be išėjimo būtų ne apsauga, o spąstai.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, pool, resursai } = await paruostiDb("audit_nasliaite_saugu");
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "A", aktyvusSecret: RAKTAS_A }));
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-X", success: true });
+
+    /** Visos `A` eilutės pašalinamos - generacija tampa nebenaudojama. */
+    await pool.query("DELETE FROM audit_log WHERE hash_key_id = 'A'");
+
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }));
+
+    assert.equal(auditStore.backend(), "postgres", "be įrašų raktą pašalinti saugu");
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("SAUGA: `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS` paleidžia, bet ĮSPĖJA", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ATSISTATYMO KELIAS. Negrįžtamai praradus secret'ą fail-closed kitaip
+   * reikštų amžinai nepaleidžiamą backend'ą. Vėliava yra dokumentuotas SĄMONINGAS
+   * GDPR garantijos laužymas, tad ji privalo RĖKTI kiekvieno starto metu.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, resursai } = await paruostiDb("audit_escape_hatch");
+
+  const savedLogLevel = process.env.LOG_LEVEL;
+  const pagauta = [];
+  const originalus = console.warn;
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "A", aktyvusSecret: RAKTAS_A }));
+    await auditLog.record({ event: "PROCESSING_COMPLETED", jobId: "job-X", success: true });
+    await auditStore.shutdown();
+
+    /** ⚠️ `warn` lygis - žr. `auditPersistence` retencijos testo paaiškinimą. */
+    process.env.LOG_LEVEL = "warn";
+    console.warn = (...args) => pagauta.push(args.join(" "));
+
+    await auditStore.init(
+      pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B, leistiNasliaites: true })
+    );
+
+    console.warn = originalus;
+
+    assert.equal(auditStore.backend(), "postgres", "su vėliava startas privalo pavykti");
+    assert.ok(
+      pagauta.some((e) => e.includes("GDPR") && e.includes("A")),
+      "privalo įspėti, kad `A` generacijos įrašai tapo nepasiekiami ištrynimui"
+    );
+  } finally {
+    console.warn = originalus;
+    if (savedLogLevel === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = savedLogLevel;
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("KIEKIO RIBA: 11 raktų su įrašais praeina, 11 su vienu tuščiu - ne", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ #212 SPĄSTAI: „maks. N" + „negalima pašalinti, kol yra įrašų" naiviai
+   * suporuoti duotų nepaleidžiamą sistemą. Riba pažeidžiama TIK tada, kai bent
+   * vienas istorinis raktas DB įrašų nebeturi - tokį pašalinti saugu.
+   */
+  const auditStore = require("../utils/auditStore");
+  const { url, pool, resursai } = await paruostiDb("audit_kiekio_riba");
+
+  try {
+    const generacijos = Array.from({ length: 11 }, (_, i) => `g${i}`);
+
+    /** Kiekvienai generacijai - po eilutę, tad visos yra „dar reikalingos". */
+    for (const g of generacijos) {
+      await pool.query(
+        `INSERT INTO audit_log (id, event, hash_key_id, result)
+         VALUES ($1, 'PROCESSING_COMPLETED', $2, 'success')`,
+        [crypto.randomUUID(), g]
+      );
+    }
+
+    const istoriniai = generacijos.map((g) => `${g}:${RAKTAS_A}`).join(",");
+
+    await auditStore.shutdown();
+    await auditStore.init(
+      pgAplinka(url, { aktyvusId: "AKTYVUS", aktyvusSecret: RAKTAS_B, istoriniai })
+    );
+    assert.equal(auditStore.backend(), "postgres", "11 raktų SU įrašais privalo praeiti");
+
+    /** Vienos generacijos eilutės pašalinamos - raktas tampa nebereikalingas. */
+    await pool.query("DELETE FROM audit_log WHERE hash_key_id = 'g0'");
+    await auditStore.shutdown();
+
+    await assert.rejects(
+      () =>
+        auditStore.init(pgAplinka(url, { aktyvusId: "AKTYVUS", aktyvusSecret: RAKTAS_B, istoriniai })),
+      /riba|g0/,
+      "viršijus ribą nebereikalingas raktas privalo būti atmestas"
+    );
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("SKENAVIMAS: generacijų paieška naudoja INDEKSĄ, ne pilną skenavimą", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ `SELECT DISTINCT hash_key_id` kas startą būtų pilnas augančios lentelės
+   * skenavimas. Rekursyvus CTE šokinėja per `hash_key_id` indeksą: viena eilutė
+   * generacijai, ne viena įrašui.
+   */
+  const { pool, resursai } = await paruostiDb("audit_loose_scan");
+
+  try {
+    for (let i = 0; i < 200; i += 1) {
+      await pool.query(
+        `INSERT INTO audit_log (id, event, hash_key_id, result)
+         VALUES ($1, 'PROCESSING_COMPLETED', $2, 'success')`,
+        [crypto.randomUUID(), `g${i % 3}`]
+      );
+    }
+    await pool.query("ANALYZE audit_log");
+
+    const { rows } = await pool.query(
+      `EXPLAIN (FORMAT JSON)
+       WITH RECURSIVE gen AS (
+         (SELECT hash_key_id FROM audit_log ORDER BY hash_key_id LIMIT 1)
+         UNION ALL
+         SELECT (SELECT a.hash_key_id FROM audit_log a
+                  WHERE a.hash_key_id > g.hash_key_id
+                  ORDER BY a.hash_key_id LIMIT 1)
+           FROM gen g WHERE g.hash_key_id IS NOT NULL
+       )
+       SELECT hash_key_id FROM gen WHERE hash_key_id IS NOT NULL`
+    );
+
+    const planas = JSON.stringify(rows[0]["QUERY PLAN"]);
+
+    assert.match(planas, /Index (Only )?Scan/, "planas privalo naudoti `hash_key_id` indeksą");
+    assert.ok(!/"Node Type": "Seq Scan"/.test(planas), `pilnas skenavimas plane: ${planas.slice(0, 200)}`);
+  } finally {
+    await resursai.isvalyti();
+  }
+});
+
+test("FILTRAI: `job_id` per generacijas ir kiti filtrai - VIENA užklausa", { skip: SKIP }, async () => {
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, resursai } = await paruostiDb("audit_filtrai_pg");
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "A", aktyvusSecret: RAKTAS_A }));
+    await auditLog.record({ event: "LOGIN_SUCCESS", jobId: "job-X", success: true });
+
+    await auditStore.shutdown();
+    await auditStore.init(
+      pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B, istoriniai: `A:${RAKTAS_A}` })
+    );
+    await auditLog.record({ event: "LOGIN_SUCCESS", jobId: "job-X", success: true });
+    await auditLog.record({ event: "LOGIN_FAILED", jobId: "job-X", success: false });
+    await auditLog.record({ event: "LOGIN_SUCCESS", jobId: "job-KITAS", success: true });
+
+    /** `job_id` randa ABI generacijas. */
+    const visi = await auditLog.query({ limit: 50, jobId: "job-X" });
+    assert.equal(visi.entries.length, 3, "abi generacijos plius nesėkmės įrašas");
+
+    /** `job_id` + `action` komponuojasi. */
+    const filtruoti = await auditLog.query({ limit: 50, jobId: "job-X", action: "LOGIN_SUCCESS" });
+    assert.equal(filtruoti.entries.length, 2, "filtrai privalo susikirsti, ne pakeisti vienas kitą");
+    assert.ok(filtruoti.entries.every((e) => e.event === "LOGIN_SUCCESS"));
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});

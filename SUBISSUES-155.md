@@ -1893,9 +1893,113 @@ ištrynimas per visas dar taikomas rakto generacijas.
 
 ### Užfiksuoti sprendimai
 
-- Istoriniai raktai: `AUDIT_ID_SALT_PREVIOUS` — kableliais atskirtas `id:reikšmė`
-  sąrašas. **Maksimum 5** generacijos; daugiau → startup klaida.
-- Puslapiavimas — **keyset kursorius** `(timestamp, id)`, ne `OFFSET`.
+Agentas jų NEKEIČIA ir alternatyvų nesirenka:
+
+- Aktyvus raktas — **pora** `AUDIT_ID_SALT_ID` + `AUDIT_ID_SALT`. `AUDIT_ID_SALT_ID`
+  yra stabilus operatoriaus suteiktas generacijos ID, persistinamas kaip
+  `hash_key_id`. Pats secret'as nepersistinamas niekada.
+- Istoriniai raktai — `AUDIT_ID_SALT_PREVIOUS`, kableliais atskirtas `id:secret`
+  sąrašas.
+- ID formatas: `[A-Za-z0-9_.-]{1,64}`. Secret formatas: base64url arba hex — kablelio
+  ir dvitaškio jame būti negali, todėl sąrašo skaidymas yra vienareikšmis.
+- ⚠️ **`AUDIT_ID_SALT_ID` PRIVALOMAS TIK `postgres` REŽIME; `memory` ĮSPĖJA.**
+
+  Tai EKSPLICITINIS sprendimas, ne praleistas reikalavimas. Atmintyje
+  `hash_key_id` niekur nerašomas, tad generacijos etiketė beprasmė, o
+  reikalavimas jos visur sulaužytų esamus atminties diegimus be jokios naudos.
+  Simetriška 7.4b taisyklei, kur `AUDIT_ID_SALT` privaloma tik persistentiniam
+  backend'ui.
+
+  Bet tylėti negalima: nustačius `AUDIT_ID_SALT` be `AUDIT_ID_SALT_ID`, startas
+  rašo `warn`. Tai vienintelė vieta, kur operatorius gali sužinoti IŠ ANKSTO,
+  kad perjungus `AUDIT_BACKEND=postgres` sistema nebepakils — kitaip jis tai
+  pamatytų tik migracijos metu.
+- Rūšiavimas — pagal **7.4b tvarkos autoritetą (`seq`)**, mažėjimo tvarka (naujausi
+  pirma). ⚠️ `timestamp` NĖRA tvarkos autoritetas: `now()` vienoje transakcijoje
+  visoms eilutėms grąžina tą patį momentą, o lygiagrečios transakcijos gali
+  prieštarauti įrašymo eilei. `seq` unikalus ir monotoniškas, tad kursoriui
+  atskiro laužtuko nereikia.
+- ⚠️ **DESC galioja TIK `query()` / `GET /api/audit`.** `getAll()` ir `list()` lieka
+  saugyklos (ASC) tvarka — 7.4b bendras paritetų rinkinys ir jo testai nekeičiami.
+- Puslapiavimas — keyset cursor. `OFFSET` po 7.4c nebėra palaikomas.
+- Startup gedimas šiame etape reiškia **proceso startą nutraukiantį FAIL**, ne vien
+  readiness — simetriškai 7.4b taisyklei, kad init klaida nekrenta į memory.
+
+### Rakto gyvavimo ciklo kontraktas
+
+⚠️ **RIBA IR GDPR TAISYKLĖ NEGALI SUKURTI NEIŠSPRENDŽIAMOS KONFIGŪRACIJOS.**
+Naivus derinys „maks. N istorinių" + „rakto negalima pašalinti, kol DB yra jo įrašų"
+duoda spąstus: pasukus raktą N+1 kartų greičiau nei suveikia retencija, viršijimas
+neleidžia startuoti, o pašalinti nė vieno rakto negalima, nes visi dar turi įrašų.
+Backend'as tampa nepaleidžiamas be teisėto išėjimo. Todėl:
+
+- Konfigūracija galioja, jei istorinių raktų **≤ 10 ARBA kiekvienas istorinis raktas
+  vis dar turi įrašų DB**. Riba atmeta tik NEBEREIKALINGUS raktus; reikalingo rakto
+  ji niekada neatmeta.
+- **Fan-out autoritetas yra DB, ne env sąrašo ilgis.** Kandidatinių `subject_id`
+  aibę apibrėžia generacijos, faktiškai esančios `audit_log`.
+
+Toliau:
+
+- Aktyvaus `AUDIT_ID_SALT_ID` ir visų istorinių `id` aibė unikali. Kolizija,
+  dublikatas, tuščias ID, tuščias secret'as, netinkamas formatas → startup FAIL.
+- ⚠️ **RAKTO NEGALIMA PAMIRŠTI, KOL DB YRA JUO PSEUDONIMIZUOTŲ ĮRAŠŲ.** Vien sąrašo
+  ilgio ribos GDPR garantijai nepakanka. PostgreSQL backend startup metu nuskaito
+  DB naudojamas `hash_key_id` generacijas; radus generaciją, kuriai resolveris
+  nebeturi rakto — FAIL-CLOSED. Taip užkertama būsena, kurioje persistentinis įrašas
+  egzistuoja, bet `removeBySubjectIdentifier(jobId)` nebegali apskaičiuoti jo
+  `subject_id`.
+- Raktą iš `AUDIT_ID_SALT_PREVIOUS` išimti leidžiama tik tada, kai DB nebeliko nė
+  vieno įrašo su tuo `hash_key_id`.
+- ⚠️ **PATIKROS KAINA.** `SELECT DISTINCT hash_key_id` kas startą yra pilnas skenavimas
+  ant augančios lentelės. Naudojamas loose index scan (rekursyvus CTE ant
+  `hash_key_id` indekso iš 7.4b). Naujos lentelės nekuriama.
+- ⚠️ **ATSISTATYMO KELIAS PRIVALOMAS.** Negrįžtamai praradus secret'ą fail-closed
+  taisyklė kitaip reikštų amžinai nepaleidžiamą backend'ą. Yra eksplicitinis
+  `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`, kuris paleidžia sistemą, kiekvieno
+  starto metu logina `warn` ir yra dokumentuotas kaip **sąmoningas GDPR garantijos
+  laužymas**. Numatyta reikšmė — `false`.
+- 7.4c retencijos NEĮGYVENDINA (tai 7.4d). 7.4c tik fail-closed būdu neleidžia paleisti
+  konfigūracijos, kuri persistentinius įrašus padarytų neberandamus GDPR keliu.
+
+### `/api/audit` filtrų kontraktas
+
+- `action` query parametras filtruoja persistentinį `event` lauką. Atskiras `action`
+  DB stulpelis nekuriamas.
+- `from` / `to` — griežtai validuojami ISO-8601 date-time. Netinkama reikšmė → 400.
+  `from > to` → 400.
+- `request_id` filtruoja atskirą `request_id` stulpelį.
+- `job_id` niekada nenaudojamas kaip plaintext lookup. Resolveris VIENĄ kartą
+  apskaičiuoja kandidatinius `subject_id` aktyviai ir visoms DB esančioms taikomoms
+  generacijoms, o užklausa naudoja vieną set-based predikatą
+  (`subject_id = ANY($1)`), ne N atskirų.
+- Filtrai komponuojami tarpusavyje viename užklausos kelyje, ne vienas kitą pakeičia.
+
+### Cursor kontraktas
+
+- `limit` išlaiko esamą ribojimo/capping kontraktą.
+- `cursor` — opaque URL-safe tokenas; klientas jo nekonstruoja ir neinterpretuoja.
+- Serveris cursor'e užkoduoja paskutinio grąžinto įrašo **pilną deterministinį sort
+  key pagal 7.4b ordering kontraktą**. ⚠️ Jei galutinis 7.4b ordering turi papildomą
+  monotonišką tie-breaker, cursor privalo apimti tą patį pilną raktą — aklai naudoti
+  `(timestamp, id)` negalima — faktinis 7.4b raktas yra `seq`.
+- ⚠️ **CURSOR NĖRA SLĖPTUVĖ FILTRŲ REIKŠMĖMS.** „Opaque" nereiškia „šifruotas".
+  Filtrų aibės susiejimas daromas per **HMAC-SHA256 fingerprint** (keyed aktyviu
+  `AUDIT_ID_SALT`, trumpinamas iki 16 baitų), o ne per užkoduotas pačias reikšmes.
+  Priešingu atveju `job_id` keliautų URL'e ir patektų į nginx access logus. Cursor
+  payload'e yra TIK sort key ir fingerprint.
+- Cursor su kita filtrų aibe (įskaitant pakeistą rūšiavimo kryptį) → 400.
+- Sugadintas, nepilnas ar semantiškai netinkamas cursor → 400, ne 500.
+- `next_cursor` — opaque tokenas kitam puslapiui arba `null`. Nustatomas per
+  `limit + 1` fetch: `null` grąžinamas tiksliai tada, kai kito puslapio nėra. Tuščias
+  paskutinis puslapis neleidžiamas.
+- Rotavus aktyvų raktą anksčiau išduoti cursor'ai nustoja galioti (fingerprint
+  nebesutampa) → 400. Dokumentuota kaip sąmoningas elgesys.
+- ⚠️ **OFFSET TRANSITION.** 7.4c sąmoningai keičia `/api/audit` puslapiavimo kontraktą.
+  `offset` po 7.4c atmetamas kaip nepalaikomas parametras; tylaus fallback į OFFSET
+  nelieka. ⚠️ Jei `schemas.auditQuery` šiandien nežinomus parametrus tyliai nukerta,
+  „`offset` → 400" yra ATSKIRAS validacijos politikos pakeitimas šiam maršrutui, ne
+  šalutinis efektas — jį reikia padaryti eksplicitiškai.
 
 ### DoD
 

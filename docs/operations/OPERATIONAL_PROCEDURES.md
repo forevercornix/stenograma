@@ -61,11 +61,46 @@ operatorius manytų, kad auditas išsaugotas.
 head -c 200 incident-audit-*.json
 ```
 
-Kartokite su `offset`, kol grąžinama mažiau įrašų nei `limit`.
+**Puslapiavimas — `cursor`, ne `offset` (#155, 7.4c).**
+
+Atsakyme yra `next_cursor`: opaque tokenas arba `null`. Kartokite, kol jis
+tampa `null`:
+
+```bash
+CURSOR=""
+while : ; do
+  URL="https://<host>/api/audit?limit=1000"
+  [ -n "$CURSOR" ] && URL="$URL&cursor=$CURSOR"
+
+  curl --fail-with-body --show-error --silent -b cookies.txt "$URL" -o page.json || break
+  cat page.json >> "incident-audit-$(date -u +%Y%m%dT%H%M%SZ).json"
+
+  CURSOR=$(python3 -c "import json,sys;print(json.load(open('page.json')).get('next_cursor') or '')")
+  [ -z "$CURSOR" ] && break
+done
+```
+
+⚠️ **`offset` po 7.4c grąžina 400.** Tai sąmoningas pakeitimas: neribotai
+augančioje lentelėje `OFFSET` padarydavo senesnius įrašus nepasiekiamus, o
+lygiagrečių įrašymų metu praleisdavo arba dubliuodavo eilutes. Kursorius
+remiasi `seq` ir tų problemų neturi.
+
+⚠️ **Kursorius susietas su filtrų aibe.** Pakeitus bet kurį filtrą — arba
+pasukus aktyvų raktą (`AUDIT_ID_SALT`) — anksčiau išduoti kursoriai grąžina
+400, ir puslapiavimą reikia pradėti iš naujo. Filtrų reikšmės pačiame tokene
+NELAIKOMOS: jis keliauja URL'e ir patenka į access logus.
+
+**Filtrai:** `action` (įvykio tipas), `request_id`, `job_id`, `from`, `to`
+(ISO-8601). Jie komponuojami tarpusavyje.
 
 ⚠️ Audito įrašai turi **pseudonimizuotą** `subjectId`, ne žalią jobo ID.
-Ieškant konkretaus jobo reikia tos pačios `pseudonymizeIdentifier` funkcijos —
-tiesioginė teksto paieška nieko neras.
+`job_id` filtras tai daro už jus — jis apskaičiuoja pseudonimus visoms
+taikomoms raktų generacijoms, tad randa ir įrašus, sukurtus PRIEŠ rotaciją.
+Tiesioginė teksto paieška nieko neras.
+
+Rankinei paieškai (pvz. tiesiai DB) reikia tos pačios `pseudonymizeIdentifier`
+funkcijos — bet TIK su tos generacijos raktu, kuria įrašas buvo sukurtas
+(`hash_key_id` stulpelis pasako, kuria).
 
 ### Žingsnis 2: išsaugoti sistemos būseną
 

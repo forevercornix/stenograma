@@ -714,6 +714,7 @@ test("KONFIGŪRACIJA: audito moduliai NESKAITO `process.env` už autoriteto rib�
     "utils/auditStore/memoryStore.js",
     "utils/auditStore/postgresStore.js",
     "utils/auditStore/fields.js",
+    "utils/auditStore/keyRing.js",
   ];
 
   /**
@@ -845,4 +846,73 @@ test("DOKUMENTACIJA: `PG*` forma įvardyta kaip PALAIKOMA, o konfliktas - kaip k
       `${pavadinimas}: konfliktas turi būti įvardytas kaip klaida, ne pirmenybė`
     );
   }
+});
+
+test("GENERACIJOS: skenavimo KLAIDA metama, o ne verčiama į tuščią sąrašą", async () => {
+  /**
+   * ⚠️ FAIL-OPEN ČIA BŪTŲ GDPR SPRAGA, IR DVIGUBA.
+   *
+   * Jei `usedGenerations()` po SQL klaidos grąžintų `[]`, atsitiktų du dalykai
+   * vienu metu:
+   *   1. našlaičių patikra praeitų TUŠČIAI - „nėra generacijų, nėra ką tikrinti",
+   *      tad startas pavyktų su įrašais, kurių `subject_id` nebeatkuriamas;
+   *   2. kiekio taisyklė nuspręstų, kad VISI istoriniai raktai nebereikalingi, ir
+   *      atmestų raktus, kurie realiai turi įrašų - klaidingas startup FAIL.
+   *
+   * ⚠️ TIKRINAMA ELGSENA, NE ŠALTINIO TEKSTAS. Pirmoji šios patikros versija
+   * skenavo failą ieškodama `catch` - tai tik tripwire (AGENTS.md §9.2), ir ji
+   * nebūtų pastebėjusi klaidos rijimo, atsiradusio kitoje vietoje (pvz. `.catch()`
+   * grandinėje ar aukštesniame kvietėjuje).
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  /** ⚠️ KRENTANTI UŽKLAUSA, ne tuščia lentelė - tai skirtingi dalykai. */
+  const krentantisPool = {
+    query: async () => {
+      const e = new Error("connection terminated unexpectedly");
+      e.code = "57P01";
+      throw e;
+    },
+  };
+
+  await assert.rejects(
+    () => createPostgresStore(krentantisPool, { hashKeyId: "A" }).usedGenerations(),
+    (e) => e.code === "57P01",
+    "skenavimo klaida privalo propaguotis, kad `init()` nutrauktų startą"
+  );
+
+  /**
+   * ⚠️ PRIEŠINGA PUSĖ: tuščia lentelė yra TEISĖTAS `[]`.
+   *
+   * Be jos testas praeitų ir tada, kai `usedGenerations()` meta VISADA - o tai
+   * padarytų neįmanomą pirmą startą su tuščia `audit_log`.
+   */
+  const tusciasPool = { query: async () => ({ rows: [] }) };
+  assert.deepEqual(
+    await createPostgresStore(tusciasPool, { hashKeyId: "A" }).usedGenerations(),
+    [],
+    "tuščia lentelė nėra klaida"
+  );
+
+  /**
+   * Tripwire greta elgsenos: kvietimo vieta `init()` kelyje irgi neturi `catch`,
+   * kitaip klaida būtų sugauta jau po to, kai `usedGenerations()` ją teisingai
+   * metė. Pjaunama iki KITOS funkcijos deklaracijos - `indexOf("async function
+   * init")` randa `initializePostgres` (poeilutė) ir duotų tuščią intervalą.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  const indexSrc = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "..", "utils/auditStore/index.js"), "utf8")
+  );
+  const pradzia = indexSrc.indexOf("async function patikrintiGeneracijas");
+  assert.notEqual(pradzia, -1, "prielaida: patikra rasta");
+
+  const kita = indexSrc.slice(pradzia + 1).search(/\n(async )?function \w+/);
+  const patikra = indexSrc.slice(pradzia, kita === -1 ? undefined : pradzia + 1 + kita);
+
+  assert.ok(patikra.length > 50, "prielaida: funkcijos kūnas išpjautas");
+  assert.doesNotMatch(patikra, /catch/, "generacijų patikra negali ryti skenavimo klaidos");
 });

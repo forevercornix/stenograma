@@ -280,6 +280,22 @@ function sanitizeControlled(value, maxLength = MAX_PROVIDER_LENGTH) {
   return sanitized.slice(0, maxLength);
 }
 
+/**
+ * Aktyvus raktų žiedas.
+ *
+ * ⚠️ VIENAS KELIAS PRIE ISTORINIŲ RAKTŲ (#212). `init()` jį jau sudarė; be
+ * `init()` (atminties režimas testuose) sudaromas iš tos pačios aplinkos ir to
+ * paties aktyvaus secret'o, kurį duoda `resolveSalt()` - kad dvi konfigūracijos
+ * neatsirastų nė čia.
+ */
+function aktyvusZiedas() {
+  const isInit = auditStore.keyRingReiksme();
+  if (isInit) return isInit;
+
+  const { resolveKeyRing } = require("./auditStore/keyRing");
+  return resolveKeyRing(process.env, { aktyvusSecret: resolveSalt() });
+}
+
 function pseudonymizeIdentifier(value) {
   if (value === null || value === undefined || value === "") return null;
 
@@ -532,14 +548,54 @@ async function getAll() {
 async function query(options = {}) {
   if (isPrivacyModeEnabled()) {
     purgeForPrivacyMode();
-    return { entries: [], total: 0 };
+    return { entries: [], nextCursor: null };
   }
 
   purgeExpired();
 
-  return auditStore.current().query
-    ? auditStore.current().query(options)
-    : auditStore.current().list(options);
+  const { limit = 100, cursor = null, action = null, requestId = null, from = null, to = null, jobId = null } = options;
+
+  const store = auditStore.current();
+  const ziedas = aktyvusZiedas();
+
+  /**
+   * ⚠️ `job_id` NIEKADA NETAMPA PLAINTEXT PAIEŠKA (#212).
+   *
+   * Jis paverčiamas kandidatiniais `subject_id` VIENĄ kartą - aktyviai ir visoms
+   * DB esančioms taikomoms generacijoms - o užklausa naudoja vieną set-based
+   * predikatą. Nei stulpelio, nei `meta` lauko, nei lookup lentelės nekuriama.
+   */
+  let subjectIds = null;
+  if (jobId) {
+    const { candidateSubjectIds } = require("./auditStore/keyRing");
+    const generacijos = store.usedGenerations ? await store.usedGenerations() : [];
+    subjectIds = candidateSubjectIds(ziedas, jobId, generacijos);
+
+    /** Nė vieno kandidato (nėra rakto) - tuščias rezultatas, ne visos lentelės skenavimas. */
+    if (subjectIds.length === 0) return { entries: [], nextCursor: null };
+  }
+
+  const filtrai = { action, requestId, from, to, jobId: jobId ? "yra" : null, dir: "desc" };
+
+  const { decodeForFilters, fingerprint, encode } = require("./auditStore/cursor");
+
+  const afterSeq = cursor ? decodeForFilters(cursor, filtrai, ziedas.activeSecret) : null;
+
+  const { entries, nextAfterSeq } = await store.queryPage({
+    limit,
+    afterSeq,
+    action,
+    requestId,
+    from,
+    to,
+    subjectIds,
+  });
+
+  return {
+    entries,
+    nextCursor:
+      nextAfterSeq === null ? null : encode(nextAfterSeq, fingerprint(filtrai, ziedas.activeSecret)),
+  };
 }
 
 /**
@@ -597,10 +653,26 @@ function purgeForPrivacyMode() {
  * nesikeis.
  */
 async function removeBySubjectIdentifier(value) {
-  const subjectId = pseudonymizeIdentifier(value);
-  if (!subjectId) return 0;
+  /**
+   * ⚠️ IŠTRYNIMAS PRIVALO PASIEKTI VISAS RAKTŲ GENERACIJAS (#155, 7.4c / #212).
+   *
+   * Rotavus raktą tas pats job'as skirtingose generacijose turi SKIRTINGĄ
+   * `subject_id`. Skaičiuojant tik aktyviu raktu, senesni įrašai liktų fiziškai
+   * DB, nors GDPR ištrynimas grąžintų sėkmę - tyliai.
+   *
+   * Kandidatų aibę apibrėžia DB esančios generacijos, ne env sąrašo ilgis, ir
+   * visos jos pašalinamos VIENU `subject_id = ANY($1)`, ne po užklausą
+   * generacijai.
+   */
+  const store = auditStore.current();
+  const generacijos = store.usedGenerations ? await store.usedGenerations() : [];
 
-  return auditStore.current().removeBySubject(subjectId);
+  const { candidateSubjectIds } = require("./auditStore/keyRing");
+  const kandidatai = candidateSubjectIds(aktyvusZiedas(), value, generacijos);
+
+  if (kandidatai.length === 0) return 0;
+
+  return store.removeBySubject(kandidatai);
 }
 
 // Jei procesas startuoja jau su PRIVACY_MODE=true, nieko nekaupiame nuo pat pradžių.
