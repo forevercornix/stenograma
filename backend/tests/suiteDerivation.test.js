@@ -158,7 +158,7 @@ const PALEIDIKLIS = path.join(TESTU_KATALOGAS, "..", "scripts", "run-tests.mjs")
 
 /** Laikinas katalogas su per-failo TAP; `turinys` - `{failoVardas: tapTekstas}`. */
 function suTapKatalogu(turinys, veiksmas) {
-  const katalogas = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "pg-tap-"));
+  const katalogas = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "stenograma-pg-tap-"));
   try {
     for (const [vardas, tekstas] of Object.entries(turinys)) {
       fs.writeFileSync(path.join(katalogas, `${vardas}.tap`), tekstas, "utf8");
@@ -265,7 +265,7 @@ test("VYKDYMO ĮRODYMAS: vienas bendras TAP ATMETAMAS, ne interpretuojamas", () 
    * Grąžinus tokį iškvietimą tikrintuvas privalo AIŠKIAI atsisakyti, o ne
    * pabandyti ir tyliai praleisti.
    */
-  const tmp = path.join(require("node:os").tmpdir(), `bendras-tap-${process.pid}`);
+  const tmp = path.join(require("node:os").tmpdir(), `stenograma-bendras-tap-${process.pid}`);
   fs.writeFileSync(tmp, "TAP version 13\nok 1 - kažkas\n", "utf8");
 
   try {
@@ -290,7 +290,7 @@ test("PALEIDIKLIS: `--tap-dir` rašo TAP kiekvienam failui ir IŠVALO senus", ()
    * ⚠️ NAUDOJAMAS `redis` RINKINYS, NE `postgres`. Savybė yra paleidiklio, ne
    * konkretaus rinkinio; `redis` mažesnis ir be DB praeina per kelias sekundes.
    */
-  const katalogas = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "tap-dir-"));
+  const katalogas = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "stenograma-tap-dir-"));
   const senas = path.join(katalogas, "seno-paleidimo-artefaktas.tap");
 
   try {
