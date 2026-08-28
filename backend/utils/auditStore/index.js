@@ -616,6 +616,16 @@ async function init(env = process.env) {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    /**
+     * ⚠️ SNAPSHOT'AS VALOMAS KIEKVIENO BANDYMO PRADŽIOJE (#231 Codex peržiūra, P2).
+     *
+     * `init()` po nesėkmės leidžiamas pakartoti be `shutdown()` (žr. `catch`
+     * žemiau). Be valymo pirmo bandymo našlaičių ID išliktų: operatorius
+     * pataisytų konfigūraciją, antras bandymas pavyktų, o `/api/ready` liktų 503
+     * dėl seno bandymo duomenų - iki restarto, kurio niekas nesuprastų reikiant.
+     */
+    nasliaitesSnapshot = [];
+
     const backendas = resolveAuditBackend(env);
 
     /**

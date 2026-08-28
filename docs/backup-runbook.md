@@ -34,21 +34,30 @@ sugadinta**.
 
 ---
 
-⚠️ **RAKTAI Į KOPIJĄ NEPATENKA, BET BE JŲ KOPIJA BEVERTĖ** (#155, 7.4f).
+⚠️ **AUDITO RAKTAI: KAM TAIKOMA IR KAM NETAIKOMA** (#155, 7.4f).
 
-`AUDIT_ID_SALT` ir `AUDIT_ID_SALT_PREVIOUS` yra **paslaptys**, todėl jų kopijoje
-nėra ir būti negali. Bet jie saugomi **atskirai ir atkuriami kartu** su duomenų
-kopija.
+Šis skyrius anksčiau teigė, kad „be raktų kopija bevertė". **Aplikacijos kopijai
+tai netaikoma**, ir tvirtinimas buvo klaidinantis.
 
-Priežastis nėra patogumas. Atkūrus `audit_log` be atitinkamų raktų, visos
-persistuotos generacijos tampa **neišsprendžiamos**: 7.4c startas fail-closed
-nutraukia paleidimą, o įjungus `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`
-sistema pakyla, bet tų eilučių `removeBySubjectIdentifier()` **nebepasiekia** —
-GDPR ištrynimas nebeįmanomas.
+`createBackup()` serializuoja tik `jobs` ir `audio`; `audit_entry` yra
+`backupPolicy` **išbrauktųjų** sąraše. Vadinasi, aplikacijos kopijoje audito
+eilučių **apskritai nėra** — nei su raktais, nei be jų. Atkūrus tokią kopiją
+audito raktų neprireiks, nes nėra ką jais išspręsti.
 
-**Praktiškai:** kai darote duomenų kopiją, tuo pačiu metu užfiksuokite ir tuo
-metu galiojusius `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID` bei
-`AUDIT_ID_SALT_PREVIOUS` — savo paslapčių saugykloje, ne kopijos faile.
+Reikalavimas galioja **atskirai PILNAI PostgreSQL kopijai** (`pg_dump`, PITR ar
+tomo momentinė kopija), kuri `audit_log` lentelę apima. Tokioje kopijoje audito
+eilutės yra, o `AUDIT_ID_SALT` ir `AUDIT_ID_SALT_PREVIOUS` — **paslaptys**,
+todėl jų ten nėra ir būti negali.
+
+Atkūrus `audit_log` be atitinkamų raktų, jo generacijos tampa
+**neišsprendžiamos**: 7.4c startas fail-closed nutraukia paleidimą, o įjungus
+`AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` sistema pakyla, bet tų eilučių
+`removeBySubjectIdentifier()` **nebepasiekia** — GDPR ištrynimas nebeįmanomas.
+
+**Praktiškai:** darydami **pilną PostgreSQL kopiją**, tuo pačiu metu
+užfiksuokite ir tuo metu galiojusius `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID` bei
+`AUDIT_ID_SALT_PREVIOUS` — savo paslapčių saugykloje, ne kopijos faile. Jie
+saugomi **atskirai ir atkuriami kartu** su ta kopija.
 
 ## 2. Įjungimas
 
@@ -161,6 +170,11 @@ Redis užrakto.
 
 ### Raktai atkuriami PRIEŠ duomenis
 
+⚠️ **Šis poskyris NĖRA apie `POST /api/backup/restore`.** Aplikacijos kopijoje
+audito eilučių nėra (žr. §1), tad jos atkūrimas audito raktų neliečia. Žemiau
+aprašytas kelias galioja **pilnos PostgreSQL kopijos** atkūrimui — tik ji
+grąžina `audit_log` turinį.
+
 Prieš keliant `audit_log` turinį, įsitikinkite, kad `AUDIT_ID_SALT_PREVIOUS`
 turi VISAS generacijas, kurios toje kopijoje pasitaiko:
 
@@ -225,9 +239,12 @@ prarastais.
 
 ---
 
-⚠️ **Atkūrimas negrąžina ir audito raktų.** Jie nėra kopijos dalis (žr. §1).
-Praradus juos kartu su duomenimis, `audit_log` eilutės lieka fiziškai, bet tampa
-neišsprendžiamos: nei paieška pagal `job_id`, nei GDPR ištrynimas jų nebepasiekia.
+⚠️ **Aplikacijos atkūrimas negrąžina audito — nei įrašų, nei raktų.** Audito
+eilučių kopijoje nėra (žr. §1), tad raktų klausimas čia neiškyla.
+
+Jis iškyla atkuriant **pilną PostgreSQL kopiją**: praradus raktus kartu su
+duomenimis, `audit_log` eilutės lieka fiziškai, bet tampa neišsprendžiamos —
+nei paieška pagal `job_id`, nei GDPR ištrynimas jų nebepasiekia.
 
 ## 6. Raktų rotacija
 

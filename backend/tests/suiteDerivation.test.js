@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
-const { suites, isvestiPostgresRinkini } = require("./suites");
+const { suites, isvestiPostgresRinkini, importuotiModuliai } = require("./suites");
 
 /**
  * PostgreSQL RINKINIO IŠVEDIMAS IR VYKDYMO ĮRODYMAS (#155, 7.4f / #231).
@@ -34,13 +34,50 @@ test("IŠVEDIMAS: rinkinys sutampa su faktine `postgresGuard` priklausomybe", ()
    * forma), o rinkinys tyliai susitraukė.
    */
   const nepriklausomai = visiTestuFailai()
-    .filter((f) => /require\((["'])[^"']*postgresGuard\1\)/.test(failoTurinys(f)))
+    .filter((f) => importuotiModuliai(failoTurinys(f)).some((k) => k.endsWith("postgresGuard")))
     .map((f) => f.replace(/\.test\.js$/, ""))
     .sort();
 
   assert.deepEqual(suites.postgres, nepriklausomai, "išvestas rinkinys išsiskyrė su realybe");
   assert.deepEqual(isvestiPostgresRinkini(), nepriklausomai);
   assert.ok(nepriklausomai.length >= 9, "rinkinys negali tyliai susitraukti");
+});
+
+test("SKENAVIMAS: komentarai ir eilutės NĖRA importai, tarpai netrukdo", () => {
+  /**
+   * ⚠️ ŠIS TESTAS EGZISTUOJA, NES ANKSTESNIS BUVO TAUTOLOGIJA (#231 Codex peržiūra).
+   *
+   * Round-trip testas kartojo TĄ PATĮ regex, kurį tikrino - abu būtų klydę
+   * vienodai, ir nukrypimo jis nebūtų pagavęs. Čia skeneris tikrinamas
+   * SINTETINIU tekstu, kuriame teisingas atsakymas žinomas iš anksto.
+   *
+   * Abi klaidos kryptys tikrinamos: praleistas tikras importas susiaurintų
+   * rinkinį tyliai, o klaidingai įtrauktas paminėjimas įtrauktų į postgres
+   * žingsnį testą, kuris ten save praleistų ir sugriautų vykdymo įrodymą.
+   */
+  const atvejai = [
+    ["paprastas importas", 'require("./helpers/postgresGuard");', true],
+    ["tarpai aplink", 'require ( "./helpers/postgresGuard" );', true],
+    ["viengubos kabutės", "require('../helpers/postgresGuard')", true],
+    ["destrukturizuotas", 'const { a } = require("./helpers/postgresGuard");', true],
+    ["eilutės komentaras", '// require("./helpers/postgresGuard");', false],
+    ["blokinis komentaras", '/* require("./helpers/postgresGuard"); */', false],
+    ["JSDoc paminėjimas", '/**\n * Naudokite require("./postgresGuard").\n */', false],
+    ["paminėjimas eilutėje", 'const t = "require(\'./helpers/postgresGuard\')";', false],
+    ["svetimas modulis", 'require("./helpers/redisGuard");', false],
+  ];
+
+  for (const [pavadinimas, saltinis, laukiama] of atvejai) {
+    const rasta = importuotiModuliai(saltinis).some((k) => k.endsWith("postgresGuard"));
+    assert.equal(rasta, laukiama, `${pavadinimas}: skeneris atsakė neteisingai`);
+  }
+
+  /** URL eilutėje neturi nuplėšti tos pačios eilutės kodo. */
+  assert.deepEqual(
+    importuotiModuliai('const u = "https://pavyzdys.lt"; require("./helpers/postgresGuard");'),
+    ["./helpers/postgresGuard"],
+    "`//` URL viduje nėra komentaras"
+  );
 });
 
 test("IŠVEDIMAS: `suites.js` nebeturi rankinio postgres sąrašo", () => {
@@ -51,6 +88,17 @@ test("IŠVEDIMAS: `suites.js` nebeturi rankinio postgres sąrašo", () => {
   const src = fs.readFileSync(path.join(TESTU_KATALOGAS, "suites.js"), "utf8");
 
   assert.match(src, /const postgres = isvestiPostgresRinkini\(\)/, "rinkinys privalo būti išvedamas");
+
+  /**
+   * ⚠️ IR SKENERIS. Grįžus prie neapdoroto teksto regex'o, elgesio testas
+   * aukščiau liktų žalias - jis tikrina `importuotiModuliai()`, ne iškvietimo
+   * vietą. Ši eilutė yra tripwire (§9.2), ne elgesio įrodymas.
+   */
+  assert.match(
+    src,
+    /importuotiModuliai\(turinys\)/,
+    "išvedimas privalo eiti per skenerį, ne per neapdorotą tekstą"
+  );
   assert.doesNotMatch(
     src,
     /const postgres = \[/,
@@ -79,7 +127,9 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
     },
   ];
 
-  const naudojaPg = visiTestuFailai().filter((f) => /require\((["'])pg\1\)/.test(failoTurinys(f)));
+  const naudojaPg = visiTestuFailai().filter((f) =>
+    importuotiModuliai(failoTurinys(f)).includes("pg")
+  );
 
   for (const failas of naudojaPg) {
     const vardas = failas.replace(/\.test\.js$/, "");

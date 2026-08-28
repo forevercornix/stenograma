@@ -18,6 +18,20 @@ const { STULPELIAI, META_LAUKAI, isrinktiMeta } = require("./fields");
  */
 const BUTINOS_PRIVILEGIJOS = Object.freeze(["SELECT", "INSERT", "DELETE"]);
 
+/**
+ * SEKOS PRIVILEGIJOS - PAKANKA BET KURIOS (#231 Codex peržiūra, P1).
+ *
+ * ⚠️ `INSERT` ANT LENTELĖS NEPAKANKA. `seq BIGSERIAL` kiekvieno `append()` metu
+ * kviečia `nextval()` ant atskiro sekos objekto, o sekos teisės suteikiamos
+ * atskirai nuo lentelės. Rolė su atimta teise ant sekos zondą praeitų žalią, o
+ * kiekvienas rašymas kristų vykdymo metu - tiksliai tas tylaus gedimo režimas,
+ * dėl kurio privilegijų zondas apskritai daromas.
+ *
+ * `nextval()` reikalauja `USAGE` ARBA `UPDATE`, tad reikalauti vien `USAGE`
+ * reikštų klaidingai raudoną zondą veikiančiam diegimui.
+ */
+const SEKOS_PRIVILEGIJOS = Object.freeze(["USAGE", "UPDATE"]);
+
 /** Teigiamo zondo rezultato galiojimas. Orkestruotojo poll'ai kitaip generuotų SQL kiekvienam. */
 const PROBE_CACHE_TTL_MS = 2000;
 
@@ -419,14 +433,34 @@ function createPostgresStore(pool, { hashKeyId }) {
           (p, i) => `has_table_privilege('audit_log', $${i + 1}) AS "${p.toLowerCase()}"`
         ).join(", ");
 
+        /**
+         * ⚠️ SEKA RANDAMA PER KATALOGĄ, NE PAGAL VARDĄ. `pg_get_serial_sequence`
+         * grąžina faktinį objektą (`audit_log_seq_seq` yra numatytoji forma, bet
+         * ne garantija). `NULL` reiškia, kad stulpelis nebeturi sekos - schema
+         * ne ta, kurios laukiam, tad fail-closed.
+         *
+         * Abu iškvietimai nemutuojantys: tai katalogo funkcijos, ne `nextval()`.
+         */
         const { rows } = await pool.query(
-          `WITH skaitymas AS (SELECT 1 FROM audit_log LIMIT 1)
-           SELECT (SELECT count(*) FROM skaitymas)::int AS perskaityta, ${stulpeliai}`,
+          `WITH skaitymas AS (SELECT 1 FROM audit_log LIMIT 1),
+                seka AS (SELECT pg_get_serial_sequence('audit_log', 'seq') AS vardas)
+           SELECT (SELECT count(*) FROM skaitymas)::int AS perskaityta,
+                  COALESCE(
+                    (SELECT has_sequence_privilege(vardas, 'USAGE')
+                         OR has_sequence_privilege(vardas, 'UPDATE')
+                       FROM seka WHERE vardas IS NOT NULL),
+                    false
+                  ) AS seka_leidziama,
+                  ${stulpeliai}`,
           [...BUTINOS_PRIVILEGIJOS]
         );
 
         const eilute = rows[0];
-        return BUTINOS_PRIVILEGIJOS.every((p) => eilute[p.toLowerCase()] === true);
+
+        return (
+          BUTINOS_PRIVILEGIJOS.every((p) => eilute[p.toLowerCase()] === true) &&
+          eilute.seka_leidziama === true
+        );
       })();
 
       try {
@@ -451,4 +485,10 @@ function createPostgresStore(pool, { hashKeyId }) {
   };
 }
 
-module.exports = { createPostgresStore, iEilute, BUTINOS_PRIVILEGIJOS, PROBE_CACHE_TTL_MS };
+module.exports = {
+  createPostgresStore,
+  iEilute,
+  BUTINOS_PRIVILEGIJOS,
+  SEKOS_PRIVILEGIJOS,
+  PROBE_CACHE_TTL_MS,
+};

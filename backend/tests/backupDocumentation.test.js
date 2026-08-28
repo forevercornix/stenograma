@@ -211,3 +211,54 @@ test("RUNBOOK: atkūrimo pratybos įvardytos kaip BŪTINOS", () => {
   assert.match(doc, /niekada nebuvo atkurta/i);
   assert.match(doc, /seniausia/i, "seniausios kopijos testas turi būti įvardytas");
 });
+
+test("RUNBOOK: audito raktų reikalavimas susietas su TEISINGA kopijos rūšimi", () => {
+  /**
+   * ⚠️ DOKUMENTACIJA NEGALI PRIEŠTARAUTI POLITIKAI (#231 Codex peržiūra, P2).
+   *
+   * Runbook'as §1 teigė, kad „be raktų kopija bevertė", ir liepė tikrinti
+   * kopijos `audit_log`. Bet `createBackup()` serializuoja tik `jobs` ir
+   * `audio`, o `audit_entry` yra išbrauktųjų sąraše - aplikacijos kopijoje
+   * audito eilučių NĖRA. Nurodymas buvo neįvykdomas, o įspėjimas - klaidinantis
+   * būtent ten, kur operatorius jį skaito atkūrimo metu.
+   *
+   * Tikrinama ne frazė, o SĄSAJA: jei politika audito įrašus išbraukia, tekstas
+   * privalo tai pasakyti ir reikalavimą priskirti pilnai PostgreSQL kopijai.
+   */
+  const backupPolicy = require("../utils/backupPolicy");
+  const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
+
+  const auditoTipas = ARTEFACT_TYPES.AUDIT_ENTRY.id;
+
+  assert.ok(
+    backupPolicy.excludedTypes().some((i) => i.type === auditoTipas),
+    "prielaida: politika audito įrašus išbraukia"
+  );
+
+  assert.ok(
+    backupPolicy.excludedTables().includes("audit_log"),
+    "prielaida: išbraukta ir lentelė, ne tik tipas"
+  );
+
+  const doc = fs.readFileSync(path.join(__dirname, "..", "..", "docs/backup-runbook.md"), "utf8");
+
+  assert.ok(
+    /aplikacijos kopijoje audito eilučių\s+\*\*apskritai nėra\*\*|audito eilučių \*\*apskritai nėra\*\*/i.test(
+      doc.replace(/\n/g, " ")
+    ),
+    "runbook'as privalo pasakyti, kad aplikacijos kopijoje audito eilučių nėra"
+  );
+
+  assert.ok(
+    doc.includes("PILNAI PostgreSQL kopijai") || doc.includes("pilnos PostgreSQL kopijos"),
+    "raktų reikalavimas privalo būti priskirtas pilnai PostgreSQL kopijai"
+  );
+
+  /** Ir nurodymas tikrinti `audit_log` negali likti be to konteksto. */
+  const patikra = doc.indexOf("SELECT DISTINCT hash_key_id FROM audit_log");
+  assert.notEqual(patikra, -1, "prielaida: patikros užklausa dokumentuota");
+  assert.ok(
+    doc.slice(Math.max(0, patikra - 800), patikra).includes("pilnos PostgreSQL kopijos"),
+    "`audit_log` patikra privalo būti aiškiai priskirta pilnai PostgreSQL kopijai"
+  );
+});

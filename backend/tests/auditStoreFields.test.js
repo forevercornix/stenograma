@@ -942,7 +942,7 @@ test("ZONDAS: kiekvienos trūkstamos teisės pakanka, kad zondas grąžintų `fa
       rows: [
         BUTINOS_PRIVILEGIJOS.reduce(
           (acc, p) => ({ ...acc, [p.toLowerCase()]: p !== atimta }),
-          { perskaityta: 0 }
+          { perskaityta: 0, seka_leidziama: true }
         ),
       ],
     }),
@@ -977,7 +977,9 @@ test("ZONDAS: NEMUTUOJA - jokio INSERT ar DELETE bandomojo įrašo", () => {
   const pool = {
     query: async (sql) => {
       uzklausos.push(sql);
-      return { rows: [{ perskaityta: 0, select: true, insert: true, delete: true }] };
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+      };
     },
   };
 
@@ -998,6 +1000,97 @@ test("ZONDAS: NEMUTUOJA - jokio INSERT ar DELETE bandomojo įrašo", () => {
     });
 });
 
+test("ZONDAS: SEKOS teisė tikrinama - be jos kiekvienas `append()` kristų", async () => {
+  /**
+   * ⚠️ `INSERT` ANT LENTELĖS NEPAKANKA (#231 Codex peržiūra, P1).
+   *
+   * `seq BIGSERIAL` kiekvieno rašymo metu kviečia `nextval()` ant ATSKIRO sekos
+   * objekto, kurio teisės suteikiamos atskirai. Rolė su `INSERT` ant lentelės,
+   * bet be teisės ant sekos, praeitų senąjį zondą žalią, o kiekvienas
+   * `append()` kristų vykdymo metu - tas pats tylaus gedimo režimas, dėl kurio
+   * privilegijų zondas ir daromas.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const suSeka = (leidziama) => ({
+    query: async () => ({
+      rows: [
+        {
+          perskaityta: 0,
+          select: true,
+          insert: true,
+          delete: true,
+          seka_leidziama: leidziama,
+        },
+      ],
+    }),
+  });
+
+  assert.equal(
+    await createPostgresStore(suSeka(true), { hashKeyId: "A" }).probe(),
+    true,
+    "su visomis teisėmis zondas teigiamas"
+  );
+
+  assert.equal(
+    await createPostgresStore(suSeka(false), { hashKeyId: "A" }).probe(),
+    false,
+    "be teisės ant sekos zondas PRIVALO būti raudonas"
+  );
+
+  /**
+   * ⚠️ `NULL` (sekos nėra) yra fail-closed, ne „nežinoma". Stulpelis be sekos
+   * reiškia kitokią schemą, nei ta, kuriai rašytas `append()`.
+   */
+  assert.equal(
+    await createPostgresStore(suSeka(null), { hashKeyId: "A" }).probe(),
+    false,
+    "dingusi seka negali reikšti sveikos būsenos"
+  );
+});
+
+test("ZONDAS: seka randama per katalogą, o abu iškvietimai NEMUTUOJA", async () => {
+  /**
+   * ⚠️ Sekos vardas NESPĖLIOJAMAS. `audit_log_seq_seq` yra numatytoji forma, bet
+   * ne garantija - pervadinta ar perkelta seka reikštų zondą, tikrinantį
+   * neegzistuojantį objektą, t. y. tylų `false` visai sveikam diegimui.
+   *
+   * ⚠️ Ir svarbiausia: patikra negali kviesti `nextval()`. Tai sunaudotų sekos
+   * reikšmes kiekvieno readiness poll'o metu ir paliktų `seq` spragas.
+   */
+  const uzklausos = [];
+  const { createPostgresStore, SEKOS_PRIVILEGIJOS } = require("../utils/auditStore/postgresStore");
+
+  const pool = {
+    query: async (sql) => {
+      uzklausos.push(sql);
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+      };
+    },
+  };
+
+  await createPostgresStore(pool, { hashKeyId: "A" }).probe();
+
+  assert.equal(uzklausos.length, 1, "vienas round-trip - seka netampa antra užklausa");
+  assert.match(uzklausos[0], /pg_get_serial_sequence/, "seka randama per katalogą");
+  assert.match(uzklausos[0], /has_sequence_privilege/, "tikrinama sekos teisė");
+  assert.doesNotMatch(uzklausos[0], /\bnextval\b/i, "zondas negali sunaudoti sekos reikšmės");
+  assert.doesNotMatch(uzklausos[0], /\bsetval\b/i, "zondas negali perstatyti sekos");
+
+  /**
+   * `nextval()` reikalauja `USAGE` ARBA `UPDATE`. Reikalauti vien `USAGE`
+   * reikštų klaidingai raudoną zondą veikiančiam diegimui.
+   */
+  assert.deepEqual([...SEKOS_PRIVILEGIJOS].sort(), ["UPDATE", "USAGE"]);
+  for (const privilegija of SEKOS_PRIVILEGIJOS) {
+    assert.ok(
+      uzklausos[0].includes(`'${privilegija}'`),
+      `${privilegija} privalo dalyvauti patikroje`
+    );
+  }
+});
+
 test("KEŠAS: įrodomas `pool.query` SKAIČIUMI, ne laiko matavimu", async () => {
   /**
    * ⚠️ REALIZACIJA SU `Date.now()`, BET BE FAKTINIO PRALEIDIMO, PRAEITŲ NAIVŲ TESTĄ.
@@ -1012,7 +1105,9 @@ test("KEŠAS: įrodomas `pool.query` SKAIČIUMI, ne laiko matavimu", async () =>
   const pool = {
     query: async () => {
       kiek += 1;
-      return { rows: [{ perskaityta: 0, select: true, insert: true, delete: true }] };
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+      };
     },
   };
 
@@ -1050,7 +1145,11 @@ test("KEŠAS: NEIGIAMAS rezultatas NEKEŠUOJAMAS, bet lygiagretūs zondai sujung
     query: async () => {
       kiek += 1;
       await new Promise((r) => setImmediate(r));
-      return { rows: [{ perskaityta: 0, select: true, insert: true, delete: atsakymas }] };
+      return {
+        rows: [
+          { perskaityta: 0, select: true, insert: true, delete: atsakymas, seka_leidziama: true },
+        ],
+      };
     },
   };
 

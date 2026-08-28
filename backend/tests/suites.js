@@ -259,6 +259,49 @@ const functional = [
  * vienas `ok` (žr. `tests/suiteDerivation.test.js`). Žalias job'as su
  * praleistais testais nėra sėkmė.
  */
+/**
+ * Failo `require()` argumentai - be komentarų ir be pašalinių eilučių literalų.
+ *
+ * ⚠️ NEAPDOROTO TEKSTO SKENAVIMAS KLYSTA ABIEM KRYPTIMIS (#231 Codex peržiūra, P2).
+ *
+ * Ankstesnė versija tikrino `/require\((["'])[^"']*postgresGuard\1\)/` tiesiai
+ * faile. Ji praleidžia `require ("...")` su tarpu ir klaidingai įtraukia
+ * paminėjimą komentare ar eilutės viduje - o kadangi tas pats šablonas buvo
+ * pakartotas teste, nukrypimo testas nebūtų pagavęs.
+ *
+ * ⚠️ TAI NĖRA AST PARSAVIMAS, ir to nereikia. Nuimami komentarai, po to
+ * užtušuojami VISI eilučių literalai, IŠSKYRUS `require()` argumentą - tada
+ * paminėjimas eilutėje nebegali apsimesti importu. Riba: `require(\`...\`)` su
+ * šablonine eilute nerandamas. Tokio importo repozitorijoje nėra, o kelią
+ * dengia atskira `pg` naudojimo patikra `suiteDerivation.test.js`.
+ *
+ * ⚠️ Šablonas NEKONSTRUOJAMAS iš kintamųjų (CodeQL): grąžinami visi importai, o
+ * kvietėjas lygina eilutes.
+ */
+function importuotiModuliai(saltinis) {
+  const beKomentaru = saltinis
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    /** `[^:]` saugo `https://` eilutėse - kitaip nuplėštume ir tos eilutės kodą. */
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
+  const uztusuota = beKomentaru.replace(
+    /(['"`])(?:\\.|(?!\1)[^\\])*\1/g,
+    (literalas, _kabute, poz, visas) =>
+      /require\s*\(\s*$/.test(visas.slice(0, poz)) ? literalas : '""'
+  );
+
+  const rasti = [];
+  const sablonas = /require\s*\(\s*(["'])([^"']*)\1\s*\)/g;
+
+  let atitikmuo = sablonas.exec(uztusuota);
+  while (atitikmuo !== null) {
+    rasti.push(atitikmuo[2]);
+    atitikmuo = sablonas.exec(uztusuota);
+  }
+
+  return rasti;
+}
+
 function isvestiPostgresRinkini() {
   const fs = require("node:fs");
   const path = require("node:path");
@@ -269,7 +312,7 @@ function isvestiPostgresRinkini() {
     .filter((failas) => failas.endsWith(".test.js"))
     .filter((failas) => {
       const turinys = fs.readFileSync(path.join(dir, failas), "utf8");
-      return /require\((["'])[^"']*postgresGuard\1\)/.test(turinys);
+      return importuotiModuliai(turinys).some((kelias) => kelias.endsWith("postgresGuard"));
     })
     .map((failas) => failas.replace(/\.test\.js$/, ""))
     .sort();
@@ -288,6 +331,7 @@ module.exports = {
    * ignoruoti. Jie paleidžiami atskirai (`npm run test:redis`) ir CI.
    */
   isvestiPostgresRinkini,
+  importuotiModuliai,
 
   defaultSuites: ["privacy", "security", "functional"],
 };
