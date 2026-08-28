@@ -529,7 +529,21 @@ async function initializePostgres(env) {
     throw err;
   }
 
-  return { store: createPostgresStore(pool, { hashKeyId: env.AUDIT_ID_SALT_ID }), pool };
+  /**
+   * ⚠️ READINESS BIUDŽETAS PERDUODAMAS, NE ATKARTOJAMAS (#233 Codex raundas 2, #3).
+   *
+   * Zondo single-flight įrašas galioja tol, kol maršrutas dar laukia. Reikšmė
+   * imama iš to paties `READINESS_TIMEOUT_MS`, kurį skaito `server.js` - antra
+   * konstanta store'e reikštų dvi konfigūracijos tiesas, o jos išsiskyrimo
+   * niekas nepastebėtų (7.4b peržiūra tą ydą rado keturis kartus).
+   */
+  return {
+    store: createPostgresStore(pool, {
+      hashKeyId: env.AUDIT_ID_SALT_ID,
+      readinessBudgetMs: env.READINESS_TIMEOUT_MS,
+    }),
+    pool,
+  };
 }
 
 /**

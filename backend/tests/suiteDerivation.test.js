@@ -43,27 +43,41 @@ test("IŠVEDIMAS: rinkinys sutampa su faktine `postgresGuard` priklausomybe", ()
   assert.ok(nepriklausomai.length >= 9, "rinkinys negali tyliai susitraukti");
 });
 
-test("SKENAVIMAS: komentarai ir eilutės NĖRA importai, tarpai netrukdo", () => {
+test("SKENAVIMAS: komentaro ir literalo atpažinimas - teisinga TVARKA", () => {
   /**
-   * ⚠️ ŠIS TESTAS EGZISTUOJA, NES ANKSTESNIS BUVO TAUTOLOGIJA (#231 Codex peržiūra).
+   * ⚠️ ŠIS TESTAS EGZISTUOJA DĖL DVIEJŲ SKIRTINGŲ KLAIDŲ.
    *
-   * Round-trip testas kartojo TĄ PATĮ regex, kurį tikrino - abu būtų klydę
-   * vienodai, ir nukrypimo jis nebūtų pagavęs. Čia skeneris tikrinamas
-   * SINTETINIU tekstu, kuriame teisingas atsakymas žinomas iš anksto.
+   * Pirma versija kartojo tą patį regex, kurį tikrino - tautologija. Antra
+   * versija regex'ą pakeitė grandine „nuimk komentarus, tada literalus", ir ta
+   * TVARKA neteisinga iš principo: komentaro ir literalo atpažinimas yra
+   * tarpusavyje priklausomas (#233 Codex raundas 2, #1).
    *
-   * Abi klaidos kryptys tikrinamos: praleistas tikras importas susiaurintų
-   * rinkinį tyliai, o klaidingai įtrauktas paminėjimas įtrauktų į postgres
-   * žingsnį testą, kuris ten save praleistų ir sugriautų vykdymo įrodymą.
+   * Abi kryptys buvo REALIOS, ne teorinės:
+   *   - eilutė `'// require("…postgresGuard")'` įtraukė `suiteDerivation` į
+   *     postgres rinkinį - failas pateko ten dėl savo paties testo duomenų;
+   *   - `const marker = '//'; require('…postgresGuard')` prarastų TIKRĄ importą,
+   *     ir realus PostgreSQL testas tyliai iškristų iš CI.
+   *
+   * Todėl tikrinamos abi kryptys, ir sintetiniai atvejai yra tie patys, kurie
+   * skenerį klaidino.
    */
   const atvejai = [
+    /** ── TURI būti rasta ─────────────────────────────────────────────────── */
     ["paprastas importas", 'require("./helpers/postgresGuard");', true],
     ["tarpai aplink", 'require ( "./helpers/postgresGuard" );', true],
     ["viengubos kabutės", "require('../helpers/postgresGuard')", true],
     ["destrukturizuotas", 'const { a } = require("./helpers/postgresGuard");', true],
+    ["po eilutės su `//` VIDUJE", "const marker = '//'; require('./helpers/postgresGuard');", true],
+    ["po regex su kabutėmis", 'const re = /["\']/; require("./helpers/postgresGuard");', true],
+    ["po dalybos", "const p = a / b; require(\"./helpers/postgresGuard\");", true],
+    ["šabloninė eilutė", "require(`./helpers/postgresGuard`)", true],
+
+    /** ── NEGALI būti rasta ───────────────────────────────────────────────── */
     ["eilutės komentaras", '// require("./helpers/postgresGuard");', false],
     ["blokinis komentaras", '/* require("./helpers/postgresGuard"); */', false],
     ["JSDoc paminėjimas", '/**\n * Naudokite require("./postgresGuard").\n */', false],
-    ["paminėjimas eilutėje", 'const t = "require(\'./helpers/postgresGuard\')";', false],
+    ["komentaras EILUTĖS viduje", 'const t = \'// require("./helpers/postgresGuard");\';', false],
+    ["importas eilutės viduje", 'const t = "require(\'./helpers/postgresGuard\')";', false],
     ["svetimas modulis", 'require("./helpers/redisGuard");', false],
   ];
 
@@ -76,7 +90,29 @@ test("SKENAVIMAS: komentarai ir eilutės NĖRA importai, tarpai netrukdo", () =>
   assert.deepEqual(
     importuotiModuliai('const u = "https://pavyzdys.lt"; require("./helpers/postgresGuard");'),
     ["./helpers/postgresGuard"],
-    "`//` URL viduje nėra komentaras"
+    "`//` eilutės viduje nėra komentaras - importas po jos privalo išlikti"
+  );
+});
+
+test("SKENAVIMAS: šis failas PATS neturi patekti į postgres rinkinį", () => {
+  /**
+   * ⚠️ REGRESIJOS SARGAS TIKRAM ĮVYKIUI.
+   *
+   * `2f1f9c3` metu šis failas į `suites.postgres` PATEKO - jame yra sintetinių
+   * eilučių su `postgresGuard`, o skeneris jas palaikė importais. Pasekmė nėra
+   * kosmetinė: failas atsidurtų postgres CI žingsnyje, o rinkinys, kurio narystė
+   * turi būti išvedama iš tikros priklausomybės, imtų remtis testo duomenimis.
+   */
+  assert.ok(
+    !suites.postgres.includes("suiteDerivation"),
+    "šiame faile tikro `postgresGuard` importo nėra - rinkinyje jo būti negali"
+  );
+
+  assert.ok(
+    !importuotiModuliai(failoTurinys("suiteDerivation.test.js")).some((k) =>
+      k.endsWith("postgresGuard")
+    ),
+    "skeneris šiame faile importo rasti negali"
   );
 });
 
@@ -243,6 +279,55 @@ test("VYKDYMO ĮRODYMAS: reikalaujama nepraleisto `ok` KIEKVIENAM rinkinio failu
 
   assert.notEqual(nulužes.kodas, 0, "nulūžęs failas be `ok` NEGALI praeiti");
   assert.ok(nulužes.isvestis.includes(praleistas), nulužes.isvestis);
+
+  /** ── APVALKALAS (`describe`) NĖRA įvykdytas testas ────────────────────── */
+  /**
+   * ⚠️ TAI NE FORMATO SMULKMENA (#233 Codex raundas 2, #4).
+   *
+   * Kai failas naudoja `describe()`, o visi vaikai praleisti dėl priežasties,
+   * nesusijusios su DB, Node vis tiek išveda `ok N - <suite>` su `type: 'suite'`
+   * ir BE `# SKIP`. Skaičiuojant `ok` eilutes toks apvalkalas atrodo kaip
+   * įvykdytas testas, ir visiškai praleistas failas praeina patikrą - tiksliai
+   * tas „failas nutyla, o kiti sukasi" režimas, dėl kurio kriterijus ir buvo
+   * grąžintas į per-failo lygį.
+   */
+  const suApvalkalu = [
+    "TAP version 13",
+    "    ok 1 - vaikas A # SKIP reikia REDIS_URL",
+    "    ok 2 - vaikas B # SKIP reikia REDIS_URL",
+    "    1..2",
+    "ok 1 - apvalkalas",
+    "  ---",
+    "  duration_ms: 4.3",
+    "  type: 'suite'",
+    "  ...",
+  ].join("\n");
+
+  const tikApvalkalas = suTapKatalogu(sveikasKatalogas({ [praleistas]: suApvalkalu }), paleistiTikrintuva);
+
+  assert.notEqual(
+    tikApvalkalas.kodas,
+    0,
+    "`describe` apvalkalas be įvykdytų vaikų NEGALI būti laikomas vykdymu"
+  );
+  assert.ok(tikApvalkalas.isvestis.includes(praleistas), tikApvalkalas.isvestis);
+
+  /** Bet apvalkalas su TIKRAI įvykdytu vaiku - teisėtas. */
+  const apvalkalasSuVaiku = [
+    "TAP version 13",
+    "    ok 1 - realus vaikas",
+    "    1..1",
+    "ok 1 - apvalkalas",
+    "  ---",
+    "  type: 'suite'",
+    "  ...",
+  ].join("\n");
+
+  assert.equal(
+    suTapKatalogu(sveikasKatalogas({ [praleistas]: apvalkalasSuVaiku }), paleistiTikrintuva).kodas,
+    0,
+    "apvalkalas su įvykdytu vaiku privalo praeiti - skaičiuojami vaikai, ne apvalkalas"
+  );
 
   /** ── Praleidimas dėl KITOS priežasties (Redis) nekliudo ────────────────── */
   const kitasSkip = suTapKatalogu(

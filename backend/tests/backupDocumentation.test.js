@@ -257,8 +257,50 @@ test("RUNBOOK: audito raktų reikalavimas susietas su TEISINGA kopijos rūšimi"
   /** Ir nurodymas tikrinti `audit_log` negali likti be to konteksto. */
   const patikra = doc.indexOf("SELECT DISTINCT hash_key_id FROM audit_log");
   assert.notEqual(patikra, -1, "prielaida: patikros užklausa dokumentuota");
+
+  const skyrius = doc.lastIndexOf("### ", patikra);
   assert.ok(
-    doc.slice(Math.max(0, patikra - 800), patikra).includes("pilnos PostgreSQL kopijos"),
+    doc.slice(skyrius, patikra).includes("pilnos PostgreSQL kopijos"),
     "`audit_log` patikra privalo būti aiškiai priskirta pilnai PostgreSQL kopijai"
   );
+});
+
+test("RUNBOOK: generacijų patikra eina PO dump'o pakėlimo, ne prieš", () => {
+  /**
+   * ⚠️ NETEISINGA TVARKA VEDA TIESIAI Į GEDIMĄ (#233 Codex raundas 2, #5).
+   *
+   * Ankstesnė versija liepė tikrinti generacijas PRIEŠ pakeliant dump'ą. Tuščioje
+   * avarinio atkūrimo duomenų bazėje `SELECT DISTINCT hash_key_id` grąžina
+   * nieko ir KLAIDINGAI patvirtina, kad raktų žiedas pilnas. Startas paskui
+   * krenta fail-closed ties generacijomis, kurių operatorius net nematė -
+   * būtent tada, kai klaidos kaina didžiausia.
+   *
+   * Tikrinama TVARKA dokumente, ne frazės buvimas: instrukcija, kurios žingsniai
+   * teisingi, bet eilė ne, yra lygiai tokia pat neveikianti.
+   */
+  const doc = fs.readFileSync(path.join(__dirname, "..", "..", "docs/backup-runbook.md"), "utf8");
+
+  const sustabdymas = doc.indexOf("Servisas SUSTABDYTAS");
+  const pakelimas = doc.indexOf("Pakelkite dump");
+  const patikra = doc.indexOf("SELECT DISTINCT hash_key_id FROM audit_log");
+  const raktai = doc.indexOf("Surinkite trūkstamus raktus");
+  const startas = doc.indexOf("Tik tada startuokite servisą");
+
+  for (const [vardas, poz] of [
+    ["servisas sustabdytas", sustabdymas],
+    ["dump'o pakėlimas", pakelimas],
+    ["generacijų patikra", patikra],
+    ["raktų surinkimas", raktai],
+    ["serviso startas", startas],
+  ]) {
+    assert.notEqual(poz, -1, `runbook'e trūksta žingsnio: ${vardas}`);
+  }
+
+  assert.ok(sustabdymas < pakelimas, "dump'as keliamas tik sustabdžius servisą");
+  assert.ok(
+    pakelimas < patikra,
+    "generacijų užklausa privalo eiti PO dump'o - kitaip ji klausia tuščios lentelės"
+  );
+  assert.ok(patikra < raktai, "raktai renkami pagal patikros rezultatą");
+  assert.ok(raktai < startas, "servisas startuoja tik surinkus raktus");
 });

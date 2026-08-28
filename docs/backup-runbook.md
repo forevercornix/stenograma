@@ -168,22 +168,50 @@ Redis užrakto.
 
 ---
 
-### Raktai atkuriami PRIEŠ duomenis
+### Audito raktai atkuriant PILNĄ PostgreSQL kopiją
 
 ⚠️ **Šis poskyris NĖRA apie `POST /api/backup/restore`.** Aplikacijos kopijoje
 audito eilučių nėra (žr. §1), tad jos atkūrimas audito raktų neliečia. Žemiau
 aprašytas kelias galioja **pilnos PostgreSQL kopijos** atkūrimui — tik ji
 grąžina `audit_log` turinį.
 
-Prieš keliant `audit_log` turinį, įsitikinkite, kad `AUDIT_ID_SALT_PREVIOUS`
-turi VISAS generacijas, kurios toje kopijoje pasitaiko:
+⚠️ **SEKA SVARBI, IR ANKSTESNĖ ŠIO RUNBOOK'O VERSIJA BUVO NETEISINGA.** Ji liepė
+patikrinti generacijas *prieš* pakeliant dump'ą. Tuščioje avarinio atkūrimo
+duomenų bazėje ta užklausa grąžina **nieko** ir klaidingai patvirtina, kad raktų
+žiedas pilnas; startas paskui krenta fail-closed ties generacijomis, kurių
+operatorius net nematė — būtent tada, kai klaidos kaina didžiausia.
 
-```sql
-SELECT DISTINCT hash_key_id FROM audit_log;
-```
+Teisinga seka:
 
-Kiekvienas rezultatas privalo turėti raktą aktyviame arba istoriniame sąraše.
-Trūkstant bent vieno, startas nutrūks — tai apsauga, ne kliūtis.
+1. **Servisas SUSTABDYTAS.** Fail-closed startas su nepilnu raktų žiedu nutrauks
+   paleidimą, o pusiau pakelta DB kartu su bandančiu kilti procesu tik apsunkina
+   diagnostiką.
+
+2. **Pakelkite dump'ą** į tikslinę duomenų bazę.
+
+3. **Tik dabar klauskite, kokios generacijos kopijoje yra** — užklausa
+   prasminga tik po žingsnio 2, nes iki tol ji rodo senos arba tuščios lentelės
+   turinį:
+
+   ```sql
+   SELECT DISTINCT hash_key_id FROM audit_log;
+   ```
+
+4. **Surinkite trūkstamus raktus** į `AUDIT_ID_SALT_PREVIOUS` (formatas
+   `id:secret`, kableliais). Kiekvienas žingsnio 3 rezultatas privalo turėti
+   raktą aktyviame arba istoriniame sąraše.
+
+5. **Tik tada startuokite servisą.** Trūkstant bent vieno rakto, startas
+   nutrūks — tai apsauga, ne kliūtis; žr. „Jei raktas prarastas negrįžtamai".
+
+⚠️ **Kodėl ne „fiksuoti generacijų sąrašą kopijos darymo metu".** Toks sąrašas
+būtų patogesnis, bet jo negalime garantuoti: pilną PostgreSQL kopiją paprastai
+daro DBA įrankiai (`pg_dump`, PITR, tomo momentinė kopija), kurių ši aplikacija
+nevaldo, o aplikacijos kopija audito lentelės neapima apskritai. Sąrašas tada
+egzistuotų tik dalyje kopijų, ir operatorius negalėtų žinoti, ar jo nebuvimas
+reiškia „nėra generacijų", ar „niekas jo neužfiksavo". Žingsnių tvarka veikia su
+**bet kokiu** dump'u, iš bet kokio šaltinio, todėl pasirinkta ji. Sąrašo
+fiksavimas kopijos metu lieka naudingas **papildomas** patogumas, ne pakaitalas.
 
 ### Jei raktas prarastas negrįžtamai
 

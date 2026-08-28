@@ -403,16 +403,49 @@ neatsivertų, ir vėliavėlė būtų paneigta.
 `SELECT 1` įrodo tik tiek, kad jungtis gyva. Rolė su atimta `DELETE` teise jį
 praeitų, o GDPR ištrynimas kristų vykdymo metu — su žaliais sveikatos signalais.
 
-Zondas per `has_table_privilege()` tikrina `SELECT`, `INSERT` ir `DELETE` ant
-`audit_log`, vienu round-trip'u, ir **nemutuoja**: bandomasis įrašas reikštų
-nuolatinį lentelės šiukšlinimą dėl diagnostikos, o append-only trigeris tokios
-eilutės dar ir neleistų ištrinti be pėdsako.
+Zondas vienu round-trip'u tikrina **dvi** teisių aibes ir **nemutuoja**:
+bandomasis įrašas reikštų nuolatinį lentelės šiukšlinimą dėl diagnostikos, o
+append-only trigeris tokios eilutės dar ir neleistų ištrinti be pėdsako.
+
+| Objektas | Teisės | Kaip tikrinama |
+|---|---|---|
+| `audit_log` lentelė | `SELECT`, `INSERT`, `DELETE` — **visos trys būtinos** | `has_table_privilege()` |
+| `audit_log.seq` seką maitinantis objektas | `USAGE` **ARBA** `UPDATE` — pakanka bet kurios | `pg_get_serial_sequence()` + `has_sequence_privilege()` |
+
+⚠️ **`INSERT` ant lentelės NEPAKANKA.** `seq` yra `BIGSERIAL`, tad kiekvienas
+rašymas kviečia `nextval()` ant **atskiro sekos objekto**, kurio teisės
+suteikiamos atskirai. Rolė su `INSERT`, bet be teisės ant sekos, zondą praeitų
+žalią, o kiekvienas `append()` kristų vykdymo metu.
+
+`nextval()` priima ir `USAGE`, ir `UPDATE`, todėl zondas reikalauja **bet
+kurios** — reikalavimas turėti būtent `USAGE` klaidingai nudažytų raudonai
+veikiantį diegimą. Seka randama per katalogą, o ne pagal vardą:
+`audit_log_seq_seq` yra numatytoji forma, bet ne garantija.
+
+Minimali veikianti rolė:
+
+```sql
+GRANT SELECT, INSERT, DELETE ON audit_log TO stenograma_app;
+
+-- Sekos vardo nespėliokite - paklauskite katalogo:
+SELECT pg_get_serial_sequence('audit_log', 'seq');
+GRANT USAGE ON SEQUENCE audit_log_seq_seq TO stenograma_app;   -- arba UPDATE
+```
+
+⚠️ Rolė, sukonfigūruota be sekos teisės, lieka **amžinai not-ready**, o
+`/api/ready` priežasties neatskleidžia (ji būtų infrastruktūros detalė viešame
+atsakyme). Diagnostika — starto logai ir ši lentelė.
 
 Rezultatas kešuojamas 2 s. **Kešuojamas tik teigiamas** — atsistačiusi DB turi
 būti pastebėta per kitą poll'ą, ne po TTL. Nuo apkrovos krentant DB saugo
-**single-flight**: vykstant zondui visi kiti kvietėjai gauna tą patį promise'ą,
-tad lygiagrečios užklausos apribotos iki vienos, o atsistatymo aptikimas
-neatidedamas.
+**single-flight**: vykstant zondui kiti kvietėjai gauna tą patį promise'ą, tad
+lygiagrečios užklausos apribotos iki vienos.
+
+⚠️ **Single-flight turi SENATĮ, lygią `READINESS_TIMEOUT_MS`.** Kai užklausa
+kabo ilgiau, nei maršrutas jos laukia, dalintis nebėra ko: kitas poll'as pradeda
+savo užklausą. Be šios ribos kabanti užklausa užrakintų readiness tol, kol
+pagaliau baigsis — atsistačiusi DB liktų nepastebėta dešimtis sekundžių, t. y.
+priešingai, nei single-flight skirtas.
 
 ### ⚠️ Generacijų būsena yra STARTO SNAPSHOT'AS
 

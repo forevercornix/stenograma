@@ -1091,6 +1091,57 @@ test("ZONDAS: seka randama per katalogą, o abu iškvietimai NEMUTUOJA", async (
   }
 });
 
+test("SINGLE-FLIGHT: kabanti užklausa NEUŽRAKINA readiness po biudžeto", async () => {
+  /**
+   * ⚠️ BE RIBOS SINGLE-FLIGHT VIRSTA UŽRAKTU (#233 Codex raundas 2, #3).
+   *
+   * Kai `READINESS_TIMEOUT_MS` trumpesnis už pool'o `query_timeout`, maršrutas
+   * nutrūksta, o užklausa lieka kaboti. Kiekvienas kitas poll'as gaudavo TĄ PATĮ
+   * pažadą - tad net atsistačiusios DB readiness nepamatydavo, kol sena užklausa
+   * pagaliau baigsis. Rezultatas priešingas single-flight tikslui: vietoj
+   * apribotos apkrovos gaudavom neapribotą prastovą.
+   *
+   * Tikrinama UŽKLAUSŲ SKAIČIUMI, ne laiku: antras poll'as po biudžeto privalo
+   * inicijuoti NAUJĄ užklausą.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const BIUDZETAS_MS = 60;
+  let kiek = 0;
+  let atrakintiAntra = null;
+
+  const pool = {
+    query: async () => {
+      kiek += 1;
+      /** Pirma užklausa KABO - kaip DB, kuri nebeatsako. */
+      if (kiek === 1) return new Promise(() => {});
+      return new Promise((resolve) => {
+        atrakintiAntra = () =>
+          resolve({
+            rows: [{ perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true }],
+          });
+      });
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A", readinessBudgetMs: BIUDZETAS_MS });
+
+  /** ⚠️ Nelaukiam: maršrutas šio pažado jau atsisakė. */
+  store.probe().catch(() => {});
+
+  /** Iškart po jo - dalijamės, nes biudžetas dar nepasibaigęs. */
+  store.probe().catch(() => {});
+  assert.equal(kiek, 1, "biudžeto ribose lygiagretūs poll'ai privalo dalintis viena užklausa");
+
+  await new Promise((r) => setTimeout(r, BIUDZETAS_MS + 20));
+
+  const treciasZondas = store.probe();
+  assert.equal(kiek, 2, "po biudžeto naujas poll'as privalo pradėti SAVO užklausą");
+
+  atrakintiAntra();
+  assert.equal(await treciasZondas, true, "atsistačiusi DB pastebima nelaukiant senos užklausos");
+});
+
 test("KEŠAS: įrodomas `pool.query` SKAIČIUMI, ne laiko matavimu", async () => {
   /**
    * ⚠️ REALIZACIJA SU `Date.now()`, BET BE FAKTINIO PRALEIDIMO, PRAEITŲ NAIVŲ TESTĄ.

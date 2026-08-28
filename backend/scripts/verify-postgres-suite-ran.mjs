@@ -52,20 +52,59 @@ if (!fs.existsSync(katalogas) || !fs.statSync(katalogas).isDirectory()) {
 }
 
 /**
+ * Vieno failo TAP įvertinimas.
+ *
+ * ⚠️ SKAIČIUOJAMI TESTAI, NE `ok` EILUTĖS (#233 Codex raundas 2, #4).
+ *
+ * Kai failas naudoja `describe()`/`suite()`, Node TAP išveda ir APVALKALO
+ * įrašą: `ok 1 - <suite>` su `type: 'suite'` YAML bloke. Tas įrašas NETURI
+ * `# SKIP` žymos net tada, kai visi vaikai praleisti - tad `ok` eilučių
+ * skaičiavimas jį užskaito kaip įvykdytą testą, ir VISIŠKAI praleistas failas
+ * praeina per-failo patikrą.
+ *
+ * Tai tiksliai tas gedimo režimas, dėl kurio buvo atmesta ankstesnė kriterijaus
+ * versija: „failas nutyla, o kiti sukasi". Garantija, kuri jo nepagauna, negina
+ * to, ko reikalauja #231 DoD 14.
+ *
  * ⚠️ Praleidimai atpažįstami pagal `postgresGuard` pranešime esantį
  * `DATABASE_URL`, ne pagal bet kokį `# SKIP`. Testas gali būti praleistas ir dėl
  * kitos priežasties (Redis, tyčinis `skip: true`), o tokie čia nesvarbūs -
  * klausimas siauras: ar praleista dėl TRŪKSTAMOS DUOMENŲ BAZĖS.
  */
 function ivertintiFaila(turinys) {
-  const okEilutes = turinys.split("\n").filter((eil) => /^\s*ok \d+ - /.test(eil));
+  const eilutes = turinys.split("\n");
 
-  return {
-    ivykdyti: okEilutes.filter((eil) => !/#\s*SKIP/i.test(eil)).length,
-    praleistiDelDb: okEilutes.filter(
-      (eil) => /#\s*SKIP/i.test(eil) && eil.includes("DATABASE_URL")
-    ).length,
-  };
+  let ivykdyti = 0;
+  let praleistiDelDb = 0;
+
+  for (let i = 0; i < eilutes.length; i += 1) {
+    const eilute = eilutes[i];
+    if (!/^\s*ok \d+ - /.test(eilute)) continue;
+
+    /** Po `ok` einantis YAML blokas: nuo `---` iki `...`. */
+    const yamlEilutes = [];
+    let j = i + 1;
+
+    if (/^\s*---\s*$/.test(eilutes[j] === undefined ? "" : eilutes[j])) {
+      j += 1;
+      while (j < eilutes.length && !/^\s*\.\.\.\s*$/.test(eilutes[j])) {
+        yamlEilutes.push(eilutes[j]);
+        j += 1;
+      }
+    }
+
+    /** Apvalkalas nėra testas: jis tik apibendrina vaikus. */
+    if (/^\s*type:\s*'suite'\s*$/m.test(yamlEilutes.join("\n"))) continue;
+
+    if (/#\s*SKIP/i.test(eilute)) {
+      if (eilute.includes("DATABASE_URL")) praleistiDelDb += 1;
+      continue;
+    }
+
+    ivykdyti += 1;
+  }
+
+  return { ivykdyti, praleistiDelDb };
 }
 
 const klaidos = [];

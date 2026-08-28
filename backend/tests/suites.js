@@ -260,43 +260,128 @@ const functional = [
  * praleistais testais nėra sėkmė.
  */
 /**
- * Failo `require()` argumentai - be komentarų ir be pašalinių eilučių literalų.
+ * Failo `require()` argumentai.
  *
- * ⚠️ NEAPDOROTO TEKSTO SKENAVIMAS KLYSTA ABIEM KRYPTIMIS (#231 Codex peržiūra, P2).
+ * ⚠️ VIENAS PRAĖJIMAS SIMBOLIAIS, NE REGEX GRANDINĖ (#233 Codex raundas 2, #1).
  *
- * Ankstesnė versija tikrino `/require\((["'])[^"']*postgresGuard\1\)/` tiesiai
- * faile. Ji praleidžia `require ("...")` su tarpu ir klaidingai įtraukia
- * paminėjimą komentare ar eilutės viduje - o kadangi tas pats šablonas buvo
- * pakartotas teste, nukrypimo testas nebūtų pagavęs.
+ * Ankstesnė versija komentarus nuimdavo PRIEŠ atpažindama literalus. Tvarka
+ * neteisinga iš principo: komentaro ir literalo atpažinimas yra tarpusavyje
+ * priklausomas, tad regex grandinė lūžta ABIEM kryptimis, ir abi buvo realios:
  *
- * ⚠️ TAI NĖRA AST PARSAVIMAS, ir to nereikia. Nuimami komentarai, po to
- * užtušuojami VISI eilučių literalai, IŠSKYRUS `require()` argumentą - tada
- * paminėjimas eilutėje nebegali apsimesti importu. Riba: `require(\`...\`)` su
- * šablonine eilute nerandamas. Tokio importo repozitorijoje nėra, o kelią
- * dengia atskira `pg` naudojimo patikra `suiteDerivation.test.js`.
+ *   1. `'// require("./helpers/postgresGuard");'` - eilutė, ne komentaras. Iš
+ *      jos nuimtas „komentaras" nuplėšia uždarančią kabutę, ir skeneris randa
+ *      importą, kurio nėra. Šitaip `suiteDerivation` ĮKRITO į postgres rinkinį -
+ *      dėl savo paties sintetinio testo duomenų.
+ *   2. `const marker = '//'; require('./helpers/postgresGuard')` - čia `//` yra
+ *      eilutėje, bet senoji versija nuo jos nuplėšdavo likusią eilutę kartu su
+ *      TIKRU importu. Realus PostgreSQL testas tyliai iškristų iš CI.
+ *
+ * Todėl einama simboliais su būsena: kodas, `'`/`"`/`` ` `` literalas, eilutės
+ * komentaras, bloko komentaras, reguliarusis reiškinys. Pilno JS parserio
+ * nereikia - reikia tik teisingos atpažinimo tvarkos.
+ *
+ * ⚠️ REGULIARIEJI REIŠKINIAI ATPAŽĮSTAMI SĄMONINGAI. Testų failuose pilna
+ * šablonų su kabutėmis (`/["']/`). Be šito pirmoji tokio šablono kabutė
+ * pradėtų „eilutę", kuri surytų kodą iki kitos kabutės - kartu su tikrais
+ * importais. Tai ta pati 2 klaida, tik kita priežastimi.
  *
  * ⚠️ Šablonas NEKONSTRUOJAMAS iš kintamųjų (CodeQL): grąžinami visi importai, o
  * kvietėjas lygina eilutes.
+ *
+ * RIBOS, kurias verta žinoti: šablonine eilute su `${...}`, kurioje yra dar
+ * viena atgalinė kabutė, tokenizatorius suklystų; tokio kodo repozitorijoje
+ * nėra, o `pg` naudojimo patikra `suiteDerivation.test.js` dengia tą kelią
+ * nepriklausomai.
  */
 function importuotiModuliai(saltinis) {
-  const beKomentaru = saltinis
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    /** `[^:]` saugo `https://` eilutėse - kitaip nuplėštume ir tos eilutės kodą. */
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  const literalai = [];
+  let skeletas = "";
+  let i = 0;
+  let pries = "";
 
-  const uztusuota = beKomentaru.replace(
-    /(['"`])(?:\\.|(?!\1)[^\\])*\1/g,
-    (literalas, _kabute, poz, visas) =>
-      /require\s*\(\s*$/.test(visas.slice(0, poz)) ? literalas : '""'
-  );
+  /** Po identifikatoriaus, skaičiaus ar uždarančio skliausto `/` yra dalyba. */
+  const PO_REIKSMES = /[\w$)\]]/;
+
+  while (i < saltinis.length) {
+    const c = saltinis[i];
+    const kitas = saltinis[i + 1];
+
+    if (c === "/" && kitas === "/") {
+      while (i < saltinis.length && saltinis[i] !== "\n") i += 1;
+      skeletas += " ";
+      continue;
+    }
+
+    if (c === "/" && kitas === "*") {
+      i += 2;
+      while (i < saltinis.length && !(saltinis[i] === "*" && saltinis[i + 1] === "/")) i += 1;
+      i += 2;
+      skeletas += " ";
+      continue;
+    }
+
+    if (c === "/" && !PO_REIKSMES.test(pries)) {
+      i += 1;
+      let simboliuKlase = false;
+      while (i < saltinis.length) {
+        const r = saltinis[i];
+        if (r === "\\") {
+          i += 2;
+          continue;
+        }
+        if (r === "\n") break;
+        if (r === "[") simboliuKlase = true;
+        else if (r === "]") simboliuKlase = false;
+        else if (r === "/" && !simboliuKlase) {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      skeletas += " ";
+      /** Po šablono einantis `/` yra dalyba, ne naujas šablonas. */
+      pries = ")";
+      continue;
+    }
+
+    if (c === '"' || c === "'" || c === "`") {
+      const kabute = c;
+      let turinys = "";
+      i += 1;
+      while (i < saltinis.length) {
+        const r = saltinis[i];
+        if (r === "\\") {
+          turinys += saltinis[i + 1] === undefined ? "" : saltinis[i + 1];
+          i += 2;
+          continue;
+        }
+        if (r === kabute) {
+          i += 1;
+          break;
+        }
+        /** Nebaigtas vienos eilutės literalas - nutraukiam, kad nesurytume failo. */
+        if (kabute !== "`" && r === "\n") break;
+        turinys += r;
+        i += 1;
+      }
+      skeletas += ` ${literalai.length} `;
+      literalai.push(turinys);
+      pries = ")";
+      continue;
+    }
+
+    skeletas += c;
+    if (!/\s/.test(c)) pries = c;
+    i += 1;
+  }
 
   const rasti = [];
-  const sablonas = /require\s*\(\s*(["'])([^"']*)\1\s*\)/g;
+  const sablonas = /require\s*\(\s* (\d+) \s*\)/g;
 
-  let atitikmuo = sablonas.exec(uztusuota);
+  let atitikmuo = sablonas.exec(skeletas);
   while (atitikmuo !== null) {
-    rasti.push(atitikmuo[2]);
-    atitikmuo = sablonas.exec(uztusuota);
+    rasti.push(literalai[Number(atitikmuo[1])]);
+    atitikmuo = sablonas.exec(skeletas);
   }
 
   return rasti;

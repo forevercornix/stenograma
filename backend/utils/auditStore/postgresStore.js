@@ -35,6 +35,22 @@ const SEKOS_PRIVILEGIJOS = Object.freeze(["USAGE", "UPDATE"]);
 /** Teigiamo zondo rezultato galiojimas. Orkestruotojo poll'ai kitaip generuotų SQL kiekvienam. */
 const PROBE_CACHE_TTL_MS = 2000;
 
+/**
+ * KIEK ILGAI SINGLE-FLIGHT PAŽADAS DAR GALI BŪTI DALINAMAS (#233 Codex raundas 2, #3).
+ *
+ * ⚠️ BE RIBOS SINGLE-FLIGHT VIRSTA UŽRAKTU. Kai `READINESS_TIMEOUT_MS`
+ * trumpesnis už pool'o `query_timeout`, maršrutas nutrūksta, o kabanti užklausa
+ * lieka. Kiekvienas kitas poll'as gaudavo TĄ PATĮ pažadą, tad atsistačiusios
+ * DB readiness nepamatydavo, kol sena užklausa pagaliau baigsis - galimai
+ * dešimtimis sekundžių vėliau. Tai atvirkščias tikslas nei tas, dėl kurio
+ * single-flight ir daromas.
+ *
+ * Numatytoji reikšmė sutampa su `READINESS_TIMEOUT_MS` numatytąja: kol maršrutas
+ * dar laukia, dalintis prasminga; kai jis jau pasidavė, įrašas nebegalioja pagal
+ * konstrukciją. Tikslią biudžeto reikšmę perduoda `init()`.
+ */
+const PROBE_SINGLE_FLIGHT_MAX_MS = 2000;
+
 /** DB stulpelių sąrašas SELECT'ui - tvarka nesvarbi, bet vienoda abiem kryptim. */
 const STULPELIU_SARASAS = Object.values(STULPELIAI)
   .map((s) => `"${s}"`)
@@ -85,7 +101,14 @@ function iEilute(row) {
   return eilute;
 }
 
-function createPostgresStore(pool, { hashKeyId }) {
+function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
+  /**
+   * Readiness biudžetas ateina iš `init(env)` - to paties `READINESS_TIMEOUT_MS`,
+   * kurį naudoja maršrutas. Antra reikšmė čia reikštų dvi konfigūracijos tiesas.
+   */
+  const singleFlightMaxMs =
+    Number(readinessBudgetMs) > 0 ? Number(readinessBudgetMs) : PROBE_SINGLE_FLIGHT_MAX_MS;
+
   /** Zondo būsena - VIENAM store'ui, ne moduliui: du pool'ai neturi dalintis kešu. */
   let kesas = null;
   let vykstantisZondas = null;
@@ -426,9 +449,18 @@ function createPostgresStore(pool, { hashKeyId }) {
         return true;
       }
 
-      if (vykstantisZondas) return vykstantisZondas;
+      /**
+       * ⚠️ DALINAMASI TIK NEPASENUSIU ĮRAŠU. Senesnis už readiness biudžetą
+       * reiškia užklausą, kurios atsakymo niekas nebelaukia - naujas poll'as
+       * privalo pradėti savo, kitaip atsistatymas lieka nematomas.
+       */
+      if (vykstantisZondas && dabar - vykstantisZondas.pradzia < singleFlightMaxMs) {
+        return vykstantisZondas.pazadas;
+      }
 
-      vykstantisZondas = (async () => {
+      const irasas = { pradzia: dabar, pazadas: null };
+
+      irasas.pazadas = (async () => {
         const stulpeliai = BUTINOS_PRIVILEGIJOS.map(
           (p, i) => `has_table_privilege('audit_log', $${i + 1}) AS "${p.toLowerCase()}"`
         ).join(", ");
@@ -463,13 +495,19 @@ function createPostgresStore(pool, { hashKeyId }) {
         );
       })();
 
+      vykstantisZondas = irasas;
+
       try {
-        const rezultatas = await vykstantisZondas;
+        const rezultatas = await irasas.pazadas;
         /** Kešuojam tik `true` - žr. paaiškinimą aukščiau. */
         kesas = rezultatas === true ? { rezultatas, laikas: Date.now() } : null;
         return rezultatas;
       } finally {
-        vykstantisZondas = null;
+        /**
+         * ⚠️ TIK SAVO ĮRAŠĄ. Pavėluotai pasibaigusi sena užklausa kitaip
+         * nutrintų naujesnę, ir kitas poll'as be reikalo pradėtų trečią.
+         */
+        if (vykstantisZondas === irasas) vykstantisZondas = null;
       }
     },
 
@@ -491,4 +529,5 @@ module.exports = {
   BUTINOS_PRIVILEGIJOS,
   SEKOS_PRIVILEGIJOS,
   PROBE_CACHE_TTL_MS,
+  PROBE_SINGLE_FLIGHT_MAX_MS,
 };
