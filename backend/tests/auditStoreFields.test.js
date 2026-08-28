@@ -1142,6 +1142,75 @@ test("SINGLE-FLIGHT: kabanti užklausa NEUŽRAKINA readiness po biudžeto", asyn
   assert.equal(await treciasZondas, true, "atsistačiusi DB pastebima nelaukiant senos užklausos");
 });
 
+test("KEŠAS: PASENĘS zondas negali jo užpildyti - net grąžinęs `true`", async () => {
+  /**
+   * ⚠️ ŠIĄ SPRAGĄ ĮNEŠĖ PATS SINGLE-FLIGHT TAISYMAS (#233 Codex raundas 3, #1).
+   *
+   * Seka, kuri readiness padaro žalią su atimtomis teisėmis:
+   *   1. zondas A startuoja ir kabo;
+   *   2. praėjus biudžetui poll'as paleidžia zondą B;
+   *   3. B grąžina `false` - teisės atimtos;
+   *   4. A PAVĖLUOTAI baigiasi su senu `true` ir įrašo jį į kešą;
+   *   5. kitas poll'as gauna `true` iš kešo, NEIŠSIUNTĘS jokios užklausos.
+   *
+   * Tai tas pats tylus gedimas, dėl kurio privilegijų zondas apskritai daromas,
+   * tik per savo paties kešą - todėl P1, ne kešavimo smulkmena.
+   *
+   * Įrodymas - UŽKLAUSŲ SKAIČIUS: jei kešas būtų užterštas, trečio poll'o
+   * užklausos nebūtų.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const BIUDZETAS_MS = 60;
+  let kiek = 0;
+  let baigtiPirma = null;
+
+  const pool = {
+    query: async () => {
+      kiek += 1;
+
+      /** Pirma užklausa kabo, o vėliau grąžina SENĄ „viskas gerai". */
+      if (kiek === 1) {
+        return new Promise((resolve) => {
+          baigtiPirma = () =>
+            resolve({
+              rows: [
+                { perskaityta: 0, select: true, insert: true, delete: true, seka_leidziama: true },
+              ],
+            });
+        });
+      }
+
+      /** Tuo metu teisės jau atimtos - visos vėlesnės užklausos tai mato. */
+      return {
+        rows: [{ perskaityta: 0, select: true, insert: true, delete: false, seka_leidziama: true }],
+      };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A", readinessBudgetMs: BIUDZETAS_MS });
+
+  const pasenes = store.probe();
+
+  await new Promise((r) => setTimeout(r, BIUDZETAS_MS + 20));
+
+  assert.equal(await store.probe(), false, "prielaida: naujas zondas mato atimtas teises");
+  assert.equal(kiek, 2, "prielaida: pasenęs įrašas nebedalinamas");
+
+  /** ── Pasenęs zondas baigiasi PO to, su senu `true` ────────────────────── */
+  baigtiPirma();
+
+  assert.equal(
+    await pasenes,
+    false,
+    "pasenusio zondo atsakymas per senas, kad juo remtųsi readiness - fail-closed"
+  );
+
+  /** ── Ir svarbiausia: kešas privalo likti TUŠČIAS ──────────────────────── */
+  assert.equal(await store.probe(), false, "readiness negali tapti žalia dėl seno atsakymo");
+  assert.equal(kiek, 3, "trečias poll'as PRIVALO klausti DB - kešas negali būti užterštas");
+});
+
 test("KEŠAS: įrodomas `pool.query` SKAIČIUMI, ne laiko matavimu", async () => {
   /**
    * ⚠️ REALIZACIJA SU `Date.now()`, BET BE FAKTINIO PRALEIDIMO, PRAEITŲ NAIVŲ TESTĄ.

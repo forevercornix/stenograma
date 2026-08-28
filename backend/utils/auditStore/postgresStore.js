@@ -499,6 +499,26 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
 
       try {
         const rezultatas = await irasas.pazadas;
+
+        /**
+         * ⚠️ KEŠĄ PILDO TIK TUO METU REGISTRUOTAS ZONDAS (#233 Codex raundas 3, #1).
+         *
+         * Šią spragą įnešė pats single-flight senaties taisymas. Scenarijus:
+         * zondas A pasensta, poll'as paleidžia zondą B, B grąžina „trūksta
+         * teisių" (`false`), ir tada A PAVĖLUOTAI baigiasi su senu `true` bei
+         * įrašo jį į kešą. Readiness dvi sekundes rodo žalią - be jokios
+         * užklausos ir su atimtomis teisėmis.
+         *
+         * Tai tiksliai tas tylaus gedimo režimas, dėl kurio privilegijų zondas
+         * apskritai daromas, tik dabar per savo paties kešą.
+         *
+         * Pasenusio įrašo rezultatas ATMETAMAS, o ne kešuojamas, ir kvietėjui
+         * grąžinamas `false`: atsakymas, kurio niekas nebelaukia, yra per senas,
+         * kad juo remtųsi readiness. Fail-closed - kitas poll'as tiesiog
+         * paklaus iš naujo.
+         */
+        if (vykstantisZondas !== irasas) return false;
+
         /** Kešuojam tik `true` - žr. paaiškinimą aukščiau. */
         kesas = rezultatas === true ? { rezultatas, laikas: Date.now() } : null;
         return rezultatas;

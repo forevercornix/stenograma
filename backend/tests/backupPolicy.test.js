@@ -409,6 +409,28 @@ test("ŽEMĖLAPIS: KIEKVIENAS artefakto tipas turi lentelės įrašą", () => {
       "eksplicitinį `null`, jei tipas savo lentelės neturi."
   );
 
+  /**
+   * ⚠️ RAKTO BUVIMO NEPAKANKA (#233 Codex raundas 3, #3).
+   *
+   * `id in TABLE_BY_TYPE` tikrina tik savybės buvimą, tad rašybos klaida
+   * (`TABLES.suklysta` → `undefined`) šią patikrą praeidavo. Pasekmė nėra
+   * teorinė: `excludedTables()` `undefined` reikšmes išfiltruoja, tad lentelė
+   * TYLIAI iškristų iš išbrauktųjų - t. y. audito eilutės patektų į kopiją,
+   * nors politika sako priešingai.
+   *
+   * `null` lieka teisėtas - jis reiškia sąmoningą „šis tipas savo lentelės
+   * neturi". Viskas kita privalo būti netuščias lentelės vardas.
+   */
+  const blogosReiksmes = Object.entries(TABLE_BY_TYPE).filter(
+    ([, lentele]) => lentele !== null && !(typeof lentele === "string" && lentele.trim() !== "")
+  );
+
+  assert.deepEqual(
+    blogosReiksmes.map(([id, lentele]) => `${id}=${String(lentele)}`),
+    [],
+    "kiekviena reikšmė privalo būti arba `null` sentinelis, arba netuščias lentelės vardas"
+  );
+
   /** Ir atvirkščiai: žemėlapyje neturi likti tipų, kurių nebėra. */
   const žinomi = new Set(Object.values(ARTEFACT_TYPES).map((t) => t.id));
   for (const id of Object.keys(TABLE_BY_TYPE)) {

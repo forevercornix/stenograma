@@ -8,6 +8,8 @@ process.env.API_KEY = "";
 process.env.LOG_LEVEL = "error";
 delete process.env.REDIS_URL;
 
+const fs = require("node:fs");
+const path = require("node:path");
 const request = require("supertest");
 const auditStore = require("../utils/auditStore");
 const app = require("../server");
@@ -110,30 +112,92 @@ test("READY: sugedęs audito zondas → 503, o liveness nepaliestas", async () =
   }
 });
 
-test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", async () => {
+test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
   /**
    * Readiness privalo atsakyti VISADA - net kai priklausomybė kabo. Be ribos
    * orkestruotojas vietoj aiškaus 503 gautų timeout, o konteineris liktų
    * „tikrinamas" būsenoje.
+   *
+   * ⚠️ ATSKIRAS PROCESAS, IR TAI NE PATOGUMAS (#233 Codex raundas 3, #2).
+   *
+   * `server.js` `READINESS_TIMEOUT_MS` užfiksuoja modulio ĮKĖLIMO metu. Šio
+   * failo 13 eilutė serverį jau įkėlė, tad ankstesnė versija, nustačiusi
+   * `process.env.READINESS_TIMEOUT_MS = "150"` teste, nekeitė NIEKO: maršrutas
+   * laukdavo numatytų 2000 ms, o riba `trukme < 5000` praeidavo. Testas buvo
+   * žalias ir neįrodinėjo nieko - nei ribos veikimo, nei jos reikšmės.
+   *
+   * Todėl aplinka nustatoma PRIEŠ įkėlimą, atskirame procese, o tikrinama riba
+   * artima 150 ms. Su numatytais 2000 ms šis testas krinta - kaip ir turi.
    */
-  const originalus = auditStore.probe;
-  auditStore.probe = () => new Promise(() => {});
+  const os = require("node:os");
+  const { execFileSync } = require("node:child_process");
 
-  const savedRiba = process.env.READINESS_TIMEOUT_MS;
-  process.env.READINESS_TIMEOUT_MS = "150";
+  const backend = path.join(__dirname, "..");
+  const katalogas = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-readiness-"));
+  const skriptas = path.join(katalogas, "zondas.js");
+
+  const RIBA_MS = 150;
 
   try {
-    const pradzia = Date.now();
-    const res = await request(app).get("/api/ready");
-    const trukme = Date.now() - pradzia;
+    fs.writeFileSync(
+      skriptas,
+      [
+        'process.env.NODE_ENV = "test";',
+        'process.env.LLM_PROVIDER = "mock";',
+        'process.env.TRANSCRIPTION_PROVIDER = "mock";',
+        'process.env.API_KEY = "";',
+        'process.env.LOG_LEVEL = "error";',
+        "delete process.env.REDIS_URL;",
+        /** ⚠️ PRIEŠ bet kokį `require` - kitaip konstanta jau užfiksuota. */
+        `process.env.READINESS_TIMEOUT_MS = "${RIBA_MS}";`,
+        "",
+        `const request = require(${JSON.stringify(path.join(backend, "node_modules", "supertest"))});`,
+        `const auditStore = require(${JSON.stringify(path.join(backend, "utils", "auditStore"))});`,
+        `const app = require(${JSON.stringify(path.join(backend, "server"))});`,
+        "",
+        "app._setReadyForTests(true);",
+        "auditStore.probe = () => new Promise(() => {});",
+        "",
+        "const pradzia = Date.now();",
+        'request(app).get("/api/ready").then((res) => {',
+        "  console.log(JSON.stringify({",
+        "    status: res.status,",
+        "    reachable: res.body.components.auditStoreReachable,",
+        "    trukme: Date.now() - pradzia,",
+        "  }));",
+        "  process.exit(0);",
+        "}).catch((e) => { console.error(String(e && e.stack ? e.stack : e)); process.exit(1); });",
+      ].join("\n"),
+      "utf8"
+    );
 
-    assert.equal(res.status, 503);
-    assert.equal(res.body.components.auditStoreReachable, false);
-    assert.ok(trukme < 5000, `readiness turi grįžti per ribą, o užtruko ${trukme} ms`);
+    const isvestis = execFileSync("node", [skriptas], {
+      encoding: "utf8",
+      cwd: backend,
+      timeout: 30_000,
+    });
+
+    const rezultatas = JSON.parse(isvestis.trim().split("\n").pop());
+
+    assert.equal(rezultatas.status, 503, "kabantis zondas privalo duoti 503, ne timeout");
+    assert.equal(rezultatas.reachable, false);
+
+    /**
+     * ⚠️ TIKRINAMOS ABI PUSĖS. Viršutinė riba įrodo, kad laukta būtent
+     * nustatytos, o ne numatytosios reikšmės; apatinė - kad atsakymas negrįžo
+     * iškart dėl kokios nors kitos priežasties, o riba realiai suveikė.
+     */
+    assert.ok(
+      rezultatas.trukme >= RIBA_MS,
+      `readiness privalo laukti ribos, o grįžo per ${rezultatas.trukme} ms`
+    );
+    assert.ok(
+      rezultatas.trukme < RIBA_MS * 5,
+      `readiness laukė ${rezultatas.trukme} ms - panašu, kad galioja numatytieji 2000 ms, ` +
+        "t. y. `READINESS_TIMEOUT_MS` nustatytas per vėlai"
+    );
   } finally {
-    auditStore.probe = originalus;
-    if (savedRiba === undefined) delete process.env.READINESS_TIMEOUT_MS;
-    else process.env.READINESS_TIMEOUT_MS = savedRiba;
+    fs.rmSync(katalogas, { recursive: true, force: true });
   }
 });
 
