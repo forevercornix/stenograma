@@ -145,7 +145,20 @@ jobs:
         # praleido save dėl trūkstamo `DATABASE_URL`. Tokia būsena atrodo
         # identiškai sėkmei, bet neįrodo nieko - o būtent ji ir slepia
         # neveikiantį DB kelią.
-        run: npm run test:postgres 2>&1 | tee /tmp/postgres-suite.tap; exit "${PIPESTATUS[0]}"
+        #
+        # ⚠️ BE PIPE IR BE `PIPESTATUS`. Ankstesnė versija naudojo
+        # `... | tee ...; exit "${PIPESTATUS[0]}"` - ji teisinga su dabartiniu
+        # numatytuoju `bash -e`, bet priklauso nuo shell nustatymo: pakeitus
+        # `shell:` reikšmę kritusi rinktinė galėtų tyliai tapti žalia. Tai
+        # tiksliai ta tylaus sulūžimo rūšis, kurios visas šis žingsnis ir vengia.
+        #
+        # `|| status=$?` reikalingas dėl `set -e`: be jo skriptas nutrūktų dar
+        # neparodęs TAP, ir CI loge nebūtų matyti, KURIS testas krito.
+        run: |
+          status=0
+          npm run test:postgres > /tmp/postgres-suite.tap 2>&1 || status=$?
+          cat /tmp/postgres-suite.tap
+          exit "$status"
 
       - name: PostgreSQL testai TIKRAI vykdyti (ne praleisti)
         working-directory: backend
