@@ -169,3 +169,60 @@ test("PRIVATUMAS: plikas `job_id` nepatenka nei į įrašą, nei į atsakymą", 
   assert.ok(!serializuota.includes(RAKTAS_A), "secret'as negali grįžti");
   assert.ok(!serializuota.includes(RAKTAS_B), "secret'as negali grįžti");
 });
+
+test("KONFIGŪRACIJA: memory be `AUDIT_ID_SALT_ID` praeina, bet ĮSPĖJA", async () => {
+  /**
+   * ⚠️ EKSPLICITINIS SPRENDIMAS, NE PRALEISTAS REIKALAVIMAS (#212).
+   *
+   * `AUDIT_ID_SALT_ID` privalomas TIK postgres režime: atmintyje `hash_key_id`
+   * niekur nerašomas, tad ID beprasmis, o reikalavimas jo visur sulaužytų
+   * esamus atminties diegimus be jokios naudos.
+   *
+   * Bet tylėti negalima. Startas yra VIENINTELĖ vieta, kur operatorius gali
+   * sužinoti IŠ ANKSTO, kad perjungus `AUDIT_BACKEND=postgres` sistema
+   * nebepakils. Be įspėjimo jis tai pamatytų tik migracijos metu.
+   */
+  const savedLevel = process.env.LOG_LEVEL;
+  const pagauta = [];
+  const originalus = console.warn;
+
+  try {
+    /** ⚠️ `warn` lygis - failo viršuje nustatytas `error`, tad kitaip matuotume tylą. */
+    process.env.LOG_LEVEL = "warn";
+    console.warn = (...args) => pagauta.push(args.join(" "));
+
+    await auditStore.shutdown();
+    await auditStore.init({ AUDIT_BACKEND: "memory", AUDIT_ID_SALT: RAKTAS_A });
+
+    console.warn = originalus;
+
+    assert.equal(auditStore.backend(), "memory", "atmintyje tai NĖRA klaida");
+    assert.ok(
+      pagauta.some((e) => e.includes("AUDIT_ID_SALT_ID") && e.includes("postgres")),
+      "įspėjimas privalo įvardyti IR trūkstamą kintamąjį, IR kada jis taps privalomas"
+    );
+
+    /** Nurodžius ID įspėjimo nebelieka - kitaip jis taptų nuolatiniu triukšmu. */
+    pagauta.length = 0;
+    console.warn = (...args) => pagauta.push(args.join(" "));
+
+    await auditStore.shutdown();
+    await auditStore.init({
+      AUDIT_BACKEND: "memory",
+      AUDIT_ID_SALT: RAKTAS_A,
+      AUDIT_ID_SALT_ID: "A",
+    });
+
+    console.warn = originalus;
+    assert.equal(
+      pagauta.filter((e) => e.includes("AUDIT_ID_SALT_ID")).length,
+      0,
+      "sukonfigūravus ID įspėjimo būti negali"
+    );
+  } finally {
+    console.warn = originalus;
+    if (savedLevel === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = savedLevel;
+    await auditStore.shutdown();
+  }
+});

@@ -1900,6 +1900,18 @@ Agentas jų NEKEIČIA ir alternatyvų nesirenka:
   sąrašas.
 - ID formatas: `[A-Za-z0-9_.-]{1,64}`. Secret formatas: base64url arba hex — kablelio
   ir dvitaškio jame būti negali, todėl sąrašo skaidymas yra vienareikšmis.
+- ⚠️ **`AUDIT_ID_SALT_ID` PRIVALOMAS TIK `postgres` REŽIME; `memory` ĮSPĖJA.**
+
+  Tai EKSPLICITINIS sprendimas, ne praleistas reikalavimas. Atmintyje
+  `hash_key_id` niekur nerašomas, tad generacijos etiketė beprasmė, o
+  reikalavimas jos visur sulaužytų esamus atminties diegimus be jokios naudos.
+  Simetriška 7.4b taisyklei, kur `AUDIT_ID_SALT` privaloma tik persistentiniam
+  backend'ui.
+
+  Bet tylėti negalima: nustačius `AUDIT_ID_SALT` be `AUDIT_ID_SALT_ID`, startas
+  rašo `warn`. Tai vienintelė vieta, kur operatorius gali sužinoti IŠ ANKSTO,
+  kad perjungus `AUDIT_BACKEND=postgres` sistema nebepakils — kitaip jis tai
+  pamatytų tik migracijos metu.
 - Rūšiavimas — pagal **7.4b tvarkos autoritetą (`seq`)**, mažėjimo tvarka (naujausi
   pirma). ⚠️ `timestamp` NĖRA tvarkos autoritetas: `now()` vienoje transakcijoje
   visoms eilutėms grąžina tą patį momentą, o lygiagrečios transakcijos gali

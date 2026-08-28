@@ -622,6 +622,23 @@ async function init(env = process.env) {
       reikalaujamaAktyvausId: backendas === "postgres",
     });
 
+    /**
+     * ⚠️ ĮSPĖJIMAS APIE TRŪKSTAMĄ `AUDIT_ID_SALT_ID` ATMINTIES REŽIME (7.4c).
+     *
+     * ID čia neprivalomas sąmoningai: `hash_key_id` atmintyje niekur nerašomas.
+     * Bet tylėti negalima - tai VIENINTELĖ vieta, kur operatorius gali sužinoti
+     * IŠ ANKSTO, kad perjungus `AUDIT_BACKEND=postgres` startas nutrūks. Kitaip
+     * jis tai pamatytų tik migracijos metu, kai jau vėlu.
+     */
+    if (backendas === "memory" && keyRing.activeSecret && !keyRing.activeId) {
+      log.warn(
+        "AUDIT_ID_SALT nustatytas, o AUDIT_ID_SALT_ID - ne. Atminties režimu tai " +
+          "leistina (generacijos etiketė niekur nerašoma), bet perjungus " +
+          "AUDIT_BACKEND=postgres startas NUTRŪKS: persistentiniam auditui ID " +
+          "privalomas. Žr. docs/audit-storage.md §13."
+      );
+    }
+
     if (backendas === "memory") {
       store = memoryStore;
       paruosta = true;

@@ -259,6 +259,12 @@ savo generacija.
 ID formatas — `[A-Za-z0-9_.-]{1,64}`; secret'as — base64url arba hex. Kablelio
 ir dvitaškio secret'e būti negali, todėl sąrašo skaidymas vienareikšmis.
 
+⚠️ **`AUDIT_ID_SALT_ID` privalomas tik `postgres` režime.** Atmintyje
+`hash_key_id` niekur nerašomas, tad etiketė beprasmė — simetriška 7.4b
+taisyklei. Nustačius `AUDIT_ID_SALT` be ID, startas rašo `warn`: perjungus
+`AUDIT_BACKEND=postgres` sistema nebepakils, ir tai geriau sužinoti dabar nei
+migracijos metu.
+
 Aktyvaus ir istorinių ID aibė privalo būti **unikali**: dublikatas reikštų, kad
 tas pats `hash_key_id` atitinka du secret'us, ir pseudonimo atkūrimas taptų
 neapibrėžtas. Kolizija, tuščias ID, tuščias secret'as ar netinkamas formatas —
