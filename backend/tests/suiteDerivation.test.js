@@ -103,16 +103,24 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
   }
 });
 
-test("VYKDYMO ĮRODYMAS: skriptas atmeta TAP, kuriame testai PRALEISTI", () => {
+test("VYKDYMO ĮRODYMAS: skriptas atmeta TAP su praleidimais dėl DB", () => {
   /**
    * ⚠️ TAI PAGRINDINĖ 7.4f CI GARANTIJA.
    *
    * `npm run test:postgres` grąžina 0 ir tada, kai kiekvienas testas praleido
-   * save dėl trūkstamo `DATABASE_URL`. Skriptas skaito TAP ir reikalauja
-   * NEPRALEISTO `ok` kiekvienam rinkinio failui.
+   * save dėl trūkstamo `DATABASE_URL`. Skriptas skaito TAP ir tokią būseną
+   * atmeta.
    *
-   * Testuojamas pats skriptas su sintetiniu TAP - taip garantija patikrinama
-   * BE duomenų bazės. Realų vykdymą CI atlieka su `REQUIRE_POSTGRES=1`.
+   * ⚠️ GRANULIARUMO RIBA. Pirmoji versija reikalavo `ok` KIEKVIENAM rinkinio
+   * failui, bet Node 18 `node --test <failai>` duoda PLOKŠČIĄ TAP be failų
+   * vardų - ta versija krisdavo visada, ir CI kritimas buvo jos pačios klaida.
+   * Dabar tikrinama tai, ką formatas leidžia įrodyti ir kas atitinka tikrąjį
+   * gedimo režimą: praleidimų dėl DB nėra, ir įvykdytų testų yra.
+   *
+   * ⚠️ JOKIO `RegExp` (CodeQL). Ankstesnė versija konstravo šabloną iš failo
+   * vardo su `replace(/\./g, "\\.")` - toks ekranavimas dengia tik taškus, o
+   * bet kuris kitas metasimbolis liktų neekranuotas. Čia pakanka eilučių
+   * lyginimo, tad `RegExp` atsisakoma visiškai, o ne taisomas ekranavimas.
    */
   const skriptas = path.join(TESTU_KATALOGAS, "..", "scripts", "verify-postgres-suite-ran.mjs");
   const tmp = path.join(require("node:os").tmpdir(), `pg-tap-${process.pid}`);
@@ -120,8 +128,7 @@ test("VYKDYMO ĮRODYMAS: skriptas atmeta TAP, kuriame testai PRALEISTI", () => {
   const paleisti = (tapTurinys) => {
     fs.writeFileSync(tmp, tapTurinys, "utf8");
     try {
-      const isvestis = execFileSync("node", [skriptas, tmp], { encoding: "utf8" });
-      return { kodas: 0, isvestis };
+      return { kodas: 0, isvestis: execFileSync("node", [skriptas, tmp], { encoding: "utf8" }) };
     } catch (e) {
       return { kodas: e.status, isvestis: (e.stderr || "") + (e.stdout || "") };
     } finally {
@@ -129,35 +136,50 @@ test("VYKDYMO ĮRODYMAS: skriptas atmeta TAP, kuriame testai PRALEISTI", () => {
     }
   };
 
-  /** ── Viskas praleista: turi KRISTI ─────────────────────────────────────── */
-  const praleista = suites.postgres
-    .map((t, i) => `ok ${i + 1} - ${t}.test.js # SKIP reikia DATABASE_URL`)
+  const PRALEIDIMO_PRIEZASTIS = "# SKIP reikia DATABASE_URL su tikru Postgres";
+
+  /** ── Viskas praleista dėl DB: turi KRISTI ──────────────────────────────── */
+  const praleista = ["TAP version 13"]
+    .concat(suites.postgres.map((_, i) => `ok ${i + 1} - koks nors testas ${PRALEIDIMO_PRIEZASTIS}`))
     .join("\n");
 
   const blogas = paleisti(praleista);
   assert.notEqual(blogas.kodas, 0, "vien praleidimai NEGALI būti laikomi sėkme");
-  assert.match(blogas.isvestis, /NEBUVO realiai įvykdytas/);
+  assert.ok(blogas.isvestis.includes("NEBUVO realiai įvykdytas"), blogas.isvestis);
+  assert.ok(blogas.isvestis.includes("DATABASE_URL"), "pranešime turi būti priežastis");
 
-  /** ── Visi realiai įvykdyti: turi PRAEITI ───────────────────────────────── */
-  const ivykdyti = suites.postgres
-    .map((t, i) => `# Subtest: /repo/backend/tests/${t}.test.js\nok ${i + 1} - ${t}.test.js`)
+  /** ── Realiai įvykdyta: turi PRAEITI ────────────────────────────────────── */
+  const ivykdyti = ["TAP version 13"]
+    .concat(suites.postgres.map((_, i) => `ok ${i + 1} - realus testas`))
     .join("\n");
 
   const geras = paleisti(ivykdyti);
-  assert.equal(geras.kodas, 0, `pilnai įvykdytas rinkinys turi praeiti: ${geras.isvestis}`);
-  assert.match(geras.isvestis, /visi \d+ failai realiai įvykdyti/);
+  assert.equal(geras.kodas, 0, `įvykdytas rinkinys turi praeiti: ${geras.isvestis}`);
+  assert.ok(geras.isvestis.includes("realiai įvykdyta"), geras.isvestis);
 
-  /** ── Vienas trūkstamas: turi KRISTI ir ĮVARDYTI, kuris ─────────────────── */
-  const truksta = suites.postgres
-    .slice(1)
-    .map((t, i) => `ok ${i + 1} - ${t}.test.js`)
-    .join("\n");
+  /** ── MIŠRUS: dalis įvykdyta, dalis praleista dėl DB - vis tiek KRINTA ──── */
+  const misrus = [
+    "TAP version 13",
+    "ok 1 - realus testas",
+    `ok 2 - kitas testas ${PRALEIDIMO_PRIEZASTIS}`,
+  ].join("\n");
 
-  const dalinis = paleisti(truksta);
-  assert.notEqual(dalinis.kodas, 0, "trūkstamas failas privalo kristi");
-  assert.match(
-    dalinis.isvestis,
-    new RegExp(suites.postgres[0].replace(/\./g, "\\.")),
-    "pranešime turi būti įvardytas KURIS failas neįvykdytas"
+  const dalinis = paleisti(misrus);
+  assert.notEqual(dalinis.kodas, 0, "net vienas praleidimas dėl DB reiškia neįvykdytą rinkinį");
+
+  /** ── Praleidimas dėl KITOS priežasties (Redis) nekliudo ────────────────── */
+  const kitasSkip = [
+    "TAP version 13",
+    "ok 1 - realus testas",
+    "ok 2 - redis testas # SKIP reikia REDIS_URL su tikru Redis",
+  ].join("\n");
+
+  assert.equal(
+    paleisti(kitasSkip).kodas,
+    0,
+    "praleidimas ne dėl DB yra teisėtas - klausimas siauras"
   );
+
+  /** ── Tuščias TAP: KRINTA ───────────────────────────────────────────────── */
+  assert.notEqual(paleisti("TAP version 13").kodas, 0, "tuščias TAP nėra sėkmė");
 });
