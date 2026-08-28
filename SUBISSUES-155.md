@@ -2234,84 +2234,108 @@ logika ir readiness lieka 7.4d.
 
 ## [7.4f] Audit readiness, backup ir CI registracija
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.4b · **Lygiagretus:** 7.4c, 7.4d, 7.4e
-· **Blokuoja:** 7.6, #212 uždarymą
+**Tėvinis:** #155 · **Priklauso nuo:** 7.4b, 7.4c · **Lygiagretus:** 7.4d, 7.4e
+· **Blokuoja:** 7.6
 
 Operacinis 7.4 uždarymas: readiness, kabliukas 7.6 atkūrimui, PostgreSQL CI
-registracija, cutover/rollback ir operatoriaus dokumentacija.
+rinkinio išvedimas ir operatoriaus dokumentacija.
 
-⚠️ **Kodėl atskirai.** Ši apimtis anksčiau buvo suplanuota kaip 7.4e, bet §7.4e
-buvo skirta audito ištrynimo galutinumui (#216). Todėl readiness, backup
-politika ir CI wiring liko be savo issue, nors nuo jų priklauso du dalykai:
-7.6 DoD reikalauja, kad `audit_log` būtų `backupPolicy` išbraukimų sąraše, o
-#212 negali būti uždarytas be `REQUIRE_POSTGRES=1` CI paleidimo.
+⚠️ **Kodėl atskirai.** Ši apimtis buvo suplanuota kaip 7.4e, bet §7.4e atiteko
+audito ištrynimo galutinumui (#216), tad readiness, backup politika ir CI
+liko be savo issue — nors nuo `backupPolicy` kabliuko priklauso 7.6 DoD.
 
-### Readiness ir health
+### Jau padaryta ankstesniuose etapuose
 
-- [ ] ⚠️ **Readiness liečia realų `audit_log`, ne `SELECT 1`.** Scenarijus: DB
-      pasiekiama, `audit_log` trūksta arba neprieinama → NOT ready.
-- [ ] ⚠️ **Probe nebrangus.** Kviečiamas kas health poll'ą — teisės tikrinamos
-      per `has_table_privilege()`, be šiukšlinių eilučių rašymo, su rezultato
-      cache trumpam intervalui. Testas, kad pakartotiniai kvietimai negeneruoja
-      užklausos kiekvienam poll'ui.
-- [ ] Readiness apima ir 7.4c raktų būseną: neišsprendžiama `hash_key_id`
-      generacija reiškia NOT ready, net kai procesas paleistas su
+Šie punktai NĖRA šio darbo dalis; įrašyti, kad nebūtų perdaryti:
+
+- `tests/helpers/postgresGuard.js` su `REQUIRE_POSTGRES=1` — egzistuoja.
+- `readiness.auditStore` laukas ir jo nustatymas po `auditStore.init()`
+  (`server.js:81`, `:383`) — egzistuoja. Trūksta tik **patikros**.
+- `backupPolicy` išbraukia `ARTEFACT_TYPES.AUDIT_ENTRY` su pagrindimu
+  (`backupPolicy.js:65-80`) — egzistuoja. Trūksta **išvedamo sąrašo ir testo**.
+
+### Readiness
+
+- [ ] ⚠️ **`/api/ready` TIKRINA `readiness.auditStore`.** Šiandien
+      `server.js:305-309` tikrina tik `jobStore && jobRunner &&
+      sessionReconcile`. Jei `auditStore.init()` krenta, serveris grąžina 200 ir
+      priima srautą — fail-closed audito apsauga apeinama. Tai veikianti klaida,
+      ne būsimo darbo spraga.
+- [ ] ⚠️ **Aktyvus zondas `probeRuntimeReadiness()` viduje.** Simetriškai
+      `sessionStore.probe()`, su `READINESS_TIMEOUT_MS` riba. Be jo DB kritimas
+      ar teisių pakeitimas PO starto lieka nepastebėtas, ir instancija toliau
+      priima audito generuojančias užklausas (pvz. prisijungimus).
+- [ ] ⚠️ **`postgresStore.probe()` tikrina PRIVILEGIJAS, ne `SELECT 1`.**
+      Dabartinė realizacija (`auditStore/postgresStore.js:250-253`) įrodo tik
+      kad ryšys gyvas. Reikia `has_table_privilege()` patikros `SELECT`,
+      `INSERT` ir `DELETE` teisėms ant `audit_log`, pagal
+      `sessionStore/postgresStore.js` šabloną. Be `DELETE` GDPR ištrynimas
+      lūžtų tyliai.
+- [ ] ⚠️ **Zondo rezultatas kešuojamas** (TTL ~2000 ms). Orkestratoriaus
+      poll'ai kitaip generuoja SQL kiekvienam kvietimui.
+- [ ] ⚠️ **Cache ĮRODOMAS `pool.query` sekimu, ne laiko matavimu.**
+      Realizacija su `Date.now()`, bet be faktinio praleidimo, praeitų naivų
+      testą. Testas: kelis kartus iš eilės kviečiamas `probe()` kešo lange →
+      `pool.query` iškviestas lygiai vieną kartą.
+- [ ] ⚠️ **NEIŠSPRENDŽIAMOS GENERACIJOS → NOT READY.** Jei 7.4c raktų
+      resolveris nemato rakto DB esančiai `hash_key_id` generacijai,
+      `/api/ready` grąžina 503 — net kai procesas paleistas su
       `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`. Vėliavėlė leidžia
-      startuoti, bet nedeklaruoja sistemos sveika.
+      startuoti, bet nedeklaruoja sveikatos.
+- [ ] ⚠️ **BET `/api/health` (liveness) LIEKA 200.** Priešingu atveju
+      orkestratorius nuolat perkraudinėtų podą, ir operatorius neturėtų lango
+      išvalyti senų eilučių — vėliavėlė netektų prasmės, o atsistatymo kelias
+      būtų paneigtas. Testas abiem endpoint'ams tuo pačiu metu.
 - [ ] `/api/health` DB ir audit backend detalių produkcijoje pagal nutylėjimą
       NErodo (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
 - [ ] ⚠️ **Secret reikšmės nepatenka į logus, health ar readiness atsakymus** —
-      testas, apimantis ir startup klaidų tekstus iš 7.4c raktų validacijos.
+      testas, apimantis ir 7.4c raktų validacijos startup klaidas.
 
 ### Backup ir 7.6 sąsaja
 
-- [ ] ⚠️ **KABLIUKAS 7.6 ATKŪRIMUI.** `utils/backupPolicy.js` sąmoningai
-      išbraukia auditą iš atkūrimo: atkūrus, GDPR ištrinti įrašai grįžtų, o
-      naujesni append-only įvykiai būtų perrašyti arba dubliuoti. `audit_log`
-      privalo būti į tą politiką užregistruotas — kitaip 7.6 DoD („prieš kopiją
-      įrašyta unikali audito eilutė po restore NERANDAMA") neįgyvendinamas.
-- [ ] Testas, kad `audit_log` yra išbraukimų sąraše ir kad sąrašas IŠVEDAMAS,
-      ne surašytas rankiniu būdu.
-- [ ] ⚠️ **Rakto konfigūracija NĖRA atsarginėse kopijose, bet be jos kopija
-      bevertė.** Atkūrus `audit_log` be `AUDIT_ID_SALT_PREVIOUS`, visos
-      generacijos tampa neišsprendžiamos (7.4c fail-closed). Backup runbook'e
-      privalo būti eksplicitiškai įrašyta, kad raktų rinkinys saugomas atskirai
-      ir atkuriamas kartu.
+- [ ] ⚠️ **`excludedTables()` IŠVEDAMAS iš `backupPolicy.js`,** ne surašytas
+      teste. Hardcode'intas `audit_log` teste yra rankomis palaikomas sąrašas,
+      linkęs tyliai išsiskirti su politika.
+- [ ] Testas, kad `audit_log` yra išbraukimų aibėje ir kad aibė gaunama iš
+      politikos, ne iš literalo. Tai kabliukas, kurio reikia 7.6 DoD („prieš
+      kopiją įrašyta unikali audito eilutė po restore NERANDAMA").
+- [ ] ⚠️ **RAKTAI NĖRA KOPIJOJE, BET BE JŲ KOPIJA BEVERTĖ.**
+      `docs/backup-runbook.md` skyriuose „Kas patenka į kopiją", „Atkūrimas" ir
+      „Ko atkūrimas negrąžina" privalo būti eksplicitiškai: `AUDIT_ID_SALT` ir
+      `AUDIT_ID_SALT_PREVIOUS` saugomi ATSKIRAI ir atkuriami kartu. Atkūrus
+      `audit_log` be jų, visos generacijos tampa neišsprendžiamos (7.4c
+      fail-closed), o GDPR ištrynimas nebeįmanomas.
 
 ### PostgreSQL CI
 
-- [ ] ⚠️ **`REQUIRE_POSTGRES=1`** — simetriškas esamam `REQUIRE_REDIS=1`.
-      PostgreSQL CI job'e privalomas scenarijus, kuris `skip`'inasi, laikomas
-      GEDIMU, ne sėkme.
-- [ ] ⚠️ **Žalias `npm run test:postgres` be DB NĖRA įrodymas.** Šiandien jis
-      praeina su ~75 praleistais testais. CI job'as privalo tikrinti, kad
-      konkretūs privalomi testai pasirodė kaip `ok`, ne kad job'as žalias.
-- [ ] Visi 7.4b–7.4e PostgreSQL integration testai realiai registruoti
-      PostgreSQL CI rinkinyje — tikrinamas faktinis vykdymas su `DATABASE_URL`,
-      ne failo egzistavimas.
-- [ ] ⚠️ **Registracija IŠVEDAMA, ne surašoma.** Fiksuotas failų sąrašas reiškia,
-      kad naujas PG testas liktų nepaleistas, kol kas nors rankiniu būdu jį
-      pridės. Rinkinys sudaromas iš failų šablono arba žymos.
-- [ ] Testas ant pačios CI konfigūracijos: „PostgreSQL unavailable" negali
-      duoti žalio rezultato.
+- [ ] ⚠️ **`tests/suites.js` postgres rinkinys IŠVEDAMAS, ne surašomas.**
+      Dabar tai fiksuotas vardų sąrašas (`suites.js:210-235`). Naujas
+      integracinis testas, kurio kas nors nepridės ranka, niekada nebus
+      paleistas — CI liks žalias, o kodas nepatikrintas. Rinkinys sudaromas
+      skenuojant `tests/`: failai su `.integration` varde arba importuojantys
+      `postgresGuard`.
+- [ ] ⚠️ **Įrodymas, kad testai TIKRAI vykdyti.** Su `REQUIRE_POSTGRES=1`
+      tikrinama, kad kiekvienam postgres rinkinio failui pasirodė bent vienas
+      `ok`. Žalias job'as su praleistais testais nėra sėkmė.
+- [ ] Visi 7.4b–7.4e PostgreSQL integration testai patenka į išvestą rinkinį —
+      patikrinama faktiniu vykdymu, ne failo egzistavimu.
 
 ### Cutover ir dokumentacija
 
 - [ ] ⚠️ **CUTOVER IR ROLLBACK.** Esami in-memory įrašai NEPERKELIAMI. Grįžimas
       `postgres → memory` reiškia, kad seni įrašai lieka DB ir nauji į juos
-      nebepatenka — įrašyta į diegimo pastabas kaip sąmoningas, ne atsitiktinis
-      elgesys.
-- [ ] `.env.example` ir operatoriaus dokumentacija pilna 7.4 kintamųjų aibė:
-      `AUDIT_BACKEND`, `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID`,
-      `AUDIT_ID_SALT_PREVIOUS`, `AUDIT_WRITE_TIMEOUT_MS`,
-      `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS`.
+      nebepatenka — sąmoningas elgesys, įrašytas į diegimo pastabas.
+- [ ] `.env.example` ir operatoriaus dokumentacija: `AUDIT_BACKEND`,
+      `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID`, `AUDIT_ID_SALT_PREVIOUS`,
+      `AUDIT_WRITE_TIMEOUT_MS`, `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS`.
 - [ ] Security/evidence matrix atnaujinta, jei to reikalauja repo sargai.
 - [ ] README apribojimų lentelės eilutė ir Roadmap punktas atnaujinti.
 
 ### Ko NEAPIMA
 
 Retencijos ir `PRIVACY_MODE` (7.4d), ištrynimo galutinumo barjero (7.4e),
-rakto rotacijos (7.4c). Job store, sesijų ir authentication pakeitimų.
+rakto rotacijos realizacijos (7.4c). `postgresGuard.js` kūrimo — jis jau yra.
+Job store, sesijų ir authentication pakeitimų.
 
 ---
 
