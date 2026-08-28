@@ -2062,6 +2062,13 @@ matote tuos reikalavimus, autoritetas yra #231.
   batch su viena autoritetinga numatytąja reikšme"; konkretų dydį parenka
   realizacija pagal repo konvencijas ir jį testuoja.
 
+- ⚠️ **Init tvarka:** `PRIVACY_MODE` purge vykdomas ir `await`inamas **PRIEŠ**
+  `patikrintiGeneracijas()`. Išvalius eilutes `usedGenerations()` grąžina `[]`,
+  tad 7.4c naslaičių patikra nebeturi ko atmesti. Priešinga tvarka sustabdytų
+  startą dėl įrašų, kuriuos purge tuoj pat ištrintų.
+- Batch kandidatų atranka PostgreSQL režime naudoja `FOR UPDATE SKIP LOCKED`.
+  Nukrypti galima tik su eksplicitiniu pagrindimu.
+
 ### Retencijos vykdymo kontraktas
 
 - Retencijos autoritetas — esama centralizuota `privacyConfig` /
@@ -2101,11 +2108,12 @@ matote tuos reikalavimus, autoritetas yra #231.
   griūva lenktynėse.
 - ⚠️ **Purge nesėkmė → startup FAIL-CLOSED.** Negalima tęsti su
   `PRIVACY_MODE=true` ir senomis eilutėmis DB.
-- ⚠️ **Tvarka su 7.4c naslaičių patikra apibrėžiama eksplicitiškai.** Abu vyksta
-  audit store init metu: generacijų skenavimas ir privacy purge. Jei purge
-  ištrina visas eilutes, naslaičių nebelieka — bet jei skenavimas eina pirmas,
-  startas gali kristi dėl generacijų, kurias purge tuoj pat būtų pašalinęs.
-  Pasirink tvarką, pagrįsk ir testuok.
+- ⚠️ **VEIKIANTI KLAIDA, NE BŪSIMA SPRAGA.** `auditLog.js:555-559` ir `:619-633`:
+  `PRIVACY_MODE=true` metu `record()`, `getAll()` ir `query()` kviečia
+  `purgeForPrivacyMode()` → `clear()`, o `postgresStore.clear()` (`:347-357`)
+  meta klaidą, kai `NODE_ENV !== "test"`. Produkcijoje su PostgreSQL procesas
+  kristų per pirmą audito rašymą. PostgreSQL režime tai privalo būti saugus
+  no-op: DB išvaloma starto metu, nauji įrašai nepridedami.
 - Kol `PRIVACY_MODE=true`, nauji audit įrašai nepersistinami.
 - Režimo keitimas vyksta per proceso restartą / init semantiką. Runtime
   hot-toggle nekuriamas, jei repo kontrakte tokio nėra.
@@ -2150,7 +2158,13 @@ matote tuos reikalavimus, autoritetas yra #231.
 - [ ] Vienos instancijos sweep'ai nepersidengia — elgsenos testas, ne vėliavos
       egzistavimas.
 - [ ] Dviejų instancijų lygiagretus sweep prieš tą pačią DB nepalieka expired
-      eilučių ir nesukelia korektiškumo klaidos.
+      eilučių ir nesukelia korektiškumo klaidos. Batch atranka naudoja
+      `FOR UPDATE SKIP LOCKED`; dvi lygiagrečios transakcijos baigiasi be
+      deadlock'o.
+- [ ] ⚠️ `retentionSweeper` **`await`ina** `auditLog.purgeExpired(now)`. Tapus
+      async, be `await` sweeper logintų `[object Promise]` vietoj skaičiaus ir
+      galėtų palikti neapdorotą rejection. Testas: grąžinamas baigtinis sveikasis
+      skaičius abiejuose backend'uose.
 - [ ] ⚠️ **RETENCIJA ATRAKINA RAKTO IŠĖMIMĄ.** 7.4c fail-closed taisyklė
       neleidžia pašalinti rakto, kol DB yra jo `hash_key_id` įrašų. Testas
       užbaigia ciklą: retencija pašalina visus `A` generacijos įrašus → `A`
@@ -2169,7 +2183,11 @@ matote tuos reikalavimus, autoritetas yra #231.
 - [ ] Tame pačiame scenarijuje audit įvykio generavimas po starto nepalieka
       naujos RAW eilutės.
 - [ ] `true → false`: seni įrašai negrįžta, nauji vėl persistinami.
-- [ ] Tvarka su 7.4c naslaičių patikra apibrėžta ir testuota.
+- [ ] ⚠️ Gamybiniame režime (`NODE_ENV !== "test"`) `PRIVACY_MODE=true` su
+      PostgreSQL NEsukelia klaidos rašant, skaitant ar užklausiant auditą —
+      testas gamybiniu režimu, ne tik `NODE_ENV=test`.
+- [ ] Purge `await`inamas PRIEŠ `patikrintiGeneracijas()` — testas: DB turi
+      naslaičių generaciją, `PRIVACY_MODE=true`, startas praeina.
 
 **`DELETE` politika ir `AUDIT_MAX_ENTRIES`**
 
@@ -2189,13 +2207,11 @@ matote tuos reikalavimus, autoritetas yra #231.
       neįgyvendintas integracijas. Jei retencija/privacy keičia doctor
       pranešimą, testas krenta. Nustatyti, ar jis dar galioja po 7.4b/7.4f, ir
       atnaujinti kartu, ne aklai.
-- [ ] ⚠️ **PATIKRINTI PRIEŠ RAŠANT:** `backupPolicy` dirba su **artefaktų
-      tipais**, o `audit_log` yra **DB lentelė**. 7.4f pridėjo `excludedTables()`,
-      bet fizinė `pg_dump` kopija pagal nutylėjimą įtrauktų `audit_log` duomenis,
-      ir atkūrus GDPR ištrinti įrašai grįžtų. Nustatyti, ar 7.4f runbook'as tai
-      jau dengia (`--exclude-table-data=audit_log`). Jei ne — tai NĖRA 7.4d
-      apimtis, bet privalo būti užregistruota kaip atskiras radinys, ne tyliai
-      praleista.
+- [ ] ⚠️ **`pg_dump` IŠBRAUKIMAS.** `backupPolicy` dirba su artefaktų tipais, o
+      `audit_log` yra DB lentelė: fizinė `pg_dump` kopija ją įtrauktų, ir atkūrus
+      grįžtų GDPR ištrinti bei pasenę įrašai. `docs/backup-runbook.md` pilnos
+      PostgreSQL kopijos skyriuje įrašyti `--exclude-table-data=audit_log` su
+      paaiškinimu kodėl.
 
 ### Ko NEAPIMA
 
