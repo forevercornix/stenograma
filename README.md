@@ -947,17 +947,23 @@ backend'o atmintyje, tad: dingsta po restarto; nesidalija tarp replikų; neturi
 DB transakcijų ar tamper-resistance. Retencija realiai reiškia „iki restarto
 arba iki N dienų, kas ateina pirmiau".
 
-**`postgres` (#155, 7.4b).** Žurnalas persistentinis, dalijamas tarp replikų ir
-append-only (`UPDATE` atmeta DB trigeris). Bet **`AUDIT_RETENTION_DAYS` ir
-`AUDIT_MAX_ENTRIES` čia NEGALIOJA**: `audit_log` eilutės automatiškai
-**nešalinamos**, ir lentelė auga neribotai. Startas dėl to įspėja `warn` lygiu.
+**`postgres` (#155, 7.4b, retencija – 7.4d).** Žurnalas persistentinis,
+dalijamas tarp replikų ir append-only (`UPDATE` atmeta DB trigeris).
 
-> Operatoriui tai reiškia: nustatyta 30 dienų reikšmė **nėra** taikoma, tad be
-> išorinės valymo politikos asmens duomenys audite išliks neribotai. Tai
-> tiesioginė GDPR saugojimo ribojimo rizika.
+- **`AUDIT_RETENTION_DAYS` GALIOJA** (nuo 7.4d): `audit_log` eilutės šalinamos
+  to paties centralizuoto sweep'o metu, ribotais batch'ais, o riba imama iš **DB
+  laikrodžio** – to paties, kuris deda `timestamp`.
+- **`AUDIT_MAX_ENTRIES` NEGALIOJA**: tai atminties apsauga, ne duomenų politika.
+  Eilutės niekada nešalinamos vien dėl to, kad jų skaičius viršijo N. Startas
+  įspėja `warn` lygiu, jei kintamasis nustatytas kartu su `postgres`.
 
-Persistentinę retenciją įgyvendina **[7.4d]**. Konfigūracija ir sprendimai –
-`docs/audit-storage.md`.
+> ⚠️ **Išorinės valymo politikos NEREIKIA, ir jos nekurkite.** Iki 7.4d ji buvo
+> būtina; dabar tai būtų antras nepriklausomas trynimo mechanizmas ant tos
+> pačios lentelės, veikiantis pagal kitą ribą ir kitą laikrodį, o
+> `RETENTION_PURGE` įrašas rodytų tik vieno jų darbą. Jei ji įdiegta iš
+> ankstesnės versijos – **išjunkite**.
+
+Konfigūracija ir sprendimai – `docs/audit-storage.md` §9.
 
 ### Privatumo režimas
 

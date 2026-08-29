@@ -78,6 +78,18 @@ užrakindavo, priešingai nei žada in-memory kontraktas, kuris `PRIVACY_MODE` m
 Derinys nelieka tylus: `init()` kiekvieno starto metu rašo **garsų įspėjimą**,
 kad auditas išjungtas sąmoningai ir kad valymas negrįžtamas.
 
+⚠️ **VĖLIAVOS PERJUNGIMUI REIKIA PILNO SUSTABDYMO, NE ROLLING UPDATE.**
+
+Purge atleidžia užraktus po kiekvieno batch'o (batch'inimo pasekmė, žr. §9), tad
+rolling update metu senesnė replika su `PRIVACY_MODE=false` gali įrašyti eilutę
+jau **po** to, kai naujoji baigė valyti. Naujoji replika savo rašymus slopina,
+bet nebepurgina niekada — ir ta eilutė lieka `audit_log` neribotai.
+
+Todėl garantija „lentelė lieka tuščia" galioja tik tada, kai **visos** replikos
+paleistos su ta pačia vėliava. Procedūra: sustabdyti visas instancijas →
+pakeisti vėliavą → paleisti. Tas pats galioja ir mišriam server/worker
+diegimui — worker'iai rašo auditą ir inicijuoja tą pačią saugyklą.
+
 ---
 
 ## 2. `AUDIT_ID_SALT` tampa privaloma

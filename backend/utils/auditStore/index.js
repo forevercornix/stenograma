@@ -569,8 +569,14 @@ async function initializePostgres(env) {
  * generacijas, faktiškai esančias lentelėje; iš to matyti ir našlaitės, ir tai,
  * kurie istoriniai raktai dar reikalingi.
  */
-async function patikrintiGeneracijas(pgStore, env) {
-  const dbGeneracijos = await pgStore.usedGenerations();
+/**
+ * NAŠLAIČIŲ GENERACIJŲ PATIKRA (#212).
+ *
+ * ⚠️ ATSKIRTA NUO KIEKIO RIBOS (#233 Codex raundas 4). Ši privalo vykti PO
+ * `PRIVACY_MODE` purge - išvalius eilutes atmesti nebėra ko; riba - PRIEŠ jį.
+ * Kol jos gyveno vienoje funkcijoje, tvarkos pasirinkti buvo neįmanoma.
+ */
+function patikrintiNasliaites(dbGeneracijos, env) {
   const zinomos = keyRing.visi;
 
   const nasliaites = dbGeneracijos.filter((id) => !zinomos.has(id));
@@ -605,7 +611,25 @@ async function patikrintiGeneracijas(pgStore, env) {
       );
     }
   }
+}
 
+/**
+ * RAKTŲ KIEKIO RIBA (#212), VERTINAMA PRIEŠ DESTRUKTYVŲ ŽINGSNĮ (#233, P1).
+ *
+ * ⚠️ PO `PRIVACY_MODE` PURGE ŠI RIBA TAPTŲ SPĄSTAIS.
+ *
+ * Purge ištrina visas eilutes, tad po jo KIEKVIENAS istorinis raktas atrodo
+ * nebereikalingas. Diegimas, kuris prieš tai kildavo normaliai (dešimt+ raktų,
+ * bet kiekvienas dar su eilutėmis), po vieno `PRIVACY_MODE` starto liktų IR be
+ * duomenų, IR nepaleidžiamas: destruktyvus žingsnis jau įvykęs, nauda negauta,
+ * o kelio atgal nėra.
+ *
+ * Todėl riba vertinama pagal PRIEŠ purge buvusią būseną - ji naudoja tikrą
+ * informaciją (kurie raktai realiai turėjo eilučių) ir kertasi anksčiau, nei
+ * kas nors ištrinama. Bendra taisyklė: patikrink viską, ką gali patikrinti,
+ * PRIEŠ trindamas.
+ */
+function patikrintiRaktuKieki(dbGeneracijos) {
   /**
    * ⚠️ KIEKIO RIBA ATMETA TIK NEBEREIKALINGUS RAKTUS (#212).
    *
@@ -732,7 +756,24 @@ async function init(env = process.env) {
        * Vieta pasirinkta sąmoningai: DB pool paruoštas, schema ir invariantai
        * patikrinti, store sukurtas - anksčiau valyti reikštų lenktynes.
        */
-      if (String(env.PRIVACY_MODE).toLowerCase() === "true") {
+      const priesPurge = await pgStore.usedGenerations();
+      const privatumas = String(env.PRIVACY_MODE).toLowerCase() === "true";
+
+      /**
+       * ⚠️ TIKRINIMŲ TVARKĄ KEIČIA TIK PRIVACY KELIAS (#233 Codex raundas 4, P1).
+       *
+       * Ten, kur bus trinama, viskas, ką galima patikrinti, tikrinama PIRMA:
+       * po purge kiekio riba matytų visus istorinius raktus kaip
+       * nebereikalingus ir nutrauktų startą - jau ištrynus duomenis.
+       *
+       * Be purge tvarka NEKEIČIAMA (našlaitės, tada riba): našlaičių pranešimas
+       * įvardija GDPR ištrynimo negalimumą, ir jis svarbesnis už konfigūracijos
+       * higienos pastabą. Perrikiavus abu kelius, įprastas diegimas gautų kitą
+       * klaidą nei iki šiol - pakeitimas be priežasties.
+       */
+      if (privatumas) patikrintiRaktuKieki(priesPurge);
+
+      if (privatumas) {
         const kiek = await pgStore.purgeAllForPrivacy();
 
         /**
@@ -744,15 +785,40 @@ async function init(env = process.env) {
          * veikianti sistema - tiksliai tas scenarijus, dėl kurio 7.4b sargą ir
          * įvedė. Įspėjimas kiekvieno starto metu yra jo pakaitalas.
          */
+        /**
+         * ⚠️ TEKSTAS NEŽADA DAUGIAU, NEI GARANTUOJA (#233 Codex raundas 4).
+         *
+         * Ankstesnė formuluotė sakė, kad `audit_log` LIEKA tuščia. Rolling
+         * update metu tai netiesa: purge atleidžia užraktus po kiekvieno
+         * batch'o (batch'inimo pasekmė), tad senesnė replika su
+         * `PRIVACY_MODE=false` gali įterpti eilutę po paskutinio tuščio
+         * batch'o. Ši replika savo rašymus slopina, bet nebepurgina niekada.
+         */
         log.warn(
           "PRIVACY_MODE=true SU AUDIT_BACKEND=postgres - auditas IŠJUNGTAS SĄMONINGAI. " +
             `Persistentinės eilutės išvalytos starto metu (${kiek}); tai NEGRĮŽTAMA. ` +
-            "Kol vėliava įjungta, nauji įrašai nepersistinami, o `audit_log` lieka tuščia. " +
+            "Ši instancija naujų įrašų nerašo. ⚠️ Lentelė liks tuščia TIK jei VISOS " +
+            "replikos paleistos su ta pačia vėliava: rolling update metu senesnė " +
+            "replika gali įrašyti eilutę po šio valymo, ir ji liks neribotai. " +
+            "Vėliavos perjungimui reikia PILNO sustabdymo, ne rolling update. " +
             "Išjungus vėliavą seni įrašai NEATSIKURIA. Žr. docs/audit-storage.md §9."
         );
       }
 
-      await patikrintiGeneracijas(pgStore, env);
+      /**
+       * ⚠️ NAŠLAIČIAI TIKRINAMI PO PURGE - žr. `patikrintiNasliaites`.
+       *
+       * Su `PRIVACY_MODE=true` lentelė jau tuščia, tad sąrašas tuščias ir
+       * atmesti nebėra ko. Be purge - tikrinama ta pati būsena, kurią ką tik
+       * nuskaitė kiekio riba, tad antro `usedGenerations()` kvietimo nereikia.
+       */
+      if (privatumas) {
+        /** Lentelė ką tik išvalyta - našlaičių sąrašas tuščias pagal apibrėžimą. */
+        patikrintiNasliaites([], env);
+      } else {
+        patikrintiNasliaites(priesPurge, env);
+        patikrintiRaktuKieki(priesPurge);
+      }
     } catch (klaida) {
       /**
        * ⚠️ UŽDAROMA PRIEŠ PERMETANT, IR KLAIDA NEPRARANDAMA.

@@ -466,3 +466,106 @@ test("POOL: kritus po-inicijavimo fazei jungtis UŽDAROMA, ne paliekama", async 
     await auditStore.shutdown();
   }
 });
+
+test("PRIVACY_MODE: 10+ raktų SU eilutėmis - startas praeina, lentelė ištuštinta", async () => {
+  /**
+   * ⚠️ DESTRUKTYVUS ŽINGSNIS ĮVYKDAVO PIRMAS, IR NAUDOS NEBŪDAVO (#233 raundas 4, P1).
+   *
+   * Diegimas su daugiau nei `HISTORICAL_SOFT_LIMIT` istorinių raktų, kur
+   * KIEKVIENAS dar turi eilučių, startuoja normaliai: 7.4c riba atmeta tik
+   * nebenaudojamus raktus. Įjungus `PRIVACY_MODE` seka buvo tokia:
+   *
+   *   1. purge ištrina visas eilutes - negrįžtamai;
+   *   2. kiekio riba dabar mato VISUS istorinius raktus kaip nebereikalingus;
+   *   3. riba meta, startas krenta.
+   *
+   * Rezultatas: duomenys prarasti, nauda negauta, ir operatorius dar turi
+   * pertvarkyti raktų žiedą, kad sistema pakiltų. Skirtumas nuo eilinio startup
+   * gedimo tas, kad negrįžtamas veiksmas jau įvykęs - todėl P1, ne P2.
+   *
+   * Dabar riba vertinama PRIEŠ purge, pagal tikrą DB būseną.
+   */
+  const auditStore = require("../utils/auditStore");
+  const pgKelias = require.resolve("pg");
+  const originalus = require.cache[pgKelias];
+
+  /** ⚠️ 11 istorinių raktų, ir KIEKVIENAS turi eilučių - riba neturi kirsti. */
+  const istoriniai = Array.from({ length: HISTORICAL_SOFT_LIMIT + 1 }, (_, i) => `H${i}`);
+  const perDaug = istoriniai.map((id) => `${id}:${AKTYVUS}`).join(",");
+
+  try {
+    await auditStore.shutdown();
+
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: [...istoriniai, "AKTYVUS"] }),
+    };
+
+    /** Prielaida: be `PRIVACY_MODE` toks diegimas kyla normaliai. */
+    await auditStore.init({
+      AUDIT_BACKEND: "postgres",
+      DATABASE_URL: "postgres://netikras/netikra",
+      AUDIT_ID_SALT: AKTYVUS,
+      AUDIT_ID_SALT_ID: "AKTYVUS",
+      AUDIT_ID_SALT_PREVIOUS: perDaug,
+    });
+    assert.equal(auditStore.backend(), "postgres", "prielaida: 11 naudojamų raktų starto nestabdo");
+
+    /** ── Tas pats diegimas su `PRIVACY_MODE=true` ────────────────────────── */
+    await auditStore.shutdown();
+
+    let istrinta = 0;
+    let istustinta = false;
+    const suSkaitikliu = netikrasPg({ generacijos: [...istoriniai, "AKTYVUS"] });
+    const OriginaliPool = suSkaitikliu.Pool;
+
+    /**
+     * ⚠️ NETIKRAS POOL'AS PRIVALO ATSPINDĖTI PURGE POVEIKĮ.
+     *
+     * Pirmoji šio testo versija po `DELETE` toliau grąžindavo tą patį generacijų
+     * sąrašą, tad mutacija (riba vėl po purge) testo NEPAGAVO: patikra matydavo
+     * 11 „naudojamų" raktų ir praeidavo. Būtent tuštėjanti lentelė ir yra
+     * radinio esmė - be jos testas tikrina ne tai, ką teigia.
+     */
+    suSkaitikliu.Pool = class extends OriginaliPool {
+      async query(sql, params) {
+        const tekstas = String(sql);
+
+        if (/DELETE FROM audit_log/i.test(tekstas)) {
+          istrinta += 1;
+          istustinta = true;
+          return { rows: [], rowCount: 0 };
+        }
+
+        if (istustinta && /WITH RECURSIVE gen/.test(tekstas)) return { rows: [] };
+
+        return super.query(sql, params);
+      }
+    };
+
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: suSkaitikliu,
+    };
+
+    await auditStore.init({
+      AUDIT_BACKEND: "postgres",
+      DATABASE_URL: "postgres://netikras/netikra",
+      AUDIT_ID_SALT: AKTYVUS,
+      AUDIT_ID_SALT_ID: "AKTYVUS",
+      AUDIT_ID_SALT_PREVIOUS: perDaug,
+      PRIVACY_MODE: "true",
+    });
+
+    assert.equal(auditStore.backend(), "postgres", "startas PRIVALO praeiti - kitaip trynimas be naudos");
+    assert.ok(istrinta > 0, "purge privalo būti įvykdytas");
+  } finally {
+    if (originalus) require.cache[pgKelias] = originalus;
+    else delete require.cache[pgKelias];
+    await auditStore.shutdown();
+  }
+});
