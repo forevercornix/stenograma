@@ -2569,6 +2569,10 @@ Job store, sesijų ir authentication pakeitimų.
 
 Tiesioginis `docs/deletion-guarantees.md` 2 skyriaus apribojimo pašalinimas.
 
+⚠️ **TAI MIGRACIJA, NE NAUJA SISTEMA.** `backend/utils/deletionTombstones.js` jau
+egzistuoja: in-memory `Map` (`:46-52`), sinchroninis `isDeleted()` (`:168-180`) ir
+lokalus `setInterval` valymas (`:207-213`). 7.5a perkelia tai į PostgreSQL.
+
 Šis etapas sukuria **vienintelį persistentinį job ištrynimo tombstone autoritetą**,
 kurį vėliau naudoja ir 7.4e audito ištrynimo galutinumo barjeras. **7.4e NEKURIA
 atskiros audito tombstone lentelės.**
@@ -2578,6 +2582,11 @@ atskiros audito tombstone lentelės.**
 - Barjeras aktyvus nuo `deletion_pending`, ne tik nuo `deleted`.
 - `deleted` — terminali būsena; vėlyvas `deletion_failed` jos neperrašo.
 - Tombstone retencija: viena formulė (žr. žemiau), ne „arba".
+- `reason` allowlist: `user_request`, `retention_policy`, `operator_cleanup`.
+- Lygiagretus `DELETE`: `deletion_pending` → HTTP **202**, `deleted` → HTTP **204**.
+  Jokio papildomo I/O.
+- Be `DATABASE_URL` `deletionTombstones` grįžta į atmintinį `Map` — bet žr.
+  „Fallback ir garantijos apimtis" žemiau: tai keičia tai, ką galima teigti dokuose.
 - ⚠️ **`revivalHorizonsMs()` NEEGZISTUOJA** — `queues/config.js` šiandien
   eksportuoja tik `QUEUE_NAMES`, `DEFAULT_JOB_OPTIONS`, `WORKER_OPTIONS` ir
   `createQueueConnection`. Ankstesnė redakcija teigė priešingai. Helperio
@@ -2591,7 +2600,7 @@ atskiros audito tombstone lentelės.**
       `status` (uždara aibė `deletion_pending | deleted | deletion_failed`);
       `marked_at` (pirmojo inicijavimo laikas);
       `updated_at` (paskutinio perėjimo laikas);
-      `reason` (kontroliuojama, allowlisted).
+      `reason` (allowlist: `user_request`, `retention_policy`, `operator_cleanup`).
 - [ ] ⚠️ **`job_id` — stabilus identifikatorius, kurį vėliau naudos 7.4e.**
       Schema negali būti raktuojama laikinu procesu ar pseudonimu. Prieš rašant
       patikrinti, kad tai tas pats identifikatorius, kurį mato audito kelias.
@@ -2641,6 +2650,39 @@ Leidžiami perėjimai:
       matomumo — būdo išvardyti neterminales žymas ir jų amžių. Be to tai ta
       pati fail-closed be išeities spraga, kurią 7.4c turėjo taisyti atskirai.
 
+### Async cutover — P0
+
+- [ ] ⚠️ **`isDeleted()` TAMPA ASYNC, IR TAI LŪŽTA TYLIAI.** DB užklausa
+      asinchroninė, o `if (tombstones.isDeleted(jobId))` su Promise visada duoda
+      `true` — Promise yra truthy. Pasekmė: **visi job'ai blokuojami ir
+      atkūrimas neveikia**, o esami testai praeina.
+- [ ] Migruoti VISUS kvietėjus su `await`: `workers/index.js:94`,
+      `queues/jobRunner.js:256`, `utils/jobStore/index.js:373`, `:529`, `:768`,
+      `:838` (`restoreRecord`), `services/restoreService.js`.
+      Sąrašas patvirtinamas paieška, ne kopijuojamas iš čia.
+- [ ] `isConfirmedDeleted()` ir kiti sinchroniniai skaitymo keliai — taip pat.
+- [ ] ⚠️ **STATINIS ZONDAS TIKRINA `await`, NE PAMINĖJIMĄ.**
+      `deletionEnforcement.test.js` šiandien ieško eilutės
+      `tombstones.isDeleted(jobId)`; pamiršus `await`, testas praeitų, o kodas
+      lūžtų. Patikra keičiama į `/await\s+tombstones\.isDeleted\(/`.
+- [ ] ⚠️ **Elgsenos testas priešinga kryptimi:** kai žymos NĖRA, job'as
+      NEPRALEIDŽIAMAS. Be jo „viskas blokuojama" praeitų kaip sėkmė.
+
+### Fallback ir garantijos apimtis
+
+- [ ] Be `DATABASE_URL` (atminties/Redis režimas) `deletionTombstones`
+      automatiškai naudoja atmintinį `Map`; procesas nelūžta.
+- [ ] ⚠️ **FALLBACK REIŠKIA, KAD GARANTIJOS NĖRA.** Atmintiniame režime žymos
+      neišgyvena restarto ir nėra bendros replikoms — t.y. tiksliai tas
+      apribojimas, kurį 7.5a šalina. Todėl `docs/deletion-guarantees.md`
+      2 skyriaus apribojimas šalinamas **sąlyginai**: garantija galioja
+      diegimams su `DATABASE_URL`, ir tai užrašoma eksplicitiškai.
+      Besąlygiškas pašalinimas būtų melagingas teiginys atminties režimui.
+- [ ] Startas atmintiniame režime garsiai įspėja, kad ištrynimo garantija
+      neveikia — kaip ir esamas retencijos įspėjimas.
+- [ ] Testas abiem režimams: su `DATABASE_URL` žyma išgyvena restartą, be jo —
+      ne, ir tai yra dokumentuotas elgesys, ne gedimas.
+
 ### Distributed single-flight
 
 - [ ] Vienam `job_id` vienu metu tik vienas procesas yra autoritetingas aktyvaus
@@ -2657,7 +2699,13 @@ Leidžiami perėjimai:
       baigiantis išoriniam I/O, antram kvietėjui koordinaciją užtikrina
       `deletion_pending` būsena, ne lock'as. Tai užrašoma eksplicitiškai.
 - [ ] Antras lygiagretus `DELETE` gauna deterministinį rezultatą pagal
-      autoritetingą būseną, o ne pradeda nepriklausomą pilną ištrynimą.
+      autoritetingą būseną: `deletion_pending` → **202**, `deleted` → **204**;
+      jokio papildomo I/O nepradedama.
+- [ ] ⚠️ **LOCK ATLEIDIMAS ĮRODOMAS, NE DEKLARUOJAMAS.** Realizacija, laikanti
+      lock'ą per visą ištrynimą vienoje ilgoje transakcijoje, praeitų paprastą
+      lenktynių testą, bet produkcijoje išsemtų pool'ą. Testas su dirbtinai
+      uždelstu išoriniu I/O įrodo, kad kitos DB operacijos ir nekonfliktuojantys
+      ištrynimai tuo metu vykdomi.
 
 ### Sąsaja su 7.4e
 
@@ -2700,6 +2748,11 @@ Leidžiami perėjimai:
 
 ### Sąsaja su 7.6
 
+- [ ] ⚠️ **ATKŪRIMAS NEGALI TRINTI AR TRUNCATE'INTI `erasure_marks`.**
+      `restoreService.js:401-415` perrašo job'us po vieną; jei atkūrimas
+      paliestų žymų lentelę, po kopijos sukurtos žymos dingtų, ir ištrinti
+      job'ai grįžtų be tombstone. Testas: žyma sukurta PO kopijos → restore →
+      žyma tebėra.
 - [ ] ⚠️ **`erasure_marks` IŠ ATSARGINIŲ KOPIJŲ NEIŠBRAUKIAMAS** — priešingai
       nei `audit_log`. 7.6 DoD reikalauja, kad ištrynimo žurnalas išliktų už
       snapshot'o ribų ir būtų sujungtas po atkūrimo; jei žymos dingtų, atkūrus
