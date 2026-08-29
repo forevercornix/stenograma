@@ -288,6 +288,30 @@ galima pamatyti turimomis priemonėmis.
   eilutės niekada nešalinamos vien dėl to, kad jų skaičius viršijo N. Startas
   įspėja `warn` lygiu, jei kintamasis nustatytas su `postgres` backend'u.
 
+### ⚠️ ATNAUJINANT Į 7.4d: PIRMAS SWEEP'AS TRINA IŠ KARTO
+
+Tai **vienintelis destruktyvus 7.4d pokytis**, ir jis įvyksta be atskiro
+patvirtinimo.
+
+Diegimas, kuriame `AUDIT_RETENTION_DAYS` buvo nustatytas tuomet, kai jis galiojo
+**tik atminčiai**, po atnaujinimo tą pačią reikšmę pritaiko `audit_log` lentelei.
+Pirmas retencijos ciklas paleidžiamas **praėjus ~5 s po starto**, tad visos
+eilutės, jau senesnės už terminą, dingsta **per kelias minutes** ir
+**negrįžtamai**.
+
+Vienintelis pranešimas produkte yra starto logas. Jo nepakanka: operatorius,
+neskaitantis starto logų, apie tai sužinos tik pastebėjęs, kad senų įrašų nebėra.
+
+**Prieš atnaujinant:**
+
+1. patikrinkite faktinę reikšmę — `AUDIT_RETENTION_DAYS` (numatyta: 30 d.);
+2. nuspręskite, ar ji tinka **persistentiniam** auditui — atmintyje ji reiškė
+   „iki restarto arba iki N dienų", DB ji reiškia tik „N dienų";
+3. jei reikia išsaugoti senesnius įrašus, pasidarykite **pilną PostgreSQL
+   kopiją** prieš atnaujinimą (`docs/backup-runbook.md`) — aplikacijos kopija
+   audito eilučių neapima;
+4. tik tada atnaujinkite.
+
 ---
 
 ## 4. Klaidingi teiginiai ir neteisingos diagnozės
