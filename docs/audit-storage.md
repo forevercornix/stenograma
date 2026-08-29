@@ -55,11 +55,28 @@ priklausyti nuo tylios pirmenybės.
 o ne paliekami `pg` skaityti iš `process.env` — kitaip konfigūracija būtų priimta
 iš vieno šaltinio, o jungtis sukurta pagal kitą.
 
-`PRIVACY_MODE=true` kartu su `AUDIT_BACKEND=postgres` taip pat nutraukia startą.
-Prašymai prieštarauja: vienas draudžia rašyti auditą, kitas reikalauja jį
-išsaugoti patvariai. Tylus leidimas duotų migruotą, sukonfigūruotą ir amžinai
-tuščią lentelę, kuri stebint atrodo kaip veikianti sistema. Pilna `PRIVACY_MODE`
-semantika lieka **[7.4d]**; čia apibrėžtas tik derinys.
+### `PRIVACY_MODE=true` su `postgres` — LEIDŽIAMAS nuo 7.4d
+
+⚠️ **Tai pakeitimas.** Iki 7.4d šis derinys **nutraukdavo startą**: tuomet jis
+neturėjo apibrėžtos semantikos, ir tylus leidimas būtų davęs migruotą,
+sukonfigūruotą, amžinai tuščią lentelę, kuri stebint atrodo kaip veikianti
+sistema.
+
+7.4d tą semantiką apibrėžia, tad prieštaravimo nebeliko:
+
+- starto metu `audit_log` **fiziškai išvalomas** (`await`inta, fail-closed);
+- kol vėliava įjungta, nauji įrašai **nepersistinami**;
+- išjungus vėliavą seni įrašai **neatsikuria**, o nauji vėl rašomi.
+
+⚠️ **Kodėl sargas pašalintas, o ne paliktas.** Su juo nebuvo **jokio palaikomo
+būdo ištrinti persistentinių audito eilučių per `PRIVACY_MODE`**: įjungus
+vėliavą procesas nepakildavo, o perjungus `AUDIT_BACKEND=memory` jis pakildavo,
+bet DB eilutės likdavo nepaliestos. Fail-fast ten saugojo ne duomenis — jis juos
+užrakindavo, priešingai nei žada in-memory kontraktas, kuris `PRIVACY_MODE` metu
+žada ištrynimą, ne nutildymą.
+
+Derinys nelieka tylus: `init()` kiekvieno starto metu rašo **garsų įspėjimą**,
+kad auditas išjungtas sąmoningai ir kad valymas negrįžtamas.
 
 ---
 
@@ -508,7 +525,7 @@ restarto jų neliks. Tai sąmoningas elgesys, ne defektas — bet grįžtant ver
 | Etapas | Kas |
 |---|---|
 | **[7.4c]** | ✅ įgyvendinta — žr. §13–§15 |
-| **[7.4d]** | persistentinė retencija, pilna `PRIVACY_MODE` logika, readiness |
+| **[7.4d]** | ✅ įgyvendinta — retencija (§9), `PRIVACY_MODE` (§1, §9) |
 | **[7.5b]** | `POST_HOC_IVYKIAI` perrikiavimas — žr. §12 |
 
 ### 12. Kodėl post-hoc įvykiai NETAMPA fail-closed 7.4b metu

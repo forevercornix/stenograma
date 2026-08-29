@@ -598,60 +598,77 @@ test("POOL: `shutdown()` uždaro jungtis - kabančių sesijų nelieka", { skip: 
   }
 });
 
-test("STARTAS: postgres režimas ĮSPĖJA apie neveikiančią retenciją", { skip: SKIP }, async () => {
+test("STARTAS: retencijos įspėjimas kyla TIK kai `AUDIT_MAX_ENTRIES` nustatytas", { skip: SKIP }, async () => {
   /**
-   * ⚠️ TIKRINAMA, KAD ĮSPĖJIMAS REALIAI LOGINAMAS, ne tik kad konstanta egzistuoja.
+   * ⚠️ ŠIO TESTO DALYKAS PASIKEITĖ 7.4d (#213).
    *
-   * Turinį tikrina `auditStoreFields` (be DB). Čia - kad `init()` jį praleidžia
-   * pro `log.warn`, ir kad startas dėl to NENUTRŪKSTA: neribotas augimas yra
-   * matomumo, o ne blokavimo klausimas.
+   * Iki 7.4d įspėjimas kildavo KIEKVIENO postgres starto metu, nes retencija
+   * ten neveikė - tai galiojo visiems. Dabar ji veikia, ir vienintelis likęs
+   * skirtumas yra `AUDIT_MAX_ENTRIES`, kuris persistentinėms eilutėms
+   * NETAIKOMAS.
+   *
+   * Todėl tikrinamos ABI pusės: nustačius kintamąjį įspėjimas privalo kilti,
+   * o jo nenustačius - NE. Vien teigiama pusė leistų grąžinti besąlygišką
+   * įspėjimą, kuris kiekvieno starto metu praneša apie normalią būseną - toks
+   * triukšmas išmokstamas ignoruoti kartu su svarbiais pranešimais.
    */
   const auditStore = require("../utils/auditStore");
   const { RETENCIJOS_ISPEJIMAS } = auditStore;
   const { url, resursai } = await paruostiDb("audit_retencijos_ispejimas");
 
-  const pagauta = [];
   const originalus = console.warn;
+  const savedLogLevel = process.env.LOG_LEVEL;
 
   /**
    * ⚠️ `LOG_LEVEL` LAIKINAI SUŠVELNINAMAS - BE TO TESTAS MATUOJA TYLĄ.
    *
-   * Šio failo viršuje nustatyta `LOG_LEVEL = "error"`, kad PostgreSQL testų
-   * išvestis liktų skaitoma. Bet `log.warn()` tada FILTRUOJAMAS (`warn` 30 <
-   * `error` 40, žr. `utils/logger.js`), ir `console.warn` niekada nekviečiamas:
-   * pirmoji šio testo versija krito CI būtent dėl to, o ne dėl produkcinio kodo.
-   *
-   * Lygis skaitomas KIEKVIENO rašymo metu (`logger.js:92`), tad laikinas
-   * perrašymas veikia ir grąžinamas `finally` bloke.
+   * Šio failo viršuje nustatyta `LOG_LEVEL = "error"`, tad `log.warn()` būtų
+   * filtruojamas ir `console.warn` niekada nekviečiamas: pirmoji šio testo
+   * versija krito CI būtent dėl to, o ne dėl produkcinio kodo.
    */
-  const savedLogLevel = process.env.LOG_LEVEL;
   process.env.LOG_LEVEL = "warn";
-  console.warn = (...args) => pagauta.push(args.join(" "));
+
+  const paleisti = async (papildoma) => {
+    const pagauta = [];
+    console.warn = (...args) => pagauta.push(args.join(" "));
+    try {
+      await auditStore.shutdown();
+      await auditStore.init({
+        ...process.env,
+        AUDIT_BACKEND: "postgres",
+        DATABASE_URL: url,
+        AUDIT_ID_SALT: "testine-druska",
+        AUDIT_ID_SALT_ID: HASH_KEY_ID,
+        PRIVACY_MODE: "false",
+        ...papildoma,
+      });
+    } finally {
+      console.warn = originalus;
+    }
+    return pagauta;
+  };
 
   try {
-    /** Prielaida eksplicitiškai: jei lygis vėl užgoštų `warn`, testas turi kristi kaip klaida, ne praeiti. */
-    assert.ok(
-      process.env.LOG_LEVEL === "warn",
-      "prielaida: `warn` lygis įjungtas - kitaip testas tikrintų tylą"
-    );
+    assert.ok(process.env.LOG_LEVEL === "warn", "prielaida: `warn` lygis įjungtas");
 
-    await auditStore.shutdown();
-    await auditStore.init({
-      ...process.env,
-      AUDIT_BACKEND: "postgres",
-      DATABASE_URL: url,
-      AUDIT_ID_SALT: "testine-druska",
-      AUDIT_ID_SALT_ID: HASH_KEY_ID,
-      PRIVACY_MODE: "false",
-    });
-
-    console.warn = originalus;
+    /** ── Nustatytas `AUDIT_MAX_ENTRIES`: įspėjimas PRIVALO kilti ─────────── */
+    const suRiba = await paleisti({ AUDIT_MAX_ENTRIES: "1000" });
 
     assert.equal(auditStore.backend(), "postgres", "startas privalo pavykti - tai ĮSPĖJIMAS, ne klaida");
     assert.ok(
-      pagauta.some((eil) => eil.includes("AUDIT_RETENTION_DAYS") && eil.includes("7.4d")),
-      "postgres startas privalo įspėti apie neveikiančią retenciją"
+      suRiba.some((eil) => eil.includes("AUDIT_MAX_ENTRIES")),
+      "sukonfigūravus ribą, kuri persistentiškai negalioja, operatorius privalo tai sužinoti"
     );
+
+    /** ── Nenustatytas: įspėjimo BŪTI NEGALI ──────────────────────────────── */
+    const beRibos = await paleisti({ AUDIT_MAX_ENTRIES: undefined });
+
+    assert.equal(
+      beRibos.filter((eil) => eil.includes(RETENCIJOS_ISPEJIMAS)).length,
+      0,
+      "be sukonfigūruotos ribos įspėti nėra ko - tai būtų triukšmas kiekviename starte"
+    );
+
     assert.ok(RETENCIJOS_ISPEJIMAS.length > 50, "prielaida: konstanta nėra tuščia");
   } finally {
     console.warn = originalus;
@@ -1655,11 +1672,35 @@ test("PRIVACY_MODE: RAW sentinel eilutė dingsta per startą, naujų neatsiranda
     await irasytiSuLaiku(pool, { id: SENTINEL, timestamp: "2026-06-01T00:00:00.000Z" });
     assert.equal(await kiekEilučių(pool), 1, "prielaida: eilutė DB yra");
 
+    /**
+     * ⚠️ ĮSPĖJIMAS PAKEITĖ 7.4b SARGĄ, TAD JIS TIKRINAMAS (#213).
+     *
+     * Iki 7.4d šis derinys buvo starto klaida. Panaikinus sargą, vienintelis
+     * likęs signalas yra starto įspėjimas - be jo operatorius gautų tylią,
+     * sukonfigūruotą ir amžinai tuščią audito lentelę.
+     */
+    const pagauta = [];
+    const originalusWarn = console.warn;
+    const savedLevel = process.env.LOG_LEVEL;
+    process.env.LOG_LEVEL = "warn";
+    console.warn = (...args) => pagauta.push(args.join(" "));
+
     await auditStore.shutdown();
-    await auditStore.init({
-      ...pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }),
-      PRIVACY_MODE: "true",
-    });
+    try {
+      await auditStore.init({
+        ...pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }),
+        PRIVACY_MODE: "true",
+      });
+    } finally {
+      console.warn = originalusWarn;
+      if (savedLevel === undefined) delete process.env.LOG_LEVEL;
+      else process.env.LOG_LEVEL = savedLevel;
+    }
+
+    assert.ok(
+      pagauta.some((eil) => eil.includes("PRIVACY_MODE=true") && /IŠJUNGTAS|NEGRĮŽTAMA/.test(eil)),
+      `startas privalo garsiai įspėti apie sąmoningai išjungtą auditą: ${pagauta.join(" | ")}`
+    );
 
     const { rows } = await pool.query("SELECT id FROM audit_log WHERE id = $1", [SENTINEL]);
     assert.equal(rows.length, 0, "sentinel eilutė privalo būti FIZIŠKAI pašalinta");

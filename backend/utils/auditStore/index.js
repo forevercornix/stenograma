@@ -718,9 +718,21 @@ async function init(env = process.env) {
      */
     if (String(env.PRIVACY_MODE).toLowerCase() === "true") {
       const kiek = await pgStore.purgeAllForPrivacy();
+
+      /**
+       * ⚠️ ĮSPĖJAMA VISADA, NET KAI PAŠALINTA 0 EILUČIŲ.
+       *
+       * Iki 7.4d šis derinys buvo starto klaida (#211), tad jis negalėjo likti
+       * nepastebėtas. Panaikinus sargą, tyla reikštų sukonfigūruotą,
+       * persistentinę ir amžinai tuščią audito lentelę, kuri stebint atrodo kaip
+       * veikianti sistema - tiksliai tas scenarijus, dėl kurio 7.4b sargą ir
+       * įvedė. Įspėjimas kiekvieno starto metu yra jo pakaitalas.
+       */
       log.warn(
-        `PRIVACY_MODE=true - persistentinis auditas išvalytas starto metu (${kiek} eilučių). ` +
-          "Tai negrįžtama; kol vėliava įjungta, nauji įrašai nepersistinami."
+        "PRIVACY_MODE=true SU AUDIT_BACKEND=postgres - auditas IŠJUNGTAS SĄMONINGAI. " +
+          `Persistentinės eilutės išvalytos starto metu (${kiek}); tai NEGRĮŽTAMA. ` +
+          "Kol vėliava įjungta, nauji įrašai nepersistinami, o `audit_log` lieka tuščia. " +
+          "Išjungus vėliavą seni įrašai NEATSIKURIA. Žr. docs/audit-storage.md §9."
       );
     }
 
@@ -731,7 +743,19 @@ async function init(env = process.env) {
     paruosta = true;
     log.info("Audito saugykla: PostgreSQL (persistentinė, append-only)");
 
-    log.warn(RETENCIJOS_ISPEJIMAS);
+    /**
+     * ⚠️ ĮSPĖJAMA TIK TADA, KAI YRA KĄ ĮSPĖTI (#213, 7.4d).
+     *
+     * Iki 7.4d įspėjimas kildavo kiekvieno postgres starto metu, nes retencija
+     * ten NEVEIKĖ - tai galiojo visiems. Dabar ji veikia, ir vienintelis likęs
+     * skirtumas yra `AUDIT_MAX_ENTRIES`: jis persistentinėms eilutėms
+     * NETAIKOMAS. Operatoriui, kuris jo nenustatė, pranešti nėra ko, o
+     * kiekvieno starto įspėjimas apie normalią būseną yra triukšmas, kurį
+     * išmokstama ignoruoti - kartu su tais, kurie svarbūs.
+     */
+    if (env.AUDIT_MAX_ENTRIES !== undefined && env.AUDIT_MAX_ENTRIES !== "") {
+      log.warn(RETENCIJOS_ISPEJIMAS);
+    }
 
     return store;
   })().catch((error) => {
