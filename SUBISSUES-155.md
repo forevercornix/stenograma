@@ -2565,71 +2565,185 @@ Job store, sesijų ir authentication pakeitimų.
 
 ## [7.5a] Persistentės ištrynimo žymos
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.1
+**Tėvinis:** #155 · **Priklauso nuo:** 7.1 · **Blokuoja:** 7.4e, 7.6
 
 Tiesioginis `docs/deletion-guarantees.md` 2 skyriaus apribojimo pašalinimas.
 
-### DoD
+Šis etapas sukuria **vienintelį persistentinį job ištrynimo tombstone autoritetą**,
+kurį vėliau naudoja ir 7.4e audito ištrynimo galutinumo barjeras. **7.4e NEKURIA
+atskiros audito tombstone lentelės.**
 
-- [ ] `erasure_marks (job_id, marked_at, reason)`.
+### Užfiksuoti sprendimai
+
+- Barjeras aktyvus nuo `deletion_pending`, ne tik nuo `deleted`.
+- `deleted` — terminali būsena; vėlyvas `deletion_failed` jos neperrašo.
+- Tombstone retencija: viena formulė (žr. žemiau), ne „arba".
+- ⚠️ **`revivalHorizonsMs()` NEEGZISTUOJA** — `queues/config.js` šiandien
+  eksportuoja tik `QUEUE_NAMES`, `DEFAULT_JOB_OPTIONS`, `WORKER_OPTIONS` ir
+  `createQueueConnection`. Ankstesnė redakcija teigė priešingai. Helperio
+  sukūrimas įeina į 7.5a apimtį.
+
+### Schema
+
+- [ ] `erasure_marks` — persistentinis vienintelio autoriteto tombstone registras.
+      Minimalus loginis kontraktas:
+      `job_id` (PRIMARY KEY arba lygiavertė unikalumo garantija);
+      `status` (uždara aibė `deletion_pending | deleted | deletion_failed`);
+      `marked_at` (pirmojo inicijavimo laikas);
+      `updated_at` (paskutinio perėjimo laikas);
+      `reason` (kontroliuojama, allowlisted).
+- [ ] ⚠️ **`job_id` — stabilus identifikatorius, kurį vėliau naudos 7.4e.**
+      Schema negali būti raktuojama laikinu procesu ar pseudonimu. Prieš rašant
+      patikrinti, kad tai tas pats identifikatorius, kurį mato audito kelias.
+- [ ] `status` invariantas enforce'inamas DB lygiu ir testuojamas tiesioginiu SQL.
+- [ ] `marked_at` po sukūrimo nekeičiamas; progresas atnaujina tik `status`,
+      `updated_at` ir leidžiamus diagnostinius laukus.
 - [ ] ⚠️ **FK į `jobs` NĖRA.** `CASCADE` ištrintų tombstone tuo momentu, kai jis
-      tampa reikalingas vėluojančiam darbui atmesti. Testas: `jobs` eilutės
-      ištrynimas **neturi** pašalinti žymos.
-- [ ] Žyma išgyvena restartą.
-- [ ] Po restarto vėluojanti eilės žinutė ištrintam job'ui **NEkuria
-      artefaktų** — end-to-end testas.
-- [ ] ⚠️ **IŠTRYNIMO KOORDINAVIMAS TARP REPLIKŲ.** Persistentės žymos
-      NEPAKEIČIA `lifecycleService` `inFlight` koordinavimo, kuris yra procesui
-      lokalus. Du `DELETE` skirtingose replikose abu įvykdytų ištrynimą ir
-      lenktyniautų dėl `pending → deleted` / `pending → failed` įrašymo:
-      kvietėjai gautų prieštaringus rezultatus, o vėlesnis nesėkmės įrašas
-      perrašytų patvirtintą ištrynimą.
+      tampa reikalingas. Testas: `jobs` eilutės ištrynimas **neturi** pašalinti
+      žymos.
+- [ ] ⚠️ **`reason` yra allowlist, ne laisvas laukas.** Ta pati klasė kaip 7.4b
+      `meta`: tikrinama RAŠANT, nežinoma reikšmė atmetama. Į `erasure_marks`
+      nepatenka transkripcija, promptai, audio turinys ar neapdorotos exception
+      žinutės. RAW testas su sentinel tekstu.
+- [ ] Nauja migracija; jau pritaikytos neredaguojamos.
+- [ ] Indeksai tik ten, kur yra realus prieigos kelias.
 
-      Reikia paskirstyto single-flight (DB eilutės arba advisory lock) ir
-      sąlyginių perėjimų (`WHERE status = 'pending'`). Testas: daugiaprocesis
-      lygiagretumo scenarijus.
-- [ ] ⚠️ **NEIŠSPRĘSTOS ŽYMOS NESENSTA.** Baigtinis horizontas taikomas TIK
-      patvirtintoms `deleted` žymoms. `deletion_pending` ir `deletion_failed`
-      lieka, kol ištrynimas pavyks arba operatorius išspręs — priešingu atveju
-      žymos galiojimo pabaiga pašalintų barjerą tuo metu, kai jautrūs duomenys
-      dar laukia valymo.
-- [ ] Retencija ≥ **max(visi eilės prikėlimo horizontai) + atsarga**. Šiandien
-      ribojantis yra `removeOnFail.age` = 24 h (`queues/config.js:29`).
-- [ ] ⚠️ **RETENCIJA PRIKLAUSO NUO BŪSENOS.** `queued`/`processing` įrašai ir
-      terminaliai su `*_pending` NEŠALINAMI pagal amžių — esamos saugyklos tai
-      daro sąmoningai (`redisStore.js:175`), nes toks įrašas gali būti
-      vienintelis `storageKey` šaltinis. Besąlygiška „po TTL" taisyklė leistų
-      ištrinti gyvą job'ą arba palikti audio be savininko.
-- [ ] ⚠️ **REZULTATAS NEGALI PASIBAIGTI PIRMA UŽ JOB'Ą.** Savarankiškas
-      `job_results.expires_at` paliktų skaitomą `completed` job'ą BE
-      transkripcijos — būseną, kurią 7.5b vadina remontu reikalaujančia, ir
-      kuri skiriasi nuo memory/Redis, kur abu dingsta kartu. Testas: rezultatas
-      pasiekiamas tol, kol pasiekiamas job'as.
-- [ ] ⚠️ **ATSARGINIŲ KOPIJŲ LANGAS ĮEINA Į APATINĘ RIBĄ.** `BACKUP_RETENTION_DAYS`
-      numatytai **7 dienos**, o eilės prikėlimo horizontas ~24 h. Formulė,
-      remianti tik eilės horizontu, leistų patvirtintai ištrynimo žymai
-      pasibaigti, kol dar egzistuoja PRIEŠ ištrynimą daryta kopija. Ją atkūrus
-      nebeliktų ko sujungti, ir ištrintas job'as grįžtų — tiesiogiai
-      prieštaraujant 7.6 atkūrimo scenarijui. Riba:
-      `max(eilės horizontai, BACKUP_RETENTION_DAYS)` arba negaliojantis
-      ištrynimo žurnalas, kol pasibaigs kiekviena jį apimanti kopija.
-- [ ] ⚠️ **UŽDELSTI JOB'AI TURI TURĖTI RIBĄ.** `revivalHorizonsMs()` mato tik
-      `queues/config.js`; per-job `delay`, perduotas `enqueue` vietoje, jam
-      nematomas. Garantija „naujas mechanizmas ribą pakeičia savaime" tokiu
-      atveju netiesa. Arba įvedamas MAKSIMALUS leistinas `delay`, tikrinamas
-      įdedant, arba registras, per kurį privalo eiti visi producer'iai.
-      Šiandien nė vienas producer'is `delay` neperduoda — tad riba įvedama
-      dabar, kol nekainuoja.
-- [ ] ⚠️ **SĄRAŠAS IŠVEDAMAS, ne surašomas.** Fiksuotas masyvas reiškia, kad
-      pridėjus naują prikėlimo mechanizmą testas lieka žalias, kol kas nors
-      rankiniu būdu jį papildys — o garantija sako, kad riba pasikeičia SAVAIME.
-      `queues/config.js` eksportuoja `revivalHorizonsMs()`, ir tik jis yra
-      autoritetas.
-- [ ] ⚠️ **VIENETAI NORMALIZUOJAMI.** BullMQ `age` yra **sekundės**, o
-      `stalledInterval` — **milisekundės**. `Math.max()` ant neapdorotų reikšmių
-      parinktų klaidingą horizontą arba praleistų tikrinimą per kelias eilių
-      tvarkas. Testas lygina tik po konversijos į bendrą vienetą.
-- [ ] `docs/deletion-guarantees.md` apribojimas pašalintas, ne perrašytas.
+### Būsenų kontraktas
+
+Leidžiami perėjimai:
+
+- nėra žymos → `deletion_pending`
+- `deletion_pending` → `deleted`
+- `deletion_pending` → `deletion_failed`
+- `deletion_failed` → `deletion_pending` **tik eksplicitiniam retry**
+- `deleted` — terminali
+
+- [ ] ⚠️ **`deleted` NEGALI būti perrašyta į `deletion_failed`.** Tai pagrindinė
+      daugiaprocesio lenktynių garantija: vėliau užsibaigęs nesėkmingas bandymas
+      negali panaikinti jau patvirtinto ištrynimo.
+- [ ] Perėjimai vykdomi **sąlyginiais DB `UPDATE`** pagal esamą būseną, ne
+      „read → decide JS → unconditional update".
+- [ ] RAW SQL testas atmeta nežinomą būseną.
+- [ ] `deletion_failed → deletion_pending` leidžiamas tik eksplicitiniam retry,
+      ne atsitiktiniam lygiagrečiam kvietėjui.
+
+### Barjero semantika
+
+- [ ] `pending`, `failed`, `deleted` → job užbarjerintas naujiems jautriems
+      artefaktams. **Tik žymos nebuvimas reiškia „nėra barjero".**
+- [ ] ⚠️ **`deletion_failed` IŠLAIKO barjerą.** Nesėkmingas ištrynimas reiškia,
+      kad jautrūs duomenys dar gali egzistuoti; operacija taisoma arba
+      kartojama, o ne leidžiama kurti naujus.
+- [ ] ⚠️ **UŽSTRIGUSIOS ŽYMOS TURI TURĖTI IŠEITĮ.** Barjeras nuo `pending` plius
+      neterminalių žymų nesenėjimas reiškia, kad nuolat nepavykstantis ištrynimas
+      užrakina job'ą neribotam laikui. Reikia: (a) operatoriaus kelio žymai
+      išspręsti (retry arba dokumentuotas force-resolve su pėdsaku), ir (b)
+      matomumo — būdo išvardyti neterminales žymas ir jų amžių. Be to tai ta
+      pati fail-closed be išeities spraga, kurią 7.4c turėjo taisyti atskirai.
+
+### Distributed single-flight
+
+- [ ] Vienam `job_id` vienu metu tik vienas procesas yra autoritetingas aktyvaus
+      ištrynimo vykdytojas.
+- [ ] ⚠️ **Procesui lokalus `Map`, mutex ar `inFlight` NEPAKANKA.** Sprendimas
+      veikia tarp atskirų Node procesų, replikų ir DB pool'ų.
+- [ ] Leidžiamas row-lock arba advisory-lock modelis, bet **scope per konkretų
+      `job_id`**, ne globalus.
+- [ ] ⚠️ **Lock negali būti laikomas per nekontroliuojamą išorinį I/O** (failai,
+      S3, Redis), jei tai duotų ilgą DB transakciją. Prieš implementuojant
+      pateikiamas konkretus koordinavimo modelis: kada lock įgyjamas, kada
+      atleidžiamas.
+- [ ] ⚠️ **Lock saugo PERĖJIMĄ, žyma saugo DARBO EIGĄ.** Atleidus lock'ą prieš
+      baigiantis išoriniam I/O, antram kvietėjui koordinaciją užtikrina
+      `deletion_pending` būsena, ne lock'as. Tai užrašoma eksplicitiškai.
+- [ ] Antras lygiagretus `DELETE` gauna deterministinį rezultatą pagal
+      autoritetingą būseną, o ne pradeda nepriklausomą pilną ištrynimą.
+
+### Sąsaja su 7.4e
+
+- [ ] 7.5a pateikia **vieną autoritetingą deletion-state reader / service
+      boundary**. 7.4e neturi skaityti `erasure_marks` ad-hoc SQL skirtingose
+      vietose.
+- [ ] Turi būti įmanoma **atominiu DB keliu** nustatyti, ar `job_id`
+      užbarjerintas naujiems subjektiniams įrašams. Tai 7.4e TOCTOU reikalavimo
+      prielaida.
+- [ ] Audito write barjeras šiame issue **NEĮGYVENDINAMAS**.
+
+### Revival horizon
+
+- [ ] ⚠️ **AUTORITETAS SUKURIAMAS ČIA.** Vienas helperis/registras, išvedantis
+      visus konfigūruotus eilių prikėlimo horizontus iš faktinės queue
+      konfigūracijos (`DEFAULT_JOB_OPTIONS`, `WORKER_OPTIONS`,
+      `removeOnComplete`/`removeOnFail`, `stalledInterval`, `lockDuration`,
+      retry/backoff).
+- [ ] Testai neturi rankiniu būdu nukopijuoto horizontų sąrašo — reikšmės
+      išvedamos iš faktinės konfigūracijos.
+- [ ] ⚠️ **VIENETAI NORMALIZUOJAMI PRIEŠ `Math.max`.** BullMQ `age` yra
+      **sekundės**, `stalledInterval` — **milisekundės**. Testas įrodo konversiją.
+- [ ] ⚠️ **Per-job `delay` negali apeiti garantijos.** Arba autoritetinga
+      maksimali leistina `delay` riba, tikrinama enqueue vietoje, arba visi
+      producer'iai privalo eiti per bendrą registruotą kelią. Ne dokumentuoti —
+      testuoti. Šiandien nė vienas producer'is `delay` neperduoda, tad riba
+      įvedama dabar, kol nekainuoja.
+
+### Tombstone retencija
+
+- [ ] `deletion_pending` ir `deletion_failed` **NESENSTA** automatiškai.
+- [ ] `deleted` šalinama tik po
+      `max(maxRevivalHorizon, backupRetentionHorizon) + safetyMargin`.
+- [ ] Visi dydžiai normalizuojami į milisekundes prieš palyginimą.
+- [ ] `safetyMargin` turi vieną autoritetingą vietą; testas jos nedubliuoja.
+- [ ] ⚠️ **FAIL-SAFE:** jei kurios nors dedamosios negalima patikimai
+      apskaičiuoti, rezultatas — **žymos NEŠALINTI**, ne pasirinkti mažesnį TTL.
+- [ ] ⚠️ **Tombstone valymas įtraukiamas į ESAMĄ centralizuotą retention kelią**
+      (`retentionSweeper`), ne į atskirą timer'į — ta pati taisyklė kaip 7.4d.
+
+### Sąsaja su 7.6
+
+- [ ] ⚠️ **`erasure_marks` IŠ ATSARGINIŲ KOPIJŲ NEIŠBRAUKIAMAS** — priešingai
+      nei `audit_log`. 7.6 DoD reikalauja, kad ištrynimo žurnalas išliktų už
+      snapshot'o ribų ir būtų sujungtas po atkūrimo; jei žymos dingtų, atkūrus
+      job'ai grįžtų be tombstone. Tai užrašoma eksplicitiškai, kad 7.4f/7.6
+      backup politika jų atsitiktinai neišbrauktų kartu su auditu.
+
+### Job ir result retencijos invariantai
+
+- [ ] ⚠️ **RETENCIJA PRIKLAUSO NUO BŪSENOS.** `queued`, `processing` ir
+      terminalūs su `*_pending` pagal amžių NEŠALINAMI — toks įrašas gali būti
+      vienintelis `storageKey` šaltinis (`redisStore.js:175`).
+- [ ] `job_results` neturi nepriklausomo TTL, leidžiančio rezultatui išnykti
+      anksčiau nei parent job.
+- [ ] Testas tikrina stebimą kontraktą: kol `completed` job pasiekiamas, jo
+      rezultatas irgi pasiekiamas.
+- [ ] Parent job'ui išnykus teisėtu keliu, rezultatas nelieka orphan'u.
+
+### Crash, restart, lenktynės
+
+- [ ] Žyma išgyvena restartą; neišspręsta `pending`/`failed` būsena taip pat.
+- [ ] Po restarto vėluojanti eilės žinutė mato barjerą **PRIEŠ** materializuodama
+      naujus jautrius artefaktus — end-to-end testas.
+- [ ] Po `jobs` eilutės ištrynimo žyma fiziškai lieka RAW `erasure_marks`.
+- [ ] Deterministinis, ne tikimybinis lenktynių testas su dviem nepriklausomomis
+      jungtimis/procesais:
+      **A** — dvi replikos pradeda ištrynimą, tik viena vykdo destruktyvų
+      darbą, abi gauna suderinamą galutinį rezultatą;
+      **B** — vienas bandymas pasiekia `deleted`, lėtesnis krenta po to,
+      `deleted` išlieka;
+      **C** — procesas miršta ties `pending`, po restarto barjeras aktyvus ir
+      ištrynimą galima tęsti.
+
+### Dokumentacija
+
+- [ ] `docs/deletion-guarantees.md` 2 skyriaus apribojimas **pašalintas**, ne
+      perrašytas švelnesniais žodžiais — ir tik tada, kai persistentė žyma,
+      paskirstyta koordinacija ir restart E2E įrodyti.
+- [ ] Neteigti multi-replica ar restart garantijų, kurioms nėra testų.
+
+### Ko NEAPIMA
+
+Audito write barjero (7.4e). Optimistic locking ir konfliktų politikos (7.5b).
+7.6 atkūrimo. 7.4c/7.4d/7.4f darbų. Job store architektūros perprojektavimo,
+sesijų ir authentication pakeitimų.
 
 ---
 
