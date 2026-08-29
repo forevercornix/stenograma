@@ -165,10 +165,7 @@ async function complete(jobId, status, { completedAt = null, failureKind = null 
 
   await ensureInit();
 
-  const rezultatas = await store.transition(jobId, [TOMBSTONE_STATUS.PENDING], status, {
-    completedAt,
-    failureKind,
-  });
+  const rezultatas = await store.transition(jobId, status, { completedAt, failureKind });
 
   if (rezultatas) {
     log.info("Ištrynimo žyma užbaigta", { jobId, status });
@@ -201,9 +198,7 @@ async function retry(jobId, { actorKind = ACTOR_KIND.OPERATOR } = {}) {
 
   await ensureInit();
 
-  return store.transition(jobId, [TOMBSTONE_STATUS.FAILED], TOMBSTONE_STATUS.PENDING, {
-    actorKind,
-  });
+  return store.transition(jobId, TOMBSTONE_STATUS.PENDING, { actorKind });
 }
 
 /**
@@ -218,7 +213,8 @@ async function forceResolve(jobId, { actorKind = ACTOR_KIND.OPERATOR, completedA
 
   await ensureInit();
 
-  return store.transition(
+  /** ⚠️ `transitionOverride`, ne `transition`: mašina `failed → deleted` neleidžia. */
+  return store.transitionOverride(
     jobId,
     [TOMBSTONE_STATUS.PENDING, TOMBSTONE_STATUS.FAILED],
     TOMBSTONE_STATUS.DELETED,

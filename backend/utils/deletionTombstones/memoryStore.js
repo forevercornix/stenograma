@@ -19,7 +19,7 @@ const {
   assertReason,
   assertActorKind,
   assertFailureKind,
-  canTransition,
+  allowedSources,
 } = require("./states");
 
 /** jobId -> įrašas. Vienas procesas, viena kopija. */
@@ -70,7 +70,25 @@ async function mark(jobId, { reason, actorKind = null, now = Date.now() } = {}) 
  * perėjimas neleidžiamas - kvietėjas tada perskaito autoritetingą būseną ir ją
  * grąžina, o NE perrašo.
  */
-async function transition(
+async function transition(jobId, to, options = {}) {
+  return _perkelti(jobId, allowedSources(to), to, options);
+}
+
+/**
+ * ⚠️ SĄMONINGAS LENTELĖS APĖJIMAS - TIK OPERATORIAUS IŠEIČIAI.
+ *
+ * `forceResolve` veda `deletion_failed → deleted`, ko įprasta mašina neleidžia:
+ * ten retry privalo eiti per `pending`. Tai ne spraga, o dokumentuotas rankinis
+ * sprendimas, kurį `erasureMarkService` fiksuoja auditu PRIEŠ veiksmą.
+ *
+ * Atskiras vardas, o ne argumentas: apėjimas privalo būti matomas kvietimo
+ * vietoje ir peržiūroje, ne paslėptas parametre.
+ */
+async function transitionOverride(jobId, from, to, options = {}) {
+  return _perkelti(jobId, from, to, options);
+}
+
+async function _perkelti(
   jobId,
   from,
   to,
@@ -79,7 +97,6 @@ async function transition(
   const irasas = zymos.get(jobId);
   if (!irasas) return null;
   if (!from.includes(irasas.status)) return null;
-  if (!canTransition(irasas.status, to)) return null;
 
   irasas.status = to;
   irasas.updatedAt = now;
@@ -160,6 +177,7 @@ async function close() {
 module.exports = {
   mark,
   transition,
+  transitionOverride,
   get,
   listUnresolved,
   purgeExpired,

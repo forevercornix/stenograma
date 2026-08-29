@@ -205,12 +205,12 @@ test("PERĖJIMAI: `deleted` NEPERRAŠOMA vėlyvos nesėkmės", { skip: SKIP }, a
     const store = createErasureMarkStore(pool);
 
     await store.mark("j", { reason: REASON });
-    await store.transition("j", [S.PENDING], S.DELETED);
+    await store.transition("j", S.DELETED);
 
     const pries = await store.get("j");
 
     /** Vėluojantis nesėkmingas bandymas - tiksliai tas scenarijus, kurio bijom. */
-    const rezultatas = await store.transition("j", [S.PENDING], S.FAILED);
+    const rezultatas = await store.transition("j", S.FAILED);
     assert.equal(rezultatas, null, "perėjimas privalo NEĮVYKTI");
 
     const po = await store.get("j");
@@ -243,7 +243,7 @@ test("PERĖJIMAI: `mark()` NEPRIKELIA jau `deleted` žymos", { skip: SKIP }, asy
     const store = createErasureMarkStore(pool);
 
     const pirma = await store.mark("j", { reason: REASON, actorKind: "user" });
-    await store.transition("j", [S.PENDING], S.DELETED);
+    await store.transition("j", S.DELETED);
 
     const antra = await store.mark("j", { reason: states.ERASURE_REASON.OPERATOR_CLEANUP });
 
@@ -276,8 +276,8 @@ test("LENKTYNĖS A: dvi instancijos, DU POOL'AI - tik viena laimi claim'ą", { s
     await Promise.all([a.mark("j", { reason: REASON }), b.mark("j", { reason: REASON })]);
 
     const [ra, rb] = await Promise.all([
-      a.transition("j", [S.PENDING], S.DELETED),
-      b.transition("j", [S.PENDING], S.DELETED),
+      a.transition("j", S.DELETED),
+      b.transition("j", S.DELETED),
     ]);
 
     const laimeje = [ra, rb].filter(Boolean);
@@ -303,9 +303,9 @@ test("LENKTYNĖS B: lėtesnis bandymas krenta PO `deleted` - `deleted` išlieka"
     const letas = createErasureMarkStore(antras);
 
     await greitas.mark("j", { reason: REASON });
-    await greitas.transition("j", [S.PENDING], S.DELETED);
+    await greitas.transition("j", S.DELETED);
 
-    const veluojantis = await letas.transition("j", [S.PENDING], S.FAILED, {
+    const veluojantis = await letas.transition("j", S.FAILED, {
       failureKind: "retryable",
     });
 
@@ -336,7 +336,7 @@ test("LENKTYNĖS C: kritimas ties `pending` - barjeras išgyvena, retry tęsia",
     assert.equal((await naujas.get("j")).status, S.PENDING);
 
     /** Jokio užstrigusio lock'o: kitas procesas gali tęsti iš karto. */
-    const uzbaigta = await naujas.transition("j", [S.PENDING], S.DELETED);
+    const uzbaigta = await naujas.transition("j", S.DELETED);
     assert.ok(uzbaigta, "retry privalo galėti užbaigti");
   } finally {
     await resursai.isvalyti();
@@ -372,7 +372,7 @@ test("LOCK'AS: NELAIKOMAS per išorinį I/O - kitas darbas vyksta tuo metu", { s
 
     const darbas = (async () => {
       await isorinisIO; // „failų / S3 / Redis trynimas"
-      return store.transition("j", [S.PENDING], S.DELETED);
+      return store.transition("j", S.DELETED);
     })();
 
     /** Kol „I/O" kabo, lock'o niekas nelaiko. */
@@ -503,7 +503,7 @@ test("RESTORE: žyma, sukurta PO kopijos, atkūrimo NEPALIEČIAMA", { skip: SKIP
     /** Žyma atsiranda PO to, kai kopija jau padaryta. */
     const store = createErasureMarkStore(pool);
     await store.mark(jobId, { reason: REASON });
-    await store.transition(jobId, [S.PENDING], S.DELETED);
+    await store.transition(jobId, S.DELETED);
 
     /** Atkūrimas: job'as perrašomas iš „kopijos". */
     await pool.query(

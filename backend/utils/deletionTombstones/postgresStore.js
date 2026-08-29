@@ -30,7 +30,13 @@
  * raktus, o lenktynių apsauga tyliai išnyktų.
  */
 
-const { TOMBSTONE_STATUS, assertReason, assertActorKind, assertFailureKind } = require("./states");
+const {
+  TOMBSTONE_STATUS,
+  assertReason,
+  assertActorKind,
+  assertFailureKind,
+  allowedSources,
+} = require("./states");
 
 /**
  * Advisory lock'ų erdvė. Bet koks fiksuotas int32; svarbu, kad jis būtų
@@ -142,7 +148,16 @@ function createErasureMarkStore(pool) {
    * runtime `if`-e, tad jos negalima apeiti nei kitu kvietėju, nei kita
    * replika. Grąžina `null`, kai perėjimas neleidžiamas iš dabartinės būsenos.
    */
-  async function transition(
+  async function transition(jobId, to, options = {}) {
+    return _perkelti(jobId, allowedSources(to), to, options);
+  }
+
+  /** Sąmoningas lentelės apėjimas - tik operatoriaus išeičiai. Žr. `memoryStore`. */
+  async function transitionOverride(jobId, from, to, options = {}) {
+    return _perkelti(jobId, from, to, options);
+  }
+
+  async function _perkelti(
     jobId,
     from,
     to,
@@ -316,6 +331,7 @@ function createErasureMarkStore(pool) {
   return {
     mark,
     transition,
+    transitionOverride,
     get,
     isBarred,
     assertNotBarred,

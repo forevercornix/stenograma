@@ -116,9 +116,26 @@ function assertFailureKind(kind) {
   return FAILURE_KINDS.includes(kind) ? kind : null;
 }
 
-/** Ar perėjimas leidžiamas iš duotos būsenos? Naudoja atminties backend'as. */
+/** Ar perėjimas leidžiamas iš duotos būsenos? */
 function canTransition(from, to) {
   return (ALLOWED_TRANSITIONS[from] || []).includes(to);
+}
+
+/**
+ * ⚠️ `from` SĄRAŠAS IŠVEDAMAS IŠ LENTELĖS, NE PADUODAMAS KVIETĖJO (#183).
+ *
+ * Pirmoji realizacija jį priiminėjo argumentu, ir tai davė DVI nepriklausomas
+ * tiesas: atminties backend'as papildomai tikrino `canTransition()`, o postgres
+ * rėmėsi TIK argumentu. Praplėtus argumentą (`[PENDING]` → `[PENDING, FAILED]`)
+ * postgres būtų leidęs `failed → deleted`, atmintis - ne, ir nė vienas be DB
+ * paleidžiamas testas to nepagautų.
+ *
+ * Dabar autoritetas vienas: kvietėjas sako TIK „į kurią būseną", o leistini
+ * šaltiniai ateina iš `ALLOWED_TRANSITIONS`. Praplėtus lentelę, pasikeičia abu
+ * backend'ai vienu metu, ir tai mato būsenų matricos testas.
+ */
+function allowedSources(to) {
+  return STATUSES.filter((from) => canTransition(from, to));
 }
 
 module.exports = {
@@ -134,4 +151,5 @@ module.exports = {
   assertActorKind,
   assertFailureKind,
   canTransition,
+  allowedSources,
 };
