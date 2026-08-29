@@ -29,6 +29,25 @@ kategorijų sąrašu, o **jobas paliekamas**, kad užklausą būtų galima pakar
 ✅ Naujas darbas tuo pačiu ID nebus pradėtas.
 ✅ Pakartotinis ištrynimas nėra klaida ir duoda tą pačią galutinę būseną.
 
+### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su `DATABASE_URL`** (nuo [7.5a])
+
+Iki 7.5a žymos gyveno tik proceso atmintyje, ir tai buvo įrašyta 2 skyriuje kaip
+apribojimas. Nuo 7.5a jos saugomos `erasure_marks` lentelėje, tad:
+
+✅ žyma **išgyvena restartą** – po jo vėluojanti eilės žinutė ištrintam jobui
+   artefaktų nesukurs;
+✅ žyma **bendra visoms replikoms** – barjeras galioja visame diegime, ne viename
+   procese;
+✅ barjeras aktyvus nuo **pirmojo ištrynimo žingsnio** (`deletion_pending`), ne tik
+   po patvirtinto ištrynimo, ir **nepavykęs** ištrynimas jo **nenuima**;
+✅ žyma **neišnyksta anksčiau**, nei job'as nebegali būti prikeltas: terminas
+   išvedamas iš faktinių eilės prikėlimo horizontų ir kopijų retencijos, ne
+   parenkamas.
+
+⚠️ **Ši garantija galioja TIK ten, kur nustatytas `DATABASE_URL`.** Be jo sistema
+sąmoningai grįžta į atmintinį režimą – žr. 2 skyrių. Startas tokiu atveju garsiai
+įspėja.
+
 ---
 
 ## 2. Ko ištrynimas NEGARANTUOJA
@@ -40,8 +59,14 @@ auditoriui.
 jis gali spėti iškviesti išorinį tiekėją arba parašyti laikiną failą. Rezultatas
 į jobą nepateks, bet tarpiniai pėdsakai gali likti, kol juos surinks retencija.
 
-⚠️ **Ištrynimo žymos neišgyvena restarto.** Jos gyvena tik atmintyje. Po
-restarto vėluojanti eilės žinutė ištrintam jobui vėl galėtų kurti artefaktus.
+⚠️ **Ištrynimo žymos neišgyvena restarto – BE `DATABASE_URL`.** Atmintiniame
+režime jos gyvena tik proceso atmintyje ir nėra bendros replikoms: po restarto
+vėluojanti eilės žinutė ištrintam jobui vėl galėtų kurti artefaktus.
+
+Su `DATABASE_URL` šio apribojimo **nebėra** (žr. 1 skyrių, [7.5a]). Apribojimas
+paliktas **sąlyginis**, o ne pašalintas: besąlygiškas pašalinimas būtų melagingas
+teiginys atmintiniam režimui, kuris tebėra palaikomas ir numatytasis desktop
+diegime.
 
 ⚠️ **Laikini failai (`upload_temp`, `conversion_temp`) dar neskenuojami.** Jie
 turi išnykti patys, bet po kritimo gali „pakibti" iki retencijos ciklo.

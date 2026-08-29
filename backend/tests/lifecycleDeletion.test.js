@@ -40,7 +40,7 @@ test("ŽYMA: uždedama PRIEŠ šalinimą", async () => {
 
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
-  assert.equal(tombstones.isDeleted(job.id), true, "žyma turi likti po ištrynimo");
+  assert.equal(await tombstones.isDeleted(job.id), true, "žyma turi likti po ištrynimo");
 });
 
 test("ŽYMA: išgyvena jobo įrašo pašalinimą", async () => {
@@ -54,7 +54,7 @@ test("ŽYMA: išgyvena jobo įrašo pašalinimą", async () => {
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
   assert.equal(await jobStore.system.get(job.id), null, "jobo įrašo neturi likti");
-  assert.equal(tombstones.isDeleted(job.id), true, "bet žyma turi išlikti");
+  assert.equal(await tombstones.isDeleted(job.id), true, "bet žyma turi išlikti");
 });
 
 test("IDEMPOTENTIŠKUMAS: pakartotinis ištrynimas NĖRA klaida", async () => {
@@ -108,7 +108,22 @@ test("IDEMPOTENTIŠKUMAS: pirmojo ištrynimo laikas NEPERRAŠOMAS", async () => 
 
   assert.equal(second.requestedAt, first.requestedAt, "pakartotinis ištrynimas neturi pastumti laiko");
   assert.equal(second.completedAt, first.completedAt, "faktinio ištrynimo laikas nekinta");
-  assert.equal(second.actor, "pirmas", "aktorius lieka tas, kuris realiai ištrynė");
+
+  /**
+   * ⚠️ IDEMPOTENTIŠKUMO KETINIMAS NEPAKITO, PAKITO GRANULIARUMAS (#155, 7.5a).
+   *
+   * Iki 7.5a čia buvo tikrinama, kad `second.actor === "pirmas"` - t. y. kad
+   * antras kvietėjas nepakeičia pirmojo įrašo. Nuo 7.5a `erasure_marks` saugo
+   * tik aktoriaus KATEGORIJĄ: lentelė pergyvena jobą ir nėra išbraukiama iš
+   * kopijų, tad plikas identifikatorius joje taptų asmens duomenimis lentelėje,
+   * kurios paskirtis - įrodyti, kad asmens duomenys pašalinti.
+   *
+   * Tikslus aktorius NEDINGO - jis yra `LIFECYCLE_DELETION` audito kvite; tai
+   * tikrina atskiras testas šiame pat faile („AUDITAS: ... aktorius").
+   */
+  assert.equal(second.actor, null, "identifikatoriaus žymoje NETURI būti");
+  assert.equal(second.actorKind, first.actorKind, "kategorija lieka pirmojo kvietėjo");
+  assert.equal(second.actorKind, "user", "savininko kelias yra `user`");
 });
 
 test("REZULTATAS: stabilus formatas VISIEMS atvejams", async () => {
@@ -223,29 +238,84 @@ test("NEEGZISTUOJANTIS jobas: žyma vis tiek uždedama", async () => {
   const result = await lifecycleService.deleteJobArtefacts(null, "job_kurio_nebera", { actor: "x" });
 
   assert.equal(result.complete, true, "trinti nebuvo ko – tai ne klaida");
-  assert.equal(tombstones.isDeleted("job_kurio_nebera"), true, "žyma turi būti uždėta");
+  assert.equal(await tombstones.isDeleted("job_kurio_nebera"), true, "žyma turi būti uždėta");
 });
 
-test("ŽYMA: pasibaigusi nebegalioja ir išvaloma", async () => {
+test("ŽYMA: `pending` ir `failed` NESENSTA - jokios TTL išeities nėra", async () => {
+  /**
+   * ⚠️ APVERSTAS KONTRAKTAS (#155, 7.5a / #183).
+   *
+   * Iki 7.5a žyma turėdavo `expiresAt`, ir pasibaigusi ji NUSTODAVO blokuoti.
+   * Tai reiškė, kad nuolat nepavykstantis ištrynimas pats save „išspręsdavo":
+   * praėjus TTL barjeras dingdavo, o jautrūs duomenys, dėl kurių jis ir buvo
+   * uždėtas, galėjo tebeegzistuoti.
+   *
+   * Nuo 7.5a neterminalės žymos nesensta NIEKADA. Išeitis iš užstrigusios
+   * būsenos yra eksplicitinė (`retry` arba auditu fiksuotas `forceResolve`), ne
+   * laikrodis.
+   */
   await tombstones._clearForTests();
 
-  tombstones.mark("job_senas", { actor: "x", env: { DELETION_TOMBSTONE_TTL_HOURS: "0.0000003" } });
-  await new Promise((r) => setTimeout(r, 20));
+  await tombstones.mark("job_pending", { reason: "user_request" });
+  await tombstones.mark("job_failed", { reason: "user_request" });
+  await tombstones.complete("job_failed", tombstones.TOMBSTONE_STATUS.FAILED);
 
-  assert.equal(tombstones.isDeleted("job_senas"), false, "pasibaigusi žyma nebegalioja");
+  /** Riba ateityje: net „viską, kas senesnio nei rytoj" valymas jų neliečia. */
+  const rytoj = Date.now() + 24 * 60 * 60 * 1000;
+  const { removed } = await tombstones.purgeExpired(rytoj, {});
+
+  assert.equal(removed, 0, "neterminalės žymos NEŠALINAMOS jokiu terminu");
+  assert.equal(await tombstones.isDeleted("job_pending"), true, "`pending` barjeras lieka");
+  assert.equal(await tombstones.isDeleted("job_failed"), true, "`failed` barjeras lieka");
 });
 
-test("ŽYMA: sweep pašalina pasibaigusias, palieka galiojančias", async () => {
+test("RETENCIJA: šalinamos TIK `deleted` žymos, ir tik už termino ribos", async () => {
   await tombstones._clearForTests();
 
-  tombstones.mark("job_senas", { env: { DELETION_TOMBSTONE_TTL_HOURS: "0.0000003" } });
-  tombstones.mark("job_naujas");
+  await tombstones.mark("job_istrintas", { reason: "user_request" });
+  await tombstones.complete("job_istrintas", tombstones.TOMBSTONE_STATUS.DELETED);
+  await tombstones.mark("job_naujas", { reason: "user_request" });
 
-  await new Promise((r) => setTimeout(r, 20));
-  const removed = tombstones.sweepExpired();
+  /** Dabartis: terminas dar nepraėjęs nė vienai žymai. */
+  const dabar = await tombstones.purgeExpired(Date.now(), {});
+  assert.equal(dabar.removed, 0, "šviežios `deleted` žymos dar saugo prikėlimo horizontą");
 
-  assert.equal(removed, 1);
-  assert.equal(tombstones.isDeleted("job_naujas"), true, "galiojanti žyma turi likti");
+  /** Praėjus terminui + atsargai - terminalė dingsta, neterminalė lieka. */
+  const veliau = Date.now() + tombstones.retentionMs({}) + 1000;
+  const { removed } = await tombstones.purgeExpired(veliau, {});
+
+  assert.equal(removed, 1, "pašalinama tik `deleted`");
+  assert.equal(await tombstones.isDeleted("job_naujas"), true, "`pending` lieka nepaliesta");
+  assert.equal(await tombstones.isDeleted("job_istrintas"), false, "terminalė po termino išnyksta");
+});
+
+test("RETENCIJA: FAIL-SAFE - neapskaičiavus horizonto žymos NEŠALINAMOS", async () => {
+  /**
+   * ⚠️ ABEJOJANT - NETRINAM. Mažesnio TTL pasirinkimas reikštų, kad neaiškioje
+   * situacijoje šalinam BARJERĄ, t. y. renkamės blogiausią įmanomą pusę.
+   */
+  await tombstones._clearForTests();
+
+  await tombstones.mark("job_x", { reason: "user_request" });
+  await tombstones.complete("job_x", tombstones.TOMBSTONE_STATUS.DELETED);
+
+  /**
+   * `QUEUE_TTL_SECONDS` šiukšlė → prikėlimo horizonto apskaičiuoti neįmanoma.
+   *
+   * ⚠️ Pastaba, kuri saugo šio testo prasmę: `BACKUP_RETENTION_DAYS` čia
+   * NETIKTŲ - `backupPolicy.retentionDays()` neteisingą reikšmę pakeičia
+   * numatytąja (7 d.), tad skaičiavimas liktų sėkmingas ir fail-safe šaka
+   * nebūtų pasiekta. Testas turi pataikyti į tikrai neapskaičiuojamą dedamąją.
+   */
+  const bloga = { QUEUE_TTL_SECONDS: "nežinia" };
+
+  assert.equal(tombstones.retentionMs(bloga), null, "neapskaičiuojamas terminas duoda `null`");
+
+  const { removed, skipped } = await tombstones.purgeExpired(Date.now() + 10 ** 12, bloga);
+
+  assert.equal(skipped, true, "valymas praleidžiamas, o ne vykdomas su spėjimu");
+  assert.equal(removed, 0);
+  assert.equal(await tombstones.isDeleted("job_x"), true, "žyma privalo likti");
 });
 
 test("STRUKTŪRA: abu DELETE maršrutai kviečia TĄ PATĮ servisą", () => {
@@ -309,11 +379,11 @@ test("RETRY: po DALINIO ištrynimo pakartojimas REALIAI kviečia trynimą", asyn
   const jobId = "job_dalinis";
 
   // Imituojam pirmą bandymą, kuris baigėsi nesėkme.
-  tombstones.mark(jobId, { actor: "sysadmin" });
-  tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.FAILED);
+  await tombstones.mark(jobId, { reason: "user_request" });
+  await tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.FAILED);
 
-  assert.equal(tombstones.isDeleted(jobId), true, "žyma turi likti - artefaktų kurti negalima");
-  assert.equal(tombstones.isConfirmedDeleted(jobId), false, "bet ištrynimas NEPATVIRTINTAS");
+  assert.equal(await tombstones.isDeleted(jobId), true, "žyma turi likti - artefaktų kurti negalima");
+  assert.equal(await tombstones.isConfirmedDeleted(jobId), false, "bet ištrynimas NEPATVIRTINTAS");
 
   // Antras kvietimas NETURI trumpinti kelio.
   const job = await createJob();
@@ -330,10 +400,10 @@ test("RETRY: `pending` žyma blokuoja artefaktų kūrimą, bet leidžia kartoti"
    */
   await tombstones._clearForTests();
 
-  tombstones.mark("job_vykdomas", { actor: "x" });
+  await tombstones.mark("job_vykdomas", { reason: "user_request" });
 
-  assert.equal(tombstones.isDeleted("job_vykdomas"), true, "kurti negalima");
-  assert.equal(tombstones.isConfirmedDeleted("job_vykdomas"), false, "trumpinti kelio negalima");
+  assert.equal(await tombstones.isDeleted("job_vykdomas"), true, "kurti negalima");
+  assert.equal(await tombstones.isConfirmedDeleted("job_vykdomas"), false, "trumpinti kelio negalima");
 });
 
 test("LYGIAGRETUMAS: antras kvietimas LAUKIA pirmojo, o ne grąžina sėkmę iš karto", async () => {
@@ -413,15 +483,17 @@ test("LAIKAI: `completedAt` yra `null`, kol ištrynimas nepatvirtintas", async (
    */
   await tombstones._clearForTests();
 
-  const marker = tombstones.mark("job_x", { actor: "x" });
+  const marker = await tombstones.mark("job_x", { reason: "user_request" });
   assert.equal(marker.completedAt, null, "vos pažymėjus - dar nieko nepašalinta");
   assert.ok(marker.requestedAt, "bet užklausos laikas jau yra");
 
-  tombstones.complete("job_x", tombstones.TOMBSTONE_STATUS.FAILED);
-  assert.equal(tombstones.get("job_x").completedAt, null, "nesėkmė NETURI ištrynimo laiko");
+  await tombstones.complete("job_x", tombstones.TOMBSTONE_STATUS.FAILED);
+  assert.equal((await tombstones.get("job_x")).completedAt, null, "nesėkmė NETURI ištrynimo laiko");
 
-  tombstones.complete("job_x", tombstones.TOMBSTONE_STATUS.DELETED);
-  assert.ok(tombstones.get("job_x").completedAt, "tik sėkmė duoda faktinį laiką");
+  /** ⚠️ Nuo 7.5a užbaigti galima tik per eksplicitinį retry (žr. atskirą testą). */
+  await tombstones.retry("job_x");
+  await tombstones.complete("job_x", tombstones.TOMBSTONE_STATUS.DELETED);
+  assert.ok((await tombstones.get("job_x")).completedAt, "tik sėkmė duoda faktinį laiką");
 });
 
 test("LAIKAI: sėkmingas ištrynimas turi IR requestedAt, IR completedAt", async () => {
@@ -538,31 +610,50 @@ test("ŽYMA: `deleted` yra GALUTINĖ - jos negalima atšaukti", async () => {
   await tombstones._clearForTests();
   const S = tombstones.TOMBSTONE_STATUS;
 
-  tombstones.mark("job_galutinis");
-  tombstones.complete("job_galutinis", S.DELETED);
-  const completedAt = tombstones.get("job_galutinis").completedAt;
+  await tombstones.mark("job_galutinis");
+  await tombstones.complete("job_galutinis", S.DELETED);
+  const completedAt = (await tombstones.get("job_galutinis")).completedAt;
 
-  tombstones.complete("job_galutinis", S.FAILED);
+  await tombstones.complete("job_galutinis", S.FAILED);
 
-  assert.equal(tombstones.get("job_galutinis").status, S.DELETED, "būsena neturi pasikeisti");
-  assert.equal(tombstones.get("job_galutinis").completedAt, completedAt, "ištrynimo laikas neturi dingti");
+  assert.equal((await tombstones.get("job_galutinis")).status, S.DELETED, "būsena neturi pasikeisti");
+  assert.equal((await tombstones.get("job_galutinis")).completedAt, completedAt, "ištrynimo laikas neturi dingti");
 });
 
-test("ŽYMA: `failed -> deleted` LEIDŽIAMAS - tai retry kelias", async () => {
+test("ŽYMA: po nesėkmės retry PRIVALO galėti pavykti - bet TIK per eksplicitinį `pending`", async () => {
   /**
-   * Vienkryptiškumas neturi sulaužyti pakartojimo: po nepavykusio trynimo
-   * antras bandymas gali pavykti, ir žyma privalo tai atspindėti. Be šio
-   * perėjimo dalinis ištrynimas liktų amžinai neužbaigtas.
+   * ⚠️ KETINIMAS NEPAKITO, PAKITO KELIAS (#155, 7.5a / #183).
+   *
+   * Pakartojimas ir toliau privalo galėti pavykti - kitaip dalinis ištrynimas
+   * liktų amžinai neužbaigtas. Bet `failed -> deleted` uždarytas: jis leido
+   * pasiekti `deleted` BE jokio įrodymo, kad antras bandymas apskritai vyko,
+   * ir dviem skirtingiems kvietėjams - iš tos pačios būsenos.
+   *
+   * Retry dabar yra EKSPLICITINIS veiksmas, ne šalutinis `complete()` poveikis,
+   * tad kiekvienas patvirtintas ištrynimas turi prieš save `pending` būseną.
    */
   await tombstones._clearForTests();
   const S = tombstones.TOMBSTONE_STATUS;
 
-  tombstones.mark("job_kartojamas");
-  tombstones.complete("job_kartojamas", S.FAILED);
-  assert.equal(tombstones.isConfirmedDeleted("job_kartojamas"), false);
+  await tombstones.mark("job_kartojamas", { reason: "user_request" });
+  await tombstones.complete("job_kartojamas", S.FAILED);
+  assert.equal(await tombstones.isConfirmedDeleted("job_kartojamas"), false);
 
-  tombstones.complete("job_kartojamas", S.DELETED);
+  /** ⚠️ NEIGIAMA PUSĖ: tiesioginis kelias privalo būti ATMESTAS. */
+  await tombstones.complete("job_kartojamas", S.DELETED);
+  assert.equal(
+    (await tombstones.get("job_kartojamas")).status,
+    S.FAILED,
+    "`failed -> deleted` be eksplicitinio retry privalo būti atmestas"
+  );
+  assert.equal(await tombstones.isConfirmedDeleted("job_kartojamas"), false, "ir NEPATVIRTINTAS");
 
-  assert.equal(tombstones.isConfirmedDeleted("job_kartojamas"), true, "pakartojimas turi galėti pavykti");
-  assert.ok(tombstones.get("job_kartojamas").completedAt);
+  /** Teigiama pusė: per `pending` pakartojimas pavyksta. */
+  await tombstones.retry("job_kartojamas");
+  assert.equal((await tombstones.get("job_kartojamas")).status, S.PENDING, "retry grąžina į `pending`");
+
+  await tombstones.complete("job_kartojamas", S.DELETED);
+
+  assert.equal(await tombstones.isConfirmedDeleted("job_kartojamas"), true, "pakartojimas turi galėti pavykti");
+  assert.ok((await tombstones.get("job_kartojamas")).completedAt);
 });

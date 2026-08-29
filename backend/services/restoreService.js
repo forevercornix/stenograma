@@ -491,7 +491,8 @@ async function _validateContent(parsed) {
      * vertintų, viena neatstovaujama pre-būsena JAU IŠTRINTAME įraše
      * užblokuotų VISĄ kopiją, ir teisėti job'ai bei audio liktų neatkurti.
      */
-    if (job && job.id && tombstones.isDeleted(job.id)) continue;
+    /** ⚠️ `await` PRIVALOMAS - be jo VISI įrašai atrodytų ištrinti, ir kopija neatsikurtų (#183). */
+    if (job && job.id && (await tombstones.isDeleted(job.id))) continue;
 
     try {
       await jobStore.assertRestorable(job);

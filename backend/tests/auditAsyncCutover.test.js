@@ -1115,13 +1115,13 @@ test("ŽYMOS TVARKA: kritęs auditas NEPALIEKA patvirtintos ištrynimo žymos", 
   );
 
   assert.equal(
-    tombstones.isConfirmedDeleted(job.id),
+    await tombstones.isConfirmedDeleted(job.id),
     false,
     "be patvirtinto audito žyma NEGALI būti `deleted` - kitaip pėdsakas prarandamas negrįžtamai"
   );
 
   // Artefaktų kūrimas vis tiek užblokuotas: žyma lieka `deletion_pending`.
-  assert.ok(tombstones.isDeleted(job.id), "žyma privalo likti - trynimas jau vyko");
+  assert.ok(await tombstones.isDeleted(job.id), "žyma privalo likti - trynimas jau vyko");
 
   // Pakartojimas: auditas nebekrinta, tad turi būti PARAŠYTAS, o ne praleistas.
   const priesTai = (await auditLog.getAll()).length;
@@ -1133,7 +1133,7 @@ test("ŽYMOS TVARKA: kritęs auditas NEPALIEKA patvirtintos ištrynimo žymos", 
     "pakartotinis kvietimas privalo užfiksuoti prarastą įvykį, o ne grąžinti `already_deleted`"
   );
   assert.notEqual(antras.status, "already_deleted");
-  assert.equal(tombstones.isConfirmedDeleted(job.id), true, "dabar žyma patvirtinta");
+  assert.equal(await tombstones.isConfirmedDeleted(job.id), true, "dabar žyma patvirtinta");
 });
 
 test("SIAURAS CATCH: NE audito klaida NEVADINAMA `AUDIT_UNAVAILABLE`", async () => {

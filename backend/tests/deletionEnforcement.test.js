@@ -38,13 +38,62 @@ test("APSAUGA: `jobStore.update` atmeta atnaujinimą po ištrynimo", async () =>
 
   assert.ok(await jobStore.system.restart(job.id), "prieš žymą – leidžiama");
 
-  tombstones.mark(job.id, { actor: "sysadmin" });
+  await tombstones.mark(job.id, { reason: "user_request" });
 
   assert.equal(
     await markCompleted(jobStore.system, job.id),
     null,
     "po žymos atnaujinimas turi būti ATMESTAS"
   );
+});
+
+test("VYKDYMAS: be žymos jobas NEPRALEIDŽIAMAS - priešinga kryptis", async () => {
+  /**
+   * ⚠️ ŠIS TESTAS EGZISTUOJA DĖL #183 P0 (DoD proof gap 1).
+   *
+   * Nuo 7.5a `isDeleted()` asinchroninis, o `Promise` yra truthy. Pamiršus
+   * `await`, KIEKVIENAS jobas būtų praleistas kaip ištrintas: apdorojimas
+   * sustotų visiškai, o testai, tikrinantys tik „su žyma - praleidžiama",
+   * liktų žali. „Viskas blokuojama" atrodytų kaip sėkmė.
+   *
+   * Todėl tikrinamos ABI kryptys tame pačiame teste ir tuo pačiu keliu.
+   */
+  await tombstones._clearForTests();
+  await jobStore.init();
+
+  const jobRunner = require("../queues/jobRunner");
+  const vykdyta = [];
+
+  /** ⚠️ Parašas yra `(payload, jobId)` - žr. `_executeInline`. */
+  jobRunner.registerProcessor("transcription", async (payload, jobId) => {
+    vykdyta.push(jobId);
+    return { text: "ok" };
+  });
+
+  /** 1. BE ŽYMOS - procesorius PRIVALO būti pakviestas. */
+  const svarus = await jobStore.create({
+    ownerKind: "unowned",
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+  });
+
+  await jobRunner._runInline("transcription", svarus.id, { storageKey: null });
+
+  assert.deepEqual(
+    vykdyta,
+    [svarus.id],
+    "be ištrynimo žymos darbas PRIVALO būti atliktas - kitaip `await` trūkumas liktų nepastebėtas"
+  );
+
+  /** 2. SU ŽYMA - procesorius NEPRIVALO būti pakviestas. */
+  const zymetas = await jobStore.create({
+    ownerKind: "unowned",
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+  });
+
+  await tombstones.mark(zymetas.id, { reason: "user_request" });
+  await jobRunner._runInline("transcription", zymetas.id, { storageKey: null });
+
+  assert.deepEqual(vykdyta, [svarus.id], "pažymėtas jobas NEGALI būti vykdomas");
 });
 
 test("APSAUGA: apėjimui reikia SIMBOLIO, `true` neveikia", async () => {
@@ -61,7 +110,7 @@ test("APSAUGA: apėjimui reikia SIMBOLIO, `true` neveikia", async () => {
   await jobStore.init();
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
-  tombstones.mark(job.id, { actor: "sysadmin" });
+  await tombstones.mark(job.id, { reason: "user_request" });
 
   /**
    * ⚠️ Šis testas tikrina APĖJIMO MECHANIZMĄ (`allowAfterDeletion`), ne fazių
@@ -132,8 +181,8 @@ test("APSAUGA: `pending` žyma irgi blokuoja – ne tik `deleted`", async () => 
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
-  tombstones.mark(job.id, { actor: "x" }); // status = deletion_pending
-  assert.equal(tombstones.isConfirmedDeleted(job.id), false, "dar nepatvirtinta");
+  await tombstones.mark(job.id, { reason: "user_request" }); // status = deletion_pending
+  assert.equal(await tombstones.isConfirmedDeleted(job.id), false, "dar nepatvirtinta");
 
   assert.equal(
     await markCompleted(jobStore.system, job.id),
@@ -153,8 +202,8 @@ test("APSAUGA: nepavykęs ištrynimas NEATIDARO kelio atgal", async () => {
 
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
 
-  tombstones.mark(job.id, { actor: "x" });
-  tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.FAILED);
+  await tombstones.mark(job.id, { reason: "user_request" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.FAILED);
 
   assert.equal(await markCompleted(jobStore.system, job.id), null);
 });
@@ -196,15 +245,32 @@ test("STRUKTŪRA: ABU vykdymo keliai tikrina žymą PRIEŠ darbą", () => {
     const source = fs.readFileSync(path.join(__dirname, file), "utf8");
 
     /**
-     * Priimam ABI rašymo formas – tiesioginę sąlygą ir per kintamąjį.
-     * Pirmoji versija tikrino tik `if (tombstones.isDeleted(jobId))`, tad
-     * nekalta refaktorizacija į `const deleted = ...; if (deleted)` būtų
-     * sulaužiusi testą, nors apsauga liktų vietoje.
+     * ⚠️ TIKRINAMAS `await`, NE PAMINĖJIMAS (#155, 7.5a / #183, P0).
+     *
+     * Iki 7.5a čia buvo ieškoma vien `tombstones.isDeleted(jobId)`. Nuo tada
+     * funkcija asinchroninė, o `Promise` yra truthy: pamiršus `await`, KIEKVIENAS
+     * job'as būtų praleistas kaip ištrintas - visas apdorojimas sustotų, o šis
+     * testas praeitų. Būtent tokia patikra ir sukuria dengimo iliuziją.
+     *
+     * ⚠️ TRIPWIRE (AGENTS.md §9.2), NE ELGSENOS ĮRODYMAS. Elgseną tikrina du
+     * testai šiame pat faile: „be žymos job'as NEPRALEIDŽIAMAS" (priešinga
+     * kryptis) ir „su žyma - praleidžiamas".
+     *
+     * Priimam abi rašymo formas - tiesioginę sąlygą ir per kintamąjį - bet abi
+     * PRIVALO turėti `await`.
      */
     assert.match(
       source,
-      /tombstones\.isDeleted\(jobId\)/,
-      `${file} turi tikrinti ištrynimo žymą prieš vykdymą`
+      /await\s+tombstones\.isDeleted\(/,
+      `${file} privalo AWAIT'INTI ištrynimo žymos patikrą - be to Promise visada truthy`
+    );
+
+    /** Nė vieno kvietimo be `await`: viena pamiršta vieta atveria tą patį kelią. */
+    const beAwait = source.match(/(?<!await\s)tombstones\.isDeleted\(/g);
+    assert.equal(
+      beAwait,
+      null,
+      `${file} turi NEAWAIT'INTŲ isDeleted kvietimų: ${beAwait && beAwait.join(", ")}`
     );
   }
 });
@@ -222,7 +288,7 @@ test("STRUKTŪRA: worker'is NEMETA klaidos dėl ištrinto jobo", () => {
   const path = require("path");
   const source = fs.readFileSync(path.join(__dirname, "../workers/index.js"), "utf8");
 
-  const guard = source.match(/if \(tombstones\.isDeleted\(jobId\)\) \{[\s\S]*?\n {6}\}/);
+  const guard = source.match(/if \(await tombstones\.isDeleted\(jobId\)\) \{[\s\S]*?\n {6}\}/);
   assert.ok(guard, "patikra turi egzistuoti");
 
   assert.ok(!/throw/.test(guard[0]), "praleidimas neturi mesti klaidos – BullMQ kartotų amžinai");
@@ -242,18 +308,39 @@ test("RETENCIJA: valymas paleidžiamas IŠKART po starto, ne po intervalo", () =
   assert.match(source, /runImmediately\s*=\s*true/, "pradinis ciklas turi būti numatytasis");
 });
 
-test("ŽYMOS: restartas jas praranda – riba dokumentuota, ne praleista", () => {
+test("ŽYMOS: riba GALIOJA TIK atmintiniam režimui - ir tai užrašyta", async () => {
   /**
-   * Sąžiningumo testas: žymos gyvena tik atmintyje, tad po restarto vėluojanti
-   * eilės žinutė vėl galėtų kurti artefaktus.
+   * ⚠️ APVERSTAS TESTAS (#155, 7.5a / #183).
    *
-   * Testas fiksuoja, kad tai ŽINOMA ir UŽRAŠYTA. Be tokio įrašo riba ilgainiui
-   * taptų nematoma, o dokumentacija tvirtintų daugiau, nei sistema daro.
+   * Iki 7.5a jis reikalavo, kad `deletionTombstones` sakytų „žymos gyvena TIK
+   * ATMINTYJE" ir kad restartas jas praranda. Po persistentinių žymų tai tapo
+   * MELU - bet melu, ginamu žalio testo: pakeitus kodą teisingai, testas būtų
+   * kritęs ir spaudęs teiginį grąžinti.
+   *
+   * Tai ta pati klasė kaip #213 rizika 13 (pasenęs teiginys, ginamas testo),
+   * todėl testas ne šalinamas, o apverčiamas: dabar jis reikalauja, kad riba
+   * būtų įvardyta SĄLYGINIAI - galiojanti atmintiniam režimui, negaliojanti su
+   * `DATABASE_URL`. Besąlygiškas apribojimo pašalinimas būtų toks pat melas,
+   * tik priešinga kryptimi.
    */
-  const fs = require("fs");
-  const path = require("path");
-  const source = fs.readFileSync(path.join(__dirname, "../utils/deletionTombstones.js"), "utf8");
+  const tombstones = require("../utils/deletionTombstones");
 
-  assert.match(source, /TIK ATMINTYJE|tik atmintyje/i, "riba turi būti įvardyta kode");
-  assert.match(source, /[Rr]estartas/, "restarto poveikis turi būti įvardytas");
+  assert.match(
+    tombstones.ATMINTIES_ISPEJIMAS,
+    /TIK ATMINTYJE/,
+    "atmintinio režimo riba privalo likti įvardyta"
+  );
+  assert.match(
+    tombstones.ATMINTIES_ISPEJIMAS,
+    /restart/i,
+    "restarto poveikis privalo likti įvardytas"
+  );
+  assert.match(
+    tombstones.ATMINTIES_ISPEJIMAS,
+    /DATABASE_URL/,
+    "įspėjimas privalo pasakyti, KADA garantija galioja - kitaip jis skamba besąlygiškai"
+  );
+
+  /** Be `DATABASE_URL` backend'as PRIVALO būti atmintis, o ne tylus postgres bandymas. */
+  assert.equal(tombstones.backend, "memory", "be DATABASE_URL - atmintinis backend'as");
 });

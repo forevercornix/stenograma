@@ -312,6 +312,56 @@ neskaitantis starto logų, apie tai sužinos tik pastebėjęs, kad senų įraš�
    audito eilučių neapima;
 4. tik tada atnaujinkite.
 
+### Užstrigusios ištrynimo žymos (nuo [7.5a])
+
+Ištrynimo barjeras aktyvus nuo **pirmojo** žingsnio (`deletion_pending`), o
+neterminalės žymos **nesensta**. Abu sprendimai sąmoningi: nesėkmingas ištrynimas
+reiškia, kad jautrūs duomenys dar gali egzistuoti, ir laikrodis to neišsprendžia.
+
+⚠️ **Todėl nuolat nepavykstantis ištrynimas užrakina job'ą neribotam laikui.**
+Išeitis yra, bet ji rankinė ir palieka audito pėdsaką.
+
+**Ar yra užstrigusių žymų:**
+
+```bash
+node backend/scripts/erasure-marks.js list --hours 24
+```
+
+Stulpeliai: `job_id`, būsena, priežastis, aktoriaus kategorija, bandymų skaičius,
+paskutinės klaidos kategorija, amžius valandomis. Terminalės (`deleted`) į sąrašą
+**nepatenka** – jos nėra užstrigusios.
+
+**Pakartoti ištrynimą** (`deletion_failed` → `deletion_pending`; pats ištrynimas
+paleidžiamas įprastu keliu):
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js retry "$JOB_ID" --actor "$OPERATOR"
+```
+
+**Paskelbti išspręsta**, kai patikrinta, kad duomenų nebėra (arba jų niekada
+nebuvo):
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js force-resolve "$JOB_ID" --actor "$OPERATOR"
+```
+
+⚠️ `force-resolve` **nėra ištrynimas**. Operatorius patvirtina faktą ir prisiima
+jį auditu (`ERASURE_MARK_FORCE_RESOLVED`). Barjeras **lieka** – būsena tampa
+`deleted`, tad job'as ir toliau nebus prikeltas.
+
+⚠️ `--actor` privalomas. Auditas rašomas **prieš** veiksmą: neužfiksavus, kas
+nuėmė barjerą, barjeras nenuimamas.
+
+⚠️ **HTTP maršruto šiems veiksmams NĖRA sąmoningai.** Užstrigusi žyma yra
+incidentas, ne kasdienis darbas; maršrutas pridėtų autentikacijos, autorizacijos
+ir rate-limit paviršių tam, kas daroma retai ir turint DB prieigą.
+
+**Ko šiame kelyje NĖRA:** automatinio užstrigusių žymų šalinimo. Tai būtų
+barjero nuėmimas be žmogaus sprendimo – tiksliai tai, ko `deletion_failed`
+semantika vengia.
+
 ---
 
 ## 4. Klaidingi teiginiai ir neteisingos diagnozės

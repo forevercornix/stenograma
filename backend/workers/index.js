@@ -91,7 +91,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
         return;
       }
 
-      if (tombstones.isDeleted(jobId)) {
+      /** ⚠️ `await` PRIVALOMAS - be jo Promise truthy, ir KIEKVIENAS jobas praleidžiamas (#183). */
+      if (await tombstones.isDeleted(jobId)) {
         log.warn("Praleistas ištrinto jobo vykdymas", { stage: "skipped_deleted", jobId });
         return { skipped: "deleted" };
       }

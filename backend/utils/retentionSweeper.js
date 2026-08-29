@@ -3,6 +3,7 @@ const fs = require("fs").promises;
 
 const jobStore = require("./jobStore");
 const auditLog = require("./auditLog");
+const tombstones = require("./deletionTombstones");
 const { rasytiAudita } = require("./auditWrite");
 const fileStorage = require("./fileStorage");
 const { getPrivacyPolicy } = require("./privacyPolicy");
@@ -109,7 +110,7 @@ async function purgeOrphanedAudio({ now = Date.now(), retentionHours } = {}) {
  * Vienas pilnas retencijos ciklas. Grąžina suvestinę (naudinga testams ir logams).
  */
 async function runRetentionSweep({ now = Date.now() } = {}) {
-  const summary = { jobs: 0, audio: 0, auditEntries: 0, errors: [] };
+  const summary = { jobs: 0, audio: 0, auditEntries: 0, tombstones: 0, errors: [] };
 
   try {
     summary.jobs = await jobStore.sweepExpired(now);
@@ -149,7 +150,34 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     summary.errors.push(`audit: ${e.message}`);
   }
 
-  const removedAnything = summary.jobs > 0 || summary.audio > 0 || summary.auditEntries > 0;
+  try {
+    /**
+     * ⚠️ ŽYMŲ VALYMAS ČIA, NE SAVO TIMER'YJE (#155, 7.5a / #183).
+     *
+     * Iki 7.5a `deletionTombstones` turėjo savo `setInterval`. Du valymo ciklai
+     * ant to paties duomenų gyvavimo ciklo reikštų dvi konfigūracijas, du
+     * laikrodžius, o `RETENTION_PURGE` įrašas rodytų tik vieno jų darbą - ta
+     * pati taisyklė, kurią 7.4d pritaikė auditui.
+     *
+     * ⚠️ ŠALINAMOS TIK `deleted` ŽYMOS. `pending` ir `failed` nesensta: jos
+     * reiškia, kad jautrūs duomenys dar gali egzistuoti.
+     */
+    const zymos = await tombstones.purgeExpired(now);
+    summary.tombstones = zymos.removed;
+
+    if (zymos.skipped) {
+      /**
+       * FAIL-SAFE nėra klaida - tai sąmoningas atsisakymas spėlioti. Bet jis
+       * privalo būti matomas: tyliai praleistas valymas atrodytų kaip valymas.
+       */
+      log.warn("Retencija: žymų terminas neapskaičiuojamas - žymos NEŠALINAMOS.");
+    }
+  } catch (e) {
+    summary.errors.push(`tombstones: ${e.message}`);
+  }
+
+  const removedAnything =
+    summary.jobs > 0 || summary.audio > 0 || summary.auditEntries > 0 || summary.tombstones > 0;
 
   /**
    * ⚠️ KLAIDA IRGI YRA ĮVYKIS (#233 Codex, P2).
@@ -176,11 +204,13 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
       event: "RETENTION_PURGE",
       success: summary.errors.length === 0,
       error: summary.errors.length ? summary.errors.join("; ") : null,
-      details: `jobs=${summary.jobs} audio=${summary.audio} audit=${summary.auditEntries}`,
+      details:
+        `jobs=${summary.jobs} audio=${summary.audio} audit=${summary.auditEntries} ` +
+        `tombstones=${summary.tombstones}`,
     });
     log.info(
       `Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +
-        `audito įrašų=${summary.auditEntries}.`
+        `audito įrašų=${summary.auditEntries}, ištrynimo žymų=${summary.tombstones}.`
     );
   }
 

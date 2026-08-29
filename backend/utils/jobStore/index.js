@@ -369,8 +369,15 @@ const PHASE_STATE_FIELDS = ["status", "phase", "progress", "progressKnown"];
  *
  * Grąžina `true`, jei operaciją reikia praleisti.
  */
-function blockedByTombstone(id, method) {
-  if (!tombstones.isDeleted(id)) return false;
+async function blockedByTombstone(id, method) {
+  /**
+   * ⚠️ `await` PRIVALOMAS (#155, 7.5a / #183).
+   *
+   * Persistentiniame režime atsakymas ateina iš `erasure_marks`, o `Promise` yra
+   * truthy: be `await` KIEKVIENAS job'as atrodytų ištrintas, visas apdorojimas
+   * būtų tyliai užblokuotas, o esami testai liktų žali.
+   */
+  if (!(await tombstones.isDeleted(id))) return false;
   log.warn(`Atmestas jobo ${method}() po ištrynimo`, { jobId: id });
   return true;
 }
@@ -526,7 +533,7 @@ module.exports = {
     update: async (id, patch, options = {}) => {
       assertNoRawPhaseWrite(patch);
       await ensureInit();
-      if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+      if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && (await tombstones.isDeleted(id))) {
         log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
         return null;
       }
@@ -546,7 +553,7 @@ module.exports = {
      */
     startPhase: async (id, nextPhase, phaseOptions = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "startPhase")) return null;
+      if (await blockedByTombstone(id, "startPhase")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
@@ -565,7 +572,7 @@ module.exports = {
      */
     restart: async (id, extra = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "restart")) return null;
+      if (await blockedByTombstone(id, "restart")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
@@ -581,7 +588,7 @@ module.exports = {
      */
     reportProgress: async (id, event) => {
       await ensureInit();
-      if (blockedByTombstone(id, "reportProgress")) return null;
+      if (await blockedByTombstone(id, "reportProgress")) return null;
 
       const job = await store.get(id);
       if (!job) return null;
@@ -622,7 +629,7 @@ module.exports = {
     /** Terminalus perėjimas – vienu patch'u išvalo fazės būseną. */
     finish: async (id, status, extra = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "finish")) return null;
+      if (await blockedByTombstone(id, "finish")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
@@ -723,7 +730,7 @@ module.exports = {
   finish: async (scope, status, extra = {}) => {
     assertScope(scope, "finish");
     await ensureInit();
-    if (blockedByTombstone(scope.jobId, "finish")) return null;
+    if (await blockedByTombstone(scope.jobId, "finish")) return null;
 
     const job = await store.getOwned(scope.jobId, scope);
     if (!job) return null;
@@ -765,7 +772,7 @@ module.exports = {
      * įrašyti ar gauti iš JSON konfigūracijos. Kad juo pasinaudotum, reikia
      * eksplicitiškai importuoti iš `jobStore`, o tai matoma peržiūroje.
      */
-    if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+    if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && (await tombstones.isDeleted(id))) {
       log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
       return null;
     }
@@ -835,7 +842,7 @@ module.exports = {
 
     assertRestorableId(job);
 
-    if (tombstones.isDeleted(job.id)) {
+    if (await tombstones.isDeleted(job.id)) {
       log.warn("Atkūrimas praleido ištrintą jobą", { jobId: job.id });
       return null;
     }

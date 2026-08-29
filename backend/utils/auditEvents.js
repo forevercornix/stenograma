@@ -102,6 +102,20 @@ const AUDIT_EVENTS = Object.freeze({
   RETENTION_PURGE: KATEGORIJA.BLOKUOJANTIS,
   ADMIN_ORPHAN_CLEANUP: KATEGORIJA.BLOKUOJANTIS,
 
+  /**
+   * ⚠️ ŽYMŲ OPERATORIAUS KELIAS - BLOKUOJANTIS IR *NE* POST-HOC (#155, 7.5a / #183).
+   *
+   * Barjeras nuo `deletion_pending` plius neterminalių žymų nesenėjimas reiškia,
+   * kad nuolat nepavykstantis ištrynimas užrakintų job'ą neribotam laikui.
+   * Išeitis yra, bet ji privalo palikti pėdsaką.
+   *
+   * Skirtingai nei keturi įvykiai aukščiau, šie rašomi PRIEŠ veiksmą: neužfiksavus,
+   * KAS nuėmė ištrynimo barjerą, barjeras NENUIMAMAS. Post-hoc čia reikštų, kad
+   * operatorius gali atidaryti barjerą, o audito gedimas paliktų tai be įrašo.
+   */
+  ERASURE_MARK_RETRIED: KATEGORIJA.BLOKUOJANTIS,
+  ERASURE_MARK_FORCE_RESOLVED: KATEGORIJA.BLOKUOJANTIS,
+
   // ── Job gyvavimo ciklas (#210: neblokuojantys) ─────────────────────────────
   TRANSCRIPTION_COMPLETED: KATEGORIJA.NEBLOKUOJANTIS,
   TRANSCRIPTION_FAILED: KATEGORIJA.NEBLOKUOJANTIS,

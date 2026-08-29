@@ -265,7 +265,7 @@ test("#154 STORE: fazių metodai gerbia IŠTRYNIMO ŽYMĄ", async () => {
    */
   const tombstones = require("../utils/deletionTombstones");
   const job = await naujas();
-  tombstones.mark(job.id, { actor: "testas" });
+  await tombstones.mark(job.id, { reason: "user_request" });
 
   try {
     assert.equal(await jobStore.system.startPhase(job.id, PHASE.VALIDATING), null);

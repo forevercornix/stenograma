@@ -726,8 +726,8 @@ test("ŽYMOS: ŠIFRUOTA kopija irgi negrąžina ištrinto jobo", async () => {
   const backup = await backupService.createBackup({ actor: "sysadmin", env });
 
   await jobStore.system.remove(job.id);
-  tombstones.mark(job.id, { actor: "sysadmin" });
-  tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
+  await tombstones.mark(job.id, { reason: "user_request" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin", env });
 
@@ -753,8 +753,8 @@ test("ŽYMOS: atkūrimas ANKSTESNIU raktu irgi gerbia žymas", async () => {
   });
 
   await jobStore.system.remove(job.id);
-  tombstones.mark(job.id, { actor: "sysadmin" });
-  tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
+  await tombstones.mark(job.id, { reason: "user_request" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
 
   const result = await restoreService.restoreBackup({
     ...backup,

@@ -1,5 +1,6 @@
 const { eraseJob } = require("../utils/jobErasure");
 const tombstones = require("../utils/deletionTombstones");
+const { ACTOR_KIND, ERASURE_REASON } = require("../utils/deletionTombstones/states");
 const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
 const { createLogger } = require("../utils/logger");
 const { rasytiAudita } = require("../utils/auditWrite");
@@ -136,6 +137,19 @@ const EPHEMERAL_CATEGORIES = [
  * ⚠️ Koordinavimas galioja tik ŠIAM PROCESUI. Kelioms replikoms reikėtų Redis
  * užrakto – ta pati riba kaip žymų saugykloje.
  */
+/**
+ * ⚠️ PROCESUI LOKALI OPTIMIZACIJA, NE KOREKTIŠKUMO MECHANIZMAS (#155, 7.5a).
+ *
+ * Iki 7.5a tai buvo VIENINTELIS vienintelio vykdytojo mechanizmas, ir jis
+ * galiojo tik viename procese: dvi replikos tą patį jobą trynė lygiagrečiai.
+ * Nuo 7.5a autoritetas yra sąlyginis `erasure_marks` rašymas su per-`job_id`
+ * advisory lock'u - jis veikia tarp procesų, replikų ir pool'ų.
+ *
+ * Žemėlapis paliktas todėl, kad tame pačiame procese jis sutaupo antrą pilną
+ * ištrynimo eigą ir leidžia lygiagretiems kvietėjams gauti TĄ PATĮ rezultato
+ * objektą. Pašalinus jį korektiškumas nenukentėtų - tik atsirastų nereikalingas
+ * darbas.
+ */
 const inFlight = new Map();
 
 /**
@@ -143,7 +157,7 @@ const inFlight = new Map();
  *
  * @param {object|null} job - jobo įrašas arba `null`, jei jo nebėra
  * @param {string} jobId
- * @param {{actor?: string}} options
+ * @param {{actor?: string, actorKind?: string, reason?: string}} options
  * @returns {Promise<object>} stabilus struktūrizuotas rezultatas
  */
 async function deleteJobArtefacts(job, jobId, options = {}) {
@@ -153,12 +167,23 @@ async function deleteJobArtefacts(job, jobId, options = {}) {
    * `pending` ir `failed` reikšmės TYČIA nepatenka čia: pirmoji reiškia, kad
    * operacija dar vyksta (laukiam žemiau), antroji – kad ją reikia kartoti.
    */
-  if (tombstones.isConfirmedDeleted(jobId)) {
-    const marker = tombstones.get(jobId);
+  if (await tombstones.isConfirmedDeleted(jobId)) {
+    const marker = await tombstones.get(jobId);
     return buildResult({
       jobId,
       status: DELETION_STATUS.ALREADY_DELETED,
-      actor: marker.actor,
+      /**
+       * ⚠️ AKTORIAUS IDENTIFIKATORIAUS ČIA NEBĖRA (#155, 7.5a).
+       *
+       * `erasure_marks` pergyvena jobą ir nėra išbraukiama iš kopijų, tad plikas
+       * `ownerId` joje taptų asmens duomenimis lentelėje, kurios paskirtis -
+       * įrodyti, kad asmens duomenys pašalinti. Saugoma tik kategorija.
+       *
+       * Tikslus atsekamumas NEDINGO: jis yra `LIFECYCLE_DELETION` audito kvite,
+       * kur veikia pseudonimizacija ir rakto rotacija.
+       */
+      actor: null,
+      actorKind: marker.actorKind,
       requestedAt: marker.requestedAt,
       completedAt: marker.completedAt,
       deleted: [],
@@ -179,7 +204,11 @@ async function deleteJobArtefacts(job, jobId, options = {}) {
   return operation;
 }
 
-async function _performDeletion(job, jobId, { actor = null } = {}) {
+async function _performDeletion(
+  job,
+  jobId,
+  { actor = null, actorKind = ACTOR_KIND.USER, reason = ERASURE_REASON.USER_REQUEST } = {}
+) {
   /**
    * ŽYMA PRIEŠ ŠALINIMĄ.
    *
@@ -188,7 +217,7 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
    * worker'is dar nematytų žymos, o duomenų jau nebūtų – ir jis juos
    * atkurtų.
    */
-  const marker = tombstones.mark(jobId, { actor });
+  const marker = await tombstones.mark(jobId, { reason, actorKind });
 
   if (!job) {
     /**
@@ -197,13 +226,14 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
      * Taip vėluojanti eilės žinutė nebegalės sukurti artefaktų ID, kurio
      * savininko jau nėra. Rezultatas – ne klaida: trinti nebuvo ko.
      */
-    tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.DELETED);
-    const finished = tombstones.get(jobId);
+    await tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.DELETED);
+    const finished = await tombstones.get(jobId);
 
     return buildResult({
       jobId,
       status: DELETION_STATUS.ALREADY_DELETED,
       actor,
+      actorKind,
       requestedAt: marker.requestedAt,
       completedAt: finished ? finished.completedAt : null,
       deleted: [],
@@ -263,6 +293,7 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
     jobId,
     status,
     actor,
+    actorKind,
     requestedAt: marker.requestedAt,
     completedAt,
     deleted,
@@ -285,7 +316,14 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
    */
   await writeAudit(result);
 
-  tombstones.complete(jobId, zymosBusena, { completedAt });
+  /**
+   * ⚠️ NESĖKMĖS KATEGORIJA, NE ŽINUTĖ. `failures` turi tik klasifikaciją
+   * (`retryable` / `permanent`), o ne originalų tekstą, kuriame būna failų
+   * kelių, saugyklos raktų ir tiekėjo atsakymų.
+   */
+  const failureKind = failures.length ? failures[0].kind : null;
+
+  await tombstones.complete(jobId, zymosBusena, { completedAt, failureKind });
 
   return result;
 }
@@ -335,11 +373,23 @@ function resolveStatus({ outcome, remaining, failures }) {
  * Laukai vienodi VISIEMS rezultatams – ir sėkmei, ir daliniam, ir galutiniam
  * gedimui. Kintantis formatas verstų klientą spėlioti, ką jis gavo.
  */
-function buildResult({ jobId, status, actor, requestedAt, completedAt, deleted, remaining, failures }) {
+function buildResult({
+  jobId,
+  status,
+  actor,
+  actorKind = null,
+  requestedAt,
+  completedAt,
+  deleted,
+  remaining,
+  failures,
+}) {
   return {
     jobId,
     status,
     actor: actor || null,
+    /** Kategorija (`user` / `operator` / `system`) - vienintelis dalykas, kurį saugo žyma. */
+    actorKind: actorKind || null,
 
     /** Kada ištrynimo PAPRAŠYTA. Visada yra. */
     requestedAt: requestedAt || null,
