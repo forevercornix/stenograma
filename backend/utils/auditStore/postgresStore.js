@@ -45,6 +45,16 @@ const SEKOS_PRIVILEGIJOS = Object.freeze(["USAGE", "UPDATE"]);
  */
 const RETENCIJOS_BATCH = 500;
 
+/**
+ * ⚠️ DIENŲ → VALANDŲ VERTIMAS TURI VARDĄ (#213 Codex, raundas 5).
+ *
+ * `retencijosRiba()` gauna dienas (bendras kontraktas su atmintimi), o SQL'ui
+ * paduoda valandas, nes tik jos PostgreSQL'yje yra tiksli trukmė. Konstanta
+ * eksportuojama, kad testas jos nekartotų skaičiumi - ta pati priežastis kaip
+ * `RETENCIJOS_BATCH`.
+ */
+const VALANDOS_PARAI = 24;
+
 /** Teigiamo zondo rezultato galiojimas. Orkestruotojo poll'ai kitaip generuotų SQL kiekvienam. */
 const PROBE_CACHE_TTL_MS = 2000;
 
@@ -380,6 +390,29 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
      * Skaičiuojama VIENĄ kartą per sweep'ą; `now` argumentas čia sąmoningai
      * ignoruojamas - persistentiniame režime kontroliuojamas laiko šaltinis yra
      * DB, ne kvietėjas.
+     *
+     * ⚠️ FIKSUOTOS VALANDOS, NE `interval 'N days'` (#213 Codex, raundas 5).
+     *
+     * `interval` turi tris atskirus laukus (mėnesiai, dienos, sekundės), ir
+     * `timestamptz` aritmetikoje jie elgiasi SKIRTINGAI. Dienų laukas yra
+     * KALENDORINIS: jis išlaiko tą pačią vietinio laikrodžio valandą, tad
+     * sesijoje su DST laikančia zona langas, kertantis perstatymą, reiškia 23
+     * arba 25 valandas per dieną, ne 24. Valandų laukas yra tikslus trukmės
+     * matas ir nuo zonos NEPRIKLAUSO.
+     *
+     * Atmintis skaičiuoja `dienos * 24 * 60 * 60 * 1000` - tikslią trukmę. Su
+     * `' days'` du kartus per metus backend'ai duotų ribas, besiskiriančias
+     * valanda, ir postgres NEGRĮŽTAMAI ištrintų eilutes valanda anksčiau, nei
+     * leidžia memory kontraktas. Skirtumas tylus: kiekio testas jo nemato.
+     *
+     * Tai TA PATI KLASĖ kaip raundo 3 laikrodžio radinys - riba apibrėžiama
+     * vienu būdu vienoje pusėje ir kitu kitoje. Tąkart nesutapo laikrodžiai,
+     * dabar nesutampa dienos apibrėžimas.
+     *
+     * UTC prievarta (`now() AT TIME ZONE 'UTC'`) DST irgi pašalintų, bet
+     * grąžintų `timestamp without time zone`, kurį prieš lyginant su
+     * `timestamptz` stulpeliu tektų konvertuoti atgal - papildomas žingsnis,
+     * kurio klaida vėl būtų tyli. Valandos to nereikalauja.
      */
     async retencijosRiba(dienos) {
       const skaicius = Number(dienos);
@@ -389,8 +422,8 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
       }
 
       const { rows } = await pool.query(
-        "SELECT (now() - ($1 || ' days')::interval) AS riba",
-        [String(skaicius)]
+        "SELECT (now() - ($1::double precision * INTERVAL '1 hour')) AS riba",
+        [skaicius * VALANDOS_PARAI]
       );
 
       return new Date(rows[0].riba).toISOString();
@@ -681,6 +714,7 @@ module.exports = {
   createPostgresStore,
   iEilute,
   RETENCIJOS_BATCH,
+  VALANDOS_PARAI,
   BUTINOS_PRIVILEGIJOS,
   SEKOS_PRIVILEGIJOS,
   PROBE_CACHE_TTL_MS,

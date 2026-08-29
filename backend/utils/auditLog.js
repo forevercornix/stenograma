@@ -25,11 +25,15 @@ const logger = createLogger("audit");
 /**
  * ⚠️ ATMINTIES MASYVAS PRIKLAUSO `memoryStore`, NE ŠIAM FAILUI (#155, 7.4b).
  *
- * Nuoroda išlaikoma todėl, kad retencija (`purgeExpired`) ir atminties riba
- * (`enforceMaxEntries`) yra 7.4a elgesys, galiojantis TIK atminties režimui.
- * PostgreSQL režime šis masyvas lieka tuščias, tad abi funkcijos savaime tampa
- * no-op - persistentinės retencijos savininkas yra 7.4d, ir jos įvedimas čia
- * būtų scope creep.
+ * Nuoroda išlaikoma todėl, kad ATMINTIES riba (`enforceMaxEntries`) ir sinchroninis
+ * `purgeExpiredMemory()` yra 7.4a elgesys, galiojantis TIK atminties režimui:
+ * PostgreSQL režime šis masyvas lieka tuščias, tad abu savaime tampa no-op.
+ *
+ * ⚠️ RETENCIJA NEBĖRA TIK ATMINTIES REIKALAS (#213, 7.4d). Asinchroninis
+ * `purgeExpired()` šiame faile yra BENDRAS abiem backend'ams: ribą jis prašo iš
+ * saugyklos ir per `store.purgeExpired()` fiziškai šalina `audit_log` eilutes.
+ * Skirtumas liko tik tarp KELIŲ (skaitymo/rašymo kelias - atmintis; sweep'as -
+ * abu), ne tarp režimų.
  */
 const auditStore = require("./auditStore");
 const log = require("./auditStore/memoryStore")._eilutes;

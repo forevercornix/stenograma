@@ -1501,6 +1501,90 @@ test("RETENCIJA: riba TIKSLI - `< cutoff` dingsta, `== cutoff` ir `> cutoff` lie
   }
 });
 
+/**
+ * Vietinio laiko poslinkis minutėmis duotai akimirkai duotoje zonoje.
+ *
+ * `Intl` yra vienintelis Node'e esantis DST žinovas; `shortOffset` sąmoningai
+ * NENAUDOJAMAS, nes jo palaikymas priklauso nuo ICU versijos.
+ */
+function poslinkisMin(data, zona) {
+  const dalys = new Intl.DateTimeFormat("en-US", {
+    timeZone: zona,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(data);
+
+  const d = Object.fromEntries(dalys.map((dalis) => [dalis.type, dalis.value]));
+  const vietinis = Date.UTC(+d.year, +d.month - 1, +d.day, +d.hour % 24, +d.minute, +d.second);
+
+  return Math.round((vietinis - data.getTime()) / 60000);
+}
+
+test("RETENCIJA: DST - riba yra TIKSLIOS 24 h per dieną, ne kalendorinė diena", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ELGSENOS ĮRODYMAS #213 RAUNDO 5 P1 RADINIUI.
+   *
+   * `auditRetention` gina SQL formą (tripwire, AGENTS.md §9.2); tik čia
+   * `interval` aritmetiką realiai įvykdo PostgreSQL. Su `interval 'N days'`
+   * DST zonoje kalendorinė diena yra 23 arba 25 valandos, tad riba nuslinktų
+   * valanda ir eilutės būtų NEGRĮŽTAMAI ištrintos anksčiau, nei leidžia
+   * atminties kontraktas.
+   *
+   * ⚠️ LANGAS PARENKAMAS TAIP, KAD JAME BŪTŲ LYGIAI VIENAS PERĖJIMAS.
+   * Fiksuotas dienų skaičius netiktų: 250 d. langas gali apimti DU priešingus
+   * perėjimus, kurie vienas kitą atsveria, ir sugedęs kodas praeitų. Todėl
+   * ieškoma paskutinio perėjimo ir pridedamas atsargos tarpas - gretimi
+   * perėjimai skiriasi bent ~150 d., tad antras į langą nepatenka.
+   */
+  const ZONA = "Europe/Vilnius";
+  const dabar = new Date();
+  const siandien = poslinkisMin(dabar, ZONA);
+
+  let dienos = null;
+  for (let i = 1; i <= 400; i += 1) {
+    if (poslinkisMin(new Date(dabar.getTime() - i * 86400000), ZONA) !== siandien) {
+      dienos = i + 5;
+      break;
+    }
+  }
+
+  assert.ok(dienos, `per 400 d. ${ZONA} zonoje privalo būti bent vienas DST perėjimas`);
+
+  const { pool, resursai } = await paruostiDb("audit_retencijos_dst");
+  const klientas = await pool.connect();
+
+  try {
+    await klientas.query(`SET TIME ZONE '${ZONA}'`);
+
+    /**
+     * Saugykla gauna TĄ PATĮ klientą, kad `SET TIME ZONE` galiotų jos
+     * užklausai: pool'as kitą kvietimą galėtų atiduoti kitai jungčiai su
+     * numatytąja zona, ir testas tikrintų ne tai, ką mano.
+     */
+    const store = createPostgresStore({ query: (...a) => klientas.query(...a) }, {
+      hashKeyId: HASH_KEY_ID,
+    });
+
+    const riba = await store.retencijosRiba(dienos);
+    const { rows } = await klientas.query("SELECT now() AS dabar");
+    const valandos = (new Date(rows[0].dabar).getTime() - Date.parse(riba)) / 3600000;
+
+    assert.equal(
+      Math.round(valandos),
+      dienos * 24,
+      `langas su DST perėjimu privalo likti ${dienos * 24} h (gauta ${valandos})`
+    );
+  } finally {
+    klientas.release();
+    await resursai.isvalyti();
+  }
+});
+
 test("RETENCIJA: vienas DB kvietimas riboja batch'ą; didesnei aibei - keli kvietimai", { skip: SKIP }, async () => {
   /**
    * ⚠️ TIKRINAMI DB KVIETIMAI, NE GALUTINIS REZULTATAS.

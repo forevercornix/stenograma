@@ -87,16 +87,21 @@ const KONFIG_RAKTAI = Object.freeze([
 const REQUIRED_AUDIT_TRIGGER = "audit_log_no_update";
 
 /**
- * ⚠️ NERIBOTAS AUGIMAS - MATOMUMAS, NE STARTO KLAIDA (#155, 7.4b).
+ * ⚠️ `AUDIT_MAX_ENTRIES` NETAIKYMAS - MATOMUMAS, NE STARTO KLAIDA (#155, 7.4b/7.4d).
  *
- * `AUDIT_RETENTION_DAYS` ir `AUDIT_MAX_ENTRIES` galioja TIK atminties režimui:
- * jie taikomi masyvui `auditLog` viduje, o persistentinės retencijos savininkas
- * yra [7.4d]. Postgres režime `audit_log` eilutės automatiškai NEŠALINAMOS.
+ * `AUDIT_RETENTION_DAYS` nuo [7.4d] galioja ABIEM režimams: postgres pusėje
+ * `audit_log` eilutės šalinamos centralizuoto sweep'o metu. `AUDIT_MAX_ENTRIES`
+ * lieka TIK atminties apsauga - jis taikomas masyvui `auditLog` viduje ir
+ * persistentinėms eilutėms NETAIKOMAS.
  *
- * Startas dėl to nenutraukiamas: persistentinis auditas be retencijos vis tiek
- * geriau nei jokio audito, ir operatorius gali turėti savo valymo politiką. Bet
- * tylėti negalima - diegimas, matantis `AUDIT_RETENTION_DAYS=30` konfigūracijoje,
- * pagrįstai manytų, kad ji galioja.
+ * Startas dėl to nenutraukiamas: kiekio riba nėra duomenų politika, ir jos
+ * nebuvimas lentelėje yra sąmoningas sprendimas (žr. `docs/audit-storage.md`
+ * §9). Bet tylėti negalima - diegimas, matantis `AUDIT_MAX_ENTRIES=5000`
+ * konfigūracijoje, pagrįstai manytų, kad ji galioja ir DB.
+ *
+ * ⚠️ ĮSPĖJIMAS KYLA TIK KAI `AUDIT_MAX_ENTRIES` NUSTATYTAS. Besąlygiškas
+ * įspėjimas apie normalią būseną kiekviename starte yra triukšmas, išmokstamas
+ * ignoruoti kartu su svarbiais (#213 CI radinys).
  *
  * ⚠️ EKSPORTUOJAMA KONSTANTA, ne inline eilutė: turinį reikia tikrinti BE tikros
  * DB, nes pats `init()` postgres šakoje be jos nevykdomas.

@@ -9,9 +9,12 @@
  * memory - visą žurnalą, postgres - puslapį. Todėl riba ir filtrai taikomi
  * ABIEJUOSE, ir bendras kontrakto rinkinys tai tikrina.
  *
- * ⚠️ RETENCIJA ČIA NEGYVENA. `auditLog` ją taiko masyvui pats (7.4a elgesys);
- * persistentinės retencijos savininkas yra 7.4d. Skirtumas SĄMONINGAS ir
- * dokumentuotas - žr. `docs/audit-storage.md`.
+ * ⚠️ RETENCIJOS POLITIKA ČIA NEGYVENA, BET MECHANIZMAS - TAIP (#213, 7.4d).
+ * `auditLog` retenciją masyvui taiko pats (7.4a elgesys), tačiau nuo 7.4d ši
+ * saugykla turi ir bendro kontrakto dalį - `retencijosRiba()` bei
+ * `purgeExpired()`, tuos pačius, ką postgres pusė. Terminą ir sweep'o ritmą
+ * toliau nustato `auditLog`/`retentionSweeper`, ne saugykla.
+ * Žr. `docs/audit-storage.md` §9.
  */
 
 /** @type {object[]} įrašymo tvarka = masyvo tvarka; `seq` atitikmuo postgres pusėje. */
@@ -250,10 +253,11 @@ const memoryStore = {
   },
 
   /**
-   * ⚠️ TIK `auditLog` VIDINEI RETENCIJAI IR RIBOJIMUI (7.4a elgesys).
+   * ⚠️ TIK `auditLog` VIDINIAM ATMINTIES KELIUI (7.4a elgesys).
    *
-   * Neįeina į bendrą backend'ų kontraktą: postgres pusėje retencijos savininkas
-   * yra 7.4d. Eksponuojama, kad `auditLog` nelaikytų antros masyvo nuorodos.
+   * Neįeina į bendrą backend'ų kontraktą - postgres pusėje masyvo atitikmens
+   * nėra, o bendra retencija nuo 7.4d eina per `retencijosRiba()` ir
+   * `purgeExpired()`. Eksponuojama, kad `auditLog` nelaikytų antros nuorodos.
    */
   _eilutes: eilutes,
 };

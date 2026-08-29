@@ -266,6 +266,11 @@ Retencijos autoritetas — ta pati centralizuota `retentionSweeper` architektūr
 kuri tvarko job'us ir audio. Atskiro audito timer'io nėra.
 
 - riba apskaičiuojama **vieną kartą** sweep'o pradžioje: `cutoff = now − retention`;
+- riba matuojama **tiksliomis valandomis** (`N × 24 h`), ne kalendorinėmis
+  dienomis: `interval 'N days'` `timestamptz` aritmetikoje išlaiko tą pačią
+  vietinio laikrodžio valandą, tad DST zonoje langas per dieną būtų 23 arba 25
+  valandos, ir postgres ištrintų valanda anksčiau nei `memory`. Abu backend'ai
+  privalo reikšti tą patį (#213 Codex, raundas 5);
 - `timestamp < cutoff` šalinama; **`timestamp == cutoff` lieka**;
 - šalinama **ribotais batch'ais** (`RETENCIJOS_BATCH`), kol batch'as grąžina
   mažiau nei limitas — trumpos transakcijos, trumpi užraktai;

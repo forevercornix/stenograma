@@ -6,7 +6,7 @@ process.env.LOG_LEVEL = "error";
 
 const auditLog = require("../utils/auditLog");
 const auditStore = require("../utils/auditStore");
-const { RETENCIJOS_BATCH } = require("../utils/auditStore/postgresStore");
+const { RETENCIJOS_BATCH, VALANDOS_PARAI } = require("../utils/auditStore/postgresStore");
 
 /**
  * PERSISTENTINĖ AUDITO RETENCIJA IR `PRIVACY_MODE` (#155, 7.4d / #213).
@@ -123,12 +123,94 @@ test("RIBA: postgres saugykla ją skaičiuoja SQL `now()`, ne Node laikrodžiu",
 
   assert.equal(riba, DB_ATSAKYMAS.toISOString(), "grąžinama BŪTENT DB duota reikšmė");
   assert.match(uzklausos[0].sql, /now\(\)/i, "riba skaičiuojama SQL `now()`");
-  assert.deepEqual(uzklausos[0].params, ["30"], "terminas perduodamas parametru, ne interpoliuojamas");
+  assert.deepEqual(
+    uzklausos[0].params,
+    [30 * VALANDOS_PARAI],
+    "terminas perduodamas parametru, ne interpoliuojamas (valandomis - žr. DST testą)"
+  );
 
   /** Netinkamas terminas atmetamas dar prieš SQL - kitaip trintume pagal šiukšlę. */
   for (const blogas of [0, -1, "trisdešimt", null]) {
     await assert.rejects(() => store.retencijosRiba(blogas), /teigiamas/i);
   }
+});
+
+test("RIBA: DST - langas matuojamas FIKSUOTOMIS valandomis, ne kalendorinėmis dienomis", async () => {
+  /**
+   * ⚠️ TRIPWIRE PLIUS PARITETO PATIKRA (AGENTS.md §9.2), NE PG ELGSENOS ĮRODYMAS.
+   *
+   * Pati aritmetika vyksta PostgreSQL viduje, tad be DB jos įvykdyti neįmanoma;
+   * elgsenos įrodymas yra `auditPersistence.integration` DST scenarijus ir jis
+   * pažymėtas [PG NOT RUN]. Čia ginama SQL FORMA ir PRAŠOMAS VIENETAS - būtent
+   * jie ir buvo radinys.
+   *
+   * `interval 'N days'` `timestamptz` aritmetikoje yra KALENDORINIS: DST zonoje
+   * jis išlaiko tą pačią vietinio laikrodžio valandą, tad perstatymą kertantis
+   * langas duoda 23 arba 25 valandas per dieną. Atmintis skaičiuoja tikslų
+   * `dienos * 24 h`. Skirtumas - viena valanda, du kartus per metus, ir jo
+   * kaina yra NEGRĮŽTAMAS trynimas anksčiau laiko.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+  const memoryStore = require("../utils/auditStore/memoryStore");
+
+  const uzklausos = [];
+  const pool = {
+    query: async (sql, params) => {
+      uzklausos.push({ sql: String(sql), params });
+      return { rows: [{ riba: new Date("2000-01-01T00:00:00.000Z") }] };
+    },
+  };
+  const store = createPostgresStore(pool, { hashKeyId: "A" });
+
+  await store.retencijosRiba(30);
+  const sql = uzklausos[0].sql;
+
+  /**
+   * ⚠️ SKENUOJAMA VISA UŽKLAUSA, ne langas aplink `now()` - fiksuoto pločio
+   * langai lūžta, kai tekstas paauga (AGENTS.md §9.1). Užklausa yra vienaeilė,
+   * be komentarų, tad savo dokumentacijos ši patikra pagauti negali.
+   */
+  assert.doesNotMatch(
+    sql,
+    /\bday|\bmonth|\byear|\bweek/i,
+    `kalendoriniai interval laukai DST zonoje nėra 24 h: ${sql}`
+  );
+  assert.match(sql, /INTERVAL\s+'1 hour'/i, `riba privalo remtis tikslia trukme: ${sql}`);
+
+  /**
+   * Konstanta yra VERTIMO vardas, ne derinamas parametras: parą sudaro 24
+   * valandos nepriklausomai nuo politikos. Prisegta, kad importas negalėtų
+   * tyliai pasikeisti kartu su kodu.
+   */
+  assert.equal(VALANDOS_PARAI, 24, "para = 24 valandos");
+
+  /** Praleistas daugiklis reikštų 30 VALANDŲ retenciją vietoj 30 dienų. */
+  for (const dienos of [30, 1, 365, 0.5]) {
+    uzklausos.length = 0;
+    await store.retencijosRiba(dienos);
+    assert.equal(
+      uzklausos[0].params[0],
+      dienos * VALANDOS_PARAI,
+      `${dienos} d. privalo virsti ${dienos * VALANDOS_PARAI} val.`
+    );
+  }
+
+  /**
+   * PARITETAS: tas pats terminas → tas pats valandų skaičius abiejuose
+   * backend'uose. Atminties riba čia yra ETALONAS, nes ji ir apibrėžia
+   * kontraktą, kurį postgres pusė privalo atkartoti.
+   */
+  const dabar = Date.parse("2026-03-29T12:00:00.000Z");
+  const atmintiesRiba = await memoryStore.retencijosRiba(30, dabar);
+  const atmintiesValandos = (dabar - Date.parse(atmintiesRiba)) / 3600000;
+
+  uzklausos.length = 0;
+  await store.retencijosRiba(30);
+  assert.equal(
+    uzklausos[0].params[0],
+    atmintiesValandos,
+    "abu backend'ai privalo prašyti TO PATIES valandų skaičiaus"
+  );
 });
 
 test("BATCH'AI: ciklas kartoja, kol saugykla grąžina mažiau nei limitas", async () => {
@@ -281,6 +363,40 @@ test("PRIVACY_MODE: GAMYBINIAME režime postgres backend'as NEBEKRENTA", async (
     if (savedPrivacy === undefined) delete process.env.PRIVACY_MODE;
     else process.env.PRIVACY_MODE = savedPrivacy;
   }
+});
+
+test("PRIVACY_MODE × postgres: PARINKIMAS derinio NEBEATMETA (7.4b sargo atšaukimas)", () => {
+  /**
+   * ⚠️ RUNNABLE ĮRODYMAS SARGO ATŠAUKIMUI (#213 Codex, raundas 5, radinys 2).
+   *
+   * Iki šito matrica šią garantiją siejo su `startupChecks` rinkiniu, kuriame
+   * nėra NĖ VIENO `PRIVACY_MODE` testo - t. y. rodė į dengimą, kurio nėra.
+   * Purge ir garsus įspėjimas gyvena `init()` postgres šakoje ir be DB
+   * nevykdomi ([PG NOT RUN] `auditPersistence.integration`), bet PATS LEIDIMAS
+   * gyvena čia, gryname `resolveAuditBackend()`, ir tikrinamas be DB.
+   *
+   * Grąžinus sargą, nepasiekiamas tampa visas #213 `PRIVACY_MODE` kontraktas:
+   * instancija nepakyla, o persistentinių eilučių per vėliavą ištrinti nebėra
+   * kaip - fail-fast saugotų ne duomenis, o užrakintų juos.
+   */
+  const { resolveAuditBackend } = require("../utils/auditStore/backendSelection");
+
+  const bazė = {
+    AUDIT_BACKEND: "postgres",
+    AUDIT_ID_SALT: "s",
+    AUDIT_ID_SALT_ID: "i",
+    DATABASE_URL: "postgres://a/b",
+  };
+
+  assert.equal(
+    resolveAuditBackend({ ...bazė, PRIVACY_MODE: "true" }),
+    "postgres",
+    "derinys privalo būti LEIDŽIAMAS - kitaip #213 kontraktas nepasiekiamas"
+  );
+
+  /** Abi pusės: vien teigiama leistų grąžinti sargą po `PRIVACY_MODE=false`. */
+  assert.equal(resolveAuditBackend({ ...bazė, PRIVACY_MODE: "false" }), "postgres");
+  assert.equal(resolveAuditBackend({ ...bazė }), "postgres");
 });
 
 test("PRIVACY_MODE: ATMINTIES režime valymas išlieka - kontraktas nepakeistas", async () => {

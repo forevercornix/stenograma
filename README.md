@@ -939,7 +939,8 @@ AUDIT_RETENTION_DAYS=30    # numatyta: 30
 AUDIT_MAX_ENTRIES=5000     # kieta atminties riba
 ```
 
-⚠️ **Abi reikšmės galioja TIK `AUDIT_BACKEND=memory` režimui.**
+⚠️ **`AUDIT_RETENTION_DAYS` galioja ABIEM režimams** (nuo [7.4d]).
+**`AUDIT_MAX_ENTRIES` – tik `AUDIT_BACKEND=memory`.**
 
 **`memory` (numatytasis).** Pasenę įrašai šalinami tiek rašant naują įvykį, tiek
 skaitant `GET /api/audit`, tiek periodiniu retencijos ciklu. Žurnalas yra
@@ -2071,9 +2072,21 @@ o numatytas tiekėjų pasirinkimas.
    nešalinamos vien dėl kiekio.
 
 Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais (`jobs=2 audio=1 audit=5`),
-`subjectId: null` – be identifikatorių, failų vardų ar turinio. Įvykis rašomas
-**tik kai kas nors realiai pašalinta**, kitaip kas valandą rašomas tuščias įrašas
-per `AUDIT_MAX_ENTRIES` išstumtų naudinguosius.
+`subjectId: null` – be identifikatorių, failų vardų ar turinio.
+
+⚠️ **Įvykis rašomas DVIEM atvejais**, ne vienu:
+
+1. kai kas nors realiai pašalinta → `success: true`;
+2. kai ciklas krito – **net jei pašalinta nulis** → `success: false` ir `error`
+   su priežastimi. Nesėkmingas automatinis asmens duomenų šalinimas privalo
+   palikti pėdsaką; be šito nulinis kritęs ciklas baigtųsi visiškoje tyloje.
+
+Tuščias IR sėkmingas ciklas įrašo **nerašo** – kitaip kas valandą rašomas tuščias
+įrašas per `AUDIT_MAX_ENTRIES` išstumtų naudinguosius.
+
+⚠️ **Monitoringas privalo tikrinti `success`, ne vien įvykio buvimą.** Įvykis su
+`success: false` reiškia, kad valymas neįvyko arba įvyko iš dalies; skaičiuojamas
+kaip „valymas įvyko", jis rodytų priešingai, nei nutiko.
 
 **Kas laikoma „nuskendusiu" failu.** Tik failas, kurio **nenaudoja nė vienas gyvas
 jobas** – nepriklausomai nuo jobo statuso (`queued`, `processing`, `completed`,
