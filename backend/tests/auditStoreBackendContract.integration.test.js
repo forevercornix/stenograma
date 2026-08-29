@@ -463,6 +463,73 @@ const SCENARIJAI = [
       assert.equal(await store.probe(), true);
     },
   },
+  {
+    id: "retencijos-riba-is-saugyklos",
+    kodel: "retencijosRiba() egzistuoja abiejuose backend'uose ir grąžina praeities ISO datą (#233)",
+    async run({ store }) {
+      /**
+       * ⚠️ RIBOS AUTORITETAS SKIRIASI SĄMONINGAI: atmintyje tai įleidžiamas
+       * `now`, postgres pusėje - DB laikrodis. Bendra tai, kad ribą duoda
+       * SAUGYKLA, o ne kvietėjas: kitaip trynimo riba ateitų iš kito laikrodžio
+       * nei rašymo žyma.
+       */
+      const riba = await store.retencijosRiba(30);
+
+      assert.equal(typeof riba, "string");
+      assert.ok(!Number.isNaN(Date.parse(riba)), `riba privalo būti data: ${riba}`);
+      assert.ok(Date.parse(riba) < Date.now(), "30 dienų riba yra praeityje");
+
+      await assert.rejects(() => store.retencijosRiba(0), /teigiamas/i);
+    },
+  },
+  {
+    id: "retencija-salina-tik-pries-cutoff",
+    kodel: "purgeExpired() riba reiškia TĄ PATĮ abiejuose backend'uose (#213)",
+    async run({ store }) {
+      await store.append(eilute());
+      await store.append(eilute());
+
+      /**
+       * ⚠️ Praeities riba negali pašalinti nieko. Backend'as, kuris čia ištrina,
+       * traktuoja `cutoff` kaip „viską iki dabar" - ir tyliai naikintų šviežius
+       * įrašus.
+       */
+      const praeitis = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      assert.equal(await store.purgeExpired(praeitis, 100), 0, "praeities riba nešalina nieko");
+      assert.equal((await store.list()).total, 2);
+
+      const ateitis = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      assert.equal(await store.purgeExpired(ateitis, 100), 2, "riba po įrašų - abu pašalinami");
+      assert.equal((await store.list()).total, 0);
+    },
+  },
+  {
+    id: "retencija-gerbia-batch-limita",
+    kodel: "purgeExpired() limit riboja VIENĄ kvietimą abiejuose backend'uose (#213)",
+    async run({ store }) {
+      for (let i = 0; i < 3; i += 1) await store.append(eilute());
+
+      const ateitis = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+      assert.equal(await store.purgeExpired(ateitis, 2), 2, "ne daugiau nei limitas");
+      assert.equal(await store.purgeExpired(ateitis, 2), 1, "likutis");
+      assert.equal(await store.purgeExpired(ateitis, 2), 0, "aibė išsemta");
+    },
+  },
+  {
+    id: "privacy-purge-isvalo-viska",
+    kodel: "purgeAllForPrivacy() yra teisėtas starto kelias abiejuose backend'uose (#213)",
+    async run({ store }) {
+      await store.append(eilute());
+      await store.append(eilute());
+
+      assert.equal(await store.purgeAllForPrivacy(), 2, "grąžinamas pašalintų kiekis");
+      assert.equal((await store.list()).total, 0);
+
+      /** Idempotentiška: pakartotinis startas su ta pačia vėliava nekrenta. */
+      assert.equal(await store.purgeAllForPrivacy(), 0);
+    },
+  },
 ];
 
 async function paleisti(ctx, pavadinimas) {

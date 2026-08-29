@@ -241,7 +241,7 @@ test("KIEKIO RIBA: pati savaime NEATMETA konfigūracijos", () => {
  * teisingumą tikrina `auditPersistence.integration.test.js` prieš tikrą
  * PostgreSQL. Čia tikrinama tik `init()` būsenos valdymo logika.
  */
-function netikrasPg({ generacijos }) {
+function netikrasPg({ generacijos, purgeKrenta = false, instancijos = [] }) {
   const klientas = {
     query: async (sql) => {
       if (/^UPDATE\s+audit_log/i.test(sql)) {
@@ -257,6 +257,7 @@ function netikrasPg({ generacijos }) {
   class NetikrasPool {
     constructor() {
       this.baigtas = false;
+      instancijos.push(this);
     }
     on() {}
     async connect() {
@@ -296,7 +297,13 @@ function netikrasPg({ generacijos }) {
         return { rows: generacijos.map((hash_key_id) => ({ hash_key_id })) };
       }
 
-      return { rows: [{}] };
+      /** `PRIVACY_MODE` starto valymas - batch'ais, tad grąžinam `rowCount`. */
+      if (/DELETE FROM audit_log/i.test(sql)) {
+        if (purgeKrenta) throw new Error("statement timeout valant audit_log");
+        return { rows: [], rowCount: 0 };
+      }
+
+      return { rows: [{}], rowCount: 0 };
     }
   }
 
@@ -366,6 +373,196 @@ test("SNAPSHOT: nepavykęs `init()` nepalieka našlaičių kitam bandymui", asyn
       [],
       "sėkmingas startas NEGALI paveldėti ankstesnio bandymo našlaičių"
     );
+  } finally {
+    if (originalus) require.cache[pgKelias] = originalus;
+    else delete require.cache[pgKelias];
+    await auditStore.shutdown();
+  }
+});
+
+test("POOL: kritus po-inicijavimo fazei jungtis UŽDAROMA, ne paliekama", async () => {
+  /**
+   * ⚠️ NUTEKĖJIMAS KAUPIASI BŪTENT ATSISTATYMO SCENARIJUJE (#233 Codex raundas 3).
+   *
+   * `initializePostgres()` grąžina GYVĄ pool'ą, o `_pool` priskiriamas tik
+   * fazės gale. Kritus bet kuriam tarpiniam žingsniui, `shutdown()` to pool'o
+   * nebemato. O `init()` po nesėkmės kartojamas SĄMONINGAI - tai 7.4f
+   * atsistatymo kelias: operatorius pataiso konfigūraciją ir bando vėl. Be šios
+   * apsaugos kiekvienas bandymas paliktų dar vieną atvirą jungčių rinkinį.
+   *
+   * ⚠️ TARPAS SENESNIS UŽ 7.4d: `patikrintiGeneracijas()` toje pačioje vietoje
+   * fail-closed metė jau ties 7.4f. 7.4d pridėjo antrą metantį žingsnį ir langą
+   * praplėtė. Todėl tikrinama VISA fazė, ne tik purge.
+   */
+  const auditStore = require("../utils/auditStore");
+  const pgKelias = require.resolve("pg");
+  const originalus = require.cache[pgKelias];
+
+  const bazine = {
+    AUDIT_BACKEND: "postgres",
+    DATABASE_URL: "postgres://netikras/netikra",
+    AUDIT_ID_SALT: AKTYVUS,
+    AUDIT_ID_SALT_ID: "AKTYVUS",
+  };
+
+  try {
+    await auditStore.shutdown();
+
+    /** ── 1. Purge krenta ─────────────────────────────────────────────────── */
+    const pirmos = [];
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: [], purgeKrenta: true, instancijos: pirmos }),
+    };
+
+    await assert.rejects(
+      () => auditStore.init({ ...bazine, PRIVACY_MODE: "true" }),
+      /statement timeout/i,
+      "prielaida: purge realiai krenta"
+    );
+
+    assert.equal(pirmos.length, 1, "prielaida: pool sukurtas");
+    assert.equal(pirmos[0].baigtas, true, "kritus fazei pool'as PRIVALO būti uždarytas");
+
+    /** ── 2. Ta pati apsauga generacijų patikrai (kelias senesnis už 7.4d) ── */
+    const antros = [];
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: ["NASLAITE"], instancijos: antros }),
+    };
+
+    await assert.rejects(
+      () => auditStore.init({ ...bazine, PRIVACY_MODE: "false" }),
+      /neturime rakto|NEPASIEKS/i,
+      "prielaida: našlaitė stabdo startą"
+    );
+
+    assert.equal(antros[0].baigtas, true, "7.4c fail-closed kelias irgi neturi palikti jungties");
+
+    /** ── 3. Sėkmingas pakartotinis bandymas nepalieka antros jungties ────── */
+    const trecios = [];
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: ["AKTYVUS"], instancijos: trecios }),
+    };
+
+    await auditStore.init({ ...bazine, PRIVACY_MODE: "false" });
+
+    assert.equal(trecios.length, 1, "sėkmingas startas sukuria vieną pool'ą");
+    assert.equal(trecios[0].baigtas, false, "veikiantis pool'as lieka atviras");
+
+    /** Ir `shutdown()` jį mato - skirtingai nei nutekėjusius. */
+    await auditStore.shutdown();
+    assert.equal(trecios[0].baigtas, true, "`shutdown()` uždaro priskirtą pool'ą");
+  } finally {
+    if (originalus) require.cache[pgKelias] = originalus;
+    else delete require.cache[pgKelias];
+    await auditStore.shutdown();
+  }
+});
+
+test("PRIVACY_MODE: 10+ raktų SU eilutėmis - startas praeina, lentelė ištuštinta", async () => {
+  /**
+   * ⚠️ DESTRUKTYVUS ŽINGSNIS ĮVYKDAVO PIRMAS, IR NAUDOS NEBŪDAVO (#233 raundas 4, P1).
+   *
+   * Diegimas su daugiau nei `HISTORICAL_SOFT_LIMIT` istorinių raktų, kur
+   * KIEKVIENAS dar turi eilučių, startuoja normaliai: 7.4c riba atmeta tik
+   * nebenaudojamus raktus. Įjungus `PRIVACY_MODE` seka buvo tokia:
+   *
+   *   1. purge ištrina visas eilutes - negrįžtamai;
+   *   2. kiekio riba dabar mato VISUS istorinius raktus kaip nebereikalingus;
+   *   3. riba meta, startas krenta.
+   *
+   * Rezultatas: duomenys prarasti, nauda negauta, ir operatorius dar turi
+   * pertvarkyti raktų žiedą, kad sistema pakiltų. Skirtumas nuo eilinio startup
+   * gedimo tas, kad negrįžtamas veiksmas jau įvykęs - todėl P1, ne P2.
+   *
+   * Dabar riba vertinama PRIEŠ purge, pagal tikrą DB būseną.
+   */
+  const auditStore = require("../utils/auditStore");
+  const pgKelias = require.resolve("pg");
+  const originalus = require.cache[pgKelias];
+
+  /** ⚠️ 11 istorinių raktų, ir KIEKVIENAS turi eilučių - riba neturi kirsti. */
+  const istoriniai = Array.from({ length: HISTORICAL_SOFT_LIMIT + 1 }, (_, i) => `H${i}`);
+  const perDaug = istoriniai.map((id) => `${id}:${AKTYVUS}`).join(",");
+
+  try {
+    await auditStore.shutdown();
+
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: [...istoriniai, "AKTYVUS"] }),
+    };
+
+    /** Prielaida: be `PRIVACY_MODE` toks diegimas kyla normaliai. */
+    await auditStore.init({
+      AUDIT_BACKEND: "postgres",
+      DATABASE_URL: "postgres://netikras/netikra",
+      AUDIT_ID_SALT: AKTYVUS,
+      AUDIT_ID_SALT_ID: "AKTYVUS",
+      AUDIT_ID_SALT_PREVIOUS: perDaug,
+    });
+    assert.equal(auditStore.backend(), "postgres", "prielaida: 11 naudojamų raktų starto nestabdo");
+
+    /** ── Tas pats diegimas su `PRIVACY_MODE=true` ────────────────────────── */
+    await auditStore.shutdown();
+
+    let istrinta = 0;
+    let istustinta = false;
+    const suSkaitikliu = netikrasPg({ generacijos: [...istoriniai, "AKTYVUS"] });
+    const OriginaliPool = suSkaitikliu.Pool;
+
+    /**
+     * ⚠️ NETIKRAS POOL'AS PRIVALO ATSPINDĖTI PURGE POVEIKĮ.
+     *
+     * Pirmoji šio testo versija po `DELETE` toliau grąžindavo tą patį generacijų
+     * sąrašą, tad mutacija (riba vėl po purge) testo NEPAGAVO: patikra matydavo
+     * 11 „naudojamų" raktų ir praeidavo. Būtent tuštėjanti lentelė ir yra
+     * radinio esmė - be jos testas tikrina ne tai, ką teigia.
+     */
+    suSkaitikliu.Pool = class extends OriginaliPool {
+      async query(sql, params) {
+        const tekstas = String(sql);
+
+        if (/DELETE FROM audit_log/i.test(tekstas)) {
+          istrinta += 1;
+          istustinta = true;
+          return { rows: [], rowCount: 0 };
+        }
+
+        if (istustinta && /WITH RECURSIVE gen/.test(tekstas)) return { rows: [] };
+
+        return super.query(sql, params);
+      }
+    };
+
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: suSkaitikliu,
+    };
+
+    await auditStore.init({
+      AUDIT_BACKEND: "postgres",
+      DATABASE_URL: "postgres://netikras/netikra",
+      AUDIT_ID_SALT: AKTYVUS,
+      AUDIT_ID_SALT_ID: "AKTYVUS",
+      AUDIT_ID_SALT_PREVIOUS: perDaug,
+      PRIVACY_MODE: "true",
+    });
+
+    assert.equal(auditStore.backend(), "postgres", "startas PRIVALO praeiti - kitaip trynimas be naudos");
+    assert.ok(istrinta > 0, "purge privalo būti įvykdytas");
   } finally {
     if (originalus) require.cache[pgKelias] = originalus;
     else delete require.cache[pgKelias];

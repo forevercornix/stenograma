@@ -4,6 +4,43 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## Unreleased
+
+Neišleisti pokyčiai, jau esantys `main` šakoje. Artimiausio `release:` commit'o
+metu ši sekcija **suliejama** į naujos versijos sekciją ir ištuštinama – kitaip
+ji pasensta ir tampa klaidinanti.
+
+### ⚠️ Destruktyvūs pokyčiai
+
+- **Audito retencija dabar galioja ir PostgreSQL režimui** (#213, 7.4d).
+  `AUDIT_RETENTION_DAYS` anksčiau veikė tik atminties žurnalui; nuo šio leidimo
+  centralizuotas sweep'as **fiziškai šalina** senesnes `audit_log` eilutes,
+  ribotais batch'ais, o riba imama iš DB laikrodžio.
+
+  ⚠️ **Pirmas ciklas paleidžiamas ~5 s po starto ir pašalina viską, kas jau
+  viršija terminą — per kelias minutes ir negrįžtamai.** Diegimas, kuriame
+  reikšmė buvo nustatyta tuomet, kai ji galiojo tik atminčiai, praras senus
+  audito įrašus be atskiro patvirtinimo.
+
+  Prieš atnaujinant: pasitikrinkite `AUDIT_RETENTION_DAYS` (numatyta 30 d.) ir,
+  jei senesni įrašai reikalingi, pasidarykite pilną PostgreSQL kopiją —
+  aplikacijos kopija audito eilučių neapima. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md` §3 ir `docs/backup-runbook.md`.
+
+- **`PRIVACY_MODE=true` su `AUDIT_BACKEND=postgres` nebenutraukia starto**
+  (#213, 7.4d). Derinys leidžiamas: starto metu `audit_log` fiziškai išvaloma, o
+  nauji įrašai nepersistinami.
+
+  ⚠️ Vėliavos perjungimui reikia **pilno sustabdymo, ne rolling update** —
+  senesnė replika gali įrašyti eilutę po to, kai naujoji jau išvalė lentelę.
+
+### Changed
+
+- `AUDIT_MAX_ENTRIES` PostgreSQL režimui **netaikoma** ir netaps retencijos
+  taisykle: eilutės nešalinamos vien dėl kiekio. Ji lieka atminties apsauga.
+
+---
+
 ## v1.3.0 – Milestone 2: prieiga, duomenų valdymas ir operacinis pasirengimas
 
 Didžiausias leidimas iki šiol: **70 commit'ai** (36 be merge), **145 failai,

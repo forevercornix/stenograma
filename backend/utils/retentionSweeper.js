@@ -125,16 +125,45 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
   }
 
   try {
-    summary.auditEntries = auditLog.purgeExpired(now);
+    /**
+     * ⚠️ `await` PRIVALOMAS (#155, 7.4d / #213).
+     *
+     * Nuo 7.4d `purgeExpired()` yra asinchroninė - persistentiniame režime ji
+     * vykdo ribotus DB batch'us. Be `await` čia atsidurtų `Promise`: logas
+     * rodytų `[object Promise]` vietoj skaičiaus, `RETENTION_PURGE` įrašas
+     * meluotų, o klaida taptų neapdorotu rejection - tyliu būtent tame kelyje,
+     * kuris turi įrodyti, kad asmens duomenys pašalinti.
+     */
+    summary.auditEntries = await auditLog.purgeExpired(now);
   } catch (e) {
+    /**
+     * ⚠️ JAU PAŠALINTOS EILUTĖS PATENKA Į SUVESTINĘ (#233 Codex, P2).
+     *
+     * Retencija persistentiniame režime vyksta batch'ais, ir kiekvienas jų
+     * commit'inasi atskirai. Kritus vėlesniam batch'ui, priskyrimas aukščiau
+     * neįvyksta - be šito `auditEntries` liktų nulis, ciklas atrodytų tuščias,
+     * ir `RETENTION_PURGE` įrašas nebūtų parašytas. Eilutės būtų negrįžtamai
+     * ištrintos be pėdsako audito žurnale.
+     */
+    summary.auditEntries = Number.isInteger(e.pasalinta) ? e.pasalinta : 0;
     summary.errors.push(`audit: ${e.message}`);
   }
 
   const removedAnything = summary.jobs > 0 || summary.audio > 0 || summary.auditEntries > 0;
 
-  // Įrašom TIK kai kažkas realiai pašalinta - kitaip kas valandą rašytume tuščią
-  // įvykį ir per AUDIT_MAX_ENTRIES išstumtume naudingus įrašus.
-  if (removedAnything) {
+  /**
+   * ⚠️ KLAIDA IRGI YRA ĮVYKIS (#233 Codex, P2).
+   *
+   * Iki šito ciklas, kuris nieko nepašalino IR krito, baigdavosi visiškoje
+   * tyloje: nei `RETENTION_PURGE` įrašo, nei klaidos - `startRetentionSweeper`
+   * logina tik tada, kai visas pažadas atmetamas, o klaidos čia sugaunamos.
+   * Nesėkmingas automatinis asmens duomenų šalinimas privalo palikti pėdsaką.
+   */
+  const verta = removedAnything || summary.errors.length > 0;
+
+  // Įrašom TIK kai kažkas realiai pašalinta arba kai buvo klaidų - kitaip kas
+  // valandą rašytume tuščią įvykį ir per AUDIT_MAX_ENTRIES išstumtume naudingus.
+  if (verta) {
     /**
      * ⚠️ AUDITO KLAIDA PROPAGUOJAMA (#155, 7.4a / #210).
      *
@@ -160,27 +189,49 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
 
 /**
  * Paleidžia periodinį retencijos šalinimą. Timer'is `unref()`-intas.
+ *
+ * ⚠️ CIKLAI NEPERSIDENGIA (#155, 7.4d / #213).
+ *
+ * Nuo 7.4d sweep'as trina ir persistentines audito eilutes ribotais DB
+ * batch'ais, tad didelėje lentelėje jis gali trukti ilgiau nei intervalas. Be
+ * apsaugos kitas `setInterval` tick'as paleistų antrą ciklą to paties proceso
+ * viduje: du sweep'ai konkuruotų dėl tų pačių eilučių, o `RETENTION_PURGE`
+ * įrašai persidengtų.
+ *
+ * ⚠️ APSAUGA GYVENA SCHEDULER'YJE, NE `runRetentionSweep()` VIDUJE. Tiesioginis
+ * kvietimas (testai, rankinis paleidimas) privalo likti sinchroniškai
+ * nuspėjamas: praleistas ciklas ten reikštų tyliai neįvykusį valymą.
+ *
+ * Tai proceso lokali spyna. Multi-instance korektiškumo ji NEGARANTUOJA ir
+ * neturi - tam yra `FOR UPDATE SKIP LOCKED` batch'ų atrankoje.
  */
 function startRetentionSweeper({ intervalMs, runImmediately = true } = {}) {
   const config = getPrivacyPolicy();
   const interval = intervalMs || config.retentionSweepMinutes * 60 * 1000;
 
+  let vykstantis = null;
+
+  const paleisti = (kontekstas) => {
+    if (vykstantis) {
+      log.warn(`${kontekstas}: praleistas - ankstesnis retencijos ciklas dar vyksta.`);
+      return;
+    }
+
+    vykstantis = runRetentionSweep()
+      .catch((e) => log.error(`${kontekstas} nepavyko: ${e.message}`))
+      .finally(() => {
+        vykstantis = null;
+      });
+  };
+
   // PRADINIS ciklas iškart po starto. Be jo po restarto pasenę duomenys liktų dar
   // visą intervalą (numatytai valandą) - automatinei retencijai tai per ilgai.
   // `unref`-intas timeout, kad neblokuotų proceso pabaigos ir netrikdytų testų.
   if (runImmediately) {
-    setTimeout(() => {
-      runRetentionSweep().catch((e) =>
-        log.error(`Pradinis retencijos ciklas nepavyko: ${e.message}`)
-      );
-    }, 5000).unref();
+    setTimeout(() => paleisti("Pradinis retencijos ciklas"), 5000).unref();
   }
 
-  const timer = setInterval(() => {
-    runRetentionSweep().catch((e) =>
-      log.error(`Retencijos ciklas nepavyko: ${e.message}`)
-    );
-  }, interval);
+  const timer = setInterval(() => paleisti("Retencijos ciklas"), interval);
 
   timer.unref();
   return timer;

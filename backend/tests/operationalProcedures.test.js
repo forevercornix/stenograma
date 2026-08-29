@@ -254,12 +254,29 @@ test("RETENCIJA: dokumentuota audito reikšmė SUTAMPA su .env.example", () => {
   assert.match(
     doc,
     /postgres/i,
-    "persistentinis režimas privalo būti paminėtas - jame reikšmė negalioja"
+    "persistentinis režimas privalo būti paminėtas - jame semantika kitokia"
+  );
+
+  /**
+   * ⚠️ ŠIS TEIGINYS APVERSTAS 7.4d (#213). Iki jo runbook'as privalėjo sakyti,
+   * kad postgres režime retencija NEVEIKIA - tada tai buvo tiesa. Dabar veikia,
+   * ir tas pats tekstas būtų melas, tad tikrinama priešinga kryptis: kad
+   * dokumentas įvardija VEIKIANČIĄ retenciją ir netaikomą `AUDIT_MAX_ENTRIES`.
+   */
+  assert.match(
+    doc,
+    /GALIOJA|šalinamos/,
+    "runbook'as privalo pasakyti, kad postgres režime retencija VEIKIA"
   );
   assert.match(
     doc,
-    /NEGALIOJA|nešalinamos|neribotai/,
-    "runbook'as privalo pasakyti, kad postgres režime retencija neveikia"
+    /AUDIT_MAX_ENTRIES/,
+    "ir kad kiekio riba persistentiškai netaikoma - be to operatorius jos lauktų"
+  );
+  assert.doesNotMatch(
+    doc,
+    /IŠORINĖ valymo politika reikalinga|reikalinga IŠORINĖ valymo politika/i,
+    "nurodymas kurti išorinę politiką duotų ANTRĄ trynimo mechanizmą ant tos pačios lentelės"
   );
 });
 

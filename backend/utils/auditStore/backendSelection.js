@@ -120,23 +120,31 @@ function resolveAuditBackend(env = process.env) {
   }
 
   /**
-   * ⚠️ `PRIVACY_MODE=true` × `postgres` - STARTO KLAIDA (#211).
+   * ⚠️ `PRIVACY_MODE=true` × `postgres` NEBĖRA STARTO KLAIDA (#213, 7.4d).
    *
-   * Prašymai prieštarauja: `PRIVACY_MODE` reiškia „audito neįrašinėti", o
-   * `AUDIT_BACKEND=postgres` - „auditą išsaugoti patvariai". Tylus leidimas
-   * duotų migruotą, sukonfigūruotą ir amžinai TUŠČIĄ lentelę, kuri stebint
-   * atrodo kaip veikianti sistema. Atsisakymas startuoti yra sąžiningesnis nei
-   * auditas, kurio nėra, bet kuris atrodo esantis.
+   * ⚠️ TAI EKSPLICITINIS 7.4b (#211) SPRENDIMO ATŠAUKIMAS, NE PRALEIDIMAS.
    *
-   * Pilna `PRIVACY_MODE` semantika lieka 7.4d; čia sprendžiamas tik derinys.
+   * 7.4b šį derinį atmetė, nes tuomet jis neturėjo apibrėžtos semantikos:
+   * `PRIVACY_MODE` reiškė „nerašyti", `postgres` - „saugoti patvariai", ir
+   * tylus leidimas būtų davęs migruotą, amžinai tuščią lentelę, kuri stebint
+   * atrodo kaip veikianti sistema. Tuo metu atsisakymas startuoti buvo
+   * sąžiningesnis atsakymas.
+   *
+   * 7.4d tą semantiką apibrėžia: starto metu `audit_log` FIZIŠKAI išvalomas, o
+   * nauji įrašai nepersistinami. Derinys nebėra prieštaringas - jis reiškia
+   * „auditas išjungtas, ir tai, kas buvo surinkta, ištrinama".
+   *
+   * ⚠️ IR SVARBIAUSIA: SU SARGU NĖRA JOKIO PALAIKOMO BŪDO IŠTRINTI
+   * PERSISTENTINIŲ AUDITO EILUČIŲ PER `PRIVACY_MODE`. Operatorius, įjungęs
+   * vėliavą, negalėdavo startuoti; perjungęs `AUDIT_BACKEND=memory`, paleisdavo
+   * procesą, bet DB eilutės LIKDAVO nepaliestos. Fail-fast čia saugojo ne
+   * duomenis, o užrakindavo juos - priešingai, nei žada in-memory kontraktas,
+   * kuris `PRIVACY_MODE` metu žada ištrynimą, ne nutildymą.
+   *
+   * Derinys lieka matomas: `init()` jį garsiai įspėja kiekvieno starto metu
+   * (žr. `auditStore/index.js`), tad tylaus „tuščios lentelės" scenarijaus,
+   * kurio 7.4b vengė, nėra.
    */
-  if (String(env.PRIVACY_MODE).toLowerCase() === "true") {
-    throw new Error(
-      "PRIVACY_MODE=true kartu su AUDIT_BACKEND=postgres yra prieštaringas " +
-        "derinys: pirmasis draudžia rašyti auditą, antrasis reikalauja jį " +
-        "išsaugoti. Pasirinkite vieną."
-    );
-  }
 
   return eksplicitinis;
 }

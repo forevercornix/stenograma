@@ -939,7 +939,8 @@ AUDIT_RETENTION_DAYS=30    # numatyta: 30
 AUDIT_MAX_ENTRIES=5000     # kieta atminties riba
 ```
 
-⚠️ **Abi reikšmės galioja TIK `AUDIT_BACKEND=memory` režimui.**
+⚠️ **`AUDIT_RETENTION_DAYS` galioja ABIEM režimams** (nuo [7.4d]).
+**`AUDIT_MAX_ENTRIES` – tik `AUDIT_BACKEND=memory`.**
 
 **`memory` (numatytasis).** Pasenę įrašai šalinami tiek rašant naują įvykį, tiek
 skaitant `GET /api/audit`, tiek periodiniu retencijos ciklu. Žurnalas yra
@@ -947,17 +948,23 @@ backend'o atmintyje, tad: dingsta po restarto; nesidalija tarp replikų; neturi
 DB transakcijų ar tamper-resistance. Retencija realiai reiškia „iki restarto
 arba iki N dienų, kas ateina pirmiau".
 
-**`postgres` (#155, 7.4b).** Žurnalas persistentinis, dalijamas tarp replikų ir
-append-only (`UPDATE` atmeta DB trigeris). Bet **`AUDIT_RETENTION_DAYS` ir
-`AUDIT_MAX_ENTRIES` čia NEGALIOJA**: `audit_log` eilutės automatiškai
-**nešalinamos**, ir lentelė auga neribotai. Startas dėl to įspėja `warn` lygiu.
+**`postgres` (#155, 7.4b, retencija – 7.4d).** Žurnalas persistentinis,
+dalijamas tarp replikų ir append-only (`UPDATE` atmeta DB trigeris).
 
-> Operatoriui tai reiškia: nustatyta 30 dienų reikšmė **nėra** taikoma, tad be
-> išorinės valymo politikos asmens duomenys audite išliks neribotai. Tai
-> tiesioginė GDPR saugojimo ribojimo rizika.
+- **`AUDIT_RETENTION_DAYS` GALIOJA** (nuo 7.4d): `audit_log` eilutės šalinamos
+  to paties centralizuoto sweep'o metu, ribotais batch'ais, o riba imama iš **DB
+  laikrodžio** – to paties, kuris deda `timestamp`.
+- **`AUDIT_MAX_ENTRIES` NEGALIOJA**: tai atminties apsauga, ne duomenų politika.
+  Eilutės niekada nešalinamos vien dėl to, kad jų skaičius viršijo N. Startas
+  įspėja `warn` lygiu, jei kintamasis nustatytas kartu su `postgres`.
 
-Persistentinę retenciją įgyvendina **[7.4d]**. Konfigūracija ir sprendimai –
-`docs/audit-storage.md`.
+> ⚠️ **Išorinės valymo politikos NEREIKIA, ir jos nekurkite.** Iki 7.4d ji buvo
+> būtina; dabar tai būtų antras nepriklausomas trynimo mechanizmas ant tos
+> pačios lentelės, veikiantis pagal kitą ribą ir kitą laikrodį, o
+> `RETENTION_PURGE` įrašas rodytų tik vieno jų darbą. Jei ji įdiegta iš
+> ankstesnės versijos – **išjunkite**.
+
+Konfigūracija ir sprendimai – `docs/audit-storage.md` §9.
 
 ### Privatumo režimas
 
@@ -1690,8 +1697,10 @@ audito režimo nekeičia. `postgres` papildomai reikalauja `AUDIT_ID_SALT` ir
 GDPR ištrynimas senų įrašų nerastų. Trūkstant bet kurio, startas **nutrūksta**;
 grįžimo į atmintį nėra.
 
-⚠️ Retencija persistentiniame režime **neveikia** iki [7.4d] – žr. „Audito
-retencija". Sprendimai ir diegimo detalės – `docs/audit-storage.md`.
+⚠️ Retencija persistentiniame režime **veikia** nuo [7.4d]: `AUDIT_RETENTION_DAYS`
+taikomas ir `audit_log` eilutėms per centralizuotą sweep'ą. `AUDIT_MAX_ENTRIES`
+lieka **tik atminties** apsauga. Sprendimai ir diegimo detalės –
+`docs/audit-storage.md` §9.
 
 **Rolėmis grįsta autorizacija (#18 PR2).** Leidimai gyvena viename registre
 (`utils/permissions.js`) ir yra **deny-by-default** – naujas leidimas be
@@ -2057,13 +2066,27 @@ o numatytas tiekėjų pasirinkimas.
 1. **Pasenusius jobus** – metaduomenys + rezultatas (transkripcija/protokolas) po `JOB_TTL_MINUTES`.
 2. **Nuskendusius audio failus** – senesnius nei `AUDIO_RETENTION_HOURS` ir nepaminėtus nė viename gyvame jobe. Iki tol jų nešalino niekas: jei procesas nukrito tarp failo įkėlimo ir jobo užbaigimo, failas likdavo storage neribotai.
 3. **Pasenusius audito įrašus** – pagal `AUDIT_RETENTION_DAYS`, nepriklausomai nuo srauto.
-   ⚠️ **Tik `AUDIT_BACKEND=memory` režimu.** Su `postgres` ciklas audito eilučių
-   NEŠALINA (jos gyvena DB, o ne atmintyje) – žr. „Audito retencija" ir [7.4d].
+   ⚠️ **Abiem backend'ams** (nuo [7.4d]). Su `postgres` eilutės šalinamos
+   ribotais batch'ais, o riba imama iš DB laikrodžio – to paties, kuris deda
+   `timestamp`. `AUDIT_MAX_ENTRIES` persistentiškai **netaikomas**: eilutės
+   nešalinamos vien dėl kiekio.
 
 Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais (`jobs=2 audio=1 audit=5`),
-`subjectId: null` – be identifikatorių, failų vardų ar turinio. Įvykis rašomas
-**tik kai kas nors realiai pašalinta**, kitaip kas valandą rašomas tuščias įrašas
-per `AUDIT_MAX_ENTRIES` išstumtų naudinguosius.
+`subjectId: null` – be identifikatorių, failų vardų ar turinio.
+
+⚠️ **Įvykis rašomas DVIEM atvejais**, ne vienu:
+
+1. kai kas nors realiai pašalinta → `success: true`;
+2. kai ciklas krito – **net jei pašalinta nulis** → `success: false` ir `error`
+   su priežastimi. Nesėkmingas automatinis asmens duomenų šalinimas privalo
+   palikti pėdsaką; be šito nulinis kritęs ciklas baigtųsi visiškoje tyloje.
+
+Tuščias IR sėkmingas ciklas įrašo **nerašo** – kitaip kas valandą rašomas tuščias
+įrašas per `AUDIT_MAX_ENTRIES` išstumtų naudinguosius.
+
+⚠️ **Monitoringas privalo tikrinti `success`, ne vien įvykio buvimą.** Įvykis su
+`success: false` reiškia, kad valymas neįvyko arba įvyko iš dalies; skaičiuojamas
+kaip „valymas įvyko", jis rodytų priešingai, nei nutiko.
 
 **Kas laikoma „nuskendusiu" failu.** Tik failas, kurio **nenaudoja nė vienas gyvas
 jobas** – nepriklausomai nuo jobo statuso (`queued`, `processing`, `completed`,

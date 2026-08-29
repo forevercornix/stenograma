@@ -297,31 +297,42 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
   }
 });
 
-test("RETENCIJOS ĮSPĖJIMAS: turinys įvardija TIKSLIAI tai, ko operatorius nežino", () => {
+test("RETENCIJOS ĮSPĖJIMAS: turinys atitinka 7.4d elgesį, o ne senąjį", () => {
   /**
-   * ⚠️ TURINIO PATIKRA VYKDOMA VIETOJE; kad įspėjimas realiai LOGINAMAS starte,
-   * tikrina `auditPersistence.integration` (reikia tikros DB).
+   * ⚠️ ŠIS TESTAS PERRAŠYTAS 7.4d (#213), NES JO DALYKAS PASIKEITĖ.
    *
-   * Postgres režime `audit_log` neribotai auga iki [7.4d]. Diegimas, matantis
-   * `AUDIT_RETENTION_DAYS=30` konfigūracijoje, pagrįstai manytų, kad ji galioja -
-   * todėl įspėjimas privalo pasakyti abu dalykus: kad NEVEIKIA ir kad lentelė AUGS.
+   * Iki 7.4d įspėjimas skelbė, kad retencija postgres režime NEVEIKIA ir kad
+   * lentelė augs neribotai - tada tai buvo tiesa. Įgyvendinus persistentinę
+   * retenciją tas pats tekstas taptų MELU, o melas šioje vietoje brangus:
+   * operatorius arba pridėtų antrą išorinę valymo politiką, arba nepasitikėtų
+   * veikiančiu mechanizmu.
+   *
+   * Todėl tikrinama, kad tekstas skelbia NAUJĄ elgesį ir nebeskelbia senojo.
+   * Turinio patikra vykdoma vietoje; kad įspėjimas realiai loginamas starte,
+   * tikrina `auditPersistence.integration` (reikia tikros DB).
    */
   const { RETENCIJOS_ISPEJIMAS } = require("../utils/auditStore");
 
-  for (const privalomas of [
-    "AUDIT_RETENTION_DAYS",
-    "AUDIT_MAX_ENTRIES",
-    "audit_log",
-    "7.4d",
-    "docs/audit-storage.md",
-  ]) {
+  for (const privalomas of ["AUDIT_RETENTION_DAYS", "AUDIT_MAX_ENTRIES", "docs/audit-storage.md"]) {
     assert.ok(
       RETENCIJOS_ISPEJIMAS.includes(privalomas),
       `įspėjime turi būti „${privalomas}" - kitaip operatorius nežinotų, ko ieškoti`
     );
   }
 
-  assert.match(RETENCIJOS_ISPEJIMAS, /neribotai|nešalinamos/i, "poveikis turi būti įvardytas");
+  /** ⚠️ Skirtumas, dėl kurio įspėjimas apskritai lieka: kiekio riba NĖRA retencija. */
+  assert.match(
+    RETENCIJOS_ISPEJIMAS,
+    /NETAIKOMA|nešalinamos vien dėl kiekio/i,
+    "`AUDIT_MAX_ENTRIES` netaikymas persistentinėms eilutėms privalo būti įvardytas"
+  );
+
+  /** ⚠️ SENASIS TEIGINYS NEGALI GRĮŽTI. */
+  assert.doesNotMatch(
+    RETENCIJOS_ISPEJIMAS,
+    /retencija NEVEIKIA|augs neribotai|iki tol reikalinga išorinė/i,
+    "tekstas skelbia elgesį, kurio 7.4d nebeturi"
+  );
 
   /** ⚠️ Ne klaida, o įspėjimas - startas privalo tęstis. */
   assert.doesNotMatch(RETENCIJOS_ISPEJIMAS, /NUTRAUK|startas negalimas/i);
@@ -895,10 +906,17 @@ test("GENERACIJOS: skenavimo KLAIDA metama, o ne verčiama į tuščią sąraš�
   );
 
   /**
-   * Tripwire greta elgsenos: kvietimo vieta `init()` kelyje irgi neturi `catch`,
-   * kitaip klaida būtų sugauta jau po to, kai `usedGenerations()` ją teisingai
-   * metė. Pjaunama iki KITOS funkcijos deklaracijos - `indexOf("async function
-   * init")` randa `initializePostgres` (poeilutė) ir duotų tuščią intervalą.
+   * Tripwire greta elgsenos: skenavimo klaida neturi būti suryta kvietimo
+   * vietoje.
+   *
+   * ⚠️ TIKRINIMO VIETA PASIKEITĖ (#233 Codex raundas 4). Anksčiau skenavimas
+   * gyveno `patikrintiGeneracijas()` viduje, ir tripwire reikalavo, kad toje
+   * funkcijoje NEBŪTŲ `catch`. Išskyrus kiekio ribą į atskirą funkciją,
+   * skenavimas persikėlė į `init()`, kur `catch` YRA - bet jo darbas kitas: jis
+   * uždaro pool'ą ir klaidą PERMETA (žr. pool nutekėjimo pataisą).
+   *
+   * Todėl tikrinama ne `catch` nebuvimas, o kad jis permeta. Reikalauti „jokio
+   * catch" būtų reikalavimas grąžinti pool'o nutekėjimą.
    */
   const fs = require("node:fs");
   const path = require("node:path");
@@ -907,14 +925,51 @@ test("GENERACIJOS: skenavimo KLAIDA metama, o ne verčiama į tuščią sąraš�
   const indexSrc = beKomentaru(
     fs.readFileSync(path.join(__dirname, "..", "utils/auditStore/index.js"), "utf8")
   );
-  const pradzia = indexSrc.indexOf("async function patikrintiGeneracijas");
-  assert.notEqual(pradzia, -1, "prielaida: patikra rasta");
 
-  const kita = indexSrc.slice(pradzia + 1).search(/\n(async )?function \w+/);
-  const patikra = indexSrc.slice(pradzia, kita === -1 ? undefined : pradzia + 1 + kita);
+  const skenavimas = indexSrc.indexOf("await pgStore.usedGenerations()");
+  assert.notEqual(skenavimas, -1, "prielaida: skenavimo kvietimas `init()` kelyje rastas");
 
-  assert.ok(patikra.length > 50, "prielaida: funkcijos kūnas išpjautas");
-  assert.doesNotMatch(patikra, /catch/, "generacijų patikra negali ryti skenavimo klaidos");
+  /** Fazė nuo skenavimo iki jos `catch` bloko pabaigos. */
+  const catchVieta = indexSrc.indexOf("} catch (klaida) {", skenavimas);
+  assert.notEqual(catchVieta, -1, "prielaida: fazė turi klaidų apdorojimą");
+
+  /**
+   * ⚠️ NE FIKSUOTO DYDŽIO LANGAS (AGENTS.md §9.1). Pirmoji šios patikros versija
+   * ėmė 400 simbolių ir užgriebė kodą PO `catch` bloko - tikrino ne tą, ką
+   * teigė. Riba skaičiuojama pagal skliaustus.
+   */
+  const faze = (() => {
+    /** ⚠️ Pradedama nuo BLOKO `{`, ne nuo `}` prieš `catch` - kitaip gylis pradžioje neigiamas. */
+    const blokoPradzia = indexSrc.indexOf("{", catchVieta + 1);
+    let gylis = 0;
+    for (let i = blokoPradzia; i < indexSrc.length; i += 1) {
+      if (indexSrc[i] === "{") gylis += 1;
+      else if (indexSrc[i] === "}") {
+        gylis -= 1;
+        if (gylis === 0) return indexSrc.slice(blokoPradzia, i + 1);
+      }
+    }
+    return indexSrc.slice(blokoPradzia);
+  })();
+
+  assert.match(faze, /throw klaida;/, "skenavimo klaida privalo būti PERMETAMA, ne suryta");
+  assert.doesNotMatch(
+    faze,
+    /return\s|paruosta = true/,
+    "`catch` negali tęsti starto - tai reikštų startą su nepatikrintomis generacijomis"
+  );
+
+  /** Ir pačios patikros funkcijos lieka grynos: jokio `catch` jose. */
+  for (const vardas of ["function patikrintiNasliaites", "function patikrintiRaktuKieki"]) {
+    const pradzia = indexSrc.indexOf(vardas);
+    assert.notEqual(pradzia, -1, `prielaida: ${vardas} rasta`);
+
+    const kita = indexSrc.slice(pradzia + 1).search(/\n(async )?function \w+/);
+    const kunas = indexSrc.slice(pradzia, kita === -1 ? undefined : pradzia + 1 + kita);
+
+    assert.ok(kunas.length > 50, `prielaida: ${vardas} kūnas išpjautas`);
+    assert.doesNotMatch(kunas, /catch/, `${vardas} negali ryti klaidos`);
+  }
 });
 
 test("ZONDAS: tikrina TEISES (SELECT/INSERT/DELETE), ne vien ryšį", () => {

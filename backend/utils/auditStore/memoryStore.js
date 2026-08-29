@@ -9,9 +9,12 @@
  * memory - visą žurnalą, postgres - puslapį. Todėl riba ir filtrai taikomi
  * ABIEJUOSE, ir bendras kontrakto rinkinys tai tikrina.
  *
- * ⚠️ RETENCIJA ČIA NEGYVENA. `auditLog` ją taiko masyvui pats (7.4a elgesys);
- * persistentinės retencijos savininkas yra 7.4d. Skirtumas SĄMONINGAS ir
- * dokumentuotas - žr. `docs/audit-storage.md`.
+ * ⚠️ RETENCIJOS POLITIKA ČIA NEGYVENA, BET MECHANIZMAS - TAIP (#213, 7.4d).
+ * `auditLog` retenciją masyvui taiko pats (7.4a elgesys), tačiau nuo 7.4d ši
+ * saugykla turi ir bendro kontrakto dalį - `retencijosRiba()` bei
+ * `purgeExpired()`, tuos pačius, ką postgres pusė. Terminą ir sweep'o ritmą
+ * toliau nustato `auditLog`/`retentionSweeper`, ne saugykla.
+ * Žr. `docs/audit-storage.md` §9.
  */
 
 /** @type {object[]} įrašymo tvarka = masyvo tvarka; `seq` atitikmuo postgres pusėje. */
@@ -158,6 +161,74 @@ const memoryStore = {
     return eilutes.filter((e) => e.subjectId === subjectId).length;
   },
 
+  /**
+   * Retencijos riba atmintyje - iš ĮLEIDŽIAMO `now` (#233 Codex, P1).
+   *
+   * ⚠️ SKIRTUMAS NUO POSTGRES YRA TEISINGAS, NE NUKRYPIMAS. Atmintyje
+   * `timestamp` rašo tas pats procesas, tad jo laikrodis IR YRA autoritetas;
+   * #213 reikalavimas dėl kontroliuojamo laiko šaltinio čia reiškia būtent
+   * įleidžiamą `now`, kurį naudoja testai. Postgres pusėje autoritetas yra DB,
+   * nes ten rašymo žymą deda ji.
+   */
+  async retencijosRiba(dienos, now = Date.now()) {
+    const skaicius = Number(dienos);
+
+    if (!Number.isFinite(skaicius) || skaicius <= 0) {
+      throw new Error(`Retencijos terminas privalo būti teigiamas (gauta: ${dienos}).`);
+    }
+
+    return new Date(now - skaicius * 24 * 60 * 60 * 1000).toISOString();
+  },
+
+  /**
+   * RETENCIJA - TAS PATS KONTRAKTAS KAIP POSTGRES (#155, 7.4d / #213).
+   *
+   * ⚠️ RIBA GRIEŽTA IR VIENODA ABIEJUOSE BACKEND'UOSE: `< cutoff` šalinama,
+   * `== cutoff` lieka. Skirtinga riba čia reikštų, kad tas pats įrašas išgyvena
+   * atmintyje ir dingsta DB - tokį nukrypimą pagauna bendras paritetų rinkinys.
+   *
+   * ⚠️ `limit` gerbiamas, nors atmintyje jis nebūtinas. Kontraktas turi būti
+   * vienodas: sweep'o ciklas nežino, kuris backend'as po juo, ir jo elgesys
+   * neturi priklausyti nuo to.
+   *
+   * ⚠️ NETINKAMO `timestamp` eilutės ČIA NEŠALINAMOS - tai daro `auditLog`
+   * atminties kelias (7.4a elgesys). Postgres pusėje `timestamp` yra `NOT NULL
+   * timestamptz`, tad netinkamos reikšmės negali atsirasti, ir šis metodas
+   * abiejuose backend'uose reiškia tą patį.
+   */
+  async purgeExpired(cutoffIso, limit = Infinity) {
+    const riba = Date.parse(cutoffIso);
+    if (!Number.isFinite(riba)) throw new Error(`Netinkamas retencijos cutoff: ${cutoffIso}`);
+
+    const pasalinti = [];
+
+    for (const eilute of eilutes) {
+      if (pasalinti.length >= limit) break;
+
+      const laikas = Date.parse(eilute.timestamp);
+      if (Number.isFinite(laikas) && laikas < riba) pasalinti.push(eilute);
+    }
+
+    for (const eilute of pasalinti) {
+      const vieta = eilutes.indexOf(eilute);
+      if (vieta !== -1) eilutes.splice(vieta, 1);
+    }
+
+    return pasalinti.length;
+  },
+
+  /**
+   * `PRIVACY_MODE` starto valymas - simetriškas postgres keliui.
+   *
+   * Atmintyje jis sutampa su `clear()`, bet vardas išlaikomas atskiras: sweep'o
+   * ir init'o kodas neturi šakotis pagal backend'ą.
+   */
+  async purgeAllForPrivacy() {
+    const kiek = eilutes.length;
+    eilutes.length = 0;
+    return kiek;
+  },
+
   async clear() {
     eilutes.length = 0;
     /** ⚠️ `seq` NEATSTATOMAS: kursoriai iš ankstesnio rinkinio neturi netikėtai atgyti. */
@@ -182,10 +253,11 @@ const memoryStore = {
   },
 
   /**
-   * ⚠️ TIK `auditLog` VIDINEI RETENCIJAI IR RIBOJIMUI (7.4a elgesys).
+   * ⚠️ TIK `auditLog` VIDINIAM ATMINTIES KELIUI (7.4a elgesys).
    *
-   * Neįeina į bendrą backend'ų kontraktą: postgres pusėje retencijos savininkas
-   * yra 7.4d. Eksponuojama, kad `auditLog` nelaikytų antros masyvo nuorodos.
+   * Neįeina į bendrą backend'ų kontraktą - postgres pusėje masyvo atitikmens
+   * nėra, o bendra retencija nuo 7.4d eina per `retencijosRiba()` ir
+   * `purgeExpired()`. Eksponuojama, kad `auditLog` nelaikytų antros nuorodos.
    */
   _eilutes: eilutes,
 };

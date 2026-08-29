@@ -25,14 +25,20 @@ const logger = createLogger("audit");
 /**
  * ⚠️ ATMINTIES MASYVAS PRIKLAUSO `memoryStore`, NE ŠIAM FAILUI (#155, 7.4b).
  *
- * Nuoroda išlaikoma todėl, kad retencija (`purgeExpired`) ir atminties riba
- * (`enforceMaxEntries`) yra 7.4a elgesys, galiojantis TIK atminties režimui.
- * PostgreSQL režime šis masyvas lieka tuščias, tad abi funkcijos savaime tampa
- * no-op - persistentinės retencijos savininkas yra 7.4d, ir jos įvedimas čia
- * būtų scope creep.
+ * Nuoroda išlaikoma todėl, kad ATMINTIES riba (`enforceMaxEntries`) ir sinchroninis
+ * `purgeExpiredMemory()` yra 7.4a elgesys, galiojantis TIK atminties režimui:
+ * PostgreSQL režime šis masyvas lieka tuščias, tad abu savaime tampa no-op.
+ *
+ * ⚠️ RETENCIJA NEBĖRA TIK ATMINTIES REIKALAS (#213, 7.4d). Asinchroninis
+ * `purgeExpired()` šiame faile yra BENDRAS abiem backend'ams: ribą jis prašo iš
+ * saugyklos ir per `store.purgeExpired()` fiziškai šalina `audit_log` eilutes.
+ * Skirtumas liko tik tarp KELIŲ (skaitymo/rašymo kelias - atmintis; sweep'as -
+ * abu), ne tarp režimų.
  */
 const auditStore = require("./auditStore");
 const log = require("./auditStore/memoryStore")._eilutes;
+/** ⚠️ Batch dydžio autoritetas yra store sluoksnis - čia jis tik naudojamas. */
+const { RETENCIJOS_BATCH } = require("./auditStore/postgresStore");
 const DEFAULT_RETENTION_DAYS = 30;
 const DEFAULT_MAX_ENTRIES = 5000;
 
@@ -122,8 +128,32 @@ function getMaxEntries() {
     : DEFAULT_MAX_ENTRIES;
 }
 
-function purgeExpired(now = Date.now()) {
-  const cutoff = now - getRetentionDays() * 24 * 60 * 60 * 1000;
+/**
+ * Retencijos riba - VIENAS skaičiavimas visam sweep'ui (#155, 7.4d / #213).
+ *
+ * ⚠️ Perskaičiuojant `now()` kiekvienam batch'ui, ilgo sweep'o metu keistųsi
+ * naikinamų eilučių aibė: pirmas batch'as dirbtų su viena riba, paskutinis - su
+ * kita, ir rezultatas priklausytų nuo trukmės.
+ */
+function retencijosRiba(now) {
+  return now - getRetentionDays() * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * ATMINTIES RETENCIJA - SINCHRONINĖ (7.4a elgesys, nepakeistas).
+ *
+ * ⚠️ SKAITYMO IR RAŠYMO KELIAI KVIEČIA BŪTENT ŠITĄ, NE `purgeExpired()`.
+ * `record()`, `getAll()` ir `query()` jo `await`inti negali - tai reikštų arba
+ * DB trynimą kiekvienos užklausos metu, arba (be `await`) neapdorotą rejection.
+ * Persistentinė retencija priklauso sweep'ui, kuris vyksta pagal grafiką.
+ *
+ * PostgreSQL režime `log` tuščias, tad čia savaime nieko nedaro.
+ *
+ * ⚠️ Netinkamo `timestamp` eilutės šalinamos - sugadinta eilutė atmintyje
+ * niekada nepasentų. Postgres pusėje tokių būti negali (`NOT NULL timestamptz`).
+ */
+function purgeExpiredMemory(now = Date.now()) {
+  const cutoff = retencijosRiba(now);
 
   const originalLength = log.length;
 
@@ -136,6 +166,58 @@ function purgeExpired(now = Date.now()) {
   }
 
   return originalLength - log.length;
+}
+
+/**
+ * PILNAS RETENCIJOS CIKLAS - ABIEM BACKEND'AMS (#155, 7.4d / #213).
+ *
+ * ⚠️ ASYNC NUO 7.4d. `retentionSweeper` privalo `await`inti: be to jis logintų
+ * `[object Promise]` vietoj skaičiaus, o klaida taptų neapdorotu rejection.
+ *
+ * Ciklas kartoja ribotus batch'us, kol saugykla grąžina mažiau nei limitas -
+ * tada expired eilučių nebeliko. Riba apskaičiuojama VIENĄ kartą ir perduodama
+ * visiems batch'ams.
+ *
+ * @returns {Promise<number>} baigtinis pašalintų įrašų skaičius.
+ */
+async function purgeExpired(now = Date.now()) {
+  let pasalinta = purgeExpiredMemory(now);
+
+  const store = auditStore.current();
+  if (typeof store.purgeExpired !== "function") return pasalinta;
+
+  /**
+   * ⚠️ RIBĄ SKAIČIUOJA SAUGYKLA, NE ŠIS PROCESAS (#233 Codex, P1).
+   *
+   * Persistentiniame režime `timestamp` rašo DB `now()`, tad ir trynimo riba
+   * privalo ateiti iš to paties laikrodžio - kitaip skubantis replikos
+   * laikrodis negrįžtamai ištrintų dar nepasenusias eilutes. Atmintyje ta pati
+   * funkcija remiasi įleidžiamu `now`, tad kontroliuojamo laiko reikalavimas
+   * galioja abiem pusėms, tik autoritetas skiriasi.
+   *
+   * Kviečiama VIENĄ kartą: visi batch'ai naudoja tą pačią ribą.
+   */
+  const cutoffIso = await store.retencijosRiba(getRetentionDays(), now);
+
+  try {
+    for (;;) {
+      const kiek = await store.purgeExpired(cutoffIso, RETENCIJOS_BATCH);
+      pasalinta += kiek;
+
+      if (kiek < RETENCIJOS_BATCH) return pasalinta;
+    }
+  } catch (klaida) {
+    /**
+     * ⚠️ JAU ĮVYKDYTI BATCH'AI NEDINGSTA IŠ ATASKAITOS (#233 Codex, P2).
+     *
+     * Kiekvienas batch'as commit'inasi atskirai. Kritus vėlesniam, be šito
+     * skaičius liktų nulis, `retentionSweeper` ciklą palaikytų tuščiu ir
+     * neparašytų `RETENTION_PURGE` įrašo - eilutės būtų negrįžtamai ištrintos
+     * BE pėdsako audito žurnale. Tyliai.
+     */
+    klaida.pasalinta = pasalinta;
+    throw klaida;
+  }
 }
 
 /**
@@ -422,7 +504,7 @@ async function record(entry = {}) {
     return null;
   }
 
-  purgeExpired();
+  purgeExpiredMemory();
 
   const row = Object.freeze({
     // UUID, ne skaitiklis: `log.length + 1` kartodavosi po purge/remove, o
@@ -522,7 +604,7 @@ async function getAll() {
 
   // Retencija galioja ir skaitant: be šito pasenę įrašai liktų matomi
   // /api/audit tol, kol neateina naujas įvykis.
-  purgeExpired();
+  purgeExpiredMemory();
 
   /**
    * ⚠️ BE RIBOS - SĄMONINGAI.
@@ -551,7 +633,7 @@ async function query(options = {}) {
     return { entries: [], nextCursor: null };
   }
 
-  purgeExpired();
+  purgeExpiredMemory();
 
   const { limit = 100, cursor = null, action = null, requestId = null, from = null, to = null, jobId = null } = options;
 
@@ -632,6 +714,21 @@ function clear() {
  * /api/audit sąrašą ir nesuprastų, kad atmintis jau išvalyta.)
  */
 function purgeForPrivacyMode() {
+  /**
+   * ⚠️ POSTGRES REŽIME TAI NO-OP, IR TAI TAISO VEIKIANČIĄ KLAIDĄ (#155, 7.4d / #213).
+   *
+   * `record()`, `getAll()` ir `query()` kviečia šią funkciją kiekvieną kartą,
+   * kai `PRIVACY_MODE=true`. Ji kvietė `clear()`, o `postgresStore.clear()`
+   * meta klaidą, kai `NODE_ENV !== "test"` - tad produkcijoje su PostgreSQL
+   * procesas krisdavo per PIRMĄ audito rašymą, skaitymą ar užklausą.
+   *
+   * Persistentiniame režime valymas priklauso STARTUI: `auditStore.init()`
+   * fiziškai išvalo lentelę prieš instancijai tampant paruošta, o naujų eilučių
+   * neatsiranda, nes `record()` grąžina `null` dar prieš rašymą. Vadinasi, čia
+   * nėra ko valyti - ir nėra pagrindo kviesti trynimą kiekvienos užklausos metu.
+   */
+  if (auditStore.backend() !== "memory") return 0;
+
   const removed = log.length;
 
   clear();
@@ -694,6 +791,7 @@ module.exports = {
   sanitizeForLogging,
   pseudonymizeIdentifier,
   purgeExpired,
+  purgeExpiredMemory,
   enforceMaxEntries,
   getRetentionDays,
   getMaxEntries,

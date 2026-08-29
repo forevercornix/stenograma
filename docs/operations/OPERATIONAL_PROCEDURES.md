@@ -272,13 +272,45 @@ galima pamatyti turimomis priemonėmis.
 - **`memory`** (numatytasis): audito retencija — 30 d. pagal
   `AUDIT_RETENTION_DAYS`. Senesnių įvykių analizei reikia iš anksto išsaugotų
   kopijų.
-- **`postgres`**: `AUDIT_RETENTION_DAYS` **NEGALIOJA** – `audit_log` eilutės
-  automatiškai nešalinamos, ir lentelė auga neribotai (persistentinę retenciją
-  įgyvendina [7.4d]). Startas įspėja `warn` lygiu.
+- **`postgres`** (nuo [7.4d]): `AUDIT_RETENTION_DAYS` **GALIOJA** – `audit_log`
+  eilutės šalinamos to paties centralizuoto sweep'o metu, ribotais batch'ais.
 
-  **Operatoriaus veiksmas:** iki 7.4d reikalinga IŠORINĖ valymo politika.
-  Priešingu atveju asmens duomenys audite išliks neribotai, nors konfigūracijoje
-  matoma 30 dienų reikšmė – tiesioginė GDPR saugojimo ribojimo rizika.
+  ⚠️ **IŠORINĖS valymo politikos NEBEREIKIA, ir jos nekurkite.** Iki 7.4d ji
+  buvo būtina; dabar ji būtų ANTRAS nepriklausomas trynimo mechanizmas ant tos
+  pačios lentelės. Du valytojai, nežinantys vienas apie kitą, šalintų eilutes
+  pagal skirtingas ribas ir skirtingus laikrodžius, o `RETENTION_PURGE` įrašas
+  rodytų tik vieno jų darbą – audito žurnalas nustotų atitikti tikrovę.
+
+  Jei išorinė politika jau įdiegta iš ankstesnės versijos, **išjunkite ją**
+  atnaujindami.
+
+- **`AUDIT_MAX_ENTRIES` persistentiškai NETAIKOMAS.** Tai atminties apsauga;
+  eilutės niekada nešalinamos vien dėl to, kad jų skaičius viršijo N. Startas
+  įspėja `warn` lygiu, jei kintamasis nustatytas su `postgres` backend'u.
+
+### ⚠️ ATNAUJINANT Į 7.4d: PIRMAS SWEEP'AS TRINA IŠ KARTO
+
+Tai **vienintelis destruktyvus 7.4d pokytis**, ir jis įvyksta be atskiro
+patvirtinimo.
+
+Diegimas, kuriame `AUDIT_RETENTION_DAYS` buvo nustatytas tuomet, kai jis galiojo
+**tik atminčiai**, po atnaujinimo tą pačią reikšmę pritaiko `audit_log` lentelei.
+Pirmas retencijos ciklas paleidžiamas **praėjus ~5 s po starto**, tad visos
+eilutės, jau senesnės už terminą, dingsta **per kelias minutes** ir
+**negrįžtamai**.
+
+Vienintelis pranešimas produkte yra starto logas. Jo nepakanka: operatorius,
+neskaitantis starto logų, apie tai sužinos tik pastebėjęs, kad senų įrašų nebėra.
+
+**Prieš atnaujinant:**
+
+1. patikrinkite faktinę reikšmę — `AUDIT_RETENTION_DAYS` (numatyta: 30 d.);
+2. nuspręskite, ar ji tinka **persistentiniam** auditui — atmintyje ji reiškė
+   „iki restarto arba iki N dienų", DB ji reiškia tik „N dienų";
+3. jei reikia išsaugoti senesnius įrašus, pasidarykite **pilną PostgreSQL
+   kopiją** prieš atnaujinimą (`docs/backup-runbook.md`) — aplikacijos kopija
+   audito eilučių neapima;
+4. tik tada atnaujinkite.
 
 ---
 

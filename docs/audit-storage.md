@@ -55,11 +55,40 @@ priklausyti nuo tylios pirmenybės.
 o ne paliekami `pg` skaityti iš `process.env` — kitaip konfigūracija būtų priimta
 iš vieno šaltinio, o jungtis sukurta pagal kitą.
 
-`PRIVACY_MODE=true` kartu su `AUDIT_BACKEND=postgres` taip pat nutraukia startą.
-Prašymai prieštarauja: vienas draudžia rašyti auditą, kitas reikalauja jį
-išsaugoti patvariai. Tylus leidimas duotų migruotą, sukonfigūruotą ir amžinai
-tuščią lentelę, kuri stebint atrodo kaip veikianti sistema. Pilna `PRIVACY_MODE`
-semantika lieka **[7.4d]**; čia apibrėžtas tik derinys.
+### `PRIVACY_MODE=true` su `postgres` — LEIDŽIAMAS nuo 7.4d
+
+⚠️ **Tai pakeitimas.** Iki 7.4d šis derinys **nutraukdavo startą**: tuomet jis
+neturėjo apibrėžtos semantikos, ir tylus leidimas būtų davęs migruotą,
+sukonfigūruotą, amžinai tuščią lentelę, kuri stebint atrodo kaip veikianti
+sistema.
+
+7.4d tą semantiką apibrėžia, tad prieštaravimo nebeliko:
+
+- starto metu `audit_log` **fiziškai išvalomas** (`await`inta, fail-closed);
+- kol vėliava įjungta, nauji įrašai **nepersistinami**;
+- išjungus vėliavą seni įrašai **neatsikuria**, o nauji vėl rašomi.
+
+⚠️ **Kodėl sargas pašalintas, o ne paliktas.** Su juo nebuvo **jokio palaikomo
+būdo ištrinti persistentinių audito eilučių per `PRIVACY_MODE`**: įjungus
+vėliavą procesas nepakildavo, o perjungus `AUDIT_BACKEND=memory` jis pakildavo,
+bet DB eilutės likdavo nepaliestos. Fail-fast ten saugojo ne duomenis — jis juos
+užrakindavo, priešingai nei žada in-memory kontraktas, kuris `PRIVACY_MODE` metu
+žada ištrynimą, ne nutildymą.
+
+Derinys nelieka tylus: `init()` kiekvieno starto metu rašo **garsų įspėjimą**,
+kad auditas išjungtas sąmoningai ir kad valymas negrįžtamas.
+
+⚠️ **VĖLIAVOS PERJUNGIMUI REIKIA PILNO SUSTABDYMO, NE ROLLING UPDATE.**
+
+Purge atleidžia užraktus po kiekvieno batch'o (batch'inimo pasekmė, žr. §9), tad
+rolling update metu senesnė replika su `PRIVACY_MODE=false` gali įrašyti eilutę
+jau **po** to, kai naujoji baigė valyti. Naujoji replika savo rašymus slopina,
+bet nebepurgina niekada — ir ta eilutė lieka `audit_log` neribotai.
+
+Todėl garantija „lentelė lieka tuščia" galioja tik tada, kai **visos** replikos
+paleistos su ta pačia vėliava. Procedūra: sustabdyti visas instancijas →
+pakeisti vėliavą → paleisti. Tas pats galioja ir mišriam server/worker
+diegimui — worker'iai rašo auditą ir inicijuoja tą pačią saugyklą.
 
 ---
 
@@ -215,16 +244,50 @@ gynybos linija tam atvejui, kai DB vis dėlto spėja įrašyti.
 
 ---
 
-## 9. Retencija — sąmoningas skirtumas tarp backend'ų
+## 9. Retencija (7.4d)
 
-`AUDIT_RETENTION_DAYS` ir `AUDIT_MAX_ENTRIES` galioja **tik `memory` režimui**
-(7.4a elgesys, taikomas atminties masyvui).
+`AUDIT_RETENTION_DAYS` galioja **abiem backend'ams**. `AUDIT_MAX_ENTRIES` —
+**tik `memory`**.
 
-`postgres` režime įrašai automatiškai **nešalinami**. Persistentinės retencijos
-savininkas yra **[7.4d]**; jos įgyvendinimas 7.4b metu būtų scope creep.
+| Nustatymas | `memory` | `postgres` |
+|---|---|---|
+| `AUDIT_RETENTION_DAYS` | taikoma | **taikoma** (nuo 7.4d) |
+| `AUDIT_MAX_ENTRIES` | taikoma | **NETAIKOMA** |
 
-Skirtumas dokumentuojamas čia, o ne slepiamas: tylus „retencija veikia visur"
-teiginys būtų stipresnis už kodą (AGENTS.md §12.1).
+### Kodėl `AUDIT_MAX_ENTRIES` į DB neperkeltas
+
+Tai buvo apsauga nuo RAM augimo viename procese, ne duomenų politika. Lentelėje
+ji reikštų tylų naikinimą: įrašas dingtų ne dėl retencijos termino, o dėl to,
+kad po jo atėjo pakankamai naujų. Eilutės **nešalinamos vien dėl kiekio**.
+
+### Kaip vyksta persistentinis šalinimas
+
+Retencijos autoritetas — ta pati centralizuota `retentionSweeper` architektūra,
+kuri tvarko job'us ir audio. Atskiro audito timer'io nėra.
+
+- riba apskaičiuojama **vieną kartą** sweep'o pradžioje: `cutoff = now − retention`;
+- riba matuojama **tiksliomis valandomis** (`N × 24 h`), ne kalendorinėmis
+  dienomis: `interval 'N days'` `timestamptz` aritmetikoje išlaiko tą pačią
+  vietinio laikrodžio valandą, tad DST zonoje langas per dieną būtų 23 arba 25
+  valandos, ir postgres ištrintų valanda anksčiau nei `memory`. Abu backend'ai
+  privalo reikšti tą patį (#213 Codex, raundas 5);
+- `timestamp < cutoff` šalinama; **`timestamp == cutoff` lieka**;
+- šalinama **ribotais batch'ais** (`RETENCIJOS_BATCH`), kol batch'as grąžina
+  mažiau nei limitas — trumpos transakcijos, trumpi užraktai;
+- kandidatai atrenkami DB pusėje per `timestamp` indeksą su
+  `FOR UPDATE SKIP LOCKED`, tad **dvi instancijos** gali sweep'inti tą pačią
+  lentelę vienu metu be deadlock'o ir be dvigubo darbo;
+- vienos instancijos ciklai **nepersidengia**: kol vyksta sweep'as, kitas
+  scheduler'io tick'as praleidžiamas.
+
+Retencija taikoma **visoms generacijoms vienodai** — senas `hash_key_id` nėra
+priežastis įrašą palikti ar pašalinti anksčiau.
+
+### Retencija atrakina rakto išėmimą
+
+7.4c neleidžia išimti istorinio rakto, kol DB yra jo `hash_key_id` įrašų (žr.
+§13). Retencija tuos įrašus galiausiai pašalina, ir tada raktą išimti saugu —
+be jos istorinių raktų sąrašas galėtų tik augti.
 
 ---
 
@@ -236,6 +299,11 @@ Atkūrus jį, GDPR ištrinti audito įrašai grįžtų: ištrynimo žymos dengia
 pagal ID, o audito įrašai saugo pseudonimus, tad žymų apsauga jų neapsaugotų.
 Ankstyvos kopijos galėjo turėti `audit` lauką — jis **praleidžiamas**, ne
 atkuriamas.
+
+⚠️ **Tai galioja APLIKACIJOS kopijai.** Fizinė `pg_dump` kopija `audit_log`
+lentelę įtrauktų pagal nutylėjimą, ir atkūrus grįžtų tiek GDPR ištrinti, tiek
+retencijos pašalinti įrašai. Pilnai PostgreSQL kopijai reikia
+`--exclude-table-data=audit_log` — žr. `docs/backup-runbook.md`.
 
 ---
 
@@ -474,7 +542,7 @@ restarto jų neliks. Tai sąmoningas elgesys, ne defektas — bet grįžtant ver
 | Etapas | Kas |
 |---|---|
 | **[7.4c]** | ✅ įgyvendinta — žr. §13–§15 |
-| **[7.4d]** | persistentinė retencija, pilna `PRIVACY_MODE` logika, readiness |
+| **[7.4d]** | ✅ įgyvendinta — retencija (§9), `PRIVACY_MODE` (§1, §9) |
 | **[7.5b]** | `POST_HOC_IVYKIAI` perrikiavimas — žr. §12 |
 
 ### 12. Kodėl post-hoc įvykiai NETAMPA fail-closed 7.4b metu

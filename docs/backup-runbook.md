@@ -59,6 +59,69 @@ užfiksuokite ir tuo metu galiojusius `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID` bei
 `AUDIT_ID_SALT_PREVIOUS` — savo paslapčių saugykloje, ne kopijos faile. Jie
 saugomi **atskirai ir atkuriami kartu** su ta kopija.
 
+### ⚠️ `pg_dump` audito duomenų NEIMA (7.4d)
+
+```bash
+pg_dump --exclude-table-data=audit_log "$DATABASE_URL" > kopija.sql
+```
+
+⚠️ **Be šio parametro kopija paneigia dvi ištrynimo garantijas vienu metu.**
+`audit_log` yra įprasta lentelė, tad `pg_dump` ją įtraukia pagal nutylėjimą.
+Atkūrus tokį dump'ą grįžta:
+
+- **GDPR ištrinti** įrašai — `removeBySubjectIdentifier()` juos fiziškai
+  pašalino, o atkūrimas grąžina;
+- **retencijos pašalinti** įrašai — jie dingo pasibaigus `AUDIT_RETENTION_DAYS`,
+  ir atkūrimas atsuka tą terminą atgal.
+
+Abiem atvejais sistemoje atsiranda pseudonimizuotų asmens duomenų, kurių ten
+neturi būti, ir niekas apie tai nepraneša.
+
+⚠️ **`--exclude-table-data`, NE `--exclude-table`.** Pirmasis praleidžia
+duomenis, bet palieka lentelės schemą; antrasis pašalintų ir ją, o atkurta DB
+liktų be `audit_log` — startas tada nutrūktų fail-closed, nes `auditStore.init()`
+reikalauja lentelės ir jos invariantų.
+
+Schema atkuriama, duomenys — ne: būtent to ir norima, nes auditas yra
+atskaitomybės žurnalas, o ne atkuriama būsena (žr. `docs/audit-storage.md` §10).
+
+### ⚠️ PITR ir tomo momentinės kopijos — `--exclude-table-data` NETAIKOMAS
+
+`--exclude-table-data` yra **`pg_dump` parametras**. Kiti pilnos kopijos metodai
+jo neturi ir turėti negali:
+
+| Metodas | Ar gali praleisti `audit_log`? |
+|---|---|
+| `pg_dump` (loginė kopija) | **Taip** — `--exclude-table-data=audit_log` |
+| PITR (WAL archyvas + bazinė kopija) | **Ne** — WAL atkuria kiekvieną pakeitimą, įskaitant ištrintų eilučių įrašymą |
+| Tomo / disko momentinė kopija | **Ne** — kopijuojami failai, ne lentelės |
+
+Atkūrus PITR arba momentinę kopiją, **GDPR ištrinti ir retencijos pašalinti
+audito įrašai grįžta**. Teiginys „pilna kopija turėtų išbraukti šią lentelę"
+šiems metodams tiesiog netaikomas, ir tvirtinti priešingai būtų klaidinga.
+
+**Ką daryti vietoj to** — atkūrimo procedūroje, kol servisas dar sustabdytas:
+
+```sql
+-- PO PITR ar momentinės kopijos atkūrimo, PRIEŠ paleidžiant servisą.
+TRUNCATE audit_log;
+```
+
+Jei audito pėdsakas reikalingas, o grąžinti visko negalima, alternatyvos yra dvi,
+ir abi reikalauja sprendimo, ne numatytosios elgsenos:
+
+1. **Paleisti su `PRIVACY_MODE=true`** vieną kartą: startas fiziškai išvalo
+   lentelę (7.4d), po to vėliava išjungiama ir servisas paleidžiamas iš naujo.
+   Rezultatas toks pat kaip `TRUNCATE`, tik per palaikomą kelią.
+2. **Pripažinti, kad atkurta kopija turi pasenusius įrašus**, ir dokumentuoti tai
+   kaip incidentą — retencija juos pašalins per kitą sweep'ą, bet GDPR ištrinti
+   įrašai **negrįš** į ištrintų būseną savaime, nes ištrynimo žymos dengia
+   job'us, o audito eilutės saugo pseudonimus.
+
+⚠️ Antrasis variantas nėra „nieko nedaryti" — jis reiškia sąmoningą sprendimą
+laikinai turėti duomenis, kurių neturėtų būti. Pirmasis variantas yra
+numatytoji rekomendacija.
+
 ## 2. Įjungimas
 
 Kopijos numatytai **išjungtos** — jos yra papildoma asmens duomenų saugykla.

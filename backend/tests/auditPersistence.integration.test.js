@@ -598,60 +598,77 @@ test("POOL: `shutdown()` uždaro jungtis - kabančių sesijų nelieka", { skip: 
   }
 });
 
-test("STARTAS: postgres režimas ĮSPĖJA apie neveikiančią retenciją", { skip: SKIP }, async () => {
+test("STARTAS: retencijos įspėjimas kyla TIK kai `AUDIT_MAX_ENTRIES` nustatytas", { skip: SKIP }, async () => {
   /**
-   * ⚠️ TIKRINAMA, KAD ĮSPĖJIMAS REALIAI LOGINAMAS, ne tik kad konstanta egzistuoja.
+   * ⚠️ ŠIO TESTO DALYKAS PASIKEITĖ 7.4d (#213).
    *
-   * Turinį tikrina `auditStoreFields` (be DB). Čia - kad `init()` jį praleidžia
-   * pro `log.warn`, ir kad startas dėl to NENUTRŪKSTA: neribotas augimas yra
-   * matomumo, o ne blokavimo klausimas.
+   * Iki 7.4d įspėjimas kildavo KIEKVIENO postgres starto metu, nes retencija
+   * ten neveikė - tai galiojo visiems. Dabar ji veikia, ir vienintelis likęs
+   * skirtumas yra `AUDIT_MAX_ENTRIES`, kuris persistentinėms eilutėms
+   * NETAIKOMAS.
+   *
+   * Todėl tikrinamos ABI pusės: nustačius kintamąjį įspėjimas privalo kilti,
+   * o jo nenustačius - NE. Vien teigiama pusė leistų grąžinti besąlygišką
+   * įspėjimą, kuris kiekvieno starto metu praneša apie normalią būseną - toks
+   * triukšmas išmokstamas ignoruoti kartu su svarbiais pranešimais.
    */
   const auditStore = require("../utils/auditStore");
   const { RETENCIJOS_ISPEJIMAS } = auditStore;
   const { url, resursai } = await paruostiDb("audit_retencijos_ispejimas");
 
-  const pagauta = [];
   const originalus = console.warn;
+  const savedLogLevel = process.env.LOG_LEVEL;
 
   /**
    * ⚠️ `LOG_LEVEL` LAIKINAI SUŠVELNINAMAS - BE TO TESTAS MATUOJA TYLĄ.
    *
-   * Šio failo viršuje nustatyta `LOG_LEVEL = "error"`, kad PostgreSQL testų
-   * išvestis liktų skaitoma. Bet `log.warn()` tada FILTRUOJAMAS (`warn` 30 <
-   * `error` 40, žr. `utils/logger.js`), ir `console.warn` niekada nekviečiamas:
-   * pirmoji šio testo versija krito CI būtent dėl to, o ne dėl produkcinio kodo.
-   *
-   * Lygis skaitomas KIEKVIENO rašymo metu (`logger.js:92`), tad laikinas
-   * perrašymas veikia ir grąžinamas `finally` bloke.
+   * Šio failo viršuje nustatyta `LOG_LEVEL = "error"`, tad `log.warn()` būtų
+   * filtruojamas ir `console.warn` niekada nekviečiamas: pirmoji šio testo
+   * versija krito CI būtent dėl to, o ne dėl produkcinio kodo.
    */
-  const savedLogLevel = process.env.LOG_LEVEL;
   process.env.LOG_LEVEL = "warn";
-  console.warn = (...args) => pagauta.push(args.join(" "));
+
+  const paleisti = async (papildoma) => {
+    const pagauta = [];
+    console.warn = (...args) => pagauta.push(args.join(" "));
+    try {
+      await auditStore.shutdown();
+      await auditStore.init({
+        ...process.env,
+        AUDIT_BACKEND: "postgres",
+        DATABASE_URL: url,
+        AUDIT_ID_SALT: "testine-druska",
+        AUDIT_ID_SALT_ID: HASH_KEY_ID,
+        PRIVACY_MODE: "false",
+        ...papildoma,
+      });
+    } finally {
+      console.warn = originalus;
+    }
+    return pagauta;
+  };
 
   try {
-    /** Prielaida eksplicitiškai: jei lygis vėl užgoštų `warn`, testas turi kristi kaip klaida, ne praeiti. */
-    assert.ok(
-      process.env.LOG_LEVEL === "warn",
-      "prielaida: `warn` lygis įjungtas - kitaip testas tikrintų tylą"
-    );
+    assert.ok(process.env.LOG_LEVEL === "warn", "prielaida: `warn` lygis įjungtas");
 
-    await auditStore.shutdown();
-    await auditStore.init({
-      ...process.env,
-      AUDIT_BACKEND: "postgres",
-      DATABASE_URL: url,
-      AUDIT_ID_SALT: "testine-druska",
-      AUDIT_ID_SALT_ID: HASH_KEY_ID,
-      PRIVACY_MODE: "false",
-    });
-
-    console.warn = originalus;
+    /** ── Nustatytas `AUDIT_MAX_ENTRIES`: įspėjimas PRIVALO kilti ─────────── */
+    const suRiba = await paleisti({ AUDIT_MAX_ENTRIES: "1000" });
 
     assert.equal(auditStore.backend(), "postgres", "startas privalo pavykti - tai ĮSPĖJIMAS, ne klaida");
     assert.ok(
-      pagauta.some((eil) => eil.includes("AUDIT_RETENTION_DAYS") && eil.includes("7.4d")),
-      "postgres startas privalo įspėti apie neveikiančią retenciją"
+      suRiba.some((eil) => eil.includes("AUDIT_MAX_ENTRIES")),
+      "sukonfigūravus ribą, kuri persistentiškai negalioja, operatorius privalo tai sužinoti"
     );
+
+    /** ── Nenustatytas: įspėjimo BŪTI NEGALI ──────────────────────────────── */
+    const beRibos = await paleisti({ AUDIT_MAX_ENTRIES: undefined });
+
+    assert.equal(
+      beRibos.filter((eil) => eil.includes(RETENCIJOS_ISPEJIMAS)).length,
+      0,
+      "be sukonfigūruotos ribos įspėti nėra ko - tai būtų triukšmas kiekviename starte"
+    );
+
     assert.ok(RETENCIJOS_ISPEJIMAS.length > 50, "prielaida: konstanta nėra tuščia");
   } finally {
     console.warn = originalus;
@@ -1428,6 +1445,480 @@ test("FILTRAI: `job_id` per generacijas ir kiti filtrai - VIENA užklausa", { sk
     assert.ok(filtruoti.entries.every((e) => e.event === "LOGIN_SUCCESS"));
   } finally {
     await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * RETENCIJA IR `PRIVACY_MODE` (#155, 7.4d / #213)
+ *
+ * ⚠️ ČIA GYVENA TAI, KO ATMINTYJE PATIKRINTI NEĮMANOMA: tikra `timestamp`
+ * riba SQL pusėje, batch'ų ribojimas DB kvietimų lygiu, dviejų instancijų
+ * lygiagretumas ir RAW eilučių fizinis dingimas.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** RAW įrašas su VALDOMU laiku - `append()` laiką ima iš DB `now()`. */
+async function irasytiSuLaiku(pool, { id, timestamp, hashKeyId = HASH_KEY_ID, subjectId = null }) {
+  await pool.query(
+    `INSERT INTO audit_log (id, timestamp, event, hash_key_id, result, subject_id)
+     VALUES ($1, $2, 'PROCESSING_COMPLETED', $3, 'success', $4)`,
+    [id, timestamp, hashKeyId, subjectId]
+  );
+}
+
+async function kiekEilučių(pool) {
+  const { rows } = await pool.query("SELECT COUNT(*)::int AS n FROM audit_log");
+  return rows[0].n;
+}
+
+test("RETENCIJA: riba TIKSLI - `< cutoff` dingsta, `== cutoff` ir `> cutoff` lieka", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ RIBA TIKRINAMA RAW LENTELĖJE, NE PER FASADĄ.
+   *
+   * `== cutoff` yra fiksuotas #213 sprendimas, ir jis yra būtent ta vieta, kur
+   * `<` ir `<=` skirtumas nematomas akimi, bet reiškia vieną negrįžtamai
+   * ištrintą įrašą.
+   */
+  const { pool, resursai } = await paruostiDb("audit_retencijos_riba");
+
+  try {
+    const cutoff = "2026-06-01T00:00:00.000Z";
+
+    await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: "2026-05-31T23:59:59.999Z" });
+    await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: cutoff });
+    await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: "2026-06-01T00:00:00.001Z" });
+
+    const store = createPostgresStore(pool, { hashKeyId: HASH_KEY_ID });
+    const pasalinta = await store.purgeExpired(cutoff, 100);
+
+    assert.equal(pasalinta, 1, "tik `< cutoff` eilutė");
+
+    const { rows } = await pool.query("SELECT timestamp FROM audit_log ORDER BY timestamp");
+    assert.equal(rows.length, 2, "`== cutoff` ir `> cutoff` privalo likti");
+    assert.equal(new Date(rows[0].timestamp).toISOString(), cutoff, "riba pati NEŠALINAMA");
+  } finally {
+    await resursai.isvalyti();
+  }
+});
+
+/**
+ * Vietinio laiko poslinkis minutėmis duotai akimirkai duotoje zonoje.
+ *
+ * `Intl` yra vienintelis Node'e esantis DST žinovas; `shortOffset` sąmoningai
+ * NENAUDOJAMAS, nes jo palaikymas priklauso nuo ICU versijos.
+ */
+function poslinkisMin(data, zona) {
+  const dalys = new Intl.DateTimeFormat("en-US", {
+    timeZone: zona,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(data);
+
+  const d = Object.fromEntries(dalys.map((dalis) => [dalis.type, dalis.value]));
+  const vietinis = Date.UTC(+d.year, +d.month - 1, +d.day, +d.hour % 24, +d.minute, +d.second);
+
+  return Math.round((vietinis - data.getTime()) / 60000);
+}
+
+test("RETENCIJA: DST - riba yra TIKSLIOS 24 h per dieną, ne kalendorinė diena", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ELGSENOS ĮRODYMAS #213 RAUNDO 5 P1 RADINIUI.
+   *
+   * `auditRetention` gina SQL formą (tripwire, AGENTS.md §9.2); tik čia
+   * `interval` aritmetiką realiai įvykdo PostgreSQL. Su `interval 'N days'`
+   * DST zonoje kalendorinė diena yra 23 arba 25 valandos, tad riba nuslinktų
+   * valanda ir eilutės būtų NEGRĮŽTAMAI ištrintos anksčiau, nei leidžia
+   * atminties kontraktas.
+   *
+   * ⚠️ LANGAS PARENKAMAS TAIP, KAD JAME BŪTŲ LYGIAI VIENAS PERĖJIMAS.
+   * Fiksuotas dienų skaičius netiktų: 250 d. langas gali apimti DU priešingus
+   * perėjimus, kurie vienas kitą atsveria, ir sugedęs kodas praeitų. Todėl
+   * ieškoma paskutinio perėjimo ir pridedamas atsargos tarpas - gretimi
+   * perėjimai skiriasi bent ~150 d., tad antras į langą nepatenka.
+   */
+  const ZONA = "Europe/Vilnius";
+  const dabar = new Date();
+  const siandien = poslinkisMin(dabar, ZONA);
+
+  let dienos = null;
+  for (let i = 1; i <= 400; i += 1) {
+    if (poslinkisMin(new Date(dabar.getTime() - i * 86400000), ZONA) !== siandien) {
+      dienos = i + 5;
+      break;
+    }
+  }
+
+  assert.ok(dienos, `per 400 d. ${ZONA} zonoje privalo būti bent vienas DST perėjimas`);
+
+  const { pool, resursai } = await paruostiDb("audit_retencijos_dst");
+  const klientas = await pool.connect();
+
+  try {
+    await klientas.query(`SET TIME ZONE '${ZONA}'`);
+
+    /**
+     * Saugykla gauna TĄ PATĮ klientą, kad `SET TIME ZONE` galiotų jos
+     * užklausai: pool'as kitą kvietimą galėtų atiduoti kitai jungčiai su
+     * numatytąja zona, ir testas tikrintų ne tai, ką mano.
+     */
+    const store = createPostgresStore({ query: (...a) => klientas.query(...a) }, {
+      hashKeyId: HASH_KEY_ID,
+    });
+
+    const riba = await store.retencijosRiba(dienos);
+    const { rows } = await klientas.query("SELECT now() AS dabar");
+    const valandos = (new Date(rows[0].dabar).getTime() - Date.parse(riba)) / 3600000;
+
+    assert.equal(
+      Math.round(valandos),
+      dienos * 24,
+      `langas su DST perėjimu privalo likti ${dienos * 24} h (gauta ${valandos})`
+    );
+  } finally {
+    klientas.release();
+    await resursai.isvalyti();
+  }
+});
+
+test("RETENCIJA: vienas DB kvietimas riboja batch'ą; didesnei aibei - keli kvietimai", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TIKRINAMI DB KVIETIMAI, NE GALUTINIS REZULTATAS.
+   *
+   * Sweep'as, kuris viską ištrina vienu neribotu `DELETE`, duotų tą patį
+   * galutinį vaizdą - ir užrakintų lentelę visam trynimo laikui. Riba egzistuoja
+   * dėl transakcijos trukmės, tad ir įrodymas turi būti apie kvietimus.
+   */
+  const { pool, resursai } = await paruostiDb("audit_retencijos_batch");
+
+  try {
+    const SENAS = "2026-01-01T00:00:00.000Z";
+    for (let i = 0; i < 7; i += 1) {
+      await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: SENAS });
+    }
+
+    /** Pool'as-apvalkalas: skaičiuoja `DELETE` kvietimus. */
+    const kvietimai = [];
+    const stebimas = {
+      query: (tekstas, parametrai) => {
+        if (/DELETE/i.test(String(tekstas))) kvietimai.push(String(tekstas));
+        return pool.query(tekstas, parametrai);
+      },
+    };
+
+    const store = createPostgresStore(stebimas, { hashKeyId: HASH_KEY_ID });
+
+    assert.equal(await store.purgeExpired("2026-06-01T00:00:00.000Z", 3), 3, "vienas kvietimas - ne daugiau nei limitas");
+    assert.equal(kvietimai.length, 1);
+
+    let iš_viso = 3;
+    for (;;) {
+      const kiek = await store.purgeExpired("2026-06-01T00:00:00.000Z", 3);
+      iš_viso += kiek;
+      if (kiek < 3) break;
+    }
+
+    assert.equal(iš_viso, 7, "ciklas pašalina visą aibę");
+    assert.equal(await kiekEilučių(pool), 0);
+    assert.ok(kvietimai.length >= 3, `didesnei aibei reikia kelių kvietimų, buvo ${kvietimai.length}`);
+
+    /** ⚠️ Ir tikrai `LIMIT`, ne `DELETE` be ribos. */
+    assert.match(kvietimai[0], /LIMIT/i);
+    assert.match(kvietimai[0], /FOR UPDATE SKIP LOCKED/i);
+  } finally {
+    await resursai.isvalyti();
+  }
+});
+
+test("RETENCIJA: dvi instancijos lygiagrečiai - be deadlock'o ir be likučių", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ PROCESO LOKALI SPYNA ČIA NEGALIOJA - ir būtent todėl testas egzistuoja.
+   *
+   * Dvi instancijos turi atskirus pool'us ir atskiras transakcijas.
+   * `FOR UPDATE SKIP LOCKED` reiškia, kad antroji praleidžia pirmosios
+   * užrakintas eilutes, o ne laukia jų ar susiduria deadlock'e; trynimas
+   * idempotentiškas, nes jau ištrinta eilutė nebeatrenkama.
+   */
+  const { url, pool, resursai } = await paruostiDb("audit_retencijos_lygiagretumas");
+
+  try {
+    const SENAS = "2026-01-01T00:00:00.000Z";
+    for (let i = 0; i < 40; i += 1) {
+      await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: SENAS });
+    }
+
+    const poolA = new Pool({ connectionString: url });
+    const poolB = new Pool({ connectionString: url });
+    resursai.registruoti("instancija A", () => poolA.end());
+    resursai.registruoti("instancija B", () => poolB.end());
+
+    const sweep = async (p) => {
+      const store = createPostgresStore(p, { hashKeyId: HASH_KEY_ID });
+      let viso = 0;
+      for (;;) {
+        const kiek = await store.purgeExpired("2026-06-01T00:00:00.000Z", 5);
+        viso += kiek;
+        if (kiek < 5) return viso;
+      }
+    };
+
+    const [a, b] = await Promise.all([sweep(poolA), sweep(poolB)]);
+
+    assert.equal(await kiekEilučių(pool), 0, "expired eilučių likti negali");
+    assert.equal(a + b, 40, "kiekviena eilutė pašalinta TIKSLIAI vieną kartą");
+  } finally {
+    await resursai.isvalyti();
+  }
+});
+
+test("RETENCIJA: taikoma VISOMS generacijoms vienodai", { skip: SKIP }, async () => {
+  const { pool, resursai } = await paruostiDb("audit_retencijos_generacijos");
+
+  try {
+    const SENAS = "2026-01-01T00:00:00.000Z";
+    const NAUJAS = "2026-12-01T00:00:00.000Z";
+
+    await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: SENAS, hashKeyId: "A" });
+    await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: SENAS, hashKeyId: "B" });
+    await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: NAUJAS, hashKeyId: "A" });
+
+    const store = createPostgresStore(pool, { hashKeyId: "B" });
+    assert.equal(await store.purgeExpired("2026-06-01T00:00:00.000Z", 100), 2, "abi senos generacijos");
+
+    const { rows } = await pool.query("SELECT hash_key_id FROM audit_log");
+    assert.deepEqual(rows.map((r) => r.hash_key_id), ["A"], "liko tik naujas įrašas, nesvarbu kurios generacijos");
+  } finally {
+    await resursai.isvalyti();
+  }
+});
+
+test("RETENCIJA ATRAKINA RAKTO IŠĖMIMĄ: A ištrinamas → A išimamas → startas praeina", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ CIKLAS, KURIO NEUŽDARIUS 7.4c TAISYKLĖ TAPTŲ SPĄSTAIS.
+   *
+   * 7.4c neleidžia pašalinti rakto, kol DB yra jo `hash_key_id` įrašų. Be
+   * retencijos tie įrašai neišnyktų niekada, tad istorinių raktų sąrašas galėtų
+   * tik augti. Šis testas parodo išėjimą: retencija pašalina generaciją, ir
+   * raktą tampa saugu išimti.
+   */
+  const auditStore = require("../utils/auditStore");
+  const { url, pool, resursai } = await paruostiDb("audit_retencija_atrakina");
+
+  try {
+    await irasytiSuLaiku(pool, {
+      id: crypto.randomUUID(),
+      timestamp: "2026-01-01T00:00:00.000Z",
+      hashKeyId: "A",
+    });
+
+    /** Prielaida: be istorinio rakto startas KRISTŲ - kitaip testas nieko neįrodo. */
+    await auditStore.shutdown();
+    await assert.rejects(
+      () => auditStore.init(pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B })),
+      /neturime rakto|NEPASIEKS/i,
+      "prielaida: 7.4c fail-closed veikia"
+    );
+
+    const store = createPostgresStore(pool, { hashKeyId: "B" });
+    assert.equal(await store.purgeExpired("2026-06-01T00:00:00.000Z", 100), 1);
+
+    /** Dabar `A` DB įrašų nebeturi - jį galima išimti iš PREVIOUS. */
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }));
+
+    assert.equal(auditStore.backend(), "postgres", "startas privalo pavykti");
+    assert.deepEqual(auditStore.nasliaitesGeneracijos(), []);
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("PRIVACY_MODE: RAW sentinel eilutė dingsta per startą, naujų neatsiranda", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ĮRODYMAS RAW LENTELĖJE, NE PER `GET /api/audit`.
+   *
+   * Fasadas `PRIVACY_MODE` metu grąžina tuščią sąrašą NEPRIKLAUSOMAI nuo to, ar
+   * eilutės fiziškai ištrintos. Per jį tikrinant, nutildymas atrodytų kaip
+   * ištrynimas - o kontraktas žada būtent ištrynimą.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, pool, resursai } = await paruostiDb("audit_privacy_purge");
+
+  const SENTINEL = crypto.randomUUID();
+
+  try {
+    await irasytiSuLaiku(pool, { id: SENTINEL, timestamp: "2026-06-01T00:00:00.000Z" });
+    assert.equal(await kiekEilučių(pool), 1, "prielaida: eilutė DB yra");
+
+    /**
+     * ⚠️ ĮSPĖJIMAS PAKEITĖ 7.4b SARGĄ, TAD JIS TIKRINAMAS (#213).
+     *
+     * Iki 7.4d šis derinys buvo starto klaida. Panaikinus sargą, vienintelis
+     * likęs signalas yra starto įspėjimas - be jo operatorius gautų tylią,
+     * sukonfigūruotą ir amžinai tuščią audito lentelę.
+     */
+    const pagauta = [];
+    const originalusWarn = console.warn;
+    const savedLevel = process.env.LOG_LEVEL;
+    process.env.LOG_LEVEL = "warn";
+    console.warn = (...args) => pagauta.push(args.join(" "));
+
+    await auditStore.shutdown();
+    try {
+      await auditStore.init({
+        ...pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }),
+        PRIVACY_MODE: "true",
+      });
+    } finally {
+      console.warn = originalusWarn;
+      if (savedLevel === undefined) delete process.env.LOG_LEVEL;
+      else process.env.LOG_LEVEL = savedLevel;
+    }
+
+    assert.ok(
+      pagauta.some((eil) => eil.includes("PRIVACY_MODE=true") && /IŠJUNGTAS|NEGRĮŽTAMA/.test(eil)),
+      `startas privalo garsiai įspėti apie sąmoningai išjungtą auditą: ${pagauta.join(" | ")}`
+    );
+
+    const { rows } = await pool.query("SELECT id FROM audit_log WHERE id = $1", [SENTINEL]);
+    assert.equal(rows.length, 0, "sentinel eilutė privalo būti FIZIŠKAI pašalinta");
+
+    /** Ir naujas įvykis po starto nepalieka eilutės. */
+    await auditLog.record({ event: "LOGIN_SUCCESS", jobId: "job-privacy", success: true });
+    assert.equal(await kiekEilučių(pool), 0, "PRIVACY_MODE metu nauji įrašai nepersistinami");
+
+    /** `true → false`: seni negrįžta, nauji vėl rašomi. */
+    await auditStore.shutdown();
+    await auditStore.init(pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }));
+
+    await auditLog.record({ event: "LOGIN_SUCCESS", jobId: "job-po", success: true });
+
+    const { rows: poIsjungimo } = await pool.query("SELECT id FROM audit_log");
+    assert.equal(poIsjungimo.length, 1, "naujas įrašas rašomas");
+    assert.ok(!poIsjungimo.some((r) => r.id === SENTINEL), "ištrinti įrašai NEGRĮŽTA");
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("PRIVACY_MODE: purge vyksta PRIEŠ generacijų patikrą - našlaitės nestabdo starto", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TVARKOS ĮRODYMAS, KURIO KITAIP NĖRA.
+   *
+   * DB turi generaciją, kurios rakto nebeturime. Be teisingos tvarkos
+   * `patikrintiGeneracijas()` nutrauktų startą fail-closed - dėl eilučių,
+   * kurias purge tuoj pat ištrintų. Su teisinga tvarka `usedGenerations()`
+   * grąžina `[]`, ir atmesti nebėra ko.
+   */
+  const auditStore = require("../utils/auditStore");
+  const { url, pool, resursai } = await paruostiDb("audit_privacy_tvarka");
+
+  try {
+    await irasytiSuLaiku(pool, {
+      id: crypto.randomUUID(),
+      timestamp: "2026-06-01T00:00:00.000Z",
+      hashKeyId: "PRARASTA-GENERACIJA",
+    });
+
+    /** Prielaida: BE `PRIVACY_MODE` toks startas krenta. */
+    await auditStore.shutdown();
+    await assert.rejects(
+      () => auditStore.init(pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B })),
+      /neturime rakto|NEPASIEKS/i,
+      "prielaida: našlaitė realiai stabdo startą"
+    );
+
+    await auditStore.shutdown();
+    await auditStore.init({
+      ...pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }),
+      PRIVACY_MODE: "true",
+    });
+
+    assert.equal(auditStore.backend(), "postgres", "su PRIVACY_MODE startas privalo praeiti");
+    assert.equal(await kiekEilučių(pool), 0, "eilutės pašalintos");
+    assert.deepEqual(auditStore.nasliaitesGeneracijos(), [], "našlaičių nebeliko");
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("`AUDIT_MAX_ENTRIES`: postgres režime NĖRA retencijos taisyklė", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ELGSENOS ĮRODYMAS, NE KONFIGŪRACIJOS TEKSTO.
+   *
+   * Riba buvo apsauga nuo RAM augimo. Perkelta į DB ji taptų tyliu duomenų
+   * naikinimu: audito įrašas dingtų ne dėl retencijos politikos, o dėl to, kad
+   * po jo atėjo pakankamai naujų.
+   */
+  const auditStore = require("../utils/auditStore");
+  const auditLog = require("../utils/auditLog");
+  const { url, pool, resursai } = await paruostiDb("audit_max_entries_pg");
+
+  const RIBA = 3;
+
+  try {
+    await auditStore.shutdown();
+    await auditStore.init({
+      ...pgAplinka(url, { aktyvusId: "B", aktyvusSecret: RAKTAS_B }),
+      AUDIT_MAX_ENTRIES: String(RIBA),
+    });
+
+    for (let i = 0; i < RIBA + 4; i += 1) {
+      await auditLog.record({ event: "LOGIN_SUCCESS", jobId: `job-${i}`, success: true });
+    }
+
+    assert.equal(
+      await kiekEilučių(pool),
+      RIBA + 4,
+      "eilutės neturi būti šalinamos vien dėl kiekio"
+    );
+  } finally {
+    await auditStore.shutdown();
+    await resursai.isvalyti();
+  }
+});
+
+test("`DELETE` POLITIKA: trys tiksliniai keliai yra, bendro trynimo NĖRA", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ 7.4b APSAUGA GYVENA STORE API, NE DB (migracija `DELETE` palieka atvirą,
+   * kad veiktų GDPR ištrynimas). Todėl 7.4d nepridėjo „raw SQL hack'o", o pridėjo
+   * du VARDU APIBRĖŽTUS kelius; bendras `clear()` produkcijoje toliau meta.
+   */
+  const { pool, resursai } = await paruostiDb("audit_delete_politika");
+
+  try {
+    const store = createPostgresStore(pool, { hashKeyId: HASH_KEY_ID });
+
+    for (const metodas of ["removeBySubject", "purgeExpired", "purgeAllForPrivacy"]) {
+      assert.equal(typeof store[metodas], "function", `trūksta teisėto kelio: ${metodas}`);
+    }
+
+    /** Bendras trynimas produkcijoje - vis dar užrakintas. */
+    const saved = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "production";
+      await assert.rejects(() => store.clear(), /TIK testuose/i, "bendras `clear()` privalo likti uždarytas");
+    } finally {
+      process.env.NODE_ENV = saved;
+    }
+
+    /** Ir append-only barjeras nepaliestas: `UPDATE` toliau atmetamas. */
+    const id = crypto.randomUUID();
+    await irasytiSuLaiku(pool, { id, timestamp: "2026-06-01T00:00:00.000Z" });
+    await assert.rejects(
+      () => pool.query("UPDATE audit_log SET result = 'failure' WHERE id = $1", [id]),
+      (e) => e.code === "23001",
+      "7.4d neturi susilpninti append-only trigerio"
+    );
+  } finally {
     await resursai.isvalyti();
   }
 });

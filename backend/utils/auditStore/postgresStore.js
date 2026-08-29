@@ -32,6 +32,29 @@ const BUTINOS_PRIVILEGIJOS = Object.freeze(["SELECT", "INSERT", "DELETE"]);
  */
 const SEKOS_PRIVILEGIJOS = Object.freeze(["USAGE", "UPDATE"]);
 
+/**
+ * RETENCIJOS BATCH DYDIS - VIENAS AUTORITETAS (#155, 7.4d / #213).
+ *
+ * ⚠️ SKAIČIUS GYVENA ČIA, NE KODE IR TESTE ATSKIRAI. Ranka įrašytas dydis
+ * dviejose vietose yra ta pati rankomis palaikomo sąrašo klasė, kurią 7.4f
+ * pašalino kitur: testas praeitų su viena reikšme, o produkcija naudotų kitą.
+ *
+ * Dydis riboja VIENĄ `DELETE` kvietimą, ne visą sweep'ą - ilgą trynimą sweep'as
+ * baigia keliais kvietimais. Prasmė - trumpos transakcijos ir trumpi užraktai,
+ * o ne bendras šalinimo limitas.
+ */
+const RETENCIJOS_BATCH = 500;
+
+/**
+ * ⚠️ DIENŲ → VALANDŲ VERTIMAS TURI VARDĄ (#213 Codex, raundas 5).
+ *
+ * `retencijosRiba()` gauna dienas (bendras kontraktas su atmintimi), o SQL'ui
+ * paduoda valandas, nes tik jos PostgreSQL'yje yra tiksli trukmė. Konstanta
+ * eksportuojama, kad testas jos nekartotų skaičiumi - ta pati priežastis kaip
+ * `RETENCIJOS_BATCH`.
+ */
+const VALANDOS_PARAI = 24;
+
 /** Teigiamo zondo rezultato galiojimas. Orkestruotojo poll'ai kitaip generuotų SQL kiekvienam. */
 const PROBE_CACHE_TTL_MS = 2000;
 
@@ -353,6 +376,150 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
     },
 
     /**
+     * RETENCIJOS RIBA IŠ **DB LAIKRODŽIO** (#233 Codex, P1).
+     *
+     * ⚠️ TRYNIMO RIBA PRIVALO ATEITI IŠ TO PATIES LAIKRODŽIO KAIP RAŠYMO ŽYMA.
+     *
+     * `timestamp` sąmoningai rašomas DB `now()`, nes replikų laikrodžiai
+     * skiriasi (7.4b sprendimas; dėl to ir 7.4c atsisakė `timestamp` kaip sort
+     * key). Skaičiuojant ribą Node procese, skubantis vienos replikos laikrodis
+     * NEGRĮŽTAMAI ištrintų eilutes, kurioms `AUDIT_RETENTION_DAYS` dar nesuėjo,
+     * o lėtas paliktų pasenusias. Dvi replikos tuo pačiu metu naudotų skirtingas
+     * ribas.
+     *
+     * Skaičiuojama VIENĄ kartą per sweep'ą; `now` argumentas čia sąmoningai
+     * ignoruojamas - persistentiniame režime kontroliuojamas laiko šaltinis yra
+     * DB, ne kvietėjas.
+     *
+     * ⚠️ FIKSUOTOS VALANDOS, NE `interval 'N days'` (#213 Codex, raundas 5).
+     *
+     * `interval` turi tris atskirus laukus (mėnesiai, dienos, sekundės), ir
+     * `timestamptz` aritmetikoje jie elgiasi SKIRTINGAI. Dienų laukas yra
+     * KALENDORINIS: jis išlaiko tą pačią vietinio laikrodžio valandą, tad
+     * sesijoje su DST laikančia zona langas, kertantis perstatymą, reiškia 23
+     * arba 25 valandas per dieną, ne 24. Valandų laukas yra tikslus trukmės
+     * matas ir nuo zonos NEPRIKLAUSO.
+     *
+     * Atmintis skaičiuoja `dienos * 24 * 60 * 60 * 1000` - tikslią trukmę. Su
+     * `' days'` du kartus per metus backend'ai duotų ribas, besiskiriančias
+     * valanda, ir postgres NEGRĮŽTAMAI ištrintų eilutes valanda anksčiau, nei
+     * leidžia memory kontraktas. Skirtumas tylus: kiekio testas jo nemato.
+     *
+     * Tai TA PATI KLASĖ kaip raundo 3 laikrodžio radinys - riba apibrėžiama
+     * vienu būdu vienoje pusėje ir kitu kitoje. Tąkart nesutapo laikrodžiai,
+     * dabar nesutampa dienos apibrėžimas.
+     *
+     * UTC prievarta (`now() AT TIME ZONE 'UTC'`) DST irgi pašalintų, bet
+     * grąžintų `timestamp without time zone`, kurį prieš lyginant su
+     * `timestamptz` stulpeliu tektų konvertuoti atgal - papildomas žingsnis,
+     * kurio klaida vėl būtų tyli. Valandos to nereikalauja.
+     */
+    async retencijosRiba(dienos) {
+      const skaicius = Number(dienos);
+
+      if (!Number.isFinite(skaicius) || skaicius <= 0) {
+        throw new Error(`Retencijos terminas privalo būti teigiamas (gauta: ${dienos}).`);
+      }
+
+      const { rows } = await pool.query(
+        "SELECT (now() - ($1::double precision * INTERVAL '1 hour')) AS riba",
+        [skaicius * VALANDOS_PARAI]
+      );
+
+      return new Date(rows[0].riba).toISOString();
+    },
+
+    /**
+     * RETENCIJA: VIENAS RIBOTAS BATCH'AS (#155, 7.4d / #213).
+     *
+     * ⚠️ KANDIDATAI ATRENKAMI DB PUSĖJE. Parsisiųsti expired eilutes į Node ir
+     * trinti po vieną reikštų O(n) round-trip'ų ir nekontroliuojamą trukmę.
+     * `DELETE` neturi paprasto `LIMIT`, tad riba taikoma kandidatų CTE.
+     *
+     * ⚠️ `FOR UPDATE SKIP LOCKED` - MULTI-INSTANCE KOREKTIŠKUMAS. Dvi instancijos
+     * gali sweep'inti tą pačią lentelę vienu metu. Be `SKIP LOCKED` antroji
+     * lauktų pirmosios užrakintų eilučių arba susidurtų deadlock'e; su juo ji
+     * tiesiog praleidžia užimtas eilutes ir paima kitas. Rezultatas
+     * idempotentiškas: jau ištrinta eilutė nebeatrenkama.
+     *
+     * ⚠️ `timestamp < $1` - riba GRIEŽTA. `== cutoff` LIEKA (fiksuotas #213
+     * sprendimas). Indeksas `timestamp` sukurtas 7.4b migracijoje.
+     *
+     * @returns {Promise<number>} kiek eilučių pašalinta ŠIUO kvietimu.
+     */
+    async purgeExpired(cutoffIso, limit = RETENCIJOS_BATCH) {
+      const riba = Number(limit);
+
+      if (!Number.isInteger(riba) || riba < 1) {
+        throw new Error(`Retencijos batch dydis privalo būti teigiamas sveikasis (gauta: ${limit}).`);
+      }
+
+      const { rowCount } = await pool.query(
+        `WITH kandidatai AS (
+           SELECT id FROM audit_log
+            WHERE timestamp < $1
+            ORDER BY seq
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+         )
+         DELETE FROM audit_log a USING kandidatai k WHERE a.id = k.id`,
+        [cutoffIso, riba]
+      );
+
+      return rowCount;
+    },
+
+    /**
+     * `PRIVACY_MODE` STARTO VALYMAS (#155, 7.4d / #213).
+     *
+     * ⚠️ ATSKIRAS METODAS, NE `clear()` SU IŠIMTIMI. `clear()` yra testų
+     * įrankis, kuris produkcijoje SĄMONINGAI meta klaidą (žr. žemiau). Privacy
+     * valymas yra teisėtas produkcinis kelias, bet tik VIENAS: jį kviečia
+     * `auditStore.init()` starto metu ir daugiau niekas.
+     *
+     * Atskiras vardas išlaiko 7.4b ribą: bendro `DELETE FROM audit_log`
+     * primityvo produkcinis kvietėjas negauna - jis gauna tris tikslinius kelius
+     * (erasure, retencija, privacy purge), kurių kiekvieno prasmė matoma iš
+     * pavadinimo.
+     *
+     * ⚠️ BATCH'INAMA, KAIP IR RETENCIJA (#233 Codex, P2).
+     *
+     * Vienas neribotas `DELETE FROM audit_log` perrašo kiekvieną eilutę ir
+     * indekso įrašą viename sakinyje, o tam pačiam pool'ui galioja audito
+     * `statement_timeout` (~1,1 s). Ant išaugusios lentelės - ypač per pirmą
+     * atnaujinimą iš anksčiau neribotos saugyklos - KIEKVIENAS `PRIVACY_MODE`
+     * startas baigtųsi timeout'u dar prieš readiness. Ironiška būtų batch'inti
+     * retenciją ir palikti nebatch'intą purge, kuris dirba su didesniu kiekiu.
+     *
+     * ⚠️ `FOR UPDATE` BE `SKIP LOCKED` - SKIRTUMAS NUO RETENCIJOS, IR SĄMONINGAS.
+     *
+     * Retencijai praleisti užrakintą eilutę saugu: ją pašalins kitas ciklas.
+     * Privacy purge tokios antros progos neturi - jis privalo išvalyti VISKĄ
+     * prieš instancijai pradedant aptarnauti srautą, tad geriau palaukti
+     * konkuruojančios transakcijos nei palikti eilutę.
+     *
+     * Ciklas baigiasi, kai partija pašalina 0 eilučių.
+     *
+     * @returns {Promise<number>} pašalintų eilučių skaičius.
+     */
+    async purgeAllForPrivacy(limit = RETENCIJOS_BATCH) {
+      let viso = 0;
+
+      for (;;) {
+        const { rowCount } = await pool.query(
+          `WITH kandidatai AS (
+             SELECT id FROM audit_log LIMIT $1 FOR UPDATE
+           )
+           DELETE FROM audit_log a USING kandidatai k WHERE a.id = k.id`,
+          [limit]
+        );
+
+        viso += rowCount;
+        if (rowCount === 0) return viso;
+      }
+    },
+
+    /**
      * ⚠️ NEPRIEINAMA PRODUKCINIAM KODUI - TAI NĖRA VIEN KOMENTARAS.
      *
      * Deklaruota vientisumo riba sako, kad store'as eksponuoja TIK subjektu
@@ -546,6 +713,8 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
 module.exports = {
   createPostgresStore,
   iEilute,
+  RETENCIJOS_BATCH,
+  VALANDOS_PARAI,
   BUTINOS_PRIVILEGIJOS,
   SEKOS_PRIVILEGIJOS,
   PROBE_CACHE_TTL_MS,

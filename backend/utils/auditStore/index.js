@@ -87,26 +87,40 @@ const KONFIG_RAKTAI = Object.freeze([
 const REQUIRED_AUDIT_TRIGGER = "audit_log_no_update";
 
 /**
- * ⚠️ NERIBOTAS AUGIMAS - MATOMUMAS, NE STARTO KLAIDA (#155, 7.4b).
+ * ⚠️ `AUDIT_MAX_ENTRIES` NETAIKYMAS - MATOMUMAS, NE STARTO KLAIDA (#155, 7.4b/7.4d).
  *
- * `AUDIT_RETENTION_DAYS` ir `AUDIT_MAX_ENTRIES` galioja TIK atminties režimui:
- * jie taikomi masyvui `auditLog` viduje, o persistentinės retencijos savininkas
- * yra [7.4d]. Postgres režime `audit_log` eilutės automatiškai NEŠALINAMOS.
+ * `AUDIT_RETENTION_DAYS` nuo [7.4d] galioja ABIEM režimams: postgres pusėje
+ * `audit_log` eilutės šalinamos centralizuoto sweep'o metu. `AUDIT_MAX_ENTRIES`
+ * lieka TIK atminties apsauga - jis taikomas masyvui `auditLog` viduje ir
+ * persistentinėms eilutėms NETAIKOMAS.
  *
- * Startas dėl to nenutraukiamas: persistentinis auditas be retencijos vis tiek
- * geriau nei jokio audito, ir operatorius gali turėti savo valymo politiką. Bet
- * tylėti negalima - diegimas, matantis `AUDIT_RETENTION_DAYS=30` konfigūracijoje,
- * pagrįstai manytų, kad ji galioja.
+ * Startas dėl to nenutraukiamas: kiekio riba nėra duomenų politika, ir jos
+ * nebuvimas lentelėje yra sąmoningas sprendimas (žr. `docs/audit-storage.md`
+ * §9). Bet tylėti negalima - diegimas, matantis `AUDIT_MAX_ENTRIES=5000`
+ * konfigūracijoje, pagrįstai manytų, kad ji galioja ir DB.
+ *
+ * ⚠️ ĮSPĖJIMAS KYLA TIK KAI `AUDIT_MAX_ENTRIES` NUSTATYTAS. Besąlygiškas
+ * įspėjimas apie normalią būseną kiekviename starte yra triukšmas, išmokstamas
+ * ignoruoti kartu su svarbiais (#213 CI radinys).
  *
  * ⚠️ EKSPORTUOJAMA KONSTANTA, ne inline eilutė: turinį reikia tikrinti BE tikros
  * DB, nes pats `init()` postgres šakoje be jos nevykdomas.
  */
+/**
+ * ⚠️ TEKSTAS PAKEISTAS 7.4d (#213), NES SENASIS TAPO MELU.
+ *
+ * Iki 7.4d jis skelbė, kad retencija postgres režime NEVEIKIA. Nuo šio darbo
+ * `AUDIT_RETENTION_DAYS` taikoma ir persistentinei lentelei per centralizuotą
+ * sweep'ą. Palikus seną tekstą, operatorius manytų, kad reikia išorinės valymo
+ * politikos - ir arba pridėtų antrą trynimo mechanizmą, arba nepasitikėtų
+ * veikiančiu. Dokumentacija, stipresnė ar silpnesnė už kodą, abiem atvejais
+ * klaidina (AGENTS.md §12.1).
+ */
 const RETENCIJOS_ISPEJIMAS =
-  "Audito retencija NEVEIKIA postgres režime: AUDIT_RETENTION_DAYS ir " +
-  "AUDIT_MAX_ENTRIES taikomi tik atminties backend'ui, tad `audit_log` " +
-  "eilutės automatiškai nešalinamos ir lentelė augs neribotai. " +
-  "Persistentinę retenciją įgyvendina [7.4d]; iki tol reikalinga išorinė " +
-  "valymo politika. Žr. docs/audit-storage.md §9.";
+  "Audito retencija postgres režime taikoma per centralizuotą sweep'ą " +
+  "(AUDIT_RETENTION_DAYS). `AUDIT_MAX_ENTRIES` yra TIK atminties apsauga ir " +
+  "persistentinėms eilutėms NETAIKOMA - eilutės nešalinamos vien dėl kiekio. " +
+  "Žr. docs/audit-storage.md §9.";
 
 let store = memoryStore;
 let _pool = null;
@@ -560,8 +574,14 @@ async function initializePostgres(env) {
  * generacijas, faktiškai esančias lentelėje; iš to matyti ir našlaitės, ir tai,
  * kurie istoriniai raktai dar reikalingi.
  */
-async function patikrintiGeneracijas(pgStore, env) {
-  const dbGeneracijos = await pgStore.usedGenerations();
+/**
+ * NAŠLAIČIŲ GENERACIJŲ PATIKRA (#212).
+ *
+ * ⚠️ ATSKIRTA NUO KIEKIO RIBOS (#233 Codex raundas 4). Ši privalo vykti PO
+ * `PRIVACY_MODE` purge - išvalius eilutes atmesti nebėra ko; riba - PRIEŠ jį.
+ * Kol jos gyveno vienoje funkcijoje, tvarkos pasirinkti buvo neįmanoma.
+ */
+function patikrintiNasliaites(dbGeneracijos, env) {
   const zinomos = keyRing.visi;
 
   const nasliaites = dbGeneracijos.filter((id) => !zinomos.has(id));
@@ -596,7 +616,25 @@ async function patikrintiGeneracijas(pgStore, env) {
       );
     }
   }
+}
 
+/**
+ * RAKTŲ KIEKIO RIBA (#212), VERTINAMA PRIEŠ DESTRUKTYVŲ ŽINGSNĮ (#233, P1).
+ *
+ * ⚠️ PO `PRIVACY_MODE` PURGE ŠI RIBA TAPTŲ SPĄSTAIS.
+ *
+ * Purge ištrina visas eilutes, tad po jo KIEKVIENAS istorinis raktas atrodo
+ * nebereikalingas. Diegimas, kuris prieš tai kildavo normaliai (dešimt+ raktų,
+ * bet kiekvienas dar su eilutėmis), po vieno `PRIVACY_MODE` starto liktų IR be
+ * duomenų, IR nepaleidžiamas: destruktyvus žingsnis jau įvykęs, nauda negauta,
+ * o kelio atgal nėra.
+ *
+ * Todėl riba vertinama pagal PRIEŠ purge buvusią būseną - ji naudoja tikrą
+ * informaciją (kurie raktai realiai turėjo eilučių) ir kertasi anksčiau, nei
+ * kas nors ištrinama. Bendra taisyklė: patikrink viską, ką gali patikrinti,
+ * PRIEŠ trindamas.
+ */
+function patikrintiRaktuKieki(dbGeneracijos) {
   /**
    * ⚠️ KIEKIO RIBA ATMETA TIK NEBEREIKALINGUS RAKTUS (#212).
    *
@@ -690,14 +728,132 @@ async function init(env = process.env) {
 
     const { store: pgStore, pool } = await initializePostgres(env);
 
-    await patikrintiGeneracijas(pgStore, env);
+    /**
+     * ⚠️ PO-INICIJAVIMO FAZĖ UŽDARO POOL'Ą, JEI KRENTA (#233 Codex raundas 3, P1).
+     *
+     * `initializePostgres()` jau grąžino GYVĄ pool'ą, bet `_pool` priskiriamas
+     * tik fazės gale. Kritus bet kuriam žingsniui tarp jų, `shutdown()` to
+     * pool'o nebemato, o `init()` po nesėkmės KARTOJAMAS sąmoningai (žr.
+     * `catch` funkcijos gale ir 7.4f atsistatymo scenarijų): kiekvienas
+     * nesėkmingas bandymas paliktų dar vieną atvirą jungčių rinkinį.
+     *
+     * ⚠️ TARPAS SENESNIS UŽ 7.4d. Jau ties 7.4f `patikrintiGeneracijas()` -
+     * kuri fail-closed meta dėl našlaičių generacijų ar raktų kiekio - buvo
+     * kviečiama toje pačioje vietoje. 7.4d pridėjo antrą metantį žingsnį
+     * (privacy purge) ir tuo langą praplėtė, bet jo nesukūrė. Todėl apsauga
+     * dedama aplink VISĄ fazę, o ne tik aplink purge.
+     */
+    try {
+      /**
+       * `PRIVACY_MODE` STARTO BARJERAS (#155, 7.4d / #213).
+       *
+       * ⚠️ TVARKA NĖRA STILIAUS KLAUSIMAS. Purge eina PRIEŠ
+       * `patikrintiGeneracijas()`: išvalius eilutes `usedGenerations()` grąžina
+       * `[]`, tad 7.4c fail-closed taisyklė nebeturi ko atmesti. Priešinga tvarka
+       * sustabdytų startą dėl našlaičių generacijų, kurias purge tuoj pat būtų
+       * ištrynęs - t. y. dėl eilučių, kurių po sekundės nebebūtų.
+       *
+       * ⚠️ FAIL-CLOSED IR `await`INTA. Jokio `catch`: tęsti su
+       * `PRIVACY_MODE=true` ir senomis eilutėmis DB reikštų, kad vėliava žada
+       * ištrynimą, o duoda nutildymą. Fire-and-forget čia reikštų tą patį, tik
+       * nematomai.
+       *
+       * Vieta pasirinkta sąmoningai: DB pool paruoštas, schema ir invariantai
+       * patikrinti, store sukurtas - anksčiau valyti reikštų lenktynes.
+       */
+      const priesPurge = await pgStore.usedGenerations();
+      const privatumas = String(env.PRIVACY_MODE).toLowerCase() === "true";
+
+      /**
+       * ⚠️ TIKRINIMŲ TVARKĄ KEIČIA TIK PRIVACY KELIAS (#233 Codex raundas 4, P1).
+       *
+       * Ten, kur bus trinama, viskas, ką galima patikrinti, tikrinama PIRMA:
+       * po purge kiekio riba matytų visus istorinius raktus kaip
+       * nebereikalingus ir nutrauktų startą - jau ištrynus duomenis.
+       *
+       * Be purge tvarka NEKEIČIAMA (našlaitės, tada riba): našlaičių pranešimas
+       * įvardija GDPR ištrynimo negalimumą, ir jis svarbesnis už konfigūracijos
+       * higienos pastabą. Perrikiavus abu kelius, įprastas diegimas gautų kitą
+       * klaidą nei iki šiol - pakeitimas be priežasties.
+       */
+      if (privatumas) patikrintiRaktuKieki(priesPurge);
+
+      if (privatumas) {
+        const kiek = await pgStore.purgeAllForPrivacy();
+
+        /**
+         * ⚠️ ĮSPĖJAMA VISADA, NET KAI PAŠALINTA 0 EILUČIŲ.
+         *
+         * Iki 7.4d šis derinys buvo starto klaida (#211), tad jis negalėjo likti
+         * nepastebėtas. Panaikinus sargą, tyla reikštų sukonfigūruotą,
+         * persistentinę ir amžinai tuščią audito lentelę, kuri stebint atrodo kaip
+         * veikianti sistema - tiksliai tas scenarijus, dėl kurio 7.4b sargą ir
+         * įvedė. Įspėjimas kiekvieno starto metu yra jo pakaitalas.
+         */
+        /**
+         * ⚠️ TEKSTAS NEŽADA DAUGIAU, NEI GARANTUOJA (#233 Codex raundas 4).
+         *
+         * Ankstesnė formuluotė sakė, kad `audit_log` LIEKA tuščia. Rolling
+         * update metu tai netiesa: purge atleidžia užraktus po kiekvieno
+         * batch'o (batch'inimo pasekmė), tad senesnė replika su
+         * `PRIVACY_MODE=false` gali įterpti eilutę po paskutinio tuščio
+         * batch'o. Ši replika savo rašymus slopina, bet nebepurgina niekada.
+         */
+        log.warn(
+          "PRIVACY_MODE=true SU AUDIT_BACKEND=postgres - auditas IŠJUNGTAS SĄMONINGAI. " +
+            `Persistentinės eilutės išvalytos starto metu (${kiek}); tai NEGRĮŽTAMA. ` +
+            "Ši instancija naujų įrašų nerašo. ⚠️ Lentelė liks tuščia TIK jei VISOS " +
+            "replikos paleistos su ta pačia vėliava: rolling update metu senesnė " +
+            "replika gali įrašyti eilutę po šio valymo, ir ji liks neribotai. " +
+            "Vėliavos perjungimui reikia PILNO sustabdymo, ne rolling update. " +
+            "Išjungus vėliavą seni įrašai NEATSIKURIA. Žr. docs/audit-storage.md §9."
+        );
+      }
+
+      /**
+       * ⚠️ NAŠLAIČIAI TIKRINAMI PO PURGE - žr. `patikrintiNasliaites`.
+       *
+       * Su `PRIVACY_MODE=true` lentelė jau tuščia, tad sąrašas tuščias ir
+       * atmesti nebėra ko. Be purge - tikrinama ta pati būsena, kurią ką tik
+       * nuskaitė kiekio riba, tad antro `usedGenerations()` kvietimo nereikia.
+       */
+      if (privatumas) {
+        /** Lentelė ką tik išvalyta - našlaičių sąrašas tuščias pagal apibrėžimą. */
+        patikrintiNasliaites([], env);
+      } else {
+        patikrintiNasliaites(priesPurge, env);
+        patikrintiRaktuKieki(priesPurge);
+      }
+    } catch (klaida) {
+      /**
+       * ⚠️ UŽDAROMA PRIEŠ PERMETANT, IR KLAIDA NEPRARANDAMA.
+       *
+       * `end()` nesėkmė nutylima sąmoningai: startas jau krenta dėl kitos,
+       * konkretesnės priežasties, ir jos pakeitimas „pool'o uždaryti nepavyko"
+       * pranešimu paslėptų tikrąją.
+       */
+      await pool.end().catch(() => {});
+      throw klaida;
+    }
 
     store = pgStore;
     _pool = pool;
     paruosta = true;
     log.info("Audito saugykla: PostgreSQL (persistentinė, append-only)");
 
-    log.warn(RETENCIJOS_ISPEJIMAS);
+    /**
+     * ⚠️ ĮSPĖJAMA TIK TADA, KAI YRA KĄ ĮSPĖTI (#213, 7.4d).
+     *
+     * Iki 7.4d įspėjimas kildavo kiekvieno postgres starto metu, nes retencija
+     * ten NEVEIKĖ - tai galiojo visiems. Dabar ji veikia, ir vienintelis likęs
+     * skirtumas yra `AUDIT_MAX_ENTRIES`: jis persistentinėms eilutėms
+     * NETAIKOMAS. Operatoriui, kuris jo nenustatė, pranešti nėra ko, o
+     * kiekvieno starto įspėjimas apie normalią būseną yra triukšmas, kurį
+     * išmokstama ignoruoti - kartu su tais, kurie svarbūs.
+     */
+    if (env.AUDIT_MAX_ENTRIES !== undefined && env.AUDIT_MAX_ENTRIES !== "") {
+      log.warn(RETENCIJOS_ISPEJIMAS);
+    }
 
     return store;
   })().catch((error) => {
