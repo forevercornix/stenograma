@@ -381,3 +381,113 @@ test("MIGRACIJA: FK į `jobs` NĖRA - tripwire", () => {
   assert.ok(!/references/i.test(lentele), "`erasure_marks` NEGALI turėti FK į `jobs`");
   assert.ok(!/onDelete/i.test(lentele), "`ON DELETE` politikos čia negali būti");
 });
+
+test("VIENAS AUTORITETAS: `erasure_marks` SQL neegzistuoja už modulio ribų - VISAME backend'e", () => {
+  /**
+   * ⚠️ TRIPWIRE PER VISĄ REPO, NE PER VIENĄ FAILĄ (AGENTS.md §9.2).
+   *
+   * #183 reikalauja, kad 7.4e neskaitytų `erasure_marks` ad-hoc SQL skirtingose
+   * vietose. Iki šito taisyklę gynė TIK `restoreService` patikra - vieno failo
+   * sargas prieš repo masto taisyklę, t. y. ta pati klasė kaip keturios jau
+   * užregistruotos kokybės skolos.
+   *
+   * ⚠️ KOMENTARAI SĄMONINGAI NEVALOMI, ir tai NE aplaidumas.
+   *
+   * Vienintelis repo turimas valytojas yra `beKomentaru()`, o jis registruotas
+   * kaip keistinas (`rizika10`): blokinius komentarus šalina reguliariuoju
+   * reiškiniu, tad `/*` eilutės literale nurytų kodą - įskaitant tikrą pažeidimą.
+   * Statyti naują sargą ant to pamato reikštų gauti TYLIĄ gedimo kryptį būtent
+   * ten, kur sargas ir reikalingas.
+   *
+   * Vietoj to ieškoma SQL FORMOS - veiksmažodžio prieš lentelės vardą. Proza to
+   * nedaro: esami komentarai (`lifecycleService`, `jobStore`) mini lentelę, bet
+   * ne kaip SQL. Kaina: komentaras, cituojantis SQL, patikrą suerzins. Tai
+   * GARSI kryptis - priimtina tripwire'ui, priešingai nei tyli.
+   *
+   * ⚠️ KO ŠI PATIKRA NEDENGIA: dinamiškai sukonstruoto lentelės vardo
+   * (`FROM ${lentele}`). Tam reikėtų tikro tokenizatoriaus - žr. `rizika10`.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  const saknis = path.resolve(__dirname, "..");
+
+  /**
+   * Leistinos vietos ir KODĖL kiekviena:
+   *   `utils/deletionTombstones/` - pats autoritetas;
+   *   `migrations/`               - schemos apibrėžimas, ne prieigos kelias;
+   *   `tests/`                    - invariantai TIKRINAMI RAW SQL sąmoningai,
+   *                                 nes patikra per tą patį sluoksnį, kuris
+   *                                 juos ir turėtų pažeisti, nieko neįrodo.
+   */
+  const LEIDZIAMA = ["utils/deletionTombstones", "migrations", "tests", "node_modules"];
+
+  const SQL_FORMA = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN)\s+erasure_marks\b/i;
+
+  const pazeidejai = [];
+
+  const eiti = (dir) => {
+    for (const irasas of fs.readdirSync(dir, { withFileTypes: true })) {
+      const pilnas = path.join(dir, irasas.name);
+      const santykinis = path.relative(saknis, pilnas);
+
+      if (LEIDZIAMA.some((p) => santykinis === p || santykinis.startsWith(`${p}${path.sep}`))) {
+        continue;
+      }
+
+      if (irasas.isDirectory()) {
+        eiti(pilnas);
+        continue;
+      }
+
+      if (!irasas.name.endsWith(".js")) continue;
+
+      const turinys = fs.readFileSync(pilnas, "utf8");
+      for (const eilute of turinys.split("\n")) {
+        if (SQL_FORMA.test(eilute)) pazeidejai.push(`${santykinis}: ${eilute.trim()}`);
+      }
+    }
+  };
+
+  eiti(saknis);
+
+  assert.deepEqual(
+    pazeidejai,
+    [],
+    "`erasure_marks` SQL privalo gyventi TIK `utils/deletionTombstones/`. " +
+      `Rasta kitur:\n${pazeidejai.join("\n")}`
+  );
+});
+
+test("VIENAS AUTORITETAS: patikra REALIAI gaudo - savitikra", () => {
+  /**
+   * ⚠️ TRIPWIRE'AS BE SAVITIKROS YRA TEIGINYS, NE SARGAS.
+   *
+   * Patikra aukščiau praeina ir tada, kai jos šablonas nieko nebeatitinka
+   * (pvz. kas nors „sutvarkė" reguliarųjį reiškinį). Todėl tas pats šablonas
+   * paleidžiamas prieš žinomai pažeidžiantį tekstą.
+   */
+  const SQL_FORMA = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN)\s+erasure_marks\b/i;
+
+  const pazeidimai = [
+    'const { rows } = await pool.query("SELECT status FROM erasure_marks WHERE job_id = $1");',
+    "await client.query(`DELETE FROM erasure_marks WHERE job_id = $1`);",
+    'await pool.query("UPDATE erasure_marks SET status = $1");',
+    'await pool.query("INSERT INTO erasure_marks (job_id) VALUES ($1)");',
+  ];
+
+  for (const eilute of pazeidimai) {
+    assert.ok(SQL_FORMA.test(eilute), `šablonas privalo pagauti: ${eilute}`);
+  }
+
+  /** Ir NEturi gaudyti prozos - kitaip komentarai taptų neįmanomi. */
+  const proza = [
+    " * Persistentiniame režime atsakymas ateina iš `erasure_marks`, o `Promise` yra",
+    " * Nuo 7.5a autoritetas yra sąlyginis `erasure_marks` rašymas su per-`job_id`",
+    " * `erasure_marks` pergyvena jobą ir nėra išbraukiama iš kopijų",
+  ];
+
+  for (const eilute of proza) {
+    assert.ok(!SQL_FORMA.test(eilute), `šablonas NETURI gaudyti prozos: ${eilute}`);
+  }
+});

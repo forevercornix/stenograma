@@ -358,6 +358,31 @@ nuėmė barjerą, barjeras nenuimamas.
 incidentas, ne kasdienis darbas; maršrutas pridėtų autentikacijos, autorizacijos
 ir rate-limit paviršių tam, kas daroma retai ir turint DB prieigą.
 
+> ### ⚠️ DIEGIMO SPRENDIMO ĮVESTIS: šis kelias reikalauja shell prieigos
+>
+> Abi komandos vykdomos **ant host'o, kuriame nustatytas `DATABASE_URL`**. Kito
+> įėjimo nėra.
+>
+> **Diegime, kuriame operatoriai turi TIK HTTP prieigą, užstrigusi ištrynimo
+> žyma NETURI VAISTŲ** – job'as lieka užbarjeruotas neribotą laiką, kol kas nors
+> prideda maršrutą arba suteikia shell prieigą.
+>
+> Tai nėra gedimas ir ne priežiūros skola – tai **sąmoningo apimties sprendimo
+> kaina** (#183, 7.5a). Bet ji privalo būti pasverta **planuojant diegimą**, ne
+> atrandama incidento metu, 2 val. nakties, kai vartotojas skambina dėl
+> ištrynimo, kuris „nieko nedaro".
+>
+> **Prieš diegiant nuspręskite:**
+>
+> 1. ar bent vienas budintis asmuo turi shell prieigą prie host'o su
+>    `DATABASE_URL`? Jei taip – jokių papildomų veiksmų nereikia;
+> 2. jei ne – arba tokia prieiga suteikiama (ir įrašoma į budėjimo procedūrą),
+>    arba prieš paleidžiant į produkciją pridedamas administracinis maršrutas.
+>
+> ⚠️ Trečio varianto – „išspręsim, kai atsitiks" – nėra: barjeras nuo
+> `deletion_pending` reiškia, kad tuo metu job'as jau užrakintas, o
+> neterminalės žymos **nesensta**, tad laukimas problemos neišsprendžia.
+
 **Ko šiame kelyje NĖRA:** automatinio užstrigusių žymų šalinimo. Tai būtų
 barjero nuėmimas be žmogaus sprendimo – tiksliai tai, ko `deletion_failed`
 semantika vengia.
