@@ -177,19 +177,42 @@ function purgeExpiredMemory(now = Date.now()) {
  * @returns {Promise<number>} baigtinis pašalintų įrašų skaičius.
  */
 async function purgeExpired(now = Date.now()) {
-  const cutoff = retencijosRiba(now);
-  const cutoffIso = new Date(cutoff).toISOString();
-
   let pasalinta = purgeExpiredMemory(now);
 
   const store = auditStore.current();
   if (typeof store.purgeExpired !== "function") return pasalinta;
 
-  for (;;) {
-    const kiek = await store.purgeExpired(cutoffIso, RETENCIJOS_BATCH);
-    pasalinta += kiek;
+  /**
+   * ⚠️ RIBĄ SKAIČIUOJA SAUGYKLA, NE ŠIS PROCESAS (#233 Codex, P1).
+   *
+   * Persistentiniame režime `timestamp` rašo DB `now()`, tad ir trynimo riba
+   * privalo ateiti iš to paties laikrodžio - kitaip skubantis replikos
+   * laikrodis negrįžtamai ištrintų dar nepasenusias eilutes. Atmintyje ta pati
+   * funkcija remiasi įleidžiamu `now`, tad kontroliuojamo laiko reikalavimas
+   * galioja abiem pusėms, tik autoritetas skiriasi.
+   *
+   * Kviečiama VIENĄ kartą: visi batch'ai naudoja tą pačią ribą.
+   */
+  const cutoffIso = await store.retencijosRiba(getRetentionDays(), now);
 
-    if (kiek < RETENCIJOS_BATCH) return pasalinta;
+  try {
+    for (;;) {
+      const kiek = await store.purgeExpired(cutoffIso, RETENCIJOS_BATCH);
+      pasalinta += kiek;
+
+      if (kiek < RETENCIJOS_BATCH) return pasalinta;
+    }
+  } catch (klaida) {
+    /**
+     * ⚠️ JAU ĮVYKDYTI BATCH'AI NEDINGSTA IŠ ATASKAITOS (#233 Codex, P2).
+     *
+     * Kiekvienas batch'as commit'inasi atskirai. Kritus vėlesniam, be šito
+     * skaičius liktų nulis, `retentionSweeper` ciklą palaikytų tuščiu ir
+     * neparašytų `RETENTION_PURGE` įrašo - eilutės būtų negrįžtamai ištrintos
+     * BE pėdsako audito žurnale. Tyliai.
+     */
+    klaida.pasalinta = pasalinta;
+    throw klaida;
   }
 }
 

@@ -159,6 +159,25 @@ const memoryStore = {
   },
 
   /**
+   * Retencijos riba atmintyje - iš ĮLEIDŽIAMO `now` (#233 Codex, P1).
+   *
+   * ⚠️ SKIRTUMAS NUO POSTGRES YRA TEISINGAS, NE NUKRYPIMAS. Atmintyje
+   * `timestamp` rašo tas pats procesas, tad jo laikrodis IR YRA autoritetas;
+   * #213 reikalavimas dėl kontroliuojamo laiko šaltinio čia reiškia būtent
+   * įleidžiamą `now`, kurį naudoja testai. Postgres pusėje autoritetas yra DB,
+   * nes ten rašymo žymą deda ji.
+   */
+  async retencijosRiba(dienos, now = Date.now()) {
+    const skaicius = Number(dienos);
+
+    if (!Number.isFinite(skaicius) || skaicius <= 0) {
+      throw new Error(`Retencijos terminas privalo būti teigiamas (gauta: ${dienos}).`);
+    }
+
+    return new Date(now - skaicius * 24 * 60 * 60 * 1000).toISOString();
+  },
+
+  /**
    * RETENCIJA - TAS PATS KONTRAKTAS KAIP POSTGRES (#155, 7.4d / #213).
    *
    * ⚠️ RIBA GRIEŽTA IR VIENODA ABIEJUOSE BACKEND'UOSE: `< cutoff` šalinama,

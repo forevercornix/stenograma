@@ -464,6 +464,25 @@ const SCENARIJAI = [
     },
   },
   {
+    id: "retencijos-riba-is-saugyklos",
+    kodel: "retencijosRiba() egzistuoja abiejuose backend'uose ir grąžina praeities ISO datą (#233)",
+    async run({ store }) {
+      /**
+       * ⚠️ RIBOS AUTORITETAS SKIRIASI SĄMONINGAI: atmintyje tai įleidžiamas
+       * `now`, postgres pusėje - DB laikrodis. Bendra tai, kad ribą duoda
+       * SAUGYKLA, o ne kvietėjas: kitaip trynimo riba ateitų iš kito laikrodžio
+       * nei rašymo žyma.
+       */
+      const riba = await store.retencijosRiba(30);
+
+      assert.equal(typeof riba, "string");
+      assert.ok(!Number.isNaN(Date.parse(riba)), `riba privalo būti data: ${riba}`);
+      assert.ok(Date.parse(riba) < Date.now(), "30 dienų riba yra praeityje");
+
+      await assert.rejects(() => store.retencijosRiba(0), /teigiamas/i);
+    },
+  },
+  {
     id: "retencija-salina-tik-pries-cutoff",
     kodel: "purgeExpired() riba reiškia TĄ PATĮ abiejuose backend'uose (#213)",
     async run({ store }) {

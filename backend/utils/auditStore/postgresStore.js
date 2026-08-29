@@ -366,6 +366,37 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
     },
 
     /**
+     * RETENCIJOS RIBA IŠ **DB LAIKRODŽIO** (#233 Codex, P1).
+     *
+     * ⚠️ TRYNIMO RIBA PRIVALO ATEITI IŠ TO PATIES LAIKRODŽIO KAIP RAŠYMO ŽYMA.
+     *
+     * `timestamp` sąmoningai rašomas DB `now()`, nes replikų laikrodžiai
+     * skiriasi (7.4b sprendimas; dėl to ir 7.4c atsisakė `timestamp` kaip sort
+     * key). Skaičiuojant ribą Node procese, skubantis vienos replikos laikrodis
+     * NEGRĮŽTAMAI ištrintų eilutes, kurioms `AUDIT_RETENTION_DAYS` dar nesuėjo,
+     * o lėtas paliktų pasenusias. Dvi replikos tuo pačiu metu naudotų skirtingas
+     * ribas.
+     *
+     * Skaičiuojama VIENĄ kartą per sweep'ą; `now` argumentas čia sąmoningai
+     * ignoruojamas - persistentiniame režime kontroliuojamas laiko šaltinis yra
+     * DB, ne kvietėjas.
+     */
+    async retencijosRiba(dienos) {
+      const skaicius = Number(dienos);
+
+      if (!Number.isFinite(skaicius) || skaicius <= 0) {
+        throw new Error(`Retencijos terminas privalo būti teigiamas (gauta: ${dienos}).`);
+      }
+
+      const { rows } = await pool.query(
+        "SELECT (now() - ($1 || ' days')::interval) AS riba",
+        [String(skaicius)]
+      );
+
+      return new Date(rows[0].riba).toISOString();
+    },
+
+    /**
      * RETENCIJA: VIENAS RIBOTAS BATCH'AS (#155, 7.4d / #213).
      *
      * ⚠️ KANDIDATAI ATRENKAMI DB PUSĖJE. Parsisiųsti expired eilutes į Node ir
@@ -418,11 +449,41 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
      * (erasure, retencija, privacy purge), kurių kiekvieno prasmė matoma iš
      * pavadinimo.
      *
+     * ⚠️ BATCH'INAMA, KAIP IR RETENCIJA (#233 Codex, P2).
+     *
+     * Vienas neribotas `DELETE FROM audit_log` perrašo kiekvieną eilutę ir
+     * indekso įrašą viename sakinyje, o tam pačiam pool'ui galioja audito
+     * `statement_timeout` (~1,1 s). Ant išaugusios lentelės - ypač per pirmą
+     * atnaujinimą iš anksčiau neribotos saugyklos - KIEKVIENAS `PRIVACY_MODE`
+     * startas baigtųsi timeout'u dar prieš readiness. Ironiška būtų batch'inti
+     * retenciją ir palikti nebatch'intą purge, kuris dirba su didesniu kiekiu.
+     *
+     * ⚠️ `FOR UPDATE` BE `SKIP LOCKED` - SKIRTUMAS NUO RETENCIJOS, IR SĄMONINGAS.
+     *
+     * Retencijai praleisti užrakintą eilutę saugu: ją pašalins kitas ciklas.
+     * Privacy purge tokios antros progos neturi - jis privalo išvalyti VISKĄ
+     * prieš instancijai pradedant aptarnauti srautą, tad geriau palaukti
+     * konkuruojančios transakcijos nei palikti eilutę.
+     *
+     * Ciklas baigiasi, kai partija pašalina 0 eilučių.
+     *
      * @returns {Promise<number>} pašalintų eilučių skaičius.
      */
-    async purgeAllForPrivacy() {
-      const { rowCount } = await pool.query("DELETE FROM audit_log");
-      return rowCount;
+    async purgeAllForPrivacy(limit = RETENCIJOS_BATCH) {
+      let viso = 0;
+
+      for (;;) {
+        const { rowCount } = await pool.query(
+          `WITH kandidatai AS (
+             SELECT id FROM audit_log LIMIT $1 FOR UPDATE
+           )
+           DELETE FROM audit_log a USING kandidatai k WHERE a.id = k.id`,
+          [limit]
+        );
+
+        viso += rowCount;
+        if (rowCount === 0) return viso;
+      }
     },
 
     /**

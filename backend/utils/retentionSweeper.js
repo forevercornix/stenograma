@@ -136,14 +136,34 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
      */
     summary.auditEntries = await auditLog.purgeExpired(now);
   } catch (e) {
+    /**
+     * ⚠️ JAU PAŠALINTOS EILUTĖS PATENKA Į SUVESTINĘ (#233 Codex, P2).
+     *
+     * Retencija persistentiniame režime vyksta batch'ais, ir kiekvienas jų
+     * commit'inasi atskirai. Kritus vėlesniam batch'ui, priskyrimas aukščiau
+     * neįvyksta - be šito `auditEntries` liktų nulis, ciklas atrodytų tuščias,
+     * ir `RETENTION_PURGE` įrašas nebūtų parašytas. Eilutės būtų negrįžtamai
+     * ištrintos be pėdsako audito žurnale.
+     */
+    summary.auditEntries = Number.isInteger(e.pasalinta) ? e.pasalinta : 0;
     summary.errors.push(`audit: ${e.message}`);
   }
 
   const removedAnything = summary.jobs > 0 || summary.audio > 0 || summary.auditEntries > 0;
 
-  // Įrašom TIK kai kažkas realiai pašalinta - kitaip kas valandą rašytume tuščią
-  // įvykį ir per AUDIT_MAX_ENTRIES išstumtume naudingus įrašus.
-  if (removedAnything) {
+  /**
+   * ⚠️ KLAIDA IRGI YRA ĮVYKIS (#233 Codex, P2).
+   *
+   * Iki šito ciklas, kuris nieko nepašalino IR krito, baigdavosi visiškoje
+   * tyloje: nei `RETENTION_PURGE` įrašo, nei klaidos - `startRetentionSweeper`
+   * logina tik tada, kai visas pažadas atmetamas, o klaidos čia sugaunamos.
+   * Nesėkmingas automatinis asmens duomenų šalinimas privalo palikti pėdsaką.
+   */
+  const verta = removedAnything || summary.errors.length > 0;
+
+  // Įrašom TIK kai kažkas realiai pašalinta arba kai buvo klaidų - kitaip kas
+  // valandą rašytume tuščią įvykį ir per AUDIT_MAX_ENTRIES išstumtume naudingus.
+  if (verta) {
     /**
      * ⚠️ AUDITO KLAIDA PROPAGUOJAMA (#155, 7.4a / #210).
      *

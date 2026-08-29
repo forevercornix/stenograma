@@ -19,14 +19,29 @@ const { RETENCIJOS_BATCH } = require("../utils/auditStore/postgresStore");
  * kuriam reikia tikros PostgreSQL - be jos ataskaitoje tai eina kaip NOT RUN.
  */
 
+/**
+ * SAUGYKLOS LAIKRODŽIO SENTINEL.
+ *
+ * ⚠️ SĄMONINGAI TOLI NUO `Date.now()`. Riba, apskaičiuota Node procese, niekada
+ * nebus lygi šiai reikšmei - todėl testas mato SKIRTUMĄ tarp „riba iš saugyklos"
+ * ir „riba iš proceso laikrodžio", o ne tik tai, kad kažkokia riba perduota.
+ */
+const SAUGYKLOS_RIBA = "2000-01-01T00:00:00.000Z";
+
 /** Saugykla, kuri fiksuoja, KOKIUS argumentus gavo kiekvienas batch'as. */
 function stebimaSaugykla(atsakymai) {
   const kvietimai = [];
+  const ribosKvietimai = [];
 
   return {
     kvietimai,
+    ribosKvietimai,
     saugykla: {
       backend: "postgres",
+      async retencijosRiba(dienos, now) {
+        ribosKvietimai.push({ dienos, now });
+        return SAUGYKLOS_RIBA;
+      },
       async purgeExpired(cutoffIso, limit) {
         kvietimai.push({ cutoffIso, limit });
         const kiek = atsakymai[kvietimai.length - 1];
@@ -48,23 +63,72 @@ async function suSaugykla(saugykla, veiksmas) {
 
 test.afterEach(() => auditLog.clear());
 
-test("RIBA: cutoff apskaičiuojamas VIENĄ kartą ir tas pats keliauja į visus batch'us", async () => {
+test("RIBA: ateina IŠ SAUGYKLOS laikrodžio, apskaičiuojama VIENĄ kartą", async () => {
   /**
-   * ⚠️ PERSKAIČIUOJANT `now()` KIEKVIENAM BATCH'UI, NAIKINAMA AIBĖ SLENKA.
+   * ⚠️ DVI ATSKIROS GARANTIJOS VIENAME TESTE, IR ABI BŪTINOS.
    *
-   * Ilgas sweep'as pirmame batch'e dirbtų su viena riba, paskutiniame - su
-   * vėlesne, tad rezultatas priklausytų nuo trukmės: kuo lėčiau, tuo daugiau
-   * eilučių pagauta. Riba turi būti sweep'o savybė, ne laikrodžio.
+   * **Kartą per sweep'ą.** Perskaičiuojant ribą kiekvienam batch'ui, ilgo
+   * sweep'o metu naikinama aibė slenka: pirmas batch'as dirbtų su viena riba,
+   * paskutinis su vėlesne, ir rezultatas priklausytų nuo trukmės.
+   *
+   * **Iš saugyklos, ne iš šio proceso** (#233 Codex, P1). Persistentiniame
+   * režime `timestamp` rašo DB `now()`, nes replikų laikrodžiai skiriasi.
+   * Skaičiuojant ribą Node procese, skubantis laikrodis NEGRĮŽTAMAI ištrintų
+   * eilutes, kurioms terminas dar nesuėjo. Sentinel reikšmė parinkta taip, kad
+   * Node apskaičiuota riba niekada su ja nesutaptų - tad testas skiria
+   * „paklausė saugyklos" nuo „pats paskaičiavo".
    */
-  const { kvietimai, saugykla } = stebimaSaugykla([RETENCIJOS_BATCH, RETENCIJOS_BATCH, 7]);
+  const { kvietimai, ribosKvietimai, saugykla } = stebimaSaugykla([
+    RETENCIJOS_BATCH,
+    RETENCIJOS_BATCH,
+    7,
+  ]);
 
   await suSaugykla(saugykla, () => auditLog.purgeExpired(Date.now()));
 
   assert.equal(kvietimai.length, 3, "prielaida: ciklas kartojosi");
+  assert.equal(ribosKvietimai.length, 1, "ribos privalo būti klausiama VIENĄ kartą per sweep'ą");
 
   const ribos = new Set(kvietimai.map((k) => k.cutoffIso));
-  assert.equal(ribos.size, 1, `visi batch'ai privalo gauti tą pačią ribą, gauta: ${[...ribos]}`);
-  assert.ok(!Number.isNaN(Date.parse(kvietimai[0].cutoffIso)), "riba perduodama kaip data");
+  assert.deepEqual(
+    [...ribos],
+    [SAUGYKLOS_RIBA],
+    "visi batch'ai privalo gauti TĄ PAČIĄ saugyklos duotą ribą, ne proceso laikrodžio"
+  );
+
+  /** Ir terminas perduodamas, kad saugykla galėtų jį pritaikyti savo laikrodžiui. */
+  assert.ok(Number.isFinite(Number(ribosKvietimai[0].dienos)), "perduodamas retencijos terminas");
+});
+
+test("RIBA: postgres saugykla ją skaičiuoja SQL `now()`, ne Node laikrodžiu", async () => {
+  /**
+   * ⚠️ ĮRODYMAS SAUGYKLOS LYGYJE. Ankstesnis testas rodo, kad `auditLog` ribos
+   * KLAUSIA; šis - kad postgres realizacija atsako DB laikrodžiu, o ne
+   * persiskaičiuoja Node pusėje.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+
+  const uzklausos = [];
+  const DB_ATSAKYMAS = new Date("2001-02-03T04:05:06.000Z");
+
+  const pool = {
+    query: async (sql, params) => {
+      uzklausos.push({ sql: String(sql), params });
+      return { rows: [{ riba: DB_ATSAKYMAS }] };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A" });
+  const riba = await store.retencijosRiba(30);
+
+  assert.equal(riba, DB_ATSAKYMAS.toISOString(), "grąžinama BŪTENT DB duota reikšmė");
+  assert.match(uzklausos[0].sql, /now\(\)/i, "riba skaičiuojama SQL `now()`");
+  assert.deepEqual(uzklausos[0].params, ["30"], "terminas perduodamas parametru, ne interpoliuojamas");
+
+  /** Netinkamas terminas atmetamas dar prieš SQL - kitaip trintume pagal šiukšlę. */
+  for (const blogas of [0, -1, "trisdešimt", null]) {
+    await assert.rejects(() => store.retencijosRiba(blogas), /teigiamas/i);
+  }
 });
 
 test("BATCH'AI: ciklas kartoja, kol saugykla grąžina mažiau nei limitas", async () => {
@@ -265,6 +329,97 @@ test("`AUDIT_MAX_ENTRIES`: atminties semantika NEREGRESUOJA", async () => {
     if (saved === undefined) delete process.env.AUDIT_MAX_ENTRIES;
     else process.env.AUDIT_MAX_ENTRIES = saved;
     auditLog.clear();
+  }
+});
+
+test("DALINIS REZULTATAS: kritus batch'ui, jau ištrintos eilutės NEDINGSTA iš suvestinės", async () => {
+  /**
+   * ⚠️ TYLUS IŠTRYNIMAS BE PĖDSAKO (#233 Codex, P2).
+   *
+   * Batch'ai commit'inasi atskirai. Kritus vėlesniam, priskyrimas sweeper'yje
+   * neįvyksta, ir be šios grandinės `auditEntries` liktų nulis. Jei tuo pačiu
+   * ciklu nepašalinta nei job'ų, nei audio, ciklas atrodytų tuščias: nei
+   * `RETENTION_PURGE` įrašo, nei klaidos - o audito eilutės jau negrįžtamai
+   * ištrintos.
+   */
+  const { runRetentionSweep } = require("../utils/retentionSweeper");
+
+  let kvietimas = 0;
+  const saugykla = {
+    backend: "postgres",
+    /** ⚠️ `append` būtinas: dėl klaidos sweeper'is dabar RAŠO `RETENTION_PURGE`. */
+    async append(eilute) {
+      return eilute;
+    },
+    async retencijosRiba() {
+      return SAUGYKLOS_RIBA;
+    },
+    async purgeExpired() {
+      kvietimas += 1;
+      if (kvietimas <= 2) return RETENCIJOS_BATCH;
+      throw new Error("DB nutrūko po dviejų batch'ų");
+    },
+  };
+
+  /** Tiesioginis kvietimas: klaida keliauja su jau pašalintų skaičiumi. */
+  await suSaugykla(saugykla, async () => {
+    await assert.rejects(
+      () => auditLog.purgeExpired(Date.now()),
+      (e) => {
+        assert.equal(e.pasalinta, RETENCIJOS_BATCH * 2, "klaida neša jau įvykdytų batch'ų sumą");
+        return true;
+      }
+    );
+  });
+
+  /** Ir sweeper'is tą skaičių paviešina, o ne praneša tuščią ciklą. */
+  kvietimas = 0;
+  const summary = await suSaugykla(saugykla, () => runRetentionSweep({ now: Date.now() }));
+
+  assert.equal(summary.auditEntries, RETENCIJOS_BATCH * 2, "suvestinė rodo realiai pašalintas");
+  assert.ok(
+    summary.errors.some((e) => e.includes("audit:")),
+    "klaida privalo likti matoma, o ne būti nurašyta į tylų nulį"
+  );
+});
+
+test("STARTO PURGE: batch'inamas, o ne vienas neribotas `DELETE`", async () => {
+  /**
+   * ⚠️ TIMEOUT'AS PRIEŠ READINESS (#233 Codex, P2).
+   *
+   * Vienas neribotas `DELETE FROM audit_log` perrašo kiekvieną eilutę ir indekso
+   * įrašą viename sakinyje, o pool'ui galioja audito `statement_timeout`. Ant
+   * išaugusios lentelės - ypač per pirmą atnaujinimą iš anksčiau neribotos
+   * saugyklos - kiekvienas `PRIVACY_MODE` startas baigtųsi timeout'u.
+   *
+   * ⚠️ `FOR UPDATE` BE `SKIP LOCKED` - skirtumas nuo retencijos. Purge privalo
+   * išvalyti VISKĄ prieš readiness; praleista užrakinta eilutė antros progos
+   * negautų.
+   */
+  const { createPostgresStore, RETENCIJOS_BATCH: RIBA } = require("../utils/auditStore/postgresStore");
+
+  const uzklausos = [];
+  let liko = RIBA * 2 + 5;
+
+  const pool = {
+    query: async (sql, params) => {
+      uzklausos.push(String(sql));
+      const kiek = Math.min(liko, params ? params[0] : liko);
+      liko -= kiek;
+      return { rowCount: kiek };
+    },
+  };
+
+  const store = createPostgresStore(pool, { hashKeyId: "A" });
+  const viso = await store.purgeAllForPrivacy();
+
+  assert.equal(viso, RIBA * 2 + 5, "grąžinamas pilnas pašalintų kiekis");
+  assert.equal(uzklausos.length, 4, "trys partijos + baigiamasis tuščias kvietimas");
+
+  for (const sql of uzklausos) {
+    assert.match(sql, /LIMIT/i, "kiekviena partija ribota");
+    assert.match(sql, /FOR UPDATE/i, "kandidatai užrakinami");
+    assert.doesNotMatch(sql, /SKIP LOCKED/i, "purge negali praleisti užrakintų eilučių");
   }
 });
 
