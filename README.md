@@ -1690,8 +1690,10 @@ audito režimo nekeičia. `postgres` papildomai reikalauja `AUDIT_ID_SALT` ir
 GDPR ištrynimas senų įrašų nerastų. Trūkstant bet kurio, startas **nutrūksta**;
 grįžimo į atmintį nėra.
 
-⚠️ Retencija persistentiniame režime **neveikia** iki [7.4d] – žr. „Audito
-retencija". Sprendimai ir diegimo detalės – `docs/audit-storage.md`.
+⚠️ Retencija persistentiniame režime **veikia** nuo [7.4d]: `AUDIT_RETENTION_DAYS`
+taikomas ir `audit_log` eilutėms per centralizuotą sweep'ą. `AUDIT_MAX_ENTRIES`
+lieka **tik atminties** apsauga. Sprendimai ir diegimo detalės –
+`docs/audit-storage.md` §9.
 
 **Rolėmis grįsta autorizacija (#18 PR2).** Leidimai gyvena viename registre
 (`utils/permissions.js`) ir yra **deny-by-default** – naujas leidimas be
@@ -2057,8 +2059,10 @@ o numatytas tiekėjų pasirinkimas.
 1. **Pasenusius jobus** – metaduomenys + rezultatas (transkripcija/protokolas) po `JOB_TTL_MINUTES`.
 2. **Nuskendusius audio failus** – senesnius nei `AUDIO_RETENTION_HOURS` ir nepaminėtus nė viename gyvame jobe. Iki tol jų nešalino niekas: jei procesas nukrito tarp failo įkėlimo ir jobo užbaigimo, failas likdavo storage neribotai.
 3. **Pasenusius audito įrašus** – pagal `AUDIT_RETENTION_DAYS`, nepriklausomai nuo srauto.
-   ⚠️ **Tik `AUDIT_BACKEND=memory` režimu.** Su `postgres` ciklas audito eilučių
-   NEŠALINA (jos gyvena DB, o ne atmintyje) – žr. „Audito retencija" ir [7.4d].
+   ⚠️ **Abiem backend'ams** (nuo [7.4d]). Su `postgres` eilutės šalinamos
+   ribotais batch'ais, o riba imama iš DB laikrodžio – to paties, kuris deda
+   `timestamp`. `AUDIT_MAX_ENTRIES` persistentiškai **netaikomas**: eilutės
+   nešalinamos vien dėl kiekio.
 
 Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais (`jobs=2 audio=1 audit=5`),
 `subjectId: null` – be identifikatorių, failų vardų ar turinio. Įvykis rašomas

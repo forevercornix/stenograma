@@ -86,7 +86,7 @@ function isrinktiMeta(eilute) {
    * `record()` beveik visiems neprivalomiems laukams eksplicitiškai priskiria
    * `null`, tad be šios sąlygos KIEKVIENA eilutė neštų visus 21 allowlist raktą -
    * ~385 simbolių JSON minimaliam prisijungimo įvykiui, dar prieš JSONB pridėtinę
-   * kainą. Postgres režime retencijos NĖRA (7.4d), tad ši kaina kaupiasi
+   * kainą. Postgres režime retenciją vykdo centralizuotas sweep'as (7.4d), tad ši kaina ribojama
    * neribotai augančioje lentelėje.
    *
    * API kontraktas nesikeičia: `iEilute()` praleistus raktus atkuria kaip `null`,

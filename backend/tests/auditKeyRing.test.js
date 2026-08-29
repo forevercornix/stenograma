@@ -241,7 +241,7 @@ test("KIEKIO RIBA: pati savaime NEATMETA konfigūracijos", () => {
  * teisingumą tikrina `auditPersistence.integration.test.js` prieš tikrą
  * PostgreSQL. Čia tikrinama tik `init()` būsenos valdymo logika.
  */
-function netikrasPg({ generacijos }) {
+function netikrasPg({ generacijos, purgeKrenta = false, instancijos = [] }) {
   const klientas = {
     query: async (sql) => {
       if (/^UPDATE\s+audit_log/i.test(sql)) {
@@ -257,6 +257,7 @@ function netikrasPg({ generacijos }) {
   class NetikrasPool {
     constructor() {
       this.baigtas = false;
+      instancijos.push(this);
     }
     on() {}
     async connect() {
@@ -296,7 +297,13 @@ function netikrasPg({ generacijos }) {
         return { rows: generacijos.map((hash_key_id) => ({ hash_key_id })) };
       }
 
-      return { rows: [{}] };
+      /** `PRIVACY_MODE` starto valymas - batch'ais, tad grąžinam `rowCount`. */
+      if (/DELETE FROM audit_log/i.test(sql)) {
+        if (purgeKrenta) throw new Error("statement timeout valant audit_log");
+        return { rows: [], rowCount: 0 };
+      }
+
+      return { rows: [{}], rowCount: 0 };
     }
   }
 
@@ -366,6 +373,93 @@ test("SNAPSHOT: nepavykęs `init()` nepalieka našlaičių kitam bandymui", asyn
       [],
       "sėkmingas startas NEGALI paveldėti ankstesnio bandymo našlaičių"
     );
+  } finally {
+    if (originalus) require.cache[pgKelias] = originalus;
+    else delete require.cache[pgKelias];
+    await auditStore.shutdown();
+  }
+});
+
+test("POOL: kritus po-inicijavimo fazei jungtis UŽDAROMA, ne paliekama", async () => {
+  /**
+   * ⚠️ NUTEKĖJIMAS KAUPIASI BŪTENT ATSISTATYMO SCENARIJUJE (#233 Codex raundas 3).
+   *
+   * `initializePostgres()` grąžina GYVĄ pool'ą, o `_pool` priskiriamas tik
+   * fazės gale. Kritus bet kuriam tarpiniam žingsniui, `shutdown()` to pool'o
+   * nebemato. O `init()` po nesėkmės kartojamas SĄMONINGAI - tai 7.4f
+   * atsistatymo kelias: operatorius pataiso konfigūraciją ir bando vėl. Be šios
+   * apsaugos kiekvienas bandymas paliktų dar vieną atvirą jungčių rinkinį.
+   *
+   * ⚠️ TARPAS SENESNIS UŽ 7.4d: `patikrintiGeneracijas()` toje pačioje vietoje
+   * fail-closed metė jau ties 7.4f. 7.4d pridėjo antrą metantį žingsnį ir langą
+   * praplėtė. Todėl tikrinama VISA fazė, ne tik purge.
+   */
+  const auditStore = require("../utils/auditStore");
+  const pgKelias = require.resolve("pg");
+  const originalus = require.cache[pgKelias];
+
+  const bazine = {
+    AUDIT_BACKEND: "postgres",
+    DATABASE_URL: "postgres://netikras/netikra",
+    AUDIT_ID_SALT: AKTYVUS,
+    AUDIT_ID_SALT_ID: "AKTYVUS",
+  };
+
+  try {
+    await auditStore.shutdown();
+
+    /** ── 1. Purge krenta ─────────────────────────────────────────────────── */
+    const pirmos = [];
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: [], purgeKrenta: true, instancijos: pirmos }),
+    };
+
+    await assert.rejects(
+      () => auditStore.init({ ...bazine, PRIVACY_MODE: "true" }),
+      /statement timeout/i,
+      "prielaida: purge realiai krenta"
+    );
+
+    assert.equal(pirmos.length, 1, "prielaida: pool sukurtas");
+    assert.equal(pirmos[0].baigtas, true, "kritus fazei pool'as PRIVALO būti uždarytas");
+
+    /** ── 2. Ta pati apsauga generacijų patikrai (kelias senesnis už 7.4d) ── */
+    const antros = [];
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: ["NASLAITE"], instancijos: antros }),
+    };
+
+    await assert.rejects(
+      () => auditStore.init({ ...bazine, PRIVACY_MODE: "false" }),
+      /neturime rakto|NEPASIEKS/i,
+      "prielaida: našlaitė stabdo startą"
+    );
+
+    assert.equal(antros[0].baigtas, true, "7.4c fail-closed kelias irgi neturi palikti jungties");
+
+    /** ── 3. Sėkmingas pakartotinis bandymas nepalieka antros jungties ────── */
+    const trecios = [];
+    require.cache[pgKelias] = {
+      id: pgKelias,
+      filename: pgKelias,
+      loaded: true,
+      exports: netikrasPg({ generacijos: ["AKTYVUS"], instancijos: trecios }),
+    };
+
+    await auditStore.init({ ...bazine, PRIVACY_MODE: "false" });
+
+    assert.equal(trecios.length, 1, "sėkmingas startas sukuria vieną pool'ą");
+    assert.equal(trecios[0].baigtas, false, "veikiantis pool'as lieka atviras");
+
+    /** Ir `shutdown()` jį mato - skirtingai nei nutekėjusius. */
+    await auditStore.shutdown();
+    assert.equal(trecios[0].baigtas, true, "`shutdown()` uždaro priskirtą pool'ą");
   } finally {
     if (originalus) require.cache[pgKelias] = originalus;
     else delete require.cache[pgKelias];

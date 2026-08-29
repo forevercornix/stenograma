@@ -700,43 +700,70 @@ async function init(env = process.env) {
     const { store: pgStore, pool } = await initializePostgres(env);
 
     /**
-     * `PRIVACY_MODE` STARTO BARJERAS (#155, 7.4d / #213).
+     * ⚠️ PO-INICIJAVIMO FAZĖ UŽDARO POOL'Ą, JEI KRENTA (#233 Codex raundas 3, P1).
      *
-     * ⚠️ TVARKA NĖRA STILIAUS KLAUSIMAS. Purge eina PRIEŠ
-     * `patikrintiGeneracijas()`: išvalius eilutes `usedGenerations()` grąžina
-     * `[]`, tad 7.4c fail-closed taisyklė nebeturi ko atmesti. Priešinga tvarka
-     * sustabdytų startą dėl našlaičių generacijų, kurias purge tuoj pat būtų
-     * ištrynęs - t. y. dėl eilučių, kurių po sekundės nebebūtų.
+     * `initializePostgres()` jau grąžino GYVĄ pool'ą, bet `_pool` priskiriamas
+     * tik fazės gale. Kritus bet kuriam žingsniui tarp jų, `shutdown()` to
+     * pool'o nebemato, o `init()` po nesėkmės KARTOJAMAS sąmoningai (žr.
+     * `catch` funkcijos gale ir 7.4f atsistatymo scenarijų): kiekvienas
+     * nesėkmingas bandymas paliktų dar vieną atvirą jungčių rinkinį.
      *
-     * ⚠️ FAIL-CLOSED IR `await`INTA. Jokio `catch`: tęsti su
-     * `PRIVACY_MODE=true` ir senomis eilutėmis DB reikštų, kad vėliava žada
-     * ištrynimą, o duoda nutildymą. Fire-and-forget čia reikštų tą patį, tik
-     * nematomai.
-     *
-     * Vieta pasirinkta sąmoningai: DB pool paruoštas, schema ir invariantai
-     * patikrinti, store sukurtas - anksčiau valyti reikštų lenktynes.
+     * ⚠️ TARPAS SENESNIS UŽ 7.4d. Jau ties 7.4f `patikrintiGeneracijas()` -
+     * kuri fail-closed meta dėl našlaičių generacijų ar raktų kiekio - buvo
+     * kviečiama toje pačioje vietoje. 7.4d pridėjo antrą metantį žingsnį
+     * (privacy purge) ir tuo langą praplėtė, bet jo nesukūrė. Todėl apsauga
+     * dedama aplink VISĄ fazę, o ne tik aplink purge.
      */
-    if (String(env.PRIVACY_MODE).toLowerCase() === "true") {
-      const kiek = await pgStore.purgeAllForPrivacy();
-
+    try {
       /**
-       * ⚠️ ĮSPĖJAMA VISADA, NET KAI PAŠALINTA 0 EILUČIŲ.
+       * `PRIVACY_MODE` STARTO BARJERAS (#155, 7.4d / #213).
        *
-       * Iki 7.4d šis derinys buvo starto klaida (#211), tad jis negalėjo likti
-       * nepastebėtas. Panaikinus sargą, tyla reikštų sukonfigūruotą,
-       * persistentinę ir amžinai tuščią audito lentelę, kuri stebint atrodo kaip
-       * veikianti sistema - tiksliai tas scenarijus, dėl kurio 7.4b sargą ir
-       * įvedė. Įspėjimas kiekvieno starto metu yra jo pakaitalas.
+       * ⚠️ TVARKA NĖRA STILIAUS KLAUSIMAS. Purge eina PRIEŠ
+       * `patikrintiGeneracijas()`: išvalius eilutes `usedGenerations()` grąžina
+       * `[]`, tad 7.4c fail-closed taisyklė nebeturi ko atmesti. Priešinga tvarka
+       * sustabdytų startą dėl našlaičių generacijų, kurias purge tuoj pat būtų
+       * ištrynęs - t. y. dėl eilučių, kurių po sekundės nebebūtų.
+       *
+       * ⚠️ FAIL-CLOSED IR `await`INTA. Jokio `catch`: tęsti su
+       * `PRIVACY_MODE=true` ir senomis eilutėmis DB reikštų, kad vėliava žada
+       * ištrynimą, o duoda nutildymą. Fire-and-forget čia reikštų tą patį, tik
+       * nematomai.
+       *
+       * Vieta pasirinkta sąmoningai: DB pool paruoštas, schema ir invariantai
+       * patikrinti, store sukurtas - anksčiau valyti reikštų lenktynes.
        */
-      log.warn(
-        "PRIVACY_MODE=true SU AUDIT_BACKEND=postgres - auditas IŠJUNGTAS SĄMONINGAI. " +
-          `Persistentinės eilutės išvalytos starto metu (${kiek}); tai NEGRĮŽTAMA. ` +
-          "Kol vėliava įjungta, nauji įrašai nepersistinami, o `audit_log` lieka tuščia. " +
-          "Išjungus vėliavą seni įrašai NEATSIKURIA. Žr. docs/audit-storage.md §9."
-      );
-    }
+      if (String(env.PRIVACY_MODE).toLowerCase() === "true") {
+        const kiek = await pgStore.purgeAllForPrivacy();
 
-    await patikrintiGeneracijas(pgStore, env);
+        /**
+         * ⚠️ ĮSPĖJAMA VISADA, NET KAI PAŠALINTA 0 EILUČIŲ.
+         *
+         * Iki 7.4d šis derinys buvo starto klaida (#211), tad jis negalėjo likti
+         * nepastebėtas. Panaikinus sargą, tyla reikštų sukonfigūruotą,
+         * persistentinę ir amžinai tuščią audito lentelę, kuri stebint atrodo kaip
+         * veikianti sistema - tiksliai tas scenarijus, dėl kurio 7.4b sargą ir
+         * įvedė. Įspėjimas kiekvieno starto metu yra jo pakaitalas.
+         */
+        log.warn(
+          "PRIVACY_MODE=true SU AUDIT_BACKEND=postgres - auditas IŠJUNGTAS SĄMONINGAI. " +
+            `Persistentinės eilutės išvalytos starto metu (${kiek}); tai NEGRĮŽTAMA. ` +
+            "Kol vėliava įjungta, nauji įrašai nepersistinami, o `audit_log` lieka tuščia. " +
+            "Išjungus vėliavą seni įrašai NEATSIKURIA. Žr. docs/audit-storage.md §9."
+        );
+      }
+
+      await patikrintiGeneracijas(pgStore, env);
+    } catch (klaida) {
+      /**
+       * ⚠️ UŽDAROMA PRIEŠ PERMETANT, IR KLAIDA NEPRARANDAMA.
+       *
+       * `end()` nesėkmė nutylima sąmoningai: startas jau krenta dėl kitos,
+       * konkretesnės priežasties, ir jos pakeitimas „pool'o uždaryti nepavyko"
+       * pranešimu paslėptų tikrąją.
+       */
+      await pool.end().catch(() => {});
+      throw klaida;
+    }
 
     store = pgStore;
     _pool = pool;

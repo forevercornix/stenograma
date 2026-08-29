@@ -272,13 +272,21 @@ galima pamatyti turimomis priemonėmis.
 - **`memory`** (numatytasis): audito retencija — 30 d. pagal
   `AUDIT_RETENTION_DAYS`. Senesnių įvykių analizei reikia iš anksto išsaugotų
   kopijų.
-- **`postgres`**: `AUDIT_RETENTION_DAYS` **NEGALIOJA** – `audit_log` eilutės
-  automatiškai nešalinamos, ir lentelė auga neribotai (persistentinę retenciją
-  įgyvendina [7.4d]). Startas įspėja `warn` lygiu.
+- **`postgres`** (nuo [7.4d]): `AUDIT_RETENTION_DAYS` **GALIOJA** – `audit_log`
+  eilutės šalinamos to paties centralizuoto sweep'o metu, ribotais batch'ais.
 
-  **Operatoriaus veiksmas:** iki 7.4d reikalinga IŠORINĖ valymo politika.
-  Priešingu atveju asmens duomenys audite išliks neribotai, nors konfigūracijoje
-  matoma 30 dienų reikšmė – tiesioginė GDPR saugojimo ribojimo rizika.
+  ⚠️ **IŠORINĖS valymo politikos NEBEREIKIA, ir jos nekurkite.** Iki 7.4d ji
+  buvo būtina; dabar ji būtų ANTRAS nepriklausomas trynimo mechanizmas ant tos
+  pačios lentelės. Du valytojai, nežinantys vienas apie kitą, šalintų eilutes
+  pagal skirtingas ribas ir skirtingus laikrodžius, o `RETENTION_PURGE` įrašas
+  rodytų tik vieno jų darbą – audito žurnalas nustotų atitikti tikrovę.
+
+  Jei išorinė politika jau įdiegta iš ankstesnės versijos, **išjunkite ją**
+  atnaujindami.
+
+- **`AUDIT_MAX_ENTRIES` persistentiškai NETAIKOMAS.** Tai atminties apsauga;
+  eilutės niekada nešalinamos vien dėl to, kad jų skaičius viršijo N. Startas
+  įspėja `warn` lygiu, jei kintamasis nustatytas su `postgres` backend'u.
 
 ---
 
