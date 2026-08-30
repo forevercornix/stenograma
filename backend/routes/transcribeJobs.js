@@ -30,6 +30,10 @@ const { recordRejectedUpload, reasonFromMulterError, REASONS } = require("../uti
 const { MAX_UPLOAD_MB } = require("../utils/uploadStorage");
 const { validate, schemas } = require("../middleware/validate");
 const { AuditWriteError } = require("../utils/auditWrite");
+const {
+  atsakytiIstrynimu,
+  atsakytiNaslaicioValymu,
+} = require("../utils/deletionHttp");
 const { auditoGedimas } = require("../utils/auditHttp");
 const log = createLogger("route:transcribe-jobs");
 
@@ -369,17 +373,7 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
       if (error instanceof AuditWriteError) return auditoGedimas(res, error, "transcribe-jobs admin auditas");
       throw error;
     }
-    if (!result.cleaned) {
-      log.error(
-        `NEPAVYKO ištrinti likusių jobo ${req.params.id} duomenų: ${result.outcome.errors.join("; ")}`
-      );
-      return res.status(503).json({
-        error: "Nepavyko visiškai ištrinti jobo duomenų. Užklausą galima pakartoti.",
-        deletion: result.outcome,
-      });
-    }
-    if (result.outcome.found) return res.status(204).send();
-    return res.status(404).json({ error: "Jobas nerastas." });
+    return atsakytiNaslaicioValymu(res, result, { jobId: req.params.id, log });
   }
 
   // Tipo patikra: abu endpoint'ai naudoja TĄ PATĮ jobStore, tad be jos protokolo
@@ -432,24 +426,13 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
     throw error;
   }
 
-  if (!result.complete) {
-    /**
-     * ⚠️ KLAIDŲ TEKSTAI NEGRĄŽINAMI - juose būna failų kelių ir Redis raktų
-     * (#19). Klientas gauna tik kategorijas.
-     */
-    log.error(`NEPAVYKO visiškai ištrinti jobo ${job.id}: statusas=${result.status}`);
-
-    return res.status(503).json({
-      error:
-        "Nepavyko visiškai ištrinti jobo duomenų. Jobas paliktas, kad užklausą būtų galima pakartoti.",
-      deletion: {
-        status: result.status,
-        categories: result.categories,
-      },
-    });
-  }
-
-  return res.status(204).send();
+  /**
+   * ⚠️ KLAIDŲ TEKSTAI NEGRĄŽINAMI - juose būna failų kelių ir Redis raktų (#19).
+   *
+   * Atvaizdavimas (įskaitant 202 „jau vykdoma" ir `tombstone_unresolved`) gyvena
+   * `utils/deletionHttp.js` - viena vieta abiem endpoint'ams (AGENTS.md §16).
+   */
+  return atsakytiIstrynimu(res, result, { jobId: job.id, log });
 });
 
 module.exports = router;

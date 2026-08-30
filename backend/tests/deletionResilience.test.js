@@ -348,3 +348,107 @@ test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
     await jobStore.system.remove(job.id);
   }
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #183 BARJERO NULEMTI HTTP ATSAKYMAI
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#183 MARŠRUTAS: svetima `deletion_pending` žyma duoda 202, o ne dubliuotą darbą", async () => {
+  /**
+   * 7.5a DoD: antras lygiagretus `DELETE` gauna determinuotą atsakymą pagal
+   * autoritetingą būseną, ir jokio papildomo I/O nepradedama.
+   *
+   * ⚠️ TIKRINAMAS IR KŪNAS, IR DUOMENYS. Vien 202 statusas nieko neįrodytų, jei
+   * jobStore įrašo tuo metu jau nebūtų - tada tai būtų ne „susilaikėm“, o
+   * „ištrynėm ir pameluojam“.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
+
+  // Kita replika jau pasiėmė šį jobą - žymos šis procesas neįrašė.
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
+
+  assert.equal(res.status, 202);
+  assert.equal(res.body.status, "in_progress");
+  assert.ok(await jobStore.system.get(job.id), "202 reiškia, kad darbas NEPRADĖTAS");
+});
+
+test("#183 MARŠRUTAS: neišspręsta žyma duoda 503, ne 204", async () => {
+  /**
+   * Duomenys ištrinti, barjeras liko `deletion_failed`. 204 teigtų patvirtintą
+   * ištrynimą, kurio persistentinis įrašas neliudija.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
+
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" });
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
+
+  assert.equal(res.status, 503);
+  assert.equal(res.body.status, "tombstone_unresolved");
+});
+
+test("#183 NUTEKĖJIMAS: našlaičio 503 atsakyme NĖRA klaidų tekstų", async () => {
+  /**
+   * ⚠️ #19: `expose no filesystem paths, storage keys, Redis keys, provider
+   * payloads or deleted content`.
+   *
+   * Savininko kelias šios taisyklės laikėsi su eksplicitiniu komentaru, o
+   * našlaičių kelias siųsdavo `deletion: result.outcome` - kartu su `errors`,
+   * kuriuose yra `storage: <žinutė>` ir `jobStore: <žinutė>`. Administracinis
+   * kelias negali būti išimtis (AGENTS.md §16).
+   *
+   * Tikrinamas ATVAIZDAVIMAS, ne maršruto integracija: dirbtinai sugadinti
+   * saugyklą per HTTP neįmanoma deterministiškai, o būtent atvaizdavimas ir
+   * sprendžia, kas patenka į kūną.
+   */
+  const { atsakytiNaslaicioValymu } = require("../utils/deletionHttp");
+
+  let kunas = null;
+  const res = {
+    status(kodas) {
+      this._kodas = kodas;
+      return this;
+    },
+    json(turinys) {
+      kunas = turinys;
+      return this;
+    },
+  };
+
+  atsakytiNaslaicioValymu(
+    res,
+    {
+      cleaned: false,
+      barjeras: null,
+      outcome: {
+        found: true,
+        jobRemoved: false,
+        queueJobRemoved: false,
+        storageRemoved: false,
+        auditEntriesRemoved: 0,
+        errors: [
+          "storage: ENOENT /var/data/stenograma/uploads/slaptas-raktas.wav",
+          "jobStore: WRONGTYPE bull:transcription:42",
+        ],
+      },
+    },
+    { jobId: "j1", log: { error() {}, warn() {} } }
+  );
+
+  assert.equal(res._kodas, 503);
+
+  const tekstas = JSON.stringify(kunas);
+  assert.ok(!("errors" in kunas.deletion), "`errors` laukas negali patekti į atsakymą");
+  assert.ok(!tekstas.includes("/var/data"), "failų keliai negali patekti į atsakymą");
+  assert.ok(!tekstas.includes("bull:"), "eilės raktai negali patekti į atsakymą");
+  assert.equal(kunas.deletion.auditEntriesRemoved, 0, "kiek pašalinta - lieka");
+});

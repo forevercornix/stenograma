@@ -291,6 +291,42 @@ async function get(jobId) {
 const barrierState = get;
 
 /**
+ * AR ŽYMĄ LAIKO KITAS VYKDYTOJAS (#183, 7.5a DoD).
+ *
+ * ⚠️ VIENA TAISYKLĖ, NE DVI KOPIJOS. Ją naudoja ir savininko
+ * (`lifecycleService`), ir našlaičių (`adminJobService`) kelias; du atskiri
+ * kriterijai neišvengiamai išsiskirtų, ir vienas endpoint'as grąžintų 202 ten,
+ * kur kitas jau dirbtų.
+ *
+ * Trys sąlygos, ir kiekviena būtina:
+ *
+ *   - `claimed === false` - žymos NEĮRAŠĖ šis kvietėjas. Tai atominis
+ *     `INSERT ... ON CONFLICT DO NOTHING` atsakymas, ne skaitymas prieš rašymą.
+ *   - `status === deletion_pending` - `deleted` ir `failed` turi savo atsakymus.
+ *   - ⚠️ `attempts === 0` - IR TAI NE SMULKMENA.
+ *
+ * `attempts` didėja TIK pereinant į `deletion_failed`, tad `pending` su
+ * `attempts > 0` reiškia vienintelį dalyką: operatorius per `erasure-marks retry`
+ * EKSPLICITIŠKAI autorizavo naują bandymą, o vykdytojo dar nėra. Be šios sąlygos
+ * autorizuotas pakartojimas amžinai gautų „jau vykdoma" ir ištrynimas
+ * nebeįvyktų niekada - operatoriaus išeitis būtų uždaryta pačios pretenzijos.
+ *
+ * ⚠️ KO ŠI TAISYKLĖ NEDENGIA. Dvi replikos, gavusios tą patį autorizuotą
+ * pakartojimą (`attempts > 0`), abi jį vykdys. Tai sąmoningai priimta: langas
+ * atsiveria tik po rankinio operatoriaus veiksmo, o alternatyva - laikyti
+ * vykdytojo „lease" - reikalautų arba lock'o per išorinį I/O (DoD tai draudžia),
+ * arba naujo stulpelio su laiko riba.
+ */
+function heldByAnotherExecutor(zyma) {
+  return Boolean(
+    zyma &&
+      zyma.claimed === false &&
+      zyma.status === TOMBSTONE_STATUS.PENDING &&
+      zyma.attempts === 0
+  );
+}
+
+/**
  * 7.4e TOCTOU PRIELAIDA.
  *
  * Persistentiniame režime patikra vykdoma KVIETĖJO transakcijoje su tuo pačiu
@@ -484,6 +520,7 @@ module.exports = {
   isConfirmedDeleted,
   get,
   barrierState,
+  heldByAnotherExecutor,
   assertNotBarred,
   listUnresolved,
   retentionMs,

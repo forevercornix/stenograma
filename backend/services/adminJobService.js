@@ -15,6 +15,18 @@ const { createLogger } = require("../utils/logger");
 const log = createLogger("service:admin-job");
 
 /**
+ * Barjero nulemtos baigtys, kurios NĖRA nei sėkmė, nei valymo gedimas (#183).
+ *
+ * Vardai sutampa su `lifecycleService.DELETION_STATUS` reikšmėmis SĄMONINGAI:
+ * abu keliai atsako tą patį klausimą ir maršrutas juos atvaizduoja vienodai.
+ */
+const BARRIER_OUTCOME = {
+  ALREADY_DELETED: "already_deleted",
+  IN_PROGRESS: "in_progress",
+  TOMBSTONE_UNRESOLVED: "tombstone_unresolved",
+};
+
+/**
  * ADMINISTRACINIS JOB TRYNIMAS (#160).
  *
  * KODĖL ATSKIRAS SERVISAS, O NE `jobStore.system` MARŠRUTE.
@@ -166,10 +178,41 @@ async function adminDeleteJob(jobId, actor) {
  * @param {"user"|"operator"} actorKind kas veikė; KODĖL - visada `orphan_cleanup`
  */
 async function valytiNaslaitiSuZyma(jobId, actorKind) {
-  await tombstones.mark(jobId, {
+  const zyma = await tombstones.mark(jobId, {
     reason: ERASURE_REASON.ORPHAN_CLEANUP,
     actorKind,
   });
+
+  /**
+   * ⚠️ PRETENZIJA PRIEŠ DESTRUKTYVŲ I/O (#183, 7.5a DoD).
+   *
+   * `claimed === false` reiškia, kad žymą įrašė KAŽKAS KITAS. Be šio skirtumo
+   * abi replikos matytų tą patį `deletion_pending` įrašą ir abi pradėtų tą patį
+   * eilės, saugyklos ir audito trynimą - o viena iš jų dar ir grąžintų 404 ten,
+   * kur kita grąžino 204.
+   *
+   * Nė vienas destruktyvus veiksmas čia NEPRADEDAMAS: DoD to reikalauja
+   * eksplicitiškai („jokio papildomo I/O nepradedama").
+   */
+  if (zyma && zyma.claimed === false) {
+    if (zyma.status === TOMBSTONE_STATUS.DELETED) {
+      return { outcome: null, success: true, barjeras: BARRIER_OUTCOME.ALREADY_DELETED };
+    }
+
+    /**
+     * `deletion_failed` NEKARTOJAMAS AUTOMATIŠKAI - žr. `lifecycleService`.
+     * Automatinis `failed → pending` apeitų `ERASURE_MARK_RETRIED`, ir būsena
+     * nustotų reikšti „operatorius turi įsikišti".
+     */
+    if (zyma.status === TOMBSTONE_STATUS.FAILED) {
+      return { outcome: null, success: false, barjeras: BARRIER_OUTCOME.TOMBSTONE_UNRESOLVED };
+    }
+
+    /** Ta pati taisyklė kaip savininko kelyje - viena vieta, ne antra kopija. */
+    if (tombstones.heldByAnotherExecutor(zyma)) {
+      return { outcome: null, success: false, barjeras: BARRIER_OUTCOME.IN_PROGRESS };
+    }
+  }
 
   const outcome = await eraseOrphanedJobData(jobId, { scope: "system" });
 
@@ -185,7 +228,7 @@ async function valytiNaslaitiSuZyma(jobId, actorKind) {
    * nesėkmės kategorija turi vieną autoritetą. Į žymą patenka TIK kategorija -
    * `outcome.errors` tekstuose būna failų kelių ir saugyklos raktų.
    */
-  await tombstones.complete(
+  const uzbaigta = await tombstones.complete(
     jobId,
     success ? TOMBSTONE_STATUS.DELETED : TOMBSTONE_STATUS.FAILED,
     success
@@ -193,7 +236,24 @@ async function valytiNaslaitiSuZyma(jobId, actorKind) {
       : { failureKind: lifecycleService.classifyFailure(outcome.errors[0]) }
   );
 
-  return { outcome, success };
+  /**
+   * ⚠️ SĖKMĖ IŠ GRĄŽINTOS ŽYMOS, NE IŠ TO, KAD KVIETIMAS NEMETĖ (#183).
+   *
+   * Ta pati taisyklė, kurią servisas jau taiko `eraseOrphanedJobData` rezultatui,
+   * pritaikyta ir `complete()`: neleidžiamas perėjimas negrąžina klaidos, jis
+   * grąžina esamą būseną. Duomenys ištrinti, barjeras neužtikrintas - trečias
+   * atsakymas, nes abu paprastesni meluotų.
+   */
+  if (success && (!uzbaigta || uzbaigta.status !== TOMBSTONE_STATUS.DELETED)) {
+    log.error("Našlaitis išvalytas, bet žymos užbaigti nepavyko", {
+      jobId,
+      zymosBusena: uzbaigta ? uzbaigta.status : "nėra",
+    });
+
+    return { outcome, success: false, barjeras: BARRIER_OUTCOME.TOMBSTONE_UNRESOLVED };
+  }
+
+  return { outcome, success, barjeras: null };
 }
 
 /**
@@ -207,19 +267,27 @@ async function adminCleanupOrphan(jobId, actor) {
   await assertSessionAdmin(actor, "orphan_cleanup", jobId);
 
   /** `actor_kind=operator`: privilegija panaudota, nuosavybė peržengta. */
-  const { outcome, success } = await valytiNaslaitiSuZyma(jobId, ACTOR_KIND.OPERATOR);
+  const { outcome, success, barjeras } = await valytiNaslaitiSuZyma(jobId, ACTOR_KIND.OPERATOR);
 
+  /**
+   * ⚠️ AUDITAS RAŠOMAS IR TADA, KAI DARBO NEBUVO.
+   *
+   * `ADMIN_*` fiksuoja PRIVILEGIJOS PANAUDOJIMĄ, o ne ištrynimo darbą: admin
+   * peržengė nuosavybę tuo momentu, kai kvietė šį kelią. Praleidus įrašą dėl to,
+   * kad barjeras darbą sustabdė, override statistika taptų nepilna.
+   */
   await rasytiAudita({
     event: ADMIN_EVENT.ORPHAN_CLEANUP,
     jobId,
     actor: actor.ownerId,
     success,
-    details: "override=admin ownershipVerified=false",
+    details: `override=admin ownershipVerified=false barrier=${barjeras || "none"}`,
   });
 
   return {
     cleaned: success,
-    reason: success ? null : "erasure_incomplete",
+    reason: barjeras || (success ? null : "erasure_incomplete"),
+    barjeras,
     outcome,
   };
 }
@@ -253,7 +321,7 @@ async function desktopCleanupOrphan(jobId, actor) {
    * subjektas. `operator` žymoje, kuri pergyvena jobą, nurodytų aktorių, kurio
    * nebuvo.
    */
-  const { outcome, success } = await valytiNaslaitiSuZyma(jobId, ACTOR_KIND.USER);
+  const { outcome, success, barjeras } = await valytiNaslaitiSuZyma(jobId, ACTOR_KIND.USER);
 
   /**
    * ATSKIRO AUDITO ĮRAŠO ČIA NĖRA – SĄMONINGAI.
@@ -267,10 +335,16 @@ async function desktopCleanupOrphan(jobId, actor) {
    * `ADMIN_*` įvykių skaičių nebebūtų galima pasakyti, kiek kartų realiai
    * naudotasi privilegija.
    */
-  return { cleaned: success, reason: success ? null : "erasure_incomplete", outcome };
+  return {
+    cleaned: success,
+    reason: barjeras || (success ? null : "erasure_incomplete"),
+    barjeras,
+    outcome,
+  };
 }
 
 module.exports = {
+  BARRIER_OUTCOME,
   adminDeleteJob,
   adminCleanupOrphan,
   desktopCleanupOrphan,

@@ -43,8 +43,19 @@ async function mark(jobId, { reason, actorKind = null, now = Date.now() } = {}) 
   assertReason(reason);
   assertActorKind(actorKind);
 
+  /**
+   * ⚠️ `claimed` ATSAKO Į KLAUSIMĄ „AR AŠ ESU VYKDYTOJAS", NE „AR YRA ŽYMA".
+   *
+   * Be jo kvietėjas negali atskirti, ar žymą SUKŪRĖ jis, ar tik PAMATĖ svetimą -
+   * abiem atvejais grąžinamas `deletion_pending` įrašas. Dvi replikos tada abi
+   * pradėtų destruktyvų I/O tam pačiam jobui.
+   *
+   * Postgres pusėje tai `INSERT ... ON CONFLICT DO NOTHING RETURNING` rezultatas:
+   * eilutė grąžinama TIK tam, kas įterpė. Atmintinis atitikmuo - ar rakto dar
+   * nebuvo. Abu atvejai atominiai savo saugykloje.
+   */
   const esamas = zymos.get(jobId);
-  if (esamas) return kopija(esamas);
+  if (esamas) return { ...kopija(esamas), claimed: false };
 
   const irasas = {
     jobId,
@@ -60,7 +71,7 @@ async function mark(jobId, { reason, actorKind = null, now = Date.now() } = {}) 
   };
 
   zymos.set(jobId, irasas);
-  return kopija(irasas);
+  return { ...kopija(irasas), claimed: true };
 }
 
 /**

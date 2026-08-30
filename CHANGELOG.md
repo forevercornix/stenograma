@@ -36,6 +36,28 @@ ji pasensta ir tampa klaidinanti.
 
 ### Changed
 
+- ⚠️ **`DELETE` atsakymų rinkinys prasiplėtė: 202 ir `tombstone_unresolved`**
+  (#183, 7.5a). Abu jobų endpoint'ai (`/api/jobs/:id`, `/api/transcribe-jobs/:id`):
+
+  | Situacija | Anksčiau | Dabar |
+  |---|---|---|
+  | Ištrynimą jau vykdo kitas procesas ar replika | 204 arba 404 po pakartoto darbo | **202** `in_progress`, jokio darbo nepradedama |
+  | Žyma `deletion_failed` | 204 (klaidingai – žyma likdavo `failed`) | **503** `tombstone_unresolved` |
+  | Patvirtintai ištrinta | 204 | 204 (nepakito) |
+
+  ⚠️ **Klientai, laikę 204 vieninteliu sėkmės kodu, turi priimti ir 202.** 202
+  reiškia „ištrynimas vyksta, pakartokite vėliau", ne klaidą.
+
+  ⚠️ **`deletion_failed` nebekartojamas automatiškai.** Naują bandymą autorizuoja
+  operatorius: `node backend/scripts/erasure-marks.js retry <jobId>`. Kietai
+  nužudytas procesas gali palikti `deletion_pending` žymą, kuriai visi vėlesni
+  `DELETE` atsakys 202 – žr. `docs/deletion-guarantees.md`.
+
+- **Našlaičių 503 atsakyme nebėra klaidų tekstų** (#183). Anksčiau siųstas visas
+  `outcome`, įskaitant `errors` su failų keliais ir eilės raktais (#19 tai
+  draudžia). Klientas gauna tik tai, kas pašalinta; savininko kelias šios
+  taisyklės laikėsi visada.
+
 - **Našlaičių valymas nuo šiol palieka ištrynimo žymą ir yra fail-closed**
   (#183, 7.5a). `adminCleanupOrphan()` ir `desktopCleanupOrphan()` anksčiau
   šalino likusius pėdsakus **nepalikdami barjero** – atkūrimas iš senesnės

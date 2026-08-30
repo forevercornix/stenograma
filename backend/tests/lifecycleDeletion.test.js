@@ -657,3 +657,111 @@ test("ŽYMA: po nesėkmės retry PRIVALO galėti pavykti - bet TIK per eksplicit
   assert.equal(await tombstones.isConfirmedDeleted("job_kartojamas"), true, "pakartojimas turi galėti pavykti");
   assert.ok((await tombstones.get("job_kartojamas")).completedAt);
 });
+
+/** Žymų būsenos šiam skyriui. */
+const S183 = tombstones.TOMBSTONE_STATUS;
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #183 PRETENZIJA IR BARJERO NULEMTI ATSAKYMAI
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#183 PRETENZIJA: `mark()` pasako, ar žymą įrašė ŠIS kvietėjas", async () => {
+  /**
+   * Be `claimed` abi replikos matytų tą patį `deletion_pending` įrašą ir negalėtų
+   * atskirti savo žymos nuo svetimos - tad abi pradėtų tą patį destruktyvų I/O.
+   * Postgres pusėje tai `ON CONFLICT DO NOTHING RETURNING` rezultatas, atmintyje -
+   * ar rakto dar nebuvo. Abu atominiai savo saugykloje.
+   */
+  const pirma = await tombstones.mark("claim_a", { reason: "user_request", actorKind: "user" });
+  const antra = await tombstones.mark("claim_a", { reason: "user_request", actorKind: "user" });
+
+  assert.equal(pirma.claimed, true, "įrašiusysis yra vykdytojas");
+  assert.equal(antra.claimed, false, "pamatęs svetimą žymą vykdytoju netampa");
+  assert.equal(antra.status, pirma.status, "autoritetinga būsena ta pati");
+});
+
+test("#183 202: svetima `deletion_pending` žyma sustabdo darbą, o ne dubliuoja jį", async () => {
+  /**
+   * ⚠️ ĮRODYMAS YRA NEPALIESTI DUOMENYS, NE STATUSO EILUTĖ.
+   *
+   * DoD reikalauja `jokio papildomo I/O nepradedama`, tad tikrinam, kad jobStore
+   * įrašas LIKO. Vien `status === in_progress` tai patenkintų ir tada, kai eilė
+   * su saugykla jau būtų išvalytos.
+   */
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+
+  // Kita replika jau pasiėmė šį jobą.
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+
+  const rezultatas = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "kitas" });
+
+  assert.equal(rezultatas.status, DELETION_STATUS.IN_PROGRESS);
+  assert.equal(rezultatas.complete, false, "`jau vykdoma` nėra sėkmė");
+  assert.ok(await jobStore.system.get(job.id), "destruktyvus darbas NEPRADĖTAS");
+});
+
+test("#183 AUTORIZUOTAS PAKARTOJIMAS: `pending` su `attempts > 0` NĖRA svetimas", async () => {
+  /**
+   * ⚠️ BE ŠIOS SĄLYGOS PRETENZIJA UŽDARYTŲ OPERATORIAUS IŠEITĮ.
+   *
+   * `attempts` didėja tik pereinant į `deletion_failed`. Todėl `pending` su
+   * `attempts > 0` reiškia tiksliai vieną dalyką: operatorius per
+   * `erasure-marks retry` autorizavo naują bandymą, o vykdytojo dar nėra. Jei
+   * tokia žyma būtų laikoma svetima, autorizuotas pakartojimas amžinai gautų
+   * `jau vykdoma`, ir ištrynimas nebeįvyktų niekada.
+   */
+  await tombstones.mark("retry_auth", { reason: "user_request", actorKind: "user" });
+  await tombstones.complete("retry_auth", S183.FAILED, { failureKind: "retryable" });
+  await tombstones.retry("retry_auth", { actorKind: "operator" });
+
+  const zyma = await tombstones.mark("retry_auth", { reason: "user_request", actorKind: "user" });
+
+  assert.equal(zyma.status, S183.PENDING);
+  assert.ok(zyma.attempts > 0, "nepavykęs bandymas užfiksuotas");
+  assert.equal(zyma.claimed, false, "žymos šis kvietėjas neįrašė");
+  assert.equal(
+    tombstones.heldByAnotherExecutor(zyma),
+    false,
+    "autorizuotas pakartojimas privalo būti vykdomas"
+  );
+
+  // Šviežia, dar niekieno nevykdyta žyma - priešinga pusė.
+  await tombstones.mark("sviezia", { reason: "user_request", actorKind: "user" });
+  const svetima = await tombstones.mark("sviezia", { reason: "user_request", actorKind: "user" });
+  assert.equal(tombstones.heldByAnotherExecutor(svetima), true);
+});
+
+test("#183 NEIŠSPRĘSTA ŽYMA: `deletion_failed` NEKARTOJAMAS automatiškai", async () => {
+  /**
+   * Anksčiau šis kelias pakartodavo visą destruktyvų darbą, o `complete()`
+   * perėjimą `failed -> deleted` atmesdavo tyliai - atsakymas skelbdavo sėkmę,
+   * kurios žyma neliudija.
+   */
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+  await tombstones.complete(job.id, S183.FAILED, { failureKind: "retryable" });
+
+  const rezultatas = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sav" });
+
+  assert.equal(rezultatas.status, DELETION_STATUS.TOMBSTONE_UNRESOLVED);
+  assert.equal(rezultatas.complete, false, "neužtikrintas barjeras negali atrodyti kaip sėkmė");
+  assert.equal(
+    (await tombstones.get(job.id)).status,
+    S183.FAILED,
+    "būsena nepakitusi - ją keičia tik operatorius"
+  );
+
+  /**
+   * ⚠️ BE ŠIOS EILUTĖS TESTAS NEATSKIRIA DVIEJŲ SKIRTINGŲ ELGSENŲ.
+   *
+   * Pašalinus išankstinę `failed` patikrą, kelias vis tiek grąžina
+   * `tombstone_unresolved` (jį pagauna vėlesnis sėkmės išvedimas iš žymos), bet
+   * PRIEŠ TAI pakartoja visą destruktyvų darbą. Statusas atrodo teisingas, o
+   * elgsena - ne. Skirtumą mato tik likęs įrašas.
+   */
+  assert.ok(
+    await jobStore.system.get(job.id),
+    "automatinio pakartojimo nėra - destruktyvus darbas NEPRADĖTAS"
+  );
+});

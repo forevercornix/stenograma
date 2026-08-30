@@ -171,7 +171,19 @@ function createErasureMarkStore(pool) {
         [jobId, TOMBSTONE_STATUS.PENDING, reason, actorKind]
       );
 
-      if (rows.length) return iIrasa(rows[0]);
+      /**
+       * ⚠️ EILUTĘ GRĄŽINA TIK ĮTERPĖJAS - TAI IR YRA PRETENZIJA (`claimed`).
+       *
+       * `ON CONFLICT DO NOTHING RETURNING` konflikto atveju negrąžina nieko, tad
+       * `rows.length` yra atominis atsakymas į klausimą „ar AŠ esu šio jobo
+       * ištrynimo vykdytojas". Be jo kvietėjas mato `deletion_pending` ir negali
+       * pasakyti, ar tai jo paties žyma, ar kitos replikos - ir abi replikos
+       * pradeda tą patį destruktyvų I/O.
+       *
+       * Pretenzija atominė PAČIAME `INSERT`-e, ne `SELECT`-e prieš jį: tarp
+       * skaitymo ir rašymo langas liktų.
+       */
+      if (rows.length) return { ...iIrasa(rows[0]), claimed: true };
 
       /** Konfliktas: žyma jau buvo. Autoritetinga yra ESAMA būsena. */
       const esama = await klientas.query(
@@ -179,7 +191,7 @@ function createErasureMarkStore(pool) {
         [jobId]
       );
 
-      return iIrasa(esama.rows[0]);
+      return { ...iIrasa(esama.rows[0]), claimed: false };
     });
   }
 

@@ -345,3 +345,79 @@ test("#183 FAIL-CLOSED: žymos įrašymo klaida SUSTABDO valymą, o ne praleidž
     "be žymos valymas negali įvykti - įrašas privalo likti (desktop kelias)"
   );
 });
+
+test("#183 NAŠLAITIS: svetima žyma sustabdo valymą (202), sava - ne", async () => {
+  /**
+   * Codex P1: `mark()` idempotentinis, tad abi replikos matydavo tą patį
+   * `deletion_pending` įrašą ir abi pradėdavo tą patį eilės, saugyklos ir audito
+   * trynimą - viena dar ir grąžindavo 404 ten, kur kita grąžino 204.
+   *
+   * ⚠️ Įrodymas - likęs įrašas, ne `barjeras` reikšmė.
+   */
+  const job = await svetimasJob();
+
+  // Kita replika jau pasiėmė šį jobą.
+  await tombstones.mark(job.id, { reason: ERASURE_REASON.ORPHAN_CLEANUP, actorKind: ACTOR_KIND.OPERATOR });
+
+  const r = await adminCleanupOrphan(job.id, sessionAdmin);
+
+  assert.equal(r.cleaned, false);
+  assert.equal(r.barjeras, "in_progress");
+  assert.ok(await jobStore.system.get(job.id), "destruktyvus darbas NEPRADĖTAS");
+});
+
+test("#183 NAŠLAITIS: `deletion_failed` grąžina `tombstone_unresolved`, be pakartojimo", async () => {
+  const job = await svetimasJob();
+
+  await tombstones.mark(job.id, { reason: ERASURE_REASON.ORPHAN_CLEANUP, actorKind: ACTOR_KIND.OPERATOR });
+  await tombstones.complete(job.id, TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" });
+
+  const r = await adminCleanupOrphan(job.id, sessionAdmin);
+
+  assert.equal(r.cleaned, false);
+  assert.equal(r.barjeras, "tombstone_unresolved");
+  assert.ok(await jobStore.system.get(job.id), "automatinio pakartojimo nėra - jį autorizuoja operatorius");
+  assert.equal((await tombstones.get(job.id)).status, TOMBSTONE_STATUS.FAILED);
+});
+
+test("#183 NAŠLAITIS: jau patvirtinta žyma - sėkmė be jokio darbo", async () => {
+  const job = await svetimasJob();
+
+  await tombstones.mark(job.id, { reason: ERASURE_REASON.ORPHAN_CLEANUP, actorKind: ACTOR_KIND.OPERATOR });
+  await tombstones.complete(job.id, TOMBSTONE_STATUS.DELETED);
+
+  const r = await adminCleanupOrphan(job.id, sessionAdmin);
+
+  assert.equal(r.cleaned, true);
+  assert.equal(r.barjeras, "already_deleted");
+});
+
+test("#183 NAŠLAITIS: sėkmė NEskelbiama, jei `complete()` grąžina ne `deleted`", async () => {
+  /**
+   * ⚠️ GYNYBINIS SLUOKSNIS, KURĮ REIKIA PASIEKTI SĄMONINGAI.
+   *
+   * Išankstinė `deletion_failed` patikra uždaro pagrindinį kelią, tad natūraliai
+   * čia nepatenkama - o netestuotas gynybinis sluoksnis yra tas pats, kas jo
+   * nebuvimas. `complete()` neleidžiamo perėjimo NEMETA: jis grąžina esamą
+   * būseną, ir būtent to grąžinimo ignoravimas buvo Codex radinys.
+   */
+  const job = await svetimasJob();
+
+  const originalus = tombstones.complete;
+  tombstones.complete = async () => ({
+    jobId: job.id,
+    status: TOMBSTONE_STATUS.FAILED,
+    attempts: 1,
+  });
+
+  let r;
+  try {
+    r = await adminCleanupOrphan(job.id, sessionAdmin);
+  } finally {
+    tombstones.complete = originalus;
+  }
+
+  assert.equal(r.cleaned, false, "žyma neužtikrinta - sėkmės skelbti negalima");
+  assert.equal(r.barjeras, "tombstone_unresolved");
+  assert.ok(r.outcome, "valymo rezultatas vis tiek grąžinamas - darbas įvyko");
+});

@@ -59,6 +59,38 @@ nepablogina – o ištrynimas be barjero yra negrįžtamas.
 Operatoriui tai reiškia, kad per DB nepasiekiamumą našlaičių valymas grąžins
 klaidą; teisingas veiksmas – **pakartoti vėliau**, ne apeiti kelią.
 
+### ⚠️ Lygiagretus `DELETE` nebekartoja darbo – **202**, ne antras ištrynimas
+
+✅ ištrynimą vienam `job_id` vykdo **vienas** procesas. Pretenzija atominė
+   (`INSERT ... ON CONFLICT DO NOTHING` grąžina eilutę tik įrašiusiajam), tad
+   antras kvietėjas – įskaitant kitą repliką – gauna **202 `in_progress`** ir
+   **nepradeda** jokio eilės, saugyklos ar audito trynimo;
+✅ patvirtintai ištrintas jobas duoda **204** be jokio I/O;
+✅ neišspręsta žyma duoda **503 `tombstone_unresolved`** – duomenys pašalinti,
+   bet apskaitą turi užbaigti operatorius.
+
+⚠️ **`deletion_failed` NEBEKARTOJAMAS automatiškai.** Anksčiau kitas `DELETE`
+tyliai pakartodavo visą darbą ir skelbdavo sėkmę, nors žyma likdavo `failed`
+(perėjimas `deletion_failed → deleted` uždarytas). Naują bandymą dabar
+autorizuoja operatorius: `node scripts/erasure-marks.js retry <jobId>`, kuris
+rašo `ERASURE_MARK_RETRIED`. Būsena, kuri išsisprendžia savaime, nebėra barjeras.
+
+⚠️ **ŽINOMA SPRAGA: kietai nužudytas procesas palieka `deletion_pending`.**
+
+Jei procesas nužudomas (SIGKILL, OOM) TARP žymėjimo ir užbaigimo, žyma lieka
+`deletion_pending` be vykdytojo. Nuo šiol kiekvienas vėlesnis `DELETE` tokiam
+`job_id` atsakys **202 „jau vykdoma"**, o ištrynimas savaime neįvyks.
+
+Mesta klaida (pvz. `AuditWriteError`) tokios būsenos nebepalieka – ji žymą
+perveda į `deletion_failed`, kuris turi dokumentuotą operatoriaus kelią. Kietas
+nužudymas lieka neuždengtas.
+
+**Ką daryti:** reguliariai tikrinti `node scripts/erasure-marks.js list` – jis
+rodo neišspręstas žymas. `pending` žyma be vykdytojo yra incidentas, ne normali
+būsena. Šiuo metu operatorius neturi komandos, kuri užstrigusią `pending` žymą
+perkeltų į `deletion_failed`; vienintelė esama išeitis yra `force-resolve`, o ji
+teigia, kad duomenų nebėra – tad tinka **tik** tada, kai tai patikrinta.
+
 ⚠️ **Ši garantija galioja TIK ten, kur nustatytas `DATABASE_URL`.** Be jo sistema
 sąmoningai grįžta į atmintinį režimą – žr. 2 skyrių. Startas tokiu atveju garsiai
 įspėja.

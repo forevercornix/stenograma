@@ -163,9 +163,17 @@ paties kodo, ir jos galėjo išsiskirti.
 | `deleted` | ❌ | ✅ |
 
 Perėjimai **vienkrypčiai**: `deleted` yra galutinė ir jos atšaukti negalima –
-kitaip programavimo klaida paverstų jau įrodytą ištrynimą neapibrėžtu. Bet
-`deletion_failed → deleted` **leidžiamas sąmoningai**: tai retry kelias, be
-kurio dalinis ištrynimas liktų amžinai neužbaigtas.
+kitaip programavimo klaida paverstų jau įrodytą ištrynimą neapibrėžtu.
+
+⚠️ **`deletion_failed → deleted` UŽDARYTAS** (#183). Ankstesnė šio dokumento
+versija teigė priešingai, bet `allowedSources("deleted")` yra `["deletion_pending"]`
+ir visada buvo: tiesioginis perėjimas reikštų patvirtintą ištrynimą be jokio
+įrodymo, kad antras bandymas apskritai vyko.
+
+Retry kelias nedingo – jis eina per `deletion_pending` ir yra **eksplicitinis
+operatoriaus veiksmas** (`erasure-marks retry`, auditas `ERASURE_MARK_RETRIED`).
+Automatinis `failed → pending` būtų blogesnis: būsena, kuri išsisprendžia
+savaime, nebėra barjeras.
 
 ⚠️ **Tik `deleted` leidžia grąžinti `already_deleted`.** Ankstesnė versija turėjo
 vieną reikšmę „pažymėta", ir tai laužė retry: po dalinės nesėkmės antras
@@ -223,6 +231,13 @@ taisyklė.
 | `already_deleted` | Žyma jau buvo – ištrynimas įvyko anksčiau |
 | `partial` | Liko kategorijų, bet gedimai **kartotini** |
 | `failed` | Gedimai galutiniai – reikia žmogaus |
+| `in_progress` | Ištrynimą jau vykdo **kitas** autoritetingas procesas. HTTP **202**; nė vienas destruktyvus veiksmas nepradedamas |
+| `tombstone_unresolved` | Duomenys pašalinti, bet žyma liko `deletion_failed`. HTTP **503** – apskaitą užbaigia operatorius |
+
+⚠️ **`tombstone_unresolved` yra trečias atsakymas sąmoningai.** „Ištrinta"
+teigtų patvirtintą ištrynimą, kurio persistentinis įrašas neliudija;
+„nepavyko" teigtų, kad duomenys liko. Nė vienas iš dviejų paprastesnių
+atsakymų nebūtų tiesa.
 
 **Efemeriškos kategorijos rodomos atskirai** sąmoningai: „nėra ko trinti" ir
 „pamiršome ištrinti" turi atrodyti skirtingai. Ta pati logika galioja
