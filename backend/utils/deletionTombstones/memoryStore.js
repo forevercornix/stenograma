@@ -14,6 +14,8 @@
  * garantiją formuluoja SĄLYGINIAI.
  */
 
+const { randomUUID } = require("crypto");
+
 const {
   TOMBSTONE_STATUS,
   assertReason,
@@ -68,6 +70,14 @@ async function mark(jobId, { reason, actorKind = null, now = Date.now() } = {}) 
     completedAt: null,
     attempts: 0,
     lastFailureKind: null,
+    /**
+     * ⚠️ ŽETONAS IDENTIFIKUOJA BANDYMĄ, NE VYKDYTOJĄ.
+     *
+     * Atsitiktinis UUID kiekvienai pretenzijai, ne proceso ID: po restarto tas
+     * pats procesas neturi atpažinti savo seno žetono ir tęsti darbo, kurio
+     * nebedaro. Simetriška `erasure_marks.claim_token`.
+     */
+    claimToken: randomUUID(),
   };
 
   zymos.set(jobId, irasas);
@@ -129,6 +139,13 @@ async function _perkelti(
   irasas.updatedAt = now;
 
   /**
+   * ⚠️ VIENINTELĖ ŽETONO VALYMO VIETA - simetriška postgres `_perkelti`.
+   * Žetonas galioja tiek, kiek trunka `deletion_pending`, tad kiekvienas
+   * perėjimas jį nuvalo, įskaitant terminalizaciją.
+   */
+  irasas.claimToken = null;
+
+  /**
    * `completed_at` ir būsena privalo sutapti - DB tai daro CHECK constraint'as
    * (`(status = 'deleted') = (completed_at IS NOT NULL)`), čia tą patį daro ši
    * eilutė. Nesėkmė NETURI ištrynimo laiko.
@@ -174,6 +191,28 @@ async function listUnresolved({ olderThanMs = 0, limit = 100, now = Date.now() }
  * jautrūs duomenys dar gali egzistuoti; žymos pašalinimas atidarytų barjerą
  * būtent tada, kai jis reikalingiausias.
  */
+/**
+ * PRETENZIJA Į AUTORIZUOTĄ PAKARTOJIMĄ - atmintinis atitikmuo (#183).
+ *
+ * ⚠️ ČIA IŠSKIRTINUMAS TRIVIALUS, IR TAI NE SPRAGA. Tarp patikros ir priskyrimo
+ * nėra `await`, tad vieno proceso viduje operacija atomiška pagal JS semantiką.
+ * Atmintinis režimas ir taip yra vieno proceso - būtent todėl jis neduoda
+ * replikoms bendro barjero (žr. `ATMINTIES_ISPEJIMAS`).
+ */
+async function claimRetry(jobId) {
+  if (!jobId) return null;
+
+  const irasas = zymos.get(jobId);
+  if (!irasas) return null;
+  if (irasas.status !== TOMBSTONE_STATUS.PENDING) return null;
+  if (irasas.claimToken !== null) return null;
+
+  irasas.claimToken = randomUUID();
+  irasas.updatedAt = Date.now();
+
+  return kopija(irasas);
+}
+
 /**
  * Riba atmintyje - iš įleidžiamo `now`.
  *
@@ -229,6 +268,7 @@ async function probe() {
 }
 
 module.exports = {
+  claimRetry,
   probe,
   retencijosRiba,
   mark,

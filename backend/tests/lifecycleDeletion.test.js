@@ -700,35 +700,111 @@ test("#183 202: svetima `deletion_pending` žyma sustabdo darbą, o ne dubliuoja
   assert.ok(await jobStore.system.get(job.id), "destruktyvus darbas NEPRADĖTAS");
 });
 
-test("#183 AUTORIZUOTAS PAKARTOJIMAS: `pending` su `attempts > 0` NĖRA svetimas", async () => {
+test("#183 PRETENZIJA: autorizuotą pakartojimą pasiima VIENAS", async () => {
   /**
-   * ⚠️ BE ŠIOS SĄLYGOS PRETENZIJA UŽDARYTŲ OPERATORIAUS IŠEITĮ.
+   * ⚠️ ANKSTESNĖ TAISYKLĖ ČIA TURĖJO IŠIMTĮ, IR JI PAŽEIDĖ DoD.
    *
-   * `attempts` didėja tik pereinant į `deletion_failed`. Todėl `pending` su
-   * `attempts > 0` reiškia tiksliai vieną dalyką: operatorius per
-   * `erasure-marks retry` autorizavo naują bandymą, o vykdytojo dar nėra. Jei
-   * tokia žyma būtų laikoma svetima, autorizuotas pakartojimas amžinai gautų
-   * `jau vykdoma`, ir ištrynimas nebeįvyktų niekada.
+   * `attempts === 0` sąlyga autorizuotam pakartojimui pretenzijos NETAIKĖ: visos
+   * replikos, gavusios tą patį operatoriaus `retry`, vykdydavo lygiagrečiai. DoD
+   * reikalauja vieno vykdytojo besąlygiškai.
+   *
+   * Dabar `retry` palieka `claimToken = null` - autorizuota, bet nepaimta - ir
+   * pirmas pretendentas ją pasiima.
    */
-  await tombstones.mark("retry_auth", { reason: "user_request", actorKind: "user" });
-  await tombstones.complete("retry_auth", S183.FAILED, { failureKind: "retryable" });
-  await tombstones.retry("retry_auth", { actorKind: "operator" });
+  await tombstones.mark("claim_retry", { reason: "user_request", actorKind: "user" });
+  await tombstones.complete("claim_retry", S183.FAILED, { failureKind: "retryable" });
+  await tombstones.retry("claim_retry", { actorKind: "operator" });
 
-  const zyma = await tombstones.mark("retry_auth", { reason: "user_request", actorKind: "user" });
-
-  assert.equal(zyma.status, S183.PENDING);
-  assert.ok(zyma.attempts > 0, "nepavykęs bandymas užfiksuotas");
-  assert.equal(zyma.claimed, false, "žymos šis kvietėjas neįrašė");
   assert.equal(
-    tombstones.heldByAnotherExecutor(zyma),
-    false,
-    "autorizuotas pakartojimas privalo būti vykdomas"
+    (await tombstones.get("claim_retry")).claimToken,
+    null,
+    "`retry` palieka žymą NEPAIMTĄ"
   );
 
-  // Šviežia, dar niekieno nevykdyta žyma - priešinga pusė.
-  await tombstones.mark("sviezia", { reason: "user_request", actorKind: "user" });
-  const svetima = await tombstones.mark("sviezia", { reason: "user_request", actorKind: "user" });
-  assert.equal(tombstones.heldByAnotherExecutor(svetima), true);
+  const pirmas = await tombstones.claimForDeletion("claim_retry", {
+    reason: "user_request",
+    actorKind: "user",
+  });
+  const antras = await tombstones.claimForDeletion("claim_retry", {
+    reason: "user_request",
+    actorKind: "user",
+  });
+
+  assert.equal(pirmas.vykdytojas, true, "pirmas pretendentas laimi");
+  assert.equal(antras.vykdytojas, false, "antras pretenzijos NEGAUNA");
+  assert.ok(pirmas.zyma.claimToken, "žetonas nustatytas");
+});
+
+test("#183 PRETENZIJA: VĖLIAU atėjusi replika negauna pretenzijos", async () => {
+  /**
+   * ⚠️ TAI SCENARIJUS, KURIS PANEIGĖ `updated_at` COMPARE-AND-SWAP SPRENDIMĄ.
+   *
+   * CAS atskiria tik tuos, kurie perskaitė TĄ PAČIĄ reikšmę. Vėliau atėjusi
+   * replika perskaito jau PO-PRETENZIJOS `updated_at` ir ja sėkmingai pasiremtų:
+   *
+   *   t1  A: CAS(T0) ✓ → updated_at = T1
+   *   t2  B: skaito T1, CAS(T1) ✓ → B taip pat vykdo
+   *
+   * Testas tai ir tikrina: `updatedAt` po pretenzijos PASIKEITĖ (tad CAS su ta
+   * reikšme pavyktų), o pretenzija vis tiek atmetama - nes ji yra BŪSENA, ne
+   * akimirka.
+   */
+  await tombstones.mark("velyva", { reason: "user_request", actorKind: "user" });
+  await tombstones.complete("velyva", S183.FAILED, { failureKind: "retryable" });
+  await tombstones.retry("velyva", { actorKind: "operator" });
+
+  const priesPretenzija = await tombstones.get("velyva");
+  const a = await tombstones.claimForDeletion("velyva", { reason: "user_request" });
+  assert.equal(a.vykdytojas, true);
+
+  const poPretenzijos = await tombstones.get("velyva");
+
+  /**
+   * ⚠️ ANTRA PRIEŽASTIS, KODĖL CAS BŪTŲ NEVEIKĘS - IR JĄ ATRADO ŠIS TESTAS.
+   *
+   * Atmintiniame režime `updatedAt` yra milisekundės, tad `retry` ir pretenzija
+   * dažnai pataiko į TĄ PAČIĄ reikšmę. CAS tada praleistų net vienu metu
+   * atėjusius - t. y. nesuveiktų būtent tuo vieninteliu atveju, kuriam jis buvo
+   * skirtas, ir suveiktų tyliai.
+   *
+   * Todėl tikrinamas ne laikas, o pretenzijos BŪSENA.
+   */
+  assert.ok(poPretenzijos.updatedAt >= priesPretenzija.updatedAt);
+  assert.ok(poPretenzijos.claimToken, "pretenzija yra būsena, ir ji nustatyta");
+
+  // B ateina vėliau ir mato jau po-pretenzijos būseną.
+  const b = await tombstones.claimForDeletion("velyva", { reason: "user_request" });
+
+  assert.equal(b.vykdytojas, false, "vėliau atėjusi replika pretenzijos NEGAUNA");
+  assert.equal(
+    b.zyma.claimToken,
+    poPretenzijos.claimToken,
+    "žetonas nepasikeitė - pretenzija tebepriklauso pirmajam"
+  );
+});
+
+test("#183 PRETENZIJA: žetonas nuvalomas KIEKVIENU perėjimu", async () => {
+  /**
+   * Viena valymo vieta - `_perkelti`. Terminalioje būsenoje žetonas nieko
+   * nebegintų, o paliktas keltų klausimą, ar pretenzija dar aktyvi.
+   */
+  await tombstones.mark("valymas_d", { reason: "user_request", actorKind: "user" });
+  assert.ok((await tombstones.get("valymas_d")).claimToken, "kūrėjas turi žetoną");
+
+  await tombstones.complete("valymas_d", S183.DELETED);
+  assert.equal(
+    (await tombstones.get("valymas_d")).claimToken,
+    null,
+    "terminalizacija žetoną nuvalo"
+  );
+
+  await tombstones.mark("valymas_f", { reason: "user_request", actorKind: "user" });
+  await tombstones.complete("valymas_f", S183.FAILED, { failureKind: "retryable" });
+  assert.equal(
+    (await tombstones.get("valymas_f")).claimToken,
+    null,
+    "`pending -> failed` žetoną nuvalo - įskaitant `release`"
+  );
 });
 
 test("#183 NEIŠSPRĘSTA ŽYMA: `deletion_failed` NEKARTOJAMAS automatiškai", async () => {

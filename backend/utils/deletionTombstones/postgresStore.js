@@ -30,6 +30,8 @@
  * raktus, o lenktynių apsauga tyliai išnyktų.
  */
 
+const { randomUUID } = require("crypto");
+
 const {
   TOMBSTONE_STATUS,
   assertReason,
@@ -52,7 +54,7 @@ const RETENCIJOS_BATCH = 500;
 
 const STULPELIAI = `
   job_id, status, reason, actor_kind, marked_at, updated_at,
-  completed_at, attempts, last_failure_kind
+  completed_at, attempts, last_failure_kind, claim_token
 `;
 
 function laikas(reiksme) {
@@ -74,6 +76,8 @@ function iIrasa(row) {
     completedAt: laikas(row.completed_at),
     attempts: row.attempts,
     lastFailureKind: row.last_failure_kind,
+    /** `null`, kai pretenzijos niekas nelaiko - žr. migraciją 1755700000000. */
+    claimToken: row.claim_token,
   };
 }
 
@@ -164,11 +168,11 @@ function createErasureMarkStore(pool) {
 
     return suRakinimu(jobId, async (klientas) => {
       const { rows } = await klientas.query(
-        `INSERT INTO erasure_marks (job_id, status, reason, actor_kind)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO erasure_marks (job_id, status, reason, actor_kind, claim_token)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (job_id) DO NOTHING
          RETURNING ${STULPELIAI}`,
-        [jobId, TOMBSTONE_STATUS.PENDING, reason, actorKind]
+        [jobId, TOMBSTONE_STATUS.PENDING, reason, actorKind, randomUUID()]
       );
 
       /**
@@ -207,6 +211,36 @@ function createErasureMarkStore(pool) {
     return _perkelti(jobId, allowedSources(to), to, options);
   }
 
+  /**
+   * PRETENZIJA Į AUTORIZUOTĄ PAKARTOJIMĄ (#183).
+   *
+   * ⚠️ IŠSKIRTINUMAS ČIA YRA BŪSENA, NE AKIMIRKA. `claim_token IS NULL` sąlyga
+   * galioja visą vykdymo laiką: vėliau atėjusi replika mato jau nustatytą
+   * žetoną ir pretenzijos nebegauna, nesvarbu, kiek laiko praėjo. Būtent tuo
+   * tai skiriasi nuo `updated_at` palyginimo, kuris atskiria tik vienu metu
+   * skaičiusius.
+   *
+   * Grąžina `null`, kai žetoną jau kažkas laiko arba žyma nebe `pending`.
+   */
+  async function claimRetry(jobId) {
+    if (!jobId) return null;
+
+    return suRakinimu(jobId, async (klientas) => {
+      const { rows } = await klientas.query(
+        `UPDATE erasure_marks
+            SET claim_token = $2,
+                updated_at = now()
+          WHERE job_id = $1
+            AND status = $3
+            AND claim_token IS NULL
+        RETURNING ${STULPELIAI}`,
+        [jobId, randomUUID(), TOMBSTONE_STATUS.PENDING]
+      );
+
+      return rows.length ? iIrasa(rows[0]) : null;
+    });
+  }
+
   /** Sąmoningas lentelės apėjimas - tik operatoriaus išeičiai. Žr. `memoryStore`. */
   async function transitionOverride(jobId, from, to, options = {}) {
     return _perkelti(jobId, from, to, options);
@@ -225,6 +259,21 @@ function createErasureMarkStore(pool) {
 
     return suRakinimu(jobId, async (klientas) => {
       const { rows } = await klientas.query(
+      /**
+       * ⚠️ `claim_token = NULL` ČIA YRA VIENINTELĖ ŽETONO VALYMO VIETA (#183).
+       *
+       * Žetonas galioja lygiai tiek, kiek trunka `deletion_pending` būsena, tad
+       * KIEKVIENAS perėjimas jį nuvalo:
+       *
+       *   - `pending -> deleted` - terminalizacija; ten jis nieko nebegintų, o
+       *     paliktas keltų klausimą, ar pretenzija dar aktyvi;
+       *   - `pending -> failed` - įskaitant `release`;
+       *   - `failed -> pending` - `retry` palieka NULL: autorizuota, nepaimta.
+       *
+       * Dvi valymo vietos (pvz. atskirai `release` ir `retry`) būtų ta pati
+       * klasė kaip dvi kartojimo sistemos, todėl taisyklė gyvena čia - viename
+       * `UPDATE`, pro kurį eina visi perėjimai - o ne kvietėjuose.
+       */
         `UPDATE erasure_marks
             SET status = $3,
                 updated_at = now(),
@@ -233,7 +282,8 @@ function createErasureMarkStore(pool) {
                                     ELSE NULL END,
                 attempts = attempts + CASE WHEN $3 = '${TOMBSTONE_STATUS.FAILED}' THEN 1 ELSE 0 END,
                 last_failure_kind = CASE WHEN $3 = '${TOMBSTONE_STATUS.FAILED}' THEN $5 ELSE NULL END,
-                actor_kind = COALESCE($6, actor_kind)
+                actor_kind = COALESCE($6, actor_kind),
+                claim_token = NULL
           WHERE job_id = $1
             AND status = ANY($2)
         RETURNING ${STULPELIAI}`,
@@ -420,6 +470,7 @@ function createErasureMarkStore(pool) {
     mark,
     transition,
     transitionOverride,
+    claimRetry,
     get,
     isBarred,
     assertNotBarred,

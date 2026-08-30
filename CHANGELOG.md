@@ -36,6 +36,12 @@ ji pasensta ir tampa klaidinanti.
 
 ### Changed
 
+- **Vieno vykdytojo garantija dabar galioja ir operatoriaus autorizuotam
+  pakartojimui** (#183, 7.5a). `erasure_marks` gavo `claim_token` stulpelį:
+  pretenzija į ištrynimo vykdymą yra būsena, ne akimirka, tad ir vėliau atėjusi
+  replika gauna **202**, o ne pradeda lygiagretų trynimą. Migracija
+  `1755700000000`.
+
 - ⚠️ **Foninis ištrynimų kartojimas nebekartoja `deletion_failed` žymėtų jobų**
   (#183, 7.5a). `retryPendingDeletions()` buvo antra kartojimo sistema: jam
   pavykus, jobas dingdavo, o žyma likdavo `deletion_failed` amžinai ir be

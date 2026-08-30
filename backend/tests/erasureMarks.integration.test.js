@@ -838,3 +838,52 @@ test("MIGRACIJA: `last_failure_kind` CHECK priima `executor_lost`", { skip: SKIP
     await resursai.isvalyti();
   }
 });
+
+test("PRETENZIJA: du pool'ai kovoja dėl autorizuoto pakartojimo - laimi VIENAS", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TAI POSTGRES PUSĖ TAISYKLĖS, KURIOS VIENETINIAI TESTAI NEDENGIA.
+   *
+   * Vienetinė mutacija (`claim_token IS NULL` pašalinimas iš `UPDATE`) atmintinio
+   * kelio nekeičia, tad ją gali nukirsti tik šis testas. Du nepriklausomi
+   * pool'ai - procesui lokalus `Map` čia nieko negelbėtų.
+   *
+   * Tikrinamos DVI puses:
+   *   - vienu metu: tik viena instancija gauna pretenziją;
+   *   - VĖLIAU: trečias bandymas, matantis jau po-pretenzijos būseną, jos
+   *     negauna. Būtent šis atvejis paneigė `updated_at` compare-and-swap
+   *     sprendimą - CAS su po-pretenzijos reikšme būtų pavykęs.
+   */
+  const { url, pool, resursai } = await paruostiDb("erasure_claim_race");
+
+  try {
+    const antras = new Pool({ connectionString: url });
+    resursai.registruoti("antras pool", () => antras.end());
+
+    const a = createErasureMarkStore(pool);
+    const b = createErasureMarkStore(antras);
+
+    // Nepavykęs bandymas, tada operatoriaus autorizuotas pakartojimas.
+    await a.mark("j", { reason: REASON, actorKind: "user" });
+    await a.transition("j", S.FAILED, { failureKind: "retryable" });
+    await a.transition("j", S.PENDING);
+
+    const poRetry = await a.get("j");
+    assert.equal(poRetry.claimToken, null, "`retry` palieka žymą NEPAIMTĄ");
+
+    const [ca, cb] = await Promise.all([a.claimRetry("j"), b.claimRetry("j")]);
+
+    const laimeje = [ca, cb].filter(Boolean);
+    assert.equal(laimeje.length, 1, "pretenziją gauna TIK VIENA instancija");
+    assert.ok(laimeje[0].claimToken, "žetonas nustatytas");
+
+    // Vėliau atėjusi replika mato jau po-pretenzijos būseną.
+    const velyva = await b.claimRetry("j");
+    assert.equal(velyva, null, "vėliau atėjusi replika pretenzijos NEGAUNA");
+
+    // Terminalizacija žetoną nuvalo - viena valymo vieta.
+    await a.transition("j", S.DELETED);
+    assert.equal((await b.get("j")).claimToken, null, "terminalizacija nuvalo žetoną");
+  } finally {
+    await resursai.isvalyti();
+  }
+});

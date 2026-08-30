@@ -331,39 +331,45 @@ async function get(jobId) {
 const barrierState = get;
 
 /**
- * AR ŽYMĄ LAIKO KITAS VYKDYTOJAS (#183, 7.5a DoD).
+ * PRETENZIJA Į IŠTRYNIMO VYKDYMĄ (#183, 7.5a DoD).
  *
- * ⚠️ VIENA TAISYKLĖ, NE DVI KOPIJOS. Ją naudoja ir savininko
- * (`lifecycleService`), ir našlaičių (`adminJobService`) kelias; du atskiri
- * kriterijai neišvengiamai išsiskirtų, ir vienas endpoint'as grąžintų 202 ten,
- * kur kitas jau dirbtų.
+ * ⚠️ VIENAS MECHANIZMAS, NE DU. Ankstesnė versija turėjo išimtį
+ * (`attempts === 0`), kuri autorizuotam pakartojimui pretenzijos NETAIKĖ - tad
+ * visos replikos, gavusios tą patį operatoriaus `retry`, vykdydavo lygiagrečiai.
+ * DoD reikalauja vieno vykdytojo BESĄLYGIŠKAI, be išimčių.
  *
- * Trys sąlygos, ir kiekviena būtina:
+ * Pretenzija yra BŪSENA (`claim_token`), ne akimirka:
  *
- *   - `claimed === false` - žymos NEĮRAŠĖ šis kvietėjas. Tai atominis
- *     `INSERT ... ON CONFLICT DO NOTHING` atsakymas, ne skaitymas prieš rašymą.
- *   - `status === deletion_pending` - `deleted` ir `failed` turi savo atsakymus.
- *   - ⚠️ `attempts === 0` - IR TAI NE SMULKMENA.
+ *   - šviežia žyma - pretenziją duoda `INSERT ... ON CONFLICT DO NOTHING`:
+ *     eilutę grąžina tik įterpėjas;
+ *   - autorizuotas pakartojimas (`retry` paliko `claim_token IS NULL`) -
+ *     pretenziją duoda sąlyginis `UPDATE`; laimi vienas.
  *
- * `attempts` didėja TIK pereinant į `deletion_failed`, tad `pending` su
- * `attempts > 0` reiškia vienintelį dalyką: operatorius per `erasure-marks retry`
- * EKSPLICITIŠKAI autorizavo naują bandymą, o vykdytojo dar nėra. Be šios sąlygos
- * autorizuotas pakartojimas amžinai gautų „jau vykdoma" ir ištrynimas
- * nebeįvyktų niekada - operatoriaus išeitis būtų uždaryta pačios pretenzijos.
+ * ⚠️ Vėliau atėjusi replika mato jau nustatytą žetoną ir pretenzijos negauna,
+ * NESVARBU, KIEK LAIKO PRAĖJO. Tuo tai skiriasi nuo `updated_at` palyginimo,
+ * kuris atskirtų tik vienu metu skaičiusius: antroji replika perskaitytų
+ * po-pretenzijos reikšmę ir ja sėkmingai pasiremtų.
  *
- * ⚠️ KO ŠI TAISYKLĖ NEDENGIA. Dvi replikos, gavusios tą patį autorizuotą
- * pakartojimą (`attempts > 0`), abi jį vykdys. Tai sąmoningai priimta: langas
- * atsiveria tik po rankinio operatoriaus veiksmo, o alternatyva - laikyti
- * vykdytojo „lease" - reikalautų arba lock'o per išorinį I/O (DoD tai draudžia),
- * arba naujo stulpelio su laiko riba.
+ * ⚠️ Miręs vykdytojas žetono neatlaisvina - tai NE nuoma, laikmačio nėra.
+ * Sprendimą priima operatorius per `erasure-marks release`, kuris žymą perveda
+ * į `deletion_failed` ir tuo pačiu nuvalo žetoną.
+ *
+ * @returns {Promise<{zyma: object|null, vykdytojas: boolean}>}
  */
-function heldByAnotherExecutor(zyma) {
-  return Boolean(
-    zyma &&
-      zyma.claimed === false &&
-      zyma.status === TOMBSTONE_STATUS.PENDING &&
-      zyma.attempts === 0
-  );
+async function claimForDeletion(jobId, { reason = ERASURE_REASON.USER_REQUEST, actorKind = null } = {}) {
+  const zyma = await mark(jobId, { reason, actorKind });
+
+  if (!zyma) return { zyma: null, vykdytojas: false };
+
+  /** Žymą įrašė šis kvietėjas - pretenzija atėjo kartu su `INSERT`. */
+  if (zyma.claimed) return { zyma, vykdytojas: true };
+
+  /** `deleted` ir `deletion_failed` turi savo atsakymus - jų kvietėjas tikrina. */
+  if (zyma.status !== TOMBSTONE_STATUS.PENDING) return { zyma, vykdytojas: false };
+
+  const paimta = await store.claimRetry(jobId);
+
+  return paimta ? { zyma: paimta, vykdytojas: true } : { zyma, vykdytojas: false };
 }
 
 /**
@@ -561,7 +567,7 @@ module.exports = {
   isConfirmedDeleted,
   get,
   barrierState,
-  heldByAnotherExecutor,
+  claimForDeletion,
   assertNotBarred,
   listUnresolved,
   retentionMs,

@@ -294,7 +294,10 @@ async function _performDeletion(
    * worker'is dar nematytų žymos, o duomenų jau nebūtų – ir jis juos
    * atkurtų.
    */
-  const marker = await tombstones.mark(jobId, { reason, actorKind });
+  const { zyma: marker, vykdytojas } = await tombstones.claimForDeletion(jobId, {
+    reason,
+    actorKind,
+  });
 
   /**
    * ⚠️ PRETENZIJA PRIEŠ DESTRUKTYVŲ I/O (#183, 7.5a DoD).
@@ -308,7 +311,7 @@ async function _performDeletion(
    * Grąžinam determinuotą būseną NEPRADĖJĘ nė vieno eilės, saugyklos ar audito
    * veiksmo - DoD reikalauja būtent to („jokio papildomo I/O nepradedama").
    */
-  if (tombstones.heldByAnotherExecutor(marker)) {
+  if (!vykdytojas && marker && marker.status === tombstones.TOMBSTONE_STATUS.PENDING) {
     return buildResult({
       jobId,
       status: DELETION_STATUS.IN_PROGRESS,

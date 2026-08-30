@@ -61,10 +61,15 @@ klaidą; teisingas veiksmas – **pakartoti vėliau**, ne apeiti kelią.
 
 ### ⚠️ Lygiagretus `DELETE` nebekartoja darbo – **202**, ne antras ištrynimas
 
-✅ ištrynimą vienam `job_id` vykdo **vienas** procesas. Pretenzija atominė
-   (`INSERT ... ON CONFLICT DO NOTHING` grąžina eilutę tik įrašiusiajam), tad
-   antras kvietėjas – įskaitant kitą repliką – gauna **202 `in_progress`** ir
-   **nepradeda** jokio eilės, saugyklos ar audito trynimo;
+✅ ištrynimą vienam `job_id` vykdo **vienas** procesas, ir tai galioja **be
+   išimčių**. Pretenzija yra BŪSENA (`claim_token`), ne akimirka: šviežiai žymai
+   ją duoda `INSERT ... ON CONFLICT DO NOTHING` (eilutę grąžina tik įrašiusiajam),
+   operatoriaus autorizuotam pakartojimui – sąlyginis `UPDATE ... WHERE
+   claim_token IS NULL`. Antras kvietėjas – įskaitant kitą repliką ir **vėliau**
+   atėjusią – gauna **202 `in_progress`** ir **nepradeda** jokio eilės, saugyklos
+   ar audito trynimo;
+✅ žetonas identifikuoja **bandymą**, ne vykdytoją: atsitiktinis UUID kiekvienai
+   pretenzijai, tad po restarto procesas nepaveldi jokios senos pretenzijos;
 ✅ patvirtintai ištrintas jobas duoda **204** be jokio I/O;
 ✅ neišspręsta žyma duoda **503 `tombstone_unresolved`** – duomenys pašalinti,
    bet apskaitą turi užbaigti operatorius.
@@ -81,6 +86,9 @@ Jei procesas nužudomas (SIGKILL, OOM) TARP žymėjimo ir užbaigimo, žyma liek
 `deletion_pending` be vykdytojo, ir kiekvienas vėlesnis `DELETE` tokiam `job_id`
 atsakytų **202 „jau vykdoma"**. Mesta klaida (pvz. `AuditWriteError`) tokios
 būsenos nepalieka – ji žymą perveda į `deletion_failed`. Kietas nužudymas – gali.
+
+⚠️ **Miręs vykdytojas žetono neatlaisvina, ir tai sąmoninga** – laikmačio nėra,
+tad ir nuomos nėra. Sprendimą priima operatorius:
 
 Išeitis yra rankinė ir palieka audito pėdsaką:
 

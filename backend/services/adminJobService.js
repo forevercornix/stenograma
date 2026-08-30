@@ -178,7 +178,7 @@ async function adminDeleteJob(jobId, actor) {
  * @param {"user"|"operator"} actorKind kas veikė; KODĖL - visada `orphan_cleanup`
  */
 async function valytiNaslaitiSuZyma(jobId, actorKind) {
-  const zyma = await tombstones.mark(jobId, {
+  const { zyma, vykdytojas } = await tombstones.claimForDeletion(jobId, {
     reason: ERASURE_REASON.ORPHAN_CLEANUP,
     actorKind,
   });
@@ -194,7 +194,7 @@ async function valytiNaslaitiSuZyma(jobId, actorKind) {
    * Nė vienas destruktyvus veiksmas čia NEPRADEDAMAS: DoD to reikalauja
    * eksplicitiškai („jokio papildomo I/O nepradedama").
    */
-  if (zyma && zyma.claimed === false) {
+  if (zyma && !vykdytojas) {
     if (zyma.status === TOMBSTONE_STATUS.DELETED) {
       return { outcome: null, success: true, barjeras: BARRIER_OUTCOME.ALREADY_DELETED };
     }
@@ -208,8 +208,8 @@ async function valytiNaslaitiSuZyma(jobId, actorKind) {
       return { outcome: null, success: false, barjeras: BARRIER_OUTCOME.TOMBSTONE_UNRESOLVED };
     }
 
-    /** Ta pati taisyklė kaip savininko kelyje - viena vieta, ne antra kopija. */
-    if (tombstones.heldByAnotherExecutor(zyma)) {
+    /** `pending`, bet pretenzijos negavom - ją laiko kitas vykdytojas. */
+    if (zyma.status === TOMBSTONE_STATUS.PENDING) {
       return { outcome: null, success: false, barjeras: BARRIER_OUTCOME.IN_PROGRESS };
     }
   }

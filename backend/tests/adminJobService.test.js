@@ -317,8 +317,15 @@ test("#183 FAIL-CLOSED: žymos įrašymo klaida SUSTABDO valymą, o ne praleidž
   const adminJob = await svetimasJob();
   const desktopJob = await svetimasJob();
 
-  const originalus = tombstones.mark;
-  tombstones.mark = async () => {
+  /**
+   * ⚠️ STUB'INAMAS `claimForDeletion`, NE `mark`.
+   *
+   * Nuo #183 pretenzijos taisyklė gyvena fasade: `claimForDeletion` yra taškas,
+   * kuriame barjeras įrengiamas. `mark` stub'inimas nieko neduotų - fasadas jį
+   * kviečia vidiniu vardu, ne per eksportą.
+   */
+  const originalus = tombstones.claimForDeletion;
+  tombstones.claimForDeletion = async () => {
     throw new Error("žymų saugykla nepasiekiama");
   };
 
@@ -333,7 +340,7 @@ test("#183 FAIL-CLOSED: žymos įrašymo klaida SUSTABDO valymą, o ne praleidž
       /žymų saugykla nepasiekiama/
     );
   } finally {
-    tombstones.mark = originalus;
+    tombstones.claimForDeletion = originalus;
   }
 
   assert.ok(
