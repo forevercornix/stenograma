@@ -51,7 +51,9 @@ function perimti({ pending, audioPending = [], updateKrinta, onUpdate }) {
   let updateKvietimai = 0;
   jobStore.update = async (id, patch) => {
     updateKvietimai += 1;
-    if (updateKrinta) {
+    /** `updateKrinta` gali būti ir funkcija: leidžia kristi TIK vienam jobId. */
+    const krinta = typeof updateKrinta === "function" ? updateKrinta(id) : updateKrinta;
+    if (krinta) {
       const e = new Error("Redis neprieinamas");
       e.code = "ECONNREFUSED";
       throw e;
@@ -230,10 +232,16 @@ test("#196 BACKOFF: kritus saugyklai pakartojimas ATIDEDAMAS, ne kartojamas", as
   assert.equal(skaitiklis.n, 2, "praėjus backoff laikui bandymas atnaujinamas");
 });
 
-test("#196 ATSTATYMAS: pavykus įrašymui atsarginis skaitiklis išvalomas", async (t) => {
+test("#196 PERSISTENTINIS KELIAS: veikiant saugyklai skaitiklis ir terminas įrašomi", async (t) => {
   /**
-   * Atmintis neturi kauptis: kai saugykla atsigauna, autoritetu vėl tampa
-   * persistintas laukas.
+   * ⚠️ PAVADINIMAS PATIKSLINTAS (#197 closure), ASSERTION'AI NEPALIESTI.
+   *
+   * Ankstesnis vardas žadėjo, kad tikrinamas atsarginio skaitiklio IŠVALYMAS -
+   * bet testas paleidžiamas su veikiančiu `update`, tad fallback įrašo apskritai
+   * nesukuria ir jo išvalymo patikrinti negali. Pats testas dengia realų dalyką:
+   * tai VIENINTELIS sėkmingo persistinimo kelio testas, todėl jis lieka.
+   *
+   * Išvalymą įrodo atskiras testas žemiau (`REKONCILIACIJA`).
    */
   const job = { id: "job-clr", deletion_pending: true, deletion_attempts: 0 };
   const store = perimti({ pending: [job], updateKrinta: false });
@@ -255,6 +263,208 @@ test("#196 ATSTATYMAS: pavykus įrašymui atsarginis skaitiklis išvalomas", asy
 
   assert.equal(job.deletion_attempts, 1, "sėkmingas įrašymas persistina skaitiklį");
   assert.ok(job.deletion_next_attempt_at, "ir backoff terminą");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #197 CLOSURE: keturios spragos, rastos mutacijų zondais
+ *
+ * Visos keturios buvo REALIZUOTOS kode ir NEĮRODYTOS testais: kiekvieną
+ * elgesį pavyko pašalinti, o visa 1582 testų suitė liko žalia. Pagal #197
+ * įrodymo standartą tai spraga, ne įrodyta garantija - egzistavimas nėra
+ * įrodymas.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#197 REKONCILIACIJA: pavykęs įrašymas IŠVALO atsarginę būseną", async (t) => {
+  /**
+   * ⚠️ TIKRINAMA PER ELGESĮ, NE PER VIDINĘ STRUKTŪRĄ.
+   *
+   * Testas, žiūrintis į privatų `Map`, lūžtų per refaktoringą ir garantijos
+   * negintų. Todėl išvalymas matuojamas taip, kaip jį pamatytų sistema: jei
+   * atsarginis įrašas liktų, jis PAKELTŲ kito bandymo numerį net tada, kai
+   * persistintas skaitiklis jau atstatytas į 0.
+   *
+   * Neišvalyta būsena yra ne tik nutekėjimas - tai pasenusios retry būsenos
+   * šaltinis, dėl kurio eskalacija ateitų per anksti.
+   */
+  const job = { id: "job-rec", deletion_pending: true, deletion_attempts: 0 };
+  const atstatytiErase = perimtiErase();
+
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  console.error = () => {};
+  console.warn = () => {};
+
+  const tikrasDateNow = Date.now;
+  let laikas = tikrasDateNow();
+  Date.now = () => laikas;
+
+  let store = perimti({ pending: [job], updateKrinta: true });
+
+  t.after(() => {
+    store.atstatyti();
+    atstatytiErase();
+    console.error = originalError;
+    console.warn = originalWarn;
+    Date.now = tikrasDateNow;
+  });
+
+  /** 1. Saugykla neveikia: atsarginis įrašas atsiranda. */
+  await retry.retryPendingDeletions();
+
+  /** 2. Saugykla atsigauna; praėjus backoff laikui bandymas persistinamas. */
+  store.atstatyti();
+  laikas += 60 * 60 * 1000;
+  store = perimti({ pending: [job], updateKrinta: false });
+  await retry.retryPendingDeletions();
+
+  assert.ok(job.deletion_attempts >= 1, "atsigavus skaitiklis persistinamas");
+
+  /**
+   * 3. Persistinta būsena atstatoma į nulį - taip atrodo įrašas po
+   *    reconciliacijos ar naujo ciklo. Jei atsarginė būsena būtų likusi
+   *    atmintyje, kitas bandymas gautų PAKELTĄ numerį.
+   */
+  job.deletion_attempts = 0;
+  delete job.deletion_next_attempt_at;
+  laikas += 60 * 60 * 1000;
+
+  await retry.retryPendingDeletions();
+
+  assert.equal(
+    job.deletion_attempts,
+    1,
+    "atsarginė būsena privalo būti išvalyta - kitaip bandymo numeris pakyla be pagrindo"
+  );
+});
+
+test("#197 IZOLIACIJA: atsarginė būsena neteršia KITO jobo", async (t) => {
+  /**
+   * ⚠️ KRYŽMINĖ TARŠA VIENO JOBO TESTUOSE YRA NEMATOMA.
+   *
+   * Raktas be `jobId` (`${laukas}` vietoj `${jobId}:${laukas}`) praeina visus
+   * esamus testus: jie naudoja po vieną jobą. Tada vieno jobo nesėkmė pakeltų
+   * kito bandymų numerį ir priartintų svetimą eskalaciją.
+   */
+  const krintantis = { id: "job-a", deletion_pending: true, deletion_attempts: 0 };
+  const sveikas = { id: "job-b", deletion_pending: true, deletion_attempts: 0 };
+
+  const store = perimti({
+    pending: [krintantis, sveikas],
+    updateKrinta: (id) => id === "job-a",
+  });
+  const atstatytiErase = perimtiErase();
+
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  console.error = () => {};
+  console.warn = () => {};
+
+  t.after(() => {
+    store.atstatyti();
+    atstatytiErase();
+    console.error = originalError;
+    console.warn = originalWarn;
+  });
+
+  await retry.retryPendingDeletions();
+
+  assert.equal(
+    sveikas.deletion_attempts,
+    1,
+    "sveiko jobo skaitiklis negali pakilti dėl KITO jobo nesėkmės"
+  );
+});
+
+test("#197 FORMULĖ: atsarginis terminas skaičiuojamas TA PAČIA formule", async (t) => {
+  /**
+   * ⚠️ ANTRA NEPRIKLAUSOMA FORMULĖ YRA SPRAGA, NET JEI SKAIČIAI SUTAMPA.
+   *
+   * Fallback su savo atgalos skaičiavimu praeina visus esamus testus - jie
+   * stumia laiką valanda, o tai viršija bet kokį pagrįstą backoff. Trumpesnė
+   * fallback atgala reikštų, kad būtent per outage'ą saugykla daužoma tankiau
+   * nei numatyta.
+   *
+   * Riba imama iš AUTORITETINGO `_backoffMs()`, ne perrašoma teste - antraip
+   * testas pats taptų trečia formule.
+   */
+  const { _backoffMs } = require("../utils/deletionRetry");
+  const baze = 10 * 60 * 1000; // `DEFAULT_INTERVAL_MS`, kai kintamasis nenustatytas
+  const laukiama = _backoffMs(1, baze);
+
+  const job = { id: "job-form", deletion_pending: true, deletion_attempts: 0 };
+  const store = perimti({ pending: [job], updateKrinta: true });
+  const skaitiklis = { n: 0 };
+  const atstatytiErase = perimtiErase(skaitiklis);
+
+  const originalError = console.error;
+  console.error = () => {};
+
+  const tikrasDateNow = Date.now;
+  let laikas = tikrasDateNow();
+  Date.now = () => laikas;
+
+  t.after(() => {
+    store.atstatyti();
+    atstatytiErase();
+    console.error = originalError;
+    Date.now = tikrasDateNow;
+  });
+
+  await retry.retryPendingDeletions();
+  assert.equal(skaitiklis.n, 1, "pirmas bandymas įvyksta");
+
+  /** Likus sekundei iki autoritetingos ribos - bandymo dar NĖRA. */
+  laikas += laukiama - 1000;
+  await retry.retryPendingDeletions();
+  assert.equal(
+    skaitiklis.n,
+    1,
+    `atsargos terminas privalo siekti ${laukiama} ms - trumpesnė fallback formulė daužytų saugyklą`
+  );
+
+  /** Peržengus ribą - bandymas leidžiamas. */
+  laikas += 2000;
+  await retry.retryPendingDeletions();
+  assert.equal(skaitiklis.n, 2, "peržengus autoritetingą ribą bandymas atnaujinamas");
+});
+
+test("#197 LOGAS: persistencijos klaida neneša job duomenų ar viso patch'o", async (t) => {
+  /**
+   * ⚠️ TEIGIAMA PUSĖ BUVO PADENGTA, NEIGIAMA - NE.
+   *
+   * Esamas testas tikrina, kad loge YRA `jobId` ir klaidos kodas. Niekas
+   * netikrino, ko ten NETURI būti: įdėjus visą `patch` (ar kitą arbitrary
+   * payload) visa suitė liko žalia. Retry būsenos patch'as šiandien nėra
+   * jautrus, bet logo turinys yra sąmoningas sprendimas, ne atsitiktinumas -
+   * kitaip jis tyliai išaugs.
+   */
+  const job = { id: "job-payload", deletion_pending: true, deletion_attempts: 0 };
+  const store = perimti({ pending: [job], updateKrinta: true });
+  const atstatytiErase = perimtiErase();
+
+  const klaidos = [];
+  const originalError = console.error;
+  console.error = (m) => klaidos.push(String(m));
+
+  t.after(() => {
+    store.atstatyti();
+    atstatytiErase();
+    console.error = originalError;
+  });
+
+  await retry.retryPendingDeletions();
+
+  const apieĮrašymą = klaidos.filter((m) => /Nepavyko išsaugoti/.test(m));
+  assert.ok(apieĮrašymą.length > 0, "įrašymo klaida privalo būti loguojama");
+
+  const tekstas = apieĮrašymą[0];
+
+  assert.match(tekstas, /job-payload/, "koreliacija privalo likti");
+  assert.ok(
+    !tekstas.includes("deletion_next_attempt_at"),
+    "patch'o laukai neturi patekti į logą"
+  );
+  assert.ok(!tekstas.includes("{"), "serializuoto objekto loge būti negali");
 });
 
 /** `releaseAudio` visada krinta; skaičiuojam kvietimus. */
