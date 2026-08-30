@@ -127,6 +127,33 @@ async function ensureInit() {
   await init();
 }
 
+/**
+ * GYVA BŪSENA READINESS KELIUI (#183 Codex, P1).
+ *
+ * ⚠️ „LAZY init" IR „NIEKADA NEZONDUOJAMA" NĖRA TAS PATS.
+ *
+ * Lazy `init()` lieka - skriptai ir worker'iai neturi HTTP starto. Bet be
+ * zondo instancija su nustatytu `DATABASE_URL` ir nepasiekiama DB startuodavo,
+ * praneštų `ready`, priimtų job'us, o gedimą aptiktų tik pirmo `isDeleted()`
+ * metu. Tai ta pati forma kaip 7.4f `readiness.auditStore`, kurio `/api/ready`
+ * netikrino.
+ *
+ * NIEKADA nemeta: readiness privalo atsakyti ir tada, kai atsakymas yra „ne".
+ */
+async function probe() {
+  try {
+    await init();
+    return (await store.probe()) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Ar `init()` jau įvykdytas sėkmingai (starto vėliavai). */
+function isReady() {
+  return _init !== null;
+}
+
 async function shutdown() {
   if (_pool) {
     await _pool.end().catch(() => {});
@@ -311,7 +338,7 @@ function retentionMs(env = process.env) {
 
   try {
     const { revivalHorizonsMs } = require("../../queues/config");
-    horizontas = revivalHorizonsMs(env).max;
+    horizontas = revivalHorizonsMs(env).horizonMs;
   } catch (klaida) {
     log.warn("Prikėlimo horizonto apskaičiuoti nepavyko – žymos NEŠALINAMOS", {
       klaida: klaida.message,
@@ -410,6 +437,9 @@ module.exports = {
   RETENCIJOS_BATCH,
 
   init,
+  ensureInit,
+  probe,
+  isReady,
   shutdown,
   mark,
   complete,

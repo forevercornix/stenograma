@@ -62,7 +62,21 @@ test("VYKDYMAS: be žymos jobas NEPRALEIDŽIAMAS - priešinga kryptis", async ()
   await jobStore.init();
 
   const jobRunner = require("../queues/jobRunner");
+  const { registerProcessors } = require("../queues/register");
   const vykdyta = [];
+
+  /**
+   * ⚠️ PROCESORIUS ATSTATOMAS (#183 Codex, P1).
+   *
+   * `registerProcessor()` rašo į MODULIO globalų registrą. Be atstatymo bet
+   * kuris vėlesnis testas tame pačiame procese, naudojantis inline
+   * transkripciją, vykdytų šitą netikrą `{ text: "ok" }` - rezultatai
+   * priklausytų nuo testų eilės, o procesoriaus regresija praeitų nepastebėta.
+   *
+   * Atstatoma per `registerProcessors()` - tą patį viešą kontraktą, kurį
+   * naudoja `server.js` ir `jobPhaseTerminal.test.js`, ne per privatų registrą.
+   */
+  test.after(() => registerProcessors());
 
   /** ⚠️ Parašas yra `(payload, jobId)` - žr. `_executeInline`. */
   jobRunner.registerProcessor("transcription", async (payload, jobId) => {
@@ -343,4 +357,41 @@ test("ŽYMOS: riba GALIOJA TIK atmintiniam režimui - ir tai užrašyta", async 
 
   /** Be `DATABASE_URL` backend'as PRIVALO būti atmintis, o ne tylus postgres bandymas. */
   assert.equal(tombstones.backend, "memory", "be DATABASE_URL - atmintinis backend'as");
+});
+
+test("READINESS: žymų saugykla zonduojama - neveikianti DB reiškia NOT ready", async () => {
+  /**
+   * ⚠️ „LAZY init" IR „NIEKADA NEZONDUOJAMA" NĖRA TAS PATS (#183 Codex, P1).
+   *
+   * Su nustatytu `DATABASE_URL` ir nepasiekiama DB instancija startuodavo,
+   * praneštų `ready`, priimtų job'us, o gedimą aptiktų tik pirmo `isDeleted()`
+   * metu - jau vykdydama darbą, kurį barjeras turėjo sustabdyti. Tai ta pati
+   * forma kaip 7.4f `readiness.auditStore`, kurio `/api/ready` netikrino.
+   */
+  const request = require("supertest");
+  const app = require("../server");
+  const tombstones = require("../utils/deletionTombstones");
+
+  app._setReadyForTests(true);
+
+  const originalus = tombstones.probe;
+
+  try {
+    /** Prielaida: veikiant saugyklai readiness praeina. */
+    tombstones.probe = async () => true;
+    assert.equal((await request(app).get("/api/ready")).status, 200, "prielaida: kitkas paruošta");
+
+    /** Neveikianti žymų saugykla PRIVALO duoti 503. */
+    tombstones.probe = async () => false;
+
+    const res = await request(app).get("/api/ready");
+
+    assert.equal(res.status, 503, "neveikianti žymų saugykla reiškia NOT ready");
+    assert.equal(res.body.components.tombstonesReachable, false, "komponentas privalo būti matomas");
+
+    /** ⚠️ Liveness NEPALIESTAS - kitaip orkestruotojas perkrautų podą cikle. */
+    assert.equal((await request(app).get("/api/health")).status, 200, "liveness lieka");
+  } finally {
+    tombstones.probe = originalus;
+  }
 });

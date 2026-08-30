@@ -467,6 +467,16 @@ async function initializeWorkerOrFail(workerName) {
    * pačią semantiką turi `server.js`.
    */
   await auditStore.init();
+
+  /**
+   * ⚠️ ŽYMOS INICIJUOJAMOS IR ČIA (#183 Codex, P1).
+   *
+   * Worker'is skaito barjerą kiekvienam job'ui. Be ankstyvo `init()` neveikianti
+   * DB paaiškėtų tik pirmo `isDeleted()` metu - job'as jau paimtas, o barjeras
+   * neveikia. Fail-closed, kaip ir audito saugykla.
+   */
+  const deletionTombstones = require("../utils/deletionTombstones");
+  await deletionTombstones.init();
   /**
    * ⚠️ TIKRINAMA EILĖS GALIMYBĖ, NE KONKRETUS BACKEND'AS (#155, 7.2a).
    *

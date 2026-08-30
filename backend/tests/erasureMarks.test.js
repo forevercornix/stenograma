@@ -184,7 +184,7 @@ test("RETENCIJA: formulė yra `max(prikėlimas, kopijos) + atsarga`, ne parinkta
   const { retentionDays } = require("../utils/backupPolicy");
 
   const env = {};
-  const prikelimas = revivalHorizonsMs(env).max;
+  const prikelimas = revivalHorizonsMs(env).horizonMs;
   const kopijos = retentionDays(env) * 24 * 3600 * 1000;
 
   assert.equal(
@@ -297,19 +297,30 @@ test("OPERATORIUS: `retry` veikia TIK iš `failed` ir palieka audito pėdsaką",
   }
 });
 
-test("OPERATORIUS: `force-resolve` rašo auditą PRIEŠ veiksmą - fail-closed", async () => {
+test("OPERATORIUS: auditas rašomas PO perėjimo, o `success` atitinka rezultatą", async () => {
   /**
-   * ⚠️ TVARKA YRA ESMĖ. Force-resolve ATIDARO barjerą. Jei auditas kristų po
-   * perėjimo, barjeras liktų nuimtas be jokio įrašo, kas jį nuėmė - t. y.
-   * tiksliai tas atvejis, dėl kurio auditas ir egzistuoja.
+   * ⚠️ ŠIS TESTAS APVERSTAS 7.5a PERŽIŪROJE (#183 Codex, P2).
+   *
+   * Ankstesnė versija reikalavo audito PRIEŠ veiksmą, ir tas argumentas
+   * galiojo: force-resolve ATIDARO barjerą, tad kritęs auditas neturi palikti
+   * jo nuimto be įrašo.
+   *
+   * Bet ta tvarka dengė tik vieną gedimo pusę. Antroji: du lygiagretūs
+   * operatoriai abu perskaito būseną, abu įrašo `success: true`, o sąlyginis
+   * perėjimas pavyksta TIK vienam - lieka patvarus SĖKMĖS įrašas veiksmui,
+   * kurio nebuvo. Auditu, kuriuo negalima pasitikėti, remiamasi; trūkstamu -
+   * ne.
+   *
+   * Todėl tikrinama nauja garantija: `success` atspindi FAKTINĮ perėjimą.
    */
   await tombstones._clearForTests();
 
   const auditWrite = require("../utils/auditWrite");
   const originalus = auditWrite.rasytiAudita;
 
-  auditWrite.rasytiAudita = async () => {
-    throw new Error("auditas neprieinamas");
+  const irasai = [];
+  auditWrite.rasytiAudita = async (irasas) => {
+    irasai.push(irasas);
   };
   delete require.cache[require.resolve("../services/erasureMarkService")];
   const service = require("../services/erasureMarkService");
@@ -318,16 +329,62 @@ test("OPERATORIUS: `force-resolve` rašo auditą PRIEŠ veiksmą - fail-closed",
     await tombstones.mark("fr1", { reason: states.ERASURE_REASON.USER_REQUEST });
     await tombstones.complete("fr1", S.FAILED);
 
-    await assert.rejects(
-      () => service.forceResolveMark("fr1", { actor: "operatorius" }),
-      /auditas neprieinamas/
-    );
+    /** ── Pirmas operatorius: perėjimas ĮVYKSTA ───────────────────────────── */
+    const pirmas = await service.forceResolveMark("fr1", { actor: "operatorius-A" });
 
-    assert.equal(
-      (await tombstones.get("fr1")).status,
-      S.FAILED,
-      "kritus auditui žyma PRIVALO likti neterminalė"
+    assert.equal(pirmas.changed, true, "prielaida: pirmas force-resolve pakeičia būseną");
+    assert.equal(irasai.length, 1);
+    assert.equal(irasai[0].event, "ERASURE_MARK_FORCE_RESOLVED");
+    assert.equal(irasai[0].success, true, "įvykęs veiksmas rašomas kaip sėkmė");
+
+    /**
+     * ── Antras operatorius tai pačiai žymai: perėjimo NĖRA ────────────────
+     *
+     * Žyma jau terminalė, tad servisas grąžina `changed: false`. Su senąja
+     * tvarka čia būtų atsiradęs ANTRAS `success: true` įrašas - patvarus
+     * pėdsakas veiksmo, kurio neįvyko.
+     */
+    const antras = await service.forceResolveMark("fr1", { actor: "operatorius-B" });
+
+    assert.equal(antras.changed, false, "terminali žyma antrą kartą nebekeičiama");
+    assert.ok(
+      !irasai.some((i) => i.success === true && i.actor === "operatorius-B"),
+      `sėkmės įrašo veiksmui, kurio nebuvo, būti negali: ${JSON.stringify(irasai)}`
     );
+  } finally {
+    auditWrite.rasytiAudita = originalus;
+    delete require.cache[require.resolve("../services/erasureMarkService")];
+  }
+});
+
+test("OPERATORIUS: `retry` sėkmės įrašas irgi atitinka faktinį perėjimą", async () => {
+  /**
+   * Ta pati garantija antrame kelyje: `retryMark` sąlyginis perėjimas
+   * `failed → pending` pavyksta tik vienam iš dviejų lygiagrečių operatorių.
+   */
+  await tombstones._clearForTests();
+
+  const auditWrite = require("../utils/auditWrite");
+  const originalus = auditWrite.rasytiAudita;
+
+  const irasai = [];
+  auditWrite.rasytiAudita = async (irasas) => {
+    irasai.push(irasas);
+  };
+  delete require.cache[require.resolve("../services/erasureMarkService")];
+  const service = require("../services/erasureMarkService");
+
+  try {
+    await tombstones.mark("rt1", { reason: states.ERASURE_REASON.USER_REQUEST });
+    await tombstones.complete("rt1", S.FAILED);
+
+    const rezultatas = await service.retryMark("rt1", { actor: "operatorius" });
+
+    assert.equal(rezultatas.changed, true, "prielaida: retry pakeičia būseną");
+    assert.equal(irasai.length, 1);
+    assert.equal(irasai[0].event, "ERASURE_MARK_RETRIED");
+    assert.equal(irasai[0].success, true);
+    assert.match(irasai[0].details, /changed=true/, "rezultatas matomas ir `details` lauke");
   } finally {
     auditWrite.rasytiAudita = originalus;
     delete require.cache[require.resolve("../services/erasureMarkService")];

@@ -143,7 +143,35 @@ function revivalHorizonsMs(env = process.env) {
     delayMax: MAX_JOB_DELAY_MS,
   };
 
-  return { ...horizontai, max: Math.max(...Object.values(horizontai)) };
+  /**
+   * ⚠️ DALIS MECHANIZMŲ SUMUOJASI, NE KONKURUOJA (#183 Codex, P1).
+   *
+   * `Math.max(...)` iš visų dedamųjų yra per mažas, nes VIENO job'o gyvenimo
+   * linija juos sudeda: darbas laukia `delay`, tada eina per retry grandinę
+   * (kiekvienas bandymas su savo backoff), tada dar guli terminalioje būsenoje
+   * `removeOnFail`/`removeOnComplete` langą. Sukonfigūravus ilgą retry grandinę
+   * ir trumpą terminalų langą, `max` grąžintų vieną dedamąją, o job'as
+   * realiai gyventų jų sumą - žyma būtų išvalyta, kol BullMQ dar gali job'ą
+   * prikelti, ir artefaktai materializuotųsi PO ištrynimo.
+   *
+   * Todėl sumuojama tai, kas eina nuosekliai, ir tik terminalus laikymas imamas
+   * `max` (job'as baigiasi arba `completed`, arba `failed` - ne abiem).
+   *
+   * ⚠️ `stalled` PRISKIRIAMAS NUOSEKLIAJAI DALIAI SĄMONINGAI. Užstrigusio
+   * job'o perėmimas vyksta grandinės viduje ir ją pailgina. Įvertinimas iš
+   * viršaus čia yra saugioji pusė: per didelis horizontas žymą palaiko ILGIAU,
+   * o per mažas leidžia jai dingti per anksti - būtent tai 7.5a ir draudžia.
+   */
+  const nuoseklus = horizontai.delayMax + horizontai.retry + horizontai.stalled;
+  const terminalus = Math.max(horizontai.removeOnComplete, horizontai.removeOnFail);
+
+  /**
+   * ⚠️ LAUKAS `max` PAŠALINTAS SĄMONINGAI. Jo vardas po šio pakeitimo meluotų
+   * (AGENTS.md §12.1), o tylus reikšmės pakeitimas paliktų kvietėjus, manančius
+   * gaunant maksimumą. Pervadinus kiekvienas kvietėjas kertasi kompiliavimo
+   * metu, ne tyliai.
+   */
+  return { ...horizontai, nuoseklus, terminalus, horizonMs: nuoseklus + terminalus };
 }
 
 /**

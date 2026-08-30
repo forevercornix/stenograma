@@ -174,7 +174,18 @@ async function close() {
   /** Atmintis neturi ko uždaryti - metodas egzistuoja dėl kontrakto vienodumo. */
 }
 
+/**
+ * Zondas - simetriškas postgres realizacijai (#183 Codex, P1).
+ *
+ * Atmintis visada pasiekiama; metodas egzistuoja tam, kad readiness kelias
+ * nešakotųsi pagal backend'ą.
+ */
+async function probe() {
+  return true;
+}
+
 module.exports = {
+  probe,
   mark,
   transition,
   transitionOverride,

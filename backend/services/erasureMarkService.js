@@ -66,18 +66,33 @@ async function retryMark(jobId, { actor = null } = {}) {
     return { changed: false, reason: "not_failed", status: esama.status };
   }
 
+  /**
+   * ⚠️ AUDITAS PO PERĖJIMO, IR `success` PAGAL JO REZULTATĄ (#183 Codex, P2).
+   *
+   * Anksčiau įrašas eidavo PIRMAS su `success: true`. Du operatoriai, kartojantys
+   * tą pačią `deletion_failed` žymą, abu perskaitydavo būseną ir abu įrašydavo
+   * sėkmę, bet sąlyginis `failed → pending` perėjimas pavyksta TIK vienam. Liktų
+   * patvarus sėkmės įrašas veiksmui, kurio nebuvo - tas pats „deklaruoti sėkmę
+   * prieš patvirtintą write", kurį 7.4a auditui uždraudė.
+   *
+   * Bandymas pėdsako nepraranda: nepavykęs perėjimas irgi rašomas, tik
+   * `success: false` su priežastimi. `rasytiAudita` blokuoja, tad audito klaida
+   * po įvykusio perėjimo iškyla kvietėjui - ta pati semantika kaip
+   * `RETENTION_PURGE`, rašomame po ištrynimo.
+   */
+  const zyma = await tombstones.retry(jobId, { actorKind: ACTOR_KIND.OPERATOR });
+  const changed = Boolean(zyma);
+
   await rasytiAudita({
     event: "ERASURE_MARK_RETRIED",
     jobId,
     actor: actor || undefined,
-    success: true,
-    details: `from=${esama.status} attempts=${esama.attempts}`,
+    success: changed,
+    details: `from=${esama.status} attempts=${esama.attempts} changed=${changed}`,
   });
 
-  const zyma = await tombstones.retry(jobId, { actorKind: ACTOR_KIND.OPERATOR });
-
-  log.info("Ištrynimo žyma grąžinta į pakartojimą", { jobId, status: zyma && zyma.status });
-  return { changed: Boolean(zyma), status: zyma ? zyma.status : esama.status };
+  log.info("Ištrynimo žyma grąžinta į pakartojimą", { jobId, status: zyma && zyma.status, changed });
+  return { changed, status: zyma ? zyma.status : esama.status };
 }
 
 /**
@@ -99,24 +114,37 @@ async function forceResolveMark(jobId, { actor = null, note = null } = {}) {
   }
 
   /**
-   * ⚠️ AUDITAS PIRMA. Kritus rašymui `rasytiAudita` meta, ir žyma LIEKA
-   * neterminalė - t. y. blogiausiu atveju operatorius pakartoja, o ne atidaro
-   * barjerą be pėdsako.
+   * ⚠️ AUDITAS PO PERĖJIMO - MAINAI, KURIE ĮVARDIJAMI (#183 Codex, P2).
+   *
+   * Ankstesnis komentaras gynė priešingą tvarką: „auditas pirma, kad barjeras
+   * neatsidarytų be pėdsako". Argumentas galiojo, bet dengė tik VIENĄ gedimo
+   * pusę. Antroji pasirodė peržiūroje: du lygiagretūs operatoriai abu įrašo
+   * `success: true`, o sąlyginis perėjimas pavyksta tik vienam - lieka patvarus
+   * sėkmės įrašas veiksmui, kurio nebuvo. Auditas, kuriuo negalima pasitikėti,
+   * yra blogiau nei auditas, kurio trūksta: pirmuoju remiamasi.
+   *
+   * Todėl rašoma PO perėjimo, o `success` atspindi jo rezultatą. Kaina
+   * pripažįstama: kritus audito rašymui po įvykusio perėjimo, barjeras jau
+   * atidarytas, o įrašo nėra - bet `rasytiAudita` blokuoja, tad operatorius
+   * gauna klaidą, ne tylą. Ta pati semantika kaip `RETENTION_PURGE`, rašomame
+   * po ištrynimo (7.4d).
    */
+  const zyma = await tombstones.forceResolve(jobId, { actorKind: ACTOR_KIND.OPERATOR });
+  const changed = Boolean(zyma);
+
   await rasytiAudita({
     event: "ERASURE_MARK_FORCE_RESOLVED",
     jobId,
     actor: actor || undefined,
-    success: true,
+    success: changed,
     details:
       `from=${esama.status} attempts=${esama.attempts} ` +
-      `lastFailure=${esama.lastFailureKind || "none"}${note ? " note=pateikta" : ""}`,
+      `lastFailure=${esama.lastFailureKind || "none"}${note ? " note=pateikta" : ""} ` +
+      `changed=${changed}`,
   });
 
-  const zyma = await tombstones.forceResolve(jobId, { actorKind: ACTOR_KIND.OPERATOR });
-
-  log.warn("Ištrynimo žyma išspręsta rankiniu būdu", { jobId, from: esama.status });
-  return { changed: Boolean(zyma), status: zyma ? zyma.status : esama.status };
+  log.warn("Ištrynimo žyma išspręsta rankiniu būdu", { jobId, from: esama.status, changed });
+  return { changed, status: zyma ? zyma.status : esama.status };
 }
 
 module.exports = {

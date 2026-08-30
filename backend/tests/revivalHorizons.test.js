@@ -40,30 +40,90 @@ test("VIENETAI: `age` yra SEKUNDĖS, `stalledInterval` - MILISEKUNDĖS", () => {
   assert.equal(h.retry, 5000 + 10000, "eksponentinis backoff per `attempts - 1` laukimus");
 });
 
-test("MAKSIMUMAS: išvedamas iš VISŲ horizontų, ne iš vieno pasirinkto", () => {
+test("HORIZONTAS: nuoseklios dedamosios SUDEDAMOS, terminalios - `max`", () => {
   /**
-   * Šiandien ribojantis yra `removeOnFail` (24 h). Testas to NEUŽRAŠO kaip
-   * tiesos: pakeitus konfigūraciją ribojantis tampa kitas, ir formulė privalo
-   * tai atspindėti savaime. Užrašius „max = removeOnFail", testas liktų žalias,
-   * o žyma baigtų galioti anksčiau, nei job'as nebegali būti prikeltas.
+   * ⚠️ ŠIS TESTAS PERRAŠYTAS 7.5a PERŽIŪROJE (#183, P1).
+   *
+   * Ankstesnė versija tvirtino `max === removeOnFail` ir tuo užrašė KLAIDINGĄ
+   * formulę kaip tiesą. Vieno job'o gyvenimo linija dedamąsias SUDEDA: `delay`
+   * → retry grandinė → terminalus laikymas. Maksimumas iš jų grąžina vieną
+   * dedamąją, o job'as gyvena jų sumą - žyma dingtų, kol BullMQ dar gali jį
+   * prikelti.
+   *
+   * Todėl tikrinama STRUKTŪRA, ne konkreti ribojanti dedamoji.
    */
-  const bazinis = revivalHorizonsMs({});
-  assert.equal(bazinis.max, bazinis.removeOnFail, "numatytoje konfigūracijoje riboja `removeOnFail`");
+  const h = revivalHorizonsMs({});
 
-  /** Ilgas `removeOnComplete` privalo perimti maksimumą. */
-  const ilgas = revivalHorizonsMs({ QUEUE_TTL_SECONDS: String(30 * 24 * 3600) });
-  assert.equal(ilgas.max, ilgas.removeOnComplete, "maksimumas privalo sekti pasikeitusią reikšmę");
-  assert.ok(ilgas.max > bazinis.max);
+  assert.equal(
+    h.nuoseklus,
+    h.delayMax + h.retry + h.stalled,
+    "nuosekli dalis - suma, ne maksimumas"
+  );
+  assert.equal(
+    h.terminalus,
+    Math.max(h.removeOnComplete, h.removeOnFail),
+    "job'as baigiasi arba `completed`, arba `failed` - ne abiem"
+  );
+  assert.equal(h.horizonMs, h.nuoseklus + h.terminalus);
 
-  /** Ilgas stalled langas - taip pat. */
-  const stalled = revivalHorizonsMs({ QUEUE_LOCK_DURATION_MS: String(10 * 24 * 3600 * 1000) });
-  assert.equal(stalled.max, stalled.stalled, "stalled langas irgi gali tapti ribojančiu");
+  /** ⚠️ Horizontas negali būti mažesnis už BET KURIĄ atskirą dedamąją. */
+  for (const [vardas, reiksme] of Object.entries(h)) {
+    if (["nuoseklus", "terminalus", "horizonMs"].includes(vardas)) continue;
+    assert.ok(h.horizonMs >= reiksme, `horizontas mažesnis už \`${vardas}\` (${reiksme} ms)`);
+  }
 });
 
-test("MAKSIMUMAS: `delay` riba yra VIENA IŠ dedamųjų, ne atskira taisyklė", () => {
+test("HORIZONTAS: ilga retry grandinė VIRŠIJA bet kurią atskirą dedamąją", () => {
+  /**
+   * ⚠️ TAI TAS SCENARIJUS, KURĮ SENOJI FORMULĖ PRALEISDAVO (#183 Codex, P1).
+   *
+   * Sukonfigūruojama retry grandinė, kurios suma didesnė už kiekvieną atskirą
+   * dedamąją. Su `Math.max(...)` horizontas būtų lygus vienai jų - ir žyma
+   * baigtų galioti, kol job'as dar gyvas eilėje.
+   *
+   * Skaičiai parinkti taip, kad `retry` viršytų `removeOnFail`: 5 bandymai,
+   * bazė 6 h → 6 + 12 + 24 + 48 = 90 h, o `removeOnFail` numatytai 24 h.
+   */
+  const env = {
+    QUEUE_MAX_ATTEMPTS: "5",
+    QUEUE_BACKOFF_MS: String(6 * 3600 * 1000),
+  };
+
+  const h = revivalHorizonsMs(env);
+
+  const didziausiaAtskira = Math.max(
+    h.removeOnComplete,
+    h.removeOnFail,
+    h.stalled,
+    h.retry,
+    h.delayMax
+  );
+
+  assert.ok(h.retry > h.removeOnFail, `prielaida: retry (${h.retry}) viršija removeOnFail`);
+  assert.ok(
+    h.horizonMs > didziausiaAtskira,
+    `horizontas ${h.horizonMs} privalo viršyti didžiausią atskirą dedamąją ${didziausiaAtskira} - ` +
+      "kitaip job'as gyvena ilgiau nei jį saugantis įrašas"
+  );
+
+  /** Ir konkrečiai: suma, ne maksimumas. */
+  assert.equal(h.horizonMs, h.delayMax + h.retry + h.stalled + h.terminalus);
+});
+
+test("HORIZONTAS: `delay` riba yra VIENA IŠ nuosekliųjų dedamųjų", () => {
   const h = revivalHorizonsMs({});
   assert.equal(h.delayMax, MAX_JOB_DELAY_MS, "riba privalo dalyvauti skaičiavime");
-  assert.ok(h.max >= MAX_JOB_DELAY_MS, "maksimumas negali būti mažesnis už leistiną atidėjimą");
+  assert.ok(h.horizonMs >= MAX_JOB_DELAY_MS, "horizontas negali būti mažesnis už leistiną atidėjimą");
+});
+
+test("HORIZONTAS: lauko `max` NEBĖRA - vardas meluotų", () => {
+  /**
+   * ⚠️ TRIPWIRE (AGENTS.md §9.2 ir §12.1). Grąžinus `max` lauką, kvietėjas
+   * galėtų jį pasiimti manydamas gaunąs horizontą, o gautų vieną dedamąją.
+   * Pašalinimas paverčia tokį kvietimą `undefined`, ne tyliai per mažu skaičiumi.
+   */
+  const h = revivalHorizonsMs({});
+  assert.equal(h.max, undefined, "`max` po 7.5a peržiūros nebeegzistuoja");
 });
 
 test("FAIL-SAFE: neapskaičiuojamas dydis META, o ne tyliai virsta nuliu", () => {

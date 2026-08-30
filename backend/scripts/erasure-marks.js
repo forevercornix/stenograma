@@ -21,6 +21,28 @@
  * neatsako į vienintelį klausimą, dėl kurio jis rašomas.
  */
 
+/**
+ * ⚠️ `.env` ĮKELIAMAS PIRMA, IR ABSOLIUČIU KELIU (#183 Codex, P1 kontekste).
+ *
+ * Be šito įrankis tyliai pasirinkdavo ATMINTIES backend'ą: įprastame ne-Compose
+ * diegime `DATABASE_URL` gyvena `backend/.env`, o ne shell aplinkoje. `list`
+ * praneštų, kad persistentinių incidentų nėra, o mutacijos komandos grąžintų
+ * `no_mark`, nepalietusios PostgreSQL - ir operatorius padarytų neteisingą
+ * išvadą būtent tada, kai atsakymas svarbiausias.
+ *
+ * Q3 sprendimu šis skriptas yra VIENINTELIS operatoriaus kelias užstrigusiai
+ * žymai išspręsti (admin maršruto sąmoningai nėra), tad tyli klaida čia yra
+ * brangiausia.
+ *
+ * ⚠️ KELIAS NUO `__dirname`, ne nuo darbinio katalogo: komanda dokumentuota kaip
+ * `node backend/scripts/erasure-marks.js …`, tad `cwd` paprastai yra repo
+ * šaknis. `dotenv` neperrašo jau nustatytų kintamųjų, tad shell aplinka lieka
+ * viršesnė.
+ */
+const path = require("node:path");
+require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
+require("dotenv").config({ path: path.resolve(__dirname, "..", "..", ".env") });
+
 const erasureMarks = require("../services/erasureMarkService");
 const tombstones = require("../utils/deletionTombstones");
 
