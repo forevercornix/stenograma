@@ -15,6 +15,7 @@ const authRoute = require("./routes/auth");
  */
 const sessionStore = require("./utils/sessionStore");
 const auditStore = require("./utils/auditStore");
+const deletionTombstones = require("./utils/deletionTombstones");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
@@ -78,7 +79,13 @@ app.use("/api", generalApiLimiter);
  * užklausas. Vėliavos AUTORITETAS yra `sessionStore.isReady()` - čia laikoma
  * kopija skirta `/api/ready` išvesčiai.
  */
-const readiness = { jobStore: false, jobRunner: false, sessionReconcile: false, auditStore: false };
+const readiness = {
+  jobStore: false,
+  jobRunner: false,
+  sessionReconcile: false,
+  auditStore: false,
+  deletionTombstones: false,
+};
 app.locals.readiness = readiness; // route failai gali tikrinti be ciklinės priklausomybės
 
 function requireJobSystemReady(req, res, next) {
@@ -206,6 +213,25 @@ async function probeRuntimeReadiness() {
   }
 
   /**
+   * ⚠️ IŠTRYNIMO ŽYMŲ ZONDAS (#155, 7.5a / #183).
+   *
+   * Be jo instancija su nustatytu `DATABASE_URL` ir nepasiekiama DB (arba be
+   * migracijos) startuodavo, praneštų `ready` ir priimtų job'us, o gedimą
+   * aptiktų tik pirmo `isDeleted()` metu - jau vykdydama darbą, kurį barjeras
+   * turėjo sustabdyti. Ta pati forma kaip 7.4f `readiness.auditStore`.
+   */
+  let tombstonesReachable = false;
+  try {
+    tombstonesReachable = await withTimeout(
+      deletionTombstones.probe(),
+      READINESS_TIMEOUT_MS,
+      "ištrynimo žymos"
+    );
+  } catch {
+    tombstonesReachable = false;
+  }
+
+  /**
    * ⚠️ NEIŠSPRENDŽIAMOS GENERACIJOS → NOT READY, NORS PROCESAS PAKILO.
    *
    * `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` leidžia STARTUOTI, kad
@@ -243,7 +269,14 @@ async function probeRuntimeReadiness() {
     }
   }
 
-  return { redisReachable, workers, sessionStoreReachable, auditStoreReachable, auditKeysResolvable };
+  return {
+    redisReachable,
+    workers,
+    sessionStoreReachable,
+    auditStoreReachable,
+    auditKeysResolvable,
+    tombstonesReachable,
+  };
 }
 
 app.get("/api/ready", pollRateLimiter, async (req, res) => {
@@ -256,7 +289,11 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
    * apeinama readiness lygyje.
    */
   const initReady =
-    readiness.jobStore && readiness.jobRunner && readiness.sessionReconcile && readiness.auditStore;
+    readiness.jobStore &&
+    readiness.jobRunner &&
+    readiness.sessionReconcile &&
+    readiness.auditStore &&
+    readiness.deletionTombstones;
   if (!initReady) {
     return res.status(503).json({
       ready: false,
@@ -265,6 +302,7 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
         jobRunner: readiness.jobRunner,
         sessionReconcile: readiness.sessionReconcile,
         auditStore: readiness.auditStore,
+        deletionTombstones: readiness.deletionTombstones,
       },
     });
   }
@@ -281,6 +319,7 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
     sessionStoreReachable,
     auditStoreReachable,
     auditKeysResolvable,
+    tombstonesReachable,
   } = await probeRuntimeReadiness();
   const workerAlive = workers.transcription && workers.protocol;
 
@@ -290,7 +329,8 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
     workerAlive &&
     sessionStoreReachable &&
     auditStoreReachable &&
-    auditKeysResolvable;
+    auditKeysResolvable &&
+    tombstonesReachable;
 
   res.status(ready ? 200 : 503).json({
     ready,
@@ -299,6 +339,7 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
       jobRunner: readiness.jobRunner,
       sessionReconcile: readiness.sessionReconcile,
       auditStore: readiness.auditStore,
+      deletionTombstones: readiness.deletionTombstones,
       redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
       workerAlive,    // BullMQ režime: true TIK jei ABU worker tipai gyvi; inline - visada true
       workers,        // detali būsena PER TIPĄ - kuri konkrečiai eilė (jei kuri) neturi gyvo worker'io
@@ -312,6 +353,8 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
        * yra viešesnis nei logai.
        */
       auditKeysResolvable,
+      /** GYVA ištrynimo žymų būsena su TEISIŲ patikra; atmintyje - visada true. */
+      tombstonesReachable,
     },
   });
 });
@@ -449,6 +492,18 @@ async function startServer({ port, listen, onStep } = {}) {
    */
   await auditStore.init();
   step("auditStore.init");
+
+  /**
+   * ⚠️ ŽYMOS INICIJUOJAMOS ANKSTI, NORS `init()` YRA LAZY (#183 Codex, P1).
+   *
+   * Lazy kelias lieka skriptams ir worker'iams, kurie HTTP starto neturi. Bet
+   * HTTP procesui „pirmas kvietėjas inicijuoja" reiškia, kad neveikianti DB
+   * paaiškėtų tik apdorojant job'ą - jau priėmus srautą. Fail-closed: klaida
+   * nutraukia startą, kaip ir `auditStore`.
+   */
+  await deletionTombstones.init();
+  step("deletionTombstones.init");
+  readiness.deletionTombstones = true;
   log.info(`Audito saugykla: ${auditStore.backend()}`);
   readiness.auditStore = true;
 
@@ -535,6 +590,15 @@ app._setReadyForTests = (value = true) => {
    * readiness regresija, nors realiai trūktų vėliavos pačiame pagalbininke.
    */
   readiness.auditStore = value;
+
+  /**
+   * ⚠️ `deletionTombstones` - ta pati priežastis (#155, 7.5a / #183).
+   *
+   * Kiekvienas naujas readiness komponentas privalo atsirasti ir čia, kitaip
+   * „pažymėk paruošta" nustoja reikšti paruošta, ir dešimtys nesusijusių testų
+   * gauna 503 kaip tariamą regresiją.
+   */
+  readiness.deletionTombstones = value;
 };
 
 /**

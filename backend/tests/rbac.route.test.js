@@ -817,3 +817,38 @@ test("#160 EXPORT: savininkas savo job'ą susieja normaliai (regresija)", async 
     "SAVAS job'as pasiekiamas – matomas tikras tipo neatitikimas, ne missing"
   );
 });
+
+test("#183 HTTP: lygiagretus admin override gauna 202, ne 503", async () => {
+  /**
+   * ⚠️ TA PATI BŪSENA NEGALI DUOTI SKIRTINGO KODO PAGAL PRIVILEGIJĄ (§16).
+   *
+   * Įvedus 202 savininko kelyje, administracinė šaka liko su savo atsakymų
+   * kopija ir tą pačią būseną - kita replika jau vykdo ištrynimą - vertė 503,
+   * t. y. „serverio gedimu" ten, kur gedimo nėra. Operatorius, matantis 503,
+   * pradėtų ieškoti incidento, kurio nėra.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const cookieB = await loginAs("antrasadmin", "antras-slaptas-3");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookieB)
+    .send({ transcript: "Petras: Aptariame biudzeta kitiems metams." });
+  const jobId = created.body.jobId;
+
+  // Kita replika jau pasiėmė šį jobą - žymos šis procesas neįrašė.
+  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
+
+  const cookieA = await loginAs("sysadmin", "admin-slaptas-1");
+  const res = await request(app).delete(`/api/jobs/${jobId}`).set("Cookie", cookieA);
+
+  assert.equal(res.status, 202, "administracinė šaka atvaizduoja barjerą taip pat kaip savininko");
+  assert.equal(res.body.status, "in_progress");
+
+  /**
+   * ESMINĖ patikra: 202 turi reikšti, kad darbas NEPRADĖTAS. Vien statuso
+   * kodas to neįrodo - jis atrodytų vienodai ir tada, jei duomenys jau būtų
+   * ištrinti, o atsakymas tik meluotų.
+   */
+  assert.ok(await jobStoreForOwnership.system.get(jobId), "destruktyvus darbas NEPRADĖTAS");
+});

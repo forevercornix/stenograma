@@ -102,6 +102,32 @@ const AUDIT_EVENTS = Object.freeze({
   RETENTION_PURGE: KATEGORIJA.BLOKUOJANTIS,
   ADMIN_ORPHAN_CLEANUP: KATEGORIJA.BLOKUOJANTIS,
 
+  /**
+   * ⚠️ ŽYMŲ OPERATORIAUS KELIAS - BLOKUOJANTIS IR *NE* POST-HOC (#155, 7.5a / #183).
+   *
+   * Barjeras nuo `deletion_pending` plius neterminalių žymų nesenėjimas reiškia,
+   * kad nuolat nepavykstantis ištrynimas užrakintų job'ą neribotam laikui.
+   * Išeitis yra, bet ji privalo palikti pėdsaką.
+   *
+   * ⚠️ NUO #183 PERŽIŪROS ŠIE ĮVYKIAI YRA POST-HOC, ir tai ATŠAUKIA ankstesnį
+   * priskyrimą. Anksčiau čia stovėjo „rašomi PRIEŠ veiksmą: neužfiksavus, KAS
+   * nuėmė barjerą, barjeras NENUIMAMAS".
+   *
+   * Ta tvarka dengė tik vieną gedimo pusę: du lygiagretūs operatoriai abu
+   * įrašydavo `success: true`, o sąlyginis perėjimas pavykdavo tik vienam -
+   * likdavo patvarus sėkmės įrašas veiksmui, kurio nebuvo. Todėl
+   * `erasureMarkService` dabar commit'ina perėjimą PIRMA, o auditą rašo po jo
+   * su `success` pagal faktinį rezultatą.
+   *
+   * Klasifikacija seka realizaciją, ne atvirkščiai: audito gedimas šių perėjimų
+   * nebeatšaukia, tad žymėti juos „ne post-hoc" reikštų tvirtinti apsaugą,
+   * kurios nebėra. BLOKUOJANTIS lieka - sėkmė be patvirtinto įrašo
+   * nedeklaruojama (kvietėjas gauna klaidą), bet duomenų tai nebeapsaugo.
+   */
+  ERASURE_MARK_RETRIED: KATEGORIJA.BLOKUOJANTIS,
+  ERASURE_MARK_FORCE_RESOLVED: KATEGORIJA.BLOKUOJANTIS,
+  ERASURE_MARK_RELEASED: KATEGORIJA.BLOKUOJANTIS,
+
   // ── Job gyvavimo ciklas (#210: neblokuojantys) ─────────────────────────────
   TRANSCRIPTION_COMPLETED: KATEGORIJA.NEBLOKUOJANTIS,
   TRANSCRIPTION_FAILED: KATEGORIJA.NEBLOKUOJANTIS,
@@ -193,6 +219,14 @@ const POST_HOC_IVYKIAI = Object.freeze([
   "LIFECYCLE_DELETION",
   "RETENTION_PURGE",
   "ADMIN_ORPHAN_CLEANUP",
+  /**
+   * ⚠️ PRIDĖTA #183 PERŽIŪROJE. Abu operatoriaus keliai commit'ina žymos
+   * perėjimą PRIEŠ `rasytiAudita()`, tad audito gedimas jo nebeatšaukia:
+   * pakartotinis bandymas grąžins `already_terminal`, ne pakartos veiksmą.
+   */
+  "ERASURE_MARK_RETRIED",
+  "ERASURE_MARK_FORCE_RESOLVED",
+  "ERASURE_MARK_RELEASED",
   /**
    * Sesija jau atšaukta ir cookie išvalytas, kai rašomas `LOGOUT`. Atmesti
    * atsijungimo nebegalima - o ir nereikėtų: neatšaukta sesija būtų blogesnė

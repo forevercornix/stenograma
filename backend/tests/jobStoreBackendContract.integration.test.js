@@ -993,11 +993,21 @@ test("KONTRAKTAS: su nustatytu URL adapteris NEGALI praleisti savo scenarijų", 
   }
 });
 
-test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 15 metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 16 metodų aibę", () => {
   /**
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
    * ilgai nebuvo memory backend'e.
+   *
+   * ⚠️ 15 → 16 (#183): pridėtas `listExpired()`. Retencija nuo šiol privalo
+   * įrašyti ištrynimo žymą PRIEŠ šalinimą, tad jai reikia ID, o ne kiekio.
+   * Skaičius keliamas SĄMONINGAI - būtent šis sargas ir pagavo, kad metodas
+   * buvo pridėtas tik dviem backend'ams iš trijų.
+   *
+   * ⚠️ Redis `listExpired()` grąžina tuščią sąrašą, ir tai NE spraga: terminą
+   * ten vykdo pats Redis per `EXPIRE`, tad momento žymai įrašyti nėra. Kontrakto
+   * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
+   * `docs/deletion-guarantees.md`.
    */
   const redis = createRedisStore({ on: () => {}, defineCommand: () => {} });
   const postgres = createPostgresStore({});
@@ -1007,7 +1017,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 15 metodų aibę",
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 15, "jobStore kontraktas privalo turėti tiksliai 15 metodų");
+  assert.equal(expected.length, 16, "jobStore kontraktas privalo turėti tiksliai 16 metodų");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,

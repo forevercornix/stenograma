@@ -91,7 +91,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
         return;
       }
 
-      if (tombstones.isDeleted(jobId)) {
+      /** ⚠️ `await` PRIVALOMAS - be jo Promise truthy, ir KIEKVIENAS jobas praleidžiamas (#183). */
+      if (await tombstones.isDeleted(jobId)) {
         log.warn("Praleistas ištrinto jobo vykdymas", { stage: "skipped_deleted", jobId });
         return { skipped: "deleted" };
       }
@@ -466,6 +467,16 @@ async function initializeWorkerOrFail(workerName) {
    * pačią semantiką turi `server.js`.
    */
   await auditStore.init();
+
+  /**
+   * ⚠️ ŽYMOS INICIJUOJAMOS IR ČIA (#183 Codex, P1).
+   *
+   * Worker'is skaito barjerą kiekvienam job'ui. Be ankstyvo `init()` neveikianti
+   * DB paaiškėtų tik pirmo `isDeleted()` metu - job'as jau paimtas, o barjeras
+   * neveikia. Fail-closed, kaip ir audito saugykla.
+   */
+  const deletionTombstones = require("../utils/deletionTombstones");
+  await deletionTombstones.init();
   /**
    * ⚠️ TIKRINAMA EILĖS GALIMYBĖ, NE KONKRETUS BACKEND'AS (#155, 7.2a).
    *

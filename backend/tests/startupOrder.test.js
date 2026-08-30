@@ -42,6 +42,14 @@ test("startServer: jobStore -> sessionStore -> auditStore -> jobRunner -> listen
       "sessionStore.init",
       "sessionStore.reconcile",
       "auditStore.init",
+      /**
+       * ⚠️ PRIEŠ `jobRunner.init` SĄMONINGAI (#155, 7.5a / #183).
+       *
+       * Runner'is apdoroja job'us, kurie kiekvienam vykdymui klausia ištrynimo
+       * barjero. Inicijavus žymas po jo, egzistuotų langas, kuriame job'as jau
+       * gali būti paimtas, o barjeras dar neinicijuotas.
+       */
+      "deletionTombstones.init",
       "jobRunner.init",
       "listen",
     ],

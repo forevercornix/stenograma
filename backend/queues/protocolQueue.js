@@ -1,4 +1,4 @@
-const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, createQueueConnection } = require("./config");
+const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, createQueueConnection, enqueue } = require("./config");
 
 /**
  * Protokolo generavimo eilė (atskiras modulis pagal 1 etapo struktūros reikalavimą).
@@ -19,7 +19,8 @@ function getProtocolQueue() {
 
 async function addProtocolJob(jobId, payload) {
   const queue = getProtocolQueue();
-  return queue.add("generate", { jobId, payload }, { ...DEFAULT_JOB_OPTIONS, jobId });
+  /** ⚠️ Per `enqueue()` - žr. `transcriptionQueue` komentarą (#155, 7.5a). */
+  return enqueue(queue, "generate", { jobId, payload }, { ...DEFAULT_JOB_OPTIONS, jobId });
 }
 
 /**

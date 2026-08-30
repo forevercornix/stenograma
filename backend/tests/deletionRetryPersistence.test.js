@@ -381,3 +381,64 @@ test("#196 IZOLIACIJA: po visų testų `jobStore` NEPALIKTAS perimtas", () => {
   assert.equal(jobStore.update, TIKRAS_UPDATE, "`update` privalo būti atkurtas");
   assert.equal(jobStore.system, TIKRAS_SYSTEM, "`system` privalo būti atkurtas");
 });
+
+test("#183 SWEEPER: `deletion_failed` žyma paliekama operatoriui", async () => {
+  /**
+   * ⚠️ DVI KARTOJIMO SISTEMOS NESUGYVENA.
+   *
+   * Šis sweeper'is automatiškai kartodavo tai, ką žymų mašina laiko operatoriaus
+   * sprendimu. Jam pavykus, jobas dingdavo, o žyma likdavo `deletion_failed`
+   * amžinai - ir be jokio `LIFECYCLE_DELETION` įrašo. Nuo tada, kai barjeras
+   * lemia HTTP atsakymą, vartotojas gautų 503 dėl duomenų, kurių seniai nebėra.
+   *
+   * ⚠️ ĮRODYMAS - `attempted: 0` KARTU su `unresolved: 1`.
+   *
+   * Vien `attempted: 0` sutaptų su „jobas dar ne laiku" (`deferred`), tad
+   * neatskirtų praleidimo nuo atidėjimo. Atskiras skaitiklis yra ir metrika,
+   * kurią mato operatorius: tyliai praleistas ištrynimas taptų nematomas.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const job = { id: "job-neissprestas", deletion_pending: true, deletion_attempts: 0 };
+  const perimta = perimti({ pending: [job] });
+
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.FAILED, {
+    failureKind: "retryable",
+  });
+
+  try {
+    const summary = await retry.retryPendingDeletions();
+
+    assert.equal(summary.unresolved, 1, "žymėtas jobas priskaičiuojamas ATSKIRAI");
+    assert.equal(summary.attempted, 0, "automatinio kartojimo nėra");
+    assert.equal(summary.succeeded, 0);
+    assert.equal(summary.deferred, 0, "tai ne atidėjimas - jobas jau laiku");
+  } finally {
+    perimta.atstatyti();
+  }
+});
+
+test("#183 SWEEPER: be žymos ir su `deletion_pending` žyma kartojimas VEIKIA", async () => {
+  /**
+   * Priešinga pusė. Be jos „viskas praleidžiama" praeitų kaip sėkmė, o
+   * sweeper'is būtų tyliai išjungtas visiems atvejams - įskaitant tuos, kur
+   * žymos nebėra (ją pašalino retencija) arba ji dar `deletion_pending`.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const beZymos = { id: "job-be-zymos", deletion_pending: true, deletion_attempts: 0 };
+  const suPending = { id: "job-pending", deletion_pending: true, deletion_attempts: 0 };
+  const perimta = perimti({ pending: [beZymos, suPending] });
+
+  await tombstones.mark(suPending.id, { reason: "user_request", actorKind: "user" });
+
+  try {
+    const summary = await retry.retryPendingDeletions();
+
+    assert.equal(summary.unresolved, 0, "nė vienas neturi `deletion_failed` žymos");
+    assert.equal(summary.attempted, 2, "abu bandomi kartoti");
+  } finally {
+    perimta.atstatyti();
+  }
+});

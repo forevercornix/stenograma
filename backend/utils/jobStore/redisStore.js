@@ -432,6 +432,22 @@ function createRedisStore(redisClient) {
     return Boolean(existed);
   }
 
+  /**
+   * ⚠️ REDIS REŽIME APLIKACIJA PASENUSIŲ JOB'Ų NETRINA - GRĄŽINAM TUŠČIĄ.
+   *
+   * Terminą čia vykdo pats Redis per `EXPIRE`: hash'as išnyksta be jokio
+   * aplikacijos veiksmo, tad nėra momento, kuriame būtų galima įrašyti žymą
+   * PRIEŠ šalinimą. `sweepExpired()` šiame backend'e tik genėja `jobs:index`
+   * nuo raktų, kurių hash jau nebėra - tai priežiūra, ne ištrynimas.
+   *
+   * ⚠️ TAI APRIBOJIMAS, NE PRALEIDIMAS: `docs/deletion-guarantees.md` jį
+   * įvardija. Retencijos barjeras galioja `postgres` ir `memory` jobStore
+   * režimuose; Redis režime pasenusio jobo ID žymos negauna.
+   */
+  async function listExpired() {
+    return [];
+  }
+
   async function sweepExpired(now = Date.now()) {
     // Redis EXPIRE jau tvarko baigtų job'ų išvalymą. Čia papildomai išvalom
     // INDEX sorted set nuo raktų, kurių hash jau expiravo (kad indeksas neaugtų).
@@ -540,7 +556,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

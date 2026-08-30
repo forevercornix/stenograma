@@ -94,6 +94,13 @@ const privacy = [
   "deletionEnforcement",
   "lifecycleE2E",
   "deletionDocumentation",
+  /**
+   * #155, 7.5a: persistentinės ištrynimo žymos. `revivalHorizons` čia, o ne
+   * `functional`, sąmoningai - jo dalykas yra ne eilių konfigūracija, o
+   * klausimas „kiek ilgai žyma privalo gyvuoti", t. y. ištrynimo garantija.
+   */
+  "erasureMarks",
+  "revivalHorizons",
   "observabilityEvents.route",
 ];
 

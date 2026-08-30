@@ -36,6 +36,95 @@ ji pasensta ir tampa klaidinanti.
 
 ### Changed
 
+- ⚠️ **Retencija nuo šiol palieka ištrynimo žymą** (#183, 7.5a). Pasenusių job'ų
+  šalinimas ėjo bendru `sweepExpired()` be jokio barjero, ir
+  `ERASURE_REASON.RETENTION_POLICY` neturėjo nė vieno kvietėjo – atkūrimas iš
+  senesnės kopijos tokį ID priimdavo. Dabar žyma rašoma prieš šalinimą, o
+  job'as, kurį jau tvarko kitas vykdytojas, praleidžiamas (`jobsSkipped`).
+
+  ⚠️ **Išimtis: `JOB_STORE_BACKEND=redis`** – ten terminą vykdo pats Redis per
+  `EXPIRE`, tad žymos įrašyti nėra kur. Įvardyta `docs/deletion-guarantees.md`.
+
+- ⚠️ **Atkūrimas nebeatkuria žymėto jobo AUDIO** (#183). Įrašo sargas veikė, bet
+  garso failai buvo rašomi besąlygiškai – ištrinto jobo audio grįždavo originaliu
+  saugyklos raktu.
+
+- **Išleistos kopijos galiojimas fiksuojamas** `backup_horizon` lentelėje
+  (migracija `1755800000000`). `BACKUP_RETENTION_DAYS` sumažinimas nebesutrumpina
+  ištrynimo žymų termino: jau eksportuota kopija galioja pagal savo manifestą.
+
+- **`DELETION_TOMBSTONE_TTL_HOURS` nebėra autoritetas** – jis gali terminą tik
+  pailginti. Faktinis terminas išvedamas ir su numatytosiomis reikšmėmis yra
+  ~8 paros, ne 72 val. Dokumentacija pataisyta.
+
+- **Admin override žymoje fiksuojamas `operator` / `operator_cleanup`**, ne
+  `user` / `user_request` (#183).
+
+- **Vieno vykdytojo garantija dabar galioja ir operatoriaus autorizuotam
+  pakartojimui** (#183, 7.5a). `erasure_marks` gavo `claim_token` stulpelį:
+  pretenzija į ištrynimo vykdymą yra būsena, ne akimirka, tad ir vėliau atėjusi
+  replika gauna **202**, o ne pradeda lygiagretų trynimą. Migracija
+  `1755700000000`.
+
+- ⚠️ **Foninis ištrynimų kartojimas nebekartoja `deletion_failed` žymėtų jobų**
+  (#183, 7.5a). `retryPendingDeletions()` buvo antra kartojimo sistema: jam
+  pavykus, jobas dingdavo, o žyma likdavo `deletion_failed` amžinai ir be
+  `LIFECYCLE_DELETION` įrašo.
+
+  **Praktikoje tai dauguma sweeper'io kandidatų**: jobas į jo sąrašą patenka tik
+  po nepavykusio ištrynimo, o tas pats nepavykimas žymą ir perveda į
+  `deletion_failed`. Sweeper'is tampa daugiausia pranešėju (`warn` kiekvienam
+  praleistam jobui + `unresolved` skaitiklis), o naują bandymą autorizuoja
+  operatorius: `erasure-marks retry <jobId>`.
+
+  ⚠️ **Reikalinga periodinė procedūra:** `erasure-marks list` yra autoritetingas
+  neišspręstų ištrynimų sąrašas; sweeper'io logai su rotacija dingsta. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
+- **Nauja operatoriaus komanda `erasure-marks release`** (#183, 7.5a).
+  Perveda užstrigusią `deletion_pending` žymą į `deletion_failed` su
+  `last_failure_kind=executor_lost`, iš kur veikia esamas `retry`.
+
+  Skirta atvejui, kai procesas nužudytas (SIGKILL, OOM) tarp žymėjimo ir
+  užbaigimo. ⚠️ **`force-resolve` tam netinka**: jis teigia, kad duomenų nebėra,
+  o po kieto nužudymo tai nežinoma. `release` netvirtina nieko apie duomenis.
+  Automatinio aptikimo nėra sąmoningai. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
+- ⚠️ **`DELETE` atsakymų rinkinys prasiplėtė: 202 ir `tombstone_unresolved`**
+  (#183, 7.5a). Abu jobų endpoint'ai (`/api/jobs/:id`, `/api/transcribe-jobs/:id`):
+
+  | Situacija | Anksčiau | Dabar |
+  |---|---|---|
+  | Ištrynimą jau vykdo kitas procesas ar replika | 204 arba 404 po pakartoto darbo | **202** `in_progress`, jokio darbo nepradedama |
+  | Žyma `deletion_failed` | 204 (klaidingai – žyma likdavo `failed`) | **503** `tombstone_unresolved` |
+  | Patvirtintai ištrinta | 204 | 204 (nepakito) |
+
+  ⚠️ **Klientai, laikę 204 vieninteliu sėkmės kodu, turi priimti ir 202.** 202
+  reiškia „ištrynimas vyksta, pakartokite vėliau", ne klaidą.
+
+  ⚠️ **`deletion_failed` nebekartojamas automatiškai.** Naują bandymą autorizuoja
+  operatorius: `node backend/scripts/erasure-marks.js retry <jobId>`. Kietai
+  nužudytas procesas gali palikti `deletion_pending` žymą, kuriai visi vėlesni
+  `DELETE` atsakys 202 – žr. `docs/deletion-guarantees.md`.
+
+- **Našlaičių 503 atsakyme nebėra klaidų tekstų** (#183). Anksčiau siųstas visas
+  `outcome`, įskaitant `errors` su failų keliais ir eilės raktais (#19 tai
+  draudžia). Klientas gauna tik tai, kas pašalinta; savininko kelias šios
+  taisyklės laikėsi visada.
+
+- **Našlaičių valymas nuo šiol palieka ištrynimo žymą ir yra fail-closed**
+  (#183, 7.5a). `adminCleanupOrphan()` ir `desktopCleanupOrphan()` anksčiau
+  šalino likusius pėdsakus **nepalikdami barjero** – atkūrimas iš senesnės
+  kopijos tą `jobId` vėl priimdavo. Dabar žyma (`reason=orphan_cleanup`)
+  rašoma **prieš** šalinimą.
+
+  ⚠️ **Operacinė pasekmė:** jei žymos įrašyti nepavyksta (DB nepasiekiama),
+  valymas **atmetamas su klaida**, o ne atliekamas tyliai. Anksčiau ta pati
+  operacija būtų pavykusi. Teisingas veiksmas – **pakartoti vėliau**; našlaitis
+  be `jobs` eilutės palaukęs nieko nepablogina, o ištrynimas be barjero yra
+  negrįžtamas. Žr. `docs/deletion-guarantees.md` §1.
+
 - `AUDIT_MAX_ENTRIES` PostgreSQL režimui **netaikoma** ir netaps retencijos
   taisykle: eilutės nešalinamos vien dėl kiekio. Ji lieka atminties apsauga.
 

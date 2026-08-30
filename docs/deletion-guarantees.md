@@ -29,6 +29,98 @@ kategorijų sąrašu, o **jobas paliekamas**, kad užklausą būtų galima pakar
 ✅ Naujas darbas tuo pačiu ID nebus pradėtas.
 ✅ Pakartotinis ištrynimas nėra klaida ir duoda tą pačią galutinę būseną.
 
+### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su `DATABASE_URL`** (nuo [7.5a])
+
+Iki 7.5a žymos gyveno tik proceso atmintyje, ir tai buvo įrašyta 2 skyriuje kaip
+apribojimas. Nuo 7.5a jos saugomos `erasure_marks` lentelėje, tad:
+
+✅ žyma **išgyvena restartą** – po jo vėluojanti eilės žinutė ištrintam jobui
+   artefaktų nesukurs;
+✅ žyma **bendra visoms replikoms** – barjeras galioja visame diegime, ne viename
+   procese;
+✅ barjeras aktyvus nuo **pirmojo ištrynimo žingsnio** (`deletion_pending`), ne tik
+   po patvirtinto ištrynimo, ir **nepavykęs** ištrynimas jo **nenuima**;
+✅ žyma **neišnyksta anksčiau**, nei job'as nebegali būti prikeltas: terminas
+   išvedamas iš faktinių eilės prikėlimo horizontų ir kopijų retencijos, ne
+   parenkamas;
+✅ barjerą palieka **visi** ištrynimo keliai – savininko užklausa,
+   administracinis override (`operator_cleanup`), **našlaičių valymas**
+   (`orphan_cleanup`) ir **retencija** (`retention_policy`).
+
+   ⚠️ **Viena išimtis, ir ji įvardyta:** `JOB_STORE_BACKEND=redis` režime
+   pasenusius job'us šalina pats Redis per `EXPIRE`. Aplikacija tame momente
+   nedalyvauja, tad žymos įrašyti nėra kur. Retencijos barjeras galioja
+   `postgres` ir `memory` jobStore režimuose. Iki šio taisymo
+   `adminCleanupOrphan()` ir `desktopCleanupOrphan()` trynė likusius pėdsakus
+   **nepalikdami žymos**, tad atkūrimas iš senesnės kopijos tą `jobId` vėl
+   priimdavo.
+
+⚠️ **NAUJA OPERACINĖ ELGSENA: našlaičio valymas be žymos NEVYKDOMAS.**
+
+Jei žymos įrašyti nepavyksta (DB nepasiekiama, žymų saugykla neinicijuota),
+valymas **atmetamas su klaida**, o ne atliekamas tyliai. Tai sąmoningas
+pasirinkimas: našlaitis be `jobs` eilutės, palauktas iki DB atsigaus, nieko
+nepablogina – o ištrynimas be barjero yra negrįžtamas.
+
+Operatoriui tai reiškia, kad per DB nepasiekiamumą našlaičių valymas grąžins
+klaidą; teisingas veiksmas – **pakartoti vėliau**, ne apeiti kelią.
+
+### ⚠️ Lygiagretus `DELETE` nebekartoja darbo – **202**, ne antras ištrynimas
+
+✅ ištrynimą vienam `job_id` vykdo **vienas** procesas, ir tai galioja **be
+   išimčių**. Pretenzija yra BŪSENA (`claim_token`), ne akimirka: šviežiai žymai
+   ją duoda `INSERT ... ON CONFLICT DO NOTHING` (eilutę grąžina tik įrašiusiajam),
+   operatoriaus autorizuotam pakartojimui – sąlyginis `UPDATE ... WHERE
+   claim_token IS NULL`. Antras kvietėjas – įskaitant kitą repliką ir **vėliau**
+   atėjusią – gauna **202 `in_progress`** ir **nepradeda** jokio eilės, saugyklos
+   ar audito trynimo;
+✅ žetonas identifikuoja **bandymą**, ne vykdytoją: atsitiktinis UUID kiekvienai
+   pretenzijai, tad po restarto procesas nepaveldi jokios senos pretenzijos;
+✅ patvirtintai ištrintas jobas duoda **204** be jokio I/O;
+✅ neišspręsta žyma duoda **503 `tombstone_unresolved`** – duomenys pašalinti,
+   bet apskaitą turi užbaigti operatorius.
+
+⚠️ **`deletion_failed` NEBEKARTOJAMAS automatiškai.** Anksčiau kitas `DELETE`
+tyliai pakartodavo visą darbą ir skelbdavo sėkmę, nors žyma likdavo `failed`
+(perėjimas `deletion_failed → deleted` uždarytas). Naują bandymą dabar
+autorizuoja operatorius: `node scripts/erasure-marks.js retry <jobId>`, kuris
+rašo `ERASURE_MARK_RETRIED`. Būsena, kuri išsisprendžia savaime, nebėra barjeras.
+
+⚠️ **KIETAI NUŽUDYTAS PROCESAS PALIEKA `deletion_pending` – IR TAM YRA IŠEITIS.**
+
+Jei procesas nužudomas (SIGKILL, OOM) TARP žymėjimo ir užbaigimo, žyma lieka
+`deletion_pending` be vykdytojo, ir kiekvienas vėlesnis `DELETE` tokiam `job_id`
+atsakytų **202 „jau vykdoma"**. Mesta klaida (pvz. `AuditWriteError`) tokios
+būsenos nepalieka – ji žymą perveda į `deletion_failed`. Kietas nužudymas – gali.
+
+⚠️ **Miręs vykdytojas žetono neatlaisvina, ir tai sąmoninga** – laikmačio nėra,
+tad ir nuomos nėra. Sprendimą priima operatorius:
+
+Išeitis yra rankinė ir palieka audito pėdsaką:
+
+```bash
+node backend/scripts/erasure-marks.js release <jobId> --actor <kas>
+```
+
+`release` perveda `deletion_pending → deletion_failed` su
+`last_failure_kind=executor_lost`, ir po jo veikia įprastas `retry`. **Jokio
+teiginio apie duomenis jis nedaro** – po SIGKILL nežinoma, kiek valymo spėta
+atlikti, ir būtent tą neapibrėžtį `executor_lost` įrašo.
+
+⚠️ **`force-resolve` šiam atvejui NETINKA.** Jis teigia, kad duomenų nebėra, ir
+uždaro žymą į terminalę `deleted` – klausimas užsidaro negrįžtamai, o ištrynimas
+taip ir neįvyksta. Žr. `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
+⚠️ **Automatinio aptikimo nėra sąmoningai.** Lease ar heartbeat ant `pending`
+būtų paskirstyta nuoma, kurios 7.5a atsisakė. „Vykdytojas mirė" yra operatoriaus
+sprendimas, ne laikmačio išvada. Todėl `erasure-marks list` tikrinimas yra
+operatoriaus procedūra: `pending` žyma be vykdytojo yra incidentas, ne normali
+būsena.
+
+⚠️ **Ši garantija galioja TIK ten, kur nustatytas `DATABASE_URL`.** Be jo sistema
+sąmoningai grįžta į atmintinį režimą – žr. 2 skyrių. Startas tokiu atveju garsiai
+įspėja.
+
 ---
 
 ## 2. Ko ištrynimas NEGARANTUOJA
@@ -40,8 +132,14 @@ auditoriui.
 jis gali spėti iškviesti išorinį tiekėją arba parašyti laikiną failą. Rezultatas
 į jobą nepateks, bet tarpiniai pėdsakai gali likti, kol juos surinks retencija.
 
-⚠️ **Ištrynimo žymos neišgyvena restarto.** Jos gyvena tik atmintyje. Po
-restarto vėluojanti eilės žinutė ištrintam jobui vėl galėtų kurti artefaktus.
+⚠️ **Ištrynimo žymos neišgyvena restarto – BE `DATABASE_URL`.** Atmintiniame
+režime jos gyvena tik proceso atmintyje ir nėra bendros replikoms: po restarto
+vėluojanti eilės žinutė ištrintam jobui vėl galėtų kurti artefaktus.
+
+Su `DATABASE_URL` šio apribojimo **nebėra** (žr. 1 skyrių, [7.5a]). Apribojimas
+paliktas **sąlyginis**, o ne pašalintas: besąlygiškas pašalinimas būtų melagingas
+teiginys atmintiniam režimui, kuris tebėra palaikomas ir numatytasis desktop
+diegime.
 
 ⚠️ **Laikini failai (`upload_temp`, `conversion_temp`) dar neskenuojami.** Jie
 turi išnykti patys, bet po kritimo gali „pakibti" iki retencijos ciklo.
@@ -66,7 +164,7 @@ atlikti, bet ne su kieno duomenimis.
 | `AUDIO_RETENTION_HOURS` | 24 | Šaltinio audio saugykloje |
 | `AUDIT_RETENTION_DAYS` | 30 | Audito žurnalo įrašai |
 | `RETENTION_SWEEP_INTERVAL_MINUTES` | 5 | Kas kiek tikrinama |
-| `DELETION_TOMBSTONE_TTL_HOURS` | 72 | Kiek galioja ištrynimo žyma |
+| `DELETION_TOMBSTONE_TTL_HOURS` | 72 | ⚠️ **Tik ALTINIS** – žr. žemiau |
 
 ✅ **Šios reikšmės tikrinamos automatiškai.** CI lygina šią lentelę su
 `backend/.env.example`; išsiskyrus jos, testas krinta. Tad dokumentu galima
@@ -78,9 +176,33 @@ su 5 min intervalu reiškia, kad įrašas dings per 60–65 min, ne tiksliai per
 Valymas paleidžiamas **iškart po starto**, ne po pirmojo intervalo – be to po
 restarto pasenę duomenys liktų dar visą valandą.
 
-⚠️ `DELETION_TOMBSTONE_TTL_HOURS` **privalo viršyti** ilgiausią eilės įrašo
-gyvavimo trukmę (BullMQ užbaigtus jobus laiko iki 24 val.). Priešingu atveju
-vėluojanti žinutė ateitų jau po žymos galiojimo.
+### ⚠️ `DELETION_TOMBSTONE_TTL_HOURS` NEBĖRA autoritetas (nuo 7.5a)
+
+Iki 7.5a ši reikšmė buvo vienintelis žymos terminas, ir operatorius galėjo ją
+nustatyti žemiau prikėlimo horizonto – tyliai sulaužydamas garantiją. Nuo 7.5a
+terminas **išvedamas**, o kintamasis gali jį tik **pailginti**:
+
+```
+terminas = max( DELETION_TOMBSTONE_TTL_HOURS,
+                eilės prikėlimo horizontas,          ← delayMax + retry + stalled
+                išleistų kopijų galiojimas )         ← žr. žemiau
+         + atsargos marža
+```
+
+Su numatytosiomis reikšmėmis tai yra **maždaug 8 paros**, ne 72 valandos. Per
+maža rankinė reikšmė nebeturi jokio poveikio – ji tiesiog ignoruojama, o ne
+sutrumpina barjerą.
+
+⚠️ **Todėl lentelės eilutė aukščiau rodo tik `.env` numatytąją reikšmę, ne
+faktinį terminą.** CI tikrina, ar lentelė sutampa su `backend/.env.example` –
+t. y. ar teisingai užrašytas KINTAMASIS. Faktinį terminą tikrina
+`revivalHorizons` testai, ne ši lentelė.
+
+⚠️ **Išleista kopija termino nesutrumpina.** `BACKUP_RETENTION_DAYS` sumažinimas
+neatšaukia anksčiau eksportuotos kopijos: ji galioja pagal savo manifestą.
+Kūrimo metu jos galiojimas fiksuojamas `backup_horizon` lentelėje (aukščiausias
+vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be `DATABASE_URL`
+kopijos galiojimas neužsirašo – tai to paties atmintinio režimo apribojimas.
 
 ---
 

@@ -369,8 +369,15 @@ const PHASE_STATE_FIELDS = ["status", "phase", "progress", "progressKnown"];
  *
  * Grąžina `true`, jei operaciją reikia praleisti.
  */
-function blockedByTombstone(id, method) {
-  if (!tombstones.isDeleted(id)) return false;
+async function blockedByTombstone(id, method) {
+  /**
+   * ⚠️ `await` PRIVALOMAS (#155, 7.5a / #183).
+   *
+   * Persistentiniame režime atsakymas ateina iš `erasure_marks`, o `Promise` yra
+   * truthy: be `await` KIEKVIENAS job'as atrodytų ištrintas, visas apdorojimas
+   * būtų tyliai užblokuotas, o esami testai liktų žali.
+   */
+  if (!(await tombstones.isDeleted(id))) return false;
   log.warn(`Atmestas jobo ${method}() po ištrynimo`, { jobId: id });
   return true;
 }
@@ -526,7 +533,7 @@ module.exports = {
     update: async (id, patch, options = {}) => {
       assertNoRawPhaseWrite(patch);
       await ensureInit();
-      if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+      if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && (await tombstones.isDeleted(id))) {
         log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
         return null;
       }
@@ -546,7 +553,7 @@ module.exports = {
      */
     startPhase: async (id, nextPhase, phaseOptions = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "startPhase")) return null;
+      if (await blockedByTombstone(id, "startPhase")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
@@ -565,7 +572,7 @@ module.exports = {
      */
     restart: async (id, extra = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "restart")) return null;
+      if (await blockedByTombstone(id, "restart")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
@@ -581,7 +588,7 @@ module.exports = {
      */
     reportProgress: async (id, event) => {
       await ensureInit();
-      if (blockedByTombstone(id, "reportProgress")) return null;
+      if (await blockedByTombstone(id, "reportProgress")) return null;
 
       const job = await store.get(id);
       if (!job) return null;
@@ -622,7 +629,7 @@ module.exports = {
     /** Terminalus perėjimas – vienu patch'u išvalo fazės būseną. */
     finish: async (id, status, extra = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "finish")) return null;
+      if (await blockedByTombstone(id, "finish")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
@@ -723,7 +730,7 @@ module.exports = {
   finish: async (scope, status, extra = {}) => {
     assertScope(scope, "finish");
     await ensureInit();
-    if (blockedByTombstone(scope.jobId, "finish")) return null;
+    if (await blockedByTombstone(scope.jobId, "finish")) return null;
 
     const job = await store.getOwned(scope.jobId, scope);
     if (!job) return null;
@@ -765,7 +772,7 @@ module.exports = {
      * įrašyti ar gauti iš JSON konfigūracijos. Kad juo pasinaudotum, reikia
      * eksplicitiškai importuoti iš `jobStore`, o tai matoma peržiūroje.
      */
-    if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+    if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && (await tombstones.isDeleted(id))) {
       log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
       return null;
     }
@@ -782,6 +789,10 @@ module.exports = {
     await ensureInit();
     const result = await store.removeOwned(scope.jobId, scope);
     return result === "FORBIDDEN" ? FORBIDDEN : result;
+  },
+  listExpired: async (now, limit) => {
+    await ensureInit();
+    return typeof store.listExpired === "function" ? store.listExpired(now, limit) : [];
   },
   sweepExpired: async (now) => {
     await ensureInit();
@@ -835,12 +846,56 @@ module.exports = {
 
     assertRestorableId(job);
 
-    if (tombstones.isDeleted(job.id)) {
+    if (await tombstones.isDeleted(job.id)) {
       log.warn("Atkūrimas praleido ištrintą jobą", { jobId: job.id });
       return null;
     }
 
-    return store.restoreRecord(job);
+    /**
+     * ⚠️ PATIKRA VIRŠUJE YRA PIGUS ANKSTYVAS IŠĖJIMAS, NE GARANTIJA (#183 Codex, P1).
+     *
+     * Ji ir `store.restoreRecord()` yra du atskiri veiksmai: lygiagreti replika
+     * gali įterpti žymą tarp jų. Persistentiniame kelyje langą uždaro pats
+     * store'as - `postgresStore.restoreRecord()` kviečia `assertNotBarred()`
+     * SAVO transakcijoje su advisory lock'u.
+     *
+     * Kitiems backend'ams tokios transakcijos nėra, tad langas uždaromas
+     * KOMPENSUOJANČIA po-rašymo patikra: jei žyma atsirado tuo metu, atkurtas
+     * įrašas pašalinamas. Rezultatas toks pat kaip niekada neatkūrus, tik
+     * pasiekiamas dviem žingsniais.
+     */
+    const atkurta = await store.restoreRecord(job);
+
+    if (atkurta && (await tombstones.isDeleted(job.id))) {
+      log.warn("Atkūrimas ATŠAUKTAS: žyma atsirado rašymo metu", { jobId: job.id });
+
+      /**
+       * ⚠️ NEPAVYKĘS VALYMAS PROPAGUOJAMAS, NE NUTYLIMAS (#183 Codex).
+       *
+       * Anksčiau `remove()` klaida buvo suloginama, o funkcija vis tiek
+       * grąžindavo `null` - t. y. praneštų, kad atkūrimas SAUGIAI praleistas,
+       * nors užbarjeruotas job'as LIEKA saugykloje. Praradus atminties žymą
+       * (restartas atminties režime) jis atgytų, o atkūrimo kvietėjas apie tai
+       * nebūtų sužinojęs: būsena blogesnė nei prieš, o pranešimas - sėkmingas.
+       *
+       * Dabar klaida keliauja kvietėjui: atkūrimas krinta matomai ir gali būti
+       * ištaisytas. `null` reiškia „neatkurta IR nieko nepalikta"; nieko kito
+       * jis reikšti negali.
+       */
+      try {
+        await store.remove(job.id);
+      } catch (klaida) {
+        log.error("Atšaukto atkūrimo nepavyko išvalyti", { jobId: job.id, klaida: klaida.message });
+        klaida.message =
+          `Atkūrimas atšauktas dėl ištrynimo žymos, bet įrašo pašalinti nepavyko ` +
+          `(job ${job.id}): ${klaida.message}. Užbarjeruotas įrašas LIKO saugykloje.`;
+        throw klaida;
+      }
+
+      return null;
+    }
+
+    return atkurta;
   },
 
   size: async () => {

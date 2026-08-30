@@ -2071,7 +2071,14 @@ o numatytas tiekėjų pasirinkimas.
    `timestamp`. `AUDIT_MAX_ENTRIES` persistentiškai **netaikomas**: eilutės
    nešalinamos vien dėl kiekio.
 
-Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais (`jobs=2 audio=1 audit=5`),
+4. **Pasenusias ištrynimo žymas** – tik patvirtintai `deleted`, ir tik praėjus
+   `max(eilės prikėlimo horizontas, kopijų retencija) + atsarga` (nuo [7.5a]).
+   ⚠️ `deletion_pending` ir `deletion_failed` **nesensta niekada**: nesėkmingas
+   ištrynimas reiškia, kad jautrūs duomenys dar gali egzistuoti. Neapskaičiavus
+   termino, žymos **nešalinamos** (fail-safe), o ne šalinamos pagal spėjimą.
+
+Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais
+(`jobs=2 audio=1 audit=5 tombstones=1`),
 `subjectId: null` – be identifikatorių, failų vardų ar turinio.
 
 ⚠️ **Įvykis rašomas DVIEM atvejais**, ne vienu:

@@ -733,7 +733,7 @@ atsistatyti iš kopijos, neprarasti rezultatų ir neprikelti ištrintų duomenų
 | Prielaida | Kodėl PRIEŠ aktyvavimą |
 |---|---|
 | Patikrintas **restore** (7.6 dalis) | Be jo negrįžtamas režimas neturi atsistatymo kelio |
-| **Persistentės ištrynimo žymos** (7.5a dalis) | `deletionTombstones` yra proceso atmintis (`deletionTombstones.js:46`) — atkūrus naujame procese jos DINGSTA, tad restore pratybos negali įvykdyti savo pačių ištrinto job'o scenarijaus |
+| ~~**Persistentės ištrynimo žymos** (7.5a dalis)~~ ✅ **ĮGYVENDINTA (#183)** | Buvo: `deletionTombstones` yra proceso atmintis — atkūrus naujame procese žymos DINGSTA, tad restore pratybos negali įvykdyti savo pačių ištrinto job'o scenarijaus. Dabar: `erasure_marks` lentelė su būsenų mašina, advisory lock'ais ir retencija pagal prikėlimo horizontą (`utils/deletionTombstones/`, migracija `1755400000000_erasure-marks.js`). Atminties režimas lieka TIK diegimams be `DATABASE_URL` ir starte apie tai garsiai įspėja |
 | **Transakcinis rezultatų įrašymas** (7.5b dalis) | Be jo nutrūkęs procesas palieka `completed` be `job_results`; kitas bandymas atsimuša į `restart()` terminalų sargą, audio lieka, o klientas transkripcijos neturi |
 | **Idempotentiškas užbaigimas su konfliktų sprendimu** (7.5b dalis) | Transakcijos vienos NEPAKANKA — žr. žemiau |
 | **Fail-closed startas, patikrintas REALIAI** (7.2a `[F2]`) | `initializePostgres()` neturi fallback į atmintį, bet kol barjeras uždarytas, funkcija produkcijoje NEPASIEKIAMA — įrodyta tik unit lygmeniu (`_initializePostgresForTests`). Barjerą atidarius pirmas realus startas su neprieinama DB ir BŪTŲ tas testas |

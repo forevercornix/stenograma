@@ -270,8 +270,8 @@ test("ŽYMOS: ištrintas jobas NEGRĮŽTA iš kopijos", async () => {
 
   // Ištrynimas su žyma.
   await jobStore.system.remove(job.id);
-  tombstones.mark(job.id, { actor: "sysadmin" });
-  tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
+  await tombstones.mark(job.id, { reason: "user_request" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
@@ -287,7 +287,7 @@ test("ŽYMOS: `pending` žyma irgi blokuoja atkūrimą", async () => {
   const backup = await backupService.createBackup({ actor: "sysadmin" });
 
   await jobStore.system.remove(job.id);
-  tombstones.mark(job.id, { actor: "sysadmin" }); // dar `deletion_pending`
+  await tombstones.mark(job.id, { reason: "user_request" }); // dar `deletion_pending`
 
   await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
@@ -731,7 +731,7 @@ test("#180 P2-E: ištrintas (tombstone) įrašas neblokuoja likusios kopijos atk
    * neatstovaujama pre-būsena JAU IŠTRINTAME įraše užblokuotų VISĄ kopiją -
    * ir teisėti job'ai bei audio liktų neatkurti.
    *
-   * MUTACIJOS ĮRODYMAS: pašalinus `tombstones.isDeleted()` praleidimą iš
+   * MUTACIJOS ĮRODYMAS: pašalinus `await tombstones.isDeleted()` praleidimą iš
    * preflight ciklo, ištrinto įrašo `id` patenka į `tikrinti` ir testas krinta.
    */
   await jobStore.init();
@@ -741,8 +741,8 @@ test("#180 P2-E: ištrintas (tombstone) įrašas neblokuoja likusios kopijos atk
 
   /** Vienas įrašas ištrinamas PO kopijos - jo tombstone lieka. */
   await jobStore.system.remove(istrintas.id);
-  tombstones.mark(istrintas.id, { actor: "sysadmin" });
-  tombstones.complete(istrintas.id, tombstones.TOMBSTONE_STATUS.DELETED);
+  await tombstones.mark(istrintas.id, { reason: "user_request" });
+  await tombstones.complete(istrintas.id, tombstones.TOMBSTONE_STATUS.DELETED);
   await jobStore.system.remove(liekantis.id);
 
   /**
@@ -776,4 +776,44 @@ test("#180 P2-E: ištrintas (tombstone) įrašas neblokuoja likusios kopijos atk
     "teisėtas job'as privalo grįžti, nepaisant tombstone'into kaimyno");
   assert.equal(await jobStore.system.get(istrintas.id), null,
     "tombstone'intas job'as NEGALI būti prikeltas");
+});
+
+test("#183 ATKŪRIMAS: žymėto jobo AUDIO neatkuriamas", async () => {
+  /**
+   * ⚠️ ĮRAŠO SARGAS NESAUGO VISŲ SERIALIZUOTŲ ARTEFAKTŲ (Codex, P1).
+   *
+   * `restoreRecord()` tombstone'intą ĮRAŠĄ praleisdavo, bet audio ciklas rašė
+   * KIEKVIENĄ `parsed.audio` elementą besąlygiškai. Ištrinto jobo garso failas
+   * atsikurdavo originaliu saugyklos raktu: barjeras apsaugodavo metaduomenis,
+   * o patys asmens duomenys grįždavo.
+   *
+   * ⚠️ Tikrinamas FAILAS saugykloje, ne grąžintas skaičius: „neatkūrėm" ir
+   * „atkūrėm, bet nesuskaičiavom" turi atrodyti skirtingai.
+   */
+  const fileStorage = require("../utils/fileStorage");
+
+  await tombstones._clearForTests();
+  await jobStore.init();
+
+  const raktas = `uploads/zymeta-${Date.now()}.wav`;
+  await fileStorage.putAtKey(raktas, Buffer.from("slaptas garsas"));
+
+  const job = await completedJob();
+  await jobStore.system.update(job.id, { storageKey: raktas });
+
+  const backup = await backupService.createBackup({ actor: "sysadmin" });
+
+  // Ištrynimas su žyma - kartu dingsta ir audio.
+  await jobStore.system.remove(job.id);
+  await fileStorage.del(raktas).catch(() => {});
+  await tombstones.mark(job.id, { reason: "user_request" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED);
+
+  const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
+  assert.equal(result.ok, true, "atkūrimas pats pavyksta");
+
+  await assert.rejects(
+    () => fileStorage.get(raktas),
+    "žymėto jobo audio NEGALI atsirasti saugykloje"
+  );
 });

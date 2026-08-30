@@ -160,10 +160,31 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
   /* ── Kontraktas ──────────────────────────────────────────────────────── */
 
   await t.test("deklaruoja TĄ PAČIĄ metodų aibę kaip memory backend'as", () => {
+    /**
+     * ⚠️ 15 → 16 (#183): pridėtas `listExpired(now, limit)`.
+     *
+     * KODĖL JIS KONTRAKTE. Retencija iki 7.5a trynė pasenusius job'us bendru
+     * `sweepExpired()`, kuris grąžina tik KIEKĮ. Nuo #183 kiekvienas ištrynimo
+     * kelias privalo palikti ištrynimo žymą PRIEŠ šalinimą, o tam reikia ID -
+     * tad skaitymo metodas atsiranda šalia trynimo metodo, ne vietoj jo.
+     *
+     * ⚠️ KODĖL VISUOSE TRIJUOSE, nors Redis grąžina tuščią sąrašą: kontraktas
+     * yra apie DEKLARAVIMĄ. Trūkstamas metodas viename backend'e reikštų, kad
+     * fasadas tyliai grįžta į atsarginį kelią - būtent tai šis sargas ir gaudo.
+     * Redis semantinį skirtumą (terminą vykdo `EXPIRE`, tad žymai vietos nėra)
+     * įvardija `docs/deletion-guarantees.md`.
+     *
+     * ⚠️ Skaičius keliamas SĄMONINGAI, ne dėl žalio CI: jis yra vienintelis
+     * dalykas, verčiantis kontrakto plėtimą pagrįsti.
+     */
     const metodai = (s) => Object.keys(s).filter((k) => typeof s[k] === "function").sort();
 
     assert.deepEqual(metodai(store), metodai(memoryStore));
-    assert.equal(metodai(store).length, 15, "kontraktas turi 15 metodų, ne 12");
+    assert.ok(
+      metodai(store).includes("listExpired"),
+      "`listExpired` yra kontrakto dalis nuo #183 - žr. paaiškinimą aukščiau"
+    );
+    assert.equal(metodai(store).length, 16, "kontraktas turi 16 metodų, ne 15");
   });
 
   /* ── tenant_id sentinelis ────────────────────────────────────────────── */

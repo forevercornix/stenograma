@@ -221,9 +221,19 @@ test("PARUOŠTUMAS: PostgreSQL režimas be baigto suderinimo → 503, ne autenti
   const login = await prisijungti();
   const cookie = cookieIs(login);
 
-  process.env.SESSION_STORE_BACKEND = "postgres";
-  process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://neveikia:1@127.0.0.1:1/none";
+  /**
+   * ⚠️ REIKŠMĖ ĮSIMENAMA PRIEŠ PERRAŠANT (#183 peržiūra).
+   *
+   * Anksčiau `buvoUrl` buvo nuskaitomas PO priskyrimo, tad visada būdavo
+   * truthy, ir `finally` bloko `if (!buvoUrl) delete ...` niekada nesuveikdavo:
+   * netikras `DATABASE_URL` nutekėdavo į visus vėlesnius šio failo testus
+   * (AGENTS.md §9.3). Nepastebėta iki 7.5a, kai readiness ėmė zonduoti ir žymų
+   * saugyklą - tada nutekėjęs URL pavertė nesusijusį readiness testą raudonu.
+   */
   const buvoUrl = process.env.DATABASE_URL;
+
+  process.env.SESSION_STORE_BACKEND = "postgres";
+  process.env.DATABASE_URL = buvoUrl || "postgres://neveikia:1@127.0.0.1:1/none";
   try {
     /**
      * ⚠️ VĖLIAVA ČIA SĄMONINGAI NEKEIČIAMA.

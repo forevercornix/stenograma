@@ -136,6 +136,21 @@ test("POST-HOC: visi po-veiksmo įvykiai įvardyti eksplicitiškai ir LIEKA blok
       "ADMIN_DELETE_OVERRIDE",
       "ADMIN_ORPHAN_CLEANUP",
       "DATA_ERASED",
+      /**
+       * ⚠️ PRIDĖTA #183 PERŽIŪROJE. Iki tol abu žymų keliai rašė auditą PRIEŠ
+       * perėjimą; dabar perėjimas commit'inasi pirmas, tad audito gedimas jo
+       * nebeatšaukia. Klasifikacija privalo sekti realizaciją - kitaip ji
+       * tvirtintų apsaugą, kurios nebėra.
+       */
+      "ERASURE_MARK_FORCE_RESOLVED",
+      /**
+       * ⚠️ `release` seka tą pačią tvarką: perėjimas `pending → deletion_failed`
+       * commit'inasi PRIEŠ auditą, tad audito gedimas jo neatšaukia.
+       * Operatorius gauna 503 (sėkmė nedeklaruojama), bet pretenzija jau
+       * atlaisvinta - post-hoc, ne fail-closed.
+       */
+      "ERASURE_MARK_RELEASED",
+      "ERASURE_MARK_RETRIED",
       "LIFECYCLE_DELETION",
       "LOGOUT",
       "RETENTION_PURGE",
@@ -1115,25 +1130,59 @@ test("ŽYMOS TVARKA: kritęs auditas NEPALIEKA patvirtintos ištrynimo žymos", 
   );
 
   assert.equal(
-    tombstones.isConfirmedDeleted(job.id),
+    await tombstones.isConfirmedDeleted(job.id),
     false,
     "be patvirtinto audito žyma NEGALI būti `deleted` - kitaip pėdsakas prarandamas negrįžtamai"
   );
 
-  // Artefaktų kūrimas vis tiek užblokuotas: žyma lieka `deletion_pending`.
-  assert.ok(tombstones.isDeleted(job.id), "žyma privalo likti - trynimas jau vyko");
+  // Artefaktų kūrimas vis tiek užblokuotas.
+  assert.ok(await tombstones.isDeleted(job.id), "žyma privalo likti - trynimas jau vyko");
 
-  // Pakartojimas: auditas nebekrinta, tad turi būti PARAŠYTAS, o ne praleistas.
+  /**
+   * ⚠️ KONTRAKTAS PASIKEITĖ SU 7.5a (#183) - IR TAI TIKRINAMA, NE APEINAMA.
+   *
+   * #210 versijoje žyma likdavo `deletion_pending`, o kitas kvietimas ją
+   * išgydydavo savaime. Nuo tada, kai antras kvietėjas gauna 202 pagal
+   * `deletion_pending`, savaiminis gijimas nebeįmanomas: pakartojimas matytų
+   * „jau vykdoma" ir nedarytų nieko AMŽINAI.
+   *
+   * Todėl mesta klaida palieka `deletion_failed`. Prarastas įvykis vis tiek
+   * užfiksuojamas - bet per dokumentuotą operatoriaus kelią, ne tyliai.
+   */
+  assert.equal(
+    (await tombstones.get(job.id)).status,
+    tombstones.TOMBSTONE_STATUS.FAILED,
+    "mesta klaida negali palikti `pending` - antras kvietėjas amžinai gautų 202"
+  );
+
+  // Pakartojimas BE operatoriaus: sėkmė NESKELBIAMA, darbas nekartojamas.
+  const priesBeRetry = (await auditLog.getAll()).length;
+  const beRetry = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
+
+  assert.equal(beRetry.status, "tombstone_unresolved");
+  assert.equal(beRetry.complete, false, "neužtikrintas barjeras negali atrodyti kaip sėkmė");
+  assert.equal(
+    (await auditLog.getAll()).length,
+    priesBeRetry,
+    "be operatoriaus pakartojimo naujo įvykio nėra - darbas nekartojamas"
+  );
+
+  // Operatorius eksplicitiškai autorizuoja naują bandymą.
+  const { retryMark } = require("../services/erasureMarkService");
+  const perkelta = await retryMark(job.id, { actor: "sysadmin" });
+  assert.equal(perkelta.changed, true, "`failed → pending` yra operatoriaus veiksmas");
+
+  // Dabar pakartojimas realiai trina ir PARAŠO prarastą įvykį.
   const priesTai = (await auditLog.getAll()).length;
   const antras = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
   const nauji = (await auditLog.getAll()).slice(priesTai);
   assert.ok(
     nauji.some((e) => e.event === "LIFECYCLE_DELETION"),
-    "pakartotinis kvietimas privalo užfiksuoti prarastą įvykį, o ne grąžinti `already_deleted`"
+    "po autorizuoto pakartojimo prarastas įvykis privalo būti užfiksuotas"
   );
   assert.notEqual(antras.status, "already_deleted");
-  assert.equal(tombstones.isConfirmedDeleted(job.id), true, "dabar žyma patvirtinta");
+  assert.equal(await tombstones.isConfirmedDeleted(job.id), true, "dabar žyma patvirtinta");
 });
 
 test("SIAURAS CATCH: NE audito klaida NEVADINAMA `AUDIT_UNAVAILABLE`", async () => {

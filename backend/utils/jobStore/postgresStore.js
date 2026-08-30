@@ -705,6 +705,37 @@ function createPostgresStore(pool) {
     /** ⚠️ PRIEŠ transakciją - netinkamas įrašas negali ištrinti esamo. */
     assertAtstovaujamasProgresas(job);
     return inTransaction(async (client) => {
+      /**
+       * ⚠️ BARJERAS TIKRINAMAS ŠIOJE TRANSAKCIJOJE (#183 Codex, P1).
+       *
+       * Fasadas prieš tai daro `isDeleted()` - bet tai ATSKIRAS skaitymas, tad
+       * lygiagreti replika gali įterpti žymą tarp patikros ir šio rašymo, ir
+       * atkūrimas prikeltų ištrintą job'ą. `assertNotBarred()` ima tą patį
+       * advisory lock'ą, kurį ima `mark()`, ir skaito TOJE PAČIOJE
+       * transakcijoje, tad „patikrink, tada rašyk" tampa atominis.
+       *
+       * Būtent tam šis API ir buvo sukurtas 7.5a metu; produkcinis atkūrimo
+       * kelias jo nepasiekdavo, tad deklaruotas cross-replica barjeras šio
+       * kelio negynė.
+       *
+       * ⚠️ KVIEČIAMA STORE LYGIO FUNKCIJA, NE FASADAS - IR TAI SVARBU.
+       *
+       * Fasadas prieš patikrą daro `ensureInit()`, kuris jungiasi pagal
+       * `process.env.DATABASE_URL`. Tai gali būti KITA duomenų bazė nei ta,
+       * kurioje vyksta ši transakcija: taip ir nutiko CI, kur
+       * `postgresStore.integration` migruoja `<bazė>_store`, o aplinkos
+       * kintamasis rodo į `<bazė>`.
+       *
+       * Barjeras privalo būti skaitomas TOJE PAČIOJE jungtyje, kur vyksta
+       * rašymas - kitos DB būsena apie šį rašymą neįrodo nieko. Funkcija
+       * naudoja tik perduotą klientą, tad nei pool'o, nei `init()` jai nereikia.
+       *
+       * ⚠️ `require` VIETOJE, ne faile: išvengiama ciklinės priklausomybės ir
+       * `jobStore` lieka naudojamas be žymų modulio inicijavimo.
+       */
+      const { assertNotBarredWithClient } = require("../deletionTombstones/postgresStore");
+      await assertNotBarredWithClient(client, job.id);
+
       await client.query("DELETE FROM jobs WHERE id = $1", [job.id]);
       await client.query(insertSql(), insertValues(job));
       await upsertResult(client, job.id, job.result ?? null);
@@ -984,6 +1015,29 @@ function createPostgresStore(pool) {
    * Išmetus jį per TTL, likęs audio failas taptų nebeatsekamas — tas pats
    * sprendimas kaip `memoryStore` ir `redisStore.js:175`.
    */
+  /**
+   * PASENUSIŲ JOB'Ų ID - BE ŠALINIMO (#183).
+   *
+   * ⚠️ Retencijai reikia ID, o ne kiekio: nuo #183 kiekvienas ištrynimo kelias
+   * privalo palikti barjerą, tad žyma rašoma PRIEŠ šalinimą. Predikatas
+   * PRIVALO sutapti su `sweepExpired()` - kitaip retencija žymėtų vienus, o
+   * trintų kitus.
+   */
+  async function listExpired(now = Date.now(), limit = 500) {
+    const riba = new Date(now - TTL_MS).toISOString();
+    const { rows } = await pool.query(
+      `SELECT id FROM jobs
+        WHERE status = ANY($1)
+          AND updated_at < $2
+          AND NOT audio_cleanup_pending
+          AND NOT deletion_pending
+        ORDER BY updated_at
+        LIMIT $3`,
+      [[STATUS.COMPLETED, STATUS.FAILED, STATUS.CANCELLED], riba, limit]
+    );
+    return rows.map((r) => r.id);
+  }
+
   async function sweepExpired(now = Date.now()) {
     const riba = new Date(now - TTL_MS).toISOString();
     const { rowCount } = await pool.query(
@@ -1069,6 +1123,7 @@ function createPostgresStore(pool) {
     getOwned,
     updateOwned,
     removeOwned,
+    listExpired,
     sweepExpired,
     size,
     listAll,

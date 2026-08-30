@@ -312,6 +312,176 @@ neskaitantis starto logų, apie tai sužinos tik pastebėjęs, kad senų įraš�
    audito eilučių neapima;
 4. tik tada atnaujinkite.
 
+### Užstrigusios ištrynimo žymos (nuo [7.5a])
+
+Ištrynimo barjeras aktyvus nuo **pirmojo** žingsnio (`deletion_pending`), o
+neterminalės žymos **nesensta**. Abu sprendimai sąmoningi: nesėkmingas ištrynimas
+reiškia, kad jautrūs duomenys dar gali egzistuoti, ir laikrodis to neišsprendžia.
+
+⚠️ **Todėl nuolat nepavykstantis ištrynimas užrakina job'ą neribotam laikui.**
+Išeitis yra, bet ji rankinė ir palieka audito pėdsaką.
+
+**Ar yra užstrigusių žymų:**
+
+```bash
+node backend/scripts/erasure-marks.js list --hours 24
+```
+
+Stulpeliai: `job_id`, būsena, priežastis, aktoriaus kategorija, bandymų skaičius,
+paskutinės klaidos kategorija, amžius valandomis. Terminalės (`deleted`) į sąrašą
+**nepatenka** – jos nėra užstrigusios.
+
+**Pakartoti ištrynimą** (`deletion_failed` → `deletion_pending`; pats ištrynimas
+paleidžiamas įprastu keliu):
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js retry "$JOB_ID" --actor "$OPERATOR"
+```
+
+**Atlaisvinti užstrigusią pretenziją** (`deletion_pending` → `deletion_failed`),
+kai žyma liko be vykdytojo – procesas nužudytas (SIGKILL, OOM, konteinerio
+nutraukimas) tarp žymėjimo ir užbaigimo:
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js release "$JOB_ID" --actor "$OPERATOR"
+```
+
+⚠️ **`release` NETVIRTINA NIEKO APIE DUOMENIS.** Po kieto nužudymo nežinoma,
+kiek valymo spėta atlikti; žyma gauna `last_failure_kind=executor_lost`, kuris
+būtent tą neapibrėžtį ir įrašo. Po jo eina įprastas `retry`, ir ištrynimas
+užbaigiamas normaliu keliu.
+
+⚠️ Barjeras **nenuimamas nė akimirkai**: `deletion_pending` ir `deletion_failed`
+abu blokuoja artefaktų kūrimą, o perėjimas tarp jų yra vienas sąlyginis `UPDATE`.
+
+⚠️ `release` veikia **tik** iš `deletion_pending`. Iš `deleted` atlaisvinti nėra
+ko, o iš `deletion_failed` jau veikia `retry`; leidus juos, `release` taptų būdu
+perrašyti nesėkmės kategoriją, t. y. suklastoti įrašą apie tai, kas nutiko.
+
+### ⚠️ `release` ar `force-resolve`? Skirtumas yra teiginys apie duomenis
+
+| | `release` | `force-resolve` |
+|---|---|---|
+| Iš kokios būsenos | tik `deletion_pending` | `deletion_pending` arba `deletion_failed` |
+| Į kokią | `deletion_failed` | `deleted` (terminali) |
+| Ką operatorius **teigia** | vykdytojo nebėra | **duomenų nebėra** |
+| Ką reikia žinoti iš anksto | nieko apie duomenis | patikrintą faktą |
+| Kas galima po to | `retry` → ištrynimas užbaigiamas | nieko – būsena terminali |
+
+**Po SIGKILL pirmiausia `release`, ne `force-resolve`.** Priežastis viena:
+`force-resolve` yra teiginys, kurio tuo momentu niekas nepatikrino. Procesas
+galėjo nutrūkti prieš saugyklos valymą, po jo, ar viduryje – ir `deleted` būseną
+uždėjus, tas klausimas užsidaro **negrįžtamai**: būsena terminali, `retry` iš jos
+nebeveda, o žyma toliau tvirtins, kad ištrynimas patvirtintas.
+
+`release` tą klausimą palieka atvirą ir leidžia ištrynimui realiai įvykti.
+`force-resolve` tinka tik tada, kai duomenų nebuvimas **patikrintas** – arba kai
+patikrinta, kad jų niekada nebuvo.
+
+**Paskelbti išspręsta**, kai patikrinta, kad duomenų nebėra (arba jų niekada
+nebuvo):
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js force-resolve "$JOB_ID" --actor "$OPERATOR"
+```
+
+⚠️ `force-resolve` **nėra ištrynimas**. Operatorius patvirtina faktą ir prisiima
+jį auditu (`ERASURE_MARK_FORCE_RESOLVED`). Barjeras **lieka** – būsena tampa
+`deleted`, tad job'as ir toliau nebus prikeltas.
+
+⚠️ `--actor` privalomas. Auditas rašomas **po** perėjimo, o jo `success`
+atspindi faktinį rezultatą (#183).
+
+⚠️ **Gedimo forma, kurią reikia žinoti.** Iki 7.5a peržiūros auditas ėjo pirmas,
+ir šis dokumentas žadėjo „neužfiksavus – barjeras nenuimamas". Ta tvarka dengė
+tik vieną pusę: du lygiagretūs operatoriai abu įrašydavo sėkmę, o perėjimas
+pavykdavo tik vienam – likdavo patvarus sėkmės įrašas veiksmui, kurio nebuvo.
+
+Dabartinė tvarka apverčia riziką ir ją reikia įvardyti tiesiai: **jei audito
+rašymas krinta PO sėkmingo perėjimo, žyma jau yra `deleted`, o įrašo nėra.**
+Pakartotinis bandymas įvykio neatkurs – jis grąžins `already_terminal`.
+
+Praktiškai tai reiškia:
+
+- komanda krinta su klaida, ne tyliai – operatorius mato, kad auditas nepavyko;
+- **užfiksuokite tai rankiniu būdu** (incidento įraše), nes automatinio pėdsako
+  nebebus;
+- žymos būsenos keisti nereikia – barjeras veikia, trūksta tik įrašo, kas jį
+  uždėjo.
+
+Atominio perėjimo-su-auditu nėra sąmoningai: auditas gyvena kitoje saugykloje
+(galimai kitoje DB) nei žymos, tad viena transakcija jų apimti negali.
+
+⚠️ **HTTP maršruto šiems veiksmams NĖRA sąmoningai.** Užstrigusi žyma yra
+incidentas, ne kasdienis darbas; maršrutas pridėtų autentikacijos, autorizacijos
+ir rate-limit paviršių tam, kas daroma retai ir turint DB prieigą.
+
+> ### ⚠️ DIEGIMO SPRENDIMO ĮVESTIS: šis kelias reikalauja shell prieigos
+>
+> Abi komandos vykdomos **ant host'o, kuriame nustatytas `DATABASE_URL`**. Kito
+> įėjimo nėra.
+>
+> **Diegime, kuriame operatoriai turi TIK HTTP prieigą, užstrigusi ištrynimo
+> žyma NETURI VAISTŲ** – job'as lieka užbarjeruotas neribotą laiką, kol kas nors
+> prideda maršrutą arba suteikia shell prieigą.
+>
+> Tai nėra gedimas ir ne priežiūros skola – tai **sąmoningo apimties sprendimo
+> kaina** (#183, 7.5a). Bet ji privalo būti pasverta **planuojant diegimą**, ne
+> atrandama incidento metu, 2 val. nakties, kai vartotojas skambina dėl
+> ištrynimo, kuris „nieko nedaro".
+>
+> **Prieš diegiant nuspręskite:**
+>
+> 1. ar bent vienas budintis asmuo turi shell prieigą prie host'o su
+>    `DATABASE_URL`? Jei taip – jokių papildomų veiksmų nereikia;
+> 2. jei ne – arba tokia prieiga suteikiama (ir įrašoma į budėjimo procedūrą),
+>    arba prieš paleidžiant į produkciją pridedamas administracinis maršrutas.
+>
+> ⚠️ Trečio varianto – „išspręsim, kai atsitiks" – nėra: barjeras nuo
+> `deletion_pending` reiškia, kad tuo metu job'as jau užrakintas, o
+> neterminalės žymos **nesensta**, tad laukimas problemos neišsprendžia.
+
+### ⚠️ Dalis ištrynimų dabar LAUKIA operatoriaus, ne kartojasi savaime
+
+Iki 7.5a fone veikė antra kartojimo sistema: `retryPendingDeletions()` sweeper'is
+periodiškai kartodavo nebaigtus ištrynimus. Ji prieštarauja žymų mašinai, kurioje
+`deletion_failed` yra **operatoriaus sprendimas**, ne laikina būsena.
+
+Nuo šiol sweeper'is **praleidžia** jobus, kurių žyma yra `deletion_failed`, ir
+kiekvieną tokį atvejį įrašo `warn` lygiu su nuoroda, ką daryti.
+
+⚠️ **Praktikoje tai reiškia daugumą sweeper'io kandidatų.** Jobas patenka į jo
+sąrašą tik po nepavykusio ištrynimo, o tas pats nepavykimas žymą perveda į
+`deletion_failed`. Diegimuose su `DATABASE_URL` sweeper'is tampa daugiausia
+**pranešėju**, ne kartotoju. Jis toliau kartoja tik tuos atvejus, kur žymos nėra
+(ją pašalino retencija) arba ji tebėra `deletion_pending`.
+
+⚠️ **MATOMUMO ŠALTINIS YRA `erasure-marks list`, NE SWEEPER'IO LOGAI.** Logas
+pasako, kad jobas paliktas, bet jis nesikaupia į sąrašą ir dingsta su rotacija.
+Autoritetingas neišspręstų ištrynimų sąrašas yra:
+
+```bash
+node backend/scripts/erasure-marks.js list --hours 24
+```
+
+Tai turi būti **periodinė procedūra**, ne reakcija į pranešimą. Neišspręsta žyma
+reiškia, kad jautrūs duomenys gali tebebūti saugomi.
+
+Atkūrimo eiga: `erasure-marks retry <jobId> --actor <kas>` → įprastas `DELETE`
+(arba kitas ištrynimo kelias) užbaigia darbą.
+
+⚠️ **Automatinio „vykdytojas mirė" aptikimo NĖRA IR NEBUS.** Lease ar heartbeat
+ant `deletion_pending` būtų paskirstyta nuoma – būtent tai, ko 7.5a atsisakė
+sąmoningai (lock'as neturi būti laikomas per išorinį I/O). Sprendimą, kad
+vykdytojo nebėra, priima operatorius, ne laikmatis.
+
+**Ko šiame kelyje NĖRA:** automatinio užstrigusių žymų šalinimo. Tai būtų
+barjero nuėmimas be žmogaus sprendimo – tiksliai tai, ko `deletion_failed`
+semantika vengia.
+
 ---
 
 ## 4. Klaidingi teiginiai ir neteisingos diagnozės
