@@ -136,6 +136,14 @@ test("POST-HOC: visi po-veiksmo įvykiai įvardyti eksplicitiškai ir LIEKA blok
       "ADMIN_DELETE_OVERRIDE",
       "ADMIN_ORPHAN_CLEANUP",
       "DATA_ERASED",
+      /**
+       * ⚠️ PRIDĖTA #183 PERŽIŪROJE. Iki tol abu žymų keliai rašė auditą PRIEŠ
+       * perėjimą; dabar perėjimas commit'inasi pirmas, tad audito gedimas jo
+       * nebeatšaukia. Klasifikacija privalo sekti realizaciją - kitaip ji
+       * tvirtintų apsaugą, kurios nebėra.
+       */
+      "ERASURE_MARK_FORCE_RESOLVED",
+      "ERASURE_MARK_RETRIED",
       "LIFECYCLE_DELETION",
       "LOGOUT",
       "RETENTION_PURGE",

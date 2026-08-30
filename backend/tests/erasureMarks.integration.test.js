@@ -367,6 +367,161 @@ test("LENKTYNĖS C: kritimas ties `pending` - barjeras išgyvena, retry tęsia",
   }
 });
 
+test("PO RESTARTO: TIKRAS vykdymo kelias konsultuojasi su barjeru", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ANKSTESNĖ VERSIJA NIEKO NEĮRODINĖJO (#183 Codex, P2).
+   *
+   * „Crash/restart" testas sukurdavo kitą store'ą ir kviesdavo jo skaitytuvus.
+   * Realus worker'is nebūdavo paleidžiamas, vėluojanti eilės žinutė
+   * nepristatoma. Regresija, kurioje po restarto vykdymo kelias NUSTOTŲ
+   * konsultuotis su barjeru, paliktų tokį testą žalią - tai ta pati klasė kaip
+   * statinis zondas, tikrinęs paminėjimą, ne `await`.
+   *
+   * `SUBISSUES-155.md` reikalauja end-to-end, tad čia varomas TIKRAS
+   * `jobRunner._runInline()` kelias - tas pats, kurį naudoja inline režimas ir
+   * kurį BullMQ worker'is kviečia savo procesoriuje.
+   */
+  const { url, pool, resursai } = await paruostiDb("erasure_po_restarto");
+
+  try {
+    const jobId = crypto.randomUUID();
+    await irasytiTevineEilute(pool, jobId);
+
+    /** ── „Prieš restartą": žyma įrašoma per ATSKIRĄ pool'ą, kuris po to miršta ── */
+    const senas = new Pool({ connectionString: url });
+    const senoStore = createErasureMarkStore(senas);
+    await senoStore.mark(jobId, { reason: REASON });
+    await senas.end();
+
+    /** ── „Po restarto": švieži moduliai, kaip naujame procese ──────────── */
+    for (const kelias of [
+      "../utils/deletionTombstones",
+      "../utils/jobStore",
+      "../queues/jobRunner",
+    ]) {
+      delete require.cache[require.resolve(kelias)];
+    }
+
+    const savedUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = url;
+
+    try {
+      const tombstones = require("../utils/deletionTombstones");
+      const jobRunner = require("../queues/jobRunner");
+
+      await tombstones.init({ ...process.env, DATABASE_URL: url });
+
+      const vykdyta = [];
+      jobRunner.registerProcessor("transcription", async (payload, id) => {
+        vykdyta.push(id);
+        return { text: "neturėjo įvykti" };
+      });
+
+      /** ⚠️ TIKRAS vykdymo kelias, ne skaitytuvas. */
+      await jobRunner._runInline("transcription", jobId, { storageKey: null });
+
+      assert.deepEqual(
+        vykdyta,
+        [],
+        "po restarto vykdymo kelias PRIVALO matyti persistentinį barjerą ir nepaleisti darbo"
+      );
+
+      /** Ir barjeras tikrai iš DB, ne iš atminties: šis procesas žymos nerašė. */
+      const { rows } = await pool.query("SELECT status FROM erasure_marks WHERE job_id = $1", [
+        jobId,
+      ]);
+      assert.equal(rows.length, 1, "prielaida: žyma yra lentelėje");
+    } finally {
+      const { registerProcessors } = require("../queues/register");
+      registerProcessors();
+      if (savedUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = savedUrl;
+    }
+  } finally {
+    await resursai.isvalyti();
+  }
+});
+
+test("ATKŪRIMAS: žyma, atsiradusi TARP patikros ir rašymo, sustabdo atkūrimą", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ DETERMINISTINĖS LENKTYNĖS, NE `sleep` (#183 Codex, P1).
+   *
+   * `restoreRecord()` darė „patikrink, tada rašyk" per DU atskirus skaitymus,
+   * tad lygiagreti replika galėjo įterpti žymą tarp jų - ir atkūrimas prikeltų
+   * ištrintą job'ą. Deklaruotas cross-replica barjeras šio kelio negynė.
+   *
+   * Langas atidaromas TIKSLIAI: `isDeleted` pakeičiamas taip, kad pirmą kartą
+   * grąžintų `false` (kaip prieš žymą) ir TUO PAČIU metu įrašytų žymą per kitą
+   * pool'ą. Jokio laukimo - eiliškumas valdomas, ne spėjamas.
+   */
+  const { url, pool, resursai } = await paruostiDb("erasure_restore_lenktynes");
+
+  try {
+    const jobId = crypto.randomUUID();
+
+    const savedUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = url;
+
+    for (const kelias of ["../utils/deletionTombstones", "../utils/jobStore"]) {
+      delete require.cache[require.resolve(kelias)];
+    }
+
+    try {
+      const tombstones = require("../utils/deletionTombstones");
+      const jobStore = require("../utils/jobStore");
+
+      await tombstones.init({ ...process.env, DATABASE_URL: url });
+      await jobStore.init();
+
+      const jobas = {
+        id: jobId,
+        type: "transcription",
+        status: "completed",
+        ownerKind: "unowned",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const originalus = tombstones.isDeleted;
+      let kartas = 0;
+
+      tombstones.isDeleted = async (id) => {
+        kartas += 1;
+
+        /** Pirmas kvietimas - fasado ankstyva patikra: žymos DAR nėra. */
+        if (kartas === 1) {
+          const konkurentas = new Pool({ connectionString: url });
+          try {
+            await createErasureMarkStore(konkurentas).mark(id, { reason: REASON });
+          } finally {
+            await konkurentas.end();
+          }
+          return false;
+        }
+
+        return originalus(id);
+      };
+
+      try {
+        const rezultatas = await jobStore.restoreRecord(jobas);
+
+        assert.equal(rezultatas, null, "atkūrimas PRIVALO būti sustabdytas");
+
+        const { rows } = await pool.query("SELECT id FROM jobs WHERE id = $1", [jobId]);
+        assert.equal(rows.length, 0, "ištrintas job'as NEGALI likti lentelėje");
+      } finally {
+        tombstones.isDeleted = originalus;
+      }
+    } finally {
+      if (savedUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = savedUrl;
+    }
+  } finally {
+    await resursai.isvalyti();
+  }
+});
+
 test("LOCK'AS: NELAIKOMAS per išorinį I/O - kitas darbas vyksta tuo metu", { skip: SKIP }, async () => {
   /**
    * ⚠️ ŠIS TESTAS EGZISTUOJA DĖL #183 DoD PROOF GAP 2.

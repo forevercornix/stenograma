@@ -393,13 +393,33 @@ async function purgeExpired(now = Date.now(), env = process.env) {
 
   await ensureInit();
 
-  const cutoff = now - terminas;
+  /**
+   * ⚠️ RIBĄ SKAIČIUOJA SAUGYKLA (#183 Codex, P2).
+   *
+   * `updated_at` rašomas DB `now()`, tad riba privalo ateiti iš to paties
+   * laikrodžio - kitaip skubanti replika ištrintų barjerus anksčiau laiko.
+   * Atmintyje ta pati funkcija remiasi įleidžiamu `now`, tad kontroliuojamas
+   * laiko šaltinis galioja abiem pusėms.
+   */
+  const cutoff = await store.retencijosRiba(terminas, now);
   let pasalinta = 0;
 
-  for (;;) {
-    const kiek = await store.purgeExpired(cutoff, RETENCIJOS_BATCH);
-    pasalinta += kiek;
-    if (kiek < RETENCIJOS_BATCH) break;
+  try {
+    for (;;) {
+      const kiek = await store.purgeExpired(cutoff, RETENCIJOS_BATCH);
+      pasalinta += kiek;
+      if (kiek < RETENCIJOS_BATCH) break;
+    }
+  } catch (klaida) {
+    /**
+     * ⚠️ JAU ĮVYKDYTI BATCH'AI NEDINGSTA IŠ ATASKAITOS (#183 Codex, P2).
+     *
+     * Kiekvienas batch'as commit'inasi atskirai. Kritus vėlesniam, be šito
+     * `RETENTION_PURGE` praneštų `tombstones=0`, nors barjerai jau negrįžtamai
+     * pašalinti. Gretimas audito retencijos kelias tą patį daro nuo 7.4d.
+     */
+    klaida.pasalinta = pasalinta;
+    throw klaida;
   }
 
   return { removed: pasalinta, skipped: false };

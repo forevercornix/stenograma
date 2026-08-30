@@ -185,11 +185,19 @@ tombstone ──► eraseJob ──► struktūrizuotas rezultatas ──► aud
 Jei žyma atsirastų po šalinimo, tarp jų liktų langas, kuriame worker'is dar
 nematytų žymos, o duomenų jau nebūtų – ir jis juos atkurtų.
 
-Žymos gyvena **atskirai** nuo jobo įrašo (`utils/deletionTombstones.js`), nes
-turi atsakyti į klausimą „ar šis ID buvo ištrintas?" **tada, kai įrašo nebėra**.
+Žymos gyvena **atskirai** nuo jobo įrašo (`utils/deletionTombstones/`), nes turi
+atsakyti į klausimą „ar šis ID buvo ištrintas?" **tada, kai įrašo nebėra**.
 
-`DELETION_TOMBSTONE_TTL_HOURS` (numatyta 72) privalo viršyti ilgiausią eilės
-įrašo gyvavimo trukmę – BullMQ užbaigtus jobus laiko iki 24 val.
+Nuo 7.5a (#183) jos yra **persistentinės**: `erasure_marks` lentelė su būsenų
+mašina ir advisory lock'ais. Be `DATABASE_URL` lieka atminties režimas – jis
+neišgyvena restarto, ir startas apie tai garsiai įspėja.
+
+Retencija nebeskaičiuojama fiksuota TTL reikšme: žyma laikoma tol, kol job'as
+dar gali būti prikeltas. Horizontas išvedamas iš eilės konfigūracijos
+(`revivalHorizonsMs()`), sudedant nuoseklias dedamąsias – `delay`, retry
+grandinę ir stalled perėmimą – prie terminalaus laikymo, plius saugos atsargą.
+`DELETION_TOMBSTONE_TTL_HOURS` lieka kaip rankinis perrašymas, ne numatytoji
+taisyklė.
 
 ### Struktūrizuotas rezultatas
 

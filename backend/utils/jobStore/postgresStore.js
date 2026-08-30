@@ -705,6 +705,26 @@ function createPostgresStore(pool) {
     /** ⚠️ PRIEŠ transakciją - netinkamas įrašas negali ištrinti esamo. */
     assertAtstovaujamasProgresas(job);
     return inTransaction(async (client) => {
+      /**
+       * ⚠️ BARJERAS TIKRINAMAS ŠIOJE TRANSAKCIJOJE (#183 Codex, P1).
+       *
+       * Fasadas prieš tai daro `isDeleted()` - bet tai ATSKIRAS skaitymas, tad
+       * lygiagreti replika gali įterpti žymą tarp patikros ir šio rašymo, ir
+       * atkūrimas prikeltų ištrintą job'ą. `assertNotBarred()` ima tą patį
+       * advisory lock'ą, kurį ima `mark()`, ir skaito TOJE PAČIOJE
+       * transakcijoje, tad „patikrink, tada rašyk" tampa atominis.
+       *
+       * Būtent tam šis API ir buvo sukurtas 7.5a metu; produkcinis atkūrimo
+       * kelias jo nepasiekdavo, tad deklaruotas cross-replica barjeras šio
+       * kelio negynė.
+       *
+       * ⚠️ `require` VIETOJE, ne faile: `deletionTombstones` importuojamas
+       * lazy, kad `jobStore` liktų naudojamas ir be žymų modulio inicijavimo
+       * (skriptai, migracijų keliai).
+       */
+      const tombstones = require("../deletionTombstones");
+      await tombstones.assertNotBarred(client, job.id);
+
       await client.query("DELETE FROM jobs WHERE id = $1", [job.id]);
       await client.query(insertSql(), insertValues(job));
       await upsertResult(client, job.id, job.result ?? null);

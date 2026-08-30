@@ -163,6 +163,23 @@ async function listUnresolved({ olderThanMs = 0, limit = 100, now = Date.now() }
  * jautrūs duomenys dar gali egzistuoti; žymos pašalinimas atidarytų barjerą
  * būtent tada, kai jis reikalingiausias.
  */
+/**
+ * Riba atmintyje - iš įleidžiamo `now`.
+ *
+ * ⚠️ SKIRTUMAS NUO POSTGRES TEISINGAS: atmintyje `updatedAt` rašo tas pats
+ * procesas, tad jo laikrodis IR YRA autoritetas. Postgres pusėje žymą laiku
+ * pažymi DB, tad riba privalo ateiti iš jos.
+ */
+async function retencijosRiba(terminasMs, now = Date.now()) {
+  const skaicius = Number(terminasMs);
+
+  if (!Number.isFinite(skaicius) || skaicius <= 0) {
+    throw new Error(`Retencijos terminas privalo būti teigiamas (gauta: ${terminasMs}).`);
+  }
+
+  return now - skaicius;
+}
+
 async function purgeExpired(cutoffMs, limit = Infinity) {
   let pasalinta = 0;
 
@@ -202,6 +219,7 @@ async function probe() {
 
 module.exports = {
   probe,
+  retencijosRiba,
   mark,
   transition,
   transitionOverride,

@@ -173,6 +173,8 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
       log.warn("Retencija: žymų terminas neapskaičiuojamas - žymos NEŠALINAMOS.");
     }
   } catch (e) {
+    /** ⚠️ Jau pašalinti barjerai patenka į suvestinę - žr. `purgeExpired` (#183). */
+    summary.tombstones = Number.isInteger(e.pasalinta) ? e.pasalinta : 0;
     summary.errors.push(`tombstones: ${e.message}`);
   }
 

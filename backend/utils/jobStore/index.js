@@ -847,7 +847,30 @@ module.exports = {
       return null;
     }
 
-    return store.restoreRecord(job);
+    /**
+     * ⚠️ PATIKRA VIRŠUJE YRA PIGUS ANKSTYVAS IŠĖJIMAS, NE GARANTIJA (#183 Codex, P1).
+     *
+     * Ji ir `store.restoreRecord()` yra du atskiri veiksmai: lygiagreti replika
+     * gali įterpti žymą tarp jų. Persistentiniame kelyje langą uždaro pats
+     * store'as - `postgresStore.restoreRecord()` kviečia `assertNotBarred()`
+     * SAVO transakcijoje su advisory lock'u.
+     *
+     * Kitiems backend'ams tokios transakcijos nėra, tad langas uždaromas
+     * KOMPENSUOJANČIA po-rašymo patikra: jei žyma atsirado tuo metu, atkurtas
+     * įrašas pašalinamas. Rezultatas toks pat kaip niekada neatkūrus, tik
+     * pasiekiamas dviem žingsniais.
+     */
+    const atkurta = await store.restoreRecord(job);
+
+    if (atkurta && (await tombstones.isDeleted(job.id))) {
+      log.warn("Atkūrimas ATŠAUKTAS: žyma atsirado rašymo metu", { jobId: job.id });
+      await store.remove(job.id).catch((klaida) => {
+        log.error("Atšaukto atkūrimo nepavyko išvalyti", { jobId: job.id, klaida: klaida.message });
+      });
+      return null;
+    }
+
+    return atkurta;
   },
 
   size: async () => {

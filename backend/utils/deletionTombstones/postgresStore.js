@@ -284,6 +284,32 @@ function createErasureMarkStore(pool) {
    * instancijos gali valyti tą pačią lentelę vienu metu be deadlock'o ir be
    * dvigubo darbo.
    */
+  /**
+   * RETENCIJOS RIBA IŠ **DB LAIKRODŽIO** (#183 Codex, P2).
+   *
+   * ⚠️ TREČIAS TOS PAČIOS KLAIDOS ATVEJIS PROJEKTE. `updated_at` rašomas DB
+   * `now()`, o riba ateidavo iš `Date.now()`: skubantis replikos laikrodis
+   * ištrindavo barjerus anksčiau, nei pagal juos sukūrusią DB suėjo horizontas.
+   * Tas pats defektas jau taisytas 7.4d audito retencijoje (Node laikrodis) ir
+   * jos DST variante - žr. ataskaitos riziką apie laikrodžio autoritetą.
+   *
+   * Riba prašoma VIENĄ kartą per sweep'ą ir perduodama visiems batch'ams.
+   */
+  async function retencijosRiba(terminasMs) {
+    const skaicius = Number(terminasMs);
+
+    if (!Number.isFinite(skaicius) || skaicius <= 0) {
+      throw new Error(`Retencijos terminas privalo būti teigiamas (gauta: ${terminasMs}).`);
+    }
+
+    const { rows } = await pool.query(
+      "SELECT (now() - ($1 || ' milliseconds')::interval) AS riba",
+      [String(Math.round(skaicius))]
+    );
+
+    return new Date(rows[0].riba).getTime();
+  }
+
   async function purgeExpired(cutoffMs, limit = RETENCIJOS_BATCH) {
     const riba = Number(limit);
 
@@ -363,6 +389,7 @@ function createErasureMarkStore(pool) {
     get,
     isBarred,
     assertNotBarred,
+    retencijosRiba,
     listUnresolved,
     purgeExpired,
     size,

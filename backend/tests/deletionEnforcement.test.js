@@ -442,3 +442,126 @@ test("SKRIPTAS: inicijuoja AUDITO saugyklą, ne tik žymų", async () => {
     `skriptas privalo inicijuoti audito saugyklą ir kristi fail-closed: ${rezultatas.isvestis}`
   );
 });
+
+test("ATKŪRIMAS: žyma, atsiradusi RAŠYMO metu, atšaukia atkūrimą", async () => {
+  /**
+   * ⚠️ KOMPENSUOJANTI PATIKRA (#183 Codex, P1).
+   *
+   * Fasado patikra ir `store.restoreRecord()` yra du atskiri veiksmai:
+   * lygiagreti replika gali įterpti žymą tarp jų, ir atkūrimas prikeltų
+   * ištrintą job'ą. Persistentiniame kelyje langą uždaro `assertNotBarred()`
+   * KVIETĖJO transakcijoje; kitiems backend'ams tokios transakcijos nėra, tad
+   * langas uždaromas po-rašymo patikra.
+   *
+   * ⚠️ LENKTYNĖS DETERMINISTINĖS: `isDeleted` pirmą kartą grąžina `false` (kaip
+   * prieš žymą), o antrą - `true`. Jokio laukimo; eiliškumas valdomas.
+   *
+   * Persistentinio kelio atomiškumą įrodo `erasureMarks.integration` - be DB
+   * jis NOT RUN.
+   */
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  await tombstones._clearForTests();
+  await jobStore.init();
+
+  const jobas = await jobStore.create({
+    ownerKind: "unowned",
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+  });
+  await jobStore.system.remove(jobas.id);
+
+  const originalus = tombstones.isDeleted;
+  let kartas = 0;
+
+  tombstones.isDeleted = async (id) => {
+    kartas += 1;
+    /** 1: fasado ankstyva patikra - žymos dar nėra. 2+: po rašymo - jau yra. */
+    return kartas === 1 ? false : originalus(id);
+  };
+
+  try {
+    /** Žyma atsiranda „lygiagrečiai" - iškart po ankstyvos patikros. */
+    await tombstones.mark(jobas.id, { reason: "user_request" });
+
+    const rezultatas = await jobStore.restoreRecord(jobas);
+
+    assert.equal(rezultatas, null, "atkūrimas privalo būti atšauktas");
+    assert.equal(await jobStore.system.get(jobas.id), null, "atkurtas įrašas privalo būti pašalintas");
+    assert.ok(kartas >= 2, "po-rašymo patikra privalo įvykti");
+  } finally {
+    tombstones.isDeleted = originalus;
+    await tombstones._clearForTests();
+  }
+});
+
+test("RETENCIJA: žymų riba ateina IŠ SAUGYKLOS, ne iš Node laikrodžio", async () => {
+  /**
+   * ⚠️ TREČIAS TOS PAČIOS KLAIDOS ATVEJIS (#183 Codex, P2).
+   *
+   * `updated_at` rašomas DB `now()`, o riba ateidavo iš `Date.now()`. Skubantis
+   * replikos laikrodis ištrindavo barjerus anksčiau, nei pagal juos sukūrusią DB
+   * suėjo horizontas. Tas pats defektas jau taisytas 7.4d audito retencijoje ir
+   * jos DST variante.
+   */
+  const { createErasureMarkStore } = require("../utils/deletionTombstones/postgresStore");
+
+  const uzklausos = [];
+  const DB_ATSAKYMAS = new Date("2001-02-03T04:05:06.000Z");
+
+  const pool = {
+    query: async (sql, params) => {
+      uzklausos.push({ sql: String(sql), params });
+      return { rows: [{ riba: DB_ATSAKYMAS }], rowCount: 0 };
+    },
+  };
+
+  const store = createErasureMarkStore(pool);
+  const riba = await store.retencijosRiba(72 * 3600 * 1000);
+
+  assert.equal(riba, DB_ATSAKYMAS.getTime(), "grąžinama BŪTENT DB duota reikšmė");
+  assert.match(uzklausos[0].sql, /now\(\)/i, "riba skaičiuojama SQL `now()`");
+  assert.deepEqual(uzklausos[0].params, [String(72 * 3600 * 1000)], "terminas - parametru");
+
+  for (const blogas of [0, -1, "nežinia", null]) {
+    await assert.rejects(() => store.retencijosRiba(blogas), /teigiamas/i);
+  }
+
+  /**
+   * ⚠️ IR FASADAS PRIVALO JOS KLAUSTI, ne skaičiuoti pats.
+   *
+   * Pirmoji šio testo versija tikrino tik saugyklą: fasadą grąžinus prie
+   * `now - terminas` testas liko žalias, nors defektas grįžo. Čia pakeičiamas
+   * `memoryStore` - jį fasadas naudoja be `DATABASE_URL`, tad naujo produkcinio
+   * test-kabliuko nereikia.
+   */
+  const SENTINEL = 946684800000; // 2000-01-01
+  const tombstones = require("../utils/deletionTombstones");
+  const memoryStore = require("../utils/deletionTombstones/memoryStore");
+
+  const ribos = [];
+  const gautosRibos = [];
+
+  const senaRiba = memoryStore.retencijosRiba;
+  const senasPurge = memoryStore.purgeExpired;
+
+  memoryStore.retencijosRiba = async (terminas) => {
+    ribos.push(terminas);
+    return SENTINEL;
+  };
+  memoryStore.purgeExpired = async (cutoff) => {
+    gautosRibos.push(cutoff);
+    return 0;
+  };
+
+  try {
+    await tombstones._clearForTests();
+    await tombstones.purgeExpired(Date.now());
+
+    assert.equal(ribos.length, 1, "ribos klausiama VIENĄ kartą per sweep'ą");
+    assert.deepEqual(gautosRibos, [SENTINEL], "batch'ai privalo gauti SAUGYKLOS duotą ribą");
+  } finally {
+    memoryStore.retencijosRiba = senaRiba;
+    memoryStore.purgeExpired = senasPurge;
+  }
+});
