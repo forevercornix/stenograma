@@ -452,3 +452,38 @@ test("#183 NUTEKĖJIMAS: našlaičio 503 atsakyme NĖRA klaidų tekstų", async 
   assert.ok(!tekstas.includes("bull:"), "eilės raktai negali patekti į atsakymą");
   assert.equal(kunas.deletion.auditEntriesRemoved, 0, "kiek pašalinta - lieka");
 });
+
+test("#183 CLI: `--actor --note` NEPRIIMAMAS kaip aktorius", async () => {
+  /**
+   * Barjero pakeitimas su aktoriumi, kurio niekas nenurodė, yra blogesnis už
+   * atmestą komandą: auditas atrodo pilnas, o jame - apsirikimas.
+   *
+   * Tikrinama per realų proceso paleidimą, nes tai `process.argv` parsinimas -
+   * funkcijos kvietimas tiesiogiai to nedengtų.
+   */
+  const { execFileSync } = require("child_process");
+  const path = require("path");
+
+  let kodas = 0;
+  let isvestis = "";
+  try {
+    isvestis = execFileSync(
+      process.execPath,
+      [
+        path.join(__dirname, "../scripts/erasure-marks.js"),
+        "release",
+        "koks-nors-id",
+        "--actor",
+        "--note",
+        "bilietas-123",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, LOG_LEVEL: "error" } }
+    );
+  } catch (e) {
+    kodas = e.status;
+    isvestis = `${e.stdout || ""}${e.stderr || ""}`;
+  }
+
+  assert.equal(kodas, 2, "komanda turi būti atmesta dėl trūkstamo `--actor`");
+  assert.match(isvestis, /--actor/, "operatorius turi matyti, ko trūksta");
+});

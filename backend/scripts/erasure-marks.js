@@ -53,9 +53,23 @@ const erasureMarks = require("../services/erasureMarkService");
 const tombstones = require("../utils/deletionTombstones");
 const auditStore = require("../utils/auditStore");
 
+/**
+ * ⚠️ KITA VĖLIAVA NĖRA REIKŠMĖ.
+ *
+ * `release <id> --actor --note bilietas` anksčiau grąžindavo `"--note"` kaip
+ * aktorių: privalomo `--actor` patikra praeidavo, ir barjero pakeitimas būdavo
+ * įrašomas su aktoriumi, kurio niekas nenurodė. Auditas, kuriame aktorius yra
+ * apsirikimas, blogesnis už atmestą komandą - operatorius bent jau pamato, kad
+ * suklydo.
+ */
 function arg(vardas, numatytas = null) {
   const i = process.argv.indexOf(`--${vardas}`);
-  return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : numatytas;
+  if (i === -1) return numatytas;
+
+  const reiksme = process.argv[i + 1];
+  if (!reiksme || reiksme.startsWith("--")) return numatytas;
+
+  return reiksme;
 }
 
 function lentele(zymos) {

@@ -184,14 +184,21 @@ router.delete("/jobs/:id", rateLimiter, authenticate, requirePermission(PERMISSI
       if (error instanceof AuditWriteError) return auditoGedimas(res, error, "jobs admin auditas");
       throw error;
     }
-    if (result.deleted) return res.status(204).send();
+    /**
+     * ⚠️ TAS PATS ATVAIZDAVIMAS KAIP SAVININKO KELYJE (#183, AGENTS.md §16).
+     *
+     * Anksčiau ši šaka turėjo savo kopiją, ir įvedus 202 ji tyliai išsiskyrė:
+     * ta pati būsena (kita replika vykdo ištrynimą) savininkui grąžindavo 202,
+     * o administratoriui - 503, t. y. „serverio gedimas" ten, kur gedimo nėra.
+     *
+     * `vanished` lieka atskirai: jį nustato pats servisas dar prieš gyvavimo
+     * ciklo kvietimą, tad `result.result` tada NĖRA.
+     */
     if (result.reason === "vanished") {
       return res.status(404).json({ error: "Jobas nerastas." });
     }
-    return res.status(503).json({
-      error: "Nepavyko visiškai ištrinti jobo duomenų. Užklausą galima pakartoti.",
-      deletion: result.result,
-    });
+
+    return atsakytiIstrynimu(res, result.result, { jobId: req.params.id, log });
   }
 
   if (
