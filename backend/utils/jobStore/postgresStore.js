@@ -718,12 +718,23 @@ function createPostgresStore(pool) {
        * kelias jo nepasiekdavo, tad deklaruotas cross-replica barjeras šio
        * kelio negynė.
        *
-       * ⚠️ `require` VIETOJE, ne faile: `deletionTombstones` importuojamas
-       * lazy, kad `jobStore` liktų naudojamas ir be žymų modulio inicijavimo
-       * (skriptai, migracijų keliai).
+       * ⚠️ KVIEČIAMA STORE LYGIO FUNKCIJA, NE FASADAS - IR TAI SVARBU.
+       *
+       * Fasadas prieš patikrą daro `ensureInit()`, kuris jungiasi pagal
+       * `process.env.DATABASE_URL`. Tai gali būti KITA duomenų bazė nei ta,
+       * kurioje vyksta ši transakcija: taip ir nutiko CI, kur
+       * `postgresStore.integration` migruoja `<bazė>_store`, o aplinkos
+       * kintamasis rodo į `<bazė>`.
+       *
+       * Barjeras privalo būti skaitomas TOJE PAČIOJE jungtyje, kur vyksta
+       * rašymas - kitos DB būsena apie šį rašymą neįrodo nieko. Funkcija
+       * naudoja tik perduotą klientą, tad nei pool'o, nei `init()` jai nereikia.
+       *
+       * ⚠️ `require` VIETOJE, ne faile: išvengiama ciklinės priklausomybės ir
+       * `jobStore` lieka naudojamas be žymų modulio inicijavimo.
        */
-      const tombstones = require("../deletionTombstones");
-      await tombstones.assertNotBarred(client, job.id);
+      const { assertNotBarredWithClient } = require("../deletionTombstones/postgresStore");
+      await assertNotBarredWithClient(client, job.id);
 
       await client.query("DELETE FROM jobs WHERE id = $1", [job.id]);
       await client.query(insertSql(), insertValues(job));

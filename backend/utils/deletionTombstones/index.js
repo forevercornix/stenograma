@@ -299,6 +299,20 @@ const barrierState = get;
  * kurią įvardija `ATMINTIES_ISPEJIMAS`, ne atskiras gedimas.
  */
 async function assertNotBarred(klientas, jobId) {
+  /**
+   * ⚠️ SPĄSTAI, KURIUOS ŠIS `ensureInit()` PASTATĖ VIENĄ KARTĄ (#183).
+   *
+   * Init jungiasi pagal `process.env.DATABASE_URL`, o `klientas` gali priklausyti
+   * VISAI KITAI duomenų bazei - taip ir nutiko, kai `jobStore.restoreRecord()`
+   * kvietė šį fasadą: CI testas migruoja `<bazė>_store`, o aplinka rodė į
+   * `<bazė>`, ir patikra krisdavo fail-closed dėl lentelės, kurios nėra TEN,
+   * nors kvietėjo DB ji buvo.
+   *
+   * Jei kvietėjas jau turi klientą, jam reikia
+   * `postgresStore.assertNotBarredWithClient()` - ji naudoja tik tą klientą.
+   * Šis kelias lieka tiems, kam reikia ir backend'o parinkimo (atminties režimo
+   * fallback žemiau).
+   */
   await ensureInit();
 
   if (typeof store.assertNotBarred === "function") {

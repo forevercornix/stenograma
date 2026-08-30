@@ -77,6 +77,48 @@ function iIrasa(row) {
   };
 }
 
+/**
+ * BARJERO PATIKRA KVIETĖJO JUNGTIMI - BE POOL'O IR BE `init()` (#183).
+ *
+ * ⚠️ FUNKCIJA SĄMONINGAI MODULIO LYGIO, NE FABRIKO VIDUJE.
+ *
+ * Ji naudoja TIK perduotą klientą, tad pool'o jai nereikia. Kviečiant per
+ * fasadą (`deletionTombstones.assertNotBarred`) prieš tai įvyktų `ensureInit()`,
+ * kuris jungiasi pagal `process.env.DATABASE_URL` - o tai gali būti KITA
+ * duomenų bazė nei ta, kurioje vyksta kvietėjo transakcija.
+ *
+ * Būtent tai ir sulaužė CI: `postgresStore.integration` migruoja `<bazė>_store`,
+ * o fasadas jungėsi prie `<bazė>` be `erasure_marks` ir krito fail-closed.
+ * Testas buvo teisingas - klaidingas buvo kelias, kuriuo barjeras ieškojo
+ * lentelės.
+ *
+ * Semantiškai tai griežčiau, ne laisviau: barjeras PRIVALO būti skaitomas toje
+ * pačioje DB ir transakcijoje, kur vyksta rašymas. Kitos DB pasiekiamumas apie
+ * šį rašymą neįrodo nieko.
+ */
+async function assertNotBarredWithClient(klientas, jobId) {
+  if (!klientas || typeof klientas.query !== "function") {
+    throw new TypeError("assertNotBarred: reikia kviečiančiojo DB kliento (transakcijos).");
+  }
+
+  await klientas.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [
+    LOCK_NAMESPACE,
+    jobId,
+  ]);
+
+  const { rows } = await klientas.query(
+    "SELECT status FROM erasure_marks WHERE job_id = $1",
+    [jobId]
+  );
+
+  if (rows.length) {
+    const klaida = new Error(`Job ${jobId} užbarjeruotas ištrynimo žyma (${rows[0].status}).`);
+    klaida.code = "ERASURE_BARRIER";
+    klaida.status = rows[0].status;
+    throw klaida;
+  }
+}
+
 function createErasureMarkStore(pool) {
   /**
    * Trumpa transakcija su per-`job_id` advisory lock'u.
@@ -240,28 +282,8 @@ function createErasureMarkStore(pool) {
    * 7.4e naudoja taip: BEGIN → assertNotBarred(client, jobId) → audito INSERT → COMMIT.
    */
   async function assertNotBarred(klientas, jobId) {
-    if (!klientas || typeof klientas.query !== "function") {
-      throw new TypeError("assertNotBarred: reikia kviečiančiojo DB kliento (transakcijos).");
-    }
-
-    await klientas.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [
-      LOCK_NAMESPACE,
-      jobId,
-    ]);
-
-    const { rows } = await klientas.query(
-      "SELECT status FROM erasure_marks WHERE job_id = $1",
-      [jobId]
-    );
-
-    if (rows.length) {
-      const klaida = new Error(`Job ${jobId} užbarjeruotas ištrynimo žyma (${rows[0].status}).`);
-      klaida.code = "ERASURE_BARRIER";
-      klaida.status = rows[0].status;
-      throw klaida;
-    }
+    return assertNotBarredWithClient(klientas, jobId);
   }
-
   async function listUnresolved({ olderThanMs = 0, limit = 100 } = {}) {
     const { rows } = await pool.query(
       `SELECT ${STULPELIAI},
@@ -400,6 +422,7 @@ function createErasureMarkStore(pool) {
 }
 
 module.exports = {
+  assertNotBarredWithClient,
   createErasureMarkStore,
   LOCK_NAMESPACE,
   RETENCIJOS_BATCH,
