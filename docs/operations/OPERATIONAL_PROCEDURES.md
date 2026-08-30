@@ -444,6 +444,35 @@ ir rate-limit paviršių tam, kas daroma retai ir turint DB prieigą.
 > `deletion_pending` reiškia, kad tuo metu job'as jau užrakintas, o
 > neterminalės žymos **nesensta**, tad laukimas problemos neišsprendžia.
 
+### ⚠️ Dalis ištrynimų dabar LAUKIA operatoriaus, ne kartojasi savaime
+
+Iki 7.5a fone veikė antra kartojimo sistema: `retryPendingDeletions()` sweeper'is
+periodiškai kartodavo nebaigtus ištrynimus. Ji prieštarauja žymų mašinai, kurioje
+`deletion_failed` yra **operatoriaus sprendimas**, ne laikina būsena.
+
+Nuo šiol sweeper'is **praleidžia** jobus, kurių žyma yra `deletion_failed`, ir
+kiekvieną tokį atvejį įrašo `warn` lygiu su nuoroda, ką daryti.
+
+⚠️ **Praktikoje tai reiškia daugumą sweeper'io kandidatų.** Jobas patenka į jo
+sąrašą tik po nepavykusio ištrynimo, o tas pats nepavykimas žymą perveda į
+`deletion_failed`. Diegimuose su `DATABASE_URL` sweeper'is tampa daugiausia
+**pranešėju**, ne kartotoju. Jis toliau kartoja tik tuos atvejus, kur žymos nėra
+(ją pašalino retencija) arba ji tebėra `deletion_pending`.
+
+⚠️ **MATOMUMO ŠALTINIS YRA `erasure-marks list`, NE SWEEPER'IO LOGAI.** Logas
+pasako, kad jobas paliktas, bet jis nesikaupia į sąrašą ir dingsta su rotacija.
+Autoritetingas neišspręstų ištrynimų sąrašas yra:
+
+```bash
+node backend/scripts/erasure-marks.js list --hours 24
+```
+
+Tai turi būti **periodinė procedūra**, ne reakcija į pranešimą. Neišspręsta žyma
+reiškia, kad jautrūs duomenys gali tebebūti saugomi.
+
+Atkūrimo eiga: `erasure-marks retry <jobId> --actor <kas>` → įprastas `DELETE`
+(arba kitas ištrynimo kelias) užbaigia darbą.
+
 ⚠️ **Automatinio „vykdytojas mirė" aptikimo NĖRA IR NEBUS.** Lease ar heartbeat
 ant `deletion_pending` būtų paskirstyta nuoma – būtent tai, ko 7.5a atsisakė
 sąmoningai (lock'as neturi būti laikomas per išorinį I/O). Sprendimą, kad

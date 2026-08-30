@@ -36,6 +36,21 @@ ji pasensta ir tampa klaidinanti.
 
 ### Changed
 
+- ⚠️ **Foninis ištrynimų kartojimas nebekartoja `deletion_failed` žymėtų jobų**
+  (#183, 7.5a). `retryPendingDeletions()` buvo antra kartojimo sistema: jam
+  pavykus, jobas dingdavo, o žyma likdavo `deletion_failed` amžinai ir be
+  `LIFECYCLE_DELETION` įrašo.
+
+  **Praktikoje tai dauguma sweeper'io kandidatų**: jobas į jo sąrašą patenka tik
+  po nepavykusio ištrynimo, o tas pats nepavykimas žymą ir perveda į
+  `deletion_failed`. Sweeper'is tampa daugiausia pranešėju (`warn` kiekvienam
+  praleistam jobui + `unresolved` skaitiklis), o naują bandymą autorizuoja
+  operatorius: `erasure-marks retry <jobId>`.
+
+  ⚠️ **Reikalinga periodinė procedūra:** `erasure-marks list` yra autoritetingas
+  neišspręstų ištrynimų sąrašas; sweeper'io logai su rotacija dingsta. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
 - **Nauja operatoriaus komanda `erasure-marks release`** (#183, 7.5a).
   Perveda užstrigusią `deletion_pending` žymą į `deletion_failed` su
   `last_failure_kind=executor_lost`, iš kur veikia esamas `retry`.
