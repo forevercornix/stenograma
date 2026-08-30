@@ -790,6 +790,10 @@ module.exports = {
     const result = await store.removeOwned(scope.jobId, scope);
     return result === "FORBIDDEN" ? FORBIDDEN : result;
   },
+  listExpired: async (now, limit) => {
+    await ensureInit();
+    return typeof store.listExpired === "function" ? store.listExpired(now, limit) : [];
+  },
   sweepExpired: async (now) => {
     await ensureInit();
     return store.sweepExpired(now);

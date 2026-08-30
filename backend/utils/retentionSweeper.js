@@ -4,10 +4,18 @@ const fs = require("fs").promises;
 const jobStore = require("./jobStore");
 const auditLog = require("./auditLog");
 const tombstones = require("./deletionTombstones");
+const {
+  ERASURE_REASON,
+  ACTOR_KIND,
+  TOMBSTONE_STATUS,
+} = require("./deletionTombstones/states");
 const { rasytiAudita } = require("./auditWrite");
 const fileStorage = require("./fileStorage");
 const { getPrivacyPolicy } = require("./privacyPolicy");
 const { createLogger } = require("../utils/logger");
+
+/** Vieno ciklo riba - žr. `_valytiPasenusiusJobus`. */
+const JOBU_BATCH = 500;
 const log = createLogger("retention");
 
 /**
@@ -107,13 +115,106 @@ async function purgeOrphanedAudio({ now = Date.now(), retentionHours } = {}) {
 }
 
 /**
+ * PASENUSIŲ JOB'Ų VALYMAS SU IŠTRYNIMO ŽYMA (#183).
+ *
+ * ⚠️ ANKSČIAU ŠIS KELIAS BARJERO NEPALIKDAVO.
+ *
+ * `jobStore.sweepExpired()` bendru `DELETE` pašalindavo pasenusius job'us, ir
+ * `ERASURE_REASON.RETENTION_POLICY` neturėjo NĖ VIENO produkcinio kvietėjo -
+ * reikšmė buvo apibrėžta, bet niekur nenaudojama. Pasibaigusio termino jobas
+ * dingdavo be žymos, o `restoreRecord()` po to tą ID iš senesnės kopijos
+ * priimdavo: ištrynimas atsistatydavo.
+ *
+ * ⚠️ Tai buvo ir `docs/deletion-guarantees.md` teiginio „barjerą palieka VISI
+ * ištrynimo keliai" paneigimas - dokumentacija buvo stipresnė už kodą.
+ *
+ * Tvarka ta pati kaip visur: žyma PIRMA, šalinimas antras.
+ *
+ * ⚠️ PRETENZIJA, NE VIEN ŽYMA. Jei jobą tuo metu jau trina kita replika ar
+ * vartotojo `DELETE`, pretenzijos negaunam ir job'o NELIEČIAM - antraip
+ * retencija dubliuotų destruktyvų darbą ir lenktyniautų dėl to paties įrašo.
+ *
+ * ⚠️ APRIBOTAS BATCH. Retencija gali rasti tūkstančius pasenusių job'ų;
+ * neapribotas ciklas laikytų pool'ą ir audito rašymą užimtą neapibrėžtą laiką.
+ * Likusieji išvalomi kitame cikle - ta pati tvarka kaip audito retencijoje.
+ */
+async function _valytiPasenusiusJobus(now) {
+  const kandidatai = await jobStore.listExpired(now, JOBU_BATCH);
+
+  let pasalinta = 0;
+  let praleista = 0;
+
+  for (const jobId of kandidatai) {
+    const { vykdytojas } = await tombstones.claimForDeletion(jobId, {
+      reason: ERASURE_REASON.RETENTION_POLICY,
+      actorKind: ACTOR_KIND.SYSTEM,
+    });
+
+    /** Jobą jau tvarko kitas vykdytojas - retencija nesikiša. */
+    if (!vykdytojas) {
+      praleista += 1;
+      continue;
+    }
+
+    try {
+      const nuimta = await jobStore.system.remove(jobId);
+      if (nuimta) pasalinta += 1;
+
+      await tombstones.complete(jobId, TOMBSTONE_STATUS.DELETED);
+    } catch (e) {
+      /**
+       * Šalinimas nepavyko po pretenzijos - žyma privalo tai atspindėti, kitaip
+       * ji liktų `deletion_pending` be vykdytojo ir kiekvienas vėlesnis kelias
+       * gautų „jau vykdoma" amžinai.
+       */
+      await tombstones
+        .complete(jobId, TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" })
+        .catch(() => {});
+
+      throw e;
+    }
+  }
+
+  /**
+   * ⚠️ BACKEND'O VIDINĖ PRIEŽIŪRA - TIK KAI KANDIDATŲ NEBUVO IŠVIS.
+   *
+   * `sweepExpired()` Redis režime genėja `jobs:index` (priežiūra), o
+   * `postgres`/`memory` režimuose TRINA bendru `DELETE`, nežiūrėdamas į žymas.
+   *
+   * ⚠️ PIRMOJI ŠIO SARGO VERSIJA BUVO PER SILPNA, IR TESTAS TAI PAGAVO.
+   * Ji leido priežiūrą, kai batch'as nepilnas - bet tada bendras `DELETE`
+   * pašalindavo BŪTENT tuos job'us, kuriuos ciklas sąmoningai praleido dėl
+   * svetimos pretenzijos. Retencija atimdavo darbą iš kito vykdytojo ir dar be
+   * žymos.
+   *
+   * Kai kandidatų nebuvo, `postgres`/`memory` režimuose `sweepExpired()`
+   * neranda ko trinti, o Redis atlieka savo indekso priežiūrą.
+   */
+  if (kandidatai.length === 0) {
+    await jobStore.sweepExpired(now);
+  }
+
+  return { pasalinta, praleista };
+}
+
+/**
  * Vienas pilnas retencijos ciklas. Grąžina suvestinę (naudinga testams ir logams).
  */
 async function runRetentionSweep({ now = Date.now() } = {}) {
-  const summary = { jobs: 0, audio: 0, auditEntries: 0, tombstones: 0, errors: [] };
+  const summary = {
+    jobs: 0,
+    /** Kiek pasenusių job'ų paliko kitam vykdytojui (#183). */
+    jobsSkipped: 0,
+    audio: 0,
+    auditEntries: 0,
+    tombstones: 0,
+    errors: [],
+  };
 
   try {
-    summary.jobs = await jobStore.sweepExpired(now);
+    const r = await _valytiPasenusiusJobus(now);
+    summary.jobs = r.pasalinta;
+    summary.jobsSkipped = r.praleista;
   } catch (e) {
     summary.errors.push(`jobs: ${e.message}`);
   }

@@ -43,8 +43,14 @@ apribojimas. Nuo 7.5a jos saugomos `erasure_marks` lentelėje, tad:
 ✅ žyma **neišnyksta anksčiau**, nei job'as nebegali būti prikeltas: terminas
    išvedamas iš faktinių eilės prikėlimo horizontų ir kopijų retencijos, ne
    parenkamas;
-✅ barjerą palieka **visi** ištrynimo keliai – savininko užklausa, administracinis
-   override ir **našlaičių valymas** (`reason=orphan_cleanup`). Iki šio taisymo
+✅ barjerą palieka **visi** ištrynimo keliai – savininko užklausa,
+   administracinis override (`operator_cleanup`), **našlaičių valymas**
+   (`orphan_cleanup`) ir **retencija** (`retention_policy`).
+
+   ⚠️ **Viena išimtis, ir ji įvardyta:** `JOB_STORE_BACKEND=redis` režime
+   pasenusius job'us šalina pats Redis per `EXPIRE`. Aplikacija tame momente
+   nedalyvauja, tad žymos įrašyti nėra kur. Retencijos barjeras galioja
+   `postgres` ir `memory` jobStore režimuose. Iki šio taisymo
    `adminCleanupOrphan()` ir `desktopCleanupOrphan()` trynė likusius pėdsakus
    **nepalikdami žymos**, tad atkūrimas iš senesnės kopijos tą `jobId` vėl
    priimdavo.
@@ -158,7 +164,7 @@ atlikti, bet ne su kieno duomenimis.
 | `AUDIO_RETENTION_HOURS` | 24 | Šaltinio audio saugykloje |
 | `AUDIT_RETENTION_DAYS` | 30 | Audito žurnalo įrašai |
 | `RETENTION_SWEEP_INTERVAL_MINUTES` | 5 | Kas kiek tikrinama |
-| `DELETION_TOMBSTONE_TTL_HOURS` | 72 | Kiek galioja ištrynimo žyma |
+| `DELETION_TOMBSTONE_TTL_HOURS` | 72 | ⚠️ **Tik ALTINIS** – žr. žemiau |
 
 ✅ **Šios reikšmės tikrinamos automatiškai.** CI lygina šią lentelę su
 `backend/.env.example`; išsiskyrus jos, testas krinta. Tad dokumentu galima
@@ -170,9 +176,33 @@ su 5 min intervalu reiškia, kad įrašas dings per 60–65 min, ne tiksliai per
 Valymas paleidžiamas **iškart po starto**, ne po pirmojo intervalo – be to po
 restarto pasenę duomenys liktų dar visą valandą.
 
-⚠️ `DELETION_TOMBSTONE_TTL_HOURS` **privalo viršyti** ilgiausią eilės įrašo
-gyvavimo trukmę (BullMQ užbaigtus jobus laiko iki 24 val.). Priešingu atveju
-vėluojanti žinutė ateitų jau po žymos galiojimo.
+### ⚠️ `DELETION_TOMBSTONE_TTL_HOURS` NEBĖRA autoritetas (nuo 7.5a)
+
+Iki 7.5a ši reikšmė buvo vienintelis žymos terminas, ir operatorius galėjo ją
+nustatyti žemiau prikėlimo horizonto – tyliai sulaužydamas garantiją. Nuo 7.5a
+terminas **išvedamas**, o kintamasis gali jį tik **pailginti**:
+
+```
+terminas = max( DELETION_TOMBSTONE_TTL_HOURS,
+                eilės prikėlimo horizontas,          ← delayMax + retry + stalled
+                išleistų kopijų galiojimas )         ← žr. žemiau
+         + atsargos marža
+```
+
+Su numatytosiomis reikšmėmis tai yra **maždaug 8 paros**, ne 72 valandos. Per
+maža rankinė reikšmė nebeturi jokio poveikio – ji tiesiog ignoruojama, o ne
+sutrumpina barjerą.
+
+⚠️ **Todėl lentelės eilutė aukščiau rodo tik `.env` numatytąją reikšmę, ne
+faktinį terminą.** CI tikrina, ar lentelė sutampa su `backend/.env.example` –
+t. y. ar teisingai užrašytas KINTAMASIS. Faktinį terminą tikrina
+`revivalHorizons` testai, ne ši lentelė.
+
+⚠️ **Išleista kopija termino nesutrumpina.** `BACKUP_RETENTION_DAYS` sumažinimas
+neatšaukia anksčiau eksportuotos kopijos: ji galioja pagal savo manifestą.
+Kūrimo metu jos galiojimas fiksuojamas `backup_horizon` lentelėje (aukščiausias
+vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be `DATABASE_URL`
+kopijos galiojimas neužsirašo – tai to paties atmintinio režimo apribojimas.
 
 ---
 

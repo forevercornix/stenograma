@@ -105,6 +105,21 @@ async function removeOwned(id, scope) {
   return true;
 }
 
+/** Pasenusių job'ų ID - be šalinimo. Predikatas TAS PATS kaip `sweepExpired`. */
+async function listExpired(now = Date.now(), limit = 500) {
+  const out = [];
+
+  for (const [id, job] of jobs.entries()) {
+    if (out.length >= limit) break;
+    if (hasPendingCleanup(job)) continue;
+    if (isFinished(job.status) && now - new Date(job.updatedAt).getTime() > TTL_MS) {
+      out.push(id);
+    }
+  }
+
+  return out;
+}
+
 async function sweepExpired(now = Date.now()) {
   let removed = 0;
   for (const [id, job] of jobs.entries()) {
@@ -187,4 +202,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, getOwned, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

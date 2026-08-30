@@ -1,3 +1,4 @@
+const { markCompleted } = require("./helpers/jobPhaseFixtures");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -915,4 +916,87 @@ test("#183 RELEASE: NEGALIMAS iš `deleted` ir iš `deletion_failed`", async () 
   );
 
   assert.equal((await releaseMark("nera_zymos", { actor: "sysadmin" })).reason, "no_mark");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #183 CODEX 8 RAUNDAS - BARJERO SKYLĖS UŽ 7.5a RIBŲ
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#183 RETENCIJA: pasenusio jobo šalinimas PALIEKA žymą", async () => {
+  /**
+   * ⚠️ ŠEŠTA „mechanizmas yra, bet kelias jo nekviečia" instancija.
+   *
+   * `ERASURE_REASON.RETENTION_POLICY` buvo apibrėžta ir NENAUDOJAMA: retencija
+   * trynė pasenusius job'us bendru `sweepExpired()` be jokios žymos, tad
+   * `restoreRecord()` po to tą ID iš senesnės kopijos priimdavo. Tai paneigė ir
+   * `docs/deletion-guarantees.md` teiginį „barjerą palieka VISI ištrynimo
+   * keliai".
+   */
+  const { runRetentionSweep } = require("../utils/retentionSweeper");
+
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
+
+  // Terminas praėjo: TTL + atsarga.
+  const ateitis = Date.now() + jobStore.TTL_MS + 60_000;
+  await runRetentionSweep({ now: ateitis });
+
+  assert.equal(await jobStore.system.get(job.id), null, "pasenęs jobas pašalintas");
+
+  const zyma = await tombstones.get(job.id);
+  assert.ok(zyma, "retencija PRIVALO palikti barjerą");
+  assert.equal(zyma.reason, "retention_policy");
+  assert.equal(zyma.actorKind, "system");
+  assert.equal(zyma.status, S183.DELETED);
+  assert.equal(await tombstones.isDeleted(job.id), true, "atkūrimas iš kopijos bus atmestas");
+});
+
+test("#183 RETENCIJA: svetimos pretenzijos jobo NELIEČIA", async () => {
+  /**
+   * Jei jobą jau trina kita replika ar vartotojo `DELETE`, retencija privalo
+   * pasitraukti - antraip dubliuotų destruktyvų darbą ir lenktyniautų dėl to
+   * paties įrašo.
+   */
+  const { runRetentionSweep } = require("../utils/retentionSweeper");
+
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
+
+  // Kita replika pasiėmė pretenziją.
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+
+  const r = await runRetentionSweep({ now: Date.now() + jobStore.TTL_MS + 60_000 });
+
+  assert.ok(await jobStore.system.get(job.id), "svetimos pretenzijos jobas NEPAŠALINTAS");
+  assert.ok(r.jobsSkipped >= 1, "praleidimas matomas suvestinėje, ne tylus");
+});
+
+test("#183 KOPIJŲ HORIZONTAS: sumažintas nustatymas NESUTRUMPINA barjero", async () => {
+  /**
+   * ⚠️ JAU IŠLEISTA KOPIJA GALIOJIMO NEPRARANDA.
+   *
+   * Terminas anksčiau imdavo tik dabartinę `BACKUP_RETENTION_DAYS` reikšmę, tad
+   * ją sumažinus žyma būdavo pašalinama anksčiau, nei nustoja galioti senesnė
+   * kopija - ir atkūrimas iš jos ištrynimą atstatydavo.
+   */
+  const tolimas = Date.now() + 90 * 24 * 60 * 60 * 1000;
+  await tombstones.recordBackupHorizon(tolimas);
+
+  const suHorizontu = tombstones.retentionMs({
+    ...process.env,
+    BACKUP_RETENTION_DAYS: "1",
+  });
+
+  assert.ok(
+    suHorizontu >= tolimas - Date.now(),
+    "terminas privalo dengti jau išleistos kopijos galiojimą"
+  );
+
+  // Aukščiausias vanduo tik kyla.
+  await tombstones.recordBackupHorizon(Date.now() + 1000);
+  assert.equal(
+    await tombstones.refreshBackupHorizon(),
+    tolimas,
+    "žemesnė reikšmė horizonto NESUMAŽINA"
+  );
 });

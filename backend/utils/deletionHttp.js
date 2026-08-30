@@ -51,16 +51,22 @@ function barjeroAtsakymas(res, statusas) {
   }
 
   /**
-   * ⚠️ 503, NE 204: duomenys ištrinti, BET barjeras liko `deletion_failed`.
+   * ⚠️ ATSAKYMAS NIEKO NETEIGIA APIE DUOMENIS - IR TAI ESMINIS DALYKAS.
    *
-   * 204 teigtų patvirtintą ištrynimą, kurio persistentinis įrašas neliudija.
-   * Užbaigti apskaitą gali tik operatorius (`erasure-marks retry`), tad
-   * klientui tai yra neužbaigta operacija.
+   * `tombstone_unresolved` kyla DVIEM skirtingais atvejais:
+   *
+   *   1. ištrynimas realiai nepavyko ar buvo dalinis - saugyklos, eilės ar
+   *      audito pėdsakų GALI BŪTI LIKĘ;
+   *   2. duomenys pašalinti, bet terminalus žymos perėjimas nepavyko.
+   *
+   * Transporto sluoksnis jų atskirti negali, tad ankstesnė žinutė („duomenys
+   * pašalinti") pirmuoju atveju buvo MELAS - tiksliai ta klaidos rūšis, kurią
+   * 7.5a ir taiso. Sakom tik tai, kas tikrai žinoma: operacija neužbaigta.
    */
   return res.status(503).json({
     error:
-      "Ištrynimo žyma liko neišspręsta. Duomenys pašalinti, bet operaciją turi " +
-      "užbaigti operatorius; užklausą galima pakartoti vėliau.",
+      "Ištrynimas neužbaigtas: žyma liko neišspręsta. Operaciją turi užbaigti " +
+      "operatorius; duomenų būklė iš šio atsakymo nenustatoma.",
     status: statusas,
   });
 }

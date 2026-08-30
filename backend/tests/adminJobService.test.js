@@ -428,3 +428,24 @@ test("#183 NAŠLAITIS: sėkmė NEskelbiama, jei `complete()` grąžina ne `delet
   assert.equal(r.barjeras, "tombstone_unresolved");
   assert.ok(r.outcome, "valymo rezultatas vis tiek grąžinamas - darbas įvyko");
 });
+
+test("#183 OVERRIDE: žyma fiksuoja OPERATORIŲ, ne savininko prašymą", async () => {
+  /**
+   * ⚠️ ŽYMA PERGYVENA JOBĄ IR NEIŠBRAUKIAMA IŠ KOPIJŲ.
+   *
+   * `deleteJobArtefacts` numatytosios reikšmės yra `actor_kind=user` ir
+   * `reason=user_request`. Admin override jų neperduodavo, tad autoritetingame
+   * įraše svetimo jobo ištrynimas atrodė kaip paties savininko prašymas - ir
+   * PASTOVIAI, nes žyma neištrinama. Našlaičių kelias `operator` rašė nuo
+   * pradžių; eiliniam override'ui negali galioti kitaip (§16).
+   */
+  const job = await svetimasJob();
+
+  const r = await adminDeleteJob(job.id, sessionAdmin);
+  assert.equal(r.deleted, true);
+
+  const zyma = await tombstones.get(job.id);
+  assert.ok(zyma, "override privalo palikti žymą");
+  assert.equal(zyma.actorKind, ACTOR_KIND.OPERATOR, "veikė operatorius, ne savininkas");
+  assert.equal(zyma.reason, ERASURE_REASON.OPERATOR_CLEANUP, "priežastis - ne `user_request`");
+});

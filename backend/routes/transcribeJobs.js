@@ -363,6 +363,18 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
       return res.status(404).json({ error: "Jobas nerastas." });
     }
 
+    /**
+     * Įrašas dingo, BET barjeras egzistuoja: kita replika jį ką tik ištrynė.
+     * Atsakymas toks pat kaip savininko kelyje - tas pats atvaizdavimas.
+     */
+    if (!result.result && result.barjeras) {
+      return atsakytiIstrynimu(
+        res,
+        { status: result.barjeras, complete: result.deleted },
+        { jobId: req.params.id, log, kategorijos: false }
+      );
+    }
+
     return atsakytiIstrynimu(res, result.result, { jobId: req.params.id, log });
   }
 

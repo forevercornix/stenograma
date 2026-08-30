@@ -1015,6 +1015,29 @@ function createPostgresStore(pool) {
    * Išmetus jį per TTL, likęs audio failas taptų nebeatsekamas — tas pats
    * sprendimas kaip `memoryStore` ir `redisStore.js:175`.
    */
+  /**
+   * PASENUSIŲ JOB'Ų ID - BE ŠALINIMO (#183).
+   *
+   * ⚠️ Retencijai reikia ID, o ne kiekio: nuo #183 kiekvienas ištrynimo kelias
+   * privalo palikti barjerą, tad žyma rašoma PRIEŠ šalinimą. Predikatas
+   * PRIVALO sutapti su `sweepExpired()` - kitaip retencija žymėtų vienus, o
+   * trintų kitus.
+   */
+  async function listExpired(now = Date.now(), limit = 500) {
+    const riba = new Date(now - TTL_MS).toISOString();
+    const { rows } = await pool.query(
+      `SELECT id FROM jobs
+        WHERE status = ANY($1)
+          AND updated_at < $2
+          AND NOT audio_cleanup_pending
+          AND NOT deletion_pending
+        ORDER BY updated_at
+        LIMIT $3`,
+      [[STATUS.COMPLETED, STATUS.FAILED, STATUS.CANCELLED], riba, limit]
+    );
+    return rows.map((r) => r.id);
+  }
+
   async function sweepExpired(now = Date.now()) {
     const riba = new Date(now - TTL_MS).toISOString();
     const { rowCount } = await pool.query(
@@ -1100,6 +1123,7 @@ function createPostgresStore(pool) {
     getOwned,
     updateOwned,
     removeOwned,
+    listExpired,
     sweepExpired,
     size,
     listAll,

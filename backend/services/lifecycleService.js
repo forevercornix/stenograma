@@ -261,6 +261,20 @@ async function deleteJobArtefacts(job, jobId, options = {}) {
    */
   const operation = _performDeletion(job, jobId, options)
     .catch(async (klaida) => {
+      /**
+       * ⚠️ ŽYMIMA TIK SAVO PRETENZIJA (#183 Codex).
+       *
+       * Anksčiau šis `catch` pervesdavo žymą į `deletion_failed` BET KOKIU
+       * atveju - įskaitant tą, kai klaida įvyko dar `mark()`/`claimRetry()`
+       * viduje ir ši replika pretenzijos NIEKADA negavo. Tada ji nusukdavo
+       * SVETIMĄ, veikiančią pretenziją: A toliau trintų, o jos `complete()`
+       * būtų atmestas, ir realiai pašalinti duomenys liktų užrašyti kaip
+       * neišspręsti - plius nereikalingas operatoriaus pakartojimas.
+       *
+       * `klaida.vykdytojas` nustato `_performDeletion` iškart po pretenzijos.
+       */
+      if (klaida && klaida.vykdytojas !== true) throw klaida;
+
       try {
         await tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.FAILED, {
           failureKind: classifyFailure(klaida && klaida.message),
@@ -311,6 +325,16 @@ async function _performDeletion(
    * Grąžinam determinuotą būseną NEPRADĖJĘ nė vieno eilės, saugyklos ar audito
    * veiksmo - DoD reikalauja būtent to („jokio papildomo I/O nepradedama").
    */
+  /**
+   * Nuo šios vietos klaidos priklauso ŠIAI pretenzijai - žr. `deleteJobArtefacts`
+   * `catch`. Vėliava keliauja su klaida, nes `catch` yra už funkcijos ribų.
+   */
+  const zymetiNesekme = (fn) =>
+    fn().catch((e) => {
+      if (vykdytojas) e.vykdytojas = true;
+      throw e;
+    });
+
   if (!vykdytojas && marker && marker.status === tombstones.TOMBSTONE_STATUS.PENDING) {
     return buildResult({
       jobId,
@@ -348,7 +372,7 @@ async function _performDeletion(
     });
   }
 
-  const outcome = await eraseJob(job);
+  const outcome = await zymetiNesekme(() => eraseJob(job));
 
   const deleted = [];
   const remaining = [];
@@ -429,7 +453,7 @@ async function _performDeletion(
    * dokumentuotą `erasure-marks retry`, kuris rašo `ERASURE_MARK_RETRIED`.
    * Automatinis savaiminis išsisprendimas būtų būtent tai, ką 7.5a uždraudė.
    */
-  await writeAudit(result);
+  await zymetiNesekme(() => writeAudit(result));
 
   /**
    * ⚠️ NESĖKMĖS KATEGORIJA, NE ŽINUTĖ. `failures` turi tik klasifikaciją

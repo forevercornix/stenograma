@@ -195,6 +195,47 @@ function createErasureMarkStore(pool) {
         [jobId]
       );
 
+      /**
+       * ⚠️ TUŠČIAS REZULTATAS ČIA YRA LENKTYNĖS SU RETENCIJA, NE „NĖRA ŽYMOS".
+       *
+       * `purgeExpired()` NEIMA per-job advisory lock'o (jis dirba batch'ais), tad
+       * tarp `ON CONFLICT DO NOTHING` ir šio `SELECT` pasibaigusio termino
+       * `deleted` eilutė gali būti pašalinta. Anksčiau tai duodavo įrašą be
+       * statuso su `claimed: false`, ir ABU ištrynimo keliai kritdavo į
+       * destruktyvų I/O tarsi turėdami pretenziją - o `complete()` dingusios
+       * žymos nebeatkurtų. Ištrynimas liktų BE barjero.
+       *
+       * Kartojam įterpimą: eilutės nebėra, tad šįkart jis pavyks, ir kvietėjas
+       * gaus TIKRĄ pretenziją. Vienas pakartojimas pakanka - antrą kartą
+       * pataikyti į tą patį langą su ką tik sukurta `pending` eilute neįmanoma:
+       * retencija šalina tik `deleted`.
+       */
+      if (!esama.rows.length) {
+        const { rows: pakartoti } = await klientas.query(
+          `INSERT INTO erasure_marks (job_id, status, reason, actor_kind, claim_token)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (job_id) DO NOTHING
+           RETURNING ${STULPELIAI}`,
+          [jobId, TOMBSTONE_STATUS.PENDING, reason, actorKind, randomUUID()]
+        );
+
+        if (pakartoti.length) return { ...iIrasa(pakartoti[0]), claimed: true };
+
+        const treti = await klientas.query(
+          `SELECT ${STULPELIAI} FROM erasure_marks WHERE job_id = $1`,
+          [jobId]
+        );
+
+        if (!treti.rows.length) {
+          throw new Error(
+            `Ištrynimo žymos ${jobId} nepavyko nei rasti, nei sukurti. Tęsti ` +
+              "negalima: ištrynimas be barjero yra negrįžtamas."
+          );
+        }
+
+        return { ...iIrasa(treti.rows[0]), claimed: false };
+      }
+
       return { ...iIrasa(esama.rows[0]), claimed: false };
     });
   }
@@ -239,6 +280,35 @@ function createErasureMarkStore(pool) {
 
       return rows.length ? iIrasa(rows[0]) : null;
     });
+  }
+
+  /**
+   * IŠLEISTOS KOPIJOS GALIOJIMAS - AUKŠČIAUSIAS VANDUO (#183 Codex, P1).
+   *
+   * ⚠️ `GREATEST`, ne priskyrimas: horizontas gali tik KILTI. Sumažinus
+   * `BACKUP_RETENTION_DAYS`, jau išleista ilgesnio galiojimo kopija savo
+   * galiojimo nepraranda, tad ir barjeras negali sutrumpėti.
+   */
+  async function recordBackupHorizon(expiresAtMs) {
+    if (!Number.isFinite(expiresAtMs)) return null;
+
+    const { rows } = await pool.query(
+      `INSERT INTO backup_horizon (id, expires_at, updated_at)
+       VALUES (true, $1, now())
+       ON CONFLICT (id) DO UPDATE
+         SET expires_at = GREATEST(backup_horizon.expires_at, EXCLUDED.expires_at),
+             updated_at = now()
+       RETURNING expires_at`,
+      [new Date(expiresAtMs).toISOString()]
+    );
+
+    return rows.length ? new Date(rows[0].expires_at).getTime() : null;
+  }
+
+  /** Grąžina aukščiausią išleistos kopijos galiojimą arba `null`. */
+  async function backupHorizon() {
+    const { rows } = await pool.query("SELECT expires_at FROM backup_horizon WHERE id");
+    return rows.length ? new Date(rows[0].expires_at).getTime() : null;
   }
 
   /** Sąmoningas lentelės apėjimas - tik operatoriaus išeičiai. Žr. `memoryStore`. */
@@ -471,6 +541,8 @@ function createErasureMarkStore(pool) {
     transition,
     transitionOverride,
     claimRetry,
+    recordBackupHorizon,
+    backupHorizon,
     get,
     isBarred,
     assertNotBarred,
@@ -485,6 +557,7 @@ function createErasureMarkStore(pool) {
 }
 
 module.exports = {
+  STULPELIAI,
   assertNotBarredWithClient,
   createErasureMarkStore,
   LOCK_NAMESPACE,

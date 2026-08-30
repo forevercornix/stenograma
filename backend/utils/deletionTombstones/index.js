@@ -29,7 +29,12 @@ const { Pool } = require("pg");
 
 const { createLogger } = require("../logger");
 const memoryStore = require("./memoryStore");
-const { createErasureMarkStore, LOCK_NAMESPACE, RETENCIJOS_BATCH } = require("./postgresStore");
+const {
+  createErasureMarkStore,
+  LOCK_NAMESPACE,
+  RETENCIJOS_BATCH,
+  STULPELIAI,
+} = require("./postgresStore");
 const states = require("./states");
 const {
   TOMBSTONE_STATUS,
@@ -80,13 +85,25 @@ async function initializePostgres(env) {
   });
 
   try {
-    await pool.query("SELECT 1 FROM erasure_marks LIMIT 1");
+    /**
+     * ⚠️ TIKRINAMI STULPELIAI, NE VIEN LENTELĖ (#183 Codex).
+     *
+     * `SELECT 1 FROM erasure_marks` pavyksta ir tada, kai diegimas nutrūko po
+     * lentelės sukūrimo, bet PRIEŠ vėlesnę migraciją. Serveris tada priimtų
+     * srautą, o kiekvienas `mark()` ir `get()` kristų vykdymo metu, nes
+     * `claim_token` stulpelio nėra - tyliai, jau po readiness.
+     *
+     * `SELECT <stulpeliai> ... WHERE false` yra planavimo, ne skaitymo
+     * operacija: trūkstamas stulpelis duoda `42703` dar prieš eilučių skaitymą,
+     * o esantys nieko nekainuoja.
+     */
+    await pool.query(`SELECT ${STULPELIAI} FROM erasure_marks WHERE false`);
   } catch (err) {
     await pool.end().catch(() => {});
     throw new Error(
       `Ištrynimo žymų lentelė nepasiekiama (${err.message}). Grįžimas į atmintį čia ` +
         "būtų blogesnė pusė nei kritimas: barjeras tyliai nustotų galioti tarp replikų, " +
-        "o ištrinti job'ai galėtų būti prikelti. Paleiskite migracijas (`npm run migrate:up`)."
+        "o ištrinti job'ai galėtų būti prikelti. Paleiskite migracijas (`npm run migrate:up`) - įskaitant vėlesnes už lentelės sukūrimą."
     );
   }
 
@@ -331,6 +348,35 @@ async function get(jobId) {
 const barrierState = get;
 
 /**
+ * Aukščiausias išleistos kopijos galiojimas, perskaitytas iš saugyklos.
+ *
+ * ⚠️ Talpykla, ne autoritetas: autoritetas yra `backup_horizon` lentelė.
+ * Atnaujinama kaskart ją rašant ir prieš retencijos ciklą, tad sumažinta
+ * `BACKUP_RETENTION_DAYS` reikšmė barjero nesutrumpina.
+ */
+let _kopijuHorizontas = null;
+
+/** Užfiksuoja išleistos kopijos galiojimą. Kviečia `backupService`. */
+async function recordBackupHorizon(expiresAtMs) {
+  await ensureInit();
+
+  const naujas = await store.recordBackupHorizon(expiresAtMs);
+  if (Number.isFinite(naujas)) _kopijuHorizontas = naujas;
+
+  return naujas;
+}
+
+/** Perskaito autoritetingą horizontą ir atnaujina talpyklą. */
+async function refreshBackupHorizon() {
+  await ensureInit();
+
+  const reiksme = await store.backupHorizon();
+  _kopijuHorizontas = Number.isFinite(reiksme) ? reiksme : null;
+
+  return _kopijuHorizontas;
+}
+
+/**
  * PRETENZIJA Į IŠTRYNIMO VYKDYMĄ (#183, 7.5a DoD).
  *
  * ⚠️ VIENAS MECHANIZMAS, NE DU. Ankstesnė versija turėjo išimtį
@@ -447,6 +493,23 @@ function retentionMs(env = process.env) {
   try {
     const { retentionDays } = require("../backupPolicy");
     kopijos = Number(retentionDays(env)) * 24 * 60 * 60 * 1000;
+
+    /**
+     * ⚠️ JAU IŠLEISTA KOPIJA GALI GALIOTI ILGIAU NEI DABARTINIS NUSTATYMAS.
+     *
+     * `BACKUP_RETENTION_DAYS` sumažinimas neatšaukia anksčiau eksportuotos
+     * kopijos: ji tebegalioja pagal savo manifestą. Skaičiuojant tik iš
+     * dabartinės reikšmės, žyma būtų pašalinta anksčiau, nei nustoja galioti
+     * senesnė kopija - ir atkūrimas iš jos ištrynimą atstatytų.
+     *
+     * `_kopijuHorizontas` yra aukščiausias KŪRIMO metu užfiksuotas galiojimas.
+     * Jis niekada nemažėja, tad barjeras negali sutrumpėti dėl konfigūracijos
+     * pakeitimo. `null` reiškia, kad kopijų dar nebuvo (arba jos kurtos be
+     * `DATABASE_URL` - žr. `docs/deletion-guarantees.md`).
+     */
+    if (Number.isFinite(_kopijuHorizontas)) {
+      kopijos = Math.max(kopijos, _kopijuHorizontas - Date.now());
+    }
   } catch (klaida) {
     log.warn("Kopijų retencijos apskaičiuoti nepavyko – žymos NEŠALINAMOS", {
       klaida: klaida.message,
@@ -484,10 +547,21 @@ function retentionMs(env = process.env) {
  * antrą laikrodį ir įrašą, rodantį tik vieno jų darbą.
  */
 async function purgeExpired(now = Date.now(), env = process.env) {
+  await ensureInit();
+
+  /**
+   * ⚠️ HORIZONTAS PERSKAITOMAS PRIEŠ TERMINO SKAIČIAVIMĄ.
+   *
+   * Kopiją galėjo sukurti KITA replika, tad proceso talpykla be šio skaitymo
+   * būtų pasenusi, ir žymos būtų šalinamos pagal trumpesnį terminą nei tikrasis
+   * išleistų kopijų galiojimas.
+   */
+  await refreshBackupHorizon().catch((klaida) =>
+    log.warn("Kopijų horizonto perskaityti nepavyko", { klaida: klaida.message })
+  );
+
   const terminas = retentionMs(env);
   if (terminas === null) return { removed: 0, skipped: true };
-
-  await ensureInit();
 
   /**
    * ⚠️ RIBĄ SKAIČIUOJA SAUGYKLA (#183 Codex, P2).
@@ -568,6 +642,8 @@ module.exports = {
   get,
   barrierState,
   claimForDeletion,
+  recordBackupHorizon,
+  refreshBackupHorizon,
   assertNotBarred,
   listUnresolved,
   retentionMs,

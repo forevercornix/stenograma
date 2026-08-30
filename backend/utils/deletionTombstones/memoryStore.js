@@ -199,6 +199,24 @@ async function listUnresolved({ olderThanMs = 0, limit = 100, now = Date.now() }
  * Atmintinis režimas ir taip yra vieno proceso - būtent todėl jis neduoda
  * replikoms bendro barjero (žr. `ATMINTIES_ISPEJIMAS`).
  */
+/**
+ * Aukščiausias išleistos kopijos galiojimas - atmintinis atitikmuo.
+ *
+ * ⚠️ NEIŠGYVENA RESTARTO, kaip ir pačios žymos šiame režime. Tai ta pati
+ * apribojimo klasė, jau įvardyta `ATMINTIES_ISPEJIMAS`.
+ */
+let kopijuHorizontas = null;
+
+async function recordBackupHorizon(expiresAtMs) {
+  if (!Number.isFinite(expiresAtMs)) return kopijuHorizontas;
+  kopijuHorizontas = Math.max(kopijuHorizontas || 0, expiresAtMs);
+  return kopijuHorizontas;
+}
+
+async function backupHorizon() {
+  return kopijuHorizontas;
+}
+
 async function claimRetry(jobId) {
   if (!jobId) return null;
 
@@ -269,6 +287,8 @@ async function probe() {
 
 module.exports = {
   claimRetry,
+  recordBackupHorizon,
+  backupHorizon,
   probe,
   retencijosRiba,
   mark,

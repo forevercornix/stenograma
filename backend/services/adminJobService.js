@@ -115,6 +115,36 @@ async function adminDeleteJob(jobId, actor) {
      * sprendimas, kurį turi priimti politika iš naujo – kitaip lenktynės
      * paverstų `DELETE` operaciją kita operacija be jokio pėdsako.
      */
+    /**
+     * ⚠️ BET PIRMA PAKLAUSIAM BARJERO (#183 Codex).
+     *
+     * Dažniausia priežastis, kodėl įrašas dingo, yra ta, kad KITA replika jį
+     * ką tik ištrynė - ir tada egzistuoja autoritetinga žyma. Grąžinti 404 tokiu
+     * atveju reikštų, kad lygiagretus administracinis `DELETE` gauna „nerasta"
+     * ten, kur savininko kelias grąžina 202 arba 204 (AGENTS.md §16).
+     *
+     * `barrierState` yra SKAITYMAS: pretenzijos jis nekuria, tad fail-closed
+     * taisyklė „nepereinam tyliai į našlaičių valymą" lieka galioti - mes
+     * niekuo netrinam, tik teisingai atsakom.
+     */
+    const barjeras = await tombstones.barrierState(jobId);
+
+    if (barjeras) {
+      if (barjeras.status === TOMBSTONE_STATUS.DELETED) {
+        return { deleted: true, reason: null, barjeras: BARRIER_OUTCOME.ALREADY_DELETED };
+      }
+
+      return {
+        deleted: false,
+        reason: barjeras.status === TOMBSTONE_STATUS.FAILED
+          ? BARRIER_OUTCOME.TOMBSTONE_UNRESOLVED
+          : BARRIER_OUTCOME.IN_PROGRESS,
+        barjeras: barjeras.status === TOMBSTONE_STATUS.FAILED
+          ? BARRIER_OUTCOME.TOMBSTONE_UNRESOLVED
+          : BARRIER_OUTCOME.IN_PROGRESS,
+      };
+    }
+
     return { deleted: false, reason: "vanished" };
   }
 
@@ -131,8 +161,19 @@ async function adminDeleteJob(jobId, actor) {
    * `complete`), tvarko tombstone'us ir ištrynimo kvitus. Antras lygiagretus
    * kriterijus neišvengiamai išsiskirtų su esamu savininko keliu.
    */
+  /**
+   * ⚠️ `actorKind` IR `reason` PERDUODAMI EKSPLICITIŠKAI (#183 Codex).
+   *
+   * Be jų `deleteJobArtefacts` numatytosios reikšmės įrašytų `actor_kind=user`
+   * ir `reason=user_request` - t. y. autoritetingoje žymoje administracinis
+   * override atrodytų kaip paties savininko prašymas. Žyma pergyvena jobą ir
+   * nėra išbraukiama iš kopijų, tad ta klaida būtų PASTOVI: našlaičių kelias
+   * jau rašo `operator`, ir eiliniam override'ui negali galioti kitaip.
+   */
   const result = await lifecycleService.deleteJobArtefacts(job, jobId, {
     actor: actor.ownerId,
+    actorKind: ACTOR_KIND.OPERATOR,
+    reason: ERASURE_REASON.OPERATOR_CLEANUP,
   });
 
   await rasytiAudita({
@@ -214,7 +255,35 @@ async function valytiNaslaitiSuZyma(jobId, actorKind) {
     }
   }
 
-  const outcome = await eraseOrphanedJobData(jobId, { scope: "system" });
+  /**
+   * ⚠️ METIMAS PO PRETENZIJOS PRIVALO PALIKTI `deletion_failed` (#183 Codex).
+   *
+   * `eraseOrphanedJobData()` gali mesti - ryškiausiai tada, kai blokuojantis
+   * `DATA_ERASED` kvitas krinta jau PO destruktyvaus valymo. Be šio `catch`
+   * žyma liktų `deletion_pending` be vykdytojo, ir kiekvienas vėlesnis valymas
+   * gautų 202 amžinai. Operatorius tada turėtų tai klaidingai kvalifikuoti kaip
+   * „prarastą vykdytoją" (`release`), nors vykdytojas darbą baigė.
+   *
+   * Ta pati tvarka kaip savininko kelyje, ir tik SAVO pretenzijai: čia mes
+   * ką tik ją gavom.
+   */
+  let outcome;
+  try {
+    outcome = await eraseOrphanedJobData(jobId, { scope: "system" });
+  } catch (klaida) {
+    await tombstones
+      .complete(jobId, TOMBSTONE_STATUS.FAILED, {
+        failureKind: lifecycleService.classifyFailure(klaida && klaida.message),
+      })
+      .catch((zymosKlaida) =>
+        log.error("Nepavyko pažymėti našlaičio žymos kaip `deletion_failed`", {
+          jobId,
+          klaida: zymosKlaida.message,
+        })
+      );
+
+    throw klaida;
+  }
 
   /**
    * Ta pati taisyklė kaip `adminDeleteJob`: sėkmė iš rezultato, ne iš to, kad

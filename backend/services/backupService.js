@@ -1,3 +1,4 @@
+const tombstones = require("../utils/deletionTombstones");
 const jobStore = require("../utils/jobStore");
 const { rasytiAudita } = require("../utils/auditWrite");
 const fileStorage = require("../utils/fileStorage");
@@ -133,6 +134,29 @@ async function createBackup({ actor = null, env = process.env } = {}) {
     checksum: "pending",
     env,
   });
+
+  /**
+   * ⚠️ IŠLEISTOS KOPIJOS GALIOJIMAS FIKSUOJAMAS PERSISTENTIŠKAI (#183 Codex, P1).
+   *
+   * Ištrynimo žymos terminas remiasi tuo, kiek laiko job'as dar gali būti
+   * atkurtas. Skaičiuojant tik iš DABARTINĖS `BACKUP_RETENTION_DAYS`, šios
+   * kopijos galiojimą būtų galima „sutrumpinti" tiesiog pakeitus nustatymą - o
+   * pati kopija jau išleista ir galioja pagal savo manifestą.
+   *
+   * ⚠️ NEBLOKUOJANTIS: kopija jau sukurta, ir jos negalima atšaukti dėl
+   * apskaitos įrašo. Klaida garsiai logojama - tylus praleidimas reikštų, kad
+   * barjeras gali sutrumpėti be jokio signalo.
+   */
+  const galiojaIki = Date.parse(manifest.expiresAt);
+
+  if (Number.isFinite(galiojaIki)) {
+    await tombstones.recordBackupHorizon(galiojaIki).catch((klaida) =>
+      log.error(
+        "Kopijos galiojimo NEPAVYKO užfiksuoti - ištrynimo žymos gali būti " +
+          `pašalintos anksčiau, nei nustoja galioti ši kopija: ${klaida.message}`
+      )
+    );
+  }
 
   manifest.encrypted = encrypted;
   manifest.encryptionAlgorithm = encrypted ? `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}` : null;

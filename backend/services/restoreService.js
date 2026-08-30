@@ -533,10 +533,44 @@ async function _validateContent(parsed) {
 async function _apply(parsed, { env }) {
   let jobs = 0;
   let audio = 0;
+  /** Kiek audio failų NEATKURTA dėl ištrynimo žymos - tylus praleidimas klaidintų. */
+  let praleistasAudio = 0;
+
+  /**
+   * ⚠️ ŽYMĖTŲ JOB'Ų AUDIO NEATKURIAMAS (#183 Codex, P1).
+   *
+   * `jobStore.restoreRecord()` praleidžia tombstone'intą ĮRAŠĄ, bet audio ciklas
+   * anksčiau rašė KIEKVIENĄ `parsed.audio` elementą besąlygiškai. Ištrinto jobo
+   * garso failas atsikurdavo originaliu saugyklos raktu - t. y. barjeras
+   * apsaugodavo metaduomenis, o patys asmens duomenys grįždavo. Įrašo sargas
+   * nesaugo visų serializuotų artefaktų; audio reikia savo filtro.
+   *
+   * ⚠️ SĄSAJA IMAMA IŠ PAČIOS KOPIJOS, NE IŠ NAUJO LAUKO.
+   *
+   * `audio` elementai turi tik `key`, tad `jobId` gaunamas iš tos pačios kopijos
+   * `jobs` sąrašo (`job.storageKey`). Taip senos kopijos lieka atkuriamos: naujo
+   * formato lauko nereikia, o žymos patikra vis tiek įvyksta.
+   *
+   * ⚠️ Raktas be jokio jobo kopijoje NĖRA blokuojamas: jis gali priklausyti
+   * job'ui, kurio įrašas iš kopijos iškrito teisėtai. Blokuojam tik tai, apie ką
+   * turim autoritetingą atsakymą.
+   */
+  const blokuotiRaktai = new Set();
+
+  for (const job of parsed.jobs) {
+    if (!job || !job.id || !job.storageKey) continue;
+    if (await tombstones.isDeleted(job.id)) blokuotiRaktai.add(job.storageKey);
+  }
 
   // `parsed.audit` sąmoningai ignoruojamas - žr. `_validateContent`.
   for (const audioEntry of parsed.audio) {
     if (!audioEntry.key || !audioEntry.content) continue;
+
+    if (blokuotiRaktai.has(audioEntry.key)) {
+      praleistasAudio += 1;
+      continue;
+    }
+
     await fileStorage.putAtKey(audioEntry.key, Buffer.from(audioEntry.content, "base64"));
     audio += 1;
   }
@@ -547,7 +581,11 @@ async function _apply(parsed, { env }) {
   }
 
   void env;
-  return { jobs, audio };
+  if (praleistasAudio) {
+    log.warn("Audio failai NEATKURTI dėl ištrynimo žymos", { praleistasAudio });
+  }
+
+  return { jobs, audio, praleistasAudio };
 }
 
 /** ⚠️ ASYNC NUO 7.4a: `_audit()` dabar async (#210). */

@@ -36,6 +36,30 @@ ji pasensta ir tampa klaidinanti.
 
 ### Changed
 
+- ⚠️ **Retencija nuo šiol palieka ištrynimo žymą** (#183, 7.5a). Pasenusių job'ų
+  šalinimas ėjo bendru `sweepExpired()` be jokio barjero, ir
+  `ERASURE_REASON.RETENTION_POLICY` neturėjo nė vieno kvietėjo – atkūrimas iš
+  senesnės kopijos tokį ID priimdavo. Dabar žyma rašoma prieš šalinimą, o
+  job'as, kurį jau tvarko kitas vykdytojas, praleidžiamas (`jobsSkipped`).
+
+  ⚠️ **Išimtis: `JOB_STORE_BACKEND=redis`** – ten terminą vykdo pats Redis per
+  `EXPIRE`, tad žymos įrašyti nėra kur. Įvardyta `docs/deletion-guarantees.md`.
+
+- ⚠️ **Atkūrimas nebeatkuria žymėto jobo AUDIO** (#183). Įrašo sargas veikė, bet
+  garso failai buvo rašomi besąlygiškai – ištrinto jobo audio grįždavo originaliu
+  saugyklos raktu.
+
+- **Išleistos kopijos galiojimas fiksuojamas** `backup_horizon` lentelėje
+  (migracija `1755800000000`). `BACKUP_RETENTION_DAYS` sumažinimas nebesutrumpina
+  ištrynimo žymų termino: jau eksportuota kopija galioja pagal savo manifestą.
+
+- **`DELETION_TOMBSTONE_TTL_HOURS` nebėra autoritetas** – jis gali terminą tik
+  pailginti. Faktinis terminas išvedamas ir su numatytosiomis reikšmėmis yra
+  ~8 paros, ne 72 val. Dokumentacija pataisyta.
+
+- **Admin override žymoje fiksuojamas `operator` / `operator_cleanup`**, ne
+  `user` / `user_request` (#183).
+
 - **Vieno vykdytojo garantija dabar galioja ir operatoriaus autorizuotam
   pakartojimui** (#183, 7.5a). `erasure_marks` gavo `claim_token` stulpelį:
   pretenzija į ištrynimo vykdymą yra būsena, ne akimirka, tad ir vėliau atėjusi
