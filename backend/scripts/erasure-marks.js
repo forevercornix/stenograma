@@ -45,6 +45,7 @@ require("dotenv").config({ path: path.resolve(__dirname, "..", "..", ".env") });
 
 const erasureMarks = require("../services/erasureMarkService");
 const tombstones = require("../utils/deletionTombstones");
+const auditStore = require("../utils/auditStore");
 
 function arg(vardas, numatytas = null) {
   const i = process.argv.indexOf(`--${vardas}`);
@@ -130,16 +131,39 @@ async function main() {
   return 2;
 }
 
+/**
+ * ⚠️ AUDITO SAUGYKLA INICIJUOJAMA IR UŽDAROMA (#183 Codex, P1).
+ *
+ * Be `auditStore.init()` su `AUDIT_BACKEND=postgres` `rasytiAudita()` rašytų į
+ * numatytąjį ATMINTIES fasadą, procesas baigtųsi, ir kiekvienas
+ * `ERASURE_MARK_RETRIED` / `ERASURE_MARK_FORCE_RESOLVED` dingtų. Operatoriaus
+ * veiksmai liktų neaudituoti, nors dokumentacija žada patvarų pėdsaką.
+ *
+ * ⚠️ TAI ANTRA TOS PAČIOS KLAIDOS PUSĖ. `.env` pataisa sutvarkė DUOMENIS -
+ * žyma keliauja į PostgreSQL. Auditas keliavo į niekur. Vieno entrypoint'o dvi
+ * saugyklos, ir inicijuota buvo tik viena.
+ *
+ * ⚠️ UŽDAROMA ABIEM KELIAIS. Neuždarius pool'o `process.exit()` nutraukia
+ * jungtis be `COMMIT` patvirtinimo laukimo; `shutdown()` klaidos nutylimos, nes
+ * skriptas jau turi rezultatą, o uždarymo triukšmas paslėptų tikrąjį atsakymą.
+ */
+async function isvalyti() {
+  await auditStore.shutdown().catch(() => {});
+  await tombstones.shutdown().catch(() => {});
+}
+
 /** ⚠️ Skriptas vykdomas TIK paleistas tiesiogiai - testai importuoja `main`. */
 if (require.main === module) {
-  main()
+  auditStore
+    .init()
+    .then(main)
     .then(async (kodas) => {
-      await tombstones.shutdown();
+      await isvalyti();
       process.exit(kodas);
     })
     .catch(async (klaida) => {
       console.error(`Klaida: ${klaida.message}`);
-      await tombstones.shutdown().catch(() => {});
+      await isvalyti();
       process.exit(1);
     });
 }

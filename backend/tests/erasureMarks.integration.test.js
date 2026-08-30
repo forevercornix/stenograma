@@ -556,3 +556,53 @@ test("RESTORE: `restoreService` niekur neliečia `erasure_marks` - tripwire", { 
     "`restoreService` NEGALI minėti `erasure_marks` - jos gyvavimo ciklas ne jo"
   );
 });
+
+test("SKRIPTAS: operatoriaus veiksmas palieka RAW `audit_log` įrašą", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ ĮRODYMAS RAW LENTELĖJE, NE PER FASADĄ (#183 Codex, P1).
+   *
+   * Be `auditStore.init()` skriptas rašytų į atminties fasadą, procesas
+   * baigtųsi, ir įrašas dingtų - o `list` per tą patį procesą jo net
+   * neparodytų kaip trūkstamo. Vienintelis būdas tai atskirti - paleisti
+   * skriptą ATSKIRU procesu ir paskui pažiūrėti į lentelę.
+   */
+  const path = require("node:path");
+  const { url, pool, resursai } = await paruostiDb("erasure_skripto_auditas");
+
+  try {
+    const jobId = crypto.randomUUID();
+    await irasytiTevineEilute(pool, jobId);
+
+    const store = createErasureMarkStore(pool);
+    await store.mark(jobId, { reason: REASON });
+    await store.transition(jobId, S.FAILED, { failureKind: "storage" });
+
+    const skriptas = path.join(__dirname, "..", "scripts", "erasure-marks.js");
+
+    execFileSync("node", [skriptas, "force-resolve", jobId, "--actor", "operatorius-testas"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DATABASE_URL: url,
+        AUDIT_BACKEND: "postgres",
+        AUDIT_ID_SALT: "testine-druska-skriptui",
+        AUDIT_ID_SALT_ID: "skriptas-2026",
+      },
+    });
+
+    const { rows } = await pool.query(
+      "SELECT event, result FROM audit_log WHERE event = 'ERASURE_MARK_FORCE_RESOLVED'"
+    );
+
+    assert.equal(rows.length, 1, "operatoriaus veiksmas privalo palikti PATVARŲ pėdsaką");
+    assert.equal(rows[0].result, "success", "įvykęs perėjimas rašomas kaip sėkmė");
+
+    /** Ir pati žyma tikrai perėjo - kitaip auditas būtų teisingas dėl kitos priežasties. */
+    const { rows: zyma } = await pool.query("SELECT status FROM erasure_marks WHERE job_id = $1", [
+      jobId,
+    ]);
+    assert.equal(zyma[0].status, S.DELETED);
+  } finally {
+    await resursai.isvalyti();
+  }
+});

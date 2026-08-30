@@ -548,3 +548,46 @@ test("VIENAS AUTORITETAS: patikra REALIAI gaudo - savitikra", () => {
     assert.ok(!SQL_FORMA.test(eilute), `šablonas NETURI gaudyti prozos: ${eilute}`);
   }
 });
+
+test("ATOMIŠKUMAS: neteisingas `actorKind` NEPALIEKA pusiau įvykusio perėjimo", async () => {
+  /**
+   * ⚠️ VALIDACIJA PRIEŠ MUTACIJĄ (#183 Codex, P2).
+   *
+   * Anksčiau `assertActorKind` buvo kviečiamas PO to, kai `status`,
+   * `updatedAt` ir `completedAt` jau pakeisti. Kvietėjas matydavo atmestą
+   * operaciją - be audito įrašo, nes metama - o barjeras VIS TIEK būdavo
+   * perėjęs. PostgreSQL validuoja prieš `UPDATE`, tad tas pats įvedimas
+   * duodavo skirtingą atomiškumą skirtinguose backend'uose.
+   *
+   * ⚠️ TIKRINAMA SAUGYKLA TIESIOGIAI, ne fasadas: `complete()` `actorKind`
+   * neperduoda - jį perduoda `retry`/`forceResolve` keliai, o defektas gyvena
+   * `_perkelti()` viduje. Per fasadą testas nieko neįrodytų.
+   */
+  const memoryStore = require("../utils/deletionTombstones/memoryStore");
+
+  await memoryStore.clear();
+  await memoryStore.mark("atom1", { reason: states.ERASURE_REASON.USER_REQUEST });
+
+  const pries = await memoryStore.get("atom1");
+  assert.equal(pries.status, S.PENDING, "prielaida: žyma pradinėje būsenoje");
+
+  await assert.rejects(
+    () => memoryStore.transition("atom1", S.DELETED, { actorKind: "nesamas-veikejas" }),
+    /Nežinoma aktoriaus kategorija/,
+    "neleistina kategorija privalo būti atmesta"
+  );
+
+  const po = await memoryStore.get("atom1");
+
+  assert.equal(po.status, S.PENDING, "būsena NEGALI būti pasikeitusi po atmestos operacijos");
+  assert.equal(po.completedAt, null, "ištrynimo laikas irgi neturi atsirasti");
+  assert.equal(po.updatedAt, pries.updatedAt, "įrašas neturi būti paliestas");
+
+  /** Teisinga kategorija tuo pačiu keliu privalo praeiti - kitaip testas įrodytų tik lūžį. */
+  const gerai = await memoryStore.transition("atom1", S.DELETED, {
+    actorKind: states.ACTOR_KIND.OPERATOR,
+  });
+  assert.equal(gerai.status, S.DELETED);
+
+  await memoryStore.clear();
+});

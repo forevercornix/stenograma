@@ -334,19 +334,28 @@ function createErasureMarkStore(pool) {
      * ZONDAS: LENTELĖ PASIEKIAMA IR TEISĖS YRA (#183 Codex, P1).
      *
      * ⚠️ NE `SELECT 1`. Ryšys gali būti gyvas, o `erasure_marks` neegzistuoti
-     * (nepritaikyta migracija) arba rolė neturėti `INSERT`/`UPDATE` - tada
-     * barjeras kristų VYKDYMO metu, jau priėmus srautą. Zondas nemutuoja:
+     * (nepritaikyta migracija) arba rolė neturėti teisių - tada barjeras kristų
+     * VYKDYMO metu, jau priėmus srautą. Zondas nemutuoja:
      * `has_table_privilege()` yra katalogo funkcija.
+     *
+     * ⚠️ `DELETE` TIKRINAMAS KARTU (#183 Codex, P2). Be jo readiness liktų
+     * žalias, o kiekvienas retencijos sweep kristų ties `purgeExpired()`, ir
+     * terminalės žymos kauptųsi neribotai - tyliai, nes barjero skaitymas
+     * veiktų. Ta pati klaida kaip 7.4f audito zonde, kur `DELETE` pridėtas
+     * būtent dėl GDPR kelio.
      */
     async probe() {
       const { rows } = await pool.query(
         `SELECT has_table_privilege('erasure_marks', 'SELECT') AS skaityti,
                 has_table_privilege('erasure_marks', 'INSERT') AS rasyti,
-                has_table_privilege('erasure_marks', 'UPDATE') AS keisti`
+                has_table_privilege('erasure_marks', 'UPDATE') AS keisti,
+                has_table_privilege('erasure_marks', 'DELETE') AS trinti`
       );
 
       const e = rows[0];
-      return e.skaityti === true && e.rasyti === true && e.keisti === true;
+      return (
+        e.skaityti === true && e.rasyti === true && e.keisti === true && e.trinti === true
+      );
     },
     mark,
     transition,

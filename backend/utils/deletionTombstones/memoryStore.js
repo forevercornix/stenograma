@@ -79,7 +79,8 @@ async function transition(jobId, to, options = {}) {
  *
  * `forceResolve` veda `deletion_failed → deleted`, ko įprasta mašina neleidžia:
  * ten retry privalo eiti per `pending`. Tai ne spraga, o dokumentuotas rankinis
- * sprendimas, kurį `erasureMarkService` fiksuoja auditu PRIEŠ veiksmą.
+ * sprendimas, kurį `erasureMarkService` fiksuoja auditu PO perėjimo, su
+ * `success` pagal faktinį rezultatą (#183).
  *
  * Atskiras vardas, o ne argumentas: apėjimas privalo būti matomas kvietimo
  * vietoje ir peržiūroje, ne paslėptas parametre.
@@ -98,6 +99,21 @@ async function _perkelti(
   if (!irasas) return null;
   if (!from.includes(irasas.status)) return null;
 
+  /**
+   * ⚠️ VISOS OPCIJOS VALIDUOJAMOS PRIEŠ LIEČIANT ĮRAŠĄ (#183 Codex, P2).
+   *
+   * Anksčiau `assertFailureKind` ir `assertActorKind` buvo kviečiami PO to, kai
+   * `status`, `updatedAt`, `completedAt` ir `attempts` jau pakeisti. Neteisinga
+   * reikšmė metė, kvietėjas matė atmestą operaciją be audito įrašo, o barjeras
+   * VIS TIEK buvo perėjęs.
+   *
+   * PostgreSQL validuoja prieš `UPDATE`, tad tas pats įvedimas duodavo skirtingą
+   * atomiškumą skirtinguose backend'uose - būtent tokį nukrypimą bendras
+   * kontrakto rinkinys ir turi gaudyti.
+   */
+  const naujasFailureKind = to === TOMBSTONE_STATUS.FAILED ? assertFailureKind(failureKind) : null;
+  const naujasActorKind = actorKind === undefined ? undefined : assertActorKind(actorKind);
+
   irasas.status = to;
   irasas.updatedAt = now;
 
@@ -110,11 +126,11 @@ async function _perkelti(
 
   if (to === TOMBSTONE_STATUS.FAILED) {
     irasas.attempts += 1;
-    irasas.lastFailureKind = assertFailureKind(failureKind);
+    irasas.lastFailureKind = naujasFailureKind;
   }
 
   if (to === TOMBSTONE_STATUS.PENDING) irasas.lastFailureKind = null;
-  if (actorKind !== undefined) irasas.actorKind = assertActorKind(actorKind);
+  if (naujasActorKind !== undefined) irasas.actorKind = naujasActorKind;
 
   return kopija(irasas);
 }

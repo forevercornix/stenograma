@@ -395,3 +395,50 @@ test("READINESS: žymų saugykla zonduojama - neveikianti DB reiškia NOT ready"
     tombstones.probe = originalus;
   }
 });
+
+test("SKRIPTAS: inicijuoja AUDITO saugyklą, ne tik žymų", async () => {
+  /**
+   * ⚠️ ANTRA TOS PAČIOS KLAIDOS PUSĖ (#183 Codex, P1).
+   *
+   * `.env` pataisa sutvarkė DUOMENIS - žyma keliauja į PostgreSQL. Bet auditas
+   * keliavo į niekur: be `auditStore.init()` su `AUDIT_BACKEND=postgres`
+   * `rasytiAudita()` rašo į numatytąjį ATMINTIES fasadą, procesas baigiasi, ir
+   * kiekvienas `ERASURE_MARK_RETRIED` / `ERASURE_MARK_FORCE_RESOLVED` dingsta.
+   * Operatoriaus veiksmai liktų neaudituoti, nors dokumentacija žada patvarų
+   * pėdsaką.
+   *
+   * ⚠️ KAIP TAI ĮRODOMA BE DUOMENŲ BAZĖS. `AUDIT_BACKEND` ir žymų backend'as
+   * valdomi ATSKIRAI: žymos renkasi postgres tik pagal `DATABASE_URL`. Paleidus
+   * be `DATABASE_URL`, bet su `AUDIT_BACKEND=postgres`, žymos lieka atmintyje, o
+   * audito saugykla privalo kristi fail-closed. Klaida pasirodo TIK tada, kai
+   * `init()` realiai kviečiamas - be pataisos skriptas ramiai išvestų sąrašą.
+   *
+   * RAW `audit_log` įrodymas su tikra DB - `erasureMarks.integration`.
+   */
+  const path = require("node:path");
+  const { execFileSync } = require("node:child_process");
+
+  const skriptas = path.join(__dirname, "..", "scripts", "erasure-marks.js");
+
+  const paleisti = (env) => {
+    try {
+      return { kodas: 0, isvestis: execFileSync("node", [skriptas, "list"], {
+        encoding: "utf8",
+        env: { ...process.env, ...env },
+      }) };
+    } catch (e) {
+      return { kodas: e.status, isvestis: (e.stdout || "") + (e.stderr || "") };
+    }
+  };
+
+  const be = { ...process.env };
+  delete be.DATABASE_URL;
+
+  const rezultatas = paleisti({ ...be, AUDIT_BACKEND: "postgres", DATABASE_URL: undefined });
+
+  assert.match(
+    rezultatas.isvestis,
+    /AUDIT_BACKEND=postgres, bet nei DATABASE_URL/,
+    `skriptas privalo inicijuoti audito saugyklą ir kristi fail-closed: ${rezultatas.isvestis}`
+  );
+});

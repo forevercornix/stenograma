@@ -351,8 +351,28 @@ node backend/scripts/erasure-marks.js force-resolve "$JOB_ID" --actor "$OPERATOR
 jį auditu (`ERASURE_MARK_FORCE_RESOLVED`). Barjeras **lieka** – būsena tampa
 `deleted`, tad job'as ir toliau nebus prikeltas.
 
-⚠️ `--actor` privalomas. Auditas rašomas **prieš** veiksmą: neužfiksavus, kas
-nuėmė barjerą, barjeras nenuimamas.
+⚠️ `--actor` privalomas. Auditas rašomas **po** perėjimo, o jo `success`
+atspindi faktinį rezultatą (#183).
+
+⚠️ **Gedimo forma, kurią reikia žinoti.** Iki 7.5a peržiūros auditas ėjo pirmas,
+ir šis dokumentas žadėjo „neužfiksavus – barjeras nenuimamas". Ta tvarka dengė
+tik vieną pusę: du lygiagretūs operatoriai abu įrašydavo sėkmę, o perėjimas
+pavykdavo tik vienam – likdavo patvarus sėkmės įrašas veiksmui, kurio nebuvo.
+
+Dabartinė tvarka apverčia riziką ir ją reikia įvardyti tiesiai: **jei audito
+rašymas krinta PO sėkmingo perėjimo, žyma jau yra `deleted`, o įrašo nėra.**
+Pakartotinis bandymas įvykio neatkurs – jis grąžins `already_terminal`.
+
+Praktiškai tai reiškia:
+
+- komanda krinta su klaida, ne tyliai – operatorius mato, kad auditas nepavyko;
+- **užfiksuokite tai rankiniu būdu** (incidento įraše), nes automatinio pėdsako
+  nebebus;
+- žymos būsenos keisti nereikia – barjeras veikia, trūksta tik įrašo, kas jį
+  uždėjo.
+
+Atominio perėjimo-su-auditu nėra sąmoningai: auditas gyvena kitoje saugykloje
+(galimai kitoje DB) nei žymos, tad viena transakcija jų apimti negali.
 
 ⚠️ **HTTP maršruto šiems veiksmams NĖRA sąmoningai.** Užstrigusi žyma yra
 incidentas, ne kasdienis darbas; maršrutas pridėtų autentikacijos, autorizacijos
