@@ -31,7 +31,12 @@ const { createLogger } = require("../logger");
 const memoryStore = require("./memoryStore");
 const { createErasureMarkStore, LOCK_NAMESPACE, RETENCIJOS_BATCH } = require("./postgresStore");
 const states = require("./states");
-const { TOMBSTONE_STATUS, ERASURE_REASON, ACTOR_KIND } = states;
+const {
+  TOMBSTONE_STATUS,
+  ERASURE_REASON,
+  ACTOR_KIND,
+  FAILURE_KIND_EXECUTOR_LOST,
+} = states;
 
 const log = createLogger("tombstones");
 
@@ -235,6 +240,41 @@ async function retry(jobId, { actorKind = ACTOR_KIND.OPERATOR } = {}) {
  * Čia paliktas tik perėjimas; audito įrašą rašo servisas PRIEŠ jį (fail-closed:
  * neužfiksavus, kas nuėmė barjerą, barjeras nenuimamas).
  */
+/**
+ * UŽSTRIGUSIOS PRETENZIJOS ATLAISVINIMAS: `pending` → `deletion_failed` (#183).
+ *
+ * ⚠️ TAI NĖRA TEIGINYS APIE DUOMENIS.
+ *
+ * `forceResolve` tvirtina „duomenų nebėra" ir uždaro žymą į `deleted`. `release`
+ * netvirtina NIEKO: po kieto proceso nužudymo nežinoma, kiek valymo spėta
+ * atlikti. Jis pasako tik tai, kas tikrai žinoma - vykdytojo nebėra - ir grąžina
+ * žymą į būseną, iš kurios veikia įprastas `retry`.
+ *
+ * ⚠️ BARJERAS NENUIMAMAS NĖ AKIMIRKAI. `deletion_pending` ir `deletion_failed`
+ * abu blokuoja artefaktų kūrimą, o perėjimas tarp jų yra vienas sąlyginis
+ * `UPDATE`. Tarpinės būsenos, kurioje jobas būtų praleidžiamas, nėra.
+ *
+ * ⚠️ AUTOMATINIO APTIKIMO NĖRA SĄMONINGAI. Lease ar heartbeat ant `pending`
+ * būtų paskirstyta nuoma - būtent tai, ko 7.5a atsisakė (DoD draudžia laikyti
+ * lock'ą per išorinį I/O). „Vykdytojas mirė" yra operatoriaus sprendimas, ne
+ * laikmačio išvada.
+ *
+ * Grąžina `null`, jei žyma NE `deletion_pending`: iš `deleted` ir
+ * `deletion_failed` atlaisvinti nėra ko.
+ */
+async function release(jobId, { actorKind = ACTOR_KIND.OPERATOR } = {}) {
+  if (!jobId) return null;
+
+  await ensureInit();
+
+  return store.transitionOverride(
+    jobId,
+    [TOMBSTONE_STATUS.PENDING],
+    TOMBSTONE_STATUS.FAILED,
+    { failureKind: FAILURE_KIND_EXECUTOR_LOST, actorKind }
+  );
+}
+
 async function forceResolve(jobId, { actorKind = ACTOR_KIND.OPERATOR, completedAt = null } = {}) {
   if (!jobId) return null;
 
@@ -515,6 +555,7 @@ module.exports = {
   complete,
   retry,
   forceResolve,
+  release,
   isDeleted,
   isBarred,
   isConfirmedDeleted,

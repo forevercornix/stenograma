@@ -800,3 +800,41 @@ test("MIGRACIJA: `reason` CHECK priima `orphan_cleanup`, o nežinomos reikšmės
     await resursai.isvalyti();
   }
 });
+
+test("MIGRACIJA: `last_failure_kind` CHECK priima `executor_lost`", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ PRAPLEČIANČIOS MIGRACIJOS ĮRODYMAS (#183).
+   *
+   * `executor_lost` pridėta į `states.js`, bet CHECK yra antra vieta, ir ji
+   * užšaldyta migracijoje. Be `1755600000000_erasure-marks-executor-lost.js`
+   * `erasure-marks release` kristų `check_violation` klaida RAŠANT - tiksliai
+   * tame kelyje, kurį ta reikšmė įveda. Vienetinis pariteto testas to nepagauna:
+   * jis lygina tekstus, ne realią DB.
+   */
+  const { pool, resursai } = await paruostiDb("erasure_executor_lost");
+
+  try {
+    const store = createErasureMarkStore(pool);
+
+    await store.mark("uzstriges", { reason: REASON, actorKind: "user" });
+    const atlaisvinta = await store.transitionOverride("uzstriges", [S.PENDING], S.FAILED, {
+      failureKind: states.FAILURE_KIND_EXECUTOR_LOST,
+      actorKind: "operator",
+    });
+
+    assert.equal(atlaisvinta.status, S.FAILED);
+    assert.equal(atlaisvinta.lastFailureKind, "executor_lost");
+
+    await assert.rejects(
+      () =>
+        pool.query(
+          "INSERT INTO erasure_marks (job_id, status, reason, last_failure_kind) VALUES ($1, $2, $3, $4)",
+          ["kita", S.FAILED, REASON, "prasimanyta_kategorija"]
+        ),
+      /check|constraint/i,
+      "CHECK privalo likti - praplėtimas nėra jo panaikinimas"
+    );
+  } finally {
+    await resursai.isvalyti();
+  }
+});

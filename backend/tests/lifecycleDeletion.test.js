@@ -765,3 +765,78 @@ test("#183 NEIŠSPRĘSTA ŽYMA: `deletion_failed` NEKARTOJAMAS automatiškai", a
     "automatinio pakartojimo nėra - destruktyvus darbas NEPRADĖTAS"
   );
 });
+
+test("#183 RELEASE: užstrigusi `pending` žyma atkuriama iki baigto ištrynimo", async () => {
+  /**
+   * ⚠️ PILNAS KELIAS, NE ATSKIRAS PERĖJIMAS.
+   *
+   * Po 202 įvedimo `deletion_pending` žyma be vykdytojo reiškia, kad ištrynimas
+   * nebeįvyks NIEKADA - kiekvienas vėlesnis kvietimas atsako „jau vykdoma".
+   * Nei `retry` (reikalauja `deletion_failed`), nei `force-resolve` (tvirtina,
+   * kad duomenų nebėra) šiam atvejui netinka.
+   *
+   * Tikrinama visa grandinė: užstrigimas → release → retry → įvykdytas
+   * ištrynimas. Vien perėjimo patikra neįrodytų, kad išeitis tikrai veda iki
+   * galo - o būtent to ir trūko.
+   */
+  const { releaseMark, retryMark } = require("../services/erasureMarkService");
+
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
+
+  // Procesas nužudytas tarp žymėjimo ir užbaigimo: pretenzija yra, vykdytojo nėra.
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+
+  const uzstrige = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sav" });
+  assert.equal(uzstrige.status, DELETION_STATUS.IN_PROGRESS, "be release kelias uždarytas");
+  assert.ok(await jobStore.system.get(job.id), "duomenys nepaliesti");
+
+  // Operatorius konstatuoja, kad vykdytojo nebėra. Jokio teiginio apie duomenis.
+  const atlaisvinta = await releaseMark(job.id, { actor: "sysadmin" });
+  assert.equal(atlaisvinta.changed, true);
+  assert.equal(atlaisvinta.status, S183.FAILED);
+  assert.equal(
+    (await tombstones.get(job.id)).lastFailureKind,
+    "executor_lost",
+    "įrašoma TIK tai, kas žinoma - ne `retryable`, kuris teigtų įvykusį bandymą"
+  );
+  assert.equal(await tombstones.isDeleted(job.id), true, "barjeras nenuimtas nė akimirkai");
+
+  // Esamas retry veikia toliau - nauja išeitis jo nedubliuoja.
+  assert.equal((await retryMark(job.id, { actor: "sysadmin" })).changed, true);
+  assert.equal((await tombstones.get(job.id)).status, S183.PENDING);
+
+  const baigta = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sav" });
+  assert.equal(baigta.complete, true, "ištrynimas užbaigiamas");
+  assert.equal(await tombstones.isConfirmedDeleted(job.id), true);
+});
+
+test("#183 RELEASE: NEGALIMAS iš `deleted` ir iš `deletion_failed`", async () => {
+  /**
+   * Leidus juos, `release` taptų būdu perrašyti nesėkmės kategoriją - t. y.
+   * suklastoti įrašą apie tai, KAS nutiko. Iš `deleted` atlaisvinti nėra ko
+   * (terminali), iš `deletion_failed` - jau yra `retry`.
+   */
+  const { releaseMark } = require("../services/erasureMarkService");
+
+  await tombstones.mark("rel_deleted", { reason: "user_request", actorKind: "user" });
+  await tombstones.complete("rel_deleted", S183.DELETED);
+
+  const a = await releaseMark("rel_deleted", { actor: "sysadmin" });
+  assert.equal(a.changed, false);
+  assert.equal(a.reason, "not_pending");
+  assert.equal((await tombstones.get("rel_deleted")).status, S183.DELETED, "terminali nepajudinta");
+
+  await tombstones.mark("rel_failed", { reason: "user_request", actorKind: "user" });
+  await tombstones.complete("rel_failed", S183.FAILED, { failureKind: "permanent" });
+
+  const b = await releaseMark("rel_failed", { actor: "sysadmin" });
+  assert.equal(b.changed, false);
+  assert.equal(b.reason, "not_pending");
+  assert.equal(
+    (await tombstones.get("rel_failed")).lastFailureKind,
+    "permanent",
+    "esama nesėkmės kategorija NEPERRAŠOMA"
+  );
+
+  assert.equal((await releaseMark("nera_zymos", { actor: "sysadmin" })).reason, "no_mark");
+});

@@ -143,6 +143,13 @@ test("POST-HOC: visi po-veiksmo įvykiai įvardyti eksplicitiškai ir LIEKA blok
        * tvirtintų apsaugą, kurios nebėra.
        */
       "ERASURE_MARK_FORCE_RESOLVED",
+      /**
+       * ⚠️ `release` seka tą pačią tvarką: perėjimas `pending → deletion_failed`
+       * commit'inasi PRIEŠ auditą, tad audito gedimas jo neatšaukia.
+       * Operatorius gauna 503 (sėkmė nedeklaruojama), bet pretenzija jau
+       * atlaisvinta - post-hoc, ne fail-closed.
+       */
+      "ERASURE_MARK_RELEASED",
       "ERASURE_MARK_RETRIED",
       "LIFECYCLE_DELETION",
       "LOGOUT",

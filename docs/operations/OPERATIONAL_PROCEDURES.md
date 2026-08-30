@@ -339,6 +339,47 @@ JOB_ID="..." OPERATOR="..."
 node backend/scripts/erasure-marks.js retry "$JOB_ID" --actor "$OPERATOR"
 ```
 
+**Atlaisvinti užstrigusią pretenziją** (`deletion_pending` → `deletion_failed`),
+kai žyma liko be vykdytojo – procesas nužudytas (SIGKILL, OOM, konteinerio
+nutraukimas) tarp žymėjimo ir užbaigimo:
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js release "$JOB_ID" --actor "$OPERATOR"
+```
+
+⚠️ **`release` NETVIRTINA NIEKO APIE DUOMENIS.** Po kieto nužudymo nežinoma,
+kiek valymo spėta atlikti; žyma gauna `last_failure_kind=executor_lost`, kuris
+būtent tą neapibrėžtį ir įrašo. Po jo eina įprastas `retry`, ir ištrynimas
+užbaigiamas normaliu keliu.
+
+⚠️ Barjeras **nenuimamas nė akimirkai**: `deletion_pending` ir `deletion_failed`
+abu blokuoja artefaktų kūrimą, o perėjimas tarp jų yra vienas sąlyginis `UPDATE`.
+
+⚠️ `release` veikia **tik** iš `deletion_pending`. Iš `deleted` atlaisvinti nėra
+ko, o iš `deletion_failed` jau veikia `retry`; leidus juos, `release` taptų būdu
+perrašyti nesėkmės kategoriją, t. y. suklastoti įrašą apie tai, kas nutiko.
+
+### ⚠️ `release` ar `force-resolve`? Skirtumas yra teiginys apie duomenis
+
+| | `release` | `force-resolve` |
+|---|---|---|
+| Iš kokios būsenos | tik `deletion_pending` | `deletion_pending` arba `deletion_failed` |
+| Į kokią | `deletion_failed` | `deleted` (terminali) |
+| Ką operatorius **teigia** | vykdytojo nebėra | **duomenų nebėra** |
+| Ką reikia žinoti iš anksto | nieko apie duomenis | patikrintą faktą |
+| Kas galima po to | `retry` → ištrynimas užbaigiamas | nieko – būsena terminali |
+
+**Po SIGKILL pirmiausia `release`, ne `force-resolve`.** Priežastis viena:
+`force-resolve` yra teiginys, kurio tuo momentu niekas nepatikrino. Procesas
+galėjo nutrūkti prieš saugyklos valymą, po jo, ar viduryje – ir `deleted` būseną
+uždėjus, tas klausimas užsidaro **negrįžtamai**: būsena terminali, `retry` iš jos
+nebeveda, o žyma toliau tvirtins, kad ištrynimas patvirtintas.
+
+`release` tą klausimą palieka atvirą ir leidžia ištrynimui realiai įvykti.
+`force-resolve` tinka tik tada, kai duomenų nebuvimas **patikrintas** – arba kai
+patikrinta, kad jų niekada nebuvo.
+
 **Paskelbti išspręsta**, kai patikrinta, kad duomenų nebėra (arba jų niekada
 nebuvo):
 
@@ -402,6 +443,11 @@ ir rate-limit paviršių tam, kas daroma retai ir turint DB prieigą.
 > ⚠️ Trečio varianto – „išspręsim, kai atsitiks" – nėra: barjeras nuo
 > `deletion_pending` reiškia, kad tuo metu job'as jau užrakintas, o
 > neterminalės žymos **nesensta**, tad laukimas problemos neišsprendžia.
+
+⚠️ **Automatinio „vykdytojas mirė" aptikimo NĖRA IR NEBUS.** Lease ar heartbeat
+ant `deletion_pending` būtų paskirstyta nuoma – būtent tai, ko 7.5a atsisakė
+sąmoningai (lock'as neturi būti laikomas per išorinį I/O). Sprendimą, kad
+vykdytojo nebėra, priima operatorius, ne laikmatis.
 
 **Ko šiame kelyje NĖRA:** automatinio užstrigusių žymų šalinimo. Tai būtų
 barjero nuėmimas be žmogaus sprendimo – tiksliai tai, ko `deletion_failed`

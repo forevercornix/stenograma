@@ -391,45 +391,19 @@ test("OPERATORIUS: `retry` sėkmės įrašas irgi atitinka faktinį perėjimą",
   }
 });
 
-test("MIGRACIJA: užšaldytos aibės sutampa su `states.js` autoritetu", () => {
-  /**
-   * ⚠️ MIGRACIJA SĄMONINGAI NEIMPORTUOJA KONSTANTŲ (ji yra istorijos įrašas),
-   * tad paritetą tikrina šis testas. Be jo pakeitus `states.js` šviežia DB
-   * gautų vieną aibę, o atnaujinta liktų su kita - tyliai.
-   */
-  const saltinis = fs.readFileSync(
-    path.join(__dirname, "../migrations/1755400000000_erasure-marks.js"),
-    "utf8"
-  );
-
-  const aibe = (vardas) => {
-    const pradzia = saltinis.indexOf(`const ${vardas} = [`);
-    assert.notEqual(pradzia, -1, `migracijoje nerasta ${vardas}`);
-
-    const pabaiga = saltinis.indexOf("];", pradzia);
-    const eilute = saltinis.slice(pradzia, pabaiga);
-
-    return eilute.match(/"[^"]+"/g).map((r) => r.replace(/"/g, ""));
-  };
-
-  assert.deepEqual(aibe("STATUSES_FROZEN").sort(), [...states.STATUSES].sort());
-  assert.deepEqual(aibe("ACTOR_KINDS_FROZEN").sort(), [...states.ACTOR_KINDS].sort());
-  assert.deepEqual(aibe("FAILURE_KINDS_FROZEN").sort(), [...states.FAILURE_KINDS].sort());
-});
-
 /**
- * Ištraukia `reason` aibę iš migracijos šaltinio, nesvarbu kelinta ji.
+ * Ištraukia užšaldytą aibę iš migracijos šaltinio, nesvarbu kelinta ji.
  *
- * Vardas su priesaga (`REASONS_FROZEN`, `REASONS_FROZEN_V2`, ...), nes kiekviena
- * praplečianti migracija turi savo užšaldytą sąrašą - importuoti konstantos jos
- * negali, tai istorijos įrašai.
+ * Vardas su nebūtina priesaga (`REASONS_FROZEN`, `REASONS_FROZEN_V2`,
+ * `FAILURE_KINDS_FROZEN_V2`, ...), nes kiekviena praplečianti migracija turi
+ * savo sąrašą - importuoti konstantos jos negali, tai istorijos įrašai.
  */
-function reasonAibe(saltinis) {
-  const m = /const REASONS_FROZEN[A-Z0-9_]* = \[/.exec(saltinis);
+function uzsaldytaAibe(saltinis, vardas) {
+  const m = new RegExp("const " + vardas + "[A-Z0-9_]* = \\[").exec(saltinis);
   if (!m) return null;
 
   const pabaiga = saltinis.indexOf("];", m.index);
-  assert.notEqual(pabaiga, -1, "neužbaigta REASONS_FROZEN deklaracija");
+  assert.notEqual(pabaiga, -1, `neužbaigta ${vardas} deklaracija`);
 
   return saltinis
     .slice(m.index, pabaiga)
@@ -437,57 +411,66 @@ function reasonAibe(saltinis) {
     .map((r) => r.replace(/"/g, ""));
 }
 
-test("MIGRACIJA: `reason` allowlist gali TIK plėstis, o naujausia aibė atitinka `states.js`", () => {
+test("MIGRACIJA: užšaldytos aibės gali TIK plėstis, o naujausios atitinka `states.js`", () => {
   /**
-   * ⚠️ TESTAS SĄMONINGAI NEĮRAŠO MIGRACIJOS VARDO.
+   * ⚠️ TESTAS SĄMONINGAI NEĮRAŠO NĖ VIENOS MIGRACIJOS VARDO.
    *
-   * `reason` aibė jau plėtėsi kartą (`orphan_cleanup`, #183) ir gali plėstis vėl.
-   * Jei testas rodytų į konkretų failą, kita nauja reikšmė `states.js` byloje
-   * praeitų tyliai tol, kol kas nors prisimintų atnaujinti ir testą. Todėl aibė
-   * ieškoma VISOSE migracijose, o autoritetu laikoma naujausia pagal vardą -
-   * t. y. ta, kuri realiai galioja šviežiai migruotai DB.
+   * Migracijos NEIMPORTUOJA konstantų (jos yra istorijos įrašai), tad paritetą
+   * turi tikrinti testas. Ankstesnė versija lygino su vienu užkoduotu failu, ir
+   * tai jau kartą būtų pralindę tyliai: aibė nuo tada plėtėsi DU kartus
+   * (`orphan_cleanup` #183, `executor_lost` #183), kaskart nauja migracija.
    *
-   * Antra tikrinama savybė - kryptis. Allowlist gali PLĖSTIS, bet reikšmė iš jo
-   * dingti negali: jau įrašytos žymos taptų `check_violation` eilutėmis, o
-   * migracija, kuri jas sulaužo, aptinkama tik diegimo metu.
+   * Autoritetu laikoma NAUJAUSIA pagal vardą deklaracija - t. y. ta, kuri realiai
+   * galioja šviežiai migruotai DB.
+   *
+   * Antra tikrinama savybė - KRYPTIS. Allowlist gali plėstis, bet reikšmė iš jo
+   * dingti negali: jau įrašytos žymos taptų `check_violation` eilutėmis, o tokia
+   * migracija aptinkama tik diegimo metu.
    */
   const migDir = path.join(__dirname, "../migrations");
-
-  const deklaracijos = fs
+  const failai = fs
     .readdirSync(migDir)
     .filter((f) => f.endsWith(".js"))
-    .sort()
-    .map((failas) => ({
-      failas,
-      reiksmes: reasonAibe(fs.readFileSync(path.join(migDir, failas), "utf8")),
-    }))
-    .filter((d) => d.reiksmes);
+    .sort();
 
-  assert.ok(
-    deklaracijos.length >= 2,
-    "tikimasi bent pirminės ir `orphan_cleanup` praplečiančios migracijos"
-  );
+  const aibes = [
+    ["STATUSES_FROZEN", states.STATUSES],
+    ["REASONS_FROZEN", states.REASONS],
+    ["ACTOR_KINDS_FROZEN", states.ACTOR_KINDS],
+    ["FAILURE_KINDS_FROZEN", states.FAILURE_KINDS],
+  ];
 
-  const naujausia = deklaracijos[deklaracijos.length - 1];
+  for (const [vardas, autoritetas] of aibes) {
+    const deklaracijos = failai
+      .map((failas) => ({
+        failas,
+        reiksmes: uzsaldytaAibe(fs.readFileSync(path.join(migDir, failas), "utf8"), vardas),
+      }))
+      .filter((d) => d.reiksmes);
 
-  assert.deepEqual(
-    [...naujausia.reiksmes].sort(),
-    [...states.REASONS].sort(),
-    `naujausia migracija (${naujausia.failas}) ir \`states.js\` aibės išsiskyrė - ` +
-      "pasikeitus allowlist'ui reikia NAUJOS migracijos"
-  );
+    assert.ok(deklaracijos.length >= 1, `${vardas} nerasta nė vienoje migracijoje`);
 
-  for (let i = 1; i < deklaracijos.length; i += 1) {
-    const dingo = deklaracijos[i - 1].reiksmes.filter(
-      (r) => !deklaracijos[i].reiksmes.includes(r)
-    );
+    const naujausia = deklaracijos[deklaracijos.length - 1];
 
     assert.deepEqual(
-      dingo,
-      [],
-      `${deklaracijos[i].failas} pašalino reikšmes, kurias leido ` +
-        `${deklaracijos[i - 1].failas}: ${dingo.join(", ")}`
+      [...naujausia.reiksmes].sort(),
+      [...autoritetas].sort(),
+      `${vardas}: naujausia migracija (${naujausia.failas}) ir \`states.js\` išsiskyrė - ` +
+        "pasikeitus aibei reikia NAUJOS migracijos"
     );
+
+    for (let i = 1; i < deklaracijos.length; i += 1) {
+      const dingo = deklaracijos[i - 1].reiksmes.filter(
+        (r) => !deklaracijos[i].reiksmes.includes(r)
+      );
+
+      assert.deepEqual(
+        dingo,
+        [],
+        `${deklaracijos[i].failas} pašalino reikšmes, kurias leido ` +
+          `${deklaracijos[i - 1].failas}: ${dingo.join(", ")}`
+      );
+    }
   }
 });
 

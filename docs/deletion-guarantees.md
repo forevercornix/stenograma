@@ -75,21 +75,33 @@ tyliai pakartodavo visą darbą ir skelbdavo sėkmę, nors žyma likdavo `failed
 autorizuoja operatorius: `node scripts/erasure-marks.js retry <jobId>`, kuris
 rašo `ERASURE_MARK_RETRIED`. Būsena, kuri išsisprendžia savaime, nebėra barjeras.
 
-⚠️ **ŽINOMA SPRAGA: kietai nužudytas procesas palieka `deletion_pending`.**
+⚠️ **KIETAI NUŽUDYTAS PROCESAS PALIEKA `deletion_pending` – IR TAM YRA IŠEITIS.**
 
 Jei procesas nužudomas (SIGKILL, OOM) TARP žymėjimo ir užbaigimo, žyma lieka
-`deletion_pending` be vykdytojo. Nuo šiol kiekvienas vėlesnis `DELETE` tokiam
-`job_id` atsakys **202 „jau vykdoma"**, o ištrynimas savaime neįvyks.
+`deletion_pending` be vykdytojo, ir kiekvienas vėlesnis `DELETE` tokiam `job_id`
+atsakytų **202 „jau vykdoma"**. Mesta klaida (pvz. `AuditWriteError`) tokios
+būsenos nepalieka – ji žymą perveda į `deletion_failed`. Kietas nužudymas – gali.
 
-Mesta klaida (pvz. `AuditWriteError`) tokios būsenos nebepalieka – ji žymą
-perveda į `deletion_failed`, kuris turi dokumentuotą operatoriaus kelią. Kietas
-nužudymas lieka neuždengtas.
+Išeitis yra rankinė ir palieka audito pėdsaką:
 
-**Ką daryti:** reguliariai tikrinti `node scripts/erasure-marks.js list` – jis
-rodo neišspręstas žymas. `pending` žyma be vykdytojo yra incidentas, ne normali
-būsena. Šiuo metu operatorius neturi komandos, kuri užstrigusią `pending` žymą
-perkeltų į `deletion_failed`; vienintelė esama išeitis yra `force-resolve`, o ji
-teigia, kad duomenų nebėra – tad tinka **tik** tada, kai tai patikrinta.
+```bash
+node backend/scripts/erasure-marks.js release <jobId> --actor <kas>
+```
+
+`release` perveda `deletion_pending → deletion_failed` su
+`last_failure_kind=executor_lost`, ir po jo veikia įprastas `retry`. **Jokio
+teiginio apie duomenis jis nedaro** – po SIGKILL nežinoma, kiek valymo spėta
+atlikti, ir būtent tą neapibrėžtį `executor_lost` įrašo.
+
+⚠️ **`force-resolve` šiam atvejui NETINKA.** Jis teigia, kad duomenų nebėra, ir
+uždaro žymą į terminalę `deleted` – klausimas užsidaro negrįžtamai, o ištrynimas
+taip ir neįvyksta. Žr. `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
+⚠️ **Automatinio aptikimo nėra sąmoningai.** Lease ar heartbeat ant `pending`
+būtų paskirstyta nuoma, kurios 7.5a atsisakė. „Vykdytojas mirė" yra operatoriaus
+sprendimas, ne laikmačio išvada. Todėl `erasure-marks list` tikrinimas yra
+operatoriaus procedūra: `pending` žyma be vykdytojo yra incidentas, ne normali
+būsena.
 
 ⚠️ **Ši garantija galioja TIK ten, kur nustatytas `DATABASE_URL`.** Be jo sistema
 sąmoningai grįžta į atmintinį režimą – žr. 2 skyrių. Startas tokiu atveju garsiai

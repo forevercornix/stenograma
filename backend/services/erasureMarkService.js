@@ -96,6 +96,63 @@ async function retryMark(jobId, { actor = null } = {}) {
 }
 
 /**
+ * UŽSTRIGUSIOS PRETENZIJOS ATLAISVINIMAS (#183).
+ *
+ * ⚠️ KAM JIS REIKALINGAS, NORS YRA `retry` IR `force-resolve`.
+ *
+ * Nė vienas iš jų netinka faktinei užstrigimo formai. `retry` reikalauja
+ * `deletion_failed` - o užstrigusi žyma yra `deletion_pending`. `force-resolve`
+ * veda į `deleted`, t. y. TVIRTINA, kad duomenų nebėra - o po kieto proceso
+ * nužudymo tai NEŽINOMA: valymas galėjo nutrūkti bet kurioje vietoje.
+ *
+ * `release` tvirtina TIK tai, kas žinoma: vykdytojo nebėra. Duomenų būklės jis
+ * neapibrėžia, todėl ir veda į `deletion_failed`, o ne į `deleted` - iš ten
+ * įprastas `retry` grąžina žymą į `pending` ir ištrynimas užbaigiamas.
+ *
+ * ⚠️ AUTOMATINIO APTIKIMO NĖRA IR NEBUS. Lease ar heartbeat ant `pending` būtų
+ * paskirstyta nuoma - būtent tai, ko 7.5a atsisakė sąmoningai. „Vykdytojas
+ * mirė" yra operatoriaus sprendimas, ne laikmačio išvada.
+ */
+async function releaseMark(jobId, { actor = null } = {}) {
+  const esama = await tombstones.get(jobId);
+
+  if (!esama) return { changed: false, reason: "no_mark" };
+
+  /**
+   * Iš `deleted` ir `deletion_failed` atlaisvinti nėra ko: pirmoji terminali,
+   * antroji jau turi `retry` kelią. Leidus juos, `release` taptų būdu perrašyti
+   * nesėkmės kategoriją - t. y. suklastoti įrašą apie tai, KAS nutiko.
+   */
+  if (esama.status !== TOMBSTONE_STATUS.PENDING) {
+    return { changed: false, reason: "not_pending", status: esama.status };
+  }
+
+  /**
+   * ⚠️ AUDITAS PO PERĖJIMO - ta pati tvarka kaip `retryMark` ir
+   * `forceResolveMark`. Du operatoriai, atlaisvinantys tą pačią žymą, abu
+   * perskaitytų `pending`, bet sąlyginis perėjimas pavyksta TIK vienam.
+   */
+  const zyma = await tombstones.release(jobId, { actorKind: ACTOR_KIND.OPERATOR });
+  const changed = Boolean(zyma);
+
+  await rasytiAudita({
+    event: "ERASURE_MARK_RELEASED",
+    jobId,
+    actor: actor || undefined,
+    success: changed,
+    details: `from=${esama.status} attempts=${esama.attempts} changed=${changed} claim=lost`,
+  });
+
+  log.info("Užstrigusi ištrynimo pretenzija atlaisvinta", {
+    jobId,
+    status: zyma && zyma.status,
+    changed,
+  });
+
+  return { changed, status: zyma ? zyma.status : esama.status };
+}
+
+/**
  * DOKUMENTUOTAS force-resolve: neterminalė žyma paskelbiama išspręsta.
  *
  * ⚠️ TAI NĖRA IŠTRYNIMAS. Operatorius patvirtina, kad duomenų nebėra (arba kad
@@ -148,6 +205,7 @@ async function forceResolveMark(jobId, { actor = null, note = null } = {}) {
 }
 
 module.exports = {
+  releaseMark,
   listStuck,
   retryMark,
   forceResolveMark,

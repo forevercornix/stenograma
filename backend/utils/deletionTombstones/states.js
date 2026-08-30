@@ -89,8 +89,26 @@ const ALLOWED_TRANSITIONS = {
   [TOMBSTONE_STATUS.DELETED]: [],
 };
 
-/** Atitinka `lifecycleService.classifyFailure()` išvestį. */
-const FAILURE_KINDS = ["retryable", "permanent", "already_absent"];
+/**
+ * Nesėkmės kategorijos.
+ *
+ * Pirmos trys atitinka `lifecycleService.classifyFailure()` išvestį - jas
+ * nustato pati sistema iš gedimo teksto.
+ *
+ * ⚠️ `executor_lost` YRA KITOKIOS KILMĖS: jos `classifyFailure()` niekada
+ * negrąžina. Ją įrašo TIK operatorius per `erasure-marks release`, kai
+ * `deletion_pending` žyma liko be vykdytojo (procesas nužudytas prieš užbaigimą).
+ *
+ * Atskira reikšmė, o ne `retryable`, nes ji atsako į kitą klausimą. `retryable`
+ * reiškia „bandymas įvyko ir nepavyko dėl kartotino gedimo"; `executor_lost`
+ * reiškia „NEŽINOMA, ar bandymas apskritai įvyko" - po SIGKILL neaišku, kiek
+ * valymo spėta atlikti. Sulipdžius jas, ta neapibrėžtis dingtų iš įrašo,
+ * kurio paskirtis yra ją išsaugoti.
+ */
+const FAILURE_KINDS = ["retryable", "permanent", "already_absent", "executor_lost"];
+
+/** Operatoriaus nustatoma kategorija - žr. `FAILURE_KINDS`. */
+const FAILURE_KIND_EXECUTOR_LOST = "executor_lost";
 
 const REASONS = Object.values(ERASURE_REASON);
 const ACTOR_KINDS = Object.values(ACTOR_KIND);
@@ -157,6 +175,7 @@ module.exports = {
   ACTOR_KIND,
   ALLOWED_TRANSITIONS,
   FAILURE_KINDS,
+  FAILURE_KIND_EXECUTOR_LOST,
   REASONS,
   ACTOR_KINDS,
   STATUSES,

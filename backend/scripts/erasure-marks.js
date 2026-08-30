@@ -10,7 +10,13 @@
  *
  *   node scripts/erasure-marks.js list [--hours N] [--limit N]
  *   node scripts/erasure-marks.js retry <jobId> --actor <kas>
+ *   node scripts/erasure-marks.js release <jobId> --actor <kas>
  *   node scripts/erasure-marks.js force-resolve <jobId> --actor <kas>
+ *
+ * ⚠️ `release` NETVIRTINA NIEKO APIE DUOMENIS. Jis skirtas `deletion_pending`
+ * žymai, likusiai be vykdytojo (procesas nužudytas prieš užbaigimą), ir veda ją
+ * į `deletion_failed`, iš kur veikia `retry`. `force-resolve` tam NETINKA: jis
+ * tvirtina, kad duomenų nebėra, o po SIGKILL tai nežinoma.
  *
  * ⚠️ `retry` NEVYKDO ištrynimo - jis grąžina žymą į `deletion_pending`, iš kur
  * įprastas ištrynimo kelias gali ją užbaigti. `force-resolve` NĖRA ištrynimas:
@@ -117,6 +123,12 @@ async function main() {
 
   if (komanda === "retry") {
     const r = await erasureMarks.retryMark(jobId, { actor });
+    console.log(JSON.stringify(r));
+    return r.changed ? 0 : 1;
+  }
+
+  if (komanda === "release") {
+    const r = await erasureMarks.releaseMark(jobId, { actor });
     console.log(JSON.stringify(r));
     return r.changed ? 0 : 1;
   }

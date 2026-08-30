@@ -126,6 +126,7 @@ const AUDIT_EVENTS = Object.freeze({
    */
   ERASURE_MARK_RETRIED: KATEGORIJA.BLOKUOJANTIS,
   ERASURE_MARK_FORCE_RESOLVED: KATEGORIJA.BLOKUOJANTIS,
+  ERASURE_MARK_RELEASED: KATEGORIJA.BLOKUOJANTIS,
 
   // ── Job gyvavimo ciklas (#210: neblokuojantys) ─────────────────────────────
   TRANSCRIPTION_COMPLETED: KATEGORIJA.NEBLOKUOJANTIS,
@@ -225,6 +226,7 @@ const POST_HOC_IVYKIAI = Object.freeze([
    */
   "ERASURE_MARK_RETRIED",
   "ERASURE_MARK_FORCE_RESOLVED",
+  "ERASURE_MARK_RELEASED",
   /**
    * Sesija jau atšaukta ir cookie išvalytas, kai rašomas `LOGOUT`. Atmesti
    * atsijungimo nebegalima - o ir nereikėtų: neatšaukta sesija būtų blogesnė

@@ -36,6 +36,16 @@ ji pasensta ir tampa klaidinanti.
 
 ### Changed
 
+- **Nauja operatoriaus komanda `erasure-marks release`** (#183, 7.5a).
+  Perveda užstrigusią `deletion_pending` žymą į `deletion_failed` su
+  `last_failure_kind=executor_lost`, iš kur veikia esamas `retry`.
+
+  Skirta atvejui, kai procesas nužudytas (SIGKILL, OOM) tarp žymėjimo ir
+  užbaigimo. ⚠️ **`force-resolve` tam netinka**: jis teigia, kad duomenų nebėra,
+  o po kieto nužudymo tai nežinoma. `release` netvirtina nieko apie duomenis.
+  Automatinio aptikimo nėra sąmoningai. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
 - ⚠️ **`DELETE` atsakymų rinkinys prasiplėtė: 202 ir `tombstone_unresolved`**
   (#183, 7.5a). Abu jobų endpoint'ai (`/api/jobs/:id`, `/api/transcribe-jobs/:id`):
 
