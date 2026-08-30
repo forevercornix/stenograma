@@ -565,3 +565,57 @@ test("RETENCIJA: žymų riba ateina IŠ SAUGYKLOS, ne iš Node laikrodžio", asy
     memoryStore.purgeExpired = senasPurge;
   }
 });
+
+test("ATKŪRIMAS: nepavykęs kompensuojantis valymas KRENTA, o ne praneša sėkmę", async () => {
+  /**
+   * ⚠️ „PRALEISTA" IR „PALIKTA" NĖRA TAS PATS (#183 Codex).
+   *
+   * Kai žyma atsiranda rašymo metu, atkurtas įrašas šalinamas. Jei TAS
+   * šalinimas krinta (pvz. Redis dingsta iškart po priėmimo), anksčiau klaida
+   * būdavo suloginama, o funkcija grąžindavo `null` - kvietėjas suprastų, kad
+   * atkūrimas saugiai praleistas, nors užbarjeruotas job'as LIKO saugykloje ir
+   * praradus atminties žymą atgytų.
+   */
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  await tombstones._clearForTests();
+  await jobStore.init();
+
+  const jobas = await jobStore.create({
+    ownerKind: "unowned",
+    type: jobStore.JOB_TYPES.TRANSCRIPTION,
+  });
+  await jobStore.system.remove(jobas.id);
+
+  const senasIsDeleted = tombstones.isDeleted;
+  const senasRemove = jobStore.system.remove;
+  let kartas = 0;
+
+  tombstones.isDeleted = async (id) => (++kartas === 1 ? false : senasIsDeleted(id));
+
+  try {
+    await tombstones.mark(jobas.id, { reason: "user_request" });
+
+    /** Valymas krinta - saugykla dingo iškart po priėmimo. */
+    const store = require("../utils/jobStore/memoryStore");
+    const senasStoreRemove = store.remove;
+    store.remove = async () => {
+      throw new Error("saugykla neprieinama");
+    };
+
+    try {
+      await assert.rejects(
+        () => jobStore.restoreRecord(jobas),
+        /Užbarjeruotas įrašas LIKO saugykloje/,
+        "nepavykęs valymas privalo būti matomas kvietėjui, ne nutylėtas"
+      );
+    } finally {
+      store.remove = senasStoreRemove;
+    }
+  } finally {
+    tombstones.isDeleted = senasIsDeleted;
+    jobStore.system.remove = senasRemove;
+    await tombstones._clearForTests();
+  }
+});

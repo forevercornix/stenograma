@@ -864,9 +864,30 @@ module.exports = {
 
     if (atkurta && (await tombstones.isDeleted(job.id))) {
       log.warn("Atkūrimas ATŠAUKTAS: žyma atsirado rašymo metu", { jobId: job.id });
-      await store.remove(job.id).catch((klaida) => {
+
+      /**
+       * ⚠️ NEPAVYKĘS VALYMAS PROPAGUOJAMAS, NE NUTYLIMAS (#183 Codex).
+       *
+       * Anksčiau `remove()` klaida buvo suloginama, o funkcija vis tiek
+       * grąžindavo `null` - t. y. praneštų, kad atkūrimas SAUGIAI praleistas,
+       * nors užbarjeruotas job'as LIEKA saugykloje. Praradus atminties žymą
+       * (restartas atminties režime) jis atgytų, o atkūrimo kvietėjas apie tai
+       * nebūtų sužinojęs: būsena blogesnė nei prieš, o pranešimas - sėkmingas.
+       *
+       * Dabar klaida keliauja kvietėjui: atkūrimas krinta matomai ir gali būti
+       * ištaisytas. `null` reiškia „neatkurta IR nieko nepalikta"; nieko kito
+       * jis reikšti negali.
+       */
+      try {
+        await store.remove(job.id);
+      } catch (klaida) {
         log.error("Atšaukto atkūrimo nepavyko išvalyti", { jobId: job.id, klaida: klaida.message });
-      });
+        klaida.message =
+          `Atkūrimas atšauktas dėl ištrynimo žymos, bet įrašo pašalinti nepavyko ` +
+          `(job ${job.id}): ${klaida.message}. Užbarjeruotas įrašas LIKO saugykloje.`;
+        throw klaida;
+      }
+
       return null;
     }
 
