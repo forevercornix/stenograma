@@ -11,6 +11,7 @@ process.env.LOG_LEVEL = "error";
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
 const { sukurtiResursuKruva } = require("./helpers/resourceStack");
 const { createErasureMarkStore, LOCK_NAMESPACE } = require("../utils/deletionTombstones/postgresStore");
+const { CURRENT_SCHEMA_VERSION } = require("../utils/jobStore/common");
 const states = require("../utils/deletionTombstones/states");
 
 /**
@@ -27,6 +28,33 @@ const states = require("../utils/deletionTombstones/states");
  */
 
 const SKIP = skipWithoutPostgres();
+
+/**
+ * TĖVINĖ `jobs` EILUTĖ ŽYMOMS - VIENA VIETA (#183).
+ *
+ * ⚠️ `schema_version` IMAMAS IŠ `CURRENT_SCHEMA_VERSION`, NE LITERALO.
+ *
+ * Pirmoji šių testų versija rašė `1` ir krito CI paruošimo fazėje su `23514`:
+ * 7.2a `jobs_schema_version_supported` po sugriežtinimo priima tik `NULL` arba
+ * `2`. Testai net nepasiekė to, ką turėjo tikrinti.
+ *
+ * Literalas čia yra pačios klaidos priežastis, ne jos forma: pakėlus erą iki
+ * `3`, `newJob()` ir migracija pasikeistų kartu, o įrašytas skaičius liktų -
+ * ir tas pats kritimas grįžtų. Konstanta ateina iš to paties modulio, kurį
+ * naudoja `newJob()`.
+ *
+ * Kiti stulpeliai parinkti taip, kad tenkintų VISUS `jobs` invariantus:
+ * `status <> 'processing'` → `phase IS NULL`; `NOT progress_known` (default);
+ * `owner_kind = 'unowned'` → `owner_id IS NULL`; `actor_source` NULL.
+ */
+async function irasytiTevineEilute(pool, jobId, { onConflict = false } = {}) {
+  await pool.query(
+    `INSERT INTO jobs (id, type, status, owner_kind, created_at, updated_at, schema_version)
+     VALUES ($1, 'transcription', 'completed', 'unowned', now(), now(), $2)
+     ${onConflict ? "ON CONFLICT (id) DO UPDATE SET updated_at = now()" : ""}`,
+    [jobId, CURRENT_SCHEMA_VERSION]
+  );
+}
 const S = states.TOMBSTONE_STATUS;
 
 async function paruostiDb(suffix) {
@@ -171,11 +199,7 @@ test("FK NĖRA: `jobs` eilutės ištrynimas NEPAŠALINA žymos", { skip: SKIP },
   try {
     const jobId = crypto.randomUUID();
 
-    await pool.query(
-      `INSERT INTO jobs (id, type, status, owner_kind, created_at, updated_at, schema_version)
-       VALUES ($1, 'transcription', 'completed', 'unowned', now(), now(), 1)`,
-      [jobId]
-    );
+    await irasytiTevineEilute(pool, jobId);
 
     await pool.query("INSERT INTO erasure_marks (job_id, status, reason) VALUES ($1, $2, $3)", [
       jobId,
@@ -494,11 +518,7 @@ test("RESTORE: žyma, sukurta PO kopijos, atkūrimo NEPALIEČIAMA", { skip: SKIP
   try {
     const jobId = crypto.randomUUID();
 
-    await pool.query(
-      `INSERT INTO jobs (id, type, status, owner_kind, created_at, updated_at, schema_version)
-       VALUES ($1, 'transcription', 'completed', 'unowned', now(), now(), 1)`,
-      [jobId]
-    );
+    await irasytiTevineEilute(pool, jobId);
 
     /** Žyma atsiranda PO to, kai kopija jau padaryta. */
     const store = createErasureMarkStore(pool);
@@ -506,12 +526,7 @@ test("RESTORE: žyma, sukurta PO kopijos, atkūrimo NEPALIEČIAMA", { skip: SKIP
     await store.transition(jobId, S.DELETED);
 
     /** Atkūrimas: job'as perrašomas iš „kopijos". */
-    await pool.query(
-      `INSERT INTO jobs (id, type, status, owner_kind, created_at, updated_at, schema_version)
-       VALUES ($1, 'transcription', 'completed', 'unowned', now(), now(), 1)
-       ON CONFLICT (id) DO UPDATE SET updated_at = now()`,
-      [jobId]
-    );
+    await irasytiTevineEilute(pool, jobId, { onConflict: true });
 
     const { rows } = await pool.query("SELECT status FROM erasure_marks WHERE job_id = $1", [jobId]);
 
