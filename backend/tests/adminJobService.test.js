@@ -10,9 +10,16 @@ const { OWNER_KIND } = require("../utils/jobStore/common");
 const {
   adminDeleteJob,
   adminCleanupOrphan,
+  desktopCleanupOrphan,
   AdminOverrideDenied,
   ADMIN_EVENT,
 } = require("../services/adminJobService");
+const tombstones = require("../utils/deletionTombstones");
+const {
+  ERASURE_REASON,
+  ACTOR_KIND,
+  TOMBSTONE_STATUS,
+} = require("../utils/deletionTombstones/states");
 
 const ADMIN_ID = "11111111-1111-4111-8111-111111111111";
 const USER_ID = "44444444-4444-4444-8444-444444444444";
@@ -251,5 +258,90 @@ test("#160 SĖKMĖ: našlaičių valymas laikosi tos pačios taisyklės", async 
     cleanup.result,
     result.cleaned ? "success" : "failure",
     "audito rezultatas turi atitikti grąžintą sėkmę"
+  );
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #183 IŠTRYNIMO ŽYMA NAŠLAIČIŲ KELYJE - FAIL-CLOSED
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#183 NAŠLAITIS: sėkmingas valymas palieka barjerą (abu keliai)", async () => {
+  /**
+   * Iki #183 abu našlaičių keliai trynė pėdsakus NEPALIKDAMI žymos: ištrynimas
+   * pavykdavo, barjero neatsirasdavo, ir atkūrimas iš senesnės kopijos tą patį
+   * `jobId` vėl priimdavo.
+   *
+   * Tikrinama ne tik žymos egzistavimas, bet ir `reason` bei `actorKind`:
+   * `orphan_cleanup` skiria šį kelią nuo savininko `user_request`, o aktorius
+   * skiriasi TARP kelių - admin naudoja privilegiją, desktop režimas jos neturi.
+   */
+  const adminJob = await svetimasJob();
+  const desktopJob = await svetimasJob();
+
+  const a = await adminCleanupOrphan(adminJob.id, sessionAdmin);
+  assert.equal(a.cleaned, true);
+
+  const zymaA = await tombstones.get(adminJob.id);
+  assert.ok(zymaA, "admin kelias privalo palikti žymą");
+  assert.equal(zymaA.status, TOMBSTONE_STATUS.DELETED);
+  assert.equal(zymaA.reason, ERASURE_REASON.ORPHAN_CLEANUP);
+  assert.equal(zymaA.actorKind, ACTOR_KIND.OPERATOR);
+  assert.equal(await tombstones.isDeleted(adminJob.id), true, "barjeras veikia");
+
+  const d = await desktopCleanupOrphan(desktopJob.id, desktopAdmin);
+  assert.equal(d.cleaned, true);
+
+  const zymaD = await tombstones.get(desktopJob.id);
+  assert.ok(zymaD, "desktop kelias privalo palikti žymą");
+  assert.equal(zymaD.reason, ERASURE_REASON.ORPHAN_CLEANUP);
+  assert.equal(
+    zymaD.actorKind,
+    ACTOR_KIND.USER,
+    "desktop režime privilegijos nėra - `operator` nurodytų aktorių, kurio nebuvo"
+  );
+});
+
+test("#183 FAIL-CLOSED: žymos įrašymo klaida SUSTABDO valymą, o ne praleidžiama", async () => {
+  /**
+   * ⚠️ ĮRODYMAS YRA PRODUKCINĖ BŪSENA, NE KVIETIMŲ SKAITIKLIS.
+   *
+   * Tikrinama ne „ar `eraseOrphanedJobData` buvo kviestas", o ar duomenys LIKO.
+   * Skaitiklį būtų galima patenkinti ir tada, kai valymas įvyko dalinai; likęs
+   * `jobs` įrašas yra tiesioginis atsakymas į klausimą, ar ištrynimas be
+   * barjero įvyko.
+   *
+   * Abu keliai tikrinami atskirai: `desktopCleanupOrphan` yra SAVARANKIŠKAS
+   * įėjimas, ne `adminCleanupOrphan` su atlaisvinta patikra, tad vieno kelio
+   * įrodymas apie kitą nesako nieko.
+   */
+  const adminJob = await svetimasJob();
+  const desktopJob = await svetimasJob();
+
+  const originalus = tombstones.mark;
+  tombstones.mark = async () => {
+    throw new Error("žymų saugykla nepasiekiama");
+  };
+
+  try {
+    await assert.rejects(
+      () => adminCleanupOrphan(adminJob.id, sessionAdmin),
+      /žymų saugykla nepasiekiama/,
+      "klaida turi propaguotis kvietėjui, o ne būti nutylėta"
+    );
+    await assert.rejects(
+      () => desktopCleanupOrphan(desktopJob.id, desktopAdmin),
+      /žymų saugykla nepasiekiama/
+    );
+  } finally {
+    tombstones.mark = originalus;
+  }
+
+  assert.ok(
+    await jobStore.system.get(adminJob.id),
+    "be žymos valymas negali įvykti - įrašas privalo likti (admin kelias)"
+  );
+  assert.ok(
+    await jobStore.system.get(desktopJob.id),
+    "be žymos valymas negali įvykti - įrašas privalo likti (desktop kelias)"
   );
 });

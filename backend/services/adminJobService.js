@@ -2,6 +2,12 @@ const jobStore = require("../utils/jobStore");
 const { rasytiAudita } = require("../utils/auditWrite");
 const { eraseOrphanedJobData } = require("../utils/jobErasure");
 const lifecycleService = require("./lifecycleService");
+const tombstones = require("../utils/deletionTombstones");
+const {
+  ERASURE_REASON,
+  ACTOR_KIND,
+  TOMBSTONE_STATUS,
+} = require("../utils/deletionTombstones/states");
 const { isSessionAdmin } = require("../utils/jobAccessPolicy");
 const { OWNER_KIND } = require("../utils/jobStore/common");
 const { createLogger } = require("../utils/logger");
@@ -135,6 +141,62 @@ async function adminDeleteJob(jobId, actor) {
 }
 
 /**
+ * NAŠLAIČIO VALYMAS SU IŠTRYNIMO ŽYMA - ŽYMA PIRMA, VALYMAS ANTRAS (#183).
+ *
+ * ⚠️ TVARKA YRA VISA ESMĖ, IR JI FAIL-CLOSED.
+ *
+ * Iki šio taisymo abu našlaičių keliai kvietė `eraseOrphanedJobData()` tiesiai,
+ * be jokios žymos. Ištrynimas pavykdavo, barjero neatsirasdavo, ir atkūrimas iš
+ * senesnės kopijos tą `jobId` vėl priimdavo - lygiai ta spraga, kurią 7.5a
+ * uždaro savininko kelyje. Vienas produkcinis ištrynimo kelias be garantijos
+ * padarytų `docs/deletion-guarantees.md` apribojimo šalinimą neteisingu.
+ *
+ * ⚠️ ŽYMOS ĮRAŠYMO KLAIDA NEGAUDOMA - VALYMAS NEVYKSTA.
+ *
+ * `mark()` klaida reiškia, kad barjero nėra: arba DB nepasiekiama, arba žymų
+ * saugykla neinicijuota. Tęsti reikštų negrįžtamai ištrinti duomenis be
+ * įrodymo, kad jie ištrinti. Atidėtas valymas atstatomas - našlaitis be `jobs`
+ * eilutės valandą nieko nepablogina; valymas be žymos yra negrįžtamas.
+ *
+ * Tai ta pati tvarka kaip `lifecycleService.deleteJobArtefacts` (#19: žyma PRIEŠ
+ * artefaktų šalinimą), pasiekiama per tą patį fasadą - antro lygiagretaus
+ * mechanizmo čia neatsiranda.
+ *
+ * @param {string} jobId
+ * @param {"user"|"operator"} actorKind kas veikė; KODĖL - visada `orphan_cleanup`
+ */
+async function valytiNaslaitiSuZyma(jobId, actorKind) {
+  await tombstones.mark(jobId, {
+    reason: ERASURE_REASON.ORPHAN_CLEANUP,
+    actorKind,
+  });
+
+  const outcome = await eraseOrphanedJobData(jobId, { scope: "system" });
+
+  /**
+   * Ta pati taisyklė kaip `adminDeleteJob`: sėkmė iš rezultato, ne iš to, kad
+   * kvietimas nemetė klaidos. Nepilnas našlaičio valymas reiškia, kad BullMQ
+   * ar audito pėdsakai liko - kvietėjas to negali interpretuoti kaip sėkmės.
+   */
+  const success = !outcome.criticalFailure;
+
+  /**
+   * ⚠️ `classifyFailure` IŠ `lifecycleService`, o ne vietinė literalė:
+   * nesėkmės kategorija turi vieną autoritetą. Į žymą patenka TIK kategorija -
+   * `outcome.errors` tekstuose būna failų kelių ir saugyklos raktų.
+   */
+  await tombstones.complete(
+    jobId,
+    success ? TOMBSTONE_STATUS.DELETED : TOMBSTONE_STATUS.FAILED,
+    success
+      ? {}
+      : { failureKind: lifecycleService.classifyFailure(outcome.errors[0]) }
+  );
+
+  return { outcome, success };
+}
+
+/**
  * Našlaičio valymas (store įraše NĖRA).
  *
  * Admin-only, nes nuosavybės patikrinti neįmanoma iš principo: likę pėdsakai
@@ -144,14 +206,8 @@ async function adminDeleteJob(jobId, actor) {
 async function adminCleanupOrphan(jobId, actor) {
   await assertSessionAdmin(actor, "orphan_cleanup", jobId);
 
-  const outcome = await eraseOrphanedJobData(jobId, { scope: "system" });
-
-  /**
-   * Ta pati taisyklė kaip `adminDeleteJob`: sėkmė iš rezultato, ne iš to, kad
-   * kvietimas nemetė klaidos. Nepilnas našlaičio valymas reiškia, kad BullMQ
-   * ar audito pėdsakai liko – kvietėjas to negali interpretuoti kaip sėkmės.
-   */
-  const success = !outcome.criticalFailure;
+  /** `actor_kind=operator`: privilegija panaudota, nuosavybė peržengta. */
+  const { outcome, success } = await valytiNaslaitiSuZyma(jobId, ACTOR_KIND.OPERATOR);
 
   await rasytiAudita({
     event: ADMIN_EVENT.ORPHAN_CLEANUP,
@@ -189,8 +245,15 @@ async function desktopCleanupOrphan(jobId, actor) {
     );
   }
 
-  const outcome = await eraseOrphanedJobData(jobId, { scope: "system" });
-  const success = !outcome.criticalFailure;
+  /**
+   * `actor_kind=user`, NE `operator`.
+   *
+   * Ta pati logika kaip žemiau esančiame audito paaiškinime: desktop režime
+   * privilegijos nėra ir nuosavybės peržengti neįmanoma - veikia pats duomenų
+   * subjektas. `operator` žymoje, kuri pergyvena jobą, nurodytų aktorių, kurio
+   * nebuvo.
+   */
+  const { outcome, success } = await valytiNaslaitiSuZyma(jobId, ACTOR_KIND.USER);
 
   /**
    * ATSKIRO AUDITO ĮRAŠO ČIA NĖRA – SĄMONINGAI.

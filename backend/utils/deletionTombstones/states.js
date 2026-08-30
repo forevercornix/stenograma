@@ -34,6 +34,19 @@ const ERASURE_REASON = {
   USER_REQUEST: "user_request",
   RETENTION_POLICY: "retention_policy",
   OPERATOR_CLEANUP: "operator_cleanup",
+  /**
+   * Našlaičio valymas: `jobs` eilutės nėra, likę tik pėdsakai (eilė, saugykla,
+   * auditas). Atskira reikšmė, o ne `operator_cleanup`, nes kelių yra DU ir jie
+   * skiriasi ne aktoriumi, o dalyku:
+   *
+   *   - `adminCleanupOrphan` - operatoriaus privilegija (`actor_kind=operator`);
+   *   - `desktopCleanupOrphan` - vieno vartotojo režimas, kur privilegijos NĖRA
+   *     ir aktorius yra pats duomenų subjektas (`actor_kind=user`).
+   *
+   * `operator_cleanup` antrajam būtų melas žymoje, kuri pergyvena jobą. Kas
+   * veikė - `actor_kind`; KODĖL - `reason`.
+   */
+  ORPHAN_CLEANUP: "orphan_cleanup",
 };
 
 /**

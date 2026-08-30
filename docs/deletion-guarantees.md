@@ -42,7 +42,22 @@ apribojimas. Nuo 7.5a jos saugomos `erasure_marks` lentelėje, tad:
    po patvirtinto ištrynimo, ir **nepavykęs** ištrynimas jo **nenuima**;
 ✅ žyma **neišnyksta anksčiau**, nei job'as nebegali būti prikeltas: terminas
    išvedamas iš faktinių eilės prikėlimo horizontų ir kopijų retencijos, ne
-   parenkamas.
+   parenkamas;
+✅ barjerą palieka **visi** ištrynimo keliai – savininko užklausa, administracinis
+   override ir **našlaičių valymas** (`reason=orphan_cleanup`). Iki šio taisymo
+   `adminCleanupOrphan()` ir `desktopCleanupOrphan()` trynė likusius pėdsakus
+   **nepalikdami žymos**, tad atkūrimas iš senesnės kopijos tą `jobId` vėl
+   priimdavo.
+
+⚠️ **NAUJA OPERACINĖ ELGSENA: našlaičio valymas be žymos NEVYKDOMAS.**
+
+Jei žymos įrašyti nepavyksta (DB nepasiekiama, žymų saugykla neinicijuota),
+valymas **atmetamas su klaida**, o ne atliekamas tyliai. Tai sąmoningas
+pasirinkimas: našlaitis be `jobs` eilutės, palauktas iki DB atsigaus, nieko
+nepablogina – o ištrynimas be barjero yra negrįžtamas.
+
+Operatoriui tai reiškia, kad per DB nepasiekiamumą našlaičių valymas grąžins
+klaidą; teisingas veiksmas – **pakartoti vėliau**, ne apeiti kelią.
 
 ⚠️ **Ši garantija galioja TIK ten, kur nustatytas `DATABASE_URL`.** Be jo sistema
 sąmoningai grįžta į atmintinį režimą – žr. 2 skyrių. Startas tokiu atveju garsiai

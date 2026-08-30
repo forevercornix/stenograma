@@ -36,6 +36,18 @@ ji pasensta ir tampa klaidinanti.
 
 ### Changed
 
+- **Našlaičių valymas nuo šiol palieka ištrynimo žymą ir yra fail-closed**
+  (#183, 7.5a). `adminCleanupOrphan()` ir `desktopCleanupOrphan()` anksčiau
+  šalino likusius pėdsakus **nepalikdami barjero** – atkūrimas iš senesnės
+  kopijos tą `jobId` vėl priimdavo. Dabar žyma (`reason=orphan_cleanup`)
+  rašoma **prieš** šalinimą.
+
+  ⚠️ **Operacinė pasekmė:** jei žymos įrašyti nepavyksta (DB nepasiekiama),
+  valymas **atmetamas su klaida**, o ne atliekamas tyliai. Anksčiau ta pati
+  operacija būtų pavykusi. Teisingas veiksmas – **pakartoti vėliau**; našlaitis
+  be `jobs` eilutės palaukęs nieko nepablogina, o ištrynimas be barjero yra
+  negrįžtamas. Žr. `docs/deletion-guarantees.md` §1.
+
 - `AUDIT_MAX_ENTRIES` PostgreSQL režimui **netaikoma** ir netaps retencijos
   taisykle: eilutės nešalinamos vien dėl kiekio. Ji lieka atminties apsauga.
 

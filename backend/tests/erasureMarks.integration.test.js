@@ -761,3 +761,42 @@ test("SKRIPTAS: operatoriaus veiksmas palieka RAW `audit_log` įrašą", { skip:
     await resursai.isvalyti();
   }
 });
+
+test("MIGRACIJA: `reason` CHECK priima `orphan_cleanup`, o nežinomos reikšmės - ne", { skip: SKIP }, async () => {
+  /**
+   * ⚠️ TAI YRA PRAPLEČIANČIOS MIGRACIJOS ĮRODYMAS (#183).
+   *
+   * `orphan_cleanup` pridėta į `states.js` allowlist'ą, bet `erasure_marks`
+   * CHECK yra ANTRA vieta, kur reikšmės surašytos ranka - ir ji užšaldyta
+   * migracijoje. Be `1755500000000_erasure-marks-orphan-reason.js` našlaičių
+   * valymas kristų `check_violation` klaida RAŠANT ŽYMĄ, t. y. tiksliai tame
+   * kelyje, kurį ta reikšmė įveda. Vienetinis pariteto testas to nepagauna:
+   * jis lygina tekstus, ne realią DB.
+   *
+   * Antra pusė - kad CHECK apskritai veikia. Priimta reikšmė be atmetamos
+   * neįrodo nieko: praplėtimas galėjo constraint'ą ir panaikinti.
+   */
+  const { pool, resursai } = await paruostiDb("erasure_mark_orphan_reason");
+
+  try {
+    const store = createErasureMarkStore(pool);
+
+    const zyma = await store.mark("naslaitis", {
+      reason: states.ERASURE_REASON.ORPHAN_CLEANUP,
+      actorKind: "operator",
+    });
+    assert.equal(zyma.reason, states.ERASURE_REASON.ORPHAN_CLEANUP);
+
+    await assert.rejects(
+      () =>
+        pool.query(
+          "INSERT INTO erasure_marks (job_id, status, reason) VALUES ($1, $2, $3)",
+          ["nezinoma", "deletion_pending", "kazkokia_prasimanyta"]
+        ),
+      /check|constraint/i,
+      "CHECK privalo likti - praplėtimas nėra jo panaikinimas"
+    );
+  } finally {
+    await resursai.isvalyti();
+  }
+});

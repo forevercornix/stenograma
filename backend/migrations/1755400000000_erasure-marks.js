@@ -20,8 +20,9 @@
  *
  *   - `lifecycleService.deleteJobArtefacts(null, jobId)` - žymima, kai `jobs`
  *     eilutės JAU NĖRA;
- *   - `adminJobService.adminCleanupOrphan(jobId)` - našlaičio valymas, kai
- *     store įraše jobo NIEKADA nebuvo;
+ *   - `adminJobService.adminCleanupOrphan(jobId)` ir `desktopCleanupOrphan(jobId)`
+ *     - našlaičio valymas, kai store įraše jobo NIEKADA nebuvo (abu keliai rašo
+ *     žymą nuo #183; iki tol jie trynė pėdsakus be barjero);
  *   - `erasure_marks` aktyvus vos yra `DATABASE_URL`, įskaitant diegimus, kur
  *     `jobStore` yra memory ar Redis, o ID forma `uuid` negarantuota.
  *

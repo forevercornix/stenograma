@@ -413,9 +413,82 @@ test("MIGRACIJA: užšaldytos aibės sutampa su `states.js` autoritetu", () => {
   };
 
   assert.deepEqual(aibe("STATUSES_FROZEN").sort(), [...states.STATUSES].sort());
-  assert.deepEqual(aibe("REASONS_FROZEN").sort(), [...states.REASONS].sort());
   assert.deepEqual(aibe("ACTOR_KINDS_FROZEN").sort(), [...states.ACTOR_KINDS].sort());
   assert.deepEqual(aibe("FAILURE_KINDS_FROZEN").sort(), [...states.FAILURE_KINDS].sort());
+});
+
+/**
+ * Ištraukia `reason` aibę iš migracijos šaltinio, nesvarbu kelinta ji.
+ *
+ * Vardas su priesaga (`REASONS_FROZEN`, `REASONS_FROZEN_V2`, ...), nes kiekviena
+ * praplečianti migracija turi savo užšaldytą sąrašą - importuoti konstantos jos
+ * negali, tai istorijos įrašai.
+ */
+function reasonAibe(saltinis) {
+  const m = /const REASONS_FROZEN[A-Z0-9_]* = \[/.exec(saltinis);
+  if (!m) return null;
+
+  const pabaiga = saltinis.indexOf("];", m.index);
+  assert.notEqual(pabaiga, -1, "neužbaigta REASONS_FROZEN deklaracija");
+
+  return saltinis
+    .slice(m.index, pabaiga)
+    .match(/"[^"]+"/g)
+    .map((r) => r.replace(/"/g, ""));
+}
+
+test("MIGRACIJA: `reason` allowlist gali TIK plėstis, o naujausia aibė atitinka `states.js`", () => {
+  /**
+   * ⚠️ TESTAS SĄMONINGAI NEĮRAŠO MIGRACIJOS VARDO.
+   *
+   * `reason` aibė jau plėtėsi kartą (`orphan_cleanup`, #183) ir gali plėstis vėl.
+   * Jei testas rodytų į konkretų failą, kita nauja reikšmė `states.js` byloje
+   * praeitų tyliai tol, kol kas nors prisimintų atnaujinti ir testą. Todėl aibė
+   * ieškoma VISOSE migracijose, o autoritetu laikoma naujausia pagal vardą -
+   * t. y. ta, kuri realiai galioja šviežiai migruotai DB.
+   *
+   * Antra tikrinama savybė - kryptis. Allowlist gali PLĖSTIS, bet reikšmė iš jo
+   * dingti negali: jau įrašytos žymos taptų `check_violation` eilutėmis, o
+   * migracija, kuri jas sulaužo, aptinkama tik diegimo metu.
+   */
+  const migDir = path.join(__dirname, "../migrations");
+
+  const deklaracijos = fs
+    .readdirSync(migDir)
+    .filter((f) => f.endsWith(".js"))
+    .sort()
+    .map((failas) => ({
+      failas,
+      reiksmes: reasonAibe(fs.readFileSync(path.join(migDir, failas), "utf8")),
+    }))
+    .filter((d) => d.reiksmes);
+
+  assert.ok(
+    deklaracijos.length >= 2,
+    "tikimasi bent pirminės ir `orphan_cleanup` praplečiančios migracijos"
+  );
+
+  const naujausia = deklaracijos[deklaracijos.length - 1];
+
+  assert.deepEqual(
+    [...naujausia.reiksmes].sort(),
+    [...states.REASONS].sort(),
+    `naujausia migracija (${naujausia.failas}) ir \`states.js\` aibės išsiskyrė - ` +
+      "pasikeitus allowlist'ui reikia NAUJOS migracijos"
+  );
+
+  for (let i = 1; i < deklaracijos.length; i += 1) {
+    const dingo = deklaracijos[i - 1].reiksmes.filter(
+      (r) => !deklaracijos[i].reiksmes.includes(r)
+    );
+
+    assert.deepEqual(
+      dingo,
+      [],
+      `${deklaracijos[i].failas} pašalino reikšmes, kurias leido ` +
+        `${deklaracijos[i - 1].failas}: ${dingo.join(", ")}`
+    );
+  }
 });
 
 test("MIGRACIJA: FK į `jobs` NĖRA - tripwire", () => {
