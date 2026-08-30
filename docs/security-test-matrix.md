@@ -1696,9 +1696,17 @@ provizionavimas uždraustas; jos NĖRA `PASS` iki CI įrodymo (AGENTS.md §14).
 
 ### #183 — persistentinės ištrynimo žymos (#155, 7.5a)
 
-⚠️ **KUR ATEINA ĮRODYMAS.** Garantijos, reikalaujančios tikros PostgreSQL,
-pažymėtos **[PG NOT RUN]**. Vietinėje aplinkoje egzemplioriaus nėra, o
-provizionavimas uždraustas; jos NĖRA `PASS` iki CI įrodymo (AGENTS.md §14).
+✅ **[PG NOT RUN] ŠIAME SKYRIUJE IŠSPRĘSTA CI.** `erasureMarks.integration`
+**18/18 praėjo** prieš tikrą PostgreSQL ties `94fb334`
+([run 33304930022](https://github.com/forevercornix/stenograma/actions/runs/33304930022)).
+Žemiau esantys **[PG NOT RUN]** žymenys rodo, KURIOMS garantijoms reikia DB, ir
+jos yra `PASS` — bet TIK ten, kur CI leidžia integracinį rinkinį. Vietinėje
+aplinkoje jie neveikia (egzemplioriaus nėra, provizionavimas uždraustas).
+
+⚠️ **CI paleido TESTUS, ne MUTACIJAS.** Mutacijos įrodymo stulpelis šiose
+eilutėse tebėra neatliktas: mutacijai reikia keisti produkcinį kodą ir stebėti
+konkretų kritimą prieš DB. Praeinantis testas įrodo, kad kodas veikia; kad
+testas pagautų jo lūžį, įrodo tik mutacija (AGENTS.md §14).
 
 | Garantija | Testai | Mutacijos įrodymas |
 |---|---|---|
