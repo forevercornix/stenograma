@@ -958,6 +958,221 @@ pataisoma nukrypstanti realizacija.
 
 ---
 
+## [7.2c] Tipų normalizavimas ir backend'ų elgsenos paritetas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.2b · **Tipas:** duomenų modelio
+kontraktas · **Prioritetas:** P1
+
+Tipų konvertavimo aibės (`BOOLEAN_FIELDS`, `NUMBER_FIELDS`) gyvena
+`redisStore.js` viduje, nors jos saugo nuo gedimo, kuris kartojasi. Bet po
+peržiūros paaiškėjo, kad **problema platesnė nei aibių vieta**: normalizavimo
+nėra rašymo kelyje, tad trys backend'ai to paties patch'o rezultatą grąžina
+skirtingai — ne tik kitokiu tipu, bet ir kitokia logine reikšme.
+
+## Ar tai pasiekiama ŠIANDIEN
+
+⚠️ **Ne per produkcinius kelius.** Patikrinta prieš `main` (`11fb336`):
+produkcinis kodas eilučių į šiuos laukus nesiunčia, o eilutės ateidavo iš Redis,
+ne iš kviečiančiųjų. Divergencija pasiekiama tik per tiesioginį `store.update()`
+su eilutės reikšme.
+
+Tai apsauga nuo ateities regresijos, ne esamo gedimo taisymas — bet šablonas jau
+sprogo **tris kartus**, ir vienas iš jų reiškė duomenų praradimą.
+
+## Įrodymas
+
+`store.update(id, { laukas: "false" })` ir `"0"`, prieš tikrą PostgreSQL:
+
+| Laukas | memory | postgres |
+|---|---|---|
+| ⚠️ `audio_cleanup_pending` | `"false"` | `true` |
+| ⚠️ `deletion_pending` | `"false"` | `true` |
+| ⚠️ `progressKnown` | `"false"` | `false` |
+| ⚠️ `attempt_count` | `"0"` | `0` |
+| ⚠️ `audio_cleanup_attempts` | `"0"` | `0` |
+| ⚠️ `deletion_attempts` | `"0"` | `0` |
+
+Du pirmieji pavojingiausi: memory palieka `"false"`, kuris JavaScript'e yra
+**truthy**, o PostgreSQL grąžina `true` per `Boolean("false")`. Skiriasi ne tik
+tipas, bet ir loginė reikšmė, kurią mato kviečiantysis kodas.
+
+`schemaVersion` (septintas tos pačios aibės laukas) ištaisytas #204.
+
+## Kodėl verta spręsti
+
+`redisStore.js:58-70` komentaras dokumentuoja tris pasekmes:
+
+| Laukas | Pasekmė |
+|---|---|
+| `audio_cleanup_pending: "false"` | `listByFlag()` grąžindavo VISUS job'us, o `retryPendingAudioCleanups()` trindavo dar apdorojamų job'ų audio |
+| `progressKnown: "false"` | `"false"` yra truthy → `progressKnown === false` niekada nesuveikdavo |
+| `audio_cleanup_attempts: "0"` | `("0" \|\| 0) + 1 === "01"` → skaitliukas ir alerto riba neveikė |
+
+Tas pats komentaras įvardija šaknį: *„`attempt_count` jau buvo apdorojamas
+atskirai — tai buvo užuomina, kad ši spąsta žinoma; naujus laukus reikėjo
+pridėti čia iš karto."*
+
+Duomenų praradimas jau įvyko kartą. Ketvirtas kartas kainuos tiek pat, o
+šiandien niekas jo nesustabdytų.
+
+## Pasirinktas sprendimas
+
+Kanoninių tipų kontraktas perkeliamas į `common.js`, bet **vien aibių perkėlimo
+NEPAKANKA.** Normalizavimas vykdomas bendrame **rašymo** kelyje, prieš
+backend'ams gaunant pataisytą objektą:
+
+```
+patch
+→ common.js validacija / applyPatch()
+→ kanoninių boolean/number laukų normalizavimas
+→ kanoninis job objektas
+→ memory / Redis / PostgreSQL backend
+```
+
+Todėl:
+
+- `memoryStore` niekada neišsaugo `"false"` ar `"0"` kanoniniame lauke;
+- `redisStore.update()` **tiesioginis** rezultatas jau normalizuotas, dar PRIEŠ
+  serialize/deserialize round-trip;
+- `postgresStore` negauna `"false"` ir nepaverčia jo per
+  `Boolean("false") === true`;
+- `redisStore.deserialize()` **išlieka**, nes Redis fiziškai saugo tekstą — bet
+  aibę ima iš `common.js`, ne apibrėžia savo.
+
+### ⚠️ `create()` ir `restoreRecord()` — ne tik `update()`
+
+`applyPatch()` dengia atnaujinimus. Bet **`restoreRecord()` priima savavališką
+įrašą iš atsarginės kopijos**, o senesnė kopija gali turėti būtent tas tekstines
+reikšmes, dėl kurių šis issue egzistuoja. Atkūrimas be normalizavimo grąžintų
+gedimą į gyvą sistemą — ir kaip tik tuo momentu, kai niekas neįtaria.
+
+Normalizavimas taikomas **visiems** keliams, kuriais job objektas patenka į
+saugyklą: `create()`, `update()`, `restoreRecord()`. Testas kiekvienam.
+
+### Kanoninės konversijos semantika
+
+Normalizavimas **negali** naudoti bendro JavaScript truthiness:
+
+```
+"false" → false        NE Boolean("false") → true
+"true"  → true
+"0"     → 0            (number, ne eilutė)
+```
+
+Neaiški ar neleistina reikšmė **negali būti tyliai interpretuojama kaip kita
+loginė reikšmė**.
+
+⚠️ **Neleistinos įvesties politika neišrandama iš naujo** — ji išlaiko esamą
+`applyPatch()` kontraktą. Bet kad ir kokia ji būtų, ji privalo būti **vienoda
+visuose trijuose backend'uose**, ir tai įrodo testas. Priešingu atveju
+divergencija tiesiog persikelia iš teisingų reikšmių į neteisingas.
+
+### Dvi normalizavimo vietos negali išsiskirti
+
+Po pataisos jų lieka dvi: rašymo kelias `common.js` ir `redisStore.deserialize()`
+skaitymo kelyje. Abi privalo naudoti **tą patį helperį**, ir testas įrodo, kad
+tai pačiai įvesčiai jos duoda tapatų rezultatą. Dvi nepriklausomos realizacijos
+yra ta pati klasė, kurią šis issue ir šalina.
+
+### Job modelio sargas
+
+`BOOLEAN_FIELDS` ir `NUMBER_FIELDS` lieka **eksplicitinis** kanoninis kontraktas
+`common.js`. Bet jų pilnumas **netikrinamas antru rankiniu sąrašu**.
+
+Sargo testas programiškai sukuria `newJob()` ir tikrina:
+
+- kiekvienas laukas, kurio numatytoji reikšmė yra `boolean`, yra
+  `BOOLEAN_FIELDS`;
+- kiekvienas laukas, kurio numatytoji reikšmė yra `number`, yra `NUMBER_FIELDS`.
+
+Taip naujas typed laukas negali atsirasti `newJob()` pamirštant normalizavimo
+kontraktą.
+
+⚠️ **Aibės NEGENERUOJAMOS iš `newJob()`.** `newJob()` yra runtime objektų
+konstruktorius, o laukų schema — duomenų modelio kontraktas. Schema neturi būti
+netiesiogiai „atrandama" paleidžiant konstruktorių; ji deklaruojama, o
+konstruktorius prieš ją tikrinamas.
+
+⚠️ **Sargo riba, kurią reikia įvardyti:** jis mato tik tuos laukus, kurie
+egzistuoja `newJob()` išvestyje. Laukas, atsirandantis tik vėliau (pvz. tik
+užbaigimo metu), pro jį prasmuktų. Tokie laukai deklaruojami kanoniniame
+kontrakte eksplicitiškai, ir ta riba užrašoma sargo komentare — kitaip jis
+skelbtų pilnumą, kurio neturi.
+
+### Typed defaults invariantas
+
+Kad sargas būtų patikimas:
+
+- kanoninis boolean laukas `newJob()` turi turėti **boolean** numatytąją reikšmę;
+- kanoninis number laukas — **number**;
+- naujas boolean/number laukas negali būti inicializuojamas `null` ar
+  `undefined` (nes `typeof null === "object"`, ir tipo aptikimas tyliai
+  nesuveiktų).
+
+Jei ateityje reikės nullable typed lauko, jo tipas deklaruojamas kanoniniame
+kontrakte eksplicitiškai ir sargas praplečiamas — negalima leisti jam tyliai
+iškristi iš tikrinimo. Ši taisyklė užrašoma komentaru pačiame `newJob()`.
+
+## DoD
+
+- [ ] `BOOLEAN_FIELDS` ir `NUMBER_FIELDS` apibrėžtos `common.js`; `redisStore`
+      savo kopijų nebeturi.
+- [ ] `applyPatch()` arba vienas jo naudojamas `common.js` helperis yra
+      **autoritetingas rašymo kelio normalizavimo taškas** visiems backend'ams.
+- [ ] Normalizavimas taikomas `create()`, `update()` **ir** `restoreRecord()` —
+      testas kiekvienam keliui.
+- [ ] `"false"` boolean lauke normalizuojamas į `false`, ne per truthiness į
+      `true`.
+- [ ] `"0"` skaitiniame lauke normalizuojamas į number `0`.
+- [ ] Neleistinos įvesties elgesys išlaiko esamą `applyPatch()` kontraktą ir yra
+      **vienodas visuose trijuose backend'uose** — testas.
+- [ ] `redisStore.deserialize()` ir rašymo kelias naudoja tą patį helperį;
+      testas įrodo tapatų rezultatą tai pačiai įvesčiai.
+- [ ] ⚠️ **RAŠYMO + SKAITYMO PARITETAS.** Kiekvienam kanoniniam laukui tas pats
+      tekstinis patch'as taikomas visiems trims backend'ams, ir testas atskirai
+      tikrina:
+      **(1)** `await store.update(id, patch)` **tiesioginį** rezultatą;
+      **(2)** po to `await store.get(id)` rezultatą.
+      Abu turi turėti identišką kanoninę reikšmę IR identišką JavaScript tipą.
+      **Vien `get()` patikros nepakanka** — Redis skaitymo kelio `deserialize()`
+      paslėptų rašymo kelio regresiją.
+- [ ] Paritetų testas **parametrizuotas pagal aibę**, apima VISUS
+      `BOOLEAN_FIELDS` ir `NUMBER_FIELDS`, ne tik istorinius šešis laukus.
+- [ ] Sargo testas iš `newJob()` nustato visus boolean/number numatytųjų
+      reikšmių laukus ir įrodo, kad jie yra atitinkamoje kanoninėje aibėje.
+- [ ] Sargo riba (laukai, neegzistuojantys `newJob()` išvestyje) įvardyta
+      komentare, ne nutylėta.
+- [ ] `newJob()` turi komentarą su typed defaults invariantu.
+- [ ] Regresijos testai trims istoriniams atvejams: `listByFlag()` su `"false"`,
+      `progressKnown === false` patikra, `attempt_count` didinimas.
+- [ ] ⚠️ **Mutacija:** pridėjus naują boolean/number lauką į `newJob()` ir
+      neįtraukus jo į kanoninį kontraktą, **sargo testas krinta**.
+- [ ] ⚠️ **Mutacija:** pašalinus rašymo kelio normalizavimą, **pariteto testas
+      krinta net tada, kai `redisStore.deserialize()` tebeveikia**.
+- [ ] `docs/security-test-matrix.md` įrašas: audio valymo vėliavos yra duomenų
+      praradimo riba, ne stiliaus klausimas. Eilutė įvardija savo mutaciją.
+
+## Ko NEAPIMA
+
+- `schemaVersion` — ištaisytas #204.
+- Redis serializavimo formato keitimo: Redis ir toliau saugo eilutes, keičiasi
+  tik tai, kur apibrėžta kanoninė aibė.
+- Įvesties validacijos maršrutuose: čia storage-layer kontraktas, ne HTTP.
+- Naujų laukų pridėjimo į job modelį.
+- Bendro schema framework'o, Zod ar JSON Schema migracijos.
+
+## Kilmė
+
+Rasta klausiant, ar #204 sprendžia pavienį atvejį, ar šabloną. `schemaVersion`
+buvo septintas iš septynių tos pačios aibės laukų; likę šeši patikrinti
+eksperimentu ir visi elgėsi skirtingai.
+
+Peržiūra parodė, kad tai ne Redis refaktoringas, o rašymo kelio kontrakto
+pataisymas — todėl issue pervadintas ir formalizuotas kaip **7.2c**, tiesioginis
+7.2b backend kontrakto ekvivalentumo tęsinys.
+
+---
+
 ## [7.3] Persistentinės sesijos
 
 **Tėvinis:** #155 · **Priklauso nuo:** 7.1
