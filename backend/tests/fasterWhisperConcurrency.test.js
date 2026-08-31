@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
-const { execSync } = require("child_process");
+const { skipWithoutPython } = require("./helpers/pythonGuard");
 
 // FASTER_WHISPER_MAX_CONCURRENCY skaitomas VIENĄ kartą modulio įkėlimo metu
 // (module-level shared semaphore), todėl turi būti nustatytas PRIEŠ require.
@@ -11,16 +11,10 @@ const FasterWhisperEmbeddedProvider = require("../providers/transcription/Faster
 
 const DELAY_SCRIPT = path.join(__dirname, "fixtures", "mock_faster_whisper_delay.py");
 
-let pythonAvailable = true;
-try {
-  execSync("python3 --version", { stdio: "ignore" });
-} catch {
-  pythonAvailable = false;
-}
 
 test(
   "FasterWhisperEmbeddedProvider: FASTER_WHISPER_MAX_CONCURRENCY=1 serializuoja vienalaikes užklausas (apsauga nuo CPU/RAM prisotinimo)",
-  { skip: !pythonAvailable && "python3 nerastas" },
+  { skip: skipWithoutPython() },
   async () => {
     const provider = new FasterWhisperEmbeddedProvider({ scriptPath: DELAY_SCRIPT });
 

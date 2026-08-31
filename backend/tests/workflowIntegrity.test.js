@@ -250,3 +250,80 @@ test("DOKUMENTACIJA: sprendimų įrašai (ADR) egzistuoja ir nuorodos galioja", 
 
   assert.deepEqual(problemos, [], `Nutrūkusios ADR nuorodos:\n  ${problemos.join("\n  ")}`);
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #202 `REQUIRE_*` SARGAI CI'e
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("CI: kiekvienas `REQUIRE_*` sargas REALIAI nustatytas workflow'e", () => {
+  /**
+   * ⚠️ VĖLIAVA, KURIOS NIEKAS NETIKRINA, YRA VĖLIAVA, KURIĄ GALIMA PAŠALINTI.
+   *
+   * Trys sargai (`REQUIRE_REDIS` #15, `REQUIRE_POSTGRES` #155/7.1,
+   * `REQUIRE_PYTHON` #202) egzistuoja tam, kad tylus praleidimas taptų klaida.
+   * Bet iki #202 nė vieno iš jų NIEKAS netikrino: pašalinus eilutę iš `ci.yml`,
+   * visi testai liktų žali, o CI grįžtų prie tos pačios spragos - praleisti
+   * testai su žaliu job'u.
+   *
+   * ⚠️ TIKRINAMI VISI TRYS, NE TIK NAUJASIS. Kaina ta pati - tas pats failas ir
+   * ta pati logika - o atskiras issue dviem eilutėms kainuotų daugiau nei pats
+   * darbas.
+   *
+   * Tikrinama TEKSTU, ne parseriu: `env:` bloko reikšmė gali būti užrašyta
+   * keliais būdais, o mums svarbu, kad vėliava apskritai yra ir yra `"1"`.
+   */
+  const SARGAI = [
+    { vėliava: "REQUIRE_REDIS", issue: "#15" },
+    { vėliava: "REQUIRE_POSTGRES", issue: "#155, 7.1" },
+    { vėliava: "REQUIRE_PYTHON", issue: "#202" },
+  ];
+
+  const visasCI = workflowFailai()
+    .map((f) => fs.readFileSync(f, "utf8"))
+    .join("\n");
+
+  const trūksta = SARGAI.filter(
+    ({ vėliava }) => !new RegExp(`${vėliava}:\\s*["']?1["']?`).test(visasCI)
+  );
+
+  assert.deepEqual(
+    trūksta.map((s) => `${s.vėliava} (${s.issue})`),
+    [],
+    "sargas be `=1` CI'e nieko negina: praleisti testai duotų žalią job'ą"
+  );
+});
+
+test("CI: `backend` job'as paruošia Python EKSPLICITIŠKAI, ne per runner'io prielaidą", () => {
+  /**
+   * ⚠️ `REQUIRE_PYTHON=1` BE `setup-python` PAVERSTŲ CI RAUDONU.
+   *
+   * Abi pusės būtinos ir viena be kitos yra klaida: vėliava be Python paruošimo
+   * duotų nuolat krentantį job'ą, o Python paruošimas be vėliavos grąžintų
+   * tylų praleidimą. Todėl tikrinamos KARTU.
+   *
+   * Versija lyginama su kitais job'ais: trečia Python versija repo be
+   * priežasties neįvedama (#202).
+   */
+  const ciTekstas = fs.readFileSync(path.join(CI, "ci.yml"), "utf8");
+
+  const backendJob = ciTekstas.slice(
+    ciTekstas.indexOf("\n  backend:"),
+    ciTekstas.indexOf("\n  frontend:")
+  );
+
+  assert.ok(
+    /uses:\s*actions\/setup-python/.test(backendJob),
+    "`backend` job'as privalo turėti `actions/setup-python` - kitaip `REQUIRE_PYTHON=1` remiasi runner'io image prielaida"
+  );
+
+  const versijos = [...ciTekstas.matchAll(/python-version:\s*["']?([\d.]+)["']?/g)].map(
+    (m) => m[1]
+  );
+
+  assert.ok(versijos.length >= 2, "tikimasi kelių `setup-python` naudojimų");
+  assert.equal(
+    new Set(versijos).size,
+    1,
+    `visi job'ai turi naudoti TĄ PAČIĄ Python versiją, rasta: ${[...new Set(versijos)].join(", ")}`
+  );
+});
