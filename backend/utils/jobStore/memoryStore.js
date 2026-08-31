@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -177,8 +177,13 @@ async function listReferencedStorageKeys() {
  * raktus, audito įrašus, išvedimo grafą).
  */
 async function restoreRecord(job) {
-  jobs.set(job.id, { ...job });
-  return job;
+  /**
+   * ⚠️ NORMALIZUOJAMA IR ČIA (#205, 7.2c) - žr. `redisStore.restoreRecord()`.
+   * Kopijos turinys yra savavališkas, o `applyPatch()` šio kelio nedengia.
+   */
+  const kanoninis = normalizeJob(job);
+  jobs.set(kanoninis.id, kanoninis);
+  return kanoninis;
 }
 
 async function listAll() {

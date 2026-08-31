@@ -1455,6 +1455,32 @@ Sąžiningumo dėlei — ribos, kurios lieka atviros:
 | `getOwned` atskiria owner, svetimą scope ir neegzistuojantį job | `jobStoreBackendContract.integration` | Grąžinus job'ą nepatikrinus abiejų scope laukų → `api-key` ir `unowned` neigiamas scenarijus krinta |
 | PostgreSQL progreso CAS lygina pilną perskaitytą snapshot'ą | `postgresStore.integration` | Kontroliuojamai pakeitus fazę tarp read ir CAS → `UPDATE` turi pakeisti 0 eilučių ir grąžinti `REJECTED` |
 
+### #205 — kanoninių tipų normalizavimas rašymo kelyje (#155, 7.2c)
+
+⚠️ **DUOMENŲ PRARADIMO RIBA, NE STILIAUS KLAUSIMAS.** `audio_cleanup_pending`
+valdo, ar `retryPendingAudioCleanups()` ištrins job'o audio. Iki 7.2c
+`store.update(id, { audio_cleanup_pending: "false" })` duodavo memory `"false"`
+(**truthy**), Redis skaitymo kelyje `false`, o PostgreSQL per `Boolean("false")`
+— `true`. Ne kitokį tipą, o **priešingą loginę reikšmę**. Duomenų praradimas jau
+buvo įvykęs kartą: `listByFlag()` grąžindavo VISUS job'us, ir valymas trindavo
+dar apdorojamų job'ų audio.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **`"false"` boolean lauke tampa `false`, ne `Boolean("false")` → `true`** | `jobStoreTypeNormalization`, **[PG NOT RUN]** `postgresStore.integration` | Pašalinus `normalizeJob()` iš `applyPatch()` → krinta pariteto testai (patikrinta mutacija). Grąžinus `Boolean()` semantiką → `jobToRow()` testas krinta be jokios DB |
+| `"0"` skaitiniame lauke tampa number `0`, ne eilute | `jobStoreTypeNormalization`, **[PG NOT RUN]** `postgresStore.integration` | `("0" \|\| 0) + 1 === "01"` — eilučių konkatenacija; regresijos testas didina skaitliuką ir reikalauja `1`, ne `"01"` |
+| ⚠️ **RAŠYMO paritetas: `update()` TIESIOGINIS grąžinimas jau kanoninis** | `jobStoreTypeNormalization` | Pašalinus rašymo kelio normalizavimą, bet PALIKUS veikiantį `redisStore.deserialize()` → `get()` vis dar praeitų, o `update()` grąžinimo patikra krinta. Būtent taip gedimas ir išgyveno |
+| SKAITYMO paritetas: `get()` sutampa su `update()` visuose backend'uose | `jobStoreTypeNormalization`, **[PG NOT RUN]** `postgresStore.integration` | Reikšmė IR `typeof` lyginami atskirai; laukiama reikšmė skaičiuojama tuo pačiu helperiu, ne įrašyta ranka |
+| Normalizavimas taikomas `create()`, `update()` IR `restoreRecord()` | `jobStoreTypeNormalization`, **[PG NOT RUN]** `postgresStore.integration` | `restoreRecord()` yra TRYS atskiros realizacijos ir `applyPatch()` jo nekviečia; pašalinus `normalizeJob()` iš bet kurios → krinta atkūrimo testas. Sena kopija grąžintų gedimą į gyvą sistemą |
+| Neleistina įvestis (`"maybe"`, `"abc"`, `"3.7"`) elgiasi VIENODAI visuose backend'uose | `jobStoreTypeNormalization`, **[PG NOT RUN]** `postgresStore.integration` | Pass-through NEGALI būti vienodas: PostgreSQL `boolean` stulpelyje `"maybe"` netelpa. Palikus jį — divergencija persikeltų iš teisingų reikšmių į neteisingas |
+| Rašymo kelias ir `redisStore.deserialize()` naudoja TĄ PATĮ helperį | `jobStoreTypeNormalization` | Testas lygina abiejų vietų rezultatą tai pačiai įvesčiai per matricą laukas × reikšmė; atkūrus antrą aibę `redisStore.js` → krinta tripwire |
+| ⚠️ **`schemaVersion` autoritetas — `normalizeSchemaVersion()` (#204), ne bendra skaičių taisyklė** | `jobStoreTypeNormalization` | Iki 7.2c #204 funkcija neturėjo NĖ VIENO kvietėjo, o veikė `parseInt(v,10) \|\| 0`. Skirtumas keičia sprendimą: `"2.5"` sena taisykle tapdavo era 2 (TYLIAI priimta), nauja lieka `"2.5"` ir yra GARSIAI atmesta |
+| Sargas: kiekvienas `newJob()` boolean/number laukas yra kanoninėje aibėje | `jobStoreTypeNormalization` | Pridėjus typed lauką į `newJob()` be kanoninio kontrakto → sargas krinta (patikrinta mutacija) |
+| ⚠️ **Sargo RIBA įvardyta, ne nutylėta** | `jobStoreTypeNormalization` | Sargas mato tik `newJob()` išvestį; `deletion_pending` ir `deletion_attempts` joje NEEGZISTUOJA. Jie deklaruoti eksplicitiškai, o testas reikalauja sąmoningo įrašo — naujas nematomas laukas negali tyliai iškristi |
+| Typed defaults: kanoninis laukas `newJob()` gauna `false`/`0`, niekada `null` | `jobStoreTypeNormalization` | `typeof null === "object"`, tad `null` inicijuotas laukas sargui atrodytų netipizuotas ir tyliai iškristų iš tikrinimo |
+| ⚠️ **Atkūrimo kelyje `progressKnown` PostgreSQL režime GRIEŽTESNIS** — ne-boolean atmetamas, ne konvertuojamas | `jobOwnership` (#180 P2-C), `jobStoreTypeNormalization` | 7.2c normalizuoja PO `assertAtstovaujamasProgresas()`, ne prieš ją. Sukeitus tvarką, `"true"` taptų `true`, patikra nebeturėtų ko atmesti, ir #180 garantija tyliai dingtų |
+| ⚠️ **NEDENGIA: `null` kanoniniame lauke** — lieka `null` memory/Redis, `false`/`0` PostgreSQL | `jobStoreTypeNormalization` (komentaras `normalizeFieldValue()`) | Sąmoninga riba: `schemaVersion: null` yra legacy eros žymė (#158), ir bendras `null` → `0` po pirmo `update()` paverstų kiekvieną legacy įrašą nežinoma era. Pre-egzistuojanti divergencija, užregistruota atskirai |
+
 ### #181 — persistentinės sesijos (#155, 7.3)
 
 | Garantija | Testai | Mutacijos įrodymas |
