@@ -72,6 +72,20 @@ jobs:
           cache: "npm"
           cache-dependency-path: backend/package-lock.json
 
+      # EKSPLICITINIS Python, ne runner'io image prielaida (#202).
+      #
+      # `fasterWhisperEmbedded` ir `fasterWhisperConcurrency` naudoja mock
+      # Python skriptus, tad reikia TIK interpretatoriaus - ne faster-whisper
+      # modelio. Iki #202 jie rėmėsi tuo, kad `ubuntu-latest` python3 turi iš
+      # anksto: prielaida šiandien teisinga, bet neužtikrinta - pasikeitus
+      # image'ui testai imtų praleisti save, o job'as liktų ŽALIAS.
+      #
+      # Versija 3.11 - TA PATI kaip `pyannote-server` ir `whisper-server`
+      # job'uose; trečia versija repo neįvedama.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
       - name: Deterministinis diegimas (npm ci)
         run: npm ci
 
@@ -112,6 +126,13 @@ jobs:
         run: npm run test:security
 
       - name: Funkciniai testai
+        env:
+          # REQUIRE_PYTHON=1 paverčia TYLŲ praleidimą klaida (#202) - ta pati
+          # taisyklė kaip REQUIRE_REDIS (#15) ir REQUIRE_POSTGRES (#155, 7.1).
+          #
+          # Be jo dingęs python3 duotų 9 praleistus testus ir žalią job'ą:
+          # padengimo iliuziją, kuri blogesnė nei testų nebuvimas.
+          REQUIRE_PYTHON: "1"
         run: npm run test:functional
 
       # ATSKIRAS žingsnis TIK realaus Redis/BullMQ integraciniams testams

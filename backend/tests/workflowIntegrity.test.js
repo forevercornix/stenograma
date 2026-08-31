@@ -250,3 +250,93 @@ test("DOKUMENTACIJA: sprendimų įrašai (ADR) egzistuoja ir nuorodos galioja", 
 
   assert.deepEqual(problemos, [], `Nutrūkusios ADR nuorodos:\n  ${problemos.join("\n  ")}`);
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #202 `REQUIRE_*` SARGAI CI'e
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** `backend` job'o tekstas - nuo jo antraštės iki kito job'o. */
+function backendJob() {
+  const ci = fs.readFileSync(path.join(CI, "ci.yml"), "utf8");
+  return ci.slice(ci.indexOf("\n  backend:"), ci.indexOf("\n  frontend:"));
+}
+
+/** Job'o žingsniai atskirai: `      - ` yra žingsnio pradžios įtrauka. */
+function zingsniai(jobas) {
+  return jobas.split(/\n      - /).slice(1);
+}
+
+test("CI: kiekvienas `REQUIRE_*` sargas nustatytas TAME žingsnyje, kurį jis gina", () => {
+  /**
+   * ⚠️ VĖLIAVA, KURIOS NIEKAS NETIKRINA, YRA VĖLIAVA, KURIĄ GALIMA PAŠALINTI.
+   *
+   * Trys sargai (`REQUIRE_REDIS` #15, `REQUIRE_POSTGRES` #155/7.1,
+   * `REQUIRE_PYTHON` #202) egzistuoja tam, kad tylus praleidimas taptų klaida.
+   * Iki #202 nė vieno netikrino niekas: pašalinus eilutę iš `ci.yml`, visi
+   * testai liktų žali, o CI grįžtų prie tos pačios spragos.
+   *
+   * ⚠️ TIKRINAMA ŽINGSNIO APIMTIMI, NE VISO FAILO TEKSTE.
+   *
+   * Pirmoji šio testo versija sujungdavo visus workflow failus ir ieškojo
+   * žetono bet kur. Tai reiškė, kad `REQUIRE_PYTHON: "1"`, perkelta į visiškai
+   * nesusijusį `frontend` job'ą, testą palikdavo ŽALIĄ - nors ten ji negina
+   * nieko. „Yra kažkur" nėra įrodymas, kad „veikia ten, kur reikia".
+   *
+   * Todėl vėliava siejama su KOMANDA: ji privalo būti tame pačiame žingsnyje,
+   * kuris paleidžia jos ginamą rinkinį.
+   */
+  const SARGAI = [
+    { vėliava: "REQUIRE_REDIS", komanda: "npm run test:redis", issue: "#15" },
+    { vėliava: "REQUIRE_POSTGRES", komanda: "npm run test:postgres", issue: "#155, 7.1" },
+    { vėliava: "REQUIRE_PYTHON", komanda: "npm run test:functional", issue: "#202" },
+  ];
+
+  const žingsniai = zingsniai(backendJob());
+
+  const pažeidimai = SARGAI.filter(({ vėliava, komanda }) => {
+    const vėliavosŠablonas = new RegExp(`${vėliava}:\\s*["']?1["']?`);
+
+    return !žingsniai.some((z) => z.includes(komanda) && vėliavosŠablonas.test(z));
+  });
+
+  assert.deepEqual(
+    pažeidimai.map((s) => `${s.vėliava} (${s.issue}) → ${s.komanda}`),
+    [],
+    "sargas privalo būti TAME žingsnyje, kurį gina - kitame job'e jis nieko nedaro"
+  );
+});
+
+test("CI: `backend` job'as paruošia Python EKSPLICITIŠKAI, ne per runner'io prielaidą", () => {
+  /**
+   * ⚠️ `REQUIRE_PYTHON=1` BE `setup-python` PAVERSTŲ CI RAUDONU.
+   *
+   * Abi pusės būtinos ir viena be kitos yra klaida: vėliava be Python paruošimo
+   * duotų nuolat krentantį job'ą, o Python paruošimas be vėliavos grąžintų
+   * tylų praleidimą. Todėl tikrinamos KARTU.
+   *
+   * Versija lyginama su kitais job'ais: trečia Python versija repo be
+   * priežasties neįvedama (#202).
+   */
+  const ciTekstas = fs.readFileSync(path.join(CI, "ci.yml"), "utf8");
+
+  const backendJob = ciTekstas.slice(
+    ciTekstas.indexOf("\n  backend:"),
+    ciTekstas.indexOf("\n  frontend:")
+  );
+
+  assert.ok(
+    /uses:\s*actions\/setup-python/.test(backendJob),
+    "`backend` job'as privalo turėti `actions/setup-python` - kitaip `REQUIRE_PYTHON=1` remiasi runner'io image prielaida"
+  );
+
+  const versijos = [...ciTekstas.matchAll(/python-version:\s*["']?([\d.]+)["']?/g)].map(
+    (m) => m[1]
+  );
+
+  assert.ok(versijos.length >= 2, "tikimasi kelių `setup-python` naudojimų");
+  assert.equal(
+    new Set(versijos).size,
+    1,
+    `visi job'ai turi naudoti TĄ PAČIĄ Python versiją, rasta: ${[...new Set(versijos)].join(", ")}`
+  );
+});

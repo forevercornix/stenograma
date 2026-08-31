@@ -209,6 +209,17 @@ const functional = [
   "diarization.route",
   "fasterWhisperConcurrency",
   "fasterWhisperEmbedded",
+  /**
+   * #202: `pythonGuard` elgsenos testai eina TEN, KUR VEIKIA PATS SARGAS.
+   *
+   * Failas testuoja ne funkcionalumą, o testų infrastruktūrą - repo tokio
+   * rinkinio neturi (`suiteDerivation` yra `privacy`, `workflowIntegrity` -
+   * `security`), tad rinktis reikia iš esamų. `functional` pasirinktas dėl
+   * vienos konkrečios priežasties: būtent šį rinkinį CI paleidžia su
+   * `REQUIRE_PYTHON=1`, tad sargo testai vykdomi TOJE pačioje aplinkoje, kurią
+   * sargas ir valdo - o ne kitame žingsnyje, kur vėliavos nėra.
+   */
+  "pythonGuard",
   "fasterWhisperStream",
   "filterHallucinations",
   "generate.route",
