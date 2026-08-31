@@ -25,6 +25,7 @@
     "test:suites": "node scripts/run-tests.mjs --list",
     "test:matrix": "node scripts/check-security-matrix.mjs",
     "test:matrix-rows": "node scripts/check-matrix-rows.mjs",
+    "test:deleted": "node scripts/check-deleted-tests.mjs",
     "test:clean": "node scripts/verify-clean.mjs --verify",
     "test:evidence": "node scripts/check-security-matrix.mjs && node scripts/check-matrix-rows.mjs && node scripts/run-tests.mjs --list"
   },

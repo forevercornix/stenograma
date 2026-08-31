@@ -2805,55 +2805,204 @@ sesijų ir authentication pakeitimų.
 **Tėvinis:** #155 · **Priklauso nuo:** 7.2b
 
 `jobs.version` ir konfliktų semantika. Atskirta nuo 7.5a: ta yra saugumo
-klausimas, ši — saugyklos korektiškumo.
+klausimas, ši — saugyklos korektiškumo. Nuo 7.5a nepriklauso — problemos
+ortogonalios.
 
-### DoD
+Trys dalykai: **optimistic version CAS**, **vienas konflikto kontraktas**,
+**atominis ir idempotentiškas `completed` + rezultato įsipareigojimas.**
 
-- [ ] `jobs.version` stulpelis, didinamas kiekvieno atnaujinimo.
-- [ ] Progreso atnaujinimai — `WHERE version = $n`; statuso perėjimai —
-      `WHERE status = $expected`.
-- [ ] Konflikto rezultatas: aiškus, atskiriamas nuo „nerasta" ir nuo „neleistina".
-- [ ] Kvietėjo politika dokumentuota: kada retry, kada klaida vartotojui.
-- [ ] Deterministinis lenktynių testas su tikru Postgres.
-- [ ] `version` nesikerta su #154 fazių CAS — abu tikrinami tame pačiame
-      `UPDATE`, ne dviem.
+### Užfiksuotas optimistic-lock kontraktas
+
+- `jobs.version` pradinė reikšmė naujam job'ui — **`1`**. Viena reikšmė, vienodai
+  visiems PostgreSQL job'ams.
+- Kiekviena **sėkminga** autoritetinga `jobs` eilutės mutacija didina `version`
+  lygiai `+1`.
+- Mutacija, kuri dėl CAS konflikto neatnaujino nė vienos eilutės, `version`
+  **nekeičia**.
+- Vienos loginės operacijos viduje negali būti kelių nekontroliuojamų
+  increment'ų vien todėl, kad ji palietė kelis SQL sakinius.
+- `job_results` pakeitimas neturi atskiro optimistic-lock autoriteto; jo
+  konsistencija su `jobs` užtikrinama per `finish()` transakciją.
+
+⚠️ **Backend'ų apimtis apibrėžiama eksplicitiškai.** `version` stulpelis yra
+PostgreSQL mechanizmas, bet **konflikto kontraktas yra fasado lygmens** ir
+galioja visiems backend'ams. Memory ir Redis tų pačių garantijų pasiekia savo
+priemonėmis (vienas procesas, Lua CAS). Prieš rašant kodą įvardyti, ką bendras
+paritetų rinkinys tikrina visiems, o kas lieka PostgreSQL-specifiška — kitaip
+rinkinys arba lūžta, arba tyliai susiaurėja.
+
+### Vienas konflikto rezultato kontraktas
+
+Optimistic-lock konfliktas turi būti aiškiai atskirtas nuo keturių kitų dalykų:
+
+1. job nerastas;
+2. owner/authorization neatitiko;
+3. lifecycle perėjimas neleistinas;
+4. DB/infrastruktūros klaida.
+
+⚠️ **Negalima vienuose metoduose grąžinti `null`, kituose `false`, o trečiuose
+mesti generinę klaidą tam pačiam konfliktui.** Vienas autoritetingas
+rezultatas / typed error / statuso objektas pagal esamą `jobStore` fasado
+kontraktą.
+
+Kvietėjų politika dokumentuota eksplicitiškai:
+
+- progresas, pralaimėjęs versijos CAS → perskaityti naują būseną ir spręsti, ar
+  retry dar prasmingas;
+- statuso perėjimo konfliktas → **NEretry'inti aklai**;
+- idempotentiškas `finish(COMPLETED)` → lyginti galutinę būseną ir rezultatą;
+- skirtingas jau įsipareigojęs galutinis rezultatas → consistency error.
+
+### `version` + fazių/statuso CAS
+
+#154 fazių CAS ir `version` **nėra du atskiri round-trip'ai**. Kai operacijai
+aktualūs abu invariantai, jie tikrinami VIENAME `UPDATE`:
+
+```
+WHERE id = ? AND version = ? AND <status/phase invariant>
+```
+
+⚠️ **Nulis eilučių nėra automatiškai „version conflict".** Implementacija privalo
+perskaityti autoritetingą būseną ir atskirti: eilutė dingo · version konfliktas ·
+status/phase konfliktas. Testas įrodo visus tris atskirai.
+
+### `finish(COMPLETED, { result })` autoritetas
+
+`COMPLETED` reiškia tik tokią būseną, kurioje:
+
+- `jobs.status = 'completed'`;
+- egzistuoja atitinkamas `job_results` rezultatas;
+- **abu commit'inti vienoje DB transakcijoje.**
+
+Negalima padaryti `jobs=completed`, o `job_results` įrašyti kitu commit'u. Jei
+rezultato rašymas nepavyksta — visa `finish` transakcija rollback.
+
+⚠️ **Transakcijos ribos apibrėžiamos.** `finish()` transakcija apima `jobs` ir
+`job_results` ir **nieko daugiau**. Audito rašymas, eilės patvirtinimas ir audio
+valymas lieka už jos — audito įtraukimas į transakciją reikštų, kad rollback
+ištrina audito įrašą, o jo laikymas viduje siektų už 7.5b apimties ribų.
+
+`finish(FAILED, ...)` kelias irgi apibrėžiamas: ar jis rašo į `job_results`, ar
+ne. Neapibrėžtas jis taptų antra, netyčine semantika.
 
 ### Idempotentiškas užbaigimas
 
 ⚠️ **`completed` BE REZULTATO NĖRA SĖKMĖ.**
 
 `workers/index.js:192` įrašo `COMPLETED`, `:198` valo audio, `:207` grąžina
-rezultatą. Kritus tarp jų PostgreSQL sako `completed`, BullMQ patvirtinimo
-negavo ir kartoja, o `restart()` terminalų įrašą atmeta.
+rezultatą. Kritus tarp jų PostgreSQL sako `completed`, BullMQ patvirtinimo negavo
+ir kartoja, o `restart()` terminalų įrašą atmeta. Blogiau: rezultatai gyvena
+atskiroje `job_results` lentelėje — jei statusas įsipareigojo, o rezultato
+įrašymas nepavyko, „tęsti valymą, tada sėkmė" ištrintų šaltinio audio ir
+patvirtintų sėkmę, kai klientas transkripcijos neturi. **Negrįžtamai.**
 
-Blogiau: rezultatai gyvena atskiroje `job_results` lentelėje. Jei statusas
-įsipareigojo, o rezultato įrašymas nepavyko, „tęsti valymą, tada sėkmė"
-ištrintų šaltinio audio ir patvirtintų sėkmę, kai klientas transkripcijos
-neturi — **negrįžtamai**.
+Kai retry randa job'ą jau `completed`:
+
+- rezultatas semantiškai **sutampa** su tuo, kurį retry bando įrašyti →
+  idempotentiška sėkmė;
+- rezultatas **skiriasi** → consistency conflict, esamas rezultatas
+  **NEPERRAŠOMAS**;
+- statusas `completed`, bet **rezultato nėra** → korumpuota arba remontuotina
+  būsena, NE sėkmė.
+
+⚠️ **„Tas pats rezultatas" lyginamas pagal kanoninę persistentinę
+reprezentaciją**, ne pagal JS objekto nuorodą ar nestabilų JSON raktų eiliškumą.
+Jei repo turi vieną rezultatų normalizavimo ar hidratavimo autoritetą — naudoti
+jį. Antros lygybės taisyklės vien 7.5b poreikiams nekurti; jei autoriteto nėra,
+sukurti vieną ir įvardyti kaip tokį.
+
+Praktinė pastaba: rezultatas gali būti kelių valandų transkripcija. Palyginimo
+kaina apgalvojama (pvz. kanoninės formos hash), bet lyginimo **teisingumas**
+nedera į kompromisą — hash kolizijos atveju elgesys apibrėžiamas.
+
+### Stalled / lygiagretus užbaigimas
+
+⚠️ **SĄLYGINIS UŽBAIGIMAS, ne vien transakcija.** Stalled recovery metu du
+persidengiantys vykdymai perskaito tą patį `processing` snapshot'ą, ir abi
+transakcijos gali įsipareigoti — vėlesnis rezultatas tyliai perrašo pirmąjį.
+
+Reikia `UPDATE ... WHERE status = 'processing' RETURNING`. Nulis eilučių →
+rezultatas **LYGINAMAS**, ne perrašomas.
+
+Lenktynių eiga:
+
+1. abu vykdytojai pradeda nuo to paties `processing` snapshot'o;
+2. tik vienas autoritetingai commit'ina `processing → completed`;
+3. antras po sąlyginio `UPDATE` su 0 eilučių perskaito įsipareigotą būseną;
+4. tas pats rezultatas → idempotentiška sėkmė;
+5. skirtingas rezultatas → consistency conflict;
+6. **jokiomis aplinkybėmis antras vykdytojas neperrašo pirmojo `job_results`.**
+
+Lenktynių testas **deterministinis**, ne paremtas `sleep()` tikimybe.
+
+### Audio valymo barjeras
+
+Audio šalinimas leidžiamas tik autoritetingai patvirtinus **`completed` +
+persistentinis rezultatas**. Vien `jobs.status='completed'` nepakanka.
+
+Aptikus `completed` be rezultato: audio **NEŠALINAMAS**, būsena laikoma
+remontuotina pagal esamą recovery politiką, ir testas įrodo, kad šaltinio audio
+išlieka.
+
+### DoD
+
+**Version ir konfliktai**
+
+- [ ] Naujo PostgreSQL job'o `version` pradinė reikšmė (`1`) užfiksuota ir
+      testuojama.
+- [ ] Kiekviena sėkminga `jobs` mutacija didina `version` lygiai `+1`;
+      konfliktas ar no-op jos nekeičia.
+- [ ] Progreso CAS ir phase/status CAS, kai abu reikalingi, vykdomi **viename**
+      `UPDATE`, ne dviem mutacijomis.
+- [ ] ⚠️ Nulis `UPDATE` eilučių nėra automatiškai „version conflict": testai
+      atskiria not-found, version conflict ir lifecycle conflict.
+- [ ] Konflikto rezultatas turi vieną bendrą kontraktą `jobStore` fasado
+      lygmenyje; nė vienas metodas negrąžina jam savo formos.
+- [ ] Kvietėjo politika dokumentuota: kada retry, kada klaida vartotojui.
+- [ ] ⚠️ Backend'ų apimtis įvardyta: kas galioja visiems per bendrą paritetų
+      rinkinį, kas lieka PostgreSQL-specifiška. Rinkinys nesusiaurinamas.
+
+**Atominis užbaigimas**
 
 - [ ] `finish(COMPLETED, { result })` atnaujina `jobs` IR `job_results`
       **vienoje transakcijoje**.
-- [ ] `completed` be `job_results` eilutės traktuojamas kaip **remontas arba
-      perdirbimas**, ne sėkmė.
-- [ ] Retry, radęs `completed` su tuo pačiu `result`, laiko tai sėkme (ne
-      klaida) — kitaip BullMQ kartotų be galo.
-- [ ] ⚠️ **SĄLYGINIS UŽBAIGIMAS, ne vien transakcija.** Stalled recovery metu du
-      persidengiantys vykdymai perskaito tą patį `processing` snapshot'ą, ir abi
-      transakcijos gali įsipareigoti — vėlesnis rezultatas tyliai perrašo
-      pirmąjį. Reikia `UPDATE ... WHERE status = 'processing' RETURNING`; nulis
-      eilučių → rezultatas LYGINAMAS, ne perrašomas, o skirtingas rezultatas yra
-      klaida. Testas: lenktynės ties draiverio riba.
-- [ ] **Testas:** procesas nutraukiamas tarp `finish()` ir `return`; po retry
-      job'as lieka `completed` SU rezultatu, audio išvalytas, eilė nekartoja.
-- [ ] **Testas:** `completed` be rezultato → audio NEIŠTRINAMAS.
-- [ ] ⚠️ **AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS.** `auditLog.record()` šiandien
-      sinchroninis, ir kvietėjai (`authorizeJobOrAudit()`,
-      `lifecycleService.writeAudit()`) jo NELAUKIA ir negaudo. Pakeitus jį į DB
-      įrašymą, gedimas taptų neapdorotu `rejection`, o autorizacijos ar
-      ištrynimo srautas tęstųsi — audito įvykis dingtų tyliai. Reikia arba
-      `await` ten, kur tinka, arba patvarios eilės su eksplicitiniu klaidų
-      pranešimu. Testas: draiverio gedimas prieš teigiant, kad auditas
-      persistentis.
+- [ ] Transakcija apima tik `jobs` ir `job_results`; auditas, eilės
+      patvirtinimas ir audio valymas lieka už jos.
+- [ ] `finish(FAILED, ...)` elgesys su `job_results` apibrėžtas ir testuotas.
+- [ ] `job_results` persistinimui nepavykus, rollback'inama **visa** transakcija;
+      pusinės `completed` būsenos nelieka — testas.
+
+**Idempotentiškumas**
+
+- [ ] Retry prieš jau `completed` su tuo pačiu kanoniniu rezultatu → sėkmė arba
+      no-op; `version` ir rezultatas be reikalo neperrašomi.
+- [ ] Retry prieš `completed` su **skirtingu** rezultatu → aiškus consistency
+      conflict; esamas rezultatas nepakeistas.
+- [ ] `completed` be `job_results` → nėra sėkmė; audio **neištrinamas**.
+- [ ] Kanoninio palyginimo autoritetas įvardytas; antros lygybės taisyklės nėra.
+
+**Lenktynės ir atsparumas**
+
+- [ ] Deterministinis dviejų nepriklausomų DB jungčių completion lenktynių
+      testas: tik vienas įsipareigoja rezultatą, kitas jo neperrašo.
+- [ ] Testas: procesas nutraukiamas po sėkmingo `finish` commit'o, bet prieš
+      BullMQ patvirtinimą → retry mato `completed` + rezultatą ir baigiasi
+      idempotentiškai, neperdirbdamas.
+- [ ] Testas: transakcijos gedimas tarp `jobs` ir `job_results` nepalieka
+      pusinės `completed` būsenos.
+
+### Ko NEAPIMA
+
+- **Audito persistentinio rašymo ir async klaidų semantikos** — tai 7.4b/7.4e
+  audito linijos atsakomybė. 7.5b audito call-site'ų nekeičia ir 7.4a įvykių
+  klasifikacijos (blokuojantys / ne-blokuojantys) nesilpnina.
+- Persistentinių erasure marks — 7.5a.
+- Bendro retry schedulerio ar retention mechanizmo.
+- Job store architektūros perprojektavimo, sesijų ir authentication pakeitimų.
+
+⚠️ Ankstesnėje šio issue redakcijoje buvo punktas apie `auditLog.record()`
+sinchroniškumą. Jis pašalintas sąmoningai: tas darbas atliktas 7.4a async
+cutover metu. Jei kur nors matote seną redakciją — gyva versija laimi.
 
 ---
 
