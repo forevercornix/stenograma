@@ -113,6 +113,16 @@ const security = [
   "deletionRetryPersistence",
   /** CI workflow struktūra: dublikuotas raktas tyliai išjungtų testų žingsnį. */
   "workflowIntegrity",
+  /**
+   * #237: ištrintų testų sargas.
+   *
+   * Eina TEN, KUR `workflowIntegrity` - abu gina ne funkciją, o patį patikrų
+   * sluoksnį, ir abiem prasminga lūžti tame pačiame žingsnyje. `security`
+   * pasirinktas dar ir todėl, kad `check-security-matrix.mjs` reikalauja
+   * kiekvieną šio rinkinio failą paminėti matricoje - t. y. rinkinys PRIVERČIA
+   * dokumentaciją, o ne pasikliauja atmintimi.
+   */
+  "deletedTestsGuard",
   /** #159: nuosavybės filtras ir privilegijuoto namespace'o riba. */
   "jobOwnership",
   "systemNamespaceBoundary",

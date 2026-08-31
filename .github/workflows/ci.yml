@@ -666,6 +666,44 @@ jobs:
       - name: Tikrinti workflow saugumo politiką
         run: node scripts/check-workflow-policy.mjs
 
+  deleted-tests:
+    runs-on: ubuntu-latest
+    # Sargas neturi priklausomybių (tik Node stdlib ir git) - 10 min su kaupu.
+    timeout-minutes: 10
+    # IŠTRINTŲ TESTŲ SARGAS (#237).
+    #
+    # Uždarant #213 per platus pakeitimo intervalas TYLIAI pašalino tris
+    # integracinius testus, ir visos patikros liko žalios - pagavo nenaudojamo
+    # importo lint klaida, t. y. sėkmė, ne sistema. `verifyManifest()` gina FAILO
+    # lygį; testo lygį iki šiol negynė niekas.
+    steps:
+      # ⚠️ ATSKIRAS JOB'AS BŪTENT DĖL `fetch-depth: 0`.
+      #
+      # `actions/checkout` numatytasis `fetch-depth: 1` neduoda nei taikinio
+      # šakos, nei merge-base commit'o, tad `git merge-base` ir `git show
+      # <baze>:<kelias>` krinta. Fail-closed sargas ant seklaus checkout'o
+      # sulaužytų KIEKVIENĄ PR - todėl gilinimas yra šio darbo dalis, ne
+      # prielaida.
+      #
+      # Kodėl `fetch-depth: 0`, o ne eksplicitinis `git fetch origin <base>`:
+      # istorija maža (~400 commit'ų), o eksplicitinis fetch reikalautų spėlioti
+      # ref'o vardą ir tyliai lūžtų ne-`main` taikiniui. Gilinimas laikomas ČIA,
+      # kad pagrindinis `backend` job'as liktų seklus.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # Be `npm ci` SĄMONINGAI: sargas naudoja tik Node stdlib ir `git`.
+      # Priklausomybių diegimas čia pridėtų minutes ir naują gedimo šaltinį
+      # patikrai, kuri turi būti pigi ir visada paleidžiama.
+      - name: Ištrintų testų sargas (#237)
+        run: node backend/scripts/check-deleted-tests.mjs
+
   dependency-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15

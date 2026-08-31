@@ -1762,3 +1762,40 @@ testas pagautų jo lūžį, įrodo tik mutacija (AGENTS.md §14).
 | ⚠️ Užstrigusi žyma TURI IŠEITĮ, ir pėdsakas atitinka FAKTĄ | `erasureMarks` (retry tik iš `failed`; auditas rašomas PO perėjimo, `success` pagal `changed`) | Barjeras nuo `pending` plius nesenėjimas be išeities užrakintų job'ą neribotam laikui. Rašant auditą PRIEŠ veiksmą (iki #183 peržiūros) du lygiagretūs operatoriai abu palikdavo `success: true`, nors perėjimas pavyko tik vienam - patvarus sėkmės įrašas veiksmui, kurio nebuvo |
 | ⚠️ Be `DATABASE_URL` — atmintinis režimas, ir garantijos apimtis užrašyta SĄLYGINIAI | `erasureMarks`, `deletionEnforcement` (apverstas testas), `deletionDocumentation` | Besąlygiškas `deletion-guarantees.md` §2 apribojimo pašalinimas būtų melagingas teiginys atmintiniam režimui; palikimas be sąlygos — melagingas persistentiniam (AGENTS.md §12.1) |
 | Migracijos užšaldytos aibės sutampa su `states.js` autoritetu | `erasureMarks` | Migracija konstantų NEIMPORTUOJA sąmoningai (ji yra istorijos įrašas). Be pariteto testo šviežia DB gautų vieną aibę, atnaujinta liktų su kita — tyliai |
+
+### #237 — ištrintų testų sargas (CI ratchet)
+
+Uždarant #213 per platus pakeitimo intervalas redagavimo skripte TYLIAI pašalino
+tris integracinius testus iš `auditPersistence.integration`. Visos patikros liko
+žalios; pagavo nenaudojamo importo lint klaida — t. y. sėkmė, ne sistema.
+`verifyManifest()` gina FAILO lygį (dingęs failas krinta iš abiejų pusių), o
+testo lygį iki #237 negynė niekas.
+
+⚠️ **KĄ ŠI GARANTIJA APIMA IR KO NEAPIMA.** Sargas lygina DEKLARUOTŲ testų
+IDENTITETUS tarp tikros PR bazės (`git merge-base`) ir head'o. Jis **netikrina
+asertų kokybės**, **netikrina padengimo** ir **netikrina scenarijų masyvų
+narystės** — trys paskutinės eilutės tai fiksuoja eksplicitiškai, kad eilutė
+neatrodytų stipresnė už kodą (AGENTS.md §12.1).
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Testo pašalinimas iš esamo failo be override SULAUŽO CI, ir testas ĮVARDIJAMAS | `deletedTestsGuard`, `check-deleted-tests.mjs` (savipatikra) | Grąžinus `arPazeidimas` į `false` → krinta 6. Istorinis atkūrimas: pašalinus tuos pačius tris #213 testus sargas juos įvardija vardais ir failu (exit 1) |
+| Keli pašalinti duoda VIENĄ klaidą su VISAIS vardais ir failais, ne skaičių | `deletedTestsGuard` | Sutrumpinus išvestį iki skaičiaus → krinta. Skaičius siunčia recenzentą ieškoti, ko nebėra |
+| Bazė imama iš `git merge-base`, o NE iš `HEAD^` | `deletedTestsGuard` | Trynimas PIRMAME šakos commit'e, po jo antras testų neliečiantis: su `HEAD^` prielaida rezultatas ŽALIAS → krinta |
+| Failo pervadinimas ar nepakitusio testo perkėlimas NĖRA masinis trynimas | `deletedTestsGuard` | Perėjus prie palyginimo PER FAILĄ → krinta 2. Tada kiekvienas rename PR reikalautų override, o įprastai naudojamas override nebegina nieko |
+| `test(...)` pavertimas `test.skip(...)` pranešamas kaip pašalinimas | `deletedTestsGuard` | Įtraukus `.skip` į indeksuojamas deklaracijas → krinta. Peržiūroje `.skip` pastebimas SUNKIAU nei trynimas |
+| Du vienodo pavadinimo testai NESUPLAKAMI (multiaibė, ne aibė) | `deletedTestsGuard` | Pakeitus `Map` skaitiklius į `Set` → krinta. Realus atvejis: `test_klaidos_detales_nenuteka_klientui` yra abiejuose Python serveriuose |
+| VISIŠKAI ištrintas testų failas pagaunamas (bazės ∪ head sąjunga) | `deletedTestsGuard` | Skenuojant tik head checkout'ą → krinta. Head'o medyje failo NĖRA, tad bazės pusė privalo ateiti iš `git ls-tree` ir `git show` |
+| ⚠️ **Fail-closed:** neišspręsta bazė duoda exit 2, ne tylų praėjimą | `deletedTestsGuard` | Grąžinus 0 prie neišspręstos bazės → krinta. Su numatytuoju `fetch-depth: 1` tai kasdienis atvejis, ne teorija |
+| ⚠️ **Fail-closed per failą:** neišanalizuotas failas stabdo sargą, o ne indeksuojamas kaip tuščias | `check-deleted-tests.mjs` (savipatikra, neuždarytas komentaras) | Grąžinus tylų nulį → failas su ištrintais testais praeitų kaip „be pakeitimų". Papildoma kryžminė patikra: lekseris privalo rasti bent tiek, kiek žalias eilutinis šablonas |
+| Override reikalauja TURININGOS priežasties, ne vien netuščios | `deletedTestsGuard` | Priėmus tuščią, tik tarpus, `...` arba literalinį vietaženklį → krinta 4. Override, priimantis daugtaškį, sunaikina atskaitomybę, dėl kurios egzistuoja |
+| Override GARSUS: rodo pašalintus vardus, failus, priežastį ir eksplicitinį perrašymo faktą | `deletedTestsGuard` | Pašalinus perrašymo antraštę arba vardų sąrašą → krinta. Tylus override yra nieko vertas |
+| Skenavimo aprėptis VERIFIKUOJAMA prieš repozitoriją; visos keturios vykdyklės netuščios | `deletedTestsGuard` (nepriklausomas platesnis atpažintuvas per `git ls-files`) | Susiaurinus klasifikaciją (pvz. tik `.test.jsx`, kaip #197) → krinta. Per #197 skeneris praleido `utils.test.js` ir visą `frontend/e2e/`, ir davė 55 melagingus radinius |
+| Sargas praneša, KIEK failų indeksavo kiekvienoje grupėje | `deletedTestsGuard`, `check-deleted-tests.mjs` | Tylus dalinis skenavimas atrodo identiškai pilnam. Skaičius yra vienintelis būdas tai pamatyti neatidarius kodo |
+| Lekseris nesutrinka nė viename repo testų faile (kryžminė patikra abiem kryptim) | `deletedTestsGuard` | Pašalinus regex literalų būseną → `startupChecks` esantis `/process\.on\(["']SIGTERM["']/` atidaro tariamą eilutę ir desinchronizuoja likusį failą → krinta |
+| Runtime sudarytas pavadinimas skaičiuojamas kaip NEATPAŽINTAS, o jo dingimas duoda ATSKIRĄ pranešimą | `deletedTestsGuard` | Nutildžius neatpažintų deltą → krinta 2. Pranešimas sąmoningai kitoks: vardo, kurio ieškoti, nėra, tad tekstas privalo tai pasakyti |
+| Šabloninio pavadinimo pavertimas statiniu paaiškinamas išvestyje | `deletedTestsGuard` | Tai VIENINTELIS teisėtas atvejis, kur neatpažintų mažėja, o įvardytų daugėja tiek pat. Be paaiškinimo pirmas toks PR atrodytų kaip sargo gedimas, ir kitas žmogus „pataisytų" veikiantį sargą |
+| Sargas paleidžiamas TAME PAČIAME job'e, kuris turi `fetch-depth: 0` | `deletedTestsGuard` (žingsnio apimties teiginys) | Perkėlus žingsnį į kitą job'ą arba nuėmus gilinimą → krinta. #202 defektas buvo būtent failo apimties teiginys: vėliava „yra `ci.yml`" liko žalia, kai ji nebegynė nieko |
+| ⚠️ **NEDENGIA: scenarijų masyvo elemento pašalinimo** | `check-deleted-tests.mjs` (antraštė) | `auditStoreBackendContract.integration` generuoja 27 parity scenarijus iš masyvo VIENAME `test()` kvietime; elemento pašalinimas deklaracijų aibės NEKEIČIA. Sąmoninga #237 riba, ne praleidimas |
+| ⚠️ **NEDENGIA: asertų kokybės ir padengimo** | `check-deleted-tests.mjs` (antraštė) | Testo kūną pavertus `assert.ok(true)` identitetas išlieka, ir sargas praeina. Šią garantiją gina mutacijų stulpelis, ne sargas |
+| ⚠️ **NEDENGIA: vienodo pavadinimo testų skirtinguose failuose** | `check-deleted-tests.mjs` (antraštė) | Globali multiaibė reiškia, kad du vienodai pavadinti testai skirtinguose failuose gali užmaskuoti vieno pašalinimą. Priimta sąmoningai: alternatyva sulaužo kiekvieną pervadinimą |
