@@ -21,7 +21,8 @@ const {
 } = require("../utils/jobStore/postgresStore");
 const memoryStore = require("../utils/jobStore/memoryStore");
 const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
-const { OWNER_KIND } = require("../utils/jobStore/common");
+const { OWNER_KIND, normalizeFieldValue } = require("../utils/jobStore/common");
+const { IVESTYS, NELEISTINOS, patchLaukai } = require("./helpers/canonicalTypeFixtures");
 
 /**
  * `postgresStore` INTEGRACINIAI TESTAI (#155, 7.2a).
@@ -1834,5 +1835,84 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       }
     }
   );
+
+  /* ── Kanoninių tipų paritetas (#205, 7.2c) ───────────────────────────── */
+
+  await t.test(
+    "#205 PARITETAS: tekstinis patch'as duoda TĄ PAČIĄ reikšmę ir TIPĄ kaip memory/Redis",
+    async () => {
+      /**
+       * ⚠️ TREČIOJI PARITETO PUSĖ. Memory ir Redis dengiami
+       * `jobStoreTypeNormalization.test.js` (be išorinių servisų); čia tas pats
+       * scenarijus vykdomas prieš TIKRĄ PostgreSQL, kur reikšmę galutinai lemia
+       * `boolean` ir `integer` stulpelių tipai.
+       *
+       * Iki 7.2c `jobToRow()` darydavo `Boolean("false")` → `true`, t. y.
+       * PRIEŠINGĄ loginę reikšmę nei memory. Lauktina reikšmė NEĮRAŠYTA ranka -
+       * ji skaičiuojama tuo pačiu `normalizeFieldValue()`, kurį naudoja abi
+       * normalizavimo vietos.
+       *
+       * ⚠️ TIKRINAMA IR `update()` GRĄŽINIMAS, IR `get()`: vien `get()` patikra
+       * paslėptų rašymo kelio regresiją.
+       */
+      const beIvesciu = patchLaukai().filter((laukas) => !IVESTYS[laukas]);
+      assert.deepEqual(beIvesciu, [], "naujas kanoninis laukas privalo gauti įvestis fixtures'uose");
+
+      for (const laukas of patchLaukai()) {
+        for (const ivestis of [...IVESTYS[laukas], ...NELEISTINOS]) {
+          const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+
+          const poUpdate = await store.update(job.id, { [laukas]: ivestis });
+          const poGet = await store.get(job.id);
+
+          const tikimasi = normalizeFieldValue(laukas, ivestis);
+          const kontekstas = `${laukas}=${JSON.stringify(ivestis)}`;
+
+          assert.equal(poUpdate[laukas], tikimasi, `update() reikšmė: ${kontekstas}`);
+          assert.equal(typeof poUpdate[laukas], typeof tikimasi, `update() tipas: ${kontekstas}`);
+          assert.equal(poGet[laukas], tikimasi, `get() reikšmė: ${kontekstas}`);
+          assert.equal(typeof poGet[laukas], typeof tikimasi, `get() tipas: ${kontekstas}`);
+
+          await store.remove(job.id);
+        }
+      }
+    }
+  );
+
+  await t.test("#205 `restoreRecord()`: sena kopija su eilutėmis atkuriama KANONINE", async () => {
+    /**
+     * `applyPatch()` šio kelio NEDENGIA - `restoreRecord()` jo nekviečia. Senesnė
+     * kopija gali turėti būtent tas tekstines reikšmes, dėl kurių #205 egzistuoja.
+     *
+     * ⚠️ `progressKnown` ČIA NEDALYVAUJA SĄMONINGAI: #180 P2-C atkūrimo kelyje
+     * ne-boolean `progressKnown` GARSIAI atmeta, ir 7.2c tos garantijos
+     * nesilpnina - normalizavimas vyksta PO tos patikros.
+     */
+    const bazinis = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    await store.remove(bazinis.id);
+
+    const senaKopija = {
+      ...bazinis,
+      audio_cleanup_pending: "false",
+      deletion_pending: "false",
+      attempt_count: "0",
+      audio_cleanup_attempts: "0",
+      deletion_attempts: "0",
+    };
+
+    const grazinta = await store.restoreRecord(senaKopija);
+    const perskaityta = await store.get(bazinis.id);
+
+    for (const laukas of ["audio_cleanup_pending", "deletion_pending", "attempt_count",
+      "audio_cleanup_attempts", "deletion_attempts"]) {
+      const tikimasi = normalizeFieldValue(laukas, senaKopija[laukas]);
+      assert.equal(grazinta[laukas], tikimasi, `restoreRecord() GRĄŽINIMAS: ${laukas}`);
+      assert.equal(typeof grazinta[laukas], typeof tikimasi, `restoreRecord() tipas: ${laukas}`);
+      assert.equal(perskaityta[laukas], tikimasi, `po get(): ${laukas}`);
+      assert.equal(typeof perskaityta[laukas], typeof tikimasi, `po get() tipas: ${laukas}`);
+    }
+
+    await store.remove(bazinis.id);
+  });
 
 });

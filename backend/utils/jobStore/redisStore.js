@@ -1,5 +1,5 @@
 const jobPhase = require("../jobPhase");
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -54,10 +54,20 @@ const TTL_SECONDS = Math.ceil(TTL_MS / 1000);
 const JSON_FIELDS = new Set(["result", "progress", "artefacts"]);
 
 /**
- * Redis hash'e VISKAS yra eilutė. Todėl laukus, kurių tipas turi reikšmę, būtina
- * atstatyti - kitaip `false` grįžta kaip `"false"`, o TAI YRA TRUTHY.
+ * ⚠️ TIPŲ AIBĖS ČIA NEBEGYVENA (#205, 7.2c).
  *
- * Ką tai laužė (rasta savo testu, Redis režime):
+ * `BOOLEAN_FIELDS` ir `NUMBER_FIELDS` yra kanoninis duomenų modelio kontraktas,
+ * ne Redis detalė - jos deklaruotos `common.js` ir importuojamos aukščiau.
+ *
+ * Kodėl perkelta: aibės saugojo nuo gedimo, kuris kartojasi, bet gynė TIK
+ * skaitymo kelią. Rašymo kelias normalizavimo neturėjo, tad tas pats patch'as
+ * trijuose backend'uose duodavo skirtingą reikšmę - `audio_cleanup_pending:
+ * "false"` memory'je likdavo truthy eilutė, o PostgreSQL'e per
+ * `Boolean("false")` tapdavo `true`. Ne kitoks tipas, o PRIEŠINGA loginė
+ * reikšmė. Dabar normalizavimas vyksta `applyPatch()` metu, dar prieš
+ * `serialize()`.
+ *
+ * Ką aibės laužė iki #205 (rasta savo testu, Redis režime):
  *   - `audio_cleanup_pending: "false"` -> listByFlag() grąžindavo VISUS jobus, o
  *     retryPendingAudioCleanups() tada trindavo dar apdorojamų jobų audio;
  *   - hasPendingCleanup() visada true -> update() kviesdavo PERSIST vietoj EXPIRE,
@@ -65,35 +75,10 @@ const JSON_FIELDS = new Set(["result", "progress", "artefacts"]);
  *   - `audio_cleanup_attempts: "0"` -> `("0" || 0) + 1` === "01" (eilučių
  *     konkatenacija), tad bandymų skaitliukas ir alerto riba neveikė.
  *
- * `attempt_count` jau buvo apdorojamas atskirai - tai buvo užuomina, kad ši spąsta
- * žinoma; naujus laukus reikėjo pridėti čia iš karto.
+ * `deserialize()` IŠLIEKA: Redis hash'e viskas fiziškai yra eilutė, tad
+ * skaitant tipą vis tiek reikia atstatyti. Bet taisyklė - viena, bendra su
+ * rašymo keliu (`normalizeFieldValue()`).
  */
-const BOOLEAN_FIELDS = new Set([
-  "audio_cleanup_pending",
-  "deletion_pending",
-  /**
-   * #154. BŪTINA čia: Redis viską grąžina kaip string'ą, o `"false"` yra
-   * TRUTHY. Be konversijos `progressKnown === false` niekada nesuveiktų, ir
-   * diarizacijos fazė rodytų procentą vietoj „progresas neteikiamas".
-   *
-   * Klastingiau nei #158 `schemaVersion`: ten `"2" !== 2` bent jau krisdavo į
-   * kitą šaką, o čia klaidinga reikšmė atrodo visiškai validi.
-   */
-  "progressKnown",
-]);
-
-const NUMBER_FIELDS = new Set([
-  "attempt_count",
-  "audio_cleanup_attempts",
-  "deletion_attempts",
-  /**
-   * Įrašo era (#158). BŪTINA čia: Redis viską grąžina kaip string'ą, o
-   * `jobAuthorization` lygina `schemaVersion === 2`. Be konversijos "2" !== 2
-   * ir KIEKVIENAS Redis job'as tyliai atrodytų kaip legacy – t. y. jų tapatybė
-   * būtų sprendžiama pagal vardą, nors `actor` jau yra userId.
-   */
-  "schemaVersion",
-]);
 
 function serialize(job) {
   const flat = {};
@@ -121,10 +106,20 @@ function deserialize(flat) {
       } catch {
         job[k] = null;
       }
-    } else if (BOOLEAN_FIELDS.has(k)) {
-      job[k] = String(v).toLowerCase() === "true";
-    } else if (NUMBER_FIELDS.has(k)) {
-      job[k] = parseInt(v, 10) || 0;
+    } else if (BOOLEAN_FIELDS.has(k) || NUMBER_FIELDS.has(k)) {
+      /**
+       * ⚠️ TAS PATS HELPERIS KAIP RAŠYMO KELYJE (#205).
+       *
+       * Dvi nepriklausomos to paties konvertavimo realizacijos yra ta pati
+       * klasė, kurią 7.2c šalina - tik viena pakopa žemiau. Testas įrodo, kad
+       * abi vietos tai pačiai įvesčiai duoda tapatų rezultatą.
+       *
+       * ⚠️ `v === ""` šaka aukščiau lieka Redis SAVYBĖ, ne antra taisyklė:
+       * `serialize()` `null` užrašo kaip `""`, tad tuščia eilutė reiškia
+       * „buvo null", o ne „reikšmė yra tuščia". Po 7.2c kanoniniame lauke
+       * `""` Redis'e nebeatsiranda - normalizavimas įvyksta prieš `serialize()`.
+       */
+      job[k] = normalizeFieldValue(k, v);
     } else {
       job[k] = v;
     }
@@ -152,9 +147,17 @@ function createRedisStore(redisClient) {
    * našlaičiu, kurio niekas niekada nepašalintų.
    */
   async function restoreRecord(job) {
-    await redisClient.hset(JOB_PREFIX + job.id, serialize(job));
-    await redisClient.zadd(INDEX_KEY, Date.now(), job.id);
-    return job;
+    /**
+     * ⚠️ NORMALIZUOJAMA IR ČIA (#205, 7.2c). `restoreRecord()` priima
+     * SAVAVALIŠKĄ įrašą iš atsarginės kopijos, o senesnė kopija gali turėti
+     * būtent tas tekstines reikšmes, dėl kurių 7.2c egzistuoja. Atkūrimas be
+     * normalizavimo grąžintų gedimą į gyvą sistemą tuo momentu, kai niekas
+     * neįtaria. `applyPatch()` šio kelio nedengia - jis čia nekviečiamas.
+     */
+    const kanoninis = normalizeJob(job);
+    await redisClient.hset(JOB_PREFIX + kanoninis.id, serialize(kanoninis));
+    await redisClient.zadd(INDEX_KEY, Date.now(), kanoninis.id);
+    return kanoninis;
   }
 
   async function get(id) {

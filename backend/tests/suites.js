@@ -239,6 +239,15 @@ const functional = [
   "jobRunnerBullmq",
   "jobStore",
   "jobStoreRedis",
+  /**
+   * #205 (7.2c): kanoninių tipų normalizavimas ir backend'ų paritetas.
+   *
+   * Eina TEN, KUR `jobStore` ir `jobStoreRedis` - tai to paties sluoksnio
+   * elgsena. Memory ir Redis (per `FakeRedis`) pusė vykdoma be išorinių
+   * servisų; PostgreSQL pusė gyvena `postgresStore.integration`, kur jau yra
+   * veikianti DB infrastruktūra.
+   */
+  "jobStoreTypeNormalization",
   "jobs.route",
   "mergeDiarization",
   "mockLLMProvider",

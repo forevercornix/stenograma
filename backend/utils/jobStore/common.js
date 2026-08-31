@@ -47,9 +47,130 @@ function normalizeSchemaVersion(value) {
 
 const CURRENT_SCHEMA_VERSION = 2;
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * KANONINIS TIPŲ KONTRAKTAS (#205, 7.2c)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ AIBĖS DEKLARUOJAMOS, NE GENERUOJAMOS IŠ `newJob()`.
+ *
+ * `newJob()` yra runtime konstruktorius, o laukų schema - duomenų modelio
+ * kontraktas. Schema neturi būti netiesiogiai „atrandama" paleidžiant
+ * konstruktorių; ji deklaruojama, o konstruktorius prieš ją tikrinamas
+ * (`tests/jobStoreTypeNormalization.test.js` sargas).
+ *
+ * ⚠️ `deletion_pending` IR `deletion_attempts` `newJob()` IŠVESTYJE NEEGZISTUOJA.
+ * Juos materializuoja tik `postgresStore.rowToJob()` ir ištrynimo kelias, tad
+ * sargas jų NEMATO - jie čia įrašyti rankomis. Tai ir yra sargo riba, įvardyta
+ * prie jo paties.
+ */
+const BOOLEAN_FIELDS = new Set([
+  "audio_cleanup_pending",
+  "deletion_pending",
+  /**
+   * #154: `"false"` yra TRUTHY, tad be konversijos `progressKnown === false`
+   * niekada nesuveikia, ir diarizacijos fazė rodo procentą vietoj „progresas
+   * neteikiamas".
+   */
+  "progressKnown",
+]);
+
+const NUMBER_FIELDS = new Set([
+  "attempt_count",
+  "audio_cleanup_attempts",
+  "deletion_attempts",
+  /** Įrašo era (#158). Jos taisyklė - `normalizeSchemaVersion()`, žr. žemiau. */
+  "schemaVersion",
+]);
+
+const KANONINIAI_LAUKAI = Object.freeze([...BOOLEAN_FIELDS, ...NUMBER_FIELDS]);
+
+/**
+ * VIENA TAISYKLĖ, KURIĄ NAUDOJA ABI NORMALIZAVIMO VIETOS (#205).
+ *
+ * Jų yra dvi ir po pataisos lieka dvi: rašymo kelias (`normalizeJob()` per
+ * `newJob()`, `applyPatch()` ir `restoreRecord()`) ir `redisStore.deserialize()`
+ * skaitymo kelyje, nes Redis fiziškai saugo tekstą. Dvi nepriklausomos
+ * realizacijos yra ta pati klasė, kurią #205 ir šalina.
+ *
+ * ⚠️ NE `Boolean()`. `Boolean("false") === true` - reikšmė virstų PRIEŠINGA
+ * logine reikšme. Tai ir buvo gedimas, kuris tris kartus sprogo.
+ *
+ * ⚠️ TAISYKLĖ NEIŠRASTA: tai `redisStore.deserialize()` taisyklė, iki šiol
+ * veikusi tik skaitant. Rašymo kelias jos neturėjo, tad tas pats patch'as
+ * trijuose backend'uose duodavo skirtingą reikšmę.
+ *
+ * ⚠️ `null` IR `undefined` PALIEKAMI NEPAKEISTI, ir tai NE praleidimas.
+ * `schemaVersion: null` yra LEGACY EROS ŽYMĖ (#158): `applyPatch()` skiria
+ * „lauko nėra" nuo `null`, o `assertSupportedSchemaVersion()` `null` praleidžia.
+ * Konvertavus `null` → `0`, kiekvienas legacy įrašas po pirmo `update()` taptų
+ * nežinomos eros ir nebepasileistų.
+ *
+ * KAINA, ĮVARDYTA: `null` boolean lauke lieka `null` memory/Redis pusėje ir
+ * `false` PostgreSQL pusėje (`jobToRow()` daro `Boolean()`). Tai VIENINTELĖ
+ * likusi kanoninio kontrakto divergencija po 7.2c; ji pre-egzistuoja, nėra #205
+ * tema (issue kalba apie eilutines reikšmes) ir turi savo issue kandidatą.
+ */
+function normalizeFieldValue(laukas, reiksme) {
+  if (reiksme === null || reiksme === undefined) return reiksme;
+
+  /**
+   * ⚠️ `schemaVersion` TURI SAVO AUTORITETĄ, IR JIS NE ČIA.
+   *
+   * `normalizeSchemaVersion()` yra #204 taisyklė; #205 jos NEKEIČIA, tik
+   * pagaliau prijungia - iki 7.2c ji neturėjo nė vieno kvietėjo, o veikė
+   * `redisStore.deserialize()` `parseInt(v, 10) || 0`. Abi taisyklės sutampa
+   * įprastoms reikšmėms, bet ne kraštinėms, ir du skirtumai keičia ne tipą, o
+   * `assertSupportedSchemaVersion()` SPRENDIMĄ:
+   *
+   *   "2.5"  → `parseInt` duotų 2 (era PRIIMTA tyliai) · ši taisyklė duoda
+   *            "2.5" (era ATMESTA) - o tylus neaiškios reikšmės aiškinimas
+   *            kaip kitos loginės reikšmės yra būtent tai, ką #205 draudžia;
+   *   "0x2"  → ši taisyklė duoda 2 (era PRIIMTA). Tai #204 taisyklės savybė
+   *            (`Number("0x2") === 2`), NE 7.2c sprendimas.
+   */
+  if (laukas === "schemaVersion") return normalizeSchemaVersion(reiksme);
+
+  if (BOOLEAN_FIELDS.has(laukas)) return String(reiksme).toLowerCase() === "true";
+  if (NUMBER_FIELDS.has(laukas)) return parseInt(reiksme, 10) || 0;
+
+  return reiksme;
+}
+
+/**
+ * Kanoniniai job objekto laukai - į kanoninius tipus.
+ *
+ * ⚠️ LIEČIAMI TIK ESAMI RAKTAI. Materializavus visą aibę, kiekvienas memory
+ * job'as staiga gautų `deletion_pending: false` ir `deletion_attempts: 0`:
+ * pasikeistų objekto forma, atsarginių kopijų turinys ir kontraktų testų
+ * palyginimai. `deletion_*` laukų `newJob()` sąmoningai nemateralizuoja.
+ */
+function normalizeJob(job) {
+  if (!job || typeof job !== "object") return job;
+
+  const out = { ...job };
+  for (const laukas of KANONINIAI_LAUKAI) {
+    if (laukas in out) out[laukas] = normalizeFieldValue(laukas, out[laukas]);
+  }
+  return out;
+}
+
+/**
+ * ⚠️ TYPED DEFAULTS INVARIANTAS (#205, 7.2c) — SKAITYTI PRIEŠ PRIDEDANT LAUKĄ.
+ *
+ * Kanoninis boolean laukas čia PRIVALO gauti `false`, skaitinis - `0`. Niekada
+ * `null` ar `undefined`: `typeof null === "object"`, tad sargas
+ * (`tests/jobStoreTypeNormalization.test.js`) tokio lauko tipo neatpažintų, jis
+ * tyliai iškristų iš `BOOLEAN_FIELDS`/`NUMBER_FIELDS` ir normalizavimo negautų -
+ * t. y. grįžtų būtent tas gedimas, kurį 7.2c uždaro.
+ *
+ * Jei kada nors prireiks nullable typed lauko, jo tipas deklaruojamas
+ * kanoniniame kontrakte EKSPLICITIŠKAI ir sargas praplečiamas. Tyliai iškristi
+ * iš tikrinimo jis negali.
+ */
 function newJob(fields = {}) {
   const now = new Date().toISOString();
-  return {
+  return normalizeJob({
     id: crypto.randomUUID(),
     /**
      * ĮRAŠO ERA (#158) – nulemia, kaip `utils/jobAuthorization.js` sprendžia
@@ -248,7 +369,7 @@ function newJob(fields = {}) {
     // Atgalinis suderinamumas su senais laukais (routes/frontend jų tikisi).
     createdAt: now,
     updatedAt: now,
-  };
+  });
 }
 
 /**
@@ -452,7 +573,21 @@ function applyPatch(job, patch) {
     next.error = patch.error_message;
   }
 
-  return next;
+  /**
+   * ⚠️ AUTORITETINGAS RAŠYMO KELIO NORMALIZAVIMO TAŠKAS (#205, 7.2c).
+   *
+   * ČIA, o ne kiekviename `update()`: `applyPatch()` yra bendras septynių
+   * mutacijos kelių taškas - `memoryStore` (`update`, `updateOwned`,
+   * `reportProgressAtomicSync`), `redisStore` (`update`, `updateOwned`) ir
+   * `postgresStore` (`writePatched` bei du sąlyginiai CAS keliai). Taisant
+   * kiekvieną atskirai liktų penki neapsaugoti.
+   *
+   * ⚠️ NORMALIZUOJAMA PRIEŠ backend'ui gaunant objektą, tad `update()`
+   * TIESIOGINIS grąžinimas jau kanoninis - dar prieš Redis serialize/deserialize
+   * round-trip. Vien `get()` tikrinantis testas šito neįrodytų: Redis skaitymo
+   * kelias paslėptų rašymo kelio regresiją.
+   */
+  return normalizeJob(next);
 }
 
 const JOB_TYPES = { TRANSCRIPTION: "transcription", PROTOCOL: "protocol" };
@@ -473,6 +608,11 @@ function isFinished(status) {
 
 module.exports = {
   normalizeSchemaVersion,
+  BOOLEAN_FIELDS,
+  NUMBER_FIELDS,
+  KANONINIAI_LAUKAI,
+  normalizeFieldValue,
+  normalizeJob,
   CURRENT_SCHEMA_VERSION,
   STATUS,
   JOB_TYPES,

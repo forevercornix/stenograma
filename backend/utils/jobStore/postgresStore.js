@@ -5,6 +5,7 @@ const {
   newJob,
   applyPatch,
   matchesOwner,
+  normalizeJob,
 } = require("./common");
 
 /**
@@ -701,9 +702,29 @@ function createPostgresStore(pool) {
    * Perduodama NEPAKEISTA — įskaitant legacy formas (`processing + phase=NULL`,
    * `ownerKind = null`), kurias schema priima sąmoningai.
    */
-  async function restoreRecord(job) {
+  async function restoreRecord(irasas) {
     /** ⚠️ PRIEŠ transakciją - netinkamas įrašas negali ištrinti esamo. */
-    assertAtstovaujamasProgresas(job);
+    assertAtstovaujamasProgresas(irasas);
+
+    /**
+     * ⚠️ NORMALIZUOJAMA PO #180 PATIKROS, NE PRIEŠ JĄ (#205, 7.2c).
+     *
+     * Tvarka čia yra sprendimas, ne atsitiktinumas. `assertAtstovaujamasProgresas()`
+     * SĄMONINGAI atmeta ne-boolean `progressKnown` (#180 P2-C): ranka redaguota
+     * kopija su `"true"` reiškia, kad kopiją gamino sugedęs rašytojas, ir #180
+     * pasirinko GARSŲ atmetimą, o ne konvertavimą. Normalizavus pirma, `"true"`
+     * taptų `true`, patikra nebeturėtų ko atmesti, ir esama garantija tyliai
+     * dingtų.
+     *
+     * ⚠️ TODĖL ATKŪRIMO KELYJE `progressKnown` YRA GRIEŽTESNIS PostgreSQL
+     * REŽIME nei memory/Redis. Tai #180 asimetrija, ne 7.2c: fasadas
+     * `assertRestorable()` irgi kviečia šią patikrą tik `postgres` backend'ui.
+     * Likę kanoniniai laukai (`audio_cleanup_pending`, `attempt_count` ir kt.)
+     * normalizuojami vienodai visuose trijuose.
+     *
+     * Kopijos turinys savavališkas, o `applyPatch()` šio kelio nedengia.
+     */
+    const job = normalizeJob(irasas);
     return inTransaction(async (client) => {
       /**
        * ⚠️ BARJERAS TIKRINAMAS ŠIOJE TRANSAKCIJOJE (#183 Codex, P1).
