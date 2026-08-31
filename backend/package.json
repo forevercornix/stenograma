@@ -24,8 +24,9 @@
     "test:functional": "node scripts/run-tests.mjs functional",
     "test:suites": "node scripts/run-tests.mjs --list",
     "test:matrix": "node scripts/check-security-matrix.mjs",
+    "test:matrix-rows": "node scripts/check-matrix-rows.mjs",
     "test:clean": "node scripts/verify-clean.mjs --verify",
-    "test:evidence": "node scripts/check-security-matrix.mjs && node scripts/run-tests.mjs --list"
+    "test:evidence": "node scripts/check-security-matrix.mjs && node scripts/check-matrix-rows.mjs && node scripts/run-tests.mjs --list"
   },
   "engines": {
     "node": ">=22"
