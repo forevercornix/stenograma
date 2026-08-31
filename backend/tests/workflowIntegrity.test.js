@@ -255,41 +255,54 @@ test("DOKUMENTACIJA: sprendimų įrašai (ADR) egzistuoja ir nuorodos galioja", 
  * #202 `REQUIRE_*` SARGAI CI'e
  * ══════════════════════════════════════════════════════════════════════════ */
 
-test("CI: kiekvienas `REQUIRE_*` sargas REALIAI nustatytas workflow'e", () => {
+/** `backend` job'o tekstas - nuo jo antraštės iki kito job'o. */
+function backendJob() {
+  const ci = fs.readFileSync(path.join(CI, "ci.yml"), "utf8");
+  return ci.slice(ci.indexOf("\n  backend:"), ci.indexOf("\n  frontend:"));
+}
+
+/** Job'o žingsniai atskirai: `      - ` yra žingsnio pradžios įtrauka. */
+function zingsniai(jobas) {
+  return jobas.split(/\n      - /).slice(1);
+}
+
+test("CI: kiekvienas `REQUIRE_*` sargas nustatytas TAME žingsnyje, kurį jis gina", () => {
   /**
    * ⚠️ VĖLIAVA, KURIOS NIEKAS NETIKRINA, YRA VĖLIAVA, KURIĄ GALIMA PAŠALINTI.
    *
    * Trys sargai (`REQUIRE_REDIS` #15, `REQUIRE_POSTGRES` #155/7.1,
    * `REQUIRE_PYTHON` #202) egzistuoja tam, kad tylus praleidimas taptų klaida.
-   * Bet iki #202 nė vieno iš jų NIEKAS netikrino: pašalinus eilutę iš `ci.yml`,
-   * visi testai liktų žali, o CI grįžtų prie tos pačios spragos - praleisti
-   * testai su žaliu job'u.
+   * Iki #202 nė vieno netikrino niekas: pašalinus eilutę iš `ci.yml`, visi
+   * testai liktų žali, o CI grįžtų prie tos pačios spragos.
    *
-   * ⚠️ TIKRINAMI VISI TRYS, NE TIK NAUJASIS. Kaina ta pati - tas pats failas ir
-   * ta pati logika - o atskiras issue dviem eilutėms kainuotų daugiau nei pats
-   * darbas.
+   * ⚠️ TIKRINAMA ŽINGSNIO APIMTIMI, NE VISO FAILO TEKSTE.
    *
-   * Tikrinama TEKSTU, ne parseriu: `env:` bloko reikšmė gali būti užrašyta
-   * keliais būdais, o mums svarbu, kad vėliava apskritai yra ir yra `"1"`.
+   * Pirmoji šio testo versija sujungdavo visus workflow failus ir ieškojo
+   * žetono bet kur. Tai reiškė, kad `REQUIRE_PYTHON: "1"`, perkelta į visiškai
+   * nesusijusį `frontend` job'ą, testą palikdavo ŽALIĄ - nors ten ji negina
+   * nieko. „Yra kažkur" nėra įrodymas, kad „veikia ten, kur reikia".
+   *
+   * Todėl vėliava siejama su KOMANDA: ji privalo būti tame pačiame žingsnyje,
+   * kuris paleidžia jos ginamą rinkinį.
    */
   const SARGAI = [
-    { vėliava: "REQUIRE_REDIS", issue: "#15" },
-    { vėliava: "REQUIRE_POSTGRES", issue: "#155, 7.1" },
-    { vėliava: "REQUIRE_PYTHON", issue: "#202" },
+    { vėliava: "REQUIRE_REDIS", komanda: "npm run test:redis", issue: "#15" },
+    { vėliava: "REQUIRE_POSTGRES", komanda: "npm run test:postgres", issue: "#155, 7.1" },
+    { vėliava: "REQUIRE_PYTHON", komanda: "npm run test:functional", issue: "#202" },
   ];
 
-  const visasCI = workflowFailai()
-    .map((f) => fs.readFileSync(f, "utf8"))
-    .join("\n");
+  const žingsniai = zingsniai(backendJob());
 
-  const trūksta = SARGAI.filter(
-    ({ vėliava }) => !new RegExp(`${vėliava}:\\s*["']?1["']?`).test(visasCI)
-  );
+  const pažeidimai = SARGAI.filter(({ vėliava, komanda }) => {
+    const vėliavosŠablonas = new RegExp(`${vėliava}:\\s*["']?1["']?`);
+
+    return !žingsniai.some((z) => z.includes(komanda) && vėliavosŠablonas.test(z));
+  });
 
   assert.deepEqual(
-    trūksta.map((s) => `${s.vėliava} (${s.issue})`),
+    pažeidimai.map((s) => `${s.vėliava} (${s.issue}) → ${s.komanda}`),
     [],
-    "sargas be `=1` CI'e nieko negina: praleisti testai duotų žalią job'ą"
+    "sargas privalo būti TAME žingsnyje, kurį gina - kitame job'e jis nieko nedaro"
   );
 });
 

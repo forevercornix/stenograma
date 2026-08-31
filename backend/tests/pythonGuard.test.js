@@ -38,14 +38,28 @@ function paleisti({ pythonYra, reikalaujama }) {
   delete env.REQUIRE_PYTHON;
   if (reikalaujama) env.REQUIRE_PYTHON = "1";
 
-  let tuscias = null;
-  if (!pythonYra) {
-    /**
-     * Tuščias katalogas vietoj `PATH`: `python3` nerandamas, o `/bin/sh`
-     * (kurį `execSync` paleidžia absoliučiu keliu) - vis dar veikia.
-     */
-    tuscias = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-nopython-"));
-    env.PATH = tuscias;
+  /**
+   * ⚠️ ABI PUSĖS HERMETIŠKOS - IR „YRA", IR „NĖRA".
+   *
+   * Pirmoji versija `python3` NEBUVIMĄ imitavo (tuščias `PATH`), o BUVIMĄ
+   * paveldėjo iš aplinkos. Asimetrija nematoma mašinoje, kurioje Python yra, bet
+   * mašinoje be jo teigiami atvejai KRISDAVO - t. y. guard'o testai padarydavo
+   * visą suitę priklausomą nuo `python3`, nors #202 principas priešingas:
+   * lokaliai be `REQUIRE_PYTHON` Python neturintys testai lieka teisėtai `skip`.
+   *
+   * Todėl `PATH` visada rodo į laikiną katalogą: teigiamiems atvejams jame
+   * padedamas `python3` shim'as, neigiamiems jis lieka tuščias. Tikrinamas
+   * guard'o SPRENDIMAS, ne hosto konfigūracija.
+   *
+   * `/bin/sh`, kurį `execSync` paleidžia absoliučiu keliu, veikia abiem atvejais.
+   */
+  const laikinas = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-python-"));
+  env.PATH = laikinas;
+
+  if (pythonYra) {
+    const shim = path.join(laikinas, "python3");
+    fs.writeFileSync(shim, '#!/bin/sh\necho "Python 3.11.0"\n');
+    fs.chmodSync(shim, 0o755);
   }
 
   try {
@@ -59,7 +73,7 @@ function paleisti({ pythonYra, reikalaujama }) {
       { env, encoding: "utf8" }
     );
   } finally {
-    if (tuscias) fs.rmSync(tuscias, { recursive: true, force: true });
+    fs.rmSync(laikinas, { recursive: true, force: true });
   }
 }
 
@@ -92,7 +106,7 @@ test("#202 GUARD: python3 nėra, REQUIRE_PYTHON nenustatytas - SKIP su aiškia p
   assert.equal(r.status, 0, `be vėliavos guard neturi kristi: ${r.stderr}`);
 
   const { hasPython, skip } = JSON.parse(r.stdout);
-  assert.equal(hasPython, false, "su tuščiu PATH python3 neturi būti randamas");
+  assert.equal(hasPython, false, "tuščiame PATH kataloge python3 neturi būti randamas");
   assert.equal(typeof skip, "string", "praleidimo priežastis privalo būti tekstas");
   assert.match(skip, /python3/, "priežastis turi įvardyti, KO trūksta");
   assert.match(skip, /REQUIRE_PYTHON/, "ir kaip praleidimą paversti klaida");
