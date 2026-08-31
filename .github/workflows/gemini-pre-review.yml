@@ -94,7 +94,10 @@ jobs:
     if: needs.gate.outputs.run == 'true'
 
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 min neužteko #35 (trys paleidimai iš eilės nutraukti ties 19m54s).
+    # Apžvalgos trukmė auga kartu su repo; jei ir 40 neužteks, sprendimas
+    # yra apimties siaurinimas (ką skenuoti), ne dar didesnis skaičius.
+    timeout-minutes: 40
 
     permissions:
       contents: read
