@@ -1,5 +1,5 @@
 const jobPhase = require("../jobPhase");
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -467,6 +467,35 @@ function createRedisStore(redisClient) {
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }
 
+  /**
+   * ATOMINIS IR IDEMPOTENTIŠKAS TERMINALUS PERĖJIMAS (#184, 7.5b).
+   *
+   * ⚠️ REDIS NEGALI TO PADARYTI VIENU LUA SKRIPTU, IR TAI SĄMONINGA.
+   *
+   * Sprendimą priima `jobPhase` — GRYNA JS funkcija. Perrašius perėjimų grafą
+   * ir rezultatų lygybę į Lua, atsirastų ANTRAS gyvavimo ciklo autoritetas,
+   * kurio #184 eksplicitiškai draudžia („perėjimų grafas SQL'e neperrašomas").
+   *
+   * Vietoj to atomiškumą duoda VERSIJOS CAS iš to paties snapshot'o, kuriuo
+   * buvo priimtas sprendimas: jei įrašas tarp skaitymo ir rašymo pasikeitė,
+   * `CAS_VERSIJA_LUA` rašymo neįvykdo, ir kvietėjas gauna konfliktą, ne tylų
+   * perrašymą. PostgreSQL šito nereikia — ten sprendimas priimamas po
+   * `FOR UPDATE` toje pačioje transakcijoje.
+   *
+   * @returns {object|null|"RESULT_CONFLICT"|"COMPLETED_WITHOUT_RESULT"|"CONCURRENCY_CONFLICT"}
+   */
+  async function finishAtomic(id, status, extra = {}) {
+    const jobPhase = require("../jobPhase");
+    const job = await get(id);
+    if (!job) return null;
+
+    const jauBaigtas = idempotentiskasAtsakymas(job, status, extra);
+    if (jauBaigtas !== undefined) return jauBaigtas;
+
+    const patch = jobPhase.finish(job, status, extra);
+    return update(id, patch, { expectedVersion: job.version });
+  }
+
   /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
   async function updateOwned(id, patch, scope, options = {}) {
     const existing = await get(id);
@@ -640,7 +669,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

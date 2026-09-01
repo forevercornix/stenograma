@@ -180,7 +180,7 @@ test("#184 ⚠️ `startPhase()` TOCTOU: konkurentas tarp `get` ir `update` NEPE
   assert.notEqual(dabartinis.actor, "pasenes");
 });
 
-test("#184 `startPhase()`/`finish()` PERDUODA `expectedVersion` iš to paties snapshot'o", async () => {
+test("#184 `startPhase()` PERDUODA `expectedVersion` iš to paties snapshot'o", async () => {
   /**
    * ⚠️ STATINĖ PATIKRA ČIA NETINKA (AGENTS.md §9.2) — tikrinama, kad saugykla
    * REALIAI gauna sąlygą, ir kad ta sąlyga yra ta pati versija, kurią fasadas
@@ -197,13 +197,49 @@ test("#184 `startPhase()`/`finish()` PERDUODA `expectedVersion` iš to paties sn
   try {
     const pries = await jobStore.system.get(job.id);
     await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
-    const poFazes = await jobStore.system.get(job.id);
-    await jobStore.system.finish(job.id, STATUS.FAILED, { error: "x" });
 
-    assert.deepEqual(gautos, [pries.version, poFazes.version],
-      "kiekvienas kvietimas perduoda TĄ versiją, kurią pats perskaitė");
+    assert.deepEqual(gautos, [pries.version],
+      "kvietimas perduoda TĄ versiją, kurią pats perskaitė");
   } finally {
     memoryStore.update = originalus;
+  }
+});
+
+test("#184 `finish()` eina per `finishAtomic()`, NE per `get` + `update` porą", async () => {
+  /**
+   * ⚠️ TAI KITAS MECHANIZMAS NEI `startPhase()`, IR SKIRTUMAS YRA ESMINIS.
+   *
+   * `startPhase` sąlygą PERDUODA (`expectedVersion` iš savo snapshot'o).
+   * `finish` to negali: idempotentiškas pakartojimas ateina su PASENUSIU
+   * snapshot'u (pirmasis `finish` versiją jau padidino), tad sąlyga jį atmestų
+   * kaip konfliktą vietoj tikro no-op. Todėl sprendimas perkeltas į saugyklą,
+   * kur jis priimamas po užrakto.
+   *
+   * Testas tikrina BŪTENT tai, kad fasadas nebeturi savo `get` + `update` poros.
+   */
+  const job = await jobStore.create({ type: JOB_TYPES.TRANSCRIPTION, ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+  await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
+
+  let atominiuKvietimu = 0;
+  let updateKvietimu = 0;
+  const originalusFinish = memoryStore.finishAtomic;
+  const originalusUpdate = memoryStore.update;
+  memoryStore.finishAtomic = async (...args) => {
+    atominiuKvietimu += 1;
+    return originalusFinish(...args);
+  };
+  memoryStore.update = async (...args) => {
+    updateKvietimu += 1;
+    return originalusUpdate(...args);
+  };
+  try {
+    const po = await jobStore.system.finish(job.id, STATUS.FAILED, { error: "x" });
+    assert.equal(po.status, STATUS.FAILED);
+    assert.equal(atominiuKvietimu, 1, "vienas atominis kvietimas");
+    assert.equal(updateKvietimu, 0, "fasadas nebeturi savo `update` kvietimo");
+  } finally {
+    memoryStore.finishAtomic = originalusFinish;
+    memoryStore.update = originalusUpdate;
   }
 });
 
@@ -275,24 +311,24 @@ test("#184 ⚠️ finishFailed: KONFLIKTAS, po kurio autoritetinga būsena yra `
    */
   const job = await processingJob();
 
-  const originalus = memoryStore.update;
+  const originalus = memoryStore.finishAtomic;
   let konkurentasIvyko = false;
 
-  async function stubas(id, patch, options = {}) {
-    if (konkurentasIvyko) return originalus(id, patch, options);
+  async function stubas(id, status, extra = {}) {
+    if (konkurentasIvyko) return originalus(id, status, extra);
     konkurentasIvyko = true;
 
     /**
      * Konkurentas įsipareigoja rezultatą - tai ir yra versijos konflikto
-     * priežastis. Rašo per TIKRĄ `update`, tad būsena po jo yra autentiška.
+     * priežastis. Rašo per TIKRĄ kelią, tad būsena po jo yra autentiška.
      */
-    memoryStore.update = originalus;
+    memoryStore.finishAtomic = originalus;
     await jobStore.system.finish(id, STATUS.COMPLETED, { result: { ok: true } });
-    memoryStore.update = stubas;
+    memoryStore.finishAtomic = stubas;
 
     return "CONCURRENCY_CONFLICT";
   }
-  memoryStore.update = stubas;
+  memoryStore.finishAtomic = stubas;
   /**
    * ⚠️ `LOG_LEVEL` pakeliamas TIK šiam testui. Failo viršuje jis yra `error`
    * (kad 450+ testų neterštų išvesties), tad `warn` eilutė būtų nutildyta - ir
@@ -307,7 +343,7 @@ test("#184 ⚠️ finishFailed: KONFLIKTAS, po kurio autoritetinga būsena yra `
     assert.equal(po.status, STATUS.COMPLETED, "FAILED žymėjimas ATMESTAS");
     assert.deepEqual(po.result, { ok: true }, "rezultatas nepaliestas");
   } finally {
-    memoryStore.update = originalus;
+    memoryStore.finishAtomic = originalus;
     zurnalas.restore();
     process.env.LOG_LEVEL = senasLygis;
   }
@@ -342,8 +378,8 @@ test("#184 finishFailed: nuolatinis konfliktas baigiasi PASITRAUKIMU, ne ciklu",
   const job = await processingJob();
 
   let bandymai = 0;
-  const originalus = memoryStore.update;
-  memoryStore.update = async () => {
+  const originalus = memoryStore.finishAtomic;
+  memoryStore.finishAtomic = async () => {
     bandymai += 1;
     return "CONCURRENCY_CONFLICT";
   };
@@ -352,7 +388,7 @@ test("#184 finishFailed: nuolatinis konfliktas baigiasi PASITRAUKIMU, ne ciklu",
     assert.equal(po, jobStore.CONCURRENCY_CONFLICT);
     assert.equal(bandymai, 2, "lygiai du bandymai, po to pasitraukimas");
   } finally {
-    memoryStore.update = originalus;
+    memoryStore.finishAtomic = originalus;
   }
 });
 
@@ -360,18 +396,18 @@ test("#184 finishFailed: ne terminalus job'as po konflikto gauna VIENĄ pakartoj
   const job = await processingJob();
 
   let bandymai = 0;
-  const originalus = memoryStore.update;
-  memoryStore.update = async (id, patch, options = {}) => {
+  const originalus = memoryStore.finishAtomic;
+  memoryStore.finishAtomic = async (id, status, extra = {}) => {
     bandymai += 1;
     if (bandymai === 1) return "CONCURRENCY_CONFLICT";
-    return originalus(id, patch, options);
+    return originalus(id, status, extra);
   };
   try {
     const po = await jobStore.system.finishFailed(job.id, { error: "x" });
     assert.equal(po.status, STATUS.FAILED, "antras bandymas pavyko");
     assert.equal(bandymai, 2);
   } finally {
-    memoryStore.update = originalus;
+    memoryStore.finishAtomic = originalus;
   }
 });
 
@@ -382,8 +418,8 @@ test("#184 finishFailed: INFRASTRUKTŪROS klaida NESLEPIAMA", async () => {
    */
   const job = await processingJob();
 
-  const originalus = memoryStore.update;
-  memoryStore.update = async () => {
+  const originalus = memoryStore.finishAtomic;
+  memoryStore.finishAtomic = async () => {
     throw new Error("ECONNREFUSED");
   };
   try {
@@ -392,6 +428,6 @@ test("#184 finishFailed: INFRASTRUKTŪROS klaida NESLEPIAMA", async () => {
       /ECONNREFUSED/
     );
   } finally {
-    memoryStore.update = originalus;
+    memoryStore.finishAtomic = originalus;
   }
 });

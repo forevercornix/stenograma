@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -218,6 +218,39 @@ async function restoreRecord(job) {
   return kanoninis;
 }
 
+/**
+ * ATOMINIS IR IDEMPOTENTIŠKAS TERMINALUS PERĖJIMAS (#184, 7.5b).
+ *
+ * ⚠️ KODĖL SAUGYKLOJE, O NE FASADE.
+ *
+ * Fasadas negali to padaryti iš principo: sprendimas „ar tai tas pats
+ * rezultatas" privalo remtis būsena, kuri nepasikeis iki įrašymo, o tarp fasado
+ * `get()` ir `update()` yra `await`. Vien `expectedVersion` čia NEPADEDA:
+ * idempotentiškas pakartojimas ateina su PASENUSIU snapshot'u (pirmasis
+ * `finish` versiją jau padidino), tad sąlyga jį atmestų kaip konfliktą — o
+ * kontraktas reikalauja TIKRO no-op.
+ *
+ * ⚠️ MODELIS NEIŠRASTAS. `reportProgressAtomic()` yra lygiai tas pats: fasado
+ * `get` + sprendimas + `update` pora, perkelta į saugyklą kartu su GRYNĄJA
+ * sprendimo funkcija (`jobPhase`). `jobPhase` lieka vienintelis perėjimų
+ * autoritetas — perėjimų grafas čia neperrašomas.
+ *
+ * @returns {object|null|"RESULT_CONFLICT"|"COMPLETED_WITHOUT_RESULT"}
+ */
+async function finishAtomic(id, status, extra = {}) {
+  const jobPhase = require("../jobPhase");
+  const job = jobs.get(id);
+  if (!job) return null;
+
+  const jauBaigtas = idempotentiskasAtsakymas(job, status, extra);
+  if (jauBaigtas !== undefined) return jauBaigtas;
+
+  const patch = jobPhase.finish(job, status, extra);
+  const next = applyPatch(job, patch);
+  jobs.set(id, next);
+  return next;
+}
+
 async function listAll() {
   return [...jobs.values()];
 }
@@ -239,4 +272,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

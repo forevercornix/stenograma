@@ -392,9 +392,17 @@ async function _executeInline(type, processor, jobId, payload) {
      * `finishFailed()`, kuris JAU `completed` įrašo nebeperrašo.
      */
     const uzbaigtas = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
-    if (uzbaigtas === jobStore.CONCURRENCY_CONFLICT) {
+    if (typeof uzbaigtas === "symbol") {
+      /**
+       * ⚠️ VISI KONFLIKTO SIMBOLIAI — VIENA ŠAKA (#184, 7.5b).
+       *
+       * `inline` kelias audio valymo sprendimo nepriima pats (jį daro
+       * `_executeInline` `finally` per `_atlaisvintiSaltini`), tad čia
+       * pakanka NEPRANEŠTI sėkmės. `typeof === "symbol"` apima ir ateities
+       * baigtis: naujas simbolis negalės tyliai praeiti kaip job objektas.
+       */
       throw new Error(
-        `Job rezultatas NEĮSIPAREIGOTAS (versijos konfliktas): ${jobId}. Įrašą pakeitė kitas vykdytojas.`
+        `Job rezultatas NEĮSIPAREIGOTAS (${String(uzbaigtas)}): ${jobId}. Įrašą pakeitė kitas vykdytojas.`
       );
     }
 

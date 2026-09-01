@@ -6,6 +6,7 @@ const {
   applyPatch,
   matchesOwner,
   normalizeJob,
+  idempotentiskasAtsakymas,
 } = require("./common");
 
 /**
@@ -675,12 +676,47 @@ function createPostgresStore(pool) {
       return;
     }
 
+    /**
+     * ⚠️ SĄLYGINIS PERRAŠYMAS (#184, 7.5b).
+     *
+     * Iki 7.5b čia buvo `DO UPDATE SET payload = EXCLUDED.payload` — BESĄLYGINIS
+     * perrašymas. Idempotentiškas pakartojimas su TUO PAČIU rezultatu perrašydavo
+     * eilutę: `created_at` išlikdavo, bet eilutė būdavo perrašoma, ir „no-op"
+     * tyliai likdavo RAŠYMU. Antrasis vykdytojas po lenktynių taip pat
+     * perrašydavo pirmojo rezultatą.
+     *
+     * ⚠️ SĄLYGA YRA `jsonb` LYGYBĖ, IR TAI NĖRA ANTRA TAISYKLĖ. `jsonb =`
+     * PostgreSQL'e yra SEMANTINIS palyginimas: raktų tvarka nereikšminga,
+     * dublikatai pašalinti, skaičiai normalizuoti — lygiai tas pats, ką
+     * `kanoninisRezultatas()` daro JS pusėje. Kontrakto sprendimą (no-op ar
+     * konfliktas) priima JS autoritetas; ši sąlyga saugo nuo BEREIKALINGO
+     * eilutės perrašymo. Integracinis testas tikrina, kad abi sutampa per
+     * REALŲ DB round-trip'ą.
+     */
     await client.query(
       `INSERT INTO job_results (job_id, storage_type, payload, created_at)
        VALUES ($1, 'inline', $2::jsonb, now())
-       ON CONFLICT (job_id) DO UPDATE SET payload = EXCLUDED.payload`,
+       ON CONFLICT (job_id) DO UPDATE SET payload = EXCLUDED.payload
+        WHERE job_results.payload IS DISTINCT FROM EXCLUDED.payload`,
       [jobId, JSON.stringify(result)]
     );
+  }
+
+  /**
+   * `job_results` SAUGOJIMO TIPAS — TIK `finish` transakcijos viduje (#184, 7.5b).
+   *
+   * ⚠️ Į JOB OBJEKTĄ ŠIS LAUKAS NEDEDAMAS SĄMONINGAI. Memory ir Redis
+   * `storage_type` neturi ir turėti negali; bendro kontrakto rinkinys lygina
+   * backend'ų grąžinamas būsenas `deepEqual`, tad PG-only laukas arba sulaužytų
+   * palyginimus, arba priverstų jį iš jų išimti — t. y. tyliai susiaurintų
+   * rinkinį. Todėl skaitomas atskira užklausa ten, kur reikia sprendimo.
+   */
+  async function rezultatoSaugojimas(client, jobId) {
+    const { rows } = await client.query(
+      "SELECT storage_type FROM job_results WHERE job_id = $1",
+      [jobId]
+    );
+    return rows[0] ? rows[0].storage_type : null;
   }
 
   async function readJob(client, id) {
@@ -855,6 +891,65 @@ function createPostgresStore(pool) {
    * pasikeitė, ji nebesugrįš, ir pakartojimas su tuo pačiu `expectedVersion`
    * duotų tą patį atsakymą amžinai. Kvietėjas gauna konfliktą ir sprendžia pats.
    */
+  /**
+   * ATOMINIS IR IDEMPOTENTIŠKAS TERMINALUS PERĖJIMAS (#184, 7.5b).
+   *
+   * ⚠️ `jobs` IR `job_results` — VIENOJE TRANSAKCIJOJE.
+   *
+   * `COMPLETED` reiškia BŪTENT tokią būseną: `jobs.status = 'completed'` IR
+   * egzistuojantis `job_results` įrašas, abu commit'inti kartu. Rezultato
+   * rašymui nepavykus, rollback'inama visa `finish` transakcija — pusinės
+   * `completed` būsenos nelieka.
+   *
+   * ⚠️ TRANSAKCIJOS RIBOS. Ji apima `jobs` ir `job_results` ir NIEKO DAUGIAU.
+   * Auditas, eilės patvirtinimas ir audio valymas lieka už jos: audito
+   * įtraukimas reikštų, kad rollback ištrina ir audito įrašą.
+   *
+   * ⚠️ SPRENDIMAS PRIIMAMAS PO `FOR UPDATE`, TOJE PAČIOJE TRANSAKCIJOJE.
+   * Tai antrasis #184 leistas klasifikavimo būdas: užraktas stabilizuoja
+   * būseną iki commit'o, tad „ar tas pats rezultatas" negali pasenti tarp
+   * sprendimo ir įrašymo. Neužrakinto skaitymo po nepavykusio `UPDATE` čia
+   * nėra.
+   *
+   * @returns {object|null|"RESULT_CONFLICT"|"COMPLETED_WITHOUT_RESULT"}
+   */
+  async function finishAtomic(id, status, extra = {}) {
+    const jobPhase = require("../jobPhase");
+    return inTransaction(async (client) => {
+      const job = await readJobForUpdate(client, id);
+      if (!job) return null;
+
+      if (job.status === STATUS.COMPLETED) {
+        /**
+         * ⚠️ `storage_type <> 'inline'` — FAIL-CLOSED (#157 riba).
+         *
+         * `upsertResult()` rašo kietą `'inline'`, o `SELECT_JOB` hidratuoja tik
+         * `payload`, tad `s3` rezultato NORMALIZAVIMO / HIDRATACIJOS autoriteto
+         * repo neturi. Palyginus tokį įrašą pagal `payload`, „skirtingas
+         * rezultatas" tyliai taptų „nepalyginamas", ir antrasis vykdytojas
+         * gautų idempotentišką sėkmę apie darbą, kurio nematė.
+         *
+         * ⚠️ SARGAS YRA PERSPEKTYVINIS: produkcinio kelio, kuris parašytų kitą
+         * `storage_type`, ŠIANDIEN NĖRA. Jis pasiekiamas tik įrašius eilutę
+         * tiesiogiai. Įvardyta atvirai, kad neatrodytų kaip įrodytas elgesys.
+         */
+        const saugojimas = await rezultatoSaugojimas(client, id);
+        if (saugojimas !== null && saugojimas !== "inline") {
+          throw new Error(
+            `postgresStore.finishAtomic: job_results.storage_type = '${saugojimas}' ` +
+              "neturi lygybės autoriteto (#157). Rezultatų palyginimas apibrėžtas TIK 'inline'."
+          );
+        }
+      }
+
+      const jauBaigtas = idempotentiskasAtsakymas(job, status, extra);
+      if (jauBaigtas !== undefined) return jauBaigtas;
+
+      const patch = jobPhase.finish(job, status, extra);
+      return writePatched(client, job, patch);
+    });
+  }
+
   async function writePatchedCas(client, current, patch, expectedVersion) {
     const row = jobToRow(applyPatch(current, patch));
     const rasomi = changedColumns(jobToRow(current), row, patch);
@@ -1300,6 +1395,7 @@ function createPostgresStore(pool) {
     update,
     remove,
     reportProgressAtomic,
+    finishAtomic,
     getOwned,
     updateOwned,
     removeOwned,

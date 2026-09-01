@@ -97,6 +97,53 @@ function createWorker(queueName, processor, workerOptions = {}) {
         return { skipped: "deleted" };
       }
 
+      /**
+       * ⚠️ IDEMPOTENTIŠKUMAS ĮĖJIMO KELYJE (#184, 7.5b).
+       *
+       * ⚠️ TAI NE HIPOTEZĖ — TAI BUVO DABARTINIO `main` ELGESYS.
+       *
+       * `finish(COMPLETED)` commit'inasi, procesas žūva PRIEŠ BullMQ
+       * patvirtinimą, retry kviečia `restart()` ant `completed` įrašo, o
+       * `jobPhase.restart()` leidžia tik `QUEUED`/`PROCESSING` → `JobPhaseError`
+       * → BullMQ failed → kartojama → dead-letter. Rezultatas visą tą laiką guli
+       * DB.
+       *
+       * ⚠️ ATOMINIS `finish()` TO NEIŠSPRENDŽIA. Jis saugo įrašymą, bet retry
+       * čia net nepriartėja prie `finish()` — jis krenta anksčiau, ties
+       * `restart()`. Todėl patikra privalo būti ĮĖJIME.
+       *
+       * ⚠️ DVI SKIRTINGOS `completed` BŪSENOS, DU SKIRTINGI VEIKSMAI:
+       *
+       *   su rezultatu  → idempotentiška SĖKMĖ: grąžinamas jau įsipareigotas
+       *                   rezultatas, transkripcija NEKARTOJAMA;
+       *   be rezultato  → NE sėkmė. Tai remontuotina būsena, ir paversti ją
+       *                   nauju `processing` vykdymu reikštų perrašyti tai, ko
+       *                   negalime perskaityti.
+       *
+       * ⚠️ TOMBSTONE PATIKRA LIEKA PIRMA (aukščiau) — 7.5a barjeras nekeičiamas.
+       */
+      const jauEsantis = await jobStore.system.get(jobId);
+      if (jauEsantis && jauEsantis.status === jobStore.STATUS.COMPLETED) {
+        if (jauEsantis.result === undefined || jauEsantis.result === null) {
+          log.error("Retry rado `completed` job'ą BE rezultato - remontuotina būsena", {
+            stage: "completed_without_result",
+            execution: "worker",
+            jobId,
+          });
+          throw new Error(
+            `Job pažymėtas COMPLETED, bet rezultato saugykloje nėra: ${jobId}. ` +
+              "Būsena remontuotina; naujas vykdymas jos neperrašo."
+          );
+        }
+
+        log.info("Retry rado jau įsipareigotą rezultatą - vykdymas praleidžiamas", {
+          stage: "completed_idempotent",
+          execution: "worker",
+          jobId,
+        });
+        return jauEsantis.result;
+      }
+
       // Pažymim PROCESSING su realiu attempt numeriu (BullMQ job.attemptsMade).
       // update() grąžina null, jei jobo įrašo NĖRA (pvz. nesuderintas store, P1 scenarijus,
       // arba job'as pasibaigė TTL). Tada BullMQ nemato problemos, bet vartotojo jobo įrašo
@@ -260,18 +307,52 @@ function createWorker(queueName, processor, workerOptions = {}) {
             throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
           }
           /**
-           * ⚠️ `Symbol` YRA TRUTHY (#184, 7.5b).
+           * ⚠️ AUDIO VALYMO BARJERAS (#184, 7.5b).
            *
-           * `if (!completedJob)` konflikto simbolio NEPAGAUTŲ – jis praeitų kaip
-           * job objektas, o po jo einantis `_cleanupStorage()` ištrintų šaltinio
-           * audio remdamasis užbaigimu, kuris NEĮVYKO. Tai ne teorinis atvejis:
-           * konfliktą sukuria stalled recovery, kur du persidengiantys vykdymai
-           * skaito tą patį `processing` snapshot'ą.
+           * `Symbol` YRA TRUTHY, tad `if (!completedJob)` nė vieno konflikto
+           * simbolio NEPAGAUTŲ – jis praeitų kaip job objektas, o po jo einantis
+           * `_cleanupStorage()` ištrintų ŠALTINIO AUDIO remdamasis užbaigimu,
+           * kuris neįvyko. Tai ne teorinis atvejis: konfliktus sukuria stalled
+           * recovery, kur du persidengiantys vykdymai skaito tą patį
+           * `processing` snapshot'ą.
            *
-           * ⚠️ ČIA – KLAIDA, NE IDEMPOTENTIŠKA SĖKMĖ. Rezultatų palyginimo šis
-           * commit'as dar neturi (7.5b C), tad vienintelis sąžiningas atsakymas
-           * yra „neįsipareigojau" – audio lieka, BullMQ mato gedimą.
+           * ⚠️ VIEN `status = 'completed'` NEPAKANKA. Audio šalinamas TIK
+           * autoritetingai patvirtinus `completed` IR persistentinį rezultatą –
+           * tai grąžina `finishAtomic()` job objektu. Bet kuri kita baigtis
+           * reiškia „neįsipareigojau", ir audio lieka: jis yra vienintelė
+           * medžiaga, iš kurios būseną dar galima suremontuoti.
+           *
+           *   `COMPLETED_WITHOUT_RESULT` → remontuotina būsena, NE sėkmė;
+           *   `RESULT_CONFLICT`          → kitas vykdytojas įsipareigojo KITĄ
+           *                                rezultatą; esamas nekeičiamas;
+           *   `CONCURRENCY_CONFLICT`     → įrašas pasikeitė nuo skaitymo.
+           *
+           * ⚠️ IDEMPOTENTIŠKAS PAKARTOJIMAS ČIA YRA SĖKMĖ. Jei rezultatas jau
+           * įsipareigotas ir sutampa kanoniškai, `finishAtomic()` grąžina TĄ
+           * PATĮ job objektą be jokio rašymo – tada audio valyti galima ir
+           * reikia (pirmajame bandyme jis galėjo likti neišvalytas).
            */
+          if (completedJob === jobStore.COMPLETED_WITHOUT_RESULT) {
+            log.error("`completed` be rezultato - audio NEŠALINAMAS", {
+              stage: "completed_without_result",
+              execution: "worker",
+              jobId,
+            });
+            throw new Error(
+              `Job pažymėtas COMPLETED, bet rezultato saugykloje nėra: ${jobId}. ` +
+                "Šaltinio audio paliekamas remontui."
+            );
+          }
+          if (completedJob === jobStore.RESULT_CONFLICT) {
+            log.error("Kitas vykdytojas jau įsipareigojo SKIRTINGĄ rezultatą", {
+              stage: "result_conflict",
+              execution: "worker",
+              jobId,
+            });
+            throw new Error(
+              `Rezultatų nesutapimas: ${jobId}. Įsipareigotas rezultatas NEPERRAŠOMAS.`
+            );
+          }
           if (completedJob === jobStore.CONCURRENCY_CONFLICT) {
             throw new Error(
               `Job rezultatas NEĮSIPAREIGOTAS (versijos konfliktas): ${jobId}. Įrašą pakeitė kitas vykdytojas.`

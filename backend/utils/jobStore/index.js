@@ -377,14 +377,47 @@ const FORBIDDEN = Symbol("jobStore.FORBIDDEN");
 const CONCURRENCY_CONFLICT = Symbol("jobStore.CONCURRENCY_CONFLICT");
 
 /**
+ * „Jau `completed`, bet KITU rezultatu" — consistency conflict (#184, 7.5b).
+ *
+ * ⚠️ ATSKIRAS NUO `CONCURRENCY_CONFLICT`. Versijos konfliktas reiškia „perskaityk
+ * iš naujo ir spręsk"; šitas reiškia „du vykdytojai pagamino SKIRTINGUS
+ * rezultatus tam pačiam darbui" — pakartojimas to neišspręs. Esamas rezultatas
+ * NEPERRAŠOMAS jokiomis aplinkybėmis.
+ */
+const RESULT_CONFLICT = Symbol("jobStore.RESULT_CONFLICT");
+
+/**
+ * „`jobs.status = completed`, bet rezultato saugykloje NĖRA" (#184, 7.5b).
+ *
+ * ⚠️ TAI NĖRA SĖKMĖ, IR TAI NĖRA KONFLIKTAS. Tai REMONTUOTINA būsena: nutrūkusi
+ * transakcija, ranka redaguota eilutė, atkūrimas iš nepilnos kopijos.
+ *
+ * ⚠️ KODĖL JI PRIVALO BŪTI ATSKIRIAMA. Audio valymo sprendimas priimamas iš
+ * `finish()` grąžinamos reikšmės. Su bendru gyvavimo ciklo konfliktu kvietėjas
+ * negalėtų atskirti „tas pats rezultatas, no-op, audio galima" nuo „rezultato
+ * nėra, audio LIEKA" — ir vienas iš dviejų atvejų neišvengiamai elgtųsi
+ * neteisingai. Šaltinio audio yra vienintelė medžiaga, iš kurios būseną dar
+ * galima suremontuoti.
+ */
+const COMPLETED_WITHOUT_RESULT = Symbol("jobStore.COMPLETED_WITHOUT_RESULT");
+
+/**
  * Saugyklos eilutė → fasado forma. VIENAS vertimas visiems keliams (#184).
  *
  * ⚠️ Kopijos kiekviename metode būtų tiksliai tai, ką issue draudžia: „nė vienas
  * metodas negrąžina konfliktui savo formos".
  */
+const SAUGYKLOS_BAIGTYS = Object.freeze({
+  FORBIDDEN,
+  CONCURRENCY_CONFLICT,
+  RESULT_CONFLICT,
+  COMPLETED_WITHOUT_RESULT,
+});
+
 function fasadoRezultatas(result) {
-  if (result === "FORBIDDEN") return FORBIDDEN;
-  if (result === "CONCURRENCY_CONFLICT") return CONCURRENCY_CONFLICT;
+  if (typeof result === "string" && result in SAUGYKLOS_BAIGTYS) {
+    return SAUGYKLOS_BAIGTYS[result];
+  }
   return result;
 }
 
@@ -557,11 +590,15 @@ function assertRestorableId(job) {
  * NEDUBLIUODAMAS nei tombstone barjero, nei snapshot'o sąlygos.
  */
 async function sisteminisFinishBandymas(store, id, status, extra) {
-  const job = await store.get(id);
-  if (!job) return null;
-
-  const patch = jobPhase.finish(job, status, extra);
-  return fasadoRezultatas(await store.update(id, patch, { expectedVersion: job.version }));
+  /**
+   * ⚠️ ATSARGINIO KELIO NĖRA SĄMONINGAI (#184, 7.5b).
+   *
+   * `finishAtomic` deklaruoja visi trys backend'ai (kontrakto rinkinys tikrina
+   * metodų aibės tapatumą), tad `typeof === "function"` patikra čia reikštų tylų
+   * grįžimą į NEATOMINĮ kelią, jei kuris nors backend'as metodą prarastų. Toks
+   * grįžimas būtų nematomas: elgesys atrodytų teisingas, kol neįvyktų lenktynės.
+   */
+  return fasadoRezultatas(await store.finishAtomic(id, status, extra));
 }
 
 module.exports = {
@@ -576,6 +613,8 @@ module.exports = {
   _storeForTests: () => store,
   FORBIDDEN,
   CONCURRENCY_CONFLICT,
+  RESULT_CONFLICT,
+  COMPLETED_WITHOUT_RESULT,
   OWNER_KIND,
 
   /**

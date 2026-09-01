@@ -647,6 +647,101 @@ function applyPatch(job, patch) {
   return normalizeJob(next);
 }
 
+/**
+ * KANONINĖ REZULTATO REPREZENTACIJA — VIENAS LYGYBĖS AUTORITETAS (#184, 7.5b).
+ *
+ * ⚠️ KODĖL BE ŠITO IDEMPOTENTIŠKUMAS BŪTŲ BACKEND-PRIKLAUSOMAS.
+ *
+ * `job_results.payload` yra `jsonb`. PostgreSQL `jsonb` NESAUGO raktų tvarkos,
+ * šalina raktų dublikatus ir normalizuoja skaičius. Vadinasi tas pats
+ * rezultatas, įrašytas ir perskaitytas atgal, JS objektų palyginime
+ * (`JSON.stringify` ar `deepEqual` su kitokia raktų tvarka) atrodytų KITAS —
+ * PostgreSQL kelyje pakartotinis `finish(COMPLETED)` visada skelbtų konfliktą,
+ * o memory kelyje veiktų. Tai ne kraštinis atvejis: raktų tvarką lemia tai,
+ * kaip objektas buvo sukonstruotas.
+ *
+ * ⚠️ MASYVŲ TVARKA NEKEIČIAMA. Ji yra SEMANTIKA: transkripcijos segmentų ar
+ * kalbėtojų eilė nėra aibė. Rūšiuojant masyvus, du skirtingi rezultatai taptų
+ * „tuo pačiu" ir antrasis vykdytojas tyliai priimtų svetimą darbą kaip savo.
+ *
+ * ⚠️ TAI NĖRA `backupEncryption._canonicalContents()` AR `evaluationManifest`.
+ * Tie kanonizavimai tarnauja AES-GCM AAD susiejimui ir manifesto hash ID.
+ * Pernaudojus juos čia, kriptografinis AAD taptų priklausomas nuo job lygybės
+ * taisyklės — ir jos pakeitimas ateityje sulaužytų iššifravimą.
+ *
+ * ⚠️ HASH-ONLY LYGYBĖS ČIA NĖRA. Kelių valandų transkripcijos palyginimo kaina
+ * yra realus klausimas, bet optimizacija atskiriama nuo teisingumo: hash
+ * lygybė reikalautų įrodytos collision-safe verifikavimo semantikos.
+ *
+ * @param {*} reiksme
+ * @returns {string} stabili eilutė palyginimui
+ */
+function kanoninisRezultatas(reiksme) {
+  return JSON.stringify(kanonizuoti(reiksme));
+}
+
+/** Ar rezultato APSKRITAI nėra? `null` ir `undefined` — ta pati būsena. */
+function rezultatoNera(reiksme) {
+  return reiksme === undefined || reiksme === null;
+}
+
+function kanonizuoti(reiksme) {
+  if (reiksme === null || typeof reiksme !== "object") {
+    /**
+     * ⚠️ `undefined` PAVERČIAMAS `null`. `JSON.stringify(undefined)` grąžina
+     * `undefined` (ne eilutę), tad be šito palyginimas lygintų `undefined` su
+     * `undefined` ir mestų klaidą pirmame `.length` kvietime.
+     */
+    return reiksme === undefined ? null : reiksme;
+  }
+  if (Array.isArray(reiksme)) return reiksme.map(kanonizuoti);
+
+  const out = {};
+  for (const raktas of Object.keys(reiksme).sort()) {
+    /**
+     * ⚠️ `undefined` REIKŠMĖS LAUKAI PRALEIDŽIAMI. `jsonb` jų neturi
+     * (`JSON.stringify` juos išmeta), tad palikti juos čia reikštų, kad
+     * įrašytas ir perskaitytas objektas skiriasi nuo įrašomo.
+     */
+    if (reiksme[raktas] === undefined) continue;
+    out[raktas] = kanonizuoti(reiksme[raktas]);
+  }
+  return out;
+}
+
+/**
+ * BENDRA IDEMPOTENTIŠKUMO TAISYKLĖ VISIEMS TRIMS BACKEND'AMS (#184, 7.5b).
+ *
+ * ⚠️ ANTROS LYGYBĖS TAISYKLĖS NĖRA. Trys saugyklos kviečia ŠITĄ funkciją, tad
+ * „tas pats rezultatas" reiškia tą patį PostgreSQL, Redis ir atmintyje.
+ *
+ * @returns {undefined} sprendimo nėra - eiti įprastu perėjimo keliu
+ */
+function idempotentiskasAtsakymas(job, status, extra) {
+  if (job.status !== STATUS.COMPLETED) return undefined;
+
+  /**
+   * ⚠️ `COMPLETED` BE REZULTATO NĖRA SĖKMĖ.
+   *
+   * Tai remontuotina būsena (nutrūkusi transakcija, ranka redaguota eilutė), ir
+   * ji privalo būti ATSKIRIAMA nuo „tas pats rezultatas". Kvietėjo veiksmas
+   * skiriasi iš esmės: audio šalinti NEGALIMA, nes rezultato, dėl kurio jis
+   * nebereikalingas, saugykloje nėra.
+   */
+  if (rezultatoNera(job.result)) return "COMPLETED_WITHOUT_RESULT";
+
+  /**
+   * ⚠️ NEATITINKANTIS STATUSAS PALIEKAMAS `jobPhase`. `finish(FAILED)` ant
+   * `completed` job'o yra gyvavimo ciklo klausimas, ne rezultato — atsakymas
+   * privalo likti `JobPhaseError`, ne `RESULT_CONFLICT`.
+   */
+  if (status !== STATUS.COMPLETED) return undefined;
+
+  return kanoninisRezultatas(extra.result) === kanoninisRezultatas(job.result)
+    ? job
+    : "RESULT_CONFLICT";
+}
+
 const JOB_TYPES = { TRANSCRIPTION: "transcription", PROTOCOL: "protocol" };
 
 /**
@@ -667,6 +762,9 @@ module.exports = {
   normalizeSchemaVersion,
   BOOLEAN_FIELDS,
   NUMBER_FIELDS,
+  kanoninisRezultatas,
+  rezultatoNera,
+  idempotentiskasAtsakymas,
   KANONINIAI_LAUKAI,
   normalizeFieldValue,
   normalizeJob,

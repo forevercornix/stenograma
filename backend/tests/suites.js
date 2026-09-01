@@ -41,6 +41,14 @@ const redis = [
    * ELGESĮ, o BullMQ yra produkcijos kelias, kuris po #155 rašys į DB.
    */
   "resultLimitsWorker.integration",
+  /**
+   * #184 (7.5b): worker'io įėjimo kelio idempotentiškumas ir audio barjeras.
+   *
+   * TIKRAS BullMQ būtinas: patikra gyvena `createWorker()` processor'iaus viduje
+   * ir be tikros eilės nepasiekiama. Vienetinis testas tikrintų atkartotą
+   * sąlygos KOPIJĄ, o kopija ilgainiui nuo originalo išsiskiria.
+   */
+  "workerIdempotency.integration",
 ];
 
 /**
@@ -270,6 +278,14 @@ const functional = [
    * `postgresStore.integration`, Redis Lua CAS — `ownershipCasRedis.integration`.
    */
   "jobConflictContract",
+  /**
+   * #184 (7.5b): atominis ir idempotentiškas `finish(COMPLETED)`.
+   *
+   * Kanoninė lygybė ir trys `completed` baigtys tikrinamos be servisų; `jsonb`
+   * round-trip, transakcijos atomiškumas ir lenktynės - `postgresStore.integration`,
+   * worker'io įėjimo kelias - `workerIdempotency.integration` (`redis`).
+   */
+  "jobFinishIdempotency",
   "jobVersionParity",
   "jobs.route",
   "mergeDiarization",

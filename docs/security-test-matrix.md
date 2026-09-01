@@ -1406,6 +1406,61 @@ pažeidžiamas būtent klaidos metu — ten, kur diagnostika svarbiausia.
 
 ---
 
+## #184 (7.5b) — optimistic locking, konfliktų politika, atominis `finish`
+
+⚠️ **Lentelės antraštė yra `Mutacijos įrodymas`, ne `Pastaba`.** Tik tokią
+`scripts/check-matrix-rows.mjs` apskritai MATO: ji tikrina, kad kiekviena eilutė
+nurodytų egzistuojantį testą ir neturėtų tuščio mutacijų stulpelio. Pirmoji šios
+sekcijos redakcija naudojo `Pastaba` ir praėjo patikrą NEPATIKRINTA.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| Naujas job'as gauna `version = 1` **visuose trijuose** backend'uose | `jobVersionParity` | Mutacija: `version` iš `jobToRow()` → krinta 2 |
+| Kiekviena sėkminga mutacija didina `version` **lygiai +1** | `jobVersionParity` | Lyginamos REIKŠMĖS, ne „padidėjo"; mutacija `+2` → krinta 6 |
+| `startPhase`/`finish` (`get` + `update` pora) duoda **vieną** increment'ą | `jobVersionParity` | Lengviausia netyčia sulaužyti vieta; garantija yra konstrukcijos (vienas `applyPatch()`) |
+| No-op (atmestas progreso įvykis) `version` **nekeičia** | `jobVersionParity` | Rasta testo klaidos taisymo metu, ne suplanuota |
+| Redis increment'as — **toje pačioje** rašymo operacijoje | `jobVersionParity` | Skaičiuojami `hset` kvietimai; atskiras rašymas atidarytų langą |
+| Bendras kontrakto rinkinys **nesusiaurintas** (`version` lieka `deepEqual`) | `jobStoreBackendContract.integration` | PG-only laukas priverstų jį išimti — tyliai |
+| `NOT_FOUND` lieka `null` IR su sąlyga, IR be jos | `jobConflictContract`, `postgresStore.integration` | #180 kontraktas nepajudintas |
+| Pasenusi `version` → `CONCURRENCY_CONFLICT`, **niekas neįrašoma** | `jobConflictContract`, `postgresStore.integration`, `ownershipCasRedis.integration` | Mutacija: patikros pašalinimas → krinta 2 |
+| ⚠️ **Ownership mismatch NEPERKLASIFIKUOJAMAS** į concurrency conflict | `jobConflictContract`, `postgresStore.integration`, `ownershipCasRedis.integration` | Abi nesėkmės sąlygos tenkinamos vienu metu; mutacija (tvarkos sukeitimas) → krinta |
+| Gyvavimo ciklo konfliktas lieka **tipizuotas `JobPhaseError`** | `jobConflictContract`, `jobFinishIdempotency` | Ne naujas simbolis: dvi reprezentacijos tam pačiam faktui yra tai, ką #184 draudžia |
+| Nulis eilučių klasifikuojamas **tame pačiame sakinyje** | `postgresStore.integration` | `casSuKlasifikacija()` + `versijaSkiriasi()`; NOT RUN be PostgreSQL |
+| Ištrinta eilutė **negauna** egzistavimo verdikto iš naujos inkarnacijos | `postgresStore.integration` | #180 `buvo === 0` tikrinamas PRIEŠ versijos priežastį |
+| Fasado `get`→`update` TOCTOU **uždarytas** | `jobConflictContract` | Mutacija: fasadas neperduoda `expectedVersion` → krinta |
+| `finish()` eina per `finishAtomic()`, ne per `get` + `update` porą | `jobConflictContract` | Skaičiuojami abu kvietimai |
+| `finishFailed`: **`COMPLETED` niekada nevirsta `failed`** | `jobConflictContract` | Testas atkuria tikrąją lenktynę (užbaigimas TARP `get` ir `update`) |
+| `finishFailed`: nuolatinis konfliktas baigiasi **pasitraukimu**, ne ciklu | `jobConflictContract` | Skaičiuojami bandymai: lygiai du |
+| `finishFailed`: infrastruktūros klaida **neslepiama** | `jobConflictContract` | Tik `JobPhaseError` reiškia „jau terminalus" |
+| Kanoninė lygybė: raktų tvarka **nereikšminga**, masyvų — **reikšminga** | `jobFinishIdempotency`, `postgresStore.integration` | Mutacijos abiem kryptim → krinta; `jsonb` pusė per REALŲ round-trip |
+| Lygybės taisyklė **nedubliuojama** — vienas autoritetas trims backend'ams | `jobFinishIdempotency` | Nė vienas saugyklos modulis sprendimo nepriima pats |
+| ⚠️ Pakartojimas su tuo pačiu rezultatu — **TIKRAS no-op** (`version` ir `job_results.created_at` nepakitę) | `jobFinishIdempotency`, `postgresStore.integration` | Be to punkto „idempotentiška sėkmė" liktų RAŠYMU |
+| Kitas rezultatas → `RESULT_CONFLICT`; **esamas neperrašomas** | `jobFinishIdempotency`, `postgresStore.integration` | Tikrinamas ir persistentinis `payload` |
+| ⚠️ `completed` be rezultato → **ne sėkmė**, audio **NEŠALINAMAS** | `jobFinishIdempotency` (sprendimas), `workerIdempotency.integration` (failas išlieka) | Mutacija: šakos pašalinimas → krinta 2 |
+| `jobs` + `job_results` — **vienoje transakcijoje**; gedimas → rollback | `postgresStore.integration` | Pusinės `completed` būsenos nelieka |
+| Transakcija apima **tik** `jobs` ir `job_results` | `postgresStore.integration` | Auditas, eilė ir audio valymas — už jos |
+| Lenktynės: du vykdytojai, dvi jungtys — **tik vienas** įsipareigoja | `postgresStore.integration` | Deterministiška per `FOR UPDATE`, ne `sleep()`; tikrinama baigčių AIBĖ |
+| ⚠️ **Worker įėjimo kelias:** jau `completed` job'as neperdirbamas ir nekrenta `JobPhaseError` | `workerIdempotency.integration` | Tikras BullMQ būtinas: patikra gyvena processor'iaus viduje |
+| `finish(FAILED)` `job_results` **nerašo ir netrina** | `jobFinishIdempotency`, `postgresStore.integration` | Elgesys APIBRĖŽIAMAS, ne keičiamas |
+| `storage_type <> 'inline'` → **fail-closed** (#157) | `postgresStore.integration` | ⚠️ PERSPEKTYVINIS sargas be produkcinio kvietėjo — žr. pastabą žemiau |
+| `version >= 1` galioja **DB lygmeniu**; upgrade iš ankstesnės schemos | `migrations.integration` | Readiness stulpelių netikrina — kristų tik `INSERT` metu |
+| Tombstone barjeras lieka **prieš** `finishAtomic` | `jobFinishIdempotency` | Nauja atominė operacija yra tiksliai tas kelias, kuris apeitų 7.5a |
+
+⚠️ **`storage_type <> 'inline'` sargas neturi produkcinio kvietėjo.** `upsertResult()`
+rašo kietą `'inline'`, tad nė viena eilutė kito tipo šiandien atsirasti negali — testas jį
+pasiekia tik įrašydamas eilutę tiesiogiai. Jis egzistuoja tam, kad #157 negalėtų tyliai
+paversti „skirtingo rezultato" į „nepalyginamą". Įvardijama, kad DoD punktas neskambėtų
+kaip įrodytas produkcinis elgesys.
+
+⚠️ **`finishFailed` `status === COMPLETED` šaka nėra atskira ELGESIO garantija.** Mutacija
+tai parodė: žemiau einantis `isFinished()` grąžina tą pačią reikšmę. Vienintelis stebimas
+skirtumas yra ŽURNALO eilutė, ir testas tikrina būtent ją.
+
+⚠️ **Redis pusė be tikro serverio NEĮRODYTA.** `FakeRedis` `eval` neturi, tad Lua versijos
+sąlyga per jį apskritai nevykdoma. Visi Redis CAS scenarijai yra `redis` rinkinyje.
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
