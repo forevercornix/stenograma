@@ -291,3 +291,66 @@ test("#184 gyvavimo ciklo pažeidimas tebemeta `JobPhaseError` per `finishAtomic
     (err) => err instanceof JobPhaseError
   );
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 5. WORKER'IO ĮĖJIMO SPRENDIMAS — GRYNA TAISYKLĖ
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#184 ⚠️ retry įėjimo sprendimas: trys būsenos, trys veiksmai", () => {
+  /**
+   * ⚠️ KODĖL ŠI TAISYKLĖ TIKRINAMA ATSKIRAI NUO BullMQ.
+   *
+   * Ji saugo PAVOJINGIAUSIĄ viso kelio veiksmą — audio trynimą po nepatvirtinto
+   * užbaigimo. Kol sprendimas gyveno `createWorker()` processor'iaus viduje, jo
+   * mutacija buvo patikrinama TIK su tikru Redis, t. y. vietinėje aplinkoje
+   * NIEKAD. Ištraukus jį į grynąją funkciją, nepatikrinamas lieka tik LAIDŲ
+   * SUJUNGIMAS (`workerIdempotency.integration`), o ne pati taisyklė.
+   *
+   * ⚠️ TAISYKLĖ NEATKARTOJAMA TESTE. Importuojama TA PATI funkcija, kurią kviečia
+   * processor'ius; atkartota išraiška ilgainiui nuo originalo išsiskirtų — ir
+   * testas tikrintų savo kopiją.
+   */
+  const { sprendimasPriesRestart, RETRY_VEIKSMAS } = require("../workers");
+
+  assert.equal(sprendimasPriesRestart(null), RETRY_VEIKSMAS.VYKDYTI, "įrašo nėra");
+  assert.equal(
+    sprendimasPriesRestart({ status: STATUS.PROCESSING, result: null }),
+    RETRY_VEIKSMAS.VYKDYTI,
+    "dar ne terminalus"
+  );
+  assert.equal(
+    sprendimasPriesRestart({ status: STATUS.FAILED, result: null }),
+    RETRY_VEIKSMAS.VYKDYTI,
+    "`failed` PRIVALO būti kartojamas - retry čia yra visa prasmė"
+  );
+
+  assert.equal(
+    sprendimasPriesRestart({ status: STATUS.COMPLETED, result: { a: 1 } }),
+    RETRY_VEIKSMAS.IDEMPOTENTISKA_SEKME,
+    "įsipareigotas rezultatas → darbas NEKARTOJAMAS"
+  );
+
+  for (const nera of [null, undefined]) {
+    assert.equal(
+      sprendimasPriesRestart({ status: STATUS.COMPLETED, result: nera }),
+      RETRY_VEIKSMAS.REMONTUOTINA,
+      `\`completed\` be rezultato (${String(nera)}) NĖRA sėkmė`
+    );
+  }
+});
+
+test("#184 ⚠️ `completed` be rezultato NIEKADA neduoda `VYKDYTI`", () => {
+  /**
+   * ⚠️ ATSKIRAS TESTAS, NES TAI YRA MUTACIJOS TAIKINYS.
+   *
+   * `VYKDYTI` čia reikštų naują `processing` vykdymą ant `completed` įrašo — o
+   * jo pabaigoje `_cleanupStorage()` ištrintų šaltinio audio. Tai vienintelis
+   * kelias, kuriuo prarandami duomenys, kurių nebeįmanoma nei atkurti, nei
+   * pakartoti.
+   */
+  const { sprendimasPriesRestart, RETRY_VEIKSMAS } = require("../workers");
+
+  const sprendimas = sprendimasPriesRestart({ status: STATUS.COMPLETED, result: null });
+  assert.notEqual(sprendimas, RETRY_VEIKSMAS.VYKDYTI);
+  assert.notEqual(sprendimas, RETRY_VEIKSMAS.IDEMPOTENTISKA_SEKME, "ir ne tyli sėkmė");
+});

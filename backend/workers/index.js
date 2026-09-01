@@ -51,6 +51,50 @@ async function _cleanupStorage(payload, jobId) {
 // netrukdo garbage collection, kai worker'is daugiau nebenaudojamas.
 const workerConnections = new WeakMap();
 
+/**
+ * RETRY ĮĖJIMO SPRENDIMAS — GRYNA FUNKCIJA (#184, 7.5b).
+ *
+ * ⚠️ KODĖL IŠTRAUKTA IŠ `createWorker()` VIDAUS.
+ *
+ * Sprendimas gyveno BullMQ processor'iaus viduje, tad jo mutacija buvo
+ * patikrinama TIK su tikru Redis — o būtent jis saugo pavojingiausią viso
+ * kelio veiksmą: audio trynimą po NEPATVIRTINTO užbaigimo. Vienintelis dalykas,
+ * kurio negalima patikrinti be BullMQ, turi būti LAIDŲ SUJUNGIMAS, ne pati
+ * taisyklė.
+ *
+ * ⚠️ MODELIS TAS PATS KAIP `reportProgressAtomicSync(id, event, jobPhase)`:
+ * grynas sprendimas atskiriamas nuo aplinkos, kurioje jis vykdomas.
+ *
+ * ⚠️ TAISYKLĖ NEDUBLIUOJAMA TESTE. Testas importuoja BŪTENT šitą funkciją, ne
+ * atkartotą išraišką. (Gretimas `tests/workerRetry.test.js` `stageFor` taisyklę
+ * vis dar atkartoja — tai ATSKIRA, šio darbo neliesta taisyklė, ir čia ji
+ * neištaisyta.)
+ *
+ * @param {object|null} job autoritetinga persistentinė būsena
+ * @returns {"VYKDYTI"|"IDEMPOTENTISKA_SEKME"|"REMONTUOTINA"}
+ */
+const RETRY_VEIKSMAS = Object.freeze({
+  /** Įrašo nėra arba jis dar ne terminalus — įprastas vykdymas. */
+  VYKDYTI: "VYKDYTI",
+  /** `completed` + galiojantis rezultatas — grąžinamas jis, darbas nekartojamas. */
+  IDEMPOTENTISKA_SEKME: "IDEMPOTENTISKA_SEKME",
+  /** `completed` BE rezultato — ne sėkmė; audio LIEKA. */
+  REMONTUOTINA: "REMONTUOTINA",
+});
+
+function sprendimasPriesRestart(job) {
+  if (!job || job.status !== jobStore.STATUS.COMPLETED) return RETRY_VEIKSMAS.VYKDYTI;
+
+  /**
+   * ⚠️ `null` IR `undefined` — TA PATI BŪSENA. `undefined` reikštų, kad laukas
+   * apskritai nehidratuotas, `null` — kad rezultato nėra; abiem atvejais
+   * perskaityti nėra ko, ir audio yra vienintelė medžiaga remontui.
+   */
+  if (job.result === undefined || job.result === null) return RETRY_VEIKSMAS.REMONTUOTINA;
+
+  return RETRY_VEIKSMAS.IDEMPOTENTISKA_SEKME;
+}
+
 function createWorker(queueName, processor, workerOptions = {}) {
   const { Worker } = require("bullmq");
   const connection = createQueueConnection();
@@ -123,19 +167,21 @@ function createWorker(queueName, processor, workerOptions = {}) {
        * ⚠️ TOMBSTONE PATIKRA LIEKA PIRMA (aukščiau) — 7.5a barjeras nekeičiamas.
        */
       const jauEsantis = await jobStore.system.get(jobId);
-      if (jauEsantis && jauEsantis.status === jobStore.STATUS.COMPLETED) {
-        if (jauEsantis.result === undefined || jauEsantis.result === null) {
-          log.error("Retry rado `completed` job'ą BE rezultato - remontuotina būsena", {
-            stage: "completed_without_result",
-            execution: "worker",
-            jobId,
-          });
-          throw new Error(
-            `Job pažymėtas COMPLETED, bet rezultato saugykloje nėra: ${jobId}. ` +
-              "Būsena remontuotina; naujas vykdymas jos neperrašo."
-          );
-        }
+      const sprendimas = sprendimasPriesRestart(jauEsantis);
 
+      if (sprendimas === RETRY_VEIKSMAS.REMONTUOTINA) {
+        log.error("Retry rado `completed` job'ą BE rezultato - remontuotina būsena", {
+          stage: "completed_without_result",
+          execution: "worker",
+          jobId,
+        });
+        throw new Error(
+          `Job pažymėtas COMPLETED, bet rezultato saugykloje nėra: ${jobId}. ` +
+            "Būsena remontuotina; naujas vykdymas jos neperrašo."
+        );
+      }
+
+      if (sprendimas === RETRY_VEIKSMAS.IDEMPOTENTISKA_SEKME) {
         log.info("Retry rado jau įsipareigotą rezultatą - vykdymas praleidžiamas", {
           stage: "completed_idempotent",
           execution: "worker",
@@ -671,4 +717,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage };
+module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, RETRY_VEIKSMAS };

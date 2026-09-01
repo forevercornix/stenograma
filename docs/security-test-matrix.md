@@ -1440,7 +1440,10 @@ sekcijos redakcija naudojo `Pastaba` ir praėjo patikrą NEPATIKRINTA.
 | `jobs` + `job_results` — **vienoje transakcijoje**; gedimas → rollback | `postgresStore.integration` | Pusinės `completed` būsenos nelieka |
 | Transakcija apima **tik** `jobs` ir `job_results` | `postgresStore.integration` | Auditas, eilė ir audio valymas — už jos |
 | Lenktynės: du vykdytojai, dvi jungtys — **tik vienas** įsipareigoja | `postgresStore.integration` | Deterministiška per `FOR UPDATE`, ne `sleep()`; tikrinama baigčių AIBĖ |
-| ⚠️ **Worker įėjimo kelias:** jau `completed` job'as neperdirbamas ir nekrenta `JobPhaseError` | `workerIdempotency.integration` | Tikras BullMQ būtinas: patikra gyvena processor'iaus viduje |
+| ⚠️ **Retry įėjimo TAISYKLĖ:** `completed` + rezultatas → idempotentiška sėkmė; `completed` be rezultato → remontuotina; kita → vykdyti | `jobFinishIdempotency` (gryna `sprendimasPriesRestart()`) | Mutacijos: `REMONTUOTINA` šakos pašalinimas → krinta 2; „visada `VYKDYTI`" → krinta 2 |
+| ⚠️ `completed` be rezultato **niekada** neduoda `VYKDYTI` | `jobFinishIdempotency` | `VYKDYTI` čia reikštų naują vykdymą, kurio pabaigoje `_cleanupStorage()` ištrintų šaltinio audio |
+| ⚠️ **Worker įėjimo SUJUNGIMAS:** jau `completed` job'as neperdirbamas ir nekrenta `JobPhaseError` | `workerIdempotency.integration` | Tikras BullMQ būtinas TIK laidams; pati taisyklė tikrinama vietoje (eilutė aukščiau) |
+| ⚠️ `finishFailed` `COMPLETED` šaka yra **STEBIMUMO**, ne elgesio garantija | `jobConflictContract` | Mutacija nužudo būtent ŽURNALO patikrą (`WARN … FAILED žymėjimas ATMESTAS` + `jobId`); elgesys nesikeičia, nes `isFinished()` grąžina tą pačią reikšmę — žr. pastabą žemiau |
 | `finish(FAILED)` `job_results` **nerašo ir netrina** | `jobFinishIdempotency`, `postgresStore.integration` | Elgesys APIBRĖŽIAMAS, ne keičiamas |
 | `storage_type <> 'inline'` → **fail-closed** (#157) | `postgresStore.integration` | ⚠️ PERSPEKTYVINIS sargas be produkcinio kvietėjo — žr. pastabą žemiau |
 | `version >= 1` galioja **DB lygmeniu**; upgrade iš ankstesnės schemos | `migrations.integration` | Readiness stulpelių netikrina — kristų tik `INSERT` metu |
