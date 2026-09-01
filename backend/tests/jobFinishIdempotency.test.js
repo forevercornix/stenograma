@@ -354,3 +354,48 @@ test("#184 ⚠️ `completed` be rezultato NIEKADA neduoda `VYKDYTI`", () => {
   assert.notEqual(sprendimas, RETRY_VEIKSMAS.VYKDYTI);
   assert.notEqual(sprendimas, RETRY_VEIKSMAS.IDEMPOTENTISKA_SEKME, "ir ne tyli sėkmė");
 });
+
+test("#184 ⚠️ audio šalinimo predikatas: TIK `completed` be rezultato blokuoja", () => {
+  /**
+   * ⚠️ ŠITĄ TESTĄ PADIKTAVO CI, NE PLANAS.
+   *
+   * Pirmoji 7.5b redakcija barjerą įdėjo tik į SĖKMĖS kelią. Bet `completed` be
+   * rezultato metama sargyba patenka į `_handleFailure()`, kur po
+   * `finishFailed()` iškart einantis `_cleanupStorage()` audio IŠTRINDAVO — ir
+   * garantiją panaikindavo iki 7.5b egzistavęs nesėkmės tvarkytojas.
+   *
+   * ⚠️ SĄLYGA PRIVALO LIKTI SIAURA. Jei predikatas blokuotų plačiau (pvz. bet
+   * kokį `failed`), audio failai kauptųsi neribotai: retencijos valytojas jų
+   * neliečia, kol raktą nurodo gyvas job'o įrašas. Todėl tikrinamos ABI pusės —
+   * ir kas blokuojama, ir kas NE.
+   */
+  const { arGalimaSalintiAudio } = require("../workers");
+
+  assert.equal(
+    arGalimaSalintiAudio({ status: STATUS.COMPLETED, result: null }),
+    false,
+    "⚠️ remontuotina būsena: audio yra vienintelė medžiaga remontui"
+  );
+  assert.equal(arGalimaSalintiAudio({ status: STATUS.COMPLETED, result: undefined }), false);
+
+  assert.equal(
+    arGalimaSalintiAudio({ status: STATUS.COMPLETED, result: { a: 1 } }),
+    true,
+    "sėkmė su rezultatu — audio nebereikalingas"
+  );
+  assert.equal(
+    arGalimaSalintiAudio({ status: STATUS.FAILED, result: null }),
+    true,
+    "⚠️ ĮPRASTAS FAILED (tiekėjo klaida) elgesio NEKEIČIA — kitaip failai kauptųsi"
+  );
+  assert.equal(
+    arGalimaSalintiAudio({ status: STATUS.CANCELLED, result: null }),
+    true,
+    "atšaukimas irgi ne remontuotina būsena"
+  );
+  assert.equal(
+    arGalimaSalintiAudio(null),
+    true,
+    "įrašo nėra (TTL, ištrynimas) — audio privalo būti pašalintas, ne paliktas amžiams"
+  );
+});

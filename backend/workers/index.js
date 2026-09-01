@@ -32,14 +32,56 @@ const log = createLogger("worker");
 const _classifyError = (e) => jobRunner._classifyError(e, "worker job");
 const { assertResultWithinLimits } = require("../utils/resultLimits");
 
-// Ištrina audio iš storage po GALUTINIO statuso (sėkmės ar išnaudotų bandymų).
-// NEtrina tarp retry - kad kitas bandymas rastų failą.
+/**
+ * Ištrina audio iš storage po GALUTINIO statuso (sėkmės ar išnaudotų bandymų).
+ * NEtrina tarp retry - kad kitas bandymas rastų failą.
+ *
+ * ⚠️ AUDIO ŠALINIMO BARJERAS GYVENA ČIA, NE KVIETĖJUOSE (#184, 7.5b).
+ *
+ * ⚠️ ŠITĄ RADO CI, NE PERŽIŪRA. Pirmoji 7.5b redakcija barjerą įdėjo tik į
+ * SĖKMĖS kelią (`finishAtomic()` grąžinimo tikrinimą). Bet `completed` be
+ * rezultato metama sargyba patenka į `_handleFailure()`, ten `attemptsExhausted`
+ * yra `true`, ir iškart po `finishFailed()` einantis `_cleanupStorage()`
+ * ištrindavo audio - t. y. iki 7.5b egzistavęs nesėkmės tvarkytojas panaikindavo
+ * būtent tą garantiją, kurią 7.5b įvedė. `workerIdempotency.integration` krito
+ * ties `ENOENT` - ties tuo, ką turėjo apsaugoti.
+ *
+ * ⚠️ KODĖL SUSIAURĖJIMO TAŠKE, O NE `_handleFailure()` ŠAKOJE.
+ *
+ * #184 formuluoja tai kaip SAVYBĘ: „audio šalinimas leidžiamas tik autoritetingai
+ * patvirtinus `completed` + persistentinį rezultatą". Savybė, įdėta į vieną
+ * tašką, per kurį eina VISI kvietėjai (sėkmė, nesėkmė, bet kuris būsimas),
+ * galioja visiems. Praleidimas vienoje `_handleFailure()` šakoje šį testą
+ * pataisytų, bet garantija liktų priklausoma nuo to, kad niekas niekada
+ * nepridės trečio kvietėjo - silpnesnė to paties dalyko forma.
+ *
+ * ⚠️ SĄLYGA SIAURA. Atsisakoma TIK tada, kai autoritetingas įrašas yra
+ * `completed` be rezultato. Visais kitais atvejais elgesys nesikeičia: įprastas
+ * FAILED kelias (tiekėjo klaida, job'as niekada nebuvo `completed`) ir
+ * nerandamas įrašas (TTL, ištrynimas) audio šalina kaip anksčiau. Priešingu
+ * atveju failai kauptųsi neribotai.
+ */
 async function _cleanupStorage(payload, jobId) {
-  if (payload && payload.storageKey) {
-    // storageKey nulinamas TIK po sėkmingo trynimo - žr. utils/audioCleanup.js.
-    const { releaseAudio } = require("../utils/audioCleanup");
-    await releaseAudio(jobId, payload.storageKey);
+  if (!payload || !payload.storageKey) return;
+
+  /**
+   * ⚠️ AUTORITETINGA BŪSENA, NE KVIETĖJO SPĖJIMAS. Kvietėjas gali turėti
+   * pasenusį snapshot'ą arba jo apskritai neturėti (`_handleFailure` mato tik
+   * klaidą), tad sprendimas priimamas iš saugyklos.
+   */
+  const autoritetingas = await jobStore.system.get(jobId);
+  if (!arGalimaSalintiAudio(autoritetingas)) {
+    log.error("Audio NEŠALINAMAS: `completed` be rezultato yra remontuotina būsena", {
+      stage: "cleanup_blocked",
+      execution: "worker",
+      jobId,
+    });
+    return;
   }
+
+  // storageKey nulinamas TIK po sėkmingo trynimo - žr. utils/audioCleanup.js.
+  const { releaseAudio } = require("../utils/audioCleanup");
+  await releaseAudio(jobId, payload.storageKey);
 }
 
 /**
@@ -81,6 +123,20 @@ const RETRY_VEIKSMAS = Object.freeze({
   /** `completed` BE rezultato — ne sėkmė; audio LIEKA. */
   REMONTUOTINA: "REMONTUOTINA",
 });
+
+/**
+ * AUDIO ŠALINIMO PREDIKATAS (#184, 7.5b).
+ *
+ * ⚠️ IŠVEDAMAS IŠ `sprendimasPriesRestart()`, NE RAŠOMAS ANTRĄ KARTĄ.
+ *
+ * Abu klausimai remiasi TA PAČIA autoritetinga būsena ir ta pačia riba:
+ * `completed` be rezultato yra remontuotina, ir audio yra vienintelė medžiaga
+ * remontui. Dvi nepriklausomos to paties fakto realizacijos neišvengiamai
+ * išsiskirtų - ir išsiskyrimo kaina čia yra negrįžtamai prarasti duomenys.
+ */
+function arGalimaSalintiAudio(job) {
+  return sprendimasPriesRestart(job) !== RETRY_VEIKSMAS.REMONTUOTINA;
+}
 
 function sprendimasPriesRestart(job) {
   if (!job || job.status !== jobStore.STATUS.COMPLETED) return RETRY_VEIKSMAS.VYKDYTI;
@@ -717,4 +773,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, RETRY_VEIKSMAS };
+module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, arGalimaSalintiAudio, RETRY_VEIKSMAS };
