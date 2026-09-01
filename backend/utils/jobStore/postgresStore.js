@@ -703,20 +703,42 @@ function createPostgresStore(pool) {
   }
 
   /**
-   * `job_results` SAUGOJIMO TIPAS — TIK `finish` transakcijos viduje (#184, 7.5b).
+   * `job_results` EILUTĖ — ŠVIEŽIAI, `finish` transakcijos viduje (#184, 7.5b).
    *
-   * ⚠️ Į JOB OBJEKTĄ ŠIS LAUKAS NEDEDAMAS SĄMONINGAI. Memory ir Redis
-   * `storage_type` neturi ir turėti negali; bendro kontrakto rinkinys lygina
-   * backend'ų grąžinamas būsenas `deepEqual`, tad PG-only laukas arba sulaužytų
+   * ⚠️ Į JOB OBJEKTĄ `storage_type` NEDEDAMAS SĄMONINGAI. Memory ir Redis jo
+   * neturi ir turėti negali; bendro kontrakto rinkinys lygina backend'ų
+   * grąžinamas būsenas `deepEqual`, tad PG-only laukas arba sulaužytų
    * palyginimus, arba priverstų jį iš jų išimti — t. y. tyliai susiaurintų
    * rinkinį. Todėl skaitomas atskira užklausa ten, kur reikia sprendimo.
+   *
+   * ⚠️ IR `payload` SKAITOMAS ČIA, NE IMAMAS IŠ `readJobForUpdate()` (RADO CI).
+   *
+   * `SELECT_JOB` yra `jobs LEFT JOIN job_results` su `FOR UPDATE OF j`. Užraktas
+   * ir `EvalPlanQual` galioja TIK užrakintai lentelei: sutikęs konkurenčiai
+   * pakeistą `jobs` eilutę, PostgreSQL perskaito jos NAUJAUSIĄ versiją, bet
+   * PRIJUNGTOS `job_results` eilutės iš naujo NEIMA — ji lieka to sakinio
+   * snapshot'o, paimto PRIEŠ konkurento commit'ą.
+   *
+   * Praktinė pasekmė lenktynėse: antrasis vykdytojas mato `status = 'completed'`
+   * (nauja reikšmė) kartu su `result = NULL` (sena) ir grąžina klaidingą
+   * `COMPLETED_WITHOUT_RESULT` vietoj `RESULT_CONFLICT`. Tai fail-safe kryptimi
+   * (audio lieka, darbas neperrašomas), bet vis tiek NETEISINGA — ir vietinėje
+   * aplinkoje nepasiekiama.
+   *
+   * ⚠️ TAI TA PATI MVCC KLASĖ, KURIĄ #180 JAU DOKUMENTAVO prie `EILUTE_YRA`:
+   * ten `SELECT` dalys lieka prie snapshot'o, o duomenis keičianti dalis daro
+   * `EvalPlanQual`. Skirtumas tik tas, kad ten išsiskirdavo skaliaras, o čia —
+   * prijungta eilutė.
+   *
+   * Atskiras sakinys PO užrakto gauna NAUJĄ snapshot'ą (`READ COMMITTED`), tad
+   * mato konkurento jau įsipareigotą rezultatą.
    */
-  async function rezultatoSaugojimas(client, jobId) {
+  async function rezultatoEilute(client, jobId) {
     const { rows } = await client.query(
-      "SELECT storage_type FROM job_results WHERE job_id = $1",
+      "SELECT storage_type, payload FROM job_results WHERE job_id = $1",
       [jobId]
     );
-    return rows[0] ? rows[0].storage_type : null;
+    return rows[0] || null;
   }
 
   async function readJob(client, id) {
@@ -933,17 +955,24 @@ function createPostgresStore(pool) {
          * `storage_type`, ŠIANDIEN NĖRA. Jis pasiekiamas tik įrašius eilutę
          * tiesiogiai. Įvardyta atvirai, kad neatrodytų kaip įrodytas elgesys.
          */
-        const saugojimas = await rezultatoSaugojimas(client, id);
-        if (saugojimas !== null && saugojimas !== "inline") {
+        const eilute = await rezultatoEilute(client, id);
+        if (eilute && eilute.storage_type !== "inline") {
           throw new Error(
-            `postgresStore.finishAtomic: job_results.storage_type = '${saugojimas}' ` +
+            `postgresStore.finishAtomic: job_results.storage_type = '${eilute.storage_type}' ` +
               "neturi lygybės autoriteto (#157). Rezultatų palyginimas apibrėžtas TIK 'inline'."
           );
         }
-      }
 
-      const jauBaigtas = idempotentiskasAtsakymas(job, status, extra);
-      if (jauBaigtas !== undefined) return jauBaigtas;
+        /**
+         * ⚠️ SPRENDIMAS PRIIMAMAS IŠ ŠVIEŽIO SKAITYMO, ne iš `readJobForUpdate()`
+         * prijungtos reikšmės — žr. `rezultatoEilute()`. Be šito lenktynių
+         * pralaimėtojas gautų `COMPLETED_WITHOUT_RESULT` vietoj
+         * `RESULT_CONFLICT`.
+         */
+        const sviezias = { ...job, result: eilute ? eilute.payload : null };
+        const jauBaigtas = idempotentiskasAtsakymas(sviezias, status, extra);
+        if (jauBaigtas !== undefined) return jauBaigtas;
+      }
 
       const patch = jobPhase.finish(job, status, extra);
       return writePatched(client, job, patch);

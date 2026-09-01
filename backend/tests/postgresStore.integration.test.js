@@ -209,7 +209,17 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       metodai(store).includes("listExpired"),
       "`listExpired` yra kontrakto dalis nuo #183 - žr. paaiškinimą aukščiau"
     );
-    assert.equal(metodai(store).length, 16, "kontraktas turi 16 metodų, ne 15");
+    /**
+     * ⚠️ ANTRA TO PATIES SKAIČIAUS KOPIJA (rasta CI, #184 / 7.5b).
+     *
+     * Tokia pati patikra yra `jobStoreBackendContract.integration`. Keliant
+     * 16 → 17 (`finishAtomic`) buvo atnaujinta tik ta, o ši liko — ir krito
+     * PIRMAME tikrame PostgreSQL paleidime. Dvi nepriklausomos to paties fakto
+     * patikros yra ta pati klasė, kurią #205 ir 7.2a šalina kitose vietose;
+     * čia ji palikta sąmoningai (viena tikrina PG saugyklą su tikra DB, kita —
+     * visų trijų aibių tapatumą), tad skaičius KEIČIAMAS ABIEJOSE.
+     */
+    assert.equal(metodai(store).length, 17, "kontraktas turi 17 metodų (nuo #184: `finishAtomic`)");
   });
 
   /* ── tenant_id sentinelis ────────────────────────────────────────────── */
@@ -2233,7 +2243,25 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
      */
     const id = await processingJob();
     await store.finishAtomic(id, "completed", { result: { a: 1 } });
-    await pool.query("UPDATE job_results SET storage_type = 's3' WHERE job_id = $1", [id]);
+
+    /**
+     * ⚠️ `job_results_storage_shape` DIKTUOJA FORMĄ, IR TAI RADO CI.
+     *
+     * Pirmoji šio testo redakcija keitė tik `storage_type` ir krito su
+     * `23514`: migracija (`1755000000000`, `:317-324`) reikalauja
+     * `inline → payload NOT NULL AND storage_key IS NULL`, o bet kuriam kitam
+     * tipui — `storage_key IS NOT NULL`. Vadinasi „s3 eilutė" negali būti
+     * pagaminta vien pervadinus tipą.
+     *
+     * ⚠️ RADINYS VERTINGESNIS NEI TESTO PATAISA: schema `s3` formą JAU riboja,
+     * nors #157 realizacijos nėra. Sargas `postgresStore.finishAtomic()` gina
+     * ne nuo bet kokios eilutės, o nuo TEISĖTAI suformuotos išorinės saugyklos
+     * eilutės, kurios lygybės autoriteto repo neturi.
+     */
+    await pool.query(
+      "UPDATE job_results SET storage_type = 's3', storage_key = 's3://kibiras/raktas', payload = NULL WHERE job_id = $1",
+      [id]
+    );
 
     await assert.rejects(
       () => store.finishAtomic(id, "completed", { result: { a: 1 } }),
@@ -2241,7 +2269,10 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       "nepalyginamas saugojimo tipas privalo KRISTI, ne tyliai sutapti"
     );
 
-    await pool.query("UPDATE job_results SET storage_type = 'inline' WHERE job_id = $1", [id]);
+    await pool.query(
+      "UPDATE job_results SET storage_type = 'inline', storage_key = NULL, payload = $2::jsonb WHERE job_id = $1",
+      [id, JSON.stringify({ a: 1 })]
+    );
   });
 
   await t.test("#184 ⚠️ LENKTYNĖS: du vykdytojai, dvi jungtys — tik VIENAS įsipareigoja", { timeout: 30000 }, async () => {
@@ -2272,6 +2303,26 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       const konfliktai = baigtys.filter((x) => x === "RESULT_CONFLICT");
 
       assert.equal(laimeje.length, 1, "tiksliai VIENAS įsipareigoja");
+
+      /**
+       * ⚠️ ŠI PATIKRA RADO TIKRĄ KODO DEFEKTĄ, NE TESTO KLAIDĄ.
+       *
+       * Pirmame tikrame PostgreSQL paleidime pralaimėtojas grąžindavo
+       * `COMPLETED_WITHOUT_RESULT`, ne `RESULT_CONFLICT`. Priežastis:
+       * `readJobForUpdate()` yra `jobs LEFT JOIN job_results ... FOR UPDATE OF j`,
+       * o `EvalPlanQual` iš naujo perskaito TIK užrakintos lentelės eilutę —
+       * prijungta `job_results` lieka sakinio snapshot'o, paimto PRIEŠ
+       * konkurento commit'ą. Antrasis matydavo `completed` (nauja) su
+       * `result = NULL` (sena).
+       *
+       * Todėl klaida tikrinama VARDU: bendras „ne objektas" praeitų ir su
+       * klaidinga baigtimi.
+       */
+      assert.equal(
+        baigtys.filter((x) => x === "COMPLETED_WITHOUT_RESULT").length,
+        0,
+        "⚠️ pralaimėtojas NEGALI matyti `completed` be rezultato - tai pasenęs LEFT JOIN"
+      );
       assert.equal(konfliktai.length, 1, "antrasis gauna consistency konfliktą");
 
       const { rows } = await pool.query("SELECT payload FROM job_results WHERE job_id = $1", [id]);
