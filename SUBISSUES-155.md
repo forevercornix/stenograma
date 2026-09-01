@@ -3223,44 +3223,128 @@ cutover metu. Jei kur nors matote seną redakciją — gyva versija laimi.
 
 ## [7.6] Health, readiness ir backup su restore
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.2a
+**Tėvinis:** #155 · **Tipas:** tracking · **Priklauso nuo:** 7.2a
+
+Šis issue yra **sekimo gijos** viršus. Darbas suskaidytas į tris PR, nes jame
+maišėsi trys skirtingos rizikos zonos: kopijos artefakto teisingumas, atkurtų
+duomenų korektiškumas ir post-restore suderinimas.
+
+| Sub-PR | Issue | Priklauso nuo |
+|---|---|---|
+| 7.6a — šifruota kopija + bazinis restore | #248 | 7.2a, 7.4f (#231) |
+| 7.6b — post-restore aplikacinis suderinimas | #249 | 7.6a |
+| 7.6c — erasure-safe restore + DR pratybos | #250 | 7.5a (#183), 7.6b |
+
+7.6a ir 7.6b nepriklauso nuo 7.5a, tad gali eiti lygiagrečiai su ja. 7.6c laukia
+ištrynimo žymų — kitaip tektų kurti antrą tombstone mechanizmą.
 
 ### DoD
 
-- [ ] `make doctor` ir readiness rodo DB būseną (prisijungimas, schemos versija,
-      migracijų atsilikimas).
-- [ ] `/api/health` DB būsenos NErodo produkcijoje pagal nutylėjimą
+- [ ] #248 uždarytas
+- [ ] #249 uždarytas
+- [ ] #250 uždarytas
+
+Detalūs kriterijai gyvena sub-issue'uose, ne čia. README apribojimų lentelė ir
+Roadmap `[x]` atnaujinami 7.6c, ne anksčiau.
+
+---
+
+## [7.6a] Šifruota Postgres kopija ir bazinis restore įrodymas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.2a, 7.4f
+
+Pirmas iš trijų 7.6 gabalų. Apimtis tik viena: **ar galime patikimai pasidaryti
+kopiją ir ją atkurti.** Jokių sesijų, ne-terminalių job'ų ar erasure replay.
+
+### DoD
+
+- [ ] `pg_dump` procedūra `docs/backup-runbook.md`.
+- [ ] Artefaktas šifruojamas per `utils/backupEncryption.js` (AES-256-GCM).
+      Paprastas `pg_dump` be šifravimo NETENKINA kriterijaus — `job_results`
+      turės transkripcijas.
+- [ ] Sugadintas ciphertext arba blogas raktas → **hard fail PRIEŠ restore**,
+      ne dalinis atkūrimas. Testas abiem atvejais.
+- [ ] Restore į naują TUŠČIĄ DB; `schema_version` patikra.
+- [ ] Reprezentatyvūs `jobs` IR `job_results` įrašai sutampa. Procedūra,
+      neatkurianti `job_results`, praeitų patikrą, nors kiekvienas baigtas
+      job'as būtų praradęs vartotojui matomą rezultatą.
+- [ ] `audit_log` NEatkuriamas (`utils/backupPolicy.js` tai jau daro sąmoningai).
+      Testas: prieš kopiją įrašoma unikaliai atpažįstama audito eilutė, po
+      restore jos NĖRA. „Nesutampa su dump'u" nepakanka — atkūrimas įrašo naujų
+      įvykių, tad nesutapimas atsiranda savaime.
+- [ ] ⚠️ **RUNBOOK ĮSPĖJA, KAD PROCEDŪRA DAR NE ERASURE-SAFE.** Po šio PR
+      restore veiks, bet prikeltų po kopijos ištrintus job'us — tombstone'ų
+      dar nėra (7.5a) ir replay nėra (7.6c). Be įspėjimo dokumentas taptų
+      stipresnis už kodą (AGENTS.md §12.1). Testas: įspėjimas runbook'e yra,
+      kol 7.6c neuždarytas.
+- [ ] Readiness / `make doctor` DB būsena: patikrinti, ką iš to jau uždarė
+      #231 (7.4f), ir įrašyti nuorodą. Likutis (pvz. migracijų atsilikimas)
+      įgyvendinamas čia — DR runbook be readiness signalo mažai naudingas.
+- [ ] `/api/health` DB būsenos produkcijoje NErodo pagal nutylėjimą
       (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
-- [ ] `docs/backup-runbook.md` papildytas Postgres atsarginėmis kopijomis.
-- [ ] ⚠️ **RESTORE testas, ne tik instrukcija:** `pg_dump` → nauja tuščia DB →
-      restore → `schema_version` patikra → keli reprezentatyvūs **`jobs`** IR
-      **`job_results`** įrašai sutampa. Gali būti atskiras integracinis workflow.
-- [ ] ⚠️ **PRATYBOS NAUDOJA ŠIFRUOTĄ ARTEFAKTĄ.** `utils/backupEncryption.js`
-      reikalauja AES-256-GCM su autentikuotu atkūrimu. Kriterijus, tenkinamas
-      paprastu `pg_dump`, tyliai susilpnintų esamą apsaugą — o `job_results`
-      turės transkripcijas. Testas: dešifravimas ir autentiškumo patikra prieš
-      restore.
-- [ ] ⚠️ **`job_results` ĮTRAUKIAMI Į PALYGINIMĄ.** Transkripcijos gyvena
-      atskiroje lentelėje; procedūra, kuri jų neatkuria arba sugadina, praeitų
-      patikrą, nors kiekvienas baigtas job'as būtų praradęs vartotojui matomą
-      rezultatą.
-- [ ] ⚠️ **`audit_log` IŠ ATKŪRIMO IŠBRAUKTAS.** `utils/backupPolicy.js` tai jau
-      daro sąmoningai: atkūrus, GDPR ištrinti įrašai grįžtų, o naujesni
-      append-only įvykiai būtų perrašyti arba dubliuoti. Testas: prieš kopiją
-      įrašoma UNIKALIAI ATPAŽĮSTAMA audito eilutė, ir po restore jos NĖRA.
-      ⚠️ „Nesutampa su dump'u" nepakanka — atkūrimas įrašo naujų įvykių, tad
-      nesutapimas atsiranda savaime.
-- [ ] ⚠️ **Sesijos po atkūrimo MASIŠKAI ATŠAUKIAMOS.** Kitaip atkūrimas prikeltų
-      atšauktas sesijas: klientas ar užpuolikas gali tebeturėti tą pačią cookie,
-      o senas `token_hash` ją vėl padarytų galiojančia. Testas: sesija atšaukta
-      PO kopijos → po restore ta cookie neautentifikuoja.
-- [ ] ⚠️ **NE-TERMINALĖS EILUTĖS PO ATKŪRIMO SUDERINAMOS.** Kopijoje gali būti
-      `queued`/`processing` įrašų, o BullMQ būsena į kopiją NEPATENKA (backup
-      politika eilės įrašus išbraukia sąmoningai). Atkūrus juos nepakeistus,
-      jie lieka amžinai ne-terminalūs: `sweepExpired()` jų nešalina, ir
-      klientai apklausinėja job'us, kurie niekada nepasileis. Restore
-      procedūra privalo juos terminalizuoti arba saugiai atkurti eilės darbą.
-- [ ] ⚠️ **Ištrynimo žurnalas išsaugomas UŽ snapshot'o ribų** ir sujungiamas po
-      atkūrimo. Kitaip job'as, ištrintas po kopijos, grįžtų su rezultatu, bet be
-      tombstone. Testas: job'as ištrintas po kopijos → po restore jo NĖRA.
+
+### Ko NEAPIMA
+
+Sesijų, ne-terminalių job'ų, ištrynimo žymų. Roadmap `[x]` NEdedamas.
+
+---
+
+## [7.6b] Post-restore aplikacinis suderinimas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.6a
+
+Apimtis: **ką daryti su būsena, kurios DB snapshot vienas pats saugiai atkurti
+negali.**
+
+### DoD
+
+- [ ] **Visos atkurtos sesijos masiškai revokuojamos.** Kitaip atkūrimas
+      prikeltų atšauktas sesijas: klientas ar užpuolikas gali tebeturėti tą
+      pačią cookie, o senas `token_hash` ją vėl padarytų galiojančia. Testas:
+      sesija atšaukta PO kopijos → po restore ta cookie neautentifikuoja.
+- [ ] `queued` / `processing` eilutės suderinamos. BullMQ būsena į kopiją
+      NEPATENKA, tad atkurti nepakeisti jie liktų amžinai ne-terminalūs:
+      `sweepExpired()` jų nešalina, o klientai apklausinėtų job'us, kurie
+      niekada nepasileis.
+- [ ] ⚠️ **ŠIAME PR — TIK TERMINALIZAVIMAS, JOKIO PRIKĖLIMO.** Prikelti job'ą
+      galima tik žinant, kad jo duomenys neištrinti, o tombstone merge atsiranda
+      7.6c. Prikėlimo kelias atidaromas ten, ne čia.
+- [ ] Terminalinės būsenos (`completed` + `result`, `failed`) NEPAŽEIDŽIAMOS —
+      testas, kad suderinimas jų neliečia.
+- [ ] Cutover leidžiamas tik PO suderinimo; procedūra runbook'e nurodo eiliškumą.
+
+### Ko NEAPIMA
+
+BullMQ eilės rekonstrukcijos ir queue replay architektūros — eksplicitiškai
+out of scope. Erasure replay — 7.6c. Roadmap `[x]` NEdedamas.
+
+---
+
+## [7.6c] Erasure-safe restore ir pilnos DR pratybos
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.5a, 7.6b
+
+Paskutinis 7.6 gabalas. Apimtis tik GDPR galutinumas ir pilnas end-to-end.
+
+### DoD
+
+- [ ] Naudojamos 7.5a persistentės ištrynimo žymos. **Antras tombstone
+      mechanizmas NEKURIAMAS** — jei 7.5a neuždarytas, šis darbas laukia.
+- [ ] Ištrynimo žurnalas saugomas UŽ snapshot'o ribų ir sujungiamas po atkūrimo.
+- [ ] Po kopijos ištrintas job'as po restore NEATSIRANDA; jo `job_results` ir
+      kiti priklausomi įrašai taip pat ne.
+- [ ] ⚠️ **TOMBSTONE MERGE EINA PIRMAS, PRIEŠ SUDERINIMĄ.** Ištrintas job'as
+      kopijoje gali gulėti kaip `queued`. Jei 7.6b suderinimas pamatys jį pirmas,
+      jis arba terminalizuos, arba (vėliau) prikels darbą su jau ištrintais
+      duomenimis. Teisinga seka: **tombstone merge → sesijos → job'ai.**
+- [ ] Pilnas E2E: backup → encrypt → restore → tombstone merge → sesijų
+      revokacija → job'ų suderinimas → verify. Gali būti atskiras integracinis
+      workflow.
+- [ ] 7.6a runbook įspėjimas („dar ne erasure-safe") PAŠALINAMAS kartu su testu,
+      kuris jo reikalavo.
 - [ ] README apribojimų lentelės eilutės atnaujintos; Roadmap `[x]`.
+- [ ] #185 uždaromas.
+
+### Ko NEAPIMA
+
+Queue replay architektūros — ji ir toliau out of scope.
