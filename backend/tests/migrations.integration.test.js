@@ -480,7 +480,7 @@ test(
 
 test(
   "#184 SCHEMA: `jobs.version` upgrade iš ankstesnės schemos + INSERT/SELECT",
-  { skip: skipWithoutPostgres() },
+  { skip: skipWithoutPostgres(), timeout: 120000 },
   async () => {
     /**
      * ⚠️ KODĖL ŠIS TESTAS APSKRITAI REIKALINGAS (#184, 7.5b).
