@@ -13,9 +13,13 @@ const {
 const auditLog = require("../utils/auditLog");
 const auditStore = require("../utils/auditStore");
 const tombstones = require("../utils/deletionTombstones");
-const { LOCK_NAMESPACE } = require("../utils/deletionTombstones/postgresStore");
+const {
+  LOCK_NAMESPACE,
+  probeBarrierWithClient,
+} = require("../utils/deletionTombstones/postgresStore");
 const { createPostgresStore } = require("../utils/auditStore/postgresStore");
 const { rasytiAudita, AuditWriteError } = require("../utils/auditWrite");
+const { pgJungtiesNustatymai } = require("../utils/pgConnection");
 
 /**
  * AUDITO IŠTRYNIMO GALUTINUMAS — ATOMIŠKUMAS IR RAW ĮRODYMAS (#155, 7.4e / #216).
@@ -285,6 +289,55 @@ test("auditErasureFinality", { skip: skipWithoutPostgres() }, async (t) => {
         assert.equal(await rawKiek(jobId), 0, "RAW DB: multi-instance galutinumas");
       } finally {
         await antrasPool.end().catch(() => {});
+      }
+    }
+  );
+
+  /* ── `PG*` konfigūracija (§5 P1 šaka) ─────────────────────────────────── */
+
+  await t.test(
+    "#216 `PG*`: pool'as BE `DATABASE_URL` realiai pasiekia `erasure_marks`",
+    async () => {
+      /**
+       * ⚠️ ŠI ŠAKA IKI ŠIOL BUVO DENGTA TIK VIENETINIAIS TESTAIS.
+       *
+       * `ci.yml` PostgreSQL žingsnis nustato `DATABASE_URL`, tad
+       * `pasirinktiBackend()` `PGHOST` šaka - pataisa, uždariusi §5 P1 - prieš
+       * TIKRĄ duomenų baze niekada nebuvo vykdoma. O būtent dėl jos visa §5 ir
+       * daryta: dokumentuotas Compose diegimas naudoja `PG*`, ne URL.
+       *
+       * ⚠️ `DATABASE_URL` ČIA SĄMONINGAI NEPERDUODAMAS. Konfigūracija sudaroma
+       * IŠSKAIDANT tą patį URL į `PG*` komponentes, tad jungiamasi prie tos
+       * pačios, jau migruotos bazės, bet KITU konfigūracijos formatu - tuo,
+       * kurio produkcija ir naudoja.
+       */
+      const u = new URL(DB_URL);
+
+      const pgEnv = { PGHOST: u.hostname, PGPORT: u.port || "5432" };
+      if (u.username) pgEnv.PGUSER = decodeURIComponent(u.username);
+      if (u.password) pgEnv.PGPASSWORD = decodeURIComponent(u.password);
+      pgEnv.PGDATABASE = u.pathname.replace(/^\//, "");
+
+      assert.equal("DATABASE_URL" in pgEnv, false, "prielaida: URL formos čia nėra");
+      assert.equal(
+        tombstones.pasirinktiBackend(pgEnv),
+        "postgres",
+        "`PG*` privalo reikšti PostgreSQL - be to barjeras skaitytų tuščią lentelę"
+      );
+
+      const nustatymai = pgJungtiesNustatymai(pgEnv);
+      assert.equal("connectionString" in nustatymai, false, "dvi formos kartu - neakivaizdi pirmenybė");
+
+      const pgPool = new Pool(nustatymai);
+
+      try {
+        assert.equal(
+          await probeBarrierWithClient(pgPool),
+          true,
+          "iš `PG*` sudarytas pool'as privalo realiai pasiekti `erasure_marks`"
+        );
+      } finally {
+        await pgPool.end().catch(() => {});
       }
     }
   );
