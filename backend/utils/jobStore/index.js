@@ -190,6 +190,19 @@ const REQUIRED_JOB_CONSTRAINTS = [
   "jobs_status_phase",
   "jobs_status_values",
   "jobs_type_values",
+  /**
+   * ⚠️ SĄMONINGAS SPRENDIMAS, NE AUTOMATINIS ĮRAŠAS (#184, 7.5b).
+   *
+   * `version integer NOT NULL DEFAULT 1` pats jokio VARDINIO constraint'o
+   * nesukuria, tad pasirinkimas buvo dvejetainis: arba `jobs_version_positive`
+   * migracijoje IR čia, arba nė vieno. Tylus „įrašom version į sąrašą" be
+   * migracijos sulaužytų readiness (žemiau, `trukstaC`), o constraint be įrašo
+   * sulaužytų `migrations.integration.test.js` pilnumo patikrą.
+   *
+   * Pasirinkta pirma: DB lygmens `version >= 1` pašalina falsy-nulio klasę ten,
+   * kur JS `expectedVersion` patikra jos nepasiektų.
+   */
+  "jobs_version_positive",
 ];
 
 async function initializePostgres() {

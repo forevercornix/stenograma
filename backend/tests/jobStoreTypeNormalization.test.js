@@ -436,8 +436,12 @@ test("#205 `schemaVersion` per `update()` NEKINTAMAS - todėl jo nėra patch'ų 
    * Išimtis (`NEDALYVAUJA_PATCHUOSE`) galioja tik tol, kol `applyPatch()` erą
    * tikrai laiko nekintamą. Jei tai pasikeistų, laukas turi grįžti į matricą -
    * šis testas tą užtikrina, kad išimtis netaptų tyliu praleidimu.
+   *
+   * ⚠️ AIBĖ TIKRINAMA TIKSLIAI, NE `includes` (#184, 7.5b). Kiekvienas naujas
+   * praleidimas privalo SULAUŽYTI šį testą ir būti pagrįstas čia pat - kitaip
+   * matrica tyliai susiaurėtų būtent tuo lauku, kurio niekas netikrina.
    */
-  assert.deepEqual([...NEDALYVAUJA_PATCHUOSE], ["schemaVersion"]);
+  assert.deepEqual([...NEDALYVAUJA_PATCHUOSE], ["schemaVersion", "version"]);
 
   const job = newJob({});
   assert.equal(applyPatch(job, { schemaVersion: "0" }).schemaVersion, 2);
@@ -445,6 +449,27 @@ test("#205 `schemaVersion` per `update()` NEKINTAMAS - todėl jo nėra patch'ų 
 
   /** Normalizavimą `schemaVersion` gauna kitu keliu - per `restoreRecord()`. */
   assert.equal(normalizeJob({ ...job, schemaVersion: "2" }).schemaVersion, 2);
+});
+
+test("#184 `version` per `update()` NENUSTATOMA kvietėjo - todėl jos nėra patch'ų matricoje", () => {
+  /**
+   * ⚠️ KODĖL ATSKIRA IŠIMTIS, O NE „skaitinis laukas kaip visi kiti".
+   *
+   * `version` yra `NUMBER_FIELDS` aibėje (Redis hash'e reikšmės yra tekstas, tad
+   * be normalizavimo backend'ai grąžintų `"3"` ir `3`), bet patch'ų matricos ji
+   * praeiti NEGALI: matrica tikrina „nustatai `X` -> gauni normalizuotą `X`", o
+   * `applyPatch()` versiją perrašo besąlygiškai. Be išimties matrica lauktų
+   * `version: 3` ir gautų `job.version + 1`.
+   */
+  const job = newJob({});
+  assert.equal(job.version, 1, "naujas job'as pradeda nuo 1");
+
+  assert.equal(applyPatch(job, { version: 99 }).version, 2, "patch'o reikšmė ignoruojama");
+  assert.equal(applyPatch(job, { version: "abc" }).version, 2);
+  assert.equal(applyPatch(job, {}).version, 2, "increment'as nepriklauso nuo patch'o turinio");
+
+  /** Tekstinis atvaizdas (Redis kelias) normalizuojamas kaip bet kuris skaitinis laukas. */
+  assert.equal(normalizeJob({ ...job, version: "7" }).version, 7);
 });
 
 /* ══════════════════════════════════════════════════════════════════════════

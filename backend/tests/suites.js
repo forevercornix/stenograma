@@ -255,6 +255,15 @@ const functional = [
    * veikianti DB infrastruktūra.
    */
   "jobStoreTypeNormalization",
+  /**
+   * #184 (7.5b): `jobs.version` optimistic lock pariteto pagrindas.
+   *
+   * Tas pats sluoksnis ir tos pačios priežastys kaip `jobStoreTypeNormalization`:
+   * memory ir Redis (per `FakeRedis`) tikrinami be išorinių servisų, o PostgreSQL
+   * pusė lieka `migrations.integration` / `postgresStore.integration`, kur DB
+   * realiai yra.
+   */
+  "jobVersionParity",
   "jobs.route",
   "mergeDiarization",
   "mockLLMProvider",

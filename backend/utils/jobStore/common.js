@@ -81,6 +81,16 @@ const NUMBER_FIELDS = new Set([
   "deletion_attempts",
   /** Įrašo era (#158). Jos taisyklė - `normalizeSchemaVersion()`, žr. žemiau. */
   "schemaVersion",
+  /**
+   * OPTIMISTIC LOCK VERSIJA (#184, 7.5b).
+   *
+   * ⚠️ KANONINIŲ LAUKŲ AIBĖJE BŪTINAI. Redis hash'e reikšmės yra TEKSTAS, tad be
+   * normalizavimo `redisStore` grąžintų `version: "3"`, o memory - `3`. Bendras
+   * kontrakto rinkinys lygina backend'ų būsenas `deepEqual`, tad skirtumas
+   * nebūtų „kosmetinis" - jis arba sulaužytų palyginimą, arba priverstų lauką iš
+   * jo išimti, t. y. tyliai susiaurintų rinkinį.
+   */
+  "version",
 ]);
 
 const KANONINIAI_LAUKAI = Object.freeze([...BOOLEAN_FIELDS, ...NUMBER_FIELDS]);
@@ -152,6 +162,22 @@ function normalizeJob(job) {
   for (const laukas of KANONINIAI_LAUKAI) {
     if (laukas in out) out[laukas] = normalizeFieldValue(laukas, out[laukas]);
   }
+
+  /**
+   * ⚠️ VIENINTELĖ SĄMONINGA IŠIMTIS IŠ „LIEČIAMI TIK ESAMI RAKTAI" (#184, 7.5b).
+   *
+   * `version` MATERIALIZUOJAMA, nes priešingu atveju atkūrimo kelias išskirtų
+   * backend'us: `postgresStore.rowToJob()` senai eilutei duoda `?? 1` (stulpelis
+   * `NOT NULL DEFAULT 1`), o memory ir Redis atkurtų kopijos įrašą BE lauko.
+   * Kontrakto rinkinys tokį skirtumą pagautų kaip formos neatitikimą - ir teisingai.
+   *
+   * Skirtumas nuo `deletion_*` atvejo, kurį komentaras aukščiau draudžia, yra
+   * esminis: `deletion_*` laukų `newJob()` NEMATERIALIZUOJA, tad jų buvimas ar
+   * nebuvimas yra reikšmingas faktas. `version` `newJob()` materializuoja visada,
+   * tad jo NEBUVIMAS reiškia tik viena - įrašas senesnis už 7.5b.
+   */
+  if (out.version === undefined || out.version === null) out.version = 1;
+
   return out;
 }
 
@@ -366,6 +392,12 @@ function newJob(fields = {}) {
     created_at: now,
     started_at: null,
     completed_at: null,
+    /**
+     * OPTIMISTIC LOCK VERSIJA (#184, 7.5b). Pradinė reikšmė - `1`, ta pati
+     * visuose trijuose backend'uose ir ta pati, kurią migracija duoda esamoms
+     * eilutėms (`DEFAULT 1`). Didinama TIK `applyPatch()` - žr. ten.
+     */
+    version: 1,
     // Atgalinis suderinamumas su senais laukais (routes/frontend jų tikisi).
     createdAt: now,
     updatedAt: now,
@@ -525,6 +557,31 @@ function applyPatch(job, patch) {
   } else {
     delete next.schemaVersion;
   }
+
+  /**
+   * OPTIMISTIC LOCK VERSIJOS INCREMENT'AS (#184, 7.5b).
+   *
+   * ⚠️ ČIA, IR TIK ČIA. `applyPatch()` jau yra bendras SEPTYNIŲ mutacijos kelių
+   * taškas (žr. normalizavimo komentarą žemiau), tad `+1` čia reiškia, kad nė
+   * vienas backend'as savo skaičiavimo neturi. Trys realizacijos neišvengiamai
+   * išsiskirtų būtent ten, kur skirtumo niekas netikrina.
+   *
+   * ⚠️ IŠ TO SEKA VIENAS INCREMENT'AS `startPhase`/`finish` PORAI.
+   *
+   * Abu fasado metodai yra `get` + VIENAS `store.update()`, tad vienas
+   * `applyPatch()` ir vienas `+1`. Du increment'ai atsirastų tik iš dviejų
+   * `update()` kvietimų - o tai matoma diff'e, ne paslėpta skaičiavimo detalė.
+   * Garantija yra KONSTRUKCIJOS, ne budrumo.
+   *
+   * ⚠️ PATCH'AS VERSIJOS NEKEIČIA - kaip `id`, nuosavybė ir era. Kvietėjas,
+   * atsiuntęs `{ version: 99 }`, gauna `job.version + 1`. Versija yra saugyklos
+   * faktas apie mutacijų skaičių, ne kvietėjo duomuo.
+   *
+   * ⚠️ NEPAVYKĘS CAS ČIA NEPATENKA. `applyPatch()` skaičiuoja reikšmę, kurią
+   * saugykla dar TIK bandys įrašyti; jei sąlyginis `UPDATE` paliečia 0 eilučių,
+   * persistentinė `version` lieka nepakitusi.
+   */
+  next.version = (job.version ?? 0) + 1;
 
   /**
    * NUOMA IR KŪRIMO KETINIMAS NEKEIČIAMI (#155).

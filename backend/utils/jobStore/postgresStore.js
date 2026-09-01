@@ -111,6 +111,12 @@ function rowToJob(row) {
     completed_at: isoFromDb(row.completed_at),
     createdAt: isoFromDb(row.created_at),
     updatedAt: isoFromDb(row.updated_at),
+    /**
+     * OPTIMISTIC LOCK VERSIJA (#184, 7.5b). Legacy eilutė stulpelio neturi tik
+     * tol, kol nepritaikyta migracija; ten `?? 1` duoda tą pačią pradinę
+     * reikšmę, kurią duoda `DEFAULT 1`.
+     */
+    version: row.version ?? 1,
   };
 
   /**
@@ -165,6 +171,7 @@ function jobToRow(job) {
     updated_at: job.updatedAt || new Date().toISOString(),
     started_at: job.started_at ?? null,
     completed_at: job.completed_at ?? null,
+    version: job.version ?? 1,
   };
 }
 
@@ -177,6 +184,8 @@ const COLUMNS = [
   "audio_cleanup_pending", "audio_cleanup_attempts", "audio_cleanup_next_attempt_at",
   "deletion_pending", "deletion_attempts", "deletion_next_attempt_at",
   "created_at", "updated_at", "started_at", "completed_at",
+  /** Optimistic lock versija (#184, 7.5b). */
+  "version",
 ];
 
 /** `j.*` su prijungtu rezultatu — vienintelė skaitymo forma (žr. hidrataciją). */
@@ -280,6 +289,16 @@ const PATCH_STULPELIAI = Object.freeze({
   started_at: ["started_at"],
   completed_at: ["completed_at"],
   updatedAt: ["updated_at"],
+  /**
+   * ⚠️ ĮRAŠAS NĖRA LEIDIMAS KVIETĖJUI RAŠYTI `version`.
+   *
+   * `applyPatch()` versiją perrašo besąlygiškai (`job.version + 1`), tad patch'o
+   * raktas jos pakeisti negali. Įrašas čia reikalingas dėl PILNUMO patikros:
+   * `jobOwnership.test.js` reikalauja, kad kiekvienas kintamas `COLUMNS`
+   * stulpelis turėtų bent vieną patch raktą, kitaip naujas stulpelis tyliai
+   * iškristų iš `SET` sąrašo.
+   */
+  version: ["version"],
 });
 
 /**
