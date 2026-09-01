@@ -2,8 +2,8 @@
 #
 # Trigeris: komentaras, PRASIDEDANTIS `/gemini-pre-review`, issue gijoje (ne PR),
 # rašytas OWNER / MEMBER / COLLABORATOR. Naujas issue apžvalgos nepaleidžia —
-# sąmoningai: `create-155-subissues.sh` viena partija sukuria 9 issue su 3
-# label'ais kiekvienam, tad automatinis trigeris duotų ~36 paleidimus.
+# sąmoningai: `scripts/dev/create-155-subissues.sh` viena partija sukuria 16 issue su 3
+# label'ais kiekvienam, tad automatinis trigeris duotų ~64 paleidimus.
 #
 # Prieš pirmą paleidimą: Settings > Secrets and variables > Actions >
 #   GEMINI_API_KEY   (privaloma; be jo job'as fail'ina ir paskelbia klaidos komentarą)

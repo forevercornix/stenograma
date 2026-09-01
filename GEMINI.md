@@ -583,7 +583,7 @@ Do not rewrite unaffected sections.
 
 State where the accepted wording belongs. In this repository the authoritative
 source for #155 sub-issue text is `SUBISSUES-155.md`, republished by
-`create-155-subissues.sh --update`. Wording pasted directly into a GitHub issue
+`scripts/dev/create-155-subissues.sh --update`. Wording pasted directly into a GitHub issue
 body will be overwritten on the next run and will silently diverge from the
 spec file in the meantime.
 
