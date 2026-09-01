@@ -34,6 +34,19 @@ const { sanitizeServerError } = require("./sanitizeError");
  * kvietėjui, spėliojančiam job ID, atskirti „niekada nebuvo" nuo „buvo ir
  * ištrintas" - teigiamą patvirtinimą apie ištrintą subjektą. Vidinė priežastis
  * lieka serverio loge ir `AuditWriteBlockedError.code`, kuris iš proceso neišeina.
+ *
+ * ⚠️ PRIELAIDA, KURIĄ BŪTINA UŽRAŠYTI: ŠI FUNKCIJA APTARNAUJA DEVYNIS KVIETĖJUS.
+ *
+ * Tarp jų `routes/auth.js:165,252` - prisijungimo ir atsijungimo keliai. Job'o
+ * formos atsakymas („Jobas nerastas.") ten būtų nesąmonė. Šiandien tas kelias
+ * NEPASIEKIAMAS: BLOCK reikalauja subjektui susietos eilutės, o `LOGIN_*` ir
+ * `LOGOUT` subjekto neturi.
+ *
+ * Prielaidos sargas jau egzistuoja - `auditErasureFinality.test.js` inventoriaus
+ * tripwire („nė vienas produkcinis BLOKUOJANTIS įvykis nėra susietas su
+ * subjektu"). Susiejus bet kurį blokuojantį įvykį su `jobId`, jis krinta ir
+ * priverčia įvertinti ŠITĄ atvaizdavimą prieš tai. Naujo testo čia nereikia:
+ * antras sargas tai pačiai prielaidai išsiskirtų.
  */
 function auditoGedimas(res, error, kontekstas) {
   if (error && error.code === "AUDIT_WRITE_BLOCKED") {

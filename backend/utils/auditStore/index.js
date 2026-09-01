@@ -848,6 +848,25 @@ async function probe(env = process.env) {
 }
 
 /**
+ * IŠTRYNIMO BARJERO PASIEKIAMUMAS PER AUDITO JUNGTĮ (#155, 7.4e / #216).
+ *
+ * ⚠️ ATSKIRA PRIEŽASTIS, NE `probe()` DALIS. `probe()` atsako „ar audito
+ * saugykla veikia"; ši - „ar per TĄ PAČIĄ jungtį pasiekiama `erasure_marks`".
+ * Sujungus, readiness pasakytų „auditas neveikia" ten, kur auditas veikia
+ * puikiai, o trūksta tik barjero migracijos - ir operatorius ieškotų ne ten.
+ *
+ * Fail-closed ir NIEKADA nemeta - readiness privalo atsakyti visada.
+ */
+async function probeBarrier(env = process.env) {
+  if (!isReady(env)) return false;
+  try {
+    return (await store.probeBarrier()) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Švarus išjungimo kelias - be jo integraciniai testai kabotų su atviromis
  * jungtimis, o konteinerio stabdymas paliktų neuždarytas DB sesijas.
  */
@@ -917,6 +936,7 @@ module.exports = {
   shutdown,
   isReady,
   probe,
+  probeBarrier,
   backend,
   current,
   auditoPoolNustatymai,

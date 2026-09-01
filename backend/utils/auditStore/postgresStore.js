@@ -8,7 +8,10 @@
  */
 
 const { STULPELIAI, META_LAUKAI, isrinktiMeta } = require("./fields");
-const { assertNotBarredWithClient } = require("../deletionTombstones/postgresStore");
+const {
+  assertNotBarredWithClient,
+  probeBarrierWithClient,
+} = require("../deletionTombstones/postgresStore");
 
 /**
  * PRIVILEGIJOS, BE KURIŲ AUDITAS NEVEIKIA (#155, 7.4f / #231).
@@ -173,6 +176,8 @@ function sukurtiIterpima(hashKeyId) {
 
 function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
   const iterpti = sukurtiIterpima(hashKeyId);
+  /** ⚠️ Atskiras nuo `probe()` kešo: tai atskira priežastis, ne ta pati būsena. */
+  let barjeroKesas = null;
   /**
    * Readiness biudžetas ateina iš `init(env)` - to paties `READINESS_TIMEOUT_MS`,
    * kurį naudoja maršrutas. Antra reikšmė čia reikštų dvi konfigūracijos tiesas.
@@ -673,6 +678,41 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
      * Šablonas tas pats kaip `sessionStore/postgresStore.js` - antra realizacija
      * išsiskirtų tyliai.
      */
+    /**
+     * BARJERO PASIEKIAMUMAS PER **AUDITO** POOL'Ą (#155, 7.4e / #216).
+     *
+     * ⚠️ `deletionTombstones.init()` ZONDAS ŠIO KELIO NEDENGIA. Jis tikrina
+     * lentelę per SAVO pool'ą, o barjeras `assertNotBarredWithClient()` skaito
+     * ją per KVIETĖJO - t. y. audito - jungtį. Jei audito DB `erasure_marks`
+     * neturi (arba turi be vėlesnių migracijų), readiness liktų žalias, o pirmas
+     * audito rašymas duotų `42P01`/`42703` → CHECK FAILED → fail-closed.
+     * Blokuojantiems įvykiams tai reiškia, kad prisijungimas nustoja veikti
+     * VYKDYMO metu, jau praėjus sveikatos patikras.
+     *
+     * ⚠️ UŽKLAUSA NERAŠOMA ČIA. Ją vykdo `deletionTombstones` eksportuota
+     * `probeBarrierWithClient()` - žymų lentelės forma yra ŽYMŲ modulio dalykas,
+     * ir jos užklausa šiame faile būtų antra vieta, kur ji žinoma. Būtent tai
+     * pagavo `erasureMarks.test.js` „VIENAS AUTORITETAS" tripwire (realiai, ne
+     * teoriškai - pirmoji šio zondo versija rašė užklausą čia).
+     *
+     * ⚠️ REZULTATAS - READINESS, NE KRITIMAS. Barjeras yra vykdymo kelias, ne
+     * starto priklausomybė; `deletionTombstones` sąmoningai lazy, ir tai
+     * nekeičiama.
+     */
+    async probeBarrier() {
+      const dabar = Date.now();
+
+      /** ⚠️ Kešuojamas TIK teigiamas rezultatas - ta pati taisyklė kaip `probe()`. */
+      if (barjeroKesas && barjeroKesas.rezultatas === true && dabar - barjeroKesas.laikas < PROBE_CACHE_TTL_MS) {
+        return true;
+      }
+
+      const pasiekiama = await probeBarrierWithClient(pool);
+
+      barjeroKesas = pasiekiama ? { rezultatas: true, laikas: dabar } : null;
+      return pasiekiama;
+    },
+
     async probe() {
       /**
        * ⚠️ KEŠUOJAMAS TIK TEIGIAMAS REZULTATAS.

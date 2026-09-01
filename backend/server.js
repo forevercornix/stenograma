@@ -213,6 +213,31 @@ async function probeRuntimeReadiness() {
   }
 
   /**
+   * ⚠️ BARJERO ZONDAS PER AUDITO JUNGTĮ (#155, 7.4e / #216).
+   *
+   * ATSKIRAS NUO `auditStore.probe()` SĄMONINGAI. Barjeras
+   * (`assertNotBarredWithClient`) skaito `erasure_marks` per KVIETĖJO - audito -
+   * jungtį, o `deletionTombstones.probe()` tikrina ją per SAVO pool'ą. Jei
+   * audito DB lentelės neturi (arba turi be vėlesnių migracijų), abu esami
+   * zondai lieka teigiami, o pirmas audito rašymas duoda `42P01`/`42703` →
+   * CHECK FAILED → fail-closed. Blokuojantiems įvykiams tai reiškia, kad
+   * prisijungimas nustoja veikti VYKDYMO metu, jau praėjus sveikatos patikras.
+   *
+   * ⚠️ ATSKIRAS KOMPONENTAS, NE `auditStoreReachable` dalis: sujungus,
+   * readiness sakytų „auditas neveikia" ten, kur trūksta tik barjero migracijos.
+   */
+  let auditBarrierReachable = false;
+  try {
+    auditBarrierReachable = await withTimeout(
+      auditStore.probeBarrier(),
+      READINESS_TIMEOUT_MS,
+      "ištrynimo barjeras"
+    );
+  } catch {
+    auditBarrierReachable = false;
+  }
+
+  /**
    * ⚠️ IŠTRYNIMO ŽYMŲ ZONDAS (#155, 7.5a / #183).
    *
    * Be jo instancija su nustatytu `DATABASE_URL` ir nepasiekiama DB (arba be
@@ -274,6 +299,7 @@ async function probeRuntimeReadiness() {
     workers,
     sessionStoreReachable,
     auditStoreReachable,
+    auditBarrierReachable,
     auditKeysResolvable,
     tombstonesReachable,
   };
@@ -318,6 +344,7 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
     workers,
     sessionStoreReachable,
     auditStoreReachable,
+    auditBarrierReachable,
     auditKeysResolvable,
     tombstonesReachable,
   } = await probeRuntimeReadiness();
@@ -329,6 +356,7 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
     workerAlive &&
     sessionStoreReachable &&
     auditStoreReachable &&
+    auditBarrierReachable &&
     auditKeysResolvable &&
     tombstonesReachable;
 
@@ -345,6 +373,13 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
       workers,        // detali būsena PER TIPĄ - kuri konkrečiai eilė (jei kuri) neturi gyvo worker'io
       sessionStoreReachable, // GYVA sesijų autoriteto būsena; atmintyje - visada true
       auditStoreReachable,   // GYVA audito saugyklos būsena su TEISIŲ patikra; atmintyje - visada true
+      /**
+       * ⚠️ ATSKIRA PRIEŽASTIS (#216): ar `erasure_marks` pasiekiama per AUDITO
+       * jungtį. `false` reiškia, kad barjeras kris vykdymo metu, nors audito
+       * saugykla veikia. Atmintyje - visada true. Rodoma TIK būsena, be jokio
+       * pranešimo: detales neša serverio logas, ne readiness atsakymas.
+       */
+      auditBarrierReachable,
       /**
        * ⚠️ STARTO MOMENTO SNAPSHOT'AS, ne gyva būsena. `false` reiškia, kad
        * procesas pakilo su `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`, ir

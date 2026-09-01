@@ -112,6 +112,86 @@ test("READY: sugedęs audito zondas → 503, o liveness nepaliestas", async () =
   }
 });
 
+test("#216 READY: nepasiekiamas ištrynimo barjeras → 503 su ATSKIRA priežastimi", async () => {
+  /**
+   * ⚠️ BARJERAS SKAITO `erasure_marks` PER AUDITO JUNGTĮ.
+   *
+   * `deletionTombstones.probe()` tikrina lentelę per SAVO pool'ą, o
+   * `auditStore.probe()` - `audit_log` teises. Jei audito DB `erasure_marks`
+   * neturi (arba turi be vėlesnių migracijų), ABU esami zondai lieka teigiami,
+   * o pirmas audito rašymas duoda `42P01`/`42703` → CHECK FAILED → fail-closed:
+   * prisijungimas nustoja veikti VYKDYMO metu, jau praėjus sveikatos patikras.
+   *
+   * ⚠️ PRIEŽASTIS PRIVALO BŪTI ATSKIRIAMA. Sujungus su `auditStoreReachable`,
+   * readiness sakytų „auditas neveikia" ten, kur auditas veikia puikiai, o
+   * trūksta tik barjero migracijos - ir operatorius ieškotų ne ten.
+   */
+  const originalus = auditStore.probeBarrier;
+  auditStore.probeBarrier = async () => false;
+
+  try {
+    const ready = await request(app).get("/api/ready");
+    const health = await request(app).get("/api/health");
+
+    assert.equal(ready.status, 503, "be pasiekiamo barjero instancija NĖRA paruošta");
+    assert.equal(ready.body.ready, false);
+    assert.equal(ready.body.components.auditBarrierReachable, false);
+    assert.equal(
+      ready.body.components.auditStoreReachable,
+      true,
+      "audito saugykla veikia - priežastis privalo būti ATSKIRIAMA"
+    );
+
+    /** Liveness nepaliestas: perkrovimas migracijos nepritaikytų. */
+    assert.equal(health.status, 200);
+  } finally {
+    auditStore.probeBarrier = originalus;
+  }
+});
+
+test("#216 READY: barjero zondas tikrina STULPELIUS, ne vien lentelę, ir ima juos iš ŽYMŲ autoriteto", async () => {
+  /**
+   * ⚠️ BE TIKROS DB - SUKLASTOTU POOL'U, kaip ir kiti šio failo zondų testai.
+   *
+   * ⚠️ TIKRINAMAS SĄRAŠO ŠALTINIS, NE TIK FAKTAS, KAD UŽKLAUSA VYKSTA.
+   * `SELECT 1 FROM erasure_marks` pavyksta ir tada, kai diegimas nutrūko po
+   * lentelės sukūrimo, bet PRIEŠ vėlesnę migraciją - tą priežastį
+   * `deletionTombstones.init()` jau užrašė. Ketvirta stulpelių sąrašo kopija
+   * neišvengiamai išsiskirtų, todėl imamas TAS PATS eksportas.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+  const { STULPELIAI: ZYMU_STULPELIAI } = require("../utils/deletionTombstones/postgresStore");
+
+  const uzklausos = [];
+  const pool = (mesti) => ({
+    query: async (sql) => {
+      uzklausos.push(String(sql));
+      if (mesti && /erasure_marks/.test(String(sql))) {
+        const e = new Error('relation "erasure_marks" does not exist');
+        e.code = "42P01";
+        throw e;
+      }
+      return { rows: [] };
+    },
+    connect: async () => ({ query: async () => ({ rows: [] }), release: () => {} }),
+  });
+
+  const bloga = createPostgresStore(pool(true), { hashKeyId: "k", readinessBudgetMs: 1000 });
+  assert.equal(await bloga.probeBarrier(), false, "trūkstama lentelė = NEPASIEKIAMA");
+
+  uzklausos.length = 0;
+  const gera = createPostgresStore(pool(false), { hashKeyId: "k", readinessBudgetMs: 1000 });
+  assert.equal(await gera.probeBarrier(), true);
+
+  const barjeroUzklausa = uzklausos.find((u) => u.includes("erasure_marks"));
+  assert.ok(barjeroUzklausa, "zondas privalo realiai kreiptis į `erasure_marks`");
+  assert.ok(
+    barjeroUzklausa.includes(ZYMU_STULPELIAI),
+    "stulpelių sąrašas privalo ateiti iš `deletionTombstones`, ne būti perrašytas čia"
+  );
+  assert.match(barjeroUzklausa, /WHERE false/, "planavimo, ne skaitymo operacija");
+});
+
 test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
   /**
    * Readiness privalo atsakyti VISADA - net kai priklausomybė kabo. Be ribos

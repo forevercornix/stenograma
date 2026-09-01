@@ -271,6 +271,16 @@ const memoryStore = {
     return [];
   },
 
+  /**
+   * ⚠️ ATMINTINIAME REŽIME BARJERO LENTELĖS NĖRA IR NEREIKIA (#216).
+   *
+   * Metodas egzistuoja dėl KONTRAKTO PARITETO: trūkstamas metodas viename
+   * backend'e reikštų, kad fasadas tyliai grįžta į atsarginį kelią.
+   */
+  async probeBarrier() {
+    return true;
+  },
+
   async probe() {
     return true;
   },
