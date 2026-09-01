@@ -298,7 +298,7 @@ async function _runInline(type, jobId, payload) {
           execution: "inline",
           klaida: error && error.message,
         });
-        await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+        await jobStore.system.finishFailed(jobId, {
           error_code: auditoGedimas ? "AUDIT_UNAVAILABLE" : "AUTHORIZATION_ERROR",
           error_message: auditoGedimas
             ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
@@ -317,7 +317,7 @@ async function _runInline(type, jobId, payload) {
          * kelias produkcijoje būtų kritęs. Testas to nepagavo, nes tikrino tik
          * kodo TEKSTĄ (`grep AUTHORIZATION_REVOKED`), ne elgesį.
          */
-        await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+        await jobStore.system.finishFailed(jobId, {
           error_code: "AUTHORIZATION_REVOKED",
           error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
         });
@@ -384,7 +384,19 @@ async function _executeInline(type, processor, jobId, payload) {
      */
     assertResultWithinLimits(result);
 
-    await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+    /**
+     * ⚠️ GRĄŽINIMAS TIKRINAMAS (#184, 7.5b). `finish()` gali grąžinti
+     * `CONCURRENCY_CONFLICT`, o ignoruotas konfliktas reikštų, kad `inline`
+     * kelias praneša sėkmę apie rezultatą, kurio neįsipareigojo. Klaida čia yra
+     * teisingas atsakymas: `catch` šaka žemiau pažymės job'ą `failed` per
+     * `finishFailed()`, kuris JAU `completed` įrašo nebeperrašo.
+     */
+    const uzbaigtas = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+    if (uzbaigtas === jobStore.CONCURRENCY_CONFLICT) {
+      throw new Error(
+        `Job rezultatas NEĮSIPAREIGOTAS (versijos konfliktas): ${jobId}. Įrašą pakeitė kitas vykdytojas.`
+      );
+    }
 
     log.info("Darbas baigtas", {
       stage: "completed",
@@ -395,7 +407,7 @@ async function _executeInline(type, processor, jobId, payload) {
     });
   } catch (e) {
     const { errorCode, message } = _classifyError(e, `${type} job`);
-    await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, { error: message, error_code: errorCode });
+    await jobStore.system.finishFailed(jobId, { error: message, error_code: errorCode });
 
     // Pranešimas jau sanitizuotas `_classifyError`; kodas yra enum.
     log.warn("Darbas nepavyko", {

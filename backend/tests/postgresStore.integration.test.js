@@ -1915,4 +1915,127 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     await store.remove(bazinis.id);
   });
 
+  /* ── Optimistic lock versijos CAS (#184, 7.5b) ───────────────────────── */
+
+  await t.test("#184 `expectedVersion` konfliktas: nulis eilučių klasifikuojamas TAME PAČIAME sakinyje", async () => {
+    /**
+     * ⚠️ TIKRAS PostgreSQL BŪTINAS. Klasifikacija remiasi `casSuKlasifikacija()`
+     * CTE snapshot'u - savybe, kurios nei memory, nei `FakeRedis` neturi. Be DB
+     * šis testas tikrintų tik JS `if` sakinius.
+     */
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    assert.equal(job.version, 1);
+
+    /** Konkurentas - atskiru kvietimu, be sąlygos. */
+    await store.update(job.id, { actor: "konkurentas" });
+
+    const rezultatas = await store.update(job.id, { actor: "pasenes" }, { expectedVersion: 1 });
+    assert.equal(rezultatas, "CONCURRENCY_CONFLICT");
+
+    const dabartinis = await store.get(job.id);
+    assert.equal(dabartinis.actor, "konkurentas", "konfliktas NIEKO neįrašė");
+    assert.equal(dabartinis.version, 2, "konfliktas versijos NEDIDINA");
+
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 sutampanti versija praeina; `version` didėja PERSISTENTIŠKAI", async () => {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+
+    const po = await store.update(job.id, { actor: "as" }, { expectedVersion: 1 });
+    assert.equal(po.version, 2);
+    assert.equal(po.actor, "as");
+
+    /** ⚠️ Ne iš grąžinimo, o iš stulpelio - grąžinimas galėtų slėpti neįrašytą SET. */
+    const { rows } = await pool.query("SELECT version, actor FROM jobs WHERE id = $1", [job.id]);
+    assert.equal(rows[0].version, 2);
+    assert.equal(rows[0].actor, "as");
+
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 ⚠️ NULIS EILUČIŲ: not-found ir version conflict atskiriami KIEKVIENAS", async () => {
+    /**
+     * ⚠️ ŠIS TESTAS YRA VISO KONTRAKTO ESMĖ. Nulis pakeistų eilučių savaime nėra
+     * versijos konfliktas: eilutės gali apskritai nebūti. Abi baigtys turi
+     * skirtingus kvietėjo veiksmus (retry vs 404), tad jų suliejimas būtų tylus
+     * elgesio pakeitimas.
+     */
+    const nesamas = crypto.randomUUID();
+    assert.equal(
+      await store.update(nesamas, { actor: "x" }, { expectedVersion: 1 }),
+      null,
+      "eilutės nėra → null, ne konfliktas"
+    );
+
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    assert.equal(
+      await store.update(job.id, { actor: "x" }, { expectedVersion: 999 }),
+      "CONCURRENCY_CONFLICT",
+      "eilutė yra, versija kita → konfliktas, ne null"
+    );
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 ⚠️ IŠTRINTA eilutė NEGAUNA egzistavimo verdikto iš NAUJOS inkarnacijos", async () => {
+    /**
+     * ⚠️ #180 komentaras (`postgresStore.js`, „CAS SNAPSHOT'E EILUTĖS NEBUVO")
+     * aprašo būtent šitą: vėliau tuo pačiu id atsiradusi eilutė yra KITA įrašo
+     * inkarnacija, ir sprendimas apie ją būtų priimtas ne tuo snapshot'u, kuriuo
+     * operacija buvo įvertinta.
+     *
+     * Versijos klasifikatorius to negali sulaužyti: `buvo === 0` tikrinamas
+     * PRIEŠ `priezastis`, tad ištrinta eilutė duoda `null`, o ne konfliktą.
+     */
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    const id = job.id;
+    await store.remove(id);
+
+    assert.equal(
+      await store.update(id, { actor: "x" }, { expectedVersion: 1 }),
+      null,
+      "ištrintas įrašas → null, NE CONCURRENCY_CONFLICT"
+    );
+  });
+
+  await t.test("#184 ⚠️ `updateOwned`: SVETIMAS savininkas su pasenusia versija lieka FORBIDDEN", async () => {
+    /**
+     * ⚠️ ABI NESĖKMĖS SĄLYGOS TENKINAMOS VIENU METU, ir klasifikatorių tvarka
+     * yra kontrakto dalis: `SVETIMAS_SCOPE` tikrinamas PRIEŠ `versijaSkiriasi`.
+     * Perklasifikavus, 403 vs 404 sprendimas (#159) remtųsi lygiagretumo faktu
+     * vietoj autorizacijos.
+     */
+    const savininkas = { ownerKind: OWNER_KIND.USER, ownerId: crypto.randomUUID() };
+    const svetimas = { ownerKind: OWNER_KIND.USER, ownerId: crypto.randomUUID() };
+
+    const job = await store.create({ ...savininkas });
+    await store.update(job.id, { actor: "konkurentas" });
+
+    assert.equal(
+      await store.updateOwned(job.id, { actor: "x" }, svetimas, { expectedVersion: 1 }),
+      "FORBIDDEN"
+    );
+    assert.equal(
+      await store.updateOwned(job.id, { actor: "x" }, savininkas, { expectedVersion: 1 }),
+      "CONCURRENCY_CONFLICT",
+      "ta pati situacija, tik SAVAS savininkas → atsakymas privalo pasikeisti"
+    );
+
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 be `expectedVersion` `updateOwned` elgesys NEPAKITĘS", async () => {
+    /** Regresijos sargas: sąlyginis kelias neturi tapti numatytuoju. */
+    const savininkas = { ownerKind: OWNER_KIND.USER, ownerId: crypto.randomUUID() };
+    const job = await store.create({ ...savininkas });
+
+    await store.update(job.id, { actor: "konkurentas" });
+    const po = await store.updateOwned(job.id, { actor: "as" }, savininkas);
+
+    assert.equal(po.actor, "as");
+    assert.equal(po.version, 3);
+
+    await store.remove(job.id);
+  });
+
 });

@@ -1,5 +1,5 @@
 const memoryStore = require("./memoryStore");
-const { STATUS, JOB_TYPES, TTL_MS } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, isFinished } = require("./common");
 const { createLogger } = require("../../utils/logger");
 const tombstones = require("../deletionTombstones");
 const maintenanceLock = require("../maintenanceLock");
@@ -352,6 +352,42 @@ async function ensureInit() {
  */
 const FORBIDDEN = Symbol("jobStore.FORBIDDEN");
 
+/**
+ * „Įrašas pasikeitė nuo tada, kai jį matei" - optimistic lock konfliktas
+ * (#184, 7.5b).
+ *
+ * ⚠️ KONTRAKTAS PRAPLEČIAMAS, NE PERRAŠOMAS. #180 forma lieka nepajudinta:
+ * `null` = nerastas, `FORBIDDEN` = svetimas. Šis simbolis pridedamas TA PAČIA
+ * forma ir toje pačioje vertimo vietoje (saugykla grąžina eilutę, fasadas -
+ * simbolį), tad nė vienas metodas neįgyja savo atskiros konflikto formos.
+ *
+ * ⚠️ KUO SKIRIASI NUO `FORBIDDEN`. Nuosavybės neatitikimas NIEKADA neverčiamas
+ * į šitą: tai autorizacijos, ne lygiagretumo rezultatas. Saugyklose nuosavybė
+ * tikrinama PIRMA būtent dėl to.
+ *
+ * ⚠️ KUO SKIRIASI NUO `JobPhaseError`. Gyvavimo ciklo konfliktas (neleistinas
+ * perėjimas) lieka `JobPhaseError` - jau esantis TIPIZUOTAS `jobPhase`
+ * autoritetas, kurio #184 nekeičia. Skirtumas kvietėjui yra veiksmas:
+ * `CONCURRENCY_CONFLICT` reiškia „perskaityk naują būseną ir spręsk iš naujo",
+ * `JobPhaseError` - „šis perėjimas neteisėtas, aklai nekartok".
+ *
+ * `Symbol` - dėl tos pačios priežasties kaip `FORBIDDEN`: jo negalima gauti iš
+ * JSON ar sumaišyti su job objektu.
+ */
+const CONCURRENCY_CONFLICT = Symbol("jobStore.CONCURRENCY_CONFLICT");
+
+/**
+ * Saugyklos eilutė → fasado forma. VIENAS vertimas visiems keliams (#184).
+ *
+ * ⚠️ Kopijos kiekviename metode būtų tiksliai tai, ką issue draudžia: „nė vienas
+ * metodas negrąžina konfliktui savo formos".
+ */
+function fasadoRezultatas(result) {
+  if (result === "FORBIDDEN") return FORBIDDEN;
+  if (result === "CONCURRENCY_CONFLICT") return CONCURRENCY_CONFLICT;
+  return result;
+}
+
 const { OWNER_KIND, assertOwnerIdentity } = require("./common");
 const jobPhase = require("../jobPhase");
 
@@ -514,6 +550,20 @@ function assertRestorableId(job) {
   }
 }
 
+/**
+ * Sisteminis terminalus perėjimas – VIENAS bandymas, be politikos (#184, 7.5b).
+ *
+ * Iškeltas iš `system.finish()`, kad `system.finishFailed()` galėtų jį pakartoti
+ * NEDUBLIUODAMAS nei tombstone barjero, nei snapshot'o sąlygos.
+ */
+async function sisteminisFinishBandymas(store, id, status, extra) {
+  const job = await store.get(id);
+  if (!job) return null;
+
+  const patch = jobPhase.finish(job, status, extra);
+  return fasadoRezultatas(await store.update(id, patch, { expectedVersion: job.version }));
+}
+
 module.exports = {
   init,
   /**
@@ -525,6 +575,7 @@ module.exports = {
    */
   _storeForTests: () => store,
   FORBIDDEN,
+  CONCURRENCY_CONFLICT,
   OWNER_KIND,
 
   /**
@@ -558,11 +609,21 @@ module.exports = {
     },
 
     /**
-     * Fazės pradžia. Grąžina atnaujintą job'ą arba `null`, jei jo nėra.
+     * Fazės pradžia. Grąžina atnaujintą job'ą, `null` (nėra) arba
+     * `CONCURRENCY_CONFLICT` (įrašas pasikeitė nuo skaitymo).
      *
-     * ⚠️ MEMORY store atveju `get` ir `update` vyksta be `await` tarp jų, tad
-     * lenktynių lango nėra. REDIS atveju to NEPAKANKA – ten patikra ir rašymas
-     * turi būti viena atominė operacija (#154, 3 žingsnis).
+     * ⚠️ TOCTOU LANGAS UŽDARYTAS (#184, 7.5b).
+     *
+     * Iki 7.5b čia buvo `get` + `update` be jokios sąlygos, ir šis komentaras
+     * tą spragą PRIPAŽINO: „memory atveju lenktynių lango nėra; Redis atveju to
+     * NEPAKANKA". Pripažinimas nebuvo sprendimas - langas liko atviras VISIEMS
+     * backend'ams, nes jis yra FASADO lygmens: tarp `store.get()` ir
+     * `store.update()` yra `await`, ir jokia saugyklos SQL/Lua patobulinta
+     * vidinė atomika jo neuždaro.
+     *
+     * Dabar sąlyga perduodama iš TO PATIES snapshot'o, kuriuo `jobPhase`
+     * skaičiavo patch'ą: jei įrašas tarp skaitymo ir rašymo pasikeitė,
+     * mutacija neįvyksta, o kvietėjas gauna konfliktą vietoj tylaus perrašymo.
      */
     startPhase: async (id, nextPhase, phaseOptions = {}) => {
       await ensureInit();
@@ -573,7 +634,9 @@ module.exports = {
       const { extra = {}, ...opts } = phaseOptions;
       const patch = jobPhase.startPhase(job, nextPhase, opts);
       // `extra` PIRMA – kad negalėtų perrašyti fazės invarianto.
-      return store.update(id, { ...extra, ...patch });
+      return fasadoRezultatas(
+        await store.update(id, { ...extra, ...patch }, { expectedVersion: job.version })
+      );
     },
 
     /**
@@ -639,15 +702,101 @@ module.exports = {
       return store.update(id, patch);
     },
 
-    /** Terminalus perėjimas – vienu patch'u išvalo fazės būseną. */
+    /**
+     * Terminalus perėjimas – vienu patch'u išvalo fazės būseną.
+     *
+     * ⚠️ SĄLYGA IŠ TO PATIES SNAPSHOT'O (#184, 7.5b) – žr. `startPhase()`.
+     * Grąžina job'ą, `null` arba `CONCURRENCY_CONFLICT`; neleistinas perėjimas
+     * lieka `JobPhaseError`.
+     */
     finish: async (id, status, extra = {}) => {
       await ensureInit();
       if (await blockedByTombstone(id, "finish")) return null;
-      const job = await store.get(id);
-      if (!job) return null;
+      return sisteminisFinishBandymas(store, id, status, extra);
+    },
 
-      const patch = jobPhase.finish(job, status, extra);
-      return store.update(id, patch);
+    /**
+     * `FAILED` žymėjimas SU KONFLIKTŲ POLITIKA (#184, 7.5b).
+     *
+     * ⚠️ KODĖL ATSKIRAS METODAS, O NE POLITIKA KIEKVIENAME KVIETĖJE.
+     *
+     * `finish(FAILED, …)` kvietėjų yra AŠTUONI (`queues/jobRunner.js` ×4,
+     * `workers/index.js` ×4), ir visi jie yra klaidų apdorojimo šakos. Politika,
+     * nukopijuota aštuonis kartus, išsiskirtų būtent ten, kur niekas nežiūri –
+     * o šitos politikos kaina klaidingai pritaikius yra `completed` įrašo
+     * pavertimas `failed`.
+     *
+     * KONTRAKTAS:
+     *
+     *   `JobPhaseError`  → job jau terminalus. NO-OP SĖKMĖ: `FAILED` žymėjimas
+     *                      nebeaktualus, kas nors kitas jį jau pabaigė.
+     *   konfliktas       → perskaitoma AUTORITETINGA būsena, ir:
+     *                      · terminalus `COMPLETED` → žymėjimas ATMETAMAS;
+     *                      · kitas terminalus       → no-op sėkmė;
+     *                      · ne terminalus          → VIENAS pakartojimas;
+     *                      · antras konfliktas      → `log.error`, pasitraukimas.
+     *
+     * ⚠️ AKLO RETRY NĖRA NĖ VIENOJE ŠAKOJE. Ciklo irgi nėra: du bandymai, po to
+     * pasitraukimas. Neribotas kartojimas čia reikštų, kad nuolat atnaujinamas
+     * job'as niekada negautų `failed` žymos ir kviečiantis worker'is kabėtų.
+     *
+     * ⚠️ `COMPLETED` NIEKADA NEVIRSTA `FAILED`. Dingęs BullMQ ack neturi teisės
+     * sunaikinti sėkmingo rezultato, kuris jau guli saugykloje. Tai buvo
+     * įmanoma iki 7.5b: pralaimėjęs lenktynes `finish(FAILED)` tiesiog
+     * perrašydavo įrašą.
+     *
+     * @returns {Promise<object|null|symbol>} job'as, `null` (nėra / atmesta
+     *   pagal tombstone) arba `CONCURRENCY_CONFLICT`, kai abu bandymai krito.
+     */
+    finishFailed: async (id, extra = {}) => {
+      await ensureInit();
+      if (await blockedByTombstone(id, "finish")) return null;
+
+      for (let bandymas = 1; bandymas <= 2; bandymas++) {
+        let rezultatas;
+        try {
+          rezultatas = await sisteminisFinishBandymas(store, id, STATUS.FAILED, extra);
+        } catch (err) {
+          /**
+           * `JobPhaseError` reiškia „iš šios būsenos baigti nebegalima", o
+           * vienintelė tokia būsena yra JAU TERMINALI. Kitos klaidos (DB,
+           * infrastruktūra) praleidžiamos pro šalį – jos nėra šio kontrakto
+           * dalis ir jų slėpimas paverstų gedimą tylia sėkme.
+           */
+          if (err.name !== "JobPhaseError") throw err;
+          const dabartinis = await store.get(id);
+          log.info("finishFailed: job jau terminalus, FAILED žymėjimas nebeaktualus", {
+            jobId: id,
+            status: dabartinis?.status,
+          });
+          return dabartinis;
+        }
+
+        if (rezultatas !== CONCURRENCY_CONFLICT) return rezultatas;
+
+        /** Konfliktas – sprendimas priimamas iš AUTORITETINGOS būsenos, ne iš snapshot'o. */
+        const dabartinis = await store.get(id);
+        if (!dabartinis) return null;
+
+        if (dabartinis.status === STATUS.COMPLETED) {
+          log.warn("finishFailed: job jau COMPLETED – FAILED žymėjimas ATMESTAS", {
+            jobId: id,
+            reason: extra.error_code || extra.error || null,
+          });
+          return dabartinis;
+        }
+        if (isFinished(dabartinis.status)) return dabartinis;
+
+        if (bandymas === 2) {
+          log.error("finishFailed: du versijos konfliktai iš eilės, pasitraukiama", {
+            jobId: id,
+            status: dabartinis.status,
+          });
+          return CONCURRENCY_CONFLICT;
+        }
+      }
+      /* c8 ignore next */
+      return CONCURRENCY_CONFLICT;
     },
     listPendingDeletions: async (limit) => {
       await ensureInit();
@@ -714,7 +863,7 @@ module.exports = {
     assertScope(scope, "get");
     await ensureInit();
     const result = await store.getOwned(scope.jobId, scope);
-    return result === "FORBIDDEN" ? FORBIDDEN : result;
+    return fasadoRezultatas(result);
   },
   /**
    * @param {string} id
@@ -750,7 +899,18 @@ module.exports = {
     if (job === "FORBIDDEN") return FORBIDDEN;
 
     const patch = jobPhase.finish(job, status, extra);
-    return store.update(scope.jobId, patch);
+    /**
+     * ⚠️ `updateOwned`, NE `update` (#184, 7.5b).
+     *
+     * Iki 7.5b čia buvo `store.update()` – nuosavybė patikrinta `getOwned()`
+     * metu, o tarp jos ir rašymo liko `await`. Sąlyginis kelias tą uždaro DVIEM
+     * invariantais viename `UPDATE`: nuosavybė IR versija. Vien versijos
+     * neužtektų – ji pasikeistų ir tada, kai savininkas nepasikeitė, o
+     * nuosavybės perdavimo atveju atsakymas privalo likti `FORBIDDEN`.
+     */
+    return fasadoRezultatas(
+      await store.updateOwned(scope.jobId, patch, scope, { expectedVersion: job.version })
+    );
   },
 
   update: async (scope, patch, options = {}) => {
@@ -791,7 +951,7 @@ module.exports = {
     }
 
     const result = await store.updateOwned(id, patch, scope);
-    return result === "FORBIDDEN" ? FORBIDDEN : result;
+    return fasadoRezultatas(result);
   },
   /**
    * @param {{jobId: string, ownerId: string|null}} scope
@@ -801,7 +961,7 @@ module.exports = {
     assertScope(scope, "remove");
     await ensureInit();
     const result = await store.removeOwned(scope.jobId, scope);
-    return result === "FORBIDDEN" ? FORBIDDEN : result;
+    return fasadoRezultatas(result);
   },
   listExpired: async (now, limit) => {
     await ensureInit();

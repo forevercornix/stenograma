@@ -63,9 +63,29 @@ async function reportProgressAtomic(id, event) {
   return reportProgressAtomicSync(id, event, jobPhase);
 }
 
-async function update(id, patch) {
+/**
+ * @param {object} [options]
+ * @param {number} [options.expectedVersion] optimistic lock sąlyga (#184, 7.5b)
+ * @returns {object|null|"CONCURRENCY_CONFLICT"}
+ */
+async function update(id, patch, options = {}) {
   const job = jobs.get(id);
   if (!job) return null;
+
+  /**
+   * ⚠️ VERSIJOS SĄLYGA TIKRINAMA IR ATMINTYJE (#184, 7.5b).
+   *
+   * Atmintyje lenktynių lango nėra - `get` ir `set` vyksta be `await` tarp jų.
+   * Bet sąlyga čia NĖRA nereikalinga: `expectedVersion` ateina iš FASADO
+   * snapshot'o, o tarp fasado `store.get()` ir šio kvietimo `await` YRA. Be
+   * patikros memory backend'as priimtų pasenusį patch'ą, kurį Redis ir
+   * PostgreSQL atmestų - ir kontraktas taptų backend-priklausomas būtent ten,
+   * kur bendras rinkinys jį lygina.
+   */
+  if (options.expectedVersion !== undefined && job.version !== options.expectedVersion) {
+    return "CONCURRENCY_CONFLICT";
+  }
+
   const next = applyPatch(job, patch);
   jobs.set(id, next);
   return next;
@@ -86,11 +106,23 @@ async function getOwned(id, scope) {
   return matchesOwner(job, scope) ? job : "FORBIDDEN";
 }
 
-/** @returns {object|null|"FORBIDDEN"} */
-async function updateOwned(id, patch, scope) {
+/** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
+async function updateOwned(id, patch, scope, options = {}) {
   const job = jobs.get(id);
   if (!job) return null;
+  /**
+   * ⚠️ NUOSAVYBĖ PIRMA, VERSIJA PO JOS (#184, 7.5b).
+   *
+   * Tvarka yra kontrakto dalis, ne stiliaus pasirinkimas: svetimas savininkas su
+   * pasenusia versija privalo gauti `"FORBIDDEN"`, o ne
+   * `"CONCURRENCY_CONFLICT"`. Autorizacijos rezultato perklasifikavimas į
+   * lygiagretumo rezultatą pasakytų kvietėjui „bandyk dar kartą" ten, kur
+   * teisingas atsakymas yra „tau negalima".
+   */
   if (!matchesOwner(job, scope)) return "FORBIDDEN";
+  if (options.expectedVersion !== undefined && job.version !== options.expectedVersion) {
+    return "CONCURRENCY_CONFLICT";
+  }
   const next = applyPatch(job, patch);
   jobs.set(id, next);
   return next;

@@ -460,6 +460,36 @@ const SVETIMAS_SCOPE = `SELECT count(*) FROM jobs
 const EILUTE_YRA = `SELECT count(*) FROM jobs WHERE id = $1`;
 
 /**
+ * „Eilutė YRA, bet `version` NESUTAMPA" - optimistic lock nesėkmės priežastis
+ * (#184, 7.5b).
+ *
+ * ⚠️ TAS PATS MODELIS KAIP `SVETIMAS_SCOPE`, IR DĖL TOS PAČIOS PRIEŽASTIES.
+ * Nulis pakeistų eilučių savaime NĖRA versijos konfliktas: eilutės gali
+ * apskritai nebūti. Priežastis skaičiuojama TAME PAČIAME sakinyje, tad ji
+ * remiasi tuo snapshot'u, kurio atžvilgiu buvo įvertintas CAS predikatas -
+ * neužrakintas skaitymas PO nepavykusio `UPDATE` atsakytų apie KITĄ įrašo
+ * inkarnaciją (žr. `updateOwned` komentarą apie `buvo === 0`).
+ *
+ * ⚠️ `IS DISTINCT FROM`, ne `<>`. Stulpelis yra `NOT NULL`, tad `NULL` čia
+ * neturėtų atsirasti - bet `<>` su `NULL` duotų `UNKNOWN`, eilutė nebūtų
+ * suskaičiuota, ir versijos konfliktas tyliai virstų „nesuderinta baigtimi".
+ * Trivertė logika čia kainuoja nieko, o klaidos klasę pašalina.
+ *
+ * ⚠️ PARAMETRO NUMERIS PERDUODAMAS, NE ĮRAŠYTAS KIETAI. `update` ir
+ * `updateOwned` sakiniuose laukiama versija atsiduria skirtingose pozicijose
+ * ($2 ir $4), o dvi kopijos su skirtingais numeriais išsiskirtų būtent taip,
+ * kad viena klasifikuotų pagal SVETIMĄ parametrą - ir atsakytų apie ne tą
+ * sąlygą, kurią tikrino mutacija.
+ *
+ * ⚠️ `$n::int IS NOT NULL` - kai sąlygos nėra, klasifikatorius privalo grąžinti
+ * `0`, o ne „versija skiriasi nuo NULL".
+ */
+function versijaSkiriasi(n) {
+  return `SELECT count(*) FROM jobs
+            WHERE id = $1 AND $${n}::int IS NOT NULL AND version IS DISTINCT FROM $${n}`;
+}
+
+/**
  * PROGRESO CAS PREDIKATAS - VIENAS ŠALTINIS (#180 P2-D).
  *
  * Naudojamas DU kartus tame pačiame sakinyje: sąlyginėje mutacijoje ir
@@ -788,12 +818,86 @@ function createPostgresStore(pool) {
     return rowToJob(rows[0]);
   }
 
-  async function update(id, patch) {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.expectedVersion] optimistic lock sąlyga (#184, 7.5b)
+   * @returns {object|null|"CONCURRENCY_CONFLICT"}
+   */
+  async function update(id, patch, options = {}) {
     return inTransaction(async (client) => {
       const current = await readJob(client, id);
       if (!current) return null;
-      return writePatched(client, current, patch);
+      if (options.expectedVersion === undefined) {
+        return writePatched(client, current, patch);
+      }
+      return writePatchedCas(client, current, patch, options.expectedVersion);
     });
+  }
+
+  /**
+   * SĄLYGINIS RAŠYMAS SU `expectedVersion` (#184, 7.5b).
+   *
+   * ⚠️ KODĖL ATSKIRAS KELIAS, O NE `writePatched()` SU PAPILDOMU `WHERE`.
+   *
+   * `writePatched()` yra BESĄLYGINIS rašymas po neužrakinto skaitymo - jam
+   * nulis pakeistų eilučių reiškia tik „eilutės nebėra". Sąlyginiam keliui to
+   * neužtenka: nulis turi tris skirtingas priežastis, ir jos privalo būti
+   * atskirtos TAME PAČIAME sakinyje. Sujungus abu kelius, besąlyginis rašymas
+   * neštų klasifikacijos kainą be jokios naudos.
+   *
+   * ⚠️ SIAURAS `SET` - tie patys stulpeliai kaip `updateOwned` CAS kelyje, dėl
+   * tos pačios priežasties: platus `SET` iš pasenusio snapshot'o atsuktų atgal
+   * konkurento jau užcommitintus laukus.
+   *
+   * ⚠️ PAKARTOJIMO ČIA NĖRA, IR TAI SĄMONINGA. `updateOwned` kartoja, nes jo
+   * CAS predikatas (nuosavybė) yra NEKINTAMAS - antras bandymas su ta pačia
+   * sąlyga privalo pavykti. Versijos predikatas priešingas: jei versija
+   * pasikeitė, ji nebesugrįš, ir pakartojimas su tuo pačiu `expectedVersion`
+   * duotų tą patį atsakymą amžinai. Kvietėjas gauna konfliktą ir sprendžia pats.
+   */
+  async function writePatchedCas(client, current, patch, expectedVersion) {
+    const row = jobToRow(applyPatch(current, patch));
+    const rasomi = changedColumns(jobToRow(current), row, patch);
+    const sets = [
+      ...rasomi.map((c, i) => `"${c}" = $${i + 3}`),
+      LAIKO_ZYMA,
+    ].join(", ");
+
+    const result = await client.query(
+      casSuKlasifikacija(
+        `      UPDATE jobs SET ${sets}
+            WHERE id = $1 AND version = $2
+          RETURNING id`,
+        versijaSkiriasi(2),
+        { buvo: EILUTE_YRA }
+      ),
+      [current.id, expectedVersion, ...rasomi.map((c) => row[c])]
+    );
+
+    const { pakeista, priezastis, buvo } = result.rows[0];
+    if (pakeista > 0) {
+      await upsertResult(client, current.id, patch.result);
+      return readJob(client, current.id);
+    }
+
+    /**
+     * ⚠️ EILUTĖS CAS SNAPSHOT'E NEBUVO → GALUTINIS `null` (#180, 1 punktas).
+     * Vėliau tuo pačiu id atsiradusi eilutė yra KITA inkarnacija.
+     */
+    if (buvo === 0) return null;
+
+    /** Eilutė yra, versija kita - nustatyta tuo pačiu snapshot'u kaip CAS. */
+    if (priezastis > 0) return "CONCURRENCY_CONFLICT";
+
+    /**
+     * ⚠️ NESUDERINTA BAIGTIS (`EvalPlanQual`): snapshot'e versija SUTAPO, bet
+     * mutacija vis tiek nepavyko - eilutė sakinio metu buvo konkurenčiai
+     * pakeista arba ištrinta. Užrakintas skaitymas TOJE PAČIOJE transakcijoje
+     * (leistinas #184 būdas) atskiria dvi likusias galimybes.
+     */
+    const dabartine = await readJobForUpdate(client, current.id);
+    if (!dabartine) return null;
+    return "CONCURRENCY_CONFLICT";
   }
 
   /** Bendras kelias visoms mutacijoms: `applyPatch()` + įrašymas. */
@@ -841,8 +945,8 @@ function createPostgresStore(pool) {
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }
 
-  /** @returns {object|null|"FORBIDDEN"} */
-  async function updateOwned(id, patch, scope) {
+  /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
+  async function updateOwned(id, patch, scope, options = {}) {
     return inTransaction(async (client) => {
       let current = await readJob(client, id);
       /**
@@ -885,23 +989,47 @@ function createPostgresStore(pool) {
         const row = jobToRow(applyPatch(current, patch));
         const rasomi = changedColumns(jobToRow(current), row, patch);
         const sets = [
-          ...rasomi.map((c, i) => `"${c}" = $${i + 4}`),
+          ...rasomi.map((c, i) => `"${c}" = $${i + 5}`),
           LAIKO_ZYMA,
         ].join(", ");
+        /**
+         * ⚠️ NUOSAVYBĖ IR VERSIJA - VIENAME `UPDATE` (#184, 7.5b).
+         *
+         * Du round-trip'ai („pirma patikrinam versiją, tada rašom") atkurtų
+         * tiksliai tą TOCTOU langą, kurį visas šis darbas uždaro. `$4::int IS
+         * NULL` šaka reiškia „sąlygos nėra" - elgesys be `expectedVersion`
+         * nesikeičia nė kiek.
+         */
         result = await client.query(
           casSuKlasifikacija(
             `      UPDATE jobs SET ${sets}
             WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
+              AND ($4::int IS NULL OR version = $4)
           RETURNING id`,
             SVETIMAS_SCOPE,
-            { buvo: EILUTE_YRA }
+            { buvo: EILUTE_YRA, versija: versijaSkiriasi(4) }
           ),
-          [id, scope.ownerId ?? null, scope.ownerKind, ...rasomi.map((c) => row[c])]
+          [
+            id,
+            scope.ownerId ?? null,
+            scope.ownerKind,
+            options.expectedVersion ?? null,
+            ...rasomi.map((c) => row[c]),
+          ]
         );
-        const { pakeista, priezastis, buvo } = result.rows[0];
+        const { pakeista, priezastis, buvo, versija } = result.rows[0];
         if (pakeista > 0) break;
-        /** Eilutė YRA, bet svetima - nustatyta tuo pačiu snapshot'u kaip CAS. */
+        /**
+         * ⚠️ NUOSAVYBĖ PIRMA, VERSIJA PO JOS (#184).
+         *
+         * Svetimas savininkas su pasenusia versija privalo gauti `"FORBIDDEN"`.
+         * Perklasifikavus jį į `"CONCURRENCY_CONFLICT"`, kvietėjui būtų pasakyta
+         * „bandyk dar kartą" ten, kur teisingas atsakymas yra „tau negalima" -
+         * ir autorizacijos rezultatas taptų lygiagretumo rezultatu.
+         */
         if (priezastis > 0) return "FORBIDDEN";
+        /** Eilutė sava, bet versija kita - tas pats snapshot'as kaip CAS. */
+        if (versija > 0) return "CONCURRENCY_CONFLICT";
 
         /**
          * ⚠️ CAS SNAPSHOT'E EILUTĖS NEBUVO - GALUTINIS `null`.
@@ -926,6 +1054,18 @@ function createPostgresStore(pool) {
         const dabartine = await readJobForUpdate(client, id);
         if (!dabartine) return null;
         if (!matchesOwner(dabartine, scope)) return "FORBIDDEN";
+        /**
+         * ⚠️ VERSIJOS KONFLIKTAS NEKARTOJAMAS (#184, 7.5b).
+         *
+         * Pakartojimas čia teisėtas TIK todėl, kad nuosavybės predikatas
+         * NEKINTAMAS: užrakinta sava eilutė svetima nebetaps, tad antras CAS
+         * privalo pavykti. Versijos predikatas priešingas - pasikeitusi versija
+         * nebesugrįš, ir ciklas su tuo pačiu `expectedVersion` suktųsi iki ribos
+         * tam, kad galiausiai grąžintų klaidą vietoj teisingo konflikto.
+         */
+        if (options.expectedVersion !== undefined && dabartine.version !== options.expectedVersion) {
+          return "CONCURRENCY_CONFLICT";
+        }
         if (bandymas >= CAS_BANDYMU_RIBA) {
           throw new Error(
             `postgresStore.updateOwned: CAS nesuartėjo per ${CAS_BANDYMU_RIBA} bandymus`

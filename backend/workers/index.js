@@ -182,7 +182,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
               execution: "worker",
               klaida: error && error.message,
             });
-            await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+            await jobStore.system.finishFailed(jobId, {
               error_code: auditoGedimas ? "AUDIT_UNAVAILABLE" : "AUTHORIZATION_ERROR",
               error_message: auditoGedimas
                 ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
@@ -202,7 +202,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
              * #154: terminalus perėjimas per state machine – žr. jobRunner.js.
              * Neapdorotas `update({ status })` čia irgi būtų kritęs.
              */
-            await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+            await jobStore.system.finishFailed(jobId, {
               error_code: "AUTHORIZATION_REVOKED",
               error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
             });
@@ -258,6 +258,24 @@ function createWorker(queueName, processor, workerOptions = {}) {
           const completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
           if (!completedJob) {
             throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
+          }
+          /**
+           * ⚠️ `Symbol` YRA TRUTHY (#184, 7.5b).
+           *
+           * `if (!completedJob)` konflikto simbolio NEPAGAUTŲ – jis praeitų kaip
+           * job objektas, o po jo einantis `_cleanupStorage()` ištrintų šaltinio
+           * audio remdamasis užbaigimu, kuris NEĮVYKO. Tai ne teorinis atvejis:
+           * konfliktą sukuria stalled recovery, kur du persidengiantys vykdymai
+           * skaito tą patį `processing` snapshot'ą.
+           *
+           * ⚠️ ČIA – KLAIDA, NE IDEMPOTENTIŠKA SĖKMĖ. Rezultatų palyginimo šis
+           * commit'as dar neturi (7.5b C), tad vienintelis sąžiningas atsakymas
+           * yra „neįsipareigojau" – audio lieka, BullMQ mato gedimą.
+           */
+          if (completedJob === jobStore.CONCURRENCY_CONFLICT) {
+            throw new Error(
+              `Job rezultatas NEĮSIPAREIGOTAS (versijos konfliktas): ${jobId}. Įrašą pakeitė kitas vykdytojas.`
+            );
           }
 
           // SĖKMĖ - audio nebereikalingas, trinam iš storage (jei transkripcija).
@@ -334,7 +352,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
 
     if (attemptsExhausted) {
       // Galutinė nesėkmė po visų bandymų - jobas FAILED (dead-letter).
-      await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, { error: message, error_code: errorCode });
+      await jobStore.system.finishFailed(jobId, { error: message, error_code: errorCode });
       // Tik dabar (po VISŲ bandymų) trinam audio - kad retry turėtų failą.
       await _cleanupStorage(payload, jobId);
     } else {

@@ -546,7 +546,23 @@ test("#180 P2-2: postgresStore.updateOwned() rašo TIK patch'o stulpelius, nuosa
   assert.equal(pagauta.params[0], esamas.id);
   assert.equal(pagauta.params[1], scope.ownerId);
   assert.equal(pagauta.params[2], scope.ownerKind);
-  assert.equal(pagauta.params.length, 3 + stulpeliai.length,
+
+  /**
+   * 5) VERSIJOS SĄLYGA – TAME PAČIAME `WHERE`, ne antru round-trip'u (#184, 7.5b).
+   *
+   * ⚠️ Šis testas KRITO, kai buvo pridėtas ketvirtasis parametras – ir tai
+   * teisingas elgesys, ne trukdis: parametrų skaičiaus patikra egzistuoja būtent
+   * tam, kad nauja sąlyga negalėtų atsirasti nepastebėta. Todėl tikrinamas ne
+   * tik naujas skaičius, bet ir pati sąlygos FORMA.
+   *
+   * `$4::int IS NULL` šaka reiškia „sąlygos nėra": be `expectedVersion` elgesys
+   * lieka toks pat, koks buvo iki 7.5b.
+   */
+  assert.match(pagauta.sql, /\(\$4::int IS NULL OR version = \$4\)/,
+    "nuosavybė IR versija privalo būti viename UPDATE");
+  assert.equal(pagauta.params[3], null, "be `expectedVersion` sąlyga neaktyvi");
+
+  assert.equal(pagauta.params.length, 4 + stulpeliai.length,
     "parametrų skaičius privalo atitikti parametrizuotų SET stulpelių skaičių");
 });
 

@@ -263,6 +263,13 @@ const functional = [
    * pusė lieka `migrations.integration` / `postgresStore.integration`, kur DB
    * realiai yra.
    */
+  /**
+   * #184 (7.5b): konflikto kontraktas — penkios atskiriamos baigtys.
+   *
+   * Memory ir fasado pusė be išorinių servisų; PostgreSQL klasifikacija lieka
+   * `postgresStore.integration`, Redis Lua CAS — `ownershipCasRedis.integration`.
+   */
+  "jobConflictContract",
   "jobVersionParity",
   "jobs.route",
   "mergeDiarization",
