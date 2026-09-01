@@ -8,6 +8,7 @@
  */
 
 const { STULPELIAI, META_LAUKAI, isrinktiMeta } = require("./fields");
+const { assertNotBarredWithClient } = require("../deletionTombstones/postgresStore");
 
 /**
  * PRIVILEGIJOS, BE KURIŲ AUDITAS NEVEIKIA (#155, 7.4f / #231).
@@ -124,7 +125,54 @@ function iEilute(row) {
   return eilute;
 }
 
+/**
+ * `INSERT` per PERDUOTĄ vykdytoją - pool'ą arba transakcijos klientą.
+ *
+ * ⚠️ VIENAS SAKINYS, NE DVI KOPIJOS. Barjeruotas kelias eina per transakciją, o
+ * ne barjeruotas - tiesiai per pool'ą; dvi to paties `INSERT` kopijos
+ * neišvengiamai išsiskirtų (stulpelis, pridėtas tik vienoje).
+ */
+function sukurtiIterpima(hashKeyId) {
+  return async function iterpti(vykdytojas, eilute) {
+    const { rows } = await vykdytojas.query(
+      `INSERT INTO audit_log (id, event, subject_id, hash_key_id, result, request_id, meta)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO NOTHING
+       RETURNING ${STULPELIU_SARASAS}, meta`,
+      [
+        eilute.id,
+        eilute.event,
+        eilute.subjectId,
+        hashKeyId,
+        eilute.result,
+        eilute.requestId,
+        isrinktiMeta(eilute),
+      ]
+    );
+
+    /**
+     * Tuščias `rows` reiškia, kad eilutė su tuo `id` jau buvo - konfliktas
+     * praleistas. Grąžinam esamą, kad kvietėjas gautų tą patį objektą kaip ir
+     * pirmą kartą, o ne `undefined`.
+     *
+     * ⚠️ `null` ČIA YRA REALUS (#216): eilutė galėjo būti IŠTRINTA tarp `INSERT`
+     * ir šio `SELECT` - būtent erasure lenktynės. `auditLog.record()` tokį
+     * rezultatą paverčia typed klaida, o ne tyliai grąžina kaip sėkmę.
+     */
+    if (rows.length === 0) {
+      const { rows: esama } = await vykdytojas.query(
+        `SELECT ${STULPELIU_SARASAS}, meta FROM audit_log WHERE id = $1`,
+        [eilute.id]
+      );
+      return esama.length ? iEilute(esama[0]) : null;
+    }
+
+    return iEilute(rows[0]);
+  };
+}
+
 function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
+  const iterpti = sukurtiIterpima(hashKeyId);
   /**
    * Readiness biudžetas ateina iš `init(env)` - to paties `READINESS_TIMEOUT_MS`,
    * kurį naudoja maršrutas. Antra reikšmė čia reikštų dvi konfigūracijos tiesas.
@@ -160,37 +208,66 @@ function createPostgresStore(pool, { hashKeyId, readinessBudgetMs }) {
      * „pakartotas rašymas nesukuria antros eilutės" apie visą sistemą būtų
      * stipriau, nei kodas daro.
      */
-    async append(eilute) {
-      const { rows } = await pool.query(
-        `INSERT INTO audit_log (id, event, subject_id, hash_key_id, result, request_id, meta)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (id) DO NOTHING
-         RETURNING ${STULPELIU_SARASAS}, meta`,
-        [
-          eilute.id,
-          eilute.event,
-          eilute.subjectId,
-          hashKeyId,
-          eilute.result,
-          eilute.requestId,
-          isrinktiMeta(eilute),
-        ]
-      );
+    async append(eilute, kontekstas = {}) {
+      /**
+       * IŠTRYNIMO BARJERAS (#155, 7.4e / #216).
+       *
+       * ⚠️ `jobId` YRA TRANSIENTINIS KONTEKSTAS, NE EILUTĖS LAUKAS.
+       *
+       * Jis ateina antru argumentu ir NIEKUR nepatenka į `INSERT`: `STULPELIAI`
+       * jo neturi, o `isrinktiMeta()` ima tik `META_LAUKAI`. Įdėjus jį į
+       * `eilute`, plikas job ID keliautų į `meta` JSONB - būtent tai, ko 7.4b
+       * draudžia. Atskiras parametras to padaryti negali STRUKTŪRIŠKAI, ne pagal
+       * susitarimą.
+       *
+       * ⚠️ BARJERAS TIK SUBJEKTUI SUSIETOMS EILUTĖMS. Be `subjectId` eilutė
+       * niekam nepriklauso; barjeruojant ją, vieno job'o ištrynimas sustabdytų
+       * su juo nesusijusį auditą.
+       */
+      const jobId = kontekstas.jobId ?? null;
+      const barjeruojama = Boolean(jobId && eilute.subjectId);
+
+      if (!barjeruojama) return iterpti(pool, eilute);
 
       /**
-       * Tuščias `rows` reiškia, kad eilutė su tuo `id` jau buvo - konfliktas
-       * praleistas. Grąžinam esamą, kad kvietėjas gautų tą patį objektą kaip ir
-       * pirmą kartą, o ne `undefined`.
+       * ⚠️ `SELECT` → `INSERT` NEPAKANKA - tarp jų telpa erasure mark, ir eilutė
+       * patenka į DB jau PO ištrynimo pabaigos.
+       *
+       * `assertNotBarredWithClient()` ima TĄ PATĮ `pg_advisory_xact_lock`, kurį
+       * ima `mark()` ir `transition()`, tad abi operacijos serializuojasi:
+       * arba mark laukia mūsų `COMMIT` (eilutė teisėtai įrašoma prieš barjerą, ir
+       * erasure ją paskui pašalina), arba mes laukiam mark `COMMIT` ir patikra
+       * mato žymą. Trečio kelio nėra. Lock'as transakcinis - atlaisvinamas
+       * `COMMIT`/`ROLLBACK`.
+       *
+       * ⚠️ PATIKRA VYKDOMA ŠIO KLIENTO TRANSAKCIJOJE, ne per `deletionTombstones`
+       * fasadą: fasadas jungtųsi pagal `process.env`, o tai gali būti KITA bazė
+       * (žr. `deletionTombstones/index.js assertNotBarred` komentarą).
        */
-      if (rows.length === 0) {
-        const { rows: esama } = await pool.query(
-          `SELECT ${STULPELIU_SARASAS}, meta FROM audit_log WHERE id = $1`,
-          [eilute.id]
-        );
-        return esama.length ? iEilute(esama[0]) : null;
-      }
+      const klientas = await pool.connect();
 
-      return iEilute(rows[0]);
+      try {
+        await klientas.query("BEGIN");
+        await assertNotBarredWithClient(klientas, jobId);
+        const irasyta = await iterpti(klientas, eilute);
+        await klientas.query("COMMIT");
+        return irasyta;
+      } catch (klaida) {
+        await klientas.query("ROLLBACK").catch(() => {});
+        /**
+         * ⚠️ BARJERO ATMETIMAS PROPAGUOJAMAS NEPAKEISTAS. Vertimas į
+         * `AuditWriteBlockedError` vyksta `auditLog.record()`, kur žinomas įvykio
+         * vardas. Čia jį suvyniojus, saugyklos sluoksnis įgytų audito rašymo
+         * žodyną, o klaidos kilmė taptų neatsekama.
+         *
+         * ⚠️ BET KOKIA KITA klaida (timeout, jungtis) irgi propaguojama - ji yra
+         * CHECK FAILED, ne „subjektas nepažymėtas". Tylaus `catch` čia nėra ir
+         * negali būti.
+         */
+        throw klaida;
+      } finally {
+        klientas.release();
+      }
     },
 
     /**

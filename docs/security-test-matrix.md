@@ -1724,6 +1724,43 @@ provizionavimas uždraustas; jos NĖRA `PASS` iki CI įrodymo (AGENTS.md §14).
 | ⚠️ **RIBA:** `auditKeysResolvable` yra STARTO snapshot'as, ne gyva būsena — atsinaujina tik per restartą | `docs/audit-storage.md` §16 | Pilnas generacijų skenavimas kiekvieno poll'o metu yra būtent tai, ko 7.4c loose index scan vengia. Vėliavėlės reikšmė snapshot'o nekeičia |
 | Backup runbook įvardija, kad `AUDIT_ID_SALT` ir `AUDIT_ID_SALT_PREVIOUS` saugomi ATSKIRAI ir atkuriami KARTU | `docs/backup-runbook.md` §1, §4, §5 | Atkūrus `audit_log` be raktų visos generacijos tampa neišsprendžiamos, ir GDPR ištrynimas nebeįmanomas — kopija atrodo pilna, bet yra bevertė |
 
+### #216 — audito ištrynimo galutinumas (#155, 7.4e)
+
+⚠️ **INVARIANTAS.** Sėkmingai baigus job'o ištrynimą, joks vėlesnis audito
+rašymas tam job'ui negali atkurti subjektui susietos eilutės. Iliustruojantis
+atvejis: `routes/exports.js` išsprendžia `linkedJobId`, rašo `EXPORT_STARTED`,
+generuoja ilgą eksportą, tuo metu ištrynimas grąžina 204 — ir tada įrašomas
+`EXPORT_COMPLETED`. Ištrynimas paskelbtas sėkmingu, o subjektas vėl turi eilutę.
+
+⚠️ **VIENAS TOMBSTONE AUTORITETAS.** Barjeras remiasi 7.5a `erasure_marks`
+(`utils/deletionTombstones`); antra auditui specifinė lentelė NEKURIAMA.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Pažymėtam `job_id` subjektui susieta audito eilutė NEATSIRANDA** | `auditErasureFinality`, **[PG NOT RUN]** `auditErasureFinality.integration` | Pašalinus barjerą iš `append()` → krinta BLOCK testai; RAW `SELECT` po ištrynimo randa eilutę |
+| ⚠️ **`append() === null` NEBĖRA sėkmė; `record()` grąžina typed nesėkmę** | `auditErasureFinality` | Grąžinus `return issaugota \|\| row` → barjero atmetimas virsta sėkmingu įrašu, ir `rasytiAudita()` mato sėkmę. `null` čia REALUS: `ON CONFLICT DO NOTHING` + `SELECT`, neradęs eilutės, yra erasure lenktynės |
+| `AuditWriteBlockedError` PAVELDI `AuditWriteError` | `auditErasureFinality` | `rasytiAudita` catch daro `instanceof AuditWriteError ? klaida : new AuditWriteError(...)`; nepaveldint blokas ties riba būtų suvyniotas, ir skirtumas dingtų ten, kur matomas kvietėjui |
+| ⚠️ **Trys būsenos: ALLOW · BLOCK · CHECK FAILED** | `auditErasureFinality` | Patikros gedimą (DB timeout, jungtis) palaikius „subjektas nepažymėtas" → fail-open ta pačia kryptimi, kurią barjeras uždaro. Testas: `isBarred` meta → rašymas krinta, eilutės nėra |
+| BLOCK ant blokuojančio įvykio ATMETA operaciją; ne-blokuojantis tęsiasi be eilutės | `auditErasureFinality` | Ne-blokuojantis kelias privalo grąžinti `null`, padidinti skaitiklį ir NESUKELTI `unhandledRejection` |
+| ⚠️ **Nėra `SELECT` → `INSERT` TOCTOU lango** | **[PG NOT RUN]** `auditErasureFinality.integration` | `assertNotBarredWithClient()` ima TĄ PATĮ `pg_advisory_xact_lock`, kurį ima `mark()`; be transakcijos žyma įsiterptų tarp patikros ir įterpimo. Testas laukia `pg_locks` FAKTO, ne `sleep` |
+| ⚠️ **Scenarijus A: erasure laimi → vėluojantis rašymas atmetamas → RAW eilutės nėra** | **[PG NOT RUN]** `auditErasureFinality.integration` | Galutinis įrodymas per RAW `SELECT`, ne `getAll()`: filtruojanti realizacija praeitų fasado patikrą, o našlaitės eilutės liktų DB |
+| Scenarijus B: teisėtai įrašyta eilutė pašalinama, ir vėluojantis rašymas jos NEATKURIA | **[PG NOT RUN]** `auditErasureFinality.integration` | Be barjero `EXPORT_COMPLETED` po ištrynimo grąžintų subjektą į lentelę |
+| Scenarijus C: DVI nepriklausomos instancijos — invariantas toks pat | **[PG NOT RUN]** `auditErasureFinality.integration` | Procesui lokali spyna nėra korektiškumo mechanizmas; antra `Pool` instancija tai įrodo |
+| Barjeras prasideda nuo `deletion_pending`, o `deletion_failed` jį LAIKO | `auditErasureFinality` | Laukiant `deleted` liktų langas, lygus ištrynimo trukmei; nepavykęs ištrynimas reiškia, kad duomenys gali dar egzistuoti |
+| Barjeras taikomas TIK subjektui susietoms eilutėms | `auditErasureFinality` | Barjeruojant įvykius be `subjectId`, vieno job'o ištrynimas sustabdytų su juo nesusijusį auditą (`LOGIN_SUCCESS`) |
+| ⚠️ **Rezultatas NEKEŠUOJAMAS** | `auditErasureFinality` | Kešas atvertų būtent tą langą, kurį barjeras uždaro. Testas: žyma, atsiradusi TARP dviejų rašymų, veikia iš karto |
+| Barjero kreipimasis telpa į `AUDIT_WRITE_TIMEOUT_MS`; viršijimas yra CHECK FAILED | `auditErasureFinality` | Patikra vyksta `append()` viduje, tad po ta pačia `suRiba()` riba; lėta patikra duoda timeout, ne tylų praėjimą |
+| ⚠️ **Transientinis `job_id` NEPERSISTINAMAS** nė viename stulpelyje ar `meta` | `auditErasureFinality`, **[PG NOT RUN]** `auditErasureFinality.integration` (RAW `to_jsonb(a)::text`) | `jobId` perduodamas `append()` ANTRU argumentu; įdėjus jį į `row`, jis keliautų per `isrinktiMeta()` į `meta` JSONB |
+| ⚠️ **`JOB_EXECUTION_DENIED` `details` nebeneša plikojo job ID** | `auditErasureFinality` (tripwire) | `details` yra `META_LAUKAI` allowlist'e, tad persistinamas į `meta`. Atsineštas 7.4b pažeidimas, pataisytas čia. Tripwire uždaro KLASĘ: joks `details` neinterpoliuoja job/meeting ID |
+| ⚠️ **Inline `meetingId` be `jobId` NEBEKURIA persistentinio GDPR subjekto** | `auditErasureFinality` | Iki 7.4e subjektu tapdavo `HMAC(meetingId)`, o `removeBySubjectIdentifier(jobId)` jo NIEKADA nerasdavo — nepasiekiamas asmens įrašas. Mutacija: grąžinus `?? entry.meetingId` fallback → krinta |
+| ⚠️ **Ištrynimo administravimo įvykiai NĖRA susieti su subjektu** | `auditErasureFinality` (inventoriaus tripwire), `erasureMarks` | `ERASURE_MARK_*` ir `ADMIN_*` rašomi apie PAŽYMĖTĄ job'ą; su subject binding barjeras atmestų operatoriaus kelius (patikrinta mutacija: krinta 17 testų). Jie prisijungia prie `DATA_ERASED`/`LIFECYCLE_DELETION` šeimos, kuri subjekto neturi nuo pat pradžių |
+| ⚠️ **KAINA: šie įrašai iškrenta iš `GET /api/audit?jobId=`** | `auditErasureFinality` | Filtras eina per `candidateSubjectIds`, tad be subjekto įrašas ten nepatenka. Koreliacija lieka per `requestId` ir ištrynimo kvitus — kurie tame filtre nebuvo IR ANKSČIAU |
+| ⚠️ **LATENTINĖ GARANTIJA: nė vienas produkcinis BLOKUOJANTIS įvykis nėra susietas su subjektu** | `auditErasureFinality` (inventoriaus tripwire) | Todėl „BLOCK atmeta operaciją" produkciniame kelyje neišsikviečia ir įrodomas SINTETINIU įvykiu. Testas krinta, jei kas nors susietų blokuojantį įvykį su `jobId` — priverčia įvertinti kelią prieš tai |
+| Blokas ties HTTP atsako 404 su TUO PAČIU kūnu kaip nerastas jobas | `auditErasureFinality` | 503 („bandykite vėliau") būtų melagingas — pakartojimas niekada nepavyks. 410 arba savas `code` leistų atskirti „niekada nebuvo" nuo „buvo ir ištrintas" |
+| ⚠️ **Audito ir žymų pool'ai statomi iš VIENO išspręsto šaltinio** | `auditErasureFinality` | `auditStore` priima `DATABASE_URL` ARBA `PGHOST`, o `deletionTombstones` iki 7.4e — tik `DATABASE_URL`. Dokumentuotame Compose diegime (`PG*`) auditas eitų į DB, o žymos liktų atmintyje: barjeras skaitytų TUŠČIĄ lentelę ir visada praleistų, tyliai |
+| ⚠️ **NEDENGIA: atmintinio režimo TOCTOU lango** | `auditErasureFinality` (komentaras `auditStore/memoryStore.js`) | Be transakcijos „patikrink, tada rašyk" langas lieka. Ta pati riba, kurią įvardija `deletionTombstones` `ATMINTIES_ISPEJIMAS`, ne atskiras gedimas |
+| ⚠️ **PRIELAIDA: barjeras galioja tol, kol gyvuoja `erasure_marks` žyma** | `revivalHorizons`, `erasureMarks` | 7.5a reikalauja, kad žymos pergyventų prikėlimo horizontą ir kopijų langą. Žymai pasibaigus, barjeras nustotų veikti TYLIAI. 7.4e to reikalavimo nedubliuoja, bet nuo jo priklauso |
+
 ### #183 — persistentinės ištrynimo žymos (#155, 7.5a)
 
 ✅ **[PG NOT RUN] ŠIAME SKYRIUJE IŠSPRĘSTA CI.** `erasureMarks.integration`

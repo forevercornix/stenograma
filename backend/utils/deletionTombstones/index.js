@@ -29,6 +29,7 @@ const { Pool } = require("pg");
 
 const { createLogger } = require("../logger");
 const memoryStore = require("./memoryStore");
+const { pgJungtiesNustatymai, arNurodytaPostgres } = require("../pgConnection");
 const {
   createErasureMarkStore,
   LOCK_NAMESPACE,
@@ -63,13 +64,26 @@ let _pool = null;
 let _init = null;
 let _ispejta = false;
 
+/**
+ * ⚠️ `PGHOST` PRIIMAMAS LYGIAI KAIP `DATABASE_URL` (#216, 7.4e).
+ *
+ * Iki 7.4e čia buvo tik `env.DATABASE_URL`, o `auditStore` priimdavo abu. Iš to
+ * sekė dokumentuotas Compose diegimas (`PG*`, be `DATABASE_URL`), kuriame
+ * auditas eina į PostgreSQL, o žymos lieka ATMINTYJE - ir 7.4e barjeras skaitytų
+ * tuščią `erasure_marks` lentelę, visada praleisdamas. Tyliai.
+ *
+ * Suderinamumo patikra to neišspręstų: ji reikalautų `DATABASE_URL`, o jį
+ * pridėjus kristų `auditStore` `DATABASE_URL` + `PGHOST` konfliktas - aklavietė.
+ * Todėl suvienodinama pati ATRANKA, o abu pool'ai statomi iš to paties
+ * `utils/pgConnection.js`.
+ */
 function pasirinktiBackend(env) {
-  return env.DATABASE_URL ? "postgres" : "memory";
+  return arNurodytaPostgres(env) ? "postgres" : "memory";
 }
 
 async function initializePostgres(env) {
   const pool = new Pool({
-    connectionString: env.DATABASE_URL,
+    ...pgJungtiesNustatymai(env),
     connectionTimeoutMillis: Number(env.PG_CONNECT_TIMEOUT_MS) || 5000,
   });
 
@@ -617,6 +631,8 @@ async function _clearForTests() {
 function _stopSweepForTests() {}
 
 module.exports = {
+  /** ⚠️ Eksportuojama TESTUI: mutacija „vėl tik `DATABASE_URL`" turi būti pagaunama. */
+  pasirinktiBackend,
   TOMBSTONE_STATUS,
   ERASURE_REASON,
   ACTOR_KIND,

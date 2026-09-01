@@ -60,7 +60,34 @@ const memoryStore = {
    * Linijinė paieška priimtina: atminties žurnalą riboja `AUDIT_MAX_ENTRIES`,
    * o persistentinis kelias šios šakos nenaudoja.
    */
-  async append(eilute) {
+  async append(eilute, kontekstas = {}) {
+    /**
+     * IŠTRYNIMO BARJERAS ATMINTINIAME BACKEND'E (#155, 7.4e / #216).
+     *
+     * ⚠️ NETIKRŲ `erasure_marks` ČIA NĖRA IR NEBUS. Kviečiamas TAS PATS
+     * autoritetas (`utils/deletionTombstones`) - antra tiesos kopija būtų
+     * tiksliai tai, ko #216 vengia.
+     *
+     * ⚠️ APIMTIS: `deletionTombstones` backend'ą renka pagal konfigūraciją, NE
+     * pagal audito backend'ą. Be `DATABASE_URL`/`PGHOST` barjeras yra procesui
+     * lokalus - ir tai priimtina, nes atmintinis auditas ir taip procesui
+     * lokalus. Su jais barjeras eina į DB, nors auditas lieka atmintyje.
+     *
+     * ⚠️ TRANSAKCIJOS ČIA NĖRA, tad „patikrink, tada rašyk" langas lieka. Tai ta
+     * pati riba, kurią įvardija `deletionTombstones` `ATMINTIES_ISPEJIMAS`, ne
+     * atskiras gedimas: atmintinė saugykla neišgyvena nė restarto.
+     */
+    const jobId = kontekstas.jobId ?? null;
+
+    if (jobId && eilute.subjectId) {
+      const tombstones = require("../deletionTombstones");
+      if (await tombstones.isBarred(jobId)) {
+        const klaida = new Error(`Job ${jobId} užbarjeruotas ištrynimo žyma.`);
+        klaida.code = "ERASURE_BARRIER";
+        throw klaida;
+      }
+    }
+
     const esama = eilutes.find((e) => e.id === eilute.id);
     if (esama) return esama;
 

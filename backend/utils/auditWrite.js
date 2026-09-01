@@ -73,6 +73,28 @@ class AuditWriteError extends Error {
 }
 
 /**
+ * BARJERO ATMETIMAS (#155, 7.4e / #216) - subjektas jau pažymėtas ištrynimui.
+ *
+ * ⚠️ PAVELDI `AuditWriteError` SĄMONINGAI. `rasytiAudita()` catch daro
+ * `klaida instanceof AuditWriteError ? klaida : new AuditWriteError(...)`, tad
+ * nepaveldint blokas ties riba būtų suvyniotas į bendrą klaidą, ir skirtumas
+ * dingtų būtent ten, kur jis matomas kvietėjui.
+ *
+ * ⚠️ TAI NE GEDIMAS. `AUDIT_WRITE_FAILED` reiškia „laikina, bandykite vėliau";
+ * čia pakartojimas NIEKADA nepavyks - subjektas ištrintas. Skirtumą neša `code`,
+ * o HTTP sluoksnyje - `utils/auditHttp.js` atvaizdavimas.
+ */
+class AuditWriteBlockedError extends AuditWriteError {
+  constructor(event, jobIdContext) {
+    super(event, "subjektas pažymėtas ištrynimui (erasure barrier)");
+    this.name = "AuditWriteBlockedError";
+    this.code = "AUDIT_WRITE_BLOCKED";
+    /** ⚠️ TIK procese. Į HTTP atsakymą, `audit_log` ar `meta` nepatenka. */
+    this.barrierStatus = jobIdContext || null;
+  }
+}
+
+/**
  * OBSERVABILITY SKAITIKLIS.
  *
  * ⚠️ REPO NETURI BENDROS METRIKŲ INFRASTRUKTŪROS. `utils/qualityMetrics.js` yra
@@ -317,6 +339,7 @@ module.exports = {
   DEFAULT_AUDIT_WRITE_TIMEOUT_MS,
   auditWriteTimeoutMs,
   AuditWriteError,
+  AuditWriteBlockedError,
   rasytiAudita,
   getAuditCounters,
   _resetAuditCountersForTests,

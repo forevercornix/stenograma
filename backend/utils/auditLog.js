@@ -514,8 +514,22 @@ async function record(entry = {}) {
     timestamp: new Date().toISOString(),
     event: normalizeEvent(entry),
 
-    // Niekada nesaugome tiesioginio meeting/job identifikatoriaus.
-    subjectId: pseudonymizeIdentifier(entry.jobId ?? entry.meetingId ?? null),
+    /**
+     * Niekada nesaugome tiesioginio meeting/job identifikatoriaus.
+     *
+     * ⚠️ `meetingId` FALLBACK PAŠALINTAS (#155, 7.4e / #216).
+     *
+     * Inline `/api/generate` kelias `jobId` neturi, tad subjektu tapdavo
+     * `HMAC(meetingId)` - o `removeBySubjectIdentifier(jobId)` ieško PAGAL JOB
+     * ID ir tokio įrašo NIEKADA neranda. Rezultatas: persistentinis GDPR
+     * subjektas, kurio job erasure negali ištrinti.
+     *
+     * Nei plikas, nei `HMAC(meetingId)` atskiru GDPR subjektu neįvedamas - jam
+     * nėra ištrynimo gyvavimo ciklo. Be `jobId` įvykis rašomas BE subject
+     * binding: jis lieka techninė telemetrija (tiekėjas, trukmė, `usage`,
+     * redakcijos būsena), o ne asmens įrašas.
+     */
+    subjectId: pseudonymizeIdentifier(entry.jobId ?? null),
 
     result: entry.success === false ? "failure" : "success",
 
@@ -588,11 +602,52 @@ async function record(entry = {}) {
    * yra tik programos spėjimas. Grąžinus jį, kvietėjas matytų vieną laiką, o
    * lentelėje gulėtų kitas - ir du atsakymai apie tą patį įrašą nesutaptų.
    */
-  const issaugota = await auditStore.current().append(row);
+  /**
+   * ⚠️ `jobId` PERDUODAMAS ANTRU ARGUMENTU, NE `row` LAUKU (#155, 7.4e / #216).
+   *
+   * Barjerui reikia PLIKO `job_id` (`erasure_marks` raktuojamas juo, ne
+   * rotuojamu `subject_id`). `row` yra tai, kas PERSISTINAMA; įdėjus `jobId` į
+   * jį, identifikatorius keliautų per `isrinktiMeta()` į `meta` JSONB. Atskiras
+   * parametras to padaryti negali struktūriškai.
+   */
+  let issaugota;
+
+  try {
+    issaugota = await auditStore.current().append(row, { jobId: entry.jobId ?? null });
+  } catch (klaida) {
+    /**
+     * ⚠️ BARJERO ATMETIMAS TAMPA TYPED KLAIDA ČIA - kur žinomas įvykio vardas.
+     * Saugyklos sluoksnis audito rašymo žodyno neturi ir neturi įgyti.
+     */
+    if (klaida && klaida.code === "ERASURE_BARRIER") {
+      const { AuditWriteBlockedError } = require("./auditWrite");
+      throw new AuditWriteBlockedError(row.event, klaida.status || null);
+    }
+    throw klaida;
+  }
 
   enforceMaxEntries();
 
-  return issaugota || row;
+  /**
+   * ⚠️ `null` NEBĖRA SĖKMĖ (#155, 7.4e / #216).
+   *
+   * Buvęs `return issaugota || row` grąžindavo VIETINĮ objektą, kai saugykla
+   * eilutės nepatvirtino - ir `rasytiAudita()` matydavo sėkmę. Barjero atmetimas
+   * ar dingusi eilutė tapdavo „įrašyta".
+   *
+   * ⚠️ IR `null` ČIA YRA REALUS, ne teorinis: `postgresStore.append()` grąžina
+   * `null`, kai `ON CONFLICT DO NOTHING` praleido įterpimą, o po jo `SELECT`
+   * eilutės neberado - t. y. ją ištrynė erasure TARP dviejų sakinių.
+   *
+   * `PRIVACY_MODE` šio kelio nepasiekia: jis grąžina `null` funkcijos pradžioje,
+   * dar prieš `append()`.
+   */
+  if (issaugota === null || issaugota === undefined) {
+    const { AuditWriteError } = require("./auditWrite");
+    throw new AuditWriteError(row.event, "saugykla nepatvirtino eilutės");
+  }
+
+  return issaugota;
 }
 
 /** ⚠️ ASYNC NUO 7.4a (#210) - žr. `record()` komentarą. */
