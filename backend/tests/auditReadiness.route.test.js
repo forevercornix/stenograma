@@ -149,6 +149,40 @@ test("#216 READY: nepasiekiamas ištrynimo barjeras → 503 su ATSKIRA priežast
   }
 });
 
+test("#216 READY: ATMINTINIS auditas duoda `auditBarrierReachable: true` - demo diegimai lieka paruošti", async () => {
+  /**
+   * ⚠️ TYLI REGRESIJA, KURIOS KITAS TESTAS NEPAGAUTŲ.
+   *
+   * Testas „nepasiekiamas barjeras → 503" tikrina `false` KARTU su
+   * `auditStoreReachable: true`. Jei naujas komponentas atmintiniame režime
+   * grąžintų `false`, tas testas liktų žalias, o `/api/ready` taptų 503
+   * KIEKVIENAM diegimui be DB - `docker-compose.demo.yml`, `quickstart`, visi
+   * mock profiliai.
+   *
+   * Atmintiniame režime `erasure_marks` lentelės nėra IR NEREIKIA: barjerą ten
+   * vykdo `deletionTombstones` atmintinis backend'as. Tad teisingas atsakymas
+   * yra `true`, ir jis tikrinamas, o ne prielaidžiamas.
+   *
+   * Grandinė, kurią tai pina: `isReady()` turi eksplicitinę `memory` šaką
+   * (`resolveAuditBackend(env) === "memory" ? true : paruosta`), o
+   * `memoryStore.probeBarrier()` grąžina `true` dėl kontrakto pariteto.
+   */
+  const { resolveAuditBackend } = require("../utils/auditStore/backendSelection");
+  assert.equal(resolveAuditBackend({}), "memory", "prielaida: be konfigūracijos - atmintis");
+
+  assert.equal(
+    await auditStore.probeBarrier({}),
+    true,
+    "atmintiniame režime barjeras pasiekiamas pagal apibrėžimą"
+  );
+
+  /** Ir per HTTP: šis rinkinys sukasi be DB, tad tai TAS PATS kelias. */
+  const ready = await request(app).get("/api/ready");
+
+  assert.equal(ready.status, 200, "diegimas be DB privalo likti paruoštas");
+  assert.equal(ready.body.components.auditBarrierReachable, true);
+});
+
 test("#216 READY: barjero zondas tikrina STULPELIUS, ne vien lentelę, ir ima juos iš ŽYMŲ autoriteto", async () => {
   /**
    * ⚠️ BE TIKROS DB - SUKLASTOTU POOL'U, kaip ir kiti šio failo zondų testai.
