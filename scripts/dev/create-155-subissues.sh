@@ -77,7 +77,7 @@ spec, outdir, mapfile, only = (
 tekstas = spec.read_text(encoding="utf-8")
 
 # `## [7.x] Pavadinimas` ... iki kito `## [`
-dalys = re.split(r"^## \[(\d+\.\d+[ab]?)\] (.+)$", tekstas, flags=re.M)[1:]
+dalys = re.split(r"^## \[(\d+\.\d+[a-z]?)\] (.+)$", tekstas, flags=re.M)[1:]
 
 visi, eilutes = [], []
 for i in range(0, len(dalys), 3):
@@ -92,6 +92,17 @@ for i in range(0, len(dalys), 3):
     failas = outdir / f"{kodas}.md"
     failas.write_text(body + "\n", encoding="utf-8")
     eilutes.append(f"{kodas}\t[{kodas}] {pavadinimas}\t{failas}")
+
+visos_antrastes = re.findall(r"^## \[.*$", tekstas, flags=re.M)
+if len(visos_antrastes) != len(visi):
+    atpazintos = {f"[{k}]" for k in visi}
+    nezinomos = [h for h in visos_antrastes
+                 if not any(h.startswith(f"## {a}") for a in atpazintos)]
+    print(f"  KLAIDA: {len(visos_antrastes)} antrasciu, atpazinta {len(visi)}.",
+          file=sys.stderr)
+    for h in nezinomos:
+        print(f"    neatpazinta: {h}", file=sys.stderr)
+    raise SystemExit(1)
 
 if only and not eilutes:
     print(f"  KLAIDA: spec neturi sekcijos [{only}]. Yra: {', '.join(visi)}", file=sys.stderr)

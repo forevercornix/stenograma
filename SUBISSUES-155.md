@@ -1,6 +1,6 @@
 # SUBISSUES-155
 
-Vieninteliai sub-issue tekstų šaltinis. `create-155-subissues.sh` juos skaito.
+Vieninteliai sub-issue tekstų šaltinis. `scripts/dev/create-155-subissues.sh` juos skaito.
 
 Formatas: `## [7.x] Pavadinimas`, tada body iki kito `##`.
 
