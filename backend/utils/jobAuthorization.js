@@ -229,9 +229,21 @@ async function authorizeJobOrAudit(job, jobId, permission = PERMISSIONS.JOB_CREA
       event: "JOB_EXECUTION_DENIED",
       success: false,
       outcome: decision.reason,
-      // Aktoriaus ID rašomas, nes jis JAU yra jobo įraše ir audite (#17) -
-      // naujos informacijos tai neatskleidžia. Kredencialų čia nėra jokių.
-      details: `jobId=${jobId} permission=${permission} reason=${decision.reason}`,
+      /**
+       * ⚠️ PLIKAS `jobId` ČIA NEBERAŠOMAS (#155, 7.4e / #216).
+       *
+       * `details` yra `auditStore/fields.js` `META_LAUKAI` allowlist'e, tad jo
+       * turinys PERSISTINAMAS į `audit_log.meta` JSONB. Interpoliuotas `jobId`
+       * reiškė plikąjį identifikatorių audito lentelėje - tiksliai tai, ką 7.4b
+       * draudžia, ir ko `removeBySubjectIdentifier()` niekada nepasiektų
+       * (`subjectId` čia yra `null`).
+       *
+       * Subject binding NEPRIDEDAMAS: šis įvykis yra blokuojantis ir rašomas
+       * apie job'ą, kuris gali būti kaip tik pažymėtas ištrynimui - susiejus jį,
+       * barjeras atmestų patį atmetimo pėdsaką. Koreliacija lieka per
+       * `requestId` ir serverio logą žemiau, kuris NĖRA persistentinis auditas.
+       */
+      details: `permission=${permission} reason=${decision.reason}`,
     });
 
     log.warn("Jobo vykdymas atmestas", { jobId, permission, reason: decision.reason });

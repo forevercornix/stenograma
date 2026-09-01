@@ -63,6 +63,13 @@ const privacy = [
   "exportVariants.route",
   "exports.route",
   "auditErasure.service",
+  /**
+   * #216 (7.4e): audito ištrynimo galutinumas - barjeras prieš subjektui susietą
+   * rašymą po ištrynimo. Eina TEN, KUR `auditErasure.service`: ta pati garantijų
+   * šeima, tik iš kitos pusės - ana tikrina, kad ištrynimas RANDA įrašus, ši -
+   * kad po jo naujų NEATSIRANDA.
+   */
+  "auditErasureFinality",
   "auditLog",
   "auditStoreFields",
   "auditKeyRing",

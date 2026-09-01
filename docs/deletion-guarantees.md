@@ -117,9 +117,15 @@ sprendimas, ne laikmačio išvada. Todėl `erasure-marks list` tikrinimas yra
 operatoriaus procedūra: `pending` žyma be vykdytojo yra incidentas, ne normali
 būsena.
 
-⚠️ **Ši garantija galioja TIK ten, kur nustatytas `DATABASE_URL`.** Be jo sistema
-sąmoningai grįžta į atmintinį režimą – žr. 2 skyrių. Startas tokiu atveju garsiai
-įspėja.
+⚠️ **Ši garantija galioja TIK ten, kur nurodyta PostgreSQL** – per `DATABASE_URL`
+**arba** per `PG*` (`PGHOST` ir kt.). Be jų sistema sąmoningai grįžta į atmintinį
+režimą – žr. 2 skyrių. Startas tokiu atveju garsiai įspėja.
+
+⚠️ **`PG*` PRIIMAMAS NUO [7.4e].** Iki tol žymos rinkosi PostgreSQL tik pagal
+`DATABASE_URL`, o auditas priimdavo abu. Dokumentuotame Compose diegime (`PG*`,
+be `DATABASE_URL`) tai reiškė auditą duomenų bazėje ir žymas atmintyje – t. y.
+7.4e barjeras skaitytų tuščią `erasure_marks` lentelę ir visada praleistų, tyliai.
+Abu pool'ai dabar statomi iš to paties `utils/pgConnection.js`.
 
 ---
 
@@ -132,11 +138,12 @@ auditoriui.
 jis gali spėti iškviesti išorinį tiekėją arba parašyti laikiną failą. Rezultatas
 į jobą nepateks, bet tarpiniai pėdsakai gali likti, kol juos surinks retencija.
 
-⚠️ **Ištrynimo žymos neišgyvena restarto – BE `DATABASE_URL`.** Atmintiniame
-režime jos gyvena tik proceso atmintyje ir nėra bendros replikoms: po restarto
-vėluojanti eilės žinutė ištrintam jobui vėl galėtų kurti artefaktus.
+⚠️ **Ištrynimo žymos neišgyvena restarto – BE PostgreSQL.** Kai nenurodytas nei
+`DATABASE_URL`, nei `PG*`, jos gyvena tik proceso atmintyje ir nėra bendros
+replikoms: po restarto vėluojanti eilės žinutė ištrintam jobui vėl galėtų kurti
+artefaktus.
 
-Su `DATABASE_URL` šio apribojimo **nebėra** (žr. 1 skyrių, [7.5a]). Apribojimas
+Su PostgreSQL šio apribojimo **nebėra** (žr. 1 skyrių, [7.5a]). Apribojimas
 paliktas **sąlyginis**, o ne pašalintas: besąlygiškas pašalinimas būtų melagingas
 teiginys atmintiniam režimui, kuris tebėra palaikomas ir numatytasis desktop
 diegime.

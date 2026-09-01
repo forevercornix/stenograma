@@ -100,6 +100,34 @@ function iIrasa(row) {
  * pačioje DB ir transakcijoje, kur vyksta rašymas. Kitos DB pasiekiamumas apie
  * šį rašymą neįrodo nieko.
  */
+/**
+ * BARJERO PASIEKIAMUMAS PER SVETIMĄ JUNGTĮ (#155, 7.4e / #216).
+ *
+ * ⚠️ UŽKLAUSA GYVENA ČIA, NE KVIETĖJO MODULYJE.
+ *
+ * 7.4e barjeras skaito `erasure_marks` per AUDITO jungtį, tad readiness turi
+ * patikrinti lentelę būtent per ją - `init()` zondas tikrina savo pool'ą.
+ * Bet pati užklausa yra ŽYMŲ modulio dalykas: `SELECT ... FROM erasure_marks`
+ * audito store'e būtų antra vieta, kur žinoma šios lentelės forma, ir
+ * `erasureMarks.test.js` „VIENAS AUTORITETAS" tripwire tai pagauna (pagavo).
+ *
+ * ⚠️ TIKRINAMI STULPELIAI, NE VIEN LENTELĖ - ta pati priežastis kaip `init()`:
+ * `SELECT 1` pavyksta ir tada, kai diegimas nutrūko po lentelės sukūrimo, bet
+ * PRIEŠ vėlesnę migraciją.
+ *
+ * ⚠️ NIEKADA NEMETA: readiness privalo atsakyti ir tada, kai atsakymas yra „ne".
+ */
+async function probeBarrierWithClient(vykdytojas) {
+  if (!vykdytojas || typeof vykdytojas.query !== "function") return false;
+
+  try {
+    await vykdytojas.query(`SELECT ${STULPELIAI} FROM erasure_marks WHERE false`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function assertNotBarredWithClient(klientas, jobId) {
   if (!klientas || typeof klientas.query !== "function") {
     throw new TypeError("assertNotBarred: reikia kviečiančiojo DB kliento (transakcijos).");
@@ -559,6 +587,7 @@ function createErasureMarkStore(pool) {
 module.exports = {
   STULPELIAI,
   assertNotBarredWithClient,
+  probeBarrierWithClient,
   createErasureMarkStore,
   LOCK_NAMESPACE,
   RETENCIJOS_BATCH,

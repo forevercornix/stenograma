@@ -73,12 +73,63 @@ class AdminOverrideDenied extends Error {
  * ⚠️ ASYNC NUO 7.4a (#210). `ADMIN_ACCESS_DENIED` yra BLOKUOJANTIS: atmetimas
  * negali būti grąžintas anksčiau, nei patvirtintas audito įrašas.
  */
-async function assertSessionAdmin(actor, operation, jobId) {
+/**
+ * ⚠️ IŠTRYNIMO ADMINISTRAVIMO ĮVYKIAI NĖRA SUSIETI SU SUBJEKTU (#155, 7.4e / #216).
+ *
+ * Šio failo `rasytiAudita()` kvietimai SĄMONINGAI neperduoda `jobId`, tad
+ * `subjectId` lieka `null`.
+ *
+ * KODĖL. 7.4e barjeras atmeta subjektui susietą audito rašymą, kai `job_id`
+ * pažymėtas `erasure_marks`. Šie įvykiai pagal apibrėžimą rašomi apie PAŽYMĖTĄ
+ * job'ą - `ERASURE_MARK_RETRIED` rašomas iškart po `tombstones.retry()`. Palikus
+ * subject binding, operatoriaus ir administratoriaus keliai nustotų veikti
+ * visiškai (patikrinta: 17 testų).
+ *
+ * ⚠️ TAI NE IŠIMTIS BARJERUI, O TA PATI TAISYKLĖ, KURIĄ REPO JAU TAIKO.
+ * `DATA_ERASED` (`utils/jobErasure.js`), `LIFECYCLE_DELETION`
+ * (`services/lifecycleService.js`) ir `RETENTION_PURGE` subjekto neturi nuo
+ * pat pradžių - ištrynimo KVITAS negali būti ištrinamas savo paties
+ * dokumentuojamo ištrynimo. Šie septyni prisijungia prie tos pačios šeimos.
+ *
+ * ⚠️ KAINA, ĮVARDYTA: `GET /api/audit?jobId=` filtruoja per `candidateSubjectIds`,
+ * tad šie įrašai iš to filtro iškrenta. Koreliacija lieka per `requestId` ir per
+ * ištrynimo kvitus, kurie tame filtre nebuvo IR ANKSČIAU.
+ */
+/**
+ * ⚠️ IŠTRYNIMO ADMINISTRAVIMO ĮVYKIAI NĖRA SUSIETI SU SUBJEKTU (#155, 7.4e / #216).
+ *
+ * Šio failo `rasytiAudita()` kvietimai SĄMONINGAI neperduoda `jobId`, tad
+ * `subjectId` lieka `null`.
+ *
+ * KODĖL. 7.4e barjeras atmeta subjektui susietą audito rašymą, kai `job_id`
+ * pažymėtas `erasure_marks`. Šie įvykiai pagal apibrėžimą rašomi apie PAŽYMĖTĄ
+ * job'ą - `ERASURE_MARK_RETRIED` rašomas iškart po `tombstones.retry()`. Palikus
+ * subject binding, operatoriaus ir administratoriaus keliai nustotų veikti
+ * visiškai (patikrinta mutacija: krinta 17 testų).
+ *
+ * ⚠️ TAI NE IŠIMTIS BARJERUI, O TA PATI TAISYKLĖ, KURIĄ REPO JAU TAIKO.
+ * `DATA_ERASED` (`utils/jobErasure.js`), `LIFECYCLE_DELETION`
+ * (`services/lifecycleService.js`) ir `RETENTION_PURGE` subjekto neturi nuo pat
+ * pradžių - ištrynimo KVITAS negali būti ištrinamas savo paties dokumentuojamo
+ * ištrynimo. Šie septyni prisijungia prie tos pačios šeimos.
+ *
+ * ⚠️ KAINA, ĮVARDYTA: `GET /api/audit?jobId=` filtruoja per `candidateSubjectIds`,
+ * tad šie įrašai iš to filtro iškrenta. Koreliacija lieka per `requestId` ir per
+ * ištrynimo kvitus, kurie tame filtre nebuvo IR ANKSČIAU.
+ */
+/**
+ * ⚠️ `jobId` PARAMETRO NEBĖRA (#155, 7.4e / #216).
+ *
+ * Jis buvo naudojamas TIK audito subject binding'ui, kurio šis įvykis nebeturi
+ * (žr. failo viršų). Palikus jį nenaudojamą, lintas praneštų apie negyvą
+ * parametrą - o tylus `_jobId` pervadinimas paslėptų, kad kvietėjams jo taip pat
+ * nebereikia.
+ */
+async function assertSessionAdmin(actor, operation) {
   if (isSessionAdmin(actor)) return;
 
   await rasytiAudita({
     event: ADMIN_EVENT.ACCESS_DENIED,
-    jobId,
     actor: actor ? actor.ownerId : null,
     success: false,
     details: `operation=${operation} ownerKind=${actor ? actor.ownerKind : "none"}`,
@@ -104,7 +155,7 @@ async function assertSessionAdmin(actor, operation, jobId) {
  * @param {{ownerId: string|null, ownerKind: string, role: string}} actor
  */
 async function adminDeleteJob(jobId, actor) {
-  await assertSessionAdmin(actor, "delete", jobId);
+  await assertSessionAdmin(actor, "delete");
 
   const job = await jobStore.system.get(jobId);
   if (!job) {
@@ -178,7 +229,6 @@ async function adminDeleteJob(jobId, actor) {
 
   await rasytiAudita({
     event: ADMIN_EVENT.DELETE_OVERRIDE,
-    jobId,
     actor: actor.ownerId,
     success: result.complete,
     details:
@@ -333,7 +383,7 @@ async function valytiNaslaitiSuZyma(jobId, actorKind) {
  * ID, galėtų ištrinti svetimus pėdsakus.
  */
 async function adminCleanupOrphan(jobId, actor) {
-  await assertSessionAdmin(actor, "orphan_cleanup", jobId);
+  await assertSessionAdmin(actor, "orphan_cleanup");
 
   /** `actor_kind=operator`: privilegija panaudota, nuosavybė peržengta. */
   const { outcome, success, barjeras } = await valytiNaslaitiSuZyma(jobId, ACTOR_KIND.OPERATOR);
@@ -347,7 +397,6 @@ async function adminCleanupOrphan(jobId, actor) {
    */
   await rasytiAudita({
     event: ADMIN_EVENT.ORPHAN_CLEANUP,
-    jobId,
     actor: actor.ownerId,
     success,
     details: `override=admin ownershipVerified=false barrier=${barjeras || "none"}`,
@@ -372,7 +421,6 @@ async function desktopCleanupOrphan(jobId, actor) {
   if (!actor || actor.ownerKind !== OWNER_KIND.UNOWNED) {
     await rasytiAudita({
       event: ADMIN_EVENT.ACCESS_DENIED,
-      jobId,
       actor: actor ? actor.ownerId : null,
       success: false,
       details: `operation=desktop_orphan_cleanup ownerKind=${actor ? actor.ownerKind : "none"}`,

@@ -222,8 +222,19 @@ test("RETENCIJA: `DELETION_TOMBSTONE_TTL_HOURS` gali TIK pailginti", async () =>
   assert.equal(ilgesnis, 8760 * 3600 * 1000);
 });
 
-test("FALLBACK: be `DATABASE_URL` - atmintis, ir įspėjimas tai pasako GARSIAI", () => {
-  assert.equal(tombstones.backend, "memory", "be DATABASE_URL backend'as privalo būti atmintis");
+test("FALLBACK: be PostgreSQL - atmintis, ir įspėjimas tai pasako GARSIAI", () => {
+  assert.equal(tombstones.backend, "memory", "be PostgreSQL backend'as privalo būti atmintis");
+
+  /**
+   * ⚠️ `PG*` PRIIMAMAS LYGIAI KAIP `DATABASE_URL` (#216, 7.4e).
+   *
+   * Iki 7.4e atranka žiūrėjo tik į `DATABASE_URL`, o `auditStore` priimdavo abu.
+   * Dokumentuotame Compose diegime (`PG*`) auditas eidavo į DB, o žymos liktų
+   * atmintyje - barjeras skaitytų tuščią lentelę ir visada praleistų, tyliai.
+   */
+  assert.equal(tombstones.pasirinktiBackend({ PGHOST: "db" }), "postgres");
+  assert.equal(tombstones.pasirinktiBackend({ DATABASE_URL: "postgres://x/y" }), "postgres");
+  assert.equal(tombstones.pasirinktiBackend({}), "memory");
 
   const i = tombstones.ATMINTIES_ISPEJIMAS;
 
@@ -290,7 +301,24 @@ test("OPERATORIUS: `retry` veikia TIK iš `failed` ir palieka audito pėdsaką",
     assert.equal(irasai.length, 1, "veiksmas privalo palikti pėdsaką");
     assert.equal(irasai[0].event, "ERASURE_MARK_RETRIED");
     assert.equal(irasai[0].actor, "operatorius");
-    assert.equal(irasai[0].jobId, "r1");
+
+    /**
+     * ⚠️ `jobId` ČIA NEBEPERDUODAMAS (#155, 7.4e / #216) - ir tai TIKRINAMA, ne
+     * praleidžiama.
+     *
+     * Anksčiau ši eilutė reikalavo `irasai[0].jobId === "r1"`. 7.4e barjeras
+     * atmeta subjektui susietą audito rašymą pažymėtam `job_id`, o šis įvykis
+     * rašomas iškart PO `tombstones.retry()` - t. y. apie garantuotai pažymėtą
+     * job'ą. Su subject binding operatoriaus kelias nustotų veikti visiškai.
+     *
+     * Tikrinama PRIEŠINGA kryptis, kad atsukimas būtų matomas: pėdsakas
+     * privalo likti (`event`, `actor`, kiekis aukščiau), bet BE subjekto.
+     */
+    assert.equal(
+      "jobId" in irasai[0],
+      false,
+      "administravimo įvykis negali būti susietas su ištrinamu subjektu - žr. #216"
+    );
   } finally {
     auditWrite.rasytiAudita = originalus;
     delete require.cache[require.resolve("../services/erasureMarkService")];

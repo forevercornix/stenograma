@@ -58,6 +58,50 @@ async function listStuck({ olderThanMs = UZSTRIGUSI_PO_MS, limit = 100 } = {}) {
  * įprastas ištrynimo kelias gali ją užbaigti. Taip retry lieka vienas, o ne
  * tampa antru lygiagrečiu trynimo mechanizmu.
  */
+/**
+ * ⚠️ IŠTRYNIMO ADMINISTRAVIMO ĮVYKIAI NĖRA SUSIETI SU SUBJEKTU (#155, 7.4e / #216).
+ *
+ * Šio failo `rasytiAudita()` kvietimai SĄMONINGAI neperduoda `jobId`, tad
+ * `subjectId` lieka `null`.
+ *
+ * KODĖL. 7.4e barjeras atmeta subjektui susietą audito rašymą, kai `job_id`
+ * pažymėtas `erasure_marks`. Šie įvykiai pagal apibrėžimą rašomi apie PAŽYMĖTĄ
+ * job'ą - `ERASURE_MARK_RETRIED` rašomas iškart po `tombstones.retry()`. Palikus
+ * subject binding, operatoriaus ir administratoriaus keliai nustotų veikti
+ * visiškai (patikrinta: 17 testų).
+ *
+ * ⚠️ TAI NE IŠIMTIS BARJERUI, O TA PATI TAISYKLĖ, KURIĄ REPO JAU TAIKO.
+ * `DATA_ERASED` (`utils/jobErasure.js`), `LIFECYCLE_DELETION`
+ * (`services/lifecycleService.js`) ir `RETENTION_PURGE` subjekto neturi nuo
+ * pat pradžių - ištrynimo KVITAS negali būti ištrinamas savo paties
+ * dokumentuojamo ištrynimo. Šie septyni prisijungia prie tos pačios šeimos.
+ *
+ * ⚠️ KAINA, ĮVARDYTA: `GET /api/audit?jobId=` filtruoja per `candidateSubjectIds`,
+ * tad šie įrašai iš to filtro iškrenta. Koreliacija lieka per `requestId` ir per
+ * ištrynimo kvitus, kurie tame filtre nebuvo IR ANKSČIAU.
+ */
+/**
+ * ⚠️ IŠTRYNIMO ADMINISTRAVIMO ĮVYKIAI NĖRA SUSIETI SU SUBJEKTU (#155, 7.4e / #216).
+ *
+ * Šio failo `rasytiAudita()` kvietimai SĄMONINGAI neperduoda `jobId`, tad
+ * `subjectId` lieka `null`.
+ *
+ * KODĖL. 7.4e barjeras atmeta subjektui susietą audito rašymą, kai `job_id`
+ * pažymėtas `erasure_marks`. Šie įvykiai pagal apibrėžimą rašomi apie PAŽYMĖTĄ
+ * job'ą - `ERASURE_MARK_RETRIED` rašomas iškart po `tombstones.retry()`. Palikus
+ * subject binding, operatoriaus ir administratoriaus keliai nustotų veikti
+ * visiškai (patikrinta mutacija: krinta 17 testų).
+ *
+ * ⚠️ TAI NE IŠIMTIS BARJERUI, O TA PATI TAISYKLĖ, KURIĄ REPO JAU TAIKO.
+ * `DATA_ERASED` (`utils/jobErasure.js`), `LIFECYCLE_DELETION`
+ * (`services/lifecycleService.js`) ir `RETENTION_PURGE` subjekto neturi nuo pat
+ * pradžių - ištrynimo KVITAS negali būti ištrinamas savo paties dokumentuojamo
+ * ištrynimo. Šie septyni prisijungia prie tos pačios šeimos.
+ *
+ * ⚠️ KAINA, ĮVARDYTA: `GET /api/audit?jobId=` filtruoja per `candidateSubjectIds`,
+ * tad šie įrašai iš to filtro iškrenta. Koreliacija lieka per `requestId` ir per
+ * ištrynimo kvitus, kurie tame filtre nebuvo IR ANKSČIAU.
+ */
 async function retryMark(jobId, { actor = null } = {}) {
   const esama = await tombstones.get(jobId);
 
@@ -85,7 +129,6 @@ async function retryMark(jobId, { actor = null } = {}) {
 
   await rasytiAudita({
     event: "ERASURE_MARK_RETRIED",
-    jobId,
     actor: actor || undefined,
     success: changed,
     details: `from=${esama.status} attempts=${esama.attempts} changed=${changed}`,
@@ -137,7 +180,6 @@ async function releaseMark(jobId, { actor = null } = {}) {
 
   await rasytiAudita({
     event: "ERASURE_MARK_RELEASED",
-    jobId,
     actor: actor || undefined,
     success: changed,
     details: `from=${esama.status} attempts=${esama.attempts} changed=${changed} claim=lost`,
@@ -191,7 +233,6 @@ async function forceResolveMark(jobId, { actor = null, note = null } = {}) {
 
   await rasytiAudita({
     event: "ERASURE_MARK_FORCE_RESOLVED",
-    jobId,
     actor: actor || undefined,
     success: changed,
     details:

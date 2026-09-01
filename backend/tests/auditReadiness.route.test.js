@@ -112,6 +112,120 @@ test("READY: sugedęs audito zondas → 503, o liveness nepaliestas", async () =
   }
 });
 
+test("#216 READY: nepasiekiamas ištrynimo barjeras → 503 su ATSKIRA priežastimi", async () => {
+  /**
+   * ⚠️ BARJERAS SKAITO `erasure_marks` PER AUDITO JUNGTĮ.
+   *
+   * `deletionTombstones.probe()` tikrina lentelę per SAVO pool'ą, o
+   * `auditStore.probe()` - `audit_log` teises. Jei audito DB `erasure_marks`
+   * neturi (arba turi be vėlesnių migracijų), ABU esami zondai lieka teigiami,
+   * o pirmas audito rašymas duoda `42P01`/`42703` → CHECK FAILED → fail-closed:
+   * prisijungimas nustoja veikti VYKDYMO metu, jau praėjus sveikatos patikras.
+   *
+   * ⚠️ PRIEŽASTIS PRIVALO BŪTI ATSKIRIAMA. Sujungus su `auditStoreReachable`,
+   * readiness sakytų „auditas neveikia" ten, kur auditas veikia puikiai, o
+   * trūksta tik barjero migracijos - ir operatorius ieškotų ne ten.
+   */
+  const originalus = auditStore.probeBarrier;
+  auditStore.probeBarrier = async () => false;
+
+  try {
+    const ready = await request(app).get("/api/ready");
+    const health = await request(app).get("/api/health");
+
+    assert.equal(ready.status, 503, "be pasiekiamo barjero instancija NĖRA paruošta");
+    assert.equal(ready.body.ready, false);
+    assert.equal(ready.body.components.auditBarrierReachable, false);
+    assert.equal(
+      ready.body.components.auditStoreReachable,
+      true,
+      "audito saugykla veikia - priežastis privalo būti ATSKIRIAMA"
+    );
+
+    /** Liveness nepaliestas: perkrovimas migracijos nepritaikytų. */
+    assert.equal(health.status, 200);
+  } finally {
+    auditStore.probeBarrier = originalus;
+  }
+});
+
+test("#216 READY: ATMINTINIS auditas duoda `auditBarrierReachable: true` - demo diegimai lieka paruošti", async () => {
+  /**
+   * ⚠️ TYLI REGRESIJA, KURIOS KITAS TESTAS NEPAGAUTŲ.
+   *
+   * Testas „nepasiekiamas barjeras → 503" tikrina `false` KARTU su
+   * `auditStoreReachable: true`. Jei naujas komponentas atmintiniame režime
+   * grąžintų `false`, tas testas liktų žalias, o `/api/ready` taptų 503
+   * KIEKVIENAM diegimui be DB - `docker-compose.demo.yml`, `quickstart`, visi
+   * mock profiliai.
+   *
+   * Atmintiniame režime `erasure_marks` lentelės nėra IR NEREIKIA: barjerą ten
+   * vykdo `deletionTombstones` atmintinis backend'as. Tad teisingas atsakymas
+   * yra `true`, ir jis tikrinamas, o ne prielaidžiamas.
+   *
+   * Grandinė, kurią tai pina: `isReady()` turi eksplicitinę `memory` šaką
+   * (`resolveAuditBackend(env) === "memory" ? true : paruosta`), o
+   * `memoryStore.probeBarrier()` grąžina `true` dėl kontrakto pariteto.
+   */
+  const { resolveAuditBackend } = require("../utils/auditStore/backendSelection");
+  assert.equal(resolveAuditBackend({}), "memory", "prielaida: be konfigūracijos - atmintis");
+
+  assert.equal(
+    await auditStore.probeBarrier({}),
+    true,
+    "atmintiniame režime barjeras pasiekiamas pagal apibrėžimą"
+  );
+
+  /** Ir per HTTP: šis rinkinys sukasi be DB, tad tai TAS PATS kelias. */
+  const ready = await request(app).get("/api/ready");
+
+  assert.equal(ready.status, 200, "diegimas be DB privalo likti paruoštas");
+  assert.equal(ready.body.components.auditBarrierReachable, true);
+});
+
+test("#216 READY: barjero zondas tikrina STULPELIUS, ne vien lentelę, ir ima juos iš ŽYMŲ autoriteto", async () => {
+  /**
+   * ⚠️ BE TIKROS DB - SUKLASTOTU POOL'U, kaip ir kiti šio failo zondų testai.
+   *
+   * ⚠️ TIKRINAMAS SĄRAŠO ŠALTINIS, NE TIK FAKTAS, KAD UŽKLAUSA VYKSTA.
+   * `SELECT 1 FROM erasure_marks` pavyksta ir tada, kai diegimas nutrūko po
+   * lentelės sukūrimo, bet PRIEŠ vėlesnę migraciją - tą priežastį
+   * `deletionTombstones.init()` jau užrašė. Ketvirta stulpelių sąrašo kopija
+   * neišvengiamai išsiskirtų, todėl imamas TAS PATS eksportas.
+   */
+  const { createPostgresStore } = require("../utils/auditStore/postgresStore");
+  const { STULPELIAI: ZYMU_STULPELIAI } = require("../utils/deletionTombstones/postgresStore");
+
+  const uzklausos = [];
+  const pool = (mesti) => ({
+    query: async (sql) => {
+      uzklausos.push(String(sql));
+      if (mesti && /erasure_marks/.test(String(sql))) {
+        const e = new Error('relation "erasure_marks" does not exist');
+        e.code = "42P01";
+        throw e;
+      }
+      return { rows: [] };
+    },
+    connect: async () => ({ query: async () => ({ rows: [] }), release: () => {} }),
+  });
+
+  const bloga = createPostgresStore(pool(true), { hashKeyId: "k", readinessBudgetMs: 1000 });
+  assert.equal(await bloga.probeBarrier(), false, "trūkstama lentelė = NEPASIEKIAMA");
+
+  uzklausos.length = 0;
+  const gera = createPostgresStore(pool(false), { hashKeyId: "k", readinessBudgetMs: 1000 });
+  assert.equal(await gera.probeBarrier(), true);
+
+  const barjeroUzklausa = uzklausos.find((u) => u.includes("erasure_marks"));
+  assert.ok(barjeroUzklausa, "zondas privalo realiai kreiptis į `erasure_marks`");
+  assert.ok(
+    barjeroUzklausa.includes(ZYMU_STULPELIAI),
+    "stulpelių sąrašas privalo ateiti iš `deletionTombstones`, ne būti perrašytas čia"
+  );
+  assert.match(barjeroUzklausa, /WHERE false/, "planavimo, ne skaitymo operacija");
+});
+
 test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
   /**
    * Readiness privalo atsakyti VISADA - net kai priklausomybė kabo. Be ribos
@@ -121,13 +235,31 @@ test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
    * ⚠️ ATSKIRAS PROCESAS, IR TAI NE PATOGUMAS (#233 Codex raundas 3, #2).
    *
    * `server.js` `READINESS_TIMEOUT_MS` užfiksuoja modulio ĮKĖLIMO metu. Šio
-   * failo 13 eilutė serverį jau įkėlė, tad ankstesnė versija, nustačiusi
-   * `process.env.READINESS_TIMEOUT_MS = "150"` teste, nekeitė NIEKO: maršrutas
-   * laukdavo numatytų 2000 ms, o riba `trukme < 5000` praeidavo. Testas buvo
-   * žalias ir neįrodinėjo nieko - nei ribos veikimo, nei jos reikšmės.
+   * failo 13 eilutė serverį jau įkėlė, tad versija, nustačiusi
+   * `process.env.READINESS_TIMEOUT_MS` teste, nekeitė NIEKO: maršrutas laukdavo
+   * numatytų 2000 ms, o riba praeidavo. Testas buvo žalias ir neįrodinėjo nieko.
    *
-   * Todėl aplinka nustatoma PRIEŠ įkėlimą, atskirame procese, o tikrinama riba
-   * artima 150 ms. Su numatytais 2000 ms šis testas krinta - kaip ir turi.
+   * ⚠️ WALL-CLOCK RIBOS ČIA NEBĖRA (#216 peržiūra, antras raundas).
+   *
+   * Ankstesnė versija tikrino `RIBA_MS <= trukme < RIBA_MS * 5`. Tai matavo
+   * LAIKĄ, ne mechanizmą (AGENTS.md §9.2): 750 ms riba aplink atskirą Node
+   * procesą krinta nuo apkrovos, ne nuo regresijos. Realiai ir krito - viename
+   * paleidime 2629 ms, o po to tas pats testas praėjo tris kartus iš eilės.
+   * GitHub runner'iai triukšmingesni už kūrimo mašiną, tad tai būtų buvęs
+   * nuolatinis, nieko nereiškiantis raudonumas.
+   *
+   * ⚠️ SAVYBĖ, KURIĄ TESTAS GINA, YRA SANTYKINĖ: atsakymas ateina, KOL kabantis
+   * zondas dar nebaigtas. Tai ir tikrinama - vėliavėle, ne laikrodžiu.
+   *
+   * ⚠️ IR ANTRA GARANTIJA IŠLIEKA. Zondas „kabo" ${ZONDO_MS} ms - DAUGIAU nei
+   * nustatyta riba, bet MAŽIAU nei numatytieji 2000 ms. Todėl:
+   *
+   *   riba veikia          → maršrutas atsako, zondas dar nebaigtas, 503;
+   *   galioja numatytoji   → zondas SUSPĖJA baigtis su `true`, ir testas krinta
+   *                          ties `reachable === false`, ne ties laikrodžiu.
+   *
+   * Abu timer'iai gyvena TAME PAČIAME procese, tad jų EILIŠKUMAS nepriklauso
+   * nuo apkrovos: apkrova vėlina abu vienodai.
    */
   const os = require("node:os");
   const { execFileSync } = require("node:child_process");
@@ -137,6 +269,8 @@ test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
   const skriptas = path.join(katalogas, "zondas.js");
 
   const RIBA_MS = 150;
+  /** > RIBA_MS ir < numatytųjų 2000 ms - žr. komentarą aukščiau. */
+  const ZONDO_MS = 800;
 
   try {
     fs.writeFileSync(
@@ -156,13 +290,20 @@ test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
         `const app = require(${JSON.stringify(path.join(backend, "server"))});`,
         "",
         "app._setReadyForTests(true);",
-        "auditStore.probe = () => new Promise(() => {});",
+        "",
+        "/** Vėliavėlė, ne laikrodis: ar zondas SPĖJO baigtis iki atsakymo? */",
+        "let zondoBaigtas = false;",
+        "auditStore.probe = () => new Promise((resolve) => {",
+        `  const t = setTimeout(() => { zondoBaigtas = true; resolve(true); }, ${ZONDO_MS});`,
+        "  if (t.unref) t.unref();",
+        "});",
         "",
         "const pradzia = Date.now();",
         'request(app).get("/api/ready").then((res) => {',
         "  console.log(JSON.stringify({",
         "    status: res.status,",
         "    reachable: res.body.components.auditStoreReachable,",
+        "    zondoBaigtas,",
         "    trukme: Date.now() - pradzia,",
         "  }));",
         "  process.exit(0);",
@@ -174,6 +315,7 @@ test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
     const isvestis = execFileSync("node", [skriptas], {
       encoding: "utf8",
       cwd: backend,
+      /** ⚠️ VIENINTELĖ likusi laiko riba - apsauga nuo TIKRO pakibimo, ne matavimas. */
       timeout: 30_000,
     });
 
@@ -183,18 +325,16 @@ test("READY: kabantis audito zondas NEPAKABINA `/api/ready`", () => {
     assert.equal(rezultatas.reachable, false);
 
     /**
-     * ⚠️ TIKRINAMOS ABI PUSĖS. Viršutinė riba įrodo, kad laukta būtent
-     * nustatytos, o ne numatytosios reikšmės; apatinė - kad atsakymas negrįžo
-     * iškart dėl kokios nors kitos priežasties, o riba realiai suveikė.
+     * ⚠️ ŠI EILUTĖ YRA VISO TESTO ESMĖ, ir ji pakeitė wall-clock ribą.
+     *
+     * Atsakymas grįžo, KOL zondas dar nebaigtas - t. y. maršrutas jo nelaukė.
+     * Apkrova šito nepaveikia: abu timer'iai tame pačiame event loop'e.
      */
-    assert.ok(
-      rezultatas.trukme >= RIBA_MS,
-      `readiness privalo laukti ribos, o grįžo per ${rezultatas.trukme} ms`
-    );
-    assert.ok(
-      rezultatas.trukme < RIBA_MS * 5,
-      `readiness laukė ${rezultatas.trukme} ms - panašu, kad galioja numatytieji 2000 ms, ` +
-        "t. y. `READINESS_TIMEOUT_MS` nustatytas per vėlai"
+    assert.equal(
+      rezultatas.zondoBaigtas,
+      false,
+      `zondas suspėjo baigtis (${rezultatas.trukme} ms) - reiškia, kad maršrutas jo LAUKĖ, ` +
+        "arba galioja numatytoji 2000 ms riba, o ne READINESS_TIMEOUT_MS"
     );
   } finally {
     fs.rmSync(katalogas, { recursive: true, force: true });

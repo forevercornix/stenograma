@@ -15,6 +15,7 @@
 const { createLogger } = require("../logger");
 const { resolveAuditBackend } = require("./backendSelection");
 const { auditTimeoutBudget } = require("./timeouts");
+const { pgJungtiesNustatymai } = require("../pgConnection");
 const { EVENT_PATTERN } = require("../auditEvents");
 const { resolveKeyRing, HISTORICAL_SOFT_LIMIT } = require("./keyRing");
 const memoryStore = require("./memoryStore");
@@ -203,55 +204,21 @@ function auditoPoolNustatymai(env = process.env) {
   const { poolAcquireMs, statementMs, clientMs } = auditTimeoutBudget(env);
 
   /**
-   * ⚠️ `connectionString` TIK KAI `DATABASE_URL` REALIAI YRA (#211 peržiūra).
+   * ⚠️ DSN DALIS ATEINA IŠ `utils/pgConnection.js` (#216, 7.4e).
    *
-   * Dokumentuotas Compose diegimas perduoda `PGHOST`/`PGPORT`/`PGUSER`/
-   * `PGPASSWORD`/`PGDATABASE`, o ne URL - sąmoningai, nes slaptažodis su URI
-   * simboliais (`/`, `?`, `#`, `@`) URL'e reikštų kitką. `pg` tuos kintamuosius
-   * skaito pats, bet TIK kai `connectionString` neperduotas: `undefined` čia
-   * nėra tas pats, kas lauko nebuvimas.
+   * Iki 7.4e ji gyveno čia, o `deletionTombstones` turėjo savo atranką pagal
+   * `DATABASE_URL`. Dviejų atrankų pasekmė: dokumentuotame Compose diegime
+   * (`PG*`, be `DATABASE_URL`) auditas atsidurdavo PostgreSQL'e, o ištrynimo
+   * žymos - atmintyje. 7.4e barjeras tada skaitytų TUŠČIĄ `erasure_marks`
+   * lentelę ir visada praleistų - tyliai.
+   *
+   * Dabar abu pool'ai statomi iš TOS PAČIOS funkcijos, tad tapatumas galioja
+   * pagal konstrukciją.
    */
-  const nustatymai = {
-    connectionTimeoutMillis: poolAcquireMs,
+  return { ...pgJungtiesNustatymai(env), connectionTimeoutMillis: poolAcquireMs,
     /** ⚠️ Serveris NUTRAUKIA anksčiau, klientas - tik atsarga. Žr. `timeouts.js`. */
     statement_timeout: statementMs,
-    query_timeout: clientMs,
-  };
-
-  if (env.DATABASE_URL) {
-    nustatymai.connectionString = env.DATABASE_URL;
-    return nustatymai;
-  }
-
-  /**
-   * ⚠️ `PG*` PERSIUNČIAMI EKSPLICITIŠKAI, NE PALIEKAMI `pg` NUOŽIŪRAI.
-   *
-   * `pg` `PG*` skaito iš `process.env`, o `init(env)` priima konfigūraciją kaip
-   * OBJEKTĄ. Įterptinis kvietėjas, perdavęs `PGHOST` tik objekte,
-   * `resolveAuditBackend()` praeitų (jis žiūri į tą patį objektą), o pool'as
-   * jungtųsi prie GLOBALIOS aplinkos nurodytos - arba numatytosios - duomenų
-   * bazės. Tai ta pati „dvi konfigūracijos" šeima kaip druska, `PRIVACY_MODE` ir
-   * timeout, tik čia antrasis skaitytojas yra ne mūsų kodas, o pati biblioteka -
-   * todėl `process.env` tripwire jos nepagauna.
-   *
-   * Persiunčiama TIK kai `DATABASE_URL` nėra: kartu su `connectionString` `pg`
-   * taikytų juos abu, ir pirmenybė taptų neakivaizdi.
-   */
-  const PG_ATITIKMENYS = {
-    PGHOST: "host",
-    PGPORT: "port",
-    PGUSER: "user",
-    PGPASSWORD: "password",
-    PGDATABASE: "database",
-  };
-
-  for (const [envRaktas, poolRaktas] of Object.entries(PG_ATITIKMENYS)) {
-    if (env[envRaktas] !== undefined) {
-      nustatymai[poolRaktas] = poolRaktas === "port" ? Number(env[envRaktas]) : env[envRaktas];
-    }
-  }
-
-  return nustatymai;
+    query_timeout: clientMs };
 }
 
 async function initializePostgres(env) {
@@ -881,6 +848,25 @@ async function probe(env = process.env) {
 }
 
 /**
+ * IŠTRYNIMO BARJERO PASIEKIAMUMAS PER AUDITO JUNGTĮ (#155, 7.4e / #216).
+ *
+ * ⚠️ ATSKIRA PRIEŽASTIS, NE `probe()` DALIS. `probe()` atsako „ar audito
+ * saugykla veikia"; ši - „ar per TĄ PAČIĄ jungtį pasiekiama `erasure_marks`".
+ * Sujungus, readiness pasakytų „auditas neveikia" ten, kur auditas veikia
+ * puikiai, o trūksta tik barjero migracijos - ir operatorius ieškotų ne ten.
+ *
+ * Fail-closed ir NIEKADA nemeta - readiness privalo atsakyti visada.
+ */
+async function probeBarrier(env = process.env) {
+  if (!isReady(env)) return false;
+  try {
+    return (await store.probeBarrier()) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Švarus išjungimo kelias - be jo integraciniai testai kabotų su atviromis
  * jungtimis, o konteinerio stabdymas paliktų neuždarytas DB sesijas.
  */
@@ -950,6 +936,7 @@ module.exports = {
   shutdown,
   isReady,
   probe,
+  probeBarrier,
   backend,
   current,
   auditoPoolNustatymai,
