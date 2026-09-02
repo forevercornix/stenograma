@@ -807,3 +807,76 @@ test("#262: SVETIMOS bazės dump'as atmetamas — horizontas negali gulėti ne t
   const { rows } = await vykdyti(SALTINIO_URL, "SELECT count(*)::int AS n FROM backup_horizon");
   assert.equal(rows[0].n, 0, "neišduotos kopijos horizontas fiksuoti negali");
 });
+
+test("#262: preflight mato NE TIK lenteles (seka, matview, funkcija, schema)", { skip: praleisti() }, async (t) => {
+  /**
+   * ⚠️ `information_schema.tables` ŠIŲ OBJEKTŲ NEMATO.
+   *
+   * Pirmoji preflight redakcija skaičiavo būtent tą rodinį, o runbook'as žadėjo
+   * „objektus ne sisteminėse schemose" — dokumentas buvo stipresnis už kodą
+   * (§12.1). Praktinė pasekmė: tikslinė bazė su likusia seka ar matview'u
+   * laikoma tuščia, ir po atkūrimo joje gulėtų dviejų bazių sąjunga — tiksliai
+   * tai, ko preflight neleidžia. #249 ir #250 dirbtų ant tokios bazės
+   * nieko neįtardami.
+   */
+  t.after(async () => {
+    await pasalintiDb(SALTINIO_URL);
+    await pasalintiDb(TIKSLO_URL);
+  });
+
+  await perkurtiDb(SALTINIO_URL);
+  await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
+
+  const kopija = await suZymuAplinka(SALTINIO_URL, () =>
+    pgDumpBackup.sukurtiSifruotaKopija({
+      databaseUrl: SALTINIO_URL,
+      actor: "operatorius-testas",
+      env: TESTO_ENV,
+    })
+  );
+
+  const likuciai = [
+    ["seka", "CREATE SEQUENCE likusi_seka"],
+    ["matview", "CREATE MATERIALIZED VIEW likes_mv AS SELECT 1 AS x"],
+    ["funkcija", "CREATE FUNCTION likusi_f() RETURNS int LANGUAGE sql AS 'SELECT 1'"],
+    ["schema", "CREATE SCHEMA likusi_schema"],
+  ];
+
+  for (const [vardas, sql] of likuciai) {
+    await perkurtiDb(TIKSLO_URL);
+    await vykdyti(TIKSLO_URL, sql);
+
+    await assert.rejects(
+      () =>
+        pgDumpBackup.atkurtiSifruotaKopija({
+          envelope: kopija.envelope,
+          manifest: kopija.manifest,
+          targetUrl: TIKSLO_URL,
+          env: TESTO_ENV,
+        }),
+      (err) => {
+        assert.equal(err.code, "PG_RESTORE_TARGET_NOT_EMPTY", `${vardas} privalo būti pastebėtas`);
+        return true;
+      },
+      `likutis „${vardas}" praėjo preflight'ą`
+    );
+
+    const { rows } = await vykdyti(
+      TIKSLO_URL,
+      "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'jobs'"
+    );
+    assert.equal(rows[0].n, 0, `⚠️ po atmesto „${vardas}" atkūrimo kopijos lentelių atsirasti negali`);
+  }
+
+  /** ⚠️ TIKRAI TUŠČIA bazė privalo PRAEITI — kitaip patikra būtų tiesiog visada „ne". */
+  await perkurtiDb(TIKSLO_URL);
+  await pgDumpBackup.atkurtiSifruotaKopija({
+    envelope: kopija.envelope,
+    manifest: kopija.manifest,
+    targetUrl: TIKSLO_URL,
+    env: TESTO_ENV,
+  });
+
+  const { rows } = await vykdyti(TIKSLO_URL, "SELECT count(*)::int AS n FROM jobs");
+  assert.ok(rows[0].n > 0, "tuščia bazė privalo būti atkuriama");
+});

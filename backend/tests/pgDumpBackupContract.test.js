@@ -484,10 +484,37 @@ test("#262 Codex P1: kredencialai ir eilučių turinys NEIŠEINA į klaidas bei 
 
   /**
    * ⚠️ SLAPTAŽODIS SU `@` — būtent dėl tokių `utils/pgConnection.js` egzistuoja.
-   * Bendras šablonas jo nesugaus, tad eksplicitiškai perduotas URL yra ANTRA ašis.
+   *
+   * ⚠️ TIKRINAMI FRAGMENTAI, NE PILNA EILUTĖ (#262 peržiūra, P1).
+   *
+   * Pirmoji šio testo redakcija tvirtino `includes(pilnas_slaptažodis) === false`,
+   * ir tai yra SIAURESNIS teiginys nei „slaptažodis neišnešamas": redagavimas
+   * sustodavo ties pirmu `@`, palikdamas `PTA`, o testas praeidavo. Assert'as
+   * privalo tvirtinti tą patį, ką sako testo pavadinimas.
    */
-  const keistas = "postgres://vartotojas:pa@ss/word@127.0.0.1:5432/db";
-  assert.equal(pgDumpBackup.bePaslapciu(`nepavyko: ${keistas}`, keistas).includes("pa@ss/word"), false);
+  const slaptazodis = "SLA@PTA@ZODIS";
+  const keistas = `postgres://vartotojas:${slaptazodis}@127.0.0.1:5432/db`;
+
+  for (const tekstas of [
+    pgDumpBackup.redaguotasUrl(keistas),
+    pgDumpBackup.bePaslapciu(`Command failed: pg_dump ${keistas}`),
+    pgDumpBackup.bePaslapciu(`nepavyko: ${keistas}`, keistas),
+    pgDumpBackup.saugusStderr(`psql: connection to ${keistas} failed`, keistas),
+  ]) {
+    for (let i = 0; i < slaptazodis.length; i += 1) {
+      for (let j = i + 3; j <= slaptazodis.length; j += 1) {
+        const fragmentas = slaptazodis.slice(i, j);
+        assert.equal(
+          tekstas.includes(fragmentas),
+          false,
+          `išvestyje liko slaptažodžio fragmentas ${JSON.stringify(fragmentas)}: ${tekstas}`
+        );
+      }
+    }
+  }
+
+  /** Vartotojo vardas ir hostas LIEKA — be jų klaida nediagnozuojama. */
+  assert.match(pgDumpBackup.redaguotasUrl(keistas), /postgres:\/\/vartotojas:\*\*\*@127\.0\.0\.1:5432\/db/);
 
   const stderr = [
     "psql:<stdin>:42: ERROR:  duplicate key value violates unique constraint \"jobs_pkey\"",
@@ -676,4 +703,47 @@ test("#262 Codex P2: CLI inicijuoja IR uždaro abi saugyklas (statinė forma, §
   assert.match(cli, /await auditStore\.init\(\)/, "auditas be `init()` rašytų į atmintį");
   assert.match(cli, /auditStore\.shutdown\(\)/);
   assert.match(cli, /tombstones\.shutdown\(\)/);
+});
+
+test("#262 Codex P1: `restore` NEPRIKLAUSO nuo audito prieinamumo", { timeout: 60000 }, () => {
+  /**
+   * ⚠️ ŠIS TESTAS GINA RUNBOOK'O §10 TEIGINĮ, NE PATOGUMĄ.
+   *
+   * Ten parašyta, kad atkūrimo pusė sąmoningai NEAUDITUOJAMA būtent tam, kad
+   * avarinis atkūrimas nepriklausytų nuo audito prieinamumo. Kai `auditStore.init()`
+   * buvo kviečiamas prieš komandų šakojimą, `restore` krisdavo ties audito baze
+   * NEPASIEKĘS savo fail-closed grandinės — t. y. kodas prieštaravo savo paties
+   * dokumentui.
+   *
+   * ⚠️ SKIRTUMAS MATOMAS IŠ TO, KURI KLAIDA GRĄŽINAMA. `ECONNREFUSED` reikštų
+   * kritimą audito saugykloje; `BACKUP_MANIFEST_INVALID` — kad kelias nuėjo iki
+   * manifesto patikros, kaip ir turi.
+   */
+  const artefaktas = path.join(os.tmpdir(), `pg-backup-262-${process.pid}.json`);
+  fs.writeFileSync(artefaktas, JSON.stringify({ manifest: {}, envelope: {} }), "utf8");
+
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [path.join(SAKNIS, "scripts", "pg-backup.mjs"), "restore", "--in", artefaktas, "--target", NEPASIEKIAMA_DB],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          NODE_ENV: "test",
+          LOG_LEVEL: "error",
+          AUDIT_BACKEND: "postgres",
+          AUDIT_ID_SALT: crypto.randomBytes(32).toString("hex"),
+          AUDIT_ID_SALT_ID: "2026-09",
+          DATABASE_URL: NEPASIEKIAMA_DB,
+        },
+      }
+    );
+
+    assert.match(r.stderr, /BACKUP_MANIFEST_INVALID/, "atkūrimas privalo pasiekti savo fail-closed grandinę");
+    assert.equal(/ECONNREFUSED/.test(r.stderr), false, "audito saugykla `restore` kelyje neinicijuojama");
+    assert.equal(r.status, 2, "procedūros klaida yra exit 2");
+  } finally {
+    fs.rmSync(artefaktas, { force: true });
+  }
 });

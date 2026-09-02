@@ -72,7 +72,6 @@ function mirti(zinute, kodas) {
 const komanda = process.argv[2];
 
 try {
-  await auditStore.init();
 
   if (komanda === "dump") {
     const out = argumentas("out");
@@ -80,6 +79,26 @@ try {
 
     const actor = argumentas("actor");
     if (!actor) mirti("`dump` reikalauja `--actor <kas>` (auditui).", 1);
+
+    /**
+     * ⚠️ AUDITO SAUGYKLA INICIJUOJAMA TIK `dump` ŠAKOJE (#262 peržiūra, P1).
+     *
+     * Pirmoji redakcija tai darė PRIEŠ komandų šakojimą, ir `restore` krisdavo
+     * ties audito baze, nepasiekęs `atkurtiSifruotaKopija()`. Išmatuota:
+     *
+     *   su AUDIT_BACKEND=postgres, nepasiekiama audito baze:
+     *     KLAIDA: ECONNREFUSED: connect ECONNREFUSED 127.0.0.1:1
+     *   ta pati komanda be AUDIT_BACKEND:
+     *     KLAIDA: BACKUP_MANIFEST_INVALID: ...
+     *
+     * T. y. avarinis atkūrimas ėmė priklausyti nuo audito prieinamumo - būtent
+     * ta priklausomybė, kurios runbook'o §10 atsisako ir dėl kurios atkūrimo
+     * pusė sąmoningai neaudituojama. Blogiau: `DATABASE_URL`, rodantis į NAUJĄ
+     * TUŠČIĄ tikslą, `audit_log` lentelės dar neturi, o tai yra NUMATYTAS 7.6a
+     * scenarijus, ne kraštinis - procedūra nepraeidavo savo pačios dokumentuotu
+     * keliu.
+     */
+    await auditStore.init();
 
     const { manifest, envelope, dumpBytes } = await pgDumpBackup.sukurtiSifruotaKopija({
       databaseUrl: argumentas("url", process.env.DATABASE_URL),

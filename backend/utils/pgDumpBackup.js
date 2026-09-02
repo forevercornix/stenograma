@@ -106,12 +106,33 @@ const SNAPSHOTA_LAUZANCIOS_VELIAVOS = Object.freeze([
  * CLI tą žinutę spausdina į stderr, tad be šio filtro slaptažodis atsiduria
  * operatoriaus terminale ir CI žurnale.
  */
-const KREDENCIALAI_URL = /\b([a-z][a-z0-9+.\-]*:\/\/)([^/\s:@]+)(?::[^/\s@]*)?@/gi;
+/**
+ * ⚠️ GODUS `[^/\s]*` IKI PASKUTINIO `@` - IR TAI NE SMULKMENA.
+ *
+ * Pirmoji redakcija sustodavo ties PIRMU `@`, tad slaptažodis su neekranuotu
+ * `@` likdavo pusiau matomas (išmatuota, #262 peržiūra):
+ *
+ *   postgres://u:SLA@PTA@host/db  ->  postgres://u:***@PTA@host/db
+ *
+ * `PTA` yra slaptažodžio fragmentas. Būtent tokie slaptažodžiai ir yra
+ * priežastis, dėl kurios egzistuoja `PG*` kelias (`utils/pgConnection.js`), tad
+ * ši klasė čia nėra teorinė.
+ */
+const KREDENCIALAI_URL = /\b([a-z][a-z0-9+.\-]*:\/\/)([^/\s]*)@/gi;
+
+/** `u:slaptas` -> `u:***`; `u` (be slaptažodžio) lieka `u`. */
+function _redaguotasVartotojas(vartotojoDalis) {
+  const dvitaskis = vartotojoDalis.indexOf(":");
+  return dvitaskis === -1 ? vartotojoDalis : `${vartotojoDalis.slice(0, dvitaskis)}:***`;
+}
 
 /** `postgres://u:slaptas@host:5432/db` -> `postgres://u:***@host:5432/db`. */
 function redaguotasUrl(url) {
   if (!url) return "<nenurodyta>";
-  return String(url).replace(KREDENCIALAI_URL, (_, schema, vartotojas) => `${schema}${vartotojas}:***@`);
+  return String(url).replace(
+    KREDENCIALAI_URL,
+    (_, schema, vartotojoDalis) => `${schema}${_redaguotasVartotojas(vartotojoDalis)}@`
+  );
 }
 
 /**
@@ -124,7 +145,10 @@ function redaguotasUrl(url) {
 function bePaslapciu(tekstas, url = null) {
   let t = String(tekstas ?? "");
   if (url) t = t.split(String(url)).join(redaguotasUrl(url));
-  return t.replace(KREDENCIALAI_URL, (_, schema, vartotojas) => `${schema}${vartotojas}:***@`);
+  return t.replace(
+    KREDENCIALAI_URL,
+    (_, schema, vartotojoDalis) => `${schema}${_redaguotasVartotojas(vartotojoDalis)}@`
+  );
 }
 
 /**
@@ -656,9 +680,36 @@ function _patikrintiProgramosVersija(backupVersion) {
  * žinoma problema, žr. `utils/pgConnection.js`), tad preflight ir atkūrimas
  * privalo jungtis vienodai.
  */
-const OBJEKTU_UZKLAUSA =
-  "SELECT count(*) FROM information_schema.tables " +
-  "WHERE table_schema NOT IN ('pg_catalog', 'information_schema')";
+/**
+ * ⚠️ KATALOGAI, NE `information_schema.tables` (#262 peržiūra, P2).
+ *
+ * Pirmoji redakcija skaičiavo tik `information_schema.tables`, o runbook'as
+ * žadėjo „objektus ne sisteminėse schemose" - t. y. dokumentas buvo stipresnis
+ * už kodą (§12.1). Į tą rodinį NEPATENKA matview'ai, sekos, funkcijos ir tuščios
+ * vartotojo schemos, tad tikslinė bazė su likusia seka būdavo laikoma tuščia, o
+ * po atkūrimo joje gulėtų dviejų bazių sąjunga - būtent tai, ko preflight ir
+ * neleidžia.
+ *
+ * ⚠️ `pg_class` apima ir indeksus - sąmoningai. Klausimas yra „ar bazė tuščia",
+ * ne „kiek ten objektų", tad perteklinis skaičiavimas klaidos pusėn yra teisinga
+ * kryptis.
+ *
+ * ⚠️ PATIKRINTA PRIEŠ PLATINANT: mūsų migracijos `CREATE EXTENSION` nenaudoja,
+ * tad plėtinių funkcijos `public` schemoje teisėtai tuščios bazės neužblokuoja.
+ * Diegimuose, kur plėtinys įdiegtas į `public`, tokia bazė bus laikoma
+ * NETUŠČIA - riba užrašyta runbook'e.
+ */
+const OBJEKTU_UZKLAUSA = `
+  SELECT
+    (SELECT count(*) FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_')
+  + (SELECT count(*) FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_')
+  + (SELECT count(*) FROM pg_namespace n
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'public') AND n.nspname !~ '^pg_')
+`.replace(/\s+/g, " ").trim();
 
 /**
  * ⚠️ NEPERSKAITOMAS SKAIČIUS = NE TUŠČIA.
@@ -699,7 +750,8 @@ async function _patikrintiTikslasTuscias(targetUrl) {
   const kiek = perskaitytiObjektuSkaiciu(stdout);
   if (kiek > 0) {
     throw new PgDumpBackupError(
-      `Tikslinė bazė NEtuščia (${kiek} objekt(ai) ne sisteminėse schemose). ` +
+      `Tikslinė bazė NEtuščia (${kiek} objekt(ai): lentelės, rodiniai, matview'ai, sekos, ` +
+        "indeksai, funkcijos ar ne `public` schemos). " +
         "Atkūrimas į netuščią bazę duotų dviejų bazių sąjungą, ne kopiją.",
       "PG_RESTORE_TARGET_NOT_EMPTY"
     );

@@ -446,9 +446,15 @@ Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
 ⚠️ **`BACKUP_ENABLED=true` privalomas.** Išjungtos kopijos reiškia išjungtas ir
 šias: `dump` krinta su `BACKUP_DISABLED` dar prieš jungiantis prie bazės.
 
-⚠️ **Auditas ir žymų saugykla CLI'e inicijuojamos ir uždaromos.** Be to su
+⚠️ **Auditas inicijuojamas TIK `dump` kelyje.** Be `auditStore.init()` su
 `AUDIT_BACKEND=postgres` įrašas nukeliautų į atminties fasadą ir dingtų procesui
 pasibaigus — komanda praneštų sėkmę, o audito žurnale įrašo nebūtų.
+
+⚠️ **`restore` audito saugyklos neinicijuoja — sąmoningai.** Kitaip avarinis
+atkūrimas priklausytų nuo audito prieinamumo, o §10 kaip tik dėl to atkūrimo
+pusės neaudituoja. Tai ne teorija: kai `DATABASE_URL` rodo į **naują tuščią
+tikslą** (numatytas 7.6a scenarijus), `audit_log` lentelės ten dar nėra, ir
+inicijavimas nutrauktų atkūrimą dar nepradėjus.
 
 ⚠️ **`--actor` privalomas `dump` komandai** — juo pasirašomas audito įrašas
 `PG_DUMP_BACKUP_CREATED`. Be jo komanda krinta su exit kodu `1`.
@@ -491,9 +497,16 @@ argumentų eilutė su slaptažodžiu.
 - **Kūrimo auditą su aktoriumi.** `PG_DUMP_BACKUP_CREATED`, atskiras nuo
   aplikacijos kopijos `BACKUP_CREATED`. ⚠️ **Atkūrimo pusėje audito NĖRA** — žr.
   §10 ir §11.
-- **Tikslinės bazės tuštumą.** Prieš pirmą SQL sakinį suskaičiuojami objektai
-  ne sisteminėse schemose; radus bent vieną, atkūrimas atmetamas
-  (`PG_RESTORE_TARGET_NOT_EMPTY`). ⚠️ Priežastis ne šis etapas: 7.6b (#249)
+- **Tikslinės bazės tuštumą.** Prieš pirmą SQL sakinį katalogai suskaičiuoja
+  **visus** vartotojo objektus ne sisteminėse schemose — lenteles, rodinius,
+  materializuotus rodinius, sekas, indeksus, funkcijas ir ne`public` schemas;
+  radus bent vieną, atkūrimas atmetamas (`PG_RESTORE_TARGET_NOT_EMPTY`).
+  ⚠️ **Patikslinta (#262 peržiūra):** pirmoji redakcija skaičiavo tik
+  `information_schema.tables`, tad likusi seka ar matview'as praeidavo, nors šis
+  skyrius jau žadėjo „visus objektus" — dokumentas buvo stipresnis už kodą.
+  ⚠️ **Riba:** diegime, kur plėtinys (pvz. `pgcrypto`) įdiegtas į `public`,
+  tokia bazė bus laikoma **netuščia**. Mūsų pačių migracijos `CREATE EXTENSION`
+  nenaudoja, tad standartiniam diegimui tai įtakos neturi. ⚠️ Priežastis ne šis etapas: 7.6b (#249)
   suderinimas ir 7.6c (#250) replay remsis BŪTENT šiuo keliu ir abu prasideda
   nuo prielaidos „restore pavyko" — atkūrimas į netuščią bazę duotų dviejų bazių
   **sąjungą**, ir jų testai to nepagautų. Neperskaičius `psql` išvesties
