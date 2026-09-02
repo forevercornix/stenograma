@@ -3640,6 +3640,40 @@ režimo, CLI **HARD FAILINA**.
 operatoriui manyti, kad suderinimas įvyko — tai pavojingiau nei kritimas. Tai NĖRA
 bendras `jobStore`/`sessionStore` administravimo įrankis.
 
+### D7a — tapatumas: suderinama TA PATI bazė, kurią mato saugyklos
+
+⚠️ **Ši pamoka gauta 7.6a metu (#248, Codex P1) ir čia kartojasi trimis
+saugyklomis vietoj vienos.** Ten `recordBackupHorizon()` ėjo per `ensureInit()`,
+kuris backend'ą renkasi iš **globalios aplinkos**, ne iš perduoto `databaseUrl` —
+tad su `--url` kitai bazei horizontas atsidurdavo ne toje bazėje, kurią artefaktas
+atkuria, o garantija tyliai nustodavo galioti.
+
+7.6b `jobStore`, `sessionStore` ir audito fasadai backend'ą renkasi lygiai taip
+pat. Vadinasi:
+
+- suderinimo tikslinė bazė **privalo sutapti** su ta, prie kurios prisirišusios
+  saugyklos; nesutapimas → **fail-closed** su savo klaidos kodu;
+- atmintinis backend'as yra atskira klaida, ne tas pats atvejis: suderinimas jame
+  formaliai įvyktų ir dingtų procesui pasibaigus (7.6a tam turi atskirą
+  `PG_BACKUP_HORIZON_NOT_PERSISTENT`);
+- tapatumas tikrinamas **prieš** pirmą mutaciją, ne po jos;
+- palyginimo riba (du klasteriai tame pačiame hoste vienodu bazės vardu) užrašoma
+  ten pat, kaip `utils/pgConnection.js` ją jau užrašo — ne nutylima.
+
+Saugyklų inicijavimas pagal perduotą URL **atmetamas**: bendrame procese jos
+perimtų globalią būseną. Riba yra tapatumo patikra, ne perkonfigūravimas.
+
+### D7b — CLI inicijuoja IR uždaro kiekvieną saugyklą, kurią naudoja
+
+Precedentas repo yra: `scripts/erasure-marks.js:160-175` aprašo tiksliai šią
+klaidą — „vieno entrypoint'o dvi saugyklos, ir inicijuota buvo tik viena". 7.6a
+nuo jo nukrypo ir gavo P2: `rasytiAudita()` rašė į numatytąjį atmintinį fasadą,
+procesas baigdavosi, ir įvykis dingdavo, nors komanda pranešdavo sėkmę.
+
+7.6b liečia **tris** saugyklas (job, sesijų, audito). Kiekviena inicijuojama
+eksplicitiškai ir uždaroma; testas įrodo, kad įrašas realiai persistintas, o ne
+kad funkcija iškviesta.
+
 ### D8 — audito / operacinė evidencija
 
 Sėkmingas suderinimas palieka patikrinamą operacinę evidenciją pagal **tuo metu
@@ -3679,6 +3713,19 @@ tai įvardijama kaip riba, o ne sprendžiama čia.
       startas → cutover, su konkrečia komanda.
 - [ ] D7: be PostgreSQL backend'o CLI **krenta**; testas įrodo, kad memory režime
       NĖRA „sėkmingo praleidimo".
+- [ ] ⚠️ **D7a tapatumas:** tikslinė bazė sutampa su ta, prie kurios prisirišusios
+      saugyklos; nesutapimas ir atmintinis backend'as duoda **atskirus** klaidos
+      kodus, ir abu tikrinami **prieš** pirmą mutaciją. Testas: nurodžius svetimą
+      bazę, joje **nelieka jokio pėdsako** (ne tik grąžinama klaida).
+- [ ] ⚠️ **D7b gyvavimo ciklas:** visos trys saugyklos inicijuojamos ir
+      uždaromos; testas įrodo **persistintą** įrašą tikroje eilutėje, ne funkcijos
+      iškvietimą.
+- [ ] ⚠️ **7.6a runbook'o apribojimai peržiūrimi.** 7.6a §9a reikalauja, kad
+      tikslinė bazė liktų **offline** ir draudžia cutover, nes suderinimo dar
+      nebuvo; §11 eilutės susiaurintos. Šis PR tą dalį **atnaujina** (offline
+      reikalavimas virsta „offline iki suderinimo pabaigos"), o erasure išimtis
+      lieka iki 7.6c. Neatnaujinta riba būtų dokumentacija, silpnesnė už kodą —
+      ta pati §12.1 klaida, tik kita kryptimi.
 
 ### Sesijos
 
