@@ -166,6 +166,17 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
      */
     { pattern: /dar NĖRA erasure-safe|nėra erasure-safe/i, what: "pg_dump atkūrimas ne erasure-safe" },
     { pattern: /MAX_DUMP_BYTES|256 MB/, what: "pg_dump dydžio riba" },
+    /**
+     * ⚠️ #262 PERŽIŪRA: dvi garantijos SUSIAURINTOS, ne įgyvendintos.
+     *
+     * `pg_dump` atkūrimas neaudituojamas (rašyti nėra kur: `audit_log` ne
+     * dump'e, bazė tuščia, aplikacija neveikia), o paslapčių skeneris pilnam DB
+     * dump'ui netaikomas (duotų daugiausia klaidingų teigiamų). Abu sprendimai
+     * §11 teiginius susilpnina, tad runbook'as PRIVALO juos įvardyti — kitaip
+     * auditoriui rodomas sąrašas taptų stipresnis už kodą (§12.1).
+     */
+    { pattern: /[Aa]tkūrimas audito žurnale nefiksuojamas|Kodėl atkūrimas neaudituojamas/, what: "pg_dump atkūrimas neaudituojamas" },
+    { pattern: /[Pp]aslapčių skeneris[^|]*netaikomas|Kodėl dump'as neskenuojamas/, what: "paslapčių skeneris netaikomas dump'ui" },
   ];
 
   for (const limit of knownLimits) {

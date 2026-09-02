@@ -4,6 +4,14 @@ const { promisify } = require("node:util");
 
 const backupEncryption = require("./backupEncryption");
 const backupManifest = require("./backupManifest");
+const backupPolicy = require("./backupPolicy");
+const tombstones = require("./deletionTombstones");
+/**
+ * ⚠️ NE DESTRUKTŪRIZUOJAMA. Destruktūrizuota nuoroda užfiksuojama `require` metu,
+ * ir integracinis testas nebegalėtų patikrinti, KAD auditas realiai kviečiamas
+ * iš šio kelio - liktų tik statinė patikra (§9.2).
+ */
+const auditWrite = require("./auditWrite");
 const { createLogger } = require("./logger");
 
 const vykdyti = promisify(execFile);
@@ -85,6 +93,62 @@ const SNAPSHOTA_LAUZANCIOS_VELIAVOS = Object.freeze([
   "-j",
 ]);
 
+/**
+ * KREDENCIALŲ REDAGAVIMAS (Codex P1, #262 peržiūra).
+ *
+ * ⚠️ IŠMATUOTA, NE NUMANOMA. `execFile` atmetimo žinutė ir `err.cmd` turi VISĄ
+ * argumentų eilutę, o joje - `postgres://vartotojas:SLAPTAZODIS@...`:
+ *
+ *   MSG: Command failed: pg_dump --no-owner postgres://vartotojas:SLAPTAS123@...
+ *   CMD: pg_dump --no-owner postgres://vartotojas:SLAPTAS123@...
+ *
+ * CLI tą žinutę spausdina į stderr, tad be šio filtro slaptažodis atsiduria
+ * operatoriaus terminale ir CI žurnale.
+ */
+const KREDENCIALAI_URL = /\b([a-z][a-z0-9+.\-]*:\/\/)([^/\s:@]+)(?::[^/\s@]*)?@/gi;
+
+/** `postgres://u:slaptas@host:5432/db` -> `postgres://u:***@host:5432/db`. */
+function redaguotasUrl(url) {
+  if (!url) return "<nenurodyta>";
+  return String(url).replace(KREDENCIALAI_URL, (_, schema, vartotojas) => `${schema}${vartotojas}:***@`);
+}
+
+/**
+ * Pašalina kredencialus iš bet kokio teksto, keliaujančio į logą ar klaidą.
+ *
+ * ⚠️ DVI AŠYS. Bendras šablonas gaudo URL formos kredencialus, o eksplicitiškai
+ * perduotas `url` pakeičiamas ir tada, kai jo forma šablono netenkina (pvz.
+ * slaptažodis su `@`, dėl kurio `PG*` kelias apskritai egzistuoja).
+ */
+function bePaslapciu(tekstas, url = null) {
+  let t = String(tekstas ?? "");
+  if (url) t = t.split(String(url)).join(redaguotasUrl(url));
+  return t.replace(KREDENCIALAI_URL, (_, schema, vartotojas) => `${schema}${vartotojas}:***@`);
+}
+
+/**
+ * `psql` stderr BE ATKURTŲ EILUČIŲ TURINIO (Codex P1).
+ *
+ * ⚠️ `DETAIL:` ir `CONTEXT:` NEŠA DUOMENIS, ne diagnostiką:
+ *
+ *   psql:<stdin>:42: ERROR:  duplicate key value violates unique constraint
+ *   psql:<stdin>:42: DETAIL:  Key (id)=(abc) already exists.
+ *   psql:<stdin>:42: CONTEXT:  COPY jobs, line 3: "abc\tTRANSKRIPCIJOS TEKSTAS..."
+ *
+ * Trečioji eilutė yra transkripcijos fragmentas. `ERROR:` eilutė diagnozei
+ * pakanka, tad į klaidos žinutę patenka tik ji.
+ */
+const DUOMENIS_NESANCIOS = /(^|:\s*)(DETAIL|CONTEXT):/i;
+
+function saugusStderr(stderr, targetUrl = null) {
+  const eilutes = String(stderr ?? "").split("\n");
+  const paliktos = eilutes.filter((e) => e.trim() && !DUOMENIS_NESANCIOS.test(e));
+  const pasalinta = eilutes.filter((e) => e.trim()).length - paliktos.length;
+
+  const tekstas = bePaslapciu(paliktos.join(" | ").trim(), targetUrl).slice(0, 500);
+  return pasalinta > 0 ? `${tekstas} [pašalinta ${pasalinta} eil. su duomenimis]` : tekstas;
+}
+
 class PgDumpBackupError extends Error {
   constructor(message, code) {
     super(message);
@@ -148,10 +212,26 @@ function _perskaitytiAntraste(plaintext) {
  *
  * @returns {{ manifest: object, envelope: object, dumpBytes: number }}
  */
-async function sukurtiSifruotaKopija({ databaseUrl, env = process.env } = {}) {
+async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.env } = {}) {
   if (!databaseUrl) {
     throw new PgDumpBackupError("Nenurodytas `databaseUrl`.", "PG_DUMP_NO_URL");
   }
+
+  /**
+   * ⚠️ ADMINISTRACINIS JUNGIKLIS TIKRINAMAS PIRMAS (Codex P1).
+   *
+   * `backupService.js:46` išjungtas kopijas atmeta `BACKUP_DISABLED` klaida. Šis
+   * kelias to neklausė, tad `BACKUP_ENABLED=false` diegime operatorius vis tiek
+   * pagamindavo šifruotą visos bazės kopiją - t. y. jungiklis reiškė mažiau, nei
+   * sako jo vardas.
+   *
+   * Prieš šifravimo patikrą sąmoningai: „kopijos išjungtos" yra sprendimas, o
+   * „nėra rakto" - konfigūracijos trūkumas. Sprendimas turi pirmenybę.
+   */
+  if (!backupPolicy.isEnabled(env)) {
+    throw new PgDumpBackupError("Kopijos išjungtos (`BACKUP_ENABLED`).", "BACKUP_DISABLED");
+  }
+
   if (!backupEncryption.isEnabled(env)) {
     /**
      * ⚠️ NEŠIFRUOTA KOPIJA NĖRA ŠIOS PROCEDŪROS BAIGTIS. `job_results` turi
@@ -184,10 +264,23 @@ async function sukurtiSifruotaKopija({ databaseUrl, env = process.env } = {}) {
    * viena netyčia pridėta vėliava tyliai panaikintų garantiją, kuria remiasi
    * atkūrimo testas.
    */
-  const { stdout: sql } = await vykdyti("pg_dump", PG_DUMP_ARGUMENTAI(databaseUrl), {
-    encoding: "utf8",
-    maxBuffer: MAX_DUMP_BYTES,
-  });
+  let sql;
+  try {
+    ({ stdout: sql } = await vykdyti("pg_dump", PG_DUMP_ARGUMENTAI(databaseUrl), {
+      encoding: "utf8",
+      maxBuffer: MAX_DUMP_BYTES,
+    }));
+  } catch (klaida) {
+    /**
+     * ⚠️ ORIGINALI KLAIDA NEPERDUODAMA. Ir `message`, ir `cmd` turi pilną
+     * jungties eilutę su slaptažodžiu; `cause` ją išsaugotų ir CLI ją
+     * atspausdintų. Diagnozei paliekamas `stderr` be kredencialų.
+     */
+    throw new PgDumpBackupError(
+      `\`pg_dump\` nepavyko: ${saugusStderr(klaida.stderr || klaida.message, databaseUrl)}`,
+      "PG_DUMP_FAILED"
+    );
+  }
 
   const plaintext = Buffer.concat([_antrasteBaitais(DUMP_FORMATAS), Buffer.from(sql, "utf8")]).toString("utf8");
   _assertDydis(plaintext);
@@ -205,7 +298,33 @@ async function sukurtiSifruotaKopija({ databaseUrl, env = process.env } = {}) {
   manifest.snapshotTime = new Date(snapshotTime).toISOString();
   manifest.excludedInFlightJobs = 0;
 
+  await _uzfiksuotiHorizonta(manifest);
+
   const envelope = backupEncryption.encrypt(plaintext, { env, manifest });
+
+  /**
+   * ⚠️ AUDITAS TIK KŪRIMO PUSĖJE - ASIMETRIJA SĄMONINGA.
+   *
+   * Čia šaltinio bazė gyva ir audito saugykla veikia, tad įrašas kainuoja
+   * nedaug. Atkūrimo pusėje rašyti nėra kur: `audit_log` į dump'ą sąmoningai
+   * neįtrauktas (7.4d), tikslinė bazė tuščia, aplikacija neveikia, o rašymas į
+   * kitą saugyklą reikštų, kad AVARINIS ATKŪRIMAS priklauso nuo audito
+   * prieinamumo - fail-closed būtent ten, kur reikia atkurti.
+   *
+   * Todėl runbook'o §11 eilutė apie atkūrimo auditavimą SUSIAURINTA, o ne
+   * paremta kodu, kurio čia negali būti.
+   *
+   * Kategoriją (`NEBLOKUOJANTIS`) nustato `utils/auditEvents.js`, ne šis
+   * call site (#210): audito gedimas kopijos nesunaikina, bet lieka matomas.
+   */
+  await auditWrite.rasytiAudita({
+    event: "PG_DUMP_BACKUP_CREATED",
+    success: true,
+    actor: actor || undefined,
+    details:
+      `formatVersion=${manifest.formatVersion} appVersion=${manifest.applicationVersion} ` +
+      `dumpBytes=${Buffer.byteLength(sql, "utf8")} expiresAt=${manifest.expiresAt}`,
+  });
 
   log.info("PostgreSQL kopija sukurta ir užšifruota", {
     stage: "pg_dump_encrypted",
@@ -213,6 +332,45 @@ async function sukurtiSifruotaKopija({ databaseUrl, env = process.env } = {}) {
   });
 
   return { manifest, envelope, dumpBytes: Buffer.byteLength(sql, "utf8") };
+}
+
+/**
+ * KOPIJOS GALIOJIMO HORIZONTAS - FAIL-CLOSED (Codex P1).
+ *
+ * ⚠️ NUO ŠIO ĮRAŠO PRIKLAUSO 7.6c (#250) PRIELAIDA.
+ *
+ * Manifestas turi `expiresAt`, bet pats savaime jis nieko nesaugo: ištrynimo
+ * žymų valymas remiasi `backup_horizon` lentele. Neužfiksavus horizonto,
+ * sutrumpinta `BACKUP_RETENTION_DAYS` reikšmė leidžia išvalyti žymas, KOL
+ * dump'as dar galioja - ir tada atkūrimas prikelia ištrintus job'us, o replay
+ * nebeturi ID sąrašo, kurį galėtų pritaikyti. Prielaida būtų netiesa dar prieš
+ * 7.6c atsirandant.
+ *
+ * ⚠️ SĄMONINGAS NUKRYPIMAS NUO `backupService.js:153`.
+ *
+ * Ten nesėkmė tik logginama ir kopija grąžinama. Čia - klaida: aplikacijos
+ * kopija turi ribotą, politikos filtruotą turinį, o šis artefaktas atkuria
+ * VISĄ bazę. Artefaktas, kurio horizontas neužfiksuotas, yra tiksliai tas
+ * atvejis, dėl kurio garantija netenka galios, tad jo išduoti negalima.
+ */
+async function _uzfiksuotiHorizonta(manifest) {
+  const galiojaIki = Date.parse(manifest.expiresAt);
+  if (!Number.isFinite(galiojaIki)) {
+    throw new PgDumpBackupError(
+      "Manifeste nėra galiojančio `expiresAt` - kopijos horizonto užfiksuoti neįmanoma.",
+      "PG_BACKUP_HORIZON_UNRECORDED"
+    );
+  }
+
+  try {
+    await tombstones.recordBackupHorizon(galiojaIki);
+  } catch (klaida) {
+    throw new PgDumpBackupError(
+      `Kopijos galiojimo NEPAVYKO užfiksuoti (${klaida.message}) - kopija neišduodama, ` +
+        "nes ištrynimo žymos gali būti pašalintos anksčiau, nei ji nustoja galioti.",
+      "PG_BACKUP_HORIZON_UNRECORDED"
+    );
+  }
 }
 
 /**
@@ -263,6 +421,23 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
     throw new PgDumpBackupError(
       `Manifestas negalioja: ${patikra.errors.join("; ")}.`,
       "BACKUP_MANIFEST_INVALID"
+    );
+  }
+
+  /**
+   * ⚠️ FORMATO VERSIJA - FAIL-CLOSED PRIEŠ DEŠIFRAVIMĄ (Codex P1).
+   *
+   * `validateManifest()` tikrina STRUKTŪRĄ ir `formatVersion` reikšmės
+   * sąmoningai nevertina. `restoreService.js:73` dėl to kviečia
+   * `backupPolicy.checkRestoreCompatibility()`; šis kelias to nedarė, tad
+   * naujesnės versijos artefaktas su tuo pačiu raktu sėkmingai autentifikuotųsi
+   * ir jo SQL keliautų į `psql` - nesuprastus laukus prarandant TYLIAI.
+   */
+  const suderinamumas = backupPolicy.checkRestoreCompatibility(manifest.formatVersion);
+  if (!suderinamumas.compatible) {
+    throw new PgDumpBackupError(
+      `Kopijos formatas nesuderinamas: ${suderinamumas.reason}.`,
+      "BACKUP_FORMAT_INCOMPATIBLE"
     );
   }
 
@@ -319,7 +494,15 @@ function _psqlSuStdin(targetUrl, sql) {
     const p = spawn(
       "psql",
       ["--single-transaction", "--set", "ON_ERROR_STOP=1", "--quiet", "--no-psqlrc", targetUrl],
-      { stdio: ["pipe", "pipe", "pipe"] }
+      /**
+       * ⚠️ `stdout: "ignore"`, NE `"pipe"` (Codex P2).
+       *
+       * Su `"pipe"` ir be skaitytojo `psql` išvestis kaupiasi vamzdyje; jį
+       * užpildžius procesas UŽSTRINGA - o atkūrimas užstrigtų vidury
+       * transakcijos. Išvestis mums nereikalinga (`--quiet`), tad ji
+       * atmetama OS lygyje, o ne buferinama be reikalo.
+       */
+      { stdio: ["pipe", "ignore", "pipe"] }
     );
 
     let stderr = "";
@@ -331,7 +514,7 @@ function _psqlSuStdin(targetUrl, sql) {
       if (code === 0) return resolve();
       reject(
         new PgDumpBackupError(
-          `psql grąžino ${code}: ${stderr.trim().slice(0, 500)}`,
+          `psql grąžino ${code}: ${saugusStderr(stderr, targetUrl)}`,
           "PG_RESTORE_FAILED"
         )
       );
@@ -350,7 +533,18 @@ module.exports = {
   DUMP_FORMATAS,
   MAX_DUMP_BYTES,
   PgDumpBackupError,
+  redaguotasUrl,
+  bePaslapciu,
+  saugusStderr,
   klientoVersija,
+  /**
+   * ⚠️ EKSPORTUOJAMA DĖL TESTO, IR TAI UŽRAŠYTA. Horizonto fiksavimas yra
+   * fail-closed sąlyga, o pilnas kelias iki jo reikalauja veikiančio `pg_dump`.
+   * Be šio eksporto abi klaidos šakos būtų tikrinamos tik CI'uje; su juo
+   * vietinis rinkinys tikrina ŠAKAS, o integracinis testas - kad jos realiai
+   * įjungtos į kopijos kūrimą.
+   */
+  uzfiksuotiHorizonta: _uzfiksuotiHorizonta,
   sukurtiSifruotaKopija,
   atkurtiSifruotaKopija,
 };

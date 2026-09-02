@@ -14,8 +14,16 @@
  * `pg_dump`/`psql`/`spawn`.
  *
  * NAUDOJIMAS
- *   node scripts/pg-backup.mjs dump    --out kopija.json   [--url $DATABASE_URL]
- *   node scripts/pg-backup.mjs restore --in  kopija.json    --target <url>
+ *   node scripts/pg-backup.mjs dump    --out kopija.json --actor <kas> [--url $DATABASE_URL]
+ *   node scripts/pg-backup.mjs restore --in  kopija.json --target <url>
+ *
+ * ⚠️ `--actor` PRIVALOMAS `dump` komandai: runbook'o §11 teigia, kad kopijų
+ * kūrimas audituojamas SU AKTORIUMI. Neprivalomas laukas tą teiginį vėl
+ * susilpnintų iki „kartais".
+ *
+ * ⚠️ JOKIŲ JUNGTIES EILUČIŲ IŠVESTYJE. Ir sėkmės pranešimas, ir klaida eina per
+ * `redaguotasUrl()`/`bePaslapciu()`: `pg_dump` klaidos tekstas turi visą argumentų
+ * eilutę su slaptažodžiu (išmatuota, #262 peržiūra).
  *
  * Exit kodai: 0 sėkmė · 1 naudojimo klaida · 2 procedūros klaida.
  */
@@ -43,8 +51,12 @@ try {
     const out = argumentas("out");
     if (!out) mirti("`dump` reikalauja `--out <failas>`.", 1);
 
+    const actor = argumentas("actor");
+    if (!actor) mirti("`dump` reikalauja `--actor <kas>` (auditui).", 1);
+
     const { manifest, envelope, dumpBytes } = await pgDumpBackup.sukurtiSifruotaKopija({
       databaseUrl: argumentas("url", process.env.DATABASE_URL),
+      actor,
     });
 
     await writeFile(out, JSON.stringify({ manifest, envelope }, null, 2), "utf8");
@@ -61,10 +73,10 @@ try {
       targetUrl: target,
     });
 
-    console.log(`Kopija atkurta į ${target} (${restoredBytes} B SQL).`);
+    console.log(`Kopija atkurta į ${pgDumpBackup.redaguotasUrl(target)} (${restoredBytes} B SQL).`);
   } else {
     mirti("Nežinoma komanda. Naudokite `dump` arba `restore`.", 1);
   }
 } catch (klaida) {
-  mirti(`${klaida.code || klaida.name}: ${klaida.message}`, 2);
+  mirti(`${klaida.code || klaida.name}: ${pgDumpBackup.bePaslapciu(klaida.message)}`, 2);
 }

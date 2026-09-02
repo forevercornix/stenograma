@@ -434,13 +434,24 @@ skirtingi artefaktai. Šis skyrius yra apie antrąjį.
 
 ```bash
 # Kopija (šifruojama AES-256-GCM; be rakto procedūra ATSISAKO dirbti)
-node backend/scripts/pg-backup.mjs dump --out kopija.json --url "$DATABASE_URL"
+BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
+  --out kopija.json --actor "$USER" --url "$DATABASE_URL"
 
 # Atkūrimas į TUŠČIĄ bazę
 node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
 ```
 
 Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+
+⚠️ **`BACKUP_ENABLED=true` privalomas.** Išjungtos kopijos reiškia išjungtas ir
+šias: `dump` krinta su `BACKUP_DISABLED` dar prieš jungiantis prie bazės.
+
+⚠️ **`--actor` privalomas `dump` komandai** — juo pasirašomas audito įrašas
+`PG_DUMP_BACKUP_CREATED`. Be jo komanda krinta su exit kodu `1`.
+
+⚠️ **Jungties eilučių išvestyje nebus.** Ir sėkmės pranešimas, ir klaidos tekstas
+praeina pro kredencialų filtrą: `pg_dump` klaidos žinutėje kitaip atsidurtų visa
+argumentų eilutė su slaptažodžiu.
 
 ### Ką procedūra garantuoja
 
@@ -452,13 +463,29 @@ Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
 - **Atomiškumą.** Atkūrimas vykdomas `psql --single-transaction` su
   `ON_ERROR_STOP=1`: SQL klaida viduryje duoda `ROLLBACK`, ne pusiau atkurtą bazę.
 - **Audito neįtraukimą.** `--exclude-table-data=audit_log` (7.4d).
+- **Kopijos galiojimo užfiksavimą.** Prieš išduodant artefaktą jo `expiresAt`
+  įrašomas per `deletionTombstones.recordBackupHorizon()`. Nepavykus — kopija
+  **neišduodama** (`PG_BACKUP_HORIZON_UNRECORDED`). Be šio įrašo sutrumpinta
+  `BACKUP_RETENTION_DAYS` reikšmė leistų išvalyti ištrynimo žymas, kol dump'as
+  dar galioja, ir 7.6c replay nebeturėtų ko taikyti.
+- **Kūrimo auditą su aktoriumi.** `PG_DUMP_BACKUP_CREATED`, atskiras nuo
+  aplikacijos kopijos `BACKUP_CREATED`. ⚠️ **Atkūrimo pusėje audito NĖRA** — žr.
+  §10 ir §11.
+- **Nesuderinamo formato atmetimą.** `backupPolicy.checkRestoreCompatibility()`
+  vykdomas prieš dešifravimą: naujesne versija sukurta kopija atmetama
+  (`BACKUP_FORMAT_INCOMPATIBLE`), o ne atkuriama prarandant nesuprastus laukus.
 
 ### Šaltinio nuoseklumas
 
 `pg_dump` visą kopiją ima **vienu nuosekliu snapshot'u** (`REPEATABLE READ`),
 tad `jobs` ir susiję `job_results` negali būti paimti iš skirtingų loginių
-momentų. Procedūra sąmoningai neperduoda `--no-synchronized-snapshots` ir
-`--jobs` — jos šią garantiją panaikintų **tyliai**, be jokios klaidos.
+momentų. Procedūra sąmoningai neperduoda `--no-synchronized-snapshots` ir `--jobs`.
+
+⚠️ **Formuluotė patikslinta (#262 peržiūra).** Ankstesnė redakcija teigė, kad abi
+vėliavos garantiją panaikintų „tyliai, be jokios klaidos". `plain` formatui tai
+netikslu: `pg_dump -j` iškart krinta (lygiagretus dump'as palaikomas tik
+`directory` formatu). Sargas testuose lieka — jis gina nuo vėliavos, pridėtos
+kartu su formato pakeitimu, kai kritimo nebebūtų.
 
 ### ⚠️ Manifestas NEPASAKO, kurią bazę atkuriate
 
@@ -475,11 +502,18 @@ remkitės tuo įrašu, ne vien manifestu. Šviežumo ir kilmės žymėjimas išs
 ### ⚠️ Po atkūrimo PRIVALOMA patikrinti schemos versiją
 
 ```bash
-DATABASE_URL="$TIKSLO_URL" node backend/scripts/doctor.mjs
+DATABASE_URL="$TIKSLO_URL" npm --prefix backend run doctor   # arba: make doctor
 ```
 
-`make doctor` per `startupChecks.postgresReachability()` lygina `pgmigrations`
-turinį su `backend/migrations/` katalogu ir parodo migracijų **atsilikimą**.
+⚠️ **Komanda patikslinta (#262 peržiūra).** Ankstesnė redakcija nurodė
+`backend/scripts/doctor.mjs` — **tokio failo nėra**; įėjimas yra
+`backend/scripts/doctor.js`, kviečiamas per `npm run doctor` arba `make doctor`.
+Ten pat mechanizmas buvo įvardytas kaip `startupChecks.postgresReachability()`:
+funkcija egzistuoja, bet yra **privati**, tad iš išorės ji nepasiekiama; viešasis
+įėjimas — `startupChecks.runSelfChecks()`.
+
+Patikra lygina `pgmigrations` turinį su `backend/migrations/` katalogu ir parodo
+migracijų **atsilikimą**.
 Atkurta bazė gali būti senesnės schemos nei kodas; be šio žingsnio tai
 paaiškėtų pirmo `INSERT` metu, gyvame sraute.
 
@@ -509,6 +543,19 @@ vykdyti tik su rankiniu ištrynimų sąrašo patikrinimu.
 | Serveris kopijų nesaugo | Perkėlimas ir saugojimas — operatoriaus | Kopijų saugyklos posistemė |
 | **`pg_dump` kopija ribojama `MAX_DUMP_BYTES` (256 MB)** | Didesnė bazė krinta su `PG_DUMP_TOO_LARGE` | Srautinis šifravimas — ne 7.6a |
 | **`pg_dump` atkūrimas NĖRA erasure-safe** | Prikelia po kopijos ištrintus job'us | Ištrynimų replay — 7.6c (#250) |
+| **`pg_dump` ATKŪRIMAS audito žurnale nefiksuojamas** | Atkūrimo faktas lieka tik operatoriaus runbook'o įraše | Sąmoningas sprendimas, ne spraga — žr. žemiau |
+| **Paslapčių skeneris `pg_dump` turiniui netaikomas** | Į kopiją patekusi paslaptis neaptinkama | Sąmoningas sprendimas — žr. žemiau |
+
+**Kodėl atkūrimas neaudituojamas.** Rašyti nėra kur: `audit_log` į dump'ą
+sąmoningai neįtrauktas, tikslinė bazė tuščia, aplikacija neveikia. Rašymas į kitą
+saugyklą reikštų, kad **avarinis atkūrimas priklauso nuo audito prieinamumo** —
+fail-closed būtent ten, kur reikia atkurti. Todėl atkūrimas fiksuojamas
+operatoriaus runbook'o įrašu, ne audito žurnale.
+
+**Kodėl dump'as neskenuojamas paslapčių.** `backupService` skenuoja aplikacijos
+artefaktus — ribotą, politikos filtruotą turinį. Pilnas DB dump'as pagal
+apibrėžimą turi **visą** turinį, tad 256 MB SQL skenavimas duotų daugiausia
+klaidingų teigiamų ir blokuotų teisėtas kopijas. Riba įvardijama, ne dangstoma.
 
 ---
 
@@ -516,8 +563,13 @@ vykdyti tik su rankiniu ištrynimų sąrašo patikrinimu.
 
 ✅ Kad kopijos šifruotos (`manifest.encrypted`, algoritmas ir versija).
 ✅ Kad kopijoje nėra eksportų ir redaguotų variantų (politika kildinama iš registro).
-✅ Kad atkūrimas **negrąžina ištrintų duomenų** — svarbiausia #20 garantija.
-✅ Kad kopijų kūrimas ir atkūrimas audituojami su aktoriumi.
+✅ Kad **aplikacijos kopijos** atkūrimas negrąžina ištrintų duomenų — svarbiausia
+#20 garantija. ⚠️ **`pg_dump` atkūrimui ji dar NEGALIOJA** (§9a, §10): ištrynimų
+replay ateina su 7.6c (#250). Iki tol tai eksplicitinė išimtis, ne nutylėjimas.
+✅ Kad kopijų **kūrimas** audituojamas su aktoriumi — ir aplikacijos
+(`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`). ⚠️ **`pg_dump`
+atkūrimas audito žurnale nefiksuojamas** (§10): jis fiksuojamas operatoriaus
+runbook'o įrašu.
 ✅ Retencijos terminą, apibrėžiantį faktinį ištrynimo langą.
 
 ❌ **Ne** to, kas konkrečiai kopijoje — manifeste tik tipai ir skaičiai.

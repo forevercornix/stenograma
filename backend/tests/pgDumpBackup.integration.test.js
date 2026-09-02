@@ -79,6 +79,12 @@ const backupEncryptionModulis = require("../utils/backupEncryption");
 const TESTO_ENV = {
   ...process.env,
   BACKUP_ENCRYPTION_KEY: backupEncryptionModulis.generateKey(),
+  /**
+   * ⚠️ `BACKUP_ENABLED` BŪTINAS NUO #262 PERŽIŪROS. `backupPolicy.isEnabled()`
+   * dabar tikrinamas pirmas, tad be šios reikšmės kiekvienas kopijos kūrimas
+   * kristų `BACKUP_DISABLED` - t. y. testas tikrintų jungiklį, ne procedūrą.
+   */
+  BACKUP_ENABLED: "true",
 };
 
 async function vykdyti(url, sql) {
@@ -193,7 +199,7 @@ test("7.6a: šifruota kopija ir atkūrimas", { skip: praleisti() }, async (t) =>
       () =>
         pgDumpBackup.sukurtiSifruotaKopija({
           databaseUrl: SALTINIO_URL,
-          env: { ...process.env, BACKUP_ENCRYPTION_KEY: "" },
+          env: { ...process.env, BACKUP_ENABLED: "true", BACKUP_ENCRYPTION_KEY: "" },
         }),
       /BACKUP_ENCRYPTION_DISABLED|šifravimas neįjungtas/i
     );
@@ -535,4 +541,110 @@ test("7.6a: rūšies antraštė yra FAIL-CLOSED (ne pg_dump artefaktas)", { skip
     "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public'"
   );
   assert.equal(rows[0].n, 0, "svetimas artefaktas NELIEČIA tikslinės bazės");
+});
+
+/**
+ * #262 CODEX PERŽIŪRA — KAS ĮRODOMA TIK SU TIKRA DB.
+ *
+ * ⚠️ RIBA BRĖŽIAMA PAGAL TAI, KO TESTUI REIKIA. Šakos (netinkamas `expiresAt`,
+ * mesta saugyklos klaida, redagavimo funkcijos) tikrinamos vietiniame
+ * `pgDumpBackupContract`. Čia lieka tik tai, kam reikia veikiančio `pg_dump`:
+ * kad horizontas ir auditas realiai ĮJUNGTI į kopijos kūrimą, ir kad tikra
+ * `pg_dump` klaida neišneša slaptažodžio.
+ */
+const { mock } = require("node:test");
+const tombstones = require("../utils/deletionTombstones");
+const auditWrite = require("../utils/auditWrite");
+
+test("#262: horizontas ir auditas ĮJUNGTI į kopijos kūrimą", { skip: praleisti() }, async (t) => {
+  t.after(async () => {
+    await pasalintiDb(SALTINIO_URL);
+  });
+
+  await perkurtiDb(SALTINIO_URL);
+  await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
+
+  const horizontas = mock.method(tombstones, "recordBackupHorizon", async (ms) => ms);
+  const auditas = mock.method(auditWrite, "rasytiAudita", async () => {});
+
+  try {
+    const kopija = await pgDumpBackup.sukurtiSifruotaKopija({
+      databaseUrl: SALTINIO_URL,
+      actor: "operatorius-testas",
+      env: TESTO_ENV,
+    });
+
+    assert.equal(horizontas.mock.callCount(), 1, "kopijos galiojimas privalo būti užfiksuotas");
+    assert.equal(
+      horizontas.mock.calls[0].arguments[0],
+      Date.parse(kopija.manifest.expiresAt),
+      "fiksuojamas TO PATIES manifesto galiojimas, ne apytikslis laikas"
+    );
+
+    assert.equal(auditas.mock.callCount(), 1);
+    const irasas = auditas.mock.calls[0].arguments[0];
+    assert.equal(irasas.event, "PG_DUMP_BACKUP_CREATED");
+    assert.equal(irasas.actor, "operatorius-testas", "§11 reikalauja aktoriaus, ne vien įvykio");
+    assert.equal(/[0-9a-f]{64}/i.test(JSON.stringify(irasas)), false, "audite - tik metaduomenys, jokių raktų");
+  } finally {
+    horizontas.mock.restore();
+    auditas.mock.restore();
+  }
+});
+
+test("#262: horizonto NEUŽFIKSAVUS kopija NEIŠDUODAMA", { skip: praleisti() }, async (t) => {
+  t.after(async () => {
+    await pasalintiDb(SALTINIO_URL);
+  });
+
+  await perkurtiDb(SALTINIO_URL);
+  await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
+
+  const luztantis = mock.method(tombstones, "recordBackupHorizon", async () => {
+    throw new Error("saugykla neprieinama");
+  });
+  const auditas = mock.method(auditWrite, "rasytiAudita", async () => {});
+
+  try {
+    await assert.rejects(
+      () => pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: SALTINIO_URL, actor: "operatorius-testas", env: TESTO_ENV }),
+      (err) => {
+        assert.equal(err.code, "PG_BACKUP_HORIZON_UNRECORDED");
+        return true;
+      }
+    );
+
+    /**
+     * ⚠️ NEUŽTENKA „metė klaidą": kopija neturi būti nei užšifruota, nei
+     * užaudituota. Auditas po nesėkmės reikštų įrašą apie neegzistuojantį
+     * artefaktą.
+     */
+    assert.equal(auditas.mock.callCount(), 0, "neišduotos kopijos auditas fiksuoti negali");
+  } finally {
+    luztantis.mock.restore();
+    auditas.mock.restore();
+  }
+});
+
+test("#262: tikra `pg_dump` klaida NEIŠNEŠA slaptažodžio", { skip: praleisti() }, async () => {
+  /**
+   * ⚠️ TAI CI-ONLY ĮRODYMAS, IR SĄMONINGAI. Be įdiegto `pg_dump` procesas krinta
+   * ties `ENOENT`, o tokioje žinutėje argumentų eilutės nėra — testas praeitų
+   * nieko neįrodęs. Su realiu klientu žinutė turi VISĄ argumentų eilutę:
+   *
+   *   Command failed: pg_dump ... postgres://vartotojas:SLAPTAS123@...
+   */
+  const nesamaDb = new URL(SALTINIO_URL);
+  nesamaDb.password = "SLAPTAZODIS123";
+  nesamaDb.pathname = "/nera_tokios_bazes_248";
+
+  await assert.rejects(
+    () => pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: nesamaDb.toString(), actor: "operatorius-testas", env: TESTO_ENV }),
+    (err) => {
+      assert.equal(err.code, "PG_DUMP_FAILED");
+      assert.equal(err.message.includes("SLAPTAZODIS123"), false, "slaptažodis negali patekti į klaidos žinutę");
+      assert.equal(String(err.stack).includes("SLAPTAZODIS123"), false, "nei į stack'ą per `cause`");
+      return true;
+    }
+  );
 });

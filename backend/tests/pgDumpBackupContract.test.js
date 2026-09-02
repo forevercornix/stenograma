@@ -355,3 +355,187 @@ test("#248 ⚠️ nesutampanti kontrolinė suma krinta PRIEŠ prisijungimą", as
     }
   );
 });
+
+/**
+ * ⚠️ CODEX PERŽIŪROS (#262) UŽDARYMAS — kas čia įrodoma BE duomenų bazės.
+ *
+ * Keturios iš patvirtintų taisymų yra grynos sprendimo šakos arba teksto
+ * transformacijos, tad joms DB nereikia. NOT RUN riba brėžiama pagal tai, ko
+ * testui REIKIA, o ne pagal tai, kur jis patogiai tilptų — ta pati klaida jau
+ * buvo padaryta pirmoje šio darbo redakcijoje ir taisyta `c6c6753`.
+ */
+const { mock } = require("node:test");
+const { spawnSync } = require("node:child_process");
+const os = require("node:os");
+const tombstones = require("../utils/deletionTombstones");
+const auditEvents = require("../utils/auditEvents");
+const backupPolicy = require("../utils/backupPolicy");
+
+const SLAPTAZODIS = "SLAPTAS123";
+const SU_SLAPTAZODZIU = `postgres://vartotojas:${SLAPTAZODIS}@127.0.0.1:1/nera`;
+
+test("#262 Codex P1: `BACKUP_ENABLED` išjungtas — kopija ATSISAKOMA prieš `pg_dump`", async () => {
+  /**
+   * ⚠️ NEPASIEKIAMA DB YRA ĮRODYMO DALIS. Jei jungiklis būtų tikrinamas po
+   * `pg_dump`, testas kristų prisijungimo klaida, ne `BACKUP_DISABLED`.
+   */
+  const env = { ...process.env, BACKUP_ENABLED: "false", BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+
+  await assert.rejects(
+    () => pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: NEPASIEKIAMA_DB, actor: "testas", env }),
+    (err) => {
+      assert.equal(err.code, "BACKUP_DISABLED");
+      return true;
+    }
+  );
+
+  // Sprendimas turi pirmenybę prieš konfigūracijos trūkumą: be rakto IR be jungiklio - vis tiek `BACKUP_DISABLED`.
+  await assert.rejects(
+    () => pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: NEPASIEKIAMA_DB, actor: "testas", env: { NODE_ENV: "test" } }),
+    (err) => {
+      assert.equal(err.code, "BACKUP_DISABLED");
+      return true;
+    }
+  );
+
+  assert.equal(backupPolicy.isEnabled({ BACKUP_ENABLED: "true" }), true, "jungiklis privalo turėti ir teigiamą reikšmę");
+});
+
+test("#262 Codex P1: NAUJESNĖS formato versijos artefaktas atmetamas PRIEŠ `psql`", async () => {
+  /**
+   * ⚠️ MANIFESTAS ŠIFRUOJAMAS SU PAKEISTA VERSIJA, ne pataisomas po to.
+   *
+   * `formatVersion` yra AAD dalis, tad vėlesnis keitimas duotų
+   * `BACKUP_DECRYPTION_FAILED` — ir testas įrodytų GCM žymą, ne suderinamumo
+   * patikrą. Užšifravus su ta pačia versija, vienintelis dalykas, galintis
+   * sustabdyti šį artefaktą, yra `checkRestoreCompatibility()`.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  const plaintext = `${pgDumpBackup.ANTRASTE}\n${pgDumpBackup.ANTRASTES_VERSIJA}\n${pgDumpBackup.DUMP_FORMATAS}\n\nSELECT 1;`;
+  const checksum = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
+
+  const manifest = backupManifest.createManifest({ contents: [], checksum, env });
+  manifest.formatVersion = manifest.formatVersion + 1;
+  manifest.encrypted = true;
+  manifest.encryptionAlgorithm = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+  manifest.snapshotTime = new Date().toISOString();
+  manifest.excludedInFlightJobs = 0;
+
+  const envelope = backupEncryption.encrypt(plaintext, { env, manifest });
+
+  await assert.rejects(
+    () => pgDumpBackup.atkurtiSifruotaKopija({ envelope, manifest, targetUrl: NEPASIEKIAMA_DB, env }),
+    (err) => {
+      assert.equal(err.code, "BACKUP_FORMAT_INCOMPATIBLE");
+      assert.match(err.message, /naujesne versija/);
+      return true;
+    }
+  );
+});
+
+test("#262 Codex P1: horizonto NEUŽFIKSAVUS kopija NEIŠDUODAMA", async () => {
+  await assert.rejects(
+    () => pgDumpBackup.uzfiksuotiHorizonta({ expiresAt: "ne data" }),
+    (err) => {
+      assert.equal(err.code, "PG_BACKUP_HORIZON_UNRECORDED");
+      return true;
+    }
+  );
+
+  /**
+   * ⚠️ SĄMONINGAS NUKRYPIMAS NUO `backupService.js:153`, tad jis ir tikrinamas:
+   * ten saugyklos gedimas tik logginamas, čia — nutraukia kopijos išdavimą.
+   */
+  const luztantis = mock.method(tombstones, "recordBackupHorizon", async () => {
+    throw new Error("saugykla neprieinama");
+  });
+
+  try {
+    await assert.rejects(
+      () => pgDumpBackup.uzfiksuotiHorizonta({ expiresAt: new Date(Date.now() + 86400000).toISOString() }),
+      (err) => {
+        assert.equal(err.code, "PG_BACKUP_HORIZON_UNRECORDED");
+        assert.match(err.message, /saugykla neprieinama/);
+        return true;
+      }
+    );
+  } finally {
+    luztantis.mock.restore();
+  }
+
+  const uzfiksuoti = mock.method(tombstones, "recordBackupHorizon", async (ms) => ms);
+  try {
+    const galiojaIki = new Date(Date.now() + 86400000).toISOString();
+    await pgDumpBackup.uzfiksuotiHorizonta({ expiresAt: galiojaIki });
+
+    assert.equal(uzfiksuoti.mock.callCount(), 1);
+    assert.equal(uzfiksuoti.mock.calls[0].arguments[0], Date.parse(galiojaIki), "fiksuojamas manifesto `expiresAt`, ne kas kita");
+  } finally {
+    uzfiksuoti.mock.restore();
+  }
+});
+
+test("#262 Codex P1: kredencialai ir eilučių turinys NEIŠEINA į klaidas bei logus", () => {
+  assert.equal(pgDumpBackup.redaguotasUrl(SU_SLAPTAZODZIU).includes(SLAPTAZODIS), false);
+  assert.match(pgDumpBackup.redaguotasUrl(SU_SLAPTAZODZIU), /postgres:\/\/vartotojas:\*\*\*@/);
+
+  const zinute = `Command failed: pg_dump --no-owner ${SU_SLAPTAZODZIU}`;
+  assert.equal(pgDumpBackup.bePaslapciu(zinute).includes(SLAPTAZODIS), false, "bendras šablonas privalo gaudyti URL formą");
+
+  /**
+   * ⚠️ SLAPTAŽODIS SU `@` — būtent dėl tokių `utils/pgConnection.js` egzistuoja.
+   * Bendras šablonas jo nesugaus, tad eksplicitiškai perduotas URL yra ANTRA ašis.
+   */
+  const keistas = "postgres://vartotojas:pa@ss/word@127.0.0.1:5432/db";
+  assert.equal(pgDumpBackup.bePaslapciu(`nepavyko: ${keistas}`, keistas).includes("pa@ss/word"), false);
+
+  const stderr = [
+    "psql:<stdin>:42: ERROR:  duplicate key value violates unique constraint \"jobs_pkey\"",
+    "psql:<stdin>:42: DETAIL:  Key (id)=(abc) already exists.",
+    "psql:<stdin>:42: CONTEXT:  COPY jobs, line 3: \"abc\tSLAPTA TRANSKRIPCIJA\"",
+  ].join("\n");
+
+  const saugus = pgDumpBackup.saugusStderr(stderr, SU_SLAPTAZODZIU);
+  assert.match(saugus, /duplicate key value/, "diagnozė privalo likti");
+  assert.equal(saugus.includes("SLAPTA TRANSKRIPCIJA"), false, "atkurtų eilučių turinys negali patekti į klaidą");
+  assert.equal(saugus.includes("Key (id)="), false);
+  assert.match(saugus, /pašalinta 2 eil/, "pašalinimas privalo būti MATOMAS, ne tylus");
+});
+
+test("#262 Codex P1: `dump` be `--actor` neįvyksta (auditas su aktoriumi)", () => {
+  /**
+   * ⚠️ TIKRAS PROCESAS, ne failo tekstas: klausimas yra „ar komanda atsisako",
+   * o ne „ar faile yra eilutė" (§9.2). DB čia nereikia — kritimas įvyksta
+   * anksčiau nei bet koks prisijungimas.
+   */
+  const r = spawnSync(process.execPath, [path.join(SAKNIS, "scripts", "pg-backup.mjs"), "dump", "--out", path.join(os.tmpdir(), "nera.json")], {
+    encoding: "utf8",
+    env: { ...process.env, BACKUP_ENABLED: "true", NODE_ENV: "test", LOG_LEVEL: "error" },
+  });
+
+  assert.equal(r.status, 1, "naudojimo klaida yra exit 1");
+  assert.match(r.stderr, /--actor/);
+  assert.equal(fs.existsSync(path.join(os.tmpdir(), "nera.json")), false, "atsisakius artefakto rašyti negalima");
+});
+
+test("#262: `PG_DUMP_BACKUP_CREATED` registruotas ir ATSKIRAS nuo aplikacijos kopijos", () => {
+  assert.equal(auditEvents.kategorija("PG_DUMP_BACKUP_CREATED"), auditEvents.kategorija("BACKUP_CREATED"));
+  assert.ok(auditEvents.AUDIT_EVENTS.PG_DUMP_BACKUP_CREATED, "neregistruotas įvykis mestų UnclassifiedAuditEventError");
+
+  /**
+   * ⚠️ ATKŪRIMO ATITIKMENS NĖRA IR NETURI BŪTI. Jei kada atsirastų, tai reikštų,
+   * kad avarinis atkūrimas ėmė priklausyti nuo audito prieinamumo — sprendimas,
+   * kurį reikėtų priimti atskirai, o ne pastebėti po fakto.
+   */
+  assert.equal(auditEvents.AUDIT_EVENTS.PG_DUMP_BACKUP_RESTORED, undefined);
+});
+
+test("#262 Codex P2: `psql` stdout NEBUFERINAMAS (statinė forma, §9.2)", () => {
+  /**
+   * ⚠️ ŠI PATIKRA TIKRINA FORMĄ, NE ELGESĮ, ir kitaip negali: užstrigimą
+   * įrodytų tik dump'as, pripildantis vamzdį — o `--quiet` režimu tokio nėra.
+   * Elgesio pusėje lieka integracinis atkūrimas, kuris su `"ignore"` praeina.
+   */
+  const src = fs.readFileSync(path.join(SAKNIS, "utils", "pgDumpBackup.js"), "utf8");
+  assert.match(src, /stdio:\s*\["pipe",\s*"ignore",\s*"pipe"\]/);
+});
