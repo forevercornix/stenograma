@@ -808,7 +808,7 @@ test("#262: SVETIMOS bazės dump'as atmetamas — horizontas negali gulėti ne t
   assert.equal(rows[0].n, 0, "neišduotos kopijos horizontas fiksuoti negali");
 });
 
-test("#262: preflight mato NE TIK lenteles (seka, matview, funkcija, schema)", { skip: praleisti() }, async (t) => {
+test("#262: preflight mato NE TIK lenteles (seka, matview, funkcija, schema, enum, domenas)", { skip: praleisti() }, async (t) => {
   /**
    * ⚠️ `information_schema.tables` ŠIŲ OBJEKTŲ NEMATO.
    *
