@@ -129,3 +129,36 @@ test("#248: manifestas dump'ui turi TUŠČIĄ `contents`", () => {
     /politika neleidžia/
   );
 });
+
+test("#248: `pg_dump` argumentai NELAUŽO nuoseklaus snapshot'o", () => {
+  /**
+   * ⚠️ NUOSEKLUS SNAPSHOT'AS YRA PRIELAIDA, KURIA REMIASI ATKŪRIMO TESTAS.
+   *
+   * `pg_dump` visą kopiją ima vienu `REPEATABLE READ` snapshot'u, tad `jobs` ir
+   * susiję `job_results` negali būti paimti iš skirtingų loginių momentų.
+   * `pgDumpBackup.integration` tuo REMIASI: jis tikrina, kad atkurtoje bazėje
+   * nėra `job_results` be `jobs` ir atvirkščiai.
+   *
+   * ⚠️ VIENA NETYČIA PRIDĖTA VĖLIAVA TĄ GARANTIJĄ PANAIKINTŲ TYLIAI —
+   * `--no-synchronized-snapshots` ar `--jobs` neduotų klaidos, tik nenuoseklią
+   * kopiją. Todėl argumentų sąrašas yra eksportuojamas ir tikrinamas.
+   *
+   * Statinė forma čia tinkama (§9.2): klausimas yra „ar sąraše nėra draudžiamos
+   * vėliavos", ne „ką `pg_dump` daro".
+   */
+  const argumentai = pgDumpBackup.PG_DUMP_ARGUMENTAI("postgres://x/y");
+
+  for (const veliava of pgDumpBackup.SNAPSHOTA_LAUZANCIOS_VELIAVOS) {
+    assert.equal(
+      argumentai.some((a) => a === veliava || String(a).startsWith(`${veliava}=`)),
+      false,
+      `⚠️ \`${veliava}\` sulaužytų nuoseklų snapshot'ą, kuriuo remiasi atkūrimo testas`
+    );
+  }
+
+  /** Auditas neimamas - ta pati 7.4d taisyklė, kurią aprašo runbook'as. */
+  assert.ok(
+    argumentai.includes("--exclude-table-data=audit_log"),
+    "`audit_log` privalo likti neimamas"
+  );
+});

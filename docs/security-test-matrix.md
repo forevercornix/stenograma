@@ -1541,6 +1541,9 @@ mutacijų stulpelis be jo skambėtų taip, tarsi apsauga būtų buvusi nuo prad�
 | ⚠️ **Fail-closed: DB lieka SEMANTIŠKAI NEPALIESTA** (5 scenarijai) | `pgDumpBackup.integration` | ⚠️ NOT RUN. Mutacijos ME (rūšies antraštė) ir MF (checksum) vietoje NEPAGAUNAMOS — reikia tikros DB |
 | ⚠️ **SQL klaida JAU PRADĖJUS → `ROLLBACK`**, ne dalinis restore (D4) | `pgDumpBackup.integration` | ⚠️ NOT RUN. Mutacija MG (`--single-transaction` pašalinimas) vietoje nepagaunama |
 | ⚠️ Rūšies antraštė fail-closed: aplikacijos kopija **neįvykdoma** per `psql` | `pgDumpBackup.integration` | ⚠️ NOT RUN. Rūšis gyvena ŠIFRUOTAME turinyje, tad GCM ją autentifikuoja be AAD keitimo |
+| ⚠️ **Schemos versija** po atkūrimo atitinka kodą | `pgDumpBackup.integration` | ⚠️ NOT RUN. Naudojamas TAS PATS `startupChecks.postgresReachability()`, kurį vykdo `make doctor` — ne atkartotas palyginimas. `count(*) > 0` nepakaktų: senesnė schema jį praeitų |
+| ⚠️ **`pg_dump` argumentai nelaužo nuoseklaus snapshot'o** | `pgDumpBackupContract` | `--no-synchronized-snapshots` ar `--jobs` garantiją panaikintų TYLIAI, be klaidos. Mutacija: vėliavą pridėjus → krinta |
+| ⚠️ Atkurtoje bazėje nėra `job_results` be `jobs` ir atvirkščiai | `pgDumpBackup.integration` | ⚠️ NOT RUN. Testas REMIASI snapshot semantika; be jos ryšys galėtų lūžti net esant teisingam atkūrimui |
 
 ⚠️ **KĄ 7.6a ĮRODO VIETOJE IR KO NE.** Vietinis rinkinys tikrina KONTRAKTĄ:
 vieno kelio taisyklę, dydžio ribą, registro neliečiamumą ir runbook'o ribas.
@@ -1548,6 +1551,18 @@ Pačią procedūrą — `pg_dump`, šifravimą per tikrus duomenis, atkūrimą,
 atomiškumą ir fail-closed elgesį — tikrina tik `pgDumpBackup.integration`,
 kuris reikalauja IR tikros DB, IR `pg_dump`/`psql` binarų. Šioje aplinkoje jis
 NEVYKDOMAS nė karto.
+
+⚠️ **VISAS FAIL-CLOSED BRANDUOLYS PIRMĄ KARTĄ BUS PATIKRINTAS TIK CI'UJE.**
+
+Trys mutacijos — ME (rūšies antraštė), MF (kontrolinė suma) ir MG
+(`--single-transaction`) — vietoje NEPAGAUNAMOS. Kartu jos dengia būtent tas
+patikras, kurios saugo pavojingiausią veiksmą: SQL vykdymą prieš realią duomenų
+bazę. Tai ta pati riba, kurią 7.5b turėjo M15/M16 atveju (taisyklė tikrinama
+vietoje, laidų sujungimas — ne), tik čia ji apima ne vieną šaką, o visą branduolį.
+
+Praktinė pasekmė: jei kuri nors iš trijų neveiktų, tai paaiškėtų ne vietinio
+rinkinio metu, o pirmame CI paleidime — ir tik jei `postgresql-client-16`
+diegimas (D7) suveiks. Abu dalykai pirmą kartą vykdomi kartu.
 
 ⚠️ **DVI PRALEIDIMO AŠYS, NE VIENA.** `skipWithoutPostgres()` tikrina
 `DATABASE_URL`, o atskira patikra — ar yra `pg_dump`/`psql`. Su

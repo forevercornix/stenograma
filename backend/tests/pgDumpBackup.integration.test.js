@@ -190,9 +190,28 @@ test("7.6a: šifruota kopija ir atkūrimas", { skip: praleisti() }, async (t) =>
       env: TESTO_ENV,
     });
 
-    /** Schemos versija: migracijų žymos atkurtos. */
+    /**
+     * ⚠️ SCHEMOS VERSIJA TIKRINAMA TUO PAČIU PALYGINIMU KAIP `make doctor` (D5).
+     *
+     * `count(*) > 0` nepakaktų: bazė, į kurią pritaikyta tik SENESNĖ migracija,
+     * jį praeitų, o pirmas `INSERT` kristų gyvame sraute. Repo „schemos versija"
+     * yra būtent PRITAIKYTŲ `pgmigrations` aibė, lyginama su
+     * `backend/migrations/` katalogu (`startupChecks.postgresReachability()`).
+     *
+     * ⚠️ NAUDOJAMAS TAS PATS KODAS, ne atkartotas palyginimas — kitaip testas
+     * įrodytų savo kopiją, o runbook'o post-restore žingsnis liktų neįrodytas.
+     */
+    const startupChecks = require("../utils/startupChecks");
+    const patikra = await startupChecks.postgresReachability({ ...process.env, DATABASE_URL: TIKSLO_URL });
+
+    assert.equal(
+      patikra.ok,
+      true,
+      `⚠️ atkurta schema privalo atitikti kodą: ${JSON.stringify(patikra.detail || patikra)}`
+    );
+
     const { rows: migracijos } = await vykdyti(TIKSLO_URL, "SELECT count(*)::int AS n FROM pgmigrations");
-    assert.ok(migracijos[0].n > 0, "`pgmigrations` atkurta - schemos versija žinoma");
+    assert.ok(migracijos[0].n > 0, "prielaida: `pgmigrations` apskritai atkurta");
 
     /**
      * ⚠️ PALYGINIMAS NĖRA `COUNT(*)` (#248).
@@ -216,6 +235,29 @@ test("7.6a: šifruota kopija ir atkūrimas", { skip: praleisti() }, async (t) =>
       { text: "reprezentatyvi transkripcija", segments: [{ t: 1 }] },
       "⚠️ rezultato TURINYS sutampa, ne tik eilučių skaičius"
     );
+
+    /**
+     * ⚠️ ŠALTINIO NUOSEKLUMAS: `jobs` ir `job_results` iš TO PATIES loginio momento.
+     *
+     * `pg_dump` visą kopiją ima vienu nuosekliu snapshot'u (REPEATABLE READ
+     * transakcija), tad lentelės negali būti paimtos iš skirtingų momentų. Šis
+     * testas tuo REMIASI: tikrina, kad atkurtoje bazėje nėra nė vieno
+     * `job_results` be savo `jobs` eilutės ir atvirkščiai.
+     *
+     * Be snapshot semantikos toks ryšys galėtų lūžti net esant teisingam
+     * atkūrimui: `job_results` paimtas vėliau nei `jobs` turėtų eilučių, kurių
+     * `jobs` pusėje nėra. Procedūra jokių snapshot'ą laužančių vėliavų
+     * neperduoda — tai gina `pgDumpBackupContract`.
+     */
+    const { rows: naslaiciai } = await vykdyti(
+      TIKSLO_URL,
+      `SELECT
+         (SELECT count(*)::int FROM job_results r LEFT JOIN jobs j ON j.id = r.job_id WHERE j.id IS NULL) AS be_jobo,
+         (SELECT count(*)::int FROM jobs j WHERE j.status = 'completed'
+            AND NOT EXISTS (SELECT 1 FROM job_results r WHERE r.job_id = j.id)) AS be_rezultato`
+    );
+    assert.equal(naslaiciai[0].be_jobo, 0, "⚠️ `job_results` be `jobs` - snapshot'ai išsiskyrė");
+    assert.equal(naslaiciai[0].be_rezultato, 0, "⚠️ baigtas job'as be rezultato - snapshot'ai išsiskyrė");
   });
 
   await t.test("⚠️ `audit_log` NEATKURIAMAS (unikalus sentinel'is)", { timeout: 60000 }, async () => {

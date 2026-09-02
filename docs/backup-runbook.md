@@ -453,6 +453,25 @@ Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
   `ON_ERROR_STOP=1`: SQL klaida viduryje duoda `ROLLBACK`, ne pusiau atkurtą bazę.
 - **Audito neįtraukimą.** `--exclude-table-data=audit_log` (7.4d).
 
+### Šaltinio nuoseklumas
+
+`pg_dump` visą kopiją ima **vienu nuosekliu snapshot'u** (`REPEATABLE READ`),
+tad `jobs` ir susiję `job_results` negali būti paimti iš skirtingų loginių
+momentų. Procedūra sąmoningai neperduoda `--no-synchronized-snapshots` ir
+`--jobs` — jos šią garantiją panaikintų **tyliai**, be jokios klaidos.
+
+### ⚠️ Manifestas NEPASAKO, kurią bazę atkuriate
+
+DB dump'o manifeste `contents` yra **tuščias** (dump'as nėra aplikacijos
+artefaktų inventorius), tad iš dviejų dump'ų manifestų juos skiria praktiškai tik
+`snapshotTime`. Klastojimui tai kelio neatveria — rūšį ir turinį autentifikuoja
+GCM žyma — bet **operatorius iš manifesto neatskiria, ką atkuria**.
+
+Todėl: kiekvienam atkūrimui užsirašykite, **kuris artefaktas yra autoritetingas**
+(failo vardas, `snapshotTime`, iš kurios aplinkos), ir rollback'o aptikimas
+remkitės tuo įrašu, ne vien manifestu. Šviežumo ir kilmės žymėjimas išsamiau —
+7.6c (#250).
+
 ### ⚠️ Po atkūrimo PRIVALOMA patikrinti schemos versiją
 
 ```bash

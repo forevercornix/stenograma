@@ -64,6 +64,27 @@ const ANTRASTES_VERSIJA = "v1";
  */
 const DUMP_FORMATAS = "plain";
 
+/**
+ * `pg_dump` argumentai — VIENAS sąrašas, kad jį būtų galima tikrinti.
+ *
+ * `--exclude-table-data=audit_log` (7.4d): auditas į kopiją nepatenka sąmoningai.
+ * `--no-owner`/`--no-privileges`: atkūrimas į kitą bazę neturi reikalauti tų
+ * pačių rolių.
+ */
+const PG_DUMP_ARGUMENTAI = (databaseUrl) => [
+  "--exclude-table-data=audit_log",
+  "--no-owner",
+  "--no-privileges",
+  databaseUrl,
+];
+
+/** Vėliavos, kurios SULAUŽYTŲ nuoseklų snapshot'ą. Tikrina kontrakto testas. */
+const SNAPSHOTA_LAUZANCIOS_VELIAVOS = Object.freeze([
+  "--no-synchronized-snapshots",
+  "--jobs",
+  "-j",
+]);
+
 class PgDumpBackupError extends Error {
   constructor(message, code) {
     super(message);
@@ -143,11 +164,30 @@ async function sukurtiSifruotaKopija({ databaseUrl, env = process.env } = {}) {
   }
 
   const snapshotTime = Date.now();
-  const { stdout: sql } = await vykdyti(
-    "pg_dump",
-    ["--exclude-table-data=audit_log", "--no-owner", "--no-privileges", databaseUrl],
-    { encoding: "utf8", maxBuffer: MAX_DUMP_BYTES }
-  );
+
+  /**
+   * ⚠️ ŠALTINIO NUOSEKLUMAS YRA KOPIJOS KOREKTIŠKUMO SĄLYGA, NE DETALĖ.
+   *
+   * `pg_dump` visą kopiją ima VIENU nuosekliu snapshot'u (`REPEATABLE READ`
+   * transakcija), tad `jobs` ir susiję `job_results` NEGALI būti paimti iš
+   * skirtingų loginių momentų. Be to atkurta bazė galėtų turėti `job_results`
+   * eilutę, kurios `jobs` pusėje nėra — ir tai atrodytų kaip teisingas
+   * atkūrimas.
+   *
+   * ⚠️ TODĖL ARGUMENTŲ SĄRAŠE NĖRA IR NEGALI ATSIRASTI:
+   *
+   *   `--no-synchronized-snapshots` — atsisako bendro snapshot'o;
+   *   `--jobs` / `-j`               — lygiagretus dump'as, kuris be
+   *                                   sinchronizuotų snapshot'ų prasmės neturi.
+   *
+   * Tai gina `pgDumpBackupContract` sargas: vėliavų sąrašas tikrinamas, nes
+   * viena netyčia pridėta vėliava tyliai panaikintų garantiją, kuria remiasi
+   * atkūrimo testas.
+   */
+  const { stdout: sql } = await vykdyti("pg_dump", PG_DUMP_ARGUMENTAI(databaseUrl), {
+    encoding: "utf8",
+    maxBuffer: MAX_DUMP_BYTES,
+  });
 
   const plaintext = Buffer.concat([_antrasteBaitais(DUMP_FORMATAS), Buffer.from(sql, "utf8")]).toString("utf8");
   _assertDydis(plaintext);
@@ -294,6 +334,8 @@ function _psqlSuStdin(targetUrl, sql) {
 }
 
 module.exports = {
+  PG_DUMP_ARGUMENTAI,
+  SNAPSHOTA_LAUZANCIOS_VELIAVOS,
   ANTRASTE,
   ANTRASTES_VERSIJA,
   DUMP_FORMATAS,
