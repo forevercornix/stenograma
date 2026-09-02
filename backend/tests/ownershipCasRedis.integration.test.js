@@ -436,40 +436,44 @@ test("#184-B ⚠️ `finishAtomic` po pralaimėto CAS PERKLASIFIKUOJA į RESULT_
    * job'ą ir gautų NUGALĖTOJO rezultatą kaip idempotentišką sėkmę. Reikalingas
    * `RESULT_CONFLICT` dingtų TYLIAI.
    *
-   * ⚠️ TIKRAS REDIS BŪTINAS: kelias eina per `CAS_VERSIJA_LUA`, o `FakeRedis`
-   * `eval` neturi. Vietinėje aplinkoje šis testas NEVYKDOMAS.
+   * ⚠️ ĮSITERPIAMA PER KLIENTĄ, NE PER `store.get` (pirmoji redakcija krito CI).
    *
-   * ⚠️ LENKTYNĖ ATKURIAMA DETERMINISTIŠKAI, ne laiku: konkurentas įsipareigoja
-   * rezultatą TARP `finishAtomic()` skaitymo ir jo rašymo, per `get` stub'ą.
+   * `finishAtomic()` kviečia MODULIO VIDINĮ `get()`, ne grąžinto objekto metodą,
+   * tad `store.get` perrašymas nieko nepakeičia — stub'as taip ir nesuveikė.
+   * Vienintelis realus įsiterpimo taškas yra pats Redis klientas: vidinis
+   * `get()` eina per `hgetall`.
+   *
+   * ⚠️ NUGALĖTOJAS DIRBA PER ATSKIRĄ JUNGTĮ, kad jo paties `hgetall` nepatektų į
+   * tą patį perėmimą — priešingu atveju gautume rekursiją, ne lenktynę.
    */
-  const { store, client } = await freshStore();
-  const job = await store.create({ ownerId: A, ownerKind: K.USER });
-  try {
-    await store.update(job.id, { status: "processing", phase: "validating" });
+  const pralaimetojas = await freshStore();
+  const nugaletojas = await freshStore();
+  const job = await pralaimetojas.store.create({ ownerId: A, ownerKind: K.USER });
 
-    const originalusGet = store.get;
+  try {
+    await pralaimetojas.store.update(job.id, { status: "processing", phase: "validating" });
+
+    const originalusHgetall = pralaimetojas.client.hgetall.bind(pralaimetojas.client);
     let konkurentasIvyko = false;
-    store.get = async (id) => {
-      const snapshot = await originalusGet(id);
-      if (!konkurentasIvyko) {
+    pralaimetojas.client.hgetall = async (key) => {
+      const snapshot = await originalusHgetall(key);
+      if (!konkurentasIvyko && key === `job:${job.id}`) {
         konkurentasIvyko = true;
-        store.get = originalusGet;
-        await store.finishAtomic(id, "completed", { result: { vykdytojas: "A" } });
-        store.get = async (x) => {
-          store.get = originalusGet;
-          return originalusGet(x);
-        };
+        /** Nugalėtojas įsipareigoja SAVO rezultatą PO mūsų skaitymo. */
+        await nugaletojas.store.finishAtomic(job.id, "completed", {
+          result: { vykdytojas: "A" },
+        });
       }
       return snapshot;
     };
 
     let rezultatas;
     try {
-      rezultatas = await store.finishAtomic(job.id, "completed", {
+      rezultatas = await pralaimetojas.store.finishAtomic(job.id, "completed", {
         result: { vykdytojas: "B" },
       });
     } finally {
-      store.get = originalusGet;
+      pralaimetojas.client.hgetall = originalusHgetall;
     }
 
     assert.ok(konkurentasIvyko, "prielaida: konkurentas tikrai įsiterpė");
@@ -479,12 +483,13 @@ test("#184-B ⚠️ `finishAtomic` po pralaimėto CAS PERKLASIFIKUOJA į RESULT_
       "⚠️ pralaimėtojas privalo gauti REZULTATO konfliktą, ne generinį versijos"
     );
 
-    const galutinis = await store.get(job.id);
+    const galutinis = await nugaletojas.store.get(job.id);
     assert.deepEqual(galutinis.result, { vykdytojas: "A" }, "nugalėtojo rezultatas nepaliestas");
   } finally {
-    await client.del(`job:${job.id}`).catch(() => {});
-    await client.zrem("jobs:index", job.id).catch(() => {});
-    await client.quit();
+    await nugaletojas.client.del(`job:${job.id}`).catch(() => {});
+    await nugaletojas.client.zrem("jobs:index", job.id).catch(() => {});
+    await pralaimetojas.client.quit().catch(() => {});
+    await nugaletojas.client.quit().catch(() => {});
   }
 });
 
