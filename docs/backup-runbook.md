@@ -494,12 +494,30 @@ argumentų eilutė su slaptažodžiu.
 - **Programos versijos ribą.** Kito MAJOR'o kopija atmetama prieš `psql`
   (`BACKUP_APPLICATION_VERSION_INCOMPATIBLE`); `unknown` praleidžiama su
   įspėjimu — tas pats elgesys kaip `restoreService`, perimtas pažodžiui.
-- **Kūrimo auditą su aktoriumi.** `PG_DUMP_BACKUP_CREATED`, atskiras nuo
-  aplikacijos kopijos `BACKUP_CREATED`. ⚠️ **Atkūrimo pusėje audito NĖRA** — žr.
-  §10 ir §11.
+- **Kūrimo auditą su aktoriumi — kai audito saugykla patvari.**
+  `PG_DUMP_BACKUP_CREATED`, atskiras nuo aplikacijos kopijos `BACKUP_CREATED`.
+  ⚠️ **Sąlyga įvardyta sąmoningai (#262 IV raundas):** su numatytu
+  `AUDIT_BACKEND=memory` įrašas lieka proceso atmintyje ir dingsta komandai
+  pasibaigus, tad komanda tokiu atveju išveda matomą įspėjimą. Fail-closed čia
+  netaikomas: kitaip diegimas su numatytu backend'u apskritai negalėtų pasidaryti
+  kopijos — ta pati priklausomybė, kurios atsisakyta atkūrimo pusėje.
+  ⚠️ **Atkūrimo pusėje audito NĖRA** — žr. §10 ir §11.
+- **Rakto formato patikrą PRIEŠ darbą.** Netinkamas `BACKUP_ENCRYPTION_KEY`
+  krinta su `BACKUP_KEY_INVALID` dar prieš `pg_dump` ir prieš horizonto
+  fiksavimą. ⚠️ Anksčiau toks raktas praeidavo visą dump'ą ir **patvariai
+  pastumdavo** `backup_horizon`: suplanuota užduotis su klaidinga konfigūracija
+  būtų tęsusi žymų retencijos horizontą neišduodama nė vieno artefakto.
+- **Šifravimo metaduomenų nuoseklumą.** `encrypted` privalo būti griežtas
+  boolean, algoritmas — palaikomas; `encrypted: false` prie envelope yra
+  manifesto downgrade ir atmetamas. Tos pačios patikros kaip
+  `restoreService` — du atkūrimo kraštai laukams suteikia tą pačią prasmę.
+- **Privatumo režimo ribą.** Eksplicitiniame `PERSISTENT_STORAGE=false` režime
+  atkūrimas atmetamas (`BACKUP_RESTORE_PRIVACY_MODE`): PostgreSQL tikslas yra
+  patvarus, tad turinys atsidurtų diske režime, kuris žada jo neturėti.
 - **Tikslinės bazės tuštumą.** Prieš pirmą SQL sakinį katalogai suskaičiuoja
   **visus** vartotojo objektus ne sisteminėse schemose — lenteles, rodinius,
-  materializuotus rodinius, sekas, indeksus, funkcijas ir ne`public` schemas;
+  materializuotus rodinius, sekas, indeksus, funkcijas, enum'us bei domenus ir
+  ne`public` schemas;
   radus bent vieną, atkūrimas atmetamas (`PG_RESTORE_TARGET_NOT_EMPTY`).
   ⚠️ **Patikslinta (#262 peržiūra):** pirmoji redakcija skaičiavo tik
   `information_schema.tables`, tad likusi seka ar matview'as praeidavo, nors šis
@@ -586,6 +604,7 @@ vykdyti tik su rankiniu ištrynimų sąrašo patikrinimu.
 | **`pg_dump` atkūrimas NĖRA erasure-safe** | Prikelia po kopijos ištrintus job'us | Ištrynimų replay — 7.6c (#250) |
 | **`pg_dump` ATKŪRIMAS audito žurnale nefiksuojamas** | Atkūrimo faktas lieka tik operatoriaus runbook'o įraše | Sąmoningas sprendimas, ne spraga — žr. žemiau |
 | **Paslapčių skeneris `pg_dump` turiniui netaikomas** | Į kopiją patekusi paslaptis neaptinkama | Sąmoningas sprendimas — žr. žemiau |
+| **Su `AUDIT_BACKEND=memory` kūrimo auditas neišlieka** | `PG_DUMP_BACKUP_CREATED` dingsta komandai pasibaigus; komanda įspėja | `AUDIT_BACKEND=postgres` |
 
 **Kodėl atkūrimas neaudituojamas.** Rašyti nėra kur: `audit_log` į dump'ą
 sąmoningai neįtrauktas, tikslinė bazė tuščia, aplikacija neveikia. Rašymas į kitą
@@ -608,7 +627,9 @@ klaidingų teigiamų ir blokuotų teisėtas kopijas. Riba įvardijama, ne dangst
 #20 garantija. ⚠️ **`pg_dump` atkūrimui ji dar NEGALIOJA** (§9a, §10): ištrynimų
 replay ateina su 7.6c (#250). Iki tol tai eksplicitinė išimtis, ne nutylėjimas.
 ✅ Kad kopijų **kūrimas** audituojamas su aktoriumi — ir aplikacijos
-(`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`). ⚠️ **`pg_dump`
+(`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`), **kai audito
+saugykla patvari** (`AUDIT_BACKEND=postgres`); su numatytu `memory` įrašas
+neišlieka, ir komanda apie tai įspėja. ⚠️ **`pg_dump`
 atkūrimas audito žurnale nefiksuojamas** (§10): jis fiksuojamas operatoriaus
 runbook'o įrašu.
 ✅ Retencijos terminą, apibrėžiantį faktinį ištrynimo langą.

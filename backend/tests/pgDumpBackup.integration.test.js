@@ -840,6 +840,12 @@ test("#262: preflight mato NE TIK lenteles (seka, matview, funkcija, schema)", {
     ["matview", "CREATE MATERIALIZED VIEW likes_mv AS SELECT 1 AS x"],
     ["funkcija", "CREATE FUNCTION likusi_f() RETURNS int LANGUAGE sql AS 'SELECT 1'"],
     ["schema", "CREATE SCHEMA likusi_schema"],
+    /**
+     * ⚠️ ENUM: `pg_class` jo NETURI, tad be `pg_type` subužklausos bazė su
+     * likusiu tipu atrodė tuščia (#262 IV raundas). Domenas — ta pati klasė.
+     */
+    ["enum tipas", "CREATE TYPE likes_enum AS ENUM ('a', 'b')"],
+    ["domenas", "CREATE DOMAIN likes_domenas AS int CHECK (VALUE > 0)"],
   ];
 
   for (const [vardas, sql] of likuciai) {

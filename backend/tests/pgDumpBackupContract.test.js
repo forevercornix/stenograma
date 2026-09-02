@@ -747,3 +747,126 @@ test("#262 Codex P1: `restore` NEPRIKLAUSO nuo audito prieinamumo", { timeout: 6
     fs.rmSync(artefaktas, { force: true });
   }
 });
+
+test("#262 IV: blogai suformatuotas raktas krinta PRIEŠ `pg_dump` ir prieš horizontą", async () => {
+  /**
+   * ⚠️ `isEnabled()` TIKRINA TIK NETUŠTUMĄ.
+   *
+   * Netinkamas raktas praeidavo iki `encrypt()` — jau po viso `pg_dump` ir jau
+   * PATVARIAI pastūmus `backup_horizon`. Cron'as su tokia konfigūracija būtų
+   * tęsęs žymų retencijos horizontą neišduodamas nė vieno artefakto: GDPR pusėje
+   * veikianti pasekmė iš konfigūracijos klaidos.
+   *
+   * ⚠️ DB SĄMONINGAI NEPASIEKIAMA: prisijungimo klaida vietoj `BACKUP_KEY_INVALID`
+   * reikštų, kad patikra nukeliavo už `pg_dump`.
+   */
+  const horizontas = mock.method(tombstones, "recordBackupHorizon", async (ms) => ms);
+
+  try {
+    for (const blogas of ["ne-hex", "abc", backupEncryption.generateKey().slice(0, 63), `${backupEncryption.generateKey()}ff`]) {
+      await assert.rejects(
+        () =>
+          pgDumpBackup.sukurtiSifruotaKopija({
+            databaseUrl: NEPASIEKIAMA_DB,
+            actor: "testas",
+            env: { ...process.env, BACKUP_ENABLED: "true", BACKUP_ENCRYPTION_KEY: blogas, DATABASE_URL: NEPASIEKIAMA_DB },
+          }),
+        (err) => {
+          assert.equal(err.code, "BACKUP_KEY_INVALID", `raktas ${JSON.stringify(blogas)} privalo kristi anksti`);
+          assert.equal(err.message.includes(blogas), false, "klaidoje negali būti paties rakto");
+          return true;
+        }
+      );
+    }
+
+    assert.equal(horizontas.mock.callCount(), 0, "⚠️ horizontas NEGALI būti pastumtas dėl netinkamo rakto");
+  } finally {
+    horizontas.mock.restore();
+  }
+});
+
+test("#262 IV: šifravimo metaduomenys tikrinami PRIEŠ dešifravimą", async () => {
+  /**
+   * ⚠️ ŠEIMA A: du atkūrimo kraštai privalo tiems patiems laukams suteikti tą
+   * pačią prasmę (§16). `restoreService` `encrypted` reikalauja GRIEŽTO boolean
+   * ir palaikomo algoritmo; be to paties čia manifestas su `encrypted: "yes"`
+   * būtų dešifruotas ir keliautų į `psql`.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  const plaintext = `${pgDumpBackup.ANTRASTE}\n${pgDumpBackup.ANTRASTES_VERSIJA}\n${pgDumpBackup.DUMP_FORMATAS}\n\nSELECT 1;`;
+  const checksum = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
+
+  const artefaktas = (keitimas) => {
+    const manifest = backupManifest.createManifest({ contents: [], checksum, env });
+    manifest.encrypted = true;
+    manifest.encryptionAlgorithm = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+    manifest.snapshotTime = new Date().toISOString();
+    manifest.excludedInFlightJobs = 0;
+    keitimas(manifest);
+    return { manifest, envelope: backupEncryption.encrypt(plaintext, { env, manifest }) };
+  };
+
+  const atvejai = [
+    ["`encrypted` kaip eilutė", (m) => { m.encrypted = "yes"; }, "BACKUP_MANIFEST_INCONSISTENT"],
+    ["`encrypted: false` prie envelope (downgrade)", (m) => { m.encrypted = false; }, "BACKUP_MANIFEST_INCONSISTENT"],
+    ["nepalaikomas algoritmas", (m) => { m.encryptionAlgorithm = "aes-256-gcm-v0"; }, "BACKUP_ENCRYPTION_ALGORITHM_UNSUPPORTED"],
+    ["algoritmas nenurodytas", (m) => { m.encryptionAlgorithm = null; }, "BACKUP_ENCRYPTION_ALGORITHM_UNSUPPORTED"],
+  ];
+
+  for (const [vardas, keitimas, kodas] of atvejai) {
+    const { manifest, envelope } = artefaktas(keitimas);
+
+    await assert.rejects(
+      () => pgDumpBackup.atkurtiSifruotaKopija({ envelope, manifest, targetUrl: NEPASIEKIAMA_DB, env }),
+      (err) => {
+        assert.equal(err.code, kodas, vardas);
+        return true;
+      },
+      vardas
+    );
+  }
+});
+
+test("#262 IV: neišsaugojimo režimas atmeta atkūrimą (priimta iš `restoreService`)", async () => {
+  /**
+   * ⚠️ DB DUMP'AS TĄ ŽADĄ LAUŽO TIESIOGIAU NEI APLIKACIJOS KOPIJA: PostgreSQL
+   * tikslas pagal apibrėžimą patvarus, tad transkripcijos atsidurtų diske
+   * režime, kuris žada jų neturėti.
+   *
+   * ⚠️ Tikrinamas EKSPLICITINIS `PERSISTENT_STORAGE=false`, ne `persistentStorage`:
+   * pastarasis be `REDIS_URL` yra `false` net įprastame diegime, ir ta klaida
+   * `restoreService` istorijoje jau blokavo daugumą atkūrimų.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  const plaintext = `${pgDumpBackup.ANTRASTE}\n${pgDumpBackup.ANTRASTES_VERSIJA}\n${pgDumpBackup.DUMP_FORMATAS}\n\nSELECT 1;`;
+  const checksum = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
+  const manifest = backupManifest.createManifest({ contents: [], checksum, env });
+  manifest.encrypted = true;
+  manifest.encryptionAlgorithm = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+  manifest.snapshotTime = new Date().toISOString();
+  manifest.excludedInFlightJobs = 0;
+  const envelope = backupEncryption.encrypt(plaintext, { env, manifest });
+
+  await assert.rejects(
+    () =>
+      pgDumpBackup.atkurtiSifruotaKopija({
+        envelope,
+        manifest,
+        targetUrl: NEPASIEKIAMA_DB,
+        env: { ...env, PERSISTENT_STORAGE: "false" },
+      }),
+    (err) => {
+      assert.equal(err.code, "BACKUP_RESTORE_PRIVACY_MODE");
+      return true;
+    }
+  );
+
+  /** Be eksplicitinio režimo kelias eina toliau — iki tikslinės bazės zondo. */
+  await assert.rejects(
+    () => pgDumpBackup.atkurtiSifruotaKopija({ envelope, manifest, targetUrl: NEPASIEKIAMA_DB, env }),
+    (err) => {
+      assert.equal(err.code, "PG_RESTORE_PREFLIGHT_FAILED", "įprastas diegimas blokuojamas būti negali");
+      return true;
+    }
+  );
+});

@@ -177,6 +177,11 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
      */
     { pattern: /[Aa]tkūrimas audito žurnale nefiksuojamas|Kodėl atkūrimas neaudituojamas/, what: "pg_dump atkūrimas neaudituojamas" },
     { pattern: /[Pp]aslapčių skeneris[^|]*netaikomas|Kodėl dump'as neskenuojamas/, what: "paslapčių skeneris netaikomas dump'ui" },
+    /**
+     * ⚠️ #262 IV raundas: audito garantija SĄLYGINĖ, ne besąlyginė. Su numatytu
+     * `AUDIT_BACKEND=memory` įrašas neišlieka, tad §11 be sąlygos būtų netiesa.
+     */
+    { pattern: /AUDIT_BACKEND=memory[^|]*neišlieka|kai audito\s+saugykla patvari/, what: "kūrimo auditas sąlyginis" },
   ];
 
   for (const limit of knownLimits) {

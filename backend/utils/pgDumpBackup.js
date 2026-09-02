@@ -6,6 +6,7 @@ const backupEncryption = require("./backupEncryption");
 const backupManifest = require("./backupManifest");
 const backupPolicy = require("./backupPolicy");
 const { pgJungtiesNustatymai, arNurodytaPostgres } = require("./pgConnection");
+const privacyConfig = require("./privacyConfig");
 const tombstones = require("./deletionTombstones");
 /**
  * ⚠️ NE DESTRUKTŪRIZUOJAMA. Destruktūrizuota nuoroda užfiksuojama `require` metu,
@@ -265,6 +266,29 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
     throw new PgDumpBackupError(
       "Šifravimas neįjungtas: `pg_dump` be AES-256-GCM netenkina 7.6a kriterijaus.",
       "BACKUP_ENCRYPTION_DISABLED"
+    );
+  }
+
+  /**
+   * ⚠️ RAKTAS TIKRINAMAS ČIA, NE `encrypt()` METU (#262 IV raundas).
+   *
+   * `isEnabled()` tikrina tik NETUŠTUMĄ. Blogai suformatuotas raktas praeidavo
+   * visą `pg_dump`, PATVARIAI pastumdavo `backup_horizon` ir tik tada krisdavo
+   * ties `encrypt()`. Cron'as su tokia konfigūracija būtų tęsęs žymų retencijos
+   * horizontą neišduodamas NĖ VIENO artefakto - GDPR pusėje veikianti pasekmė
+   * iš paprastos konfigūracijos klaidos.
+   *
+   * Griežta 64 hex patikra priklauso TAM PAČIAM „artefakto savybės" žingsniui,
+   * kur jau stovi `isEnabled()`: sprendimas -> artefakto savybė -> tapatumas ->
+   * darbas. Naudojamas `currentKey()`, o ne savas regex - kriptografinė
+   * semantika lieka viename modulyje.
+   */
+  try {
+    backupEncryption.currentKey(env);
+  } catch (klaida) {
+    throw new PgDumpBackupError(
+      `Šifravimo raktas netinkamas: ${klaida.message}`,
+      "BACKUP_KEY_INVALID"
     );
   }
 
@@ -536,6 +560,44 @@ function _assertDydis(plaintext) {
  * ⚠️ `--single-transaction`: SQL klaida viduryje duoda `ROLLBACK`, ne pusiau
  * atkurtą bazę. „Sėkmingai užbaigto" dalinio atkūrimo būti negali.
  */
+/**
+ * ⚠️ ŠEIMOS A PERĖJIMAS: `restoreService` GRANDINĖ, ŽINGSNIS PO ŽINGSNIO (#262).
+ *
+ * Trys peržiūros raundai iš eilės rado tą patį: naujas kelias nepaėmė to, ką
+ * `restoreService` jau turi (`checkRestoreCompatibility`, `applicationVersion`,
+ * šifravimo metaduomenys). Todėl grandinė pereita VISA, ir kiekvienas žingsnis
+ * arba priimtas, arba turi užrašytą priežastį - kad ketvirtos tos pačios šeimos
+ * pastabos nebereikėtų.
+ *
+ *   1. MANIFEST        - PRIIMTA (`validateManifest`).
+ *   2. FORMAT          - PRIIMTA (`checkRestoreCompatibility`).
+ *   3. APPLICATION     - PRIIMTA (`_patikrintiProgramosVersija`, `unknown` praleidžiamas).
+ *   4. CHECKSUM        - SĄMONINGAI KITAIP. `restoreService` maišo TAI, KAS
+ *                        SAUGOMA (šifruotą turinį), kad sugadinimą atskirtų nuo
+ *                        blogo rakto. Čia suma skaičiuojama nuo DEŠIFRUOTO
+ *                        turinio, o ciphertext'o vientisumą dengia GCM žyma:
+ *                        abi savybės padengtos, tik kitais mechanizmais.
+ *                        Sugadintas artefaktas krinta ties `BACKUP_DECRYPTION_FAILED`,
+ *                        ne ties suma - ir tai tikrina integracinis testas.
+ *   5. DECRYPTED       - PRIIMTA (`_patikrintiSifravimoMetaduomenis` + AAD +
+ *                        `usedPreviousKey` įspėjimas).
+ *   6. CONTENT         - PRIIMTA KITU PAVIDALU. Aplikacijos kopijoje tai JSON
+ *                        struktūros patikra; čia - `_perskaitytiAntraste()`
+ *                        (rūšis, versija, formatas), po kurios SQL vykdomas.
+ *   7. CONFIGURATION   - NETAIKOMA. Aplikacijos konfigūracija į `pg_dump` NEPATENKA
+ *                        (ji gyvena aplinkoje, ne bazėje), tad atkurti jos
+ *                        neįmanoma. Analogas yra privalomas post-restore
+ *                        `npm run doctor` žingsnis (D5), aprašytas runbook'e.
+ *   8. SECRETS         - SĄMONINGAI SUSIAURINTA. `backupService` skenuoja politikos
+ *                        filtruotus artefaktus; pilnas DB dump'as pagal apibrėžimą
+ *                        turi VISĄ turinį, tad 256 MB SQL skenavimas duotų
+ *                        daugiausia klaidingų teigiamų. Riba - runbook'o §10.
+ *   9. PRIVACY         - PRIIMTA (`_patikrintiPrivatumoRezima`).
+ *  10. APPLIED         - PRIIMTA (`--single-transaction` + tuštumo preflight).
+ *
+ * Užrakto `restoreService` neturi, tad ir perimti nėra ko; lygiagrečius
+ * atkūrimus į tą patį tikslą stabdo tuštumo preflight.
+ */
 async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = process.env } = {}) {
   if (!targetUrl) {
     throw new PgDumpBackupError("Nenurodytas `targetUrl`.", "PG_RESTORE_NO_URL");
@@ -584,6 +646,30 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
   }
 
   /**
+   * ⚠️ PRIVATUMO REŽIMAS - PRIIMTA IŠ `restoreService` (šeimos A perėjimas).
+   *
+   * Eksplicitinis `PERSISTENT_STORAGE=false` reiškia, kad sistema ŽADA nelaikyti
+   * turinio. DB dump'o atkūrimas tą žadą laužo dar tiesiogiau nei aplikacijos
+   * kopija: PostgreSQL tikslas pagal apibrėžimą yra patvarus, tad transkripcijos
+   * atsidurtų diske režime, kuris žada jų neturėti.
+   *
+   * ⚠️ TIKRINAMA ANKSČIAU NEI `restoreService`, ir sąmoningai: ten patikra yra
+   * po turinio validacijos, nes jai reikia turinio; čia sprendimas nuo turinio
+   * nepriklauso, o pigus sprendimas turi eiti prieš brangų darbą.
+   */
+  _patikrintiPrivatumoRezima(env);
+
+  /**
+   * ⚠️ ŠIFRAVIMO METADUOMENYS - PRIIMTA IŠ `restoreService` (šeimos A perėjimas).
+   *
+   * Be šių patikrų manifestas su `encrypted: "yes"` ar nepalaikomu algoritmu
+   * būtų dešifruotas ir keliautų į `psql`, nors jo skelbiamas šifravimo
+   * kontraktas kitoje sistemos pusėje būtų atmestas. Du atkūrimo kraštai
+   * privalo tiems patiems laukams suteikti tą pačią prasmę (§16).
+   */
+  _patikrintiSifravimoMetaduomenis(manifest);
+
+  /**
    * GCM žyma ir AAD — krinta čia, PRIEŠ bet kokį SQL.
    *
    * ⚠️ `decrypt()` GRĄŽINA `{ plaintext: Buffer, usedPreviousKey }`, NE EILUTĘ.
@@ -592,8 +678,19 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
    * gaudavo objektą. Vietinis rinkinys to nepagavo: visas šis kelias eina per
    * `pgDumpBackup.integration`, kuriam reikia tikros DB.
    */
-  const { plaintext: plaintextBuffer } = backupEncryption.decrypt(envelope, { env, manifest });
+  const { plaintext: plaintextBuffer, usedPreviousKey } = backupEncryption.decrypt(envelope, { env, manifest });
   const plaintext = plaintextBuffer.toString("utf8");
+
+  if (usedPreviousKey) {
+    /**
+     * ⚠️ PRIIMTA IŠ `restoreService`: operatoriui svarbu ŽINOTI, kad panaudotas
+     * ankstesnis raktas - kopija dar nepersišifruota, ir pašalinus
+     * `BACKUP_ENCRYPTION_KEY_PREVIOUS` ji taps neatkuriama.
+     */
+    log.warn("Atkurta ANKSTESNIU šifravimo raktu - kopija dar nepersišifruota", {
+      formatVersion: manifest.formatVersion,
+    });
+  }
 
   const suma = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
   if (suma !== manifest.checksum) {
@@ -629,6 +726,84 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
 
   log.info("PostgreSQL kopija atkurta", { stage: "pg_restore_done" });
   return { restoredBytes: Buffer.byteLength(sql, "utf8") };
+}
+
+/**
+ * PRIVATUMO REŽIMO PATIKRA (`restoreService` 8 žingsnis).
+ *
+ * ⚠️ TIKRINAMAS EKSPLICITINIS `PERSISTENT_STORAGE=false`, ne `persistentStorage`:
+ * pastarasis reiškia „Redis saugykla" ir be `REDIS_URL` yra `false` net įprastame
+ * diegime. Ta pati klaida `restoreService` istorijoje jau buvo padaryta ir
+ * blokavo daugumą atkūrimų - kartoti jos nereikia.
+ */
+function _patikrintiPrivatumoRezima(env) {
+  let privacy;
+  try {
+    privacy = privacyConfig.getPrivacyConfig(env);
+  } catch (klaida) {
+    throw new PgDumpBackupError(
+      `Privatumo konfigūracija netinkama: ${klaida.message}`,
+      "BACKUP_RESTORE_PRIVACY_INVALID"
+    );
+  }
+
+  if (privacy.persistentExplicit && !privacy.persistentStorage) {
+    throw new PgDumpBackupError(
+      "Neišsaugojimo režimas (`PERSISTENT_STORAGE=false`) - atkūrimas jį apeitų: " +
+        "PostgreSQL tikslas yra patvarus, tad turinys atsidurtų diske.",
+      "BACKUP_RESTORE_PRIVACY_MODE"
+    );
+  }
+
+  const patikra = privacyConfig.validatePrivacyConfig(env);
+  if (patikra && Array.isArray(patikra.errors) && patikra.errors.length > 0) {
+    throw new PgDumpBackupError(
+      `Privatumo konfigūracija netinkama: ${patikra.errors.length} klaida (-os).`,
+      "BACKUP_RESTORE_PRIVACY_INVALID"
+    );
+  }
+}
+
+/**
+ * ŠIFRAVIMO METADUOMENŲ NUOSEKLUMAS (`restoreService` 5 žingsnis).
+ *
+ * ⚠️ `encrypted` PRIVALO BŪTI GRIEŽTAS BOOLEAN. `"yes"`, `"false"`, `0` ar `null`
+ * skirtingose vietose interpretuojami skirtingai, o šis laukas sprendžia, ar
+ * apskritai dešifruoti - neapibrėžtumas čia reikštų downgrade be klastojimo.
+ *
+ * ⚠️ `encrypted: false` ŠIAME KELYJE YRA DOWNGRADE PAGAL APIBRĖŽIMĄ. Procedūra
+ * nešifruotų artefaktų negamina (`BACKUP_ENCRYPTION_DISABLED`), tad manifestas,
+ * teigiantis „nešifruota" prie envelope, yra arba klastotė, arba svetimas
+ * artefaktas. `restoreService` tam turi atskirą `_looksLikeEnvelope()` patikrą;
+ * čia envelope yra privalomas argumentas, tad sąlyga paprastesnė.
+ */
+function _patikrintiSifravimoMetaduomenis(manifest) {
+  if (typeof manifest.encrypted !== "boolean") {
+    throw new PgDumpBackupError(
+      "Manifesto `encrypted` privalo būti boolean.",
+      "BACKUP_MANIFEST_INCONSISTENT"
+    );
+  }
+
+  if (!manifest.encrypted) {
+    throw new PgDumpBackupError(
+      "Manifestas sako `encrypted: false`, bet turinys yra šifruotas envelope - manifesto downgrade.",
+      "BACKUP_MANIFEST_INCONSISTENT"
+    );
+  }
+
+  const palaikomas = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+  if (manifest.encryptionAlgorithm !== palaikomas) {
+    const senasFormatas = String(manifest.encryptionAlgorithm || "").replace(`${backupEncryption.ALGORITHM}-`, "");
+    const paaiskinimas = backupEncryption.UNSUPPORTED_FORMATS[senasFormatas];
+
+    throw new PgDumpBackupError(
+      paaiskinimas
+        ? `Kopijos formatas "${senasFormatas}" nebepalaikomas: ${paaiskinimas}.`
+        : `Nepalaikomas šifravimo algoritmas: ${manifest.encryptionAlgorithm || "nenurodytas"}.`,
+      "BACKUP_ENCRYPTION_ALGORITHM_UNSUPPORTED"
+    );
+  }
 }
 
 /** ⚠️ Kopija iš `restoreService._majorOf` - ta pati taisyklė abiejuose keliuose. */
@@ -690,6 +865,12 @@ function _patikrintiProgramosVersija(backupVersion) {
  * po atkūrimo joje gulėtų dviejų bazių sąjunga - būtent tai, ko preflight ir
  * neleidžia.
  *
+ * ⚠️ `pg_type` TIK `typtype IN ('e','d')` - enum'ai ir domenai (#262 IV raundas).
+ * Kompozitiniai tipai jau turi `pg_class` įrašą, tad platesnė sąlyga juos
+ * skaičiuotų du kartus. Enum'ai ir domenai `pg_class` neturi visai, tad be šios
+ * subužklausos bazė su likusiu enum'u atrodė tuščia - o runbook'as jau žadėjo
+ * „visus vartotojo objektus".
+ *
  * ⚠️ `pg_class` apima ir indeksus - sąmoningai. Klausimas yra „ar bazė tuščia",
  * ne „kiek ten objektų", tad perteklinis skaičiavimas klaidos pusėn yra teisinga
  * kryptis.
@@ -707,6 +888,10 @@ const OBJEKTU_UZKLAUSA = `
   + (SELECT count(*) FROM pg_proc p
        JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_')
+  + (SELECT count(*) FROM pg_type ty
+       JOIN pg_namespace n ON n.oid = ty.typnamespace
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_'
+        AND ty.typtype IN ('e', 'd'))
   + (SELECT count(*) FROM pg_namespace n
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'public') AND n.nspname !~ '^pg_')
 `.replace(/\s+/g, " ").trim();
@@ -751,7 +936,7 @@ async function _patikrintiTikslasTuscias(targetUrl) {
   if (kiek > 0) {
     throw new PgDumpBackupError(
       `Tikslinė bazė NEtuščia (${kiek} objekt(ai): lentelės, rodiniai, matview'ai, sekos, ` +
-        "indeksai, funkcijos ar ne `public` schemos). " +
+        "indeksai, funkcijos, enum'ai/domenai ar ne `public` schemos). " +
         "Atkūrimas į netuščią bazę duotų dviejų bazių sąjungą, ne kopiją.",
       "PG_RESTORE_TARGET_NOT_EMPTY"
     );

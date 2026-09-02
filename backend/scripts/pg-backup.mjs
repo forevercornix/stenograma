@@ -100,6 +100,28 @@ try {
      */
     await auditStore.init();
 
+    /**
+     * ⚠️ NUMATYTAS `AUDIT_BACKEND=memory` — MATOMAS ĮSPĖJIMAS, NE ATSISAKYMAS
+     * (#262 IV raundas).
+     *
+     * Atmintinėje saugykloje `PG_DUMP_BACKUP_CREATED` gula į proceso masyvą ir
+     * dingsta komandai pasibaigus, tad §11 teiginys be sąlygos būtų netiesa.
+     *
+     * ⚠️ KODĖL NE FAIL-CLOSED, KITAIP NEI HORIZONTAS. Nuo horizonto priklauso
+     * #250 ištrynimų replay — jo praradimas yra GDPR pasekmė. Auditas yra
+     * atskaitomybės įrodymas, ir reikalavimas turėti persistentinę audito
+     * saugyklą reikštų, kad diegimas su numatytu `memory` APSKRITAI negali
+     * pasidaryti kopijos — ta pati priklausomybė, kurios atsisakėme atkūrimo
+     * pusėje. Todėl runbook'o teiginys sąlyginis, o operatorius įspėjamas.
+     */
+    if (auditStore.backend() === "memory") {
+      console.error(
+        "ĮSPĖJIMAS: audito saugykla yra `memory` — `PG_DUMP_BACKUP_CREATED` liks " +
+          "proceso atmintyje ir dings pasibaigus komandai. Patvariam pėdsakui " +
+          "nustatykite `AUDIT_BACKEND=postgres`."
+      );
+    }
+
     const { manifest, envelope, dumpBytes } = await pgDumpBackup.sukurtiSifruotaKopija({
       databaseUrl: argumentas("url", process.env.DATABASE_URL),
       actor,
