@@ -429,6 +429,19 @@ function createWorker(queueName, processor, workerOptions = {}) {
     const { runWithContext } = require("../utils/requestContext");
     const failedJob = await jobStore.system.get(jobId).catch(() => null);
 
+    /**
+     * ⚠️ ATMETIMAS GAUDOMAS ČIA, ĮVYKIO KLAUSYTOJO RIBOJE (Codex).
+     *
+     * `EventEmitter` grąžinto Promise NELAUKIA. Kol `_handleFailure()` visas
+     * klaidas rijo pats, tai nebuvo matoma — bet `finishFailed()` dabar
+     * SĄMONINGAI permeta `UNKNOWN_SOURCE_STATUS` (žr. `jobStore/index.js`), ir
+     * be šio gaudyklės tas atmetimas taptų neapdorotu: nuodingas job'as
+     * kiekvieno retry metu galėtų nužudyti visą worker'io procesą.
+     *
+     * ⚠️ AUDIO ČIA NELIEČIAMAS. Ši šaka reiškia „nesėkmės tvarkymas
+     * nepavyko" — būsena lieka tokia, kokia buvo, ir šaltinis su ja. Tylus
+     * valymas čia būtų blogesnis už patį atmetimą.
+     */
     return runWithContext(
       {
         requestId: (failedJob && failedJob.requestId) || null,
@@ -436,7 +449,15 @@ function createWorker(queueName, processor, workerOptions = {}) {
         execution: "worker",
       },
       () => _handleFailure(job, err, jobId, payload)
-    );
+    ).catch((tvarkymoKlaida) => {
+      log.error("Nesėkmės tvarkymas krito - būsena ir audio paliekami nepaliesti", {
+        stage: "failure_handler_error",
+        execution: "worker",
+        jobId,
+        klaida: tvarkymoKlaida && tvarkymoKlaida.message,
+        kodas: tvarkymoKlaida && tvarkymoKlaida.code,
+      });
+    });
   });
 
   async function _handleFailure(job, err, jobId, payload) {

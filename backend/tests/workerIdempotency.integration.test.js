@@ -226,3 +226,100 @@ test(
     assert.ok(audio && audio.length > 0, "⚠️ šaltinio audio privalo IŠLIKTI");
   }
 );
+
+test(
+  "#184-A ⚠️ `finishFailed` NEĮSIPAREIGOJUS terminalaus perėjimo — audio LIEKA",
+  { skip: skipWithoutRedis() },
+  async (t) => {
+    /**
+     * ⚠️ ŠĮ TESTĄ PADIKTAVO CODEX PERŽIŪRA.
+     *
+     * Matricoje buvau užrašiusi, kad `_handleFailure` `typeof uzbaigta ===
+     * "symbol"` šaką dengia gretimas integracinis testas. NEDENGĖ: tas testas
+     * pradeda nuo `completed` be rezultato, tad `finishFailed()` grąžina
+     * TERMINALŲ JOB OBJEKTĄ, o failą išsaugo ATSKIRAS barjeras. Pašalinus
+     * simbolio patikrą, testas būtų likęs žalias, o tikras dviejų CAS konfliktų
+     * scenarijus vis tiek ištrintų `processing` job'o audio.
+     *
+     * ⚠️ KONFLIKTAS ĮVEDAMAS DETERMINISTIŠKAI, ne lenktynėmis: `finishFailed()`
+     * pakeičiamas dubliu, grąžinančiu `CONCURRENCY_CONFLICT`. Tikros dvigubos
+     * versijos lenktynės su BullMQ būtų tikimybinės — o tikrinama ne lenktynė,
+     * o SPRENDIMAS, kurį worker'is priima gavęs tokią baigtį.
+     *
+     * ⚠️ BARJERAS ČIA NEPADEDA IR NETURI. Job'as lieka `processing`, o barjeras
+     * ne-terminalį sąmoningai praleidžia (kitaip audio failai kauptųsi). Būtent
+     * todėl sprendimas priimamas iš operacijos baigties, ne iš būsenos.
+     */
+    const jobStore = require("../utils/jobStore");
+    const jobRunner = require("../queues/jobRunner");
+    const fileStorage = require("../utils/fileStorage");
+    const { createQueueConnection } = require("../queues/config");
+    const { Queue } = require("bullmq");
+
+    let worker;
+    let queue;
+    let queueConnection;
+    let storageKey;
+    const originalus = jobStore.system.finishFailed;
+
+    t.after(async () => {
+      jobStore.system.finishFailed = originalus;
+      const { shutdownWorker } = require("../workers");
+      await shutdownWorker(worker, { force: true }).catch(() => {});
+      await queue?.close().catch(() => {});
+      await queueConnection?.quit().catch(() => {});
+      await jobRunner.close().catch(() => {});
+      if (storageKey) await fileStorage.del(storageKey).catch(() => {});
+      await jobStore._resetForTests();
+    });
+
+    await jobStore.init();
+    await jobRunner.init();
+
+    const queueName = `test-uncommitted-${process.pid}-${Date.now()}`;
+    const job = await jobStore.create({ ownerKind: "unowned" });
+    storageKey = await fileStorage.put(Buffer.from("audio-baitai"), { ext: ".wav" });
+
+    /** Abu `finishFailed()` bandymai pralaimi versijos lenktynes. */
+    let kviesta = 0;
+    jobStore.system.finishFailed = async () => {
+      kviesta += 1;
+      return jobStore.CONCURRENCY_CONFLICT;
+    };
+
+    queueConnection = createQueueConnection();
+    queue = new Queue(queueName, { connection: queueConnection });
+    await queue.add(
+      "transcription",
+      { jobId: job.id, payload: { storageKey } },
+      { jobId: job.id, attempts: 1 }
+    );
+
+    const { createWorker } = require("../workers");
+    worker = createWorker(
+      queueName,
+      async () => {
+        throw new Error("tiekėjo klaida");
+      },
+      { stalledInterval: 1000, lockDuration: 2000 }
+    );
+
+    let busena = null;
+    for (let i = 0; i < 40; i++) {
+      const b = await queue.getJob(job.id);
+      const state = b ? await b.getState() : null;
+      if (state === "completed" || state === "failed") {
+        busena = state;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    assert.equal(busena, "failed", "prielaida: bandymai išnaudoti");
+    assert.ok(kviesta > 0, "prielaida: `finishFailed()` tikrai kviestas");
+
+    /** ⚠️ ESMINĖ PATIKRA: perėjimas neįsipareigotas, tad šaltinis privalo likti. */
+    const audio = await fileStorage.get(storageKey);
+    assert.ok(audio && audio.length > 0, "⚠️ audio privalo IŠLIKTI - `FAILED` neįsipareigotas");
+  }
+);
