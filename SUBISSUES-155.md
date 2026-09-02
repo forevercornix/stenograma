@@ -3564,6 +3564,14 @@ Apsvarstyti ir pasirinkti su priežastimi:
 - **(b) persistentinė suderinimo žyma + starto patikra** — startas (ar readiness)
   fail-closed, kol žymos nėra. Brangiau, bet paverčia procedūrą invariantu.
 
+⚠️ **Jei renkiesi (b), žyma privalo būti susieta su ŠIA restore karta.** Paprasta
+„suderinta = true" žyma DB viduje pati pateks į vėlesnes kopijas; atkūrus tokią
+kopiją atsikuria ir žyma, tad starto patikra praeitų dar prieš suderinant šios
+kartos sesijas ir in-flight job'us — būtent tą prikeltų sesijų grėsmę, nuo kurios
+visa D1/D2 ir saugo. Reikia unikalaus backup/restore kartos identifikatoriaus
+žymoje, kuris restore metu paskelbiamas negaliojančiu arba pakeičiamas, prieš
+laikant DB paleidžiama. Be to (b) nėra invariantas.
+
 Pasirinkimas įrašomas; „numanoma (a)" netinka.
 
 ### D3 — terminalizavimo kontraktas: per `jobPhase`, ne per ranka rašytą SQL
@@ -3781,11 +3789,31 @@ Turi egzistuoti operatoriaus/CLI kelias, kuris:
 4. **monotoniškai** sulieja žymas su atkurtos DB `erasure_marks`;
 5. negali panaikinti naujesnės ar stipresnės jau egzistuojančios žymos.
 
-⚠️ **Monotoniškumas išvedamas, ne aprašomas iš naujo.** „Naujesnė ar stipresnė"
-tvarka jau apibrėžta `states.ALLOWED_TRANSITIONS`
-(`deletion_pending → deleted` yra stiprėjimas, atgal — ne). Merge sprendimas
-remiasi TUO grafu; antra tvarkos taisyklė teste ar SQL'e yra ta pati dviejų
-kopijų klasė, kurią repo jau kelis kartus gaudė.
+⚠️ **Grafas yra būsenų mašinos autoritetas, BET NE dviejų snapshot'ų tvarka.**
+`states.ALLOWED_TRANSITIONS` yra `PENDING → [DELETED, FAILED]`,
+`FAILED → [PENDING]`, `DELETED → []` (`states.js:86-90`). Iš to seka tik viena
+tvarkos taisyklė: **`deleted` yra terminalus ir laimi visada**. `pending` ir
+`failed` sudaro ciklą, tad pasiekiamumas nepasako, kuris įrašas naujesnis:
+senesnio `pending` importas virš naujesnio `failed` nutrintų gedimo metaduomenis
+ir grąžintų pasenusį `claim_token`, o atvirkščiai — nuslopintų naujesnį
+autorizuotą retry.
+
+Todėl merge taisyklė yra **dviejų dalių**, ir abi užrašomos:
+
+1. `deleted` terminalumas — iš grafo, ne iš naujo;
+2. `pending` vs `failed` konfliktas — atskira laiko/kartos taisyklė
+   (`updated_at` ar generacija), apibrėžta eksplicitiškai.
+
+Antra tvarkos taisyklė, paslėpta teste ar SQL'e, yra ta pati dviejų kopijų klasė,
+kurią repo jau kelis kartus gaudė — tad ji privalo gyventi viename autoritete.
+
+⚠️ **Importuoti `claim_token` NEPERKELIAMI kaip paprasta būsena.**
+`claim_token` žymi GYVĄ ištrynimo vykdytoją ir neturi nei lease, nei timeout'o.
+Po DR bet kuris tokenas, eksportuotas su `deletion_pending` žyma, priklauso jau
+mirusiam pre-restore procesui; importavus jį nepakeistą, autoritetingas kelias
+grąžina `IN_PROGRESS` neribotai (`lifecycleService.js:338-349`) ir koordinatorius
+niekada nebaigia. Importuojami claim'ai išvalomi arba pervedami per **esamas
+audituojamas** `release`/`retry` semantikas prieš replay.
 
 Konkreti reprezentacija (formatas, šifravimas) parenkama pagal 7.6a artefaktų
 kontraktą — kriptografinė grandinė nedubliuojama.
@@ -3796,9 +3824,26 @@ Jei senas dump'as jau atkūrė `jobs` ir `job_results`, žymų įterpimas atgal
 duomenų nepašalina.
 
 Po merge kiekvienai galiojančiai žymai taikomas **tas pats autoritetingas
-erasure kelias**, kurį įvedė 7.5a (`lifecycleService.deleteJobArtefacts`, žemiau
-`jobErasure.eraseJob`). Atkurtas subjektas negali likti gyvas vien todėl, kad
-žyma jau egzistuoja.
+trynimo įgyvendinimas**, kurį įvedė 7.5a. Atkurtas subjektas negali likti gyvas
+vien todėl, kad žyma jau egzistuoja.
+
+⚠️ **`lifecycleService.deleteJobArtefacts()` TIESIOGIAI ČIA NETINKA.** Pagrindiniu
+7.6c atveju — importuota `deleted` žyma — jis pirmiausia tikrina žymą ir grąžina
+`ALREADY_DELETED` su `deleted: []`, **nekviesdamas `eraseJob()`**
+(`services/lifecycleService.js:217-239`). Vadinasi būtent tas kelias, kurį šis
+issue nurodytų, paliktų atkurtas `jobs` ir `job_results` eilutes gyvas ir dar
+praneštų apie sėkmingai užbaigtą ištrynimą. Tas pats trumpasis kelias yra ir
+`PENDING` žymai be claim'o (`:338-349` → `IN_PROGRESS`).
+
+Reikia **replay-aware įėjimo taško**, kuris:
+
+- naudoja tą patį autoritetingą trynimo įgyvendinimą (`jobErasure.eraseJob` ir
+  ta pati artefaktų aibė), tad antros erasure semantikos neatsiranda;
+- **neima** pasenusios žymos trumpojo kelio: žyma čia yra įrodymas, kad trinti
+  REIKIA, o ne kad jau ištrinta;
+- žymos būsenos ir audito kvito semantiką palieka esamam autoritetui.
+
+Testas privalo kristi, jei replay eina per `deleteJobArtefacts()` tiesiogiai.
 
 Po replay:
 
@@ -3846,9 +3891,31 @@ neapimtų ištrynimų, įvykusių PO kopijos — o būtent jie yra visa 7.6c pri
 Runbook aiškiai nurodo, kaip ir kada išorinė erasure būsena atnaujinama ir kaip
 prieš cutover patikrinama, kad naudojama **naujausia prieinama** versija.
 
-⚠️ Šalia to galioja 7.5a retencijos apatinė riba: žyma negali pasibaigti anksčiau
-nei ją apimanti kopija (`recordBackupHorizon`, `BACKUP_RETENTION_DAYS`).
-Eksportas remiasi tuo pačiu horizontu, o ne savo taisykle.
+⚠️ **Šviežumo patikra runbook'e neatkuria to, kas niekada nebuvo eksportuota.**
+Neplanuoto DB praradimo atveju „naujausias prieinamas" eksportas vis tiek gali
+būti senesnis už ištrynimą: vartotojo ištrynimas pavyksta po paskutinio eksporto,
+o DB krenta prieš kitą. Tada senas snapshot'as + naujausias eksportas neturi nei
+tos žymos, nei būdo ją atkurti, ir job'as atgyja — nors procedūra vadinasi
+erasure-safe.
+
+Todėl reikalinga **viena iš dviejų**, ir pasirinkimas užrašomas:
+
+- **(a)** ištrynimo kelias patvariai atnaujina už-snapshot'o būseną **prieš**
+  patvirtindamas galutinumą (t. y. eksportas nustoja būti periodinis);
+- **(b)** eksplicitiškai apibrėžtas ir įgyvendintas **ribotas galutinumo/RPO
+  kontraktas** — kiek ištrynimų galima prarasti ir per kiek laiko, su tuo
+  sutinkant dokumentuotai.
+
+„Runbook liepia dažnai eksportuoti" nėra nė vienas iš jų.
+
+⚠️ **Kopijų horizontas irgi privalo pergyventi restore.** `recordBackupHorizon()`
+savo monotoninę aukščiausią reikšmę saugo `backup_horizon` lentelėje
+(`migrations/1755800000000_backup-horizon.js:31`) — **toje pačioje** DB, tad
+senesnio snapshot'o atkūrimas ją atsuka atgal. Jei po atkurto snapshot'o buvo
+išleista ilgiau galiojanti kopija, importuotos žymos taptų šalintinos, nors ta
+kopija dar gali prikelti jų job'us. Išorinė atkūrimo būsena (ar kopijų katalogas)
+privalo nešti **maksimalią išleistą galiojimo pabaigą** ir sulieti ją
+monotoniškai **prieš** atnaujinant žymų retenciją.
 
 ### D5 — idempotentiškumas
 
@@ -3881,9 +3948,20 @@ kas nors ieškos jų dump'e.
       monotoniškas merge.
 - [ ] Eksportas apima **visas** žymas, įskaitant `deleted`; `listUnresolved()`
       vieno nepakanka — testas įrodo, kad `deleted` žyma eksportą praeina.
-- [ ] ⚠️ Merge monotoniškumas išvestas iš `states.ALLOWED_TRANSITIONS`, ne
+- [ ] ⚠️ `deleted` terminalumas išvestas iš `states.ALLOWED_TRANSITIONS`, ne
       surašytas atskirai. Testas: `deleted` žymos merge NEPAVERČIA
       `deletion_pending`.
+- [ ] ⚠️ `pending` vs `failed` konflikto taisyklė apibrėžta **atskirai** (laikas
+      ar karta) ir gyvena viename autoritete. Testai abiem kryptim: senesnis
+      `pending` neperrašo naujesnio `failed` (gedimo metaduomenys ir claim
+      nedingsta), ir senesnis `failed` neslopina naujesnio autorizuoto retry.
+- [ ] ⚠️ Importuoti `claim_token` išvalomi arba pervedami per esamas audituojamas
+      `release`/`retry` semantikas prieš replay. Testas: importuota `pending`
+      žyma su pasenusiu tokenu **NEBLOKUOJA** koordinatoriaus ties
+      `IN_PROGRESS`.
+- [ ] ⚠️ Eksportas neša ir **kopijų horizontą** (`backup_horizon`), sulietą
+      monotoniškai prieš atnaujinant žymų retenciją. Testas: atkūrus senesnį
+      snapshot'ą horizontas neatsuka atgal.
 - [ ] Sugadintas ar neautentiškas eksportas → hard fail **PRIEŠ** bet kokį merge.
 - [ ] D4: šviežumo semantika apibrėžta runbook'e ir susieta su 7.5a horizontu.
 
@@ -3896,6 +3974,11 @@ kas nors ieškos jų dump'e.
       revive.
 - [ ] Replay naudoja esamą autoritetą; restore-specific deletion SQL nėra —
       tikrinama mutacija arba tripwire.
+- [ ] ⚠️ Replay **neima pasenusios žymos trumpojo kelio**. Testas: importuota
+      `deleted` žyma + atkurtos `jobs` / `job_results` eilutės → po replay eilučių
+      NĖRA. Testas privalo kristi, jei replay eina per
+      `lifecycleService.deleteJobArtefacts()` tiesiogiai (jis grąžintų
+      `ALREADY_DELETED` su `deleted: []`).
 
 ### Seka
 
@@ -3907,6 +3990,11 @@ kas nors ieškos jų dump'e.
       bandymas paleisti ne ta tvarka **krenta**, o ne tyliai praeina.
 - [ ] D3: `maintenanceLock` galiojimo pabaiga apdorota arba pagrįstai
       nenaudojama.
+- [ ] ⚠️ **Gedimo sklidimo testas:** klaida įleidžiama **replay metu**, po
+      sėkmingo merge. Tikrinama, kad sesijų revokacija, job'ų suderinimas,
+      verifikacija ir cutover **liko neįvykdyti**, o paleidžiamumo žyma —
+      nepaliesta. Be jo realizacija, kuri replay klaidą pagauna ir tęsia,
+      praeitų visus kitus testus ir pažeistų būtent fail-closed garantiją.
 
 ### DR E2E
 
