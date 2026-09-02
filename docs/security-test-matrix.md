@@ -1452,8 +1452,8 @@ sekcijos redakcija naudojo `Pastaba` ir praėjo patikrą NEPATIKRINTA.
 | ⚠️ `completed` be rezultato **niekada** neduoda `VYKDYTI` | `jobFinishIdempotency` | `VYKDYTI` čia reikštų naują vykdymą, kurio pabaigoje `_cleanupStorage()` ištrintų šaltinio audio |
 | ⚠️ `failed`/`cancelled` irgi **neina į `restart()`** | `jobFinishIdempotency` | `jobPhase.restart()` leidžia tik `QUEUED`/`PROCESSING`, tad toks retry gaudavo `JobPhaseError` → dead-letter. Tarpinis bandymas lieka `processing`, tad persistentinis `failed` reiškia IŠNAUDOTUS bandymus. Mutacija: `JAU_TERMINALUS` pašalinus → krinta |
 | ⚠️ `JAU_TERMINALUS` šaka **išvalo audio** prieš patvirtindama | `workerIdempotency.integration` | ⚠️ NOT RUN vietoje (sujungimas, ne taisyklė). Retry gali ateiti PO `finishFailed()`, bet PRIEŠ valymą — tas pats kritimo langas kaip `IDEMPOTENTISKA_SEKME` šakoje. Be to failas liktų su gyvu `storageKey` ir BE `audio_cleanup_pending` vėliavos (Codex G1) |
-| ⚠️ `__proto__` laukas **išlieka** kanoninėje formoje | `jobFinishIdempotency` | `{}` objekte priskyrimas suveikia prototipo setter'į ir laukas dingsta; du skirtingi rezultatai taptų lygūs, o pralaimėtojas gautų idempotentišką sėkmę. Mutacija: `Object.create(null)` → `{}` → krinta |
-| ⚠️ `finish(COMPLETED)` **be rezultato atmetamas** pirmame perėjime | `jobFinishIdempotency` | `assertResultWithinLimits()` tikrina DYDĮ ir `null` praleidžia, tad sistema pati pagamindavo remontuotiną būseną. Tikrinamas tik BUVIMAS — tuščias objektas teisėtas. Mutacija: patikrą išjungus → krinta |
+| ⚠️ `__proto__` laukas **išlieka** kanoninėje formoje | `jobFinishIdempotency` | `{}` objekte priskyrimas suveikia prototipo setter'į ir laukas dingsta; du skirtingi rezultatai taptų lygūs, o pralaimėtojas gautų idempotentišką sėkmę. Mutacija: `Object.create(null)` → `{}` → krinta. ⚠️ PIRMAS bandymas NIEKO nesulaužė — testo dar nebuvo (žr. pastabą žemiau) |
+| ⚠️ `finish(COMPLETED)` **be rezultato atmetamas** pirmame perėjime | `jobFinishIdempotency` | `assertResultWithinLimits()` tikrina DYDĮ ir `null` praleidžia, tad sistema pati pagamindavo remontuotiną būseną. Tikrinamas tik BUVIMAS — tuščias objektas teisėtas. Mutacija: patikrą išjungus → krinta. ⚠️ PIRMAS bandymas NIEKO nesulaužė — testo dar nebuvo |
 | ⚠️ `finish(FAILED)` ant `completed`-be-rezultato lieka **`JobPhaseError`** | `jobFinishIdempotency` | Anksčiau vien duomenų trūkumas keitė gyvavimo ciklo konfliktą į `COMPLETED_WITHOUT_RESULT`. Mutacija: patikrų tvarką sukeitus → krinta |
 | ⚠️ **Audio šalinimo barjeras gyvena `utils/audioBarrier.js`** — bendras autoritetas, per kurį eina VISI gyvavimo ciklo valymo keliai | `jobFinishIdempotency` (predikatas ir kvietimo taškai), `audioCleanup` (elgesys), `workerIdempotency.integration` (sujungimas) | ⚠️ Ankstesnė šios eilutės redakcija teigė, kad barjeras gyvena `_cleanupStorage()` viduje ir todėl dengia visus kvietėjus. Tai NEBEGALIOJA ir negaliojo: `_cleanupStorage()` yra tik worker'io apvalkalas, o inline kelias turi savo. Mutacijos: predikatas `false`/`true` → krinta; kvietimo pašalinimas bet kurioje iš TRIJŲ funkcijų → krinta |
 | ⚠️ Barjeras **neblokuoja terminalaus `failed`/`cancelled`** ir **nerasto įrašo** | `jobFinishIdempotency`, `audioCleanup` | Per platus predikatas kauptų audio failus neribotai — retencija jų neliečia, kol raktą nurodo gyvas įrašas; o nerastas įrašas reikštų failą be jokios nuorodos |
@@ -1487,6 +1487,41 @@ skirtumas yra ŽURNALO eilutė, ir testas tikrina būtent ją.
 
 ⚠️ **Redis pusė be tikro serverio NEĮRODYTA.** `FakeRedis` `eval` neturi, tad Lua versijos
 sąlyga per jį apskritai nevykdoma. Visi Redis CAS scenarijai yra `redis` rinkinyje.
+
+⚠️ **KIEK IŠ ŠIŲ GARANTIJŲ REALIAI VYKDOMA (paleidimas `33626429824`).**
+
+Vietinė išvestis (`1886 testai · pass 1732 · skipped 154`) atrodo stipriau, nei
+yra: 154 praleidimai yra būtent tie, kurie liečia PostgreSQL ir Redis, o šios
+trys Codex grupės (A, B, C+D) ten pridėjo daugiausia.
+
+CI paleidžia rinkinius atskirai ir su `REQUIRE_POSTGRES=1` / `REQUIRE_REDIS=1`:
+
+| Rinkinys | Testų | Pass | Skipped |
+|---|---|---|---|
+| `privacy` | 849 | 848 | 1 |
+| `security` | 624 | 622 | 2 |
+| `functional` | 247 | 247 | 0 |
+| `redis` | 63 | 60 | 3 |
+| `postgres` (11 failų) | 230 | 228 | 2 |
+
+Praleidimų lieka **8**, ne 154, ir nė vienas jų nėra dėl trūkstamo serviso:
+`postgres` rinkinyje praleidžiami `REDIS_URL` reikalaujantys testai ir
+atvirkščiai — abu tada įvykdomi kitame žingsnyje.
+
+⚠️ Skaičiai persidengia (tas pats failas gali būti keliuose rinkiniuose), tad
+suma nėra unikalių testų kiekis. Svarbu kita: **PostgreSQL ir Redis šakos,
+kurių vietinė išvestis nemato, CI'uje realiai įvykdytos**, ir tai patvirtina
+atskiras žingsnis (`verify-postgres-suite-ran.mjs`).
+
+⚠️ **DVI PATAISOS PIRMĄ KARTĄ BUVO NEĮRODYTOS (§9.1).** `Object.create(null)`
+kanonizavime (C10) ir rezultato reikalavimas `finish(COMPLETED)` metu (C11) buvo
+įgyvendinti, o jų mutacijos **nesulaužė nė vieno testo** — nes testų joms dar
+nebuvo. Tai reiškia, kad tuo momentu abi pataisos egzistavo kaip kodas be
+įrodymo: bet kas galėjo jas atsukti, ir rinkinys būtų likęs žalias.
+
+Testai pridėti, ir tik tada mutacijos pradėjo kristi. Epizodas užrašomas čia, o
+ne tik commit'o žinutėje, nes žinutės po merge neskaitomos, o ši lentelė lieka:
+mutacijų stulpelis be jo skambėtų taip, tarsi apsauga būtų buvusi nuo pradžių.
 
 ---
 
