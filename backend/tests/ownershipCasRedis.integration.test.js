@@ -424,3 +424,103 @@ test("#184 REDIS: nerastas įrašas grąžina `null` IR su sąlyga, IR be jos", 
     await client.quit();
   }
 });
+
+test("#184-B ⚠️ `finishAtomic` po pralaimėto CAS PERKLASIFIKUOJA į RESULT_CONFLICT", { skip }, async () => {
+  /**
+   * ⚠️ TRYS BACKEND'AI TURI ATSAKYTI VIENODAI Į TĄ PAČIĄ LENKTYNĘ (Codex B8).
+   *
+   * PostgreSQL sprendimą priima po `FOR UPDATE` toje pačioje transakcijoje, tad
+   * pralaimėtojas iškart mato įsipareigotą būseną ir grąžina `RESULT_CONFLICT`.
+   * Redis atomiškumą gauna iš versijos CAS, tad be perklasifikavimo grąžindavo
+   * vien `CONCURRENCY_CONFLICT` — o kvietėjo retry tada pamatytų jau `completed`
+   * job'ą ir gautų NUGALĖTOJO rezultatą kaip idempotentišką sėkmę. Reikalingas
+   * `RESULT_CONFLICT` dingtų TYLIAI.
+   *
+   * ⚠️ TIKRAS REDIS BŪTINAS: kelias eina per `CAS_VERSIJA_LUA`, o `FakeRedis`
+   * `eval` neturi. Vietinėje aplinkoje šis testas NEVYKDOMAS.
+   *
+   * ⚠️ LENKTYNĖ ATKURIAMA DETERMINISTIŠKAI, ne laiku: konkurentas įsipareigoja
+   * rezultatą TARP `finishAtomic()` skaitymo ir jo rašymo, per `get` stub'ą.
+   */
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    await store.update(job.id, { status: "processing", phase: "validating" });
+
+    const originalusGet = store.get;
+    let konkurentasIvyko = false;
+    store.get = async (id) => {
+      const snapshot = await originalusGet(id);
+      if (!konkurentasIvyko) {
+        konkurentasIvyko = true;
+        store.get = originalusGet;
+        await store.finishAtomic(id, "completed", { result: { vykdytojas: "A" } });
+        store.get = async (x) => {
+          store.get = originalusGet;
+          return originalusGet(x);
+        };
+      }
+      return snapshot;
+    };
+
+    let rezultatas;
+    try {
+      rezultatas = await store.finishAtomic(job.id, "completed", {
+        result: { vykdytojas: "B" },
+      });
+    } finally {
+      store.get = originalusGet;
+    }
+
+    assert.ok(konkurentasIvyko, "prielaida: konkurentas tikrai įsiterpė");
+    assert.equal(
+      rezultatas,
+      "RESULT_CONFLICT",
+      "⚠️ pralaimėtojas privalo gauti REZULTATO konfliktą, ne generinį versijos"
+    );
+
+    const galutinis = await store.get(job.id);
+    assert.deepEqual(galutinis.result, { vykdytojas: "A" }, "nugalėtojo rezultatas nepaliestas");
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});
+
+test("#184-B ⚠️ priimtas progreso įvykis didina `version` (Lua HINCRBY)", { skip }, async () => {
+  /**
+   * ⚠️ REDIS PROGRESO KELIAS VERSIJOS APSKRITAI NEDIDINO (Codex B7).
+   *
+   * `CAS_PROGRESS_LUA` rašė tik `progress`, `progressKnown` ir `updatedAt`, o
+   * memory bei PostgreSQL eina per `applyPatch()` ir didina. Pasekmė nebuvo
+   * kosmetinė: po PRIIMTO progreso įvykio snapshot'as su senąja versija LIKDAVO
+   * galiojantis vėlesniam CAS, nors įrašo būsena jau pasikeitusi — trys
+   * backend'ai turėjo tris skirtingus `version` kontraktus.
+   *
+   * ⚠️ Vietinis `jobVersionParity` testas to nepagavo: jis eina per fasadą su
+   * MEMORY backend'u, o Redis progreso kelias reikalauja `eval`.
+   */
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    await store.update(job.id, { status: "processing", phase: "transcribing" });
+    const pries = await store.get(job.id);
+
+    const po = await store.reportProgressAtomic(job.id, {
+      phase: "transcribing",
+      progress: { current: 5, total: 10 },
+    });
+
+    assert.ok(po && typeof po === "object", "įvykis TIKRAI priimtas, ne atmestas");
+    assert.equal(po.progress.current, 5);
+    assert.equal(po.version, pries.version + 1, "⚠️ priimtas įvykis yra mutacija: tiksliai +1");
+
+    const hash = await client.hgetall(`job:${job.id}`);
+    assert.equal(hash.version, String(pries.version + 1), "persistentinė reikšmė sutampa");
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});

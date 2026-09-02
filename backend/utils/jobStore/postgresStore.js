@@ -344,11 +344,16 @@ function changedColumns(expected, row, patch = {}) {
   }
 
   /**
-   * ⚠️ `updated_at` ČIA NEBEĮTRAUKIAMAS. Jį rašo SQL išraiška rašymo METU
-   * (žr. `LAIKO_ZYMA`), ne pasenusi JS reikšmė - todėl jis nėra parametras.
+   * ⚠️ `updated_at` IR `version` ČIA NEBEĮTRAUKIAMI. Abu rašo SQL išraiškos
+   * rašymo METU (`LAIKO_ZYMA`, `VERSIJOS_ZYMA`), ne pasenusios JS reikšmės -
+   * todėl parametrais jie neperduodami.
+   *
+   * ⚠️ `version` be šios išimties į `SET` patektų VISADA, nes `applyPatch()` jį
+   * keičia kiekvienoje mutacijoje - ir tada pasenusi snapshot'o reikšmė
+   * nugalėtų SQL išraišką.
    */
   return KINTAMI_STULPELIAI.filter(
-    (c) => c !== "updated_at" && (patchStulpeliai.has(c) || row[c] !== expected[c])
+    (c) => c !== "updated_at" && c !== "version" && (patchStulpeliai.has(c) || row[c] !== expected[c])
   );
 }
 
@@ -369,11 +374,36 @@ function changedColumns(expected, row, patch = {}) {
 const LAIKO_ZYMA = `"updated_at" = GREATEST(updated_at, clock_timestamp())`;
 
 /**
- * Rašomi stulpeliai BE `updated_at` - jį visada rašo `LAIKO_ZYMA` išraiška,
- * tad parametru jis nebeperduodamas nė viename kelyje.
+ * ⚠️ VERSIJA DIDINAMA RAŠYMO METU, NE IŠ SNAPSHOT'O (#184, Codex B6).
+ *
+ * TIKSLIAI TA PATI PROBLEMA IR TAS PATS SPRENDIMAS KAIP `LAIKO_ZYMA` AUKŠČIAU.
+ *
+ * `applyPatch()` apskaičiuoja `job.version + 1` iš PERSKAITYTO snapshot'o. Kol
+ * ta reikšmė keliauja į besąlyginį `UPDATE`, du lygiagretūs kvietėjai gali
+ * perskaityti `N`, abu apskaičiuoti `N + 1` ir abu sėkmingai commit'inti — įvyko
+ * DVI mutacijos, o versija paaugo VIENĄ kartą.
+ *
+ * Pasekmė nėra kosmetinė: po pirmojo commit'o paimtas snapshot'as neša `N + 1`,
+ * tad vėlesnis CAS su tuo `expectedVersion` PRAEINA nepaisant to, kad tarp jų
+ * įsiterpė antra mutacija — ir ją perrašo. Optimistic lock garantija
+ * („kiekviena sėkminga mutacija +1") lūžta būtent ten, kur ji reikalinga.
+ *
+ * Todėl `version`, kaip ir `updated_at`, NĖRA parametras: jį skaičiuoja pats
+ * PostgreSQL eilutės rašymo momentu. `SET` dėl šios išraiškos irgi niekada
+ * nebūna tuščias.
+ *
+ * ⚠️ SĄLYGINIAME KELYJE TAI NEKONFLIKTUOJA SU `WHERE version = $n`: sąlyga
+ * tikrina SENĄ reikšmę, o išraiška rašo naują — abu tame pačiame sakinyje.
+ */
+const VERSIJOS_ZYMA = `"version" = jobs.version + 1`;
+
+/**
+ * Rašomi stulpeliai BE `updated_at` ir BE `version` - abu visada rašo SQL
+ * išraiškos (`LAIKO_ZYMA`, `VERSIJOS_ZYMA`), tad parametrais jie
+ * nebeperduodami nė viename kelyje.
  */
 const KINTAMI_BE_LAIKO = Object.freeze(
-  KINTAMI_STULPELIAI.filter((c) => c !== "updated_at")
+  KINTAMI_STULPELIAI.filter((c) => c !== "updated_at" && c !== "version")
 );
 
 /**
@@ -998,6 +1028,7 @@ function createPostgresStore(pool) {
     const sets = [
       ...rasomi.map((c, i) => `"${c}" = $${i + 3}`),
       LAIKO_ZYMA,
+      VERSIJOS_ZYMA,
     ].join(", ");
 
     const result = await client.query(
@@ -1064,6 +1095,7 @@ function createPostgresStore(pool) {
     const sets = [
       ...mutable.map((c, i) => `"${c}" = $${i + 2}`),
       LAIKO_ZYMA,
+      VERSIJOS_ZYMA,
     ].join(", ");
 
     await client.query(
@@ -1128,6 +1160,7 @@ function createPostgresStore(pool) {
         const sets = [
           ...rasomi.map((c, i) => `"${c}" = $${i + 5}`),
           LAIKO_ZYMA,
+          VERSIJOS_ZYMA,
         ].join(", ");
         /**
          * ⚠️ NUOSAVYBĖ IR VERSIJA - VIENAME `UPDATE` (#184, 7.5b).
@@ -1279,6 +1312,7 @@ function createPostgresStore(pool) {
       const sets = [
         ...rasomi.map((c, i) => `"${c}" = $${i + 8}`),
         LAIKO_ZYMA,
+        VERSIJOS_ZYMA,
       ].join(", ");
       const result = await client.query(
         casSuKlasifikacija(

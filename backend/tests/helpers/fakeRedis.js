@@ -26,6 +26,26 @@ class FakeRedis {
   async hgetall(key) {
     return this.hashes.get(key) || {};
   }
+  /**
+   * ⚠️ ATOMINIS SKAITIKLIS (#184, Codex B6).
+   *
+   * `version` nuo B grupės didinamas SERVERYJE, ne iš JS snapshot'o: du
+   * lygiagretūs kvietėjai negali abu įrašyti `N + 1`. `HINCRBY` yra paprasta
+   * komanda (ne Lua), tad ją gali turėti ir šis dublis — skirtingai nuo `eval`,
+   * kurio imitacija reikštų antrą Lua realizaciją testų sluoksnyje.
+   *
+   * ⚠️ TAI NEPADARO DUBLIO LYGIAVERČIU TIKRAM REDIS. Lygiagretumo čia nėra
+   * apskritai; tikrinama tik tai, kad kodas naudoja SERVERIO skaitiklį, o ne
+   * savo apskaičiuotą reikšmę. Tikrą atomiškumą tikrina `redis` rinkinys.
+   */
+  async hincrby(key, field, delta) {
+    const hash = this.hashes.get(key) || {};
+    const dabar = parseInt(hash[field], 10) || 0;
+    const naujas = dabar + delta;
+    hash[field] = String(naujas);
+    this.hashes.set(key, hash);
+    return naujas;
+  }
   async zadd(key, score, member) {
     if (!this.zsets.has(key)) this.zsets.set(key, new Map());
     this.zsets.get(key).set(member, score);

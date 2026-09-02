@@ -115,32 +115,67 @@ test("#184 kiekviena sėkminga mutacija didina `version` LYGIAI vienetu", async 
   assert.equal(perskaitytas.version, 4, "grąžinta reikšmė sutampa su persistentine");
 });
 
-test("#184 Redis mutacija didina versiją TOJE PAČIOJE rašymo operacijoje", async () => {
+test("#184-B ⚠️ Redis versiją didina SERVERIS, ne JS snapshot'as", async () => {
   /**
-   * ⚠️ ATSKIRO RAŠYMO NĖRA — ir tai matuojama, ne teigiama.
+   * ⚠️ ŠIS TESTAS BUVO PERRAŠYTAS, NES FIKSAVO KLAIDĄ (Codex B6).
    *
-   * `applyPatch()` versiją apskaičiuoja PRIEŠ `serialize()`, tad ji patenka į tą
-   * patį `HSET` (arba tą patį Lua CAS `HSET`), kuriuo rašomas visas job'as.
-   * Papildomas `hset` reikštų langą, per kurį įrašas turėtų seną versiją su
-   * nauju statusu.
+   * Ankstesnė redakcija reikalavo, kad `version` būtų rašomas TAME PAČIAME
+   * `hset` kaip ir patch'as — t. y. kaip `applyPatch()` apskaičiuota SNAPSHOT'O
+   * reikšmė. Būtent tai ir buvo defektas: du lygiagretūs kvietėjai perskaito
+   * `N`, abu apskaičiuoja `N + 1`, abu įrašo — įvyko dvi mutacijos, o versija
+   * paaugo vieną kartą. Po to pasenęs snapshot'as CAS'ą praeitų.
+   *
+   * Naujas kontraktas: reikšmę skaičiuoja SERVERIS (`HINCRBY`), o `hset` jos
+   * nebeliečia. Tas pats sprendimas kaip PostgreSQL `VERSIJOS_ZYMA`.
    */
   const fake = new FakeRedis();
   const redis = createRedisStore(fake);
   const sukurtas = await redis.create({});
 
   const rasymai = [];
-  const originalus = fake.hset.bind(fake);
+  const incr = [];
+  const originalusHset = fake.hset.bind(fake);
+  const originalusIncr = fake.hincrby.bind(fake);
   fake.hset = async (key, obj) => {
     rasymai.push(Object.keys(obj));
-    return originalus(key, obj);
+    return originalusHset(key, obj);
+  };
+  fake.hincrby = async (key, field, delta) => {
+    incr.push([field, delta]);
+    return originalusIncr(key, field, delta);
   };
 
   const po = await redis.update(sukurtas.id, { actor: "a" });
 
-  assert.equal(po.version, 2);
-  assert.equal(rasymai.length, 1, "vienas rašymas, ne du");
-  assert.ok(rasymai[0].includes("version"), "versija tame pačiame rašyme kaip ir patch'as");
-  assert.ok(rasymai[0].includes("actor"), "kartu su patch'o lauku");
+  assert.equal(po.version, 2, "grąžinama SERVERIO apskaičiuota reikšmė");
+  assert.ok(rasymai.length >= 1, "patch'as įrašytas");
+  assert.equal(
+    rasymai.some((laukai) => laukai.includes("version")),
+    false,
+    "⚠️ `version` NEGALI būti tarp rašomų laukų - tai būtų snapshot'o reikšmė"
+  );
+  assert.deepEqual(incr, [["version", 1]], "versiją didina atominis serverio skaitiklis");
+
+  /** Persistentinė reikšmė sutampa su grąžinta. */
+  const skaitytas = await redis.get(sukurtas.id);
+  assert.equal(skaitytas.version, 2);
+});
+
+test("#184-B Redis: dvi mutacijos duoda +2, ne +1", async () => {
+  /**
+   * ⚠️ TAI YRA VISO B6 ESMĖ. Su snapshot'o reikšme dvi mutacijos, prasidėjusios
+   * nuo tos pačios `N`, abi įrašydavo `N + 1`. Su serverio skaitikliu
+   * padidinimas neprarandamas net tada, kai abu kvietėjai matė tą patį `N`.
+   */
+  const redis = createRedisStore(new FakeRedis());
+  const job = await redis.create({});
+  assert.equal(job.version, 1);
+
+  const pirmas = await redis.update(job.id, { actor: "a" });
+  const antras = await redis.update(job.id, { actor: "b" });
+
+  assert.equal(pirmas.version, 2);
+  assert.equal(antras.version, 3, "antra mutacija - dar vienas padidinimas");
 });
 
 test("#184 `applyPatch()` yra VIENINTELIS increment'o šaltinis", async () => {
@@ -266,4 +301,46 @@ test("#184 `version` išgyvena `jobToRow` → `rowToJob` round-trip", () => {
 
   const atgal = rowToJob({ ...row, artefacts: [], progress_known: false });
   assert.equal(atgal.version, 5);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 5. VERSIJOS KONTRAKTO PARITETAS (Codex B grupė)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#184-B ⚠️ netinkama ATKURTA versija atmetama GARSIAI, ne tyliai taisoma", () => {
+  /**
+   * ⚠️ BENDRA SKAITINIŲ LAUKŲ TAISYKLĖ ČIA BŪTŲ PAVOJINGA (Codex B9).
+   *
+   * `parseInt(x, 10) || 0` priimtų `0`, neigiamą ir `"1x"` (→ `1`). PostgreSQL
+   * tokias reikšmes atmeta per `jobs_version_positive`, o memory ir Redis jas
+   * ATKURTŲ — sugadinti optimistic-lock metaduomenys taptų autoritetingi
+   * skirtingai, priklausomai nuo backend'o.
+   *
+   * ⚠️ TIKRINAMA ŽALIA REIKŠMĖ: `parseInt("1x", 10)` yra `1`, tad po
+   * normalizavimo klaida būtų nebematoma. Todėl `"1x"` yra atskiras atvejis
+   * sąraše, ne pavyzdys.
+   */
+  const bazinis = newJob({});
+
+  for (const bloga of [0, -1, 1.5, "1x", "abc", "", true, {}]) {
+    assert.throws(
+      () => normalizeJob({ ...bazinis, version: bloga }),
+      /Netinkama optimistic-lock versija/,
+      `${JSON.stringify(bloga)} privalo būti atmesta`
+    );
+  }
+
+  /** Galiojančios formos - įskaitant Redis tekstinę. */
+  assert.equal(normalizeJob({ ...bazinis, version: 1 }).version, 1);
+  assert.equal(normalizeJob({ ...bazinis, version: 7 }).version, 7);
+  assert.equal(normalizeJob({ ...bazinis, version: "7" }).version, 7, "Redis saugo tekstą");
+
+  /**
+   * ⚠️ TRŪKSTAMAS laukas NĖRA klaida - legacy įrašas iš prieš 7.5b jo neturi.
+   * Numatytoji `1` galioja TIK šiam atvejui.
+   */
+  const legacy = { ...bazinis };
+  delete legacy.version;
+  assert.equal(normalizeJob(legacy).version, 1, "legacy įrašas gauna numatytąją");
+  assert.equal(normalizeJob({ ...bazinis, version: null }).version, 1);
 });
