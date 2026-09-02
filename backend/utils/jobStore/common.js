@@ -158,6 +158,58 @@ function normalizeFieldValue(laukas, reiksme) {
 function normalizeJob(job) {
   if (!job || typeof job !== "object") return job;
 
+  /**
+   * ⚠️ NETINKAMA ATKURTA `version` ATMETAMA GARSIAI (#184, Codex B9).
+   *
+   * `version` yra `NUMBER_FIELDS` aibėje, tad bendra taisyklė
+   * (`parseInt(x, 10) || 0`) priimtų `0`, neigiamą ar `"1x"` (→ `1`) tyliai.
+   * PostgreSQL tokias reikšmes atmeta per `jobs_version_positive`, o memory ir
+   * Redis jas ATKURTŲ — ir sugadinti optimistic-lock metaduomenys taptų
+   * autoritetingi skirtingai, priklausomai nuo backend'o.
+   *
+   * Tikrinama ŽALIA reikšmė, ne normalizuota: `parseInt("1x", 10)` grąžina `1`,
+   * tad po normalizavimo klaida būtų nebematoma.
+   *
+   * ⚠️ NUMATYTOJI `1` LIEKA TIK TRŪKSTAMAM LAUKUI. Legacy įrašas iš prieš 7.5b
+   * lauko neturi, ir tai NĖRA klaida (žr. materializavimą žemiau); klaida yra
+   * PATEIKTA, bet negaliojanti reikšmė.
+   */
+  if (job.version !== undefined && job.version !== null) {
+    const zalia = job.version;
+
+    /**
+     * ⚠️ VIRŠUTINĖ RIBA YRA BENDRIAUSIA IŠ TRIJŲ SAUGYKLŲ (#184, Codex F3).
+     *
+     * `jobs.version` yra PostgreSQL `integer`, tad jo lubos — 2147483647.
+     * Vien „skaitmenys ir ≥ 1" praleistų `"2147483648"`: memory ir Redis tokį
+     * įrašą atkurtų, o PostgreSQL atmestų — TAS PATS backup'as elgtųsi
+     * skirtingai priklausomai nuo backend'o, o tai ir yra klasė, kurią ši
+     * patikra šalina.
+     *
+     * Dar didesnės reikšmės JS pusėje prarastų tikslumą arba virstų
+     * `Infinity`, ir „tiksliai +1" kontraktas nustotų galioti tyliai.
+     */
+    const VERSIJOS_LUBOS = 2147483647;
+
+    const skaicius =
+      typeof zalia === "number"
+        ? zalia
+        : typeof zalia === "string" && /^[0-9]+$/.test(zalia)
+          ? Number(zalia)
+          : NaN;
+
+    const galioja =
+      Number.isInteger(skaicius) && skaicius >= 1 && skaicius <= VERSIJOS_LUBOS;
+
+    if (!galioja) {
+      throw new Error(
+        `Netinkama optimistic-lock versija: ${JSON.stringify(zalia)}. ` +
+          `Leidžiami tik sveikieji skaičiai nuo 1 iki ${VERSIJOS_LUBOS} ` +
+          "(arba lauko nebuvimas legacy įrašuose)."
+      );
+    }
+  }
+
   const out = { ...job };
   for (const laukas of KANONINIAI_LAUKAI) {
     if (laukas in out) out[laukas] = normalizeFieldValue(laukas, out[laukas]);

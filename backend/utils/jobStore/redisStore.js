@@ -92,6 +92,28 @@ const JSON_FIELDS = new Set(["result", "progress", "artefacts"]);
  * ir tik tada praleidžia patikrą. Reikšmė `''` hash'e reikštų `null` versiją,
  * kurios `normalizeJob()` neleidžia.
  */
+/**
+ * Serializuotas job'as BE `version` (#184, Codex B6).
+ *
+ * ⚠️ VERSIJĄ RAŠO SERVERIS, NE SNAPSHOT'AS. `applyPatch()` apskaičiuoja
+ * `job.version + 1` iš PERSKAITYTOS reikšmės; kol ta reikšmė keliauja į `HSET`,
+ * du lygiagretūs kvietėjai gali abu perskaityti `N`, abu apskaičiuoti `N + 1` ir
+ * abu įrašyti — įvyko dvi mutacijos, o versija paaugo vieną kartą. Tada po
+ * pirmojo commit'o paimtas snapshot'as neša `N + 1`, ir vėlesnis CAS su ta
+ * reikšme praeina nepaisant įsiterpusios antros mutacijos.
+ *
+ * Todėl `version` iš rašomų laukų išimamas, o jį didina `HINCRBY` — atominis
+ * serverio skaitiklis, kuris nė vieno padidinimo neprarandą.
+ *
+ * ⚠️ TAS PATS SPRENDIMAS KAIP PostgreSQL `VERSIJOS_ZYMA` (`"version" =
+ * jobs.version + 1`). Skiriasi tik priemonė, ne taisyklė.
+ */
+function serializeBeVersijos(job) {
+  const flat = serialize(job);
+  delete flat.version;
+  return flat;
+}
+
 function versijosArgumentas(expectedVersion) {
   return expectedVersion === undefined || expectedVersion === null ? "" : String(expectedVersion);
 }
@@ -199,15 +221,47 @@ function createRedisStore(redisClient) {
      * `hset()` neapsaugotų nuo nieko, nes tarp jų yra `await`.
      */
     if (options.expectedVersion !== undefined) {
-      const flat = serialize(next);
+      const flat = serializeBeVersijos(next);
       const args = [versijosArgumentas(options.expectedVersion)];
       for (const [k, v] of Object.entries(flat)) args.push(k, v);
 
       const outcome = await redisClient.eval(CAS_VERSIJA_LUA, 1, JOB_PREFIX + id, ...args);
-      if (Number(outcome) === -1) return null;
-      if (Number(outcome) === 2) return "CONCURRENCY_CONFLICT";
+      const [kodas, naujaVersija] = Array.isArray(outcome) ? outcome : [outcome, null];
+      if (Number(kodas) === -1) return null;
+      if (Number(kodas) === 2) return "CONCURRENCY_CONFLICT";
+      next.version = Number(naujaVersija);
     } else {
-      await redisClient.hset(JOB_PREFIX + id, serialize(next));
+      /**
+       * ⚠️ VIENA TRANSAKCIJA, NE DU `await` (#184, Codex F1).
+       *
+       * `HSET` rašo visus laukus IŠSKYRUS `version`, o `HINCRBY` versiją didina
+       * atominiu serverio skaitikliu — padidinimas nė vieno nepraranda.
+       *
+       * ⚠️ BET DVIEM ATSKIROMIS KOMANDOMIS TO NEUŽTENKA, IR PIRMOJI ŠIO PR
+       * REDAKCIJA TĄ TIK APRAŠĖ, O NE UŽDARĖ. Jei `HSET` pavyksta, o `HINCRBY`
+       * krenta (nutrūkęs ryšys tarp `await`), lieka NAUJI LAUKAI SU SENA
+       * VERSIJA. Tą versiją turintis klientas tada praeina CAS ir perrašo
+       * neužfiksuotą pakeitimą — t. y. lūžta būtent ta invarianta, kurią B6
+       * atkuria. „Sisteminis last-write-wins" čia buvo klaidingas pateisinimas:
+       * klausimas ne apie laukų nugalėtoją, o apie tai, ar versija seka mutacijas.
+       *
+       * `MULTI`/`EXEC` daro tai viskas-arba-nieko: nutrūkus ryšiui iki `EXEC`,
+       * nepritaikoma nė viena komanda.
+       */
+      const rezultatai = await redisClient
+        .multi()
+        .hset(JOB_PREFIX + id, serializeBeVersijos(next))
+        .hincrby(JOB_PREFIX + id, "version", 1)
+        .exec();
+
+      /** `exec()` grąžina `[[err, reikšmė], …]`; versija yra antros komandos rezultatas. */
+      const versijosAtsakas = rezultatai && rezultatai[1];
+      if (!versijosAtsakas || versijosAtsakas[0]) {
+        throw versijosAtsakas && versijosAtsakas[0]
+          ? versijosAtsakas[0]
+          : new Error(`redisStore.update: MULTI/EXEC nepavyko (job ${id}).`);
+      }
+      next.version = Number(versijosAtsakas[1]);
     }
     await redisClient.zadd(INDEX_KEY, Date.now(), id);
     // Baigtiems job'ams - Redis EXPIRE, kad pats išvalytų po TTL. IŠIMTIS:
@@ -262,19 +316,20 @@ function createRedisStore(redisClient) {
    * Kodai: `-1` nėra eilutės · `0` svetima · `2` pasenusi versija · `1` įrašyta.
    */
   const CAS_UPDATE_LUA = `
-    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+    if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
     local id = redis.call('HGET', KEYS[1], 'ownerId')
     if id == false or id == nil then id = '' end
     local kind = redis.call('HGET', KEYS[1], 'ownerKind')
     if kind == false or kind == nil then kind = '' end
-    if id ~= ARGV[1] or kind ~= ARGV[2] then return 0 end
+    if id ~= ARGV[1] or kind ~= ARGV[2] then return {0, 0} end
     if ARGV[3] ~= '' then
       local v = redis.call('HGET', KEYS[1], 'version')
       if v == false or v == nil then v = '' end
-      if v ~= ARGV[3] then return 2 end
+      if v ~= ARGV[3] then return {2, 0} end
     end
     redis.call('HSET', KEYS[1], unpack(ARGV, 4))
-    return 1
+    local nauja = redis.call('HINCRBY', KEYS[1], 'version', 1)
+    return {1, nauja}
   `;
 
   /**
@@ -288,12 +343,13 @@ function createRedisStore(redisClient) {
    * Kodai: `-1` nėra eilutės · `2` pasenusi versija · `1` įrašyta.
    */
   const CAS_VERSIJA_LUA = `
-    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+    if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
     local v = redis.call('HGET', KEYS[1], 'version')
     if v == false or v == nil then v = '' end
-    if v ~= ARGV[1] then return 2 end
+    if v ~= ARGV[1] then return {2, 0} end
     redis.call('HSET', KEYS[1], unpack(ARGV, 2))
-    return 1
+    local nauja = redis.call('HINCRBY', KEYS[1], 'version', 1)
+    return {1, nauja}
   `;
 
   const CAS_REMOVE_LUA = `
@@ -347,10 +403,10 @@ function createRedisStore(redisClient) {
    * Grąžinamos reikšmės: `-1` job'o nėra, `0` įvykis atmestas, `1` įrašyta.
    */
   const CAS_PROGRESS_LUA = `
-    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+    if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
 
     local status = redis.call('HGET', KEYS[1], 'status')
-    if status ~= ARGV[1] then return 0 end
+    if status ~= ARGV[1] then return {0, 0} end
 
     -- TIPAS irgi turi nepakisti tarp get() ir eval().
     --
@@ -358,11 +414,11 @@ function createRedisStore(redisClient) {
     -- pakeiciamas (restoreRecord perraso hash'a), Lua to nepastebedavo - CAS
     -- lygino tik statusa, faze ir progresa. Rezultatai issiskirdavo.
     local jobType = redis.call('HGET', KEYS[1], 'type')
-    if jobType ~= ARGV[8] then return 0 end
+    if jobType ~= ARGV[8] then return {0, 0} end
 
     local phase = redis.call('HGET', KEYS[1], 'phase')
     if phase == false or phase == nil then phase = '' end
-    if phase ~= ARGV[2] then return 0 end
+    if phase ~= ARGV[2] then return {0, 0} end
 
     local progress = redis.call('HGET', KEYS[1], 'progress')
     if progress ~= false and progress ~= nil and progress ~= 'null' then
@@ -380,8 +436,8 @@ function createRedisStore(redisClient) {
         -- Redis pusej buvo atmetamas, o memory pusej priimamas: ten
         -- Number.isFinite("8") yra false, ir gryna funkcija tokio progreso
         -- nelaiko galiojanciu. Backend'ai issiskirdavo.
-        if type(p.total) == 'number' and p.total ~= tonumber(ARGV[3]) then return 0 end
-        if type(p.current) == 'number' and tonumber(ARGV[4]) < p.current then return 0 end
+        if type(p.total) == 'number' and p.total ~= tonumber(ARGV[3]) then return {0, 0} end
+        if type(p.current) == 'number' and tonumber(ARGV[4]) < p.current then return {0, 0} end
       end
     end
 
@@ -389,7 +445,20 @@ function createRedisStore(redisClient) {
       'progress', ARGV[5],
       'progressKnown', ARGV[6],
       'updatedAt', ARGV[7])
-    return 1
+
+    -- VERSIJA DIDINAMA IR CIA (#184, Codex B7).
+    --
+    -- Priimtas progreso ivykis yra SEKMINGA AUTORITETINGA MUTACIJA, tad pagal
+    -- 7.5b kontrakta ji privalo didinti version. Memory ir PostgreSQL tai daro
+    -- per applyPatch(); Redis progreso kelias yra ATSKIRAS ir ji aplenkdavo.
+    --
+    -- Pasekme buvo ne kosmetine: po priimto Redis progreso ivykio snapshot'as su
+    -- senaja versija LIKDAVO galiojantis velesniam CAS, nors iraso busena jau
+    -- buvo pasikeitusi. Trys backend'ai turejo tris skirtingus version
+    -- kontraktus, o bendras rinkinys to nematuoja - progreso kelias per
+    -- FakeRedis eval neturi.
+    local nauja = redis.call('HINCRBY', KEYS[1], 'version', 1)
+    return {1, nauja}
   `;
 
   /**
@@ -447,8 +516,14 @@ function createRedisStore(redisClient) {
       existing.type == null ? "" : String(existing.type)
     );
 
-    if (Number(outcome) === -1) return null;
-    if (Number(outcome) === 0) return "REJECTED";
+    /**
+     * ⚠️ SKRIPTAS GRĄŽINA `{kodas, naujaVersija}` (#184, Codex B7). Klaidų kodai
+     * lieka tie patys; nauja tik antroji reikšmė, kurios šis kelias nenaudoja —
+     * grąžinamas įrašas vis tiek perskaitomas iš naujo (žr. žemiau).
+     */
+    const [kodas] = Array.isArray(outcome) ? outcome : [outcome];
+    if (Number(kodas) === -1) return null;
+    if (Number(kodas) === 0) return "REJECTED";
 
     await redisClient.zadd(INDEX_KEY, now, id);
 
@@ -493,7 +568,31 @@ function createRedisStore(redisClient) {
     if (jauBaigtas !== undefined) return jauBaigtas;
 
     const patch = jobPhase.finish(job, status, extra);
-    return update(id, patch, { expectedVersion: job.version });
+    const rezultatas = await update(id, patch, { expectedVersion: job.version });
+
+    /**
+     * ⚠️ PO PRALAIMĖTO CAS BŪSENA PERSKAITOMA IR PERKLASIFIKUOJAMA (#184, Codex B8).
+     *
+     * PostgreSQL sprendimą priima po `FOR UPDATE` toje pačioje transakcijoje, tad
+     * lenktynių pralaimėtojas iškart mato įsipareigotą būseną ir grąžina
+     * `RESULT_CONFLICT`. Redis to negali: sprendimą priima gryna JS funkcija, o
+     * atomiškumą duoda versijos CAS. Grąžinus vien `CONCURRENCY_CONFLICT`,
+     * kvietėjo retry pamatytų jau `completed` job'ą ir gautų NUGALĖTOJO rezultatą
+     * kaip idempotentišką sėkmę — reikalingas `RESULT_CONFLICT` dingtų tyliai, ir
+     * trys backend'ai atsakytų skirtingai į tą pačią lenktynę.
+     *
+     * ⚠️ VIENAS PERSKAITYMAS, BE CIKLO. Jei įrašas tebėra ne terminalus, tai
+     * TIKRAS lygiagretumo konfliktas, ir kvietėjas sprendžia pats.
+     */
+    if (rezultatas === "CONCURRENCY_CONFLICT") {
+      const dabartinis = await get(id);
+      if (!dabartinis) return null;
+
+      const perklasifikuota = idempotentiskasAtsakymas(dabartinis, status, extra);
+      if (perklasifikuota !== undefined) return perklasifikuota;
+    }
+
+    return rezultatas;
   }
 
   /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
@@ -503,7 +602,7 @@ function createRedisStore(redisClient) {
     if (!matchesOwner(existing, scope)) return "FORBIDDEN";
 
     const next = applyPatch(existing, patch);
-    const flat = serialize(next);
+    const flat = serializeBeVersijos(next);
     const args = [
       normalizeOwnerId(scope.ownerId),
       scope.ownerKind || "",
@@ -512,9 +611,11 @@ function createRedisStore(redisClient) {
     for (const [k, v] of Object.entries(flat)) args.push(k, v);
 
     const outcome = await redisClient.eval(CAS_UPDATE_LUA, 1, JOB_PREFIX + id, ...args);
-    if (Number(outcome) === -1) return null;
-    if (Number(outcome) === 0) return "FORBIDDEN";
-    if (Number(outcome) === 2) return "CONCURRENCY_CONFLICT";
+    const [kodas, naujaVersija] = Array.isArray(outcome) ? outcome : [outcome, null];
+    if (Number(kodas) === -1) return null;
+    if (Number(kodas) === 0) return "FORBIDDEN";
+    if (Number(kodas) === 2) return "CONCURRENCY_CONFLICT";
+    next.version = Number(naujaVersija);
 
     await redisClient.zadd(INDEX_KEY, Date.now(), id);
     if (hasPendingCleanup(next)) {
