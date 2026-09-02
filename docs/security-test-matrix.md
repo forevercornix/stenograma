@@ -1554,6 +1554,8 @@ mutacijų stulpelis be jo skambėtų taip, tarsi apsauga būtų buvusi nuo prad�
 | ⚠️ **`dump` be `--actor` neįvyksta** (auditas su aktoriumi) | `pgDumpBackupContract` | Mutacija MO (privalomumo pašalinimas) → krinta. Tikrinamas TIKRAS procesas ir exit kodas, ne eilutė faile (§9.2) |
 | ⚠️ **Auditas kūrimo pusėje, atskiras įvykis; atkūrimo pusėje — NĖRA** | `pgDumpBackupContract`, `pgDumpBackup.integration` | Neregistruotas įvykis mestų `UnclassifiedAuditEventError`; testas fiksuoja ir tai, kad `PG_DUMP_BACKUP_RESTORED` NEEGZISTUOJA — jo atsiradimas reikštų, kad avarinis atkūrimas ėmė priklausyti nuo audito prieinamumo |
 | `psql` stdout **nebuferinamas** (`stdio: "ignore"`) | `pgDumpBackupContract` | Mutacija MP (`"pipe"`) → krinta. ⚠️ STATINĖ forma (§9.2): užstrigimą įrodytų tik vamzdį pripildantis dump'as, o `--quiet` režimu tokio nėra |
+| ⚠️ **Netuščia tikslinė bazė atmetama PRIEŠ pirmą SQL sakinį** | `pgDumpBackup.integration` | ✅ CI. Tikrinama ne tik klaida: svetimas turinys privalo likti nepaliestas, o kopijos lentelės - neatsirasti. ⚠️ Mutacija MR (preflight neįjungtas į atkūrimą) vietoje NEPAGAUNAMA - reikia dviejų tikrų bazių. Gina ne 7.6a, o #249/#250, kurie prasideda nuo prielaidos „restore pavyko" |
+| ⚠️ **Neperskaityta `psql` išvestis NEreiškia „tuščia"** | `pgDumpBackupContract` | Mutacija MQ (fail-closed parsinimo išjungimas) → krinta. Kitaip patikrą apeitų bet koks išvesties formato pokytis |
 | ⚠️ **Neišduotos kopijos auditas nefiksuoja** | `pgDumpBackup.integration` | ✅ CI PASS. Horizontui lūžus tikrinama ne tik klaida, bet ir tai, kad audito įrašo NĖRA: įrašas apie neegzistuojantį artefaktą būtų blogesnis už tylą |
 
 ⚠️ **KĄ 7.6a ĮRODO VIETOJE IR KO NE.** Vietinis rinkinys tikrina KONTRAKTĄ:

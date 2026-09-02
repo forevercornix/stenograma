@@ -552,9 +552,28 @@ test("7.6a: rūšies antraštė yra FAIL-CLOSED (ne pg_dump artefaktas)", { skip
  * kad horizontas ir auditas realiai ĮJUNGTI į kopijos kūrimą, ir kad tikra
  * `pg_dump` klaida neišneša slaptažodžio.
  */
-const { mock } = require("node:test");
+const { mock, before } = require("node:test");
 const tombstones = require("../utils/deletionTombstones");
 const auditWrite = require("../utils/auditWrite");
+
+/**
+ * ⚠️ ŽYMŲ SAUGYKLA ŠIAM FAILUI — ATMINTYJE, IR TAI CI RADINYS.
+ *
+ * Horizonto fiksavimas yra fail-closed, tad kopijos kūrimas dabar REIKALAUJA
+ * veikiančios ištrynimo žymų saugyklos. CI'uje `DATABASE_URL` rodo į bazę be
+ * `erasure_marks`, ir visas šis failas krito su:
+ *
+ *   Kopijos galiojimo NEPAVYKO užfiksuoti (relation "erasure_marks" does not exist)
+ *
+ * Tai NE testo triukšmas, o tikra kelio savybė: bazė be ištrynimo žymų
+ * infrastruktūros kopijos nebeišduoda. Čia saugykla inicijuojama EKSPLICITIŠKAI
+ * atmintyje - taip fiksuojamas REALUS `recordBackupHorizon()` kvietimas (ne
+ * mock'as), o postgres žymų saugyklą tikrina `erasureMarks.integration`.
+ */
+before(async () => {
+  await tombstones.shutdown().catch(() => {});
+  await tombstones.init({ NODE_ENV: "test" });
+});
 
 test("#262: horizontas ir auditas ĮJUNGTI į kopijos kūrimą", { skip: praleisti() }, async (t) => {
   t.after(async () => {
@@ -564,21 +583,24 @@ test("#262: horizontas ir auditas ĮJUNGTI į kopijos kūrimą", { skip: praleis
   await perkurtiDb(SALTINIO_URL);
   await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
 
-  const horizontas = mock.method(tombstones, "recordBackupHorizon", async (ms) => ms);
   const auditas = mock.method(auditWrite, "rasytiAudita", async () => {});
 
   try {
+    /**
+     * ⚠️ HORIZONTAS TIKRINAMAS PER SAUGYKLĄ, NE PER MOCK'Ą. Mock'as įrodytų tik
+     * tai, kad funkcija kviečiama; skaitymas atgal įrodo, kad reikšmė REALIAI
+     * užfiksuota - o būtent tuo remsis 7.6c.
+     */
     const kopija = await pgDumpBackup.sukurtiSifruotaKopija({
       databaseUrl: SALTINIO_URL,
       actor: "operatorius-testas",
       env: TESTO_ENV,
     });
 
-    assert.equal(horizontas.mock.callCount(), 1, "kopijos galiojimas privalo būti užfiksuotas");
     assert.equal(
-      horizontas.mock.calls[0].arguments[0],
+      await tombstones.refreshBackupHorizon(),
       Date.parse(kopija.manifest.expiresAt),
-      "fiksuojamas TO PATIES manifesto galiojimas, ne apytikslis laikas"
+      "saugykloje privalo gulėti TO PATIES manifesto galiojimas, ne apytikslis laikas"
     );
 
     assert.equal(auditas.mock.callCount(), 1);
@@ -587,7 +609,6 @@ test("#262: horizontas ir auditas ĮJUNGTI į kopijos kūrimą", { skip: praleis
     assert.equal(irasas.actor, "operatorius-testas", "§11 reikalauja aktoriaus, ne vien įvykio");
     assert.equal(/[0-9a-f]{64}/i.test(JSON.stringify(irasas)), false, "audite - tik metaduomenys, jokių raktų");
   } finally {
-    horizontas.mock.restore();
     auditas.mock.restore();
   }
 });
@@ -647,4 +668,58 @@ test("#262: tikra `pg_dump` klaida NEIŠNEŠA slaptažodžio", { skip: praleisti
       return true;
     }
   );
+});
+
+test("#262: NETUŠČIA tikslinė bazė atmetama PRIEŠ pirmą SQL sakinį", { skip: praleisti() }, async (t) => {
+  /**
+   * ⚠️ ŠIS TESTAS GINA NE 7.6a, O #249 IR #250.
+   *
+   * Abu remsis šiuo restore keliu ir abu prasideda nuo „restore pavyko".
+   * Atkūrimas į bazę su svetimu turiniu duotų dviejų bazių SĄJUNGĄ, o jų testai
+   * to nepagautų - jie tikrintų suderinimą ir replay ant jau užterštos būsenos.
+   */
+  t.after(async () => {
+    await pasalintiDb(SALTINIO_URL);
+    await pasalintiDb(TIKSLO_URL);
+  });
+
+  await perkurtiDb(SALTINIO_URL);
+  await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
+
+  const kopija = await pgDumpBackup.sukurtiSifruotaKopija({
+    databaseUrl: SALTINIO_URL,
+    actor: "operatorius-testas",
+    env: TESTO_ENV,
+  });
+
+  await perkurtiDb(TIKSLO_URL);
+  await vykdyti(TIKSLO_URL, "CREATE TABLE svetimas (id int); INSERT INTO svetimas VALUES (7);");
+
+  await assert.rejects(
+    () =>
+      pgDumpBackup.atkurtiSifruotaKopija({
+        envelope: kopija.envelope,
+        manifest: kopija.manifest,
+        targetUrl: TIKSLO_URL,
+        env: TESTO_ENV,
+      }),
+    (err) => {
+      assert.equal(err.code, "PG_RESTORE_TARGET_NOT_EMPTY");
+      return true;
+    }
+  );
+
+  /**
+   * ⚠️ NEUŽTENKA „metė klaidą": svetimas turinys privalo likti NEPALIESTAS, o
+   * kopijos lentelių - neatsirasti. Kitaip patikra būtų įvykusi jau po to, kai
+   * `psql` pradėjo darbą.
+   */
+  const { rows: svetimas } = await vykdyti(TIKSLO_URL, "SELECT id FROM svetimas");
+  assert.deepEqual(svetimas.map((r) => r.id), [7], "esamas turinys negali būti paliestas");
+
+  const { rows: jobs } = await vykdyti(
+    TIKSLO_URL,
+    "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'jobs'"
+  );
+  assert.equal(jobs[0].n, 0, "⚠️ nė vienas kopijos sakinys negalėjo būti įvykdytas");
 });

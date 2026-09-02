@@ -468,9 +468,20 @@ argumentų eilutė su slaptažodžiu.
   **neišduodama** (`PG_BACKUP_HORIZON_UNRECORDED`). Be šio įrašo sutrumpinta
   `BACKUP_RETENTION_DAYS` reikšmė leistų išvalyti ištrynimo žymas, kol dump'as
   dar galioja, ir 7.6c replay nebeturėtų ko taikyti.
+  ⚠️ **Praktinė pasekmė, išmatuota CI'uje:** bazė be įdiegtos ištrynimo žymų
+  infrastruktūros (`erasure_marks`) kopijos **neišduoda** — komanda krinta su
+  `PG_BACKUP_HORIZON_UNRECORDED`. Prieš pirmą kopiją paleiskite migracijas.
 - **Kūrimo auditą su aktoriumi.** `PG_DUMP_BACKUP_CREATED`, atskiras nuo
   aplikacijos kopijos `BACKUP_CREATED`. ⚠️ **Atkūrimo pusėje audito NĖRA** — žr.
   §10 ir §11.
+- **Tikslinės bazės tuštumą.** Prieš pirmą SQL sakinį suskaičiuojami objektai
+  ne sisteminėse schemose; radus bent vieną, atkūrimas atmetamas
+  (`PG_RESTORE_TARGET_NOT_EMPTY`). ⚠️ Priežastis ne šis etapas: 7.6b (#249)
+  suderinimas ir 7.6c (#250) replay remsis BŪTENT šiuo keliu ir abu prasideda
+  nuo prielaidos „restore pavyko" — atkūrimas į netuščią bazę duotų dviejų bazių
+  **sąjungą**, ir jų testai to nepagautų. Neperskaičius `psql` išvesties
+  atkūrimas taip pat atmetamas (`PG_RESTORE_PREFLIGHT_FAILED`): „tuščia" yra
+  teiginys, kurį reikia įrodyti.
 - **Nesuderinamo formato atmetimą.** `backupPolicy.checkRestoreCompatibility()`
   vykdomas prieš dešifravimą: naujesne versija sukurta kopija atmetama
   (`BACKUP_FORMAT_INCOMPATIBLE`), o ne atkuriama prarandant nesuprastus laukus.

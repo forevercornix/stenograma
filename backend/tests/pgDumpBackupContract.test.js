@@ -539,3 +539,28 @@ test("#262 Codex P2: `psql` stdout NEBUFERINAMAS (statinė forma, §9.2)", () =>
   const src = fs.readFileSync(path.join(SAKNIS, "utils", "pgDumpBackup.js"), "utf8");
   assert.match(src, /stdio:\s*\["pipe",\s*"ignore",\s*"pipe"\]/);
 });
+
+test("#262: netuščios bazės patikra yra FAIL-CLOSED prie neaiškios išvesties", () => {
+  /**
+   * ⚠️ „TUŠČIA" YRA TEIGINYS, KURĮ REIKIA ĮRODYTI.
+   *
+   * Preflight saugo ne šį etapą, o 7.6b (#249) ir 7.6c (#250): abu prasideda
+   * nuo prielaidos „restore pavyko", tad atkūrimas į netuščią bazę ten virstų
+   * suderinimu ir replay'umi ant dviejų bazių sąjungos. Jei neperskaityta
+   * `psql` išvestis reikštų „tuščia", patikrą apeitų bet koks išvesties formato
+   * pokytis - t. y. sarga liktų tik iki pirmo `psql` atnaujinimo.
+   */
+  assert.equal(pgDumpBackup.perskaitytiObjektuSkaiciu("0\n"), 0);
+  assert.equal(pgDumpBackup.perskaitytiObjektuSkaiciu("42\n"), 42);
+
+  for (const neaisku of ["", "   ", "abc", "3 rows", "(0 rows)", "0.5"]) {
+    assert.throws(
+      () => pgDumpBackup.perskaitytiObjektuSkaiciu(neaisku),
+      (err) => {
+        assert.equal(err.code, "PG_RESTORE_PREFLIGHT_FAILED");
+        return true;
+      },
+      `neperskaitytas skaičius (${JSON.stringify(neaisku)}) negali reikšti „tuščia"`
+    );
+  }
+});

@@ -476,10 +476,87 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
    * dump'ą į laikiną failą reikštų dešifruotą turinį diske — būtent tai, ko
    * šifravimas ir vengia.
    */
+  /**
+   * ⚠️ PASKUTINĖ GRANDIES PAKOPA: kriptografija ir rūšis jau įrodytos, tad
+   * pirmasis prisijungimas prie TIKSLO įvyksta tik dabar - ir vis tiek prieš
+   * pirmą SQL sakinį.
+   */
+  await _patikrintiTikslasTuscias(targetUrl);
+
   await _psqlSuStdin(targetUrl, sql);
 
   log.info("PostgreSQL kopija atkurta", { stage: "pg_restore_done" });
   return { restoredBytes: Buffer.byteLength(sql, "utf8") };
+}
+
+/**
+ * TIKSLINĖS BAZĖS TUŠTUMO PREFLIGHT (#262 peržiūra, #249/#250 sąlyga).
+ *
+ * ⚠️ PRIEŽASTIS NE ŠIAME ETAPE, O KITUOSE DVIEJUOSE.
+ *
+ * `--single-transaction` netuščioje bazėje krinta savaime tik tada, kai dump'as
+ * bando kurti JAU ESANTĮ objektą. Bet 7.6b (#249) suderinimas ir 7.6c (#250)
+ * ištrynimų replay remsis BŪTENT šiuo keliu, o abu prasideda nuo prielaidos
+ * „restore pavyko". Atkūrimas į bazę su svetimu turiniu duotų dviejų bazių
+ * SĄJUNGĄ, ir nė vienas jų testas to nepagautų - jie tikrintų suderinimą ant
+ * jau užterštos būsenos.
+ *
+ * Kaina - viena užklausa prieš pirmą SQL sakinį, ir ji gula į tą pačią
+ * fail-closed grandinę, kuri jau veikia prieš `psql`.
+ *
+ * ⚠️ TAS PATS `psql`, NE `pg` KLIENTAS. Antras jungimosi mechanizmas reikštų
+ * antrą jungties eilutės interpretaciją (slaptažodžiai su URI simboliais - jau
+ * žinoma problema, žr. `utils/pgConnection.js`), tad preflight ir atkūrimas
+ * privalo jungtis vienodai.
+ */
+const OBJEKTU_UZKLAUSA =
+  "SELECT count(*) FROM information_schema.tables " +
+  "WHERE table_schema NOT IN ('pg_catalog', 'information_schema')";
+
+/**
+ * ⚠️ NEPERSKAITOMAS SKAIČIUS = NE TUŠČIA.
+ *
+ * Tuščia bazė yra TEIGINYS, kurį reikia įrodyti. Neaiški `psql` išvestis to
+ * neįrodo, tad ji negali reikšti „galima tęsti" - kitaip preflight'ą apeitų bet
+ * koks išvesties formato pokytis.
+ */
+function perskaitytiObjektuSkaiciu(stdout) {
+  const eilute = String(stdout ?? "").trim().split("\n").pop();
+  const skaicius = Number.parseInt(eilute, 10);
+
+  if (!Number.isInteger(skaicius) || skaicius < 0 || String(skaicius) !== eilute.trim()) {
+    throw new PgDumpBackupError(
+      `Nepavyko nustatyti, ar tikslinė bazė tuščia (psql grąžino ${JSON.stringify(String(stdout ?? "").slice(0, 80))}).`,
+      "PG_RESTORE_PREFLIGHT_FAILED"
+    );
+  }
+
+  return skaicius;
+}
+
+async function _patikrintiTikslasTuscias(targetUrl) {
+  let stdout;
+  try {
+    ({ stdout } = await vykdyti(
+      "psql",
+      ["--no-psqlrc", "--quiet", "-At", "-c", OBJEKTU_UZKLAUSA, targetUrl],
+      { encoding: "utf8" }
+    ));
+  } catch (klaida) {
+    throw new PgDumpBackupError(
+      `Tikslinės bazės patikrinti nepavyko: ${saugusStderr(klaida.stderr || klaida.message, targetUrl)}`,
+      "PG_RESTORE_PREFLIGHT_FAILED"
+    );
+  }
+
+  const kiek = perskaitytiObjektuSkaiciu(stdout);
+  if (kiek > 0) {
+    throw new PgDumpBackupError(
+      `Tikslinė bazė NEtuščia (${kiek} objekt(ai) ne sisteminėse schemose). ` +
+        "Atkūrimas į netuščią bazę duotų dviejų bazių sąjungą, ne kopiją.",
+      "PG_RESTORE_TARGET_NOT_EMPTY"
+    );
+  }
 }
 
 /**
@@ -536,6 +613,7 @@ module.exports = {
   redaguotasUrl,
   bePaslapciu,
   saugusStderr,
+  perskaitytiObjektuSkaiciu,
   klientoVersija,
   /**
    * ⚠️ EKSPORTUOJAMA DĖL TESTO, IR TAI UŽRAŠYTA. Horizonto fiksavimas yra
