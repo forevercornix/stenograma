@@ -87,7 +87,41 @@ function arGalimaSalintiAudio(job) {
 async function salintiAudioSuBarjeru(jobId, payload, kontekstas = {}) {
   if (!payload || !payload.storageKey) return false;
 
-  const autoritetingas = await jobStore.system.get(jobId);
+  /**
+   * ⚠️ PAIEŠKOS GEDIMAS NEGALI TYLIAI NUTRAUKTI VALYMO GRANDINĖS (Codex D2).
+   *
+   * Barjeras įvedė naują gedimo tašką PRIEŠ `releaseAudio()`. O būtent
+   * `releaseAudio()` nepavykus uždeda `audio_cleanup_pending` vėliavą, ir
+   * `retryPendingAudioCleanups()` ieško TIK jos. Vadinasi trumpalaikis saugyklos
+   * trikdis čia paliktų audio be jokio vėlesnio kvietėjo — nei ištrintą, nei
+   * pažymėtą pakartojimui.
+   *
+   * Elgesys fail-closed IR fail-visible: netrinam (nes negalim įrodyti, kad
+   * galima), bet pažymim, kad valymas dar skolingas. Žymėjimas irgi
+   * best-effort — jei ir jis krenta, lieka `error` eilutė, o ne tyla.
+   */
+  let autoritetingas;
+  try {
+    autoritetingas = await jobStore.system.get(jobId);
+  } catch (klaida) {
+    log.error("Barjero paieška krito - audio NEŠALINAMAS, žymimas pakartojimui", {
+      stage: "cleanup_lookup_failed",
+      jobId,
+      klaida: klaida && klaida.message,
+      ...kontekstas,
+    });
+    await jobStore.system
+      .update(jobId, { audio_cleanup_pending: true })
+      .catch((zymejimoKlaida) =>
+        log.error("Nepavyko pažymėti audio valymo pakartojimo", {
+          stage: "cleanup_flag_failed",
+          jobId,
+          klaida: zymejimoKlaida && zymejimoKlaida.message,
+        })
+      );
+    return false;
+  }
+
   if (!arGalimaSalintiAudio(autoritetingas)) {
     log.error("Audio NEŠALINAMAS: `completed` be rezultato yra remontuotina būsena", {
       stage: "cleanup_blocked",

@@ -767,8 +767,21 @@ module.exports = {
      *
      * KONTRAKTAS:
      *
-     *   `JobPhaseError`  → job jau terminalus. NO-OP SĖKMĖ: `FAILED` žymėjimas
-     *                      nebeaktualus, kas nors kitas jį jau pabaigė.
+     *   `JOB_ALREADY_TERMINAL` → job jau terminalus. NO-OP SĖKMĖ: `FAILED`
+     *                      žymėjimas nebeaktualus, kas nors kitas jį jau pabaigė.
+     *
+     * ⚠️ VISI KITI `JobPhaseError` KODAI PERMETAMI, NE SLOPINAMI (Codex D5).
+     *
+     * `jobPhase` ta pačia klase meta ir `UNKNOWN_SOURCE_STATUS` (nežinomas ar
+     * ateities persistentinis statusas). Jį nuslopinus, „jau terminalus"
+     * verdiktas būtų MELAGINGAS, o kvietėjas eitų į audio valymą neįsipareigojęs
+     * `FAILED`.
+     *
+     * ⚠️ IŠ TO SEKA PAREIGA KVIETĖJUI: šis metodas GALI atmesti. Kvietėjas,
+     * kviečiantis jį iš `async` įvykio klausytojo, privalo turėti savo
+     * `.catch()` — `EventEmitter` grąžinto Promise nelaukia, ir atmetimas taptų
+     * neapdorotu (žr. `workers/index.js` `worker.on("failed", …)`). Būtent to
+     * neapibrėžta ankstesnė šio kontrakto redakcija ir kainavo.
      *   konfliktas       → perskaitoma AUTORITETINGA būsena, ir:
      *                      · terminalus `COMPLETED` → žymėjimas ATMETAMAS;
      *                      · kitas terminalus       → no-op sėkmė;

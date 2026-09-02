@@ -318,3 +318,160 @@ test("worker cleanup: klaidos atveju storageKey lieka", async () => {
     }
   }
 });
+
+test("#184-A ⚠️ inline: NEĮSIPAREIGOJUS terminalaus perėjimo audio NEŠALINAMAS", async () => {
+  /**
+   * ⚠️ ŠĮ SCENARIJŲ ATKŪRĖ CODEX, NE TESTAS.
+   *
+   * Kai inline `finish(COMPLETED)` grąžina konflikto simbolį, o po jo einantis
+   * `finishFailed()` pralaimi ABU savo bandymus, įrašas lieka `processing`. Bet
+   * `finally` barjerą kviesdavo besąlygiškai, o barjeras ne-terminalį SĄMONINGAI
+   * praleidžia (kitaip audio failai kauptųsi) — tad šaltinis būdavo ištrinamas,
+   * paliekant AKTYVŲ job'ą be įvesties.
+   *
+   * ⚠️ BARJERAS ČIA NEPADEDA IR NETURI PADĖTI. Klausimas ne „ar būsena leidžia
+   * šalinti", o „ar būsena apskritai pasikeitė". Todėl sprendimas priimamas iš
+   * OPERACIJOS BAIGTIES — ir tai tikrinama atskirai.
+   */
+  const calls = { del: [], update: [] };
+
+  const fileStoragePath = resolve("utils/fileStorage");
+  const jobStorePath = resolve("utils/jobStore");
+  const cleanupPath = resolve("utils/audioCleanup");
+  const barrierPath = resolve("utils/audioBarrier");
+  const runnerPath = resolve("queues/jobRunner");
+
+  const originals = {};
+  for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath, runnerPath]) {
+    originals[p] = require.cache[p];
+    delete require.cache[p];
+  }
+
+  const KONFLIKTAS = Symbol("jobStore.CONCURRENCY_CONFLICT");
+
+  require.cache[fileStoragePath] = {
+    id: fileStoragePath,
+    filename: fileStoragePath,
+    loaded: true,
+    exports: {
+      del: async (key) => {
+        calls.del.push(key);
+        return true;
+      },
+    },
+  };
+
+  require.cache[jobStorePath] = {
+    id: jobStorePath,
+    filename: jobStorePath,
+    loaded: true,
+    exports: {
+      STATUS: { QUEUED: "queued", PROCESSING: "processing", COMPLETED: "completed", FAILED: "failed" },
+      CONCURRENCY_CONFLICT: KONFLIKTAS,
+      system: {
+        /** ABI operacijos pralaimi CAS - įrašas lieka `processing`. */
+        finish: async () => KONFLIKTAS,
+        finishFailed: async () => KONFLIKTAS,
+        restart: async (id) => ({ id, status: "processing" }),
+        update: async (id, patch) => {
+          calls.update.push({ id, patch });
+          return { id, ...patch };
+        },
+        get: async (id) => ({ id, status: "processing", result: null }),
+      },
+    },
+  };
+
+  try {
+    const jobRunner = require(runnerPath);
+    jobRunner.registerProcessor("transcription", async () => ({ text: "ok" }));
+
+    await jobRunner._runInline("transcription", "job-inline", { storageKey: "audio-key" });
+
+    assert.deepEqual(
+      calls.del,
+      [],
+      "⚠️ audio NEGALI būti šalinamas, kol terminalus perėjimas neįsipareigotas"
+    );
+  } finally {
+    for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath, runnerPath]) {
+      delete require.cache[p];
+      if (originals[p]) require.cache[p] = originals[p];
+    }
+  }
+});
+
+test("#184-A ⚠️ barjero paieškos gedimas PAŽYMI valymo pakartojimą", async () => {
+  /**
+   * ⚠️ BARJERAS ĮVEDĖ NAUJĄ GEDIMO TAŠKĄ PRIEŠ `releaseAudio()` (Codex D2).
+   *
+   * Būtent `releaseAudio()` nepavykus uždeda `audio_cleanup_pending`, ir
+   * `retryPendingAudioCleanups()` ieško TIK tos vėliavos. Vadinasi trumpalaikis
+   * saugyklos trikdis barjero skaityme paliktų audio be jokio vėlesnio
+   * kvietėjo — nei ištrintą, nei pažymėtą pakartojimui. Tyli nutekėjimo forma:
+   * jokio simptomo, jokios eilutės, o failas lieka amžiams.
+   *
+   * Elgesys fail-closed IR fail-visible: netrinam (negalim įrodyti, kad galima),
+   * bet pažymim, kad valymas dar skolingas.
+   */
+  const calls = { del: [], update: [] };
+
+  const fileStoragePath = resolve("utils/fileStorage");
+  const jobStorePath = resolve("utils/jobStore");
+  const cleanupPath = resolve("utils/audioCleanup");
+  const barrierPath = resolve("utils/audioBarrier");
+
+  const originals = {};
+  for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath]) {
+    originals[p] = require.cache[p];
+    delete require.cache[p];
+  }
+
+  require.cache[fileStoragePath] = {
+    id: fileStoragePath,
+    filename: fileStoragePath,
+    loaded: true,
+    exports: {
+      del: async (key) => {
+        calls.del.push(key);
+        return true;
+      },
+    },
+  };
+
+  require.cache[jobStorePath] = {
+    id: jobStorePath,
+    filename: jobStorePath,
+    loaded: true,
+    exports: {
+      STATUS: { QUEUED: "queued", PROCESSING: "processing", COMPLETED: "completed", FAILED: "failed" },
+      system: {
+        /** Trumpalaikis trikdis BŪTENT barjero skaityme. */
+        get: async () => {
+          throw new Error("ECONNRESET");
+        },
+        update: async (id, patch) => {
+          calls.update.push({ id, patch });
+          return { id, ...patch };
+        },
+      },
+    },
+  };
+
+  try {
+    const { salintiAudioSuBarjeru } = require(barrierPath);
+    const leista = await salintiAudioSuBarjeru("job-x", { storageKey: "audio-key" });
+
+    assert.equal(leista, false, "paieškai kritus valymas NELEIDŽIAMAS");
+    assert.deepEqual(calls.del, [], "⚠️ netrinam, kol negalim įrodyti, kad galima");
+    assert.ok(
+      calls.update.some((c) => c.patch.audio_cleanup_pending === true),
+      "⚠️ BET pažymim pakartojimui - kitaip `retryPendingAudioCleanups()` failo niekada nepamatys"
+    );
+  } finally {
+    for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath]) {
+      delete require.cache[p];
+      if (originals[p]) require.cache[p] = originals[p];
+    }
+  }
+});

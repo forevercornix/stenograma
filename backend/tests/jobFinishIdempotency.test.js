@@ -422,13 +422,35 @@ test("#184-A ⚠️ barjeras yra VIENAS autoritetas abiem vykdymo keliams", () =
   const path = require("node:path");
   const saknis = path.join(__dirname, "..");
 
-  for (const failas of ["workers/index.js", "queues/jobRunner.js"]) {
+  /**
+   * ⚠️ TIKRINAMA KIEKVIENA FUNKCIJA ATSKIRAI, NE FAILAS (Codex D6).
+   *
+   * Pirmoji redakcija tikrino, ar faile YRA bent vienas
+   * `salintiAudioSuBarjeru()`. `queues/jobRunner.js` turi DU nepriklausomus
+   * valymo taškus — `_atlaisvintiSaltini()` ir `_executeInline()` `finally` —
+   * tad ištrynus vieną, kitas patikrą vis tiek pratempdavo, o visas kelias
+   * nustodavo valyti audio.
+   */
+  const FUNKCIJOS = [
+    ["workers/index.js", "async function _cleanupStorage"],
+    ["queues/jobRunner.js", "async function _atlaisvintiSaltini"],
+    ["queues/jobRunner.js", "async function _executeInline"],
+  ];
+
+  for (const [failas, pradzia] of FUNKCIJOS) {
     const src = fs.readFileSync(path.join(saknis, failas), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-    assert.match(src, /salintiAudioSuBarjeru\(/, `${failas}: valymas privalo eiti per barjerą`);
+    const i = src.indexOf(pradzia);
+    assert.ok(i >= 0, `${failas}: nerasta \`${pradzia}\``);
+
+    /** Kito top-level `function` pradžia arba failo galas — funkcijos riba. */
+    const kita = src.indexOf("\nasync function ", i + 1);
+    const kunas = src.slice(i, kita === -1 ? undefined : kita);
+
+    assert.match(kunas, /salintiAudioSuBarjeru\(/, `${failas} ${pradzia}: valymas privalo eiti per barjerą`);
     assert.equal(
-      /releaseAudio\(/.test(src),
+      /releaseAudio\(/.test(kunas),
       false,
-      `${failas}: TIESIOGINIS releaseAudio() apeina barjerą`
+      `${failas} ${pradzia}: TIESIOGINIS releaseAudio() apeina barjerą`
     );
   }
 });

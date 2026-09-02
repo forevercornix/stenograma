@@ -363,6 +363,11 @@ async function _atlaisvintiSaltini(jobId, payload) {
 
 async function _executeInline(type, processor, jobId, payload) {
   /**
+   * Ar terminalus perėjimas realiai ĮSIPAREIGOTAS saugykloje? Nustatoma abiejose
+   * šakose (`finish` ir `finishFailed`); `finally` pagal tai sprendžia dėl audio.
+   */
+  let terminalasIsipareigotas = false;
+  /**
    * GRANDINĖS ĮVYKIAI rašomi ČIA, kur baigtis realiai žinoma (GDPR #17).
    *
    * Pirmoji versija apvyniojo šią funkciją iš išorės ir sprendė pagal tai, ar
@@ -403,6 +408,7 @@ async function _executeInline(type, processor, jobId, payload) {
      * `finishFailed()`, kuris JAU `completed` įrašo nebeperrašo.
      */
     const uzbaigtas = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+    terminalasIsipareigotas = typeof uzbaigtas !== "symbol" && uzbaigtas !== null;
     if (typeof uzbaigtas === "symbol") {
       /**
        * ⚠️ VISI KONFLIKTO SIMBOLIAI — VIENA ŠAKA (#184, 7.5b).
@@ -426,7 +432,8 @@ async function _executeInline(type, processor, jobId, payload) {
     });
   } catch (e) {
     const { errorCode, message } = _classifyError(e, `${type} job`);
-    await jobStore.system.finishFailed(jobId, { error: message, error_code: errorCode });
+    const nesekme = await jobStore.system.finishFailed(jobId, { error: message, error_code: errorCode });
+    terminalasIsipareigotas = typeof nesekme !== "symbol" && nesekme !== null;
 
     // Pranešimas jau sanitizuotas `_classifyError`; kodas yra enum.
     log.warn("Darbas nepavyko", {
@@ -442,15 +449,31 @@ async function _executeInline(type, processor, jobId, payload) {
      * Inline režimas neturi retry - tad audio galima trinti iškart po galutinio
      * statuso (sėkmė ar nesėkmė).
      *
-     * ⚠️ BET TIK PER BARJERĄ (Codex A grupė). Šis `finally` vykdomas IR tada,
-     * kai `finish()` grąžino konflikto simbolį ir šaka aukščiau metė klaidą —
-     * t. y. kai rezultatas NEBUVO įsipareigotas. Besąlyginis `releaseAudio()`
-     * čia ištrindavo šaltinio audio būtent tais atvejais, kuriems 7.5b jį ir
-     * saugo. `storageKey` nulinamas TIK po sėkmingo trynimo - žr.
-     * `utils/audioCleanup.js`.
+     * ⚠️ BET TIK PO ĮSIPAREIGOTO PERĖJIMO, IR TIK PER BARJERĄ.
+     *
+     * Dvi atskiros sąlygos, nes jos gina skirtingus dalykus:
+     *
+     *   · `terminalasIsipareigotas` — ar būsena APSKRITAI pasikeitė. Jei ir
+     *     `finish(COMPLETED)`, ir `finishFailed()` pralaimėjo CAS, įrašas lieka
+     *     `processing`, o barjeras ne-terminalį sąmoningai praleidžia (kitaip
+     *     audio failai kauptųsi). Be šios sąlygos šaltinis būdavo ištrinamas
+     *     paliekant AKTYVŲ job'ą be įvesties — Codex tai atkūrė.
+     *   · barjeras — ar būsena, į kurią perėjom, apskritai leidžia šalinti
+     *     (`completed` be rezultato yra remontuotina).
+     *
+     * ⚠️ SIMETRIŠKA `workers/_handleFailure()`. Tas pats sprendimas dviejuose
+     * vykdymo keliuose; skiriasi tik tai, iš kur ateina baigtis.
      */
-    const { salintiAudioSuBarjeru } = require("../utils/audioBarrier");
-    await salintiAudioSuBarjeru(jobId, payload, { execution: "inline" });
+    if (terminalasIsipareigotas) {
+      const { salintiAudioSuBarjeru } = require("../utils/audioBarrier");
+      await salintiAudioSuBarjeru(jobId, payload, { execution: "inline" });
+    } else if (payload && payload.storageKey) {
+      log.error("Terminalus perėjimas NEĮSIPAREIGOTAS - audio NEŠALINAMAS", {
+        stage: "finish_not_committed",
+        execution: "inline",
+        jobId,
+      });
+    }
   }
 }
 
