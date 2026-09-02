@@ -41,6 +41,14 @@ const redis = [
    * ELGESĮ, o BullMQ yra produkcijos kelias, kuris po #155 rašys į DB.
    */
   "resultLimitsWorker.integration",
+  /**
+   * #184 (7.5b): worker'io įėjimo kelio idempotentiškumas ir audio barjeras.
+   *
+   * TIKRAS BullMQ būtinas: patikra gyvena `createWorker()` processor'iaus viduje
+   * ir be tikros eilės nepasiekiama. Vienetinis testas tikrintų atkartotą
+   * sąlygos KOPIJĄ, o kopija ilgainiui nuo originalo išsiskiria.
+   */
+  "workerIdempotency.integration",
 ];
 
 /**
@@ -255,6 +263,30 @@ const functional = [
    * veikianti DB infrastruktūra.
    */
   "jobStoreTypeNormalization",
+  /**
+   * #184 (7.5b): `jobs.version` optimistic lock pariteto pagrindas.
+   *
+   * Tas pats sluoksnis ir tos pačios priežastys kaip `jobStoreTypeNormalization`:
+   * memory ir Redis (per `FakeRedis`) tikrinami be išorinių servisų, o PostgreSQL
+   * pusė lieka `migrations.integration` / `postgresStore.integration`, kur DB
+   * realiai yra.
+   */
+  /**
+   * #184 (7.5b): konflikto kontraktas — penkios atskiriamos baigtys.
+   *
+   * Memory ir fasado pusė be išorinių servisų; PostgreSQL klasifikacija lieka
+   * `postgresStore.integration`, Redis Lua CAS — `ownershipCasRedis.integration`.
+   */
+  "jobConflictContract",
+  /**
+   * #184 (7.5b): atominis ir idempotentiškas `finish(COMPLETED)`.
+   *
+   * Kanoninė lygybė ir trys `completed` baigtys tikrinamos be servisų; `jsonb`
+   * round-trip, transakcijos atomiškumas ir lenktynės - `postgresStore.integration`,
+   * worker'io įėjimo kelias - `workerIdempotency.integration` (`redis`).
+   */
+  "jobFinishIdempotency",
+  "jobVersionParity",
   "jobs.route",
   "mergeDiarization",
   "mockLLMProvider",

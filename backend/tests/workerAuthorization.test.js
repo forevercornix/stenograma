@@ -300,8 +300,15 @@ test("STRUKTŪRA: abu vykdymo keliai naudoja TĄ PAČIĄ autorizacijos funkciją
        * pakartojimų apdorojimą, o šaltinio audio liktų susietas. Būtent tokį
        * dublikatą paliko skriptinis redagavimas #210 eigoje.
        */
+      /**
+       * ⚠️ REGEX APIMA IR `finishFailed()` (#184, 7.5b) – bet TIK kaip alternatyvą,
+       * ne kaip papildomą leidimą: skaičius tebėra LYGIAI 1. `finishFailed()`
+       * yra `finish(FAILED, …)` su konfliktų politika, tad dublikatas su
+       * skirtingais vardais (`finish` + `finishFailed`) toje pačioje šakoje
+       * krenta lygiai taip pat, kaip krito du `finish()`.
+       */
       assert.equal(
-        (saka.match(/system\.finish\(/g) || []).length,
+        (saka.match(/system\.finish(?:Failed)?\(/g) || []).length,
         1,
         `${file}: šaka „${pavadinimas}" turi daryti LYGIAI VIENĄ terminalų perėjimą`
       );

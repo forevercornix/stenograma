@@ -993,7 +993,7 @@ test("KONTRAKTAS: su nustatytu URL adapteris NEGALI praleisti savo scenarijų", 
   }
 });
 
-test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 16 metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę", () => {
   /**
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
@@ -1008,6 +1008,12 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 16 metodų aibę",
    * ten vykdo pats Redis per `EXPIRE`, tad momento žymai įrašyti nėra. Kontrakto
    * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
    * `docs/deletion-guarantees.md`.
+   *
+   * ⚠️ 16 → 17 (#184, 7.5b): pridėtas `finishAtomic()`. Skaičius keliamas
+   * SĄMONINGAI. Fasadas jo NETIKRINA `typeof === "function"` sąlyga: tokia
+   * patikra reikštų tylų grįžimą į NEATOMINĮ `get` + `update` kelią, jei kuris
+   * nors backend'as metodą prarastų - ir elgesys atrodytų teisingas, kol
+   * neįvyktų lenktynės. Vietoj to šis sargas krenta iškart.
    */
   const redis = createRedisStore({ on: () => {}, defineCommand: () => {} });
   const postgres = createPostgresStore({});
@@ -1017,7 +1023,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 16 metodų aibę",
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 16, "jobStore kontraktas privalo turėti tiksliai 16 metodų");
+  assert.equal(expected.length, 17, "jobStore kontraktas privalo turėti tiksliai 17 metodų");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,

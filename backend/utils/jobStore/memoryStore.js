@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -63,9 +63,29 @@ async function reportProgressAtomic(id, event) {
   return reportProgressAtomicSync(id, event, jobPhase);
 }
 
-async function update(id, patch) {
+/**
+ * @param {object} [options]
+ * @param {number} [options.expectedVersion] optimistic lock sąlyga (#184, 7.5b)
+ * @returns {object|null|"CONCURRENCY_CONFLICT"}
+ */
+async function update(id, patch, options = {}) {
   const job = jobs.get(id);
   if (!job) return null;
+
+  /**
+   * ⚠️ VERSIJOS SĄLYGA TIKRINAMA IR ATMINTYJE (#184, 7.5b).
+   *
+   * Atmintyje lenktynių lango nėra - `get` ir `set` vyksta be `await` tarp jų.
+   * Bet sąlyga čia NĖRA nereikalinga: `expectedVersion` ateina iš FASADO
+   * snapshot'o, o tarp fasado `store.get()` ir šio kvietimo `await` YRA. Be
+   * patikros memory backend'as priimtų pasenusį patch'ą, kurį Redis ir
+   * PostgreSQL atmestų - ir kontraktas taptų backend-priklausomas būtent ten,
+   * kur bendras rinkinys jį lygina.
+   */
+  if (options.expectedVersion !== undefined && job.version !== options.expectedVersion) {
+    return "CONCURRENCY_CONFLICT";
+  }
+
   const next = applyPatch(job, patch);
   jobs.set(id, next);
   return next;
@@ -86,11 +106,23 @@ async function getOwned(id, scope) {
   return matchesOwner(job, scope) ? job : "FORBIDDEN";
 }
 
-/** @returns {object|null|"FORBIDDEN"} */
-async function updateOwned(id, patch, scope) {
+/** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
+async function updateOwned(id, patch, scope, options = {}) {
   const job = jobs.get(id);
   if (!job) return null;
+  /**
+   * ⚠️ NUOSAVYBĖ PIRMA, VERSIJA PO JOS (#184, 7.5b).
+   *
+   * Tvarka yra kontrakto dalis, ne stiliaus pasirinkimas: svetimas savininkas su
+   * pasenusia versija privalo gauti `"FORBIDDEN"`, o ne
+   * `"CONCURRENCY_CONFLICT"`. Autorizacijos rezultato perklasifikavimas į
+   * lygiagretumo rezultatą pasakytų kvietėjui „bandyk dar kartą" ten, kur
+   * teisingas atsakymas yra „tau negalima".
+   */
   if (!matchesOwner(job, scope)) return "FORBIDDEN";
+  if (options.expectedVersion !== undefined && job.version !== options.expectedVersion) {
+    return "CONCURRENCY_CONFLICT";
+  }
   const next = applyPatch(job, patch);
   jobs.set(id, next);
   return next;
@@ -186,6 +218,39 @@ async function restoreRecord(job) {
   return kanoninis;
 }
 
+/**
+ * ATOMINIS IR IDEMPOTENTIŠKAS TERMINALUS PERĖJIMAS (#184, 7.5b).
+ *
+ * ⚠️ KODĖL SAUGYKLOJE, O NE FASADE.
+ *
+ * Fasadas negali to padaryti iš principo: sprendimas „ar tai tas pats
+ * rezultatas" privalo remtis būsena, kuri nepasikeis iki įrašymo, o tarp fasado
+ * `get()` ir `update()` yra `await`. Vien `expectedVersion` čia NEPADEDA:
+ * idempotentiškas pakartojimas ateina su PASENUSIU snapshot'u (pirmasis
+ * `finish` versiją jau padidino), tad sąlyga jį atmestų kaip konfliktą — o
+ * kontraktas reikalauja TIKRO no-op.
+ *
+ * ⚠️ MODELIS NEIŠRASTAS. `reportProgressAtomic()` yra lygiai tas pats: fasado
+ * `get` + sprendimas + `update` pora, perkelta į saugyklą kartu su GRYNĄJA
+ * sprendimo funkcija (`jobPhase`). `jobPhase` lieka vienintelis perėjimų
+ * autoritetas — perėjimų grafas čia neperrašomas.
+ *
+ * @returns {object|null|"RESULT_CONFLICT"|"COMPLETED_WITHOUT_RESULT"}
+ */
+async function finishAtomic(id, status, extra = {}) {
+  const jobPhase = require("../jobPhase");
+  const job = jobs.get(id);
+  if (!job) return null;
+
+  const jauBaigtas = idempotentiskasAtsakymas(job, status, extra);
+  if (jauBaigtas !== undefined) return jauBaigtas;
+
+  const patch = jobPhase.finish(job, status, extra);
+  const next = applyPatch(job, patch);
+  jobs.set(id, next);
+  return next;
+}
+
 async function listAll() {
   return [...jobs.values()];
 }
@@ -207,4 +272,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

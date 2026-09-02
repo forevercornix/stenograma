@@ -46,6 +46,18 @@ function loadReleaseAudio({ delThrows = null }) {
           calls.update.push({ id, patch });
           return { id, ...patch };
         },
+        /**
+         * ⚠️ PRIVALOMAS NUO #184 (7.5b). `_cleanupStorage()` dabar prieš trynimą
+         * skaito AUTORITETINGĄ būseną: audio šalinamas tik tada, kai įrašas NĖRA
+         * `completed` be rezultato (remontuotina būsena). Dublis be `get()`
+         * kristų su `TypeError` - būtent taip šis testas ir pagavo pakeitimą.
+         *
+         * ⚠️ GRĄŽINAMAS `failed`, NE `null`. `null` (įrašo nebėra) barjerą irgi
+         * praleistų, bet tada testas nieko nesakytų apie ĮPRASTĄ nesėkmės kelią -
+         * o būtent jis privalo likti nepakitęs, kitaip audio failai kauptųsi
+         * neribotai.
+         */
+        get: async (id) => ({ id, status: "failed", result: null }),
       },
     },
   };
@@ -78,7 +90,11 @@ test("sėkmingas trynimas: storageKey nulinamas", async () => {
     const removed = await releaseAudio("job-1", "audio-key");
 
     assert.equal(removed, true);
-    assert.deepEqual(calls.del, ["audio-key"]);
+    assert.deepEqual(
+      calls.del,
+      ["audio-key"],
+      "#184 barjeras ĮPRASTO `failed` kelio neblokuoja - trynimas bandomas kaip anksčiau"
+    );
     assert.deepEqual(calls.update, [
       { id: "job-1", patch: { storageKey: null, audio_cleanup_pending: false } },
     ]);
@@ -250,6 +266,8 @@ test("worker cleanup: klaidos atveju storageKey lieka", async () => {
           calls.update.push({ id, patch });
           return { id, ...patch };
         },
+        /** ⚠️ PRIVALOMAS NUO #184 — žr. pirmojo dublio komentarą. */
+        get: async (id) => ({ id, status: "failed", result: null }),
       },
     },
   };

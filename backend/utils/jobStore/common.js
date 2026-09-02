@@ -81,6 +81,16 @@ const NUMBER_FIELDS = new Set([
   "deletion_attempts",
   /** Įrašo era (#158). Jos taisyklė - `normalizeSchemaVersion()`, žr. žemiau. */
   "schemaVersion",
+  /**
+   * OPTIMISTIC LOCK VERSIJA (#184, 7.5b).
+   *
+   * ⚠️ KANONINIŲ LAUKŲ AIBĖJE BŪTINAI. Redis hash'e reikšmės yra TEKSTAS, tad be
+   * normalizavimo `redisStore` grąžintų `version: "3"`, o memory - `3`. Bendras
+   * kontrakto rinkinys lygina backend'ų būsenas `deepEqual`, tad skirtumas
+   * nebūtų „kosmetinis" - jis arba sulaužytų palyginimą, arba priverstų lauką iš
+   * jo išimti, t. y. tyliai susiaurintų rinkinį.
+   */
+  "version",
 ]);
 
 const KANONINIAI_LAUKAI = Object.freeze([...BOOLEAN_FIELDS, ...NUMBER_FIELDS]);
@@ -152,6 +162,22 @@ function normalizeJob(job) {
   for (const laukas of KANONINIAI_LAUKAI) {
     if (laukas in out) out[laukas] = normalizeFieldValue(laukas, out[laukas]);
   }
+
+  /**
+   * ⚠️ VIENINTELĖ SĄMONINGA IŠIMTIS IŠ „LIEČIAMI TIK ESAMI RAKTAI" (#184, 7.5b).
+   *
+   * `version` MATERIALIZUOJAMA, nes priešingu atveju atkūrimo kelias išskirtų
+   * backend'us: `postgresStore.rowToJob()` senai eilutei duoda `?? 1` (stulpelis
+   * `NOT NULL DEFAULT 1`), o memory ir Redis atkurtų kopijos įrašą BE lauko.
+   * Kontrakto rinkinys tokį skirtumą pagautų kaip formos neatitikimą - ir teisingai.
+   *
+   * Skirtumas nuo `deletion_*` atvejo, kurį komentaras aukščiau draudžia, yra
+   * esminis: `deletion_*` laukų `newJob()` NEMATERIALIZUOJA, tad jų buvimas ar
+   * nebuvimas yra reikšmingas faktas. `version` `newJob()` materializuoja visada,
+   * tad jo NEBUVIMAS reiškia tik viena - įrašas senesnis už 7.5b.
+   */
+  if (out.version === undefined || out.version === null) out.version = 1;
+
   return out;
 }
 
@@ -366,6 +392,12 @@ function newJob(fields = {}) {
     created_at: now,
     started_at: null,
     completed_at: null,
+    /**
+     * OPTIMISTIC LOCK VERSIJA (#184, 7.5b). Pradinė reikšmė - `1`, ta pati
+     * visuose trijuose backend'uose ir ta pati, kurią migracija duoda esamoms
+     * eilutėms (`DEFAULT 1`). Didinama TIK `applyPatch()` - žr. ten.
+     */
+    version: 1,
     // Atgalinis suderinamumas su senais laukais (routes/frontend jų tikisi).
     createdAt: now,
     updatedAt: now,
@@ -527,6 +559,31 @@ function applyPatch(job, patch) {
   }
 
   /**
+   * OPTIMISTIC LOCK VERSIJOS INCREMENT'AS (#184, 7.5b).
+   *
+   * ⚠️ ČIA, IR TIK ČIA. `applyPatch()` jau yra bendras SEPTYNIŲ mutacijos kelių
+   * taškas (žr. normalizavimo komentarą žemiau), tad `+1` čia reiškia, kad nė
+   * vienas backend'as savo skaičiavimo neturi. Trys realizacijos neišvengiamai
+   * išsiskirtų būtent ten, kur skirtumo niekas netikrina.
+   *
+   * ⚠️ IŠ TO SEKA VIENAS INCREMENT'AS `startPhase`/`finish` PORAI.
+   *
+   * Abu fasado metodai yra `get` + VIENAS `store.update()`, tad vienas
+   * `applyPatch()` ir vienas `+1`. Du increment'ai atsirastų tik iš dviejų
+   * `update()` kvietimų - o tai matoma diff'e, ne paslėpta skaičiavimo detalė.
+   * Garantija yra KONSTRUKCIJOS, ne budrumo.
+   *
+   * ⚠️ PATCH'AS VERSIJOS NEKEIČIA - kaip `id`, nuosavybė ir era. Kvietėjas,
+   * atsiuntęs `{ version: 99 }`, gauna `job.version + 1`. Versija yra saugyklos
+   * faktas apie mutacijų skaičių, ne kvietėjo duomuo.
+   *
+   * ⚠️ NEPAVYKĘS CAS ČIA NEPATENKA. `applyPatch()` skaičiuoja reikšmę, kurią
+   * saugykla dar TIK bandys įrašyti; jei sąlyginis `UPDATE` paliečia 0 eilučių,
+   * persistentinė `version` lieka nepakitusi.
+   */
+  next.version = (job.version ?? 0) + 1;
+
+  /**
    * NUOMA IR KŪRIMO KETINIMAS NEKEIČIAMI (#155).
    *
    * ⚠️ BE ŠIŲ EILUČIŲ BACKEND'AI IŠSISKIRIA. `postgresStore` juos išbraukia iš
@@ -590,6 +647,101 @@ function applyPatch(job, patch) {
   return normalizeJob(next);
 }
 
+/**
+ * KANONINĖ REZULTATO REPREZENTACIJA — VIENAS LYGYBĖS AUTORITETAS (#184, 7.5b).
+ *
+ * ⚠️ KODĖL BE ŠITO IDEMPOTENTIŠKUMAS BŪTŲ BACKEND-PRIKLAUSOMAS.
+ *
+ * `job_results.payload` yra `jsonb`. PostgreSQL `jsonb` NESAUGO raktų tvarkos,
+ * šalina raktų dublikatus ir normalizuoja skaičius. Vadinasi tas pats
+ * rezultatas, įrašytas ir perskaitytas atgal, JS objektų palyginime
+ * (`JSON.stringify` ar `deepEqual` su kitokia raktų tvarka) atrodytų KITAS —
+ * PostgreSQL kelyje pakartotinis `finish(COMPLETED)` visada skelbtų konfliktą,
+ * o memory kelyje veiktų. Tai ne kraštinis atvejis: raktų tvarką lemia tai,
+ * kaip objektas buvo sukonstruotas.
+ *
+ * ⚠️ MASYVŲ TVARKA NEKEIČIAMA. Ji yra SEMANTIKA: transkripcijos segmentų ar
+ * kalbėtojų eilė nėra aibė. Rūšiuojant masyvus, du skirtingi rezultatai taptų
+ * „tuo pačiu" ir antrasis vykdytojas tyliai priimtų svetimą darbą kaip savo.
+ *
+ * ⚠️ TAI NĖRA `backupEncryption._canonicalContents()` AR `evaluationManifest`.
+ * Tie kanonizavimai tarnauja AES-GCM AAD susiejimui ir manifesto hash ID.
+ * Pernaudojus juos čia, kriptografinis AAD taptų priklausomas nuo job lygybės
+ * taisyklės — ir jos pakeitimas ateityje sulaužytų iššifravimą.
+ *
+ * ⚠️ HASH-ONLY LYGYBĖS ČIA NĖRA. Kelių valandų transkripcijos palyginimo kaina
+ * yra realus klausimas, bet optimizacija atskiriama nuo teisingumo: hash
+ * lygybė reikalautų įrodytos collision-safe verifikavimo semantikos.
+ *
+ * @param {*} reiksme
+ * @returns {string} stabili eilutė palyginimui
+ */
+function kanoninisRezultatas(reiksme) {
+  return JSON.stringify(kanonizuoti(reiksme));
+}
+
+/** Ar rezultato APSKRITAI nėra? `null` ir `undefined` — ta pati būsena. */
+function rezultatoNera(reiksme) {
+  return reiksme === undefined || reiksme === null;
+}
+
+function kanonizuoti(reiksme) {
+  if (reiksme === null || typeof reiksme !== "object") {
+    /**
+     * ⚠️ `undefined` PAVERČIAMAS `null`. `JSON.stringify(undefined)` grąžina
+     * `undefined` (ne eilutę), tad be šito palyginimas lygintų `undefined` su
+     * `undefined` ir mestų klaidą pirmame `.length` kvietime.
+     */
+    return reiksme === undefined ? null : reiksme;
+  }
+  if (Array.isArray(reiksme)) return reiksme.map(kanonizuoti);
+
+  const out = {};
+  for (const raktas of Object.keys(reiksme).sort()) {
+    /**
+     * ⚠️ `undefined` REIKŠMĖS LAUKAI PRALEIDŽIAMI. `jsonb` jų neturi
+     * (`JSON.stringify` juos išmeta), tad palikti juos čia reikštų, kad
+     * įrašytas ir perskaitytas objektas skiriasi nuo įrašomo.
+     */
+    if (reiksme[raktas] === undefined) continue;
+    out[raktas] = kanonizuoti(reiksme[raktas]);
+  }
+  return out;
+}
+
+/**
+ * BENDRA IDEMPOTENTIŠKUMO TAISYKLĖ VISIEMS TRIMS BACKEND'AMS (#184, 7.5b).
+ *
+ * ⚠️ ANTROS LYGYBĖS TAISYKLĖS NĖRA. Trys saugyklos kviečia ŠITĄ funkciją, tad
+ * „tas pats rezultatas" reiškia tą patį PostgreSQL, Redis ir atmintyje.
+ *
+ * @returns {undefined} sprendimo nėra - eiti įprastu perėjimo keliu
+ */
+function idempotentiskasAtsakymas(job, status, extra) {
+  if (job.status !== STATUS.COMPLETED) return undefined;
+
+  /**
+   * ⚠️ `COMPLETED` BE REZULTATO NĖRA SĖKMĖ.
+   *
+   * Tai remontuotina būsena (nutrūkusi transakcija, ranka redaguota eilutė), ir
+   * ji privalo būti ATSKIRIAMA nuo „tas pats rezultatas". Kvietėjo veiksmas
+   * skiriasi iš esmės: audio šalinti NEGALIMA, nes rezultato, dėl kurio jis
+   * nebereikalingas, saugykloje nėra.
+   */
+  if (rezultatoNera(job.result)) return "COMPLETED_WITHOUT_RESULT";
+
+  /**
+   * ⚠️ NEATITINKANTIS STATUSAS PALIEKAMAS `jobPhase`. `finish(FAILED)` ant
+   * `completed` job'o yra gyvavimo ciklo klausimas, ne rezultato — atsakymas
+   * privalo likti `JobPhaseError`, ne `RESULT_CONFLICT`.
+   */
+  if (status !== STATUS.COMPLETED) return undefined;
+
+  return kanoninisRezultatas(extra.result) === kanoninisRezultatas(job.result)
+    ? job
+    : "RESULT_CONFLICT";
+}
+
 const JOB_TYPES = { TRANSCRIPTION: "transcription", PROTOCOL: "protocol" };
 
 /**
@@ -610,6 +762,9 @@ module.exports = {
   normalizeSchemaVersion,
   BOOLEAN_FIELDS,
   NUMBER_FIELDS,
+  kanoninisRezultatas,
+  rezultatoNera,
+  idempotentiskasAtsakymas,
   KANONINIAI_LAUKAI,
   normalizeFieldValue,
   normalizeJob,

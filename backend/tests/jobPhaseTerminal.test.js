@@ -182,12 +182,22 @@ test("#154 ATŠAUKIMAS: WORKER kelias naudoja TĄ PATĮ finish() metodą", () =>
     const i = src.indexOf("AUTHORIZATION_REVOKED");
     assert.ok(i > 0, `${failas}: atšaukimo šaka turi egzistuoti KODE, ne tik komentare`);
 
-    /** Ieškom artimiausio kvietimo PRIEŠ kodą – be komentarų jis šalia. */
+    /**
+     * Ieškom artimiausio kvietimo PRIEŠ kodą – be komentarų jis šalia.
+     *
+     * ⚠️ PRIIMAMI ABU TERMINALŪS KELIAI (#184, 7.5b). `finishFailed()` yra
+     * `finish(FAILED, …)` su konfliktų politika, o ne jo apėjimas: jis kviečia
+     * TĄ PATĮ `jobPhase.finish()` per `system.finish` kūną. Garantija, kurią šis
+     * testas saugo, nepakito – draudžiamas lieka neapdorotas `update({status})`.
+     */
     const priesKoda = src.slice(0, i);
-    const paskutinisFinish = priesKoda.lastIndexOf(".finish(");
+    const paskutinisFinish = Math.max(
+      priesKoda.lastIndexOf(".finish("),
+      priesKoda.lastIndexOf(".finishFailed(")
+    );
     const paskutinisUpdate = priesKoda.lastIndexOf(".update(");
 
-    assert.ok(paskutinisFinish > 0, `${failas}: turi naudoti finish()`);
+    assert.ok(paskutinisFinish > 0, `${failas}: turi naudoti finish() arba finishFailed()`);
     assert.ok(
       paskutinisFinish > paskutinisUpdate,
       `${failas}: artimiausias kvietimas prieš AUTHORIZATION_REVOKED turi būti finish(), ne update()`

@@ -128,6 +128,30 @@ async function priima(stulpeliai, kodel) {
   );
 }
 
+/**
+ * TESTINIS POOL'AS SU UŽRAKTŲ RIBOMIS (#184, 7.5b — CI diagnostika).
+ *
+ * ⚠️ KODĖL TAI ATSIRADO. Pirmasis 7.5b PostgreSQL paleidimas CI'e ne krito, o
+ * PAKIBO: `main` šakoje tas pats žingsnis trunka ~63 s ir yra žalias, o čia jis
+ * suvalgė visą 20 min job'o biudžetą ir buvo nutrauktas. Nutrauktas žingsnis
+ * nepasako NIEKO — nei kuris testas kabo, nei kodėl.
+ *
+ * ⚠️ TAI DIAGNOSTIKA, NE ELGESIO KEITIMAS. `lock_timeout` suveikia tik tada, kai
+ * eilutės užrakto laukiama ilgiau nei 5 s; sveikame rinkinyje (visas žingsnis
+ * 63 s) tokio laukimo nėra. Užuot tyliai kabėjęs, rinkinys krenta ĮVARDYTAME
+ * teste su `lock_timeout` klaida — t. y. gedimas įgyja adresą.
+ *
+ * ⚠️ `statement_timeout` didesnis: migracijos ir `DROP DATABASE ... WITH (FORCE)`
+ * teisėtai užtrunka, tad riba turi skirti „lėtą" nuo „niekada".
+ */
+function naujasPool() {
+  const p = new Pool({ connectionString: DB_URL });
+  p.on("connect", (client) => {
+    client.query("SET lock_timeout = '5s'; SET statement_timeout = '60s'").catch(() => {});
+  });
+  return p;
+}
+
 test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
   const vardas = new URL(DB_URL).pathname.replace(/^\//, "");
 
@@ -146,7 +170,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  pool = new Pool({ connectionString: DB_URL });
+  pool = naujasPool();
   store = createPostgresStore(pool);
 
   t.after(async () => {
@@ -185,7 +209,17 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       metodai(store).includes("listExpired"),
       "`listExpired` yra kontrakto dalis nuo #183 - žr. paaiškinimą aukščiau"
     );
-    assert.equal(metodai(store).length, 16, "kontraktas turi 16 metodų, ne 15");
+    /**
+     * ⚠️ ANTRA TO PATIES SKAIČIAUS KOPIJA (rasta CI, #184 / 7.5b).
+     *
+     * Tokia pati patikra yra `jobStoreBackendContract.integration`. Keliant
+     * 16 → 17 (`finishAtomic`) buvo atnaujinta tik ta, o ši liko — ir krito
+     * PIRMAME tikrame PostgreSQL paleidime. Dvi nepriklausomos to paties fakto
+     * patikros yra ta pati klasė, kurią #205 ir 7.2a šalina kitose vietose;
+     * čia ji palikta sąmoningai (viena tikrina PG saugyklą su tikra DB, kita —
+     * visų trijų aibių tapatumą), tad skaičius KEIČIAMAS ABIEJOSE.
+     */
+    assert.equal(metodai(store).length, 17, "kontraktas turi 17 metodų (nuo #184: `finishAtomic`)");
   });
 
   /* ── tenant_id sentinelis ────────────────────────────────────────────── */
@@ -1913,6 +1947,404 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     }
 
     await store.remove(bazinis.id);
+  });
+
+  /* ── Optimistic lock versijos CAS (#184, 7.5b) ───────────────────────── */
+
+  await t.test("#184 `expectedVersion` konfliktas: nulis eilučių klasifikuojamas TAME PAČIAME sakinyje", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ TIKRAS PostgreSQL BŪTINAS. Klasifikacija remiasi `casSuKlasifikacija()`
+     * CTE snapshot'u - savybe, kurios nei memory, nei `FakeRedis` neturi. Be DB
+     * šis testas tikrintų tik JS `if` sakinius.
+     */
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    assert.equal(job.version, 1);
+
+    /** Konkurentas - atskiru kvietimu, be sąlygos. */
+    await store.update(job.id, { actor: "konkurentas" });
+
+    const rezultatas = await store.update(job.id, { actor: "pasenes" }, { expectedVersion: 1 });
+    assert.equal(rezultatas, "CONCURRENCY_CONFLICT");
+
+    const dabartinis = await store.get(job.id);
+    assert.equal(dabartinis.actor, "konkurentas", "konfliktas NIEKO neįrašė");
+    assert.equal(dabartinis.version, 2, "konfliktas versijos NEDIDINA");
+
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 sutampanti versija praeina; `version` didėja PERSISTENTIŠKAI", { timeout: 30000 }, async () => {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+
+    const po = await store.update(job.id, { actor: "as" }, { expectedVersion: 1 });
+    assert.equal(po.version, 2);
+    assert.equal(po.actor, "as");
+
+    /** ⚠️ Ne iš grąžinimo, o iš stulpelio - grąžinimas galėtų slėpti neįrašytą SET. */
+    const { rows } = await pool.query("SELECT version, actor FROM jobs WHERE id = $1", [job.id]);
+    assert.equal(rows[0].version, 2);
+    assert.equal(rows[0].actor, "as");
+
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 ⚠️ NULIS EILUČIŲ: not-found ir version conflict atskiriami KIEKVIENAS", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ ŠIS TESTAS YRA VISO KONTRAKTO ESMĖ. Nulis pakeistų eilučių savaime nėra
+     * versijos konfliktas: eilutės gali apskritai nebūti. Abi baigtys turi
+     * skirtingus kvietėjo veiksmus (retry vs 404), tad jų suliejimas būtų tylus
+     * elgesio pakeitimas.
+     */
+    const nesamas = crypto.randomUUID();
+    assert.equal(
+      await store.update(nesamas, { actor: "x" }, { expectedVersion: 1 }),
+      null,
+      "eilutės nėra → null, ne konfliktas"
+    );
+
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    assert.equal(
+      await store.update(job.id, { actor: "x" }, { expectedVersion: 999 }),
+      "CONCURRENCY_CONFLICT",
+      "eilutė yra, versija kita → konfliktas, ne null"
+    );
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 ⚠️ IŠTRINTA eilutė NEGAUNA egzistavimo verdikto iš NAUJOS inkarnacijos", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ #180 komentaras (`postgresStore.js`, „CAS SNAPSHOT'E EILUTĖS NEBUVO")
+     * aprašo būtent šitą: vėliau tuo pačiu id atsiradusi eilutė yra KITA įrašo
+     * inkarnacija, ir sprendimas apie ją būtų priimtas ne tuo snapshot'u, kuriuo
+     * operacija buvo įvertinta.
+     *
+     * Versijos klasifikatorius to negali sulaužyti: `buvo === 0` tikrinamas
+     * PRIEŠ `priezastis`, tad ištrinta eilutė duoda `null`, o ne konfliktą.
+     */
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    const id = job.id;
+    await store.remove(id);
+
+    assert.equal(
+      await store.update(id, { actor: "x" }, { expectedVersion: 1 }),
+      null,
+      "ištrintas įrašas → null, NE CONCURRENCY_CONFLICT"
+    );
+  });
+
+  await t.test("#184 ⚠️ `updateOwned`: SVETIMAS savininkas su pasenusia versija lieka FORBIDDEN", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ ABI NESĖKMĖS SĄLYGOS TENKINAMOS VIENU METU, ir klasifikatorių tvarka
+     * yra kontrakto dalis: `SVETIMAS_SCOPE` tikrinamas PRIEŠ `versijaSkiriasi`.
+     * Perklasifikavus, 403 vs 404 sprendimas (#159) remtųsi lygiagretumo faktu
+     * vietoj autorizacijos.
+     */
+    const savininkas = { ownerKind: OWNER_KIND.USER, ownerId: crypto.randomUUID() };
+    const svetimas = { ownerKind: OWNER_KIND.USER, ownerId: crypto.randomUUID() };
+
+    const job = await store.create({ ...savininkas });
+    await store.update(job.id, { actor: "konkurentas" });
+
+    assert.equal(
+      await store.updateOwned(job.id, { actor: "x" }, svetimas, { expectedVersion: 1 }),
+      "FORBIDDEN"
+    );
+    assert.equal(
+      await store.updateOwned(job.id, { actor: "x" }, savininkas, { expectedVersion: 1 }),
+      "CONCURRENCY_CONFLICT",
+      "ta pati situacija, tik SAVAS savininkas → atsakymas privalo pasikeisti"
+    );
+
+    await store.remove(job.id);
+  });
+
+  await t.test("#184 be `expectedVersion` `updateOwned` elgesys NEPAKITĘS", { timeout: 30000 }, async () => {
+    /** Regresijos sargas: sąlyginis kelias neturi tapti numatytuoju. */
+    const savininkas = { ownerKind: OWNER_KIND.USER, ownerId: crypto.randomUUID() };
+    const job = await store.create({ ...savininkas });
+
+    await store.update(job.id, { actor: "konkurentas" });
+    const po = await store.updateOwned(job.id, { actor: "as" }, savininkas);
+
+    assert.equal(po.actor, "as");
+    assert.equal(po.version, 3);
+
+    await store.remove(job.id);
+  });
+
+  /* ── Atominis ir idempotentiškas `finish` (#184, 7.5b) ───────────────── */
+
+  async function processingJob() {
+    const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+    await store.update(job.id, { status: "processing", phase: "validating" });
+    return job.id;
+  }
+
+  await t.test("#184 `finish(COMPLETED)` įrašo `jobs` IR `job_results` VIENOJE transakcijoje", { timeout: 30000 }, async () => {
+    const id = await processingJob();
+    const po = await store.finishAtomic(id, "completed", { result: { protocol: { a: 1 } } });
+
+    assert.equal(po.status, "completed");
+
+    const { rows } = await pool.query(
+      "SELECT j.status, r.payload, r.storage_type FROM jobs j LEFT JOIN job_results r ON r.job_id = j.id WHERE j.id = $1",
+      [id]
+    );
+    assert.equal(rows[0].status, "completed");
+    assert.deepEqual(rows[0].payload, { protocol: { a: 1 } }, "rezultatas commit'intas kartu");
+    assert.equal(rows[0].storage_type, "inline");
+  });
+
+  await t.test("#184 ⚠️ rezultato rašymui NEPAVYKUS lieka ROLLBACK, ne pusinė `completed` būsena", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ TAI IR YRA `COMPLETED` APIBRĖŽIMO ESMĖ. `jobs.status = 'completed'` be
+     * `job_results` yra būsena, kurios kvietėjas negali nei naudoti, nei
+     * suremontuoti - ir kurioje audio valymas ištrintų vienintelę medžiagą
+     * remontui. Todėl gedimas privalo atsukti VISKĄ.
+     */
+    const id = await processingJob();
+
+    /**
+     * Pool'as, kuris krenta BŪTENT ties `job_results` rašymu.
+     *
+     * ⚠️ KLIENTAS APVYNIOJAMAS, NE MUTUOJAMAS.
+     *
+     * Pirmoji redakcija perrašinėjo `client.query` TIESIOG ant pooled kliento ir
+     * grąžindavo jį į bendrą pool'ą su likusia pataisa — kitaip tariant,
+     * užnuodydavo jungtį VĖLESNIEMS testams. Visi kiti šio failo dubliai
+     * (`racingPool`, `stebimasPool`) vynioja į naują objektą; ši vieta nuo
+     * konvencijos buvo nukrypusi.
+     */
+    const luztantisPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          release: () => client.release(),
+          query: (sql, params) => {
+            if (typeof sql === "string" && /INSERT INTO job_results/.test(sql)) {
+              return Promise.reject(new Error("simuliuotas gedimas rašant job_results"));
+            }
+            return client.query(sql, params);
+          },
+        };
+      },
+    };
+
+    await assert.rejects(
+      () => createPostgresStore(luztantisPool).finishAtomic(id, "completed", { result: { a: 1 } }),
+      /simuliuotas gedimas/
+    );
+
+    const { rows } = await pool.query(
+      "SELECT j.status, j.version, r.payload FROM jobs j LEFT JOIN job_results r ON r.job_id = j.id WHERE j.id = $1",
+      [id]
+    );
+    assert.equal(rows[0].status, "processing", "⚠️ statusas NEPAKEISTAS - pusinės būsenos nėra");
+    assert.equal(rows[0].payload, null, "rezultato nėra");
+    assert.equal(rows[0].version, 2, "versija nepadidėjo (create=1, update=2)");
+  });
+
+  await t.test("#184 ⚠️ pakartojimas su TUO PAČIU rezultatu: `version` IR `job_results.created_at` NEPAKITĘ", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ BE ŠIOS PATIKROS „IDEMPOTENTIŠKA SĖKMĖ" TYLIAI LIKTŲ RAŠYMU.
+     *
+     * AS-IS `upsertResult()` darė `ON CONFLICT DO UPDATE SET payload =
+     * EXCLUDED.payload` - besąlyginį perrašymą. Testas, tikrinantis tik grąžintą
+     * statusą, to nepagautų: rezultatas atrodytų teisingas, o eilutė būtų
+     * perrašyta kiekvieną kartą.
+     */
+    const id = await processingJob();
+    const pirmas = await store.finishAtomic(id, "completed", { result: { a: 1, b: { c: 2 } } });
+
+    const { rows: pries } = await pool.query(
+      "SELECT j.version, r.created_at FROM jobs j JOIN job_results r ON r.job_id = j.id WHERE j.id = $1",
+      [id]
+    );
+
+    /** ⚠️ KITA RAKTŲ TVARKA - semantiškai TAS PATS rezultatas. */
+    const antras = await store.finishAtomic(id, "completed", { result: { b: { c: 2 }, a: 1 } });
+    assert.equal(antras.version, pirmas.version, "grąžinta versija nepakitusi");
+
+    const { rows: po } = await pool.query(
+      "SELECT j.version, r.created_at FROM jobs j JOIN job_results r ON r.job_id = j.id WHERE j.id = $1",
+      [id]
+    );
+    assert.equal(po[0].version, pries[0].version, "⚠️ `jobs.version` NEPADIDĖJO");
+    assert.equal(
+      po[0].created_at.getTime(),
+      pries[0].created_at.getTime(),
+      "⚠️ `job_results` eilutė NEPERRAŠYTA"
+    );
+  });
+
+  await t.test("#184 ⚠️ raktų tvarka: TAS PATS rezultatas per REALŲ `jsonb` round-trip'ą", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ TESTAS EINA PER DB, NE PER RANKOMIS SUMAIŠYTĄ OBJEKTĄ.
+     *
+     * `jsonb` raktų tvarkos nesaugo - ją nustato PATS PostgreSQL pagal savo
+     * vidinę tvarką. Rankomis sumaišius objektą, testas tikrintų MŪSŲ spėjimą
+     * apie tą tvarką; einant per round-trip'ą, tikrinama tikroji.
+     */
+    const id = await processingJob();
+    const rasomas = { zzz: 1, aaa: 2, mmm: { yyy: 3, bbb: 4 } };
+    await store.finishAtomic(id, "completed", { result: rasomas });
+
+    const perskaitytas = (await store.get(id)).result;
+    assert.notEqual(
+      JSON.stringify(perskaitytas),
+      JSON.stringify(rasomas),
+      "prielaida: `jsonb` raktų tvarką PAKEITĖ - kitaip testas nieko netikrintų"
+    );
+
+    /** Pakartojimas su DB grąžinta forma - privalo būti no-op, ne konfliktas. */
+    const po = await store.finishAtomic(id, "completed", { result: perskaitytas });
+    assert.equal(typeof po, "object", "no-op, ne RESULT_CONFLICT");
+
+    /** Ir su ORIGINALIA forma - taip pat. */
+    const po2 = await store.finishAtomic(id, "completed", { result: rasomas });
+    assert.equal(typeof po2, "object", "originali raktų tvarka irgi yra TAS PATS rezultatas");
+  });
+
+  await t.test("#184 KITAS rezultatas → RESULT_CONFLICT; esamas NEPERRAŠOMAS", { timeout: 30000 }, async () => {
+    const id = await processingJob();
+    await store.finishAtomic(id, "completed", { result: { a: 1 } });
+
+    assert.equal(
+      await store.finishAtomic(id, "completed", { result: { a: 2 } }),
+      "RESULT_CONFLICT"
+    );
+
+    const { rows } = await pool.query("SELECT payload FROM job_results WHERE job_id = $1", [id]);
+    assert.deepEqual(rows[0].payload, { a: 1 }, "⚠️ pirmojo vykdytojo rezultatas nepaliestas");
+  });
+
+  await t.test("#184 `completed` BE `job_results` → COMPLETED_WITHOUT_RESULT", { timeout: 30000 }, async () => {
+    const id = await processingJob();
+    await store.finishAtomic(id, "completed", { result: { a: 1 } });
+
+    /** Remontuotina būsena: eilutė dingo (nutrūkusi transakcija, ranka redaguota DB). */
+    await pool.query("DELETE FROM job_results WHERE job_id = $1", [id]);
+
+    assert.equal(
+      await store.finishAtomic(id, "completed", { result: { a: 1 } }),
+      "COMPLETED_WITHOUT_RESULT"
+    );
+  });
+
+  await t.test("#184 `storage_type <> 'inline'` — FAIL-CLOSED (perspektyvinis sargas, #157)", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ SARGAS BE PRODUKCINIO KVIETĖJO, IR TAI ĮVARDIJAMA.
+     *
+     * `upsertResult()` rašo kietą `'inline'`, tad nė viena eilutė kito tipo
+     * ŠIANDIEN atsirasti negali - testas jį pasiekia tik įrašydamas tiesiogiai.
+     * Sargas egzistuoja tam, kad #157 negalėtų tyliai paversti „skirtingo
+     * rezultato" į „nepalyginamą": be jo antrasis vykdytojas gautų
+     * idempotentišką sėkmę apie darbą, kurio nematė.
+     */
+    const id = await processingJob();
+    await store.finishAtomic(id, "completed", { result: { a: 1 } });
+
+    /**
+     * ⚠️ `job_results_storage_shape` DIKTUOJA FORMĄ, IR TAI RADO CI.
+     *
+     * Pirmoji šio testo redakcija keitė tik `storage_type` ir krito su
+     * `23514`: migracija (`1755000000000`, `:317-324`) reikalauja
+     * `inline → payload NOT NULL AND storage_key IS NULL`, o bet kuriam kitam
+     * tipui — `storage_key IS NOT NULL`. Vadinasi „s3 eilutė" negali būti
+     * pagaminta vien pervadinus tipą.
+     *
+     * ⚠️ RADINYS VERTINGESNIS NEI TESTO PATAISA: schema `s3` formą JAU riboja,
+     * nors #157 realizacijos nėra. Sargas `postgresStore.finishAtomic()` gina
+     * ne nuo bet kokios eilutės, o nuo TEISĖTAI suformuotos išorinės saugyklos
+     * eilutės, kurios lygybės autoriteto repo neturi.
+     */
+    await pool.query(
+      "UPDATE job_results SET storage_type = 's3', storage_key = 's3://kibiras/raktas', payload = NULL WHERE job_id = $1",
+      [id]
+    );
+
+    await assert.rejects(
+      () => store.finishAtomic(id, "completed", { result: { a: 1 } }),
+      /#157/,
+      "nepalyginamas saugojimo tipas privalo KRISTI, ne tyliai sutapti"
+    );
+
+    await pool.query(
+      "UPDATE job_results SET storage_type = 'inline', storage_key = NULL, payload = $2::jsonb WHERE job_id = $1",
+      [id, JSON.stringify({ a: 1 })]
+    );
+  });
+
+  await t.test("#184 ⚠️ LENKTYNĖS: du vykdytojai, dvi jungtys — tik VIENAS įsipareigoja", { timeout: 30000 }, async () => {
+    /**
+     * ⚠️ DETERMINISTIŠKA BE `sleep()`.
+     *
+     * Serializavimą duoda `FOR UPDATE` eilutės užraktas `finishAtomic()`
+     * transakcijoje, ne laikas: antroji transakcija BLOKUOJASI, kol pirmoji
+     * commit'ina, ir tada mato ĮSIPAREIGOTĄ būseną. Todėl baigčių AIBĖ yra
+     * fiksuota, net jei nugalėtojas kaskart kitas - lygiai to ir reikia.
+     *
+     * ⚠️ TIKRINAMA AIBĖ, NE KONKRETUS NUGALĖTOJAS. Testas, reikalaujantis, kad
+     * laimėtų būtent A, priklausytų nuo planuoklio ir taptų flaky - tai būtent
+     * ta klasė, kurios #184 reikalauja vengti.
+     */
+    const id = await processingJob();
+
+    const poolA = naujasPool();
+    const poolB = naujasPool();
+    try {
+      const [a, b] = await Promise.all([
+        createPostgresStore(poolA).finishAtomic(id, "completed", { result: { vykdytojas: "A" } }),
+        createPostgresStore(poolB).finishAtomic(id, "completed", { result: { vykdytojas: "B" } }),
+      ]);
+
+      const baigtys = [a, b];
+      const laimeje = baigtys.filter((x) => x && typeof x === "object");
+      const konfliktai = baigtys.filter((x) => x === "RESULT_CONFLICT");
+
+      assert.equal(laimeje.length, 1, "tiksliai VIENAS įsipareigoja");
+
+      /**
+       * ⚠️ ŠI PATIKRA RADO TIKRĄ KODO DEFEKTĄ, NE TESTO KLAIDĄ.
+       *
+       * Pirmame tikrame PostgreSQL paleidime pralaimėtojas grąžindavo
+       * `COMPLETED_WITHOUT_RESULT`, ne `RESULT_CONFLICT`. Priežastis:
+       * `readJobForUpdate()` yra `jobs LEFT JOIN job_results ... FOR UPDATE OF j`,
+       * o `EvalPlanQual` iš naujo perskaito TIK užrakintos lentelės eilutę —
+       * prijungta `job_results` lieka sakinio snapshot'o, paimto PRIEŠ
+       * konkurento commit'ą. Antrasis matydavo `completed` (nauja) su
+       * `result = NULL` (sena).
+       *
+       * Todėl klaida tikrinama VARDU: bendras „ne objektas" praeitų ir su
+       * klaidinga baigtimi.
+       */
+      assert.equal(
+        baigtys.filter((x) => x === "COMPLETED_WITHOUT_RESULT").length,
+        0,
+        "⚠️ pralaimėtojas NEGALI matyti `completed` be rezultato - tai pasenęs LEFT JOIN"
+      );
+      assert.equal(konfliktai.length, 1, "antrasis gauna consistency konfliktą");
+
+      const { rows } = await pool.query("SELECT payload FROM job_results WHERE job_id = $1", [id]);
+      assert.deepEqual(
+        rows[0].payload,
+        laimeje[0].result,
+        "⚠️ saugykloje guli BŪTENT nugalėtojo rezultatas - antrasis jo neperrašė"
+      );
+    } finally {
+      await poolA.end();
+      await poolB.end();
+    }
+  });
+
+  await t.test("#184 `finish(FAILED)` `job_results` NERAŠO ir esamo NETRINA", { timeout: 30000 }, async () => {
+    /** Elgesys APIBRĖŽIAMAS, ne keičiamas - kad netaptų antra, netyčine semantika. */
+    const id = await processingJob();
+    const po = await store.finishAtomic(id, "failed", { error: "x", error_code: "E" });
+    assert.equal(po.status, "failed");
+
+    const { rows } = await pool.query("SELECT count(*)::int AS n FROM job_results WHERE job_id = $1", [id]);
+    assert.equal(rows[0].n, 0, "FAILED rezultato neįrašo");
   });
 
 });

@@ -14,7 +14,12 @@ const { KANONINIAI_LAUKAI } = require("../../utils/jobStore/common");
  * normalizavimas tikrinamas atskirai - per `restoreRecord()` ir
  * `deserialize()`. Išimtis eksplicitinė, kad nebūtų tyli.
  */
-const NEDALYVAUJA_PATCHUOSE = new Set(["schemaVersion"]);
+/**
+ * ⚠️ `version` IRGI NEDALYVAUJA (#184, 7.5b). `applyPatch()` ją perrašo
+ * besąlygiškai (`job.version + 1`), tad patch'as jos reikšmės nustatyti negali -
+ * lygiai kaip `schemaVersion` atveju. Išimtis eksplicitinė, kad nebūtų tyli.
+ */
+const NEDALYVAUJA_PATCHUOSE = new Set(["schemaVersion", "version"]);
 
 const IVESTYS = Object.freeze({
   audio_cleanup_pending: ["false", "true"],

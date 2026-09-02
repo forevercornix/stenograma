@@ -6,6 +6,7 @@ const {
   applyPatch,
   matchesOwner,
   normalizeJob,
+  idempotentiskasAtsakymas,
 } = require("./common");
 
 /**
@@ -111,6 +112,12 @@ function rowToJob(row) {
     completed_at: isoFromDb(row.completed_at),
     createdAt: isoFromDb(row.created_at),
     updatedAt: isoFromDb(row.updated_at),
+    /**
+     * OPTIMISTIC LOCK VERSIJA (#184, 7.5b). Legacy eilutė stulpelio neturi tik
+     * tol, kol nepritaikyta migracija; ten `?? 1` duoda tą pačią pradinę
+     * reikšmę, kurią duoda `DEFAULT 1`.
+     */
+    version: row.version ?? 1,
   };
 
   /**
@@ -165,6 +172,7 @@ function jobToRow(job) {
     updated_at: job.updatedAt || new Date().toISOString(),
     started_at: job.started_at ?? null,
     completed_at: job.completed_at ?? null,
+    version: job.version ?? 1,
   };
 }
 
@@ -177,6 +185,8 @@ const COLUMNS = [
   "audio_cleanup_pending", "audio_cleanup_attempts", "audio_cleanup_next_attempt_at",
   "deletion_pending", "deletion_attempts", "deletion_next_attempt_at",
   "created_at", "updated_at", "started_at", "completed_at",
+  /** Optimistic lock versija (#184, 7.5b). */
+  "version",
 ];
 
 /** `j.*` su prijungtu rezultatu — vienintelė skaitymo forma (žr. hidrataciją). */
@@ -280,6 +290,16 @@ const PATCH_STULPELIAI = Object.freeze({
   started_at: ["started_at"],
   completed_at: ["completed_at"],
   updatedAt: ["updated_at"],
+  /**
+   * ⚠️ ĮRAŠAS NĖRA LEIDIMAS KVIETĖJUI RAŠYTI `version`.
+   *
+   * `applyPatch()` versiją perrašo besąlygiškai (`job.version + 1`), tad patch'o
+   * raktas jos pakeisti negali. Įrašas čia reikalingas dėl PILNUMO patikros:
+   * `jobOwnership.test.js` reikalauja, kad kiekvienas kintamas `COLUMNS`
+   * stulpelis turėtų bent vieną patch raktą, kitaip naujas stulpelis tyliai
+   * iškristų iš `SET` sąrašo.
+   */
+  version: ["version"],
 });
 
 /**
@@ -437,8 +457,51 @@ const SVETIMAS_SCOPE = `SELECT count(*) FROM jobs
  * kartu su `priezastis = 0` (snapshot'o versija buvo SAVA). Be `buvo` ši baigtis
  * nesiskirtų nuo „eilutės apskritai nebuvo", ir savininko pasikeitimas sakinio
  * viduryje būtų klaidingai paskelbtas `false`/`null` vietoj `"FORBIDDEN"`.
+ *
+ * ⚠️ ANTRAS TOS PAČIOS KLASĖS PAVYZDYS — `rezultatoEilute()` (#184, 7.5b).
+ *
+ * Ta pati `EvalPlanQual` asimetrija pasirodė KITU pavidalu: `readJobForUpdate()`
+ * yra `jobs LEFT JOIN job_results ... FOR UPDATE OF j`, ir EPQ iš naujo skaito
+ * TIK užrakintą `jobs` eilutę — PRIJUNGTA `job_results` eilutė lieka pradinio
+ * sakinio snapshot'o. Lenktynėse antrasis vykdytojas matydavo
+ * `status = 'completed'` (nauja) su `result = NULL` (sena).
+ *
+ * Čia išsiskiria SKALIARAS, ten — PRIJUNGTA EILUTĖ. Abu pavyzdžiai laikomi
+ * greta sąmoningai: klasė ta pati, o antrąjį jos pavidalą pagavo tik tikras
+ * PostgreSQL (memory ir Redis jo neturi - `HGETALL` atomiškas), ir pasekmė buvo
+ * fail-safe kryptimi, tad be gilaus testo atrodė kaip teisingas elgesys.
  */
 const EILUTE_YRA = `SELECT count(*) FROM jobs WHERE id = $1`;
+
+/**
+ * „Eilutė YRA, bet `version` NESUTAMPA" - optimistic lock nesėkmės priežastis
+ * (#184, 7.5b).
+ *
+ * ⚠️ TAS PATS MODELIS KAIP `SVETIMAS_SCOPE`, IR DĖL TOS PAČIOS PRIEŽASTIES.
+ * Nulis pakeistų eilučių savaime NĖRA versijos konfliktas: eilutės gali
+ * apskritai nebūti. Priežastis skaičiuojama TAME PAČIAME sakinyje, tad ji
+ * remiasi tuo snapshot'u, kurio atžvilgiu buvo įvertintas CAS predikatas -
+ * neužrakintas skaitymas PO nepavykusio `UPDATE` atsakytų apie KITĄ įrašo
+ * inkarnaciją (žr. `updateOwned` komentarą apie `buvo === 0`).
+ *
+ * ⚠️ `IS DISTINCT FROM`, ne `<>`. Stulpelis yra `NOT NULL`, tad `NULL` čia
+ * neturėtų atsirasti - bet `<>` su `NULL` duotų `UNKNOWN`, eilutė nebūtų
+ * suskaičiuota, ir versijos konfliktas tyliai virstų „nesuderinta baigtimi".
+ * Trivertė logika čia kainuoja nieko, o klaidos klasę pašalina.
+ *
+ * ⚠️ PARAMETRO NUMERIS PERDUODAMAS, NE ĮRAŠYTAS KIETAI. `update` ir
+ * `updateOwned` sakiniuose laukiama versija atsiduria skirtingose pozicijose
+ * ($2 ir $4), o dvi kopijos su skirtingais numeriais išsiskirtų būtent taip,
+ * kad viena klasifikuotų pagal SVETIMĄ parametrą - ir atsakytų apie ne tą
+ * sąlygą, kurią tikrino mutacija.
+ *
+ * ⚠️ `$n::int IS NOT NULL` - kai sąlygos nėra, klasifikatorius privalo grąžinti
+ * `0`, o ne „versija skiriasi nuo NULL".
+ */
+function versijaSkiriasi(n) {
+  return `SELECT count(*) FROM jobs
+            WHERE id = $1 AND $${n}::int IS NOT NULL AND version IS DISTINCT FROM $${n}`;
+}
 
 /**
  * PROGRESO CAS PREDIKATAS - VIENAS ŠALTINIS (#180 P2-D).
@@ -626,12 +689,69 @@ function createPostgresStore(pool) {
       return;
     }
 
+    /**
+     * ⚠️ SĄLYGINIS PERRAŠYMAS (#184, 7.5b).
+     *
+     * Iki 7.5b čia buvo `DO UPDATE SET payload = EXCLUDED.payload` — BESĄLYGINIS
+     * perrašymas. Idempotentiškas pakartojimas su TUO PAČIU rezultatu perrašydavo
+     * eilutę: `created_at` išlikdavo, bet eilutė būdavo perrašoma, ir „no-op"
+     * tyliai likdavo RAŠYMU. Antrasis vykdytojas po lenktynių taip pat
+     * perrašydavo pirmojo rezultatą.
+     *
+     * ⚠️ SĄLYGA YRA `jsonb` LYGYBĖ, IR TAI NĖRA ANTRA TAISYKLĖ. `jsonb =`
+     * PostgreSQL'e yra SEMANTINIS palyginimas: raktų tvarka nereikšminga,
+     * dublikatai pašalinti, skaičiai normalizuoti — lygiai tas pats, ką
+     * `kanoninisRezultatas()` daro JS pusėje. Kontrakto sprendimą (no-op ar
+     * konfliktas) priima JS autoritetas; ši sąlyga saugo nuo BEREIKALINGO
+     * eilutės perrašymo. Integracinis testas tikrina, kad abi sutampa per
+     * REALŲ DB round-trip'ą.
+     */
     await client.query(
       `INSERT INTO job_results (job_id, storage_type, payload, created_at)
        VALUES ($1, 'inline', $2::jsonb, now())
-       ON CONFLICT (job_id) DO UPDATE SET payload = EXCLUDED.payload`,
+       ON CONFLICT (job_id) DO UPDATE SET payload = EXCLUDED.payload
+        WHERE job_results.payload IS DISTINCT FROM EXCLUDED.payload`,
       [jobId, JSON.stringify(result)]
     );
+  }
+
+  /**
+   * `job_results` EILUTĖ — ŠVIEŽIAI, `finish` transakcijos viduje (#184, 7.5b).
+   *
+   * ⚠️ Į JOB OBJEKTĄ `storage_type` NEDEDAMAS SĄMONINGAI. Memory ir Redis jo
+   * neturi ir turėti negali; bendro kontrakto rinkinys lygina backend'ų
+   * grąžinamas būsenas `deepEqual`, tad PG-only laukas arba sulaužytų
+   * palyginimus, arba priverstų jį iš jų išimti — t. y. tyliai susiaurintų
+   * rinkinį. Todėl skaitomas atskira užklausa ten, kur reikia sprendimo.
+   *
+   * ⚠️ IR `payload` SKAITOMAS ČIA, NE IMAMAS IŠ `readJobForUpdate()` (RADO CI).
+   *
+   * `SELECT_JOB` yra `jobs LEFT JOIN job_results` su `FOR UPDATE OF j`. Užraktas
+   * ir `EvalPlanQual` galioja TIK užrakintai lentelei: sutikęs konkurenčiai
+   * pakeistą `jobs` eilutę, PostgreSQL perskaito jos NAUJAUSIĄ versiją, bet
+   * PRIJUNGTOS `job_results` eilutės iš naujo NEIMA — ji lieka to sakinio
+   * snapshot'o, paimto PRIEŠ konkurento commit'ą.
+   *
+   * Praktinė pasekmė lenktynėse: antrasis vykdytojas mato `status = 'completed'`
+   * (nauja reikšmė) kartu su `result = NULL` (sena) ir grąžina klaidingą
+   * `COMPLETED_WITHOUT_RESULT` vietoj `RESULT_CONFLICT`. Tai fail-safe kryptimi
+   * (audio lieka, darbas neperrašomas), bet vis tiek NETEISINGA — ir vietinėje
+   * aplinkoje nepasiekiama.
+   *
+   * ⚠️ TAI TA PATI MVCC KLASĖ, KURIĄ #180 JAU DOKUMENTAVO prie `EILUTE_YRA`:
+   * ten `SELECT` dalys lieka prie snapshot'o, o duomenis keičianti dalis daro
+   * `EvalPlanQual`. Skirtumas tik tas, kad ten išsiskirdavo skaliaras, o čia —
+   * prijungta eilutė.
+   *
+   * Atskiras sakinys PO užrakto gauna NAUJĄ snapshot'ą (`READ COMMITTED`), tad
+   * mato konkurento jau įsipareigotą rezultatą.
+   */
+  async function rezultatoEilute(client, jobId) {
+    const { rows } = await client.query(
+      "SELECT storage_type, payload FROM job_results WHERE job_id = $1",
+      [jobId]
+    );
+    return rows[0] || null;
   }
 
   async function readJob(client, id) {
@@ -769,12 +889,152 @@ function createPostgresStore(pool) {
     return rowToJob(rows[0]);
   }
 
-  async function update(id, patch) {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.expectedVersion] optimistic lock sąlyga (#184, 7.5b)
+   * @returns {object|null|"CONCURRENCY_CONFLICT"}
+   */
+  async function update(id, patch, options = {}) {
     return inTransaction(async (client) => {
       const current = await readJob(client, id);
       if (!current) return null;
-      return writePatched(client, current, patch);
+      if (options.expectedVersion === undefined) {
+        return writePatched(client, current, patch);
+      }
+      return writePatchedCas(client, current, patch, options.expectedVersion);
     });
+  }
+
+  /**
+   * SĄLYGINIS RAŠYMAS SU `expectedVersion` (#184, 7.5b).
+   *
+   * ⚠️ KODĖL ATSKIRAS KELIAS, O NE `writePatched()` SU PAPILDOMU `WHERE`.
+   *
+   * `writePatched()` yra BESĄLYGINIS rašymas po neužrakinto skaitymo - jam
+   * nulis pakeistų eilučių reiškia tik „eilutės nebėra". Sąlyginiam keliui to
+   * neužtenka: nulis turi tris skirtingas priežastis, ir jos privalo būti
+   * atskirtos TAME PAČIAME sakinyje. Sujungus abu kelius, besąlyginis rašymas
+   * neštų klasifikacijos kainą be jokios naudos.
+   *
+   * ⚠️ SIAURAS `SET` - tie patys stulpeliai kaip `updateOwned` CAS kelyje, dėl
+   * tos pačios priežasties: platus `SET` iš pasenusio snapshot'o atsuktų atgal
+   * konkurento jau užcommitintus laukus.
+   *
+   * ⚠️ PAKARTOJIMO ČIA NĖRA, IR TAI SĄMONINGA. `updateOwned` kartoja, nes jo
+   * CAS predikatas (nuosavybė) yra NEKINTAMAS - antras bandymas su ta pačia
+   * sąlyga privalo pavykti. Versijos predikatas priešingas: jei versija
+   * pasikeitė, ji nebesugrįš, ir pakartojimas su tuo pačiu `expectedVersion`
+   * duotų tą patį atsakymą amžinai. Kvietėjas gauna konfliktą ir sprendžia pats.
+   */
+  /**
+   * ATOMINIS IR IDEMPOTENTIŠKAS TERMINALUS PERĖJIMAS (#184, 7.5b).
+   *
+   * ⚠️ `jobs` IR `job_results` — VIENOJE TRANSAKCIJOJE.
+   *
+   * `COMPLETED` reiškia BŪTENT tokią būseną: `jobs.status = 'completed'` IR
+   * egzistuojantis `job_results` įrašas, abu commit'inti kartu. Rezultato
+   * rašymui nepavykus, rollback'inama visa `finish` transakcija — pusinės
+   * `completed` būsenos nelieka.
+   *
+   * ⚠️ TRANSAKCIJOS RIBOS. Ji apima `jobs` ir `job_results` ir NIEKO DAUGIAU.
+   * Auditas, eilės patvirtinimas ir audio valymas lieka už jos: audito
+   * įtraukimas reikštų, kad rollback ištrina ir audito įrašą.
+   *
+   * ⚠️ SPRENDIMAS PRIIMAMAS PO `FOR UPDATE`, TOJE PAČIOJE TRANSAKCIJOJE.
+   * Tai antrasis #184 leistas klasifikavimo būdas: užraktas stabilizuoja
+   * būseną iki commit'o, tad „ar tas pats rezultatas" negali pasenti tarp
+   * sprendimo ir įrašymo. Neužrakinto skaitymo po nepavykusio `UPDATE` čia
+   * nėra.
+   *
+   * @returns {object|null|"RESULT_CONFLICT"|"COMPLETED_WITHOUT_RESULT"}
+   */
+  async function finishAtomic(id, status, extra = {}) {
+    const jobPhase = require("../jobPhase");
+    return inTransaction(async (client) => {
+      const job = await readJobForUpdate(client, id);
+      if (!job) return null;
+
+      if (job.status === STATUS.COMPLETED) {
+        /**
+         * ⚠️ `storage_type <> 'inline'` — FAIL-CLOSED (#157 riba).
+         *
+         * `upsertResult()` rašo kietą `'inline'`, o `SELECT_JOB` hidratuoja tik
+         * `payload`, tad `s3` rezultato NORMALIZAVIMO / HIDRATACIJOS autoriteto
+         * repo neturi. Palyginus tokį įrašą pagal `payload`, „skirtingas
+         * rezultatas" tyliai taptų „nepalyginamas", ir antrasis vykdytojas
+         * gautų idempotentišką sėkmę apie darbą, kurio nematė.
+         *
+         * ⚠️ SARGAS YRA PERSPEKTYVINIS: produkcinio kelio, kuris parašytų kitą
+         * `storage_type`, ŠIANDIEN NĖRA. Jis pasiekiamas tik įrašius eilutę
+         * tiesiogiai. Įvardyta atvirai, kad neatrodytų kaip įrodytas elgesys.
+         */
+        const eilute = await rezultatoEilute(client, id);
+        if (eilute && eilute.storage_type !== "inline") {
+          throw new Error(
+            `postgresStore.finishAtomic: job_results.storage_type = '${eilute.storage_type}' ` +
+              "neturi lygybės autoriteto (#157). Rezultatų palyginimas apibrėžtas TIK 'inline'."
+          );
+        }
+
+        /**
+         * ⚠️ SPRENDIMAS PRIIMAMAS IŠ ŠVIEŽIO SKAITYMO, ne iš `readJobForUpdate()`
+         * prijungtos reikšmės — žr. `rezultatoEilute()`. Be šito lenktynių
+         * pralaimėtojas gautų `COMPLETED_WITHOUT_RESULT` vietoj
+         * `RESULT_CONFLICT`.
+         */
+        const sviezias = { ...job, result: eilute ? eilute.payload : null };
+        const jauBaigtas = idempotentiskasAtsakymas(sviezias, status, extra);
+        if (jauBaigtas !== undefined) return jauBaigtas;
+      }
+
+      const patch = jobPhase.finish(job, status, extra);
+      return writePatched(client, job, patch);
+    });
+  }
+
+  async function writePatchedCas(client, current, patch, expectedVersion) {
+    const row = jobToRow(applyPatch(current, patch));
+    const rasomi = changedColumns(jobToRow(current), row, patch);
+    const sets = [
+      ...rasomi.map((c, i) => `"${c}" = $${i + 3}`),
+      LAIKO_ZYMA,
+    ].join(", ");
+
+    const result = await client.query(
+      casSuKlasifikacija(
+        `      UPDATE jobs SET ${sets}
+            WHERE id = $1 AND version = $2
+          RETURNING id`,
+        versijaSkiriasi(2),
+        { buvo: EILUTE_YRA }
+      ),
+      [current.id, expectedVersion, ...rasomi.map((c) => row[c])]
+    );
+
+    const { pakeista, priezastis, buvo } = result.rows[0];
+    if (pakeista > 0) {
+      await upsertResult(client, current.id, patch.result);
+      return readJob(client, current.id);
+    }
+
+    /**
+     * ⚠️ EILUTĖS CAS SNAPSHOT'E NEBUVO → GALUTINIS `null` (#180, 1 punktas).
+     * Vėliau tuo pačiu id atsiradusi eilutė yra KITA inkarnacija.
+     */
+    if (buvo === 0) return null;
+
+    /** Eilutė yra, versija kita - nustatyta tuo pačiu snapshot'u kaip CAS. */
+    if (priezastis > 0) return "CONCURRENCY_CONFLICT";
+
+    /**
+     * ⚠️ NESUDERINTA BAIGTIS (`EvalPlanQual`): snapshot'e versija SUTAPO, bet
+     * mutacija vis tiek nepavyko - eilutė sakinio metu buvo konkurenčiai
+     * pakeista arba ištrinta. Užrakintas skaitymas TOJE PAČIOJE transakcijoje
+     * (leistinas #184 būdas) atskiria dvi likusias galimybes.
+     */
+    const dabartine = await readJobForUpdate(client, current.id);
+    if (!dabartine) return null;
+    return "CONCURRENCY_CONFLICT";
   }
 
   /** Bendras kelias visoms mutacijoms: `applyPatch()` + įrašymas. */
@@ -822,8 +1082,8 @@ function createPostgresStore(pool) {
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }
 
-  /** @returns {object|null|"FORBIDDEN"} */
-  async function updateOwned(id, patch, scope) {
+  /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
+  async function updateOwned(id, patch, scope, options = {}) {
     return inTransaction(async (client) => {
       let current = await readJob(client, id);
       /**
@@ -866,23 +1126,47 @@ function createPostgresStore(pool) {
         const row = jobToRow(applyPatch(current, patch));
         const rasomi = changedColumns(jobToRow(current), row, patch);
         const sets = [
-          ...rasomi.map((c, i) => `"${c}" = $${i + 4}`),
+          ...rasomi.map((c, i) => `"${c}" = $${i + 5}`),
           LAIKO_ZYMA,
         ].join(", ");
+        /**
+         * ⚠️ NUOSAVYBĖ IR VERSIJA - VIENAME `UPDATE` (#184, 7.5b).
+         *
+         * Du round-trip'ai („pirma patikrinam versiją, tada rašom") atkurtų
+         * tiksliai tą TOCTOU langą, kurį visas šis darbas uždaro. `$4::int IS
+         * NULL` šaka reiškia „sąlygos nėra" - elgesys be `expectedVersion`
+         * nesikeičia nė kiek.
+         */
         result = await client.query(
           casSuKlasifikacija(
             `      UPDATE jobs SET ${sets}
             WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND owner_kind = $3
+              AND ($4::int IS NULL OR version = $4)
           RETURNING id`,
             SVETIMAS_SCOPE,
-            { buvo: EILUTE_YRA }
+            { buvo: EILUTE_YRA, versija: versijaSkiriasi(4) }
           ),
-          [id, scope.ownerId ?? null, scope.ownerKind, ...rasomi.map((c) => row[c])]
+          [
+            id,
+            scope.ownerId ?? null,
+            scope.ownerKind,
+            options.expectedVersion ?? null,
+            ...rasomi.map((c) => row[c]),
+          ]
         );
-        const { pakeista, priezastis, buvo } = result.rows[0];
+        const { pakeista, priezastis, buvo, versija } = result.rows[0];
         if (pakeista > 0) break;
-        /** Eilutė YRA, bet svetima - nustatyta tuo pačiu snapshot'u kaip CAS. */
+        /**
+         * ⚠️ NUOSAVYBĖ PIRMA, VERSIJA PO JOS (#184).
+         *
+         * Svetimas savininkas su pasenusia versija privalo gauti `"FORBIDDEN"`.
+         * Perklasifikavus jį į `"CONCURRENCY_CONFLICT"`, kvietėjui būtų pasakyta
+         * „bandyk dar kartą" ten, kur teisingas atsakymas yra „tau negalima" -
+         * ir autorizacijos rezultatas taptų lygiagretumo rezultatu.
+         */
         if (priezastis > 0) return "FORBIDDEN";
+        /** Eilutė sava, bet versija kita - tas pats snapshot'as kaip CAS. */
+        if (versija > 0) return "CONCURRENCY_CONFLICT";
 
         /**
          * ⚠️ CAS SNAPSHOT'E EILUTĖS NEBUVO - GALUTINIS `null`.
@@ -907,6 +1191,18 @@ function createPostgresStore(pool) {
         const dabartine = await readJobForUpdate(client, id);
         if (!dabartine) return null;
         if (!matchesOwner(dabartine, scope)) return "FORBIDDEN";
+        /**
+         * ⚠️ VERSIJOS KONFLIKTAS NEKARTOJAMAS (#184, 7.5b).
+         *
+         * Pakartojimas čia teisėtas TIK todėl, kad nuosavybės predikatas
+         * NEKINTAMAS: užrakinta sava eilutė svetima nebetaps, tad antras CAS
+         * privalo pavykti. Versijos predikatas priešingas - pasikeitusi versija
+         * nebesugrįš, ir ciklas su tuo pačiu `expectedVersion` suktųsi iki ribos
+         * tam, kad galiausiai grąžintų klaidą vietoj teisingo konflikto.
+         */
+        if (options.expectedVersion !== undefined && dabartine.version !== options.expectedVersion) {
+          return "CONCURRENCY_CONFLICT";
+        }
         if (bandymas >= CAS_BANDYMU_RIBA) {
           throw new Error(
             `postgresStore.updateOwned: CAS nesuartėjo per ${CAS_BANDYMU_RIBA} bandymus`
@@ -1141,6 +1437,7 @@ function createPostgresStore(pool) {
     update,
     remove,
     reportProgressAtomic,
+    finishAtomic,
     getOwned,
     updateOwned,
     removeOwned,

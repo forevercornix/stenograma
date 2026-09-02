@@ -477,3 +477,104 @@ test(
     }
   }
 );
+
+test(
+  "#184 SCHEMA: `jobs.version` upgrade iš ankstesnės schemos + INSERT/SELECT",
+  { skip: skipWithoutPostgres(), timeout: 120000 },
+  async () => {
+    /**
+     * ⚠️ KODĖL ŠIS TESTAS APSKRITAI REIKALINGAS (#184, 7.5b).
+     *
+     * Readiness patikra (`utils/jobStore/index.js`) tikrina LENTELES ir
+     * CHECK CONSTRAINT'US — ne stulpelius. Pamirštas stulpelių žemėlapis
+     * (`COLUMNS` / `PATCH_STULPELIAI` / `jobToRow`) starte NEKRIS: jis kris
+     * pirmo `INSERT` metu, gyvame sraute. Todėl schemos garantija tikrinama
+     * čia, o ne pasitikima startu.
+     *
+     * ⚠️ TIKRINAMAS UPGRADE, NE TIK ŠVIEŽIA SCHEMA. Švarioje DB stulpelis
+     * atsirastų ir be `DEFAULT`; klausimas yra, ką gauna EILUTĖS, kurios jau
+     * egzistavo. `NOT NULL` be galiojančios numatytosios reikšmės tokį
+     * `ALTER TABLE` nutrauktų — ir tai paaiškėtų tik produkcijoje.
+     */
+    await perkurtiDb();
+
+    /**
+     * 1. Schema BE `version` — viskas IKI 7.5b migracijos imtinai.
+     *
+     * ⚠️ `--timestamp` YRA PRIVALOMAS, NE PAPUOŠIMAS. Be jo `node-pg-migrate`
+     * skaitinį argumentą traktuoja kaip migracijų KIEKĮ
+     * (`upMigrations.slice(0, Math.abs(count))`), tad `up 1755800000000`
+     * pritaikytų VISAS — įskaitant tą, kurios čia dar neturi būti. Su vėliava
+     * filtras yra `timestamp <= count`.
+     */
+    migrate("up 1755800000000 --timestamp");
+
+    const pries = new Pool({ connectionString: DB_URL });
+    let jobId;
+    try {
+      const { rows: stulpeliai } = await pries.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'jobs' AND column_name = 'version'`
+      );
+      assert.deepEqual(stulpeliai, [], "prielaida: prieš migraciją stulpelio NĖRA");
+
+      const { rows } = await pries.query(
+        `INSERT INTO jobs (id, type, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), 'transcription', 'queued', now(), now())
+         RETURNING id`
+      );
+      jobId = rows[0].id;
+    } finally {
+      await pries.end();
+    }
+
+    /** 2. Forward migracija. */
+    migrate("up");
+
+    const po = new Pool({ connectionString: DB_URL });
+    try {
+      /** 2a. JAU EGZISTAVUSI eilutė gavo galiojančią pradinę reikšmę. */
+      const { rows: senos } = await po.query("SELECT version FROM jobs WHERE id = $1", [jobId]);
+      assert.equal(senos[0].version, 1, "esama eilutė po migracijos turi `version = 1`");
+
+      /** 2b. Nauja eilutė be eksplicitinės reikšmės — tas pats `1`. */
+      const { rows: naujos } = await po.query(
+        `INSERT INTO jobs (id, type, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), 'transcription', 'queued', now(), now())
+         RETURNING id, version`
+      );
+      assert.equal(naujos[0].version, 1, "DEFAULT 1");
+
+      /** 2c. `NOT NULL` realiai galioja. */
+      await assert.rejects(
+        () => po.query("UPDATE jobs SET version = NULL WHERE id = $1", [jobId]),
+        /null value|not-null/i,
+        "`version` privalo būti NOT NULL"
+      );
+
+      /**
+       * 2d. `jobs_version_positive` realiai galioja.
+       *
+       * ⚠️ TAI IR YRA PRIEŽASTIS, DĖL KURIOS CONSTRAINT ĮVESTAS. `DEFAULT 1`
+       * pats nulio nedraudžia, o `0` JS pusėje yra FALSY: `expectedVersion`
+       * patikra tokią reikšmę palaikytų „versija nenurodyta". DB lygmuo tą
+       * klasę pašalina ten, kur JS jos nepasiekia — rankinis `UPDATE`,
+       * atkūrimas iš kopijos.
+       */
+      await assert.rejects(
+        () => po.query("UPDATE jobs SET version = 0 WHERE id = $1", [jobId]),
+        /jobs_version_positive/,
+        "`version = 0` privalo būti atmestas"
+      );
+
+      /** 2e. Įprastas increment'as praeina. */
+      const { rows: padidinta } = await po.query(
+        "UPDATE jobs SET version = version + 1 WHERE id = $1 RETURNING version",
+        [jobId]
+      );
+      assert.equal(padidinta[0].version, 2);
+    } finally {
+      await po.end();
+    }
+  }
+);
