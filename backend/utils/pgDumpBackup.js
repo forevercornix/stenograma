@@ -266,8 +266,17 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
     );
   }
 
-  /** GCM žyma ir AAD — krinta čia, PRIEŠ bet kokį SQL. */
-  const plaintext = backupEncryption.decrypt(envelope, { env, manifest });
+  /**
+   * GCM žyma ir AAD — krinta čia, PRIEŠ bet kokį SQL.
+   *
+   * ⚠️ `decrypt()` GRĄŽINA `{ plaintext: Buffer, usedPreviousKey }`, NE EILUTĘ.
+   *
+   * Pirmoji redakcija reikšmę naudojo tiesiogiai, ir `createHash().update()`
+   * gaudavo objektą. Vietinis rinkinys to nepagavo: visas šis kelias eina per
+   * `pgDumpBackup.integration`, kuriam reikia tikros DB.
+   */
+  const { plaintext: plaintextBuffer } = backupEncryption.decrypt(envelope, { env, manifest });
+  const plaintext = plaintextBuffer.toString("utf8");
 
   const suma = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
   if (suma !== manifest.checksum) {

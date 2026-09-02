@@ -12,6 +12,13 @@ process.env.LOG_LEVEL = "error";
 const SAKNIS = path.resolve(__dirname, "..");
 
 /**
+ * ⚠️ SĄMONINGAI NEPASIEKIAMA. Fail-closed patikros privalo kristi PRIEŠ bet kokį
+ * prisijungimą; jei testas kada nors kris su prisijungimo klaida, tai reikš, kad
+ * tvarka pasikeitė ir patikra nukeliavo po `psql`.
+ */
+const NEPASIEKIAMA_DB = "postgres://nera:nera@127.0.0.1:1/nera";
+
+/**
  * 7.6a KONTRAKTAS BE PostgreSQL (#155, #248).
  *
  * ⚠️ KĄ ŠIS FAILAS ĮRODO IR KO NE.
@@ -160,5 +167,191 @@ test("#248: `pg_dump` argumentai NELAUŽO nuoseklaus snapshot'o", () => {
   assert.ok(
     argumentai.includes("--exclude-table-data=audit_log"),
     "`audit_log` privalo likti neimamas"
+  );
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * KRIPTOGRAFINIS RATAS BE DUOMENŲ BAZĖS
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+const backupEncryption = require("../utils/backupEncryption");
+const backupManifest = require("../utils/backupManifest");
+
+/** Artefaktas, identiškas tam, kurį gamina `sukurtiSifruotaKopija()`. */
+function artefaktas(sql, env) {
+  const plaintext = `${pgDumpBackup.ANTRASTE}\n${pgDumpBackup.ANTRASTES_VERSIJA}\n${pgDumpBackup.DUMP_FORMATAS}\n\n${sql}`;
+  const checksum = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
+
+  const manifest = backupManifest.createManifest({ contents: [], checksum, env });
+  manifest.encrypted = true;
+  manifest.encryptionAlgorithm = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+  manifest.snapshotTime = new Date().toISOString();
+  manifest.excludedInFlightJobs = 0;
+
+  return { plaintext, manifest, envelope: backupEncryption.encrypt(plaintext, { env, manifest }) };
+}
+
+test("#248 ⚠️ šifravimo ratas ir antraštė tikrinami BE duomenų bazės", () => {
+  /**
+   * ⚠️ ŠIS TESTAS ATSIRADO IŠ CI RADINIO, IR JO NEBUVIMAS BUVO KLAIDA.
+   *
+   * `decrypt()` grąžina `{ plaintext: Buffer, usedPreviousKey }`, NE eilutę.
+   * Pirmoji `atkurtiSifruotaKopija()` redakcija reikšmę naudojo tiesiogiai, ir
+   * `createHash().update()` gaudavo objektą. Vietinis rinkinys to nepagavo,
+   * nes VISAS kriptografinis ratas buvo pasiekiamas tik per integracinį testą su
+   * tikra DB.
+   *
+   * Bet ratui duomenų bazės NEREIKIA: šifravimas, dešifravimas, kontrolinė suma
+   * ir antraštės perskaitymas yra grynas darbas su baitais. Palikus jį už NOT RUN
+   * ribos, trys svarbiausios patikros liko be vietinio įrodymo be jokios
+   * priežasties.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  const { plaintext, manifest, envelope } = artefaktas("CREATE TABLE t (id int);", env);
+
+  const { plaintext: grazintas } = backupEncryption.decrypt(envelope, { env, manifest });
+  assert.ok(Buffer.isBuffer(grazintas), "⚠️ `decrypt()` grąžina Buffer - kontraktas, ne detalė");
+  assert.equal(grazintas.toString("utf8"), plaintext, "ratas grąžina tą patį turinį");
+
+  const suma = crypto.createHash("sha256").update(grazintas.toString("utf8"), "utf8").digest("hex");
+  assert.equal(suma, manifest.checksum, "kontrolinė suma skaičiuojama nuo TO PATIES atvaizdo");
+});
+
+test("#248 ⚠️ sugadintas ciphertext ir blogas raktas krinta BE duomenų bazės", () => {
+  /**
+   * ⚠️ MF/ME MUTACIJOS DABAR PAGAUNAMOS VIETOJE.
+   *
+   * Anksčiau kontrolinės sumos ir rūšies antraštės patikros buvo tikrinamos tik
+   * per `psql` kelią, tad jų mutacijos vietoje nekrisdavo. Tai buvo per plati
+   * NOT RUN riba: patikros yra apie BAITUS, ne apie duomenų bazę.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  const { manifest, envelope } = artefaktas("SELECT 1;", env);
+
+  /** Sugadintas ciphertext - GCM žyma nebesutampa. */
+  const sugadintas = { ...envelope };
+  const b = Buffer.from(sugadintas.ciphertext, "base64");
+  b[Math.floor(b.length / 2)] ^= 0xff;
+  sugadintas.ciphertext = b.toString("base64");
+  assert.throws(() => backupEncryption.decrypt(sugadintas, { env, manifest }));
+
+  /** Blogas raktas. */
+  const kitasEnv = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  assert.throws(() => backupEncryption.decrypt(envelope, { env: kitasEnv, manifest }));
+
+  /** Suklastotas AAD laukas. */
+  assert.throws(() =>
+    backupEncryption.decrypt(envelope, {
+      env,
+      manifest: { ...manifest, snapshotTime: new Date(0).toISOString() },
+    })
+  );
+});
+
+test("#248 ⚠️ svetimas artefaktas atmetamas dėl RŪŠIES, be duomenų bazės", async () => {
+  /**
+   * ⚠️ RŪŠIES ANTRAŠTĖ YRA D1 SPRENDIMO ŠERDIS, ir jos mutacija (ME) iki šiol
+   * vietoje nekrisdavo.
+   *
+   * Aplikacijos JSON kopija yra TEISĖTAS artefaktas su galiojančiu manifestu ir
+   * galiojančia GCM žyma — nuo dump'o ją skiria TIK antraštė šifruotame
+   * turinyje. Be tos patikros JSON būtų paduotas tiesiai į `psql`.
+   *
+   * ⚠️ `targetUrl` nurodomas, bet DB nepasiekiama IR NETURI BŪTI: patikra krinta
+   * PRIEŠ bet kokį prisijungimą. Jei kada nors kris su prisijungimo klaida, tai
+   * reikš, kad tvarka pasikeitė.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+
+  const plaintext = JSON.stringify({ jobs: [], sessions: [] });
+  const checksum = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
+  const manifest = backupManifest.createManifest({ contents: [], checksum, env });
+  manifest.encrypted = true;
+  manifest.encryptionAlgorithm = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+  manifest.snapshotTime = new Date().toISOString();
+  manifest.excludedInFlightJobs = 0;
+
+  const envelope = backupEncryption.encrypt(plaintext, { env, manifest });
+
+  await assert.rejects(
+    () =>
+      pgDumpBackup.atkurtiSifruotaKopija({
+        envelope,
+        manifest,
+        targetUrl: NEPASIEKIAMA_DB,
+        env,
+      }),
+    (err) => {
+      assert.equal(
+        err.code,
+        "PG_DUMP_HEADER_MISSING",
+        `⚠️ privalo kristi dėl RŪŠIES, ne dėl prisijungimo. Gauta: ${err.code}`
+      );
+      return true;
+    }
+  );
+});
+
+test("#248 ⚠️ TEISINGOS FORMOS, bet SVETIMOS rūšies artefaktas atmetamas", async () => {
+  /**
+   * ⚠️ ATSKIRAS ATVEJIS NUO „NĖRA ANTRAŠTĖS" (mutacija ME).
+   *
+   * Aplikacijos JSON neturi `\n\n`, tad jis krinta jau ties
+   * `PG_DUMP_HEADER_MISSING` ir RŪŠIES patikros nepasiekia. Pirmoji šio failo
+   * redakcija to nepastebėjo: ME mutacija (rūšies palyginimo išjungimas)
+   * nekrisdavo, nors testas atrodė ją dengiantis.
+   *
+   * Todėl čia artefaktas turi TEISINGĄ formą — antraštės bloką ir `\n\n` — bet
+   * svetimą rūšies eilutę. Tokį galėtų pagaminti kita to paties formato
+   * procedūra.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+
+  const plaintext = `KITA-SISTEMA-DUMP\n${pgDumpBackup.ANTRASTES_VERSIJA}\n${pgDumpBackup.DUMP_FORMATAS}\n\nSELECT 1;`;
+  const checksum = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
+  const manifest = backupManifest.createManifest({ contents: [], checksum, env });
+  manifest.encrypted = true;
+  manifest.encryptionAlgorithm = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+  manifest.snapshotTime = new Date().toISOString();
+  manifest.excludedInFlightJobs = 0;
+
+  const envelope = backupEncryption.encrypt(plaintext, { env, manifest });
+
+  await assert.rejects(
+    () => pgDumpBackup.atkurtiSifruotaKopija({ envelope, manifest, targetUrl: NEPASIEKIAMA_DB, env }),
+    (err) => {
+      assert.equal(err.code, "PG_DUMP_KIND_MISMATCH", `gauta: ${err.code}`);
+      return true;
+    }
+  );
+});
+
+test("#248 ⚠️ nesutampanti kontrolinė suma krinta PRIEŠ prisijungimą", async () => {
+  /**
+   * ⚠️ MUTACIJA MF IKI ŠIOL VIETOJE NEKRISDAVO.
+   *
+   * Kontrolinės sumos palyginimas yra darbas su baitais — duomenų bazės jam
+   * nereikia. Palikus jį tik integraciniame teste, patikra liko be vietinio
+   * įrodymo be jokios priežasties.
+   *
+   * ⚠️ `targetUrl` nurodo NEPASIEKIAMĄ bazę sąmoningai: jei kada nors kris su
+   * prisijungimo klaida, tai reikš, kad patikra nukeliavo PO `psql`, ir
+   * fail-closed tvarka lūžo.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  const { manifest, envelope } = artefaktas("SELECT 1;", env);
+
+  await assert.rejects(
+    () =>
+      pgDumpBackup.atkurtiSifruotaKopija({
+        envelope,
+        manifest: { ...manifest, checksum: "0".repeat(64) },
+        targetUrl: NEPASIEKIAMA_DB,
+        env,
+      }),
+    (err) => {
+      assert.equal(err.code, "BACKUP_CHECKSUM_MISMATCH", `gauta: ${err.code}`);
+      return true;
+    }
   );
 });
