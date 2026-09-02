@@ -5,6 +5,7 @@ const { promisify } = require("node:util");
 const backupEncryption = require("./backupEncryption");
 const backupManifest = require("./backupManifest");
 const backupPolicy = require("./backupPolicy");
+const { pgJungtiesNustatymai, arNurodytaPostgres } = require("./pgConnection");
 const tombstones = require("./deletionTombstones");
 /**
  * ⚠️ NE DESTRUKTŪRIZUOJAMA. Destruktūrizuota nuoroda užfiksuojama `require` metu,
@@ -243,6 +244,13 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
     );
   }
 
+  /**
+   * ⚠️ TAPATUMAS TIKRINAMAS PRIEŠ `pg_dump`, NE PO JO. Atsisakymas po 200 MB
+   * dump'o būtų teisingas, bet brangus, o klaida - ta pati. Tvarka: sprendimas
+   * (`BACKUP_ENABLED`) → artefakto savybė (šifravimas) → tapatumas → darbas.
+   */
+  patikrintiZymuTapatuma(databaseUrl);
+
   const snapshotTime = Date.now();
 
   /**
@@ -298,7 +306,7 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
   manifest.snapshotTime = new Date(snapshotTime).toISOString();
   manifest.excludedInFlightJobs = 0;
 
-  await _uzfiksuotiHorizonta(manifest);
+  await _uzfiksuotiHorizonta(manifest, databaseUrl);
 
   const envelope = backupEncryption.encrypt(plaintext, { env, manifest });
 
@@ -335,6 +343,97 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
 }
 
 /**
+ * ŽYMŲ SAUGYKLOS IR DUMP'O ŠALTINIO TAPATUMAS - FAIL-CLOSED (Codex P1, #262).
+ *
+ * ⚠️ HORIZONTAS BE TAPATUMO YRA HORIZONTAS NE TEN.
+ *
+ * `recordBackupHorizon()` eina per `ensureInit()`, o tas renkasi backend'ą iš
+ * GLOBALIOS aplinkos, ne iš `databaseUrl`. Kai jie sutampa - viskas gerai. Kai
+ * operatorius nurodo `--url` kitai bazei, horizontas atsiduria aplikacijos
+ * bazėje, o artefakte guli KITA: dump'intos bazės retencijos ciklas gali
+ * išvalyti žymas, kol artefaktas dar galioja.
+ *
+ * ⚠️ TAI NE ERGONOMIKA, O #250 D4 PRIELAIDA. Eksportas remiasi TUO PAČIU
+ * horizontu, ne sava taisykle. Artefaktas su horizontu kitoje bazėje tą prielaidą
+ * paverčia netiesa nuo pat pradžių, o 7.6c ją rastų kaip „kodėl žymos pasibaigė
+ * anksčiau nei kopija" - jau su trimis judančiomis dalimis vietoj vienos.
+ *
+ * ⚠️ RIBA RUNBOOK'E ČIA NETIKTŲ. Dokumentas, sakantis „nenurodykite kitos
+ * bazės", saugo nuo klaidos, kurios niekas nesustabdo, o klaidos kaina yra
+ * tyliai negaliojanti GDPR garantija, matoma tik po atkūrimo.
+ *
+ * ⚠️ KODĖL NE `tombstones.init(env)` SU ŠALTINIO NUSTATYMAIS. Bendrame procese
+ * tai perimtų globalią saugyklos būseną iš serverio - ta pati „vieno entrypoint'o
+ * dvi saugyklos" klasė, kurią kaip tik uždaro CLI inicijavimas.
+ *
+ * ⚠️ PALYGINIMAS PAGAL KONSTRUKCIJĄ, SU TA PAČIA RIBA KAIP `pgConnection.js`:
+ * du klasteriai tame pačiame hoste su vienodu bazės vardu palyginime sutaptų.
+ * Tai TRIPWIRE riba, ne mechanizmo skylė - ji užrašyta ir ten, ir čia.
+ */
+function _jungtiesTapatybe(nustatymai) {
+  if (nustatymai.connectionString) {
+    try {
+      const u = new URL(nustatymai.connectionString);
+      return {
+        host: (u.hostname || "").toLowerCase(),
+        port: u.port || "5432",
+        database: decodeURIComponent(u.pathname.replace(/^\//, "")),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  if (!nustatymai.host && !nustatymai.database) return null;
+
+  return {
+    host: String(nustatymai.host || "").toLowerCase(),
+    port: String(nustatymai.port || "5432"),
+    database: String(nustatymai.database || ""),
+  };
+}
+
+function _tapatybesTekstas(t) {
+  return t ? `${t.host}:${t.port}/${t.database}` : "<neatpažinta>";
+}
+
+/**
+ * Ar žymų saugykla gyvena TOJE PAČIOJE bazėje, kurią dump'iname?
+ *
+ * ⚠️ TIKRINAMA PRIEŠ `process.env`, NE PRIEŠ INJEKTUOTĄ `env`. Žymų saugykla
+ * jungiasi būtent iš globalios aplinkos, tad palyginimas su injektuotu objektu
+ * lygintų su tuo, ko saugykla niekada nematė.
+ */
+function patikrintiZymuTapatuma(databaseUrl, env = process.env) {
+  if (!arNurodytaPostgres(env)) {
+    throw new PgDumpBackupError(
+      "Ištrynimo žymų saugykla nėra PostgreSQL (`DATABASE_URL`/`PGHOST` nenurodyti), " +
+        "tad kopijos galiojimas būtų užfiksuotas atmintyje ir dingtų procesui pasibaigus.",
+      "PG_BACKUP_HORIZON_NOT_PERSISTENT"
+    );
+  }
+
+  const zymos = _jungtiesTapatybe(pgJungtiesNustatymai(env));
+  const saltinis = _jungtiesTapatybe({ connectionString: databaseUrl });
+
+  const sutampa =
+    zymos !== null &&
+    saltinis !== null &&
+    zymos.host === saltinis.host &&
+    zymos.port === saltinis.port &&
+    zymos.database === saltinis.database;
+
+  if (!sutampa) {
+    throw new PgDumpBackupError(
+      `Dump'o šaltinis (${_tapatybesTekstas(saltinis)}) nesutampa su ištrynimo žymų baze ` +
+        `(${_tapatybesTekstas(zymos)}). Kopijos galiojimas atsidurtų ne toje bazėje, kurios ` +
+        "žymas jis privalo saugoti, tad kopija neišduodama.",
+      "PG_BACKUP_SOURCE_MISMATCH"
+    );
+  }
+}
+
+/**
  * KOPIJOS GALIOJIMO HORIZONTAS - FAIL-CLOSED (Codex P1).
  *
  * ⚠️ NUO ŠIO ĮRAŠO PRIKLAUSO 7.6c (#250) PRIELAIDA.
@@ -353,7 +452,9 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
  * VISĄ bazę. Artefaktas, kurio horizontas neužfiksuotas, yra tiksliai tas
  * atvejis, dėl kurio garantija netenka galios, tad jo išduoti negalima.
  */
-async function _uzfiksuotiHorizonta(manifest) {
+async function _uzfiksuotiHorizonta(manifest, databaseUrl = null) {
+  if (databaseUrl) patikrintiZymuTapatuma(databaseUrl);
+
   const galiojaIki = Date.parse(manifest.expiresAt);
   if (!Number.isFinite(galiojaIki)) {
     throw new PgDumpBackupError(
@@ -442,6 +543,23 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
   }
 
   /**
+   * ⚠️ PROGRAMOS VERSIJA - ATSKIRA AŠIS NUO FORMATO (Codex P2).
+   *
+   * `restoreService` jas skiria sąmoningai: nepakitęs envelope formatas
+   * nereiškia nepakitusios schemos ar dalykinės semantikos. Elgesys perimamas
+   * PAŽODŽIUI, ne perprojektuojamas - `unknown` praleidžiamas su įspėjimu
+   * (supakuotoje aplinkoje `package.json` gali būti nepasiekiamas, ir atmesta
+   * kopija reikštų neįmanomą atkūrimą būtent ten, kur jo labiausiai reikia).
+   */
+  const versija = _patikrintiProgramosVersija(manifest.applicationVersion);
+  if (!versija.compatible) {
+    throw new PgDumpBackupError(
+      `Kopijos programos versija nesuderinama: ${versija.reason}.`,
+      "BACKUP_APPLICATION_VERSION_INCOMPATIBLE"
+    );
+  }
+
+  /**
    * GCM žyma ir AAD — krinta čia, PRIEŠ bet kokį SQL.
    *
    * ⚠️ `decrypt()` GRĄŽINA `{ plaintext: Buffer, usedPreviousKey }`, NE EILUTĘ.
@@ -487,6 +605,35 @@ async function atkurtiSifruotaKopija({ envelope, manifest, targetUrl, env = proc
 
   log.info("PostgreSQL kopija atkurta", { stage: "pg_restore_done" });
   return { restoredBytes: Buffer.byteLength(sql, "utf8") };
+}
+
+/** ⚠️ Kopija iš `restoreService._majorOf` - ta pati taisyklė abiejuose keliuose. */
+function _majorOf(version) {
+  const match = String(version || "").match(/^(\d+)\./);
+  return match ? Number(match[1]) : null;
+}
+
+function _patikrintiProgramosVersija(backupVersion) {
+  if (!backupVersion || backupVersion === "unknown") {
+    log.warn("Kopijos programos versija nežinoma - atkuriama be versijos patikros");
+    return { compatible: true };
+  }
+
+  const dabartine = _majorOf(require("../package.json").version);
+  const kopijos = _majorOf(backupVersion);
+
+  if (dabartine === null || kopijos === null) {
+    return { compatible: false, reason: `netinkamas versijos formatas: "${backupVersion}"` };
+  }
+
+  if (dabartine !== kopijos) {
+    return {
+      compatible: false,
+      reason: `nesuderinama programos versija (kopija ${kopijos}.x, sistema ${dabartine}.x)`,
+    };
+  }
+
+  return { compatible: true };
 }
 
 /**
@@ -614,6 +761,7 @@ module.exports = {
   bePaslapciu,
   saugusStderr,
   perskaitytiObjektuSkaiciu,
+  patikrintiZymuTapatuma,
   klientoVersija,
   /**
    * ⚠️ EKSPORTUOJAMA DĖL TESTO, IR TAI UŽRAŠYTA. Horizonto fiksavimas yra

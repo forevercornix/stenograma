@@ -446,6 +446,10 @@ Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
 ⚠️ **`BACKUP_ENABLED=true` privalomas.** Išjungtos kopijos reiškia išjungtas ir
 šias: `dump` krinta su `BACKUP_DISABLED` dar prieš jungiantis prie bazės.
 
+⚠️ **Auditas ir žymų saugykla CLI'e inicijuojamos ir uždaromos.** Be to su
+`AUDIT_BACKEND=postgres` įrašas nukeliautų į atminties fasadą ir dingtų procesui
+pasibaigus — komanda praneštų sėkmę, o audito žurnale įrašo nebūtų.
+
 ⚠️ **`--actor` privalomas `dump` komandai** — juo pasirašomas audito įrašas
 `PG_DUMP_BACKUP_CREATED`. Be jo komanda krinta su exit kodu `1`.
 
@@ -471,6 +475,19 @@ argumentų eilutė su slaptažodžiu.
   ⚠️ **Praktinė pasekmė, išmatuota CI'uje:** bazė be įdiegtos ištrynimo žymų
   infrastruktūros (`erasure_marks`) kopijos **neišduoda** — komanda krinta su
   `PG_BACKUP_HORIZON_UNRECORDED`. Prieš pirmą kopiją paleiskite migracijas.
+- **Horizontą TOJE PAT bazėje, kurią dump'iname.** Šaltinis privalo sutapti su
+  ištrynimo žymų baze (`DATABASE_URL` arba `PG*`); kitaip komanda atsisako
+  dirbti (`PG_BACKUP_SOURCE_MISMATCH`) dar prieš `pg_dump`.
+  ⚠️ **Todėl `--url` NĖRA būdas dump'inti svetimą bazę** — jis skirtas nurodyti
+  jungtį, kai `DATABASE_URL` neeksportuotas shell'e. Svetimos bazės kopija būtų
+  sukurta sėkmingai, o jos galiojimas užfiksuotas KITOS bazės `backup_horizon`
+  lentelėje: 7.6c (#250) tai rastų kaip „kodėl žymos pasibaigė anksčiau nei
+  kopija". Atmintinė žymų saugykla (be `DATABASE_URL`/`PGHOST`) taip pat
+  atmetama — horizontas dingtų procesui pasibaigus
+  (`PG_BACKUP_HORIZON_NOT_PERSISTENT`).
+- **Programos versijos ribą.** Kito MAJOR'o kopija atmetama prieš `psql`
+  (`BACKUP_APPLICATION_VERSION_INCOMPATIBLE`); `unknown` praleidžiama su
+  įspėjimu — tas pats elgesys kaip `restoreService`, perimtas pažodžiui.
 - **Kūrimo auditą su aktoriumi.** `PG_DUMP_BACKUP_CREATED`, atskiras nuo
   aplikacijos kopijos `BACKUP_CREATED`. ⚠️ **Atkūrimo pusėje audito NĖRA** — žr.
   §10 ir §11.

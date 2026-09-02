@@ -564,3 +564,116 @@ test("#262: netuščios bazės patikra yra FAIL-CLOSED prie neaiškios išvestie
     );
   }
 });
+
+test("#262 Codex P1: žymų saugykla PRIVALO gyventi toje pačioje bazėje", () => {
+  /**
+   * ⚠️ TAI NE ERGONOMIKA, O #250 D4 PRIELAIDA. Eksportas remsis TUO PAČIU
+   * horizontu, ne sava taisykle. Artefaktas, kurio horizontas užfiksuotas kitoje
+   * bazėje, tą prielaidą paverčia netiesa nuo pat pradžių — ir 7.6c ją rastų kaip
+   * „kodėl žymos pasibaigė anksčiau nei kopija", jau su trimis judančiomis
+   * dalimis vietoj vienos.
+   */
+  const SALTINIS = "postgres://vartotojas:slaptas@db.vidinis:5432/stenograma";
+
+  pgDumpBackup.patikrintiZymuTapatuma(SALTINIS, { DATABASE_URL: "postgres://kitas:kitoks@db.vidinis:5432/stenograma" });
+  pgDumpBackup.patikrintiZymuTapatuma(SALTINIS, {
+    PGHOST: "db.vidinis",
+    PGPORT: "5432",
+    PGDATABASE: "stenograma",
+  });
+
+  const atmeta = (env, kodas, kodel) =>
+    assert.throws(
+      () => pgDumpBackup.patikrintiZymuTapatuma(SALTINIS, env),
+      (err) => {
+        assert.equal(err.code, kodas, kodel);
+        assert.equal(err.message.includes("slaptas"), false, "klaidoje negali būti kredencialų");
+        return true;
+      },
+      kodel
+    );
+
+  atmeta({ DATABASE_URL: "postgres://u:p@db.vidinis:5432/kita" }, "PG_BACKUP_SOURCE_MISMATCH", "kita bazė");
+  atmeta({ DATABASE_URL: "postgres://u:p@kitas.host:5432/stenograma" }, "PG_BACKUP_SOURCE_MISMATCH", "kitas hostas");
+  atmeta({ DATABASE_URL: "postgres://u:p@db.vidinis:5433/stenograma" }, "PG_BACKUP_SOURCE_MISMATCH", "kitas portas");
+  atmeta({ PGHOST: "db.vidinis", PGDATABASE: "kita" }, "PG_BACKUP_SOURCE_MISMATCH", "PG* ašis tikrinama vienodai");
+
+  /**
+   * ⚠️ ATMINTIES SAUGYKLA — ATSKIRA KLAIDA. Horizontas joje būtų užfiksuotas ir
+   * dingtų procesui pasibaigus: garantija formaliai „įvykdyta", faktiškai — ne.
+   */
+  atmeta({}, "PG_BACKUP_HORIZON_NOT_PERSISTENT", "be PostgreSQL žymų saugyklos");
+
+  atmeta({ DATABASE_URL: "ne url" }, "PG_BACKUP_SOURCE_MISMATCH", "neatpažinta jungtis = fail-closed");
+});
+
+test("#262 Codex P2: kito MAJOR'o kopija atmetama, `unknown` — praleidžiama", async () => {
+  /**
+   * ⚠️ ELGESYS PERIMAMAS PAŽODŽIUI IŠ `restoreService`, ne perprojektuojamas:
+   * nepakitęs envelope formatas nereiškia nepakitusios schemos, o `unknown`
+   * atsiranda supakuotoje aplinkoje, kur atmetimas reikštų neįmanomą atkūrimą.
+   */
+  const env = { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey() };
+  const plaintext = `${pgDumpBackup.ANTRASTE}\n${pgDumpBackup.ANTRASTES_VERSIJA}\n${pgDumpBackup.DUMP_FORMATAS}\n\nSELECT 1;`;
+  const checksum = crypto.createHash("sha256").update(plaintext, "utf8").digest("hex");
+
+  const artefaktasSuVersija = (applicationVersion) => {
+    const manifest = backupManifest.createManifest({ contents: [], checksum, env });
+    manifest.applicationVersion = applicationVersion;
+    manifest.encrypted = true;
+    manifest.encryptionAlgorithm = `${backupEncryption.ALGORITHM}-${backupEncryption.FORMAT}`;
+    manifest.snapshotTime = new Date().toISOString();
+    manifest.excludedInFlightJobs = 0;
+    return { manifest, envelope: backupEncryption.encrypt(plaintext, { env, manifest }) };
+  };
+
+  const dabartinis = Number(require("../package.json").version.split(".")[0]);
+  const kitas = artefaktasSuVersija(`${dabartinis + 7}.0.0`);
+
+  await assert.rejects(
+    () => pgDumpBackup.atkurtiSifruotaKopija({ ...kitas, targetUrl: NEPASIEKIAMA_DB, env }),
+    (err) => {
+      assert.equal(err.code, "BACKUP_APPLICATION_VERSION_INCOMPATIBLE");
+      return true;
+    }
+  );
+
+  /**
+   * ⚠️ `unknown` PRAEINA VERSIJOS VARTUS — ir tai matoma iš to, KURI klaida
+   * grąžinama: kelias nueina iki tikslinės bazės zondo, t. y. iki pat paskutinės
+   * grandies pakopos.
+   */
+  const nezinomas = artefaktasSuVersija("unknown");
+  await assert.rejects(
+    () => pgDumpBackup.atkurtiSifruotaKopija({ ...nezinomas, targetUrl: NEPASIEKIAMA_DB, env }),
+    (err) => {
+      assert.equal(err.code, "PG_RESTORE_PREFLIGHT_FAILED", "`unknown` neturi būti atmetamas dėl versijos");
+      return true;
+    }
+  );
+});
+
+test("#262 Codex P2: CLI inicijuoja IR uždaro abi saugyklas (statinė forma, §9.2)", () => {
+  /**
+   * ⚠️ REPO ATSAKYMĄ JAU TURĖJO: `scripts/erasure-marks.js` tą pačią klaidą
+   * aprašo kaip „vieno entrypoint'o dvi saugyklos, ir inicijuota buvo tik viena".
+   * Elgesio patikrai reikėtų tikro `AUDIT_BACKEND=postgres` proceso, tad čia
+   * tikrinama FORMA; kad įrašas realiai rašomas, tikrina integracinis testas.
+   */
+  /**
+   * ⚠️ KOMENTARAI NUKERPAMI PRIEŠ PALYGINIMĄ, IR TAI NE FORMALUMAS.
+   *
+   * Pirmoji šio testo redakcija skaitė failą kaip yra, o `auditStore.init()`
+   * minimas ir viršuje esančiame komentare - todėl mutacija „pašalinti
+   * `await auditStore.init()`" testo NESULAUŽĖ. Statinė patikra, kuri gaudo
+   * savo pačios dokumentaciją, neįrodo nieko (§9.2).
+   */
+  const cli = fs
+    .readFileSync(path.join(SAKNIS, "scripts", "pg-backup.mjs"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  assert.match(cli, /await auditStore\.init\(\)/, "auditas be `init()` rašytų į atmintį");
+  assert.match(cli, /auditStore\.shutdown\(\)/);
+  assert.match(cli, /tombstones\.shutdown\(\)/);
+});

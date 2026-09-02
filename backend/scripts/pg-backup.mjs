@@ -32,6 +32,31 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const pgDumpBackup = require("../utils/pgDumpBackup");
+const auditStore = require("../utils/auditStore");
+const tombstones = require("../utils/deletionTombstones");
+
+/**
+ * ⚠️ SAUGYKLOS INICIJUOJAMOS IR UŽDAROMOS (Codex P2, #262) - TAS PATS SPRENDIMAS
+ * KAIP `scripts/erasure-marks.js:160-175`.
+ *
+ * Be `auditStore.init()` su `AUDIT_BACKEND=postgres` `rasytiAudita()` rašo į
+ * numatytąjį ATMINTIES fasadą (`auditStore/index.js:126`): komanda praneša
+ * sėkmę, o `PG_DUMP_BACKUP_CREATED` dingsta procesui pasibaigus. Runbook'o §11
+ * garantija liktų be įrašo.
+ *
+ * ⚠️ REPO ATSAKYMĄ JAU TURĖJO. `erasure-marks.js` tą pačią klaidą užrašė kaip
+ * „vieno entrypoint'o dvi saugyklos, ir inicijuota buvo tik viena"; šis kelias
+ * jo nepaėmė. Tai antras kartas šiame darbe, kai atsakymas repo jau buvo
+ * (pirmas - `checkRestoreCompatibility`).
+ *
+ * ⚠️ UŽDAROMA ABIEM KELIAIS. Neuždarius pool'o `process.exit()` nutraukia
+ * jungtis nelaukdamas `COMMIT` patvirtinimo; uždarymo klaidos nutylimos, nes
+ * rezultatas jau yra, o triukšmas paslėptų tikrąjį atsakymą.
+ */
+async function isvalyti() {
+  await auditStore.shutdown().catch(() => {});
+  await tombstones.shutdown().catch(() => {});
+}
 
 function argumentas(vardas, numatytas = undefined) {
   const i = process.argv.indexOf(`--${vardas}`);
@@ -47,6 +72,8 @@ function mirti(zinute, kodas) {
 const komanda = process.argv[2];
 
 try {
+  await auditStore.init();
+
   if (komanda === "dump") {
     const out = argumentas("out");
     if (!out) mirti("`dump` reikalauja `--out <failas>`.", 1);
@@ -78,5 +105,8 @@ try {
     mirti("Nežinoma komanda. Naudokite `dump` arba `restore`.", 1);
   }
 } catch (klaida) {
+  await isvalyti();
   mirti(`${klaida.code || klaida.name}: ${pgDumpBackup.bePaslapciu(klaida.message)}`, 2);
 }
+
+await isvalyti();

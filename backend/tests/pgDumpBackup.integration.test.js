@@ -171,10 +171,13 @@ test("7.6a: šifruota kopija ir atkūrimas", { skip: praleisti() }, async (t) =>
   jobId = await uzpildytiSaltini(auditoSentinelis);
 
   await t.test("kopija sukuriama ir yra ŠIFRUOTA", { timeout: 120000 }, async () => {
-    kopija = await pgDumpBackup.sukurtiSifruotaKopija({
-      databaseUrl: SALTINIO_URL,
-      env: TESTO_ENV,
-    });
+    kopija = await suZymuAplinka(SALTINIO_URL, () =>
+      pgDumpBackup.sukurtiSifruotaKopija({
+        databaseUrl: SALTINIO_URL,
+        actor: "operatorius-testas",
+        env: TESTO_ENV,
+      })
+    );
 
     assert.equal(kopija.manifest.encrypted, true);
     assert.match(kopija.manifest.encryptionAlgorithm, /aes-256-gcm/);
@@ -336,10 +339,13 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
   await perkurtiDb(SALTINIO_URL);
   await uzpildytiSaltini(auditoSentinelis);
 
-  const kopija = await pgDumpBackup.sukurtiSifruotaKopija({
-    databaseUrl: SALTINIO_URL,
-    env: TESTO_ENV,
-  });
+  const kopija = await suZymuAplinka(SALTINIO_URL, () =>
+    pgDumpBackup.sukurtiSifruotaKopija({
+      databaseUrl: SALTINIO_URL,
+      actor: "operatorius-testas",
+      env: TESTO_ENV,
+    })
+  );
 
   /** Kiek lentelių yra tikslinėje bazėje? Tuščioje - nulis. */
   async function lenteliuSkaicius() {
@@ -552,28 +558,45 @@ test("7.6a: rūšies antraštė yra FAIL-CLOSED (ne pg_dump artefaktas)", { skip
  * kad horizontas ir auditas realiai ĮJUNGTI į kopijos kūrimą, ir kad tikra
  * `pg_dump` klaida neišneša slaptažodžio.
  */
-const { mock, before } = require("node:test");
+const { mock } = require("node:test");
 const tombstones = require("../utils/deletionTombstones");
 const auditWrite = require("../utils/auditWrite");
 
 /**
- * ⚠️ ŽYMŲ SAUGYKLA ŠIAM FAILUI — ATMINTYJE, IR TAI CI RADINYS.
+ * ŽYMŲ SAUGYKLA PRIRIŠAMA PRIE DUMP'INAMOS BAZĖS (#262 Codex P1).
  *
- * Horizonto fiksavimas yra fail-closed, tad kopijos kūrimas dabar REIKALAUJA
- * veikiančios ištrynimo žymų saugyklos. CI'uje `DATABASE_URL` rodo į bazę be
- * `erasure_marks`, ir visas šis failas krito su:
+ * ⚠️ DVI PRIEŽASTYS, IR ABI SVARBIOS.
  *
- *   Kopijos galiojimo NEPAVYKO užfiksuoti (relation "erasure_marks" does not exist)
+ * 1. Nuo #262 kopijos kūrimas REIKALAUJA, kad žymų saugykla gyventų TOJE PAČIOJE
+ *    bazėje, kurią dump'iname. Horizontas kitoje bazėje reikštų, kad #250 D4
+ *    prielaida netiesa nuo pat pradžių.
+ * 2. Atmintinė saugykla įrodytų tik tai, kad funkcija IŠKVIESTA. Prisirišus prie
+ *    `dumpsrc` gaunama tikra `backup_horizon` EILUTĖ - t. y. įrodymas, kad
+ *    horizontas atsidūrė toje bazėje, kurios žymas jis privalo saugoti.
  *
- * Tai NE testo triukšmas, o tikra kelio savybė: bazė be ištrynimo žymų
- * infrastruktūros kopijos nebeišduoda. Čia saugykla inicijuojama EKSPLICITIŠKAI
- * atmintyje - taip fiksuojamas REALUS `recordBackupHorizon()` kvietimas (ne
- * mock'as), o postgres žymų saugyklą tikrina `erasureMarks.integration`.
+ * ⚠️ CI RADINYS, DĖL KURIO ŠIS KELIAS APSKRITAI ATSIRADO: `DATABASE_URL` rodė į
+ * bazę be `erasure_marks`, ir visas failas krito su „relation "erasure_marks"
+ * does not exist". Tai ne testo triukšmas, o tikra kelio savybė - bazė be
+ * ištrynimo žymų infrastruktūros kopijos nebeišduoda.
+ *
+ * ⚠️ `process.env`, NE INJEKTUOTAS `env`: saugykla jungiasi iš globalios
+ * aplinkos, ir tapatumo patikra lygina būtent ją.
  */
-before(async () => {
+async function suZymuAplinka(url, veiksmas, { prijungti = true } = {}) {
+  const senas = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = url;
+
   await tombstones.shutdown().catch(() => {});
-  await tombstones.init({ NODE_ENV: "test" });
-});
+  if (prijungti) await tombstones.init(process.env);
+
+  try {
+    return await veiksmas();
+  } finally {
+    await tombstones.shutdown().catch(() => {});
+    if (senas === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = senas;
+  }
+}
 
 test("#262: horizontas ir auditas ĮJUNGTI į kopijos kūrimą", { skip: praleisti() }, async (t) => {
   t.after(async () => {
@@ -587,20 +610,27 @@ test("#262: horizontas ir auditas ĮJUNGTI į kopijos kūrimą", { skip: praleis
 
   try {
     /**
-     * ⚠️ HORIZONTAS TIKRINAMAS PER SAUGYKLĄ, NE PER MOCK'Ą. Mock'as įrodytų tik
-     * tai, kad funkcija kviečiama; skaitymas atgal įrodo, kad reikšmė REALIAI
-     * užfiksuota - o būtent tuo remsis 7.6c.
+     * ⚠️ HORIZONTAS TIKRINAMAS PER `backup_horizon` EILUTĘ TOJE BAZĖJE, KURIĄ
+     * DUMP'INOME - ne per mock'ą ir ne per atmintinę saugyklą.
+     *
+     * Mock'as įrodytų tik tai, kad funkcija kviečiama; atmintinė saugykla - kad
+     * reikšmė kažkur atsidūrė. #250 D4 remiasi tuo, kad ji atsidūrė BŪTENT ten,
+     * kur gyvena tos bazės ištrynimo žymos, ir tik SQL užklausa tai parodo.
      */
-    const kopija = await pgDumpBackup.sukurtiSifruotaKopija({
-      databaseUrl: SALTINIO_URL,
-      actor: "operatorius-testas",
-      env: TESTO_ENV,
-    });
+    const kopija = await suZymuAplinka(SALTINIO_URL, () =>
+      pgDumpBackup.sukurtiSifruotaKopija({
+        databaseUrl: SALTINIO_URL,
+        actor: "operatorius-testas",
+        env: TESTO_ENV,
+      })
+    );
 
+    const { rows } = await vykdyti(SALTINIO_URL, "SELECT expires_at FROM backup_horizon");
+    assert.equal(rows.length, 1, "horizontas privalo gulėti dump'intos bazės lentelėje");
     assert.equal(
-      await tombstones.refreshBackupHorizon(),
+      new Date(rows[0].expires_at).getTime(),
       Date.parse(kopija.manifest.expiresAt),
-      "saugykloje privalo gulėti TO PATIES manifesto galiojimas, ne apytikslis laikas"
+      "eilutėje privalo būti TO PATIES manifesto galiojimas, ne apytikslis laikas"
     );
 
     assert.equal(auditas.mock.callCount(), 1);
@@ -628,7 +658,10 @@ test("#262: horizonto NEUŽFIKSAVUS kopija NEIŠDUODAMA", { skip: praleisti() },
 
   try {
     await assert.rejects(
-      () => pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: SALTINIO_URL, actor: "operatorius-testas", env: TESTO_ENV }),
+      () =>
+        suZymuAplinka(SALTINIO_URL, () =>
+          pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: SALTINIO_URL, actor: "operatorius-testas", env: TESTO_ENV })
+        ),
       (err) => {
         assert.equal(err.code, "PG_BACKUP_HORIZON_UNRECORDED");
         return true;
@@ -659,8 +692,19 @@ test("#262: tikra `pg_dump` klaida NEIŠNEŠA slaptažodžio", { skip: praleisti
   nesamaDb.password = "SLAPTAZODIS123";
   nesamaDb.pathname = "/nera_tokios_bazes_248";
 
+  /**
+   * ⚠️ ŽYMŲ APLINKA RIŠAMA PRIE TOS PAČIOS NESAMOS BAZĖS, BET SAUGYKLA
+   * NEJUNGIAMA: tapatumo patikra lygina konfigūraciją ir praeina, o kelias
+   * krinta ten, kur ir turi - ties `pg_dump`. Kitaip testas įrodytų tapatumo
+   * patikrą, ne redagavimą.
+   */
   await assert.rejects(
-    () => pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: nesamaDb.toString(), actor: "operatorius-testas", env: TESTO_ENV }),
+    () =>
+      suZymuAplinka(
+        nesamaDb.toString(),
+        () => pgDumpBackup.sukurtiSifruotaKopija({ databaseUrl: nesamaDb.toString(), actor: "operatorius-testas", env: TESTO_ENV }),
+        { prijungti: false }
+      ),
     (err) => {
       assert.equal(err.code, "PG_DUMP_FAILED");
       assert.equal(err.message.includes("SLAPTAZODIS123"), false, "slaptažodis negali patekti į klaidos žinutę");
@@ -686,11 +730,13 @@ test("#262: NETUŠČIA tikslinė bazė atmetama PRIEŠ pirmą SQL sakinį", { sk
   await perkurtiDb(SALTINIO_URL);
   await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
 
-  const kopija = await pgDumpBackup.sukurtiSifruotaKopija({
-    databaseUrl: SALTINIO_URL,
-    actor: "operatorius-testas",
-    env: TESTO_ENV,
-  });
+  const kopija = await suZymuAplinka(SALTINIO_URL, () =>
+    pgDumpBackup.sukurtiSifruotaKopija({
+      databaseUrl: SALTINIO_URL,
+      actor: "operatorius-testas",
+      env: TESTO_ENV,
+    })
+  );
 
   await perkurtiDb(TIKSLO_URL);
   await vykdyti(TIKSLO_URL, "CREATE TABLE svetimas (id int); INSERT INTO svetimas VALUES (7);");
@@ -722,4 +768,42 @@ test("#262: NETUŠČIA tikslinė bazė atmetama PRIEŠ pirmą SQL sakinį", { sk
     "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'jobs'"
   );
   assert.equal(jobs[0].n, 0, "⚠️ nė vienas kopijos sakinys negalėjo būti įvykdytas");
+});
+
+test("#262: SVETIMOS bazės dump'as atmetamas — horizontas negali gulėti ne ten", { skip: praleisti() }, async (t) => {
+  /**
+   * ⚠️ ŠIS TESTAS SAUGO #250 D4, NE 7.6a ERGONOMIKĄ.
+   *
+   * Su svetima baze kopija būtų sukurta sėkmingai, o jos galiojimas užfiksuotas
+   * KITOS bazės `backup_horizon` lentelėje. 7.6c tai rastų kaip „kodėl žymos
+   * pasibaigė anksčiau nei kopija" — jau turėdamas tris judančias dalis.
+   *
+   * ⚠️ Tikrinama ir tai, kad atsisakoma PRIEŠ `pg_dump`: `dumpdst` bazė net
+   * nesukurta, tad pasiekus `pg_dump` klaida būtų kita.
+   */
+  t.after(async () => {
+    await pasalintiDb(SALTINIO_URL);
+  });
+
+  await perkurtiDb(SALTINIO_URL);
+  await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
+
+  await assert.rejects(
+    () =>
+      suZymuAplinka(SALTINIO_URL, () =>
+        pgDumpBackup.sukurtiSifruotaKopija({
+          databaseUrl: TIKSLO_URL,
+          actor: "operatorius-testas",
+          env: TESTO_ENV,
+        })
+      ),
+    (err) => {
+      assert.equal(err.code, "PG_BACKUP_SOURCE_MISMATCH");
+      assert.equal(err.message.includes("dumpdst"), true, "klaida privalo įvardyti, KAS nesutampa");
+      return true;
+    }
+  );
+
+  const { rows } = await vykdyti(SALTINIO_URL, "SELECT count(*)::int AS n FROM backup_horizon");
+  assert.equal(rows[0].n, 0, "neišduotos kopijos horizontas fiksuoti negali");
 });
