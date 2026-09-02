@@ -232,20 +232,36 @@ function createRedisStore(redisClient) {
       next.version = Number(naujaVersija);
     } else {
       /**
-       * ⚠️ DU ŽINGSNIAI, IR RIBA ĮVARDIJAMA (#184, Codex B6).
+       * ⚠️ VIENA TRANSAKCIJA, NE DU `await` (#184, Codex F1).
        *
        * `HSET` rašo visus laukus IŠSKYRUS `version`, o `HINCRBY` versiją didina
-       * atominiu serverio skaitikliu. Padidinimas nė vieno nepraranda: dvi
-       * mutacijos duoda `+2`, ne `+1`, ir pasenęs snapshot'as CAS'o nebepraeina.
+       * atominiu serverio skaitikliu — padidinimas nė vieno nepraranda.
        *
-       * ⚠️ BET ABU ŽINGSNIAI KARTU NĖRA ATOMINIAI. Tarp jų kitas skaitytojas gali
-       * pamatyti naujus laukus su dar nepadidinta versija. Sąlyginis kelias
-       * (`expectedVersion`) to neturi — ten viskas viename Lua skripte. Šis kelias
-       * yra SISTEMINIS last-write-wins, kurio semantikos 7.5b sąmoningai nekeitė;
-       * čia taisoma tik prarandamų padidinimų klasė.
+       * ⚠️ BET DVIEM ATSKIROMIS KOMANDOMIS TO NEUŽTENKA, IR PIRMOJI ŠIO PR
+       * REDAKCIJA TĄ TIK APRAŠĖ, O NE UŽDARĖ. Jei `HSET` pavyksta, o `HINCRBY`
+       * krenta (nutrūkęs ryšys tarp `await`), lieka NAUJI LAUKAI SU SENA
+       * VERSIJA. Tą versiją turintis klientas tada praeina CAS ir perrašo
+       * neužfiksuotą pakeitimą — t. y. lūžta būtent ta invarianta, kurią B6
+       * atkuria. „Sisteminis last-write-wins" čia buvo klaidingas pateisinimas:
+       * klausimas ne apie laukų nugalėtoją, o apie tai, ar versija seka mutacijas.
+       *
+       * `MULTI`/`EXEC` daro tai viskas-arba-nieko: nutrūkus ryšiui iki `EXEC`,
+       * nepritaikoma nė viena komanda.
        */
-      await redisClient.hset(JOB_PREFIX + id, serializeBeVersijos(next));
-      next.version = Number(await redisClient.hincrby(JOB_PREFIX + id, "version", 1));
+      const rezultatai = await redisClient
+        .multi()
+        .hset(JOB_PREFIX + id, serializeBeVersijos(next))
+        .hincrby(JOB_PREFIX + id, "version", 1)
+        .exec();
+
+      /** `exec()` grąžina `[[err, reikšmė], …]`; versija yra antros komandos rezultatas. */
+      const versijosAtsakas = rezultatai && rezultatai[1];
+      if (!versijosAtsakas || versijosAtsakas[0]) {
+        throw versijosAtsakas && versijosAtsakas[0]
+          ? versijosAtsakas[0]
+          : new Error(`redisStore.update: MULTI/EXEC nepavyko (job ${id}).`);
+      }
+      next.version = Number(versijosAtsakas[1]);
     }
     await redisClient.zadd(INDEX_KEY, Date.now(), id);
     // Baigtiems job'ams - Redis EXPIRE, kad pats išvalytų po TTL. IŠIMTIS:

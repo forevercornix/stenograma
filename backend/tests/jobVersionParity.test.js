@@ -161,21 +161,98 @@ test("#184-B ⚠️ Redis versiją didina SERVERIS, ne JS snapshot'as", async ()
   assert.equal(skaitytas.version, 2);
 });
 
-test("#184-B Redis: dvi mutacijos duoda +2, ne +1", async () => {
+test("#184-B ⚠️ besąlyginis Redis rašymas eina VIENA transakcija", async () => {
   /**
-   * ⚠️ TAI YRA VISO B6 ESMĖ. Su snapshot'o reikšme dvi mutacijos, prasidėjusios
-   * nuo tos pačios `N`, abi įrašydavo `N + 1`. Su serverio skaitikliu
-   * padidinimas neprarandamas net tada, kai abu kvietėjai matė tą patį `N`.
+   * ⚠️ DVI ATSKIROS KOMANDOS NEUŽTENKA (Codex F1).
+   *
+   * Jei `HSET` pavyksta, o `HINCRBY` krenta (nutrūkęs ryšys tarp `await`), lieka
+   * NAUJI LAUKAI SU SENA VERSIJA. Tą versiją turintis klientas tada praeina CAS
+   * ir perrašo neužfiksuotą pakeitimą — lūžta būtent ta invarianta, kurią B6
+   * atkuria.
+   *
+   * Pirmoji šio PR redakcija tą riziką tik APRAŠĖ komentare. Aprašyta skylė
+   * lieka skylė.
+   *
+   * ⚠️ ŠIS TESTAS NEĮRODO REDIS ATOMIŠKUMO — vienoje gijoje jis trivialus.
+   * Įrodo tik tai, kad kodas komandas SIUNČIA viena transakcija, o ne dviem
+   * nepriklausomais `await`. Tikrą elgesį tikrina `redis` rinkinys.
    */
-  const redis = createRedisStore(new FakeRedis());
+  const fake = new FakeRedis();
+  const redis = createRedisStore(fake);
+  const job = await redis.create({});
+
+  let multiKvietimu = 0;
+  let komanduTransakcijoje = 0;
+  const originalusMulti = fake.multi.bind(fake);
+  fake.multi = () => {
+    multiKvietimu += 1;
+    const m = originalusMulti();
+    const originalusExec = m.exec;
+    m.exec = async () => {
+      komanduTransakcijoje = m._commandCount();
+      return originalusExec();
+    };
+    return m;
+  };
+
+  const po = await redis.update(job.id, { actor: "a" });
+
+  assert.equal(multiKvietimu, 1, "rašymas privalo eiti per MULTI");
+  assert.equal(komanduTransakcijoje, 2, "laukų rašymas IR versijos didinimas - vienoje transakcijoje");
+  assert.equal(po.version, 2, "grąžinama transakcijos apskaičiuota reikšmė");
+});
+
+test("#184-B ⚠️ DU KVIETĖJAI NUO TO PATIES SNAPSHOT'O duoda +2, ne +1", async () => {
+  /**
+   * ⚠️ ŠIS TESTAS BUVO PERRAŠYTAS, NES NIEKO NEĮRODĖ (Codex F4).
+   *
+   * Pirmoji redakcija tiesiog kvietė `update()` du kartus iš eilės ir tikrino,
+   * kad versijos yra 2 ir 3. Bet antrasis kvietimas skaito PIRMOJO įrašytą
+   * reikšmę, tad **iki pataisos buvusi snapshot'o realizacija būtų davusi
+   * lygiai tą patį** — testas būtų žalias ir su defektu. Regresijos apsaugos
+   * nulis.
+   *
+   * Prarandamo padidinimo klasė reikalauja, kad ABU kvietėjai pradėtų nuo TOS
+   * PAČIOS `N`. Tai įvedama deterministiškai: `hgetall` abiem kvietimams grąžina
+   * TĄ PATĮ pradinį snapshot'ą, tad `applyPatch()` abu kartus apskaičiuoja
+   * `N + 1`.
+   *
+   * Su snapshot'o realizacija (`hset` su versija) abu rašytų `2` → galutinė `2`.
+   * Su serverio skaitikliu (`HINCRBY`) — `2` ir `3` → galutinė `3`.
+   */
+  const fake = new FakeRedis();
+  const redis = createRedisStore(fake);
   const job = await redis.create({});
   assert.equal(job.version, 1);
 
-  const pirmas = await redis.update(job.id, { actor: "a" });
-  const antras = await redis.update(job.id, { actor: "b" });
+  const pradinis = { ...(await fake.hgetall(`job:${job.id}`)) };
+  const originalus = fake.hgetall.bind(fake);
+  let uzsaldyta = 0;
 
-  assert.equal(pirmas.version, 2);
-  assert.equal(antras.version, 3, "antra mutacija - dar vienas padidinimas");
+  fake.hgetall = async (key) => {
+    if (key === `job:${job.id}` && uzsaldyta < 2) {
+      uzsaldyta += 1;
+      /** ⚠️ ABU kvietėjai mato TĄ PAČIĄ `version = 1`. */
+      return { ...pradinis };
+    }
+    return originalus(key);
+  };
+
+  try {
+    await redis.update(job.id, { actor: "a" });
+    await redis.update(job.id, { actor: "b" });
+  } finally {
+    fake.hgetall = originalus;
+  }
+
+  assert.equal(uzsaldyta, 2, "prielaida: abu kvietimai tikrai matė tą patį snapshot'ą");
+
+  const galutinis = await redis.get(job.id);
+  assert.equal(
+    galutinis.version,
+    3,
+    "⚠️ DVI mutacijos = DU padidinimai. Snapshot'o realizacija čia duotų 2 - prarastas padidinimas"
+  );
 });
 
 test("#184 `applyPatch()` yra VIENINTELIS increment'o šaltinis", async () => {
@@ -322,7 +399,12 @@ test("#184-B ⚠️ netinkama ATKURTA versija atmetama GARSIAI, ne tyliai taisom
    */
   const bazinis = newJob({});
 
-  for (const bloga of [0, -1, 1.5, "1x", "abc", "", true, {}]) {
+  /**
+   * ⚠️ VIRŠUTINĖ RIBA IRGI PRIVALOMA (Codex F3). `jobs.version` yra PostgreSQL
+   * `integer`, tad `"2147483648"` PG atmestų, o memory/Redis atkurtų — tas pats
+   * backup'as elgtųsi skirtingai priklausomai nuo backend'o.
+   */
+  for (const bloga of [0, -1, 1.5, "1x", "abc", "", true, {}, 2147483648, "2147483648", 1e20]) {
     assert.throws(
       () => normalizeJob({ ...bazinis, version: bloga }),
       /Netinkama optimistic-lock versija/,
@@ -334,6 +416,11 @@ test("#184-B ⚠️ netinkama ATKURTA versija atmetama GARSIAI, ne tyliai taisom
   assert.equal(normalizeJob({ ...bazinis, version: 1 }).version, 1);
   assert.equal(normalizeJob({ ...bazinis, version: 7 }).version, 7);
   assert.equal(normalizeJob({ ...bazinis, version: "7" }).version, 7, "Redis saugo tekstą");
+  assert.equal(
+    normalizeJob({ ...bazinis, version: 2147483647 }).version,
+    2147483647,
+    "PostgreSQL `integer` lubos - dar galioja"
+  );
 
   /**
    * ⚠️ TRŪKSTAMAS laukas NĖRA klaida - legacy įrašas iš prieš 7.5b jo neturi.

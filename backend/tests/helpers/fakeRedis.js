@@ -72,6 +72,34 @@ class FakeRedis {
     const end = stop === -1 ? sorted.length : stop + 1;
     return sorted.slice(start, end);
   }
+  /**
+   * ⚠️ MULTI/EXEC — VISKAS ARBA NIEKO (#184, Codex F1).
+   *
+   * Besąlyginis `update()` rašo laukus ir didina versiją; jei tai būtų dvi
+   * atskiros komandos, ryšio nutrūkimas TARP jų paliktų naujus laukus su SENA
+   * versija — ir tą versiją turintis klientas praeitų CAS bei perrašytų
+   * neužfiksuotą pakeitimą. Tiksliai ta invariantą, kurią B6 atkuria.
+   *
+   * ⚠️ ŠIS DUBLIS ATOMIŠKUMO NEĮRODO. Vienoje gijoje jis trivialus. Tikrinama
+   * tik tai, kad kodas komandas SIUNČIA viena transakcija; tikrą Redis
+   * elgesį tikrina `redis` rinkinys.
+   */
+  multi() {
+    const cmds = [];
+    const self = this;
+    const m = {
+      hset(key, obj) { cmds.push(() => self.hset(key, obj)); return m; },
+      hincrby(key, field, delta) { cmds.push(() => self.hincrby(key, field, delta)); return m; },
+      async exec() {
+        const out = [];
+        for (const vykdyti of cmds) out.push([null, await vykdyti()]);
+        return out;
+      },
+      _commandCount: () => cmds.length,
+    };
+    return m;
+  }
+
   pipeline() {
     // Minimalus pipeline mock: kaupia komandas, exec() grąžina [[null, rezultatas], ...].
     const cmds = [];

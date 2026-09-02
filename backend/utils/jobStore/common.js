@@ -176,14 +176,36 @@ function normalizeJob(job) {
    */
   if (job.version !== undefined && job.version !== null) {
     const zalia = job.version;
+
+    /**
+     * ⚠️ VIRŠUTINĖ RIBA YRA BENDRIAUSIA IŠ TRIJŲ SAUGYKLŲ (#184, Codex F3).
+     *
+     * `jobs.version` yra PostgreSQL `integer`, tad jo lubos — 2147483647.
+     * Vien „skaitmenys ir ≥ 1" praleistų `"2147483648"`: memory ir Redis tokį
+     * įrašą atkurtų, o PostgreSQL atmestų — TAS PATS backup'as elgtųsi
+     * skirtingai priklausomai nuo backend'o, o tai ir yra klasė, kurią ši
+     * patikra šalina.
+     *
+     * Dar didesnės reikšmės JS pusėje prarastų tikslumą arba virstų
+     * `Infinity`, ir „tiksliai +1" kontraktas nustotų galioti tyliai.
+     */
+    const VERSIJOS_LUBOS = 2147483647;
+
+    const skaicius =
+      typeof zalia === "number"
+        ? zalia
+        : typeof zalia === "string" && /^[0-9]+$/.test(zalia)
+          ? Number(zalia)
+          : NaN;
+
     const galioja =
-      (typeof zalia === "number" && Number.isInteger(zalia) && zalia >= 1) ||
-      (typeof zalia === "string" && /^[0-9]+$/.test(zalia) && Number(zalia) >= 1);
+      Number.isInteger(skaicius) && skaicius >= 1 && skaicius <= VERSIJOS_LUBOS;
 
     if (!galioja) {
       throw new Error(
         `Netinkama optimistic-lock versija: ${JSON.stringify(zalia)}. ` +
-          "Leidžiami tik sveikieji skaičiai nuo 1 (arba lauko nebuvimas legacy įrašuose)."
+          `Leidžiami tik sveikieji skaičiai nuo 1 iki ${VERSIJOS_LUBOS} ` +
+          "(arba lauko nebuvimas legacy įrašuose)."
       );
     }
   }
