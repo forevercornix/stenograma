@@ -86,8 +86,17 @@ for i in range(0, len(dalys), 3):
     if only and kodas != only:
         continue
 
-    # Sekcijos pabaiga yra `\n---\n` skirtukas prieš kitą `## [`.
-    body = body.split("\n---\n")[0].strip()
+    # ⚠️ SEKCIJOS PABAIGĄ NUSTATO KITA `## [` ANTRAŠTĖ, NE PIRMAS `---`.
+    #
+    # `re.split()` aukščiau JAU nukerpa ties kita sekcija, tad `body` pabaiga
+    # teisinga. Belieka nuimti VIENĄ skirtuką, likusį sekcijų sandūroje.
+    #
+    # Ankstesnė redakcija darė `body.split("\n---\n")[0]` - t. y. kirpo ties
+    # PIRMUOJU brūkšniu bet kur kūne. Sekcija su vidiniais skirtukais tyliai
+    # netekdavo visko po jų: `7.4e` iš 10750 simbolių virsdavo 3341, prarasdama
+    # sprendimo variantus (A/B/C), reikalingus sprendimus ir visą DoD. Klaidos
+    # nebūdavo - `--update` tiesiog perrašydavo GitHub issue nukirsta versija.
+    body = re.sub(r"\n---\s*$", "", body.strip()).strip()
 
     failas = outdir / f"{kodas}.md"
     failas.write_text(body + "\n", encoding="utf-8")

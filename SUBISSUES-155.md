@@ -3256,6 +3256,8 @@ Roadmap `[x]` atnaujinami 7.6c, ne anksčiau.
 Pirmas iš trijų 7.6 gabalų. Apimtis tik viena: **ar galime patikimai pasidaryti kopiją
 ir ją atkurti.** Jokių sesijų, ne-terminalių job'ų ar erasure replay.
 
+---
+
 ## Patikrinta AS-IS (`7ce5356`)
 
 Eilučių numeriai sensta — prieš darbą inventorizuok iš naujo. Ši lentelė galioja
@@ -3276,6 +3278,8 @@ Eilučių numeriai sensta — prieš darbą inventorizuok iš naujo. Ši lentel�
 | `backupDocumentation.test.js` turi ~10 sargų, tarp jų „KIEKVIENA žinoma riba įvardyta" | `tests/backupDocumentation.test.js:135` | naujas įspėjimas jungiamas prie ŠIO mechanizmo |
 | `backupService`/`restoreService` dengia tik aplikacijos lygio JSON kopijas | `services/` | `pg_dump` kelio repo neturi visai |
 | CI: serveris `postgres:16-alpine`, **`postgresql-client` niekur neinstaliuojamas** | `.github/workflows/ci.yml:51` | žr. D7 — be to visas DoD CI'uje neįvykdomas |
+
+---
 
 ## Užrakinti sprendimai
 
@@ -3391,6 +3395,8 @@ logikos.
   `skipWithoutPostgres()`, po `REQUIRE_POSTGRES=1` virsta klaida. Tyliai praleistas
   failas apeitų `verify-postgres-suite-ran.mjs` prasmę.
 
+---
+
 ## DoD
 
 ### Kopija ir šifravimas
@@ -3466,6 +3472,8 @@ logikos.
 - [ ] Testas registruotas `postgres` rinkinyje (per `postgresGuard` importą), tad
       `verify-postgres-suite-ran.mjs` reikalauja neprapleisto `ok`.
 
+---
+
 ## Ko NEAPIMA
 
 Sesijų, ne-terminalių job'ų, ištrynimo žymų, erasure replay. Srautinio šifravimo.
@@ -3474,6 +3482,8 @@ Roadmap `[x]` NEdedamas — 7.6 uždaromas tik po 7.6c.
 ⚠️ Šis nuokrypis nuo bendro 7.6 aprašo `SUBISSUES-155.md` yra **sąmoningas ir
 suplanuotas** (pirmas iš trijų). Testų ir kodo komentaruose tai įvardyti, kad nekiltų
 painiavos su bendruoju 7.6 DoD.
+
+---
 
 ## Pastabos vykdytojui
 
