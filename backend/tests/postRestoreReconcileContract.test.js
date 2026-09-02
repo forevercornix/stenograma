@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const crypto = require("node:crypto");
 
 const reconcile = require("../utils/postRestoreReconcile");
 const jobPhase = require("../utils/jobPhase");
@@ -358,4 +359,54 @@ test("#249 D7: CLI atmintiniame režime KRENTA, ne praleidžia tyliai", () => {
   });
   assert.equal(svetima.status, 2);
   assert.match(svetima.stderr, /RECONCILE_TARGET_MISMATCH/);
+});
+
+test("#249: sėjimo seka yra LEGALI pagal lifecycle — tikrinama VIETOJE", async () => {
+  /**
+   * ⚠️ ŠIS TESTAS EGZISTUOJA DĖL DVIEJŲ SUGAIŠTŲ CI RAUNDŲ.
+   *
+   * Integracinio testo fixture krito ne ties tikrinamu elgesiu, o ties SĖJIMU:
+   *
+   *   1. `startPhase(job, "transcribing")` → `ILLEGAL_TRANSITION`
+   *      (grafas yra `null → validating → transcribing → …`);
+   *   2. `finishAtomic(job, "completed")` iš `queued` → `ILLEGAL_TERMINAL_TRANSITION`
+   *      („nevykdytas darbas negali būti baigtas sėkmingai").
+   *
+   * Abi taisyklės yra `jobPhase` autoriteto, ne PostgreSQL — vadinasi atsakymą
+   * duoda atminties backend'as per sekundę, ir CI'ui to klausimo užduoti
+   * nereikia. Testas gina TĄ PAČIĄ seką, kurią naudoja integracinis testas:
+   * helperis vienas.
+   *
+   * ⚠️ Tai ir yra šio raundo pamoka bendrąja forma: prielaidą, kurios patikrinti
+   * NEREIKIA išorinio serviso, tikrinti CI'uje yra pasirinkimas laukti ilgiau
+   * dėl to paties atsakymo.
+   */
+  const memory = require("../utils/jobStore/memoryStore");
+  const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
+
+  const { queued, processing, failed, completed, zymetas } = await pasetiKeturisStatusus(memory, {
+    ownerId: "11111111-1111-4111-8111-111111111111",
+    storageKey: (vardas) => `audio/${vardas}-${crypto.randomUUID()}.wav`,
+  });
+
+  const busena = async (id) => {
+    const j = await memory.get(id);
+    return { status: j.status, phase: j.phase };
+  };
+
+  assert.deepEqual(await busena(queued.id), { status: "queued", phase: null });
+  assert.deepEqual(await busena(processing.id), { status: "processing", phase: "transcribing" });
+  assert.deepEqual(await busena(failed.id), { status: "failed", phase: null });
+  assert.deepEqual(await busena(completed.id), { status: "completed", phase: null });
+  assert.deepEqual(await busena(zymetas.id), { status: "queued", phase: null });
+
+  /**
+   * ⚠️ KONTROLĖ: `processing` job'as PRIVALO sėdėti gilesnėje nei pirmoji fazėje.
+   * Kitaip integracinio testo teiginys „fazė nuvalyta" būtų tenkinamas ir tada,
+   * kai valyti nebuvo ko.
+   */
+  assert.notEqual((await memory.get(processing.id)).phase, "validating");
+
+  const rezultatas = await memory.get(completed.id);
+  assert.ok(rezultatas.result, "`completed` be rezultato neegzistuoja (7.5b)");
 });

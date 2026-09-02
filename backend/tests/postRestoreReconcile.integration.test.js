@@ -15,6 +15,7 @@ const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const sesijuPg = require("../utils/sessionStore/postgresStore");
 const { hashPassword } = require("../utils/credentials");
 const tombstones = require("../utils/deletionTombstones");
+const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -132,38 +133,15 @@ async function pripildytiSesijas(pool) {
 async function pripildytiJobus(pool) {
   const store = createPostgresStore(pool);
 
-  const bazinis = (extra = {}) => ({
-    type: "transcription",
-    ownerId: VARTOTOJAS_A,
-    ownerKind: "user",
-    actor: "admin",
-    actorRole: "administrator",
-    actorSource: "session",
-    storageKey: `audio/${crypto.randomUUID()}.wav`,
-    ...extra,
-  });
-
-  const queued = await store.create(bazinis());
-  const processing = await store.create(bazinis());
-  const failed = await store.create(bazinis());
-  const completed = await store.create(bazinis());
-  const uzbarjeruotas = await store.create(bazinis());
-
   /**
-   * ⚠️ FAZĖ ATIDAROMA PER GRAFĄ, NE ŠUOLIU — CI RADINYS.
-   *
-   * Pirmoji šio fixture'o redakcija darė `startPhase(job, "transcribing")` ir
-   * krito su `ILLEGAL_TRANSITION: null → transcribing`. `transcription` tipo
-   * grafas yra `null → validating → transcribing → diarizing → merging`, tad
-   * šuolis per `validating` yra ne trumpinys, o neteisėtas perėjimas.
-   *
-   * ⚠️ TAI NAUDINGA IR TESTUI: `processing` job'as dabar sėdi GILESNĖJE fazėje,
-   * todėl „fazė nuvalyta" po suderinimo įrodo daugiau nei pirmoji fazė.
+   * ⚠️ SEKA — IŠ BENDRO HELPERIO. Ta pati, kurią vietinis kontraktinis testas
+   * paleidžia prieš `memoryStore`; dvi kopijos išsiskirtų, ir vietinė patikra
+   * imtų ginti nebe tą seką, kurią vykdo šis testas.
    */
-  const validuojantis = await store.update(processing.id, jobPhase.startPhase(processing, "validating"));
-  await store.update(processing.id, jobPhase.startPhase(validuojantis, "transcribing"));
-  await store.finishAtomic(failed.id, "failed", { error: "ankstesnė klaida", error_code: "SENAS" });
-  await store.finishAtomic(completed.id, "completed", { result: { text: "reprezentatyvi transkripcija", segments: [1, 2] } });
+  const { queued, processing, failed, completed, zymetas } = await pasetiKeturisStatusus(store, {
+    ownerId: VARTOTOJAS_A,
+    storageKey: (vardas) => `audio/${vardas}-${crypto.randomUUID()}.wav`,
+  });
 
   /**
    * ⚠️ ŽYMA RAŠOMA PER MODULĮ, NE `INSERT`-u.
@@ -174,9 +152,9 @@ async function pripildytiJobus(pool) {
    * kurią gamina produkcinis kelias. Pirmoji šio failo redakcija tą sargą
    * sulaužė, ir jis suveikė.
    */
-  await tombstones.mark(uzbarjeruotas.id, { reason: "user_request", actorKind: "user" });
+  await tombstones.mark(zymetas.id, { reason: "user_request", actorKind: "user" });
 
-  return { store, queued, processing, failed, completed, uzbarjeruotas };
+  return { store, queued, processing, failed, completed, uzbarjeruotas: zymetas };
 }
 
 /** Persistentinė būsena — tai, ką lyginame prieš/po (ne `COUNT`). */
