@@ -767,8 +767,21 @@ module.exports = {
      *
      * KONTRAKTAS:
      *
-     *   `JobPhaseError`  → job jau terminalus. NO-OP SĖKMĖ: `FAILED` žymėjimas
-     *                      nebeaktualus, kas nors kitas jį jau pabaigė.
+     *   `JOB_ALREADY_TERMINAL` → job jau terminalus. NO-OP SĖKMĖ: `FAILED`
+     *                      žymėjimas nebeaktualus, kas nors kitas jį jau pabaigė.
+     *
+     * ⚠️ VISI KITI `JobPhaseError` KODAI PERMETAMI, NE SLOPINAMI (Codex D5).
+     *
+     * `jobPhase` ta pačia klase meta ir `UNKNOWN_SOURCE_STATUS` (nežinomas ar
+     * ateities persistentinis statusas). Jį nuslopinus, „jau terminalus"
+     * verdiktas būtų MELAGINGAS, o kvietėjas eitų į audio valymą neįsipareigojęs
+     * `FAILED`.
+     *
+     * ⚠️ IŠ TO SEKA PAREIGA KVIETĖJUI: šis metodas GALI atmesti. Kvietėjas,
+     * kviečiantis jį iš `async` įvykio klausytojo, privalo turėti savo
+     * `.catch()` — `EventEmitter` grąžinto Promise nelaukia, ir atmetimas taptų
+     * neapdorotu (žr. `workers/index.js` `worker.on("failed", …)`). Būtent to
+     * neapibrėžta ankstesnė šio kontrakto redakcija ir kainavo.
      *   konfliktas       → perskaitoma AUTORITETINGA būsena, ir:
      *                      · terminalus `COMPLETED` → žymėjimas ATMETAMAS;
      *                      · kitas terminalus       → no-op sėkmė;
@@ -797,12 +810,22 @@ module.exports = {
           rezultatas = await sisteminisFinishBandymas(store, id, STATUS.FAILED, extra);
         } catch (err) {
           /**
-           * `JobPhaseError` reiškia „iš šios būsenos baigti nebegalima", o
-           * vienintelė tokia būsena yra JAU TERMINALI. Kitos klaidos (DB,
-           * infrastruktūra) praleidžiamos pro šalį – jos nėra šio kontrakto
-           * dalis ir jų slėpimas paverstų gedimą tylia sėkme.
+           * ⚠️ SLOPINAMAS TIK `JOB_ALREADY_TERMINAL`, NE BET KOKS `JobPhaseError`
+           * (Codex peržiūros A grupė).
+           *
+           * Ankstesnė redakcija tikrino `err.name !== "JobPhaseError"`. Bet
+           * `jobPhase` ta pačia klase meta ir `UNKNOWN_SOURCE_STATUS`
+           * (`utils/jobPhase.js`), kai persistentinis įrašas turi nežinomą ar
+           * ateities statusą. Tada „jau terminalus" verdiktas būdavo MELAGINGAS:
+           * grąžindavom nepakeistą įrašą kaip no-op sėkmę, o worker'io nesėkmės
+           * tvarkytojas eidavo toliau į audio valymą — nors `FAILED` niekada
+           * nebuvo įsipareigotas.
+           *
+           * Kodas tikrinamas eksplicitiškai; visos kitos priežastys (nežinomas
+           * statusas, DB, infrastruktūra) keliauja pro šalį, nes jų slėpimas
+           * paverstų gedimą tylia sėkme.
            */
-          if (err.name !== "JobPhaseError") throw err;
+          if (err.name !== "JobPhaseError" || err.code !== "JOB_ALREADY_TERMINAL") throw err;
           const dabartinis = await store.get(id);
           log.info("finishFailed: job jau terminalus, FAILED žymėjimas nebeaktualus", {
             jobId: id,

@@ -399,3 +399,122 @@ test("#184 ⚠️ audio šalinimo predikatas: TIK `completed` be rezultato bloku
     "įrašo nėra (TTL, ištrynimas) — audio privalo būti pašalintas, ne paliktas amžiams"
   );
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 6. AUDIO BARJERO SKYLĖS (Codex peržiūros A grupė)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#184-A ⚠️ barjeras yra VIENAS autoritetas abiem vykdymo keliams", () => {
+  /**
+   * ⚠️ ŠITĄ RADO PERŽIŪRA, NE CI IR NE MUTACIJA.
+   *
+   * 7.5b barjerą įdėjo į `workers/_cleanupStorage()`. Argumentas („savybė
+   * susiaurėjimo taške galioja visiems kvietėjams") buvo teisingas, bet taikytas
+   * per siaurai: INLINE vykdymas turi SAVO valymo funkciją
+   * (`jobRunner._atlaisvintiSaltini`) ir savo `finally` bloką, tad jis liko be
+   * barjero visiškai.
+   *
+   * Todėl predikatas gyvena atskirame modulyje, o abu keliai per jį eina.
+   * Statinė patikra čia yra tinkama forma: klausimas yra „ar nėra ANTROS
+   * realizacijos", o ne „ką ji daro" (elgesį tikrina testai žemiau).
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const saknis = path.join(__dirname, "..");
+
+  /**
+   * ⚠️ TIKRINAMA KIEKVIENA FUNKCIJA ATSKIRAI, NE FAILAS (Codex D6).
+   *
+   * Pirmoji redakcija tikrino, ar faile YRA bent vienas
+   * `salintiAudioSuBarjeru()`. `queues/jobRunner.js` turi DU nepriklausomus
+   * valymo taškus — `_atlaisvintiSaltini()` ir `_executeInline()` `finally` —
+   * tad ištrynus vieną, kitas patikrą vis tiek pratempdavo, o visas kelias
+   * nustodavo valyti audio.
+   */
+  const FUNKCIJOS = [
+    ["workers/index.js", "async function _cleanupStorage"],
+    ["queues/jobRunner.js", "async function _atlaisvintiSaltini"],
+    ["queues/jobRunner.js", "async function _executeInline"],
+  ];
+
+  for (const [failas, pradzia] of FUNKCIJOS) {
+    const src = fs.readFileSync(path.join(saknis, failas), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const i = src.indexOf(pradzia);
+    assert.ok(i >= 0, `${failas}: nerasta \`${pradzia}\``);
+
+    /** Kito top-level `function` pradžia arba failo galas — funkcijos riba. */
+    const kita = src.indexOf("\nasync function ", i + 1);
+    const kunas = src.slice(i, kita === -1 ? undefined : kita);
+
+    assert.match(kunas, /salintiAudioSuBarjeru\(/, `${failas} ${pradzia}: valymas privalo eiti per barjerą`);
+    assert.equal(
+      /releaseAudio\(/.test(kunas),
+      false,
+      `${failas} ${pradzia}: TIESIOGINIS releaseAudio() apeina barjerą`
+    );
+  }
+});
+
+test("#184-A ⚠️ GDPR ištrynimo kelias barjero NETURI ir neturi turėti", () => {
+  /**
+   * ⚠️ RIBA, KURI DARO BARJERĄ TEISINGĄ.
+   *
+   * `releaseAudio()` atrodo kaip dar siauresnis taškas, bet barjeras ten būtų
+   * NETEISINGAS: `utils/deletionRetry.js` jį kviečia GDPR ištrynimo kelyje, kur
+   * audio privalo dingti nepriklausomai nuo job'o būsenos. Barjeras ten
+   * blokuotų būtent tą veiksmą, kurio reikalauja įstatymas.
+   *
+   * Testas gina tą ribą: jei kas nors barjerą „patobulins" nukeldamas į
+   * `releaseAudio()`, ši patikra kris.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const src = fs.readFileSync(path.join(__dirname, "..", "utils", "audioCleanup.js"), "utf8");
+
+  assert.equal(
+    /arGalimaSalintiAudio|salintiAudioSuBarjeru|audioBarrier/.test(src),
+    false,
+    "`releaseAudio()` privalo likti be barjero - jį naudoja GDPR ištrynimas"
+  );
+  const retry = fs.readFileSync(path.join(__dirname, "..", "utils", "deletionRetry.js"), "utf8");
+  assert.match(retry, /releaseAudio/, "prielaida: ištrynimo kelias tikrai naudoja `releaseAudio()`");
+});
+
+test("#184-A ⚠️ `finishFailed` slopina TIK `JOB_ALREADY_TERMINAL`", async () => {
+  /**
+   * ⚠️ `jobPhase` TA PAČIA KLASE META DVI SKIRTINGAS PRIEŽASTIS.
+   *
+   * `JOB_ALREADY_TERMINAL` reiškia „kas nors kitas jau pabaigė" — tada no-op
+   * sėkmė teisinga. `UNKNOWN_SOURCE_STATUS` reiškia, kad persistentinis įrašas
+   * turi nežinomą ar ateities statusą — tada NIEKO neįvyko, ir grąžinti sėkmę
+   * reikštų, kad worker'io nesėkmės tvarkytojas eis toliau į audio valymą, nors
+   * `FAILED` niekada nebuvo įsipareigotas.
+   *
+   * Ankstesnė redakcija tikrino tik `err.name`, tad abi priežastys atrodė
+   * vienodai.
+   */
+  const job = await jobStore.create({ type: JOB_TYPES.TRANSCRIPTION, ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+  await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
+
+  /** Nežinomas statusas - būtent tai, ką duoda sugadintas ar ateities įrašas. */
+  await memoryStore.update(job.id, { status: "kazkoks-nezinomas" });
+
+  await assert.rejects(
+    () => jobStore.system.finishFailed(job.id, { error: "x" }),
+    (err) => {
+      assert.equal(err.name, "JobPhaseError");
+      assert.equal(err.code, "UNKNOWN_SOURCE_STATUS", "kodas privalo prasiskverbti, ne būti nuslopintas");
+      return true;
+    }
+  );
+});
+
+test("#184-A `finishFailed` JAU TERMINALIAM job'ui tebeduoda no-op sėkmę", async () => {
+  /** Regresijos sargas: susiaurinta sąlyga neturi sulaužyti teisėtos šakos. */
+  const job = await jobStore.create({ type: JOB_TYPES.TRANSCRIPTION, ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
+  await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
+  await jobStore.system.finish(job.id, STATUS.CANCELLED, {});
+
+  const po = await jobStore.system.finishFailed(job.id, { error: "veluojantis" });
+  assert.equal(po.status, STATUS.CANCELLED);
+});

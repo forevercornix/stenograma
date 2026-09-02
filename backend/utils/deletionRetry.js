@@ -257,7 +257,26 @@ async function retryPendingDeletions({ limit = 50 } = {}) {
  * visą jobą, nors vartotojas to neprašė.
  */
 async function retryPendingAudioCleanups({ limit = 50 } = {}) {
-  const { releaseAudio } = require("./audioCleanup");
+  /**
+   * ⚠️ TECHNINIS PAKARTOJIMAS EINA PER BARJERĄ (Codex E1).
+   *
+   * Anksčiau čia buvo TIESIOGINIS `releaseAudio()`, ir tai apeidavo barjerą.
+   * Pasekmė buvo tiksliai atvirkštinė nei norėta: barjerui nepavykus perskaityti
+   * būsenos, jis pažymi `audio_cleanup_pending` (kad valymas nedingtų), o šis
+   * sweep'as tą vėliavą apdorodavo BE patikros — ir negrįžtamai ištrindavo
+   * būtent tą audio, kurį barjeras saugojo.
+   *
+   * ⚠️ GDPR IŠTRYNIMAS EINA VISIŠKAI KITU KELIU, IR BARJERO TEN NĖRA.
+   *
+   * `retryPendingDeletions()` kviečia `jobErasure.eraseJob()`, o tas šalina
+   * failą TIESIOGIAI per `fileStorage.del()` (`utils/jobErasure.js`) —
+   * `releaseAudio()` ten nedalyvauja apskritai. Barjeras tos šakos nepasiekia ir
+   * neturi pasiekti: ten audio privalo dingti nepriklausomai nuo job'o būsenos.
+   *
+   * Skiriasi ne mechanizmas, o teisė: techninis valymas yra patogumas,
+   * ištrynimas — pareiga.
+   */
+  const { salintiAudioSuBarjeru } = require("./audioBarrier");
 
   const pending = await jobStore.system.listPendingAudioCleanups(limit);
   const summary = { scanned: pending.length, attempted: 0, succeeded: 0, failed: 0, deferred: 0 };
@@ -285,7 +304,11 @@ async function retryPendingAudioCleanups({ limit = 50 } = {}) {
 
     summary.attempted += 1;
 
-    const removed = await releaseAudio(job.id, job.storageKey);
+    const removed = await salintiAudioSuBarjeru(
+      job.id,
+      { storageKey: job.storageKey },
+      { execution: "retry" }
+    );
 
     if (removed) {
       summary.succeeded += 1;
