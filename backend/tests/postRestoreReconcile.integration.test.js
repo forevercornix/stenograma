@@ -149,7 +149,19 @@ async function pripildytiJobus(pool) {
   const completed = await store.create(bazinis());
   const uzbarjeruotas = await store.create(bazinis());
 
-  await store.update(processing.id, jobPhase.startPhase(processing, "transcribing"));
+  /**
+   * ⚠️ FAZĖ ATIDAROMA PER GRAFĄ, NE ŠUOLIU — CI RADINYS.
+   *
+   * Pirmoji šio fixture'o redakcija darė `startPhase(job, "transcribing")` ir
+   * krito su `ILLEGAL_TRANSITION: null → transcribing`. `transcription` tipo
+   * grafas yra `null → validating → transcribing → diarizing → merging`, tad
+   * šuolis per `validating` yra ne trumpinys, o neteisėtas perėjimas.
+   *
+   * ⚠️ TAI NAUDINGA IR TESTUI: `processing` job'as dabar sėdi GILESNĖJE fazėje,
+   * todėl „fazė nuvalyta" po suderinimo įrodo daugiau nei pirmoji fazė.
+   */
+  const validuojantis = await store.update(processing.id, jobPhase.startPhase(processing, "validating"));
+  await store.update(processing.id, jobPhase.startPhase(validuojantis, "transcribing"));
   await store.finishAtomic(failed.id, "failed", { error: "ankstesnė klaida", error_code: "SENAS" });
   await store.finishAtomic(completed.id, "completed", { result: { text: "reprezentatyvi transkripcija", segments: [1, 2] } });
 
