@@ -455,3 +455,98 @@ test(
     assert.ok(audio && audio.length > 0, "⚠️ audio privalo IŠLIKTI");
   }
 );
+
+test(
+  "#184-C ⚠️ JAU TERMINALUS retry irgi IŠVALO audio",
+  { skip: skipWithoutRedis() },
+  async (t) => {
+    /**
+     * ⚠️ TAS PATS KRITIMO LANGAS KAIP `IDEMPOTENTISKA_SEKME` ŠAKOJE (Codex G1).
+     *
+     * Retry gali ateiti PO `finishFailed()` commit'o, bet PRIEŠ
+     * `_cleanupStorage()`. Tada įrašas yra `failed` su GYVU `storageKey`, o
+     * `audio_cleanup_pending` vėliavos niekas neuždeda (`releaseAudio()` nebuvo
+     * kviestas) — failas lieka diske neribotai, nes retencija jo neliečia, kol
+     * raktą nurodo gyvas job'o įrašas.
+     *
+     * ⚠️ PIRMOJI D14 REDAKCIJA VALYMO NEKVIETĖ su paaiškinimu „įrašas terminalus,
+     * tad jį jau apdorojo tas kelias, kuris jį tokiu padarė". Tai buvo tas pats
+     * argumentas, kurį A5 jau kartą atmečiau gretimoje šakoje.
+     */
+    const jobStore = require("../utils/jobStore");
+    const jobRunner = require("../queues/jobRunner");
+    const fileStorage = require("../utils/fileStorage");
+    const { createQueueConnection } = require("../queues/config");
+    const { Queue } = require("bullmq");
+
+    let worker;
+    let queue;
+    let queueConnection;
+    let storageKey;
+
+    t.after(async () => {
+      const { shutdownWorker } = require("../workers");
+      await shutdownWorker(worker, { force: true }).catch(() => {});
+      await queue?.close().catch(() => {});
+      await queueConnection?.quit().catch(() => {});
+      await jobRunner.close().catch(() => {});
+      if (storageKey) await fileStorage.del(storageKey).catch(() => {});
+      await jobStore._resetForTests();
+    });
+
+    await jobStore.init();
+    await jobRunner.init();
+
+    const queueName = `test-terminal-retry-${process.pid}-${Date.now()}`;
+    const job = await jobStore.create({ ownerKind: "unowned" });
+    storageKey = await fileStorage.put(Buffer.from("audio-baitai"), { ext: ".wav" });
+
+    /** Būsena po kritimo: `failed` įsipareigotas, valymas neįvyko. */
+    await jobStore.system.startPhase(job.id, "validating");
+    await jobStore.system.finishFailed(job.id, { error: "tiekėjo klaida", error_code: "x" });
+
+    const pries = await jobStore.system.get(job.id);
+    assert.equal(pries.status, "failed", "prielaida: įrašas terminalus");
+    assert.equal(pries.audio_cleanup_pending, false, "prielaida: valymo vėliavos NĖRA");
+
+    queueConnection = createQueueConnection();
+    queue = new Queue(queueName, { connection: queueConnection });
+    await queue.add(
+      "transcription",
+      { jobId: job.id, payload: { storageKey } },
+      { jobId: job.id, attempts: 1 }
+    );
+
+    let processorKvietimu = 0;
+    const { createWorker } = require("../workers");
+    worker = createWorker(
+      queueName,
+      async () => {
+        processorKvietimu += 1;
+        return { text: "PERDIRBTA" };
+      },
+      { stalledInterval: 1000, lockDuration: 2000 }
+    );
+
+    let busena = null;
+    for (let i = 0; i < 40; i++) {
+      const b = await queue.getJob(job.id);
+      const state = b ? await b.getState() : null;
+      if (state === "completed" || state === "failed") {
+        busena = state;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    assert.equal(busena, "completed", "⚠️ retry NEKRENTA `JobPhaseError` - job'as praleidžiamas");
+    assert.equal(processorKvietimu, 0, "terminalus darbas NEPERDIRBAMAS");
+
+    /** ⚠️ ESMINĖ PATIKRA: šaltinio audio pašalintas, ne paliktas amžiams. */
+    await assert.rejects(
+      () => fileStorage.get(storageKey),
+      "terminalaus retry šaka privalo išvalyti audio"
+    );
+    storageKey = null;
+  }
+);

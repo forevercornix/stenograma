@@ -156,9 +156,22 @@ function createWorker(queueName, processor, workerOptions = {}) {
          * toks retry gaudavo `JobPhaseError` → BullMQ failed → kartojama →
          * dead-letter, nors darbas jau seniai tvarkingai baigtas.
          *
-         * ⚠️ AUDIO ČIA NEVALOMAS ATSKIRAI. Įrašas terminalus, tad jį jau apdorojo
-         * tas kelias, kuris jį tokiu padarė; pakartotinis valymas būtų antras
-         * autoritetas tam pačiam sprendimui.
+         * ⚠️ AUDIO VALOMAS IR ČIA (Codex G1).
+         *
+         * Pirmoji šios šakos redakcija valymo nekvietė su paaiškinimu „įrašas
+         * terminalus, tad jį jau apdorojo tas kelias, kuris jį tokiu padarė".
+         * Paaiškinimas buvo NENUOSEKLUS su gretima `IDEMPOTENTISKA_SEKME` šaka,
+         * kur tą patį argumentą jau buvau atmetusi (A5): retry gali ateiti PO
+         * `finishFailed()` commit'o, bet PRIEŠ `_cleanupStorage()` — tas pats
+         * kritimo langas, tik kita terminali būsena.
+         *
+         * Tada įrašas lieka `failed` su gyvu `storageKey`, o
+         * `audio_cleanup_pending` vėliavos NIEKAS neuždeda (`releaseAudio()`
+         * nebuvo kviestas), tad failas lieka diske neribotai: retencija jo
+         * neliečia, kol raktą nurodo gyvas job'o įrašas.
+         *
+         * Barjeras čia praleidžia pagal konstrukciją: `failed`/`cancelled` yra
+         * terminalūs ir rezultato klausimo neturi.
          */
         log.warn("Retry rado JAU TERMINALŲ job'ą - vykdymas praleidžiamas", {
           stage: "already_terminal",
@@ -166,6 +179,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
           jobId,
           status: jauEsantis.status,
         });
+
+        await _cleanupStorage(payload, jobId);
         return { skipped: "already_terminal", status: jauEsantis.status };
       }
 
