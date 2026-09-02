@@ -68,10 +68,17 @@ function praleisti() {
 const SALTINIO_URL = testDatabaseUrl("dumpsrc");
 const TIKSLO_URL = testDatabaseUrl("dumpdst");
 
-/** Raktas TIK šiam testui — produkcinio env neliečiam. */
+/**
+ * Raktas TIK šiam testui — produkcinio env neliečiam.
+ *
+ * ⚠️ HEX, NE BASE64 (CI radinys). `backupEncryption._readKey()` reikalauja
+ * `^[0-9a-fA-F]{64}$`; base64 eilutė atmetama. Naudojamas pats modulio
+ * `generateKey()`, kad formatas negalėtų išsiskirti su tuo, ko modulis laukia.
+ */
+const backupEncryptionModulis = require("../utils/backupEncryption");
 const TESTO_ENV = {
   ...process.env,
-  BACKUP_ENCRYPTION_KEY: crypto.randomBytes(32).toString("base64"),
+  BACKUP_ENCRYPTION_KEY: backupEncryptionModulis.generateKey(),
 };
 
 async function vykdyti(url, sql) {
@@ -120,9 +127,20 @@ async function uzpildytiSaltini(auditoSentinelis) {
       [jobId, JSON.stringify({ text: "reprezentatyvi transkripcija", segments: [{ t: 1 }] })]
     );
 
+    /**
+     * ⚠️ SCHEMA TIKRINTA, NE SPĖTA (CI radinys).
+     *
+     * Pirmoji redakcija rašė `(event, result, meta, created_at)` — bet
+     * `audit_log` `created_at` NETURI (laiko žyma vadinasi `timestamp`), o
+     * `event` turi CHECK `^[A-Z][A-Z0-9_]{1,63}$`, tad mažosiomis raidėmis ir su
+     * tašku sudarytas sentinel'is būtų atmestas ir su teisingu stulpeliu.
+     *
+     * `id` ir `hash_key_id` yra `NOT NULL` be numatytosios reikšmės, tad
+     * perduodami eksplicitiškai.
+     */
     await c.query(
-      `INSERT INTO audit_log (event, result, meta, created_at)
-       VALUES ($1, 'success', '{}'::jsonb, now())`,
+      `INSERT INTO audit_log (id, event, result, hash_key_id, meta)
+       VALUES (gen_random_uuid(), $1, 'success', 'test-key', '{}'::jsonb)`,
       [auditoSentinelis]
     );
 
@@ -133,7 +151,8 @@ async function uzpildytiSaltini(auditoSentinelis) {
 }
 
 test("7.6a: šifruota kopija ir atkūrimas", { skip: praleisti() }, async (t) => {
-  const auditoSentinelis = `sentinel.${crypto.randomUUID()}`;
+  /** ⚠️ Atitinka `audit_log` CHECK `^[A-Z][A-Z0-9_]{1,63}$`. */
+  const auditoSentinelis = `SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`;
   let jobId;
   let kopija;
 
@@ -288,7 +307,7 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
    * KIEKVIENO bandymo tikrinama, kad tikslinė bazė liko SEMANTIŠKAI NEPALIESTA:
    * jokių lentelių, jokių įrašų.
    */
-  const auditoSentinelis = `sentinel.${crypto.randomUUID()}`;
+  const auditoSentinelis = `SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`;
 
   t.after(async () => {
     await pasalintiDb(SALTINIO_URL);
@@ -330,7 +349,7 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
       paruosti: () => ({
         envelope: kopija.envelope,
         manifest: kopija.manifest,
-        env: { ...process.env, BACKUP_ENCRYPTION_KEY: crypto.randomBytes(32).toString("base64") },
+        env: { ...process.env, BACKUP_ENCRYPTION_KEY: backupEncryptionModulis.generateKey() },
       }),
     },
     {
