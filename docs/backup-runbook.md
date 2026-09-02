@@ -425,6 +425,170 @@ vyksta.
 
 ---
 
+## 9a. Šifruota PostgreSQL kopija (`pg_dump`) — 7.6a
+
+Aplikacijos JSON kopija (skyriai 3–4) ir **pilna PostgreSQL kopija** yra du
+skirtingi artefaktai. Šis skyrius yra apie antrąjį.
+
+### Procedūra
+
+```bash
+# Kopija (šifruojama AES-256-GCM; be rakto procedūra ATSISAKO dirbti)
+BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
+  --out kopija.json --actor "$USER" --url "$DATABASE_URL"
+
+# Atkūrimas į TUŠČIĄ bazę
+node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
+```
+
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+
+⚠️ **`BACKUP_ENABLED=true` privalomas.** Išjungtos kopijos reiškia išjungtas ir
+šias: `dump` krinta su `BACKUP_DISABLED` dar prieš jungiantis prie bazės.
+
+⚠️ **Auditas inicijuojamas TIK `dump` kelyje.** Be `auditStore.init()` su
+`AUDIT_BACKEND=postgres` įrašas nukeliautų į atminties fasadą ir dingtų procesui
+pasibaigus — komanda praneštų sėkmę, o audito žurnale įrašo nebūtų.
+
+⚠️ **`restore` audito saugyklos neinicijuoja — sąmoningai.** Kitaip avarinis
+atkūrimas priklausytų nuo audito prieinamumo, o §10 kaip tik dėl to atkūrimo
+pusės neaudituoja. Tai ne teorija: kai `DATABASE_URL` rodo į **naują tuščią
+tikslą** (numatytas 7.6a scenarijus), `audit_log` lentelės ten dar nėra, ir
+inicijavimas nutrauktų atkūrimą dar nepradėjus.
+
+⚠️ **`--actor` privalomas `dump` komandai** — juo pasirašomas audito įrašas
+`PG_DUMP_BACKUP_CREATED`. Be jo komanda krinta su exit kodu `1`.
+
+⚠️ **Jungties eilučių išvestyje nebus.** Ir sėkmės pranešimas, ir klaidos tekstas
+praeina pro kredencialų filtrą: `pg_dump` klaidos žinutėje kitaip atsidurtų visa
+argumentų eilutė su slaptažodžiu.
+
+### Ką procedūra garantuoja
+
+- **Šifravimą.** `pg_dump` išvestis niekada nerašoma į diską atviru tekstu;
+  be `BACKUP_ENCRYPTION_KEY` `dump` komanda krinta su
+  `BACKUP_ENCRYPTION_DISABLED`. Tai sąmoninga: `job_results` turi transkripcijas.
+- **Fail-closed patikras PRIEŠ pirmą SQL sakinį.** Manifesto validacija, GCM
+  žyma (AAD) ir kontrolinė suma tikrinamos prieš `psql` iškvietimą.
+- **Atomiškumą.** Atkūrimas vykdomas `psql --single-transaction` su
+  `ON_ERROR_STOP=1`: SQL klaida viduryje duoda `ROLLBACK`, ne pusiau atkurtą bazę.
+- **Audito neįtraukimą.** `--exclude-table-data=audit_log` (7.4d).
+- **Kopijos galiojimo užfiksavimą.** Prieš išduodant artefaktą jo `expiresAt`
+  įrašomas per `deletionTombstones.recordBackupHorizon()`. Nepavykus — kopija
+  **neišduodama** (`PG_BACKUP_HORIZON_UNRECORDED`). Be šio įrašo sutrumpinta
+  `BACKUP_RETENTION_DAYS` reikšmė leistų išvalyti ištrynimo žymas, kol dump'as
+  dar galioja, ir 7.6c replay nebeturėtų ko taikyti.
+  ⚠️ **Praktinė pasekmė, išmatuota CI'uje:** bazė be įdiegtos ištrynimo žymų
+  infrastruktūros (`erasure_marks`) kopijos **neišduoda** — komanda krinta su
+  `PG_BACKUP_HORIZON_UNRECORDED`. Prieš pirmą kopiją paleiskite migracijas.
+- **Horizontą TOJE PAT bazėje, kurią dump'iname.** Šaltinis privalo sutapti su
+  ištrynimo žymų baze (`DATABASE_URL` arba `PG*`); kitaip komanda atsisako
+  dirbti (`PG_BACKUP_SOURCE_MISMATCH`) dar prieš `pg_dump`.
+  ⚠️ **Todėl `--url` NĖRA būdas dump'inti svetimą bazę** — jis skirtas nurodyti
+  jungtį, kai `DATABASE_URL` neeksportuotas shell'e. Svetimos bazės kopija būtų
+  sukurta sėkmingai, o jos galiojimas užfiksuotas KITOS bazės `backup_horizon`
+  lentelėje: 7.6c (#250) tai rastų kaip „kodėl žymos pasibaigė anksčiau nei
+  kopija". Atmintinė žymų saugykla (be `DATABASE_URL`/`PGHOST`) taip pat
+  atmetama — horizontas dingtų procesui pasibaigus
+  (`PG_BACKUP_HORIZON_NOT_PERSISTENT`).
+- **Programos versijos ribą.** Kito MAJOR'o kopija atmetama prieš `psql`
+  (`BACKUP_APPLICATION_VERSION_INCOMPATIBLE`); `unknown` praleidžiama su
+  įspėjimu — tas pats elgesys kaip `restoreService`, perimtas pažodžiui.
+- **Kūrimo auditą su aktoriumi — kai audito saugykla patvari.**
+  `PG_DUMP_BACKUP_CREATED`, atskiras nuo aplikacijos kopijos `BACKUP_CREATED`.
+  ⚠️ **Sąlyga įvardyta sąmoningai (#262 IV raundas):** su numatytu
+  `AUDIT_BACKEND=memory` įrašas lieka proceso atmintyje ir dingsta komandai
+  pasibaigus, tad komanda tokiu atveju išveda matomą įspėjimą. Fail-closed čia
+  netaikomas: kitaip diegimas su numatytu backend'u apskritai negalėtų pasidaryti
+  kopijos — ta pati priklausomybė, kurios atsisakyta atkūrimo pusėje.
+  ⚠️ **Atkūrimo pusėje audito NĖRA** — žr. §10 ir §11.
+- **Rakto formato patikrą PRIEŠ darbą.** Netinkamas `BACKUP_ENCRYPTION_KEY`
+  krinta su `BACKUP_KEY_INVALID` dar prieš `pg_dump` ir prieš horizonto
+  fiksavimą. ⚠️ Anksčiau toks raktas praeidavo visą dump'ą ir **patvariai
+  pastumdavo** `backup_horizon`: suplanuota užduotis su klaidinga konfigūracija
+  būtų tęsusi žymų retencijos horizontą neišduodama nė vieno artefakto.
+- **Šifravimo metaduomenų nuoseklumą.** `encrypted` privalo būti griežtas
+  boolean, algoritmas — palaikomas; `encrypted: false` prie envelope yra
+  manifesto downgrade ir atmetamas. Tos pačios patikros kaip
+  `restoreService` — du atkūrimo kraštai laukams suteikia tą pačią prasmę.
+- **Privatumo režimo ribą.** Eksplicitiniame `PERSISTENT_STORAGE=false` režime
+  atkūrimas atmetamas (`BACKUP_RESTORE_PRIVACY_MODE`): PostgreSQL tikslas yra
+  patvarus, tad turinys atsidurtų diske režime, kuris žada jo neturėti.
+- **Tikslinės bazės tuštumą.** Prieš pirmą SQL sakinį katalogai suskaičiuoja
+  **visus** vartotojo objektus ne sisteminėse schemose — lenteles, rodinius,
+  materializuotus rodinius, sekas, indeksus, funkcijas, enum'us bei domenus ir
+  ne`public` schemas;
+  radus bent vieną, atkūrimas atmetamas (`PG_RESTORE_TARGET_NOT_EMPTY`).
+  ⚠️ **Patikslinta (#262 peržiūra):** pirmoji redakcija skaičiavo tik
+  `information_schema.tables`, tad likusi seka ar matview'as praeidavo, nors šis
+  skyrius jau žadėjo „visus objektus" — dokumentas buvo stipresnis už kodą.
+  ⚠️ **Riba:** diegime, kur plėtinys (pvz. `pgcrypto`) įdiegtas į `public`,
+  tokia bazė bus laikoma **netuščia**. Mūsų pačių migracijos `CREATE EXTENSION`
+  nenaudoja, tad standartiniam diegimui tai įtakos neturi. ⚠️ Priežastis ne šis etapas: 7.6b (#249)
+  suderinimas ir 7.6c (#250) replay remsis BŪTENT šiuo keliu ir abu prasideda
+  nuo prielaidos „restore pavyko" — atkūrimas į netuščią bazę duotų dviejų bazių
+  **sąjungą**, ir jų testai to nepagautų. Neperskaičius `psql` išvesties
+  atkūrimas taip pat atmetamas (`PG_RESTORE_PREFLIGHT_FAILED`): „tuščia" yra
+  teiginys, kurį reikia įrodyti.
+- **Nesuderinamo formato atmetimą.** `backupPolicy.checkRestoreCompatibility()`
+  vykdomas prieš dešifravimą: naujesne versija sukurta kopija atmetama
+  (`BACKUP_FORMAT_INCOMPATIBLE`), o ne atkuriama prarandant nesuprastus laukus.
+
+### Šaltinio nuoseklumas
+
+`pg_dump` visą kopiją ima **vienu nuosekliu snapshot'u** (`REPEATABLE READ`),
+tad `jobs` ir susiję `job_results` negali būti paimti iš skirtingų loginių
+momentų. Procedūra sąmoningai neperduoda `--no-synchronized-snapshots` ir `--jobs`.
+
+⚠️ **Formuluotė patikslinta (#262 peržiūra).** Ankstesnė redakcija teigė, kad abi
+vėliavos garantiją panaikintų „tyliai, be jokios klaidos". `plain` formatui tai
+netikslu: `pg_dump -j` iškart krinta (lygiagretus dump'as palaikomas tik
+`directory` formatu). Sargas testuose lieka — jis gina nuo vėliavos, pridėtos
+kartu su formato pakeitimu, kai kritimo nebebūtų.
+
+### ⚠️ Manifestas NEPASAKO, kurią bazę atkuriate
+
+DB dump'o manifeste `contents` yra **tuščias** (dump'as nėra aplikacijos
+artefaktų inventorius), tad iš dviejų dump'ų manifestų juos skiria praktiškai tik
+`snapshotTime`. Klastojimui tai kelio neatveria — rūšį ir turinį autentifikuoja
+GCM žyma — bet **operatorius iš manifesto neatskiria, ką atkuria**.
+
+Todėl: kiekvienam atkūrimui užsirašykite, **kuris artefaktas yra autoritetingas**
+(failo vardas, `snapshotTime`, iš kurios aplinkos), ir rollback'o aptikimas
+remkitės tuo įrašu, ne vien manifestu. Šviežumo ir kilmės žymėjimas išsamiau —
+7.6c (#250).
+
+### ⚠️ Po atkūrimo PRIVALOMA patikrinti schemos versiją
+
+```bash
+DATABASE_URL="$TIKSLO_URL" npm --prefix backend run doctor   # arba: make doctor
+```
+
+⚠️ **Komanda patikslinta (#262 peržiūra).** Ankstesnė redakcija nurodė
+`backend/scripts/doctor.mjs` — **tokio failo nėra**; įėjimas yra
+`backend/scripts/doctor.js`, kviečiamas per `npm run doctor` arba `make doctor`.
+Ten pat mechanizmas buvo įvardytas kaip `startupChecks.postgresReachability()`:
+funkcija egzistuoja, bet yra **privati**, tad iš išorės ji nepasiekiama; viešasis
+įėjimas — `startupChecks.runSelfChecks()`.
+
+Patikra lygina `pgmigrations` turinį su `backend/migrations/` katalogu ir parodo
+migracijų **atsilikimą**.
+Atkurta bazė gali būti senesnės schemos nei kodas; be šio žingsnio tai
+paaiškėtų pirmo `INSERT` metu, gyvame sraute.
+
+⚠️ `/api/ready` migracijų atsilikimo **netikrina** — jis tikrina komponentų
+liveness zondus. 7.6a to nekeičia (žr. ataskaitos D5).
+
+### ⚠️ Ši procedūra dar NĖRA erasure-safe
+
+Atkūrimas **prikelia po kopijos ištrintus job'us**. Ištrynimo žymos
+(`erasure_marks`, 7.5a) egzistuoja, bet atkūrimo kelias jų dar **netaiko**, o
+ištrynimų replay ateis su 7.6c (#250).
+
+Praktinė pasekmė: jei tarp kopijos ir atkūrimo kas nors pasinaudojo teise būti
+pamirštam, po atkūrimo jo duomenys grįžta. Iki 7.6c uždarymo atkūrimą galima
+vykdyti tik su rankiniu ištrynimų sąrašo patikrinimu.
+
 ## 10. Žinomos ribos
 
 | Riba | Poveikis | Kur spręsti |
@@ -436,6 +600,22 @@ vyksta.
 | ZIP nepalaikomas | Operatoriui mažiau patogu | Priklausomybės peržiūra |
 | Paslapčių patikra *best-effort* | Neaptinka rotuotų ar kitos aplinkos paslapčių | Slaptų duomenų skeneris |
 | Serveris kopijų nesaugo | Perkėlimas ir saugojimas — operatoriaus | Kopijų saugyklos posistemė |
+| **`pg_dump` kopija ribojama `MAX_DUMP_BYTES` (256 MB)** | Didesnė bazė krinta su `PG_DUMP_TOO_LARGE` | Srautinis šifravimas — ne 7.6a |
+| **`pg_dump` atkūrimas NĖRA erasure-safe** | Prikelia po kopijos ištrintus job'us | Ištrynimų replay — 7.6c (#250) |
+| **`pg_dump` ATKŪRIMAS audito žurnale nefiksuojamas** | Atkūrimo faktas lieka tik operatoriaus runbook'o įraše | Sąmoningas sprendimas, ne spraga — žr. žemiau |
+| **Paslapčių skeneris `pg_dump` turiniui netaikomas** | Į kopiją patekusi paslaptis neaptinkama | Sąmoningas sprendimas — žr. žemiau |
+| **Su `AUDIT_BACKEND=memory` kūrimo auditas neišlieka** | `PG_DUMP_BACKUP_CREATED` dingsta komandai pasibaigus; komanda įspėja | `AUDIT_BACKEND=postgres` |
+
+**Kodėl atkūrimas neaudituojamas.** Rašyti nėra kur: `audit_log` į dump'ą
+sąmoningai neįtrauktas, tikslinė bazė tuščia, aplikacija neveikia. Rašymas į kitą
+saugyklą reikštų, kad **avarinis atkūrimas priklauso nuo audito prieinamumo** —
+fail-closed būtent ten, kur reikia atkurti. Todėl atkūrimas fiksuojamas
+operatoriaus runbook'o įrašu, ne audito žurnale.
+
+**Kodėl dump'as neskenuojamas paslapčių.** `backupService` skenuoja aplikacijos
+artefaktus — ribotą, politikos filtruotą turinį. Pilnas DB dump'as pagal
+apibrėžimą turi **visą** turinį, tad 256 MB SQL skenavimas duotų daugiausia
+klaidingų teigiamų ir blokuotų teisėtas kopijas. Riba įvardijama, ne dangstoma.
 
 ---
 
@@ -443,8 +623,15 @@ vyksta.
 
 ✅ Kad kopijos šifruotos (`manifest.encrypted`, algoritmas ir versija).
 ✅ Kad kopijoje nėra eksportų ir redaguotų variantų (politika kildinama iš registro).
-✅ Kad atkūrimas **negrąžina ištrintų duomenų** — svarbiausia #20 garantija.
-✅ Kad kopijų kūrimas ir atkūrimas audituojami su aktoriumi.
+✅ Kad **aplikacijos kopijos** atkūrimas negrąžina ištrintų duomenų — svarbiausia
+#20 garantija. ⚠️ **`pg_dump` atkūrimui ji dar NEGALIOJA** (§9a, §10): ištrynimų
+replay ateina su 7.6c (#250). Iki tol tai eksplicitinė išimtis, ne nutylėjimas.
+✅ Kad kopijų **kūrimas** audituojamas su aktoriumi — ir aplikacijos
+(`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`), **kai audito
+saugykla patvari** (`AUDIT_BACKEND=postgres`); su numatytu `memory` įrašas
+neišlieka, ir komanda apie tai įspėja. ⚠️ **`pg_dump`
+atkūrimas audito žurnale nefiksuojamas** (§10): jis fiksuojamas operatoriaus
+runbook'o įrašu.
 ✅ Retencijos terminą, apibrėžiantį faktinį ištrynimo langą.
 
 ❌ **Ne** to, kas konkrečiai kopijoje — manifeste tik tipai ir skaičiai.

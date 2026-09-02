@@ -1525,6 +1525,84 @@ mutacijų stulpelis be jo skambėtų taip, tarsi apsauga būtų buvusi nuo prad�
 
 ---
 
+## #248 (7.6a) — šifruota PostgreSQL kopija ir bazinis restore
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Operatoriaus kelias neturi savo orkestracijos** (D2) | `pgDumpBackupContract` | CLI faile atsiradus `pg_dump`/`psql`/`spawn` → krinta. Dvi realizacijos reikštų, kad testas įrodinėja ne tą procedūrą, kurią vykdo operatorius |
+| ⚠️ **Dydžio riba įvardyta ir žemesnė** už `MAX_CIPHERTEXT_BYTES` (D6) | `pgDumpBackupContract` | Ribą pakėlus virš nominalios lubos → krinta. Envelope laukai yra base64 EILUTĖS atmintyje, tad V8 riba ateina gerokai anksčiau nei 2 GB |
+| ⚠️ **DB dump'as NEregistruojamas `ARTEFACT_TYPES`** (D1) | `pgDumpBackupContract` | Įrašius jį į registrą → krinta 2 testai. Registras maitina GDPR ištrynimo inventorių; `isIncluded()` išvedamas iš `persistence`, tad tipas automatiškai patektų ir į aplikacijos kopiją |
+| Manifestas dump'ui turi **tuščią `contents`** | `pgDumpBackupContract` | Melagingas `contents` įrašas atmetamas `createManifest()` politikos vartuose — tai ir yra priežastis, kodėl jis tuščias |
+| ⚠️ **Runbook įspėja, kad procedūra dar NE erasure-safe** (§12.1) | `backupDocumentation` („KIEKVIENA žinoma riba įvardyta") | Įspėjimą pašalinus → krinta. Prijungta prie ESAMO ribų sąrašo, ne vienuoliktu `assert` |
+| Kopija yra **šifruota**; transkripcija nematoma artefakte | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879); vietoje NEVYKDOMA |
+| Šifravimas išjungtas → procedūra **atsisako dirbti** | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879). Paprastas `pg_dump` kriterijaus netenkina — `job_results` turi transkripcijas |
+| ⚠️ Atkūrimas lygina **`jobs` IR `job_results` TURINĮ**, ne `COUNT(*)` | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879). Procedūra, neatkurianti `job_results`, `COUNT` patikrą praeitų, nors kiekvienas job'as būtų praradęs vartotojui matomą rezultatą |
+| ⚠️ `audit_log` **neatkuriamas** — unikalus sentinel'is | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879). „Nesutampa su dump'u" nepakanka: atkūrimas įrašo naujų įvykių, ir nesutapimas atsiranda savaime |
+| ⚠️ **Fail-closed: DB lieka SEMANTIŠKAI NEPALIESTA** (5 scenarijai) | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879) — bet pačios patikros dabar dengiamos vietoje (eilutės žemiau) |
+| ⚠️ Šifravimo ratas, kontrolinė suma ir antraštė — **be duomenų bazės** | `pgDumpBackupContract` | Mutacijos: ME (rūšies palyginimas) → krinta; MF (checksum) → krinta; MI (`decrypt()` grąžinimas naudojamas tiesiogiai) → krinta |
+| ⚠️ Fail-closed patikros krinta **PRIEŠ prisijungimą** | `pgDumpBackupContract` | `targetUrl` nurodo sąmoningai NEPASIEKIAMĄ bazę: prisijungimo klaida vietoj `PG_DUMP_*`/`BACKUP_*` reikštų, kad patikra nukeliavo po `psql` |
+| ⚠️ **SQL klaida JAU PRADĖJUS → `ROLLBACK`**, ne dalinis restore (D4) | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879). Mutacija MG (`--single-transaction` pašalinimas) vietoje nepagaunama |
+| ⚠️ Rūšies antraštė fail-closed: aplikacijos kopija **neįvykdoma** per `psql` | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879). Rūšis gyvena ŠIFRUOTAME turinyje, tad GCM ją autentifikuoja be AAD keitimo |
+| ⚠️ **Schemos versija** po atkūrimo atitinka kodą | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879). Naudojamas viešasis `startupChecks.runSelfChecks()` — tas pats mechanizmas kaip `npm run doctor`, ne atkartotas palyginimas. ⚠️ Ankstesnė šios eilutės redakcija minėjo `startupChecks.postgresReachability()`: funkcija yra, bet PRIVATI (#262 peržiūra). `count(*) > 0` nepakaktų: senesnė schema jį praeitų |
+| ⚠️ **`pg_dump` argumentai nelaužo nuoseklaus snapshot'o** | `pgDumpBackupContract` | Mutacija: vėliavą pridėjus → krinta. ⚠️ Formuluotė patikslinta (#262): `plain` formatu `pg_dump -j` krinta iškart, tad „tyliai“ galioja tik `--no-synchronized-snapshots` ir tik kartu su formato pakeitimu |
+| ⚠️ Atkurtoje bazėje nėra `job_results` be `jobs` ir atvirkščiai | `pgDumpBackup.integration` | ✅ CI PASS (run 33659950879). Testas REMIASI snapshot semantika; be jos ryšys galėtų lūžti net esant teisingam atkūrimui |
+| ⚠️ **`BACKUP_ENABLED` galioja ir `pg_dump` keliui** | `pgDumpBackupContract` | Mutacija MJ (jungiklio patikros pašalinimas) → krinta. DB sąmoningai NEPASIEKIAMA: prisijungimo klaida vietoj `BACKUP_DISABLED` reikštų, kad jungiklis tikrinamas po `pg_dump` |
+| ⚠️ **Naujesnio formato kopija atmetama PRIEŠ `psql`** | `pgDumpBackupContract` | Mutacija MK (`checkRestoreCompatibility()` apėjimas) → krinta. Artefaktas šifruojamas SU pakeista versija, kitaip testas įrodytų GCM žymą, ne suderinamumo patikrą |
+| ⚠️ **Horizonto neužfiksavus kopija NEIŠDUODAMA** (nuo to priklauso 7.6c) | `pgDumpBackupContract`, `pgDumpBackup.integration` | Mutacija ML (klaida → `log.error`) → krinta. Sąmoningas nukrypimas nuo `backupService.js:153`, kur gedimas tik logginamas |
+| ⚠️ **Kredencialai neišeina į klaidas ir logus** | `pgDumpBackupContract` (funkcijos), `pgDumpBackup.integration` (tikra `pg_dump` klaida) | Vietoje: dvi ašys — bendras URL šablonas ir eksplicitiškai perduotas URL (slaptažodis su `@`). ⚠️ Mutacija MM (neredaguota `klaida.message`) vietoje NEPAGAUNAMA: be įdiegto `pg_dump` procesas krinta ties `ENOENT`, o tokioje žinutėje argumentų eilutės nėra |
+| ⚠️ **Atkurtų eilučių turinys nepatenka į `psql` klaidą** | `pgDumpBackupContract` | Mutacija MN (`DETAIL`/`CONTEXT` filtro pašalinimas) → krinta. `CONTEXT: COPY jobs, line 3` neša transkripcijos fragmentą, o `ERROR:` eilutė diagnozei pakanka |
+| ⚠️ **`dump` be `--actor` neįvyksta** (auditas su aktoriumi) | `pgDumpBackupContract` | Mutacija MO (privalomumo pašalinimas) → krinta. Tikrinamas TIKRAS procesas ir exit kodas, ne eilutė faile (§9.2) |
+| ⚠️ **Auditas kūrimo pusėje, atskiras įvykis; atkūrimo pusėje — NĖRA** | `pgDumpBackupContract`, `pgDumpBackup.integration` | Neregistruotas įvykis mestų `UnclassifiedAuditEventError`; testas fiksuoja ir tai, kad `PG_DUMP_BACKUP_RESTORED` NEEGZISTUOJA — jo atsiradimas reikštų, kad avarinis atkūrimas ėmė priklausyti nuo audito prieinamumo |
+| `psql` stdout **nebuferinamas** (`stdio: "ignore"`) | `pgDumpBackupContract` | Mutacija MP (`"pipe"`) → krinta. ⚠️ STATINĖ forma (§9.2): užstrigimą įrodytų tik vamzdį pripildantis dump'as, o `--quiet` režimu tokio nėra |
+| ⚠️ **Netuščia tikslinė bazė atmetama PRIEŠ pirmą SQL sakinį** | `pgDumpBackup.integration` | ✅ CI. Tikrinama ne tik klaida: svetimas turinys privalo likti nepaliestas, o kopijos lentelės - neatsirasti. ⚠️ Mutacija MR (preflight neįjungtas į atkūrimą) vietoje NEPAGAUNAMA - reikia dviejų tikrų bazių. Gina ne 7.6a, o #249/#250, kurie prasideda nuo prielaidos „restore pavyko" |
+| ⚠️ **`restore` NEPRIKLAUSO nuo audito prieinamumo** | `pgDumpBackupContract` | Mutacija MW (`auditStore.init()` prieš komandų šakojimą) → krinta. Tikrinamas TIKRAS procesas su `AUDIT_BACKEND=postgres` ir nepasiekiama baze: `BACKUP_MANIFEST_INVALID` reiškia, kad kelias nuėjo iki savo fail-closed grandinės, `ECONNREFUSED` reikštų kritimą audito saugykloje. Gina runbook'o §10 teiginį, kurio kodas prieštaravo |
+| ⚠️ **Preflight mato NE TIK lenteles** (sekas, matview'us, funkcijas, schemas, enum'us, domenus) | `pgDumpBackup.integration` | ✅ CI. Keturi likučių tipai po vieną, ir kaskart tikrinama, kad kopijos lentelių neatsirado; tuščia bazė privalo PRAEITI, kitaip patikra būtų visada „ne". ⚠️ Mutacija MX (grįžimas prie `information_schema.tables`) vietoje NEPAGAUNAMA |
+| ⚠️ **Netinkamas raktas krinta PRIEŠ `pg_dump` ir prieš horizontą** | `pgDumpBackupContract` | Mutacija MY (patikra išjungta) → krinta. Tikrinama ir tai, kad `recordBackupHorizon` NEBUVO kviestas: anksčiau cron'as su blogu raktu būtų patvariai stūmęs žymų retencijos horizontą neišduodamas nė vieno artefakto |
+| ⚠️ **Šifravimo metaduomenys tikrinami PRIEŠ dešifravimą** | `pgDumpBackupContract` | Mutacija MZ (patikra neįjungta) → krinta. Keturi atvejai: `encrypted` kaip eilutė, `false` prie envelope (downgrade), nepalaikomas ir nenurodytas algoritmas — tos pačios reikšmės kaip `restoreService` (§16) |
+| ⚠️ **Neišsaugojimo režimas atmeta atkūrimą** | `pgDumpBackupContract` | Mutacija NA (patikra neįjungta) → krinta. Kontrolė: be eksplicitinio `PERSISTENT_STORAGE=false` kelias privalo eiti iki tikslinės bazės zondo — kitaip patikra blokuotų daugumą diegimų, kaip kadaise `restoreService` |
+| Preflight mato enum'us ir domenus | `pgDumpBackup.integration` | ⚠️ Mutacija NB (`pg_type` subužklausa pašalinta) vietoje NEPAGAUNAMA. `pg_class` enum'o įrašo neturi, tad be jos bazė su likusiu tipu atrodė tuščia |
+| ⚠️ **Slaptažodžio FRAGMENTAI neišeina į išvestį** | `pgDumpBackupContract` | Mutacija MV (redagavimas iki pirmo `@`) → krinta. ⚠️ Ankstesnė testo redakcija MV NEPAGAVO: ji tvirtino `includes(pilnas_slaptažodis) === false`, o tai siauresnis teiginys nei testo pavadinimas. Dabar tikrinamos VISOS ≥3 simbolių poeilutės keturiose išvesties formose |
+| ⚠️ **Neperskaityta `psql` išvestis NEreiškia „tuščia"** | `pgDumpBackupContract` | Mutacija MQ (fail-closed parsinimo išjungimas) → krinta. Kitaip patikrą apeitų bet koks išvesties formato pokytis |
+| ⚠️ **Žymų saugykla PRIVALO gyventi dump'inamoje bazėje** | `pgDumpBackupContract`, `pgDumpBackup.integration` | Mutacijos: MS (palyginimas suveltas) → krinta vietoje; ⚠️ MS2 (patikra neįjungta į kopijos kūrimą) vietoje NEPAGAUNAMA — gina integracinis „svetimos bazės" testas. Saugo #250 D4: horizontas kitoje bazėje paverčia eksporto prielaidą netiesa nuo pat pradžių |
+| ⚠️ **Atmintinė žymų saugykla kopijos neišduoda** | `pgDumpBackupContract` | Horizontas joje būtų užfiksuotas ir dingtų procesui pasibaigus — garantija formaliai „įvykdyta", faktiškai ne (`PG_BACKUP_HORIZON_NOT_PERSISTENT`) |
+| ⚠️ **Programos MAJOR versija — atskira ašis nuo formato** | `pgDumpBackupContract` | Mutacija MT (ašis išjungta) → krinta. `unknown` praleidžiamas su įspėjimu: tikrinama pagal TAI, kuri klaida grąžinama (kelias nueina iki tikslinės bazės zondo) |
+| CLI inicijuoja ir uždaro abi saugyklas | `pgDumpBackupContract` | Mutacija MU (be `auditStore.init()`) → krinta. ⚠️ Pirmoji testo redakcija MU NEPAGAVO: statinė patikra sutapdavo su savo pačios komentaru, tad komentarai dabar nukerpami prieš palyginimą (§9.2) |
+| ⚠️ **Neišduotos kopijos auditas nefiksuoja** | `pgDumpBackup.integration` | ✅ CI PASS. Horizontui lūžus tikrinama ne tik klaida, bet ir tai, kad audito įrašo NĖRA: įrašas apie neegzistuojantį artefaktą būtų blogesnis už tylą |
+
+⚠️ **KĄ 7.6a ĮRODO VIETOJE IR KO NE.** Vietinis rinkinys tikrina KONTRAKTĄ:
+vieno kelio taisyklę, dydžio ribą, registro neliečiamumą ir runbook'o ribas.
+Pačią procedūrą — `pg_dump`, šifravimą per tikrus duomenis, atkūrimą,
+atomiškumą ir fail-closed elgesį — tikrina tik `pgDumpBackup.integration`,
+kuris reikalauja IR tikros DB, IR `pg_dump`/`psql` binarų. Šioje aplinkoje jis
+NEVYKDOMAS nė karto.
+
+⚠️ **NOT RUN RIBA BUVO PLATESNĖ, NEI TURĖJO BŪTI — IR CI TAI PARODĖ.**
+
+Pirmoji redakcija paliko VISĄ fail-closed branduolį (ME rūšies antraštė, MF
+kontrolinė suma, MG `--single-transaction`) už NOT RUN ribos, motyvuojant tuo,
+kad tai „elgesys prieš realią duomenų bazę".
+
+Dviem iš trijų tai buvo NETIESA. Šifravimo ratas, kontrolinė suma ir antraštės
+perskaitymas yra grynas darbas su BAITAIS — duomenų bazės jiems nereikia.
+Riba buvo nubrėžta pagal tai, kur testas buvo parašytas, ne pagal tai, ko jam
+realiai reikia.
+
+Kaina buvo tikra: CI rado, kad `decrypt()` grąžina `{ plaintext: Buffer }`, o ne
+eilutę, ir `atkurtiSifruotaKopija()` tą reikšmę naudojo tiesiogiai. Vietinis
+rinkinys to nepagavo, nes visas ratas buvo pasiekiamas tik per DB.
+
+Dabar **ME ir MF krinta vietoje**, o `MI` (regresija į tiesioginį `decrypt()`
+grąžinimą) — taip pat. Už NOT RUN ribos pagrįstai lieka **tik MG**: jis apie
+`psql --single-transaction` elgesį, kurio be `psql` patikrinti tikrai neįmanoma.
+
+⚠️ **DVI PRALEIDIMO AŠYS, NE VIENA.** `skipWithoutPostgres()` tikrina
+`DATABASE_URL`, o atskira patikra — ar yra `pg_dump`/`psql`. Su
+`REQUIRE_POSTGRES=1` trūkstamas klientas yra KLAIDA, ne praleidimas: tyliai
+praleistas failas apeitų `verify-postgres-suite-ran.mjs`, kuris reikalauja bent
+vieno neprapleisto `ok` kiekviename rinkinio faile.
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

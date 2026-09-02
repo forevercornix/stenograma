@@ -151,6 +151,37 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
     { pattern: /best-effort/i, what: "paslapčių patikros ribos" },
     { pattern: /[Ss]erveris kopijų nesaugo/, what: "serveris kopijų nesaugo" },
     { pattern: /audito žurnale \*\*nebus\*\*|[Aa]tkuriami duomenys, ne jų istorija/, what: "auditas neatkuriamas" },
+    /**
+     * ⚠️ 7.6a (#248): `pg_dump` procedūra dar NĖRA erasure-safe.
+     *
+     * Atkūrimas prikelia po kopijos ištrintus job'us: žymos (7.5a) yra, bet
+     * atkūrimo kelias jų netaiko, o replay ateina su 7.6c. Be šios eilutės
+     * runbook'as taptų stipresnis už kodą (§12.1) — jis aprašytų procedūrą,
+     * kuri atrodo baigta, nors viena garantija dar neįgyvendinta.
+     *
+     * ⚠️ ĮRAŠOMA Į ŠĮ SĄRAŠĄ, NE ATSKIRU `assert` (#248 užbaigimo punktas).
+     * Sąrašas NĖRA išvedamas iš kodo — jis rankinis (žr. testo antraštę), tad
+     * „prijungti prie esamo mechanizmo" čia reiškia būtent papildyti jį, o ne
+     * kurti vienuoliktą nepriklausomą patikrą šalia.
+     */
+    { pattern: /dar NĖRA erasure-safe|nėra erasure-safe/i, what: "pg_dump atkūrimas ne erasure-safe" },
+    { pattern: /MAX_DUMP_BYTES|256 MB/, what: "pg_dump dydžio riba" },
+    /**
+     * ⚠️ #262 PERŽIŪRA: dvi garantijos SUSIAURINTOS, ne įgyvendintos.
+     *
+     * `pg_dump` atkūrimas neaudituojamas (rašyti nėra kur: `audit_log` ne
+     * dump'e, bazė tuščia, aplikacija neveikia), o paslapčių skeneris pilnam DB
+     * dump'ui netaikomas (duotų daugiausia klaidingų teigiamų). Abu sprendimai
+     * §11 teiginius susilpnina, tad runbook'as PRIVALO juos įvardyti — kitaip
+     * auditoriui rodomas sąrašas taptų stipresnis už kodą (§12.1).
+     */
+    { pattern: /[Aa]tkūrimas audito žurnale nefiksuojamas|Kodėl atkūrimas neaudituojamas/, what: "pg_dump atkūrimas neaudituojamas" },
+    { pattern: /[Pp]aslapčių skeneris[^|]*netaikomas|Kodėl dump'as neskenuojamas/, what: "paslapčių skeneris netaikomas dump'ui" },
+    /**
+     * ⚠️ #262 IV raundas: audito garantija SĄLYGINĖ, ne besąlyginė. Su numatytu
+     * `AUDIT_BACKEND=memory` įrašas neišlieka, tad §11 be sąlygos būtų netiesa.
+     */
+    { pattern: /AUDIT_BACKEND=memory[^|]*neišlieka|kai audito\s+saugykla patvari/, what: "kūrimo auditas sąlyginis" },
   ];
 
   for (const limit of knownLimits) {

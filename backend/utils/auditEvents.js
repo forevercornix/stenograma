@@ -151,6 +151,16 @@ const AUDIT_EVENTS = Object.freeze({
   BACKUP_REJECTED: KATEGORIJA.NEBLOKUOJANTIS,
   BACKUP_RESTORED: KATEGORIJA.NEBLOKUOJANTIS,
   BACKUP_RESTORE_FAILED: KATEGORIJA.NEBLOKUOJANTIS,
+  /**
+   * ⚠️ ATSKIRAS NUO `BACKUP_CREATED` (#248, 7.6a). Aplikacijos kopija turi
+   * politikos filtruotą turinį, o `pg_dump` artefaktas - visą bazę; auditoriui
+   * tai skirtingi dalykai, ir vienas įvykio vardas juos suplaktų.
+   *
+   * Atitikmens atkūrimo pusėje NĖRA sąmoningai: ten `audit_log` neįtrauktas į
+   * dump'ą, tikslinė bazė tuščia, o rašymas į kitą saugyklą reikštų, kad
+   * avarinis atkūrimas priklauso nuo audito prieinamumo.
+   */
+  PG_DUMP_BACKUP_CREATED: KATEGORIJA.NEBLOKUOJANTIS,
 });
 
 /**
