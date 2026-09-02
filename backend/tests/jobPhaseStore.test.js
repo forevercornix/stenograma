@@ -77,7 +77,7 @@ test("#154 STORE: pilnas transcription srautas su diarizacija", async () => {
   assert.equal(po.progressKnown, false);
 
   po = await jobStore.system.startPhase(job.id, PHASE.MERGING);
-  po = await jobStore.system.finish(job.id, STATUS.COMPLETED);
+  po = await jobStore.system.finish(job.id, STATUS.COMPLETED, { result: { text: "ok" } });
 
   assert.equal(po.status, STATUS.COMPLETED);
   assert.equal(po.phase, null);
@@ -156,7 +156,11 @@ test("#154 STORE: terminalus perėjimas iš BET KURIOS fazės išvalo būseną",
       progress: { current: 3900, total: 4400 },
     });
 
-    const po = await jobStore.system.finish(job.id, status, { error_code: "x" });
+    /** ⚠️ `completed` reikalauja rezultato (#184, C11) - kiti terminalai ne. */
+    const po = await jobStore.system.finish(job.id, status, {
+      error_code: "x",
+      ...(status === STATUS.COMPLETED ? { result: { text: "ok" } } : {}),
+    });
 
     assert.equal(po.status, status);
     assert.equal(po.phase, null, `${status}: fazė turi būti išvalyta`);
