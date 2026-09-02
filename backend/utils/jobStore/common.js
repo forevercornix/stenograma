@@ -748,7 +748,23 @@ function kanonizuoti(reiksme) {
   }
   if (Array.isArray(reiksme)) return reiksme.map(kanonizuoti);
 
-  const out = {};
+  /**
+   * ⚠️ `Object.create(null)`, NE `{}` (#184, Codex C10).
+   *
+   * Tiekėjo rezultatas ateina per `JSON.parse`, tad jame gali būti NUOSAVAS
+   * `__proto__` raktas. Priskyrus jį įprastam objektui, suveikia prototipo
+   * SETTER'is, o nuosava savybė NEATSIRANDA — laukas tyliai iškrenta iš
+   * kanoninės formos.
+   *
+   * Pasekmė nėra teorinė: du rezultatai, besiskiriantys TIK tuo lauku, taptų
+   * lygūs, `finishAtomic()` grąžintų idempotentišką sėkmę vietoj
+   * `RESULT_CONFLICT`, o pralaimėjęs vykdytojas praneštų sėkmę ir išvalytų savo
+   * šaltinį.
+   *
+   * Prototipo neturintis objektas priskyrimą paverčia paprasta nuosava savybe,
+   * o `JSON.stringify` ją įtraukia.
+   */
+  const out = Object.create(null);
   for (const raktas of Object.keys(reiksme).sort()) {
     /**
      * ⚠️ `undefined` REIKŠMĖS LAUKAI PRALEIDŽIAMI. `jsonb` jų neturi
@@ -773,6 +789,20 @@ function idempotentiskasAtsakymas(job, status, extra) {
   if (job.status !== STATUS.COMPLETED) return undefined;
 
   /**
+   * ⚠️ PRAŠOMAS STATUSAS TIKRINAMAS PIRMA (#184, Codex C12).
+   *
+   * `finish(FAILED)` ant `completed` job'o yra GYVAVIMO CIKLO klausimas, ir
+   * atsakymas privalo būti `JobPhaseError` — nesvarbu, ar rezultatas yra.
+   * Anksčiau trūkstamo rezultato klasifikacija buvo AUKŠČIAU, tad tas pats
+   * perėjimas grąžindavo `COMPLETED_WITHOUT_RESULT`, jei rezultato nebuvo, ir
+   * mesdavo `JobPhaseError`, jei buvo. Vien persistentinių duomenų trūkumas
+   * keitė gyvavimo ciklo konfliktą į rezultato sentinel'į, o `finishFailed()`
+   * tada elgdavosi su juo kaip su įprastu grąžinimu, ne kaip su terminaliu
+   * no-op keliu.
+   */
+  if (status !== STATUS.COMPLETED) return undefined;
+
+  /**
    * ⚠️ `COMPLETED` BE REZULTATO NĖRA SĖKMĖ.
    *
    * Tai remontuotina būsena (nutrūkusi transakcija, ranka redaguota eilutė), ir
@@ -781,13 +811,6 @@ function idempotentiskasAtsakymas(job, status, extra) {
    * nebereikalingas, saugykloje nėra.
    */
   if (rezultatoNera(job.result)) return "COMPLETED_WITHOUT_RESULT";
-
-  /**
-   * ⚠️ NEATITINKANTIS STATUSAS PALIEKAMAS `jobPhase`. `finish(FAILED)` ant
-   * `completed` job'o yra gyvavimo ciklo klausimas, ne rezultato — atsakymas
-   * privalo likti `JobPhaseError`, ne `RESULT_CONFLICT`.
-   */
-  if (status !== STATUS.COMPLETED) return undefined;
 
   return kanoninisRezultatas(extra.result) === kanoninisRezultatas(job.result)
     ? job

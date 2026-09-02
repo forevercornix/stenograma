@@ -482,7 +482,15 @@ test("#154 DOKUMENTAS: terminalūs PERĖJIMAI atitinka finish() semantiką", () 
 
       let leidžia = true;
       try {
-        finish(job, tikslas);
+        /**
+         * ⚠️ REZULTATAS PERDUODAMAS `completed` ATVEJU (#184, C11).
+         *
+         * Nuo 7.5b `finish(COMPLETED)` be rezultato metama — bet tai NĖRA
+         * perėjimo grafo briauna, o rezultato pilnumo reikalavimas. Šis testas
+         * lygina dokumentuotą GRAFĄ su kodu, tad rezultatas paduodamas, kad
+         * pilnumo patikra neapsimestų neegzistuojančiu grafo apribojimu.
+         */
+        finish(job, tikslas, tikslas === STATUS.COMPLETED ? { result: { text: "ok" } } : {});
       } catch {
         leidžia = false;
       }

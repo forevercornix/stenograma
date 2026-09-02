@@ -239,7 +239,8 @@ test("#154 RETRY: terminalaus job'o perpaleisti NEGALIMA", async () => {
   for (const status of [STATUS.COMPLETED, STATUS.FAILED, STATUS.CANCELLED]) {
     const job = await naujas();
     await jobStore.system.restart(job.id);
-    await jobStore.system.finish(job.id, status);
+    /** ⚠️ `completed` reikalauja rezultato (#184, C11). */
+    await jobStore.system.finish(job.id, status, status === STATUS.COMPLETED ? { result: { text: "ok" } } : {});
 
     await assert.rejects(
       () => jobStore.system.restart(job.id),

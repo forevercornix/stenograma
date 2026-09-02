@@ -148,6 +148,27 @@ function createWorker(queueName, processor, workerOptions = {}) {
         );
       }
 
+      if (sprendimas === RETRY_VEIKSMAS.JAU_TERMINALUS) {
+        /**
+         * ⚠️ `failed`/`cancelled` NEEINA Į `restart()` (#184, Codex D14).
+         *
+         * `jobPhase.restart()` leidžia tik `QUEUED`/`PROCESSING`, tad anksčiau
+         * toks retry gaudavo `JobPhaseError` → BullMQ failed → kartojama →
+         * dead-letter, nors darbas jau seniai tvarkingai baigtas.
+         *
+         * ⚠️ AUDIO ČIA NEVALOMAS ATSKIRAI. Įrašas terminalus, tad jį jau apdorojo
+         * tas kelias, kuris jį tokiu padarė; pakartotinis valymas būtų antras
+         * autoritetas tam pačiam sprendimui.
+         */
+        log.warn("Retry rado JAU TERMINALŲ job'ą - vykdymas praleidžiamas", {
+          stage: "already_terminal",
+          execution: "worker",
+          jobId,
+          status: jauEsantis.status,
+        });
+        return { skipped: "already_terminal", status: jauEsantis.status };
+      }
+
       if (sprendimas === RETRY_VEIKSMAS.IDEMPOTENTISKA_SEKME) {
         log.info("Retry rado jau įsipareigotą rezultatą - vykdymas praleidžiamas", {
           stage: "completed_idempotent",

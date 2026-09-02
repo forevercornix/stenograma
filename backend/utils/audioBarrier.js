@@ -34,6 +34,11 @@ const RETRY_VEIKSMAS = Object.freeze({
   IDEMPOTENTISKA_SEKME: "IDEMPOTENTISKA_SEKME",
   /** `completed` BE rezultato — ne sėkmė; audio LIEKA. */
   REMONTUOTINA: "REMONTUOTINA",
+  /**
+   * Kitas TERMINALUS statusas (`failed`, `cancelled`) — darbas jau baigtas,
+   * `restart()` jo neleidžia, tad retry neturi ko daryti (#184, Codex D14).
+   */
+  JAU_TERMINALUS: "JAU_TERMINALUS",
 });
 
 /**
@@ -46,7 +51,26 @@ const RETRY_VEIKSMAS = Object.freeze({
  * @param {object|null} job autoritetinga persistentinė būsena
  */
 function sprendimasPriesRestart(job) {
-  if (!job || job.status !== jobStore.STATUS.COMPLETED) return RETRY_VEIKSMAS.VYKDYTI;
+  if (!job) return RETRY_VEIKSMAS.VYKDYTI;
+
+  /**
+   * ⚠️ KITI TERMINALŪS STATUSAI IRGI NEEINA Į `restart()` (#184, Codex D14).
+   *
+   * `jobPhase.restart()` leidžia tik `QUEUED`/`PROCESSING`. Anksčiau čia buvo
+   * tikrinamas TIK `completed`, tad `failed` ar `cancelled` įrašas grąžindavo
+   * `VYKDYTI`, worker'is kviesdavo `restart()`, ir gaudavo `JobPhaseError` →
+   * BullMQ failed → kartojama → dead-letter. Tai tas pats gedimo režimas, kurį
+   * 7.5b taisė `completed` atvejui, tik kita būsena.
+   *
+   * ⚠️ ATSKIRA NUO `REMONTUOTINA`: ten būsena sugadinta ir audio privalo likti;
+   * čia darbas TVARKINGAI baigtas, tiesiog nesėkme ar atšaukimu.
+   */
+  if (job.status !== jobStore.STATUS.COMPLETED) {
+    const kitiTerminalus = [jobStore.STATUS.FAILED, jobStore.STATUS.CANCELLED];
+    return kitiTerminalus.includes(job.status)
+      ? RETRY_VEIKSMAS.JAU_TERMINALUS
+      : RETRY_VEIKSMAS.VYKDYTI;
+  }
 
   /**
    * ⚠️ `null` IR `undefined` — TA PATI BŪSENA. `undefined` reikštų, kad laukas

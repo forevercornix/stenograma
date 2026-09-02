@@ -483,6 +483,37 @@ function finish(job, status, extra = {}) {
     );
   }
 
+  /**
+   * ⚠️ `COMPLETED` BE REZULTATO NEPRIIMAMAS (#184, Codex C11).
+   *
+   * Tai ne naujas reikalavimas, o paties 7.5b APIBRĖŽIMO vykdymas: „`COMPLETED`
+   * reiškia tik tokią būseną, kurioje `jobs.status = 'completed'` IR egzistuoja
+   * atitinkamas rezultatas". Iki šiol apibrėžimas galiojo tik PAKARTOTINIAM
+   * užbaigimui — pirmasis perėjimas rezultato netikrino.
+   *
+   * Pasekmė: tiekėjui grąžinus `null` ar `undefined`, `assertResultWithinLimits()`
+   * tokį rezultatą praleidžia (jis tikrina DYDĮ), ir job'as būdavo
+   * įsipareigojamas kaip `completed` BE rezultato. Worker'is praneša sėkmę,
+   * BullMQ patvirtina, ir tik VĖLESNIS retry atpažįsta būseną kaip remontuotiną —
+   * t. y. sistema pati pagamindavo tą sugadintą būseną, kurią 7.5b sargai
+   * skirti aptikti.
+   *
+   * ⚠️ ČIA, O NE KVIETĖJUOSE. `jobPhase` yra vienintelis perėjimų autoritetas, ir
+   * per jį eina visų trijų backend'ų `finishAtomic()`. Patikra kvietėjuose
+   * reikštų tris vietas, kurias reikia prisiminti — būtent ta klasė, kuri šiame
+   * darbe jau kartą kainavo (audio barjeras).
+   *
+   * ⚠️ TIKRINAMAS TIK BUVIMAS, NE TURINYS. Tuščias objektas ar tuščias masyvas
+   * yra teisėtas rezultatas; `null`/`undefined` reiškia, kad rezultato NĖRA.
+   */
+  if (status === STATUS.COMPLETED && (extra.result === undefined || extra.result === null)) {
+    throw new JobPhaseError(
+      "`completed` reikalauja rezultato: `finish(COMPLETED)` be `result` sukurtų " +
+        "būseną, kurios kvietėjas negali nei naudoti, nei suremontuoti.",
+      "COMPLETED_REQUIRES_RESULT"
+    );
+  }
+
   return { ...extra, status, phase: null, progress: null, progressKnown: false };
 }
 

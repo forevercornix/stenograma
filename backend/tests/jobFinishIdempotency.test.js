@@ -318,11 +318,26 @@ test("#184 ⚠️ retry įėjimo sprendimas: trys būsenos, trys veiksmai", () =
     RETRY_VEIKSMAS.VYKDYTI,
     "dar ne terminalus"
   );
-  assert.equal(
-    sprendimasPriesRestart({ status: STATUS.FAILED, result: null }),
-    RETRY_VEIKSMAS.VYKDYTI,
-    "`failed` PRIVALO būti kartojamas - retry čia yra visa prasmė"
-  );
+  /**
+   * ⚠️ ŠI ASERCIJA BUVO APVERSTA, IR MANO PAGRINDIMAS BUVO KLAIDINGAS (Codex D14).
+   *
+   * Anksčiau čia buvo `VYKDYTI` su paaiškinimu „`failed` privalo būti kartojamas —
+   * retry čia yra visa prasmė". Tai neteisinga: `workers/index.js` job'ą pažymi
+   * `FAILED` TIK kai `attemptsExhausted`, o tarpiniame bandyme įrašas lieka
+   * `processing` (`:546-547`). Vadinasi persistentinis `failed` reiškia, kad
+   * bandymai jau IŠNAUDOTI, o ne kad laukiama dar vieno.
+   *
+   * Be to `jobPhase.restart()` leidžia tik `QUEUED`/`PROCESSING`, tad
+   * `restart()` ant `failed` niekada negali pavykti — vienintelės galimos
+   * baigtys buvo `JobPhaseError` → dead-letter arba praleidimas.
+   */
+  for (const terminalus of [STATUS.FAILED, STATUS.CANCELLED]) {
+    assert.equal(
+      sprendimasPriesRestart({ status: terminalus, result: null }),
+      RETRY_VEIKSMAS.JAU_TERMINALUS,
+      `\`${terminalus}\` jau baigtas - \`restart()\` jo nepriimtų`
+    );
+  }
 
   assert.equal(
     sprendimasPriesRestart({ status: STATUS.COMPLETED, result: { a: 1 } }),
@@ -388,6 +403,12 @@ test("#184 ⚠️ audio šalinimo predikatas: TIK `completed` be rezultato bloku
     true,
     "⚠️ ĮPRASTAS FAILED (tiekėjo klaida) elgesio NEKEIČIA — kitaip failai kauptųsi"
   );
+  /**
+   * ⚠️ `JAU_TERMINALUS` NEBLOKUOJA VALYMO (#184, D14). Retry sprendimas ir audio
+   * predikatas remiasi ta pačia funkcija, bet klausia SKIRTINGŲ dalykų: „ar
+   * vykdyti iš naujo" ir „ar galima šalinti šaltinį". Tvarkingai baigtas
+   * `failed` job'as pirmojo neleidžia, antrąjį leidžia.
+   */
   assert.equal(
     arGalimaSalintiAudio({ status: STATUS.CANCELLED, result: null }),
     true,
@@ -517,4 +538,100 @@ test("#184-A `finishFailed` JAU TERMINALIAM job'ui tebeduoda no-op sėkmę", asy
 
   const po = await jobStore.system.finishFailed(job.id, { error: "veluojantis" });
   assert.equal(po.status, STATUS.CANCELLED);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 7. KLASIFIKACIJA IR KANONIZAVIMAS (Codex C grupė)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#184-C ⚠️ `__proto__` laukas IŠLIEKA kanoninėje formoje", () => {
+  /**
+   * ⚠️ PROTOTIPO SETTER'IS TYLIAI PRARYJA LAUKĄ (Codex C10).
+   *
+   * Tiekėjo rezultatas ateina per `JSON.parse`, tad jame gali būti NUOSAVAS
+   * `__proto__` raktas. Priskyrus jį įprastam `{}` objektui, suveikia prototipo
+   * setter'is, o nuosava savybė NEATSIRANDA — laukas iškrenta.
+   *
+   * Pasekmė nėra teorinė: du rezultatai, besiskiriantys TIK tuo lauku, taptų
+   * lygūs, `finishAtomic()` grąžintų idempotentišką sėkmę vietoj
+   * `RESULT_CONFLICT`, o pralaimėjęs vykdytojas praneštų sėkmę ir išvalytų savo
+   * šaltinį.
+   */
+  const su = JSON.parse('{"a":1,"__proto__":{"slaptas":true}}');
+  const be = JSON.parse('{"a":1}');
+
+  assert.notEqual(
+    kanoninisRezultatas(su),
+    kanoninisRezultatas(be),
+    "⚠️ skirtingi rezultatai NEGALI būti kanoniškai lygūs"
+  );
+  assert.match(kanoninisRezultatas(su), /__proto__/, "laukas privalo patekti į kanoninę formą");
+
+  /** Ir atvirkščiai: tas pats `__proto__` turinys lieka lygus sau. */
+  const kitas = JSON.parse('{"__proto__":{"slaptas":true},"a":1}');
+  assert.equal(kanoninisRezultatas(su), kanoninisRezultatas(kitas), "raktų tvarka nereikšminga");
+});
+
+test("#184-C ⚠️ `finish(COMPLETED)` BE rezultato atmetamas PIRMAME perėjime", () => {
+  /**
+   * ⚠️ SISTEMA PATI PAGAMINDAVO BŪSENĄ, KURIĄ SARGAI SKIRTI APTIKTI (Codex C11).
+   *
+   * 7.5b apibrėžė: „`COMPLETED` reiškia tik tokią būseną, kurioje
+   * `jobs.status = 'completed'` IR egzistuoja rezultatas". Bet apibrėžimas
+   * galiojo tik PAKARTOTINIAM užbaigimui — pirmasis perėjimas rezultato
+   * netikrino.
+   *
+   * Tiekėjui grąžinus `null`, `assertResultWithinLimits()` tokį rezultatą
+   * PRALEIDŽIA (jis tikrina dydį), job'as būdavo įsipareigojamas kaip
+   * `completed` be rezultato, worker'is praneša sėkmę, BullMQ patvirtina — ir
+   * tik VĖLESNIS retry atpažįsta būseną kaip remontuotiną.
+   */
+  const { finish, JobPhaseError } = require("../utils/jobPhase");
+  const processing = { type: JOB_TYPES.TRANSCRIPTION, status: STATUS.PROCESSING, phase: PHASE.VALIDATING };
+
+  for (const nera of [undefined, null]) {
+    assert.throws(
+      () => finish(processing, STATUS.COMPLETED, nera === undefined ? {} : { result: nera }),
+      (err) => {
+        assert.ok(err instanceof JobPhaseError);
+        assert.equal(err.code, "COMPLETED_REQUIRES_RESULT");
+        return true;
+      },
+      `result=${String(nera)} privalo būti atmestas`
+    );
+  }
+
+  /** ⚠️ TIKRINAMAS TIK BUVIMAS, NE TURINYS: tuščias objektas yra teisėtas rezultatas. */
+  assert.doesNotThrow(() => finish(processing, STATUS.COMPLETED, { result: {} }));
+  assert.doesNotThrow(() => finish(processing, STATUS.COMPLETED, { result: [] }));
+
+  /** Kiti terminalai rezultato nereikalauja. */
+  assert.doesNotThrow(() => finish(processing, STATUS.FAILED, { error: "x" }));
+  assert.doesNotThrow(() => finish(processing, STATUS.CANCELLED, {}));
+});
+
+test("#184-C ⚠️ `finish(FAILED)` ant `completed`-be-rezultato lieka GYVAVIMO CIKLO klausimas", () => {
+  /**
+   * ⚠️ VIEN DUOMENŲ TRŪKUMAS KEITĖ KONFLIKTO RŪŠĮ (Codex C12).
+   *
+   * Anksčiau trūkstamo rezultato klasifikacija buvo AUKŠČIAU už prašomo statuso
+   * patikrą, tad tas pats perėjimas (`completed → failed`) grąžindavo
+   * `COMPLETED_WITHOUT_RESULT`, jei rezultato nebuvo, ir mesdavo `JobPhaseError`,
+   * jei buvo. `finishFailed()` tada su sentinel'iu elgdavosi kaip su įprastu
+   * grąžinimu, ne kaip su terminaliu no-op keliu.
+   */
+  const beRezultato = { status: STATUS.COMPLETED, result: null };
+
+  assert.equal(
+    idempotentiskasAtsakymas(beRezultato, STATUS.FAILED, {}),
+    undefined,
+    "⚠️ sprendimas paliekamas `jobPhase` - tai perėjimo, ne rezultato klausimas"
+  );
+  assert.equal(idempotentiskasAtsakymas(beRezultato, STATUS.CANCELLED, {}), undefined);
+
+  /** O `finish(COMPLETED)` ant tos pačios būsenos TEBĖRA rezultato klausimas. */
+  assert.equal(
+    idempotentiskasAtsakymas(beRezultato, STATUS.COMPLETED, { result: { a: 1 } }),
+    "COMPLETED_WITHOUT_RESULT"
+  );
 });
