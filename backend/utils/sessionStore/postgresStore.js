@@ -49,6 +49,51 @@ function rowToSession(row, username) {
   };
 }
 
+/**
+ * MASINĖ REVOKACIJA PO DB ATKŪRIMO — PostgreSQL-ONLY, SU SVETIMU KLIENTU
+ * (#155, 7.6b / #249, D6).
+ *
+ * ⚠️ KODĖL NE FASADO METODAS.
+ *
+ * Fasado metodas reikštų backend'ų paritetą, o 7.6b atmintiniame režime
+ * privalo KRISTI (D7), ne veikti: „sėkmingas praleidimas" ten leistų
+ * operatoriui manyti, kad atkurtos sesijos revokuotos, nors jos gyvos. Metodas,
+ * kurio memory realizacija niekada neturi būti kviečiama šiame kelyje, yra
+ * blogesnis už jo nebuvimą. Paviršiaus pariteto testas remiasi eksplicitiniu
+ * `KONTRAKTAS` sąrašu, tad šis papildymas jo nelaužo - ir neturi į jį patekti.
+ *
+ * ⚠️ KODĖL PRIIMA KLIENTĄ, NE POOL'Ą.
+ *
+ * D4 reikalauja, kad sesijų revokacija ir job'ų terminalizavimas įvyktų VIENOJE
+ * transakcijoje. Dviejų pool'ų dvi jungtys to negali; tad SQL lieka ČIA - savo
+ * modulyje, kur gyvena sesijų semantika - o transakciją valdo kvietėjas. Ta pati
+ * forma kaip `deletionTombstones.assertNotBarredWithClient()`.
+ *
+ * ⚠️ `revoked_at IS NULL` SĄLYGA DARO OPERACIJĄ IDEMPOTENTIŠKĄ (D9): antras
+ * vykdymas nepaliečia jau revokuotų eilučių, tad `revoked_at` laikas nepasislenka
+ * ir „kada revokuota" lieka tas pats faktas.
+ */
+async function revokeAllActiveWithClient(klientas) {
+  if (!klientas || typeof klientas.query !== "function") {
+    throw new TypeError("revokeAllActiveWithClient: reikia kviečiančiojo DB kliento (transakcijos).");
+  }
+
+  const res = await klientas.query(
+    `UPDATE sessions SET revoked_at = now()
+      WHERE revoked_at IS NULL`
+  );
+
+  return res.rowCount;
+}
+
+/** Kiek sesijų šiuo metu NĖRA revokuotų (verifikacijai ir idempotentiškumo patikrai). */
+async function countActiveWithClient(klientas) {
+  const { rows } = await klientas.query(
+    "SELECT count(*)::int AS kiek FROM sessions WHERE revoked_at IS NULL"
+  );
+  return rows[0].kiek;
+}
+
 function createPostgresStore(pool) {
   /**
    * ⚠️ VIENAS LAIKO ŠALTINIS: DB LAIKRODIS.
@@ -397,4 +442,9 @@ function createPostgresStore(pool) {
   };
 }
 
-module.exports = { createPostgresStore, SessionIdentityError };
+module.exports = {
+  createPostgresStore,
+  SessionIdentityError,
+  revokeAllActiveWithClient,
+  countActiveWithClient,
+};

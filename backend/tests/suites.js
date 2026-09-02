@@ -295,6 +295,18 @@ const functional = [
    * binaro, tad išvedamas į `postgres` rinkinį per `postgresGuard` importą.
    */
   "pgDumpBackupContract",
+  /**
+   * #249 (7.6b): post-restore suderinimo KONTRAKTAS be DB.
+   *
+   * Fail-closed sargai (`RECONCILE_*`), terminalizavimo patch'o KILMĖ iš
+   * `jobPhase` autoriteto, praleidimo predikatas ir CLI exit kodai tikrinami be
+   * išorinių servisų — su padirbtu DB klientu, ne su mock'intu `jobPhase`.
+   *
+   * Persistentinė būsena, transakcijos atsukimas ir realus auth kelias su senais
+   * cookie gyvena `postRestoreReconcile.integration`, kuris išvedamas į
+   * `postgres` rinkinį per `postgresGuard` importą.
+   */
+  "postRestoreReconcileContract",
   "jobVersionParity",
   "jobs.route",
   "mergeDiarization",
