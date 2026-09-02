@@ -220,13 +220,26 @@ test("7.6a: šifruota kopija ir atkūrimas", { skip: praleisti() }, async (t) =>
      * ⚠️ NAUDOJAMAS TAS PATS KODAS, ne atkartotas palyginimas — kitaip testas
      * įrodytų savo kopiją, o runbook'o post-restore žingsnis liktų neįrodytas.
      */
+    /**
+     * ⚠️ NAUDOJAMAS VIEŠAS `runSelfChecks()`, NE VIDINĖ FUNKCIJA (CI radinys).
+     *
+     * `startupChecks` eksportuoja tik `{ validateConfig, runSelfChecks }` —
+     * `postgresReachability` yra vidinė. Pirmoji redakcija ją kvietė tiesiogiai
+     * ir krito su „is not a function".
+     *
+     * Viešas kelias net geresnis: `make doctor` eina būtent per `runSelfChecks()`,
+     * tad testas tikrina TĄ PAČIĄ išvestį, kurią mato operatorius, o ne vidinę
+     * detalę.
+     */
     const startupChecks = require("../utils/startupChecks");
-    const patikra = await startupChecks.postgresReachability({ ...process.env, DATABASE_URL: TIKSLO_URL });
+    const patikros = await startupChecks.runSelfChecks({ ...process.env, DATABASE_URL: TIKSLO_URL });
+    const pg = patikros.find((c) => /PostgreSQL/.test(c.name));
 
+    assert.ok(pg, "prielaida: `runSelfChecks()` turi PostgreSQL patikrą");
     assert.equal(
-      patikra.ok,
+      pg.ok,
       true,
-      `⚠️ atkurta schema privalo atitikti kodą: ${JSON.stringify(patikra.detail || patikra)}`
+      `⚠️ atkurta schema privalo atitikti kodą: ${JSON.stringify(pg.detail || pg)}`
     );
 
     const { rows: migracijos } = await vykdyti(TIKSLO_URL, "SELECT count(*)::int AS n FROM pgmigrations");
@@ -334,7 +347,7 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
   const scenarijai = [
     {
       vardas: "sugadintas ciphertext",
-      kodas: /BACKUP_|Nepavyko|autent/i,
+      kodas: "BACKUP_DECRYPTION_FAILED",
       paruosti: () => {
         const sugadintas = { ...kopija.envelope };
         const b = Buffer.from(sugadintas.ciphertext, "base64");
@@ -345,7 +358,7 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
     },
     {
       vardas: "blogas raktas",
-      kodas: /BACKUP_|Nepavyko|raktas|autent/i,
+      kodas: "BACKUP_DECRYPTION_FAILED",
       paruosti: () => ({
         envelope: kopija.envelope,
         manifest: kopija.manifest,
@@ -354,7 +367,7 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
     },
     {
       vardas: "suklastotas manifestas (AAD)",
-      kodas: /BACKUP_|Nepavyko|autent/i,
+      kodas: "BACKUP_DECRYPTION_FAILED",
       paruosti: () => ({
         envelope: kopija.envelope,
         /** `snapshotTime` yra AAD lauke - pakeitus jį, GCM žyma nebesutampa. */
@@ -364,7 +377,7 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
     },
     {
       vardas: "nesutampanti kontrolinė suma",
-      kodas: /BACKUP_CHECKSUM_MISMATCH|suma nesutampa/i,
+      kodas: "BACKUP_CHECKSUM_MISMATCH",
       paruosti: () => ({
         envelope: kopija.envelope,
         manifest: { ...kopija.manifest, checksum: "0".repeat(64) },
@@ -373,7 +386,7 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
     },
     {
       vardas: "negaliojantis manifestas",
-      kodas: /BACKUP_MANIFEST_INVALID|negalioja/i,
+      kodas: "BACKUP_MANIFEST_INVALID",
       paruosti: () => ({
         envelope: kopija.envelope,
         manifest: { ...kopija.manifest, formatVersion: undefined },
@@ -387,9 +400,24 @@ test("7.6a FAIL-CLOSED: sugadinta kopija NELIEČIA tikslinės bazės", { skip: p
       await perkurtiDb(TIKSLO_URL);
       assert.equal(await lenteliuSkaicius(), 0, "prielaida: tikslinė bazė TUŠČIA");
 
+      /**
+       * ⚠️ TIKRINAMAS `code`, NE ŽINUTĖS ŠABLONAS (CI radinys gretimame teste).
+       *
+       * `assert.rejects()` su `RegExp` lygina `err.message`, o žinutės yra
+       * lietuviškos. Laisvas šablonas (`/Nepavyko|autent/i`) sutaptų ir su
+       * PRISIJUNGIMO klaida — testas praeitų dėl neteisingos priežasties, o
+       * „DB liko nepaliesta" patikra tą užmaskuotų.
+       */
       await assert.rejects(
         () => pgDumpBackup.atkurtiSifruotaKopija({ ...scenarijus.paruosti(), targetUrl: TIKSLO_URL }),
-        scenarijus.kodas
+        (err) => {
+          assert.equal(
+            err.code,
+            scenarijus.kodas,
+            `${scenarijus.vardas}: laukta ${scenarijus.kodas}, gauta ${err.code} (${err.message})`
+          );
+          return true;
+        }
       );
 
       /** ⚠️ ESMINĖ PATIKRA: ne „metė klaidą", o „nieko nepadarė". */
@@ -487,9 +515,19 @@ test("7.6a: rūšies antraštė yra FAIL-CLOSED (ne pg_dump artefaktas)", { skip
 
   const envelope = backupEncryption.encrypt(plaintext, { env: TESTO_ENV, manifest });
 
+  /**
+   * ⚠️ TIKRINAMAS `code`, NE ŽINUTĖ (CI radinys).
+   *
+   * `assert.rejects()` su `RegExp` lygina `err.message`, o žinutės yra
+   * lietuviškos ir kodo jose nėra. Pirmoji redakcija metė TEISINGĄ klaidą, bet
+   * testas vis tiek krito — patikra tikrino ne tą lauką.
+   */
   await assert.rejects(
     () => pgDumpBackup.atkurtiSifruotaKopija({ envelope, manifest, targetUrl: TIKSLO_URL, env: TESTO_ENV }),
-    /PG_DUMP_HEADER_MISSING|PG_DUMP_KIND_MISMATCH/
+    (err) => {
+      assert.match(String(err.code), /PG_DUMP_HEADER_MISSING|PG_DUMP_KIND_MISMATCH/, `gauta: ${err.code}`);
+      return true;
+    }
   );
 
   const { rows } = await vykdyti(
