@@ -475,3 +475,95 @@ test("#184-A ⚠️ barjero paieškos gedimas PAŽYMI valymo pakartojimą", asyn
     }
   }
 });
+
+test("#184-A ⚠️ barjeras reikalauja TERMINALAUS statuso, ne tik „ne remontuotino\"", () => {
+  /**
+   * ⚠️ NUMATYTOJI REIKŠMĖ APVERSTA (Codex E2).
+   *
+   * Anksčiau predikatas leido VISKĄ, išskyrus `completed` be rezultato. Iš to
+   * sekė, kad kiekvienas kvietėjas privalėjo ATSKIRAI tikrinti, ar terminalus
+   * perėjimas apskritai įvyko. Per šį PR ta patikra buvo pamiršta keturiose
+   * vietose iš keturių bent po kartą — worker'io nesėkmėje, inline `finally`, ir
+   * abiejose autorizacijos ankstyvo grįžimo šakose.
+   *
+   * Vietoj penktos kvietėjo patikros apversta pati numatytoji reikšmė: valymas
+   * leidžiamas TIK terminaliai būsenai. Garantija nebepriklauso nuo to, ar visi
+   * kvietėjai prisiminė — įskaitant tuos, kurių dar nėra.
+   */
+  const { arGalimaSalintiAudio } = require("../utils/audioBarrier");
+
+  for (const status of ["queued", "processing"]) {
+    assert.equal(
+      arGalimaSalintiAudio({ status, result: null }),
+      false,
+      `⚠️ \`${status}\` yra AKTYVUS darbas - jo įvesties naikinti negalima`
+    );
+  }
+
+  assert.equal(arGalimaSalintiAudio({ status: "completed", result: null }), false, "remontuotina");
+  assert.equal(arGalimaSalintiAudio({ status: "completed", result: { a: 1 } }), true);
+  assert.equal(arGalimaSalintiAudio({ status: "failed", result: null }), true);
+  assert.equal(arGalimaSalintiAudio({ status: "cancelled", result: null }), true);
+
+  /**
+   * ⚠️ ĮRAŠO NĖRA → ŠALINAM. TTL ar ištrynimas reiškia, kad nuorodos nebeliko;
+   * nepašalinus failas liktų diske amžiams, nes retencija ieško per gyvus
+   * job'ų įrašus. Per griežta sąlyga čia būtų nutekėjimas, ne apsauga.
+   */
+  assert.equal(arGalimaSalintiAudio(null), true, "įrašo nėra - failas privalo dingti");
+});
+
+test("#184-A ⚠️ techninis valymo pakartojimas eina PER barjerą", () => {
+  /**
+   * ⚠️ MANO PATAISA BUVO SUKŪRUSI KELIĄ APLINK SAVE (Codex E1).
+   *
+   * Barjerui nepavykus perskaityti būsenos, jis pažymi `audio_cleanup_pending`,
+   * kad valymas nedingtų. Bet `retryPendingAudioCleanups()` tą vėliavą apdorodavo
+   * TIESIOGINIU `releaseAudio()` — be patikros. Rezultatas buvo tiksliai
+   * atvirkštinis nei norėta: kitas sweep'as negrįžtamai ištrindavo būtent tą
+   * audio, kurį barjeras saugojo.
+   *
+   * ⚠️ GDPR IŠTRYNIMAS LIEKA BE BARJERO, ir tai tikrinama kartu: skiriasi ne
+   * mechanizmas, o teisė. Techninis valymas yra patogumas, ištrynimas — pareiga.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const src = fs
+    .readFileSync(path.join(__dirname, "..", "utils", "deletionRetry.js"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+
+  const i = src.indexOf("async function retryPendingAudioCleanups");
+  const j = src.indexOf("async function retryPendingDeletions");
+  assert.ok(i >= 0 && j >= 0, "prielaida: abi funkcijos egzistuoja");
+
+  const techninis = i < j ? src.slice(i, j) : src.slice(i);
+
+  assert.match(techninis, /salintiAudioSuBarjeru\(/, "techninis pakartojimas privalo eiti per barjerą");
+  assert.equal(
+    /releaseAudio\(/.test(techninis),
+    false,
+    "⚠️ tiesioginis releaseAudio() techniniame kelyje apeina barjerą"
+  );
+
+  /**
+   * ⚠️ GDPR KELIAS TIKRINAMAS TEN, KUR JIS REALIAI YRA.
+   *
+   * Pirmoji šio testo redakcija tikrino, ar `retryPendingDeletions()` kviečia
+   * `releaseAudio()`. NEKVIEČIA: ji kviečia `jobErasure.eraseJob()`, o tas
+   * šalina failą tiesiogiai per `fileStorage.del()`. Testas krito ir taip
+   * atskleidė, kad gretimas komentaras teigė neteisybę — abu ištaisyti.
+   */
+  const erasure = fs
+    .readFileSync(path.join(__dirname, "..", "utils", "jobErasure.js"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(
+    erasure,
+    /fileStorage\.del\(/,
+    "⚠️ GDPR ištrynimas privalo likti BE barjero - ten audio dingsta nepriklausomai nuo būsenos"
+  );
+  assert.equal(
+    /salintiAudioSuBarjeru|arGalimaSalintiAudio/.test(erasure),
+    false,
+    "⚠️ barjeras NEGALI patekti į ištrynimo kelią"
+  );
+});

@@ -71,6 +71,36 @@ function sprendimasPriesRestart(job) {
  * nurodo gyvas job'o įrašas.
  */
 function arGalimaSalintiAudio(job) {
+  /**
+   * ⚠️ ĮRAŠO NĖRA → ŠALINAM. TTL, ištrynimas ar nesuderintas store reiškia, kad
+   * nuorodos į failą nebeliko; jo NEpašalinus, jis liktų diske amžiams, nes
+   * retencija ieško per gyvus job'o įrašus.
+   */
+  if (!job) return true;
+
+  /**
+   * ⚠️ NE TERMINALUS → NEŠALINAM (Codex E2).
+   *
+   * Anksčiau predikatas leido VISKĄ, išskyrus `completed` be rezultato. Iš to
+   * sekė, kad kiekvienas kvietėjas privalėjo ATSKIRAI tikrinti, ar terminalus
+   * perėjimas apskritai įvyko — ir keturiose vietose iš keturių tai buvo
+   * pamiršta bent kartą (worker'io nesėkmė, inline `finally`, ir abi
+   * autorizacijos ankstyvo grįžimo šakos).
+   *
+   * Numatytoji reikšmė apversta: valymas leidžiamas TIK terminaliai būsenai.
+   * Visi teisėti valymo kvietimai vyksta PO galutinio statuso, tad siaurinimas
+   * nieko neatima; o `processing` įrašas reiškia AKTYVŲ darbą, kurio įvesties
+   * naikinti negalima. Dabar tai galioja ir būsimiems kvietėjams, kurių dar
+   * nėra — ne tik tiems, kuriuos prisiminiau.
+   *
+   * Kvietėjų patikros (`terminalasIsipareigotas`, `typeof uzbaigta === "symbol"`)
+   * lieka kaip gynyba į gylį ir dėl geresnių žurnalo eilučių, bet garantija
+   * nebepriklauso nuo to, ar jos visos vietoje.
+   */
+  const { STATUS } = jobStore;
+  const terminalus = [STATUS.COMPLETED, STATUS.FAILED, STATUS.CANCELLED];
+  if (!terminalus.includes(job.status)) return false;
+
   return sprendimasPriesRestart(job) !== RETRY_VEIKSMAS.REMONTUOTINA;
 }
 
@@ -82,7 +112,15 @@ function arGalimaSalintiAudio(job) {
  * snapshot'ą arba jo neturėti visai (`_handleFailure` mato tik klaidą), tad
  * sprendimas priimamas iš saugyklos.
  *
- * @returns {Promise<boolean>} `true`, jei valymas buvo LEISTAS (nebūtinai pavykęs)
+ * @returns {Promise<boolean>} `true` TIK jei failas realiai pašalintas.
+ *
+ * ⚠️ GRĄŽINAMA `releaseAudio()` BAIGTIS, NE „ar leista" (Codex E1).
+ *
+ * `retryPendingAudioCleanups()` pagal šią reikšmę skaičiuoja sėkmes ir
+ * nesėkmes bei sprendžia, ar kartoti. Grąžinus „leista", neįvykęs trynimas
+ * atrodytų kaip pavykęs, ir vėliava būtų nuimta nuo failo, kuris tebėra diske.
+ * Barjero atsisakymas ir nepavykęs trynimas abu grąžina `false` — abiem
+ * atvejais darbas dar skolingas; priežastį skiria žurnalo eilutė.
  */
 async function salintiAudioSuBarjeru(jobId, payload, kontekstas = {}) {
   if (!payload || !payload.storageKey) return false;
@@ -132,8 +170,7 @@ async function salintiAudioSuBarjeru(jobId, payload, kontekstas = {}) {
   }
 
   const { releaseAudio } = require("./audioCleanup");
-  await releaseAudio(jobId, payload.storageKey);
-  return true;
+  return releaseAudio(jobId, payload.storageKey);
 }
 
 module.exports = {
