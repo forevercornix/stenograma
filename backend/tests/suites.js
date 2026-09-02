@@ -286,6 +286,15 @@ const functional = [
    * worker'io įėjimo kelias - `workerIdempotency.integration` (`redis`).
    */
   "jobFinishIdempotency",
+  /**
+   * #248 (7.6a): šifruotos PostgreSQL kopijos KONTRAKTAS be DB.
+   *
+   * Dydžio riba, rūšies antraštė ir D2 sargas („operatoriaus kelias neturi savo
+   * orkestracijos") tikrinami be išorinių servisų. Pati procedūra —
+   * `pgDumpBackup.integration`, kuris reikalauja ir tikros DB, ir `pg_dump`
+   * binaro, tad išvedamas į `postgres` rinkinį per `postgresGuard` importą.
+   */
+  "pgDumpBackupContract",
   "jobVersionParity",
   "jobs.route",
   "mergeDiarization",

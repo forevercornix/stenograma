@@ -1525,6 +1525,38 @@ mutacijų stulpelis be jo skambėtų taip, tarsi apsauga būtų buvusi nuo prad�
 
 ---
 
+## #248 (7.6a) — šifruota PostgreSQL kopija ir bazinis restore
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Operatoriaus kelias neturi savo orkestracijos** (D2) | `pgDumpBackupContract` | CLI faile atsiradus `pg_dump`/`psql`/`spawn` → krinta. Dvi realizacijos reikštų, kad testas įrodinėja ne tą procedūrą, kurią vykdo operatorius |
+| ⚠️ **Dydžio riba įvardyta ir žemesnė** už `MAX_CIPHERTEXT_BYTES` (D6) | `pgDumpBackupContract` | Ribą pakėlus virš nominalios lubos → krinta. Envelope laukai yra base64 EILUTĖS atmintyje, tad V8 riba ateina gerokai anksčiau nei 2 GB |
+| ⚠️ **DB dump'as NEregistruojamas `ARTEFACT_TYPES`** (D1) | `pgDumpBackupContract` | Įrašius jį į registrą → krinta 2 testai. Registras maitina GDPR ištrynimo inventorių; `isIncluded()` išvedamas iš `persistence`, tad tipas automatiškai patektų ir į aplikacijos kopiją |
+| Manifestas dump'ui turi **tuščią `contents`** | `pgDumpBackupContract` | Melagingas `contents` įrašas atmetamas `createManifest()` politikos vartuose — tai ir yra priežastis, kodėl jis tuščias |
+| ⚠️ **Runbook įspėja, kad procedūra dar NE erasure-safe** (§12.1) | `backupDocumentation` („KIEKVIENA žinoma riba įvardyta") | Įspėjimą pašalinus → krinta. Prijungta prie ESAMO ribų sąrašo, ne vienuoliktu `assert` |
+| Kopija yra **šifruota**; transkripcija nematoma artefakte | `pgDumpBackup.integration` | ⚠️ NOT RUN vietoje |
+| Šifravimas išjungtas → procedūra **atsisako dirbti** | `pgDumpBackup.integration` | ⚠️ NOT RUN. Paprastas `pg_dump` kriterijaus netenkina — `job_results` turi transkripcijas |
+| ⚠️ Atkūrimas lygina **`jobs` IR `job_results` TURINĮ**, ne `COUNT(*)` | `pgDumpBackup.integration` | ⚠️ NOT RUN. Procedūra, neatkurianti `job_results`, `COUNT` patikrą praeitų, nors kiekvienas job'as būtų praradęs vartotojui matomą rezultatą |
+| ⚠️ `audit_log` **neatkuriamas** — unikalus sentinel'is | `pgDumpBackup.integration` | ⚠️ NOT RUN. „Nesutampa su dump'u" nepakanka: atkūrimas įrašo naujų įvykių, ir nesutapimas atsiranda savaime |
+| ⚠️ **Fail-closed: DB lieka SEMANTIŠKAI NEPALIESTA** (5 scenarijai) | `pgDumpBackup.integration` | ⚠️ NOT RUN. Mutacijos ME (rūšies antraštė) ir MF (checksum) vietoje NEPAGAUNAMOS — reikia tikros DB |
+| ⚠️ **SQL klaida JAU PRADĖJUS → `ROLLBACK`**, ne dalinis restore (D4) | `pgDumpBackup.integration` | ⚠️ NOT RUN. Mutacija MG (`--single-transaction` pašalinimas) vietoje nepagaunama |
+| ⚠️ Rūšies antraštė fail-closed: aplikacijos kopija **neįvykdoma** per `psql` | `pgDumpBackup.integration` | ⚠️ NOT RUN. Rūšis gyvena ŠIFRUOTAME turinyje, tad GCM ją autentifikuoja be AAD keitimo |
+
+⚠️ **KĄ 7.6a ĮRODO VIETOJE IR KO NE.** Vietinis rinkinys tikrina KONTRAKTĄ:
+vieno kelio taisyklę, dydžio ribą, registro neliečiamumą ir runbook'o ribas.
+Pačią procedūrą — `pg_dump`, šifravimą per tikrus duomenis, atkūrimą,
+atomiškumą ir fail-closed elgesį — tikrina tik `pgDumpBackup.integration`,
+kuris reikalauja IR tikros DB, IR `pg_dump`/`psql` binarų. Šioje aplinkoje jis
+NEVYKDOMAS nė karto.
+
+⚠️ **DVI PRALEIDIMO AŠYS, NE VIENA.** `skipWithoutPostgres()` tikrina
+`DATABASE_URL`, o atskira patikra — ar yra `pg_dump`/`psql`. Su
+`REQUIRE_POSTGRES=1` trūkstamas klientas yra KLAIDA, ne praleidimas: tyliai
+praleistas failas apeitų `verify-postgres-suite-ran.mjs`, kuris reikalauja bent
+vieno neprapleisto `ok` kiekviename rinkinio faile.
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |

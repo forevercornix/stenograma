@@ -425,6 +425,58 @@ vyksta.
 
 ---
 
+## 9a. Šifruota PostgreSQL kopija (`pg_dump`) — 7.6a
+
+Aplikacijos JSON kopija (skyriai 3–4) ir **pilna PostgreSQL kopija** yra du
+skirtingi artefaktai. Šis skyrius yra apie antrąjį.
+
+### Procedūra
+
+```bash
+# Kopija (šifruojama AES-256-GCM; be rakto procedūra ATSISAKO dirbti)
+node backend/scripts/pg-backup.mjs dump --out kopija.json --url "$DATABASE_URL"
+
+# Atkūrimas į TUŠČIĄ bazę
+node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
+```
+
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+
+### Ką procedūra garantuoja
+
+- **Šifravimą.** `pg_dump` išvestis niekada nerašoma į diską atviru tekstu;
+  be `BACKUP_ENCRYPTION_KEY` `dump` komanda krinta su
+  `BACKUP_ENCRYPTION_DISABLED`. Tai sąmoninga: `job_results` turi transkripcijas.
+- **Fail-closed patikras PRIEŠ pirmą SQL sakinį.** Manifesto validacija, GCM
+  žyma (AAD) ir kontrolinė suma tikrinamos prieš `psql` iškvietimą.
+- **Atomiškumą.** Atkūrimas vykdomas `psql --single-transaction` su
+  `ON_ERROR_STOP=1`: SQL klaida viduryje duoda `ROLLBACK`, ne pusiau atkurtą bazę.
+- **Audito neįtraukimą.** `--exclude-table-data=audit_log` (7.4d).
+
+### ⚠️ Po atkūrimo PRIVALOMA patikrinti schemos versiją
+
+```bash
+DATABASE_URL="$TIKSLO_URL" node backend/scripts/doctor.mjs
+```
+
+`make doctor` per `startupChecks.postgresReachability()` lygina `pgmigrations`
+turinį su `backend/migrations/` katalogu ir parodo migracijų **atsilikimą**.
+Atkurta bazė gali būti senesnės schemos nei kodas; be šio žingsnio tai
+paaiškėtų pirmo `INSERT` metu, gyvame sraute.
+
+⚠️ `/api/ready` migracijų atsilikimo **netikrina** — jis tikrina komponentų
+liveness zondus. 7.6a to nekeičia (žr. ataskaitos D5).
+
+### ⚠️ Ši procedūra dar NĖRA erasure-safe
+
+Atkūrimas **prikelia po kopijos ištrintus job'us**. Ištrynimo žymos
+(`erasure_marks`, 7.5a) egzistuoja, bet atkūrimo kelias jų dar **netaiko**, o
+ištrynimų replay ateis su 7.6c (#250).
+
+Praktinė pasekmė: jei tarp kopijos ir atkūrimo kas nors pasinaudojo teise būti
+pamirštam, po atkūrimo jo duomenys grįžta. Iki 7.6c uždarymo atkūrimą galima
+vykdyti tik su rankiniu ištrynimų sąrašo patikrinimu.
+
 ## 10. Žinomos ribos
 
 | Riba | Poveikis | Kur spręsti |
@@ -436,6 +488,8 @@ vyksta.
 | ZIP nepalaikomas | Operatoriui mažiau patogu | Priklausomybės peržiūra |
 | Paslapčių patikra *best-effort* | Neaptinka rotuotų ar kitos aplinkos paslapčių | Slaptų duomenų skeneris |
 | Serveris kopijų nesaugo | Perkėlimas ir saugojimas — operatoriaus | Kopijų saugyklos posistemė |
+| **`pg_dump` kopija ribojama `MAX_DUMP_BYTES` (256 MB)** | Didesnė bazė krinta su `PG_DUMP_TOO_LARGE` | Srautinis šifravimas — ne 7.6a |
+| **`pg_dump` atkūrimas NĖRA erasure-safe** | Prikelia po kopijos ištrintus job'us | Ištrynimų replay — 7.6c (#250) |
 
 ---
 

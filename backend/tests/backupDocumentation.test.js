@@ -151,6 +151,21 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
     { pattern: /best-effort/i, what: "paslapčių patikros ribos" },
     { pattern: /[Ss]erveris kopijų nesaugo/, what: "serveris kopijų nesaugo" },
     { pattern: /audito žurnale \*\*nebus\*\*|[Aa]tkuriami duomenys, ne jų istorija/, what: "auditas neatkuriamas" },
+    /**
+     * ⚠️ 7.6a (#248): `pg_dump` procedūra dar NĖRA erasure-safe.
+     *
+     * Atkūrimas prikelia po kopijos ištrintus job'us: žymos (7.5a) yra, bet
+     * atkūrimo kelias jų netaiko, o replay ateina su 7.6c. Be šios eilutės
+     * runbook'as taptų stipresnis už kodą (§12.1) — jis aprašytų procedūrą,
+     * kuri atrodo baigta, nors viena garantija dar neįgyvendinta.
+     *
+     * ⚠️ ĮRAŠOMA Į ŠĮ SĄRAŠĄ, NE ATSKIRU `assert` (#248 užbaigimo punktas).
+     * Sąrašas NĖRA išvedamas iš kodo — jis rankinis (žr. testo antraštę), tad
+     * „prijungti prie esamo mechanizmo" čia reiškia būtent papildyti jį, o ne
+     * kurti vienuoliktą nepriklausomą patikrą šalia.
+     */
+    { pattern: /dar NĖRA erasure-safe|nėra erasure-safe/i, what: "pg_dump atkūrimas ne erasure-safe" },
+    { pattern: /MAX_DUMP_BYTES|256 MB/, what: "pg_dump dydžio riba" },
   ];
 
   for (const limit of knownLimits) {
