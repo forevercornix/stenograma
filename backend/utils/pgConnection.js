@@ -71,6 +71,67 @@ function pgJungtiesNustatymai(env = process.env) {
 }
 
 /**
+ * JUNGTIES TAPATYBĖ IŠ NUSTATYMŲ: `{ host, port, database }` arba `null`.
+ *
+ * ⚠️ VIENAS AUTORITETAS DVIEM KELIAMS (#249, 7.6b). 7.6a `pgDumpBackup.js`
+ * turėjo savo kopiją šios logikos; antras darbas, kuriam reikia to paties
+ * klausimo („ar tai TA PATI bazė?"), reikštų dvi tiesas apie tapatumą, ir jos
+ * ilgainiui išsiskirtų. Palyginimo semantika gyvena ČIA - ten pat, kur jau
+ * užrašyta jos riba (žr. `tapatiBaze()`): du klasteriai tame pačiame hoste su
+ * vienodu bazės vardu palyginime SUTAMPA.
+ */
+function jungtiesTapatybe(nustatymai) {
+  if (!nustatymai) return null;
+
+  if (nustatymai.connectionString) {
+    try {
+      const u = new URL(nustatymai.connectionString);
+      return {
+        host: (u.hostname || "").toLowerCase(),
+        port: u.port || "5432",
+        database: decodeURIComponent(u.pathname.replace(/^\//, "")),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  if (!nustatymai.host && !nustatymai.database) return null;
+
+  return {
+    host: String(nustatymai.host || "").toLowerCase(),
+    port: String(nustatymai.port || "5432"),
+    database: String(nustatymai.database || ""),
+  };
+}
+
+/** Skaitoma forma klaidos žinutėje - BE kredencialų. */
+function tapatybesTekstas(tapatybe) {
+  return tapatybe ? `${tapatybe.host}:${tapatybe.port}/${tapatybe.database}` : "<neatpažinta>";
+}
+
+/**
+ * Ar nurodytas URL rodo į TĄ PAČIĄ bazę, kurią naudotų šios aplinkos saugyklos?
+ *
+ * ⚠️ PALYGINIMAS PAGAL KONSTRUKCIJĄ, ne per vykdymo meto zondą - tai ta pati
+ * riba, kurią aprašo šio failo antraštė. Neatpažinta forma reiškia NESUTAPIMĄ
+ * (fail-closed), o ne „tikriausiai gerai".
+ */
+function arTaPatiBaze(url, env = process.env) {
+  const konfiguracija = jungtiesTapatybe(pgJungtiesNustatymai(env));
+  const nurodyta = jungtiesTapatybe({ connectionString: url });
+
+  const sutampa =
+    konfiguracija !== null &&
+    nurodyta !== null &&
+    konfiguracija.host === nurodyta.host &&
+    konfiguracija.port === nurodyta.port &&
+    konfiguracija.database === nurodyta.database;
+
+  return { sutampa, nurodyta, konfiguracija };
+}
+
+/**
  * TRIPWIRE: ar dvi jungtys realiai rodo į tą pačią bazę?
  *
  * ⚠️ NE KOREKTIŠKUMO MECHANIZMAS — žr. failo viršų. Grąžina `{ sutampa, a, b }`,
@@ -90,4 +151,12 @@ async function tapatiBaze(klientasA, klientasB) {
   };
 }
 
-module.exports = { pgJungtiesNustatymai, arNurodytaPostgres, tapatiBaze, PG_ATITIKMENYS };
+module.exports = {
+  pgJungtiesNustatymai,
+  arNurodytaPostgres,
+  tapatiBaze,
+  jungtiesTapatybe,
+  tapatybesTekstas,
+  arTaPatiBaze,
+  PG_ATITIKMENYS,
+};

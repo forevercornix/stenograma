@@ -5,7 +5,7 @@ const { promisify } = require("node:util");
 const backupEncryption = require("./backupEncryption");
 const backupManifest = require("./backupManifest");
 const backupPolicy = require("./backupPolicy");
-const { pgJungtiesNustatymai, arNurodytaPostgres } = require("./pgConnection");
+const { arNurodytaPostgres, arTaPatiBaze, tapatybesTekstas } = require("./pgConnection");
 const privacyConfig = require("./privacyConfig");
 const tombstones = require("./deletionTombstones");
 /**
@@ -418,33 +418,6 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
  * du klasteriai tame pačiame hoste su vienodu bazės vardu palyginime sutaptų.
  * Tai TRIPWIRE riba, ne mechanizmo skylė - ji užrašyta ir ten, ir čia.
  */
-function _jungtiesTapatybe(nustatymai) {
-  if (nustatymai.connectionString) {
-    try {
-      const u = new URL(nustatymai.connectionString);
-      return {
-        host: (u.hostname || "").toLowerCase(),
-        port: u.port || "5432",
-        database: decodeURIComponent(u.pathname.replace(/^\//, "")),
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  if (!nustatymai.host && !nustatymai.database) return null;
-
-  return {
-    host: String(nustatymai.host || "").toLowerCase(),
-    port: String(nustatymai.port || "5432"),
-    database: String(nustatymai.database || ""),
-  };
-}
-
-function _tapatybesTekstas(t) {
-  return t ? `${t.host}:${t.port}/${t.database}` : "<neatpažinta>";
-}
-
 /**
  * Ar žymų saugykla gyvena TOJE PAČIOJE bazėje, kurią dump'iname?
  *
@@ -461,20 +434,16 @@ function patikrintiZymuTapatuma(databaseUrl, env = process.env) {
     );
   }
 
-  const zymos = _jungtiesTapatybe(pgJungtiesNustatymai(env));
-  const saltinis = _jungtiesTapatybe({ connectionString: databaseUrl });
-
-  const sutampa =
-    zymos !== null &&
-    saltinis !== null &&
-    zymos.host === saltinis.host &&
-    zymos.port === saltinis.port &&
-    zymos.database === saltinis.database;
+  /**
+   * ⚠️ PALYGINIMAS GYVENA `pgConnection.js` (#249). Ten pat užrašyta ir jo riba;
+   * dvi kopijos to paties klausimo ilgainiui išsiskirtų.
+   */
+  const { sutampa, nurodyta: saltinis, konfiguracija: zymos } = arTaPatiBaze(databaseUrl, env);
 
   if (!sutampa) {
     throw new PgDumpBackupError(
-      `Dump'o šaltinis (${_tapatybesTekstas(saltinis)}) nesutampa su ištrynimo žymų baze ` +
-        `(${_tapatybesTekstas(zymos)}). Kopijos galiojimas atsidurtų ne toje bazėje, kurios ` +
+      `Dump'o šaltinis (${tapatybesTekstas(saltinis)}) nesutampa su ištrynimo žymų baze ` +
+        `(${tapatybesTekstas(zymos)}). Kopijos galiojimas atsidurtų ne toje bazėje, kurios ` +
         "žymas jis privalo saugoti, tad kopija neišduodama.",
       "PG_BACKUP_SOURCE_MISMATCH"
     );
