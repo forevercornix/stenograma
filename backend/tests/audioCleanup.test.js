@@ -69,6 +69,11 @@ function loadReleaseAudio({ delThrows = null }) {
     require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
   }
 
+  /**
+   * ⚠️ ŠIS HELPERIS BARJERO NELIEČIA SĄMONINGAI. Jis tikrina GRYNĄ
+   * `releaseAudio()` elgesį — būtent tą kelią, kurį GDPR ištrynimas naudoja be
+   * barjero. Įtraukus `audioBarrier` čia, testas nustotų tikrinti tai, ką turi.
+   */
   const cleanupPath = resolve("utils/audioCleanup");
   delete require.cache[cleanupPath];
   const { releaseAudio } = require(cleanupPath);
@@ -149,10 +154,15 @@ test("inline runner: cleanup klaidos atveju storageKey lieka", async () => {
   const fileStoragePath = resolve("utils/fileStorage");
   const jobStorePath = resolve("utils/jobStore");
   const cleanupPath = resolve("utils/audioCleanup");
+  /**
+   * ⚠️ `audioBarrier` IRGI VALOMAS. Jis importuoja `jobStore` moduliui kraunantis,
+   * tad likęs cache'e laikytų TIKRĄ saugyklą ir dublis liktų neįtakotas.
+   */
+  const barrierPath = resolve("utils/audioBarrier");
   const runnerPath = resolve("queues/jobRunner");
 
   const originals = {};
-  for (const p of [fileStoragePath, jobStorePath, cleanupPath, runnerPath]) {
+  for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath, runnerPath]) {
     originals[p] = require.cache[p];
     delete require.cache[p];
   }
@@ -192,6 +202,16 @@ test("inline runner: cleanup klaidos atveju storageKey lieka", async () => {
           jobs.set(id, { ...(jobs.get(id) || { id }), ...patch });
           return jobs.get(id);
         },
+        /**
+         * ⚠️ PRIVALOMAS NUO #184 / Codex A grupės: `_atlaisvintiSaltini()` ir
+         * inline `finally` dabar eina per `audioBarrier`, kuris skaito
+         * AUTORITETINGĄ būseną. Dublis privalo turėti tą pačią formą kaip
+         * produkcija.
+         *
+         * Grąžinama reali stebima būsena, ne konstanta — kitaip testas
+         * netikrintų nieko apie kelią, kurį pats vykdo.
+         */
+        get: async (id) => jobs.get(id) || { id, status: "failed", result: null },
       },
     },
   };
@@ -212,7 +232,7 @@ test("inline runner: cleanup klaidos atveju storageKey lieka", async () => {
       "jobas turi būti pažymėtas audio valymo pakartojimui"
     );
   } finally {
-    for (const p of [fileStoragePath, jobStorePath, cleanupPath, runnerPath]) {
+    for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath, runnerPath]) {
       delete require.cache[p];
       if (originals[p]) require.cache[p] = originals[p];
     }
@@ -225,10 +245,15 @@ test("worker cleanup: klaidos atveju storageKey lieka", async () => {
   const fileStoragePath = resolve("utils/fileStorage");
   const jobStorePath = resolve("utils/jobStore");
   const cleanupPath = resolve("utils/audioCleanup");
+  /**
+   * ⚠️ `audioBarrier` IRGI VALOMAS. Jis importuoja `jobStore` moduliui kraunantis,
+   * tad likęs cache'e laikytų TIKRĄ saugyklą ir dublis liktų neįtakotas.
+   */
+  const barrierPath = resolve("utils/audioBarrier");
   const workersPath = resolve("workers/index");
 
   const originals = {};
-  for (const p of [fileStoragePath, jobStorePath, cleanupPath, workersPath]) {
+  for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath, workersPath]) {
     originals[p] = require.cache[p];
     delete require.cache[p];
   }
@@ -287,7 +312,7 @@ test("worker cleanup: klaidos atveju storageKey lieka", async () => {
       "jobas turi būti pažymėtas audio valymo pakartojimui"
     );
   } finally {
-    for (const p of [fileStoragePath, jobStorePath, cleanupPath, workersPath]) {
+    for (const p of [fileStoragePath, jobStorePath, cleanupPath, barrierPath, workersPath]) {
       delete require.cache[p];
       if (originals[p]) require.cache[p] = originals[p];
     }

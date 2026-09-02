@@ -33,12 +33,14 @@ test(
   async (t) => {
     const jobStore = require("../utils/jobStore");
     const jobRunner = require("../queues/jobRunner");
+    const fileStorage = require("../utils/fileStorage");
     const { createQueueConnection } = require("../queues/config");
     const { Queue } = require("bullmq");
 
     let worker;
     let queue;
     let queueConnection;
+    let storageKey;
 
     t.after(async () => {
       const { shutdownWorker } = require("../workers");
@@ -46,6 +48,7 @@ test(
       await queue?.close().catch(() => {});
       await queueConnection?.quit().catch(() => {});
       await jobRunner.close().catch(() => {});
+      if (storageKey) await fileStorage.del(storageKey).catch(() => {});
       await jobStore._resetForTests();
     });
 
@@ -70,9 +73,19 @@ test(
     });
     assert.equal(uzbaigtas.status, "completed", "prielaida: rezultatas ĮSIPAREIGOTAS");
 
+    /**
+     * ⚠️ AUDIO ĮKELIAMAS SĄMONINGAI (Codex A grupė).
+     *
+     * Ši šaka atkuria kritimą PO `finish(COMPLETED)`, bet PRIEŠ
+     * `_cleanupStorage()` — vadinasi audio beveik visada dar guli saugykloje.
+     * Ankstesnė redakcija iš šakos grįždavo iškart, ir failas likdavo AMŽIAMS:
+     * retencijos valytojas jo neliečia, kol raktą nurodo gyvas job'o įrašas.
+     */
+    storageKey = await fileStorage.put(Buffer.from("audio-baitai"), { ext: ".wav" });
+
     queueConnection = createQueueConnection();
     queue = new Queue(queueName, { connection: queueConnection });
-    await queue.add("protocol", { jobId: job.id, payload: { transcript: "x" } }, { jobId: job.id });
+    await queue.add("protocol", { jobId: job.id, payload: { transcript: "x", storageKey } }, { jobId: job.id });
 
     /**
      * ⚠️ PROCESSOR'IUS SKAIČIUOJA KVIETIMUS. Jei idempotentiškumo patikros
@@ -112,6 +125,17 @@ test(
       isipareigotas,
       "⚠️ įsipareigotas rezultatas NEPERRAŠYTAS naujo vykdymo išvestimi"
     );
+
+    /**
+     * ⚠️ IR AUDIO IŠVALYTAS. Idempotentiška sėkmė reiškia „darbas baigtas", tad
+     * šaltinio failas nebereikalingas — bet kol grįžimas iš šakos vyko be
+     * valymo, jis likdavo saugykloje be jokio vėlesnio kvietėjo.
+     */
+    await assert.rejects(
+      () => fileStorage.get(storageKey),
+      "šaltinio audio privalo būti pašalintas po idempotentiškos sėkmės"
+    );
+    storageKey = null;
   }
 );
 
