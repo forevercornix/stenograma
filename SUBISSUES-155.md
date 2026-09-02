@@ -3223,44 +3223,339 @@ cutover metu. Jei kur nors matote seną redakciją — gyva versija laimi.
 
 ## [7.6] Health, readiness ir backup su restore
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.2a
+**Tėvinis:** #155 · **Tipas:** tracking · **Priklauso nuo:** 7.2a
+
+Šis issue yra **sekimo gijos** viršus. Darbas suskaidytas į tris PR, nes jame
+maišėsi trys skirtingos rizikos zonos: kopijos artefakto teisingumas, atkurtų
+duomenų korektiškumas ir post-restore suderinimas.
+
+| Sub-PR | Issue | Priklauso nuo |
+|---|---|---|
+| 7.6a — šifruota kopija + bazinis restore | #248 | 7.2a, 7.4f (#231) |
+| 7.6b — post-restore aplikacinis suderinimas | #249 | 7.6a |
+| 7.6c — erasure-safe restore + DR pratybos | #250 | 7.5a (#183), 7.6b |
+
+7.6a ir 7.6b nepriklauso nuo 7.5a, tad gali eiti lygiagrečiai su ja. 7.6c laukia
+ištrynimo žymų — kitaip tektų kurti antrą tombstone mechanizmą.
 
 ### DoD
 
-- [ ] `make doctor` ir readiness rodo DB būseną (prisijungimas, schemos versija,
-      migracijų atsilikimas).
-- [ ] `/api/health` DB būsenos NErodo produkcijoje pagal nutylėjimą
-      (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
-- [ ] `docs/backup-runbook.md` papildytas Postgres atsarginėmis kopijomis.
-- [ ] ⚠️ **RESTORE testas, ne tik instrukcija:** `pg_dump` → nauja tuščia DB →
-      restore → `schema_version` patikra → keli reprezentatyvūs **`jobs`** IR
-      **`job_results`** įrašai sutampa. Gali būti atskiras integracinis workflow.
-- [ ] ⚠️ **PRATYBOS NAUDOJA ŠIFRUOTĄ ARTEFAKTĄ.** `utils/backupEncryption.js`
-      reikalauja AES-256-GCM su autentikuotu atkūrimu. Kriterijus, tenkinamas
-      paprastu `pg_dump`, tyliai susilpnintų esamą apsaugą — o `job_results`
-      turės transkripcijas. Testas: dešifravimas ir autentiškumo patikra prieš
-      restore.
-- [ ] ⚠️ **`job_results` ĮTRAUKIAMI Į PALYGINIMĄ.** Transkripcijos gyvena
-      atskiroje lentelėje; procedūra, kuri jų neatkuria arba sugadina, praeitų
-      patikrą, nors kiekvienas baigtas job'as būtų praradęs vartotojui matomą
-      rezultatą.
-- [ ] ⚠️ **`audit_log` IŠ ATKŪRIMO IŠBRAUKTAS.** `utils/backupPolicy.js` tai jau
-      daro sąmoningai: atkūrus, GDPR ištrinti įrašai grįžtų, o naujesni
-      append-only įvykiai būtų perrašyti arba dubliuoti. Testas: prieš kopiją
-      įrašoma UNIKALIAI ATPAŽĮSTAMA audito eilutė, ir po restore jos NĖRA.
-      ⚠️ „Nesutampa su dump'u" nepakanka — atkūrimas įrašo naujų įvykių, tad
-      nesutapimas atsiranda savaime.
-- [ ] ⚠️ **Sesijos po atkūrimo MASIŠKAI ATŠAUKIAMOS.** Kitaip atkūrimas prikeltų
-      atšauktas sesijas: klientas ar užpuolikas gali tebeturėti tą pačią cookie,
-      o senas `token_hash` ją vėl padarytų galiojančia. Testas: sesija atšaukta
-      PO kopijos → po restore ta cookie neautentifikuoja.
-- [ ] ⚠️ **NE-TERMINALĖS EILUTĖS PO ATKŪRIMO SUDERINAMOS.** Kopijoje gali būti
-      `queued`/`processing` įrašų, o BullMQ būsena į kopiją NEPATENKA (backup
-      politika eilės įrašus išbraukia sąmoningai). Atkūrus juos nepakeistus,
-      jie lieka amžinai ne-terminalūs: `sweepExpired()` jų nešalina, ir
-      klientai apklausinėja job'us, kurie niekada nepasileis. Restore
-      procedūra privalo juos terminalizuoti arba saugiai atkurti eilės darbą.
-- [ ] ⚠️ **Ištrynimo žurnalas išsaugomas UŽ snapshot'o ribų** ir sujungiamas po
-      atkūrimo. Kitaip job'as, ištrintas po kopijos, grįžtų su rezultatu, bet be
-      tombstone. Testas: job'as ištrintas po kopijos → po restore jo NĖRA.
+- [ ] #248 uždarytas
+- [ ] #249 uždarytas
+- [ ] #250 uždarytas
+
+Detalūs kriterijai gyvena sub-issue'uose, ne čia. README apribojimų lentelė ir
+Roadmap `[x]` atnaujinami 7.6c, ne anksčiau.
+
+---
+
+## [7.6a] Šifruota Postgres kopija ir bazinis restore įrodymas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.2a, 7.4f
+
+Pirmas iš trijų 7.6 gabalų. Apimtis tik viena: **ar galime patikimai pasidaryti kopiją
+ir ją atkurti.** Jokių sesijų, ne-terminalių job'ų ar erasure replay.
+
+---
+
+## Patikrinta AS-IS (`7ce5356`)
+
+Eilučių numeriai sensta — prieš darbą inventorizuok iš naujo. Ši lentelė galioja
+įvardytam commit'ui.
+
+| Faktas | Kur | Reikšmė šiam darbui |
+|---|---|---|
+| `_canonicalContents()` iš `contents` reikalauja tik netuščio `type` string'o ir neneigiamų sveikųjų `count`/`bytes` | `utils/backupEncryption.js:159-176` | **šifravimas tipų registro NEtikrina** |
+| Politikos vartai yra manifeste | `utils/backupManifest.js:82` (`createManifest`), `:163` (`validateManifest`) | čia atmetamas tipas, kurio `isIncluded()` nepripažįsta |
+| `isIncluded()` yra IŠVEDAMAS: `persistence === PERSISTENT` ir ne `EXCLUDED_DESPITE_PERSISTENT` | `utils/backupPolicy.js:120-126` | naujas persistentinis tipas **automatiškai** patenka ir į aplikacijos JSON kopiją |
+| Kiekvienas registro tipas PRIVALO turėti skenavimo strategiją | `utils/artefactScanner.js:15`, gina `tests/lifecycleE2E.test.js:423` | `ARTEFACT_TYPES` yra **GDPR ištrynimo inventorius**, ne kopijų leidimų sąrašas |
+| `audit_log` išbrauktas sąmoningai | `utils/backupPolicy.js:45+` (`EXCLUDED_DESPITE_PERSISTENT`) | nekeičiama |
+| `MAX_CIPHERTEXT_BYTES = 2 GB`, envelope laukai — **base64 eilutės atmintyje** | `utils/backupEncryption.js:318,356` | žr. D6: praktinė riba gerokai žemesnė nei 2 GB |
+| `testDatabaseUrl(suffix)` ir `adminDatabaseUrl()` JAU egzistuoja | `tests/helpers/postgresGuard.js:45,55` | naudojami `sessionStoreBackendContract.integration.test.js:460-465` ir `jobStoreBackendContract.integration.test.js:385` su `CREATE DATABASE` |
+| `postgresReachability()` tikrina `pgmigrations` ir lygina su `backend/migrations/` katalogu | `utils/startupChecks.js:504,551-583` | migracijų atsilikimas JAU matomas per `make doctor` |
+| `/api/ready` (`probeRuntimeReadiness()`) tikrina komponentų liveness zondus, migracijų atsilikimo — ne | `server.js` | žr. D5 |
+| Runbook jau turi `pg_dump --exclude-table-data=audit_log` | `docs/backup-runbook.md:62-95` | procedūra yra, automatikos nėra |
+| `backupDocumentation.test.js` turi ~10 sargų, tarp jų „KIEKVIENA žinoma riba įvardyta" | `tests/backupDocumentation.test.js:135` | naujas įspėjimas jungiamas prie ŠIO mechanizmo |
+| `backupService`/`restoreService` dengia tik aplikacijos lygio JSON kopijas | `services/` | `pg_dump` kelio repo neturi visai |
+| CI: serveris `postgres:16-alpine`, **`postgresql-client` niekur neinstaliuojamas** | `.github/workflows/ci.yml:51` | žr. D7 — be to visas DoD CI'uje neįvykdomas |
+
+---
+
+## Užrakinti sprendimai
+
+### D1 — PostgreSQL dump artefakto kontraktas
+
+7.6a turi apibrėžti, kaip dump'as reprezentuojamas esamame manifesto / šifravimo
+formate. Esamos AES-256-GCM + AAD grandinės apeiti negalima vien todėl, kad payload yra
+SQL, o ne aplikacijos JSON.
+
+⚠️ **„Užregistruoti naują kanoninį tipą" NĖRA lokalus veiksmas.** `ARTEFACT_TYPES`
+registras maitina ištrynimo inventorių, ne tik kopijų politiką, ir turi dvi
+automatines pasekmes:
+
+1. `isIncluded()` išvedamas iš `persistence` — naujas **persistentinis** tipas iškart
+   tampa įtrauktas ir į aplikacijos JSON kopijos kelią (`includedTypes()`), kur jo
+   semantika netinka;
+2. `artefactScanner` reikalauja strategijos **kiekvienam** registro tipui, ir
+   `lifecycleE2E.test.js:423` tai gina — naujas įrašas iškart sukuria pareigą atsakyti,
+   kaip dump'as skenuojamas ir trinamas per GDPR ištrynimą.
+
+Prieš implementaciją apsvarstyti **tris** variantus ir pasirinkimą užrašyti su
+priežastimi:
+
+- **(a)** naujas kanoninis tipas (pvz. `POSTGRES_DUMP`) su eksplicitiniu atsakymu į abi
+  pasekmes aukščiau;
+- **(b)** atskira manifesto **ašis** — artefakto *rūšis* (aplikacijos kopija vs. DB
+  dump'as) — kuri nepraplečia `ARTEFACT_TYPES` ir nepaliečia ištrynimo inventoriaus;
+- **(c)** kitas variantas, jei kodas pasiūlo geresnį.
+
+Ko **negalima**: laisvinti `backupEncryption.js` kriptografinės semantikos ar v2 AAD
+formato vien dėl šio PR. Fail-closed manifesto/šifravimo kontraktas lieka fail-closed.
+
+Naujas dump tipas negali tapti leidimu produkcinės aplikacijos kopijos turiniui ten,
+kur jo semantika netinka.
+
+### D2 — vienas vykdomas backup/restore kelias
+
+Turi egzistuoti **vienas** programinis/operatoriaus kelias, kurį naudoja ir integracinis
+testas, ir dokumentuota procedūra. Jis atsakingas už:
+
+- `pg_dump` iškvietimą;
+- dump artefakto manifesto/metaduomenų sukūrimą;
+- AES-256-GCM šifravimą per `utils/backupEncryption.js`;
+- prieš restore atliekamą manifesto, checksum ir GCM autentifikacijos patikrą;
+- dešifruoto dump'o perdavimą PostgreSQL restore įrankiui;
+- aiškius exit kodus ir klaidas.
+
+⚠️ Testas **NETURI** atkurti šios orkestracijos savo atskira imitacija. Konkretūs failų
+vardai (`backup-db.js` / `restore-db.js`) **nefiksuojami** — fiksuojamas elgesys ir tai,
+kad kelias vienas.
+
+### D3 — izoliuota tikslinė DB
+
+⚠️ **Helperis JAU yra — antro provisioning framework'o nekurti.**
+`tests/helpers/postgresGuard.js` teikia `testDatabaseUrl(suffix)` ir
+`adminDatabaseUrl()`, o modelis (`CREATE DATABASE` per admin URL + `resourceStack`
+teardown) jau naudojamas dviejuose kontraktų testuose. Restore testas eina tuo pačiu
+keliu.
+
+### D4 — restore atomiškumas
+
+Kriptografinės ir manifesto klaidos sustabdo procesą **PRIEŠ pirmą SQL mutaciją**.
+
+Jei autentifikuotas dump'as jau pradėtas vykdyti, SQL ar ryšio klaida negali palikti
+„sėkmingai užbaigto" dalinio restore. Restore vykdomas režimu, kuris pagal pasirinktą
+`pg_dump` formatą duoda maksimaliai atominę fail-closed semantiką (pvz.
+single-transaction, jei formatas ir įrankis ją palaiko).
+
+⚠️ Konkreti vėliavėlė (`psql -1` ar kita) **nefiksuojama** — formatas (plain, custom)
+dar pasirenkamas. Fiksuojama garantija.
+
+Pastaba: „hard fail PRIEŠ restore" (sugadintas ciphertext, blogas raktas) ir „SQL klaida
+jau pradėjus" yra **du skirtingi** reikalavimai; abu privalo turėti testą.
+
+### D5 — readiness / doctor riba
+
+7.6a **neperimplementuoja** 7.4f readiness darbo.
+
+`make doctor` per `startupChecks.postgresReachability()` jau lygina `pgmigrations` su
+`backend/migrations/` katalogu, t. y. migracijų atsilikimo signalas **egzistuoja**.
+Todėl 7.6a numatytai tik **dokumentuoja jį kaip privalomą post-restore verifikacijos
+žingsnį**.
+
+`/api/ready` migracijų atsilikimo patikra šiame PR daroma **TIK** jei be jos negalima
+tenkinti jau egzistuojančio 7.6 kontrakto; kitu atveju — atskiras follow-up. Sprendimą
+užrašyti, nesvarbu kuris.
+
+### D6 — dydžio riba yra tikra, ir ji žemesnė nei 2 GB
+
+`MAX_CIPHERTEXT_BYTES` yra 2 GB, bet envelope laukai (`iv`, `authTag`, `ciphertext`) yra
+**base64 eilutės atmintyje**, o V8 eilutės ilgis ribotas. Praktinė lubos ateina
+gerokai anksčiau nei nominalios 2 GB, ir produkcinis dump'as su transkripcijomis prie
+jų gali priartėti.
+
+7.6a **neįveda** srautinio šifravimo. Bet riba privalo būti:
+
+- išmatuota arba argumentuotai įvardyta;
+- užrašyta runbook'e kaip žinoma riba (kitaip dokumentas teigia daugiau, nei kodas
+  gali — §12.1);
+- padengta testu ties klaidos keliu (per didelis artefaktas duoda aiškią klaidą, ne
+  neaiškų V8 kritimą).
+
+### D7 — `pg_dump` prieinamumas CI'uje
+
+⚠️ Šiandien workflow **neįdiegia jokio** PostgreSQL kliento, o serveris yra
+`postgres:16-alpine`. Runner'io numatytasis klientas yra senesnis, o `pg_dump` prieš
+naujesnį serverį atsisako dirbti. Be šito visas DoD CI'uje neįvykdomas — ir kris ne dėl
+logikos.
+
+- workflow įdiegia suderinamą klientą (`postgresql-client-16` ar lygiavertį), **versija
+  pririšama**, ne paliekama runner'io numatytajai, kuri keičiasi be įspėjimo;
+- testas turi **atskirą praleidimo ašį** „nėra `pg_dump` binaro", ir ji, kaip
+  `skipWithoutPostgres()`, po `REQUIRE_POSTGRES=1` virsta klaida. Tyliai praleistas
+  failas apeitų `verify-postgres-suite-ran.mjs` prasmę.
+
+---
+
+## DoD
+
+### Kopija ir šifravimas
+
+- [ ] `pg_dump` procedūra `docs/backup-runbook.md`.
+- [ ] Artefaktas šifruojamas per `utils/backupEncryption.js` (AES-256-GCM). Paprastas
+      `pg_dump` be šifravimo kriterijaus NETENKINA — `job_results` turi transkripcijas.
+- [ ] D1 sprendimas priimtas ir užrašytas; jei pasirinktas naujas kanoninis tipas —
+      atsakyta į abi automatines pasekmes (`isIncluded()` išvedimas, `artefactScanner`
+      strategijos pareiga), ir `lifecycleE2E.test.js:423` lieka žalias **dėl
+      sprendimo**, ne dėl atsitiktinumo.
+- [ ] `backupEncryption.js` kriptografinė semantika ir v2 AAD formatas nepakeisti.
+- [ ] D6: dydžio riba įvardyta, užrašyta runbook'e ir padengta klaidos keliu.
+
+### Vienas kelias
+
+- [ ] Egzistuoja vienas programinis backup/restore kelias (D2); integracinis testas ir
+      dokumentuota procedūra naudoja **jį**, ne dvi realizacijas.
+- [ ] Testas neatkuria orkestracijos savo imitacija.
+- [ ] Aiškūs exit kodai / klaidos.
+
+### Restore įrodymas
+
+- [ ] Restore į naują **TUŠČIĄ** DB; `schema_version` patikra.
+- [ ] ⚠️ Testas naudoja atskirą, unikaliai pavadintą laikiną DB per esamą
+      `testDatabaseUrl()` / `adminDatabaseUrl()` ir **niekada** nedaro DROP/restore ant
+      bendros `DATABASE_URL` bazės.
+- [ ] Testas išvalo **tik SAVO** sukurtą DB; lygiagretus kitų PostgreSQL integracinių
+      testų vykdymas nepaveikiamas.
+- [ ] ⚠️ Palyginimas **nėra vien `COUNT(*)`**: tikrinami konkretūs `jobs.id`, statusai
+      ir jų ryšys su `job_results`, įskaitant reprezentatyvų transcript/protocol
+      payload. Procedūra, neatkurianti `job_results`, praeitų `COUNT` patikrą, nors
+      kiekvienas baigtas job'as būtų praradęs vartotojui matomą rezultatą.
+- [ ] ⚠️ Kopijos šaltinio nuoseklumas: procedūra dokumentuoja ir testas remiasi
+      PostgreSQL consistent snapshot semantika — `jobs` ir susiję `job_results` negali
+      būti paimti iš skirtingų loginių momentų vien dėl skaitymo sekos.
+
+### Fail-closed
+
+- [ ] Sugadintas ciphertext arba blogas raktas → **hard fail PRIEŠ restore**, ne dalinis
+      atkūrimas. Testas abiem atvejais.
+- [ ] ⚠️ Neužtenka „grąžina klaidą": prieš ir po bandymo tikslinė **tuščia DB lieka
+      semantiškai nepaliesta** (jokių lentelių, jokių įrašų).
+- [ ] D4: tyčia sugadintas jau **validžiai dešifruotas** restore payload nepaverčiamas
+      sėkmingu restore; dalinės būsenos nelieka.
+- [ ] Pasirinktas restore režimas ir jo atomiškumo garantija užrašyti.
+
+### Auditas
+
+- [ ] `audit_log` NEatkuriamas (`utils/backupPolicy.js` tai jau daro sąmoningai).
+- [ ] ⚠️ Testas naudoja **unikalų sentinel'į**: prieš kopiją įrašoma unikaliai
+      atpažįstama audito eilutė, po restore jos NĖRA. „Nesutampa su dump'u" nepakanka —
+      atkūrimas įrašo naujų įvykių, tad nesutapimas atsiranda savaime.
+
+### Dokumentacija ir readiness
+
+- [ ] ⚠️ **RUNBOOK ĮSPĖJA, KAD PROCEDŪRA DAR NE ERASURE-SAFE.** Po šio PR restore veiks,
+      bet prikeltų po kopijos ištrintus job'us — tombstone'ai (7.5a) ir replay (7.6c)
+      dar neuždaryti. Be įspėjimo dokumentas taptų stipresnis už kodą (§12.1).
+- [ ] Testas gina šį įspėjimą, **prijungtas prie esamo** `backupDocumentation.test.js`
+      „KIEKVIENA žinoma riba įvardyta" mechanizmo, jei tas sąrašas išvedamas — ne
+      vienuoliktas rankinis `assert`.
+- [ ] D5 sprendimas užrašytas: `make doctor` signalas dokumentuotas kaip privalomas
+      post-restore žingsnis; `/api/ready` keičiamas tik jei būtina.
+- [ ] `/api/health` DB būsenos produkcijoje NErodo pagal nutylėjimą (`HEALTH_DETAILS`,
+      kaip esami tiekėjų pavadinimai).
+
+### CI
+
+- [ ] D7: workflow įdiegia pririštos versijos PostgreSQL klientą; `pg_dump` CI'uje
+      realiai vykdomas.
+- [ ] Praleidimo ašis „nėra `pg_dump`" po `REQUIRE_POSTGRES=1` virsta klaida.
+- [ ] Testas registruotas `postgres` rinkinyje (per `postgresGuard` importą), tad
+      `verify-postgres-suite-ran.mjs` reikalauja neprapleisto `ok`.
+
+---
+
+## Ko NEAPIMA
+
+Sesijų, ne-terminalių job'ų, ištrynimo žymų, erasure replay. Srautinio šifravimo.
+Roadmap `[x]` NEdedamas — 7.6 uždaromas tik po 7.6c.
+
+⚠️ Šis nuokrypis nuo bendro 7.6 aprašo `SUBISSUES-155.md` yra **sąmoningas ir
+suplanuotas** (pirmas iš trijų). Testų ir kodo komentaruose tai įvardyti, kad nekiltų
+painiavos su bendruoju 7.6 DoD.
+
+---
+
+## Pastabos vykdytojui
+
+- **Įrodymo standartas:** AGENTS.md §14. „Testas praėjo" nėra restore korektiškumo
+  įrodymas, jei palyginimas paviršinis.
+- **Mutacijos:** §9.1. Kiekvienas fail-closed testas privalo kristi, kai atitinkama
+  patikra pašalinama.
+- **Testų izoliacija:** §9.3. Restore testas liečia DB — izoliacija čia nėra higiena, o
+  korektiškumo sąlyga.
+- **Dokumentacija:** §12.1. Runbook negali teigti daugiau, nei procedūra gali —
+  ypač dėl erasure-safety ir dydžio ribos.
+- **Apimties disciplina:** §13. `/api/ready` architektūra, srautinis šifravimas ir
+  erasure replay yra už ribos; jei kuris pasirodys būtinas — sustok ir pasakyk.
+
+---
+
+## [7.6b] Post-restore aplikacinis suderinimas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.6a
+
+Apimtis: **ką daryti su būsena, kurios DB snapshot vienas pats saugiai atkurti
+negali.**
+
+### DoD
+
+- [ ] **Visos atkurtos sesijos masiškai revokuojamos.** Kitaip atkūrimas
+      prikeltų atšauktas sesijas: klientas ar užpuolikas gali tebeturėti tą
+      pačią cookie, o senas `token_hash` ją vėl padarytų galiojančia. Testas:
+      sesija atšaukta PO kopijos → po restore ta cookie neautentifikuoja.
+- [ ] `queued` / `processing` eilutės suderinamos. BullMQ būsena į kopiją
+      NEPATENKA, tad atkurti nepakeisti jie liktų amžinai ne-terminalūs:
+      `sweepExpired()` jų nešalina, o klientai apklausinėtų job'us, kurie
+      niekada nepasileis.
+- [ ] ⚠️ **ŠIAME PR — TIK TERMINALIZAVIMAS, JOKIO PRIKĖLIMO.** Prikelti job'ą
+      galima tik žinant, kad jo duomenys neištrinti, o tombstone merge atsiranda
+      7.6c. Prikėlimo kelias atidaromas ten, ne čia.
+- [ ] Terminalinės būsenos (`completed` + `result`, `failed`) NEPAŽEIDŽIAMOS —
+      testas, kad suderinimas jų neliečia.
+- [ ] Cutover leidžiamas tik PO suderinimo; procedūra runbook'e nurodo eiliškumą.
+
+### Ko NEAPIMA
+
+BullMQ eilės rekonstrukcijos ir queue replay architektūros — eksplicitiškai
+out of scope. Erasure replay — 7.6c. Roadmap `[x]` NEdedamas.
+
+---
+
+## [7.6c] Erasure-safe restore ir pilnos DR pratybos
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.5a, 7.6b
+
+Paskutinis 7.6 gabalas. Apimtis tik GDPR galutinumas ir pilnas end-to-end.
+
+### DoD
+
+- [ ] Naudojamos 7.5a persistentės ištrynimo žymos. **Antras tombstone
+      mechanizmas NEKURIAMAS** — jei 7.5a neuždarytas, šis darbas laukia.
+- [ ] Ištrynimo žurnalas saugomas UŽ snapshot'o ribų ir sujungiamas po atkūrimo.
+- [ ] Po kopijos ištrintas job'as po restore NEATSIRANDA; jo `job_results` ir
+      kiti priklausomi įrašai taip pat ne.
+- [ ] ⚠️ **TOMBSTONE MERGE EINA PIRMAS, PRIEŠ SUDERINIMĄ.** Ištrintas job'as
+      kopijoje gali gulėti kaip `queued`. Jei 7.6b suderinimas pamatys jį pirmas,
+      jis arba terminalizuos, arba (vėliau) prikels darbą su jau ištrintais
+      duomenimis. Teisinga seka: **tombstone merge → sesijos → job'ai.**
+- [ ] Pilnas E2E: backup → encrypt → restore → tombstone merge → sesijų
+      revokacija → job'ų suderinimas → verify. Gali būti atskiras integracinis
+      workflow.
+- [ ] 7.6a runbook įspėjimas („dar ne erasure-safe") PAŠALINAMAS kartu su testu,
+      kuris jo reikalavo.
 - [ ] README apribojimų lentelės eilutės atnaujintos; Roadmap `[x]`.
+- [ ] #185 uždaromas.
+
+### Ko NEAPIMA
+
+Queue replay architektūros — ji ir toliau out of scope.
