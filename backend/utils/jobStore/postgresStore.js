@@ -457,6 +457,19 @@ const SVETIMAS_SCOPE = `SELECT count(*) FROM jobs
  * kartu su `priezastis = 0` (snapshot'o versija buvo SAVA). Be `buvo` ši baigtis
  * nesiskirtų nuo „eilutės apskritai nebuvo", ir savininko pasikeitimas sakinio
  * viduryje būtų klaidingai paskelbtas `false`/`null` vietoj `"FORBIDDEN"`.
+ *
+ * ⚠️ ANTRAS TOS PAČIOS KLASĖS PAVYZDYS — `rezultatoEilute()` (#184, 7.5b).
+ *
+ * Ta pati `EvalPlanQual` asimetrija pasirodė KITU pavidalu: `readJobForUpdate()`
+ * yra `jobs LEFT JOIN job_results ... FOR UPDATE OF j`, ir EPQ iš naujo skaito
+ * TIK užrakintą `jobs` eilutę — PRIJUNGTA `job_results` eilutė lieka pradinio
+ * sakinio snapshot'o. Lenktynėse antrasis vykdytojas matydavo
+ * `status = 'completed'` (nauja) su `result = NULL` (sena).
+ *
+ * Čia išsiskiria SKALIARAS, ten — PRIJUNGTA EILUTĖ. Abu pavyzdžiai laikomi
+ * greta sąmoningai: klasė ta pati, o antrąjį jos pavidalą pagavo tik tikras
+ * PostgreSQL (memory ir Redis jo neturi - `HGETALL` atomiškas), ir pasekmė buvo
+ * fail-safe kryptimi, tad be gilaus testo atrodė kaip teisingas elgesys.
  */
 const EILUTE_YRA = `SELECT count(*) FROM jobs WHERE id = $1`;
 
