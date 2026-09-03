@@ -478,3 +478,57 @@ test("#280 IV: konfigūracijos klaida NEPALIEKA įsipareigoto darbo", { skip: pr
     }
   });
 });
+
+test("#280 follow-up: be nė vienos PostgreSQL ašies komanda KRENTA, nieko nepakeitusi", { skip: praleisti(), timeout: 180000 }, async (t) => {
+  /**
+   * ⚠️ D7 SAKO: „jokio successful skip memory režime; tylus praleidimas
+   * pavojingesnis nei kritimas". Iki šio taisymo su `DATABASE_URL` ir numatytais
+   * atmintiniais backend'ais abi ašys gaudavo `NEREIKALINGA`, `arSaugu()`
+   * grąžindavo `true`, ir komanda išeidavo `0` NIEKO nesuderinusi — t. y.
+   * operatorius gaudavo patvirtinimą apie darbą, kurio nebuvo.
+   *
+   * ⚠️ TIKRINAMA BŪSENA, NE FORMA: po kritimo sesijos privalo likti aktyvios,
+   * job'ai nepakitę, audito eilutės nėra. „Krito su teisingu kodu" nepakanka —
+   * reikia, kad nebūtų ir šalutinio efekto.
+   */
+  t.after(async () => {
+    await pasalintiDb(SUDERINIMO_URL);
+  });
+
+  await perkurtiDb(SUDERINIMO_URL);
+
+  await suAplinka(SUDERINIMO_URL, async () => {
+    const pool = new Pool({ connectionString: SUDERINIMO_URL });
+
+    try {
+      const { store: sesijuStore, sesijos } = await pripildytiSesijas(pool);
+      await pripildytiJobus(pool);
+
+      const pries = await busena(SUDERINIMO_URL);
+
+      /** ⚠️ `SESSION_STORE_BACKEND` PAŠALINAMAS — lieka numatytoji atmintis, o job'us uždaro barjeras. */
+      const beAsiu = { ...process.env };
+      delete beAsiu.SESSION_STORE_BACKEND;
+
+      await assert.rejects(
+        () => reconcile.suderinti({ targetUrl: SUDERINIMO_URL, actor: "operatorius-testas", env: beAsiu }),
+        (err) => {
+          assert.equal(err.code, "RECONCILE_BACKEND_NOT_POSTGRES");
+          return true;
+        }
+      );
+
+      assert.deepEqual(await busena(SUDERINIMO_URL), pries, "sargas negali palikti pakeitimų");
+      for (const s of sesijos) {
+        assert.ok(await sesijuStore.touch(s.token, process.env), "sesijos privalo likti aktyvios");
+      }
+      assert.deepEqual(await auditoIrasai(SUDERINIMO_URL), [], "nesėkmė evidencijos nepalieka");
+
+      /** ⚠️ KONTROLĖ: su sesijų ašimi ta pati komanda PRAEINA — kitaip sargas draustų viską. */
+      const r = await reconcile.suderinti({ targetUrl: SUDERINIMO_URL, actor: "operatorius-testas" });
+      assert.equal(r.asys.sesijos.verdiktas, "suderinta");
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  });
+});
