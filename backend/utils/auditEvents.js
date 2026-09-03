@@ -434,32 +434,61 @@ function konstantosReiksme(turinys, identifikatorius, laukas) {
   return null;
 }
 
-function producerIvykiai() {
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const saknis = path.resolve(__dirname, "..");
-  const rasti = new Set();
-  const nezinomiSaltiniai = new Set();
+/**
+ * OS-NATYVUS KELIAS → VIENA VIDINĖ FORMA (#283).
+ *
+ * ⚠️ `fs.readdirSync(dir, { recursive: true })` GRĄŽINA OS-NATYVIUS SKIRTUKUS.
+ *
+ * Windows'e įrašas yra `auditStore\postgresStore.js`, tad
+ * `startsWith("auditStore/")` ten yra `false`: `NE_PRODUCER_KELIAI` išimtis
+ * nesuveikdavo, skeneris perskaitydavo saugyklos sluoksnį, rasdavo teisėtą
+ * mapping'ą `event: row.event` ir SUSTABDYDAVO STARTĄ dėl konstantos, kurios
+ * niekas nekuria. Su galiojančia mock konfigūracija `npm run doctor` krisdavo.
+ *
+ * ⚠️ KANONIZUOJAMA TIES ĮVESTIES RIBA, NE PALYGINIME.
+ *
+ * `startsWith(`${k}/`) || startsWith(`${k}\\`)` pataisytų ŠĮ palyginimą ir
+ * paliktų klasę atvirą: antras filtras ateitų be jo. Ta pati taisyklė, kurią repo
+ * jau taikė `arTaPatiBaze()`, `efektyvusJungtiesParametrai()` ir
+ * `jobPhase.finish()` patch'ui — viena tiesa vienoje vietoje.
+ *
+ * ⚠️ ATPAŽĮSTAMI ABU SKIRTUKAI, NE TIK `path.sep`. Regresija tikrinama Linux
+ * CI'uje su Windows formos įrašais; `path.sep` ten yra `/`, tad normalizavimas
+ * nieko nekeistų ir testas praeitų nieko neįrodęs.
+ *
+ * ⚠️ ŽINOMA RIBA: POSIX sistemose `\` yra LEISTINAS failo vardo simbolis. Failas,
+ * pavadintas `auditStore\x.js` produkciniame kataloge, būtų kanonizuotas į
+ * `auditStore/x.js` ir praleistas kaip saugyklos sluoksnis. Tokio vardo repo
+ * neturi, o kaina už jį — Windows starto gedimas.
+ */
+function kanonizuotiKelia(irasas) {
+  return String(irasas).split("\\").join("/");
+}
 
-  for (const katalogas of PRODUKCINIAI_KATALOGAI) {
-    const dir = path.join(saknis, katalogas);
-    let irasai;
-    try {
-      irasai = fs.readdirSync(dir, { recursive: true });
-    } catch {
-      continue; // katalogo nėra - žr. komentarą aukščiau
-    }
-    for (const irasas of irasai) {
-      if (!String(irasas).endsWith(".js")) continue;
-      if (NE_PRODUCER_KELIAI.some((k) => String(irasas).startsWith(`${k}/`))) continue;
-      const kelias = path.join(dir, String(irasas));
-      let turinys;
-      try {
-        turinys = fs.readFileSync(kelias, "utf8");
-      } catch {
-        continue;
-      }
-      const svarus = beKomentaru(turinys);
+/**
+ * Skeneris, atskirtas nuo failų sistemos (#283).
+ *
+ * ⚠️ ATSKYRIMAS YRA ĮRODYMO SĄLYGA, NE STILIUS. Linux CI niekada nesukurs
+ * `auditStore\postgresStore.js` formos, tad regresiją galima įrodyti tik paduodant
+ * įrašų sąrašą TIESIOGIAI. Testas, šakojantis pagal `process.platform`, CI'uje
+ * visada praleistų būtent tą šaką, dėl kurios rašomas.
+ *
+ * @param {Iterable<string>} irasai katalogo įrašai (OS-natyvūs arba POSIX)
+ * @param {(kanoninisKelias: string) => string|null} skaityti failo turinys arba `null`
+ */
+function skenuotiIrasus(irasai, skaityti, kaupikliai) {
+  const { rasti, nezinomiSaltiniai } = kaupikliai;
+
+  for (const neapdorotas of irasai) {
+    const irasas = kanonizuotiKelia(neapdorotas);
+
+    if (!irasas.endsWith(".js")) continue;
+    if (NE_PRODUCER_KELIAI.some((k) => irasas.startsWith(`${k}/`))) continue;
+
+    const turinys = skaityti(irasas);
+    if (turinys === null || turinys === undefined) continue;
+
+    const svarus = beKomentaru(turinys);
 
       /** Tiesioginiai literalai: `event: "DATA_ERASED"`. */
       for (const m of svarus.matchAll(/event:\s*"([A-Z_0-9]+)"/g)) rasti.add(m[1]);
@@ -491,19 +520,61 @@ function producerIvykiai() {
       for (const m of svarus.matchAll(
         /event:\s*([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)(?![\w$])(?!\s*\()/g
       )) {
-        const reiksme = konstantosReiksme(svarus, m[1], m[2]);
-        if (reiksme) rasti.add(reiksme);
-        else nezinomiSaltiniai.add(`${m[1]}.${m[2]}`);
-      }
+      const reiksme = konstantosReiksme(svarus, m[1], m[2]);
+      if (reiksme) rasti.add(reiksme);
+      else nezinomiSaltiniai.add(`${m[1]}.${m[2]}`);
     }
   }
-  return { rasti, nezinomiSaltiniai };
+
+  return kaupikliai;
 }
 
-function validateAuditEvents() {
+function producerIvykiai() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const saknis = path.resolve(__dirname, "..");
+  const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+  for (const katalogas of PRODUKCINIAI_KATALOGAI) {
+    const dir = path.join(saknis, katalogas);
+    let irasai;
+    try {
+      irasai = fs.readdirSync(dir, { recursive: true });
+    } catch {
+      continue; // katalogo nėra - žr. komentarą aukščiau
+    }
+
+    /**
+     * ⚠️ SKAITOMA PAGAL KANONINĮ KELIĄ, o `path.join` jį vėl paverčia natyviu —
+     * tad kanonizacija lieka VIDINĖ forma, o failų sistema mato savąją.
+     */
+    skenuotiIrasus(
+      irasai,
+      (kanoninis) => {
+        try {
+          return fs.readFileSync(path.join(dir, ...kanoninis.split("/")), "utf8");
+        } catch {
+          return null;
+        }
+      },
+      kaupikliai
+    );
+  }
+
+  return kaupikliai;
+}
+
+/**
+ * @param {{rasti: Set<string>, nezinomiSaltiniai: Set<string>}} [ivykiai]
+ *   ⚠️ INJEKCIJA TIK TESTUI, IR TAI UŽRAŠYTA. Produkcinis kelias
+ *   (`startupChecks.js:174`) kviečia BE argumentų, tad elgesys nepakitęs.
+ *   Be šios angos „nežinomas producer šaltinis stabdo startą" būtų įrodoma tik
+ *   sugadinus tikrą produkcinį failą — t. y. testas turėtų rašyti į repo.
+ */
+function validateAuditEvents(ivykiai = null) {
   const klaidos = [];
 
-  const { rasti, nezinomiSaltiniai } = producerIvykiai();
+  const { rasti, nezinomiSaltiniai } = ivykiai || producerIvykiai();
 
   for (const šaltinis of nezinomiSaltiniai) {
     klaidos.push(
@@ -550,6 +621,13 @@ module.exports = {
   arBlokuojantis,
   validateAuditEvents,
   producerIvykiai,
+  /**
+   * ⚠️ EKSPORTUOJAMA DĖL REGRESIJOS ĮRODYMO (#283). Skenerio elgesys su Windows
+   * formos įrašais Linux CI'uje kitaip nepasiekiamas: tikra failų sistema tokių
+   * įrašų negrąžins niekada.
+   */
+  skenuotiIrasus,
+  kanonizuotiKelia,
   NE_PRODUCER_KELIAI,
   /**
    * Eksportuojama testams: statinės patikros PRIVALO nuskusti komentarus, kitaip
