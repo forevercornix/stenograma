@@ -1,6 +1,5 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const crypto = require("node:crypto");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { Client, Pool } = require("pg");
@@ -18,8 +17,15 @@ const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const erasureReplay = require("../utils/erasureReplay");
 const restoredJobStore = require("../utils/restoredJobStore");
 const sesijuPg = require("../utils/sessionStore/postgresStore");
-const { hashPassword } = require("../utils/credentials");
 const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
+/**
+ * ⚠️ APLINKA IMAMA IŠ BENDRO HELPERIO, NE APRAŠOMA ČIA.
+ *
+ * Ją tikrina `drRestorePreconditions` VIETOJE, prieš nepasiekiamą bazę: trys CI
+ * raundai iš eilės krito ne ties elgesiu, o ties šia aplinka. Kopija reikštų,
+ * kad vietinė patikra gina nebe tą aplinką, kurią naudoja šis failas.
+ */
+const { testoAplinka } = require("./helpers/drRestoreEnv");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -99,32 +105,6 @@ async function sukurtiTusciaDb(url) {
   await vykdyti(adminDatabaseUrl(), `CREATE DATABASE "${vardas}"`);
 }
 
-/**
- * ⚠️ `JOB_STORE_BACKEND=postgres` ČIA NENUSTATOMAS, IR TAI NE PRALEIDIMAS.
- *
- * 7.2a aktyvavimo barjeras jį verčia KLAIDA (išmatuota: `selectBackend` meta
- * „dar neleidžiamas"), o vien `DATABASE_URL` grąžina `memory | barjeras: true`.
- * Todėl job'ai sėjami ir tikrinami per TIESIOGINĮ `createPostgresStore(pool)` —
- * tą patį, kurį fasadas naudos barjerui atsidarius — o replay eina per
- * koordinatoriaus nukreiptą saugyklą (#250, C sprendimas).
- *
- * ⚠️ `AUDIT_ID_SALT` BŪTINAS. Be jo `AUDIT_BACKEND=postgres` atsisako startuoti:
- * pseudonimai skirtųsi tarp restartų, ir GDPR ištrynimas senų įrašų nerastų.
- * Pirmoji šio failo redakcija CI'uje krito būtent ties šia eilute.
- */
-function testoAplinka(url) {
-  return {
-    ...process.env,
-    DATABASE_URL: url,
-    SESSION_STORE_BACKEND: "postgres",
-    AUDIT_BACKEND: "postgres",
-    AUDIT_ID_SALT: crypto.randomBytes(32).toString("hex"),
-    AUDIT_ID_SALT_ID: "2026-09",
-    BACKUP_ENABLED: "true",
-    BACKUP_ENCRYPTION_KEY: crypto.randomBytes(32).toString("base64"),
-  };
-}
-
 /** Aplinka pririšama prie konkrečios bazės — kitaip saugyklos dirbtų su kita. */
 async function suAplinka(env, veiksmas) {
   const senas = { ...process.env };
@@ -184,13 +164,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           [VARTOTOJAS_A, "administrator", "admin"],
           [VARTOTOJAS_B, "operator", "petras"],
         ]) {
-          await store.create({
-            userId,
-            role,
-            username,
-            passwordHash: hashPassword("a1"),
-            expiresAt: new Date(Date.now() + 3_600_000),
-          });
+          await store.create({ id: userId, role, username }, process.env);
         }
 
         saltinioDeployment = await deploymentIdentity.skaitytiTapatybe(pool);

@@ -161,6 +161,15 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
         "kuria `new Pool()` tik tam, kad patikrintų `error` klausytojo registraciją " +
         "ir pool'o nustatymus - prie DB nesijungia",
     },
+    {
+      failas: "drRestorePreconditions.test.js",
+      kodel:
+        "jungiasi prie SĄMONINGAI nepasiekiamo adreso (127.0.0.1:1): serverio jam " +
+        "NEREIKIA, o ryšio gedimas ir yra tikrinamas rezultatas - kiekvienas DR sargas " +
+        "privalo kristi dėl ryšio, ne dėl konfigūracijos (#250). Įtraukus jį į " +
+        "`postgres` rinkinį patikra vyktų tik CI'uje, t. y. kaip tik ten, kur ji " +
+        "turi būti nebereikalinga",
+    },
   ];
 
   const naudojaPg = visiTestuFailai().filter((f) =>

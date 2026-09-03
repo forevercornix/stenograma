@@ -321,6 +321,14 @@ const functional = [
    * `drRestore.integration`, kuris išvedamas į `postgres` rinkinį.
    */
   "drCoordinatorContract",
+  /**
+   * #250: `drRestore.integration` APLINKOS prielaidos, tikrinamos VIETOJE.
+   *
+   * Trys CI raundai iš eilės krito ne ties DR elgesiu, o ties aplinka
+   * (`AUDIT_ID_SALT`, sesijos forma, base64 raktas vietoj hex). Šis testas tą
+   * patį klausimą užduoda per sekundes, prieš nepasiekiamą bazę.
+   */
+  "drRestorePreconditions",
   "erasureExportContract",
   "erasureReplayContract",
   "jobVersionParity",
