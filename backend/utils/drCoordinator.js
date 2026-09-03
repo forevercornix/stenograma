@@ -1,6 +1,7 @@
 
 const tombstones = require("./deletionTombstones");
 const erasureExport = require("./erasureExport");
+const restoredJobStore = require("./restoredJobStore");
 const erasureReplay = require("./erasureReplay");
 const deploymentIdentity = require("./deploymentIdentity");
 const postRestoreReconcile = require("./postRestoreReconcile");
@@ -301,11 +302,31 @@ function _patikrintiMerge(merge) {
 
 /**
  * 2 ŽINGSNIS — REPLAY. Privalo gauti 1 žingsnio rezultatą.
+ *
+ * ⚠️ REPLAY VYKDOMAS PRIEŠ ATKURTĄ BAZĘ, NE PRIEŠ FASADĄ (#250, C sprendimas).
+ *
+ * Koordinatorius yra vienintelė vieta, kuri žino tikslinę bazę, tad būtent jis
+ * sudaro nukreiptą saugyklą. Per fasadą replay būtų VAKUUMAS: 7.2a barjeras
+ * job'ų autoritetu palieka atmintį arba Redis, o ištrintų žmonių duomenys guli
+ * atkurtoje bazėje — `jobs` eilutės liktų neribotai, o kvitas skelbtų sėkmę.
+ *
+ * ⚠️ `vykdytojas` PRIVALOMAS. Be jo tyliai grįžtume prie fasado, t. y. prie to
+ * paties vakuumo, tik be jokio ženklo. Fail-closed čia pigesnis už bet kokį
+ * numatytąjį elgesį.
  */
-async function replay({ merge, actor = null }) {
+async function replay({ merge, vykdytojas, actor = null }) {
   _patikrintiMerge(merge);
 
-  const rezultatas = await erasureReplay.replay({ zymos: merge.zymos, actor });
+  if (!vykdytojas || typeof vykdytojas.query !== "function") {
+    throw new DrCoordinatorError(
+      "Replay be tikslinės bazės kliento: per fasadą jis šalintų iš atminties, " +
+        "o atkurtos `jobs` eilutės liktų. Perduokite tą patį pool'ą kaip sargams.",
+      "DR_REPLAY_STORE_MISSING"
+    );
+  }
+
+  const store = restoredJobStore.sukurti(vykdytojas);
+  const rezultatas = await erasureReplay.replay({ zymos: merge.zymos, actor, store });
 
   if (rezultatas.nesekmes.length > 0) {
     throw new DrCoordinatorError(
@@ -387,7 +408,7 @@ async function patikrinti({ reconcile, targetUrl, env = process.env }) {
  */
 async function paleisti({ targetUrl, artefaktas, vykdytojas, actor = null, env = process.env, leistiPasenusi = false }) {
   const merge = await sulieti({ targetUrl, artefaktas, vykdytojas, actor, env, leistiPasenusi });
-  const replayRez = await replay({ merge, actor });
+  const replayRez = await replay({ merge, vykdytojas, actor });
   const reconcile = await suderinti({ replay: replayRez, targetUrl, actor, env });
   const verify = await patikrinti({ reconcile, targetUrl, env });
 

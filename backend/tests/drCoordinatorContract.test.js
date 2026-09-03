@@ -67,6 +67,36 @@ test("SEKA: `replay()` su svetimu objektu krenta PRIEŠ bet kokį trynimą", asy
   );
 });
 
+test("SAUGYKLA: replay be tikslinės bazės kliento KRENTA", async () => {
+  /**
+   * ⚠️ TYLUS GRĮŽIMAS PRIE FASADO BŪTŲ VAKUUMAS.
+   *
+   * 7.2a barjeras job'ų autoritetu palieka atmintį arba Redis, tad replay per
+   * fasadą atkurtos bazės eilučių NEPALIESTŲ — o kvitas skelbtų sėkmę. Todėl
+   * klientas privalomas, ne numatytas.
+   */
+  await assert.rejects(
+    () => drCoordinator.replay({ merge: tikrasMerge() }),
+    (k) => k.code === "DR_REPLAY_STORE_MISSING"
+  );
+
+  await assert.rejects(
+    () => drCoordinator.replay({ merge: tikrasMerge(), vykdytojas: { query: "ne funkcija" } }),
+    (k) => k.code === "DR_REPLAY_STORE_MISSING"
+  );
+});
+
+test("SAUGYKLA: su klientu replay PRAEINA (kontrolė)", async () => {
+  /** Tuščias žymų sąrašas: tikrinamas sargas, ne trynimas — DB čia neliečiama. */
+  const rez = await drCoordinator.replay({
+    merge: tikrasMerge(),
+    vykdytojas: { query: async () => ({ rows: [] }) },
+  });
+
+  assert.equal(rez.zingsnis, "replay");
+  assert.deepEqual(rez.istrinta, []);
+});
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * 2. PASENUSIO ŽURNALO OVERRIDE — ABI LAIKMENOS
  * ═══════════════════════════════════════════════════════════════════════════ */

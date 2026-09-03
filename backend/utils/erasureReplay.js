@@ -65,12 +65,22 @@ async function _paruostiUzdarymui(jobId, status) {
 }
 
 /**
+ * ⚠️ `store` — SAUGYKLA, KURIOJE REALIAI GULI DUOMENYS (#250, C sprendimas).
+ *
+ * Numatytoji reikšmė yra `jobStore` fasadas, tad visi esami kvietėjai elgesio
+ * nekeičia. DR kelyje koordinatorius perduoda ATKURTOS bazės saugyklą
+ * (`utils/restoredJobStore.js`): be jos replay per fasadą būtų vakuumas, nes
+ * 7.2a barjeras job'ų autoritetu palieka atmintį arba Redis, o asmens duomenys
+ * guli atkurtoje bazėje. Ir job'o SKAITYMAS, ir jo ŠALINIMAS eina per tą pačią
+ * saugyklą — kitaip replay tikrintų vieną vietą, o trintų kitą.
+ *
  * @param {object} opcijos
  * @param {Array<object>} opcijos.zymos sulietos žymos (visos, ne tik `deleted`)
  * @param {string|null} opcijos.actor operatorius evidencijai
+ * @param {object} [opcijos.store] saugykla; numatytoji — `jobStore` fasadas
  * @returns {Promise<{apdorota: number, istrinta: string[], jauNebuvo: string[], nesekmes: Array<object>}>}
  */
-async function replay({ zymos, actor = null } = {}) {
+async function replay({ zymos, actor = null, store = jobStore } = {}) {
   const istrinta = [];
   const jauNebuvo = [];
   const uzdarytosZymos = [];
@@ -86,7 +96,7 @@ async function replay({ zymos, actor = null } = {}) {
      * patikra čia neturėtų ką tikrinti, o `system` kelias yra tas pats, kurį
      * naudoja kiti sisteminiai valytojai.
      */
-    const job = await jobStore.system.get(zyma.jobId);
+    const job = await store.system.get(zyma.jobId);
 
     if (!job) {
       /**
@@ -156,7 +166,7 @@ async function replay({ zymos, actor = null } = {}) {
     }
 
     try {
-      const outcome = await eraseJob(job);
+      const outcome = await eraseJob(job, { store });
 
       /**
        * ⚠️ SĖKMĖ IŠVEDAMA IŠ `outcome`, NE IŠ TO, KAD `eraseJob()` NEMETĖ.

@@ -14,7 +14,9 @@ const drCoordinator = require("../utils/drCoordinator");
 const tombstones = require("../utils/deletionTombstones");
 const auditStore = require("../utils/auditStore");
 const jobErasure = require("../utils/jobErasure");
-const jobStore = require("../utils/jobStore");
+const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+const erasureReplay = require("../utils/erasureReplay");
+const restoredJobStore = require("../utils/restoredJobStore");
 const sesijuPg = require("../utils/sessionStore/postgresStore");
 const { hashPassword } = require("../utils/credentials");
 const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
@@ -97,13 +99,27 @@ async function sukurtiTusciaDb(url) {
   await vykdyti(adminDatabaseUrl(), `CREATE DATABASE "${vardas}"`);
 }
 
+/**
+ * ⚠️ `JOB_STORE_BACKEND=postgres` ČIA NENUSTATOMAS, IR TAI NE PRALEIDIMAS.
+ *
+ * 7.2a aktyvavimo barjeras jį verčia KLAIDA (išmatuota: `selectBackend` meta
+ * „dar neleidžiamas"), o vien `DATABASE_URL` grąžina `memory | barjeras: true`.
+ * Todėl job'ai sėjami ir tikrinami per TIESIOGINĮ `createPostgresStore(pool)` —
+ * tą patį, kurį fasadas naudos barjerui atsidarius — o replay eina per
+ * koordinatoriaus nukreiptą saugyklą (#250, C sprendimas).
+ *
+ * ⚠️ `AUDIT_ID_SALT` BŪTINAS. Be jo `AUDIT_BACKEND=postgres` atsisako startuoti:
+ * pseudonimai skirtųsi tarp restartų, ir GDPR ištrynimas senų įrašų nerastų.
+ * Pirmoji šio failo redakcija CI'uje krito būtent ties šia eilute.
+ */
 function testoAplinka(url) {
   return {
     ...process.env,
     DATABASE_URL: url,
-    JOB_STORE_BACKEND: "postgres",
     SESSION_STORE_BACKEND: "postgres",
     AUDIT_BACKEND: "postgres",
+    AUDIT_ID_SALT: crypto.randomBytes(32).toString("hex"),
+    AUDIT_ID_SALT_ID: "2026-09",
     BACKUP_ENABLED: "true",
     BACKUP_ENCRYPTION_KEY: crypto.randomBytes(32).toString("base64"),
   };
@@ -156,14 +172,13 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
   await t.test("1. šaltinis pripildomas, tapatybė yra", async () => {
     await suAplinka(saltinioEnv, async () => {
-      await jobStore.init(process.env);
-      jobai = await pasetiKeturisStatusus(jobStore, {
-        ownerId: VARTOTOJAS_A,
-        storageKey: (k) => `audio/${k}.wav`,
-      });
-
       const pool = new Pool({ connectionString: SALTINIO_URL });
       try {
+        jobai = await pasetiKeturisStatusus(createPostgresStore(pool), {
+          ownerId: VARTOTOJAS_A,
+          storageKey: (k) => `audio/${k}.wav`,
+        });
+
         const store = sesijuPg.createPostgresStore(pool);
         for (const [userId, role, username] of [
           [VARTOTOJAS_A, "administrator", "admin"],
@@ -184,7 +199,6 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
       }
 
       assert.match(saltinioDeployment, /^[0-9a-f-]{36}$/, "migracija sukūrė tapatybės eilutę");
-      await jobStore.shutdown().catch(() => {});
     });
   });
 
@@ -202,22 +216,21 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
   await t.test("3. job'as A ištrinamas PO kopijos, žurnalas eksportuojamas", async () => {
     await suAplinka(saltinioEnv, async () => {
-      await jobStore.init(process.env);
-
-      /**
-       * ⚠️ ATKARTOJAMA PRODUKCINĖ SEKA (`lifecycleService`): žyma → `eraseJob()` →
-       * žymos uždarymas. Šio testo dalykas yra tai, kas vyksta PO to, tad
-       * ištrynimas čia yra PARUOŠIMAS, ne tikrinamas elgesys.
-       */
-      const job = await jobStore.system.get(jobai.zymetas.id);
-      await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
-      await jobErasure.eraseJob(job);
-      await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED, { completedAt: Date.now() });
-
-      assert.equal(await jobStore.system.get(job.id), null, "šaltinyje job'o A nebėra");
-
       const pool = new Pool({ connectionString: SALTINIO_URL });
       try {
+        /**
+         * ⚠️ ATKARTOJAMA PRODUKCINĖ SEKA (`lifecycleService`): žyma → `eraseJob()` →
+         * žymos uždarymas. Šio testo dalykas yra tai, kas vyksta PO to, tad
+         * ištrynimas čia yra PARUOŠIMAS, ne tikrinamas elgesys.
+         */
+        const saugykla = restoredJobStore.sukurti(pool);
+        const job = await saugykla.system.get(jobai.zymetas.id);
+        await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+        await jobErasure.eraseJob(job, { store: saugykla });
+        await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED, { completedAt: Date.now() });
+
+        assert.equal(await saugykla.system.get(job.id), null, "šaltinyje job'o A nebėra");
+
         artefaktas = erasureExport.sudarytiArtefakta({
           zymos: await tombstones.listAll(),
           horizontas: await tombstones.refreshBackupHorizon(),
@@ -235,8 +248,6 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
         false,
         "⚠️ `job_id` NEMATOMAS artefakte — žurnalas yra asmens duomenys"
       );
-
-      await jobStore.shutdown().catch(() => {});
     });
   });
 
@@ -312,6 +323,34 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     });
   });
 
+  await t.test("6a. KONTROLĖ: replay per FASADĄ atkurtos eilutės NEPAŠALINA", async () => {
+    /**
+     * ⚠️ BE ŠIOS PUSĖS 7 ŽINGSNIS ĮRODYTŲ TIK TIEK, KAD NAUJAS KELIAS VEIKIA.
+     *
+     * 7.2a barjeras job'ų autoritetu palieka atmintį arba Redis, tad replay be
+     * nukreiptos saugyklos atkurtos bazės NELIEČIA — ir vis tiek UŽDARO žymą bei
+     * įrašo kvitą. „Sėkmė paskelbta, duomenys liko" yra tiksliai tas vakuumas,
+     * dėl kurio saugykla DR kelyje privaloma. Šis žingsnis jį parodo, o ne
+     * aprašo.
+     */
+    const zurnalas = erasureExport.perskaitytiArtefakta({
+      envelope: artefaktas.envelope,
+      manifest: artefaktas.manifest,
+      env: saltinioEnv,
+    });
+
+    const vakuumas = await suAplinka(tiksloEnv, () =>
+      erasureReplay.replay({ zymos: zurnalas.zymos, actor: "kontrole" })
+    );
+
+    assert.deepEqual(vakuumas.istrinta, [], "fasadas atkurtų eilučių nemato");
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE id = $1", [jobai.zymetas.id]),
+      1,
+      "⚠️ eilutė LIKO: replay per fasadą būtų buvęs vakuumas"
+    );
+  });
+
   let pirmas = null;
 
   await t.test("7. koordinatorius: suliejimas → replay → suderinimas → verifikacija", async () => {
@@ -367,14 +406,25 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
       "neterminaliniai job'ai terminalizuoti (7.6b)"
     );
 
+    /**
+     * ⚠️ SKAIČIUOJAMA PAGAL `outcome`, NE BENDRAI.
+     *
+     * 6a kontrolė paliko `erasure_confirmed` kvitą — tai jos radinio dalis, ne
+     * triukšmas. Realių ištrynimų kvitas yra `erasure_replayed`, ir jų privalo
+     * būti lygiai vienas.
+     */
     const kvitai = await vykdyti(
       TIKSLO_URL,
-      "SELECT event, count(*)::int AS n FROM audit_log WHERE event = ANY($1) GROUP BY event",
+      "SELECT event, outcome, count(*)::int AS n FROM audit_log WHERE event = ANY($1) GROUP BY event, outcome",
       [["ERASURE_REPLAYED", "DR_RECOVERY_COMPLETED"]]
     );
-    const pagalIvyki = Object.fromEntries(kvitai.rows.map((r) => [r.event, r.n]));
-    assert.equal(pagalIvyki.ERASURE_REPLAYED, 1, "vienas kvitas vienam ištrynimui");
-    assert.equal(pagalIvyki.DR_RECOVERY_COMPLETED, 1, "atkūrimo faktas užfiksuotas PO visos sekos");
+    const pagal = Object.fromEntries(kvitai.rows.map((r) => [`${r.event}:${r.outcome}`, r.n]));
+    assert.equal(pagal["ERASURE_REPLAYED:erasure_replayed"], 1, "vienas kvitas vienam ištrynimui");
+    assert.equal(
+      kvitai.rows.filter((r) => r.event === "DR_RECOVERY_COMPLETED").reduce((a, r) => a + r.n, 0),
+      1,
+      "atkūrimo faktas užfiksuotas PO visos sekos"
+    );
   });
 
   await t.test("9. IDEMPOTENTIŠKUMAS: antras paleidimas būsenos nekeičia", async () => {
@@ -404,7 +454,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
     const { rows } = await vykdyti(
       TIKSLO_URL,
-      "SELECT count(*)::int AS n FROM audit_log WHERE event = 'ERASURE_REPLAYED'"
+      "SELECT count(*)::int AS n FROM audit_log WHERE event = 'ERASURE_REPLAYED' AND outcome = 'erasure_replayed'"
     );
     assert.equal(rows[0].n, 1, "antras paleidimas antro ištrynimo kvito NERAŠO");
   });

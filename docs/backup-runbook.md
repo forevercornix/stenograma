@@ -787,6 +787,19 @@ Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida (fail-
 | `claim_token` žurnale | **Nukerpamas** — pretenzija priklausė mirusiam procesui |
 | Kopijų horizontas | Imamas **maksimumas** (monotoniškas) |
 
+### ⚠️ Replay vykdomas prieš ATKURTĄ bazę, ne prieš gyvą autoritetą
+
+7.2a barjeras job'ų autoritetu palieka atmintį arba Redis (`JOB_STORE_BACKEND=postgres`
+šiandien yra klaida), o ištrintų žmonių duomenys po atkūrimo guli būtent
+PostgreSQL'yje. Todėl koordinatorius `eraseJob()` nukreipia į tikslinę bazę
+(`utils/restoredJobStore.js`); be to replay būtų **vakuumas** — `jobs` eilutės
+liktų neribotai, o kvitas skelbtų sėkmę.
+
+Nukreipiama TIK įrašo vieta. Audio saugykla, eilė ir auditas yra globalūs
+posistemiai, tad juos valo tie patys `eraseJob()` kvietimai, o `storageKey`
+imamas iš pačios atkurtos eilutės. Nepilna saugykla atmetama **prieš** pirmą
+šalinimą: praleistas metodas reikštų dalinį ištrynimą su sėkmės kvitu.
+
 Po suliejimo replay kiekvienam ID vykdo TĄ PATĮ `jobErasure.eraseJob()`, kurį
 naudoja gyvas trynimas. `lifecycleService.deleteJobArtefacts()` čia netinka: jo
 trys trumpieji keliai (`tombstone_unresolved`, `already_deleted`, `in_progress`)
@@ -861,6 +874,7 @@ rašo pats `eraseJob()`.
 | **Su `AUDIT_BACKEND=memory` kūrimo auditas neišlieka** | `PG_DUMP_BACKUP_CREATED` dingsta komandai pasibaigus; komanda įspėja | `AUDIT_BACKEND=postgres` |
 | **Post-restore suderinimo riba yra procedūrinė** | Serverį galima paleisti nesuderinus — `verify` yra patikra, ne sargas | Suderinimo žyma su starto patikra (#279) |
 | **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami 7.6b žingsnyje | Uždaro §9c replay, vykdomas PRIEŠ suderinimą |
+| **Replay be tikslinės bazės kliento neįmanomas** | `DR_REPLAY_STORE_MISSING` — tylaus grįžimo prie fasado nėra | Sąmoningas fail-closed (7.2a barjeras) |
 | **Job'ų autoritetas šiandien nėra PostgreSQL** | 7.2a barjeras: suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | 7.2a aktyvavimo barjero atidarymas (#281) |
 | **`PG*`-only diegimas neturi nė vienos PostgreSQL ašies** | `post-restore-reconcile` krenta su `RECONCILE_BACKEND_NOT_POSTGRES` | Sesijų atranka turi priimti `PG*` (#282) |
 | **`options`/`search_path` skirtumas = kita bazė** | Vienodi DSN su skirtingu `search_path` laikomi SKIRTINGAIS taikiniais | Sąmoninga fail-closed kryptis |

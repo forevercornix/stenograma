@@ -371,3 +371,102 @@ test("TVARKA: kvitas rašomas PRIEŠ žymos uždarymą — jo gedimas palieka ž
   assert.equal((await tombstones.get(job.id)).status, tombstones.TOMBSTONE_STATUS.DELETED);
   assert.equal((await irasai(erasureReplay.AUDITO_IVYKIS)).length, 1, "kvitas atsirado, ir tik vienas");
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 5. NUKREIPTA SAUGYKLA (#250, C sprendimas)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ KĄ ĮRODO ŠI DALIS IR KO NE.
+ *
+ * Įrodo MARŠRUTIZAVIMĄ: `store` parametras sprendžia, KUR įrašas šalinamas, ir
+ * nepilna saugykla atmetama PRIEŠ pirmą šalinimą. Tam duomenų bazės nereikia.
+ *
+ * NEĮRODO, kad replay per fasadą prieš ATKURTĄ bazę yra vakuumas — tam reikia
+ * tikros PostgreSQL, ir ta kontrolė gyvena `drRestore.integration` (žingsnis 6a).
+ */
+function saugyklaSuAibe(irasai) {
+  return {
+    system: {
+      get: async (id) => irasai.get(id) || null,
+      update: async (id, patch) => {
+        const esamas = irasai.get(id);
+        if (esamas) irasai.set(id, { ...esamas, ...patch });
+        return irasai.get(id) || null;
+      },
+      remove: async (id) => irasai.delete(id),
+    },
+  };
+}
+
+test("NUKREIPIMAS: `store` sprendžia, kur įrašas šalinamas", async () => {
+  await paruosti();
+
+  /** Tas pats job'as GYVENA nukreiptoje saugykloje, o fasadas jo neturi. */
+  const jobId = naujasId();
+  const kitur = new Map([[jobId, { id: jobId, type: "transcription", storageKey: null }]]);
+
+  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
+
+  const rez = await erasureReplay.replay({
+    zymos: await tombstones.listAll(),
+    actor: "op",
+    store: saugyklaSuAibe(kitur),
+  });
+
+  assert.deepEqual(rez.istrinta, [jobId], "šalinta iš NUKREIPTOS saugyklos");
+  assert.equal(kitur.has(jobId), false);
+});
+
+test("KONTROLĖ: be nukreipimo tas pats job'as lieka NEPALIESTAS", async () => {
+  await paruosti();
+
+  /**
+   * ⚠️ BE ŠIOS PUSĖS ANKSTESNIS TESTAS ĮRODYTŲ TIK TIEK, KAD NAUJAS KELIAS VEIKIA.
+   *
+   * Čia matoma, kodėl nukreipimas apskritai reikalingas: fasadas job'o nemato,
+   * tad replay jo NEŠALINA — ir vis tiek UŽDARO žymą bei rašo kvitą. Būtent
+   * toks derinys („sėkmė paskelbta, duomenys liko") ir yra vakuumas, dėl kurio
+   * DR kelyje saugykla yra privaloma, o ne pasirenkama.
+   */
+  const jobId = naujasId();
+  const kitur = new Map([[jobId, { id: jobId, type: "transcription", storageKey: null }]]);
+
+  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
+
+  const rez = await erasureReplay.replay({ zymos: await tombstones.listAll(), actor: "op" });
+
+  assert.deepEqual(rez.istrinta, [], "fasadas šio job'o nemato");
+  assert.deepEqual(rez.jauNebuvo, [jobId]);
+  assert.equal(kitur.has(jobId), true, "įrašas LIKO ten, kur iš tikrųjų gyvena");
+
+  const kvitai = await irasai(erasureReplay.AUDITO_IVYKIS);
+  assert.equal(kvitai[0].outcome, "erasure_confirmed", "⚠️ ir kvitas skelbia galutinumą");
+});
+
+test("FAIL-CLOSED: nepilna saugykla atmetama PRIEŠ pirmą šalinimą", async () => {
+  await paruosti();
+  const { eraseJob } = require("../utils/jobErasure");
+
+  const nepilnos = [
+    {},
+    { system: {} },
+    { system: { get: async () => null, remove: async () => true } },
+    { system: { get: async () => null, update: async () => null } },
+  ];
+
+  for (const store of nepilnos) {
+    await assert.rejects(
+      () => eraseJob({ id: naujasId(), type: "transcription" }, { store }),
+      (k) => k instanceof TypeError && /neteikia/.test(k.message),
+      `nepilna saugykla praėjo: ${JSON.stringify(Object.keys(store.system || {}))}`
+    );
+  }
+
+  /** KONTROLĖ: pilna saugykla PRAEINA — kitaip patikra būtų visada „ne". */
+  const job = await sukurtiJoba();
+  const pilna = saugyklaSuAibe(new Map([[job.id, job]]));
+  const outcome = await eraseJob(job, { store: pilna });
+  assert.equal(outcome.criticalFailure, false);
+  assert.equal(outcome.jobRemoved, true);
+});
