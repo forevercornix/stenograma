@@ -130,8 +130,19 @@ async function eraseJob(job, { store = jobStore } = {}) {
 
   if (storageKey) {
     try {
-      await fileStorage.del(storageKey);
-      outcome.storageRemoved = true;
+      /**
+       * ⚠️ REZULTATAS IMAMAS IŠ GRĄŽINTOS REIKŠMĖS, NE IŠ „NEMETĖ" (#250 radinys).
+       *
+       * `fileStorage.del()` nesant objekto grąžina `false` BE klaidos, o anksčiau
+       * čia buvo `storageRemoved = true` besąlygiškai. Dėl to `DATA_ERASED` kvitas
+       * rašė `storage=deleted` ir tada, kai nieko nepašalinta — auditas tvirtino
+       * veiksmą, kurio nebuvo.
+       *
+       * Tai suderina kodą su jo paties sąlyga žemiau: „Kvitas rašomas TIK jei
+       * kažkas realiai pašalinta". Ta pati #183 pamoka: sėkmė išvedama iš
+       * rezultato, ne iš išimties nebuvimo.
+       */
+      outcome.storageRemoved = Boolean(await fileStorage.del(storageKey));
     } catch (e) {
       outcome.errors.push(`storage: ${e.message}`);
       outcome.criticalFailure = true;

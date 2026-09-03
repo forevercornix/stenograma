@@ -152,19 +152,25 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
     { pattern: /[Ss]erveris kopijų nesaugo/, what: "serveris kopijų nesaugo" },
     { pattern: /audito žurnale \*\*nebus\*\*|[Aa]tkuriami duomenys, ne jų istorija/, what: "auditas neatkuriamas" },
     /**
-     * ⚠️ 7.6a (#248): `pg_dump` procedūra dar NĖRA erasure-safe.
+     * ⚠️ 7.6c (#250): TEIGINYS PASIKEITĖ, RIBA — NE.
      *
-     * Atkūrimas prikelia po kopijos ištrintus job'us: žymos (7.5a) yra, bet
-     * atkūrimo kelias jų netaiko, o replay ateina su 7.6c. Be šios eilutės
-     * runbook'as taptų stipresnis už kodą (§12.1) — jis aprašytų procedūrą,
-     * kuri atrodo baigta, nors viena garantija dar neįgyvendinta.
+     * Iki 7.6c čia buvo reikalaujama įspėjimo „replay ateis su 7.6c". Replay
+     * atėjo ir įrodytas pratybomis (`drRestore.integration`, CI run 33782254813,
+     * 10 subtestų, `skipped 0`), tad tas įspėjimas būtų tapęs netiesa.
      *
-     * ⚠️ ĮRAŠOMA Į ŠĮ SĄRAŠĄ, NE ATSKIRU `assert` (#248 užbaigimo punktas).
-     * Sąrašas NĖRA išvedamas iš kodo — jis rankinis (žr. testo antraštę), tad
-     * „prijungti prie esamo mechanizmo" čia reiškia būtent papildyti jį, o ne
-     * kurti vienuoliktą nepriklausomą patikrą šalia.
+     * ⚠️ BET ĮSPĖJIMAS NEPAŠALINTAS — JIS SUSIAURINTAS, IR TAI SĄMONINGA.
+     * `pg-backup.mjs restore` erasure-safe nėra ir NETAPS: ištrynimų žurnalas
+     * pagal konstrukciją gyvena UŽ snapshot'o ribų, tad sulieti ir pakartoti gali
+     * tik §9c. Praleidęs jį operatorius gauna lygiai tą patį senąjį pavojų.
+     *
+     * Todėl tikrinami DU dalykai: kad riba tebeįvardyta IR kad pilna procedūra
+     * dokumentuota. Vien pirmojo šiandien nepakaktų (runbook'as atrodytų
+     * silpnesnis už kodą), vien antrojo — irgi (operatorius nesužinotų, kad
+     * §9c praleisti negalima).
      */
-    { pattern: /dar NĖRA erasure-safe|nėra erasure-safe/i, what: "pg_dump atkūrimas ne erasure-safe" },
+    { pattern: /nėra erasure-safe/i, what: "vien restore be §9c nėra erasure-safe" },
+    { pattern: /## 9c\. Erasure-safe atkūrimas/i, what: "pilna erasure-safe procedūra dokumentuota" },
+    { pattern: /dr-restore\.mjs/, what: "erasure-safe procedūros komandos" },
     { pattern: /MAX_DUMP_BYTES|256 MB/, what: "pg_dump dydžio riba" },
     /**
      * ⚠️ #262 PERŽIŪRA: dvi garantijos SUSIAURINTOS, ne įgyvendintos.

@@ -84,6 +84,7 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
   const istrinta = [];
   const jauNebuvo = [];
   const uzdarytosZymos = [];
+  const audioNepasalintas = [];
   const nesekmes = [];
 
   for (const zyma of zymos) {
@@ -250,15 +251,27 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
       istrinta.push(zyma.jobId);
 
       /**
-       * ⚠️ ASINCHRONINIS AUDIO VALYMAS NĖRA SĖKMINGAS REVIVE.
+       * ⚠️ NEPAŠALINTAS AUDIO REGISTRUOJAMAS, BET NĖRA NEI NESĖKMĖ, NEI REVIVE.
        *
-       * `eraseJob()` audio šalinimą gali palikti vėlesniam bandymui (7.4e
-       * barjeras + `audio_cleanup_pending`). Tokia būsena registruojama, bet
-       * NIEKADA nereiškia, kad job'as gyvas: metaduomenys ir rezultatas jau
-       * pašalinti, o valymo skola lieka esamame mechanizme.
+       * ⚠️ PIRMOJI REDAKCIJA TIKRINO `outcome.audioCleanupPending` — LAUKO,
+       * KURIO `eraseJob()` NIEKADA NENUSTATO. `audio_cleanup_pending` gyvena
+       * `utils/audioCleanup.js` ir `deletionRetry.js` kelyje, ne čia; šaka buvo
+       * negyva, o komentaras skelbė garantiją, kurios kodas neturėjo (§12.1).
+       *
+       * Tikra, matuojama sąlyga yra ši: job'as turėjo `storageKey`, o
+       * `storageRemoved` liko `false`. `fileStorage.del()` nesant objekto grąžina
+       * `false` BE klaidos, tad be šio įrašo „audio galbūt liko" būtų tyla.
+       *
+       * Tai NE nesėkmė (objekto tiesiog gali nebūti) ir NE revive: metaduomenys
+       * su rezultatu jau pašalinti, o žyma uždaroma. Todėl faktas grąžinamas
+       * atskirai — kad DR ataskaitoje jį būtų galima pamatyti, o ne atkurti iš logo.
        */
-      if (outcome && outcome.audioCleanupPending) {
-        log.warn("Audio valymas liko atidėtas po replay", { jobId: zyma.jobId, stage: "erasure_replay" });
+      if (job.storageKey && outcome && !outcome.storageRemoved) {
+        audioNepasalintas.push(zyma.jobId);
+        log.warn("Audio objektas nepašalintas per replay", {
+          jobId: zyma.jobId,
+          stage: "erasure_replay",
+        });
       }
     } catch (klaida) {
       nesekmes.push({ jobId: zyma.jobId, priezastis: klaida.code || klaida.message });
@@ -283,10 +296,11 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
     istrinta: istrinta.length,
     jauNebuvo: jauNebuvo.length,
     uzdarytosZymos: uzdarytosZymos.length,
+    audioNepasalintas: audioNepasalintas.length,
     nesekmes: nesekmes.length,
   });
 
-  return { apdorota: zymos.length, istrinta, jauNebuvo, uzdarytosZymos, nesekmes };
+  return { apdorota: zymos.length, istrinta, jauNebuvo, uzdarytosZymos, audioNepasalintas, nesekmes };
 }
 
 module.exports = { AUDITO_IVYKIS, replay };

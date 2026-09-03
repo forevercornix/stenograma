@@ -226,3 +226,65 @@ test("#250: `listAll()` grąžina `deleted` — ABIEJUOSE backend'uose", async (
 
   memoryStore.clear();
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * TRIPWIRE: RESTORE-SPECIFIC TRYNIMO SQL NĖRA
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("#250: DR moduliuose NĖRA nuosavo trynimo SQL — trynimas eina per autoritetą", () => {
+  /**
+   * ⚠️ TAI STATINĖ PATIKRA, IR JOS RIBA UŽRAŠYTA (§9.2).
+   *
+   * Ji NEĮRODO, kad replay tikrai šalina (tai daro `erasureReplayContract` ir
+   * `drRestore.integration`). Ji saugo nuo KITO dalyko: nuo antros trynimo
+   * semantikos atsiradimo — `DELETE FROM jobs` DR kelyje ilgainiui išsiskirtų su
+   * `jobErasure`, ir dalis artefaktų liktų nepašalinta be jokio signalo.
+   *
+   * ⚠️ KOMENTARAI NUKERPAMI PRIEŠ PALYGINIMĄ (#265 pamoka): kitaip patikra
+   * sutaptų su savo pačios paaiškinimu ir visada rastų „pažeidimą".
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  const TIKRINAMI = [
+    "utils/erasureReplay.js",
+    "utils/drCoordinator.js",
+    "utils/erasureExport.js",
+    "utils/restoredJobStore.js",
+    "scripts/dr-restore.mjs",
+  ];
+
+  const DRAUDZIAMA = /\b(DELETE\s+FROM|TRUNCATE\s+TABLE|TRUNCATE\s+\w|DROP\s+TABLE)\b/i;
+
+  function beKomentaru(tekstas) {
+    return tekstas.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  }
+
+  for (const santykinis of TIKRINAMI) {
+    const turinys = beKomentaru(
+      fs.readFileSync(path.resolve(__dirname, "..", santykinis), "utf8")
+    );
+
+    assert.equal(
+      DRAUDZIAMA.test(turinys),
+      false,
+      `${santykinis}: rastas nuosavas trynimo SQL — DR kelias privalo eiti per ` +
+        "`jobErasure.eraseJob()` ir `deletionTombstones`, ne turėti antrą semantiką"
+    );
+  }
+
+  /**
+   * ⚠️ KONTROLĖ: patikra tikrai kažką mato.
+   *
+   * Be jos ji praeitų ir tada, jei reguliarusis reiškinys nesutaptų su niekuo —
+   * arba jei komentarų nukirpimas suėstų visą failą.
+   */
+  assert.equal(DRAUDZIAMA.test("await c.query('DELETE FROM jobs WHERE id = $1')"), true);
+  assert.equal(beKomentaru("/* DELETE FROM jobs */ const x = 1;").includes("DELETE"), false);
+  assert.ok(
+    beKomentaru(fs.readFileSync(path.resolve(__dirname, "..", "utils/erasureReplay.js"), "utf8")).includes(
+      "eraseJob"
+    ),
+    "nukirpus komentarus kodas privalo likti"
+  );
+});
