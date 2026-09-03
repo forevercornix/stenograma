@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const auditoLaukai = require("../../utils/auditStore/fields");
 
 /**
  * 7.6c E2E APLINKA — VIENA, DVIEM KELIAMS (#155, #250).
@@ -51,4 +52,26 @@ function testoAplinka(url, papildomi = {}) {
   };
 }
 
-module.exports = { testoAplinka };
+/**
+ * AUDITO LAUKO SQL IŠRAIŠKA — IŠVEDAMA IŠ AUTORITETO, NE SPĖJAMA.
+ *
+ * ⚠️ `outcome` NĖRA `audit_log` stulpelis: filtruojami laukai yra stulpeliai, o
+ * visa kita gyvena `meta` JSONB (`auditStore/fields.js`). Tiesioginis
+ * `SELECT outcome` CI'uje krito su `42703: column "outcome" does not exist` —
+ * ta pati „prielaida apie `audit_log` schemą", kuri jau kainavo 7.6a raundą.
+ *
+ * Todėl išraiška imama iš TO PATIES sąrašo, kurį naudoja saugykla: sąrašui
+ * pasikeitus, pasikeis ir užklausa, o nežinomas laukas KRENTA, ne tyliai virsta
+ * neegzistuojančiu stulpeliu.
+ */
+function auditoLaukas(vardas) {
+  if (auditoLaukai.STULPELIAI[vardas]) return auditoLaukai.STULPELIAI[vardas];
+  if (auditoLaukai.META_LAUKAI.includes(vardas)) return `meta->>'${vardas}'`;
+
+  throw new Error(
+    `Nežinomas audito laukas "${vardas}": jo nėra nei stulpeliuose, nei \`META_LAUKAI\`. ` +
+      "Sąrašas pasikeitė — užklausa privalo kristi, ne kreiptis į neegzistuojantį stulpelį."
+  );
+}
+
+module.exports = { testoAplinka, auditoLaukas };

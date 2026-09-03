@@ -25,8 +25,7 @@ const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
  * raundai iš eilės krito ne ties elgesiu, o ties šia aplinka. Kopija reikštų,
  * kad vietinė patikra gina nebe tą aplinką, kurią naudoja šis failas.
  */
-const { testoAplinka } = require("./helpers/drRestoreEnv");
-
+const { testoAplinka, auditoLaukas } = require("./helpers/drRestoreEnv");
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
@@ -372,7 +371,22 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     ]);
     assert.equal(zyma.rows[0].status, "deleted", "žyma sulieta IR uždaryta");
 
-    assert.equal(await eiluciuSkaicius(TIKSLO_URL, "sessions"), 0, "sesijos revokuotos (7.6b)");
+    /**
+     * ⚠️ REVOKACIJA STATO `revoked_at`, EILUČIŲ NETRINA (7.6b).
+     *
+     * Pirmoji šio testo redakcija tikrino `count(*) = 0` ir CI'uje krito su
+     * `2 !== 0` — asercija buvo neteisinga, ne kodas: ištrynus eilutes dingtų
+     * pėdsakas, kurios sesijos apskritai egzistavo.
+     *
+     * Tikrinami ABU dydžiai: aktyvių NĖRA, ir sesijų APSKRITAI buvo — kitaip
+     * „nė vienos aktyvios" praeitų ir tuščioje lentelėje.
+     */
+    assert.ok(await eiluciuSkaicius(TIKSLO_URL, "sessions") > 0, "sesijų buvo, ką revokuoti");
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "sessions", "WHERE revoked_at IS NULL"),
+      0,
+      "nė viena sesija nelieka aktyvi (7.6b)"
+    );
 
     assert.equal(
       await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE status IN ('queued','processing')"),
@@ -389,7 +403,8 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
      */
     const kvitai = await vykdyti(
       TIKSLO_URL,
-      "SELECT event, outcome, count(*)::int AS n FROM audit_log WHERE event = ANY($1) GROUP BY event, outcome",
+      `SELECT event, ${auditoLaukas("outcome")} AS outcome, count(*)::int AS n ` +
+        `FROM audit_log WHERE event = ANY($1) GROUP BY event, ${auditoLaukas("outcome")}`,
       [["ERASURE_REPLAYED", "DR_RECOVERY_COMPLETED"]]
     );
     const pagal = Object.fromEntries(kvitai.rows.map((r) => [`${r.event}:${r.outcome}`, r.n]));
@@ -428,7 +443,8 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
     const { rows } = await vykdyti(
       TIKSLO_URL,
-      "SELECT count(*)::int AS n FROM audit_log WHERE event = 'ERASURE_REPLAYED' AND outcome = 'erasure_replayed'"
+      "SELECT count(*)::int AS n FROM audit_log WHERE event = 'ERASURE_REPLAYED' " +
+        `AND ${auditoLaukas("outcome")} = 'erasure_replayed'`
     );
     assert.equal(rows[0].n, 1, "antras paleidimas antro ištrynimo kvito NERAŠO");
   });

@@ -168,3 +168,31 @@ test("KONTROLĖ: nepilna aplinka PAGAUNAMA (kitaip patikra būtų visada žalia)
     "base64 raktas privalo būti atpažintas kaip KONFIGŪRACIJOS, ne ryšio gedimas"
   );
 });
+
+test("AUDITO LAUKAI: SQL išraiška išvedama iš saugyklos autoriteto", () => {
+  /**
+   * ⚠️ ŠI KLASĖ CI'UI KAINAVO DU RAUNDUS — 7.6a ir 7.6c.
+   *
+   * `audit_log` stulpeliai yra tik FILTRUOJAMI laukai; visa kita gyvena `meta`
+   * JSONB. `SELECT outcome` krito su `42703: column "outcome" does not exist`.
+   * Todėl E2E išraiška imama iš `auditStore/fields.js`, o ne rašoma ranka —
+   * ir čia įrodoma, kad išvedimas tikrai skiria abu atvejus.
+   */
+  const { auditoLaukas } = require("./helpers/drRestoreEnv");
+  const laukai = require("../utils/auditStore/fields");
+
+  assert.equal(auditoLaukas("event"), "event", "stulpelis lieka stulpeliu");
+  assert.equal(auditoLaukas("subjectId"), "subject_id", "camelCase → stulpelio vardas");
+  assert.equal(auditoLaukas("outcome"), "meta->>'outcome'", "meta laukas → JSONB išraiška");
+
+  /** KONTROLĖ: nežinomas laukas KRENTA, o ne virsta neegzistuojančiu stulpeliu. */
+  assert.throws(() => auditoLaukas("nera_tokio"), /Nežinomas audito laukas/);
+
+  /**
+   * ⚠️ TIKRINAMA IR PRIELAIDA, ANT KURIOS STOVI VISKAS: kad `outcome` apskritai
+   * yra `META_LAUKAI`, ne stulpeliuose. Perkėlus jį į stulpelius ši eilutė
+   * kris — ir tai teisinga, nes tada pasikeis ir užklausa.
+   */
+  assert.ok(laukai.META_LAUKAI.includes("outcome"));
+  assert.equal(laukai.STULPELIAI.outcome, undefined);
+});
