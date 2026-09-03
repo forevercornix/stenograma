@@ -82,7 +82,7 @@ function pgJungtiesNustatymai(env = process.env) {
  * užrašyta jos riba (žr. `tapatiBaze()`): du klasteriai tame pačiame hoste su
  * vienodu bazės vardu palyginime SUTAMPA.
  */
-function jungtiesTapatybe(nustatymai) {
+function jungtiesTapatybe(nustatymai, env = process.env) {
   if (!nustatymai) return null;
 
   if (nustatymai.connectionString) {
@@ -104,18 +104,37 @@ function jungtiesTapatybe(nustatymai) {
      * pirmas naujas parametras vėl atvertų plyšį TYLIAI. Tas pats parseris duoda
      * tapatumą pagal konstrukciją, ne pagal sąrašo priežiūrą.
      */
+    /**
+     * ⚠️ TRŪKSTAMI LAUKAI IMAMI IŠ `PG*`, NE IŠ SAVO NUMATYTŲJŲ (#280, II raundas).
+     *
+     * `pg` prie DSN pritaiko aplinkos fallback'ą. Išmatuota
+     * (`pg/lib/connection-parameters`):
+     *
+     *   postgres://u@host/db      + PGPORT=6543  ->  host:6543/db
+     *   postgres://u@host:5432/db + PGPORT=6543  ->  host:5432/db   (eksplicitinis laimi)
+     *   postgres:///db            + PGHOST=env-h ->  env-h:5432/db
+     *   postgres://vartotojas@host/               ->  host:5432/vartotojas
+     *
+     * Savarankiškas `|| "5432"` reiškė, kad `--target …:5432/db` ir
+     * `DATABASE_URL=…/db` su `PGPORT=6543` palyginime SUTAMPA, o `_pool()`
+     * jungiasi į 6543 — vėl dvi DSN interpretacijos, tik per aplinką.
+     *
+     * ⚠️ EILIŠKUMAS ATKARTOTAS SĄMONINGAI, IR JIS TIKRINAMAS. Vykdymo metu
+     * nesiremiama `pg` vidiniu moduliu (`pg/lib/…` yra ne viešas kelias), bet
+     * `pgConnectionIdentity` testas lygina ŠIĄ funkciją su tikru
+     * `connection-parameters` rezultatu — jei `pg` eiliškumą pakeis, testas
+     * krinta garsiai, o ne tapatumas ima tylėti.
+     */
     try {
       const parsed = parseDsn(nustatymai.connectionString);
-      const host = String(parsed.host || "").trim();
 
-      /** Fail-closed tam, ko biblioteka neišsprendžia: be hosto tapatybės nėra. */
-      if (!host || !parsed.database) return null;
+      const host = String(parsed.host || env.PGHOST || "localhost").trim();
+      const port = String(parsed.port || env.PGPORT || "5432");
+      const database = String(parsed.database || env.PGDATABASE || parsed.user || env.PGUSER || "");
 
-      return {
-        host: host.toLowerCase(),
-        port: String(parsed.port || "5432"),
-        database: String(parsed.database),
-      };
+      if (!host || !database) return null;
+
+      return { host: host.toLowerCase(), port, database };
     } catch {
       return null;
     }
@@ -143,8 +162,14 @@ function tapatybesTekstas(tapatybe) {
  * (fail-closed), o ne „tikriausiai gerai".
  */
 function arTaPatiBaze(url, env = process.env) {
-  const konfiguracija = jungtiesTapatybe(pgJungtiesNustatymai(env));
-  const nurodyta = jungtiesTapatybe({ connectionString: url });
+  /**
+   * ⚠️ TA PATI APLINKA ABIEM PUSĖM. Operatorius `--target` rašo tame pačiame
+   * shell'e, kuriame gyvena `PG*`, tad ir jo DSN `pg` interpretuotų su tais
+   * pačiais fallback'ais. Skirtingas eiliškumas dviem pusėms būtų trečia
+   * interpretacija.
+   */
+  const konfiguracija = jungtiesTapatybe(pgJungtiesNustatymai(env), env);
+  const nurodyta = jungtiesTapatybe({ connectionString: url }, env);
 
   const sutampa =
     konfiguracija !== null &&

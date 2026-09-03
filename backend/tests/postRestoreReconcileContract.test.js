@@ -456,14 +456,36 @@ test("#280 P1: `?host=` keičia endpoint'ą — tapatumas privalo tai matyti", (
   /** ⚠️ KONTROLĖ: vienodi DSN su tuo pačiu `?host=` privalo PRAEITI — kitaip patikra būtų visada-„ne". */
   reconcile.patikrintiSargus(`${AUTORITETAS}?host=/restore`, { DATABASE_URL: `${AUTORITETAS}?host=/restore` });
 
-  /** Fail-closed tam, ko biblioteka neišsprendžia: DSN be hosto tapatybės neturi. */
+  /**
+   * ⚠️ DSN BE HOSTO NEBĖRA FAIL-CLOSED — IR TAI PATAISYTA SĄMONINGAI.
+   *
+   * Pirmoji redakcija tokį DSN atmetė. Bet `pg` jį išsprendžia (`PGHOST` arba
+   * `localhost`), ir jei ABI pusės sprendžiamos tomis pačiomis taisyklėmis, jos
+   * rodo į tą pačią bazę — atmesti reikštų uždrausti teisėtą konfigūraciją.
+   * Fail-closed lieka tam, ko išspręsti NEĮMANOMA: neparsinamam DSN.
+   */
+  reconcile.patikrintiSargus("postgres:///stenograma", { DATABASE_URL: "postgres:///stenograma" });
+
   assert.throws(
-    () => reconcile.patikrintiSargus("postgres:///stenograma", { DATABASE_URL: "postgres:///stenograma" }),
+    () => reconcile.patikrintiSargus("visai ne url", { DATABASE_URL: "postgres://u@h:5432/s" }),
     (err) => {
       assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
       return true;
-    }
+    },
+    "neparsinamas DSN tapatybės neturi"
   );
+
+  /** ⚠️ `PGPORT` fallback: `pg` jį taiko, tad tapatumas privalo taikyti irgi. */
+  assert.throws(
+    () => reconcile.patikrintiSargus("postgres://u@host:5432/db", { DATABASE_URL: "postgres://u@host/db", PGPORT: "6543" }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      return true;
+    },
+    "be šito `_pool()` jungtųsi į 6543, o palyginimas sakytų, kad tai ta pati bazė"
+  );
+
+  reconcile.patikrintiSargus("postgres://u@host/db", { DATABASE_URL: "postgres://u@host/db", PGPORT: "6543" });
 });
 
 test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal `DATABASE_URL`", () => {
@@ -508,4 +530,128 @@ test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal
 
   /** 7.2a barjeras įvardijamas atskirai — operatorius turi matyti PRIEŽASTĮ. */
   assert.equal(reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" }).jobai.barjeras, true);
+});
+
+test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą autoritetą", () => {
+  /**
+   * ⚠️ ATKARTOTAS EILIŠKUMAS BE PATIKROS YRA TREČIA INTERPRETACIJA.
+   *
+   * Vykdymo metu nesiremiame `pg` vidiniu keliu (`pg/lib/…` nėra viešas API),
+   * tad `jungtiesTapatybe()` fallback'us taiko pati. Bet „taiko pati" be
+   * palyginimo reikštų, kad `pg` pakeitus eiliškumą tapatumas ims tylėti —
+   * tiksliai ta klasė, kurią šis raundas ir taiso.
+   *
+   * Todėl čia lyginama su TIKRU `connection-parameters` rezultatu. Jei `pg`
+   * eiliškumą pakeis, testas kris GARSIAI, ir sprendimas bus priimtas rankomis.
+   */
+  const CP = require("pg/lib/connection-parameters");
+  const { jungtiesTapatybe } = require("../utils/pgConnection");
+
+  const ATVEJAI = [
+    ["postgres://u@host/db", {}],
+    ["postgres://u@host/db", { PGPORT: "6543" }],
+    ["postgres://u@host:5432/db", { PGPORT: "6543" }],
+    ["postgres:///db", { PGHOST: "env-host" }],
+    ["postgres:///db", {}],
+    ["postgres://vartotojas@host/", {}],
+    ["postgres://u@host/db", { PGHOST: "ignoruojamas" }],
+  ];
+
+  const PG_RAKTAI = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER"];
+
+  for (const [dsn, env] of ATVEJAI) {
+    const buvo = {};
+    for (const raktas of PG_RAKTAI) {
+      buvo[raktas] = process.env[raktas];
+      delete process.env[raktas];
+    }
+    Object.assign(process.env, env);
+
+    try {
+      const pgIdentity = new CP({ connectionString: dsn });
+      const mano = jungtiesTapatybe({ connectionString: dsn }, env);
+
+      assert.deepEqual(
+        mano,
+        {
+          host: String(pgIdentity.host).toLowerCase(),
+          port: String(pgIdentity.port),
+          database: String(pgIdentity.database),
+        },
+        `${dsn} su ${JSON.stringify(env)}: tapatumas privalo sutapti su tuo, kaip jungsis \`pg\``
+      );
+    } finally {
+      for (const raktas of PG_RAKTAI) {
+        if (buvo[raktas] === undefined) delete process.env[raktas];
+        else process.env[raktas] = buvo[raktas];
+      }
+    }
+  }
+
+  /** ⚠️ KONTROLĖ: matrica turi bent vieną atvejį, kur aplinka REALIAI keičia rezultatą. */
+  const beEnv = jungtiesTapatybe({ connectionString: "postgres://u@host/db" }, {});
+  const suEnv = jungtiesTapatybe({ connectionString: "postgres://u@host/db" }, { PGPORT: "6543" });
+  assert.notDeepEqual(beEnv, suEnv, "be tokio atvejo tripwire tikrintų tik numatytąsias reikšmes");
+});
+
+test("#280 II: konfigūracijos klaida krinta PRIEŠ transakciją, ne po `COMMIT`", () => {
+  /**
+   * ⚠️ COMMIT'INTAS, NEAUDITUOTAS DARBAS, PRANEŠTAS KAIP NESĖKMĖ.
+   *
+   * `nustatytiAsis()` gali mesti (`JOB_STORE_BACKEND=postgres` su uždarytu 7.2a
+   * barjeru). Kviečiant po `COMMIT`, klaida atsidurdavo `catch` bloke:
+   * `ROLLBACK` jau nieko negrąžintų, auditas būtų praleistas, o CLI grąžintų 2 —
+   * sesijos revokuotos, job'ai terminalizuoti, ir niekas apie tai nežino.
+   *
+   * ⚠️ SKIRTUMAS MATOMAS IŠ TO, KURI KLAIDA GRĄŽINAMA. `ECONNREFUSED` reikštų,
+   * kad kelias jau jungėsi prie bazės; konfigūracijos klaida reiškia, kad
+   * krito anksčiau — nepasiekęs nė vienos mutacijos.
+   */
+  const r = spawnSync(
+    process.execPath,
+    [path.join(SAKNIS, "scripts", "post-restore-reconcile.mjs"), "run", "--target", TAIKINYS, "--actor", "operatorius"],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        LOG_LEVEL: "error",
+        DATABASE_URL: TAIKINYS,
+        JOB_STORE_BACKEND: "postgres",
+      },
+    }
+  );
+
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+  assert.equal(/ECONNREFUSED/.test(r.stderr), false, "prie bazės jungtis nebuvo galima nė bandyti");
+});
+
+test("#280 II: ašys nustatomos MODULYJE prieš transakciją, ne tik CLI'e", async () => {
+  /**
+   * ⚠️ ŠIS TESTAS ATSIRADO IŠ MUTACIJOS, KURIOS ANKSTESNIS NEPAGAVO.
+   *
+   * Pirmoji redakcija tikrino tik CLI, o CLI turi savo ankstyvą
+   * `nustatytiAsis()` kvietimą — tad mutacija „modulyje ašis skaičiuoti vėl po
+   * `COMMIT`" testo NESULAUŽĖ. Pavadinimas žadėjo modulio tvarką, assert'as
+   * tikrino apvalkalą (#266).
+   *
+   * ⚠️ SKIRTUMAS MATOMAS IŠ TO, KURI KLAIDA GRĄŽINAMA. Su ašimis PRIEŠ
+   * transakciją konfigūracijos klaida krinta nepaliesta bazės;
+   * `ECONNREFUSED` reikštų, kad kelias jau bandė jungtis — o po `COMMIT`
+   * skaičiuojamos ašys reikštų commit'intą, neaudituotą darbą.
+   */
+  await assert.rejects(
+    () =>
+      reconcile.suderinti({
+        targetUrl: TAIKINYS,
+        actor: "operatorius",
+        env: { DATABASE_URL: TAIKINYS, JOB_STORE_BACKEND: "postgres" },
+      }),
+    (err) => {
+      assert.match(err.message, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+      assert.equal(/ECONNREFUSED/.test(err.message), false);
+      return true;
+    }
+  );
 });

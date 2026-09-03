@@ -639,6 +639,31 @@ DATABASE_URL="$TIKSLO_URL" node backend/scripts/post-restore-reconcile.mjs \
 #    arba jie pašalinti rankiniu būdu. `verify` apie ištrynimus NIEKO nesako.
 ```
 
+### ⚠️ `PG*` diegime `DATABASE_URL` NEPRIDEDAMAS
+
+Dokumentuotame Compose diegime `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`
+jau nustatyti. Prirašius `DATABASE_URL`, aplinkoje atsiduria **abi** jungties
+formos, ir su rekomenduojamu `AUDIT_BACKEND=postgres` komanda krinta dar prieš
+suderinimą (išmatuota):
+
+```
+AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST.
+```
+
+Tokiame diegime `--target` sudaromas iš tų pačių `PG*` reikšmių, o `DATABASE_URL`
+**nenustatomas**:
+
+```bash
+# PG* diegimas: jungtis paveldima iš aplinkos, tikslas tik PATIKRINAMAS
+node backend/scripts/post-restore-reconcile.mjs \
+  run --target "postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE" --actor "$USER"
+```
+
+⚠️ Tapatumo patikra abi puses sprendžia **tomis pačiomis taisyklėmis kaip `pg`**
+(įskaitant `PG*` fallback'ą), tad toks `--target` sutampa su tuo, prie ko realiai
+jungiamasi. Praleistas `PGPORT` ar `PGHOST` čia nėra „numatytoji reikšmė" — jis
+imamas iš tos pačios aplinkos.
+
 Exit kodai: `0` suderinta (arba nieko nereikėjo) · `1` naudojimo klaida ·
 `2` procedūros klaida · `3` (`verify`) **bazė dar NĖRA suderinta** ·
 `4` **ašis NEPADENGTA** (darbas atliktas, bet gyvas tos ašies autoritetas ne

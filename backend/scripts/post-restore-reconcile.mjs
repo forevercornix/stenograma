@@ -77,6 +77,7 @@ try {
      * pati tvarka kaip 7.6a `pg-backup.mjs`.
      */
     reconcile.patikrintiSargus(target, process.env);
+    reconcile.nustatytiAsis(process.env);
 
     await auditStore.init();
 

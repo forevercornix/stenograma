@@ -211,6 +211,20 @@ async function _arUzbarjeruotas(client, jobId) {
 async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
   const { tapatybe } = patikrintiSargus(targetUrl, env);
 
+  /**
+   * ⚠️ AŠYS NUSTATOMOS PRIEŠ TRANSAKCIJĄ (#280, II raundas).
+   *
+   * `nustatytiAsis()` gali MESTI: `JOB_STORE_BACKEND=postgres` su uždarytu 7.2a
+   * barjeru yra konfigūracijos klaida, ne įspėjimas. Kviečiant po `COMMIT`, ta
+   * klaida atsidurdavo `catch` bloke, `ROLLBACK` vėluodavo (commit'as jau
+   * įvykęs), auditas būdavo praleistas, o CLI grąžindavo 2 — t. y.
+   * **commit'intas, neaudituotas darbas, praneštas kaip nesėkmė.**
+   *
+   * Konfigūracijos klaidos privalo kristi ten pat, kur ir kiti sargai: prieš
+   * pirmą mutaciją.
+   */
+  const asys = nustatytiAsis(env);
+
   const pool = _pool(env);
   const jobStore = createPostgresStore(pool);
   const jobPhase = require("./jobPhase");
@@ -236,7 +250,7 @@ async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
     });
 
     await client.query("COMMIT");
-    rezultatas = { tapatybe, sesijos: revokuota, jobai, asys: nustatytiAsis(env) };
+    rezultatas = { tapatybe, sesijos: revokuota, jobai, asys };
   } catch (klaida) {
     try {
       await client.query("ROLLBACK");
