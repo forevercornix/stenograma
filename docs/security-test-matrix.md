@@ -1656,6 +1656,37 @@ vieno neprapleisto `ok` kiekviename rinkinio faile.
 
 ---
 
+## #250 (7.6c) — erasure-safe atkūrimas ir DR pratyba
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Ištrynimas IŠGYVENA atkūrimą iš senesnės kopijos** | `drRestore.integration` | ⚠️ **NOT RUN** iki pirmo CI paleidimo. Devyni žingsniai: pripildymas → kopija → ištrynimas PO kopijos → žurnalo eksportas → restore → **tarpinė asercija** → koordinatorius → galinė būsena → idempotentiškumas |
+| ⚠️ **TARPINĖ ASERCIJA: job'as grįžo IR jo žymos nėra** | `drRestore.integration` | Be jos testas būtų klaidingai žalias: „job'o A nebėra" praeitų ir tada, jei snapshot'as jo apskritai neatkurtų. Tikrinami ABU faktai — `jobs` eilutė YRA, `erasure_marks` eilutės NĖRA |
+| ⚠️ **KONTROLĖ: procedūra neištrynė visko** | `drRestore.integration` | Nepažymėtas job'as B privalo likti. Be jos „0 eilučių" nieko neįrodytų |
+| ⚠️ **Atkurta bazė turi ŠALTINIO diegimo tapatybę** | `drRestore.integration` | `deployment_identity` keliauja su dump'u, tad kilmės patikra tikroje avarijoje praeina tyliai. Neigiama kontrolė: svetimas žurnalas → `ERASURE_FOREIGN_LEDGER` |
+| ⚠️ **Replay pašalina job'ą ten, kur `lifecycleService` jį PALIEKA** | `erasureReplayContract` | Trys trumpieji keliai ATSKIRAI, kiekvienas su kontrole, pirma įrodančia, kad `deleteJobArtefacts()` grąžina `already_deleted` / `in_progress` / `tombstone_unresolved` ir job'ą palieka. Bendras testas būtų padengęs vieną iš trijų, o lentelėje atrodęs kaip trys |
+| ⚠️ **`criticalFailure` NEĮSKAITOMAS kaip ištrynimas** | `erasureReplayContract` | Mutacija M1 (sargas pašalintas) → krinta. `eraseJob()` kritinę nesėkmę grąžina VĖLIAVA, ne išimtimi; be patikros replay rašytų kvitą apie neįvykusį ištrynimą ir uždarytų žymą — sunaikindamas vienintelį žymeklį, daręs jį pakartojamą |
+| ⚠️ **`deletion_failed` žyma uždaroma EINANT grafu** | `erasureReplayContract` | Mutacija M2 (`retry()` perėjimas pašalintas) → krinta 2 testai. Grafe nėra `FAILED → DELETED`; be perėjimo duomenys būdavo ištrinami, o žyma likdavo atvira AMŽINAI ir `verify` blokuotų cutover'į. **Rado testas, ne peržiūra** |
+| ⚠️ **Kvitas rašomas PRIEŠ žymos uždarymą** | `erasureReplayContract` | Mutacija M3 (tvarka apversta) → krinta. ⚠️ **Pirmoji redakcija M3 NEPAGAVO:** seamas laužė VISĄ audito saugyklą, tad `eraseJob()` krisdavo anksčiau ties savo `DATA_ERASED`, o mutuota eilutė nebūdavo pasiekiama — testas matavo kitą kelią, nei skelbė pavadinime. Seamas susiaurintas iki VIENO įvykio |
+| ⚠️ **Kvitas rašomas BE `jobId`** | `erasureReplayContract` | Mutacija M4 (`jobId` grąžintas) → krinta 7 testai. Subjektui susieto kvito neįsileistų 7.4e barjeras (`AUDIT_WRITE_BLOCKED`), o ir jį patį pašalintų kitas to paties job'o ištrynimas. Testas turi kontrolę, kuri tai ĮRODO, kad `subjectId === null` neatrodytų kaip praleidimas |
+| ⚠️ **Antrasis langas ATSTATOMAS, ne tik aptinkamas** | `erasureReplayContract` | „Job'o nebėra, žyma neuždaryta" → paleidimas ją uždaro ir rašo `erasure_confirmed`. Verifikacija, pranešanti apie būseną, kurios niekas negali ištaisyti, būtų runbook'o aklavietė |
+| ⚠️ **Antras paleidimas antro kvito NERAŠO** | `erasureReplayContract`, `drRestore.integration` | Audito žurnale atsirastų du ištrynimai, kurių buvo vienas |
+| ⚠️ **Seka tikrinama KRITIMU, ne stebėjimu** | `drCoordinatorContract` | Kiekvienam sekos raktui — ir kontrolė: tikras rezultatas PRAEINA. Be jos testas praeitų ir tada, jei sargas atmestų VISKĄ. Rankomis sukurtas objektas be `zurnaloChecksum` nepraeina |
+| ⚠️ **Pasenęs žurnalas sustabdo atkūrimą PRIEŠ pirmą rašymą** | `drCoordinatorContract` | `DR_LEDGER_STALE`; šviežumas tikrinamas koordinatoriuje, ne runbook'e — riba dokumente nesustabdytų operatoriaus |
+| ⚠️ **Override reikalauja EVIDENCIJOS, ne vėliavos** (auditas) | `drCoordinatorContract` | Mutacija M5 (`DR_STALE_OVERRIDE_UNRECORDED` pašalintas) → krinta. `PRIVACY_MODE` išjungtas, tad `null` gali reikšti TIK gedimą — fail-closed vienareikšmis |
+| ⚠️ **`PRIVACY_MODE`: patvirtinimas REIKŠMĖMIS, ne `--yes`** | `drCoordinatorContract` | Mutacijos M6 (`DR_STALE_OVERRIDE_UNCONFIRMED` pašalintas) → krinta 2 testai; M7 (lyginamas tik checksum) → krinta. Kiekvienas laukas tikrinamas ATSKIRAI: `--yes` su teisingu checksum'u būtų tiksliai tas apėjimas, kurio sargas neturi leisti |
+| ⚠️ **Sargas įveikiamas TEISĖTAI** | `dr-restore.mjs` (mašininis blokas) | Radęs `DR_LEDGER_STALE`, CLI išveda tikslias reikšmes ir pakartojamą komandą. Be jų operatorius checksum'o neturėtų iš kur gauti, ir neįveikiamas sargas būtų apeitas kitu būdu. ⚠️ Patvirtinimas lyginamas VALANDOMIS, tad galioja iki valandos pabaigos — riba kyla iš palyginimo granuliarumo, kaip `pgConnection` „du klasteriai tame pačiame hoste" |
+| ⚠️ **Terminali būsena nugali abiem kryptimis** | `erasureExportContract` | Suliejimas tikrinamas abiem kryptimis + lygiosios (palieka vietinį) + kontrolė. Tvarkos raktas yra EKSPORTO `updatedAt`, ne sanitizacijos laikas |
+| ⚠️ **`claim_token` NIEKADA nepersistinamas** | `erasureExportContract` | Su kontrole: be jos patikra galėtų virsti visada-„ne". Po DR pretenzija priklauso mirusiam procesui |
+| ⚠️ **Kopijų horizontas — MAKSIMUMAS (monotoniškas)** | `erasureExportContract` | ⚠️ `horizontoMaksimumas(null, null)` grąžindavo `0` (`Number(null) === 0`), t. y. „horizonto nėra" tapdavo 1970-01-01 ir visos sulietos žymos — iškart valytinos. **Pagavo kontrolinė eilutė, ne peržiūra** |
+| ⚠️ **Terminalus statusas grafe yra VIENINTELIS** | `erasureExportContract` | Tripwire: terminalumas išvedamas iš `ALLOWED_TRANSITIONS`, ne kartojamas sąrašu. Antras terminalus statusas be replay taisyklės pakeitimo → krinta |
+| ⚠️ **Replay taikomas VISIEMS statusams, ne tik `deleted`** | `erasureExportContract` | Su kontrole. `deletion_pending` po DR yra dažniausias atvejis, o ne kraštinis |
+| `listAll()` / `importuotiZyma()` paritetas abiem backend'ams | `erasureExportContract` | Be pariteto vietinis kontraktas gintų kitą elgesį nei CI integracinis |
+| ⚠️ **NEDENGIA: aplinkos (staging vs prod) atskyrimo** | `deploymentIdentity.js` (antraštė), runbook §9c | Staging, atkurtas iš produkcijos dump'o, turi produkcijos tapatybę — produkcijos žurnalas jam PRAEINA. Sąmoninga pasirinktos duomenų kilmės tapatybės riba, ne spraga |
+| ⚠️ **NEDENGIA: dviejų klonų iš to paties dump'o** | `deploymentIdentity.js` (antraštė) | Vienodas ID, tad vieno klono žurnalas praeina prieš kitą. Ta pati klasė kaip `pgConnection` riba |
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
