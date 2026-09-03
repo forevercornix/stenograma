@@ -27,10 +27,51 @@ const jobRunner = require("../queues/jobRunner");
  * naudoja tą patį jobStore, tad pasitikint URL'u protokolo jobo ID, pateiktas
  * transkripcijos endpoint'ui, būtų ieškomas ne toje eilėje.
  *
+ * ⚠️ SAUGYKLA GALI BŪTI NUKREIPTA (#250, 7.6c).
+ *
+ * Po DR atkūrimo asmens duomenys guli ATKURTOJE bazėje, o fasado autoritetas
+ * šiandien yra atmintis arba Redis (7.2a barjeras: `JOB_STORE_BACKEND=postgres`
+ * meta klaidą, vien `DATABASE_URL` grąžina `memory | barjeras: true`). Be šio
+ * parametro ištrynimų replay tokioje bazėje būtų VAKUUMAS: `jobs` eilutės
+ * liktų, o kvitas skelbtų sėkmę.
+ *
+ * Alternatyva - atskiras DB-only trynimas atkūrimo kelyje - reikštų ANTRĄ
+ * erasure vykdytoją, kuris ištrintų eilutes, bet paliktų audio objektus
+ * saugykloje: dalinis ištrynimas, praneštas kaip sėkmė. Todėl keičiama tik tai,
+ * KUR gyvena įrašas; audio, eilė ir auditas lieka tie patys globalūs posistemiai,
+ * o `storageKey` imamas iš pačios atkurtos eilutės.
+ *
+ * ⚠️ NEPILNA SAUGYKLA ATMETAMA PRIEŠ PIRMĄ ŠALINIMĄ. Trūkstamas metodas reikštų
+ * tyliai praleistą artefaktų klasę su sėkmės kvitu - ta pati klasė kaip #183
+ * „complete() nemetė, vadinasi pavyko".
+ *
  * @param {object} job - jobStore įrašas (ne tik id)
+ * @param {object} [opcijos]
+ * @param {object} [opcijos.store] - saugykla su `system.get/update/remove`;
+ *   numatytoji yra fasadas, tad esamiems kvietėjams elgesys nesikeičia
  * @returns {object} outcome su `criticalFailure` vėliava
  */
-async function eraseJob(job) {
+const BUTINI_SYSTEM_METODAI = Object.freeze(["get", "update", "remove"]);
+
+function patikrintiSaugykla(store) {
+  if (store === jobStore) return store;
+
+  const truksta = !store || !store.system
+    ? BUTINI_SYSTEM_METODAI
+    : BUTINI_SYSTEM_METODAI.filter((m) => typeof store.system[m] !== "function");
+
+  if (truksta.length > 0) {
+    throw new TypeError(
+      `eraseJob: nukreipta saugykla neteikia \`system.${truksta.join("`, `system.")}\`. ` +
+        "Nepilna saugykla reikštų praleistą artefaktų klasę su sėkmės kvitu."
+    );
+  }
+
+  return store;
+}
+
+async function eraseJob(job, { store = jobStore } = {}) {
+  const saugykla = patikrintiSaugykla(store);
   const jobId = job.id;
 
   // LEGACY: prieš `job.type` įvedimą sukurti (ypač Redis'e išlikę) jobai šio
@@ -112,7 +153,7 @@ async function eraseJob(job) {
   //    kad operaciją būtų galima pakartoti su tuo pačiu ID.
   if (outcome.criticalFailure) {
     try {
-      await jobStore.system.update(jobId, { deletion_pending: true, storageKey });
+      await saugykla.system.update(jobId, { deletion_pending: true, storageKey });
     } catch (e) {
       // Klientas ir taip gaus 503, bet garantijos, kad vėliava išsaugota, nėra -
       // tad bent jau nenutylim (anksčiau čia buvo tuščias .catch()).
@@ -122,7 +163,7 @@ async function eraseJob(job) {
   }
 
   try {
-    outcome.jobRemoved = Boolean(await jobStore.system.remove(jobId));
+    outcome.jobRemoved = Boolean(await saugykla.system.remove(jobId));
   } catch (e) {
     outcome.errors.push(`jobStore: ${e.message}`);
     outcome.criticalFailure = true;

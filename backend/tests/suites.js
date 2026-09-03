@@ -307,6 +307,30 @@ const functional = [
    * `postgres` rinkinį per `postgresGuard` importą.
    */
   "postRestoreReconcileContract",
+  /**
+   * #250 (7.6c): erasure-safe atkūrimo KONTRAKTAI be DB.
+   *
+   * `erasureExportContract` — suliejimo taisyklė ir artefakto sargai (gryna
+   * logika); `erasureReplayContract` — replay elgesys su TIKRAIS atminties
+   * saugyklos keliais (`jobStore`, `deletionTombstones`, `jobErasure`), kur
+   * įrodoma, kad replay pašalina job'ą ten, kur `lifecycleService` jo palieka;
+   * `drCoordinatorContract` — sekos raktai ir pasenusio žurnalo override abiem
+   * pėdsako laikmenomis.
+   *
+   * Persistavimas, transakcijos ir pilna DR seka su tikru `pg_restore` gyvena
+   * `drRestore.integration`, kuris išvedamas į `postgres` rinkinį.
+   */
+  "drCoordinatorContract",
+  /**
+   * #250: `drRestore.integration` APLINKOS prielaidos, tikrinamos VIETOJE.
+   *
+   * Trys CI raundai iš eilės krito ne ties DR elgesiu, o ties aplinka
+   * (`AUDIT_ID_SALT`, sesijos forma, base64 raktas vietoj hex). Šis testas tą
+   * patį klausimą užduoda per sekundes, prieš nepasiekiamą bazę.
+   */
+  "drRestorePreconditions",
+  "erasureExportContract",
+  "erasureReplayContract",
   "jobVersionParity",
   "jobs.route",
   "mergeDiarization",

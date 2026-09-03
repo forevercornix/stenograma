@@ -1431,7 +1431,25 @@ veikianti sistema nepaliečiama, tad nutrūkęs atkūrimas jos nesugadina.
 
 ⚠️ **Atkūrimas gerbia ištrynimo žymas (#19).** Kopija atkuria būklę, bet
 **negali atšaukti sprendimo ištrinti** — be to ji taptų būdu apeiti GDPR
-ištrynimą.
+ištrynimą. Ištrynimų žurnalas eksportuojamas **atskirai nuo snapshot'o** ir po
+atkūrimo sujungiamas monotoniškai (terminali būsena nugali), o kiekvienam
+sulietam ID ištrynimas **pakartojamas** per tą patį autoritetą, kuris trina
+gyvoje sistemoje (`utils/erasureReplay.js`).
+
+⚠️ **Kiek ištrynimų galima prarasti (RPO).** Prarandami ištrynimai, įvykę **po
+paskutinio žurnalo eksporto**; su numatytąja kadencija (eksportas prieš kiekvieną
+kopiją, kopijos kas parą) tai **iki 24 valandų**. Rečiau eksportuojantis diegimas
+praranda daugiau — riba yra eksportas, ne kalendorius. Senesnis žurnalas
+atkūrimą **sustabdo** (`DR_LEDGER_STALE`); tęsti galima tik su užfiksuotu
+patvirtinimu, kuris gula į auditą (arba, `PRIVACY_MODE` režime, į operatoriaus
+patvirtinimą reikšmėmis).
+
+⚠️ **Tai įrodytas kelias, o ne veikianti gynyba.** Kol 7.2a aktyvavimo barjeras
+neuždarytas, PostgreSQL nėra job'ų autoritetas produkcijoje (#281, #282), tad
+visa ši grandinė šiandien yra **procedūra**, o ne kasdien veikianti apsauga. Jos
+pilnos pratybos (kopija → ištrynimas → atkūrimas iš senesnio snapshot'o → replay)
+vykdomos CI `postgres` rinkinyje. Skirtumas svarbus būtent čia: šį skyrių skaito
+ir tie, kas neskaitė nė vieno issue.
 
 ⚠️ **Auditas nekopijuojamas** dėl tos pačios priežasties: jo įrašai saugo
 pseudonimizuotą subjektą, tad žymų patikra jų neapima, ir atkūrus GDPR ištrinti
