@@ -406,8 +406,38 @@ async function patikrinti({ reconcile, targetUrl, env = process.env }) {
  * ⚠️ FAIL-CLOSED: bet kuriam žingsniui metus, vėlesni NEVYKDOMI. Klaida keliauja
  * kvietėjui, o ne virsta „dalinai pavyko" rezultatu.
  */
-async function paleisti({ targetUrl, artefaktas, vykdytojas, actor = null, env = process.env, leistiPasenusi = false }) {
-  const merge = await sulieti({ targetUrl, artefaktas, vykdytojas, actor, env, leistiPasenusi });
+/**
+ * ⚠️ `patvirtinimas` PRAEINA IKI SARGO — ANKSČIAU JIS DINGDAVO ČIA (#250, Codex).
+ *
+ * `paleisti()` jo nepriimdavo, o CLI jį perduodavo, tad `PRIVACY_MODE` režime
+ * operatoriaus patvirtinimas iki `_uzfiksuotiOverride()` NEPASIEKDAVO ir kelias
+ * visada baigdavosi `DR_STALE_OVERRIDE_UNCONFIRMED`. Vadinasi teisėto atsigavimo
+ * su pasenusiu žurnalu tokiame diegime NEBŪDAVO IŠVIS — o būtent dėl jo ta šaka
+ * ir egzistuoja.
+ *
+ * Defekto nepagavo testai, nes buvo padengtos tik NEIGIAMOS šakos
+ * (`UNRECORDED`, `UNCONFIRMED`) ir tik `_uzfiksuotiOverride()` lygyje. Teigiamas
+ * kelias per visą seką liko neįrodytas — ta pati „patikra be teigiamos
+ * kontrolės" forma, tik viena pakopa aukščiau.
+ */
+async function paleisti({
+  targetUrl,
+  artefaktas,
+  vykdytojas,
+  actor = null,
+  env = process.env,
+  leistiPasenusi = false,
+  patvirtinimas = null,
+}) {
+  const merge = await sulieti({
+    targetUrl,
+    artefaktas,
+    vykdytojas,
+    actor,
+    env,
+    leistiPasenusi,
+    patvirtinimas,
+  });
   const replayRez = await replay({ merge, vykdytojas, actor });
   const reconcile = await suderinti({ replay: replayRez, targetUrl, actor, env });
   const verify = await patikrinti({ reconcile, targetUrl, env });

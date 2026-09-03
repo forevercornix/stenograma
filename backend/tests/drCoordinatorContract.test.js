@@ -242,3 +242,129 @@ test("LANGAS: numatytasis 24 h, override iš aplinkos, šiukšlės grąžina num
   assert.equal(drCoordinator.sviezumoLangasMs({ ERASURE_EXPORT_MAX_AGE_MS: "ne skaičius" }), 24 * 3_600_000);
   assert.equal(drCoordinator.sviezumoLangasMs({ ERASURE_EXPORT_MAX_AGE_MS: "-5" }), 24 * 3_600_000);
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 4. TEIGIAMAS OVERRIDE KELIAS PER `paleisti()` (#250, Codex peržiūra)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ KODĖL ŠIS TESTAS ATSIRADO.
+ *
+ * Override šakos buvo padengtos tik `_uzfiksuotiOverride()` lygyje ir tik
+ * NEIGIAMOS (`UNRECORDED`, `UNCONFIRMED`). Dėl to liko nepastebėta, kad
+ * `paleisti()` apskritai NEPRIIMDAVO `patvirtinimas` — CLI jį perduodavo,
+ * o seka jį numesdavo. `PRIVACY_MODE` diegime teisėto atsigavimo su pasenusiu
+ * žurnalu NEBUVO IŠVIS.
+ *
+ * Testas eina per TIKRĄ `paleisti()`, ne per vidinę funkciją: būtent tarp jų ir
+ * dingdavo argumentas.
+ */
+function pasenesArtefaktas(deploymentId) {
+  const erasureExport = require("../utils/erasureExport");
+
+  const artefaktas = erasureExport.sudarytiArtefakta({
+    zymos: [],
+    horizontas: null,
+    saltinis: "testas",
+    deploymentId,
+    env: process.env,
+  });
+
+  /**
+   * ⚠️ SENUMAS GAUNAMAS PER APLINKĄ, NE PERRAŠANT ARTEFAKTĄ. Turinys
+   * autentifikuojamas GCM, tad `eksportuotaMs` keitimas jį sulaužytų — ir testas
+   * tikrintų dešifravimą, ne šviežumą.
+   */
+  return artefaktas;
+}
+
+test("OVERRIDE per `paleisti()`: patvirtinimas PASIEKIA sargą", async () => {
+  const crypto = require("node:crypto");
+  const DEPLOYMENT = "33333333-3333-4333-8333-333333333333";
+
+  const senas = { ...process.env };
+  Object.assign(process.env, {
+    DATABASE_URL: "postgres://u:p@127.0.0.1:1/nera",
+    AUDIT_BACKEND: "postgres",
+    AUDIT_ID_SALT: crypto.randomBytes(32).toString("hex"),
+    AUDIT_ID_SALT_ID: "2026-09",
+    BACKUP_ENABLED: "true",
+    BACKUP_ENCRYPTION_KEY: crypto.randomBytes(32).toString("hex"),
+    /** Langas 0 ms — kiekvienas žurnalas iškart pasenęs, be laikrodžio žaidimų. */
+    ERASURE_EXPORT_MAX_AGE_MS: "1",
+    PRIVACY_MODE: "true",
+  });
+
+  try {
+    const artefaktas = pasenesArtefaktas(DEPLOYMENT);
+    const vykdytojas = { query: async () => ({ rows: [{ deployment_id: DEPLOYMENT }] }) };
+
+    const bendri = {
+      targetUrl: process.env.DATABASE_URL,
+      artefaktas,
+      vykdytojas,
+      actor: "op",
+      env: process.env,
+      leistiPasenusi: true,
+    };
+
+    /** (a) BE patvirtinimo — kelias privalo sustoti čia. */
+    const bePatvirtinimo = await drCoordinator
+      .paleisti(bendri)
+      .then(() => null)
+      .catch((k) => k);
+
+    assert.equal(
+      bePatvirtinimo && bePatvirtinimo.code,
+      "DR_STALE_OVERRIDE_UNCONFIRMED",
+      "be patvirtinimo `PRIVACY_MODE` kelias nesitęsia"
+    );
+
+    /**
+     * (b) SU teisingu patvirtinimu — sargas PRALEIDŽIA.
+     *
+     * Toliau seka krenta ties nepasiekiama baze, ir tai teisinga: šis testas
+     * įrodo, kad argumentas pasiekia sargą, o ne kad DR veikia be DB. Pilnas
+     * teigiamas praėjimas iki `verify` gyvena `drRestore.integration`.
+     */
+    const sargai = await drCoordinator.patikrintiSargus({
+      targetUrl: bendri.targetUrl,
+      artefaktas,
+      vykdytojas,
+      env: process.env,
+      leistiPasenusi: true,
+    });
+
+    const suPatvirtinimu = await drCoordinator
+      .paleisti({
+        ...bendri,
+        patvirtinimas: {
+          deploymentId: DEPLOYMENT,
+          zurnaloChecksum: sargai.zurnaloChecksum,
+          pasenimoValandos: Math.floor(sargai.amzius / 3_600_000),
+        },
+      })
+      .then(() => null)
+      .catch((k) => k);
+
+    assert.notEqual(
+      suPatvirtinimu && suPatvirtinimu.code,
+      "DR_STALE_OVERRIDE_UNCONFIRMED",
+      "teisingas patvirtinimas privalo PASIEKTI sargą — anksčiau jis dingdavo `paleisti()` viduje"
+    );
+  } finally {
+    for (const raktas of [
+      "DATABASE_URL",
+      "AUDIT_BACKEND",
+      "AUDIT_ID_SALT",
+      "AUDIT_ID_SALT_ID",
+      "BACKUP_ENABLED",
+      "BACKUP_ENCRYPTION_KEY",
+      "ERASURE_EXPORT_MAX_AGE_MS",
+      "PRIVACY_MODE",
+    ]) {
+      if (senas[raktas] === undefined) delete process.env[raktas];
+      else process.env[raktas] = senas[raktas];
+    }
+  }
+});
