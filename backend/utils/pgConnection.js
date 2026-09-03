@@ -1,3 +1,5 @@
+const { parse: parseDsn } = require("pg-connection-string");
+
 /**
  * PostgreSQL JUNGTIES NUSTATYMAI — VIENAS IŠSPRĘSTAS ŠALTINIS (#155, 7.4e / #216).
  *
@@ -84,12 +86,35 @@ function jungtiesTapatybe(nustatymai) {
   if (!nustatymai) return null;
 
   if (nustatymai.connectionString) {
+    /**
+     * ⚠️ DSN PARSINAMAS TA PAČIA BIBLIOTEKA, KURIĄ NAUDOJA `pg` (#280 peržiūra).
+     *
+     * `new URL()` mato tik autoritetą, o `pg-connection-string` query parametrams
+     * (`?host=`, `?port=`) suteikia PIRMENYBĘ prieš jį:
+     *
+     *   postgres://u:x@db.prod:5432/s?host=/restore  ->  host = "/restore"
+     *
+     * Vadinasi du DSN, besiskiriantys TIK `?host=`, `new URL()` palyginime
+     * SUTAMPA, o `pg` jungiasi į skirtingus endpoint'us. 7.6b atveju pasekmė yra
+     * blogiausia įmanoma: sutampantis verdiktas ir jungtis į produkcinę bazę
+     * reiškia revokuotas sesijas ir terminalizuotus job'us NE atkurtoje kopijoje.
+     *
+     * ⚠️ DRAUDIMŲ SĄRAŠAS („atmesti DSN su endpoint keičiančiais parametrais")
+     * ATMESTAS: jį reikėtų laikyti sinchroniškai su tuo, ką palaiko `pg`, ir
+     * pirmas naujas parametras vėl atvertų plyšį TYLIAI. Tas pats parseris duoda
+     * tapatumą pagal konstrukciją, ne pagal sąrašo priežiūrą.
+     */
     try {
-      const u = new URL(nustatymai.connectionString);
+      const parsed = parseDsn(nustatymai.connectionString);
+      const host = String(parsed.host || "").trim();
+
+      /** Fail-closed tam, ko biblioteka neišsprendžia: be hosto tapatybės nėra. */
+      if (!host || !parsed.database) return null;
+
       return {
-        host: (u.hostname || "").toLowerCase(),
-        port: u.port || "5432",
-        database: decodeURIComponent(u.pathname.replace(/^\//, "")),
+        host: host.toLowerCase(),
+        port: String(parsed.port || "5432"),
+        database: String(parsed.database),
       };
     } catch {
       return null;

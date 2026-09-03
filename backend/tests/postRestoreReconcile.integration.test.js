@@ -82,6 +82,15 @@ async function suAplinka(url, veiksmas) {
   const senas = { ...process.env };
 
   process.env.DATABASE_URL = url;
+  /**
+   * ⚠️ `SESSION_STORE_BACKEND=postgres` BŪTINAS, IR TAI NE TESTO PATOGUMAS.
+   *
+   * Be jo aplikacijos sesijų autoritetas yra ATMINTIS (#280 P1), tad sesijų ašies
+   * verdiktas būtų `nereikalinga` — ir testas tikrintų revokaciją, kurios
+   * produkcijoje niekas nedarytų. DoD reikalauja būtent to atvejo, kur
+   * revokacija turi prasmę.
+   */
+  process.env.SESSION_STORE_BACKEND = "postgres";
   process.env.AUDIT_BACKEND = "postgres";
   process.env.AUDIT_ID_SALT = crypto.randomBytes(32).toString("hex");
   process.env.AUDIT_ID_SALT_ID = "2026-09";
@@ -105,7 +114,14 @@ async function suAplinka(url, veiksmas) {
   } finally {
     await tombstones.shutdown().catch(() => {});
     await auditStore.shutdown().catch(() => {});
-    for (const raktas of ["DATABASE_URL", "AUDIT_BACKEND", "AUDIT_ID_SALT", "AUDIT_ID_SALT_ID", "AUTH_USERS"]) {
+    for (const raktas of [
+      "DATABASE_URL",
+      "SESSION_STORE_BACKEND",
+      "AUDIT_BACKEND",
+      "AUDIT_ID_SALT",
+      "AUDIT_ID_SALT_ID",
+      "AUTH_USERS",
+    ]) {
       if (senas[raktas] === undefined) delete process.env[raktas];
       else process.env[raktas] = senas[raktas];
     }
@@ -209,6 +225,17 @@ test("7.6b: suderinimas revokuoja sesijas ir terminalizuoja job'us", { skip: pra
       assert.equal(r.nieko, false);
 
       /**
+       * ⚠️ AŠIŲ VERDIKTAI (#280 P1). Sesijos — `suderinta` (autoritetas
+       * PostgreSQL); job'ai — `nereikalinga`, nes 7.2a barjeras palieka jų gyvą
+       * autoritetą atmintyje. Darbas bazėje atliktas abiem, bet verdiktas sako
+       * TIESĄ apie tai, ką suderinimas realiai užtikrina.
+       */
+      assert.equal(r.asys.sesijos.verdiktas, "suderinta");
+      assert.equal(r.asys.sesijos.autoritetas, "postgres");
+      assert.equal(r.asys.jobai.barjeras, true, "barjeras privalo būti matomas, ne numanomas");
+      assert.equal(r.asys.jobai.verdiktas, "nereikalinga");
+
+      /**
        * ⚠️ SESIJOS: PERSISTENTINIS LAUKAS **IR** REALUS AUTH KELIAS.
        *
        * `revoked_at` įrodo eilutę, `touch()` įrodo, kad senas cookie nebeveikia -
@@ -255,6 +282,7 @@ test("7.6b: suderinimas revokuoja sesijas ir terminalizuoja job'us", { skip: pra
       /** ⚠️ VERIFIKACIJA: užbarjeruotas job'as nėra „nesuderinimas". */
       const v = await reconcile.patikrinti({ targetUrl: SUDERINIMO_URL });
       assert.equal(v.suderinta, true);
+      assert.equal(v.duomenysSutvarkyti, true);
       assert.equal(v.aktyviosSesijos, 0);
       assert.deepEqual(v.nesuderinti, []);
       assert.deepEqual(v.uzbarjeruoti, [uzbarjeruotas.id]);

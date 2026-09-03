@@ -14,6 +14,8 @@ const sesijuPg = require("./sessionStore/postgresStore");
  */
 const { assertNotBarredWithClient } = require("./deletionTombstones/postgresStore");
 const auditWrite = require("./auditWrite");
+const { selectBackend } = require("./jobStore/backendSelection");
+const { resolveSessionBackend } = require("./sessionStore/backendSelection");
 const { createLogger } = require("./logger");
 
 const log = createLogger("post-restore-reconcile");
@@ -64,6 +66,72 @@ const TERMINALIZAVIMO_KODAS = "POST_RESTORE_TERMINALIZED";
 const TERMINALIZAVIMO_ZINUTE =
   "Job'as nutrūko duomenų bazės atkūrimo metu ir buvo terminalizuotas " +
   "post-restore suderinimo (7.6b). Vykdymas neatnaujinamas.";
+
+/**
+ * APLIKACIJOS AUTORITETAS KIEKVIENAI AŠIAI (#280 peržiūra, P1).
+ *
+ * ⚠️ `DATABASE_URL` BUVIMAS NĖRA BACKEND'O SPRENDIMAS.
+ *
+ * Sargas tikrino tik jungties nustatymus, o aplikacija saugyklas renkasi kitaip:
+ *
+ *   selectBackend({DATABASE_URL})            -> { norimas: "memory", barjeras: true }
+ *   selectBackend({DATABASE_URL, REDIS_URL}) -> { norimas: "redis",  barjeras: true }
+ *   resolveSessionBackend({DATABASE_URL})    -> "memory"
+ *
+ * `POSTGRES_AKTYVAVIMAS_LEISTAS = false` reiškia, kad job'ų autoritetas ŠIANDIEN
+ * niekada nėra PostgreSQL. Vadinasi `verify` galėjo pasakyti „galima cutover",
+ * kai gyva būsena yra kitur — o Redis atveju ne terminaliniai job'ai po starto
+ * ATSINAUJINA. Tai tas pats „sėkmingas praleidimas", kurio D7 neleidžia, tik
+ * barjero, ne atminties režime.
+ *
+ * ⚠️ GRIEŽTAS YRA VERDIKTAS, NE KOMANDA.
+ *
+ * Reikalauti `SESSION_STORE_BACKEND=postgres` būtų per stipru: atmintinės sesijos
+ * restarto NEIŠGYVENA, tad atkūrimas jų prikelti negali — revokacija ten
+ * NEREIKALINGA, o ne „praleista". Tylėti apie Redis job'us būtų per silpna.
+ * Todėl kiekviena ašis įvardijama atskirai:
+ *
+ *   `suderinta`    - autoritetas PostgreSQL: darbas atliktas ir skaitosi į „saugu";
+ *   `nereikalinga` - autoritetas atmintyje: prikelti nėra ko;
+ *   `nepadengta`   - autoritetas Redis: gyva būsena LIEKA ten ir po starto grįš.
+ *
+ * ⚠️ DARBAS ATLIEKAMAS ABIEM AŠIMS NEPRIKLAUSOMAI NUO VERDIKTO. Atkurtoje bazėje
+ * likusios `queued` eilutės ir neatšauktos sesijos taps gyvos tą dieną, kai
+ * atsidarys 7.2a barjeras arba `SESSION_STORE_BACKEND` taps `postgres`. Verdiktas
+ * atsako į klausimą „ar dabar saugu", ne „ar buvo dirbta".
+ */
+const VERDIKTAS = Object.freeze({
+  SUDERINTA: "suderinta",
+  NEREIKALINGA: "nereikalinga",
+  NEPADENGTA: "nepadengta",
+});
+
+function _asiesVerdiktas(autoritetas) {
+  if (autoritetas === "postgres") return VERDIKTAS.SUDERINTA;
+  if (autoritetas === "redis") return VERDIKTAS.NEPADENGTA;
+  return VERDIKTAS.NEREIKALINGA;
+}
+
+function nustatytiAsis(env = process.env) {
+  const jobai = selectBackend(env);
+
+  return {
+    sesijos: {
+      autoritetas: resolveSessionBackend(env),
+      verdiktas: _asiesVerdiktas(resolveSessionBackend(env)),
+    },
+    jobai: {
+      autoritetas: jobai.norimas,
+      barjeras: Boolean(jobai.barjeras),
+      verdiktas: _asiesVerdiktas(jobai.norimas),
+    },
+  };
+}
+
+/** Ar visos ašys arba suderintos, arba įrodomai neprikeliamos? */
+function arSaugu(asys) {
+  return [asys.sesijos, asys.jobai].every((a) => a.verdiktas !== VERDIKTAS.NEPADENGTA);
+}
 
 /**
  * FAIL-CLOSED SARGAI PRIEŠ PIRMĄ MUTACIJĄ (D7, D7a).
@@ -168,7 +236,7 @@ async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
     });
 
     await client.query("COMMIT");
-    rezultatas = { tapatybe, sesijos: revokuota, jobai };
+    rezultatas = { tapatybe, sesijos: revokuota, jobai, asys: nustatytiAsis(env) };
   } catch (klaida) {
     try {
       await client.query("ROLLBACK");
@@ -194,7 +262,9 @@ async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
     details:
       `db=${rezultatas.tapatybe} sesijos=${rezultatas.sesijos} ` +
       `jobai=${rezultatas.jobai.terminalizuota}/${rezultatas.jobai.rasta} ` +
-      `praleista=${rezultatas.jobai.praleista.length}`,
+      `praleista=${rezultatas.jobai.praleista.length} ` +
+      `verdiktas.sesijos=${rezultatas.asys.sesijos.verdiktas} ` +
+      `verdiktas.jobai=${rezultatas.asys.jobai.verdiktas}`,
   });
 
   const nieko = rezultatas.sesijos === 0 && rezultatas.jobai.rasta === 0;
@@ -250,12 +320,24 @@ async function patikrinti({ targetUrl, env = process.env } = {}) {
 
     const nesuderinti = neterminalus.filter((id) => !uzbarjeruoti.includes(id));
 
+    const asys = nustatytiAsis(env);
+
+    /**
+     * ⚠️ „SAUGU" REIKALAUJA DVIEJŲ DALYKŲ, NE VIENO.
+     *
+     * Tuščia bazės pusė nieko nereiškia, jei tos ašies gyvas autoritetas yra
+     * kitur: Redis job'ai lieka nepaliesti ir po starto atsinaujins. Todėl
+     * nepadengta ašis NEGALI virsti „saugu su išnaša" — ji duoda atskirą
+     * atsakymą, kurį CLI paverčia savo exit kodu.
+     */
     return {
       tapatybe,
       aktyviosSesijos,
       nesuderinti,
       uzbarjeruoti,
-      suderinta: aktyviosSesijos === 0 && nesuderinti.length === 0,
+      asys,
+      duomenysSutvarkyti: aktyviosSesijos === 0 && nesuderinti.length === 0,
+      suderinta: aktyviosSesijos === 0 && nesuderinti.length === 0 && arSaugu(asys),
     };
   } finally {
     client.release();
@@ -268,6 +350,9 @@ module.exports = {
   AUDITO_IVYKIS,
   TERMINALIZAVIMO_KODAS,
   TERMINALIZAVIMO_ZINUTE,
+  VERDIKTAS,
+  nustatytiAsis,
+  arSaugu,
   patikrintiSargus,
   suderinti,
   patikrinti,

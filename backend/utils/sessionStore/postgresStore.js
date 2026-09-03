@@ -78,8 +78,21 @@ async function revokeAllActiveWithClient(klientas) {
     throw new TypeError("revokeAllActiveWithClient: reikia kviečiančiojo DB kliento (transakcijos).");
   }
 
+  /**
+   * ⚠️ `GREATEST(now(), created_at)`, NE `now()` (#280 peržiūra).
+   *
+   * `sessions_revoked_after_created` reikalauja `revoked_at >= created_at`. Jei
+   * snapshot'as buvo padarytas bazėje, kurios laikrodis pirmauja prieš tikslinę,
+   * atkurta sesija turi `created_at > now()`, ir `revoked_at = now()` pažeistų
+   * apribojimą — o kadangi visas suderinimas yra VIENA transakcija (D4),
+   * kristų ir job'ų terminalizavimas.
+   *
+   * Pasekmė būtų blogiausia įmanoma šiame kelyje: sesijos, kurias revokuoti
+   * SAUGU ir BŪTINA, taptų nerevokuojamos dėl laikrodžių skirtumo tarp dviejų
+   * bazių — t. y. atkūrimas užstrigtų ties tuo, ką turi ištaisyti.
+   */
   const res = await klientas.query(
-    `UPDATE sessions SET revoked_at = now()
+    `UPDATE sessions SET revoked_at = GREATEST(now(), created_at)
       WHERE revoked_at IS NULL`
   );
 

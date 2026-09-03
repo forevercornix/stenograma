@@ -615,6 +615,17 @@ node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_UR
 # 2. Schemos patikra
 DATABASE_URL="$TIKSLO_URL" npm --prefix backend run doctor
 
+# ⚠️ 2b. IŠTRYNIMŲ PATIKRA — kol nėra 7.6c (#250), RANKINIS ŽINGSNIS
+#
+#    Suderinimas SĄMONINGAI praleidžia job'us su ištrynimo žyma ir NEVYKDO
+#    ištrynimų replay. Vadinasi po snapshot'o ištrinti duomenys atkurtoje bazėje
+#    lieka. Prieš 3 žingsnį operatorius privalo RANKINIU BŪDU patikrinti
+#    ištrynimų sąrašą nuo `snapshotTime` iki dabar ir nuspręsti, ar cutover
+#    apskritai galimas.
+#
+#    ⚠️ ČIA BUS ĮTERPTAS 7.6c: `tombstone merge → erasure replay`, PRIEŠ
+#    suderinimą, ne po jo. Iki tol šis žingsnis yra procedūrinis.
+
 # 3. Suderinimas — sesijos ir in-flight job'ai (ŠIS žingsnis)
 DATABASE_URL="$TIKSLO_URL" node backend/scripts/post-restore-reconcile.mjs \
   run --target "$TIKSLO_URL" --actor "$USER"
@@ -624,10 +635,32 @@ DATABASE_URL="$TIKSLO_URL" node backend/scripts/post-restore-reconcile.mjs \
   verify --target "$TIKSLO_URL"
 
 # 5. Tik dabar — aplikacijos startas ir srauto perjungimas (cutover)
+#    ⚠️ TIK jei 2b žingsnis atsakė, kad po snapshot'o ištrintų duomenų nėra
+#    arba jie pašalinti rankiniu būdu. `verify` apie ištrynimus NIEKO nesako.
 ```
 
 Exit kodai: `0` suderinta (arba nieko nereikėjo) · `1` naudojimo klaida ·
-`2` procedūros klaida · `3` (`verify`) **bazė dar NĖRA suderinta**.
+`2` procedūros klaida · `3` (`verify`) **bazė dar NĖRA suderinta** ·
+`4` **ašis NEPADENGTA** (darbas atliktas, bet gyvas tos ašies autoritetas ne
+PostgreSQL — cutover saugiu vadinti negalima).
+
+### ⚠️ Ką suderinimas užtikrina KIEKVIENAI ašiai atskirai
+
+`DATABASE_URL` buvimas **nėra** backend'o sprendimas: aplikacija saugyklas renkasi
+per `jobStore/backendSelection` ir `sessionStore/backendSelection`. Todėl komanda
+kiekvienai ašiai praneša verdiktą:
+
+| Verdiktas | Kada | Ką reiškia |
+|---|---|---|
+| `suderinta` | autoritetas PostgreSQL | darbas atliktas ir **skaitosi į „saugu"** |
+| `nereikalinga` | autoritetas atmintyje | prikelti nėra ko: atmintinė būsena restarto neišgyvena |
+| `nepadengta` | autoritetas Redis | gyva būsena **lieka ten** ir po starto grįš — exit `4` |
+
+⚠️ **Šiandien job'ų ašis niekada nėra `suderinta`:** 7.2a aktyvavimo barjeras
+(`POSTGRES_AKTYVAVIMAS_LEISTAS = false`) palieka job'ų autoritetą atmintyje arba
+Redis'e. Darbas atkurtoje bazėje vis tiek atliekamas — likusios `queued` eilutės
+taptų gyvos tą dieną, kai barjeras atsidarys — bet **verdiktas to saugumu
+nevadina**. Žr. §10 ir #281.
 
 ⚠️ **`--target` privalo sutapti su `DATABASE_URL`.** Jis nenaudojamas jungtis —
 jis TIKRINAMAS: suderinimas dirba su ta baze, prie kurios prisirišusios
@@ -686,6 +719,7 @@ saugyklos. Nesutapimas duoda `RECONCILE_TARGET_MISMATCH`, o ne PostgreSQL režim
 | **Su `AUDIT_BACKEND=memory` kūrimo auditas neišlieka** | `PG_DUMP_BACKUP_CREATED` dingsta komandai pasibaigus; komanda įspėja | `AUDIT_BACKEND=postgres` |
 | **Post-restore suderinimo riba yra procedūrinė** | Serverį galima paleisti nesuderinus — `verify` yra patikra, ne sargas | Suderinimo žyma su starto patikra (#279) |
 | **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami | Ištrynimų replay — 7.6c (#250) |
+| **Job'ų autoritetas šiandien nėra PostgreSQL** | 7.2a barjeras: suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | 7.2a aktyvavimo barjero atidarymas (#281) |
 
 **Kodėl atkūrimas neaudituojamas.** Rašyti nėra kur: `audit_log` į dump'ą
 sąmoningai neįtrauktas, tikslinė bazė tuščia, aplikacija neveikia. Rašymas į kitą
@@ -714,9 +748,13 @@ neišlieka, ir komanda apie tai įspėja. ⚠️ **`pg_dump`
 atkūrimas audito žurnale nefiksuojamas** (§10): jis fiksuojamas operatoriaus
 runbook'o įrašu.
 ✅ Kad po atkūrimo **visos senos sesijos revokuotos** ir in-flight job'ai
-terminalizuoti (`POST_RESTORE_RECONCILED` su aktoriumi, §9b). ⚠️ Šis žingsnis yra
-**procedūrinis**: `verify` pasako, ar jis atliktas, bet startas jo nereikalauja
-(§10).
+terminalizuoti (`POST_RESTORE_RECONCILED` su aktoriumi, §9b) — **kai audito
+saugykla patvari ir prieinama**. ⚠️ Tomis pačiomis sąlygomis kaip kopijų įvykiai:
+su `AUDIT_BACKEND=memory` įrašo neliks, `PRIVACY_MODE=true` režimu eilutės gali
+nebūti, o įvykis yra NEBLOKUOJANTIS — tad suderinimas gali pavykti BE jo.
+Tokiu atveju evidencija yra operatoriaus runbook'o įrašas, ne audito žurnalas.
+⚠️ Pats žingsnis yra **procedūrinis**: `verify` pasako, ar jis atliktas, bet
+startas jo nereikalauja (§10).
 ✅ Retencijos terminą, apibrėžiantį faktinį ištrynimo langą.
 
 ❌ **Ne** to, kas konkrečiai kopijoje — manifeste tik tipai ir skaičiai.

@@ -18,6 +18,8 @@
  *   1 — naudojimo klaida
  *   2 — procedūros klaida (fail-closed: atkūrimo laikyti baigtu negalima)
  *   3 — `verify`: bazė NĖRA suderinta (ne klaida, o atsakymas „dar ne")
+ *   4 — ašis NEPADENGTA: darbas atliktas, bet gyvas tos ašies autoritetas yra
+ *       ne PostgreSQL (pvz. Redis job'ai), tad cutover saugiu vadinti negalima
  *
  * ⚠️ „NIEKO NEREIKĖJO" NIEKADA NEATRODO KAIP NESĖKMĖ ir atvirkščiai: 0 ir 2
  * skiria būtent tuos du atvejus, o 3 atskiria „procedūra lūžo" nuo „procedūra
@@ -103,10 +105,42 @@ try {
     );
 
     if (r.nieko) console.log("Nieko nereikėjo: aktyvių sesijų ir ne terminalinių job'ų nebuvo.");
+
+    console.log(`Ašys: sesijos=${r.asys.sesijos.verdiktas} (${r.asys.sesijos.autoritetas}); ` +
+      `job'ai=${r.asys.jobai.verdiktas} (${r.asys.jobai.autoritetas}${r.asys.jobai.barjeras ? ", 7.2a barjeras" : ""})`);
+
+    /**
+     * ⚠️ NEPADENGTA AŠIS — SAVAS EXIT KODAS, NE IŠNAŠA.
+     *
+     * Darbas atkurtoje bazėje atliktas, bet gyva tos ašies būsena yra kitur:
+     * Redis job'ai lieka nepaliesti ir po starto atsinaujins. „Sėkmė su
+     * įspėjimu" čia reikštų tą patį melagingą užtikrinimą, dėl kurio ši patikra
+     * apskritai atsirado.
+     */
+    if (!reconcile.arSaugu(r.asys)) {
+      console.error(
+        "NEPADENGTA: gyvas autoritetas ne PostgreSQL — suderinimas šios ašies " +
+          "saugumo neužtikrina. Cutover laikyti saugiu negalima."
+      );
+      await isvalyti();
+      process.exit(4);
+    }
   } else if (komanda === "verify") {
     if (!target) mirti("`verify` reikalauja `--target <url>`.", 1);
 
     const v = await reconcile.patikrinti({ targetUrl: target });
+
+    console.log(`Ašys: sesijos=${v.asys.sesijos.verdiktas} (${v.asys.sesijos.autoritetas}); ` +
+      `job'ai=${v.asys.jobai.verdiktas} (${v.asys.jobai.autoritetas}${v.asys.jobai.barjeras ? ", 7.2a barjeras" : ""})`);
+
+    if (v.duomenysSutvarkyti && !reconcile.arSaugu(v.asys)) {
+      console.error(
+        `NEPADENGTA (${v.tapatybe}): bazės pusė sutvarkyta, bet gyvas autoritetas yra ` +
+          "ne PostgreSQL. Cutover saugiu vadinti negalima."
+      );
+      await isvalyti();
+      process.exit(4);
+    }
 
     if (v.suderinta) {
       console.log(

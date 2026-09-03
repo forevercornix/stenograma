@@ -282,8 +282,17 @@ test("#249 D6: masinė revokacija yra idempotentiška PAGAL SĄLYGĄ, ne pagal k
   await sesijuPg.revokeAllActiveWithClient(klientas);
 
   assert.equal(uzklausos.length, 1);
-  assert.match(uzklausos[0], /UPDATE sessions SET revoked_at = now\(\)/);
   assert.match(uzklausos[0], /WHERE revoked_at IS NULL/);
+
+  /**
+   * ⚠️ `GREATEST(now(), created_at)` — ne kosmetika (#280 peržiūra).
+   *
+   * `sessions_revoked_after_created` reikalauja `revoked_at >= created_at`.
+   * Snapshot'as iš bazės, kurios laikrodis pirmauja, duoda `created_at > now()`,
+   * ir `revoked_at = now()` nulaužtų VISĄ transakciją — sesijos, kurias
+   * revokuoti saugu, taptų nerevokuojamos dėl laikrodžių skirtumo.
+   */
+  assert.match(uzklausos[0], /revoked_at = GREATEST\(now\(\), created_at\)/);
 });
 
 test("#249 D8: audito įvykis registruotas ir NEBLOKUOJANTIS", () => {
@@ -409,4 +418,94 @@ test("#249: sėjimo seka yra LEGALI pagal lifecycle — tikrinama VIETOJE", asyn
 
   const rezultatas = await memory.get(completed.id);
   assert.ok(rezultatas.result, "`completed` be rezultato neegzistuoja (7.5b)");
+});
+
+test("#280 P1: `?host=` keičia endpoint'ą — tapatumas privalo tai matyti", () => {
+  /**
+   * ⚠️ DVI DSN INTERPRETACIJOS YRA BLOGIAU NEI VIENA NETIKSLI.
+   *
+   * `pg-connection-string` (ta pati biblioteka, per kurią `pg` interpretuoja DSN)
+   * `?host=` ir `?port=` suteikia PIRMENYBĘ prieš URL autoritetą. `new URL()`
+   * mato tik autoritetą, tad du DSN, besiskiriantys TIK `?host=`, sutapdavo — o
+   * `_pool()` jungdavosi į KITĄ bazę.
+   *
+   * 7.6b atveju pasekmė yra blogiausia įmanoma: sutampantis verdiktas plius
+   * jungtis į produkcinę bazę = revokuotos sesijos ir terminalizuoti job'ai NE
+   * atkurtoje kopijoje.
+   */
+  const AUTORITETAS = "postgres://u:slaptas@db.prod:5432/stenograma";
+
+  assert.throws(
+    () => reconcile.patikrintiSargus(`${AUTORITETAS}?host=/restore`, { DATABASE_URL: `${AUTORITETAS}?host=/prod` }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      return true;
+    },
+    "skirtingas `?host=` privalo reikšti skirtingą bazę"
+  );
+
+  assert.throws(
+    () => reconcile.patikrintiSargus(`${AUTORITETAS}?port=6000`, { DATABASE_URL: AUTORITETAS }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      return true;
+    },
+    "`?port=` irgi turi pirmenybę prieš autoritetą"
+  );
+
+  /** ⚠️ KONTROLĖ: vienodi DSN su tuo pačiu `?host=` privalo PRAEITI — kitaip patikra būtų visada-„ne". */
+  reconcile.patikrintiSargus(`${AUTORITETAS}?host=/restore`, { DATABASE_URL: `${AUTORITETAS}?host=/restore` });
+
+  /** Fail-closed tam, ko biblioteka neišsprendžia: DSN be hosto tapatybės neturi. */
+  assert.throws(
+    () => reconcile.patikrintiSargus("postgres:///stenograma", { DATABASE_URL: "postgres:///stenograma" }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      return true;
+    }
+  );
+});
+
+test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal `DATABASE_URL`", () => {
+  /**
+   * ⚠️ `DATABASE_URL` BUVIMAS NĖRA BACKEND'O SPRENDIMAS.
+   *
+   * `POSTGRES_AKTYVAVIMAS_LEISTAS = false` reiškia, kad job'ų autoritetas
+   * šiandien NIEKADA nėra PostgreSQL, o sesijos be `SESSION_STORE_BACKEND` gyvena
+   * atmintyje. Senasis sargas to nematė, tad `verify` galėjo pasakyti „galima
+   * cutover", kai gyva būsena yra Redis'e — ir po starto ne terminaliniai job'ai
+   * atsinaujintų.
+   *
+   * ⚠️ GRIEŽTAS YRA VERDIKTAS, NE KOMANDA: atmintinės sesijos restarto
+   * neišgyvena, tad ten revokacija NEREIKALINGA, o ne „praleista".
+   */
+  const atvejai = [
+    [{ DATABASE_URL: "postgres://u@h/db" }, "nereikalinga", "nereikalinga", true],
+    [{ DATABASE_URL: "postgres://u@h/db", SESSION_STORE_BACKEND: "postgres" }, "suderinta", "nereikalinga", true],
+    [{ DATABASE_URL: "postgres://u@h/db", REDIS_URL: "redis://r" }, "nereikalinga", "nepadengta", false],
+    [
+      { DATABASE_URL: "postgres://u@h/db", REDIS_URL: "redis://r", SESSION_STORE_BACKEND: "postgres" },
+      "suderinta",
+      "nepadengta",
+      false,
+    ],
+  ];
+
+  for (const [env, sesijos, jobai, saugu] of atvejai) {
+    const asys = reconcile.nustatytiAsis(env);
+    assert.equal(asys.sesijos.verdiktas, sesijos, JSON.stringify(env));
+    assert.equal(asys.jobai.verdiktas, jobai, JSON.stringify(env));
+    assert.equal(reconcile.arSaugu(asys), saugu, `„saugu" verdiktas: ${JSON.stringify(env)}`);
+  }
+
+  /**
+   * ⚠️ KONTROLĖ: „nepadengta" privalo būti PASIEKIAMA ir „saugu" privalo būti
+   * PASIEKIAMAS. Patikra, kuri visada grąžina tą patį, nieko netikrina.
+   */
+  const verdiktai = new Set(atvejai.map(([env]) => reconcile.nustatytiAsis(env).jobai.verdiktas));
+  assert.equal(verdiktai.has("nepadengta"), true);
+  assert.equal(verdiktai.has("nereikalinga"), true);
+
+  /** 7.2a barjeras įvardijamas atskirai — operatorius turi matyti PRIEŽASTĮ. */
+  assert.equal(reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" }).jobai.barjeras, true);
 });
