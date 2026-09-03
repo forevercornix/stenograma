@@ -261,58 +261,8 @@ test("APSKAITA: tas pats `jobId` negali būti ir `istrinta`, ir `nesekmes`", asy
  * 4. GEDIMAI NEPALIEKA UŽDARYTOS ŽYMOS
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * ⚠️ SEAMAS — `auditStore.current()`, NE `rasytiAudita()`.
- *
- * Pakeitus patį `rasytiAudita()` testas tikrintų savo stub'ą: dingtų blokuojančio
- * įvykio politika (klaida → sėkmė nedeklaruojama), kuri čia ir yra dalykas.
- * Pakeista tik SAUGYKLA — kaip `sessionStore._setStoreForTests()` sesijų pusėje;
- * visas kelias virš jos lieka produkcinis.
- *
- * `tikIvykiui` sulaužo `append()` TIK vienam įvykiui, o visa kita deleguoja tikrai
- * saugyklai. Be tokio tikslumo `eraseJob()` kristų anksčiau — ties savo paties
- * `DATA_ERASED` kvitu — ir testas matuotų kitą kelią, nei skelbia pavadinime.
- * Būtent taip ir nutiko pirmajai versijai: tvarkos mutacija jos NEPRALEIDO, nes
- * mutuota eilutė net nebūdavo pasiekiama.
- */
-function suSugadintuAuditu(veiksmas, { tikIvykiui = null } = {}) {
-  const auditStore = require("../utils/auditStore");
-  const tikrasis = auditStore.current;
-
-  auditStore.current = () => {
-    const realus = tikrasis();
-    if (!tikIvykiui) {
-      return {
-        async append() {
-          throw new Error("audito saugykla nepasiekiama");
-        },
-        async query() {
-          return { entries: [], total: 0 };
-        },
-      };
-    }
-    return new Proxy(realus, {
-      get(taikinys, raktas) {
-        if (raktas === "append") {
-          return async (eilute, kontekstas) => {
-            if (eilute && eilute.event === tikIvykiui) {
-              throw new Error(`audito rašymas nepasiekiamas (${tikIvykiui})`);
-            }
-            return taikinys.append(eilute, kontekstas);
-          };
-        }
-        const reiksme = taikinys[raktas];
-        return typeof reiksme === "function" ? reiksme.bind(taikinys) : reiksme;
-      },
-    });
-  };
-
-  return Promise.resolve()
-    .then(veiksmas)
-    .finally(() => {
-      auditStore.current = tikrasis;
-    });
-}
+/** Seamas gyvena bendrame helperyje — dvi kopijos ilgainiui išsiskirtų. */
+const { suSugadintuAuditu } = require("./helpers/auditStoreSeam");
 
 test("KRITINĖ NESĖKMĖ: `eraseJob()` grįžta be išimties — žyma NEUŽDAROMA", async () => {
   await paruosti();
@@ -469,4 +419,58 @@ test("FAIL-CLOSED: nepilna saugykla atmetama PRIEŠ pirmą šalinimą", async ()
   const outcome = await eraseJob(job, { store: pilna });
   assert.equal(outcome.criticalFailure, false);
   assert.equal(outcome.jobRemoved, true);
+});
+
+test("AUDIO: atidėto valymo skola registruojama, bet nėra nei nesėkmė, nei revive", async () => {
+  await paruosti();
+
+  /**
+   * ⚠️ SIGNALAS IMAMAS IŠ `audio_cleanup_pending`, NE IŠ `del()` REZULTATO.
+   *
+   * Nesant objekto `fileStorage.del()` grąžina `false` be klaidos — tai ĮPRASTAS
+   * pakartotinio trynimo atvejis, ne likutis. Signalas, degantis normaliu atveju,
+   * nustoja būti signalu; tikra skola yra atidėtas valymas atkurtoje eilutėje.
+   */
+  const jobId = naujasId();
+  const kitur = new Map([
+    [jobId, { id: jobId, type: "transcription", storageKey: null, audio_cleanup_pending: true }],
+  ]);
+
+  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
+
+  const rez = await erasureReplay.replay({
+    zymos: await tombstones.listAll(),
+    actor: "op",
+    store: saugyklaSuAibe(kitur),
+  });
+
+  assert.deepEqual(rez.istrinta, [jobId], "job'as IŠTRINTAS — tai ne revive");
+  assert.deepEqual(rez.nesekmes, [], "ir ne nesėkmė");
+  assert.deepEqual(rez.audioValymoSkola, [jobId], "skola UŽREGISTRUOTA");
+  assert.equal((await tombstones.get(jobId)).status, tombstones.TOMBSTONE_STATUS.DELETED);
+});
+
+test("KONTROLĖ: job'as be atidėto valymo į skolos sąrašą NEPATENKA", async () => {
+  await paruosti();
+
+  /**
+   * Be šios pusės patikra galėtų virsti visada-„taip". Job'as TURI `storageKey`,
+   * kurio objekto nėra — būtent tas atvejis, kurį ankstesnė redakcija klaidingai
+   * skaitė kaip likutį.
+   */
+  const jobId = naujasId();
+  const kitur = new Map([
+    [jobId, { id: jobId, type: "transcription", storageKey: "audio/nera-tokio.wav" }],
+  ]);
+
+  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
+
+  const rez = await erasureReplay.replay({
+    zymos: await tombstones.listAll(),
+    actor: "op",
+    store: saugyklaSuAibe(kitur),
+  });
+
+  assert.deepEqual(rez.istrinta, [jobId]);
+  assert.deepEqual(rez.audioValymoSkola, [], "nėra atidėto valymo — nėra ir skolos");
 });

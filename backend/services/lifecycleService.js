@@ -99,10 +99,21 @@ function classifyFailure(message) {
  * Susiejimas EKSPLICITINIS, ne spėjamas iš laukų pavadinimų: kai atsiras nauja
  * kategorija, ji turės būti pridėta ČIA, o ne likti tyliai nepastebėta.
  */
+/**
+ * ⚠️ KLAUSIMAS YRA „AR ARTEFAKTO NEBĖRA", NE „AR MES JĮ IŠTRYNĖME" (#250).
+ *
+ * `source_audio` turi DVI būsenas, reiškiančias tą patį rezultatą: objektą
+ * pašalinome (`storageRemoved`) arba jo jau nebuvo (`storageAlreadyAbsent`).
+ * Skaitant tik pirmąją, įprastas pakartotinis trynimas rodytų
+ * `remaining: [source_audio]` prie sėkmingo statuso — likutis, kurio nėra.
+ */
 const COVERED_CATEGORIES = [
-  { type: ARTEFACT_TYPES.QUEUE_RECORD.id, outcomeKey: "queueJobRemoved" },
-  { type: ARTEFACT_TYPES.SOURCE_AUDIO.id, outcomeKey: "storageRemoved" },
-  { type: ARTEFACT_TYPES.JOB_RECORD.id, outcomeKey: "jobRemoved" },
+  { type: ARTEFACT_TYPES.QUEUE_RECORD.id, nebera: (o) => Boolean(o.queueJobRemoved) },
+  {
+    type: ARTEFACT_TYPES.SOURCE_AUDIO.id,
+    nebera: (o) => Boolean(o.storageRemoved || o.storageAlreadyAbsent),
+  },
+  { type: ARTEFACT_TYPES.JOB_RECORD.id, nebera: (o) => Boolean(o.jobRemoved) },
 ];
 
 /**
@@ -377,8 +388,8 @@ async function _performDeletion(
   const deleted = [];
   const remaining = [];
 
-  for (const { type, outcomeKey } of COVERED_CATEGORIES) {
-    if (outcome[outcomeKey]) deleted.push(type);
+  for (const { type, nebera } of COVERED_CATEGORIES) {
+    if (nebera(outcome)) deleted.push(type);
     else remaining.push(type);
   }
 

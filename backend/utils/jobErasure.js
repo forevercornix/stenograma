@@ -92,6 +92,8 @@ async function eraseJob(job, { store = jobStore } = {}) {
     jobRemoved: false,
     queueJobRemoved: false,
     storageRemoved: false,
+    /** Bandyta šalinti, bet objekto NEBUVO — ne tas pat, kas „liko". */
+    storageAlreadyAbsent: false,
     auditEntriesRemoved: 0,
     errors: [],
     criticalFailure: false,
@@ -130,8 +132,27 @@ async function eraseJob(job, { store = jobStore } = {}) {
 
   if (storageKey) {
     try {
-      await fileStorage.del(storageKey);
-      outcome.storageRemoved = true;
+      /**
+       * ⚠️ TRYS BŪSENOS, NE DVI (#250, Codex peržiūra).
+       *
+       * `fileStorage.del()` nesant objekto grąžina `false` BE klaidos. Anksčiau
+       * čia buvo `storageRemoved = true` besąlygiškai — tad `DATA_ERASED` rašė
+       * `storage=deleted` ir tada, kai nieko nepašalinta (auditas tvirtino
+       * veiksmą, kurio nebuvo).
+       *
+       * ⚠️ BET PAPRASTAS `Boolean(...)` PERŠOKA Į KITĄ KRAŠTUTINUMĄ. `false`
+       * tada reikštų „audio LIKO", nors objekto nebėra — o `lifecycleService`
+       * (`COVERED_CATEGORIES`) būtent taip jį ir skaito, tad įprastas
+       * pakartotinis trynimas rodytų `remaining: [source_audio]` prie sėkmingo
+       * statuso. Melagingas kvitas būtų pakeistas melagingu likučiu.
+       *
+       * Todėl fiksuojamos DVI skirtingos tiesos: „mes pašalinome" ir „jau nebuvo".
+       * Klausimui „ar artefakto nebėra" atsako jų sąjunga, ir būtent ją naudoja
+       * kvitas bei kategorijos.
+       */
+      const pasalinta = await fileStorage.del(storageKey);
+      outcome.storageRemoved = Boolean(pasalinta);
+      outcome.storageAlreadyAbsent = !pasalinta;
     } catch (e) {
       outcome.errors.push(`storage: ${e.message}`);
       outcome.criticalFailure = true;
@@ -217,7 +238,7 @@ async function writeDeletionReceipt(outcome) {
     success: true,
     details:
       `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
-      `storage=${outcome.storageRemoved ? "deleted" : "none"} ` +
+      `storage=${outcome.storageRemoved ? "deleted" : outcome.storageAlreadyAbsent ? "absent" : "none"} ` +
       `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
       `audit=${outcome.auditEntriesRemoved}`,
   });

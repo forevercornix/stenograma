@@ -3240,9 +3240,9 @@ ištrynimo žymų — kitaip tektų kurti antrą tombstone mechanizmą.
 
 ### DoD
 
-- [ ] #248 uždarytas
-- [ ] #249 uždarytas
-- [ ] #250 uždarytas
+- [x] #248 uždarytas
+- [x] #249 uždarytas
+- [x] #250 uždarytas
 
 Detalūs kriterijai gyvena sub-issue'uose, ne čia. README apribojimų lentelė ir
 Roadmap `[x]` atnaujinami 7.6c, ne anksčiau.
@@ -3989,39 +3989,39 @@ kas nors ieškos jų dump'e.
 
 ### Erasure būsena už snapshot'o ribų
 
-- [ ] Naudojamos 7.5a persistentės ištrynimo žymos. **Antras tombstone
+- [x] Naudojamos 7.5a persistentės ištrynimo žymos. **Antras tombstone
       mechanizmas NEKURIAMAS** — jei 7.5a neuždarytas, šis darbas laukia.
-- [ ] Egzistuoja CLI kelias: eksportas → apsauga → fail-closed validacija →
+- [x] Egzistuoja CLI kelias: eksportas → apsauga → fail-closed validacija →
       monotoniškas merge.
-- [ ] Eksportas apima **visas** žymas, įskaitant `deleted`; `listUnresolved()`
+- [x] Eksportas apima **visas** žymas, įskaitant `deleted`; `listUnresolved()`
       vieno nepakanka — testas įrodo, kad `deleted` žyma eksportą praeina.
-- [ ] ⚠️ `deleted` terminalumas išvestas iš `states.ALLOWED_TRANSITIONS`, ne
+- [x] ⚠️ `deleted` terminalumas išvestas iš `states.ALLOWED_TRANSITIONS`, ne
       surašytas atskirai. Testas: `deleted` žymos merge NEPAVERČIA
       `deletion_pending`.
-- [ ] ⚠️ `pending` vs `failed` konflikto taisyklė apibrėžta **atskirai** (laikas
+- [x] ⚠️ `pending` vs `failed` konflikto taisyklė apibrėžta **atskirai** (laikas
       ar karta) ir gyvena viename autoritete. Testai abiem kryptim: senesnis
       `pending` neperrašo naujesnio `failed` (gedimo metaduomenys ir claim
       nedingsta), ir senesnis `failed` neslopina naujesnio autorizuoto retry.
-- [ ] ⚠️ Importuoti `claim_token` išvalomi arba pervedami per esamas audituojamas
+- [x] ⚠️ Importuoti `claim_token` išvalomi arba pervedami per esamas audituojamas
       `release`/`retry` semantikas prieš replay. Testas: importuota `pending`
       žyma su pasenusiu tokenu **NEBLOKUOJA** koordinatoriaus ties
       `IN_PROGRESS`.
-- [ ] ⚠️ Eksportas neša ir **kopijų horizontą** (`backup_horizon`), sulietą
+- [x] ⚠️ Eksportas neša ir **kopijų horizontą** (`backup_horizon`), sulietą
       monotoniškai prieš atnaujinant žymų retenciją. Testas: atkūrus senesnį
       snapshot'ą horizontas neatsuka atgal.
-- [ ] Sugadintas ar neautentiškas eksportas → hard fail **PRIEŠ** bet kokį merge.
-- [ ] D4: šviežumo semantika apibrėžta runbook'e ir susieta su 7.5a horizontu.
+- [x] Sugadintas ar neautentiškas eksportas → hard fail **PRIEŠ** bet kokį merge.
+- [x] D4: šviežumo semantika apibrėžta runbook'e ir susieta su 7.5a horizontu.
 
 ### Replay
 
-- [ ] Po merge kiekvienai galiojančiai žymai taikomas 7.5a erasure kelias.
-- [ ] Po kopijos ištrintas job'as po restore **NEATSIRANDA**; jo `job_results` ir
+- [x] Po merge kiekvienai galiojančiai žymai taikomas 7.5a erasure kelias.
+- [x] Po kopijos ištrintas job'as po restore **NEATSIRANDA**; jo `job_results` ir
       kiti priklausomi įrašai taip pat ne.
-- [ ] Asinchroninio audio valymo būsena užregistruota ir **nelaikoma** sėkmingu
+- [x] Asinchroninio audio valymo būsena užregistruota ir **nelaikoma** sėkmingu
       revive.
-- [ ] Replay naudoja esamą autoritetą; restore-specific deletion SQL nėra —
+- [x] Replay naudoja esamą autoritetą; restore-specific deletion SQL nėra —
       tikrinama mutacija arba tripwire.
-- [ ] ⚠️ Replay **neima pasenusios žymos trumpojo kelio**. Testas: importuota
+- [x] ⚠️ Replay **neima pasenusios žymos trumpojo kelio**. Testas: importuota
       `deleted` žyma + atkurtos `jobs` / `job_results` eilutės → po replay eilučių
       NĖRA. Testas privalo kristi, jei replay eina per
       `lifecycleService.deleteJobArtefacts()` tiesiogiai (jis grąžintų
@@ -4029,15 +4029,15 @@ kas nors ieškos jų dump'e.
 
 ### Seka
 
-- [ ] ⚠️ **TOMBSTONE MERGE EINA PIRMAS, PRIEŠ SUDERINIMĄ.** Ištrintas job'as
+- [x] ⚠️ **TOMBSTONE MERGE EINA PIRMAS, PRIEŠ SUDERINIMĄ.** Ištrintas job'as
       kopijoje gali gulėti kaip `queued`; jei 7.6b suderinimas pamatys jį pirmas,
       jis terminalizuos (ar vėliau prikels) darbą su jau ištrintais duomenimis.
-- [ ] Seka užtikrinama **struktūriškai**, ne tik dokumentu: suderinimo žingsnis
+- [x] Seka užtikrinama **struktūriškai**, ne tik dokumentu: suderinimo žingsnis
       negali įvykti, jei merge ir replay nebaigti sėkmingai. Testas įrodo, kad
       bandymas paleisti ne ta tvarka **krenta**, o ne tyliai praeina.
-- [ ] D3: `maintenanceLock` galiojimo pabaiga apdorota arba pagrįstai
+- [x] D3: `maintenanceLock` galiojimo pabaiga apdorota arba pagrįstai
       nenaudojama.
-- [ ] ⚠️ **Gedimo sklidimo testas:** klaida įleidžiama **replay metu**, po
+- [x] ⚠️ **Gedimo sklidimo testas:** klaida įleidžiama **replay metu**, po
       sėkmingo merge. Tikrinama, kad sesijų revokacija, job'ų suderinimas,
       verifikacija ir cutover **liko neįvykdyti**, o paleidžiamumo žyma —
       nepaliesta. Be jo realizacija, kuri replay klaidą pagauna ir tęsia,
@@ -4045,9 +4045,9 @@ kas nors ieškos jų dump'e.
 
 ### DR E2E
 
-- [ ] Realus PostgreSQL kelias: 7.6a backup/restore ir 7.6b reconciliation, ne
+- [x] Realus PostgreSQL kelias: 7.6a backup/restore ir 7.6b reconciliation, ne
       aplikacijos lygio ar memory imitacija.
-- [ ] Scenarijus:
+- [x] Scenarijus:
       1. sukurti job A, job B, aktyvias sesijas ir in-flight job'ą;
       2. padaryti kopiją;
       3. PO kopijos ištrinti job A ir sukurti jo 7.5a žymą;
@@ -4055,28 +4055,28 @@ kas nors ieškos jų dump'e.
       5. restore'inti seną snapshot'ą;
       6. paleisti pilną DR koordinatorių;
       7. patikrinti rezultatą.
-- [ ] ⚠️ **Testas fiziškai įrodo praradimą ir grąžinimą:** po restore ir PRIEŠ
+- [x] ⚠️ **Testas fiziškai įrodo praradimą ir grąžinimą:** po restore ir PRIEŠ
       merge tikrinama, kad job A DB **vėl egzistuoja**, o jo žymos DB **NĖRA**.
       Be šio tarpinio patikrinimo testas gali būti klaidingai žalias — praeitų ir
       realizacija, kuri nieko nesulieja.
-- [ ] Po koordinatoriaus: job A neegzistuoja; jo `job_results` neegzistuoja; jo
+- [x] Po koordinatoriaus: job A neegzistuoja; jo `job_results` neegzistuoja; jo
       žyma išlieka; job B lieka; pre-restore sesijos neautentifikuoja;
       `queued`/`processing` suderinti; `completed` rezultatai nepažeisti;
       cutover verifikacija sėkminga.
-- [ ] Testas registruotas `postgres` rinkinyje (per `postgresGuard` importą), tad
+- [x] Testas registruotas `postgres` rinkinyje (per `postgresGuard` importą), tad
       `verify-postgres-suite-ran.mjs` reikalauja neprapleisto `ok`.
-- [ ] D5: koordinatorius vykdomas **du kartus**; būsena po abiejų sutampa.
+- [x] D5: koordinatorius vykdomas **du kartus**; būsena po abiejų sutampa.
 
 ### Dokumentacija ir uždarymas
 
-- [ ] ⚠️ 7.6a runbook įspėjimas („dar ne erasure-safe") pašalinamas **tik po
+- [x] ⚠️ 7.6a runbook įspėjimas („dar ne erasure-safe") pašalinamas **tik po
       sėkmingo realaus DR E2E**, kartu su testu, kuris jo reikalavo.
       Dokumentacijos testas keičiamas iš „įspėjimas privalomas" į „pilna
       erasure-safe procedūra dokumentuota ir įrodyta". Jei 7.6a to įspėjimo dar
       nepridėjo — čia nėra ko šalinti, ir tai pasakoma, o ne tyliai praleidžiama.
-- [ ] Runbook aprašo pilną seką su konkrečiomis komandomis.
-- [ ] README apribojimų lentelės eilutės atnaujintos; Roadmap `[x]`.
-- [ ] #185 uždaromas.
+- [x] Runbook aprašo pilną seką su konkrečiomis komandomis.
+- [x] README apribojimų lentelės eilutės atnaujintos; Roadmap `[x]`.
+- [x] #185 uždaromas.
 
 ---
 

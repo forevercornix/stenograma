@@ -831,6 +831,24 @@ nėra: ji neįrodytų, kad operatorius matė pasenimo dydį.
 ⚠️ **Patvirtinimas lyginamas VALANDOMIS**, tad jis galioja iki valandos pabaigos.
 Milisekundžių tikslumas sargą padarytų neįveikiamą teisėtai.
 
+### ⚠️ Po nepavykusio paleidimo kartojama su TUO PAČIU žurnalu
+
+Nepavykęs replay (pvz. nepasiekiama audito saugykla) palieka žymą **atvirą** — tai
+konstrukcija, ne likutis: nepatvirtintas ištrynimas privalo likti pakartojamas.
+Kol ji atvira, `verify` cutover'į **blokuoja** (`DR_VERIFICATION_FAILED`,
+„neuždarytų žymų N"), net jei duomenys jau pašalinti.
+
+⚠️ **Kitas žurnalas tos žymos neuždarys**, nes jos jame nėra. Procedūra
+kartojama su tuo pačiu (arba naujesniu, tą žymą apimančiu) žurnalu:
+
+```bash
+node backend/scripts/dr-restore.mjs run --in tas-pats-zurnalas.json \
+  --target "$TIKSLO_URL" --actor "$USER"
+```
+
+Pakartojimas idempotentinis: jau ištrintiems job'ams rašomas `erasure_confirmed`
+kvitas, o žyma uždaroma.
+
 ### ⚠️ Kilmės patikra tikrina DUOMENŲ kilmę, ne aplinką
 
 `deployment_identity` keliauja su dump'u, tad atkurta bazė turi ŠALTINIO
@@ -896,9 +914,12 @@ klaidingų teigiamų ir blokuotų teisėtas kopijas. Riba įvardijama, ne dangst
 
 ✅ Kad kopijos šifruotos (`manifest.encrypted`, algoritmas ir versija).
 ✅ Kad kopijoje nėra eksportų ir redaguotų variantų (politika kildinama iš registro).
-✅ Kad **aplikacijos kopijos** atkūrimas negrąžina ištrintų duomenų — svarbiausia
-#20 garantija. ⚠️ **`pg_dump` atkūrimui ji dar NEGALIOJA** (§9a, §10): ištrynimų
-replay ateina su 7.6c (#250). Iki tol tai eksplicitinė išimtis, ne nutylėjimas.
+✅ Kad atkūrimas negrąžina ištrintų duomenų — svarbiausia #20 garantija.
+Aplikacijos kopijai ji galioja tiesiogiai; `pg_dump` keliui — **tik atlikus §9c**
+(ištrynimų žurnalo suliejimas ir replay). ⚠️ **Vien §9a atkūrimas jos NESUTEIKIA
+ir niekada nesuteiks**: žurnalas pagal konstrukciją gyvena UŽ snapshot'o ribų,
+tad praleidus §9c ištrinti job'ai grįžta. Tai nuolatinė procedūros savybė, ne
+laikina spraga.
 ✅ Kad kopijų **kūrimas** audituojamas su aktoriumi — ir aplikacijos
 (`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`), **kai audito
 saugykla patvari** (`AUDIT_BACKEND=postgres`); su numatytu `memory` įrašas

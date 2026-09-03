@@ -1447,9 +1447,13 @@ patvirtinimą reikšmėmis).
 ⚠️ **Tai įrodytas kelias, o ne veikianti gynyba.** Kol 7.2a aktyvavimo barjeras
 neuždarytas, PostgreSQL nėra job'ų autoritetas produkcijoje (#281, #282), tad
 visa ši grandinė šiandien yra **procedūra**, o ne kasdien veikianti apsauga. Jos
-pilnos pratybos (kopija → ištrynimas → atkūrimas iš senesnio snapshot'o → replay)
-vykdomos CI `postgres` rinkinyje. Skirtumas svarbus būtent čia: šį skyrių skaito
-ir tie, kas neskaitė nė vieno issue.
+pilnos pratybos — kopija → ištrynimas → atkūrimas iš senesnio snapshot'o →
+replay — **įvykdytos ir žalios** CI `postgres` rinkinyje, įskaitant tarpinį
+patikrinimą, kad ištrintas job'as po atkūrimo tikrai grįžta.
+
+Skirtumas tarp „įrodyto kelio" ir „veikiančios gynybos" svarbus būtent čia: šį
+skyrių skaito ir tie, kas neskaitė nė vieno issue. Kol barjeras neatidarytas,
+procedūrą paleidžia **operatorius**, ne sistema.
 
 ⚠️ **Auditas nekopijuojamas** dėl tos pačios priežasties: jo įrašai saugo
 pseudonimizuotą subjektą, tad žymų patikra jų neapima, ir atkūrus GDPR ištrinti

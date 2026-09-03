@@ -84,6 +84,7 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
   const istrinta = [];
   const jauNebuvo = [];
   const uzdarytosZymos = [];
+  const audioValymoSkola = [];
   const nesekmes = [];
 
   for (const zyma of zymos) {
@@ -250,16 +251,33 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
       istrinta.push(zyma.jobId);
 
       /**
-       * ⚠️ ASINCHRONINIS AUDIO VALYMAS NĖRA SĖKMINGAS REVIVE.
+       * ⚠️ REGISTRUOJAMA ATIDĖTO VALYMO SKOLA, NE `del()` GRĄŽINTAS `false`.
        *
-       * `eraseJob()` audio šalinimą gali palikti vėlesniam bandymui (7.4e
-       * barjeras + `audio_cleanup_pending`). Tokia būsena registruojama, bet
-       * NIEKADA nereiškia, kad job'as gyvas: metaduomenys ir rezultatas jau
-       * pašalinti, o valymo skola lieka esamame mechanizme.
+       * ⚠️ DVI KLAIDINGOS REDAKCIJOS PRIEŠ ŠIĄ, IR ABI VERTOS ĮRAŠO.
+       *
+       * Pirmoji tikrino `outcome.audioCleanupPending` — lauko, kurio `eraseJob()`
+       * NIEKADA nenustato: negyva šaka su garantiją skelbiančiu komentaru.
+       *
+       * Antroji tikrino `!outcome.storageRemoved`, ir tai buvo dar blogiau: nesant
+       * objekto `del()` grąžina `false`, tad ĮPRASTAS pakartotinis trynimas būtų
+       * pranešamas kaip audio likutis. Signalas, kuris dega normaliu atveju,
+       * nustoja būti signalu.
+       *
+       * Tikra atidėto valymo būsena gyvena `audio_cleanup_pending` vėliavoje
+       * (`utils/audioCleanup.js`, `deletionRetry.js`), ir ji ateina ATKURTOJE
+       * eilutėje. Būtent ji reiškia, kad valymo skola egzistavo; po replay job'o
+       * įrašo nebėra, tad tos skolos niekas nebevykdys — o `eraseJob()` audio
+       * pašalino tiesiogiai pagal `storageKey`. Faktas grąžinamas, kad DR
+       * ataskaitoje jį matytų operatorius.
        */
-      if (outcome && outcome.audioCleanupPending) {
-        log.warn("Audio valymas liko atidėtas po replay", { jobId: zyma.jobId, stage: "erasure_replay" });
+      if (job.audio_cleanup_pending) {
+        audioValymoSkola.push(zyma.jobId);
+        log.warn("Replay uždarė job'ą su atidėto audio valymo žyme", {
+          jobId: zyma.jobId,
+          stage: "erasure_replay",
+        });
       }
+
     } catch (klaida) {
       nesekmes.push({ jobId: zyma.jobId, priezastis: klaida.code || klaida.message });
     }
@@ -283,10 +301,11 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
     istrinta: istrinta.length,
     jauNebuvo: jauNebuvo.length,
     uzdarytosZymos: uzdarytosZymos.length,
+    audioValymoSkola: audioValymoSkola.length,
     nesekmes: nesekmes.length,
   });
 
-  return { apdorota: zymos.length, istrinta, jauNebuvo, uzdarytosZymos, nesekmes };
+  return { apdorota: zymos.length, istrinta, jauNebuvo, uzdarytosZymos, audioValymoSkola, nesekmes };
 }
 
 module.exports = { AUDITO_IVYKIS, replay };

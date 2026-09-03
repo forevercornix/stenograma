@@ -26,6 +26,7 @@ const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
  * kad vietinė patikra gina nebe tą aplinką, kurią naudoja šis failas.
  */
 const { testoAplinka, auditoLaukas } = require("./helpers/drRestoreEnv");
+const { suSugadintuAuditu } = require("./helpers/auditStoreSeam");
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
@@ -145,6 +146,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
   await perkurtiSaltini(SALTINIO_URL);
 
   let jobai = null;
+  let sesijuTokenai = [];
   let saltinioDeployment = null;
   let kopija = null;
   let artefaktas = null;
@@ -163,7 +165,8 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           [VARTOTOJAS_A, "administrator", "admin"],
           [VARTOTOJAS_B, "operator", "petras"],
         ]) {
-          await store.create({ id: userId, role, username }, process.env);
+          const sesija = await store.create({ id: userId, role, username }, process.env);
+          sesijuTokenai.push(sesija.token);
         }
 
         saltinioDeployment = await deploymentIdentity.skaitytiTapatybe(pool);
@@ -324,6 +327,167 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     );
   });
 
+  await t.test("6b. GEDIMO SKLIDIMAS: replay klaida sustabdo VISKĄ po jos", async () => {
+    /**
+     * ⚠️ KLAIDA ĮLEIDŽIAMA PO SĖKMINGO MERGE, NE ANKSČIAU.
+     *
+     * Sargai ir suliejimas privalo praeiti — kitaip testas įrodytų tik tiek, kad
+     * fail-closed veikia ties ĮĖJIMU, o DoD reikalauja būtent sklidimo: replay
+     * krito, vadinasi sesijos, job'ai, verifikacija ir cutover NEĮVYKO.
+     *
+     * Gedimas tikras, ne dirbtinis: `ERASURE_REPLAYED` yra BLOKUOJANTIS, tad
+     * nepasiekiama audito saugykla ištrynimo nepatvirtina. Realizacija, kuri
+     * tokią klaidą pagautų ir tęstų, praeitų visus kitus testus.
+     */
+    const priesSesijos = await eiluciuSkaicius(TIKSLO_URL, "sessions", "WHERE revoked_at IS NULL");
+    const priesNeterminaliniai = await eiluciuSkaicius(
+      TIKSLO_URL,
+      "jobs",
+      "WHERE status IN ('queued','processing')"
+    );
+    assert.ok(priesSesijos > 0 && priesNeterminaliniai > 0, "kontrolė: yra ką prarasti");
+
+    /**
+     * ⚠️ AUKA — KITAS JOB'AS, NE A.
+     *
+     * Replay šalina PIRMA, o kvitą rašo PO to, tad nepavykęs kvitas job'o
+     * nebegrąžina. Panaudojus A, 7 žingsnis nebeturėtų ko replay'inti, ir pilna
+     * seka liktų neįrodyta. Todėl gedimui naudojamas atskiras žurnalas su VIENA
+     * žyma — `failed` job'ui, kurio nemato nė viena kita asercija.
+     */
+    const gedimoArtefaktas = await suAplinka(saltinioEnv, async () => {
+      const pool = new Pool({ connectionString: SALTINIO_URL });
+      try {
+        await tombstones.mark(jobai.failed.id, { reason: "user_request", actorKind: "user" });
+        const tik = (await tombstones.listAll()).filter((z) => z.jobId === jobai.failed.id);
+        assert.equal(tik.length, 1, "žurnale — lygiai viena žyma");
+
+        return erasureExport.sudarytiArtefakta({
+          zymos: tik,
+          horizontas: await tombstones.refreshBackupHorizon(),
+          saltinis: erasureExport.saltinioTapatybe(process.env),
+          deploymentId: await deploymentIdentity.skaitytiTapatybe(pool),
+          env: process.env,
+        });
+      } finally {
+        await pool.end();
+      }
+    });
+
+    await suAplinka(tiksloEnv, async () => {
+      const pool = new Pool({ connectionString: TIKSLO_URL });
+      try {
+        await assert.rejects(
+          () =>
+            suSugadintuAuditu(
+              () =>
+                drCoordinator.paleisti({
+                  targetUrl: TIKSLO_URL,
+                  artefaktas: gedimoArtefaktas,
+                  vykdytojas: pool,
+                  actor: "gedimo-testas",
+                  env: process.env,
+                }),
+              { tikIvykiui: erasureReplay.AUDITO_IVYKIS }
+            ),
+          (k) => k.code === "DR_REPLAY_FAILED",
+          "replay nesėkmė privalo nutraukti seką"
+        );
+      } finally {
+        await pool.end();
+      }
+    });
+
+    /** MERGE ĮVYKO — klaida tikrai buvo PO jo, ne prieš. */
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "erasure_marks", "WHERE job_id = $1", [jobai.failed.id]),
+      1,
+      "žyma sulieta: gedimas įleistas po sėkmingo merge"
+    );
+
+    /**
+     * ⚠️ IR ŽYMA LIKO ATVIRA. Tai ne šalutinis efektas, o konstrukcija: kvitas
+     * rašomas PRIEŠ uždarymą, tad nepatvirtintas ištrynimas lieka pakartojamas.
+     */
+    const zyma = await vykdyti(TIKSLO_URL, "SELECT status FROM erasure_marks WHERE job_id = $1", [
+      jobai.failed.id,
+    ]);
+    assert.notEqual(zyma.rows[0].status, "deleted", "nepatvirtintas ištrynimas žymos NEUŽDARO");
+
+    /** A NEPALIESTAS: gedimas nesuėdė 7 žingsnio dalyko. */
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE id = $1", [jobai.zymetas.id]),
+      1,
+      "job'as A tebėra — jo žurnalo šis žingsnis nelietė"
+    );
+
+    /** IR NIEKAS PO REPLAY NEĮVYKO. */
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "sessions", "WHERE revoked_at IS NULL"),
+      priesSesijos,
+      "sesijos NEREVOKUOTOS — suderinimas nepasiektas"
+    );
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE status IN ('queued','processing')"),
+      priesNeterminaliniai,
+      "job'ai NETERMINALIZUOTI — suderinimas nepasiektas"
+    );
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "audit_log", "WHERE event = 'DR_RECOVERY_COMPLETED'"),
+      0,
+      "atkūrimas NEDEKLARUOTAS"
+    );
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "audit_log", "WHERE event = 'POST_RESTORE_RECONCILED'"),
+      0,
+      "7.6b suderinimas net neprasidėjo"
+    );
+
+    /**
+     * ⚠️ ATSTATYMAS — PO SKLIDIMO ASERCIJŲ, NE PRIEŠ JAS.
+     *
+     * Pirmoji redakcija jį įterpė anksčiau, ir CI parodė `expected 2, actual 0`:
+     * sesijas revokavo šis PAVYKĘS paleidimas, o asercija skaitė tai kaip įrodymą,
+     * kad sklidimas neveikia. Testo tvarka yra jo teiginio dalis — matuoti reikia
+     * TOJE būsenoje, apie kurią kalbama.
+     *
+     * ⚠️ GEDIMAS ATSTATOMAS PAKARTOJIMU — IR TAI TIKRINAMA, NE NUMANOMA.
+     *
+     * Atvira žyma NĖRA nekaltas likutis: `patikrinti()` ją mato ir cutover'į
+     * BLOKUOJA (`DR_VERIFICATION_FAILED`). CI tai ir parodė — 7 žingsnis krito su
+     * „neuždarytų žymų 1", nors pats replay pavyko. Sargas teisus: nepatvirtinto
+     * ištrynimo negalima praleisti pro šalį.
+     *
+     * Iš to seka operatoriaus taisyklė, kurios anksčiau nebuvo užrašyta: po
+     * nepavykusio paleidimo procedūra kartojama su TUO PAČIU žurnalu — kitas
+     * žurnalas tos žymos neuždarys, nes jos jame nėra.
+     */
+    await suAplinka(tiksloEnv, async () => {
+      const pool = new Pool({ connectionString: TIKSLO_URL });
+      try {
+        const atstatymas = await drCoordinator.paleisti({
+          targetUrl: TIKSLO_URL,
+          artefaktas: gedimoArtefaktas,
+          vykdytojas: pool,
+          actor: "gedimo-testas",
+          env: process.env,
+        });
+
+        assert.deepEqual(atstatymas.replay.uzdarytosZymos, [jobai.failed.id], "žyma uždaryta");
+        assert.equal(atstatymas.verify.suderinta, true, "cutover vėl leidžiamas");
+      } finally {
+        await pool.end();
+      }
+    });
+
+    const poAtstatymo = await vykdyti(
+      TIKSLO_URL,
+      "SELECT status FROM erasure_marks WHERE job_id = $1",
+      [jobai.failed.id]
+    );
+    assert.equal(poAtstatymo.rows[0].status, "deleted", "pakartojimas žymą uždarė");
+  });
+
   let pirmas = null;
 
   await t.test("7. koordinatorius: suliejimas → replay → suderinimas → verifikacija", async () => {
@@ -388,6 +552,30 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
       "nė viena sesija nelieka aktyvi (7.6b)"
     );
 
+    /**
+     * ⚠️ TIKRINAMAS ELGESYS, NE TIK STULPELIS.
+     *
+     * `revoked_at IS NOT NULL` yra būsena; DoD reikalauja, kad SENAS COOKIE
+     * NEBEAUTENTIKUOTŲ. Tai skirtingi teiginiai: revokacija, kurios `touch()`
+     * nepaiso, praeitų pirmąjį ir neapsaugotų nieko.
+     */
+    assert.ok(sesijuTokenai.length > 0, "kontrolė: tokenai išsaugoti");
+    await suAplinka(tiksloEnv, async () => {
+      const pool = new Pool({ connectionString: TIKSLO_URL });
+      try {
+        const store = sesijuPg.createPostgresStore(pool);
+        for (const token of sesijuTokenai) {
+          assert.equal(
+            await store.touch(token, process.env),
+            null,
+            "senas cookie po atkūrimo nebeautentifikuoja"
+          );
+        }
+      } finally {
+        await pool.end();
+      }
+    });
+
     assert.equal(
       await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE status IN ('queued','processing')"),
       0,
@@ -409,16 +597,55 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     );
     const pagal = Object.fromEntries(kvitai.rows.map((r) => [`${r.event}:${r.outcome}`, r.n]));
     assert.equal(pagal["ERASURE_REPLAYED:erasure_replayed"], 1, "vienas kvitas vienam ištrynimui");
+    /**
+     * ⚠️ DU ĮRAŠAI, NE VIENAS: 6b atstatymo paleidimas ir šis. Kiekvienas
+     * `DR_RECOVERY_COMPLETED` atitinka VIENĄ pilnai praėjusią seką — nepavykęs
+     * 6b bandymas savo įrašo neturi, ir būtent tai tikrinama aukščiau.
+     */
     assert.equal(
       kvitai.rows.filter((r) => r.event === "DR_RECOVERY_COMPLETED").reduce((a, r) => a + r.n, 0),
-      1,
-      "atkūrimo faktas užfiksuotas PO visos sekos"
+      2,
+      "po vieną įrašą kiekvienai SĖKMINGAI sekai"
     );
   });
 
+  /**
+   * ⚠️ D5 LYGINA BŪSENĄ, NE `COUNT(*)` (Codex, #288).
+   *
+   * Skaičiai nepasikeistų ir tada, jei pakartojimas perrašytų rezultatą, pakeistų
+   * job'o statusą, atvertų žymą ar pastumtų kopijų horizontą. Tad imamas turinys:
+   * job'ų statusai ir fazės, rezultatų raktai, VISI žymų stulpeliai (jie
+   * importuojami deterministiškai — `updated_at = EXCLUDED.updated_at`), sesijų
+   * revokacijos laikas ir horizontas.
+   */
+  async function busenosPjuvis() {
+    const uzklausos = {
+      jobs: "SELECT id, status, phase FROM jobs ORDER BY id",
+      job_results: "SELECT job_id FROM job_results ORDER BY job_id",
+      erasure_marks:
+        "SELECT job_id, status, reason, actor_kind, marked_at, updated_at, completed_at, " +
+        "attempts, last_failure_kind, claim_token FROM erasure_marks ORDER BY job_id",
+      sessions: "SELECT id, user_id, revoked_at FROM sessions ORDER BY id",
+      backup_horizon: "SELECT * FROM backup_horizon",
+    };
+
+    const pjuvis = {};
+    for (const [vardas, sql] of Object.entries(uzklausos)) {
+      const { rows } = await vykdyti(TIKSLO_URL, sql);
+      pjuvis[vardas] = rows;
+    }
+    return pjuvis;
+  }
+
   await t.test("9. IDEMPOTENTIŠKUMAS: antras paleidimas būsenos nekeičia", async () => {
+    const priesBusena = await busenosPjuvis();
     const priesJobai = await eiluciuSkaicius(TIKSLO_URL, "jobs");
     const priesZymos = await eiluciuSkaicius(TIKSLO_URL, "erasure_marks");
+
+    /** KONTROLĖ: pjūvis tikrai kažką mato — tuščias palyginimas nieko neįrodytų. */
+    assert.ok(priesBusena.jobs.length > 0, "job'ų yra");
+    assert.ok(priesBusena.erasure_marks.length > 0, "žymų yra");
+    assert.ok(priesBusena.sessions.length > 0, "sesijų yra");
 
     const antras = await suAplinka(tiksloEnv, async () => {
       const pool = new Pool({ connectionString: TIKSLO_URL });
@@ -441,11 +668,93 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     assert.equal(await eiluciuSkaicius(TIKSLO_URL, "jobs"), priesJobai);
     assert.equal(await eiluciuSkaicius(TIKSLO_URL, "erasure_marks"), priesZymos);
 
+    assert.deepEqual(
+      await busenosPjuvis(),
+      priesBusena,
+      "persistentinė būsena po antro paleidimo privalo SUTAPTI, ne tik sutapti skaičiais"
+    );
+
     const { rows } = await vykdyti(
       TIKSLO_URL,
       "SELECT count(*)::int AS n FROM audit_log WHERE event = 'ERASURE_REPLAYED' " +
         `AND ${auditoLaukas("outcome")} = 'erasure_replayed'`
     );
     assert.equal(rows[0].n, 1, "antras paleidimas antro ištrynimo kvito NERAŠO");
+  });
+
+  await t.test("10. PASENĘS ŽURNALAS `PRIVACY_MODE`: patvirtinimas veda iki `verify`", async () => {
+    /**
+     * ⚠️ TEIGIAMAS OVERRIDE KELIAS PER TIKRĄ SEKĄ (Codex, #288).
+     *
+     * Kontraktinis testas įrodo tik ARGUMENTO PERDAVIMĄ (jis dirba su nepasiekiama
+     * baze). Čia tikrinama tai, dėl ko ta šaka apskritai egzistuoja: `PRIVACY_MODE`
+     * diegimas su pasenusiu žurnalu privalo turėti kelią, kuris BAIGIASI —
+     * suliejimu, replay, suderinimu ir `verify`.
+     *
+     * Be šio žingsnio būtų padengtos tik atmetimo pusės, o kelias, dėl kurio jos
+     * egzistuoja, liktų neįrodytas.
+     */
+    const pasenesEnv = {
+      ...tiksloEnv,
+      PRIVACY_MODE: "true",
+      /** Kiekvienas žurnalas iškart pasenęs — laikrodžio žaidimų nereikia. */
+      ERASURE_EXPORT_MAX_AGE_MS: "1",
+    };
+
+    await suAplinka(pasenesEnv, async () => {
+      const pool = new Pool({ connectionString: TIKSLO_URL });
+      try {
+        const bendri = {
+          targetUrl: TIKSLO_URL,
+          artefaktas,
+          vykdytojas: pool,
+          actor: "pasenusio-testas",
+          env: process.env,
+        };
+
+        /** (a) BE `--allow-stale` — sustoja ties šviežumo riba. */
+        await assert.rejects(
+          () => drCoordinator.paleisti(bendri),
+          (k) => k.code === "DR_LEDGER_STALE",
+          "pasenęs žurnalas sustabdo atkūrimą"
+        );
+
+        /** (b) Su vėliava, BET be patvirtinimo — `PRIVACY_MODE` reikalauja pėdsako. */
+        await assert.rejects(
+          () => drCoordinator.paleisti({ ...bendri, leistiPasenusi: true }),
+          (k) => k.code === "DR_STALE_OVERRIDE_UNCONFIRMED",
+          "audito įrašas slopinamas, tad reikia patvirtinimo reikšmėmis"
+        );
+
+        /** (c) Su teisingu patvirtinimu — seka nueina IKI GALO. */
+        const sargai = await drCoordinator.patikrintiSargus({
+          targetUrl: TIKSLO_URL,
+          artefaktas,
+          vykdytojas: pool,
+          env: process.env,
+          leistiPasenusi: true,
+        });
+
+        const rezultatas = await drCoordinator.paleisti({
+          ...bendri,
+          leistiPasenusi: true,
+          patvirtinimas: {
+            deploymentId: sargai.deploymentId,
+            zurnaloChecksum: sargai.zurnaloChecksum,
+            pasenimoValandos: Math.floor(sargai.amzius / 3_600_000),
+          },
+        });
+
+        assert.equal(rezultatas.merge.pasenes, true, "kelias tikrai ėjo per pasenusio šaką");
+        assert.equal(
+          rezultatas.merge.overrideLaikmena,
+          "operatoriaus_patvirtinimas",
+          "`PRIVACY_MODE` pėdsakas yra patvirtinimas, ne audito įrašas"
+        );
+        assert.equal(rezultatas.verify.suderinta, true, "verifikacija praėjo — cutover leidžiamas");
+      } finally {
+        await pool.end();
+      }
+    });
   });
 });

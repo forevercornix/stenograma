@@ -226,3 +226,107 @@ test("#250: `listAll()` grąžina `deleted` — ABIEJUOSE backend'uose", async (
 
   memoryStore.clear();
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * TRIPWIRE: RESTORE-SPECIFIC TRYNIMO SQL NĖRA
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("#250: DR moduliuose NĖRA nuosavo trynimo SQL — trynimas eina per autoritetą", () => {
+  /**
+   * ⚠️ APIMTIS IŠVEDAMA IŠ `require` GRAFO, NE IŠ RANKINIO SĄRAŠO (Codex, #288).
+   *
+   * Pirmoji redakcija turėjo penkių failų sąrašą, ir jame TRŪKO
+   * `postRestoreReconcile.js`, nors `drCoordinator` jį tiesiogiai kviečia
+   * (`suderinti()` žingsnis). `DELETE FROM jobs` ten būtų praėjęs, o testas
+   * likęs žalias — t. y. sargas gynė tai, ką kažkas prisiminė įrašyti.
+   *
+   * Tai atskira, jau tris kartus šiame repo taisyta KLASĖ: #231 postgres rinkinys
+   * (dabar išvedamas iš `postgresGuard` importo), `redis` masyvas (K1) ir
+   * `backupDocumentation` ribų sąrašas. Todėl apimtis imama iš to, ką
+   * koordinatorius REALIAI importuoja.
+   *
+   * ⚠️ GYLIS — VIENAS, IR TAI SĄMONINGA. Tranzityvi uždarymo aibė įtrauktų
+   * `jobStore`, `auditStore` ir `deletionTombstones` saugyklas, kuriose trynimo
+   * SQL yra TEISĖTAS — jos ir yra autoritetai. Taisyklė nėra „niekur nėra
+   * `DELETE`", o „DR keliui SPECIFINIAI moduliai savo trynimo neturi".
+   *
+   * ⚠️ STATINĖ PATIKRA (§9.2): ji NEĮRODO, kad replay šalina — tai daro
+   * `erasureReplayContract` ir `drRestore.integration`. Ji saugo nuo ANTROS
+   * trynimo semantikos atsiradimo.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  const saknis = path.resolve(__dirname, "..");
+  const koordinatorius = fs.readFileSync(path.join(saknis, "utils/drCoordinator.js"), "utf8");
+
+  /**
+   * ESAMI AUTORITETAI: jiems trynimo SQL yra darbo dalis, tad jie praleidžiami —
+   * bet KIEKVIENAS su priežastimi, ne tyliai.
+   */
+  const AUTORITETAI = {
+    deletionTombstones: "žymų saugykla — jos SQL valdo `erasure_marks` gyvavimo ciklą",
+    auditWrite: "audito rašymo politika — trynimo nevykdo, bet priklauso 7.4 autoritetui",
+    auditLog: "audito žurnalas — `removeBySubjectIdentifier` yra jo atsakomybė",
+    logger: "infrastruktūra",
+  };
+
+  /**
+   * ⚠️ ABI KABUČIŲ FORMOS (Codex, #288).
+   *
+   * ESLint dvigubų kabučių nereikalauja, tad `require('./erasureReplay')` būtų
+   * iškritęs iš apimties, o kiekio patikra vis tiek praeitų — modulis tyliai
+   * dingtų iš sargo. Kontrolė žemiau tikrina abi formas.
+   */
+  const IMPORTO_FORMA = /require\(\s*(['"])\.\/([\w/-]+)\1\s*\)/g;
+
+  const importai = [...koordinatorius.matchAll(IMPORTO_FORMA)].map((m) => m[2]);
+  assert.ok(importai.length >= 7, "importų radimas neturi tyliai susitraukti");
+
+  assert.deepEqual(
+    [...`const a = require('./vienguboms'); const b = require("./dvigubom");`.matchAll(IMPORTO_FORMA)].map(
+      (m) => m[2]
+    ),
+    ["vienguboms", "dvigubom"],
+    "kontrolė: atpažįstamos ABI kabučių formos"
+  );
+
+  const tikrinami = importai.filter((vardas) => !AUTORITETAI[vardas.split("/")[0]]);
+
+  /** ⚠️ KONTROLĖ: `postRestoreReconcile` PRIVALO patekti — būtent jo ir trūko. */
+  assert.ok(
+    tikrinami.includes("postRestoreReconcile"),
+    "7.6b suderinimas yra DR kelyje, tad jo apimtis privaloma"
+  );
+
+  const failai = [
+    ...tikrinami.map((v) => `utils/${v}.js`),
+    "utils/drCoordinator.js",
+    "scripts/dr-restore.mjs",
+  ];
+
+  const DRAUDZIAMA = /\b(DELETE\s+FROM|TRUNCATE\s+TABLE|TRUNCATE\s+\w|DROP\s+TABLE)\b/i;
+
+  function beKomentaru(tekstas) {
+    return tekstas.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  }
+
+  for (const santykinis of failai) {
+    const turinys = beKomentaru(fs.readFileSync(path.join(saknis, santykinis), "utf8"));
+
+    assert.equal(
+      DRAUDZIAMA.test(turinys),
+      false,
+      `${santykinis}: rastas nuosavas trynimo SQL — DR kelias privalo eiti per ` +
+        "`jobErasure.eraseJob()` ir `deletionTombstones`, ne turėti antrą semantiką"
+    );
+  }
+
+  /** ⚠️ KONTROLĖS: patikra tikrai kažką mato, o komentarų kirpimas nesuėda kodo. */
+  assert.equal(DRAUDZIAMA.test("await c.query('DELETE FROM jobs WHERE id = $1')"), true);
+  assert.equal(beKomentaru("/* DELETE FROM jobs */ const x = 1;").includes("DELETE"), false);
+  assert.ok(
+    beKomentaru(fs.readFileSync(path.join(saknis, "utils/erasureReplay.js"), "utf8")).includes("eraseJob"),
+    "nukirpus komentarus kodas privalo likti"
+  );
+});

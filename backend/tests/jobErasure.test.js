@@ -55,9 +55,18 @@ function loadEraseJob({
     },
 
     "utils/fileStorage": {
+      /**
+       * ⚠️ DUBLIS GRĄŽINA `boolean`, KAIP IR TIKRASIS `del()` (#250 radinys).
+       *
+       * Anksčiau jis negrąžindavo nieko, o `eraseJob` `storageRemoved` statė
+       * besąlygiškai — tad neištikimas dublis dengė tai, kad kodas ignoruoja
+       * `del()` rezultatą. `fileStorage.del()` grąžina `true` pašalinus ir
+       * `false`, kai objekto nebuvo (be klaidos).
+       */
       del: async (key) => {
         calls.storageDel.push(key);
         if (fileStorage.throws) throw new Error(fileStorage.throws);
+        return fileStorage.rado !== false;
       },
     },
 
@@ -164,6 +173,30 @@ test("BullMQ: protokolo jobas šalinamas iš PROTOKOLO eilės", async () => {
     assert.deepEqual(calls.transcriptionRemove, []);
     assert.equal(outcome.type, "protocol");
     assert.equal(outcome.criticalFailure, false);
+  } finally {
+    restore();
+  }
+});
+
+test("audio objekto NEBUVO: `storageRemoved` lieka `false`, bet tai NE nesėkmė", async () => {
+  /**
+   * ⚠️ ŠI EILUTĖ SAUGO KVITO TIESĄ (#250).
+   *
+   * `del()` grąžina `false`, kai objekto nėra. Anksčiau `DATA_ERASED` vis tiek
+   * rašė `storage=deleted` — auditas tvirtino veiksmą, kurio nebuvo.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    fileStorage: { rado: false },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: "jau-nebuvo" }));
+
+    assert.deepEqual(calls.storageDel, ["jau-nebuvo"], "bandymas ĮVYKO");
+    assert.equal(outcome.storageRemoved, false, "bet nieko nepašalinta");
+    assert.equal(outcome.criticalFailure, false, "ir tai nėra gedimas");
+    assert.equal(outcome.jobRemoved, true, "job'as vis tiek pašalinamas");
   } finally {
     restore();
   }
@@ -347,5 +380,36 @@ test("tipas imamas iš JOBO, ne iš iškvietimo konteksto", async () => {
     assert.deepEqual(calls.transcriptionRemove, []);
   } finally {
     restore();
+  }
+});
+
+test("`already absent` NĖRA likutis: `source_audio` skaitomas kaip pašalintas", async () => {
+  /**
+   * ⚠️ CODEX RADINYS (#288): `storageRemoved: false` reiškia DVI skirtingas
+   * būsenas, ir jų suplakimas melagingą kvitą pakeičia melagingu likučiu.
+   *
+   * `lifecycleService` `COVERED_CATEGORIES` skaito „ar artefakto nebėra", tad
+   * objekto, kurio jau nebuvo, negalima rodyti kaip `remaining`.
+   */
+  const { eraseJob, restore } = loadEraseJob({ mode: "inline", fileStorage: { rado: false } });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: "jau-nebuvo" }));
+
+    assert.equal(outcome.storageRemoved, false, "nieko nepašalinta");
+    assert.equal(outcome.storageAlreadyAbsent, true, "bet objekto ir NEBUVO");
+  } finally {
+    restore();
+  }
+
+  /** KONTROLĖ: realiai pašalinus abi vėliavos yra priešingos. */
+  const antras = loadEraseJob({ mode: "inline" });
+  try {
+    const outcome = await antras.eraseJob(completedJob({ storageKey: "buvo" }));
+
+    assert.equal(outcome.storageRemoved, true);
+    assert.equal(outcome.storageAlreadyAbsent, false);
+  } finally {
+    antras.restore();
   }
 });
