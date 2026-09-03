@@ -171,6 +171,20 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
     { pattern: /nėra erasure-safe/i, what: "vien restore be §9c nėra erasure-safe" },
     { pattern: /## 9c\. Erasure-safe atkūrimas/i, what: "pilna erasure-safe procedūra dokumentuota" },
     { pattern: /dr-restore\.mjs/, what: "erasure-safe procedūros komandos" },
+    /**
+     * ⚠️ SENOJI ATEITIES FORMA PRIVALO BŪTI NEBERANDAMA (Codex, #288).
+     *
+     * §11 (auditoriui rodomas sąrašas) dar teigė, kad garantija „dar NEGALIOJA"
+     * ir kad replay „ateina su 7.6c" — o 7.6c jau įgyvendintas ir įrodytas.
+     * Ankstesnė šios patikros redakcija to nepagavo: ji ieškojo tik frazės
+     * „nėra erasure-safe", kurią tas pats pasenęs tekstas ir tenkino. Teigiamų
+     * patikrų sąrašui reikėjo NEIGIAMOS eilutės.
+     */
+    {
+      pattern: /(ateina|ateis) su 7\.6c|dar NEGALIOJA/i,
+      what: "pasenusi ateities formuluotė",
+      privalo_nebuti: true,
+    },
     { pattern: /MAX_DUMP_BYTES|256 MB/, what: "pg_dump dydžio riba" },
     /**
      * ⚠️ #262 PERŽIŪRA: dvi garantijos SUSIAURINTOS, ne įgyvendintos.
@@ -191,6 +205,19 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
   ];
 
   for (const limit of knownLimits) {
+    if (limit.privalo_nebuti) {
+      /**
+       * ⚠️ NEIGIAMA EILUTĖ ŠIAME SĄRAŠE (Codex, #288). Dokumentacija negali
+       * vienoje vietoje skelbti procedūrą baigta, o kitoje — laukiama.
+       */
+      assert.equal(
+        limit.pattern.test(doc),
+        false,
+        `runbook'e liko ${limit.what}: skelbiama laukiama tai, kas jau įrodyta`
+      );
+      continue;
+    }
+
     assert.match(doc, limit.pattern, `riba neįvardyta: ${limit.what}`);
   }
 });

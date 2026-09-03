@@ -914,9 +914,12 @@ klaidingų teigiamų ir blokuotų teisėtas kopijas. Riba įvardijama, ne dangst
 
 ✅ Kad kopijos šifruotos (`manifest.encrypted`, algoritmas ir versija).
 ✅ Kad kopijoje nėra eksportų ir redaguotų variantų (politika kildinama iš registro).
-✅ Kad **aplikacijos kopijos** atkūrimas negrąžina ištrintų duomenų — svarbiausia
-#20 garantija. ⚠️ **`pg_dump` atkūrimui ji dar NEGALIOJA** (§9a, §10): ištrynimų
-replay ateina su 7.6c (#250). Iki tol tai eksplicitinė išimtis, ne nutylėjimas.
+✅ Kad atkūrimas negrąžina ištrintų duomenų — svarbiausia #20 garantija.
+Aplikacijos kopijai ji galioja tiesiogiai; `pg_dump` keliui — **tik atlikus §9c**
+(ištrynimų žurnalo suliejimas ir replay). ⚠️ **Vien §9a atkūrimas jos NESUTEIKIA
+ir niekada nesuteiks**: žurnalas pagal konstrukciją gyvena UŽ snapshot'o ribų,
+tad praleidus §9c ištrinti job'ai grįžta. Tai nuolatinė procedūros savybė, ne
+laikina spraga.
 ✅ Kad kopijų **kūrimas** audituojamas su aktoriumi — ir aplikacijos
 (`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`), **kai audito
 saugykla patvari** (`AUDIT_BACKEND=postgres`); su numatytu `memory` įrašas

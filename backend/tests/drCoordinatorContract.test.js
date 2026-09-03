@@ -290,13 +290,24 @@ test("OVERRIDE per `paleisti()`: patvirtinimas PASIEKIA sargą", async () => {
     AUDIT_ID_SALT_ID: "2026-09",
     BACKUP_ENABLED: "true",
     BACKUP_ENCRYPTION_KEY: crypto.randomBytes(32).toString("hex"),
-    /** Langas 0 ms — kiekvienas žurnalas iškart pasenęs, be laikrodžio žaidimų. */
+    /**
+     * ⚠️ 1 ms LANGAS PATS SAVAIME NEPAKANKA (Codex, #288).
+     *
+     * Produkcija pasenusiu laiko `amzius > langas`, tad greitame paleidime
+     * artefaktas gali nespėti „pasenti" ir testas kristų dėl visai kitos
+     * priežasties. Todėl žemiau dar sąmoningai palaukiama — riba peržengiama
+     * DETERMINISTIŠKAI, ne pagal planuoklio nuotaiką.
+     */
     ERASURE_EXPORT_MAX_AGE_MS: "1",
     PRIVACY_MODE: "true",
   });
 
   try {
     const artefaktas = pasenesArtefaktas(DEPLOYMENT);
+
+    /** Peržengiame 1 ms ribą su atsarga — be to `amzius > langas` būtų lenktynės. */
+    await new Promise((r) => setTimeout(r, 25));
+
     const vykdytojas = { query: async () => ({ rows: [{ deployment_id: DEPLOYMENT }] }) };
 
     const bendri = {

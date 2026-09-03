@@ -382,3 +382,34 @@ test("tipas imamas iš JOBO, ne iš iškvietimo konteksto", async () => {
     restore();
   }
 });
+
+test("`already absent` NĖRA likutis: `source_audio` skaitomas kaip pašalintas", async () => {
+  /**
+   * ⚠️ CODEX RADINYS (#288): `storageRemoved: false` reiškia DVI skirtingas
+   * būsenas, ir jų suplakimas melagingą kvitą pakeičia melagingu likučiu.
+   *
+   * `lifecycleService` `COVERED_CATEGORIES` skaito „ar artefakto nebėra", tad
+   * objekto, kurio jau nebuvo, negalima rodyti kaip `remaining`.
+   */
+  const { eraseJob, restore } = loadEraseJob({ mode: "inline", fileStorage: { rado: false } });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: "jau-nebuvo" }));
+
+    assert.equal(outcome.storageRemoved, false, "nieko nepašalinta");
+    assert.equal(outcome.storageAlreadyAbsent, true, "bet objekto ir NEBUVO");
+  } finally {
+    restore();
+  }
+
+  /** KONTROLĖ: realiai pašalinus abi vėliavos yra priešingos. */
+  const antras = loadEraseJob({ mode: "inline" });
+  try {
+    const outcome = await antras.eraseJob(completedJob({ storageKey: "buvo" }));
+
+    assert.equal(outcome.storageRemoved, true);
+    assert.equal(outcome.storageAlreadyAbsent, false);
+  } finally {
+    antras.restore();
+  }
+});

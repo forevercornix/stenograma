@@ -609,9 +609,43 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     );
   });
 
+  /**
+   * ⚠️ D5 LYGINA BŪSENĄ, NE `COUNT(*)` (Codex, #288).
+   *
+   * Skaičiai nepasikeistų ir tada, jei pakartojimas perrašytų rezultatą, pakeistų
+   * job'o statusą, atvertų žymą ar pastumtų kopijų horizontą. Tad imamas turinys:
+   * job'ų statusai ir fazės, rezultatų raktai, VISI žymų stulpeliai (jie
+   * importuojami deterministiškai — `updated_at = EXCLUDED.updated_at`), sesijų
+   * revokacijos laikas ir horizontas.
+   */
+  async function busenosPjuvis() {
+    const uzklausos = {
+      jobs: "SELECT id, status, phase FROM jobs ORDER BY id",
+      job_results: "SELECT job_id FROM job_results ORDER BY job_id",
+      erasure_marks:
+        "SELECT job_id, status, reason, actor_kind, marked_at, updated_at, completed_at, " +
+        "attempts, last_failure_kind, claim_token FROM erasure_marks ORDER BY job_id",
+      sessions: "SELECT id, user_id, revoked_at FROM sessions ORDER BY id",
+      backup_horizon: "SELECT * FROM backup_horizon",
+    };
+
+    const pjuvis = {};
+    for (const [vardas, sql] of Object.entries(uzklausos)) {
+      const { rows } = await vykdyti(TIKSLO_URL, sql);
+      pjuvis[vardas] = rows;
+    }
+    return pjuvis;
+  }
+
   await t.test("9. IDEMPOTENTIŠKUMAS: antras paleidimas būsenos nekeičia", async () => {
+    const priesBusena = await busenosPjuvis();
     const priesJobai = await eiluciuSkaicius(TIKSLO_URL, "jobs");
     const priesZymos = await eiluciuSkaicius(TIKSLO_URL, "erasure_marks");
+
+    /** KONTROLĖ: pjūvis tikrai kažką mato — tuščias palyginimas nieko neįrodytų. */
+    assert.ok(priesBusena.jobs.length > 0, "job'ų yra");
+    assert.ok(priesBusena.erasure_marks.length > 0, "žymų yra");
+    assert.ok(priesBusena.sessions.length > 0, "sesijų yra");
 
     const antras = await suAplinka(tiksloEnv, async () => {
       const pool = new Pool({ connectionString: TIKSLO_URL });
@@ -634,11 +668,93 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     assert.equal(await eiluciuSkaicius(TIKSLO_URL, "jobs"), priesJobai);
     assert.equal(await eiluciuSkaicius(TIKSLO_URL, "erasure_marks"), priesZymos);
 
+    assert.deepEqual(
+      await busenosPjuvis(),
+      priesBusena,
+      "persistentinė būsena po antro paleidimo privalo SUTAPTI, ne tik sutapti skaičiais"
+    );
+
     const { rows } = await vykdyti(
       TIKSLO_URL,
       "SELECT count(*)::int AS n FROM audit_log WHERE event = 'ERASURE_REPLAYED' " +
         `AND ${auditoLaukas("outcome")} = 'erasure_replayed'`
     );
     assert.equal(rows[0].n, 1, "antras paleidimas antro ištrynimo kvito NERAŠO");
+  });
+
+  await t.test("10. PASENĘS ŽURNALAS `PRIVACY_MODE`: patvirtinimas veda iki `verify`", async () => {
+    /**
+     * ⚠️ TEIGIAMAS OVERRIDE KELIAS PER TIKRĄ SEKĄ (Codex, #288).
+     *
+     * Kontraktinis testas įrodo tik ARGUMENTO PERDAVIMĄ (jis dirba su nepasiekiama
+     * baze). Čia tikrinama tai, dėl ko ta šaka apskritai egzistuoja: `PRIVACY_MODE`
+     * diegimas su pasenusiu žurnalu privalo turėti kelią, kuris BAIGIASI —
+     * suliejimu, replay, suderinimu ir `verify`.
+     *
+     * Be šio žingsnio būtų padengtos tik atmetimo pusės, o kelias, dėl kurio jos
+     * egzistuoja, liktų neįrodytas.
+     */
+    const pasenesEnv = {
+      ...tiksloEnv,
+      PRIVACY_MODE: "true",
+      /** Kiekvienas žurnalas iškart pasenęs — laikrodžio žaidimų nereikia. */
+      ERASURE_EXPORT_MAX_AGE_MS: "1",
+    };
+
+    await suAplinka(pasenesEnv, async () => {
+      const pool = new Pool({ connectionString: TIKSLO_URL });
+      try {
+        const bendri = {
+          targetUrl: TIKSLO_URL,
+          artefaktas,
+          vykdytojas: pool,
+          actor: "pasenusio-testas",
+          env: process.env,
+        };
+
+        /** (a) BE `--allow-stale` — sustoja ties šviežumo riba. */
+        await assert.rejects(
+          () => drCoordinator.paleisti(bendri),
+          (k) => k.code === "DR_LEDGER_STALE",
+          "pasenęs žurnalas sustabdo atkūrimą"
+        );
+
+        /** (b) Su vėliava, BET be patvirtinimo — `PRIVACY_MODE` reikalauja pėdsako. */
+        await assert.rejects(
+          () => drCoordinator.paleisti({ ...bendri, leistiPasenusi: true }),
+          (k) => k.code === "DR_STALE_OVERRIDE_UNCONFIRMED",
+          "audito įrašas slopinamas, tad reikia patvirtinimo reikšmėmis"
+        );
+
+        /** (c) Su teisingu patvirtinimu — seka nueina IKI GALO. */
+        const sargai = await drCoordinator.patikrintiSargus({
+          targetUrl: TIKSLO_URL,
+          artefaktas,
+          vykdytojas: pool,
+          env: process.env,
+          leistiPasenusi: true,
+        });
+
+        const rezultatas = await drCoordinator.paleisti({
+          ...bendri,
+          leistiPasenusi: true,
+          patvirtinimas: {
+            deploymentId: sargai.deploymentId,
+            zurnaloChecksum: sargai.zurnaloChecksum,
+            pasenimoValandos: Math.floor(sargai.amzius / 3_600_000),
+          },
+        });
+
+        assert.equal(rezultatas.merge.pasenes, true, "kelias tikrai ėjo per pasenusio šaką");
+        assert.equal(
+          rezultatas.merge.overrideLaikmena,
+          "operatoriaus_patvirtinimas",
+          "`PRIVACY_MODE` pėdsakas yra patvirtinimas, ne audito įrašas"
+        );
+        assert.equal(rezultatas.verify.suderinta, true, "verifikacija praėjo — cutover leidžiamas");
+      } finally {
+        await pool.end();
+      }
+    });
   });
 });

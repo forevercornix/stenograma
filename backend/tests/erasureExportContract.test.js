@@ -271,8 +271,25 @@ test("#250: DR moduliuose NĖRA nuosavo trynimo SQL — trynimas eina per autori
     logger: "infrastruktūra",
   };
 
-  const importai = [...koordinatorius.matchAll(/require\("\.\/([\w/-]+)"\)/g)].map((m) => m[1]);
+  /**
+   * ⚠️ ABI KABUČIŲ FORMOS (Codex, #288).
+   *
+   * ESLint dvigubų kabučių nereikalauja, tad `require('./erasureReplay')` būtų
+   * iškritęs iš apimties, o kiekio patikra vis tiek praeitų — modulis tyliai
+   * dingtų iš sargo. Kontrolė žemiau tikrina abi formas.
+   */
+  const IMPORTO_FORMA = /require\(\s*(['"])\.\/([\w/-]+)\1\s*\)/g;
+
+  const importai = [...koordinatorius.matchAll(IMPORTO_FORMA)].map((m) => m[2]);
   assert.ok(importai.length >= 7, "importų radimas neturi tyliai susitraukti");
+
+  assert.deepEqual(
+    [...`const a = require('./vienguboms'); const b = require("./dvigubom");`.matchAll(IMPORTO_FORMA)].map(
+      (m) => m[2]
+    ),
+    ["vienguboms", "dvigubom"],
+    "kontrolė: atpažįstamos ABI kabučių formos"
+  );
 
   const tikrinami = importai.filter((vardas) => !AUTORITETAI[vardas.split("/")[0]]);
 

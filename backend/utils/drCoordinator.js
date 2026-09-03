@@ -249,8 +249,9 @@ async function sulieti({
    * sąmoningai (procedūros faktas), bet ŠIS kelias fiksuoja sprendimą sąmoningai
    * rizikuoti, tad sąlyga yra KELIO, ne įvykio klasifikacijos.
    */
+  let override = null;
   if (sargai.pasenes) {
-    await _uzfiksuotiOverride({ sargai, zurnalas, actor, patvirtinimas });
+    override = await _uzfiksuotiOverride({ sargai, zurnalas, actor, patvirtinimas });
   }
 
   const vietinesSarasas = await tombstones.listAll();
@@ -286,6 +287,16 @@ async function sulieti({
     praleistos: planas.praleisti,
     nukirptiClaimai: planas.nukirptiClaimai,
     horizontas,
+    /**
+     * ⚠️ PASENIMO FAKTAS KELIAUJA SU REZULTATU, NE LIEKA LOGE.
+     *
+     * Operatoriui ir DR ataskaitai svarbu, ar atkūrimas ėjo per pasenusio
+     * žurnalo šaką IR kokia laikmena buvo pėdsakas — kitaip tą patį tektų
+     * atkurti iš audito arba iš atminties. `null` reiškia „žurnalas buvo šviežias".
+     */
+    pasenes: sargai.pasenes,
+    overrideLaikmena: override ? override.laikmena : null,
+    pasenimoValandos: override ? override.pasenimoValandos : null,
   };
 }
 

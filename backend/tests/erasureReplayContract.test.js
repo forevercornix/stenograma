@@ -421,15 +421,42 @@ test("FAIL-CLOSED: nepilna saugykla atmetama PRIEŠ pirmą šalinimą", async ()
   assert.equal(outcome.jobRemoved, true);
 });
 
-test("AUDIO: nepašalintas objektas registruojamas, bet nėra nei nesėkmė, nei revive", async () => {
+test("AUDIO: atidėto valymo skola registruojama, bet nėra nei nesėkmė, nei revive", async () => {
   await paruosti();
 
   /**
-   * ⚠️ `fileStorage.del()` NESANT OBJEKTO GRĄŽINA `false` BE KLAIDOS.
+   * ⚠️ SIGNALAS IMAMAS IŠ `audio_cleanup_pending`, NE IŠ `del()` REZULTATO.
    *
-   * Tad job'as su `storageKey`, kurio failo nėra, ištrinamas sėkmingai, o audio
-   * pusė lieka „neaišku". Be atskiro įrašo tai būtų tyla; be šios eilutės
-   * ataskaita tvirtintų pilną pašalinimą, kurio įrodymo neturi.
+   * Nesant objekto `fileStorage.del()` grąžina `false` be klaidos — tai ĮPRASTAS
+   * pakartotinio trynimo atvejis, ne likutis. Signalas, degantis normaliu atveju,
+   * nustoja būti signalu; tikra skola yra atidėtas valymas atkurtoje eilutėje.
+   */
+  const jobId = naujasId();
+  const kitur = new Map([
+    [jobId, { id: jobId, type: "transcription", storageKey: null, audio_cleanup_pending: true }],
+  ]);
+
+  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
+
+  const rez = await erasureReplay.replay({
+    zymos: await tombstones.listAll(),
+    actor: "op",
+    store: saugyklaSuAibe(kitur),
+  });
+
+  assert.deepEqual(rez.istrinta, [jobId], "job'as IŠTRINTAS — tai ne revive");
+  assert.deepEqual(rez.nesekmes, [], "ir ne nesėkmė");
+  assert.deepEqual(rez.audioValymoSkola, [jobId], "skola UŽREGISTRUOTA");
+  assert.equal((await tombstones.get(jobId)).status, tombstones.TOMBSTONE_STATUS.DELETED);
+});
+
+test("KONTROLĖ: job'as be atidėto valymo į skolos sąrašą NEPATENKA", async () => {
+  await paruosti();
+
+  /**
+   * Be šios pusės patikra galėtų virsti visada-„taip". Job'as TURI `storageKey`,
+   * kurio objekto nėra — būtent tas atvejis, kurį ankstesnė redakcija klaidingai
+   * skaitė kaip likutį.
    */
   const jobId = naujasId();
   const kitur = new Map([
@@ -444,27 +471,6 @@ test("AUDIO: nepašalintas objektas registruojamas, bet nėra nei nesėkmė, nei
     store: saugyklaSuAibe(kitur),
   });
 
-  assert.deepEqual(rez.istrinta, [jobId], "job'as IŠTRINTAS — tai ne revive");
-  assert.deepEqual(rez.nesekmes, [], "ir ne nesėkmė");
-  assert.deepEqual(rez.audioNepasalintas, [jobId], "faktas UŽREGISTRUOTAS");
-  assert.equal((await tombstones.get(jobId)).status, tombstones.TOMBSTONE_STATUS.DELETED);
-});
-
-test("KONTROLĖ: job'as be `storageKey` į audio sąrašą NEPATENKA", async () => {
-  await paruosti();
-
-  /** Be šios pusės ankstesnė patikra galėtų virsti visada-„taip". */
-  const jobId = naujasId();
-  const kitur = new Map([[jobId, { id: jobId, type: "transcription", storageKey: null }]]);
-
-  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
-
-  const rez = await erasureReplay.replay({
-    zymos: await tombstones.listAll(),
-    actor: "op",
-    store: saugyklaSuAibe(kitur),
-  });
-
   assert.deepEqual(rez.istrinta, [jobId]);
-  assert.deepEqual(rez.audioNepasalintas, [], "nėra `storageKey` — nėra ir ko registruoti");
+  assert.deepEqual(rez.audioValymoSkola, [], "nėra atidėto valymo — nėra ir skolos");
 });
