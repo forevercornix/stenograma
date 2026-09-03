@@ -444,6 +444,77 @@ function createErasureMarkStore(pool) {
   async function assertNotBarred(klientas, jobId) {
     return assertNotBarredWithClient(klientas, jobId);
   }
+  /**
+   * VISOS žymos — įskaitant `deleted` (#250, 7.6c).
+   *
+   * ⚠️ `listUnresolved()` EKSPORTUI NEPAKANKA, IR TAI NE DETALĖ. Ji sąmoningai
+   * praleidžia `deleted`, o būtent tos žymos yra 7.6c priežastis: jos įrodo, kad
+   * subjekto duomenų būti negali. Eksportas be jų atkurtų DB be pačių svarbiausių
+   * ištrynimų.
+   *
+   * ⚠️ BE `limit`: eksportas privalo būti PILNAS. Riba čia reikštų tylų
+   * praradimą — būtent tai, ko visa procedūra ir vengia.
+   */
+  async function listAll() {
+    const { rows } = await pool.query(
+      `SELECT ${STULPELIAI} FROM erasure_marks ORDER BY job_id`
+    );
+
+    return rows.map(iIrasa);
+  }
+
+  /**
+   * SULIETOS ŽYMOS ĮRAŠYMAS (#250, 7.6c).
+   *
+   * ⚠️ SPRENDIMAS PRIIMAMAS NE ČIA. Ką rašyti, nusprendžia
+   * `utils/erasureExport.js` (`suliejimoPlanas`) PRIEŠ bet kokį rašymą; ši
+   * funkcija tik vykdo. Antra tvarkos taisyklė SQL'e būtų ta pati dviejų tiesų
+   * klasė, kurią repo jau gaudė.
+   *
+   * ⚠️ `claim_token` VISADA `NULL`. Svetimas žetonas žymi mirusį pre-restore
+   * vykdytoją; jį persistinus autoritetingas kelias grąžintų `IN_PROGRESS`
+   * neribotai.
+   *
+   * ⚠️ LAIKO ŽYMOS IŠSAUGOMOS IŠ EKSPORTO, ne `now()`. `updated_at` yra ir
+   * retencijos raktas (`retencijosRiba`), ir suliejimo tvarkos raktas: perrašius
+   * jį rašymo metu, antras paleidimas matytų „naujesnę" vietinę žymą, o retencija
+   * pailgėtų be priežasties.
+   */
+  async function importuotiZyma(irasas) {
+    const { rows } = await pool.query(
+      `INSERT INTO erasure_marks
+         (job_id, status, reason, actor_kind, marked_at, updated_at, completed_at,
+          attempts, last_failure_kind, claim_token)
+       VALUES ($1, $2, $3, $4, to_timestamp($5 / 1000.0), to_timestamp($6 / 1000.0),
+               CASE WHEN $7::bigint IS NULL THEN NULL ELSE to_timestamp($7 / 1000.0) END,
+               $8, $9, NULL)
+       ON CONFLICT (job_id) DO UPDATE
+          SET status = EXCLUDED.status,
+              reason = EXCLUDED.reason,
+              actor_kind = EXCLUDED.actor_kind,
+              marked_at = LEAST(erasure_marks.marked_at, EXCLUDED.marked_at),
+              updated_at = EXCLUDED.updated_at,
+              completed_at = EXCLUDED.completed_at,
+              attempts = GREATEST(erasure_marks.attempts, EXCLUDED.attempts),
+              last_failure_kind = EXCLUDED.last_failure_kind,
+              claim_token = NULL
+       RETURNING ${STULPELIAI}`,
+      [
+        irasas.jobId,
+        irasas.status,
+        irasas.reason,
+        irasas.actorKind,
+        Number(irasas.requestedAt),
+        Number(irasas.updatedAt),
+        irasas.completedAt === null || irasas.completedAt === undefined ? null : Number(irasas.completedAt),
+        Number(irasas.attempts) || 0,
+        irasas.lastFailureKind || null,
+      ]
+    );
+
+    return iIrasa(rows[0]);
+  }
+
   async function listUnresolved({ olderThanMs = 0, limit = 100 } = {}) {
     const { rows } = await pool.query(
       `SELECT ${STULPELIAI},
@@ -576,6 +647,8 @@ function createErasureMarkStore(pool) {
     assertNotBarred,
     retencijosRiba,
     listUnresolved,
+    listAll,
+    importuotiZyma,
     purgeExpired,
     size,
     clear,

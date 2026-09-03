@@ -170,6 +170,29 @@ const AUDIT_EVENTS = Object.freeze({
    * nepadaro jau commit'into suderinimo neįvykusio, o jo „atsukti" nebūtų kaip.
    */
   POST_RESTORE_RECONCILED: KATEGORIJA.NEBLOKUOJANTIS,
+  /**
+   * ⚠️ IŠTRYNIMŲ REPLAY PO ATKŪRIMO (#250, 7.6c) — BLOKUOJANTIS.
+   *
+   * Skirtingai nei kopijų ir suderinimo įvykiai, šis fiksuoja ASMENS DUOMENŲ
+   * ŠALINIMĄ, tad priklauso tai pačiai šeimai kaip `LIFECYCLE_DELETION`: audito
+   * gedimas čia reiškia ištrynimą be pėdsako, o būtent pėdsakas įrodo, kad
+   * ištrynimas įvyko (#210).
+   *
+   * ⚠️ RAŠOMAS BE `jobId`, KAIP IR `DATA_ERASED` BEI `LIFECYCLE_DELETION`.
+   * Subjektui susieto kvito barjeras (7.4e / #216) neįsileistų, o `eraseJob()`
+   * jį vėliau pašalintų kartu su kitais to subjekto įrašais. Pagrindimas —
+   * `utils/erasureReplay.js`, prie paties rašymo.
+   */
+  ERASURE_REPLAYED: KATEGORIJA.BLOKUOJANTIS,
+  /**
+   * DR koordinatoriaus įvykiai (#250, 7.6c) — NEBLOKUOJANTYS.
+   *
+   * ⚠️ SKIRTUMAS NUO `ERASURE_REPLAYED` SĄMONINGAS: šie fiksuoja PROCEDŪRĄ
+   * (atkūrimas baigtas; priimtas pasenęs žurnalas), ne asmens duomenų šalinimą.
+   * Per-ištrynimo kvitą rašo `ERASURE_REPLAYED`, ir būtent jis yra blokuojantis.
+   */
+  DR_RECOVERY_COMPLETED: KATEGORIJA.NEBLOKUOJANTIS,
+  DR_STALE_LEDGER_ACCEPTED: KATEGORIJA.NEBLOKUOJANTIS,
 });
 
 /**
@@ -246,6 +269,12 @@ const POST_HOC_IVYKIAI = Object.freeze([
   "ERASURE_MARK_RETRIED",
   "ERASURE_MARK_FORCE_RESOLVED",
   "ERASURE_MARK_RELEASED",
+  /**
+   * ⚠️ PRIDĖTA #250 (7.6c). Replay rašo kvitą JAU PO `eraseJob()`, tad audito
+   * gedimas duomenų nebegrąžina — jis tik palieka žymą atvirą, kad kitas
+   * paleidimas galėtų kvitą pakartoti. Post-hoc, ne fail-closed.
+   */
+  "ERASURE_REPLAYED",
   /**
    * Sesija jau atšaukta ir cookie išvalytas, kai rašomas `LOGOUT`. Atmesti
    * atsijungimo nebegalima - o ir nereikėtų: neatšaukta sesija būtų blogesnė

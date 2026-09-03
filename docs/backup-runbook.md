@@ -589,15 +589,19 @@ perjungti negalima.
 nei „offline", nei „galima" — tad riba egzistavo tik kaip numanoma. Numanoma riba
 yra ta pati klasė kaip nedokumentuota: operatorius jos nemato.
 
-### ⚠️ Ši procedūra dar NĖRA erasure-safe
+### ⚠️ Vien šis žingsnis NĖRA erasure-safe
 
 Atkūrimas **prikelia po kopijos ištrintus job'us**. Ištrynimo žymos
-(`erasure_marks`, 7.5a) egzistuoja, bet atkūrimo kelias jų dar **netaiko**, o
-ištrynimų replay ateis su 7.6c (#250).
+(`erasure_marks`, 7.5a) gyvena toje pačioje bazėje, tad senas snapshot'as
+grąžina ir duomenis, IR būseną „ištrynimo nebuvo".
 
 Praktinė pasekmė: jei tarp kopijos ir atkūrimo kas nors pasinaudojo teise būti
-pamirštam, po atkūrimo jo duomenys grįžta. Iki 7.6c uždarymo atkūrimą galima
-vykdyti tik su rankiniu ištrynimų sąrašo patikrinimu.
+pamirštam, po atkūrimo jo duomenys grįžta.
+
+⚠️ **Tai ištaiso §9c, ir tik jis.** `pg-backup.mjs restore` erasure-safe NĖRA ir
+netaps — ištrynimų žurnalas gyvena UŽ snapshot'o ribų, tad jį sulieti ir
+pakartoti gali tik atskiras žingsnis. Praleidus §9c, atkūrimas lieka tiksliai
+toks, koks aprašytas šioje pastraipoje.
 
 ## 9b. Post-restore aplikacinis suderinimas — 7.6b
 
@@ -615,28 +619,17 @@ node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_UR
 # 2. Schemos patikra
 DATABASE_URL="$TIKSLO_URL" npm --prefix backend run doctor
 
-# ⚠️ 2b. IŠTRYNIMŲ PATIKRA — kol nėra 7.6c (#250), RANKINIS ŽINGSNIS
+# ⚠️ 2b-4. IŠTRYNIMAI, SUDERINIMAS IR VERIFIKACIJA — VIENA KOMANDA (§9c)
 #
-#    Suderinimas SĄMONINGAI praleidžia job'us su ištrynimo žyma ir NEVYKDO
-#    ištrynimų replay. Vadinasi po snapshot'o ištrinti duomenys atkurtoje bazėje
-#    lieka. Prieš 3 žingsnį operatorius privalo RANKINIU BŪDU patikrinti
-#    ištrynimų sąrašą nuo `snapshotTime` iki dabar ir nuspręsti, ar cutover
-#    apskritai galimas.
-#
-#    ⚠️ ČIA BUS ĮTERPTAS 7.6c: `tombstone merge → erasure replay`, PRIEŠ
-#    suderinimą, ne po jo. Iki tol šis žingsnis yra procedūrinis.
-
-# 3. Suderinimas — sesijos ir in-flight job'ai (ŠIS žingsnis)
-DATABASE_URL="$TIKSLO_URL" node backend/scripts/post-restore-reconcile.mjs \
-  run --target "$TIKSLO_URL" --actor "$USER"
-
-# 4. Verifikacija — atskiras atsakymas „ar galima startuoti"
-DATABASE_URL="$TIKSLO_URL" node backend/scripts/post-restore-reconcile.mjs \
-  verify --target "$TIKSLO_URL"
+#    `dr-restore.mjs run` atlieka juos SEKA: žymų suliejimas → ištrynimų replay →
+#    7.6b suderinimas → verifikacija. Tvarka yra kontrakto dalis, ne pasirinkimas:
+#    suderinimas PRIEŠ replay terminalizuotų darbą su jau ištrintais duomenimis.
+DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs \
+  run --in zurnalas.json --target "$TIKSLO_URL" --actor "$USER"
 
 # 5. Tik dabar — aplikacijos startas ir srauto perjungimas (cutover)
-#    ⚠️ TIK jei 2b žingsnis atsakė, kad po snapshot'o ištrintų duomenų nėra
-#    arba jie pašalinti rankiniu būdu. `verify` apie ištrynimus NIEKO nesako.
+#    ⚠️ TIK jei §9c grąžino 0. Atskiras patikrinimas:
+DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs verify --target "$TIKSLO_URL"
 ```
 
 ### ⚠️ VIENA jungties forma: `DATABASE_URL` **arba** `PG*`, ne abi
@@ -748,6 +741,106 @@ saugyklos. Nesutapimas duoda `RECONCILE_TARGET_MISMATCH`, o ne PostgreSQL režim
 
 ---
 
+## 9c. Erasure-safe atkūrimas — 7.6c
+
+⚠️ **KODĖL ATSKIRAS ŽINGSNIS, O NE KOPIJOS DALIS.** Ištrynimų žurnalas privalo
+gyventi UŽ snapshot'o ribų. Būdamas jo viduje, jis grįžtų kartu su duomenimis —
+t. y. atkūrimas atkurtų ir būseną „ištrynimo nebuvo". Todėl žurnalas
+eksportuojamas atskirai, PRIEŠ kiekvieną kopiją.
+
+### Eksportas (kartu su kopijos kadencija)
+
+```bash
+node backend/scripts/dr-restore.mjs export --out zurnalas.json --actor "$USER"
+```
+
+Artefaktas šifruojamas tuo pačiu AES-256-GCM keliu kaip kopija (7.6a) ir neša
+**diegimo tapatybę** (`deployment_identity`). `job_id` plaintext'e nėra: žurnalas
+yra asmens duomenys.
+
+⚠️ **Eksporto kadencija IR YRA RPO.** Prarandami ištrynimai, įvykę po paskutinio
+eksporto. Numatytoji riba — 24 h; senesnį žurnalą koordinatorius atmeta
+(`DR_LEDGER_STALE`).
+
+### Atkūrimo seka
+
+```bash
+# 1. Atkūrimas į TUŠČIĄ bazę (§9a) ir schemos patikra (§9b, 1-2 žingsniai)
+# 2. Pilna seka: suliejimas → replay → suderinimas → verifikacija
+DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs \
+  run --in zurnalas.json --target "$TIKSLO_URL" --actor "$USER"
+
+# 3. Cutover leidžiamas tik po 0 exit kodo
+DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs verify --target "$TIKSLO_URL"
+```
+
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida (fail-closed)
+· `3` `verify`: dar NESUDERINTA.
+
+### Ką daro suliejimas (D4)
+
+| Situacija | Sprendimas |
+|---|---|
+| Žyma tik žurnale | Įrašoma į bazę |
+| Abi pusės, viena terminali | **Terminali laimi** — ištrynimas neatšaukiamas |
+| Abi neterminalės | Laimi vėlesnis **eksporto** `updatedAt`; lygiosios palieka vietinį |
+| `claim_token` žurnale | **Nukerpamas** — pretenzija priklausė mirusiam procesui |
+| Kopijų horizontas | Imamas **maksimumas** (monotoniškas) |
+
+Po suliejimo replay kiekvienam ID vykdo TĄ PATĮ `jobErasure.eraseJob()`, kurį
+naudoja gyvas trynimas. `lifecycleService.deleteJobArtefacts()` čia netinka: jo
+trys trumpieji keliai (`tombstone_unresolved`, `already_deleted`, `in_progress`)
+po DR pataiko būtent į mūsų atvejį ir job'ą **paliktų**.
+
+### ⚠️ Pasenęs žurnalas: kaip tęsti teisėtai
+
+Sargas turi būti įveikiamas teisėtai, kitaip jį apeis neteisėtai. Radęs
+`DR_LEDGER_STALE`, `dr-restore.mjs` išveda **mašininį bloką su tiksliomis
+reikšmėmis** ir pakartojamą komandą:
+
+```bash
+node backend/scripts/dr-restore.mjs run --in zurnalas.json --target "$TIKSLO_URL" \
+  --actor "$USER" --allow-stale
+```
+
+Priėmimas visada palieka pėdsaką, ir laikmena priklauso nuo režimo:
+
+| Režimas | Pėdsakas | Klaida be jo |
+|---|---|---|
+| Įprastas | `DR_STALE_LEDGER_ACCEPTED` audito įrašas | `DR_STALE_OVERRIDE_UNRECORDED` |
+| `PRIVACY_MODE` | Operatoriaus patvirtinimas **reikšmėmis** | `DR_STALE_OVERRIDE_UNCONFIRMED` |
+
+`PRIVACY_MODE` režime auditas slopinamas sąmoningai, tad pėdsaku tampa
+patvirtinimas: reikia perduoti `--confirm-deployment`, `--confirm-checksum` ir
+`--confirm-stale-hours` su reikšmėmis iš išvesto bloko. `--yes` tipo vėliavos
+nėra: ji neįrodytų, kad operatorius matė pasenimo dydį.
+
+⚠️ **Patvirtinimas lyginamas VALANDOMIS**, tad jis galioja iki valandos pabaigos.
+Milisekundžių tikslumas sargą padarytų neįveikiamą teisėtai.
+
+### ⚠️ Kilmės patikra tikrina DUOMENŲ kilmę, ne aplinką
+
+`deployment_identity` keliauja su dump'u, tad atkurta bazė turi ŠALTINIO
+tapatybę — būtent todėl tikra avarija (kitas hostas, tie patys duomenys) praeina
+tyliai, o svetimas žurnalas krenta (`ERASURE_FOREIGN_LEDGER`).
+
+Iš to seka dvi ribos, kurias operatorius turi žinoti:
+
+- staging, atkurtas iš produkcijos dump'o, turi **produkcijos** tapatybę, tad
+  produkcijos žurnalas jam tinka (duomenys tie patys) — aplinkos apsaugos čia
+  **nėra**;
+- du klonai iš to paties dump'o turi tą patį ID, tad vieno klono žurnalas
+  praeina prieš kitą.
+
+### Auditas po atkūrimo
+
+`audit_log` į kopiją neįtraukiamas (`--exclude-table-data`), tad `ERASURE_REPLAYED`
+ir `DR_RECOVERY_COMPLETED` gula į **gyvą** audito saugyklą jau po atkūrimo — jų
+dump'e nebus. Kvitai rašomi **be `job_id`**: subjektui susieto įrašo apie ką tik
+ištrintą subjektą neįsileistų erasure barjeras (7.4e), o ir jį patį pašalintų
+kitas to paties job'o ištrynimas. Per-subjekto įrodymas yra `DATA_ERASED`, kurį
+rašo pats `eraseJob()`.
+
 ## 10. Žinomos ribos
 
 | Riba | Poveikis | Kur spręsti |
@@ -760,12 +853,14 @@ saugyklos. Nesutapimas duoda `RECONCILE_TARGET_MISMATCH`, o ne PostgreSQL režim
 | Paslapčių patikra *best-effort* | Neaptinka rotuotų ar kitos aplinkos paslapčių | Slaptų duomenų skeneris |
 | Serveris kopijų nesaugo | Perkėlimas ir saugojimas — operatoriaus | Kopijų saugyklos posistemė |
 | **`pg_dump` kopija ribojama `MAX_DUMP_BYTES` (256 MB)** | Didesnė bazė krinta su `PG_DUMP_TOO_LARGE` | Srautinis šifravimas — ne 7.6a |
-| **`pg_dump` atkūrimas NĖRA erasure-safe** | Prikelia po kopijos ištrintus job'us | Ištrynimų replay — 7.6c (#250) |
+| **`pg_dump` atkūrimas vienas NĖRA erasure-safe** | Prikelia po kopijos ištrintus job'us, jei praleistas §9c | Sąmoninga konstrukcija: žurnalas gyvena už snapshot'o |
+| **Prarandami ištrynimai po paskutinio eksporto** | Numatytoji kadencija — iki 24 h; rečiau eksportuojant daugiau | Dažnesnis `dr-restore.mjs export` |
+| **Kilmės patikra tikrina duomenų, ne aplinkos tapatybę** | Produkcijos žurnalas praeina prieš staging'ą, atkurtą iš produkcijos dump'o | Sąmoninga riba — žr. §9c |
 | **`pg_dump` ATKŪRIMAS audito žurnale nefiksuojamas** | Atkūrimo faktas lieka tik operatoriaus runbook'o įraše | Sąmoningas sprendimas, ne spraga — žr. žemiau |
 | **Paslapčių skeneris `pg_dump` turiniui netaikomas** | Į kopiją patekusi paslaptis neaptinkama | Sąmoningas sprendimas — žr. žemiau |
 | **Su `AUDIT_BACKEND=memory` kūrimo auditas neišlieka** | `PG_DUMP_BACKUP_CREATED` dingsta komandai pasibaigus; komanda įspėja | `AUDIT_BACKEND=postgres` |
 | **Post-restore suderinimo riba yra procedūrinė** | Serverį galima paleisti nesuderinus — `verify` yra patikra, ne sargas | Suderinimo žyma su starto patikra (#279) |
-| **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami | Ištrynimų replay — 7.6c (#250) |
+| **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami 7.6b žingsnyje | Uždaro §9c replay, vykdomas PRIEŠ suderinimą |
 | **Job'ų autoritetas šiandien nėra PostgreSQL** | 7.2a barjeras: suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | 7.2a aktyvavimo barjero atidarymas (#281) |
 | **`PG*`-only diegimas neturi nė vienos PostgreSQL ašies** | `post-restore-reconcile` krenta su `RECONCILE_BACKEND_NOT_POSTGRES` | Sesijų atranka turi priimti `PG*` (#282) |
 | **`options`/`search_path` skirtumas = kita bazė** | Vienodi DSN su skirtingu `search_path` laikomi SKIRTINGAIS taikiniais | Sąmoninga fail-closed kryptis |

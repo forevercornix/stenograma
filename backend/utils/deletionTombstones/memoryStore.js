@@ -174,6 +174,45 @@ async function get(jobId) {
  * ⚠️ `deleted` ČIA NEPATENKA. Užstrigusi žyma yra `pending` arba `failed`;
  * terminalės sąraše tik trukdytų.
  */
+/**
+ * VISOS žymos — įskaitant `deleted` (#250, 7.6c).
+ *
+ * ⚠️ PARITETAS SU POSTGRES SĄMONINGAS. Žymų ašis 7.6c'e turi savo verdiktą
+ * („žymos atmintyje" yra ATSKIRA klaida, ne ta pati kaip „ne ta bazė"), tad
+ * atmintinis backend'as privalo mokėti tą patį paviršių — kitaip ta ašis liktų
+ * be dangos, ir kontraktinis testas jos net neiškviestų.
+ */
+function listAll() {
+  return [...zymos.values()].sort((a, b) => String(a.jobId).localeCompare(String(b.jobId))).map(kopija);
+}
+
+/**
+ * Sulietos žymos įrašymas — sprendimą priima `utils/erasureExport.js`.
+ *
+ * ⚠️ `claimToken` VISADA `null`: svetimas žetonas žymi mirusį pre-restore
+ * vykdytoją. Laiko žymos imamos IŠ EKSPORTO, ne `Date.now()` — jos yra ir
+ * retencijos, ir suliejimo tvarkos raktas.
+ */
+function importuotiZyma(irasas) {
+  const esamas = zymos.get(irasas.jobId) || null;
+
+  const naujas = {
+    jobId: irasas.jobId,
+    status: irasas.status,
+    reason: irasas.reason,
+    actorKind: irasas.actorKind,
+    requestedAt: esamas ? Math.min(Number(esamas.requestedAt), Number(irasas.requestedAt)) : Number(irasas.requestedAt),
+    updatedAt: Number(irasas.updatedAt),
+    completedAt: irasas.completedAt === null || irasas.completedAt === undefined ? null : Number(irasas.completedAt),
+    attempts: Math.max(Number(esamas ? esamas.attempts : 0) || 0, Number(irasas.attempts) || 0),
+    lastFailureKind: irasas.lastFailureKind || null,
+    claimToken: null,
+  };
+
+  zymos.set(naujas.jobId, naujas);
+  return kopija(naujas);
+}
+
 async function listUnresolved({ olderThanMs = 0, limit = 100, now = Date.now() } = {}) {
   const riba = now - olderThanMs;
 
@@ -296,6 +335,8 @@ module.exports = {
   transitionOverride,
   get,
   listUnresolved,
+  listAll,
+  importuotiZyma,
   purgeExpired,
   size,
   clear,

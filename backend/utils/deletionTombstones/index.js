@@ -471,6 +471,30 @@ async function assertNotBarred(klientas, jobId) {
 }
 
 /** Neterminalės žymos su amžiumi – operatoriaus matomumo kelias (#183). */
+/**
+ * VISOS žymos eksportui (#250, 7.6c) — įskaitant `deleted`.
+ *
+ * ⚠️ ATSKIRAS METODAS, NE `listUnresolved()` VĖLIAVA. Ta funkcija turi savo
+ * semantiką (operatoriaus „kas įstrigo" rodinys) ir amžiaus/limito parametrus;
+ * eksportui reikia PILNOS aibės be ribų, o dvi prasmės viename metode reikštų,
+ * kad kvietėjas turi žinoti, kurią gauna.
+ */
+async function listAll() {
+  await ensureInit();
+  return store.listAll();
+}
+
+/**
+ * Sulietos žymos įrašymas (#250, 7.6c).
+ *
+ * ⚠️ SPRENDIMĄ PRIIMA `utils/erasureExport.js`. Fasadas jo nekartoja: čia tik
+ * `ensureInit()` ir perdavimas saugyklai.
+ */
+async function importuotiZyma(irasas) {
+  await ensureInit();
+  return store.importuotiZyma(irasas);
+}
+
 async function listUnresolved(options = {}) {
   await ensureInit();
   return store.listUnresolved(options);
@@ -662,6 +686,8 @@ module.exports = {
   refreshBackupHorizon,
   assertNotBarred,
   listUnresolved,
+  listAll,
+  importuotiZyma,
   retentionMs,
   purgeExpired,
   size,

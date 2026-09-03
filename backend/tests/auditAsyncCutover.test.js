@@ -152,6 +152,12 @@ test("POST-HOC: visi po-veiksmo įvykiai įvardyti eksplicitiškai ir LIEKA blok
        */
       "ERASURE_MARK_RELEASED",
       "ERASURE_MARK_RETRIED",
+      /**
+       * ⚠️ PRIDĖTA #250 (7.6c). Kvitas rašomas po `eraseJob()`: duomenų jau nėra,
+       * tad audito gedimas apsaugo tik ataskaitą. Žyma tokiu atveju lieka atvira,
+       * ir kitas replay paleidimas kvitą pakartoja.
+       */
+      "ERASURE_REPLAYED",
       "LIFECYCLE_DELETION",
       "LOGOUT",
       "RETENTION_PURGE",
