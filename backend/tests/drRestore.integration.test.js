@@ -421,7 +421,36 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
       "job'as A tebėra — jo žurnalo šis žingsnis nelietė"
     );
 
+    /** IR NIEKAS PO REPLAY NEĮVYKO. */
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "sessions", "WHERE revoked_at IS NULL"),
+      priesSesijos,
+      "sesijos NEREVOKUOTOS — suderinimas nepasiektas"
+    );
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE status IN ('queued','processing')"),
+      priesNeterminaliniai,
+      "job'ai NETERMINALIZUOTI — suderinimas nepasiektas"
+    );
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "audit_log", "WHERE event = 'DR_RECOVERY_COMPLETED'"),
+      0,
+      "atkūrimas NEDEKLARUOTAS"
+    );
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "audit_log", "WHERE event = 'POST_RESTORE_RECONCILED'"),
+      0,
+      "7.6b suderinimas net neprasidėjo"
+    );
+
     /**
+     * ⚠️ ATSTATYMAS — PO SKLIDIMO ASERCIJŲ, NE PRIEŠ JAS.
+     *
+     * Pirmoji redakcija jį įterpė anksčiau, ir CI parodė `expected 2, actual 0`:
+     * sesijas revokavo šis PAVYKĘS paleidimas, o asercija skaitė tai kaip įrodymą,
+     * kad sklidimas neveikia. Testo tvarka yra jo teiginio dalis — matuoti reikia
+     * TOJE būsenoje, apie kurią kalbama.
+     *
      * ⚠️ GEDIMAS ATSTATOMAS PAKARTOJIMU — IR TAI TIKRINAMA, NE NUMANOMA.
      *
      * Atvira žyma NĖRA nekaltas likutis: `patikrinti()` ją mato ir cutover'į
@@ -457,28 +486,6 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
       [jobai.failed.id]
     );
     assert.equal(poAtstatymo.rows[0].status, "deleted", "pakartojimas žymą uždarė");
-
-    /** IR NIEKAS PO REPLAY NEĮVYKO. */
-    assert.equal(
-      await eiluciuSkaicius(TIKSLO_URL, "sessions", "WHERE revoked_at IS NULL"),
-      priesSesijos,
-      "sesijos NEREVOKUOTOS — suderinimas nepasiektas"
-    );
-    assert.equal(
-      await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE status IN ('queued','processing')"),
-      priesNeterminaliniai,
-      "job'ai NETERMINALIZUOTI — suderinimas nepasiektas"
-    );
-    assert.equal(
-      await eiluciuSkaicius(TIKSLO_URL, "audit_log", "WHERE event = 'DR_RECOVERY_COMPLETED'"),
-      0,
-      "atkūrimas NEDEKLARUOTAS"
-    );
-    assert.equal(
-      await eiluciuSkaicius(TIKSLO_URL, "audit_log", "WHERE event = 'POST_RESTORE_RECONCILED'"),
-      0,
-      "7.6b suderinimas net neprasidėjo"
-    );
   });
 
   let pirmas = null;
