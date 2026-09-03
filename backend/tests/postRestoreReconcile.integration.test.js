@@ -426,3 +426,55 @@ test("7.6b D7a: svetima bazė NEPALIEČIAMA — jokio pėdsako", { skip: praleis
     }
   });
 });
+
+test("#280 IV: konfigūracijos klaida NEPALIEKA įsipareigoto darbo", { skip: praleisti(), timeout: 180000 }, async (t) => {
+  /**
+   * ⚠️ TIKRINAMA BŪSENA, NE TVARKA.
+   *
+   * Kol ašys buvo nustatomos PO `COMMIT`, `JOB_STORE_BACKEND=postgres` su
+   * uždarytu 7.2a barjeru duodavo: sesijos revokuotos, job'ai terminalizuoti,
+   * `ROLLBACK` per vėlu, `POST_RESTORE_RECONCILED` neįrašytas, exit 2 —
+   * ĮSIPAREIGOTOS, NEAUDITUOTOS mutacijos, pranešamos kaip nesėkmė. Operatorius
+   * tokioje būsenoje arba kartotų komandą, arba laikytų atkūrimą neįvykusiu.
+   *
+   * Todėl testas tikrina ne „ašys skaičiuojamos anksčiau", o tai, kad po
+   * komandos sesijų ir job'ų būsena NEPAKITUSI — vienintelis dalykas, kuris
+   * skiria taisymą nuo pertvarkymo.
+   */
+  t.after(async () => {
+    await pasalintiDb(SUDERINIMO_URL);
+  });
+
+  await perkurtiDb(SUDERINIMO_URL);
+
+  await suAplinka(SUDERINIMO_URL, async () => {
+    const pool = new Pool({ connectionString: SUDERINIMO_URL });
+
+    try {
+      const { store: sesijuStore, sesijos } = await pripildytiSesijas(pool);
+      await pripildytiJobus(pool);
+
+      const pries = await busena(SUDERINIMO_URL);
+
+      await assert.rejects(
+        () =>
+          reconcile.suderinti({
+            targetUrl: SUDERINIMO_URL,
+            actor: "operatorius-testas",
+            env: { ...process.env, JOB_STORE_BACKEND: "postgres" },
+          }),
+        /JOB_STORE_BACKEND=postgres dar neleidžiamas/
+      );
+
+      assert.deepEqual(await busena(SUDERINIMO_URL), pries, "konfigūracijos klaida negali palikti pakeitimų");
+
+      for (const s of sesijos) {
+        assert.ok(await sesijuStore.touch(s.token, process.env), "sesijos privalo likti aktyvios");
+      }
+
+      assert.deepEqual(await auditoIrasai(SUDERINIMO_URL), [], "nesėkmė evidencijos nepalieka");
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  });
+});

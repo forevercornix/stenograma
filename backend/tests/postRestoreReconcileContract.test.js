@@ -655,3 +655,54 @@ test("#280 II: ašys nustatomos MODULYJE prieš transakciją, ne tik CLI'e", asy
     }
   );
 });
+
+test("#280 IV: dviprasmiška jungties konfigūracija yra KLAIDA, ne interpretacija", () => {
+  /**
+   * ⚠️ KETURI RAUNDAI TAISĖ PO VIENĄ PARAMETRĄ (`--url` vs `PG*`, `?host=`,
+   * `PGPORT`, maišymas) — tai buvo simptomo taisymas. Klausimas yra ne „kaip
+   * parsinti DSN", o „KUR `pg` realiai jungsis", ir su abiem formomis tas
+   * klausimas atsakymo NETURI: prioritetas priklauso nuo to, kas konstruoja
+   * pool'ą.
+   *
+   * Repo sprendimą jau turi priėmęs: `auditStore/backendSelection.js` tą pačią
+   * kombinaciją atmeta. Čia taikomas tas pats principas.
+   */
+  const { PgConnectionError, arDviprasmiskaKonfiguracija, efektyvusJungtiesParametrai } = require("../utils/pgConnection");
+
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: "postgres://u@h/db", PGHOST: "h" }), true);
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: "postgres://u@h/db" }), false);
+  assert.equal(arDviprasmiskaKonfiguracija({ PGHOST: "h" }), false);
+
+  assert.throws(
+    () => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, PGHOST: "db.vidinis" }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_CONNECTION_AMBIGUOUS", "operatoriaus veiksmas kitoks nei prie nesutapimo");
+      return true;
+    }
+  );
+
+  /** ⚠️ KONTROLĖ: be maišymo abi formos privalo VEIKTI — kitaip sargas draustų teisėtas konfigūracijas. */
+  reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS });
+  reconcile.patikrintiSargus("postgres://vartotojas@db.vidinis:5432/stenograma", {
+    PGHOST: "db.vidinis",
+    PGPORT: "5432",
+    PGDATABASE: "stenograma",
+    PGUSER: "vartotojas",
+  });
+
+  /**
+   * ⚠️ `PG*` FORMA SPRENDŽIAMA TA PAČIA FUNKCIJA. Iki šito `PG*` šaka apskritai
+   * nedalyvavo efektyvių parametrų skaičiavime — ji grąžindavo laukus tokius,
+   * kokie yra, be `pg` numatytųjų.
+   */
+  assert.deepEqual(
+    efektyvusJungtiesParametrai({ host: "h", database: "db" }, {}),
+    { host: "h", port: "5432", database: "db" }
+  );
+  assert.deepEqual(
+    efektyvusJungtiesParametrai({ host: "h" }, { PGDATABASE: "iš-aplinkos" }),
+    { host: "h", port: "5432", database: "iš-aplinkos" }
+  );
+
+  assert.ok(new PgConnectionError("x", "PG_CONNECTION_AMBIGUOUS") instanceof Error);
+});

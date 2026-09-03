@@ -639,12 +639,17 @@ DATABASE_URL="$TIKSLO_URL" node backend/scripts/post-restore-reconcile.mjs \
 #    arba jie pašalinti rankiniu būdu. `verify` apie ištrynimus NIEKO nesako.
 ```
 
-### ⚠️ `PG*` diegime `DATABASE_URL` NEPRIDEDAMAS
+### ⚠️ VIENA jungties forma: `DATABASE_URL` **arba** `PG*`, ne abi
 
 Dokumentuotame Compose diegime `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`
-jau nustatyti. Prirašius `DATABASE_URL`, aplinkoje atsiduria **abi** jungties
-formos, ir su rekomenduojamu `AUDIT_BACKEND=postgres` komanda krinta dar prieš
-suderinimą (išmatuota):
+jau nustatyti. Prirašius `DATABASE_URL`, aplinkoje atsiduria **abi** formos, ir
+tada klausimas „į kurią bazę jungiamasi" atsakymo NETURI: prioritetas priklauso
+nuo to, kas konstruoja pool'ą.
+
+⚠️ **Todėl abi formos kartu yra KLAIDA, ne interpretacijos reikalas.** Suderinimas
+krinta su `RECONCILE_CONNECTION_AMBIGUOUS`, kopijos kūrimas — su
+`PG_BACKUP_CONNECTION_AMBIGUOUS`, dar prieš pirmą mutaciją. Tas pats sprendimas
+repo jau galioja auditui (išmatuota):
 
 ```
 AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST.
@@ -659,10 +664,15 @@ node backend/scripts/post-restore-reconcile.mjs \
   run --target "postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE" --actor "$USER"
 ```
 
-⚠️ Tapatumo patikra abi puses sprendžia **tomis pačiomis taisyklėmis kaip `pg`**
-(įskaitant `PG*` fallback'ą), tad toks `--target` sutampa su tuo, prie ko realiai
-jungiamasi. Praleistas `PGPORT` ar `PGHOST` čia nėra „numatytoji reikšmė" — jis
-imamas iš tos pačios aplinkos.
+⚠️ Tapatumo patikra abi puses sprendžia **tomis pačiomis taisyklėmis kaip `pg`**:
+
+```
+val(key, config) = config[key] || process.env["PG" + KEY] || defaults[key]
+```
+
+(`pg/lib/connection-parameters.js:5-17`; `defaults` yra STATINIAI ir aplinkos
+neskaito). Todėl DSN be porto reiškia ne „5432", o **„portas iš aplinkos, jei
+yra"** — praleistas `PGPORT` nėra numatytoji reikšmė, o paveldėta.
 
 Exit kodai: `0` suderinta (arba nieko nereikėjo) · `1` naudojimo klaida ·
 `2` procedūros klaida · `3` (`verify`) **bazė dar NĖRA suderinta** ·

@@ -438,7 +438,21 @@ function patikrintiZymuTapatuma(databaseUrl, env = process.env) {
    * ⚠️ PALYGINIMAS GYVENA `pgConnection.js` (#249). Ten pat užrašyta ir jo riba;
    * dvi kopijos to paties klausimo ilgainiui išsiskirtų.
    */
-  const { sutampa, nurodyta: saltinis, konfiguracija: zymos } = arTaPatiBaze(databaseUrl, env);
+  /**
+   * ⚠️ Dviprasmiška konfigūracija (`DATABASE_URL` IR `PG*`) gauna savo kodą:
+   * ten klausimas „ta pati bazė?" atsakymo neturi (#280, IV raundas).
+   */
+  let palyginimas;
+  try {
+    palyginimas = arTaPatiBaze(databaseUrl, env);
+  } catch (klaida) {
+    if (klaida.code === "PG_CONNECTION_AMBIGUOUS") {
+      throw new PgDumpBackupError(klaida.message, "PG_BACKUP_CONNECTION_AMBIGUOUS");
+    }
+    throw klaida;
+  }
+
+  const { sutampa, nurodyta: saltinis, konfiguracija: zymos } = palyginimas;
 
   if (!sutampa) {
     throw new PgDumpBackupError(

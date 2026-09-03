@@ -73,6 +73,70 @@ function pgJungtiesNustatymai(env = process.env) {
 }
 
 /**
+ * DVIPRASMIŠKA JUNGTIES KONFIGŪRACIJA — FAIL-CLOSED (#280, IV tos pačios šeimos raundas).
+ *
+ * ⚠️ KETURI RAUNDAI TAISĖ PO VIENĄ PARAMETRĄ: `--url` vs `PG*` (7.6a, #264),
+ * `?host=`, `PGPORT`, ir `DATABASE_URL` + `PG*` maišymas. Kiekvienas taisymas
+ * uždarydavo vieną plyšį ir palikdavo klasę atvirą, nes klausimas buvo ne
+ * „kaip parsinti DSN", o „KUR `pg` realiai jungsis".
+ *
+ * Repo tą sprendimą jau turi priėmęs kitoje vietoje:
+ * `auditStore/backendSelection.js` draudžia `DATABASE_URL` ir `PGHOST` kartu -
+ * ne dėl estetikos, o todėl, kad prioritetas tampa neakivaizdus. Tas pats
+ * principas čia uždaro ir tapatumo, ir dokumentacijos klausimą vienu judesiu:
+ * maišymas yra KLAIDA, ne interpretacijos reikalas.
+ *
+ * ⚠️ RIBA: tikrinama TIK ten, kur tapatumas turi teisinę galią (DR keliai —
+ * 7.6a kopija, 7.6b suderinimas). Pool'ų konstravimo semantikos visame repo šis
+ * modulis NEKEIČIA: tai atskiras sprendimas su kitokia rizika.
+ */
+class PgConnectionError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = "PgConnectionError";
+    this.code = code;
+  }
+}
+
+function arDviprasmiskaKonfiguracija(env = process.env) {
+  return Boolean(env.DATABASE_URL && env.PGHOST);
+}
+
+/**
+ * EFEKTYVŪS JUNGTIES PARAMETRAI — „kur `pg` realiai jungsis", ne „kas parašyta".
+ *
+ * ⚠️ EILIŠKUMAS PAIMTAS IŠ `pg` ŠALTINIO (`lib/connection-parameters.js:5-17`):
+ *
+ *   val(key, config) = config[key] || process.env["PG" + KEY] || defaults[key]
+ *
+ * `defaults` yra STATINIAI (`host: "localhost"`, `port: 5432`), ir jie env
+ * NESKAITO — env atsargą taiko pats `val()`. Todėl DSN be porto reiškia ne
+ * „5432", o „portas iš aplinkos, jei yra". Išmatuota:
+ *
+ *   postgres://u@host/db      + PGPORT=6543  ->  host:6543/db
+ *   postgres://u@host:5432/db + PGPORT=6543  ->  host:5432/db
+ *   postgres://vartotojas@host/               ->  host:5432/vartotojas
+ *
+ * ⚠️ `database` KRENTA Į `user` (`connection-parameters.js:66-68`), ne į tuščią.
+ */
+function efektyvusJungtiesParametrai(nustatymai, env = process.env) {
+  if (!nustatymai) return null;
+
+  const parsed = nustatymai.connectionString
+    ? parseDsn(nustatymai.connectionString)
+    : nustatymai;
+
+  const vartotojas = parsed.user || env.PGUSER || undefined;
+  const host = String(parsed.host || env.PGHOST || "localhost").trim();
+  const port = String(parsed.port || env.PGPORT || "5432");
+  const database = String(parsed.database || env.PGDATABASE || vartotojas || "");
+
+  if (!host || !database) return null;
+
+  return { host: host.toLowerCase(), port, database };
+}
+
+/**
  * JUNGTIES TAPATYBĖ IŠ NUSTATYMŲ: `{ host, port, database }` arba `null`.
  *
  * ⚠️ VIENAS AUTORITETAS DVIEM KELIAMS (#249, 7.6b). 7.6a `pgDumpBackup.js`
@@ -126,15 +190,7 @@ function jungtiesTapatybe(nustatymai, env = process.env) {
      * krinta garsiai, o ne tapatumas ima tylėti.
      */
     try {
-      const parsed = parseDsn(nustatymai.connectionString);
-
-      const host = String(parsed.host || env.PGHOST || "localhost").trim();
-      const port = String(parsed.port || env.PGPORT || "5432");
-      const database = String(parsed.database || env.PGDATABASE || parsed.user || env.PGUSER || "");
-
-      if (!host || !database) return null;
-
-      return { host: host.toLowerCase(), port, database };
+      return efektyvusJungtiesParametrai(nustatymai, env);
     } catch {
       return null;
     }
@@ -162,6 +218,19 @@ function tapatybesTekstas(tapatybe) {
  * (fail-closed), o ne „tikriausiai gerai".
  */
 function arTaPatiBaze(url, env = process.env) {
+  /**
+   * ⚠️ DVIPRASMYBĖ TIKRINAMA PIRMA. Su abiem formomis prioritetas priklauso nuo
+   * to, kas konstruoja pool'ą, tad „ta pati bazė?" atsakymo apskritai neturi.
+   */
+  if (arDviprasmiskaKonfiguracija(env)) {
+    throw new PgConnectionError(
+      "Aplinkoje nustatyti IR `DATABASE_URL`, IR `PG*` - neaišku, į kurią bazę " +
+        "bus jungiamasi. Palikite VIENĄ formą (tas pats reikalavimas kaip " +
+        "`AUDIT_BACKEND=postgres` atveju).",
+      "PG_CONNECTION_AMBIGUOUS"
+    );
+  }
+
   /**
    * ⚠️ TA PATI APLINKA ABIEM PUSĖM. Operatorius `--target` rašo tame pačiame
    * shell'e, kuriame gyvena `PG*`, tad ir jo DSN `pg` interpretuotų su tais
@@ -205,6 +274,9 @@ module.exports = {
   pgJungtiesNustatymai,
   arNurodytaPostgres,
   tapatiBaze,
+  PgConnectionError,
+  arDviprasmiskaKonfiguracija,
+  efektyvusJungtiesParametrai,
   jungtiesTapatybe,
   tapatybesTekstas,
   arTaPatiBaze,

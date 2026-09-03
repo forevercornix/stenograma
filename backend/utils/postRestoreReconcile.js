@@ -157,7 +157,24 @@ function patikrintiSargus(targetUrl, env) {
     );
   }
 
-  const { sutampa, nurodyta, konfiguracija } = arTaPatiBaze(targetUrl, env);
+  /**
+   * ⚠️ DVIPRASMIŠKA KONFIGŪRACIJA — SAVAS KODAS, NE „nesutapimas".
+   *
+   * `DATABASE_URL` ir `PG*` kartu reiškia, kad klausimas „ta pati bazė?" atsakymo
+   * neturi, o ne kad atsakymas neigiamas. Operatoriaus veiksmas kitoks: pašalinti
+   * vieną formą, ne taisyti `--target`.
+   */
+  let palyginimas;
+  try {
+    palyginimas = arTaPatiBaze(targetUrl, env);
+  } catch (klaida) {
+    if (klaida.code === "PG_CONNECTION_AMBIGUOUS") {
+      throw new ReconcileError(klaida.message, "RECONCILE_CONNECTION_AMBIGUOUS");
+    }
+    throw klaida;
+  }
+
+  const { sutampa, nurodyta, konfiguracija } = palyginimas;
   if (!sutampa) {
     throw new ReconcileError(
       `Nurodyta bazė (${tapatybesTekstas(nurodyta)}) nesutampa su ta, prie kurios ` +
