@@ -1569,6 +1569,42 @@ mutacijų stulpelis be jo skambėtų taip, tarsi apsauga būtų buvusi nuo prad�
 | CLI inicijuoja ir uždaro abi saugyklas | `pgDumpBackupContract` | Mutacija MU (be `auditStore.init()`) → krinta. ⚠️ Pirmoji testo redakcija MU NEPAGAVO: statinė patikra sutapdavo su savo pačios komentaru, tad komentarai dabar nukerpami prieš palyginimą (§9.2) |
 | ⚠️ **Neišduotos kopijos auditas nefiksuoja** | `pgDumpBackup.integration` | ✅ CI PASS. Horizontui lūžus tikrinama ne tik klaida, bet ir tai, kad audito įrašo NĖRA: įrašas apie neegzistuojantį artefaktą būtų blogesnis už tylą |
 
+## #249 (7.6b) — post-restore aplikacinis suderinimas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Sargai krenta PRIEŠ pirmą mutaciją, trimis skirtingais kodais** | `postRestoreReconcileContract` | Mutacijos NF (tapatumo patikra) ir NG (backend'o sargas) → krinta. „Nenurodyta bazė", „ne PostgreSQL" ir „ne ta bazė" reiškia skirtingus operatoriaus veiksmus, tad turi skirtingus kodus |
+| ⚠️ **Terminalizavimo patch'as ATEINA IŠ `jobPhase`, ne iš rankomis surašyto SET** | `postRestoreReconcileContract` | Mutacija NE (patch surašomas ranka) → krinta. ⚠️ Pirmoji testo redakcija NE NEPAGAVO: ji tikrino, ar `"phase"` yra `SET` sąraše, o `writePatched()` deda visus kintamus stulpelius. Dabar tikrinama REIKŠMĖ (`processing` job'o fazė → `null`), kurią gali duoti tik autoritetas |
+| ⚠️ **Užbarjeruoti job'ai praleidžiami, ir grąžinami VARDAIS** | `postRestoreReconcileContract`, `postRestoreReconcile.integration` | Mutacija ND (predikatas ignoruojamas) → krinta. Tylus apėjimas neleistinas: skaičius pasakytų „kažkas liko", vardai pasako kas ir leidžia 7.6c juos rasti |
+| ⚠️ **Masinė revokacija idempotentiška PAGAL SĄLYGĄ** (`revoked_at IS NULL`) | `postRestoreReconcileContract`, `postRestoreReconcile.integration` | Mutacija NC (sąlyga pašalinta) → krinta. Be jos antras paleidimas pastumtų `revoked_at`, ir „kada revokuota" pasikeistų, nors abu paleidimai grąžintų sėkmę |
+| ⚠️ **CLI atmintiniame režime KRENTA, ne praleidžia tyliai** | `postRestoreReconcileContract` | Tikrinamas TIKRAS procesas ir exit kodas (2), ne failo tekstas. „Sėkmingas praleidimas" leistų operatoriui manyti, kad sesijos revokuotos |
+| CLI neturi savo orkestracijos (D1) | `postRestoreReconcileContract` | Statinė patikra su **savitikra**: detektorius čia pat įrodo, kad pažeidimą rastų, ir skenuoja kodą BE komentarų (#265 pamoka) |
+| ⚠️ **Tapatumas mato `?host=`/`?port=` (ta pati biblioteka kaip `pg`)** | `postRestoreReconcileContract` | Mutacija NO (grąžintas `new URL()` palyginimas) → krinta. `pg-connection-string` query parametrams suteikia pirmenybę prieš autoritetą, tad du DSN, besiskiriantys TIK `?host=`, sutapdavo — o `_pool()` jungdavosi į kitą bazę. Kontrolė: vienodi DSN privalo praeiti |
+| ⚠️ **Dviprasmiška jungties konfigūracija yra KLAIDA** (`DATABASE_URL` + `PG*`) | `postRestoreReconcileContract` | Mutacija NS (sargas išjungtas) → krinta. ⚠️ Tai APIBENDRINIMAS po keturių tos pačios šeimos raundų (`--url` vs `PG*`, `?host=`, `PGPORT`, maišymas): klausimas yra ne „kaip parsinti DSN", o „kur `pg` realiai jungsis". Kontrolė: abi formos ATSKIRAI privalo veikti |
+| ⚠️ **Konfigūracijos klaida nepalieka įsipareigoto darbo** | `postRestoreReconcile.integration` | ⚠️ NOT RUN vietoje. Tikrinama BŪSENA, ne tvarka: po klaidos sesijos aktyvios, job'ai nepakitę, audito eilutės nėra. Iki taisymo tai buvo įsipareigotos, neaudituotos mutacijos, pranešamos kaip nesėkmė |
+| ⚠️ **Tapatumas taiko `PG*` fallback'ą taip pat kaip `pg`** | `postRestoreReconcileContract` | Mutacijos NP (`PGPORT` fallback pašalintas) ir NQ (`PGHOST`) → krinta. Plius TRIPWIRE: matrica lyginama su tikru `pg/lib/connection-parameters` rezultatu, tad `pg` pakeitus eiliškumą testas kris garsiai. Kontrolė: bent vienas atvejis, kur aplinka realiai keičia rezultatą |
+| ⚠️ **Konfigūracijos klaida krinta PRIEŠ transakciją** | `postRestoreReconcileContract` | Mutacija NR (ašys skaičiuojamos po `COMMIT`) → krinta. ⚠️ Pirmoji testo redakcija NR NEPAGAVO: ji tikrino CLI, kuris turi savo ankstyvą patikrą, o pavadinimas žadėjo MODULIO tvarką. Dabar tikrinamas ir modulis: klaida po commit'o reikštų commit'intą, neaudituotą darbą, praneštą kaip nesėkmė |
+| ⚠️ **Ašies verdiktas pagal APLIKACIJOS autoritetą, ne `DATABASE_URL`** | `postRestoreReconcileContract`, `postRestoreReconcile.integration` | Keturių aplinkų matrica; kontrolė, kad ir `nepadengta`, ir `nereikalinga` yra PASIEKIAMI. Su 7.2a barjeru job'ų autoritetas niekada nėra PostgreSQL, tad `verify` „saugu" be šito būtų melagingas užtikrinimas |
+| ⚠️ **Revokacija nelūžta dėl laikrodžių skirtumo** | `postRestoreReconcileContract` | Mutacija NN (`revoked_at = now()`) → krinta. `created_at > now()` atkurtoje bazėje pažeistų `sessions_revoked_after_created` ir atsuktų VISĄ transakciją — sesijos, kurias revokuoti saugu, taptų nerevokuojamos |
+| ⚠️ **Sėjimo seka legali pagal lifecycle — tikrinama VIETOJE** | `postRestoreReconcileContract` | Mutacijos NL (`processing` lieka pirmoje fazėje) ir NM (`completed` tiesiai iš `queued`) → krinta. ⚠️ Testas atsirado dėl DVIEJŲ sugaištų CI raundų: fixture krito ties sėjimu (`ILLEGAL_TRANSITION`, `ILLEGAL_TERMINAL_TRANSITION`), nors abi taisyklės yra `jobPhase` autoriteto, ne PostgreSQL. Seka viena — helperis dalijamasi su integraciniu testu |
+| ⚠️ **PostgreSQL ne-funkcinis paviršius skiriasi TIK vardytais raktais** | `jobStoreBackendContract.integration` | Mutacija NK (antras ne-funkcinis raktas be deklaracijos) → krinta. ⚠️ Pariteto sargas filtruoja `typeof === "function"`, tad `atkurimas` objektas pro jį praeidavo NE dėl išimties, o dėl to, kad sargas jo nemato. Apėjimas padarytas eksplicitinis: skirtumas vardijamas, ir naujas raktas lauš testą |
+| Audito įvykis registruotas; antro mechanizmo nėra (D8) | `postRestoreReconcileContract` | Neregistruotas įvykis mestų `UnclassifiedAuditEventError`; tikrinama ir tai, kad modulyje nėra antro audito kelio |
+| ⚠️ **Visos sesijos revokuotos — persistentiškai IR realiame auth kelyje** | `postRestoreReconcile.integration` | ⚠️ NOT RUN vietoje. Trys sesijos dviem vartotojams: vienos sesijos testą praeitų ir realizacija, revokuojanti tik ją. Tikrinamas `revoked_at` IR `touch()` su senais token'ais |
+| ⚠️ **Keturi statusai vienu metu; terminaliniai NEPALIEČIAMI** | `postRestoreReconcile.integration` | ⚠️ NOT RUN. `failed` lyginamas visa eilute, `completed` — kartu su `job_results` persistentine reprezentacija, ne `COUNT` |
+| ⚠️ **Klaida po dalies darbo ATSUKA viską** (D4) | `postRestoreReconcile.integration` | ⚠️ NOT RUN. Deterministinis gedimas (`jobPhase.finish` meta), ne `sleep()`; po atsukimo sesijos privalo TEBEAUTENTIFIKUOTI |
+| ⚠️ **Rollback nepalieka evidencijos** (D8) | `postRestoreReconcile.integration` | ⚠️ NOT RUN. Audito eilučių skaičius tikrinamas abiem kryptim: po sėkmės 1, po atsukimo 0 |
+| ⚠️ **Antras vykdymas palieka TĄ PAČIĄ būseną** (D9) | `postRestoreReconcile.integration` | ⚠️ NOT RUN. Lyginama visa persistentinė būsena (statusai, versijos, `revoked_at`, rezultatai), ne grąžinamas kodas |
+| ⚠️ **Svetimoje bazėje nelieka PĖDSAKO** (D7a) | `postRestoreReconcile.integration` | ⚠️ NOT RUN. Neužtenka „grąžino klaidą": tikrinama, kad svetimoje bazėje nepakito sesijos ir neatsirado audito eilutė |
+| Evidencija yra EILUTĖ, ne funkcijos iškvietimas (D7b) | `postRestoreReconcile.integration` | ⚠️ NOT RUN. `audit_log` skaitomas SQL užklausa iš tos pačios bazės, su `AUDIT_BACKEND=postgres` |
+
+⚠️ **KĄ 7.6b ĮRODO VIETOJE IR KO NE.** Vietinis rinkinys tikrina SPRENDIMUS:
+sargus, patch'o kilmę, praleidimo predikatą, CLI exit kodus — su padirbtu DB
+klientu ir TIKRU `jobPhase`. Viskas, kas reikalauja dviejų tikrų lentelių —
+revokacijos, atsukimo, idempotentiškumo ir evidencijos — gyvena
+`postRestoreReconcile.integration` ir vietinėje aplinkoje **NEVYKDOMA**.
+
+---
+
 ⚠️ **KĄ 7.6a ĮRODO VIETOJE IR KO NE.** Vietinis rinkinys tikrina KONTRAKTĄ:
 vieno kelio taisyklę, dydžio ribą, registro neliečiamumą ir runbook'o ribas.
 Pačią procedūrą — `pg_dump`, šifravimą per tikrus duomenis, atkūrimą,

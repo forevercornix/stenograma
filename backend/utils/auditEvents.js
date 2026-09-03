@@ -161,6 +161,15 @@ const AUDIT_EVENTS = Object.freeze({
    * avarinis atkūrimas priklauso nuo audito prieinamumo.
    */
   PG_DUMP_BACKUP_CREATED: KATEGORIJA.NEBLOKUOJANTIS,
+  /**
+   * ⚠️ POST-RESTORE SUDERINIMAS (#249, 7.6b). Rašomas TIK po sėkmingo commit:
+   * rollback negali palikti įrašo „suderinta", nes tokiu atveju evidencija
+   * teigtų daugiau, nei įvyko.
+   *
+   * NEBLOKUOJANTIS, kaip ir kiti kopijų/atkūrimo įvykiai: audito gedimas
+   * nepadaro jau commit'into suderinimo neįvykusio, o jo „atsukti" nebūtų kaip.
+   */
+  POST_RESTORE_RECONCILED: KATEGORIJA.NEBLOKUOJANTIS,
 });
 
 /**

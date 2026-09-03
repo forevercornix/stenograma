@@ -49,6 +49,64 @@ function rowToSession(row, username) {
   };
 }
 
+/**
+ * MASINĖ REVOKACIJA PO DB ATKŪRIMO — PostgreSQL-ONLY, SU SVETIMU KLIENTU
+ * (#155, 7.6b / #249, D6).
+ *
+ * ⚠️ KODĖL NE FASADO METODAS.
+ *
+ * Fasado metodas reikštų backend'ų paritetą, o 7.6b atmintiniame režime
+ * privalo KRISTI (D7), ne veikti: „sėkmingas praleidimas" ten leistų
+ * operatoriui manyti, kad atkurtos sesijos revokuotos, nors jos gyvos. Metodas,
+ * kurio memory realizacija niekada neturi būti kviečiama šiame kelyje, yra
+ * blogesnis už jo nebuvimą. Paviršiaus pariteto testas remiasi eksplicitiniu
+ * `KONTRAKTAS` sąrašu, tad šis papildymas jo nelaužo - ir neturi į jį patekti.
+ *
+ * ⚠️ KODĖL PRIIMA KLIENTĄ, NE POOL'Ą.
+ *
+ * D4 reikalauja, kad sesijų revokacija ir job'ų terminalizavimas įvyktų VIENOJE
+ * transakcijoje. Dviejų pool'ų dvi jungtys to negali; tad SQL lieka ČIA - savo
+ * modulyje, kur gyvena sesijų semantika - o transakciją valdo kvietėjas. Ta pati
+ * forma kaip `deletionTombstones.assertNotBarredWithClient()`.
+ *
+ * ⚠️ `revoked_at IS NULL` SĄLYGA DARO OPERACIJĄ IDEMPOTENTIŠKĄ (D9): antras
+ * vykdymas nepaliečia jau revokuotų eilučių, tad `revoked_at` laikas nepasislenka
+ * ir „kada revokuota" lieka tas pats faktas.
+ */
+async function revokeAllActiveWithClient(klientas) {
+  if (!klientas || typeof klientas.query !== "function") {
+    throw new TypeError("revokeAllActiveWithClient: reikia kviečiančiojo DB kliento (transakcijos).");
+  }
+
+  /**
+   * ⚠️ `GREATEST(now(), created_at)`, NE `now()` (#280 peržiūra).
+   *
+   * `sessions_revoked_after_created` reikalauja `revoked_at >= created_at`. Jei
+   * snapshot'as buvo padarytas bazėje, kurios laikrodis pirmauja prieš tikslinę,
+   * atkurta sesija turi `created_at > now()`, ir `revoked_at = now()` pažeistų
+   * apribojimą — o kadangi visas suderinimas yra VIENA transakcija (D4),
+   * kristų ir job'ų terminalizavimas.
+   *
+   * Pasekmė būtų blogiausia įmanoma šiame kelyje: sesijos, kurias revokuoti
+   * SAUGU ir BŪTINA, taptų nerevokuojamos dėl laikrodžių skirtumo tarp dviejų
+   * bazių — t. y. atkūrimas užstrigtų ties tuo, ką turi ištaisyti.
+   */
+  const res = await klientas.query(
+    `UPDATE sessions SET revoked_at = GREATEST(now(), created_at)
+      WHERE revoked_at IS NULL`
+  );
+
+  return res.rowCount;
+}
+
+/** Kiek sesijų šiuo metu NĖRA revokuotų (verifikacijai ir idempotentiškumo patikrai). */
+async function countActiveWithClient(klientas) {
+  const { rows } = await klientas.query(
+    "SELECT count(*)::int AS kiek FROM sessions WHERE revoked_at IS NULL"
+  );
+  return rows[0].kiek;
+}
+
 function createPostgresStore(pool) {
   /**
    * ⚠️ VIENAS LAIKO ŠALTINIS: DB LAIKRODIS.
@@ -397,4 +455,9 @@ function createPostgresStore(pool) {
   };
 }
 
-module.exports = { createPostgresStore, SessionIdentityError };
+module.exports = {
+  createPostgresStore,
+  SessionIdentityError,
+  revokeAllActiveWithClient,
+  countActiveWithClient,
+};

@@ -1028,6 +1028,40 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę",
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,
     "PostgreSQL metodų aibė privalo tiksliai sutapti su memory");
+
+  /**
+   * ⚠️ NE-FUNKCINIAI RAKTAI — APĖJIMAS PADAROMAS EKSPLICITINIS (#249, 7.6b).
+   *
+   * Aukščiau esantis palyginimas filtruoja `typeof === "function"`, tad OBJEKTO
+   * formos paviršius pro jį praeina NE dėl išimties, o dėl to, kad sargas jo
+   * NEMATO. 7.6b tuo pasinaudojo sąmoningai: `atkurimas.*` operacijos yra
+   * PostgreSQL-only (offline suderinimas, kuris memory režime privalo kristi),
+   * tad memory/Redis realizacijos būtų negyvas kodas.
+   *
+   * Sprendimas praktiškai teisingas, bet be šios patikros sargo teiginys „visi
+   * trys deklaruoja tą pačią aibę" nuo šiol būtų pažodžiui neteisingas, o kitas
+   * žmogus, pridėjęs antrą tokį raktą, gautų TYLĄ — būtent tai, ko šis sargas ir
+   * neturi leisti.
+   *
+   * Todėl skirtumas VARDIJAMAS: naujas ne-funkcinis raktas lauš testą, kol
+   * nebus įrašytas čia kartu su priežastimi.
+   */
+  const neFunkcijos = (store) => Object.keys(store)
+    .filter((key) => typeof store[key] !== "function")
+    .sort();
+
+  const LEIDZIAMAS_SKIRTUMAS = ["atkurimas"];
+
+  assert.deepEqual(neFunkcijos(memoryStore), neFunkcijos(redis),
+    "memory ir Redis ne-funkcinis paviršius privalo sutapti");
+
+  const skirtumas = neFunkcijos(postgres).filter((k) => !neFunkcijos(memoryStore).includes(k));
+  assert.deepEqual(skirtumas, LEIDZIAMAS_SKIRTUMAS,
+    "PostgreSQL ne-funkcinis paviršius gali skirtis TIK vardytais raktais");
+
+  /** ⚠️ KONTROLĖ: sąrašas nėra tuščias formalumas — raktas realiai egzistuoja. */
+  assert.equal(typeof postgres.atkurimas, "object");
+  assert.equal(typeof postgres.atkurimas.terminalizuotiNeTerminaliniusWithClient, "function");
 });
 
 test(

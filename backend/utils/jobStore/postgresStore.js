@@ -1022,6 +1022,77 @@ function createPostgresStore(pool) {
     });
   }
 
+  /**
+   * POST-RESTORE TERMINALIZAVIMAS SVETIMOJE TRANSAKCIJOJE (#155, 7.6b / #249, D3+D4).
+   *
+   * ⚠️ GRYNOJI TAISYKLĖ PERDUODAMA SAUGYKLAI, KURI JĄ VYKDO — ta pati forma kaip
+   * `reportProgressAtomicSync(id, event, jobPhase)` ir `finishAtomic()`.
+   *
+   * Patch'as IŠVEDAMAS iš `jobPhase.finish(job, FAILED, extra)`, tad
+   * `jobs_status_phase`, `jobs_progress_only_processing`, `jobs_progress_known`
+   * ir `jobs_version_positive` tenkinami DĖL AUTORITETO. Ranka surašytas
+   * `SET status='failed', phase=NULL, …` sąrašas šiandien praeitų ir pasentų po
+   * kito schemos pokyčio — būtent to D3 neleidžia.
+   *
+   * ⚠️ KLIENTAS ATEINA IŠ IŠORĖS, TRANSAKCIJOS ČIA NEATVERIAME. D4 reikalauja,
+   * kad sesijų revokacija ir job'ų terminalizavimas būtų VIENA transakcija; jos
+   * ribas valdo `utils/postRestoreReconcile.js`, nes tik jis mato abu dalykus.
+   *
+   * ⚠️ `praleisti` YRA KVIETĖJO SPRENDIMAS. Tombstone barjeras gyvena savo
+   * modulyje (`deletionTombstones.assertNotBarredWithClient`), ir `jobStore`
+   * apie ištrynimo žymas čia nieko nesužino — kvietėjas paduoda predikatą, o
+   * praleisti job'ai grąžinami VARDAIS, ne tik skaičiumi, kad tyliai nedingtų.
+   *
+   * @param {object} client atviros transakcijos klientas
+   * @param {object} opcijos `{ jobPhase, extra, praleisti }`
+   * @returns {{terminalizuota: number, praleista: string[], rasta: number}}
+   */
+  async function terminalizuotiNeTerminaliniusWithClient(client, opcijos = {}) {
+    const { jobPhase, extra = {}, praleisti = null } = opcijos;
+    if (!jobPhase || typeof jobPhase.finish !== "function") {
+      throw new TypeError("terminalizuotiNeTerminalinius: reikia `jobPhase` autoriteto.");
+    }
+
+    /**
+     * ⚠️ `FOR UPDATE` IŠ KARTO. Eilutės užrakinamos viena užklausa, tad tarp
+     * atrankos ir mutacijos niekas negali jų pakeisti — o suderinimas vykdomas
+     * offline, kur konkurentų neturėtų būti VISAI. Užraktas čia yra tripwire:
+     * jei kas nors dirba lygiagrečiai, jis lauks, o ne perrašys.
+     */
+    const { rows } = await client.query(
+      `SELECT id FROM jobs WHERE status IN ($1, $2) ORDER BY created_at, id FOR UPDATE`,
+      [STATUS.QUEUED, STATUS.PROCESSING]
+    );
+
+    const praleista = [];
+    let terminalizuota = 0;
+
+    for (const { id } of rows) {
+      if (praleisti && (await praleisti(client, id))) {
+        praleista.push(id);
+        continue;
+      }
+
+      const job = await readJob(client, id);
+      if (!job) continue;
+
+      const patch = jobPhase.finish(job, STATUS.FAILED, extra);
+      await writePatched(client, job, patch);
+      terminalizuota += 1;
+    }
+
+    return { rasta: rows.length, terminalizuota, praleista };
+  }
+
+  /** Kiek job'ų vis dar ne terminalūs (verifikacijai ir idempotentiškumo patikrai). */
+  async function skaiciuotiNeTerminaliniusWithClient(client) {
+    const { rows } = await client.query(
+      "SELECT id FROM jobs WHERE status IN ($1, $2) ORDER BY id",
+      [STATUS.QUEUED, STATUS.PROCESSING]
+    );
+    return rows.map((r) => r.id);
+  }
+
   async function writePatchedCas(client, current, patch, expectedVersion) {
     const row = jobToRow(applyPatch(current, patch));
     const rasomi = changedColumns(jobToRow(current), row, patch);
@@ -1472,6 +1543,24 @@ function createPostgresStore(pool) {
     remove,
     reportProgressAtomic,
     finishAtomic,
+    /**
+     * ⚠️ ATKŪRIMO OPERACIJOS — NE FASADO KONTRAKTO DALIS, IR TAI SĄMONINGA.
+     *
+     * `jobStoreBackendContract` reikalauja, kad visi TRYS backend'ai deklaruotų
+     * tą pačią 17 metodų aibę: trūkstamas metodas reikštų tylų fasado grįžimą į
+     * atsarginį kelią. Šios dvi operacijos fasado NEPASIEKIAMOS — jas kviečia
+     * tik offline suderinimas (`utils/postRestoreReconcile.js`), kuris pagal D7
+     * ne PostgreSQL režime privalo KRISTI, ne veikti. Memory/Redis realizacijos
+     * būtų negyvas kodas, kurio niekas neturi teisės iškviesti.
+     *
+     * Todėl jos gyvena atskirame RAKTE, ne tarp metodų: kontraktas lieka
+     * nepaliestas, o šis komentaras yra vieta, kur tai pasakyta atvirai — ne
+     * atsitiktinis prasilenkimas su sargo filtru.
+     */
+    atkurimas: {
+      terminalizuotiNeTerminaliniusWithClient,
+      skaiciuotiNeTerminaliniusWithClient,
+    },
     getOwned,
     updateOwned,
     removeOwned,
