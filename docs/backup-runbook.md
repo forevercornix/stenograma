@@ -831,6 +831,24 @@ nėra: ji neįrodytų, kad operatorius matė pasenimo dydį.
 ⚠️ **Patvirtinimas lyginamas VALANDOMIS**, tad jis galioja iki valandos pabaigos.
 Milisekundžių tikslumas sargą padarytų neįveikiamą teisėtai.
 
+### ⚠️ Po nepavykusio paleidimo kartojama su TUO PAČIU žurnalu
+
+Nepavykęs replay (pvz. nepasiekiama audito saugykla) palieka žymą **atvirą** — tai
+konstrukcija, ne likutis: nepatvirtintas ištrynimas privalo likti pakartojamas.
+Kol ji atvira, `verify` cutover'į **blokuoja** (`DR_VERIFICATION_FAILED`,
+„neuždarytų žymų N"), net jei duomenys jau pašalinti.
+
+⚠️ **Kitas žurnalas tos žymos neuždarys**, nes jos jame nėra. Procedūra
+kartojama su tuo pačiu (arba naujesniu, tą žymą apimančiu) žurnalu:
+
+```bash
+node backend/scripts/dr-restore.mjs run --in tas-pats-zurnalas.json \
+  --target "$TIKSLO_URL" --actor "$USER"
+```
+
+Pakartojimas idempotentinis: jau ištrintiems job'ams rašomas `erasure_confirmed`
+kvitas, o žyma uždaroma.
+
 ### ⚠️ Kilmės patikra tikrina DUOMENŲ kilmę, ne aplinką
 
 `deployment_identity` keliauja su dump'u, tad atkurta bazė turi ŠALTINIO

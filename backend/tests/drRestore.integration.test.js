@@ -421,6 +421,43 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
       "job'as A tebėra — jo žurnalo šis žingsnis nelietė"
     );
 
+    /**
+     * ⚠️ GEDIMAS ATSTATOMAS PAKARTOJIMU — IR TAI TIKRINAMA, NE NUMANOMA.
+     *
+     * Atvira žyma NĖRA nekaltas likutis: `patikrinti()` ją mato ir cutover'į
+     * BLOKUOJA (`DR_VERIFICATION_FAILED`). CI tai ir parodė — 7 žingsnis krito su
+     * „neuždarytų žymų 1", nors pats replay pavyko. Sargas teisus: nepatvirtinto
+     * ištrynimo negalima praleisti pro šalį.
+     *
+     * Iš to seka operatoriaus taisyklė, kurios anksčiau nebuvo užrašyta: po
+     * nepavykusio paleidimo procedūra kartojama su TUO PAČIU žurnalu — kitas
+     * žurnalas tos žymos neuždarys, nes jos jame nėra.
+     */
+    await suAplinka(tiksloEnv, async () => {
+      const pool = new Pool({ connectionString: TIKSLO_URL });
+      try {
+        const atstatymas = await drCoordinator.paleisti({
+          targetUrl: TIKSLO_URL,
+          artefaktas: gedimoArtefaktas,
+          vykdytojas: pool,
+          actor: "gedimo-testas",
+          env: process.env,
+        });
+
+        assert.deepEqual(atstatymas.replay.uzdarytosZymos, [jobai.failed.id], "žyma uždaryta");
+        assert.equal(atstatymas.verify.suderinta, true, "cutover vėl leidžiamas");
+      } finally {
+        await pool.end();
+      }
+    });
+
+    const poAtstatymo = await vykdyti(
+      TIKSLO_URL,
+      "SELECT status FROM erasure_marks WHERE job_id = $1",
+      [jobai.failed.id]
+    );
+    assert.equal(poAtstatymo.rows[0].status, "deleted", "pakartojimas žymą uždarė");
+
     /** IR NIEKAS PO REPLAY NEĮVYKO. */
     assert.equal(
       await eiluciuSkaicius(TIKSLO_URL, "sessions", "WHERE revoked_at IS NULL"),
@@ -553,10 +590,15 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     );
     const pagal = Object.fromEntries(kvitai.rows.map((r) => [`${r.event}:${r.outcome}`, r.n]));
     assert.equal(pagal["ERASURE_REPLAYED:erasure_replayed"], 1, "vienas kvitas vienam ištrynimui");
+    /**
+     * ⚠️ DU ĮRAŠAI, NE VIENAS: 6b atstatymo paleidimas ir šis. Kiekvienas
+     * `DR_RECOVERY_COMPLETED` atitinka VIENĄ pilnai praėjusią seką — nepavykęs
+     * 6b bandymas savo įrašo neturi, ir būtent tai tikrinama aukščiau.
+     */
     assert.equal(
       kvitai.rows.filter((r) => r.event === "DR_RECOVERY_COMPLETED").reduce((a, r) => a + r.n, 0),
-      1,
-      "atkūrimo faktas užfiksuotas PO visos sekos"
+      2,
+      "po vieną įrašą kiekvienai SĖKMINGAI sekai"
     );
   });
 
