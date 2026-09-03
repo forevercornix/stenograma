@@ -1569,6 +1569,19 @@ mutacijų stulpelis be jo skambėtų taip, tarsi apsauga būtų buvusi nuo prad�
 | CLI inicijuoja ir uždaro abi saugyklas | `pgDumpBackupContract` | Mutacija MU (be `auditStore.init()`) → krinta. ⚠️ Pirmoji testo redakcija MU NEPAGAVO: statinė patikra sutapdavo su savo pačios komentaru, tad komentarai dabar nukerpami prieš palyginimą (§9.2) |
 | ⚠️ **Neišduotos kopijos auditas nefiksuoja** | `pgDumpBackup.integration` | ✅ CI PASS. Horizontui lūžus tikrinama ne tik klaida, bet ir tai, kad audito įrašo NĖRA: įrašas apie neegzistuojantį artefaktą būtų blogesnis už tylą |
 
+## #283 — audito producer skenerio kelių kontraktas
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **`auditStore` išimtis veikia ABIEM kelio formomis** | `auditAsyncCutover` | Mutacijos NX (kanonizavimas pašalintas) ir NY (helperis nieko nekeičia) → krinta. Windows'e `readdirSync` grąžina `auditStore\postgresStore.js`, tad `startsWith("auditStore/")` yra `false`, ir saugyklos mapping'as `event: row.event` sustabdydavo startą su galiojančia mock konfigūracija |
+| ⚠️ **Kanonizuojama ties ĮVESTIES riba, ne palyginime** | `auditAsyncCutover` | Įrašų sąrašas paduodamas TIESIOGIAI: Linux CI tikros `auditStore\…` formos nesukurs niekada, o testas su `process.platform` šaka CI'uje visada praleistų būtent tą šaką (§9.2) |
+| ⚠️ **KONTROLĖ: ne-`auditStore` failas ir toliau skenuojamas** | `auditAsyncCutover` | Mutacija NZ (išimtis išjungta) → krinta 3 testai. Be šios eilutės patikra galėtų virsti visada-„praleisti" ir nieko nebeįrodytų |
+| ⚠️ **`utils/auditStore/` išimtis `getAll` sarge veikia abiem formomis** | `auditStoreFields` | Mutacijos OA (kanonizavimas pašalintas testo skeneryje) ir OB (bendras helperis nieko nekeičia) → krinta. ⚠️ Tas pats defektas, kurio issue inventorizacija neturėjo: prefiksas `utils/auditStore/` su baigiamuoju `/` Windows'e nesutampa. Šiandien nekrisdavo tik todėl, kad išimtis NEPANAUDOJAMA (0 `auditLog.getAll(` saugyklos sluoksnyje) |
+| ⚠️ **KONTROLĖ: išimtis tikrinama SINTETINIU turiniu, ne tyla** | `auditStoreFields` | Be jos taisymas įrodytų tik tiek, kad kodas nekrenta: skeneris išimties šakos šiandien nepasiekia. Fixture su `auditLog.getAll(` „saugyklos" kelyje įjungia ją realiai; kontrolė kontrolei — produkcinis failas su tuo pačiu turiniu RANDAMAS |
+| ⚠️ **Fail-closed 7.4a semantika nesusilpninta** | `auditAsyncCutover` | Nežinoma konstanta ne-`auditStore` kelyje ir toliau patenka į nežinomų šaltinių aibę IR sukelia `validateAuditEvents()` klaidą |
+
+---
+
 ## #249 (7.6b) — post-restore aplikacinis suderinimas
 
 | Garantija | Testai | Mutacijos įrodymas |

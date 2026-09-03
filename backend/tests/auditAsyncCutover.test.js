@@ -1410,3 +1410,98 @@ test("SKAITIKLIS: VIENAS lėtas rašymas duoda VIENĄ didinimą (abiejose katego
     "blokuojantis vėlyvas įrašas privalo likti MATOMAS: kvietėjui pasakyta 503, o pėdsakas atsirado"
   );
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #283 — SKENERIO KELIŲ KONTRAKTAS (Windows portabilumas)
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+test("#283: `auditStore` išimtis veikia ABIEM kelio formomis, ir `row.event` nepatenka į nežinomus", () => {
+  /**
+   * ⚠️ ĮRAŠŲ SĄRAŠAS PADUODAMAS TIESIOGIAI, NE PER FAILŲ SISTEMĄ.
+   *
+   * Linux CI niekada nesukurs `auditStore\postgresStore.js` formos, o būtent ją
+   * reikia patikrinti: Windows'e `fs.readdirSync(dir, { recursive: true })`
+   * grąžina OS-natyvius skirtukus, ir `startsWith("auditStore/")` ten yra
+   * `false`. Testas, šakojantis pagal `process.platform`, CI'uje visada
+   * praleistų būtent tą šaką, dėl kurios rašomas (§9.2).
+   *
+   * ⚠️ TIKRINAMAS SKENERIO ELGESYS, ne kanonizavimo helperio grąžinama eilutė:
+   * klausimas yra „ar `row.event` pateko į nežinomų producer šaltinių aibę",
+   * nes būtent tai stabdo startą.
+   */
+  const { skenuotiIrasus } = require("../utils/auditEvents");
+
+  const SAUGYKLOS_TURINYS = `
+    async function irasyti(row) {
+      return { event: row.event, subjectId: row.subject_id };
+    }
+  `;
+
+  for (const irasas of ["auditStore/postgresStore.js", "auditStore\\postgresStore.js"]) {
+    const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+    skenuotiIrasus([irasas], () => SAUGYKLOS_TURINYS, kaupikliai);
+
+    assert.deepEqual(
+      [...kaupikliai.nezinomiSaltiniai],
+      [],
+      `${JSON.stringify(irasas)}: saugyklos sluoksnio mapping'as negali tapti nežinomu producer šaltiniu`
+    );
+    assert.deepEqual(
+      [...kaupikliai.rasti],
+      [],
+      `${JSON.stringify(irasas)}: iš saugyklos sluoksnio neimamas NĖ VIENAS įvykis`
+    );
+  }
+});
+
+test("#283 KONTROLĖ: ne-`auditStore` produkcinis failas ir toliau skenuojamas", () => {
+  /**
+   * ⚠️ BE ŠITO PATIKRA GALĖTŲ VIRSTI VISADA-„PRALEISTI".
+   *
+   * Jei kanonizavimas ar filtras imtų atmesti viską, ankstesnis testas liktų
+   * žalias ir nieko nebeįrodytų. Ta pati kontrolės taisyklė, kuri šiame repo jau
+   * pritaikyta septynis kartus.
+   */
+  const { skenuotiIrasus } = require("../utils/auditEvents");
+
+  const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+  skenuotiIrasus(
+    ["services/backupService.js", "services\\backupService.js"],
+    () => 'await rasytiAudita({ event: "BACKUP_CREATED" });',
+    kaupikliai
+  );
+
+  assert.deepEqual([...kaupikliai.rasti], ["BACKUP_CREATED"], "produkcinis literalas privalo būti randamas abiem formomis");
+});
+
+test("#283 FAIL-CLOSED: nežinoma konstanta ne-`auditStore` kelyje ir toliau stabdo startą", () => {
+  /**
+   * ⚠️ 7.4a GARANTIJA NESILPNINAMA. Bugfix'as taiso KELIO FORMĄ, ne klasifikaciją:
+   * tikras produkcinis `event: X.Y`, kurio reikšmės išvesti negalima, privalo ir
+   * toliau patekti į nežinomų šaltinių aibę ir sukelti `validateAuditEvents()`
+   * klaidą.
+   */
+  const { skenuotiIrasus, validateAuditEvents } = require("../utils/auditEvents");
+
+  const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+  skenuotiIrasus(
+    ["services\\naujasServisas.js"],
+    () => "await rasytiAudita({ event: NEZINOMA_KONSTANTA.REIKSME });",
+    kaupikliai
+  );
+
+  assert.deepEqual([...kaupikliai.nezinomiSaltiniai], ["NEZINOMA_KONSTANTA.REIKSME"]);
+
+  const klaidos = validateAuditEvents({
+    rasti: kaupikliai.rasti,
+    nezinomiSaltiniai: kaupikliai.nezinomiSaltiniai,
+  });
+
+  assert.ok(
+    klaidos.some((k) => /NEZINOMA_KONSTANTA\.REIKSME/.test(k)),
+    "nežinomas producer šaltinis privalo likti starto klaida"
+  );
+});
