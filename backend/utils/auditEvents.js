@@ -456,10 +456,16 @@ function konstantosReiksme(turinys, identifikatorius, laukas) {
  * CI'uje su Windows formos įrašais; `path.sep` ten yra `/`, tad normalizavimas
  * nieko nekeistų ir testas praeitų nieko neįrodęs.
  *
- * ⚠️ ŽINOMA RIBA: POSIX sistemose `\` yra LEISTINAS failo vardo simbolis. Failas,
- * pavadintas `auditStore\x.js` produkciniame kataloge, būtų kanonizuotas į
- * `auditStore/x.js` ir praleistas kaip saugyklos sluoksnis. Tokio vardo repo
- * neturi, o kaina už jį — Windows starto gedimas.
+ * ⚠️ LIKUSI RIBA — TIK FILTRAVIMO, NE SKAITYMO (#285 peržiūra).
+ *
+ * POSIX sistemose `\` yra leistinas failo vardo simbolis. Failas, pavadintas
+ * `auditStore\x.js`, kanonizuojamas į `auditStore/x.js` ir būtų PRALEISTAS kaip
+ * saugyklos sluoksnis — ši riba lieka, ir kaina už ją yra Windows starto veikimas.
+ *
+ * Bet TURINYS nuo šiol skaitomas per NEAPDOROTĄ įrašą, tad tokio failo turinys
+ * nebepakeičiamas kito failo turiniu. Iki taisymo `foo\bar.js` POSIX'e būtų
+ * skaitomas kaip `foo/bar.js`: tikras producer'is tyliai iškristų iš starto
+ * validacijos — fail-open fail-closed validatoriuje.
  */
 function kanonizuotiKelia(irasas) {
   return String(irasas).split("\\").join("/");
@@ -485,7 +491,15 @@ function skenuotiIrasus(irasai, skaityti, kaupikliai) {
     if (!irasas.endsWith(".js")) continue;
     if (NE_PRODUCER_KELIAI.some((k) => irasas.startsWith(`${k}/`))) continue;
 
-    const turinys = skaityti(irasas);
+    /**
+     * ⚠️ SKAITOMA PER NEAPDOROTĄ ĮRAŠĄ, NE PER KANONINĮ (#285 peržiūra).
+     *
+     * Kanoninė forma egzistuoja PALYGINIMAMS. Failų sistemai ji netinka: POSIX'e
+     * `foo\bar.js` yra VIENAS failas tokiu vardu, o `path.join(dir, "foo", "bar.js")`
+     * rodytų į KITĄ. Skaitymas per kanoninį kelią grąžindavo svetimą turinį arba
+     * nieko, ir tikras producer'is tyliai iškristų iš starto validacijos.
+     */
+    const turinys = skaityti(neapdorotas);
     if (turinys === null || turinys === undefined) continue;
 
     const svarus = beKomentaru(turinys);
@@ -545,14 +559,15 @@ function producerIvykiai() {
     }
 
     /**
-     * ⚠️ SKAITOMA PAGAL KANONINĮ KELIĄ, o `path.join` jį vėl paverčia natyviu —
-     * tad kanonizacija lieka VIDINĖ forma, o failų sistema mato savąją.
+     * ⚠️ `readdirSync` ĮRAŠAS PERDUODAMAS `path.join` NEPALIESTAS. Jis jau yra
+     * tos OS forma, kurioje failas realiai egzistuoja; bet koks perrašymas čia
+     * duotų kelią, kurio failų sistema nemato.
      */
     skenuotiIrasus(
       irasai,
-      (kanoninis) => {
+      (neapdorotas) => {
         try {
-          return fs.readFileSync(path.join(dir, ...kanoninis.split("/")), "utf8");
+          return fs.readFileSync(path.join(dir, String(neapdorotas)), "utf8");
         } catch {
           return null;
         }
@@ -565,16 +580,23 @@ function producerIvykiai() {
 }
 
 /**
- * @param {{rasti: Set<string>, nezinomiSaltiniai: Set<string>}} [ivykiai]
- *   ⚠️ INJEKCIJA TIK TESTUI, IR TAI UŽRAŠYTA. Produkcinis kelias
- *   (`startupChecks.js:174`) kviečia BE argumentų, tad elgesys nepakitęs.
- *   Be šios angos „nežinomas producer šaltinis stabdo startą" būtų įrodoma tik
- *   sugadinus tikrą produkcinį failą — t. y. testas turėtų rašyti į repo.
+ * ⚠️ SKENERIS KVIEČIAMAS PER `module.exports`, NE TIESIOGIAI (#285 peržiūra).
+ *
+ * Anksčiau čia buvo neprivalomas `ivykiai` argumentas testui, ir dėl to
+ * fail-closed regresija apeidavo DVI produkcines grandis: `startupChecks →
+ * validateAuditEvents` ir `validateAuditEvents → producerIvykiai()`. Nutrūkus
+ * bet kuriai, testas būtų likęs žalias, o 7.4a garantija būtent tos grandinės
+ * vientisumą ir reiškia.
+ *
+ * Netiesioginis kvietimas leidžia testui pakeisti SKENERIO rezultatą
+ * (`mock.method`), bet grandinė lieka tikra: `validateConfig()` iškviečia
+ * `validateAuditEvents()`, o ši — `producerIvykiai()`. Produkcinis elgesys
+ * nepakitęs, argumentų nebėra.
  */
-function validateAuditEvents(ivykiai = null) {
+function validateAuditEvents() {
   const klaidos = [];
 
-  const { rasti, nezinomiSaltiniai } = ivykiai || producerIvykiai();
+  const { rasti, nezinomiSaltiniai } = module.exports.producerIvykiai();
 
   for (const šaltinis of nezinomiSaltiniai) {
     klaidos.push(

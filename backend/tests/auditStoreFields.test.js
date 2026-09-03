@@ -219,6 +219,43 @@ test("SKENERIO IŠIMTIS: saugyklos sluoksnis realiai NĖRA producer'is", () => {
   }
 });
 
+/** Fasado apibrėžimas ir saugyklos sluoksnis nėra kvietėjai. */
+const NE_KVIETEJAI = ["utils/auditLog.js", "utils/auditStore/"];
+
+/**
+ * `auditLog.getAll()` KVIETĖJŲ SKENERIS — VIENAS, DVIEM KVIETIMAMS (#285).
+ *
+ * ⚠️ KANONIZUOJAMA TIES ĮVESTIES RIBA (#283).
+ *
+ * `fs.readdirSync(dir, { recursive: true })` Windows'e grąžina
+ * `auditStore\postgresStore.js`, tad `${katalogas}/${irasas}` duoda
+ * `utils/auditStore\postgresStore.js`, o `NE_KVIETEJAI` prefiksas turi
+ * BAIGIAMĄJĮ `/` — išimtis nesuveikdavo. Naudojamas TAS PATS `kanonizuotiKelia()`
+ * kaip producer skeneryje: antra normalizavimo kopija būtų ta pati klasė.
+ *
+ * ⚠️ TURINYS SKAITOMAS PER NEAPDOROTĄ ĮRAŠĄ (#285): kanoninė forma skirta
+ * palyginimams, ne failų sistemai.
+ *
+ * @param {string} katalogas produkcinis katalogas (`utils`, `services`, …)
+ * @param {Iterable<string>} irasai `readdirSync` įrašai (OS-natyvūs arba POSIX)
+ * @param {(irasas: string) => string} skaityti turinio šaltinis
+ */
+function rastiNeribotusSkaitymus(katalogas, irasai, skaityti) {
+  const { beKomentaru, kanonizuotiKelia } = require("../utils/auditEvents");
+  const rasti = [];
+
+  for (const irasas of irasai) {
+    const santykinis = `${katalogas}/${kanonizuotiKelia(irasas)}`;
+    if (!santykinis.endsWith(".js")) continue;
+    if (NE_KVIETEJAI.some((k) => santykinis.startsWith(k))) continue;
+
+    const svarus = beKomentaru(skaityti(irasas));
+    if (/auditLog\s*\.\s*getAll\s*\(/.test(svarus)) rasti.push(santykinis);
+  }
+
+  return rasti;
+}
+
 test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRAUDŽIAMI", () => {
   /**
    * ⚠️ TRIPWIRE (AGENTS.md §9.2), ne elgsenos įrodymas.
@@ -236,7 +273,6 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
    */
   const fs = require("node:fs");
   const path = require("node:path");
-  const { beKomentaru, kanonizuotiKelia } = require("../utils/auditEvents");
 
   /**
    * Žinomi kvietėjai. Kiekvienas įrašas privalo turėti priežastį - be jos
@@ -249,9 +285,6 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
   const PRODUKCINIAI = ["utils", "services", "middleware", "routes", "workers", "queues"];
   const saknis = path.join(__dirname, "..");
 
-  /** Fasado apibrėžimas ir saugyklos sluoksnis nėra kvietėjai. */
-  const NE_KVIETEJAI = ["utils/auditLog.js", "utils/auditStore/"];
-
   const rasti = [];
 
   for (const katalogas of PRODUKCINIAI) {
@@ -263,29 +296,18 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
       continue;
     }
 
-    for (const irasas of irasai) {
-      /**
-       * ⚠️ KANONIZUOJAMA TIES ĮVESTIES RIBA (#283).
-       *
-       * `fs.readdirSync(dir, { recursive: true })` Windows'e grąžina
-       * `auditStore\postgresStore.js`, tad `${katalogas}/${irasas}` duoda
-       * `utils/auditStore\postgresStore.js`, o `NE_KVIETEJAI` prefiksas turi
-       * BAIGIAMĄJĮ `/` — išimtis nesuveikdavo.
-       *
-       * ⚠️ ŠIANDIEN TAI NEKRISDAVO TIK ATSITIKTINAI: `utils/auditStore/*` nė
-       * viename faile nekviečia `auditLog.getAll(`, tad išimtis lieka
-       * nepanaudota. Pirmas toks kvietimas Windows'e duotų klaidingą kritimą.
-       * Naudojamas TAS PATS helperis kaip producer skeneryje — antra
-       * normalizavimo kopija būtų ta pati klasė, tik kitame faile.
-       */
-      const santykinis = `${katalogas}/${kanonizuotiKelia(irasas)}`;
-      if (!santykinis.endsWith(".js")) continue;
-      if (NE_KVIETEJAI.some((k) => santykinis.startsWith(k))) continue;
-
-      const svarus = beKomentaru(fs.readFileSync(path.join(dir, String(irasas)), "utf8"));
-
-      if (/auditLog\s*\.\s*getAll\s*\(/.test(svarus)) rasti.push(santykinis);
-    }
+    /**
+     * ⚠️ TAS PATS SKENERIS, KURĮ KVIEČIA IR KONTROLINIS TESTAS (#285 peržiūra).
+     *
+     * Pirmoji redakcija turėjo predikato KOPIJĄ testo apačioje. Linux CI'uje
+     * tikri įrašai naudoja `/`, tad kanonizavimą pašalinus IŠ ČIA kopija likdavo
+     * žalia — mutacija OA buvo paskelbta krintančia, nors nekrisdavo. Griežčiausia
+     * #266 forma: assert'as tvirtino teisybę apie kodą, kurio produkcinis srautas
+     * nenaudoja.
+     */
+    rastiNeribotusSkaitymus(katalogas, irasai, (irasas) =>
+      fs.readFileSync(path.join(dir, String(irasas)), "utf8")
+    ).forEach((f) => rasti.push(f));
   }
 
   const netiketi = rasti.filter((f) => !LEIDZIAMI.some((l) => l.failas === f));
@@ -1377,31 +1399,33 @@ test("#283 KONTROLĖ: `utils/auditStore/` išimtis veikia ABIEM kelio formomis",
    * ⚠️ Testas nesišakoja pagal `process.platform`: Linux CI tikros
    * `auditStore\postgresStore.js` formos nesukurs niekada (§9.2).
    */
-  const { kanonizuotiKelia } = require("../utils/auditEvents");
-
-  const NE_KVIETEJAI = ["utils/auditLog.js", "utils/auditStore/"];
+  /**
+   * ⚠️ KVIEČIAMAS TIKRASIS SKENERIS, NE JO KOPIJA (#285 peržiūra).
+   *
+   * Pirmoji redakcija atkartojo predikatą su savo `kanonizuotiKelia()` kvietimu.
+   * Linux CI'uje tikri įrašai naudoja `/`, tad pašalinus kanonizavimą iš TIKROJO
+   * skenerio kopija likdavo žalia — mutacija OA buvo paskelbta krintančia,
+   * nors nekrisdavo.
+   */
   const TURINYS_SU_GETALL = "const visi = await auditLog.getAll();";
-
-  /** Ta pati filtravimo taisyklė kaip skeneryje — su kanonizacija ties įvestimi. */
-  const arSkenuojamas = (katalogas, irasas) => {
-    const santykinis = `${katalogas}/${kanonizuotiKelia(irasas)}`;
-    if (!santykinis.endsWith(".js")) return null;
-    if (NE_KVIETEJAI.some((k) => santykinis.startsWith(k))) return null;
-    return /auditLog\s*\.\s*getAll\s*\(/.test(TURINYS_SU_GETALL) ? santykinis : null;
-  };
+  const skaityti = () => TURINYS_SU_GETALL;
 
   for (const irasas of ["auditStore/postgresStore.js", "auditStore\\postgresStore.js"]) {
-    assert.equal(
-      arSkenuojamas("utils", irasas),
-      null,
+    assert.deepEqual(
+      rastiNeribotusSkaitymus("utils", [irasas], skaityti),
+      [],
       `${JSON.stringify(irasas)}: saugyklos sluoksnis privalo būti atmestas, nors turi \`getAll(\``
     );
   }
 
   /** ⚠️ KONTROLĖ KONTROLEI: produkcinis failas su tuo pačiu turiniu — RANDAMAS. */
-  assert.equal(arSkenuojamas("services", "backupService.js"), "services/backupService.js");
-  assert.equal(arSkenuojamas("services", "vidinis\\backupService.js"), "services/vidinis/backupService.js");
+  assert.deepEqual(rastiNeribotusSkaitymus("services", ["backupService.js"], skaityti), [
+    "services/backupService.js",
+  ]);
+  assert.deepEqual(rastiNeribotusSkaitymus("services", ["vidinis\\backupService.js"], skaityti), [
+    "services/vidinis/backupService.js",
+  ]);
 
-  /** Fasado failas — irgi ne kvietėjas, abiem formomis (jis be katalogo, tad forma nesvarbi). */
-  assert.equal(arSkenuojamas("utils", "auditLog.js"), null);
+  /** Fasado failas — irgi ne kvietėjas. */
+  assert.deepEqual(rastiNeribotusSkaitymus("utils", ["auditLog.js"], skaityti), []);
 });
