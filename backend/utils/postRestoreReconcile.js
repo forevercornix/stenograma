@@ -128,9 +128,28 @@ function nustatytiAsis(env = process.env) {
   };
 }
 
-/** Ar visos ašys arba suderintos, arba įrodomai neprikeliamos? */
+/**
+ * Ar visos ašys arba suderintos, arba įrodomai neprikeliamos?
+ *
+ * ⚠️ AŠIES VERDIKTAS ≠ KOMANDOS VERDIKTAS (#280 follow-up).
+ *
+ * Pirmoji redakcija grąžindavo `true`, kai VISOS ašys buvo `NEREIKALINGA` — t. y.
+ * su numatytais atmintiniais backend'ais komanda išeidavo `0` nieko nesuderinusi.
+ * Tai tiesiogiai prieštarauja D7: „jokio successful skip memory režime; tylus
+ * praleidimas pavojingesnis nei kritimas".
+ *
+ * Per-ašies tikslumo dėl to prarasti nereikia — atmintinės sesijos restarto
+ * neišgyvena, tad tai ašis, kuriai suderinimo NEREIKIA. Bet komanda, kuriai
+ * nereikia NĖ VIENOS ašies, neturi ką patvirtinti: reikalaujama, kad bent viena
+ * ašis būtų `SUDERINTA`.
+ */
 function arSaugu(asys) {
-  return [asys.sesijos, asys.jobai].every((a) => a.verdiktas !== VERDIKTAS.NEPADENGTA);
+  const visos = [asys.sesijos, asys.jobai];
+
+  return (
+    visos.every((a) => a.verdiktas !== VERDIKTAS.NEPADENGTA) &&
+    visos.some((a) => a.verdiktas === VERDIKTAS.SUDERINTA)
+  );
 }
 
 /**
@@ -184,7 +203,27 @@ function patikrintiSargus(targetUrl, env) {
     );
   }
 
-  return { tapatybe: tapatybesTekstas(konfiguracija) };
+  /**
+   * ⚠️ D7 SARGAS AŠIŲ LYGMENYJE — PRIEŠ PIRMĄ MUTACIJĄ.
+   *
+   * `arNurodytaPostgres()` atsako tik „ar yra jungtis". Jei NĖ VIENOS ašies
+   * autoritetas nėra PostgreSQL, suderinimas neturi ko užtikrinti: jis pakeistų
+   * eilutes bazėje, kurios aplikacija nenaudoja, ir grąžintų `0`. Tas pats
+   * kodas kaip atmintinio režimo atveju, nes operatoriaus veiksmas tas pats —
+   * pataisyti backend'ų konfigūraciją.
+   */
+  const asys = nustatytiAsis(env);
+  if (![asys.sesijos, asys.jobai].some((a) => a.verdiktas === VERDIKTAS.SUDERINTA)) {
+    throw new ReconcileError(
+      `Nė viena ašis nėra PostgreSQL (sesijos: ${asys.sesijos.autoritetas}, ` +
+        `job'ai: ${asys.jobai.autoritetas}${asys.jobai.barjeras ? " dėl 7.2a barjero" : ""}). ` +
+        "Suderinimas pakeistų eilutes bazėje, kurios aplikacija nenaudoja, ir " +
+        "praneštų sėkmę - tylus praleidimas pavojingesnis nei kritimas (D7).",
+      "RECONCILE_BACKEND_NOT_POSTGRES"
+    );
+  }
+
+  return { tapatybe: tapatybesTekstas(konfiguracija), asys };
 }
 
 function _pool(env) {
@@ -226,7 +265,7 @@ async function _arUzbarjeruotas(client, jobId) {
  * @returns {{tapatybe: string, sesijos: number, jobai: object, nieko: boolean}}
  */
 async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
-  const { tapatybe } = patikrintiSargus(targetUrl, env);
+  const { tapatybe, asys } = patikrintiSargus(targetUrl, env);
 
   /**
    * ⚠️ AŠYS NUSTATOMOS PRIEŠ TRANSAKCIJĄ (#280, II raundas).
@@ -238,9 +277,9 @@ async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
    * **commit'intas, neaudituotas darbas, praneštas kaip nesėkmė.**
    *
    * Konfigūracijos klaidos privalo kristi ten pat, kur ir kiti sargai: prieš
-   * pirmą mutaciją.
+   * pirmą mutaciją — o nuo #280 follow-up ašys ir YRA sargas: `patikrintiSargus()`
+   * jas nustato ir reikalauja bent vienos PostgreSQL ašies.
    */
-  const asys = nustatytiAsis(env);
 
   const pool = _pool(env);
   const jobStore = createPostgresStore(pool);
@@ -323,7 +362,7 @@ async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
  * suderinimas privalėjo paliesti.
  */
 async function patikrinti({ targetUrl, env = process.env } = {}) {
-  const { tapatybe } = patikrintiSargus(targetUrl, env);
+  const { tapatybe, asys } = patikrintiSargus(targetUrl, env);
 
   const pool = _pool(env);
   const jobStore = createPostgresStore(pool);
@@ -350,8 +389,6 @@ async function patikrinti({ targetUrl, env = process.env } = {}) {
     }
 
     const nesuderinti = neterminalus.filter((id) => !uzbarjeruoti.includes(id));
-
-    const asys = nustatytiAsis(env);
 
     /**
      * ⚠️ „SAUGU" REIKALAUJA DVIEJŲ DALYKŲ, NE VIENO.

@@ -119,6 +119,43 @@ function arDviprasmiskaKonfiguracija(env = process.env) {
  *
  * ⚠️ `database` KRENTA Į `user` (`connection-parameters.js:66-68`), ne į tuščią.
  */
+/**
+ * HOST'O NORMALIZAVIMAS — DNS VARDAI, BET NE SOCKET KELIAI (#280 follow-up).
+ *
+ * ⚠️ `toLowerCase()` VISAM HOST'UI YRA NETEISINGA.
+ *
+ * DNS vardai case-insensitive, tad `HOST.example` ir `host.example` yra ta pati
+ * mašina. Bet `?host=/Prod` yra FAILŲ SISTEMOS KELIAS iki unix socket katalogo,
+ * o failų sistema gali skirti raides: `pg` `/Prod` ir `/prod` laiko skirtingais
+ * taikiniais, o tapatumas juos sutapdydavo.
+ *
+ * ⚠️ VIENAS HELPERIS, NE DVI KOPIJOS. Iki šito normalizavimas gyveno dviejose
+ * vietose (`efektyvusJungtiesParametrai` ir `jungtiesTapatybe` diskrečioji šaka),
+ * ir taisant vieną pora būtų išsiskyrusi.
+ */
+function normalizuotiHosta(host) {
+  const reiksme = String(host || "").trim();
+  if (reiksme.startsWith("/")) return reiksme;
+  return reiksme.toLowerCase();
+}
+
+/**
+ * ⚠️ `options` YRA TAIKINIO DALIS, NE PAPUOŠALAS (#280 follow-up, P1).
+ *
+ * `pg` `options` perduoda serveriui startup pakete
+ * (`connection-parameters.js:83, 151`), o `-csearch_path=…` keičia SCHEMĄ.
+ * Visos suderinimo užklausos naudoja NEKVALIFIKUOTUS lentelių vardus, tad du
+ * DSN, besiskiriantys tik `options=-csearch_path=prod` vs `…=restore`, rodo į
+ * SKIRTINGAS lenteles — o tapatumas juos laikė vienodais.
+ *
+ * ⚠️ ĮTRAUKIAMA, NE ATMETAMA. Atmesti „namespace keičiančius parametrus" reikštų
+ * savo raktažodžių sąrašą greta to, ką supranta `pg` — tiksliai ta antros
+ * interpretacijos klasė, kurią šis modulis kaip tik uždarė. `options` imamas iš
+ * to paties `val()` eiliškumo (patikrinta: `PGOPTIONS` fallback veikia).
+ *
+ * ⚠️ Lyginama ŽALIA eilutė: semantiškai lygiavertis, bet kitaip užrašytas
+ * `options` duos NESUTAPIMĄ. Tai fail-closed kryptis, ir ji sąmoninga.
+ */
 function efektyvusJungtiesParametrai(nustatymai, env = process.env) {
   if (!nustatymai) return null;
 
@@ -127,13 +164,14 @@ function efektyvusJungtiesParametrai(nustatymai, env = process.env) {
     : nustatymai;
 
   const vartotojas = parsed.user || env.PGUSER || undefined;
-  const host = String(parsed.host || env.PGHOST || "localhost").trim();
+  const host = normalizuotiHosta(parsed.host || env.PGHOST || "localhost");
   const port = String(parsed.port || env.PGPORT || "5432");
   const database = String(parsed.database || env.PGDATABASE || vartotojas || "");
+  const options = String(parsed.options || env.PGOPTIONS || "");
 
   if (!host || !database) return null;
 
-  return { host: host.toLowerCase(), port, database };
+  return { host, port, database, options };
 }
 
 /**
@@ -149,65 +187,33 @@ function efektyvusJungtiesParametrai(nustatymai, env = process.env) {
 function jungtiesTapatybe(nustatymai, env = process.env) {
   if (!nustatymai) return null;
 
-  if (nustatymai.connectionString) {
-    /**
-     * ⚠️ DSN PARSINAMAS TA PAČIA BIBLIOTEKA, KURIĄ NAUDOJA `pg` (#280 peržiūra).
-     *
-     * `new URL()` mato tik autoritetą, o `pg-connection-string` query parametrams
-     * (`?host=`, `?port=`) suteikia PIRMENYBĘ prieš jį:
-     *
-     *   postgres://u:x@db.prod:5432/s?host=/restore  ->  host = "/restore"
-     *
-     * Vadinasi du DSN, besiskiriantys TIK `?host=`, `new URL()` palyginime
-     * SUTAMPA, o `pg` jungiasi į skirtingus endpoint'us. 7.6b atveju pasekmė yra
-     * blogiausia įmanoma: sutampantis verdiktas ir jungtis į produkcinę bazę
-     * reiškia revokuotas sesijas ir terminalizuotus job'us NE atkurtoje kopijoje.
-     *
-     * ⚠️ DRAUDIMŲ SĄRAŠAS („atmesti DSN su endpoint keičiančiais parametrais")
-     * ATMESTAS: jį reikėtų laikyti sinchroniškai su tuo, ką palaiko `pg`, ir
-     * pirmas naujas parametras vėl atvertų plyšį TYLIAI. Tas pats parseris duoda
-     * tapatumą pagal konstrukciją, ne pagal sąrašo priežiūrą.
-     */
-    /**
-     * ⚠️ TRŪKSTAMI LAUKAI IMAMI IŠ `PG*`, NE IŠ SAVO NUMATYTŲJŲ (#280, II raundas).
-     *
-     * `pg` prie DSN pritaiko aplinkos fallback'ą. Išmatuota
-     * (`pg/lib/connection-parameters`):
-     *
-     *   postgres://u@host/db      + PGPORT=6543  ->  host:6543/db
-     *   postgres://u@host:5432/db + PGPORT=6543  ->  host:5432/db   (eksplicitinis laimi)
-     *   postgres:///db            + PGHOST=env-h ->  env-h:5432/db
-     *   postgres://vartotojas@host/               ->  host:5432/vartotojas
-     *
-     * Savarankiškas `|| "5432"` reiškė, kad `--target …:5432/db` ir
-     * `DATABASE_URL=…/db` su `PGPORT=6543` palyginime SUTAMPA, o `_pool()`
-     * jungiasi į 6543 — vėl dvi DSN interpretacijos, tik per aplinką.
-     *
-     * ⚠️ EILIŠKUMAS ATKARTOTAS SĄMONINGAI, IR JIS TIKRINAMAS. Vykdymo metu
-     * nesiremiama `pg` vidiniu moduliu (`pg/lib/…` yra ne viešas kelias), bet
-     * `pgConnectionIdentity` testas lygina ŠIĄ funkciją su tikru
-     * `connection-parameters` rezultatu — jei `pg` eiliškumą pakeis, testas
-     * krinta garsiai, o ne tapatumas ima tylėti.
-     */
-    try {
-      return efektyvusJungtiesParametrai(nustatymai, env);
-    } catch {
-      return null;
-    }
+  /**
+   * ⚠️ ABI FORMOS — VIENA FUNKCIJA (#280 follow-up).
+   *
+   * `efektyvusJungtiesParametrai()` moka ir DSN (per `pg-connection-string`,
+   * tą pačią biblioteką, kurią naudoja `pg`), ir diskrečius `PG*` laukus. Iki
+   * šito diskrečioji šaka turėjo SAVO kodą: be `pg` numatytųjų, be
+   * `database → user` atsargos ir su savo `toLowerCase()`.
+   *
+   * ⚠️ ANKSTESNĖ ATASKAITA TEIGĖ, KAD „abi formos eina per tą pačią funkciją".
+   * Tai buvo netiesa — vietinis testas tikrino `efektyvusJungtiesParametrai()`
+   * TIESIOGIAI, o `arTaPatiBaze()` `PG*` atveju eidavo pro senąją šaką. Pagavo
+   * ne peržiūra, o šio darbo 0 žingsnis.
+   */
+  try {
+    return efektyvusJungtiesParametrai(nustatymai, env);
+  } catch {
+    return null;
   }
-
-  if (!nustatymai.host && !nustatymai.database) return null;
-
-  return {
-    host: String(nustatymai.host || "").toLowerCase(),
-    port: String(nustatymai.port || "5432"),
-    database: String(nustatymai.database || ""),
-  };
 }
 
 /** Skaitoma forma klaidos žinutėje - BE kredencialų. */
 function tapatybesTekstas(tapatybe) {
-  return tapatybe ? `${tapatybe.host}:${tapatybe.port}/${tapatybe.database}` : "<neatpažinta>";
+  if (!tapatybe) return "<neatpažinta>";
+
+  /** `options` rodomas TIK kai jis yra — kitaip nesutapimo priežastis liktų nematoma. */
+  const pagrindas = `${tapatybe.host}:${tapatybe.port}/${tapatybe.database}`;
+  return tapatybe.options ? `${pagrindas} (options=${tapatybe.options})` : pagrindas;
 }
 
 /**
@@ -245,7 +251,8 @@ function arTaPatiBaze(url, env = process.env) {
     nurodyta !== null &&
     konfiguracija.host === nurodyta.host &&
     konfiguracija.port === nurodyta.port &&
-    konfiguracija.database === nurodyta.database;
+    konfiguracija.database === nurodyta.database &&
+    konfiguracija.options === nurodyta.options;
 
   return { sutampa, nurodyta, konfiguracija };
 }
@@ -275,6 +282,7 @@ module.exports = {
   arNurodytaPostgres,
   tapatiBaze,
   PgConnectionError,
+  normalizuotiHosta,
   arDviprasmiskaKonfiguracija,
   efektyvusJungtiesParametrai,
   jungtiesTapatybe,

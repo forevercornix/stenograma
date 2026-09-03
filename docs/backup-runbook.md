@@ -664,6 +664,13 @@ node backend/scripts/post-restore-reconcile.mjs \
   run --target "postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE" --actor "$USER"
 ```
 
+⚠️ **ŠIANDIEN `PG*`-only diegimas suderinimo įvykdyti NEGALI.** Suderinimas
+reikalauja bent vienos PostgreSQL ašies (D7); job'ų ašį uždaro 7.2a barjeras
+(#281), o sesijų ašis reikalauja **būtent** `DATABASE_URL`
+(`sessionStore/backendSelection.js` — `PG*` jam netinka, #282). Todėl komanda
+atsisako dirbti su `RECONCILE_BACKEND_NOT_POSTGRES`. Iki #282 uždarymo šis kelias
+yra dokumentuotas, bet neprieinamas — riba, ne garantija.
+
 ⚠️ Tapatumo patikra abi puses sprendžia **tomis pačiomis taisyklėmis kaip `pg`**:
 
 ```
@@ -690,6 +697,11 @@ kiekvienai ašiai praneša verdiktą:
 | `suderinta` | autoritetas PostgreSQL | darbas atliktas ir **skaitosi į „saugu"** |
 | `nereikalinga` | autoritetas atmintyje | prikelti nėra ko: atmintinė būsena restarto neišgyvena |
 | `nepadengta` | autoritetas Redis | gyva būsena **lieka ten** ir po starto grįš — exit `4` |
+
+⚠️ **Ašies verdiktas ≠ komandos verdiktas.** Jei NĖ VIENA ašis nėra `suderinta`,
+komanda **krenta** (`RECONCILE_BACKEND_NOT_POSTGRES`) prieš pirmą mutaciją:
+suderinimas, kuriam nereikia nė vienos ašies, neturi ko patvirtinti, o „sėkmė be
+darbo" yra tiksliai tas tylus praleidimas, kurio D7 neleidžia.
 
 ⚠️ **Šiandien job'ų ašis niekada nėra `suderinta`:** 7.2a aktyvavimo barjeras
 (`POSTGRES_AKTYVAVIMAS_LEISTAS = false`) palieka job'ų autoritetą atmintyje arba
@@ -755,6 +767,8 @@ saugyklos. Nesutapimas duoda `RECONCILE_TARGET_MISMATCH`, o ne PostgreSQL režim
 | **Post-restore suderinimo riba yra procedūrinė** | Serverį galima paleisti nesuderinus — `verify` yra patikra, ne sargas | Suderinimo žyma su starto patikra (#279) |
 | **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami | Ištrynimų replay — 7.6c (#250) |
 | **Job'ų autoritetas šiandien nėra PostgreSQL** | 7.2a barjeras: suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | 7.2a aktyvavimo barjero atidarymas (#281) |
+| **`PG*`-only diegimas neturi nė vienos PostgreSQL ašies** | `post-restore-reconcile` krenta su `RECONCILE_BACKEND_NOT_POSTGRES` | Sesijų atranka turi priimti `PG*` (#282) |
+| **`options`/`search_path` skirtumas = kita bazė** | Vienodi DSN su skirtingu `search_path` laikomi SKIRTINGAIS taikiniais | Sąmoninga fail-closed kryptis |
 
 **Kodėl atkūrimas neaudituojamas.** Rašyti nėra kur: `audit_log` į dump'ą
 sąmoningai neįtrauktas, tikslinė bazė tuščia, aplikacija neveikia. Rašymas į kitą
