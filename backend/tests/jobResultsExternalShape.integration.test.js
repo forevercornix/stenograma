@@ -277,6 +277,23 @@ test("#157 PR-1: `job_results` external forma yra DB invariantas", { skip: PRALE
     }
   });
 
+  await t.test("KONTROLĖ: galiojantis `s3` reference PRAEINA (atgalinis suderinamumas)", async () => {
+    /**
+     * ⚠️ CODEX RADINYS (#289): `s3` VISUR BUVO LAUKIAMAS KAIP ATMETAMAS.
+     *
+     * Visi ankstesni `s3` įrašai sąmoningai netaisyklingos formos, o teisėtos
+     * external kontrolės naudoja `fs`. Vadinasi mutacija `IN ('inline','fs')` —
+     * `s3` pašalinimas iš allowlist — būtų palikusi rinkinį ŽALIĄ, nors atgalinis
+     * suderinamumas sulaužytas: `s3` yra reikšmė, egzistavusi NUO PAT pradinės
+     * migracijos, ir #157 jos nešalina.
+     */
+    assert.equal(
+      await ideti({ storage_type: "s3", storage_key: RAKTAS, bytes: 4096, checksum: SUMA }),
+      null,
+      "`s3` lieka teisėta reikšme — #157 aibę PRAPLEČIA, ne pakeičia"
+    );
+  });
+
   await t.test("KONTROLĖ: mažiausia teisėta reikšmė (`{}` = 2 baitai) PRAEINA", async () => {
     /** Be jos `bytes > 0` galėtų būti sugriežtintas iki nesamos ribos ir niekas to nepamatytų. */
     assert.equal(
@@ -455,6 +472,22 @@ test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { skip: PRALEISTI, timeo
         "23514",
         "grąžinus senąją aibę, `fs` vėl neįrašomas"
       );
+
+      /**
+       * ⚠️ IR PRIEŠINGA KRYPTIS: `s3` pašalinimas iš allowlist privalo būti
+       * jaučiamas. Be šios pusės mutacija `IN ('inline','fs')` liktų nepagauta.
+       */
+      await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_type_values");
+      await pg(
+        DB_URL,
+        "ALTER TABLE job_results ADD CONSTRAINT job_results_storage_type_values CHECK (storage_type IN ('inline', 'fs'))"
+      );
+
+      assert.equal(
+        await ideti({ storage_type: "s3", storage_key: RAKTAS, bytes: 4096, checksum: SUMA }),
+        "23514",
+        "pašalinus `s3`, galiojantis jo reference nebeįrašomas — vadinasi allowlist yra nešantis abiem reikšmėm"
+      );
     } finally {
       await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_type_values");
       await pg(
@@ -467,6 +500,11 @@ test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { skip: PRALEISTI, timeo
       await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 1024, checksum: SUMA }),
       null,
       "KONTROLĖ: atstačius aibę `fs` vėl praeina"
+    );
+    assert.equal(
+      await ideti({ storage_type: "s3", storage_key: RAKTAS, bytes: 4096, checksum: SUMA }),
+      null,
+      "KONTROLĖ: ir `s3` vėl praeina — abi reikšmės atstatytos"
     );
   });
 });
