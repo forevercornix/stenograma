@@ -2258,8 +2258,25 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
      * ne nuo bet kokios eilutės, o nuo TEISĖTAI suformuotos išorinės saugyklos
      * eilutės, kurios lygybės autoriteto repo neturi.
      */
+    /**
+     * ⚠️ FIXTURE'AS SEKA SCHEMĄ, NE ATVIRKŠČIAI (#157 PR-1).
+     *
+     * Iki #157 external eilutei pakako `storage_key`. Sugriežtintas
+     * `job_results_storage_shape` reikalauja ir vientisumo metaduomenų, tad ši
+     * eilutė be jų nebeįsirašo (`23514`) — ir testas kristų ties `UPDATE`, dar
+     * nepasiekęs tikrinamo `finishAtomic` elgesio.
+     *
+     * Sargas ir jo tvirtinimas NEKEIČIAMI: jis šalinamas tik #157 PR-7, po visų
+     * penkių kelių padengimo.
+     */
     await pool.query(
-      "UPDATE job_results SET storage_type = 's3', storage_key = 's3://kibiras/raktas', payload = NULL WHERE job_id = $1",
+      `UPDATE job_results
+          SET storage_type = 's3',
+              storage_key = 's3://kibiras/raktas',
+              payload = NULL,
+              bytes = 42,
+              checksum = repeat('a', 64)
+        WHERE job_id = $1`,
       [id]
     );
 
@@ -2270,7 +2287,13 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
     );
 
     await pool.query(
-      "UPDATE job_results SET storage_type = 'inline', storage_key = NULL, payload = $2::jsonb WHERE job_id = $1",
+      `UPDATE job_results
+          SET storage_type = 'inline',
+              storage_key = NULL,
+              payload = $2::jsonb,
+              bytes = NULL,
+              checksum = NULL
+        WHERE job_id = $1`,
       [id, JSON.stringify({ a: 1 })]
     );
   });
