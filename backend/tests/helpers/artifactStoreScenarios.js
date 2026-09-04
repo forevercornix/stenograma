@@ -53,6 +53,15 @@ const GALIOJANTYS = Object.freeze([
   },
   { vardas: "lietuviški rašmenys", reiksme: { text: "ąčęėįšųūž ĄČĘĖĮŠŲŪŽ" } },
   {
+    /**
+     * ⚠️ KONTROLĖ SUROGATO SARGUI: tekstas, kuriame LITERALIAI parašyta escape
+     * seka. Kanoninėje eilutėje ji atrodo kaip dvigubas pasvirasis brūkšnys, ir
+     * naivus šablonas ją atmestų kaip neporinį surogatą — nors PG ją priima.
+     */
+    vardas: "tekstas, kuriame literaliai parašyta escape seka",
+    reiksme: { t: "eilutė su \\ud800 viduje" },
+  },
+  {
     vardas: "surogatinės poros ir jungtukas",
     reiksme: { text: "\u{1F469}‍\u{1F4BB} protokolas" },
   },

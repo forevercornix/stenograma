@@ -97,6 +97,12 @@ function patikrintiRakta(raktas) {
  */
 const NUL_ESCAPE = "\\u0000";
 
+/**
+ * Neporinis surogatas kanoninėje eilutėje: `\uD800`-`\uDFFF` su NELYGINIU
+ * pasvirųjų brūkšnių skaičiumi (tikras escape, ne tekstas apie escape).
+ */
+const VIENISAS_SUROGATAS = /(?:^|[^\\])(?:\\\\)*\\u[dD][89a-fA-F][0-9a-fA-F]{2}/;
+
 function paruostiReiksme(reiksme) {
   if (reiksme === undefined) {
     throw struktūrinė("ArtifactStore: `undefined` nėra saugotina reikšmė.", KLAIDA.REIKSME);
@@ -185,6 +191,35 @@ function paruostiReiksme(reiksme) {
       "ArtifactStore: reikšmės tapatybė pasikeistų inline kelyje (objektas su prototipo " +
         "`toJSON`, pvz. `Date`). Tokia reikšmė skirtinguose backend'uose duotų skirtingą " +
         "kanoninę eilutę, tad atmetama ties riba (#157 D1).",
+      KLAIDA.REIKSME
+    );
+  }
+
+  /**
+   * ⚠️ VIENIŠAS SUROGATAS — IŠMATUOTA, NE NUMANYTA (CI 33909895874).
+   *
+   * PostgreSQL `jsonb` neporinio surogato NEPRIIMA: `22P02`. Riba jį PRALEIDO,
+   * ir tai buvo vienintelis atvejis, kur ji buvo ŠVELNESNĖ už PG — reikšmė būtų
+   * praėjusi `put()`, o inline diegimas gautų klaidą jau PO sėkmės.
+   *
+   * ⚠️ KODĖL `fs` TO NEPARODĖ. `JSON.stringify` neporinį surogatą UŽKODUOJA kaip
+   * ASCII escape (`\ud800`), tad kanoninėje eilutėje raw simbolio nėra ir
+   * filesystem round-trip nelūžta. Klasė matoma tik prieš PG — dėl to
+   * `jobResultsJsonbDomain.integration` ir egzistuoja.
+   *
+   * ⚠️ REALUMAS: JS eilutės surogatus neša laisvai, ir jie atsiranda PJAUSTANT
+   * tekstą — segmentų dalijime ar apkarpyme ties dydžio riba. Pjūvis per emoji
+   * palieka pusę poros, ir rezultatas iškeliauja į `finish()`.
+   *
+   * ⚠️ NELYGINIS PASVIRŲJŲ BRŪKŠNIŲ SKAIČIUS. Be jo tekstas, kuriame LITERALIAI
+   * parašyta `\ud800`, būtų atmestas kaip surogatas: kanoninėje eilutėje jis
+   * atrodo kaip `\\ud800`, ir naivus šablonas sutaptų su vidine dalimi.
+   */
+  if (VIENISAS_SUROGATAS.test(kanonine)) {
+    throw struktūrinė(
+      "ArtifactStore: neporinis surogatas nepalaikomas - PostgreSQL `jsonb` jį atmeta " +
+        "(`22P02`), tad jis neįeina į bendrą backend'ų reikšmių aibę (#157 D1). " +
+        "Dažniausia kilmė: teksto pjūvis per emoji ar retesnį simbolį.",
       KLAIDA.REIKSME
     );
   }
