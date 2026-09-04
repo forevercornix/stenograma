@@ -569,8 +569,24 @@ test("#157 PR-1: paveldėta eilutė SUSTABDO migraciją, o ne pataisoma tyliai",
      * suveiktų teisingai, o diagnostika nuvestų į šalį. Todėl užklausa ne tik
      * tikrinama tekstu — ji PALEIDŽIAMA.
      */
-    const uzklausa = tekstas.match(/SELECT job_id[^;]+;/);
-    assert.ok(uzklausa, "pranešime privalo būti vientisa užklausa");
+    /**
+     * ⚠️ IEŠKOMA PO INKARO, NE PIRMO `SELECT` IŠVESTYJE (CI 33884855232).
+     *
+     * `node-pg-migrate` kartu su klaida atspausdina ir NEPAVYKUSĮ SAKINĮ — visą
+     * `DO` bloką, kuriame ta pati užklausa guli SUSKAIDYTA į sujungiamus SQL
+     * literalus (`'SELECT job_id, ... AS be_rakto, '`). Pirmoji redakcija pagavo
+     * būtent tą kopiją ir vykdė nukirstą tekstą: `42601 syntax error at or near "IS"`.
+     *
+     * Testas krito teisingai — jis tikrino tai, ką skelbia — bet krito ties MANO
+     * ištraukimu, ne ties diagnostika. Inkaras yra operatoriui skirto pranešimo
+     * dalis, tad ištraukiama būtent ji.
+     */
+    const INKARAS = "ATSUKTOJE schemoje): ";
+    const pradzia = tekstas.indexOf(INKARAS);
+    assert.ok(pradzia > 0, "pranešime privalo būti nuoroda, kad užklausa veikia atsuktoje schemoje");
+
+    const uzklausa = tekstas.slice(pradzia + INKARAS.length).match(/^SELECT job_id[^;]+;/);
+    assert.ok(uzklausa, "po inkaro privalo eiti vientisa užklausa");
 
     const { rows } = await pg(DB_URL, uzklausa[0]);
     assert.equal(rows.length, 1, "ji privalo grąžinti būtent pažeidžiančią eilutę");
