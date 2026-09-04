@@ -205,6 +205,24 @@ const REQUIRED_JOB_CONSTRAINTS = [
   "jobs_version_positive",
 ];
 
+/**
+ * `job_results` INVARIANTAI, BŪTINI STARTUI (#157, PR-1).
+ *
+ * ⚠️ KODĖL ATSKIRAS SĄRAŠAS, O NE ĮRAŠAI VIRŠUJE. Readiness užklausa filtravo
+ * `t.relname = 'jobs'`, tad `job_results` invariantai NEBUVO tikrinami išvis:
+ * diegimas, pritaikęs tik pirmąją #157 migraciją arba praradęs constraint'ą dėl
+ * schemos nukrypimo, startuodavo sėkmingai — o vėlesni rašytojai ir restore
+ * verifikacija remiasi būtent jais (Codex #289).
+ *
+ * ⚠️ SĄRAŠAS PILNAS, NE PAVYZDINIS — pilnumą tikrina
+ * `migrations.integration.test.js`, ta pačia forma kaip `jobs` pusėje.
+ */
+const REQUIRED_JOB_RESULT_CONSTRAINTS = [
+  "job_results_integrity_shape",
+  "job_results_storage_shape",
+  "job_results_storage_type_values",
+];
+
 async function initializePostgres() {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
@@ -294,23 +312,38 @@ async function initializePostgres() {
      * sąrašas auga, o šis rinkinys įvardija tai, kas realiai būtina saugyklai
      * veikti teisingai.
      */
+    /**
+     * ⚠️ TIKRINAMOS ABI LENTELĖS (#157, PR-1).
+     *
+     * Anksčiau filtras buvo `t.relname = 'jobs'`, tad `job_results` invariantai
+     * nebuvo tikrinami išvis — diegimas be `job_results_storage_shape` ar be
+     * vientisumo sargo skelbdavosi pasiruošęs, nors rezultatų rašymo ir restore
+     * verifikacijos keliai jais remiasi.
+     */
     const { rows: cRows } = await pool.query(
-      `SELECT c.conname
+      `SELECT t.relname, c.conname
          FROM pg_constraint c
          JOIN pg_class t     ON t.oid = c.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
-        WHERE t.relname = 'jobs'
+        WHERE t.relname IN ('jobs', 'job_results')
           AND n.nspname = current_schema()
           AND c.contype = 'c'`
     );
-    const rastiC = cRows.map((r) => r.conname);
-    const trukstaC = REQUIRED_JOB_CONSTRAINTS.filter((c) => !rastiC.includes(c));
 
-    if (trukstaC.length > 0) {
+    const rastiC = cRows.filter((r) => r.relname === "jobs").map((r) => r.conname);
+    const rastiR = cRows.filter((r) => r.relname === "job_results").map((r) => r.conname);
+
+    const trukstaInvariantu = [
+      ...REQUIRED_JOB_CONSTRAINTS.filter((c) => !rastiC.includes(c)),
+      ...REQUIRED_JOB_RESULT_CONSTRAINTS.filter((c) => !rastiR.includes(c)),
+    ];
+
+    if (trukstaInvariantu.length > 0) {
       throw new Error(
-        `PostgreSQL schema pasenusi - trūksta invariantų: ${trukstaC.join(", ")}. ` +
+        `PostgreSQL schema pasenusi - trūksta invariantų: ${trukstaInvariantu.join(", ")}. ` +
           "Paleiskite `npm run migrate:up`: be jų DB priimtų įrašus, kurių " +
-          "runtime nepripažįsta (nežinomas tipas, nepalaikoma era, nežinomas actor source)."
+          "runtime nepripažįsta (nežinomas tipas, nepalaikoma era, nežinomas actor " +
+          "source, rezultato eilutė be vientisumo metaduomenų)."
       );
     }
   } catch (err) {
@@ -1166,6 +1199,7 @@ module.exports = {
    */
   _initializePostgresForTests: initializePostgres,
   REQUIRED_JOB_CONSTRAINTS,
+  REQUIRED_JOB_RESULT_CONSTRAINTS,
   STATUS,
   JOB_TYPES,
   TTL_MS,

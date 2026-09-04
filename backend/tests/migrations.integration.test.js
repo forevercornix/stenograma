@@ -472,8 +472,96 @@ test(
         [...REQUIRED_JOB_CONSTRAINTS].sort(),
         "migracijų sukurtų CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
       );
+
+      /**
+       * ⚠️ TA PATI PILNUMO PATIKRA `job_results` LENTELEI (#157, PR-1).
+       *
+       * Readiness anksčiau filtravo tik `jobs`, tad `job_results` invariantai
+       * nebuvo tikrinami nei starte, nei čia (Codex #289). Sąrašas išvedamas iš
+       * šviežiai migruotos DB — naujas constraint'as migracijoje be įrašo
+       * `REQUIRED_JOB_RESULT_CONSTRAINTS` krinta iškart.
+       */
+      const { REQUIRED_JOB_RESULT_CONSTRAINTS } = require("../utils/jobStore");
+      const { rows: rezultatai } = await pool.query(
+        `SELECT c.conname
+           FROM pg_constraint c
+           JOIN pg_class t     ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE t.relname = 'job_results'
+            AND n.nspname = current_schema()
+            AND c.contype = 'c'`
+      );
+
+      assert.deepEqual(
+        rezultatai.map((r) => r.conname).sort(),
+        [...REQUIRED_JOB_RESULT_CONSTRAINTS].sort(),
+        "`job_results` CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
+      );
     } finally {
       await pool.end();
+    }
+  }
+);
+
+test(
+  "#157 STARTAS: dingęs `job_results` invariantas SUSTABDO paleidimą",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ CODEX RADINYS (#289): readiness užklausa filtravo `t.relname = 'jobs'`,
+     * tad diegimas, pritaikęs tik pirmąją #157 migraciją arba praradęs
+     * constraint'ą dėl schemos nukrypimo, startuodavo SĖKMINGAI — o rezultatų
+     * rašymo ir restore verifikacijos keliai remiasi būtent tais invariantais.
+     *
+     * Tikrinamas ELGESYS, ne sąrašas: constraint'as realiai pašalinamas, ir
+     * startas privalo kristi fail-closed.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const { _initializePostgresForTests } = require("../utils/jobStore");
+    assert.ok(_initializePostgresForTests, "startas turi būti pasiekiamas testui");
+
+    /**
+     * ⚠️ `initializePostgres()` SKAITO `process.env`, ARGUMENTŲ NEPRIIMA, ir
+     * sėkmės atveju pool'o NEUŽDARO (jį perima store). Todėl aplinka keičiama
+     * trumpam, o sukurtas store'as uždaromas rankomis — kitaip liktų atviros
+     * jungtys, ir kitas failas gautų „too many clients" (§9.3).
+     */
+    const senasUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = DB_URL;
+
+    async function startas() {
+      const store = await _initializePostgresForTests();
+      await store.close?.();
+      return store;
+    }
+
+    try {
+      /** KONTROLĖ: pilna schema startą PRAEINA — kitaip patikra būtų visada „ne". */
+      await startas();
+
+      await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_shape");
+
+      await assert.rejects(
+        startas,
+        /job_results_storage_shape/,
+        "dingęs invariantas privalo sustabdyti startą ir būti ĮVARDYTAS"
+      );
+    } finally {
+      await pg(
+        DB_URL,
+        `ALTER TABLE job_results ADD CONSTRAINT job_results_storage_shape CHECK (
+           CASE storage_type
+             WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+                  AND bytes IS NULL AND checksum IS NULL
+             ELSE storage_key IS NOT NULL AND payload IS NULL
+                  AND bytes IS NOT NULL AND checksum IS NOT NULL
+           END
+         )`
+      );
+      if (senasUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = senasUrl;
     }
   }
 );
