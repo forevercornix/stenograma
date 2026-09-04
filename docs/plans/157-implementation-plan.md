@@ -26,6 +26,9 @@ body arba A1–A4 atsakymai.
 | 14 | **PR-3 riba tapo dviguba:** pigus atmetimas pagal persistintą `bytes` + kietas srauto stabdis; pasenusi maža reikšmė nebeleidžia įkelti didelio objekto | Codex P2 (#289) |
 | 15 | **Object key tapo ATTEMPT-UNIQUE**, ne turinio adresas: sąlyginis cleanup su eilutės užraktu NEUŽDARO lenktynių, kai konkurentas jau parašė objektą, bet dar neįėjo į transakciją | Codex P1, antra redakcija (#289) |
 | 16 | PR-1 testų lentelė plane sulyginta su faktine forma (`fs` reikalauja pilnos formos; pridėta `s3` eilutė) | Codex (#289) |
+| 17 | **Pre-check nebėra lygybės verdiktas:** sutapęs checksum praleidžia tik `put()`, sprendimą priima authoritative re-check | Codex (#289) |
+| 18 | Rakto pagrindimas perrašytas kaip **atmestas variantas su priežastimi**; cleanup skyrius suderintas su attempt-unique raktu | Codex (#289) |
+| 19 | **Naujas atviras PR-4 sprendimas:** orphan'ai su attempt-unique raktu (trys variantai, rekomendacija — patvarus bandymo registras) | peržiūra |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -352,7 +355,8 @@ nepadengti (#157 to reikalauja eksplicitiškai).
 **I/O tvarka — DVIEJŲ PAKOPŲ** (#157 D4):
 ```
 1. optimistic identity pre-check   (DB skaitymas, be užrakto, be I/O)
-       │  sutampa → NO-OP, grįžtama ČIA — put() nekviečiamas apskritai
+       │  checksum NESUTAMPA → einama į pilną kelią (2)
+       │  checksum SUTAMPA   → praleidžiamas 2 žingsnis, einama TIESIAI į 3
        ▼
 2. canonicalize → ArtifactStore.put() → head() verification
        ▼
@@ -434,6 +438,27 @@ kaip išspręsta.
 `rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:778-785, 799`) be
 tinklo I/O po užraktu.
 
+⚠️ **PRE-CHECK NĖRA IR LYGYBĖS VERDIKTAS** (Codex, #289).
+
+Body sako: checksum yra **fast-path**, o galutinį „tas pats rezultatas" sprendžia
+`kanoninisRezultatas()`. Ankstesnė šio plano seka tą taisyklę apeidavo — grąžindavo
+no-op tiesiai iš pre-check'o, t. y. verdiktą priimdavo vien digest'as. Todėl seka
+perrašyta: sutapęs checksum praleidžia tik **`put()`**, ne DB patvirtinimą.
+
+| Pre-check | Ką reiškia | Kur einama |
+|---|---|---|
+| checksum **nesutampa** | rezultatai TIKRAI skirtingi — digest čia saugus | pilnas kelias su `put()` |
+| checksum **sutampa** | greita šaka, ne verdiktas | authoritative re-check transakcijoje, `put()` praleidžiamas |
+
+⚠️ **PRIEŽASTIS NĖRA sha256 KOLIZIJA.** Ji teorinė, ir remtis ja būtų silpna.
+Tikroji priežastis — **metaduomenys gali nesutapti su turiniu**: `checksum`
+aprašo tai, kas buvo įrašyta, ne tai, kas objekte guli dabar. Sprendimą priimti
+gali tik DB pusėje matoma eilutės būsena.
+
+Pilna kanoninė lygybė reikalinga TIK ten, kur rezultatas vis tiek skaitomas —
+selective hydration lieka nepaliesta, ir pakartotinis `finish()` external turinio
+neskaito.
+
 ⚠️ **PRE-CHECK NĖRA CONCURRENCY AUTORITETAS, IR TAI RAŠOMA KODE, NE TIK ČIA.**
 Tarp 1 ir 3 žingsnio kitas worker'is gali laimėti, tad sprendimą priima **DB
 pusėje matoma eilutės būsena** (3 žingsnis), ne prieš I/O perskaityta jos kopija.
@@ -483,7 +508,8 @@ eilutė **neegzistuoja**, ir lygiagretus `SELECT` mato „rezultato nėra" vieto
 **§9.1**
 | Sargas | Mutacija | Krenta? |
 |---|---|---|
-| **pre-check** (no-op prieš `put()`) | pašalinam pre-check šaką | taip — `put` skaitiklis 2 vietoj 1, nors tapatybė sutampa |
+| **pre-check** (praleidžia `put()`) | pašalinam pre-check šaką | taip — `put` skaitiklis 2 vietoj 1, nors tapatybė sutampa |
+| pre-check NĖRA verdiktas | grąžinam no-op tiesiai iš pre-check'o | taip — testas su „checksum sutampa, bet eilutė pakeista" gauna sėkmę be DB patvirtinimo |
 | no-op reference perrašymas | nuimam re-check sąlygą | taip — `updated_at`/version pasikeičia |
 | version nedidinamas | nuimam `IS DISTINCT FROM` sąlygą | taip — version 2 vietoj 1 |
 | authoritative re-check | paliekam tik pre-check | taip — lenktynių testas duoda du skirtingus rezultatus toje pačioje eilutėje |
