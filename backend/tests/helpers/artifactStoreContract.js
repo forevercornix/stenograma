@@ -22,19 +22,26 @@ const {
  * kelias ar kad klaida ateina sinchroniškai. Tikrinama tik tai, ką kontraktas
  * ĮSIPAREIGOJA.
  *
+ * ⚠️ RAKTŲ FORMĄ DUODA BACKEND'AS, NE RINKINYS.
+ *
+ * Rinkinys, gaminantis `results/<...>.json`, būtų įkodavęs KELIO formą — o ji
+ * teisinga tik saugykloms, adresuojančioms objektus keliu. `inline` eilutė
+ * adresuojama job'o tapatybe ir turi FK į `jobs`, tad išgalvotas raktas ten
+ * apskritai neįrašomas. Todėl kiekvienas backend'as pateikia savo `raktas()`, o
+ * kontraktas lieka apie ELGESĮ, ne apie adresavimo schemą.
+ *
  * @param {string} vardas backend'o vardas ataskaitai
- * @param {() => Promise<{saugykla: object, isvalyti?: Function}>} paruosti
+ * @param {() => Promise<{saugykla: object, raktas: Function, isvalyti?: Function}>} paruosti
  */
 function paleistiKontrakta(vardas, paruosti) {
   test(`ArtifactStore kontraktas: ${vardas}`, { timeout: 120000 }, async (t) => {
-    const { saugykla, isvalyti } = await paruosti();
+    const { saugykla, raktas, isvalyti } = await paruosti();
+
+    assert.equal(typeof raktas, "function", "backend'as privalo pateikti `raktas()` gamyklą");
 
     t.after(async () => {
       if (isvalyti) await isvalyti();
     });
-
-    let seka = 0;
-    const raktas = () => `results/kontraktas/${vardas}-${++seka}.json`;
 
     /* ═══ 1. ROUND-TRIP IŠTIKIMYBĖ ═══ */
 

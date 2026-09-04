@@ -23,9 +23,12 @@ const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
 
 paleistiKontrakta("fs", async () => {
   const saknis = await fs.mkdtemp(path.join(os.tmpdir(), "stenograma-artifacts-"));
+  let seka = 0;
 
   return {
     saugykla: createFsArtifactStore({ root: saknis }),
+    /** Kelio forma yra ŠIO backend'o savybė, tad ji gyvena čia, ne kontrakte. */
+    raktas: () => `results/kontraktas/fs-${++seka}.json`,
     isvalyti: () => fs.rm(saknis, { recursive: true, force: true }),
   };
 });
