@@ -581,14 +581,23 @@ test("#157 PR-1: paveldėta eilutė SUSTABDO migraciją, o ne pataisoma tyliai",
      * ištraukimu, ne ties diagnostika. Inkaras yra operatoriui skirto pranešimo
      * dalis, tad ištraukiama būtent ji.
      */
-    const INKARAS = "ATSUKTOJE schemoje): ";
-    const pradzia = tekstas.indexOf(INKARAS);
-    assert.ok(pradzia > 0, "pranešime privalo būti nuoroda, kad užklausa veikia atsuktoje schemoje");
+    /**
+     * ⚠️ INKARAS IR UŽKLAUSA — VIENAME ŠABLONE (CI 33885361950).
+     *
+     * Ankstesnė redakcija ieškojo inkaro per `indexOf`, o jis grąžina PIRMĄ
+     * pasitaikymą. Išvestyje inkaras yra DU kartus: operatoriui skirtame
+     * pranešime ir PostgreSQL `STATEMENT:` atkartojime, kur ta pati užklausa guli
+     * suskaidyta į SQL literalus (`... schemoje): '` + naujilutė + `'SELECT ...`).
+     * `indexOf` pataikė į antrąjį, ir `^SELECT` nesutapo.
+     *
+     * Vienas šablonas su grupe reikalauja, kad `SELECT` eitų IŠKART po inkaro —
+     * tad jis gali sutapti tik su tikru pranešimu, nepriklausomai nuo to, kuris
+     * atvaizdavimas išvestyje pirmas.
+     */
+    const uzklausa = tekstas.match(/ATSUKTOJE schemoje\): (SELECT job_id[^;]+;)/);
+    assert.ok(uzklausa, "pranešime privalo būti vientisa, iškart po inkaro einanti užklausa");
 
-    const uzklausa = tekstas.slice(pradzia + INKARAS.length).match(/^SELECT job_id[^;]+;/);
-    assert.ok(uzklausa, "po inkaro privalo eiti vientisa užklausa");
-
-    const { rows } = await pg(DB_URL, uzklausa[0]);
+    const { rows } = await pg(DB_URL, uzklausa[1]);
     assert.equal(rows.length, 1, "ji privalo grąžinti būtent pažeidžiančią eilutę");
     assert.equal(rows[0].su_payload, true);
   });
