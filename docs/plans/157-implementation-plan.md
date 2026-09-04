@@ -22,6 +22,8 @@ body arba A1–A4 atsakymai.
 | 10 | **F1:** PR-1 DoD citatos perrašytos pažodžiui iš dabartinio body (5 punktai vietoj 3) | peržiūra |
 | 11 | **F2:** `verify()` riba užrašyta trijų lygių lentele; PR-3 skaitiklis skaičiuoja `read` **ir** `verify`; įvardytas reikalingas body pataisymas | peržiūra |
 | 12 | **F3:** rakto prefikso pagrindime pašalinta `list(prefix)` nuoroda kaip esama galimybė | peržiūra |
+| 13 | **PR-4 cleanup tapo SĄLYGINIS ir serializuotas job eilutės užraktu** — besąlyginis pralaimėjusiojo trynimas su turinio adresu ištrintų laimėtojo objektą | Codex P1 (#289) |
+| 14 | **PR-3 riba tapo dviguba:** pigus atmetimas pagal persistintą `bytes` + kietas srauto stabdis; pasenusi maža reikšmė nebeleidžia įkelti didelio objekto | Codex P2 (#289) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -266,7 +268,21 @@ metadata keliai perduoda `hydrate: false`. `listByFlag()` jau elgiasi taip —
 
 **Riba tikrinama PRIEŠ įkėlimą, ne po jo.** Hidratuojant external rezultatą
 `MAX_RESULT_BYTES` lyginamas su **persistintu `bytes`** (PR-1 kolona), ir viršijus
-ribą turinys apskritai neskaitomas. Tai skiriasi nuo inline kelio, kur riba
+ribą turinys apskritai neskaitomas.
+
+⚠️ **VIEN PERSISTINTO `bytes` NEPAKANKA** (Codex P2, #289). Jei objektas
+saugykloje perrašytas ar sugadintas iki didesnio, pasenusi maža reikšmė patikrą
+praeitų, ir į atmintį vis tiek patektų savavališkai didelis turinys. Todėl riba
+yra **dviguba**:
+
+1. **pigus atmetimas** — `persistintas bytes > MAX_RESULT_BYTES` → net nekreipiamės
+   į saugyklą;
+2. **kietas stabdis** — skaitymas eina per srautą su baitų skaitikliu, ir jis
+   nutraukiamas, kai viršijamas mažesnysis iš (`persistintas bytes`,
+   `MAX_RESULT_BYTES`). Neatitikimas tarp deklaruoto ir faktinio dydžio yra
+   gedimas, ne tyliai priimama būsena.
+
+Antrasis punktas yra tas, kuris garantuoja ribotumą: pirmasis tik taupo I/O. Tai skiriasi nuo inline kelio, kur riba
 tikrinama prieš rašymą — bet klausimas tas pats: į atmintį nepatenka tai, kas
 netelpa.
 
@@ -325,8 +341,36 @@ nepadengti (#157 to reikalauja eksplicitiškai).
        ▼
 3. trumpa DB transakcija: authoritative re-check / CAS → commit
        ▼
-4. pralaimėjus arba rollback'inus → orphan cleanup
+4. pralaimėjus arba rollback'inus → SĄLYGINIS cleanup (žr. žemiau)
 ```
+
+⚠️ **PRALAIMĖJĘS NETRINA BESĄLYGIŠKAI — TAI DUOMENŲ PRARADIMAS** (Codex P1, #289).
+
+Raktas yra turinio adresas, tad du worker'iai su **tuo pačiu** loginiu rezultatu
+rašo į **tą patį** raktą. Besąlyginis pralaimėjusiojo cleanup ištrintų objektą,
+kurį laimėtojas jau referencina — job'as liktų `completed` be rezultato. Tai
+blogiau nei orphan: orphan yra šiukšlė, o čia dingsta duomenys.
+
+Todėl cleanup yra sąlyginis ir **serializuojamas tuo pačiu job eilutės užraktu**:
+
+```
+BEGIN
+  SELECT ... FROM jobs WHERE id = $1 FOR UPDATE      -- laukia, kol laimėtojas commit'ina
+  SELECT storage_key FROM job_results WHERE job_id = $1
+  jei storage_key = mūsų raktas  → NETRINAM (tai laimėtojo objektas)
+  jei nuorodos nėra              → trinam (tikras orphan)
+COMMIT
+```
+
+Užraktas čia būtinas: be jo pralaimėjęs galėtų patikrinti nuorodą PRIEŠ
+laimėtojo commit'ą, pamatyti „nereferencuota" ir ištrinti objektą, kurį
+laimėtojas po sekundės užregistruos.
+
+⚠️ **LIEKA RIBA, IR JI UŽRAŠOMA:** objektas, parašytas proceso, kuris krito
+PRIEŠ bet kokią DB transakciją, lieka be jokios nuorodos ir be jokio detektoriaus —
+DB krypties skenavimas (A3) jo nemato pagal apibrėžimą. Tai to paties follow-up
+issue apimtis (`list(prefix)`), ir PR-4 aprašyme įvardijama kaip žinoma riba, ne
+kaip išspręsta.
 
 `put()` vyksta **prieš** `inTransaction()`, ne jo viduje: tai išsprendžia
 `rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:778-785, 799`) be
@@ -378,7 +422,9 @@ eilutė **neegzistuoja**, ir lygiagretus `SELECT` mato „rezultato nėra" vieto
 | version nedidinamas | nuimam `IS DISTINCT FROM` sąlygą | taip — version 2 vietoj 1 |
 | authoritative re-check | paliekam tik pre-check | taip — lenktynių testas duoda du skirtingus rezultatus toje pačioje eilutėje |
 | I/O ne po užraktu | keliam `put()` į `inTransaction()` | **ne automatiškai** — žr. žemiau |
-| orphan cleanup | pašalinam `catch` | taip — objektas lieka po rollback |
+| sąlyginis cleanup | trinam besąlygiškai | taip — lygiagretus testas su TUO PAČIU rezultatu: laimėtojo objekto nebelieka |
+| cleanup po užraktu | nuimam `FOR UPDATE` | ⚠️ **ne patikimai** — lenktynių langas siauras; testas kartojamas N kartų, verdiktas „nepaneigta" (§14.1) |
+| orphan cleanup | pašalinam `catch` | taip — objektas lieka po rollback, kai nuorodos NĖRA |
 
 ⚠️ **„I/O ne po užraktu" negali būti įrodyta grep'u** (§9.2), o elgesio testas
 reikalauja stebimo užrakto. Sprendimas: `ArtifactStore` dublis, kurio `put()`
