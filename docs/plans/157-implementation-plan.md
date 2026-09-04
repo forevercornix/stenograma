@@ -34,6 +34,14 @@ body arba A1–A4 atsakymai.
 | 22 | **No-op reikalauja ir `head()` patikros:** sutapęs checksum nebeleidžia skelbti sėkmės virš pakibusios nuorodos | Codex (#289) |
 | 23 | **Stebėtojo mutacija taisyta:** skaldyti reikia TRANSAKCIJĄ, ne sakinį — vienos transakcijos vidinė būsena išoriniam stebėtojui nematoma | Codex (#289) |
 | 24 | **PR-3 metaduomenų `SELECT` traukia rezultato reference laukus** — be jų PR-5 per-row sprendimas buvo neįvykdomas nurodymas | Codex (#289) |
+| 25 | **PR-2 riba atmeta reikšmes, kurių tapatybė pasikeistų inline kelyje** (`Date` ir kt. su prototipo `toJSON`) — išmatuota divergencija, kurios `fs` rinkinys nepagautų | peržiūra |
+| 26 | **Struktūrinis atmetimas žymimas `neatkartojama`; PR-4 privalo jį vynioti į `UnrecoverableError`** | peržiūra (#153 precedentas) |
+| 27 | Užrašyta, kad stabilumo predikatas yra inline kelio **modelis**, ne pats kelias — inline pariteto testo jis nepakeičia | peržiūra |
+| 28 | **`put()` grąžina `key` (adresas) IR `reference` (kas persistinama, `null` inline)** — kitaip inline išgalvotų sentinelį ir gautų `23514` | peržiūra |
+| 29 | **`verify()` grąžina `nepriklausomas`** — inline patikra lygina reikšmę su savimi; užrašyta kaip 7.6 restore riba | peržiūra |
+| 30 | PR-4 gauna ELGESIO DoD punktą: struktūrinis atmetimas duoda nulį BullMQ pakartojimų | peržiūra |
+| 31 | **Atsakyta, kada `delete()` kviečiamas:** `reference !== null` → saugykloje; `null` → eilutės ištrynimas IR YRA ištrynimas | peržiūra |
+| 32 | **PR-7 DoD per ataskaitos turinį:** patikrintų ir nepatikrinamų eilučių skaičiai pateikiami atskirai | peržiūra |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -261,6 +269,25 @@ ir ten ji taisytina.
 
 ⚠️ **`list(prefix)` į kontraktą NEĮEINA** (A3). Orphan aptikimas apibrėžiamas DB
 kryptimi; priešinga kryptis — atskiro darbo apimtis, ir riba užrašoma PR-5.
+
+⚠️ **PR-4 DoD PUNKTAS (elgesio, ne lauko): „struktūrinis atmetimas completion
+metu duoda NULĮ BullMQ pakartojimų".**
+
+Nuoroda plane nieko nesulaužo; krentantis testas sulaužo. Todėl PR-4 privalo
+turėti testą, matuojantį PAKARTOJIMŲ SKAIČIŲ, ne `neatkartojama` lauko buvimą:
+job'as su `Date` rezultate baigiasi `failed` po VIENO vykdymo, `attempts` nedidėja.
+
+⚠️ **PR-4 PRIVALO SUVYNIOTI STRUKTŪRINĮ ATMETIMĄ Į `UnrecoverableError`.**
+
+`ArtifactStore` klaidos žymimos `neatkartojama: true`, o `jobRunner._classifyError()`
+jas atpažįsta ir grąžina savo kodą. Bet **ženklas vienas nieko nesustabdo**:
+BullMQ retry grandinę nutraukia tik `UnrecoverableError`, kurį uždeda KVIETĖJAS —
+lygiai kaip `assertResultWithinLimits` (`workers/index.js:359-366`). Be to vienas
+netinkamas laukas kainuotų `attempts` × pilną transkribavimą arba LLM kvietimą ir
+vis tiek baigtųsi klaida.
+
+Tai PR-4 darbas, nes completion kelias `put()` kviečia būtent ten; PR-2 palieka
+paruoštą ženklą ir klasifikaciją, ne garantiją.
 
 **DoD, kuriuos uždaro**
 - „Vienas `ArtifactStore` production boundary; business/service sluoksnis neatlieka tiesioginio filesystem/S3 I/O."
@@ -664,6 +691,18 @@ ir taip nėra tiesos šaltinis.
 
 **DoD**
 - „Autoritetingas erasure kelias pašalina external object; dalinis object-storage gedimas negali būti raportuojamas kaip sėkmingas galutinis ištrynimas."
+
+⚠️ **KADA `delete()` KVIEČIAMAS, O KADA NE — ATSAKYTA KONTRAKTE, NE PR-5.**
+
+Erasure eina per `job_results.storage_key`: yra nuoroda — yra ką trinti
+saugykloje. `inline` eilutėje ji `NULL`, tad atskiro kvietimo NĖRA: turinys
+gyvena toje pačioje eilutėje ir dingsta kartu su ja (`ON DELETE CASCADE`).
+Adreso niekas neatkurs, nes jo niekas nepersistino — ir nereikia.
+
+Vadinasi PR-5 predikatas yra: `reference !== null` → objektas privalo būti
+pašalintas ir tai patvirtinta; `reference === null` → eilutės ištrynimas IR YRA
+ištrynimas. Be šio sakinio PR-5 turėtų išsiaiškinti tai pats, o ten klaidos kaina
+yra ištrynimo garantija.
 - „`services/lifecycleService.js` `STORED_IN_JOB_RECORD` šaka pakeista…"
 - „Mutation įrodymas: `ArtifactStore.delete()` meta klaidą → `criticalFailure: true` → DB metaduomenys NEPAŠALINAMI…"
 - „`utils/artefactScanner.js` `transcript` / `protocol` įrašai nebeturi `reason: "saugoma job_record viduje"`; skenavimo elgesys sprendžiamas **pagal faktinį eilutės `storage_type`**, ne pagal konfigūraciją."
@@ -762,6 +801,20 @@ atidedamas — sargas nešalinamas anksčiau.
 - `docs/security-test-matrix.md`, `README.md` apribojimų lentelė
 - `backend/tests/artifactRestoreIntegrity.integration.test.js`
 
+⚠️ **INLINE EILUTĖMS RESTORE VERIFIKACIJA NIEKO NEPATIKRINA, IR TAI RIBA.**
+
+`verify()` grąžina `nepriklausomas: true|false`. External eilutėje `bytes` ir
+`checksum` persistinti ATSKIRAI (PR-1 kolonos), tad objektas lyginamas su
+nepriklausomu įrašu. `inline` eilutėje tų metaduomenų NĖRA (invariantas jų
+reikalauja tik external šakoje), tad `verify()` gali tik perskaičiuoti iš to
+paties `payload` — lygina reikšmę su savimi ir visada grąžina `ok: true`.
+
+Tai nėra klaida, bet tai **kita garantija**. Praktinė pasekmė: procedūra,
+tikrinanti „ar `storage_key` rodo į vientisą artefaktą", inline eilutėms neduoda
+JOKIO patikrinimo — o mišrioje DB (po migracijos) tokių eilučių bus dauguma.
+Restore ataskaita privalo skirti „patikrinta" nuo „nebuvo ko tikrinti", kitaip
+pratybos praeis per lengvai ir tai atrodys kaip sėkmė.
+
 **Restore verifikacija:** kiekvienai `job_results` eilutei su `storage_key`
 kviečiamas `verify(key, {bytes, checksum})` su **DB pusėje persistintomis**
 reikšmėmis (PR-1 kolonos, rašytos PR-4 metu). Missing arba nesutampantis →
@@ -776,6 +829,13 @@ neskaičiuoja laukiamos reikšmės iš tikrinamo objekto.
 - „Aiškiai apibrėžta external artifact backup/restore atsakomybė; peržiūrėti `docs/backup-runbook.md` §9a / §11 teiginiai bei atitinkami testai."
 - „Restore/integrity testas įrodo, kad atkurtas DB `storage_key` nurodo į egzistuojantį ir teisingą artefaktą; missing/corrupt object failina uždarai."
 - „Apibrėžta, IŠ KUR imama laukiama vientisumo reikšmė…"
+
+⚠️ **PR-7 DoD FORMULUOJAMAS PER ATASKAITOS TURINĮ, NE PER LAUKO EGZISTAVIMĄ:**
+restore verifikacija pateikia **atskirai** patikrintų ir NEPATIKRINAMŲ eilučių
+skaičius. `verify()` grąžina `nepriklausomas`, bet laukas, kurio niekas neskaito,
+nėra garantija — lygiai kaip `neatkartojama` be `UnrecoverableError`. Mišrioje DB
+inline eilučių bus dauguma, tad ataskaita, rodanti vien „patikrinta: N", skambėtų
+kaip pilna patikra ir pratybos praeitų per lengvai.
 - „Non-inline fail-closed sargo (`postgresStore.js:989-1007`) pašalinimas yra **paskutinis** implementacijos žingsnis — po equality, schemos, hydration, completion/concurrency, erasure, migracijos ir backup/restore integracinių įrodymų. Sargo pašalinimas negali būti naudojamas ankstesniems testams „atrakinti"…"
 - „Įvardyta, kad #157 PostgreSQL aktyvavimo barjero neatidaro…"
 

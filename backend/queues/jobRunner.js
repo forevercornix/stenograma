@@ -500,7 +500,8 @@ function _classifyError(e, context = "job") {
    * sustabdo retry grandinę. Originali klaida perduodama per `cause`, tad
    * domeninis kodas turi būti imamas iš jos, ne iš gaubiančios klaidos.
    */
-  const domeninė = e && e.cause && e.cause.name === "ResultLimitError" ? e.cause : e;
+  const NEATKARTOJAMOS = ["ResultLimitError", "ArtifactStoreError"];
+  const domeninė = e && e.cause && NEATKARTOJAMOS.includes(e.cause.name) ? e.cause : e;
 
   /**
    * FAZĖS KLAIDA TURI SAVO KODĄ (#154).
@@ -516,6 +517,23 @@ function _classifyError(e, context = "job") {
    * fazių pavadinimai ir job tipas.
    */
   if (domeninė && domeninė.name === "JobPhaseError") {
+    return { errorCode: domeninė.code, message: domeninė.message };
+  }
+
+  /**
+   * ARTEFAKTŲ SAUGYKLOS KLAIDA TURI SAVO KODĄ (#157, PR-2).
+   *
+   * ⚠️ STRUKTŪRINIS ATMETIMAS NĖRA `internal_error`. `Date` rezultate arba NUL
+   * simbolis tekste nuo kartojimo neišnyks, ir operatoriui reikia matyti, KAS
+   * nutiko: `ARTIFACT_VALUE_UNSUPPORTED` pasako, kad rezultatas nesaugotinas,
+   * o `ARTIFACT_NOT_FOUND` — kad dingo objektas. Suplakus juos į vieną kodą,
+   * abu virstų ta pačia neinformatyvia eilute.
+   *
+   * ⚠️ RETRY GRANDINĘ SUSTABDO KVIETĖJAS, NE ŠI ŠAKA. Klasifikatorius tik
+   * įvardija; `UnrecoverableError` vyniojimas gyvena completion kelyje (PR-4),
+   * kaip ir `assertResultWithinLimits` atveju.
+   */
+  if (domeninė && domeninė.name === "ArtifactStoreError") {
     return { errorCode: domeninė.code, message: domeninė.message };
   }
 
