@@ -1,5 +1,4 @@
 const fsp = require("node:fs/promises");
-const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
@@ -158,21 +157,36 @@ function createFsArtifactStore({ root } = {}) {
     const pilnas = kelias(raktas);
 
     /**
-     * ⚠️ EGZISTAVIMAS TIKRINAMAS PRIEŠ SRAUTĄ - BET TAI NE GARANTIJA.
+     * ⚠️ FAILAS ATIDAROMAS ANKSTI, NE `createReadStream` VIDUJE (CI 33909325226).
      *
-     * `createReadStream` nesančio failo klaidą paduoda ASINCHRONIŠKAI, per
-     * `error` įvykį. Ši patikra DAŽNĄ atvejį paverčia tipizuota klaida, tačiau
-     * lango neuždaro: objektas gali dingti tarp patikros ir skaitymo.
+     * Pirmoji redakcija darė `head()` patikrą ir grąžindavo `fs.createReadStream()`.
+     * Tas srautas failą atidaro TINGIAI, jau po grąžinimo, tad objektui dingus
+     * tarp patikros ir pirmo skaitymo `ENOENT` iškyla kaip `error` ĮVYKIS - ir,
+     * jei tuo metu klausytojo dar nėra, virsta `uncaughtException`. CI būtent tai
+     * ir parodė: testas krito ne dėl tvirtinimo, o dėl nesugaunamos klaidos.
      *
-     * ⚠️ TODĖL KONTRAKTAS NEŽADA „visada tipizuota". Kvietėjas PRIVALO apdoroti
-     * ir srauto `error` įvykį; priešingu atveju dokumentacija teigtų daugiau,
-     * nei kodas gali (§12.1).
+     * `fsp.open()` klaidą paduoda per `await`, tad ji tampa tipizuota ir
+     * SUGAUNAMA. Grąžinamas srautas kuriamas iš JAU atidaryto deskriptoriaus, tad
+     * vėlesnis objekto ištrynimas jo nebeliečia (POSIX: inode gyvas, kol atviras).
+     *
+     * ⚠️ KONTRAKTAS VIS TIEK NEŽADA „visada tipizuota": srautas gali kristi dėl
+     * I/O klaidos jau skaitymo metu. Kvietėjas privalo apdoroti ir srauto klaidą.
+     *
+     * ⚠️ DESKRIPTORIUS UŽSIDARO SU SRAUTU - išmatuota: po srauto pabaigos
+     * `fh.read()` grąžina `EBADF`. Tad nutekėjimo nėra, kol srautas suvartojamas
+     * arba sunaikinamas.
      */
-    if ((await head(raktas)) === null) {
-      throw new ArtifactStoreError(`FsArtifactStore: objekto "${raktas}" nėra.`, KLAIDA.NERASTA);
+    let deskriptorius;
+    try {
+      deskriptorius = await fsp.open(pilnas, "r");
+    } catch (klaida) {
+      if (klaida.code === "ENOENT") {
+        throw new ArtifactStoreError(`FsArtifactStore: objekto "${raktas}" nėra.`, KLAIDA.NERASTA);
+      }
+      throw klaida;
     }
 
-    return fs.createReadStream(pilnas);
+    return deskriptorius.createReadStream();
   }
 
   async function verify(raktas, laukiama = {}) {

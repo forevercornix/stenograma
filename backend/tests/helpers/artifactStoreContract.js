@@ -295,13 +295,37 @@ function paleistiKontrakta(vardas, paruosti) {
       const srautas = await saugykla.readStream(k);
       await saugykla.delete(k);
 
+      /**
+       * ⚠️ KLAIDA PRIVALO ATEITI PER SRAUTĄ, NE PRO ŠALĮ (CI 33909325226).
+       *
+       * Pirmoji redakcija tikrino tik „duomenys arba klaida", ir CI parodė, kodėl
+       * to nepakanka: `ENOENT` atkeliavo kaip `uncaughtException` — testas krito
+       * ne dėl tvirtinimo, o dėl klaidos, kurios niekas nesugavo. Tvirtinimas
+       * buvo teisingas, bet nepasiekiamas.
+       *
+       * Todėl aiškiai fiksuojama, kad neapdorotų klaidų NĖRA: jos arba ateina per
+       * `for await`, arba nekyla išvis.
+       */
+      const nesugautos = [];
+      const stebetojas = (e) => nesugautos.push(e);
+      process.on("uncaughtException", stebetojas);
+
       let klaida = null;
       let baitai = 0;
       try {
         for await (const gabalas of srautas) baitai += gabalas.length;
       } catch (e) {
         klaida = e;
+      } finally {
+        await new Promise((r) => setImmediate(r));
+        process.off("uncaughtException", stebetojas);
       }
+
+      assert.deepEqual(
+        nesugautos.map((e) => e.code || e.message),
+        [],
+        "srauto klaida privalo būti SUGAUNAMA, ne virsti `uncaughtException`"
+      );
 
       assert.ok(
         klaida !== null || baitai > 0,
