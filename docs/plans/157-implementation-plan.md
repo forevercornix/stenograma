@@ -428,11 +428,42 @@ neša tapatybę; pasikeičia tik tai, kad ji nebėra objekto vardas. Tai tiesiog
 atitinka A2 ribą „checksum niekada neišvedamas iš object key" — dabar ji galioja
 ir atvirkščiai: object key neišvedamas iš checksum'o.
 
-⚠️ **LIEKA RIBA, IR JI UŽRAŠOMA:** objektas, parašytas proceso, kuris krito
-PRIEŠ bet kokią DB transakciją, lieka be jokios nuorodos ir be jokio detektoriaus —
-DB krypties skenavimas (A3) jo nemato pagal apibrėžimą. Tai to paties follow-up
-issue apimtis (`list(prefix)`), ir PR-4 aprašyme įvardijama kaip žinoma riba, ne
-kaip išspręsta.
+### ⚠️ ATVIRAS PR-4 SPRENDIMAS: orphan'ai su attempt-unique raktu
+
+Rakto schemos pakeitimas uždarė duomenų praradimą, bet **atidarė kitą klausimą, ir
+jį reikia priimti eksplicitiškai, ne praslysti pro šalį.**
+
+Su turinio adresu orphan'ai buvo iš dalies saviorganizuoti: pakartotinis tas pats
+rezultatas taikėsi į tą patį raktą, tad šiukšlė nesidaugino. Su attempt-unique
+raktu **kiekvienas kritęs bandymas palieka unikaliai pavadintą objektą**, o
+procesas, kritęs tarp `put()` ir cleanup, palieka objektą, kurio nerodo nė viena
+DB eilutė.
+
+⚠️ **AŠTRIAUSIA FORMA: toks objektas išgyvena job'o IŠTRYNIMĄ.** Erasure eina per
+`job_results.storage_key`; nuorodos nėra, tad nėra ko trinti — o objekte guli
+transkripcija. Tai nebe šiukšlė, o GDPR klausimas, ir jis atsirado dėl mano rakto
+schemos sprendimo, ne dėl #157 reikalavimo.
+
+Trys variantai PR-4:
+
+| | Variantas | Kaina |
+|---|---|---|
+| a | Erasure trina pagal **prefiksą** (`results/<jobId>/`) | Tai `list`-ekvivalentas: A3 riba turėtų būti PERRAŠYTA, ne apeita per kitą metodo vardą |
+| b | **Patvarus bandymo registras:** `attemptId` įrašomas į DB PRIEŠ `put()` | Orphan tampa matomas DB kryptimi; kaina — vienas `INSERT` prieš kiekvieną rašymą |
+| c | Riba pripažįstama ir fiksuojama | `docs/artefact-lifecycle.md` + follow-up issue; GDPR pusėje silpniausias |
+
+**Rekomendacija: (b).** Ji vienintelė išlaiko A3 („DB kryptis") nepakeistą ir tuo
+pat metu padaro orphan'ą aptinkamu: jei `attemptId` yra registre, bet nėra
+`job_results` nuorodos, objektas turi savininką ir adresą. (a) reikštų tylų A3
+apėjimą — `list(prefix)` grįžtų kitu vardu; (c) paliktų transkripciją saugykloje
+po ištrynimo.
+
+⚠️ **SPRENDIMAS PRIIMAMAS PR-4 PRADŽIOJE, NE PABAIGOJE.** Jis keičia rašymo kelio
+formą (registras prieš `put()`), tad įterptas vėliau reikštų perrašymą.
+
+Iki tada lieka ir senoji riba: objektas, parašytas proceso, kuris krito prieš bet
+kokią DB transakciją, be varianto (b) neturi jokio detektoriaus — DB krypties
+skenavimas jo nemato pagal apibrėžimą.
 
 `put()` vyksta **prieš** `inTransaction()`, ne jo viduje: tai išsprendžia
 `rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:778-785, 799`) be
