@@ -77,7 +77,27 @@ function dbVardas() {
  * #157 migracija.
  */
 function migracijuIkiPR1() {
-  const failai = fs.readdirSync(path.join(ŠAKNIS, "migrations")).sort();
+  /**
+   * ⚠️ DOTFILE'AI IŠMETAMI TA PAČIA TAISYKLE, KURIĄ TAIKO BIBLIOTEKA (Codex #289).
+   *
+   * `node-pg-migrate` numatytai ignoruoja `^\..*`
+   * (`node_modules/node-pg-migrate/dist/bundle/index.js:2559`), o
+   * `migrations/.gitkeep` egzistuoja. `readdirSync` jį grąžina, tad indeksas
+   * buvo per didelis vienetu: `up <N>` pritaikydavo IR pirmąją #157 migraciją,
+   * ir „krentanti" liko tik antroji. Testas tvirtino „SCHEMA NEPALIESTA", nors
+   * vientisumo kolonos tuo metu jau buvo įsipareigotos — t. y. jis TEIGĖ
+   * daugiau, nei parodė.
+   *
+   * Ad-hoc `!== ".gitkeep"` uždarytų šį atvejį ir praleistų kitą dotfile'ą;
+   * kartojama bibliotekos taisyklė, ne simptomas.
+   */
+  const IGNORUOJAMI = /^\..*/;
+
+  const failai = fs
+    .readdirSync(path.join(ŠAKNIS, "migrations"))
+    .filter((f) => !IGNORUOJAMI.test(f))
+    .sort();
+
   const indeksas = failai.findIndex((f) => f.startsWith("1756100000000_"));
 
   assert.ok(indeksas > 0, "#157 PR-1 migracija privalo egzistuoti ir nebūti pirmoji");
@@ -517,8 +537,16 @@ test("#157 PR-1: paveldėta eilutė SUSTABDO migraciją, o ne pataisoma tyliai",
     assert.equal(rows[0].storage_type, "s3");
   });
 
-  await t.test("SCHEMA NEPALIESTA: naujas invariantas NEPRITAIKYTAS", async () => {
-    const { rows } = await pg(
+  await t.test("SCHEMA NEPALIESTA: ABI migracijos atšauktos viena transakcija", async () => {
+    /**
+     * ⚠️ TIKRINAMOS ABI, NE VIENA.
+     *
+     * `node-pg-migrate` numatytai visą paleidimą vykdo VIENOJE transakcijoje, tad
+     * antrosios migracijos kritimas privalo atsukti ir pirmąją. Iki `.gitkeep`
+     * pataisymo šis tvirtinimas buvo neįmanomas: pirmoji migracija būdavo
+     * pritaikyta ATSKIRU ankstesniu paleidimu, tad kolonos likdavo.
+     */
+    const { rows: apribojimai } = await pg(
       DB_URL,
       `SELECT pg_get_constraintdef(c.oid) AS apibrezimas
          FROM pg_constraint c
@@ -526,11 +554,23 @@ test("#157 PR-1: paveldėta eilutė SUSTABDO migraciją, o ne pataisoma tyliai",
         WHERE t.relname = 'job_results' AND c.conname = 'job_results_storage_type_values'`
     );
 
-    assert.equal(rows.length, 1);
+    assert.equal(apribojimai.length, 1);
     assert.equal(
-      /'fs'/.test(rows[0].apibrezimas),
+      /'fs'/.test(apribojimai[0].apibrezimas),
       false,
-      "kritusi migracija negali palikti pusiau pakeistos schemos"
+      "antroji migracija (reikšmės ir forma) NEPRITAIKYTA"
+    );
+
+    const { rows: kolonos } = await pg(
+      DB_URL,
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'job_results' AND column_name IN ('bytes', 'checksum')`
+    );
+
+    assert.deepEqual(
+      kolonos.map((r) => r.column_name).sort(),
+      [],
+      "pirmoji migracija (vientisumo kolonos) TAIP PAT atšaukta — kritimas negali palikti pusiau pakeistos schemos"
     );
   });
 
