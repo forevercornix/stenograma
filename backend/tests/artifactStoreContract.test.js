@@ -29,6 +29,8 @@ paleistiKontrakta("fs", async () => {
     saugykla: createFsArtifactStore({ root: saknis }),
     /** Kelio forma yra ŠIO backend'o savybė, tad ji gyvena čia, ne kontrakte. */
     raktas: () => `results/kontraktas/fs-${++seka}.json`,
+    /** Filesystem adresuoja OBJEKTUS, tad external pakopa jam galioja. */
+    external: true,
     isvalyti: () => fs.rm(saknis, { recursive: true, force: true }),
   };
 });

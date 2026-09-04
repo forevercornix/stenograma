@@ -30,12 +30,27 @@ const {
  * apskritai neįrašomas. Todėl kiekvienas backend'as pateikia savo `raktas()`, o
  * kontraktas lieka apie ELGESĮ, ne apie adresavimo schemą.
  *
+ * ⚠️ EXTERNAL PAKOPA — KLASĖS, NE BACKEND'O SKIRTUMAS.
+ *
+ * Dalis #157 garantijų kalba apie IŠORINĮ objektą: kad `reference` persistinama,
+ * kad du bandymai turi atskirus objektus, kad vieno šalinimas neliečia kito.
+ * `inline` atveju jos neturi prasmės — ten objekto nėra, adresas yra job'o
+ * tapatybė, ir du bandymai rašo ta pačia vieta TEISĖTAI.
+ *
+ * Todėl fixture deklaruoja `external: true`, ir tos garantijos tikrinamos
+ * atskira pakopa. Alternatyva (bendras scenarijus su `if backend === ...`) būtų
+ * pavertusi vartus sąlyginiais, o būtent to šis rinkinys ir vengia.
+ *
+ * ⚠️ BE ŠIOS PAKOPOS attempt-uniqueness garantija liktų BE NAMŲ: bendras
+ * rinkinys jos tikrinti negali, o vienintelis ją liečiantis testas būtų S3
+ * specifinis — t. y. PR-4 reikalavimas gyventų tik plane.
+ *
  * @param {string} vardas backend'o vardas ataskaitai
- * @param {() => Promise<{saugykla: object, raktas: Function, isvalyti?: Function}>} paruosti
+ * @param {() => Promise<{saugykla: object, raktas: Function, external?: boolean, isvalyti?: Function}>} paruosti
  */
 function paleistiKontrakta(vardas, paruosti) {
   test(`ArtifactStore kontraktas: ${vardas}`, { timeout: 120000 }, async (t) => {
-    const { saugykla, raktas, isvalyti } = await paruosti();
+    const { saugykla, raktas, external = false, isvalyti } = await paruosti();
 
     assert.equal(typeof raktas, "function", "backend'as privalo pateikti `raktas()` gamyklą");
 
@@ -47,7 +62,7 @@ function paleistiKontrakta(vardas, paruosti) {
 
     await t.test("put -> read išlaiko kanoninę tapatybę", async () => {
       for (const scenarijus of GALIOJANTYS) {
-        const k = raktas();
+        const k = await raktas();
         await saugykla.put(k, scenarijus.reiksme);
         const grazinta = await saugykla.read(k);
 
@@ -62,8 +77,8 @@ function paleistiKontrakta(vardas, paruosti) {
     await t.test("tapatybė NEPRIKLAUSO nuo raktų tvarkos, bet PRIKLAUSO nuo masyvo", async () => {
       for (const scenarijus of GALIOJANTYS) {
         if (scenarijus.tapatuSu) {
-          const a = raktas();
-          const b = raktas();
+          const a = await raktas();
+          const b = await raktas();
           await saugykla.put(a, scenarijus.reiksme);
           await saugykla.put(b, scenarijus.tapatuSu);
 
@@ -75,8 +90,8 @@ function paleistiKontrakta(vardas, paruosti) {
         }
 
         if (scenarijus.skiriasiNuo) {
-          const a = raktas();
-          const b = raktas();
+          const a = await raktas();
+          const b = await raktas();
           await saugykla.put(a, scenarijus.reiksme);
           await saugykla.put(b, scenarijus.skiriasiNuo);
 
@@ -92,7 +107,7 @@ function paleistiKontrakta(vardas, paruosti) {
     /* ═══ 2. `put` GRĄŽINAMI METADUOMENYS ═══ */
 
     await t.test("put grąžina `bytes` ir `checksum`, sutampančius su kanonine eilute", async () => {
-      const k = raktas();
+      const k = await raktas();
       const reiksme = { text: "kvitas", segments: [1, 2] };
 
       const rezultatas = await saugykla.put(k, reiksme);
@@ -129,7 +144,7 @@ function paleistiKontrakta(vardas, paruosti) {
     /* ═══ 3. `head` ═══ */
 
     await t.test("head: esantis objektas grąžina dydį, nesantis - `null`", async () => {
-      const k = raktas();
+      const k = await raktas();
       const { bytes } = await saugykla.put(k, { text: "yra" });
 
       const galva = await saugykla.head(k);
@@ -137,13 +152,13 @@ function paleistiKontrakta(vardas, paruosti) {
       assert.equal(galva.exists, true);
       assert.equal(galva.bytes, bytes, "dydis privalo sutapti su `put` grąžintu");
 
-      assert.equal(await saugykla.head(raktas()), null, "nesantis objektas -> `null`, ne klaida");
+      assert.equal(await saugykla.head(await raktas()), null, "nesantis objektas -> `null`, ne klaida");
     });
 
     /* ═══ 4. `verify` ═══ */
 
     await t.test("verify: sutampantys metaduomenys -> ok, nesutampantys -> ne ok", async () => {
-      const k = raktas();
+      const k = await raktas();
       const { bytes, checksum } = await saugykla.put(k, { text: "vientisumas" });
 
       const patvirtinimas = await saugykla.verify(k, { bytes, checksum });
@@ -174,7 +189,7 @@ function paleistiKontrakta(vardas, paruosti) {
         "neteisinga suma privalo būti pastebėta"
       );
       assert.equal(
-        (await saugykla.verify(raktas(), { bytes: 1, checksum: "f".repeat(64) })).ok,
+        (await saugykla.verify(await raktas(), { bytes: 1, checksum: "f".repeat(64) })).ok,
         false,
         "nesantis objektas -> ne ok, ne klaida: kvietėjas nusprendžia, ką daryti"
       );
@@ -198,7 +213,7 @@ function paleistiKontrakta(vardas, paruosti) {
      * vykdomas VISIEMS - skiriasi tik tai, kas jį kviečia produkcijoje.
      */
     await t.test("delete: `true` pašalinus, `false` kai nebuvo - be klaidos", async () => {
-      const k = raktas();
+      const k = await raktas();
       await saugykla.put(k, { text: "trinama" });
 
       assert.equal(await saugykla.delete(k), true, "pašalinimas grąžina `true`");
@@ -210,7 +225,7 @@ function paleistiKontrakta(vardas, paruosti) {
 
     await t.test("read: nesantis objektas -> tipizuota klaida", async () => {
       await assert.rejects(
-        () => saugykla.read(raktas()),
+        async () => saugykla.read(await raktas()),
         (klaida) => klaida.code === "ARTIFACT_NOT_FOUND",
         "trukstamas objektas privalo skirtis nuo sugedusio: kvietejas elgiasi skirtingai"
       );
@@ -219,7 +234,7 @@ function paleistiKontrakta(vardas, paruosti) {
     /* ═══ 7. `readStream` ═══ */
 
     await t.test("readStream duoda TĄ PAČIĄ reikšmę kaip `read`", async () => {
-      const k = raktas();
+      const k = await raktas();
       const reiksme = { text: "srautas", segments: Array.from({ length: 100 }, (_, i) => i) };
       const { bytes } = await saugykla.put(k, reiksme);
 
@@ -240,7 +255,7 @@ function paleistiKontrakta(vardas, paruosti) {
     await t.test("kontraktas atmeta reikšmes, kurių ne visi backend'ai gali išsaugoti", async () => {
       for (const scenarijus of ATMETAMI) {
         await assert.rejects(
-          () => saugykla.put(raktas(), scenarijus.reiksme),
+          async () => saugykla.put(await raktas(), scenarijus.reiksme),
           (klaida) => klaida.code === "ARTIFACT_VALUE_UNSUPPORTED",
           `privalėjo būti atmesta ties riba: ${scenarijus.vardas}`
         );
@@ -254,7 +269,7 @@ function paleistiKontrakta(vardas, paruosti) {
        * kad visi backend'ai praranda tą patį ir grąžina tą pačią tapatybę.
        */
       for (const scenarijus of NUOSTOLINGI) {
-        const k = raktas();
+        const k = await raktas();
         await saugykla.put(k, scenarijus.reiksme);
 
         assert.equal(
@@ -296,7 +311,7 @@ function paleistiKontrakta(vardas, paruosti) {
        * patikros ir skaitymo. Tikrinama, kad srautas klaidą PRANEŠA — kad
        * kvietėjas turėtų ką apdoroti — o ne kad ji visada ateina prieš srautą.
        */
-      const k = raktas();
+      const k = await raktas();
       await saugykla.put(k, { text: "dings" });
 
       const srautas = await saugykla.readStream(k);
@@ -340,14 +355,61 @@ function paleistiKontrakta(vardas, paruosti) {
       );
     });
 
-    /* ═══ 10. KONTROLĖ ═══ */
+    /* ═══ 10. EXTERNAL PAKOPA ═══ */
+
+    await t.test("EXTERNAL: `reference` yra adresas, ne `null`", { skip: !external }, async () => {
+      const k = await raktas();
+      const rezultatas = await saugykla.put(k, { text: "nuoroda" });
+
+      assert.equal(
+        rezultatas.reference,
+        k,
+        "išorinė saugykla PRIVALO grąžinti persistinamą nuorodą — be jos `storage_key` liktų tuščias"
+      );
+    });
+
+    await t.test("EXTERNAL: du bandymai su TUO PAČIU turiniu — du atskiri objektai", { skip: !external }, async () => {
+      /**
+       * ⚠️ TAI PR-4 attempt-uniqueness PAGRINDAS.
+       *
+       * Jei saugykla tyliai dedupliktuotų pagal turinį (turinio adresavimas
+       * „po gaubtu"), du bandymai dalintųsi vienu objektu, ir pralaimėjusiojo
+       * cleanup ištrintų laimėtojo duomenis. Čia tikrinama, kad skirtingi
+       * adresai lieka NEPRIKLAUSOMI net esant identiškam turiniui.
+       */
+      const a = await raktas();
+      const b = await raktas();
+      const reiksme = { text: "tas pats turinys" };
+
+      await saugykla.put(a, reiksme);
+      await saugykla.put(b, reiksme);
+
+      assert.notEqual(a, b, "gamykla privalo duoti skirtingus adresus");
+      assert.ok(await saugykla.head(a));
+      assert.ok(await saugykla.head(b));
+
+      assert.equal(await saugykla.delete(a), true);
+
+      assert.equal(await saugykla.head(a), null, "pašalintas bandymas dingo");
+      assert.ok(
+        await saugykla.head(b),
+        "KITO bandymo objektas privalo LIKTI — kitaip cleanup ištrintų svetimus duomenis"
+      );
+      assert.equal(
+        tapatybe(await saugykla.read(b)),
+        tapatybe(reiksme),
+        "ir jo turinys nepakitęs"
+      );
+    });
+
+    /* ═══ 11. KONTROLĖ ═══ */
 
     await t.test("KONTROLĖ: teisėtas raktas ir reikšmė PRAEINA visose operacijose", async () => {
       /**
        * Be jos 8 ir 9 patikros galėtų būti tenkinamos saugyklos, kuri atmeta
        * VISKĄ - ir kontraktas nieko neįrodytų.
        */
-      const k = raktas();
+      const k = await raktas();
       const { bytes, checksum } = await saugykla.put(k, { text: "kontrolė" });
 
       assert.ok((await saugykla.head(k)).exists);

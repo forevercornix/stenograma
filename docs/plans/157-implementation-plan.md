@@ -42,6 +42,9 @@ body arba A1–A4 atsakymai.
 | 30 | PR-4 gauna ELGESIO DoD punktą: struktūrinis atmetimas duoda nulį BullMQ pakartojimų | peržiūra |
 | 31 | **Atsakyta, kada `delete()` kviečiamas:** `reference !== null` → saugykloje; `null` → eilutės ištrynimas IR YRA ištrynimas | peržiūra |
 | 32 | **PR-7 DoD per ataskaitos turinį:** patikrintų ir nepatikrinamų eilučių skaičiai pateikiami atskirai | peržiūra |
+| 33 | **Kontraktas gavo EXTERNAL pakopą** — attempt-uniqueness garantija turi namus; be jos ji gyventų tik plane | peržiūra |
+| 34 | **PR-4 skirsto pagal `reference === null`, ne pagal backend'o vardą** | peržiūra |
+| 35 | **PR-7 ataskaita skirsto pagal `nepriklausomas`, ne `ok`** — inline `ok: true` yra tikras, bet tuščias | peržiūra |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -504,6 +507,15 @@ skenavimas jo nemato pagal apibrėžimą.
 `rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:778-785, 799`) be
 tinklo I/O po užraktu.
 
+⚠️ **PR-4 NESIŠAKOJA PAGAL BACKEND'O VARDĄ — TIK PAGAL `reference`.**
+
+`put()` grąžina `reference === null` inline atveju ir adresą external atveju. Tas
+pats predikatas, kurį PR-5 naudoja ištrynimui, dengia ir PR-4 rašymo kelią:
+`null` → išorinio objekto nėra, tad nėra nei cleanup, nei orphan, nei
+pralaimėjusio bandymo, galinčio ką nors ištrinti. Šakojimasis pagal `backend`
+vardą būtų trečia tos pačios tiesos interpretacija — užrašoma dabar, kol atrodo
+akivaizdu.
+
 ⚠️ **PRE-CHECK NĖRA IR LYGYBĖS VERDIKTAS** (Codex, #289).
 
 Body sako: checksum yra **fast-path**, o galutinį „tas pats rezultatas" sprendžia
@@ -832,7 +844,11 @@ neskaičiuoja laukiamos reikšmės iš tikrinamo objekto.
 
 ⚠️ **PR-7 DoD FORMULUOJAMAS PER ATASKAITOS TURINĮ, NE PER LAUKO EGZISTAVIMĄ:**
 restore verifikacija pateikia **atskirai** patikrintų ir NEPATIKRINAMŲ eilučių
-skaičius. `verify()` grąžina `nepriklausomas`, bet laukas, kurio niekas neskaito,
+skaičius.
+
+⚠️ **SKIRSTOMA PAGAL `nepriklausomas`, NE PAGAL `ok`.** Inline `ok: true` yra
+tikras, bet tuščias — jis reiškia „reikšmė sutampa su savimi". Ataskaita,
+skaičiuojanti `ok`, mišrioje DB parodytų beveik 100 % ir būtų melas. `verify()` grąžina `nepriklausomas`, bet laukas, kurio niekas neskaito,
 nėra garantija — lygiai kaip `neatkartojama` be `UnrecoverableError`. Mišrioje DB
 inline eilučių bus dauguma, tad ataskaita, rodanti vien „patikrinta: N", skambėtų
 kaip pilna patikra ir pratybos praeitų per lengvai.
