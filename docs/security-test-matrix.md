@@ -1700,6 +1700,29 @@ vieno neprapleisto `ok` kiekviename rinkinio faile.
 
 ---
 
+## #157 (PR-1) — `job_results` external reprezentacijos invariantas
+
+⚠️ **DB, ne aplikacija.** #157 body: „Integrity metaduomenys tampa DB invariantu,
+ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos `INSERT` atmetimu
+(`23514`), ne kodo keliu.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **`fs` reference įrašomas be schemos apėjimo** | `jobResultsExternalShape.integration` | Grąžinus `IN ('inline','s3')` → `fs` eilutė gauna `23514` → krinta |
+| ⚠️ **external + `payload` ATMETAMAS** | `jobResultsExternalShape.integration` | Grąžinus `ELSE storage_key IS NOT NULL` → hibridinė eilutė įsirašo → krinta. Tai NE teorinis atvejis: `upsertResult()` (`postgresStore.js:739-745`) tokią eilutę sugeneruotų pirmu inline rašymu ant external eilutės |
+| ⚠️ **external be `bytes` ATMETAMAS** | `jobResultsExternalShape.integration` | Išėmus sąlygą iš `CHECK` → eilutė be dydžio įsirašo → krinta. ⚠️ Mutuojama ATSKIRAI nuo `checksum`: bendras „integrity privalomi" testas praeitų padengęs vieną iš dviejų |
+| ⚠️ **external be `checksum` ATMETAMAS** | `jobResultsExternalShape.integration` | Išėmus sąlygą → krinta. Be sumos restore patikra įrodytų tik tai, kad objektas skaitomas, ne kad jis tas pats |
+| ⚠️ **`inline` eilutė NETURI vientisumo metaduomenų** | `jobResultsExternalShape.integration` | ⚠️ **Codex radinys (#289):** invariantas buvo NESIMETRIŠKAS — `inline` šaka tikrino tik `payload` ir `storage_key`, tad external → inline perėjimas, išvalęs raktą, bet pamiršęs `bytes`/`checksum`, būdavo priimtas: pasenusi external būsena, atvaizduota kaip galiojanti inline eilutė. `bytes` ir `checksum` tikrinami ATSKIRAI + mutacija `inline` šakai |
+| ⚠️ **KONTROLĖ: `inline` formos nesugriautos** | `jobResultsExternalShape.integration` | Trys kontrolės — `inline + payload` praeina, `inline` be naujų kolonų praeina, `inline + storage_key` atmetamas. Be jų invariantas galėtų būti „viską atmesti", ir keturi sargai nieko neįrodytų |
+| ⚠️ **Reikšmių aibė praplėsta, ne atidaryta** | `jobResultsExternalShape.integration` | `gcs` atmetamas — kontrolė, kad `fs` pridėjimas netapo „bet kas leidžiama". ⚠️ **Codex radinys (#289):** visi `s3` įrašai buvo laukiami kaip ATMETAMI (netaisyklingos formos), tad mutacija `IN ('inline','fs')` būtų palikusi rinkinį žalią, nors atgalinis suderinamumas sulaužytas. Pridėta pozityvi `s3` kontrolė ir mutacija abiem kryptim |
+| ⚠️ **Dingęs `job_results` invariantas SUSTABDO startą** | `migrations.integration` | ⚠️ **Codex radinys (#289):** readiness užklausa filtravo `t.relname = 'jobs'`, tad `job_results` invariantai nebuvo tikrinami NEI starte, NEI pilnumo teste — diegimas, pritaikęs tik pirmąją #157 migraciją, skelbdavosi pasiruošęs. Tikrinamas ELGESYS: constraint'as realiai pašalinamas, startas privalo kristi ir jį ĮVARDYTI; kontrolė — pilna schema praeina |
+| ⚠️ **`REQUIRED_JOB_RESULT_CONSTRAINTS` pilnas, ne pavyzdinis** | `migrations.integration` | Sąrašas išvedamas iš šviežiai migruotos DB — naujas constraint'as migracijoje be įrašo sąraše krinta iškart. Ta pati forma kaip `jobs` pusėje |
+| ⚠️ **Preflight riba skaičiuojama BIBLIOTEKOS taisykle** | `jobResultsExternalShape.integration` | ⚠️ **Codex radinys (#289):** `readdirSync` grąžina `.gitkeep`, o `node-pg-migrate` dotfile'us ignoruoja (`^\..*`), tad riba buvo per didelė vienetu ir pirmoji #157 migracija būdavo pritaikyta. Testas tvirtino „schema nepaliesta", nors kolonos jau egzistavo. Po pataisymo tikrinama, kad kritimas atsuka ABI migracijas (viena transakcija) |
+| ⚠️ **Kiekviena `CHECK` dalis yra NEŠANTI** | `jobResultsExternalShape.integration` | Mutacijos VYKDOMOS teste: sargas pašalinamas `ALTER TABLE`, tikrinama, kad eilutė įsirašo, ir grąžinamas. Trys atskiros (`payload`, `bytes`, `checksum`) + reikšmių aibė atskirai nuo formos. ⚠️ **Kodėl to reikėjo, nors testas jau krito prieš migraciją:** raudonas raundas (CI 33854194027) parodė, kad visi keturi sargai krenta su `42703` (stulpelio nėra), ne su `23514` — t. y. testas jautė migracijos NEBUVIMĄ, o ne kiekvieną dalį atskirai |
+| ⚠️ **KONTROLĖ: mutacija tikrai atstatoma** | `jobResultsExternalShape.integration` | Po kiekvienos mutacijos tos pačios eilutės vėl atmetamos. Be jos mutacijos rodytų tik tai, kad susilpninta forma praleidžia, bet ne kad pilna — atmeta |
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
