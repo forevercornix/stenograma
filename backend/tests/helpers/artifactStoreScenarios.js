@@ -88,6 +88,19 @@ const ATMETAMI = Object.freeze([
   { vardas: "NUL masyve", reiksme: [NUL] },
   { vardas: "undefined", reiksme: undefined },
   /**
+   * ⚠️ VIRŠUTINIO LYGIO `null` — P1, ne kosmetika.
+   *
+   * Grandinė: external saugykla priima literalų `null` -> job'as `completed` ->
+   * hidratacija duoda `result: null` -> terminalus valymas ištrina šaltinio
+   * audio, o klientas rezultato NETURI. Negrįžtamai. Tai tiesioginis
+   * prieštaravimas 7.5b taisyklei „`completed` be rezultato nėra sėkmė".
+   *
+   * ⚠️ IR RIBA BUVO PLATESNĖ UŽ SAVO PAČIOS IMPLEMENTACIJĄ: `payload` yra
+   * `NOT NULL`, tad inline tokios reikšmės nepriimtų. Riba, priimanti tai, ko
+   * viena jos implementacija negali, yra ta pati divergencija, kurią D1 draudžia.
+   */
+  { vardas: "viršutinio lygio null", reiksme: null },
+  /**
    * ⚠️ IŠMATUOTA DIVERGENCIJA, NE TEORINĖ (peržiūros radinys).
    *
    * `kanonizuoti()` perrenka tik NUOSAVUS raktus, o inline `payload` keliauja per

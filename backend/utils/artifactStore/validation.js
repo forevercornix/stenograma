@@ -104,8 +104,26 @@ const NUL_ESCAPE = "\\u0000";
 const VIENISAS_SUROGATAS = /(?:^|[^\\])(?:\\\\)*\\u[dD][89a-fA-F][0-9a-fA-F]{2}/;
 
 function paruostiReiksme(reiksme) {
-  if (reiksme === undefined) {
-    throw struktūrinė("ArtifactStore: `undefined` nėra saugotina reikšmė.", KLAIDA.REIKSME);
+  /**
+   * ⚠️ VIRŠUTINIO LYGIO `null` ATMETAMAS KARTU SU `undefined` (Codex, #290).
+   *
+   * `rezultatoNera()` (`common.js`) juos laiko TA PAČIA būsena: „rezultato
+   * apskritai nėra". Vadinasi external saugykla, priėmusi literalų `null`,
+   * leistų job'ui tapti `completed` be rezultato — o terminalus valymas tada
+   * ištrintų šaltinio audio, ir klientas neturėtų nieko. NEGRĮŽTAMAI.
+   *
+   * ⚠️ RIBA BUVO PLATESNĖ UŽ SAVO IMPLEMENTACIJĄ: `job_results.payload` yra
+   * `NOT NULL`, tad inline tokios reikšmės nepriimtų. Riba, priimanti tai, ko
+   * viena jos implementacija negali, yra ta pati divergencija, kurią D1 draudžia.
+   *
+   * ⚠️ `null` LAUKAI OBJEKTO VIDUJE LIEKA TEISĖTI — tai turinys, ne jo nebuvimas.
+   */
+  if (reiksme === undefined || reiksme === null) {
+    throw struktūrinė(
+      "ArtifactStore: `undefined` ir `null` reiškia REZULTATO NEBUVIMĄ, ne saugotiną reikšmę " +
+        "(`common.js` `rezultatoNera()`). `null` laukai objekto viduje leidžiami.",
+      KLAIDA.REIKSME
+    );
   }
 
   let kanonine;
