@@ -79,12 +79,26 @@ exports.up = (pgm) => {
    * `inline` reikalauja turinio, išorinė saugykla — rakto IR vientisumo
    * metaduomenų. Be pastarųjų restore verifikacija neturėtų ko palyginti
    * (#157 D3), tad jie yra DB invariantas, ne aplikacijos susitarimas.
+   *
+   * ⚠️ INVARIANTAS SIMETRIŠKAS: `inline` eilutė vientisumo metaduomenų TURĖTI
+   * NEGALI (Codex #289). Pirmoji redakcija tikrino tik `payload` ir
+   * `storage_key`, tad external → inline perėjimas, išvalęs raktą, bet pamiršęs
+   * `bytes`/`checksum`, būtų priimtas. Likusios reikšmės aprašytų objektą, kurio
+   * ta eilutė nebereferencina — pasenusi external būsena, atvaizduojama kaip
+   * galiojanti inline eilutė.
+   *
+   * Tai kertasi ir su gretima migracija, ir su planu: abu sako, kad `inline`
+   * eilutės šių metaduomenų neturi ir neturės. Kol invariantas to netvirtino,
+   * teiginys buvo stipresnis už schemą (§12.1).
    */
   pgm.dropConstraint("job_results", "job_results_storage_shape");
   pgm.addConstraint("job_results", "job_results_storage_shape", {
     check: `
       CASE storage_type
-        WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+        WHEN 'inline' THEN payload IS NOT NULL
+             AND storage_key IS NULL
+             AND bytes IS NULL
+             AND checksum IS NULL
         ELSE storage_key IS NOT NULL
              AND payload IS NULL
              AND bytes IS NOT NULL

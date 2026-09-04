@@ -235,6 +235,30 @@ test("#157 PR-1: `job_results` external forma yra DB invariantas", { skip: PRALE
     );
   });
 
+  /* ═══ SARGAS 7: `inline` NETURI VIENTISUMO METADUOMENŲ ═══
+   *
+   * ⚠️ CODEX RADINYS (#289): invariantas buvo NESIMETRIŠKAS. `inline` šaka
+   * tikrino tik `payload` ir `storage_key`, tad external → inline perėjimas,
+   * išvalęs raktą, bet pamiršęs `bytes`/`checksum`, būdavo priimtas. Likusios
+   * reikšmės aprašytų objektą, kurio eilutė nebereferencina.
+   */
+
+  await t.test("`inline` + `bytes` ATMETAMAS", async () => {
+    assert.equal(
+      await ideti({ storage_type: "inline", payload: JSON.stringify({ text: "x" }), bytes: 10 }),
+      "23514",
+      "pasenusi external būsena negali gulėti inline eilutėje"
+    );
+  });
+
+  await t.test("`inline` + `checksum` ATMETAMAS", async () => {
+    assert.equal(
+      await ideti({ storage_type: "inline", payload: JSON.stringify({ text: "x" }), checksum: SUMA }),
+      "23514",
+      "tikrinama ATSKIRAI nuo `bytes` — bendras testas padengtų vieną iš dviejų"
+    );
+  });
+
   await t.test("KONTROLĖ: `inline` + `storage_key` ATMETAMAS", async () => {
     assert.equal(
       await ideti({ storage_type: "inline", payload: JSON.stringify({ text: "x" }), storage_key: RAKTAS }),
@@ -422,6 +446,19 @@ test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { skip: PRALEISTI, timeo
       }),
       "23514"
     );
+  });
+
+  await t.test("be `inline` metaduomenų draudimo — pasenusi external būsena ĮSIRAŠO", async () => {
+    const kodas = await suSusilpnintaForma(
+      `CASE storage_type
+         WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+         ELSE storage_key IS NOT NULL AND payload IS NULL
+              AND bytes IS NOT NULL AND checksum IS NOT NULL
+       END`,
+      () => ideti({ storage_type: "inline", payload: JSON.stringify({ text: "x" }), bytes: 10, checksum: SUMA })
+    );
+
+    assert.equal(kodas, null, "`inline` šakos sąlyga jaučiama atskirai nuo external šakos");
   });
 
   await t.test("be `job_results_integrity_shape` — `bytes = 0` ir bloga suma ĮSIRAŠO", async () => {
