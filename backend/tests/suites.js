@@ -329,6 +329,15 @@ const functional = [
    * patį klausimą užduoda per sekundes, prieš nepasiekiamą bazę.
    */
   "drRestorePreconditions",
+  /**
+   * #157 (PR-2): `ArtifactStore` kontraktas ir klaidų klasifikavimas.
+   *
+   * `artifactStoreContract` paleidžia BENDRĄ scenarijų rinkinį prieš `fs` — jam
+   * nereikia nei DB, nei tinklo, tad kontrakto pažeidimas matomas per sekundes.
+   * Tas pats rinkinys prieš `inline` ir `s3` gyvena integraciniuose failuose.
+   */
+  "artifactStoreContract",
+  "artifactStoreErrors",
   "erasureExportContract",
   "erasureReplayContract",
   "jobVersionParity",
