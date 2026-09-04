@@ -1700,6 +1700,23 @@ vieno neprapleisto `ok` kiekviename rinkinio faile.
 
 ---
 
+## #157 (PR-1) — `job_results` external reprezentacijos invariantas
+
+⚠️ **DB, ne aplikacija.** #157 body: „Integrity metaduomenys tampa DB invariantu,
+ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos `INSERT` atmetimu
+(`23514`), ne kodo keliu.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **`fs` reference įrašomas be schemos apėjimo** | `jobResultsExternalShape.integration` | Grąžinus `IN ('inline','s3')` → `fs` eilutė gauna `23514` → krinta |
+| ⚠️ **external + `payload` ATMETAMAS** | `jobResultsExternalShape.integration` | Grąžinus `ELSE storage_key IS NOT NULL` → hibridinė eilutė įsirašo → krinta. Tai NE teorinis atvejis: `upsertResult()` (`postgresStore.js:739-745`) tokią eilutę sugeneruotų pirmu inline rašymu ant external eilutės |
+| ⚠️ **external be `bytes` ATMETAMAS** | `jobResultsExternalShape.integration` | Išėmus sąlygą iš `CHECK` → eilutė be dydžio įsirašo → krinta. ⚠️ Mutuojama ATSKIRAI nuo `checksum`: bendras „integrity privalomi" testas praeitų padengęs vieną iš dviejų |
+| ⚠️ **external be `checksum` ATMETAMAS** | `jobResultsExternalShape.integration` | Išėmus sąlygą → krinta. Be sumos restore patikra įrodytų tik tai, kad objektas skaitomas, ne kad jis tas pats |
+| ⚠️ **KONTROLĖ: `inline` formos nesugriautos** | `jobResultsExternalShape.integration` | Trys kontrolės — `inline + payload` praeina, `inline` be naujų kolonų praeina, `inline + storage_key` atmetamas. Be jų invariantas galėtų būti „viską atmesti", ir keturi sargai nieko neįrodytų |
+| ⚠️ **Reikšmių aibė praplėsta, ne atidaryta** | `jobResultsExternalShape.integration` | `gcs` atmetamas — kontrolė, kad `fs` pridėjimas netapo „bet kas leidžiama" |
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
