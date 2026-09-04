@@ -40,9 +40,18 @@ const ŠAKNIS = path.resolve(__dirname, "..");
 const DB_URL = testDatabaseUrl("extshape");
 const JOB_ID = "aaaaaaaa-0000-4000-8000-000000000001";
 
-function praleisti() {
-  return skipWithoutPostgres();
-}
+/**
+ * ⚠️ `skip:` OPCIJA, NE `if (...) return` (Codex, #289).
+ *
+ * Ankstesnė redakcija be DB grąžindavo tyliai, ir Node išvesdavo įprastą `ok` —
+ * `verify-postgres-suite-ran.mjs` tokį failą skaičiuotų kaip ĮVYKDYTĄ, nors
+ * nebuvo nei migracijos, nei nė vieno tvirtinimo. PostgreSQL kriterijai atrodytų
+ * patikrinti be jokios patikros (AGENTS.md §9.3, §14.1).
+ *
+ * `postRestoreReconcile.integration` naudoja būtent šią formą; ji ir yra
+ * griežtesnis repo precedentas.
+ */
+const PRALEISTI = skipWithoutPostgres();
 
 async function pg(url, sql, params = []) {
   const c = new Client({ connectionString: url });
@@ -79,7 +88,7 @@ async function perkurtiDb() {
 }
 
 after(async () => {
-  if (praleisti()) return;
+  if (PRALEISTI) return;
   await pg(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(() => {});
 });
 
@@ -111,9 +120,7 @@ async function ideti(laukai) {
 const RAKTAS = "results/aaaaaaaa-0000-4000-8000-000000000001/abc.json";
 const SUMA = "e".repeat(64);
 
-test("#157 PR-1: `job_results` external forma yra DB invariantas", { timeout: 180000 }, async (t) => {
-  if (praleisti()) return;
-
+test("#157 PR-1: `job_results` external forma yra DB invariantas", { skip: PRALEISTI, timeout: 180000 }, async (t) => {
   await perkurtiDb();
 
   /* ═══ SARGAS 1: `fs` yra teisėta reikšmė ═══ */
@@ -248,9 +255,7 @@ async function suSusilpnintaForma(salyga, veiksmas) {
   }
 }
 
-test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { timeout: 180000 }, async (t) => {
-  if (praleisti()) return;
-
+test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { skip: PRALEISTI, timeout: 180000 }, async (t) => {
   await perkurtiDb();
 
   await t.test("be `payload IS NULL` — hibridinė eilutė ĮSIRAŠO", async () => {
