@@ -29,6 +29,8 @@ body arba A1–A4 atsakymai.
 | 17 | **Pre-check nebėra lygybės verdiktas:** sutapęs checksum praleidžia tik `put()`, sprendimą priima authoritative re-check | Codex (#289) |
 | 18 | Rakto pagrindimas perrašytas kaip **atmestas variantas su priežastimi**; cleanup skyrius suderintas su attempt-unique raktu | Codex (#289) |
 | 19 | **Naujas atviras PR-4 sprendimas:** orphan'ai su attempt-unique raktu (trys variantai, rekomendacija — patvarus bandymo registras) | peržiūra |
+| 20 | PR-4 cleanup mutacijos perrašytos pagal attempt-unique raktą — senosios nebeatkuria gedimo | Codex (#289) |
+| 21 | §3 nebeteigia „atvirų klausimų nebėra": orphan strategija lieka atvira ir blokuoja PR-4 pradžią | Codex (#289) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -545,9 +547,16 @@ eilutė **neegzistuoja**, ir lygiagretus `SELECT` mato „rezultato nėra" vieto
 | version nedidinamas | nuimam `IS DISTINCT FROM` sąlygą | taip — version 2 vietoj 1 |
 | authoritative re-check | paliekam tik pre-check | taip — lenktynių testas duoda du skirtingus rezultatus toje pačioje eilutėje |
 | I/O ne po užraktu | keliam `put()` į `inTransaction()` | **ne automatiškai** — žr. žemiau |
-| sąlyginis cleanup | trinam besąlygiškai | taip — lygiagretus testas su TUO PAČIU rezultatu: laimėtojo objekto nebelieka |
-| cleanup po užraktu | nuimam `FOR UPDATE` | ⚠️ **ne patikimai** — lenktynių langas siauras; testas kartojamas N kartų, verdiktas „nepaneigta" (§14.1) |
-| orphan cleanup | pašalinam `catch` | taip — objektas lieka po rollback, kai nuorodos NĖRA |
+| cleanup trina TIK savo `attemptId` | trinam pagal `jobId` prefiksą | taip — lygiagretus testas: laimėtojo objekto nebelieka, nors jo eilutė commit'inta |
+| cleanup apskritai vyksta | pašalinam `catch` | taip — pralaimėjusio bandymo objektas lieka saugykloje |
+| commit'intas bandymas NELIEČIAMAS | trinam po commit'o | taip — `head()` po sėkmingo `finish()` grąžina `null` |
+
+⚠️ **MUTACIJOS SUDERINTOS SU ATTEMPT-UNIQUE RAKTU** (Codex, #289). Ankstesnė
+lentelė reikalavo sąlyginio cleanup po `FOR UPDATE` ir tikėjosi, kad pralaimėjęs
+ištrins laimėtojo objektą. Su skirtingais raktais tos mutacijos nebeatkuria
+aprašyto gedimo — jos arba neveikia, arba skatina grąžinti nebeegzistuojantį
+bendro rakto koordinavimą. Pakeista tuo, ką dabar reikia įrodyti: kad cleanup
+liečia TIK savo bandymą.
 
 ⚠️ **„I/O ne po užraktu" negali būti įrodyta grep'u** (§9.2), o elgesio testas
 reikalauja stebimo užrakto. Sprendimas: `ArtifactStore` dublis, kurio `put()`
@@ -730,7 +739,15 @@ Nė vienas jų neverčiamas į `PASS` dėl to, kad „kodas atrodo teisingai".
 ## 3. A1–A4: priimti sprendimai
 
 Keturi klausimai iš 1 revizijos atsakyti; čia jie fiksuojami kaip sprendimai su
-viena eilute pagrindimo. Atvirų klausimų šioje revizijoje nebėra.
+viena eilute pagrindimo.
+
+⚠️ **BET VIENAS KLAUSIMAS LIEKA ATVIRAS, IR JIS NAUJAS** (Codex, #289): orphan
+strategija su attempt-unique raktu (PR-4 skyrius „ATVIRAS PR-4 SPRENDIMAS").
+A1–A4 uždaryti, tačiau rakto schemos pakeitimas atidarė klausimą su GDPR
+pasekme — objektas, likęs po kritusio bandymo, išgyvena job'o ištrynimą. Trys
+variantai užrašyti, rekomendacija yra (b), bet **sprendimas nepriimtas**.
+
+Kol jis nepriimtas, PR-4 negali prasidėti: pasirinkimas keičia rašymo kelio formą.
 
 **A1 — integrity kolonos eina į PR-1, ir external šakoje jos privalomos.**
 `bytes` ir `checksum` gyvena `job_results` greta reference'o; privalomumas
