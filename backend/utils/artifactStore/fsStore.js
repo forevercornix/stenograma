@@ -61,11 +61,99 @@ function createFsArtifactStore({ root } = {}) {
     return pilnas;
   }
 
+  /**
+   * ⚠️ RIBA TIKRINAMA IR PO `realpath`, NE VIEN LEKSIŠKAI (Codex, #290).
+   *
+   * ⚠️ PAGRINDINIS ARGUMENTAS - NE ATAKA, O NUOSEKLUMAS (§16). Kad
+   * `<šaknis>/results` taptų symlink'u, kažkas jau turi rašymo teisę į artefaktų
+   * šaknį — o tada jis ir taip pasiekia artefaktus. Tikroji priežastis kita:
+   * `fileStorage._resolveExisting()` ŠIAME REPO jau uždaro būtent šią klasę per
+   * `realpath`. Dvi saugyklos ribos su skirtinga traversal semantika yra
+   * nenuoseklumas, ir jis pasimatys per bendrą volume tarp konteinerių ar
+   * restore, ne per ataką.
+   *
+   * ⚠️ TOCTOU LIEKA. `realpath` riziką sumažina, bet nepašalina: kelias gali
+   * pasikeisti tarp patikros ir operacijos. Teigti daugiau, nei kodas daro,
+   * būtų §12.1 pažeidimas.
+   */
+  async function tikrasKelias(pilnas, { katalogas = false } = {}) {
+    /**
+     * ⚠️ `put()` METU FAILO DAR NĖRA, tad `realpath` taikomas KATALOGUI (jau po
+     * `mkdir`). Taikant failui, teisėtas kelias grįžtų su `ENOENT`.
+     */
+    const taikinys = katalogas ? path.dirname(pilnas) : pilnas;
+
+    let tikras;
+    try {
+      tikras = await fsp.realpath(taikinys);
+    } catch (klaida) {
+      /** Nesantis objektas nėra ribos pažeidimas — tai `head`/`read` reikalas. */
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return pilnas;
+      throw klaida;
+    }
+
+    const tikraSaknis = await fsp.realpath(saknis);
+
+    if (tikras !== tikraSaknis && !tikras.startsWith(tikraSaknis + path.sep)) {
+      throw new ArtifactStoreError(
+        "FsArtifactStore: raktas per symlink išveda už saugyklos šaknies.",
+        KLAIDA.RAKTAS
+      );
+    }
+
+    return pilnas;
+  }
+
+  /**
+   * ⚠️ NAUJI KATALOGAI IRGI PRIVALO BŪTI PATVARŪS (Codex, #290).
+   *
+   * `mkdir(..., { recursive: true })` grąžina sėkmę, kai įrašai dar tik page
+   * cache. Po maitinimo dingimo failas gali būti patvarus, o KATALOGAS, kuriame
+   * jis guli - ne: rezultatas dingsta kartu su neįrašytu katalogo įrašu.
+   *
+   * ⚠️ PUSIAU ATLIKTAS PATVARUMAS BLOGESNIS UŽ JOKĮ: `put()` grąžina sėkmę,
+   * kurios negali patvirtinti. Todėl sekamos BŪTENT naujai sukurtos dalys, o jau
+   * egzistuojantiems katalogams `fsync` nedaromas — nemokamos kainos
+   * nedidiname.
+   *
+   * @returns {string[]} naujai sukurtų katalogų keliai, giliausias pirmas
+   */
+  async function sukurtiKatalogus(katalogas) {
+    const nauji = [];
+    let dabartinis = katalogas;
+
+    /** Randame, kiek kelio dalių dar nėra — nuo giliausios aukštyn. */
+    while (dabartinis !== saknis && dabartinis.startsWith(saknis + path.sep)) {
+      try {
+        await fsp.stat(dabartinis);
+        break;
+      } catch (klaida) {
+        if (klaida.code !== "ENOENT") throw klaida;
+        nauji.push(dabartinis);
+        dabartinis = path.dirname(dabartinis);
+      }
+    }
+
+    await fsp.mkdir(katalogas, { recursive: true });
+    return nauji;
+  }
+
+  /** `fsync` katalogui — įpareigoja jo ĮRAŠUS, ne jų turinį. */
+  async function sinchronizuotiKatalaga(kelias) {
+    const deskriptorius = await fsp.open(kelias, "r");
+    try {
+      await deskriptorius.sync();
+    } finally {
+      await deskriptorius.close();
+    }
+  }
+
   async function put(raktas, reiksme) {
     const pilnas = kelias(raktas);
     const paruosta = paruostiReiksme(reiksme);
 
-    await fsp.mkdir(path.dirname(pilnas), { recursive: true });
+    const sukurti = await sukurtiKatalogus(path.dirname(pilnas));
+    await tikrasKelias(pilnas, { katalogas: true });
 
     const laikinas = `${pilnas}.${crypto.randomUUID()}.tmp`;
     let deskriptorius = null;
@@ -86,11 +174,16 @@ function createFsArtifactStore({ root } = {}) {
        * žingsnio po avarijos objektas gali dingti visai, nors `rename` grąžino
        * sėkmę.
        */
-      const katalogas = await fsp.open(path.dirname(pilnas), "r");
-      try {
-        await katalogas.sync();
-      } finally {
-        await katalogas.close();
+      await sinchronizuotiKatalaga(path.dirname(pilnas));
+
+      /**
+       * ⚠️ IR NAUJŲ KATALOGŲ TĖVAI. Grandinė patvari tiek, kiek silpniausia jos
+       * grandis: neįrašytas `results/` įrašas pasiima kartu ir visą `<jobId>/`
+       * pomedį. Einama nuo giliausio aukštyn, kad kiekvienas įrašas būtų
+       * įpareigotas savo tėve.
+       */
+      for (const naujas of sukurti) {
+        await sinchronizuotiKatalaga(path.dirname(naujas));
       }
     } catch (klaida) {
       if (deskriptorius) await deskriptorius.close().catch(() => {});
@@ -115,7 +208,7 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   async function head(raktas) {
-    const pilnas = kelias(raktas);
+    const pilnas = await tikrasKelias(kelias(raktas));
 
     try {
       const info = await fsp.stat(pilnas);
@@ -247,12 +340,25 @@ function createFsArtifactStore({ root } = {}) {
 
     try {
       await fsp.unlink(pilnas);
-      return true;
     } catch (klaida) {
       /** `false` = objekto NEBUVO. 7.6c pamoka: tai ne nesėkmė, o kita būsena. */
-      if (klaida.code === "ENOENT") return false;
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return false;
       throw klaida;
     }
+
+    /**
+     * ⚠️ IŠTRYNIMAS PATVIRTINAMAS TIK PO KATALOGO `fsync` (Codex, #290).
+     *
+     * Optimistinis `true` čia kerta ištrynimo garantijų grandinę: kvietėjas
+     * patvirtina ištrynimą -> DB metaduomenys pašalinami -> maitinimo dingimas
+     * grąžina failą. Rezultatas — NEREFERENCUOTAS jautrus objektas, kurio DB
+     * kryptimi orientuotas inventorius (A3) NEBERANDA pagal apibrėžimą.
+     *
+     * Tai ta pati klasė kaip rašymo pusėje, bet sunkesnė: ten prarandamas
+     * rezultatas, čia — lieka tai, kas privalėjo dingti.
+     */
+    await sinchronizuotiKatalaga(path.dirname(pilnas));
+    return true;
   }
 
   return { backend: "fs", root: saknis, put, read, readStream, head, verify, delete: del };

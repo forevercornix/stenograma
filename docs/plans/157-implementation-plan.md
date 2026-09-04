@@ -45,6 +45,7 @@ body arba A1–A4 atsakymai.
 | 33 | **Kontraktas gavo EXTERNAL pakopą** — attempt-uniqueness garantija turi namus; be jos ji gyventų tik plane | peržiūra |
 | 34 | **PR-4 skirsto pagal `reference === null`, ne pagal backend'o vardą** | peržiūra |
 | 35 | **PR-7 ataskaita skirsto pagal `nepriklausomas`, ne `ok`** — inline `ok: true` yra tikras, bet tuščias | peržiūra |
+| 36 | **`fs` `.tmp` likučiai įvardyti kaip TREČIAS to paties orphan reiškinio veidas** — sprendžiami kartu PR-4, ne taškiškai PR-2 | Codex (#290) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -481,6 +482,24 @@ DB eilutė.
 `job_results.storage_key`; nuorodos nėra, tad nėra ko trinti — o objekte guli
 transkripcija. Tai nebe šiukšlė, o GDPR klausimas, ir jis atsirado dėl mano rakto
 schemos sprendimo, ne dėl #157 reikalavimo.
+
+⚠️ **TAS PATS REIŠKINYS JAU PASIRODĖ TRIS KARTUS.** Prieš sprendžiant verta
+matyti visus tris veidus — jie skiriasi tik tuo, kur objektas atsiranda:
+
+| # | Kaip atsiranda | Kada |
+|---|---|---|
+| 1 | attempt-unique raktas: kritęs bandymas palieka savo objektą | PR-4 rašymas |
+| 2 | nutrūkęs cleanup tarp `put()` ir DB commit'o | PR-4 rašymas |
+| 3 | `fs` laikinas `.tmp` failas, likęs po nutrūkusio proceso | PR-2 `fsStore` |
+
+Visais trim atvejais rezultatas tas pats: **nereferencuotas objektas su
+transkripcija**, kurio nepasiekia nei erasure, nei DB kryptimi orientuotas
+skenavimas (A3).
+
+⚠️ **TODĖL PR-2 `.tmp` VALYMO MECHANIZMO NEKURIA.** Atskiras sprendimas būtų
+trečias taškinis vaistas tam pačiam reiškiniui. Jei PR-4 pasirenkamas variantas
+(b) — patvarus bandymų registras — jis dengia ir šitą: laikinas failas tampa
+REGISTRUOTU bandymu, tad matomas DB kryptimi kaip ir visi kiti.
 
 Trys variantai PR-4:
 
