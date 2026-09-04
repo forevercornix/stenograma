@@ -200,3 +200,152 @@ test("#157 PR-1: `job_results` external forma yra DB invariantas", { timeout: 18
     );
   });
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * MUTACIJOS: KIEKVIENAS SARGAS JAUČIAMAS ATSKIRAI
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ KODĖL TO REIKIA, NORS TESTAS JAU KRITO PRIEŠ MIGRACIJĄ.
+ *
+ * Raudonas raundas (CI 33854194027) parodė, kad VISI keturi sargai krenta —
+ * bet visi su `42703` (stulpelio nėra), ne su `23514`. Tai įrodo, kad testas
+ * jaučia migracijos NEBUVIMĄ, o ne kiekvieną invarianto dalį atskirai.
+ * Pašalinus vien `bytes IS NOT NULL` iš `CHECK`, ankstesni testai vis tiek
+ * kristų — bet tik todėl, kad kita mutacija juos laužia.
+ *
+ * Todėl sargas pašalinamas ČIA, PAČIAME TESTE, ir grąžinamas: mutacija
+ * vykdoma, ne teigiama (§9.1). Tai vienintelis būdas įrodyti, kad kiekviena
+ * `CHECK` dalis yra nešanti, o ne dekoratyvi.
+ *
+ * ⚠️ IZOLIACIJA: dirbama nuosavoje `<bazė>_extshape` DB, kuri po rinkinio
+ * sunaikinama. `DROP CONSTRAINT` bendroje bazėje būtų tiksliai tai, ką
+ * AGENTS.md §9.3 draudžia.
+ */
+
+const PILNA_FORMA = `
+  CASE storage_type
+    WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+    ELSE storage_key IS NOT NULL
+         AND payload IS NULL
+         AND bytes IS NOT NULL
+         AND checksum IS NOT NULL
+  END
+`;
+
+async function suSusilpnintaForma(salyga, veiksmas) {
+  await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_shape");
+  await pg(DB_URL, `ALTER TABLE job_results ADD CONSTRAINT job_results_storage_shape CHECK (${salyga})`);
+
+  try {
+    return await veiksmas();
+  } finally {
+    await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_shape");
+    await pg(
+      DB_URL,
+      `ALTER TABLE job_results ADD CONSTRAINT job_results_storage_shape CHECK (${PILNA_FORMA})`
+    );
+  }
+}
+
+test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { timeout: 180000 }, async (t) => {
+  if (praleisti()) return;
+
+  await perkurtiDb();
+
+  await t.test("be `payload IS NULL` — hibridinė eilutė ĮSIRAŠO", async () => {
+    const kodas = await suSusilpnintaForma(
+      `CASE storage_type
+         WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+         ELSE storage_key IS NOT NULL AND bytes IS NOT NULL AND checksum IS NOT NULL
+       END`,
+      () =>
+        ideti({
+          storage_type: "s3",
+          storage_key: RAKTAS,
+          payload: JSON.stringify({ text: "x" }),
+          bytes: 1024,
+          checksum: SUMA,
+        })
+    );
+
+    assert.equal(kodas, null, "sargas pašalintas → eilutė praeina, vadinasi jis buvo nešantis");
+  });
+
+  await t.test("be `bytes IS NOT NULL` — eilutė be dydžio ĮSIRAŠO", async () => {
+    const kodas = await suSusilpnintaForma(
+      `CASE storage_type
+         WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+         ELSE storage_key IS NOT NULL AND payload IS NULL AND checksum IS NOT NULL
+       END`,
+      () => ideti({ storage_type: "fs", storage_key: RAKTAS, checksum: SUMA })
+    );
+
+    assert.equal(kodas, null, "`bytes` sąlyga jaučiama ATSKIRAI nuo `checksum`");
+  });
+
+  await t.test("be `checksum IS NOT NULL` — eilutė be sumos ĮSIRAŠO", async () => {
+    const kodas = await suSusilpnintaForma(
+      `CASE storage_type
+         WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+         ELSE storage_key IS NOT NULL AND payload IS NULL AND bytes IS NOT NULL
+       END`,
+      () => ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 1024 })
+    );
+
+    assert.equal(kodas, null, "`checksum` sąlyga jaučiama ATSKIRAI nuo `bytes`");
+  });
+
+  await t.test("KONTROLĖ: grąžinus pilną formą, tos pačios eilutės vėl ATMETAMOS", async () => {
+    /**
+     * ⚠️ BE ŠIOS DALIES mutacijos nieko neįrodytų: jos rodytų, kad susilpninta
+     * forma praleidžia, bet ne kad pilna — atmeta. Tikrinama, kad `finally`
+     * blokas invariantą tikrai atstatė.
+     */
+    assert.equal(await ideti({ storage_type: "fs", storage_key: RAKTAS, checksum: SUMA }), "23514");
+    assert.equal(await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 1024 }), "23514");
+    assert.equal(
+      await ideti({
+        storage_type: "s3",
+        storage_key: RAKTAS,
+        payload: JSON.stringify({ text: "x" }),
+        bytes: 1024,
+        checksum: SUMA,
+      }),
+      "23514"
+    );
+  });
+
+  await t.test("`fs` reikšmės sargas jaučiamas atskirai nuo formos", async () => {
+    /**
+     * Reikšmių aibė ir forma yra DU sargai vienoje migracijoje. Susilpninus
+     * TIK reikšmes, forma privalo likti galiojanti — kitaip vienas testas
+     * dengtų abu ir nė vieno neįrodytų.
+     */
+    await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_type_values");
+    await pg(
+      DB_URL,
+      "ALTER TABLE job_results ADD CONSTRAINT job_results_storage_type_values CHECK (storage_type IN ('inline', 's3'))"
+    );
+
+    try {
+      assert.equal(
+        await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 1024, checksum: SUMA }),
+        "23514",
+        "grąžinus senąją aibę, `fs` vėl neįrašomas"
+      );
+    } finally {
+      await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_type_values");
+      await pg(
+        DB_URL,
+        "ALTER TABLE job_results ADD CONSTRAINT job_results_storage_type_values CHECK (storage_type IN ('inline', 'fs', 's3'))"
+      );
+    }
+
+    assert.equal(
+      await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 1024, checksum: SUMA }),
+      null,
+      "KONTROLĖ: atstačius aibę `fs` vėl praeina"
+    );
+  });
+});

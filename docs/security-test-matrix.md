@@ -1714,6 +1714,8 @@ ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos `INSERT` atme
 | ⚠️ **external be `checksum` ATMETAMAS** | `jobResultsExternalShape.integration` | Išėmus sąlygą → krinta. Be sumos restore patikra įrodytų tik tai, kad objektas skaitomas, ne kad jis tas pats |
 | ⚠️ **KONTROLĖ: `inline` formos nesugriautos** | `jobResultsExternalShape.integration` | Trys kontrolės — `inline + payload` praeina, `inline` be naujų kolonų praeina, `inline + storage_key` atmetamas. Be jų invariantas galėtų būti „viską atmesti", ir keturi sargai nieko neįrodytų |
 | ⚠️ **Reikšmių aibė praplėsta, ne atidaryta** | `jobResultsExternalShape.integration` | `gcs` atmetamas — kontrolė, kad `fs` pridėjimas netapo „bet kas leidžiama" |
+| ⚠️ **Kiekviena `CHECK` dalis yra NEŠANTI** | `jobResultsExternalShape.integration` | Mutacijos VYKDOMOS teste: sargas pašalinamas `ALTER TABLE`, tikrinama, kad eilutė įsirašo, ir grąžinamas. Trys atskiros (`payload`, `bytes`, `checksum`) + reikšmių aibė atskirai nuo formos. ⚠️ **Kodėl to reikėjo, nors testas jau krito prieš migraciją:** raudonas raundas (CI 33854194027) parodė, kad visi keturi sargai krenta su `42703` (stulpelio nėra), ne su `23514` — t. y. testas jautė migracijos NEBUVIMĄ, o ne kiekvieną dalį atskirai |
+| ⚠️ **KONTROLĖ: mutacija tikrai atstatoma** | `jobResultsExternalShape.integration` | Po kiekvienos mutacijos tos pačios eilutės vėl atmetamos. Be jos mutacijos rodytų tik tai, kad susilpninta forma praleidžia, bet ne kad pilna — atmeta |
 
 ---
 
