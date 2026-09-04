@@ -24,6 +24,8 @@ body arba A1–A4 atsakymai.
 | 12 | **F3:** rakto prefikso pagrindime pašalinta `list(prefix)` nuoroda kaip esama galimybė | peržiūra |
 | 13 | **PR-4 cleanup tapo SĄLYGINIS ir serializuotas job eilutės užraktu** — besąlyginis pralaimėjusiojo trynimas su turinio adresu ištrintų laimėtojo objektą | Codex P1 (#289) |
 | 14 | **PR-3 riba tapo dviguba:** pigus atmetimas pagal persistintą `bytes` + kietas srauto stabdis; pasenusi maža reikšmė nebeleidžia įkelti didelio objekto | Codex P2 (#289) |
+| 15 | **Object key tapo ATTEMPT-UNIQUE**, ne turinio adresas: sąlyginis cleanup su eilutės užraktu NEUŽDARO lenktynių, kai konkurentas jau parašė objektą, bet dar neįėjo į transakciją | Codex P1, antra redakcija (#289) |
+| 16 | PR-1 testų lentelė plane sulyginta su faktine forma (`fs` reikalauja pilnos formos; pridėta `s3` eilutė) | Codex (#289) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -127,8 +129,9 @@ operatoriaus sprendimo čia būtų tas pats dalinis ištrynimas kita forma.
 | Testas | Tvirtina |
 |---|---|
 | `s3 + storage_key + payload` → `23514` | sustiprintas invariantas veikia |
-| `fs + storage_key` → praeina | `fs` teisėtas |
+| `fs + storage_key + bytes + checksum` → praeina | `fs` teisėtas TIK pilna forma |
 | `fs + payload` → atmetamas | `fs` nėra „inline su kitu vardu" |
+| `s3 + storage_key + bytes + checksum` → praeina | atgalinis suderinamumas: aibė PRAPLEČIAMA, ne keičiama |
 | `fs + storage_key + checksum` be `bytes` → atmetamas | integrity metaduomenys yra DB invariantas |
 | `fs + storage_key + bytes` be `checksum` → atmetamas | tas pats antrai reikšmei |
 | `inline + payload` → praeina | **kontrolė**: nesugriauta esama forma |
@@ -139,7 +142,8 @@ operatoriaus sprendimo čia būtų tas pats dalinis ištrynimas kita forma.
 
 | Sargas | Mutacija | Krenta? |
 |---|---|---|
-| `fs` reikšmės praplėtimas | grąžinam `IN ('inline','s3')` | taip — `fs + storage_key` gauna `23514` |
+| `fs` reikšmės praplėtimas | grąžinam `IN ('inline','s3')` | taip — pilnos formos `fs` eilutė gauna `23514` |
+| `s3` išlaikymas aibėje | mutuojam į `IN ('inline','fs')` | taip — galiojantis `s3` reference nebeįrašomas |
 | `payload IS NULL` external | grąžinam `ELSE storage_key IS NOT NULL` | taip — `s3 + payload` įsirašo |
 | `bytes IS NOT NULL` external | išimam iš `CHECK` | taip — eilutė be `bytes` įsirašo |
 | `checksum IS NOT NULL` external | išimam iš `CHECK` | taip — eilutė be `checksum` įsirašo |
@@ -182,16 +186,20 @@ paslepia defektą (#266 trečia dalis). Kontraktinis rinkinys tikrina abu atveju
 
 **Mano sprendimai iš §3**
 
-*Object key schema:* `results/<jobId>/<sha256(kanoninisRezultatas)>.json`.
-⚠️ Raktas ir persistintas `checksum` šiandien turi tą pačią reikšmę, bet
-**skaitomi atskirai**: tapatybė imama iš kolonos, niekada iš rakto. Pakeitus rakto
-schemą (prefiksas, attempt komponentas) lygybės semantika neturi pasikeisti.
+*Object key schema:* `results/<jobId>/<attemptId>.json`, kur `attemptId` yra
+šio rašymo bandymo UUID.
+⚠️ **NE turinio adresas** (Codex P1, #289): du worker'iai su tuo pačiu rezultatu
+rašytų į tą patį raktą, ir pralaimėjusiojo cleanup ištrintų laimėtojo objektą —
+`completed` job'as be rezultato. Attempt-unique raktas tą klasę pašalina pagal
+konstrukciją, ne pagal koordinavimą.
+Tapatybę neša `checksum` KOLONA; raktas jos nedubliuoja nė viena kryptimi.
 Pagrindimas: raktas privalo būti immutable konkrečiam kanoniniam rezultatui, o
 hash tai duoda be papildomos būsenos — du worker'iai su **tuo pačiu** loginiu
 rezultatu taikosi į tą patį raktą (idempotencija natūrali), su **skirtingu** —
 į skirtingus (perrašymo nėra pagal konstrukciją). Attempt-UUID reikalautų atskiro
 „kuris attempt laimėjo" registro. `jobId` prefiksas reikalingas **erasure** keliui (žinoti, kuriuos raktus liesti
-šalinant job'ą), o ne tapatybei. ⚠️ Jis NĖRA orphan skenavimo priemonė: `list(prefix)`
+šalinant job'ą), o ne tapatybei; `attemptId` — kad du rašytojai negalėtų dalintis
+objektu. ⚠️ Jis NĖRA orphan skenavimo priemonė: `list(prefix)`
 į kontraktą neįeina (A3), tad prefiksas šiandien yra tvarkos, o ne aptikimo
 savybė. Jei follow-up darbas kada įves listing'ą, prefiksas jam tiks — bet tai
 būsimoji, ne esama galimybė.
@@ -366,6 +374,40 @@ Užraktas čia būtinas: be jo pralaimėjęs galėtų patikrinti nuorodą PRIEŠ
 laimėtojo commit'ą, pamatyti „nereferencuota" ir ištrinti objektą, kurį
 laimėtojas po sekundės užregistruos.
 
+⚠️ **BET UŽRAKTO NEPAKANKA, IR TAI ANTRA TO PATIES DEFEKTO REDAKCIJA** (Codex P1
+antrą kartą, #289). Scenarijus, kurio sąlyginis cleanup NEUŽDARO:
+
+```
+A: put(raktas) ✓        B: put(raktas) ✓   (tas pats turinio adresas)
+A: transakcija krenta
+A: paima eilutės užraktą, nuorodos NĖRA  →  trina objektą
+                        B: dar tik dabar įeina į transakciją, commit'ina nuorodą
+                        →  B nuoroda rodo į IŠTRINTĄ raktą
+```
+
+Eilutės užraktas serializuoja tik tuos, kurie jau **įėjo** į transakciją; B
+rašymas įvyko PRIEŠ ją. Vadinasi „jei nuorodos nėra → trinam" yra neteisinga
+sąlyga: nuorodos nebuvimas nereiškia, kad objekto niekam nereikia — jis gali būti
+reikalingas rašytojui, kuris dar nespėjo commit'inti.
+
+**Sprendimas: rašymo kelias gauna ATTEMPT-UNIQUE raktą.**
+
+| Vaidmuo | Reikšmė | Kodėl |
+|---|---|---|
+| Tapatybė | `sha256(kanoninisRezultatas)` **kolonoje** | idempotencijos fast-path, A2 |
+| Objekto kelias | `results/<jobId>/<attemptId>.json` | vienas rašytojas — vienas objektas |
+
+Su attempt-unique raktu A niekada neturi teisės liesti B objekto: jie skirtingi.
+Cleanup tampa trivialus ir saugus — kiekvienas trina TIK savo attempt'ą, jei jo
+nuoroda neįsipareigojo. Kaina: du identiški rezultatai užima du objektus, kol
+retencija vieną pašalins. Tai pigiau nei bet kokia koordinavimo schema tarp
+in-flight rašytojų, ir nereikalauja `list(prefix)` (A3).
+
+⚠️ **TURINIO ADRESAS LIEKA — TIK NE OBJEKTO KELYJE.** `checksum` kolona toliau
+neša tapatybę; pasikeičia tik tai, kad ji nebėra objekto vardas. Tai tiesiogiai
+atitinka A2 ribą „checksum niekada neišvedamas iš object key" — dabar ji galioja
+ir atvirkščiai: object key neišvedamas iš checksum'o.
+
 ⚠️ **LIEKA RIBA, IR JI UŽRAŠOMA:** objektas, parašytas proceso, kuris krito
 PRIEŠ bet kokią DB transakciją, lieka be jokios nuorodos ir be jokio detektoriaus —
 DB krypties skenavimas (A3) jo nemato pagal apibrėžimą. Tai to paties follow-up
@@ -388,6 +430,14 @@ Argumentas „tas pats raktas, tad perrašymas nekenkia" padarytų elgesį prikl
 nuo saugyklos overwrite semantikos: S3 versijavimas, `fs` `rename` ir būsimas
 backend'as ją turi skirtingą. Tapatybės sprendimas privalo būti mūsų, ne
 saugyklos.
+
+⚠️ **SU ATTEMPT-UNIQUE RAKTU ŠIS ARGUMENTAS TAPO DAR STIPRESNIS.** Perėjus nuo
+turinio adreso (delta 15), „tas pats raktas" nebeegzistuoja apskritai: kiekvienas
+bandymas rašo į savo objektą. Vadinasi be pre-check kiekvienas pakartotinis
+`finish()` sukurtų NAUJĄ objektą, o ne perrašytų esamą — šiukšlė, kurios
+retencija turėtų valyti. Pre-check yra vienintelis dalykas, neleidžiantis tam
+įvykti, tad jo mutacija (`put` skaitiklis 2 vietoj 1) lieka galiojanti ir po
+rakto schemos pakeitimo.
 
 **Lygybės paritetas.** `inline` kelias lygina kanonines eilutes, external —
 persistintą checksum'ą. Tas pats **scenarijų rinkinys** (`tests/helpers/rezultatuPoros.js`)
