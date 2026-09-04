@@ -2,6 +2,7 @@ const { test, after } = require("node:test");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
 const path = require("node:path");
+const fs = require("node:fs");
 const { Client } = require("pg");
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
@@ -67,17 +68,40 @@ function dbVardas() {
   return new URL(DB_URL).pathname.replace(/^\//, "");
 }
 
-async function perkurtiDb() {
-  const admin = adminDatabaseUrl();
-  await pg(admin, `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`);
-  await pg(admin, `CREATE DATABASE "${dbVardas()}"`);
+/**
+ * ⚠️ RIBA IŠVEDAMA IŠ KATALOGO, NE RAŠOMA SKAIČIUMI.
+ *
+ * `migrate("up 11")` būtų teisingas šiandien ir tylia klaida rytoj: įterpus
+ * migraciją prieš #157, skaičius rodytų ne tą ribą, o testas vis tiek žaliuotų —
+ * tik tikrintų kitą schemos būseną. Todėl skaičiuojama, kelinta yra pirmoji
+ * #157 migracija.
+ */
+function migracijuIkiPR1() {
+  const failai = fs.readdirSync(path.join(ŠAKNIS, "migrations")).sort();
+  const indeksas = failai.findIndex((f) => f.startsWith("1756100000000_"));
 
-  execFileSync("npx", ["node-pg-migrate", "up"], {
+  assert.ok(indeksas > 0, "#157 PR-1 migracija privalo egzistuoti ir nebūti pirmoji");
+  return indeksas;
+}
+
+function migruoti(kryptis = "up") {
+  return execFileSync("npx", ["node-pg-migrate", ...kryptis.split(/\s+/).filter(Boolean)], {
     cwd: ŠAKNIS,
     env: { ...process.env, DATABASE_URL: DB_URL },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+async function tuscaDb() {
+  const admin = adminDatabaseUrl();
+  await pg(admin, `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`);
+  await pg(admin, `CREATE DATABASE "${dbVardas()}"`);
+}
+
+async function perkurtiDb() {
+  await tuscaDb();
+  migruoti("up");
 
   await pg(
     DB_URL,
@@ -424,5 +448,108 @@ test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { skip: PRALEISTI, timeo
       null,
       "KONTROLĖ: atstačius aibę `fs` vėl praeina"
     );
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ATNAUJINIMO KELIAS: PREFLIGHT SU PAVELDĖTA EILUTE
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ CODEX RADINYS (#289): PREFLIGHT BUVO NEGYVAS KODAS.
+ *
+ * Abu ankstesni testai migruoja TUŠČIĄ bazę, tad `DO $$` bloko sąlyga niekada
+ * netiesa — jį pašalinus (ar sulaužius diagnostiką) niekas nekristų. O jis gina
+ * vienintelį realų scenarijų: atnaujinimą bazės, kurioje SENOJI schema jau
+ * leido `s3` eilutę su likusiu `payload` arba be vientisumo metaduomenų.
+ *
+ * Todėl migruojama TIK iki tėvinės schemos, pasėjama paveldėta eilutė, ir tada
+ * paleidžiamos likusios migracijos.
+ *
+ * ⚠️ TIKRINAMA IR TAI, KAD BAZĖ LIEKA NEPALIESTA. Migracija, kuri krenta, bet
+ * spėja pakeisti invariantą, būtų blogesnė už tą, kuri nekrenta: operatorius
+ * gautų klaidą ir pusiau pakeistą schemą.
+ */
+test("#157 PR-1: paveldėta eilutė SUSTABDO migraciją, o ne pataisoma tyliai", { skip: PRALEISTI, timeout: 180000 }, async (t) => {
+  await tuscaDb();
+  migruoti(`up ${migracijuIkiPR1()}`);
+
+  /** Prielaida: iki #157 tokia eilutė yra TEISĖTA — kitaip testas tikrintų ne tai. */
+  await pg(
+    DB_URL,
+    `INSERT INTO jobs (id, type, status, created_at, updated_at)
+     VALUES ($1, 'transcription', 'completed', now(), now())`,
+    [JOB_ID]
+  );
+  await pg(
+    DB_URL,
+    `INSERT INTO job_results (job_id, storage_type, storage_key, payload, created_at)
+     VALUES ($1, 's3', $2, $3::jsonb, now())`,
+    [JOB_ID, RAKTAS, JSON.stringify({ text: "senas hibridas" })]
+  );
+
+  await t.test("migracija KRENTA su diagnostika", () => {
+    let klaida = null;
+    try {
+      migruoti("up");
+    } catch (e) {
+      klaida = e;
+    }
+
+    assert.ok(klaida, "paveldėta pažeidžianti eilutė privalo sustabdyti migraciją");
+
+    const tekstas = `${klaida.stdout || ""}${klaida.stderr || ""}${klaida.message || ""}`;
+    assert.match(tekstas, /pažeidžiančias naują external formą/, "operatorius turi gauti PRIEŽASTĮ");
+    assert.match(tekstas, /SELECT job_id/, "ir užklausą, kuria pamatys, kurias eilutes");
+  });
+
+  await t.test("DUOMENYS NEPALIESTI: `payload` tebėra", async () => {
+    /**
+     * ⚠️ ŠERDIS. Automatinis `UPDATE ... SET payload = NULL` būtų sunaikinęs
+     * VIENINTELĘ rezultato kopiją — duomenų praradimas be operatoriaus sprendimo.
+     */
+    const { rows } = await pg(DB_URL, "SELECT payload, storage_type FROM job_results WHERE job_id = $1", [
+      JOB_ID,
+    ]);
+
+    assert.equal(rows.length, 1);
+    assert.notEqual(rows[0].payload, null, "vienintelė rezultato kopija privalo išlikti");
+    assert.equal(rows[0].storage_type, "s3");
+  });
+
+  await t.test("SCHEMA NEPALIESTA: naujas invariantas NEPRITAIKYTAS", async () => {
+    const { rows } = await pg(
+      DB_URL,
+      `SELECT pg_get_constraintdef(c.oid) AS apibrezimas
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+        WHERE t.relname = 'job_results' AND c.conname = 'job_results_storage_type_values'`
+    );
+
+    assert.equal(rows.length, 1);
+    assert.equal(
+      /'fs'/.test(rows[0].apibrezimas),
+      false,
+      "kritusi migracija negali palikti pusiau pakeistos schemos"
+    );
+  });
+
+  await t.test("KONTROLĖ: pašalinus pažeidžiančią eilutę migracija PRAEINA", async () => {
+    /**
+     * Be jos testas įrodytų tik tiek, kad migracija krenta — bet ne kad ji
+     * krenta BŪTENT dėl tos eilutės. Praeitų ir visiškai sugedusi migracija.
+     */
+    await pg(DB_URL, "DELETE FROM job_results WHERE job_id = $1", [JOB_ID]);
+
+    assert.doesNotThrow(() => migruoti("up"), "be paveldėtos eilutės kelias švarus");
+
+    const { rows } = await pg(
+      DB_URL,
+      `SELECT pg_get_constraintdef(c.oid) AS apibrezimas
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+        WHERE t.relname = 'job_results' AND c.conname = 'job_results_storage_type_values'`
+    );
+    assert.match(rows[0].apibrezimas, /'fs'/, "dabar invariantas pritaikytas");
   });
 });
