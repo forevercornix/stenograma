@@ -1723,6 +1723,24 @@ ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos `INSERT` atme
 
 ---
 
+## #157 (PR-2) — `ArtifactStore` kontraktas ir reikšmių sritis
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Ribos priimtų reikšmių aibė TELPA į `jsonb` aibę** | `jobResultsJsonbDomain.integration` | ⚠️ **Kryptis svarbi:** riba gali būti GRIEŽTESNĖ už PG (uniformizacijos kaina), bet niekada ŠVELNESNĖ — praleista reikšmė sulaužytų inline diegimą jau PO sėkmingo `put()`. Kontrolė: bent viena reikšmė praeina abi puses, bent viena atmetama ribos. ⚠️ **Iki šio testo NUL atmetimas rėmėsi DOKUMENTACIJA, ne matavimu šiame repo** (§14.1) |
+| ⚠️ **Išmatuota, kurias reikšmes `jsonb` atmeta** | `jobResultsJsonbDomain.integration` | Aibė fiksuojama tvirtinimu: pasikeitus PG elgesiui (versija, konfigūracija) testas krenta ir priverčia peržiūrėti ribą, o ne leidžia jai tyliai išsiskirti su tikrove |
+| ⚠️ **Kontraktas — VIENAS, visiems backend'ams** | `artifactStoreContract` (`fs`) | Rinkinys gyvena `helpers/artifactStoreContract.js` ir yra vartai `inline` bei `s3` implementacijoms. Kur elgesys neapibrėžtas (perrašymas, listing'as), scenarijaus NĖRA — matoma spraga geriau nei tyliai įtvirtinta `fs` savybė |
+| ⚠️ **Round-trip išlaiko kanoninę tapatybę** | `artifactStoreContract` | 16 reikšmių; raktų tvarka NELEMIA, masyvo tvarka LEMIA. `checksum` yra KANONINĖS EILUTĖS suma, ne saugyklos baitų |
+| ⚠️ **Inline reprezentacijos stabilumas** | `artifactStoreContract`, `jobResultsJsonbDomain.integration` | ⚠️ **Peržiūros radinys, patvirtintas matavimu:** `kanonizuoti()` perrenka tik NUOSAVUS raktus, o `payload` keliauja per `JSON.stringify`, kviečiantį PROTOTIPE esantį `toJSON`. `Date` kanoniškai virsta `{}` (visos datos tapatingos!), o po inline round-trip'o — ISO eilute → `RESULT_CONFLICT` teisėtam retry. `fs`/S3 to neparodytų |
+| ⚠️ **Struktūrinis atmetimas neša savo kodą** | `artifactStoreErrors` | Klasifikatorius atpažįsta `ArtifactStoreError` tiesiogiai IR per `cause`. Kontrolė: svetima klaida lieka `internal_error` — kitaip patikra praeitų ir tada, jei klasifikatorius grąžintų bet kurios klaidos `code` |
+| ⚠️ **`neatkartojama` ženklas GAMINAMAS** | `artifactStoreErrors` | ⚠️ **`UNVERIFIED`: patikrinta, kad ženklas dedamas, NE kad jo paisoma.** Retry grandinę stabdo `UnrecoverableError`, kurį uždeda completion kelias (PR-4). Elgesio DoD — nulis pakartojimų — gyvena PR-4, ne čia |
+| ⚠️ **`key` ≠ `reference`** | `artifactStoreContract` | `reference` yra tai, kas persistinama į `storage_key`, ir inline atveju ji `null`. Kontraktas tikrina, kad reikšmė yra viena iš dviejų teisėtų formų — jokio sentinelio, kurį reikėtų atsiminti nerašyti |
+| ⚠️ **`verify()` sako, ar palyginimas NEPRIKLAUSOMAS** | `artifactStoreContract` | Inline atveju lyginama reikšmė su savimi (metaduomenų atskirai nėra). Riba: restore verifikacija inline eilutėms neduoda jokio patikrinimo — PR-7 DoD reikalauja ataskaitoje atskirti patikrintas ir nepatikrinamas eilutes |
+| ⚠️ **`fs`: `fsync` + `rename` + katalogo `fsync`** | `artifactStoreContract` (netiesiogiai) | ⚠️ **STATINĖ riba (§9.2):** kontraktas tikrina round-trip, ne patvarumą po maitinimo dingimo. Vien `rename` paliktų NULINIO ILGIO failą teisingu vardu, kurį `head` rodo kaip esantį |
+| ⚠️ **`readStream` klaida APDOROJAMA, ne visada tipizuota** | `artifactStoreContract` | Objektas gali dingti tarp patikros ir skaitymo, tad kontraktas nežada „visada tipizuota" (§12.1); tikrinama, kad srautas arba perduoda duomenis, arba praneša klaidą |
+
+---
+
 ## Redis ir persistencija
 
 | Garantija | Testai | Pastaba |
