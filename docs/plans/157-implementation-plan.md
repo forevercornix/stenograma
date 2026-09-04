@@ -187,24 +187,33 @@ paslepia defektą (#266 trečia dalis). Kontraktinis rinkinys tikrina abu atveju
 **Mano sprendimai iš §3**
 
 *Object key schema:* `results/<jobId>/<attemptId>.json`, kur `attemptId` yra
-šio rašymo bandymo UUID.
-⚠️ **NE turinio adresas** (Codex P1, #289): du worker'iai su tuo pačiu rezultatu
-rašytų į tą patį raktą, ir pralaimėjusiojo cleanup ištrintų laimėtojo objektą —
-`completed` job'as be rezultato. Attempt-unique raktas tą klasę pašalina pagal
-konstrukciją, ne pagal koordinavimą.
-Tapatybę neša `checksum` KOLONA; raktas jos nedubliuoja nė viena kryptimi.
-Pagrindimas: raktas privalo būti immutable konkrečiam kanoniniam rezultatui, o
-hash tai duoda be papildomos būsenos — du worker'iai su **tuo pačiu** loginiu
-rezultatu taikosi į tą patį raktą (idempotencija natūrali), su **skirtingu** —
-į skirtingus (perrašymo nėra pagal konstrukciją). Attempt-UUID reikalautų atskiro
-„kuris attempt laimėjo" registro. `jobId` prefiksas reikalingas **erasure** keliui (žinoti, kuriuos raktus liesti
+šio rašymo bandymo UUID. Tapatybę neša `checksum` KOLONA; raktas jos nedubliuoja
+nė viena kryptimi.
+
+⚠️ **ATMESTAS VARIANTAS: TURINIO ADRESAS `<sha256(kanoninisRezultatas)>.json`.**
+
+Jis atrodė pakankamas, ir argumentas buvo tikras: hash duoda immutability **be
+papildomos būsenos** — du worker'iai su tuo pačiu loginiu rezultatu taikosi į tą
+patį raktą (idempotencija natūrali), su skirtingu — į skirtingus. Attempt-UUID
+tada atrodė kaip nereikalingas registras.
+
+Jis nepakanka dėl vienos konkrečios priežasties: **du bandymai dalijasi tuo pačiu
+objektu**. Kritęs A gali ištrinti objektą, kurį B ruošiasi referencuoti, ir
+eilutės užraktas to neapsaugo, nes B `put()` įvyko PRIEŠ transakciją (Codex P1,
+#289). Attempt-unique raktas šitą pašalina konstrukciškai: vienas bandymas —
+vienas objektas, ir svetimo liesti fiziškai nėra kaip.
+
+Užrašyta kaip atmestas variantas su priežastimi, o ne ištrinta: be jos „hash
+duoda immutability be papildomos būsenos" yra pakankamai geras argumentas, kad
+po kelių mėnesių būtų pasiūlytas iš naujo.
+
+`jobId` prefiksas reikalingas **erasure** keliui (žinoti, kuriuos raktus liesti
 šalinant job'ą), o ne tapatybei; `attemptId` — kad du rašytojai negalėtų dalintis
-objektu. ⚠️ Jis NĖRA orphan skenavimo priemonė: `list(prefix)`
-į kontraktą neįeina (A3), tad prefiksas šiandien yra tvarkos, o ne aptikimo
-savybė. Jei follow-up darbas kada įves listing'ą, prefiksas jam tiks — bet tai
-būsimoji, ne esama galimybė.
-⚠️ Riba užrašoma: hash naudojamas kaip **rakto** komponentas, **ne** kaip lygybės
-taisyklė — lygybę toliau sprendžia `kanoninisRezultatas()` (`common.js:731`).
+objektu. ⚠️ Prefiksas NĖRA orphan skenavimo priemonė: `list(prefix)` į kontraktą
+neįeina (A3), tad jis šiandien yra tvarkos, o ne aptikimo savybė.
+⚠️ Riba užrašoma: hash naudojamas TIK `checksum` kolonoje, **ne** kaip lygybės
+taisyklė ir **ne** kaip rakto komponentas — lygybę toliau sprendžia
+`kanoninisRezultatas()` (`common.js:731`).
 
 *Integrity reikšmė:* `bytes` + `sha256(kanoninisRezultatas(result))` persistinami
 **DB pusėje kartu su reference** write metu (PR-1 kolonos). Checksum skaičiuojamas
@@ -349,17 +358,23 @@ nepadengti (#157 to reikalauja eksplicitiškai).
        ▼
 3. trumpa DB transakcija: authoritative re-check / CAS → commit
        ▼
-4. pralaimėjus arba rollback'inus → SĄLYGINIS cleanup (žr. žemiau)
+4. pralaimėjus arba rollback'inus → cleanup: trinamas TIK savas `attemptId`
 ```
 
-⚠️ **PRALAIMĖJĘS NETRINA BESĄLYGIŠKAI — TAI DUOMENŲ PRARADIMAS** (Codex P1, #289).
+⚠️ **CLEANUP TRINA TIK SAVO BANDYMĄ, IR TAI KONSTRUKCIJA, NE DRAUSMĖ.**
 
-Raktas yra turinio adresas, tad du worker'iai su **tuo pačiu** loginiu rezultatu
-rašo į **tą patį** raktą. Besąlyginis pralaimėjusiojo cleanup ištrintų objektą,
-kurį laimėtojas jau referencina — job'as liktų `completed` be rezultato. Tai
-blogiau nei orphan: orphan yra šiukšlė, o čia dingsta duomenys.
+Su attempt-unique raktu pralaimėjęs fiziškai neturi kaip paliesti laimėtojo
+objekto: raktai skirtingi. Sąlyginė patikra („ar kas nors referencina") tampa
+nereikalinga — ne todėl, kad ją praleidžiame, o todėl, kad nebėra ką ja spręsti.
 
-Todėl cleanup yra sąlyginis ir **serializuojamas tuo pačiu job eilutės užraktu**:
+⚠️ **KODĖL ŠIS SKYRIUS PERRAŠYTAS DU KARTUS.** Pirmoji redakcija leido
+besąlyginį trynimą su turinio adresu — tai būtų ištrynę laimėtojo objektą.
+Antroji pridėjo sąlyginę patikrą po eilutės užraktu — bet ji neuždarė lenktynių,
+kai konkurentas jau parašė objektą, o į transakciją dar neįėjo. Tik rakto schemos
+pakeitimas pašalino klasę; abu ankstesni bandymai ją tik siaurino.
+
+Istorinė alternatyva (turinio adresas + sąlyginis cleanup po užraktu) atrodytų
+taip, ir ji čia paliekama kaip **atmestas** variantas:
 
 ```
 BEGIN
@@ -370,9 +385,10 @@ BEGIN
 COMMIT
 ```
 
-Užraktas čia būtinas: be jo pralaimėjęs galėtų patikrinti nuorodą PRIEŠ
+Užraktas ten būtinas: be jo pralaimėjęs galėtų patikrinti nuorodą PRIEŠ
 laimėtojo commit'ą, pamatyti „nereferencuota" ir ištrinti objektą, kurį
-laimėtojas po sekundės užregistruos.
+laimėtojas po sekundės užregistruos. **Bet ir su užraktu jos nepakanka** — žr.
+scenarijų žemiau.
 
 ⚠️ **BET UŽRAKTO NEPAKANKA, IR TAI ANTRA TO PATIES DEFEKTO REDAKCIJA** (Codex P1
 antrą kartą, #289). Scenarijus, kurio sąlyginis cleanup NEUŽDARO:
