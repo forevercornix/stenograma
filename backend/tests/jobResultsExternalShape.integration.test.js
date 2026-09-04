@@ -546,7 +546,7 @@ test("#157 PR-1: paveldėta eilutė SUSTABDO migraciją, o ne pataisoma tyliai",
     [JOB_ID, RAKTAS, JSON.stringify({ text: "senas hibridas" })]
   );
 
-  await t.test("migracija KRENTA su diagnostika", () => {
+  await t.test("migracija KRENTA su diagnostika, kuri VEIKIA atsuktoje schemoje", async () => {
     let klaida = null;
     try {
       migruoti("up");
@@ -559,6 +559,22 @@ test("#157 PR-1: paveldėta eilutė SUSTABDO migraciją, o ne pataisoma tyliai",
     const tekstas = `${klaida.stdout || ""}${klaida.stderr || ""}${klaida.message || ""}`;
     assert.match(tekstas, /pažeidžiančias naują external formą/, "operatorius turi gauti PRIEŽASTĮ");
     assert.match(tekstas, /SELECT job_id/, "ir užklausą, kuria pamatys, kurias eilutes");
+
+    /**
+     * ⚠️ SIŪLOMA UŽKLAUSA PRIVALO VEIKTI TOJE SCHEMOJE, KURIOJE OPERATORIUS
+     * ATSIDURIA PO KRITIMO (Codex #289).
+     *
+     * Kritimas atsuka ir kolonų migraciją, tad `bytes`/`checksum` neegzistuoja.
+     * Užklausa, juos mininti, duotų `42703` vietoj eilučių sąrašo: fail-closed
+     * suveiktų teisingai, o diagnostika nuvestų į šalį. Todėl užklausa ne tik
+     * tikrinama tekstu — ji PALEIDŽIAMA.
+     */
+    const uzklausa = tekstas.match(/SELECT job_id[^;]+;/);
+    assert.ok(uzklausa, "pranešime privalo būti vientisa užklausa");
+
+    const { rows } = await pg(DB_URL, uzklausa[0]);
+    assert.equal(rows.length, 1, "ji privalo grąžinti būtent pažeidžiančią eilutę");
+    assert.equal(rows[0].su_payload, true);
   });
 
   await t.test("DUOMENYS NEPALIESTI: `payload` tebėra", async () => {

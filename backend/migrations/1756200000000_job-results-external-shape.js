@@ -33,6 +33,20 @@ exports.shorthands = undefined;
  * migracija sustoja su tiksliu jų sąrašu.
  */
 exports.up = (pgm) => {
+  /**
+   * ⚠️ SIŪLOMA DIAGNOSTIKOS UŽKLAUSA NAUDOJA TIK TĖVINĖS SCHEMOS STULPELIUS
+   * (Codex #289).
+   *
+   * `node-pg-migrate` visą paleidimą vykdo VIENOJE transakcijoje, tad kritus
+   * šiai migracijai atsukama ir ankstesnė — `bytes` bei `checksum` operatoriaus
+   * bazėje NEEGZISTUOJA. Tai įrodo `jobResultsExternalShape.integration`
+   * tvirtinimas „ABI migracijos atšauktos". Užklausa, minėjusi tas kolonas,
+   * duotų `42703` vietoj pažeidžiančių eilučių sąrašo: fail-closed suveiktų
+   * teisingai, o diagnostika nuvestų į šalį.
+   *
+   * Trūkstamų metaduomenų rodyti nereikia — kolonų dar nėra apskritai, tad
+   * KIEKVIENA external eilutė jų neturi pagal apibrėžimą.
+   */
   pgm.sql(`
     DO $$
     DECLARE
@@ -48,8 +62,9 @@ exports.up = (pgm) => {
         RAISE EXCEPTION
           'job_results turi % eilutes(-ių), pažeidžiančias naują external formą. '
           'Migracija sustabdyta: automatinis taisymas galėtų sunaikinti vienintelę '
-          'rezultato kopiją. Peržiūrėkite: SELECT job_id, storage_type, storage_key IS NULL AS be_rakto, '
-          'payload IS NOT NULL AS su_payload, bytes IS NULL AS be_dydzio, checksum IS NULL AS be_sumos '
+          'rezultato kopiją. Peržiūrėkite (užklausa veikia ATSUKTOJE schemoje): '
+          'SELECT job_id, storage_type, storage_key IS NULL AS be_rakto, '
+          'payload IS NOT NULL AS su_payload '
           'FROM job_results WHERE storage_type <> ''inline'';', pazeidzia;
       END IF;
     END $$;
