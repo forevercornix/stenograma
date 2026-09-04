@@ -31,6 +31,9 @@ body arba A1–A4 atsakymai.
 | 19 | **Naujas atviras PR-4 sprendimas:** orphan'ai su attempt-unique raktu (trys variantai, rekomendacija — patvarus bandymo registras) | peržiūra |
 | 20 | PR-4 cleanup mutacijos perrašytos pagal attempt-unique raktą — senosios nebeatkuria gedimo | Codex (#289) |
 | 21 | §3 nebeteigia „atvirų klausimų nebėra": orphan strategija lieka atvira ir blokuoja PR-4 pradžią | Codex (#289) |
+| 22 | **No-op reikalauja ir `head()` patikros:** sutapęs checksum nebeleidžia skelbti sėkmės virš pakibusios nuorodos | Codex (#289) |
+| 23 | **Stebėtojo mutacija taisyta:** skaldyti reikia TRANSAKCIJĄ, ne sakinį — vienos transakcijos vidinė būsena išoriniam stebėtojui nematoma | Codex (#289) |
+| 24 | **PR-3 metaduomenų `SELECT` traukia rezultato reference laukus** — be jų PR-5 per-row sprendimas buvo neįvykdomas nurodymas | Codex (#289) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -279,7 +282,10 @@ metadata keliai nustoja tempti `payload`.
 
 **Failai**
 - `backend/utils/jobStore/postgresStore.js` — `SELECT_JOB` skaidymas į
-  `SELECT_JOB_META` ir `SELECT_JOB_WITH_RESULT`; `rowToJob` gauna `hydrate` požymį
+  `SELECT_JOB_META` ir `SELECT_JOB_WITH_RESULT`; `rowToJob` gauna `hydrate` požymį.
+  ⚠️ `SELECT_JOB_META` traukia rezultato **reference** laukus (`storage_type`,
+  `storage_key`, `bytes`, `checksum`) BE `payload` — be jų PR-5 per-row sprendimas
+  neįvykdomas (Codex #289)
 - `backend/services/backupService.js` — `countActiveJobs()` per metadata kelią
 - `backend/tests/jobStoreHydration.integration.test.js` (nauja)
 
@@ -492,6 +498,28 @@ Pilna kanoninė lygybė reikalinga TIK ten, kur rezultatas vis tiek skaitomas �
 selective hydration lieka nepaliesta, ir pakartotinis `finish()` external turinio
 neskaito.
 
+⚠️ **BET NO-OP NEGALI BŪTI SKELBIAMAS NEPATIKRINUS, AR OBJEKTAS DAR YRA**
+(Codex, #289). Sutapęs checksum sako tik tiek, kad **metaduomenys** sutampa;
+objektas per tą laiką galėjo dingti, būti perrašytas ar sugadintas. Tokiu atveju
+ankstesnė seka grąžindavo sėkmę virš pakibusios nuorodos — `completed` job'as be
+naudojamo rezultato.
+
+Todėl no-op šaka turi **du** reikalavimus:
+
+1. persistintas `checksum` sutampa su įeinančiu, IR
+2. `head()` patvirtina, kad objektas egzistuoja ir jo dydis atitinka persistintą
+   `bytes`.
+
+Neišlaikius (2), tai **nebe pakartojimas, o remontas**: einama į pilną kelią,
+rašomas naujas `attemptId` objektas ir perjungiama nuoroda. Turinys ir toliau
+NESKAITOMAS — `head()` yra metadata operacija, leidžiama visuose keliuose (žr.
+PR-2 trijų lygių lentelę), tad selective hydration lieka nepaliesta.
+
+⚠️ Riba, kurią tai palieka: `head()` be checksum'o (pvz. `fs`) sugadinto, bet
+to paties dydžio objekto neaptiks. Pilną `verify()` čia dėti būtų per brangu —
+kiekvienas pakartojimas skaitytų visą artefaktą. Ta klasė lieka restore
+verifikacijai (PR-7), ir tai užrašoma, ne nutylima.
+
 ⚠️ **PRE-CHECK NĖRA CONCURRENCY AUTORITETAS, IR TAI RAŠOMA KODE, NE TIK ČIA.**
 Tarp 1 ir 3 žingsnio kitas worker'is gali laimėti, tad sprendimą priima **DB
 pusėje matoma eilutės būsena** (3 žingsnis), ne prieš I/O perskaityta jos kopija.
@@ -601,6 +629,33 @@ Praktinė pasekmė: `inline` eilutei predikatas lieka `jobRemoved` (šiandienini
 teisingas elgesys), external eilutei — reikalauja objekto pašalinimo. Tas pats
 sprendimo šaltinis naudojamas skenavime ir backup politikoje.
 
+⚠️ **BET ŠIANDIEN NĖ VIENAS IŠ TRIJŲ NETURI IŠ KUR TO SUŽINOTI** (Codex, #289).
+
+`SELECT_JOB` traukia tik `r.payload`, `rowToJob()` rezultato `storage_type`,
+`storage_key`, `bytes` ar `checksum` neatskleidžia, o `job.storageKey` yra
+**source_audio** raktas, ne rezultato. Vadinasi „sprendžia pagal eilutės
+`storage_type`" be atskiro kelio yra neįvykdomas nurodymas — ir vartotojai
+grįžtų prie eksplicitiškai atmestos aktyvios konfigūracijos.
+
+Todėl PR-3 metaduomenų `SELECT` praplečiamas rezultato **reference** laukais
+(`storage_type`, `storage_key`, `bytes`, `checksum`) — **be `payload`**, tad
+hidratacijos riba nepažeidžiama: tai metaduomenys, ne turinys. `rowToJob()` juos
+pateikia atskiru lauku (pvz. `job.resultStorage`), aiškiai atskirtu nuo
+`job.storageKey`.
+
+Visi trys vartotojai eina per TĄ PATĮ kelią; nė vienas neskaito `job_results`
+savo užklausa — kitaip atsirastų trečia rezultato vietos interpretacija.
+
+| Vartotojas | Ką klausia | Ko NEDARO |
+|---|---|---|
+| `lifecycleService` | ar external objektas pašalintas | neklausia konfigūracijos |
+| `artefactScanner` | ar `storage_key` rodo į esantį objektą (`head`) | neskaito turinio |
+| `backupPolicy` | ar turinys yra `job_results`, ar saugykloje | nesprendžia pagal aktyvų backend'ą |
+
+⚠️ Iš to seka PR-3 apimties pokytis: metaduomenų `SELECT` nebėra vien „be
+`payload`" — jis turi ir KĄ pateikti. Failų sąraše tai `postgresStore.js` ir
+`rowToJob()`, o PR-5 tik naudoja jau esantį kelią.
+
 **Registras lieka statinis** (A4): `artefactInventory` aprašai nebedeklaruoja
 fizinės vietos apskritai — jie aprašo artefakto **tipą**. Vietą sprendžia
 vartotojai. Alternatyva (registras su funkcija `saugojimoVieta(env)`) atmesta:
@@ -656,9 +711,23 @@ Body reikalauja: „migracijos progresas nesaugomas kaip negaliojanti `job_resul
 Statinė „vienas UPDATE" patikra netinka (§9.2, body tai sako tiesiogiai).
 Sprendimas: migracija leidžiama su **stebėtoju antroje jungtyje**, kuris cikle
 (`READ COMMITTED`) skaito `job_results` ir kiekvieną matytą eilutę tikrina prieš
-invariantą. Pažeidimas → testas krenta. Mutacija: pakeitus atominį sakinį į
-`UPDATE storage_key` + `UPDATE payload=NULL` du žingsniais → stebėtojas pagauna
-tarpinę būseną → **krenta**.
+invariantą. Pažeidimas → testas krenta.
+
+⚠️ **MUTACIJA PRIVALO SKALDYTI TRANSAKCIJĄ, NE TIK SAKINĮ** (Codex, #289).
+Ankstesnė formuluotė žadėjo, kad `UPDATE storage_key` + `UPDATE payload = NULL`
+du žingsniais bus pagauta — bet jei abu vyksta TOJE PAČIOJE transakcijoje,
+antroji jungtis `READ COMMITTED` režimu tarpinės būsenos nemato IŠ VISO: iki
+commit'o ji regi seną eilutę, po jo — galutinę. Tokia mutacija stebėtojo
+nesulaužytų, ir testas būtų atrodęs stipresnis, nei yra.
+
+Teisinga mutacija: du `UPDATE` **atskirose transakcijose** (arba `COMMIT` tarp
+jų) → stebėtojas pagauna commit'intą tarpinę būseną → **krenta**.
+
+⚠️ IŠ TO SEKA IR TIKSLUS TEIGINYS, KURĮ TESTAS ĮRODO: „nėra **commit'intos**
+formos pažeidžiančios būsenos". Tai lygiai tas reikalavimas, kurį formuluoja
+body („commit'inta dalinai pakeisto trejeto būsena negalima"), ne stipresnis.
+Vienos transakcijos vidinės tarpinės būsenos joks išorinis stebėtojas
+neįrodys — ir jų įrodinėti nereikia, nes jos niekam nematomos.
 ⚠️ Riba užrašoma: stebėtojas įrodo, kad pažeidimo **nepastebėta**, ne kad jo
 neįmanoma. Tai stipriau nei statinė patikra ir silpniau nei formalus įrodymas.
 
