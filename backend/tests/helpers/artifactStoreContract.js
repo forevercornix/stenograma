@@ -368,6 +368,40 @@ function paleistiKontrakta(vardas, paruosti) {
       );
     });
 
+    await t.test("EXTERNAL: `head` PREFIKSUI nerodo objekto", { skip: !external }, async () => {
+      /**
+       * ⚠️ ORPHAN APTIKIMAS APIBRĖŽTAS PER `head` (A3), TAD KLAIDINGAS TEIGIAMAS
+       * ČIA UŽMASKUOJA DINGUSĮ ARTEFAKTĄ.
+       *
+       * Jei saugykla rakto prefiksui grąžina „objektas yra", DB krypties
+       * inventorius nusiramins ties eilute, kurios objekto nebėra. Filesystem
+       * pusėje prefiksas yra KATALOGAS, kurio `stat()` pavyksta; objektų
+       * saugykloje jis paprastai yra tiesiog nesantis raktas.
+       *
+       * Kontraktas reikalauja to paties atsakymo abiem atvejais: prefiksas nėra
+       * objektas.
+       */
+      const k = await raktas();
+      await saugykla.put(k, { text: "gilus" });
+
+      const prefiksas = k.split("/").slice(0, -1).join("/");
+      if (prefiksas.length === 0) return;
+
+      assert.equal(
+        await saugykla.head(prefiksas),
+        null,
+        "prefiksas nėra objektas — kitaip orphan patikra nusiramintų be pagrindo"
+      );
+
+      await assert.rejects(
+        () => saugykla.read(prefiksas),
+        (klaida) => klaida.code === "ARTIFACT_NOT_FOUND",
+        "ir skaitymas privalo sakyti tą patį"
+      );
+
+      assert.equal((await saugykla.verify(prefiksas, { bytes: 1, checksum: "a".repeat(64) })).ok, false);
+    });
+
     await t.test("EXTERNAL: du bandymai su TUO PAČIU turiniu — du atskiri objektai", { skip: !external }, async () => {
       /**
        * ⚠️ TAI PR-4 attempt-uniqueness PAGRINDAS.

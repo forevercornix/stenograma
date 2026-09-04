@@ -119,6 +119,18 @@ function createFsArtifactStore({ root } = {}) {
 
     try {
       const info = await fsp.stat(pilnas);
+
+      /**
+       * ⚠️ TIK REGULIARUS FAILAS YRA OBJEKTAS (Codex, #290).
+       *
+       * `stat()` pavyksta ir katalogui, ir socket'ui, ir įrenginiui. Grąžinus
+       * `{ exists: true, bytes: 4096 }` katalogui, orphan patikra (A3: `storage_key`
+       * -> `head`) nusiramintų ties eilute, kurios objekto NEBĖRA - t. y.
+       * dingęs artefaktas atrodytų esantis. Būtent tam `head` ir naudojamas, tad
+       * klaidingas teigiamas čia kainuoja daugiau nei bet kur kitur.
+       */
+      if (!info.isFile()) return null;
+
       /**
        * ⚠️ `checksum` NEGRĄŽINAMAS, IR TAI KONTRAKTO DALIS.
        *
@@ -129,13 +141,22 @@ function createFsArtifactStore({ root } = {}) {
        */
       return { exists: true, bytes: info.size };
     } catch (klaida) {
-      if (klaida.code === "ENOENT") return null;
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return null;
       throw klaida;
     }
   }
 
   async function read(raktas) {
     const pilnas = kelias(raktas);
+
+    /**
+     * ⚠️ TA PATI REGULIARUMO SĄLYGA KAIP `head()`. Be jos `readFile` katalogui
+     * duotų `EISDIR`, o kvietėjas gautų svetimo tipo klaidą vietoj
+     * `ARTIFACT_NOT_FOUND`.
+     */
+    if ((await head(raktas)) === null) {
+      throw new ArtifactStoreError(`FsArtifactStore: objekto "${raktas}" nėra.`, KLAIDA.NERASTA);
+    }
 
     let buferis;
     try {
@@ -176,6 +197,10 @@ function createFsArtifactStore({ root } = {}) {
      * `fh.read()` grąžina `EBADF`. Tad nutekėjimo nėra, kol srautas suvartojamas
      * arba sunaikinamas.
      */
+    if ((await head(raktas)) === null) {
+      throw new ArtifactStoreError(`FsArtifactStore: objekto "${raktas}" nėra.`, KLAIDA.NERASTA);
+    }
+
     let deskriptorius;
     try {
       deskriptorius = await fsp.open(pilnas, "r");
@@ -190,8 +215,9 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   async function verify(raktas, laukiama = {}) {
+    /** `head()` jau atmeta neregiuliarius įrašus, tad `verify` jų nepasiekia. */
     const galva = await head(raktas);
-    if (!galva) return { ok: false, exists: false, bytes: null, checksum: null };
+    if (!galva) return { ok: false, exists: false, bytes: null, checksum: null, nepriklausomas: true };
 
     /**
      * ⚠️ VISAS OBJEKTAS SKAITOMAS SĄMONINGAI. Filesystem checksum'o
