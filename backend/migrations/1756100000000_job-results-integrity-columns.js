@@ -39,12 +39,23 @@ exports.up = (pgm) => {
    * ⚠️ FORMOS SARGAS PAČIOMS REIKŠMĖMS.
    *
    * Be jo `checksum` galėtų būti bet kokia eilutė, o restore verifikacija lygintų
-   * su šiukšlėmis ir vis tiek „praeitų". `bytes` neigiamas dydis irgi nėra
-   * teisėta būsena.
+   * su šiukšlėmis ir vis tiek „praeitų".
+   *
+   * ⚠️ `bytes > 0`, NE `>= 0`. Kanoninė JSON eilutė niekada nėra 0 baitų —
+   * mažiausia įmanoma reikšmė yra `{}`, du baitai. Nulis reiškia nutrauktą arba
+   * tuščią rašymą, t. y. BŪTENT tą gedimą, kurį `bytes` turi gaudyti; leidus jį,
+   * sargas praleistų vienintelį atvejį, dėl kurio egzistuoja.
+   *
+   * ⚠️ `checksum` FORMATAS LIEKA PLIKAS HEX, NE `sha256:<hex>`. Prefiksas būtų
+   * savaime aprašantis, bet algoritmo keitimas nėra schemos, o kanoninės
+   * tapatybės klausimas: pakeitus jį, keistųsi ir `kanoninisRezultatas()`
+   * išvestis, tad migruoti tektų VISAS eilutes nepriklausomai nuo formato.
+   * Prefiksas duotų skaitomumą, bet ne migracijos lengvumą — o kainuotų 7
+   * simbolius kiekvienoje eilutėje ir antrą parsinimo taisyklę.
    */
   pgm.addConstraint("job_results", "job_results_integrity_shape", {
     check: `
-      (bytes IS NULL OR bytes >= 0)
+      (bytes IS NULL OR bytes > 0)
       AND (checksum IS NULL OR checksum ~ '^[0-9a-f]{64}$')
     `,
   });

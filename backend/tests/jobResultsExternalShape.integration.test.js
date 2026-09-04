@@ -199,6 +199,48 @@ test("#157 PR-1: `job_results` external forma yra DB invariantas", { skip: PRALE
     );
   });
 
+  /* ═══ SARGAS 5-6: VIENTISUMO REIKŠMĖS, NE TIK JŲ BUVIMAS ═══
+   *
+   * ⚠️ CODEX RADINYS (#289). Sargai 1-4 tikrina, ar `bytes`/`checksum` YRA — bet
+   * kiekviena jų paduodama reikšmė buvo galiojanti. `job_results_integrity_shape`
+   * pašalinimas ar susilpninimas būtų palikęs visus testus žalius, o DB priimtų
+   * `bytes = 0` ir `checksum = "nesuma"`. Restore verifikacija tada lygintų su
+   * šiukšlėmis ir „praeitų".
+   */
+
+  await t.test("`bytes = 0` ATMETAMAS", async () => {
+    assert.equal(
+      await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 0, checksum: SUMA }),
+      "23514",
+      "kanoninė JSON eilutė niekada nėra 0 baitų — nulis reiškia nutrauktą rašymą"
+    );
+  });
+
+  await t.test("neigiamas `bytes` ATMETAMAS", async () => {
+    assert.equal(
+      await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: -1, checksum: SUMA }),
+      "23514"
+    );
+  });
+
+  await t.test("netinkamo formato `checksum` ATMETAMAS", async () => {
+    for (const bloga of ["nesuma", "A".repeat(64), "e".repeat(63), "e".repeat(65), "sha256:" + SUMA]) {
+      assert.equal(
+        await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 10, checksum: bloga }),
+        "23514",
+        `netinkamas checksum praėjo: ${bloga.slice(0, 20)}`
+      );
+    }
+  });
+
+  await t.test("KONTROLĖ: mažiausia teisėta reikšmė (`{}` = 2 baitai) PRAEINA", async () => {
+    /** Be jos `bytes > 0` galėtų būti sugriežtintas iki nesamos ribos ir niekas to nepamatytų. */
+    assert.equal(
+      await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 2, checksum: SUMA }),
+      null
+    );
+  });
+
   await t.test("KONTROLĖ: nežinomas `storage_type` ATMETAMAS", async () => {
     assert.equal(
       await ideti({ storage_type: "gcs", storage_key: RAKTAS, bytes: 1, checksum: SUMA }),
@@ -318,6 +360,36 @@ test("#157 PR-1: kiekviena `CHECK` dalis yra NEŠANTI", { skip: PRALEISTI, timeo
         checksum: SUMA,
       }),
       "23514"
+    );
+  });
+
+  await t.test("be `job_results_integrity_shape` — `bytes = 0` ir bloga suma ĮSIRAŠO", async () => {
+    /**
+     * ⚠️ Šis sargas yra ATSKIRAS `CHECK`, ne `storage_shape` dalis, tad jam
+     * reikia savo mutacijos: susilpninus formą jis liktų galioti, ir atvirkščiai.
+     */
+    await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_integrity_shape");
+
+    try {
+      assert.equal(
+        await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 0, checksum: "nesuma" }),
+        null,
+        "sargas pašalintas → šiukšlės įsirašo, vadinasi jis buvo nešantis"
+      );
+    } finally {
+      await pg(
+        DB_URL,
+        `ALTER TABLE job_results ADD CONSTRAINT job_results_integrity_shape CHECK (
+           (bytes IS NULL OR bytes > 0)
+           AND (checksum IS NULL OR checksum ~ '^[0-9a-f]{64}$')
+         )`
+      );
+    }
+
+    assert.equal(
+      await ideti({ storage_type: "fs", storage_key: RAKTAS, bytes: 0, checksum: "nesuma" }),
+      "23514",
+      "KONTROLĖ: atstačius sargą tos pačios šiukšlės vėl atmetamos"
     );
   });
 
