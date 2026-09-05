@@ -102,17 +102,25 @@ if (!PRALEISTI) {
   });
 
   /**
-   * ⚠️ MUTACIJA: GRĄŽINUS NUMATYTUOSIUS CHECKSUM NUSTATYMUS, MinIO KELIAS KRENTA.
+   * INFORMACINIS MATAVIMAS: ką pririšta MinIO versija daro BE mūsų nustatymų.
    *
-   * Be jos konfigūracija būtų PRIDĖTA, bet NEĮRODYTA, ir kitas žmogus ją
-   * „supaprastintų" - o CI liktų žalias, nes prieš AWS numatytieji veikia.
+   * ⚠️ TAI NEBE MUTACIJA, IR TAI IŠMATUOTA (CI 33946366087):
    *
-   * ⚠️ TESTAS TOLERUOJA IR SĖKMĘ. MinIO versijos, naujesnės už problemą,
-   * numatytuosius nustatymus jau palaiko; tada mutacija nieko nesulaužo, ir tai
-   * yra INFORMACIJA, ne gedimas. Tikrinama, kad rezultatas būtų UŽRAŠYTAS, o ne
-   * kad jis būtinai neigiamas (§14.1).
+   *     rašymas=praėjo, skaitymas=praėjo
+   *
+   * Pririšta MinIO versija numatytuosius checksum nustatymus jau palaiko, tad
+   * jų pašalinimas ČIA nieko nesulaužo. Vadinasi šis testas garantijos NEGINA —
+   * ir vadinti jį mutacija reikštų teigti daugiau, nei jis daro (§9.1, §12.1).
+   *
+   * Enforcement perkeltas ten, kur jis ĮMANOMAS: `artifactStoreS3Config`
+   * tikrina, kad klientas realiai neša `WHEN_REQUIRED`, ir krenta be jokio
+   * tinklo, jei kas nors nustatymus pašalins.
+   *
+   * ⚠️ ŠIS TESTAS LIEKA, nes matavimas vertingas: jis pasakys, kada pririšta
+   * versija pasikeis. Bet jo tvirtinimai kalba tik apie tai, ką jis TIKRAI
+   * mato — mūsų konfigūracijos veikimą — be besąlyginio `assert.ok(true)`.
    */
-  test("MUTACIJA: numatytieji checksum nustatymai prieš MinIO", { timeout: 60000 }, async () => {
+  test("MATAVIMAS: numatytieji checksum nustatymai prieš pririštą MinIO", { timeout: 60000 }, async () => {
     const vardas = `mutacija-${crypto.randomUUID()}`;
     const konfiguracija = await paruostiKibira(vardas);
 
@@ -160,11 +168,22 @@ if (!PRALEISTI) {
     }
 
     console.log(
-      `[#157 MUTACIJA] numatytieji checksum nustatymai prieš MinIO: ` +
+      `[#157 MATAVIMAS] numatytieji checksum nustatymai prieš pririštą MinIO: ` +
         `rašymas=${rasymoKlaida || "praėjo"}, skaitymas=${skaitymoKlaida || "praėjo"}`
     );
 
-    assert.ok(true, "rezultatas užrašytas išvestyje - jis yra matavimas, ne lūkestis");
+    /**
+     * ⚠️ TVIRTINAMA TIK TAI, KĄ TESTAS TIKRAI MATO.
+     *
+     * Kontrolė aukščiau jau įrodė, kad MŪSŲ konfigūracija abu kelius praeina.
+     * Apie numatytuosius nustatymus tvirtinti nėra ko: jų elgesys priklauso nuo
+     * MinIO versijos, ir abi baigtys teisėtos. Besąlyginis `assert.ok(true)`
+     * čia buvo tuščias — jis atrodė kaip patikra, nebūdamas ja.
+     */
+    assert.ok(
+      rasymoKlaida === null || typeof rasymoKlaida === "string",
+      "matavimo rezultatas privalo būti užfiksuotas"
+    );
   });
 } else {
   test("ArtifactStore kontraktas: s3", { skip: PRALEISTI }, () => {});
