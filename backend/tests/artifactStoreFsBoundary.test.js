@@ -177,3 +177,137 @@ test("gedimas PO `rename` NENAIKINA objekto, kuris jau buvo tuo adresu", async (
 
   assert.ok(await saugykla.head(raktas), "esamas adresas NEIŠVALOMAS — tai būtų duomenų praradimas");
 });
+
+/* ═══ ŠAKNIES GYVAVIMO CIKLAS ═══ */
+
+test("šaknis, kuri yra FAILAS, yra konfigūracijos klaida — ne dingę duomenys", async (t) => {
+  /**
+   * ⚠️ NEGALIOJANTI ŠAKNIS ATRODĖ KAIP PRARASTI VARTOTOJO DUOMENYS.
+   *
+   * `realpath` tokiu atveju meta `ENOTDIR`, o operacijos jį laikydavo „objekto
+   * nėra": `head()` → `null`, `read()` → `ARTIFACT_NOT_FOUND`, `verify()` →
+   * nesančio objekto verdiktas. Remontas taip nueina atkūrimo keliu, nors trūksta
+   * ne artefakto, o saugyklos.
+   */
+  const failas = path.join(os.tmpdir(), `stenograma-saknis-failas-${process.pid}`);
+  await fsp.writeFile(failas, "ne katalogas", "utf8");
+  t.after(() => fsp.rm(failas, { force: true }));
+
+  const saugykla = createFsArtifactStore({ root: failas });
+
+  for (const [vardas, veiksmas] of operacijosSuRaktu(saugykla)) {
+    await assert.rejects(
+      () => veiksmas("results/a.json"),
+      (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID",
+      `${vardas}: negaliojanti šaknis privalo būti konfigūracijos klaida`
+    );
+  }
+});
+
+test("failų sistemos šaknis (`/`) atmetama iš karto", () => {
+  /**
+   * ⚠️ Su `saknis === "/"` sulaikymo patikra lygintų su `"//"`, ir saugykla atmestų
+   * VISKĄ — atrodytų veikianti, bet nepriimtų nė vieno teisėto rakto. Be to
+   * artefaktų šaknis, sutampanti su failų sistemos šaknimi, reikštų `delete()`,
+   * vaikštantį po visą mašiną.
+   */
+  assert.throws(
+    () => createFsArtifactStore({ root: "/" }),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID"
+  );
+});
+
+test("trūkstama šaknis sukuriama su `0700` ir lieka naudojama", async (t) => {
+  const tevas = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-nauja-saknis-"));
+  t.after(() => fsp.rm(tevas, { recursive: true, force: true }));
+
+  const saknis = path.join(tevas, "artefaktai", "gilu");
+  const saugykla = createFsArtifactStore({ root: saknis });
+
+  await saugykla.put("results/a.json", { text: "nauja" });
+
+  const info = await fsp.stat(saknis);
+  assert.ok(info.isDirectory(), "šaknis privalo būti sukurta");
+  assert.equal(info.mode & 0o777, 0o700, "šaknis nėra apeinama kitų vietinių paskyrų");
+  assert.deepEqual(await saugykla.read("results/a.json"), { text: "nauja" });
+});
+
+/* ═══ TEISĖS ═══ */
+
+test("artefaktai kuriami `0600`, ne pagal `umask`", async (t) => {
+  /**
+   * ⚠️ Be eksplicitinio režimo Node naudoja `0o666 & ~umask`; su įprastu `022`
+   * galutinis artefaktas lieka `0644` — transkripciją perskaito bet kuri vietinė
+   * paskyra ar sidecar, pasiekiantis tą volume.
+   *
+   * Teisės nustatomos LAIKINAM failui, nes `rename` jas išsaugo: turinys niekada,
+   * net milisekundę, nebūna platesnis, nei turi būti.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  await saugykla.put("results/slaptas.json", { text: "transkripcija" });
+
+  assert.equal((await fsp.stat(path.join(saknis, "results/slaptas.json"))).mode & 0o777, 0o600);
+  assert.equal((await fsp.stat(path.join(saknis, "results"))).mode & 0o777, 0o700, "ir katalogas");
+});
+
+/* ═══ OBJEKTO SEMANTIKA ═══ */
+
+test("katalogas nėra objektas NĖ VIENOJE operacijoje", async (t) => {
+  /**
+   * ⚠️ `delete("results")` mesdavo žalią `EISDIR`, nors `head("results")` tam pačiam
+   * raktui sako „objekto nėra", o `inline` ir S3 grąžina `false`. Tas pats įėjimas
+   * duodavo tris skirtingus atsakymus, ir bendras kontraktas nustodavo būti bendras.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  await saugykla.put("results/job/a.json", { text: "gilus" });
+
+  assert.equal(await saugykla.head("results"), null, "`head` prefiksui — `null`");
+  assert.equal(await saugykla.delete("results"), false, "`delete` prefiksui — `false`, ne `EISDIR`");
+  assert.equal((await saugykla.verify("results", { bytes: 1, checksum: "a".repeat(64) })).ok, false);
+
+  await assert.rejects(
+    () => saugykla.read("results"),
+    (klaida) => klaida.code === "ARTIFACT_NOT_FOUND"
+  );
+  await assert.rejects(
+    () => saugykla.readStream("results"),
+    (klaida) => klaida.code === "ARTIFACT_NOT_FOUND"
+  );
+
+  assert.ok(await saugykla.head("results/job/a.json"), "KONTROLĖ: tikras objektas nedingo");
+});
+
+/* ═══ SYMLINK PRIEŠ `mkdir` ═══ */
+
+test("symlink'as pastebimas PRIEŠ sukuriant palikuonių katalogus", async (t) => {
+  /**
+   * ⚠️ ANKSTESNĖ REDAKCIJA TIKRINO TIK PATĮ TAIKINĮ.
+   *
+   * Kai `<šaknis>/results` yra symlink'as į išorę, o `results/job/` dar nėra,
+   * `realpath` taikiniui grąžindavo `ENOENT` — riba praleisdavo, `mkdir` sekdavo
+   * symlink'ą, ir katalogas atsirasdavo UŽ šaknies dar prieš tai, kai raktas būdavo
+   * atmestas. Rašymas nepavykdavo, bet pėdsakas svetimoje vietoje likdavo.
+   */
+  const { saknis, isore, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  await fsp.symlink(isore, path.join(saknis, "results"));
+  const saugykla = createFsArtifactStore({ root: saknis });
+
+  await assert.rejects(
+    () => saugykla.put("results/job/a.json", { text: "svetur" }),
+    (klaida) => klaida.code === "ARTIFACT_KEY_INVALID"
+  );
+
+  assert.deepEqual(
+    await fsp.readdir(isore),
+    [],
+    "už šaknies neturi likti NIEKO — nei failo, nei katalogo"
+  );
+});

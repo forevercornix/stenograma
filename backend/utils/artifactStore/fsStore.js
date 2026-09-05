@@ -43,6 +43,37 @@ function createFsArtifactStore({ root } = {}) {
   const saknis = path.resolve(root);
 
   /**
+   * ⚠️ FAILŲ SISTEMOS ŠAKNIS (`/`) ATMETAMA IŠ KARTO (Codex, #290).
+   *
+   * Su `saknis === "/"` sulaikymo patikra lygintų su `"//"`, ir nė vienas
+   * teisėtas raktas jos nepraeitų — saugykla atrodytų veikianti, bet atmestų
+   * VISKĄ su `ARTIFACT_KEY_INVALID`. Be to artefaktų šaknis, sutampanti su
+   * failų sistemos šaknimi, reikštų, kad `delete()` vaikšto po visą mašiną.
+   *
+   * Pasirinkta uždrausti, o ne palaikyti: tai konfigūracijos klaida, ir tyliai
+   * ją „palaikyti" reikštų priimti diegimą, kurio niekas nenorėjo.
+   */
+  if (path.dirname(saknis) === saknis) {
+    throw new ArtifactStoreError(
+      `FsArtifactStore: \`root\` negali būti failų sistemos šaknis ("${saknis}"). ` +
+        "Nurodykite atskirą katalogą artefaktams.",
+      "ARTIFACT_CONFIG_INVALID"
+    );
+  }
+
+  /**
+   * ⚠️ SULAIKYMAS TIKRINAMAS PER `path.relative`, NE PER EILUČIŲ PREFIKSĄ.
+   *
+   * Prefiksų palyginimas priklauso nuo to, ar kelias baigiasi skirtuku, ir
+   * būtent tai sulaužė šaknies atvejį. `relative` atsako į tikrąjį klausimą:
+   * ar kelias yra šaknies palikuonis.
+   */
+  function viduje(kelias, saknisKelias) {
+    const santykis = path.relative(saknisKelias, kelias);
+    return santykis === "" || (!santykis.startsWith("..") && !path.isAbsolute(santykis));
+  }
+
+  /**
    * ⚠️ ANTRA RIBOS PATIKRA, IR JI SĄMONINGA.
    *
    * `patikrintiRakta()` jau atmetė viską, kas nėra siauras allowlist'as, tad ši
@@ -53,7 +84,7 @@ function createFsArtifactStore({ root } = {}) {
   function leksinisKelias(raktas) {
     const pilnas = path.resolve(saknis, patikrintiRakta(raktas));
 
-    if (pilnas !== saknis && !pilnas.startsWith(saknis + path.sep)) {
+    if (!viduje(pilnas, saknis)) {
       throw new ArtifactStoreError(
         "FsArtifactStore: raktas išveda už saugyklos šaknies.",
         KLAIDA.RAKTAS
@@ -64,62 +95,139 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   /**
-   * ⚠️ RIBA TIKRINAMA IR PO `realpath`, NE VIEN LEKSIŠKAI (Codex, #290).
+   * ŠAKNIES GYVAVIMO CIKLAS — PATIKRINAMAS VIENĄ KARTĄ, PRIEŠ BET KURIĄ OPERACIJĄ
+   * (Codex, #290).
    *
-   * ⚠️ PAGRINDINIS ARGUMENTAS - NE ATAKA, O NUOSEKLUMAS (§16). Kad
-   * `<šaknis>/results` taptų symlink'u, kažkas jau turi rašymo teisę į artefaktų
-   * šaknį — o tada jis ir taip pasiekia artefaktus. Tikroji priežastis kita:
-   * `fileStorage._resolveExisting()` ŠIAME REPO jau uždaro būtent šią klasę per
+   * ⚠️ NEGALIOJANTI ŠAKNIS ATRODĖ KAIP PRARASTI DUOMENYS.
+   *
+   * Kai `ARTIFACT_FS_ROOT` nurodydavo į paprastą FAILĄ, `realpath` mesdavo
+   * `ENOTDIR`, o operacijos jį laikydavo „objekto nėra": `head()` grąžindavo
+   * `null`, `read()` — `ARTIFACT_NOT_FOUND`, `verify()` — nesančio objekto
+   * verdiktą. Konfigūracijos klaida taip apsimeta dingusiais vartotojo duomenimis
+   * ir siunčia remontą atkūrimo keliu, nors saugyklos apskritai nėra.
+   *
+   * ⚠️ TRŪKSTAMA ŠAKNIS SUKURIAMA IR ĮTVIRTINAMA. `mkdir` grąžina sėkmę, kai įrašas
+   * dar tik page cache: be tėvo `fsync` maitinimo dingimas po `put()` gali pasiimti
+   * VISĄ naujai sukurtą artefaktų šaknį. Todėl sukuriama su `0700` ir sinchronizuo-
+   * jamas jos tėvas.
+   *
+   * ⚠️ REZULTATAS ĮSIMENAMAS, BET KLAIDA — NE: nepavykusi patikra kartojama kitam
+   * kvietimui, kad laikina problema nepaverstų saugyklos nuolat sugedusia.
+   */
+  let saknisParuosta = null;
+
+  async function paruostiSakni() {
+    if (saknisParuosta) return saknisParuosta;
+
+    saknisParuosta = (async () => {
+      let info = null;
+      try {
+        info = await fsp.stat(saknis);
+      } catch (klaida) {
+        if (klaida.code !== "ENOENT" && klaida.code !== "ENOTDIR") throw klaida;
+      }
+
+      if (info && !info.isDirectory()) {
+        throw new ArtifactStoreError(
+          `FsArtifactStore: \`root\` ("${saknis}") nėra katalogas. Tai saugyklos ` +
+            "konfigūracijos klaida, o ne dingęs artefaktas.",
+          "ARTIFACT_CONFIG_INVALID"
+        );
+      }
+
+      if (!info) {
+        const naujiSaknies = await trukstamosDalys(saknis, path.parse(saknis).root);
+        try {
+          await fsp.mkdir(saknis, { recursive: true, mode: 0o700 });
+        } catch (klaida) {
+          if (klaida.code === "ENOTDIR" || klaida.code === "EEXIST") {
+            throw new ArtifactStoreError(
+              `FsArtifactStore: \`root\` ("${saknis}") sukurti nepavyko: kelyje yra ne katalogas.`,
+              "ARTIFACT_CONFIG_INVALID"
+            );
+          }
+          throw klaida;
+        }
+
+        /** Ir naujos šaknies įrašas tėve — kitaip ji dingtų kartu su neįrašytu įrašu. */
+        for (const naujas of naujiSaknies) {
+          await sinchronizuotiKatalaga(path.dirname(naujas));
+        }
+      }
+
+      return fsp.realpath(saknis);
+    })().catch((klaida) => {
+      saknisParuosta = null;
+      throw klaida;
+    });
+
+    return saknisParuosta;
+  }
+
+  /**
+   * ⚠️ RIBA TIKRINAMA PER ARČIAUSIĄ ESANTĮ PROTĖVĮ (Codex, #290).
+   *
+   * ⚠️ ANKSTESNĖ REDAKCIJA TIKRINO TIK PATĮ TAIKINĮ. Kai `<šaknis>/results` yra
+   * symlink'as į išorę, o `results/job/` dar nėra, `realpath` taikiniui grąžindavo
+   * `ENOENT` — riba praleisdavo, `mkdir` sekdavo symlink'ą, ir katalogas
+   * atsirasdavo UŽ šaknies dar prieš tai, kai raktas būdavo atmestas. Rašymas
+   * nepavykdavo, bet pėdsakas svetimoje vietoje likdavo.
+   *
+   * Einant nuo taikinio aukštyn iki pirmo ESANČIO kelio elemento, symlink'as
+   * pasimato visada — nesvarbu, kiek gilus taikinys ir ar jo dar nėra.
+   *
+   * ⚠️ PAGRINDINIS ARGUMENTAS — NE ATAKA, O NUOSEKLUMAS (§16):
+   * `fileStorage._resolveExisting()` šiame repo jau uždaro tą pačią klasę per
    * `realpath`. Dvi saugyklos ribos su skirtinga traversal semantika yra
-   * nenuoseklumas, ir jis pasimatys per bendrą volume tarp konteinerių ar
-   * restore, ne per ataką.
+   * nenuoseklumas, ir jis pasimato per bendrą volume tarp konteinerių ar restore,
+   * ne per ataką.
    *
    * ⚠️ TOCTOU LIEKA. `realpath` riziką sumažina, bet nepašalina: kelias gali
-   * pasikeisti tarp patikros ir operacijos. Teigti daugiau, nei kodas daro,
-   * būtų §12.1 pažeidimas.
+   * pasikeisti tarp patikros ir operacijos. Teigti daugiau, nei kodas daro, būtų
+   * §12.1 pažeidimas.
    */
-  async function tikrasKelias(pilnas, { katalogas = false } = {}) {
-    /**
-     * ⚠️ `put()` METU FAILO DAR NĖRA, tad `realpath` taikomas KATALOGUI (jau po
-     * `mkdir`). Taikant failui, teisėtas kelias grįžtų su `ENOENT`.
-     */
-    const taikinys = katalogas ? path.dirname(pilnas) : pilnas;
+  async function tikrasKelias(pilnas, tikraSaknis) {
+    let dabartinis = pilnas;
 
-    let tikras;
-    try {
-      tikras = await fsp.realpath(taikinys);
-    } catch (klaida) {
-      /**
-       * ⚠️ ŽALIAS `ENAMETOOLONG` NEIŠEINA PRO RIBĄ (Codex, #290).
-       *
-       * Riba raktų segmentus riboja 255 baitais — tiek leidžia `NAME_MAX` ext4,
-       * XFS ir APFS. Bet konkreti failų sistema (ar overlay konteineryje) gali
-       * turėti mažesnę ribą, ir tada raktas, kurį kontraktas priima, čia vis tiek
-       * neįmanomas. Kvietėjui tai privalo atrodyti kaip rakto atmetimas, o ne kaip
-       * svetimo tipo I/O klaida.
-       */
-      if (klaida.code === "ENAMETOOLONG") {
+    for (;;) {
+      let tikras;
+      try {
+        tikras = await fsp.realpath(dabartinis);
+      } catch (klaida) {
+        /**
+         * ⚠️ ŽALIAS `ENAMETOOLONG` NEIŠEINA PRO RIBĄ (Codex, #290).
+         *
+         * Riba raktų segmentus riboja 255 baitais — tiek leidžia `NAME_MAX` ext4,
+         * XFS ir APFS. Bet konkreti failų sistema (ar overlay konteineryje) gali
+         * turėti mažesnę ribą, ir tada raktas, kurį kontraktas priima, čia vis tiek
+         * neįmanomas. Kvietėjui tai privalo atrodyti kaip rakto atmetimas, o ne
+         * kaip svetimo tipo I/O klaida.
+         */
+        if (klaida.code === "ENAMETOOLONG") {
+          throw new ArtifactStoreError(
+            "FsArtifactStore: raktas per ilgas šiai failų sistemai (`ENAMETOOLONG`).",
+            KLAIDA.RAKTAS
+          );
+        }
+
+        if (klaida.code !== "ENOENT" && klaida.code !== "ENOTDIR") throw klaida;
+
+        const tevas = path.dirname(dabartinis);
+        /** Šaknis egzistuoja (`paruostiSakni`), tad ciklas visada ja ir baigiasi. */
+        if (tevas === dabartinis) return pilnas;
+        dabartinis = tevas;
+        continue;
+      }
+
+      if (!viduje(tikras, tikraSaknis)) {
         throw new ArtifactStoreError(
-          "FsArtifactStore: raktas per ilgas šiai failų sistemai (`ENAMETOOLONG`).",
+          "FsArtifactStore: raktas per symlink išveda už saugyklos šaknies.",
           KLAIDA.RAKTAS
         );
       }
 
-      /** Nesantis objektas nėra ribos pažeidimas — tai `head`/`read` reikalas. */
-      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return pilnas;
-      throw klaida;
+      return pilnas;
     }
-
-    const tikraSaknis = await fsp.realpath(saknis);
-
-    if (tikras !== tikraSaknis && !tikras.startsWith(tikraSaknis + path.sep)) {
-      throw new ArtifactStoreError(
-        "FsArtifactStore: raktas per symlink išveda už saugyklos šaknies.",
-        KLAIDA.RAKTAS
-      );
-    }
-
-    return pilnas;
   }
 
   /**
@@ -131,14 +239,16 @@ function createFsArtifactStore({ root } = {}) {
    * `delete` ėmė LEKSINĮ kelią. Trys iš jų buvo apsaugotos ATSITIKTINAI - jos
    * pirma kviečia `head()`, tad riba suveikdavo joje; `delete` `head()` nekviečia,
    * ir būtent jis symlink'ą per katalogą praleisdavo iki galo, ištrindamas failą
-   * UŽ saugyklos šaknies. Codex pastebėjo `delete`; spraga buvo šablone.
+   * UŽ saugyklos šaknies.
    *
-   * ⚠️ APSAUGA DABAR STRUKTŪRINĖ, NE DRAUSMĖS. `leksinisKelias()` už šios
-   * funkcijos ribų nekviečiamas niekur, tad operacija be resolverio kelio
-   * paprasčiausiai NETURI - pamiršti nebėra kaip.
+   * ⚠️ APSAUGA STRUKTŪRINĖ, NE DRAUSMĖS. `leksinisKelias()` už šios funkcijos ribų
+   * nekviečiamas niekur, tad operacija be resolverio kelio paprasčiausiai NETURI.
+   * Ji taip pat yra vienintelė vieta, kur laukiama šaknies paruošimo — negaliojanti
+   * konfigūracija sustabdo KIEKVIENĄ operaciją, ne tik rašymą.
    */
-  async function keliasSaugus(raktas, { katalogas = false } = {}) {
-    return tikrasKelias(leksinisKelias(raktas), { katalogas });
+  async function keliasSaugus(raktas) {
+    const tikraSaknis = await paruostiSakni();
+    return tikrasKelias(leksinisKelias(raktas), tikraSaknis);
   }
 
   /**
@@ -155,12 +265,12 @@ function createFsArtifactStore({ root } = {}) {
    *
    * @returns {string[]} naujai sukurtų katalogų keliai, giliausias pirmas
    */
-  async function sukurtiKatalogus(katalogas) {
+  async function trukstamosDalys(katalogas, riba) {
     const nauji = [];
     let dabartinis = katalogas;
 
     /** Randame, kiek kelio dalių dar nėra — nuo giliausios aukštyn. */
-    while (dabartinis !== saknis && dabartinis.startsWith(saknis + path.sep)) {
+    while (dabartinis !== riba && viduje(dabartinis, riba) && path.dirname(dabartinis) !== dabartinis) {
       try {
         await fsp.stat(dabartinis);
         break;
@@ -171,7 +281,14 @@ function createFsArtifactStore({ root } = {}) {
       }
     }
 
-    await fsp.mkdir(katalogas, { recursive: true });
+    return nauji;
+  }
+
+  async function sukurtiKatalogus(katalogas) {
+    const nauji = await trukstamosDalys(katalogas, saknis);
+
+    /** ⚠️ `0700`: artefaktų katalogai neturi būti apeinami kitų vietinių paskyrų. */
+    await fsp.mkdir(katalogas, { recursive: true, mode: 0o700 });
     return nauji;
   }
 
@@ -189,9 +306,15 @@ function createFsArtifactStore({ root } = {}) {
     const pilnas = await keliasSaugus(raktas);
     const paruosta = paruostiReiksme(reiksme);
 
+    /**
+     * ⚠️ RIBA JAU PATIKRINTA PRIEŠ `mkdir` (Codex, #290).
+     *
+     * `keliasSaugus()` išsprendžia arčiausią ESANTĮ protėvį, tad symlink'as
+     * pasimato dar prieš tai, kai atsiranda pirmas naujas katalogas. Ankstesnė
+     * redakcija tikrino po `mkdir` — ir palikdavo katalogus UŽ šaknies net tada,
+     * kai raktas galiausiai būdavo atmestas.
+     */
     const sukurti = await sukurtiKatalogus(path.dirname(pilnas));
-    /** Po `mkdir` katalogas jau egzistuoja, tad `realpath` jį realiai patikrina. */
-    await keliasSaugus(raktas, { katalogas: true });
 
     /**
      * ⚠️ AR OBJEKTAS TUO ADRESU JAU BUVO - KLAUSIAMA PRIEŠ `rename`.
@@ -219,7 +342,16 @@ function createFsArtifactStore({ root } = {}) {
     let pervadinta = false;
 
     try {
-      deskriptorius = await fsp.open(laikinas, "wx");
+      /**
+       * ⚠️ `0600`, NE `umask` MALONĖ (Codex, #290).
+       *
+       * Be eksplicitinio režimo Node naudoja `0o666 & ~umask`; su įprastu `022`
+       * galutinis artefaktas lieka `0644` — transkripciją perskaito bet kuri
+       * vietinė paskyra ar sidecar, pasiekiantis tą volume. Teisės nustatomos
+       * LAIKINAM failui, nes `rename` jas išsaugo: taip turinys niekada, net
+       * milisekundę, nebūna platesnis, nei turi būti.
+       */
+      deskriptorius = await fsp.open(laikinas, "wx", 0o600);
       await deskriptorius.writeFile(paruosta.buferis);
       await deskriptorius.sync();
       await deskriptorius.close();
@@ -429,6 +561,16 @@ function createFsArtifactStore({ root } = {}) {
 
   async function del(raktas) {
     const pilnas = await keliasSaugus(raktas);
+
+    /**
+     * ⚠️ OBJEKTAS YRA TIK REGULIARUS FAILAS — IR TRYNIMAS TAI ŽINO (Codex, #290).
+     *
+     * `delete("results")` po `put("results/job/a.json", ...)` mesdavo žalią
+     * `EISDIR`, nors `head("results")` tam pačiam raktui sako „objekto nėra", o
+     * `inline` ir S3 grąžina `false`. Tas pats įėjimas duodavo tris skirtingus
+     * atsakymus, ir bendras kontraktas nustodavo būti bendras.
+     */
+    if ((await head(raktas)) === null) return false;
 
     try {
       await fsp.unlink(pilnas);
