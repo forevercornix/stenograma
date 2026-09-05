@@ -118,3 +118,41 @@ test("tikras sugadintas objektas fs saugykloje: `ARTIFACT_CORRUPT`, ne `ARTIFACT
 
   assert.ok(await saugykla.head(raktas), "objektas VIS DAR yra — būtent tuo jis skiriasi nuo dingusio");
 });
+
+test("LOGAI neša TIK kodą — artefakto turinys į juos nepatenka", () => {
+  /**
+   * ⚠️ VIEŠAS KELIAS TURINĮ SLĖPĖ, O LOGAI JĮ IŠSAUGODAVO (Codex P1, #290).
+   *
+   * Klasifikatorius rašydavo pilną `message` ir parserio diagnostiką į
+   * `log.error`. Logger'io euristinė redakcija savavališkų vardų ar sveikatos
+   * informacijos nepašalina, tad centralizuoti logai išlaikydavo būtent tai, ką
+   * viešas pranešimas sąmoningai paslėpė — tas pats nuotėkis pro kitas duris.
+   *
+   * ⚠️ TIKRINAMAS IR `cause`: originali klaida išsaugoma derinimui, tad testas
+   * privalo įrodyti, kad ji nėra automatiškai serializuojama.
+   */
+  const kilme = new Error(`Unexpected token, "${SLAPTAS}" is not valid JSON`);
+  const klaida = new ArtifactStoreError(`ArtifactStore: turinys ${SLAPTAS}`, "ARTIFACT_CORRUPT", {
+    cause: kilme,
+  });
+
+  const eilutes = [];
+  const originalus = console.error;
+  console.error = (...args) => {
+    eilutes.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+
+  let rezultatas;
+  try {
+    rezultatas = jobRunner._classifyError(klaida, "testas");
+  } finally {
+    console.error = originalus;
+  }
+
+  const logas = eilutes.join("\n");
+
+  assert.ok(logas.length > 0, "įvykis privalo būti užfiksuotas — tyla čia irgi netinka");
+  assert.ok(logas.includes("ARTIFACT_CORRUPT"), "kodas privalo patekti į logą");
+  assert.ok(!logas.includes(SLAPTAS), `artefakto turinys pateko į logą: ${logas.slice(0, 200)}`);
+  assert.ok(!rezultatas.message.includes(SLAPTAS), "ir į viešą pranešimą — ne");
+});

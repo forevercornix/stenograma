@@ -60,7 +60,9 @@ if (!PRALEISTI) {
       saugykla,
       /** Objektų saugykla adresuoja raktu, tad kelio forma čia teisėta. */
       raktas: () => `results/kontraktas/s3-${++seka}.json`,
-      external: true,
+      /** S3 adresuoja objektus: nuoroda yra adresas, o `verify()` — nepriklausomas. */
+      nuoroda: "raktas",
+      nepriklausomas: true,
       isvalyti: () => saugykla.uzdaryti(),
     };
   });

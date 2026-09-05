@@ -51,9 +51,34 @@ const {
  */
 function paleistiKontrakta(vardas, paruosti) {
   test(`ArtifactStore kontraktas: ${vardas}`, { timeout: 120000 }, async (t) => {
-    const { saugykla, raktas, external = false, isvalyti } = await paruosti();
+    const { saugykla, raktas, nuoroda, nepriklausomas, isvalyti } = await paruosti();
 
     assert.equal(typeof raktas, "function", "backend'as privalo pateikti `raktas()` gamyklą");
+
+    /**
+     * ⚠️ BACKEND'AS DEKLARUOJA SAVO SEMANTIKĄ, O RINKINYS JĄ TIKRINA (Codex, #290).
+     *
+     * Tikrinti tik TIPĄ („`reference` yra `null` ARBA adresas", „`nepriklausomas`
+     * yra loginė reikšmė") reiškia, kad backend'o regresija lieka žalia: inline,
+     * pradėjęs grąžinti `job_id` kaip nuorodą, praeitų vartus, o pirmas kvietėjas,
+     * kuris ją persistintų, gautų `23514`. Lygiai taip inline, pradėjęs skelbti
+     * `nepriklausomas: true`, priverstų PR-7 ataskaitą skaičiuoti iš to paties
+     * `payload` išvestą sumą kaip nepriklausomą įrodymą.
+     *
+     * Todėl fixture deklaruoja LAUKIAMĄ reikšmę, o ne rinkinys spėja.
+     */
+    assert.ok(
+      nuoroda === "null" || nuoroda === "raktas",
+      "fixture privalo deklaruoti `nuoroda`: null arba raktas"
+    );
+    assert.equal(
+      typeof nepriklausomas,
+      "boolean",
+      "fixture privalo deklaruoti, ar `verify()` palyginimas NEPRIKLAUSOMAS"
+    );
+
+    /** EXTERNAL pakopa yra to paties fakto pasekmė, ne atskiras jungiklis. */
+    const external = nuoroda === "raktas";
 
     t.after(async () => {
       if (isvalyti) await isvalyti();
@@ -125,9 +150,10 @@ function paleistiKontrakta(vardas, paruosti) {
        * teisėtų formų — kitaip inline implementacija išgalvotų sentinelį, o
        * pirmas kvietėjas, kuris jį persistintų, gautų `23514`.
        */
-      assert.ok(
-        rezultatas.reference === null || rezultatas.reference === k,
-        "`reference` privalo būti arba adresas, arba `null` — jokio sentinelio"
+      assert.equal(
+        rezultatas.reference,
+        nuoroda === "null" ? null : k,
+        `\`reference\` privalo atitikti deklaruotą semantiką (${nuoroda})`
       );
       assert.equal(
         rezultatas.checksum,
@@ -239,9 +265,9 @@ function paleistiKontrakta(vardas, paruosti) {
        * skirtumas būtų PASAKYTAS, o ne numanomas.
        */
       assert.equal(
-        typeof patvirtinimas.nepriklausomas,
-        "boolean",
-        "`verify()` privalo pasakyti, ar palyginimas buvo nepriklausomas"
+        patvirtinimas.nepriklausomas,
+        nepriklausomas,
+        "`verify()` privalo pasakyti TIKSLIAI tai, ką backend'as gali įrodyti"
       );
       assert.equal(
         (await saugykla.verify(k, { bytes: bytes + 1, checksum })).ok,
@@ -310,7 +336,11 @@ function paleistiKontrakta(vardas, paruosti) {
       assert.equal(verdiktas.ok, false);
       assert.equal(verdiktas.bytes, null);
       assert.equal(verdiktas.checksum, null);
-      assert.equal(typeof verdiktas.nepriklausomas, "boolean", "vėliava privalo būti ir tada, kai objekto nėra");
+      assert.equal(
+        verdiktas.nepriklausomas,
+        nepriklausomas,
+        "vėliava privalo būti ir tada, kai objekto nėra — ir ta pati"
+      );
     });
 
     /* ═══ 5. `delete` ═══ */

@@ -565,12 +565,24 @@ function _classifyError(e, context = "job") {
      * Skirtumas — kodas išsaugomas, nes pagal jį operatorius sprendžia, ar
      * ieškoti dingusio objekto, ar tirti vientisumą.
      */
+    /**
+     * ⚠️ Į LOGĄ EINA KODAS, NE PRANEŠIMAS (Codex P1, #290).
+     *
+     * Ankstesnė redakcija čia rašė pilną `message` ir parserio diagnostiką. Abu jie
+     * gali nešti ARTEFAKTO TURINIO fragmentą — transkripcijos asmenvardžius, adresus,
+     * sveikatos informaciją — o logger'io euristinė redakcija savavališkų vardų
+     * nepašalina. Rezultatas: viešas kelias turinį slepia, o centralizuoti logai jį
+     * išsaugo. Tai tas pats nuotėkis pro kitas duris.
+     *
+     * Logguojama tik tai, kas SAUGU pagal konstrukciją: kodas, kontekstas ir
+     * neatkartojamumo ženklas. Originali klaida lieka `cause` grandinėje — pasiekiama
+     * derinant, bet niekur automatiškai neserializuojama.
+     */
     log.error("Artefaktų saugyklos klaida", {
       stage: "artifact_store",
       context,
       errorCode: domeninė.code,
-      message: domeninė.message,
-      priezastis: domeninė.priezastis,
+      neatkartojama: Boolean(domeninė.neatkartojama),
     });
 
     return {

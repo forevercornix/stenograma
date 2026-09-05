@@ -78,6 +78,17 @@ if (!PRALEISTI) {
     return {
       saugykla: createInlineArtifactStore({ vykdytojas: pool }),
       raktas,
+      /**
+       * ⚠️ INLINE INVARIANTAI DEKLARUOJAMI EKSPLICITIŠKAI (Codex, #290).
+       *
+       * `storage_key` inline eilutėje PRIVALO būti `NULL` (PR-1 invariantas), tad
+       * nuorodos nėra. Ir `verify()` čia lygina reikšmę SU SAVIMI — nepriklausomo
+       * metaduomens nėra, tad `nepriklausomas: false`. Be šių deklaracijų regresija
+       * abiem laukais praeitų vartus, o pasekmę pamatytų PR-4 (`23514`) ir PR-7
+       * (tuščia suma, apsimetanti įrodymu).
+       */
+      nuoroda: "null",
+      nepriklausomas: false,
       isvalyti: async () => {
         await pool.end().catch(() => {});
         await pg(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(
