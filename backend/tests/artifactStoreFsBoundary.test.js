@@ -311,3 +311,49 @@ test("symlink'as pastebimas PRIEŠ sukuriant palikuonių katalogus", async (t) =
     "už šaknies neturi likti NIEKO — nei failo, nei katalogo"
   );
 });
+
+/* ═══ VIENTISUMO PATIKRA BE VISO OBJEKTO BUFERINIMO ═══ */
+
+test("`verify()` nutraukia skaitymą peržengus patikimą dydį", async (t) => {
+  /**
+   * ⚠️ TA PATI KLASĖ KAIP S3 PUSĖJE (Codex rado ten; `fs` turėjo tą pačią).
+   *
+   * Objektas, pakeistas ar sugadintas į daug didesnį už persistintą `bytes`,
+   * išsemtų atkūrimo procesą BŪTENT tame kelyje, kuris sugadinimą ir turi aptikti.
+   * Verdiktas fail-closed: `ok: false` be teigiamos sumos.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  const raktas = "results/isputes.json";
+
+  const kvitas = await saugykla.put(raktas, { text: "mažas" });
+
+  /** Objektas pakeičiamas UŽ saugyklos nugaros — būtent tai `verify()` ir gaudo. */
+  await fsp.writeFile(path.join(saknis, raktas), Buffer.alloc(4 * 1024 * 1024, 0x61));
+
+  const verdiktas = await saugykla.verify(raktas, { bytes: kvitas.bytes, checksum: kvitas.checksum });
+
+  assert.equal(verdiktas.ok, false, "išsipūtęs objektas negali būti patvirtintas");
+  assert.equal(verdiktas.exists, true, "objektas YRA vietoje");
+  assert.equal(verdiktas.checksum, null, "sumos neapskaičiavome, tad jos ir neteigiame");
+  assert.equal(verdiktas.nepriklausomas, true);
+});
+
+test("KONTROLĖ: nepakitęs objektas ir toliau patvirtinamas", async (t) => {
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  const reiksme = { text: "vientisumas", segments: Array.from({ length: 500 }, (_, i) => i) };
+  const kvitas = await saugykla.put("results/geras.json", reiksme);
+
+  const verdiktas = await saugykla.verify("results/geras.json", {
+    bytes: kvitas.bytes,
+    checksum: kvitas.checksum,
+  });
+
+  assert.equal(verdiktas.ok, true, "srautinė suma privalo sutapti su kvitu");
+  assert.equal(verdiktas.bytes, kvitas.bytes);
+});

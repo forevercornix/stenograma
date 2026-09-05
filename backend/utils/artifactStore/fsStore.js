@@ -9,8 +9,11 @@ const {
   paruostiReiksme,
   atkurtiReiksme,
   nesancioVerdiktas,
+  neverifikuojamasVerdiktas,
+  normalizuotiLaukima,
   vientisumoVerdiktas,
 } = require("./validation");
+const { getLimits, LIMIT_KIND } = require("../resultLimits");
 
 /**
  * `FsArtifactStore` - artefaktai konfigūruotame filesystem kataloge (#157, PR-2).
@@ -524,28 +527,57 @@ function createFsArtifactStore({ root } = {}) {
     if (!galva) return nesancioVerdiktas(true);
 
     /**
-     * ⚠️ VISAS OBJEKTAS SKAITOMAS SĄMONINGAI. Filesystem checksum'o
-     * metaduomenyse neturi, tad kitaip vientisumo patvirtinti neįmanoma. Būtent
-     * dėl šios kainos `verify()` metadata-only keliuose DRAUDŽIAMAS.
-     */
-    /**
-     * ⚠️ OBJEKTAS GALI DINGTI TARP `head()` IR `readFile()` (Codex, #290).
+     * ⚠️ OBJEKTAS SKAITOMAS SRAUTU, NE Į ATMINTĮ (ta pati klasė kaip S3, Codex #290).
      *
-     * Langas mažas, bet realus: erasure kelias trina lygiagrečiai. Be šito
-     * `verify()` metų žalią `ENOENT` vietoj dokumentuoto „nėra", ir kvietėjas,
-     * laukiantis verdikto, gautų klaidą — 7.6 patikroje tai reikštų nutrūkusią
-     * ataskaitą, o ne eilutę „objekto nebėra".
+     * Filesystem checksum'o metaduomenyse neturi, tad vientisumą galima patvirtinti
+     * tik perskaičius — bet objektas, pakeistas ar sugadintas į daug didesnį už
+     * persistintą `bytes`, išsemtų atkūrimo procesą BŪTENT tame kelyje, kuris
+     * sugadinimą ir turi aptikti. Codex šią klasę rado S3 pusėje; `fs` turėjo tą pačią.
+     *
+     * Riba: persistintas lūkestis, o jo nesant — `MAX_RESULT_BYTES`. Būtent dėl šios
+     * kainos `verify()` metadata-only keliuose DRAUDŽIAMAS.
+     *
+     * ⚠️ OBJEKTAS GALI DINGTI TARP `head()` IR SKAITYMO. Langas mažas, bet realus:
+     * erasure kelias trina lygiagrečiai. Be šito `verify()` mestų žalią `ENOENT`
+     * vietoj dokumentuoto „nėra", ir 7.6 ataskaita nutrūktų vietoj eilutės.
      */
-    let buferis;
+    const lauktas = normalizuotiLaukima(laukiama);
+    const riba = lauktas.bytes === null ? getLimits()[LIMIT_KIND.RESULT_BYTES] : lauktas.bytes;
+
+    let deskriptorius;
     try {
-      buferis = await fsp.readFile(await keliasSaugus(raktas));
+      deskriptorius = await fsp.open(await keliasSaugus(raktas), "r");
     } catch (klaida) {
       if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return nesancioVerdiktas(true);
       throw klaida;
     }
 
-    const checksum = crypto.createHash("sha256").update(buferis).digest("hex");
-    const bytes = buferis.byteLength;
+    const maisa = crypto.createHash("sha256");
+    let bytes = 0;
+    let perzengta = false;
+
+    try {
+      const srautas = deskriptorius.createReadStream();
+
+      for await (const gabalas of srautas) {
+        bytes += gabalas.byteLength;
+
+        if (bytes > riba) {
+          perzengta = true;
+          srautas.destroy();
+          break;
+        }
+
+        maisa.update(gabalas);
+      }
+    } catch (klaida) {
+      if (klaida.code === "ENOENT") return nesancioVerdiktas(true);
+      throw klaida;
+    } finally {
+      await deskriptorius.close().catch(() => {});
+    }
+
+    if (perzengta) return neverifikuojamasVerdiktas(true);
 
     /**
      * ⚠️ `nepriklausomas: true` — LYGINAMA SU IŠORE ĮRAŠYTU METADUOMENIU.
@@ -556,7 +588,12 @@ function createFsArtifactStore({ root } = {}) {
      * ten vėliava bus `false` — ir 7.6 restore verifikacija privalo tai matyti,
      * o ne laikyti abu atvejus lygiaverčiais.
      */
-    return vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas: true });
+    return vientisumoVerdiktas({
+      laukiama,
+      bytes,
+      checksum: maisa.digest("hex"),
+      nepriklausomas: true,
+    });
   }
 
   async function del(raktas) {

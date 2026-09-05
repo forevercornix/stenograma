@@ -382,6 +382,15 @@ function paleistiKontrakta(vardas, paruosti) {
     /* ═══ 7. `readStream` ═══ */
 
     await t.test("readStream duoda TĄ PAČIĄ reikšmę kaip `read`", async () => {
+      /**
+       * ⚠️ `readStream()` YRA ŽALIŲ BAITŲ KELIAS, IR TAI UŽRAŠOMA.
+       *
+       * `read()` praeina pilną dekodavimą — griežtą UTF-8, `JSON.parse` ir reikšmių
+       * sritį. `readStream()` to NEDARO ir negali: patikra reikalautų sukaupti visą
+       * objektą, o srauto prasmė yra priešinga. Kvietėjas (download, backup,
+       * artefakto kopijavimas) gauna tai, kas guli saugykloje, ir NETURI laikyti to
+       * patikrinta reikšme — vientisumui yra `verify()`.
+       */
       const k = await raktas();
       const reiksme = { text: "srautas", segments: Array.from({ length: 100 }, (_, i) => i) };
       const { bytes } = await saugykla.put(k, reiksme);
