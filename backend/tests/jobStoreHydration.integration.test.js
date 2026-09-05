@@ -562,7 +562,7 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     const beSaugyklos = createPostgresStore(pool);
     const id = await sukurtiExternal();
 
-    await assert.rejects(() => beSaugyklos.get(id), /artefaktų saugykla nesukonfigūruota/i);
+    await assert.rejects(() => beSaugyklos.get(id), /neregistruota/i);
   });
 
   /* ═══ BENDRI STULPELIŲ VARDAI ═══ */
