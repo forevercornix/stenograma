@@ -1306,11 +1306,37 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
     return readJob(client, current.id);
   }
 
-  /** @returns {object|null|"FORBIDDEN"} */
+  /**
+   * ⚠️ NUOSAVYBĖ SPRENDŽIAMA PRIEŠ HIDRATACIJĄ (Codex blokatorius, #291).
+   *
+   * Iki PR-3 tvarka buvo nekalta: `get()` skaitė tą pačią eilutę, tad hidratacija
+   * nieko nekainavo. Dabar `get()` gali eiti į IŠORINĘ saugyklą, ir riziką sukūrė
+   * būtent šis PR — tad ji taisoma jame.
+   *
+   * Trys atskiros pasekmės, jei sprendimas priimamas PO hidratacijos:
+   *
+   *   · AMPLIFIKACIJA — svetimas žmogus, žinantis job ID, priverčia iki
+   *     `MAX_RESULT_BYTES` saugyklos I/O užklausai, kuri turėjo baigtis `403`;
+   *   · INFORMACIJOS NUTEKĖJIMAS — vietoj vienodo atsakymo jis gauna
+   *     `ARTIFACT_CORRUPT` arba „nėra", t. y. sužino apie SVETIMO job'o būseną;
+   *   · SAVININKAS NEBEPASIEKIA REMONTO — skaitymas krenta ties hidratacija
+   *     būtent tada, kai objektas sugadintas, o tai tas atvejis, kuriam kelias ir
+   *     reikalingas.
+   *
+   * ⚠️ DVI UŽKLAUSOS, IR TAI SĄMONINGA KAINA. Metaduomenų užklausa priima
+   * sprendimą, o turinys traukiamas TIK jį praėjus. Vienos užklausos variantas
+   * (paimti viską ir hidratuoti po patikros) saugyklos I/O irgi išvengtų, bet
+   * svetimai užklausai vis tiek deserializuotų inline `payload` — o amplifikacija
+   * yra amplifikacija, nesvarbu, kuri pusė ją apmoka.
+   *
+   * @returns {object|null|"FORBIDDEN"}
+   */
   async function getOwned(id, scope) {
-    const job = await get(id);
-    if (!job) return null;
-    return matchesOwner(job, scope) ? job : "FORBIDDEN";
+    const metaduomenys = await get(id, { hydrate: false });
+    if (!metaduomenys) return null;
+    if (!matchesOwner(metaduomenys, scope)) return "FORBIDDEN";
+
+    return get(id);
   }
 
   /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */

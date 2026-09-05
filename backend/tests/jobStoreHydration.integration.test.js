@@ -249,6 +249,93 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     assert.ok(raktai.includes("audio/originalus.wav"), "audio raktas privalo likti matomas valymui");
   });
 
+  /* ═══ NUOSAVYBĖ SPRENDŽIAMA PRIEŠ HIDRATACIJĄ ═══ */
+
+  const SAVININKAS = { ownerKind: "user", ownerId: "11111111-1111-1111-1111-111111111111" };
+  const SVETIMAS = { ownerKind: "user", ownerId: "22222222-2222-2222-2222-222222222222" };
+
+  async function sukurtiSavininkoJoba({ raktas = null } = {}) {
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO jobs (id, type, status, owner_kind, owner_id, created_at, updated_at)
+       VALUES ($1, 'transcription', 'completed', $2, $3, now(), now())`,
+      [id, SAVININKAS.ownerKind, SAVININKAS.ownerId]
+    );
+    await pool.query(
+      `INSERT INTO job_results (job_id, storage_type, storage_key, bytes, checksum, created_at)
+       VALUES ($1, 'fs', $2, $3, $4, now())`,
+      [id, raktas || `results/${id}/a.json`, saugykla.dydis, "a".repeat(64)]
+    );
+    return id;
+  }
+
+  await t.test("SVETIMAS scope: `FORBIDDEN` ir saugykla NEPALIEČIAMA", async () => {
+    /**
+     * ⚠️ AMPLIFIKACIJA: svetimas žmogus, žinantis job ID, priverstų iki
+     * `MAX_RESULT_BYTES` saugyklos I/O užklausai, kuri turėjo baigtis `403`.
+     * Tikrinama SKAITIKLIU, ne stebėjimu.
+     */
+    const id = await sukurtiSavininkoJoba();
+    saugykla.perskaityta = 0;
+
+    assert.equal(await store.getOwned(id, SVETIMAS), "FORBIDDEN");
+    assert.equal(saugykla.perskaityta, 0, "atmestai užklausai saugykla neturi būti net paliesta");
+  });
+
+  await t.test("SVETIMAS scope + SUGADINTAS artefaktas: vis tiek `FORBIDDEN`", async () => {
+    /**
+     * ⚠️ INFORMACIJOS NUTEKĖJIMAS: jei hidratacija vyktų pirma, svetimas gautų
+     * `ARTIFACT_CORRUPT` vietoj `FORBIDDEN` — t. y. sužinotų apie SVETIMO job'o
+     * būseną. Atsakymas privalo būti tas pats, koks jis būtų su tvarkingu objektu.
+     */
+    const id = await sukurtiSavininkoJoba({ raktas: "results/nera/objekto.json" });
+    const sugadinta = { ...saugykla };
+    sugadinta.readStream = async () => {
+      throw Object.assign(new Error("nėra"), { code: "ARTIFACT_NOT_FOUND" });
+    };
+
+    const suSugadinta = createPostgresStore(pool, { artifactStore: sugadinta });
+    assert.equal(await suSugadinta.getOwned(id, SVETIMAS), "FORBIDDEN");
+  });
+
+  await t.test("SAVININKAS + sugadintas artefaktas: ištrynimo kelias PASIEKIAMAS", async () => {
+    /**
+     * ⚠️ BLOGIAUSIA PASEKMĖ BUVO ŠI: `DELETE` privalo veikti BŪTENT tada, kai
+     * objektas blogas. Ištrynimas eina per `removeOwned()`, kuris sprendžia SQL
+     * pusėje ir turinio neliečia — testas fiksuoja, kad ta savybė išlieka.
+     */
+    const id = await sukurtiSavininkoJoba();
+    const sugadinta = { ...saugykla };
+    sugadinta.readStream = async () => {
+      throw Object.assign(new Error("sugadinta"), { code: "ARTIFACT_CORRUPT" });
+    };
+    const suSugadinta = createPostgresStore(pool, { artifactStore: sugadinta });
+
+    /** Skaitymas sugadinto artefakto TIKRAI nepaslepia — jis krenta atvirai. */
+    await assert.rejects(
+      () => suSugadinta.getOwned(id, SAVININKAS),
+      (klaida) => klaida.code === "ARTIFACT_CORRUPT"
+    );
+
+    /** Bet nuosavybės sprendimas jau priimtas, ir ištrynimas pasiekiamas. */
+    assert.equal(await suSugadinta.removeOwned(id, SAVININKAS), true);
+    assert.equal(await store.get(id, { hydrate: false }), null, "eilutės nebeliko");
+  });
+
+  await t.test("KONTROLĖ: savininkas su tvarkingu artefaktu gauna rezultatą", async () => {
+    /**
+     * Be jos ankstesni tvirtinimai būtų tenkinami ir `getOwned()`, kuris VISIEMS
+     * grąžina `FORBIDDEN`.
+     */
+    const id = await sukurtiSavininkoJoba();
+    saugykla.perskaityta = 0;
+
+    const job = await store.getOwned(id, SAVININKAS);
+
+    assert.deepEqual(job.result, turinys);
+    assert.equal(saugykla.perskaityta, 1, "leistai užklausai turinys skaitomas lygiai kartą");
+  });
+
   await t.test("external eilutė BE sukonfigūruotos saugyklos krenta UŽDARAI", async () => {
     /**
      * ⚠️ Grąžinti `null` čia būtų „`completed` be rezultato" — būsena, po kurios
