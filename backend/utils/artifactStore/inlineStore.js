@@ -42,12 +42,27 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
   }
 
   /**
+   * ⚠️ NE-UUID ADRESAS YRA „NĖRA", NE KLAIDA (Codex, #290).
+   *
+   * `job_id` yra `uuid`, tad užklausa su `"nesantis"` mestų žalią `22P02`.
+   * Bet tas pats raktas `fs` ir S3 atveju yra GALIOJANTIS - tiesiog be objekto.
+   * Grąžindamas rakto ar DB klaidą, inline išskirtų save tam pačiam įėjimui, ir
+   * bendras kontrakto rinkinys nustotų būti vykdomas vienodai.
+   *
+   * ⚠️ FORMA TIKRINAMA PRIEŠ UŽKLAUSĄ, ne per implicit cast: taip klaida
+   * neatsiranda išvis, o ne gaudoma po fakto pagal SQLSTATE.
+   */
+  const UUID_FORMA = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  /**
    * ⚠️ TA PATI RAKTO VALIDACIJA KAIP VISUR. Inline raktas yra `job_id`, tad
    * kelio pavojų čia nėra - bet riba viena visiems, kitaip du backend'ai
    * priimtų skirtingas aibes (žr. `validation.js`).
    */
   async function eilute(raktas) {
     patikrintiRakta(raktas);
+
+    if (!UUID_FORMA.test(raktas)) return null;
 
     const { rows } = await vykdytojas.query(
       "SELECT payload FROM job_results WHERE job_id = $1 AND storage_type = 'inline'",
@@ -65,6 +80,20 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
 
   async function put(raktas, reiksme) {
     patikrintiRakta(raktas);
+
+    /**
+     * ⚠️ RAŠANT FORMA PRIVALO BŪTI TEISINGA. Skaitymo pusėje ne-UUID reiškia
+     * „nėra", bet rašymas į tokį adresą yra kvietėjo klaida: inline adresas YRA
+     * job'o tapatybė, ir tylus praleidimas paslėptų, kad rezultatas niekur
+     * nenukeliavo.
+     */
+    if (!UUID_FORMA.test(raktas)) {
+      throw new ArtifactStoreError(
+        `InlineArtifactStore: adresas "${raktas}" nėra job'o tapatybė (UUID).`,
+        KLAIDA.RAKTAS
+      );
+    }
+
     const paruosta = paruostiReiksme(reiksme);
 
     /**
@@ -137,6 +166,8 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
 
   async function del(raktas) {
     patikrintiRakta(raktas);
+
+    if (!UUID_FORMA.test(raktas)) return false;
 
     const { rowCount } = await vykdytojas.query(
       "DELETE FROM job_results WHERE job_id = $1 AND storage_type = 'inline'",

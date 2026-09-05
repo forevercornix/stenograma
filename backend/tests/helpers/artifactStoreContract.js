@@ -355,6 +355,36 @@ function paleistiKontrakta(vardas, paruosti) {
       );
     });
 
+    await t.test("adresas, kurio saugykla negalėtų pagaminti, elgiasi kaip NESANTIS", async () => {
+      /**
+       * ⚠️ VIENODAS ĮĖJIMAS PRIVALO DUOTI VIENODĄ ATSAKYMĄ (Codex, #290).
+       *
+       * `nesantis` yra galiojantis raktas pagal ribos allowlist'ą, bet jo forma
+       * netinka kiekvienam backend'ui: vienur tai paprasčiausiai nesantis
+       * objektas, kitur — adresas, kurio saugykla pati niekada nesugalvotų.
+       *
+       * Kontraktas reikalauja, kad rezultatas būtų TAS PATS: „nėra", ne rakto
+       * klaida ir ne saugyklos vidinė klaida. Priešingu atveju tas pats įėjimas
+       * vienoje saugykloje būtų `ARTIFACT_NOT_FOUND`, kitoje — žalia DB klaida,
+       * ir bendras rinkinys nustotų būti bendras.
+       */
+      const svetimas = "nesantis";
+
+      assert.equal(await saugykla.head(svetimas), null, "`head` -> `null`");
+      assert.equal(await saugykla.delete(svetimas), false, "`delete` -> `false`");
+      assert.equal(
+        (await saugykla.verify(svetimas, { bytes: 1, checksum: "a".repeat(64) })).ok,
+        false,
+        "`verify` -> `ok: false`"
+      );
+
+      await assert.rejects(
+        () => saugykla.read(svetimas),
+        (klaida) => klaida.code === "ARTIFACT_NOT_FOUND",
+        "`read` -> `ARTIFACT_NOT_FOUND`, ne saugyklos vidinė klaida"
+      );
+    });
+
     /* ═══ 10. EXTERNAL PAKOPA ═══ */
 
     await t.test("EXTERNAL: `reference` yra adresas, ne `null`", { skip: !external }, async () => {
