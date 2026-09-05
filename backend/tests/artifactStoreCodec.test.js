@@ -226,3 +226,54 @@ test("KONTROLĖ: teisėtas inline `payload` perskaitomas nepakitęs", async () =
     assert.deepEqual(await saugykla.read(JOB_ID), payload);
   }
 });
+
+test("inline `verify()` sugadintą turinį klasifikuoja TAIP PAT kaip `read()`", async () => {
+  /**
+   * ⚠️ TAS PATS FAKTAS NEGALI TURĖTI DVIEJŲ SEMANTIKŲ (Codex, #290).
+   *
+   * `paruostiReiksme()` yra RAŠYMO pusės riba: netinkamai reikšmei ji meta
+   * `ARTIFACT_VALUE_UNSUPPORTED` — „šio rezultato išsaugoti negalima". Bet
+   * `verify()` skaito tai, kas JAU guli lentelėje (senos migracijos, rankinio
+   * taisymo ar sugadinimo palikimas), ir `read()` tą pačią eilutę jau vadina
+   * `ARTIFACT_CORRUPT`.
+   *
+   * Dviguba semantika siųstų remontą klaidinga kryptimi: operatorius tikrintų
+   * tiekėjo rezultatą, nors taisyti reikia eilutę.
+   */
+  const uzSrities = [
+    { vardas: "viršutinio lygio null", payload: null },
+    { vardas: "NUL tekste", payload: { x: `a${NUL}b` } },
+  ];
+
+  for (const scenarijus of uzSrities) {
+    const saugykla = createInlineArtifactStore({ vykdytojas: vykdytojasSu(scenarijus.payload) });
+
+    const skaitymas = await saugykla.read(JOB_ID).then(() => null, (e) => e.code);
+    const patikra = await saugykla
+      .verify(JOB_ID, { bytes: 1, checksum: "a".repeat(64) })
+      .then(() => null, (e) => e.code);
+
+    assert.equal(skaitymas, "ARTIFACT_CORRUPT", `${scenarijus.vardas}: read`);
+    assert.equal(patikra, "ARTIFACT_CORRUPT", `${scenarijus.vardas}: verify`);
+    assert.notEqual(
+      patikra,
+      "ARTIFACT_VALUE_UNSUPPORTED",
+      "persistuotas sugadinimas nėra nepavykęs NAUJO rezultato išsaugojimas"
+    );
+  }
+});
+
+test("KONTROLĖ: teisėtas inline `payload` verifikuojamas įprastai", async () => {
+  /**
+   * Be jos ankstesnis testas būtų tenkinamas `verify()`, kuris VISKĄ vadina
+   * sugadinimu — tada „nuosekli klasifikacija" reikštų neveikiančią patikrą.
+   */
+  const saugykla = createInlineArtifactStore({ vykdytojas: vykdytojasSu({ text: "geras" }) });
+  const verdiktas = await saugykla.verify(JOB_ID, { bytes: 1, checksum: "a".repeat(64) });
+
+  assert.equal(verdiktas.exists, true);
+  assert.equal(verdiktas.ok, false, "lūkestis nesutampa — bet tai palyginimas, ne sugadinimas");
+  assert.equal(verdiktas.nepriklausomas, false);
+  assert.ok(verdiktas.bytes > 0);
+  assert.match(verdiktas.checksum, /^[0-9a-f]{64}$/);
+});

@@ -467,3 +467,94 @@ test("KONTROLĖ: nepakitęs objektas ir toliau patvirtinamas", async (t) => {
   assert.equal(verdiktas.ok, true, "srautinė suma privalo sutapti su kvitu");
   assert.equal(verdiktas.bytes, kvitas.bytes);
 });
+
+/* ═══ STARTO ZONDAS: AR ŠAKNIS TINKA RAŠYMUI ═══ */
+
+test("starto patikra ZONDUOJA rašymą ir po savęs nieko nepalieka", async (t) => {
+  /**
+   * ⚠️ KATALOGAS GALI BŪTI PASIEKIAMAS IR VIS TIEK NETINKAMAS.
+   *
+   * `stat` ir `realpath` pavyksta ir tada, kai šaknis prijungta tik skaitymui arba
+   * priklauso kitai paskyrai (`0555`). Startas skelbdavo backend'ą paruoštą, o
+   * pirmas `put()` krisdavo — JAU PO to, kai tiekėjas atliko brangų transkribavimą.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  const verdiktas = await saugykla.patikrintiSaugykla();
+
+  assert.equal(verdiktas.backend, "fs");
+  assert.deepEqual(
+    await fsp.readdir(saknis),
+    [],
+    "sėkmingas zondas privalo po savęs nepalikti NIEKO"
+  );
+});
+
+test("nerašoma šaknis SUSTABDO startą, o ne pirmą `put()`", async (t) => {
+  /**
+   * ⚠️ GEDIMAS ĮTERPIAMAS, NE MODELIUOJAMAS `chmod`.
+   *
+   * CI gali vykdyti testus kaip `root`, o `root` `0555` katalogą rašo be kliūčių —
+   * tada testas žaliuotų nepatikrinęs nieko (§9.2). Įterpimas per `fsp.open`
+   * duoda tą patį `EACCES`, kurį duotų tikra tik skaitymui prijungta saugykla,
+   * ir nepriklauso nuo to, kas paleido procesą.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+
+  const tikrasOpen = fsp.open;
+  fsp.open = async (kelias, veliavos, ...kita) => {
+    if (veliavos === "wx") {
+      const klaida = new Error("suklastota tik skaitymui prijungta saugykla");
+      klaida.code = "EACCES";
+      throw klaida;
+    }
+    return tikrasOpen(kelias, veliavos, ...kita);
+  };
+
+  try {
+    await assert.rejects(
+      () => saugykla.patikrintiSaugykla(),
+      (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID",
+      "netinkama rašymui šaknis privalo sustabdyti STARTĄ"
+    );
+
+    /** ⚠️ Ir operacijos lieka uždarytos — startas nėra atskiras nuo naudojimo. */
+    await assert.rejects(
+      () => saugykla.put("results/a.json", { a: 1 }),
+      (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID"
+    );
+  } finally {
+    fsp.open = tikrasOpen;
+  }
+
+  assert.deepEqual(
+    await fsp.readdir(saknis),
+    [],
+    "nepavykęs zondas irgi nepalieka pėdsakų"
+  );
+});
+
+test("zondas NEGALI užkliudyti artefakto: jo vardas raktu neišreiškiamas", () => {
+  /**
+   * ⚠️ SAUGUMAS ČIA REMIASI RIBA, NE TIKIMYBE.
+   *
+   * Zondo vardas prasideda tašku, o raktų allowlist'as (`validation.js`) taško
+   * segmento pradžioje NELEIDŽIA. Vadinasi jokio teisėto artefakto tokiu vardu
+   * nėra ir negali būti — susidūrimas neįmanomas, o ne mažai tikėtinas. (`wx`
+   * vėliava yra antra gynybos linija.)
+   */
+  const { patikrintiRakta } = require("../utils/artifactStore/validation");
+
+  for (const vardas of [".zondas.0123456789abcdef.tmp", ".zondas", "results/.zondas.tmp"]) {
+    assert.throws(
+      () => patikrintiRakta(vardas),
+      (klaida) => klaida.code === "ARTIFACT_KEY_INVALID",
+      `${vardas}: tašku prasidedantis segmentas negali būti raktas`
+    );
+  }
+});

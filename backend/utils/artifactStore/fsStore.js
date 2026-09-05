@@ -161,7 +161,10 @@ function createFsArtifactStore({ root } = {}) {
         }
       }
 
-      return fsp.realpath(saknis);
+      const tikraSaknis = await fsp.realpath(saknis);
+      await zonduotiRasyma(tikraSaknis);
+
+      return tikraSaknis;
     })().catch((klaida) => {
       saknisParuosta = null;
       throw klaida;
@@ -296,6 +299,59 @@ function createFsArtifactStore({ root } = {}) {
     /** ⚠️ `0700`: artefaktų katalogai neturi būti apeinami kitų vietinių paskyrų. */
     await fsp.mkdir(katalogas, { recursive: true, mode: 0o700 });
     return nauji;
+  }
+
+  /**
+   * RAŠYMO ZONDAS — STARTO PATIKRA TIKRINA NAUDOJAMUMĄ, NE TIK FORMĄ
+   * (Codex, #290).
+   *
+   * ⚠️ KATALOGAS GALI BŪTI PASIEKIAMAS IR VIS TIEK NETINKAMAS.
+   *
+   * `stat` ir `realpath` pavyksta ir tada, kai šaknis prijungta tik skaitymui arba
+   * priklauso kitai paskyrai (`0555`). Startas tokiu atveju skelbdavo backend'ą
+   * paruoštą, o pirmas `put()` krisdavo — JAU PO to, kai tiekėjas atliko brangų
+   * transkribavimą. Būtent tai PR-2 fail-fast kriterijus ir draudžia.
+   *
+   * ⚠️ ZONDAS NEGALI PALIESTI VARTOTOJO ARTEFAKTŲ. Vardas pradedamas tašku, o
+   * raktų allowlist'as (`validation.js`) taško pradžioje NELEIDŽIA — vadinasi
+   * susidūrimas su teisėtu artefaktu yra neįmanomas, o ne mažai tikėtinas.
+   * `wx` vėliava papildomai atmeta rašymą į jau esantį failą.
+   *
+   * ⚠️ ZONDAS PO SAVĘS TVARKOSI, o nepavykęs valymas sustabdo startą: paliktas
+   * failas reikštų, kad saugykla veikia ne taip, kaip manome, ir tylėti apie tai
+   * būtų blogiau nei nepakilti.
+   */
+  async function zonduotiRasyma(tikraSaknis) {
+    const zondas = path.join(tikraSaknis, `.zondas.${crypto.randomBytes(8).toString("hex")}.tmp`);
+
+    let deskriptorius = null;
+    try {
+      deskriptorius = await fsp.open(zondas, "wx", 0o600);
+      await deskriptorius.writeFile(Buffer.from("z", "utf8"));
+    } catch (klaida) {
+      /** Deskriptorių uždaro `finally`; čia lieka tik pėdsako pašalinimas. */
+      await fsp.rm(zondas, { force: true }).catch(() => {});
+
+      throw new ArtifactStoreError(
+        `FsArtifactStore: į \`root\` ("${saknis}") rašyti nepavyko (${klaida.code || klaida.name}). ` +
+          "Saugykla nepasiekiama rašymui, tad backend'as negali būti laikomas paruoštu.",
+        "ARTIFACT_CONFIG_INVALID",
+        { cause: klaida }
+      );
+    } finally {
+      if (deskriptorius) await deskriptorius.close().catch(() => {});
+    }
+
+    try {
+      await fsp.rm(zondas, { force: true });
+    } catch (klaida) {
+      throw new ArtifactStoreError(
+        `FsArtifactStore: starto zondo ("${path.basename(zondas)}") pašalinti nepavyko ` +
+          `(${klaida.code || klaida.name}). Saugykloje liktų nereikalingas failas.`,
+        "ARTIFACT_CONFIG_INVALID",
+        { cause: klaida }
+      );
+    }
   }
 
   /** `fsync` katalogui — įpareigoja jo ĮRAŠUS, ne jų turinį. */

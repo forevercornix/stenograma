@@ -327,3 +327,87 @@ test("KONTROLĖ: async-iterable kūnas priimamas abiem formomis", async () => {
     assert.deepEqual(await saugykla.read("results/a.json"), { text: "ok" }, vardas);
   }
 });
+
+/* ═══ VERSIJAVIMAS YRA KINTAMA BŪSENA ═══ */
+
+test("`delete()` tikrina versijavimą IŠ NAUJO, o ne iš atminties", async () => {
+  /**
+   * ⚠️ ĮSIMINTAS REZULTATAS GALIOJA VISĄ PROCESO GYVENIMĄ (Codex P1, #290).
+   *
+   * Kibiras, startavęs kaip neversijuotas, gali būti įjungtas bet kurią minutę.
+   * Tada `delete()` toliau patvirtindavo ištrynimą, nors S3 palieka delete
+   * marker'į, o ankstesnė TRANSKRIPCIJOS versija lieka pasiekiama — patvirtintas
+   * ištrynimas su išlikusiais duomenimis.
+   *
+   * ⚠️ TIKRINAMA IR TAI, KAD `DeleteObject` NEBUVO SIŲSTAS: fail-closed čia reiškia,
+   * kad versijuotame kibire nesukuriame net delete marker'io.
+   */
+  let versijavimas = {};
+  const klientas = {
+    kvietimai: [],
+    async send(komanda) {
+      const vardas = komanda.constructor.name;
+      this.kvietimai.push(vardas);
+      if (vardas === "GetBucketVersioningCommand") return versijavimas;
+      if (vardas === "HeadObjectCommand") return { ContentLength: 10 };
+      return {};
+    },
+  };
+
+  const saugykla = createS3ArtifactStore({ ...KONFIGURACIJA, klientas });
+
+  /** 1-2. Startas neversijuotame kibire — patikra pavyksta. */
+  assert.deepEqual(await saugykla.patikrintiSaugykla(), { versijavimas: "Disabled" });
+
+  /** KONTROLĖ: įprastas ištrynimas neversijuotame kibire veikia. */
+  assert.equal(await saugykla.delete("results/a.json"), true, "neversijuotame kibire ištrynimas leidžiamas");
+  assert.ok(klientas.kvietimai.includes("DeleteObjectCommand"), "ir realiai pasiekia saugyklą");
+
+  /** 3. Versijavimas įjungiamas JAU PO starto. */
+  versijavimas = { Status: "Enabled" };
+  const iki = klientas.kvietimai.filter((k) => k === "DeleteObjectCommand").length;
+
+  /** 4-5. `delete()` persitikrina ir atsisako. */
+  await assert.rejects(
+    () => saugykla.delete("results/a.json"),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID",
+    "po versijavimo įjungimo ištrynimas privalo kristi, o ne būti patvirtintas"
+  );
+
+  assert.equal(
+    klientas.kvietimai.filter((k) => k === "DeleteObjectCommand").length,
+    iki,
+    "delete marker'is neturi būti sukurtas — patikra vyksta PRIEŠ `DeleteObject`"
+  );
+
+  /** Ir `Suspended` yra tas pats atvejis: ankstesnės versijos lieka. */
+  versijavimas = { Status: "Suspended" };
+  await assert.rejects(
+    () => saugykla.delete("results/a.json"),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID"
+  );
+
+  /** Ir neaiškus atsakymas — fail-closed, ne „tikriausiai gerai". */
+  versijavimas = { Status: null };
+  await assert.rejects(
+    () => saugykla.delete("results/a.json"),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID"
+  );
+
+  /**
+   * ⚠️ SUŽINOJUS APIE NESAUGIĄ BŪSENĄ, ĮSIMINTA „SAUGU" NEBEGALIOJA IR KITUR.
+   *
+   * Kitaip skaitymas bei rašymas toliau remtųsi senu verdiktu, nors ką tik
+   * išsiaiškinome priešingai.
+   */
+  versijavimas = { Status: "Enabled" };
+  await assert.rejects(
+    () => saugykla.delete("results/a.json"),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID"
+  );
+  await assert.rejects(
+    () => saugykla.head("results/a.json"),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID",
+    "po nesaugios būsenos aptikimo įsimintas verdiktas nebegalioja"
+  );
+});

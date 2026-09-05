@@ -174,8 +174,22 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
     const rasta = await eilute(raktas);
     if (!rasta) return nesancioVerdiktas(false);
 
-    const { bytes } = matmenys(rasta.payload);
-    const { checksum } = paruostiReiksme(rasta.payload);
+    /**
+     * ⚠️ SUGADINTAS PERSISTUOTAS TURINYS YRA SUGADINIMAS IR ČIA (Codex, #290).
+     *
+     * `paruostiReiksme()` yra RAŠYMO pusės riba: netinkamai reikšmei ji meta
+     * `ARTIFACT_VALUE_UNSUPPORTED`, t. y. „šio rezultato išsaugoti negalima". Bet
+     * `verify()` skaito tai, kas JAU guli lentelėje, ir ta pati eilutė per `read()`
+     * jau klasifikuojama kaip `ARTIFACT_CORRUPT`.
+     *
+     * Dviguba semantika tam pačiam faktui siųstų remontą klaidinga kryptimi:
+     * operatorius tikrintų tiekėjo rezultatą, nors taisyti reikia eilutę. Todėl
+     * pirmiausia taikoma TA PATI persistuoto turinio patikra kaip `read()`, ir tik
+     * po jos išvedami matmenys.
+     */
+    patikrintiPersistuotaReiksme(rasta.payload, raktas);
+
+    const { bytes, checksum } = paruostiReiksme(rasta.payload);
 
     /**
      * ⚠️ `nepriklausomas: false` - LYGINAMA REIKŠMĖ SU SAVIMI.

@@ -202,6 +202,45 @@ function createS3ArtifactStore({
     return politikaPatikrinta;
   }
 
+  /**
+   * ⚠️ IŠTRYNIMAS TIKRINA POLITIKĄ IŠ NAUJO, NE IŠ ATMINTIES (Codex P1, #290).
+   *
+   * Versijavimas yra KINTAMA tiekėjo būsena: kibiras, startavęs kaip neversijuotas,
+   * gali būti įjungtas bet kurią minutę. Įsimintas rezultatas galioja tol, kol
+   * gyvuoja procesas, tad `delete()` toliau patvirtindavo ištrynimą, nors S3 jau
+   * palieka delete marker'į, o ankstesnė TRANSKRIPCIJOS versija lieka pasiekiama.
+   *
+   * ⚠️ TIKRINAMA PRIEŠ `DeleteObject`, NE PO JO. Fail-closed čia reiškia, kad
+   * versijuotame kibire mes net nesukuriame delete marker'io: geriau nepavykęs
+   * ištrynimas, kurį erasure kelias pakartos, nei patvirtintas ištrynimas su
+   * išlikusiais duomenimis (7.5a/7.6c grandinė).
+   *
+   * ⚠️ KAINA: viena papildoma `GetBucketVersioning` užklausa vienam ištrynimui.
+   * Skaitymo ir rašymo keliai lieka prie įsiminto rezultato — ten klaidinga
+   * prielaida nekainuoja negrįžtamai. Kaina mokama TIK ten, kur garantija yra
+   * autoritetinga.
+   */
+  async function uztikrintiPolitikaIsNaujo() {
+    let verdiktas;
+    try {
+      verdiktas = await patikrintiVersijavima(klientas, bucket);
+    } catch (klaida) {
+      /**
+       * ⚠️ SUŽINOJUS APIE NESAUGIĄ BŪSENĄ, ĮSIMINTA „SAUGU" NEBEGALIOJA.
+       *
+       * Be šito likusios operacijos toliau remtųsi senu verdiktu, nors ką tik
+       * išsiaiškinome priešingai. Išvalius, kitas kvietimas patikrins iš naujo ir
+       * gaus tą patį atsakymą — fail-closed visame paviršiuje, ne tik ištrynime.
+       */
+      politikaPatikrinta = null;
+      throw klaida;
+    }
+
+    /** Šviežias rezultatas pakeičia įsimintą — kitaip būtų dvi tiesos. */
+    politikaPatikrinta = Promise.resolve(verdiktas);
+    return verdiktas;
+  }
+
   async function put(raktas, reiksme) {
     patikrintiRakta(raktas);
     await uztikrintiPolitika();
@@ -379,7 +418,13 @@ function createS3ArtifactStore({
 
   async function del(raktas) {
     patikrintiRakta(raktas);
-    await uztikrintiPolitika();
+
+    /**
+     * ⚠️ ŠVIEŽIA PATIKRA, NE ĮSIMINTA: žr. `uztikrintiPolitikaIsNaujo()`.
+     * Kibiro versijavimas gali būti įjungtas jau po starto, o ištrynimas yra
+     * vienintelis kelias, kuriame klaidinga prielaida negrįžtama.
+     */
+    await uztikrintiPolitikaIsNaujo();
 
     /**
      * ⚠️ S3 `DeleteObject` NESANČIAM RAKTUI GRĄŽINA SĖKMĘ, tad „ar buvo" reikia
