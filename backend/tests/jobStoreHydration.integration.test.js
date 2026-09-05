@@ -385,7 +385,51 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     assert.equal(saugykla.perskaityta, 1, "leistai užklausai turinys skaitomas lygiai kartą");
   });
 
-  await t.test("eilutės backend'as, nesutampantis su saugyklos, KRENTA", async () => {
+  await t.test("saugykla parenkama pagal EILUTĘ: registruoti du tipai, naudojamas teisingas", async () => {
+    /**
+     * ⚠️ AUTORITETAS YRA PERSISTINTAS `storage_type`, NE RUNTIME KONFIGŪRACIJA.
+     *
+     * Diegimas, kuriame dalis rezultatų jau `s3`, o nauji rašomi į `fs`, yra NORMALI
+     * būsena po backend'o pakeitimo. Registruojami abu, ir tikrinama, kad eilutė
+     * pasiima SAVO saugyklą — kitaip „vienas globalus backend'as" būtų abstrakcija,
+     * kurią PR-6/PR-7 turėtų ardyti.
+     */
+    const fsTurinys = { text: "fs turinys" };
+    const s3Turinys = { text: "s3 turinys" };
+
+    const fsSaugykla = { ...skaitiklineSaugykla(fsTurinys), backend: "fs" };
+    const s3Saugykla = { ...skaitiklineSaugykla(s3Turinys), backend: "s3" };
+
+    const suAbiem = createPostgresStore(pool, {
+      artifactStores: { fs: fsSaugykla, s3: s3Saugykla },
+    });
+
+    const idFs = crypto.randomUUID();
+    const idS3 = crypto.randomUUID();
+
+    for (const [id, tipas, dydis] of [
+      [idFs, "fs", fsSaugykla.dydis],
+      [idS3, "s3", s3Saugykla.dydis],
+    ]) {
+      await pool.query(
+        `INSERT INTO jobs (id, type, status, created_at, updated_at)
+         VALUES ($1, 'transcription', 'completed', now(), now())`,
+        [id]
+      );
+      await pool.query(
+        `INSERT INTO job_results (job_id, storage_type, storage_key, bytes, checksum, created_at)
+         VALUES ($1, $2, $3, $4, $5, now())`,
+        [id, tipas, `results/${id}/a.json`, dydis, "a".repeat(64)]
+      );
+    }
+
+    assert.deepEqual((await suAbiem.get(idFs)).result, fsTurinys);
+    assert.deepEqual((await suAbiem.get(idS3)).result, s3Turinys);
+    assert.equal(fsSaugykla.perskaityta, 1, "`fs` eilutė skaityta TIK per `fs` saugyklą");
+    assert.equal(s3Saugykla.perskaityta, 1, "`s3` eilutė skaityta TIK per `s3` saugyklą");
+  });
+
+  await t.test("neregistruotas `storage_type` KRENTA, o ne skaitomas iš to, kas po ranka", async () => {
     /**
      * ⚠️ Pilnas dispatch pagal `storage_type` — PR-4/PR-6 tema. Bet `s3` eilutė,
      * skaitoma per `fs` saugyklą tuo pačiu raktu ir su sutampančiu dydžiu, hidratuotų
@@ -403,14 +447,12 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
       [id, `results/${id}/a.json`, saugykla.dydis, "a".repeat(64)]
     );
 
-    const fsSaugykla = { ...saugykla, backend: "fs" };
-    const suFs = createPostgresStore(pool, { artifactStore: fsSaugykla });
+    /** Registruota TIK `fs`, o eilutė yra `s3`. */
+    const suFs = createPostgresStore(pool, { artifactStore: { ...saugykla, backend: "fs" } });
+    await assert.rejects(() => suFs.get(id), /neregistruota/i);
 
-    await assert.rejects(() => suFs.get(id), /skaityti iš kitos saugyklos neleidžiama/i);
-
-    /** KONTROLĖ: sutampantis backend'as hidratuoja įprastai. */
-    const s3Saugykla = { ...saugykla, backend: "s3" };
-    const suS3 = createPostgresStore(pool, { artifactStore: s3Saugykla });
+    /** KONTROLĖ: registravus teisingą tipą, hidratacija veikia. */
+    const suS3 = createPostgresStore(pool, { artifactStore: { ...saugykla, backend: "s3" } });
     assert.deepEqual((await suS3.get(id)).result, turinys);
   });
 

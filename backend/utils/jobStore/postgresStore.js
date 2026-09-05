@@ -775,9 +775,68 @@ function assertAtstovaujamasProgresas(job) {
 
 /**
  * @param {object} pool `pg` pool
- * @param {{artifactStore?: object}} [priklausomybes] external rezultatų saugykla (#157)
+ * @param {object} [priklausomybes]
+ * @param {Record<string, object>} [priklausomybes.artifactStores] `storage_type` -> saugykla (#157)
+ * @param {object} [priklausomybes.artifactStore] sutrumpinimas vienam backend'ui; tipas
+ *   imamas iš paties store'o `backend` lauko
  */
-function createPostgresStore(pool, { artifactStore = null } = {}) {
+function createPostgresStore(pool, { artifactStores = null, artifactStore = null } = {}) {
+  /**
+   * ARTEFAKTŲ SAUGYKLOS RAKTUOJAMOS PAGAL `storage_type` (Codex, #291).
+   *
+   * ⚠️ AUTORITETAS YRA PERSISTINTAS `result_storage_type`, NE RUNTIME KONFIGŪRACIJA.
+   *
+   * Diegimas, kuriame dalis rezultatų jau `s3`, o nauji rašomi į `fs`, yra NORMALI
+   * būsena po backend'o pakeitimo — ne klaida. Injektavus vieną „globalią" saugyklą, į
+   * kodą įsirašytų abstrakcija „vienas backend'as visam diegimui", kurią PR-6/PR-7
+   * turėtų ardyti; tokia abstrakcija pigi dabar ir brangi vėliau.
+   *
+   * ⚠️ REGISTRUOTAS TEBŪNIE VIENAS — svarbi FORMA, ne kiekis. Prijungimas
+   * `initializePostgres()` viduje lieka PR-7 kartu su non-inline sargo pašalinimu:
+   * šiandien external eilutės atsirasti negali, tad prijungtas kelias būtų kelias,
+   * kurio niekas nevykdo.
+   *
+   * ⚠️ VIENO STORE'O FORMA PRIIMAMA KAIP SUTRUMPINIMAS testams ir kvietėjams, kurie
+   * turi tik vieną backend'ą: ji IŠVEDAMA į žemėlapį pagal paties store'o `backend`
+   * lauką, o ne laikoma antra konfigūracijos forma.
+   */
+  const saugyklos = new Map();
+
+  if (artifactStores) {
+    for (const [tipas, saugykla] of Object.entries(artifactStores)) {
+      if (saugykla) saugyklos.set(tipas, saugykla);
+    }
+  }
+
+  if (artifactStore) {
+    const tipas = artifactStore.backend;
+    if (!tipas) {
+      throw new TypeError(
+        "createPostgresStore: `artifactStore` privalo deklaruoti `backend` — be jo " +
+          "neįmanoma pasakyti, kurio `storage_type` eilutes jis aptarnauja (#157)."
+      );
+    }
+    saugyklos.set(tipas, artifactStore);
+  }
+
+  /**
+   * @param {string} tipas persistintas `job_results.storage_type`
+   * @returns {object} saugykla; nežinomas ar neregistruotas tipas - klaida
+   */
+  function parinktiArtefaktuSaugykla(tipas) {
+    const saugykla = saugyklos.get(tipas);
+
+    if (!saugykla) {
+      throw new Error(
+        `postgresStore: job_results.storage_type = '${tipas}', bet šiam tipui saugykla ` +
+          `neregistruota (registruoti: ${[...saugyklos.keys()].join(", ") || "nė vieno"}). ` +
+          "Rezultato perskaityti neįmanoma (#157)."
+      );
+    }
+
+    return saugykla;
+  }
+
   /** Rezultato įrašymas — `payload` yra JSONB, tad bet koks JSON tinka. */
   async function upsertResult(client, jobId, result) {
     if (result === undefined) return;
@@ -1005,30 +1064,13 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
       return eilute.result === undefined ? null : eilute.result;
     }
 
-    if (!artifactStore) {
-      throw new Error(
-        `postgresStore: job_results.storage_type = '${tipas}', bet artefaktų saugykla ` +
-          "nesukonfigūruota. Rezultato perskaityti neįmanoma (#157)."
-      );
-    }
-
     /**
-     * ⚠️ EILUTĖS BACKEND'AS PRIVALO SUTAPTI SU SAUGYKLOS (Codex, #291).
-     *
-     * Pilnas dispatch pagal `storage_type` yra PR-4/PR-6 tema, o čia skaitoma iš
-     * vienos injekuotos saugyklos. Blogiausias atvejis mažai tikėtinas, bet
-     * konkretus: `s3` eilutė, skaitoma per `fs` saugyklą, tuo pačiu raktu ir su
-     * sutampančiu dydžiu, hidratuotų SVETIMĄ turinį — ir niekas apie tai nesužinotų.
-     *
-     * Fail-closed čia kainuoja vieną `if`, tad jis ir daromas: neatitikimas yra
-     * konfigūracijos klaida, ne bandymas skaityti.
+     * ⚠️ SAUGYKLA PARENKAMA PAGAL EILUTĘ, NE PAGAL KONFIGŪRACIJĄ. Neregistruotas ar
+     * nežinomas tipas — aiški klaida, ne bandymas skaityti iš to, kas po ranka:
+     * `s3` eilutė, perskaityta per `fs` saugyklą tuo pačiu raktu ir su sutampančiu
+     * dydžiu, duotų SVETIMĄ turinį, ir niekas apie tai nesužinotų.
      */
-    if (artifactStore.backend && artifactStore.backend !== tipas) {
-      throw new Error(
-        `postgresStore: eilutės storage_type = '${tipas}', o sukonfigūruota saugykla yra ` +
-          `'${artifactStore.backend}'. Skaityti iš kitos saugyklos neleidžiama (#157).`
-      );
-    }
+    const saugykla = parinktiArtefaktuSaugykla(tipas);
 
     const { getLimits, LIMIT_KIND, assertWithinLimit } = require("../resultLimits");
     const { skaitytiRibotai } = require("../artifactStore");
@@ -1042,7 +1084,7 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
       assertWithinLimit(LIMIT_KIND.RESULT_BYTES, deklaruotiBaitai);
     }
 
-    const { reiksme } = await skaitytiRibotai(artifactStore, eilute.result_storage_key, {
+    const { reiksme } = await skaitytiRibotai(saugykla, eilute.result_storage_key, {
       maxBaitai: getLimits()[LIMIT_KIND.RESULT_BYTES],
       deklaruotiBaitai,
     });
