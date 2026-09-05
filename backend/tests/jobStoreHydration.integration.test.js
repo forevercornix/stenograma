@@ -54,12 +54,17 @@ function skaitiklineSaugykla(turinys) {
   const buferis = Buffer.from(JSON.stringify(turinys), "utf8");
 
   return {
-    backend: "skaitiklis",
+    /**
+     * ⚠️ `backend` DEKLARUOJAMAS TIKRAS: store'as tikrina, ar eilutės `storage_type`
+     * sutampa su saugyklos tipu, tad dublis privalo sakyti tiesą apie tai, kam jis
+     * apsimeta. Testinės eilutės rašomos kaip `fs`.
+     */
+    backend: "fs",
     /** ⚠️ Turinio skaitymai — VIENAS skaitiklis abiem metodams. */
     perskaityta: 0,
     galvos: 0,
     async patikrintiSaugykla() {
-      return { backend: "skaitiklis" };
+      return { backend: "fs" };
     },
     async put() {
       throw new Error("rašymas šiame teste nenaudojamas");
@@ -334,6 +339,35 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
 
     assert.deepEqual(job.result, turinys);
     assert.equal(saugykla.perskaityta, 1, "leistai užklausai turinys skaitomas lygiai kartą");
+  });
+
+  await t.test("eilutės backend'as, nesutampantis su saugyklos, KRENTA", async () => {
+    /**
+     * ⚠️ Pilnas dispatch pagal `storage_type` — PR-4/PR-6 tema. Bet `s3` eilutė,
+     * skaitoma per `fs` saugyklą tuo pačiu raktu ir su sutampančiu dydžiu, hidratuotų
+     * SVETIMĄ turinį, ir niekas apie tai nesužinotų. Fail-closed kainuoja vieną `if`.
+     */
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO jobs (id, type, status, created_at, updated_at)
+       VALUES ($1, 'transcription', 'completed', now(), now())`,
+      [id]
+    );
+    await pool.query(
+      `INSERT INTO job_results (job_id, storage_type, storage_key, bytes, checksum, created_at)
+       VALUES ($1, 's3', $2, $3, $4, now())`,
+      [id, `results/${id}/a.json`, saugykla.dydis, "a".repeat(64)]
+    );
+
+    const fsSaugykla = { ...saugykla, backend: "fs" };
+    const suFs = createPostgresStore(pool, { artifactStore: fsSaugykla });
+
+    await assert.rejects(() => suFs.get(id), /skaityti iš kitos saugyklos neleidžiama/i);
+
+    /** KONTROLĖ: sutampantis backend'as hidratuoja įprastai. */
+    const s3Saugykla = { ...saugykla, backend: "s3" };
+    const suS3 = createPostgresStore(pool, { artifactStore: s3Saugykla });
+    assert.deepEqual((await suS3.get(id)).result, turinys);
   });
 
   await t.test("external eilutė BE sukonfigūruotos saugyklos krenta UŽDARAI", async () => {

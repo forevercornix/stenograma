@@ -1012,6 +1012,24 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
       );
     }
 
+    /**
+     * ⚠️ EILUTĖS BACKEND'AS PRIVALO SUTAPTI SU SAUGYKLOS (Codex, #291).
+     *
+     * Pilnas dispatch pagal `storage_type` yra PR-4/PR-6 tema, o čia skaitoma iš
+     * vienos injekuotos saugyklos. Blogiausias atvejis mažai tikėtinas, bet
+     * konkretus: `s3` eilutė, skaitoma per `fs` saugyklą, tuo pačiu raktu ir su
+     * sutampančiu dydžiu, hidratuotų SVETIMĄ turinį — ir niekas apie tai nesužinotų.
+     *
+     * Fail-closed čia kainuoja vieną `if`, tad jis ir daromas: neatitikimas yra
+     * konfigūracijos klaida, ne bandymas skaityti.
+     */
+    if (artifactStore.backend && artifactStore.backend !== tipas) {
+      throw new Error(
+        `postgresStore: eilutės storage_type = '${tipas}', o sukonfigūruota saugykla yra ` +
+          `'${artifactStore.backend}'. Skaityti iš kitos saugyklos neleidžiama (#157).`
+      );
+    }
+
     const { getLimits, LIMIT_KIND, assertWithinLimit } = require("../resultLimits");
     const { skaitytiRibotai } = require("../artifactStore");
 
