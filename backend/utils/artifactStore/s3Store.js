@@ -6,6 +6,8 @@ const {
   patikrintiRakta,
   paruostiReiksme,
   atkurtiReiksme,
+  nesancioVerdiktas,
+  vientisumoVerdiktas,
 } = require("./validation");
 
 /**
@@ -184,9 +186,7 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
       for await (const gabalas of srautas) gabalai.push(Buffer.from(gabalas));
       buferis = Buffer.concat(gabalai);
     } catch (klaida) {
-      if (klaida.code === KLAIDA.NERASTA) {
-        return { ok: false, exists: false, bytes: null, checksum: null, nepriklausomas: true };
-      }
+      if (klaida.code === KLAIDA.NERASTA) return nesancioVerdiktas(true);
       throw klaida;
     }
 
@@ -198,13 +198,7 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
     const checksum = crypto.createHash("sha256").update(buferis).digest("hex");
     const bytes = buferis.byteLength;
 
-    return {
-      ok: laukiama.bytes === bytes && laukiama.checksum === checksum,
-      exists: true,
-      bytes,
-      checksum,
-      nepriklausomas: true,
-    };
+    return vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas: true });
   }
 
   async function del(raktas) {

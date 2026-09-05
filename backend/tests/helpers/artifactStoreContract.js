@@ -260,6 +260,59 @@ function paleistiKontrakta(vardas, paruosti) {
       );
     });
 
+    await t.test("verify: laukiami metaduomenys ateina IŠ DB, tad tipas gali būti eilutė", async () => {
+      /**
+       * ⚠️ `bigint` STULPELIS PER `node-postgres` GRĮŽTA EILUTE (Codex P1, #290).
+       *
+       * `job_results.bytes` yra `bigint`, o `pg` tokius stulpelius grąžina kaip
+       * eilutes (64 bitai netelpa į JS skaičių saugiai). Griežtas `===` tada
+       * lygina `"12"` su `12`, ir KIEKVIENAS DB paremtas artefaktas atrodytų
+       * sugadintas — 7.6 restore verifikacija taptų beverte būtent tada, kai ja
+       * remiamasi.
+       *
+       * ⚠️ ČIA TIPAS IMITUOJAMAS. Kad jis tikrai toks ateina iš `bigint`
+       * stulpelio, matuoja `artifactStoreVerifyMetadata.integration` prieš tikrą
+       * PostgreSQL; šis tvirtinimas gina kontraktą kiekvienam backend'ui.
+       */
+      const k = await raktas();
+      const { bytes, checksum } = await saugykla.put(k, { text: "iš DB" });
+
+      assert.equal(
+        (await saugykla.verify(k, { bytes: String(bytes), checksum })).ok,
+        true,
+        "`bytes` eilute privalo reikšti tą patį, ką skaičiumi"
+      );
+
+      assert.equal(
+        (await saugykla.verify(k, { bytes: String(bytes + 1), checksum })).ok,
+        false,
+        "KONTROLĖ: normalizavimas neturi paversti palyginimo visada teigiamu"
+      );
+    });
+
+    await t.test("verify: nesančio objekto forma PILNA, ne dalinė", async () => {
+      /**
+       * ⚠️ TRŪKSTAMAS LAUKAS YRA TREČIA BŪSENA (Codex, #290).
+       *
+       * PR-7 ataskaita eilutes skirsto pagal `nepriklausomas`, ne pagal `ok`.
+       * Jei nesančiam objektui tas laukas negrįžta, atsiranda `undefined` —
+       * ir „nepriklausomai nepatvirtinta" tyliai susilieja su „patvirtinta
+       * priklausomai". Todėl kontraktas reikalauja VISŲ laukų abiem atvejais.
+       */
+      const verdiktas = await saugykla.verify(await raktas(), { bytes: 1, checksum: "a".repeat(64) });
+
+      assert.deepEqual(
+        Object.keys(verdiktas).sort(),
+        ["bytes", "checksum", "exists", "nepriklausomas", "ok"],
+        "nesančio objekto verdiktas privalo turėti TĄ PATĮ laukų rinkinį"
+      );
+      assert.equal(verdiktas.exists, false);
+      assert.equal(verdiktas.ok, false);
+      assert.equal(verdiktas.bytes, null);
+      assert.equal(verdiktas.checksum, null);
+      assert.equal(typeof verdiktas.nepriklausomas, "boolean", "vėliava privalo būti ir tada, kai objekto nėra");
+    });
+
     /* ═══ 5. `delete` ═══ */
 
     /**

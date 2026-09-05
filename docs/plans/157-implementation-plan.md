@@ -53,6 +53,8 @@ body arba A1–A4 atsakymai.
 | 41 | **Taisyklė vietoj sąrašo:** „tikras escape, ne tekstas apie escape" gyvena vienoje vietoje; NUL `includes` patikra atmesdavo teisėtą tekstą, kurį PG priima | Codex (#290) |
 | 42 | **`NaN`/`±Infinity` viršutiniame lygyje atmetami** — kanonizavimas juos paverčia `null`, t. y. „rezultato nebuvimu"; viduje esantys lieka nuostolingi, bet vieningi | Codex (#290) |
 | 43 | **`jsonb` kandidatų aprėptis įvardyta kaip REPREZENTATYVI** (§12.1), ir kiekviena ribos taisyklė gauna teisėtą kaimyną — antra kryptis anksčiau nebuvo matuojama | Codex (#290) |
+| 44 | **`verify()` normalizuoja laukiamus metaduomenis** — `bigint` per `node-postgres` grįžta eilute, tad `===` skelbtų kiekvieną DB paremtą artefaktą sugadintu (P1) | Codex (#290) |
+| 45 | **`verify()` yra pilna funkcija** — nesančio objekto verdiktas neša visus laukus, `nepriklausomas` įskaitytinai; forma viena, ne trys | Codex (#290) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 

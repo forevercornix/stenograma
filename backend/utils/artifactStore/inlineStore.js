@@ -3,6 +3,8 @@ const {
   KLAIDA,
   patikrintiRakta,
   paruostiReiksme,
+  nesancioVerdiktas,
+  vientisumoVerdiktas,
 } = require("./validation");
 const { kanoninisRezultatas } = require("../jobStore/common");
 
@@ -153,7 +155,7 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
 
   async function verify(raktas, laukiama = {}) {
     const rasta = await eilute(raktas);
-    if (!rasta) return { ok: false, exists: false, bytes: null, checksum: null, nepriklausomas: false };
+    if (!rasta) return nesancioVerdiktas(false);
 
     const { bytes } = matmenys(rasta.payload);
     const { checksum } = paruostiReiksme(rasta.payload);
@@ -166,8 +168,7 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
      * pagauna, jei kvietėjo lūkestis kilo iš KITOS reikšmės), bet objekto
      * vientisumo jis NEĮRODO. Vėliava tai pasako garsiai.
      */
-    const ok = laukiama.bytes === bytes && laukiama.checksum === checksum;
-    return { ok, exists: true, bytes, checksum, nepriklausomas: false };
+    return vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas: false });
   }
 
   async function del(raktas) {

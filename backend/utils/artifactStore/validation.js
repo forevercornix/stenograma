@@ -298,6 +298,64 @@ function paruostiReiksme(reiksme) {
   };
 }
 
+/**
+ * LAUKIAMI METADUOMENYS NORMALIZUOJAMI VIENOJE VIETOJE (Codex P1, #290).
+ *
+ * ⚠️ `job_results.bytes` YRA `bigint`, IR `node-postgres` JĮ GRĄŽINA EILUTE.
+ *
+ * 64 bitų sveikasis į JS skaičių saugiai netelpa, tad `pg` tokius stulpelius
+ * paduoda kaip eilutes. Griežtas `===` tada lygina `"12"` su `12` ir grąžina
+ * `false` KIEKVIENAM DB paremtam artefaktui: 7.6 restore verifikacija skelbtų,
+ * kad viskas sugadinta, būtent tada, kai ja remiamasi. Klaidos kryptis blogiausia
+ * įmanoma - ne tyli spraga, o visuotinis klaidingas aliarmas.
+ *
+ * ⚠️ NORMALIZUOJAMA TIK LAUKIAMA PUSĖ. Faktinius `bytes`/`checksum` skaičiuoja
+ * pati saugykla, tad jų tipas yra mūsų, o ne draiverio reikalas. Konvertuoti abi
+ * puses reikštų slėpti ir tikras klaidas.
+ *
+ * ⚠️ NEATPAŽINTAS TIPAS VIRSTA `null`, NE NULIU. `null` niekada nesutaps su
+ * faktine reikšme, tad neaiškus lūkestis duoda `ok: false` - fail-closed. Nulis
+ * atsitiktinai sutaptų su tuščiu objektu.
+ */
+function normalizuotiLaukima(laukiama = {}) {
+  const salt = laukiama && typeof laukiama === "object" ? laukiama : {};
+
+  let bytes = null;
+  if (typeof salt.bytes === "number" && Number.isFinite(salt.bytes)) bytes = salt.bytes;
+  else if (typeof salt.bytes === "bigint") bytes = Number(salt.bytes);
+  else if (typeof salt.bytes === "string" && /^\d+$/.test(salt.bytes.trim())) bytes = Number(salt.bytes.trim());
+
+  /** Šešioliktainės sumos registras nėra prasmė, tad jis nesukuria nesutapimo. */
+  const checksum = typeof salt.checksum === "string" ? salt.checksum.trim().toLowerCase() : null;
+
+  return { bytes, checksum };
+}
+
+/**
+ * NESANČIO OBJEKTO VERDIKTAS - VIENA FORMA VISIEMS BACKEND'AMS (Codex, #290).
+ *
+ * ⚠️ TRŪKSTAMAS LAUKAS YRA TREČIA BŪSENA. PR-7 ataskaita eilutes skirsto pagal
+ * `nepriklausomas`; jei nesančiam objektui tas laukas negrįžta, `undefined`
+ * tyliai susilieja su „patvirtinta priklausomai". Trys implementacijos, rašančios
+ * tą pačią formą ranka, anksčiau ar vėliau išsiskiria - tad forma viena.
+ */
+function nesancioVerdiktas(nepriklausomas) {
+  return { ok: false, exists: false, bytes: null, checksum: null, nepriklausomas };
+}
+
+/** Rastam objektui: palyginimas su lūkesčiu, ta pati forma kaip `nesancioVerdiktas`. */
+function vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas }) {
+  const lauktas = normalizuotiLaukima(laukiama);
+
+  return {
+    ok: lauktas.bytes === bytes && lauktas.checksum === checksum,
+    exists: true,
+    bytes,
+    checksum,
+    nepriklausomas,
+  };
+}
+
 /** Reikšmės atkūrimas iš baitų - viena vieta, kad klaidos kodas būtų vienodas. */
 function atkurtiReiksme(buferis, raktas) {
   try {
@@ -318,4 +376,7 @@ module.exports = {
   patikrintiRakta,
   paruostiReiksme,
   atkurtiReiksme,
+  normalizuotiLaukima,
+  nesancioVerdiktas,
+  vientisumoVerdiktas,
 };

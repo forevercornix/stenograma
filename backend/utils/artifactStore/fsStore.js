@@ -8,6 +8,8 @@ const {
   patikrintiRakta,
   paruostiReiksme,
   atkurtiReiksme,
+  nesancioVerdiktas,
+  vientisumoVerdiktas,
 } = require("./validation");
 
 /**
@@ -371,18 +373,31 @@ function createFsArtifactStore({ root } = {}) {
   async function verify(raktas, laukiama = {}) {
     /** `head()` jau atmeta neregiuliarius įrašus, tad `verify` jų nepasiekia. */
     const galva = await head(raktas);
-    if (!galva) return { ok: false, exists: false, bytes: null, checksum: null, nepriklausomas: true };
+    if (!galva) return nesancioVerdiktas(true);
 
     /**
      * ⚠️ VISAS OBJEKTAS SKAITOMAS SĄMONINGAI. Filesystem checksum'o
      * metaduomenyse neturi, tad kitaip vientisumo patvirtinti neįmanoma. Būtent
      * dėl šios kainos `verify()` metadata-only keliuose DRAUDŽIAMAS.
      */
-    const buferis = await fsp.readFile(await keliasSaugus(raktas));
+    /**
+     * ⚠️ OBJEKTAS GALI DINGTI TARP `head()` IR `readFile()` (Codex, #290).
+     *
+     * Langas mažas, bet realus: erasure kelias trina lygiagrečiai. Be šito
+     * `verify()` metų žalią `ENOENT` vietoj dokumentuoto „nėra", ir kvietėjas,
+     * laukiantis verdikto, gautų klaidą — 7.6 patikroje tai reikštų nutrūkusią
+     * ataskaitą, o ne eilutę „objekto nebėra".
+     */
+    let buferis;
+    try {
+      buferis = await fsp.readFile(await keliasSaugus(raktas));
+    } catch (klaida) {
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return nesancioVerdiktas(true);
+      throw klaida;
+    }
+
     const checksum = crypto.createHash("sha256").update(buferis).digest("hex");
     const bytes = buferis.byteLength;
-
-    const ok = laukiama.bytes === bytes && laukiama.checksum === checksum;
 
     /**
      * ⚠️ `nepriklausomas: true` — LYGINAMA SU IŠORE ĮRAŠYTU METADUOMENIU.
@@ -393,7 +408,7 @@ function createFsArtifactStore({ root } = {}) {
      * ten vėliava bus `false` — ir 7.6 restore verifikacija privalo tai matyti,
      * o ne laikyti abu atvejus lygiaverčiais.
      */
-    return { ok, exists: true, bytes, checksum, nepriklausomas: true };
+    return vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas: true });
   }
 
   async function del(raktas) {
