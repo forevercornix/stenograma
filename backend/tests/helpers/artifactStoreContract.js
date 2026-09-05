@@ -7,6 +7,7 @@ const {
   ATMETAMI,
   NUOSTOLINGI,
   BLOGI_RAKTAI,
+  PRIVALOMI_METODAI,
   operacijosSuRaktu,
   tapatybe,
 } = require("./artifactStoreScenarios");
@@ -79,6 +80,14 @@ function paleistiKontrakta(vardas, paruosti) {
 
     /** EXTERNAL pakopa yra to paties fakto pasekmė, ne atskiras jungiklis. */
     const external = nuoroda === "raktas";
+
+    for (const metodas of PRIVALOMI_METODAI) {
+      assert.equal(
+        typeof saugykla[metodas],
+        "function",
+        `${vardas}: trūksta privalomo metodo \`${metodas}\``
+      );
+    }
 
     t.after(async () => {
       if (isvalyti) await isvalyti();

@@ -131,7 +131,8 @@ test("sukurtiSaugykla grąžina TĄ PATĮ paviršių visiems backend'ams", async
    * ⚠️ PAVIRŠIAUS PARITETAS TIKRINAMAS ČIA, o elgesys - kontrakto rinkinyje.
    * Be šito trūkstamas metodas paaiškėtų tik pirmo kvietimo metu produkcijoje.
    */
-  const butini = ["put", "read", "readStream", "head", "verify", "delete"];
+  const { PRIVALOMI_METODAI } = require("./helpers/artifactStoreScenarios");
+  const butini = PRIVALOMI_METODAI;
 
   /**
    * ⚠️ S3 ČIA KURIAMAS TIESIOGIAI, NE PER FACTORY.
@@ -172,4 +173,42 @@ test("sukurtiSaugykla grąžina TĄ PATĮ paviršių visiems backend'ams", async
     saugyklos.map((s) => s.backend),
     ["inline", "fs", "s3"]
   );
+});
+
+test("factory LAUKIA starto patikros VISIEMS backend'ams", async (t) => {
+  /**
+   * ⚠️ SĄLYGINIS LAUKIMAS ATKURTŲ TĄ PAČIĄ SPRAGĄ.
+   *
+   * Anksčiau laukta tik S3 šakoje, tad netinkamas `ARTIFACT_FS_ROOT` paaiškėdavo
+   * per pirmą operaciją — jau po brangaus tiekėjo darbo. Todėl `patikrintiSaugykla()`
+   * yra PRIVALOMAS visų backend'ų metodas, o factory kviečia jį be sąlygų: naujas
+   * backend'as be starto patikros nebeatsiras tyliai.
+   */
+  const fsp = require("node:fs/promises");
+  const failas = path.join(os.tmpdir(), `stenograma-parinkimas-failas-${process.pid}`);
+  await fsp.writeFile(failas, "ne katalogas", "utf8");
+  t.after(() => fsp.rm(failas, { force: true }));
+
+  await assert.rejects(
+    () => sukurtiSaugykla({ backend: "fs", env: { ARTIFACT_FS_ROOT: failas } }),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID",
+    "netinkama `fs` šaknis privalo sustabdyti STARTĄ, ne pirmą rašymą"
+  );
+
+  /** Kiekvienas backend'as PRIVALO turėti metodą — kitaip factory kvietimas kristų. */
+  const saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-parinkimas-"));
+  t.after(() => fsp.rm(saknis, { recursive: true, force: true }));
+
+  const saugyklos = [
+    await sukurtiSaugykla({ backend: "inline", vykdytojas: { query: async () => ({ rows: [], rowCount: 0 }) } }),
+    await sukurtiSaugykla({ backend: "fs", env: { ARTIFACT_FS_ROOT: saknis } }),
+  ];
+
+  for (const saugykla of saugyklos) {
+    assert.equal(
+      typeof saugykla.patikrintiSaugykla,
+      "function",
+      `${saugykla.backend}: starto patikra privaloma visiems`
+    );
+  }
 });

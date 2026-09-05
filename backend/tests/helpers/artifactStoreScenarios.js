@@ -248,6 +248,15 @@ function tapatybe(reiksme) {
  */
 const BE_RAKTO = new Set(["patikrintiSaugykla", "klientoNustatymai", "uzdaryti"]);
 
+/**
+ * ⚠️ STARTO PATIKRA PRIVALOMA VISIEMS BACKEND'AMS (Codex, #290).
+ *
+ * `fs` fail-fast neįvykdavo būtent todėl, kad metodo turėjo tik S3, o factory
+ * laukė sąlygiškai. Privalomas vardas paverčia tai konstrukcija: naujas
+ * backend'as be starto patikros nepraeis kontrakto.
+ */
+const PRIVALOMI_METODAI = Object.freeze(["put", "read", "readStream", "head", "verify", "delete", "patikrintiSaugykla"]);
+
 const RAKTO_ARGUMENTAI = Object.freeze({
   put: (raktas) => [raktas, { a: 1 }],
   read: (raktas) => [raktas],
@@ -279,6 +288,7 @@ function operacijosSuRaktu(saugykla) {
 }
 
 module.exports = {
+  PRIVALOMI_METODAI,
   GALIOJANTYS,
   ATMETAMI,
   NUOSTOLINGI,

@@ -3,6 +3,7 @@ const {
   KLAIDA,
   patikrintiRakta,
   paruostiReiksme,
+  patikrintiPersistuotaReiksme,
   nesancioVerdiktas,
   vientisumoVerdiktas,
 } = require("./validation");
@@ -129,7 +130,23 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
       throw new ArtifactStoreError(`InlineArtifactStore: objekto "${raktas}" nėra.`, KLAIDA.NERASTA);
     }
 
-    return rasta.payload;
+    /**
+     * ⚠️ `jsonb` EILUTĖ YRA TOKS PAT NEPATIKIMAS TURINYS KAIP FAILAS (Codex, #290).
+     *
+     * `fs` ir S3 skaitymas praeina bendrą reikšmių sritį, o inline grąžindavo
+     * `payload` tiesiai. Schemą tenkinantis, bet srities neatitinkantis turinys —
+     * pvz. viršutinio lygio `null`, likęs po migracijos ar rankinio taisymo —
+     * viename diegime tapdavo `ARTIFACT_CORRUPT`, o kitame „galiojančiu rezultatu".
+     *
+     * Literalus `null` čia ypač brangus: jis atkuria „`completed` be rezultato"
+     * būseną, kurią rašymo sargas ir uždarė. `payload` yra `NOT NULL`, tad SQL
+     * `NULL` čia neateina — bet `jsonb` reikšmė `'null'` yra visiškai teisėta
+     * stulpeliui ir NETEISĖTA rezultatui.
+     *
+     * ⚠️ TAISYKLĖ NEDUBLIUOJAMA: kviečiama TA PATI ribos funkcija, kurią naudoja
+     * baitų kelias — tik be UTF-8 ir `JSON.parse` pakopų, kurių `jsonb` nereikia.
+     */
+    return patikrintiPersistuotaReiksme(rasta.payload, raktas);
   }
 
   async function head(raktas) {
@@ -185,7 +202,23 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
     return rowCount > 0;
   }
 
-  return { backend: "inline", put, read, readStream, head, verify, delete: del };
+  /**
+   * STARTO PATIKRA — SĄMONINGAI TUŠČIA, IR TAI UŽRAŠOMA (Codex, #290).
+   *
+   * ⚠️ TUŠČIA NE DĖL TO, KAD PAMIRŠTA. Inline saugykla neturi savo išorinio
+   * resurso: lentelę ir jungtį valdo `jobStore` sluoksnis, o vykdytojo buvimas
+   * patikrintas konstruktoriuje. Papildoma užklausa čia reikštų antrą schemos
+   * autoritetą.
+   *
+   * ⚠️ METODAS VIS TIEK EGZISTUOJA, nes factory laukia jo VISIEMS backend'ams.
+   * Sąlyginis „jei backend'as turi patikrą" reikštų, kad naujas backend'as be jos
+   * praslystų tyliai — o būtent taip `fs` fail-fast ir liko nekviečiamas.
+   */
+  async function patikrintiSaugykla() {
+    return { backend: "inline", isorinioResurso: false };
+  }
+
+  return { backend: "inline", put, read, readStream, head, verify, delete: del, patikrintiSaugykla };
 }
 
 module.exports = { createInlineArtifactStore };

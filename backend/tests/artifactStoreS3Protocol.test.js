@@ -62,11 +62,22 @@ test("nežinoma versijavimo būsena FAILINA UŽDARAI", async () => {
    * Trūkstamas atsakymas, `null` ar būsimas `Status` praeidavo kaip „neversijuota" —
    * fail-open būtent ten, kur sprendžiama, ar ištrynimas gali būti PATVIRTINTAS.
    */
+  /**
+   * ⚠️ PRIIMAMA TIKSLIAI VIENA FORMA: `Status === undefined`.
+   *
+   * `null` ir `""` atrodo „beveik kaip nieko", bet nė vienas iš jų nėra
+   * dokumentuota neversijuoto kibiro forma — jie reiškia, kad būsena LIKO
+   * NENUSTATYTA. Įsiminus juos kaip „Disabled", vėlesni `delete()` patvirtinimai
+   * remtųsi garantija, kurios niekas nepatikrino.
+   */
   const nesaugios = [
     ["Enabled", { Status: "Enabled" }],
     ["Suspended", { Status: "Suspended" }],
     ["nežinoma būsena", { Status: "Unknown" }],
     ["būsimas praplėtimas", { Status: "EnabledWithLock" }],
+    ["null būsena", { Status: null }],
+    ["tuščia eilutė", { Status: "" }],
+    ["skaičius", { Status: 0 }],
     ["tuščias atsakymas", null],
     ["ne objektas", "Disabled"],
   ];
@@ -85,7 +96,7 @@ test("KONTROLĖ: dokumentuota neversijuoto kibiro forma PRAEINA", async () => {
    * Be jos ankstesnis testas būtų tenkinamas patikros, kuri atmeta VISKĄ — tada
    * „fail-closed" reikštų neveikiančią saugyklą, ne garantiją.
    */
-  for (const atsakymas of [{}, { Status: undefined }, { Status: "" }, { MFADelete: "Disabled" }]) {
+  for (const atsakymas of [{}, { Status: undefined }, { MFADelete: "Disabled" }]) {
     const verdiktas = await patikrintiVersijavima(
       klientasSu({ GetBucketVersioningCommand: atsakymas }),
       "kibiras"
@@ -136,7 +147,31 @@ test("`HeadObject` be tinkamo `ContentLength` yra PROTOKOLO klaida", async () =>
    * kvietėjas gaudavo metaduomenis už dokumentuoto `{ exists, bytes }` kontrakto
    * ribų. Būtent jais remiasi orphan patikra ir hidratacijos dydžio riba.
    */
-  for (const blogas of [{}, { ContentLength: "labas" }, { ContentLength: -1 }, { ContentLength: 1.5 }]) {
+  /**
+   * ⚠️ VALIDUOJAMA ŽALIA REIKŠMĖ, NE KONVERSIJOS REZULTATAS.
+   *
+   * `Number(null)`, `Number("")` ir `Number(false)` visi duoda `0` — teisėtą
+   * sveikąjį skaičių. Tikrinant PO konversijos, netaisyklingas atsakymas virsdavo
+   * `{ exists: true, bytes: 0 }`, ir orphan patikra remtųsi dydžiu, kurio saugykla
+   * niekada nepranešė. SDK kontraktas yra `number | undefined`.
+   */
+  const blogi = [
+    {},
+    { ContentLength: null },
+    { ContentLength: "" },
+    { ContentLength: false },
+    { ContentLength: true },
+    { ContentLength: "12" },
+    { ContentLength: "labas" },
+    { ContentLength: NaN },
+    { ContentLength: Infinity },
+    { ContentLength: -1 },
+    { ContentLength: 1.5 },
+    { ContentLength: {} },
+    { ContentLength: [] },
+  ];
+
+  for (const blogas of blogi) {
     const saugykla = createS3ArtifactStore({
       ...KONFIGURACIJA,
       klientas: klientasSu({ ...NEVERSIJUOTAS, HeadObjectCommand: blogas }),
@@ -151,12 +186,15 @@ test("`HeadObject` be tinkamo `ContentLength` yra PROTOKOLO klaida", async () =>
 });
 
 test("KONTROLĖ: tvarkingas `ContentLength` grąžina dokumentuotą formą", async () => {
-  const saugykla = createS3ArtifactStore({
-    ...KONFIGURACIJA,
-    klientas: klientasSu({ ...NEVERSIJUOTAS, HeadObjectCommand: { ContentLength: 12 } }),
-  });
+  /** Ir nulinis dydis yra teisėtas — svarbu, kad jis ATEINA kaip skaičius. */
+  for (const dydis of [0, 1, 12, 20 * 1024 * 1024]) {
+    const saugykla = createS3ArtifactStore({
+      ...KONFIGURACIJA,
+      klientas: klientasSu({ ...NEVERSIJUOTAS, HeadObjectCommand: { ContentLength: dydis } }),
+    });
 
-  assert.deepEqual(await saugykla.head("results/a.json"), { exists: true, bytes: 12 });
+    assert.deepEqual(await saugykla.head("results/a.json"), { exists: true, bytes: dydis });
+  }
 });
 
 test("sėkmingas `GetObject` be kūno yra PROTOKOLO klaida", async () => {
@@ -165,7 +203,25 @@ test("sėkmingas `GetObject` be kūno yra PROTOKOLO klaida", async () => {
    * `TypeError` iš `for await` — kvietėjas matytų programavimo klaidą ten, kur
    * sugedo saugyklos protokolas.
    */
-  for (const blogas of [{}, { Body: null }, { Body: 42 }, { Body: { pipe: "ne funkcija" } }]) {
+  /**
+   * ⚠️ TIKRINAMA TA GALIMYBĖ, KURIĄ REALIAI NAUDOJA VARTOTOJAI.
+   *
+   * `read()` ir `verify()` kūną vartoja per `for await`, tad `pipe()` buvimas
+   * nieko negarantuoja: `{ Body: { pipe() {} } }` praeidavo patikrą ir lūždavo
+   * žaliu `TypeError` — tiksliai tuo, ko patikra turėjo neleisti. Sinchroniškai
+   * iteruojama eilutė taip pat netinka: `for await` jos nepriims kaip srauto.
+   */
+  const blogi = [
+    {},
+    { Body: null },
+    { Body: 42 },
+    { Body: "eilutė" },
+    { Body: { pipe: "ne funkcija" } },
+    { Body: { pipe() {} } },
+    { Body: [1, 2, 3] },
+  ];
+
+  for (const blogas of blogi) {
     const saugykla = createS3ArtifactStore({
       ...KONFIGURACIJA,
       klientas: klientasSu({ ...NEVERSIJUOTAS, GetObjectCommand: blogas }),
@@ -240,4 +296,34 @@ test("KONTROLĖ: tinkamo dydžio objektas patvirtinamas inkrementiškai", async 
   assert.equal(verdiktas.ok, true, "sudalintas srautas privalo duoti tą pačią sumą");
   assert.equal(verdiktas.bytes, turinys.byteLength);
   assert.equal(verdiktas.checksum, checksum);
+});
+
+test("KONTROLĖ: async-iterable kūnas priimamas abiem formomis", async () => {
+  /**
+   * Be jos ankstesnis testas būtų tenkinamas patikros, kuri atmeta KIEKVIENĄ kūną.
+   * Tikrinamos dvi realios formos: Node srautas ir async generatorius (kai kurie
+   * S3-compatible SDK adapteriai grąžina būtent jį).
+   */
+  const turinys = Buffer.from(JSON.stringify({ text: "ok" }), "utf8");
+
+  const formos = [
+    ["Readable", () => Readable.from([turinys])],
+    [
+      "async generatorius",
+      () => ({
+        async *[Symbol.asyncIterator]() {
+          yield turinys;
+        },
+      }),
+    ],
+  ];
+
+  for (const [vardas, gamykla] of formos) {
+    const saugykla = createS3ArtifactStore({
+      ...KONFIGURACIJA,
+      klientas: klientasSu({ ...NEVERSIJUOTAS, GetObjectCommand: () => ({ Body: gamykla() }) }),
+    });
+
+    assert.deepEqual(await saugykla.read("results/a.json"), { text: "ok" }, vardas);
+  }
 });

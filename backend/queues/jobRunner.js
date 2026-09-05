@@ -495,6 +495,7 @@ const VIESI_ARTEFAKTU_PRANESIMAI = Object.freeze({
   ARTIFACT_NOT_FOUND: "Rezultato saugykloje nėra.",
   ARTIFACT_CORRUPT: "Rezultatas saugykloje yra, bet jo turinys neperskaitomas.",
   ARTIFACT_STORAGE_PROTOCOL: "Rezultatų saugykla atsakė netinkamai — tai saugyklos, ne rezultato klaida.",
+  ARTIFACT_ORPHAN_LEFT: "Rezultato išsaugoti nepavyko, o saugykloje liko nebaigtas įrašas — reikia administratoriaus.",
   ARTIFACT_CONFIG_INVALID: "Artefaktų saugykla sukonfigūruota neteisingai.",
   NEZINOMA: "Rezultato saugyklos klaida.",
 });

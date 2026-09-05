@@ -163,3 +163,66 @@ test("fs NIEKADA neišleidžia žalio `ENAMETOOLONG`", async (t) => {
     assert.deepEqual(await saugykla.read(raktas), { a: 1 }, "priimtas raktas privalo veikti");
   }
 });
+
+/* ═══ INLINE PARITETAS: `jsonb` EILUTĖ IRGI YRA NEPATIKIMAS TURINYS ═══ */
+
+const { createInlineArtifactStore } = require("../utils/artifactStore/inlineStore");
+
+const JOB_ID = "11111111-2222-3333-4444-555555555555";
+
+/** ⚠️ Dublis grąžina TIKRO kontrakto tipus: `rows` ir `rowCount` (#266 trečia dalis). */
+function vykdytojasSu(payload) {
+  return {
+    async query(sql) {
+      if (/SELECT payload/.test(sql)) return { rows: [{ payload }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    },
+  };
+}
+
+test("inline skaitymas taiko TĄ PAČIĄ sritį kaip `fs` ir S3", async () => {
+  /**
+   * ⚠️ SRITIS, TAIKOMA DVIEM IŠ TRIJŲ BACKEND'Ų, NĖRA SRITIS.
+   *
+   * `fs`/S3 skaitymas praeidavo bendrą patikrą, o inline grąžindavo `payload`
+   * tiesiai — tas pats netinkamas turinys viename diegime tapdavo
+   * `ARTIFACT_CORRUPT`, o kitame „galiojančiu rezultatu". Bendras kontraktas taip
+   * tampa priklausomas nuo backend'o (#157 D1 draudžia).
+   *
+   * ⚠️ `payload` yra `NOT NULL`, tad SQL `NULL` čia neateina. Bet `jsonb` reikšmė
+   * `'null'` stulpeliui visiškai teisėta ir rezultatui — ne: ji atkuria
+   * „`completed` be rezultato" būseną, kurią rašymo sargas uždarė.
+   */
+  const uzSrities = [
+    { vardas: "viršutinio lygio null", payload: null },
+    { vardas: "NUL tekste", payload: { x: `a${NUL}b` } },
+    { vardas: "vienišas surogatas", payload: { x: `a${String.fromCharCode(0xd800)}b` } },
+  ];
+
+  for (const scenarijus of uzSrities) {
+    const saugykla = createInlineArtifactStore({ vykdytojas: vykdytojasSu(scenarijus.payload) });
+
+    await assert.rejects(
+      () => saugykla.read(JOB_ID),
+      (klaida) => klaida.code === "ARTIFACT_CORRUPT",
+      `${scenarijus.vardas}: persistuotas turinys už srities privalo būti sugadinimas`
+    );
+
+    /** Ir srautas eina tuo pačiu keliu — kitaip liktų aplinkkelis. */
+    await assert.rejects(
+      () => saugykla.readStream(JOB_ID),
+      (klaida) => klaida.code === "ARTIFACT_CORRUPT",
+      `${scenarijus.vardas}: readStream irgi`
+    );
+  }
+});
+
+test("KONTROLĖ: teisėtas inline `payload` perskaitomas nepakitęs", async () => {
+  /**
+   * Be jos ankstesnis testas būtų tenkinamas inline saugyklos, kuri atmeta VISKĄ.
+   */
+  for (const payload of [{ text: "ok" }, { a: { b: [1, null] } }, [], { n: 0 }]) {
+    const saugykla = createInlineArtifactStore({ vykdytojas: vykdytojasSu(payload) });
+    assert.deepEqual(await saugykla.read(JOB_ID), payload);
+  }
+});

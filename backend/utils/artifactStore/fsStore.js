@@ -1,5 +1,6 @@
 const fsp = require("node:fs/promises");
 const path = require("node:path");
+const { createLogger } = require("../logger");
 const crypto = require("node:crypto");
 
 const {
@@ -14,6 +15,8 @@ const {
   vientisumoVerdiktas,
 } = require("./validation");
 const { getLimits, LIMIT_KIND } = require("../resultLimits");
+
+const log = createLogger("artifact-fs");
 
 /**
  * `FsArtifactStore` - artefaktai konfigūruotame filesystem kataloge (#157, PR-2).
@@ -383,23 +386,64 @@ function createFsArtifactStore({ root } = {}) {
       }
     } catch (klaida) {
       if (deskriptorius) await deskriptorius.close().catch(() => {});
-      await fsp.rm(laikinas, { force: true }).catch(() => {});
 
       /**
-       * ⚠️ GEDIMAS PO `rename` PALIEKA OBJEKTĄ, KURIO NIEKAS NEREGISTRUOS
-       * (Codex, #290).
+       * ⚠️ VALYMAS YRA GARANTIJA, NE GERAS NORAS (Codex, #290).
        *
+       * ⚠️ GEDIMAS PO `rename` PALIEKA OBJEKTĄ, KURIO NIEKAS NEREGISTRUOS.
        * `put()` meta, tad kvietėjas nuorodos nepersistina — o objektas lieka
        * gulėti. DB krypties inventorius (A3) jo NEBERANDA pagal apibrėžimą:
        * jautrus turinys be savininko, tiksliai ta orphan klasė, kurią #157
        * uždarinėja.
        *
+       * Ankstesnė redakcija darė `rm(...).catch(() => {})`: nesėkmė dingdavo
+       * TYLIAI, o pavykęs trynimas likdavo neįtvirtintas — po maitinimo dingimo
+       * failas galėjo GRĮŽTI galutiniu vardu, nors `put()` metė. Best-effort
+       * valymas ištrynimo garantijų grandinėje yra tas pats, kas jokio valymo.
+       *
+       * Todėl: trynimas tikrinamas, katalogas po jo sinchronizuojamas, o valymo
+       * nesėkmė PRANEŠAMA kvietėjui atskiru kodu — kitaip apie likusį jautrų
+       * objektą nesužinotų niekas.
+       *
        * ⚠️ BUVĘS OBJEKTAS NENAIKINAMAS. Jei tuo adresu jau kažkas gulėjo, jo
        * turinys po `rename` jau pakeistas, ir atstatyti nebėra iš ko; trynimas
        * prarastų duomenis. Riba užrašoma, o ne praplečiama.
        */
-      if (pervadinta && !buvoAnksciau) {
-        await fsp.rm(pilnas, { force: true }).catch(() => {});
+      const valytini = [];
+      if (!pervadinta) valytini.push(laikinas);
+      if (pervadinta && !buvoAnksciau) valytini.push(pilnas);
+
+      const neisvalyta = [];
+
+      for (const kelias of valytini) {
+        try {
+          await fsp.rm(kelias, { force: true });
+          /** Ir pats IŠTRYNIMAS privalo būti patvarus — kitaip failas grįžta. */
+          await sinchronizuotiKatalaga(path.dirname(kelias));
+        } catch (valymoKlaida) {
+          neisvalyta.push({ kelias, kodas: valymoKlaida.code || valymoKlaida.name });
+        }
+      }
+
+      if (neisvalyta.length > 0) {
+        /**
+         * ⚠️ SAUGŪS METADUOMENYS: raktas ir klaidos kodas, jokio turinio. Raktas
+         * yra adresas (`results/<jobId>/<attemptId>.json`), tad jis operatoriui
+         * ir reikalingas — būtent jį reikės pašalinti rankomis.
+         */
+        log.error("Artefakto valymas po nepavykusio rašymo NEPAVYKO", {
+          stage: "artifact_cleanup",
+          backend: "fs",
+          raktas,
+          neisvalyta: neisvalyta.map((n) => n.kodas),
+        });
+
+        throw new ArtifactStoreError(
+          `FsArtifactStore: rašymas nepavyko, o po jo likusio objekto "${raktas}" pašalinti ` +
+            "nepavyko. Saugykloje gali likti NEREFERENCUOTAS artefaktas — jį reikia pašalinti.",
+          KLAIDA.LIKO_ARTEFAKTAS,
+          { cause: klaida }
+        );
       }
 
       throw klaida;
@@ -632,7 +676,34 @@ function createFsArtifactStore({ root } = {}) {
     return true;
   }
 
-  return { backend: "fs", root: saknis, put, read, readStream, head, verify, delete: del };
+  /**
+   * STARTO PATIKRA — TAS PATS VARDAS KAIP S3 (Codex, #290).
+   *
+   * ⚠️ FAIL-FAST NEĮVYKDAVO, NES JO NIEKAS NEKVIETĖ. Šaknies patikra buvo tingi:
+   * netinkamas `ARTIFACT_FS_ROOT` (esamas failas, nepasiekiamas katalogas)
+   * paaiškėdavo tik per pirmą operaciją — t. y. po to, kai tiekėjas jau atliko
+   * brangų darbą. PR-2 fail-fast kriterijus reikalauja priešingo.
+   *
+   * ⚠️ VARDAS BENDRAS SĄMONINGAI: factory laukia `patikrintiSaugykla()` VISIEMS
+   * backend'ams, tad naujas backend'as be starto patikros nebeatsiras tyliai —
+   * jam tektų arba ją turėti, arba eksplicitiškai deklaruoti, kad tikrinti nėra ko.
+   */
+  async function patikrintiSaugykla() {
+    const tikraSaknis = await paruostiSakni();
+    return { backend: "fs", root: tikraSaknis };
+  }
+
+  return {
+    backend: "fs",
+    root: saknis,
+    put,
+    read,
+    readStream,
+    head,
+    verify,
+    delete: del,
+    patikrintiSaugykla,
+  };
 }
 
 module.exports = { createFsArtifactStore };

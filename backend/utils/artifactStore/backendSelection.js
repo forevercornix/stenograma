@@ -74,14 +74,27 @@ function parinktiBackenda(env = process.env) {
  * reikštų antrą jungčių biudžetą, kurio niekas neskaičiuoja.
  */
 async function sukurtiSaugykla({ backend, env = process.env, vykdytojas = null } = {}) {
+  /**
+   * ⚠️ STARTO PATIKROS LAUKIAMA VISIEMS BACKEND'AMS (Codex, #290).
+   *
+   * Anksčiau laukta tik S3 šakoje, tad `fs` netinkamas `ARTIFACT_FS_ROOT`
+   * paaiškėdavo per pirmą operaciją — jau po brangaus tiekėjo darbo. Sąlyginis
+   * laukimas („jei backend'as turi patikrą") atkurtų tą pačią spragą kitam
+   * backend'ui, todėl metodas privalomas visiems, o čia jis kviečiamas be sąlygų.
+   */
+  const paruosti = async (saugykla) => {
+    await saugykla.patikrintiSaugykla();
+    return saugykla;
+  };
+
   if (backend === "inline") {
     const { createInlineArtifactStore } = require("./inlineStore");
-    return createInlineArtifactStore({ vykdytojas });
+    return paruosti(createInlineArtifactStore({ vykdytojas }));
   }
 
   if (backend === "fs") {
     const { createFsArtifactStore } = require("./fsStore");
-    return createFsArtifactStore({ root: env.ARTIFACT_FS_ROOT });
+    return paruosti(createFsArtifactStore({ root: env.ARTIFACT_FS_ROOT }));
   }
 
   if (backend === "s3") {
@@ -99,15 +112,13 @@ async function sukurtiSaugykla({ backend, env = process.env, vykdytojas = null }
      *
      * Versijuotame kibire `DeleteObject` palieka ankstesnę versiją, tad erasure
      * kelias praneštų sėkmę su išlikusia transkripcija. Patikra, kurios niekas
-     * nekviečia, yra dokumentacija, ne sargas — todėl factory jos LAUKIA, ir
-     * netinkamas kibiras sustabdo diegimą, o ne pirmą ištrynimą.
+     * nekviečia, yra dokumentacija, ne sargas.
      *
      * ⚠️ TAI ANTRA GYNYBOS LINIJA, NE VIENINTELĖ: kiekviena `S3ArtifactStore`
      * operacija tos pačios patikros laukia pati, tad tiesioginis konstruktoriaus
      * kvietimas (aplenkiant šį factory) jos neapeina.
      */
-    await saugykla.patikrintiSaugykla();
-    return saugykla;
+    return paruosti(saugykla);
   }
 
   /**

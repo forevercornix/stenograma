@@ -78,6 +78,15 @@ const KLAIDA = Object.freeze({
    * nors turinio niekas net nepamatė.
    */
   SAUGYKLA: "ARTIFACT_STORAGE_PROTOCOL",
+  /**
+   * ⚠️ RAŠYMAS NEPAVYKO, IR PO JO LIKO OBJEKTAS (Codex, #290).
+   *
+   * Skiriasi nuo paprastos rašymo klaidos tuo, kad reikalauja RANKINIO veiksmo:
+   * saugykloje guli nereferencuotas jautrus artefaktas, kurio DB krypties
+   * inventorius neranda pagal apibrėžimą. Tylus `internal_error` čia reikštų, kad
+   * apie jį nesužino niekas.
+   */
+  LIKO_ARTEFAKTAS: "ARTIFACT_ORPHAN_LEFT",
 });
 
 /**
@@ -490,6 +499,35 @@ function sugadintas(raktas, priezastis, kilme) {
 const GRIEZTAS_UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 /**
+ * PERSISTUOTOS REIKŠMĖS PATIKRA — VIENA VIETA VISIEMS BACKEND'AMS (Codex, #290).
+ *
+ * ⚠️ SAUGYKLOJE GULINTI REIKŠMĖ YRA NEPATIKIMA, NESVARBU, KURI SAUGYKLA.
+ *
+ * `fs` ir S3 kelias eina per baitus, o `inline` — per `jsonb` stulpelį, tad
+ * dekodavimo pakopos skiriasi. BET reikšmių sritis yra ta pati, ir jei ji taikoma
+ * tik dviem iš trijų, tas pats sugadintas turinys viename diegime tampa
+ * `ARTIFACT_CORRUPT`, o kitame — „galiojančiu rezultatu". Tada bendras kontraktas
+ * priklauso nuo backend'o, o būtent to #157 D1 ir neleidžia.
+ *
+ * Todėl paskutinė pakopa gyvena atskirai: baitų kelias ją kviečia po `JSON.parse`,
+ * o `inline` — iškart su `payload` reikšme.
+ */
+function patikrintiPersistuotaReiksme(reiksme, raktas) {
+  try {
+    patikrintiSriti(reiksme);
+  } catch (klaida) {
+    /**
+     * ⚠️ KODAS YRA `SUGADINTAS`, NE `REIKSME`. Čia kalta ne kvietėjo įvestis, o
+     * saugykloje gulintis turinys: `ARTIFACT_VALUE_UNSUPPORTED` nusiųstų operatorių
+     * tikrinti tiekėjo rezultato, nors taisyti reikia objektą.
+     */
+    throw sugadintas(raktas, `turinys už leistinos reikšmių srities (${klaida.code})`, klaida);
+  }
+
+  return reiksme;
+}
+
+/**
  * DEKODAVIMAS: baitai -> patikrinta reikšmė. Kodavimo atvirkštinė kryptis.
  *
  * ⚠️ TRYS PAKOPOS, IR VISOS TRYS FAIL-CLOSED: griežtas UTF-8, `JSON.parse` ir TA
@@ -511,18 +549,7 @@ function atkurtiReiksme(buferis, raktas) {
     throw sugadintas(raktas, "turinys nėra galiojantis JSON", klaida);
   }
 
-  try {
-    patikrintiSriti(reiksme);
-  } catch (klaida) {
-    /**
-     * ⚠️ KODAS YRA `SUGADINTAS`, NE `REIKSME`. Čia kalta ne kvietėjo įvestis, o
-     * saugykloje gulintis turinys: `ARTIFACT_VALUE_UNSUPPORTED` nusiųstų operatorių
-     * tikrinti tiekėjo rezultato, nors taisyti reikia objektą.
-     */
-    throw sugadintas(raktas, `turinys už leistinos reikšmių srities (${klaida.code})`, klaida);
-  }
-
-  return reiksme;
+  return patikrintiPersistuotaReiksme(reiksme, raktas);
 }
 
 module.exports = {
@@ -535,6 +562,7 @@ module.exports = {
   patikrintiSriti,
   paruostiReiksme,
   atkurtiReiksme,
+  patikrintiPersistuotaReiksme,
   normalizuotiLaukima,
   nesancioVerdiktas,
   neverifikuojamasVerdiktas,

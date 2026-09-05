@@ -97,57 +97,156 @@ test("laikino failo vardas NEPRIKLAUSO nuo rakto ilgio", async (t) => {
   assert.deepEqual(await saugykla.read(raktas), { text: "ilgas" });
 });
 
+/**
+ * ⚠️ GEDIMŲ ĮTERPIMAS PER `fsp` MODULIO OBJEKTĄ.
+ *
+ * `fsStore` naudoja tą patį `require("node:fs/promises")` objektą, tad laikinas
+ * metodo pakeitimas pasiekia produkcinį kelią nekeičiant jo formos. Pataisa
+ * grąžinama `finally`, o `node:test` failus vykdo atskiruose procesuose.
+ *
+ * @param {{sugadintiSync?: boolean, sugadintiRm?: boolean, sugadintiRename?: boolean}} kas
+ */
+async function suGedimu(kas, veiksmas) {
+  const tikrasOpen = fsp.open;
+  const tikrasRm = fsp.rm;
+  const tikrasRename = fsp.rename;
+
+  let syncSugadintas = Boolean(kas.sugadintiSync);
+
+  if (kas.sugadintiSync) {
+    fsp.open = async (kelias, veliavos, ...kita) => {
+      if (veliavos === "r" && syncSugadintas) {
+        syncSugadintas = false;
+        const klaida = new Error("suklastotas katalogo `fsync` gedimas");
+        klaida.code = "EIO";
+        throw klaida;
+      }
+      return tikrasOpen(kelias, veliavos, ...kita);
+    };
+  }
+
+  if (kas.sugadintiRm) {
+    fsp.rm = async () => {
+      const klaida = new Error("suklastotas valymo gedimas");
+      klaida.code = "EACCES";
+      throw klaida;
+    };
+  }
+
+  if (kas.sugadintiRename) {
+    fsp.rename = async () => {
+      const klaida = new Error("suklastotas `rename` gedimas");
+      klaida.code = "EXDEV";
+      throw klaida;
+    };
+  }
+
+  try {
+    return await veiksmas();
+  } finally {
+    fsp.open = tikrasOpen;
+    fsp.rm = tikrasRm;
+    fsp.rename = tikrasRename;
+  }
+}
+
+test("gedimas PRIEŠ `rename` nepalieka laikino failo", async (t) => {
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  await saugykla.put("results/pirmas.json", { text: "kad šaknis būtų paruošta" });
+
+  await assert.rejects(
+    () => suGedimu({ sugadintiRename: true }, () => saugykla.put("results/nutruko.json", { a: 1 })),
+    /EXDEV|suklastotas/
+  );
+
+  assert.deepEqual(
+    await fsp.readdir(path.join(saknis, "results")),
+    ["pirmas.json"],
+    "nei objekto, nei `.tmp` likučio"
+  );
+});
+
 test("gedimas PO `rename` nepalieka objekto, kurio kvietėjas neregistruos", async (t) => {
   /**
    * ⚠️ NESĖKMINGAS `put()` NETURI PALIKTI NEREFERENCUOTO ARTEFAKTO.
    *
    * `rename` jau įvyko, bet katalogo `fsync` krito — `put()` meta, kvietėjas
-   * nuorodos nepersistina, o objektas lieka gulėti. DB krypties inventorius
-   * (A3) jo NEBERANDA pagal apibrėžimą: tai jautrus turinys be savininko.
-   *
-   * ⚠️ GEDIMAS ĮTERPIAMAS PER `fsp.open`, nes kito seamo nėra: katalogo `fsync`
-   * vyksta saugyklos viduje. Pataisa grąžinama `finally` bloke; `node:test`
-   * failus vykdo atskiruose procesuose, tad pataisa neišeina už šio failo.
+   * nuorodos nepersistina, o objektas lieka gulėti. DB krypties inventorius (A3)
+   * jo NEBERANDA pagal apibrėžimą: tai jautrus turinys be savininko.
    */
   const { saknis, isvalyti } = await aplinka();
   t.after(isvalyti);
 
   const saugykla = createFsArtifactStore({ root: saknis });
-  const raktas = "results/nutruko.json";
+  await saugykla.put("results/pirmas.json", { text: "kad šaknis būtų paruošta" });
 
-  const tikrasOpen = fsp.open;
-  let sugadinti = true;
-  fsp.open = async (kelias, veliavos, ...kita) => {
-    if (veliavos === "r" && sugadinti) {
-      sugadinti = false;
-      const klaida = new Error("suklastotas katalogo `fsync` gedimas");
-      klaida.code = "EIO";
-      throw klaida;
-    }
-    return tikrasOpen(kelias, veliavos, ...kita);
-  };
-
-  try {
-    await assert.rejects(() => saugykla.put(raktas, { text: "nutrūkęs" }), /EIO|suklastotas/);
-  } finally {
-    fsp.open = tikrasOpen;
-  }
-
-  assert.equal(
-    await saugykla.head(raktas),
-    null,
-    "nesėkmingas `put()` privalo nepalikti objekto — kitaip lieka artefaktas be savininko"
+  await assert.rejects(
+    () => suGedimu({ sugadintiSync: true }, () => saugykla.put("results/nutruko.json", { a: 1 })),
+    (klaida) => klaida.code === "EIO",
+    "kvietėjas privalo matyti PIRMINĘ gedimo priežastį, kai valymas pavyko"
   );
 
-  const likuciai = await fsp.readdir(path.join(saknis, "results")).catch(() => []);
-  assert.deepEqual(likuciai, [], "nei objekto, nei laikino failo");
+  assert.equal(
+    await saugykla.head("results/nutruko.json"),
+    null,
+    "nesėkmingas `put()` privalo nepalikti objekto"
+  );
+  assert.deepEqual(await fsp.readdir(path.join(saknis, "results")), ["pirmas.json"]);
+});
+
+test("VALYMO nesėkmė PRANEŠAMA, o ne nurijama", async (t) => {
+  /**
+   * ⚠️ BEST-EFFORT VALYMAS IŠTRYNIMO GRANDINĖJE YRA TAS PATS, KAS JOKIO VALYMO
+   * (Codex, #290).
+   *
+   * Ankstesnė redakcija darė `rm(...).catch(() => {})`: jei trynimas nepavyko,
+   * jautrus nereferencuotas objektas likdavo saugykloje, o apie tai nesužinodavo
+   * NIEKAS — nei kvietėjas, nei operatorius.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  await saugykla.put("results/pirmas.json", { text: "kad šaknis būtų paruošta" });
+
+  const eilutes = [];
+  const originalus = console.error;
+  console.error = (...args) => {
+    eilutes.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+
+  let klaida = null;
+  try {
+    await suGedimu({ sugadintiSync: true, sugadintiRm: true }, () =>
+      saugykla.put("results/liko.json", { transkripcija: "SLAPTAS-PACIENTO-TEKSTAS" })
+    );
+  } catch (e) {
+    klaida = e;
+  } finally {
+    console.error = originalus;
+  }
+
+  assert.ok(klaida, "nesėkmė privalo pasiekti kvietėją");
+  assert.equal(klaida.code, "ARTIFACT_ORPHAN_LEFT", "ir turėti SAVO kodą, ne pirminės klaidos");
+  assert.equal(klaida.cause && klaida.cause.code, "EIO", "pirminė priežastis išsaugoma `cause`");
+
+  const logas = eilutes.join("\n");
+  assert.match(logas, /artifact_cleanup/, "operatorius privalo apie tai sužinoti iš logo");
+  assert.match(logas, /results\/liko\.json/, "logas privalo įvardyti, KĄ reikės pašalinti");
+  assert.ok(
+    !logas.includes("SLAPTAS-PACIENTO-TEKSTAS"),
+    "bet turinio jame būti negali - raktas yra adresas, ne duomenys"
+  );
 });
 
 test("gedimas PO `rename` NENAIKINA objekto, kuris jau buvo tuo adresu", async (t) => {
   /**
    * ⚠️ RIBA UŽRAŠOMA, O NE PRAPLEČIAMA. Jei tuo adresu objektas jau buvo, jo
-   * turinys po `rename` jau pakeistas, ir atstatyti jo nebėra iš ko. Trynimas
-   * čia prarastų duomenis; paliekamas naujas turinys, o `put()` vis tiek praneša
+   * turinys po `rename` jau pakeistas, ir atstatyti jo nebėra iš ko. Trynimas čia
+   * prarastų duomenis; paliekamas naujas turinys, o `put()` vis tiek praneša
    * nesėkmę — patvarumo jis patvirtinti negali.
    */
   const { saknis, isvalyti } = await aplinka();
@@ -157,28 +256,39 @@ test("gedimas PO `rename` NENAIKINA objekto, kuris jau buvo tuo adresu", async (
   const raktas = "results/buvo.json";
   await saugykla.put(raktas, { text: "pirmas" });
 
-  const tikrasOpen = fsp.open;
-  let sugadinti = true;
-  fsp.open = async (kelias, veliavos, ...kita) => {
-    if (veliavos === "r" && sugadinti) {
-      sugadinti = false;
-      const klaida = new Error("suklastotas katalogo `fsync` gedimas");
-      klaida.code = "EIO";
-      throw klaida;
-    }
-    return tikrasOpen(kelias, veliavos, ...kita);
-  };
-
-  try {
-    await assert.rejects(() => saugykla.put(raktas, { text: "antras" }), /EIO|suklastotas/);
-  } finally {
-    fsp.open = tikrasOpen;
-  }
+  await assert.rejects(
+    () => suGedimu({ sugadintiSync: true }, () => saugykla.put(raktas, { text: "antras" })),
+    (klaida) => klaida.code === "EIO"
+  );
 
   assert.ok(await saugykla.head(raktas), "esamas adresas NEIŠVALOMAS — tai būtų duomenų praradimas");
 });
 
-/* ═══ ŠAKNIES GYVAVIMO CIKLAS ═══ */
+test("STARTO patikra atskleidžia netinkamą šaknį PRIEŠ pirmą operaciją", async (t) => {
+  /**
+   * ⚠️ FAIL-FAST NEĮVYKDAVO, NES JO NIEKAS NEKVIETĖ (Codex, #290).
+   *
+   * Šaknies patikra buvo tingi: netinkamas `ARTIFACT_FS_ROOT` paaiškėdavo tik per
+   * pirmą operaciją — jau PO to, kai tiekėjas atliko brangų darbą. PR-2 fail-fast
+   * kriterijus reikalauja priešingo.
+   */
+  const failas = path.join(os.tmpdir(), `stenograma-startas-failas-${process.pid}`);
+  await fsp.writeFile(failas, "ne katalogas", "utf8");
+  t.after(() => fsp.rm(failas, { force: true }));
+
+  await assert.rejects(
+    () => createFsArtifactStore({ root: failas }).patikrintiSaugykla(),
+    (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID"
+  );
+
+  /** KONTROLĖ: tvarkinga šaknis startą praeina ir grąžina išspręstą kelią. */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const verdiktas = await createFsArtifactStore({ root: saknis }).patikrintiSaugykla();
+  assert.equal(verdiktas.backend, "fs");
+  assert.ok(verdiktas.root.length > 0);
+});
 
 test("šaknis, kuri yra FAILAS, yra konfigūracijos klaida — ne dingę duomenys", async (t) => {
   /**

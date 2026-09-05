@@ -92,11 +92,25 @@ async function patikrintiVersijavima(klientas, bucket) {
     );
   }
 
+  /**
+   * ⚠️ PRIIMAMA TIKSLIAI VIENA REIKŠMĖ: `Status === undefined` (Codex, #290).
+   *
+   * Ankstesnė redakcija greta jos praleisdavo `null` ir `""`. Nė vienas iš jų nėra
+   * dokumentuota neversijuoto kibiro forma — jie reiškia, kad atsakymas neatitinka
+   * protokolo, t. y. kibiro būsena LIKO NENUSTATYTA. Įsiminus tokį rezultatą kaip
+   * „Disabled", vėlesni `delete()` patvirtinimai remtųsi garantija, kurios niekas
+   * nepatikrino.
+   *
+   * Praplėsti aibę „panašiomis" reikšmėmis pigu ir todėl pavojinga: kiekviena jų
+   * yra spėjimas apie tiekėją, o kaina — patvirtintas ištrynimas su išlikusia
+   * transkripcija.
+   */
   const busena = atsakymas.Status;
 
-  if (busena !== undefined && busena !== null && busena !== "") {
+  if (busena !== undefined) {
     throw new ArtifactStoreError(
-      `S3ArtifactStore: kibiro "${bucket}" versijavimo būsena yra "${busena}". ` +
+      `S3ArtifactStore: kibiro "${bucket}" versijavimo būsena yra ${JSON.stringify(busena)}. ` +
+        "Priimama TIK dokumentuota neversijuoto kibiro forma (atsakymas be `Status`). " +
         "Ištrynimo garantija versijuotame kibire NEĮRODOMA: `DeleteObject` palieka " +
         "ankstesnę versiją, o erasure kelias praneštų sėkmę su išlikusia transkripcija. " +
         "Naudokite neversijuotą kibirą arba lifecycle politiką, kuri versijas šalina " +
@@ -232,9 +246,21 @@ function createS3ArtifactStore({
        * Kvietėjas gaudavo metaduomenis UŽ dokumentuoto `{ exists, bytes }` kontrakto
        * ribų — o būtent jais remiasi orphan patikra ir hidratacijos dydžio riba.
        */
-      const bytes = Number(atsakymas && atsakymas.ContentLength);
+      /**
+       * ⚠️ VALIDUOJAMA ŽALIA REIKŠMĖ, NE KONVERSIJOS REZULTATAS (Codex, #290).
+       *
+       * `Number(null)`, `Number("")` ir `Number(false)` visi duoda `0` — teisėtą
+       * sveikąjį skaičių. Tikrinant PO konversijos, netaisyklingas atsakymas
+       * virsdavo `{ exists: true, bytes: 0 }`, ir orphan patikra bei hidratacijos
+       * riba remtųsi dydžiu, kurio saugykla niekada nepranešė.
+       *
+       * AWS SDK v3 `HeadObject.ContentLength` kontraktas yra `number | undefined`,
+       * tad priimamas tik `number`. Kiekvienas kitas tipas — protokolo klaida, o
+       * ne „nulinio dydžio objektas".
+       */
+      const zalias = atsakymas ? atsakymas.ContentLength : undefined;
 
-      if (!Number.isInteger(bytes) || bytes < 0) {
+      if (typeof zalias !== "number" || !Number.isInteger(zalias) || zalias < 0) {
         throw new ArtifactStoreError(
           `S3ArtifactStore: saugykla objektui "${raktas}" grąžino netinkamą dydį. ` +
             "Tai tiekėjo protokolo klaida, ne dingęs objektas.",
@@ -242,7 +268,7 @@ function createS3ArtifactStore({
         );
       }
 
-      return { exists: true, bytes };
+      return { exists: true, bytes: zalias };
     } catch (klaida) {
       if (arNera(klaida)) return null;
       throw klaida;
@@ -271,11 +297,20 @@ function createS3ArtifactStore({
        * `TypeError` iš `for await` — kvietėjas matytų programavimo klaidą ten, kur
        * iš tikrųjų sugedo saugyklos protokolas, ir remontas eitų ne ta kryptimi.
        */
+      /**
+       * ⚠️ TIKRINAMA TA GALIMYBĖ, KURIĄ REALIAI NAUDOJA VARTOTOJAI (Codex, #290).
+       *
+       * `read()` ir `verify()` kūną vartoja per `for await`, tad `pipe()` buvimas
+       * nieko negarantuoja: `{ Body: { pipe() {} } }` praeidavo patikrą ir lūždavo
+       * žaliu `TypeError` — tiksliai tuo, ko patikra ir turėjo neleisti. Sargas,
+       * tikrinantis KITĄ savybę nei ta, kurios reikia, yra ceremonija.
+       */
       const kunas = atsakymas && atsakymas.Body;
 
-      if (!kunas || (typeof kunas[Symbol.asyncIterator] !== "function" && typeof kunas.pipe !== "function")) {
+      if (!kunas || typeof kunas[Symbol.asyncIterator] !== "function") {
         throw new ArtifactStoreError(
-          `S3ArtifactStore: saugykla objektui "${raktas}" grąžino atsakymą be skaitomo kūno.`,
+          `S3ArtifactStore: saugykla objektui "${raktas}" grąžino kūną, kurio negalima skaityti srautu ` +
+            "(nėra `Symbol.asyncIterator`).",
           KLAIDA.SAUGYKLA
         );
       }
