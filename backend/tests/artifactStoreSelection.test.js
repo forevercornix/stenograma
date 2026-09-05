@@ -6,7 +6,13 @@ const path = require("node:path");
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
-const { parinktiBackenda, sukurtiSaugykla, LEISTINI, BUTINI } = require("../utils/artifactStore/backendSelection");
+/**
+ * ⚠️ PER MODULIO ĮĖJIMĄ, NE per `backendSelection.js` tiesiogiai: vartotojai
+ * (PR-3+) kvies `require("../utils/artifactStore")`, ir testas privalo eiti tuo
+ * pačiu keliu — kitaip įėjimas galėtų nustoti eksportuoti parinkimą, o rinkinys
+ * liktų žalias.
+ */
+const { parinktiBackenda, sukurtiSaugykla, LEISTINI, BUTINI } = require("../utils/artifactStore");
 
 /**
  * ARTEFAKTŲ SAUGYKLOS PARINKIMAS (#157, PR-2).

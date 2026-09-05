@@ -46,6 +46,7 @@ body arba A1–A4 atsakymai.
 | 34 | **PR-4 skirsto pagal `reference === null`, ne pagal backend'o vardą** | peržiūra |
 | 35 | **PR-7 ataskaita skirsto pagal `nepriklausomas`, ne `ok`** — inline `ok: true` yra tikras, bet tuščias | peržiūra |
 | 36 | **`fs` `.tmp` likučiai įvardyti kaip TREČIAS to paties orphan reiškinio veidas** — sprendžiami kartu PR-4, ne taškiškai PR-2 | Codex (#290) |
+| 37 | **PR-2 parinkimo testas kviečia `require("../utils/artifactStore")`, ne `backendSelection` tiesiogiai** — vartotojai (PR-3+) eis įėjimu, tad rinkinys privalo eiti tuo pačiu; mutacija (įėjimas nustoja eksportuoti parinkimą) — 5/6 krito | įgyvendinimas |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
