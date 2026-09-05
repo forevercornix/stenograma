@@ -47,7 +47,7 @@
     "papaparse": "^5.6.0",
     "pg": "^8.23.0",
     "pg-connection-string": "^2.14.0",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "optionalDependencies": {
     "bullmq": "^6.1.2",
