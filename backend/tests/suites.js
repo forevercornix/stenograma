@@ -347,6 +347,8 @@ const functional = [
    * padengia deterministiškai.
    */
   "artifactStoreS3Config",
+  /** #157 (PR-2): inline rašymo kelias — kvitas aprašo tai, kas įrašyta. */
+  "artifactStoreInlineWrite",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
   "artifactStoreSelection",
   "erasureExportContract",

@@ -141,6 +141,70 @@ function paleistiKontrakta(vardas, paruosti) {
       assert.ok(rezultatas.bytes > 0, "nulinis dydis reikštų nutrauktą rašymą");
     });
 
+    await t.test("kvitas aprašo TAI, KAS ĮRAŠYTA — ne antrą serializaciją", async () => {
+      /**
+       * ⚠️ RIBA SKAIČIUOJA KVITĄ, IMPLEMENTACIJA NEBESERIALIZUOJA IŠ NAUJO
+       * (Codex, #290).
+       *
+       * Jei implementacija pati dar kartą paverstų PRADINĘ reikšmę baitais,
+       * tarp kvito ir įrašymo liktų langas: reikšmė gali pasikeisti (getter'is,
+       * `toJSON` su būsena, kitas gijos darbas), ir tada saugykloje gultų viena,
+       * o `checksum` aprašytų kitą. Tai vienintelė vieta, kur suma gali
+       * apibūdinti NE TAI, kas įrašyta — o būtent ja remiasi 7.6 vientisumo
+       * patikra ir PR-4 idempotencijos fast-path.
+       *
+       * ⚠️ REIKŠMĖ SVYRUOJA TIK PO DVIEJŲ SKAITYMŲ. Riba reikšmę perbėga du
+       * kartus (kanonizacija + inline stabilumo modelis), tad svyravimas nuo
+       * PIRMO skaitymo būtų atmestas dar ties riba ir šito lango neparodytų.
+       */
+      /**
+       * ⚠️ RIBOS SKAITYMŲ SKAIČIUS IŠMATUOJAMAS, NE ĮKODUOJAMAS.
+       *
+       * Riba reikšmę perbėga kelis kartus (kanonizacija + inline stabilumo
+       * modelis), ir tas skaičius yra jos vidinis reikalas. Įrašytas konstanta,
+       * jis pasentų tyliai; išmatuotas — testas persikalibruoja pats, o
+       * tvirtinimas lieka apie tai, kas iš tikrųjų svarbu: implementacija
+       * NEPRIDEDA nė vieno skaitymo.
+       */
+      const { paruostiReiksme } = require("../../utils/artifactStore/validation");
+
+      let ribosSkaitymai = 0;
+      paruostiReiksme({
+        get text() {
+          ribosSkaitymai += 1;
+          return "pastovi";
+        },
+      });
+
+      let kvietimai = 0;
+      const nestabili = {
+        get text() {
+          kvietimai += 1;
+          return kvietimai <= ribosSkaitymai ? "pirma" : "antra";
+        },
+      };
+
+      const k = await raktas();
+      const kvitas = await saugykla.put(k, nestabili);
+
+      assert.equal(
+        kvietimai,
+        ribosSkaitymai,
+        "implementacija reikšmę perskaitė DAR KARTĄ — būtent tame lange kvitas ir turinys išsiskiria"
+      );
+
+      const perskaityta = tapatybe(await saugykla.read(k));
+      assert.equal(
+        crypto.createHash("sha256").update(perskaityta, "utf8").digest("hex"),
+        kvitas.checksum,
+        "`checksum` privalo aprašyti ĮRAŠYTĄ turinį, ne tarpinę reikšmės būseną"
+      );
+      assert.equal(Buffer.byteLength(perskaityta, "utf8"), kvitas.bytes, "`bytes` — to paties turinio");
+
+      const patvirtinimas = await saugykla.verify(k, { bytes: kvitas.bytes, checksum: kvitas.checksum });
+      assert.equal(patvirtinimas.ok, true, "saugykla privalo patvirtinti savo pačios kvitą");
+    });
+
     /* ═══ 3. `head` ═══ */
 
     await t.test("head: esantis objektas grąžina dydį, nesantis - `null`", async () => {

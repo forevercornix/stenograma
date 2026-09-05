@@ -97,18 +97,24 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
     const paruosta = paruostiReiksme(reiksme);
 
     /**
-     * ⚠️ RAŠOMA PER `JSON.stringify`, NE PER KANONINĘ EILUTĘ.
+     * ⚠️ RAŠOMA RIBOS PARUOŠTA EILUTĖ, NE ANTRA SERIALIZACIJA (Codex, #290).
      *
-     * Tai SĄMONINGAI tas pats kelias, kurį naudoja `upsertResult()`: `jsonb`
-     * turinį vis tiek normalizuoja pats, tad kanoninės eilutės saugojimas nieko
-     * nepridėtų, o skirtingas kelias reikštų, kad testuojame ne tai, kas veikia
-     * produkcijoje.
+     * Ankstesnė redakcija čia iš naujo kvietė `JSON.stringify(reiksme)`, ir tai
+     * buvo VIENINTELĖ vieta, kur `checksum` galėjo aprašyti ne tai, kas įrašyta:
+     * tarp ribos skaičiavimo ir šios eilutės reikšmė spėja pasikeisti (getter'is,
+     * `toJSON` su būsena), o kvitas apie tai nieko nežino. Būtent tuo kvitu
+     * remiasi 7.6 vientisumo patikra ir PR-4 idempotencijos fast-path.
+     *
+     * ⚠️ TAI NEKEIČIA `jsonb` TURINIO. Kanoninė eilutė nuo `JSON.stringify`
+     * skiriasi tik raktų tvarka, o `jsonb` jos nesaugo (`common.js:731`) — tad
+     * produkcinis kelias lieka tas pats, kaip `upsertResult()`, o vienintelis
+     * pokytis yra tas, kad serializacija įvyksta VIENĄ kartą.
      */
     await vykdytojas.query(
       `INSERT INTO job_results (job_id, storage_type, payload, created_at)
        VALUES ($1, 'inline', $2::jsonb, now())
        ON CONFLICT (job_id) DO UPDATE SET payload = EXCLUDED.payload`,
-      [raktas, JSON.stringify(reiksme)]
+      [raktas, paruosta.kanonine]
     );
 
     return { key: raktas, reference: null, bytes: paruosta.bytes, checksum: paruosta.checksum };

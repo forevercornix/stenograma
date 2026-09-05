@@ -47,6 +47,7 @@ body arba A1–A4 atsakymai.
 | 35 | **PR-7 ataskaita skirsto pagal `nepriklausomas`, ne `ok`** — inline `ok: true` yra tikras, bet tuščias | peržiūra |
 | 36 | **`fs` `.tmp` likučiai įvardyti kaip TREČIAS to paties orphan reiškinio veidas** — sprendžiami kartu PR-4, ne taškiškai PR-2 | Codex (#290) |
 | 37 | **PR-2 parinkimo testas kviečia `require("../utils/artifactStore")`, ne `backendSelection` tiesiogiai** — vartotojai (PR-3+) eis įėjimu, tad rinkinys privalo eiti tuo pačiu; mutacija (įėjimas nustoja eksportuoti parinkimą) — 5/6 krito | įgyvendinimas |
+| 38 | **Riba paskaičiuoja kvitą, o implementacija nebeserializuoja iš naujo** — inline `put()` rašė `JSON.stringify(reiksme)` antrą kartą; tarp kvito ir įrašymo reikšmė gali pasikeisti, ir `checksum` aprašytų NE TAI, kas įrašyta | Codex (#290) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -193,7 +194,7 @@ kelias jo dar nekviečia. `inline` elgesys nepakitęs.
 
 **Paviršius** (minimalus, ne „S3 klientas"):
 ```
-put(key, value)      → { key, bytes, checksum }
+put(key, value)      → { key, reference, bytes, checksum }   // `reference` = tai, kas keliauja į `storage_key`; inline atveju `null`
 read(key)            → loginė reikšmė (ne eilutė)
 readStream(key)      → Readable
 head(key)            → { exists, bytes, checksum? } | null
