@@ -57,6 +57,7 @@ body arba A1–A4 atsakymai.
 | 45 | **`verify()` yra pilna funkcija** — nesančio objekto verdiktas neša visus laukus, `nepriklausomas` įskaitytinai; forma viena, ne trys | Codex (#290) |
 | 46 | **Viešas klaidos tekstas gaminamas iš KODO** — `JSON.parse` diagnostika neša artefakto turinio fragmentą į savininkui matomą lauką | Codex (#290) |
 | 47 | **`ARTIFACT_CORRUPT` atskiriamas nuo `ARTIFACT_NOT_FOUND`** — sugadintas objektas guli vietoje, tad remontas kitas | Codex (#290) |
+| 48 | **Plano teiginys apie `reference === null` buvo per stiprus** — inline bandymai dalijasi `job_id`, tad `ON CONFLICT DO UPDATE` perrašo nugalėtojo rezultatą prieš completion CAS. Predikatas galioja cleanup/orphan klausimui, NE „pralaimėjusio bandymo nėra" | Codex (#290) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -541,10 +542,27 @@ tinklo I/O po užraktu.
 
 `put()` grąžina `reference === null` inline atveju ir adresą external atveju. Tas
 pats predikatas, kurį PR-5 naudoja ištrynimui, dengia ir PR-4 rašymo kelią:
-`null` → išorinio objekto nėra, tad nėra nei cleanup, nei orphan, nei
-pralaimėjusio bandymo, galinčio ką nors ištrinti. Šakojimasis pagal `backend`
-vardą būtų trečia tos pačios tiesos interpretacija — užrašoma dabar, kol atrodo
-akivaizdu.
+`null` → **išorinio objekto nėra, tad nėra nei cleanup, nei orphan**. Šakojimasis
+pagal `backend` vardą būtų trečia tos pačios tiesos interpretacija — užrašoma
+dabar, kol atrodo akivaizdu.
+
+⚠️ **ANKSTESNĖ ŠIO SAKINIO REDAKCIJA BUVO KLAIDINGA, IR TAISOMA FORMULUOTĖ, NE
+GYNYBA** (Codex, #290).
+
+Ji teigė, kad `reference === null` reiškia ir „pralaimėjusio bandymo nėra". Tai
+netiesa: du bandymai tam pačiam job'ui naudoja **tą patį `job_id`**, o
+`ON CONFLICT (job_id) DO UPDATE SET payload` perrašo nugalėtojo rezultatą **dar
+prieš** completion CAS. Išorinio objekto tikrai nėra — bet svetimo rezultato
+perrašymas įvyksta, ir jokia nuoroda apie tai nieko nesako.
+
+⚠️ **IŠ TO SEKA PR-4 REIKALAVIMAS:** inline rašymas privalo vykti **toje pačioje
+transakcijoje / CAS** kaip completion, arba bandymai gauna izoliuotą saugojimą.
+Sprendimas priimamas PR-4, ne čia; PR-2 kode šito nesprendžiame.
+
+⚠️ **KĄ PREDIKATAS TOLIAU REIŠKIA:** `reference === null` galioja **cleanup ir
+orphan** klausimui (išorinio objekto nėra, tad nėra ko trinti ir nėra kam pasimesti)
+— bet NE „pralaimėjusio bandymo nėra". Riba užrašoma, kad kitas skaitytojas
+nepaimtų platesnės reikšmės iš siauresnio fakto.
 
 ⚠️ **PRE-CHECK NĖRA IR LYGYBĖS VERDIKTAS** (Codex, #289).
 
@@ -923,6 +941,14 @@ pasekme — objektas, likęs po kritusio bandymo, išgyvena job'o ištrynimą. T
 variantai užrašyti, rekomendacija yra (b), bet **sprendimas nepriimtas**.
 
 Kol jis nepriimtas, PR-4 negali prasidėti: pasirinkimas keičia rašymo kelio formą.
+
+⚠️ **ANTRAS PR-4 REIKALAVIMAS, PAAIŠKĖJĘS PR-2 PERŽIŪROJE** (Codex, #290): inline
+kelyje du bandymai dalijasi `job_id`, tad `ON CONFLICT (job_id) DO UPDATE SET
+payload` perrašo nugalėtojo rezultatą **dar prieš** completion CAS. Vadinasi
+inline rašymas privalo vykti **toje pačioje transakcijoje / CAS** kaip completion,
+arba bandymai turi gauti izoliuotą saugojimą. Tai NE orphan klausimo dalis — čia
+išorinio objekto nėra; tai lenktynių klausimas, ir jis sprendžiamas PR-4 kartu su
+I/O tvarka.
 
 **A1 — integrity kolonos eina į PR-1, ir external šakoje jos privalomos.**
 `bytes` ir `checksum` gyvena `job_results` greta reference'o; privalomumas
