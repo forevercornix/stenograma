@@ -95,13 +95,35 @@ function patikrintiRakta(raktas) {
  * `bytes` PRIVALO aprašyti tą patį, ką lygina idempotencijos kelias. Skaičiuoti
  * juos iš kitos reprezentacijos reikštų dvi tapatybes vienam rezultatui.
  */
-const NUL_ESCAPE = "\\u0000";
+/**
+ * ⚠️ „TIKRAS ESCAPE, NE TEKSTAS APIE ESCAPE" - VIENA TAISYKLĖ, NE DU SĄRAŠAI
+ * (Codex, #290).
+ *
+ * Kanoninėje eilutėje pavojingi simboliai gyvena kaip escape sekos, tad ieškoma
+ * jų. Bet `substring` paieška negali atskirti tikros sekos nuo TEKSTO, kuriame ta
+ * seka parašyta literaliai: teisėtas rezultatas (pvz. programinio kodo
+ * transkripcija) turi vieną pasvirąjį brūkšnį daugiau, ir naivi paieška sutampa
+ * nuo antrojo.
+ *
+ * ⚠️ KLAIDOS KRYPTIS BUVO PAVOJINGESNĖ, NEI ATRODO. PG tokį tekstą PRIIMA, o riba
+ * jį atmesdavo - t. y. riba buvo griežtesnė ta kryptimi, kurios matricos eilutė
+ * negina, ir rezultatas būtų nesaugotinas be jokios priežasties.
+ *
+ * Todėl nelyginio pasvirųjų brūkšnių skaičiaus taisyklė gyvena VIENOJE vietoje, o
+ * konkretūs šablonai iš jos IŠVEDAMI. Surogatams ji jau buvo; NUL jos neturėjo.
+ */
+function tikroEscapeSablonas(kunas) {
+  return new RegExp("(?:^|[^\\\\])(?:\\\\\\\\)*\\\\u" + kunas);
+}
+
+/** NUL kanoninėje eilutėje: `\u0000` su NELYGINIU pasvirųjų brūkšnių skaičiumi. */
+const NUL_ESCAPE = tikroEscapeSablonas("0000");
 
 /**
  * Neporinis surogatas kanoninėje eilutėje: `\uD800`-`\uDFFF` su NELYGINIU
  * pasvirųjų brūkšnių skaičiumi (tikras escape, ne tekstas apie escape).
  */
-const VIENISAS_SUROGATAS = /(?:^|[^\\])(?:\\\\)*\\u[dD][89a-fA-F][0-9a-fA-F]{2}/;
+const VIENISAS_SUROGATAS = tikroEscapeSablonas("[dD][89a-fA-F][0-9a-fA-F]{2}");
 
 function paruostiReiksme(reiksme) {
   /**
@@ -122,6 +144,30 @@ function paruostiReiksme(reiksme) {
     throw struktūrinė(
       "ArtifactStore: `undefined` ir `null` reiškia REZULTATO NEBUVIMĄ, ne saugotiną reikšmę " +
         "(`common.js` `rezultatoNera()`). `null` laukai objekto viduje leidžiami.",
+      KLAIDA.REIKSME
+    );
+  }
+
+  /**
+   * ⚠️ NE BAIGTINIS SKAIČIUS VIRŠUTINIAME LYGYJE = REZULTATO NEBUVIMAS
+   * (Codex, #290).
+   *
+   * `NaN`, `Infinity` ir `-Infinity` pro ankstesnį sargą praeidavo, o
+   * kanonizavimas juos paverčia `null` (išmatuota: `kanoninisRezultatas(NaN)`
+   * grąžina `"null"`). Vadinasi saugykloje atsidurtų literalus `null` - tiksliai
+   * ta būsena, kurią sargas ir uždarė: `completed` be rezultato, po kurio
+   * terminalus valymas ištrina šaltinio audio.
+   *
+   * ⚠️ VIDUJE ESANTIS `NaN` NEATMETAMAS. Jis virsta `null` VIENODAI visuose
+   * backend'uose, tad tapatybė lieka viena (`NUOSTOLINGI` klasė). Atmesti jį
+   * reikštų pereiti visą struktūrą - antrą kanonizavimo kopiją, kurios D1
+   * eksplicitiškai vengia. Skirtumas ne kosmetinis: viršutiniame lygyje dingsta
+   * REZULTATAS, viduje - vienas laukas.
+   */
+  if (typeof reiksme === "number" && !Number.isFinite(reiksme)) {
+    throw struktūrinė(
+      "ArtifactStore: `NaN` ir begalybė kanonizuojamos į `null`, o tai reiškia REZULTATO " +
+        "NEBUVIMĄ (`common.js` `rezultatoNera()`), ne saugotiną reikšmę.",
       KLAIDA.REIKSME
     );
   }
@@ -147,7 +193,7 @@ function paruostiReiksme(reiksme) {
    * kopija. Po jo pakanka vienos patikros: `JSON.stringify` NUL simbolį paverčia
    * ESCAPE seka, tad ieškoma būtent jos, o ne paties simbolio.
    */
-  if (kanonine.includes(NUL_ESCAPE)) {
+  if (NUL_ESCAPE.test(kanonine)) {
     throw struktūrinė(
       "ArtifactStore: NUL simbolis nepalaikomas - PostgreSQL `jsonb` jo nepriima, " +
         "tad jis neįeina į bendrą backend'ų reikšmių aibę (#157 D1).",

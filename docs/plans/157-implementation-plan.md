@@ -50,6 +50,9 @@ body arba A1–A4 atsakymai.
 | 38 | **Riba paskaičiuoja kvitą, o implementacija nebeserializuoja iš naujo** — inline `put()` rašė `JSON.stringify(reiksme)` antrą kartą; tarp kvito ir įrašymo reikšmė gali pasikeisti, ir `checksum` aprašytų NE TAI, kas įrašyta | Codex (#290) |
 | 39 | **`fs` riba taikoma per VARTUS, ne per operaciją** — `realpath` darė tik `head`/`put`; `delete` symlink'ą praleisdavo. Vienas resolveris; `leksinisKelias()` už jo nekviečiamas niekur | Codex (#290) |
 | 40 | **Raktų matrica išvedama iš saugyklos paviršiaus** — ranka surašyta buvo praleidusi `readStream`; nauja operacija be eilutės sustabdo rinkinį | Codex (#290) |
+| 41 | **Taisyklė vietoj sąrašo:** „tikras escape, ne tekstas apie escape" gyvena vienoje vietoje; NUL `includes` patikra atmesdavo teisėtą tekstą, kurį PG priima | Codex (#290) |
+| 42 | **`NaN`/`±Infinity` viršutiniame lygyje atmetami** — kanonizavimas juos paverčia `null`, t. y. „rezultato nebuvimu"; viduje esantys lieka nuostolingi, bet vieningi | Codex (#290) |
+| 43 | **`jsonb` kandidatų aprėptis įvardyta kaip REPREZENTATYVI** (§12.1), ir kiekviena ribos taisyklė gauna teisėtą kaimyną — antra kryptis anksčiau nebuvo matuojama | Codex (#290) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 

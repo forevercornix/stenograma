@@ -38,16 +38,35 @@ const NUL = String.fromCharCode(0);
 const VIENISAS_SUROGATAS = String.fromCharCode(0xd800);
 
 /**
- * Kandidatai: kiekvienas turi būti arba abiejų priimtas, arba PG atmestas kartu
- * su ribos atmetimu. Trečio derinio (riba praleidžia, PG atmeta) būti negali.
+ * KANDIDATAI - REPREZENTATYVI, NE IŠSAMI APRĖPTIS (§12.1, Codex #290).
+ *
+ * ⚠️ ŠIS SĄRAŠAS NEĮRODO VISUOTINĖS GARANTIJOS. `jsonb` priėmimo sritis yra
+ * begalinė; čia paimta po vieną atstovą kiekvienai ribos taisyklei ir po vieną
+ * teisėtą reikšmę greta jos. Tai duoda REGRESIJOS aptikimą (pasikeitus PG ar
+ * ribai, atstovas krenta), o ne pilną srities įrodymą - ir taip užrašyta
+ * matricoje, kad eilutė neteigtų daugiau, nei testas daro.
+ *
+ * ⚠️ KIEKVIENA RIBOS TAISYKLĖ TURI PORĄ: draudžiama reikšmė IR jos teisėtas
+ * kaimynas (tekstas, kuriame ta pati seka parašyta literaliai). Be poros būtų
+ * matuojama tik viena kryptis - „riba ne švelnesnė už PG", o antroji („riba be
+ * reikalo negriežtesnė") liktų nepatikrinta. Būtent joje ir buvo defektas:
+ * literalus NUL escape PG praeina, o substring patikra jį atmesdavo.
+ *
+ * `teisetas: true` = reikšmė, kurią PRIVALO priimti abi pusės.
  */
 const KANDIDATAI = [
-  { vardas: "paprastas tekstas", reiksme: { t: "labas" } },
-  { vardas: "lietuviški rašmenys", reiksme: { t: "ąčęėįšųūž" } },
-  { vardas: "emoji (pilna pora)", reiksme: { t: "\u{1F469}" } },
+  { vardas: "paprastas tekstas", reiksme: { t: "labas" }, teisetas: true },
+  { vardas: "lietuviški rašmenys", reiksme: { t: "ąčęėįšųūž" }, teisetas: true },
+  { vardas: "emoji (pilna pora)", reiksme: { t: "\u{1F469}" }, teisetas: true },
+  { vardas: "gilus objektas", reiksme: { a: { b: [1, null, "x"] } }, teisetas: true },
+
+  /** NUL taisyklė: tikras simbolis ir tekstas, kuriame seka parašyta literaliai. */
   { vardas: "NUL tekste", reiksme: { t: `a${NUL}b` } },
+  { vardas: "literalus NUL escape tekste", reiksme: { t: "a \\u0000 b" }, teisetas: true },
+
+  /** Surogato taisyklė: ta pati pora. */
   { vardas: "vienišas surogatas", reiksme: { t: `a${VIENISAS_SUROGATAS}b` } },
-  { vardas: "gilus objektas", reiksme: { a: { b: [1, null, "x"] } } },
+  { vardas: "literalus surogato escape tekste", reiksme: { t: "a \\ud800 b" }, teisetas: true },
 ];
 
 async function pg(url, sql, params = []) {
@@ -104,7 +123,13 @@ test("#157 PR-2: ribos priimtų reikšmių aibė TELPA į `jsonb` aibę", { skip
       pgKlaida = klaida.code;
     }
 
-    verdiktai.push({ vardas: kandidatas.vardas, ribaPriima, pgPriima, pgKlaida });
+    verdiktai.push({
+      vardas: kandidatas.vardas,
+      teisetas: Boolean(kandidatas.teisetas),
+      ribaPriima,
+      pgPriima,
+      pgKlaida,
+    });
   }
 
   await t.test("riba niekada nėra ŠVELNESNĖ už `jsonb`", () => {
@@ -114,6 +139,25 @@ test("#157 PR-2: ribos priimtų reikšmių aibė TELPA į `jsonb` aibę", { skip
       pazeidimai.map((v) => `${v.vardas} (PG: ${v.pgKlaida})`),
       [],
       "riba praleido reikšmę, kurios PG nepriima - inline diegimas gautų klaidą PO sėkmingo `put()`"
+    );
+  });
+
+  await t.test("riba be reikalo nėra GRIEŽTESNĖ už `jsonb` ten, kur reikšmė teisėta", () => {
+    /**
+     * ⚠️ ANTRA KRYPTIS, IR JI TURĖJO DEFEKTĄ (Codex, #290).
+     *
+     * Ankstesnis rinkinys matavo tik „riba ne švelnesnė už PG". Priešinga kryptis
+     * kainuoja ne mažiau: teisėtas rezultatas, kurį PG priima, o riba atmeta,
+     * niekada nebus išsaugotas - job'as krinta su `ARTIFACT_VALUE_UNSUPPORTED`
+     * dėl teksto, kuris yra visiškai normalus (programinio kodo transkripcija su
+     * literalia escape seka).
+     */
+    const beReikalo = verdiktai.filter((v) => v.teisetas && v.pgPriima && !v.ribaPriima);
+
+    assert.deepEqual(
+      beReikalo.map((v) => v.vardas),
+      [],
+      "riba atmetė reikšmę, kurią PG priima ir kuri yra teisėtas rezultatas"
     );
   });
 

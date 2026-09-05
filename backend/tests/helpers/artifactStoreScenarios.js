@@ -62,6 +62,19 @@ const GALIOJANTYS = Object.freeze([
     reiksme: { t: "eilutė su \\ud800 viduje" },
   },
   {
+    /**
+     * ⚠️ KONTROLĖ NUL SARGUI, IR JI RADO DEFEKTĄ (Codex, #290).
+     *
+     * Substring patikra (`kanonine.includes(...)`) šitą tekstą ATMESDAVO:
+     * kanoninėje eilutėje jis atrodo kaip dvigubas pasvirasis brūkšnys, o naivi
+     * paieška sutampa nuo antrojo. PG tokią reikšmę PRIIMA — vadinasi riba buvo
+     * griežtesnė ta kryptimi, kurios matricos eilutė negina: teisėtas rezultatas
+     * (pvz. programinio kodo transkripcija) būtų atmestas kaip nesaugotinas.
+     */
+    vardas: "tekstas, kuriame literaliai parašyta NUL escape seka",
+    reiksme: { t: "eilutė su \\u0000 viduje" },
+  },
+  {
     vardas: "surogatinės poros ir jungtukas",
     reiksme: { text: "\u{1F469}‍\u{1F4BB} protokolas" },
   },
@@ -123,6 +136,23 @@ const ATMETAMI = Object.freeze([
       })(),
     },
   },
+  /**
+   * ⚠️ NE BAIGTINĖS REIKŠMĖS VIRŠUTINIAME LYGYJE — TA PATI KLASĖ KAIP `null`.
+   *
+   * `NaN`, `Infinity` ir `-Infinity` praeidavo `null`/`undefined` sargą, o
+   * kanonizavimas juos paverčia `null` (išmatuota). Vadinasi saugykla gautų
+   * literalų `null` — tiksliai tą būseną, kurią sargas ir uždarė: job'as taptų
+   * `completed` be rezultato, terminalus valymas ištrintų šaltinio audio, o
+   * klientas neturėtų nieko.
+   *
+   * ⚠️ VIDUJE ESANTIS `NaN` NEATMETAMAS — jis virsta `null` VIENODAI visuose
+   * backend'uose, tad tai nuostolinga, bet vieninga reikšmė (žr. `NUOSTOLINGI`).
+   * Skirtumas ne kosmetinis: viršutiniame lygyje dingsta REZULTATAS, viduje —
+   * vienas laukas.
+   */
+  { vardas: "viršutinio lygio NaN", reiksme: NaN },
+  { vardas: "viršutinio lygio Infinity", reiksme: Infinity },
+  { vardas: "viršutinio lygio -Infinity", reiksme: -Infinity },
   {
     vardas: "ciklinė nuoroda",
     reiksme: (() => {
@@ -163,6 +193,12 @@ const NUOSTOLINGI = Object.freeze([
     vardas: "funkcija masyve VIRSTA null",
     reiksme: { segments: [1, () => 1] },
     virsta: { segments: [1, null] },
+  },
+  {
+    /** ⚠️ Viduje esantis `NaN` prarandamas VIENODAI — todėl ne atmetimas. */
+    vardas: "NaN objekto lauke VIRSTA null",
+    reiksme: { n: NaN, m: 1 },
+    virsta: { n: null, m: 1 },
   },
   {
     vardas: "toJSON NUOSAVAME lauke veikia vienodai abiem keliais",
