@@ -69,6 +69,15 @@ const KLAIDA = Object.freeze({
    * tyrimo. Vienas kodas abiem verstų operatorių ieškoti to, kas guli po ranka.
    */
   SUGADINTAS: "ARTIFACT_CORRUPT",
+  /**
+   * ⚠️ TIEKĖJO PROTOKOLO KLAIDA NĖRA NEI „nėra", NEI „sugadinta" (Codex, #290).
+   *
+   * Sėkmingas atsakymas be `ContentLength` ar be kūno reiškia, kad sugedo SAUGYKLA,
+   * o ne artefaktas. Suplakus su „nėra", orphan patikra imtų „taisyti" objektus,
+   * kurie ramiai guli vietoje; suplakus su „sugadinta" — operatorius tirtų turinį,
+   * nors turinio niekas net nepamatė.
+   */
+  SAUGYKLA: "ARTIFACT_STORAGE_PROTOCOL",
 });
 
 /**
@@ -418,6 +427,18 @@ function nesancioVerdiktas(nepriklausomas) {
   return { ok: false, exists: false, bytes: null, checksum: null, nepriklausomas };
 }
 
+/**
+ * NEVERIFIKUOJAMO OBJEKTO VERDIKTAS — objektas YRA, bet patikrinti jo negalime.
+ *
+ * ⚠️ TAI NĖRA NEI „nėra", NEI „nesutampa". Objektas egzistuoja, bet viršija patikimą
+ * dydį (žr. `s3Store.verify`), tad skaitymas nutraukiamas — kitaip vientisumo
+ * patikra taptų atminties gedimo šaltiniu būtent tame kelyje, kuriam ji skirta.
+ * `ok: false` yra fail-closed: kvietėjas negauna patvirtinimo, kurio neturime.
+ */
+function neverifikuojamasVerdiktas(nepriklausomas) {
+  return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas };
+}
+
 /** Rastam objektui: palyginimas su lūkesčiu, ta pati forma kaip `nesancioVerdiktas`. */
 function vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas }) {
   const lauktas = normalizuotiLaukima(laukiama);
@@ -516,5 +537,6 @@ module.exports = {
   atkurtiReiksme,
   normalizuotiLaukima,
   nesancioVerdiktas,
+  neverifikuojamasVerdiktas,
   vientisumoVerdiktas,
 };

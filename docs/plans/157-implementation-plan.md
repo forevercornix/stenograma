@@ -313,7 +313,7 @@ paruoštą ženklą ir klasifikaciją, ne garantiją.
 **§9.1:** startup validacijos testas paleidžia **tikrą** `selectBackend({ARTIFACT_STORE_BACKEND:"fs"})` be root konfigūracijos ir laukia `throw`; pašalinus patikrą — grąžintų `inline` ir testas **krenta**. Kontrolė: be `ARTIFACT_STORE_BACKEND` startas `inline` režimu **privalo praeiti** (inline nėra fallback, bet yra teisėtas numatytasis).
 
 ⚠️ **UNVERIFIED:** `S3ArtifactStore` elgesys. Vietoje neįrodomas.
-`REQUIRE_S3=1 MINIO_ENDPOINT=... npm run test:postgres` (arba naujas `test:s3`) —
+`REQUIRE_MINIO=1 MINIO_ENDPOINT=... npm run test:s3` —
 komanda įvardyta PR aprašyme, rezultatas — CI.
 
 ---
@@ -920,7 +920,7 @@ visada-„fail" ir taip pat nieko neįrodytų.
 | Kriterijus | Kodėl | Kas jį uždarytų |
 |---|---|---|
 | Visi `postgresStore` keliai | Barjeras uždarytas; `DATABASE_URL` vietoje nėra | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
-| `S3ArtifactStore` | Reikia MinIO | `docker compose -f docker-compose.minio.yml up -d && REQUIRE_S3=1 npm run test:s3` |
+| `S3ArtifactStore` | Reikia MinIO | `docker compose -f docker-compose.minio.yml up -d && REQUIRE_MINIO=1 npm run test:s3` |
 | I/O ne po užraktu | Reikia dviejų tikrų jungčių | tas pats `test:postgres` |
 | Lenktynių testas | Vienas žalias paleidimas nieko neįrodo | N kartojimų CI; verdiktas „nepaneigta" |
 | Hidratacijos nauda dydžiu | Reikia realaus duomenų kiekio | nematuojama šiame darbe; įvardijama kaip riba |

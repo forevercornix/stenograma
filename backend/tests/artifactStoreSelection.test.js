@@ -101,25 +101,60 @@ test("nežinomas backend'as KRENTA su galimų sąrašu", () => {
   }
 });
 
-test("sukurtiSaugykla grąžina TĄ PATĮ paviršių visiems backend'ams", () => {
+test("sukurtiSaugykla ATMETA nežinomą backend'ą — allowlist'as neapeinamas", async () => {
+  /**
+   * ⚠️ FACTORY NETURI SAVO NUMATYTOJO KELIO (Codex, #290).
+   *
+   * Anksčiau paskutinė šaka buvo besąlyginė S3: `sukurtiSaugykla({ backend: "gcs" })`
+   * su galiojančiais S3 kintamaisiais TYLIAI sukurdavo S3 saugyklą ir apeidavo
+   * `parinktiBackenda()` allowlist'ą — rezultatai iškeliautų ne ten, kur mano
+   * operatorius. Aibė viena (`LEISTINI`), ir abu keliai remiasi ja.
+   */
+  const s3Aplinka = {
+    ARTIFACT_S3_BUCKET: "b",
+    ARTIFACT_S3_REGION: "us-east-1",
+    ARTIFACT_S3_ACCESS_KEY: "a",
+    ARTIFACT_S3_SECRET_KEY: "s",
+  };
+
+  for (const backend of ["gcs", "S3", "", null, undefined, "fs "]) {
+    await assert.rejects(
+      () => sukurtiSaugykla({ backend, env: s3Aplinka }),
+      (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID",
+      `${JSON.stringify(backend)}: privalo būti atmestas, o ne tyliai tapti S3`
+    );
+  }
+});
+
+test("sukurtiSaugykla grąžina TĄ PATĮ paviršių visiems backend'ams", async () => {
   /**
    * ⚠️ PAVIRŠIAUS PARITETAS TIKRINAMAS ČIA, o elgesys - kontrakto rinkinyje.
    * Be šito trūkstamas metodas paaiškėtų tik pirmo kvietimo metu produkcijoje.
    */
   const butini = ["put", "read", "readStream", "head", "verify", "delete"];
 
+  /**
+   * ⚠️ S3 ČIA KURIAMAS TIESIOGIAI, NE PER FACTORY.
+   *
+   * Factory S3 atveju LAUKIA versijavimo patikros (fail-closed startas), o ji
+   * reikalauja tinklo. Paviršiaus paritetas yra formos klausimas, tad tinklo
+   * priklausomybė čia būtų netikras testas; startą tikrina
+   * `artifactStoreS3Protocol` ir MinIO rinkinys.
+   */
+  const { createS3ArtifactStore } = require("../utils/artifactStore/s3Store");
+
   const saugyklos = [
-    sukurtiSaugykla({ backend: "inline", vykdytojas: { query: async () => ({ rows: [] }) } }),
-    sukurtiSaugykla({ backend: "fs", env: { ARTIFACT_FS_ROOT: path.join(os.tmpdir(), "artefaktai") } }),
-    sukurtiSaugykla({
-      backend: "s3",
-      env: {
-        ARTIFACT_S3_BUCKET: "b",
-        ARTIFACT_S3_REGION: "us-east-1",
-        ARTIFACT_S3_ACCESS_KEY: "a",
-        ARTIFACT_S3_SECRET_KEY: "s",
-        ARTIFACT_S3_ENDPOINT: "http://127.0.0.1:9000",
-      },
+    await sukurtiSaugykla({ backend: "inline", vykdytojas: { query: async () => ({ rows: [] }) } }),
+    await sukurtiSaugykla({
+      backend: "fs",
+      env: { ARTIFACT_FS_ROOT: path.join(os.tmpdir(), "artefaktai") },
+    }),
+    createS3ArtifactStore({
+      bucket: "b",
+      region: "us-east-1",
+      accessKeyId: "a",
+      secretAccessKey: "s",
+      endpoint: "http://127.0.0.1:9000",
     }),
   ];
 

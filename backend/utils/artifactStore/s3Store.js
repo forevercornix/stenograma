@@ -7,8 +7,11 @@ const {
   paruostiReiksme,
   atkurtiReiksme,
   nesancioVerdiktas,
+  neverifikuojamasVerdiktas,
+  normalizuotiLaukima,
   vientisumoVerdiktas,
 } = require("./validation");
+const { getLimits, LIMIT_KIND } = require("../resultLimits");
 
 /**
  * `S3ArtifactStore` - artefaktai S3-compatible objektų saugykloje (#157, PR-2).
@@ -69,11 +72,31 @@ async function patikrintiVersijavima(klientas, bucket) {
   const { GetBucketVersioningCommand } = require("@aws-sdk/client-s3");
 
   const atsakymas = await klientas.send(new GetBucketVersioningCommand({ Bucket: bucket }));
-  const busena = atsakymas && atsakymas.Status;
 
-  if (busena === "Enabled" || busena === "Suspended") {
+  /**
+   * ⚠️ PRIIMAMA TIK DOKUMENTUOTA NEVERSIJUOTO KIBIRO FORMA (Codex, #290).
+   *
+   * Ankstesnė redakcija atmesdavo `Enabled` ir `Suspended`, o VISKĄ KITĄ laikydavo
+   * saugiu: trūkstamas atsakymas, `null`, tuščias objektas ar būsimas `Status`
+   * (pvz. tiekėjo praplėtimas) praeidavo kaip „neversijuota". Tai fail-open
+   * būtent ten, kur sprendžiama, ar ištrynimas gali būti PATVIRTINTAS.
+   *
+   * AWS ir S3-compatible saugyklos niekada neversijuotam kibirui grąžina atsakymą
+   * BE `Status`. Tik ši forma ir priimama; visa kita — startas neleidžiamas.
+   */
+  if (!atsakymas || typeof atsakymas !== "object") {
     throw new ArtifactStoreError(
-      `S3ArtifactStore: kibiras "${bucket}" yra versijuotas (${busena}). ` +
+      `S3ArtifactStore: kibiro "${bucket}" versijavimo būsenos nustatyti nepavyko ` +
+        "(tuščias atsakymas). Ištrynimo garantija nepatikrinta, tad startas neleidžiamas.",
+      "ARTIFACT_CONFIG_INVALID"
+    );
+  }
+
+  const busena = atsakymas.Status;
+
+  if (busena !== undefined && busena !== null && busena !== "") {
+    throw new ArtifactStoreError(
+      `S3ArtifactStore: kibiro "${bucket}" versijavimo būsena yra "${busena}". ` +
         "Ištrynimo garantija versijuotame kibire NEĮRODOMA: `DeleteObject` palieka " +
         "ankstesnę versiją, o erasure kelias praneštų sėkmę su išlikusia transkripcija. " +
         "Naudokite neversijuotą kibirą arba lifecycle politiką, kuri versijas šalina " +
@@ -82,10 +105,22 @@ async function patikrintiVersijavima(klientas, bucket) {
     );
   }
 
-  return { versijavimas: busena || "Disabled" };
+  return { versijavimas: "Disabled" };
 }
 
-function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAccessKey, forcePathStyle = true } = {}) {
+/**
+ * @param {object} nustatymai
+ * @param {object} [nustatymai.klientas] TESTO SEAMAS — žr. komentarą prie `klientas`.
+ */
+function createS3ArtifactStore({
+  bucket,
+  endpoint,
+  region,
+  accessKeyId,
+  secretAccessKey,
+  forcePathStyle = true,
+  klientas: pateiktasKlientas = null,
+} = {}) {
   const truksta = Object.entries({ bucket, region, accessKeyId, secretAccessKey })
     .filter(([, reiksme]) => typeof reiksme !== "string" || reiksme.trim() === "")
     .map(([vardas]) => vardas);
@@ -100,7 +135,17 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
   const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } =
     require("@aws-sdk/client-s3");
 
-  const klientas = new S3Client({
+  /**
+   * ⚠️ KLIENTO ĮTERPIMAS YRA UŽRAŠYTAS TESTO SEAMAS.
+   *
+   * Tiekėjo protokolo gedimų (atsakymas be `ContentLength`, be kūno, nežinoma
+   * versijavimo būsena) tikra saugykla pagal užsakymą negamina — o būtent jie yra
+   * fail-closed elgesio esmė. Be šio seamo tos šakos liktų netikrintos arba
+   * tikrinamos ne per tą patį įėjimą, kurį naudoja produkcija.
+   *
+   * Numatytuoju atveju klientas kuriamas čia pat, tad produkcinis kelias nesikeičia.
+   */
+  const klientas = pateiktasKlientas || new S3Client({
     region,
     credentials: { accessKeyId, secretAccessKey },
     /** `endpoint` neprivalomas: be jo klientas eina į tikrą AWS. */
@@ -115,8 +160,37 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
     responseChecksumValidation: CHECKSUM_REZIMAS,
   });
 
+  /**
+   * SAUGYKLA NENAUDOJAMA, KOL POLITIKA NEPATIKRINTA (Codex P1, #290).
+   *
+   * ⚠️ PATIKRA, KURIOS NIEKAS NEKVIEČIA, YRA DOKUMENTACIJA, NE SARGAS.
+   *
+   * `patikrintiSaugykla()` egzistavo kaip eksportuotas metodas, o factory grąžindavo
+   * saugyklą jo nė nepalietusi — reklamuotas fail-closed startas neįvykdavo NIEKADA,
+   * ir `delete()` galėjo patvirtinti ištrynimą versijuotame kibire, kur ankstesnė
+   * transkripcijos versija lieka pasiekiama.
+   *
+   * Todėl patikra yra KIEKVIENOS operacijos sąlyga, o ne starto ceremonija:
+   * konstruktoriaus apėjimas (tiesioginis `createS3ArtifactStore()`) jos nebeapeina.
+   * Rezultatas įsimenamas — tinklo kaina sumokama vieną kartą; klaida NEĮSIMENAMA,
+   * kad laikinas tinklo gedimas nepaverstų saugyklos visam laikui sugedusia.
+   */
+  let politikaPatikrinta = null;
+
+  async function uztikrintiPolitika() {
+    if (!politikaPatikrinta) {
+      politikaPatikrinta = patikrintiVersijavima(klientas, bucket).catch((klaida) => {
+        politikaPatikrinta = null;
+        throw klaida;
+      });
+    }
+
+    return politikaPatikrinta;
+  }
+
   async function put(raktas, reiksme) {
     patikrintiRakta(raktas);
+    await uztikrintiPolitika();
     const paruosta = paruostiReiksme(reiksme);
 
     await klientas.send(
@@ -137,6 +211,7 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
 
   async function head(raktas) {
     patikrintiRakta(raktas);
+    await uztikrintiPolitika();
 
     try {
       const atsakymas = await klientas.send(new HeadObjectCommand({ Bucket: bucket, Key: raktas }));
@@ -149,7 +224,25 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
        * `checksum`, `verify()` lygintų dvi skirtingas prasmes ir kartais
        * „patvirtintų" nesutampantį objektą.
        */
-      return { exists: true, bytes: Number(atsakymas.ContentLength) };
+      /**
+       * ⚠️ TIEKĖJO ATSAKYMAS NĖRA KONTRAKTAS, KOL NEPATIKRINTAS (Codex, #290).
+       *
+       * Sėkmingas `HeadObject` be `ContentLength` (ar su netekstiniu dydžiu) duodavo
+       * `Number(undefined)` = `NaN`, o `head()` vis tiek skelbdavo `exists: true`.
+       * Kvietėjas gaudavo metaduomenis UŽ dokumentuoto `{ exists, bytes }` kontrakto
+       * ribų — o būtent jais remiasi orphan patikra ir hidratacijos dydžio riba.
+       */
+      const bytes = Number(atsakymas && atsakymas.ContentLength);
+
+      if (!Number.isInteger(bytes) || bytes < 0) {
+        throw new ArtifactStoreError(
+          `S3ArtifactStore: saugykla objektui "${raktas}" grąžino netinkamą dydį. ` +
+            "Tai tiekėjo protokolo klaida, ne dingęs objektas.",
+          KLAIDA.SAUGYKLA
+        );
+      }
+
+      return { exists: true, bytes };
     } catch (klaida) {
       if (arNera(klaida)) return null;
       throw klaida;
@@ -166,10 +259,28 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
 
   async function readStream(raktas) {
     patikrintiRakta(raktas);
+    await uztikrintiPolitika();
 
     try {
       const atsakymas = await klientas.send(new GetObjectCommand({ Bucket: bucket, Key: raktas }));
-      return atsakymas.Body;
+
+      /**
+       * ⚠️ SĖKMINGAS ATSAKYMAS BE KŪNO YRA PROTOKOLO KLAIDA (Codex, #290).
+       *
+       * Grąžinus jį neapžiūrėtą, `read()` ir `verify()` lūžtų vėliau su žaliu
+       * `TypeError` iš `for await` — kvietėjas matytų programavimo klaidą ten, kur
+       * iš tikrųjų sugedo saugyklos protokolas, ir remontas eitų ne ta kryptimi.
+       */
+      const kunas = atsakymas && atsakymas.Body;
+
+      if (!kunas || (typeof kunas[Symbol.asyncIterator] !== "function" && typeof kunas.pipe !== "function")) {
+        throw new ArtifactStoreError(
+          `S3ArtifactStore: saugykla objektui "${raktas}" grąžino atsakymą be skaitomo kūno.`,
+          KLAIDA.SAUGYKLA
+        );
+      }
+
+      return kunas;
     } catch (klaida) {
       if (arNera(klaida)) {
         throw new ArtifactStoreError(`S3ArtifactStore: objekto "${raktas}" nėra.`, KLAIDA.NERASTA);
@@ -179,30 +290,61 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
   }
 
   async function verify(raktas, laukiama = {}) {
-    let buferis;
+    /**
+     * ⚠️ VIENTISUMO PATIKRA NEBUFERINA VISO OBJEKTO (Codex, #290).
+     *
+     * Ankstesnė redakcija kaupė visus gabalus ir dar kartą juos dubliavo
+     * `Buffer.concat()`. Objektas, pakeistas ar sugadintas į daug didesnį už
+     * persistintą `bytes`, išsemtų atkūrimo procesą BŪTENT tame kelyje, kuris
+     * sugadinimą ir turi aptikti — patikra taptų savo pačios gedimo šaltiniu.
+     *
+     * Dabar skaičiuojami baitai ir atnaujinama maiša gabalas po gabalo, o skaitymas
+     * nutraukiamas peržengus patikimą dydį. Riba: persistintas lūkestis, o jo
+     * nesant — `MAX_RESULT_BYTES` (ta pati, kurią gina hidratacija).
+     */
+    const lauktas = normalizuotiLaukima(laukiama);
+    const riba =
+      lauktas.bytes === null ? getLimits()[LIMIT_KIND.RESULT_BYTES] : lauktas.bytes;
+
+    let srautas;
     try {
-      const srautas = await readStream(raktas);
-      const gabalai = [];
-      for await (const gabalas of srautas) gabalai.push(Buffer.from(gabalas));
-      buferis = Buffer.concat(gabalai);
+      srautas = await readStream(raktas);
     } catch (klaida) {
       if (klaida.code === KLAIDA.NERASTA) return nesancioVerdiktas(true);
       throw klaida;
     }
 
-    /**
-     * ⚠️ SKAITOMAS VISAS OBJEKTAS, IR TAI SĄMONINGA KAINA. `ETag` netinka (žr.
-     * `head()`), tad vientisumą galima patvirtinti tik perskaičius. Būtent dėl
-     * to `verify()` metadata-only keliuose DRAUDŽIAMAS.
-     */
-    const checksum = crypto.createHash("sha256").update(buferis).digest("hex");
-    const bytes = buferis.byteLength;
+    const maisa = crypto.createHash("sha256");
+    let bytes = 0;
+    let perzengta = false;
 
-    return vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas: true });
+    for await (const gabalas of srautas) {
+      const dalis = Buffer.from(gabalas);
+      bytes += dalis.byteLength;
+
+      if (bytes > riba) {
+        perzengta = true;
+        /** Nutraukiame skaitymą: likusi objekto dalis mūsų atminties nebeliečia. */
+        if (typeof srautas.destroy === "function") srautas.destroy();
+        break;
+      }
+
+      maisa.update(dalis);
+    }
+
+    if (perzengta) return neverifikuojamasVerdiktas(true);
+
+    return vientisumoVerdiktas({
+      laukiama,
+      bytes,
+      checksum: maisa.digest("hex"),
+      nepriklausomas: true,
+    });
   }
 
   async function del(raktas) {
     patikrintiRakta(raktas);
+    await uztikrintiPolitika();
 
     /**
      * ⚠️ S3 `DeleteObject` NESANČIAM RAKTUI GRĄŽINA SĖKMĘ, tad „ar buvo" reikia

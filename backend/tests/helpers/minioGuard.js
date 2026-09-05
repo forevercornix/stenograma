@@ -16,13 +16,26 @@
  */
 
 const MINIO_ENDPOINT = process.env.MINIO_ENDPOINT;
-const REQUIRED = process.env.REQUIRE_MINIO === "1";
+
+/**
+ * ⚠️ PRIIMAMI ABU VARDAI, IR TAI NE PATOGUMAS (Codex, #290).
+ *
+ * Planas dokumentavo `REQUIRE_S3=1`, o implementacija tikrino `REQUIRE_MINIO` —
+ * dokumentuota patikros komanda praleisdavo VIENINTELĮ S3 rinkinį ir vis tiek
+ * baigdavosi sėkme. Sargas, kurio vardas priklauso nuo to, kurį dokumentą skaitei,
+ * nėra sargas.
+ *
+ * Autoritetingas vardas yra `REQUIRE_MINIO` (jį naudoja CI), bet `REQUIRE_S3` irgi
+ * priimamas: klysti privalo SAUGIA kryptimi — geriau papildomas gedimas, nei tylus
+ * praleidimas.
+ */
+const REQUIRED = process.env.REQUIRE_MINIO === "1" || process.env.REQUIRE_S3 === "1";
 
 if (REQUIRED && !MINIO_ENDPOINT) {
   throw new Error(
-    "REQUIRE_MINIO=1 nustatytas, bet MINIO_ENDPOINT nėra. S3 integraciniai testai " +
-      "būtų praleisti tyliai, o CI liktų žalias jų nepaleidęs. Nustatykite " +
-      "MINIO_ENDPOINT arba nuimkite REQUIRE_MINIO."
+    "REQUIRE_MINIO=1 (arba REQUIRE_S3=1) nustatytas, bet MINIO_ENDPOINT nėra. " +
+      "S3 integraciniai testai būtų praleisti tyliai, o CI liktų žalias jų nepaleidęs. " +
+      "Nustatykite MINIO_ENDPOINT arba nuimkite vėliavą."
   );
 }
 

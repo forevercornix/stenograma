@@ -355,6 +355,8 @@ const functional = [
   "artifactStoreMessages",
   /** #157 (PR-2): kodekas — viena reikšmių sritis abiem kryptim + raktų pernešamumas. */
   "artifactStoreCodec",
+  /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
+  "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
   "artifactStoreSelection",
   "erasureExportContract",

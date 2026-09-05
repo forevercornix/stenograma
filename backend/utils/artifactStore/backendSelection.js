@@ -73,7 +73,7 @@ function parinktiBackenda(env = process.env) {
  * `jobStore`/`postgresStore` sluoksnis. Antras pool'as tam pačiam procesui
  * reikštų antrą jungčių biudžetą, kurio niekas neskaičiuoja.
  */
-function sukurtiSaugykla({ backend, env = process.env, vykdytojas = null } = {}) {
+async function sukurtiSaugykla({ backend, env = process.env, vykdytojas = null } = {}) {
   if (backend === "inline") {
     const { createInlineArtifactStore } = require("./inlineStore");
     return createInlineArtifactStore({ vykdytojas });
@@ -84,14 +84,44 @@ function sukurtiSaugykla({ backend, env = process.env, vykdytojas = null } = {})
     return createFsArtifactStore({ root: env.ARTIFACT_FS_ROOT });
   }
 
-  const { createS3ArtifactStore } = require("./s3Store");
-  return createS3ArtifactStore({
-    bucket: env.ARTIFACT_S3_BUCKET,
-    region: env.ARTIFACT_S3_REGION,
-    accessKeyId: env.ARTIFACT_S3_ACCESS_KEY,
-    secretAccessKey: env.ARTIFACT_S3_SECRET_KEY,
-    endpoint: env.ARTIFACT_S3_ENDPOINT,
-  });
+  if (backend === "s3") {
+    const { createS3ArtifactStore } = require("./s3Store");
+    const saugykla = createS3ArtifactStore({
+      bucket: env.ARTIFACT_S3_BUCKET,
+      region: env.ARTIFACT_S3_REGION,
+      accessKeyId: env.ARTIFACT_S3_ACCESS_KEY,
+      secretAccessKey: env.ARTIFACT_S3_SECRET_KEY,
+      endpoint: env.ARTIFACT_S3_ENDPOINT,
+    });
+
+    /**
+     * ⚠️ POLITIKA PATIKRINAMA STARTE, O NE PIRMO RAŠYMO METU (Codex P1, #290).
+     *
+     * Versijuotame kibire `DeleteObject` palieka ankstesnę versiją, tad erasure
+     * kelias praneštų sėkmę su išlikusia transkripcija. Patikra, kurios niekas
+     * nekviečia, yra dokumentacija, ne sargas — todėl factory jos LAUKIA, ir
+     * netinkamas kibiras sustabdo diegimą, o ne pirmą ištrynimą.
+     *
+     * ⚠️ TAI ANTRA GYNYBOS LINIJA, NE VIENINTELĖ: kiekviena `S3ArtifactStore`
+     * operacija tos pačios patikros laukia pati, tad tiesioginis konstruktoriaus
+     * kvietimas (aplenkiant šį factory) jos neapeina.
+     */
+    await saugykla.patikrintiSaugykla();
+    return saugykla;
+  }
+
+  /**
+   * ⚠️ FACTORY NETURI SAVO NUMATYTOJO KELIO (Codex, #290).
+   *
+   * Anksčiau čia buvo besąlyginė S3 šaka: `sukurtiSaugykla({ backend: "gcs" })` su
+   * galiojančiais S3 kintamaisiais tyliai sukurdavo S3 saugyklą ir apeidavo
+   * `parinktiBackenda()` allowlist'ą — rezultatai iškeliautų ne ten, kur mano
+   * operatorius. Aibė yra viena (`LEISTINI`), ir abu keliai remiasi ja.
+   */
+  throw new ArtifactStoreError(
+    `ArtifactStore: nežinomas backend'as "${backend}". Galimi: ${LEISTINI.join(", ")}.`,
+    "ARTIFACT_CONFIG_INVALID"
+  );
 }
 
 module.exports = { LEISTINI, BUTINI, parinktiBackenda, sukurtiSaugykla };

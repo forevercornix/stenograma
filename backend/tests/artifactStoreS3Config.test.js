@@ -8,7 +8,6 @@ const {
   createS3ArtifactStore,
   CHECKSUM_REZIMAS,
   arObjektoNera,
-  patikrintiVersijavima,
 } = require("../utils/artifactStore/s3Store");
 
 /**
@@ -52,29 +51,14 @@ test("404 NESUPLAKAMAS su nesančiu objektu", () => {
   }
 });
 
-test("VERSIJUOTAS kibiras NELEIDŽIA startuoti", async () => {
-  /**
-   * ⚠️ `DeleteObject` versijuotame kibire palieka ankstesnę versiją, o
-   * `delete()` grąžina `true`: patvirtintas ištrynimas su išlikusia
-   * transkripcija.
-   */
-  const klientas = (busena) => ({
-    send: async () => (busena ? { Status: busena } : {}),
-  });
-
-  for (const busena of ["Enabled", "Suspended"]) {
-    await assert.rejects(
-      () => patikrintiVersijavima(klientas(busena), "kibiras"),
-      (klaida) => klaida.code === "ARTIFACT_CONFIG_INVALID" && /versijuotas/.test(klaida.message),
-      `${busena} privalo sustabdyti startą`
-    );
-  }
-
-  /** KONTROLĖ: neversijuotas kibiras praeina — kitaip sargas būtų visada „ne". */
-  assert.deepEqual(await patikrintiVersijavima(klientas(null), "kibiras"), {
-    versijavimas: "Disabled",
-  });
-});
+/**
+ * ⚠️ VERSIJAVIMO BŪSENŲ MATRICA GYVENA `artifactStoreS3Protocol`.
+ *
+ * Ji ten praplėsta iki visos klasės (`Enabled`, `Suspended`, nežinoma būsena,
+ * tuščias atsakymas, ne objektas) ir papildyta tikrinimu, kad NĖ VIENA operacija
+ * nevyksta, kol politika nepatikrinta. Dvi to paties sargo namų vietos reikštų, kad
+ * pakeitus taisyklę reikia atsiminti abi.
+ */
 
 test("CHECKSUM nustatymai realiai PATENKA į klientą", async () => {
   /**
