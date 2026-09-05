@@ -609,7 +609,22 @@ const CAS_BANDYMU_RIBA = 2;
  * nepridėjus antros užklausos (Codex #289). ⚠️ Šie laukai LIEKA VIDINIAI: į bendrą
  * job modelį jie nepatenka, kitaip viešas kontraktas imtų priklausyti nuo saugyklos.
  */
-const REZULTATO_NUORODA = "r.storage_type, r.storage_key, r.bytes AS result_bytes, r.checksum";
+/**
+ * ⚠️ KIEKVIENAS NUORODOS STULPELIS GAUNA `result_` PRIEŠDĖLĮ, IR TAI NE STILIUS.
+ *
+ * `jobs` IR `job_results` abi turi `storage_key`. Be alias'ų `pg` eilutės objekte
+ * lieka PASKUTINIS to paties vardo stulpelis, tad `row.storage_key` imtų reikšti
+ * rezultato nuorodą (inline atveju - `NULL`), o job'o audio raktas tyliai dingtų per
+ * įprastą round-trip: `update()` jį perrašytų į `NULL`, ir audio valymas nebežinotų,
+ * kurie failai naudojami. Išmatuota CI (33984736988): trys nesusiję postgres testai
+ * krito iš karto.
+ */
+const REZULTATO_NUORODA = [
+  "r.storage_type AS result_storage_type",
+  "r.storage_key AS result_storage_key",
+  "r.bytes AS result_bytes",
+  "r.checksum AS result_checksum",
+].join(", ");
 
 const SELECT_JOB_META = `
   SELECT j.*, ${REZULTATO_NUORODA}
@@ -984,7 +999,7 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
    * šaltinio audio.
    */
   async function hidratuotiRezultata(eilute) {
-    const tipas = eilute.storage_type;
+    const tipas = eilute.result_storage_type;
 
     if (!tipas || tipas === "inline") {
       return eilute.result === undefined ? null : eilute.result;
@@ -1009,7 +1024,7 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
       assertWithinLimit(LIMIT_KIND.RESULT_BYTES, deklaruotiBaitai);
     }
 
-    const { reiksme } = await skaitytiRibotai(artifactStore, eilute.storage_key, {
+    const { reiksme } = await skaitytiRibotai(artifactStore, eilute.result_storage_key, {
       maxBaitai: getLimits()[LIMIT_KIND.RESULT_BYTES],
       deklaruotiBaitai,
     });

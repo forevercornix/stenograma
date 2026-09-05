@@ -214,6 +214,41 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     assert.equal(saugykla.perskaityta, 0, "inline rezultatas saugyklos neliečia");
   });
 
+  await t.test("job'o `storageKey` NEPRIKLAUSO nuo rezultato eilutės", async () => {
+    /**
+     * ⚠️ IŠMATUOTA REGRESIJA (CI 33984736988).
+     *
+     * `jobs` ir `job_results` abi turi `storage_key`. Be alias'ų `pg` eilutės objekte
+     * lieka PASKUTINIS to paties vardo stulpelis, tad job'o AUDIO raktas tyliai
+     * virsdavo rezultato nuoroda (inline atveju — `NULL`), o `update()` jį perrašydavo:
+     * audio valymas nebežinotų, kurie failai naudojami. Krito trys nesusiję postgres
+     * testai — bet ne vienas vietinis, nes jie visi reikalauja tikros DB.
+     *
+     * Tikrinami ABU keliai: hidratuotas ir metaduomenų.
+     */
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO jobs (id, type, status, storage_key, created_at, updated_at)
+       VALUES ($1, 'transcription', 'completed', 'audio/originalus.wav', now(), now())`,
+      [id]
+    );
+    await pool.query(
+      `INSERT INTO job_results (job_id, storage_type, storage_key, bytes, checksum, created_at)
+       VALUES ($1, 'fs', $2, $3, $4, now())`,
+      [id, `results/${id}/a.json`, saugykla.dydis, "a".repeat(64)]
+    );
+
+    assert.equal((await store.get(id)).storageKey, "audio/originalus.wav");
+    assert.equal((await store.get(id, { hydrate: false })).storageKey, "audio/originalus.wav");
+
+    /** Ir po round-trip'o per `update()` raktas privalo išlikti. */
+    await store.update(id, { error_message: "nesusijęs pakeitimas" });
+    assert.equal((await store.get(id, { hydrate: false })).storageKey, "audio/originalus.wav");
+
+    const raktai = await store.listReferencedStorageKeys();
+    assert.ok(raktai.includes("audio/originalus.wav"), "audio raktas privalo likti matomas valymui");
+  });
+
   await t.test("external eilutė BE sukonfigūruotos saugyklos krenta UŽDARAI", async () => {
     /**
      * ⚠️ Grąžinti `null` čia būtų „`completed` be rezultato" — būsena, po kurios
