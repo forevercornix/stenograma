@@ -338,6 +338,15 @@ const functional = [
    */
   "artifactStoreContract",
   "artifactStoreErrors",
+  /**
+   * #157 (PR-2): S3 sprendimai, tikrinami BE tinklo.
+   *
+   * Trys dalykai neįrodomi prieš tikrą MinIO: `NoSuchBucket` klaidos ji pagal
+   * užsakymą neduoda, versijuoto kibiro CI'uje nekuriame, o checksum nustatymų
+   * pašalinimo pririšta versija NESULAUŽO (išmatuota). Vietinis testas juos
+   * padengia deterministiškai.
+   */
+  "artifactStoreS3Config",
   "erasureExportContract",
   "erasureReplayContract",
   "jobVersionParity",

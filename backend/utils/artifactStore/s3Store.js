@@ -32,6 +32,57 @@ const {
 
 const CHECKSUM_REZIMAS = "WHEN_REQUIRED";
 
+/**
+ * ⚠️ „OBJEKTO NĖRA" ATPAŽĮSTAMA PAGAL TAPATYBĘ, NE PAGAL HTTP STATUSĄ
+ * (Codex, #290).
+ *
+ * 404 grąžina ir neegzistuojantis KIBIRAS, ir blogas maršrutas, ir politika,
+ * slepianti resurso egzistavimą. Suplakus juos su „nėra objekto", konfigūracijos
+ * gedimas nueitų MISSING-OBJECT keliu — tuo pačiu, kurį #157 apibrėžia kaip
+ * fail-closed remonto signalą. Klaidingai sukonfigūruota saugykla atrodytų kaip
+ * dingęs artefaktas, ir orphan patikra imtų „taisyti" tai, kas nesugedę.
+ *
+ * ⚠️ EKSPORTUOJAMA TESTUI SĄMONINGAI: predikatą reikia tikrinti su klaidomis,
+ * kurių tikra saugykla neduoda pagal užsakymą (`NoSuchBucket`, autorizacija).
+ */
+function arObjektoNera(klaida) {
+  const kodas = klaida && (klaida.name || klaida.Code);
+  return kodas === "NoSuchKey" || kodas === "NotFound";
+}
+
+/**
+ * VERSIJUOTAS KIBIRAS — FAIL-CLOSED STARTAS (Codex P1, #290).
+ *
+ * ⚠️ `DeleteObject` versijuotame kibire sukuria tik DELETE MARKER: ankstesnė
+ * versija lieka pasiekiama ir apmokestinama, o `delete()` grąžina `true`.
+ * Autoritetingam erasure keliui tai reiškia PATVIRTINTĄ ištrynimą su išlikusia
+ * transkripcija — tiksliai tai, ko 7.5a/7.6c grandinė neleidžia.
+ *
+ * ⚠️ KODĖL NE VISŲ VERSIJŲ ŠALINIMAS. Tam reikėtų `ListObjectVersions`, `delete()`
+ * taptų neapibrėžtos trukmės operacija, o rezultatas vis tiek priklausytų nuo
+ * bucket lifecycle politikos, kurios mes NEVALDOME. Fail-closed startas yra
+ * sąžiningesnis: garantija arba įrodoma, arba diegimas nepakyla.
+ */
+async function patikrintiVersijavima(klientas, bucket) {
+  const { GetBucketVersioningCommand } = require("@aws-sdk/client-s3");
+
+  const atsakymas = await klientas.send(new GetBucketVersioningCommand({ Bucket: bucket }));
+  const busena = atsakymas && atsakymas.Status;
+
+  if (busena === "Enabled" || busena === "Suspended") {
+    throw new ArtifactStoreError(
+      `S3ArtifactStore: kibiras "${bucket}" yra versijuotas (${busena}). ` +
+        "Ištrynimo garantija versijuotame kibire NEĮRODOMA: `DeleteObject` palieka " +
+        "ankstesnę versiją, o erasure kelias praneštų sėkmę su išlikusia transkripcija. " +
+        "Naudokite neversijuotą kibirą arba lifecycle politiką, kuri versijas šalina " +
+        "(už #157 apimties — žr. `docs/deletion-guarantees.md`).",
+      "ARTIFACT_CONFIG_INVALID"
+    );
+  }
+
+  return { versijavimas: busena || "Disabled" };
+}
+
 function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAccessKey, forcePathStyle = true } = {}) {
   const truksta = Object.entries({ bucket, region, accessKeyId, secretAccessKey })
     .filter(([, reiksme]) => typeof reiksme !== "string" || reiksme.trim() === "")
@@ -78,10 +129,8 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
     return { key: raktas, reference: raktas, bytes: paruosta.bytes, checksum: paruosta.checksum };
   }
 
-  /** `NoSuchKey`/`NotFound` yra „objekto nėra", visa kita - tikras gedimas. */
   function arNera(klaida) {
-    const kodas = klaida && (klaida.name || klaida.Code);
-    return kodas === "NoSuchKey" || kodas === "NotFound" || klaida?.$metadata?.httpStatusCode === 404;
+    return arObjektoNera(klaida);
   }
 
   async function head(raktas) {
@@ -175,11 +224,55 @@ function createS3ArtifactStore({ bucket, endpoint, region, accessKeyId, secretAc
     return buvo;
   }
 
+  /**
+   * STARTO PATIKRA — kviečiama prieš pirmą naudojimą.
+   *
+   * ⚠️ ATSKIRA NUO KONSTRUKTORIAUS, nes reikalauja tinklo. Konstruktorius lieka
+   * sinchroninis ir tikrina tik konfigūracijos pilnumą; tinklinė patikra gyvena
+   * čia, kad startas galėtų ją paleisti fail-closed tvarka.
+   */
+  async function patikrintiSaugykla() {
+    return patikrintiVersijavima(klientas, bucket);
+  }
+
+  /**
+   * ⚠️ TESTO SEAMAS, IR JIS UŽRAŠYTAS.
+   *
+   * Checksum nustatymai yra TIKRINAMA sąlyga, bet pririšta MinIO versija juos
+   * jau palaiko ir be mūsų (išmatuota, CI 33946366087), tad mutacija prieš ją
+   * nieko nesulaužo. Vienintelis vietoje įvykdomas enforcement — patvirtinti,
+   * kad KLIENTAS realiai neša tas reikšmes: pašalinus jas iš konstruktoriaus,
+   * SDK grąžina `WHEN_SUPPORTED`, ir testas krenta be jokio tinklo.
+   */
+  async function klientoNustatymai() {
+    const skaityti = async (laukas) => {
+      const reiksme = klientas.config[laukas];
+      return typeof reiksme === "function" ? reiksme() : reiksme;
+    };
+
+    return {
+      requestChecksumCalculation: await skaityti("requestChecksumCalculation"),
+      responseChecksumValidation: await skaityti("responseChecksumValidation"),
+    };
+  }
+
   async function uzdaryti() {
     await klientas.destroy();
   }
 
-  return { backend: "s3", bucket, put, read, readStream, head, verify, delete: del, uzdaryti };
+  return {
+    backend: "s3",
+    bucket,
+    put,
+    read,
+    readStream,
+    head,
+    verify,
+    delete: del,
+    patikrintiSaugykla,
+    klientoNustatymai,
+    uzdaryti,
+  };
 }
 
-module.exports = { createS3ArtifactStore, CHECKSUM_REZIMAS };
+module.exports = { createS3ArtifactStore, CHECKSUM_REZIMAS, arObjektoNera, patikrintiVersijavima };

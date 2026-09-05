@@ -163,6 +163,23 @@ atlikti, bet ne su kieno duomenimis.
 
 ---
 
+### ⚠️ Versijuoti S3 kibirai — už #157 apimties
+
+`DeleteObject` versijuotame kibire sukuria tik **delete marker**: ankstesnė
+versija lieka pasiekiama ir apmokestinama, o operacija grąžina sėkmę. Autoritetingam
+ištrynimo keliui tai reikštų **patvirtintą ištrynimą su išlikusia transkripcija** —
+tiksliai tai, ko §1 garantijos neleidžia.
+
+Visų versijų šalinimas nepasirinktas sąmoningai: jam reikėtų `ListObjectVersions`,
+ištrynimas taptų neapibrėžtos trukmės operacija, o rezultatas vis tiek priklausytų
+nuo bucket lifecycle politikos, kurios diegimas nevaldo.
+
+Todėl `S3ArtifactStore` **neleidžia startuoti** su versijuotu kibiru
+(`Enabled` arba `Suspended`). Diegimams, kuriems versijavimo reikia, ištrynimo
+garantija turi būti užtikrinta lifecycle politika, ir tai yra atskiras darbas —
+ne tyli šio dokumento išimtis.
+
+
 ## 3. Retencija
 
 | Nuostata | Numatyta | Ką valdo |
