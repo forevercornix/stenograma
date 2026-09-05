@@ -332,11 +332,33 @@ test("UŽRAKTAS: turi MAKSIMALIĄ trukmę", () => {
    */
   maintenanceLock._resetForTests();
 
-  maintenanceLock.acquire("test", { maxHoldMs: 1 });
+  /**
+   * ⚠️ LANGAS PLATUS SĄMONINGAI (CI 33951067157).
+   *
+   * Su `maxHoldMs: 1` tarp `acquire()` ir pirmojo tvirtinimo pakakdavo vienos
+   * milisekundės planuoklio delsos — užraktas jau būdavo pasibaigęs, ir testas
+   * krisdavo teigdamas, kad jis NEGALIOJA iškart po paėmimo. Tas pats commit'as
+   * CI davė ir raudoną, ir žalią rezultatą, tad tai laiko lenktynės teste, ne
+   * elgesio pokytis.
+   *
+   * Prasmė nepakito: tikrinama, kad užraktas galioja iškart ir NEBEGALIOJA
+   * pasibaigus jo trukmei — tik langas nebėra siauresnis už planuoklio tikslumą.
+   *
+   * ⚠️ JEI ŠIS LANGAS VĖL PASIRODYS PER SIAURAS, ATSAKYMAS NĖRA `100`.
+   *
+   * Konstantos didinimas yra begalinė seka: po kelių raundų liktų testas, kuris
+   * trunka ilgai ir netikrina nieko, ko nepatikrintų trumpesnis. Teisingas
+   * pataisymas — MATUOTI faktinę trukmę, o ne laukti pasirinktos: fiksuoti laiką
+   * prieš `acquire()`, ciklu laukti, kol `isLocked()` taps `false`, ir tvirtinti,
+   * kad praėjo BENT `maxHoldMs`. Tada tvirtinimas kalba apie užrakto elgesį, o ne
+   * apie tai, ar runner'is spėjo per pasirinktą langą.
+   */
+  const TRUKME_MS = 50;
+  maintenanceLock.acquire("test", { maxHoldMs: TRUKME_MS });
   assert.equal(maintenanceLock.isLocked(), true);
 
   const start = Date.now();
-  while (Date.now() - start < 5) {
+  while (Date.now() - start <= TRUKME_MS) {
     /* laukiam, kol pasibaigs */
   }
 

@@ -329,6 +329,36 @@ const functional = [
    * patį klausimą užduoda per sekundes, prieš nepasiekiamą bazę.
    */
   "drRestorePreconditions",
+  /**
+   * #157 (PR-2): `ArtifactStore` kontraktas ir klaidų klasifikavimas.
+   *
+   * `artifactStoreContract` paleidžia BENDRĄ scenarijų rinkinį prieš `fs` — jam
+   * nereikia nei DB, nei tinklo, tad kontrakto pažeidimas matomas per sekundes.
+   * Tas pats rinkinys prieš `inline` ir `s3` gyvena integraciniuose failuose.
+   */
+  "artifactStoreContract",
+  "artifactStoreErrors",
+  /**
+   * #157 (PR-2): S3 sprendimai, tikrinami BE tinklo.
+   *
+   * Trys dalykai neįrodomi prieš tikrą MinIO: `NoSuchBucket` klaidos ji pagal
+   * užsakymą neduoda, versijuoto kibiro CI'uje nekuriame, o checksum nustatymų
+   * pašalinimo pririšta versija NESULAUŽO (išmatuota). Vietinis testas juos
+   * padengia deterministiškai.
+   */
+  "artifactStoreS3Config",
+  /** #157 (PR-2): inline rašymo kelias — kvitas aprašo tai, kas įrašyta. */
+  "artifactStoreInlineWrite",
+  /** #157 (PR-2): `fs` riba, laikini failai ir rašymo patvarumas. */
+  "artifactStoreFsBoundary",
+  /** #157 (PR-2): klaidų pranešimų higiena — turinys nepatenka į viešą lauką. */
+  "artifactStoreMessages",
+  /** #157 (PR-2): kodekas — viena reikšmių sritis abiem kryptim + raktų pernešamumas. */
+  "artifactStoreCodec",
+  /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
+  "artifactStoreS3Protocol",
+  /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
+  "artifactStoreSelection",
   "erasureExportContract",
   "erasureReplayContract",
   "jobVersionParity",
@@ -510,7 +540,15 @@ function importuotiModuliai(saltinis) {
   return rasti;
 }
 
-function isvestiPostgresRinkini() {
+/**
+ * ⚠️ RINKINYS IŠVEDAMAS IŠ SARGO IMPORTO, NE RAŠOMAS RANKA.
+ *
+ * Rankinis sąrašas leistų naujam integraciniam testui iškristi tyliai: jis
+ * nebūtų paleistas, CI liktų žalias, o kodas — nepatikrintas. Ta pati taisyklė
+ * galioja abiem infrastruktūroms, tad išvedimas parametrizuotas, o ne
+ * nukopijuotas (#157, PR-2).
+ */
+function isvestiRinkini(sargas) {
   const fs = require("node:fs");
   const path = require("node:path");
   const dir = __dirname;
@@ -520,16 +558,30 @@ function isvestiPostgresRinkini() {
     .filter((failas) => failas.endsWith(".test.js"))
     .filter((failas) => {
       const turinys = fs.readFileSync(path.join(dir, failas), "utf8");
-      return importuotiModuliai(turinys).some((kelias) => kelias.endsWith("postgresGuard"));
+      return importuotiModuliai(turinys).some((kelias) => kelias.endsWith(sargas));
     })
     .map((failas) => failas.replace(/\.test\.js$/, ""))
     .sort();
 }
 
+function isvestiPostgresRinkini() {
+  return isvestiRinkini("postgresGuard");
+}
+
 const postgres = isvestiPostgresRinkini();
 
+/**
+ * ⚠️ S3 RINKINYS ATSKIRAS NUO `postgres`, NORS ABU INTEGRACINIAI.
+ *
+ * Jie reikalauja SKIRTINGOS infrastruktūros: `postgres` žingsnis turi
+ * `DATABASE_URL`, S3 — `MINIO_ENDPOINT`. Sujungus, vienas trūkstamas servisas
+ * paverstų kito garantiją praleidimu, o „rinkinys tikrai vykdytas" sargas
+ * nebegalėtų pasakyti, KURIO trūko.
+ */
+const s3 = isvestiRinkini("minioGuard");
+
 module.exports = {
-  suites: { privacy, security, functional, redis, postgres },
+  suites: { privacy, security, functional, redis, postgres, s3 },
 
   /**
    * Rinkiniai, kuriuos apima `npm test`.
@@ -539,6 +591,7 @@ module.exports = {
    * ignoruoti. Jie paleidžiami atskirai (`npm run test:redis`) ir CI.
    */
   isvestiPostgresRinkini,
+  isvestiRinkini,
   importuotiModuliai,
 
   defaultSuites: ["privacy", "security", "functional"],

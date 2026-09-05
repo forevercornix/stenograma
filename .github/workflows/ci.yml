@@ -224,6 +224,66 @@ jobs:
         # uždarymas.
         run: node scripts/verify-postgres-suite-ran.mjs /tmp/pg-tap
 
+      # ⚠️ MinIO PALEIDŽIAMAS ŽINGSNIU, NE `services:` BLOKU (#157, PR-2).
+      #
+      # GitHub servisų konteineriai komandos perduoti NELEIDŽIA, o `minio/minio`
+      # be `server /data` tik atspausdina pagalbą ir išsijungia. Servisas būtų
+      # kritęs dar prieš pirmą testą, ir gedimo priežastis atrodytų kaip mūsų
+      # kodo problema.
+      #
+      # ⚠️ TAG'AS PRIRIŠTAS TIKSLIAI, ne `latest`. Būtent MinIO versija lemia,
+      # kaip elgiasi flexible-checksums derinys su AWS SDK - tai TIKRINAMA
+      # sąlyga, ne fonas. Su `latest` testas vieną dieną imtų tikrinti kitą
+      # elgesį, ir niekas to nepastebėtų.
+      - name: Paleisti MinIO (S3-compatible)
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+
+          # Laukiama, kol saugykla ATSAKO, ne fiksuotą laiką: `sleep 5` yra
+          # lenktynės, kurios pralaimimos lėtame runner'yje.
+          for i in $(seq 1 40); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO pasiruošęs po $i bandymo(-ų)."
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "MinIO nepakilo per 40 s - konteinerio logas:"
+          docker logs minio || true
+          exit 1
+
+      - name: S3 testai (MinIO, `ArtifactStore` kontraktas)
+        working-directory: backend
+        env:
+          MINIO_ENDPOINT: http://localhost:9000
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+          # ⚠️ REQUIRE_MINIO=1 paverčia TYLŲ praleidimą klaida - kitaip pirmas
+          # nepakilęs konteineris paverstų CI žalią į „nebuvo ko tikrinti", ir
+          # tai būtų blogiausias derinys: infrastruktūros kaina sumokėta,
+          # garantijos nulis.
+          #
+          # ⚠️ ČIA TAI SVARBIAU NEI KITUR: checksum konfigūracija, dėl kurios
+          # šis testas egzistuoja, prieš AWS veiktų IR BE JOS. Tik
+          # S3-compatible saugykla parodo skirtumą, tad praleistas rinkinys
+          # reikštų, kad vienintelis ją tikrinantis kelias tyliai dingo.
+          REQUIRE_MINIO: "1"
+        run: |
+          status=0
+          npm run test:s3 -- --tap-dir=/tmp/s3-tap || status=$?
+          exit "$status"
+
+      - name: S3 testai TIKRAI vykdyti (ne praleisti)
+        working-directory: backend
+        # Tas pats tikrintuvas kaip PostgreSQL pusėje, tik su kitu rinkiniu ir
+        # kita praleidimo žyma - parametrizuotas, ne nukopijuotas.
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/s3-tap s3 MINIO_ENDPOINT
+
       # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
       # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas
       # kažko neištrina.
