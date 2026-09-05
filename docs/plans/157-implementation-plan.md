@@ -481,7 +481,7 @@ neša tapatybę; pasikeičia tik tai, kad ji nebėra objekto vardas. Tai tiesiog
 atitinka A2 ribą „checksum niekada neišvedamas iš object key" — dabar ji galioja
 ir atvirkščiai: object key neišvedamas iš checksum'o.
 
-### ⚠️ ATVIRAS PR-4 SPRENDIMAS: orphan'ai su attempt-unique raktu
+### ✅ PRIIMTAS PR-4 SPRENDIMAS: orphan'ai su attempt-unique raktu
 
 Rakto schemos pakeitimas uždarė duomenų praradimą, bet **atidarė kitą klausimą, ir
 jį reikia priimti eksplicitiškai, ne praslysti pro šalį.**
@@ -523,11 +523,35 @@ Trys variantai PR-4:
 | b | **Patvarus bandymo registras:** `attemptId` įrašomas į DB PRIEŠ `put()` | Orphan tampa matomas DB kryptimi; kaina — vienas `INSERT` prieš kiekvieną rašymą |
 | c | Riba pripažįstama ir fiksuojama | `docs/artefact-lifecycle.md` + follow-up issue; GDPR pusėje silpniausias |
 
-**Rekomendacija: (b).** Ji vienintelė išlaiko A3 („DB kryptis") nepakeistą ir tuo
-pat metu padaro orphan'ą aptinkamu: jei `attemptId` yra registre, bet nėra
-`job_results` nuorodos, objektas turi savininką ir adresą. (a) reikštų tylų A3
-apėjimą — `list(prefix)` grįžtų kitu vardu; (c) paliktų transkripciją saugykloje
-po ištrynimo.
+✅ **SPRENDIMAS: (b) — PATVARUS BANDYMŲ REGISTRAS.**
+
+Ji vienintelė išlaiko A3 („DB kryptis") nepakeistą ir tuo pat metu padaro orphan'ą
+aptinkamu: jei `attemptId` yra registre, bet nėra `job_results` nuorodos, objektas
+turi savininką ir adresą. (a) reikštų tylų A3 apėjimą — `list(prefix)` grįžtų kitu
+vardu; (c) paliktų transkripciją saugykloje po ištrynimo.
+
+⚠️ **KODĖL (b) LAIMĖJO, O NE „ATRODĖ SAUGIAUSIA":** ji vienintelė paverčia A3 ribą iš
+ŽINOMOS SPRAGOS į PILNĄ GARANTIJĄ tam, ką patys parašėme. „Objektas yra, DB nerodo"
+nustoja egzistuoti kaip klasė, ir `list(prefix)` tampa nereikalingas ne dėl
+susitarimo, o dėl konstrukcijos.
+
+**Ribos, kurios yra sprendimo dalis:**
+
+- įrašas atsiranda **PRIEŠ `put()`**, ne po jo — po reikštų tą patį langą, tik
+  siauresnį;
+- registras dengia **visus tris veidus** (lentelė aukščiau): attempt-unique raktus,
+  nutrūkusį cleanup tarp `put()` ir commit'o ir `fs` `.tmp` likučius. Trečiajam tai
+  reiškia, kad laikinas vardas irgi registruojamas arba IŠVEDAMAS iš registruoto
+  bandymo — kitaip lieka ketvirtas veidas;
+- **erasure trina pagal REGISTRĄ, ne pagal `storage_key`**: job'o ištrynimas pašalina
+  visus to job'o bandymų objektus, ne tik laimėjusio;
+- **retencija ≥ eilės prikėlimo horizontai**, IŠVEDAMA iš `revivalHorizonsMs()`, ne
+  surašoma — ta pati taisyklė kaip 7.5a ištrynimo žymoms;
+- kaina: vienas papildomas DB rašymas per job'o užbaigimą.
+
+⚠️ **KO REGISTRAS NEDENGIA:** objektai, atsiradę NE per mūsų rašymo kelią (rankinis
+kopijavimas, atkūrimas į kitą prefiksą), registre neatsiras. Riba užrašyta
+`docs/artefact-lifecycle.md` skyriuje „Ko šis etapas NEAPIMA".
 
 ⚠️ **SPRENDIMAS PRIIMAMAS PR-4 PRADŽIOJE, NE PABAIGOJE.** Jis keičia rašymo kelio
 formą (registras prieš `put()`), tad įterptas vėliau reikštų perrašymą.
@@ -936,13 +960,12 @@ Nė vienas jų neverčiamas į `PASS` dėl to, kad „kodas atrodo teisingai".
 Keturi klausimai iš 1 revizijos atsakyti; čia jie fiksuojami kaip sprendimai su
 viena eilute pagrindimo.
 
-⚠️ **BET VIENAS KLAUSIMAS LIEKA ATVIRAS, IR JIS NAUJAS** (Codex, #289): orphan
-strategija su attempt-unique raktu (PR-4 skyrius „ATVIRAS PR-4 SPRENDIMAS").
-A1–A4 uždaryti, tačiau rakto schemos pakeitimas atidarė klausimą su GDPR
-pasekme — objektas, likęs po kritusio bandymo, išgyvena job'o ištrynimą. Trys
-variantai užrašyti, rekomendacija yra (b), bet **sprendimas nepriimtas**.
+✅ **ORPHAN STRATEGIJOS KLAUSIMAS UŽDARYTAS** (Codex, #289; sprendimas priimtas po
+PR-3 peržiūros): pasirinktas **variantas (b) — patvarus bandymų registras**. Pilna
+formuluotė su ribomis: PR-4 skyrius „PRIIMTAS PR-4 SPRENDIMAS".
 
-Kol jis nepriimtas, PR-4 negali prasidėti: pasirinkimas keičia rašymo kelio formą.
+PR-4 nebeblokuojamas šio klausimo; jo formą (registras PRIEŠ `put()`) sprendimas
+apibrėžia.
 
 ⚠️ **ANTRAS PR-4 REIKALAVIMAS, PAAIŠKĖJĘS PR-2 PERŽIŪROJE** (Codex, #290): inline
 kelyje du bandymai dalijasi `job_id`, tad `ON CONFLICT (job_id) DO UPDATE SET
