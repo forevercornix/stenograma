@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas, metaduomenuProjekcija } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -21,8 +21,21 @@ async function create(fields = {}) {
   return job;
 }
 
-async function get(id) {
-  return jobs.get(id) || null;
+/**
+ * ⚠️ `hydrate: false` PROJEKCIJA TURI ELGTIS VIENODAI VISUOSE BACKEND'UOSE (#157, PR-3).
+ *
+ * PostgreSQL kelyje ji taupo `payload` deserializavimą; atmintyje taupyti nėra ko.
+ * Bet FORMA privalo sutapti: nehidratuotas job'as `result` lauko NETURI, ir kvietėjas,
+ * parašytas prieš vieną backend'ą, negali tyliai sulūžti prieš kitą.
+ *
+ * @param {{hydrate?: boolean}} [nustatymai]
+ */
+async function get(id, { hydrate = true } = {}) {
+  const job = jobs.get(id) || null;
+  if (!job || hydrate) return job;
+
+  /** Kopija: originalas saugykloje lieka pilnas. */
+  return metaduomenuProjekcija(job);
 }
 
 /**
@@ -100,10 +113,15 @@ async function update(id, patch, options = {}) {
  * ───────────────────────────────────────────────────────────────────────── */
 
 /** @returns {object|null|"FORBIDDEN"} */
-async function getOwned(id, scope) {
+/**
+ * @param {{hydrate?: boolean}} [nustatymai] forma vienoda visuose backend'uose (#157, PR-3)
+ */
+async function getOwned(id, scope, { hydrate = true } = {}) {
   const job = jobs.get(id);
   if (!job) return null;
-  return matchesOwner(job, scope) ? job : "FORBIDDEN";
+  if (!matchesOwner(job, scope)) return "FORBIDDEN";
+
+  return hydrate ? job : metaduomenuProjekcija(job);
 }
 
 /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
@@ -251,14 +269,23 @@ async function finishAtomic(id, status, extra = {}) {
   return next;
 }
 
-async function listAll() {
-  return [...jobs.values()];
+async function listAll({ hydrate = true } = {}) {
+  const visi = [...jobs.values()];
+  return hydrate ? visi : visi.map(metaduomenuProjekcija);
 }
 
+/**
+ * ⚠️ `listByFlag()` YRA METADUOMENŲ KELIAS PAGAL APIBRĖŽIMĄ (#157, PR-3).
+ *
+ * Abu valymo ciklai naudoja tik vėliavą, bandymus, terminą ir `storageKey`; nė vienas
+ * kvietėjas rezultato neskaito. Todėl grąžinama ta pati nehidratuota projekcija kaip
+ * PostgreSQL pusėje — hidratacijos parinktis čia būtų svirtis, kurios niekam nereikia,
+ * o divergencija liktų galima.
+ */
 async function listByFlag(field, limit = 100) {
   const pending = [];
   for (const job of jobs.values()) {
-    if (job[field]) pending.push(job);
+    if (job[field]) pending.push(metaduomenuProjekcija(job));
     if (pending.length >= limit) break;
   }
   return pending;

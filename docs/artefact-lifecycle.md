@@ -380,3 +380,11 @@ būtent jis atsako, kada duomenys buvo pašalinti.
   `derivedFrom`. Be dviejų paskutinių punktų ištrynimas apeitų grafą, kurio
   dalis nurodo į niekur – apėjimas „pavyktų", tik nieko nerastų.
 - **`meeting` lygio artefaktų** – žr. pastabą prie registro.
+- **Objektų, atsiradusių NE per mūsų rašymo kelią** (#157, PR-4 orphan sprendimas).
+  Bandymų registras dengia viską, ką parašo pats servisas: kiekvienas `put()` turi
+  registruotą `attemptId`, tad „objektas yra, DB nerodo" nustoja egzistuoti kaip
+  klasė. ⚠️ **Bet objektas, atsiradęs rankiniu kopijavimu ar atkūrimu į kitą
+  prefiksą, registre neatsiras** – jo nepasiekia nei erasure, nei DB krypties
+  skenavimas (A3). Tai ne prielaida, o užrašyta riba: aptikti tokius objektus
+  reikėtų `list(prefix)` visuose trijuose backend'uose, o tai #157 apimčiai
+  eksplicitiškai nepriklauso.

@@ -108,3 +108,83 @@ test("DELETE /api/jobs/:id - TRANSKRIPCIJOS jobo ID nepriimamas (404, jobas liek
 
   await jobStore.system.remove(transcriptionJob.id);
 });
+
+test("DELETE /api/jobs/:id per MARŠRUTĄ prašo job'o BE rezultato", async (t) => {
+  /**
+   * ⚠️ MATUOJAMA PER MARŠRUTĄ, NE PER SAUGYKLĄ (#157, PR-3, Codex P1 #291).
+   *
+   * `getOwned()` pataisymas praėjusiame raunde gyveno saugyklos viduje, o produkcinis
+   * `DELETE` toliau prašė hidratuoto job'o. Testas su `removeOwned()` to nepagautų —
+   * maršrutas jo nekviečia.
+   *
+   * ⚠️ KODĖL SKAITIKLIS ČIA NEĮMANOMAS: maršrutai testuose eina per atminties
+   * backend'ą, kuris artefaktų saugyklos apskritai neturi (PostgreSQL už maršrutų
+   * uždarytas aktyvavimo barjero). Todėl grandinė tikrinama dviem susietomis
+   * dalimis: ČIA — kad maršrutas prašo `hydrate: false`; `jobStoreHydration.
+   * integration` — kad `hydrate: false` reiškia NULĮ kreipinių į saugyklą.
+   */
+  const jobStore = require("../utils/jobStore");
+  const originalus = jobStore.get;
+  const kvietimai = [];
+
+  jobStore.get = async (scope, nustatymai) => {
+    kvietimai.push(nustatymai);
+    return originalus(scope, nustatymai);
+  };
+  t.after(() => {
+    jobStore.get = originalus;
+  });
+
+  const createRes = await request(app)
+    .post("/api/jobs")
+    .send({ title: "Ištrynimo kelias", transcript: "Jonas: Sveiki, pradedam susitikima. Reikia parengti ataskaita." });
+  assert.equal(createRes.status, 202);
+
+  const jobId = createRes.body.jobId;
+  for (let i = 0; i < 20; i++) {
+    const pollRes = await request(app).get(`/api/jobs/${jobId}`);
+    if (["completed", "failed"].includes(pollRes.body.status)) break;
+    await wait(50);
+  }
+
+  kvietimai.length = 0;
+  const delRes = await request(app).delete(`/api/jobs/${jobId}`);
+
+  assert.ok([200, 202, 204].includes(delRes.status), `ištrynimas privalo pavykti (${delRes.status})`);
+  assert.deepEqual(
+    kvietimai.map((n) => n && n.hydrate),
+    [false],
+    "DELETE maršrutas privalo prašyti job'o BE rezultato"
+  );
+});
+
+test("GET /api/jobs/:id per MARŠRUTĄ prašo job'o SU rezultatu", async (t) => {
+  /**
+   * KONTROLĖ: be jos ankstesnis testas būtų tenkinamas ir maršrutų rinkinio, kuris
+   * NIEKADA nehidratuoja — o `READ` be rezultato grąžintų klientui tuščią atsakymą.
+   */
+  const jobStore = require("../utils/jobStore");
+  const originalus = jobStore.get;
+  const kvietimai = [];
+
+  jobStore.get = async (scope, nustatymai) => {
+    kvietimai.push(nustatymai);
+    return originalus(scope, nustatymai);
+  };
+  t.after(() => {
+    jobStore.get = originalus;
+  });
+
+  const createRes = await request(app)
+    .post("/api/jobs")
+    .send({ title: "Skaitymo kelias", transcript: "Jonas: Sveiki, pradedam susitikima. Reikia parengti ataskaita." });
+
+  const getRes = await request(app).get(`/api/jobs/${createRes.body.jobId}`);
+
+  assert.equal(getRes.status, 200);
+  assert.deepEqual(
+    kvietimai.map((n) => n && n.hydrate),
+    [true],
+    "READ be rezultato grąžintų klientui tuščią atsakymą"
+  );
+});
