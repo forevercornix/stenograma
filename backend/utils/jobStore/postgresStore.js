@@ -1350,11 +1350,71 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
    * @returns {object|null|"FORBIDDEN"}
    */
   async function getOwned(id, scope, { hydrate = true } = {}) {
-    const metaduomenys = await get(id, { hydrate: false });
-    if (!metaduomenys) return null;
-    if (!matchesOwner(metaduomenys, scope)) return "FORBIDDEN";
+    /**
+     * ⚠️ VIENA UŽKLAUSA YRA AUTORIZUOTAS SNAPSHOT'AS (Codex P1, #291).
+     *
+     * Ankstesnė redakcija darė DU nepriklausomus skaitymus: metaduomenų (su `scope`)
+     * ir `get(id)` — jau BE `scope`. Tarp jų buvo langas: atkūrimas ar administracinis
+     * kelias gali pakeisti to paties UUID savininką, ir antra užklausa grąžintų JAU
+     * NAUJO savininko rezultatą kvietėjui, autorizuotam prieš SENĄ eilutę.
+     *
+     * Dabar sprendimas ir turinys imami iš TOS PAČIOS eilutės: `payload` ateina kartu
+     * su `owner_id`, tad inline atveju lango nebėra pagal konstrukciją.
+     */
+    const uzklausa = hydrate ? SELECT_JOB_WITH_RESULT : SELECT_JOB_META;
+    const { rows } = await pool.query(`${uzklausa} WHERE j.id = $1`, [id]);
+    const eilute = rows[0];
+    if (!eilute) return null;
 
-    return hydrate ? get(id) : metaduomenys;
+    const job = rowToJob(eilute, { hidratuota: false });
+    if (!matchesOwner(job, scope)) return "FORBIDDEN";
+    if (!hydrate) return job;
+
+    const reiksme = await hidratuotiRezultata(eilute);
+
+    /**
+     * ⚠️ EXTERNAL SKAITYMAS VYKSTA PO AUTORIZACIJOS, TAD SNAPSHOT'AS PATIKRINAMAS
+     * DAR KARTĄ.
+     *
+     * Artefaktas skaitomas pagal SNAPSHOT'O raktą (`eilute.result_storage_key`), ne
+     * pagal naują užklausą — kitaip perimtas UUID nurodytų jau naujo savininko
+     * objektą. Bet vien to nepakanka: kol vyko I/O, eilutė galėjo būti pakeista, ir
+     * tada grąžintume SENO job'o rezultatą po to, kai UUID jau perimtas — kitokia,
+     * bet ne mažesnė klaida.
+     *
+     * Todėl po skaitymo tikrinama, ar eilutė tebėra ta pati: savininkas ir `version`
+     * (`jobs.version`, migracija 1755900000000 — antro versijos mechanizmo nekuriame).
+     * Nesutampa → perskaitytas turinys ATMETAMAS.
+     *
+     * ⚠️ INLINE ATVEJU PAKARTOTINĖS PATIKROS NĖRA IR NEREIKIA: turinys atėjo ta pačia
+     * užklausa kaip savininkas, tad lango, kurį reikėtų uždaryti, neegzistuoja.
+     * Patikra daroma TIK tada, kai realiai buvo išorinis skaitymas — kitaip
+     * kiekvienas skaitymas gautų papildomą užklausą už garantiją, kurios jau turi.
+     */
+    if (eilute.result_storage_type && eilute.result_storage_type !== "inline") {
+      const { rows: dabartines } = await pool.query(
+        "SELECT owner_id, owner_kind, version FROM jobs WHERE id = $1",
+        [id]
+      );
+      const dabartine = dabartines[0];
+
+      /** Eilutės nebėra — turinys, kurį ką tik perskaitėme, nebeturi savininko. */
+      if (!dabartine) return null;
+
+      if (!matchesOwner(rowToJob({ ...eilute, ...dabartine }, { hidratuota: false }), scope)) {
+        return "FORBIDDEN";
+      }
+
+      /**
+       * Versija pasikeitė: eilutė ta pati, bet jos turinys — nebe tas, kurį matėme.
+       * `NOT_FOUND` čia sąžiningesnis už pasenusį rezultatą; kvietėjas pakartojęs
+       * gaus dabartinę būseną.
+       */
+      if (String(dabartine.version) !== String(eilute.version)) return null;
+    }
+
+    job.result = reiksme;
+    return job;
   }
 
   /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */

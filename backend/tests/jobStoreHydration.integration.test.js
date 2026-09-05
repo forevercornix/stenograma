@@ -414,6 +414,104 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     assert.deepEqual((await suS3.get(id)).result, turinys);
   });
 
+  /* ═══ HIDRATACIJA SUSIETA SU AUTORIZUOTU SNAPSHOT'U ═══ */
+
+  await t.test("savininkas pakeistas TARP skaitymų: kvietėjas negauna NEI seno, NEI naujo", async () => {
+    /**
+     * ⚠️ DU NEPRIKLAUSOMI SKAITYMAI PALIKO LANGĄ (Codex P1, #291).
+     *
+     * Atkūrimas ar administracinis kelias gali pakeisti to paties UUID savininką po
+     * autorizacijos. Jei antra užklausa apribojimo nebeturi, kvietėjas gauna JAU NAUJO
+     * savininko rezultatą; jei ji ima raktą iš snapshot'o, bet niekas nepatikrina
+     * eilutės po skaitymo — gauna SENO job'o rezultatą po to, kai UUID jau perimtas.
+     * Abu keliai blogi, tad tikrinami abu galai: verdiktas ir TURINIO nebuvimas.
+     *
+     * Pakeitimas įterpiamas ties draiverio riba: `readStream` yra vienintelis taškas,
+     * kuriame `getOwned()` laukia išorinio I/O.
+     */
+    const id = await sukurtiSavininkoJoba();
+
+    const lenktyniaujanti = { ...saugykla };
+    lenktyniaujanti.readStream = async (...args) => {
+      /** Kol vyksta skaitymas, eilutę perima KITAS savininkas ir versija pasikeičia. */
+      await pool.query(
+        "UPDATE jobs SET owner_id = $2, version = version + 1 WHERE id = $1",
+        [id, SVETIMAS.ownerId]
+      );
+      return saugykla.readStream(...args);
+    };
+
+    const suLenktynemis = createPostgresStore(pool, { artifactStore: lenktyniaujanti });
+    const verdiktas = await suLenktynemis.getOwned(id, SAVININKAS);
+
+    assert.ok(
+      verdiktas === "FORBIDDEN" || verdiktas === null,
+      `pasikeitusi eilutė privalo duoti FORBIDDEN arba NOT_FOUND, gauta: ${JSON.stringify(verdiktas)}`
+    );
+    assert.equal(
+      verdiktas && verdiktas.result,
+      undefined,
+      "perskaitytas turinys privalo būti ATMESTAS, ne grąžintas"
+    );
+
+    /** KONTROLĖ: naujas savininkas tą pačią eilutę mato normaliai. */
+    assert.deepEqual((await store.getOwned(id, SVETIMAS)).result, turinys);
+  });
+
+  await t.test("versija pasikeitė be savininko pasikeitimo: rezultatas irgi ATMETAMAS", async () => {
+    /**
+     * ⚠️ SAVININKAS TAS PATS, BET TURINYS — NEBE TAS, KURĮ MATĖME. Grąžinti pasenusį
+     * rezultatą būtų tyli klaida; `NOT_FOUND` verčia kvietėją pakartoti ir gauti
+     * dabartinę būseną.
+     */
+    const id = await sukurtiSavininkoJoba();
+
+    const lenktyniaujanti = { ...saugykla };
+    lenktyniaujanti.readStream = async (...args) => {
+      await pool.query("UPDATE jobs SET version = version + 1 WHERE id = $1", [id]);
+      return saugykla.readStream(...args);
+    };
+
+    const suLenktynemis = createPostgresStore(pool, { artifactStore: lenktyniaujanti });
+    assert.equal(await suLenktynemis.getOwned(id, SAVININKAS), null);
+  });
+
+  await t.test("KONTROLĖ: be lenktynių tas pats kelias grąžina rezultatą", async () => {
+    /**
+     * Be jos ankstesni tvirtinimai būtų tenkinami ir `getOwned()`, kuris po
+     * hidratacijos VISADA atmeta.
+     */
+    const id = await sukurtiSavininkoJoba();
+    assert.deepEqual((await store.getOwned(id, SAVININKAS)).result, turinys);
+  });
+
+  await t.test("external skaitymas eina pagal SNAPSHOT'O raktą, ne pagal naują užklausą", async () => {
+    /**
+     * ⚠️ Jei raktas imamas iš NAUJOS užklausos, perimtas UUID nurodytų jau naujo
+     * savininko objektą — ir kvietėjas gautų svetimą turinį net tada, kai verdiktas
+     * atrodo teisingas. Todėl fiksuojama, KOKIO rakto buvo paprašyta.
+     */
+    const id = await sukurtiSavininkoJoba();
+    const snapshotRaktas = `results/${id}/a.json`;
+    const praSyti = [];
+
+    const stebima = { ...saugykla };
+    stebima.readStream = async (raktas) => {
+      praSyti.push(raktas);
+      /** Pakeičiame nuorodą IŠ KARTO — antra užklausa matytų jau kitą raktą. */
+      await pool.query("UPDATE job_results SET storage_key = $2 WHERE job_id = $1", [
+        id,
+        "results/svetimas/objektas.json",
+      ]);
+      return saugykla.readStream(raktas);
+    };
+
+    const suStebejimu = createPostgresStore(pool, { artifactStore: stebima });
+    await suStebejimu.getOwned(id, SAVININKAS).catch(() => {});
+
+    assert.deepEqual(praSyti, [snapshotRaktas], "skaityta pagal snapshot'o raktą");
+  });
+
   await t.test("external eilutė BE sukonfigūruotos saugyklos krenta UŽDARAI", async () => {
     /**
      * ⚠️ Grąžinti `null` čia būtų „`completed` be rezultato" — būsena, po kurios
