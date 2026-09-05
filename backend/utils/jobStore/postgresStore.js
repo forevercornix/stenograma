@@ -1383,11 +1383,19 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    *     būtent tada, kai objektas sugadintas, o tai tas atvejis, kuriam kelias ir
    *     reikalingas.
    *
-   * ⚠️ DVI UŽKLAUSOS, IR TAI SĄMONINGA KAINA. Metaduomenų užklausa priima
-   * sprendimą, o turinys traukiamas TIK jį praėjus. Vienos užklausos variantas
-   * (paimti viską ir hidratuoti po patikros) saugyklos I/O irgi išvengtų, bet
-   * svetimai užklausai vis tiek deserializuotų inline `payload` — o amplifikacija
-   * yra amplifikacija, nesvarbu, kuri pusė ją apmoka.
+   * ⚠️ ŠIS METODAS NĖRA VIENINTELIS TAŠKAS, IR TAI BUVO PAMOKA.
+   *
+   * Pirmoji šio taisymo redakcija tvirtino, kad „ta pati tvarka kitur nerasta", ir
+   * išvardijo tik saugyklos metodus. Sąrašas buvo teisingas, bet NEPILNAS: hidrataciją
+   * užsako TRANSPORTO sluoksnis (`utils/jobAccessTransport.js` `resolveJobAccess()`),
+   * kurį naudoja `routes/jobs.js` (READ, DELETE), `routes/transcribeJobs.js`
+   * (READ, DELETE) ir `routes/exports.js`. Ieškant, kas hidratuoja be reikalo, reikia
+   * eiti nuo MARŠRUTO, ne nuo saugyklos — grandinė ten ir prasideda.
+   *
+   * ⚠️ SVETIMAI UŽKLAUSAI TURINYS NETRAUKIAMAS. `hydrate: false` kelias naudoja
+   * metaduomenų užklausą, tad `DELETE` ir atmestos užklausos inline `payload` net
+   * nedeserializuoja. Hidratuojančiam keliui užklausa viena — ji kartu yra ir
+   * autorizuotas snapshot'as (žr. žemiau).
    *
    * @returns {object|null|"FORBIDDEN"}
    */
