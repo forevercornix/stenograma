@@ -1774,6 +1774,15 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
 
 module.exports = {
   createPostgresStore,
+  /**
+   * ⚠️ UŽKLAUSOS EKSPORTUOJAMOS KAIP TESTO SEAMAS (#157, PR-3).
+   *
+   * `jobs` ir `job_results` dalijasi stulpelių vardais, ir kolizija nesimato niekur,
+   * išskyrus rezultato objektą. Sargas turi tikrinti TIKRĄ užklausą, o ne jos kopiją
+   * teste — kopija pasentų būtent tada, kai užklausa pasikeis.
+   */
+  SELECT_JOB_META,
+  SELECT_JOB_WITH_RESULT,
   IMMUTABLE_COLUMNS,
   rowToJob,
   jobToRow,

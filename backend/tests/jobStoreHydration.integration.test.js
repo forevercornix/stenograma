@@ -6,7 +6,11 @@ const crypto = require("node:crypto");
 const { Pool, Client } = require("pg");
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
-const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+const {
+  createPostgresStore,
+  SELECT_JOB_META,
+  SELECT_JOB_WITH_RESULT,
+} = require("../utils/jobStore/postgresStore");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -379,5 +383,80 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     const id = await sukurtiExternal();
 
     await assert.rejects(() => beSaugyklos.get(id), /artefaktų saugykla nesukonfigūruota/i);
+  });
+
+  /* ═══ BENDRI STULPELIŲ VARDAI ═══ */
+
+  await t.test("BENDRI stulpelių vardai NEPATENKA į rezultatą nealiasuoti", async () => {
+    /**
+     * ⚠️ APSAUGA NEGALI LAIKYTIS ANT RANKA SURAŠYTO SĄRAŠO.
+     *
+     * `REZULTATO_NUORODA` šiandien išvardija keturis stulpelius su alias'ais, bet
+     * pridėjus `r.*` kolizija grįžta. `storage_key` atveju ji jau kainavo raundą
+     * (CI 33984736988), o `created_at` atveju būtų BLOGESNĖ: abi reikšmės yra
+     * timestamp'ai, tad joks „ar tai data" tvirtinimas nekristų.
+     *
+     * ⚠️ BENDRŲ VARDŲ SĄRAŠAS IŠVEDAMAS IŠ `information_schema`, ne surašomas — tas
+     * pats principas kaip blogų raktų matricoje: pridėjus stulpelį, sargas apie jį
+     * sužino pats.
+     */
+    const { rows: bendri } = await pool.query(`
+      SELECT a.column_name
+        FROM information_schema.columns a
+        JOIN information_schema.columns b
+          ON a.column_name = b.column_name
+       WHERE a.table_name = 'jobs' AND b.table_name = 'job_results'
+    `);
+
+    const bendriVardai = bendri.map((r) => r.column_name);
+    assert.ok(bendriVardai.length >= 2, `tikėtasi bent dviejų bendrų vardų, gauta: ${bendriVardai}`);
+
+    for (const [vardas, uzklausa] of [
+      ["SELECT_JOB_META", SELECT_JOB_META],
+      ["SELECT_JOB_WITH_RESULT", SELECT_JOB_WITH_RESULT],
+    ]) {
+      const rezultatas = await pool.query(`${uzklausa} LIMIT 0`);
+      const laukai = rezultatas.fields.map((f) => f.name);
+
+      /** Dublikatas rezultate reiškia, kad viena reikšmė TYLIAI perrašo kitą. */
+      const dublikatai = laukai.filter((l, i) => laukai.indexOf(l) !== i);
+      assert.deepEqual(dublikatai, [], `${vardas}: dublikuoti laukai ${dublikatai}`);
+
+      for (const bendras of bendriVardai) {
+        assert.equal(
+          laukai.filter((l) => l === bendras).length <= 1,
+          true,
+          `${vardas}: bendras stulpelis "${bendras}" pateko daugiau nei kartą`
+        );
+      }
+    }
+  });
+
+  await t.test("`created_at` kolizija: job'o data NEPAIMAMA iš rezultato eilutės", async () => {
+    /**
+     * ⚠️ PIGUS, BET TIKSLINIS SARGAS. `job_results.created_at` užsėjamas akivaizdžiai
+     * kitokia reikšme; jei kada nors užklausa vėl susilietų, `job.createdAt` pasikeistų
+     * tyliai — abu laukai yra timestamp'ai, tad tipo patikra nieko neduotų.
+     */
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO jobs (id, type, status, created_at, updated_at)
+       VALUES ($1, 'transcription', 'completed', TIMESTAMPTZ '2020-01-02 03:04:05+00', now())`,
+      [id]
+    );
+    await pool.query(
+      `INSERT INTO job_results (job_id, storage_type, payload, created_at)
+       VALUES ($1, 'inline', '{"a":1}'::jsonb, TIMESTAMPTZ '2031-11-12 13:14:15+00')`,
+      [id]
+    );
+
+    for (const nustatymai of [{}, { hydrate: false }]) {
+      const job = await store.get(id, nustatymai);
+      assert.match(
+        job.createdAt,
+        /^2020-01-02T03:04:05/,
+        `job'o data privalo likti sava (${JSON.stringify(nustatymai)})`
+      );
+    }
   });
 });
