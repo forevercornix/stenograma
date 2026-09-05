@@ -21,8 +21,22 @@ async function create(fields = {}) {
   return job;
 }
 
-async function get(id) {
-  return jobs.get(id) || null;
+/**
+ * ⚠️ `hydrate: false` PROJEKCIJA TURI ELGTIS VIENODAI VISUOSE BACKEND'UOSE (#157, PR-3).
+ *
+ * PostgreSQL kelyje ji taupo `payload` deserializavimą; atmintyje taupyti nėra ko.
+ * Bet FORMA privalo sutapti: nehidratuotas job'as `result` lauko NETURI, ir kvietėjas,
+ * parašytas prieš vieną backend'ą, negali tyliai sulūžti prieš kitą.
+ *
+ * @param {{hydrate?: boolean}} [nustatymai]
+ */
+async function get(id, { hydrate = true } = {}) {
+  const job = jobs.get(id) || null;
+  if (!job || hydrate) return job;
+
+  /** Kopija: originalas saugykloje lieka pilnas. */
+  const { result: _nehidratuota, ...metaduomenys } = job;
+  return metaduomenys;
 }
 
 /**
@@ -251,8 +265,14 @@ async function finishAtomic(id, status, extra = {}) {
   return next;
 }
 
-async function listAll() {
-  return [...jobs.values()];
+async function listAll({ hydrate = true } = {}) {
+  const visi = [...jobs.values()];
+  if (hydrate) return visi;
+
+  return visi.map((job) => {
+    const { result: _nehidratuota, ...metaduomenys } = job;
+    return metaduomenys;
+  });
 }
 
 async function listByFlag(field, limit = 100) {

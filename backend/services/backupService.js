@@ -257,7 +257,13 @@ function _backupError(message, code) {
  * tampa dviem.
  */
 async function countActiveJobs() {
-  const jobs = await jobStore.system.listAll();
+  /**
+   * ⚠️ BE HIDRATACIJOS (#157, PR-3). Skaičiuojamos BŪSENOS, o rezultatų turinys čia
+   * niekada nebuvo žiūrimas — su 20 MiB riba kiekvienas priežiūros patikrinimas be
+   * reikalo pertempdavo visų job'ų `payload`. `createBackup()` lieka hidratuotas:
+   * jam rezultatai BŪTINI.
+   */
+  const jobs = await jobStore.system.listAll({ hydrate: false });
   return jobs.filter((job) => !["completed", "failed"].includes(job.status)).length;
 }
 

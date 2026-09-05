@@ -58,6 +58,8 @@ body arba A1–A4 atsakymai.
 | 46 | **Viešas klaidos tekstas gaminamas iš KODO** — `JSON.parse` diagnostika neša artefakto turinio fragmentą į savininkui matomą lauką | Codex (#290) |
 | 47 | **`ARTIFACT_CORRUPT` atskiriamas nuo `ARTIFACT_NOT_FOUND`** — sugadintas objektas guli vietoje, tad remontas kitas | Codex (#290) |
 | 48 | **Plano teiginys apie `reference === null` buvo per stiprus** — inline bandymai dalijasi `job_id`, tad `ON CONFLICT DO UPDATE` perrašo nugalėtojo rezultatą prieš completion CAS. Predikatas galioja cleanup/orphan klausimui, NE „pralaimėjusio bandymo nėra" | Codex (#290) |
+| 49 | **PR-3: `listByFlag()` irgi grąžina nehidratuotą projekciją** — `payload` ji netempė, bet `rowToJob()` pridėdavo `result: null`, t. y. teigdavo „rezultato nėra" apie job'ą, kurio rezultatas yra | įgyvendinimas |
+| 50 | **PR-3: rezultato NUORODA (`storage_type`, `storage_key`, `bytes`, `checksum`) lieka VIDINĖ** — traukiama metaduomenų užklausoje PR-5 sprendimui, bet į bendrą job modelį nepatenka | įgyvendinimas |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 

@@ -60,7 +60,11 @@ function isoFromDb(value) {
  * galėtų sėkmingai IŠSAUGOTI transkripciją ir grąžinti `result: null`
  * kiekvienam klientui — sėkmingas įrašymas, tuščias atsakymas.
  */
-function rowToJob(row) {
+/**
+ * @param {object} row
+ * @param {{hidratuota?: boolean}} [nustatymai] `hidratuota: false` - metaduomenų kelias
+ */
+function rowToJob(row, { hidratuota = true } = {}) {
   if (!row) return null;
 
   const progress = row.progress_known
@@ -91,7 +95,6 @@ function rowToJob(row) {
     requestId: row.request_id,
     storageKey: row.storage_key,
     artefacts: row.artefacts || [],
-    result: row.result === undefined ? null : row.result,
     /**
      * `error` yra ATGALINIS SUDERINAMUMAS su senu lauku — `applyPatch()` jį
      * laiko `error_message` kopija. Atskiro stulpelio nėra sąmoningai: dvi
@@ -132,6 +135,18 @@ function rowToJob(row) {
    * NESANTI, ne `null`.
    */
   if (row.schema_version != null) job.schemaVersion = row.schema_version;
+
+  /**
+   * ⚠️ NEHIDRATUOTAS JOB'AS `result` LAUKO NETURI — JIS NĖRA `null`.
+   *
+   * `null` reiškia „rezultato NĖRA" (`common.js` `rezultatoNera()`), ir metaduomenų
+   * kelyje tai būtų MELAS apie job'ą, kurio rezultatas puikiausiai egzistuoja. Be to
+   * `applyPatch()` sprendžia pagal `"result" in job`: `null` reikštų nurodymą
+   * IŠTRINTI rezultatą, jei toks įrašas kada nors keliautų į `update()`.
+   *
+   * Lauko nebuvimas yra tas pats mechanizmas, kurį jau naudoja `schemaVersion`.
+   */
+  if (hidratuota) job.result = row.result === undefined ? null : row.result;
 
   return job;
 }
@@ -576,11 +591,45 @@ const EILUTE_ATITIKO = `SELECT count(*) FROM jobs WHERE ${PROGRESO_CAS_PREDIKATA
  */
 const CAS_BANDYMU_RIBA = 2;
 
-const SELECT_JOB = `
-  SELECT j.*, r.payload AS result
+/**
+ * UŽKLAUSA SKAIDOMA Į DVI: METADUOMENYS IR TURINYS (#157, PR-3).
+ *
+ * ⚠️ `LEFT JOIN ... r.payload` TEMPIA REZULTATĄ Į KIEKVIENĄ SKAITYMĄ.
+ *
+ * Autorizacija, sąrašai, sweep ir `countActiveJobs()` naudoja tik metaduomenis, bet
+ * `SELECT_JOB` jiems deserializuodavo VISĄ `payload` — su 20 MiB riba ir šimtu
+ * eilučių tai keli GiB per praėjimą, tiesiogiai prieštaraujant priežasčiai, dėl
+ * kurios rezultatai iškelti į atskirą lentelę. `listByFlag()` šito jau vengė; čia tas
+ * pats precedentas išplečiamas, o ne įvedama nauja taisyklė.
+ *
+ * ⚠️ METADUOMENŲ UŽKLAUSA TRAUKIA REZULTATO **NUORODĄ**, NE TURINĮ.
+ *
+ * `storage_type`, `storage_key`, `bytes` ir `checksum` yra keli baitai eilutei, bet
+ * be jų PR-5 sprendimas „ar šiam job'ui yra ką trinti saugykloje" būtų neįmanomas
+ * nepridėjus antros užklausos (Codex #289). ⚠️ Šie laukai LIEKA VIDINIAI: į bendrą
+ * job modelį jie nepatenka, kitaip viešas kontraktas imtų priklausyti nuo saugyklos.
+ */
+const REZULTATO_NUORODA = "r.storage_type, r.storage_key, r.bytes AS result_bytes, r.checksum";
+
+const SELECT_JOB_META = `
+  SELECT j.*, ${REZULTATO_NUORODA}
     FROM jobs j
     LEFT JOIN job_results r ON r.job_id = j.id
 `;
+
+const SELECT_JOB_WITH_RESULT = `
+  SELECT j.*, ${REZULTATO_NUORODA}, r.payload AS result
+    FROM jobs j
+    LEFT JOIN job_results r ON r.job_id = j.id
+`;
+
+/**
+ * ⚠️ VIDINIAI KELIAI LIEKA PRIE PILNOS UŽKLAUSOS. `readJob()` ir
+ * `readJobForUpdate()` aptarnauja mutacijas, kurioms rezultatas reikalingas
+ * (idempotencija, `finishAtomic`), tad jų skaidyti nėra ko — o `finishAtomic`
+ * non-inline eilutę atmeta fail-closed sargu (#157), kol PR-4 neatidaro rašymo kelio.
+ */
+const SELECT_JOB = SELECT_JOB_WITH_RESULT;
 
 function insertSql() {
   const cols = COLUMNS.map((c) => `"${c}"`).join(", ");
@@ -709,7 +758,11 @@ function assertAtstovaujamasProgresas(job) {
   }
 }
 
-function createPostgresStore(pool) {
+/**
+ * @param {object} pool `pg` pool
+ * @param {{artifactStore?: object}} [priklausomybes] external rezultatų saugykla (#157)
+ */
+function createPostgresStore(pool, { artifactStore = null } = {}) {
   /** Rezultato įrašymas — `payload` yra JSONB, tad bet koks JSON tinka. */
   async function upsertResult(client, jobId, result) {
     if (result === undefined) return;
@@ -914,9 +967,69 @@ function createPostgresStore(pool) {
     });
   }
 
-  async function get(id) {
-    const { rows } = await pool.query(`${SELECT_JOB} WHERE j.id = $1`, [id]);
-    return rowToJob(rows[0]);
+  /**
+   * REZULTATO HIDRATACIJA — RIBOTA PAGAL KONSTRUKCIJĄ (#157, PR-3).
+   *
+   * ⚠️ RIBA TIKRINAMA PRIEŠ ĮKĖLIMĄ, NE PO JO.
+   *
+   * External eilutėje `bytes` persistinamas kartu su nuoroda (PR-1 kolona), tad
+   * per didelis rezultatas atmetamas NĖ NEKREIPUS į saugyklą. Tai pigus atmetimas,
+   * o ne garantija: jei objektas saugykloje perrašytas iki didesnio, pasenusi maža
+   * reikšmė patikrą praeitų. Kietas stabdis gyvena `skaitytiRibotai()` — skaitiklyje
+   * skaitymo metu (Codex P2, #289).
+   *
+   * ⚠️ FAIL-CLOSED BE SAUGYKLOS. External nuoroda be sukonfigūruotos saugyklos
+   * reiškia, kad rezultato perskaityti NEGALIME. Grąžinti `null` čia būtų
+   * „`completed` be rezultato" — būsena, po kurios terminalus valymas ištrina
+   * šaltinio audio.
+   */
+  async function hidratuotiRezultata(eilute) {
+    const tipas = eilute.storage_type;
+
+    if (!tipas || tipas === "inline") {
+      return eilute.result === undefined ? null : eilute.result;
+    }
+
+    if (!artifactStore) {
+      throw new Error(
+        `postgresStore: job_results.storage_type = '${tipas}', bet artefaktų saugykla ` +
+          "nesukonfigūruota. Rezultato perskaityti neįmanoma (#157)."
+      );
+    }
+
+    const { getLimits, LIMIT_KIND, assertWithinLimit } = require("../resultLimits");
+    const { skaitytiRibotai } = require("../artifactStore");
+
+    /** `bigint` per `node-postgres` grįžta EILUTE — normalizuojama vieną kartą. */
+    const deklaruoti = Number(eilute.result_bytes);
+    const deklaruotiBaitai = Number.isInteger(deklaruoti) && deklaruoti >= 0 ? deklaruoti : null;
+
+    if (deklaruotiBaitai !== null) {
+      /** Pigus atmetimas: į saugyklą net nesikreipiame. */
+      assertWithinLimit(LIMIT_KIND.RESULT_BYTES, deklaruotiBaitai);
+    }
+
+    const { reiksme } = await skaitytiRibotai(artifactStore, eilute.storage_key, {
+      maxBaitai: getLimits()[LIMIT_KIND.RESULT_BYTES],
+      deklaruotiBaitai,
+    });
+
+    return reiksme;
+  }
+
+  /**
+   * @param {string} id
+   * @param {{hydrate?: boolean}} [nustatymai] `hydrate: false` - tik metaduomenys
+   */
+  async function get(id, { hydrate = true } = {}) {
+    const uzklausa = hydrate ? SELECT_JOB_WITH_RESULT : SELECT_JOB_META;
+    const { rows } = await pool.query(`${uzklausa} WHERE j.id = $1`, [id]);
+    if (!rows[0]) return null;
+
+    const job = rowToJob(rows[0], { hidratuota: hydrate });
+    if (hydrate) job.result = await hidratuotiRezultata(rows[0]);
+
+    return job;
   }
 
   /**
@@ -1478,9 +1591,27 @@ function createPostgresStore(pool) {
     return rows[0].n;
   }
 
-  async function listAll() {
-    const { rows } = await pool.query(`${SELECT_JOB} ORDER BY j.created_at`);
-    return rows.map(rowToJob);
+  /**
+   * @param {{hydrate?: boolean}} [nustatymai] `hydrate: false` - tik metaduomenys
+   */
+  async function listAll({ hydrate = true } = {}) {
+    const uzklausa = hydrate ? SELECT_JOB_WITH_RESULT : SELECT_JOB_META;
+    const { rows } = await pool.query(`${uzklausa} ORDER BY j.created_at`);
+
+    const jobai = rows.map((row) => rowToJob(row, { hidratuota: hydrate }));
+    if (!hydrate) return jobai;
+
+    /**
+     * ⚠️ EXTERNAL EILUTĖS HIDRATUOJAMOS PO VIENĄ, IR KAINA UŽRAŠOMA: tai po
+     * kreipinį į saugyklą kiekvienam tokiam job'ui. Vienintelis hidratuojantis
+     * `listAll()` kvietėjas yra kopijos kūrimas, kuriam rezultatai BŪTINI; visi
+     * metaduomenų keliai perduoda `hydrate: false` ir šios kainos nemoka.
+     */
+    for (let i = 0; i < rows.length; i += 1) {
+      jobai[i].result = await hidratuotiRezultata(rows[i]);
+    }
+
+    return jobai;
   }
 
   const FLAG_COLUMNS = new Set(["audio_cleanup_pending", "deletion_pending"]);
@@ -1506,13 +1637,17 @@ function createPostgresStore(pool) {
      * praėjimas be reikalo pertemptų kelis GiB - tiesiogiai prieštaraudamas
      * priežasčiai, dėl kurios rezultatai iškelti į atskirą lentelę.
      *
-     * `result` čia lieka `null`; jei kada prireiks, imamas per `get()`.
+     * ⚠️ IR `result` LAUKO ČIA NĖRA — jis nėra `null` (#157, PR-3). Anksčiau ši
+     * užklausa `payload` netempė, bet `rowToJob()` vis tiek pridėdavo `result: null`,
+     * t. y. teigdavo „rezultato NĖRA" apie job'ą, kurio rezultatas puikiausiai yra.
+     * Dabar naudojama ta pati nehidratuota projekcija kaip `get(id, {hydrate:false})`;
+     * prireikus rezultato, jis imamas per `get()`.
      */
     const { rows } = await pool.query(
       `SELECT j.* FROM jobs j WHERE j."${field}" ORDER BY j.updated_at LIMIT $1`,
       [limit]
     );
-    return rows.map(rowToJob);
+    return rows.map((row) => rowToJob(row, { hidratuota: false }));
   }
 
   /**

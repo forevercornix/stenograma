@@ -662,9 +662,12 @@ module.exports = {
    * be jo atskiras namespace taptų patogiu privilege escalation keliu.
    */
   system: {
-    get: async (id) => {
+    /**
+     * @param {{hydrate?: boolean}} [nustatymai] `hydrate: false` - tik metaduomenys (#157, PR-3)
+     */
+    get: async (id, nustatymai = {}) => {
       await ensureInit();
-      return store.get(id);
+      return store.get(id, nustatymai);
     },
     update: async (id, patch, options = {}) => {
       assertNoRawPhaseWrite(patch);
@@ -899,9 +902,18 @@ module.exports = {
         ? store.listByFlag("deletion_pending", limit)
         : [];
     },
-    listAll: async () => {
+    /**
+     * ⚠️ HIDRATACIJA YRA EKSPLICITINIS ARGUMENTAS, NE NUMANOMA (#157, PR-3).
+     *
+     * Numatytoji reikšmė - hidratuoti, kad viešas kontraktas nepasikeistų. Metaduomenų
+     * keliai (pvz. `countActiveJobs()`) perduoda `hydrate: false` ir nustoja tempti
+     * `payload`, kurio niekada nežiūrėjo.
+     *
+     * @param {{hydrate?: boolean}} [nustatymai]
+     */
+    listAll: async (nustatymai = {}) => {
       await ensureInit();
-      return store.listAll();
+      return store.listAll(nustatymai);
     },
     /**
      * Grąžina `null`, jei saugykla to nepalaiko - iškviečiantis kodas tada

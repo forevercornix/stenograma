@@ -198,9 +198,20 @@ function createRedisStore(redisClient) {
     return kanoninis;
   }
 
-  async function get(id) {
+  /**
+   * ⚠️ `hydrate: false` PROJEKCIJA — FORMOS PARITETAS (#157, PR-3). Redis eilutė yra
+   * vienas hash'as, tad turinio čia neišvengsi; bet kvietėjas, gavęs nehidratuotą
+   * job'ą, VISUOSE backend'uose privalo matyti tą patį: `result` lauko nėra.
+   *
+   * @param {{hydrate?: boolean}} [nustatymai]
+   */
+  async function get(id, { hydrate = true } = {}) {
     const flat = await redisClient.hgetall(JOB_PREFIX + id);
-    return deserialize(flat);
+    const job = deserialize(flat);
+    if (!job || hydrate) return job;
+
+    const { result: _nehidratuota, ...metaduomenys } = job;
+    return metaduomenys;
   }
 
   /**
@@ -696,8 +707,14 @@ function createRedisStore(redisClient) {
    * Naudoja `_scanJobs`, kuris eina per `SCAN`, ne `KEYS` – pastarasis
    * blokuotų Redis, kol pereina visą raktų erdvę.
    */
-  async function listAll() {
-    return _scanJobs();
+  async function listAll({ hydrate = true } = {}) {
+    const visi = await _scanJobs();
+    if (hydrate) return visi;
+
+    return visi.map((job) => {
+      const { result: _nehidratuota, ...metaduomenys } = job;
+      return metaduomenys;
+    });
   }
 
   async function listReferencedStorageKeys() {
