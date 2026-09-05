@@ -1,5 +1,5 @@
 const jobPhase = require("../jobPhase");
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas, metaduomenuProjekcija } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -210,8 +210,7 @@ function createRedisStore(redisClient) {
     const job = deserialize(flat);
     if (!job || hydrate) return job;
 
-    const { result: _nehidratuota, ...metaduomenys } = job;
-    return metaduomenys;
+    return metaduomenuProjekcija(job);
   }
 
   /**
@@ -709,12 +708,7 @@ function createRedisStore(redisClient) {
    */
   async function listAll({ hydrate = true } = {}) {
     const visi = await _scanJobs();
-    if (hydrate) return visi;
-
-    return visi.map((job) => {
-      const { result: _nehidratuota, ...metaduomenys } = job;
-      return metaduomenys;
-    });
+    return hydrate ? visi : visi.map(metaduomenuProjekcija);
   }
 
   async function listReferencedStorageKeys() {
@@ -728,13 +722,14 @@ function createRedisStore(redisClient) {
     return [...keys];
   }
 
+  /** ⚠️ METADUOMENŲ KELIAS — ta pati projekcija kaip kituose backend'uose (#157, PR-3). */
   async function listByFlag(field, limit = 100) {
     const jobs = await _scanJobs();
     const pending = [];
 
     for (const job of jobs) {
       if (pending.length >= limit) break;
-      if (job[field]) pending.push(job);
+      if (job[field]) pending.push(metaduomenuProjekcija(job));
     }
 
     return pending;

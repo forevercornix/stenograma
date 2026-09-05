@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas, metaduomenuProjekcija } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -35,8 +35,7 @@ async function get(id, { hydrate = true } = {}) {
   if (!job || hydrate) return job;
 
   /** Kopija: originalas saugykloje lieka pilnas. */
-  const { result: _nehidratuota, ...metaduomenys } = job;
-  return metaduomenys;
+  return metaduomenuProjekcija(job);
 }
 
 /**
@@ -267,18 +266,21 @@ async function finishAtomic(id, status, extra = {}) {
 
 async function listAll({ hydrate = true } = {}) {
   const visi = [...jobs.values()];
-  if (hydrate) return visi;
-
-  return visi.map((job) => {
-    const { result: _nehidratuota, ...metaduomenys } = job;
-    return metaduomenys;
-  });
+  return hydrate ? visi : visi.map(metaduomenuProjekcija);
 }
 
+/**
+ * ⚠️ `listByFlag()` YRA METADUOMENŲ KELIAS PAGAL APIBRĖŽIMĄ (#157, PR-3).
+ *
+ * Abu valymo ciklai naudoja tik vėliavą, bandymus, terminą ir `storageKey`; nė vienas
+ * kvietėjas rezultato neskaito. Todėl grąžinama ta pati nehidratuota projekcija kaip
+ * PostgreSQL pusėje — hidratacijos parinktis čia būtų svirtis, kurios niekam nereikia,
+ * o divergencija liktų galima.
+ */
 async function listByFlag(field, limit = 100) {
   const pending = [];
   for (const job of jobs.values()) {
-    if (job[field]) pending.push(job);
+    if (job[field]) pending.push(metaduomenuProjekcija(job));
     if (pending.length >= limit) break;
   }
   return pending;

@@ -1159,3 +1159,76 @@ test("KONTRAKTAS: dokumentacija neteigia, kad memory backend'ui CAS nereikalinga
     );
   }
 });
+
+/* ═══ FORMOS EKVIVALENTUMAS: METADUOMENŲ KELIAI ═══════════════════════ */
+
+/**
+ * ⚠️ KONTRAKTAS TIKRINO METODŲ AIBĘ IR ELGESĮ, BET NE GRĄŽINAMĄ FORMĄ
+ * (Codex blokatorius, #291).
+ *
+ * PR-3 metu PostgreSQL `listByFlag()` nustojo grąžinti `result`, o atminties ir Redis
+ * pusė jį grąžino toliau — ir rinkinys liko ŽALIAS. Kvietėjas, parašytas prieš vieną
+ * backend'ą, tokiu atveju tyliai elgiasi kitaip prieš kitą.
+ *
+ * ⚠️ LAUKŲ AIBĖ LYGINAMA TARP BACKEND'Ų, ne su ranka surašytu sąrašu: įrašytas
+ * sąrašas pasentų su pirmu nauju lauku, o palyginimas tarp backend'ų gaudo būtent tą
+ * klasę, dėl kurios šis testas ir egzistuoja.
+ */
+test("KONTRAKTAS: `listByFlag()` grąžina TĄ PAČIĄ laukų aibę visuose backend'uose", async (t) => {
+  const formos = new Map();
+
+  for (const adapter of ADAPTERIAI) {
+    if (adapter.skip) {
+      t.diagnostic(`${adapter.name}: praleista (${adapter.skip})`);
+      continue;
+    }
+
+    const ctx = await adapter.setup();
+    try {
+      const job = await ctx.store.create({ ownerKind: OWNER_KIND.UNOWNED, type: JOB_TYPES.TRANSCRIPTION });
+      await ctx.store.update(job.id, { status: "processing", phase: PHASE.TRANSCRIBING });
+      await ctx.store.update(job.id, {
+        status: "completed",
+        phase: null,
+        result: { text: "turinys" },
+        deletion_pending: true,
+      });
+
+      const [irasas] = await ctx.store.listByFlag("deletion_pending");
+      assert.ok(irasas, `${adapter.name}: pažymėtas įrašas privalo būti grąžintas`);
+
+      formos.set(adapter.name, Object.keys(irasas).sort());
+
+      /**
+       * ⚠️ METADUOMENŲ KELYJE `result` LAUKO NĖRA — ir jis nėra `null`. `null` reikštų
+       * „rezultato nėra", nors jis yra; be to `applyPatch()` sprendžia pagal
+       * `"result" in job`, tad `null` būtų nurodymas jį IŠTRINTI.
+       */
+      assert.equal("result" in irasas, false, `${adapter.name}: metaduomenų kelias turinio neneša`);
+
+      /** KONTROLĖ: pilnas kelias rezultatą TURI — kitaip lygintume dvi tuštumas. */
+      assert.deepEqual(
+        (await ctx.store.get(job.id)).result,
+        { text: "turinys" },
+        `${adapter.name}: hidratuotas kelias privalo grąžinti rezultatą`
+      );
+
+      await ctx.store.remove(job.id);
+    } finally {
+      await ctx.cleanup();
+    }
+  }
+
+  const [pirmas, ...kiti] = [...formos.entries()];
+  assert.ok(pirmas, "bent vienas backend'as privalo būti įvykdytas");
+
+  for (const [vardas, laukai] of kiti) {
+    assert.deepEqual(
+      laukai,
+      pirmas[1],
+      `${vardas} ir ${pirmas[0]} grąžina SKIRTINGĄ laukų aibę — kontraktas išsiskyrė`
+    );
+  }
+
+  t.diagnostic(`palyginti backend'ai: ${[...formos.keys()].join(", ")}`);
+});
