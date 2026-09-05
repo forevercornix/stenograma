@@ -1219,14 +1219,40 @@ test("KONTRAKTAS: `listByFlag()` grąžina TĄ PAČIĄ laukų aibę visuose back
     }
   }
 
+  /**
+   * ⚠️ VIENA ŽINOMA DIVERGENCIJA, IR JI NE APIE HIDRATACIJĄ.
+   *
+   * `deletion_pending`, `deletion_attempts` ir jų palydovai `newJob()` išvestyje
+   * NEEGZISTUOJA — juos materializuoja tik `postgresStore.rowToJob()` ir ištrynimo
+   * kelias. Tai užrašyta `common.js` (`BOOLEAN_FIELDS`/`NUMBER_FIELDS` komentaras) ir
+   * yra SENESNĖ už #157: laukai atsiranda tada, kai jais pradedama naudotis.
+   *
+   * ⚠️ SĄRAŠAS UŽRAŠOMAS, O NE PALIEKAMAS TYLĖTI. Skirtumas, kurio niekas nemato, po
+   * kelių mėnesių tampa „taip visada buvo"; skirtumas, kurio aibė tvirtinama, kiekvieną
+   * NAUJĄ narį paverčia kritimu. Būtent to ir reikia: `result` grįžimas į vieną
+   * backend'ą kris, nes jo šiame sąraše nėra.
+   */
+  const ZINOMOS_DIVERGENCIJOS = new Set([
+    "audio_cleanup_next_attempt_at",
+    "deletion_attempts",
+    "deletion_next_attempt_at",
+  ]);
+
   const [pirmas, ...kiti] = [...formos.entries()];
   assert.ok(pirmas, "bent vienas backend'as privalo būti įvykdytas");
 
   for (const [vardas, laukai] of kiti) {
+    const tik_cia = laukai.filter((l) => !pirmas[1].includes(l));
+    const tik_ten = pirmas[1].filter((l) => !laukai.includes(l));
+    const skirtumas = [...tik_cia, ...tik_ten].sort();
+
+    t.diagnostic(`${vardas} vs ${pirmas[0]}: skirtumas = ${JSON.stringify(skirtumas)}`);
+
+    const nauji = skirtumas.filter((l) => !ZINOMOS_DIVERGENCIJOS.has(l));
     assert.deepEqual(
-      laukai,
-      pirmas[1],
-      `${vardas} ir ${pirmas[0]} grąžina SKIRTINGĄ laukų aibę — kontraktas išsiskyrė`
+      nauji,
+      [],
+      `${vardas} ir ${pirmas[0]} išsiskyrė NAUJAIS laukais — kontraktas išsiskyrė`
     );
   }
 
