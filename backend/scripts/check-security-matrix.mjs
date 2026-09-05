@@ -84,7 +84,7 @@ for (const name of mentioned) {
 //
 // `redis` ir `postgres` įtraukti, nes juose gyvena nuosavybės CAS, fazių CAS ir
 // backend'ų kontraktas — invariantai, ne funkcijos.
-const DOKUMENTUOJAMI = ["privacy", "security", "redis", "postgres"];
+const DOKUMENTUOJAMI = ["privacy", "security", "redis", "postgres", "s3"];
 
 for (const suite of DOKUMENTUOJAMI) {
   for (const name of suites[suite]) {

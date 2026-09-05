@@ -519,7 +519,15 @@ function importuotiModuliai(saltinis) {
   return rasti;
 }
 
-function isvestiPostgresRinkini() {
+/**
+ * ⚠️ RINKINYS IŠVEDAMAS IŠ SARGO IMPORTO, NE RAŠOMAS RANKA.
+ *
+ * Rankinis sąrašas leistų naujam integraciniam testui iškristi tyliai: jis
+ * nebūtų paleistas, CI liktų žalias, o kodas — nepatikrintas. Ta pati taisyklė
+ * galioja abiem infrastruktūroms, tad išvedimas parametrizuotas, o ne
+ * nukopijuotas (#157, PR-2).
+ */
+function isvestiRinkini(sargas) {
   const fs = require("node:fs");
   const path = require("node:path");
   const dir = __dirname;
@@ -529,16 +537,30 @@ function isvestiPostgresRinkini() {
     .filter((failas) => failas.endsWith(".test.js"))
     .filter((failas) => {
       const turinys = fs.readFileSync(path.join(dir, failas), "utf8");
-      return importuotiModuliai(turinys).some((kelias) => kelias.endsWith("postgresGuard"));
+      return importuotiModuliai(turinys).some((kelias) => kelias.endsWith(sargas));
     })
     .map((failas) => failas.replace(/\.test\.js$/, ""))
     .sort();
 }
 
+function isvestiPostgresRinkini() {
+  return isvestiRinkini("postgresGuard");
+}
+
 const postgres = isvestiPostgresRinkini();
 
+/**
+ * ⚠️ S3 RINKINYS ATSKIRAS NUO `postgres`, NORS ABU INTEGRACINIAI.
+ *
+ * Jie reikalauja SKIRTINGOS infrastruktūros: `postgres` žingsnis turi
+ * `DATABASE_URL`, S3 — `MINIO_ENDPOINT`. Sujungus, vienas trūkstamas servisas
+ * paverstų kito garantiją praleidimu, o „rinkinys tikrai vykdytas" sargas
+ * nebegalėtų pasakyti, KURIO trūko.
+ */
+const s3 = isvestiRinkini("minioGuard");
+
 module.exports = {
-  suites: { privacy, security, functional, redis, postgres },
+  suites: { privacy, security, functional, redis, postgres, s3 },
 
   /**
    * Rinkiniai, kuriuos apima `npm test`.
@@ -548,6 +570,7 @@ module.exports = {
    * ignoruoti. Jie paleidžiami atskirai (`npm run test:redis`) ir CI.
    */
   isvestiPostgresRinkini,
+  isvestiRinkini,
   importuotiModuliai,
 
   defaultSuites: ["privacy", "security", "functional"],
