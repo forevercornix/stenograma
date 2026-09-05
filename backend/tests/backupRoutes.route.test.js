@@ -343,6 +343,15 @@ test("UŽRAKTAS: turi MAKSIMALIĄ trukmę", () => {
    *
    * Prasmė nepakito: tikrinama, kad užraktas galioja iškart ir NEBEGALIOJA
    * pasibaigus jo trukmei — tik langas nebėra siauresnis už planuoklio tikslumą.
+   *
+   * ⚠️ JEI ŠIS LANGAS VĖL PASIRODYS PER SIAURAS, ATSAKYMAS NĖRA `100`.
+   *
+   * Konstantos didinimas yra begalinė seka: po kelių raundų liktų testas, kuris
+   * trunka ilgai ir netikrina nieko, ko nepatikrintų trumpesnis. Teisingas
+   * pataisymas — MATUOTI faktinę trukmę, o ne laukti pasirinktos: fiksuoti laiką
+   * prieš `acquire()`, ciklu laukti, kol `isLocked()` taps `false`, ir tvirtinti,
+   * kad praėjo BENT `maxHoldMs`. Tada tvirtinimas kalba apie užrakto elgesį, o ne
+   * apie tai, ar runner'is spėjo per pasirinktą langą.
    */
   const TRUKME_MS = 50;
   maintenanceLock.acquire("test", { maxHoldMs: TRUKME_MS });
