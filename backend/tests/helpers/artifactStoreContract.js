@@ -7,6 +7,7 @@ const {
   ATMETAMI,
   NUOSTOLINGI,
   BLOGI_RAKTAI,
+  operacijosSuRaktu,
   tapatybe,
 } = require("./artifactStoreScenarios");
 
@@ -347,18 +348,19 @@ function paleistiKontrakta(vardas, paruosti) {
     /* ═══ 9. ATMETAMI RAKTAI ═══ */
 
     await t.test("kontraktas atmeta blogus raktus VISOSE operacijose", async () => {
-      for (const scenarijus of BLOGI_RAKTAI) {
-        const operacijos = [
-          ["put", () => saugykla.put(scenarijus.raktas, { a: 1 })],
-          ["read", () => saugykla.read(scenarijus.raktas)],
-          ["head", () => saugykla.head(scenarijus.raktas)],
-          ["verify", () => saugykla.verify(scenarijus.raktas, { bytes: 1, checksum: "a".repeat(64) })],
-          ["delete", () => saugykla.delete(scenarijus.raktas)],
-        ];
+      /**
+       * ⚠️ OPERACIJŲ SĄRAŠAS IŠVEDAMAS IŠ SAUGYKLOS PAVIRŠIAUS (Codex, #290).
+       *
+       * Ranka surašytas jis jau buvo praleidęs `readStream`. Nauja operacija be
+       * matricos eilutės dabar sustabdo rinkinį su vardu — o ne praslysta.
+       */
+      const operacijos = operacijosSuRaktu(saugykla);
+      assert.ok(operacijos.length >= 6, `raktų matrica privalo dengti visą paviršių: ${operacijos.length}`);
 
+      for (const scenarijus of BLOGI_RAKTAI) {
         for (const [operacija, veiksmas] of operacijos) {
           await assert.rejects(
-            veiksmas,
+            () => veiksmas(scenarijus.raktas),
             (klaida) => klaida.code === "ARTIFACT_KEY_INVALID",
             `${operacija} praleido blogą raktą: ${scenarijus.vardas}`
           );

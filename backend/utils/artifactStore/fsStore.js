@@ -48,7 +48,7 @@ function createFsArtifactStore({ root } = {}) {
    * ateities: jei kas nors kada praplės leistinų raktų aibę, filesystem pusė
    * neturi tapti pirmąja auka. Gynyba gilumoje, ne dubliavimas.
    */
-  function kelias(raktas) {
+  function leksinisKelias(raktas) {
     const pilnas = path.resolve(saknis, patikrintiRakta(raktas));
 
     if (pilnas !== saknis && !pilnas.startsWith(saknis + path.sep)) {
@@ -105,6 +105,25 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   /**
+   * VIENINTELIS KELIO ŠALTINIS - PER JĮ EINA KIEKVIENA OPERACIJA (Codex, #290).
+   *
+   * ⚠️ ANKSČIAU RIBA BUVO TAIKOMA PER OPERACIJĄ, NE PER VARTUS.
+   *
+   * `head` ir `put` `realpath` patikrą darė, o `read`, `readStream`, `verify` ir
+   * `delete` ėmė LEKSINĮ kelią. Trys iš jų buvo apsaugotos ATSITIKTINAI - jos
+   * pirma kviečia `head()`, tad riba suveikdavo joje; `delete` `head()` nekviečia,
+   * ir būtent jis symlink'ą per katalogą praleisdavo iki galo, ištrindamas failą
+   * UŽ saugyklos šaknies. Codex pastebėjo `delete`; spraga buvo šablone.
+   *
+   * ⚠️ APSAUGA DABAR STRUKTŪRINĖ, NE DRAUSMĖS. `leksinisKelias()` už šios
+   * funkcijos ribų nekviečiamas niekur, tad operacija be resolverio kelio
+   * paprasčiausiai NETURI - pamiršti nebėra kaip.
+   */
+  async function keliasSaugus(raktas, { katalogas = false } = {}) {
+    return tikrasKelias(leksinisKelias(raktas), { katalogas });
+  }
+
+  /**
    * ⚠️ NAUJI KATALOGAI IRGI PRIVALO BŪTI PATVARŪS (Codex, #290).
    *
    * `mkdir(..., { recursive: true })` grąžina sėkmę, kai įrašai dar tik page
@@ -149,14 +168,37 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   async function put(raktas, reiksme) {
-    const pilnas = kelias(raktas);
+    const pilnas = await keliasSaugus(raktas);
     const paruosta = paruostiReiksme(reiksme);
 
     const sukurti = await sukurtiKatalogus(path.dirname(pilnas));
-    await tikrasKelias(pilnas, { katalogas: true });
+    /** Po `mkdir` katalogas jau egzistuoja, tad `realpath` jį realiai patikrina. */
+    await keliasSaugus(raktas, { katalogas: true });
 
-    const laikinas = `${pilnas}.${crypto.randomUUID()}.tmp`;
+    /**
+     * ⚠️ AR OBJEKTAS TUO ADRESU JAU BUVO - KLAUSIAMA PRIEŠ `rename`.
+     *
+     * Nuo atsakymo priklauso, ką daryti su gedimu PO `rename`: šviežią objektą
+     * privalu pašalinti (kvietėjas jo neregistruos), o buvusį - palikti, nes
+     * atstatyti seno turinio nebėra iš ko.
+     */
+    const buvoAnksciau = (await head(raktas)) !== null;
+
+    /**
+     * ⚠️ LAIKINAS VARDAS NEPRIKLAUSO NUO RAKTO (Codex, #290).
+     *
+     * `<raktas>.<uuid>.tmp` pridėdavo 41 simbolį prie failo vardo, o failų
+     * sistemos riba yra 255 baitai VIENAM vardui. Riba raktą iki 512 simbolių
+     * priima, tad `put()` krisdavo su `ENAMETOOLONG` dėl MŪSŲ sufikso, o ne dėl
+     * sistemos ribos - išmatuota nuo 214 simbolių segmento.
+     *
+     * Trumpas nepriklausomas vardas tą klasę pašalina. Kaina: laikinas failas
+     * nebenurodo savo rakto — bet `.tmp` likučiai ir taip yra orphan klausimas,
+     * sprendžiamas PR-4 kartu su nutrūkusiais bandymais, o ne vardo forma.
+     */
+    const laikinas = path.join(path.dirname(pilnas), `.${crypto.randomBytes(8).toString("hex")}.tmp`);
     let deskriptorius = null;
+    let pervadinta = false;
 
     try {
       deskriptorius = await fsp.open(laikinas, "wx");
@@ -166,6 +208,7 @@ function createFsArtifactStore({ root } = {}) {
       deskriptorius = null;
 
       await fsp.rename(laikinas, pilnas);
+      pervadinta = true;
 
       /**
        * ⚠️ KATALOGO `fsync` PO `rename`.
@@ -188,6 +231,24 @@ function createFsArtifactStore({ root } = {}) {
     } catch (klaida) {
       if (deskriptorius) await deskriptorius.close().catch(() => {});
       await fsp.rm(laikinas, { force: true }).catch(() => {});
+
+      /**
+       * ⚠️ GEDIMAS PO `rename` PALIEKA OBJEKTĄ, KURIO NIEKAS NEREGISTRUOS
+       * (Codex, #290).
+       *
+       * `put()` meta, tad kvietėjas nuorodos nepersistina — o objektas lieka
+       * gulėti. DB krypties inventorius (A3) jo NEBERANDA pagal apibrėžimą:
+       * jautrus turinys be savininko, tiksliai ta orphan klasė, kurią #157
+       * uždarinėja.
+       *
+       * ⚠️ BUVĘS OBJEKTAS NENAIKINAMAS. Jei tuo adresu jau kažkas gulėjo, jo
+       * turinys po `rename` jau pakeistas, ir atstatyti nebėra iš ko; trynimas
+       * prarastų duomenis. Riba užrašoma, o ne praplečiama.
+       */
+      if (pervadinta && !buvoAnksciau) {
+        await fsp.rm(pilnas, { force: true }).catch(() => {});
+      }
+
       throw klaida;
     }
 
@@ -208,7 +269,7 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   async function head(raktas) {
-    const pilnas = await tikrasKelias(kelias(raktas));
+    const pilnas = await keliasSaugus(raktas);
 
     try {
       const info = await fsp.stat(pilnas);
@@ -240,7 +301,7 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   async function read(raktas) {
-    const pilnas = kelias(raktas);
+    const pilnas = await keliasSaugus(raktas);
 
     /**
      * ⚠️ TA PATI REGULIARUMO SĄLYGA KAIP `head()`. Be jos `readFile` katalogui
@@ -268,7 +329,7 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   async function readStream(raktas) {
-    const pilnas = kelias(raktas);
+    const pilnas = await keliasSaugus(raktas);
 
     /**
      * ⚠️ FAILAS ATIDAROMAS ANKSTI, NE `createReadStream` VIDUJE (CI 33909325226).
@@ -317,7 +378,7 @@ function createFsArtifactStore({ root } = {}) {
      * metaduomenyse neturi, tad kitaip vientisumo patvirtinti neįmanoma. Būtent
      * dėl šios kainos `verify()` metadata-only keliuose DRAUDŽIAMAS.
      */
-    const buferis = await fsp.readFile(kelias(raktas));
+    const buferis = await fsp.readFile(await keliasSaugus(raktas));
     const checksum = crypto.createHash("sha256").update(buferis).digest("hex");
     const bytes = buferis.byteLength;
 
@@ -336,7 +397,7 @@ function createFsArtifactStore({ root } = {}) {
   }
 
   async function del(raktas) {
-    const pilnas = kelias(raktas);
+    const pilnas = await keliasSaugus(raktas);
 
     try {
       await fsp.unlink(pilnas);

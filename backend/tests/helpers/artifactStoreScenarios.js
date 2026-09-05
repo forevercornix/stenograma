@@ -194,4 +194,60 @@ function tapatybe(reiksme) {
   return kanoninisRezultatas(reiksme);
 }
 
-module.exports = { GALIOJANTYS, ATMETAMI, NUOSTOLINGI, BLOGI_RAKTAI, tapatybe, NUL };
+/**
+ * RAKTĄ PRIIMANČIOS OPERACIJOS - IŠVEDAMOS IŠ PAVIRŠIAUS, NE SURAŠOMOS
+ * (Codex, #290).
+ *
+ * ⚠️ RANKINIS SĄRAŠAS JAU BUVO PRALEIDĘS `readStream`.
+ *
+ * Kol operacijų sąrašas buvo įrašytas teste, kiekviena nauja operacija į jį
+ * patekdavo TIK jei kas nors prisimindavo. Išvedus jį iš pačios saugyklos,
+ * pamiršimas nebeįmanomas: nauja funkcija be matricos eilutės sustabdo rinkinį
+ * su vardu, o ne praslysta tyliai.
+ *
+ * ⚠️ IŠIMČIŲ SĄRAŠAS SAUGUS KRYPTIMI. `BE_RAKTO` yra vienintelė ranka rašoma
+ * dalis, bet pamiršus į jį įrašyti — testas KRENTA (perteklinė patikra), o ne
+ * praleidžia. Priešingos krypties klaida (pamiršta operacija) yra ta, kuri
+ * kainuoja.
+ */
+const BE_RAKTO = new Set(["patikrintiSaugykla", "klientoNustatymai", "uzdaryti"]);
+
+const RAKTO_ARGUMENTAI = Object.freeze({
+  put: (raktas) => [raktas, { a: 1 }],
+  read: (raktas) => [raktas],
+  readStream: (raktas) => [raktas],
+  head: (raktas) => [raktas],
+  verify: (raktas) => [raktas, { bytes: 1, checksum: "a".repeat(64) }],
+  delete: (raktas) => [raktas],
+});
+
+/**
+ * @param {object} saugykla
+ * @returns {Array<[string, (raktas: string) => Promise<*>]>} operacija -> kvietimas
+ */
+function operacijosSuRaktu(saugykla) {
+  const vardai = Object.keys(saugykla).filter(
+    (vardas) => typeof saugykla[vardas] === "function" && !BE_RAKTO.has(vardas)
+  );
+
+  const beMatricos = vardai.filter((vardas) => !RAKTO_ARGUMENTAI[vardas]);
+  if (beMatricos.length > 0) {
+    throw new Error(
+      `ArtifactStore: operacijos be raktų matricos eilutės: ${beMatricos.join(", ")}. ` +
+        "Kiekviena raktą priimanti operacija privalo būti tikrinama; jei ji rakto NEPRIIMA, " +
+        "įrašykite ją į `BE_RAKTO`."
+    );
+  }
+
+  return vardai.map((vardas) => [vardas, (raktas) => saugykla[vardas](...RAKTO_ARGUMENTAI[vardas](raktas))]);
+}
+
+module.exports = {
+  GALIOJANTYS,
+  ATMETAMI,
+  NUOSTOLINGI,
+  BLOGI_RAKTAI,
+  operacijosSuRaktu,
+  tapatybe,
+  NUL,
+};

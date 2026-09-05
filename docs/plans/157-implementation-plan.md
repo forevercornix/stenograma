@@ -48,6 +48,8 @@ body arba A1–A4 atsakymai.
 | 36 | **`fs` `.tmp` likučiai įvardyti kaip TREČIAS to paties orphan reiškinio veidas** — sprendžiami kartu PR-4, ne taškiškai PR-2 | Codex (#290) |
 | 37 | **PR-2 parinkimo testas kviečia `require("../utils/artifactStore")`, ne `backendSelection` tiesiogiai** — vartotojai (PR-3+) eis įėjimu, tad rinkinys privalo eiti tuo pačiu; mutacija (įėjimas nustoja eksportuoti parinkimą) — 5/6 krito | įgyvendinimas |
 | 38 | **Riba paskaičiuoja kvitą, o implementacija nebeserializuoja iš naujo** — inline `put()` rašė `JSON.stringify(reiksme)` antrą kartą; tarp kvito ir įrašymo reikšmė gali pasikeisti, ir `checksum` aprašytų NE TAI, kas įrašyta | Codex (#290) |
+| 39 | **`fs` riba taikoma per VARTUS, ne per operaciją** — `realpath` darė tik `head`/`put`; `delete` symlink'ą praleisdavo. Vienas resolveris; `leksinisKelias()` už jo nekviečiamas niekur | Codex (#290) |
+| 40 | **Raktų matrica išvedama iš saugyklos paviršiaus** — ranka surašyta buvo praleidusi `readStream`; nauja operacija be eilutės sustabdo rinkinį | Codex (#290) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
