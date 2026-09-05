@@ -113,10 +113,15 @@ async function update(id, patch, options = {}) {
  * ───────────────────────────────────────────────────────────────────────── */
 
 /** @returns {object|null|"FORBIDDEN"} */
-async function getOwned(id, scope) {
+/**
+ * @param {{hydrate?: boolean}} [nustatymai] forma vienoda visuose backend'uose (#157, PR-3)
+ */
+async function getOwned(id, scope, { hydrate = true } = {}) {
   const job = jobs.get(id);
   if (!job) return null;
-  return matchesOwner(job, scope) ? job : "FORBIDDEN";
+  if (!matchesOwner(job, scope)) return "FORBIDDEN";
+
+  return hydrate ? job : metaduomenuProjekcija(job);
 }
 
 /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */

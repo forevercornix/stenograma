@@ -359,6 +359,8 @@ const functional = [
   "artifactStoreBoundedRead",
   /** #157 (PR-3): hidratacijos vėliava — projekcijos forma ir kvietimo vieta. */
   "jobStoreHydrationFlag",
+  /** #157 (PR-3): hidratacija kaip OPERACIJOS sprendimas (maršruto kelias). */
+  "jobAccessHydration",
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */

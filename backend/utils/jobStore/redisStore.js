@@ -546,8 +546,9 @@ function createRedisStore(redisClient) {
   }
 
   /** @returns {object|null|"FORBIDDEN"} */
-  async function getOwned(id, scope) {
-    const job = await get(id);
+  /** @param {{hydrate?: boolean}} [nustatymai] forma vienoda visuose backend'uose (#157, PR-3) */
+  async function getOwned(id, scope, nustatymai = {}) {
+    const job = await get(id, nustatymai);
     if (!job) return null;
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }

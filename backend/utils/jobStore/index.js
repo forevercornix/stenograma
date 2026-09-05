@@ -966,10 +966,14 @@ module.exports = {
    *   sprendžia 403 vs 404. Sulieti į `null` reikštų, kad transporto sluoksnis
    *   nebeturi iš ko pasirinkti.
    */
-  get: async (scope) => {
+  /**
+   * @param {{jobId: string, ownerId: string|null, ownerKind?: string}} scope
+   * @param {{hydrate?: boolean}} [nustatymai] `hydrate: false` - tik metaduomenys (#157, PR-3)
+   */
+  get: async (scope, nustatymai = {}) => {
     assertScope(scope, "get");
     await ensureInit();
-    const result = await store.getOwned(scope.jobId, scope);
+    const result = await store.getOwned(scope.jobId, scope, nustatymai);
     return fasadoRezultatas(result);
   },
   /**

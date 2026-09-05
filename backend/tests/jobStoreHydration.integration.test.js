@@ -331,6 +331,46 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     assert.equal(await store.get(id, { hydrate: false }), null, "eilutės nebeliko");
   });
 
+  await t.test("`getOwned(..., {hydrate:false})`: sprendimas priimamas, saugykla NEPALIEČIAMA", async () => {
+    /**
+     * ⚠️ TAI ANTRA GRANDINĖS PUSĖ. `jobs.route` testas įrodo, kad `DELETE` maršrutas
+     * prašo `hydrate: false`; čia įrodoma, ką ta vėliava REIŠKIA: nulis kreipinių į
+     * saugyklą. Nė viena pusė atskirai nepakanka.
+     */
+    const id = await sukurtiSavininkoJoba();
+    saugykla.perskaityta = 0;
+
+    const job = await store.getOwned(id, SAVININKAS, { hydrate: false });
+
+    assert.equal(saugykla.perskaityta, 0, "ištrynimo kelias turinio neskaito");
+    assert.equal("result" in job, false, "ir `result` lauko negauna");
+    assert.equal(job.status, "completed");
+
+    /** Svetimam scope'ui atsakymas toks pat, koks būtų su hidratacija. */
+    assert.equal(await store.getOwned(id, SVETIMAS, { hydrate: false }), "FORBIDDEN");
+  });
+
+  await t.test("SUGADINTAS artefaktas: `hydrate:false` kelias VEIKIA, `hydrate:true` — krenta", async () => {
+    /**
+     * ⚠️ BŪTENT DĖL TO IR ATSKIRIAMA. Ištrynimas privalo veikti tada, kai objektas
+     * blogas; skaitymas tokiu atveju krenta atvirai, ir tai teisinga.
+     */
+    const id = await sukurtiSavininkoJoba();
+    const sugadinta = { ...saugykla };
+    sugadinta.readStream = async () => {
+      throw Object.assign(new Error("sugadinta"), { code: "ARTIFACT_CORRUPT" });
+    };
+    const suSugadinta = createPostgresStore(pool, { artifactStore: sugadinta });
+
+    const metaduomenys = await suSugadinta.getOwned(id, SAVININKAS, { hydrate: false });
+    assert.equal(metaduomenys.id, id, "ištrynimo kelias sugadinto artefakto neliečia");
+
+    await assert.rejects(
+      () => suSugadinta.getOwned(id, SAVININKAS),
+      (klaida) => klaida.code === "ARTIFACT_CORRUPT"
+    );
+  });
+
   await t.test("KONTROLĖ: savininkas su tvarkingu artefaktu gauna rezultatą", async () => {
     /**
      * Be jos ankstesni tvirtinimai būtų tenkinami ir `getOwned()`, kuris VISIEMS

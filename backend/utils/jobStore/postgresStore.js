@@ -1349,12 +1349,12 @@ function createPostgresStore(pool, { artifactStore = null } = {}) {
    *
    * @returns {object|null|"FORBIDDEN"}
    */
-  async function getOwned(id, scope) {
+  async function getOwned(id, scope, { hydrate = true } = {}) {
     const metaduomenys = await get(id, { hydrate: false });
     if (!metaduomenys) return null;
     if (!matchesOwner(metaduomenys, scope)) return "FORBIDDEN";
 
-    return get(id);
+    return hydrate ? get(id) : metaduomenys;
   }
 
   /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
