@@ -34,8 +34,17 @@ const { kanoninisRezultatas } = require("../jobStore/common");
  * ir taip užrašytas plane.
  */
 class ArtifactStoreError extends Error {
-  constructor(message, code, { neatkartojama = false } = {}) {
-    super(message);
+  /**
+   * ⚠️ `cause` YRA DERINIMO GRANDINĖ, NE ŽURNALO LAUKAS (Codex, #290).
+   *
+   * Originali klaida (parserio, SDK ar failų sistemos) gali nešti artefakto turinio
+   * fragmentą. Ji išsaugoma, nes be jos derinimas su debugger'iu tampa spėliojimu —
+   * bet automatinis jos serializavimas grąžintų tą patį turinį į logus pro kitas
+   * duris. Todėl kvietėjai logguoja TIK kodą ir saugius metaduomenis
+   * (`jobRunner._classifyError`).
+   */
+  constructor(message, code, { neatkartojama = false, cause } = {}) {
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "ArtifactStoreError";
     this.code = code;
     this.neatkartojama = neatkartojama;
@@ -73,6 +82,22 @@ const KLAIDA = Object.freeze({
 const LEISTINAS_SEGMENTAS = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MAX_RAKTO_ILGIS = 512;
 
+/**
+ * ⚠️ SEGMENTAS RIBOJAMAS BAITAIS, NE SIMBOLIAIS (Codex, #290).
+ *
+ * Failų sistemos vieno vardo riba (`NAME_MAX`) ext4, XFS ir APFS yra 255 BAITAI.
+ * Riba, matuojanti tik bendrą rakto ilgį, praleisdavo 256 baitų segmentą, kurį
+ * `fs` backend'as atmesdavo žaliu `ENAMETOOLONG` — t. y. raktas buvo teisėtas
+ * kontrakte ir neįmanomas vienoje jo implementacijoje. Ta pati klasė kaip NUL: aibė
+ * imama iš to backend'o, kuris gali MAŽIAUSIA.
+ *
+ * ⚠️ BAITAI, NE `length`. Lietuviški rašmenys UTF-8 užima po du baitus, tad
+ * simboliais matuojanti riba 255 „simbolių" segmentą paverstų 400+ baitų vardu.
+ * (Šiandien allowlist'as daugiabaičių simbolių neleidžia, bet riba neturi
+ * priklausyti nuo kito sargo formos.)
+ */
+const MAX_SEGMENTO_BAITAI = 255;
+
 function patikrintiRakta(raktas) {
   if (typeof raktas !== "string" || raktas.length === 0) {
     throw struktūrinė("ArtifactStore: raktas privalo būti netuščia eilutė.", KLAIDA.RAKTAS);
@@ -83,6 +108,15 @@ function patikrintiRakta(raktas) {
   }
 
   for (const segmentas of raktas.split("/")) {
+    if (Buffer.byteLength(segmentas, "utf8") > MAX_SEGMENTO_BAITAI) {
+      throw struktūrinė(
+        `ArtifactStore: rakto segmentas ilgesnis nei ${MAX_SEGMENTO_BAITAI} baitai. ` +
+          "Failų sistemos vieno vardo riba yra 255 baitai, tad ilgesnio segmento " +
+          "`fs` backend'as išsaugoti negalėtų (#157 D1).",
+        KLAIDA.RAKTAS
+      );
+    }
+
     if (!LEISTINAS_SEGMENTAS.test(segmentas)) {
       throw struktūrinė(
         `ArtifactStore: neleistinas rakto segmentas "${segmentas.slice(0, 40)}". ` +
@@ -133,7 +167,28 @@ const NUL_ESCAPE = tikroEscapeSablonas("0000");
  */
 const VIENISAS_SUROGATAS = tikroEscapeSablonas("[dD][89a-fA-F][0-9a-fA-F]{2}");
 
-function paruostiReiksme(reiksme) {
+/**
+ * VIENA REIKŠMIŲ SRITIS — TA PATI ABIEM KRYPTIM (Codex, #290).
+ *
+ * ⚠️ RAŠYMO IR SKAITYMO SRITYS BUVO SKIRTINGOS, IR TAI YRA KLASĖ, NE ATVEJIS.
+ *
+ * `put()` atmesdavo viršutinio lygio `null`, NUL simbolį ir neporinį surogatą, o
+ * `read()` juos PRIIMDAVO: atkurtas ar iš išorės pakeistas objektas galėjo grąžinti
+ * būtent tai, ko riba niekada nebūtų įsileidusi. Literalus `null` čia blogiausias —
+ * jis atkuria „`completed` be rezultato" būseną, po kurios terminalus valymas
+ * ištrina šaltinio audio.
+ *
+ * Todėl sritis gyvena VIENOJE funkcijoje, o kodavimas ir dekodavimas yra tik dvi
+ * jos kryptys. Naujai taisyklei nebereikia atsiminti antros vietos.
+ *
+ * ⚠️ KAINA UŽRAŠOMA: skaitymo kelias dabar kanonizuoja perskaitytą reikšmę. Tai
+ * viena papildoma struktūros perėja vienam artefaktui — priimta, nes hidratacija
+ * ribojama `MAX_RESULT_BYTES` (#157 D5), o tyli divergencija kainuoja duomenų
+ * praradimą.
+ *
+ * @returns {string} kanoninė eilutė
+ */
+function patikrintiSriti(reiksme) {
   /**
    * ⚠️ VIRŠUTINIO LYGIO `null` ATMETAMAS KARTU SU `undefined` (Codex, #290).
    *
@@ -296,6 +351,18 @@ function paruostiReiksme(reiksme) {
     );
   }
 
+  return kanonine;
+}
+
+/**
+ * KODAVIMAS: reikšmė -> kanoniniai baitai + metaduomenys.
+ *
+ * ⚠️ `bytes` IR `checksum` SKAIČIUOJAMI IŠ TŲ PAČIŲ BAITŲ, KURIE PERSISTINAMI.
+ * Implementacijos pradinės reikšmės nebeserializuoja — kitaip tarp kvito ir
+ * įrašymo liktų langas, kuriame reikšmė spėja pasikeisti.
+ */
+function paruostiReiksme(reiksme) {
+  const kanonine = patikrintiSriti(reiksme);
   const buferis = Buffer.from(kanonine, "utf8");
 
   return {
@@ -375,20 +442,66 @@ function vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas }) {
  * Node 18 rodo vieną simbolį, Node 22 (CI ir produkcija) — iki dešimties: versija
  * keičia nuotėkio DYDĮ, ne jo egzistavimą.
  *
- * Todėl diagnostika gyvena atskirame lauke: serverio logas ją turi, viešas kelias
- * — ne.
+ * ⚠️ ORIGINALI KLAIDA LIEKA `cause` GRANDINĖJE, BET NIEKUR NELOGGUOJAMA. Ji skirta
+ * derinimui su debugger'iu, ne žurnalui; automatinis jos serializavimas grąžintų
+ * tą patį turinį pro kitas duris (žr. `jobRunner._classifyError`).
+ */
+function sugadintas(raktas, priezastis, kilme) {
+  const nesekme = new ArtifactStoreError(
+    `ArtifactStore: objekto "${raktas}" ${priezastis}.`,
+    KLAIDA.SUGADINTAS,
+    { cause: kilme }
+  );
+
+  return nesekme;
+}
+
+/**
+ * ⚠️ NETAISYKLINGAS UTF-8 TYLIAI PAKEIČIA DUOMENIS (Codex, #290).
+ *
+ * `Buffer.toString("utf8")` blogus baitus pakeičia U+FFFD ir grąžina „sėkmę": tada
+ * `JSON.parse` pavyksta, o kvietėjas gauna PAKEISTUS vartotojo duomenis vietoj
+ * signalo, kad objektas sugadintas. Pvz. `{"x":"\xff"}` virsta `{x:"\uFFFD"}`.
+ *
+ * Griežtas dekoderis tą klasę uždaro: sugadinti baitai tampa `ARTIFACT_CORRUPT`,
+ * t. y. eina remonto keliu, o ne į rezultatą.
+ */
+const GRIEZTAS_UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * DEKODAVIMAS: baitai -> patikrinta reikšmė. Kodavimo atvirkštinė kryptis.
+ *
+ * ⚠️ TRYS PAKOPOS, IR VISOS TRYS FAIL-CLOSED: griežtas UTF-8, `JSON.parse` ir TA
+ * PATI reikšmių sritis, kurią taiko `put()`. Trečioji yra esminė — be jos
+ * saugykloje gulinti reikšmė galėtų būti tokia, kokios riba niekada neįsileido.
  */
 function atkurtiReiksme(buferis, raktas) {
+  let tekstas;
   try {
-    return JSON.parse(buferis.toString("utf8"));
+    tekstas = GRIEZTAS_UTF8.decode(buferis);
   } catch (klaida) {
-    const nesekme = new ArtifactStoreError(
-      `ArtifactStore: objekto "${raktas}" turinys nėra galiojantis JSON.`,
-      KLAIDA.SUGADINTAS
-    );
-    nesekme.priezastis = klaida.message;
-    throw nesekme;
+    throw sugadintas(raktas, "turinys nėra galiojantis UTF-8", klaida);
   }
+
+  let reiksme;
+  try {
+    reiksme = JSON.parse(tekstas);
+  } catch (klaida) {
+    throw sugadintas(raktas, "turinys nėra galiojantis JSON", klaida);
+  }
+
+  try {
+    patikrintiSriti(reiksme);
+  } catch (klaida) {
+    /**
+     * ⚠️ KODAS YRA `SUGADINTAS`, NE `REIKSME`. Čia kalta ne kvietėjo įvestis, o
+     * saugykloje gulintis turinys: `ARTIFACT_VALUE_UNSUPPORTED` nusiųstų operatorių
+     * tikrinti tiekėjo rezultato, nors taisyti reikia objektą.
+     */
+    throw sugadintas(raktas, `turinys už leistinos reikšmių srities (${klaida.code})`, klaida);
+  }
+
+  return reiksme;
 }
 
 module.exports = {
@@ -396,7 +509,9 @@ module.exports = {
   struktūrinė,
   KLAIDA,
   MAX_RAKTO_ILGIS,
+  MAX_SEGMENTO_BAITAI,
   patikrintiRakta,
+  patikrintiSriti,
   paruostiReiksme,
   atkurtiReiksme,
   normalizuotiLaukima,

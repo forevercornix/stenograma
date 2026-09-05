@@ -89,6 +89,22 @@ function createFsArtifactStore({ root } = {}) {
     try {
       tikras = await fsp.realpath(taikinys);
     } catch (klaida) {
+      /**
+       * ⚠️ ŽALIAS `ENAMETOOLONG` NEIŠEINA PRO RIBĄ (Codex, #290).
+       *
+       * Riba raktų segmentus riboja 255 baitais — tiek leidžia `NAME_MAX` ext4,
+       * XFS ir APFS. Bet konkreti failų sistema (ar overlay konteineryje) gali
+       * turėti mažesnę ribą, ir tada raktas, kurį kontraktas priima, čia vis tiek
+       * neįmanomas. Kvietėjui tai privalo atrodyti kaip rakto atmetimas, o ne kaip
+       * svetimo tipo I/O klaida.
+       */
+      if (klaida.code === "ENAMETOOLONG") {
+        throw new ArtifactStoreError(
+          "FsArtifactStore: raktas per ilgas šiai failų sistemai (`ENAMETOOLONG`).",
+          KLAIDA.RAKTAS
+        );
+      }
+
       /** Nesantis objektas nėra ribos pažeidimas — tai `head`/`read` reikalas. */
       if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return pilnas;
       throw klaida;

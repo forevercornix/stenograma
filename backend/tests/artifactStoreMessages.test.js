@@ -88,7 +88,16 @@ test("SUGADINTAS ≠ NERASTAS: netaisyklingas JSON turi savo kodą", () => {
   assert.notEqual(klaida.code, KLAIDA.NERASTA, "sugadintas turinys nėra dingęs objektas");
 
   assert.ok(!klaida.message.includes(SLAPTAS), "pranešime nėra artefakto turinio");
-  assert.ok(klaida.priezastis, "parserio diagnostika išsaugoma — bet ATSKIRAI, serverio logui");
+
+  /**
+   * ⚠️ ORIGINALI KLAIDA LIEKA `cause` GRANDINĖJE, BET NIEKUR NELOGGUOJAMA.
+   *
+   * Ankstesnė redakcija ją dėjo į `priezastis` lauką, kurį `_classifyError()`
+   * rašydavo į logą — turinys iškeliaudavo pro kitas duris. `cause` yra
+   * standartinė derinimo grandinė; taisyklė ta pati, kur ji nebūtų: automatiškai
+   * serializuoti jos negalima (žr. „logai neša TIK kodą" testą).
+   */
+  assert.ok(klaida.cause instanceof Error, "kilmė išsaugoma derinimui per `cause`");
 });
 
 test("tikras sugadintas objektas fs saugykloje: `ARTIFACT_CORRUPT`, ne `ARTIFACT_NOT_FOUND`", async (t) => {

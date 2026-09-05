@@ -353,6 +353,8 @@ const functional = [
   "artifactStoreFsBoundary",
   /** #157 (PR-2): klaidų pranešimų higiena — turinys nepatenka į viešą lauką. */
   "artifactStoreMessages",
+  /** #157 (PR-2): kodekas — viena reikšmių sritis abiem kryptim + raktų pernešamumas. */
+  "artifactStoreCodec",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
   "artifactStoreSelection",
   "erasureExportContract",
