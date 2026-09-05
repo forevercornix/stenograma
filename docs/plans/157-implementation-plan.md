@@ -55,6 +55,8 @@ body arba A1–A4 atsakymai.
 | 43 | **`jsonb` kandidatų aprėptis įvardyta kaip REPREZENTATYVI** (§12.1), ir kiekviena ribos taisyklė gauna teisėtą kaimyną — antra kryptis anksčiau nebuvo matuojama | Codex (#290) |
 | 44 | **`verify()` normalizuoja laukiamus metaduomenis** — `bigint` per `node-postgres` grįžta eilute, tad `===` skelbtų kiekvieną DB paremtą artefaktą sugadintu (P1) | Codex (#290) |
 | 45 | **`verify()` yra pilna funkcija** — nesančio objekto verdiktas neša visus laukus, `nepriklausomas` įskaitytinai; forma viena, ne trys | Codex (#290) |
+| 46 | **Viešas klaidos tekstas gaminamas iš KODO** — `JSON.parse` diagnostika neša artefakto turinio fragmentą į savininkui matomą lauką | Codex (#290) |
+| 47 | **`ARTIFACT_CORRUPT` atskiriamas nuo `ARTIFACT_NOT_FOUND`** — sugadintas objektas guli vietoje, tad remontas kitas | Codex (#290) |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 

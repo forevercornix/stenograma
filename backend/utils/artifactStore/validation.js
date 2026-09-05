@@ -52,6 +52,14 @@ const KLAIDA = Object.freeze({
   RAKTAS: "ARTIFACT_KEY_INVALID",
   REIKSME: "ARTIFACT_VALUE_UNSUPPORTED",
   NERASTA: "ARTIFACT_NOT_FOUND",
+  /**
+   * ⚠️ SUGADINTAS NĖRA NERASTAS (Codex, #290).
+   *
+   * „Nėra objekto" siunčia remontą į ATKŪRIMĄ iš atsarginės kopijos; „turinys
+   * neperskaitomas" reiškia, kad objektas YRA vietoje, ir ten reikia vientisumo
+   * tyrimo. Vienas kodas abiem verstų operatorių ieškoti to, kas guli po ranka.
+   */
+  SUGADINTAS: "ARTIFACT_CORRUPT",
 });
 
 /**
@@ -356,15 +364,30 @@ function vientisumoVerdiktas({ laukiama, bytes, checksum, nepriklausomas }) {
   };
 }
 
-/** Reikšmės atkūrimas iš baitų - viena vieta, kad klaidos kodas būtų vienodas. */
+/**
+ * Reikšmės atkūrimas iš baitų - viena vieta, kad klaidos kodas būtų vienodas.
+ *
+ * ⚠️ PARSERIO DIAGNOSTIKA NEĮEINA Į PRANEŠIMĄ (Codex, #290).
+ *
+ * `JSON.parse` klaidos tekste Node cituoja NEPAVYKUSIĄ vietą — t. y. artefakto
+ * turinio fragmentą. Transkripcijų atveju tai asmenvardžiai, adresai ar sveikatos
+ * informacija, o pranešimas keliauja į job'o klaidos lauką, kurį mato savininkas.
+ * Node 18 rodo vieną simbolį, Node 22 (CI ir produkcija) — iki dešimties: versija
+ * keičia nuotėkio DYDĮ, ne jo egzistavimą.
+ *
+ * Todėl diagnostika gyvena atskirame lauke: serverio logas ją turi, viešas kelias
+ * — ne.
+ */
 function atkurtiReiksme(buferis, raktas) {
   try {
     return JSON.parse(buferis.toString("utf8"));
   } catch (klaida) {
-    throw new ArtifactStoreError(
-      `ArtifactStore: objekto "${raktas}" turinys nėra galiojantis JSON (${klaida.message}).`,
-      KLAIDA.NERASTA
+    const nesekme = new ArtifactStoreError(
+      `ArtifactStore: objekto "${raktas}" turinys nėra galiojantis JSON.`,
+      KLAIDA.SUGADINTAS
     );
+    nesekme.priezastis = klaida.message;
+    throw nesekme;
   }
 }
 

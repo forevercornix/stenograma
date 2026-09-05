@@ -481,6 +481,23 @@ async function _executeInline(type, processor, jobId, payload) {
 // klaidos SANITIZUOJAMOS - kad paslaptys (API raktai, keliai) nepatektų į jobStore,
 // kurį skaito klientas per GET /api/jobs/:id. HttpError su ne-500 statusu (validacija,
 // override) yra saugu rodyti kaip yra.
+/**
+ * VIEŠI ARTEFAKTŲ SAUGYKLOS PRANEŠIMAI - PAGAL KODĄ (#157, PR-2, Codex #290).
+ *
+ * ⚠️ KIEKVIENAS KODAS TURI SAVO TEKSTĄ, IR TAI NE KOSMETIKA. „Objekto nėra"
+ * siunčia remontą į atkūrimą, „turinys sugadintas" - į vientisumo tyrimą, o
+ * „rezultatas nesaugotinas" reiškia, kad kartoti nėra prasmės. Vienas bendras
+ * tekstas visus tris paverstų ta pačia neinformatyvia eilute.
+ */
+const VIESI_ARTEFAKTU_PRANESIMAI = Object.freeze({
+  ARTIFACT_VALUE_UNSUPPORTED: "Rezultato nepavyko išsaugoti: jo turinys neatitinka saugyklos reikalavimų.",
+  ARTIFACT_KEY_INVALID: "Rezultato nepavyko išsaugoti: neteisingas saugyklos adresas.",
+  ARTIFACT_NOT_FOUND: "Rezultato saugykloje nėra.",
+  ARTIFACT_CORRUPT: "Rezultatas saugykloje yra, bet jo turinys neperskaitomas.",
+  ARTIFACT_CONFIG_INVALID: "Artefaktų saugykla sukonfigūruota neteisingai.",
+  NEZINOMA: "Rezultato saugyklos klaida.",
+});
+
 function _classifyError(e, context = "job") {
   const { sanitizeServerError } = require("../utils/sanitizeError");
 
@@ -534,7 +551,31 @@ function _classifyError(e, context = "job") {
    * kaip ir `assertResultWithinLimits` atveju.
    */
   if (domeninė && domeninė.name === "ArtifactStoreError") {
-    return { errorCode: domeninė.code, message: domeninė.message };
+    /**
+     * ⚠️ VIEŠAS PRANEŠIMAS GAMINAMAS IŠ KODO, NE IŠ `message` (Codex, #290).
+     *
+     * `ArtifactStoreError.message` nešasi `JSON.parse` diagnostiką, į kurią Node
+     * įdeda ARTEFAKTO TURINIO fragmentą — transkripcijų atveju asmenvardžius,
+     * adresus ar sveikatos informaciją. Šis laukas keliauja į job'o klaidos
+     * įrašą, kurį savininkas mato per `GET /api/jobs/:id`.
+     *
+     * ⚠️ TAI TA PATI TAISYKLĖ KAIP `sanitizeServerError`: pilnas tekstas lieka
+     * serverio loge, o kvietėjui atiduodama tik tai, kas parašyta MŪSŲ.
+     * Skirtumas — kodas išsaugomas, nes pagal jį operatorius sprendžia, ar
+     * ieškoti dingusio objekto, ar tirti vientisumą.
+     */
+    log.error("Artefaktų saugyklos klaida", {
+      stage: "artifact_store",
+      context,
+      errorCode: domeninė.code,
+      message: domeninė.message,
+      priezastis: domeninė.priezastis,
+    });
+
+    return {
+      errorCode: domeninė.code,
+      message: VIESI_ARTEFAKTU_PRANESIMAI[domeninė.code] || VIESI_ARTEFAKTU_PRANESIMAI.NEZINOMA,
+    };
   }
 
   if (domeninė && domeninė.name === "ResultLimitError") {

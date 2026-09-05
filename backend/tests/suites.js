@@ -351,6 +351,8 @@ const functional = [
   "artifactStoreInlineWrite",
   /** #157 (PR-2): `fs` riba, laikini failai ir rašymo patvarumas. */
   "artifactStoreFsBoundary",
+  /** #157 (PR-2): klaidų pranešimų higiena — turinys nepatenka į viešą lauką. */
+  "artifactStoreMessages",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
   "artifactStoreSelection",
   "erasureExportContract",
