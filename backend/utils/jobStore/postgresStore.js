@@ -1520,9 +1520,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
        * sako `pending`: retencijos valymas, pamatęs seną `pending` eilutę, ištrintų
        * NAUDOJAMĄ objektą.
        */
-      if (rasymas && rasymas.attemptId) {
-        await attemptRegistry.pazymeti(client, rasymas.attemptId, attemptRegistry.BUSENA.ISIPAREIGOTA);
-      }
+      /* MUTACIJA: registro būsena neatnaujinama */
 
       isipareigota = true;
 
