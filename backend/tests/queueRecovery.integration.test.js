@@ -101,7 +101,7 @@ test("restart recovery: jobas eilėje išlieka ir užbaigiamas worker'io po 'res
   // 4. Laukiam, kol jobas užbaigiamas (worker pasiima ir įvykdo).
   let finalStatus;
   for (let i = 0; i < 40; i++) {
-    const j = await jobStore.system.get(job.id);
+    const j = await jobStore.system.get(job.id, { hydrate: true });
     finalStatus = j?.status;
     if (finalStatus === "completed" || finalStatus === "failed") break;
     await new Promise((r) => setTimeout(r, 250));
@@ -271,7 +271,7 @@ test("stalled recovery: worker'iui nukritus vykdymo metu, jobas grąžinamas ir 
 
   let finalJob;
   for (let i = 0; i < 60; i++) {
-    const j = await jobStore.system.get(job.id);
+    const j = await jobStore.system.get(job.id, { hydrate: true });
     const bullJob = await queue.getJob(job.id);
     const bullState = bullJob ? await bullJob.getState() : "missing";
     /**

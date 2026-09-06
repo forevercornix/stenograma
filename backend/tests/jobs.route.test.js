@@ -86,7 +86,7 @@ test("DELETE /api/jobs/:id - ištrina užbaigtą protokolo jobą ir jo auditą",
   const delRes = await request(app).delete(`/api/jobs/${jobId}`);
   assert.equal(delRes.status, 204);
 
-  assert.equal(await jobStore.system.get(jobId), null);
+  assert.equal(await jobStore.system.get(jobId, { hydrate: true }), null);
   assert.equal(
     (await auditLog.getAll()).filter((entry) => entry.subjectId === subjectId).length,
     0
@@ -104,7 +104,7 @@ test("DELETE /api/jobs/:id - TRANSKRIPCIJOS jobo ID nepriimamas (404, jobas liek
   const res = await request(app).delete(`/api/jobs/${transcriptionJob.id}`);
 
   assert.equal(res.status, 404);
-  assert.ok(await jobStore.system.get(transcriptionJob.id));
+  assert.ok(await jobStore.system.get(transcriptionJob.id, { hydrate: true }));
 
   await jobStore.system.remove(transcriptionJob.id);
 });

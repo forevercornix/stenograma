@@ -73,3 +73,52 @@ test("`countActiveJobs()` prašo METADUOMENŲ, ne turinio", async (t) => {
     "priežiūros kelias privalo eksplicitiškai atsisakyti hidratacijos"
   );
 });
+
+test("#157 PR-4: `system.get()` REIKALAUJA eksplicitinio `hydrate`", async () => {
+  /**
+   * ⚠️ AIBĖ NUSTOJA BŪTI SURAŠOMA.
+   *
+   * PR-3 metu keturios paieškos davė keturis nepilnus sąrašus, ir visos rėmėsi
+   * SINTAKSINIU raktu (store metodas → maršrutas → `jobStore.get()` vardas →
+   * adapteris). Adapteris `store` perpakuoja nauju vardu, tad paieška pagal vardą
+   * dingsta kartu su vardu; penktas grep duotų penktą nepilną sąrašą.
+   *
+   * Apvertus numatytąją reikšmę, praleistus kvietėjus parodo TESTAI, ne atmintis.
+   *
+   * ⚠️ IŠMATUOTAS REZULTATAS: apvertimas atskleidė NULĮ naujų GAMYBOS kvietėjų — visi
+   * septyni jau buvo PR-3 lentelėje. Tai reiškia, kad keturios paieškos galiausiai buvo
+   * pilnos gamybos kodui; bet tai žinoma tik DABAR, po struktūrinės patikros, o ne
+   * tada, kai sąrašas buvo skelbiamas baigtu. Skirtumas tarp „buvo teisinga" ir
+   * „buvo įrodyta".
+   */
+  const jobStore = require("../utils/jobStore");
+
+  await assert.rejects(
+    () => jobStore.system.get("11111111-1111-1111-1111-111111111111"),
+    (klaida) => klaida instanceof TypeError && /hydrate` privalomas/.test(klaida.message),
+    "be vėliavos kvietimas privalo kristi, o ne tyliai grąžinti turinį"
+  );
+
+  for (const bloga of [{}, { hydrate: "taip" }, { hydrate: null }, null]) {
+    await assert.rejects(
+      () => jobStore.system.get("11111111-1111-1111-1111-111111111111", bloga),
+      (klaida) => klaida instanceof TypeError,
+      `${JSON.stringify(bloga)}: netinkama reikšmė nėra pasirinkimas`
+    );
+  }
+
+  /** KONTROLĖ: abi teisėtos reikšmės praeina — kitaip tai būtų neveikiantis metodas. */
+  for (const hydrate of [true, false]) {
+    assert.equal(
+      await jobStore.system.get("11111111-1111-1111-1111-111111111111", { hydrate }),
+      null,
+      `hydrate: ${hydrate} privalo veikti (job'o nėra, tad \`null\`)`
+    );
+  }
+
+  /**
+   * ⚠️ VIEŠAS KELIAS NEPAKITĘS: ten sprendimą priima OPERACIJA
+   * (`jobAccessPolicy.reikiaRezultato()`), tad kvietėjui nėra ko pasirinkti.
+   */
+  assert.equal(typeof jobStore.get, "function");
+});

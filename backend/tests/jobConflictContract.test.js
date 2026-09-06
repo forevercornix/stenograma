@@ -160,7 +160,7 @@ test("#184 ⚠️ `startPhase()` TOCTOU: konkurentas tarp `get` ir `update` NEPE
   const job = await jobStore.create({ type: JOB_TYPES.TRANSCRIPTION, ownerKind: OWNER_KIND.UNOWNED, ownerId: null });
 
   /** Konkurentas veikia PO to, kai fasadas jau perskaitė savo snapshot'ą. */
-  const snapshot = await jobStore.system.get(job.id);
+  const snapshot = await jobStore.system.get(job.id, { hydrate: true });
   await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
 
   /**
@@ -175,7 +175,7 @@ test("#184 ⚠️ `startPhase()` TOCTOU: konkurentas tarp `get` ir `update` NEPE
   );
   assert.equal(konfliktas, "CONCURRENCY_CONFLICT");
 
-  const dabartinis = await jobStore.system.get(job.id);
+  const dabartinis = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(dabartinis.phase, PHASE.VALIDATING, "konkurento darbas NEATSUKTAS");
   assert.notEqual(dabartinis.actor, "pasenes");
 });
@@ -195,7 +195,7 @@ test("#184 `startPhase()` PERDUODA `expectedVersion` iš to paties snapshot'o", 
     return originalus(id, patch, options);
   };
   try {
-    const pries = await jobStore.system.get(job.id);
+    const pries = await jobStore.system.get(job.id, { hydrate: true });
     await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
 
     assert.deepEqual(gautos, [pries.version],
@@ -365,7 +365,7 @@ test("#184 ⚠️ finishFailed: KONFLIKTAS, po kurio autoritetinga būsena yra `
   assert.match(eilutes[0], new RegExp(job.id), "eilutėje privalo būti jobId");
 
   /** Persistentinė būsena - ne tik grąžinimas. */
-  const galutinis = await jobStore.system.get(job.id);
+  const galutinis = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(galutinis.status, STATUS.COMPLETED);
 });
 

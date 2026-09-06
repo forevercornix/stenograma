@@ -52,7 +52,7 @@ test("sweepExpired: nešalina QUEUED/PROCESSING jobų, kad ir kokie seni", async
   await jobStore.sweepExpired(farFuture);
   // Tikrinam KONKRETŲ jobą (ne bendrą removed skaičių - kiti testai dalinasi ta
   // pačia in-memory saugykla): PROCESSING jobas turi IŠLIKTI, kad ir koks senas.
-  assert.ok(await jobStore.system.get(job.id), "PROCESSING jobas neturi būti pašalintas");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "PROCESSING jobas neturi būti pašalintas");
 });
 
 test("sweepExpired: pašalina COMPLETED jobą po TTL, bet ne prieš tai", async () => {
@@ -61,11 +61,11 @@ test("sweepExpired: pašalina COMPLETED jobą po TTL, bet ne prieš tai", async 
 
   const beforeTtl = Date.now() + 30 * 1000; // 30s < 1 min TTL
   await jobStore.sweepExpired(beforeTtl);
-  assert.ok(await jobStore.system.get(job.id), "prieš TTL jobas dar turi būti");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "prieš TTL jobas dar turi būti");
 
   const afterTtl = Date.now() + 2 * 60 * 1000; // 2 min > 1 min TTL
   await jobStore.sweepExpired(afterTtl);
-  assert.equal(await jobStore.system.get(job.id), null, "po TTL jobas turi būti pašalintas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "po TTL jobas turi būti pašalintas");
 });
 
 test("sweepExpired: pašalina CANCELLED jobą po TTL", async () => {
@@ -73,7 +73,7 @@ test("sweepExpired: pašalina CANCELLED jobą po TTL", async () => {
   await jobStore.system.finish(job.id, jobStore.STATUS.CANCELLED);
   const afterTtl = Date.now() + 2 * 60 * 1000;
   await jobStore.sweepExpired(afterTtl);
-  assert.equal(await jobStore.system.get(job.id), null, "CANCELLED jobas po TTL turi būti pašalintas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "CANCELLED jobas po TTL turi būti pašalintas");
 });
 
 test("TIKRA race: create() laukia neužbaigto Redis init (ne memory), kol connect() lėtas", async (t) => {
@@ -150,10 +150,10 @@ test("remove deletes an existing job", async () => {
 
   const job = await store.create({ ownerKind: "unowned" });
 
-  assert.ok(await store.system.get(job.id));
+  assert.ok(await store.system.get(job.id, { hydrate: true }));
 
   const removed = await store.system.remove(job.id);
 
   assert.equal(removed, true);
-  assert.equal(await store.system.get(job.id), null);
+  assert.equal(await store.system.get(job.id, { hydrate: true }), null);
 });

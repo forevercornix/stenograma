@@ -434,7 +434,7 @@ test("centralizuotas retencijos ciklas išvalo ir pasenusius JOBUS", async () =>
   const summary = await runRetentionSweep({ now: farFuture });
 
   assert.ok(summary.jobs >= 1, "retencijos ciklas turi šalinti pasenusius jobus");
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 });
 
 test("numatytasis retencijos intervalas nesumažina jobų valymo tankumo", () => {

@@ -340,7 +340,7 @@ test("#154 PROCESSOR: progreso įvykis pasiekia store su FAZE ir {current,total}
 
   await transcriptionProcessor({ storageKey, filename: "testas.wav" }, job.id);
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
 
   assert.equal(po.phase, PHASE.TRANSCRIBING, "fazė nustatyta per onPhase");
   assert.deepEqual(
@@ -372,7 +372,7 @@ test("#154 PROCESSOR: protokolo job'as pereina į generating_protocol", async (t
   const { protocolProcessor } = require("../queues/processors");
   await protocolProcessor({ transcript: "Jonas: Aptariame biudzeta." }, job.id);
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(po.phase, PHASE.GENERATING_PROTOCOL);
 });
 

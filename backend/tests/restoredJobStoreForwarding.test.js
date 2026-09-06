@@ -60,7 +60,7 @@ test("KONTROLĖ: be nustatymų tas pats adapteris hidratuoja", async () => {
   const pool = iraseinantisPool();
   const store = sukurti(pool);
 
-  await store.system.get(JOB_ID);
+  await store.system.get(JOB_ID, { hydrate: true });
 
   const sql = pool.uzklausos.map((u) => u.sql).join("\n");
   assert.match(sql, /r\.payload/, "numatytasis kelias turinį traukia");

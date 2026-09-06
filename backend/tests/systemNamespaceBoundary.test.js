@@ -9,7 +9,7 @@ const path = require("node:path");
  * `jobStore.system.*` apeina nuosavybės filtrą. Tai teisinga fono keliams
  * (`workers/`, `queues/`, valymas, retencija), kurie VYKDO darbą ir neturi
  * owner konteksto. Bet maršrutų ir servisų sluoksnyje tas pats namespace'as
- * būtų patogus privilege escalation kelias: vienas `jobStore.system.get(id)`
+ * būtų patogus privilege escalation kelias: vienas `jobStore.system.get(id, { hydrate: true })`
  * grąžintų svetimą įrašą be jokio signalo.
  *
  * KODĖL SARGAS, O NE KONVENCIJA. Konvencija be patikros išsitrina per pirmą
@@ -114,7 +114,7 @@ test("#159 SARGAS: pats sargas veikia (aptinka dirbtinį pažeidimą)", () => {
    */
   const regex = /jobStore\s*\.\s*system\b/;
 
-  assert.ok(regex.test("const j = await jobStore.system.get(id);"));
+  assert.ok(regex.test("const j = await jobStore.system.get(id, { hydrate: true });"));
   assert.ok(regex.test("jobStore . system . listAll()"), "tarpai neturi apeiti sargo");
   assert.equal(regex.test("await jobStore.get({ jobId, ownerId });"), false);
   assert.equal(regex.test("// jobStoreSystem yra kitas dalykas"), false);

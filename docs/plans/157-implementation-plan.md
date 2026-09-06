@@ -413,7 +413,17 @@ gamyboje ir **127 testuose** (34 failai). Mechaninis 127 vietų pakeitimas į
 tikrąjį pakeitimą. Vietoj to PR-3 uždarė MECHANIZMĄ, kuris ketvirtąjį atvejį paslėpė:
 `restoredJobStore` metodai generuojami, tad adapteris nebegali susiaurinti parašo.
 
-Apvertimas lieka PR-4 darbu — jis vis tiek liečia rašymo kelią, tad kaina ten mažesnė.
+✅ **PADARYTA PR-4 METU.** `system.get()` be `hydrate` dabar meta `TypeError`; viešas
+`jobStore.get()` nepakitęs (ten sprendžia operacija).
+
+⚠️ **IŠMATUOTAS REZULTATAS: 0 naujų gamybos kvietėjų.** Apvertimas nesugriovė nė vieno
+produkcinio kelio, kurio nebūtų PR-3 lentelėje — visi septyni jau ten buvo. Vadinasi
+keturios paieškos galiausiai BUVO pilnos gamybos kodui; bet tai žinoma tik dabar, po
+struktūrinės patikros, o ne tada, kai sąrašas buvo skelbiamas baigtu. Skirtumas tarp
+„buvo teisinga" ir „buvo įrodyta" — ir būtent jį apvertimas ir uždaro.
+
+Kaina: 127 kvietimai 34 testų failuose gavo eksplicitinę vėliavą (mechaninis pakeitimas,
+išsaugantis ankstesnį elgesį — numatytoji reikšmė buvo `true`).
 
 **⚠️ ĮĖJIMO SĄLYGOS — ABI PRIIMTOS, VIENOJE VIETOJE.**
 

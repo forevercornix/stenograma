@@ -393,7 +393,7 @@ test("E2E: kopija sukuriama ir atkuriama per TIKRUS endpoint'us", async () => {
 
   // 3. Ištrinam jobą ir atkuriam.
   await jobStore.system.remove(job.id);
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 
   const restored = await request(app)
     .post("/api/admin/backups/restore")
@@ -403,7 +403,7 @@ test("E2E: kopija sukuriama ir atkuriama per TIKRUS endpoint'us", async () => {
 
   assert.equal(restored.status, 200, `atkūrimas nepavyko: ${JSON.stringify(restored.body)}`);
   assert.ok(restored.body.completedSteps.includes("applied"));
-  assert.ok(await jobStore.system.get(job.id), "jobas turi grįžti");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "jobas turi grįžti");
 });
 
 /** Išskiria `manifest.json` ir `backup.data` iš `multipart/mixed` atsakymo. */

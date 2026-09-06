@@ -308,7 +308,7 @@ test("#184 `finish()` (`get` + `update` pora) duoda VIENĄ increment'ą", async 
   const job = await naujasPerFasada();
   await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
 
-  const pries = await jobStore.system.get(job.id);
+  const pries = await jobStore.system.get(job.id, { hydrate: true });
   const po = await jobStore.system.finish(job.id, jobStore.STATUS.FAILED, { error: "x" });
 
   assert.equal(po.version, pries.version + 1, "tiksliai +1");
@@ -324,7 +324,7 @@ test("#184 PRIIMTAS progreso įvykis duoda vieną increment'ą", async () => {
   const job = await naujasPerFasada();
   await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
   await jobStore.system.startPhase(job.id, PHASE.TRANSCRIBING, { progress: { current: 0, total: 10 } });
-  const pries = await jobStore.system.get(job.id);
+  const pries = await jobStore.system.get(job.id, { hydrate: true });
 
   const po = await jobStore.system.reportProgress(job.id, {
     phase: PHASE.TRANSCRIBING,
@@ -349,7 +349,7 @@ test("#184 ATMESTAS progreso įvykis versijos NEKEIČIA", async () => {
   const job = await naujasPerFasada();
   await jobStore.system.startPhase(job.id, PHASE.VALIDATING);
   await jobStore.system.startPhase(job.id, PHASE.TRANSCRIBING, { progress: { current: 5, total: 10 } });
-  const pries = await jobStore.system.get(job.id);
+  const pries = await jobStore.system.get(job.id, { hydrate: true });
 
   /** REGRESIJA: 2 < 5 — `jobPhase` tokį įvykį atmeta. */
   const po = await jobStore.system.reportProgress(job.id, {
