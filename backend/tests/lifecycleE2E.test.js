@@ -469,3 +469,45 @@ test("SKENERIS: efemeriški tipai imami iš REGISTRO, ne iš strategijų sąraš
     );
   }
 });
+
+test("#157 SKENERIS klausia, ar ĮRAŠAS yra — ne ką jame (sugadintas artefaktas jo nesulaužo)", async (t) => {
+  /**
+   * ⚠️ IŠTRYNIMO PATIKRA NEGALI PRIKLAUSYTI NUO TO, AR ARTEFAKTAS PERSKAITOMAS.
+   *
+   * `JOB_RECORD` strategija atsako į vieną klausimą: ar job'o eilutė dar yra.
+   * Hidratuodama ji sugadinto artefakto atveju MESTŲ — t. y. patikra lūžtų būtent
+   * ties tais job'ais, dėl kurių ji ir daroma. Tai ta pati klasė kaip
+   * `adminDeleteJob()`: paskutinė instancija negali reikalauti sveiko turinio.
+   */
+  const job = await jobStore.create({ ownerKind: "unowned", type: "protocol" });
+
+  const originalus = jobStore.system.get;
+  const kvietimai = [];
+  jobStore.system.get = async (id, nustatymai = {}) => {
+    kvietimai.push(nustatymai);
+    if (nustatymai.hydrate !== false) {
+      throw Object.assign(new Error("artefaktas sugadintas"), { code: "ARTIFACT_CORRUPT" });
+    }
+    return originalus(id, nustatymai);
+  };
+  t.after(() => {
+    jobStore.system.get = originalus;
+  });
+
+  const rezultatas = await artefactScanner.scanAllArtefacts(job.id, {
+    jobStore,
+    auditLog,
+    fileStorage,
+    jobRunner,
+    storageKey: null,
+  });
+
+  assert.ok(rezultatas.found.includes("job_record"), "įrašas TEBĖRA, ir skeneris tai mato");
+  assert.deepEqual(
+    kvietimai.map((n) => n && n.hydrate),
+    [false],
+    "skeneriui rūpi ĮRAŠO buvimas, ne jo turinys"
+  );
+
+  await jobStore.system.remove(job.id);
+});

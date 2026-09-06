@@ -26,7 +26,15 @@ const { ARTEFACT_TYPES, PERSISTENCE, TYPES_BY_ID } = require("./artefactInventor
 const SCAN_STRATEGIES = {
   [ARTEFACT_TYPES.JOB_RECORD.id]: {
     async scan(jobId, { jobStore }) {
-      return Boolean(await jobStore.system.get(jobId));
+      /**
+       * ⚠️ BE HIDRATACIJOS: klausiama, ar ĮRAŠAS yra, o ne kas jame (#157, PR-3).
+       *
+       * Hidratuojant ši patikra sugadinto artefakto atveju MESTŲ — t. y. ištrynimo
+       * PATIKRA lūžtų būtent ties tais job'ais, dėl kurių ji ir daroma. Tai ta pati
+       * klasė kaip `adminDeleteJob()`: verifikacijos kelias negali priklausyti nuo
+       * to, ar artefaktas perskaitomas.
+       */
+      return Boolean(await jobStore.system.get(jobId, { hydrate: false }));
     },
   },
 

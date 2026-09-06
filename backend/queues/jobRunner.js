@@ -207,7 +207,8 @@ async function _runInline(type, jobId, payload) {
   // vis tiek turi vykti. Observability niekada negali tapti vykdymo sąlyga.
   let job = null;
   try {
-    if (typeof jobStore.get === "function") job = await jobStore.system.get(jobId);
+    /** ⚠️ TIK KONTEKSTUI (`requestId`, `actor`) — turinio čia niekas neskaito (#157, PR-3). */
+    if (typeof jobStore.get === "function") job = await jobStore.system.get(jobId, { hydrate: false });
   } catch {
     job = null;
   }

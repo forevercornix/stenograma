@@ -449,3 +449,66 @@ test("#183 OVERRIDE: žyma fiksuoja OPERATORIŲ, ne savininko prašymą", async 
   assert.equal(zyma.actorKind, ACTOR_KIND.OPERATOR, "veikė operatorius, ne savininkas");
   assert.equal(zyma.reason, ERASURE_REASON.OPERATOR_CLEANUP, "priežastis - ne `user_request`");
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * HIDRATACIJA: OVERRIDE YRA PASKUTINĖ INSTANCIJA (#157, PR-3)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#157 ADMIN OVERRIDE prašo job'o BE rezultato", async (t) => {
+  /**
+   * ⚠️ ČIA TAI SVARBIAU NEI SAVININKO KELYJE.
+   *
+   * `ADMIN_DELETE_OVERRIDE` egzistuoja BŪTENT sugedusiems ir svetimiems job'ams.
+   * Hidratuodamas jis lūžtų PIRMA: job'as su sugadintu artefaktu taptų neištrinamas
+   * ABIEM keliais — savininką politika nukreipia į override, o override krenta ties
+   * hidratacija. Tai ne saugumo, o prieinamumo ir BDAR klausimas: neištrinama
+   * transkripcija.
+   *
+   * ⚠️ SKAITIKLIS ČIA NEĮMANOMAS (atminties backend'as artefaktų saugyklos neturi),
+   * tad tikrinamas SAITAS su kvietimo vieta; ką `hydrate: false` reiškia saugyklai,
+   * įrodo `jobStoreHydration.integration` („sugadintas artefaktas: `hydrate:false`
+   * kelias VEIKIA").
+   */
+  const job = await svetimasJob();
+
+  const originalus = jobStore.system.get;
+  const kvietimai = [];
+  jobStore.system.get = async (id, nustatymai) => {
+    kvietimai.push(nustatymai);
+    return originalus(id, nustatymai);
+  };
+  t.after(() => {
+    jobStore.system.get = originalus;
+  });
+
+  const result = await adminDeleteJob(job.id, sessionAdmin);
+
+  assert.equal(result.deleted, true, "override privalo ištrinti");
+  assert.deepEqual(
+    kvietimai.map((n) => n && n.hydrate),
+    [false],
+    "paskutinė instancija negali priklausyti nuo to, ar artefaktas perskaitomas"
+  );
+});
+
+test("#157 SUGADINTAS artefaktas NEBLOKUOJA admin override'o", async (t) => {
+  /**
+   * ⚠️ ELGESIO PATIKRA, NE TIK VĖLIAVOS. Saugykla, kuri kiekvienam hidratuotam
+   * skaitymui meta, imituoja sugadintą artefaktą; ištrynimas vis tiek privalo pavykti.
+   */
+  const job = await svetimasJob();
+
+  const originalus = jobStore.system.get;
+  jobStore.system.get = async (id, nustatymai = {}) => {
+    if (nustatymai.hydrate !== false) {
+      throw Object.assign(new Error("artefaktas sugadintas"), { code: "ARTIFACT_CORRUPT" });
+    }
+    return originalus(id, nustatymai);
+  };
+  t.after(() => {
+    jobStore.system.get = originalus;
+  });
+
+  const result = await adminDeleteJob(job.id, sessionAdmin);
+  assert.equal(result.deleted, true, "override privalo veikti BŪTENT tada, kai artefaktas blogas");
+});

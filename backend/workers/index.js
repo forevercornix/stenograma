@@ -463,7 +463,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
      * kuris tiriamas dažniausiai, liktų vienintelis be koreliacijos.
      */
     const { runWithContext } = require("../utils/requestContext");
-    const failedJob = await jobStore.system.get(jobId).catch(() => null);
+    /** ⚠️ TIK KORELIACIJAI (`requestId`, `actor`) — rezultato ši šaka neskaito (#157, PR-3). */
+    const failedJob = await jobStore.system.get(jobId, { hydrate: false }).catch(() => null);
 
     /**
      * ⚠️ ATMETIMAS GAUDOMAS ČIA, ĮVYKIO KLAUSYTOJO RIBOJE (Codex).
