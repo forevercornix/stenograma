@@ -1358,7 +1358,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
   }
 
   /** Vidinis ženklas: external pakartojimas yra no-op, o job'as hidratuojamas PO transakcijos. */
-  const EXTERNAL_NO_OP = Symbol("external-no-op");
+  const EXTERNAL_HIDRATUOTI = Symbol("external-hidratuoti");
 
   async function finishAtomic(id, status, extra = {}) {
     const jobPhase = require("../jobPhase");
@@ -1407,13 +1407,30 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
         if (eilute && eilute.storage_type !== "inline" && rasymas) {
           const verdiktas = idempotentiskasAtsakymasIsMetaduomenu(job, status, rasymas, eilute);
 
-          /**
-           * ⚠️ NO-OP GRĄŽINA SENTINEL'Į, NE JOB'Ą. Kvietėjui reikia job'o SU rezultatu
-           * (pvz. `audioBarrier` sprendžia pagal `job.result`), o hidratacija čia
-           * vyktų PO EILUTĖS UŽRAKTU — tai būtent tas I/O, kurio visas šis kelias
-           * vengia. Todėl hidratuojama po transakcijos, jau be užrakto.
-           */
-          if (verdiktas === job) return EXTERNAL_NO_OP;
+          if (verdiktas === job) {
+            /**
+             * ⚠️ TAS PATS `checksum` REIŠKIA DU SKIRTINGUS DALYKUS, IR JUOS SKIRIA
+             * PRE-CHECK (#157, PR-4).
+             *
+             * Pre-check patvirtino, kad objektas vietoje (`attemptId === null`) — tai
+             * TIKRAS pakartojimas, ir nieko nerašome. Jei objekto nebuvo, pre-check jau
+             * parašė NAUJĄ bandymą: tas pats checksum tada reiškia REMONTĄ, ir nuoroda
+             * privalo būti perjungta. Grąžinus no-op čia, job'as liktų `completed` su
+             * PAKIBUSIA nuoroda — tiksliai ta būsena, kurios `head()` patikra ir vengia.
+             */
+            if (!rasymas.attemptId) return EXTERNAL_HIDRATUOTI;
+
+            await upsertResult(client, id, undefined, rasymas.nuoroda);
+            await attemptRegistry.pazymeti(
+              client,
+              rasymas.attemptId,
+              attemptRegistry.BUSENA.ISIPAREIGOTA
+            );
+
+            isipareigota = true;
+            return EXTERNAL_HIDRATUOTI;
+          }
+
           if (verdiktas !== undefined) return verdiktas;
         }
 
@@ -1460,11 +1477,17 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       }
 
       isipareigota = true;
-      return rezultatas;
+
+      /**
+       * ⚠️ EXTERNAL ATVEJU GRĄŽINAMAS ŽENKLAS, NE `readJob()` REZULTATAS: pastarasis
+       * external eilutei duotų `result: null` (jis skaito `payload`, kurio ten nėra), ir
+       * kvietėjas matytų „completed be rezultato" ten, kur rezultatas ką tik įrašytas.
+       */
+      return rasymas && rasymas.nuoroda ? EXTERNAL_HIDRATUOTI : rezultatas;
       });
 
-      /** Pakartojimas: hidratuojama jau be užrakto, tad kvietėjas gauna įprastą job'ą. */
-      if (atsakymas === EXTERNAL_NO_OP) return get(id);
+      /** Hidratuojama jau be užrakto, tad kvietėjas gauna įprastą job'ą. */
+      if (atsakymas === EXTERNAL_HIDRATUOTI) return get(id);
 
       return atsakymas;
     } finally {
