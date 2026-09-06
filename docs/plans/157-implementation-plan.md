@@ -447,6 +447,14 @@ External rašymas įsijungia TIK gavus `rasymoSaugykla`, o produkcinis prijungim
 PR-7. Skaitymo pusė (PR-5) atsiranda ANKSČIAU, nei kelias tampa pasiekiamas — write-only
 langas niekada nepersidengia su diegimu, kuris realiai rašo external rezultatus.
 
+⚠️ **IR TAI YRA PRIKLAUSOMYBĖ, NE TVARKOS SUTAPIMAS.**
+
+**`rasymoSaugykla` produkcinis prijungimas negali įvykti anksčiau, nei registro skaitymo
+pusė (erasure pagal registrą + šlavėjas).** Remtis PR numeracijos seka būtų prielaida:
+jei PR-7 kada nors aplenktų PR-5 (pvz. dėl skubaus poreikio įjungti external saugyklą),
+langas atsivertų TYLIAI, ir niekas to nesusietų su šiuo sprendimu. Todėl sąlyga
+užrašoma kaip reikalavimas prijungimui, ne kaip pastaba apie eiliškumą.
+
 ⚠️ **BDAR PRASME TAI REIŠKIA:** iki PR-5 nutrūkęs procesas paliktų objektą, kurio
 niekas nepašalins — registras jį UŽRAŠO, bet neskaito. Kol external rašymas
 neprijungtas, tokių objektų atsirasti negali; nuo prijungimo momento (PR-7) skaitymo
@@ -810,9 +818,34 @@ grįžtų prie eksplicitiškai atmestos aktyvios konfigūracijos.
 
 Todėl PR-3 metaduomenų `SELECT` praplečiamas rezultato **reference** laukais
 (`storage_type`, `storage_key`, `bytes`, `checksum`) — **be `payload`**, tad
-hidratacijos riba nepažeidžiama: tai metaduomenys, ne turinys. `rowToJob()` juos
-pateikia atskiru lauku (pvz. `job.resultStorage`), aiškiai atskirtu nuo
-`job.storageKey`.
+hidratacijos riba nepažeidžiama: tai metaduomenys, ne turinys.
+
+⚠️ **PATAISYTA: NUORODA LIEKA VIDINĖ, O VARTOTOJAI GAUNA STORE LYGMENS METODĄ.**
+
+Ankstesnė šio skyriaus redakcija siūlė `rowToJob()` pateikti juos atskiru job'o lauku
+(`job.resultStorage`). Tai buvo klaidinga DVIEM atžvilgiais, ir abu verti užrašymo,
+nes eilutė jau kartą suklaidino:
+
+1. **Ji laužtų formos paritetą.** `memory` ir `redis` tokių laukų neturi ir negali
+   turėti, o `jobStoreBackendContract` nuo PR-3 lygina grąžinamų laukų AIBĘ. Naujas
+   laukas iškart duotų trečią divergenciją tame pačiame teste, kuris tam ir atsirado.
+2. **Ir PR-5 užduočiai jos neužtektų.** Erasure privalo trinti PAGAL REGISTRĄ — visus
+   job'o bandymus, ne tik laimėjusį. `job.resultStorage` pateiktų VIENĄ nuorodą, būtent
+   tą, kuri jau saugi, nes referencuota. Pralaimėjusių bandymų objektai, dėl kurių
+   registras ir egzistuoja, į job modelį nepatektų iš principo.
+
+**Teisinga forma:** store lygmens metodas, grąžinantis VISAS job'o rezultato artefaktų
+nuorodas — laimėjusią (`job_results`) plius registro bandymus (`job_result_attempts`).
+Ne job objekte, o greta jo.
+
+Precedentas jau yra: `listReferencedStorageKeys()` daro tiksliai tą patį audio pusėje ir
+yra backend kontrakto dalis. PR-5 reikia jo analogo rezultatams — tos pačios šeimos
+metodas, tas pats **fail-safe** elgesys (`null`, kai surašyti nepavyksta, kad kvietėjas
+NETRINTŲ vietoj „nieko nenaudojama"), ir tas pats **elgesiu grįstas** kontrakto testas,
+kurio reikalauja #157 body.
+
+`memory` ir `redis` jį įgyvendina trivialiai (bandymų registro jie neturi, tad grąžina
+tai, ką turi), ir paritetas išlieka METODŲ AIBĖS lygmenyje, ne job formos.
 
 Visi trys vartotojai eina per TĄ PATĮ kelią; nė vienas neskaito `job_results`
 savo užklausa — kitaip atsirastų trečia rezultato vietos interpretacija.
@@ -919,6 +952,15 @@ neįmanoma. Tai stipriau nei statinė patikra ir silpniau nei formalus įrodymas
 ### PR-7 — Backup/restore, dokumentai, sargo pašalinimas
 
 **Ką palieka veikiantį:** visą grandinę; tik čia dingsta fail-closed sargas.
+
+⚠️ **ĮĖJIMO SĄLYGA: `rasymoSaugykla` PRIJUNGIMAS REIKALAUJA REGISTRO SKAITYMO PUSĖS.**
+
+Produkcinis prijungimas (`initializePostgres()` paduoda saugyklą) negali įvykti anksčiau,
+nei veikia erasure pagal registrą IR neįsipareigotų bandymų šlavėjas (PR-5). Priešingu
+atveju nutrūkęs procesas paliktų objektą su transkripcija, kurio niekas nepašalins.
+
+Tai PRIKLAUSOMYBĖ, ne PR numeracijos pasekmė: jei šis PR kada nors aplenktų PR-5, sąlyga
+lieka galioti, o prijungimas — atidedamas.
 
 **Vidinė commit'ų tvarka — privaloma, ne rekomenduojama**
 
