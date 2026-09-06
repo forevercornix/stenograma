@@ -394,6 +394,22 @@ tik su tikra DB ir tikru duomenų kiekiu. Testas įrodo **kelią**, ne apimtį.
 
 ### PR-4 — Completion, concurrency ir round-trip tapatybė
 
+**⚠️ ĮĖJIMO SĄLYGOS — ABI PRIIMTOS, VIENOJE VIETOJE.**
+
+PR-4 forma priklauso nuo dviejų sprendimų, priimtų peržiūrose ir išbarstytų po
+skirtingus skyrius. Surašomi čia, kad PR-4 pradžioje nereikėtų jų ieškoti:
+
+1. **Orphan strategija: (b) — patvarus bandymų registras** (skyrius „PRIIMTAS PR-4
+   SPRENDIMAS" žemiau). Registro įrašas atsiranda PRIEŠ `put()`, dengia visus tris
+   orphan veidus, erasure trina PAGAL REGISTRĄ, retencija išvedama iš
+   `revivalHorizonsMs()`.
+2. **Inline rašymas privalo vykti completion transakcijoje / CAS** (žr. §3 pabaigą).
+   Du bandymai dalijasi `job_id`, o `ON CONFLICT (job_id) DO UPDATE SET payload`
+   perrašo nugalėtojo rezultatą DAR PRIEŠ completion CAS. Tai lenktynių, ne orphan
+   klausimas — išorinio objekto čia nėra.
+
+Abi sąlygos keičia rašymo kelio FORMĄ, tad įterptos vėliau reikštų perrašymą.
+
 **Ką palieka veikiantį:** external completion veikia `fs` backend'e; sargas
 (`postgresStore.js:989-1007`) **dar lieka**, nes erasure ir backup keliai
 nepadengti (#157 to reikalauja eksplicitiškai).

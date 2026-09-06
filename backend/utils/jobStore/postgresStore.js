@@ -1438,8 +1438,13 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
      *
      * ⚠️ INLINE ATVEJU PAKARTOTINĖS PATIKROS NĖRA IR NEREIKIA: turinys atėjo ta pačia
      * užklausa kaip savininkas, tad lango, kurį reikėtų uždaryti, neegzistuoja.
-     * Patikra daroma TIK tada, kai realiai buvo išorinis skaitymas — kitaip
-     * kiekvienas skaitymas gautų papildomą užklausą už garantiją, kurios jau turi.
+     *
+     * ⚠️ SĄLYGA REMIASI SNAPSHOT'O `storage_type`, O NE TUO, AR SAUGYKLA BUVO
+     * KVIESTA. Antroji formuluotė atrodo ekvivalenti ir šiandien duoda tą patį
+     * atsakymą, bet ji tyliai nustotų galioti, jei kada atsirastų inline kelias su
+     * ATSKIRU skaitymu (pvz. rezultatas iškeliamas iš eilutės): tada langas būtų, o
+     * „ar kvietėme saugyklą" sakytų „ne". Klausiama apie EILUTĘ, ne apie tai, ką
+     * spėjome padaryti.
      */
     if (eilute.result_storage_type && eilute.result_storage_type !== "inline") {
       const { rows: dabartines } = await pool.query(
