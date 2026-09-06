@@ -394,6 +394,27 @@ tik su tikra DB ir tikru duomenų kiekiu. Testas įrodo **kelią**, ne apimtį.
 
 ### PR-4 — Completion, concurrency ir round-trip tapatybė
 
+**⚠️ ATVIRAS KLAUSIMAS, PERIMTAS IŠ PR-3: hidratacijos aibė tebėra SURAŠOMA, ne
+išvedama.**
+
+PR-3 metu keturios paieškos davė keturis nepilnus sąrašus: store metodai → maršrutai
+→ `jobStore.get()` vardas → `restoredJobStore` adapteris. Visos keturios rėmėsi
+SINTAKSINIU raktu, o adapteris `store` perpakuoja nauju vardu — vardas dingsta,
+paieška pagal vardą dingsta kartu. Penktas grep duotų penktą nepilną sąrašą.
+
+Teisingas sprendimas — **apversti numatytąją reikšmę**: `system.get()` reikalauja
+eksplicitinio `hydrate`, tad kiekvienas kvietėjas (dabartinis, būsimas, per adapterį
+ar tiesiogiai) privalo pasirinkti, o praleistus parodo testai, ne atmintis. Viešas
+`jobStore.get()` numatytosios reikšmės nekeičia.
+
+⚠️ **PR-3 TO NEPADARĖ, IR PRIEŽASTIS UŽRAŠOMA:** `.system.get(` turi 7 kvietimus
+gamyboje ir **127 testuose** (34 failai). Mechaninis 127 vietų pakeitimas į
+`{ hydrate: true }` uždarančiame PR būtų diff'as, kuris nieko neteigia, ir paskandintų
+tikrąjį pakeitimą. Vietoj to PR-3 uždarė MECHANIZMĄ, kuris ketvirtąjį atvejį paslėpė:
+`restoredJobStore` metodai generuojami, tad adapteris nebegali susiaurinti parašo.
+
+Apvertimas lieka PR-4 darbu — jis vis tiek liečia rašymo kelią, tad kaina ten mažesnė.
+
 **⚠️ ĮĖJIMO SĄLYGOS — ABI PRIIMTOS, VIENOJE VIETOJE.**
 
 PR-4 forma priklauso nuo dviejų sprendimų, priimtų peržiūrose ir išbarstytų po
