@@ -365,6 +365,8 @@ const functional = [
   "restoredJobStoreForwarding",
   /** #157 (PR-4): bandymų registro modulis (grynas SQL sluoksnis). */
   "attemptRegistry",
+  /** #157 (PR-4): lygybės paritetas ir round-trip ištikimybė. */
+  "artifactRoundTrip",
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
