@@ -336,8 +336,8 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
 
     assert.deepEqual(job.result, { text: "užraktas" }, "rašymas privalo pavykti");
     assert.equal(
-      uzraktoKlaida && uzraktoKlaida.code,
-      undefined,
+      uzraktoKlaida,
+      null,
       `rašymo metu eilutė buvo UŽRAKINTA (${uzraktoKlaida && uzraktoKlaida.code}) — I/O vyksta po užraktu`
     );
     assert.equal(uzraktasGautas, true, "užraktas privalo būti laisvas `put()` metu");
