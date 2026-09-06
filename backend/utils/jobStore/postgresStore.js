@@ -1255,9 +1255,18 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    * `head()` privalo patvirtinti egzistavimą ir dydį — kitaip tai nebe pakartojimas, o
    * REMONTAS, ir einama į pilną kelią su nauju `attemptId`.
    *
-   * ⚠️ Riba: `head()` be checksum'o (pvz. `fs`) sugadinto, bet TO PATIES DYDŽIO objekto
+   * ⚠️ RIBA: `head()` be checksum'o (pvz. `fs`) sugadinto, bet TO PATIES DYDŽIO objekto
    * neaptiks. Pilnas `verify()` čia reikštų viso artefakto skaitymą kiekvienam
-   * pakartojimui; ta klasė lieka restore verifikacijai (PR-7). Užrašoma, ne nutylima.
+   * pakartojimui; ta klasė lieka restore verifikacijai (PR-7).
+   *
+   * ⚠️ IR TOS RIBOS ANTRA PUSĖ, KURI SVARBESNĖ UŽ PIRMĄ: „pakartojimas" skelbiamas
+   * remiantis įrodymu, kuris nustato TIK DYDĮ. Jei objektas tyliai sugedo, `finish()`
+   * patvirtins sėkmę, klientas gaus sugadintą rezultatą, o kitas pakartojimas pasielgs
+   * lygiai taip pat.
+   *
+   * Vadinasi SAVAIMINIO PASITAISYMO NĖRA: iš tos būsenos išveda tik IŠORINĖ patikra
+   * (PR-7 restore verifikacija su `verify()`). Tai skiriasi nuo „aptiksime vėliau" —
+   * niekas jos neaptiks, kol kas nors nepaklaus.
    */
   async function paruostiExternalRasyma(id, status, extra) {
     if (!rasymoSaugykla) return null;
@@ -1410,13 +1419,18 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
           if (verdiktas === job) {
             /**
              * ⚠️ TAS PATS `checksum` REIŠKIA DU SKIRTINGUS DALYKUS, IR JUOS SKIRIA
-             * PRE-CHECK (#157, PR-4).
+             * PRE-CHECK (#157, PR-4; radinį davė CI 34039343363, ne peržiūra).
              *
              * Pre-check patvirtino, kad objektas vietoje (`attemptId === null`) — tai
              * TIKRAS pakartojimas, ir nieko nerašome. Jei objekto nebuvo, pre-check jau
              * parašė NAUJĄ bandymą: tas pats checksum tada reiškia REMONTĄ, ir nuoroda
              * privalo būti perjungta. Grąžinus no-op čia, job'as liktų `completed` su
              * PAKIBUSIA nuoroda — tiksliai ta būsena, kurios `head()` patikra ir vengia.
+             *
+             * ⚠️ ŠIS SKIRTUMAS NEMATOMAS IŠ `checksum === checksum` EILUTĖS. Sąlyga
+             * žemiau atrodo perteklinė („juk sutampa"), ir kitas skaitytojas ją
+             * pagrįstai norės pašalinti. Reikšmę neša ne palyginimas, o tai, KĄ
+             * pre-check jau spėjo padaryti su saugykla.
              */
             if (!rasymas.attemptId) return EXTERNAL_HIDRATUOTI;
 

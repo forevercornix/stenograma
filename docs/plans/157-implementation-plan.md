@@ -431,6 +431,27 @@ skirtingus skyrius. Surašomi čia, kad PR-4 pradžioje nereikėtų jų ieškoti
 
 Abi sąlygos keičia rašymo kelio FORMĄ, tad įterptos vėliau reikštų perrašymą.
 
+⚠️ **PR-4 REGISTRAS YRA WRITE-ONLY — SPRENDIMAS, NE PRALEIDIMAS.**
+
+Iš penkių sąlygų, priimtų kartu su variantu (b), PR-4 įgyvendina DVI: įrašas atsiranda
+prieš `put()`, ir cleanup liečia tik savo bandymą. Trys likusios yra būtent tos, kurios
+paverčia registrą VEIKIANČIU, ir visos trys yra PR-5 apimtis („Erasure ir registro
+vartotojai"):
+
+1. **erasure trina pagal registrą**, ne pagal `storage_key`;
+2. **šlavėjas** neįsipareigotiems bandymams;
+3. **retencija ≥ prikėlimo horizontai**, išvedama iš `revivalHorizonsMs()`.
+
+⚠️ **KODĖL LANGAS NEPAVOJINGAS, IR KODĖL TAI NĖRA „UŽDARYTA ORPHAN PROBLEMA".**
+External rašymas įsijungia TIK gavus `rasymoSaugykla`, o produkcinis prijungimas vyksta
+PR-7. Skaitymo pusė (PR-5) atsiranda ANKSČIAU, nei kelias tampa pasiekiamas — write-only
+langas niekada nepersidengia su diegimu, kuris realiai rašo external rezultatus.
+
+⚠️ **BDAR PRASME TAI REIŠKIA:** iki PR-5 nutrūkęs procesas paliktų objektą, kurio
+niekas nepašalins — registras jį UŽRAŠO, bet neskaito. Kol external rašymas
+neprijungtas, tokių objektų atsirasti negali; nuo prijungimo momento (PR-7) skaitymo
+pusė privalo jau egzistuoti. Tvarka yra garantijos dalis, ne patogumas.
+
 **Ką palieka veikiantį:** external completion veikia `fs` backend'e; sargas
 (`postgresStore.js:989-1007`) **dar lieka**, nes erasure ir backup keliai
 nepadengti (#157 to reikalauja eksplicitiškai).

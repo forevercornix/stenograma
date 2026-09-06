@@ -16,6 +16,21 @@ const crypto = require("node:crypto");
  *
  * ⚠️ REGISTRAS NEDENGIA objektų, atsiradusių NE per mūsų rašymo kelią (rankinis
  * kopijavimas, atkūrimas į kitą prefiksą) — riba užrašyta `docs/artefact-lifecycle.md`.
+ *
+ * ⚠️ PR-4 REGISTRAS YRA WRITE-ONLY, IR TAI SĄMONINGA, NE PRALEIDIMAS.
+ *
+ * `joboBandymai()` čia jau yra, bet už modulio ribų jo dar niekas nekviečia: erasure
+ * jungtis ir šlavėjas gyvena PR-5 („Erasure ir registro vartotojai"). Savybė be ją
+ * paisančio kelio yra dokumentacija, ne savybė — todėl tai užrašoma atvirai.
+ *
+ * ⚠️ KODĖL LANGAS NEPAVOJINGAS: external rašymas įsijungia TIK gavus `rasymoSaugykla`,
+ * o produkcinis prijungimas vyksta PR-7 kartu su non-inline sargo pašalinimu. Skaitymo
+ * pusė (PR-5) atsiranda ANKSČIAU, nei kelias tampa pasiekiamas — write-only langas
+ * niekada nepersidengia su diegimu, kuris realiai rašo external rezultatus.
+ *
+ * Iš penkių sprendimo (b) sąlygų PR-4 įgyvendina dvi (įrašas prieš `put()`, cleanup tik
+ * savo bandymo); trys likusios — erasure pagal registrą, šlavėjas ir retencija iš
+ * `revivalHorizonsMs()` — yra PR-5 apimtis.
  */
 
 /** Būsenos privalo sutapti su migracijos `job_result_attempts_busena_allowed`. */
