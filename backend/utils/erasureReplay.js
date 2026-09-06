@@ -97,7 +97,13 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
      * patikra čia neturėtų ką tikrinti, o `system` kelias yra tas pats, kurį
      * naudoja kiti sisteminiai valytojai.
      */
-    const job = await store.system.get(zyma.jobId);
+    /**
+     * ⚠️ BE HIDRATACIJOS (#157, PR-3). Ištrynimui `result` nereikalingas, o replay yra
+     * kelias, kuris PO ATKŪRIMO įvykdo BDAR ištrynimą, kurio reikalauja žyma. Jei jį
+     * blokuotų sugadintas artefaktas, ištrynimo garantija turėtų skylę BŪTENT atkūrimo
+     * scenarijuje — ten, kur artefaktai ir būna nevientisi.
+     */
+    const job = await store.system.get(zyma.jobId, { hydrate: false });
 
     if (!job) {
       /**

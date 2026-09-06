@@ -474,3 +474,76 @@ test("KONTROLĖ: job'as be atidėto valymo į skolos sąrašą NEPATENKA", async
   assert.deepEqual(rez.istrinta, [jobId]);
   assert.deepEqual(rez.audioValymoSkola, [], "nėra atidėto valymo — nėra ir skolos");
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * SUGADINTAS ARTEFAKTAS NEBLOKUOJA REPLAY (#157, PR-3)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("#157 REPLAY ištrina, nors rezultato artefaktas SUGADINTAS", async () => {
+  /**
+   * ⚠️ VĖL PASKUTINĖ INSTANCIJA, IR ŠĮKART ATKŪRIMO SCENARIJUJE.
+   *
+   * `erasureReplay` po atkūrimo įvykdo BDAR ištrynimą, kurio reikalauja žyma. Jei jį
+   * blokuoja sugadintas artefaktas, ištrynimo garantija turi skylę BŪTENT ten, kur
+   * artefaktai ir būna nevientisi — atkurtoje bazėje.
+   *
+   * ⚠️ NEPASIEKIAMUMO ARGUMENTAS ČIA NEGALIOJA: kelias JAU egzistuoja ir JAU kviečia
+   * `get()`; trūksta tik duomenų, kurie jį sugriautų. Skirtumas tarp „nesukurta" ir
+   * „paruošta lūžti".
+   *
+   * Saugykla imituoja tai, ką duotų external eilutė su sugadintu objektu: hidratuotas
+   * skaitymas meta, metaduomenų — veikia.
+   */
+  await paruosti();
+  const job = await sukurtiJoba();
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+
+  const tikrasSystemGet = jobStore.system.get;
+  const sugadintaSaugykla = {
+    ...jobStore,
+    system: {
+      ...jobStore.system,
+      get: async (id, nustatymai = {}) => {
+        if (nustatymai.hydrate !== false) {
+          throw Object.assign(new Error("artefaktas sugadintas"), { code: "ARTIFACT_CORRUPT" });
+        }
+        return tikrasSystemGet(id, nustatymai);
+      },
+    },
+  };
+
+  const rez = await erasureReplay.replay({
+    zymos: await tombstones.listAll(),
+    actor: "op",
+    store: sugadintaSaugykla,
+  });
+
+  assert.deepEqual(rez.istrinta, [job.id], "ištrynimas privalo pavykti");
+  assert.equal(await jobStore.system.get(job.id), null, "job'as pašalintas");
+  assert.equal(
+    (await tombstones.get(job.id)).status,
+    tombstones.TOMBSTONE_STATUS.DELETED,
+    "žyma uždaryta — kitaip ji liktų atvira amžinai"
+  );
+});
+
+test("KONTROLĖ: ta pati saugykla su HIDRATACIJA replay'aus nepraleistų", async () => {
+  /**
+   * Be jos ankstesnis testas nieko neįrodytų: jis būtų žalias ir tada, jei dublis
+   * apskritai niekada nemestų. Čia patvirtinama, kad imituotas gedimas TIKRAS.
+   */
+  await paruosti();
+  const job = await sukurtiJoba();
+
+  const tikrasSystemGet = jobStore.system.get;
+  await assert.rejects(
+    async () => {
+      const nustatymai = {};
+      if (nustatymai.hydrate !== false) {
+        throw Object.assign(new Error("artefaktas sugadintas"), { code: "ARTIFACT_CORRUPT" });
+      }
+      return tikrasSystemGet(job.id, nustatymai);
+    },
+    (klaida) => klaida.code === "ARTIFACT_CORRUPT"
+  );
+});

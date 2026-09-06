@@ -31,7 +31,13 @@ const { createPostgresStore } = require("./jobStore/postgresStore");
  * klasę su sėkmės kvitu, o tokio gedimo kaina yra GDPR, ne patogumas.
  */
 
-/** Metodai, kurių `jobErasure.eraseJob()` reikalauja iš `system.*`. */
+/**
+ * Metodai, kurių `jobErasure.eraseJob()` reikalauja iš `system.*`.
+ *
+ * ⚠️ SARGAS TIKRINA BUVIMĄ, NE ELGESĮ IR NE PARAŠĄ (§12.1). Metodo dingimą jis
+ * pagauna; tai, kad metodas ims elgtis kitaip ar praras parametrą — ne. Parašo
+ * pusę uždaro ne patikra, o generavimas (žr. `sukurti()`).
+ */
 const BUTINI = Object.freeze(["get", "update", "remove"]);
 
 /**
@@ -53,13 +59,27 @@ function sukurti(pool) {
     );
   }
 
-  return {
-    system: {
-      get: (jobId) => store.get(jobId),
-      update: (jobId, patch) => store.update(jobId, patch),
-      remove: (jobId) => store.remove(jobId),
-    },
-  };
+  /**
+   * ⚠️ METODAI GENERUOJAMI, NE RAŠOMI RANKA (Codex, #291).
+   *
+   * Ankstesnė redakcija juos išvardijo su fiksuotais parametrais
+   * (`get: (jobId) => store.get(jobId)`), ir adapteris TYLIAI NUMESDAVO antrąjį
+   * argumentą. Taip mirė `{ hydrate: false }` DR replay kelyje — bet mirtų ir bet
+   * kuris BŪSIMAS parametras, nes siaurinimas yra adapterio savybė, ne vieno
+   * argumento klaida.
+   *
+   * ⚠️ IR SARGAS ŠITO NEPAGAVO, NORS STOVI 8 EILUTĖS AUKŠČIAU. Jis tikrina METODŲ
+   * VARDUS, ne parašus, tad paviršiaus pokytį mato, o parametro pokyčio — ne.
+   * `Function.length` čia irgi nepadėtų: `get(id, opts = {})` turi `length === 1`,
+   * kaip ir `(jobId) => ...`. Todėl taisoma ne patikra, o MECHANIZMAS: rankomis
+   * neparašytas metodas negali susiaurinti to, ko neaprašo.
+   */
+  const system = {};
+  for (const metodas of BUTINI) {
+    system[metodas] = (...argumentai) => store[metodas](...argumentai);
+  }
+
+  return { system };
 }
 
 module.exports = { BUTINI, sukurti };
