@@ -798,6 +798,45 @@ function kanonizuoti(reiksme) {
 }
 
 /**
+ * EXTERNAL ATITIKMUO — TA PATI TAISYKLĖ, KITA REPREZENTACIJA (#157, PR-4).
+ *
+ * ⚠️ ANTROS LYGYBĖS TAISYKLĖS ČIA NĖRA, IR BŪTENT TODĖL JI GYVENA ŠIAME FAILE.
+ *
+ * External rezultato turinys guli saugykloje, tad palyginti dvi kanonines eilutes
+ * reikštų jį PERSKAITYTI kiekvieno pakartotinio `finish()` metu. Vietoj to lyginamas
+ * `checksum`, kuris IŠVESTAS iš tos pačios `kanoninisRezultatas()` išvesties
+ * (`artifactStore/validation.js` riba) — tai ne kita taisyklė, o ta pati santrauka.
+ *
+ * ⚠️ SPRENDIMO STRUKTŪRA IDENTIŠKA `idempotentiskasAtsakymas()`: tie patys žingsniai,
+ * ta pati tvarka, tie patys sentinel'iai. Jei kada nors išsiskirs, tai matysis čia, o
+ * ne dviejuose failuose, kurių niekas nelygina.
+ *
+ * @param {object} job užrakintas job'o snapshot'as
+ * @param {string} status prašomas statusas
+ * @param {{checksum: string, bytes: number}} ateinantis įeinančio rezultato santrauka
+ * @param {{checksum: string|null, bytes: number|string|null}} persistintas eilutės metaduomenys
+ */
+function idempotentiskasAtsakymasIsMetaduomenu(job, status, ateinantis, persistintas) {
+  if (job.status !== STATUS.COMPLETED) return undefined;
+  if (status !== STATUS.COMPLETED) return undefined;
+
+  /** ⚠️ `COMPLETED` BE REZULTATO NĖRA SĖKMĖ — ta pati riba kaip inline kelyje. */
+  if (!persistintas || persistintas.checksum == null || persistintas.bytes == null) {
+    return "COMPLETED_WITHOUT_RESULT";
+  }
+
+  /**
+   * ⚠️ `bytes` LYGINAMAS SKAIČIUMI: `bigint` per `node-postgres` grįžta EILUTE, tad
+   * griežtas `===` čia visada sakytų „skirtingas rezultatas".
+   */
+  const tapatu =
+    persistintas.checksum === ateinantis.checksum &&
+    Number(persistintas.bytes) === Number(ateinantis.bytes);
+
+  return tapatu ? job : "RESULT_CONFLICT";
+}
+
+/**
  * BENDRA IDEMPOTENTIŠKUMO TAISYKLĖ VISIEMS TRIMS BACKEND'AMS (#184, 7.5b).
  *
  * ⚠️ ANTROS LYGYBĖS TAISYKLĖS NĖRA. Trys saugyklos kviečia ŠITĄ funkciją, tad
@@ -855,6 +894,7 @@ function isFinished(status) {
 
 module.exports = {
   metaduomenuProjekcija,
+  idempotentiskasAtsakymasIsMetaduomenu,
   normalizeSchemaVersion,
   BOOLEAN_FIELDS,
   NUMBER_FIELDS,

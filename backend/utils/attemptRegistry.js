@@ -1,0 +1,87 @@
+const crypto = require("node:crypto");
+
+/**
+ * BANDYMŲ REGISTRAS — ORPHAN'AS TAMPA MATOMAS DB KRYPTIMI (#157, PR-4).
+ *
+ * ⚠️ ĮRAŠAS ATSIRANDA PRIEŠ `put()`, NE PO JO.
+ *
+ * Po `put()` registruojant liktų tas pats langas, tik siauresnis: procesas, kritęs
+ * tarp rašymo ir registravimo, paliktų objektą, kurio nerodo niekas. Registruojant
+ * PRIEŠ, blogiausia būsena yra `pending` eilutė BE objekto — o ji nekainuoja nieko:
+ * valymas kreipiasi į saugyklą, gauna „nėra" ir uždaro eilutę.
+ *
+ * ⚠️ KRYPTIS PASIRINKTA SĄMONINGAI: geriau eilutė be objekto, nei objektas be eilutės.
+ * Pirmoji yra šiukšlė registre, antroji — transkripcija, kurios nepasiekia nei erasure,
+ * nei DB krypties skenavimas (A3).
+ *
+ * ⚠️ REGISTRAS NEDENGIA objektų, atsiradusių NE per mūsų rašymo kelią (rankinis
+ * kopijavimas, atkūrimas į kitą prefiksą) — riba užrašyta `docs/artefact-lifecycle.md`.
+ */
+
+/** Būsenos privalo sutapti su migracijos `job_result_attempts_busena_allowed`. */
+const BUSENA = Object.freeze({
+  /** Registruota prieš `put()`; objektas gali egzistuoti arba ne. */
+  LAUKIA: "pending",
+  /** Nuoroda įsipareigota `job_results` eilutėje — objektas NAUDOJAMAS. */
+  ISIPAREIGOTA: "committed",
+  /** Bandymas pralaimėjo ar buvo remontuotas — objektas šalintinas. */
+  ATMESTA: "abandoned",
+});
+
+/**
+ * Objekto raktas vienam bandymui.
+ *
+ * ⚠️ `jobId` PREFIKSAS YRA ERASURE REIKALAS, NE TAPATYBĖ. Jis leidžia žmogui matyti,
+ * kam objektas priklauso; tapatybę neša `checksum` KOLONA, o unikalumą — `attemptId`.
+ * ⚠️ Raktas NEIŠVEDAMAS iš checksum'o (A2 riba galioja abiem kryptimis).
+ */
+function bandymoRaktas(jobId, attemptId) {
+  return `results/${jobId}/${attemptId}.json`;
+}
+
+/** Naujas bandymo identifikatorius. Atskira funkcija — kad testai galėtų jį fiksuoti. */
+function naujasBandymas() {
+  return crypto.randomUUID();
+}
+
+/**
+ * Registruoja bandymą PRIEŠ rašymą.
+ *
+ * @param {{query: Function}} vykdytojas pool arba transakcijos klientas
+ */
+async function registruoti(vykdytojas, { attemptId, jobId, storageType, storageKey }) {
+  await vykdytojas.query(
+    `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [attemptId, String(jobId), storageType, storageKey, BUSENA.LAUKIA]
+  );
+}
+
+/**
+ * ⚠️ BŪSENOS PERĖJIMAS VYKSTA TOJE PAČIOJE TRANSAKCIJOJE KAIP NUORODOS ĮRAŠYMAS.
+ *
+ * Kitaip liktų langas, kuriame `job_results` jau rodo į objektą, o registras dar sako
+ * „pending": valymas, pamatęs seną `pending` eilutę, ištrintų NAUDOJAMĄ objektą.
+ * Todėl `vykdytojas` čia yra transakcijos klientas, ne pool'as.
+ */
+async function pazymeti(vykdytojas, attemptId, busena) {
+  const { rowCount } = await vykdytojas.query(
+    `UPDATE job_result_attempts SET busena = $2, updated_at = now() WHERE attempt_id = $1`,
+    [attemptId, busena]
+  );
+
+  return rowCount > 0;
+}
+
+/** Visi job'o bandymai — erasure kelias (PR-5) trina PAGAL REGISTRĄ, ne pagal nuorodą. */
+async function joboBandymai(vykdytojas, jobId) {
+  const { rows } = await vykdytojas.query(
+    `SELECT attempt_id, job_id, storage_type, storage_key, busena, created_at
+       FROM job_result_attempts WHERE job_id = $1 ORDER BY created_at`,
+    [String(jobId)]
+  );
+
+  return rows;
+}
+
+module.exports = { BUSENA, bandymoRaktas, naujasBandymas, registruoti, pazymeti, joboBandymai };
