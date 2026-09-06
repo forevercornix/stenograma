@@ -7,6 +7,8 @@ const {
   matchesOwner,
   normalizeJob,
   idempotentiskasAtsakymas,
+  idempotentiskasAtsakymasIsMetaduomenu,
+  rezultatoNera,
 } = require("./common");
 
 /**
@@ -780,7 +782,7 @@ function assertAtstovaujamasProgresas(job) {
  * @param {object} [priklausomybes.artifactStore] sutrumpinimas vienam backend'ui; tipas
  *   imamas iš paties store'o `backend` lauko
  */
-function createPostgresStore(pool, { artifactStores = null, artifactStore = null } = {}) {
+function createPostgresStore(pool, { artifactStores = null, artifactStore = null, rasymoSaugykla = null } = {}) {
   /**
    * ARTEFAKTŲ SAUGYKLOS RAKTUOJAMOS PAGAL `storage_type` (Codex, #291).
    *
@@ -800,7 +802,27 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    * turi tik vieną backend'ą: ji IŠVEDAMA į žemėlapį pagal paties store'o `backend`
    * lauką, o ne laikoma antra konfigūracijos forma.
    */
+  /**
+   * ⚠️ RAŠYMO SAUGYKLA IR SKAITYMO ŽEMĖLAPIS — DU SKIRTINGI KLAUSIMAI (#157, PR-4).
+   *
+   * Skaitymas eina pagal PERSISTINTĄ `storage_type`: diegimas, kuriame dalis rezultatų
+   * jau `s3`, o nauji rašomi į `fs`, yra normali būsena po backend'o pakeitimo. Rašymas
+   * turi vieną taikinį — tą, kurį šiandien pasirinko operatorius.
+   *
+   * ⚠️ BE `rasymoSaugykla` ELGESYS NEPAKINTA: rezultatai rašomi INLINE, kaip iki #157.
+   * PR-4 kelias įsijungia tik tada, kai saugykla paduota — prijungimas prie
+   * `initializePostgres()` lieka PR-7 kartu su non-inline sargo pašalinimu.
+   */
   const saugyklos = new Map();
+
+  if (rasymoSaugykla && !rasymoSaugykla.backend) {
+    throw new TypeError(
+      "createPostgresStore: `rasymoSaugykla` privalo deklaruoti `backend` — be jo " +
+        "neįmanoma įrašyti `job_results.storage_type` (#157)."
+    );
+  }
+
+  if (rasymoSaugykla) saugyklos.set(rasymoSaugykla.backend, rasymoSaugykla);
 
   if (artifactStores) {
     for (const [tipas, saugykla] of Object.entries(artifactStores)) {
@@ -837,8 +859,41 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     return saugykla;
   }
 
-  /** Rezultato įrašymas — `payload` yra JSONB, tad bet koks JSON tinka. */
-  async function upsertResult(client, jobId, result) {
+  /**
+   * Rezultato įrašymas — `payload` yra JSONB, tad bet koks JSON tinka.
+   *
+   * ⚠️ SU `nuoroda` TAI REFERENCE SWITCH, IR JIS VIENAS SAKINYS (#157, PR-4).
+   *
+   * `INSERT ... ON CONFLICT DO UPDATE SET storage_type, storage_key, payload, bytes,
+   * checksum` — viena eilutė, jokios commit'intos tarpinės būsenos. `DELETE`+`INSERT`
+   * atmestas ne dėl atomiškumo (transakcijoje jis lygiavertis), o dėl to, kad tarp jų
+   * eilutė NEEGZISTUOJA: lygiagretus `SELECT` matytų „rezultato nėra" vietoj
+   * „rezultatas senas", ir tai keistų `finishAtomic` klasifikaciją.
+   *
+   * @param {{storageType: string, storageKey: string, bytes: number, checksum: string}} [nuoroda]
+   */
+  async function upsertResult(client, jobId, result, nuoroda = null) {
+    if (nuoroda) {
+      /**
+       * ⚠️ `payload` NUSTATOMAS Į `NULL` EKSPLICITIŠKAI. `job_results_storage_shape`
+       * reikalauja, kad external eilutėje jo nebūtų; palikus seną inline reikšmę,
+       * perėjimas iš inline į external duotų `23514` — arba, be sargo, hibridinę
+       * eilutę su dviem tiesomis apie tą patį rezultatą.
+       */
+      await client.query(
+        `INSERT INTO job_results (job_id, storage_type, storage_key, payload, bytes, checksum, created_at)
+         VALUES ($1, $2, $3, NULL, $4, $5, now())
+         ON CONFLICT (job_id) DO UPDATE
+            SET storage_type = EXCLUDED.storage_type,
+                storage_key  = EXCLUDED.storage_key,
+                payload      = NULL,
+                bytes        = EXCLUDED.bytes,
+                checksum     = EXCLUDED.checksum`,
+        [jobId, nuoroda.storageType, nuoroda.storageKey, nuoroda.bytes, nuoroda.checksum]
+      );
+      return;
+    }
+
     if (result === undefined) return;
 
     if (result === null) {
@@ -863,11 +918,25 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
      * eilutės perrašymo. Integracinis testas tikrina, kad abi sutampa per
      * REALŲ DB round-trip'ą.
      */
+    /**
+     * ⚠️ INLINE RAŠYMAS GRĄŽINA EILUTĘ Į INLINE FORMĄ (#157, PR-4).
+     *
+     * Iki PR-4 čia buvo keičiamas TIK `payload`, o `storage_type`/`storage_key`
+     * likdavo nepaliesti — external eilutė, perrašoma inline rezultatu, būtų tapusi
+     * hibridine (išmatuota PR-1 metu; būtent dėl to atsirado `job_results_storage_shape`
+     * sugriežtinimas). Dabar visi penki laukai keičiami kartu, tad forma lieka viena.
+     */
     await client.query(
-      `INSERT INTO job_results (job_id, storage_type, payload, created_at)
-       VALUES ($1, 'inline', $2::jsonb, now())
-       ON CONFLICT (job_id) DO UPDATE SET payload = EXCLUDED.payload
-        WHERE job_results.payload IS DISTINCT FROM EXCLUDED.payload`,
+      `INSERT INTO job_results (job_id, storage_type, storage_key, payload, bytes, checksum, created_at)
+       VALUES ($1, 'inline', NULL, $2::jsonb, NULL, NULL, now())
+       ON CONFLICT (job_id) DO UPDATE
+          SET storage_type = 'inline',
+              storage_key  = NULL,
+              payload      = EXCLUDED.payload,
+              bytes        = NULL,
+              checksum     = NULL
+        WHERE job_results.payload IS DISTINCT FROM EXCLUDED.payload
+           OR job_results.storage_type IS DISTINCT FROM 'inline'`,
       [jobId, JSON.stringify(result)]
     );
   }
@@ -905,7 +974,8 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    */
   async function rezultatoEilute(client, jobId) {
     const { rows } = await client.query(
-      "SELECT storage_type, payload FROM job_results WHERE job_id = $1",
+      `SELECT storage_type, storage_key, payload, bytes, checksum
+         FROM job_results WHERE job_id = $1`,
       [jobId]
     );
     return rows[0] || null;
@@ -1166,9 +1236,139 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    *
    * @returns {object|null|"RESULT_CONFLICT"|"COMPLETED_WITHOUT_RESULT"}
    */
+  /**
+   * EXTERNAL RAŠYMO PARUOŠIMAS — VISKAS, KAS VYKSTA PRIEŠ TRANSAKCIJĄ (#157, PR-4).
+   *
+   * ⚠️ I/O NEVYKSTA PO EILUTĖS UŽRAKTU. `put()` yra tinklo ar disko operacija; įvykus
+   * jai `inTransaction()` viduje, `jobs` eilutė liktų užrakinta visą rašymo laiką, ir
+   * lygiagretūs skaitymai lauktų saugyklos. Todėl paruošimas grąžina jau parašytą
+   * objektą, o transakcija tik įsipareigoja nuorodą.
+   *
+   * ⚠️ PRE-CHECK NĖRA VERDIKTAS (Codex, #289). Sutapęs `checksum` praleidžia TIK
+   * `put()`; ar rezultatas „tas pats", sprendžia DB pusėje matoma eilutės būsena
+   * transakcijoje. Pre-check klysta tik VIENA kryptimi — leidžia nereikalingą rašymą,
+   * kurį re-check atmeta; priešinga klaida neįmanoma, nes šis kelias į `job_results`
+   * nerašo.
+   *
+   * ⚠️ NO-OP NESKELBIAMAS NEPATIKRINUS, AR OBJEKTAS DAR YRA (Codex, #289). Sutapęs
+   * checksum sako tik tiek, kad METADUOMENYS sutampa; objektas galėjo dingti. Todėl
+   * `head()` privalo patvirtinti egzistavimą ir dydį — kitaip tai nebe pakartojimas, o
+   * REMONTAS, ir einama į pilną kelią su nauju `attemptId`.
+   *
+   * ⚠️ Riba: `head()` be checksum'o (pvz. `fs`) sugadinto, bet TO PATIES DYDŽIO objekto
+   * neaptiks. Pilnas `verify()` čia reikštų viso artefakto skaitymą kiekvienam
+   * pakartojimui; ta klasė lieka restore verifikacijai (PR-7). Užrašoma, ne nutylima.
+   */
+  async function paruostiExternalRasyma(id, status, extra) {
+    if (!rasymoSaugykla) return null;
+    if (status !== STATUS.COMPLETED) return null;
+    if (rezultatoNera(extra.result)) return null;
+
+    const { paruostiReiksme } = require("../artifactStore/validation");
+    const attemptRegistry = require("../attemptRegistry");
+
+    /** Riba paskaičiuoja kvitą VIENĄ kartą; implementacijos jo nebeperskaičiuoja. */
+    const paruosta = paruostiReiksme(extra.result);
+
+    /* ═══ 1. PRE-CHECK: be užrakto, be I/O į DB rašymo pusę ═══ */
+    const esama = await rezultatoEilute(pool, id);
+
+    if (
+      esama &&
+      esama.storage_type !== "inline" &&
+      esama.checksum === paruosta.checksum &&
+      Number(esama.bytes) === paruosta.bytes
+    ) {
+      const galva = await rasymoSaugykla.head(esama.storage_key);
+
+      if (galva && Number(galva.bytes) === Number(esama.bytes)) {
+        /** `put()` praleidžiamas; verdiktą vis tiek priims transakcija. */
+        return { checksum: paruosta.checksum, bytes: paruosta.bytes, attemptId: null, nuoroda: null };
+      }
+    }
+
+    /* ═══ 2. REGISTRAS PRIEŠ `put()`, tada rašymas ir patikra ═══ */
+    const attemptId = attemptRegistry.naujasBandymas();
+    const raktas = attemptRegistry.bandymoRaktas(id, attemptId);
+
+    await attemptRegistry.registruoti(pool, {
+      attemptId,
+      jobId: id,
+      storageType: rasymoSaugykla.backend,
+      storageKey: raktas,
+    });
+
+    const kvitas = await rasymoSaugykla.put(raktas, extra.result);
+
+    /**
+     * ⚠️ `head()` PO RAŠYMO — sėkmė be patvirtinimo yra prielaida. Nesutapęs dydis
+     * reiškia, kad saugykloje guli ne tai, ką parašėme, ir nuorodos įsipareigoti
+     * negalima.
+     */
+    const galva = await rasymoSaugykla.head(raktas);
+    if (!galva || Number(galva.bytes) !== kvitas.bytes) {
+      throw new Error(
+        `postgresStore: artefaktas "${raktas}" po rašymo nepatvirtintas ` +
+          `(head: ${galva ? galva.bytes : "nėra"}, laukta: ${kvitas.bytes}).`
+      );
+    }
+
+    return {
+      checksum: kvitas.checksum,
+      bytes: kvitas.bytes,
+      attemptId,
+      nuoroda: {
+        storageType: rasymoSaugykla.backend,
+        storageKey: kvitas.reference,
+        bytes: kvitas.bytes,
+        checksum: kvitas.checksum,
+      },
+    };
+  }
+
+  /**
+   * ⚠️ CLEANUP TRINA TIK SAVO BANDYMĄ, IR TAI KONSTRUKCIJA, NE DRAUSMĖ.
+   *
+   * Su attempt-unique raktu pralaimėjęs FIZIŠKAI neturi kaip paliesti laimėtojo
+   * objekto: raktai skirtingi. Sąlyginė patikra („ar kas nors referencina") tampa
+   * nereikalinga — ne todėl, kad ją praleidžiame, o todėl, kad nebėra ką ja spręsti.
+   *
+   * ⚠️ REGISTRO EILUTĖ LIEKA, tik pažymima `abandoned`: ji yra ĮRODYMAS, kad objektas
+   * egzistavo, ir retencijos valymui (PR-5) reikalinga net tada, kai trynimas dabar
+   * nepavyko.
+   */
+  async function isvalytiBandyma(rasymas) {
+    if (!rasymas || !rasymas.attemptId) return;
+    const attemptRegistry = require("../attemptRegistry");
+
+    try {
+      await rasymoSaugykla.delete(rasymas.nuoroda.storageKey);
+    } catch (klaida) {
+      const { createLogger } = require("../logger");
+      createLogger("postgres-store").error("Pralaimėjusio bandymo objekto pašalinti nepavyko", {
+        stage: "attempt_cleanup_failed",
+        raktas: rasymas.nuoroda.storageKey,
+        kodas: klaida && klaida.code,
+      });
+    }
+
+    await attemptRegistry
+      .pazymeti(pool, rasymas.attemptId, attemptRegistry.BUSENA.ATMESTA)
+      .catch(() => {});
+  }
+
+  /** Vidinis ženklas: external pakartojimas yra no-op, o job'as hidratuojamas PO transakcijos. */
+  const EXTERNAL_NO_OP = Symbol("external-no-op");
+
   async function finishAtomic(id, status, extra = {}) {
     const jobPhase = require("../jobPhase");
-    return inTransaction(async (client) => {
+    const attemptRegistry = require("../attemptRegistry");
+
+    const rasymas = await paruostiExternalRasyma(id, status, extra);
+    let isipareigota = false;
+
+    try {
+      const atsakymas = await inTransaction(async (client) => {
       const job = await readJobForUpdate(client, id);
       if (!job) return null;
 
@@ -1187,6 +1387,36 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
          * tiesiogiai. Įvardyta atvirai, kad neatrodytų kaip įrodytas elgesys.
          */
         const eilute = await rezultatoEilute(client, id);
+
+        /**
+         * ⚠️ EXTERNAL LYGYBĖS AUTORITETAS — PERSISTINTAS `checksum` (#157, PR-4).
+         *
+         * Sargas žemiau sako „šis `storage_type` neturi lygybės autoriteto". PR-4 jį
+         * sukūrė: `bytes` ir `checksum` persistinami KARTU su nuoroda, ir jie aprašo
+         * TĄ PAČIĄ kanoninę eilutę, kurią lygina inline kelias (`common.js:731`).
+         * Todėl external eilutė sprendžiama ČIA — dar prieš sargą.
+         *
+         * ⚠️ SARGAS LIEKA IR NĖRA SUSILPNINTAS. Jis toliau gina atvejį, kuriam
+         * autoriteto TIKRAI nėra: external eilutė diegime, kuris external rašymo
+         * saugyklos neturi (`rasymas === null`), arba kito tipo eilutė. Pašalinamas
+         * jis tik PR-7, kai erasure ir backup keliai bus padengti (#157 riba).
+         *
+         * ⚠️ TURINYS NESKAITOMAS. Pakartotinis `finish()` external atveju lygina
+         * metaduomenis, tad selective hydration lieka nepaliesta.
+         */
+        if (eilute && eilute.storage_type !== "inline" && rasymas) {
+          const verdiktas = idempotentiskasAtsakymasIsMetaduomenu(job, status, rasymas, eilute);
+
+          /**
+           * ⚠️ NO-OP GRĄŽINA SENTINEL'Į, NE JOB'Ą. Kvietėjui reikia job'o SU rezultatu
+           * (pvz. `audioBarrier` sprendžia pagal `job.result`), o hidratacija čia
+           * vyktų PO EILUTĖS UŽRAKTU — tai būtent tas I/O, kurio visas šis kelias
+           * vengia. Todėl hidratuojama po transakcijos, jau be užrakto.
+           */
+          if (verdiktas === job) return EXTERNAL_NO_OP;
+          if (verdiktas !== undefined) return verdiktas;
+        }
+
         if (eilute && eilute.storage_type !== "inline") {
           throw new Error(
             `postgresStore.finishAtomic: job_results.storage_type = '${eilute.storage_type}' ` +
@@ -1206,8 +1436,46 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       }
 
       const patch = jobPhase.finish(job, status, extra);
-      return writePatched(client, job, patch);
-    });
+
+      /**
+       * ⚠️ INLINE REZULTATAS RAŠOMAS TOJE PAČIOJE TRANSAKCIJOJE KAIP COMPLETION
+       * (PR-4 įėjimo sąlyga #2).
+       *
+       * `writePatched()` daro `UPDATE jobs` ir `upsertResult()` viename
+       * `inTransaction()` bloke, tad du bandymai nebegali perrašyti vienas kito
+       * rezultato PRIEŠ completion CAS: pralaimėjęs pirma atsimuša į `readJobForUpdate`
+       * užraktą, o po jo mato jau `completed` būseną ir eina idempotencijos keliu.
+       */
+      const rezultatas = await writePatched(client, job, patch, rasymas ? rasymas.nuoroda : null);
+
+      /**
+       * ⚠️ BŪSENOS PERĖJIMAS — TOJE PAČIOJE TRANSAKCIJOJE KAIP NUORODA.
+       *
+       * Kitaip liktų langas, kuriame `job_results` jau rodo į objektą, o registras dar
+       * sako `pending`: retencijos valymas, pamatęs seną `pending` eilutę, ištrintų
+       * NAUDOJAMĄ objektą.
+       */
+      if (rasymas && rasymas.attemptId) {
+        await attemptRegistry.pazymeti(client, rasymas.attemptId, attemptRegistry.BUSENA.ISIPAREIGOTA);
+      }
+
+      isipareigota = true;
+      return rezultatas;
+      });
+
+      /** Pakartojimas: hidratuojama jau be užrakto, tad kvietėjas gauna įprastą job'ą. */
+      if (atsakymas === EXTERNAL_NO_OP) return get(id);
+
+      return atsakymas;
+    } finally {
+      /**
+       * ⚠️ VALYMAS VYKSTA IR PO KLAIDOS, IR PO PRALAIMĖTO CAS. `finally` čia yra
+       * esmė: transakcija gali baigtis atmetimu (rollback) arba grąžinti sentinel'į
+       * (`RESULT_CONFLICT`, `CONCURRENCY_CONFLICT`) — abiem atvejais mūsų objektas
+       * lieka neįsipareigotas, o jo registro eilutė — `pending`.
+       */
+      if (!isipareigota) await isvalytiBandyma(rasymas);
+    }
   }
 
   /**
@@ -1328,7 +1596,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
   }
 
   /** Bendras kelias visoms mutacijoms: `applyPatch()` + įrašymas. */
-  async function writePatched(client, current, patch) {
+  async function writePatched(client, current, patch, nuoroda = null) {
     const next = applyPatch(current, patch);
     const row = jobToRow(next);
 
@@ -1362,7 +1630,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       [current.id, ...mutable.map((c) => row[c])]
     );
 
-    await upsertResult(client, current.id, patch.result);
+    await upsertResult(client, current.id, patch.result, nuoroda);
     return readJob(client, current.id);
   }
 
