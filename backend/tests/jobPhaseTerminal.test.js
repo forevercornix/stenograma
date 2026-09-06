@@ -140,7 +140,7 @@ test("#154 ATŠAUKIMAS: INLINE kelias realiai pažymi job'ą failed", async (t) 
   });
 
   await jobRunner._runInline("transcription", job.id, {});
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
 
   assert.equal(processorKviestas, false, "darbas neturi prasidėti");
   assert.equal(po.status, STATUS.FAILED, "job'as pažymėtas failed");
@@ -268,7 +268,7 @@ test("#154 KLAIDA: nelegalus perėjimas job'ą pažymi SAVO kodu", async (t) => 
   });
 
   await jobRunner._runInline("transcription", job.id, {});
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
 
   assert.equal(po.status, STATUS.FAILED);
   assert.equal(po.error_code, "ILLEGAL_TRANSITION", "ne internal_error");
@@ -293,7 +293,7 @@ test("#154 RECOVERY: nutrūkęs job'as lieka processing su fazе, ne pakibęs be
   });
 
   // Worker'is „krinta" – jokio finish() nekviečiama.
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
 
   assert.equal(po.status, STATUS.PROCESSING);
   assert.equal(po.phase, PHASE.TRANSCRIBING, "matoma, KUR nutrūko");

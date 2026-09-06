@@ -105,7 +105,7 @@ test("#159 FILTRAS: A negauna, nekeičia ir neištrina B job'o", async () => {
   assert.equal(await jobStore.update({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }, { attempt_count: 7 }), jobStore.FORBIDDEN);
   assert.equal(await jobStore.remove({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }), jobStore.FORBIDDEN);
 
-  const still = await jobStore.system.get(job.id);
+  const still = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(still, "svetimas job'as turi likti nepaliestas");
   assert.notEqual(still.status, "failed", "atmestas update neturi būti pritaikytas");
 });
@@ -170,7 +170,7 @@ test("#159 SYSTEM: sweep mato VISUS job'us nepriklausomai nuo savininko", async 
 test("#159 SYSTEM: get/update/remove veikia be owner konteksto", async () => {
   const job = await jobStore.create({ ownerId: B, ownerKind: OWNER_KIND.USER });
 
-  assert.ok(await jobStore.system.get(job.id), "worker'is neturi ir negali turėti ownerId");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "worker'is neturi ir negali turėti ownerId");
   assert.ok(await jobStore.system.restart(job.id));
   assert.equal(await jobStore.system.remove(job.id), true);
 });

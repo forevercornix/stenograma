@@ -164,7 +164,7 @@ async function salintiAudioSuBarjeru(jobId, payload, kontekstas = {}) {
    */
   let autoritetingas;
   try {
-    autoritetingas = await jobStore.system.get(jobId);
+    autoritetingas = await jobStore.system.get(jobId, { hydrate: true });
   } catch (klaida) {
     log.error("Barjero paieška krito - audio NEŠALINAMAS, žymimas pakartojimui", {
       stage: "cleanup_lookup_failed",

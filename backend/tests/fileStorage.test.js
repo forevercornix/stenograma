@@ -145,7 +145,7 @@ test("releaseAudio su TIKRU storage: nepavykus trynimui storageKey lieka", async
   try {
     assert.equal(await releaseAudio(job.id, key), false);
 
-    const after = await jobStore.system.get(job.id);
+    const after = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(after.storageKey, key, "raktas turi likti, kad ištrynimą būtų galima pakartoti");
   } finally {
     await fs.chmod(dir, 0o700);

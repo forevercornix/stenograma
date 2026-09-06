@@ -214,7 +214,7 @@ test("#154 STORE: terminalaus statuso NEGALIMA įrašyti apeinant finish()", asy
     TypeError
   );
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(po.status, STATUS.PROCESSING, "būsena nepakito");
   assert.equal(po.phase, PHASE.TRANSCRIBING);
   assert.deepEqual(po.progress, { current: 50, total: 100 });
@@ -319,7 +319,7 @@ test("#154 LENKTYNĖS: lygiagretūs progreso įvykiai IŠLAIKO monotoniškumą",
     }),
   ]);
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(po.progress.current, 60, "senesnis įvykis NETURI perrašyti naujesnio");
 });
 

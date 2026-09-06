@@ -200,12 +200,12 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
          * ištrynimas čia yra PARUOŠIMAS, ne tikrinamas elgesys.
          */
         const saugykla = restoredJobStore.sukurti(pool);
-        const job = await saugykla.system.get(jobai.zymetas.id);
+        const job = await saugykla.system.get(jobai.zymetas.id, { hydrate: true });
         await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
         await jobErasure.eraseJob(job, { store: saugykla });
         await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED, { completedAt: Date.now() });
 
-        assert.equal(await saugykla.system.get(job.id), null, "šaltinyje job'o A nebėra");
+        assert.equal(await saugykla.system.get(job.id, { hydrate: true }), null, "šaltinyje job'o A nebėra");
 
         artefaktas = erasureExport.sudarytiArtefakta({
           zymos: await tombstones.listAll(),

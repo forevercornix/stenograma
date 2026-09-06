@@ -54,7 +54,7 @@ test("ŽYMA: išgyvena jobo įrašo pašalinimą", async () => {
 
   await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
 
-  assert.equal(await jobStore.system.get(job.id), null, "jobo įrašo neturi likti");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "jobo įrašo neturi likti");
   assert.equal(await tombstones.isDeleted(job.id), true, "bet žyma turi išlikti");
 });
 
@@ -698,7 +698,7 @@ test("#183 202: svetima `deletion_pending` žyma sustabdo darbą, o ne dubliuoja
 
   assert.equal(rezultatas.status, DELETION_STATUS.IN_PROGRESS);
   assert.equal(rezultatas.complete, false, "`jau vykdoma` nėra sėkmė");
-  assert.ok(await jobStore.system.get(job.id), "destruktyvus darbas NEPRADĖTAS");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "destruktyvus darbas NEPRADĖTAS");
 });
 
 test("#183 PRETENZIJA: autorizuotą pakartojimą pasiima VIENAS", async () => {
@@ -838,7 +838,7 @@ test("#183 NEIŠSPRĘSTA ŽYMA: `deletion_failed` NEKARTOJAMAS automatiškai", a
    * elgsena - ne. Skirtumą mato tik likęs įrašas.
    */
   assert.ok(
-    await jobStore.system.get(job.id),
+    await jobStore.system.get(job.id, { hydrate: true }),
     "automatinio pakartojimo nėra - destruktyvus darbas NEPRADĖTAS"
   );
 });
@@ -865,7 +865,7 @@ test("#183 RELEASE: užstrigusi `pending` žyma atkuriama iki baigto ištrynimo"
 
   const uzstrige = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sav" });
   assert.equal(uzstrige.status, DELETION_STATUS.IN_PROGRESS, "be release kelias uždarytas");
-  assert.ok(await jobStore.system.get(job.id), "duomenys nepaliesti");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "duomenys nepaliesti");
 
   // Operatorius konstatuoja, kad vykdytojo nebėra. Jokio teiginio apie duomenis.
   const atlaisvinta = await releaseMark(job.id, { actor: "sysadmin" });
@@ -941,7 +941,7 @@ test("#183 RETENCIJA: pasenusio jobo šalinimas PALIEKA žymą", async () => {
   const ateitis = Date.now() + jobStore.TTL_MS + 60_000;
   await runRetentionSweep({ now: ateitis });
 
-  assert.equal(await jobStore.system.get(job.id), null, "pasenęs jobas pašalintas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "pasenęs jobas pašalintas");
 
   const zyma = await tombstones.get(job.id);
   assert.ok(zyma, "retencija PRIVALO palikti barjerą");
@@ -967,7 +967,7 @@ test("#183 RETENCIJA: svetimos pretenzijos jobo NELIEČIA", async () => {
 
   const r = await runRetentionSweep({ now: Date.now() + jobStore.TTL_MS + 60_000 });
 
-  assert.ok(await jobStore.system.get(job.id), "svetimos pretenzijos jobas NEPAŠALINTAS");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "svetimos pretenzijos jobas NEPAŠALINTAS");
   assert.ok(r.jobsSkipped >= 1, "praleidimas matomas suvestinėje, ne tylus");
 });
 

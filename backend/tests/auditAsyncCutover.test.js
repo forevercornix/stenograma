@@ -632,7 +632,7 @@ test("INLINE: audito gedimas autorizacijoje perkelia job'ą į TERMINALIĄ būse
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     assert.deepEqual(pagauti, [], "inline kelias negali palikti nesuvaldyto Promise");
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED, "job'as privalo tapti terminalus");
     assert.equal(
       poVykdymo.errorCode || poVykdymo.error_code,
@@ -1222,7 +1222,7 @@ test("SIAURAS CATCH: NE audito klaida NEVADINAMA `AUDIT_UNAVAILABLE`", async () 
    * `schemaVersion` nustatomas TIESIOGIAI saugykloje: `create()` jo nepriima,
    * o mus domina būtent PERSISTUOTAS nesuderinamas įrašas.
    */
-  const issaugotas = await jobStore.system.get(job.id);
+  const issaugotas = await jobStore.system.get(job.id, { hydrate: true });
   issaugotas.schemaVersion = 99;
 
   const pagauti = [];
@@ -1234,7 +1234,7 @@ test("SIAURAS CATCH: NE audito klaida NEVADINAMA `AUDIT_UNAVAILABLE`", async () 
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     assert.deepEqual(pagauti, [], "inline kelias vis tiek negali palikti nesuvaldyto Promise");
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED, "job'as privalo tapti terminalus");
     assert.notEqual(
       poVykdymo.errorCode || poVykdymo.error_code,
@@ -1286,7 +1286,7 @@ test("ŠALTINIO AUDIO: terminalus audito gedimas ATLAISVINA įkeltą failą", as
       ["JOB_EXECUTION_DENIED"]
     );
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED);
     assert.equal(poVykdymo.errorCode || poVykdymo.error_code, "AUDIT_UNAVAILABLE");
 
@@ -1342,7 +1342,7 @@ test("ŠALTINIO AUDIO: ATŠAUKTOS TEISĖS irgi atlaisvina įkeltą failą", asyn
   try {
     await jobRunner._runInline("protocol", job.id, { storageKey });
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED);
     assert.equal(
       poVykdymo.errorCode || poVykdymo.error_code,

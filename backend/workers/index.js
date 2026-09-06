@@ -133,7 +133,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
        *
        * ⚠️ TOMBSTONE PATIKRA LIEKA PIRMA (aukščiau) — 7.5a barjeras nekeičiamas.
        */
-      const jauEsantis = await jobStore.system.get(jobId);
+      const jauEsantis = await jobStore.system.get(jobId, { hydrate: true });
       const sprendimas = sprendimasPriesRestart(jauEsantis);
 
       if (sprendimas === RETRY_VEIKSMAS.REMONTUOTINA) {
