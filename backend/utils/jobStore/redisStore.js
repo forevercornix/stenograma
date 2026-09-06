@@ -1,5 +1,5 @@
 const jobPhase = require("../jobPhase");
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas, metaduomenuProjekcija } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -198,9 +198,19 @@ function createRedisStore(redisClient) {
     return kanoninis;
   }
 
-  async function get(id) {
+  /**
+   * ⚠️ `hydrate: false` PROJEKCIJA — FORMOS PARITETAS (#157, PR-3). Redis eilutė yra
+   * vienas hash'as, tad turinio čia neišvengsi; bet kvietėjas, gavęs nehidratuotą
+   * job'ą, VISUOSE backend'uose privalo matyti tą patį: `result` lauko nėra.
+   *
+   * @param {{hydrate?: boolean}} [nustatymai]
+   */
+  async function get(id, { hydrate = true } = {}) {
     const flat = await redisClient.hgetall(JOB_PREFIX + id);
-    return deserialize(flat);
+    const job = deserialize(flat);
+    if (!job || hydrate) return job;
+
+    return metaduomenuProjekcija(job);
   }
 
   /**
@@ -536,8 +546,9 @@ function createRedisStore(redisClient) {
   }
 
   /** @returns {object|null|"FORBIDDEN"} */
-  async function getOwned(id, scope) {
-    const job = await get(id);
+  /** @param {{hydrate?: boolean}} [nustatymai] forma vienoda visuose backend'uose (#157, PR-3) */
+  async function getOwned(id, scope, nustatymai = {}) {
+    const job = await get(id, nustatymai);
     if (!job) return null;
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }
@@ -696,8 +707,9 @@ function createRedisStore(redisClient) {
    * Naudoja `_scanJobs`, kuris eina per `SCAN`, ne `KEYS` – pastarasis
    * blokuotų Redis, kol pereina visą raktų erdvę.
    */
-  async function listAll() {
-    return _scanJobs();
+  async function listAll({ hydrate = true } = {}) {
+    const visi = await _scanJobs();
+    return hydrate ? visi : visi.map(metaduomenuProjekcija);
   }
 
   async function listReferencedStorageKeys() {
@@ -711,13 +723,14 @@ function createRedisStore(redisClient) {
     return [...keys];
   }
 
+  /** ⚠️ METADUOMENŲ KELIAS — ta pati projekcija kaip kituose backend'uose (#157, PR-3). */
   async function listByFlag(field, limit = 100) {
     const jobs = await _scanJobs();
     const pending = [];
 
     for (const job of jobs) {
       if (pending.length >= limit) break;
-      if (job[field]) pending.push(job);
+      if (job[field]) pending.push(metaduomenuProjekcija(job));
     }
 
     return pending;

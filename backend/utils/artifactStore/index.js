@@ -13,5 +13,13 @@
  */
 const { ArtifactStoreError } = require("./validation");
 const { LEISTINI, BUTINI, parinktiBackenda, sukurtiSaugykla } = require("./backendSelection");
+const { skaitytiRibotai } = require("./boundedRead");
 
-module.exports = { ArtifactStoreError, LEISTINI, BUTINI, parinktiBackenda, sukurtiSaugykla };
+module.exports = {
+  ArtifactStoreError,
+  LEISTINI,
+  BUTINI,
+  parinktiBackenda,
+  sukurtiSaugykla,
+  skaitytiRibotai,
+};

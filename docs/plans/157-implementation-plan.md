@@ -58,6 +58,8 @@ body arba A1–A4 atsakymai.
 | 46 | **Viešas klaidos tekstas gaminamas iš KODO** — `JSON.parse` diagnostika neša artefakto turinio fragmentą į savininkui matomą lauką | Codex (#290) |
 | 47 | **`ARTIFACT_CORRUPT` atskiriamas nuo `ARTIFACT_NOT_FOUND`** — sugadintas objektas guli vietoje, tad remontas kitas | Codex (#290) |
 | 48 | **Plano teiginys apie `reference === null` buvo per stiprus** — inline bandymai dalijasi `job_id`, tad `ON CONFLICT DO UPDATE` perrašo nugalėtojo rezultatą prieš completion CAS. Predikatas galioja cleanup/orphan klausimui, NE „pralaimėjusio bandymo nėra" | Codex (#290) |
+| 49 | **PR-3: `listByFlag()` irgi grąžina nehidratuotą projekciją** — `payload` ji netempė, bet `rowToJob()` pridėdavo `result: null`, t. y. teigdavo „rezultato nėra" apie job'ą, kurio rezultatas yra | įgyvendinimas |
+| 50 | **PR-3: rezultato NUORODA (`storage_type`, `storage_key`, `bytes`, `checksum`) lieka VIDINĖ** — traukiama metaduomenų užklausoje PR-5 sprendimui, bet į bendrą job modelį nepatenka | įgyvendinimas |
 
 Nepakito: PR skaičius ir tvarka, §1 grafas, §2 `UNVERIFIED` lentelė, §4.
 
@@ -392,6 +394,43 @@ tik su tikra DB ir tikru duomenų kiekiu. Testas įrodo **kelią**, ne apimtį.
 
 ### PR-4 — Completion, concurrency ir round-trip tapatybė
 
+**⚠️ ATVIRAS KLAUSIMAS, PERIMTAS IŠ PR-3: hidratacijos aibė tebėra SURAŠOMA, ne
+išvedama.**
+
+PR-3 metu keturios paieškos davė keturis nepilnus sąrašus: store metodai → maršrutai
+→ `jobStore.get()` vardas → `restoredJobStore` adapteris. Visos keturios rėmėsi
+SINTAKSINIU raktu, o adapteris `store` perpakuoja nauju vardu — vardas dingsta,
+paieška pagal vardą dingsta kartu. Penktas grep duotų penktą nepilną sąrašą.
+
+Teisingas sprendimas — **apversti numatytąją reikšmę**: `system.get()` reikalauja
+eksplicitinio `hydrate`, tad kiekvienas kvietėjas (dabartinis, būsimas, per adapterį
+ar tiesiogiai) privalo pasirinkti, o praleistus parodo testai, ne atmintis. Viešas
+`jobStore.get()` numatytosios reikšmės nekeičia.
+
+⚠️ **PR-3 TO NEPADARĖ, IR PRIEŽASTIS UŽRAŠOMA:** `.system.get(` turi 7 kvietimus
+gamyboje ir **127 testuose** (34 failai). Mechaninis 127 vietų pakeitimas į
+`{ hydrate: true }` uždarančiame PR būtų diff'as, kuris nieko neteigia, ir paskandintų
+tikrąjį pakeitimą. Vietoj to PR-3 uždarė MECHANIZMĄ, kuris ketvirtąjį atvejį paslėpė:
+`restoredJobStore` metodai generuojami, tad adapteris nebegali susiaurinti parašo.
+
+Apvertimas lieka PR-4 darbu — jis vis tiek liečia rašymo kelią, tad kaina ten mažesnė.
+
+**⚠️ ĮĖJIMO SĄLYGOS — ABI PRIIMTOS, VIENOJE VIETOJE.**
+
+PR-4 forma priklauso nuo dviejų sprendimų, priimtų peržiūrose ir išbarstytų po
+skirtingus skyrius. Surašomi čia, kad PR-4 pradžioje nereikėtų jų ieškoti:
+
+1. **Orphan strategija: (b) — patvarus bandymų registras** (skyrius „PRIIMTAS PR-4
+   SPRENDIMAS" žemiau). Registro įrašas atsiranda PRIEŠ `put()`, dengia visus tris
+   orphan veidus, erasure trina PAGAL REGISTRĄ, retencija išvedama iš
+   `revivalHorizonsMs()`.
+2. **Inline rašymas privalo vykti completion transakcijoje / CAS** (žr. §3 pabaigą).
+   Du bandymai dalijasi `job_id`, o `ON CONFLICT (job_id) DO UPDATE SET payload`
+   perrašo nugalėtojo rezultatą DAR PRIEŠ completion CAS. Tai lenktynių, ne orphan
+   klausimas — išorinio objekto čia nėra.
+
+Abi sąlygos keičia rašymo kelio FORMĄ, tad įterptos vėliau reikštų perrašymą.
+
 **Ką palieka veikiantį:** external completion veikia `fs` backend'e; sargas
 (`postgresStore.js:989-1007`) **dar lieka**, nes erasure ir backup keliai
 nepadengti (#157 to reikalauja eksplicitiškai).
@@ -479,7 +518,7 @@ neša tapatybę; pasikeičia tik tai, kad ji nebėra objekto vardas. Tai tiesiog
 atitinka A2 ribą „checksum niekada neišvedamas iš object key" — dabar ji galioja
 ir atvirkščiai: object key neišvedamas iš checksum'o.
 
-### ⚠️ ATVIRAS PR-4 SPRENDIMAS: orphan'ai su attempt-unique raktu
+### ✅ PRIIMTAS PR-4 SPRENDIMAS: orphan'ai su attempt-unique raktu
 
 Rakto schemos pakeitimas uždarė duomenų praradimą, bet **atidarė kitą klausimą, ir
 jį reikia priimti eksplicitiškai, ne praslysti pro šalį.**
@@ -521,11 +560,35 @@ Trys variantai PR-4:
 | b | **Patvarus bandymo registras:** `attemptId` įrašomas į DB PRIEŠ `put()` | Orphan tampa matomas DB kryptimi; kaina — vienas `INSERT` prieš kiekvieną rašymą |
 | c | Riba pripažįstama ir fiksuojama | `docs/artefact-lifecycle.md` + follow-up issue; GDPR pusėje silpniausias |
 
-**Rekomendacija: (b).** Ji vienintelė išlaiko A3 („DB kryptis") nepakeistą ir tuo
-pat metu padaro orphan'ą aptinkamu: jei `attemptId` yra registre, bet nėra
-`job_results` nuorodos, objektas turi savininką ir adresą. (a) reikštų tylų A3
-apėjimą — `list(prefix)` grįžtų kitu vardu; (c) paliktų transkripciją saugykloje
-po ištrynimo.
+✅ **SPRENDIMAS: (b) — PATVARUS BANDYMŲ REGISTRAS.**
+
+Ji vienintelė išlaiko A3 („DB kryptis") nepakeistą ir tuo pat metu padaro orphan'ą
+aptinkamu: jei `attemptId` yra registre, bet nėra `job_results` nuorodos, objektas
+turi savininką ir adresą. (a) reikštų tylų A3 apėjimą — `list(prefix)` grįžtų kitu
+vardu; (c) paliktų transkripciją saugykloje po ištrynimo.
+
+⚠️ **KODĖL (b) LAIMĖJO, O NE „ATRODĖ SAUGIAUSIA":** ji vienintelė paverčia A3 ribą iš
+ŽINOMOS SPRAGOS į PILNĄ GARANTIJĄ tam, ką patys parašėme. „Objektas yra, DB nerodo"
+nustoja egzistuoti kaip klasė, ir `list(prefix)` tampa nereikalingas ne dėl
+susitarimo, o dėl konstrukcijos.
+
+**Ribos, kurios yra sprendimo dalis:**
+
+- įrašas atsiranda **PRIEŠ `put()`**, ne po jo — po reikštų tą patį langą, tik
+  siauresnį;
+- registras dengia **visus tris veidus** (lentelė aukščiau): attempt-unique raktus,
+  nutrūkusį cleanup tarp `put()` ir commit'o ir `fs` `.tmp` likučius. Trečiajam tai
+  reiškia, kad laikinas vardas irgi registruojamas arba IŠVEDAMAS iš registruoto
+  bandymo — kitaip lieka ketvirtas veidas;
+- **erasure trina pagal REGISTRĄ, ne pagal `storage_key`**: job'o ištrynimas pašalina
+  visus to job'o bandymų objektus, ne tik laimėjusio;
+- **retencija ≥ eilės prikėlimo horizontai**, IŠVEDAMA iš `revivalHorizonsMs()`, ne
+  surašoma — ta pati taisyklė kaip 7.5a ištrynimo žymoms;
+- kaina: vienas papildomas DB rašymas per job'o užbaigimą.
+
+⚠️ **KO REGISTRAS NEDENGIA:** objektai, atsiradę NE per mūsų rašymo kelią (rankinis
+kopijavimas, atkūrimas į kitą prefiksą), registre neatsiras. Riba užrašyta
+`docs/artefact-lifecycle.md` skyriuje „Ko šis etapas NEAPIMA".
 
 ⚠️ **SPRENDIMAS PRIIMAMAS PR-4 PRADŽIOJE, NE PABAIGOJE.** Jis keičia rašymo kelio
 formą (registras prieš `put()`), tad įterptas vėliau reikštų perrašymą.
@@ -934,13 +997,12 @@ Nė vienas jų neverčiamas į `PASS` dėl to, kad „kodas atrodo teisingai".
 Keturi klausimai iš 1 revizijos atsakyti; čia jie fiksuojami kaip sprendimai su
 viena eilute pagrindimo.
 
-⚠️ **BET VIENAS KLAUSIMAS LIEKA ATVIRAS, IR JIS NAUJAS** (Codex, #289): orphan
-strategija su attempt-unique raktu (PR-4 skyrius „ATVIRAS PR-4 SPRENDIMAS").
-A1–A4 uždaryti, tačiau rakto schemos pakeitimas atidarė klausimą su GDPR
-pasekme — objektas, likęs po kritusio bandymo, išgyvena job'o ištrynimą. Trys
-variantai užrašyti, rekomendacija yra (b), bet **sprendimas nepriimtas**.
+✅ **ORPHAN STRATEGIJOS KLAUSIMAS UŽDARYTAS** (Codex, #289; sprendimas priimtas po
+PR-3 peržiūros): pasirinktas **variantas (b) — patvarus bandymų registras**. Pilna
+formuluotė su ribomis: PR-4 skyrius „PRIIMTAS PR-4 SPRENDIMAS".
 
-Kol jis nepriimtas, PR-4 negali prasidėti: pasirinkimas keičia rašymo kelio formą.
+PR-4 nebeblokuojamas šio klausimo; jo formą (registras PRIEŠ `put()`) sprendimas
+apibrėžia.
 
 ⚠️ **ANTRAS PR-4 REIKALAVIMAS, PAAIŠKĖJĘS PR-2 PERŽIŪROJE** (Codex, #290): inline
 kelyje du bandymai dalijasi `job_id`, tad `ON CONFLICT (job_id) DO UPDATE SET

@@ -157,7 +157,19 @@ async function assertSessionAdmin(actor, operation) {
 async function adminDeleteJob(jobId, actor) {
   await assertSessionAdmin(actor, "delete");
 
-  const job = await jobStore.system.get(jobId);
+  /**
+   * ⚠️ BE HIDRATACIJOS, IR ČIA TAI SVARBIAU NEI SAVININKO KELYJE (#157, PR-3).
+   *
+   * `ADMIN_DELETE_OVERRIDE` egzistuoja BŪTENT sugedusiems ir svetimiems job'ams —
+   * tai paskutinė instancija. Hidratuodama ji lūžtų PIRMA: job'as su sugadintu
+   * artefaktu taptų neištrinamas ABIEM keliais (savininką politika nukreipia į
+   * override, o override krenta ties hidratacija). Tai ne saugumo, o prieinamumo ir
+   * BDAR klausimas — neištrinama transkripcija.
+   *
+   * `deleteJobArtefacts()` ir audito eilutė naudoja METADUOMENIS (`ownerKind`,
+   * `type`, `status`), ne `result`.
+   */
+  const job = await jobStore.system.get(jobId, { hydrate: false });
   if (!job) {
     /**
      * Job'as dingo tarp politikos sprendimo ir šio kvietimo.

@@ -59,6 +59,46 @@ const OPERATION = Object.freeze({
 });
 
 /**
+ * AR OPERACIJAI REIKIA REZULTATO TURINIO? (#157, PR-3)
+ *
+ * ⚠️ SPRENDIMĄ PRIIMA OPERACIJA, NE KVIETĖJAS.
+ *
+ * Vėliava, kurią perduoda maršrutas, veikia tol, kol kas nors nepamiršta jos
+ * perduoti — o tada `DELETE` tyliai grįžta prie hidratacijos. Todėl atsakymas
+ * gyvena greta operacijos apibrėžimo: naujas endpoint'as pasirenka operaciją ir
+ * gauna teisingą elgesį kartu su ja.
+ *
+ * ⚠️ `DELETE` REZULTATO NENAUDOJA, IR TAI NE OPTIMIZACIJA. Po #157 hidratacija
+ * gali eiti į išorinę saugyklą, tad ištrynimas krisdavo ties ja BŪTENT tada, kai
+ * objektas sugadintas — t. y. tuo atveju, kuriam ištrynimo kelias ir reikalingas.
+ * `lifecycleService.deleteJobArtefacts()` skaito job'o metaduomenis, ne `result`.
+ *
+ * `READ` grąžina `job.result` klientui, o `EXPORT` iš jo generuoja failą — abiem
+ * turinys BŪTINAS.
+ */
+const OPERACIJAI_REIKIA_REZULTATO = Object.freeze({
+  [OPERATION.READ]: true,
+  [OPERATION.EXPORT]: true,
+  [OPERATION.DELETE]: false,
+});
+
+/**
+ * @param {string} operation `OPERATION` reikšmė
+ * @returns {boolean}
+ */
+function reikiaRezultato(operation) {
+  if (!(operation in OPERACIJAI_REIKIA_REZULTATO)) {
+    /** Nežinoma operacija — klaida, ne numatytoji reikšmė (fail-closed abiem kryptim). */
+    throw new TypeError(
+      `jobAccessPolicy.reikiaRezultato(): nežinoma operacija "${operation}". ` +
+        `Galimos: ${Object.keys(OPERACIJAI_REIKIA_REZULTATO).join(", ")}.`
+    );
+  }
+
+  return OPERACIJAI_REIKIA_REZULTATO[operation];
+}
+
+/**
  * Ar iškviečiantysis yra SESSION-ADMIN?
  *
  * ⚠️ NEPAKANKA `role === "administrator"`.
@@ -153,6 +193,7 @@ module.exports = {
   ACCESS_INPUT,
   ACCESS_DECISION,
   OPERATION,
+  reikiaRezultato,
   isSessionAdmin,
   decideJobAccess,
 };

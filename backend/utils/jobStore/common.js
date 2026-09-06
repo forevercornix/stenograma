@@ -732,6 +732,26 @@ function kanoninisRezultatas(reiksme) {
   return JSON.stringify(kanonizuoti(reiksme));
 }
 
+/**
+ * METADUOMENŲ PROJEKCIJA — VIENA FORMA VISIEMS BACKEND'AMS (#157, PR-3).
+ *
+ * ⚠️ FORMOS DIVERGENCIJA YRA TYLI: `jobStoreBackendContract` tikrina METODŲ aibę ir
+ * ELGESĮ, bet ne grąžinamą FORMĄ. PostgreSQL `listByFlag()` pradėjus praleisti
+ * `result`, o atminties pusei jį grąžinant, kvietėjas, parašytas prieš vieną
+ * backend'ą, tyliai elgtųsi kitaip prieš kitą — ir niekas nekristų.
+ *
+ * ⚠️ `result` PAŠALINAMAS, O NE NUSTATOMAS Į `null`. `null` reiškia „rezultato NĖRA"
+ * (`rezultatoNera()`), tad tai būtų melas apie job'ą, kurio rezultatas yra; be to
+ * `applyPatch()` sprendžia pagal `"result" in job`, ir `null` reikštų nurodymą jį
+ * IŠTRINTI.
+ */
+function metaduomenuProjekcija(job) {
+  if (!job) return job;
+
+  const { result: _nehidratuota, ...metaduomenys } = job;
+  return metaduomenys;
+}
+
 /** Ar rezultato APSKRITAI nėra? `null` ir `undefined` — ta pati būsena. */
 function rezultatoNera(reiksme) {
   return reiksme === undefined || reiksme === null;
@@ -834,6 +854,7 @@ function isFinished(status) {
 }
 
 module.exports = {
+  metaduomenuProjekcija,
   normalizeSchemaVersion,
   BOOLEAN_FIELDS,
   NUMBER_FIELDS,
