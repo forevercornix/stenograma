@@ -1281,6 +1281,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
 
     /* ═══ 1. PRE-CHECK: be užrakto, be I/O į DB rašymo pusę ═══ */
     const esama = await rezultatoEilute(pool, id);
+    let remontas = false;
 
     if (
       esama &&
@@ -1292,11 +1293,27 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
 
       if (galva && Number(galva.bytes) === Number(esama.bytes)) {
         /** `put()` praleidžiamas; verdiktą vis tiek priims transakcija. */
-        return { checksum: paruosta.checksum, bytes: paruosta.bytes, attemptId: null, nuoroda: null };
+        return {
+          checksum: paruosta.checksum,
+          bytes: paruosta.bytes,
+          attemptId: null,
+          nuoroda: null,
+          remontas: false,
+        };
       }
+
+      /**
+       * ⚠️ ČIA IR TIK ČIA GIMSTA „REMONTAS".
+       *
+       * Persistinta eilutė sutampa metaduomenimis, bet objekto nėra — vadinasi nuoroda
+       * PAKIBUSI, ir naujas bandymas ją privalo pakeisti. Tai vienintelis atvejis, kai
+       * tas pats `checksum` reiškia RAŠYMĄ.
+       */
+      remontas = true;
     }
 
     /* ═══ 2. REGISTRAS PRIEŠ `put()`, tada rašymas ir patikra ═══ */
+
     const attemptId = attemptRegistry.naujasBandymas();
     const raktas = attemptRegistry.bandymoRaktas(id, attemptId);
 
@@ -1326,6 +1343,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       checksum: kvitas.checksum,
       bytes: kvitas.bytes,
       attemptId,
+      remontas,
       nuoroda: {
         storageType: rasymoSaugykla.backend,
         storageKey: kvitas.reference,
@@ -1433,6 +1451,22 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
              * pre-check jau spėjo padaryti su saugykla.
              */
             if (!rasymas.attemptId) return EXTERNAL_HIDRATUOTI;
+
+            /**
+             * ⚠️ TREČIA BŪSENA, KURIOS PIRMOJI REDAKCIJA NEMATĖ: PRALAIMĖTOS LENKTYNĖS.
+             *
+             * Tas pats loginis rezultatas gali reikšti ir tai, kad KITAS vykdytojas
+             * mus aplenkė: pre-check eilutės dar nematė (jos nebuvo), tad parašėme savo
+             * bandymą, o laimėtojas per tą laiką jau įsipareigojo SAVO objektą.
+             *
+             * Perjungti nuorodą čia būtų klaida: laimėtojo objektas geras, o mūsiškis —
+             * perteklinis. Todėl grąžinam idempotentišką sėkmę, o `finally` blokas
+             * pašalina mūsų bandymą. Job'ui lieka LYGIAI VIENAS įsipareigotas įrašas.
+             *
+             * `remontas` ženklą uždeda TIK pre-check, radęs sutampančią eilutę BE
+             * objekto — vienintelį atvejį, kai tas pats checksum reiškia rašymą.
+             */
+            if (!rasymas.remontas) return EXTERNAL_HIDRATUOTI;
 
             await upsertResult(client, id, undefined, rasymas.nuoroda);
             await attemptRegistry.pazymeti(

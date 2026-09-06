@@ -193,6 +193,190 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     assert.ok(await saugykla.head(nauja.storage_key));
   });
 
+  /* ═══ LYGIAGRETUMAS: DVI LENKTYNĖS, NE VIENA ═══ */
+
+  await t.test("DU lygiagretūs `finish()` su TUO PAČIU rezultatu: lieka VIENAS objektas", async () => {
+    /**
+     * ⚠️ ĮDOMESNĖ LENKTYNĖ NEI SKIRTINGI REZULTATAI.
+     *
+     * Skirtingi rezultatai duoda `RESULT_CONFLICT` — akivaizdus atvejis. Tas pats
+     * loginis rezultatas yra ten, kur susikerta pre-check, „pakartojimas vs remontas"
+     * ir cleanup: abu vykdytojai mato TĄ PATĮ checksum, abu jau parašė savo objektą, ir
+     * klausimas tampa — kas nutinka pralaimėjusiojo objektui.
+     *
+     * ⚠️ ŠI LENKTYNĖ RADO TREČIĄ BŪSENĄ. Pirmoji redakcija skyrė tik „pakartojimą" ir
+     * „remontą", tad pralaimėjęs vykdytojas su tuo pačiu checksum PERJUNGDAVO nuorodą į
+     * savo objektą — laimėtojo objektas liktų nereferencuotas, o job'as turėtų DU
+     * įsipareigotus registro įrašus.
+     */
+    const id = await naujasJobas();
+    const rezultatas = { text: "lygiagretus", segments: [1, 2, 3] };
+
+    saugykla.rasymai = 0;
+    saugykla.trynimai = [];
+
+    const [a, b] = await Promise.all([
+      store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
+      store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
+    ]);
+
+    /** Abu grąžina sėkmę: tas pats loginis rezultatas yra idempotentiškas. */
+    for (const atsakymas of [a, b]) {
+      assert.equal(typeof atsakymas, "object", `netikėtas verdiktas: ${JSON.stringify(atsakymas)}`);
+      assert.deepEqual(atsakymas.result, rezultatas);
+    }
+
+    const r = await eilute(id);
+    const bandymai = await attemptRegistry.joboBandymai(pool, id);
+    const isipareigoti = bandymai.filter((x) => x.busena === attemptRegistry.BUSENA.ISIPAREIGOTA);
+
+    /** 1. Laimėtojo objektas išlieka. */
+    assert.ok(await saugykla.head(r.storage_key), "referencuotas objektas privalo egzistuoti");
+
+    /**
+     * 2. Pralaimėjusio cleanup laimėtojo NEPALIEČIA.
+     *
+     * ⚠️ SU ATTEMPT-UNIQUE RAKTU TAI SAUGU PAGAL KONSTRUKCIJĄ — ir būtent todėl verta
+     * tvirtinimo: jei raktas kada nors taps TURINIO adresu, abu bandymai taikysis į tą
+     * patį objektą, ir šis testas kris. Tai tas pats variantas, kuris jau buvo atmestas
+     * (plano „ATMESTAS VARIANTAS: turinio adresas").
+     */
+    assert.ok(
+      !saugykla.trynimai.includes(r.storage_key),
+      `cleanup palietė laimėtojo objektą: ${saugykla.trynimai.join(", ")}`
+    );
+
+    /** 3. Job'ui lieka LYGIAI VIENAS įsipareigotas registro įrašas. */
+    assert.equal(
+      isipareigoti.length,
+      1,
+      `laukta vieno įsipareigoto bandymo, gauta ${isipareigoti.length}: ` +
+        JSON.stringify(bandymai.map((x) => [x.attempt_id, x.busena]))
+    );
+    assert.equal(isipareigoti[0].storage_key, r.storage_key, "nuoroda rodo į įsipareigotą bandymą");
+
+    /** Ir pralaimėjusiojo objekto nebėra — nei saugykloje, nei kaip `pending` eilutės. */
+    for (const bandymas of bandymai.filter((x) => x !== isipareigoti[0])) {
+      assert.equal(bandymas.busena, attemptRegistry.BUSENA.ATMESTA, "pralaimėjęs pažymimas");
+      assert.equal(await saugykla.head(bandymas.storage_key), null, "ir jo objekto nebėra");
+    }
+  });
+
+  await t.test("DU lygiagretūs `finish()` su SKIRTINGAIS rezultatais: vienas laimi, kitas gauna konfliktą", async () => {
+    const id = await naujasJobas();
+
+    const verdiktai = await Promise.all([
+      store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "A" } }),
+      store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "B" } }),
+    ]);
+
+    const laimeti = verdiktai.filter((v) => v && typeof v === "object");
+    const konfliktai = verdiktai.filter((v) => v === "RESULT_CONFLICT");
+
+    assert.equal(laimeti.length, 1, "lygiai vienas vykdytojas laimi");
+    assert.equal(konfliktai.length, 1, "kitas gauna konfliktą, ne tylų perrašymą");
+
+    const r = await eilute(id);
+    assert.deepEqual((await store.get(id)).result, laimeti[0].result, "eilutė rodo laimėtojo rezultatą");
+
+    const bandymai = await attemptRegistry.joboBandymai(pool, id);
+    const isipareigoti = bandymai.filter((x) => x.busena === attemptRegistry.BUSENA.ISIPAREIGOTA);
+
+    assert.equal(isipareigoti.length, 1);
+    assert.equal(isipareigoti[0].storage_key, r.storage_key);
+    assert.ok(await saugykla.head(r.storage_key), "laimėtojo objektas vietoje");
+
+    for (const bandymas of bandymai.filter((x) => x !== isipareigoti[0])) {
+      assert.equal(await saugykla.head(bandymas.storage_key), null, "pralaimėjusio objekto nebėra");
+    }
+  });
+
+  /* ═══ I/O NEVYKSTA PO EILUTĖS UŽRAKTU ═══ */
+
+  await t.test("`put()` vyksta NE po `jobs` eilutės užraktu — elgesio įrodymas", async (t2) => {
+    /**
+     * ⚠️ ŠITO NEGALIMA ĮRODYTI GREP'U (§9.2).
+     *
+     * „Patikrinom, kad `put()` kviečiamas prieš `inTransaction()`" yra teksto, ne
+     * elgesio tvirtinimas: pakanka vieno refaktoringo, ir kvietimas persikelia į vidų,
+     * o testas lieka žalias. Todėl saugyklos dublis rašymo metu bando ANTRA JUNGTIMI
+     * paimti tos pačios `jobs` eilutės užraktą su `FOR UPDATE NOWAIT`.
+     *
+     * Jei `put()` vyktų po užraktu, PostgreSQL grąžintų `55P03` (lock_not_available), ir
+     * testas kristų. Tai elgesio įrodymas su tikra DB, ne prielaida apie kodo tvarką.
+     */
+    const id = await naujasJobas();
+
+    const antraJungtis = new Client({ connectionString: DB_URL });
+    await antraJungtis.connect();
+    t2.after(() => antraJungtis.end().catch(() => {}));
+
+    let uzraktoKlaida = null;
+    let uzraktasGautas = false;
+
+    const stebimaSaugykla = {
+      ...saugykla,
+      async put(raktas, reiksme) {
+        try {
+          await antraJungtis.query("BEGIN");
+          await antraJungtis.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE NOWAIT", [id]);
+          uzraktasGautas = true;
+        } catch (klaida) {
+          uzraktoKlaida = klaida;
+        } finally {
+          await antraJungtis.query("ROLLBACK").catch(() => {});
+        }
+
+        return saugykla.put(raktas, reiksme);
+      },
+    };
+
+    const suStebejimu = createPostgresStore(pool, { rasymoSaugykla: stebimaSaugykla });
+    const job = await suStebejimu.finishAtomic(id, STATUS.COMPLETED, { result: { text: "užraktas" } });
+
+    assert.deepEqual(job.result, { text: "užraktas" }, "rašymas privalo pavykti");
+    assert.equal(
+      uzraktoKlaida && uzraktoKlaida.code,
+      undefined,
+      `rašymo metu eilutė buvo UŽRAKINTA (${uzraktoKlaida && uzraktoKlaida.code}) — I/O vyksta po užraktu`
+    );
+    assert.equal(uzraktasGautas, true, "užraktas privalo būti laisvas `put()` metu");
+  });
+
+  await t.test("KONTROLĖ: tas pats zondas KRENTA, kai eilutė TIKRAI užrakinta", async (t2) => {
+    /**
+     * Be jos ankstesnis testas nieko neįrodytų: jis būtų žalias ir tada, jei
+     * `FOR UPDATE NOWAIT` niekada nemestų (pvz. dėl klaidingos užklausos ar jungties).
+     * Čia užraktas paimamas SĄMONINGAI, ir zondas privalo gauti `55P03`.
+     */
+    const id = await naujasJobas();
+
+    const laikantis = new Client({ connectionString: DB_URL });
+    const zondas = new Client({ connectionString: DB_URL });
+    await laikantis.connect();
+    await zondas.connect();
+    t2.after(async () => {
+      await laikantis.query("ROLLBACK").catch(() => {});
+      await laikantis.end().catch(() => {});
+      await zondas.end().catch(() => {});
+    });
+
+    await laikantis.query("BEGIN");
+    await laikantis.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE", [id]);
+
+    let kodas = null;
+    try {
+      await zondas.query("BEGIN");
+      await zondas.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE NOWAIT", [id]);
+    } catch (klaida) {
+      kodas = klaida.code;
+    } finally {
+      await zondas.query("ROLLBACK").catch(() => {});
+    }
+
+    assert.equal(kodas, "55P03", "zondas privalo mokėti pastebėti užraktą");
+  });
+
   await t.test("KONTROLĖ: be `rasymoSaugykla` rezultatas ir toliau rašomas INLINE", async () => {
     /**
      * Be jos ankstesni tvirtinimai būtų tenkinami ir store'o, kuris VISKĄ rašo
