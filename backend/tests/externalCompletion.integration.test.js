@@ -193,6 +193,63 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     assert.ok(await saugykla.head(nauja.storage_key));
   });
 
+  /* ═══ LYGYBĖS PARITETAS: TAS PATS SĄRAŠAS ABIEM KELIAMS ═══ */
+
+  await t.test("external verdiktai SUTAMPA su inline verdiktais toms pačioms poroms", async () => {
+    /**
+     * ⚠️ TAI PRIELAIDA, ANT KURIOS STOVI VISAS EXTERNAL IDEMPOTENTIŠKUMAS.
+     *
+     * `inline` lygina kanonines eilutes, external — persistintą `checksum`. Tai ta pati
+     * išvestis dviem pavidalais, bet „ta pati" yra TEIGINYS, kol jo niekas nepatikrino.
+     * Jei kada nors išsiskirs, external kelias skelbtų „tas pats rezultatas" ten, kur
+     * inline skelbia konfliktą — arba atvirkščiai, ir teisėtas retry gautų
+     * `RESULT_CONFLICT`.
+     *
+     * Sąrašas bendras (`helpers/rezultatuPoros.js`), tad abu keliai gauna TIKSLIAI tą
+     * pačią įvestį — įrašius jį į vieną testą, antrasis anksčiau ar vėliau gautų savo
+     * variantą, ir paritetas taptų nepatikrinamas.
+     */
+    const { POROS } = require("./helpers/rezultatuPoros");
+    const inlineStore = createPostgresStore(pool);
+
+    for (const pora of POROS) {
+      /* ── external kelias ── */
+      const idExternal = await naujasJobas();
+      await store.finishAtomic(idExternal, STATUS.COMPLETED, { result: pora.pirmas });
+      const pirmaVersija = (await store.get(idExternal, { hydrate: false })).version;
+
+      const externalVerdiktas = await store.finishAtomic(idExternal, STATUS.COMPLETED, {
+        result: pora.antras,
+      });
+
+      /* ── inline kelias, TA PATI pora ── */
+      const idInline = await naujasJobas();
+      await inlineStore.finishAtomic(idInline, STATUS.COMPLETED, { result: pora.pirmas });
+      const inlineVerdiktas = await inlineStore.finishAtomic(idInline, STATUS.COMPLETED, {
+        result: pora.antras,
+      });
+
+      const externalTapatus = typeof externalVerdiktas === "object";
+      const inlineTapatus = typeof inlineVerdiktas === "object";
+
+      assert.equal(
+        externalTapatus,
+        inlineTapatus,
+        `${pora.vardas}: verdiktai IŠSISKYRĖ (external: ${JSON.stringify(externalVerdiktas)}, ` +
+          `inline: ${JSON.stringify(inlineVerdiktas)})`
+      );
+      assert.equal(externalTapatus, pora.tapatus, `${pora.vardas}: verdiktas ne toks, kokio laukta`);
+
+      if (pora.tapatus) {
+        assert.equal(
+          (await store.get(idExternal, { hydrate: false })).version,
+          pirmaVersija,
+          `${pora.vardas}: no-op version NEDIDINA`
+        );
+      }
+    }
+  });
+
   /* ═══ LYGIAGRETUMAS: DVI LENKTYNĖS, NE VIENA ═══ */
 
   await t.test("DU lygiagretūs `finish()` su TUO PAČIU rezultatu: lieka VIENAS objektas", async () => {
