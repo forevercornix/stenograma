@@ -860,6 +860,8 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 | 3 | **Retencija ribojama BŪSENA IR amžiumi:** horizontas iš `revivalHorizonsMs()` yra apatinė riba, bet eilutė, kurios objektas referencuotas **ARBA** kurios job'as turi neišspręstą ištrynimo žymą, pagal amžių nešalinama NIEKADA | variantas (b) + PR-5 pradžios peržiūra |
 | 4 | **Šlavėjas zonduoja ABU vardus** (laikiną ir galutinį); „nė vieno nėra" = sėkmė | #294 uždarymas — žr. skyrių iškart žemiau |
 | 4a | **Šlavėjas neliečia VYKSTANČIO rašymo:** `pending` eilutei horizontas turi atskirą „maksimalios rašymo trukmės" narį, neišvestą iš `revivalHorizonsMs()` | PR-5 peržiūra — determinizmo pasekmė |
+| 4b | **Fail-closed praleidimas MATOMAS:** skaitiklis + `log.warn` suvestinėje, 7.5a precedentu (`retentionSweeper.js:269-274`) | PR-5 peržiūra |
+| 4c | **„Maksimali rašymo trukmė" užrašoma kaip EURISTIKA** su kilme ir galiojimo pabaiga, `MAX_SEGMENTO_BAITAI` šablonu | PR-5 peržiūra |
 | 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
 | 6 | **Store lygmens metodas visoms nuorodoms**, ne `job.resultStorage` laukas | PR-3 peržiūra (žr. „PATAISYTA" žemiau) |
 | 7 | **`reference !== null`** → objektas privalo būti pašalintas ir tai patvirtinta; `reference === null` → eilutės ištrynimas IR YRA ištrynimas | kontraktas, ne PR-5 |
@@ -1013,6 +1015,46 @@ nustotų dengti.
 ⚠️ Priežastis užrašoma, ne tik sprendimas: **determinizmas buvo pridėtas dėl
 atrandamumo, ir jis kartu padarė objektą pažeidžiamą.** Be šito sakinio kitas žmogus,
 matydamas „papildomą narį horizonte", pagrįstai laikys jį pertekliumi.
+
+⚠️ **SĄLYGA 4b: FAIL-CLOSED TURI SAVO PABAIGĄ — ARBA BENT MATOMUMĄ.**
+
+Iš 4a seka, kad egzistuos `pending` eilutės, kurių šlavėjas neliečia NIEKADA:
+
+| Eilutė | Ar kenkia? |
+|---|---|
+| iš atkurto dump'o su melagingai senu `created_at` | **Taip** — objektas gali būti, o šlavėjas jo neliečia PAGAL APIBRĖŽIMĄ, ne dėl klaidos |
+| likusi po proceso, žuvusio PRIEŠ `put()` | Ne — objekto nėra, eilutė yra tik šiukšlė registre |
+
+Tai ta pati forma, kurią 7.5a jau sutiko ištrynimo žymoms: **neišspręstos žymos
+nesensta**. Sprendimas ten buvo ne horizontas, o MATOMUMAS, ir precedentas yra
+`retentionSweeper.js:269-274`:
+
+> FAIL-SAFE nėra klaida - tai sąmoningas atsisakymas spėlioti. Bet jis privalo būti
+> matomas: tyliai praleistas valymas atrodytų kaip valymas.
+
+Šlavėjas privalo turėti tos pačios formos analogą: **skaitiklį „`pending` eilučių,
+praleistų dėl fail-closed", ir `log.warn`, kai jis nenulinis.** Be jo fail-closed yra
+teisingas sprendimas su neapibrėžta pabaiga — o saugyklos augimą kas nors aiškinsis po
+metų. Skaitiklis eina į tą pačią `runRetentionSweep()` suvestinę kaip `jobs`, `audio`,
+`auditEntries`, `tombstones`.
+
+⚠️ **SĄLYGA 4c: „MAKSIMALI RAŠYMO TRUKMĖ" YRA EURISTIKA, IR TAI UŽRAŠOMA IŠ KARTO.**
+
+4a sąmoningai atsieja šį narį nuo `revivalHorizonsMs()`, bet iš to seka kaina: atsiranda
+NAUJA RANKINĖ konstanta. Skirtumas nuo prikėlimo horizontų yra esminis — pastarieji
+IŠVEDAMI iš eilės konfigūracijos, tad pasikeitus eilei riba pasikeičia savaime. Rašymo
+trukmė tokio šaltinio neturi.
+
+Dalinį šaltinį ji vis dėlto turi, ir jis įvardijamas: **`MAX_RESULT_BYTES`**
+(`utils/resultLimits.js:154`, numatyta 20 MiB) kartu su saugyklos užklausos timeout'u
+apibrėžia viršutinę vieno rašymo trukmės ribą geriau nei pasirinktas skaičius. `fs`
+timeout'o neturi; `s3` naudoja SDK numatytuosius, tad tikslaus šaltinio šiandien NĖRA —
+ir būtent todėl konstanta yra euristika, ne išvedimas.
+
+Todėl ji užrašoma tuo pačiu šablonu kaip `MAX_SEGMENTO_BAITAI` (#294): **iš ko kilo, ką
+atmeta ir KADA NUSTOTŲ GALIOTI.** Be to po pusmečio ji bus arba „supaprastinta", arba
+padvigubinta be matavimo — abu be jokio signalo, nes rankinė reikšmė tyliai atsilieka nuo
+tikrovės (ši klasė projekte kartojosi keturis kartus).
 
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
