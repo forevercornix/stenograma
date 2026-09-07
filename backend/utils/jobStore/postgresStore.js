@@ -2284,6 +2284,73 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    * metodų aibės patikrą ir sunaikintų dar apdorojamų job'ų audio — todėl
    * filtro pagal statusą ar vėliavas čia NĖRA.
    */
+  /**
+   * VISOS job'o REZULTATO artefaktų nuorodos — laimėjusi PLIUS registro bandymai.
+   *
+   * ⚠️ KODĖL METODAS, O NE JOB'O LAUKAS (#157, PR-5 įėjimo sąlyga 6).
+   *
+   * Ankstesnė plano redakcija siūlė `job.resultStorage`. Tai buvo klaidinga dviem
+   * atžvilgiais: (1) `memory` ir `redis` tokio lauko neturi ir negali turėti, o
+   * `jobStoreBackendContract` nuo PR-3 lygina grąžinamų laukų AIBĘ — naujas laukas iškart
+   * duotų divergenciją tame pačiame teste, kuris tam ir atsirado; (2) erasure privalo
+   * trinti PAGAL REGISTRĄ, o job'o laukas pateiktų VIENĄ nuorodą — būtent tą, kuri jau
+   * saugi, nes referencuota. Pralaimėjusių bandymų objektai, dėl kurių registras ir
+   * egzistuoja, į job modelį nepatektų iš principo.
+   *
+   * ⚠️ `payload` ČIA NESKAITOMAS. Klausimas yra apie ADRESUS, ne turinį; `rezultatoEilute()`
+   * traukia ir `payload`, tad jos pernaudoti negalima — inline rezultatas gali būti dešimtys
+   * MiB, o PR-3 riba sako, kad metaduomenų kelias turinio netempia.
+   *
+   * ⚠️ REFERENCUOTAS OBJEKTAS GRĄŽINAMAS PASKUTINIS, IR TAI SPRENDIMAS.
+   *
+   * Kvietėjas trina eilės tvarka. Nutrūkus viduryje, referencuotas objektas lieka
+   * paskutinis stovintis, tad `job_results` nuoroda niekada nerodo į jau ištrintą objektą,
+   * kai kiti bandymai dar gyvi. Priešinga tvarka paliktų kabančią nuorodą.
+   *
+   * ⚠️ `busena: null` REIŠKIA „referencuota, bet registro eilutės nėra".
+   *
+   * Tai teisėta būsena: retencija bandymų eilutes valo, o `job_results` nuoroda lieka; be
+   * to eilutės, parašytos prieš registrą, jo neturi. Kvietėjui tai svarbu — objektą vis
+   * tiek reikia pašalinti, tik apie jį registras nieko nebepasako.
+   *
+   * @param {string} jobId
+   * @returns {Promise<Array<{storageType: string, storageKey: string, busena: string|null, referencuotas: boolean}>>}
+   */
+  async function listResultArtifacts(jobId) {
+    const attemptRegistry = require("../attemptRegistry");
+
+    const { rows: rezultatas } = await pool.query(
+      "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1 AND storage_key IS NOT NULL",
+      [String(jobId)]
+    );
+    const bandymai = await attemptRegistry.joboBandymai(pool, jobId);
+
+    const pagalRakta = new Map();
+
+    for (const bandymas of bandymai) {
+      if (!bandymas.storage_key) continue;
+      pagalRakta.set(bandymas.storage_key, {
+        storageType: bandymas.storage_type,
+        storageKey: bandymas.storage_key,
+        busena: bandymas.busena,
+        referencuotas: false,
+      });
+    }
+
+    for (const eilute of rezultatas) {
+      const bandymas = pagalRakta.get(eilute.storage_key);
+      pagalRakta.delete(eilute.storage_key);
+      pagalRakta.set(eilute.storage_key, {
+        storageType: eilute.storage_type,
+        storageKey: eilute.storage_key,
+        busena: bandymas ? bandymas.busena : null,
+        referencuotas: true,
+      });
+    }
+
+    return [...pagalRakta.values()];
+  }
+
   async function listReferencedStorageKeys() {
     const { rows } = await pool.query(
       "SELECT DISTINCT storage_key FROM jobs WHERE storage_key IS NOT NULL"
@@ -2330,6 +2397,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     listAll,
     listByFlag,
     listReferencedStorageKeys,
+    listResultArtifacts,
     close,
     STATUS,
     JOB_TYPES,

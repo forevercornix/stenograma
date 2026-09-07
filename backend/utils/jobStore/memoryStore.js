@@ -203,6 +203,25 @@ async function size() {
  * eilė, GPU trūkumas) buvo palaikomas orphan ir jo failas IŠTRINAMAS dar
  * apdorojant. Čia turi būti VISI jobai.
  */
+/**
+ * VISOS job'o REZULTATO artefaktų nuorodos (#157, PR-5).
+ *
+ * ⚠️ TUŠČIAS SĄRAŠAS ČIA YRA FAKTAS, NE PRIELAIDA.
+ *
+ * ``memory`` rezultatą persistina TIK savo įraše: external rašymo kelio (`rasymoSaugykla`,
+ * bandymų registras) šis backend'as neturi, tad „job'as neturi external artefaktų" yra
+ * konstrukcijos savybė, o ne spėjimas apie duomenis. Skirtumas svarbus: fasadas `null`
+ * traktuoja kaip „nežinau, netrink", o `[]` — kaip „nėra ko trinti", ir pastarasis čia
+ * teisingas.
+ *
+ * ⚠️ JEI KADA NORS ATSIRASTŲ EXTERNAL KELIAS MEMORY BACKEND'E, ŠIS METODAS PRIVALO
+ * PASIKEISTI KARTU. Kontrakto testas tikrina elgesį (po `finish()` su rezultatu sąrašas
+ * lieka tuščias), tad tylus praleidimas pasimatytų.
+ */
+async function listResultArtifacts() {
+  return [];
+}
+
 async function listReferencedStorageKeys() {
   const keys = new Set();
   for (const job of jobs.values()) {
@@ -299,4 +318,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

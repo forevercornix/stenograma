@@ -951,6 +951,20 @@ module.exports = {
         ? store.listReferencedStorageKeys()
         : null;
     },
+    /**
+     * VISOS job'o rezultato artefaktų nuorodos — erasure ir šlavėjui (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU", ne „nėra". Ta pati fail-safe forma kaip
+     * `listReferencedStorageKeys()`: saugykla, kuri metodo neturi, negali leisti
+     * kvietėjui nuspręsti, kad trinti nėra ko. `[]` grąžina tik tie backend'ai, kuriems
+     * tai FAKTAS (inline-only saugojimas), ir jie tą užrašo pas save.
+     */
+    listResultArtifacts: async (jobId) => {
+      await ensureInit();
+      return typeof store.listResultArtifacts === "function"
+        ? store.listResultArtifacts(jobId)
+        : null;
+    },
     listPendingAudioCleanups: async (limit) => {
       await ensureInit();
       return typeof store.listByFlag === "function"

@@ -993,7 +993,7 @@ test("KONTRAKTAS: su nustatytu URL adapteris NEGALI praleisti savo scenarijų", 
   }
 });
 
-test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 18 metodų aibę", () => {
   /**
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
@@ -1009,6 +1009,11 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę",
    * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
    * `docs/deletion-guarantees.md`.
    *
+   * ⚠️ 17 → 18 (#157, PR-5): pridėtas `listResultArtifacts()`. Skaičius keliamas
+   * SĄMONINGAI. Erasure ir šlavėjas nuo šiol klausia REGISTRO, o ne vienos `job_results`
+   * nuorodos; backend'as, praradęs šį metodą, fasade duotų `null`, ir kvietėjas
+   * NIEKO netrintų — saugu, bet tyliai neteisinga, tad sargas krenta iškart.
+   *
    * ⚠️ 16 → 17 (#184, 7.5b): pridėtas `finishAtomic()`. Skaičius keliamas
    * SĄMONINGAI. Fasadas jo NETIKRINA `typeof === "function"` sąlyga: tokia
    * patikra reikštų tylų grįžimą į NEATOMINĮ `get` + `update` kelią, jei kuris
@@ -1023,7 +1028,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę",
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 17, "jobStore kontraktas privalo turėti tiksliai 17 metodų");
+  assert.equal(expected.length, 18, "jobStore kontraktas privalo turėti tiksliai 18 metodų");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,
@@ -1174,6 +1179,30 @@ test("KONTRAKTAS: dokumentacija neteigia, kad memory backend'ui CAS nereikalinga
  * sąrašas pasentų su pirmu nauju lauku, o palyginimas tarp backend'ų gaudo būtent tą
  * klasę, dėl kurios šis testas ir egzistuoja.
  */
+test("KONTRAKTAS: `listResultArtifacts()` inline backend'e grąžina TUŠČIĄ sąrašą — po tikro `finish()`", async () => {
+  /**
+   * ⚠️ TIKRINAMAS ELGESYS, NE KONSTANTA (#157, PR-5).
+   *
+   * `memory` realizacija grąžina `[]`, ir komentaras prie jos teigia, kad tai FAKTAS:
+   * external rašymo kelio šis backend'as neturi. Teiginys tikrinamas per tikrą
+   * užbaigimą su rezultatu — jei kada nors atsirastų external kelias, o metodas liktų
+   * grąžinantis `[]`, šis testas ir toliau būtų žalias TIK tol, kol rezultatas
+   * persistinamas įraše.
+   *
+   * ⚠️ KO ŠIS TESTAS NEĮRODO: PostgreSQL pusės. Ten sąrašas turi turėti registro
+   * bandymus, ir tai tikrinama PR-5 integraciniame teste su tikra DB — čia įrodoma tik
+   * inline backend'o pusė ir `null` vs `[]` skirtumas.
+   */
+  const job = await memoryStore.create({ ownerKind: "unowned", type: JOB_TYPES.TRANSCRIPTION });
+  await memoryStore.update(job.id, { status: "processing", phase: PHASE.TRANSCRIBING });
+  await memoryStore.finishAtomic(job.id, "completed", { result: { text: "inline" } });
+
+  const artefaktai = await memoryStore.listResultArtifacts(job.id);
+
+  assert.deepEqual(artefaktai, [], "inline rezultatas external artefaktų nepalieka");
+  assert.notEqual(artefaktai, null, '`null` reikstu "nezinau" - o cia zinoma');
+});
+
 test("KONTRAKTAS: `listByFlag()` grąžina TĄ PAČIĄ laukų aibę visuose backend'uose", async (t) => {
   const formos = new Map();
 

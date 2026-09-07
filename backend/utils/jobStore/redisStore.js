@@ -712,6 +712,25 @@ function createRedisStore(redisClient) {
     return hydrate ? visi : visi.map(metaduomenuProjekcija);
   }
 
+  /**
+   * VISOS job'o REZULTATO artefaktų nuorodos (#157, PR-5).
+   *
+   * ⚠️ TUŠČIAS SĄRAŠAS ČIA YRA FAKTAS, NE PRIELAIDA.
+   *
+   * ``redis`` rezultatą persistina TIK savo įraše: external rašymo kelio (`rasymoSaugykla`,
+   * bandymų registras) šis backend'as neturi, tad „job'as neturi external artefaktų" yra
+   * konstrukcijos savybė, o ne spėjimas apie duomenis. Skirtumas svarbus: fasadas `null`
+   * traktuoja kaip „nežinau, netrink", o `[]` — kaip „nėra ko trinti", ir pastarasis čia
+   * teisingas.
+   *
+   * ⚠️ JEI KADA NORS ATSIRASTŲ EXTERNAL KELIAS REDIS BACKEND'E, ŠIS METODAS PRIVALO
+   * PASIKEISTI KARTU. Kontrakto testas tikrina elgesį (po `finish()` su rezultatu sąrašas
+   * lieka tuščias), tad tylus praleidimas pasimatytų.
+   */
+  async function listResultArtifacts() {
+    return [];
+  }
+
   async function listReferencedStorageKeys() {
     const jobs = await _scanJobs();
     const keys = new Set();
@@ -783,7 +802,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };
