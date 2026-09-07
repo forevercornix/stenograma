@@ -81,3 +81,89 @@ po remonto, CI `34083939521`).
 
 ⚠️ Ankstesnė šio testo redakcija ieškojo žodžio šaltinio TEKSTE ir būtų praėjusi: žodis
 lieka komentare (§9.2).
+
+## M5 — pralaimėtų lenktynių šaka pašalinta (CI `34124044419`)
+
+```diff
+-            if (!remontasTebegalioja) return EXTERNAL_HIDRATUOTI;
+-
+             await upsertResult(client, id, undefined, rasymas.nuoroda);
+```
+
+**Krenta:** „DU lygiagretūs `finish()` su TUO PAČIU rezultatu: lieka VIENAS objektas".
+Tvirtinimas — „ir jo objekto nebėra": pralaimėjusysis perjungia nuorodą į savo objektą,
+laimėtojo bandymas nuvertinamas, o jo objektas lieka saugykloje (`{ bytes: 41, exists: true }`).
+
+Ši mutacija atsako į klausimą, ar barjerinis testas apskritai JAUTRUS elgesiui. Atsakymas —
+taip.
+
+## M5b — ta pati mutacija, BET barjeras neutralizuotas (CI `34124049309`)
+
+```diff
+           barjeras.laukiantys += 1;
+-          if (barjeras.laukiantys >= 2) barjeras.atrakinti();
+-          await barjeras.zadejimas;
++          barjeras.atrakinti();
+```
+
+**Prognozė buvo: testas lieka ŽALIAS.** Samprotavimas: be sinchronizacijos antrasis
+`finish()` pre-check metu pamatytų jau įsipareigotą eilutę su esančiu objektu, grįžtų
+pakartojimo keliu ir mutuotos šakos NEPASIEKTŲ.
+
+**Išmatuota: testas KRENTA — tuo pačiu tvirtinimu ir ta pačia reikšme kaip M5.**
+
+⚠️ **Tai radinys, ne patvirtinimas.** Barjeras NĖRA tai, kas šiam testui suteikia
+jautrumą M5 mutacijai: `Promise.all` sukurtas persidengimas šioje aplinkoje įvyksta ir
+be jo. Ką barjeras duoda — DETERMINIZMĄ: be jo aptikimas priklauso nuo planuoklio, o
+vienas žalias arba raudonas paleidimas apie tai nieko neįrodo (§14.1). Todėl barjeras
+paliekamas, bet teiginys apie jį susiaurinamas: jis šalina priklausomybę nuo sėkmės, o
+ne sukuria patį lenktynių langą.
+
+## M6 — registro eilutė rašoma PO `put()` (CI `34124053562`)
+
+```diff
+-    await attemptRegistry.registruoti(pool, {
+-      attemptId,
+-      jobId: id,
+-      storageType: rasymoSaugykla.backend,
+-      storageKey: raktas,
+-    });
+-
+     const kvitas = await rasymoSaugykla.put(raktas, paruosta);
++
++    await attemptRegistry.registruoti(pool, {
++      attemptId,
++      jobId: id,
++      storageType: rasymoSaugykla.backend,
++      storageKey: raktas,
++    });
+```
+
+**Krenta:** „registro eilutė egzistuoja JAU TADA, kai prasideda `put()`" —
+`expected: 'pending'`, `actual: null`.
+
+⚠️ Būtent tokia mutacija liktų nepastebėta `attemptRegistry` VIENETINIAM testui: jis
+`finishAtomic()` niekada nekviečia. Tvarka tikrinama per produkcinį kelią.
+
+## M7 — `UnrecoverableError` vyniojimas pašalintas (CI `34124586230`)
+
+```diff
+-          let completedJob;
+-          try {
+-            completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+-          } catch (klaida) {
+-            if (!klaida || klaida.neatkartojama !== true) throw klaida;
+-
+-            const { UnrecoverableError } = require("bullmq");
+-            const fatal = new UnrecoverableError(klaida.message);
+-            fatal.cause = klaida;
+-            throw fatal;
+-          }
++          const completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+```
+
+**Krenta:** „#157 WORKER: struktūrinis atmetimas → failed po VIENO vykdymo, be
+pakartojimų" (redis rinkinys, vykdomas CI).
+
+⚠️ Tai D radinio taisymo įrodymas: be vyniojimo `neatkartojama` ženklas lieka, bet
+grandinė nenutrūksta — testas matuoja PAKARTOJIMŲ SKAIČIŲ, ne lauko buvimą.

@@ -489,10 +489,19 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     /**
      * ⚠️ `Promise.all()` NEGARANTUOJA LENKTYNIŲ (Codex, #294).
      *
-     * Be sinchronizacijos abu bandymai gali įvykti NUOSEKLIAI — pirmas spėja
+     * Be sinchronizacijos abu bandymai GALI įvykti nuosekliai — pirmas spėtų
      * įsipareigoti anksčiau, nei antras pasiekia pre-check — ir testas praeitų su
      * visomis asercijomis, nieko neišbandęs. Barjeras ties saugyklos riba sulaiko abu,
      * kol JIEDU paruošė savo objektus; tik tada leidžiama eiti į transakciją.
+     *
+     * ⚠️ BARJERAS DUODA DETERMINIZMĄ, NE PATĮ LENKTYNIŲ LANGĄ — IŠMATUOTA (M5b,
+     * CI `34124049309`).
+     *
+     * Ta pati produkcinė mutacija buvo pagauta ir su NEUTRALIZUOTU barjeru: šioje
+     * aplinkoje `Promise.all` persidengimas įvyksta ir be jo. Vadinasi teiginys
+     * „be barjero testas nieko neišbando" yra per stiprus. Barjeras lieka, nes be jo
+     * aptikimas priklauso nuo planuoklio, o vienas paleidimas apie tai nieko neįrodo
+     * (§14.1) — bet jo nuopelnas yra pastovumas, ne jautrumas.
      */
     const barjeras = { laukiantys: 0, atrakinti: null };
     barjeras.zadejimas = new Promise((r) => {
