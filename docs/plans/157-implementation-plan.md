@@ -844,6 +844,27 @@ verdiktas lieka „nepaneigta", ne „įrodyta"; įvardijama PR aprašyme.
 **Ką palieka veikiantį:** ištrynimas šalina ir external objektą; registras
 nebemeluoja apie saugojimo vietą.
 
+⚠️ **ĮĖJIMO SĄLYGA: ŠLAVĖJAS PRIVALO BANDYTI ABU VARDUS** (#294 uždarymas).
+
+PR-4 eksportavo `laikinasVardas(raktas)` (`utils/artifactStore/fsStore.js`) būtent tam,
+kad šlavėjas laikino failo vardą apskaičiuotų iš registro `storage_key`. Bet **iš
+`pending` eilutės neįmanoma pasakyti, kurioje `rename` pusėje procesas nutrūko**:
+
+| Kada nutrūko | Kas saugykloje egzistuoja |
+|---|---|
+| prieš `rename` | **tik** `laikinasVardas(storage_key)` |
+| po `rename`, prieš commit'ą | **tik** `storage_key` |
+| po cleanup arba jam nespėjus prasidėti | nė vieno |
+
+Vadinasi šlavėjas tikrina ABU adresus, o „nė vieno nėra" yra **sėkmė**, ne gedimas:
+eilutė tada tiesiog uždaroma. Vieno adreso tikrinimas praleistų pusę atvejų, o testas su
+vienu scenarijumi liktų žalias — todėl PR-5 testai privalo dengti abi puses atskirai.
+
+⚠️ Tai galioja `fs` saugyklai. `s3` laikino objekto neturi (`put` yra vienas
+`PutObject`), tad ten klausimas neegzistuoja — bet šlavėjas privalo tai spręsti pagal
+eilutės `storage_type`, ne prielaida, ta pačia taisykle kaip visi kiti per-row
+sprendimai šiame skyriuje.
+
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
 - `backend/services/lifecycleService.js` — `STORED_IN_JOB_RECORD` šaka (`:129`, `:404-405`)

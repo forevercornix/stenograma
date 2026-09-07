@@ -250,6 +250,11 @@ function createFsArtifactStore({ root } = {}) {
          * turėti mažesnę ribą, ir tada raktas, kurį kontraktas priima, čia vis tiek
          * neįmanomas. Kvietėjui tai privalo atrodyti kaip rakto atmetimas, o ne
          * kaip svetimo tipo I/O klaida.
+         *
+         * ⚠️ TAI NEBĖRA PRIELAIDA: PR-4 `.tmp` matavimo metu vienoje aplinkoje
+         * efektyvus limitas pasirodė 254 baitai, tad ši šaka yra pasiekiama, o ne
+         * teorinė. Konstanta atmeta tai, kas neįmanoma VISUR; ši šaka — tai, kas
+         * neįmanoma ČIA.
          */
         if (klaida.code === "ENAMETOOLONG") {
           throw new ArtifactStoreError(

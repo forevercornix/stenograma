@@ -113,6 +113,19 @@ const MAX_RAKTO_ILGIS = 512;
  * simboliais matuojanti riba 255 „simbolių" segmentą paverstų 400+ baitų vardu.
  * (Šiandien allowlist'as daugiabaičių simbolių neleidžia, bet riba neturi
  * priklausyti nuo kito sargo formos.)
+ *
+ * ⚠️ 255 YRA EURISTIKA, NE KONTRAKTAS — IŠMATUOTA (#294).
+ *
+ * Skaičius paimtas iš POSIX `NAME_MAX`, kurį ext4, XFS ir APFS tenkina. Bet realios
+ * failų sistemos gali būti GRIEŽTESNĖS: `.tmp` vardo matavimo metu (PR-4) vienoje
+ * aplinkoje efektyvus limitas pasirodė 254 baitai, tad riba priima segmentą, kurio ta
+ * sistema įrašyti negali.
+ *
+ * Iš to seka, kad `fsStore` `ENAMETOOLONG` -> `ARTIFACT_KEY_INVALID` atvaizdavimas
+ * (#290) NĖRA atsarginis kelias „jei kada nors" — tai antra gynybos linija, kurios
+ * prireikia. Konstanta atmeta tai, kas neįmanoma VISUR; implementacija atmeta tai, kas
+ * neįmanoma ČIA. Griežtinti konstantos iki mažiausio žinomo limito neverta: tai
+ * susiaurintų teisėtus raktus visose normaliose sistemose dėl vienos nenormalios.
  */
 const MAX_SEGMENTO_BAITAI = 255;
 
