@@ -193,6 +193,42 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     assert.ok(await saugykla.head(nauja.storage_key));
   });
 
+  await t.test("kvitas ir įrašytas turinys sutampa net su NESTABILIA reikšme", async () => {
+    /**
+     * ⚠️ TAS PATS PER PRODUKCINĮ KELIĄ, NE PER `put()` (Codex, #294).
+     *
+     * Bendras kontraktas tikrina `put()`; čia tikrinama visa `finishAtomic()` grandinė:
+     * kvitas skaičiuojamas VIENĄ kartą, ir būtent ta reprezentacija patenka į saugyklą.
+     * Reikšmė svyruoja po ribos skaitymų — jei kelias ją kanonizuotų antrą kartą,
+     * `checksum` kolonoje ir objekte gultų SKIRTINGI duomenys.
+     */
+    const id = await naujasJobas();
+
+    let kvietimai = 0;
+    const nestabili = {
+      get text() {
+        kvietimai += 1;
+        return kvietimai <= 3 ? "pirma" : "antra";
+      },
+    };
+
+    const job = await store.finishAtomic(id, STATUS.COMPLETED, { result: nestabili });
+
+    assert.deepEqual(job.result, { text: "pirma" }, "grąžinamas tas turinys, kurį matė riba");
+
+    const r = await eilute(id);
+    const objektas = await saugykla.read(r.storage_key);
+    const crypto2 = require("node:crypto");
+    const { kanoninisRezultatas } = require("../utils/jobStore/common");
+
+    assert.equal(
+      crypto2.createHash("sha256").update(kanoninisRezultatas(objektas), "utf8").digest("hex"),
+      r.checksum,
+      "`checksum` kolona privalo aprašyti TAI, kas guli saugykloje"
+    );
+    assert.equal(Number(r.bytes), Buffer.byteLength(kanoninisRezultatas(objektas), "utf8"));
+  });
+
   /* ═══ LYGYBĖS PARITETAS: TAS PATS SĄRAŠAS ABIEM KELIAMS ═══ */
 
   await t.test("external verdiktai SUTAMPA su inline verdiktais toms pačioms poroms", async () => {

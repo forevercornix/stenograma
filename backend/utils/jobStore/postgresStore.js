@@ -1324,7 +1324,17 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       storageKey: raktas,
     });
 
-    const kvitas = await rasymoSaugykla.put(raktas, extra.result);
+    /**
+     * ⚠️ PADUODAMA PARUOŠTA REPREZENTACIJA, NE ŽALIA REIKŠMĖ (Codex, #294).
+     *
+     * `paruosta` jau turi kanoninę eilutę, baitus ir sumą. Perduodant `extra.result`,
+     * riba kanonizuotų TĄ PATĮ (galimai kintantį) objektą dar kartą: getter'is, proxy
+     * ar mutacija tarp dviejų perėjimų reikštų, kad kvitas aprašo A, o saugykla laiko B.
+     *
+     * PR-2 tą pačią klasę uždarė `inlineStore` VIDUJE; čia ji buvo atsivėrusi sluoksniu
+     * aukščiau, ir tai rodo, kad anas taisymas buvo lokalus, ne kontraktinis.
+     */
+    const kvitas = await rasymoSaugykla.put(raktas, paruosta);
 
     /**
      * ⚠️ `head()` PO RAŠYMO — sėkmė be patvirtinimo yra prielaida. Nesutapęs dydis

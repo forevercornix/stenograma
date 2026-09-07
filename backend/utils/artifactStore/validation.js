@@ -373,6 +373,28 @@ function patikrintiSriti(reiksme) {
 }
 
 /**
+ * ⚠️ ŽENKLAS, KAD REIKŠMĖ JAU PARUOŠTA (Codex, #294).
+ *
+ * `put()` gali gauti arba ŽALIĄ reikšmę, arba ribos jau paruoštą reprezentaciją.
+ * Skirti juos pagal laukų buvimą būtų spėjimas: `{ kanonine, buferis }` yra visiškai
+ * teisėtas transkripcijos rezultatas. Simbolis to dviprasmiškumo neturi.
+ */
+const PARUOSTA = Symbol.for("stenograma.artifactStore.paruosta");
+
+/**
+ * Ar tai jau ribos paruošta reprezentacija?
+ *
+ * ⚠️ KODĖL TO REIKIA: kvitą ir įrašomus baitus privalo gaminti TA PATI serializacija.
+ * PR-2 tai buvo ištaisyta `inlineStore` VIDUJE, bet klasė liko atvira sluoksniu
+ * aukščiau — completion kelias skaičiavo kvitą, o `put()` kanonizavo tą patį (galimai
+ * kintantį) objektą DAR KARTĄ. Getter'is, proxy ar mutacija tarp dviejų perėjimų
+ * reiškia, kad kvitas aprašo A, o saugykla laiko B.
+ */
+function arParuosta(reiksme) {
+  return Boolean(reiksme) && typeof reiksme === "object" && reiksme[PARUOSTA] === true;
+}
+
+/**
  * KODAVIMAS: reikšmė -> kanoniniai baitai + metaduomenys.
  *
  * ⚠️ `bytes` IR `checksum` SKAIČIUOJAMI IŠ TŲ PAČIŲ BAITŲ, KURIE PERSISTINAMI.
@@ -380,10 +402,20 @@ function patikrintiSriti(reiksme) {
  * įrašymo liktų langas, kuriame reikšmė spėja pasikeisti.
  */
 function paruostiReiksme(reiksme) {
+  /**
+   * ⚠️ IDEMPOTENTIŠKA: jau paruoštą reprezentaciją grąžina nepakeistą.
+   *
+   * Be to kiekvienas kvietėjas turėtų ATSIMINTI, ar reikšmė jau paruošta — o tokia
+   * atmintis gyvena tol, kol ateina kitas žmogus. Su šia šaka `put()` gali priimti
+   * abi formas, o rezultatas visada aprašo TUOS PAČIUS baitus.
+   */
+  if (arParuosta(reiksme)) return reiksme;
+
   const kanonine = patikrintiSriti(reiksme);
   const buferis = Buffer.from(kanonine, "utf8");
 
   return {
+    [PARUOSTA]: true,
     kanonine,
     buferis,
     bytes: buferis.byteLength,
@@ -560,6 +592,8 @@ module.exports = {
   MAX_SEGMENTO_BAITAI,
   patikrintiRakta,
   patikrintiSriti,
+  PARUOSTA,
+  arParuosta,
   paruostiReiksme,
   atkurtiReiksme,
   patikrintiPersistuotaReiksme,
