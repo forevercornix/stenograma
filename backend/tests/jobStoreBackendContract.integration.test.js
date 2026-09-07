@@ -993,8 +993,16 @@ test("KONTRAKTAS: su nustatytu URL adapteris NEGALI praleisti savo scenarijų", 
   }
 });
 
-test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 19 metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", () => {
   /**
+   * ⚠️ SKAIČIUS IŠ PAVADINIMO PAŠALINTAS (#157, PR-5).
+   *
+   * Testo vardas yra jo TAPATYBĖ ištrintų testų sargui (#237), tad kiekvienas
+   * kontrakto praplėtimas versdavo vardą keistis — ir sargas tai matydavo kaip
+   * PAŠALINTĄ testą, reikalaujantį override. Taip įvyko keliant 18 → 19
+   * (CI `34144363714`). Skaičius gyvena tvirtinime žemiau, kur jam ir vieta:
+   * tikrinamas jis vienodai, o tapatybė nustoja svyruoti kartu su kontraktu.
+   *
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
    * ilgai nebuvo memory backend'e.
