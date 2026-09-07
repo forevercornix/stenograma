@@ -315,11 +315,47 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     /** Ir nė vienas nereferencuotas objektas neliko saugykloje. */
     for (const bandymas of bandymai.filter((x) => x.storage_key !== nauja.storage_key)) {
       assert.equal(
+        bandymas.busena,
+        attemptRegistry.BUSENA.ATMESTA,
+        `nereferencuotas bandymas privalo būti \`abandoned\`: ${bandymas.storage_key}`
+      );
+      assert.equal(
         await saugykla.head(bandymas.storage_key),
         null,
         `nereferencuotas objektas liko: ${bandymas.storage_key} (${bandymas.busena})`
       );
     }
+  });
+
+  await t.test("po REMONTO senasis bandymas nustoja būti `committed`", async () => {
+    /**
+     * ⚠️ INVARIANTAS: JOB'AS TURI DAUGIAUSIA VIENĄ ĮSIPAREIGOTĄ BANDYMĄ (išmatuota
+     * CI 34083939521).
+     *
+     * Pirmoji redakcija po remonto palikdavo DU `committed` įrašus: senąjį (kurio
+     * objekto nebėra) ir naująjį. Registras tada teigtų, kad naudojami DU objektai, o
+     * šlavėjas (PR-5) senojo niekada neliestų — jis atrodytų reikalingas. Tai tas pats
+     * „registras rašo, bet meluoja" atvejis, tik kita kryptimi.
+     */
+    const id = await naujasJobas();
+    const rezultatas = { text: "remonto istorija" };
+
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas });
+    const sena = await eilute(id);
+    await fs.delete(sena.storage_key);
+
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas });
+
+    const bandymai = await attemptRegistry.joboBandymai(pool, id);
+    const isipareigoti = bandymai.filter((x) => x.busena === attemptRegistry.BUSENA.ISIPAREIGOTA);
+
+    assert.equal(bandymai.length, 2, "abu bandymai lieka registre — jis yra istorija, ne būsena");
+    assert.equal(isipareigoti.length, 1, "bet įsipareigotas gali būti tik VIENAS");
+    assert.equal(
+      bandymai.find((x) => x.storage_key === sena.storage_key).busena,
+      attemptRegistry.BUSENA.ATMESTA,
+      "senasis privalo tapti `abandoned`, kad šlavėjas jį matytų"
+    );
   });
 
   await t.test("pre-check klausia PERSISTINTO backend'o, ne aktyvaus", async () => {

@@ -1516,11 +1516,13 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
             if (!remontasTebegalioja) return EXTERNAL_HIDRATUOTI;
 
             await upsertResult(client, id, undefined, rasymas.nuoroda);
-            await attemptRegistry.pazymeti(
-              client,
-              rasymas.attemptId,
-              attemptRegistry.BUSENA.ISIPAREIGOTA
-            );
+
+            /**
+             * ⚠️ REMONTO METU SENASIS BANDYMAS TAMPA `abandoned`. Palikus jį
+             * `committed`, registras teigtų, kad naudojami DU objektai, ir šlavėjas
+             * (PR-5) senojo — jau dingusio — niekada neliestų.
+             */
+            await attemptRegistry.isipareigoti(client, { jobId: id, attemptId: rasymas.attemptId });
 
             isipareigota = true;
             return EXTERNAL_HIDRATUOTI;
@@ -1568,7 +1570,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
        * NAUDOJAMĄ objektą.
        */
       if (rasymas && rasymas.attemptId) {
-        await attemptRegistry.pazymeti(client, rasymas.attemptId, attemptRegistry.BUSENA.ISIPAREIGOTA);
+        await attemptRegistry.isipareigoti(client, { jobId: id, attemptId: rasymas.attemptId });
       }
 
       isipareigota = true;

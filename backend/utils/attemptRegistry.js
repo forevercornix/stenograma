@@ -88,6 +88,31 @@ async function pazymeti(vykdytojas, attemptId, busena) {
   return rowCount > 0;
 }
 
+/**
+ * ĮSIPAREIGOJIMAS: šis bandymas tampa `committed`, visi ANKSTESNI — `abandoned`.
+ *
+ * ⚠️ INVARIANTAS: JOB'AS TURI DAUGIAUSIA VIENĄ ĮSIPAREIGOTĄ BANDYMĄ (išmatuota
+ * CI 34083939521).
+ *
+ * Pirmoji redakcija tik pažymėdavo naująjį. Po REMONTO registre likdavo DU
+ * `committed` įrašai: senasis (kurio objekto nebėra) ir naujasis. Registras tada
+ * teigtų, kad naudojami DU objektai, o šlavėjas (PR-5) senojo niekada neliestų — jis
+ * atrodytų reikalingas.
+ *
+ * Perėjimas daromas VIENU sakiniu ir TOJE PAČIOJE transakcijoje kaip nuorodos
+ * įrašymas: kitaip liktų momentas, kai įsipareigotų yra du arba nė vieno.
+ */
+async function isipareigoti(vykdytojas, { jobId, attemptId }) {
+  await vykdytojas.query(
+    `UPDATE job_result_attempts
+        SET busena = CASE WHEN attempt_id = $2 THEN $3 ELSE $4 END,
+            updated_at = now()
+      WHERE job_id = $1
+        AND (attempt_id = $2 OR busena = $3)`,
+    [String(jobId), attemptId, BUSENA.ISIPAREIGOTA, BUSENA.ATMESTA]
+  );
+}
+
 /** Visi job'o bandymai — erasure kelias (PR-5) trina PAGAL REGISTRĄ, ne pagal nuorodą. */
 async function joboBandymai(vykdytojas, jobId) {
   const { rows } = await vykdytojas.query(
@@ -99,4 +124,12 @@ async function joboBandymai(vykdytojas, jobId) {
   return rows;
 }
 
-module.exports = { BUSENA, bandymoRaktas, naujasBandymas, registruoti, pazymeti, joboBandymai };
+module.exports = {
+  BUSENA,
+  bandymoRaktas,
+  naujasBandymas,
+  registruoti,
+  pazymeti,
+  isipareigoti,
+  joboBandymai,
+};
