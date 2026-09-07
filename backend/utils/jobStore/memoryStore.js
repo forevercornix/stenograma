@@ -222,6 +222,18 @@ async function listResultArtifacts() {
   return [];
 }
 
+/**
+ * Rezultato artefaktų šalinimas — `memory` backend'e nėra ko šalinti (#157, PR-5).
+ *
+ * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: external rašymo kelio šis backend'as
+ * neturi, tad tuščias rezultatas yra konstrukcijos savybė. Metodas egzistuoja, kad
+ * erasure kelias neturėtų `typeof === "function"` šakos: tokia šaka reikštų tylų
+ * praleidimą ten, kur praleidimas yra BDAR klausimas.
+ */
+async function deleteResultArtifacts() {
+  return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+}
+
 async function listReferencedStorageKeys() {
   const keys = new Set();
   for (const job of jobs.values()) {
@@ -318,4 +330,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

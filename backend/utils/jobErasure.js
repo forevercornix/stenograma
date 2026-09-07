@@ -51,7 +51,15 @@ const jobRunner = require("../queues/jobRunner");
  *   numatytoji yra fasadas, tad esamiems kvietėjams elgesys nesikeičia
  * @returns {object} outcome su `criticalFailure` vėliava
  */
-const BUTINI_SYSTEM_METODAI = Object.freeze(["get", "update", "remove"]);
+/**
+ * ⚠️ `deleteResultArtifacts` ĮTRAUKTAS Į BŪTINŲ AIBĘ (#157, PR-5).
+ *
+ * Be jo nukreipta saugykla praeitų patikrą ir kristų VIDURYJE — po eilės ir audio
+ * šalinimo, su `TypeError` vietoj aiškaus atmetimo. Šio sargo pažadas yra būtent
+ * priešingas: nepilna saugykla atmetama PRIEŠ pirmą šalinimą, kad nebūtų pusiau
+ * atlikto ištrynimo su neaiškia priežastimi.
+ */
+const BUTINI_SYSTEM_METODAI = Object.freeze(["get", "update", "remove", "deleteResultArtifacts"]);
 
 function patikrintiSaugykla(store) {
   if (store === jobStore) return store;
@@ -94,6 +102,9 @@ async function eraseJob(job, { store = jobStore } = {}) {
     storageRemoved: false,
     /** Bandyta šalinti, bet objekto NEBUVO — ne tas pat, kas „liko". */
     storageAlreadyAbsent: false,
+    /** REZULTATO artefaktai (#157, PR-5): visi job'o bandymai, ne tik referencuotas. */
+    resultArtifactsRemoved: 0,
+    resultArtifactsAlreadyAbsent: 0,
     auditEntriesRemoved: 0,
     errors: [],
     criticalFailure: false,
@@ -157,6 +168,42 @@ async function eraseJob(job, { store = jobStore } = {}) {
       outcome.errors.push(`storage: ${e.message}`);
       outcome.criticalFailure = true;
     }
+  }
+
+  /**
+   * 2b) REZULTATO ARTEFAKTAI — PER REGISTRĄ, NE PER VIENĄ NUORODĄ (#157, PR-5).
+   *
+   * ⚠️ ŠALINAMI VISI JOB'O BANDYMAI, NE TIK LAIMĖJĘS. `job_results.storage_key` rodo į
+   * vieną — tą, kuris ir taip saugus, nes referencuotas. Pralaimėję ir remontuoti
+   * bandymai paliko savo objektus attempt-unique adresais, ir būtent dėl jų bandymų
+   * registras egzistuoja: be jo tie objektai yra transkripcijos be jokios rodyklės.
+   *
+   * ⚠️ PRIEŠ JOB'O EILUTĖS ŠALINIMĄ, IR TVARKA YRA GARANTIJOS DALIS. `job_results` turi
+   * `ON DELETE CASCADE` nuo `jobs`; pašalinus eilutę pirma, adresai dingtų, o
+   * pakartojimas (`deletionRetry`) nebeturėtų ko trinti.
+   *
+   * ⚠️ `null` YRA KRITINĖ NESĖKMĖ, NE NO-OP. Fasadas jį grąžina, kai saugykla metodo
+   * neturi — o „ištrinta" be objekto pašalinimo yra tiksliai tas melas, kurį #157 riba
+   * draudžia. Tyli šaka čia reikštų BDAR teiginį be padengimo.
+   */
+  try {
+    const artefaktai = await saugykla.system.deleteResultArtifacts(jobId);
+
+    if (artefaktai === null) {
+      outcome.errors.push("result artifacts: saugykla nepalaiko deleteResultArtifacts()");
+      outcome.criticalFailure = true;
+    } else {
+      outcome.resultArtifactsRemoved = artefaktai.pasalinti.length;
+      outcome.resultArtifactsAlreadyAbsent = artefaktai.jauNebuvo.length;
+
+      for (const nesekme of artefaktai.nepavyko) {
+        outcome.errors.push(`result artifact ${nesekme.storageKey}: ${nesekme.priezastis}`);
+        outcome.criticalFailure = true;
+      }
+    }
+  } catch (e) {
+    outcome.errors.push(`result artifacts: ${e.message}`);
+    outcome.criticalFailure = true;
   }
 
   // 3) Audito įrašai. KRITINIAI: pseudonimizuoti duomenys pagal BDAR vis tiek
@@ -240,6 +287,12 @@ async function writeDeletionReceipt(outcome) {
       `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
       `storage=${outcome.storageRemoved ? "deleted" : outcome.storageAlreadyAbsent ? "absent" : "none"} ` +
       `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
+      /**
+       * ⚠️ REZULTATO ARTEFAKTAI KVITE ATSKIRAI (#157, PR-5). `storage=` kalba apie
+       * ŠALTINIO AUDIO; sujungus abu, kvitas nebepasakytų, kuris artefaktas pašalintas,
+       * o po #157 jų yra du skirtingi tipai skirtingose vietose.
+       */
+      `results=${outcome.resultArtifactsRemoved}/${outcome.resultArtifactsAlreadyAbsent} ` +
       `audit=${outcome.auditEntriesRemoved}`,
   });
 }

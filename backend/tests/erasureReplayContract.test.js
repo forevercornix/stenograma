@@ -345,6 +345,8 @@ function saugyklaSuAibe(irasai) {
         return irasai.get(id) || null;
       },
       remove: async (id) => irasai.delete(id),
+      /** #157 PR-5: erasure klausia registro; dublis privalo turėti visą paviršių. */
+      deleteResultArtifacts: async () => ({ pasalinti: [], jauNebuvo: [], nepavyko: [] }),
     },
   };
 }

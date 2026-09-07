@@ -965,6 +965,20 @@ module.exports = {
         ? store.listResultArtifacts(jobId)
         : null;
     },
+    /**
+     * Rezultato artefaktų šalinimas — erasure kelias (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU, AR PAŠALINTA". Erasure privalo tai laikyti KRITINE
+     * nesėkme, ne no-op: „ištrinta" be objekto pašalinimo yra būtent tas melas,
+     * kurio #157 riba draudžia („dalinis object-storage gedimas negali būti
+     * raportuojamas kaip sėkmingas galutinis ištrynimas").
+     */
+    deleteResultArtifacts: async (jobId) => {
+      await ensureInit();
+      return typeof store.deleteResultArtifacts === "function"
+        ? store.deleteResultArtifacts(jobId)
+        : null;
+    },
     listPendingAudioCleanups: async (limit) => {
       await ensureInit();
       return typeof store.listByFlag === "function"

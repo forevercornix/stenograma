@@ -731,6 +731,18 @@ function createRedisStore(redisClient) {
     return [];
   }
 
+  /**
+   * Rezultato artefaktų šalinimas — `redis` backend'e nėra ko šalinti (#157, PR-5).
+   *
+   * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: external rašymo kelio šis backend'as
+   * neturi, tad tuščias rezultatas yra konstrukcijos savybė. Metodas egzistuoja, kad
+   * erasure kelias neturėtų `typeof === "function"` šakos: tokia šaka reikštų tylų
+   * praleidimą ten, kur praleidimas yra BDAR klausimas.
+   */
+  async function deleteResultArtifacts() {
+    return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+  }
+
   async function listReferencedStorageKeys() {
     const jobs = await _scanJobs();
     const keys = new Set();
@@ -802,7 +814,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

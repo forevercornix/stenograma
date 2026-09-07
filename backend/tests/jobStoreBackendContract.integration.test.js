@@ -993,7 +993,7 @@ test("KONTRAKTAS: su nustatytu URL adapteris NEGALI praleisti savo scenarijų", 
   }
 });
 
-test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 18 metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 19 metodų aibę", () => {
   /**
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
@@ -1008,6 +1008,11 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 18 metodų aibę",
    * ten vykdo pats Redis per `EXPIRE`, tad momento žymai įrašyti nėra. Kontrakto
    * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
    * `docs/deletion-guarantees.md`.
+   *
+   * ⚠️ 18 → 19 (#157, PR-5): pridėtas `deleteResultArtifacts()`. Šalina saugykla, ne
+   * `jobErasure`, nes `storage_type -> ArtifactStore` žemėlapis gyvena store'e ir yra
+   * vienintelis; antra jo kopija kvietėjo pusėje būtų antra rezultato vietos
+   * interpretacija (A4).
    *
    * ⚠️ 17 → 18 (#157, PR-5): pridėtas `listResultArtifacts()`. Skaičius keliamas
    * SĄMONINGAI. Erasure ir šlavėjas nuo šiol klausia REGISTRO, o ne vienos `job_results`
@@ -1028,7 +1033,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 18 metodų aibę",
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 18, "jobStore kontraktas privalo turėti tiksliai 18 metodų");
+  assert.equal(expected.length, 19, "jobStore kontraktas privalo turėti tiksliai 19 metodų");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,

@@ -2367,6 +2367,58 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     return [...pagalRakta.values()];
   }
 
+  /**
+   * VISŲ job'o rezultato artefaktų ŠALINIMAS — erasure kelias (#157, PR-5).
+   *
+   * ⚠️ TRINA SAUGYKLA, NE `jobErasure`, IR TAI NE ATSITIKTINUMAS.
+   *
+   * `storage_type -> ArtifactStore` žemėlapis gyvena ČIA (`parinktiArtefaktuSaugykla`),
+   * ir jis yra vienintelis. Perdavus `jobErasure` teisę jį atkurti, atsirastų antra
+   * rezultato vietos interpretacija — tiksliai tai, ko A4 riba draudžia: vartotojas
+   * klaustų „koks aktyvus backend'as", o eilutė sako „koks buvo rašant". Simetriška
+   * hidratacijai: skaityti artefaktą irgi moka store'as, ne kvietėjas.
+   *
+   * ⚠️ DB EILUČIŲ ŠIS METODAS NELIEČIA. Job'o ir `job_results` šalinimas yra erasure
+   * sprendimas, priimamas PO to, kai žinoma, ar objektai pašalinti — kitaip dalinis
+   * gedimas prarastų adresus (`ON DELETE CASCADE`), ir pakartojimas nebeturėtų ko trinti.
+   *
+   * ⚠️ NEREGISTRUOTAS `storage_type` YRA NESĖKMĖ, NE PRALEIDIMAS. `parinktiArtefaktuSaugykla()`
+   * meta, kai tipui saugykla neregistruota; sugavus tai kaip „nieko nedarom", erasure
+   * raportuotų sėkmę objektui, kurio net nebandė paliesti.
+   *
+   * @param {string} jobId
+   * @returns {Promise<{pasalinti: string[], jauNebuvo: string[], nepavyko: Array<{storageKey: string, priezastis: string}>}>}
+   */
+  async function deleteResultArtifacts(jobId) {
+    const artefaktai = await listResultArtifacts(jobId);
+    const rezultatas = { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+
+    for (const artefaktas of artefaktai) {
+      let saugykla = null;
+
+      try {
+        saugykla = parinktiArtefaktuSaugykla(artefaktas.storageType);
+      } catch (klaida) {
+        rezultatas.nepavyko.push({ storageKey: artefaktas.storageKey, priezastis: klaida.message });
+        continue;
+      }
+
+      try {
+        /**
+         * ⚠️ TRYS BŪSENOS, NE DVI — ta pati taisyklė kaip audio kelyje
+         * (`jobErasure.js`, #250): „pašalinome" ir „jau nebuvo" yra skirtingos tiesos,
+         * ir tik jų sąjunga atsako į klausimą „ar artefakto nebėra".
+         */
+        const pasalinta = await saugykla.delete(artefaktas.storageKey);
+        (pasalinta ? rezultatas.pasalinti : rezultatas.jauNebuvo).push(artefaktas.storageKey);
+      } catch (klaida) {
+        rezultatas.nepavyko.push({ storageKey: artefaktas.storageKey, priezastis: klaida.message });
+      }
+    }
+
+    return rezultatas;
+  }
+
   async function listReferencedStorageKeys() {
     const { rows } = await pool.query(
       "SELECT DISTINCT storage_key FROM jobs WHERE storage_key IS NOT NULL"
@@ -2414,6 +2466,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     listByFlag,
     listReferencedStorageKeys,
     listResultArtifacts,
+    deleteResultArtifacts,
     close,
     STATUS,
     JOB_TYPES,
