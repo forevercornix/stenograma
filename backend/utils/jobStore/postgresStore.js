@@ -1513,8 +1513,6 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
               stebeta.storageKey === eilute.storage_key &&
               stebeta.storageType === eilute.storage_type;
 
-            if (!remontasTebegalioja) return EXTERNAL_HIDRATUOTI;
-
             await upsertResult(client, id, undefined, rasymas.nuoroda);
 
             /**
