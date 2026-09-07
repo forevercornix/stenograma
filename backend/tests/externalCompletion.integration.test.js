@@ -229,6 +229,97 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     assert.equal(Number(r.bytes), Buffer.byteLength(kanoninisRezultatas(objektas), "utf8"));
   });
 
+  await t.test("DU lygiagretūs REMONTAI to paties dingusio objekto: lieka VIENAS įsipareigotas", async () => {
+    /**
+     * ⚠️ SCENARIJUS, KURIO TREČIOJI MUTACIJA NEPAGAVO (Codex, #294).
+     *
+     * Mutacijų lentelė „patvirtino", kad registro būsenos sargas veikia — bet dengė
+     * VIENĄ kelią, ne invariantą. Šis atvejis laužia tą patį invariantą kita kryptimi:
+     * abu vykdytojai pre-check metu mato TĄ PATĮ dingusį objektą ir abu nusprendžia
+     * remontuoti. Jei sprendimas priimtas PRIEŠ užraktą ir vykdomas po jo, antrasis
+     * perrašo pirmojo nuorodą — laimėtojo objektas lieka nereferencuotas, o job'as
+     * gauna DU įsipareigotus registro įrašus.
+     *
+     * Dabar pre-check fiksuoja tik STEBĖJIMĄ („šitas raktas buvo tuščias"), o remontą
+     * patvirtina transakcija: jei eilutė po užraktu rodo jau į kitą raktą, mes esame
+     * pralaimėjęs bandymas.
+     */
+    const id = await naujasJobas();
+    const rezultatas = { text: "remonto lenktynės" };
+
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas });
+    const sena = await eilute(id);
+
+    /** Objektas dingsta — abu vykdytojai pamatys tą patį tuščią raktą. */
+    await fs.delete(sena.storage_key);
+
+    const [a, b] = await Promise.all([
+      store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
+      store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
+    ]);
+
+    for (const atsakymas of [a, b]) {
+      assert.equal(typeof atsakymas, "object", `netikėtas verdiktas: ${JSON.stringify(atsakymas)}`);
+      assert.deepEqual(atsakymas.result, rezultatas);
+    }
+
+    const nauja = await eilute(id);
+    const bandymai = await attemptRegistry.joboBandymai(pool, id);
+    const isipareigoti = bandymai.filter((x) => x.busena === attemptRegistry.BUSENA.ISIPAREIGOTA);
+
+    assert.equal(
+      isipareigoti.length,
+      1,
+      `po dviejų remontų privalo likti VIENAS įsipareigotas: ` +
+        JSON.stringify(bandymai.map((x) => [x.storage_key, x.busena]))
+    );
+    assert.equal(isipareigoti[0].storage_key, nauja.storage_key, "nuoroda rodo į jį");
+    assert.ok(await saugykla.head(nauja.storage_key), "remontuotas objektas vietoje");
+
+    /** Ir nė vienas nereferencuotas objektas neliko saugykloje. */
+    for (const bandymas of bandymai.filter((x) => x.storage_key !== nauja.storage_key)) {
+      assert.equal(
+        await saugykla.head(bandymas.storage_key),
+        null,
+        `nereferencuotas objektas liko: ${bandymas.storage_key} (${bandymas.busena})`
+      );
+    }
+  });
+
+  await t.test("pre-check klausia PERSISTINTO backend'o, ne aktyvaus", async () => {
+    /**
+     * ⚠️ #245 INVARIANTAS: persistinti metaduomenys autoritetingi, runtime konfigūracija
+     * — ne. PR-3 jį užrašė hidratacijos pusėje; pre-check jį pažeidė trečioje vietoje.
+     *
+     * DB po migracijos ilgai bus MIŠRI: `s3` eilutės objektas, tikrinamas per `fs`
+     * saugyklą, atrodytų dingęs — ir tai sukeltų remontą, kurio niekas neprašė, plius
+     * naują objektą kitame backend'e.
+     */
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO jobs (id, type, status, created_at, updated_at)
+       VALUES ($1, 'transcription', 'completed', now(), now())`,
+      [id]
+    );
+
+    const turinys = { text: "s3 eilutė" };
+    const { paruostiReiksme } = require("../utils/artifactStore/validation");
+    const paruosta = paruostiReiksme(turinys);
+
+    await pool.query(
+      `INSERT INTO job_results (job_id, storage_type, storage_key, bytes, checksum, created_at)
+       VALUES ($1, 's3', $2, $3, $4, now())`,
+      [id, `results/${id}/svetimas.json`, paruosta.bytes, paruosta.checksum]
+    );
+
+    /** Rašymo saugykla yra `fs`, o eilutė — `s3`: klausti `fs` būtų klaida. */
+    await assert.rejects(
+      () => store.finishAtomic(id, STATUS.COMPLETED, { result: turinys }),
+      /neregistruota|kito backend/i,
+      "pre-check negali tikrinti `s3` eilutės per `fs` saugyklą"
+    );
+  });
+
   /* ═══ LYGYBĖS PARITETAS: TAS PATS SĄRAŠAS ABIEM KELIAMS ═══ */
 
   await t.test("external verdiktai SUTAMPA su inline verdiktais toms pačioms poroms", async () => {

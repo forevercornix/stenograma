@@ -1281,7 +1281,19 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
 
     /* ═══ 1. PRE-CHECK: be užrakto, be I/O į DB rašymo pusę ═══ */
     const esama = await rezultatoEilute(pool, id);
-    let remontas = false;
+
+    /**
+     * ⚠️ PRE-CHECK GRĄŽINA STEBĖJIMUS, NE VERDIKTĄ (Codex, #294).
+     *
+     * Ankstesnė redakcija čia nusprendė „remontas" ir tą sprendimą transakcija VYKDĖ.
+     * Bet tarp pre-check ir užrakto kitas vykdytojas gali remontą jau atlikti — tada
+     * mūsų sprendimas, priimtas PRIEŠ užraktą, perrašytų svetimą nuorodą ir paliktų
+     * nereferencuotą objektą.
+     *
+     * Todėl fiksuojama tik tai, KĄ MATĖME: kurią eilutę ir kokį objekto raktą tikrinom.
+     * Sprendimą priima transakcija iš eilutės, kurią laiko po užraktu.
+     */
+    let stebetaEilute = null;
 
     if (
       esama &&
@@ -1289,7 +1301,24 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       esama.checksum === paruosta.checksum &&
       Number(esama.bytes) === paruosta.bytes
     ) {
-      const galva = await rasymoSaugykla.head(esama.storage_key);
+      /**
+       * ⚠️ `head()` SPRENDŽIAMAS PAGAL PERSISTINTĄ `storage_type`, NE PAGAL AKTYVŲ
+       * BACKEND'Ą (#245 invariantas; PR-3 jį jau užrašė hidratacijos pusėje).
+       *
+       * DB po migracijos ilgai bus MIŠRI: dalis eilučių `s3`, naujos `fs`. Klausiant
+       * `rasymoSaugykla`, `s3` eilutės objektas būtų tikrinamas `fs` saugykloje — ir
+       * „nėra" reikštų remontą, kurio niekas neprašė.
+       */
+      const eilutesSaugykla = saugyklos.get(esama.storage_type);
+
+      if (!eilutesSaugykla) {
+        throw new Error(
+          `postgresStore: eilutės storage_type = '${esama.storage_type}', bet šiam tipui ` +
+            "saugykla neregistruota — pre-check negali klausti kito backend'o (#157)."
+        );
+      }
+
+      const galva = await eilutesSaugykla.head(esama.storage_key);
 
       if (galva && Number(galva.bytes) === Number(esama.bytes)) {
         /** `put()` praleidžiamas; verdiktą vis tiek priims transakcija. */
@@ -1298,18 +1327,15 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
           bytes: paruosta.bytes,
           attemptId: null,
           nuoroda: null,
-          remontas: false,
+          stebetaEilute: null,
         };
       }
 
       /**
-       * ⚠️ ČIA IR TIK ČIA GIMSTA „REMONTAS".
-       *
-       * Persistinta eilutė sutampa metaduomenimis, bet objekto nėra — vadinasi nuoroda
-       * PAKIBUSI, ir naujas bandymas ją privalo pakeisti. Tai vienintelis atvejis, kai
-       * tas pats `checksum` reiškia RAŠYMĄ.
+       * ⚠️ STEBĖJIMAS, NE SPRENDIMAS: „šitas raktas buvo tuščias". Ar iš to seka
+       * remontas, spręs transakcija — jei tuo metu eilutė VIS DAR rodo į tą patį raktą.
        */
-      remontas = true;
+      stebetaEilute = { storageKey: esama.storage_key, storageType: esama.storage_type };
     }
 
     /* ═══ 2. REGISTRAS PRIEŠ `put()`, tada rašymas ir patikra ═══ */
@@ -1353,7 +1379,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       checksum: kvitas.checksum,
       bytes: kvitas.bytes,
       attemptId,
-      remontas,
+      stebetaEilute,
       nuoroda: {
         storageType: rasymoSaugykla.backend,
         storageKey: kvitas.reference,
@@ -1473,10 +1499,21 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
              * perteklinis. Todėl grąžinam idempotentišką sėkmę, o `finally` blokas
              * pašalina mūsų bandymą. Job'ui lieka LYGIAI VIENAS įsipareigotas įrašas.
              *
-             * `remontas` ženklą uždeda TIK pre-check, radęs sutampančią eilutę BE
-             * objekto — vienintelį atvejį, kai tas pats checksum reiškia rašymą.
+             * ⚠️ REMONTAS PATVIRTINAMAS PO UŽRAKTU, NE PRE-CHECK METU (Codex, #294).
+             *
+             * Pre-check fiksavo tik STEBĖJIMĄ: „šitas raktas buvo tuščias". Jei eilutė
+             * po užraktu VIS DAR rodo į tą patį raktą, stebėjimas tebegalioja, ir
+             * remontas teisėtas. Jei rodo į kitą — kitas vykdytojas remontą jau atliko,
+             * o mes esame pralaimėjęs bandymas: perrašę nuorodą, paliktume jo objektą
+             * nereferencuotą ir job'ui duotume DU įsipareigotus registro įrašus.
              */
-            if (!rasymas.remontas) return EXTERNAL_HIDRATUOTI;
+            const stebeta = rasymas.stebetaEilute;
+            const remontasTebegalioja =
+              stebeta &&
+              stebeta.storageKey === eilute.storage_key &&
+              stebeta.storageType === eilute.storage_type;
+
+            if (!remontasTebegalioja) return EXTERNAL_HIDRATUOTI;
 
             await upsertResult(client, id, undefined, rasymas.nuoroda);
             await attemptRegistry.pazymeti(
