@@ -2319,11 +2319,15 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    *
    * ⚠️ `busena: null` REIŠKIA „referencuota, bet registro eilutės nėra".
    *
-   * Tai teisėta būsena eilutėms, parašytoms PRIEŠ registrą (PR-4 migracija), ir
-   * eilutėms, atkurtoms iš senesnio dump'o. Retencija šio atvejo gaminti NETURI — žr.
-   * PR-5 įėjimo sąlygą 3: bandymo eilutė, kurios objektas vis dar referencuotas gyvos
-   * `job_results` eilutės, pagal amžių nešalinama. Kvietėjui skirtumas svarbus: objektą
-   * vis tiek reikia pašalinti, tik apie jį registras nieko nebepasako.
+   * VIENINTELIAI teisėti šio atvejo šaltiniai yra du: eilutės, parašytos PRIEŠ registrą
+   * (PR-4 migracija), ir eilutės, atkurtos iš senesnio dump'o. Tai išsamus sąrašas, ne
+   * pavyzdžiai — retencija šio atvejo gaminti NETURI (PR-5 įėjimo sąlyga 3: eilutė,
+   * kurios objektas referencuotas arba kurios job'as turi neišspręstą ištrynimo žymą,
+   * pagal amžių nešalinama). Jei `busena: null` pasirodytų kur nors kitur, tai reikštų,
+   * kad sąlyga 3 pažeista, o ne kad atsirado naujas teisėtas šaltinis.
+   *
+   * Kvietėjui skirtumas svarbus: objektą vis tiek reikia pašalinti, tik apie jį
+   * registras nieko nebepasako.
    *
    * @param {string} jobId
    * @returns {Promise<Array<{storageType: string, storageKey: string, busena: string|null, referencuotas: boolean}>>}

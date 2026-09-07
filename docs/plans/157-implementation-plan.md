@@ -857,7 +857,7 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 |---|---|---|
 | 1 | **Erasure trina PAGAL REGISTRĄ**, ne pagal `job_results.storage_key` — job'o ištrynimas šalina VISŲ to job'o bandymų objektus, ne tik laimėjusio | variantas (b), orphan skyrius |
 | 2 | **Šlavėjas** neįsipareigotiems bandymams (`busena <> 'committed'`) | variantas (b), orphan skyrius |
-| 3 | **Retencija ribojama BŪSENA IR amžiumi:** horizontas iš `revivalHorizonsMs()` yra apatinė riba, bet eilutė, kurios objektas vis dar referencuotas, pagal amžių nešalinama NIEKADA | variantas (b) + PR-5 pradžios peržiūra |
+| 3 | **Retencija ribojama BŪSENA IR amžiumi:** horizontas iš `revivalHorizonsMs()` yra apatinė riba, bet eilutė, kurios objektas referencuotas **ARBA** kurios job'as turi neišspręstą ištrynimo žymą, pagal amžių nešalinama NIEKADA | variantas (b) + PR-5 pradžios peržiūra |
 | 4 | **Šlavėjas zonduoja ABU vardus** (laikiną ir galutinį); „nė vieno nėra" = sėkmė | #294 uždarymas — žr. skyrių iškart žemiau |
 | 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
 | 6 | **Store lygmens metodas visoms nuorodoms**, ne `job.resultStorage` laukas | PR-3 peržiūra (žr. „PATAISYTA" žemiau) |
@@ -896,6 +896,48 @@ nepaima — bet tai indekso, t. y. PAIEŠKOS, savybė, ne sargas. Būsena ir nuo
 išsiskirti (ranka redaguota eilutė, atkūrimas iš dviejų skirtingų momentų), o klausimas,
 į kurį retencija privalo atsakyti, yra „ar ši eilutė yra vienintelis likęs adresas", ne
 „kokia jos būsena".
+
+⚠️ **BET VIEN NUORODOS NEUŽTENKA: APSAUGA DINGTŲ TADA, KAI JOS LABIAUSIAI REIKIA.**
+
+Ištrynimas NAIKINA nuorodas. `job_results` turi `ON DELETE CASCADE` nuo `jobs`, tad
+pašalinus job'o eilutę visos to job'o bandymų eilutės vienu metu netenka apsaugos.
+Normaliame kelyje tai nekenkia — objektai šalinami pirmi, job'o eilutė paskutinė. Bet
+daliniame gedime seka yra tokia:
+
+1. vienas `delete()` grąžina klaidą, o job'o eilutė vis tiek pašalinama (arba jau buvo
+   pašalinta kitu keliu);
+2. nuorodų nebėra → bandymų eilutės nebeapsaugotos;
+3. retencija po horizonto jas pašalina;
+4. `deletionRetry` grįžta prie job'o, PAŽYMĖTO ištrynimui, ir nebeturi iš kur sužinoti
+   adresų;
+5. objektas lieka saugykloje amžiams — be nuorodos, be registro eilutės, be
+   `list(prefix)`.
+
+Tai TA PATI forma, dėl kurios registras FK į `jobs` sąmoningai neturi („`CASCADE`
+pašalintų eilutę BŪTENT tuo momentu, kai ji reikalinga"). Predikatui, remiantis tuo pačiu
+ryšiu, tas efektas grįžtų ne per FK, o pro galines duris.
+
+**Todėl apsauga simetriška tam, kas jau įrodyta apie tvarką: ją teikia ir IŠTRYNIMO
+ŽYMA.** Žyma rašoma PRIEŠ šalinimą, tad ji yra patvarus signalas, išgyvenantis nuorodos
+dingimą:
+
+> bandymo eilutė nešalinama pagal amžių, jei jos `storage_key` yra gyvoje `job_results`
+> eilutėje **ARBA** jos job'as turi neišspręstą ištrynimo žymą
+> (`erasure_marks.status <> 'deleted'`).
+
+Antroji sąlyga pati savaime pasibaigia: žyma uždaroma, kai ištrynimas patvirtinamas, ir
+tada eilutė teisėtai tampa valytina. Apsauga nėra amžina — ji trunka lygiai tol, kol
+ištrynimas neišspręstas.
+
+⚠️ **IŠVESTINĖ SĄLYGA, KURIĄ ŠIS PREDIKATAS UŽDEDA ŠLAVĖJUI.** `erasure_marks` gyvena
+toje pačioje bazėje kaip `job_result_attempts` (tos pačios migracijos), tad predikatas
+yra VIENAS `SQL` sakinys, o ne dviejų saugyklų palyginimas — tai svarbu, nes lyginant per
+programą tarp dviejų skaitymų liktų langas. Bet žymų fasadas gali veikti ATMINTIES
+režimu (`pasirinktiBackend(env) === "memory"`); tada lentelė egzistuoja, bet tuščia, ir
+`OR` sąlyga neapsaugotų NIEKO. Vadinasi šlavėjas privalo būti fail-closed: **jei žymų
+saugykla nėra `postgres`, valymas pagal amžių NEVYKDOMAS.** Praleidus tai, apsauga
+atrodytų veikianti ir tyliai negaliotų — ta pati klasė kaip „`[]` reiškia nėra ko
+trinti".
 
 ⚠️ **KĄ PR-5 VIS DAR PRIVALO ĮRODYTI PATS:** `joboBandymai()` iki šiol nekviečiamas iš
 produkcinio kodo — jis buvo parašytas PR-4 ir laukė šio PR. Tol, kol jį kviečia tik
