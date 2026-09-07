@@ -860,6 +860,99 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     assert.deepEqual(registroPazeidimai, [], `lygiagretus remontas išmetė DB klaidą: ${registroPazeidimai}`);
   });
 
+  await t.test("`head()` klaida PO `put()` palieka VALOMĄ, ne laukiantį pėdsaką", async () => {
+    /**
+     * ⚠️ PARUOŠIMAS BUVO UŽ VALYMO SRITIES RIBŲ (Codex, #294).
+     *
+     * `paruostiExternalRasyma()` kviečiama PRIEŠ `try`, kurio `finally` valo bandymą.
+     * Jei `put()` pavyko, o `head()` metė arba parodė kitą dydį, funkcija atmesdavo dar
+     * PRIEŠ priskyrimą — ir `isvalytiBandyma()` nebūdavo kviečiamas niekada.
+     *
+     * ⚠️ TAI NORMALUS KLAIDOS KELIAS, NE AVARIJA. Klaida bendrinė, tad worker'is laiko
+     * ją atkartojama, ir KIEKVIENAS pakartojimas palieka dar vieną objektą. Sinchroninis
+     * valymo kelias egzistavo ir tiesiog buvo nepasiekiamas.
+     *
+     * Eilutė liktų `pending`, tad PR-5 šlavėjas ją rastų — bet remtis PR-5 tam, ką
+     * dabartinis kodas sutvarko iškart, prieštarauja pačiai I/O tvarkos idėjai: nesėkmė
+     * turi palikti VALOMĄ pėdsaką, ne laukiantį.
+     */
+    const id = await naujasJobas();
+
+    let sugadinti = true;
+    const suGedimu = createPostgresStore(pool, {
+      rasymoSaugykla: {
+        ...saugykla,
+        async head(raktas) {
+          if (!sugadinti) return saugykla.head(raktas);
+          const klaida = new Error("suklastotas `head` gedimas po sėkmingo `put`");
+          klaida.code = "EIO";
+          throw klaida;
+        },
+      },
+    });
+
+    await assert.rejects(
+      () => suGedimu.finishAtomic(id, STATUS.COMPLETED, { result: { text: "head krito" } }),
+      /suklastotas `head` gedimas/
+    );
+
+    sugadinti = false;
+
+    const bandymai = await attemptRegistry.joboBandymai(pool, id);
+    assert.equal(bandymai.length, 1, "bandymas privalo būti registruotas");
+    assert.notEqual(
+      bandymai[0].busena,
+      attemptRegistry.BUSENA.LAUKIA,
+      "eilutė negali likti `pending`: tai LAUKIANTIS, ne valomas pėdsakas"
+    );
+    assert.equal(
+      await saugykla.head(bandymai[0].storage_key),
+      null,
+      "objekto saugykloje nebeturi likti"
+    );
+  });
+
+  await t.test("pasikartojanti `head()` klaida NEKAUPIA objektų", async () => {
+    /**
+     * ⚠️ VIENAS KRITIMAS NIEKO NEĮRODO APIE KAUPIMĄ.
+     *
+     * Būtent kaupimas yra šio radinio kaina: klaida bendrinė, tad BullMQ kartoja, ir be
+     * valymo kiekvienas pakartojimas paliktų dar vieną transkripciją saugykloje. Todėl
+     * tikrinamas ne vienas, o DU vykdymai iš eilės.
+     */
+    const id = await naujasJobas();
+
+    const suGedimu = createPostgresStore(pool, {
+      rasymoSaugykla: {
+        ...saugykla,
+        async head() {
+          const klaida = new Error("suklastotas `head` gedimas po sėkmingo `put`");
+          klaida.code = "EIO";
+          throw klaida;
+        },
+      },
+    });
+
+    for (const bandymas of [1, 2]) {
+      await assert.rejects(
+        () => suGedimu.finishAtomic(id, STATUS.COMPLETED, { result: { text: "kartojasi" } }),
+        /suklastotas `head` gedimas/,
+        `bandymas ${bandymas}`
+      );
+    }
+
+    const bandymai = await attemptRegistry.joboBandymai(pool, id);
+    assert.equal(bandymai.length, 2, "du vykdymai — dvi registro eilutės");
+
+    const likę = [];
+    for (const b of bandymai) {
+      assert.notEqual(b.busena, attemptRegistry.BUSENA.LAUKIA, "nė viena eilutė nelieka `pending`");
+      if (await saugykla.head(b.storage_key)) likę.push(b.storage_key);
+    }
+
+    assert.deepEqual(likę, [], "NULIS susikaupusių objektų");
+  });
+
   await t.test("VISI šio failo rašymai ėjo per PARUOŠTĄ reprezentaciją", () => {
     /**
      * ⚠️ TVIRTINIMAS PABAIGOJE, NE KIEKVIENAME TESTE.

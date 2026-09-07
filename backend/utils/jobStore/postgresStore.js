@@ -1351,42 +1351,72 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     });
 
     /**
-     * ⚠️ PADUODAMA PARUOŠTA REPREZENTACIJA, NE ŽALIA REIKŠMĖ (Codex, #294).
+     * ⚠️ NUO ŠIOS VIETOS PARUOŠIMAS VALO PATS (Codex, #294).
      *
-     * `paruosta` jau turi kanoninę eilutę, baitus ir sumą. Perduodant `extra.result`,
-     * riba kanonizuotų TĄ PATĮ (galimai kintantį) objektą dar kartą: getter'is, proxy
-     * ar mutacija tarp dviejų perėjimų reikštų, kad kvitas aprašo A, o saugykla laiko B.
+     * `paruostiExternalRasyma()` kviečiama PRIEŠ `finishAtomic()` `try` bloką, tad jo
+     * `finally` čia dar nepasiekia: `put()` pavykus, o `head()` metus, funkcija
+     * atmesdavo dar prieš priskyrimą, ir `isvalytiBandyma()` nebūdavo kviečiamas
+     * NIEKADA. Klaida bendrinė, tad worker'is laiko ją atkartojama — kiekvienas
+     * pakartojimas palikdavo dar vieną transkripciją saugykloje.
      *
-     * PR-2 tą pačią klasę uždarė `inlineStore` VIDUJE; čia ji buvo atsivėrusi sluoksniu
-     * aukščiau, ir tai rodo, kad anas taisymas buvo lokalus, ne kontraktinis.
+     * ⚠️ SRITĮ VALDO TAS, KAS SUKŪRĖ. Alternatyva — įtraukti paruošimą į `finishAtomic`
+     * `try` — reikštų, kad `rasymas` egzistuoja tik `catch` viduje, ir valymas turėtų
+     * spėlioti, kiek žingsnių spėta padaryti. Funkcija, kuri registro eilutę sukūrė, ją
+     * ir uždaro; `finishAtomic` `finally` lieka atsakingas už tai, kas vyksta PO
+     * sėkmingo paruošimo (pralaimėtas CAS, konfliktas, rollback).
      */
-    const kvitas = await rasymoSaugykla.put(raktas, paruosta);
+    try {
+      /**
+       * ⚠️ PADUODAMA PARUOŠTA REPREZENTACIJA, NE ŽALIA REIKŠMĖ (Codex, #294).
+       *
+       * `paruosta` jau turi kanoninę eilutę, baitus ir sumą. Perduodant `extra.result`,
+       * riba kanonizuotų TĄ PATĮ (galimai kintantį) objektą dar kartą: getter'is, proxy
+       * ar mutacija tarp dviejų perėjimų reikštų, kad kvitas aprašo A, o saugykla laiko B.
+       *
+       * PR-2 tą pačią klasę uždarė `inlineStore` VIDUJE; čia ji buvo atsivėrusi sluoksniu
+       * aukščiau, ir tai rodo, kad anas taisymas buvo lokalus, ne kontraktinis.
+       */
+      const kvitas = await rasymoSaugykla.put(raktas, paruosta);
 
-    /**
-     * ⚠️ `head()` PO RAŠYMO — sėkmė be patvirtinimo yra prielaida. Nesutapęs dydis
-     * reiškia, kad saugykloje guli ne tai, ką parašėme, ir nuorodos įsipareigoti
-     * negalima.
-     */
-    const galva = await rasymoSaugykla.head(raktas);
-    if (!galva || Number(galva.bytes) !== kvitas.bytes) {
-      throw new Error(
-        `postgresStore: artefaktas "${raktas}" po rašymo nepatvirtintas ` +
-          `(head: ${galva ? galva.bytes : "nėra"}, laukta: ${kvitas.bytes}).`
-      );
-    }
+      /**
+       * ⚠️ `head()` PO RAŠYMO — sėkmė be patvirtinimo yra prielaida. Nesutapęs dydis
+       * reiškia, kad saugykloje guli ne tai, ką parašėme, ir nuorodos įsipareigoti
+       * negalima.
+       */
+      const galva = await rasymoSaugykla.head(raktas);
+      if (!galva || Number(galva.bytes) !== kvitas.bytes) {
+        throw new Error(
+          `postgresStore: artefaktas "${raktas}" po rašymo nepatvirtintas ` +
+            `(head: ${galva ? galva.bytes : "nėra"}, laukta: ${kvitas.bytes}).`
+        );
+      }
 
-    return {
-      checksum: kvitas.checksum,
-      bytes: kvitas.bytes,
-      attemptId,
-      stebetaEilute,
-      nuoroda: {
-        storageType: rasymoSaugykla.backend,
-        storageKey: kvitas.reference,
-        bytes: kvitas.bytes,
+      return {
         checksum: kvitas.checksum,
-      },
-    };
+        bytes: kvitas.bytes,
+        attemptId,
+        stebetaEilute,
+        nuoroda: {
+          storageType: rasymoSaugykla.backend,
+          storageKey: kvitas.reference,
+          bytes: kvitas.bytes,
+          checksum: kvitas.checksum,
+        },
+      };
+    } catch (klaida) {
+      /**
+       * ⚠️ VALOMA IR TADA, KAI KRITO PATS `put()`. Objekto gali nebūti (`delete()`
+       * tada grąžina `false` be klaidos), bet registro eilutė LIEKA — tik nebe
+       * `pending`: „laukiantis" pėdsakas reikštų, kad šlavėjas dar turi ateiti ten,
+       * kur jau nieko nėra.
+       */
+      await isvalytiBandyma({
+        attemptId,
+        nuoroda: { storageType: rasymoSaugykla.backend, storageKey: raktas },
+      });
+
+      throw klaida;
+    }
   }
 
   /**
