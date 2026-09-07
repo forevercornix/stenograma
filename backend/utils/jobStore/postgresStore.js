@@ -1343,13 +1343,6 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     const attemptId = attemptRegistry.naujasBandymas();
     const raktas = attemptRegistry.bandymoRaktas(id, attemptId);
 
-    await attemptRegistry.registruoti(pool, {
-      attemptId,
-      jobId: id,
-      storageType: rasymoSaugykla.backend,
-      storageKey: raktas,
-    });
-
     /**
      * ⚠️ PADUODAMA PARUOŠTA REPREZENTACIJA, NE ŽALIA REIKŠMĖ (Codex, #294).
      *
@@ -1361,6 +1354,13 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
      * aukščiau, ir tai rodo, kad anas taisymas buvo lokalus, ne kontraktinis.
      */
     const kvitas = await rasymoSaugykla.put(raktas, paruosta);
+
+    await attemptRegistry.registruoti(pool, {
+      attemptId,
+      jobId: id,
+      storageType: rasymoSaugykla.backend,
+      storageKey: raktas,
+    });
 
     /**
      * ⚠️ `head()` PO RAŠYMO — sėkmė be patvirtinimo yra prielaida. Nesutapęs dydis
