@@ -862,6 +862,8 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 | 4a | **Šlavėjas neliečia VYKSTANČIO rašymo:** `pending` eilutei horizontas turi atskirą „maksimalios rašymo trukmės" narį, neišvestą iš `revivalHorizonsMs()` | PR-5 peržiūra — determinizmo pasekmė |
 | 4b | **Fail-closed praleidimas MATOMAS:** skaitiklis + `log.warn` suvestinėje, 7.5a precedentu (`retentionSweeper.js:269-274`) | PR-5 peržiūra |
 | 4c | **„Maksimali rašymo trukmė" užrašoma kaip EURISTIKA** su kilme ir galiojimo pabaiga, `MAX_SEGMENTO_BAITAI` šablonu | PR-5 peržiūra |
+| 3a | **Žymų saugyklos neatitikimas — ŽINGSNIO lygio būsena**, pranešama vieną kartą, ne kaip N praleistų eilučių | PR-5 peržiūra |
+| 4d | **Abu vardai rasti = INVARIANTO PAŽEIDIMAS**, pranešamas, o ne tyliai ištrinamas | PR-5 peržiūra |
 | 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
 | 6 | **Store lygmens metodas visoms nuorodoms**, ne `job.resultStorage` laukas | PR-3 peržiūra (žr. „PATAISYTA" žemiau) |
 | 7 | **`reference !== null`** → objektas privalo būti pašalintas ir tai patvirtinta; `reference === null` → eilutės ištrynimas IR YRA ištrynimas | kontraktas, ne PR-5 |
@@ -932,6 +934,29 @@ Antroji sąlyga pati savaime pasibaigia: žyma uždaroma, kai ištrynimas patvir
 tada eilutė teisėtai tampa valytina. Apsauga nėra amžina — ji trunka lygiai tol, kol
 ištrynimas neišspręstas.
 
+⚠️ **SĄLYGA 3a: KONFIGŪRACIJOS NEATITIKIMAS NĖRA „NORMALUS FAIL-CLOSED".**
+
+Antroji predikato šaka reiškia, kad šlavėjas skaito `deletionTombstones`, o tos saugyklos
+backend'as renkasi **automatiškai** — `pasirinktiBackend()` yra
+`arNurodytaPostgres(env) ? "postgres" : "memory"` (`deletionTombstones/index.js:80-82`).
+Tai vienintelis toks komponentas iš keturių (#245).
+
+Iš to seka derinys, kurio negalima praleisti: jei `jobStore` yra PostgreSQL, o žymų
+konfigūracija skiriasi (kitas taikinys, `PG*` ir `DATABASE_URL` neatitikimas), fail-closed
+suveiks KIEKVIENAI eilutei — ir šlavėjas **niekada nieko nešluos, tyliai**, nes kiekvienos
+eilutės žymos statusas bus „nežinau".
+
+Tai ta pati klasė kaip 4b, bet KITO MASTO: 4b praleidžia atskiras eilutes, o čia
+fail-closed padengia VISĄ šlavimą. Todėl šlavėjas privalo skirti du dalykus:
+
+| Būsena | Kaip pranešama |
+|---|---|
+| atskira eilutė praleista (senas `created_at`, vykstantis rašymas) | skaitiklis suvestinėje (4b) |
+| **žymų saugykla nepasiekiama arba kitokia** | **žingsnio lygio būsena, pranešama VIENĄ kartą aiškiai** — ne kaip N praleistų eilučių |
+
+Priešingu atveju konfigūracijos klaida atrodys kaip normalus fail-closed darbas, ir
+skaitiklis, į kurį niekas nežiūri, bus vienintelis skirtumas.
+
 ⚠️ **IŠVESTINĖ SĄLYGA, KURIĄ ŠIS PREDIKATAS UŽDEDA ŠLAVĖJUI.** `erasure_marks` gyvena
 toje pačioje bazėje kaip `job_result_attempts` (tos pačios migracijos), tad predikatas
 yra VIENAS `SQL` sakinys, o ne dviejų saugyklų palyginimas — tai svarbu, nes lyginant per
@@ -978,6 +1003,17 @@ kad šlavėjas laikino failo vardą apskaičiuotų iš registro `storage_key`. B
 Vadinasi šlavėjas tikrina ABU adresus, o „nė vieno nėra" yra **sėkmė**, ne gedimas:
 eilutė tada tiesiog uždaroma. Vieno adreso tikrinimas praleistų pusę atvejų, o testas su
 vienu scenarijumi liktų žalias — todėl PR-5 testai privalo dengti abi puses atskirai.
+
+⚠️ **KETVIRTAS DERINYS — ABU RASTI — YRA INVARIANTO PAŽEIDIMAS, NE ŠALINIMO ATVEJIS.**
+
+Radus IR laikinąjį, IR galutinį objektą, reikštų, kad `rename` neįvyko, o ankstesnis
+bandymas TUO PAČIU raktu paliko galutinį objektą. Su attempt-unique raktais
+(`results/<jobId>/<attemptId>.json`) to būti negali: kiekvienas bandymas turi savo adresą.
+
+Todėl šlavėjas šio atvejo **netyli ir abiejų neištrina** — jis praneša jį kaip invarianto
+pažeidimą. Jei kada nors rakto schema pasikeis (pvz. į turinio adresą, kuris jau kartą
+buvo atmestas), tai bus PIRMAS signalas — ir vienintelis, nes `list(prefix)` pagal A3
+nėra.
 
 ⚠️ Tai galioja `fs` saugyklai. `s3` laikino objekto neturi (`put` yra vienas
 `PutObject`), tad ten klausimas neegzistuoja — bet šlavėjas privalo tai spręsti pagal
@@ -1055,6 +1091,18 @@ Todėl ji užrašoma tuo pačiu šablonu kaip `MAX_SEGMENTO_BAITAI` (#294): **i�
 atmeta ir KADA NUSTOTŲ GALIOTI.** Be to po pusmečio ji bus arba „supaprastinta", arba
 padvigubinta be matavimo — abu be jokio signalo, nes rankinė reikšmė tyliai atsilieka nuo
 tikrovės (ši klasė projekte kartojosi keturis kartus).
+
+⚠️ **KODĖL IŠVEDIMO NĖRA: RIBOS NIEKAS NEAPIBRĖŽIA.**
+
+Tikslinimas, kuris keičia paieškos kryptį ateities skaitytojui. Viršutinės vieno rašymo
+trukmės ribos nėra ne todėl, kad jos neapskaičiavome, o todėl, kad **jos niekas
+neapibrėžia**: `fs` `put()` timeout'o neturi apskritai, o `s3` naudoja AWS SDK
+numatytuosius, kurių repo nefiksuoja. `API_TIMEOUT_MS` yra `httpClient` konstanta ir
+saugyklų neliečia.
+
+Vadinasi 4c yra euristika ne dėl formulės trūkumo, o dėl **trūkstamo apribojimo**. Kas
+nors, norintis 4c paversti išvedimu, turi pirma pridėti tą apribojimą (saugyklos
+užklausos timeout'ą), o ne ieškoti geresnės formulės iš esamų reikšmių.
 
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
