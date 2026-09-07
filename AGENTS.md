@@ -275,6 +275,15 @@ Flag as a defect, not a style issue:
 Where a hand-maintained list must exist, prefer a test asserting it matches
 reality over a comment asking future authors to remember.
 
+If later evidence disproves or materially weakens an earlier claim in a plan, PR
+description, checked-in report, guarantee table, or other maintained project
+artifact, correct the claim **at the place where it was originally published**.
+
+A later comment, review reply, or follow-up note does not by itself repair an
+authoritative or durable statement that remains false or overstated. Where the
+original artifact cannot be edited, mark the superseding correction explicitly in
+the closest durable source of truth.
+
 ## 13. Scope discipline
 
 Flag unrelated changes when they:
@@ -322,6 +331,10 @@ claimed behavior:
 | Test calling the shared helper | Helper semantics, not that production calls it |
 | Mocked provider test | Adapter behavior, not provider behavior |
 | Single successful run of a concurrency test | Little; races are order-dependent |
+| Production code writes a field, marker, status, registry entry, or metadata value | That the value is stored — not that any production behavior reads or depends on it |
+| A search by symbol/function/variable name found no other callers | Names and direct references — not an inventory of behavior reached through adapters, wrappers, aliases, arguments, injection, registries, factories, or restored objects |
+| A hand-maintained list matches the repository today | A point-in-time match — not that the list stays complete as the repository changes |
+| A check, test, validation command, or matrix exists in the repository | That the artifact exists — not that the required CI or verification path executes it |
 
 When a criterion depends on an environment unavailable during review (GPU,
 browser, real credentials, production data volume), classify it `UNVERIFIED`
@@ -370,3 +383,341 @@ Before recommending issue closure, verify:
 `requirements → implementation → tests → documented evidence`
 
 If that chain is incomplete, state exactly what remains.
+
+---
+
+## 18. Agent roles and implementation workflow
+
+Sections §18–§21 apply when acting as an **implementation agent**.
+
+When acting only as a **review agent**, §2–§3 and §17 define the review and
+closure workflow; do not modify code unless the task explicitly asks you to
+implement or repair findings.
+
+Sections §1 and §4–§16 apply to both roles.
+
+### 18.1 Plan before implementation
+
+For non-trivial implementation work, inspect the relevant repository state and
+prepare an implementation plan before editing.
+
+The plan must identify:
+
+- scope and, where applicable, PR/stage boundaries;
+- contracts and invariants affected;
+- persistence and migration implications;
+- relevant producers, consumers, callers, and equivalent implementations;
+- test and verification strategy;
+- rollback/cutover implications where applicable;
+- unresolved decisions.
+
+For each unresolved decision, classify whether it can be resolved under §18.2 or
+requires human input under §18.3.
+
+**Approval gates are derived from unresolved decisions**, not from task size or a
+generic requirement to approve every plan.
+
+- If the plan contains no decision requiring §18.3 human input, proceed with
+  implementation without waiting for plan approval.
+- If such a decision exists, stop before the first change that depends on it, and
+  present the specific decision, alternatives, evidence, and recommendation.
+- Do not perform work that **materially constrains** the outcome of a pending
+  §18.3 decision, even when that work does not formally depend on it. Presenting a
+  decision after building on one of its options is not a decision.
+- Do not use a generic "show me the plan" checkpoint when the plan contains no
+  decision requiring human approval.
+
+The classification is itself subject to §14.1: a claim that no §18.3 decision
+remained is not verifiable unless it can be inspected.
+
+- List **all** unresolved decisions in the plan, including those resolved under
+  §18.2, each with its classification and a one-line justification.
+- Carry that classification into the completion report so it can be audited after
+  the fact.
+- If later evidence shows that a decision classified under §18.2 in fact belonged
+  to §18.3, correct it under §12.1 — at the place where the original
+  classification was published, not only in a later note.
+
+If implementation evidence invalidates a material plan assumption, update the plan
+and repeat the same classification. Stop only if the newly discovered decision
+falls under §18.3.
+
+### 18.2 Decision authority
+
+Within an approved scope, resolve routine technical decisions from repository
+evidence in this order:
+
+1. authoritative issue acceptance criteria and DoD;
+2. explicit repository contracts and ADRs;
+3. these `AGENTS.md` rules;
+4. intentional behavior encoded by tests;
+5. repository documentation and operational contracts;
+6. established implementation patterns;
+7. the narrowest change consistent with the above.
+
+Prefer the solution that preserves existing invariants, changes the smallest
+legitimate surface, introduces the least new configuration or abstraction, and is
+easiest to verify behaviorally.
+
+Do not invent product requirements to resolve ambiguity.
+
+### 18.3 Mandatory stop conditions
+
+Stop for human input when safe continuation requires:
+
+- resolving contradictory authoritative requirements;
+- a product or externally visible behavior decision not established by repository
+  evidence;
+- a new security, privacy, authorization, retention, or data-governance policy
+  decision;
+- a material architectural, persistence, migration, compatibility, cutover, or
+  rollback decision without an established precedent or approved plan;
+- adding a new production dependency — SDK, service client, runtime package,
+  hosted service, or equivalent supply-chain commitment — unless explicitly
+  authorized by the issue or approved plan;
+- violating an explicit hard constraint;
+- destructive or irreversible action not explicitly authorized;
+- missing permissions, credentials, infrastructure, or evidence that prevents
+  implementation itself rather than only preventing verification.
+
+A failing test is not itself a stop condition.
+
+An unavailable verification environment is not a stop condition when the task
+defines `UNVERIFIED`, `NOT RUN`, or equivalent handling.
+
+When stopping, state the conflict, the evidence establishing it, work already
+completed, viable alternatives, the recommended resolution, and what can continue
+without the decision.
+
+---
+
+## 19. Root-cause-driven review and repair
+
+Review findings, CI failures, and test failures are evidence of failure modes, not
+an ordered patch queue.
+
+### 19.1 Collect and validate before fixing
+
+Before editing in response to a review round, collect all currently available
+relevant findings where practical.
+
+Classify each as:
+
+- `VALID`;
+- `VALID — SYMPTOM OF BROADER ROOT CAUSE`;
+- `DUPLICATE`;
+- `ALREADY RESOLVED`;
+- `OUT OF SCOPE`;
+- `INCORRECT / NOT APPLICABLE`;
+- `REQUIRES HUMAN DECISION`.
+
+Validate automated-review findings independently against the repository and the
+authoritative requirements. Do not accept a finding solely because an automated
+reviewer produced it, and do not reject one merely because the current behavior
+was intentional or the suite is green.
+
+Do not begin fixing finding #1 merely because it appeared first.
+
+### 19.2 Group by root cause
+
+Group related valid findings and identify:
+
+`findings → violated invariant → root cause → affected surface → coherent repair`
+
+Prefer repairing the violated invariant over patching individual symptoms.
+
+A root-cause repair may legitimately touch more code than the originally reported
+symptom, but it remains subject to the scope discipline in §13. Root-cause
+analysis is not permission for unrelated cleanup or opportunistic refactoring.
+
+### 19.3 Search beyond the reported symptom
+
+Before declaring a root cause resolved, search for other manifestations of the
+same failure mode.
+
+Do not treat a symbol-name search as an exhaustive behavioral inventory; apply the
+evidence rule in §14.1.
+
+Where practical, derive the affected surface structurally from authoritative
+repository structure — registries, exports, filesystem contents, schemas,
+configuration, contracts, or backend interfaces.
+
+Where structural derivation is impractical, prefer tests or inverted defaults that
+make omitted members fail visibly rather than relying on an assumed-complete
+inventory.
+
+If the same root cause exists outside the legitimate PR scope and repairing it
+would materially broaden the change, follow §13: document and escalate or split it
+rather than silently expanding the PR.
+
+### 19.4 Repair the invariant, not the comment
+
+For each root-cause group:
+
+1. state the root cause;
+2. define the invariant that must hold;
+3. identify the legitimate affected surface;
+4. implement the narrowest coherent repair;
+5. add or strengthen regression evidence;
+6. apply §9.1 mutation-resistance reasoning;
+7. verify relevant equivalent paths and contracts under §16.
+
+A finding is resolved when the underlying supported failure mode is no longer
+reachable, or when evidence establishes that the finding was not applicable — not
+merely when the originally mentioned line changes.
+
+### 19.5 Properties that look like guarantees
+
+Apply §14.1 when implementation structure appears to establish a guarantee merely
+because an artifact exists.
+
+- **Sets should be derived.** For supported keys, backends, tables, scenarios,
+  providers, matrix rows, persisted variants, configuration variables, or
+  equivalent sets, prefer deriving membership from an authoritative source over
+  maintaining a second enumeration. If a manual list is unavoidable, require an
+  executable consistency check that fails when reality diverges from it.
+- **Written state needs a consumer.** A field, marker, status, registry entry, or
+  metadata value does not establish functional behavior merely because production
+  code writes it. Identify the production path that reads and acts on it;
+  otherwise the claimed behavior is incomplete or `UNVERIFIED`.
+- **Existing checks must actually execute.** A test, validation command, matrix,
+  or guard present in the repository is not enforcement evidence unless the
+  required CI or verification path runs it.
+
+Do not substitute a comment asking future maintainers to preserve these
+relationships for executable verification where such verification is practical.
+
+### 19.6 Findings ledger
+
+For a non-trivial review batch, maintain a concise ledger:
+
+`finding → validation → root-cause group → invariant → repair → verification → status`
+
+Use it to distinguish multiple symptoms of one defect, recurrence of a previously
+repaired root cause, genuinely new defects, and rejected or out-of-scope findings.
+
+The number of closed review comments is not a quality metric.
+
+---
+
+## 20. Adversarial review
+
+After implementation and required verification, review the complete resulting diff
+as if it were an unfamiliar PR written by another developer.
+
+Do not defend the implementation because you authored it. Do not treat a green
+suite or the implementation plan as evidence of correctness.
+
+Re-read the authoritative issue and apply §2, §4–§16 and §17 from scratch, against
+the final diff rather than the files remembered from implementation.
+
+In addition to those rules, explicitly check:
+
+- whether the reported examples are symptoms of a broader invariant failure;
+- TOCTOU and competing-operation orderings where state can change concurrently;
+- retry and duplicate-execution behavior where operations may repeat;
+- backend parity where multiple implementations expose one contract;
+- adapters, wrappers, injected objects, and restored state that a name-based
+  inventory may have missed;
+- derived versus manually enumerated sets;
+- written state that has no production consumer;
+- required checks or tests that exist but are not executed by the actual CI path.
+
+Collect the findings from this pass before repairing them, then process them
+through §19 — including your own findings.
+
+---
+
+## 21. Repair cycles, review rounds, and communication
+
+### 21.1 Repair loop
+
+A first green suite is not completion.
+
+`implement → verify → adversarial review → root-cause analysis → repair → verify`
+
+Repeat while new in-scope blocking defects are found.
+
+Do not leave a known in-scope `P0`, `P1`, or completion-blocking `P2` unfixed
+merely because it was discovered after the first implementation pass.
+
+Any repair that would materially expand the approved PR scope remains governed by
+§13 and §19.3; this loop is not permission to absorb a separate issue into the
+current PR.
+
+### 21.2 External review batches
+
+When an automated reviewer, CI, or a human reviewer supplies multiple findings:
+
+`collect → validate → group → root cause → derive affected surface → repair → verify → adversarial review`
+
+Treat a proposed reviewer fix as a suggestion: validate the reported defect and
+the proposed remedy independently.
+
+Finish collecting the current review round before beginning repairs where
+practical, so related findings can be analyzed together.
+
+**In automated review loops this rule applies unchanged.** A round is collected
+before repair begins; the appearance of an individual comment is not a trigger to
+edit the line it mentions.
+
+### 21.3 Re-review after repair
+
+A later review must verify the repaired root cause, not only the line originally
+mentioned.
+
+Ask:
+
+- Is the original failure mode now unreachable?
+- Does the invariant hold across the legitimate affected surface?
+- Did an adapter, wrapper, alternate backend, restored object, or injected
+  dependency preserve the same defect?
+- Did the repair introduce another failure mode?
+- Does regression evidence protect the invariant?
+- Would the relevant test fail if the repair were removed?
+
+If a later finding is another symptom of an earlier root cause, reopen that
+root-cause group rather than treating it as an unrelated finding.
+
+### 21.4 Communication and approval checkpoints
+
+Autonomous implementation does not mean silent architectural decision-making.
+
+For a single bounded PR, avoid approval requests for routine implementation
+details and ordinary repair cycles.
+
+Report separately and obtain approval when:
+
+- §18.3 requires human input;
+- a material architectural decision is discovered or changed;
+- an approved multi-stage plan must change materially;
+- a legitimate root-cause repair crosses the current PR boundary and requires a
+  scope decision;
+- a new production dependency is proposed.
+
+Short progress reports are appropriate at meaningful boundaries in multi-stage
+work, especially when they expose new architectural information, invalidate an
+inventory assumption, or affect later stages.
+
+Do not interrupt merely to narrate routine edits, individual test runs, or each
+reviewer comment.
+
+### 21.5 Completion
+
+A task is `COMPLETE` when:
+
+- current in-scope requirements are implemented;
+- required locally executable verification has run;
+- unavailable evidence is explicitly classified rather than fabricated;
+- adversarial review has completed;
+- known in-scope blocking defects have been repaired;
+- the final diff and repository state have been inspected;
+- remaining risks and `UNVERIFIED` / `NOT RUN` items are stated.
+
+Otherwise the task is either still in the repair loop or `BLOCKED` under §18.3.
+
+For each completed PR, provide one concise completion report covering:
+implementation, root causes repaired, additional manifestations discovered beyond
+the original findings, verification performed and its result, unavailable
+evidence, remaining risks, decision classification under §18.1, and the final
+repository/commit state.
