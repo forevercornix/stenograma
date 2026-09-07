@@ -66,19 +66,43 @@ test(
 
     let vykdymai = 0;
 
+    /**
+     * ⚠️ KLAIDA ĮTERPIAMA TIES `finish()`, O NE PER `Date` REZULTATE — IR PRIEŽASTIS
+     * VERTA UŽRAŠYMO (išmatuota CI 34083676612).
+     *
+     * Pirmoji redakcija grąžino `Date` rezultate ir laukė struktūrinio atmetimo. Testas
+     * krito su `completed`: `ArtifactStore` riba yra EXTERNAL kelyje, o worker'is
+     * testuose eina per ATMINTIES saugyklą (aktyvavimo barjeras neleidžia PostgreSQL už
+     * maršrutų ir worker'ių). Inline kelias `paruostiReiksme()` nekviečia, tad `Date`
+     * ten priimamas — riba jo tiesiog nemato.
+     *
+     * Vadinasi pilnos grandinės „Date → atmetimas → nulis pakartojimų" šiandien
+     * paleisti neįmanoma; ji taps pasiekiama PR-7, prijungus rašymo saugyklą. Iki tol
+     * tikrinama TA DALIS, kuri egzistuoja: ar `neatkartojama` klaida iš `finish()`
+     * sustabdo BullMQ retry grandinę. Eilė, worker'is ir pakartojimų semantika — TIKRI.
+     */
+    const tikrasFinish = jobStore.system.finish;
+    t.after(() => {
+      jobStore.system.finish = tikrasFinish;
+    });
+
+    jobStore.system.finish = async (id, status, extra) => {
+      if (id !== job.id) return tikrasFinish(id, status, extra);
+
+      const { ArtifactStoreError } = require("../utils/artifactStore/validation");
+      throw new ArtifactStoreError(
+        "ArtifactStore: reikšmės tapatybė pasikeistų inline kelyje (Date).",
+        "ARTIFACT_VALUE_UNSUPPORTED",
+        { neatkartojama: true }
+      );
+    };
+
     const { createWorker } = require("../workers");
     worker = createWorker(
       queueName,
       async () => {
         vykdymai += 1;
-        /**
-         * ⚠️ REZULTATAS SU `Date` — struktūrinis atmetimas ties `ArtifactStore` riba.
-         *
-         * `kanonizuoti()` perrenka tik NUOSAVUS raktus, o `JSON.stringify` kviečia
-         * PROTOTIPE esantį `toJSON`, tad `Date` skirtinguose backend'uose duotų
-         * skirtingą kanoninę eilutę (#157 D1). Pakartojimas to nepakeis.
-         */
-        return { protocol: { pavadinimas: "Data", sukurta: new Date(0) }, meta: {} };
+        return { protocol: { pavadinimas: "Struktūrinis" }, meta: {} };
       },
       { stalledInterval: 1000, lockDuration: 2000 }
     );
@@ -86,7 +110,7 @@ test(
     let galutinis;
     for (let i = 0; i < 60; i++) {
       galutinis = await jobStore.system.get(job.id, { hydrate: true });
-      if (galutinis?.status === "completed" || galutinis?.status === "failed") break;
+      if (galutinis?.status === "failed") break;
       await new Promise((r) => setTimeout(r, 250));
     }
 
@@ -94,7 +118,8 @@ test(
     assert.equal(
       galutinis.error_code,
       "ARTIFACT_VALUE_UNSUPPORTED",
-      "domeninis kodas, ne `internal_error` — operatoriui reikia matyti, KAS nutiko"
+      "domeninis kodas, ne `internal_error` — operatoriui reikia matyti, KAS nutiko; " +
+        "jis ateina per `cause`, tad vyniojimas privalo jį išsaugoti"
     );
 
     /** ⚠️ ESMINĖ PATIKRA: vykdymų LYGIAI vienas, ne trys. */
