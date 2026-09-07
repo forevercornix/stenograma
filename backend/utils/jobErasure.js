@@ -384,4 +384,4 @@ async function eraseOrphanedJobData(jobId, options = {}) {
   return outcome;
 }
 
-module.exports = { eraseJob, eraseOrphanedJobData };
+module.exports = { BUTINI_SYSTEM_METODAI, eraseJob, eraseOrphanedJobData };

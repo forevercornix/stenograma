@@ -37,8 +37,16 @@ const { createPostgresStore } = require("./jobStore/postgresStore");
  * ⚠️ SARGAS TIKRINA BUVIMĄ, NE ELGESĮ IR NE PARAŠĄ (§12.1). Metodo dingimą jis
  * pagauna; tai, kad metodas ims elgtis kitaip ar praras parametrą — ne. Parašo
  * pusę uždaro ne patikra, o generavimas (žr. `sukurti()`).
+ *
+ * ⚠️ SĄRAŠAS IMAMAS IŠ `jobErasure`, NE KARTOJAMAS (#157, PR-5).
+ *
+ * Iki tol čia gulėjo antra to paties sąrašo kopija, ir ji iškart atsiliko: PR-5
+ * pridėjo `deleteResultArtifacts`, `jobErasure` jo pareikalavo, o adapteris liko su
+ * senuoju trejetu — DR replay krito CI (`34142484397`). Tai TA PATI ketvirtojo atvejo
+ * forma, kurią PR-3 uždarė generavimu: sąrašas, gyvenantis dviese, išsiskiria tyliai,
+ * o kaina čia yra praleista artefaktų klasė su sėkmės kvitu.
  */
-const BUTINI = Object.freeze(["get", "update", "remove"]);
+const { BUTINI_SYSTEM_METODAI: BUTINI } = require("./jobErasure");
 
 /**
  * @param {import("pg").Pool} pool atkurtos bazės pool'as
