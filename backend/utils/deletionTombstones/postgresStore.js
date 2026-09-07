@@ -128,6 +128,37 @@ async function probeBarrierWithClient(vykdytojas) {
   }
 }
 
+/**
+ * NEIŠSPRĘSTOS ŽYMOS SĄLYGA — SQL POSAKIS KVIETĖJO UŽKLAUSAI (#157, PR-5).
+ *
+ * ⚠️ KODĖL POSAKIS, O NE ATSAKYMAS.
+ *
+ * Bandymų registro šlavėjui reikia predikato „šis job'as neturi neišspręstos žymos"
+ * TOJE PAČIOJE užklausoje, kurioje jis renka kandidatus: `erasure_marks` gyvena toje
+ * pačioje bazėje, tad vienas sakinys yra įmanomas, o du skaitymai paliktų langą, kuriame
+ * žyma spėtų atsirasti tarp patikros ir šalinimo. Tai ta pati TOCTOU forma, kurią 7.4e
+ * sprendžia `assertNotBarredWithClient()` — čia tik kita kryptis: ne „patikrink man", o
+ * „duok man sąlygą, kurią įdėsiu į savo `WHERE`".
+ *
+ * ⚠️ IR KODĖL ČIA, O NE KVIETĖJO MODULYJE. `erasure_marks` SQL neegzistuoja už šio
+ * katalogo ribų (`erasureMarks` tripwire per visą repo, #183). Autoritetas lieka vienas:
+ * lentelės vardą, stulpelį ir statuso reikšmę žino TIK šis modulis; kvietėjas gauna
+ * tekstą ir savo alias'ą.
+ *
+ * @param {string} alias kvietėjo lentelės alias'as, kurio `job_id` lyginamas
+ * @returns {string} `NOT EXISTS (...)` posakis be parametrų
+ */
+function neisspresptosZymosSalyga(alias) {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(String(alias))) {
+    throw new TypeError("neisspresptosZymosSalyga: alias privalo būti paprastas vardas.");
+  }
+
+  return (
+    "NOT EXISTS (SELECT 1 FROM erasure_marks m " +
+    `WHERE m.job_id = ${alias}.job_id AND m.status <> '${TOMBSTONE_STATUS.DELETED}')`
+  );
+}
+
 async function assertNotBarredWithClient(klientas, jobId) {
   if (!klientas || typeof klientas.query !== "function") {
     throw new TypeError("assertNotBarred: reikia kviečiančiojo DB kliento (transakcijos).");
@@ -659,6 +690,7 @@ function createErasureMarkStore(pool) {
 
 module.exports = {
   STULPELIAI,
+  neisspresptosZymosSalyga,
   assertNotBarredWithClient,
   probeBarrierWithClient,
   createErasureMarkStore,

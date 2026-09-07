@@ -187,6 +187,14 @@ async function valytiniBandymai(
   vykdytojas,
   { laukianciuRibaMs, atmestuRibaMs, kiekis = 200 }
 ) {
+  /**
+   * ⚠️ ŽYMŲ SĄLYGĄ DUODA AUTORITETAS, NE ŠIS MODULIS. `erasure_marks` SQL neegzistuoja
+   * už `deletionTombstones/` ribų (tripwire per visą repo, #183), tad lentelės vardą,
+   * stulpelį ir statuso reikšmę žino TIK jis; čia gaunamas tekstas su mūsų alias'u.
+   */
+  const { neisspresptosZymosSalyga } = require("./deletionTombstones/postgresStore");
+  const zymosSalyga = neisspresptosZymosSalyga("a");
+
   const { rows } = await vykdytojas.query(
     `SELECT a.attempt_id, a.job_id, a.storage_type, a.storage_key, a.busena, a.created_at,
             (a.created_at > now()) AS laikas_ateityje
@@ -195,25 +203,16 @@ async function valytiniBandymai(
         AND NOT EXISTS (
               SELECT 1 FROM job_results r WHERE r.storage_key = a.storage_key
             )
-        AND NOT EXISTS (
-              SELECT 1 FROM erasure_marks m WHERE m.job_id = a.job_id AND m.status <> $2
-            )
+        AND ${zymosSalyga}
         AND (
               a.created_at > now()
               OR a.created_at < now() - (
-                   CASE WHEN a.busena = $3 THEN $4 ELSE $5 END * INTERVAL '1 millisecond'
+                   CASE WHEN a.busena = $2 THEN $3 ELSE $4 END * INTERVAL '1 millisecond'
                  )
             )
       ORDER BY a.created_at
-      LIMIT $6`,
-    [
-      BUSENA.ISIPAREIGOTA,
-      "deleted",
-      BUSENA.LAUKIA,
-      Number(laukianciuRibaMs),
-      Number(atmestuRibaMs),
-      Number(kiekis),
-    ]
+      LIMIT $5`,
+    [BUSENA.ISIPAREIGOTA, BUSENA.LAUKIA, Number(laukianciuRibaMs), Number(atmestuRibaMs), Number(kiekis)]
   );
 
   return {
