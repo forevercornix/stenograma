@@ -133,7 +133,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
        *
        * ⚠️ TOMBSTONE PATIKRA LIEKA PIRMA (aukščiau) — 7.5a barjeras nekeičiamas.
        */
-      const jauEsantis = await jobStore.system.get(jobId);
+      const jauEsantis = await jobStore.system.get(jobId, { hydrate: true });
       const sprendimas = sprendimasPriesRestart(jauEsantis);
 
       if (sprendimas === RETRY_VEIKSMAS.REMONTUOTINA) {
@@ -365,8 +365,35 @@ function createWorker(queueName, processor, workerOptions = {}) {
             throw fatal;
           }
 
-          // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
-          const completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+          /**
+           * ⚠️ STRUKTŪRINIS ARTEFAKTO ATMETIMAS SUSTABDO RETRY GRANDINĘ (#157, PR-4).
+           *
+           * `neatkartojama: true` reiškia, kad pakartojimas duos TĄ PATĮ atmetimą:
+           * `Date` rezultate, NUL simbolis, neporinis surogatas. Be vyniojimo BullMQ
+           * kartotų `attempts` kartų, o kiekvienas bandymas yra PILNAS transkribavimas
+           * arba LLM kvietimas — tiksliai tai, ką #153 uždarė dydžio pusėje.
+           *
+           * ⚠️ PR-2 PADARĖ ŽENKLĄ, PR-4 JO PAISO. Iki šiol `neatkartojama` buvo
+           * GAMINAMAS, bet niekas jo neskaitė — savybė be ją paisančio kelio yra
+           * dokumentacija, ne savybė. Tai užrašyta PR-2 kaip `UNVERIFIED`, ir čia
+           * uždaroma.
+           *
+           * Seka precedentą 20 eilučių aukščiau (`assertResultWithinLimits`): ta pati
+           * forma, tas pats `cause` perdavimas, kad `_classifyError()` matytų domeninį
+           * kodą, ne `internal_error`.
+           */
+          let completedJob;
+          try {
+            // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
+            completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+          } catch (klaida) {
+            if (!klaida || klaida.neatkartojama !== true) throw klaida;
+
+            const { UnrecoverableError } = require("bullmq");
+            const fatal = new UnrecoverableError(klaida.message);
+            fatal.cause = klaida;
+            throw fatal;
+          }
           if (!completedJob) {
             throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
           }

@@ -307,6 +307,22 @@ vis tiek baigtųsi klaida.
 Tai PR-4 darbas, nes completion kelias `put()` kviečia būtent ten; PR-2 palieka
 paruoštą ženklą ir klasifikaciją, ne garantiją.
 
+⚠️ **ŠIS DoD PUNKTAS PR-4 METU LIEKA NEĮRODYTAS — IR NE VIEN DĖL AKTYVAVIMO.**
+
+Pirma priežastis buvo žinoma: `rasymoSaugykla` produkcijoje neįjungta (PR-7), o
+PostgreSQL kelią uždaro `POSTGRES_AKTYVAVIMAS_LEISTAS`, tad grandinė
+„struktūrinis atmetimas → nulis pakartojimų" nepaleidžiama nuo galo iki galo.
+
+Antra priežastis paaiškėjo šiame raunde ir yra svarbesnė: **validacija pririšta
+prie ne to sluoksnio**. Struktūrinį atmetimą gamina `ArtifactStore` riba, tad
+kelias, einantis pro ją (Redis, atmintis — būtent tie, kurie aktyvūs ŠIANDIEN),
+`Date` rezultatą priima ir jokio atmetimo negamina. Vadinasi, punktas neįrodomas
+ne todėl, kad grandinė neįjungta, o todėl, kad įjungus vieną jos galą kitas
+galas vis tiek liktų neuždengtas. Invariantas kyla iš `common.js` lygybės
+autoriteto, ne iš `ArtifactStore` — išmatuota ir aprašyta **#298**.
+
+Iki #298 uždarymo šis DoD punktas žymimas `PARTIAL / UNVERIFIED`, ne `DONE`.
+
 **DoD, kuriuos uždaro**
 - „Vienas `ArtifactStore` production boundary; business/service sluoksnis neatlieka tiesioginio filesystem/S3 I/O."
 - „Inline, filesystem ir S3-compatible implementacijos praeina tą patį `artifactStoreContract`."
@@ -413,7 +429,17 @@ gamyboje ir **127 testuose** (34 failai). Mechaninis 127 vietų pakeitimas į
 tikrąjį pakeitimą. Vietoj to PR-3 uždarė MECHANIZMĄ, kuris ketvirtąjį atvejį paslėpė:
 `restoredJobStore` metodai generuojami, tad adapteris nebegali susiaurinti parašo.
 
-Apvertimas lieka PR-4 darbu — jis vis tiek liečia rašymo kelią, tad kaina ten mažesnė.
+✅ **PADARYTA PR-4 METU.** `system.get()` be `hydrate` dabar meta `TypeError`; viešas
+`jobStore.get()` nepakitęs (ten sprendžia operacija).
+
+⚠️ **IŠMATUOTAS REZULTATAS: 0 naujų gamybos kvietėjų.** Apvertimas nesugriovė nė vieno
+produkcinio kelio, kurio nebūtų PR-3 lentelėje — visi septyni jau ten buvo. Vadinasi
+keturios paieškos galiausiai BUVO pilnos gamybos kodui; bet tai žinoma tik dabar, po
+struktūrinės patikros, o ne tada, kai sąrašas buvo skelbiamas baigtu. Skirtumas tarp
+„buvo teisinga" ir „buvo įrodyta" — ir būtent jį apvertimas ir uždaro.
+
+Kaina: 127 kvietimai 34 testų failuose gavo eksplicitinę vėliavą (mechaninis pakeitimas,
+išsaugantis ankstesnį elgesį — numatytoji reikšmė buvo `true`).
 
 **⚠️ ĮĖJIMO SĄLYGOS — ABI PRIIMTOS, VIENOJE VIETOJE.**
 
@@ -430,6 +456,61 @@ skirtingus skyrius. Surašomi čia, kad PR-4 pradžioje nereikėtų jų ieškoti
    klausimas — išorinio objekto čia nėra.
 
 Abi sąlygos keičia rašymo kelio FORMĄ, tad įterptos vėliau reikštų perrašymą.
+
+⚠️ **ATVIRA RIZIKA, LIEČIANTI AKTYVŲ KELIĄ: #298.** Kanoninė rezultato tapatybė
+neišlieka po persistavimo, tad teisėtas pakartojimas Redis kelyje gauna
+`RESULT_CONFLICT` (išmatuota prieš tikrą Redis). Tai ne #157 grandinės ateities
+klausimas: Redis aktyvuotas, PostgreSQL — ne. Sprendimas privalo kilti iš `common.js`
+lygybės autoriteto ir padengti VISUS persistentinius backend'us.
+
+Paveiktų reikšmių predikatas IŠMATUOTAS ir siauras: **reikšmėje bet kokiame gylyje yra
+objektas, turintis `toJSON`** (`kanonizuoti()` renka nuosavus raktus ir jo nemato,
+`JSON.stringify` jį kviečia). `Date` yra šio predikato atvejis, ne atskira klasė;
+`Map`, `Set`, `NaN`, `Infinity`, `undefined` ir klasės be `toJSON` abiejose pusėse
+virsta tuo pačiu ir į apimtį nepatenka.
+
+⚠️ **PR-4 REGISTRAS YRA WRITE-ONLY — SPRENDIMAS, NE PRALEIDIMAS.**
+
+Iš penkių sąlygų, priimtų kartu su variantu (b), PR-4 įgyvendina DVI: įrašas atsiranda
+prieš `put()`, ir cleanup liečia tik savo bandymą. Trys likusios yra būtent tos, kurios
+paverčia registrą VEIKIANČIU, ir visos trys yra PR-5 apimtis („Erasure ir registro
+vartotojai"):
+
+1. **erasure trina pagal registrą**, ne pagal `storage_key`;
+2. **šlavėjas** neįsipareigotiems bandymams;
+3. **retencija ≥ prikėlimo horizontai**, išvedama iš `revivalHorizonsMs()`.
+
+⚠️ **PR-5 ŠLAVĖJUI REIKALINGA PRIELAIDA PADARYTA DB INVARIANTU (PR-4 pabaigoje).**
+
+„Job'as turi daugiausia VIENĄ įsipareigotą bandymą" iki šio raundo buvo modulio
+susitarimas `attemptRegistry.isipareigoti()` viduje. Spragą (du `committed` įrašai po
+remonto) rado testas, ne konstrukcija — o testas įrodo nebuvimą tik ten, kur nuėjo.
+Šlavėjas rems būtent šia prielaida: du įsipareigoti bandymai reikštų arba naudojamo
+objekto ištrynimą, arba nebenaudojamo palikimą. Todėl pridėtas dalinis unikalus
+indeksas `UNIQUE (job_id) WHERE busena = 'committed'` (migracija `1756400000000`) —
+tas pats precedentas kaip PR-1, kur vientisumo metaduomenys tapo DB invariantu.
+
+Pasekmė kodui: dalinio indekso atidėti negalima, tad perėjimas skaidomas į DU sakinius
+(nuvertinimas, tada įsipareigojimas) toje pačioje transakcijoje — vieno `CASE` sakinio
+eilučių tvarka neapibrėžta, ir jis kristų atsitiktinai.
+
+⚠️ **KODĖL LANGAS NEPAVOJINGAS, IR KODĖL TAI NĖRA „UŽDARYTA ORPHAN PROBLEMA".**
+External rašymas įsijungia TIK gavus `rasymoSaugykla`, o produkcinis prijungimas vyksta
+PR-7. Skaitymo pusė (PR-5) atsiranda ANKSČIAU, nei kelias tampa pasiekiamas — write-only
+langas niekada nepersidengia su diegimu, kuris realiai rašo external rezultatus.
+
+⚠️ **IR TAI YRA PRIKLAUSOMYBĖ, NE TVARKOS SUTAPIMAS.**
+
+**`rasymoSaugykla` produkcinis prijungimas negali įvykti anksčiau, nei registro skaitymo
+pusė (erasure pagal registrą + šlavėjas).** Remtis PR numeracijos seka būtų prielaida:
+jei PR-7 kada nors aplenktų PR-5 (pvz. dėl skubaus poreikio įjungti external saugyklą),
+langas atsivertų TYLIAI, ir niekas to nesusietų su šiuo sprendimu. Todėl sąlyga
+užrašoma kaip reikalavimas prijungimui, ne kaip pastaba apie eiliškumą.
+
+⚠️ **BDAR PRASME TAI REIŠKIA:** iki PR-5 nutrūkęs procesas paliktų objektą, kurio
+niekas nepašalins — registras jį UŽRAŠO, bet neskaito. Kol external rašymas
+neprijungtas, tokių objektų atsirasti negali; nuo prijungimo momento (PR-7) skaitymo
+pusė privalo jau egzistuoti. Tvarka yra garantijos dalis, ne patogumas.
 
 **Ką palieka veikiantį:** external completion veikia `fs` backend'e; sargas
 (`postgresStore.js:989-1007`) **dar lieka**, nes erasure ir backup keliai
@@ -580,6 +661,16 @@ susitarimo, o dėl konstrukcijos.
   nutrūkusį cleanup tarp `put()` ir commit'o ir `fs` `.tmp` likučius. Trečiajam tai
   reiškia, kad laikinas vardas irgi registruojamas arba IŠVEDAMAS iš registruoto
   bandymo — kitaip lieka ketvirtas veidas;
+
+  ✅ **ĮVYKDYTA PR-4 PABAIGOJE (`REOPENED`, Codex #294).** Iki tol vardas buvo
+  atsitiktinis (`fsStore.js:407`), tad sąlyga liko neįgyvendinta ir ketvirtas veidas
+  egzistavo: registre — tik galutinis raktas. Dabar vardą duoda `laikinasVardas(raktas)`,
+  ir šlavėjas (PR-5) jį apskaičiuoja iš `storage_key`; antros registro eilutės nereikia.
+
+  ⚠️ **Vardas NĖRA `<raktas>.tmp`, ir priežastis išmatuota:** segmento riba (255 baitų)
+  sutampa su `NAME_MAX`, tad bet koks sufiksas raktą, kurį riba priėmė, paverstų
+  `ENAMETOOLONG` (255 + `.tmp` = 259). Fiksuoto ilgio santrauka iš rakto tenkina abu
+  reikalavimus: išvedama ir neauga;
 - **erasure trina pagal REGISTRĄ, ne pagal `storage_key`**: job'o ištrynimas pašalina
   visus to job'o bandymų objektus, ne tik laimėjusio;
 - **retencija ≥ eilės prikėlimo horizontai**, IŠVEDAMA iš `revivalHorizonsMs()`, ne
@@ -753,6 +844,27 @@ verdiktas lieka „nepaneigta", ne „įrodyta"; įvardijama PR aprašyme.
 **Ką palieka veikiantį:** ištrynimas šalina ir external objektą; registras
 nebemeluoja apie saugojimo vietą.
 
+⚠️ **ĮĖJIMO SĄLYGA: ŠLAVĖJAS PRIVALO BANDYTI ABU VARDUS** (#294 uždarymas).
+
+PR-4 eksportavo `laikinasVardas(raktas)` (`utils/artifactStore/fsStore.js`) būtent tam,
+kad šlavėjas laikino failo vardą apskaičiuotų iš registro `storage_key`. Bet **iš
+`pending` eilutės neįmanoma pasakyti, kurioje `rename` pusėje procesas nutrūko**:
+
+| Kada nutrūko | Kas saugykloje egzistuoja |
+|---|---|
+| prieš `rename` | **tik** `laikinasVardas(storage_key)` |
+| po `rename`, prieš commit'ą | **tik** `storage_key` |
+| po cleanup arba jam nespėjus prasidėti | nė vieno |
+
+Vadinasi šlavėjas tikrina ABU adresus, o „nė vieno nėra" yra **sėkmė**, ne gedimas:
+eilutė tada tiesiog uždaroma. Vieno adreso tikrinimas praleistų pusę atvejų, o testas su
+vienu scenarijumi liktų žalias — todėl PR-5 testai privalo dengti abi puses atskirai.
+
+⚠️ Tai galioja `fs` saugyklai. `s3` laikino objekto neturi (`put` yra vienas
+`PutObject`), tad ten klausimas neegzistuoja — bet šlavėjas privalo tai spręsti pagal
+eilutės `storage_type`, ne prielaida, ta pačia taisykle kaip visi kiti per-row
+sprendimai šiame skyriuje.
+
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
 - `backend/services/lifecycleService.js` — `STORED_IN_JOB_RECORD` šaka (`:129`, `:404-405`)
@@ -789,9 +901,34 @@ grįžtų prie eksplicitiškai atmestos aktyvios konfigūracijos.
 
 Todėl PR-3 metaduomenų `SELECT` praplečiamas rezultato **reference** laukais
 (`storage_type`, `storage_key`, `bytes`, `checksum`) — **be `payload`**, tad
-hidratacijos riba nepažeidžiama: tai metaduomenys, ne turinys. `rowToJob()` juos
-pateikia atskiru lauku (pvz. `job.resultStorage`), aiškiai atskirtu nuo
-`job.storageKey`.
+hidratacijos riba nepažeidžiama: tai metaduomenys, ne turinys.
+
+⚠️ **PATAISYTA: NUORODA LIEKA VIDINĖ, O VARTOTOJAI GAUNA STORE LYGMENS METODĄ.**
+
+Ankstesnė šio skyriaus redakcija siūlė `rowToJob()` pateikti juos atskiru job'o lauku
+(`job.resultStorage`). Tai buvo klaidinga DVIEM atžvilgiais, ir abu verti užrašymo,
+nes eilutė jau kartą suklaidino:
+
+1. **Ji laužtų formos paritetą.** `memory` ir `redis` tokių laukų neturi ir negali
+   turėti, o `jobStoreBackendContract` nuo PR-3 lygina grąžinamų laukų AIBĘ. Naujas
+   laukas iškart duotų trečią divergenciją tame pačiame teste, kuris tam ir atsirado.
+2. **Ir PR-5 užduočiai jos neužtektų.** Erasure privalo trinti PAGAL REGISTRĄ — visus
+   job'o bandymus, ne tik laimėjusį. `job.resultStorage` pateiktų VIENĄ nuorodą, būtent
+   tą, kuri jau saugi, nes referencuota. Pralaimėjusių bandymų objektai, dėl kurių
+   registras ir egzistuoja, į job modelį nepatektų iš principo.
+
+**Teisinga forma:** store lygmens metodas, grąžinantis VISAS job'o rezultato artefaktų
+nuorodas — laimėjusią (`job_results`) plius registro bandymus (`job_result_attempts`).
+Ne job objekte, o greta jo.
+
+Precedentas jau yra: `listReferencedStorageKeys()` daro tiksliai tą patį audio pusėje ir
+yra backend kontrakto dalis. PR-5 reikia jo analogo rezultatams — tos pačios šeimos
+metodas, tas pats **fail-safe** elgesys (`null`, kai surašyti nepavyksta, kad kvietėjas
+NETRINTŲ vietoj „nieko nenaudojama"), ir tas pats **elgesiu grįstas** kontrakto testas,
+kurio reikalauja #157 body.
+
+`memory` ir `redis` jį įgyvendina trivialiai (bandymų registro jie neturi, tad grąžina
+tai, ką turi), ir paritetas išlieka METODŲ AIBĖS lygmenyje, ne job formos.
 
 Visi trys vartotojai eina per TĄ PATĮ kelią; nė vienas neskaito `job_results`
 savo užklausa — kitaip atsirastų trečia rezultato vietos interpretacija.
@@ -898,6 +1035,15 @@ neįmanoma. Tai stipriau nei statinė patikra ir silpniau nei formalus įrodymas
 ### PR-7 — Backup/restore, dokumentai, sargo pašalinimas
 
 **Ką palieka veikiantį:** visą grandinę; tik čia dingsta fail-closed sargas.
+
+⚠️ **ĮĖJIMO SĄLYGA: `rasymoSaugykla` PRIJUNGIMAS REIKALAUJA REGISTRO SKAITYMO PUSĖS.**
+
+Produkcinis prijungimas (`initializePostgres()` paduoda saugyklą) negali įvykti anksčiau,
+nei veikia erasure pagal registrą IR neįsipareigotų bandymų šlavėjas (PR-5). Priešingu
+atveju nutrūkęs procesas paliktų objektą su transkripcija, kurio niekas nepašalins.
+
+Tai PRIKLAUSOMYBĖ, ne PR numeracijos pasekmė: jei šis PR kada nors aplenktų PR-5, sąlyga
+lieka galioti, o prijungimas — atidedamas.
 
 **Vidinė commit'ų tvarka — privaloma, ne rekomenduojama**
 

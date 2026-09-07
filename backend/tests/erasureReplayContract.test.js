@@ -79,12 +79,12 @@ test("TRUMPASIS KELIAS `already_deleted`: lifecycle palieka job'ą, replay jį p
   /** KONTROLĖ: be jos nežinotume, ar skirtumas apskritai egzistuoja. */
   const kontrole = await lifecycleService.deleteJobArtefacts(job, job.id, {});
   assert.equal(kontrole.status, "already_deleted");
-  assert.ok(await jobStore.system.get(job.id), "kontrolė: lifecycle job'o NEPAŠALINO");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "kontrolė: lifecycle job'o NEPAŠALINO");
 
   const rez = await erasureReplay.replay({ zymos: await tombstones.listAll(), actor: "op" });
 
   assert.deepEqual(rez.istrinta, [job.id]);
-  assert.equal(await jobStore.system.get(job.id), null, "replay job'ą pašalino");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "replay job'ą pašalino");
 });
 
 test("TRUMPASIS KELIAS `in_progress`: pending be claim'o — dažniausias atvejis po nukirpimo", async () => {
@@ -95,13 +95,13 @@ test("TRUMPASIS KELIAS `in_progress`: pending be claim'o — dažniausias atveji
 
   const kontrole = await lifecycleService.deleteJobArtefacts(job, job.id, {});
   assert.equal(kontrole.status, "in_progress");
-  assert.ok(await jobStore.system.get(job.id), "kontrolė: lifecycle job'o NEPAŠALINO");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "kontrolė: lifecycle job'o NEPAŠALINO");
 
   const zymos = (await tombstones.listAll()).filter((z) => z.jobId === job.id);
   const rez = await erasureReplay.replay({ zymos, actor: "op" });
 
   assert.deepEqual(rez.istrinta, [job.id]);
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
   assert.equal((await tombstones.get(job.id)).status, tombstones.TOMBSTONE_STATUS.DELETED);
 });
 
@@ -113,13 +113,13 @@ test("TRUMPASIS KELIAS `tombstone_unresolved`: `deletion_failed` žyma", async (
 
   const kontrole = await lifecycleService.deleteJobArtefacts(job, job.id, {});
   assert.equal(kontrole.status, "tombstone_unresolved");
-  assert.ok(await jobStore.system.get(job.id), "kontrolė: lifecycle job'o NEPAŠALINO");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "kontrolė: lifecycle job'o NEPAŠALINO");
 
   const zymos = (await tombstones.listAll()).filter((z) => z.jobId === job.id);
   const rez = await erasureReplay.replay({ zymos, actor: "op" });
 
   assert.deepEqual(rez.istrinta, [job.id], "`failed` žyma taip pat replay'inama");
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 
   /**
    * ⚠️ ŠI EILUTĖ RADO DEFEKTĄ. Grafe nėra `FAILED → DELETED`, tad be perėjimo per
@@ -282,7 +282,7 @@ test("KRITINĖ NESĖKMĖ: `eraseJob()` grįžta be išimties — žyma NEUŽDARO
   assert.equal(rez.nesekmes.length, 1);
   assert.match(rez.nesekmes[0].priezastis, /ištrynimas nepavyko/);
 
-  assert.ok(await jobStore.system.get(job.id), "job'as paliktas pakartojimui");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "job'as paliktas pakartojimui");
   assert.notEqual(
     (await tombstones.get(job.id)).status,
     tombstones.TOMBSTONE_STATUS.DELETED,
@@ -307,7 +307,7 @@ test("TVARKA: kvitas rašomas PRIEŠ žymos uždarymą — jo gedimas palieka ž
 
   assert.deepEqual(pirmas.istrinta, [], "sėkmė nedeklaruojama be patvirtinto kvito");
   assert.equal(pirmas.nesekmes.length, 1);
-  assert.equal(await jobStore.system.get(job.id), null, "duomenų PAŠALINIMAS jau įvyko");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "duomenų PAŠALINIMAS jau įvyko");
 
   /**
    * ⚠️ ŠERDIS: žyma NEUŽDARYTA. Uždarius ją prieš kvitą, ši būsena būtų
@@ -519,7 +519,7 @@ test("#157 REPLAY ištrina, nors rezultato artefaktas SUGADINTAS", async () => {
   });
 
   assert.deepEqual(rez.istrinta, [job.id], "ištrynimas privalo pavykti");
-  assert.equal(await jobStore.system.get(job.id), null, "job'as pašalintas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "job'as pašalintas");
   assert.equal(
     (await tombstones.get(job.id)).status,
     tombstones.TOMBSTONE_STATUS.DELETED,

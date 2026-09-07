@@ -564,7 +564,7 @@ test("#160 HTTP: admin B ištrina admin A job'ą TIK per override, ne kaip savin
    * ten jis būtų aiškinamas kaip įrašas su `undefined` laukais ir galėtų
    * paleisti valymą.
    */
-  assert.equal(await jobStoreForOwnership.system.get(jobId), null, "realiai ištrinta");
+  assert.equal(await jobStoreForOwnership.system.get(jobId, { hydrate: true }), null, "realiai ištrinta");
 
   // Bet SKAITYTI to paties job'o admin A negalėjo – override tik trynimui.
   const kitas = await request(app)
@@ -648,7 +648,7 @@ test("#160 HTTP: session-admin svetimą job'ą IŠTRINA (override)", async () =>
   const res = await request(app).delete(`/api/jobs/${jobId}`).set("Cookie", adminCookie);
 
   assert.equal(res.status, 204, "trynimo override leidžiamas");
-  assert.equal(await jobStoreForOwnership.system.get(jobId), null, "realiai ištrinta");
+  assert.equal(await jobStoreForOwnership.system.get(jobId, { hydrate: true }), null, "realiai ištrinta");
 });
 
 test("#160 HTTP: eilinis vartotojas NEVALO našlaičio", async () => {
@@ -850,5 +850,5 @@ test("#183 HTTP: lygiagretus admin override gauna 202, ne 503", async () => {
    * kodas to neįrodo - jis atrodytų vienodai ir tada, jei duomenys jau būtų
    * ištrinti, o atsakymas tik meluotų.
    */
-  assert.ok(await jobStoreForOwnership.system.get(jobId), "destruktyvus darbas NEPRADĖTAS");
+  assert.ok(await jobStoreForOwnership.system.get(jobId, { hydrate: true }), "destruktyvus darbas NEPRADĖTAS");
 });

@@ -663,9 +663,34 @@ module.exports = {
    */
   system: {
     /**
-     * @param {{hydrate?: boolean}} [nustatymai] `hydrate: false` - tik metaduomenys (#157, PR-3)
+     * ⚠️ `hydrate` YRA PRIVALOMAS, IR NUMATYTOSIOS REIKŠMĖS ČIA NĖRA (#157, PR-4).
+     *
+     * Keturios paieškos PR-3 metu davė keturis nepilnus sąrašus (store metodai →
+     * maršrutai → `jobStore.get()` vardas → `restoredJobStore` adapteris), ir visos
+     * keturios rėmėsi SINTAKSINIU raktu. Adapteris `store` perpakuoja nauju vardu —
+     * vardas dingsta, paieška pagal vardą dingsta kartu. Penktas grep duotų penktą
+     * nepilną sąrašą.
+     *
+     * Apvertus numatytąją reikšmę, aibė nustoja būti SURAŠOMA: kiekvienas kvietėjas —
+     * dabartinis, būsimas, per adapterį ar tiesiogiai — privalo pasirinkti, o
+     * praleistus parodo testai, ne atmintis.
+     *
+     * ⚠️ VIEŠAS `jobStore.get()` (transporto kelias) numatytosios reikšmės NEKEIČIA:
+     * ten sprendimą priima OPERACIJA (`jobAccessPolicy.reikiaRezultato()`), tad
+     * kvietėjui nėra ko pasirinkti. Griežtinamas TIK sisteminis kelias.
+     *
+     * @param {string} id
+     * @param {{hydrate: boolean}} nustatymai PRIVALOMA - žr. aukščiau
      */
-    get: async (id, nustatymai = {}) => {
+    get: async (id, nustatymai) => {
+      if (!nustatymai || typeof nustatymai.hydrate !== "boolean") {
+        throw new TypeError(
+          "jobStore.system.get(): `hydrate` privalomas (#157, PR-4). Nurodykite " +
+            "`{ hydrate: true }`, jei reikia `job.result`, arba `{ hydrate: false }` " +
+            "metaduomenų keliui — numatytoji reikšmė čia tyliai grąžintų turinį."
+        );
+      }
+
       await ensureInit();
       return store.get(id, nustatymai);
     },

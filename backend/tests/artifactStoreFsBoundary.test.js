@@ -7,7 +7,7 @@ const fsp = require("node:fs/promises");
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
-const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
+const { createFsArtifactStore, laikinasVardas } = require("../utils/artifactStore/fsStore");
 const { operacijosSuRaktu } = require("./helpers/artifactStoreScenarios");
 
 /**
@@ -167,6 +167,74 @@ test("gedimas PRIEŠ `rename` nepalieka laikino failo", async (t) => {
     ["pirmas.json"],
     "nei objekto, nei `.tmp` likučio"
   );
+});
+
+test("laikino failo vardas IŠVEDAMAS iš rakto — šlavėjas jį apskaičiuoja", async (t) => {
+  /**
+   * ⚠️ PENKTOJI VARIANTO (b) SĄLYGA: `.tmp` LIKUTIS PRIVALO BŪTI PASIEKIAMAS PER
+   * REGISTRĄ (#157, PR-4; Codex #294).
+   *
+   * PR-2 metu `.tmp` likučiai buvo NUKREIPTI į PR-4 orphan sprendimą su pažadu
+   * „registras dengia ir šitą: laikinas failas tampa registruotu bandymu". Su
+   * atsitiktiniu vardu pažadas liko neįvykdytas: registre yra tik galutinis raktas, o
+   * `list(prefix)` pagal A3 ribą nėra — vadinasi procesui nutrūkus tarp `writeFile` ir
+   * `rename` DB kryptimi orientuotas šlavėjas objekto nerastų NIEKADA.
+   *
+   * Vardas dabar išvedamas iš rakto, tad antros registro eilutės nereikia: turėdamas
+   * `storage_key`, šlavėjas (PR-5) apskaičiuoja ir laikiną vardą.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  const raktas = "results/joboo/bandymas.json";
+
+  /** Šaknis paruošiama iš anksto: starto zondas irgi kviečia `rm`. */
+  await saugykla.put("results/joboo/pirmas.json", { text: "šaknis paruošta" });
+
+  /**
+   * Gedimas ties `rename` IR ties valymu: taip atkuriamas būtent tas atvejis, kurio
+   * `finally` blokas nepasiekia — nutrūkęs procesas laikino failo nepašalina.
+   */
+  await assert.rejects(
+    () => suGedimu({ sugadintiRename: true, sugadintiRm: true }, () => saugykla.put(raktas, { a: 1 })),
+    /EXDEV|suklastotas|pašalinti nepavyko/
+  );
+
+  const likuciai = await fsp.readdir(path.join(saknis, "results", "joboo"));
+
+  assert.deepEqual(
+    likuciai.sort(),
+    ["pirmas.json", laikinasVardas(raktas)].sort(),
+    "likęs `.tmp` privalo turėti BŪTENT tą vardą, kurį apskaičiuoja `laikinasVardas(raktas)`"
+  );
+});
+
+test("laikino vardo ilgis NEPRIKLAUSO nuo rakto ilgio — determinizmas telpa į ribą", async () => {
+  /**
+   * ⚠️ ČIA IR YRA PRIEŽASTIS, KODĖL VARDAS NĖRA `<raktas>.tmp` (išmatuota).
+   *
+   * Riba leidžia segmentą iki `MAX_SEGMENTO_BAITAI` = 255 baitų, o failų sistemos
+   * `NAME_MAX` yra tie patys 255. Sufiksas — net keturi simboliai — raktą, kurį riba
+   * PRIĖMĖ, paverstų `ENAMETOOLONG`: tiksliai ta klasė, dėl kurios vardas pirmą kartą
+   * ir tapo atsitiktinis (Codex #290).
+   *
+   * Fiksuoto ilgio išvestinis vardas abu reikalavimus tenkina vienu metu: jis
+   * apskaičiuojamas iš rakto (tad šlavėjui pasiekiamas) ir niekada neauga.
+   */
+  const { MAX_SEGMENTO_BAITAI } = require("../utils/artifactStore/validation");
+
+  const trumpas = laikinasVardas("results/a.json");
+  const ilgas = laikinasVardas(`results/${"a".repeat(214)}.json`);
+
+  assert.equal(trumpas.length, ilgas.length, "vardo ilgis privalo būti PASTOVUS");
+  assert.ok(
+    Buffer.byteLength(ilgas, "utf8") <= MAX_SEGMENTO_BAITAI,
+    `laikinas vardas netelpa į segmento ribą: ${Buffer.byteLength(ilgas, "utf8")}`
+  );
+  assert.notEqual(trumpas, ilgas, "skirtingi raktai — skirtingi laikini vardai");
+  assert.equal(laikinasVardas("results/a.json"), trumpas, "ta pati įvestis — tas pats vardas");
+  assert.match(trumpas, /^\.[0-9a-f]+\.tmp$/, "paslėptas failas su `.tmp` galūne");
 });
 
 test("gedimas PO `rename` nepalieka objekto, kurio kvietėjas neregistruos", async (t) => {

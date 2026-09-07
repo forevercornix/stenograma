@@ -241,6 +241,11 @@ function createS3ArtifactStore({
     return verdiktas;
   }
 
+  /**
+   * ⚠️ `reiksme` GALI BŪTI IR ŽALIA, IR JAU PARUOŠTA (Codex, #294). Kvietėjas, jau
+   * apskaičiavęs kvitą, paduoda tą pačią reprezentaciją — kitaip serializacija įvyktų
+   * DU kartus, ir kvitas galėtų aprašyti ne tuos baitus, kurie įrašomi.
+   */
   async function put(raktas, reiksme) {
     patikrintiRakta(raktas);
     await uztikrintiPolitika();

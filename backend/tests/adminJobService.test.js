@@ -67,7 +67,7 @@ test('#160 SERVISAS: suklastotas maršruto teiginys „čia admin" atmetamas', a
   await assert.rejects(() => adminDeleteJob(job.id, sessionUser), AdminOverrideDenied);
   await assert.rejects(() => adminDeleteJob(job.id, null), AdminOverrideDenied);
 
-  const still = await jobStore.system.get(job.id);
+  const still = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(still, "nė vienas atmestas bandymas neturi nieko ištrinti");
 });
 
@@ -86,7 +86,7 @@ test("#160 SERVISAS: session-admin ištrina svetimą job'ą", async () => {
   const result = await adminDeleteJob(job.id, sessionAdmin);
 
   assert.equal(result.deleted, true);
-  assert.equal(await jobStore.system.get(job.id), null, "job'as realiai ištrintas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "job'as realiai ištrintas");
 });
 
 test("#160 SERVISAS: legacy job'as (be ownerKind) taip pat trinamas", async () => {
@@ -344,11 +344,11 @@ test("#183 FAIL-CLOSED: žymos įrašymo klaida SUSTABDO valymą, o ne praleidž
   }
 
   assert.ok(
-    await jobStore.system.get(adminJob.id),
+    await jobStore.system.get(adminJob.id, { hydrate: true }),
     "be žymos valymas negali įvykti - įrašas privalo likti (admin kelias)"
   );
   assert.ok(
-    await jobStore.system.get(desktopJob.id),
+    await jobStore.system.get(desktopJob.id, { hydrate: true }),
     "be žymos valymas negali įvykti - įrašas privalo likti (desktop kelias)"
   );
 });
@@ -370,7 +370,7 @@ test("#183 NAŠLAITIS: svetima žyma sustabdo valymą (202), sava - ne", async (
 
   assert.equal(r.cleaned, false);
   assert.equal(r.barjeras, "in_progress");
-  assert.ok(await jobStore.system.get(job.id), "destruktyvus darbas NEPRADĖTAS");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "destruktyvus darbas NEPRADĖTAS");
 });
 
 test("#183 NAŠLAITIS: `deletion_failed` grąžina `tombstone_unresolved`, be pakartojimo", async () => {
@@ -383,7 +383,7 @@ test("#183 NAŠLAITIS: `deletion_failed` grąžina `tombstone_unresolved`, be pa
 
   assert.equal(r.cleaned, false);
   assert.equal(r.barjeras, "tombstone_unresolved");
-  assert.ok(await jobStore.system.get(job.id), "automatinio pakartojimo nėra - jį autorizuoja operatorius");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "automatinio pakartojimo nėra - jį autorizuoja operatorius");
   assert.equal((await tombstones.get(job.id)).status, TOMBSTONE_STATUS.FAILED);
 });
 

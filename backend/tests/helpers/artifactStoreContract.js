@@ -241,6 +241,50 @@ function paleistiKontrakta(vardas, paruosti) {
       assert.equal(patvirtinimas.ok, true, "saugykla privalo patvirtinti savo pačios kvitą");
     });
 
+    await t.test("PARUOŠTA reprezentacija persistinama TIKSLIAI tokia, kokia paduota", async () => {
+      /**
+       * ⚠️ ANTRAS TOS PAČIOS KLASĖS KVIETĖJAS (Codex, #294).
+       *
+       * PR-2 uždarė „riba skaičiuoja kvitą, implementacija serializuoja iš naujo"
+       * `inlineStore` VIDUJE. Completion kelias tą pačią klaidą pakartojo sluoksniu
+       * aukščiau: kvitas skaičiuojamas iš `result`, o `put()` gaudavo TĄ PATĮ kintantį
+       * objektą ir kanonizuodavo jį antrą kartą.
+       *
+       * Todėl `put()` priima ir jau PARUOŠTĄ reprezentaciją, o šis scenarijus tikrina,
+       * kad ji persistinama nepakeista: nestabili reikšmė, paruošta VIENĄ kartą, negali
+       * pakeisti nei turinio, nei sumos, kad ir kiek kartų būtų perskaityta vėliau.
+       */
+      const { paruostiReiksme } = require("../../utils/artifactStore/validation");
+
+      let kvietimai = 0;
+      const nestabili = {
+        get text() {
+          kvietimai += 1;
+          return kvietimai <= 3 ? "pirma" : "antra";
+        },
+      };
+
+      const paruosta = paruostiReiksme(nestabili);
+      const poParuosimo = kvietimai;
+
+      const k = await raktas();
+      const kvitas = await saugykla.put(k, paruosta);
+
+      assert.equal(
+        kvietimai,
+        poParuosimo,
+        "paduota paruošta reprezentacija — saugykla pradinės reikšmės NEBESKAITO"
+      );
+      assert.equal(kvitas.checksum, paruosta.checksum, "kvitas nepasikeičia");
+
+      const perskaityta = tapatybe(await saugykla.read(k));
+      assert.equal(
+        crypto.createHash("sha256").update(perskaityta, "utf8").digest("hex"),
+        paruosta.checksum,
+        "įrašytas turinys privalo atitikti TĄ PAČIĄ paruoštą reprezentaciją"
+      );
+    });
+
     /* ═══ 3. `head` ═══ */
 
     await t.test("head: esantis objektas grąžina dydį, nesantis - `null`", async () => {

@@ -81,6 +81,14 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
     return { kanonine, buferis, bytes: buferis.byteLength };
   }
 
+  /**
+   * ⚠️ `reiksme` GALI BŪTI IR ŽALIA, IR JAU PARUOŠTA (Codex, #294).
+   *
+   * Kvietėjas, kuris kvitą jau apskaičiavo (completion kelias), paduoda būtent tą
+   * reprezentaciją — kitaip riba kanonizuotų tą patį (galimai kintantį) objektą DAR
+   * KARTĄ, ir kvitas aprašytų A, o saugykla laikytų B. `paruostiReiksme()` yra
+   * idempotentiška, tad abi formos duoda TUOS PAČIUS baitus ir tą pačią sumą.
+   */
   async function put(raktas, reiksme) {
     patikrintiRakta(raktas);
 

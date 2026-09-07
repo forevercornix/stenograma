@@ -17,6 +17,11 @@
 
 /** Testai, kuriems reikia TIKRO Redis (be jo jie patys save praleidžia). */
 const redis = [
+  /**
+   * #157 (PR-4): struktūrinis atmetimas TIKRAME BullMQ kelyje. Vienetinis testas
+   * įrodytų tik ženklo buvimą; klausimas yra, ar retry grandinė realiai sustoja.
+   */
+  "artifactUnrecoverable.integration",
   "queueRecovery.integration",
   "heartbeatReadiness.integration",
   "redisConcurrency.integration",
@@ -363,9 +368,14 @@ const functional = [
   "jobAccessHydration",
   /** #157 (PR-3): adapteris negali siaurinti parašo. */
   "restoredJobStoreForwarding",
+  /** #157 (PR-4): bandymų registro modulis (grynas SQL sluoksnis). */
+  "attemptRegistry",
+  /** #157 (PR-4): lygybės paritetas ir round-trip ištikimybė. */
+  "artifactRoundTrip",
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
+  "artifactStoreRegistracija",
   "artifactStoreSelection",
   "erasureExportContract",
   "erasureReplayContract",
