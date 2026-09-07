@@ -207,7 +207,8 @@ async function valytiniBandymai(
         AND (
               a.created_at > now()
               OR a.created_at < now() - (
-                   CASE WHEN a.busena = $2 THEN $3 ELSE $4 END * INTERVAL '1 millisecond'
+                   CASE WHEN a.busena = $2 THEN $3::double precision ELSE $4::double precision END
+                     * INTERVAL '1 millisecond'
                  )
             )
       ORDER BY a.created_at
