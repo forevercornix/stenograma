@@ -156,15 +156,21 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     }
   });
 
-  await t.test("REGISTRAS yra skaitymo šaltinis: be jo eilutės objektas IŠLIEKA", async () => {
+  await t.test("REGISTRAS yra šaltinis NEREFERENCUOTIEMS bandymams: be jo eilutės objektas IŠLIEKA", async () => {
     /**
      * ⚠️ MUTACIJOS EKVIVALENTAS, ĮVYKDYTAS DUOMENIMIS, NE KODU.
      *
      * Jei erasure eitų per `job_results.storage_key`, nutrūkusio bandymo objektas
      * išliktų — ir tai vienintelis skirtumas tarp „trina pagal nuorodą" ir „trina pagal
      * registrą". Pašalinus registro eilutę, sąlygos tampa lygiai tokios, kokios būtų
-     * BE registro, ir objektas privalo išlikti. Tai įrodo, kad ankstesnio testo sėkmę
-     * lėmė būtent registras.
+     * BE registro, ir objektas privalo išlikti.
+     *
+     * ⚠️ KĄ TIKSLIAI ĮRODO — IR KO NE. Įrodoma, kad registras yra šaltinis
+     * NEREFERENCUOTIEMS bandymams. REFERENCUOTAS objektas atrandamas ABIEM keliais:
+     * `listResultArtifacts()` jį grąžina ir be registro eilutės (`busena: null` šaka,
+     * `job_results` pusė). Tai SĄMONINGA dviguba gynyba, ne spraga — bet jei šio testo
+     * pavadinimas ar komentaras teigtų „registras yra vienintelis šaltinis", teiginys
+     * būtų platesnis už tai, kas patikrinta, ir kitas skaitytojas jo nebetikrintų.
      */
     const id = await naujasJobas();
     await store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "laimėtojas" } });

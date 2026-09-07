@@ -859,6 +859,7 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 | 2 | **Šlavėjas** neįsipareigotiems bandymams (`busena <> 'committed'`) | variantas (b), orphan skyrius |
 | 3 | **Retencija ribojama BŪSENA IR amžiumi:** horizontas iš `revivalHorizonsMs()` yra apatinė riba, bet eilutė, kurios objektas referencuotas **ARBA** kurios job'as turi neišspręstą ištrynimo žymą, pagal amžių nešalinama NIEKADA | variantas (b) + PR-5 pradžios peržiūra |
 | 4 | **Šlavėjas zonduoja ABU vardus** (laikiną ir galutinį); „nė vieno nėra" = sėkmė | #294 uždarymas — žr. skyrių iškart žemiau |
+| 4a | **Šlavėjas neliečia VYKSTANČIO rašymo:** `pending` eilutei horizontas turi atskirą „maksimalios rašymo trukmės" narį, neišvestą iš `revivalHorizonsMs()` | PR-5 peržiūra — determinizmo pasekmė |
 | 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
 | 6 | **Store lygmens metodas visoms nuorodoms**, ne `job.resultStorage` laukas | PR-3 peržiūra (žr. „PATAISYTA" žemiau) |
 | 7 | **`reference !== null`** → objektas privalo būti pašalintas ir tai patvirtinta; `reference === null` → eilutės ištrynimas IR YRA ištrynimas | kontraktas, ne PR-5 |
@@ -939,6 +940,21 @@ saugykla nėra `postgres`, valymas pagal amžių NEVYKDOMAS.** Praleidus tai, ap
 atrodytų veikianti ir tyliai negaliotų — ta pati klasė kaip „`[]` reiškia nėra ko
 trinti".
 
+⚠️ **ŽINOMAS LIEKAMASIS DARBAS (ne šio PR apimtis, bet užrašomas): „ANTRA SĄRAŠO
+KOPIJA" YRA KLASĖ, NE TRYS ATVEJAI.**
+
+PR-5 pradžioje CI davė tris radinius, ir visi trys buvo ta pati forma: antra to paties
+sąrašo ar skaičiaus kopija (`restoredJobStore` būtinų metodų sąrašas; metodų skaičius
+`postgresStore.integration`; skaičius testo varde). Antrasis ypač iškalbingas —
+komentaras dubliavimą PRIPAŽINO ir nurodė „keičiamas abiejose", ir vis tiek atsiliko
+antrą kartą. **Nurodymas nėra mechanizmas** (§19.5, patvirtinta eksperimentu).
+
+Taisymai buvo taškiniai: dvi kopijos suvienytos, viena pašalinta. Klasė lieka atvira —
+trečia kopija gali atsirasti rytoj, ir niekas nekris, kol ji neatsiliks. Struktūrinis
+variantas: **`BUTINI_SYSTEM_METODAI` IŠVEDAMAS iš kontrakto rinkinio metodų aibės**, o ne
+laikomas atskira konstanta. Nedaroma dabar (keistų `jobErasure` reikalavimų šaltinį
+viduryje PR-5), bet įrašoma, nes ši klasė projekte kartojasi ne pirmą kartą.
+
 ⚠️ **KĄ PR-5 VIS DAR PRIVALO ĮRODYTI PATS:** `joboBandymai()` iki šiol nekviečiamas iš
 produkcinio kodo — jis buvo parašytas PR-4 ir laukė šio PR. Tol, kol jį kviečia tik
 testai, „erasure trina pagal registrą" yra dokumentacija, ne savybė.
@@ -965,6 +981,38 @@ vienu scenarijumi liktų žalias — todėl PR-5 testai privalo dengti abi puses
 `PutObject`), tad ten klausimas neegzistuoja — bet šlavėjas privalo tai spręsti pagal
 eilutės `storage_type`, ne prielaida, ta pačia taisykle kaip visi kiti per-row
 sprendimai šiame skyriuje.
+
+⚠️ **ĮĖJIMO SĄLYGA 4a: ŠLAVĖJAS NEGALI LIESTI VYKSTANČIO RAŠYMO.**
+
+Determinizmas pridėtas dėl ATRANDAMUMO, bet jis kartu padarė objektą PAŽEIDŽIAMĄ. Kol
+vardas buvo atsitiktinis, galiojo netyčinė savybė: šlavėjas laikino failo ištrinti
+NEGALĖJO — vardo nebuvo iš kur sužinoti. Dabar gali.
+
+Scenarijus: registro eilutė sukuriama PRIEŠ `put()`, o didelis rezultatas rašomas ilgai.
+Jei eilutė atrodo pakankamai sena — atkurta iš dump'o su senu `created_at`, laikrodžio
+šuolis arba agresyviai sukonfigūruotas horizontas — šlavėjas apskaičiuoja tą patį vardą
+ir jį pašalina. Rašytojas gauna `ENOENT` ties `rename`, arba `rename` pavyksta, o
+objektas jau ne tas.
+
+⚠️ **24 h horizontas tai dengia ATSITIKTINAI, ne pagal konstrukciją.**
+`revivalHorizonsMs()` atsako „kada eilė gali prikelti darbą", ne „kiek gali trukti vienas
+rašymas". Tai dvi skirtingos trukmės, sutampančios tik dabar; pakeitus vieną, kita tyliai
+nustotų dengti.
+
+**Sprendimas, kurį šlavėjas privalo įgyvendinti:**
+
+1. `abandoned` eilutės šluojamos laisvai — rašytojas jau baigė, ir tai žinoma iš būsenos;
+2. `pending` eilutėms horizontas turi ATSKIRĄ, eksplicitiškai išvestą narį: „maksimali
+   vieno rašymo trukmė". Jis NEIŠVEDAMAS iš `revivalHorizonsMs()` ir negali būti su juo
+   sulietas — kitaip grįžtame prie sutapimo;
+3. `created_at` po atkūrimo iš dump'o yra ŠALTINIO laikas, tad amžius iš jo gali būti
+   melagingai didelis. Šlavėjas privalo tai spręsti fail-closed — ta pati riba kaip
+   `deploymentIdentity` („duomenys keliauja su `pg_dump`"), ir ji sprendžiama šlavėjo
+   žingsnyje su testu, ne prielaida.
+
+⚠️ Priežastis užrašoma, ne tik sprendimas: **determinizmas buvo pridėtas dėl
+atrandamumo, ir jis kartu padarė objektą pažeidžiamą.** Be šito sakinio kitas žmogus,
+matydamas „papildomą narį horizonte", pagrįstai laikys jį pertekliumi.
 
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`

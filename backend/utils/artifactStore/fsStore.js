@@ -62,6 +62,23 @@ const log = createLogger("artifact-fs");
  * (planas, „ATMESTAS VARIANTAS: turinio adresas"); čia maišomas ADRESAS, tad A2 riba
  * („raktas neišvedamas iš checksum'o") lieka galioti abiem kryptimis.
  *
+ * ⚠️ DETERMINIZMAS SUKŪRĖ PAVOJŲ, KURIO ANKSČIAU NEBUVO (#157, PR-5 peržiūra).
+ *
+ * Kol vardas buvo ATSITIKTINIS, galiojo netyčinė savybė: šlavėjas laikino failo negalėjo
+ * ištrinti, net jei būtų norėjęs — vardo nebuvo iš kur sužinoti. Padarius vardą
+ * apskaičiuojamą (dėl atrandamumo), atsirado ir priešinga kryptis: šlavėjas gali
+ * pašalinti VYKSTANČIO rašymo laikinąjį failą tarp `writeFile` ir `rename`. Registro
+ * eilutė sukuriama PRIEŠ `put()`, tad ilgai rašomas rezultatas visą tą laiką turi
+ * `pending` eilutę, kuri iš šalies atrodo kaip nutrūkusi.
+ *
+ * Rašytojas tada gautų `ENOENT` ties `rename` — arba, blogiau, `rename` pavyktų, o
+ * objektas būtų ne tas.
+ *
+ * Šiandien tai dengia 24 h horizontas, bet dengia ATSITIKTINAI, ne pagal konstrukciją:
+ * `revivalHorizonsMs()` atsako į klausimą „kada eilė gali prikelti darbą", ne „kiek gali
+ * trukti vienas rašymas". Dvi skirtingos trukmės, sutampančios tik dabar. Sąlyga, kurią
+ * tai uždeda šlavėjui, užrašyta plane (PR-5 įėjimo sąlyga 4a), o ne palikta horizontui.
+ *
  * ⚠️ DETERMINIZMAS SAUGUS TIK TODĖL, KAD RAKTAI YRA ATTEMPT-UNIQUE.
  *
  * Du rašytojai tam pačiam raktui vienu metu susidurtų ties `wx` (`EEXIST`), o ne tyliai
