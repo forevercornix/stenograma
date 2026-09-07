@@ -382,18 +382,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
            * forma, tas pats `cause` perdavimas, kad `_classifyError()` matytų domeninį
            * kodą, ne `internal_error`.
            */
-          let completedJob;
-          try {
-            // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
-            completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
-          } catch (klaida) {
-            if (!klaida || klaida.neatkartojama !== true) throw klaida;
-
-            const { UnrecoverableError } = require("bullmq");
-            const fatal = new UnrecoverableError(klaida.message);
-            fatal.cause = klaida;
-            throw fatal;
-          }
+          // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
+          const completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
           if (!completedJob) {
             throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
           }
