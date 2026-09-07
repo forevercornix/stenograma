@@ -99,17 +99,38 @@ async function pazymeti(vykdytojas, attemptId, busena) {
  * teigtų, kad naudojami DU objektai, o šlavėjas (PR-5) senojo niekada neliestų — jis
  * atrodytų reikalingas.
  *
- * Perėjimas daromas VIENU sakiniu ir TOJE PAČIOJE transakcijoje kaip nuorodos
- * įrašymas: kitaip liktų momentas, kai įsipareigotų yra du arba nė vieno.
+ * ⚠️ INVARIANTAS GYVENA DB, NE ČIA (migracija `1756400000000`).
+ *
+ * Ši funkcija jį PALAIKO, bet neberemia juo garantijos: dalinis unikalus indeksas
+ * `UNIQUE (job_id) WHERE busena = 'committed'` daro antrą įsipareigotą bandymą
+ * NEIŠREIŠKIAMĄ. Priežastis — šlavėjas (PR-5) trins objektus pagal registrą, tad
+ * prielaida bus ne šio modulio vidaus reikalas.
+ *
+ * ⚠️ PERĖJIMAS DVIEM SAKINIAIS, NE VIENU `CASE` — TAI INDEKSO PASEKMĖ.
+ *
+ * Dalinio unikalaus indekso atidėti negalima (`DEFERRABLE` reikalauja constraint'o,
+ * o constraint'as negali būti dalinis), tad unikalumas tikrinamas kiekvieno sakinio
+ * pabaigoje. Viename `UPDATE ... CASE` sakinyje eilučių tvarka neapibrėžta: jei
+ * naujasis būtų pažymėtas `committed` prieš nuvertinant senąjį, sakinys kristų
+ * ATSITIKTINAI. Todėl pirma nuvertinama, tada įsipareigojama.
+ *
+ * Abu sakiniai eina TOJE PAČIOJE transakcijoje kaip nuorodos įrašymas, tad išorėje
+ * momento „įsipareigotų du arba nė vieno" nesimato — jis egzistuoja tik šios
+ * transakcijos viduje, kur nė vienas kitas skaitytojas jo nepasiekia.
  */
 async function isipareigoti(vykdytojas, { jobId, attemptId }) {
   await vykdytojas.query(
     `UPDATE job_result_attempts
-        SET busena = CASE WHEN attempt_id = $2 THEN $3 ELSE $4 END,
-            updated_at = now()
-      WHERE job_id = $1
-        AND (attempt_id = $2 OR busena = $3)`,
-    [String(jobId), attemptId, BUSENA.ISIPAREIGOTA, BUSENA.ATMESTA]
+        SET busena = $3, updated_at = now()
+      WHERE job_id = $1 AND busena = $4 AND attempt_id <> $2`,
+    [String(jobId), attemptId, BUSENA.ATMESTA, BUSENA.ISIPAREIGOTA]
+  );
+
+  await vykdytojas.query(
+    `UPDATE job_result_attempts
+        SET busena = $3, updated_at = now()
+      WHERE job_id = $1 AND attempt_id = $2`,
+    [String(jobId), attemptId, BUSENA.ISIPAREIGOTA]
   );
 }
 

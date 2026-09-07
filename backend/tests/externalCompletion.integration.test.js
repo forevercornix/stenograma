@@ -10,6 +10,7 @@ const { Pool, Client } = require("pg");
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
+const { arParuosta } = require("../utils/artifactStore/validation");
 const attemptRegistry = require("../utils/attemptRegistry");
 const { STATUS, OWNER_KIND } = require("../utils/jobStore/common");
 
@@ -73,8 +74,22 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     backend: "fs",
     rasymai: 0,
     trynimai: [],
+    neparuostos: 0,
     async put(raktas, reiksme) {
       this.rasymai += 1;
+
+      /**
+       * ⚠️ KONTRAKTAS, NE STILIUS: completion kelias privalo perduoti PARUOŠTĄ
+       * reprezentaciją (#294, Codex „Reuse the prepared result").
+       *
+       * `paruostiReiksme()` idempotentiškumas yra ŠVELNINIMAS — jis pašalina PASEKMĘ
+       * (kvitas ir baitai išsiskiria), bet ne KELIĄ: kvietėjas vis dar gali paskaičiuoti
+       * kvitą ties riba, o į `put()` paduoti žalią reikšmę, ir niekas nekris. Čia tas
+       * kelias tampa MATOMAS: skaitiklis kaupia atvejus, o tvirtinimas gyvena testuose,
+       * kad gedimas rodytų į konkretų scenarijų, ne į bendrą „kažkas kažkada".
+       */
+      if (!arParuosta(reiksme)) this.neparuostos += 1;
+
       return fs.put(raktas, reiksme);
     },
     async delete(raktas) {
@@ -679,5 +694,85 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     assert.equal(r.storage_key, null);
     assert.deepEqual(r.payload, { text: "inline" });
     assert.deepEqual(await attemptRegistry.joboBandymai(pool, id), [], "inline registro neliečia");
+  });
+
+  await t.test("„daugiausia VIENAS įsipareigotas\" yra DB invariantas, ne modulio susitarimas", async () => {
+    /**
+     * ⚠️ REGISTRO API ČIA SĄMONINGAI APLENKIAMAS.
+     *
+     * `isipareigoti()` taisyklę laiko, ir tai jau tikrinama aukščiau („du lygiagretūs
+     * remontai"). Bet toks testas įrodo tik tiek, kad TAS kelias jos nelaužo. Šlavėjas
+     * (PR-5) rems prielaida, kad įsipareigotas bandymas yra vienas, nesvarbu, kas ir
+     * kaip eilutę parašė — tad tikrinama, ar antra `committed` eilutė apskritai
+     * IŠREIŠKIAMA. Migracijos `1756400000000` dalinis unikalus indeksas sako, kad ne.
+     */
+    const id = await naujasJobas();
+    const a = attemptRegistry.naujasBandymas();
+    const b = attemptRegistry.naujasBandymas();
+
+    for (const attemptId of [a, b]) {
+      await attemptRegistry.registruoti(pool, {
+        attemptId,
+        jobId: id,
+        storageType: "fs",
+        storageKey: attemptRegistry.bandymoRaktas(id, attemptId),
+      });
+    }
+
+    await pool.query("UPDATE job_result_attempts SET busena = $2 WHERE attempt_id = $1", [
+      a,
+      attemptRegistry.BUSENA.ISIPAREIGOTA,
+    ]);
+
+    let kodas = null;
+    try {
+      await pool.query("UPDATE job_result_attempts SET busena = $2 WHERE attempt_id = $1", [
+        b,
+        attemptRegistry.BUSENA.ISIPAREIGOTA,
+      ]);
+    } catch (klaida) {
+      kodas = klaida.code;
+    }
+
+    assert.equal(kodas, "23505", "antra `committed` eilutė privalo būti NEĮMANOMA");
+
+    /** Ta pati eilutė KITAM job'ui — leidžiama; indeksas dalinis ir pagal `job_id`. */
+    const kitas = await naujasJobas();
+    const c = attemptRegistry.naujasBandymas();
+    await attemptRegistry.registruoti(pool, {
+      attemptId: c,
+      jobId: kitas,
+      storageType: "fs",
+      storageKey: attemptRegistry.bandymoRaktas(kitas, c),
+    });
+    await pool.query("UPDATE job_result_attempts SET busena = $2 WHERE attempt_id = $1", [
+      c,
+      attemptRegistry.BUSENA.ISIPAREIGOTA,
+    ]);
+
+    /** O `isipareigoti()` po viso to VIS TIEK pereina — nuvertinimas eina pirmas. */
+    await attemptRegistry.isipareigoti(pool, { jobId: id, attemptId: b });
+    const bandymai = await attemptRegistry.joboBandymai(pool, id);
+    assert.deepEqual(
+      bandymai.filter((x) => x.busena === attemptRegistry.BUSENA.ISIPAREIGOTA).map((x) => x.attempt_id),
+      [b],
+      "perėjimas dviem sakiniais indekso NELAUŽO"
+    );
+  });
+
+  await t.test("VISI šio failo rašymai ėjo per PARUOŠTĄ reprezentaciją", () => {
+    /**
+     * ⚠️ TVIRTINIMAS PABAIGOJE, NE KIEKVIENAME TESTE.
+     *
+     * Klausimas yra apie KELIĄ, ne apie vieną scenarijų: ar completion, remontas ir
+     * lenktynių šakos VISOS paduoda `put()` tą pačią formą. Sudėjus tvirtinimą į
+     * kiekvieną testą, naujas testas, pridėtas vėliau, jį tyliai praleistų.
+     *
+     * Ką tai NEPADENGIA: `paruostiReiksme()` idempotentiškumas leidžia `put()` priimti
+     * ir žalią reikšmę, tad ateities kvietėjas, apeinantis `paruostiExternalRasyma()`,
+     * čia nesimatys. Ta liekamoji rizika užrašyta ataskaitos §9.
+     */
+    assert.ok(saugykla.rasymai > 0, "kontrolė: rašymų apskritai buvo");
+    assert.equal(saugykla.neparuostos, 0, "į `put()` niekada nepateko žalia reikšmė");
   });
 });

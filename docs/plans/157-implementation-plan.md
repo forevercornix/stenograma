@@ -307,6 +307,22 @@ vis tiek baigtųsi klaida.
 Tai PR-4 darbas, nes completion kelias `put()` kviečia būtent ten; PR-2 palieka
 paruoštą ženklą ir klasifikaciją, ne garantiją.
 
+⚠️ **ŠIS DoD PUNKTAS PR-4 METU LIEKA NEĮRODYTAS — IR NE VIEN DĖL AKTYVAVIMO.**
+
+Pirma priežastis buvo žinoma: `rasymoSaugykla` produkcijoje neįjungta (PR-7), o
+PostgreSQL kelią uždaro `POSTGRES_AKTYVAVIMAS_LEISTAS`, tad grandinė
+„struktūrinis atmetimas → nulis pakartojimų" nepaleidžiama nuo galo iki galo.
+
+Antra priežastis paaiškėjo šiame raunde ir yra svarbesnė: **validacija pririšta
+prie ne to sluoksnio**. Struktūrinį atmetimą gamina `ArtifactStore` riba, tad
+kelias, einantis pro ją (Redis, atmintis — būtent tie, kurie aktyvūs ŠIANDIEN),
+`Date` rezultatą priima ir jokio atmetimo negamina. Vadinasi, punktas neįrodomas
+ne todėl, kad grandinė neįjungta, o todėl, kad įjungus vieną jos galą kitas
+galas vis tiek liktų neuždengtas. Invariantas kyla iš `common.js` lygybės
+autoriteto, ne iš `ArtifactStore` — išmatuota ir aprašyta **#298**.
+
+Iki #298 uždarymo šis DoD punktas žymimas `PARTIAL / UNVERIFIED`, ne `DONE`.
+
 **DoD, kuriuos uždaro**
 - „Vienas `ArtifactStore` production boundary; business/service sluoksnis neatlieka tiesioginio filesystem/S3 I/O."
 - „Inline, filesystem ir S3-compatible implementacijos praeina tą patį `artifactStoreContract`."
@@ -441,6 +457,12 @@ skirtingus skyrius. Surašomi čia, kad PR-4 pradžioje nereikėtų jų ieškoti
 
 Abi sąlygos keičia rašymo kelio FORMĄ, tad įterptos vėliau reikštų perrašymą.
 
+⚠️ **ATVIRA RIZIKA, LIEČIANTI AKTYVŲ KELIĄ: #298.** Kanoninė rezultato tapatybė
+neišlieka po persistavimo, tad teisėtas pakartojimas Redis kelyje gauna
+`RESULT_CONFLICT` (išmatuota prieš tikrą Redis). Tai ne #157 grandinės ateities
+klausimas: Redis aktyvuotas, PostgreSQL — ne. Sprendimas privalo kilti iš `common.js`
+lygybės autoriteto ir padengti VISUS persistentinius backend'us.
+
 ⚠️ **PR-4 REGISTRAS YRA WRITE-ONLY — SPRENDIMAS, NE PRALEIDIMAS.**
 
 Iš penkių sąlygų, priimtų kartu su variantu (b), PR-4 įgyvendina DVI: įrašas atsiranda
@@ -451,6 +473,20 @@ vartotojai"):
 1. **erasure trina pagal registrą**, ne pagal `storage_key`;
 2. **šlavėjas** neįsipareigotiems bandymams;
 3. **retencija ≥ prikėlimo horizontai**, išvedama iš `revivalHorizonsMs()`.
+
+⚠️ **PR-5 ŠLAVĖJUI REIKALINGA PRIELAIDA PADARYTA DB INVARIANTU (PR-4 pabaigoje).**
+
+„Job'as turi daugiausia VIENĄ įsipareigotą bandymą" iki šio raundo buvo modulio
+susitarimas `attemptRegistry.isipareigoti()` viduje. Spragą (du `committed` įrašai po
+remonto) rado testas, ne konstrukcija — o testas įrodo nebuvimą tik ten, kur nuėjo.
+Šlavėjas rems būtent šia prielaida: du įsipareigoti bandymai reikštų arba naudojamo
+objekto ištrynimą, arba nebenaudojamo palikimą. Todėl pridėtas dalinis unikalus
+indeksas `UNIQUE (job_id) WHERE busena = 'committed'` (migracija `1756400000000`) —
+tas pats precedentas kaip PR-1, kur vientisumo metaduomenys tapo DB invariantu.
+
+Pasekmė kodui: dalinio indekso atidėti negalima, tad perėjimas skaidomas į DU sakinius
+(nuvertinimas, tada įsipareigojimas) toje pačioje transakcijoje — vieno `CASE` sakinio
+eilučių tvarka neapibrėžta, ir jis kristų atsitiktinai.
 
 ⚠️ **KODĖL LANGAS NEPAVOJINGAS, IR KODĖL TAI NĖRA „UŽDARYTA ORPHAN PROBLEMA".**
 External rašymas įsijungia TIK gavus `rasymoSaugykla`, o produkcinis prijungimas vyksta
