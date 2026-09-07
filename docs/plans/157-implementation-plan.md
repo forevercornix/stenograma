@@ -661,6 +661,16 @@ susitarimo, o dėl konstrukcijos.
   nutrūkusį cleanup tarp `put()` ir commit'o ir `fs` `.tmp` likučius. Trečiajam tai
   reiškia, kad laikinas vardas irgi registruojamas arba IŠVEDAMAS iš registruoto
   bandymo — kitaip lieka ketvirtas veidas;
+
+  ✅ **ĮVYKDYTA PR-4 PABAIGOJE (`REOPENED`, Codex #294).** Iki tol vardas buvo
+  atsitiktinis (`fsStore.js:407`), tad sąlyga liko neįgyvendinta ir ketvirtas veidas
+  egzistavo: registre — tik galutinis raktas. Dabar vardą duoda `laikinasVardas(raktas)`,
+  ir šlavėjas (PR-5) jį apskaičiuoja iš `storage_key`; antros registro eilutės nereikia.
+
+  ⚠️ **Vardas NĖRA `<raktas>.tmp`, ir priežastis išmatuota:** segmento riba (255 baitų)
+  sutampa su `NAME_MAX`, tad bet koks sufiksas raktą, kurį riba priėmė, paverstų
+  `ENAMETOOLONG` (255 + `.tmp` = 259). Fiksuoto ilgio santrauka iš rakto tenkina abu
+  reikalavimus: išvedama ir neauga;
 - **erasure trina pagal REGISTRĄ, ne pagal `storage_key`**: job'o ištrynimas pašalina
   visus to job'o bandymų objektus, ne tik laimėjusio;
 - **retencija ≥ eilės prikėlimo horizontai**, IŠVEDAMA iš `revivalHorizonsMs()`, ne

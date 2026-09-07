@@ -38,6 +38,45 @@ const log = createLogger("artifact-fs");
  * įrenginių ribą duotų `EXDEV`, ir atomiškumo nebeliktų iš viso.
  */
 
+/**
+ * LAIKINO FAILO VARDAS — IŠVEDAMAS IŠ RAKTO, FIKSUOTO ILGIO (#157, PR-4; Codex #294).
+ *
+ * ⚠️ KODĖL IŠVESTINIS, O NE ATSITIKTINIS.
+ *
+ * PR-2 metu `.tmp` likučiai buvo NUKREIPTI į PR-4 orphan sprendimą su pažadu, kad
+ * „registras dengia ir šitą". Su atsitiktiniu vardu tas pažadas neįvykdomas: registre
+ * yra tik galutinis raktas, `list(prefix)` pagal A3 ribą nėra, tad nutrūkus procesui
+ * tarp `writeFile` ir `rename` DB kryptimi orientuotas šlavėjas laikino failo nerastų
+ * niekada. Turėdamas `storage_key`, šlavėjas (PR-5) dabar apskaičiuoja ir šį vardą —
+ * antros registro eilutės nereikia.
+ *
+ * ⚠️ KODĖL NE `<raktas>.tmp` — IŠMATUOTA, NE NUSPĖTA.
+ *
+ * Segmento riba (`MAX_SEGMENTO_BAITAI` = 255) sutampa su failų sistemos `NAME_MAX`,
+ * tad BET KOKS sufiksas raktą, kurį riba PRIĖMĖ, paverstų `ENAMETOOLONG`: 255 baitų
+ * segmentas + `.tmp` = 259 baitai. Tai tiksliai ta klasė, dėl kurios vardas pirmą kartą
+ * ir tapo atsitiktinis (Codex #290). Fiksuoto ilgio santrauka tenkina abu reikalavimus:
+ * ji išvedama iš rakto ir neauga kartu su juo.
+ *
+ * ⚠️ SANTRAUKA IMAMA IŠ RAKTO, NE IŠ TURINIO. Turinio adresas yra atmestas variantas
+ * (planas, „ATMESTAS VARIANTAS: turinio adresas"); čia maišomas ADRESAS, tad A2 riba
+ * („raktas neišvedamas iš checksum'o") lieka galioti abiem kryptimis.
+ *
+ * ⚠️ DETERMINIZMAS SAUGUS TIK TODĖL, KAD RAKTAI YRA ATTEMPT-UNIQUE.
+ *
+ * Du rašytojai tam pačiam raktui vienu metu susidurtų ties `wx` (`EEXIST`), o ne tyliai
+ * perrašytų vienas kitą. Šiandien tokių nėra: `results/<jobId>/<attemptId>.json` duoda
+ * kiekvienam bandymui savo adresą. Pakeitus rakto schemą į turinio adresą ar bet kokią
+ * kitą, kur du rašytojai dalijasi raktu, ŠI prielaida dingtų — todėl ji užrašyta čia, o
+ * ne numanoma.
+ *
+ * @param {string} raktas artefakto raktas (toks pat, koks registre `storage_key`)
+ * @returns {string} laikino failo vardas TAME PAČIAME kataloge kaip galutinis objektas
+ */
+function laikinasVardas(raktas) {
+  return `.${crypto.createHash("sha256").update(String(raktas)).digest("hex")}.tmp`;
+}
+
 function createFsArtifactStore({ root } = {}) {
   if (typeof root !== "string" || root.trim() === "") {
     throw new ArtifactStoreError(
@@ -392,19 +431,8 @@ function createFsArtifactStore({ root } = {}) {
      */
     const buvoAnksciau = (await head(raktas)) !== null;
 
-    /**
-     * ⚠️ LAIKINAS VARDAS NEPRIKLAUSO NUO RAKTO (Codex, #290).
-     *
-     * `<raktas>.<uuid>.tmp` pridėdavo 41 simbolį prie failo vardo, o failų
-     * sistemos riba yra 255 baitai VIENAM vardui. Riba raktą iki 512 simbolių
-     * priima, tad `put()` krisdavo su `ENAMETOOLONG` dėl MŪSŲ sufikso, o ne dėl
-     * sistemos ribos - išmatuota nuo 214 simbolių segmento.
-     *
-     * Trumpas nepriklausomas vardas tą klasę pašalina. Kaina: laikinas failas
-     * nebenurodo savo rakto — bet `.tmp` likučiai ir taip yra orphan klausimas,
-     * sprendžiamas PR-4 kartu su nutrūkusiais bandymais, o ne vardo forma.
-     */
-    const laikinas = path.join(path.dirname(pilnas), `.${crypto.randomBytes(8).toString("hex")}.tmp`);
+    /** Vardas išvestinis: šlavėjas jį apskaičiuoja iš registruoto `storage_key`. */
+    const laikinas = path.join(path.dirname(pilnas), laikinasVardas(raktas));
     let deskriptorius = null;
     let pervadinta = false;
 
@@ -767,4 +795,4 @@ function createFsArtifactStore({ root } = {}) {
   };
 }
 
-module.exports = { createFsArtifactStore };
+module.exports = { createFsArtifactStore, laikinasVardas };
