@@ -506,8 +506,7 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
           const kvitas = await saugykla.put(raktas, reiksme);
 
           barjeras.laukiantys += 1;
-          if (barjeras.laukiantys >= 2) barjeras.atrakinti();
-          await barjeras.zadejimas;
+          barjeras.atrakinti();
 
           return kvitas;
         },
