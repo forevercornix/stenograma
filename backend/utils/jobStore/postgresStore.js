@@ -1436,19 +1436,8 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
           checksum: kvitas.checksum,
         },
       };
-    } catch (klaida) {
-      /**
-       * ⚠️ VALOMA IR TADA, KAI KRITO PATS `put()`. Objekto gali nebūti (`delete()`
-       * tada grąžina `false` be klaidos), bet registro eilutė LIEKA — tik nebe
-       * `pending`: „laukiantis" pėdsakas reikštų, kad šlavėjas dar turi ateiti ten,
-       * kur jau nieko nėra.
-       */
-      await isvalytiBandyma({
-        attemptId,
-        nuoroda: { storageType: rasymoSaugykla.backend, storageKey: raktas },
-      });
-
-      throw klaida;
+    } finally {
+      /** Valymą atlieka `finishAtomic()` `finally` blokas. */
     }
   }
 
