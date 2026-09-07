@@ -987,6 +987,14 @@ fail-closed padengia VISĄ šlavimą. Todėl šlavėjas privalo skirti du dalyku
 Priešingu atveju konfigūracijos klaida atrodys kaip normalus fail-closed darbas, ir
 skaitiklis, į kurį niekas nežiūri, bus vienintelis skirtumas.
 
+⚠️ **IR SUVESTINĖJE TAI PRIVALO BŪTI ATSKIRA REIKŠMĖ, NE NULIS.**
+
+`runRetentionSweep()` grąžina suvestinę, ir „šis žingsnis NEVYKDYTAS" joje turi turėti
+savo reikšmę. **Nulis reiškia „nieko nebuvo", o čia reiškia „nežinau, ar buvo"** — ta pati
+riba kaip fasado `null` (`listResultArtifacts()`: „nežinau, netrink"). Sulietus abu,
+sustabdytas žingsnis atrodytų kaip tuščias, o tai tiksliai ta būsena, kurios 3a ir vengia:
+konfigūracijos klaida, atrodanti kaip normalus darbas.
+
 ⚠️ **IŠVESTINĖ SĄLYGA, KURIĄ ŠIS PREDIKATAS UŽDEDA ŠLAVĖJUI.** `erasure_marks` gyvena
 toje pačioje bazėje kaip `job_result_attempts` (tos pačios migracijos), tad predikatas
 yra VIENAS `SQL` sakinys, o ne dviejų saugyklų palyginimas — tai svarbu, nes lyginant per

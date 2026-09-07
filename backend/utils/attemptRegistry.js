@@ -145,8 +145,86 @@ async function joboBandymai(vykdytojas, jobId) {
   return rows;
 }
 
+/**
+ * ŠLAVIMO KANDIDATAI — RETENCIJOS PREDIKATAS VIENU SAKINIU (#157, PR-5).
+ *
+ * ⚠️ APSAUGA YRA DVIGUBA, IR ABI ŠAKOS BŪTINOS (įėjimo sąlyga 3).
+ *
+ * 1. **Nuoroda:** eilutė, kurios `storage_key` yra gyvoje `job_results` eilutėje, NĖRA
+ *    kandidatė. Predikatas per nuorodą, ne per `busena = 'committed'`: būsena yra
+ *    TVIRTINIMAS, o nuoroda — FAKTAS, ir jiedu gali išsiskirti (ranka redaguota eilutė,
+ *    atkūrimas iš dviejų skirtingų momentų).
+ * 2. **Ištrynimo žyma:** ištrynimas NAIKINA nuorodas (`job_results` turi
+ *    `ON DELETE CASCADE` nuo `jobs`), tad pirmoji šaka dingsta būtent tada, kai jos
+ *    labiausiai reikia — daliniame gedime. Žyma rašoma PRIEŠ šalinimą, tad ji išgyvena
+ *    nuorodos dingimą ir pati savaime pasibaigia, kai ištrynimas patvirtinamas.
+ *
+ * Be antrosios šakos galima seka: `delete()` krenta -> job'o eilutė vis tiek pašalinama ->
+ * bandymų eilutės nebeapsaugotos -> retencija jas pašalina -> `deletionRetry` grįžta prie
+ * pažymėto job'o ir nebeturi iš kur sužinoti adresų -> objektas lieka amžiams.
+ *
+ * ⚠️ VIENAS SAKINYS, NE DVIEJŲ SAUGYKLŲ PALYGINIMAS. `erasure_marks` gyvena toje pačioje
+ * bazėje kaip `job_result_attempts`, tad predikatas skaičiuojamas DB pusėje; lyginant per
+ * programą tarp dviejų skaitymų liktų langas, kuriame žyma spėtų atsirasti.
+ *
+ * ⚠️ `pending` IR `abandoned` TURI SKIRTINGAS RIBAS (įėjimo sąlyga 4a).
+ *
+ * `abandoned` reiškia, kad rašytojas BAIGĖ — tai žinoma iš būsenos, tad pakanka prikėlimo
+ * horizonto. `pending` reiškia „gali būti vykdoma DABAR": eilutė sukuriama PRIEŠ `put()`,
+ * o laikinas failas nuo PR-5 turi APSKAIČIUOJAMĄ vardą, tad šlavėjas gali ištrinti
+ * vykstančio rašymo laikinąjį failą. Todėl `pending` riba turi atskirą narį.
+ *
+ * ⚠️ `created_at` ATEITYJE — NEŠLUOJAMA, IR TAI SKAIČIUOJAMA (įėjimo sąlyga 4b).
+ *
+ * Po atkūrimo iš `pg_dump` žymos yra ŠALTINIO laiko (ta pati klasė kaip
+ * `deploymentIdentity`), tad amžius iš jų gali būti nepalyginamas. Ateityje esantis
+ * `created_at` yra vienintelė DETEKTUOJAMA to dalis; įtartinai senos, bet praeityje
+ * esančios eilutės nuo tikrai senų neatskiriamos — riba užrašyta plane, ne nutylėta.
+ *
+ * @returns {Promise<{kandidatai: Array<object>, praleista: number}>}
+ */
+async function valytiniBandymai(
+  vykdytojas,
+  { laukianciuRibaMs, atmestuRibaMs, kiekis = 200 }
+) {
+  const { rows } = await vykdytojas.query(
+    `SELECT a.attempt_id, a.job_id, a.storage_type, a.storage_key, a.busena, a.created_at,
+            (a.created_at > now()) AS laikas_ateityje
+       FROM job_result_attempts a
+      WHERE a.busena <> $1
+        AND NOT EXISTS (
+              SELECT 1 FROM job_results r WHERE r.storage_key = a.storage_key
+            )
+        AND NOT EXISTS (
+              SELECT 1 FROM erasure_marks m WHERE m.job_id = a.job_id AND m.status <> $2
+            )
+        AND (
+              a.created_at > now()
+              OR a.created_at < now() - (
+                   CASE WHEN a.busena = $3 THEN $4 ELSE $5 END * INTERVAL '1 millisecond'
+                 )
+            )
+      ORDER BY a.created_at
+      LIMIT $6`,
+    [
+      BUSENA.ISIPAREIGOTA,
+      "deleted",
+      BUSENA.LAUKIA,
+      Number(laukianciuRibaMs),
+      Number(atmestuRibaMs),
+      Number(kiekis),
+    ]
+  );
+
+  return {
+    kandidatai: rows.filter((r) => !r.laikas_ateityje),
+    praleista: rows.filter((r) => r.laikas_ateityje).length,
+  };
+}
+
 module.exports = {
   BUSENA,
+  valytiniBandymai,
   bandymoRaktas,
   naujasBandymas,
   registruoti,

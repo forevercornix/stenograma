@@ -190,6 +190,138 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await saugykla.delete(nutrukes.raktas);
   });
 
+  await t.test("retencijos predikatas: NUORODA saugo eilutę nepriklausomai nuo amžiaus", async () => {
+    /**
+     * ⚠️ ĮĖJIMO SĄLYGA 3, PIRMOJI ŠAKA. Eilutė, kurios `storage_key` yra gyvoje
+     * `job_results` eilutėje, nėra kandidatė NIEKADA — net kai ji senesnė už bet kokią
+     * ribą. Be to retencija galėtų pašalinti vienintelį likusį adresą.
+     */
+    const id = await naujasJobas();
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "referencuotas" } });
+
+    /** Eilutė dirbtinai pasendinama — amžius nustoja būti kliūtis. */
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE job_id = $1", [id]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    const musu = kandidatai.filter((k) => k.job_id === id);
+    assert.deepEqual(musu, [], `referencuota eilutė NEGALI būti kandidatė: ${JSON.stringify(musu)}`);
+  });
+
+  await t.test("retencijos predikatas: NEIŠSPRĘSTA ŽYMA saugo eilutę ir be nuorodos", async () => {
+    /**
+     * ⚠️ ĮĖJIMO SĄLYGA 3, ANTROJI ŠAKA — IR BŪTENT JI DENGIA DALINĮ GEDIMĄ.
+     *
+     * Ištrynimas naikina nuorodas (`ON DELETE CASCADE`), tad pirmoji šaka dingsta tada,
+     * kai jos labiausiai reikia. Čia atkuriama būtent ta būsena: nuorodos nebėra, žyma
+     * neišspręsta, eilutė sena — ir ji vis tiek NĖRA kandidatė.
+     */
+    const id = await naujasJobas();
+    const nutrukes = await nutrukesBandymas(id, { text: "žymos gynyba" });
+
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE job_id = $1", [id]);
+
+    /** KONTROLĖ: be žymos ji YRA kandidatė. */
+    const pries = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+    assert.ok(
+      pries.kandidatai.some((k) => k.attempt_id === nutrukes.attemptId),
+      "kontrolė: be žymos sena, nereferencuota eilutė privalo būti kandidatė"
+    );
+
+    await pool.query(
+      "INSERT INTO erasure_marks (job_id, status, reason, marked_at) VALUES ($1, $2, $3, now())",
+      [id, "deletion_pending", "user_request"]
+    );
+
+    const po = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+    assert.ok(
+      !po.kandidatai.some((k) => k.attempt_id === nutrukes.attemptId),
+      "neišspręsta žyma privalo saugoti eilutę — kitaip `deletionRetry` netenka adresų"
+    );
+
+    /** O uždarius žymą apsauga PASIBAIGIA pati — ji nėra amžina. */
+    await pool.query("UPDATE erasure_marks SET status = $2, completed_at = now() WHERE job_id = $1", [id, "deleted"]);
+    const uzdarius = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+    assert.ok(
+      uzdarius.kandidatai.some((k) => k.attempt_id === nutrukes.attemptId),
+      "uždarius žymą eilutė teisėtai tampa valytina"
+    );
+
+    await saugykla.delete(nutrukes.raktas);
+  });
+
+  await t.test("`pending` turi SAVO ribą, ilgesnę nei `abandoned` (sąlyga 4a)", async () => {
+    /**
+     * ⚠️ VYKSTANTIS RAŠYMAS ATRODO KAIP NUTRŪKĘS. Eilutė sukuriama PRIEŠ `put()`, o
+     * laikinas vardas nuo PR-5 apskaičiuojamas — tad šlavėjas gali ištrinti vykstančio
+     * rašymo laikinąjį failą. `abandoned` tokios rizikos neturi: rašytojas baigė.
+     */
+    const id = await naujasJobas();
+    const laukiantis = await nutrukesBandymas(id, { text: "pending" });
+    const atmestas = await nutrukesBandymas(id, { text: "abandoned" });
+    await attemptRegistry.pazymeti(pool, atmestas.attemptId, attemptRegistry.BUSENA.ATMESTA);
+
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '2 hours' WHERE job_id = $1", [id]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 24 * 60 * 60 * 1000,
+      atmestuRibaMs: 60 * 60 * 1000,
+      kiekis: 100,
+    });
+
+    const raktai = kandidatai.map((k) => k.attempt_id);
+    assert.ok(raktai.includes(atmestas.attemptId), "`abandoned` už savo ribos — kandidatas");
+    assert.ok(
+      !raktai.includes(laukiantis.attemptId),
+      "`pending` dar savo riboje — NEGALI būti kandidatas, nes rašymas gali vykti"
+    );
+
+    for (const b of [laukiantis, atmestas]) await saugykla.delete(b.raktas);
+  });
+
+  await t.test("`created_at` ATEITYJE nešluojamas ir SKAIČIUOJAMAS (sąlyga 4b)", async () => {
+    /**
+     * ⚠️ PO ATKŪRIMO IŠ `pg_dump` ŽYMOS YRA ŠALTINIO LAIKO — ta pati klasė kaip
+     * `deploymentIdentity`. Ateityje esantis `created_at` yra vienintelė DETEKTUOJAMA to
+     * dalis, ir ji privalo būti ne tik praleista, bet ir MATOMA: tyliai praleistas
+     * valymas atrodo kaip valymas (7.5a precedentas).
+     */
+    const id = await naujasJobas();
+    const nutrukes = await nutrukesBandymas(id, { text: "iš ateities" });
+
+    await pool.query("UPDATE job_result_attempts SET created_at = now() + INTERVAL '5 days' WHERE job_id = $1", [id]);
+
+    const { kandidatai, praleista } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.ok(
+      !kandidatai.some((k) => k.attempt_id === nutrukes.attemptId),
+      "ateities `created_at` — amžius neapskaičiuojamas, tad NEŠLUOJAMA"
+    );
+    assert.ok(praleista >= 1, "praleidimas privalo būti SUSKAIČIUOTAS, ne tylus");
+
+    await saugykla.delete(nutrukes.raktas);
+  });
+
   await t.test("`eraseJob()` per fasado paviršių nueina iki saugyklos", async () => {
     /**
      * ⚠️ ANKSTESNI SUBTESTAI TIKRINA STORE'Ą; ŠIS — LAIDĄ.
