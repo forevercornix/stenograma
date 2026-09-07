@@ -375,6 +375,7 @@ const functional = [
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
+  "artifactStoreRegistracija",
   "artifactStoreSelection",
   "erasureExportContract",
   "erasureReplayContract",

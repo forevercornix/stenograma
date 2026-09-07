@@ -822,11 +822,44 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     );
   }
 
-  if (rasymoSaugykla) saugyklos.set(rasymoSaugykla.backend, rasymoSaugykla);
+  /**
+   * ⚠️ KONFLIKTUOJANTI REGISTRACIJA ATMETAMA KONSTRUKCIJOS METU (Codex, #294).
+   *
+   * Anksčiau `rasymoSaugykla` buvo įrašoma pirma, o `artifactStores` ciklas ją TYLIAI
+   * PERRAŠYDAVO. Su `fs` root A rašymui ir root B skaitymui `finishAtomic()`
+   * įsipareigotų nuorodą į A, o hidratacija po commit'o ir visi vėlesni skaitymai eitų
+   * per B: sėkmingai užbaigtas job'as su NEPERSKAITOMU rezultatu.
+   *
+   * ⚠️ FAIL-CLOSED, NE „RAŠYMO SAUGYKLA LAIMI". Abu variantai pašalina neperskaitomą
+   * rezultatą, bet „laimi" paliktų klaidingą konfigūraciją VEIKIANČIĄ ir tylią —
+   * operatorius toliau tikėtų, kad skaitymai eina per B. Žemėlapis sudaromas vieną kartą
+   * paleidimo metu, tad kritimas ten yra pigus ir garsus. Tas pats šablonas kaip
+   * `backend` lauko reikalavimui 20 eilučių aukščiau.
+   *
+   * ⚠️ TIKRINAMA TAPATYBĖ, NE `backend` SUTAPIMAS. Ta pati saugykla, paduota ir kaip
+   * rašymo taikinys, ir kaip savo tipo skaitytoja, yra NORMALUS prijungimas (PR-7);
+   * uždraudus jį, sargas draustų teisingą konfigūraciją.
+   */
+  function registruotiSaugykla(tipas, saugykla, saltinis) {
+    const esama = saugyklos.get(tipas);
+
+    if (esama && esama !== saugykla) {
+      throw new TypeError(
+        `createPostgresStore: '${tipas}' backend'ui registruotos DVI skirtingos saugyklos ` +
+          `(${saltinis} kertasi su ankstesne registracija). Rašymas eitų į vieną, o ` +
+          "skaitymas po commit'o — į kitą, tad job'as būtų užbaigtas su neperskaitomu " +
+          "rezultatu (#157). Palikite VIENĄ saugyklą šiam `storage_type`."
+      );
+    }
+
+    saugyklos.set(tipas, saugykla);
+  }
+
+  if (rasymoSaugykla) registruotiSaugykla(rasymoSaugykla.backend, rasymoSaugykla, "`rasymoSaugykla`");
 
   if (artifactStores) {
     for (const [tipas, saugykla] of Object.entries(artifactStores)) {
-      if (saugykla) saugyklos.set(tipas, saugykla);
+      if (saugykla) registruotiSaugykla(tipas, saugykla, "`artifactStores`");
     }
   }
 
@@ -838,7 +871,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
           "neįmanoma pasakyti, kurio `storage_type` eilutes jis aptarnauja (#157)."
       );
     }
-    saugyklos.set(tipas, artifactStore);
+    registruotiSaugykla(tipas, artifactStore, "`artifactStore`");
   }
 
   /**
