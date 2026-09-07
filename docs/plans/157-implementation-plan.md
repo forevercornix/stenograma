@@ -844,7 +844,44 @@ verdiktas lieka „nepaneigta", ne „įrodyta"; įvardijama PR aprašyme.
 **Ką palieka veikiantį:** ištrynimas šalina ir external objektą; registras
 nebemeluoja apie saugojimo vietą.
 
-⚠️ **ĮĖJIMO SĄLYGA: ŠLAVĖJAS PRIVALO BANDYTI ABU VARDUS** (#294 uždarymas).
+---
+
+⚠️ **ĮĖJIMO SĄLYGOS — VISOS, VIENOJE VIETOJE (surinkta PR-5 pradžioje).**
+
+Tas pats šablonas kaip PR-4 („ĮĖJIMO SĄLYGOS — ABI PRIIMTOS, VIENOJE VIETOJE"), ir dėl
+tos pačios priežasties: sąlygos priimtos skirtinguose raunduose ir gyvena skirtinguose
+skyriuose, o PR-5 pradžioje jų tektų ieškoti. **PR-5 apimtis paaugo dviejuose
+paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
+
+| # | Sąlyga | Kur priimta |
+|---|---|---|
+| 1 | **Erasure trina PAGAL REGISTRĄ**, ne pagal `job_results.storage_key` — job'o ištrynimas šalina VISŲ to job'o bandymų objektus, ne tik laimėjusio | variantas (b), orphan skyrius |
+| 2 | **Šlavėjas** neįsipareigotiems bandymams (`busena <> 'committed'`) | variantas (b), orphan skyrius |
+| 3 | **Retencija ≥ eilės prikėlimo horizontai**, IŠVEDAMA iš `revivalHorizonsMs()`, ne surašoma | variantas (b), orphan skyrius |
+| 4 | **Šlavėjas zonduoja ABU vardus** (laikiną ir galutinį); „nė vieno nėra" = sėkmė | #294 uždarymas — žr. skyrių iškart žemiau |
+| 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
+| 6 | **Store lygmens metodas visoms nuorodoms**, ne `job.resultStorage` laukas | PR-3 peržiūra (žr. „PATAISYTA" žemiau) |
+| 7 | **`reference !== null`** → objektas privalo būti pašalintas ir tai patvirtinta; `reference === null` → eilutės ištrynimas IR YRA ištrynimas | kontraktas, ne PR-5 |
+| 8 | **„Job'as turi daugiausia VIENĄ įsipareigotą bandymą" yra DB invariantas** (`UNIQUE (job_id) WHERE busena = 'committed'`, migracija `1756400000000`) — šlavėjas gali juo REMTIS, ne tikrinti | PR-4 pabaiga |
+
+✅ **KĄ PR-3/PR-4 JAU PADARĖ — NEBEKARTOTI (patikrinta kode, ne prisiminta):**
+
+- metaduomenų `SELECT` jau neša rezultato nuorodą: `SELECT_JOB_META` turi
+  `result_storage_type`, `result_storage_key`, `result_bytes`, `result_checksum`
+  (`postgresStore.js:625-635`) — **be `payload`**, tad hidratacijos riba nepažeista.
+  Skyriaus tekstas žemiau („BET ŠIANDIEN NĖ VIENAS IŠ TRIJŲ NETURI IŠ KUR TO SUŽINOTI")
+  aprašo būseną PRIEŠ PR-3 ir paliktas kaip sprendimo pagrindimas, ne kaip dabartis;
+- `laikinasVardas(raktas)` eksportuotas iš `utils/artifactStore/fsStore.js`;
+- registro rašymo pusė (`registruoti`, `pazymeti`, `isipareigoti`, `joboBandymai`) veikia
+  ir yra padengta; PR-5 prideda VARTOTOJUS, ne registrą.
+
+⚠️ **KĄ PR-5 VIS DAR PRIVALO ĮRODYTI PATS:** `joboBandymai()` iki šiol nekviečiamas iš
+produkcinio kodo — jis buvo parašytas PR-4 ir laukė šio PR. Tol, kol jį kviečia tik
+testai, „erasure trina pagal registrą" yra dokumentacija, ne savybė.
+
+---
+
+⚠️ **ĮĖJIMO SĄLYGA (4): ŠLAVĖJAS PRIVALO BANDYTI ABU VARDUS** (#294 uždarymas).
 
 PR-4 eksportavo `laikinasVardas(raktas)` (`utils/artifactStore/fsStore.js`) būtent tam,
 kad šlavėjas laikino failo vardą apskaičiuotų iš registro `storage_key`. Bet **iš
