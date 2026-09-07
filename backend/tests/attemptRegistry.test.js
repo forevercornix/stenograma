@@ -63,10 +63,18 @@ test("registravimas rašo `pending` PRIEŠ rašymą į saugyklą", async () => {
   assert.equal(irasas.params[4], attemptRegistry.BUSENA.LAUKIA, "pradinė būsena — `pending`");
 });
 
-test("būsenos pavadinimai SUTAMPA su migracijos aibe", () => {
+test("būsenų aibė SUTAMPA su migracijos aibe — abiem kryptim", () => {
   /**
-   * ⚠️ MIGRACIJA UŽŠALDO AIBĘ SĄMONINGAI (istorijos įrašas), tad kodo konstantos
-   * negali nuo jos nutolti tyliai: `CHECK` pažeidimas pasimatytų tik prieš tikrą DB.
+   * ⚠️ GREP'AS ŠIO INVARIANTO NETIKRINA (§9.2, Codex #294).
+   *
+   * Pirmoji redakcija ieškojo kiekvienos būsenos šaltinio TEKSTE. `committed`
+   * pašalinimas iš migracijos masyvo praeitų, nes žodis lieka komentare — o `CHECK`
+   * pažeidimas pasimatytų tik prieš tikrą DB.
+   *
+   * Todėl aibė IŠRENKAMA iš pačios migracijos apibrėžties (masyvo literalo) ir lyginama
+   * TIKSLIAI: trūkstama būsena ir perteklinė būsena abi yra defektai. Pirmoji reikštų,
+   * kad kodas rašo tai, ko DB nepriims; antroji — kad DB priima būseną, kurios kodas
+   * niekada nenaudos, ir niekas apie ją nieko nežino.
    */
   const fs = require("node:fs");
   const path = require("node:path");
@@ -75,7 +83,24 @@ test("būsenos pavadinimai SUTAMPA su migracijos aibe", () => {
     "utf8"
   );
 
-  for (const busena of Object.values(attemptRegistry.BUSENA)) {
-    assert.match(src, new RegExp(`"${busena}"`), `migracija privalo leisti "${busena}"`);
-  }
+  const apibrezimas = src.match(/const BUSENOS_FROZEN = \[([^\]]*)\]/);
+  assert.ok(apibrezimas, "migracijoje privalo būti `BUSENOS_FROZEN` masyvo literalas");
+
+  const migracijos = apibrezimas[1]
+    .split(",")
+    .map((x) => x.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean)
+    .sort();
+
+  assert.deepEqual(
+    migracijos,
+    Object.values(attemptRegistry.BUSENA).sort(),
+    "kodo ir migracijos būsenų aibės privalo sutapti TIKSLIAI"
+  );
+
+  /**
+   * ⚠️ IR PATS `CHECK` PRIVALO NAUDOTI TĄ AIBĘ. Be to migracija galėtų deklaruoti
+   * masyvą ir apriboti stulpelį visai kitomis reikšmėmis.
+   */
+  assert.match(src, /busena IN \(\$\{sarasas\(BUSENOS_FROZEN\)\}\)|sarasas\(BUSENOS_FROZEN\)/);
 });

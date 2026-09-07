@@ -119,6 +119,42 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     assert.equal(bandymai[0].storage_key, r.storage_key, "registras ir nuoroda rodo TĄ PATĮ objektą");
   });
 
+  await t.test("registro eilutė egzistuoja JAU TADA, kai prasideda `put()`", async () => {
+    /**
+     * ⚠️ TVARKA TIKRINAMA PER PRODUKCINĮ KELIĄ, NE PER MODULIO SIGNATŪRĄ (Codex, #294).
+     *
+     * `attemptRegistry` vienetinis testas niekada nekviečia `finishAtomic()`: perkėlus
+     * `registruoti()` ŽEMIAU `put()`, jis liktų žalias — o būtent ta tvarka yra viso
+     * registro esmė. „Geriau eilutė be objekto, nei objektas be eilutės" yra teiginys
+     * apie SEKĄ, tad ir tikrinti reikia seką.
+     *
+     * Dublis klausia DB rašymo metu: ar mano bandymo eilutė jau yra?
+     */
+    const id = await naujasJobas();
+    let eiluteRasymoMetu = null;
+
+    const stebimaSaugykla = {
+      ...saugykla,
+      async put(raktas, reiksme) {
+        const { rows } = await pool.query(
+          "SELECT busena FROM job_result_attempts WHERE storage_key = $1",
+          [raktas]
+        );
+        eiluteRasymoMetu = rows[0] ? rows[0].busena : null;
+        return saugykla.put(raktas, reiksme);
+      },
+    };
+
+    const suStebejimu = createPostgresStore(pool, { rasymoSaugykla: stebimaSaugykla });
+    await suStebejimu.finishAtomic(id, STATUS.COMPLETED, { result: { text: "tvarka" } });
+
+    assert.equal(
+      eiluteRasymoMetu,
+      attemptRegistry.BUSENA.LAUKIA,
+      "registro eilutė privalo egzistuoti (`pending`) DAR PRIEŠ rašymą į saugyklą"
+    );
+  });
+
   await t.test("pakartojimas su TUO PAČIU rezultatu: `put()` NEKVIEČIAMAS, version nedidėja", async () => {
     /**
      * ⚠️ SU ATTEMPT-UNIQUE RAKTU PRE-CHECK YRA VIENINTELIS DALYKAS, NELEIDŽIANTIS
@@ -399,10 +435,40 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     saugykla.rasymai = 0;
     saugykla.trynimai = [];
 
+    /**
+     * ⚠️ `Promise.all()` NEGARANTUOJA LENKTYNIŲ (Codex, #294).
+     *
+     * Be sinchronizacijos abu bandymai gali įvykti NUOSEKLIAI — pirmas spėja
+     * įsipareigoti anksčiau, nei antras pasiekia pre-check — ir testas praeitų su
+     * visomis asercijomis, nieko neišbandęs. Barjeras ties saugyklos riba sulaiko abu,
+     * kol JIEDU paruošė savo objektus; tik tada leidžiama eiti į transakciją.
+     */
+    const barjeras = { laukiantys: 0, atrakinti: null };
+    barjeras.zadejimas = new Promise((r) => {
+      barjeras.atrakinti = r;
+    });
+
+    const suBarjeru = createPostgresStore(pool, {
+      rasymoSaugykla: {
+        ...saugykla,
+        async put(raktas, reiksme) {
+          const kvitas = await saugykla.put(raktas, reiksme);
+
+          barjeras.laukiantys += 1;
+          if (barjeras.laukiantys >= 2) barjeras.atrakinti();
+          await barjeras.zadejimas;
+
+          return kvitas;
+        },
+      },
+    });
+
     const [a, b] = await Promise.all([
-      store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
-      store.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
+      suBarjeru.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
+      suBarjeru.finishAtomic(id, STATUS.COMPLETED, { result: rezultatas }),
     ]);
+
+    assert.equal(barjeras.laukiantys, 2, "abu bandymai privalėjo pasiekti barjerą");
 
     /** Abu grąžina sėkmę: tas pats loginis rezultatas yra idempotentiškas. */
     for (const atsakymas of [a, b]) {
