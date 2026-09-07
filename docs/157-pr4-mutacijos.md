@@ -167,3 +167,44 @@ pakartojimų" (redis rinkinys, vykdomas CI).
 
 ⚠️ Tai D radinio taisymo įrodymas: be vyniojimo `neatkartojama` ženklas lieka, bet
 grandinė nenutrūksta — testas matuoja PAKARTOJIMŲ SKAIČIŲ, ne lauko buvimą.
+
+## M8 — paruošimas grąžintas UŽ valymo srities (CI `34127983140`)
+
+```diff
+-    } catch (klaida) {
+-      await isvalytiBandyma({
+-        attemptId,
+-        nuoroda: { storageType: rasymoSaugykla.backend, storageKey: raktas },
+-      });
+-
+-      throw klaida;
+-    }
++    } finally {
++      /** Valymą atlieka `finishAtomic()` `finally` blokas. */
++    }
+```
+
+**Krenta ABU** (reikalauta „bent vienas"):
+
+- „`head()` klaida PO `put()` palieka VALOMĄ, ne laukiantį pėdsaką";
+- „pasikartojanti `head()` klaida NEKAUPIA objektų".
+
+⚠️ Mutacijos komentaras („valymą atlieka `finishAtomic()` `finally`") yra būtent tas
+teiginys, kuris atrodo teisingas ir nėra: `paruostiExternalRasyma()` kviečiama PRIEŠ tą
+`try`, tad jo `finally` paruošimo klaidų nepasiekia. Mutacija parašyta taip, kaip ją
+parašytų žmogus, tikintis, kad valymas jau padengtas.
+
+## Radiniai 1 ir 3 — raudona prieš žalią, be atskiros mutacijos
+
+`.tmp` vardo išvedimas ir saugyklų registracijos sargas tikrinami VIETOJE (be servisų),
+tad įrodymas gautas tiesiogiai: testai parašyti pirma ir paleisti prieš taisymą.
+
+| Testas | Prieš taisymą | Po taisymo |
+|---|---|---|
+| „laikino failo vardas IŠVEDAMAS iš rakto" | **not ok** | ok |
+| „laikino vardo ilgis NEPRIKLAUSO nuo rakto ilgio" | **not ok** | ok |
+| „KONFLIKTUOJANTI to paties `backend` registracija KRENTA" | **not ok** | ok |
+| „`artifactStore` (vienaskaita) kertasi su tais pačiais sargais" | **not ok** | ok |
+
+Tai ta pati evidencija, kurią duoda mutacija (subjektas pašalintas → testas raudonas),
+tik gauta priešinga kryptimi ir be laikinos šakos.
