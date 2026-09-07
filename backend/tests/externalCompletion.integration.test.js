@@ -760,6 +760,97 @@ test("#157 PR-4: external completion, registras ir pakartojimas", { skip: PRALEI
     );
   });
 
+  await t.test("registro `23505` NEPASIEKIAMAS produkciniu keliu: promote vyksta PO `jobs` užraktu", async (t2) => {
+    /**
+     * ⚠️ NAUJAS INDEKSAS ĮVEDA NAUJĄ GEDIMO REŽIMĄ, IR JIS PRIVALO BŪTI ARBA
+     * APDOROTAS, ARBA ĮRODYTAS NEPASIEKIAMU (Codex, #294).
+     *
+     * `UNIQUE (job_id) WHERE busena = 'committed'` reiškia, kad `23505` dabar gali kilti
+     * ir iš registro. Repo jį apdoroja vienoje vietoje (`postgresStore.js:1035`) ir tik
+     * `jobs_idempotency` suvaržymui; registro pažeidimas sklistų kaip žalia DB klaida, o
+     * worker'is laikytų ją ATKARTOJAMA ir perleistų visą transkripciją. Tai D radinys
+     * kitu pavidalu.
+     *
+     * Scenarijus, dėl kurio kilo klausimas: du lygiagretūs remontai, kai antrasis paima
+     * užraktą PRIEŠ pirmojo commit'ą — tada jis dar matytų seną raktą, remonto sąlyga jį
+     * praleistų, ir promote duotų `23505`.
+     *
+     * ⚠️ TO NUTIKTI NEGALI, IR PRIEŽASTIS TIKRINAMA ELGESIU, NE ARGUMENTU: promote vyksta
+     * TOJE PAČIOJE transakcijoje, kuri jau laiko `jobs` eilutės `FOR UPDATE` užraktą, tad
+     * antrasis vykdytojas į tą šaką patenka tik PO pirmojo commit'o — o tada mato jau
+     * perjungtą raktą ir promote nekviečia.
+     *
+     * Zondas antra jungtimi klausia to paties, ko klausia ankstesnis testas, tik
+     * PRIEŠINGA kryptimi: `put()` metu užraktas privalo būti LAISVAS, promote metu —
+     * UŽIMTAS. Kontrolė ta pati zondo eilutėje: kito job'o eilutė lieka pasiekiama, tad
+     * `55P03` yra teiginys apie ŠITĄ eilutę, ne apie zondą.
+     */
+    const id = await naujasJobas();
+    const kitas = await naujasJobas();
+
+    const antraJungtis = new Client({ connectionString: DB_URL });
+    await antraJungtis.connect();
+    t2.after(() => antraJungtis.end().catch(() => {}));
+
+    async function zondas(jobId) {
+      try {
+        await antraJungtis.query("BEGIN");
+        await antraJungtis.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE NOWAIT", [jobId]);
+        return null;
+      } catch (klaida) {
+        return klaida.code;
+      } finally {
+        await antraJungtis.query("ROLLBACK").catch(() => {});
+      }
+    }
+
+    const originalus = attemptRegistry.isipareigoti;
+    let uzraktasPromoteMetu = "NEPAKVIESTA";
+    let kontrolePromoteMetu = "NEPAKVIESTA";
+
+    attemptRegistry.isipareigoti = async (vykdytojas, argumentai) => {
+      uzraktasPromoteMetu = await zondas(id);
+      kontrolePromoteMetu = await zondas(kitas);
+      return originalus(vykdytojas, argumentai);
+    };
+
+    try {
+      await store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "promote po užraktu" } });
+    } finally {
+      attemptRegistry.isipareigoti = originalus;
+    }
+
+    assert.equal(
+      uzraktasPromoteMetu,
+      "55P03",
+      "promote metu `jobs` eilutė privalo būti UŽRAKINTA — kitaip du promote gali sutapti"
+    );
+    assert.equal(kontrolePromoteMetu, null, "kontrolė: zondas kito job'o eilutę paima laisvai");
+
+    /**
+     * Ir antra pusė to paties teiginio: du lygiagretūs remontai iš tikrųjų NEIŠMETA
+     * `23505`. Aukščiau esantis remontų testas tai tikrina netiesiogiai (verdiktas
+     * privalo būti objektas); čia klaidos kodas gaudomas atvirai, kad gedimas rodytų į
+     * indeksą, o ne į „netikėtą verdiktą".
+     */
+    const remontuojamas = await naujasJobas();
+    const rezultatas = { text: "23505 zondas" };
+    await store.finishAtomic(remontuojamas, STATUS.COMPLETED, { result: rezultatas });
+    const sena = await eilute(remontuojamas);
+    await fs.delete(sena.storage_key);
+
+    const atsakymai = await Promise.allSettled([
+      store.finishAtomic(remontuojamas, STATUS.COMPLETED, { result: rezultatas }),
+      store.finishAtomic(remontuojamas, STATUS.COMPLETED, { result: rezultatas }),
+    ]);
+
+    const registroPazeidimai = atsakymai
+      .filter((x) => x.status === "rejected")
+      .map((x) => `${x.reason && x.reason.code}/${x.reason && x.reason.constraint}`);
+
+    assert.deepEqual(registroPazeidimai, [], `lygiagretus remontas išmetė DB klaidą: ${registroPazeidimai}`);
+  });
+
   await t.test("VISI šio failo rašymai ėjo per PARUOŠTĄ reprezentaciją", () => {
     /**
      * ⚠️ TVIRTINIMAS PABAIGOJE, NE KIEKVIENAME TESTE.

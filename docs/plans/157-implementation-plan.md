@@ -463,6 +463,12 @@ neišlieka po persistavimo, tad teisėtas pakartojimas Redis kelyje gauna
 klausimas: Redis aktyvuotas, PostgreSQL — ne. Sprendimas privalo kilti iš `common.js`
 lygybės autoriteto ir padengti VISUS persistentinius backend'us.
 
+Paveiktų reikšmių predikatas IŠMATUOTAS ir siauras: **reikšmėje bet kokiame gylyje yra
+objektas, turintis `toJSON`** (`kanonizuoti()` renka nuosavus raktus ir jo nemato,
+`JSON.stringify` jį kviečia). `Date` yra šio predikato atvejis, ne atskira klasė;
+`Map`, `Set`, `NaN`, `Infinity`, `undefined` ir klasės be `toJSON` abiejose pusėse
+virsta tuo pačiu ir į apimtį nepatenka.
+
 ⚠️ **PR-4 REGISTRAS YRA WRITE-ONLY — SPRENDIMAS, NE PRALEIDIMAS.**
 
 Iš penkių sąlygų, priimtų kartu su variantu (b), PR-4 įgyvendina DVI: įrašas atsiranda
