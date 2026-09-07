@@ -2303,15 +2303,27 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    *
    * ⚠️ REFERENCUOTAS OBJEKTAS GRĄŽINAMAS PASKUTINIS, IR TAI SPRENDIMAS.
    *
-   * Kvietėjas trina eilės tvarka. Nutrūkus viduryje, referencuotas objektas lieka
-   * paskutinis stovintis, tad `job_results` nuoroda niekada nerodo į jau ištrintą objektą,
-   * kai kiti bandymai dar gyvi. Priešinga tvarka paliktų kabančią nuorodą.
+   * Kvietėjas trina eilės tvarka. Nutrūkus BET KURIOJE vietoje, IŠSKYRUS PASKUTINĮ
+   * ŽINGSNĮ, `job_results` nuoroda lieka galiojanti: pašalinti tik nereferencuoti
+   * bandymai. Priešinga tvarka paliktų kabančią nuorodą jau po pirmo žingsnio.
+   *
+   * ⚠️ PASKUTINIS ŽINGSNIS LANGO NEPANAIKINA — JĮ DENGIA IŠTRYNIMO ŽYMA.
+   *
+   * Ištrynus referencuotą objektą ir nutrūkus prieš pašalinant eilutę, nuoroda rodo
+   * būtent į ištrintą objektą. Langas neišvengiamas ir siauras, o dengia jį tai, kad
+   * žyma įrašoma PRIEŠ pradedant šalinti: `lifecycleService.js:315-325`
+   * („ŽYMA PRIEŠ ŠALINIMĄ"), `adminJobService.js:284` ir `retentionSweeper.js:148` visi
+   * ima `claimForDeletion()` prieš destruktyvų I/O. Vadinasi po kritimo eilutė su
+   * kabančia nuoroda yra job'as, PAŽYMĖTAS ištrynimui, ir jį atkartoja `deletionRetry`,
+   * o ne prikelia worker'is. Patikrinta kode, ne prielaida.
    *
    * ⚠️ `busena: null` REIŠKIA „referencuota, bet registro eilutės nėra".
    *
-   * Tai teisėta būsena: retencija bandymų eilutes valo, o `job_results` nuoroda lieka; be
-   * to eilutės, parašytos prieš registrą, jo neturi. Kvietėjui tai svarbu — objektą vis
-   * tiek reikia pašalinti, tik apie jį registras nieko nebepasako.
+   * Tai teisėta būsena eilutėms, parašytoms PRIEŠ registrą (PR-4 migracija), ir
+   * eilutėms, atkurtoms iš senesnio dump'o. Retencija šio atvejo gaminti NETURI — žr.
+   * PR-5 įėjimo sąlygą 3: bandymo eilutė, kurios objektas vis dar referencuotas gyvos
+   * `job_results` eilutės, pagal amžių nešalinama. Kvietėjui skirtumas svarbus: objektą
+   * vis tiek reikia pašalinti, tik apie jį registras nieko nebepasako.
    *
    * @param {string} jobId
    * @returns {Promise<Array<{storageType: string, storageKey: string, busena: string|null, referencuotas: boolean}>>}

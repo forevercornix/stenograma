@@ -857,7 +857,7 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 |---|---|---|
 | 1 | **Erasure trina PAGAL REGISTRĄ**, ne pagal `job_results.storage_key` — job'o ištrynimas šalina VISŲ to job'o bandymų objektus, ne tik laimėjusio | variantas (b), orphan skyrius |
 | 2 | **Šlavėjas** neįsipareigotiems bandymams (`busena <> 'committed'`) | variantas (b), orphan skyrius |
-| 3 | **Retencija ≥ eilės prikėlimo horizontai**, IŠVEDAMA iš `revivalHorizonsMs()`, ne surašoma | variantas (b), orphan skyrius |
+| 3 | **Retencija ribojama BŪSENA IR amžiumi:** horizontas iš `revivalHorizonsMs()` yra apatinė riba, bet eilutė, kurios objektas vis dar referencuotas, pagal amžių nešalinama NIEKADA | variantas (b) + PR-5 pradžios peržiūra |
 | 4 | **Šlavėjas zonduoja ABU vardus** (laikiną ir galutinį); „nė vieno nėra" = sėkmė | #294 uždarymas — žr. skyrių iškart žemiau |
 | 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
 | 6 | **Store lygmens metodas visoms nuorodoms**, ne `job.resultStorage` laukas | PR-3 peržiūra (žr. „PATAISYTA" žemiau) |
@@ -874,6 +874,28 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 - `laikinasVardas(raktas)` eksportuotas iš `utils/artifactStore/fsStore.js`;
 - registro rašymo pusė (`registruoti`, `pazymeti`, `isipareigoti`, `joboBandymai`) veikia
   ir yra padengta; PR-5 prideda VARTOTOJUS, ne registrą.
+
+⚠️ **SĄLYGA 3 PATIKSLINTA: HORIZONTO VIENO NEUŽTENKA.**
+
+Pradinė formuluotė („retencija ≥ prikėlimo horizontai") kalba tik apie AMŽIŲ. Bet
+`listResultArtifacts()` `busena: null` atvejis parodo, kad registro eilutė gali dingti,
+kol objektas dar gyvas ir referencuotas — o tada objekto atrandamumas priklauso VIEN nuo
+`job_results` eilutės. Ji turi `ON DELETE CASCADE` nuo `jobs`; registras FK sąmoningai
+neturi būtent tam, kad išgyventų. Vadinasi galimas derinys, kuriame **abi** rodyklės
+dingsta: retencija pašalino bandymo eilutę anksčiau, o vėliau job'as ištrintas keliu,
+kuris neina per `listResultArtifacts()`.
+
+**Predikatas: bandymo eilutė, kurios `storage_key` yra gyvoje `job_results` eilutėje,
+retencijai NEATIDUODAMA — nepriklausomai nuo amžiaus.** Tai ta pati taisyklė, kurią 7.5a
+jau priėmė ištrynimo žymoms: retencija priklauso nuo BŪSENOS, ne tik nuo amžiaus.
+
+⚠️ Predikatas formuluojamas per NUORODĄ, ne per `busena = 'committed'`, ir skirtumas
+nėra kosmetinis. Migracijos indeksas `job_result_attempts_valytini`
+(`WHERE busena <> 'committed'`) šiandien atrenka kandidatus ir įsipareigotų eilučių
+nepaima — bet tai indekso, t. y. PAIEŠKOS, savybė, ne sargas. Būsena ir nuoroda gali
+išsiskirti (ranka redaguota eilutė, atkūrimas iš dviejų skirtingų momentų), o klausimas,
+į kurį retencija privalo atsakyti, yra „ar ši eilutė yra vienintelis likęs adresas", ne
+„kokia jos būsena".
 
 ⚠️ **KĄ PR-5 VIS DAR PRIVALO ĮRODYTI PATS:** `joboBandymai()` iki šiol nekviečiamas iš
 produkcinio kodo — jis buvo parašytas PR-4 ir laukė šio PR. Tol, kol jį kviečia tik
