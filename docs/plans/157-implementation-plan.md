@@ -869,6 +869,36 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 | 7 | **`reference !== null`** → objektas privalo būti pašalintas ir tai patvirtinta; `reference === null` → eilutės ištrynimas IR YRA ištrynimas | kontraktas, ne PR-5 |
 | 8 | **„Job'as turi daugiausia VIENĄ įsipareigotą bandymą" yra DB invariantas** (`UNIQUE (job_id) WHERE busena = 'committed'`, migracija `1756400000000`) — šlavėjas gali juo REMTIS, ne tikrinti | PR-4 pabaiga |
 
+⚠️ **KAIP ŠIS SĄRAŠAS UŽDAROMAS — DVYLIKA SĄLYGŲ PATI SAVAIME YRA RIZIKA.**
+
+Sąrašas per tris raundus paaugo nuo trijų iki dvylikos, ir jis turi tą pačią savybę kaip
+bet kuris rankinis sąrašas: **jį galima įvykdyti nepilnai, ir niekas nekris.** Šlavėjas
+gali praeiti visus testus, uždaryti dešimt sąlygų iš dvylikos, ir tai atrodys kaip sėkmė.
+
+Atsakymas nėra dar viena taisyklė: **šlavėjo užbaigimo ataskaita eina per sąrašą punktas
+po punkto** — dvylika eilučių, kiekviena su įrodymu arba `UNVERIFIED`. Ta pati forma kaip
+PR-1 DoD citatos. Tai uždaro vienintelį būdą, kuriuo šis sąrašas gali suklysti.
+
+⚠️ **TRYS POROS NĖRA NEPRIKLAUSOMOS — RAŠOMOS KARTU, NE EILĖS TVARKA.**
+
+| Pora | Kodėl kartu |
+|---|---|
+| **4a + 4b** | 4a fail-closed SUKURIA tai, ką 4b turi matyti. Vien 4a — sistema tyli; vien 4b — nėra ko rodyti |
+| **3a + 8** | Jei žymų saugykla „kitokia", predikato antra šaka neveikia, ir lieka klausimas, ar sąlygos 8 pakanka — žr. atsakymą žemiau |
+| **4 + 4d** | Tai TAS PATS kodas su dviem verdiktais. Parašius atskirai lengva gauti šaką, kuri trina, ir šaką, kuri praneša, nesutariančias dėl tos pačios būsenos |
+
+⚠️ **ATSAKYMAS Į 3a + 8 KLAUSIMĄ: SĄLYGA 8 NĖRA PAKAITALAS, TAD ŠLAVĖJAS NEDIRBA.**
+
+Kyla natūralus klausimas, ar praradus žymų šaką pakanka sąlygos 8 (DB invariantas
+„daugiausia vienas įsipareigotas"). **Nepakanka, ir priežastis struktūrinė:** sąlyga 8
+sako, kuris bandymas yra REFERENCUOTAS, tad ji gina būtent tuos objektus, kurie ir taip
+apsaugoti pirmąja predikato šaka. Šlavėjo dalykas yra priešingas — NEREFERENCUOTI
+bandymai, kuriems sąlyga 8 nepasako nieko.
+
+Todėl, kai žymų saugykla nepasiekiama ar kitokia, šlavėjas **nedirba visai** (žingsnio
+lygio fail-closed), o ne šluoja su viena apsauga iš dviejų. Tai ir yra 3a „žingsnio lygio
+būsenos" praktinė prasmė: ne tik pranešimo forma, bet ir apimtis.
+
 ✅ **KĄ PR-3/PR-4 JAU PADARĖ — NEBEKARTOTI (patikrinta kode, ne prisiminta):**
 
 - metaduomenų `SELECT` jau neša rezultato nuorodą: `SELECT_JOB_META` turi
