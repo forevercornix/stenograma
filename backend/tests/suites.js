@@ -17,6 +17,11 @@
 
 /** Testai, kuriems reikia TIKRO Redis (be jo jie patys save praleidžia). */
 const redis = [
+  /**
+   * #157 (PR-4): struktūrinis atmetimas TIKRAME BullMQ kelyje. Vienetinis testas
+   * įrodytų tik ženklo buvimą; klausimas yra, ar retry grandinė realiai sustoja.
+   */
+  "artifactUnrecoverable.integration",
   "queueRecovery.integration",
   "heartbeatReadiness.integration",
   "redisConcurrency.integration",
