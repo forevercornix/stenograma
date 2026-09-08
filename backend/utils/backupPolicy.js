@@ -86,6 +86,21 @@ const EXCLUDED_DESPITE_PERSISTENT = {
  *
  * `null` yra teisėta reikšmė - ji reiškia „šis tipas neturi savo lentelės"
  * (failai saugykloje, laikini artefaktai). Ji SĄMONINGA, ne praleista.
+ *
+ * ⚠️ `transcript` / `protocol` -> `job_results` YRA APIE METADUOMENIS, NE APIE TURINĮ
+ * (#157, PR-5, sąlyga 5).
+ *
+ * Iki #157 abu teiginiai sutapdavo: eilutė buvo ir adresas, ir turinys. Po #157 external
+ * eilutėje `payload` yra `NULL`, o turinys guli S3 arba failų sistemoje — tad
+ * `job_results` kopija atkuria NUORODĄ, ne rezultatą. Žemėlapis lieka teisingas savo
+ * klausimui („kurią LENTELĘ liečia šis tipas"), bet jis NEBEATSAKO į klausimą „ar
+ * turinys pateks į kopiją".
+ *
+ * ⚠️ ATSAKYMAS YRA PER-ROW, TAD JIS ČIA NETELPA. Po migracijos DB bus mišri, ir
+ * konfigūracija nesako, kur guli JAU EGZISTUOJANTIS rezultatas; sprendžia eilutės
+ * `storage_type`. External artefaktų kopijavimo atsakomybė apibrėžiama PR-7 kartu su
+ * `docs/backup-runbook.md` §9a/§11 — čia užrašoma riba, kad žemėlapis netvirtintų
+ * daugiau, nei žino (§12.1).
  */
 const TABLE_BY_TYPE = Object.freeze({
   [ARTEFACT_TYPES.SOURCE_AUDIO.id]: null,
