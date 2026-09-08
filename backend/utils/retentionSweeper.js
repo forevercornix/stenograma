@@ -179,7 +179,8 @@ async function _valytiPasenusiusJobus(now) {
             : artefaktai.nepavyko.map((n) => `${n.storageKey}: ${n.priezastis}`).join("; ");
 
         /** ⚠️ Ta pati taisyklė kitoje šakoje: nesėkmė yra kvito dalis, ne tik logas. */
-        nepavykeArtefaktai.push(`pasenęs job'as ${jobId}: ${priezastis}`);
+        /** ⚠️ Ta pati taisyklė kaip bandymų šakoje: į kvitą — klasė, ne adresas. */
+        nepavykeArtefaktai.push(klaidosKlase(priezastis));
         log.warn(`Retencija: pasenusio job'o artefaktų pašalinti nepavyko (${jobId}): ${priezastis}`);
         await tombstones
           .complete(jobId, TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" })
@@ -250,6 +251,36 @@ async function _valytiPasenusiusJobus(now) {
  * Vienas rašymas, trunkantis ilgiau nei valandą, šiandien reikštų pakibusį procesą, o ne
  * lėtą saugyklą — o pakibusio proceso eilutė teisėtai tampa šluotina.
  */
+/**
+ * NESĖKMĖS KLASĖ KVITUI — BE IDENTIFIKATORIŲ IR BE ADRESŲ (#157, PR-5; Codex G).
+ *
+ * ⚠️ KVITAS TURI KITĄ REDAGAVIMO REŽIMĄ NEI LOGAS. Praėjusio raundo taisymas („nesėkmė
+ * yra kvito dalis, ne tik logas") teisingas, bet perkėlė turinį nepatikrinęs reikalavimų
+ * skirtumo: `auditLog` redaguoja kredencialus ir absoliučius kelius, o UUID ir santykinių
+ * raktų — ne.
+ *
+ * Todėl kvite lieka KATEGORIJA. Iš jos matyti, kiek ir kokios klasės nesėkmių buvo; kur
+ * tiksliai — operacinėje diagnostikoje, kuri turi atitinkamą apsaugą.
+ */
+function klaidosKlase(priezastis) {
+  const tekstas = String(priezastis || "");
+
+  if (/NESAUGU/.test(tekstas)) return "nesaugu:svetimas-adresas";
+  if (/neregistruota|saugykla neregistruota/i.test(tekstas)) return "konfiguracija:saugykla-neregistruota";
+  if (/nepalaiko/.test(tekstas)) return "konfiguracija:metodo-nera";
+  if (/EACCES|EPERM/.test(tekstas)) return "saugykla:teisiu-klaida";
+  if (/ENOSPC|EIO|ETIMEDOUT|ECONN/.test(tekstas)) return "saugykla:nepasiekiama";
+
+  return "saugykla:kita";
+}
+
+/** Klasių dažniai kvitui: „kiek ir kokios", be pavienių įrašų. */
+function suskaiciuoti(klases) {
+  const dazniai = {};
+  for (const klase of klases || []) dazniai[klase] = (dazniai[klase] || 0) + 1;
+  return dazniai;
+}
+
 const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
 
 /**
@@ -371,7 +402,19 @@ async function _valytiRezultatoBandymus() {
        * Vien logginant, tame pačiame cikle pašalinus ką nors kita, kvitas sakytų
        * `success: true`, nors jautrus objektas liko. Logas nėra kvito dalis.
        */
-      nepavyke.push(`bandymas ${v.storageKey}: ${v.priezastis}`);
+      /**
+       * ⚠️ KATEGORIJA, NE ADRESAS (Codex, #304 / G).
+       *
+       * `summary.errors` persistinamas kaip `RETENTION_PURGE.error`, o `auditLog`
+       * redaguoja kredencialus ir absoliučius kelius, bet NE UUID ir ne santykinius
+       * raktus. Įrašius `results/<jobId>/<attemptId>.json`, kryptis apsiverstų:
+       * SĖKMINGAS ištrynimas paliktų pseudonimizuotą įrašą, o NEPAVYKĘS — tiesioginį
+       * identifikatorių ir artefakto vietą. Būtent nesėkmės atveju duomenys dar yra.
+       *
+       * Adresas keliauja į `log.warn` (operacinė diagnostika su savo apsauga), o į kvitą —
+       * tik klasė.
+       */
+      nepavyke.push(klaidosKlase(v.priezastis));
       log.warn(`Retencija: bandymo objekto pašalinti nepavyko (${v.storageKey}): ${v.priezastis}`);
       continue;
     }
@@ -444,7 +487,13 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     summary.jobs = r.pasalinta;
     summary.jobsSkipped = r.praleista;
     /** ⚠️ Artefaktų nesėkmė yra KVITO dalis: be jos ciklas atrodytų sėkmingas. */
-    for (const klaida of r.nepavyke || []) summary.errors.push(`result artifacts: ${klaida}`);
+    /**
+     * ⚠️ SUTRAUKIAMA Į KLASĖS + KIEKIO PORAS. Po eilutę kiekvienam objektui reikštų, kad
+     * kvito ilgis proporcingas nesėkmių skaičiui, o turinys — vis tiek be adresų.
+     */
+    for (const [klase, kiek] of Object.entries(suskaiciuoti(r.nepavyke))) {
+      summary.errors.push(`result artifacts ${klase} x${kiek}`);
+    }
   } catch (e) {
     summary.errors.push(`jobs: ${e.message}`);
   }
@@ -454,7 +503,9 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     summary.resultAttempts = bandymai.pasalinta;
     summary.resultAttemptsSkipped = bandymai.praleista;
     summary.resultAttemptsViolations = bandymai.pazeidimai;
-    for (const klaida of bandymai.nepavyke || []) summary.errors.push(`result attempts: ${klaida}`);
+    for (const [klase, kiek] of Object.entries(suskaiciuoti(bandymai.nepavyke))) {
+      summary.errors.push(`result attempts ${klase} x${kiek}`);
+    }
     if (bandymai.nevykdyta) summary.resultAttempts = null;
   } catch (e) {
     summary.errors.push(`result attempts: ${e.message}`);

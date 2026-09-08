@@ -833,10 +833,20 @@ test("#157 PR-5: viena sėkmė + vienas `nepavyko` tame pačiame cikle → kvita
     const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
 
     assert.equal(summary.resultAttempts, 1, "kontrolė: viena sėkmė TIKRAI buvo");
+    /**
+     * ⚠️ KLASĖ, NE ADRESAS (Codex, #304 / G). `summary.errors` persistinamas kaip
+     * `RETENTION_PURGE.error`, o `auditLog` UUID ir santykinių raktų neredaguoja — tad
+     * SĖKMINGAS ištrynimas paliktų pseudonimizuotą įrašą, o NEPAVYKĘS — tiesioginį
+     * identifikatorių ir artefakto vietą. Būtent nesėkmės atveju duomenys dar yra.
+     */
     assert.ok(
-      summary.errors.some((e) => e.includes("EACCES")),
-      `nesėkmė privalo patekti į suvestinę: ${JSON.stringify(summary.errors)}`
+      summary.errors.some((e) => e.includes("saugykla:teisiu-klaida")),
+      `nesėkmės KLASĖ privalo patekti į suvestinę: ${JSON.stringify(summary.errors)}`
     );
+
+    const kvitoTekstas = JSON.stringify(summary.errors);
+    assert.ok(!kvitoTekstas.includes("results/j/b.json"), "kvite NEGALI būti artefakto adreso");
+    assert.ok(!kvitoTekstas.includes("EACCES"), "nei žalios saugyklos klaidos");
 
     const kvitas = (await auditLog.getAll()).find((i) => i.event === "RETENTION_PURGE");
     assert.equal(kvitas.result, "failure", "vienas likęs objektas paneigia viso ciklo sėkmę");
@@ -846,6 +856,68 @@ test("#157 PR-5: viena sėkmė + vienas `nepavyko` tame pačiame cikle → kvita
     jobStore.system.valytiniBandymai = atsargos.valytini;
     jobStore.system.sweepResultArtifacts = atsargos.sweep;
     jobStore.system.pasalintiBandymus = atsargos.pasalinti;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
+
+test("#157 PR-5: nepavykusio ištrynimo kvite NĖRA nei job ID, nei adreso", async () => {
+  /**
+   * ⚠️ KRYPTIS BUVO ATVIRKŠČIA, NEI TURĖTŲ (Codex, #304 / G).
+   *
+   * Sėkmingas ištrynimas palieka pseudonimizuotą įrašą (`subjectId: null`), o nepavykęs
+   * — tiesioginį identifikatorių ir artefakto vietą. Būtent nesėkmės atveju duomenys DAR
+   * EGZISTUOJA, tad kvitas yra blogiausia vieta jiems įvardyti.
+   *
+   * Tai tiesioginė praėjusio raundo taisymo pasekmė: „nesėkmė yra kvito dalis, ne tik
+   * logas" teisinga, bet kvitas turi kitą redagavimo režimą nei logas.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const JOB_ID = "11111111-2222-3333-4444-555555555555";
+  const RAKTAS = `results/${JOB_ID}/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json`;
+
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({
+    kandidatai: [{ attempt_id: "a", storage_type: "fs", storage_key: RAKTAS }],
+    praleista: 0,
+  });
+  jobStore.system.sweepResultArtifacts = async () => [
+    { attemptId: "a", storageKey: RAKTAS, verdiktas: "nepavyko", priezastis: `EACCES ${RAKTAS}` },
+  ];
+  jobStore.system.karantinuotuSkaicius = async () => 0;
+  jobStore.listExpired = async () => [];
+
+  try {
+    await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    const kvitas = (await auditLog.getAll()).find((i) => i.event === "RETENTION_PURGE");
+    const visas = JSON.stringify(kvitas);
+
+    assert.ok(!visas.includes(JOB_ID), `kvite NEGALI būti job ID: ${kvitas.error}`);
+    assert.ok(!visas.includes("results/"), `kvite NEGALI būti artefakto adreso: ${kvitas.error}`);
+
+    /** KONTROLĖ: klasė ir kiekis YRA — kitaip kvitas nustotų būti naudingas. */
+    assert.match(kvitas.error, /saugykla:teisiu-klaida x1/, kvitas.error);
+    assert.equal(kvitas.result, "failure");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
     jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
     jobStore.listExpired = atsargos.expired;
   }
