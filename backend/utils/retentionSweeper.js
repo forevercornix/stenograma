@@ -157,7 +157,35 @@ async function _valytiPasenusiusJobus(now) {
     }
 
     try {
-      const nuimta = await jobStore.system.remove(jobId);
+      /**
+       * ⚠️ PASENĘS JOB'AS EINA PER REGISTRĄ, KAIP IR VISI KITI (Codex, #304).
+       *
+       * Iki šito šis kelias kvietė `system.remove()` tiesiogiai: `CASCADE` pašalindavo
+       * `job_results`, o external objektas likdavo. Blogiau — registro eilutė likdavo
+       * `committed`, tad kandidatų predikatas ją IŠBRAUKDAVO amžiams (nuoroda dingo,
+       * bet būsena liko), ir orphan'as tapdavo nuolatinis. Ir tai AUTOMATINIS kelias,
+       * veikiantis be žmogaus.
+       *
+       * Fiziniai objektai šalinami PIRMA ir tik SĖKMINGAI; nepavykus, eilutė lieka, o
+       * žyma pažymima nesėkme — pakartojimas turi ką daryti.
+       */
+      const artefaktai = await jobStore.system.deleteResultArtifacts(jobId);
+
+      if (artefaktai === null || artefaktai.nepavyko.length > 0) {
+        const priezastis =
+          artefaktai === null
+            ? "saugykla nepalaiko deleteResultArtifacts()"
+            : artefaktai.nepavyko.map((n) => `${n.storageKey}: ${n.priezastis}`).join("; ");
+
+        log.warn(`Retencija: pasenusio job'o artefaktų pašalinti nepavyko (${jobId}): ${priezastis}`);
+        await tombstones
+          .complete(jobId, TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" })
+          .catch(() => {});
+        praleista += 1;
+        continue;
+      }
+
+      const nuimta = await jobStore.system.remove(jobId, { tiketiniAdresai: artefaktai.matyti || [] });
       if (nuimta) pasalinta += 1;
 
       await tombstones.complete(jobId, TOMBSTONE_STATUS.DELETED);

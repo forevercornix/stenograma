@@ -2243,6 +2243,27 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
         return false;
       }
 
+      /**
+       * ⚠️ REGISTRO EILUTĖS ŠALINAMOS TOJE PAČIOJE TRANSAKCIJOJE (Codex, #304).
+       *
+       * `job_result_attempts` sąmoningai neturi FK į `jobs` — kad išgyventų ištrynimą ir
+       * liktų įrodymu, jei jis nutrūko. Bet po PATVIRTINTO ištrynimo tas argumentas
+       * nebegalioja: eilutė lieka NERIBOTAI su job ID ir saugyklos adresu, o tai asmens
+       * duomenų liekana po ištrynimo, kurį patys paskelbėme baigtu.
+       *
+       * Šalinama TIK po to, kai fizinis ištrynimas patvirtintas (aibė sutampa, nė vienas
+       * bandymas nebėra `pending`) ir TIK enumeruotos eilutės — tai ta pati taisyklė kaip
+       * šlavėjo `pasalintiBandymus()`: eilutė yra vienintelis adresas, tad ji šalinama
+       * paskutinė, ne pirma.
+       */
+      const enumeruoti = esami.map((a) => a.storageKey);
+
+      if (enumeruoti.length > 0) {
+        await client.query(
+          "DELETE FROM job_result_attempts WHERE job_id = $1 AND storage_key = ANY($2::text[])",
+          [String(id), enumeruoti]
+        );
+      }
       const { rowCount } = await client.query("DELETE FROM jobs WHERE id = $1", [id]);
       return rowCount > 0;
     });

@@ -454,6 +454,35 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await saugykla.delete(naujas.raktas);
   });
 
+  await t.test("finalizacija pašalina IR registro eilutes — ne tik `jobs` eilutę", async () => {
+    /**
+     * ⚠️ NERIBOTAI SAUGOMAS `job_id` PLIUS ADRESAS PO PATVIRTINTO IŠTRYNIMO (Codex, #304).
+     *
+     * `job_result_attempts` sąmoningai neturi FK į `jobs` — kad išgyventų nutrūkusį
+     * ištrynimą ir liktų įrodymu. Bet po PATVIRTINTO ištrynimo tas argumentas nebegalioja:
+     * eilutė lieka amžinai su job ID ir saugyklos adresu, o tai asmens duomenų liekana
+     * ištrynime, kurį patys paskelbėme baigtu.
+     */
+    const id = await naujasJobas();
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "finalizacija" } });
+    const nutrukes = await nutrukesBandymas(id, { text: "apleistas" });
+    await attemptRegistry.pazymeti(pool, nutrukes.attemptId, attemptRegistry.BUSENA.ATMESTA);
+
+    const pries = await attemptRegistry.joboBandymai(pool, id);
+    assert.ok(pries.length >= 2, "kontrolė: registre yra eilučių");
+
+    const artefaktai = await store.deleteResultArtifacts(id);
+    assert.deepEqual(artefaktai.nepavyko, []);
+
+    assert.equal(await store.remove(id, { tiketiniAdresai: artefaktai.matyti }), true);
+
+    assert.deepEqual(
+      await attemptRegistry.joboBandymai(pool, id),
+      [],
+      "po patvirtinto ištrynimo registro eilučių likti NEGALI"
+    );
+  });
+
   await t.test("`eraseJob()` per fasado paviršių nueina iki saugyklos", async () => {
     /**
      * ⚠️ ANKSTESNI SUBTESTAI TIKRINA STORE'Ą; ŠIS — LAIDĄ.
