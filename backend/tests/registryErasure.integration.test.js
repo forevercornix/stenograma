@@ -447,9 +447,24 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     const { rows } = await pool.query("SELECT 1 FROM jobs WHERE id = $1", [id]);
     assert.equal(rows.length, 1, "job'o eilutė privalo likti — pakartojimas turi ką daryti");
 
-    /** KONTROLĖ: su ATNAUJINTA aibe tas pats šalinimas praeina. */
+    /**
+     * ⚠️ VIEN AIBĖS ATNAUJINIMO NEUŽTENKA, IR TAI SĄMONINGA (Codex, #304 A radinys).
+     *
+     * Naujasis bandymas yra `pending`, t. y. rašytojas gali būti vykdomas DABAR: jo
+     * objektą ištrynus, `put()` galėtų jį grąžinti TUO PAČIU adresu, o aibės palyginimas
+     * to nepamatytų. Todėl šalinimas blokuojamas, kol bandymas nebaigtas.
+     */
     const atnaujinta = await store.listResultArtifacts(id);
-    assert.equal(await store.remove(id, { tiketiniAdresai: atnaujinta }), true, "kontrolė: nepakitusi aibė leidžia šalinti");
+    assert.equal(
+      await store.remove(id, { tiketiniAdresai: atnaujinta }),
+      false,
+      "`pending` bandymas privalo blokuoti finalizaciją net su atnaujinta aibe"
+    );
+
+    /** KONTROLĖ: rašytojui pasibaigus (arba šlavėjui uždarius eilutę) šalinimas praeina. */
+    await attemptRegistry.pazymeti(pool, naujas.attemptId, attemptRegistry.BUSENA.ATMESTA);
+    const galutine = await store.listResultArtifacts(id);
+    assert.equal(await store.remove(id, { tiketiniAdresai: galutine }), true, "kontrolė: baigtas bandymas nebeblokuoja");
 
     await saugykla.delete(naujas.raktas);
   });
