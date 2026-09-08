@@ -129,6 +129,32 @@ Abu pool'ai dabar statomi iš to paties `utils/pgConnection.js`.
 
 ---
 
+### 1.x External rezultatas: ištrynimas eina per REGISTRĄ (#157, PR-5)
+
+Kol rezultatas gyveno `job_results.payload` viduje, `jobs` eilutės ištrynimas buvo visas
+atsakymas. Po #157 dalis rezultatų guli failų sistemoje arba S3, ir eilutės ištrynimas jų
+neliečia. Todėl ištrynimas remiasi **bandymų registru** (`job_result_attempts`), ne
+`job_results.storage_key`.
+
+**Ką tai keičia praktiškai:**
+
+| Klausimas | Atsakymas |
+|---|---|
+| Kuriuos objektus šalina ištrynimas? | **Visus job'o bandymus**, ne tik referencuotą. `job_results.storage_key` rodo į vieną — tą, kuris ir taip saugus, nes referencuotas. Pralaimėję ir nutrūkę bandymai paliko savo objektus attempt-unique adresais, ir be registro jie yra transkripcijos be jokios rodyklės |
+| Ar šalinamas ir nebaigtas rašymas? | **Taip.** `fs` rašymas eina per laikiną failą, kurio vardas **išvedamas iš rakto**, tad procesui žuvus tarp `writeFile` ir `rename` likęs failas su transkripcija pasiekiamas: šalinamas ir jis |
+| Ar dalinis gedimas gali būti raportuotas kaip sėkmė? | **Ne.** Bet kuris nepavykęs objekto šalinimas yra kritinė nesėkmė: DB metaduomenys **nešalinami**, `deletion_pending` lieka, ir `deletionRetry` kartoja. Pakartojimas turi iš ko sužinoti adresus |
+| Kas nutinka registro eilutėms po ištrynimo? | Jos šalinamos **toje pačioje transakcijoje**, po patvirtinto fizinio ištrynimo. FK į `jobs` nėra sąmoningai — kad eilutė išgyventų NUTRŪKUSĮ ištrynimą; bet po patvirtinto ji liktų neribotai su job ID ir adresu, o tai asmens duomenų liekana |
+| Ar visi job'o pabaigos keliai eina per registrą? | Vartotojo ištrynimas, administracinis ištrynimas ir **retencijos pasenusių job'ų kelias** — taip. Riba: `sweepExpired()` TTL bendrasis `DELETE` — ne, žr. 2 skyrių |
+
+**Apleisti bandymai valomi atskirai.** Objektas, likęs po nutrūkusio rašymo, kurio job'as
+niekada nebuvo ištrintas, pašalinamas retencijos šlavėjo. Šlavėjas zonduoja **abu**
+adresus (laikiną ir galutinį), o „nė vieno nėra" jam yra **sėkmė**: eilutė uždaroma.
+
+⚠️ **Radus ABU adresus objektai NEŠALINAMI.** Su attempt-unique raktais tai neįmanoma,
+tad tai invarianto pažeidimas, ne šalinimo atvejis — eilutė **karantinuojama**, pranešama
+**vieną kartą**, ir lieka matoma retencijos suvestinėje, kol operatorius ją uždaro. Taip
+vienintelis signalas apie pasikeitusią rakto schemą nepaskęsta pasikartojimuose.
+
 ## 2. Ko ištrynimas NEGARANTUOJA
 
 Šis sąrašas svarbesnis už pirmąjį: jis apibrėžia, ko **negalima** teigti
@@ -137,6 +163,21 @@ auditoriui.
 ⚠️ **Jau vykdomas processor'ius nesustabdomas vidury.** Iki pirmojo įrašo į jobą
 jis gali spėti iškviesti išorinį tiekėją arba parašyti laikiną failą. Rezultatas
 į jobą nepateks, bet tarpiniai pėdsakai gali likti, kol juos surinks retencija.
+
+⚠️ **Apleistų bandymų šlavimas NEVYKDOMAS, jei žymos ir registras skirtingose bazėse.**
+
+Šlavėjo apsauga remiasi dviem šakomis: eilutė nešalinama, jei jos objektas referencuotas
+**arba** jos job'as turi neišspręstą ištrynimo žymą. Antroji šaka reikalauja, kad
+`erasure_marks` ir `job_result_attempts` būtų **toje pačioje bazėje** — tikrinama pagal
+jungties tapatybę, ne pagal backend'o vardą (abu gali vadintis „postgres" ir rodyti
+skirtingur). Nesutapus, žingsnis **nevykdomas visas**, ir retencijos suvestinėje tai
+matoma kaip `nevykdyta`, ne kaip nulis.
+
+⚠️ **`sweepExpired()` TTL bendrasis `DELETE` per registrą NEEINA.** Nuo #183 pagrindinis
+retencijos kelias yra `listExpired` + per-job šalinimas, o `sweepExpired()` lieka
+priežiūrai ir praeina tik tada, kai kandidatų nebuvo. Jei jis kada nors vėl taptų
+pagrindiniu keliu, external objektai liktų nepašalinti — riba užrašyta, mechanizmo, kuris
+tai pagautų, kol kas nėra.
 
 ⚠️ **Ištrynimo žymos neišgyvena restarto – BE PostgreSQL.** Kai nenurodytas nei
 `DATABASE_URL`, nei `PG*`, jos gyvena tik proceso atmintyje ir nėra bendros

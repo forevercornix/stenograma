@@ -67,6 +67,13 @@ kad jie **neišlieka**, o ne kad jie pašalinami.
 
 ---
 
+⚠️ **REGISTRAS APRAŠO TIPĄ, NE FIZINĘ VIETĄ** (#157, PR-5). Iki #157 `transcript` ir
+`protocol` aprašai sakė „jobo įraše" / „jobo rezultate", ir tai buvo tiesa. Po #157 dalis
+rezultatų guli failų sistemoje arba S3, tad tokie aprašai taptų melu external eilutėms.
+Fizinę vietą sprendžia **vartotojai pagal eilutės `storage_type`**; registrui ji
+nepriklauso, nes registras, priklausomas nuo konfigūracijos, mišrioje DB nustotų būti
+tiesos šaltinis.
+
 ## Išvedimo grafas
 
 ```
@@ -380,6 +387,12 @@ būtent jis atsako, kada duomenys buvo pašalinti.
   `derivedFrom`. Be dviejų paskutinių punktų ištrynimas apeitų grafą, kurio
   dalis nurodo į niekur – apėjimas „pavyktų", tik nieko nerastų.
 - **`meeting` lygio artefaktų** – žr. pastabą prie registro.
+- **`list(prefix)` krypties inventorizacijos** (#157, PR-5). Orphan aptikimas apibrėžtas
+  **DB kryptimi**: kiekvienam persistintam adresui tikrinamas objekto egzistavimas.
+  Priešinga kryptis („objektas yra, DB nerodo") reikalautų `list(prefix)` visuose trijuose
+  backend'uose, ir #157 apimčiai ji eksplicitiškai nepriklauso. ⚠️ Su bandymų registru ta
+  kryptis nustoja būti reikalinga **tam, ką parašė pats servisas** — bet ne tam, kas
+  atsirado kitaip (žr. kitą punktą).
 - **Objektų, atsiradusių NE per mūsų rašymo kelią** (#157, PR-4 orphan sprendimas).
   Bandymų registras dengia viską, ką parašo pats servisas: kiekvienas `put()` turi
   registruotą `attemptId`, tad „objektas yra, DB nerodo" nustoja egzistuoti kaip
