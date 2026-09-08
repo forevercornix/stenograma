@@ -48,8 +48,8 @@ test("MATAVIMAS: reference switch skaidymo formos", { skip: PRALEISTI, timeout: 
 
   async function naujaInlineEilute() {
     const { rows } = await pool.query(
-      `INSERT INTO jobs (id, status, type, owner_kind, schema_version)
-       VALUES (gen_random_uuid(), 'completed', 'transcription', 'unowned', 1) RETURNING id`
+      `INSERT INTO jobs (id, status, type, owner_kind, schema_version, created_at, updated_at)
+       VALUES (gen_random_uuid(), 'completed', 'transcription', 'unowned', 1, now(), now()) RETURNING id`
     );
     const id = rows[0].id;
     await pool.query(
