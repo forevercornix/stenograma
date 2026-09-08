@@ -80,6 +80,11 @@ function loadEraseJob({
        * produkcijoje nebėra.
        */
       system: {
+        /**
+         * ⚠️ #157 PR-5: `eraseJob` po nepavykusio CAS klausia, ar eilutė dar yra —
+         * be šio metodo dublis kristų `TypeError`, ir testas įrodinėtų ne tą dalyką.
+         */
+        get: async (id) => (jobStore.dingo ? null : { id }),
         remove: async (id) => {
           calls.jobRemove.push(id);
           if (jobStore.throws) throw new Error(jobStore.throws);
@@ -564,6 +569,40 @@ test("#157 PR-5: našlaitis su VIENINTELIU external rezultatu nėra „nerastas\
 
     assert.equal(outcome.resultArtifactsRemoved, 1);
     assert.equal(outcome.found, true, "artefaktas rastas ir pašalintas — tai NE 404");
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: NEBAIGTAS ištrynimas palieka `deletion_pending` — kad būtų kas pakartos", async () => {
+  /**
+   * ⚠️ FAIL-CLOSED BE PABAIGOS YRA TA PATI KLASĖ KAIP 4b `pending` EILUTĖS.
+   *
+   * `deletionRetry` kandidatus randa per `listPendingDeletions()`, t. y. per
+   * `deletion_pending` vėliavą. Be jos būsena „eilutė liko, ištrynimas nebaigtas" būtų
+   * aklavietė: kvietėjas matytų „nebaigta", o iš naujo nebandytų niekas.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      removed: false,
+      resultArtifacts: { pasalinti: ["a"], jauNebuvo: [], nepavyko: [], matyti: [{ storageType: "fs", storageKey: "a" }] },
+    },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.jobRemoved, false, "eilutė nepašalinta");
+    assert.equal(outcome.criticalFailure, true, "tai NE sėkmė");
+    assert.ok(
+      calls.jobUpdate.some((u) => u.patch && u.patch.deletion_pending === true),
+      `privalo likti \`deletion_pending\`: ${JSON.stringify(calls.jobUpdate)}`
+    );
+    assert.ok(
+      outcome.errors.some((e) => e.includes("BARJERO")),
+      "klasifikacija privalo nurodyti, kad pasikartojimas yra barjero problema"
+    );
   } finally {
     restore();
   }

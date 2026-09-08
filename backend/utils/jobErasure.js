@@ -254,8 +254,18 @@ async function eraseJob(job, { store = jobStore } = {}) {
     if (!outcome.jobRemoved && matytiArtefaktai) {
       const dar = await saugykla.system.get(jobId, { hydrate: false }).catch(() => null);
       if (dar) {
+        /**
+         * ⚠️ TAI NE „LENKTYNĖS" — TAI BARJERO PRAĖJIMAS.
+         *
+         * Bandymas, įsipareigotas PO to, kai ištrynimo žyma jau egzistuoja, reiškia, kad
+         * kažkas praėjo tombstone patikrą, kuri tam ir skirta. Pakartojimas čia padės
+         * (nauja aibė bus enumeruota iš naujo), bet jei tai KARTOJASI, problema yra
+         * barjero, ne ištrynimo — ir klaidos tekstas tai pasako, kad operatorius
+         * neieškotų jos ištrynimo kelyje.
+         */
         outcome.errors.push(
-          "result artifacts: tarp enumeracijos ir šalinimo atsirado naujas bandymas — ištrynimas NEBAIGTAS"
+          "result artifacts: tarp enumeracijos ir šalinimo įsipareigotas naujas bandymas — " +
+            "ištrynimas NEBAIGTAS. Pasikartojant tai yra ŽYMOS BARJERO, ne ištrynimo problema."
         );
         outcome.criticalFailure = true;
       }
@@ -263,6 +273,20 @@ async function eraseJob(job, { store = jobStore } = {}) {
   } catch (e) {
     outcome.errors.push(`jobStore: ${e.message}`);
     outcome.criticalFailure = true;
+  }
+
+  /**
+   * ⚠️ NEBAIGTAS IŠTRYNIMAS PRIVALO TURĖTI KAS JĮ ATNAUJINS (Codex, #304 peržiūra).
+   *
+   * `deletionRetry` kandidatus randa per `listPendingDeletions()`, t. y. per
+   * `deletion_pending` vėliavą. Aukštesnis `criticalFailure` blokas ją uždeda ir
+   * grįžta, bet šalinimo žingsnio gedimai iki šiol jos NEUŽDĖDAVO — tad būsena „eilutė
+   * liko, ištrynimas nebaigtas" būtų fail-closed be pabaigos: niekas nebandytų iš naujo.
+   */
+  if (outcome.criticalFailure && !outcome.jobRemoved) {
+    await saugykla.system
+      .update(jobId, { deletion_pending: true, storageKey })
+      .catch((e) => outcome.errors.push(`deletion_pending: ${e.message}`));
   }
 
   await writeDeletionReceipt(outcome);
