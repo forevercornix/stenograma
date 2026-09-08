@@ -2172,9 +2172,57 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     });
   }
 
-  async function remove(id) {
-    const { rowCount } = await pool.query("DELETE FROM jobs WHERE id = $1", [id]);
-    return rowCount > 0;
+  /**
+   * ⚠️ `tiketiniAdresai` — CAS ANT ARTEFAKTŲ AIBĖS (#157, PR-5; Codex #304).
+   *
+   * Enumeracija (`listResultArtifacts`) yra PRE-CHECK: ji vyksta be užrakto, nes po jos
+   * eina fizinis I/O, o jis po `jobs` eilutės užraktu vykti negali (PR-4 D4). Tarp
+   * enumeracijos ir eilutės šalinimo worker'is, praėjęs žymos patikrą PRIEŠ žymos
+   * atsiradimą, gali įsipareigoti NAUJĄ bandymą — ir tada `CASCADE` pašalintų šviežią
+   * `job_results` nuorodą, o objektas liktų be nuorodos, o ištrynimas praneštų sėkmę.
+   *
+   * Tai pažodžiui ta pati forma, kurią PR-4 sprendė du kartus: pre-check duoda FAKTUS,
+   * sprendimą priima transakcija PO užrakto. Todėl aibė perduodama atgal, ir šalinimas
+   * vyksta TOJE PAČIOJE transakcijoje kaip pakartotinė patikra: `FOR UPDATE` ant `jobs`
+   * eilutės, tada palyginimas, tada `DELETE`. Atsiradus naujam adresui, eilutė NEŠALINAMA
+   * ir grąžinama `false` — ištrynimas NEBAIGTAS, ne „sėkmė".
+   *
+   * ⚠️ BE `tiketiniAdresai` ELGESYS NEPAKITĘS. Retencija, TTL ir kiti kvietėjai jokios
+   * artefaktų aibės neturi, ir reikalauti jos iš jų reikštų antrą enumeraciją be
+   * priežasties.
+   *
+   * @param {string} id
+   * @param {{tiketiniAdresai?: Array<{storageType: string, storageKey: string}>}} [nustatymai]
+   */
+  async function remove(id, nustatymai = {}) {
+    const tiketini = nustatymai && nustatymai.tiketiniAdresai;
+
+    if (!tiketini) {
+      const { rowCount } = await pool.query("DELETE FROM jobs WHERE id = $1", [id]);
+      return rowCount > 0;
+    }
+
+    const laukiami = new Set(tiketini.map((a) => `${a.storageType}\u0000${a.storageKey}`));
+
+    return inTransaction(async (client) => {
+      const { rows: uzrakinta } = await client.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE", [id]);
+      if (uzrakinta.length === 0) return false;
+
+      const esami = await listResultArtifacts(id, client);
+      const nauji = esami.filter((a) => !laukiami.has(`${a.storageType}\u0000${a.storageKey}`));
+
+      if (nauji.length > 0) {
+        /**
+         * ⚠️ NEMETAMA IŠ ČIA. Kvietėjas (`eraseJob`) turi savo `outcome` ir savo
+         * klasifikaciją; klaida čia paverstų „nebaigta" į „kritinį gedimą" prarandant
+         * informaciją, kad DB pusė tvarkinga ir pakartojimas turi ką daryti.
+         */
+        return false;
+      }
+
+      const { rowCount } = await client.query("DELETE FROM jobs WHERE id = $1", [id]);
+      return rowCount > 0;
+    });
   }
 
   /**
@@ -2343,14 +2391,14 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    * @param {string} jobId
    * @returns {Promise<Array<{storageType: string, storageKey: string, busena: string|null, referencuotas: boolean}>>}
    */
-  async function listResultArtifacts(jobId) {
+  async function listResultArtifacts(jobId, vykdytojas = pool) {
     const attemptRegistry = require("../attemptRegistry");
 
-    const { rows: rezultatas } = await pool.query(
+    const { rows: rezultatas } = await vykdytojas.query(
       "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1 AND storage_key IS NOT NULL",
       [String(jobId)]
     );
-    const bandymai = await attemptRegistry.joboBandymai(pool, jobId);
+    const bandymai = await attemptRegistry.joboBandymai(vykdytojas, jobId);
 
     /**
      * ⚠️ TAPATYBĖ YRA PORA `(storage_type, storage_key)`, NE RAKTAS (Codex, #304).
@@ -2431,7 +2479,13 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
 
   async function deleteResultArtifacts(jobId) {
     const artefaktai = await listResultArtifacts(jobId);
-    const rezultatas = { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+    /**
+     * ⚠️ `matyti` GRĄŽINAMA KVIETĖJUI, NE PAMIRŠTAMA (Codex, #304). Ši aibė yra
+     * PRE-CHECK rezultatas; eilutės šalinimas privalo ją patikrinti dar kartą po
+     * užrakto (`remove(id, { tiketiniAdresai })`), kitaip tarp enumeracijos ir
+     * šalinimo įsipareigotas naujas bandymas dingtų su `CASCADE`.
+     */
+    const rezultatas = { pasalinti: [], jauNebuvo: [], nepavyko: [], matyti: artefaktai };
 
     for (const artefaktas of artefaktai) {
       let saugykla = null;

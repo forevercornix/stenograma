@@ -418,6 +418,42 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     assert.deepEqual(tipai, ["fs", "s3"], `abu fiziniai adresai privalo likti aibėje: ${JSON.stringify(artefaktai)}`);
   });
 
+  await t.test("bandymas, įsipareigotas PO enumeracijos, sustabdo eilutės šalinimą", async () => {
+    /**
+     * ⚠️ SNAPSHOT BE PAKARTOTINĖS PATIKROS PO UŽRAKTO (Codex, #304).
+     *
+     * Enumeracija vyksta BE užrakto — kitaip fizinis I/O būtų po `jobs` eilutės užraktu,
+     * ko PR-4 D4 neleidžia. Tarp jos ir eilutės šalinimo worker'is, praėjęs žymos patikrą
+     * PRIEŠ žymos atsiradimą, gali įsipareigoti naują bandymą. Be pakartotinės patikros
+     * `CASCADE` pašalintų šviežią `job_results` nuorodą, objektas liktų be nuorodos, o
+     * ištrynimas praneštų SĖKMĘ.
+     *
+     * Tai ta pati forma, kurią PR-4 sprendė du kartus: pre-check duoda faktus, sprendimą
+     * priima transakcija po užrakto.
+     */
+    const id = await naujasJobas();
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "snapshot" } });
+
+    /** Aibė, matyta PRIEŠ I/O. */
+    const matyti = await store.listResultArtifacts(id);
+    assert.ok(matyti.length > 0, "kontrolė: aibė netuščia");
+
+    /** Po enumeracijos atsiranda NAUJAS bandymas — tiksliai tas atvejis. */
+    const naujas = await nutrukesBandymas(id, { text: "įsipareigotas po snapshot'o" });
+
+    const pasalinta = await store.remove(id, { tiketiniAdresai: matyti });
+
+    assert.equal(pasalinta, false, "eilutė NEGALI būti pašalinta: aibė pasikeitė");
+    const { rows } = await pool.query("SELECT 1 FROM jobs WHERE id = $1", [id]);
+    assert.equal(rows.length, 1, "job'o eilutė privalo likti — pakartojimas turi ką daryti");
+
+    /** KONTROLĖ: su ATNAUJINTA aibe tas pats šalinimas praeina. */
+    const atnaujinta = await store.listResultArtifacts(id);
+    assert.equal(await store.remove(id, { tiketiniAdresai: atnaujinta }), true, "kontrolė: nepakitusi aibė leidžia šalinti");
+
+    await saugykla.delete(naujas.raktas);
+  });
+
   await t.test("`eraseJob()` per fasado paviršių nueina iki saugyklos", async () => {
     /**
      * ⚠️ ANKSTESNI SUBTESTAI TIKRINA STORE'Ą; ŠIS — LAIDĄ.

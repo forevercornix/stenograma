@@ -186,6 +186,8 @@ async function eraseJob(job, { store = jobStore } = {}) {
    * neturi — o „ištrinta" be objekto pašalinimo yra tiksliai tas melas, kurį #157 riba
    * draudžia. Tyli šaka čia reikštų BDAR teiginį be padengimo.
    */
+  let matytiArtefaktai = null;
+
   try {
     const artefaktai = await saugykla.system.deleteResultArtifacts(jobId);
 
@@ -195,6 +197,8 @@ async function eraseJob(job, { store = jobStore } = {}) {
     } else {
       outcome.resultArtifactsRemoved = artefaktai.pasalinti.length;
       outcome.resultArtifactsAlreadyAbsent = artefaktai.jauNebuvo.length;
+      /** Aibė, kurią matėme PRIEŠ I/O — ją patikrins eilutės šalinimas po užrakto. */
+      matytiArtefaktai = artefaktai.matyti || null;
 
       for (const nesekme of artefaktai.nepavyko) {
         outcome.errors.push(`result artifact ${nesekme.storageKey}: ${nesekme.priezastis}`);
@@ -231,7 +235,31 @@ async function eraseJob(job, { store = jobStore } = {}) {
   }
 
   try {
-    outcome.jobRemoved = Boolean(await saugykla.system.remove(jobId));
+    /**
+     * ⚠️ AIBĖ TIKRINAMA DAR KARTĄ PO UŽRAKTO (Codex, #304).
+     *
+     * Enumeracija vyko be užrakto — kitaip fizinis I/O būtų po `jobs` eilutės užraktu,
+     * ko PR-4 D4 neleidžia. Tarp jos ir šito šalinimo worker'is, praėjęs žymos patikrą
+     * PRIEŠ žymos atsiradimą, gali įsipareigoti naują bandymą; `CASCADE` tada pašalintų
+     * šviežią nuorodą, o objektas liktų be jos.
+     *
+     * `remove()` su `tiketiniAdresai` palygina aibę toje pačioje transakcijoje, kurioje
+     * šalina, ir grąžina `false`, jei atsirado naujas adresas. Tai NE „nieko nebuvo":
+     * žemiau `jobRemoved === false` su nepašalinta eilute reiškia NEBAIGTĄ ištrynimą.
+     */
+    outcome.jobRemoved = Boolean(
+      await saugykla.system.remove(jobId, matytiArtefaktai ? { tiketiniAdresai: matytiArtefaktai } : {})
+    );
+
+    if (!outcome.jobRemoved && matytiArtefaktai) {
+      const dar = await saugykla.system.get(jobId, { hydrate: false }).catch(() => null);
+      if (dar) {
+        outcome.errors.push(
+          "result artifacts: tarp enumeracijos ir šalinimo atsirado naujas bandymas — ištrynimas NEBAIGTAS"
+        );
+        outcome.criticalFailure = true;
+      }
+    }
   } catch (e) {
     outcome.errors.push(`jobStore: ${e.message}`);
     outcome.criticalFailure = true;

@@ -703,9 +703,16 @@ module.exports = {
       }
       return store.update(id, patch);
     },
-    remove: async (id) => {
+    /**
+     * ⚠️ `nustatymai` PERDUODAMI, NE NUMETAMI (#157, PR-5; Codex #304).
+     *
+     * Būtent siaurinimas adapteryje nužudė `{ hydrate: false }` PR-3 metu. Čia tas pats
+     * pavojus: `{ tiketiniAdresai }` yra artefaktų aibės CAS, ir be jo eilutė būtų
+     * pašalinta neatsižvelgus į bandymą, įsipareigotą po enumeracijos.
+     */
+    remove: async (id, nustatymai = {}) => {
       await ensureInit();
-      return store.remove(id);
+      return store.remove(id, nustatymai);
     },
 
     /**

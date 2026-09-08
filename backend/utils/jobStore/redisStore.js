@@ -648,7 +648,15 @@ function createRedisStore(redisClient) {
     return true;
   }
 
-  async function remove(id) {
+  /**
+ * ⚠️ `tiketiniAdresai` PRIIMAMAS IR IGNORUOJAMAS SĄMONINGAI (#157, PR-5).
+ *
+ * Artefaktų aibės CAS turi prasmę tik ten, kur yra bandymų registras. Šis backend'as
+ * external rezultatų neturi, tad tikėtina aibė VISADA tuščia ir visada sutampa — tai
+ * faktas, ne praleidimas. Parametras priimamas, kad kvietėjas neturėtų šakos „ar šis
+ * backend'as moka".
+ */
+async function remove(id, _nustatymai = {}) {
     const existed = await redisClient.exists(JOB_PREFIX + id);
 
     await redisClient.del(JOB_PREFIX + id);
