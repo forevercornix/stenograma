@@ -1280,6 +1280,57 @@ visada-„kritinė nesėkmė"); **`inline` eilutė ir toliau raportuojama pagal
 **Ką palieka veikiantį:** CLI migracija veikia, restartable; galiojanti
 `job_results` būsena niekada nepažeidžia invarianto.
 
+---
+
+⚠️ **ĮĖJIMO SĄLYGOS — SURINKTA PR-6 PRADŽIOJE** (tas pats šablonas kaip PR-4 ir PR-5).
+
+| # | Sąlyga | Kur priimta |
+|---|---|---|
+| 1 | Progresas — **atskira lentelė** `artifact_migration_progress`, ne `job_results` laukai | body: „progresas nesaugomas kaip negaliojanti `job_results` būsena" |
+| 2 | Tvarka: **object write → integrity verification → atominis reference switch** | body DoD |
+| 3 | **Restartable ir idempotentiška**; gedimas nė viename taške nepraranda vienintelės kopijos | body DoD |
+| 4 | Dry-run ir tikra migracija — abi padengtos testais | body DoD |
+| 5 | **Stebėtojas antroje jungtyje** įrodo, kad commit'intos pažeidžiančios būsenos nepastebėta | §9.1 |
+| 6 | ⚠️ **Migracijos rašymas eina per bandymų REGISTRĄ** — objektas, parašytas migracijos ir neįsipareigotas, yra tos pačios klasės orphan'as kaip completion kelyje | PR-4/PR-5 pasekmė, žr. žemiau |
+| 7 | Migracija **nešalina** inline `payload`, kol objekto vientisumas nepatvirtintas — tai ta pati „vienintelė kopija" taisyklė | body DoD |
+
+✅ **KĄ PR-1…PR-5 JAU PADARĖ (patikrinta kode):**
+
+- `job_results_storage_shape` (migracija `1756200000000`) jau reikalauja PILNO trejeto:
+  external eilutė privalo turėti `storage_key`, `bytes`, `checksum` ir `payload IS NULL`;
+- `upsertResult()` reference switch yra VIENAS `INSERT ... ON CONFLICT DO UPDATE` sakinys;
+- bandymų registras, jo šlavėjas ir erasure per registrą veikia (PR-4, PR-5);
+- `ArtifactStore` riba, `paruostiReiksme()` ir kanoninė tapatybė — PR-2.
+
+⚠️ **ATVIRAS KLAUSIMAS, KURĮ REIKIA IŠMATUOTI PRIEŠ RAŠANT §9.1 ĮRODYMĄ.**
+
+Planas numato mutaciją „du `UPDATE` atskirose transakcijose → stebėtojas pagauna
+commit'intą tarpinę būseną → krenta". Bet po `1756200000000` toks skaidymas gali būti
+NEĮVYKDOMAS: `UPDATE job_results SET storage_key = 'x'` inline eilutėje palieka
+`storage_type = 'inline'`, o CHECK tada reikalauja `storage_key IS NULL` — sakinys
+kristų DB pusėje, ir stebėtojas neturėtų ko pamatyti.
+
+Jei taip, iš to seka DVI pasekmės, ir abi turi būti užrašytos, ne nutylėtos:
+
+1. tikrasis invarianto sargas yra **CHECK constraint**, ne migracijos kodas — o tada
+   §9.1 stebėtojas įrodo mažiau, nei planas žada;
+2. mutacija privalo būti KITOKIA: tokia, kurią DB priima, bet kuri vis tiek palieka
+   commit'intą tarpinę būseną (pvz. `storage_type` perjungimas kartu su `storage_key`,
+   bet `payload` pašalinimas ATSKIRA transakcija).
+
+**Klausimas sprendžiamas MATAVIMU prieš tikrą DB, ne argumentu**, ir rezultatas —
+ataskaitoje. Jei mutacija neįvykdoma, tai radinys apie plano prielaidą, ne kliūtis.
+
+⚠️ **SĄLYGA 6 UŽRAŠOMA ATSKIRAI, NES PLANE JOS NEBUVO.**
+
+Planas PR-6 rašė prieš PR-4 orphan sprendimą. Migracija rašo objektą į saugyklą ir tik
+paskui perjungia nuorodą — tai TIKSLIAI ta pati seka, dėl kurios PR-4 įvedė bandymų
+registrą: procesas, kritęs tarp `put()` ir reference switch, palieka objektą su
+transkripcija, kurio nerodo nė viena `job_results` eilutė. Be registro migracija būtų
+naujas orphan'ų šaltinis — ta pati klasė, kurią PR-5 ką tik uždarė.
+
+---
+
 **Failai**
 - `backend/scripts/migrate-artifacts.mjs` (naujas, plonas — logika `utils/`)
 - `backend/utils/artifactMigration.js`
