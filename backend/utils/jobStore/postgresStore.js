@@ -791,9 +791,24 @@ function assertAtstovaujamasProgresas(job) {
  * privalo DEKLARUOTI, ką daro su kiekvienu vardu iš šios aibės, o testas krenta, kai
  * atsiranda ketvirtas.
  */
-const KONSTRUKCIJOS_PARINKTYS = Object.freeze(["artifactStores", "artifactStore", "rasymoSaugykla"]);
+const KONSTRUKCIJOS_PARINKTYS = Object.freeze(["artifactStores", "artifactStore", "rasymoSaugykla", "bandymuRegistras"]);
 
-function createPostgresStore(pool, { artifactStores = null, artifactStore = null, rasymoSaugykla = null } = {}) {
+/**
+ * ⚠️ `bandymuRegistras: false` — SCHEMA BE `job_result_attempts` (#157, PR-5; Codex E1).
+ *
+ * Atkurta bazė iš kopijos, sukurtos prieš migraciją `1756300000000`, tos lentelės neturi.
+ * Preflight tai jau mokėjo, bet fallback buvo pritaikytas TIK ten, kur buvo pranešta:
+ * `deleteResultArtifacts()` -> `listResultArtifacts()` -> `joboBandymai()` toliau
+ * užklausdavo tą pačią lentelę, tad legacy kopija praeidavo preflight ir krisdavo replay
+ * VIDURYJE — tiksliai ten, kur `paruosti()` turėjo neleisti atsidurti.
+ *
+ * Sprendimas VIENAME lygmenyje, ne trys `try/catch`: store'as sukonstruojamas žinodamas,
+ * ar registras egzistuoja, ir visi registro keliai iš to seka.
+ */
+function createPostgresStore(
+  pool,
+  { artifactStores = null, artifactStore = null, rasymoSaugykla = null, bandymuRegistras = true } = {}
+) {
   /**
    * ARTEFAKTŲ SAUGYKLOS RAKTUOJAMOS PAGAL `storage_type` (Codex, #291).
    *
@@ -2258,7 +2273,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
        */
       const enumeruoti = esami.map((a) => a.storageKey);
 
-      if (enumeruoti.length > 0) {
+      if (bandymuRegistras && enumeruoti.length > 0) {
         await client.query(
           "DELETE FROM job_result_attempts WHERE job_id = $1 AND storage_key = ANY($2::text[])",
           [String(id), enumeruoti]
@@ -2442,7 +2457,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1 AND storage_key IS NOT NULL",
       [String(jobId)]
     );
-    const bandymai = await attemptRegistry.joboBandymai(vykdytojas, jobId);
+    const bandymai = bandymuRegistras ? await attemptRegistry.joboBandymai(vykdytojas, jobId) : [];
 
     /**
      * ⚠️ TAPATYBĖ YRA PORA `(storage_type, storage_key)`, NE RAKTAS (Codex, #304).
@@ -2460,6 +2475,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     for (const bandymas of bandymai) {
       if (!bandymas.storage_key) continue;
       pagalAdresa.set(raktas(bandymas.storage_type, bandymas.storage_key), {
+        attemptId: bandymas.attempt_id,
         storageType: bandymas.storage_type,
         storageKey: bandymas.storage_key,
         busena: bandymas.busena,
@@ -2472,6 +2488,8 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       const bandymas = pagalAdresa.get(adresas);
       pagalAdresa.delete(adresas);
       pagalAdresa.set(adresas, {
+        /** ⚠️ `attemptId` reikalingas finalizacijai: eilutės šalinamos po patvirtinimo. */
+        attemptId: bandymas ? bandymas.attemptId : null,
         storageType: eilute.storage_type,
         storageKey: eilute.storage_key,
         busena: bandymas ? bandymas.busena : null,
@@ -2612,24 +2630,28 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    */
   /** Šlavimo kandidatai — predikatas gyvena `attemptRegistry` (#157, PR-5). */
   async function valytiniBandymai(nustatymai) {
+    if (!bandymuRegistras) return { kandidatai: [], praleista: 0 };
     const attemptRegistry = require("../attemptRegistry");
     return attemptRegistry.valytiniBandymai(pool, nustatymai);
   }
 
   /** Karantinas — vienkartinis pranešimas apie invarianto pažeidimą (#157, PR-5). */
   async function pazymetiKarantina(attemptIds) {
+    if (!bandymuRegistras) return [];
     const attemptRegistry = require("../attemptRegistry");
     return attemptRegistry.pazymetiKarantina(pool, attemptIds);
   }
 
   /** Kiek eilučių karantine — suvestinei, kol jos egzistuoja (#157, PR-5). */
   async function karantinuotuSkaicius() {
+    if (!bandymuRegistras) return 0;
     const attemptRegistry = require("../attemptRegistry");
     return attemptRegistry.karantinuotuSkaicius(pool);
   }
 
   /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
   async function pasalintiBandymus(attemptIds) {
+    if (!bandymuRegistras) return 0;
     const attemptRegistry = require("../attemptRegistry");
     return attemptRegistry.pasalintiBandymus(pool, attemptIds);
   }

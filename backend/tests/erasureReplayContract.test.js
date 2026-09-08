@@ -577,7 +577,17 @@ test("#157 PR-5: `!job` šaka šalina registro artefaktus PRIEŠ uždarydama žy
       remove: async () => false,
       deleteResultArtifacts: async (jobId) => {
         veiksmai.push(`salinta:${jobId}`);
-        return { pasalinti: ["results/job-be-eilutes/a.json"], jauNebuvo: [], nepavyko: [], matyti: [] };
+        return {
+          pasalinti: ["results/job-be-eilutes/a.json"],
+          jauNebuvo: [],
+          nepavyko: [],
+          matyti: [{ attemptId: "a1", storageType: "fs", storageKey: "results/job-be-eilutes/a.json" }],
+        };
+      },
+      /** #157 PR-5 (E2): registro eilutės šalinamos ir šioje šakoje, ne tik `remove()`. */
+      pasalintiBandymus: async (ids) => {
+        veiksmai.push(`eilutes:${ids.join(",")}`);
+        return ids.length;
       },
     },
   };
@@ -591,6 +601,14 @@ test("#157 PR-5: `!job` šaka šalina registro artefaktus PRIEŠ uždarydama žy
   assert.deepEqual(rez.nesekmes, [], JSON.stringify(rez));
   assert.ok(veiksmai.includes("salinta:job-be-eilutes"), "artefaktai privalo būti šalinami");
   assert.ok(rez.uzdarytosZymos.includes("job-be-eilutes"), "ir tik po to žyma uždaroma");
+  assert.ok(
+    veiksmai.includes("eilutes:a1"),
+    `registro eilutės privalo būti pašalintos: ${veiksmai.join(" ")}`
+  );
+  assert.ok(
+    veiksmai.indexOf("salinta:job-be-eilutes") < veiksmai.indexOf("eilutes:a1"),
+    "eilutė šalinama TIK po patvirtinto fizinio šalinimo"
+  );
 });
 
 test("#157 PR-5: artefaktų šalinimo nesėkmė PALIEKA žymą atvirą", async () => {

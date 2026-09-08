@@ -155,6 +155,20 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
         continue;
       }
 
+      /**
+       * ⚠️ REGISTRO EILUTĖS ŠALINAMOS IR ČIA (Codex, #304 / E2).
+       *
+       * `remove()` finalizacija tai daro, bet ši šaka `remove()` nekviečia — ir be to
+       * `committed` orphan eilutė iš šlavėjo išbraukiama VISAM LAIKUI (kandidatų
+       * predikatas įsipareigotų neima), tad job ID ir adresas liktų neribotai PO
+       * sėkmingo atkūrimo. Ta pati privatumo klasė kaip `remove()` pusėje, tik kitame
+       * kelio gale.
+       *
+       * Šalinama TIK po patvirtinto fizinio šalinimo — eilutė yra vienintelis adresas.
+       */
+      const bandymuIds = (artefaktai.matyti || []).map((a) => a.attemptId).filter(Boolean);
+      if (bandymuIds.length > 0) await store.system.pasalintiBandymus(bandymuIds);
+
       jauNebuvo.push(zyma.jobId);
 
       const esama = await tombstones.get(zyma.jobId);

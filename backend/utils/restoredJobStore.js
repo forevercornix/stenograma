@@ -71,6 +71,12 @@ const { BUTINI_SYSTEM_METODAI: BUTINI } = require("./jobErasure");
  * replay viduryje, o konstrukcijos metu, su vardu.
  */
 const PARINKCIU_SPRENDIMAI = Object.freeze({
+  /**
+   * Perduodama IŠVESTINAI: `paruosti()` pats nustato, ar atkurtoje bazėje yra
+   * `job_result_attempts`, ir store'as sukonstruojamas tai žinodamas. Kvietėjas šios
+   * parinkties nenurodo — schema yra bazės faktas, ne kvietėjo pasirinkimas.
+   */
+  bandymuRegistras: "isvedama-is-schemos",
   /** Perduodama: atkurtoje bazėje gali būti `fs` ir `s3` eilučių vienu metu. */
   artifactStores: "perduodama",
   /** Perduodama: vieno tipo saugykla yra tas pats klausimas siauresne forma. */
@@ -96,8 +102,6 @@ const PARINKCIU_SPRENDIMAI = Object.freeze({
  * ⚠️ `inline` NEREIKALAUJA SAUGYKLOS: turinys gyvena eilutėje ir dingsta kartu su ja.
  */
 async function paruosti(pool, parinktys = {}) {
-  const adapteris = sukurti(pool, parinktys);
-
   /**
    * ⚠️ SENESNĖ KOPIJA `job_result_attempts` LENTELĖS NETURI (Codex, #304 antras raundas).
    *
@@ -122,12 +126,14 @@ async function paruosti(pool, parinktys = {}) {
   );
 
   let bandymuTipai = [];
+  let bandymuRegistras = true;
   try {
     const { rows } = await pool.query("SELECT DISTINCT storage_type FROM job_result_attempts");
     bandymuTipai = rows;
   } catch (klaida) {
     /** `42P01` = lentelės nėra. Bet kokia kita klaida yra tikras gedimas ir keliauja toliau. */
     if (klaida.code !== "42P01") throw klaida;
+    bandymuRegistras = false;
   }
 
   const rows = [...rezultatuTipai, ...bandymuTipai];
@@ -162,10 +168,18 @@ async function paruosti(pool, parinktys = {}) {
     );
   }
 
-  return adapteris;
+  /**
+   * ⚠️ SCHEMOS FAKTAS PERDUODAMAS STORE'UI, NE TIK PATIKRINAMAS ČIA (Codex, #304 / E1).
+   *
+   * Fallback, gyvenantis tik preflight'e, uždaro ĮĖJIMĄ, o ne kelią: `deleteResultArtifacts()`
+   * toliau užklaustų tą pačią trūkstamą lentelę ir kristų replay VIDURYJE. Store'as
+   * sukonstruojamas žinodamas, ar registras yra, tad visi registro keliai iš to seka —
+   * vienas sprendimas, ne trys `try/catch`.
+   */
+  return sukurti(pool, { ...parinktys, bandymuRegistras });
 }
 
-function sukurti(pool, { artifactStores = null, artifactStore = null } = {}) {
+function sukurti(pool, { artifactStores = null, artifactStore = null, bandymuRegistras = true } = {}) {
   if (!pool || typeof pool.query !== "function") {
     throw new TypeError("restoredJobStore: reikia atkurtos bazės pool'o.");
   }
@@ -179,7 +193,7 @@ function sukurti(pool, { artifactStores = null, artifactStore = null } = {}) {
     );
   }
 
-  const store = createPostgresStore(pool, { artifactStores, artifactStore });
+  const store = createPostgresStore(pool, { artifactStores, artifactStore, bandymuRegistras });
 
   const truksta = BUTINI.filter((metodas) => typeof store[metodas] !== "function");
   if (truksta.length > 0) {
