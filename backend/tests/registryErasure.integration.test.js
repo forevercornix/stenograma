@@ -416,6 +416,13 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     const tipai = artefaktai.filter((a) => a.storageKey === eilute.storage_key).map((a) => a.storageType).sort();
 
     assert.deepEqual(tipai, ["fs", "s3"], `abu fiziniai adresai privalo likti aibėje: ${JSON.stringify(artefaktai)}`);
+
+    /**
+     * ⚠️ SINTETINĖ `s3` EILUTĖ SUTVARKOMA. Ji atkuria nekonsistentiškus metaduomenis
+     * ŠIAM testui; palikta ji sustabdytų DR preflight'ą kitame subteste — ir tai būtų
+     * sargas, veikiantis teisingai, bet apie kito testo šiukšlę (CI `34273676283`).
+     */
+    await pool.query("DELETE FROM job_result_attempts WHERE job_id = $1 AND storage_type = 's3'", [id]);
   });
 
   await t.test("bandymas, įsipareigotas PO enumeracijos, sustabdo eilutės šalinimą", async () => {
