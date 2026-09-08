@@ -182,9 +182,18 @@ async function _valytiPasenusiusJobus(now) {
         /** ⚠️ Ta pati taisyklė kaip bandymų šakoje: į kvitą — klasė, ne adresas. */
         nepavykeArtefaktai.push(klaidosKlase(priezastis));
         log.warn(`Retencija: pasenusio job'o artefaktų pašalinti nepavyko (${jobId}): ${priezastis}`);
-        await tombstones
-          .complete(jobId, TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" })
-          .catch(() => {});
+
+        /**
+         * ⚠️ `NESAUGU` NĖRA `retryable` (#157, PR-5; peržiūra).
+         *
+         * `nepavyko` reiškia „bandyk vėliau"; `NESAUGU` reiškia „nebandyk, kol kas nors
+         * nepataisys metaduomenų". Pažymėjus jį atkartojamu, operatorius lauktų
+         * automatinio pakartojimo, kuris kiekvieną kartą bandytų ištrinti SVETIMĄ
+         * objektą — tiksliai ta klaida, kurią ką tik ištaisėme `deletion_failed`
+         * lentelėje dokumentuose.
+         */
+        const kindas = /NESAUGU/.test(priezastis) ? "permanent" : "retryable";
+        await tombstones.complete(jobId, TOMBSTONE_STATUS.FAILED, { failureKind: kindas }).catch(() => {});
         praleista += 1;
         continue;
       }

@@ -922,3 +922,60 @@ test("#157 PR-5: nepavykusio ištrynimo kvite NĖRA nei job ID, nei adreso", asy
     jobStore.listExpired = atsargos.expired;
   }
 });
+
+test("#157 PR-5: `NESAUGU` žymima `permanent`, ne `retryable`", async () => {
+  /**
+   * ⚠️ KETVIRTA KLASĖ ŠALIA `pašalinta` / `praleista` / `nepavyko` (peržiūra).
+   *
+   * `nepavyko` reiškia „bandyk vėliau"; `NESAUGU` reiškia „nebandyk, kol kas nors
+   * nepataisys metaduomenų". Pažymėjus jį atkartojamu, operatorius lauktų automatinio
+   * pakartojimo, kuris kiekvieną kartą bandytų ištrinti SVETIMĄ objektą — ta pati klaida,
+   * kurią ką tik ištaisėme `deletion_failed` lentelėje dokumentuose.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  await tombstones._clearForTests();
+
+  const kindai = [];
+  const tikrasComplete = tombstones.complete;
+  tombstones.complete = async (jobId, status, opcijos = {}) => {
+    kindai.push(opcijos.failureKind || null);
+    return { jobId, status };
+  };
+
+  const atsargos = {
+    claim: tombstones.claimForDeletion,
+    expired: jobStore.listExpired,
+    delete: jobStore.system.deleteResultArtifacts,
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+  };
+
+  tombstones.claimForDeletion = async () => ({ zyma: {}, vykdytojas: true });
+  jobStore.listExpired = async () => ["job-nesaugu"];
+  jobStore.system.deleteResultArtifacts = async () => ({
+    pasalinti: [],
+    jauNebuvo: [],
+    nepavyko: [{ storageKey: "results/x/y.json", priezastis: "NESAUGU: šį adresą referencuoja KITAS job'as" }],
+    matyti: [],
+  });
+  /** Bandymų šaka nevykdoma — tikrinama TIK pasenusių job'ų šaka. */
+  tombstones.jungtiesTapatybe = () => null;
+  jobStore.system.jungtiesTapatybe = async () => null;
+
+  try {
+    await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.ok(kindai.includes("permanent"), `NESAUGU privalo būti \`permanent\`: ${JSON.stringify(kindai)}`);
+    assert.ok(!kindai.includes("retryable"), "ir tikrai NE `retryable`");
+  } finally {
+    tombstones.complete = tikrasComplete;
+    tombstones.claimForDeletion = atsargos.claim;
+    jobStore.listExpired = atsargos.expired;
+    jobStore.system.deleteResultArtifacts = atsargos.delete;
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+  }
+});

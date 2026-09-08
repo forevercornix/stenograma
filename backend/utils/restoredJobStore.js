@@ -175,6 +175,12 @@ async function paruosti(pool, parinktys = {}) {
    * toliau užklaustų tą pačią trūkstamą lentelę ir kristų replay VIDURYJE. Store'as
    * sukonstruojamas žinodamas, ar registras yra, tad visi registro keliai iš to seka —
    * vienas sprendimas, ne trys `try/catch`.
+   *
+   * ⚠️ IŠ TO SEKA PRIELAIDA, KURIĄ VERTA ĮVARDYTI: schemos faktas tampa store'o BŪSENA,
+   * nustatoma VIENĄ kartą konstrukcijos metu. Jei kada nors migracijos būtų taikomos TUO
+   * PAČIU procesu, kuris jau turi sukonstruotą store'ą, faktas pasentų ir liktų „lentelės
+   * nėra", nors ji jau yra. Šiandien to kelio nėra — replay migracijų nedaro — tad tai
+   * prielaida, ne defektas; bet ji užrašoma, o ne laikoma savybe.
    */
   return sukurti(pool, { ...parinktys, bandymuRegistras });
 }
