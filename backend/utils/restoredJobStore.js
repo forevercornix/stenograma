@@ -98,11 +98,39 @@ const PARINKCIU_SPRENDIMAI = Object.freeze({
 async function paruosti(pool, parinktys = {}) {
   const adapteris = sukurti(pool, parinktys);
 
-  const { rows } = await pool.query(
-    `SELECT DISTINCT storage_type FROM job_results WHERE storage_type <> 'inline'
-     UNION
-     SELECT DISTINCT storage_type FROM job_result_attempts`
+  /**
+   * ⚠️ SENESNĖ KOPIJA `job_result_attempts` LENTELĖS NETURI (Codex, #304 antras raundas).
+   *
+   * Atkūrimas iš kopijos, sukurtos PRIEŠ migraciją `1756300000000`, jos neturi, ir viena
+   * užklausa kristų su `42P01` — sugriaudama būtent tą fail-before-first-step garantiją,
+   * kuriai preflight ir egzistuoja. Kopijos formatas tebėra `version 1`, o DR seka tikrina
+   * tik migracijų ATSILIKIMĄ, tad tokios kopijos formaliai priimamos.
+   *
+   * ⚠️ PASIRINKTAS ANTRAS VARIANTAS: trūkstama lentelė = TUŠČIA bandymų aibė.
+   *
+   * Pirmasis (migracijos tampa privalomu žingsniu prieš replay) keistų DR SEKĄ, o ji
+   * aprašyta runbook'e ir tikrinama atskirai — tai PR-7 lygio pokytis, ne preflight
+   * detalė. Antrasis yra teisingas ir faktiškai: jei lentelės nėra, tai bandymų registro
+   * toje bazėje NIEKADA nebuvo, tad bandymų aibė tikrai tuščia — tai FAKTAS, ne prielaida.
+   *
+   * ⚠️ IR JIS FAIL-CLOSED GARANTIJOS NEAPGAUNA: `job_results` external eilutės tikrinamos
+   * toliau, tad sena kopija su `s3` rezultatais preflight'ą vis tiek sustabdo. Tuščia
+   * bandymų aibė reiškia „nėra ko šluoti", ne „nėra ko tikrinti".
+   */
+  const { rows: rezultatuTipai } = await pool.query(
+    "SELECT DISTINCT storage_type FROM job_results WHERE storage_type <> 'inline'"
   );
+
+  let bandymuTipai = [];
+  try {
+    const { rows } = await pool.query("SELECT DISTINCT storage_type FROM job_result_attempts");
+    bandymuTipai = rows;
+  } catch (klaida) {
+    /** `42P01` = lentelės nėra. Bet kokia kita klaida yra tikras gedimas ir keliauja toliau. */
+    if (klaida.code !== "42P01") throw klaida;
+  }
+
+  const rows = [...rezultatuTipai, ...bandymuTipai];
 
   /**
    * ⚠️ SKAIČIUOJAMOS TIK TOS SAUGYKLOS, KURIAS STORE'AS REALIAI UŽREGISTRUOS (Codex, #304).

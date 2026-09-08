@@ -170,3 +170,72 @@ test("#157 PR-5: preflight skaičiuoja REGISTRUOJAMAS saugyklas, ne raktus", asy
   /** KONTROLĖ: tikra saugykla su `backend` praeina. */
   assert.ok(await restoredJobStore.paruosti(suS3, { artifactStores: { s3: { backend: "s3" } } }));
 });
+
+test("#157 PR-5: bazė BE `job_result_attempts` — preflight nekrenta su `42P01`", async () => {
+  /**
+   * ⚠️ IRONIJA, KURIĄ CODEX PAGAVO: preflight, pridėtas kaip fail-before-first-step
+   * garantija, pats krisdavo prieš pirmą žingsnį — atkūrus iš kopijos, sukurtos PRIEŠ
+   * migraciją `1756300000000`.
+   *
+   * Pasirinktas antras variantas: trūkstama lentelė = TUŠČIA bandymų aibė. Tai faktas,
+   * ne prielaida: jei lentelės nėra, registro toje bazėje niekada ir nebuvo.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const senaKopija = {
+    query: async (sql) => {
+      if (/job_result_attempts/.test(sql)) {
+        const klaida = new Error('relation "job_result_attempts" does not exist');
+        klaida.code = "42P01";
+        throw klaida;
+      }
+      return { rows: [] };
+    },
+  };
+
+  assert.ok(await restoredJobStore.paruosti(senaKopija), "sena kopija be registro turi praeiti");
+});
+
+test("#157 PR-5: tuščia bandymų aibė NEAPGAUNA fail-closed garantijos", async () => {
+  /**
+   * ⚠️ Be šios kontrolės pirmasis testas būtų tenkinamas ir preflight'o, kuris po `42P01`
+   * nustoja tikrinti VISKĄ — o tada sena kopija su `s3` rezultatais praeitų, ir replay
+   * kristų ties pirmu artefaktu. Tuščia bandymų aibė reiškia „nėra ko šluoti", ne „nėra
+   * ko tikrinti".
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const senaKopijaSuS3 = {
+    query: async (sql) => {
+      if (/job_result_attempts/.test(sql)) {
+        const klaida = new Error('relation "job_result_attempts" does not exist');
+        klaida.code = "42P01";
+        throw klaida;
+      }
+      return { rows: [{ storage_type: "s3" }] };
+    },
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(senaKopijaSuS3), /s3/);
+});
+
+test("#157 PR-5: kita DB klaida NĖRA „lentelės nėra“", async () => {
+  /**
+   * ⚠️ Ta pati A šaknies taisyklė: neigiamas rezultatas priimamas TIK iš įrodymo, kuris jį
+   * nustato. `42P01` reiškia „lentelės nėra"; ryšio gedimas — ne.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const sugedusi = {
+    query: async (sql) => {
+      if (/job_result_attempts/.test(sql)) {
+        const klaida = new Error("connection terminated");
+        klaida.code = "57P01";
+        throw klaida;
+      }
+      return { rows: [] };
+    },
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(sugedusi), /connection terminated/);
+});
