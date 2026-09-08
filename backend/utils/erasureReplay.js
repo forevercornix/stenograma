@@ -80,6 +80,19 @@ async function _paruostiUzdarymui(jobId, status) {
  * @param {object} [opcijos.store] saugykla; numatytoji — `jobStore` fasadas
  * @returns {Promise<{apdorota: number, istrinta: string[], jauNebuvo: string[], nesekmes: Array<object>}>}
  */
+/**
+ * PAVIRŠIUS, KURIO REIKALAUJA REPLAY — ATSKIRAS NUO `eraseJob` (#157, PR-5; Codex H1).
+ *
+ * ⚠️ `jobErasure.BUTINI_SYSTEM_METODAI` atsako į klausimą „ko reikia `eraseJob()`", ir tai
+ * TEISINGAS šaltinis savo klausimui. Bet replay `!job` šaka `eraseJob()` NEKVIEČIA: ji
+ * pati šalina artefaktus ir pati uždaro registro eilutes, tad jos reikalavimai platesni.
+ *
+ * Vienas sąrašas dviem skirtingiems klausimams būtų ta pati klaida, tik atvirkščia: iki
+ * šiol ji reiškė atsiliekančią kopiją, čia reikštų per siaurą šaltinį. Todėl sąrašas
+ * ATSKIRAS ir eksportuojamas — adapteris ima abiejų sąjungą.
+ */
+const BUTINI_REPLAY_METODAI = Object.freeze(["get", "deleteResultArtifacts", "pasalintiBandymus"]);
+
 async function replay({ zymos, actor = null, store = jobStore } = {}) {
   const istrinta = [];
   const jauNebuvo = [];
@@ -167,9 +180,48 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
        * Šalinama TIK po patvirtinto fizinio šalinimo — eilutė yra vienintelis adresas.
        */
       const bandymuIds = (artefaktai.matyti || []).map((a) => a.attemptId).filter(Boolean);
-      if (bandymuIds.length > 0) await store.system.pasalintiBandymus(bandymuIds);
 
-      jauNebuvo.push(zyma.jobId);
+      if (bandymuIds.length > 0) {
+        /**
+         * ⚠️ `leistiIsipareigotus` — BE JO VALYMAS NEVEIKĖ SAVO PASKIRČIAI (Codex, H2).
+         *
+         * `pasalintiBandymus()` numatytai išbraukia `busena = 'committed'` — sargas,
+         * teisingas įprastame kelyje. Bet `committed` orphan eilutė ir BUVO tas atvejis,
+         * dėl kurio šis valymas pridėtas: `jobs` eilutės nebėra, nuorodos nebėra, o
+         * eilutė lieka įsipareigota amžiams.
+         *
+         * Čia sąlygos kitos ir jos patikrintos: `jobs` eilutės NĖRA (`!job` šaka) ir
+         * fizinis šalinimas PATVIRTINTAS (`nepavyko` tuščias). Tik tada įsipareigota
+         * eilutė yra šiukšlė, ne nuoroda.
+         *
+         * ⚠️ NULINĖ GRĄŽA NEBEIGNORUOJAMA: jei nepašalinta nė viena eilutė, kurios
+         * tikėjomės, žyma NEUŽDAROMA — kitaip uždarytume ištrynimą, kurio registro pusė
+         * liko neatlikta.
+         */
+        const pasalintaEiluciu = await store.system.pasalintiBandymus(bandymuIds, {
+          leistiIsipareigotus: true,
+        });
+
+        if (!pasalintaEiluciu) {
+          nesekmes.push({
+            jobId: zyma.jobId,
+            priezastis: "registro eilučių nepavyko pašalinti (nulinė grąža)",
+          });
+          continue;
+        }
+      }
+
+      /**
+       * ⚠️ KLASIFIKACIJA PAGAL TAI, KAS ĮVYKO (Codex, H3).
+       *
+       * Iki šito šaka visada rašė `jauNebuvo` ir `duomenu=nebuvo`, nors ką tik fiziškai
+       * pašalino rezultato objektus. Patvarus atkūrimo įrašas teigdavo, kad niekas
+       * nepašalinta — melas būtent apie jautrius duomenis.
+       */
+      const kasNorsPasalinta = (artefaktai.pasalinti || []).length > 0;
+
+      if (kasNorsPasalinta) istrinta.push(zyma.jobId);
+      else jauNebuvo.push(zyma.jobId);
 
       const esama = await tombstones.get(zyma.jobId);
       if (esama && esama.status !== tombstones.TOMBSTONE_STATUS.DELETED) {
@@ -192,7 +244,9 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
             success: true,
             outcome: "erasure_confirmed",
             actor: actor || undefined,
-            details: `zymosStatusas=${esama.status} duomenu=nebuvo`,
+            details: `zymosStatusas=${esama.status} duomenu=${
+              kasNorsPasalinta ? `istrinta:${artefaktai.pasalinti.length}` : "nebuvo"
+            }`,
           });
         } catch (klaida) {
           nesekmes.push({ jobId: zyma.jobId, priezastis: klaida.code || klaida.message });
@@ -361,4 +415,4 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
   return { apdorota: zymos.length, istrinta, jauNebuvo, uzdarytosZymos, audioValymoSkola, nesekmes };
 }
 
-module.exports = { AUDITO_IVYKIS, replay };
+module.exports = { AUDITO_IVYKIS, BUTINI_REPLAY_METODAI, replay };

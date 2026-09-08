@@ -1004,10 +1004,10 @@ module.exports = {
         : null;
     },
     /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
-    pasalintiBandymus: async (attemptIds) => {
+    pasalintiBandymus: async (attemptIds, nustatymai = {}) => {
       await ensureInit();
       return typeof store.pasalintiBandymus === "function"
-        ? store.pasalintiBandymus(attemptIds)
+        ? store.pasalintiBandymus(attemptIds, nustatymai)
         : null;
     },
     /** Karantinas: vienkartinis pranešimas apie invarianto pažeidimą (#157, PR-5). */

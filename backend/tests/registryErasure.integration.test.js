@@ -626,6 +626,41 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     assert.deepEqual(rezultatas.pasalinti, [], "nieko nepašalinta");
   });
 
+  await t.test("SVETIMAS `pending` bandymas irgi saugo objektą — registras yra antras šaltinis", async () => {
+    /**
+     * ⚠️ PRALEISTA PUSĖ BUVO PATS REGISTRAS (Codex, #304 / I).
+     *
+     * Job'as B gali būti baigęs `put()` ir dar neįsipareigojęs: eilutė yra
+     * `job_result_attempts` su `pending`, o `job_results` — dar ne. Tikrinant tik
+     * `job_results`, A ištrynimas pašalintų B objektą, o B po to įsipareigotų nuorodą į
+     * JAU NEEGZISTUOJANTĮ rezultatą.
+     *
+     * Ironija verta įrašo: predikatas klausė „ar adresas referencuotas", o registro esmė
+     * yra būtent tai, kad referencijos NEPAKANKA.
+     */
+    const a = await naujasJobas();
+    const b = await naujasJobas();
+
+    /** B ką tik įrašė objektą, bet dar neįsipareigojo — eilutė `pending`. */
+    const bBandymas = await nutrukesBandymas(b, { text: "B pending rezultatas" });
+    assert.ok(await saugykla.head(bBandymas.raktas), "kontrolė: B objektas yra");
+
+    /** A registre — eilutė į TĄ PATĮ adresą (nekonsistentiški metaduomenys). */
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, 'fs', $3, $4)`,
+      [attemptRegistry.naujasBandymas(), a, bBandymas.raktas, attemptRegistry.BUSENA.ATMESTA]
+    );
+
+    const rezultatas = await store.deleteResultArtifacts(a);
+
+    assert.ok(await saugykla.head(bBandymas.raktas), "B `pending` objektas privalo LIKTI");
+    assert.equal(rezultatas.nepavyko.length, 1, JSON.stringify(rezultatas));
+    assert.match(rezultatas.nepavyko[0].priezastis, /NESAUGU/);
+
+    await saugykla.delete(bBandymas.raktas);
+  });
+
   await t.test("KONTROLĖ: SAVAS adresas šalinamas normaliai", async () => {
     /**
      * Be jos ankstesnis testas būtų tenkinamas ir patikros, kuri atmeta VISKĄ — o toks
@@ -640,6 +675,59 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     assert.deepEqual(rezultatas.nepavyko, [], JSON.stringify(rezultatas));
     assert.deepEqual(rezultatas.pasalinti, [eilute.storage_key]);
     assert.equal(await saugykla.head(eilute.storage_key), null);
+  });
+
+  await t.test("DR replay `!job`: `committed` orphan eilutė pašalinama, ataskaita sako IŠTRINTA", async () => {
+    /**
+     * ⚠️ TESTAS EINA PER DR GRANDINĘ, NE PER STORE (Codex, #304 / H1).
+     *
+     * H1 buvo `TypeError` adapterio paviršiuje — per store tiesiogiai jis NEBŪTŲ
+     * pasimatęs, nes store metodą turi. Trūko jo adapteryje, kurį stato `restoredJobStore`.
+     */
+    const restoredJobStore = require("../utils/restoredJobStore");
+    const erasureReplay = require("../utils/erasureReplay");
+    const tombstones = require("../utils/deletionTombstones");
+
+    await tombstones._clearForTests();
+
+    /** Job'as, kurio `jobs` eilutės nebėra, bet registre liko ĮSIPAREIGOTA eilutė. */
+    const orphanJobId = "99999999-8888-7777-6666-555555555555";
+    const attemptId = attemptRegistry.naujasBandymas();
+    const raktas = attemptRegistry.bandymoRaktas(orphanJobId, attemptId);
+
+    await attemptRegistry.registruoti(pool, {
+      attemptId,
+      jobId: orphanJobId,
+      storageType: "fs",
+      storageKey: raktas,
+    });
+    await pool.query("UPDATE job_result_attempts SET busena = $2 WHERE attempt_id = $1", [
+      attemptId,
+      attemptRegistry.BUSENA.ISIPAREIGOTA,
+    ]);
+    await saugykla.put(raktas, { text: "orphan po atkūrimo" });
+
+    const zyma = await tombstones.mark(orphanJobId, { reason: "user_request" });
+    const adapteris = await restoredJobStore.paruosti(pool, { artifactStores: { fs: saugykla } });
+
+    const rez = await erasureReplay.replay({
+      zymos: [{ jobId: orphanJobId, status: zyma.status }],
+      actor: "dr-testas",
+      store: adapteris,
+    });
+
+    assert.deepEqual(rez.nesekmes, [], JSON.stringify(rez));
+    assert.equal(await saugykla.head(raktas), null, "objekto nebeturi likti");
+    assert.deepEqual(
+      await attemptRegistry.joboBandymai(pool, orphanJobId),
+      [],
+      "`committed` orphan eilutė privalo būti pašalinta — be to valymas neveiktų savo paskirčiai"
+    );
+    assert.ok(rez.uzdarytosZymos.includes(orphanJobId), "žyma uždaroma");
+    assert.ok(
+      rez.istrinta.includes(orphanJobId),
+      `ataskaita privalo sakyti IŠTRINTA, ne „jau nebuvo": ${JSON.stringify(rez)}`
+    );
   });
 
   await t.test("`eraseJob()` per fasado paviršių nueina iki saugyklos", async () => {

@@ -2561,15 +2561,57 @@ function createPostgresStore(
   async function svetimiAdresai(jobId, adresai) {
     if (adresai.length === 0) return new Set();
 
+    /**
+     * ⚠️ BE REGISTRO LIEKA TIK VIENAS ŠALTINIS, IR TAI UŽRAŠOMA. Legacy atkurtoje bazėje
+     * `job_result_attempts` nėra, tad `pending` nuosavybės patikrinti neįmanoma — bet ten
+     * ir naujų bandymų niekas nerašo, tad gyvos `pending` nuosavybės atsirasti nėra iš ko.
+     */
+    if (!bandymuRegistras) {
+      const { rows } = await pool.query(
+        `SELECT storage_type, storage_key
+           FROM job_results
+          WHERE job_id <> $1
+            AND storage_key IS NOT NULL
+            AND (storage_type, storage_key) IN (SELECT * FROM unnest($2::text[], $3::text[]))`,
+        [String(jobId), adresai.map((a) => a.storageType), adresai.map((a) => a.storageKey)]
+      );
+
+      return new Set(rows.map((r) => `${r.storage_type}\u0000${r.storage_key}`));
+    }
+
+    /**
+     * ⚠️ DU ŠALTINIAI, NE VIENAS (#157, PR-5; Codex I).
+     *
+     * Pirmoji redakcija tikrino tik `job_results` — t. y. ĮSIPAREIGOTAS nuorodas. Bet
+     * job'as B gali būti baigęs `put()` ir dar neįsipareigojęs: eilutė yra
+     * `job_result_attempts` su `pending`, o `job_results` — dar ne. Tada A ištrynimas
+     * pašalintų B objektą, o B po to įsipareigotų nuorodą į JAU NEEGZISTUOJANTĮ rezultatą.
+     *
+     * ⚠️ IRONIJA, KURIĄ VERTA UŽRAŠYTI: praleista pusė buvo PATS REGISTRAS — tas, dėl
+     * kurio visa ši apsauga ir kuriama. Predikatas klausė „ar adresas referencuotas", o
+     * registro esmė yra būtent tai, kad REFERENCIJOS NEPAKANKA: nereferencuoti bandymai
+     * irgi turi objektus.
+     *
+     * ⚠️ SVETIMAS BANDYMAS SVARBUS NEPRIKLAUSOMAI NUO BŪSENOS. `pending` reiškia „gali
+     * būti ką tik įrašytas", `committed` — „referencuotas", o `abandoned` svetimame
+     * job'e reiškia, kad tą objektą šalins JO šlavėjas. Nė vienu atveju A ištrynimas
+     * neturi teisės jo liesti; skirtumas tarp būsenų čia nieko nekeičia.
+     */
+    const tipai = adresai.map((a) => a.storageType);
+    const raktai = adresai.map((a) => a.storageKey);
+
     const { rows } = await pool.query(
       `SELECT storage_type, storage_key
          FROM job_results
         WHERE job_id <> $1
           AND storage_key IS NOT NULL
-          AND (storage_type, storage_key) IN (
-                SELECT * FROM unnest($2::text[], $3::text[])
-              )`,
-      [String(jobId), adresai.map((a) => a.storageType), adresai.map((a) => a.storageKey)]
+          AND (storage_type, storage_key) IN (SELECT * FROM unnest($2::text[], $3::text[]))
+       UNION
+       SELECT storage_type, storage_key
+         FROM job_result_attempts
+        WHERE job_id <> $1
+          AND (storage_type, storage_key) IN (SELECT * FROM unnest($2::text[], $3::text[]))`,
+      [String(jobId), tipai, raktai]
     );
 
     return new Set(rows.map((r) => `${r.storage_type}\u0000${r.storage_key}`));
@@ -2704,10 +2746,10 @@ function createPostgresStore(
   }
 
   /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
-  async function pasalintiBandymus(attemptIds) {
+  async function pasalintiBandymus(attemptIds, nustatymai = {}) {
     if (!bandymuRegistras) return 0;
     const attemptRegistry = require("../attemptRegistry");
-    return attemptRegistry.pasalintiBandymus(pool, attemptIds);
+    return attemptRegistry.pasalintiBandymus(pool, attemptIds, nustatymai);
   }
 
   async function sweepResultArtifacts(kandidatai) {

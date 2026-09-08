@@ -46,7 +46,24 @@ const { createPostgresStore, KONSTRUKCIJOS_PARINKTYS } = require("./jobStore/pos
  * forma, kurią PR-3 uždarė generavimu: sąrašas, gyvenantis dviese, išsiskiria tyliai,
  * o kaina čia yra praleista artefaktų klasė su sėkmės kvitu.
  */
-const { BUTINI_SYSTEM_METODAI: BUTINI } = require("./jobErasure");
+/**
+ * ⚠️ DU ŠALTINIAI, NE VIENAS (#157, PR-5; Codex H1).
+ *
+ * `jobErasure.BUTINI_SYSTEM_METODAI` atsako „ko reikia `eraseJob()`", ir tai teisingas
+ * šaltinis SAVO klausimui. Bet replay `!job` šaka `eraseJob()` nekviečia — ji pati šalina
+ * artefaktus ir pati uždaro registro eilutes. Ėmus tik pirmąjį sąrašą, `pasalintiBandymus`
+ * į generuojamą paviršių nepatekdavo, ir `TypeError` įvykdavo PO destruktyvaus I/O:
+ * objektai ištrinti, žyma neišspręsta, o kiekvienas kitas DR replay krenta toje pačioje
+ * vietoje.
+ *
+ * Vienas sąrašas dviem klausimams būtų ta pati klaida, tik atvirkščia: iki šiol ji reiškė
+ * atsiliekančią KOPIJĄ, čia reikštų per siaurą ŠALTINĮ. Todėl imama SĄJUNGA, o kiekvienas
+ * vartotojas savo reikalavimus deklaruoja pats.
+ */
+const { BUTINI_SYSTEM_METODAI } = require("./jobErasure");
+const { BUTINI_REPLAY_METODAI } = require("./erasureReplay");
+
+const BUTINI = Object.freeze([...new Set([...BUTINI_SYSTEM_METODAI, ...BUTINI_REPLAY_METODAI])]);
 
 /**
  * @param {import("pg").Pool} pool atkurtos bazės pool'as

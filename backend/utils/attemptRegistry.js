@@ -267,13 +267,28 @@ async function valytiniBandymai(
  * kainuoja vieną sąlygą: jei kada nors kandidatų atranka praleistų `committed` eilutę,
  * šis sakinys ją vis tiek praleistų, ir klaida liktų diagnostikoje, ne duomenyse.
  */
-async function pasalintiBandymus(vykdytojas, attemptIds) {
+async function pasalintiBandymus(vykdytojas, attemptIds, { leistiIsipareigotus = false } = {}) {
   if (!Array.isArray(attemptIds) || attemptIds.length === 0) return 0;
 
-  const { rowCount } = await vykdytojas.query(
-    "DELETE FROM job_result_attempts WHERE attempt_id = ANY($1::uuid[]) AND busena <> $2",
-    [attemptIds, BUSENA.ISIPAREIGOTA]
-  );
+  /**
+   * ⚠️ `leistiIsipareigotus` — SIAURAI APIBRĖŽTA IŠIMTIS (#157, PR-5; Codex H2).
+   *
+   * Numatytas sargas („įsipareigotų neliečiam") teisingas įprastame kelyje: įsipareigota
+   * eilutė yra NUORODA, ne šiukšlė. Bet DR replay `!job` šakoje sąlygos kitos ir jos
+   * PATIKRINTOS: `jobs` eilutės nebėra, `job_results` su ja dingo per `CASCADE`, o fizinis
+   * šalinimas patvirtintas. Tada įsipareigota eilutė nebeturi ką referencuoti — ji lieka
+   * amžinai, o kandidatų predikatas jos neima.
+   *
+   * Išimtis yra PARAMETRAS, ne numatytoji reikšmė, būtent todėl, kad sąlygas privalo
+   * patvirtinti kvietėjas: iš čia jų nesimato.
+   */
+  const sqlSuSargu =
+    "DELETE FROM job_result_attempts WHERE attempt_id = ANY($1::uuid[]) AND busena <> $2";
+  const sqlBeSargo = "DELETE FROM job_result_attempts WHERE attempt_id = ANY($1::uuid[])";
+
+  const { rowCount } = leistiIsipareigotus
+    ? await vykdytojas.query(sqlBeSargo, [attemptIds])
+    : await vykdytojas.query(sqlSuSargu, [attemptIds, BUSENA.ISIPAREIGOTA]);
 
   return rowCount;
 }
