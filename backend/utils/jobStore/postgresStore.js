@@ -2341,11 +2341,22 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     );
     const bandymai = await attemptRegistry.joboBandymai(pool, jobId);
 
-    const pagalRakta = new Map();
+    /**
+     * ⚠️ TAPATYBĖ YRA PORA `(storage_type, storage_key)`, NE RAKTAS (Codex, #304).
+     *
+     * Raktuojant vien `storage_key`, `(fs, k)` ir `(s3, k)` suplaktų į vieną įrašą, o
+     * antrasis perrašytų pirmojo `storageType` — VIENAS FIZINIS OBJEKTAS dingtų iš aibės
+     * tyliai. Toks derinys nėra teorinis: metaduomenys, atkurti ar migruoti tarp
+     * backend'ų, gali rodyti į nukopijuotą objektą tuo pačiu loginiu raktu.
+     *
+     * Erasure aibė yra FIZINIŲ ADRESŲ aibė, tad ir tapatybė turi būti fizinė.
+     */
+    const raktas = (tipas, key) => `${tipas}\u0000${key}`;
+    const pagalAdresa = new Map();
 
     for (const bandymas of bandymai) {
       if (!bandymas.storage_key) continue;
-      pagalRakta.set(bandymas.storage_key, {
+      pagalAdresa.set(raktas(bandymas.storage_type, bandymas.storage_key), {
         storageType: bandymas.storage_type,
         storageKey: bandymas.storage_key,
         busena: bandymas.busena,
@@ -2354,9 +2365,10 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     }
 
     for (const eilute of rezultatas) {
-      const bandymas = pagalRakta.get(eilute.storage_key);
-      pagalRakta.delete(eilute.storage_key);
-      pagalRakta.set(eilute.storage_key, {
+      const adresas = raktas(eilute.storage_type, eilute.storage_key);
+      const bandymas = pagalAdresa.get(adresas);
+      pagalAdresa.delete(adresas);
+      pagalAdresa.set(adresas, {
         storageType: eilute.storage_type,
         storageKey: eilute.storage_key,
         busena: bandymas ? bandymas.busena : null,
@@ -2364,7 +2376,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       });
     }
 
-    return [...pagalRakta.values()];
+    return [...pagalAdresa.values()];
   }
 
   /**
@@ -2389,6 +2401,23 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
    * @param {string} jobId
    * @returns {Promise<{pasalinti: string[], jauNebuvo: string[], nepavyko: Array<{storageKey: string, priezastis: string}>}>}
    */
+  /**
+   * ADRESŲ POROS BŪSENA — VIENAS ZONDAS DVIEM KVIETĖJAMS (#157, PR-5; Codex #304).
+   *
+   * ⚠️ ANTRA KOPIJA ČIA BŪTŲ KETVIRTAS TOS PAČIOS KLASĖS ATVEJIS ŠIAME PR
+   * (`restoredJobStore` sąrašas, `postgresStore.integration` skaičius, #237 vardas).
+   * Todėl būseną skaičiuoja VIENA vieta, o verdiktą — kiekvienas kvietėjas savo:
+   * šlavėjui „abu" yra `pazeidimas`, erasure — nurodymas šalinti abu.
+   *
+   * ⚠️ `turiLaikinaji` DEKLARUOJAMAS SAUGYKLOS, ne spėjamas per `typeof`.
+   */
+  async function adresuBusena(saugykla, raktas) {
+    const laikinas = saugykla.turiLaikinaji ? (await saugykla.laikinasisZondas(raktas)).yra : false;
+    const galutinis = (await saugykla.head(raktas)) !== null;
+
+    return { laikinas, galutinis };
+  }
+
   async function deleteResultArtifacts(jobId) {
     const artefaktai = await listResultArtifacts(jobId);
     const rezultatas = { pasalinti: [], jauNebuvo: [], nepavyko: [] };
@@ -2405,11 +2434,31 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
 
       try {
         /**
+         * ⚠️ ŠALINAMI ABU ADRESAI — GALUTINIS IR LAIKINASIS (Codex, #304).
+         *
+         * Iki šito erasure trynė tik `storageKey`, o šlavėjas zondavo abu — tad
+         * ŠIUKŠLIŲ SURINKĖJAS turėjo stipresnę garantiją nei autoritetingas BDAR kelias.
+         * Job'as, ištrintas kai bandymas žuvo prieš `rename`, palikdavo laikinąjį failą
+         * su transkripcija, o erasure grąžindavo `jauNebuvo` — sėkmę. Objektas tapdavo
+         * nepasiekiamas GALUTINAI: registro eilutė dingsta kartu su erasure,
+         * `list(prefix)` pagal A3 nėra, ir vardo nebėra iš ko apskaičiuoti.
+         *
+         * ⚠️ BŪSENA SKAIČIUOJAMA BENDRU KELIU SU ŠLAVĖJU (`adresuBusena`), BET VERDIKTAS
+         * SKIRIASI, IR TAI SĄMONINGA. Šlavėjui „abu rasti" reiškia `pazeidimas` —
+         * nešalinam, nes tai vienintelis signalas apie pasikeitusią rakto schemą. Erasure
+         * taip elgtis NEGALI: likęs jautrus turinys po patvirtinto ištrynimo yra blogiau
+         * nei įtartinas šalinimas. Todėl čia šalinami abu, o pora vis tiek pranešama.
+         *
          * ⚠️ TRYS BŪSENOS, NE DVI — ta pati taisyklė kaip audio kelyje
          * (`jobErasure.js`, #250): „pašalinome" ir „jau nebuvo" yra skirtingos tiesos,
          * ir tik jų sąjunga atsako į klausimą „ar artefakto nebėra".
          */
-        const pasalinta = await saugykla.delete(artefaktas.storageKey);
+        const busena = await adresuBusena(saugykla, artefaktas.storageKey);
+        let pasalinta = false;
+
+        if (busena.galutinis) pasalinta = (await saugykla.delete(artefaktas.storageKey)) || pasalinta;
+        if (busena.laikinas) pasalinta = (await saugykla.pasalintiLaikinaji(artefaktas.storageKey)) || pasalinta;
+
         (pasalinta ? rezultatas.pasalinti : rezultatas.jauNebuvo).push(artefaktas.storageKey);
       } catch (klaida) {
         rezultatas.nepavyko.push({ storageKey: artefaktas.storageKey, priezastis: klaida.message });
@@ -2484,8 +2533,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       }
 
       try {
-        const laikinas = saugykla.turiLaikinaji ? (await saugykla.laikinasisZondas(raktas)).yra : false;
-        const galutinis = (await saugykla.head(raktas)) !== null;
+        const { laikinas, galutinis } = await adresuBusena(saugykla, raktas);
 
         if (laikinas && galutinis) {
           rezultatai.push({

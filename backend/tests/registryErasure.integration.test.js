@@ -322,6 +322,67 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await saugykla.delete(nutrukes.raktas);
   });
 
+  await t.test("erasure šalina IR LAIKINĄJĮ failą — ne tik galutinį raktą", async () => {
+    /**
+     * ⚠️ KRYPTIS BUVO APVERSTA (Codex, #304).
+     *
+     * Šlavėjas zondavo abu adresus, o erasure trynė tik `storageKey` — tad ŠIUKŠLIŲ
+     * SURINKĖJAS turėjo stipresnę garantiją nei autoritetingas BDAR kelias. Bandymas,
+     * žuvęs prieš `rename`, palikdavo laikinąjį failą su transkripcija, o erasure
+     * grąžindavo `jauNebuvo`, t. y. sėkmę. Po to objektas tampa nepasiekiamas
+     * GALUTINAI: registro eilutė dingsta, `list(prefix)` nėra, vardo nebėra iš ko išvesti.
+     */
+    const { laikinasVardas } = require("../utils/artifactStore/fsStore");
+    const id = await naujasJobas();
+
+    /** Bandymas registruotas, laikinas failas parašytas, `rename` neįvyko. */
+    const attemptId = attemptRegistry.naujasBandymas();
+    const raktas = attemptRegistry.bandymoRaktas(id, attemptId);
+    await attemptRegistry.registruoti(pool, { attemptId, jobId: id, storageType: "fs", storageKey: raktas });
+
+    const laikinasKelias = path.join(saknis, path.dirname(raktas), laikinasVardas(raktas));
+    await fsp.mkdir(path.dirname(laikinasKelias), { recursive: true });
+    await fsp.writeFile(laikinasKelias, JSON.stringify({ text: "transkripcija" }), { mode: 0o600 });
+
+    assert.ok(await fsp.stat(laikinasKelias).catch(() => null), "kontrolė: laikinas failas YRA");
+    assert.equal(await saugykla.head(raktas), null, "kontrolė: galutinio objekto NĖRA");
+
+    const rezultatas = await store.deleteResultArtifacts(id);
+
+    assert.deepEqual(rezultatas.nepavyko, []);
+    assert.equal(
+      await fsp.stat(laikinasKelias).catch(() => null),
+      null,
+      "laikinojo failo su transkripcija NEGALI likti po patvirtinto ištrynimo"
+    );
+    assert.deepEqual(rezultatas.pasalinti, [raktas], "ir tai privalo būti raportuojama kaip PAŠALINTA");
+  });
+
+  await t.test("tapatybė yra PORA `(storage_type, storage_key)`, ne raktas", async () => {
+    /**
+     * ⚠️ RAKTUOJANT VIEN `storage_key`, VIENAS FIZINIS OBJEKTAS DINGTŲ TYLIAI (Codex, #304).
+     *
+     * `(fs, k)` ir `(s3, k)` yra DU fiziniai adresai. Metaduomenys, atkurti ar migruoti
+     * tarp backend'ų, gali rodyti į nukopijuotą objektą tuo pačiu loginiu raktu — ir
+     * tada aibė, raktuota vien raktu, praneštų vieną, o egzistuotų du.
+     */
+    const id = await naujasJobas();
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "pora" } });
+    const eilute = await rezultatoEilute(id);
+
+    /** Bandymas su TUO PAČIU raktu, bet kitu backend'u. */
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, 's3', $3, $4)`,
+      [attemptRegistry.naujasBandymas(), id, eilute.storage_key, attemptRegistry.BUSENA.ATMESTA]
+    );
+
+    const artefaktai = await store.listResultArtifacts(id);
+    const tipai = artefaktai.filter((a) => a.storageKey === eilute.storage_key).map((a) => a.storageType).sort();
+
+    assert.deepEqual(tipai, ["fs", "s3"], `abu fiziniai adresai privalo likti aibėje: ${JSON.stringify(artefaktai)}`);
+  });
+
   await t.test("`eraseJob()` per fasado paviršių nueina iki saugyklos", async () => {
     /**
      * ⚠️ ANKSTESNI SUBTESTAI TIKRINA STORE'Ą; ŠIS — LAIDĄ.
