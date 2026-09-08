@@ -322,6 +322,41 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await saugykla.delete(nutrukes.raktas);
   });
 
+  await t.test("`praleista` matomas net kai partiją užpildo senos eilutės", async () => {
+    /**
+     * ⚠️ MATOMUMO PRIEMONĖ, MATUOJAMA TAIP, KAD NEGALĖTŲ PASIRODYTI (Codex, #304).
+     *
+     * `ORDER BY created_at LIMIT n` partiją užpildo SENOMIS tinkamomis eilutėmis, tad
+     * ateities žymos į ją nepatenka. Skaitiklis rodytų nulį BŪTENT tada, kai atsilikimas
+     * didžiausias — ir tvirtintų, kad problemos nėra.
+     */
+    const id = await naujasJobas();
+    const seni = [];
+    for (let i = 0; i < 3; i += 1) seni.push(await nutrukesBandymas(id, { text: `senas ${i}` }));
+    const ateities = await nutrukesBandymas(id, { text: "iš ateities" });
+
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE job_id = $1", [id]);
+    await pool.query("UPDATE job_result_attempts SET created_at = now() + INTERVAL '5 days' WHERE attempt_id = $1", [
+      ateities.attemptId,
+    ]);
+
+    /** Partija MAŽESNĖ nei senų eilučių skaičius — ateities eilutė į ją nepatenka. */
+    const { kandidatai, praleista } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 2,
+    });
+
+    assert.equal(kandidatai.length, 2, "kontrolė: partija tikrai ribota");
+    assert.ok(
+      !kandidatai.some((k) => k.attempt_id === ateities.attemptId),
+      "kontrolė: ateities eilutė į partiją nepateko"
+    );
+    assert.ok(praleista >= 1, `praleistųjų skaičius privalo būti matomas ir už partijos ribų: ${praleista}`);
+
+    for (const b of [...seni, ateities]) await saugykla.delete(b.raktas);
+  });
+
   await t.test("erasure šalina IR LAIKINĄJĮ failą — ne tik galutinį raktą", async () => {
     /**
      * ⚠️ KRYPTIS BUVO APVERSTA (Codex, #304).

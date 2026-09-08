@@ -265,10 +265,19 @@ async function writeDeletionReceipt(outcome) {
   // klaidingą DATA_ERASED įrašą - o kadangi kvitai neturi subjectId, jų srautas
   // galėjo per AUDIT_MAX_ENTRIES išstumti tikrus audito įrašus. Tas pats galioja
   // lenktynių atvejui, kai `jobStore.system.remove()` grąžina false.
+  /**
+   * ⚠️ `resultArtifactsRemoved` PRIVALO BŪTI ČIA (Codex, #304).
+   *
+   * Be jo: jei rezultato objekto pašalinimas buvo VIENINTELIS fizinis veiksmas,
+   * `DATA_ERASED` kvito nebūtų — ištrynimas įvyktų be pėdsako. Reikšmė buvo rašoma į
+   * suvestinę, kurios šis sprendimas neskaito: „write nėra behavior" (§19.5) trečiu
+   * pavidalu.
+   */
   const anythingRemoved =
     outcome.jobRemoved ||
     outcome.queueJobRemoved ||
     outcome.storageRemoved ||
+    outcome.resultArtifactsRemoved > 0 ||
     outcome.auditEntriesRemoved > 0;
 
   if (!anythingRemoved) return;
@@ -375,8 +384,16 @@ async function eraseOrphanedJobData(jobId, options = {}) {
   outcome.ownershipVerified = false;
 
   outcome.orphan = true;
+  /**
+   * ⚠️ IR ČIA (Codex, #304). Našlaitis, kurio VIENINTELIS artefaktas yra external
+   * rezultatas, be šito būtų ištrintas, o kvietėjas gautų 404 — „nieko neradom" apie
+   * job'ą, kurio transkripciją ką tik pašalinom.
+   */
   outcome.found =
-    outcome.queueJobRemoved || outcome.storageRemoved || outcome.auditEntriesRemoved > 0;
+    outcome.queueJobRemoved ||
+    outcome.storageRemoved ||
+    outcome.resultArtifactsRemoved > 0 ||
+    outcome.auditEntriesRemoved > 0;
 
   // jobStore įrašo nebuvo - tai ne klaida, o šio kelio prielaida.
   outcome.jobRemoved = false;

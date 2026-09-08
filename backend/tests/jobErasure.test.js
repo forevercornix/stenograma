@@ -142,14 +142,14 @@ function loadEraseJob({
 
   const erasurePath = resolve("utils/jobErasure");
   delete require.cache[erasurePath];
-  const { eraseJob } = require(erasurePath);
+  const { eraseJob, eraseOrphanedJobData } = require(erasurePath);
 
   const restore = () => {
     for (const resolved of injected) delete require.cache[resolved];
     delete require.cache[erasurePath];
   };
 
-  return { eraseJob, calls, restore };
+  return { eraseJob, eraseOrphanedJobData, calls, restore };
 }
 
 function completedJob(overrides = {}) {
@@ -511,6 +511,59 @@ test('#157 PR-5: sėkmės atveju kvitas skiria PAŠALINTA nuo JAU NEBUVO', async
     const kvitas = calls.auditRecord.find((e) => e.details && e.details.includes("results="));
     assert.ok(kvitas, "kvite privalo būti `results=` eilutė");
     assert.match(kvitas.details, /results=1\/2/, kvitas.details);
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: rezultato artefaktų šalinimas patenka į `anythingRemoved` — kvitas IŠRAŠOMAS", async () => {
+  /**
+   * ⚠️ REIKŠMĖ, RAŠOMA Į SUVESTINĘ, KURIOS NIEKAS NESKAITO (Codex, #304).
+   *
+   * Jei rezultato objekto pašalinimas buvo VIENINTELIS fizinis veiksmas, `DATA_ERASED`
+   * kvito nebūtų — ištrynimas įvyktų be pėdsako. Būtent tokia yra external rezultato
+   * situacija: eilės nėra, audio nėra, audito įrašų nėra.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      removed: false,
+      resultArtifacts: { pasalinti: ["results/j/a.json"], jauNebuvo: [], nepavyko: [] },
+    },
+    auditLog: { removed: 0 },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.resultArtifactsRemoved, 1);
+    assert.ok(
+      calls.auditRecord.some((e) => e.details && e.details.includes("results=1/0")),
+      `kvitas privalo būti išrašytas: ${JSON.stringify(calls.auditRecord)}`
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: našlaitis su VIENINTELIU external rezultatu nėra „nerastas\"", async () => {
+  /**
+   * ⚠️ `found` be `resultArtifactsRemoved` reikštų 404 apie job'ą, kurio transkripciją
+   * ką tik pašalinom (Codex, #304).
+   */
+  const { eraseOrphanedJobData, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      resultArtifacts: { pasalinti: ["results/j/a.json"], jauNebuvo: [], nepavyko: [] },
+    },
+    auditLog: { removed: 0 },
+  });
+
+  try {
+    const outcome = await eraseOrphanedJobData("job-1", { scope: "system" });
+
+    assert.equal(outcome.resultArtifactsRemoved, 1);
+    assert.equal(outcome.found, true, "artefaktas rastas ir pašalintas — tai NE 404");
   } finally {
     restore();
   }

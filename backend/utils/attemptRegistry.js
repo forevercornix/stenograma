@@ -208,7 +208,8 @@ async function valytiniBandymai(
        FROM job_result_attempts a
       WHERE a.busena <> $1
         AND NOT EXISTS (
-              SELECT 1 FROM job_results r WHERE r.storage_key = a.storage_key
+              SELECT 1 FROM job_results r
+               WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
             )
         AND ${zymosSalyga}
         AND (
@@ -223,9 +224,34 @@ async function valytiniBandymai(
     [BUSENA.ISIPAREIGOTA, BUSENA.LAUKIA, Number(laukianciuRibaMs), Number(atmestuRibaMs), Number(kiekis)]
   );
 
+  /**
+   * ⚠️ PRALEISTŲJŲ SKAIČIUS ATSIETAS NUO PARTIJOS (Codex, #304).
+   *
+   * Anksčiau jis buvo skaičiuojamas iš tos pačios `LIMIT`-uotos eilučių aibės. Bet
+   * `ORDER BY created_at` partiją užpildo SENOMIS TINKAMOMIS eilutėmis, tad ateities
+   * žymos į ją nepatenka — ir skaitiklis rodytų NULĮ būtent tada, kai atsilikimas
+   * didžiausias. Matomumo priemonė, matuojama taip, kad negalėtų pasirodyti, yra
+   * blogesnė už jos nebuvimą: ji tvirtina, kad problemos nėra.
+   *
+   * Todėl skaičiuojama ATSKIRA užklausa be `LIMIT`, tuo pačiu predikatu, tik be amžiaus
+   * sąlygos — ateities žyma amžiaus neturi apskritai.
+   */
+  const { rows: praleistiRows } = await vykdytojas.query(
+    `SELECT count(*)::int AS kiek
+       FROM job_result_attempts a
+      WHERE a.busena <> $1
+        AND a.created_at > now()
+        AND NOT EXISTS (
+              SELECT 1 FROM job_results r
+               WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
+            )
+        AND ${zymosSalyga}`,
+    [BUSENA.ISIPAREIGOTA]
+  );
+
   return {
     kandidatai: rows.filter((r) => !r.laikas_ateityje),
-    praleista: rows.filter((r) => r.laikas_ateityje).length,
+    praleista: praleistiRows[0].kiek,
   };
 }
 
