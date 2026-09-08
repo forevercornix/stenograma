@@ -426,8 +426,27 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     summary.errors.push(`tombstones: ${e.message}`);
   }
 
+  /**
+   * ⚠️ `resultAttempts` PRIVALO BŪTI ČIA (Codex, #304).
+   *
+   * Tas pats defektas, kuris praeitame raunde buvo uždarytas `jobErasure` pusėje
+   * (`anythingRemoved` / `found`), tik ANTROJE suvestinėje: ciklas, pašalinęs TIK
+   * apleistus rezultato artefaktus, neišrašydavo `RETENTION_PURGE` kvito — automatinis
+   * asmens duomenų šalinimas be pėdsako.
+   *
+   * ⚠️ `null` (žingsnis NEVYKDYTAS) čia nėra „nieko nebuvo": `> 0` jam netaikoma, tad
+   * sustabdytas žingsnis emisijos nesukelia, o tai teisinga — nevykdytas žingsnis nieko
+   * ir nepašalino. Bet pažeidimai ir praleidimai skaičiuojami: jie yra ĮVYKIS, net kai
+   * nieko nepašalinta.
+   */
   const removedAnything =
-    summary.jobs > 0 || summary.audio > 0 || summary.auditEntries > 0 || summary.tombstones > 0;
+    summary.jobs > 0 ||
+    summary.audio > 0 ||
+    summary.auditEntries > 0 ||
+    summary.tombstones > 0 ||
+    summary.resultAttempts > 0 ||
+    summary.resultAttemptsViolations > 0 ||
+    summary.resultAttemptsSkipped > 0;
 
   /**
    * ⚠️ KLAIDA IRGI YRA ĮVYKIS (#233 Codex, P2).
@@ -456,7 +475,13 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
       error: summary.errors.length ? summary.errors.join("; ") : null,
       details:
         `jobs=${summary.jobs} audio=${summary.audio} audit=${summary.auditEntries} ` +
-        `tombstones=${summary.tombstones}`,
+        `tombstones=${summary.tombstones} ` +
+        /**
+         * ⚠️ `attempts=` ATSKIRAI, IR `nevykdyta` NĖRA NULIS. Kvitas, rodantis `0` ten,
+         * kur žingsnis buvo sustabdytas, tvirtintų, kad šluoti nebuvo ko.
+         */
+        `attempts=${summary.resultAttempts === null ? "nevykdyta" : summary.resultAttempts}` +
+        `/${summary.resultAttemptsSkipped}/${summary.resultAttemptsViolations}`,
     });
     log.info(
       `Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +

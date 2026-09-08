@@ -587,3 +587,68 @@ test("SAUGYKLOS RIBA: `limit` riboja VIENĄ kvietimą, ne visą aibę", async ()
 
   await memoryStore.clear();
 });
+
+test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION_PURGE`", async () => {
+  /**
+   * ⚠️ TAS PATS DEFEKTAS ANTROJE SUVESTINĖJE (Codex, #304).
+   *
+   * Praeitą raundą jis buvo uždarytas `jobErasure` pusėje (`anythingRemoved` / `found`),
+   * bet `retentionSweeper` `removedAnything` naujos kategorijos nepažino. Ciklas,
+   * pašalinęs tik apleistus rezultato artefaktus, neišrašydavo kvito — automatinis
+   * asmens duomenų šalinimas be pėdsako.
+   *
+   * ⚠️ Taisyklė buvo pritaikyta PRANEŠTO AGREGATO, ne klasės lygmeniu. Repo yra TRYS
+   * sprendimo agregatai: `DATA_ERASED` emisija, `found` našlaičių kelyje ir šis.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  /**
+   * ⚠️ ĮRAŠAI SKAITOMI IŠ `auditLog`, ne perimant `rasytiAudita`: `retentionSweeper` jį
+   * destruktūrizuoja importo metu, tad modulio objekto pataisymas jo nepasiektų.
+   */
+
+  const tikrasBackend = Object.getOwnPropertyDescriptor(tombstones, "backend");
+  Object.defineProperty(tombstones, "backend", { get: () => "postgres", configurable: true });
+
+  const originalus = {
+    valytiniBandymai: jobStore.system.valytiniBandymai,
+    sweepResultArtifacts: jobStore.system.sweepResultArtifacts,
+    pasalintiBandymus: jobStore.system.pasalintiBandymus,
+    listExpired: jobStore.listExpired,
+    listReferencedStorageKeys: jobStore.system.listReferencedStorageKeys,
+  };
+
+  jobStore.system.valytiniBandymai = async () => ({
+    kandidatai: [{ attempt_id: "a", storage_type: "fs", storage_key: "results/j/a.json" }],
+    praleista: 0,
+  });
+  jobStore.system.sweepResultArtifacts = async () => [
+    { attemptId: "a", storageKey: "results/j/a.json", verdiktas: "pasalinta" },
+  ];
+  jobStore.system.pasalintiBandymus = async () => 1;
+  jobStore.listExpired = async () => [];
+  jobStore.system.listReferencedStorageKeys = async () => null;
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, 1, "kontrolė: bandymas pašalintas");
+    assert.equal(summary.jobs, 0, "kontrolė: daugiau niekas nepašalinta");
+
+    const irasai = await auditLog.getAll();
+    const kvitas = irasai.find((i) => i.event === "RETENTION_PURGE");
+    assert.ok(kvitas, `kvitas privalo būti išrašytas: ${JSON.stringify(irasai)}`);
+    assert.match(kvitas.details, /attempts=1\/0\/0/, kvitas.details);
+  } finally {
+    if (tikrasBackend) Object.defineProperty(tombstones, "backend", tikrasBackend);
+    Object.assign(jobStore.system, {
+      valytiniBandymai: originalus.valytiniBandymai,
+      sweepResultArtifacts: originalus.sweepResultArtifacts,
+      pasalintiBandymus: originalus.pasalintiBandymus,
+      listReferencedStorageKeys: originalus.listReferencedStorageKeys,
+    });
+    jobStore.listExpired = originalus.listExpired;
+  }
+});
