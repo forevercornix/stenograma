@@ -782,6 +782,17 @@ function assertAtstovaujamasProgresas(job) {
  * @param {object} [priklausomybes.artifactStore] sutrumpinimas vienam backend'ui; tipas
  *   imamas iš paties store'o `backend` lauko
  */
+/**
+ * KONSTRUKCIJOS PARINKČIŲ AIBĖ — VIENAS ŠALTINIS (#157, PR-5; Codex #304).
+ *
+ * ⚠️ KODĖL EKSPORTUOJAMA. `restoredJobStore` STATO šį store'ą, tad kiekviena nauja
+ * parinktis ten atsilieka tyliai — taip nutiko TRIS kartus iš eilės (PR-3 parašai,
+ * PR-5 būtinų metodų sąrašas, dabar saugyklos). Adapteris nebegali spėlioti: jis
+ * privalo DEKLARUOTI, ką daro su kiekvienu vardu iš šios aibės, o testas krenta, kai
+ * atsiranda ketvirtas.
+ */
+const KONSTRUKCIJOS_PARINKTYS = Object.freeze(["artifactStores", "artifactStore", "rasymoSaugykla"]);
+
 function createPostgresStore(pool, { artifactStores = null, artifactStore = null, rasymoSaugykla = null } = {}) {
   /**
    * ARTEFAKTŲ SAUGYKLOS RAKTUOJAMOS PAGAL `storage_type` (Codex, #291).
@@ -2628,6 +2639,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
 }
 
 module.exports = {
+  KONSTRUKCIJOS_PARINKTYS,
   createPostgresStore,
   /**
    * ⚠️ UŽKLAUSOS EKSPORTUOJAMOS KAIP TESTO SEAMAS (#157, PR-3).

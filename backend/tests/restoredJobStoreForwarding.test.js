@@ -98,3 +98,53 @@ test("kiekvienas `BUTINI` metodas persiunčia VISUS argumentus", async () => {
     );
   }
 });
+
+test("#157 PR-5: adapteris DEKLARUOJA sprendimą kiekvienai `postgresStore` parinkčiai", () => {
+  /**
+   * ⚠️ TREČIAS KARTAS TA PAČIA PRIEŽASTIMI (Codex, #304).
+   *
+   * PR-3 adapteris numesdavo parašus, PR-5 turėjo antrą būtinų metodų sąrašo kopiją, o
+   * dabar — nebeperduodavo saugyklų, tad DR replay su bet kokia external eilute krito
+   * `parinktiArtefaktuSaugykla()` viduje.
+   *
+   * Šaknis ta pati: adapteris STATO store'ą, tad kiekviena nauja konstrukcijos parinktis
+   * jam yra nauja skola. Taškinis taisymas uždarytų trečią atvejį ir paliktų ketvirtą,
+   * todėl aibė ateina iš `postgresStore`, o adapteris privalo turėti sprendimą kiekvienam
+   * jos vardui. Šis testas krenta, kai atsiranda ketvirta parinktis.
+   */
+  const { KONSTRUKCIJOS_PARINKTYS } = require("../utils/jobStore/postgresStore");
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  assert.ok(KONSTRUKCIJOS_PARINKTYS.length > 0, "kontrolė: aibė netuščia");
+
+  /** Konstrukcija su tikru pool'o dubliu privalo praeiti — visos parinktys deklaruotos. */
+  assert.doesNotThrow(() => restoredJobStore.sukurti({ query: async () => ({ rows: [] }) }));
+});
+
+test("#157 PR-5: nepilna konfigūracija atmetama PRIEŠ pirmą replay žingsnį", async () => {
+  /**
+   * ⚠️ KRITIMAS VIDURYJE YRA BLOGIAUSIA IŠ TRIJŲ GALIMYBIŲ: dalis job'ų jau apdorota,
+   * replay pažymimas kritiniu, o operatorius mato klaidą apie neregistruotą
+   * `storage_type` procedūros viduryje.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const suExternal = {
+    query: async (sql) => {
+      if (/storage_type/.test(sql)) return { rows: [{ storage_type: "s3" }] };
+      return { rows: [] };
+    },
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(suExternal), /s3/);
+
+  /** KONTROLĖ: padavus tai saugyklai, paruošimas praeina. */
+  const adapteris = await restoredJobStore.paruosti(suExternal, {
+    artifactStores: { s3: { backend: "s3" } },
+  });
+  assert.equal(typeof adapteris.system.remove, "function");
+
+  /** KONTROLĖ: inline-only bazė saugyklų nereikalauja. */
+  const tikInline = { query: async () => ({ rows: [] }) };
+  assert.ok(await restoredJobStore.paruosti(tikInline));
+});

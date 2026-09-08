@@ -1,4 +1,4 @@
-const { createPostgresStore } = require("./jobStore/postgresStore");
+const { createPostgresStore, KONSTRUKCIJOS_PARINKTYS } = require("./jobStore/postgresStore");
 
 /**
  * JOB'Ų SAUGYKLA, NUKREIPTA Į ATKURTĄ BAZĘ (#155, 7.6c / #250).
@@ -52,12 +52,93 @@ const { BUTINI_SYSTEM_METODAI: BUTINI } = require("./jobErasure");
  * @param {import("pg").Pool} pool atkurtos bazės pool'as
  * @returns {{system: {get: Function, update: Function, remove: Function}}}
  */
-function sukurti(pool) {
+/**
+ * ⚠️ KIEKVIENA KONSTRUKCIJOS PARINKTIS TURI DEKLARUOTĄ SPRENDIMĄ (#157, PR-5; Codex #304).
+ *
+ * Trečias kartas iš eilės, kai šis adapteris atsiliko nuo `postgresStore`: PR-3 numesti
+ * parašai, PR-5 antra būtinų metodų sąrašo kopija, dabar — saugyklos, be kurių DR replay
+ * su bet kokia external eilute krenta `parinktiArtefaktuSaugykla()` viduje.
+ *
+ * Taškinis taisymas („perduokim ir saugyklas") uždarytų trečią atvejį ir paliktų
+ * ketvirtą. Šaknis yra ta, kad adapteris STATO store'ą, tad kiekviena nauja parinktis jam
+ * yra nauja skola. Struktūrinio taisymo (adapteris gauna JAU SUKONFIGŪRUOTĄ store'ą)
+ * šiandien padaryti negalima: gamybinio surinkimo, iš kurio kvietėjas jį gautų, dar nėra
+ * — tai PR-7 („prijungimas `initializePostgres()` viduje"). Užrašyta, o ne apeita
+ * tyliai (§19.3).
+ *
+ * Todėl mechanizmas: aibė ateina iš `postgresStore`, o čia kiekvienas jos vardas turi
+ * EKSPLICITINĮ sprendimą. Atsiradus ketvirtai parinkčiai, `sukurti()` kris — ne DR
+ * replay viduryje, o konstrukcijos metu, su vardu.
+ */
+const PARINKCIU_SPRENDIMAI = Object.freeze({
+  /** Perduodama: atkurtoje bazėje gali būti `fs` ir `s3` eilučių vienu metu. */
+  artifactStores: "perduodama",
+  /** Perduodama: vieno tipo saugykla yra tas pats klausimas siauresne forma. */
+  artifactStore: "perduodama",
+  /**
+   * NEPERDUODAMA SĄMONINGAI: replay tik ŠALINA. Rašymo saugykla atkurtoje bazėje
+   * reikštų, kad DR kelias gali kurti naujus artefaktus — o jis to daryti negali.
+   */
+  rasymoSaugykla: "nenaudojama-replay-tik-salina",
+});
+
+/**
+ * NEPILNA KONFIGŪRACIJA ATMETAMA PRIEŠ PIRMĄ REPLAY ŽINGSNĮ (#157, PR-5; Codex #304).
+ *
+ * ⚠️ KRITIMAS VIDURYJE YRA BLOGIAUSIA IŠ TRIJŲ GALIMYBIŲ. Be šios patikros DR replay su
+ * external eilute nueina iki `parinktiArtefaktuSaugykla()` ir krenta ten — dalis job'ų
+ * jau apdorota, replay pažymimas kritiniu, o operatorius mato klaidą apie „neregistruotą
+ * `storage_type`" viduryje procedūros, kurios apimtis jam nebeaiški.
+ *
+ * Patikra yra AIBIŲ palyginimas: kokių tipų eilučių bazėje YRA prieš tai, kokių saugyklų
+ * adapteriui PADUOTA. Ji nieko netrina ir nieko nekeičia.
+ *
+ * ⚠️ `inline` NEREIKALAUJA SAUGYKLOS: turinys gyvena eilutėje ir dingsta kartu su ja.
+ */
+async function paruosti(pool, parinktys = {}) {
+  const adapteris = sukurti(pool, parinktys);
+
+  const { rows } = await pool.query(
+    `SELECT DISTINCT storage_type FROM job_results WHERE storage_type <> 'inline'
+     UNION
+     SELECT DISTINCT storage_type FROM job_result_attempts`
+  );
+
+  const turimi = new Set([
+    ...Object.keys((parinktys && parinktys.artifactStores) || {}),
+    ...(parinktys && parinktys.artifactStore && parinktys.artifactStore.backend
+      ? [parinktys.artifactStore.backend]
+      : []),
+  ]);
+
+  const truksta = rows.map((r) => r.storage_type).filter((tipas) => tipas && !turimi.has(tipas));
+
+  if (truksta.length > 0) {
+    throw new TypeError(
+      `restoredJobStore: atkurtoje bazėje yra \`${truksta.join("`, `")}\` eilučių, bet šioms ` +
+        "saugykloms adapteris negavo. Replay pašalintų DB eilutes, o objektai liktų — " +
+        "tad procedūra stabdoma PRIEŠ pirmą žingsnį, ne viduryje."
+    );
+  }
+
+  return adapteris;
+}
+
+function sukurti(pool, { artifactStores = null, artifactStore = null } = {}) {
   if (!pool || typeof pool.query !== "function") {
     throw new TypeError("restoredJobStore: reikia atkurtos bazės pool'o.");
   }
 
-  const store = createPostgresStore(pool);
+  const nedeklaruotos = KONSTRUKCIJOS_PARINKTYS.filter((v) => !PARINKCIU_SPRENDIMAI[v]);
+  if (nedeklaruotos.length > 0) {
+    throw new TypeError(
+      `restoredJobStore: \`postgresStore\` turi parinktis be sprendimo: \`${nedeklaruotos.join("`, `")}\`. ` +
+        "Adapteris privalo pasakyti, ką su kiekviena daro — kitaip nauja parinktis tyliai " +
+        "dingsta, o DR replay krenta viduryje."
+    );
+  }
+
+  const store = createPostgresStore(pool, { artifactStores, artifactStore });
 
   const truksta = BUTINI.filter((metodas) => typeof store[metodas] !== "function");
   if (truksta.length > 0) {
@@ -90,4 +171,4 @@ function sukurti(pool) {
   return { system };
 }
 
-module.exports = { BUTINI, sukurti };
+module.exports = { BUTINI, sukurti, paruosti };
