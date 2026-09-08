@@ -122,6 +122,39 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
        * ⚠️ TAI ATSTATYMAS, NE APTIKIMAS. Verifikacija, pranešanti apie būseną,
        * kurios niekas negali ištaisyti, būtų runbook'o aklavietė.
        */
+      /**
+       * ⚠️ „JOB'O NĖRA" NEREIŠKIA „ARTEFAKTŲ NĖRA" (#157, PR-5; Codex #304 antras raundas).
+       *
+       * `job_result_attempts` SĄMONINGAI neturi FK į `jobs` — būtent tam, kad išgyventų
+       * nutrūkusį ištrynimą. Vadinasi registro eilutė BE `jobs` eilutės yra TEISĖTA
+       * būsena, ne anomalija: taip atrodo bazė, kurioje ištrynimas nutrūko po eilutės
+       * pašalinimo, bet prieš objektų šalinimą.
+       *
+       * Iki šito ši šaka žymėdavo žymą išspręsta ir `deleteResultArtifacts()` NEKVIESDAVO
+       * niekada — cutover verifikacija matydavo uždarytą žymą, o transkripcija likdavo.
+       *
+       * ⚠️ TAI D ŠAKNIS APVERSTA. D sakė „kiekvienas job'o pabaigos kelias eina per
+       * registrą"; čia — kelias, kuris `jobs` NĖ NELIEČIA, irgi privalo eiti per registrą.
+       * Praėjusio raundo inventorius jos nepagavo, nes buvo išvestas iš `DELETE FROM jobs`
+       * kvietėjų.
+       */
+      const artefaktai = await store.system.deleteResultArtifacts(zyma.jobId);
+
+      if (artefaktai === null || artefaktai.nepavyko.length > 0) {
+        /**
+         * ⚠️ ŽYMA LIEKA ATVIRA. Uždaryti ją nepašalinus objektų reikštų tą patį melą,
+         * tik kitu keliu: galutinumas užfiksuotas, o duomenys liko.
+         */
+        nesekmes.push({
+          jobId: zyma.jobId,
+          priezastis:
+            artefaktai === null
+              ? "saugykla nepalaiko deleteResultArtifacts()"
+              : artefaktai.nepavyko.map((n) => `${n.storageKey}: ${n.priezastis}`).join("; "),
+        });
+        continue;
+      }
+
       jauNebuvo.push(zyma.jobId);
 
       const esama = await tombstones.get(zyma.jobId);
