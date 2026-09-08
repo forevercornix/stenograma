@@ -498,6 +498,95 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     );
   });
 
+  await t.test("ŠLAVIMAS: trys verdiktai prieš tikrą DB ir tikrą failų sistemą", async () => {
+    /**
+     * ⚠️ VIENETINIAI TESTAI TIKRINA VERDIKTŲ LOGIKĄ SU DUBLIU (`sweepVerdiktai`); čia
+     * tikrinama, kad ta pati logika veikia su TIKRA saugykla ir TIKRU registru — t. y.
+     * kad zondas randa būtent tuos failus, kuriuos palieka tikras nutrūkęs rašymas.
+     */
+    const { laikinasVardas } = require("../utils/artifactStore/fsStore");
+
+    /** 1. `nebuvo`: eilutė yra, objekto nėra nė vienoje pusėje. */
+    const idA = await naujasJobas();
+    const a = attemptRegistry.naujasBandymas();
+    const raktasA = attemptRegistry.bandymoRaktas(idA, a);
+    await attemptRegistry.registruoti(pool, { attemptId: a, jobId: idA, storageType: "fs", storageKey: raktasA });
+
+    /** 2. `pasalinta` nutrūkus PRIEŠ `rename`: tik laikinas failas. */
+    const idB = await naujasJobas();
+    const b = attemptRegistry.naujasBandymas();
+    const raktasB = attemptRegistry.bandymoRaktas(idB, b);
+    await attemptRegistry.registruoti(pool, { attemptId: b, jobId: idB, storageType: "fs", storageKey: raktasB });
+    const laikinasB = path.join(saknis, path.dirname(raktasB), laikinasVardas(raktasB));
+    await fsp.mkdir(path.dirname(laikinasB), { recursive: true });
+    await fsp.writeFile(laikinasB, "{}", { mode: 0o600 });
+
+    /** 3. `pasalinta` nutrūkus PO `rename`: tik galutinis objektas. */
+    const idC = await naujasJobas();
+    const c = await nutrukesBandymas(idC, { text: "po rename" });
+
+    const verdiktai = await store.sweepResultArtifacts([
+      { attempt_id: a, storage_type: "fs", storage_key: raktasA },
+      { attempt_id: b, storage_type: "fs", storage_key: raktasB },
+      { attempt_id: c.attemptId, storage_type: "fs", storage_key: c.raktas },
+    ]);
+
+    assert.deepEqual(
+      verdiktai.map((v) => v.verdiktas),
+      ["nebuvo", "pasalinta", "pasalinta"],
+      JSON.stringify(verdiktai)
+    );
+    assert.equal(await fsp.stat(laikinasB).catch(() => null), null, "laikinas failas pašalintas");
+    assert.equal(await saugykla.head(c.raktas), null, "galutinis objektas pašalintas");
+  });
+
+  await t.test("ŠLAVIMAS: `pazeidimas` NEŠALINA nė vieno objekto", async () => {
+    /**
+     * ⚠️ SU ATTEMPT-UNIQUE RAKTAIS ŠI BŪSENA NEĮMANOMA, ir būtent todėl ji yra signalas.
+     * Atkuriama tiesiogiai — kitaip jos nepamatytum, kol schema nepasikeis.
+     */
+    const { laikinasVardas } = require("../utils/artifactStore/fsStore");
+
+    const id = await naujasJobas();
+    const bandymas = await nutrukesBandymas(id, { text: "galutinis" });
+    const laikinas = path.join(saknis, path.dirname(bandymas.raktas), laikinasVardas(bandymas.raktas));
+    await fsp.writeFile(laikinas, "{}", { mode: 0o600 });
+
+    const [verdiktas] = await store.sweepResultArtifacts([
+      { attempt_id: bandymas.attemptId, storage_type: "fs", storage_key: bandymas.raktas },
+    ]);
+
+    assert.equal(verdiktas.verdiktas, "pazeidimas");
+    assert.ok(await saugykla.head(bandymas.raktas), "galutinis objektas privalo LIKTI");
+    assert.ok(await fsp.stat(laikinas).catch(() => null), "laikinas failas privalo LIKTI");
+
+    /** Karantinas: pirmas kartas grąžina eilutę, antras — nieko. */
+    const pirmas = await store.pazymetiKarantina([bandymas.attemptId]);
+    assert.equal(pirmas.length, 1, "pirmas kartas karantinuoja");
+    const antras = await store.pazymetiKarantina([bandymas.attemptId]);
+    assert.deepEqual(antras, [], "antras kartas TYLI — pranešimas vienkartinis");
+
+    /** Bet eilutė lieka MATOMA suvestinėje, kol operatorius ją uždaro. */
+    assert.ok((await store.karantinuotuSkaicius()) >= 1, "karantinas matomas, kol egzistuoja");
+
+    /** Ir kandidatų predikatas jos nebeima — veiksmas nekartojamas. */
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE attempt_id = $1", [
+      bandymas.attemptId,
+    ]);
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+    assert.ok(
+      !kandidatai.some((k) => k.attempt_id === bandymas.attemptId),
+      "karantinuota eilutė nebėra kandidatė"
+    );
+
+    await saugykla.delete(bandymas.raktas);
+    await fsp.rm(laikinas, { force: true });
+  });
+
   await t.test("`eraseJob()` per fasado paviršių nueina iki saugyklos", async () => {
     /**
      * ⚠️ ANKSTESNI SUBTESTAI TIKRINA STORE'Ą; ŠIS — LAIDĄ.

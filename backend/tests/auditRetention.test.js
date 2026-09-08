@@ -660,3 +660,84 @@ test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION
     jobStore.listExpired = originalus.listExpired;
   }
 });
+
+test("#157 PR-5: žymos KITOJE bazėje → šlavimas NEVYKDOMAS, `resultAttempts: null`", async () => {
+  /**
+   * ⚠️ SĄLYGA 3a: ŽINGSNIO LYGIO FAIL-CLOSED, NE N PRALEISTŲ EILUČIŲ.
+   *
+   * Be žymų šakos retencijos predikatas apsaugotų NULĮ nereferencuotų objektų (pirmoji
+   * šaka gina tik referencuotus — būtent tuos, kurių šlavėjas neliečia). Todėl žingsnis
+   * stabdomas VISAS, o suvestinėje tai `null`, ne `0`: nulis reikštų „nieko nebuvo", o
+   * čia reikšmė yra „nežinau, ar buvo".
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const tikrasTapatybe = tombstones.jungtiesTapatybe;
+  const tikrasJobTapatybe = jobStore.system.jungtiesTapatybe;
+  const tikrasValytini = jobStore.system.valytiniBandymai;
+  const tikrasListExpired = jobStore.listExpired;
+
+  /** DVI SKIRTINGOS bazės — abi „postgres", tad vardų palyginimas šito nepamatytų. */
+  tombstones.jungtiesTapatybe = () => ({ host: "db-a", port: 5432, database: "stenograma" });
+  jobStore.system.jungtiesTapatybe = async () => ({ host: "db-b", port: 5432, database: "stenograma" });
+
+  let kandidatuKlausta = false;
+  jobStore.system.valytiniBandymai = async () => {
+    kandidatuKlausta = true;
+    return { kandidatai: [], praleista: 0 };
+  };
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, null, "`null` reiškia NEVYKDYTA, ne „nieko nebuvo“");
+    assert.equal(kandidatuKlausta, false, "žingsnis stabdomas PRIEŠ kandidatų užklausą");
+  } finally {
+    tombstones.jungtiesTapatybe = tikrasTapatybe;
+    jobStore.system.jungtiesTapatybe = tikrasJobTapatybe;
+    jobStore.system.valytiniBandymai = tikrasValytini;
+    jobStore.listExpired = tikrasListExpired;
+  }
+});
+
+test("#157 PR-5: KONTROLĖ — ta pati bazė leidžia šlavimą", async () => {
+  /**
+   * Be šios kontrolės ankstesnis testas būtų tenkinamas ir šlavėjo, kuris NIEKADA
+   * nedirba — o „viską praleidžiantis" šlavėjas atrodytų kaip saugus.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({ kandidatai: [], praleista: 0 });
+  jobStore.system.sweepResultArtifacts = async () => [];
+  jobStore.system.karantinuotuSkaicius = async () => 0;
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+    assert.equal(summary.resultAttempts, 0, "vykdyta, bet kandidatų nebuvo — tai NULIS, ne `null`");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
