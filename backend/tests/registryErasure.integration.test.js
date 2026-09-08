@@ -688,7 +688,16 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     const erasureReplay = require("../utils/erasureReplay");
     const tombstones = require("../utils/deletionTombstones");
 
-    await tombstones._clearForTests();
+    /**
+     * ⚠️ ŽYMOS TURI GYVENTI TOJE PAČIOJE BAZĖJE KAIP REGISTRAS. Fasadas jungiasi pagal
+     * `DATABASE_URL`, o šis failas dirba su savo testine baze — be nukreipimo
+     * `erasure_marks` lentelės ten tiesiog nėra (CI `34273046910`).
+     */
+    await tombstones.shutdown().catch(() => {});
+    await tombstones.init({ ...process.env, DATABASE_URL: DB_URL });
+    t.after(async () => {
+      await tombstones.shutdown().catch(() => {});
+    });
 
     /** Job'as, kurio `jobs` eilutės nebėra, bet registre liko ĮSIPAREIGOTA eilutė. */
     const orphanJobId = "99999999-8888-7777-6666-555555555555";
