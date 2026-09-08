@@ -587,6 +587,61 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await fsp.rm(laikinas, { force: true });
   });
 
+  await t.test("SVETIMAS adresas NEŠALINAMAS: job'o A ištrynimas neliečia job'o B rezultato", async () => {
+    /**
+     * ⚠️ REGISTRAS TAPO DESTRUKTYVAUS VEIKSMO ĮĖJIMU (Codex, #304 / F).
+     *
+     * Iki šiol jis buvo ATRANDAMUMO mechanizmas — sako, kur ieškoti. Kaip destruktyvaus
+     * veiksmo įėjimas jis reikalauja stipresnės garantijos, nei buvo suprojektuota:
+     * schema `(job_id, storage_key)` unikalumo nereikalauja, o attempt-unique raktai
+     * garantuoja tik tai, kad MES nesukursime dublikato — ne kad jo nebus po atkūrimo.
+     *
+     * Scenarijus pasiekiamas ne per kodo klaidą, o per NEKONSISTENTIŠKUS metaduomenis:
+     * eilutes, atkurtas iš skirtingų momentų arba taisytas ranka.
+     */
+    const a = await naujasJobas();
+    const b = await naujasJobas();
+
+    /** B turi GYVĄ rezultatą. */
+    await store.finishAtomic(b, STATUS.COMPLETED, { result: { text: "gyvas B rezultatas" } });
+    const bEilute = await rezultatoEilute(b);
+    assert.ok(await saugykla.head(bEilute.storage_key), "kontrolė: B objektas yra");
+
+    /** O A registre turi eilutę, rodančią į TĄ PATĮ adresą. */
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [attemptRegistry.naujasBandymas(), a, bEilute.storage_type, bEilute.storage_key, attemptRegistry.BUSENA.ATMESTA]
+    );
+
+    const rezultatas = await store.deleteResultArtifacts(a);
+
+    assert.ok(await saugykla.head(bEilute.storage_key), "B objektas privalo LIKTI");
+    assert.equal(rezultatas.nepavyko.length, 1, JSON.stringify(rezultatas));
+    assert.match(
+      rezultatas.nepavyko[0].priezastis,
+      /NESAUGU/,
+      "klaidos klasė privalo sakyti „nesaugu\", ne „nepavyko\": pakartojimas to neišspręstų"
+    );
+    assert.deepEqual(rezultatas.pasalinti, [], "nieko nepašalinta");
+  });
+
+  await t.test("KONTROLĖ: SAVAS adresas šalinamas normaliai", async () => {
+    /**
+     * Be jos ankstesnis testas būtų tenkinamas ir patikros, kuri atmeta VISKĄ — o toks
+     * erasure atrodytų saugus, nepašalindamas nieko.
+     */
+    const id = await naujasJobas();
+    await store.finishAtomic(id, STATUS.COMPLETED, { result: { text: "savas" } });
+    const eilute = await rezultatoEilute(id);
+
+    const rezultatas = await store.deleteResultArtifacts(id);
+
+    assert.deepEqual(rezultatas.nepavyko, [], JSON.stringify(rezultatas));
+    assert.deepEqual(rezultatas.pasalinti, [eilute.storage_key]);
+    assert.equal(await saugykla.head(eilute.storage_key), null);
+  });
+
   await t.test("`eraseJob()` per fasado paviršių nueina iki saugyklos", async () => {
     /**
      * ⚠️ ANKSTESNI SUBTESTAI TIKRINA STORE'Ą; ŠIS — LAIDĄ.

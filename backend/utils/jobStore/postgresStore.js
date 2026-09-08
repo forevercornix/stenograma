@@ -2539,8 +2539,45 @@ function createPostgresStore(
     return { laikinas, galutinis };
   }
 
+  /**
+   * SVETIMI ADRESAI — FAIL-CLOSED PRIEŠ DESTRUKTYVŲ I/O (#157, PR-5; Codex F).
+   *
+   * ⚠️ KAS PASIKEITĖ IR KODĖL TO PAKAKO ANKSČIAU. Iki šiol registras buvo ATRANDAMUMO
+   * mechanizmas: jis sako, kur ieškoti. Dabar jis yra DESTRUKTYVAUS VEIKSMO ĮĖJIMAS, ir
+   * tam reikia stipresnės garantijos, nei buvo suprojektuota. Schema `(job_id, storage_key)`
+   * unikalumo nereikalauja, o attempt-unique raktai to nepadaro savaime: jie garantuoja,
+   * kad MES nesukursime dublikato, ne kad jo nebus PO ATKŪRIMO.
+   *
+   * ⚠️ PASIEKIAMA NE PER KODO KLAIDĄ, O PER NEKONSISTENTIŠKUS METADUOMENIS: eilutes,
+   * atkurtas iš skirtingų momentų, arba taisytas ranka. Tada job'o A ištrynimas gali
+   * pašalinti job'o B GYVĄ rezultatą — kryžminis duomenų praradimas.
+   *
+   * ⚠️ PREDIKATAS TAS PATS, KURĮ JAU TURI RETENCIJOS KANDIDATŲ UŽKLAUSA, tik kitoje
+   * pusėje: ten „ar šis adresas kur nors referencuotas" saugo eilutę nuo šlavimo, čia —
+   * objektą nuo ištrynimo. Antro predikato nekuriama.
+   *
+   * @returns {Promise<Set<string>>} adresai, kuriuos referencuoja KITAS job'as
+   */
+  async function svetimiAdresai(jobId, adresai) {
+    if (adresai.length === 0) return new Set();
+
+    const { rows } = await pool.query(
+      `SELECT storage_type, storage_key
+         FROM job_results
+        WHERE job_id <> $1
+          AND storage_key IS NOT NULL
+          AND (storage_type, storage_key) IN (
+                SELECT * FROM unnest($2::text[], $3::text[])
+              )`,
+      [String(jobId), adresai.map((a) => a.storageType), adresai.map((a) => a.storageKey)]
+    );
+
+    return new Set(rows.map((r) => `${r.storage_type}\u0000${r.storage_key}`));
+  }
+
   async function deleteResultArtifacts(jobId) {
     const artefaktai = await listResultArtifacts(jobId);
+    const svetimi = await svetimiAdresai(jobId, artefaktai);
     /**
      * ⚠️ `matyti` GRĄŽINAMA KVIETĖJUI, NE PAMIRŠTAMA (Codex, #304). Ši aibė yra
      * PRE-CHECK rezultatas; eilutės šalinimas privalo ją patikrinti dar kartą po
@@ -2551,6 +2588,23 @@ function createPostgresStore(
 
     for (const artefaktas of artefaktai) {
       let saugykla = null;
+
+      /**
+       * ⚠️ SUGADINTI METADUOMENYS BAIGIASI ATSISAKYMU TRINTI, NE KRYŽMINIU ŠALINIMU.
+       *
+       * Klaidos klasė čia sąmoningai kitokia nei „nepavyko": tai NESAUGU. „Nepavyko"
+       * kviečia pakartoti, o pakartojimas šio atvejo neišsprendžia — jis kiekvieną kartą
+       * bandytų ištrinti svetimą objektą.
+       */
+      if (svetimi.has(`${artefaktas.storageType}\u0000${artefaktas.storageKey}`)) {
+        rezultatas.nepavyko.push({
+          storageKey: artefaktas.storageKey,
+          priezastis:
+            "NESAUGU: šį adresą referencuoja KITAS job'as — nekonsistentiški metaduomenys, " +
+            "šalinimas atmestas",
+        });
+        continue;
+      }
 
       try {
         saugykla = parinktiArtefaktuSaugykla(artefaktas.storageType);
