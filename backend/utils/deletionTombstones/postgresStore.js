@@ -128,6 +128,68 @@ async function probeBarrierWithClient(vykdytojas) {
   }
 }
 
+/**
+ * NEIŠSPRĘSTOS ŽYMOS SĄLYGA — SQL POSAKIS KVIETĖJO UŽKLAUSAI (#157, PR-5).
+ *
+ * ⚠️ KODĖL POSAKIS, O NE ATSAKYMAS.
+ *
+ * Bandymų registro šlavėjui reikia predikato „šis job'as neturi neišspręstos žymos"
+ * TOJE PAČIOJE užklausoje, kurioje jis renka kandidatus: `erasure_marks` gyvena toje
+ * pačioje bazėje, tad vienas sakinys yra įmanomas, o du skaitymai paliktų langą, kuriame
+ * žyma spėtų atsirasti tarp patikros ir šalinimo. Tai ta pati TOCTOU forma, kurią 7.4e
+ * sprendžia `assertNotBarredWithClient()` — čia tik kita kryptis: ne „patikrink man", o
+ * „duok man sąlygą, kurią įdėsiu į savo `WHERE`".
+ *
+ * ⚠️ IR KODĖL ČIA, O NE KVIETĖJO MODULYJE. `erasure_marks` SQL neegzistuoja už šio
+ * katalogo ribų (`erasureMarks` tripwire per visą repo, #183). Autoritetas lieka vienas:
+ * lentelės vardą, stulpelį ir statuso reikšmę žino TIK šis modulis; kvietėjas gauna
+ * tekstą ir savo alias'ą.
+ *
+ * ⚠️ POSAKIS NETURI BIND PARAMETRŲ, IR TAI KONTRAKTAS, NE STILIUS. Kvietėjas savo `$1`,
+ * `$2` numeruoja pats; parametras posakyje tyliai sujauktų numeraciją, o klaida
+ * pasirodytų kaip nesusijęs tipo neatitikimas kitoje sakinio vietoje. Tikrina
+ * `erasureMarks` testas, ne vien šis sakinys.
+ *
+ * ⚠️ SVARSTYTAS IR ATMESTAS KETVIRTAS VARIANTAS: DB PUSĖS FUNKCIJA ARBA `VIEW`.
+ *
+ * Jis turi tas pačias savybes (vienas sakinys, lentelės vardas lieka modulyje) ir dvi
+ * papildomas: injekcijos paviršiaus nebūtų apskritai (alias validacija ir posakio testai
+ * taptų nereikalingi), o priklausomybė taptų matoma SCHEMOJE, ne tik JS importe.
+ *
+ * Atmestas dėl trijų priežasčių, ir nė viena nėra „taip paprasčiau":
+ *   1. migracija yra ISTORIJOS ĮRAŠAS — funkcijos kūnas taptų versijuojamu artefaktu,
+ *      kurio keitimas reikalautų naujos migracijos kiekvienam predikato patikslinimui,
+ *      o predikatas šiame cikle keitėsi jau du kartus (nuoroda -> nuoroda ARBA žyma);
+ *   2. `NOT EXISTS` inline planas gali būti geresnis nei funkcijos kvietimas EILUTEI —
+ *      matuota nebuvo, tad tai rizika, ne faktas, bet ji krypsta viena kryptimi;
+ *   3. atminties režimu (`pasirinktiBackend() === "memory"`) funkcijos nėra, tad
+ *      kvietėjas vis tiek turėtų antrą kelią — o du keliai yra tai, ko čia ir vengiama.
+ *
+ * ⚠️ Tai PIRMAS kartas šiame repo, kai SQL TEKSTAS keliauja tarp modulių, tad
+ * alternatyva užrašoma, o ne nutylima: kitas skaitytojas pagrįstai klaus, kodėl ne per
+ * schemą.
+ *
+ * @param {string} alias kvietėjo lentelės alias'as, kurio `job_id` lyginamas
+ * @returns {string} `NOT EXISTS (...)` posakis be parametrų
+ */
+function neisspresptosZymosSalyga(alias) {
+  /**
+   * ⚠️ TIPAS TIKRINAMAS PRIEŠ FORMĄ (rado testas, #157 PR-5).
+   *
+   * Pirmoji redakcija darė `String(alias)` ir tikrino formą — o `String(null)` yra
+   * `"null"`, kuris allowlist'ą PRAEINA. Rezultatas būtų `null.job_id` užklausoje:
+   * ne injekcija, bet klaida, pasirodanti kaip nesusijęs SQL gedimas toli nuo priežasties.
+   */
+  if (typeof alias !== "string" || !/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new TypeError("neisspresptosZymosSalyga: alias privalo būti paprastas vardas.");
+  }
+
+  return (
+    "NOT EXISTS (SELECT 1 FROM erasure_marks m " +
+    `WHERE m.job_id = ${alias}.job_id AND m.status <> '${TOMBSTONE_STATUS.DELETED}')`
+  );
+}
+
 async function assertNotBarredWithClient(klientas, jobId) {
   if (!klientas || typeof klientas.query !== "function") {
     throw new TypeError("assertNotBarred: reikia kviečiančiojo DB kliento (transakcijos).");
@@ -659,6 +721,7 @@ function createErasureMarkStore(pool) {
 
 module.exports = {
   STULPELIAI,
+  neisspresptosZymosSalyga,
   assertNotBarredWithClient,
   probeBarrierWithClient,
   createErasureMarkStore,

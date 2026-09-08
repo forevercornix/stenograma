@@ -703,9 +703,16 @@ module.exports = {
       }
       return store.update(id, patch);
     },
-    remove: async (id) => {
+    /**
+     * ⚠️ `nustatymai` PERDUODAMI, NE NUMETAMI (#157, PR-5; Codex #304).
+     *
+     * Būtent siaurinimas adapteryje nužudė `{ hydrate: false }` PR-3 metu. Čia tas pats
+     * pavojus: `{ tiketiniAdresai }` yra artefaktų aibės CAS, ir be jo eilutė būtų
+     * pašalinta neatsižvelgus į bandymą, įsipareigotą po enumeracijos.
+     */
+    remove: async (id, nustatymai = {}) => {
       await ensureInit();
-      return store.remove(id);
+      return store.remove(id, nustatymai);
     },
 
     /**
@@ -949,6 +956,80 @@ module.exports = {
       await ensureInit();
       return typeof store.listReferencedStorageKeys === "function"
         ? store.listReferencedStorageKeys()
+        : null;
+    },
+    /**
+     * VISOS job'o rezultato artefaktų nuorodos — erasure ir šlavėjui (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU", ne „nėra". Ta pati fail-safe forma kaip
+     * `listReferencedStorageKeys()`: saugykla, kuri metodo neturi, negali leisti
+     * kvietėjui nuspręsti, kad trinti nėra ko. `[]` grąžina tik tie backend'ai, kuriems
+     * tai FAKTAS (inline-only saugojimas), ir jie tą užrašo pas save.
+     */
+    listResultArtifacts: async (jobId) => {
+      await ensureInit();
+      return typeof store.listResultArtifacts === "function"
+        ? store.listResultArtifacts(jobId)
+        : null;
+    },
+    /**
+     * Rezultato artefaktų šalinimas — erasure kelias (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU, AR PAŠALINTA". Erasure privalo tai laikyti KRITINE
+     * nesėkme, ne no-op: „ištrinta" be objekto pašalinimo yra būtent tas melas,
+     * kurio #157 riba draudžia („dalinis object-storage gedimas negali būti
+     * raportuojamas kaip sėkmingas galutinis ištrynimas").
+     */
+    /**
+     * Šlavimo verdiktai — retencijos kelias (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU". Šlavėjas tai privalo laikyti ŽINGSNIO sustabdymu, ne
+     * tuščiu rezultatu: nulis nušluotų reiškia „nieko nebuvo", o `null` — „nežinau, ar
+     * buvo". Ta pati riba kaip `listResultArtifacts()`.
+     */
+    /**
+     * Šlavimo kandidatai — retencijos predikatas (#157, PR-5, sąlyga 3).
+     *
+     * ⚠️ `null` = „NEŽINAU": saugykla be registro negali pasakyti, kad kandidatų nėra.
+     */
+    /** Efektyvi jungties tapatybė — „ta pati bazė?", ne „tas pats vardas" (#157, PR-5). */
+    jungtiesTapatybe: async () => {
+      await ensureInit();
+      return typeof store.jungtiesTapatybe === "function" ? store.jungtiesTapatybe() : null;
+    },
+    valytiniBandymai: async (nustatymai) => {
+      await ensureInit();
+      return typeof store.valytiniBandymai === "function"
+        ? store.valytiniBandymai(nustatymai)
+        : null;
+    },
+    /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
+    pasalintiBandymus: async (attemptIds, nustatymai = {}) => {
+      await ensureInit();
+      return typeof store.pasalintiBandymus === "function"
+        ? store.pasalintiBandymus(attemptIds, nustatymai)
+        : null;
+    },
+    /** Karantinas: vienkartinis pranešimas apie invarianto pažeidimą (#157, PR-5). */
+    pazymetiKarantina: async (attemptIds) => {
+      await ensureInit();
+      return typeof store.pazymetiKarantina === "function" ? store.pazymetiKarantina(attemptIds) : [];
+    },
+    /** Kiek eilučių karantine — matoma suvestinėje, kol jos egzistuoja (#157, PR-5). */
+    karantinuotuSkaicius: async () => {
+      await ensureInit();
+      return typeof store.karantinuotuSkaicius === "function" ? store.karantinuotuSkaicius() : 0;
+    },
+    sweepResultArtifacts: async (kandidatai) => {
+      await ensureInit();
+      return typeof store.sweepResultArtifacts === "function"
+        ? store.sweepResultArtifacts(kandidatai)
+        : null;
+    },
+    deleteResultArtifacts: async (jobId) => {
+      await ensureInit();
+      return typeof store.deleteResultArtifacts === "function"
+        ? store.deleteResultArtifacts(jobId)
         : null;
     },
     listPendingAudioCleanups: async (limit) => {

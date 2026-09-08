@@ -325,7 +325,7 @@ function _patikrintiMerge(merge) {
  * paties vakuumo, tik be jokio ženklo. Fail-closed čia pigesnis už bet kokį
  * numatytąjį elgesį.
  */
-async function replay({ merge, vykdytojas, actor = null }) {
+async function replay({ merge, vykdytojas, actor = null, artifactStores = null }) {
   _patikrintiMerge(merge);
 
   if (!vykdytojas || typeof vykdytojas.query !== "function") {
@@ -336,7 +336,15 @@ async function replay({ merge, vykdytojas, actor = null }) {
     );
   }
 
-  const store = restoredJobStore.sukurti(vykdytojas);
+  /**
+   * ⚠️ NEPILNA KONFIGŪRACIJA ATMETAMA ČIA, NE REPLAY VIDURYJE (#157, PR-5).
+   *
+   * `paruosti()` palygina, kokių `storage_type` eilučių atkurtoje bazėje YRA, su tuo,
+   * kokias saugyklas adapteris gavo. Šiandien saugyklų niekas neperduoda (prijungimas —
+   * PR-7), tad bazė su external eilutėmis sustabdo procedūrą PRIEŠ pirmą žingsnį — ir
+   * tai teisinga: replay pašalintų DB eilutes, o objektai liktų.
+   */
+  const store = await restoredJobStore.paruosti(vykdytojas, artifactStores ? { artifactStores } : {});
   const rezultatas = await erasureReplay.replay({ zymos: merge.zymos, actor, store });
 
   if (rezultatas.nesekmes.length > 0) {
@@ -439,6 +447,7 @@ async function paleisti({
   env = process.env,
   leistiPasenusi = false,
   patvirtinimas = null,
+  artifactStores = null,
 }) {
   const merge = await sulieti({
     targetUrl,
@@ -449,7 +458,7 @@ async function paleisti({
     leistiPasenusi,
     patvirtinimas,
   });
-  const replayRez = await replay({ merge, vykdytojas, actor });
+  const replayRez = await replay({ merge, vykdytojas, actor, artifactStores });
   const reconcile = await suderinti({ replay: replayRez, targetUrl, actor, env });
   const verify = await patikrinti({ reconcile, targetUrl, env });
 

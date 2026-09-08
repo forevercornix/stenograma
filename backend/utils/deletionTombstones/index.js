@@ -699,4 +699,30 @@ module.exports = {
   get backend() {
     return store.backend;
   },
+
+  /**
+   * EFEKTYVI JUNGTIES TAPATYBĖ — „ta pati bazė?", ne „tas pats vardas" (#157, PR-5).
+   *
+   * ⚠️ VARDO PALYGINIMO NEUŽTENKA, IR TAI #245 PAGRINDINĖ PAMOKA. Du komponentai gali
+   * abu būti „postgres" ir rodyti į SKIRTINGAS bazes; tada `erasure_marks` skaitoma
+   * tuščia šalia `job_result_attempts`, ir žymų apsauga tyliai negina nieko — būtent ta
+   * apsauga, dėl kurios sąlyga 3a buvo įvesta.
+   */
+  /**
+   * ⚠️ IMAMA IŠ `_pool.options`, NE IŠ `env` (Codex, #304 antras raundas).
+   *
+   * Pirmoji redakcija perskaičiuodavo tapatybę iš KONFIGŪRACIJOS. Tai buvo tas pats
+   * defektas, tik perkeltas: vardo palyginimas -> konfigūracijos palyginimas, o reikėjo
+   * iki INICIJUOTO RYŠIO. `init(env)` gali gauti kitą aplinką nei `process.env` (testai,
+   * DR keliai, kelių bazių procesai), ir tada sargas lygintų ne tas jungtis — ir praeitų.
+   *
+   * Precedentas repo jau buvo: PostgreSQL job store tapatybę ima iš `_pool.options`.
+   * Klausimas yra „kur jungtis REALIAI eina", tad atsakymą turi duoti pati jungtis.
+   */
+  jungtiesTapatybe() {
+    if (store.backend !== "postgres" || !_pool || !_pool.options) return null;
+
+    const { jungtiesTapatybe: tapatybe } = require("../pgConnection");
+    return tapatybe(_pool.options);
+  },
 };

@@ -1000,3 +1000,39 @@ test("#183 KOPIJŲ HORIZONTAS: sumažintas nustatymas NESUTRUMPINA barjero", asy
     "žemesnė reikšmė horizonto NESUMAŽINA"
   );
 });
+
+test("#157 PR-5: external rezultatas laikomas ištrintu PAGAL FAKTĄ, ne pagal `jobRemoved`", async () => {
+  /**
+   * ⚠️ PER-ROW `storage_type`, NE PER-CONFIG (sąlyga 5).
+   *
+   * Iki #157 `transcript`/`protocol` gyveno `job_results.payload` viduje, tad
+   * `jobRemoved` buvo visas atsakymas. External eilutei tai TAMPA MELU: `jobs` ištrynimas
+   * neliečia S3/failų objekto. O našlaičių kelyje `jobRemoved` VISADA `false`, tad
+   * artefaktai būdavo raportuoti kaip LIKĘ net tada, kai objektas ką tik pašalintas.
+   *
+   * Tikrinama per PRODUKCINĮ kelią: `deleteJobArtefacts` -> `eraseJob`, o external
+   * pašalinimą imituoja saugykla, grąžinanti vieną pašalintą artefaktą.
+   */
+  await tombstones._clearForTests();
+  const job = await createJob();
+
+  const jobStore = require("../utils/jobStore");
+  const tikrasDelete = jobStore.system.deleteResultArtifacts;
+  jobStore.system.deleteResultArtifacts = async () => ({
+    pasalinti: ["results/j/a.json"],
+    jauNebuvo: [],
+    nepavyko: [],
+    matyti: [{ storageType: "fs", storageKey: "results/j/a.json" }],
+  });
+
+  try {
+    const rezultatas = await lifecycleService.deleteJobArtefacts(job, job.id, { actor: "sysadmin" });
+
+    assert.ok(
+      !(rezultatas.remaining || []).includes("transcript"),
+      `external objektas pasalintas - transcript negali buti likes: ${JSON.stringify(rezultatas)}`
+    );
+  } finally {
+    jobStore.system.deleteResultArtifacts = tikrasDelete;
+  }
+});

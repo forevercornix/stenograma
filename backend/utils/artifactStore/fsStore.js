@@ -62,6 +62,23 @@ const log = createLogger("artifact-fs");
  * (planas, „ATMESTAS VARIANTAS: turinio adresas"); čia maišomas ADRESAS, tad A2 riba
  * („raktas neišvedamas iš checksum'o") lieka galioti abiem kryptimis.
  *
+ * ⚠️ DETERMINIZMAS SUKŪRĖ PAVOJŲ, KURIO ANKSČIAU NEBUVO (#157, PR-5 peržiūra).
+ *
+ * Kol vardas buvo ATSITIKTINIS, galiojo netyčinė savybė: šlavėjas laikino failo negalėjo
+ * ištrinti, net jei būtų norėjęs — vardo nebuvo iš kur sužinoti. Padarius vardą
+ * apskaičiuojamą (dėl atrandamumo), atsirado ir priešinga kryptis: šlavėjas gali
+ * pašalinti VYKSTANČIO rašymo laikinąjį failą tarp `writeFile` ir `rename`. Registro
+ * eilutė sukuriama PRIEŠ `put()`, tad ilgai rašomas rezultatas visą tą laiką turi
+ * `pending` eilutę, kuri iš šalies atrodo kaip nutrūkusi.
+ *
+ * Rašytojas tada gautų `ENOENT` ties `rename` — arba, blogiau, `rename` pavyktų, o
+ * objektas būtų ne tas.
+ *
+ * Šiandien tai dengia 24 h horizontas, bet dengia ATSITIKTINAI, ne pagal konstrukciją:
+ * `revivalHorizonsMs()` atsako į klausimą „kada eilė gali prikelti darbą", ne „kiek gali
+ * trukti vienas rašymas". Dvi skirtingos trukmės, sutampančios tik dabar. Sąlyga, kurią
+ * tai uždeda šlavėjui, užrašyta plane (PR-5 įėjimo sąlyga 4a), o ne palikta horizontui.
+ *
  * ⚠️ DETERMINIZMAS SAUGUS TIK TODĖL, KAD RAKTAI YRA ATTEMPT-UNIQUE.
  *
  * Du rašytojai tam pačiam raktui vienu metu susidurtų ties `wx` (`EEXIST`), o ne tyliai
@@ -787,9 +804,66 @@ function createFsArtifactStore({ root } = {}) {
     return { backend: "fs", root: tikraSaknis };
   }
 
+  /**
+   * LAIKINOJO FAILO ZONDAS IR ŠALINIMAS — TIK ŠLAVĖJUI (#157, PR-5).
+   *
+   * ⚠️ KODĖL NE PER `head()` IR `delete()`. Laikinas vardas prasideda tašku, tad
+   * `patikrintiRakta()` jį ATMESTŲ: jis nėra teisėtas `ArtifactStore` raktas ir neturi
+   * juo tapti — kitaip kvietėjas galėtų jį rašyti, skaityti ir referencuoti. Zondas ima
+   * GALUTINĮ raktą ir pats išveda laikinojo vardą, tad išorėje laikinas adresas
+   * neegzistuoja kaip adresas.
+   *
+   * ⚠️ `turiLaikinaji` DEKLARUOJAMAS, NE SPĖJAMAS. Kvietėjas neklausia
+   * `typeof ... === "function"`: tyli šaka reikštų, kad backend'as, praradęs metodą,
+   * atrodytų kaip backend'as be laikinojo etapo, ir pusė gedimo atvejų dingtų be signalo.
+   */
+  async function laikinasisZondas(raktas) {
+    const pilnas = await keliasSaugus(raktas);
+    const laikinas = path.join(path.dirname(pilnas), laikinasVardas(raktas));
+
+    try {
+      const st = await fsp.stat(laikinas);
+      return { yra: true, bytes: st.size };
+    } catch (klaida) {
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return { yra: false, bytes: null };
+      throw klaida;
+    }
+  }
+
+  async function pasalintiLaikinaji(raktas) {
+    const pilnas = await keliasSaugus(raktas);
+    const laikinas = path.join(path.dirname(pilnas), laikinasVardas(raktas));
+
+    try {
+      await fsp.rm(laikinas);
+    } catch (klaida) {
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return false;
+      throw klaida;
+    }
+
+    /**
+     * ⚠️ IŠTRYNIMAS PATVIRTINAMAS TIK PO KATALOGO `fsync` — LYGIAI KAIP `delete()`
+     * (Codex, #304).
+     *
+     * `rm()` grąžinta sėkmė reiškia, kad įrašas pašalintas iš katalogo BUFERIO, ne kad
+     * jis persistintas. Optimistinis `true` čia kerta tą pačią grandinę: šlavėjas
+     * uždaro registro eilutę -> maitinimo dingimas grąžina laikinąjį failą su
+     * transkripcija -> objekto neberodo NIEKAS, nes eilutės nebėra, o `list(prefix)`
+     * pagal A3 nėra.
+     *
+     * `delete()` šį `fsync` daro nuo #290 būtent šiam gedimo režimui; čia jis buvo
+     * praleistas, nes taisyklė buvo pritaikyta ten, kur apie ją buvo pranešta.
+     */
+    await sinchronizuotiKatalaga(path.dirname(pilnas));
+    return true;
+  }
+
   return {
     backend: "fs",
     root: saknis,
+    turiLaikinaji: true,
+    laikinasisZondas,
+    pasalintiLaikinaji,
     put,
     read,
     readStream,

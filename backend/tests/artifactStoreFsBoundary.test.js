@@ -626,3 +626,44 @@ test("zondas NEGALI užkliudyti artefakto: jo vardas raktu neišreiškiamas", ()
     );
   }
 });
+
+test("laikinojo failo šalinimas patvirtinamas TIK po katalogo `fsync`", async (t) => {
+  /**
+   * ⚠️ TA PATI TAISYKLĖ KAIP `delete()` (#290), PRITAIKYTA IR ČIA (Codex, #304).
+   *
+   * `rm()` grąžinta sėkmė reiškia, kad įrašas pašalintas iš katalogo BUFERIO, ne kad jis
+   * persistintas. Optimistinis `true` kerta ištrynimo grandinę: šlavėjas uždaro registro
+   * eilutę, o po maitinimo dingimo laikinas failas su transkripcija grįžta — ir jo
+   * neberodo niekas.
+   */
+  const { saknis, isvalyti } = await aplinka();
+  t.after(isvalyti);
+
+  const saugykla = createFsArtifactStore({ root: saknis });
+  const raktas = "results/joboo/fsync.json";
+  await saugykla.put("results/joboo/pirmas.json", { text: "šaknis" });
+
+  /** Laikinas failas paliekamas taip pat, kaip jį paliktų nutrūkęs procesas. */
+  await assert.rejects(
+    () => suGedimu({ sugadintiRename: true, sugadintiRm: true }, () => saugykla.put(raktas, { a: 1 })),
+    /EXDEV|suklastotas|pašalinti nepavyko/
+  );
+
+  let sinchronizuota = false;
+  const tikrasOpen = fsp.open;
+  fsp.open = async (kelias, veliavos, ...kita) => {
+    if (veliavos === "r") sinchronizuota = true;
+    return tikrasOpen(kelias, veliavos, ...kita);
+  };
+
+  try {
+    assert.equal(await saugykla.pasalintiLaikinaji(raktas), true, "kontrolė: laikinas failas buvo");
+  } finally {
+    fsp.open = tikrasOpen;
+  }
+
+  assert.equal(sinchronizuota, true, "sėkmė negali būti grąžinta be katalogo `fsync`");
+
+  /** KONTROLĖ: nesant failo `fsync` nereikalingas, ir grąžinama `false`. */
+  assert.equal(await saugykla.pasalintiLaikinaji(raktas), false);
+});

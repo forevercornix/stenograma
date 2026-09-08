@@ -80,6 +80,19 @@ async function _paruostiUzdarymui(jobId, status) {
  * @param {object} [opcijos.store] saugykla; numatytoji — `jobStore` fasadas
  * @returns {Promise<{apdorota: number, istrinta: string[], jauNebuvo: string[], nesekmes: Array<object>}>}
  */
+/**
+ * PAVIRŠIUS, KURIO REIKALAUJA REPLAY — ATSKIRAS NUO `eraseJob` (#157, PR-5; Codex H1).
+ *
+ * ⚠️ `jobErasure.BUTINI_SYSTEM_METODAI` atsako į klausimą „ko reikia `eraseJob()`", ir tai
+ * TEISINGAS šaltinis savo klausimui. Bet replay `!job` šaka `eraseJob()` NEKVIEČIA: ji
+ * pati šalina artefaktus ir pati uždaro registro eilutes, tad jos reikalavimai platesni.
+ *
+ * Vienas sąrašas dviem skirtingiems klausimams būtų ta pati klaida, tik atvirkščia: iki
+ * šiol ji reiškė atsiliekančią kopiją, čia reikštų per siaurą šaltinį. Todėl sąrašas
+ * ATSKIRAS ir eksportuojamas — adapteris ima abiejų sąjungą.
+ */
+const BUTINI_REPLAY_METODAI = Object.freeze(["get", "deleteResultArtifacts", "pasalintiBandymus"]);
+
 async function replay({ zymos, actor = null, store = jobStore } = {}) {
   const istrinta = [];
   const jauNebuvo = [];
@@ -122,7 +135,93 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
        * ⚠️ TAI ATSTATYMAS, NE APTIKIMAS. Verifikacija, pranešanti apie būseną,
        * kurios niekas negali ištaisyti, būtų runbook'o aklavietė.
        */
-      jauNebuvo.push(zyma.jobId);
+      /**
+       * ⚠️ „JOB'O NĖRA" NEREIŠKIA „ARTEFAKTŲ NĖRA" (#157, PR-5; Codex #304 antras raundas).
+       *
+       * `job_result_attempts` SĄMONINGAI neturi FK į `jobs` — būtent tam, kad išgyventų
+       * nutrūkusį ištrynimą. Vadinasi registro eilutė BE `jobs` eilutės yra TEISĖTA
+       * būsena, ne anomalija: taip atrodo bazė, kurioje ištrynimas nutrūko po eilutės
+       * pašalinimo, bet prieš objektų šalinimą.
+       *
+       * Iki šito ši šaka žymėdavo žymą išspręsta ir `deleteResultArtifacts()` NEKVIESDAVO
+       * niekada — cutover verifikacija matydavo uždarytą žymą, o transkripcija likdavo.
+       *
+       * ⚠️ TAI D ŠAKNIS APVERSTA. D sakė „kiekvienas job'o pabaigos kelias eina per
+       * registrą"; čia — kelias, kuris `jobs` NĖ NELIEČIA, irgi privalo eiti per registrą.
+       * Praėjusio raundo inventorius jos nepagavo, nes buvo išvestas iš `DELETE FROM jobs`
+       * kvietėjų.
+       */
+      const artefaktai = await store.system.deleteResultArtifacts(zyma.jobId);
+
+      if (artefaktai === null || artefaktai.nepavyko.length > 0) {
+        /**
+         * ⚠️ ŽYMA LIEKA ATVIRA. Uždaryti ją nepašalinus objektų reikštų tą patį melą,
+         * tik kitu keliu: galutinumas užfiksuotas, o duomenys liko.
+         */
+        nesekmes.push({
+          jobId: zyma.jobId,
+          priezastis:
+            artefaktai === null
+              ? "saugykla nepalaiko deleteResultArtifacts()"
+              : artefaktai.nepavyko.map((n) => `${n.storageKey}: ${n.priezastis}`).join("; "),
+        });
+        continue;
+      }
+
+      /**
+       * ⚠️ REGISTRO EILUTĖS ŠALINAMOS IR ČIA (Codex, #304 / E2).
+       *
+       * `remove()` finalizacija tai daro, bet ši šaka `remove()` nekviečia — ir be to
+       * `committed` orphan eilutė iš šlavėjo išbraukiama VISAM LAIKUI (kandidatų
+       * predikatas įsipareigotų neima), tad job ID ir adresas liktų neribotai PO
+       * sėkmingo atkūrimo. Ta pati privatumo klasė kaip `remove()` pusėje, tik kitame
+       * kelio gale.
+       *
+       * Šalinama TIK po patvirtinto fizinio šalinimo — eilutė yra vienintelis adresas.
+       */
+      const bandymuIds = (artefaktai.matyti || []).map((a) => a.attemptId).filter(Boolean);
+
+      if (bandymuIds.length > 0) {
+        /**
+         * ⚠️ `leistiIsipareigotus` — BE JO VALYMAS NEVEIKĖ SAVO PASKIRČIAI (Codex, H2).
+         *
+         * `pasalintiBandymus()` numatytai išbraukia `busena = 'committed'` — sargas,
+         * teisingas įprastame kelyje. Bet `committed` orphan eilutė ir BUVO tas atvejis,
+         * dėl kurio šis valymas pridėtas: `jobs` eilutės nebėra, nuorodos nebėra, o
+         * eilutė lieka įsipareigota amžiams.
+         *
+         * Čia sąlygos kitos ir jos patikrintos: `jobs` eilutės NĖRA (`!job` šaka) ir
+         * fizinis šalinimas PATVIRTINTAS (`nepavyko` tuščias). Tik tada įsipareigota
+         * eilutė yra šiukšlė, ne nuoroda.
+         *
+         * ⚠️ NULINĖ GRĄŽA NEBEIGNORUOJAMA: jei nepašalinta nė viena eilutė, kurios
+         * tikėjomės, žyma NEUŽDAROMA — kitaip uždarytume ištrynimą, kurio registro pusė
+         * liko neatlikta.
+         */
+        const pasalintaEiluciu = await store.system.pasalintiBandymus(bandymuIds, {
+          leistiIsipareigotus: true,
+        });
+
+        if (!pasalintaEiluciu) {
+          nesekmes.push({
+            jobId: zyma.jobId,
+            priezastis: "registro eilučių nepavyko pašalinti (nulinė grąža)",
+          });
+          continue;
+        }
+      }
+
+      /**
+       * ⚠️ KLASIFIKACIJA PAGAL TAI, KAS ĮVYKO (Codex, H3).
+       *
+       * Iki šito šaka visada rašė `jauNebuvo` ir `duomenu=nebuvo`, nors ką tik fiziškai
+       * pašalino rezultato objektus. Patvarus atkūrimo įrašas teigdavo, kad niekas
+       * nepašalinta — melas būtent apie jautrius duomenis.
+       */
+      const kasNorsPasalinta = (artefaktai.pasalinti || []).length > 0;
+
+      if (kasNorsPasalinta) istrinta.push(zyma.jobId);
+      else jauNebuvo.push(zyma.jobId);
 
       const esama = await tombstones.get(zyma.jobId);
       if (esama && esama.status !== tombstones.TOMBSTONE_STATUS.DELETED) {
@@ -145,7 +244,9 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
             success: true,
             outcome: "erasure_confirmed",
             actor: actor || undefined,
-            details: `zymosStatusas=${esama.status} duomenu=nebuvo`,
+            details: `zymosStatusas=${esama.status} duomenu=${
+              kasNorsPasalinta ? `istrinta:${artefaktai.pasalinti.length}` : "nebuvo"
+            }`,
           });
         } catch (klaida) {
           nesekmes.push({ jobId: zyma.jobId, priezastis: klaida.code || klaida.message });
@@ -314,4 +415,4 @@ async function replay({ zymos, actor = null, store = jobStore } = {}) {
   return { apdorota: zymos.length, istrinta, jauNebuvo, uzdarytosZymos, audioValymoSkola, nesekmes };
 }
 
-module.exports = { AUDITO_IVYKIS, replay };
+module.exports = { AUDITO_IVYKIS, BUTINI_REPLAY_METODAI, replay };

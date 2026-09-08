@@ -98,3 +98,144 @@ test("kiekvienas `BUTINI` metodas persiunčia VISUS argumentus", async () => {
     );
   }
 });
+
+test("#157 PR-5: adapteris DEKLARUOJA sprendimą kiekvienai `postgresStore` parinkčiai", () => {
+  /**
+   * ⚠️ TREČIAS KARTAS TA PAČIA PRIEŽASTIMI (Codex, #304).
+   *
+   * PR-3 adapteris numesdavo parašus, PR-5 turėjo antrą būtinų metodų sąrašo kopiją, o
+   * dabar — nebeperduodavo saugyklų, tad DR replay su bet kokia external eilute krito
+   * `parinktiArtefaktuSaugykla()` viduje.
+   *
+   * Šaknis ta pati: adapteris STATO store'ą, tad kiekviena nauja konstrukcijos parinktis
+   * jam yra nauja skola. Taškinis taisymas uždarytų trečią atvejį ir paliktų ketvirtą,
+   * todėl aibė ateina iš `postgresStore`, o adapteris privalo turėti sprendimą kiekvienam
+   * jos vardui. Šis testas krenta, kai atsiranda ketvirta parinktis.
+   */
+  const { KONSTRUKCIJOS_PARINKTYS } = require("../utils/jobStore/postgresStore");
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  assert.ok(KONSTRUKCIJOS_PARINKTYS.length > 0, "kontrolė: aibė netuščia");
+
+  /** Konstrukcija su tikru pool'o dubliu privalo praeiti — visos parinktys deklaruotos. */
+  assert.doesNotThrow(() => restoredJobStore.sukurti({ query: async () => ({ rows: [] }) }));
+});
+
+test("#157 PR-5: nepilna konfigūracija atmetama PRIEŠ pirmą replay žingsnį", async () => {
+  /**
+   * ⚠️ KRITIMAS VIDURYJE YRA BLOGIAUSIA IŠ TRIJŲ GALIMYBIŲ: dalis job'ų jau apdorota,
+   * replay pažymimas kritiniu, o operatorius mato klaidą apie neregistruotą
+   * `storage_type` procedūros viduryje.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const suExternal = {
+    query: async (sql) => {
+      if (/storage_type/.test(sql)) return { rows: [{ storage_type: "s3" }] };
+      return { rows: [] };
+    },
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(suExternal), /s3/);
+
+  /** KONTROLĖ: padavus tai saugyklai, paruošimas praeina. */
+  const adapteris = await restoredJobStore.paruosti(suExternal, {
+    artifactStores: { s3: { backend: "s3" } },
+  });
+  assert.equal(typeof adapteris.system.remove, "function");
+
+  /** KONTROLĖ: inline-only bazė saugyklų nereikalauja. */
+  const tikInline = { query: async () => ({ rows: [] }) };
+  assert.ok(await restoredJobStore.paruosti(tikInline));
+});
+
+test("#157 PR-5: preflight skaičiuoja REGISTRUOJAMAS saugyklas, ne raktus", async () => {
+  /**
+   * ⚠️ DEKLARACIJA NĖRA TIKROVĖ (Codex, #304).
+   *
+   * `{ s3: null }` turi raktą, bet `createPostgresStore()` tokios eilutės į žemėlapį
+   * nededa. Preflight, skaičiuojantis `Object.keys()`, praeidavo — o replay tada
+   * mutuodavo ankstesnius job'us ir kristų ties pirmu S3 artefaktu, t. y. darytų
+   * tiksliai tai, ką preflight turėjo užkirsti.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const suS3 = {
+    query: async (sql) => (/storage_type/.test(sql) ? { rows: [{ storage_type: "s3" }] } : { rows: [] }),
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(suS3, { artifactStores: { s3: null } }), /s3/);
+  await assert.rejects(() => restoredJobStore.paruosti(suS3, { artifactStores: { s3: {} } }), /s3/);
+
+  /** KONTROLĖ: tikra saugykla su `backend` praeina. */
+  assert.ok(await restoredJobStore.paruosti(suS3, { artifactStores: { s3: { backend: "s3" } } }));
+});
+
+test("#157 PR-5: bazė BE `job_result_attempts` — preflight nekrenta su `42P01`", async () => {
+  /**
+   * ⚠️ IRONIJA, KURIĄ CODEX PAGAVO: preflight, pridėtas kaip fail-before-first-step
+   * garantija, pats krisdavo prieš pirmą žingsnį — atkūrus iš kopijos, sukurtos PRIEŠ
+   * migraciją `1756300000000`.
+   *
+   * Pasirinktas antras variantas: trūkstama lentelė = TUŠČIA bandymų aibė. Tai faktas,
+   * ne prielaida: jei lentelės nėra, registro toje bazėje niekada ir nebuvo.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const senaKopija = {
+    query: async (sql) => {
+      if (/job_result_attempts/.test(sql)) {
+        const klaida = new Error('relation "job_result_attempts" does not exist');
+        klaida.code = "42P01";
+        throw klaida;
+      }
+      return { rows: [] };
+    },
+  };
+
+  assert.ok(await restoredJobStore.paruosti(senaKopija), "sena kopija be registro turi praeiti");
+});
+
+test("#157 PR-5: tuščia bandymų aibė NEAPGAUNA fail-closed garantijos", async () => {
+  /**
+   * ⚠️ Be šios kontrolės pirmasis testas būtų tenkinamas ir preflight'o, kuris po `42P01`
+   * nustoja tikrinti VISKĄ — o tada sena kopija su `s3` rezultatais praeitų, ir replay
+   * kristų ties pirmu artefaktu. Tuščia bandymų aibė reiškia „nėra ko šluoti", ne „nėra
+   * ko tikrinti".
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const senaKopijaSuS3 = {
+    query: async (sql) => {
+      if (/job_result_attempts/.test(sql)) {
+        const klaida = new Error('relation "job_result_attempts" does not exist');
+        klaida.code = "42P01";
+        throw klaida;
+      }
+      return { rows: [{ storage_type: "s3" }] };
+    },
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(senaKopijaSuS3), /s3/);
+});
+
+test("#157 PR-5: kita DB klaida NĖRA „lentelės nėra“", async () => {
+  /**
+   * ⚠️ Ta pati A šaknies taisyklė: neigiamas rezultatas priimamas TIK iš įrodymo, kuris jį
+   * nustato. `42P01` reiškia „lentelės nėra"; ryšio gedimas — ne.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const sugedusi = {
+    query: async (sql) => {
+      if (/job_result_attempts/.test(sql)) {
+        const klaida = new Error("connection terminated");
+        klaida.code = "57P01";
+        throw klaida;
+      }
+      return { rows: [] };
+    },
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(sugedusi), /connection terminated/);
+});

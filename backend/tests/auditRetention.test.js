@@ -587,3 +587,395 @@ test("SAUGYKLOS RIBA: `limit` riboja VIENĄ kvietimą, ne visą aibę", async ()
 
   await memoryStore.clear();
 });
+
+test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION_PURGE`", async () => {
+  /**
+   * ⚠️ TAS PATS DEFEKTAS ANTROJE SUVESTINĖJE (Codex, #304).
+   *
+   * Praeitą raundą jis buvo uždarytas `jobErasure` pusėje (`anythingRemoved` / `found`),
+   * bet `retentionSweeper` `removedAnything` naujos kategorijos nepažino. Ciklas,
+   * pašalinęs tik apleistus rezultato artefaktus, neišrašydavo kvito — automatinis
+   * asmens duomenų šalinimas be pėdsako.
+   *
+   * ⚠️ Taisyklė buvo pritaikyta PRANEŠTO AGREGATO, ne klasės lygmeniu. Repo yra TRYS
+   * sprendimo agregatai: `DATA_ERASED` emisija, `found` našlaičių kelyje ir šis.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  /**
+   * ⚠️ ĮRAŠAI SKAITOMI IŠ `auditLog`, ne perimant `rasytiAudita`: `retentionSweeper` jį
+   * destruktūrizuoja importo metu, tad modulio objekto pataisymas jo nepasiektų.
+   */
+
+  /**
+   * ⚠️ TAPATYBĖ, NE VARDAS: šlavėjas lygina EFEKTYVIĄ jungtį, tad dublis turi grąžinti
+   * tą pačią tapatybę abiem pusėm (Codex, #304).
+   */
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const tikrasTapatybe = tombstones.jungtiesTapatybe;
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+
+  const originalus = {
+    valytiniBandymai: jobStore.system.valytiniBandymai,
+    sweepResultArtifacts: jobStore.system.sweepResultArtifacts,
+    pasalintiBandymus: jobStore.system.pasalintiBandymus,
+    listExpired: jobStore.listExpired,
+    listReferencedStorageKeys: jobStore.system.listReferencedStorageKeys,
+  };
+
+  const tikrasJungtiesTapatybe = jobStore.system.jungtiesTapatybe;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({
+    kandidatai: [{ attempt_id: "a", storage_type: "fs", storage_key: "results/j/a.json" }],
+    praleista: 0,
+  });
+  jobStore.system.sweepResultArtifacts = async () => [
+    { attemptId: "a", storageKey: "results/j/a.json", verdiktas: "pasalinta" },
+  ];
+  jobStore.system.pasalintiBandymus = async () => 1;
+  jobStore.listExpired = async () => [];
+  jobStore.system.listReferencedStorageKeys = async () => null;
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, 1, "kontrolė: bandymas pašalintas");
+    assert.equal(summary.jobs, 0, "kontrolė: daugiau niekas nepašalinta");
+
+    const irasai = await auditLog.getAll();
+    const kvitas = irasai.find((i) => i.event === "RETENTION_PURGE");
+    assert.ok(kvitas, `kvitas privalo būti išrašytas: ${JSON.stringify(irasai)}`);
+    assert.match(kvitas.details, /attempts=1\/0\/0/, kvitas.details);
+  } finally {
+    tombstones.jungtiesTapatybe = tikrasTapatybe;
+    Object.assign(jobStore.system, {
+      valytiniBandymai: originalus.valytiniBandymai,
+      sweepResultArtifacts: originalus.sweepResultArtifacts,
+      pasalintiBandymus: originalus.pasalintiBandymus,
+      listReferencedStorageKeys: originalus.listReferencedStorageKeys,
+      jungtiesTapatybe: tikrasJungtiesTapatybe,
+    });
+    jobStore.listExpired = originalus.listExpired;
+  }
+});
+
+test("#157 PR-5: žymos KITOJE bazėje → šlavimas NEVYKDOMAS, `resultAttempts: null`", async () => {
+  /**
+   * ⚠️ SĄLYGA 3a: ŽINGSNIO LYGIO FAIL-CLOSED, NE N PRALEISTŲ EILUČIŲ.
+   *
+   * Be žymų šakos retencijos predikatas apsaugotų NULĮ nereferencuotų objektų (pirmoji
+   * šaka gina tik referencuotus — būtent tuos, kurių šlavėjas neliečia). Todėl žingsnis
+   * stabdomas VISAS, o suvestinėje tai `null`, ne `0`: nulis reikštų „nieko nebuvo", o
+   * čia reikšmė yra „nežinau, ar buvo".
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const tikrasTapatybe = tombstones.jungtiesTapatybe;
+  const tikrasJobTapatybe = jobStore.system.jungtiesTapatybe;
+  const tikrasValytini = jobStore.system.valytiniBandymai;
+  const tikrasListExpired = jobStore.listExpired;
+
+  /** DVI SKIRTINGOS bazės — abi „postgres", tad vardų palyginimas šito nepamatytų. */
+  tombstones.jungtiesTapatybe = () => ({ host: "db-a", port: 5432, database: "stenograma" });
+  jobStore.system.jungtiesTapatybe = async () => ({ host: "db-b", port: 5432, database: "stenograma" });
+
+  let kandidatuKlausta = false;
+  jobStore.system.valytiniBandymai = async () => {
+    kandidatuKlausta = true;
+    return { kandidatai: [], praleista: 0 };
+  };
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, null, "`null` reiškia NEVYKDYTA, ne „nieko nebuvo“");
+    assert.equal(kandidatuKlausta, false, "žingsnis stabdomas PRIEŠ kandidatų užklausą");
+  } finally {
+    tombstones.jungtiesTapatybe = tikrasTapatybe;
+    jobStore.system.jungtiesTapatybe = tikrasJobTapatybe;
+    jobStore.system.valytiniBandymai = tikrasValytini;
+    jobStore.listExpired = tikrasListExpired;
+  }
+});
+
+test("#157 PR-5: KONTROLĖ — ta pati bazė leidžia šlavimą", async () => {
+  /**
+   * Be šios kontrolės ankstesnis testas būtų tenkinamas ir šlavėjo, kuris NIEKADA
+   * nedirba — o „viską praleidžiantis" šlavėjas atrodytų kaip saugus.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({ kandidatai: [], praleista: 0 });
+  jobStore.system.sweepResultArtifacts = async () => [];
+  jobStore.system.karantinuotuSkaicius = async () => 0;
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+    assert.equal(summary.resultAttempts, 0, "vykdyta, bet kandidatų nebuvo — tai NULIS, ne `null`");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
+
+test("#157 PR-5: ciklas su TIK karantinuota eilute NEIŠRAŠO `success: true` kvito", async () => {
+  /**
+   * ⚠️ AGREGATAS SUPLAKĖ TRIS DALYKUS (Codex, #304 antras raundas).
+   *
+   * `praleista` ir `pažeidimai` reiškia „NEAPDOROTA", ne „pašalinta". Kadangi
+   * karantinuotos eilutės skaičiuojamos KIEKVIENAME cikle, vienas nuolatinis pažeidimas
+   * gamintų begalinį `success: true` kvitų srautą, per `AUDIT_MAX_ENTRIES` išstumiantį
+   * tikrą audito istoriją.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({ kandidatai: [], praleista: 0 });
+  jobStore.system.sweepResultArtifacts = async () => [];
+  /** Nuolatinis pažeidimas: eilutė karantine, nieko nepašalinta. */
+  jobStore.system.karantinuotuSkaicius = async () => 1;
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, 0, "kontrolė: nieko nepašalinta");
+    assert.equal(summary.resultAttemptsViolations, 1, "kontrolė: pažeidimas matomas");
+
+    const kvitas = (await auditLog.getAll()).find((i) => i.event === "RETENTION_PURGE");
+    assert.ok(kvitas, "įvykis vertas įrašo — operatorius privalo jį matyti");
+    assert.equal(kvitas.result, "failure", "bet tai NE sėkmingas retencijos ciklas");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
+
+test("#157 PR-5: viena sėkmė + vienas `nepavyko` tame pačiame cikle → kvitas NE sėkmingas", async () => {
+  /**
+   * ⚠️ NESĖKMĖ BUVO TIK LOGE (Codex, #304). Tame pačiame cikle pašalinus ką nors kita,
+   * kvitas sakydavo `success: true`, nors jautrus objektas liko. Logas nėra kvito dalis.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    pasalinti: jobStore.system.pasalintiBandymus,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({
+    kandidatai: [
+      { attempt_id: "a", storage_type: "fs", storage_key: "results/j/a.json" },
+      { attempt_id: "b", storage_type: "fs", storage_key: "results/j/b.json" },
+    ],
+    praleista: 0,
+  });
+  jobStore.system.sweepResultArtifacts = async () => [
+    { attemptId: "a", storageKey: "results/j/a.json", verdiktas: "pasalinta" },
+    { attemptId: "b", storageKey: "results/j/b.json", verdiktas: "nepavyko", priezastis: "EACCES" },
+  ];
+  jobStore.system.pasalintiBandymus = async () => 1;
+  jobStore.system.karantinuotuSkaicius = async () => 0;
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, 1, "kontrolė: viena sėkmė TIKRAI buvo");
+    /**
+     * ⚠️ KLASĖ, NE ADRESAS (Codex, #304 / G). `summary.errors` persistinamas kaip
+     * `RETENTION_PURGE.error`, o `auditLog` UUID ir santykinių raktų neredaguoja — tad
+     * SĖKMINGAS ištrynimas paliktų pseudonimizuotą įrašą, o NEPAVYKĘS — tiesioginį
+     * identifikatorių ir artefakto vietą. Būtent nesėkmės atveju duomenys dar yra.
+     */
+    assert.ok(
+      summary.errors.some((e) => e.includes("saugykla:teisiu-klaida")),
+      `nesėkmės KLASĖ privalo patekti į suvestinę: ${JSON.stringify(summary.errors)}`
+    );
+
+    const kvitoTekstas = JSON.stringify(summary.errors);
+    assert.ok(!kvitoTekstas.includes("results/j/b.json"), "kvite NEGALI būti artefakto adreso");
+    assert.ok(!kvitoTekstas.includes("EACCES"), "nei žalios saugyklos klaidos");
+
+    const kvitas = (await auditLog.getAll()).find((i) => i.event === "RETENTION_PURGE");
+    assert.equal(kvitas.result, "failure", "vienas likęs objektas paneigia viso ciklo sėkmę");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
+    jobStore.system.pasalintiBandymus = atsargos.pasalinti;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
+
+test("#157 PR-5: nepavykusio ištrynimo kvite NĖRA nei job ID, nei adreso", async () => {
+  /**
+   * ⚠️ KRYPTIS BUVO ATVIRKŠČIA, NEI TURĖTŲ (Codex, #304 / G).
+   *
+   * Sėkmingas ištrynimas palieka pseudonimizuotą įrašą (`subjectId: null`), o nepavykęs
+   * — tiesioginį identifikatorių ir artefakto vietą. Būtent nesėkmės atveju duomenys DAR
+   * EGZISTUOJA, tad kvitas yra blogiausia vieta jiems įvardyti.
+   *
+   * Tai tiesioginė praėjusio raundo taisymo pasekmė: „nesėkmė yra kvito dalis, ne tik
+   * logas" teisinga, bet kvitas turi kitą redagavimo režimą nei logas.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const JOB_ID = "11111111-2222-3333-4444-555555555555";
+  const RAKTAS = `results/${JOB_ID}/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.json`;
+
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({
+    kandidatai: [{ attempt_id: "a", storage_type: "fs", storage_key: RAKTAS }],
+    praleista: 0,
+  });
+  jobStore.system.sweepResultArtifacts = async () => [
+    { attemptId: "a", storageKey: RAKTAS, verdiktas: "nepavyko", priezastis: `EACCES ${RAKTAS}` },
+  ];
+  jobStore.system.karantinuotuSkaicius = async () => 0;
+  jobStore.listExpired = async () => [];
+
+  try {
+    await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    const kvitas = (await auditLog.getAll()).find((i) => i.event === "RETENTION_PURGE");
+    const visas = JSON.stringify(kvitas);
+
+    assert.ok(!visas.includes(JOB_ID), `kvite NEGALI būti job ID: ${kvitas.error}`);
+    assert.ok(!visas.includes("results/"), `kvite NEGALI būti artefakto adreso: ${kvitas.error}`);
+
+    /** KONTROLĖ: klasė ir kiekis YRA — kitaip kvitas nustotų būti naudingas. */
+    assert.match(kvitas.error, /saugykla:teisiu-klaida x1/, kvitas.error);
+    assert.equal(kvitas.result, "failure");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
+
+test("#157 PR-5: `NESAUGU` žymima `permanent`, ne `retryable`", async () => {
+  /**
+   * ⚠️ KETVIRTA KLASĖ ŠALIA `pašalinta` / `praleista` / `nepavyko` (peržiūra).
+   *
+   * `nepavyko` reiškia „bandyk vėliau"; `NESAUGU` reiškia „nebandyk, kol kas nors
+   * nepataisys metaduomenų". Pažymėjus jį atkartojamu, operatorius lauktų automatinio
+   * pakartojimo, kuris kiekvieną kartą bandytų ištrinti SVETIMĄ objektą — ta pati klaida,
+   * kurią ką tik ištaisėme `deletion_failed` lentelėje dokumentuose.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  await tombstones._clearForTests();
+
+  const kindai = [];
+  const tikrasComplete = tombstones.complete;
+  tombstones.complete = async (jobId, status, opcijos = {}) => {
+    kindai.push(opcijos.failureKind || null);
+    return { jobId, status };
+  };
+
+  const atsargos = {
+    claim: tombstones.claimForDeletion,
+    expired: jobStore.listExpired,
+    delete: jobStore.system.deleteResultArtifacts,
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+  };
+
+  tombstones.claimForDeletion = async () => ({ zyma: {}, vykdytojas: true });
+  jobStore.listExpired = async () => ["job-nesaugu"];
+  jobStore.system.deleteResultArtifacts = async () => ({
+    pasalinti: [],
+    jauNebuvo: [],
+    nepavyko: [{ storageKey: "results/x/y.json", priezastis: "NESAUGU: šį adresą referencuoja KITAS job'as" }],
+    matyti: [],
+  });
+  /** Bandymų šaka nevykdoma — tikrinama TIK pasenusių job'ų šaka. */
+  tombstones.jungtiesTapatybe = () => null;
+  jobStore.system.jungtiesTapatybe = async () => null;
+
+  try {
+    await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.ok(kindai.includes("permanent"), `NESAUGU privalo būti \`permanent\`: ${JSON.stringify(kindai)}`);
+    assert.ok(!kindai.includes("retryable"), "ir tikrai NE `retryable`");
+  } finally {
+    tombstones.complete = tikrasComplete;
+    tombstones.claimForDeletion = atsargos.claim;
+    jobStore.listExpired = atsargos.expired;
+    jobStore.system.deleteResultArtifacts = atsargos.delete;
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+  }
+});

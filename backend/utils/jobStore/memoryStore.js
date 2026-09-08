@@ -203,6 +203,77 @@ async function size() {
  * eilė, GPU trūkumas) buvo palaikomas orphan ir jo failas IŠTRINAMAS dar
  * apdorojant. Čia turi būti VISI jobai.
  */
+/**
+ * VISOS job'o REZULTATO artefaktų nuorodos (#157, PR-5).
+ *
+ * ⚠️ TUŠČIAS SĄRAŠAS ČIA YRA FAKTAS, NE PRIELAIDA.
+ *
+ * ``memory`` rezultatą persistina TIK savo įraše: external rašymo kelio (`rasymoSaugykla`,
+ * bandymų registras) šis backend'as neturi, tad „job'as neturi external artefaktų" yra
+ * konstrukcijos savybė, o ne spėjimas apie duomenis. Skirtumas svarbus: fasadas `null`
+ * traktuoja kaip „nežinau, netrink", o `[]` — kaip „nėra ko trinti", ir pastarasis čia
+ * teisingas.
+ *
+ * ⚠️ JEI KADA NORS ATSIRASTŲ EXTERNAL KELIAS MEMORY BACKEND'E, ŠIS METODAS PRIVALO
+ * PASIKEISTI KARTU. Kontrakto testas tikrina elgesį (po `finish()` su rezultatu sąrašas
+ * lieka tuščias), tad tylus praleidimas pasimatytų.
+ */
+async function listResultArtifacts() {
+  return [];
+}
+
+/**
+ * Rezultato artefaktų šalinimas — `memory` backend'e nėra ko šalinti (#157, PR-5).
+ *
+ * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: external rašymo kelio šis backend'as
+ * neturi, tad tuščias rezultatas yra konstrukcijos savybė. Metodas egzistuoja, kad
+ * erasure kelias neturėtų `typeof === "function"` šakos: tokia šaka reikštų tylų
+ * praleidimą ten, kur praleidimas yra BDAR klausimas.
+ */
+async function deleteResultArtifacts() {
+  return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+}
+
+/**
+ * Šlavimo verdiktai — `memory` backend'e kandidatų nėra (#157, PR-5).
+ *
+ * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: bandymų registro šis backend'as
+ * neturi, tad ir šluoti nėra ko. Metodas egzistuoja, kad šlavėjas neturėtų
+ * `typeof === "function"` šakos.
+ */
+/** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+/**
+ * Jungties tapatybė — `memory` backend'as jos NETURI (#157, PR-5).
+ *
+ * ⚠️ `null` REIŠKIA „NĖRA JUNGTIES", NE „NEŽINAU". Kvietėjas (retencijos šlavėjas) iš
+ * to daro teisingą išvadą: be jungties tapatybės negalima įrodyti, kad žymos ir bandymai
+ * yra toje pačioje bazėje, tad žingsnis nevykdomas.
+ */
+/** Registro nėra — karantinuoti nėra ko (#157, PR-5). */
+async function pazymetiKarantina() {
+  return [];
+}
+
+async function karantinuotuSkaicius() {
+  return 0;
+}
+
+function jungtiesTapatybe() {
+  return null;
+}
+
+async function valytiniBandymai() {
+  return { kandidatai: [], praleista: 0 };
+}
+
+async function pasalintiBandymus() {
+  return 0;
+}
+
+async function sweepResultArtifacts() {
+  return [];
+}
+
 async function listReferencedStorageKeys() {
   const keys = new Set();
   for (const job of jobs.values()) {
@@ -291,7 +362,15 @@ async function listByFlag(field, limit = 100) {
   return pending;
 }
 
-async function remove(id) {
+/**
+ * ⚠️ `tiketiniAdresai` PRIIMAMAS IR IGNORUOJAMAS SĄMONINGAI (#157, PR-5).
+ *
+ * Artefaktų aibės CAS turi prasmę tik ten, kur yra bandymų registras. Šis backend'as
+ * external rezultatų neturi, tad tikėtina aibė VISADA tuščia ir visada sutampa — tai
+ * faktas, ne praleidimas. Parametras priimamas, kad kvietėjas neturėtų šakos „ar šis
+ * backend'as moka".
+ */
+async function remove(id, _nustatymai = {}) {
   return jobs.delete(id);
 }
 
@@ -299,4 +378,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

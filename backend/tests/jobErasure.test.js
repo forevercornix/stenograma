@@ -33,6 +33,7 @@ function loadEraseJob({
     jobUpdate: [],
     auditRemove: [],
     auditRecord: [],
+    resultArtifactsDelete: [],
   };
 
   const stubs = {
@@ -79,6 +80,14 @@ function loadEraseJob({
        * produkcijoje nebėra.
        */
       system: {
+        /**
+         * ⚠️ #157 PR-5: `eraseJob` po nepavykusio CAS klausia, ar eilutė dar yra —
+         * be šio metodo dublis kristų `TypeError`, ir testas įrodinėtų ne tą dalyką.
+         */
+        get: async (id) => {
+          if (jobStore.getThrows) throw new Error(jobStore.getThrows);
+          return jobStore.dingo ? null : { id };
+        },
         remove: async (id) => {
           calls.jobRemove.push(id);
           if (jobStore.throws) throw new Error(jobStore.throws);
@@ -87,6 +96,21 @@ function loadEraseJob({
         update: async (id, patch) => {
           calls.jobUpdate.push({ id, patch });
           return { id, ...patch };
+        },
+        /**
+         * ⚠️ REZULTATO ARTEFAKTAI (#157, PR-5). Dublis privalo turėti šį metodą dėl
+         * TOS PAČIOS priežasties, kurią aiškina 7.4a komentaras žemiau: trūkstamas
+         * metodas produkciniame kelyje yra KRITINĖ nesėkmė („nežinau, ar pašalinta"),
+         * ir be jo visi šio failo testai kristų ne dėl savo dalyko.
+         *
+         * `null` grąžinamas eksplicitiškai, kai to prašo scenarijus — taip tikrinama
+         * fasado fail-safe šaka, o ne dublio spraga.
+         */
+        deleteResultArtifacts: async (id) => {
+          calls.resultArtifactsDelete.push(id);
+          if (jobStore.resultArtifacts === null) return null;
+          if (jobStore.resultArtifactsThrows) throw new Error(jobStore.resultArtifactsThrows);
+          return jobStore.resultArtifacts ?? { pasalinti: [], jauNebuvo: [], nepavyko: [] };
         },
       },
     },
@@ -126,14 +150,14 @@ function loadEraseJob({
 
   const erasurePath = resolve("utils/jobErasure");
   delete require.cache[erasurePath];
-  const { eraseJob } = require(erasurePath);
+  const { eraseJob, eraseOrphanedJobData } = require(erasurePath);
 
   const restore = () => {
     for (const resolved of injected) delete require.cache[resolved];
     delete require.cache[erasurePath];
   };
 
-  return { eraseJob, calls, restore };
+  return { eraseJob, eraseOrphanedJobData, calls, restore };
 }
 
 function completedJob(overrides = {}) {
@@ -411,5 +435,214 @@ test("`already absent` NĖRA likutis: `source_audio` skaitomas kaip pašalintas"
     assert.equal(outcome.storageAlreadyAbsent, false);
   } finally {
     antras.restore();
+  }
+});
+
+test("#157 PR-5: rezultato artefaktų šalinimo klaida yra KRITINĖ — DB įrašas LIEKA", async () => {
+  /**
+   * ⚠️ ĮRODYMAS #157 DoD PUNKTUI: „`ArtifactStore.delete()` meta klaidą →
+   * `criticalFailure: true` → DB metaduomenys NEPAŠALINAMI, kad retry turėtų
+   * autoritetingą informaciją, ką reikia ištrinti".
+   *
+   * Tvarka čia yra garantijos dalis, ne stilius. Pašalinus job'o eilutę, `job_results`
+   * dingtų per `ON DELETE CASCADE`, o su ja — ir adresai; `deletionRetry` grįžtų prie
+   * job'o, pažymėto ištrynimui, ir nebeturėtų ko trinti. Objektas su transkripcija
+   * liktų saugykloje be nė vienos rodyklės.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      resultArtifacts: {
+        pasalinti: ["results/job-1/a.json"],
+        jauNebuvo: [],
+        nepavyko: [{ storageKey: "results/job-1/b.json", priezastis: "EACCES" }],
+      },
+    },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.criticalFailure, true, "dalinis gedimas negali būti sėkmė");
+    assert.deepEqual(calls.jobRemove, [], "job'o eilutė privalo LIKTI — kitaip adresai dingsta");
+    assert.ok(
+      outcome.errors.some((e) => e.includes("results/job-1/b.json")),
+      `klaidoje privalo būti KONKRETUS adresas: ${outcome.errors.join("; ")}`
+    );
+    assert.deepEqual(calls.auditRecord, [], "kvitas apie ištrynimą nerašomas");
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: saugykla be `deleteResultArtifacts()` yra KRITINĖ nesėkmė, ne no-op", async () => {
+  /**
+   * ⚠️ `null` = „NEŽINAU, AR PAŠALINTA". Fasadas jį grąžina, kai backend'as metodo
+   * neturi. Tyli šaka čia reikštų „ištrinta" be objekto pašalinimo — tiksliai tas
+   * melas, kurį #157 riba draudžia.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: { resultArtifacts: null },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.criticalFailure, true);
+    assert.deepEqual(calls.jobRemove, [], "nežinant, ar objektai pašalinti, įrašas neliečiamas");
+  } finally {
+    restore();
+  }
+});
+
+test('#157 PR-5: sėkmės atveju kvitas skiria PAŠALINTA nuo JAU NEBUVO', async () => {
+  /**
+   * Ta pati trijų būsenų taisyklė kaip audio kelyje (#250): kvitas, sujungiantis abu,
+   * tvirtintų veiksmą, kurio nebuvo. `results=` eilutė kvite yra ATSKIRA nuo `storage=`,
+   * nes po #157 tai du skirtingi artefaktų tipai skirtingose vietose.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      resultArtifacts: { pasalinti: ["a"], jauNebuvo: ["b", "c"], nepavyko: [] },
+    },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.criticalFailure, false);
+    assert.equal(outcome.resultArtifactsRemoved, 1);
+    assert.equal(outcome.resultArtifactsAlreadyAbsent, 2);
+
+    const kvitas = calls.auditRecord.find((e) => e.details && e.details.includes("results="));
+    assert.ok(kvitas, "kvite privalo būti `results=` eilutė");
+    assert.match(kvitas.details, /results=1\/2/, kvitas.details);
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: rezultato artefaktų šalinimas patenka į `anythingRemoved` — kvitas IŠRAŠOMAS", async () => {
+  /**
+   * ⚠️ REIKŠMĖ, RAŠOMA Į SUVESTINĘ, KURIOS NIEKAS NESKAITO (Codex, #304).
+   *
+   * Jei rezultato objekto pašalinimas buvo VIENINTELIS fizinis veiksmas, `DATA_ERASED`
+   * kvito nebūtų — ištrynimas įvyktų be pėdsako. Būtent tokia yra external rezultato
+   * situacija: eilės nėra, audio nėra, audito įrašų nėra.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      removed: false,
+      resultArtifacts: { pasalinti: ["results/j/a.json"], jauNebuvo: [], nepavyko: [] },
+    },
+    auditLog: { removed: 0 },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.resultArtifactsRemoved, 1);
+    assert.ok(
+      calls.auditRecord.some((e) => e.details && e.details.includes("results=1/0")),
+      `kvitas privalo būti išrašytas: ${JSON.stringify(calls.auditRecord)}`
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: našlaitis su VIENINTELIU external rezultatu nėra „nerastas\"", async () => {
+  /**
+   * ⚠️ `found` be `resultArtifactsRemoved` reikštų 404 apie job'ą, kurio transkripciją
+   * ką tik pašalinom (Codex, #304).
+   */
+  const { eraseOrphanedJobData, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      resultArtifacts: { pasalinti: ["results/j/a.json"], jauNebuvo: [], nepavyko: [] },
+    },
+    auditLog: { removed: 0 },
+  });
+
+  try {
+    const outcome = await eraseOrphanedJobData("job-1", { scope: "system" });
+
+    assert.equal(outcome.resultArtifactsRemoved, 1);
+    assert.equal(outcome.found, true, "artefaktas rastas ir pašalintas — tai NE 404");
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: NEBAIGTAS ištrynimas palieka `deletion_pending` — kad būtų kas pakartos", async () => {
+  /**
+   * ⚠️ FAIL-CLOSED BE PABAIGOS YRA TA PATI KLASĖ KAIP 4b `pending` EILUTĖS.
+   *
+   * `deletionRetry` kandidatus randa per `listPendingDeletions()`, t. y. per
+   * `deletion_pending` vėliavą. Be jos būsena „eilutė liko, ištrynimas nebaigtas" būtų
+   * aklavietė: kvietėjas matytų „nebaigta", o iš naujo nebandytų niekas.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      removed: false,
+      resultArtifacts: { pasalinti: ["a"], jauNebuvo: [], nepavyko: [], matyti: [{ storageType: "fs", storageKey: "a" }] },
+    },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.jobRemoved, false, "eilutė nepašalinta");
+    assert.equal(outcome.criticalFailure, true, "tai NE sėkmė");
+    assert.ok(
+      calls.jobUpdate.some((u) => u.patch && u.patch.deletion_pending === true),
+      `privalo likti \`deletion_pending\`: ${JSON.stringify(calls.jobUpdate)}`
+    );
+    assert.ok(
+      outcome.errors.some((e) => e.includes("BARJERO")),
+      "klasifikacija privalo nurodyti, kad pasikartojimas yra barjero problema"
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: po-CAS SKAITYMO klaida nėra „job'o nebėra“", async () => {
+  /**
+   * ⚠️ NEIGIAMAS REZULTATAS IŠ ĮRODYMO, KURIS JO NENUSTATO (Codex, #304).
+   *
+   * `.catch(() => null)` laikiną DB gedimą paversdavo išvada „eilutės nebėra, vadinasi
+   * pavyko": `criticalFailure` likdavo `false`, kvitas būdavo išrašomas, o žyma
+   * finalizuojama — po ištrynimo, kurio niekas nepatvirtino.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      removed: false,
+      getThrows: "laikinas DB gedimas",
+      resultArtifacts: {
+        pasalinti: ["a"],
+        jauNebuvo: [],
+        nepavyko: [],
+        matyti: [{ storageType: "fs", storageKey: "a" }],
+      },
+    },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.criticalFailure, true, "nežinoma būsena negali būti sėkmė");
+    assert.ok(
+      outcome.errors.some((e) => e.includes("NEŽINOMA")),
+      `klaida privalo pasakyti, kad būsena nežinoma: ${outcome.errors.join("; ")}`
+    );
+    assert.deepEqual(calls.auditRecord, [], "kvitas NEIŠRAŠOMAS");
+  } finally {
+    restore();
   }
 });

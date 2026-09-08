@@ -993,8 +993,16 @@ test("KONTRAKTAS: su nustatytu URL adapteris NEGALI praleisti savo scenarijų", 
   }
 });
 
-test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", () => {
   /**
+   * ⚠️ SKAIČIUS IŠ PAVADINIMO PAŠALINTAS (#157, PR-5).
+   *
+   * Testo vardas yra jo TAPATYBĖ ištrintų testų sargui (#237), tad kiekvienas
+   * kontrakto praplėtimas versdavo vardą keistis — ir sargas tai matydavo kaip
+   * PAŠALINTĄ testą, reikalaujantį override. Taip įvyko keliant 18 → 19
+   * (CI `34144363714`). Skaičius gyvena tvirtinime žemiau, kur jam ir vieta:
+   * tikrinamas jis vienodai, o tapatybė nustoja svyruoti kartu su kontraktu.
+   *
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
    * ilgai nebuvo memory backend'e.
@@ -1008,6 +1016,32 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę",
    * ten vykdo pats Redis per `EXPIRE`, tad momento žymai įrašyti nėra. Kontrakto
    * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
    * `docs/deletion-guarantees.md`.
+   *
+   * ⚠️ 23 → 25 (#157, PR-5): pridėti `pazymetiKarantina()` ir `karantinuotuSkaicius()`.
+   * `pazeidimas` yra VIENINTELIS signalas apie pasikeitusią rakto schemą, tad jis
+   * pranešamas vieną kartą, o eilutė lieka matoma suvestinėje, kol operatorius ją uždaro.
+   *
+   * ⚠️ 22 → 23 (#157, PR-5): pridėtas `jungtiesTapatybe()`. Šlavėjas privalo įrodyti,
+   * kad žymos ir bandymų registras yra TOJE PAČIOJE bazėje; vardų palyginimas to
+   * neįrodo (#245 pamoka). `memory`/`redis` grąžina `null` — jungties jie neturi.
+   *
+   * ⚠️ 20 → 22 (#157, PR-5): pridėti `valytiniBandymai()` ir `pasalintiBandymus()` —
+   * kandidatų atranka su retencijos predikatu ir eilučių uždarymas PO to, kai objekto
+   * tikrai nebėra.
+   *
+   * ⚠️ 19 → 20 (#157, PR-5): pridėtas `sweepResultArtifacts()`. Šlavėjas klausia
+   * saugyklos dėl tos pačios priežasties kaip erasure: laikinojo etapo buvimas ir
+   * `storage_type -> ArtifactStore` žemėlapis gyvena ten.
+   *
+   * ⚠️ 18 → 19 (#157, PR-5): pridėtas `deleteResultArtifacts()`. Šalina saugykla, ne
+   * `jobErasure`, nes `storage_type -> ArtifactStore` žemėlapis gyvena store'e ir yra
+   * vienintelis; antra jo kopija kvietėjo pusėje būtų antra rezultato vietos
+   * interpretacija (A4).
+   *
+   * ⚠️ 17 → 18 (#157, PR-5): pridėtas `listResultArtifacts()`. Skaičius keliamas
+   * SĄMONINGAI. Erasure ir šlavėjas nuo šiol klausia REGISTRO, o ne vienos `job_results`
+   * nuorodos; backend'as, praradęs šį metodą, fasade duotų `null`, ir kvietėjas
+   * NIEKO netrintų — saugu, bet tyliai neteisinga, tad sargas krenta iškart.
    *
    * ⚠️ 16 → 17 (#184, 7.5b): pridėtas `finishAtomic()`. Skaičius keliamas
    * SĄMONINGAI. Fasadas jo NETIKRINA `typeof === "function"` sąlyga: tokia
@@ -1023,7 +1057,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 17 metodų aibę",
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 17, "jobStore kontraktas privalo turėti tiksliai 17 metodų");
+  assert.equal(expected.length, 25, "jobStore kontraktas privalo turėti tiksliai 25 metodus");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,
@@ -1174,6 +1208,30 @@ test("KONTRAKTAS: dokumentacija neteigia, kad memory backend'ui CAS nereikalinga
  * sąrašas pasentų su pirmu nauju lauku, o palyginimas tarp backend'ų gaudo būtent tą
  * klasę, dėl kurios šis testas ir egzistuoja.
  */
+test("KONTRAKTAS: `listResultArtifacts()` inline backend'e grąžina TUŠČIĄ sąrašą — po tikro `finish()`", async () => {
+  /**
+   * ⚠️ TIKRINAMAS ELGESYS, NE KONSTANTA (#157, PR-5).
+   *
+   * `memory` realizacija grąžina `[]`, ir komentaras prie jos teigia, kad tai FAKTAS:
+   * external rašymo kelio šis backend'as neturi. Teiginys tikrinamas per tikrą
+   * užbaigimą su rezultatu — jei kada nors atsirastų external kelias, o metodas liktų
+   * grąžinantis `[]`, šis testas ir toliau būtų žalias TIK tol, kol rezultatas
+   * persistinamas įraše.
+   *
+   * ⚠️ KO ŠIS TESTAS NEĮRODO: PostgreSQL pusės. Ten sąrašas turi turėti registro
+   * bandymus, ir tai tikrinama PR-5 integraciniame teste su tikra DB — čia įrodoma tik
+   * inline backend'o pusė ir `null` vs `[]` skirtumas.
+   */
+  const job = await memoryStore.create({ ownerKind: "unowned", type: JOB_TYPES.TRANSCRIPTION });
+  await memoryStore.update(job.id, { status: "processing", phase: PHASE.TRANSCRIBING });
+  await memoryStore.finishAtomic(job.id, "completed", { result: { text: "inline" } });
+
+  const artefaktai = await memoryStore.listResultArtifacts(job.id);
+
+  assert.deepEqual(artefaktai, [], "inline rezultatas external artefaktų nepalieka");
+  assert.notEqual(artefaktai, null, '`null` reikstu "nezinau" - o cia zinoma');
+});
+
 test("KONTRAKTAS: `listByFlag()` grąžina TĄ PAČIĄ laukų aibę visuose backend'uose", async (t) => {
   const formos = new Map();
 

@@ -210,16 +210,21 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
       "`listExpired` yra kontrakto dalis nuo #183 - žr. paaiškinimą aukščiau"
     );
     /**
-     * ⚠️ ANTRA TO PATIES SKAIČIAUS KOPIJA (rasta CI, #184 / 7.5b).
+     * ⚠️ SKAIČIAUS KOPIJA IŠ ČIA PAŠALINTA — JI KRITO ANTRĄ KARTĄ (#157, PR-5).
      *
-     * Tokia pati patikra yra `jobStoreBackendContract.integration`. Keliant
-     * 16 → 17 (`finishAtomic`) buvo atnaujinta tik ta, o ši liko — ir krito
-     * PIRMAME tikrame PostgreSQL paleidime. Dvi nepriklausomos to paties fakto
-     * patikros yra ta pati klasė, kurią #205 ir 7.2a šalina kitose vietose;
-     * čia ji palikta sąmoningai (viena tikrina PG saugyklą su tikra DB, kita —
-     * visų trijų aibių tapatumą), tad skaičius KEIČIAMAS ABIEJOSE.
+     * Anksčiau čia gulėjo `assert.equal(metodai(store).length, 17)`, o tokia pati
+     * patikra yra `jobStoreBackendContract.integration`. Ankstesnis komentaras tą
+     * dubliavimą pripažino ir nurodė „skaičius KEIČIAMAS ABIEJOSE" — bet nurodymas nėra
+     * mechanizmas: 16 → 17 metu atnaujinta tik viena, ir ši krito pirmame tikrame
+     * PostgreSQL paleidime; 18 → 19 metu (`listResultArtifacts`,
+     * `deleteResultArtifacts`) tas pats pasikartojo (CI `34143416350`).
+     *
+     * Skaičiaus PASKIRTIS — priversti kontrakto plėtimą pagrįsti — pilnai atliekama
+     * VIENOJE vietoje; antra kopija tos jėgos nepadvigubina, tik pasensta. Šio testo
+     * savitas indėlis lieka nepaliestas: jis lygina PG saugyklos aibę su `memory` prieš
+     * TIKRĄ DB, ir būtent tai tikrina `deepEqual` aukščiau.
      */
-    assert.equal(metodai(store).length, 17, "kontraktas turi 17 metodų (nuo #184: `finishAtomic`)");
+    assert.ok(metodai(store).length > 0, "kontrolė: aibė nėra tuščia");
   });
 
   /* ── tenant_id sentinelis ────────────────────────────────────────────── */

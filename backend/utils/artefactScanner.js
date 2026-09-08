@@ -104,8 +104,28 @@ const SCAN_STRATEGIES = {
    * `job.result` viduje. Jų „pėdsakas" yra tiksliai `job_record` pėdsakas, tad
    * atskiras skenavimas duotų tą patį atsakymą du kartus.
    */
-  [ARTEFACT_TYPES.TRANSCRIPT.id]: { scan: null, reason: "saugoma job_record viduje" },
-  [ARTEFACT_TYPES.PROTOCOL.id]: { scan: null, reason: "saugoma job_record viduje" },
+  /**
+   * ⚠️ PRIEŽASTIS PERRAŠYTA: PO #157 „saugoma job_record viduje" NEBĖRA TIESA (PR-5).
+   *
+   * `inline` eilutėms ji tebegalioja, bet external eilutėms turinys guli S3 arba failų
+   * sistemoje, ir tada skenavimas yra VIENINTELIS kelias rasti likutį po nepavykusio
+   * ištrynimo. Priežastis, teigianti daugiau, nei tiesa, yra blogesnė už jos nebuvimą:
+   * ji uždaro klausimą, kurio niekas nebeuždavė.
+   *
+   * ⚠️ SPRENDIMAS YRA PER-ROW, TAD JIS NEGALI GYVENTI ŠIOJE STATINĖJE LENTELĖJE.
+   * Registras aprašo artefakto TIPĄ; fizinę vietą sprendžia vartotojas pagal eilutės
+   * `storage_type` (A4). Todėl čia lieka `scan: null` su TIKSLIA priežastimi, o external
+   * eilučių orphan aptikimas eina per `jobStore.system.listResultArtifacts()` — DB
+   * kryptimi, kaip reikalauja #157 riba.
+   */
+  [ARTEFACT_TYPES.TRANSCRIPT.id]: {
+    scan: null,
+    reason: "inline eilutėse saugoma job_record viduje; external eilutės tikrinamos per registrą",
+  },
+  [ARTEFACT_TYPES.PROTOCOL.id]: {
+    scan: null,
+    reason: "inline eilutėse saugoma job_record viduje; external eilutės tikrinamos per registrą",
+  },
 
   /**
    * EFEMERIŠKI – niekada nesaugomi.

@@ -345,6 +345,8 @@ function saugyklaSuAibe(irasai) {
         return irasai.get(id) || null;
       },
       remove: async (id) => irasai.delete(id),
+      /** #157 PR-5: erasure klausia registro; dublis privalo turėti visą paviršių. */
+      deleteResultArtifacts: async () => ({ pasalinti: [], jauNebuvo: [], nepavyko: [] }),
     },
   };
 }
@@ -546,4 +548,103 @@ test("KONTROLĖ: ta pati saugykla su HIDRATACIJA replay'aus nepraleistų", async
     },
     (klaida) => klaida.code === "ARTIFACT_CORRUPT"
   );
+});
+
+test("#157 PR-5: `!job` šaka šalina registro artefaktus PRIEŠ uždarydama žymą", async () => {
+  /**
+   * ⚠️ REGISTRAS AUTORITETINGAS IR BE `jobs` EILUTĖS (Codex, #304 antras raundas).
+   *
+   * `job_result_attempts` sąmoningai neturi FK į `jobs`, tad registro eilutė BE `jobs`
+   * eilutės yra TEISĖTA būsena — taip atrodo bazė, kurioje ištrynimas nutrūko po eilutės
+   * pašalinimo, bet prieš objektų šalinimą. Iki šito ši šaka žymą uždarydavo, o
+   * `deleteResultArtifacts()` nekviesdavo NIEKADA: cutover verifikacija matydavo
+   * išspręstą žymą, o transkripcija likdavo.
+   *
+   * ⚠️ TVARKA YRA GARANTIJOS DALIS: šalinimas PIRMA, žymos uždarymas PO. Atvirkščiai
+   * gedimas paliktų uždarytą žymą su likusiais duomenimis, ir niekas nebekartotų.
+   */
+  const erasureReplay = require("../utils/erasureReplay");
+  await tombstones._clearForTests();
+
+  const zyma = await tombstones.mark("job-be-eilutes", { reason: "user_request" });
+  assert.ok(zyma, "kontrolė: žyma sukurta");
+
+  const veiksmai = [];
+  const store = {
+    system: {
+      get: async () => null,
+      update: async () => null,
+      remove: async () => false,
+      deleteResultArtifacts: async (jobId) => {
+        veiksmai.push(`salinta:${jobId}`);
+        return {
+          pasalinti: ["results/job-be-eilutes/a.json"],
+          jauNebuvo: [],
+          nepavyko: [],
+          matyti: [{ attemptId: "a1", storageType: "fs", storageKey: "results/job-be-eilutes/a.json" }],
+        };
+      },
+      /** #157 PR-5 (E2): registro eilutės šalinamos ir šioje šakoje, ne tik `remove()`. */
+      pasalintiBandymus: async (ids) => {
+        veiksmai.push(`eilutes:${ids.join(",")}`);
+        return ids.length;
+      },
+    },
+  };
+
+  const rez = await erasureReplay.replay({
+    zymos: [{ jobId: "job-be-eilutes", status: zyma.status }],
+    actor: "testas",
+    store,
+  });
+
+  assert.deepEqual(rez.nesekmes, [], JSON.stringify(rez));
+  assert.ok(veiksmai.includes("salinta:job-be-eilutes"), "artefaktai privalo būti šalinami");
+  assert.ok(rez.uzdarytosZymos.includes("job-be-eilutes"), "ir tik po to žyma uždaroma");
+  assert.ok(
+    veiksmai.includes("eilutes:a1"),
+    `registro eilutės privalo būti pašalintos: ${veiksmai.join(" ")}`
+  );
+  assert.ok(
+    veiksmai.indexOf("salinta:job-be-eilutes") < veiksmai.indexOf("eilutes:a1"),
+    "eilutė šalinama TIK po patvirtinto fizinio šalinimo"
+  );
+});
+
+test("#157 PR-5: artefaktų šalinimo nesėkmė PALIEKA žymą atvirą", async () => {
+  /**
+   * ⚠️ Uždaryti žymą nepašalinus objektų reikštų tą patį melą, tik kitu keliu:
+   * galutinumas užfiksuotas, o duomenys liko. Ir kitas paleidimas praeitų pro šalį.
+   */
+  const erasureReplay = require("../utils/erasureReplay");
+  await tombstones._clearForTests();
+
+  const zymaN = await tombstones.mark("job-nepavyko", { reason: "user_request" });
+
+  const store = {
+    system: {
+      get: async () => null,
+      update: async () => null,
+      remove: async () => false,
+      deleteResultArtifacts: async () => ({
+        pasalinti: [],
+        jauNebuvo: [],
+        nepavyko: [{ storageKey: "results/job-nepavyko/a.json", priezastis: "EACCES" }],
+        matyti: [],
+      }),
+    },
+  };
+
+  const rez = await erasureReplay.replay({
+    zymos: [{ jobId: "job-nepavyko", status: zymaN.status }],
+    actor: "testas",
+    store,
+  });
+
+  assert.equal(rez.nesekmes.length, 1, JSON.stringify(rez));
+  assert.match(rez.nesekmes[0].priezastis, /EACCES/);
+  assert.deepEqual(rez.uzdarytosZymos, [], "žyma privalo likti ATVIRA");
+
+  const esama = await tombstones.get("job-nepavyko");
+  assert.notEqual(esama.status, tombstones.TOMBSTONE_STATUS.DELETED, "ir tikrai neuždaryta");
 });

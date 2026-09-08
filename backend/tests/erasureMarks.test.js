@@ -675,3 +675,107 @@ test("ATOMIŠKUMAS: neteisingas `actorKind` NEPALIEKA pusiau įvykusio perėjimo
 
   await memoryStore.clear();
 });
+
+test("#157 PR-5: žymų sąlygos posakis NETURI bind parametrų", () => {
+  /**
+   * ⚠️ KONTRAKTAS BUVO TIK KOMENTARE (Codex, #157 PR-5).
+   *
+   * `neisspresptosZymosSalyga()` grąžina tekstą, kurį kvietėjas ĮDEDA į savo užklausą ir
+   * numeruoja savo `$1`, `$2` pats. Posakis su bind parametru TYLIAI sujauktų numeraciją:
+   * kvietėjo `$3` taptų posakio parametru, o klaida pasirodytų kaip nesusijęs tipo
+   * neatitikimas kitoje sakinio vietoje.
+   *
+   * Sąlyga buvo užrašyta doc komentare ir niekur netikrinama. Pakeitimas, atrodantis
+   * nekaltai („pridėkim `AND m.marked_at > $1`"), sulaužytų kvietėją, kurio autorius apie
+   * posakį nė nežino.
+   */
+  const { neisspresptosZymosSalyga } = require("../utils/deletionTombstones/postgresStore");
+
+  const posakis = neisspresptosZymosSalyga("a");
+
+  assert.ok(!posakis.includes("$"), `posakyje negali būti bind parametrų: ${posakis}`);
+  assert.match(posakis, /^NOT EXISTS \(/, "forma privalo būti `NOT EXISTS (...)`");
+  assert.match(posakis, /a\.job_id/, "alias'as privalo patekti į posakį");
+  assert.match(posakis, /erasure_marks/, "kontrolė: posakis apskritai liečia žymų lentelę");
+});
+
+test("#157 PR-5: žymų sąlygos alias'as VALIDUOJAMAS — vienintelė injekcijos gynyba", () => {
+  /**
+   * ⚠️ POSAKIS SUDAROMAS EILUČIŲ SUJUNGIMU, tad alias'as yra vienintelė vieta, per kurią
+   * kvietėjo tekstas patenka į SQL. Validacija be įrodymo yra prielaida — o čia kaina
+   * būtų SQL injekcija per parametrą, kuris atrodo nekaltas.
+   */
+  const { neisspresptosZymosSalyga } = require("../utils/deletionTombstones/postgresStore");
+
+  for (const blogas of [
+    "a; DROP TABLE erasure_marks",
+    "a' OR '1'='1",
+    "a.b",
+    "a-b",
+    "1a",
+    "",
+    " ",
+    null,
+    undefined,
+    123,
+  ]) {
+    assert.throws(
+      () => neisspresptosZymosSalyga(blogas),
+      TypeError,
+      `privalo būti atmestas: ${JSON.stringify(blogas)}`
+    );
+  }
+
+  /** KONTROLĖ: teisėti alias'ai praeina, kitaip testas įrodinėtų, kad viskas atmetama. */
+  for (const geras of ["a", "attempts", "_x", "a1", "JOB"]) {
+    assert.match(neisspresptosZymosSalyga(geras), new RegExp(`${geras}\\.job_id`));
+  }
+});
+
+test("#157 PR-5: žymų jungties tapatybė imama iš INICIJUOTO pool'o, ne iš `env`", async () => {
+  /**
+   * ⚠️ §21.3 KLAUSIMAS: AR TAISYMAS SPRENDŽIA, AR PERKELIA (Codex, #304).
+   *
+   * Pirmoji redakcija lygino backend'o VARDĄ; taisymas įvedė `jungtiesTapatybe()`, bet
+   * skaičiavo ją iš `process.env`. Tai tas pats defektas, perkeltas: vardas ->
+   * konfigūracija, o reikėjo iki INICIJUOTO RYŠIO. `init(env)` gali gauti kitą aplinką
+   * nei `process.env`, ir tada sargas lygina ne tas jungtis — ir praeina.
+   *
+   * Testas tikrina būtent tą skirtumą: `process.env` rodo į VIENĄ bazę, o inicijuota
+   * aplinka — į KITĄ. Teisinga tapatybė yra antroji.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+  const { tapatybesTekstas } = require("../utils/pgConnection");
+
+  await tombstones._clearForTests();
+
+  const senasUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = "postgres://vartotojas@aplinkos-host:5432/aplinkos_baze";
+
+  try {
+    /** Atmintiniame režime tapatybės nėra — ir tai teisingas atsakymas, ne spėjimas. */
+    delete process.env.DATABASE_URL;
+    await tombstones.init({});
+    assert.equal(tombstones.jungtiesTapatybe(), null, "be `postgres` jungties tapatybės NĖRA");
+    await tombstones.shutdown();
+
+    /**
+     * ⚠️ TIKRO POSTGRES ČIA NEREIKIA: tikrinamas ŠALTINIS, ne turinys. Pakanka, kad
+     * tapatybė nebūtų skaičiuojama iš `process.env` — o be jungties ji yra `null`.
+     */
+    process.env.DATABASE_URL = "postgres://vartotojas@aplinkos-host:5432/aplinkos_baze";
+    await tombstones.init({});
+    const tapatybe = tombstones.jungtiesTapatybe();
+
+    assert.notEqual(
+      tapatybe && tapatybesTekstas(tapatybe),
+      "aplinkos-host:5432/aplinkos_baze",
+      "tapatybė NEGALI būti skaičiuojama iš `process.env` — `init()` gavo tuščią aplinką"
+    );
+  } finally {
+    await tombstones.shutdown().catch(() => {});
+    if (senasUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = senasUrl;
+    await tombstones._clearForTests();
+  }
+});

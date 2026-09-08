@@ -844,7 +844,189 @@ verdiktas lieka „nepaneigta", ne „įrodyta"; įvardijama PR aprašyme.
 **Ką palieka veikiantį:** ištrynimas šalina ir external objektą; registras
 nebemeluoja apie saugojimo vietą.
 
-⚠️ **ĮĖJIMO SĄLYGA: ŠLAVĖJAS PRIVALO BANDYTI ABU VARDUS** (#294 uždarymas).
+---
+
+⚠️ **ĮĖJIMO SĄLYGOS — VISOS, VIENOJE VIETOJE (surinkta PR-5 pradžioje).**
+
+Tas pats šablonas kaip PR-4 („ĮĖJIMO SĄLYGOS — ABI PRIIMTOS, VIENOJE VIETOJE"), ir dėl
+tos pačios priežasties: sąlygos priimtos skirtinguose raunduose ir gyvena skirtinguose
+skyriuose, o PR-5 pradžioje jų tektų ieškoti. **PR-5 apimtis paaugo dviejuose
+paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
+
+| # | Sąlyga | Kur priimta |
+|---|---|---|
+| 1 | **Erasure trina PAGAL REGISTRĄ**, ne pagal `job_results.storage_key` — job'o ištrynimas šalina VISŲ to job'o bandymų objektus, ne tik laimėjusio | variantas (b), orphan skyrius |
+| 2 | **Šlavėjas** neįsipareigotiems bandymams (`busena <> 'committed'`) | variantas (b), orphan skyrius |
+| 3 | **Retencija ribojama BŪSENA IR amžiumi:** horizontas iš `revivalHorizonsMs()` yra apatinė riba, bet eilutė, kurios objektas referencuotas **ARBA** kurios job'as turi neišspręstą ištrynimo žymą, pagal amžių nešalinama NIEKADA | variantas (b) + PR-5 pradžios peržiūra |
+| 4 | **Šlavėjas zonduoja ABU vardus** (laikiną ir galutinį); „nė vieno nėra" = sėkmė | #294 uždarymas — žr. skyrių iškart žemiau |
+| 4a | **Šlavėjas neliečia VYKSTANČIO rašymo:** `pending` eilutei horizontas turi atskirą „maksimalios rašymo trukmės" narį, neišvestą iš `revivalHorizonsMs()` | PR-5 peržiūra — determinizmo pasekmė |
+| 4b | **Fail-closed praleidimas MATOMAS:** skaitiklis + `log.warn` suvestinėje, 7.5a precedentu (`retentionSweeper.js:269-274`) | PR-5 peržiūra |
+| 4c | **„Maksimali rašymo trukmė" užrašoma kaip EURISTIKA** su kilme ir galiojimo pabaiga, `MAX_SEGMENTO_BAITAI` šablonu | PR-5 peržiūra |
+| 3a | **Žymų saugyklos neatitikimas — ŽINGSNIO lygio būsena**, pranešama vieną kartą, ne kaip N praleistų eilučių | PR-5 peržiūra |
+| 4d | **Abu vardai rasti = INVARIANTO PAŽEIDIMAS**, pranešamas, o ne tyliai ištrinamas | PR-5 peržiūra |
+| 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
+| 6 | **Store lygmens metodas visoms nuorodoms**, ne `job.resultStorage` laukas | PR-3 peržiūra (žr. „PATAISYTA" žemiau) |
+| 7 | **`reference !== null`** → objektas privalo būti pašalintas ir tai patvirtinta; `reference === null` → eilutės ištrynimas IR YRA ištrynimas | kontraktas, ne PR-5 |
+| 8 | **„Job'as turi daugiausia VIENĄ įsipareigotą bandymą" yra DB invariantas** (`UNIQUE (job_id) WHERE busena = 'committed'`, migracija `1756400000000`) — šlavėjas gali juo REMTIS, ne tikrinti | PR-4 pabaiga |
+
+⚠️ **KAIP ŠIS SĄRAŠAS UŽDAROMAS — DVYLIKA SĄLYGŲ PATI SAVAIME YRA RIZIKA.**
+
+Sąrašas per tris raundus paaugo nuo trijų iki dvylikos, ir jis turi tą pačią savybę kaip
+bet kuris rankinis sąrašas: **jį galima įvykdyti nepilnai, ir niekas nekris.** Šlavėjas
+gali praeiti visus testus, uždaryti dešimt sąlygų iš dvylikos, ir tai atrodys kaip sėkmė.
+
+Atsakymas nėra dar viena taisyklė: **šlavėjo užbaigimo ataskaita eina per sąrašą punktas
+po punkto** — dvylika eilučių, kiekviena su įrodymu arba `UNVERIFIED`. Ta pati forma kaip
+PR-1 DoD citatos. Tai uždaro vienintelį būdą, kuriuo šis sąrašas gali suklysti.
+
+⚠️ **TRYS POROS NĖRA NEPRIKLAUSOMOS — RAŠOMOS KARTU, NE EILĖS TVARKA.**
+
+| Pora | Kodėl kartu |
+|---|---|
+| **4a + 4b** | 4a fail-closed SUKURIA tai, ką 4b turi matyti. Vien 4a — sistema tyli; vien 4b — nėra ko rodyti |
+| **3a + 8** | Jei žymų saugykla „kitokia", predikato antra šaka neveikia, ir lieka klausimas, ar sąlygos 8 pakanka — žr. atsakymą žemiau |
+| **4 + 4d** | Tai TAS PATS kodas su dviem verdiktais. Parašius atskirai lengva gauti šaką, kuri trina, ir šaką, kuri praneša, nesutariančias dėl tos pačios būsenos |
+
+⚠️ **ATSAKYMAS Į 3a + 8 KLAUSIMĄ: SĄLYGA 8 NĖRA PAKAITALAS, TAD ŠLAVĖJAS NEDIRBA.**
+
+Kyla natūralus klausimas, ar praradus žymų šaką pakanka sąlygos 8 (DB invariantas
+„daugiausia vienas įsipareigotas"). **Nepakanka, ir priežastis struktūrinė:** sąlyga 8
+sako, kuris bandymas yra REFERENCUOTAS, tad ji gina būtent tuos objektus, kurie ir taip
+apsaugoti pirmąja predikato šaka. Šlavėjo dalykas yra priešingas — NEREFERENCUOTI
+bandymai, kuriems sąlyga 8 nepasako nieko.
+
+Todėl, kai žymų saugykla nepasiekiama ar kitokia, šlavėjas **nedirba visai** (žingsnio
+lygio fail-closed), o ne šluoja su viena apsauga iš dviejų. Tai ir yra 3a „žingsnio lygio
+būsenos" praktinė prasmė: ne tik pranešimo forma, bet ir apimtis.
+
+✅ **KĄ PR-3/PR-4 JAU PADARĖ — NEBEKARTOTI (patikrinta kode, ne prisiminta):**
+
+- metaduomenų `SELECT` jau neša rezultato nuorodą: `SELECT_JOB_META` turi
+  `result_storage_type`, `result_storage_key`, `result_bytes`, `result_checksum`
+  (`postgresStore.js:625-635`) — **be `payload`**, tad hidratacijos riba nepažeista.
+  Skyriaus tekstas žemiau („BET ŠIANDIEN NĖ VIENAS IŠ TRIJŲ NETURI IŠ KUR TO SUŽINOTI")
+  aprašo būseną PRIEŠ PR-3 ir paliktas kaip sprendimo pagrindimas, ne kaip dabartis;
+- `laikinasVardas(raktas)` eksportuotas iš `utils/artifactStore/fsStore.js`;
+- registro rašymo pusė (`registruoti`, `pazymeti`, `isipareigoti`, `joboBandymai`) veikia
+  ir yra padengta; PR-5 prideda VARTOTOJUS, ne registrą.
+
+⚠️ **SĄLYGA 3 PATIKSLINTA: HORIZONTO VIENO NEUŽTENKA.**
+
+Pradinė formuluotė („retencija ≥ prikėlimo horizontai") kalba tik apie AMŽIŲ. Bet
+`listResultArtifacts()` `busena: null` atvejis parodo, kad registro eilutė gali dingti,
+kol objektas dar gyvas ir referencuotas — o tada objekto atrandamumas priklauso VIEN nuo
+`job_results` eilutės. Ji turi `ON DELETE CASCADE` nuo `jobs`; registras FK sąmoningai
+neturi būtent tam, kad išgyventų. Vadinasi galimas derinys, kuriame **abi** rodyklės
+dingsta: retencija pašalino bandymo eilutę anksčiau, o vėliau job'as ištrintas keliu,
+kuris neina per `listResultArtifacts()`.
+
+**Predikatas: bandymo eilutė, kurios `storage_key` yra gyvoje `job_results` eilutėje,
+retencijai NEATIDUODAMA — nepriklausomai nuo amžiaus.** Tai ta pati taisyklė, kurią 7.5a
+jau priėmė ištrynimo žymoms: retencija priklauso nuo BŪSENOS, ne tik nuo amžiaus.
+
+⚠️ Predikatas formuluojamas per NUORODĄ, ne per `busena = 'committed'`, ir skirtumas
+nėra kosmetinis. Migracijos indeksas `job_result_attempts_valytini`
+(`WHERE busena <> 'committed'`) šiandien atrenka kandidatus ir įsipareigotų eilučių
+nepaima — bet tai indekso, t. y. PAIEŠKOS, savybė, ne sargas. Būsena ir nuoroda gali
+išsiskirti (ranka redaguota eilutė, atkūrimas iš dviejų skirtingų momentų), o klausimas,
+į kurį retencija privalo atsakyti, yra „ar ši eilutė yra vienintelis likęs adresas", ne
+„kokia jos būsena".
+
+⚠️ **BET VIEN NUORODOS NEUŽTENKA: APSAUGA DINGTŲ TADA, KAI JOS LABIAUSIAI REIKIA.**
+
+Ištrynimas NAIKINA nuorodas. `job_results` turi `ON DELETE CASCADE` nuo `jobs`, tad
+pašalinus job'o eilutę visos to job'o bandymų eilutės vienu metu netenka apsaugos.
+Normaliame kelyje tai nekenkia — objektai šalinami pirmi, job'o eilutė paskutinė. Bet
+daliniame gedime seka yra tokia:
+
+1. vienas `delete()` grąžina klaidą, o job'o eilutė vis tiek pašalinama (arba jau buvo
+   pašalinta kitu keliu);
+2. nuorodų nebėra → bandymų eilutės nebeapsaugotos;
+3. retencija po horizonto jas pašalina;
+4. `deletionRetry` grįžta prie job'o, PAŽYMĖTO ištrynimui, ir nebeturi iš kur sužinoti
+   adresų;
+5. objektas lieka saugykloje amžiams — be nuorodos, be registro eilutės, be
+   `list(prefix)`.
+
+Tai TA PATI forma, dėl kurios registras FK į `jobs` sąmoningai neturi („`CASCADE`
+pašalintų eilutę BŪTENT tuo momentu, kai ji reikalinga"). Predikatui, remiantis tuo pačiu
+ryšiu, tas efektas grįžtų ne per FK, o pro galines duris.
+
+**Todėl apsauga simetriška tam, kas jau įrodyta apie tvarką: ją teikia ir IŠTRYNIMO
+ŽYMA.** Žyma rašoma PRIEŠ šalinimą, tad ji yra patvarus signalas, išgyvenantis nuorodos
+dingimą:
+
+> bandymo eilutė nešalinama pagal amžių, jei jos `storage_key` yra gyvoje `job_results`
+> eilutėje **ARBA** jos job'as turi neišspręstą ištrynimo žymą
+> (`erasure_marks.status <> 'deleted'`).
+
+Antroji sąlyga pati savaime pasibaigia: žyma uždaroma, kai ištrynimas patvirtinamas, ir
+tada eilutė teisėtai tampa valytina. Apsauga nėra amžina — ji trunka lygiai tol, kol
+ištrynimas neišspręstas.
+
+⚠️ **SĄLYGA 3a: KONFIGŪRACIJOS NEATITIKIMAS NĖRA „NORMALUS FAIL-CLOSED".**
+
+Antroji predikato šaka reiškia, kad šlavėjas skaito `deletionTombstones`, o tos saugyklos
+backend'as renkasi **automatiškai** — `pasirinktiBackend()` yra
+`arNurodytaPostgres(env) ? "postgres" : "memory"` (`deletionTombstones/index.js:80-82`).
+Tai vienintelis toks komponentas iš keturių (#245).
+
+Iš to seka derinys, kurio negalima praleisti: jei `jobStore` yra PostgreSQL, o žymų
+konfigūracija skiriasi (kitas taikinys, `PG*` ir `DATABASE_URL` neatitikimas), fail-closed
+suveiks KIEKVIENAI eilutei — ir šlavėjas **niekada nieko nešluos, tyliai**, nes kiekvienos
+eilutės žymos statusas bus „nežinau".
+
+Tai ta pati klasė kaip 4b, bet KITO MASTO: 4b praleidžia atskiras eilutes, o čia
+fail-closed padengia VISĄ šlavimą. Todėl šlavėjas privalo skirti du dalykus:
+
+| Būsena | Kaip pranešama |
+|---|---|
+| atskira eilutė praleista (senas `created_at`, vykstantis rašymas) | skaitiklis suvestinėje (4b) |
+| **žymų saugykla nepasiekiama arba kitokia** | **žingsnio lygio būsena, pranešama VIENĄ kartą aiškiai** — ne kaip N praleistų eilučių |
+
+Priešingu atveju konfigūracijos klaida atrodys kaip normalus fail-closed darbas, ir
+skaitiklis, į kurį niekas nežiūri, bus vienintelis skirtumas.
+
+⚠️ **IR SUVESTINĖJE TAI PRIVALO BŪTI ATSKIRA REIKŠMĖ, NE NULIS.**
+
+`runRetentionSweep()` grąžina suvestinę, ir „šis žingsnis NEVYKDYTAS" joje turi turėti
+savo reikšmę. **Nulis reiškia „nieko nebuvo", o čia reiškia „nežinau, ar buvo"** — ta pati
+riba kaip fasado `null` (`listResultArtifacts()`: „nežinau, netrink"). Sulietus abu,
+sustabdytas žingsnis atrodytų kaip tuščias, o tai tiksliai ta būsena, kurios 3a ir vengia:
+konfigūracijos klaida, atrodanti kaip normalus darbas.
+
+⚠️ **IŠVESTINĖ SĄLYGA, KURIĄ ŠIS PREDIKATAS UŽDEDA ŠLAVĖJUI.** `erasure_marks` gyvena
+toje pačioje bazėje kaip `job_result_attempts` (tos pačios migracijos), tad predikatas
+yra VIENAS `SQL` sakinys, o ne dviejų saugyklų palyginimas — tai svarbu, nes lyginant per
+programą tarp dviejų skaitymų liktų langas. Bet žymų fasadas gali veikti ATMINTIES
+režimu (`pasirinktiBackend(env) === "memory"`); tada lentelė egzistuoja, bet tuščia, ir
+`OR` sąlyga neapsaugotų NIEKO. Vadinasi šlavėjas privalo būti fail-closed: **jei žymų
+saugykla nėra `postgres`, valymas pagal amžių NEVYKDOMAS.** Praleidus tai, apsauga
+atrodytų veikianti ir tyliai negaliotų — ta pati klasė kaip „`[]` reiškia nėra ko
+trinti".
+
+⚠️ **ŽINOMAS LIEKAMASIS DARBAS (ne šio PR apimtis, bet užrašomas): „ANTRA SĄRAŠO
+KOPIJA" YRA KLASĖ, NE TRYS ATVEJAI.**
+
+PR-5 pradžioje CI davė tris radinius, ir visi trys buvo ta pati forma: antra to paties
+sąrašo ar skaičiaus kopija (`restoredJobStore` būtinų metodų sąrašas; metodų skaičius
+`postgresStore.integration`; skaičius testo varde). Antrasis ypač iškalbingas —
+komentaras dubliavimą PRIPAŽINO ir nurodė „keičiamas abiejose", ir vis tiek atsiliko
+antrą kartą. **Nurodymas nėra mechanizmas** (§19.5, patvirtinta eksperimentu).
+
+Taisymai buvo taškiniai: dvi kopijos suvienytos, viena pašalinta. Klasė lieka atvira —
+trečia kopija gali atsirasti rytoj, ir niekas nekris, kol ji neatsiliks. Struktūrinis
+variantas: **`BUTINI_SYSTEM_METODAI` IŠVEDAMAS iš kontrakto rinkinio metodų aibės**, o ne
+laikomas atskira konstanta. Nedaroma dabar (keistų `jobErasure` reikalavimų šaltinį
+viduryje PR-5), bet įrašoma, nes ši klasė projekte kartojasi ne pirmą kartą.
+
+⚠️ **KĄ PR-5 VIS DAR PRIVALO ĮRODYTI PATS:** `joboBandymai()` iki šiol nekviečiamas iš
+produkcinio kodo — jis buvo parašytas PR-4 ir laukė šio PR. Tol, kol jį kviečia tik
+testai, „erasure trina pagal registrą" yra dokumentacija, ne savybė.
+
+---
+
+⚠️ **ĮĖJIMO SĄLYGA (4): ŠLAVĖJAS PRIVALO BANDYTI ABU VARDUS** (#294 uždarymas).
 
 PR-4 eksportavo `laikinasVardas(raktas)` (`utils/artifactStore/fsStore.js`) būtent tam,
 kad šlavėjas laikino failo vardą apskaičiuotų iš registro `storage_key`. Bet **iš
@@ -860,10 +1042,116 @@ Vadinasi šlavėjas tikrina ABU adresus, o „nė vieno nėra" yra **sėkmė**, 
 eilutė tada tiesiog uždaroma. Vieno adreso tikrinimas praleistų pusę atvejų, o testas su
 vienu scenarijumi liktų žalias — todėl PR-5 testai privalo dengti abi puses atskirai.
 
+⚠️ **KETVIRTAS DERINYS — ABU RASTI — YRA INVARIANTO PAŽEIDIMAS, NE ŠALINIMO ATVEJIS.**
+
+Radus IR laikinąjį, IR galutinį objektą, reikštų, kad `rename` neįvyko, o ankstesnis
+bandymas TUO PAČIU raktu paliko galutinį objektą. Su attempt-unique raktais
+(`results/<jobId>/<attemptId>.json`) to būti negali: kiekvienas bandymas turi savo adresą.
+
+Todėl šlavėjas šio atvejo **netyli ir abiejų neištrina** — jis praneša jį kaip invarianto
+pažeidimą. Jei kada nors rakto schema pasikeis (pvz. į turinio adresą, kuris jau kartą
+buvo atmestas), tai bus PIRMAS signalas — ir vienintelis, nes `list(prefix)` pagal A3
+nėra.
+
 ⚠️ Tai galioja `fs` saugyklai. `s3` laikino objekto neturi (`put` yra vienas
 `PutObject`), tad ten klausimas neegzistuoja — bet šlavėjas privalo tai spręsti pagal
 eilutės `storage_type`, ne prielaida, ta pačia taisykle kaip visi kiti per-row
 sprendimai šiame skyriuje.
+
+⚠️ **ĮĖJIMO SĄLYGA 4a: ŠLAVĖJAS NEGALI LIESTI VYKSTANČIO RAŠYMO.**
+
+Determinizmas pridėtas dėl ATRANDAMUMO, bet jis kartu padarė objektą PAŽEIDŽIAMĄ. Kol
+vardas buvo atsitiktinis, galiojo netyčinė savybė: šlavėjas laikino failo ištrinti
+NEGALĖJO — vardo nebuvo iš kur sužinoti. Dabar gali.
+
+Scenarijus: registro eilutė sukuriama PRIEŠ `put()`, o didelis rezultatas rašomas ilgai.
+Jei eilutė atrodo pakankamai sena — atkurta iš dump'o su senu `created_at`, laikrodžio
+šuolis arba agresyviai sukonfigūruotas horizontas — šlavėjas apskaičiuoja tą patį vardą
+ir jį pašalina. Rašytojas gauna `ENOENT` ties `rename`, arba `rename` pavyksta, o
+objektas jau ne tas.
+
+⚠️ **24 h horizontas tai dengia ATSITIKTINAI, ne pagal konstrukciją.**
+`revivalHorizonsMs()` atsako „kada eilė gali prikelti darbą", ne „kiek gali trukti vienas
+rašymas". Tai dvi skirtingos trukmės, sutampančios tik dabar; pakeitus vieną, kita tyliai
+nustotų dengti.
+
+**Sprendimas, kurį šlavėjas privalo įgyvendinti:**
+
+1. `abandoned` eilutės šluojamos laisvai — rašytojas jau baigė, ir tai žinoma iš būsenos;
+2. `pending` eilutėms horizontas turi ATSKIRĄ, eksplicitiškai išvestą narį: „maksimali
+   vieno rašymo trukmė". Jis NEIŠVEDAMAS iš `revivalHorizonsMs()` ir negali būti su juo
+   sulietas — kitaip grįžtame prie sutapimo;
+3. `created_at` po atkūrimo iš dump'o yra ŠALTINIO laikas, tad amžius iš jo gali būti
+   melagingai didelis. Šlavėjas privalo tai spręsti fail-closed — ta pati riba kaip
+   `deploymentIdentity` („duomenys keliauja su `pg_dump`"), ir ji sprendžiama šlavėjo
+   žingsnyje su testu, ne prielaida.
+
+   ⚠️ **Dengiama tik DETEKTUOJAMA dalis, ir tai lieka `UNVERIFIED`:** ateityje esantis
+   `created_at` atpažįstamas, o įtartinai senas, bet praeityje esantis — ne, nes nuo
+   tikrai senos eilutės jis neatskiriamas.
+
+   ⚠️ **Bet tai neišnaudota kryptis, ne principinis apribojimas.** Jei atkūrimas paliktų
+   žymą apie ATKŪRIMO MOMENTĄ (`backup_horizon` jau yra tos pačios šeimos artefaktas),
+   eilutės, kurių `created_at` ankstesnis už paskutinį atkūrimą, būtų traktuojamos
+   atskirai — tai neatskirtų „sena" nuo „iš dump'o", bet atskirtų „iki atkūrimo" nuo „po
+   jo". Ataskaitos `UNVERIFIED` eilutė privalo nurodyti šią kryptį, kitaip po metų ji
+   skaitysis kaip riba, kurios nėra kaip peržengti.
+
+⚠️ Priežastis užrašoma, ne tik sprendimas: **determinizmas buvo pridėtas dėl
+atrandamumo, ir jis kartu padarė objektą pažeidžiamą.** Be šito sakinio kitas žmogus,
+matydamas „papildomą narį horizonte", pagrįstai laikys jį pertekliumi.
+
+⚠️ **SĄLYGA 4b: FAIL-CLOSED TURI SAVO PABAIGĄ — ARBA BENT MATOMUMĄ.**
+
+Iš 4a seka, kad egzistuos `pending` eilutės, kurių šlavėjas neliečia NIEKADA:
+
+| Eilutė | Ar kenkia? |
+|---|---|
+| iš atkurto dump'o su melagingai senu `created_at` | **Taip** — objektas gali būti, o šlavėjas jo neliečia PAGAL APIBRĖŽIMĄ, ne dėl klaidos |
+| likusi po proceso, žuvusio PRIEŠ `put()` | Ne — objekto nėra, eilutė yra tik šiukšlė registre |
+
+Tai ta pati forma, kurią 7.5a jau sutiko ištrynimo žymoms: **neišspręstos žymos
+nesensta**. Sprendimas ten buvo ne horizontas, o MATOMUMAS, ir precedentas yra
+`retentionSweeper.js:269-274`:
+
+> FAIL-SAFE nėra klaida - tai sąmoningas atsisakymas spėlioti. Bet jis privalo būti
+> matomas: tyliai praleistas valymas atrodytų kaip valymas.
+
+Šlavėjas privalo turėti tos pačios formos analogą: **skaitiklį „`pending` eilučių,
+praleistų dėl fail-closed", ir `log.warn`, kai jis nenulinis.** Be jo fail-closed yra
+teisingas sprendimas su neapibrėžta pabaiga — o saugyklos augimą kas nors aiškinsis po
+metų. Skaitiklis eina į tą pačią `runRetentionSweep()` suvestinę kaip `jobs`, `audio`,
+`auditEntries`, `tombstones`.
+
+⚠️ **SĄLYGA 4c: „MAKSIMALI RAŠYMO TRUKMĖ" YRA EURISTIKA, IR TAI UŽRAŠOMA IŠ KARTO.**
+
+4a sąmoningai atsieja šį narį nuo `revivalHorizonsMs()`, bet iš to seka kaina: atsiranda
+NAUJA RANKINĖ konstanta. Skirtumas nuo prikėlimo horizontų yra esminis — pastarieji
+IŠVEDAMI iš eilės konfigūracijos, tad pasikeitus eilei riba pasikeičia savaime. Rašymo
+trukmė tokio šaltinio neturi.
+
+Dalinį šaltinį ji vis dėlto turi, ir jis įvardijamas: **`MAX_RESULT_BYTES`**
+(`utils/resultLimits.js:154`, numatyta 20 MiB) kartu su saugyklos užklausos timeout'u
+apibrėžia viršutinę vieno rašymo trukmės ribą geriau nei pasirinktas skaičius. `fs`
+timeout'o neturi; `s3` naudoja SDK numatytuosius, tad tikslaus šaltinio šiandien NĖRA —
+ir būtent todėl konstanta yra euristika, ne išvedimas.
+
+Todėl ji užrašoma tuo pačiu šablonu kaip `MAX_SEGMENTO_BAITAI` (#294): **iš ko kilo, ką
+atmeta ir KADA NUSTOTŲ GALIOTI.** Be to po pusmečio ji bus arba „supaprastinta", arba
+padvigubinta be matavimo — abu be jokio signalo, nes rankinė reikšmė tyliai atsilieka nuo
+tikrovės (ši klasė projekte kartojosi keturis kartus).
+
+⚠️ **KODĖL IŠVEDIMO NĖRA: RIBOS NIEKAS NEAPIBRĖŽIA.**
+
+Tikslinimas, kuris keičia paieškos kryptį ateities skaitytojui. Viršutinės vieno rašymo
+trukmės ribos nėra ne todėl, kad jos neapskaičiavome, o todėl, kad **jos niekas
+neapibrėžia**: `fs` `put()` timeout'o neturi apskritai, o `s3` naudoja AWS SDK
+numatytuosius, kurių repo nefiksuoja. `API_TIMEOUT_MS` yra `httpClient` konstanta ir
+saugyklų neliečia.
+
+Vadinasi 4c yra euristika ne dėl formulės trūkumo, o dėl **trūkstamo apribojimo**. Kas
+nors, norintis 4c paversti išvedimu, turi pirma pridėti tą apribojimą (saugyklos
+užklausos timeout'ą), o ne ieškoti geresnės formulės iš esamų reikšmių.
 
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
