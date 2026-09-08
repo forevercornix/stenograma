@@ -143,6 +143,7 @@ async function _valytiPasenusiusJobus(now) {
 
   let pasalinta = 0;
   let praleista = 0;
+  const nepavykeArtefaktai = [];
 
   for (const jobId of kandidatai) {
     const { vykdytojas } = await tombstones.claimForDeletion(jobId, {
@@ -177,6 +178,8 @@ async function _valytiPasenusiusJobus(now) {
             ? "saugykla nepalaiko deleteResultArtifacts()"
             : artefaktai.nepavyko.map((n) => `${n.storageKey}: ${n.priezastis}`).join("; ");
 
+        /** ⚠️ Ta pati taisyklė kitoje šakoje: nesėkmė yra kvito dalis, ne tik logas. */
+        nepavykeArtefaktai.push(`pasenęs job'as ${jobId}: ${priezastis}`);
         log.warn(`Retencija: pasenusio job'o artefaktų pašalinti nepavyko (${jobId}): ${priezastis}`);
         await tombstones
           .complete(jobId, TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" })
@@ -222,7 +225,7 @@ async function _valytiPasenusiusJobus(now) {
     await jobStore.sweepExpired(now);
   }
 
-  return { pasalinta, praleista };
+  return { pasalinta, praleista, nepavyke: nepavykeArtefaktai };
 }
 
 /**
@@ -345,6 +348,7 @@ async function _valytiRezultatoBandymus() {
   let pasalinta = 0;
   const uzdarytini = [];
   const karantinuotini = [];
+  const nepavyke = [];
 
   for (const v of verdiktai) {
     if (v.verdiktas === "pazeidimas") {
@@ -361,6 +365,13 @@ async function _valytiRezultatoBandymus() {
     }
 
     if (v.verdiktas === "nepavyko") {
+      /**
+       * ⚠️ NESĖKMĖ PATENKA Į `errors`, NE TIK Į LOGĄ (Codex, #304 antras raundas).
+       *
+       * Vien logginant, tame pačiame cikle pašalinus ką nors kita, kvitas sakytų
+       * `success: true`, nors jautrus objektas liko. Logas nėra kvito dalis.
+       */
+      nepavyke.push(`bandymas ${v.storageKey}: ${v.priezastis}`);
       log.warn(`Retencija: bandymo objekto pašalinti nepavyko (${v.storageKey}): ${v.priezastis}`);
       continue;
     }
@@ -398,7 +409,7 @@ async function _valytiRezultatoBandymus() {
    */
   const pazeidimai = await jobStore.system.karantinuotuSkaicius();
 
-  return { pasalinta, praleista, pazeidimai, nevykdyta: false };
+  return { pasalinta, praleista, pazeidimai, nepavyke, nevykdyta: false };
 }
 
 /**
@@ -432,6 +443,8 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     const r = await _valytiPasenusiusJobus(now);
     summary.jobs = r.pasalinta;
     summary.jobsSkipped = r.praleista;
+    /** ⚠️ Artefaktų nesėkmė yra KVITO dalis: be jos ciklas atrodytų sėkmingas. */
+    for (const klaida of r.nepavyke || []) summary.errors.push(`result artifacts: ${klaida}`);
   } catch (e) {
     summary.errors.push(`jobs: ${e.message}`);
   }
@@ -441,6 +454,7 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     summary.resultAttempts = bandymai.pasalinta;
     summary.resultAttemptsSkipped = bandymai.praleista;
     summary.resultAttemptsViolations = bandymai.pazeidimai;
+    for (const klaida of bandymai.nepavyke || []) summary.errors.push(`result attempts: ${klaida}`);
     if (bandymai.nevykdyta) summary.resultAttempts = null;
   } catch (e) {
     summary.errors.push(`result attempts: ${e.message}`);
@@ -519,14 +533,27 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
    * ir nepašalino. Bet pažeidimai ir praleidimai skaičiuojami: jie yra ĮVYKIS, net kai
    * nieko nepašalinta.
    */
+  /**
+   * ⚠️ TRYS SKIRTINGI DALYKAI, NE VIENAS (Codex, #304 antras raundas).
+   *
+   * Praėjęs taisymas įtraukė čia TRIS skaitiklius, o pašalinimas yra tik VIENAS iš jų:
+   * `praleista` ir `pažeidimai` reiškia „NEAPDOROTA", ne „pašalinta". Kadangi
+   * karantinuotos eilutės skaičiuojamos kiekviename cikle, vienas nuolatinis pažeidimas
+   * gamintų begalinį `RETENTION_PURGE success: true` srautą, išstumiantį tikrą audito
+   * istoriją per `AUDIT_MAX_ENTRIES`.
+   *
+   * §0 ATSAKYMAS: praėjęs taisymas PERŠOKO — įtraukė daugiau, nei reiškia. `skipped`
+   * niekada nebuvo pašalinimas.
+   *
+   * Kvitą SĖKMINGU daro tik pašalinimas; praleidimai ir pažeidimai yra įvykiai, tad jie
+   * emisiją SUKELIA (žr. `verta` žemiau), bet per `errors`/`skipped` pusę.
+   */
   const removedAnything =
     summary.jobs > 0 ||
     summary.audio > 0 ||
     summary.auditEntries > 0 ||
     summary.tombstones > 0 ||
-    summary.resultAttempts > 0 ||
-    summary.resultAttemptsViolations > 0 ||
-    summary.resultAttemptsSkipped > 0;
+    summary.resultAttempts > 0;
 
   /**
    * ⚠️ KLAIDA IRGI YRA ĮVYKIS (#233 Codex, P2).
@@ -536,7 +563,13 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
    * logina tik tada, kai visas pažadas atmetamas, o klaidos čia sugaunamos.
    * Nesėkmingas automatinis asmens duomenų šalinimas privalo palikti pėdsaką.
    */
-  const verta = removedAnything || summary.errors.length > 0;
+  /**
+   * ⚠️ PRALEIDIMAI IR PAŽEIDIMAI VERTI ĮRAŠO, BET NE SĖKMĖS. Jie patenka į `verta`, tad
+   * operatorius juos mato; bet `success` skaičiuojamas iš `errors`, tad kvitas su
+   * karantinuota eilute nebus „sėkmingas ištrynimas".
+   */
+  const nebaigtiDarbai = summary.resultAttemptsViolations > 0 || summary.resultAttemptsSkipped > 0;
+  const verta = removedAnything || nebaigtiDarbai || summary.errors.length > 0;
 
   // Įrašom TIK kai kažkas realiai pašalinta arba kai buvo klaidų - kitaip kas
   // valandą rašytume tuščią įvykį ir per AUDIT_MAX_ENTRIES išstumtume naudingus.
@@ -551,7 +584,13 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
      */
     await rasytiAudita({
       event: "RETENTION_PURGE",
-      success: summary.errors.length === 0,
+      /**
+       * ⚠️ NEAPDOROTAS DARBAS NĖRA SĖKMĖ. Karantinuota eilutė reiškia objektą, kurio
+       * niekas nepašalino; praleista — eilutę, kurios amžiaus negalima apskaičiuoti.
+       * Abiem atvejais „sėkmingas retencijos ciklas" būtų teiginys apie darbą, kuris
+       * neįvyko.
+       */
+      success: summary.errors.length === 0 && !nebaigtiDarbai,
       error: summary.errors.length ? summary.errors.join("; ") : null,
       details:
         `jobs=${summary.jobs} audio=${summary.audio} audit=${summary.auditEntries} ` +

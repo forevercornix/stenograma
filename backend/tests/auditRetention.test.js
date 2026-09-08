@@ -741,3 +741,112 @@ test("#157 PR-5: KONTROLĖ — ta pati bazė leidžia šlavimą", async () => {
     jobStore.listExpired = atsargos.expired;
   }
 });
+
+test("#157 PR-5: ciklas su TIK karantinuota eilute NEIŠRAŠO `success: true` kvito", async () => {
+  /**
+   * ⚠️ AGREGATAS SUPLAKĖ TRIS DALYKUS (Codex, #304 antras raundas).
+   *
+   * `praleista` ir `pažeidimai` reiškia „NEAPDOROTA", ne „pašalinta". Kadangi
+   * karantinuotos eilutės skaičiuojamos KIEKVIENAME cikle, vienas nuolatinis pažeidimas
+   * gamintų begalinį `success: true` kvitų srautą, per `AUDIT_MAX_ENTRIES` išstumiantį
+   * tikrą audito istoriją.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({ kandidatai: [], praleista: 0 });
+  jobStore.system.sweepResultArtifacts = async () => [];
+  /** Nuolatinis pažeidimas: eilutė karantine, nieko nepašalinta. */
+  jobStore.system.karantinuotuSkaicius = async () => 1;
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, 0, "kontrolė: nieko nepašalinta");
+    assert.equal(summary.resultAttemptsViolations, 1, "kontrolė: pažeidimas matomas");
+
+    const kvitas = (await auditLog.getAll()).find((i) => i.event === "RETENTION_PURGE");
+    assert.ok(kvitas, "įvykis vertas įrašo — operatorius privalo jį matyti");
+    assert.equal(kvitas.result, "failure", "bet tai NE sėkmingas retencijos ciklas");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
+
+test("#157 PR-5: viena sėkmė + vienas `nepavyko` tame pačiame cikle → kvitas NE sėkmingas", async () => {
+  /**
+   * ⚠️ NESĖKMĖ BUVO TIK LOGE (Codex, #304). Tame pačiame cikle pašalinus ką nors kita,
+   * kvitas sakydavo `success: true`, nors jautrus objektas liko. Logas nėra kvito dalis.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const atsargos = {
+    zymos: tombstones.jungtiesTapatybe,
+    job: jobStore.system.jungtiesTapatybe,
+    valytini: jobStore.system.valytiniBandymai,
+    sweep: jobStore.system.sweepResultArtifacts,
+    pasalinti: jobStore.system.pasalintiBandymus,
+    karantinas: jobStore.system.karantinuotuSkaicius,
+    expired: jobStore.listExpired,
+  };
+
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => ({
+    kandidatai: [
+      { attempt_id: "a", storage_type: "fs", storage_key: "results/j/a.json" },
+      { attempt_id: "b", storage_type: "fs", storage_key: "results/j/b.json" },
+    ],
+    praleista: 0,
+  });
+  jobStore.system.sweepResultArtifacts = async () => [
+    { attemptId: "a", storageKey: "results/j/a.json", verdiktas: "pasalinta" },
+    { attemptId: "b", storageKey: "results/j/b.json", verdiktas: "nepavyko", priezastis: "EACCES" },
+  ];
+  jobStore.system.pasalintiBandymus = async () => 1;
+  jobStore.system.karantinuotuSkaicius = async () => 0;
+  jobStore.listExpired = async () => [];
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, 1, "kontrolė: viena sėkmė TIKRAI buvo");
+    assert.ok(
+      summary.errors.some((e) => e.includes("EACCES")),
+      `nesėkmė privalo patekti į suvestinę: ${JSON.stringify(summary.errors)}`
+    );
+
+    const kvitas = (await auditLog.getAll()).find((i) => i.event === "RETENTION_PURGE");
+    assert.equal(kvitas.result, "failure", "vienas likęs objektas paneigia viso ciklo sėkmę");
+  } finally {
+    tombstones.jungtiesTapatybe = atsargos.zymos;
+    jobStore.system.jungtiesTapatybe = atsargos.job;
+    jobStore.system.valytiniBandymai = atsargos.valytini;
+    jobStore.system.sweepResultArtifacts = atsargos.sweep;
+    jobStore.system.pasalintiBandymus = atsargos.pasalinti;
+    jobStore.system.karantinuotuSkaicius = atsargos.karantinas;
+    jobStore.listExpired = atsargos.expired;
+  }
+});
