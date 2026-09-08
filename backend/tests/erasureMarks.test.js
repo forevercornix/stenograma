@@ -731,3 +731,51 @@ test("#157 PR-5: žymų sąlygos alias'as VALIDUOJAMAS — vienintelė injekcijo
     assert.match(neisspresptosZymosSalyga(geras), new RegExp(`${geras}\\.job_id`));
   }
 });
+
+test("#157 PR-5: žymų jungties tapatybė imama iš INICIJUOTO pool'o, ne iš `env`", async () => {
+  /**
+   * ⚠️ §21.3 KLAUSIMAS: AR TAISYMAS SPRENDŽIA, AR PERKELIA (Codex, #304).
+   *
+   * Pirmoji redakcija lygino backend'o VARDĄ; taisymas įvedė `jungtiesTapatybe()`, bet
+   * skaičiavo ją iš `process.env`. Tai tas pats defektas, perkeltas: vardas ->
+   * konfigūracija, o reikėjo iki INICIJUOTO RYŠIO. `init(env)` gali gauti kitą aplinką
+   * nei `process.env`, ir tada sargas lygina ne tas jungtis — ir praeina.
+   *
+   * Testas tikrina būtent tą skirtumą: `process.env` rodo į VIENĄ bazę, o inicijuota
+   * aplinka — į KITĄ. Teisinga tapatybė yra antroji.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+  const { tapatybesTekstas } = require("../utils/pgConnection");
+
+  await tombstones._clearForTests();
+
+  const senasUrl = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = "postgres://vartotojas@aplinkos-host:5432/aplinkos_baze";
+
+  try {
+    /** Atmintiniame režime tapatybės nėra — ir tai teisingas atsakymas, ne spėjimas. */
+    delete process.env.DATABASE_URL;
+    await tombstones.init({});
+    assert.equal(tombstones.jungtiesTapatybe(), null, "be `postgres` jungties tapatybės NĖRA");
+    await tombstones.shutdown();
+
+    /**
+     * ⚠️ TIKRO POSTGRES ČIA NEREIKIA: tikrinamas ŠALTINIS, ne turinys. Pakanka, kad
+     * tapatybė nebūtų skaičiuojama iš `process.env` — o be jungties ji yra `null`.
+     */
+    process.env.DATABASE_URL = "postgres://vartotojas@aplinkos-host:5432/aplinkos_baze";
+    await tombstones.init({});
+    const tapatybe = tombstones.jungtiesTapatybe();
+
+    assert.notEqual(
+      tapatybe && tapatybesTekstas(tapatybe),
+      "aplinkos-host:5432/aplinkos_baze",
+      "tapatybė NEGALI būti skaičiuojama iš `process.env` — `init()` gavo tuščią aplinką"
+    );
+  } finally {
+    await tombstones.shutdown().catch(() => {});
+    if (senasUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = senasUrl;
+    await tombstones._clearForTests();
+  }
+});

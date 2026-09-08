@@ -708,10 +708,21 @@ module.exports = {
    * tuščia šalia `job_result_attempts`, ir žymų apsauga tyliai negina nieko — būtent ta
    * apsauga, dėl kurios sąlyga 3a buvo įvesta.
    */
-  jungtiesTapatybe(env = process.env) {
-    if (store.backend !== "postgres") return null;
+  /**
+   * ⚠️ IMAMA IŠ `_pool.options`, NE IŠ `env` (Codex, #304 antras raundas).
+   *
+   * Pirmoji redakcija perskaičiuodavo tapatybę iš KONFIGŪRACIJOS. Tai buvo tas pats
+   * defektas, tik perkeltas: vardo palyginimas -> konfigūracijos palyginimas, o reikėjo
+   * iki INICIJUOTO RYŠIO. `init(env)` gali gauti kitą aplinką nei `process.env` (testai,
+   * DR keliai, kelių bazių procesai), ir tada sargas lygintų ne tas jungtis — ir praeitų.
+   *
+   * Precedentas repo jau buvo: PostgreSQL job store tapatybę ima iš `_pool.options`.
+   * Klausimas yra „kur jungtis REALIAI eina", tad atsakymą turi duoti pati jungtis.
+   */
+  jungtiesTapatybe() {
+    if (store.backend !== "postgres" || !_pool || !_pool.options) return null;
 
-    const { jungtiesTapatybe: tapatybe, pgJungtiesNustatymai } = require("../pgConnection");
-    return tapatybe(pgJungtiesNustatymai(env), env);
+    const { jungtiesTapatybe: tapatybe } = require("../pgConnection");
+    return tapatybe(_pool.options);
   },
 };
