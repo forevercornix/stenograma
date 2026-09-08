@@ -175,9 +175,23 @@ matoma kaip `nevykdyta`, ne kaip nulis.
 
 ⚠️ **`sweepExpired()` TTL bendrasis `DELETE` per registrą NEEINA.** Nuo #183 pagrindinis
 retencijos kelias yra `listExpired` + per-job šalinimas, o `sweepExpired()` lieka
-priežiūrai ir praeina tik tada, kai kandidatų nebuvo. Jei jis kada nors vėl taptų
-pagrindiniu keliu, external objektai liktų nepašalinti — riba užrašyta, mechanizmo, kuris
-tai pagautų, kol kas nėra.
+priežiūrai ir praeina tik tada, kai kandidatų nebuvo.
+
+**Kas nutinka, jei ši prielaida lūžta — tai duomenų saugojimo, ne tvarkos klausimas.**
+Pasenęs job'as su external rezultatu praeitų šiuo keliu, ir seka būtų tokia:
+
+1. bendrasis `DELETE` pašalina `jobs` eilutę;
+2. `CASCADE` pašalina `job_results`, tad nuorodos nebelieka;
+3. registro eilutė išgyvena (FK nėra sąmoningai) ir lieka **`committed`**;
+4. kandidatų predikatas įsipareigotų eilučių neima — tad šlavėjas jos nepaims
+   **niekada**, ne „vėliau", o pagal apibrėžimą.
+
+Rezultatas — **nuolatinis orphan'as su transkripcija**: jo nepasiekia nei erasure (job'o
+eilutės nebėra), nei šlavėjas (eilutė išbraukta), nei DB krypties skenavimas (į jį niekas
+nerodo). Tai asmens duomenys, likę po job'o gyvavimo pabaigos — tiksliai ta būsena, kuriai
+registras ir buvo sukurtas.
+
+Riba užrašyta; mechanizmo, kuris pagautų iškvietimo tvarkos pasikeitimą, kol kas nėra.
 
 ⚠️ **Ištrynimo žymos neišgyvena restarto – BE PostgreSQL.** Kai nenurodytas nei
 `DATABASE_URL`, nei `PG*`, jos gyvena tik proceso atmintyje ir nėra bendros
