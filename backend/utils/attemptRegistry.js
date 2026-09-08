@@ -207,6 +207,7 @@ async function valytiniBandymai(
             (a.created_at > now()) AS laikas_ateityje
        FROM job_result_attempts a
       WHERE a.busena <> $1
+        AND a.karantinas_nuo IS NULL
         AND NOT EXISTS (
               SELECT 1 FROM job_results r
                WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
@@ -277,9 +278,47 @@ async function pasalintiBandymus(vykdytojas, attemptIds) {
   return rowCount;
 }
 
+/**
+ * KARANTINAS — VIENKARTINIS, NE KARTOJAMAS (#157, PR-5).
+ *
+ * ⚠️ ŽYMA UŽDEDAMA TIK TADA, KAI JOS DAR NĖRA (`karantinas_nuo IS NULL`). Grąžinamos
+ * TIK naujai karantinuotos eilutės, ir būtent jos pranešamos: antras ciklas apie tą patį
+ * objektą nebekalba, nors eilutė tebėra.
+ */
+async function pazymetiKarantina(vykdytojas, attemptIds) {
+  if (!Array.isArray(attemptIds) || attemptIds.length === 0) return [];
+
+  const { rows } = await vykdytojas.query(
+    `UPDATE job_result_attempts
+        SET karantinas_nuo = now(), updated_at = now()
+      WHERE attempt_id = ANY($1::uuid[]) AND karantinas_nuo IS NULL
+      RETURNING attempt_id, storage_type, storage_key`,
+    [attemptIds]
+  );
+
+  return rows;
+}
+
+/**
+ * KIEK EILUČIŲ KARANTINE — SUVESTINEI (#157, PR-5).
+ *
+ * ⚠️ SKAIČIUOJAMA KIEKVIENAME CIKLE, NORS PRANEŠIMAS VIENKARTINIS. Karantinas be išėjimo
+ * būtų tyliai kaupiama būsena; matomumas suvestinėje yra jo pabaigos sąlyga —
+ * operatorius mato, kad kažkas laukia, kol pats tai uždaro.
+ */
+async function karantinuotuSkaicius(vykdytojas) {
+  const { rows } = await vykdytojas.query(
+    "SELECT count(*)::int AS kiek FROM job_result_attempts WHERE karantinas_nuo IS NOT NULL"
+  );
+
+  return rows[0].kiek;
+}
+
 module.exports = {
   BUSENA,
   valytiniBandymai,
+  pazymetiKarantina,
+  karantinuotuSkaicius,
   pasalintiBandymus,
   bandymoRaktas,
   naujasBandymas,

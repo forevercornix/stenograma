@@ -343,17 +343,20 @@ async function _valytiRezultatoBandymus() {
   }
 
   let pasalinta = 0;
-  let pazeidimai = 0;
   const uzdarytini = [];
+  const karantinuotini = [];
 
   for (const v of verdiktai) {
     if (v.verdiktas === "pazeidimas") {
-      pazeidimai += 1;
-      log.error("Retencija: INVARIANTO PAŽEIDIMAS bandymų registre", {
-        stage: "attempt_sweep_violation",
-        raktas: v.storageKey,
-        priezastis: v.priezastis,
-      });
+      /**
+       * ⚠️ KARANTINAS, NE PAKARTOTINIS PRANEŠIMAS (#157, PR-5).
+       *
+       * Be žymos kiekvienas ciklas aptiktų tą patį objektą iš naujo ir vėl rašytų
+       * `log.error`. Per savaitę tai triukšmas apie vieną failą, o triukšmas virsta
+       * ignoravimu — ir `pazeidimas`, kuris yra VIENINTELIS signalas apie pasikeitusią
+       * rakto schemą, prarastų paskirtį.
+       */
+      karantinuotini.push(v);
       continue;
     }
 
@@ -372,6 +375,28 @@ async function _valytiRezultatoBandymus() {
   }
 
   if (uzdarytini.length > 0) await jobStore.system.pasalintiBandymus(uzdarytini);
+
+  /**
+   * ⚠️ PRANEŠAMOS TIK NAUJAI KARANTINUOTOS. `pazymetiKarantina()` grąžina eilutes, kurių
+   * žymos dar nebuvo, tad antras ciklas apie tą patį objektą nebekalba.
+   */
+  const naujaiKarantinuoti = await jobStore.system.pazymetiKarantina(karantinuotini.map((v) => v.attemptId));
+
+  for (const eilute of naujaiKarantinuoti) {
+    const v = karantinuotini.find((x) => x.attemptId === eilute.attempt_id);
+    log.error("Retencija: INVARIANTO PAŽEIDIMAS bandymų registre — eilutė KARANTINUOTA", {
+      stage: "attempt_sweep_violation",
+      raktas: eilute.storage_key,
+      priezastis: v ? v.priezastis : null,
+    });
+  }
+
+  /**
+   * ⚠️ SKAIČIUOJAMOS VISOS, NE TIK NAUJOS. Karantinas be išėjimo yra tyliai kaupiama
+   * būsena; matomumas suvestinėje yra jo pabaigos sąlyga — operatorius mato, kad kažkas
+   * laukia, kol pats tai uždaro (pašalindamas eilutę arba nunulindamas `karantinas_nuo`).
+   */
+  const pazeidimai = await jobStore.system.karantinuotuSkaicius();
 
   return { pasalinta, praleista, pazeidimai, nevykdyta: false };
 }

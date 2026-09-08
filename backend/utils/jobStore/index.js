@@ -1010,6 +1010,16 @@ module.exports = {
         ? store.pasalintiBandymus(attemptIds)
         : null;
     },
+    /** Karantinas: vienkartinis pranešimas apie invarianto pažeidimą (#157, PR-5). */
+    pazymetiKarantina: async (attemptIds) => {
+      await ensureInit();
+      return typeof store.pazymetiKarantina === "function" ? store.pazymetiKarantina(attemptIds) : [];
+    },
+    /** Kiek eilučių karantine — matoma suvestinėje, kol jos egzistuoja (#157, PR-5). */
+    karantinuotuSkaicius: async () => {
+      await ensureInit();
+      return typeof store.karantinuotuSkaicius === "function" ? store.karantinuotuSkaicius() : 0;
+    },
     sweepResultArtifacts: async (kandidatai) => {
       await ensureInit();
       return typeof store.sweepResultArtifacts === "function"

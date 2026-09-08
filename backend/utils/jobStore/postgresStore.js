@@ -2616,6 +2616,18 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     return attemptRegistry.valytiniBandymai(pool, nustatymai);
   }
 
+  /** Karantinas — vienkartinis pranešimas apie invarianto pažeidimą (#157, PR-5). */
+  async function pazymetiKarantina(attemptIds) {
+    const attemptRegistry = require("../attemptRegistry");
+    return attemptRegistry.pazymetiKarantina(pool, attemptIds);
+  }
+
+  /** Kiek eilučių karantine — suvestinei, kol jos egzistuoja (#157, PR-5). */
+  async function karantinuotuSkaicius() {
+    const attemptRegistry = require("../attemptRegistry");
+    return attemptRegistry.karantinuotuSkaicius(pool);
+  }
+
   /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
   async function pasalintiBandymus(attemptIds) {
     const attemptRegistry = require("../attemptRegistry");
@@ -2745,6 +2757,8 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     sweepResultArtifacts,
     valytiniBandymai,
     pasalintiBandymus,
+    pazymetiKarantina,
+    karantinuotuSkaicius,
     close,
     STATUS,
     JOB_TYPES,

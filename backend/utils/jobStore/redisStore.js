@@ -766,6 +766,15 @@ async function remove(id, _nustatymai = {}) {
    * to daro teisingą išvadą: be jungties tapatybės negalima įrodyti, kad žymos ir bandymai
    * yra toje pačioje bazėje, tad žingsnis nevykdomas.
    */
+  /** Registro nėra — karantinuoti nėra ko (#157, PR-5). */
+  async function pazymetiKarantina() {
+    return [];
+  }
+
+  async function karantinuotuSkaicius() {
+    return 0;
+  }
+
   function jungtiesTapatybe() {
     return null;
   }
@@ -853,7 +862,7 @@ async function remove(id, _nustatymai = {}) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

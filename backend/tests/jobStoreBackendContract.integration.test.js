@@ -1017,6 +1017,10 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
    * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
    * `docs/deletion-guarantees.md`.
    *
+   * ⚠️ 23 → 25 (#157, PR-5): pridėti `pazymetiKarantina()` ir `karantinuotuSkaicius()`.
+   * `pazeidimas` yra VIENINTELIS signalas apie pasikeitusią rakto schemą, tad jis
+   * pranešamas vieną kartą, o eilutė lieka matoma suvestinėje, kol operatorius ją uždaro.
+   *
    * ⚠️ 22 → 23 (#157, PR-5): pridėtas `jungtiesTapatybe()`. Šlavėjas privalo įrodyti,
    * kad žymos ir bandymų registras yra TOJE PAČIOJE bazėje; vardų palyginimas to
    * neįrodo (#245 pamoka). `memory`/`redis` grąžina `null` — jungties jie neturi.
@@ -1053,7 +1057,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 23, "jobStore kontraktas privalo turėti tiksliai 23 metodus");
+  assert.equal(expected.length, 25, "jobStore kontraktas privalo turėti tiksliai 25 metodus");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,
