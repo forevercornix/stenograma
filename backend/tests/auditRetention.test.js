@@ -609,8 +609,13 @@ test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION
    * destruktūrizuoja importo metu, tad modulio objekto pataisymas jo nepasiektų.
    */
 
-  const tikrasBackend = Object.getOwnPropertyDescriptor(tombstones, "backend");
-  Object.defineProperty(tombstones, "backend", { get: () => "postgres", configurable: true });
+  /**
+   * ⚠️ TAPATYBĖ, NE VARDAS: šlavėjas lygina EFEKTYVIĄ jungtį, tad dublis turi grąžinti
+   * tą pačią tapatybę abiem pusėm (Codex, #304).
+   */
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const tikrasTapatybe = tombstones.jungtiesTapatybe;
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
 
   const originalus = {
     valytiniBandymai: jobStore.system.valytiniBandymai,
@@ -620,6 +625,8 @@ test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION
     listReferencedStorageKeys: jobStore.system.listReferencedStorageKeys,
   };
 
+  const tikrasJungtiesTapatybe = jobStore.system.jungtiesTapatybe;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
   jobStore.system.valytiniBandymai = async () => ({
     kandidatai: [{ attempt_id: "a", storage_type: "fs", storage_key: "results/j/a.json" }],
     praleista: 0,
@@ -642,12 +649,13 @@ test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION
     assert.ok(kvitas, `kvitas privalo būti išrašytas: ${JSON.stringify(irasai)}`);
     assert.match(kvitas.details, /attempts=1\/0\/0/, kvitas.details);
   } finally {
-    if (tikrasBackend) Object.defineProperty(tombstones, "backend", tikrasBackend);
+    tombstones.jungtiesTapatybe = tikrasTapatybe;
     Object.assign(jobStore.system, {
       valytiniBandymai: originalus.valytiniBandymai,
       sweepResultArtifacts: originalus.sweepResultArtifacts,
       pasalintiBandymus: originalus.pasalintiBandymus,
       listReferencedStorageKeys: originalus.listReferencedStorageKeys,
+      jungtiesTapatybe: tikrasJungtiesTapatybe,
     });
     jobStore.listExpired = originalus.listExpired;
   }

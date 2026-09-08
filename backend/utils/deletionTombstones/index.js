@@ -699,4 +699,19 @@ module.exports = {
   get backend() {
     return store.backend;
   },
+
+  /**
+   * EFEKTYVI JUNGTIES TAPATYBĖ — „ta pati bazė?", ne „tas pats vardas" (#157, PR-5).
+   *
+   * ⚠️ VARDO PALYGINIMO NEUŽTENKA, IR TAI #245 PAGRINDINĖ PAMOKA. Du komponentai gali
+   * abu būti „postgres" ir rodyti į SKIRTINGAS bazes; tada `erasure_marks` skaitoma
+   * tuščia šalia `job_result_attempts`, ir žymų apsauga tyliai negina nieko — būtent ta
+   * apsauga, dėl kurios sąlyga 3a buvo įvesta.
+   */
+  jungtiesTapatybe(env = process.env) {
+    if (store.backend !== "postgres") return null;
+
+    const { jungtiesTapatybe: tapatybe, pgJungtiesNustatymai } = require("../pgConnection");
+    return tapatybe(pgJungtiesNustatymai(env), env);
+  },
 };

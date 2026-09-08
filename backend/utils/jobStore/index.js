@@ -992,6 +992,11 @@ module.exports = {
      *
      * ⚠️ `null` = „NEŽINAU": saugykla be registro negali pasakyti, kad kandidatų nėra.
      */
+    /** Efektyvi jungties tapatybė — „ta pati bazė?", ne „tas pats vardas" (#157, PR-5). */
+    jungtiesTapatybe: async () => {
+      await ensureInit();
+      return typeof store.jungtiesTapatybe === "function" ? store.jungtiesTapatybe() : null;
+    },
     valytiniBandymai: async (nustatymai) => {
       await ensureInit();
       return typeof store.valytiniBandymai === "function"

@@ -104,11 +104,24 @@ async function paruosti(pool, parinktys = {}) {
      SELECT DISTINCT storage_type FROM job_result_attempts`
   );
 
+  /**
+   * ⚠️ SKAIČIUOJAMOS TIK TOS SAUGYKLOS, KURIAS STORE'AS REALIAI UŽREGISTRUOS (Codex, #304).
+   *
+   * `Object.keys()` įtraukdavo ir `{ s3: null }`: raktas yra, reikšmės nėra, o
+   * `createPostgresStore()` tokios eilutės į žemėlapį NEDEDA (`if (saugykla)`). Preflight
+   * praeidavo, replay mutuodavo ankstesnius job'us ir kristų ties pirmu S3 artefaktu —
+   * būtent tai, ką jis turėjo užkirsti.
+   *
+   * Tikrinama TIKROVĖ, ne deklaracija: reikšmė privalo egzistuoti ir turėti `backend`,
+   * kaip reikalauja pats registruojantis kelias.
+   */
+  const registruojama = (saugykla) => Boolean(saugykla) && typeof saugykla.backend === "string";
+
   const turimi = new Set([
-    ...Object.keys((parinktys && parinktys.artifactStores) || {}),
-    ...(parinktys && parinktys.artifactStore && parinktys.artifactStore.backend
-      ? [parinktys.artifactStore.backend]
-      : []),
+    ...Object.entries((parinktys && parinktys.artifactStores) || {})
+      .filter(([, saugykla]) => registruojama(saugykla))
+      .map(([tipas]) => tipas),
+    ...(parinktys && registruojama(parinktys.artifactStore) ? [parinktys.artifactStore.backend] : []),
   ]);
 
   const truksta = rows.map((r) => r.storage_type).filter((tipas) => tipas && !turimi.has(tipas));

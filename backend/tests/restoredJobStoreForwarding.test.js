@@ -148,3 +148,25 @@ test("#157 PR-5: nepilna konfigūracija atmetama PRIEŠ pirmą replay žingsnį"
   const tikInline = { query: async () => ({ rows: [] }) };
   assert.ok(await restoredJobStore.paruosti(tikInline));
 });
+
+test("#157 PR-5: preflight skaičiuoja REGISTRUOJAMAS saugyklas, ne raktus", async () => {
+  /**
+   * ⚠️ DEKLARACIJA NĖRA TIKROVĖ (Codex, #304).
+   *
+   * `{ s3: null }` turi raktą, bet `createPostgresStore()` tokios eilutės į žemėlapį
+   * nededa. Preflight, skaičiuojantis `Object.keys()`, praeidavo — o replay tada
+   * mutuodavo ankstesnius job'us ir kristų ties pirmu S3 artefaktu, t. y. darytų
+   * tiksliai tai, ką preflight turėjo užkirsti.
+   */
+  const restoredJobStore = require("../utils/restoredJobStore");
+
+  const suS3 = {
+    query: async (sql) => (/storage_type/.test(sql) ? { rows: [{ storage_type: "s3" }] } : { rows: [] }),
+  };
+
+  await assert.rejects(() => restoredJobStore.paruosti(suS3, { artifactStores: { s3: null } }), /s3/);
+  await assert.rejects(() => restoredJobStore.paruosti(suS3, { artifactStores: { s3: {} } }), /s3/);
+
+  /** KONTROLĖ: tikra saugykla su `backend` praeina. */
+  assert.ok(await restoredJobStore.paruosti(suS3, { artifactStores: { s3: { backend: "s3" } } }));
+});

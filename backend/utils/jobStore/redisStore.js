@@ -759,6 +759,17 @@ async function remove(id, _nustatymai = {}) {
    * `typeof === "function"` šakos.
    */
   /** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+  /**
+   * Jungties tapatybė — `redis` backend'as jos NETURI (#157, PR-5).
+   *
+   * ⚠️ `null` REIŠKIA „NĖRA JUNGTIES", NE „NEŽINAU". Kvietėjas (retencijos šlavėjas) iš
+   * to daro teisingą išvadą: be jungties tapatybės negalima įrodyti, kad žymos ir bandymai
+   * yra toje pačioje bazėje, tad žingsnis nevykdomas.
+   */
+  function jungtiesTapatybe() {
+    return null;
+  }
+
   async function valytiniBandymai() {
     return { kandidatai: [], praleista: 0 };
   }
@@ -842,7 +853,7 @@ async function remove(id, _nustatymai = {}) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, pasalintiBandymus, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

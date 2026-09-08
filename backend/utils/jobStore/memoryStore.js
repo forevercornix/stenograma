@@ -242,6 +242,17 @@ async function deleteResultArtifacts() {
  * `typeof === "function"` šakos.
  */
 /** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+/**
+ * Jungties tapatybė — `memory` backend'as jos NETURI (#157, PR-5).
+ *
+ * ⚠️ `null` REIŠKIA „NĖRA JUNGTIES", NE „NEŽINAU". Kvietėjas (retencijos šlavėjas) iš
+ * to daro teisingą išvadą: be jungties tapatybės negalima įrodyti, kad žymos ir bandymai
+ * yra toje pačioje bazėje, tad žingsnis nevykdomas.
+ */
+function jungtiesTapatybe() {
+  return null;
+}
+
 async function valytiniBandymai() {
   return { kandidatai: [], praleista: 0 };
 }
@@ -358,4 +369,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, pasalintiBandymus, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

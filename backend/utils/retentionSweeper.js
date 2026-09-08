@@ -248,14 +248,41 @@ const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
 async function _valytiRezultatoBandymus() {
   const tuscias = { pasalinta: 0, praleista: 0, pazeidimai: 0, nevykdyta: false };
 
-  if (tombstones.backend !== "postgres") {
+  /**
+   * ⚠️ TIKRINAMA EFEKTYVI TIKROVĖ, NE DEKLARACIJA (Codex, #304; #245 pamoka).
+   *
+   * Ankstesnė redakcija lygino VARDĄ (`tombstones.backend !== "postgres"`). Bet abu
+   * komponentai gali būti „postgres" ir rodyti į SKIRTINGAS bazes — tada kandidatų
+   * užklausa skaito tuščią `erasure_marks` šalia `job_result_attempts`, ir žymų šaka
+   * tyliai negina NIEKO. Būtent ta apsauga yra sąlygos 3a esmė.
+   *
+   * #245 ta pačią klaidą jau ištaisė kitoje vietoje: `arDviprasmiskaKonfiguracija` buvo
+   * perrašyta iš vardų palyginimo į EFEKTYVIŲ PARAMETRŲ palyginimą, ir
+   * `jungtiesTapatybe()` egzistuoja kaip tik šiam klausimui. Čia jis panaudojamas
+   * tiesiogiai.
+   */
+  const zymuTapatybe = tombstones.jungtiesTapatybe ? tombstones.jungtiesTapatybe() : null;
+  const bandymuTapatybe = await jobStore.system.jungtiesTapatybe().catch(() => null);
+  const { tapatybesTekstas } = require("./pgConnection");
+
+  const tosPacios =
+    zymuTapatybe &&
+    bandymuTapatybe &&
+    tapatybesTekstas(zymuTapatybe) === tapatybesTekstas(bandymuTapatybe);
+
+  if (!tosPacios) {
     /**
      * ⚠️ PRANEŠAMA VIENĄ KARTĄ, ŽINGSNIO LYGIU — ne kaip N praleistų eilučių. Priešingu
      * atveju konfigūracijos klaida atrodytų kaip normalus fail-closed darbas.
      */
     log.warn(
-      "Retencija: žymų saugykla nėra `postgres` - rezultato bandymų šlavimas NEVYKDOMAS " +
-        "(retencijos predikatas be žymų šakos apsaugotų nulį nereferencuotų objektų)."
+      "Retencija: žymos ir bandymų registras NE TOJE PAČIOJE bazėje - rezultato bandymų " +
+        "šlavimas NEVYKDOMAS (žymų šaka apsaugotų nulį nereferencuotų objektų).",
+      {
+        stage: "attempt_sweep_skipped",
+        zymos: tapatybesTekstas(zymuTapatybe),
+        bandymai: tapatybesTekstas(bandymuTapatybe),
+      }
     );
     return { ...tuscias, nevykdyta: true };
   }

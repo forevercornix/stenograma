@@ -2656,6 +2656,22 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     return rezultatai;
   }
 
+  /**
+   * EFEKTYVI ŠIO STORE'O JUNGTIES TAPATYBĖ (#157, PR-5; Codex #304).
+   *
+   * ⚠️ IMAMA IŠ POOL'O, NE IŠ `env`. Store'as gali būti sukonstruotas su pool'u, kurio
+   * parametrai su aplinkos kintamaisiais nesutampa — būtent taip veikia DR adapteris.
+   * Klausimas „ar žymos ir bandymai toje pačioje bazėje?" atsakomas tik iš to, kur
+   * jungtis REALIAI eina.
+   */
+  function jungtiesTapatybe() {
+    const nustatymai = (pool && pool.options) || null;
+    if (!nustatymai) return null;
+
+    const { jungtiesTapatybe: tapatybe } = require("../pgConnection");
+    return tapatybe(nustatymai);
+  }
+
   async function listReferencedStorageKeys() {
     const { rows } = await pool.query(
       "SELECT DISTINCT storage_key FROM jobs WHERE storage_key IS NOT NULL"
@@ -2703,6 +2719,7 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     listByFlag,
     listReferencedStorageKeys,
     listResultArtifacts,
+    jungtiesTapatybe,
     deleteResultArtifacts,
     sweepResultArtifacts,
     valytiniBandymai,
