@@ -2570,7 +2570,7 @@ function createPostgresStore(
       const { rows } = await pool.query(
         `SELECT storage_type, storage_key
            FROM job_results
-          WHERE job_id <> $1
+          WHERE job_id::text <> $1
             AND storage_key IS NOT NULL
             AND (storage_type, storage_key) IN (SELECT * FROM unnest($2::text[], $3::text[]))`,
         [String(jobId), adresai.map((a) => a.storageType), adresai.map((a) => a.storageKey)]
@@ -2601,9 +2601,17 @@ function createPostgresStore(
     const raktai = adresai.map((a) => a.storageKey);
 
     const { rows } = await pool.query(
+      /**
+       * ⚠️ `job_id` TIPAI SKIRIASI IR TAI KASTUOJAMA EKSPLICITIŠKAI (CI `34272518154`).
+       *
+       * `job_results.job_id` yra `uuid`, o `job_result_attempts.job_id` — `text`
+       * (sąmoningas nukrypimas: registras aktyvus visuose diegimuose, tad ID forma `uuid`
+       * negarantuota). `UNION` be kastų palieka parametro tipą neapibrėžtą, ir viena pusė
+       * krenta su `text <> uuid`.
+       */
       `SELECT storage_type, storage_key
          FROM job_results
-        WHERE job_id <> $1
+        WHERE job_id::text <> $1
           AND storage_key IS NOT NULL
           AND (storage_type, storage_key) IN (SELECT * FROM unnest($2::text[], $3::text[]))
        UNION
