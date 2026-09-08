@@ -84,7 +84,10 @@ function loadEraseJob({
          * ⚠️ #157 PR-5: `eraseJob` po nepavykusio CAS klausia, ar eilutė dar yra —
          * be šio metodo dublis kristų `TypeError`, ir testas įrodinėtų ne tą dalyką.
          */
-        get: async (id) => (jobStore.dingo ? null : { id }),
+        get: async (id) => {
+          if (jobStore.getThrows) throw new Error(jobStore.getThrows);
+          return jobStore.dingo ? null : { id };
+        },
         remove: async (id) => {
           calls.jobRemove.push(id);
           if (jobStore.throws) throw new Error(jobStore.throws);
@@ -603,6 +606,42 @@ test("#157 PR-5: NEBAIGTAS ištrynimas palieka `deletion_pending` — kad būtų
       outcome.errors.some((e) => e.includes("BARJERO")),
       "klasifikacija privalo nurodyti, kad pasikartojimas yra barjero problema"
     );
+  } finally {
+    restore();
+  }
+});
+
+test("#157 PR-5: po-CAS SKAITYMO klaida nėra „job'o nebėra“", async () => {
+  /**
+   * ⚠️ NEIGIAMAS REZULTATAS IŠ ĮRODYMO, KURIS JO NENUSTATO (Codex, #304).
+   *
+   * `.catch(() => null)` laikiną DB gedimą paversdavo išvada „eilutės nebėra, vadinasi
+   * pavyko": `criticalFailure` likdavo `false`, kvitas būdavo išrašomas, o žyma
+   * finalizuojama — po ištrynimo, kurio niekas nepatvirtino.
+   */
+  const { eraseJob, calls, restore } = loadEraseJob({
+    mode: "inline",
+    jobStore: {
+      removed: false,
+      getThrows: "laikinas DB gedimas",
+      resultArtifacts: {
+        pasalinti: ["a"],
+        jauNebuvo: [],
+        nepavyko: [],
+        matyti: [{ storageType: "fs", storageKey: "a" }],
+      },
+    },
+  });
+
+  try {
+    const outcome = await eraseJob(completedJob({ storageKey: null }));
+
+    assert.equal(outcome.criticalFailure, true, "nežinoma būsena negali būti sėkmė");
+    assert.ok(
+      outcome.errors.some((e) => e.includes("NEŽINOMA")),
+      `klaida privalo pasakyti, kad būsena nežinoma: ${outcome.errors.join("; ")}`
+    );
+    assert.deepEqual(calls.auditRecord, [], "kvitas NEIŠRAŠOMAS");
   } finally {
     restore();
   }

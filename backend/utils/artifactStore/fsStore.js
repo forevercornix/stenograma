@@ -836,11 +836,26 @@ function createFsArtifactStore({ root } = {}) {
 
     try {
       await fsp.rm(laikinas);
-      return true;
     } catch (klaida) {
       if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return false;
       throw klaida;
     }
+
+    /**
+     * ⚠️ IŠTRYNIMAS PATVIRTINAMAS TIK PO KATALOGO `fsync` — LYGIAI KAIP `delete()`
+     * (Codex, #304).
+     *
+     * `rm()` grąžinta sėkmė reiškia, kad įrašas pašalintas iš katalogo BUFERIO, ne kad
+     * jis persistintas. Optimistinis `true` čia kerta tą pačią grandinę: šlavėjas
+     * uždaro registro eilutę -> maitinimo dingimas grąžina laikinąjį failą su
+     * transkripcija -> objekto neberodo NIEKAS, nes eilutės nebėra, o `list(prefix)`
+     * pagal A3 nėra.
+     *
+     * `delete()` šį `fsync` daro nuo #290 būtent šiam gedimo režimui; čia jis buvo
+     * praleistas, nes taisyklė buvo pritaikyta ten, kur apie ją buvo pranešta.
+     */
+    await sinchronizuotiKatalaga(path.dirname(pilnas));
+    return true;
   }
 
   return {

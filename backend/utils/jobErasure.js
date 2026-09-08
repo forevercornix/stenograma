@@ -252,7 +252,30 @@ async function eraseJob(job, { store = jobStore } = {}) {
     );
 
     if (!outcome.jobRemoved && matytiArtefaktai) {
-      const dar = await saugykla.system.get(jobId, { hydrate: false }).catch(() => null);
+      /**
+       * ⚠️ SKAITYMO KLAIDA NĖRA „JOB'O NEBĖRA" (Codex, #304).
+       *
+       * Ankstesnė redakcija darė `.catch(() => null)`: laikinas DB gedimas virsdavo
+       * išvada „eilutės nebėra, vadinasi ištrynimas pavyko", `criticalFailure` likdavo
+       * `false`, kvitas būdavo išrašomas, o žyma finalizuojama. Neigiamas rezultatas
+       * priimtas iš įrodymo, kuris jo NENUSTATO.
+       *
+       * Ta pati taisyklė jau veikia `fsStore` zonde (`ENOENT` skiriamas nuo kitų
+       * klaidų) ir `sweepResultArtifacts` (metimas -> `nepavyko`, ne `nebuvo`); ji
+       * tiesiog nebuvo pritaikyta čia.
+       */
+      let dar = null;
+      try {
+        dar = await saugykla.system.get(jobId, { hydrate: false });
+      } catch (skaitymoKlaida) {
+        outcome.errors.push(
+          `jobStore: po-CAS patikros skaityti nepavyko (${skaitymoKlaida.message}) — ` +
+            "ištrynimo būsena NEŽINOMA, tad kvitas neišrašomas"
+        );
+        outcome.criticalFailure = true;
+        dar = null;
+      }
+
       if (dar) {
         /**
          * ⚠️ TAI NE „LENKTYNĖS" — TAI BARJERO PRAĖJIMAS.

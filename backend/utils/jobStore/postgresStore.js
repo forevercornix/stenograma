@@ -2211,6 +2211,29 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
       const esami = await listResultArtifacts(id, client);
       const nauji = esami.filter((a) => !laukiami.has(`${a.storageType}\u0000${a.storageKey}`));
 
+      /**
+       * ⚠️ AIBĖS PALYGINIMO NEUŽTENKA — ADRESAS GALI BŪTI PERRAŠYTAS (Codex, #304).
+       *
+       * Nauji adresai pagaunami aukščiau, bet adresas, JAU BUVĘS `laukiami`, pakartotinės
+       * patikros negaudavo. Pasiekiamas atvejis: enumeravome `pending` bandymą, ištrynėme
+       * jo objektą, o tas pats rašytojas savo `put()` pabaigė PO to — objektas grįžo tuo
+       * pačiu adresu, o CAS to nemato.
+       *
+       * ⚠️ FIZINIS ZONDAS ČIA NEGALIMAS: mes po `jobs` eilutės užraktu, o objekto I/O po
+       * juo vykti negali (PR-4 D4). Todėl tikrinama tai, ką galima patikrinti DB pusėje:
+       * ar kuris nors enumeruotas bandymas VIS DAR `pending`. `pending` reiškia „rašytojas
+       * gali būti vykdomas dabar" — o tada ištrynimas nėra baigtas, nesvarbu, ką matėme
+       * prieš tai.
+       *
+       * ⚠️ TAI NE AMŽINA BLOKUOTĖ. Miręs rašytojas savo eilutės neuždaro, bet šlavėjas ją
+       * pašalina po horizonto (sąlyga 4a), ir tada ši patikra praeina. Pabaiga apibrėžta.
+       */
+      const vykstantys = esami.filter((a) => a.busena === "pending");
+
+      if (vykstantys.length > 0) {
+        return false;
+      }
+
       if (nauji.length > 0) {
         /**
          * ⚠️ NEMETAMA IŠ ČIA. Kvietėjas (`eraseJob`) turi savo `outcome` ir savo
