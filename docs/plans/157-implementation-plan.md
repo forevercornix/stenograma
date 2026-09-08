@@ -1086,6 +1086,17 @@ nustotų dengti.
    `deploymentIdentity` („duomenys keliauja su `pg_dump`"), ir ji sprendžiama šlavėjo
    žingsnyje su testu, ne prielaida.
 
+   ⚠️ **Dengiama tik DETEKTUOJAMA dalis, ir tai lieka `UNVERIFIED`:** ateityje esantis
+   `created_at` atpažįstamas, o įtartinai senas, bet praeityje esantis — ne, nes nuo
+   tikrai senos eilutės jis neatskiriamas.
+
+   ⚠️ **Bet tai neišnaudota kryptis, ne principinis apribojimas.** Jei atkūrimas paliktų
+   žymą apie ATKŪRIMO MOMENTĄ (`backup_horizon` jau yra tos pačios šeimos artefaktas),
+   eilutės, kurių `created_at` ankstesnis už paskutinį atkūrimą, būtų traktuojamos
+   atskirai — tai neatskirtų „sena" nuo „iš dump'o", bet atskirtų „iki atkūrimo" nuo „po
+   jo". Ataskaitos `UNVERIFIED` eilutė privalo nurodyti šią kryptį, kitaip po metų ji
+   skaitysis kaip riba, kurios nėra kaip peržengti.
+
 ⚠️ Priežastis užrašoma, ne tik sprendimas: **determinizmas buvo pridėtas dėl
 atrandamumo, ir jis kartu padarė objektą pažeidžiamą.** Be šito sakinio kitas žmogus,
 matydamas „papildomą narį horizonte", pagrįstai laikys jį pertekliumi.

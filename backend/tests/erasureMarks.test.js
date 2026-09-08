@@ -675,3 +675,59 @@ test("ATOMIŠKUMAS: neteisingas `actorKind` NEPALIEKA pusiau įvykusio perėjimo
 
   await memoryStore.clear();
 });
+
+test("#157 PR-5: žymų sąlygos posakis NETURI bind parametrų", () => {
+  /**
+   * ⚠️ KONTRAKTAS BUVO TIK KOMENTARE (Codex, #157 PR-5).
+   *
+   * `neisspresptosZymosSalyga()` grąžina tekstą, kurį kvietėjas ĮDEDA į savo užklausą ir
+   * numeruoja savo `$1`, `$2` pats. Posakis su bind parametru TYLIAI sujauktų numeraciją:
+   * kvietėjo `$3` taptų posakio parametru, o klaida pasirodytų kaip nesusijęs tipo
+   * neatitikimas kitoje sakinio vietoje.
+   *
+   * Sąlyga buvo užrašyta doc komentare ir niekur netikrinama. Pakeitimas, atrodantis
+   * nekaltai („pridėkim `AND m.marked_at > $1`"), sulaužytų kvietėją, kurio autorius apie
+   * posakį nė nežino.
+   */
+  const { neisspresptosZymosSalyga } = require("../utils/deletionTombstones/postgresStore");
+
+  const posakis = neisspresptosZymosSalyga("a");
+
+  assert.ok(!posakis.includes("$"), `posakyje negali būti bind parametrų: ${posakis}`);
+  assert.match(posakis, /^NOT EXISTS \(/, "forma privalo būti `NOT EXISTS (...)`");
+  assert.match(posakis, /a\.job_id/, "alias'as privalo patekti į posakį");
+  assert.match(posakis, /erasure_marks/, "kontrolė: posakis apskritai liečia žymų lentelę");
+});
+
+test("#157 PR-5: žymų sąlygos alias'as VALIDUOJAMAS — vienintelė injekcijos gynyba", () => {
+  /**
+   * ⚠️ POSAKIS SUDAROMAS EILUČIŲ SUJUNGIMU, tad alias'as yra vienintelė vieta, per kurią
+   * kvietėjo tekstas patenka į SQL. Validacija be įrodymo yra prielaida — o čia kaina
+   * būtų SQL injekcija per parametrą, kuris atrodo nekaltas.
+   */
+  const { neisspresptosZymosSalyga } = require("../utils/deletionTombstones/postgresStore");
+
+  for (const blogas of [
+    "a; DROP TABLE erasure_marks",
+    "a' OR '1'='1",
+    "a.b",
+    "a-b",
+    "1a",
+    "",
+    " ",
+    null,
+    undefined,
+    123,
+  ]) {
+    assert.throws(
+      () => neisspresptosZymosSalyga(blogas),
+      TypeError,
+      `privalo būti atmestas: ${JSON.stringify(blogas)}`
+    );
+  }
+
+  /** KONTROLĖ: teisėti alias'ai praeina, kitaip testas įrodinėtų, kad viskas atmetama. */
+  for (const geras of ["a", "attempts", "_x", "a1", "JOB"]) {
+    assert.match(neisspresptosZymosSalyga(geras), new RegExp(`${geras}\\.job_id`));
+  }
+});

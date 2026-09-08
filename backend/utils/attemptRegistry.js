@@ -181,6 +181,13 @@ async function joboBandymai(vykdytojas, jobId) {
  * `created_at` yra vienintelė DETEKTUOJAMA to dalis; įtartinai senos, bet praeityje
  * esančios eilutės nuo tikrai senų neatskiriamos — riba užrašyta plane, ne nutylėta.
  *
+ * ⚠️ RIBA NĖRA PRINCIPINĖ — YRA NEIŠNAUDOTA KRYPTIS. Jei atkūrimas paliktų žymą apie
+ * ATKŪRIMO MOMENTĄ (`backup_horizon` lentelė jau yra tos šeimos artefaktas), eilutės,
+ * kurių `created_at` ankstesnis už paskutinį atkūrimą, būtų traktuojamos atskirai. Tai
+ * neatskirtų „sena" nuo „iš dump'o", bet atskirtų „iki atkūrimo" nuo „po jo", ir
+ * šlavėjui to gali pakakti. Ne PR-5 apimtis; užrašyta, kad po metų neskaitytųsi kaip
+ * principinis apribojimas.
+ *
  * @returns {Promise<{kandidatai: Array<object>, praleista: number}>}
  */
 async function valytiniBandymai(
