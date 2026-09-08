@@ -2419,6 +2419,107 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     return rezultatas;
   }
 
+  /**
+   * ŠLAVIMO VERDIKTAI — VIENAS KELIAS, TRYS BŪSENOS (#157, PR-5; sąlygos 4 ir 4d).
+   *
+   * ⚠️ ZONDAS GRĄŽINA TRIS BŪSENAS, NE DVI, IR JOS SPRENDŽIAMOS VIENOJE VIETOJE.
+   *
+   * Iš `pending` eilutės neįmanoma pasakyti, kurioje `rename` pusėje procesas nutrūko:
+   * prieš jį egzistuoja tik laikinas vardas, po jo — tik galutinis raktas, po cleanup —
+   * nė vieno. Todėl tikrinami ABU adresai, ir verdiktas priimamas iš PORO, ne iš dviejų
+   * nepriklausomų `if`. Parašius `if (laikinas) ... if (galutinis) ...`, trečia būsena
+   * atsirastų kaip šalutinis efektas, o ne kaip sprendimas — ir dvi šakos galėtų
+   * nesutarti dėl tos pačios būsenos.
+   *
+   * | laikinas | galutinis | verdiktas |
+   * |---|---|---|
+   * | ne | ne | `nebuvo` — SĖKMĖ: nėra ko šalinti, eilutė uždaroma |
+   * | ne | taip | `pasalinta` — nutrūko po `rename`, prieš commit'ą |
+   * | taip | ne | `pasalinta` — nutrūko prieš `rename` |
+   * | taip | taip | ⚠️ `pazeidimas` — NEŠALINAMA |
+   *
+   * ⚠️ KETVIRTAS DERINYS YRA INVARIANTO PAŽEIDIMAS, NE ŠALINIMO ATVEJIS. Jis reikštų,
+   * kad `rename` neįvyko, o ankstesnis bandymas TUO PAČIU raktu paliko galutinį objektą —
+   * su attempt-unique raktais to būti negali. Šlavėjas jį PRANEŠA ir abiejų NETRINA: jei
+   * kada nors rakto schema pasikeis, tai bus pirmas signalas, ir vienintelis, nes
+   * `list(prefix)` pagal A3 nėra.
+   *
+   * ⚠️ LAIKINOJO ETAPO BUVIMAS DEKLARUOJAMAS SAUGYKLOS (`turiLaikinaji`), ne spėjamas.
+   * `s3` ir `inline` jo neturi — ten `put()` yra vienas veiksmas, tad laikinas adresas
+   * visada „nėra". Klausiant `typeof ... === "function"`, backend'as, praradęs metodą,
+   * atrodytų kaip backend'as be laikinojo etapo.
+   *
+   * @param {Array<{attempt_id: string, storage_type: string, storage_key: string}>} kandidatai
+   * @returns {Promise<Array<{attemptId: string, storageKey: string, verdiktas: string, priezastis?: string}>>}
+   */
+  /** Šlavimo kandidatai — predikatas gyvena `attemptRegistry` (#157, PR-5). */
+  async function valytiniBandymai(nustatymai) {
+    const attemptRegistry = require("../attemptRegistry");
+    return attemptRegistry.valytiniBandymai(pool, nustatymai);
+  }
+
+  /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
+  async function pasalintiBandymus(attemptIds) {
+    const attemptRegistry = require("../attemptRegistry");
+    return attemptRegistry.pasalintiBandymus(pool, attemptIds);
+  }
+
+  async function sweepResultArtifacts(kandidatai) {
+    const rezultatai = [];
+
+    for (const kandidatas of kandidatai || []) {
+      const raktas = kandidatas.storage_key;
+      let saugykla = null;
+
+      try {
+        saugykla = parinktiArtefaktuSaugykla(kandidatas.storage_type);
+      } catch (klaida) {
+        rezultatai.push({
+          attemptId: kandidatas.attempt_id,
+          storageKey: raktas,
+          verdiktas: "nepavyko",
+          priezastis: klaida.message,
+        });
+        continue;
+      }
+
+      try {
+        const laikinas = saugykla.turiLaikinaji ? (await saugykla.laikinasisZondas(raktas)).yra : false;
+        const galutinis = (await saugykla.head(raktas)) !== null;
+
+        if (laikinas && galutinis) {
+          rezultatai.push({
+            attemptId: kandidatas.attempt_id,
+            storageKey: raktas,
+            verdiktas: "pazeidimas",
+            priezastis:
+              "laikinas IR galutinis objektas tuo pačiu raktu — su attempt-unique raktais neįmanoma",
+          });
+          continue;
+        }
+
+        if (!laikinas && !galutinis) {
+          rezultatai.push({ attemptId: kandidatas.attempt_id, storageKey: raktas, verdiktas: "nebuvo" });
+          continue;
+        }
+
+        if (galutinis) await saugykla.delete(raktas);
+        else await saugykla.pasalintiLaikinaji(raktas);
+
+        rezultatai.push({ attemptId: kandidatas.attempt_id, storageKey: raktas, verdiktas: "pasalinta" });
+      } catch (klaida) {
+        rezultatai.push({
+          attemptId: kandidatas.attempt_id,
+          storageKey: raktas,
+          verdiktas: "nepavyko",
+          priezastis: klaida.message,
+        });
+      }
+    }
+
+    return rezultatai;
+  }
+
   async function listReferencedStorageKeys() {
     const { rows } = await pool.query(
       "SELECT DISTINCT storage_key FROM jobs WHERE storage_key IS NOT NULL"
@@ -2467,6 +2568,9 @@ function createPostgresStore(pool, { artifactStores = null, artifactStore = null
     listReferencedStorageKeys,
     listResultArtifacts,
     deleteResultArtifacts,
+    sweepResultArtifacts,
+    valytiniBandymai,
+    pasalintiBandymus,
     close,
     STATUS,
     JOB_TYPES,

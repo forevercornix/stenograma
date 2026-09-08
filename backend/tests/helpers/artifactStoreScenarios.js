@@ -264,6 +264,16 @@ const RAKTO_ARGUMENTAI = Object.freeze({
   head: (raktas) => [raktas],
   verify: (raktas) => [raktas, { bytes: 1, checksum: "a".repeat(64) }],
   delete: (raktas) => [raktas],
+  /**
+   * ⚠️ ŠLAVĖJO OPERACIJOS IRGI PRIIMA RAKTĄ (#157, PR-5).
+   *
+   * Jos ima GALUTINĮ raktą ir pačios išveda laikinojo vardą, tad rakto tikrinimas joms
+   * galioja lygiai taip pat: `keliasSaugus()` -> `leksinisKelias()` -> `patikrintiRakta()`.
+   * Įrašius jas į `BE_RAKTO`, atsirastų dvi operacijos, per kurias blogas raktas patektų
+   * į failų sistemos kelio skaičiavimą be patikros.
+   */
+  laikinasisZondas: (raktas) => [raktas],
+  pasalintiLaikinaji: (raktas) => [raktas],
 });
 
 /**

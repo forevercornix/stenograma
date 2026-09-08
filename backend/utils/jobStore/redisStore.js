@@ -743,6 +743,26 @@ function createRedisStore(redisClient) {
     return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
   }
 
+  /**
+   * Šlavimo verdiktai — `redis` backend'e kandidatų nėra (#157, PR-5).
+   *
+   * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: bandymų registro šis backend'as
+   * neturi, tad ir šluoti nėra ko. Metodas egzistuoja, kad šlavėjas neturėtų
+   * `typeof === "function"` šakos.
+   */
+  /** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+  async function valytiniBandymai() {
+    return { kandidatai: [], praleista: 0 };
+  }
+
+  async function pasalintiBandymus() {
+    return 0;
+  }
+
+  async function sweepResultArtifacts() {
+    return [];
+  }
+
   async function listReferencedStorageKeys() {
     const jobs = await _scanJobs();
     const keys = new Set();
@@ -814,7 +834,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, pasalintiBandymus, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

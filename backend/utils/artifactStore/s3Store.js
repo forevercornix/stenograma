@@ -483,6 +483,8 @@ function createS3ArtifactStore({
 
   return {
     backend: "s3",
+    /** Laikinojo etapo NĖRA: rašymas yra vienas veiksmas (#157, PR-5). */
+    turiLaikinaji: false,
     bucket,
     put,
     read,

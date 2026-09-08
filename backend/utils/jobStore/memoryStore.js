@@ -234,6 +234,26 @@ async function deleteResultArtifacts() {
   return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
 }
 
+/**
+ * Šlavimo verdiktai — `memory` backend'e kandidatų nėra (#157, PR-5).
+ *
+ * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: bandymų registro šis backend'as
+ * neturi, tad ir šluoti nėra ko. Metodas egzistuoja, kad šlavėjas neturėtų
+ * `typeof === "function"` šakos.
+ */
+/** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+async function valytiniBandymai() {
+  return { kandidatai: [], praleista: 0 };
+}
+
+async function pasalintiBandymus() {
+  return 0;
+}
+
+async function sweepResultArtifacts() {
+  return [];
+}
+
 async function listReferencedStorageKeys() {
   const keys = new Set();
   for (const job of jobs.values()) {
@@ -330,4 +350,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, pasalintiBandymus, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

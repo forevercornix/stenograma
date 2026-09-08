@@ -240,7 +240,8 @@ function createInlineArtifactStore({ vykdytojas } = {}) {
     return { backend: "inline", isorinioResurso: false };
   }
 
-  return { backend: "inline", put, read, readStream, head, verify, delete: del, patikrintiSaugykla };
+  /** Laikinojo etapo NĖRA: turinys gyvena DB eilutėje, ne faile (#157, PR-5). */
+  return { backend: "inline", turiLaikinaji: false, put, read, readStream, head, verify, delete: del, patikrintiSaugykla };
 }
 
 module.exports = { createInlineArtifactStore };

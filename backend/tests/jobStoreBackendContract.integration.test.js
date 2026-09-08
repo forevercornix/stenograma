@@ -1017,6 +1017,14 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
    * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
    * `docs/deletion-guarantees.md`.
    *
+   * ⚠️ 20 → 22 (#157, PR-5): pridėti `valytiniBandymai()` ir `pasalintiBandymus()` —
+   * kandidatų atranka su retencijos predikatu ir eilučių uždarymas PO to, kai objekto
+   * tikrai nebėra.
+   *
+   * ⚠️ 19 → 20 (#157, PR-5): pridėtas `sweepResultArtifacts()`. Šlavėjas klausia
+   * saugyklos dėl tos pačios priežasties kaip erasure: laikinojo etapo buvimas ir
+   * `storage_type -> ArtifactStore` žemėlapis gyvena ten.
+   *
    * ⚠️ 18 → 19 (#157, PR-5): pridėtas `deleteResultArtifacts()`. Šalina saugykla, ne
    * `jobErasure`, nes `storage_type -> ArtifactStore` žemėlapis gyvena store'e ir yra
    * vienintelis; antra jo kopija kvietėjo pusėje būtų antra rezultato vietos
@@ -1041,7 +1049,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 19, "jobStore kontraktas privalo turėti tiksliai 19 metodų");
+  assert.equal(expected.length, 22, "jobStore kontraktas privalo turėti tiksliai 22 metodus");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,

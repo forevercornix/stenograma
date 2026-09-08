@@ -973,6 +973,37 @@ module.exports = {
      * kurio #157 riba draudžia („dalinis object-storage gedimas negali būti
      * raportuojamas kaip sėkmingas galutinis ištrynimas").
      */
+    /**
+     * Šlavimo verdiktai — retencijos kelias (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU". Šlavėjas tai privalo laikyti ŽINGSNIO sustabdymu, ne
+     * tuščiu rezultatu: nulis nušluotų reiškia „nieko nebuvo", o `null` — „nežinau, ar
+     * buvo". Ta pati riba kaip `listResultArtifacts()`.
+     */
+    /**
+     * Šlavimo kandidatai — retencijos predikatas (#157, PR-5, sąlyga 3).
+     *
+     * ⚠️ `null` = „NEŽINAU": saugykla be registro negali pasakyti, kad kandidatų nėra.
+     */
+    valytiniBandymai: async (nustatymai) => {
+      await ensureInit();
+      return typeof store.valytiniBandymai === "function"
+        ? store.valytiniBandymai(nustatymai)
+        : null;
+    },
+    /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
+    pasalintiBandymus: async (attemptIds) => {
+      await ensureInit();
+      return typeof store.pasalintiBandymus === "function"
+        ? store.pasalintiBandymus(attemptIds)
+        : null;
+    },
+    sweepResultArtifacts: async (kandidatai) => {
+      await ensureInit();
+      return typeof store.sweepResultArtifacts === "function"
+        ? store.sweepResultArtifacts(kandidatai)
+        : null;
+    },
     deleteResultArtifacts: async (jobId) => {
       await ensureInit();
       return typeof store.deleteResultArtifacts === "function"

@@ -198,6 +198,130 @@ async function _valytiPasenusiusJobus(now) {
 }
 
 /**
+ * MAKSIMALI VIENO RAŠYMO TRUKMĖ — EURISTIKA, NE IŠVEDIMAS (#157, PR-5, sąlyga 4c).
+ *
+ * ⚠️ IŠ KO KILO. `pending` registro eilutė atsiranda PRIEŠ `put()`, o laikinas failas nuo
+ * PR-5 turi APSKAIČIUOJAMĄ vardą — tad šlavėjas galėtų ištrinti vykstančio rašymo
+ * laikinąjį failą. Prikėlimo horizonto čia neužtenka: `revivalHorizonsMs()` atsako „kada
+ * eilė gali prikelti darbą", ne „kiek gali trukti vienas rašymas". Dvi skirtingos
+ * trukmės, sutampančios tik atsitiktinai.
+ *
+ * ⚠️ KODĖL EURISTIKA, O NE IŠVEDIMAS. Viršutinės rašymo trukmės ribos nėra ne todėl, kad
+ * jos neapskaičiavome, o todėl, kad JOS NIEKAS NEAPIBRĖŽIA: `fs` `put()` timeout'o
+ * neturi, `s3` naudoja AWS SDK numatytuosius, o `API_TIMEOUT_MS` yra `httpClient`
+ * konstanta ir saugyklų neliečia. Vienintelis realus rėmas yra `MAX_RESULT_BYTES`
+ * (20 MiB numatyta), bet be timeout'o jis trukmės neriboja.
+ *
+ * ⚠️ KADA NUSTOTŲ GALIOTI: pridėjus saugyklos užklausos timeout'ą. Tada šis narys
+ * privalo tapti IŠVEDIMU iš jo, o ne likti pasirinktu skaičiumi. Ta pati forma kaip
+ * `MAX_SEGMENTO_BAITAI` (#294): riba, kuri žino savo pačios galiojimo sąlygą.
+ *
+ * Vienas rašymas, trunkantis ilgiau nei valandą, šiandien reikštų pakibusį procesą, o ne
+ * lėtą saugyklą — o pakibusio proceso eilutė teisėtai tampa šluotina.
+ */
+const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
+
+/**
+ * REZULTATO BANDYMŲ ŠLAVIMAS (#157, PR-5).
+ *
+ * ⚠️ ŽINGSNIS STABDOMAS VISAS, JEI ŽYMŲ SAUGYKLA NĖRA `postgres` (sąlyga 3a).
+ *
+ * Retencijos predikatas remiasi DVIEM apsaugomis: nuoroda ir neišspręsta ištrynimo žyma.
+ * Atminties režime `erasure_marks` lentelė lieka tuščia, tad antra šaka neapsaugotų NIEKO,
+ * o pirmoji gina tik REFERENCUOTUS objektus — būtent tuos, kurių šlavėjas ir neliečia.
+ * Vadinasi liktų nulis apsaugų tai kategorijai, kurią šlavėjas trina.
+ *
+ * Sąlyga 8 (DB invariantas „daugiausia vienas įsipareigotas") čia NĖRA pakaitalas dėl tos
+ * pačios priežasties: ji sako, kuris bandymas referencuotas, o šlavėjo dalykas yra
+ * nereferencuoti.
+ */
+/**
+ * ⚠️ `now` ČIA SĄMONINGAI NEPERDUODAMAS — AMŽIŲ SKAIČIUOJA DB LAIKRODIS.
+ *
+ * Kiti retencijos žingsniai gauna `now` iš kvietėjo (testams). Čia palyginimas vyksta
+ * SQL sakinyje prieš `now()`, ir tai ne praleidimas: `created_at` rašo DB, tad lyginant
+ * su programos laiku bet koks nesutapimas tarp aplikacijos ir bazės laikrodžių taptų
+ * paslinkta riba — o visas 4b klausimas kaip tik ir yra apie nepatikimas laiko žymas.
+ * Kaina: šio žingsnio negalima „pasukti į priekį" iš testo, tad ribos tikrinamos
+ * senindant EILUTES, ne laiką.
+ */
+async function _valytiRezultatoBandymus() {
+  const tuscias = { pasalinta: 0, praleista: 0, pazeidimai: 0, nevykdyta: false };
+
+  if (tombstones.backend !== "postgres") {
+    /**
+     * ⚠️ PRANEŠAMA VIENĄ KARTĄ, ŽINGSNIO LYGIU — ne kaip N praleistų eilučių. Priešingu
+     * atveju konfigūracijos klaida atrodytų kaip normalus fail-closed darbas.
+     */
+    log.warn(
+      "Retencija: žymų saugykla nėra `postgres` - rezultato bandymų šlavimas NEVYKDOMAS " +
+        "(retencijos predikatas be žymų šakos apsaugotų nulį nereferencuotų objektų)."
+    );
+    return { ...tuscias, nevykdyta: true };
+  }
+
+  const { revivalHorizonsMs } = require("../queues/config");
+  const horizontas = revivalHorizonsMs().horizonMs;
+
+  const { kandidatai, praleista } = await jobStore.system.valytiniBandymai({
+    atmestuRibaMs: horizontas,
+    laukianciuRibaMs: horizontas + MAX_RASYMO_TRUKME_MS,
+    kiekis: JOBU_BATCH,
+  });
+
+  if (praleista > 0) {
+    /**
+     * ⚠️ 7.5a PRECEDENTAS: „FAIL-SAFE nėra klaida - tai sąmoningas atsisakymas spėlioti.
+     * Bet jis privalo būti matomas: tyliai praleistas valymas atrodytų kaip valymas."
+     */
+    log.warn(
+      `Retencija: ${praleista} bandymo eilutė(-ės) praleista - \`created_at\` ateityje ` +
+        "(tikėtina, atkurta iš dump'o su šaltinio laiko žymomis)."
+    );
+  }
+
+  const verdiktai = await jobStore.system.sweepResultArtifacts(kandidatai);
+
+  if (verdiktai === null) {
+    log.warn("Retencija: saugykla nepalaiko `sweepResultArtifacts()` - šlavimas NEVYKDOMAS.");
+    return { ...tuscias, praleista, nevykdyta: true };
+  }
+
+  let pasalinta = 0;
+  let pazeidimai = 0;
+  const uzdarytini = [];
+
+  for (const v of verdiktai) {
+    if (v.verdiktas === "pazeidimas") {
+      pazeidimai += 1;
+      log.error("Retencija: INVARIANTO PAŽEIDIMAS bandymų registre", {
+        stage: "attempt_sweep_violation",
+        raktas: v.storageKey,
+        priezastis: v.priezastis,
+      });
+      continue;
+    }
+
+    if (v.verdiktas === "nepavyko") {
+      log.warn(`Retencija: bandymo objekto pašalinti nepavyko (${v.storageKey}): ${v.priezastis}`);
+      continue;
+    }
+
+    if (v.verdiktas === "pasalinta") pasalinta += 1;
+
+    /**
+     * ⚠️ EILUTĖ ŠALINAMA TIK TADA, KAI OBJEKTO TIKRAI NEBĖRA. Eilutė yra vienintelis
+     * adresas; pašalinus ją anksčiau, likęs objektas taptų nebeatrandamas.
+     */
+    uzdarytini.push(v.attemptId);
+  }
+
+  if (uzdarytini.length > 0) await jobStore.system.pasalintiBandymus(uzdarytini);
+
+  return { pasalinta, praleista, pazeidimai, nevykdyta: false };
+}
+
+/**
  * Vienas pilnas retencijos ciklas. Grąžina suvestinę (naudinga testams ir logams).
  */
 async function runRetentionSweep({ now = Date.now() } = {}) {
@@ -208,6 +332,19 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     audio: 0,
     auditEntries: 0,
     tombstones: 0,
+    /**
+     * ⚠️ REZULTATO BANDYMŲ ŠLAVIMAS — `null` REIŠKIA „NEVYKDYTA" (#157, PR-5, sąlyga 3a).
+     *
+     * Nulis reikštų „nieko nebuvo", o čia reikia atskirti „nežinau, ar buvo": kai žymų
+     * saugykla nėra `postgres`, retencijos predikato antra šaka neveikia, ir žingsnis
+     * stabdomas VISAS. Sulietus abu, sustabdytas žingsnis atrodytų kaip tuščias — ta
+     * pati riba kaip fasado `null` („nežinau, netrink").
+     */
+    resultAttempts: null,
+    /** Praleista dėl fail-closed (ateities `created_at`) — sąlyga 4b. */
+    resultAttemptsSkipped: 0,
+    /** Invarianto pažeidimai: laikinas IR galutinis objektas tuo pačiu raktu (4d). */
+    resultAttemptsViolations: 0,
     errors: [],
   };
 
@@ -217,6 +354,16 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     summary.jobsSkipped = r.praleista;
   } catch (e) {
     summary.errors.push(`jobs: ${e.message}`);
+  }
+
+  try {
+    const bandymai = await _valytiRezultatoBandymus();
+    summary.resultAttempts = bandymai.pasalinta;
+    summary.resultAttemptsSkipped = bandymai.praleista;
+    summary.resultAttemptsViolations = bandymai.pazeidimai;
+    if (bandymai.nevykdyta) summary.resultAttempts = null;
+  } catch (e) {
+    summary.errors.push(`result attempts: ${e.message}`);
   }
 
   try {

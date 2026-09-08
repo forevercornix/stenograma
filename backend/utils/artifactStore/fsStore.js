@@ -804,9 +804,51 @@ function createFsArtifactStore({ root } = {}) {
     return { backend: "fs", root: tikraSaknis };
   }
 
+  /**
+   * LAIKINOJO FAILO ZONDAS IR ŠALINIMAS — TIK ŠLAVĖJUI (#157, PR-5).
+   *
+   * ⚠️ KODĖL NE PER `head()` IR `delete()`. Laikinas vardas prasideda tašku, tad
+   * `patikrintiRakta()` jį ATMESTŲ: jis nėra teisėtas `ArtifactStore` raktas ir neturi
+   * juo tapti — kitaip kvietėjas galėtų jį rašyti, skaityti ir referencuoti. Zondas ima
+   * GALUTINĮ raktą ir pats išveda laikinojo vardą, tad išorėje laikinas adresas
+   * neegzistuoja kaip adresas.
+   *
+   * ⚠️ `turiLaikinaji` DEKLARUOJAMAS, NE SPĖJAMAS. Kvietėjas neklausia
+   * `typeof ... === "function"`: tyli šaka reikštų, kad backend'as, praradęs metodą,
+   * atrodytų kaip backend'as be laikinojo etapo, ir pusė gedimo atvejų dingtų be signalo.
+   */
+  async function laikinasisZondas(raktas) {
+    const pilnas = await keliasSaugus(raktas);
+    const laikinas = path.join(path.dirname(pilnas), laikinasVardas(raktas));
+
+    try {
+      const st = await fsp.stat(laikinas);
+      return { yra: true, bytes: st.size };
+    } catch (klaida) {
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return { yra: false, bytes: null };
+      throw klaida;
+    }
+  }
+
+  async function pasalintiLaikinaji(raktas) {
+    const pilnas = await keliasSaugus(raktas);
+    const laikinas = path.join(path.dirname(pilnas), laikinasVardas(raktas));
+
+    try {
+      await fsp.rm(laikinas);
+      return true;
+    } catch (klaida) {
+      if (klaida.code === "ENOENT" || klaida.code === "ENOTDIR") return false;
+      throw klaida;
+    }
+  }
+
   return {
     backend: "fs",
     root: saknis,
+    turiLaikinaji: true,
+    laikinasisZondas,
+    pasalintiLaikinaji,
     put,
     read,
     readStream,

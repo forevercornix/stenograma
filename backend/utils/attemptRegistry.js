@@ -229,9 +229,32 @@ async function valytiniBandymai(
   };
 }
 
+/**
+ * ŠLUOTŲ EILUČIŲ UŽDARYMAS (#157, PR-5).
+ *
+ * ⚠️ EILUTĖ ŠALINAMA TIK TADA, KAI OBJEKTO TIKRAI NEBĖRA. Eilutė yra VIENINTELIS objekto
+ * adresas (`list(prefix)` pagal A3 nėra), tad pašalinus ją anksčiau, likęs objektas taptų
+ * nebeatrandamas — būtent ta būsena, kurios registras ir sukurtas išvengti.
+ *
+ * ⚠️ ĮSIPAREIGOTOS EILUTĖS NELIEČIAMOS NET ČIA. Kvietėjas jų neatrenka, bet sargas
+ * kainuoja vieną sąlygą: jei kada nors kandidatų atranka praleistų `committed` eilutę,
+ * šis sakinys ją vis tiek praleistų, ir klaida liktų diagnostikoje, ne duomenyse.
+ */
+async function pasalintiBandymus(vykdytojas, attemptIds) {
+  if (!Array.isArray(attemptIds) || attemptIds.length === 0) return 0;
+
+  const { rowCount } = await vykdytojas.query(
+    "DELETE FROM job_result_attempts WHERE attempt_id = ANY($1::uuid[]) AND busena <> $2",
+    [attemptIds, BUSENA.ISIPAREIGOTA]
+  );
+
+  return rowCount;
+}
+
 module.exports = {
   BUSENA,
   valytiniBandymai,
+  pasalintiBandymus,
   bandymoRaktas,
   naujasBandymas,
   registruoti,
