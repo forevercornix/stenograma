@@ -66,6 +66,22 @@ async function adminPg(sql) {
 }
 
 async function perkurti() {
+  /**
+   * ⚠️ SENAS POOL'AS UŽDAROMAS PRIEŠ `DROP`, NE PO JO.
+   *
+   * `WITH (FORCE)` nutraukia VISAS prisijungusias sesijas. Jei ankstesnio testo
+   * pool'as dar atviras, jo laisvos jungtys gauna „terminating connection due to
+   * administrator command" jau PO to, kai anas testas baigėsi — `node --test` tai
+   * mato kaip „asynchronous activity after the test ended" ir paverčia
+   * `uncaughtException`. Failas krinta, nors nė viena asercija nesuklydo.
+   *
+   * Būtent taip ir nutiko pirmame CI raunde (34352704975): visi 14 subtestų
+   * `ok`, o failas `exit 1`. Tvarka čia yra testo gyvavimo ciklo dalis, ne
+   * kosmetika.
+   */
+  if (pool) await pool.end().catch(() => {});
+  pool = null;
+
   await adminPg(`DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`);
   await adminPg(`CREATE DATABASE "${dbVardas()}"`);
   execFileSync("npx", ["node-pg-migrate", "up"], {
@@ -75,7 +91,6 @@ async function perkurti() {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  if (pool) await pool.end().catch(() => {});
   pool = new Pool({ connectionString: DB_URL });
 
   saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-migracija-"));
