@@ -12,7 +12,7 @@
 #   nesuderinama - koreguokite nvidia-* versijas pagal savo CUDA (12.x).
 
 faster-whisper==1.2.1
-ctranslate2==4.8.1
+ctranslate2==4.8.2
 # numpy 2.5+ reikalauja Python >=3.12, o šie image'ai naudoja python3.11.
 # 2.4.6 yra PASKUTINĖ versija su Requires-Python >=3.11.
 #
