@@ -196,6 +196,86 @@ function vardas(priskyrimai) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * 0. AIBĖ IŠVEDAMA, NE RAŠOMA RANKA
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ RANKINIS SĄRAŠAS ČIA BUVO REALI SPRAGA (Codex, PR-6 raundas).
+ *
+ * `Į_EXTERNAL` ir `Į_INLINE` yra penkių laukų KOPIJOS, o aprėpties skaičius
+ * (`2ⁿ−2`) skaičiuojamas iš tų pačių masyvų. Vadinasi testas įrodo „visus
+ * nukopijuotų laukų poaibius", ne „visus reference switch poaibius" — ir jei
+ * produkcija įgytų šeštą priskyrimą, skaičius vis tiek sutaptų, o erdvė būtų
+ * nebe visa. Aprėptis, kuri matuoja pati save, yra ta pati klasė, kurią repo
+ * užregistravęs šešis kartus (#305).
+ *
+ * ⚠️ AUTORITETAS YRA `CHECK`, NE MASYVAS. Šio failo dalykas — kurias FORMAS
+ * `job_results_storage_shape` priima, tad laukų aibė imama iš paties suvaržymo
+ * apibrėžties (`pg_get_constraintdef`), susikertant su tikrais lentelės
+ * stulpeliais. Naujas stulpelis suvaržyme automatiškai praplečia erdvę.
+ *
+ * ⚠️ IR ATSKIRAI TIKRINAMAS PRODUKCINIS SWITCH. Suvaržymas sako, kas LEIDŽIAMA;
+ * migracijos `UPDATE` sako, kas RAŠOMA. Jie gali išsiskirti abiem kryptimis, tad
+ * tikrinami abu — kitaip liktų langas, kuriame switch priskiria stulpelį, apie
+ * kurį suvaržymas nieko nesako.
+ */
+async function suvarzymoStulpeliai() {
+  const { rows } = await pool.query(
+    `SELECT pg_get_constraintdef(oid) AS apibreztis
+       FROM pg_constraint WHERE conname = 'job_results_storage_shape'`
+  );
+  assert.equal(rows.length, 1, "suvaržymo nėra — išvedimas kalbėtų apie tuštumą");
+
+  const { rows: stulpeliai } = await pool.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_name = 'job_results'`
+  );
+
+  const tekstas = rows[0].apibreztis;
+  return stulpeliai
+    .map((r) => r.column_name)
+    .filter((v) => new RegExp(`\\b${v}\\b`).test(tekstas))
+    .sort();
+}
+
+/** Migracijos `UPDATE job_results SET ...` priskiriami stulpeliai. */
+function switchStulpeliai() {
+  const fs = require("node:fs");
+  const saltinis = fs.readFileSync(path.join(__dirname, "..", "utils", "artifactMigration.js"), "utf8");
+
+  const m = saltinis.match(/UPDATE job_results\s+SET([\s\S]*?)WHERE/);
+  assert.ok(m, "produkcinio reference switch nerasta — išvedimas neturi iš ko");
+
+  return [...m[1].matchAll(/^\s*([a-z_]+)\s*=/gm)].map((x) => x[1]).sort();
+}
+
+test("#157 PR-6: skaidymo erdvė IŠVESTA, ne nukopijuota", { skip: PRALEISTI, timeout: 180000 }, async (t) => {
+  await perkurtiDb();
+
+  const laukiama = Į_EXTERNAL.map((p) => p.stulpelis).sort();
+
+  await t.test("aibė sutampa su `job_results_storage_shape` apibrėžtimi", async () => {
+    assert.deepEqual(
+      await suvarzymoStulpeliai(),
+      laukiama,
+      "suvaržymas įgijo, prarado ar pervadino stulpelį — skaidymo erdvė nebe visa"
+    );
+  });
+
+  await t.test("aibė sutampa su PRODUKCINIU reference switch", () => {
+    assert.deepEqual(
+      switchStulpeliai(),
+      laukiama,
+      "migracijos `UPDATE` priskiria kitą aibę, nei tikrina šis testas"
+    );
+  });
+
+  await t.test("abi kryptys aprašo TĄ PAČIĄ aibę", () => {
+    /** Asimetrija reikštų, kad viena kryptis tikrinama siauriau, ir to nesimatytų. */
+    assert.deepEqual(Į_INLINE.map((p) => p.stulpelis).sort(), laukiama);
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * 1. SKAIDYMO ERDVĖ ABIEM KRYPTIMIS
  * ═══════════════════════════════════════════════════════════════════════════ */
 
