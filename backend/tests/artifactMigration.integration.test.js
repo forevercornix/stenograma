@@ -297,9 +297,17 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
     );
   });
 
-  await t.test("`head()` nepatvirtino → `vientisumas_nepatvirtintas`, objektas pašalintas", async () => {
+  await t.test("`verify()` nepatvirtino → `vientisumas_nepatvirtintas`, objektas pašalintas", async () => {
+    /**
+     * ⚠️ MELUOJA `verify()`, NE `head()`. Po P1 taisymo `head()` šiame kelyje
+     * nebedalyvauja, tad senas `head` melagis nieko nebeišbandytų — testas būtų
+     * žalias apie sargą, kurio nebekviečia.
+     */
     const jobId = await naujasInline({ text: "nepatvirtintas" });
-    const melagis = { ...saugykla, head: async () => ({ bytes: 999999 }) };
+    const melagis = {
+      ...saugykla,
+      verify: async () => ({ ok: false, exists: true, bytes: 1, checksum: "a".repeat(64), nepriklausomas: true }),
+    };
 
     const s = await migruoti(pool, melagis, {});
 
@@ -313,7 +321,7 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
     assert.equal(galva, null, "nepatvirtintas objektas privalo būti pašalintas");
   });
 
-  await t.test("eilutė pasikeitė po `head()` → `eilute_pasikeite`, svetima nuoroda nepaliesta", async () => {
+  await t.test("eilutė pasikeitė po `verify()` → `eilute_pasikeite`, svetima nuoroda nepaliesta", async () => {
     const jobId = await naujasInline({ text: "lenktynes" });
 
     /**

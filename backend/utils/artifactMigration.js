@@ -9,7 +9,7 @@ const { createLogger } = require("./logger");
  *
  * ⚠️ TVARKA YRA VISA ESMĖ, IR JI TA PATI KAIP PRODUKCINIAME KELYJE.
  *
- *   registras (`pending`) → `put()` → `head()` → ATOMINIS reference switch
+ *   registras (`pending`) → `put()` → `verify()` → ATOMINIS reference switch
  *
  * Ne todėl, kad taip gražiau, o todėl, kad kiekvienas žingsnis uždaro konkrečią
  * gedimo klasę, ir jos jau apmokėtos PR-4/PR-5 kaina:
@@ -17,8 +17,10 @@ const { createLogger } = require("./logger");
  *   - registras PRIEŠ `put()` — procesas, kritęs po rašymo, palieka objektą su
  *     ADRESU DB pusėje; be to įrašo tai būtų transkripcija, kurios nepasiekia
  *     nei erasure, nei šlavėjas (A3: `list(prefix)` nėra);
- *   - `head()` PRIEŠ perjungimą — `payload` naikinamas tik po to, kai objekto
- *     vientisumas patvirtintas (sąlyga 7: „vienintelė kopija");
+ *   - `verify()` PRIEŠ perjungimą — `payload` naikinamas tik po to, kai objekto
+ *     vientisumas PATVIRTINTAS TURINIU, ne dydžiu. `head()` čia nepakanka: ji
+ *     grąžina tik baitus, tad sugadintas to paties ilgio objektas ją praeina
+ *     (sąlyga 7: „vienintelė kopija");
  *   - perjungimas VIENU sakiniu — išmatuota, kad kitaip DB ir nepriima
  *     (`jobResultsShapeDomain.integration`: visi 60 dalinių sakinių → `23514`).
  *
@@ -168,18 +170,43 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
   }
 
   /**
-   * ⚠️ SĄLYGA 7 GYVENA ČIA. `payload` naikinamas TIK po šitos patikros: sėkmingas
-   * `put()` be patvirtinimo yra prielaida, o prielaida čia kainuoja vienintelę
-   * rezultato kopiją.
+   * ⚠️ SĄLYGA 7 GYVENA ČIA, IR JAI REIKIA `verify()`, NE `head()`.
+   *
+   * `head()` grąžina tik egzistavimą ir baitus — `fs` ir `s3` tai daro SĄMONINGAI
+   * (metadata-only kaina). Sugadintas TO PAČIO ILGIO objektas tokią patikrą
+   * praeina, ir kitas `UPDATE` sunaikina vienintelę galiojančią inline kopiją, o
+   * `job_results` išsaugo ORIGINALO `checksum`. Nuo tada `verify()` visada sakys
+   * „nesutampa" — jau po to, kai atkurti nebėra iš ko.
+   *
+   * ⚠️ IŠMATUOTA, NE NUMANYTA. CI 34360090645: objektas sugadintas failų sistemoje
+   * nepakeičiant ilgio, `head()` grąžino tą patį dydį kaip kvitas, ir migracija
+   * `payload` sunaikino. Su `verify()` tas pats testas praeina.
+   *
+   * ⚠️ TA PATI KLASĖ, KURIĄ PR-4 UŽDARĖ PRE-CHECK'E: verdiktas skelbiamas remiantis
+   * įrodymu, kuris nustato tik DYDĮ. Ten pasekmė buvo sugadintas rezultatas
+   * klientui; čia — sunaikinta vienintelė kopija.
+   *
+   * ⚠️ KAINA UŽRAŠOMA, NE NUTYLIMA. `verify()` PERSKAITO visą objektą, ir `fsStore`
+   * komentaras sako, kad būtent dėl šios kainos metadata-only keliuose jis
+   * DRAUDŽIAMAS. Čia ji pateisinama tuo, ko nėra kituose keliuose: iškart po šios
+   * patikros naikinama vienintelė kopija. Migracija yra vienintelė vieta, kur
+   * skaitymo kaina mažesnė už klaidos kainą.
+   *
+   * ⚠️ `nepriklausomas !== true` IRGI ATMETAMAS. `inlineStore` (`inlineStore.js:210`)
+   * lygina reikšmę SU SAVIMI ir grąžina `false`; toks verdiktas migracijai
+   * neįrodo nieko, o `payload` naikinimas remiasi būtent tuo įrodymu.
    */
-  let galva = null;
+  let vientisumas = null;
   try {
-    galva = await saugykla.head(raktas);
+    vientisumas = await saugykla.verify(raktas, {
+      bytes: kvitas.bytes,
+      checksum: kvitas.checksum,
+    });
   } catch (klaida) {
-    log.error("Migracijos `head()` krito", { code: klaida && klaida.code });
+    log.error("Migracijos `verify()` krito", { code: klaida && klaida.code });
   }
 
-  if (!galva || Number(galva.bytes) !== Number(kvitas.bytes)) {
+  if (!vientisumas || vientisumas.ok !== true || vientisumas.nepriklausomas !== true) {
     await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
     await irasytiNesekme(pool, { jobId, priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS, runId });
     return { verdiktas: BUSENA.NEPAVYKO, priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS };
