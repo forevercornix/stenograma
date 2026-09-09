@@ -1455,6 +1455,21 @@ kuriama LAZY pirmo `add` metu (`queues/transcriptionQueue.js:13-21`). Su
 PostgreSQL metaduomenimis prie Redis **nesijungia niekas**: `server.js` pažymėtų
 runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų arba kristų.
 
+⚠️ **KAI SĄLYGA 1 TAPS SPRENDIMU, JIS PRIVALO APIMTI IR ATSUKIMĄ.**
+
+Atidarymas yra VIENKRYPTIS, tad pateikimas be atsakymo „ką darome, jei po
+savaitės paaiškės problema" būtų nepilnas. Mechanika užrašyta ADR
+`155-postgres-authority.md` §„Grįžimas atgal" → „Kas nutinka mechaniškai".
+
+Trumpai, kad sprendimo pateikėjas neieškotų: perjungimas atgal įvyksta TYLIAI
+(nėra nei patikros, nei įspėjimo), job'ai tampa nematomi iš karto, o **po #157
+saugykloje lieka transkripcijų, kurių adresas gyveno tik PostgreSQL'e** — jų
+nepasiekia nei erasure, nei retencija, ir jų neįmanoma surasti rankiniu būdu
+(`list(prefix)` pagal A3 nėra). Tai duomenų apsaugos, ne prieinamumo klausimas.
+
+Teisinga seka atsisakant PostgreSQL: pirma IŠTRINTI duomenis per veikiantį
+diegimą, tik paskui keisti konfigūraciją.
+
 ⚠️ **SĄLYGA 1 ŠIANDIEN NĖRA §18.3 SPRENDIMAS — JI UŽBLOKUOTA NEPILNA PRIELAIDA.**
 
 ADR išvardija šešias prielaidas; dvi neuždarytos: **eilės preflight** (sąlyga 9)
