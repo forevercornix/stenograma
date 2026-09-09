@@ -370,7 +370,6 @@ const functional = [
   "restoredJobStoreForwarding",
   /** #157 (PR-4): bandymų registro modulis (grynas SQL sluoksnis). */
   "attemptRegistry",
-  "zzMatavimasCheck.integration",
   "sweepVerdiktai",
   /** #157 (PR-4): lygybės paritetas ir round-trip ištikimybė. */
   "artifactRoundTrip",
