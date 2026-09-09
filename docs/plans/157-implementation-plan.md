@@ -1302,24 +1302,43 @@ visada-„kritinė nesėkmė"); **`inline` eilutė ir toliau raportuojama pagal
 - bandymų registras, jo šlavėjas ir erasure per registrą veikia (PR-4, PR-5);
 - `ArtifactStore` riba, `paruostiReiksme()` ir kanoninė tapatybė — PR-2.
 
-⚠️ **ATVIRAS KLAUSIMAS, KURĮ REIKIA IŠMATUOTI PRIEŠ RAŠANT §9.1 ĮRODYMĄ.**
+✅ **ATSAKYTA MATAVIMU — §9.1 MUTACIJA NEĮVYKDOMA** (CI 34323230438, `backend` job'as,
+tikras `postgres:16-alpine`, `REQUIRE_POSTGRES=1`; testas `jobResultsShapeDomain.integration`,
+12/12, nė vieno praleisto).
 
-Planas numato mutaciją „du `UPDATE` atskirose transakcijose → stebėtojas pagauna
-commit'intą tarpinę būseną → krenta". Bet po `1756200000000` toks skaidymas gali būti
-NEĮVYKDOMAS: `UPDATE job_results SET storage_key = 'x'` inline eilutėje palieka
-`storage_type = 'inline'`, o CHECK tada reikalauja `storage_key IS NULL` — sakinys
-kristų DB pusėje, ir stebėtojas neturėtų ko pamatyti.
+Planas numatė mutaciją „du `UPDATE` atskirose transakcijose → stebėtojas pagauna
+commit'intą tarpinę būseną → krenta". Ji NEĮVYKDOMA: po `1756200000000` nė vienas
+dalinis sakinys DB nepraeina.
 
-Jei taip, iš to seka DVI pasekmės, ir abi turi būti užrašytos, ne nutylėtos:
+Matuota ne pavyzdžiais, o visa skaidymo erdve. Reference switch yra penki priskyrimai
+(`storage_type`, `storage_key`, `payload`, `bytes`, `checksum`); ištirti VISI netušti
+tikri poaibiai — 2⁵−2 = 30 kiekviena kryptimi, `inline` → external ir atgal. Visi 60
+atmesti su `23514` ties `job_results_storage_shape`. Tai padengia ir ilgesnius
+skaidymus: bet kurio N sakinių skaidymo PIRMASIS sakinys yra tikras poaibis, tad
+commit'intos tarpinės būsenos neturi joks skaidymas.
 
-1. tikrasis invarianto sargas yra **CHECK constraint**, ne migracijos kodas — o tada
-   §9.1 stebėtojas įrodo mažiau, nei planas žada;
-2. mutacija privalo būti KITOKIA: tokia, kurią DB priima, bet kuri vis tiek palieka
-   commit'intą tarpinę būseną (pvz. `storage_type` perjungimas kartu su `storage_key`,
-   bet `payload` pašalinimas ATSKIRA transakcija).
+Kontrolės, be kurių išvada būtų neteisinga dėl teisingo rezultato: pilnas perėjimas
+vienu sakiniu PRAEINA abiem kryptimis (kitaip „joks `UPDATE` neveikia" atrodytų kaip
+įrodytas atomiškumas), suvaržymas nėra `DEFERRABLE` (`pg_constraint.condeferrable =
+false`), ir dalinis `UPDATE` po eksplicitinio `SET CONSTRAINTS ALL DEFERRED` vis tiek
+meta iš karto — bendra transakcija irgi nėra išeitis.
 
-**Klausimas sprendžiamas MATAVIMU prieš tikrą DB, ne argumentu**, ir rezultatas —
-ataskaitoje. Jei mutacija neįvykdoma, tai radinys apie plano prielaidą, ne kliūtis.
+**Iš to seka dvi pasekmės, ir abi galioja:**
+
+1. Tikrasis invarianto sargas yra **CHECK constraint**, ne migracijos kodo tvarka.
+   Atomiškumo nereikia SAUGOTI — jis yra schemos savybė. §9.1 stebėtojas antroje
+   jungtyje įrodo MAŽIAU, nei planas žadėjo: pažeidžiančios būsenos jis nepamatytų
+   ir tada, jei migracija būtų parašyta blogai, nes ją atmestų DB.
+2. Todėl stebėtojas persiorientuoja į **poras**, kurių CHECK NEGINA:
+   objektas ↔ nuoroda ir progresas ↔ nuoroda. Tai vieninteliai langai, kuriuos
+   migracija dar gali palikti atvirus — `job_results` eilutės viduje jų nebėra.
+
+⚠️ **KODĖL MATAVIMAS LIKO TESTU, NE ATASKAITOS EILUTE.** Vienkartinis matavimas
+laikinoje šakoje atsako į šiandienos klausimą ir nieko negina rytoj — taip PR-4
+mutacijos vos nedingo kartu su ištrinta šaka. `jobResultsShapeDomain.integration` yra
+tos pačios šeimos testas kaip `jobResultsJsonbDomain.integration`: susilpninus
+`job_results_storage_shape`, jis pasakys tai iškart, ir abi pasekmės aukščiau bus
+peržiūrėtos, o ne tyliai pasens.
 
 ⚠️ **SĄLYGA 6 UŽRAŠOMA ATSKIRAI, NES PLANE JOS NEBUVO.**
 
