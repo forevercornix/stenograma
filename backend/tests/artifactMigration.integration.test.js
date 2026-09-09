@@ -578,6 +578,85 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * 3b. BATCH'Ų GRANDINĖ — `LIMIT` TIKRAI ATKERTA
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("#157 PR-6: `--limit` grandinė baigia darbą per kelis paleidimus", { skip: PRALEISTI, timeout: 300000 }, async (t) => {
+  const saugykla = await perkurti();
+
+  /**
+   * ⚠️ RINKINYS PARINKTAS TAIP, KAD `LIMIT` ATKIRSTŲ TRIS KARTUS.
+   *
+   * Septynios eilutės su `limit: 3` duoda 3 + 3 + 1 + 0. Lyginis skaičius
+   * paslėptų klaidą paskutiniame, nepilname batch'e — būtent ten, kur ciklo
+   * pabaigos sąlyga dažniausiai ir klysta.
+   *
+   * ⚠️ IDEMPOTENCIJA TIKRINAMA PAKARTOJIMU, NE PRIELAIDA. Ankstesnis testas
+   * („PAKARTOTINIS paleidimas nieko nebedaro") tikrino vieną eilutę ir vieną
+   * pakartojimą; čia grandinė vykdoma iki pabaigos, ir kiekvienas žingsnis
+   * tikrinamas atskirai.
+   */
+  const IS_VISO = 7;
+  const RIBA = 3;
+  const laukiama = [3, 3, 1, 0];
+
+  const jobai = [];
+  for (let i = 0; i < IS_VISO; i += 1) jobai.push(await naujasInline({ text: `batch-${i}` }));
+
+  const gauta = [];
+  for (let raundas = 0; raundas < laukiama.length; raundas += 1) {
+    const s = await migruoti(pool, saugykla, { limit: RIBA });
+    gauta.push(s.perkelta);
+    assert.deepEqual(s.nepavyko, {}, `raundas ${raundas}: nesėkmių būti neturi`);
+    assert.equal(s.praleista, 0, `raundas ${raundas}: praleidimų būti neturi`);
+  }
+
+  await t.test("kiekvienas raundas perkelia tiek, kiek `LIMIT` leidžia", () => {
+    assert.deepEqual(gauta, laukiama, "grandinė nesutampa — `LIMIT` arba atranka klysta");
+  });
+
+  await t.test("KONTROLĖ: `LIMIT` tikrai atkirto, o ne visi tilpo iš karto", () => {
+    /**
+     * Be jos testas praeitų ir tada, jei `limit` būtų ignoruojamas ir viskas
+     * pereitų per vieną raundą — o tada grandinė nieko neįrodytų.
+     */
+    assert.ok(gauta[0] === RIBA && gauta.length > 2, "pirmas raundas privalo būti APRIBOTAS");
+    assert.ok(gauta[gauta.length - 2] < RIBA, "priešpaskutinis raundas privalo būti NEPILNAS");
+  });
+
+  await t.test("visos eilutės perkeltos, be dublikatų", async () => {
+    for (const jobId of jobai) {
+      const r = await eilute(jobId);
+      assert.equal(r.storage_type, "fs", `${jobId} liko inline`);
+      assert.equal(r.payload, null);
+
+      const p = await progresas(jobId);
+      assert.equal(p.busena, "done");
+      assert.equal(p.storage_key, r.storage_key);
+
+      const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
+      assert.equal(bandymai.length, 1, "pakartotinis paleidimas negali sukurti antro objekto");
+      assert.equal(bandymai[0].busena, attemptRegistry.BUSENA.ISIPAREIGOTA);
+    }
+  });
+
+  await t.test("PENKTAS raundas nieko nebekeičia", async () => {
+    const s = await migruoti(pool, saugykla, { limit: RIBA });
+    assert.equal(s.kandidatai, 0, "atranka privalo būti tuščia");
+    assert.equal(s.perkelta, 0);
+  });
+
+  await t.test("`dry-run` mato tą pačią ribą", async () => {
+    /** Sausas paleidimas be kandidatų — kontrolė, kad `limit` jam irgi galioja. */
+    for (let i = 0; i < 4; i += 1) await naujasInline({ text: `sausas-${i}` });
+
+    const s = await sausasPaleidimas(pool, { limit: 2 });
+    assert.equal(s.kandidatai, 2, "`limit` galioja ir sausame paleidime");
+    assert.equal(s.perkeltini, 2);
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * 4. §9.1 — STEBĖTOJAS PAGAL PORAS
  * ═══════════════════════════════════════════════════════════════════════════ */
 
