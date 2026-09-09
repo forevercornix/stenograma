@@ -90,6 +90,7 @@ būtų paminėtas. Be to matrica ilgainiui virstų sąrašu to, ką kažkada tur
 | Vidinės klaidos sanitizuojamos prieš atsakymą | `errorSanitization.route` | — |
 | Startup validacija stabdo nesaugią konfigūraciją | `startupChecks` | Kategorijų validacijos pašalinimas |
 | Init vyksta PRIEŠ `listen` | `startupOrder` | — |
+| ⚠️ **Eilė patikrinama REALIU probe prieš pradedant klausytis** | `eilesPreflight` | ADR `155-postgres-authority.md` barjero prielaida, iki #155 vienintelė neįgyvendinta. `hasQueueBackend()` vertino tik konfigūraciją, `jobRunner.init()` — tik ar `bullmq` galima `require()`, o jungtis kuriama LAZY pirmo `add` metu: serveris imdavo klausytis su eile, kurios nėra, ir PIRMAS `enqueue` kabodavo jau turint priimtą užklausą. **Mutacija: `ping()` pašalinimas iš mock’o → režimas tampa `inline`** — „pasiekiama eilė“ yra REIKALAVIMAS režimui, ne konfigūracijos pasekmė. Riba privaloma: be jos pakibęs Redis paverstų startą pakibimu, t. y. tuo, ko probe turi išvengti. ⚠️ Priežastis SANITIZUOJAMA — ji keliauja į `doctor` ir `/api/health/deep`, o `REDIS_URL` gali turėti slaptažodį; kontrolė tikrina, kad sanitizacija nepašalina VISKO. ⚠️ `/api/ready` NEPAPILDYTAS sąmoningai: jo kontraktas (`auditReadiness.route`) reikalauja loginių būsenų be infrastruktūros detalių |
 | Išoriniai kvietimai turi timeout | `httpClient.timeout` | — |
 | Worker'iai neprieina prie draudžiamų operacijų | `workerGuard` | — |
 
