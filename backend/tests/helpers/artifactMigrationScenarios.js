@@ -63,6 +63,24 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
   const sugadinti = (raktas) => fixture.sugadinti(raktas);
   const objektuKiekis = () => fixture.objektuKiekis();
 
+  /**
+   * ⚠️ BACKEND'O VARDAS IMAMAS IŠ SAUGYKLOS, NE RAŠOMAS SCENARIJUJE.
+   *
+   * Pirma iškelto rinkinio redakcija tvirtino `storage_type === "fs"` — t. y.
+   * rinkinys, rašytas prieš `fs`, buvo TYLIAI perėmęs jo savybę. Prieš `s3` tai
+   * davė šešis kritimus (CI 34370538544), ir tai NĖRA radinys apie `s3`: tai
+   * radinys apie rinkinį, kuris teigė daugiau, nei tikrino.
+   *
+   * Būtent dėl šios klasės antras backend'as ir buvo reikalingas — argumentas
+   * „kontraktas jau dengia" jos nepagavo, nes kontraktas apie `job_results`
+   * eilutės turinį nieko nesako.
+   *
+   * `saugykla.backend` yra pačios saugyklos deklaracija, tad scenarijus
+   * nebeturi kaip išsiskirti su tuo, ką ji realiai persistina.
+   */
+  const backendas = () => fixture.saugykla.backend;
+
+
   async function perkurti() {
     /**
      * ⚠️ SENAS POOL'AS UŽDAROMAS PRIEŠ `DROP`, NE PO JO.
@@ -193,7 +211,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
 
     await t.test("eilutė tapo external su PILNU trejetu", async () => {
       const r = await eilute(jobId);
-      assert.equal(r.storage_type, "fs");
+      assert.equal(r.storage_type, backendas());
       assert.ok(r.storage_key, "raktas privalomas");
       assert.equal(r.payload, null, "`payload` pašalintas TIK po perkėlimo");
       assert.ok(Number(r.bytes) > 0);
@@ -322,10 +340,10 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
         const kvitas = await saugykla.put(raktas, paruosta);
         await pool.query(
           `UPDATE job_results
-              SET storage_type = 'fs', storage_key = 'results/svetimas/kitas.json',
+              SET storage_type = $2, storage_key = 'results/svetimas/kitas.json',
                   bytes = 7, checksum = repeat('b', 64), payload = NULL
             WHERE job_id = $1`,
-          [jobId]
+          [jobId, backendas()]
         );
         return kvitas;
       };
@@ -455,16 +473,16 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
 
         await pool.query(
           `UPDATE job_results
-              SET storage_type = 'fs', storage_key = 'results/laimetojas/a.json',
+              SET storage_type = $2, storage_key = 'results/laimetojas/a.json',
                   bytes = 9, checksum = repeat('d', 64), payload = NULL
             WHERE job_id = $1`,
-          [jobId]
+          [jobId, backendas()]
         );
         await pool.query(
           `INSERT INTO artifact_migration_progress
                  (job_id, busena, storage_type, storage_key, run_id, created_at, updated_at)
-           VALUES ($1, 'done', 'fs', 'results/laimetojas/a.json', $2, now(), now())`,
-          [String(jobId), svetimasRun]
+           VALUES ($1, 'done', $3, 'results/laimetojas/a.json', $2, now(), now())`,
+          [String(jobId), svetimasRun, backendas()]
         );
 
         return kvitas;
@@ -528,10 +546,10 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
           perjungta = true;
           await pool.query(
             `UPDATE job_results
-                SET storage_type = 'fs', storage_key = 'results/kitas/proc.json',
+                SET storage_type = $2, storage_key = 'results/kitas/proc.json',
                     bytes = 5, checksum = repeat('e', 64), payload = NULL
               WHERE job_id = $1`,
-            [antras]
+            [antras, backendas()]
           );
         }
         return kvitas;
@@ -543,7 +561,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       assert.equal(s.praleista, 1, "antras PRALEISTAS, ne pažymėtas nesėkme");
       assert.deepEqual(s.nepavyko, {}, "praleidimas negali virsti `failed`");
       assert.equal(await progresas(antras), null, "praleistas job'as neturi progreso įrašo");
-      assert.equal((await eilute(pirmas)).storage_type, "fs");
+      assert.equal((await eilute(pirmas)).storage_type, backendas());
     });
 
     await t.test("`failed` eilutės pakartotinai NEBANDOMOS be `retryFailed`", async () => {
@@ -605,7 +623,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     await t.test("visos eilutės perkeltos, be dublikatų", async () => {
       for (const jobId of jobai) {
         const r = await eilute(jobId);
-        assert.equal(r.storage_type, "fs", `${jobId} liko inline`);
+        assert.equal(r.storage_type, backendas(), `${jobId} liko inline`);
         assert.equal(r.payload, null);
 
         const p = await progresas(jobId);
@@ -729,8 +747,8 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       await pool.query(
         `INSERT INTO artifact_migration_progress
                (job_id, busena, storage_type, storage_key, run_id, created_at, updated_at)
-         VALUES ($1, 'done', 'fs', 'results/mutacija/x.json', gen_random_uuid(), now(), now())`,
-        [String(jobId)]
+         VALUES ($1, 'done', $2, 'results/mutacija/x.json', gen_random_uuid(), now(), now())`,
+        [String(jobId), backendas()]
       );
 
       /** Stebėtojui duodamas laikas pamatyti commit'intą tarpinę būseną. */
@@ -751,10 +769,10 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       const jobId = await naujasInline({ text: "be-objekto" });
       await pool.query(
         `UPDATE job_results
-            SET storage_type = 'fs', storage_key = 'results/nera/objekto.json',
+            SET storage_type = $2, storage_key = 'results/nera/objekto.json',
                 bytes = 10, checksum = repeat('c', 64), payload = NULL
           WHERE job_id = $1`,
-        [jobId]
+        [jobId, backendas()]
       );
 
       const stop = paleistiStebetoja(saugykla);
