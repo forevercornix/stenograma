@@ -93,6 +93,15 @@ async function perkurti() {
 
   pool = new Pool({ connectionString: DB_URL });
 
+  /**
+   * ⚠️ ANKSTESNĖ ŠAKNIS PAŠALINAMA ČIA, NE TIK `after()`.
+   *
+   * `after()` išvalo tik PASKUTINĘ, tad keturi `perkurti()` kvietimai paliktų
+   * tris katalogus CI runner'io `/tmp`. Testas, kuris po savęs netvarko, yra
+   * `verify-clean.mjs` klausimas, o ne skonio reikalas.
+   */
+  if (saknis) await fsp.rm(saknis, { recursive: true, force: true }).catch(() => {});
+
   saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-migracija-"));
   return createFsArtifactStore({ root: saknis });
 }
