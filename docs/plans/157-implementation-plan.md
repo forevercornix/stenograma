@@ -1445,7 +1445,7 @@ septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** j
 | 6 | **`backupPolicy.TABLE_BY_TYPE` per-row** | `utils/backupPolicy.js:94` — riba užrašyta, atsakymas atidėtas PR-7 | statinis žemėlapis | — | Kopijos ataskaita teigtų turinį, kurio `job_results` nebėra |
 | 7 | **Restore ataskaita skirsto pagal `nepriklausomas`, ne `ok`** | body §32, §35; ši sekcija | nėra | — | ⚠️ Inline `ok: true` tikras, bet tuščias — mišrioje DB rodytų ~100 % |
 | 8 | **Laukiama vientisumo reikšmė — iš DB, niekada neperskaičiuota iš tikrinamo objekto** | ši sekcija, „Restore verifikacija" | nėra | — | Mutacija: `head()` vietoj `verify()` → sugadintas objektas praeitų |
-| 9 | ⚠️ **Eilės prieinamumo PREFLIGHT** | ADR barjero prielaidų lentelė — **NEĮGYVENDINTA** | nėra | — | Realus probe PRIEŠ pradedant klausytis; rezultatas readiness/`doctor` išvestyje, ne logo eilutėje |
+| 9 | ⚠️ **Eilės prieinamumo PREFLIGHT** — **ATSKIRAS PR, PRIEŠ PR-7** | ADR barjero prielaidų lentelė — **NEĮGYVENDINTA** | nėra | — | Realus probe PRIEŠ pradedant klausytis; rezultatas readiness/`doctor` išvestyje, ne logo eilutėje |
 
 ⚠️ **SĄLYGA 9 BUVO PRALEISTA PIRMOJE REDAKCIJOJE.** Ji gyvena ADR'e, ne plano
 PR-7 sekcijoje, tad sąrašas, surinktas tik iš plano, jos nepagautų. ADR aprašo
@@ -1464,27 +1464,61 @@ Sprendimu jis tampa tik jas uždarius.
 
 | # | Sąlyga | Kur priimta | Būsena | Kas pamatys |
 |---|---|---|---|---|
-| 10 | **Fail-closed startas patikrintas REALIAI** | ADR barjero lentelė | įrodyta tik unit lygmeniu (`_initializePostgresForTests`) | Pirmas realus startas su neprieinama DB — ADR sako, kad jis PATS ir būtų tas testas |
+| 10 | **Fail-closed startas patikrintas REALIAI** — **PR-7 VIDUJE, kaip CI žingsnis KARTU su atidarymu** | ADR barjero lentelė | įrodyta tik unit lygmeniu (`_initializePostgresForTests`) | CI žingsnis: startas su neprieinama DB ir ATIDARYTU barjeru privalo kristi, ne nusileisti į atmintį |
 
-**VIDINĖ PR-7 TVARKA — dvi prielaidos PRIEKYJE, ne tik sargas gale**
+⚠️ **KODĖL SĄLYGA 10 NEGALI BŪTI ANKSČIAU — TAI NE PLANAVIMO PASIRINKIMAS.**
+
+Ji reikalauja paleisti kelią, kurio **uždarytas barjeras neleidžia pasiekti**.
+`initializePostgres()` produkcijoje nekviečiama, kol `POSTGRES_AKTYVAVIMAS_LEISTAS
+= false`; šiandien ji pasiekiama tik per `_initializePostgresForTests`. Vadinasi
+„realus fail-closed startas" prieš atidarymą reikštų arba testinį įėjimą (t. y.
+vėl NE realų kelią), arba laikiną barjero atidarymą — o tai tas pats atidarymas,
+tik be jo peržiūros.
+
+ADR tą patį sako iš kitos pusės: *„Barjerą atidarius pirmas realus startas su
+neprieinama DB ir BŪTŲ tas testas."*
+
+⚠️ **IŠ TO SEKA FORMA: CI ŽINGSNIS, NE VIENETINIS TESTAS.** Įrodymas yra
+PROCESO elgesys — startas su `DATABASE_URL` į nepasiekiamą adresą privalo baigtis
+klaida, o ne tyliu nusileidimu į atmintį. Vienetinis testas tikrintų funkciją;
+čia klausimas yra, ką daro `server.js` startas.
+
+⚠️ **IR IŠ TO SEKA RIZIKA, KURIĄ VERTA ĮVARDYTI IŠ ANKSTO:** sąlyga 10 ir
+sąlyga 1 (atidarymas) atsiduria TAME PAČIAME commit'e, tad peržiūrėtojas mato dvi
+rizikas viename diff'e. Tai priimta sąmoningai — alternatyva (atidaryti anksčiau,
+kad būtų ką patikrinti) yra blogesnė. Kompensacija: atidarymas ir jo CI žingsnis
+yra ATSKIRAS commit'as PR-7 viduje, ne sulietas su prijungimu ar backup darbu.
+
+**TVARKA — viena prielaida IŠEINA iš PR-7, kita eina su atidarymu**
 
 ```
-1. eilės prieinamumo preflight            (sąlyga 9)
-2. fail-closed starto realus patikrinimas (sąlyga 10)
-3. ── BARJERAS ──                         (sąlyga 1; §18.3 TIK ČIA)
-4. rasymoSaugykla prijungimas             (sąlyga 3)
-5. `neatkartojama` grandinė               (sąlyga 5, kartu su #298)
-6. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
-7. integrity testai
-8. pilna regresija (postgres + s3 rinkiniai)
-9. dokumentai
-10. sargo pašalinimas — PASKUTINIS         (sąlyga 2)
+0. eilės prieinamumo preflight   — ATSKIRAS PR, sumerginamas PRIEŠ PR-7 (sąlyga 9)
+────────────────────────────────  PR-7 pradžia ────────────────────────────────
+1. ── BARJERAS ── + fail-closed starto CI žingsnis  (sąlygos 1 ir 10; §18.3 TIK ČIA)
+2. rasymoSaugykla prijungimas             (sąlyga 3)
+3. `neatkartojama` grandinė               (sąlyga 5, kartu su #298)
+4. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
+5. integrity testai
+6. pilna regresija (postgres + s3 rinkiniai)
+7. dokumentai
+8. sargo pašalinimas — PASKUTINIS         (sąlyga 2)
 ```
 
 ⚠️ **TAI NĖRA ta pati tvarka, kuri buvo aprašyta žemiau** („sargas paskutinis").
-Ji pridedama PRIEKYJE: dvi barjero prielaidos, tada barjeras, ir tik tada visa
-likusi seka. Be to sargo pašalinimas (2) ir prijungimas (3) būtų daromi nuo
-kelio, kurio produkcijoje niekas nepasiekia.
+Ji pridedama PRIEKYJE — bet dvi prielaidos elgiasi SKIRTINGAI:
+
+- **sąlyga 9 (preflight)** išeina iš PR-7 visai: atskiras PR, sumerginamas PRIEŠ.
+  Ji neliečia #157 temos (eilės ir metaduomenų backend'o sąveika, ne artefaktų
+  saugykla), yra barjero prielaida, tad turi būti vietoje anksčiau, ir turi savo
+  matomumo klausimą (readiness/`doctor`);
+- **sąlyga 10 (fail-closed startas)** lieka PR-7 viduje ir eina KARTU su
+  atidarymu, nes anksčiau jos įvykdyti neįmanoma — žr. paaiškinimą aukščiau.
+
+⚠️ **KODĖL BARJERAS YRA PIRMAS PR-7 ŽINGSNIS, NE PASKUTINIS.** Sargo pašalinimas
+(sąlyga 2) ir `rasymoSaugykla` prijungimas (sąlyga 3) be atidarymo būtų daromi nuo
+kelio, kurio produkcijoje **niekas nepasiekia**: pašalintas sargas negintų nieko,
+o prijungta saugykla liktų be stebėtojo. Tai ne tas pats, kas „sargas paskutinis" —
+ta taisyklė galioja toliau ir kalba apie tvarką PR-7 VIDUJE.
 
 ⚠️ **MATOMUMO STULPELIO IŠVADA.** Iš dešimties sąlygų **viena** (nr. 3) šiandien
 neturi jokio stebėtojo. Tai ta pati klasė, kuri šioje sekoje keturis kartus rasta
