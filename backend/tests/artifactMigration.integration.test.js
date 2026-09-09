@@ -374,6 +374,7 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
 
       const kelias = path.join(saknis, raktas);
       const baitai = await fsp.readFile(kelias);
+      const priesIlgis = baitai.length;
 
       /** Keičiama VIENA raidė reikšmės viduje — ilgis nekinta, JSON lieka galiojantis. */
       const i = baitai.findIndex((b, idx) => idx > 10 && b >= 0x61 && b <= 0x7a);
@@ -381,31 +382,34 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
       baitai[i] = baitai[i] === 0x7a ? 0x79 : baitai[i] + 1;
 
       await fsp.writeFile(kelias, baitai);
+
+      /**
+       * ⚠️ KONTROLĖ TEN, KUR TEIGIAMA — TIES PAČIU SUGADINIMU.
+       *
+       * Be jos testas praeitų ir tada, jei sugadinimas pakeistų ILGĮ: tada jį
+       * pagautų ir senoji `head()` patikra, ir įrodymas būtų apie kitą klasę.
+       *
+       * ⚠️ IR BŪTENT ČIA, O NE PO MIGRACIJOS. Po sėkmingo taisymo objektas
+       * pašalinamas valymo, tad vėlesnė kontrolė taptų TUŠČIA — praeitų nieko
+       * nepatikrinusi. Kontrolė, kuri po taisymo nustoja veikti, negina nieko.
+       *
+       * ⚠️ IR NE ĮDĖTINIS `t.test()`. Pirma redakcija kvietė `t.test()` iš
+       * subtesto vidaus su TĖVO kontekstu; `node --test` tai baigia klaida
+       * „Promise resolution is still pending", kuri sugadina VISĄ failą, ir
+       * raundas nieko neįrodo (CI 34359378997).
+       */
+      const galva = await saugykla.head(raktas);
+      assert.equal(Number(galva.bytes), priesIlgis, "sugadinimas pakeitė ILGĮ — kita klasė");
+      assert.equal(
+        Number(galva.bytes),
+        Number(kvitas.bytes),
+        "`head()` rodo tą patį dydį kaip kvitas — vadinasi ji šito sugadinimo NEPAGAUNA"
+      );
+
       return kvitas;
     };
 
     const s = await migruoti(pool, gadintojas, {});
-
-    await t.test("KONTROLĖ: `head()` šio sugadinimo NEPAGAUNA", async () => {
-      /**
-       * Be šitos kontrolės testas praeitų ir tada, jei sugadinimas pakeistų
-       * ILGĮ — tada jį pagautų ir senoji patikra, ir įrodymas būtų apie kitą
-       * klasę, nei teigiama.
-       */
-      const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
-      const musu = bandymai[bandymai.length - 1];
-      const kelias = path.join(saknis, musu.storage_key);
-      const yra = await fsp.stat(kelias).then(() => true).catch(() => false);
-
-      if (yra) {
-        const galva = await saugykla.head(musu.storage_key);
-        const verdiktas = await saugykla.verify(musu.storage_key, {
-          bytes: galva.bytes,
-          checksum: null,
-        });
-        assert.equal(Number(galva.bytes), Number(verdiktas.bytes), "ilgis nepakito — `head()` aklas");
-      }
-    });
 
     assert.equal(
       s.nepavyko[PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS],
