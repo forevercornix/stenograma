@@ -70,7 +70,7 @@ const PRIEZASTIS = Object.freeze({
  * (`retryFailed`), o ne tylus ciklas, kuris kas paleidimą bando tą patį.
  */
 const KANDIDATAI_SQL = `
-  SELECT r.job_id, r.payload
+  SELECT r.job_id
     FROM job_results r
    WHERE r.storage_type = 'inline'
      AND r.payload IS NOT NULL
@@ -99,6 +99,39 @@ const KANDIDATAI_SQL = `
  * užrakinimo tvarką visame kelyje; čia pakanka to, kad vienintelis pavojingas
  * perėjimas (`done` → `failed`) taptų neišreiškiamas.
  */
+/**
+ * `payload` TRAUKIAMAS PER EILUTĘ, NE SU PARTIJA (P2 raundo radinys).
+ *
+ * ⚠️ KODĖL ATRANKA JO NEBETRAUKIA.
+ *
+ * `LIMIT 1000` su leidžiamu 20 MiB rezultatu reiškia iki ~20 GiB `payload`
+ * ATMINTYJE dar prieš pirmos eilutės apdorojimą. Procesas žūtų nemigravęs NIEKO,
+ * ir tai galiotų vienodai `run` bei `dry-run` režimams. Eilučių riba čia matuoja
+ * ne tą dydį, kuris svarbus.
+ *
+ * Dabar atmintyje vienu metu yra DAUGIAUSIA VIENAS `payload`, tad riba tampa
+ * baitinė pagal konstrukciją — ne pagal parinktą `LIMIT` reikšmę.
+ *
+ * ⚠️ NAUJO LANGO NEATSIRANDA, IR TAI PATIKRINTA, NE PRIELAIDA.
+ *
+ * Tarp atrankos ir traukimo eilutė gali pasikeisti — pvz. įprastas užbaigimo
+ * kelias ją perjungia. Sąlyga `storage_type = 'inline' AND payload IS NOT NULL`
+ * kartojama ČIA, tad tokia eilutė grąžina 0 įrašų ir PRALEIDŽIAMA. Tai ne
+ * nesėkmė: niekas nesugedo, darbą tiesiog atliko kas nors kitas, ir `failed`
+ * įrašas apie jį meluotų.
+ *
+ * Antra to paties lango pusė jau buvo uždaryta anksčiau: perjungimo `UPDATE`
+ * turi tą pačią sąlygą kaip CAS, tad eilutė, pasikeitusi PO traukimo, duoda
+ * `eilute_pasikeite`, o ne svetimos nuorodos perrašymą.
+ */
+const PAYLOAD_SQL = `
+  SELECT payload
+    FROM job_results
+   WHERE job_id = $1
+     AND storage_type = 'inline'
+     AND payload IS NOT NULL
+`;
+
 async function irasytiNesekme(vykdytojas, { jobId, priezastis, runId }) {
   await vykdytojas.query(
     `INSERT INTO artifact_migration_progress (job_id, busena, priezastis, run_id, created_at, updated_at)
@@ -321,11 +354,18 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
 async function sausasPaleidimas(pool, { limit = 1000, retryFailed = false } = {}) {
   const { rows } = await pool.query(KANDIDATAI_SQL, [limit, retryFailed]);
 
-  const suvestine = { kandidatai: rows.length, perkeltini: 0, neatvaizduojami: [] };
+  const suvestine = { kandidatai: rows.length, perkeltini: 0, praleista: 0, neatvaizduojami: [] };
 
   for (const eilute of rows) {
+    /** ⚠️ Ta pati baitinė riba kaip `migruoti()`: vienu metu — vienas `payload`. */
+    const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
+    if (turinys.rowCount !== 1) {
+      suvestine.praleista += 1;
+      continue;
+    }
+
     try {
-      paruostiReiksme(eilute.payload);
+      paruostiReiksme(turinys.rows[0].payload);
       suvestine.perkeltini += 1;
     } catch (klaida) {
       if (klaida instanceof ArtifactStoreError && klaida.code === KLAIDA.REIKSME) {
@@ -353,12 +393,29 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
   const paleidimas = runId || crypto.randomUUID();
   const { rows } = await pool.query(KANDIDATAI_SQL, [limit, retryFailed]);
 
-  const suvestine = { runId: paleidimas, kandidatai: rows.length, perkelta: 0, nepavyko: {} };
+  const suvestine = {
+    runId: paleidimas,
+    kandidatai: rows.length,
+    perkelta: 0,
+    praleista: 0,
+    nepavyko: {},
+  };
 
   for (const eilute of rows) {
+    /**
+     * ⚠️ TRAUKIAMA ČIA, NE ATRANKOJE. Atmintyje vienu metu — daugiausia vienas
+     * `payload`; žr. `PAYLOAD_SQL` komentarą apie ~20 GiB partiją.
+     */
+    const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
+    if (turinys.rowCount !== 1) {
+      /** Eilutę jau perjungė kas nors kitas. Ne nesėkmė — `failed` apie ją meluotų. */
+      suvestine.praleista += 1;
+      continue;
+    }
+
     const rezultatas = await perkeltiEilute(pool, saugykla, {
       jobId: eilute.job_id,
-      payload: eilute.payload,
+      payload: turinys.rows[0].payload,
       runId: paleidimas,
     });
 
@@ -377,6 +434,7 @@ module.exports = {
   BUSENA,
   PRIEZASTIS,
   KANDIDATAI_SQL,
+  PAYLOAD_SQL,
   migruoti,
   sausasPaleidimas,
 };

@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { BUSENA, PRIEZASTIS, KANDIDATAI_SQL } = require("../utils/artifactMigration");
+const { BUSENA, PRIEZASTIS, KANDIDATAI_SQL, PAYLOAD_SQL } = require("../utils/artifactMigration");
 
 process.env.NODE_ENV = "test";
 
@@ -79,6 +79,42 @@ test("ATRANKA praleidžia `failed` tik tada, kai to prašoma", () => {
   assert.match(KANDIDATAI_SQL, /payload IS NOT NULL/);
   assert.match(KANDIDATAI_SQL, /artifact_migration_progress/);
   assert.match(KANDIDATAI_SQL, /busena = 'failed'/);
+});
+
+test("ATRANKA NETRAUKIA `payload` — riba baitinė, ne eilučių", () => {
+  /**
+   * ⚠️ EILUČIŲ RIBA MATUOJA NE TĄ DYDĮ.
+   *
+   * `LIMIT 1000` su leidžiamu 20 MiB rezultatu reiškia iki ~20 GiB `payload`
+   * atmintyje dar PRIEŠ pirmos eilutės apdorojimą — procesas žūtų nemigravęs
+   * nieko, ir tai galiotų vienodai `run` bei `dry-run`.
+   *
+   * Tikrinama STRUKTŪRIŠKAI, nes tai vienintelis būdas: elgesio testas su 20 GiB
+   * CI'uje neįmanomas, o mažesnis nieko neįrodytų. Sąlyga paprasta ir tikrinama —
+   * atranka grąžina tik identifikatorius.
+   */
+  assert.ok(
+    !/SELECT[\s\S]*?payload[\s\S]*?FROM job_results/i.test(KANDIDATAI_SQL),
+    "atranka traukia `payload` — visa partija patenka į atmintį"
+  );
+  assert.match(KANDIDATAI_SQL, /SELECT\s+r\.job_id\s+FROM/, "atranka privalo grąžinti tik `job_id`");
+});
+
+test("`PAYLOAD_SQL` kartoja atrankos sąlygą — langas uždarytas", () => {
+  /**
+   * ⚠️ TRAUKIMAS PER EILUTĘ ATVERTŲ NAUJĄ LANGĄ, JEI SĄLYGOS NEBŪTŲ.
+   *
+   * Tarp atrankos ir traukimo eilutę gali perjungti įprastas užbaigimo kelias.
+   * Be `storage_type = 'inline' AND payload IS NOT NULL` traukimas grąžintų jau
+   * EXTERNAL eilutės `payload` (t. y. `NULL`) arba svetimą turinį, ir migracija
+   * bandytų perkelti tai, kas jau perkelta.
+   *
+   * Su sąlyga tokia eilutė grąžina 0 įrašų ir praleidžiama — ne `failed`, nes
+   * niekas nesugedo.
+   */
+  assert.match(PAYLOAD_SQL, /storage_type = 'inline'/);
+  assert.match(PAYLOAD_SQL, /payload IS NOT NULL/);
+  assert.match(PAYLOAD_SQL, /WHERE\s+job_id = \$1/);
 });
 
 test("STRUKTŪRINĖ SARGYBA: CLI neturi savo orkestracijos", () => {

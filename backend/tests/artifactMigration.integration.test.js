@@ -503,6 +503,71 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
     assert.equal(p.run_id, svetimasRun, "laimėtojo `run_id` neperrašytas");
   });
 
+  await t.test("PARTIJA, viršijanti vienos eilutės dydį, apdorojama DALIMIS", async () => {
+    /**
+     * ⚠️ KĄ ŠIS TESTAS ĮRODO, IR KO NEĮRODINĖJA.
+     *
+     * Įrodo, kad kelios stambios eilutės pereina VISOS ir nė viena neužstringa —
+     * t. y. kad apdorojimas eina per eilutę. NEĮRODO atsparumo ties 20 GiB: toks
+     * rinkinys CI'uje neįmanomas, o mažesnis nieko nesakytų. Baitinę ribą pagal
+     * konstrukciją įrodo `artifactMigrationContract` („atranka netraukia
+     * `payload`"), ir tai vienintelis būdas ją įrodyti tikrai.
+     */
+    const tekstas = "a".repeat(64 * 1024);
+    const kiek = 6;
+    for (let i = 0; i < kiek; i += 1) await naujasInline({ text: `${i}-${tekstas}` });
+
+    const s = await migruoti(pool, saugykla, {});
+
+    assert.equal(s.perkelta, kiek, "visos stambios eilutės privalo pereiti");
+    assert.deepEqual(s.nepavyko, {}, "dydis pats savaime nėra nesėkmė");
+    assert.equal(s.praleista, 0);
+  });
+
+  await t.test("Eilutė, perjungta TARP atrankos ir traukimo, PRALEIDŽIAMA (ne `failed`)", async () => {
+    /**
+     * ⚠️ TAI LANGAS, KURĮ ATVĖRĖ `payload` TRAUKIMAS PER EILUTĘ.
+     *
+     * Atranka grąžina tik `job_id`, tad tarp jos ir traukimo eilutę gali
+     * perjungti įprastas užbaigimo kelias. Tokia eilutė NĖRA nesėkmė — niekas
+     * nesugedo, darbą atliko kas nors kitas, ir `failed` įrašas apie ją meluotų
+     * bei dar užkirstų kelią būsimiems paleidimams be `retryFailed`.
+     *
+     * Langas uždaromas ta pačia sąlyga (`storage_type = 'inline'`), kuri yra
+     * atrankoje; čia tikrinamas ELGESYS, o sąlygos buvimą gina kontraktinis testas.
+     *
+     * Sinchronizuojama ties draiverio riba: pirmos eilutės `put()` perjungia
+     * ANTRĄ, tad kai ciklas prie jos prieina, ji jau nebe `inline`.
+     */
+    const pirmas = await naujasInline({ text: "pirmas" });
+    const antras = await naujasInline({ text: "antras" });
+
+    const kabliukas = { ...saugykla };
+    let perjungta = false;
+    kabliukas.put = async (raktas, paruosta) => {
+      const kvitas = await saugykla.put(raktas, paruosta);
+      if (!perjungta) {
+        perjungta = true;
+        await pool.query(
+          `UPDATE job_results
+              SET storage_type = 'fs', storage_key = 'results/kitas/proc.json',
+                  bytes = 5, checksum = repeat('e', 64), payload = NULL
+            WHERE job_id = $1`,
+          [antras]
+        );
+      }
+      return kvitas;
+    };
+
+    const s = await migruoti(pool, kabliukas, {});
+
+    assert.equal(s.perkelta, 1, "pirmas perkeltas");
+    assert.equal(s.praleista, 1, "antras PRALEISTAS, ne pažymėtas nesėkme");
+    assert.deepEqual(s.nepavyko, {}, "praleidimas negali virsti `failed`");
+    assert.equal(await progresas(antras), null, "praleistas job'as neturi progreso įrašo");
+    assert.equal((await eilute(pirmas)).storage_type, "fs");
+  });
+
   await t.test("`failed` eilutės pakartotinai NEBANDOMOS be `retryFailed`", async () => {
     const pries = await migruoti(pool, saugykla, {});
     assert.equal(pries.kandidatai, 0, "visos keturios pažymėtos `failed` ir praleidžiamos");
