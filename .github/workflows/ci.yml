@@ -284,6 +284,42 @@ jobs:
         # kita praleidimo žyma - parametrizuotas, ne nukopijuotas.
         run: node scripts/verify-postgres-suite-ran.mjs /tmp/s3-tap s3 MINIO_ENDPOINT
 
+      # ⚠️ TREČIAS RINKINYS: TESTAI, KURIEMS REIKIA ABIEJŲ SERVISŲ (#157, PR-6).
+      #
+      # `artifactMigrationS3.integration` migruoja iš PostgreSQL į S3-suderinamą
+      # saugyklą, tad be vieno iš jų jis praleistų save. Ankstesnėmis
+      # taisyklėmis toks failas būtų patekęs IR į `postgres`, IR į `s3` rinkinį
+      # ir ABIEJUOSE praleidęs save — sulaužydamas abu „tikrai vykdytas" sargus,
+      # ir ne dėl defekto.
+      #
+      # Todėl `suites.js` aibės padarytos NESIKERTANČIOMIS: `postgres` yra
+      # postgresGuard BE minioGuard, `s3` — atvirkščiai, o `postgresS3` — abu.
+      # Principas („vienas trūkstamas servisas neturi paversti kito garantijos
+      # praleidimu") lieka nepakeistas; pridėtas tik trečias atvejis.
+      #
+      # ⚠️ SERVISŲ PALEISTI NEREIKIA: `postgres` yra job'o lygio `services:`, o
+      # MinIO pakeltas ankstesniu žingsniu ir tebeveikia.
+      - name: PostgreSQL + S3 testai (migracija į tinklinę saugyklą)
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+          REQUIRE_POSTGRES: "1"
+          MINIO_ENDPOINT: http://localhost:9000
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+          REQUIRE_MINIO: "1"
+        run: |
+          status=0
+          npm run test:postgres-s3 -- --tap-dir=/tmp/pgs3-tap || status=$?
+          exit "$status"
+
+      - name: PostgreSQL + S3 rinkinys TIKRAI vykdytas (ne praleistas)
+        working-directory: backend
+        # ⚠️ SAVAS SARGAS, kaip ir abiem kitiems rinkiniams. Be jo trečias
+        # rinkinys būtų vienintelis, kurio praleidimas liktų nepastebėtas — t. y.
+        # tiksliai ta spraga, dėl kurios sargai apskritai egzistuoja.
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/pgs3-tap postgresS3 DATABASE_URL
+
       # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
       # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas
       # kažko neištrina.

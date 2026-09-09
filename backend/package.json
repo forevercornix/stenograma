@@ -12,6 +12,7 @@
     "test:redis": "node scripts/run-tests.mjs redis",
     "test:postgres": "node scripts/run-tests.mjs postgres",
     "test:s3": "node scripts/run-tests.mjs s3",
+    "test:postgres-s3": "node scripts/run-tests.mjs postgresS3",
     "migrate:up": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
     "migrate:create": "node-pg-migrate create",

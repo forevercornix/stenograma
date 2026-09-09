@@ -576,40 +576,67 @@ function importuotiModuliai(saltinis) {
  * galioja abiem infrastruktūroms, tad išvedimas parametrizuotas, o ne
  * nukopijuotas (#157, PR-2).
  */
-function isvestiRinkini(sargas) {
+function importuojaSarga(failas, sargas) {
   const fs = require("node:fs");
   const path = require("node:path");
-  const dir = __dirname;
+
+  const turinys = fs.readFileSync(path.join(__dirname, failas), "utf8");
+  return importuotiModuliai(turinys).some((kelias) => kelias.endsWith(sargas));
+}
+
+/**
+ * @param {string} sargas    privalomas importas
+ * @param {string|null} be   importas, kurio failas NETURI turėti
+ */
+function isvestiRinkini(sargas, be = null) {
+  const fs = require("node:fs");
 
   return fs
-    .readdirSync(dir)
+    .readdirSync(__dirname)
     .filter((failas) => failas.endsWith(".test.js"))
-    .filter((failas) => {
-      const turinys = fs.readFileSync(path.join(dir, failas), "utf8");
-      return importuotiModuliai(turinys).some((kelias) => kelias.endsWith(sargas));
-    })
+    .filter((failas) => importuojaSarga(failas, sargas))
+    .filter((failas) => be === null || !importuojaSarga(failas, be))
     .map((failas) => failas.replace(/\.test\.js$/, ""))
     .sort();
 }
 
+/**
+ * ⚠️ TRYS RINKINIAI, NE DU — IR IŠSKYRIMAS YRA JŲ ESMĖ (#157, PR-6).
+ *
+ * `postgres` žingsnis turi `DATABASE_URL`, S3 — `MINIO_ENDPOINT`. Sujungus juos,
+ * vienas trūkstamas servisas paverstų kito garantiją praleidimu, o „rinkinys
+ * tikrai vykdytas" sargas nebegalėtų pasakyti, KURIO trūko. Tas principas lieka
+ * nepakeistas.
+ *
+ * ⚠️ BET ATSIRADO FAILAS, KURIAM REIKIA ABIEJŲ (`artifactMigrationS3.integration`:
+ * migracija iš DB į tinklinę saugyklą). Palikus senas taisykles, jis patektų į
+ * ABU rinkinius ir ABIEJUOSE praleistų save — nes kiekviename žingsnyje trūktų
+ * svetimo serviso. Kristų abu „tikrai vykdytas" sargai, ir ne dėl defekto.
+ *
+ * Todėl aibės tampa TARPUSAVYJE NESIKERTANČIOS:
+ *
+ *   postgres    — importuoja `postgresGuard` ir NE `minioGuard`;
+ *   s3          — importuoja `minioGuard` ir NE `postgresGuard`;
+ *   postgresS3  — importuoja ABU; savo žingsnis, savo sargas.
+ *
+ * ⚠️ IŠSKYRIMAS BŪTINAS ABIEM KRYPTIM. Pašalinus jį vienoje pusėje, dvigubos
+ * priklausomybės failas tyliai grįžtų į tą rinkinį ir vėl sulaužytų jo sargą —
+ * tik jau po pusmečio ir kitam žmogui.
+ */
 function isvestiPostgresRinkini() {
-  return isvestiRinkini("postgresGuard");
+  return isvestiRinkini("postgresGuard", "minioGuard");
 }
 
 const postgres = isvestiPostgresRinkini();
+const s3 = isvestiRinkini("minioGuard", "postgresGuard");
 
-/**
- * ⚠️ S3 RINKINYS ATSKIRAS NUO `postgres`, NORS ABU INTEGRACINIAI.
- *
- * Jie reikalauja SKIRTINGOS infrastruktūros: `postgres` žingsnis turi
- * `DATABASE_URL`, S3 — `MINIO_ENDPOINT`. Sujungus, vienas trūkstamas servisas
- * paverstų kito garantiją praleidimu, o „rinkinys tikrai vykdytas" sargas
- * nebegalėtų pasakyti, KURIO trūko.
- */
-const s3 = isvestiRinkini("minioGuard");
+/** Failai, kuriems reikia IR PostgreSQL, IR S3-suderinamos saugyklos. */
+const postgresS3 = isvestiRinkini("postgresGuard").filter((v) =>
+  isvestiRinkini("minioGuard").includes(v)
+);
 
 module.exports = {
-  suites: { privacy, security, functional, redis, postgres, s3 },
+  suites: { privacy, security, functional, redis, postgres, s3, postgresS3 },
 
   /**
    * Rinkiniai, kuriuos apima `npm test`.

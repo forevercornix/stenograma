@@ -68,3 +68,54 @@ nurodykite jį **laikinai, tik migracijoms** — arba įsitikinkite, kad
 audito, barjeras liktų neveikiantis, o `/api/ready` — teisėtai `503`.
 
 Garantijos formuluotė — `docs/deletion-guarantees.md` §1 ir §2.
+
+---
+
+## Artefaktų migracija: `inline` → external (#157, PR-6)
+
+`node-pg-migrate` čia nedalyvauja. Tai **duomenų**, ne schemos migracija, ir ji
+vykdoma atskirai, kai schema jau atnaujinta:
+
+```bash
+cd backend
+DATABASE_URL=postgres://...                     node scripts/migrate-artifacts.mjs dry-run
+DATABASE_URL=... ARTIFACT_STORE_BACKEND=fs      node scripts/migrate-artifacts.mjs run --limit 500
+DATABASE_URL=...                                node scripts/migrate-artifacts.mjs status
+```
+
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida ·
+**`3` dalis eilučių neperkelta — reikia peržiūros** (`status` parodo, kurios ir
+kodėl).
+
+Paleidimas saugus kartoti: perkelta eilutė nebėra `inline`, tad atranka jos
+nebemato. `--limit` grandinę galima leisti tiek kartų, kiek reikia.
+
+### ⚠️ Ko tikėtis iš srauto — `s3` atveju jis DVIGUBAS
+
+Prieš perjungdama nuorodą, migracija kiekvienai eilutei kviečia
+`ArtifactStore.verify()`, o šis **perskaito visą objektą** ir perskaičiuoja
+kontrolinę sumą. `s3` (ar bet kurios tinklinės saugyklos) atveju tai reiškia, kad
+kiekviena eilutė **parsiunčiama atgal iš karto po įkėlimo**.
+
+Praktinė pasekmė, kurios iš žodžio „migracija" nesitikima:
+
+| | |
+|---|---|
+| Įkeliama | ~*N* × vidutinis rezultato dydis |
+| Parsiunčiama | **tiek pat** |
+| Viso srauto | **~2×** duomenų apimtis |
+
+Prie leidžiamo 20 MiB vienos eilutės dydžio ir kelių dešimčių tūkstančių eilučių
+tai virsta pralaidumo ir **egress kaštų** klausimu. Planuokite pagal dvigubą
+apimtį ir leiskite dalimis (`--limit`), o ne vienu paleidimu.
+
+⚠️ **Tai NĖRA neefektyvumas, kurį reikia pašalinti.** Iš karto po šios patikros
+migracija ištrina `payload` — vienintelę galiojančią rezultato kopiją. `head()`
+grąžina tik dydį, tad sugadintas **to paties ilgio** objektas ją praeitų, ir
+kopija būtų sunaikinta mainais į nepatikrintą prielaidą (išmatuota:
+`artifactMigration.integration`, CI 34360090645). Migracija yra vienintelė vieta
+repo, kur skaitymo kaina mažesnė už klaidos kainą — kitur `verify()` metadata-only
+keliuose sąmoningai **draudžiamas**.
+
+Jei srautas nepriimtinas, teisingas sprendimas yra leisti mažesnėmis dalimis arba
+ne piko metu — **ne** išjungti patikrą.
