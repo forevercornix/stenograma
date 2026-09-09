@@ -82,20 +82,22 @@ PR #288 (7.6c uždarymas) — planas naudoja dabartinius numerius ir įvardija a
 | `migrations/1755000000000_...:309-311` | ta pati | `storage_type IN ('inline','s3')` — `fs` neteisėtas |
 | `migrations/1755000000000_...:317-323` | ta pati | `ELSE storage_key IS NOT NULL` — `payload` external atveju NEUŽDRAUSTAS |
 | `postgresStore.js:739-745` | ta pati | `ON CONFLICT ... SET payload = EXCLUDED.payload`; `storage_type`/`storage_key` neliečiami |
+
+⚠️ **ŠI EILUTĖ PASENUSI IR NUMERIU, IR TEIGINIU (§12.1).** `ON CONFLICT ... SET payload = EXCLUDED.payload` nebėra ties `:739-745` (dabar ~`:966`), ir svarbiau — besąlyginio `payload` perrašymo TEN NEBĖRA: 7.5b jį pakeitė, ką sako pats kodo komentaras („Iki 7.5b čia buvo... BESĄLYGINIS"). Numerio taisymas vienas išsaugotų neteisingą teiginį, tad eilutė paliekama pažymėta ir peržiūrima kartu su PR-7 backup/restore darbu, ne tyliai pataisoma.
 | `postgresStore.js:579-583` | ta pati | `SELECT_JOB` = `LEFT JOIN job_results` + `r.payload AS result` |
-| `postgresStore.js:1499-1514` | ta pati | `listByFlag()` sąmoningai be prijungimo — precedentas |
-| `postgresStore.js:778-785, 799` | ta pati | `rezultatoEilute()` po `FOR UPDATE OF j` |
-| `postgresStore.js:989-1007` | ta pati | non-inline fail-closed sargas |
+| `postgresStore.js:2362-2377` | ta pati | `listByFlag()` sąmoningai be prijungimo — precedentas |
+| `postgresStore.js:1034-1041` | ta pati | `rezultatoEilute()` po `FOR UPDATE OF j` |
+| `postgresStore.js:1623-1627` | ta pati | non-inline fail-closed sargas |
 | `services/backupService.js:259-262` | ta pati | `countActiveJobs()` per `listAll()`, naudoja tik `status` |
-| `services/lifecycleService.js:118, 393-394` | **`:129`, `:404-405`** | PR #288 įterpė `COVERED_CATEGORIES` predikatus; `STORED_IN_JOB_RECORD` logika nepakitusi |
-| `utils/artefactScanner.js:99-100` | ta pati | `scan: null, reason: "saugoma job_record viduje"` |
+| `services/lifecycleService.js:118, 393-394` | **`:129`, `:434`** | PR #288 įterpė `COVERED_CATEGORIES` predikatus; `STORED_IN_JOB_RECORD` logika nepakitusi |
+| `utils/artefactScanner.js:117-123` | ta pati | `scan: null, reason: "saugoma job_record viduje"` |
 | `utils/artefactInventory.js` | `:77`, `:98` | „…jobo įraše" / „…jobo rezultate" |
 | `utils/backupPolicy.js:94,96` | ta pati | `transcript`/`protocol` → `"job_results"` |
 | `utils/resultLimits.js:154` | ta pati | `MAX_RESULT_BYTES` = 20 MiB |
 
 Papildomai patvirtinta, kas planą formuoja:
 
-- `rowToJob` (`postgresStore.js:94`) rezultatą prikabina kaip `result: row.result`
+- `rowToJob` (`postgresStore.js:69`) rezultatą prikabina kaip `result: row.result`
   — hidratacijos riba yra **viena vieta**, ne išbarstyta;
 - kontraktinių rinkinių precedentas jau yra: `jobStoreBackendContract`,
   `sessionStoreBackendContract`, `auditStoreBackendContract` — `artifactStoreContract`
@@ -122,7 +124,7 @@ PR-1 schema ──► PR-2 boundary ──► PR-3 hydration ──► PR-4 comp
                                         └──► PR-7 backup/restore + sargo pašalinimas
 ```
 
-PR-7 yra vienintelis, kuris liečia `postgresStore.js:989-1007`.
+PR-7 yra vienintelis, kuris liečia `postgresStore.js:1623-1627`.
 
 ---
 
@@ -513,7 +515,7 @@ neprijungtas, tokių objektų atsirasti negali; nuo prijungimo momento (PR-7) sk
 pusė privalo jau egzistuoti. Tvarka yra garantijos dalis, ne patogumas.
 
 **Ką palieka veikiantį:** external completion veikia `fs` backend'e; sargas
-(`postgresStore.js:989-1007`) **dar lieka**, nes erasure ir backup keliai
+(`postgresStore.js:1623-1627`) **dar lieka**, nes erasure ir backup keliai
 nepadengti (#157 to reikalauja eksplicitiškai).
 
 **Failai**
@@ -689,7 +691,7 @@ kokią DB transakciją, be varianto (b) neturi jokio detektoriaus — DB kryptie
 skenavimas jo nemato pagal apibrėžimą.
 
 `put()` vyksta **prieš** `inTransaction()`, ne jo viduje: tai išsprendžia
-`rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:778-785, 799`) be
+`rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:1034-1041`) be
 tinklo I/O po užraktu.
 
 ⚠️ **PR-4 NESIŠAKOJA PAGAL BACKEND'O VARDĄ — TIK PAGAL `reference`.**
@@ -1155,7 +1157,7 @@ užklausos timeout'ą), o ne ieškoti geresnės formulės iš esamų reikšmių.
 
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
-- `backend/services/lifecycleService.js` — `STORED_IN_JOB_RECORD` šaka (`:129`, `:404-405`)
+- `backend/services/lifecycleService.js` — `STORED_IN_JOB_RECORD` šaka (`:129`, `:434`)
 - `backend/utils/artefactScanner.js` — `transcript`/`protocol` skenavimas
 - `backend/utils/artefactInventory.js` — aprašai
 - `backend/utils/backupPolicy.js` — `TABLE_BY_TYPE` per-row (paruošimas PR-7)
@@ -1424,6 +1426,72 @@ nebuvo patikrinta.
 
 **Ką palieka veikiantį:** visą grandinę; tik čia dingsta fail-closed sargas.
 
+---
+
+⚠️ **ĮĖJIMO SĄLYGOS — SURINKTA PR-7 PRADŽIOJE** (tas pats šablonas kaip PR-4/5/6).
+
+⚠️ **SURINKTA IŠ PLANO IR KODO, NE IŠ ATMINTIES.** Metodas nėra formalumas: iš
+septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** jau
+įgyvendintos. Prielaida, paimta iš ankstesnio pokalbio, yra tas pats silpnas
+įrodymas, kurį §14.1 draudžia — tik jos šaltinis atrodo patikimesnis.
+
+| # | Sąlyga | Kur priimta | Būsena kode | Priklauso nuo | Kas ir kada pamatys, kad suveikė |
+|---|---|---|---|---|---|
+| 1 | **Aktyvavimo barjeras** — atidaromas TIK uždarius jo prielaidas | ADR `155-postgres-authority.md` §„AKTYVAVIMO BARJERAS"; plano DoD | `backendSelection.js:55` = `false` | 9, 10 | ADR prielaidų lentelė; `selectBackend()` grąžina `barjeras: true` |
+| 2 | **Sargo pašalinimas — paskutinis commit'as** (impl → integrity → regresija → dokumentai → sargas) | body §8; ši sekcija | sargas gyvas (`postgresStore.js:1623-1627`) | **1** | `git log` peržiūroje — plane įvardyta kaip grąžinimo pagrindas |
+| 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | neprijungta (`:823`, `:840`) | **1** | ⚠️ **NIEKAS** — reikia testo, kad `initializePostgres()` paduoda saugyklą |
+| 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
+| 5 | **`neatkartojama` grandinė: nulis BullMQ pakartojimų** | plano §„PR-4 DoD punktas"; DoD `PARTIAL / UNVERIFIED` | **#298 atviras** | **1**, #298 | Testas privalo matuoti PAKARTOJIMŲ SKAIČIŲ, ne lauko buvimą |
+| 6 | **`backupPolicy.TABLE_BY_TYPE` per-row** | `utils/backupPolicy.js:94` — riba užrašyta, atsakymas atidėtas PR-7 | statinis žemėlapis | — | Kopijos ataskaita teigtų turinį, kurio `job_results` nebėra |
+| 7 | **Restore ataskaita skirsto pagal `nepriklausomas`, ne `ok`** | body §32, §35; ši sekcija | nėra | — | ⚠️ Inline `ok: true` tikras, bet tuščias — mišrioje DB rodytų ~100 % |
+| 8 | **Laukiama vientisumo reikšmė — iš DB, niekada neperskaičiuota iš tikrinamo objekto** | ši sekcija, „Restore verifikacija" | nėra | — | Mutacija: `head()` vietoj `verify()` → sugadintas objektas praeitų |
+| 9 | ⚠️ **Eilės prieinamumo PREFLIGHT** | ADR barjero prielaidų lentelė — **NEĮGYVENDINTA** | nėra | — | Realus probe PRIEŠ pradedant klausytis; rezultatas readiness/`doctor` išvestyje, ne logo eilutėje |
+
+⚠️ **SĄLYGA 9 BUVO PRALEISTA PIRMOJE REDAKCIJOJE.** Ji gyvena ADR'e, ne plano
+PR-7 sekcijoje, tad sąrašas, surinktas tik iš plano, jos nepagautų. ADR aprašo
+defektą tiksliai: `hasQueueBackend()` vertina TIK konfigūraciją, `jobRunner.init()`
+tikrina tik ar `bullmq` galima `require` (`queues/jobRunner.js:77-82`), o jungtis
+kuriama LAZY pirmo `add` metu (`queues/transcriptionQueue.js:13-21`). Su
+PostgreSQL metaduomenimis prie Redis **nesijungia niekas**: `server.js` pažymėtų
+runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų arba kristų.
+
+⚠️ **SĄLYGA 1 ŠIANDIEN NĖRA §18.3 SPRENDIMAS — JI UŽBLOKUOTA NEPILNA PRIELAIDA.**
+
+ADR išvardija šešias prielaidas; dvi neuždarytos: **eilės preflight** (sąlyga 9)
+ir **fail-closed startas, patikrintas realiai** (sąlyga 10 žemiau). Kol jos
+atviros, „ar atidaryti barjerą" nėra klausimas — atsakymas žinomas ir yra „ne".
+Sprendimu jis tampa tik jas uždarius.
+
+| # | Sąlyga | Kur priimta | Būsena | Kas pamatys |
+|---|---|---|---|---|
+| 10 | **Fail-closed startas patikrintas REALIAI** | ADR barjero lentelė | įrodyta tik unit lygmeniu (`_initializePostgresForTests`) | Pirmas realus startas su neprieinama DB — ADR sako, kad jis PATS ir būtų tas testas |
+
+**VIDINĖ PR-7 TVARKA — dvi prielaidos PRIEKYJE, ne tik sargas gale**
+
+```
+1. eilės prieinamumo preflight            (sąlyga 9)
+2. fail-closed starto realus patikrinimas (sąlyga 10)
+3. ── BARJERAS ──                         (sąlyga 1; §18.3 TIK ČIA)
+4. rasymoSaugykla prijungimas             (sąlyga 3)
+5. `neatkartojama` grandinė               (sąlyga 5, kartu su #298)
+6. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
+7. integrity testai
+8. pilna regresija (postgres + s3 rinkiniai)
+9. dokumentai
+10. sargo pašalinimas — PASKUTINIS         (sąlyga 2)
+```
+
+⚠️ **TAI NĖRA ta pati tvarka, kuri buvo aprašyta žemiau** („sargas paskutinis").
+Ji pridedama PRIEKYJE: dvi barjero prielaidos, tada barjeras, ir tik tada visa
+likusi seka. Be to sargo pašalinimas (2) ir prijungimas (3) būtų daromi nuo
+kelio, kurio produkcijoje niekas nepasiekia.
+
+⚠️ **MATOMUMO STULPELIO IŠVADA.** Iš dešimties sąlygų **viena** (nr. 3) šiandien
+neturi jokio stebėtojo. Tai ta pati klasė, kuri šioje sekoje keturis kartus rasta
+PO fakto, tad PR-7 privalo ją uždaryti testu, ne komentaru.
+
+---
+
 ⚠️ **ĮĖJIMO SĄLYGA: `rasymoSaugykla` PRIJUNGIMAS REIKALAUJA REGISTRO SKAITYMO PUSĖS.**
 
 Produkcinis prijungimas (`initializePostgres()` paduoda saugyklą) negali įvykti anksčiau,
@@ -1453,7 +1521,7 @@ atidedamas — sargas nešalinamas anksčiau.
 - `backend/utils/backupPolicy.js` — `TABLE_BY_TYPE` sprendimas **per-row** pagal
   eilutės `storage_type` (ne pagal aktyvų backend'ą)
 - `backend/utils/pgDumpBackup.js` / `backend/utils/artifactBackup.js` — external objektų atsakomybė
-- `backend/utils/jobStore/postgresStore.js:989-1007` — **sargas pašalinamas**
+- `backend/utils/jobStore/postgresStore.js:1623-1627` — **sargas pašalinamas**
 - `docs/backup-runbook.md` §9a, §9c, §11
 - `docs/security-test-matrix.md`, `README.md` apribojimų lentelė
 - `backend/tests/artifactRestoreIntegrity.integration.test.js`
@@ -1497,7 +1565,7 @@ skaičiuojanti `ok`, mišrioje DB parodytų beveik 100 % ir būtų melas. `verif
 nėra garantija — lygiai kaip `neatkartojama` be `UnrecoverableError`. Mišrioje DB
 inline eilučių bus dauguma, tad ataskaita, rodanti vien „patikrinta: N", skambėtų
 kaip pilna patikra ir pratybos praeitų per lengvai.
-- „Non-inline fail-closed sargo (`postgresStore.js:989-1007`) pašalinimas yra **paskutinis** implementacijos žingsnis — po equality, schemos, hydration, completion/concurrency, erasure, migracijos ir backup/restore integracinių įrodymų. Sargo pašalinimas negali būti naudojamas ankstesniems testams „atrakinti"…"
+- „Non-inline fail-closed sargo (`postgresStore.js:1623-1627`) pašalinimas yra **paskutinis** implementacijos žingsnis — po equality, schemos, hydration, completion/concurrency, erasure, migracijos ir backup/restore integracinių įrodymų. Sargo pašalinimas negali būti naudojamas ankstesniems testams „atrakinti"…"
 - „Įvardyta, kad #157 PostgreSQL aktyvavimo barjero neatidaro…"
 
 **§9.1**
