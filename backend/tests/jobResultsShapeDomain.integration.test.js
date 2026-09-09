@@ -110,6 +110,24 @@ function dbVardas() {
 
 async function perkurtiDb() {
   const admin = adminDatabaseUrl();
+
+  /**
+   * ⚠️ SENAS POOL'AS UŽDAROMAS PRIEŠ `DROP`, NE PO JO.
+   *
+   * `WITH (FORCE)` nutraukia visas prisijungusias sesijas. Kol failas turėjo tik
+   * du testus, kiekvienas kūrė savo pool'ą po jau įvykusio `DROP`, ir problema
+   * nesimatė. Pridėjus TREČIĄ `perkurtiDb()` kvietėją, ankstesnio testo pool'as
+   * lieka atviras, jo laisvos jungtys gauna „terminating connection due to
+   * administrator command" JAU PO to testo pabaigos, ir `node --test` tai paverčia
+   * `uncaughtException`: failas krinta, nors visos asercijos praėjo.
+   *
+   * ⚠️ TA PATI KLAIDA JAU BUVO IŠTAISYTA `artifactMigration.integration` faile
+   * (CI 34352704975), ir čia ji nebuvo pritaikyta. Tai ne sutapimas, o modelio
+   * spraga: taisymas buvo lokalus, o klasė — bendra abiem failams.
+   */
+  if (pool) await pool.end().catch(() => {});
+  pool = null;
+
   await pg(admin, `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`);
   await pg(admin, `CREATE DATABASE "${dbVardas()}"`);
   execFileSync("npx", ["node-pg-migrate", "up"], {
