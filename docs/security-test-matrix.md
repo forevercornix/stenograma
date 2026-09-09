@@ -65,6 +65,7 @@ būtų paminėtas. Be to matrica ilgainiui virstų sąrašu to, ką kažkada tur
 |---|---|---|
 | Kelio traversal negalimas | `uploadPath` | — |
 | Bendra multer konfigūracija abiem maršrutams | `uploadStorage` | Struktūrinis: `multer.diskStorage` maršrutuose |
+| ⚠️ **Laukų vardų ribos NUSTATOMOS eksplicitiškai** | `uploadIngestion.route` | `multer` 2.3.0 uždarė crash'ą (`GHSA-wc9g-mqfw-jrwm`: sukurtas `multipart` lauko vardas kėlė neapdorotą `RangeError` ir nutraukdavo Node procesą), bet trys ištekliaus ribos liko OPT-IN — `make-middleware.js` jas tikrina tik `hasOwnProperty` sąlygoje, o `index.js` numatytųjų nesudeda. Busboy nepadeda: jo `fieldNameSize` galioja tik `urlencoded` keliui, o `multipart` šakoje `nameTruncated` yra literalus `false`. Vadinasi vien atnaujinimas palieka vardo ilgį ir gylį neribotą. **Mutacija: `AUDIO_LIMITS` pašalinimas → krenta trys testai.** ⚠️ Ta mutacija RADO defektą pačiame teste: pirma redakcija tvirtino tik `400`, ir be ribos praeidavo, nes nežinomą lauką atmesdavo schemos sluoksnis (`VALIDATION_FAILED`) — visai kita vieta. Dabar tvirtinamas multer pranešimas (`Field name too long`, `Field name nesting too deep`), tad sluoksniai nebesusiplaka. KONTROLĖ: `language` ir `diarize` — tiksliai tie laukai, kuriuos siunčia frontend'as — praeina |
 | Laikini failai valomi | `uploadIngestion.route`, `audioCleanup` | — |
 | Atmesti įkėlimai fiksuojami be failo vardo | `observabilityEvents.route` | MIME sanitizacijos pašalinimas |
 | Failo TURINYS tikrinamas, ne tik plėtinys | `audioMagicBytes` | — |
