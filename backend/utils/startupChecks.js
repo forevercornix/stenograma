@@ -497,6 +497,40 @@ async function runSelfChecks(env = process.env) {
     }
   }
 
+  /**
+   * EILĖS PRIEINAMUMO PREFLIGHT (#155, aktyvavimo barjero prielaida).
+   *
+   * ⚠️ RODOMA ČIA, NES ČIA MATO IR `doctor`, IR `/api/health/deep`.
+   *
+   * ADR reikalauja, kad preflight rezultatas būtų matomas operatoriui, ne tik
+   * logo eilutėje: logas rotuojasi, o klausimas „kodėl režimas `inline`, nors
+   * `REDIS_URL` nustatytas" užduodamas praėjus savaitėms.
+   *
+   * ⚠️ `/api/ready` ČIA NETINKA. Jo kontraktas reikalauja loginių būsenų be
+   * infrastruktūros detalių, o preflight priežastis (`ECONNREFUSED`, timeout)
+   * būtent tokia detalė ir yra.
+   *
+   * ⚠️ VERDIKTAS NEKARTOJAMAS — imamas iš `jobRunner`, kuris jį gavo starto metu.
+   * Antras `ping()` čia reikštų antrą „ar eilė pasiekiama" atsakymą, galintį
+   * nesutapti su tuo, pagal kurį PARINKTAS režimas.
+   */
+  try {
+    const jobRunner = require("../queues/jobRunner");
+    const verdiktas = jobRunner.getQueuePreflight && jobRunner.getQueuePreflight();
+
+    if (verdiktas) {
+      checks.push({
+        name: "Eilės preflight (startas)",
+        ok: verdiktas.pasiekiama,
+        detail: verdiktas.pasiekiama
+          ? "eilė buvo pasiekiama starto metu"
+          : `eilė NEBUVO pasiekiama: ${verdiktas.priezastis}`,
+      });
+    }
+  } catch {
+    /** `jobRunner` gali būti neįkeltas (pvz. `doctor` be starto) — tai ne gedimas. */
+  }
+
   return checks;
 }
 

@@ -32,7 +32,27 @@ test("jobRunner BullMQ režime kviečia queue.add, nevykdo inline", async () => 
   const origLoad = Module._load;
   Module._load = function (request, _parent, _isMain) {
     if (request === "bullmq") return { Queue: MockQueue, Worker: class {} };
-    if (request === "ioredis") return class MockRedis { constructor() {} };
+    /**
+     * ⚠️ MOCK'AS TURI ATSAKYTI Į `ping()` — NUO #155 EILĖS PREFLIGHT.
+     *
+     * `jobRunner.init()` nebepasitiki tuo, kad `bullmq` galima `require()`: prieš
+     * pasirenkant `bullmq` režimą jis daro REALŲ `ping()`, nes jungtis kuriama
+     * lazy pirmo `add` metu, ir be patikros serveris imtų klausytis su eile,
+     * kurios nėra.
+     *
+     * Mock'as be `ping()` duoda `inline` — ir tai NE testo apėjimas, o įrodymas,
+     * kad preflight nešantis: „pasiekiama eilė" dabar yra reikalavimas režimui,
+     * ne konfigūracijos pasekmė.
+     */
+    if (request === "ioredis") {
+      return class MockRedis {
+        constructor() {}
+        async ping() {
+          return "PONG";
+        }
+        async quit() {}
+      };
+    }
     return origLoad.apply(this, arguments);
   };
 
