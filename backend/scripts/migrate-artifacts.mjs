@@ -36,9 +36,29 @@ const { Pool } = pg;
 const { migruoti, sausasPaleidimas } = artifactMigration;
 const { parinktiBackenda, sukurtiSaugykla } = artifactStore;
 
+/**
+ * ⚠️ METAMA, NE `process.exit()` — DVI SKIRTINGOS PRIEŽASTYS.
+ *
+ * 1. `process.exit()` nutraukia procesą NELAUKDAMAS, kol išsipils stdout. Kai
+ *    išvestis nukreipta į failą ar pipe (t. y. kiekvienoje automatikoje), didelis
+ *    `console.log` gali būti NUKIRSTAS: skaitytojas gauna nepilną JSON ir to
+ *    nepastebi, nes exit kodas sako „sėkmė".
+ *
+ * 2. Iš `try` bloko vidaus jis dar ir aplenkia `finally`, tad `pool.end()`
+ *    neįvyksta. Antroji problema tylesnė už pirmą ir buvo ten pat.
+ *
+ * Metimas + `process.exitCode` abi uždaro: Node baigia darbą pats, kai srautai
+ * išsipylę ir `finally` įvykdytas.
+ */
+class NaudojimoKlaida extends Error {
+  constructor(zinute, kodas = 1) {
+    super(zinute);
+    this.kodas = kodas;
+  }
+}
+
 function klaida(zinute, kodas = 1) {
-  console.error(zinute);
-  process.exit(kodas);
+  throw new NaudojimoKlaida(zinute, kodas);
 }
 
 function skaicius(argv, vardas, numatytas) {
@@ -55,18 +75,10 @@ function skaicius(argv, vardas, numatytas) {
 const argv = process.argv.slice(2);
 const komanda = argv[0];
 
-if (!["dry-run", "run", "status"].includes(komanda)) {
-  klaida("Naudojimas: migrate-artifacts.mjs <dry-run|run|status> [--limit N] [--retry-failed]");
-}
-
-if (!process.env.DATABASE_URL) klaida("DATABASE_URL nenustatytas.");
-
-const limit = skaicius(argv, "--limit", 1000);
-const retryFailed = argv.includes("--retry-failed");
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-
-try {
+/**
+ * Grąžina exit kodą. NĖ VIENA šaka nekviečia `process.exit()` — žr. `klaida()`.
+ */
+async function vykdyti(pool) {
   if (komanda === "status") {
     const { rows } = await pool.query(
       `SELECT busena, priezastis, count(*)::int AS kiek
@@ -79,8 +91,11 @@ try {
     );
 
     console.log(JSON.stringify({ likęInline: likę[0].kiek, progresas: rows }, null, 2));
-    process.exit(0);
+    return 0;
   }
+
+  const limit = skaicius(argv, "--limit", 1000);
+  const retryFailed = argv.includes("--retry-failed");
 
   if (komanda === "dry-run") {
     /**
@@ -90,15 +105,14 @@ try {
      */
     const suvestine = await sausasPaleidimas(pool, { limit, retryFailed });
     console.log(JSON.stringify(suvestine, null, 2));
-    process.exit(0);
+    return 0;
   }
 
   const { backend, eksplicitinis } = parinktiBackenda();
   if (!eksplicitinis || backend === "inline") {
     klaida(
       "ARTIFACT_STORE_BACKEND privalo būti eksplicitiškai `fs` arba `s3`. " +
-        "Migracija į `inline` nieko neperkeltų, o tylus numatytasis paverstų tai nepastebima.",
-      1
+        "Migracija į `inline` nieko neperkeltų, o tylus numatytasis paverstų tai nepastebima."
     );
   }
 
@@ -111,11 +125,29 @@ try {
    * ⚠️ NESĖKMĖS TURI SAVO EXIT KODĄ. Su `0` masinis paleidimas, palikęs šimtą
    * neperkeltų eilučių, atrodytų sėkmingas kiekvienoje automatikoje, kuri žiūri
    * tik į exit kodą — o būtent tos eilutės ir reikalauja žmogaus.
+   *
+   * ⚠️ `praleista` į šį kodą NEĮEINA: praleista eilutė reiškia, kad darbą atliko
+   * kas nors kitas, o ne kad jo reikia.
    */
   const nepavyko = Object.values(suvestine.nepavyko).reduce((a, b) => a + b, 0);
-  process.exit(nepavyko > 0 ? 3 : 0);
+  return nepavyko > 0 ? 3 : 0;
+}
+
+let pool = null;
+
+try {
+  if (!["dry-run", "run", "status"].includes(komanda)) {
+    klaida("Naudojimas: migrate-artifacts.mjs <dry-run|run|status> [--limit N] [--retry-failed]");
+  }
+  if (!process.env.DATABASE_URL) klaida("DATABASE_URL nenustatytas.");
+
+  pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  process.exitCode = await vykdyti(pool);
 } catch (e) {
-  klaida(`Migracija nutraukta: ${e && e.message ? e.message : e}`, 2);
+  console.error(
+    e instanceof NaudojimoKlaida ? e.message : `Migracija nutraukta: ${e && e.message ? e.message : e}`
+  );
+  process.exitCode = e instanceof NaudojimoKlaida ? e.kodas : 2;
 } finally {
-  await pool.end().catch(() => {});
+  if (pool) await pool.end().catch(() => {});
 }

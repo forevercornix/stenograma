@@ -117,6 +117,46 @@ test("`PAYLOAD_SQL` kartoja atrankos sąlygą — langas uždarytas", () => {
   assert.match(PAYLOAD_SQL, /WHERE\s+job_id = \$1/);
 });
 
+test("CLI nenaudoja `process.exit()` — išvestis nenukertama", () => {
+  /**
+   * ⚠️ DVI PROBLEMOS VIENAME KVIETIME.
+   *
+   * 1. `process.exit()` nutraukia procesą NELAUKDAMAS, kol išsipils stdout. Kai
+   *    išvestis nukreipta į failą ar pipe — t. y. kiekvienoje automatikoje —
+   *    didelis `console.log` gali būti NUKIRSTAS. Skaitytojas gauna nepilną JSON
+   *    ir to nepastebi, nes exit kodas sako „sėkmė". Tylus gedimas.
+   *
+   * 2. Iš `try` bloko jis dar ir aplenkia `finally`, tad `pool.end()` neįvyksta.
+   *
+   * Tikrinama tekste, nes tai struktūrinė savybė: nė viena šaka neturi teisės
+   * baigti proceso pati. Vienas grįžęs `process.exit()` atkurtų abi problemas.
+   */
+  const cli = fs.readFileSync(path.join(__dirname, "..", "scripts", "migrate-artifacts.mjs"), "utf8");
+
+  /**
+   * ⚠️ KOMENTARŲ EILUTĖS IŠMETAMOS — SARGAS PAGAVO PATS SAVE.
+   *
+   * Pirma redakcija skenavo visą tekstą ir krito dėl TRIJŲ paminėjimų PAČIAME
+   * paaiškinime, kodėl `process.exit()` nenaudojamas. Tai #265 klasė („statinės
+   * patikros gaudo savo pačių komentarus"), ir ji reali: patikra, kurią tenkina
+   * tik nutylėtas paaiškinimas, verčia rinktis tarp sargo ir dokumentacijos.
+   *
+   * ⚠️ RIBA UŽRAŠOMA: filtruojama pagal eilutės pradžią, tad `process.exit(`
+   * daugiaeilėje eilutėje (template literal) būtų palaikytas kvietimu. Tokio
+   * kodo čia nėra, o bendra taisyklė yra #265 apimtis — ne šio testo.
+   */
+  const kodoEilutes = cli
+    .split("\n")
+    .filter((e) => !/^\s*(\*|\/\/|\/\*)/.test(e))
+    .join("\n");
+
+  const kvietimai = [...kodoEilutes.matchAll(/process\.exit\s*\(/g)];
+  assert.deepEqual(kvietimai.map((m) => m[0]), [], "CLI kviečia `process.exit()`");
+
+  assert.match(cli, /process\.exitCode\s*=/, "exit kodas privalo būti nustatomas, ne vykdomas");
+  assert.match(cli, /finally\s*\{[\s\S]*?pool\.end\(\)/, "`finally` privalo uždaryti pool'ą");
+});
+
 test("STRUKTŪRINĖ SARGYBA: CLI neturi savo orkestracijos", () => {
   /**
    * Ta pati taisyklė ir tas pats precedentas kaip `dr-restore.mjs` (#250 D2):
