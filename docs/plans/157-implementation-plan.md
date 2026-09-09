@@ -1290,7 +1290,7 @@ visada-„kritinė nesėkmė"); **`inline` eilutė ir toliau raportuojama pagal
 | 2 | Tvarka: **object write → integrity verification → atominis reference switch** | body DoD |
 | 3 | **Restartable ir idempotentiška**; gedimas nė viename taške nepraranda vienintelės kopijos | body DoD |
 | 4 | Dry-run ir tikra migracija — abi padengtos testais | body DoD |
-| 5 | **Stebėtojas antroje jungtyje** įrodo, kad commit'intos pažeidžiančios būsenos nepastebėta | §9.1 |
+| 5 | ~~**Stebėtojas antroje jungtyje** įrodo, kad commit'intos pažeidžiančios `job_results` būsenos nepastebėta~~ → **PAKEISTA:** stebėtojas antroje jungtyje įrodo, kad nepastebėta commit'intos pažeistos POROS — objektas ↔ nuoroda ir progresas ↔ nuoroda | §9.1 (perrašyta po matavimo, CI 34323230438) |
 | 6 | ⚠️ **Migracijos rašymas eina per bandymų REGISTRĄ** — objektas, parašytas migracijos ir neįsipareigotas, yra tos pačios klasės orphan'as kaip completion kelyje | PR-4/PR-5 pasekmė, žr. žemiau |
 | 7 | Migracija **nešalina** inline `payload`, kol objekto vientisumas nepatvirtintas — tai ta pati „vienintelė kopija" taisyklė | body DoD |
 
@@ -1366,9 +1366,41 @@ Body reikalauja: „migracijos progresas nesaugomas kaip negaliojanti `job_resul
 
 **§9.1 — „jokia stebima būsena nepažeidžia invarianto" yra sunkiausias punktas.**
 Statinė „vienas UPDATE" patikra netinka (§9.2, body tai sako tiesiogiai).
-Sprendimas: migracija leidžiama su **stebėtoju antroje jungtyje**, kuris cikle
+
+~~Sprendimas: migracija leidžiama su **stebėtoju antroje jungtyje**, kuris cikle
 (`READ COMMITTED`) skaito `job_results` ir kiekvieną matytą eilutę tikrina prieš
-invariantą. Pažeidimas → testas krenta.
+invariantą. Pažeidimas → testas krenta.~~
+
+⚠️ **PERRAŠYTA (§12.1). SENAS RECEPTAS BUVO NEĮGYVENDINAMAS, IR PRIEŽASTIS
+SVARBESNĖ UŽ PATĮ RECEPTĄ.**
+
+Toks stebėtojas **negalėtų kristi**. Išmatuota (`jobResultsShapeDomain.integration`,
+CI 34323230438): visi 2⁵−2 = 30 netušti tikri priskyrimų poaibiai kiekviena
+kryptimi atmetami `23514` ties `job_results_storage_shape`. Commit'intos
+pažeidžiančios `job_results` eilutės padaryti NEĮMANOMA — nei dviem sakiniais,
+nei daugiau (bet kurio skaidymo pirmasis sakinys yra tikras poaibis), nei bendra
+transakcija (suvaržymas nėra `DEFERRABLE`, sakinys krenta iš karto).
+
+Vadinasi senas stebėtojas tikrintų tą patį `CHECK`, kurį DB taiko kiekvienam
+sakiniui. **Jis įrodo ne „mažiau, nei tikėtasi" — jis įrodo nieko**, o testas,
+kuris negali kristi, nėra įrodymas.
+
+**NAUJAS RECEPTAS: stebimos POROS TARP SISTEMŲ**, kurioms joks `CHECK`
+negalioja pagal apibrėžimą, nes jos yra tarp dviejų lentelių arba tarp DB ir
+saugyklos:
+
+| Pora | Pažeidimas | Kaip mutuojama |
+|---|---|---|
+| objektas ↔ nuoroda | external eilutė rodo į raktą, kurio saugykloje nėra | eilutė perjungiama į nesantį objektą |
+| progresas ↔ nuoroda | `artifact_migration_progress` sako `done`, o eilutė tebėra `inline` | progresas įrašomas atskira, ANKSTESNE transakcija |
+
+Abi mutacijos VYKDOMOS (`artifactMigration.integration`), ne teigiamos: stebėtojas,
+kuris nieko nerado, neatskiriamas nuo stebėtojo, kuris neveikia.
+
+⚠️ **KĄ TAI KEIČIA MIGRACIJOJE.** Iš šito seka reikalavimas kodui, ne tik testui:
+progreso įrašas privalo būti TOJE PAČIOJE transakcijoje kaip reference switch.
+Atskirai rašomas progresas sukurtų būtent tą commit'intą porą, kurios stebėtojas
+ieško — ir tai vienintelė vieta, kur migracija dar gali palikti langą.
 
 ⚠️ **MUTACIJA PRIVALO SKALDYTI TRANSAKCIJĄ, NE TIK SAKINĮ** (Codex, #289).
 Ankstesnė formuluotė žadėjo, kad `UPDATE storage_key` + `UPDATE payload = NULL`
@@ -1380,40 +1412,11 @@ nesulaužytų, ir testas būtų atrodęs stipresnis, nei yra.
 ~~Teisinga mutacija: du `UPDATE` **atskirose transakcijose** (arba `COMMIT` tarp
 jų) → stebėtojas pagauna commit'intą tarpinę būseną → **krenta**.~~
 
-⚠️ **ATŠAUKTA (§12.1) — IŠMATUOTA, KAD TOKIOS MUTACIJOS NĖRA.**
-
-`jobResultsShapeDomain.integration` (CI 34323230438) ištyrė VISĄ skaidymo erdvę:
-2⁵−2 = 30 netušti tikri priskyrimų poaibiai kiekviena kryptimi, visi 60 atmesti
-su `23514` ties `job_results_storage_shape`. Nė vienas dalinis `UPDATE` DB
-nepraeina, tad **commit'intos tarpinės būsenos padaryti neįmanoma** — nei dviem
-sakiniais, nei daugiau (bet kurio skaidymo pirmasis sakinys yra tikras poaibis).
-Bendra transakcija irgi ne išeitis: suvaržymas nėra `DEFERRABLE`, o sakinys
-krenta iš karto, ne commit'o metu.
-
-**Iš to seka, kad §9.1 stebėtojas `job_results` eilutės viduje įrodo NIEKO.**
-Ne „mažiau, nei tikėtasi" — nieko: jo tikrinamas invariantas yra tas pats
-`CHECK`, kurį DB jau taiko kiekvienam sakiniui. Testas, kuris niekada negali
-kristi, nėra įrodymas.
-
-**Stebėtojas persiorientuoja į POras, kurių `CHECK` NEGINA** — tai vienintelės
-vietos, kur migracija dar gali palikti langą:
-
-| Pora | Ką pažeidimas reikštų | Kaip mutuojama |
-|---|---|---|
-| objektas ↔ nuoroda | `job_results` rodo į raktą, kurio saugykloje nėra (arba objektas yra, o nuorodos nėra) | `put()` praleidžiamas / `head()` patikra išjungiama |
-| progresas ↔ nuoroda | `artifact_migration_progress` sako `done`, o eilutė tebėra `inline` (arba atvirkščiai) | progreso įrašas perkeliamas prieš reference switch |
-
-Abi poros yra TARP dviejų sistemų, tad joms joks `CHECK` negalioja, ir abi
-mutuojamos realiai. Tai perkelia §9.1 iš „patikrinti tai, ką DB ir taip taiko"
-į „patikrinti tai, ko nepatikrina niekas kitas".
-
-⚠️ IŠ TO SEKA IR TIKSLUS TEIGINYS, KURĮ TESTAS ĮRODO: „nėra **commit'intos**
-formos pažeidžiančios būsenos". Tai lygiai tas reikalavimas, kurį formuluoja
-body („commit'inta dalinai pakeisto trejeto būsena negalima"), ne stipresnis.
-Vienos transakcijos vidinės tarpinės būsenos joks išorinis stebėtojas
-neįrodys — ir jų įrodinėti nereikia, nes jos niekam nematomos.
-⚠️ Riba užrašoma: stebėtojas įrodo, kad pažeidimo **nepastebėta**, ne kad jo
-neįmanoma. Tai stipriau nei statinė patikra ir silpniau nei formalus įrodymas.
+⚠️ **ATŠAUKTA (§12.1).** Ši mutacija neįvykdoma — matavimas ir naujas receptas
+užrašyti aukščiau, prie perrašyto §9.1 sprendimo. Sakinys paliekamas perbrauktas,
+o ne ištrintas, nes jis paaiškina, KODĖL ankstesnis Codex raundas (#289) reikalavo
+skaldyti transakciją: tuo metu prielaida, kad skaidymas apskritai įmanomas, dar
+nebuvo patikrinta.
 
 ---
 
