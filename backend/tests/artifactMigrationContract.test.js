@@ -157,6 +157,58 @@ test("CLI nenaudoja `process.exit()` — išvestis nenukertama", () => {
   assert.match(cli, /finally\s*\{[\s\S]*?pool\.end\(\)/, "`finally` privalo uždaryti pool'ą");
 });
 
+test("SCENARIJAI neturi backend'o literalų — kitaip jie perima vieno savybes", () => {
+  /**
+   * ⚠️ PATIKRINTA, KAD ELGESIO SARGAS ČIA NEPAKANKA.
+   *
+   * Būtų natūralu manyti, kad tų pačių scenarijų paleidimas prieš DU backend'us
+   * pagauna kiekvieną naują `'fs'` literalą. Taip yra tik IŠ DALIES:
+   *
+   *   TVIRTINIME (`assert.equal(r.storage_type, "fs")`) — pagauna: `s3` raunde
+   *     laukiama reikšmė nesutampa, ir testas krenta (taip ir rado pirmas
+   *     raundas, CI 34370538544);
+   *
+   *   SQL SAKINYJE, imituojančiame svetimą procesą — NEPAGAUNA. `UPDATE ... SET
+   *     storage_type = 'fs'` yra teisėtas įrašas ir `s3` paleidime:
+   *     `job_results_storage_shape` jį priima, o gretimi tvirtinimai tikrina
+   *     `storage_key`, ne `storage_type`. Testas lieka žalias, o scenarijus
+   *     tyliai grįžta prie vieno backend'o prielaidos.
+   *
+   * Todėl reikia TEKSTINIO sargo — ne todėl, kad jis stipresnis, o todėl, kad jis
+   * dengia būtent tą pusę, kurios elgesio sargas nemato. Be jo teiginys „kode
+   * nebeliko nė vieno `'fs'` literalo" būtų konvencija, ne garantija.
+   */
+  const scenarijai = fs.readFileSync(
+    path.join(__dirname, "helpers", "artifactMigrationScenarios.js"),
+    "utf8"
+  );
+
+  /** ⚠️ Komentarų eilutės išmetamos — #265 klasė; žr. `process.exit()` sargą. */
+  const tikKodas = (tekstas) =>
+    tekstas
+      .split("\n")
+      .filter((e) => !/^\s*(\*|\/\/|\/\*)/.test(e))
+      .join("\n");
+
+  const rasti = (tekstas) => [...tikKodas(tekstas).matchAll(/['"](fs|s3)['"]/g)].map((m) => m[0]);
+
+  assert.deepEqual(
+    rasti(scenarijai),
+    [],
+    "scenarijuose yra backend'o literalas — naudokite `backendas()`, t. y. `saugykla.backend`"
+  );
+
+  /**
+   * ⚠️ SAVIPATIKRA. Patikra, kuri niekada nieko nerado, neatskiriama nuo
+   * patikros, kuri neveikia — ta pati taisyklė kaip `check-matrix-rows.mjs`.
+   */
+  assert.equal(
+    rasti(scenarijai + "\nassert.equal(r.storage_type, \"fs\");\n").length,
+    1,
+    "sargas neranda įterpto literalo — jis nieko negina"
+  );
+});
+
 test("STRUKTŪRINĖ SARGYBA: CLI neturi savo orkestracijos", () => {
   /**
    * Ta pati taisyklė ir tas pats precedentas kaip `dr-restore.mjs` (#250 D2):

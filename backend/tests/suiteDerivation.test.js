@@ -80,6 +80,56 @@ test("IŠVEDIMAS: trys rinkiniai NESIKERTA ir nieko nepraranda", () => {
   assert.ok(suites.postgresS3.length > 0, "be dvigubos priklausomybės failo taisyklė nepatikrinta");
 });
 
+test("SAVIPATIKRA: išvedimo taisyklė atskiria FIKTYVŲ dvigubos priklausomybės failą", () => {
+  /**
+   * ⚠️ KOL `postgresS3` TURI VIENĄ FAILĄ, JO SARGO JAUTRUMAS PRIKLAUSO NUO TO
+   * VIENO ATVEJO.
+   *
+   * Taisyklė gali būti teisinga ir sutapti su vieninteliu failu vienu metu —
+   * abu paaiškinimai duoda tą patį rezultatą, ir jų neatskiria niekas. Antras
+   * TIKRAS dvigubos priklausomybės testas būtų stipresnis, bet brangesnis;
+   * pigesnis atsakymas yra savipatikra, kaip CLI `process.exit()` sargo atveju.
+   *
+   * Tikrinama TAISYKLĖ, ne failų sistema: fiktyvus turinys paduodamas tam pačiam
+   * skeneriui (`importuotiModuliai`), ir tikrinama, į kurią aibę jis patektų.
+   * Failo į diską nerašom — testas, kuriantis testų failus, keistų aibę, kurią
+   * pats matuoja.
+   */
+  const klasifikuoti = (turinys) => {
+    const importai = importuotiModuliai(turinys);
+    const pg = importai.some((k) => k.endsWith("postgresGuard"));
+    const minio = importai.some((k) => k.endsWith("minioGuard"));
+
+    if (pg && minio) return "postgresS3";
+    if (pg) return "postgres";
+    if (minio) return "s3";
+    return "nė vieno";
+  };
+
+  const ABU = `
+    const { skipWithoutPostgres } = require("./helpers/postgresGuard");
+    const { skipWithoutMinio } = require("./helpers/minioGuard");
+  `;
+
+  assert.equal(klasifikuoti(ABU), "postgresS3", "dviguba priklausomybė privalo eiti į savo rinkinį");
+  assert.equal(
+    klasifikuoti('const { skipWithoutPostgres } = require("./helpers/postgresGuard");'),
+    "postgres"
+  );
+  assert.equal(
+    klasifikuoti('const { skipWithoutMinio } = require("./helpers/minioGuard");'),
+    "s3"
+  );
+  assert.equal(klasifikuoti('const x = require("node:fs");'), "nė vieno");
+
+  /**
+   * ⚠️ IR ATVIRKŠČIAI: be dvigubo importo `postgresS3` privalo likti TUŠČIAS.
+   * Be šios pusės taisyklė „viskas eina į postgresS3" praeitų pirmą tvirtinimą.
+   */
+  const tikPg = ['const a = require("./helpers/postgresGuard");'];
+  assert.equal(tikPg.filter((t) => klasifikuoti(t) === "postgresS3").length, 0);
+});
+
 test("SKENAVIMAS: komentaro ir literalo atpažinimas - teisinga TVARKA", () => {
   /**
    * ⚠️ ŠIS TESTAS EGZISTUOJA DĖL DVIEJŲ SKIRTINGŲ KLAIDŲ.
