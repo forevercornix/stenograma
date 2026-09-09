@@ -1377,8 +1377,35 @@ antroji jungtis `READ COMMITTED` režimu tarpinės būsenos nemato IŠ VISO: iki
 commit'o ji regi seną eilutę, po jo — galutinę. Tokia mutacija stebėtojo
 nesulaužytų, ir testas būtų atrodęs stipresnis, nei yra.
 
-Teisinga mutacija: du `UPDATE` **atskirose transakcijose** (arba `COMMIT` tarp
-jų) → stebėtojas pagauna commit'intą tarpinę būseną → **krenta**.
+~~Teisinga mutacija: du `UPDATE` **atskirose transakcijose** (arba `COMMIT` tarp
+jų) → stebėtojas pagauna commit'intą tarpinę būseną → **krenta**.~~
+
+⚠️ **ATŠAUKTA (§12.1) — IŠMATUOTA, KAD TOKIOS MUTACIJOS NĖRA.**
+
+`jobResultsShapeDomain.integration` (CI 34323230438) ištyrė VISĄ skaidymo erdvę:
+2⁵−2 = 30 netušti tikri priskyrimų poaibiai kiekviena kryptimi, visi 60 atmesti
+su `23514` ties `job_results_storage_shape`. Nė vienas dalinis `UPDATE` DB
+nepraeina, tad **commit'intos tarpinės būsenos padaryti neįmanoma** — nei dviem
+sakiniais, nei daugiau (bet kurio skaidymo pirmasis sakinys yra tikras poaibis).
+Bendra transakcija irgi ne išeitis: suvaržymas nėra `DEFERRABLE`, o sakinys
+krenta iš karto, ne commit'o metu.
+
+**Iš to seka, kad §9.1 stebėtojas `job_results` eilutės viduje įrodo NIEKO.**
+Ne „mažiau, nei tikėtasi" — nieko: jo tikrinamas invariantas yra tas pats
+`CHECK`, kurį DB jau taiko kiekvienam sakiniui. Testas, kuris niekada negali
+kristi, nėra įrodymas.
+
+**Stebėtojas persiorientuoja į POras, kurių `CHECK` NEGINA** — tai vienintelės
+vietos, kur migracija dar gali palikti langą:
+
+| Pora | Ką pažeidimas reikštų | Kaip mutuojama |
+|---|---|---|
+| objektas ↔ nuoroda | `job_results` rodo į raktą, kurio saugykloje nėra (arba objektas yra, o nuorodos nėra) | `put()` praleidžiamas / `head()` patikra išjungiama |
+| progresas ↔ nuoroda | `artifact_migration_progress` sako `done`, o eilutė tebėra `inline` (arba atvirkščiai) | progreso įrašas perkeliamas prieš reference switch |
+
+Abi poros yra TARP dviejų sistemų, tad joms joks `CHECK` negalioja, ir abi
+mutuojamos realiai. Tai perkelia §9.1 iš „patikrinti tai, ką DB ir taip taiko"
+į „patikrinti tai, ko nepatikrina niekas kitas".
 
 ⚠️ IŠ TO SEKA IR TIKSLUS TEIGINYS, KURĮ TESTAS ĮRODO: „nėra **commit'intos**
 formos pažeidžiančios būsenos". Tai lygiai tas reikalavimas, kurį formuluoja
