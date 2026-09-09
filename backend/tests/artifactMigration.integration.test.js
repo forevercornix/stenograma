@@ -453,6 +453,56 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
     assert.ok((await eilute(jobId)).payload, "kopija lieka");
   });
 
+  await t.test("PRALAIMĖJĘS NEPERRAŠO laimėtojo `done` įrašo", async () => {
+    /**
+     * ⚠️ P2: PRALAIMĖJĘS CAS NAIKINO SVETIMĄ AUDITO ĮRAŠĄ.
+     *
+     * `irasytiNesekme()` upsert buvo besąlyginis: `busena = 'failed'`,
+     * `storage_type`/`storage_key` į `NULL`. Jei kitas procesas tuo metu jau
+     * įsipareigojo `done`, o `job_results` jau external, pralaimėjęs sunaikindavo
+     * LAIMĖTOJO įrašą ir nuorodą į realiai egzistuojantį objektą — o jo `run_id`
+     * pakeisdavo savuoju. Audito lentelė tada meluotų apie du dalykus vienu metu:
+     * kad perkėlimas nepavyko, ir kad jį darė ne tas paleidimas.
+     *
+     * Lenktynės SINCHRONIZUOJAMOS ties draiverio riba, ne tikimasi: `put()`
+     * kabliukas įvykdo VISĄ svetimo proceso perkėlimą (eilutė + progresas), tad
+     * mūsų procesas garantuotai ateina antras.
+     */
+    const jobId = await naujasInline({ text: "lenktynes-progresas" });
+    const svetimasRun = "11111111-2222-4333-8444-555555555555";
+
+    const svetimas = { ...saugykla };
+    svetimas.put = async (raktas, paruosta) => {
+      const kvitas = await saugykla.put(raktas, paruosta);
+
+      await pool.query(
+        `UPDATE job_results
+            SET storage_type = 'fs', storage_key = 'results/laimetojas/a.json',
+                bytes = 9, checksum = repeat('d', 64), payload = NULL
+          WHERE job_id = $1`,
+        [jobId]
+      );
+      await pool.query(
+        `INSERT INTO artifact_migration_progress
+               (job_id, busena, storage_type, storage_key, run_id, created_at, updated_at)
+         VALUES ($1, 'done', 'fs', 'results/laimetojas/a.json', $2, now(), now())`,
+        [String(jobId), svetimasRun]
+      );
+
+      return kvitas;
+    };
+
+    const s = await migruoti(pool, svetimas, {});
+
+    assert.equal(s.nepavyko[PRIEZASTIS.EILUTE_PASIKEITE], 1, "kontrolė: mūsų procesas TIKRAI pralaimėjo");
+
+    const p = await progresas(jobId);
+    assert.equal(p.busena, "done", "laimėtojo įrašas privalo išlikti");
+    assert.equal(p.storage_key, "results/laimetojas/a.json", "nuoroda į realų objektą nesunaikinta");
+    assert.equal(p.priezastis, null, "`failed` priežastis negali atsirasti ant `done` įrašo");
+    assert.equal(p.run_id, svetimasRun, "laimėtojo `run_id` neperrašytas");
+  });
+
   await t.test("`failed` eilutės pakartotinai NEBANDOMOS be `retryFailed`", async () => {
     const pries = await migruoti(pool, saugykla, {});
     assert.equal(pries.kandidatai, 0, "visos keturios pažymėtos `failed` ir praleidžiamos");

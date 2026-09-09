@@ -82,6 +82,23 @@ const KANDIDATAI_SQL = `
    LIMIT $1
 `;
 
+/**
+ * ⚠️ NESĖKMĖ NEGALI PERRAŠYTI `done` ĮRAŠO (P2).
+ *
+ * Besąlyginis upsert leido pralaimėjusiam CAS sunaikinti LAIMĖTOJO audito įrašą:
+ * `busena` į `failed`, `storage_key` į `NULL`, `run_id` į savąjį — nors
+ * `job_results` tuo metu jau external, o objektas realiai egzistuoja. Lentelė
+ * tada meluotų apie du dalykus vienu metu: kad perkėlimas nepavyko, ir kad jį
+ * darė ne tas paleidimas.
+ *
+ * ⚠️ `done` YRA TERMINALUS, IR TAI NE PRIELAIDA. Perkelta eilutė nebėra `inline`,
+ * tad atranka (`KANDIDATAI_SQL`) jos nebegrąžina — job'as, turintis `done`, į šį
+ * kelią antrą kartą nepatenka. Sąlyga tik užrašo tai, ką jau garantuoja atranka.
+ *
+ * ⚠️ SĄLYGA `WHERE`, NE SERIALIZAVIMAS PER JOB'Ą. Serializavimas reikštų naują
+ * užrakinimo tvarką visame kelyje; čia pakanka to, kad vienintelis pavojingas
+ * perėjimas (`done` → `failed`) taptų neišreiškiamas.
+ */
 async function irasytiNesekme(vykdytojas, { jobId, priezastis, runId }) {
   await vykdytojas.query(
     `INSERT INTO artifact_migration_progress (job_id, busena, priezastis, run_id, created_at, updated_at)
@@ -92,7 +109,8 @@ async function irasytiNesekme(vykdytojas, { jobId, priezastis, runId }) {
             storage_type = NULL,
             storage_key = NULL,
             run_id = EXCLUDED.run_id,
-            updated_at = now()`,
+            updated_at = now()
+      WHERE artifact_migration_progress.busena <> 'done'`,
     [String(jobId), priezastis, runId]
   );
 }
