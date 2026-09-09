@@ -176,3 +176,93 @@ test("asinchroninis maršrutas elgiasi VIENODAI (tas pats cleanup)", async (t) =
     "cleanup neturi tyliai nepavykti - tai buvo ankstesnės regresijos slėptuvė"
   );
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * LAUKŲ VARDŲ RIBOS (`multer` 2.3.0, `GHSA-wc9g-mqfw-jrwm` ir kt.)
+ *
+ * ⚠️ KODĖL TESTAS, O NE VIEN ATNAUJINIMAS.
+ *
+ * `multer` 2.3.0 uždarė patį crash'ą, bet trys ištekliaus ribos liko OPT-IN:
+ * `make-middleware.js` jas tikrina tik `hasOwnProperty` sąlygoje, o `index.js`
+ * numatytųjų nesudeda. Vadinasi konfigūracija ir sauga čia yra tas pats daiktas,
+ * ir be testo `AUDIO_LIMITS` galėtų būti tyliai pašalintas ar perrašytas —
+ * `npm audit` liktų žalias, nes biblioteka atnaujinta.
+ *
+ * Tikrinama per TIKRĄ maršrutą, ne per `multer()` objektą: klausimas yra, ar
+ * ribos pasiekia produkcinį kelią, o ne ar objektas turi lauką.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const { AUDIO_LIMITS } = require("../utils/uploadStorage");
+
+test("per ilgas lauko vardas ATMETAMAS, procesas nekrenta", async () => {
+  const res = await request(app)
+    .post("/api/transcribe")
+    .field("a".repeat(AUDIO_LIMITS.fieldNameSize + 1), "x")
+    .attach("audio", wavBuffer(), { filename: "posedis.wav", contentType: "audio/wav" });
+
+  /**
+   * ⚠️ TIKRINAMAS PRANEŠIMAS, NE VIEN `400` (rasta mutacija).
+   *
+   * Pirma šio testo redakcija tvirtino tik statusą — ir mutacijos raunde
+   * (`AUDIO_LIMITS` pašalintas) brolinis testas su `a[0][0][0]` VIS TIEK
+   * praeidavo: nežinomą lauką atmesdavo schemos sluoksnis su
+   * `VALIDATION_FAILED`, visai kitoje vietoje ir dėl visai kitos priežasties.
+   * Testas žaliavo be jokios multer ribos. Pranešimas atskiria sluoksnius.
+   */
+  assert.equal(res.status, 400, "riba privalo suveikti maršrute, ne tik konfigūracijoje");
+  assert.equal(res.body.error, "Field name too long", "atmesta ne multer riba, o kažkas kitas");
+  await assertUploadDirEmpty("atmestas įkėlimas irgi valomas");
+});
+
+test("laužtiniai skliaustai lauko varde ATMETAMI (`fieldNestingDepth: 0`)", async () => {
+  /**
+   * ⚠️ BŪTENT ŠIS VEKTORIUS KELDAVO `RangeError`. 2.3.0 jį paverčia klaida, o ne
+   * proceso nutraukimu; riba padaro, kad iki `appendField` apskritai nebūtų
+   * einama. Tikrinamos ABI dalys, nes atnaujinimas be ribos praeitų vien pirmą.
+   */
+  const res = await request(app)
+    .post("/api/transcribe")
+    .field("a[0][0][0]", "x")
+    .attach("audio", wavBuffer(), { filename: "posedis.wav", contentType: "audio/wav" });
+
+  assert.equal(res.status, 400);
+  assert.equal(
+    res.body.error,
+    "Field name nesting too deep",
+    "be šito tvirtinimo testas praeina ir BE ribos — atmeta schemos sluoksnis"
+  );
+});
+
+test("KONTROLĖ: teisėti laukai (`language`, `diarize`) ir toliau PRAEINA", async () => {
+  /**
+   * ⚠️ Be jos visos ribos galėtų būti „atmesk viską", ir du testai aukščiau
+   * praeitų nieko neįrodę. Šie du laukai yra tiksliai tai, ką siunčia frontend'as
+   * (`stenogramaApi.js`), tad kontrolė matuoja realų kelią, ne sugalvotą.
+   */
+  const res = await request(app)
+    .post("/api/transcribe")
+    .field("language", "lt")
+    .field("diarize", "false")
+    .attach("audio", wavBuffer(), { filename: "posedis.wav", contentType: "audio/wav" });
+
+  assert.equal(res.status, 200, "įprasta forma privalo veikti — kitaip riba sulaužė produktą");
+});
+
+test("KONTROLĖ: ribos TIKRAI perduodamos multer'iui, ne tik apibrėžtos", () => {
+  /**
+   * ⚠️ TRYS OPT-IN RIBOS IŠVARDIJAMOS EKSPLICITIŠKAI. Bendras „limits nėra
+   * tuščias" praeitų ir tada, jei liktų vien `fileSize` — t. y. tiksliai
+   * ankstesnė būsena, kurios ši eilutė ir netenkina.
+   */
+  const { createAudioUpload } = require("../utils/uploadStorage");
+  const limits = createAudioUpload().limits;
+
+  for (const raktas of ["fieldNameSize", "fieldNestingDepth", "fieldArrayIndexLimit", "fields", "files", "parts"]) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(limits, raktas),
+      `\`${raktas}\` neperduota — multer patikros be jos NEVYKDO`
+    );
+  }
+
+  assert.ok(limits.fileSize > 0, "`fileSize` negali dingti pridedant naujas ribas");
+});

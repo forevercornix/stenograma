@@ -42,7 +42,7 @@
     "express-rate-limit": "^8.6.2",
     "form-data": "^4.0.0",
     "helmet": "^8.3.0",
-    "multer": "^2.0.0",
+    "multer": "^2.3.0",
     "node-pg-migrate": "^9.0.0",
     "papaparse": "^5.6.0",
     "pg": "^8.23.0",
