@@ -1704,8 +1704,9 @@ vieno neprapleisto `ok` kiekviename rinkinio faile.
 ## #157 (PR-1) — `job_results` external reprezentacijos invariantas
 
 ⚠️ **DB, ne aplikacija.** #157 body: „Integrity metaduomenys tampa DB invariantu,
-ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos `INSERT` atmetimu
-(`23514`), ne kodo keliu.
+ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos DB atmetimu (`23514`), ne kodo keliu:
+`INSERT` eilutės tikrina formos STATIKĄ, dvi paskutinės (#157 PR-6) — PERĖJIMUS
+tarp galiojančių formų, t. y. ar juos apskritai galima išskaidyti.
 
 | Garantija | Testai | Mutacijos įrodymas |
 |---|---|---|
@@ -1721,6 +1722,8 @@ ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos `INSERT` atme
 | ⚠️ **Preflight riba skaičiuojama BIBLIOTEKOS taisykle** | `jobResultsExternalShape.integration` | ⚠️ **Codex radinys (#289):** `readdirSync` grąžina `.gitkeep`, o `node-pg-migrate` dotfile'us ignoruoja (`^\..*`), tad riba buvo per didelė vienetu ir pirmoji #157 migracija būdavo pritaikyta. Testas tvirtino „schema nepaliesta", nors kolonos jau egzistavo. Po pataisymo tikrinama, kad kritimas atsuka ABI migracijas (viena transakcija) |
 | ⚠️ **Kiekviena `CHECK` dalis yra NEŠANTI** | `jobResultsExternalShape.integration` | Mutacijos VYKDOMOS teste: sargas pašalinamas `ALTER TABLE`, tikrinama, kad eilutė įsirašo, ir grąžinamas. Trys atskiros (`payload`, `bytes`, `checksum`) + reikšmių aibė atskirai nuo formos. ⚠️ **Kodėl to reikėjo, nors testas jau krito prieš migraciją:** raudonas raundas (CI 33854194027) parodė, kad visi keturi sargai krenta su `42703` (stulpelio nėra), ne su `23514` — t. y. testas jautė migracijos NEBUVIMĄ, o ne kiekvieną dalį atskirai |
 | ⚠️ **KONTROLĖ: mutacija tikrai atstatoma** | `jobResultsExternalShape.integration` | Po kiekvienos mutacijos tos pačios eilutės vėl atmetamos. Be jos mutacijos rodytų tik tai, kad susilpninta forma praleidžia, bet ne kad pilna — atmeta |
+| ⚠️ **Reference switch NEIŠSKAIDOMAS — commit'intos tarpinės būsenos NĖRA** | `jobResultsShapeDomain.integration` | PR-6 planas §9.1 rėmėsi NEPATIKRINTA prielaida, kad `inline` → external perėjimą galima skaidyti į du `UPDATE` atskirose transakcijose, ir kad tarp jų yra commit'inta būsena, kurią stebėtojas pamatytų. Skaidymo erdvė IŠVEDAMA, ne atrenkama ranka: visi 2^5−2 = 30 netušti tikri priskyrimų poaibiai KIEKVIENA kryptimi, po vieną `UPDATE` kiekvienam — tad padengiami ir ilgesni skaidymai, nes bet kurio N sakinių skaidymo PIRMASIS sakinys yra tikras poaibis. Mutacija: pašalinus `storage_key IS NULL` iš `inline` šakos, poaibis `storage_key` praeina → tvirtinimas krenta. Tikrinamas SQLSTATE IR suvaržymo vardas (`23514` ties `job_results_storage_shape`), nes `42703` reikštų nepritaikytą migraciją, o ne invariantą. KONTROLĖ: pilnas perėjimas vienu sakiniu praeina ABIEM kryptimis — be jos „joks `UPDATE` neveikia" atrodytų kaip įrodytas atomiškumas |
+| ⚠️ **Transakcija NĖRA išeitis — sakinys krenta PATS, ne commit'o metu** | `jobResultsShapeDomain.integration` | Jei `CHECK` būtų tikrinamas atidėtai, migracija galėtų teisėtai rašyti du sakinius vienoje transakcijoje, ir §9.1 stebėtojas turėtų ką stebėti. Tikrinama DVIEM lygiais: `pg_constraint.condeferrable`/`condeferred` yra `false` (struktūrinė savybė — krenta, jei kas nors suvaržymą perkurs atidedamą), IR dalinis `UPDATE` po EKSPLICITINIO `SET CONSTRAINTS ALL DEFERRED` vis tiek meta `23514` iš karto. Vien stebėjimo nepakaktų: jis įrodytų tik tą vieną bandymą, ne kad atidėti nėra ko |
 
 ---
 
@@ -1826,6 +1829,31 @@ ne aplikacijos susitarimu." Todėl visos šios eilutės tikrinamos `INSERT` atme
 | ⚠️ **`verify()` sako, ar palyginimas NEPRIKLAUSOMAS** | `artifactStoreContract` | Inline atveju lyginama reikšmė su savimi (metaduomenų atskirai nėra). Riba: restore verifikacija inline eilutėms neduoda jokio patikrinimo — PR-7 DoD reikalauja ataskaitoje atskirti patikrintas ir nepatikrinamas eilutes |
 | ⚠️ **`fs`: `fsync` + `rename` + katalogo `fsync`** | `artifactStoreContract` (netiesiogiai) | ⚠️ **STATINĖ riba (§9.2):** kontraktas tikrina round-trip, ne patvarumą po maitinimo dingimo. Vien `rename` paliktų NULINIO ILGIO failą teisingu vardu, kurį `head` rodo kaip esantį |
 | ⚠️ **`readStream` klaida APDOROJAMA, ne visada tipizuota** | `artifactStoreContract` | Objektas gali dingti tarp patikros ir skaitymo, tad kontraktas nežada „visada tipizuota" (§12.1); tikrinama, kad srautas arba perduoda duomenis, arba praneša klaidą |
+
+---
+
+## #157 (PR-6) — `inline` → external migracija
+
+⚠️ **§9.1 PERORIENTUOTAS PO MATAVIMO.** Planas reikalavo stebėtojo, tikrinančio
+`job_results` eilutes prieš `job_results_storage_shape`. Toks stebėtojas
+**negalėtų kristi**: išmatuota (`jobResultsShapeDomain.integration`), kad visi 60
+dalinių perėjimo sakinių atmetami `23514`, tad pažeidžiančios eilutės padaryti
+neįmanoma. Todėl stebimos **poros tarp sistemų**, kurių `CHECK` negina pagal
+apibrėžimą.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Tvarka: registras → `put()` → `head()` → atominis perjungimas** | `artifactMigration.integration` | Ta pati tvarka kaip produkciniame completion kelyje, ir dėl tų pačių priežasčių. `head()` prieš perjungimą yra SĄLYGA 7 („vienintelė kopija"): mutacija — `head()` grąžina neteisingą dydį → eilutė privalo likti `inline`, `payload` nepaliestas, objektas pašalintas |
+| ⚠️ **Perjungimas VIENU sakiniu — ne stilius, o vienintelis būdas** | `artifactMigration.integration`, `jobResultsShapeDomain.integration` | Skaidymas net nebūtų „blogesnis variantas" — jis nepraeitų: 2⁵−2 = 30 poaibių kiekviena kryptimi atmetami `23514`. `WHERE storage_type = 'inline'` sąlyga yra CAS: mutacija — lygiagretus užbaigimas perjungia eilutę pirmas → `eilute_pasikeite`, svetima nuoroda NEPERRAŠYTA |
+| ⚠️ **Migracijos rašymas eina per bandymų REGISTRĄ** | `artifactMigration.integration` | ⚠️ **Sąlygos 6 plane NEBUVO** — jis rašytas prieš PR-4 orphan sprendimą. Be registro migracija būtų NAUJAS orphan'ų šaltinis: procesas, kritęs tarp `put()` ir perjungimo, paliktų transkripciją, kurios nepasiekia nei erasure, nei šlavėjas (A3). Tikrinama, kad po nesėkmės eilutė yra `abandoned`, ne `pending` |
+| ⚠️ **Progresas rašomas TOJE PAČIOJE transakcijoje kaip perjungimas** | `artifactMigration.integration` | Atskirai rašomas progresas sukurtų commit'intą būseną „progresas `done`, eilutė `inline`". **Mutacija VYKDOMA:** progresas įrašomas savo, ankstesne transakcija → stebėtojas privalo kristi. Be jos „stebėtojas nieko nerado" neatskiriamas nuo „stebėtojas neveikia" |
+| ⚠️ **Pora objektas ↔ nuoroda tikrinama ATSKIRAI** | `artifactMigration.integration` | Bendras stebėtojas dengtų vieną iš dviejų porų. **Mutacija:** eilutė perjungiama į raktą, kurio saugykloje nėra → stebėtojas krenta |
+| ⚠️ **Keturios nesėkmės atskiriamos, ne suplakamos į „nepavyko"** | `artifactMigration.integration` | Bendras testas praeitų padengęs vieną iš keturių — ta pati klaida, kurią PR-1 padarė su `CHECK` dalimis. `payload_neatvaizduojamas` tikrinamas per JSON `null`: SQL `IS NOT NULL` jam teisingas, tad DB tokią eilutę priima, o riba atmeta. NUL ar neporinis surogatas netiktų — jų `jsonb` apskritai nepriima |
+| ⚠️ **Sausas paleidimas nerašo NIEKUR** | `artifactMigration.integration` | Ne tik DB: tikrinama, kad saugyklos katalogas TUŠČIAS (failų sistema, ne `put()` skaitiklis) ir kad registre nėra nė vienos eilutės. Dry-run, kuris rašo progresą, paliktų įrašus apie darbą, kurio niekas nedirbo |
+| ⚠️ **Idempotencija iš DUOMENŲ, ne iš žymeklio** | `artifactMigration.integration` | Perkelta eilutė nebėra `inline`, tad kito paleidimo atranka jos nebemato. Tikrinama, kad pakartojimas nesukuria ANTRO objekto. Žymeklis būtų antra to paties fakto kopija — klasė, kurią repo užregistravęs šešis kartus (#305) |
+| ⚠️ **`failed` praleidžiamos, bet NEUŽRAKINAMOS** | `artifactMigration.integration` | Nesėkmė gali būti laikina (saugyklos gedimas) ir galutinė (neatvaizduojamas `payload`); atskirti gali tik operatorius. Be praleidimo ciklas kartotų tą patį kas paleidimą; be `retryFailed` operatorius neturėtų kaip pakartoti |
+| ⚠️ **Priežastis yra KODAS, ne tekstas** | `artifactMigrationContract` | Privatumo riba: laisvas tekstas atneštų klaidos pranešimą, o jis migracijos kelyje gali cituoti REZULTATO TURINĮ. Lentelė pergyvena job'ą, tad tekstas joje taptų transkripcijos fragmentu lentelėje, kurios paskirtis — apskaityti perkėlimą. Aibė lyginama su migracijos užšaldyta, ne grep'inama |
+| ⚠️ **CLI neturi savo orkestracijos** | `artifactMigrationContract` | Ta pati taisyklė kaip `dr-restore.mjs` (#250 D2). Tikrinama struktūriškai: CLI tekste neturi būti nei `UPDATE job_results`, nei `attemptRegistry` — antras egzempliorius reikštų, kad testuojama viena versija, o paleidžiama kita |
 
 ---
 

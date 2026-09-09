@@ -370,6 +370,15 @@ const functional = [
   "restoredJobStoreForwarding",
   /** #157 (PR-4): bandymų registro modulis (grynas SQL sluoksnis). */
   "attemptRegistry",
+  /**
+   * #157 (PR-6): migracijos kontraktas be DB.
+   *
+   * Pariteto klausimai (`BUSENA`/`PRIEZASTIS` prieš migracijos užšaldytas aibes)
+   * ir CLI struktūrinė sargyba atsakomi per sekundes; elgesys su tikra DB gyvena
+   * `artifactMigration.integration`, kuris išvedamas į `postgres` rinkinį per
+   * `postgresGuard` importą.
+   */
+  "artifactMigrationContract",
   "sweepVerdiktai",
   /** #157 (PR-4): lygybės paritetas ir round-trip ištikimybė. */
   "artifactRoundTrip",
