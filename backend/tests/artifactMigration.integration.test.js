@@ -348,6 +348,99 @@ test("#157 PR-6: kiekviena nesėkmės klasė atskiriama ir nepraranda kopijos", 
     assert.equal(await saugykla.head(musu.storage_key), null, "pralaimėjęs objektas pašalintas");
   });
 
+  await t.test("SUGADINTAS TO PATIES ILGIO objektas → `payload` NEIŠTRINAMAS", async () => {
+    /**
+     * ⚠️ P1: ČIA VIENINTELIS PR-6 KELIAS, KURIAME DUOMENYS NAIKINAMI.
+     *
+     * `head()` grąžina tik egzistavimą ir baitus — `fs` ir `s3` tai daro
+     * SĄMONINGAI (metadata-only kaina). Sugadintas TO PAČIO ILGIO objektas tokią
+     * patikrą praeina, ir kitas `UPDATE` sunaikina vienintelę galiojančią inline
+     * kopiją, o `job_results` išsaugo ORIGINALO `checksum`. Nuo tada `verify()`
+     * visada sakys „nesutampa" — bet jau po to, kai atkurti nebėra iš ko.
+     *
+     * ⚠️ TA PATI KLASĖ, KURIĄ PR-4 UŽDARĖ PRE-CHECK'E: verdiktas skelbiamas
+     * remiantis įrodymu, kuris nustato tik DYDĮ. Ten pasekmė buvo sugadintas
+     * rezultatas klientui; čia — sunaikinta vienintelė kopija.
+     *
+     * Objektas gadinamas TIESIAI failų sistemoje, ne per padirbtą verdiktą:
+     * padirbtas `verify()` įrodytų tik tai, kad mūsų kodas skaito lauką, o ne
+     * kad `head()` šio sugadinimo nepagauna.
+     */
+    const jobId = await naujasInline({ text: "sugadinamas" });
+
+    const gadintojas = { ...saugykla };
+    gadintojas.put = async (raktas, paruosta) => {
+      const kvitas = await saugykla.put(raktas, paruosta);
+
+      const kelias = path.join(saknis, raktas);
+      const baitai = await fsp.readFile(kelias);
+
+      /** Keičiama VIENA raidė reikšmės viduje — ilgis nekinta, JSON lieka galiojantis. */
+      const i = baitai.findIndex((b, idx) => idx > 10 && b >= 0x61 && b <= 0x7a);
+      assert.ok(i > 0, "testo prielaida: kanoninėje eilutėje yra mažoji raidė");
+      baitai[i] = baitai[i] === 0x7a ? 0x79 : baitai[i] + 1;
+
+      await fsp.writeFile(kelias, baitai);
+      return kvitas;
+    };
+
+    const s = await migruoti(pool, gadintojas, {});
+
+    await t.test("KONTROLĖ: `head()` šio sugadinimo NEPAGAUNA", async () => {
+      /**
+       * Be šitos kontrolės testas praeitų ir tada, jei sugadinimas pakeistų
+       * ILGĮ — tada jį pagautų ir senoji patikra, ir įrodymas būtų apie kitą
+       * klasę, nei teigiama.
+       */
+      const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
+      const musu = bandymai[bandymai.length - 1];
+      const kelias = path.join(saknis, musu.storage_key);
+      const yra = await fsp.stat(kelias).then(() => true).catch(() => false);
+
+      if (yra) {
+        const galva = await saugykla.head(musu.storage_key);
+        const verdiktas = await saugykla.verify(musu.storage_key, {
+          bytes: galva.bytes,
+          checksum: null,
+        });
+        assert.equal(Number(galva.bytes), Number(verdiktas.bytes), "ilgis nepakito — `head()` aklas");
+      }
+    });
+
+    assert.equal(
+      s.nepavyko[PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS],
+      1,
+      "sugadintas objektas privalo duoti `vientisumas_nepatvirtintas`"
+    );
+
+    const r = await eilute(jobId);
+    assert.equal(r.storage_type, "inline", "eilutė privalo likti inline");
+    assert.ok(r.payload, "VIENINTELĖ galiojanti kopija privalo likti — tai negrįžtama");
+  });
+
+  await t.test("`verify()` be nepriklausomo patvirtinimo NEPRALEIDŽIAMAS", async () => {
+    /**
+     * ⚠️ `nepriklausomas: false` REIŠKIA „reikšmė palyginta SU SAVIMI".
+     *
+     * Taip elgiasi `inlineStore` (`inlineStore.js:210`). Saugykla, kuri
+     * vientisumą „patvirtina" savo pačios metaduomenimis, migracijai nieko
+     * neįrodo — o `payload` naikinimas remiasi būtent tuo įrodymu.
+     */
+    const jobId = await naujasInline({ text: "priklausomas" });
+
+    const priklausomas = { ...saugykla };
+    priklausomas.verify = async (raktas, laukiama) => {
+      const v = await saugykla.verify(raktas, laukiama);
+      return { ...v, nepriklausomas: false };
+    };
+
+    const s = await migruoti(pool, priklausomas, {});
+
+    assert.equal(s.nepavyko[PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS], 1);
+    assert.equal((await eilute(jobId)).storage_type, "inline");
+    assert.ok((await eilute(jobId)).payload, "kopija lieka");
+  });
+
   await t.test("`failed` eilutės pakartotinai NEBANDOMOS be `retryFailed`", async () => {
     const pries = await migruoti(pool, saugykla, {});
     assert.equal(pries.kandidatai, 0, "visos keturios pažymėtos `failed` ir praleidžiamos");
