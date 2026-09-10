@@ -338,6 +338,28 @@ Tai daro 7.6 restore procedūrą privaloma prieš cutover, ne po jo.
 modelis NETINKA — jų retencija ilgesnė, ir jiems reikia atskiros cutover
 politikos tuose PR.
 
+### ⚠️ PAVOJINGAS NE TIK SPRENDIMAS GRĮŽTI, BET IR KONFIGŪRACIJOS PRARADIMAS
+
+Žemiau aprašyta seka prasideda nuo operatoriaus SPRENDIMO. Bet mechanika
+sprendimo nereikalauja: rezultatas identiškas, jei `DATABASE_URL` tiesiog
+DINGSTA — pamestas Compose faile, neperduotas env kintamasis, klaida
+deployment'e, atkurta sena konfigūracija.
+
+Startas pavyksta, `/api/ready` žalias, job'ai nematomi, objektai nepasiekiami. Nė
+vienas iš šių žingsnių nereikalauja, kad kas nors būtų nusprendęs grįžti.
+
+⚠️ **IŠ TO SEKA TREČIA AKTYVAVIMO SPRENDIMO KOMPONENTĖ.** Iki šiol sprendimas
+formuluotas kaip „ar prielaidos uždarytos" ir „ką darome, jei norėsime atsukti".
+Trečias klausimas: **ar diegimo procedūra apsaugo nuo ATSITIKTINIO konfigūracijos
+praradimo.**
+
+Jis nebūtinai sprendžiamas prieš atidarymą — bet privalo būti sprendimo TEKSTE,
+nes keičia RIZIKĄ, ne tik jos aprašymą. „Ar kas nors nuspręs grįžti" ir „ar per
+metus nė karto nedings env kintamasis" yra skirtingos tikimybės.
+
+⚠️ `deployment_identity` lentelė galėtų būti tokios patikros pagrindas, bet sargo
+čia SĄMONINGAI nekuriame: riba užrašoma, kad sprendimas būtų priimtas ją žinant.
+
 ### ⚠️ KAS NUTINKA MECHANIŠKAI, JEI KAS NORS VIS TIEK GRĮŽTA
 
 Politika („nepalaikoma") atsako, ko NEDARYTI. Ji neatsako, kas įvyksta, jei
