@@ -493,6 +493,46 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     assert.equal(await saugykla.head(bandymai[0].storage_key), null, "pasenęs objektas pašalintas");
   });
 
+  await t.test("UŽBARJERUOTAS job'as PRALEIDŽIAMAS, ne registruojamas (Codex B)", async () => {
+    /**
+     * ⚠️ REGISTRACIJA GALĖJO ĮVYKTI PO ENUMERACIJOS.
+     *
+     * Nei `job_result_attempts`, nei `artifact_migration_progress` neturi FK, tad
+     * migratorius, jau perskaitęs inline `payload`, galėjo įregistruoti bandymą PO
+     * to, kai `eraseJob()` suskaičiavo artefaktus. Ištrynimas įsipareigotų
+     * sėkmingai, o po jo liktų `abandoned` bandymas ir — jei valymas nepavyktų —
+     * TRANSKRIPCIJOS OBJEKTAS PO PATVIRTINTO IŠTRYNIMO.
+     *
+     * ⚠️ TIKRINAMA PER TIKRĄ ŽYMĄ, ne per padirbtą barjerą: klausimas yra, ar
+     * registracija PAISO `erasure_marks`, o ne ar kodas turi šaką.
+     */
+    const jobId = await naujasInline({ text: "uzbarjeruotas" });
+
+    await pool.query(
+      `INSERT INTO erasure_marks (job_id, status, reason, actor_kind, created_at, updated_at)
+       VALUES ($1, 'pending', 'subject_request', 'system', now(), now())
+       ON CONFLICT (job_id) DO UPDATE SET status = 'pending'`,
+      [String(jobId)]
+    );
+
+    const s = await migruoti(pool, saugykla, {});
+
+    assert.equal(s.praleista, 1, "užbarjeruotas job'as privalo būti PRALEISTAS");
+    assert.equal(s.perkelta, 0);
+    assert.deepEqual(s.nepavyko, {}, "praleidimas NĖRA nesėkmė — `failed` įrašas meluotų");
+
+    assert.equal(
+      await progresas(jobId),
+      null,
+      "progreso eilutė apie ištrinamą job'ą prieštarautų pačiam ištrynimui"
+    );
+
+    const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
+    assert.deepEqual(bandymai, [], "bandymas NETURI būti registruotas — jokio objekto neatsiranda");
+
+    await pool.query("DELETE FROM erasure_marks WHERE job_id = $1", [String(jobId)]);
+  });
+
   await t.test("PRALAIMĖJĘS NEPERRAŠO laimėtojo `done` įrašo", async () => {
       /**
        * ⚠️ P2: PRALAIMĖJĘS CAS NAIKINO SVETIMĄ AUDITO ĮRAŠĄ.

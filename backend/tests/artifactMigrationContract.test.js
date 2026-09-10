@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
 const { BUSENA, PRIEZASTIS, KANDIDATAI_SQL, PAYLOAD_SQL, migruoti } = require("../utils/artifactMigration");
 
@@ -332,6 +333,98 @@ test("KONTROLĖ: ĮPRASTA nesėkmė objektą VIS TIEK ištrina", async () => {
 
   assert.equal(s.nepavyko.vientisumas_nepatvirtintas, 1);
   assert.equal(saugykla.irasai.delete.length, 1, "aiški nesėkmė privalo išvalyti savo objektą");
+});
+
+test("SCHEMOS VARTAI: progreso šalinimas praleidžiamas, kai lentelės nėra (Codex A)", () => {
+  /**
+   * ⚠️ BESĄLYGINĖ UŽKLAUSA GRIOVĖ DR REPLAY.
+   *
+   * `restoredJobStore.paruosti()` SĄMONINGAI leidžia senesnę schemą, o
+   * `artifact_migration_progress` (`1756600000000`) yra NAUJESNĖ už
+   * `job_result_attempts` (`1756300000000`) — tad kopija gali turėti registrą ir
+   * neturėti progreso. Besąlyginis `DELETE` tokioje bazėje duotų `42P01` PO to,
+   * kai eilė, audio, artefaktai ir auditas jau išvalyti: palaikomas replay
+   * virstų DALINAI ĮVYKDYTU GEDIMU.
+   *
+   * ⚠️ TIKRINAMA STRUKTŪRIŠKAI, nes elgesio testas reikalautų DB su TARPINE
+   * schema — o tokios `node-pg-migrate` „up N" riba neduoda be atskiro
+   * mechanizmo. Struktūra čia atsako į tą patį klausimą: ar kvietimas eina per
+   * vartus, ar aplenkia juos.
+   */
+  const store = fs.readFileSync(
+    path.join(__dirname, "..", "utils", "jobStore", "postgresStore.js"),
+    "utf8"
+  );
+
+  const eilute = store
+    .split("\n")
+    .find((e) => e.includes("DELETE FROM artifact_migration_progress"));
+
+  assert.ok(eilute, "progreso šalinimo sakinys dingo");
+
+  const indeksas = store.split("\n").indexOf(eilute);
+  const kontekstas = store.split("\n").slice(Math.max(0, indeksas - 3), indeksas).join("\n");
+
+  assert.match(
+    kontekstas,
+    /if \(migracijosProgresas\)/,
+    "šalinimas nepraeina pro schemos vartus — senesnė kopija duotų `42P01` VIDURYJE replay"
+  );
+
+  /**
+   * ⚠️ IR VARTAI PRIVALO BŪTI IŠVEDAMI, NE PADUODAMI. Kvietėjas negali pasirinkti
+   * schemos — tai bazės faktas. Ta pati taisyklė kaip `bandymuRegistras`.
+   */
+  const restored = fs.readFileSync(path.join(__dirname, "..", "utils", "restoredJobStore.js"), "utf8");
+  assert.match(restored, /migracijosProgresas: "isvedama-is-schemos"/);
+  assert.match(restored, /42P01/);
+});
+
+test("CLI: nežinomas argumentas atmetamas — ir BE brūkšnių (Codex C)", () => {
+  /**
+   * ⚠️ FILTRAS PRALEIDO SAVO TAIKINĮ.
+   *
+   * Pirma redakcija paliko tik `-` prasidedančius tokenus, tad `run retry-failed`
+   * TYLIAI vykdydavo su `retryFailed === false` — tiksliai tas gedimas, kurį
+   * validacija turėjo užkirsti. Filtras, praleidžiantis savo taikinį, blogesnis
+   * nei jo nebuvimas: jis sukuria įspūdį, kad argumentai tikrinami.
+   *
+   * ⚠️ TIKRINAMA PER TIKRĄ PALEIDIMĄ, ne per funkciją: klausimas yra, ką daro
+   * KOMANDA, o ne ar egzistuoja filtras. DB nereikia — validacija vyksta PRIEŠ
+   * prisijungimą, ir būtent tai yra viena iš tikrinamų savybių.
+   */
+  const cli = path.join(__dirname, "..", "scripts", "migrate-artifacts.mjs");
+
+  const paleisti = (argumentai) => {
+    try {
+      execFileSync(process.execPath, [cli, ...argumentai], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, DATABASE_URL: "", PGHOST: "" },
+      });
+      return { kodas: 0, isvestis: "" };
+    } catch (e) {
+      return { kodas: e.status, isvestis: String(e.stderr || "") };
+    }
+  };
+
+  for (const argumentai of [["run", "retry-failed"], ["run", "--retry-failed", "typo"], ["run", "--retry-fai"]]) {
+    const r = paleisti(argumentai);
+    assert.equal(r.kodas, 1, `${argumentai.join(" ")}: privalo būti naudojimo klaida`);
+    assert.match(r.isvestis, /Nežinomi argumentai/, `${argumentai.join(" ")}: netinkama priežastis`);
+  }
+
+  /**
+   * ⚠️ KONTROLĖ: galiojantys argumentai NEATMETAMI. Be jos „viskas atmetama"
+   * tenkintų ankstesnius tvirtinimus, o komanda taptų nenaudojama.
+   */
+  const galiojantys = paleisti(["run", "--retry-failed"]);
+  assert.equal(galiojantys.kodas, 1, "be DB komanda vis tiek krenta — bet dėl KITOS priežasties");
+  assert.match(
+    galiojantys.isvestis,
+    /PostgreSQL nenurodyta/,
+    "galiojantis argumentas atmestas kaip nežinomas — filtras per platus"
+  );
 });
 
 test("STRUKTŪRINĖ SARGYBA: CLI neturi savo orkestracijos", () => {

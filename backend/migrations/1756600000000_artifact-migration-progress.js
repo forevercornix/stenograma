@@ -51,8 +51,18 @@
  * ⚠️ `job_id` YRA `text`, NE `uuid` — tas pats nukrypimas ir ta pati priežastis:
  * lentelė aprašo perkėlimą, o ID forma `uuid` negarantuota visuose diegimuose.
  *
- * ⚠️ ASMENS DUOMENŲ ČIA NĖRA: adresas, būsena, kodas ir laikas. Nei turinio, nei
- * savininko.
+ * ⚠️ TURINIO IR SAVININKO ČIA NĖRA: adresas, būsena, kodas ir laikas.
+ *
+ * ⚠️ BET `job_id` IR `storage_key` YRA SUBJEKTĄ SIEJANTYS LAUKAI (§12.1 korekcija,
+ * #157 PR-6). Ankstesnė formuluotė sakė „asmens duomenų čia nėra" ir prieštaravo
+ * `postgresStore.eraseJob()` komentarui, kuris tą pačią eilutę po ištrynimo vadina
+ * asmens duomenų liekana. Du autoritetingi ir prieštaraujantys teiginiai yra
+ * blogiau nei vienas neteisingas: retencijos ar privatumo peržiūra, radusi juos
+ * abu, pagrįstai išbrauktų lentelę.
+ *
+ * Teisinga formuluotė: eilutė NETURI turinio, bet SIEJA su job'u, tad po SĖKMINGO
+ * ištrynimo ji šalinama koordinuotai — kaip ir `job_result_attempts`. Lentelė be
+ * FK gina NUTRŪKUSĮ kelią, ne teisę likti po užbaigto ištrynimo.
  */
 
 /**

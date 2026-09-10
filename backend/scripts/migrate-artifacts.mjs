@@ -16,8 +16,13 @@
  *   node scripts/migrate-artifacts.mjs status
  *
  * APLINKA
- *   DATABASE_URL              privaloma
- *   ARTIFACT_STORE_BACKEND    privaloma `run` režimui: `fs` arba `s3`
+ *   DATABASE_URL ARBA PGHOST (+ `PG*`)   privaloma — ta pati pora, kurią naudoja
+ *                                        `dr-restore.mjs` ir `pg-backup.mjs`
+ *   ARTIFACT_STORE_BACKEND               privaloma `run` režimui: `fs` arba `s3`
+ *
+ * ⚠️ ANKSTESNĖ REDAKCIJA SAKĖ „DATABASE_URL privaloma" (§12.1 korekcija).
+ * Validacija jau priima `PG*`, bet dokumentacija — ne, tad operatorius, kuriam ši
+ * pataisa ir skirta, iš jos sužinotų, kad komanda jam NEPASIEKIAMA.
  *
  * ⚠️ `inline` BACKEND'AS `run` REŽIME ATMETAMAS. Migracija į `inline` reikštų
  * perkėlimą į tą pačią vietą — tyliai nieko nedarantis paleidimas, po kurio
@@ -177,14 +182,32 @@ try {
    * ⚠️ TIKRINAMA PRIEŠ atidarant DB ar saugyklą: klaida rašyboje neturi kainuoti
    * prisijungimo, o juo labiau — dalinio darbo.
    */
-  const ZINOMOS = new Set(["--limit", "--retry-failed"]);
-  const nezinomos = argv
-    .slice(1)
-    .filter((a, i, visi) => a.startsWith("-") || (i > 0 && visi[i - 1] !== "--limit"))
-    .filter((a) => a.startsWith("-") && !ZINOMOS.has(a));
+  /**
+   * ⚠️ SUVARTOJAMAS VISAS SĄRAŠAS, NE TIK `-` PRASIDEDANTYS (Codex C).
+   *
+   * Ankstesnis filtras paliko tik brūkšniuotus tokenus, tad `run retry-failed`
+   * (be brūkšnių) TYLIAI vykdydavo su `retryFailed === false` — tiksliai tas
+   * gedimas, kurį validacija turėjo užkirsti. Filtras, praleidžiantis savo
+   * taikinį, blogesnis nei jo nebuvimas: jis dar ir sukuria įspūdį, kad
+   * argumentai tikrinami.
+   *
+   * Dabar einama per sąrašą, kiekvienas žinomas argumentas SUVARTOJAMAS (su savo
+   * reikšme), o bet koks likutis — brūkšniuotas ar ne — yra naudojimo klaida.
+   */
+  const likutis = [];
+  for (let i = 1; i < argv.length; i += 1) {
+    if (argv[i] === "--limit") {
+      i += 1; // reikšmę patikrina `skaicius()`; trūkstama duos naudojimo klaidą
+      continue;
+    }
+    if (argv[i] === "--retry-failed") continue;
+    likutis.push(argv[i]);
+  }
 
-  if (nezinomos.length > 0) {
-    klaida(`Nežinomi argumentai: ${nezinomos.join(", ")}. Leidžiami: ${[...ZINOMOS].join(", ")}.`);
+  if (likutis.length > 0) {
+    klaida(
+      `Nežinomi argumentai: ${likutis.join(", ")}. Leidžiami: --limit N, --retry-failed.`
+    );
   }
   /**
    * ⚠️ BENDRAS AUTORITETAS, NE `DATABASE_URL` VARDAS (#245; Codex PR-6).
