@@ -338,6 +338,55 @@ Tai daro 7.6 restore procedūrą privaloma prieš cutover, ne po jo.
 modelis NETINKA — jų retencija ilgesnė, ir jiems reikia atskiros cutover
 politikos tuose PR.
 
+### ⚠️ KAS NUTINKA MECHANIŠKAI, JEI KAS NORS VIS TIEK GRĮŽTA
+
+Politika („nepalaikoma") atsako, ko NEDARYTI. Ji neatsako, kas įvyksta, jei
+operatorius pašalina `DATABASE_URL` — o būtent to klausia žmogus, kuriam po
+savaitės paaiškėjo problema. Užrašoma, nes iki #157 atsakymas buvo nemalonus,
+o po #157 tapo NEGRĮŽTAMAS.
+
+**1. Perjungimas įvyksta TYLIAI.** `resolveBackendChoice()` renkasi pagal
+aplinką: yra `DATABASE_URL` → `postgres`, nėra → `redis`. Nėra nei patikros, ar
+PostgreSQL anksčiau buvo autoritetas, nei įspėjimo, nei fail-closed. Startas
+pavyksta, `/api/ready` žalias, o job'ai tiesiog nebematomi.
+
+⚠️ Tai NE spraga, kurią reikia skubiai užkalti — tai riba, kurią reikia ŽINOTI:
+`deployment_identity` lentelė egzistuoja ir galėtų būti tokios patikros pagrindas
+(žr. 7.6c DR koordinatorių), bet šiandien jos niekas tam nenaudoja.
+
+**2. Job'ai tampa nematomi IŠ KARTO,** ne po `JOB_TTL_MINUTES` — tai jau
+užrašyta aukščiau. Duomenys PostgreSQL'e lieka; dingsta tik kelias iki jų.
+
+**3. ⚠️ PO #157 GRĮŽIMAS PALIEKA NEPASIEKIAMŲ TRANSKRIPCIJŲ, NE TIK NEMATOMŲ
+JOB'Ų. ŠITO ANKSČIAU NEBUVO.**
+
+Po `inline` → external migracijos rezultatai guli failų sistemoje arba S3, o
+VIENINTELIS jų adresas yra `job_results.storage_key` ir `job_result_attempts`
+eilutės — abi PostgreSQL'e. Erasure kelias ir neįsipareigotų bandymų šlavėjas
+skaito būtent jas.
+
+Nustojus skaityti tą duomenų bazę:
+
+- objektai saugykloje LIEKA — niekas jų netrina, nes niekas apie juos nebežino;
+- jų nepasiekia nei ištrynimas pagal subjekto prašymą, nei retencijos valymas;
+- **jų neįmanoma surasti ir rankiniu būdu**: `list(prefix)` pagal A3 ribą
+  neegzistuoja, o raktas (`results/<jobId>/<attemptId>.json`) išvedamas iš
+  identifikatorių, kurie buvo tik toje pačioje duomenų bazėje.
+
+Vadinasi grįžimas paverčia transkripcijas objektais be savininko ir be adreso.
+Tai jau **ne prieinamumo, o duomenų apsaugos klausimas**: diegimas, gavęs
+ištrynimo prašymą, jo įvykdyti nebegalės, ir negalės net parodyti, kas liko.
+
+**4. Ką daryti VIETOJ grįžimo.** Atstatyti PostgreSQL iš kopijos (7.6), kaip sako
+politika aukščiau. Jei atsisakoma PostgreSQL sąmoningai ir visam laikui, teisinga
+seka yra: pirma **ištrinti** duomenis per veikiantį diegimą (kol erasure dar
+pasiekia saugyklą), ir tik paskui keisti konfigūraciją — ne atvirkščiai.
+
+⚠️ **IR TAI YRA ATSAKYMAS Į KLAUSIMĄ „AR ATIDARYTI BARJERĄ".** Atidarymas
+vienkryptis ne todėl, kad kas nors taip nusprendė, o todėl, kad po jo atsiranda
+duomenų, kurių adresas gyvena tik PostgreSQL'e. Sprendimas atidaryti privalo būti
+priimtas kartu su šituo žinojimu, ne po jo.
+
 ---
 
 ## Kiti sprendimai, kuriuos reikia užrakinti prieš kodą

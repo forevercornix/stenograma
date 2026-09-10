@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { BUSENA, PRIEZASTIS, KANDIDATAI_SQL, PAYLOAD_SQL } = require("../utils/artifactMigration");
+const { BUSENA, PRIEZASTIS, KANDIDATAI_SQL, PAYLOAD_SQL, migruoti } = require("../utils/artifactMigration");
 
 process.env.NODE_ENV = "test";
 
@@ -207,6 +207,131 @@ test("SCENARIJAI neturi backend'o literalų — kitaip jie perima vieno savybes"
     1,
     "sargas neranda įterpto literalo — jis nieko negina"
   );
+});
+
+/**
+ * DVIPRASMIŠKAS `COMMIT` — TIKRINAMA BE DB, IR TAI SPRENDIMAS (#157, PR-6).
+ *
+ * ⚠️ TRYS INTEGRACINIAI RAUNDAI KABO, IR KAINA VIRŠIJO NAUDĄ.
+ *
+ * Pirmos redakcijos lopė tikro pool'o klientą (tarša išeidavo į gretimus
+ * scenarijus), antra bandė lopą nusiimti pačiam, trečia davė `migruoti()` atskirą
+ * pool'ą. Visos trys baigėsi `test timed out after 300000ms` (CI 34440571250,
+ * 34441688559, 34442823089).
+ *
+ * ⚠️ IR PATS KLAUSIMAS DB NEREIKALAUJA. „Ar po dviprasmiško `COMMIT` vykdomas
+ * valymas" yra KODO ŠAKOS klausimas, ne PostgreSQL elgesio. Tikra DB čia įrodo
+ * ne daugiau, o tik lėčiau ir su bendrų resursų rizika — ta pačia, kurią
+ * užregistravo #310.
+ *
+ * Padirbtas pool'as leidžia `COMMIT` „pavykti" ir TIK PASKUI mesti — tiksliai ta
+ * seka, kurios tikra DB neduoda deterministiškai.
+ */
+function padirbtasPool({ commitElgesys }) {
+  const irasai = { sakiniai: [], atlaisvinta: 0 };
+
+  const atsakymas = (sql) => {
+    if (/FROM job_results r/.test(sql)) return { rows: [{ job_id: "job-1" }], rowCount: 1 };
+    if (/SELECT\s+payload/.test(sql)) return { rows: [{ payload: { text: "x" } }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  };
+
+  const client = {
+    async query(sql) {
+      irasai.sakiniai.push(String(sql).trim().split(/\s+/)[0].toUpperCase());
+      if (String(sql).trim().toUpperCase() === "COMMIT") return commitElgesys();
+      return atsakymas(String(sql));
+    },
+    release() {
+      irasai.atlaisvinta += 1;
+    },
+  };
+
+  return {
+    irasai,
+    async query(sql) {
+      irasai.sakiniai.push(String(sql).trim().split(/\s+/)[0].toUpperCase());
+      return atsakymas(String(sql));
+    },
+    async connect() {
+      return client;
+    },
+  };
+}
+
+function padirbtaSaugykla() {
+  const irasai = { put: 0, verify: 0, delete: [] };
+
+  return {
+    irasai,
+    backend: "fs",
+    async put(raktas) {
+      irasai.put += 1;
+      return { reference: raktas, bytes: 10, checksum: "e".repeat(64) };
+    },
+    async verify() {
+      irasai.verify += 1;
+      return { ok: true, exists: true, bytes: 10, checksum: "e".repeat(64), nepriklausomas: true };
+    },
+    async head() {
+      return { bytes: 10 };
+    },
+    async delete(raktas) {
+      irasai.delete.push(raktas);
+      return true;
+    },
+  };
+}
+
+test("DVIPRASMIŠKAS `COMMIT` NEIŠTRINA objekto, į kurį jau rodo nuoroda", async () => {
+  /**
+   * ⚠️ P1: „NEŽINAU, AR ĮVYKO" NEGALI VIRSTI DESTRUKTYVIU VEIKSMU.
+   *
+   * PostgreSQL gali įsipareigoti, o atsakymas kliento nepasiekti. Tada `COMMIT`
+   * meta, nors transakcija ĮVYKO. Ištrynus objektą tokiu atveju liktų external
+   * eilutė be objekto IR be inline kopijos — sunaikinta vienintelė kopija.
+   *
+   * ⚠️ TA PATI KLASĖ KAIP PR-5 A ŠAKNIS.
+   */
+  const pool = padirbtasPool({
+    commitElgesys: () => {
+      throw new Error("simuliuotas ryšio nutrūkimas PO sėkmingo COMMIT");
+    },
+  });
+  const saugykla = padirbtaSaugykla();
+
+  await assert.rejects(() => migruoti(pool, saugykla, {}), /nutrūkimas/);
+
+  assert.deepEqual(
+    saugykla.irasai.delete,
+    [],
+    "objektas IŠTRINTAS po dviprasmiško `COMMIT` — sunaikinta vienintelė kopija"
+  );
+  assert.ok(pool.irasai.sakiniai.includes("COMMIT"), "kontrolė: `COMMIT` tikrai buvo išsiųstas");
+  assert.equal(pool.irasai.atlaisvinta, 1, "jungtis privalo būti atlaisvinta");
+});
+
+test("KONTROLĖ: ĮPRASTA nesėkmė objektą VIS TIEK ištrina", async () => {
+  /**
+   * Be jos ankstesnis testas būtų tenkinamas ir tada, jei valymas dingtų VISAI —
+   * o tada pralaimėję bandymai kauptųsi kaip orphan'ai. Skiriasi tik tuo, KADA
+   * įvyksta nesėkmė: prieš `COMMIT`, kai baigtis NĖRA dviprasmiška.
+   */
+  const pool = padirbtasPool({ commitElgesys: () => ({ rows: [], rowCount: 1 }) });
+  const saugykla = padirbtaSaugykla();
+
+  saugykla.verify = async () => ({
+    ok: false,
+    exists: true,
+    bytes: 1,
+    checksum: "a".repeat(64),
+    nepriklausomas: true,
+  });
+
+  const s = await migruoti(pool, saugykla, {});
+
+  assert.equal(s.nepavyko.vientisumas_nepatvirtintas, 1);
+  assert.equal(saugykla.irasai.delete.length, 1, "aiški nesėkmė privalo išvalyti savo objektą");
 });
 
 test("STRUKTŪRINĖ SARGYBA: CLI neturi savo orkestracijos", () => {
