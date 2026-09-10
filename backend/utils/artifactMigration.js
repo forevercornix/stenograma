@@ -48,6 +48,13 @@ const BUSENA = Object.freeze({
   NEPAVYKO: "failed",
 });
 
+/**
+ * ⚠️ VIDINIS VERDIKTAS, NE DB BŪSENA. `artifact_migration_progress` jo NETURI ir
+ * neturi turėti: „job'as ištrintas" nėra migracijos rezultatas, o eilutė apie jį
+ * prieštarautų pačiam ištrynimui.
+ */
+const PRALEISTA = "praleista";
+
 /** Privalo sutapti su `artifact_migration_progress_priezastis_allowed`. */
 const PRIEZASTIS = Object.freeze({
   PAYLOAD_NEATVAIZDUOJAMAS: "payload_neatvaizduojamas",
@@ -203,12 +210,59 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
   const attemptId = attemptRegistry.naujasBandymas();
   const raktas = attemptRegistry.bandymoRaktas(jobId, attemptId);
 
-  await attemptRegistry.registruoti(pool, {
-    attemptId,
-    jobId: String(jobId),
-    storageType: saugykla.backend,
-    storageKey: raktas,
-  });
+  /**
+   * ⚠️ REGISTRACIJA SERIALIZUOJAMA SU IŠTRYNIMU (Codex B).
+   *
+   * §0 KETVIRTASIS KLAUSIMAS — su kuo šis kvietimas privalo sutarti? Su
+   * VYKSTANČIU IŠTRYNIMU. Nei `job_result_attempts`, nei
+   * `artifact_migration_progress` neturi FK, tad migratorius, jau perskaitęs
+   * inline `payload`, gali įregistruoti bandymą PO to, kai `eraseJob()` jau
+   * suskaičiavo artefaktus. Ištrynimas įsipareigotų sėkmingai, o po jo liktų
+   * `failed` progreso eilutė, `abandoned` bandymas ir — jei geriausių pastangų
+   * valymas nepavyktų — TRANSKRIPCIJOS OBJEKTAS PO PATVIRTINTO IŠTRYNIMO.
+   *
+   * ⚠️ PATIKRA VIENA NEPAKANKA, IR TAI ESMĖ. „Ar yra tombstone" atsakymas,
+   * gautas prieš registraciją atskira užklausa, remiasi eilutėmis, MATOMOMIS TĄ
+   * AKIMIRKĄ — ta pačia prielaida, kuri čia ir lūžta. Todėl registracija vyksta
+   * TRANSAKCIJOJE, kuri pirma paima tą patį advisory lock'ą, kurį laiko
+   * ištrynimas (`assertNotBarredWithClient`): jei ištrynimas enumeruoja —
+   * registracija LAUKIA; jei jis baigė — registracija ATMETAMA; jei registracija
+   * suspėjo pirma — ištrynimas jos bandymą MATO.
+   *
+   * Serializavimas, ne spėjimas: abi pusės tvarkomos to paties užrakto.
+   */
+  const registracijosKlientas = await pool.connect();
+  try {
+    await registracijosKlientas.query("BEGIN");
+
+    const { assertNotBarredWithClient } = require("./deletionTombstones/postgresStore");
+    await assertNotBarredWithClient(registracijosKlientas, String(jobId));
+
+    await attemptRegistry.registruoti(registracijosKlientas, {
+      attemptId,
+      jobId: String(jobId),
+      storageType: saugykla.backend,
+      storageKey: raktas,
+    });
+
+    await registracijosKlientas.query("COMMIT");
+  } catch (klaida) {
+    await registracijosKlientas.query("ROLLBACK").catch(() => {});
+
+    /**
+     * ⚠️ UŽTVERTAS JOB'AS NĖRA MIGRACIJOS NESĖKMĖ — jis PRALEIDŽIAMAS.
+     *
+     * `failed` įrašas apie ištrintą job'ą būtų dvigubai neteisingas: jis teigtų
+     * gedimą, kurio nebuvo, IR paliktų `job_id` lentelėje, iš kurios ta eilutė
+     * ką tik pašalinta.
+     */
+    if (klaida && klaida.code === "ERASURE_BARRIER") {
+      return { verdiktas: PRALEISTA, priezastis: null };
+    }
+    throw klaida;
+  } finally {
+    registracijosKlientas.release();
+  }
 
   /* ═══ 3. RAŠYMAS IR VIENTISUMO PATVIRTINIMAS ═══ */
 
@@ -472,6 +526,9 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
 
     if (rezultatas.verdiktas === BUSENA.ATLIKTA) {
       suvestine.perkelta += 1;
+    } else if (rezultatas.verdiktas === PRALEISTA) {
+      /** Job'as ištrintas tarp atrankos ir registracijos — ne nesėkmė (Codex B). */
+      suvestine.praleista += 1;
     } else {
       suvestine.nepavyko[rezultatas.priezastis] =
         (suvestine.nepavyko[rezultatas.priezastis] || 0) + 1;

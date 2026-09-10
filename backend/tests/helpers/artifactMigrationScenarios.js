@@ -493,6 +493,109 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     assert.equal(await saugykla.head(bandymai[0].storage_key), null, "pasenęs objektas pašalintas");
   });
 
+  await t.test("UŽBARJERUOTAS job'as PRALEIDŽIAMAS, ne registruojamas (Codex B)", async () => {
+    /**
+     * ⚠️ REGISTRACIJA GALĖJO ĮVYKTI PO ENUMERACIJOS.
+     *
+     * Nei `job_result_attempts`, nei `artifact_migration_progress` neturi FK, tad
+     * migratorius, jau perskaitęs inline `payload`, galėjo įregistruoti bandymą PO
+     * to, kai `eraseJob()` suskaičiavo artefaktus. Ištrynimas įsipareigotų
+     * sėkmingai, o po jo liktų `abandoned` bandymas ir — jei valymas nepavyktų —
+     * TRANSKRIPCIJOS OBJEKTAS PO PATVIRTINTO IŠTRYNIMO.
+     *
+     * ⚠️ TIKRINAMA PER TIKRĄ ŽYMĄ, ne per padirbtą barjerą: klausimas yra, ar
+     * registracija PAISO `erasure_marks`, o ne ar kodas turi šaką.
+     */
+    const jobId = await naujasInline({ text: "uzbarjeruotas" });
+
+    /**
+     * ⚠️ REIKŠMĖS IMAMOS IŠ MIGRACIJOS UŽŠALDYTŲ AIBIŲ, NE SUGALVOJAMOS.
+     *
+     * Pirma redakcija rašė `status: 'pending'`, `reason: 'subject_request'` ir
+     * stulpelį `created_at` — nė vienas neegzistuoja. CI davė
+     * `column "created_at" ... does not exist`, ir testas krito ne dėl tikrinamo
+     * dalyko, o dėl neteisingos fixture: `erasure_marks` naudoja `marked_at`,
+     * `deletion_pending` ir `user_request` (migracija `1755400000000`).
+     */
+    await pool.query(
+      `INSERT INTO erasure_marks (job_id, status, reason, actor_kind, marked_at, updated_at)
+       VALUES ($1, 'deletion_pending', 'user_request', 'system', now(), now())
+       ON CONFLICT (job_id) DO UPDATE SET status = 'deletion_pending'`,
+      [String(jobId)]
+    );
+
+    /**
+     * ⚠️ ŽYMA ŠALINAMA `finally`, NE TESTO GALE.
+     *
+     * Kritus tvirtinimui, likusi žyma paliktų job'ą kandidatu gretimiems
+     * scenarijams — ir jie kristų dėl svetimos priežasties. Būtent taip nutiko
+     * pirmame raunde: krito ir šis testas, ir gretimas „PRALAIMĖJĘS NEPERRAŠO".
+     */
+    /**
+     * ⚠️ VALOMAS JOB'AS, NE TIK ŽYMA.
+     *
+     * Antras raundas (CI 34503582983) parodė, kad vien žymos nuėmimo NEPAKANKA:
+     * job'as lieka `inline` be progreso ir be bandymo, tad kitas scenarijaus
+     * `migruoti()` jį paima kaip KANDIDATĄ. Gretimame teste `put()` kabliukas
+     * suveikdavo ties SVETIMU job'u, ir tikrinamas job'as gaudavo `praleista`
+     * vietoj `eilute_pasikeite` — testas krisdavo dėl priežasties, su kuria
+     * neturi nieko bendra.
+     *
+     * ⚠️ TREČIA TOS PAČIOS KLASĖS REDAKCIJA. Pirma paliko žymą kritus, antra ją
+     * nuėmė, bet paliko job'ą. Klausimas visą laiką buvo ne „ką pašalinti", o
+     * „kokią būseną testas grąžina" — ir atsakymas yra TA PATI, kurią rado:
+     * jokio naujo kandidato.
+     *
+     * `job_results` dingsta per `ON DELETE CASCADE`.
+     */
+    /**
+     * ⚠️ BŪSENA FIKSUOJAMA PRIEŠ VALYMĄ, TVIRTINAMA PO JO.
+     *
+     * Skaitant po `finally`, tvirtinimai priklausytų nuo valymo tvarkos: dalis
+     * jų taptų tuščiai teisingi (eilutės nebėra, nes ją ką tik pašalinom), ir
+     * testas rodytų žalią nepriklausomai nuo kodo. Skaitymas ir valymas yra du
+     * skirtingi dalykai, tad ir eiliškumas jų neturi maišyti.
+     */
+    let s;
+    let progresoEilute;
+    let bandymai;
+
+    try {
+      s = await migruoti(pool, saugykla, {});
+      progresoEilute = await progresas(jobId);
+      bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
+    } finally {
+      /**
+       * ⚠️ VALOMAS JOB'AS, NE TIK ŽYMA.
+       *
+       * Antras raundas (CI 34503582983) parodė, kad vien žymos nuėmimo NEPAKANKA:
+       * job'as lieka `inline` be progreso ir be bandymo, tad kito scenarijaus
+       * `migruoti()` jį paima kaip KANDIDATĄ. Gretimame teste `put()` kabliukas
+       * suveikdavo ties SVETIMU job'u, ir tikrinamas job'as gaudavo `praleista`
+       * vietoj `eilute_pasikeite`.
+       *
+       * ⚠️ TREČIA TOS PAČIOS KLASĖS REDAKCIJA: pirma paliko žymą kritus, antra ją
+       * nuėmė, bet paliko job'ą. Klausimas visą laiką buvo ne „ką pašalinti", o
+       * „kokią būseną testas grąžina" — ir atsakymas yra: jokio naujo kandidato.
+       */
+      await pool.query("DELETE FROM erasure_marks WHERE job_id = $1", [String(jobId)]).catch(() => {});
+      await pool.query("DELETE FROM jobs WHERE id = $1", [jobId]).catch(() => {});
+    }
+
+    assert.equal(s.praleista, 1, "užbarjeruotas job'as privalo būti PRALEISTAS");
+    assert.equal(s.perkelta, 0);
+    assert.deepEqual(s.nepavyko, {}, "praleidimas NĖRA nesėkmė — `failed` įrašas meluotų");
+
+    assert.equal(
+      progresoEilute,
+      null,
+      "progreso eilutė apie ištrinamą job'ą prieštarautų pačiam ištrynimui"
+    );
+
+    assert.deepEqual(bandymai, [], "bandymas NETURI būti registruotas — jokio objekto neatsiranda");
+
+  });
+
   await t.test("PRALAIMĖJĘS NEPERRAŠO laimėtojo `done` įrašo", async () => {
       /**
        * ⚠️ P2: PRALAIMĖJĘS CAS NAIKINO SVETIMĄ AUDITO ĮRAŠĄ.
@@ -706,9 +809,26 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
    * ⚠️ TIKRINAMOS TIK POROS TARP SISTEMŲ. `job_results` vidaus netikrina sąmoningai:
    * tą invariantą DB taiko kiekvienam sakiniui, ir stebėtojas ten kristi negalėtų.
    */
-  function paleistiStebetoja(saugykla) {
+  async function paleistiStebetoja(saugykla) {
     const pazeidimai = [];
     let dirba = true;
+    let raundai = 0;
+
+    /**
+     * ⚠️ STEBĖTOJAS GRĄŽINAMAS TIK PO PIRMOS APKLAUSOS (Codex, PR-6).
+     *
+     * Ankstesnė redakcija grąždavo IŠ KARTO, dar neprisijungusi. Jei `migruoti()`
+     * spėdavo baigti anksčiau nei ciklas pradėdavo, `stop()` nustatydavo
+     * `dirba = false` PRIEŠ pirmą iteraciją, ir tvirtinimas „nė vieno pažeidimo"
+     * praeidavo NIEKO NESTEBĖJĘS.
+     *
+     * Barjeras uždaro startą; `raundai` skaitiklis leidžia po to TVIRTINTI, kad
+     * apklausa realiai persidengė su migracija, o ne tik įvyko kartą prieš ją.
+     */
+    let paruoštas;
+    const pasiruošė = new Promise((r) => {
+      paruoštas = r;
+    });
 
     const ciklas = (async () => {
       const klientas = new Client({ connectionString: DB_URL });
@@ -744,6 +864,9 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
             }
           }
 
+            raundai += 1;
+          if (raundai === 1) paruoštas();
+
           await new Promise((r) => setTimeout(r, 2));
         }
       } finally {
@@ -751,10 +874,13 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       }
     })();
 
+    /** ⚠️ Laukiam PIRMOS apklausos — kitaip stebėtojas gali nespėti pradėti. */
+    await pasiruošė;
+
     return async function stop() {
       dirba = false;
       await ciklas;
-      return pazeidimai;
+      return { pazeidimai, raundai };
     };
   }
 
@@ -764,11 +890,12 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     await t.test("TIKRA migracija: nė vieno pažeidimo", async () => {
       for (let i = 0; i < 12; i += 1) await naujasInline({ text: `eilute-${i}` });
 
-      const stop = paleistiStebetoja(saugykla);
+      const stop = await paleistiStebetoja(saugykla);
       const s = await migruoti(pool, saugykla, {});
-      const pazeidimai = await stop();
+      const { pazeidimai, raundai } = await stop();
 
       assert.equal(s.perkelta, 12, "kontrolė: stebėtojas stebėjo TIKRĄ darbą, ne tuštumą");
+      assert.ok(raundai > 1, `apklausa nepersidengė su migracija (raundų: ${raundai})`);
       assert.deepEqual(pazeidimai, [], "commit'inta pažeista pora — migracija turi langą");
     });
 
@@ -786,7 +913,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
        */
       const jobId = await naujasInline({ text: "mutacija" });
 
-      const stop = paleistiStebetoja(saugykla);
+      const stop = await paleistiStebetoja(saugykla);
 
       await pool.query(
         `INSERT INTO artifact_migration_progress
@@ -798,7 +925,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       /** Stebėtojui duodamas laikas pamatyti commit'intą tarpinę būseną. */
       await new Promise((r) => setTimeout(r, 60));
 
-      const pazeidimai = await stop();
+      const { pazeidimai } = await stop();
 
       assert.ok(
         pazeidimai.some((p) => p.includes("tebėra inline")),
@@ -819,9 +946,9 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
         [jobId, backendas()]
       );
 
-      const stop = paleistiStebetoja(saugykla);
+      const stop = await paleistiStebetoja(saugykla);
       await new Promise((r) => setTimeout(r, 60));
-      const pazeidimai = await stop();
+      const { pazeidimai } = await stop();
 
       assert.ok(
         pazeidimai.some((p) => p.includes("objekto nėra")),

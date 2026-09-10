@@ -791,7 +791,13 @@ function assertAtstovaujamasProgresas(job) {
  * privalo DEKLARUOTI, ką daro su kiekvienu vardu iš šios aibės, o testas krenta, kai
  * atsiranda ketvirtas.
  */
-const KONSTRUKCIJOS_PARINKTYS = Object.freeze(["artifactStores", "artifactStore", "rasymoSaugykla", "bandymuRegistras"]);
+const KONSTRUKCIJOS_PARINKTYS = Object.freeze([
+  "artifactStores",
+  "artifactStore",
+  "rasymoSaugykla",
+  "bandymuRegistras",
+  "migracijosProgresas",
+]);
 
 /**
  * ⚠️ `bandymuRegistras: false` — SCHEMA BE `job_result_attempts` (#157, PR-5; Codex E1).
@@ -807,7 +813,13 @@ const KONSTRUKCIJOS_PARINKTYS = Object.freeze(["artifactStores", "artifactStore"
  */
 function createPostgresStore(
   pool,
-  { artifactStores = null, artifactStore = null, rasymoSaugykla = null, bandymuRegistras = true } = {}
+  {
+    artifactStores = null,
+    artifactStore = null,
+    rasymoSaugykla = null,
+    bandymuRegistras = true,
+    migracijosProgresas = true,
+  } = {}
 ) {
   /**
    * ARTEFAKTŲ SAUGYKLOS RAKTUOJAMOS PAGAL `storage_type` (Codex, #291).
@@ -2279,6 +2291,45 @@ function createPostgresStore(
           [String(id), enumeruoti]
         );
       }
+
+      /**
+       * ⚠️ MIGRACIJOS PROGRESO EILUTĖ IRGI ŠALINAMA (#157, PR-6; Codex).
+       *
+       * `artifact_migration_progress` sąmoningai neturi FK į `jobs` — kad
+       * pergyventų job'ą ir liktų įrodymu, jei perkėlimas nutrūko. Bet po
+       * SĖKMINGO ištrynimo ji lieka su `job_id` ir `storage_key` NERIBOTAI, o
+       * ištrynimo kontraktas tokį likutį vadina asmens duomenų liekana.
+       *
+       * ⚠️ TAS PATS SPRENDIMAS KAIP BANDYMŲ REGISTRUI, IR TA PATI PRIEŽASTIS.
+       * Registro eilutės čia šalinamos gretimu sakiniu dėl to paties: lentelė be
+       * FK gina nutrūkusį kelią, ne teisę likti po užbaigto ištrynimo.
+       *
+       * ⚠️ ŠALINIMAS SĄLYGINIS PAGAL SCHEMOS AMŽIŲ (Codex A).
+       *
+       * §0 KETVIRTASIS KLAUSIMAS — su kuo šis kvietimas privalo sutarti? Su
+       * SCHEMOS FAKTU, kurį `restoredJobStore.paruosti()` jau išveda gretimai
+       * lentelei. `paruosti()` SĄMONINGAI leidžia senesnę schemą, o
+       * `artifact_migration_progress` (`1756600000000`) yra NAUJESNĖ už
+       * `job_result_attempts`. Besąlyginė užklausa tokioje bazėje duotų `42P01` PO
+       * to, kai eilė, audio, artefaktai ir auditas jau išvalyti — palaikomas
+       * replay virstų DALINAI ĮVYKDYTU GEDIMU. Tai E šaknies recidyvas: fallback
+       * buvo preflight'e, bet ne visame kelyje.
+       *
+       * ⚠️ NEPRIKLAUSO NUO `enumeruoti`. Progreso eilutė NĖRA adresas:
+       * `done` reiškia, kad tas pats raktas yra ir `job_results`, ir įsipareigotoje
+       * registro eilutėje. Jos pašalinimas nieko nepadaro nepasiekiamo — skirtingai
+       * nei registro eilutės, kuri yra vienintelis nereferencuoto objekto adresas.
+       *
+       * ⚠️ TAČIAU TAI GALIOJA TIK EILUTĖMS, KURIOS EGZISTUOJA ŠIĄ AKIMIRKĄ
+       * (Codex B). Migratorius, registruojantis bandymą PO enumeracijos, tą
+       * prielaidą laužo — todėl registracija serializuojama su ištrynimu per tą
+       * patį advisory lock'ą (`artifactMigration.js`). Be tos pusės šis komentaras
+       * teigtų daugiau, nei kodas garantuoja.
+       */
+      if (migracijosProgresas) {
+        await client.query("DELETE FROM artifact_migration_progress WHERE job_id = $1", [String(id)]);
+      }
+
       const { rowCount } = await client.query("DELETE FROM jobs WHERE id = $1", [id]);
       return rowCount > 0;
     });
