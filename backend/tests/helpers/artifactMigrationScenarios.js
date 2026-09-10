@@ -531,11 +531,55 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
      * scenarijams — ir jie kristų dėl svetimos priežasties. Būtent taip nutiko
      * pirmame raunde: krito ir šis testas, ir gretimas „PRALAIMĖJĘS NEPERRAŠO".
      */
+    /**
+     * ⚠️ VALOMAS JOB'AS, NE TIK ŽYMA.
+     *
+     * Antras raundas (CI 34503582983) parodė, kad vien žymos nuėmimo NEPAKANKA:
+     * job'as lieka `inline` be progreso ir be bandymo, tad kitas scenarijaus
+     * `migruoti()` jį paima kaip KANDIDATĄ. Gretimame teste `put()` kabliukas
+     * suveikdavo ties SVETIMU job'u, ir tikrinamas job'as gaudavo `praleista`
+     * vietoj `eilute_pasikeite` — testas krisdavo dėl priežasties, su kuria
+     * neturi nieko bendra.
+     *
+     * ⚠️ TREČIA TOS PAČIOS KLASĖS REDAKCIJA. Pirma paliko žymą kritus, antra ją
+     * nuėmė, bet paliko job'ą. Klausimas visą laiką buvo ne „ką pašalinti", o
+     * „kokią būseną testas grąžina" — ir atsakymas yra TA PATI, kurią rado:
+     * jokio naujo kandidato.
+     *
+     * `job_results` dingsta per `ON DELETE CASCADE`.
+     */
+    /**
+     * ⚠️ BŪSENA FIKSUOJAMA PRIEŠ VALYMĄ, TVIRTINAMA PO JO.
+     *
+     * Skaitant po `finally`, tvirtinimai priklausytų nuo valymo tvarkos: dalis
+     * jų taptų tuščiai teisingi (eilutės nebėra, nes ją ką tik pašalinom), ir
+     * testas rodytų žalią nepriklausomai nuo kodo. Skaitymas ir valymas yra du
+     * skirtingi dalykai, tad ir eiliškumas jų neturi maišyti.
+     */
     let s;
+    let progresoEilute;
+    let bandymai;
+
     try {
       s = await migruoti(pool, saugykla, {});
+      progresoEilute = await progresas(jobId);
+      bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
     } finally {
+      /**
+       * ⚠️ VALOMAS JOB'AS, NE TIK ŽYMA.
+       *
+       * Antras raundas (CI 34503582983) parodė, kad vien žymos nuėmimo NEPAKANKA:
+       * job'as lieka `inline` be progreso ir be bandymo, tad kito scenarijaus
+       * `migruoti()` jį paima kaip KANDIDATĄ. Gretimame teste `put()` kabliukas
+       * suveikdavo ties SVETIMU job'u, ir tikrinamas job'as gaudavo `praleista`
+       * vietoj `eilute_pasikeite`.
+       *
+       * ⚠️ TREČIA TOS PAČIOS KLASĖS REDAKCIJA: pirma paliko žymą kritus, antra ją
+       * nuėmė, bet paliko job'ą. Klausimas visą laiką buvo ne „ką pašalinti", o
+       * „kokią būseną testas grąžina" — ir atsakymas yra: jokio naujo kandidato.
+       */
       await pool.query("DELETE FROM erasure_marks WHERE job_id = $1", [String(jobId)]).catch(() => {});
+      await pool.query("DELETE FROM jobs WHERE id = $1", [jobId]).catch(() => {});
     }
 
     assert.equal(s.praleista, 1, "užbarjeruotas job'as privalo būti PRALEISTAS");
@@ -543,12 +587,11 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     assert.deepEqual(s.nepavyko, {}, "praleidimas NĖRA nesėkmė — `failed` įrašas meluotų");
 
     assert.equal(
-      await progresas(jobId),
+      progresoEilute,
       null,
       "progreso eilutė apie ištrinamą job'ą prieštarautų pačiam ištrynimui"
     );
 
-    const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
     assert.deepEqual(bandymai, [], "bandymas NETURI būti registruotas — jokio objekto neatsiranda");
 
   });
