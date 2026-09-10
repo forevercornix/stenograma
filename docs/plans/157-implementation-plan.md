@@ -1439,7 +1439,7 @@ septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** j
 |---|---|---|---|---|---|
 | 1 | **Aktyvavimo barjeras** — atidaromas TIK uždarius prielaidas; **NE PR-7, o atskiras #155 apimties PR** | ADR `155-postgres-authority.md` §„AKTYVAVIMO BARJERAS"; plano DoD | `backendSelection.js:55` = `false` | 9, 10 | ADR prielaidų lentelė; `selectBackend()` grąžina `barjeras: true` |
 | 2 | **Sargo pašalinimas — paskutinis commit'as** (impl → integrity → regresija → dokumentai → sargas) | body §8; ši sekcija | sargas gyvas (`postgresStore.js:1623-1627`) | **1** | `git log` peržiūroje — plane įvardyta kaip grąžinimo pagrindas |
-| 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | neprijungta (`:823`, `:840`); **stebėtojas yra** (`artifactStore/prijungimoBusena.js`) | **1** | `doctor` ir `/api/health/deep` varnelė „Artefaktų saugyklų prijungimas (startas)": lygina PARINKTA (`ARTIFACT_STORE_BACKEND`) ↔ PRIJUNGTA (rezolveris) ↔ REIKALINGA (`job_results` + `job_result_attempts` tipai) |
+| 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | ✅ **PRIJUNGTA** (`jobStore/index.js`, `paruostiArtefaktuSaugykla()`); stebėtojas `artifactStore/prijungimoBusena.js` | **1** | `doctor` ir `/api/health/deep` varnelė „Artefaktų saugyklų prijungimas (startas)": lygina PARINKTA (`ARTIFACT_STORE_BACKEND`) ↔ PRIJUNGTA (rezolveris) ↔ REIKALINGA (`job_results` + `job_result_attempts` tipai). Verdikto pavirtimas iš `rasymas_neprijungtas` į žalią išmatuotas VIENAME teste (`jobStoreArtefaktuPrijungimas.integration`) |
 | 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
 | 5 | **`neatkartojama` grandinė: nulis BullMQ pakartojimų** | plano §„PR-4 DoD punktas"; DoD `PARTIAL / UNVERIFIED` | **#298 atviras** | **1**, #298 | Testas privalo matuoti PAKARTOJIMŲ SKAIČIŲ, ne lauko buvimą |
 | 6 | **`backupPolicy.TABLE_BY_TYPE` per-row** | `utils/backupPolicy.js:94` — riba užrašyta, atsakymas atidėtas PR-7 | statinis žemėlapis | — | Kopijos ataskaita teigtų turinį, kurio `job_results` nebėra |
@@ -1594,6 +1594,45 @@ Tai pirmas kartas, kai matomumo stulpelis suveikė taip, kaip buvo sumanytas:
 ne kaip trūkumo registras, o kaip eiliškumo argumentas. Užrašoma todėl, kad
 stulpelio vertė matosi tik iš tokio atvejo — kitaip jis atrodo kaip papildoma
 lentelės skiltis.
+
+⚠️ **§18.3 SPRENDIMAS: NETINKAMA ARTEFAKTŲ KONFIGŪRACIJA STABDO STARTĄ.**
+
+Prijungimas atnešė klausimą, kurio 3 sąlygos formuluotėje nebuvo: ką daryti, kai
+`ARTIFACT_STORE_BACKEND` nustatytas, bet jo konfigūracija netinkama.
+
+**Kas buvo iki tol.** Serveris `parinktiBackenda()` nekvietė **iš viso** —
+vienintelis produkcinis kvietėjas buvo `scripts/migrate-artifacts.mjs`. Diegimas su
+`ARTIFACT_STORE_BACKEND=s3` ir trūkstamu raktu startuodavo ir rašydavo `inline`.
+
+**Kodėl tai negalėjo taip likti.** `backendSelection.js` tą elgesį draudžia
+žodžiais: *„Grįžimas į `inline` NEGALIMAS: dalis rezultatų atsidurtų kitoje
+saugykloje, nei mano operatorius, ir tai paaiškėtų tik tada, kai jų prireiktų."*
+Prijungimas be to draudimo būtų atkūręs tylų grįžimą — su ta pačia konfigūracija,
+tik dabar per kelią, kuris apie ją klausia.
+
+**Alternatyva, kuri atmesta.** Gaudyti klaidą, neprijungti, o radinį
+`konfiguracija_netinkama` parodyti `doctor` išvestyje. Ji atmesta todėl, kad tai
+tiksliai yra „grįžti į `inline` ir tęsti darbą": raudona varnelė nesustabdo
+rašymo, o rezultatai jau būtų ne ten.
+
+⚠️ **TAI NĖRA 10 SĄLYGA.** 10 sąlyga yra startas su NEPRIEINAMA DB ir ATIDARYTU
+barjeru; ji eina kartu su atidarymu, atskirame #155 PR. Čia sustabdo PR-2
+kontraktas, galiojantis nuo #290. Barjeras lieka `false`.
+
+⚠️ **KAIP ATSUKTI.** Pašalinti `ARTIFACT_STORE_BACKEND` iš aplinkos — diegimas
+grįžta į `inline` **eksplicitiškai**, ne tyliai, ir startuoja. Kodo atsukimo
+nereikia; tai konfigūracijos veiksmas, kurį gali atlikti operatorius per vieną
+perleidimą.
+
+⚠️ **PASEKMĖ, KURIĄ VERTA ŽINOTI PRIEŠ DIEGIMĄ:** diegimas su pasenusiu ar nepilnu
+`ARTIFACT_STORE_BACKEND` nuo šiol **nepakils**. Jis ir yra tas, dėl kurio riba
+egzistuoja — iki šiol jis kilo ir tylėjo.
+
+⚠️ **ŠALUTINĖ IŠVADA: `konfiguracija_netinkama` radinys starte NEBEPASIEKIAMAS.**
+`initializePostgres()` krenta anksčiau, nei stebėtojas suformuoja verdiktą. Kodas
+lieka — jis pasiekiamas tiesioginiams kvietėjams ir testams — bet plane užrašoma,
+kad `doctor` išvestyje jo niekas nepamatys; tylėti apie tai reikštų palikti verdikto
+kodą, kuris atrodo gyvas.
 
 ⚠️ **STEBĖTOJO KAINA — ATIDĖTAS SPRENDIMAS, NE NEPASTEBĖTA DETALĖ.**
 

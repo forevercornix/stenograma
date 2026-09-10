@@ -360,12 +360,72 @@ async function initializePostgres() {
     throw err;
   }
 
-  store = createPostgresStore(pool);
+  /**
+   * ⚠️ POOL'AS UŽDAROMAS IR ČIA. Aukščiau esantis `catch` dengia tik schemos
+   * patikras; be šio bloko netinkama artefaktų konfigūracija paliktų atvirą
+   * jungčių pool'ą procese, kuris vis tiek nepakils.
+   *
+   * ⚠️ `createPostgresStore()` YRA VIDUJE, NE UŽ RIBOS. Jis irgi meta —
+   * konstrukcijos sargas (PR-2) atmeta saugyklą be `backend` ir dvi skirtingas
+   * saugyklas tam pačiam tipui. Palikus jį lauke, būtų uždarytas pool'as vienam
+   * gedimo keliui ir paliktas atviras gretimam.
+   */
+  try {
+    store = createPostgresStore(pool, await paruostiArtefaktuSaugykla());
+  } catch (err) {
+    await pool.end().catch(() => {});
+    throw err;
+  }
+
   artefaktuPrijungimas = await ivertintiArtefaktuPrijungima(pool, store);
   log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)", {
     artefaktuSaugykla: artefaktuPrijungimas.santrauka,
   });
   return store;
+}
+
+/**
+ * Artefaktų saugykla `createPostgresStore()` parinktims (#157, PR-7, 3 sąlyga).
+ *
+ * ⚠️ `inline` SAUGYKLA NEPADUODAMA — IR TAI NE PRALEIDIMAS, O SCHEMOS RIBA.
+ *
+ * `inlineStore.backend` yra `"inline"`, o `paruostiExternalRasyma()` iš `backend`
+ * lauko gamina `storage_type` KARTU su `storage_key`. `job_results_storage_shape`
+ * inline šakai reikalauja `storage_key IS NULL`, tad kiekvienas užbaigimas kristų
+ * `23514`. Paduota inline saugykla ne „nieko nekeistų" — ji sulaužytų rašymą
+ * VISIEMS diegimams, kurie #157 dar nenaudoja.
+ *
+ * ⚠️ IR JOS NEREIKIA SKAITYMUI: inline eilutė grąžinama iš `payload` dar prieš
+ * rezolverį (`postgresStore.js:1205`), tad `parinktiArtefaktuSaugykla("inline")`
+ * nekviečiamas niekada.
+ *
+ * ⚠️ NETINKAMA KONFIGŪRACIJA STABDO STARTĄ — §18.3 SPRENDIMAS.
+ *
+ * `parinktiBackenda()` ir `patikrintiSaugykla()` meta; čia jos NEGAUDOMOS. Iki šio
+ * žingsnio serveris `parinktiBackenda()` nekvietė iš viso (vienintelis produkcinis
+ * kvietėjas buvo `scripts/migrate-artifacts.mjs`), tad diegimas su
+ * `ARTIFACT_STORE_BACKEND=s3` ir trūkstamu raktu startuodavo ir rašydavo `inline` —
+ * tiksliai tas grįžimas, kurį `backendSelection.js` draudžia žodžiais: „dalis
+ * rezultatų atsidurtų kitoje saugykloje, nei mano operatorius, ir tai paaiškėtų tik
+ * tada, kai jų prireiktų".
+ *
+ * ⚠️ TAI NĖRA 10 SĄLYGA. 10 sąlyga yra startas su NEPRIEINAMA DB ir ATIDARYTU
+ * barjeru; ji eina kartu su atidarymu, atskirame #155 PR. Čia sustabdo PR-2
+ * kontraktas, galiojantis nuo #290, o barjeras lieka `false`.
+ *
+ * ⚠️ PASEKMĖ, KURIĄ VERTA ŽINOTI: diegimas su pasenusiu `ARTIFACT_STORE_BACKEND`
+ * nuo šiol NEPAKILS. Jis ir yra tas, dėl kurio riba egzistuoja — iki šiol jis kilo
+ * ir tylėjo.
+ */
+async function paruostiArtefaktuSaugykla() {
+  const { parinktiBackenda, sukurtiSaugykla } = require("../artifactStore");
+  const { backend } = parinktiBackenda(process.env);
+
+  if (backend === "inline") return {};
+
+  const rasymoSaugykla = await sukurtiSaugykla({ backend });
+  log.info("Artefaktų saugykla prijungta", { backend });
+  return { rasymoSaugykla };
 }
 
 /**
@@ -1361,6 +1421,15 @@ module.exports = {
    * acceptance priklauso aktyvavimo etapui, ne šiam PR.
    */
   _initializePostgresForTests: initializePostgres,
+  /**
+   * Prieiga prie PRIJUNGIMO TAISYKLIŲ testams (#157, PR-7).
+   *
+   * ⚠️ EKSPONUOJAMA TA PATI FUNKCIJA, kurią kviečia `initializePostgres()`, ne jos
+   * kopija: taisyklė „inline nepaduodama" turi VIENĄ egzempliorių. Testas be DB
+   * kitaip arba nepasiekiamas, arba tikrintų perrašytą tos pačios logikos versiją —
+   * antra interpretacija, nustojanti sutapti tyliai.
+   */
+  _paruostiArtefaktuSaugyklaForTests: paruostiArtefaktuSaugykla,
   REQUIRED_JOB_CONSTRAINTS,
   REQUIRED_JOB_RESULT_CONSTRAINTS,
   STATUS,

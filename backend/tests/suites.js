@@ -405,6 +405,15 @@ const functional = [
    * galiojimą prieš realią schemą tikrina `artifactStorePrijungimasSchema.integration`.
    */
   "artifactStorePrijungimas",
+  /**
+   * #157 (PR-7): PRIJUNGIMO taisyklės — BE DB.
+   *
+   * `initializePostgres()` be tikros DB nepasileidžia, tad jo asercijos guli
+   * `postgres` rinkinyje. Bet taisyklė „`inline` saugykla NEPADUODAMA" nuo DB
+   * nepriklauso, o jos pažeidimas duotų `23514` KIEKVIENAM užbaigimui diegime,
+   * kuris #157 dar nenaudoja — tokia klasė negali laukti CI raundo.
+   */
+  "jobStoreArtefaktuPrijungimas",
   "erasureExportContract",
   "erasureReplayContract",
   "jobVersionParity",
