@@ -509,26 +509,32 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     const jobId = await naujasInline({ text: "dviprasmis-commit" });
 
     /**
-     * ⚠️ LOPAS PRIVALO NUSIIMTI PATS — POOL'AS KLIENTUS PERNAUDOJA.
+     * ⚠️ SIMULIACIJA DIRBA SU ATSKIRU POOL'U, NE SU BENDRU.
      *
-     * `client.release()` grąžina klientą į pool'ą TOKĮ, koks jis yra. Paliktas
-     * užlopytas `query` vėliau kristų ties KIEKVIENU `COMMIT` — įskaitant kitų
-     * scenarijų transakcijas, kurios su šituo neturi nieko bendra. Pirmame
-     * raunde (CI 34440571250) būtent taip ir nutiko: trys gretimi testai krito
-     * arba buvo nutraukti dėl lopo, likusio ant pernaudoto kliento.
+     * Pirmos dvi redakcijos lopė bendro pool'o klientą. `client.release()` grąžina
+     * klientą TOKĮ, KOKS JIS YRA, tad lopas keliaudavo į kitus scenarijus; antroji
+     * redakcija bandė jį nusiimti pati, bet blokas vis tiek KABDAVO (CI
+     * 34440571250 ir 34441688559 — abu `timed out after 300000ms`).
      *
-     * Todėl `query` atstatomas PRIEŠ metimą, o testo `finally` atstato ir tuos
-     * klientus, kurie `COMMIT` nepasiekė.
+     * Priežasties nebeieškau lopo viduje: pati konstrukcija bloga. Padirbtas
+     * resursas BENDRAME telkinyje yra ta pati klasė kaip testas, nesutvarkantis po
+     * savęs (#310) — gedimas pasirodo KITUR, ir jo priežastis nematoma iš kritusio
+     * testo.
+     *
+     * Todėl `migruoti()` gauna SAVO pool'ą: tarša fiziškai negali išeiti, o
+     * `end()` jį uždaro nepriklausomai nuo to, kokioje būsenoje liko jungtys.
+     * Tvirtinimai skaito per bendrą pool'ą — ta pati DB, kitas kelias.
      */
-    const originalusConnect = pool.connect.bind(pool);
-    const atstatymai = [];
+    const atskirasPool = new Pool({ connectionString: DB_URL, max: 2 });
 
-    pool.connect = async () => {
+    atskirasPool.on("error", () => {
+      /** Nutrūkusi laisva jungtis šiame pool'e yra LAUKIAMA — ne testo gedimas. */
+    });
+
+    const originalusConnect = atskirasPool.connect.bind(atskirasPool);
+    atskirasPool.connect = async () => {
       const client = await originalusConnect();
       const originalusQuery = client.query.bind(client);
-      atstatymai.push(() => {
-        client.query = originalusQuery;
-      });
 
       client.query = async (sql, ...likusieji) => {
         const rezultatas = await originalusQuery(sql, ...likusieji);
@@ -544,12 +550,11 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
 
     let metimas = null;
     try {
-      await migruoti(pool, saugykla, {}).catch((k) => {
+      await migruoti(atskirasPool, saugykla, {}).catch((k) => {
         metimas = k;
       });
     } finally {
-      pool.connect = originalusConnect;
-      for (const atstatyti of atstatymai) atstatyti();
+      await atskirasPool.end().catch(() => {});
     }
 
     assert.ok(metimas, "kontrolė: simuliacija privalo mesti");
