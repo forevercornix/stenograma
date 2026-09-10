@@ -508,14 +508,35 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
      */
     const jobId = await naujasInline({ text: "uzbarjeruotas" });
 
+    /**
+     * ⚠️ REIKŠMĖS IMAMOS IŠ MIGRACIJOS UŽŠALDYTŲ AIBIŲ, NE SUGALVOJAMOS.
+     *
+     * Pirma redakcija rašė `status: 'pending'`, `reason: 'subject_request'` ir
+     * stulpelį `created_at` — nė vienas neegzistuoja. CI davė
+     * `column "created_at" ... does not exist`, ir testas krito ne dėl tikrinamo
+     * dalyko, o dėl neteisingos fixture: `erasure_marks` naudoja `marked_at`,
+     * `deletion_pending` ir `user_request` (migracija `1755400000000`).
+     */
     await pool.query(
-      `INSERT INTO erasure_marks (job_id, status, reason, actor_kind, created_at, updated_at)
-       VALUES ($1, 'pending', 'subject_request', 'system', now(), now())
-       ON CONFLICT (job_id) DO UPDATE SET status = 'pending'`,
+      `INSERT INTO erasure_marks (job_id, status, reason, actor_kind, marked_at, updated_at)
+       VALUES ($1, 'deletion_pending', 'user_request', 'system', now(), now())
+       ON CONFLICT (job_id) DO UPDATE SET status = 'deletion_pending'`,
       [String(jobId)]
     );
 
-    const s = await migruoti(pool, saugykla, {});
+    /**
+     * ⚠️ ŽYMA ŠALINAMA `finally`, NE TESTO GALE.
+     *
+     * Kritus tvirtinimui, likusi žyma paliktų job'ą kandidatu gretimiems
+     * scenarijams — ir jie kristų dėl svetimos priežasties. Būtent taip nutiko
+     * pirmame raunde: krito ir šis testas, ir gretimas „PRALAIMĖJĘS NEPERRAŠO".
+     */
+    let s;
+    try {
+      s = await migruoti(pool, saugykla, {});
+    } finally {
+      await pool.query("DELETE FROM erasure_marks WHERE job_id = $1", [String(jobId)]).catch(() => {});
+    }
 
     assert.equal(s.praleista, 1, "užbarjeruotas job'as privalo būti PRALEISTAS");
     assert.equal(s.perkelta, 0);
@@ -530,7 +551,6 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
     assert.deepEqual(bandymai, [], "bandymas NETURI būti registruotas — jokio objekto neatsiranda");
 
-    await pool.query("DELETE FROM erasure_marks WHERE job_id = $1", [String(jobId)]);
   });
 
   await t.test("PRALAIMĖJĘS NEPERRAŠO laimėtojo `done` įrašo", async () => {
