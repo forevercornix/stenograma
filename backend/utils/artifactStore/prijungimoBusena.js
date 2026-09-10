@@ -1,15 +1,20 @@
 /**
  * ARTEFAKTŲ SAUGYKLOS PRIJUNGIMO STEBĖTOJAS (#157, PR-7, 3 sąlyga).
  *
- * ⚠️ KAM JIS, KAI PRIJUNGIMO DAR NĖRA.
+ * ⚠️ KODĖL JIS PARAŠYTAS PRIEŠ PRIJUNGIMĄ (§12.1: PIRMOJI REDAKCIJA SAKĖ „KAM JIS,
+ * KAI PRIJUNGIMO DAR NĖRA" — PRIJUNGIMAS JAU YRA).
  *
- * `initializePostgres()` šiandien kviečia `createPostgresStore(pool)` BE saugyklos.
- * Tai reiškia, kad diegimas su `ARTIFACT_STORE_BACKEND=s3` startuoja žaliai ir toliau
- * rašo `inline` — TYLIAI. Klaida paaiškėtų ne starte, o po savaitės, kai kas nors
+ * Iki PR-7 prijungimo žingsnio `initializePostgres()` kvietė `createPostgresStore(pool)`
+ * BE saugyklos: diegimas su `ARTIFACT_STORE_BACKEND=s3` startuodavo žaliai ir toliau
+ * rašydavo `inline` — TYLIAI. Klaida paaiškėtų ne starte, o po savaitės, kai kas nors
  * pastebėtų, kad kibiras tuščias, arba niekada.
  *
- * Todėl stebėtojas rašomas PRIEŠ prijungimą, ne po jo: jis yra tas įrankis, kuriuo
- * prijungimas bus patikrintas. Sukurtas po prijungimo, jis tikrintų pats save.
+ * Stebėtojas parašytas PRIEŠ tą prijungimą sąmoningai: jis yra tas įrankis, kuriuo
+ * prijungimas patikrintas. Sukurtas po jo, jis tikrintų pats save.
+ *
+ * ⚠️ IR TAI IŠMATUOTA, NE TEIGIAMA: `jobStoreArtefaktuPrijungimas.integration` VIENAME
+ * teste, prieš TĄ PAČIĄ bazę ir TA PAČIA funkcija, gauna `rasymas_neprijungtas` be
+ * paduotos saugyklos ir žalią verdiktą po `initializePostgres()`.
  *
  * ⚠️ LYGINAMOS TRYS AIBĖS, NE VIENA BŪSENA.
  *

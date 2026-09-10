@@ -848,8 +848,22 @@ function createPostgresStore(
    * turi vieną taikinį — tą, kurį šiandien pasirinko operatorius.
    *
    * ⚠️ BE `rasymoSaugykla` ELGESYS NEPAKINTA: rezultatai rašomi INLINE, kaip iki #157.
-   * PR-4 kelias įsijungia tik tada, kai saugykla paduota — prijungimas prie
-   * `initializePostgres()` lieka PR-7 kartu su non-inline sargo pašalinimu.
+   * PR-4 kelias įsijungia tik tada, kai saugykla paduota.
+   *
+   * ⚠️ PRIJUNGIMAS JAU ĮVYKDYTAS (#157, PR-7); SARGO PAŠALINIMAS — NE (§12.1).
+   *
+   * Ankstesnė redakcija sakė, kad prijungimas „lieka PR-7 kartu su non-inline sargo
+   * pašalinimu", ir tai suporavo du dalykus, kurių kodas nesuporuoja.
+   * `initializePostgres()` saugyklą paduoda nuo PR-7 prijungimo žingsnio, o sargas
+   * (`finishAtomic`, žemiau) lieka gyvas ir NĖRA susilpnintas: external eilutę su
+   * paduota saugykla sprendžia lygybės autoritetas dar PRIEŠ jį, o sargas gina tik
+   * atvejį, kuriam autoriteto tikrai nėra — external eilutę diegime BE saugyklos.
+   * Jis šalinamas paskutiniu PR-7 commit'u, kai erasure ir backup keliai bus padengti.
+   *
+   * ⚠️ `inline` SAUGYKLA ČIA NIEKADA NEPATENKA: `storage_type` gaminamas iš
+   * `rasymoSaugykla.backend`, tad inline saugykla duotų inline eilutę SU `storage_key`,
+   * o `job_results_storage_shape` to nepriima. Ribą laiko `initializePostgres()`
+   * (`jobStore/index.js`), ir ji tikrinama be DB.
    */
   const saugyklos = new Map();
 
