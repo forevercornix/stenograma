@@ -89,8 +89,8 @@ PR #288 (7.6c uždarymas) — planas naudoja dabartinius numerius ir įvardija a
 | `postgresStore.js:1034-1041` | ta pati | `rezultatoEilute()` po `FOR UPDATE OF j` |
 | `postgresStore.js:1623-1627` | ta pati | non-inline fail-closed sargas |
 | `services/backupService.js:259-262` | ta pati | `countActiveJobs()` per `listAll()`, naudoja tik `status` |
-| `services/lifecycleService.js:118, 393-394` | **`:129`, `:434`** | PR #288 įterpė `COVERED_CATEGORIES` predikatus; `STORED_IN_JOB_RECORD` logika nepakitusi |
-| `utils/artefactScanner.js:117-123` | ta pati | `scan: null, reason: "saugoma job_record viduje"` |
+| `services/lifecycleService.js:118, 393-394` | **`:129`, `:434`** | PR #288 įterpė `COVERED_CATEGORIES` predikatus. ⚠️ **`STORED_IN_JOB_RECORD` logika PAKITO (PR-5):** `:434` dabar yra `if (outcome.jobRemoved || externalNebera)` — `externalNebera` dengia external eilutę, kurios objekto nebėra, įskaitant NAŠLAIČIŲ kelią, kur `jobRemoved` visada `false`. Teiginys „nepakitusi" buvo teisingas iki PR-5 ir nuo tada klaidina |
+| `utils/artefactScanner.js:117-123` | **PAKEISTA (PR-5)** | `scan: null` liko, bet PRIEŽASTIS perrašyta: „inline eilutėse saugoma job_record viduje; **external eilutės tikrinamos per registrą**". Senoji formuluotė po #157 buvo netiesa — ji teigė, kad turinys visada eilutėje |
 | `utils/artefactInventory.js` | `:77`, `:98` | „…jobo įraše" / „…jobo rezultate" |
 | `utils/backupPolicy.js:94,96` | ta pati | `transcript`/`protocol` → `"job_results"` |
 | `utils/resultLimits.js:154` | ta pati | `MAX_RESULT_BYTES` = 20 MiB |
@@ -1514,7 +1514,7 @@ yra ATSKIRAS commit'as PR-7 viduje, ne sulietas su prijungimu ar backup darbu.
 3. `neatkartojama` grandinė               (sąlyga 5, kartu su #298)
 4. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
 5. integrity testai
-6. pilna regresija (postgres + s3 rinkiniai)
+6. pilna regresija (postgres + s3 + **postgres-s3** rinkiniai)
 7. dokumentai
 8. sargo pašalinimas — PASKUTINIS         (sąlyga 2)
 ```
@@ -1555,7 +1555,8 @@ lieka galioti, o prijungimas — atidedamas.
 ```
 1. backup/restore implementacija (be sargo pašalinimo)
 2. integrity testai (missing / corrupt / kontrolė)
-3. pilna regresija + integraciniai įrodymai (postgres + MinIO rinkiniai žali)
+3. pilna regresija + integraciniai įrodymai (**postgres, s3 IR postgres-s3** rinkiniai žali)
+   ⚠️ `postgres-s3` NEPRALEIDŽIAMAS: PR-7 backup/restore kelias kerta ABU servisus, tad regresija, vardijanti tik `postgres` ir `s3`, praleistų KIEKVIENĄ kombinuotą scenarijų. Nepraleidimą tikrina `verify-postgres-suite-ran.mjs /tmp/pgs3-tap postgresS3`
 4. dokumentai (runbook §9a/§9c/§11, matrica, README)
 5. sargo pašalinimas — PASKUTINIS commit'as
 ```
