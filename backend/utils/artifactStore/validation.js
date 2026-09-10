@@ -298,18 +298,29 @@ function patikrintiSriti(reiksme) {
   /**
    * ⚠️ INLINE REPREZENTACIJOS STABILUMAS - ANTRA DIVERGENCIJOS KLASĖ (#157 D1).
    *
-   * ⚠️ IŠMATUOTA: `kanonizuoti()` struktūrą perrenka PATS ir kopijuoja tik
-   * NUOSAVUS raktus, o `payload` į `jsonb` keliauja per `JSON.stringify`, kuris
-   * kviečia `toJSON()` — dažniausiai gyvenantį PROTOTIPE:
+   * ⚠️ PRIELAIDA PASIKEITĖ (§12.1 korekcija, #298). ANKSTESNĖ REDAKCIJA SAKĖ, KAD
+   * ŠIS SARGAS GINA `Date`. NEBEGINA — IR NEBETURI KO.
+   *
+   * Buvo išmatuota: `kanonizuoti()` kopijavo tik NUOSAVUS raktus, o `payload` į
+   * `jsonb` keliauja per `JSON.stringify`, kviečiantį PROTOTIPE gyvenantį `toJSON`:
    *
    *   kanoninė reikšmė      {"d":{}}
    *   inline saugoma        {"d":"1970-01-01T00:00:00.000Z"}
-   *   perskaityta atgal     {"d":"1970-01-01T00:00:00.000Z"}
    *
-   * Vadinasi visos `Date` reikšmės kanoniškai tapatingos tarpusavyje IR tuščiam
-   * objektui, o po inline round-trip'o tapatybė PASIKEIČIA. Pakartotinis
-   * `finish(COMPLETED)` su ta pačia įvestimi tada duotų ne no-op, o
-   * `RESULT_CONFLICT` — teisėtam retry.
+   * #298 taisymas pašalino PRIEŽASTĮ: `kanonizuoti()` dabar `toJSON` kviečia lygiai
+   * taip pat kaip `JSON.stringify` (vieną kartą lygyje, su raktu). `Date` tapatybė
+   * tapo viena visuose trijuose backend'uose, tad ties riba jos atmesti nebėra
+   * pagrindo — tai NUOSTOLINGA reikšmė (forma keičiasi VIENODAI), ne atmetama.
+   *
+   * ⚠️ SARGAS LIEKA, NES JO APIMTIS SUSIAURĖJO, O NE IŠNYKO. Predikatas
+   * „kanoninė forma nepergyvena round-trip'o" tebegalioja ir tebegaudo klasę,
+   * kurios `kanonizuoti()` išspręsti NEGALI: `toJSON`, grąžinantį SKIRTINGĄ
+   * reikšmę kiekvienam kvietimui. Tokiu atveju kvitas aprašytų A, o saugykla
+   * laikytų B — išmatuota, kad būtent tai čia ir atmetama.
+   *
+   * ⚠️ IR JIS YRA VYKDOMAS #298 TAISYMO SARGAS. Jei kas nors `kanonizuoti()`
+   * grąžins prie `toJSON` nepaisymo, šis palyginimas kris ties pirmu `Date` —
+   * t. y. regresija pasimatys ties riba, ne po savaitės Redis kelyje.
    *
    * ⚠️ `fs` ir S3 to NEPARODYTŲ: jie grąžina tuos pačius baitus. Todėl patikra
    * gyvena BOUNDARY, ne implementacijoje — kitaip rinkinys, žalias prieš `fs`,
@@ -346,9 +357,10 @@ function patikrintiSriti(reiksme) {
 
   if (inlineKanonine !== kanonine) {
     throw struktūrinė(
-      "ArtifactStore: reikšmės tapatybė pasikeistų inline kelyje (objektas su prototipo " +
-        "`toJSON`, pvz. `Date`). Tokia reikšmė skirtinguose backend'uose duotų skirtingą " +
-        "kanoninę eilutę, tad atmetama ties riba (#157 D1).",
+      "ArtifactStore: reikšmės kanoninė forma nepergyvena serializacijos — du to paties " +
+        "objekto kanonizavimai duoda skirtingą eilutę. Dažniausia kilmė: `toJSON`, " +
+        "grąžinantis kiekvienam kvietimui kitą reikšmę. Kvitas aprašytų vieną turinį, " +
+        "o saugykla laikytų kitą, tad reikšmė atmetama ties riba (#157 D1, #298).",
       KLAIDA.REIKSME
     );
   }
