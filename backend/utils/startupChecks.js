@@ -531,6 +531,50 @@ async function runSelfChecks(env = process.env) {
     /** `jobRunner` gali būti neįkeltas (pvz. `doctor` be starto) — tai ne gedimas. */
   }
 
+  /**
+   * ARTEFAKTŲ SAUGYKLŲ PRIJUNGIMAS (#157, PR-7, 3 sąlyga).
+   *
+   * ⚠️ TAS PATS ADRESAS IR TA PATI PRIEŽASTIS KAIP EILĖS PREFLIGHT: čia mato ir
+   * `doctor`, ir `/api/health/deep`, o logo eilutė iki klausimo neišgyvena.
+   *
+   * ⚠️ `/api/ready` ČIA NETINKA — `auditReadiness.route` kontraktas reikalauja
+   * loginių būsenų BE infrastruktūros detalių, o „kuris backend'as registruotas"
+   * yra būtent tokia detalė. #319 pirma redakcija ties tuo ir krito.
+   *
+   * ⚠️ VARNELĖ ŽALIA ESANT `nezinoma` — ir tai sąmoninga. Neįvykęs stebėjimas nėra
+   * gedimas; `detail` pasako, kad atsakymo nėra, ir tai matoma be klaidingo pavojaus.
+   *
+   * ⚠️ RADINYS PAVERČIA `/api/health/deep` Į `degraded` (503) — SĄMONINGAI, IR TAI
+   * NĖRA 10 SĄLYGA.
+   *
+   * 10 sąlyga yra FAIL-CLOSED STARTAS: procesas nepakyla. Ji eina kartu su barjeru
+   * ir čia jos nėra — procesas pakyla ir aptarnauja. Raudona varnelė gilioje
+   * sveikatoje yra ne startas, o būtent tas paviršius, kuriam ji skirta.
+   *
+   * Kas realiai pasikeičia: diegimas, NUSTATĘS `ARTIFACT_STORE_BACKEND=fs|s3`, gauna
+   * 503 ties `/api/health/deep`. Toks diegimas yra sugedęs — jo rezultatai rašomi
+   * `inline`, ne ten, kur prašyta. Iki šiol jis tylėjo.
+   *
+   * ⚠️ SRAUTO TAI NELIEČIA: `/api/ready` NEPAPILDYTAS (jo kontraktas — loginės
+   * būsenos be infrastruktūros detalių), o `/api/health/deep` production'e dar ir
+   * uždarytas `x-audit-key`. Diegimai be `ARTIFACT_STORE_BACKEND` (t. y. `inline`)
+   * radinio negauna: `inline` saugyklos nereikalauja.
+   */
+  try {
+    const jobStore = require("./jobStore");
+    const verdiktas = jobStore.getArtifactStoreStatus && jobStore.getArtifactStoreStatus();
+
+    if (verdiktas) {
+      checks.push({
+        name: "Artefaktų saugyklų prijungimas (startas)",
+        ok: verdiktas.ok || verdiktas.nezinoma,
+        detail: verdiktas.santrauka,
+      });
+    }
+  } catch {
+    /** `jobStore` gali būti neįkeltas — tai ne gedimas, tas pats kaip aukščiau. */
+  }
+
   return checks;
 }
 

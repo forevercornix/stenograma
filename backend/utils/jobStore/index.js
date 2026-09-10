@@ -36,6 +36,15 @@ const log = createLogger("job-store");
 let store = memoryStore; // numatyta, kol init() nepakeičia
 let initPromise = null;   // bendras inicijavimo Promise (žr. init() komentarą)
 let _redisFactoryForTests = null; // TESTAMS: injektuota Redis factory (žr. eksportus)
+/**
+ * ARTEFAKTŲ SAUGYKLOS PRIJUNGIMO VERDIKTAS (#157, PR-7, 3 sąlyga).
+ *
+ * ⚠️ SKAIČIUOJAMAS STARTE, RODOMAS VĖLIAU — ta pati forma kaip eilės preflight
+ * (#155). Perskaičiuotas rodymo metu jis atsakytų apie DABARTINĘ konfigūraciją,
+ * o klausiama apie tą, PAGAL KURIĄ buvo sukurtas rezolveris. Du nesutampantys
+ * atsakymai į „ar prijungta teisingai" yra blogiau nei vienas pasenęs.
+ */
+let artefaktuPrijungimas = null;
 
 /**
  * RACE CONDITION APSAUGA: anksčiau `initialized = true` buvo nustatomas IŠKART, o Redis
@@ -352,8 +361,35 @@ async function initializePostgres() {
   }
 
   store = createPostgresStore(pool);
-  log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)");
+  artefaktuPrijungimas = await ivertintiArtefaktuPrijungima(pool, store);
+  log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)", {
+    artefaktuSaugykla: artefaktuPrijungimas.santrauka,
+  });
   return store;
+}
+
+/**
+ * Ar saugyklos prijungtos taip, kaip prašo konfigūracija ir reikalauja bazė?
+ *
+ * ⚠️ NEKEIČIA STARTO BAIGTIES — nei radiniu, nei savo gedimu.
+ *
+ * Fail-closed startas yra 10 PR-7 sąlyga ir jis eina kartu su aktyvavimo barjeru:
+ * įjungtas anksčiau, jis sustabdytų diegimus dėl būsenos, kuri iki barjero atidarymo
+ * yra normali. O kritusi pati patikra sustabdytų startą dėl DIAGNOSTIKOS gedimo —
+ * naujas gedimo taškas ten, kur jo anksčiau nebuvo.
+ *
+ * ⚠️ ŠIANDIEN JIS RODO NEPRIJUNGTĄ RAŠYMĄ, IR TAI TEISINGA.
+ *
+ * `createPostgresStore(pool)` kviečiamas be saugyklos, tad diegimas su
+ * `ARTIFACT_STORE_BACKEND=fs|s3` gauna radinį `rasymas_neprijungtas`. Tai ne
+ * stebėtojo klaida — tai pati spraga, kurią uždaro kitas PR-7 žingsnis, ir
+ * pirmas jo patikrinimas bus šio verdikto pasikeitimas į žalią.
+ */
+async function ivertintiArtefaktuPrijungima(pool, pgStore) {
+  const { nustatytiPrijungimoBusena } = require("../artifactStore/prijungimoBusena");
+  return nustatytiPrijungimoBusena(pool, pgStore, {
+    ispeti: (zinute, ctx) => log.warn(zinute, ctx),
+  });
 }
 
 /**
@@ -644,6 +680,11 @@ module.exports = {
    * lenktynių" nėra deterministinis – testas praeitų ir be atomiškumo.
    */
   _storeForTests: () => store,
+  /**
+   * Starto verdiktas apie artefaktų saugyklų prijungimą; `null` ne PostgreSQL režime.
+   * Rodo `startupChecks.runSelfChecks()` — t. y. ir `doctor`, ir `/api/health/deep`.
+   */
+  getArtifactStoreStatus: () => artefaktuPrijungimas,
   FORBIDDEN,
   CONCURRENCY_CONFLICT,
   RESULT_CONFLICT,

@@ -2896,6 +2896,25 @@ function createPostgresStore(
   return {
     create,
     restoreRecord,
+    /**
+     * ⚠️ REZOLVERIO BŪSENA — STEBĖTOJUI, NE KVIETĖJUI (#157, PR-7, 3 sąlyga).
+     *
+     * Metodas atsako į vienintelį klausimą: KAS registruota. Jis nieko neparenka
+     * ir negrąžina pačių saugyklų — kitaip jis taptų antru keliu prie rašymo,
+     * apeinančiu `parinktiArtefaktuSaugykla()` ir jo klaidos pranešimą.
+     *
+     * ⚠️ YRA `jobStoreBackendContract` DALIS (25 → 26). Pirma redakcija teigė
+     * priešingai — kad memory/Redis jo deklaruoti neprivalo, nes rezolverio neturi.
+     * Sargas krito ir buvo teisus: metodo netekęs backend'as stebėtojui atrodytų
+     * kaip „nieko netikrinu", tad neteisingai sukonfigūruotas diegimas gautų ŽALIĄ
+     * varnelę. Jie deklaruoja jį su TUŠČIA būsena — tai jų teisingas atsakymas.
+     */
+    saugykluBusena() {
+      return {
+        rasymoBackend: rasymoSaugykla ? rasymoSaugykla.backend : null,
+        registruotiTipai: [...saugyklos.keys()].sort(),
+      };
+    },
     get,
     update,
     remove,

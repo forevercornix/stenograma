@@ -1029,6 +1029,18 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
    * kandidatų atranka su retencijos predikatu ir eilučių uždarymas PO to, kai objekto
    * tikrai nebėra.
    *
+   * ⚠️ 25 → 26 (#157, PR-7): pridėtas `saugykluBusena()`. Skaičius keliamas
+   * SĄMONINGAI. Prijungimo stebėtojas klausia STORE'O, kas registruota, nes
+   * `storage_type -> ArtifactStore` žemėlapis gyvena ten ir yra vienintelis — ta
+   * pati priežastis, dėl kurios čia atsirado `deleteResultArtifacts()`. Backend'as,
+   * praradęs šį metodą, stebėtojui atrodytų kaip „nieko netikrinu", ir neteisingai
+   * sukonfigūruotas diegimas gautų ŽALIĄ varnelę: „nematau" pavirstų į „viskas gerai".
+   *
+   * ⚠️ MEMORY IR REDIS GRĄŽINA TUŠČIĄ BŪSENĄ, IR TAI NE UŽPILDAS. Jie artefaktų
+   * rezolverio neturi, tad `rasymoBackend: null` yra jų TEISINGAS atsakymas; jį
+   * gavęs stebėtojas parodo, kad `ARTIFACT_STORE_BACKEND=s3` prie tokio job store'o
+   * nieko į S3 nerašo.
+   *
    * ⚠️ 19 → 20 (#157, PR-5): pridėtas `sweepResultArtifacts()`. Šlavėjas klausia
    * saugyklos dėl tos pačios priežasties kaip erasure: laikinojo etapo buvimas ir
    * `storage_type -> ArtifactStore` žemėlapis gyvena ten.
@@ -1057,7 +1069,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 25, "jobStore kontraktas privalo turėti tiksliai 25 metodus");
+  assert.equal(expected.length, 26, "jobStore kontraktas privalo turėti tiksliai 26 metodus");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,
