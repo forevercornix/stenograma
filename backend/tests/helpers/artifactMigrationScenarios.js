@@ -508,14 +508,32 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
      */
     const jobId = await naujasInline({ text: "dviprasmis-commit" });
 
+    /**
+     * ⚠️ LOPAS PRIVALO NUSIIMTI PATS — POOL'AS KLIENTUS PERNAUDOJA.
+     *
+     * `client.release()` grąžina klientą į pool'ą TOKĮ, koks jis yra. Paliktas
+     * užlopytas `query` vėliau kristų ties KIEKVIENU `COMMIT` — įskaitant kitų
+     * scenarijų transakcijas, kurios su šituo neturi nieko bendra. Pirmame
+     * raunde (CI 34440571250) būtent taip ir nutiko: trys gretimi testai krito
+     * arba buvo nutraukti dėl lopo, likusio ant pernaudoto kliento.
+     *
+     * Todėl `query` atstatomas PRIEŠ metimą, o testo `finally` atstato ir tuos
+     * klientus, kurie `COMMIT` nepasiekė.
+     */
     const originalusConnect = pool.connect.bind(pool);
+    const atstatymai = [];
+
     pool.connect = async () => {
       const client = await originalusConnect();
       const originalusQuery = client.query.bind(client);
+      atstatymai.push(() => {
+        client.query = originalusQuery;
+      });
 
       client.query = async (sql, ...likusieji) => {
         const rezultatas = await originalusQuery(sql, ...likusieji);
         if (typeof sql === "string" && sql.trim().toUpperCase() === "COMMIT") {
+          client.query = originalusQuery;
           throw new Error("simuliuotas ryšio nutrūkimas PO sėkmingo COMMIT");
         }
         return rezultatas;
@@ -531,6 +549,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       });
     } finally {
       pool.connect = originalusConnect;
+      for (const atstatyti of atstatymai) atstatyti();
     }
 
     assert.ok(metimas, "kontrolė: simuliacija privalo mesti");
