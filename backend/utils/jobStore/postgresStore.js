@@ -2279,6 +2279,26 @@ function createPostgresStore(
           [String(id), enumeruoti]
         );
       }
+
+      /**
+       * ⚠️ MIGRACIJOS PROGRESO EILUTĖ IRGI ŠALINAMA (#157, PR-6; Codex).
+       *
+       * `artifact_migration_progress` sąmoningai neturi FK į `jobs` — kad
+       * pergyventų job'ą ir liktų įrodymu, jei perkėlimas nutrūko. Bet po
+       * SĖKMINGO ištrynimo ji lieka su `job_id` ir `storage_key` NERIBOTAI, o
+       * ištrynimo kontraktas tokį likutį vadina asmens duomenų liekana.
+       *
+       * ⚠️ TAS PATS SPRENDIMAS KAIP BANDYMŲ REGISTRUI, IR TA PATI PRIEŽASTIS.
+       * Registro eilutės čia šalinamos gretimu sakiniu dėl to paties: lentelė be
+       * FK gina nutrūkusį kelią, ne teisę likti po užbaigto ištrynimo.
+       *
+       * ⚠️ BESĄLYGINIS, NE PAGAL `enumeruoti`. Progreso eilutė NĖRA adresas:
+       * `done` reiškia, kad tas pats raktas yra ir `job_results`, ir įsipareigotoje
+       * registro eilutėje. Jos pašalinimas nieko nepadaro nepasiekiamo — skirtingai
+       * nei registro eilutės, kuri yra vienintelis nereferencuoto objekto adresas.
+       */
+      await client.query("DELETE FROM artifact_migration_progress WHERE job_id = $1", [String(id)]);
+
       const { rowCount } = await client.query("DELETE FROM jobs WHERE id = $1", [id]);
       return rowCount > 0;
     });

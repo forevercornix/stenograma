@@ -30,11 +30,13 @@
 import pg from "pg";
 
 import artifactMigration from "../utils/artifactMigration.js";
+import pgConnection from "../utils/pgConnection.js";
 import artifactStore from "../utils/artifactStore/index.js";
 
 const { Pool } = pg;
 const { migruoti, sausasPaleidimas } = artifactMigration;
 const { parinktiBackenda, sukurtiSaugykla } = artifactStore;
+const { arNurodytaPostgres, pgJungtiesNustatymai } = pgConnection;
 
 /**
  * ⚠️ METAMA, NE `process.exit()` — DVI SKIRTINGOS PRIEŽASTYS.
@@ -80,17 +82,41 @@ const komanda = argv[0];
  */
 async function vykdyti(pool) {
   if (komanda === "status") {
-    const { rows } = await pool.query(
-      `SELECT busena, priezastis, count(*)::int AS kiek
-         FROM artifact_migration_progress
-        GROUP BY busena, priezastis
-        ORDER BY busena, priezastis`
-    );
-    const { rows: likę } = await pool.query(
-      "SELECT count(*)::int AS kiek FROM job_results WHERE storage_type = 'inline' AND payload IS NOT NULL"
-    );
+    /**
+     * ⚠️ ABU SKAITYMAI — VIENOJE `REPEATABLE READ` TRANSAKCIJOJE (Codex, PR-6).
+     *
+     * Dvi autocommit užklausos matė DU SKIRTINGUS momentus. Eilutė, įsipareigojusi
+     * tarp jų, DINGDAVO IŠ ATASKAITOS VISIŠKAI: progreso užklausa dar nematė
+     * `done`, o likusių-inline užklausa jau nematė eilutės. Suma nesutapdavo su
+     * niekuo, ir klaidingiausia tai būdavo tada, kai `status` naudojamas VEIKIANČIAM
+     * paleidimui stebėti — t. y. vienintele proga, kai eilutės tikrai juda.
+     *
+     * `REPEATABLE READ` duoda vieną snapshot'ą abiem sakiniams: ataskaita aprašo
+     * VIENĄ momentą, net jei jis jau praeitas.
+     */
+    const klientas = await pool.connect();
+    try {
+      await klientas.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
 
-    console.log(JSON.stringify({ likęInline: likę[0].kiek, progresas: rows }, null, 2));
+      const { rows } = await klientas.query(
+        `SELECT busena, priezastis, count(*)::int AS kiek
+           FROM artifact_migration_progress
+          GROUP BY busena, priezastis
+          ORDER BY busena, priezastis`
+      );
+      const { rows: likę } = await klientas.query(
+        "SELECT count(*)::int AS kiek FROM job_results WHERE storage_type = 'inline' AND payload IS NOT NULL"
+      );
+
+      await klientas.query("COMMIT");
+      console.log(JSON.stringify({ likęInline: likę[0].kiek, progresas: rows }, null, 2));
+    } catch (e) {
+      await klientas.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally {
+      klientas.release();
+    }
+
     return 0;
   }
 
@@ -139,9 +165,44 @@ try {
   if (!["dry-run", "run", "status"].includes(komanda)) {
     klaida("Naudojimas: migrate-artifacts.mjs <dry-run|run|status> [--limit N] [--retry-failed]");
   }
-  if (!process.env.DATABASE_URL) klaida("DATABASE_URL nenustatytas.");
 
-  pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  /**
+   * ⚠️ NEŽINOMA VĖLIAVA — NAUDOJIMO KLAIDA, NE TYLUS NUMATYTASIS (Codex, PR-6).
+   *
+   * `--retry-faield` tyliai vykdydavo su `retryFailed = false`. Kai likę tik
+   * `failed` eilutės, komanda pranešdavo NULĮ kandidatų ir baigdavosi SĖKMINGAI,
+   * nors prašyti pakartojimai neįvyko. Operatorius gautų „nieko nėra" vietoj
+   * „nesupratau, ko prašai".
+   *
+   * ⚠️ TIKRINAMA PRIEŠ atidarant DB ar saugyklą: klaida rašyboje neturi kainuoti
+   * prisijungimo, o juo labiau — dalinio darbo.
+   */
+  const ZINOMOS = new Set(["--limit", "--retry-failed"]);
+  const nezinomos = argv
+    .slice(1)
+    .filter((a, i, visi) => a.startsWith("-") || (i > 0 && visi[i - 1] !== "--limit"))
+    .filter((a) => a.startsWith("-") && !ZINOMOS.has(a));
+
+  if (nezinomos.length > 0) {
+    klaida(`Nežinomi argumentai: ${nezinomos.join(", ")}. Leidžiami: ${[...ZINOMOS].join(", ")}.`);
+  }
+  /**
+   * ⚠️ BENDRAS AUTORITETAS, NE `DATABASE_URL` VARDAS (#245; Codex PR-6).
+   *
+   * Dokumentuotas Compose diegimas naudoja `PG*` kintamuosius, ne `DATABASE_URL`.
+   * Reikalaujant vardo, migracijos įrankis būtų NEPASIEKIAMAS palaikomoje
+   * konfigūracijoje, o operatorius verčiamas rankomis konstruoti DSN — ypač
+   * klaidinga slaptažodžiams su URI simboliais.
+   *
+   * `arNurodytaPostgres()` ir `pgJungtiesNustatymai()` yra ta pati pora, kurią
+   * naudoja `dr-restore.mjs` ir `pg-backup.mjs`; antras atsakymas į klausimą
+   * „kur DB" reikštų, kad įrankiai gali nesutarti.
+   */
+  if (!arNurodytaPostgres()) {
+    klaida("PostgreSQL nenurodyta: reikia `DATABASE_URL` arba `PGHOST` (+ `PG*`).");
+  }
+
+  pool = new Pool(pgJungtiesNustatymai());
   process.exitCode = await vykdyti(pool);
 } catch (e) {
   console.error(
