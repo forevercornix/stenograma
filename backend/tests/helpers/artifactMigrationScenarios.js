@@ -706,9 +706,26 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
    * ⚠️ TIKRINAMOS TIK POROS TARP SISTEMŲ. `job_results` vidaus netikrina sąmoningai:
    * tą invariantą DB taiko kiekvienam sakiniui, ir stebėtojas ten kristi negalėtų.
    */
-  function paleistiStebetoja(saugykla) {
+  async function paleistiStebetoja(saugykla) {
     const pazeidimai = [];
     let dirba = true;
+    let raundai = 0;
+
+    /**
+     * ⚠️ STEBĖTOJAS GRĄŽINAMAS TIK PO PIRMOS APKLAUSOS (Codex, PR-6).
+     *
+     * Ankstesnė redakcija grąždavo IŠ KARTO, dar neprisijungusi. Jei `migruoti()`
+     * spėdavo baigti anksčiau nei ciklas pradėdavo, `stop()` nustatydavo
+     * `dirba = false` PRIEŠ pirmą iteraciją, ir tvirtinimas „nė vieno pažeidimo"
+     * praeidavo NIEKO NESTEBĖJĘS.
+     *
+     * Barjeras uždaro startą; `raundai` skaitiklis leidžia po to TVIRTINTI, kad
+     * apklausa realiai persidengė su migracija, o ne tik įvyko kartą prieš ją.
+     */
+    let paruoštas;
+    const pasiruošė = new Promise((r) => {
+      paruoštas = r;
+    });
 
     const ciklas = (async () => {
       const klientas = new Client({ connectionString: DB_URL });
@@ -744,6 +761,9 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
             }
           }
 
+            raundai += 1;
+          if (raundai === 1) paruoštas();
+
           await new Promise((r) => setTimeout(r, 2));
         }
       } finally {
@@ -751,10 +771,13 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       }
     })();
 
+    /** ⚠️ Laukiam PIRMOS apklausos — kitaip stebėtojas gali nespėti pradėti. */
+    await pasiruošė;
+
     return async function stop() {
       dirba = false;
       await ciklas;
-      return pazeidimai;
+      return { pazeidimai, raundai };
     };
   }
 
@@ -764,11 +787,12 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
     await t.test("TIKRA migracija: nė vieno pažeidimo", async () => {
       for (let i = 0; i < 12; i += 1) await naujasInline({ text: `eilute-${i}` });
 
-      const stop = paleistiStebetoja(saugykla);
+      const stop = await paleistiStebetoja(saugykla);
       const s = await migruoti(pool, saugykla, {});
-      const pazeidimai = await stop();
+      const { pazeidimai, raundai } = await stop();
 
       assert.equal(s.perkelta, 12, "kontrolė: stebėtojas stebėjo TIKRĄ darbą, ne tuštumą");
+      assert.ok(raundai > 1, `apklausa nepersidengė su migracija (raundų: ${raundai})`);
       assert.deepEqual(pazeidimai, [], "commit'inta pažeista pora — migracija turi langą");
     });
 
@@ -786,7 +810,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
        */
       const jobId = await naujasInline({ text: "mutacija" });
 
-      const stop = paleistiStebetoja(saugykla);
+      const stop = await paleistiStebetoja(saugykla);
 
       await pool.query(
         `INSERT INTO artifact_migration_progress
@@ -798,7 +822,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       /** Stebėtojui duodamas laikas pamatyti commit'intą tarpinę būseną. */
       await new Promise((r) => setTimeout(r, 60));
 
-      const pazeidimai = await stop();
+      const { pazeidimai } = await stop();
 
       assert.ok(
         pazeidimai.some((p) => p.includes("tebėra inline")),
@@ -819,9 +843,9 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
         [jobId, backendas()]
       );
 
-      const stop = paleistiStebetoja(saugykla);
+      const stop = await paleistiStebetoja(saugykla);
       await new Promise((r) => setTimeout(r, 60));
-      const pazeidimai = await stop();
+      const { pazeidimai } = await stop();
 
       assert.ok(
         pazeidimai.some((p) => p.includes("objekto nėra")),
