@@ -120,9 +120,11 @@ const KANDIDATAI_SQL = `
  * nesėkmė: niekas nesugedo, darbą tiesiog atliko kas nors kitas, ir `failed`
  * įrašas apie jį meluotų.
  *
- * Antra to paties lango pusė jau buvo uždaryta anksčiau: perjungimo `UPDATE`
- * turi tą pačią sąlygą kaip CAS, tad eilutė, pasikeitusi PO traukimo, duoda
- * `eilute_pasikeite`, o ne svetimos nuorodos perrašymą.
+ * Antra to paties lango pusė uždaryta perjungimo `UPDATE` predikate — ir jis
+ * tikrina NE TIK formą, bet ir TURINĮ (`payload = $6::jsonb`). Be turinio dalies
+ * sąlyga gaudytų tik perjungimą į external, o inline rezultato ATNAUJINIMAS
+ * (kurį `upsertResult()` palaiko) ją tenkintų: migracija įsipareigotų seną
+ * turinį ir sunaikintų naujesnį. Su ja bet koks pokytis duoda `eilute_pasikeite`.
  */
 const PAYLOAD_SQL = `
   SELECT payload
@@ -268,6 +270,9 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
   const client = await pool.connect();
   let isipareigota = false;
 
+  /** ⚠️ „COMMIT išsiųstas" ir „COMMIT pavyko" — DU SKIRTINGI faktai. Žr. žemiau. */
+  let commitIssiustas = false;
+
   try {
     await client.query("BEGIN");
 
@@ -282,6 +287,23 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
      * eilutę galėjo pakeisti įprastas užbaigimo kelias. Be sąlygos perrašytume
      * svetimą, ką tik įsipareigotą nuorodą, ir jos objektas liktų be jokios
      * rodyklės — tiksliai tas orphan'as, dėl kurio egzistuoja registras.
+     *
+     * ⚠️ IR TURINYS ĮEINA Į PREDIKATĄ, NE TIK FORMA (Codex, PR-6).
+     *
+     * Ankstesnė redakcija tikrino tik `storage_type = 'inline' AND payload IS NOT
+     * NULL`. Tai gaudo perjungimą į external, bet NEGAUDO turinio pakeitimo
+     * INLINE viduje — o `postgresStore.upsertResult()` tokį pakeitimą PALAIKO.
+     * Kitas rašytojas, atnaujinęs rezultatą tarp `PAYLOAD_SQL` skaitymo ir šio
+     * sakinio, paliktų eilutę tenkinančią sąlygą: migracija įsipareigotų objektą
+     * su SENU turiniu ir sunaikintų NAUJESNĮ `payload`.
+     *
+     * ⚠️ TA PATI PR-4 PAMOKA: pre-check gamina faktus, sprendimą priima
+     * transakcija iš to, ką laiko po užraktu. Stebėtas turinys privalo įeiti į
+     * sprendimą, kitaip jis lieka stebėjimu, kuriuo remiamasi destruktyviai.
+     *
+     * ⚠️ LYGINAMA `jsonb`, NE TEKSTAS. `jsonb` lygybė semantinė — nepriklauso
+     * nuo raktų tvarkos ar tarpų, tad ji atitinka TĄ PATĮ klausimą, kurį uždavė
+     * skaitymas („ar tai ta pati reikšmė"), o ne jos atsitiktinę serializaciją.
      */
     const perjungimas = await client.query(
       `UPDATE job_results
@@ -292,8 +314,9 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
               payload = NULL
         WHERE job_id = $1
           AND storage_type = 'inline'
-          AND payload IS NOT NULL`,
-      [jobId, saugykla.backend, kvitas.reference, kvitas.bytes, kvitas.checksum]
+          AND payload IS NOT NULL
+          AND payload = $6::jsonb`,
+      [jobId, saugykla.backend, kvitas.reference, kvitas.bytes, kvitas.checksum, JSON.stringify(payload)]
     );
 
     if (perjungimas.rowCount !== 1) {
@@ -327,6 +350,28 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
       [String(jobId), saugykla.backend, kvitas.reference, runId]
     );
 
+    /**
+     * ⚠️ NUO ČIA VALYMAS DRAUDŽIAMAS, NET JEI `COMMIT` ATMES PAŽADĄ (Codex, PR-6).
+     *
+     * PostgreSQL gali įsipareigoti, o atsakymas kliento nepasiekti (nutrūkęs
+     * ryšys, timeout). Tada `COMMIT` meta, nors transakcija ĮVYKO. Ankstesnė
+     * redakcija tokiu atveju `finally` bloke ištrindavo objektą, į kurį JAU rodo
+     * įsipareigota nuoroda: liktų external eilutė be objekto IR be inline kopijos.
+     *
+     * ⚠️ TA PATI KLASĖ KAIP PR-5 A ŠAKNIS: „nežinau, ar įvyko" buvo traktuojama
+     * kaip „neįvyko", ir tuo teiginiu remiantis vykdomas DESTRUKTYVUS veiksmas.
+     *
+     * ⚠️ SPRENDIMAS — NE ANTRAS SKAITYMAS, O TEISINGAS SAVININKAS. Patikra nauja
+     * jungtimi būtų dar vienas „ar įvyko" spėjimas su savo langu. Vietoj to
+     * bandymas paliekamas ŠLAVĖJUI (PR-5), kuris sprendžia iš DB BŪSENOS:
+     *
+     *   `COMMIT` įvyko  → registro eilutė yra `committed` → šlavėjas jos neliečia;
+     *   `COMMIT` neįvyko → eilutė liko `pending`, objektas be nuorodos → išvalo.
+     *
+     * Abi šakos teisingos be jokio spėjimo, nes autoritetas yra ta pati DB, apie
+     * kurią klausiama.
+     */
+    commitIssiustas = true;
     await client.query("COMMIT");
     isipareigota = true;
 
@@ -336,7 +381,13 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
     throw klaida;
   } finally {
     client.release();
-    if (!isipareigota) await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
+    if (!isipareigota && !commitIssiustas) {
+      await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
+    } else if (!isipareigota) {
+      log.error("Migracijos `COMMIT` baigtis NEŽINOMA — bandymas paliekamas šlavėjui", {
+        jobId: String(jobId),
+      });
+    }
   }
 }
 
