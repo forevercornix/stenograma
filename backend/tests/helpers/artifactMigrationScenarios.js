@@ -449,7 +449,109 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       assert.ok((await eilute(jobId)).payload, "kopija lieka");
     });
 
-    await t.test("PRALAIMĖJĘS NEPERRAŠO laimėtojo `done` įrašo", async () => {
+    await t.test("INLINE turinio pakeitimas tarp skaitymo ir `UPDATE` → `eilute_pasikeite`", async () => {
+    /**
+     * ⚠️ P1: CAS BE TURINIO SUNAIKINTŲ NAUJESNĮ REZULTATĄ.
+     *
+     * `postgresStore.upsertResult()` PALAIKO inline rezultato atnaujinimą. Jei
+     * kitas rašytojas jį pakeičia tarp `PAYLOAD_SQL` skaitymo ir perjungimo,
+     * eilutė vis tiek tenkina `storage_type = 'inline' AND payload IS NOT NULL` —
+     * ir migracija įsipareigotų objektą su SENU turiniu, o NAUJESNIS `payload`
+     * būtų sunaikintas. Vienintelė galiojanti kopija dingtų mainais į pasenusią.
+     *
+     * ⚠️ SKIRIASI NUO GRETIMO SCENARIJAUS. „Eilutė pasikeitė" testas perjungia
+     * eilutę į EXTERNAL; čia ji lieka `inline`, keičiasi tik TURINYS. Būtent šitą
+     * atvejį senasis predikatas praleisdavo.
+     *
+     * Lenktynės sinchronizuojamos ties draiverio riba: `put()` kabliukas atlieka
+     * svetimą atnaujinimą, tad mūsų `UPDATE` garantuotai ateina antras.
+     */
+    const jobId = await naujasInline({ text: "senas-turinys" });
+    const naujesnis = { text: "naujesnis-turinys" };
+
+    const kabliukas = { ...saugykla };
+    kabliukas.put = async (raktas, paruosta) => {
+      const kvitas = await saugykla.put(raktas, paruosta);
+      await pool.query(
+        "UPDATE job_results SET payload = $2::jsonb WHERE job_id = $1",
+        [jobId, JSON.stringify(naujesnis)]
+      );
+      return kvitas;
+    };
+
+    const s = await migruoti(pool, kabliukas, {});
+
+    assert.equal(s.nepavyko[PRIEZASTIS.EILUTE_PASIKEITE], 1, "turinio pokytis privalo sustabdyti perkėlimą");
+    assert.equal(s.perkelta, 0);
+
+    const r = await eilute(jobId);
+    assert.equal(r.storage_type, "inline", "eilutė privalo likti inline");
+    assert.deepEqual(r.payload, naujesnis, "NAUJESNIS `payload` privalo išlikti nepaliestas");
+
+    const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
+    assert.equal(bandymai[0].busena, attemptRegistry.BUSENA.ATMESTA);
+    assert.equal(await saugykla.head(bandymai[0].storage_key), null, "pasenęs objektas pašalintas");
+  });
+
+  await t.test("DVIPRASMIŠKAS `COMMIT` NEIŠTRINA įsipareigoto objekto", async () => {
+    /**
+     * ⚠️ P1: „NEŽINAU, AR ĮVYKO" NEGALI VIRSTI DESTRUKTYVIU VEIKSMU.
+     *
+     * PostgreSQL gali įsipareigoti, o atsakymas kliento nepasiekti. Tada `COMMIT`
+     * meta, nors transakcija ĮVYKO. Ankstesnė redakcija tokiu atveju ištrindavo
+     * objektą, į kurį JAU rodo įsipareigota nuoroda — liktų external eilutė be
+     * objekto IR be inline kopijos.
+     *
+     * ⚠️ SIMULIACIJA TIKSLINĖ: `client.query` apgaubiamas taip, kad `COMMIT`
+     * REALIAI įvyktų, o pažadas būtų atmestas PO to. Padirbtas metimas prieš
+     * `COMMIT` tikrintų kitą klasę (paprastą nesėkmę), ne dviprasmybę.
+     */
+    const jobId = await naujasInline({ text: "dviprasmis-commit" });
+
+    const originalusConnect = pool.connect.bind(pool);
+    pool.connect = async () => {
+      const client = await originalusConnect();
+      const originalusQuery = client.query.bind(client);
+
+      client.query = async (sql, ...likusieji) => {
+        const rezultatas = await originalusQuery(sql, ...likusieji);
+        if (typeof sql === "string" && sql.trim().toUpperCase() === "COMMIT") {
+          throw new Error("simuliuotas ryšio nutrūkimas PO sėkmingo COMMIT");
+        }
+        return rezultatas;
+      };
+
+      return client;
+    };
+
+    let metimas = null;
+    try {
+      await migruoti(pool, saugykla, {}).catch((k) => {
+        metimas = k;
+      });
+    } finally {
+      pool.connect = originalusConnect;
+    }
+
+    assert.ok(metimas, "kontrolė: simuliacija privalo mesti");
+
+    const r = await eilute(jobId);
+    assert.notEqual(r.storage_type, "inline", "kontrolė: `COMMIT` TIKRAI įvyko");
+
+    const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
+    assert.equal(bandymai.length, 1);
+    assert.equal(
+      bandymai[0].busena,
+      attemptRegistry.BUSENA.ISIPAREIGOTA,
+      "registro eilutė įsipareigota — šlavėjas jos neliestų"
+    );
+
+    const galva = await saugykla.head(r.storage_key);
+    assert.ok(galva, "OBJEKTAS PRIVALO IŠLIKTI — į jį rodo įsipareigota nuoroda");
+    assert.equal(Number(galva.bytes), Number(r.bytes));
+  });
+
+  await t.test("PRALAIMĖJĘS NEPERRAŠO laimėtojo `done` įrašo", async () => {
       /**
        * ⚠️ P2: PRALAIMĖJĘS CAS NAIKINO SVETIMĄ AUDITO ĮRAŠĄ.
        *
