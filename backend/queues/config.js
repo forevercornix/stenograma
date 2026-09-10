@@ -207,6 +207,66 @@ async function enqueue(queue, name, data, opts = {}) {
  * Sukuria BullMQ suderinamą ioredis prisijungimą. BullMQ reikalauja
  * maxRetriesPerRequest: null (kad blokuojantys komandos veiktų).
  */
+/**
+ * EILĖS PRIEINAMUMO PREFLIGHT (#155, aktyvavimo barjero prielaida).
+ *
+ * ⚠️ KODĖL ŠI FUNKCIJA EGZISTUOJA.
+ *
+ * Iki jos NIEKAS starto metu prie Redis nesijungdavo: `hasQueueBackend()` vertina
+ * TIK konfigūraciją, `jobRunner.init()` tikrina tik ar `bullmq` galima
+ * `require()`, o jungtis kuriama LAZY pirmo `add` metu. Vadinasi `server.js`
+ * pažymėdavo runner'į ready ir imdavo klausytis, o PIRMAS `enqueue` kabodavo arba
+ * kristų — jau turint priimtą užklausą.
+ *
+ * ADR `155-postgres-authority.md` tai išvardija kaip vieną iš šešių aktyvavimo
+ * barjero prielaidų, ir ji buvo vienintelė NEĮGYVENDINTA.
+ *
+ * ⚠️ VIENAS PROBE STARTUI IR READINESS'UI, NE DU.
+ *
+ * `server.js` readiness kelias jau darė `conn.ping()` su riba — bet TIK po to,
+ * kai režimas jau `bullmq`, t. y. jau po starto. Palikus jį atskirai, repo turėtų
+ * dvi „ar Redis pasiekiamas" versijas, kurios ilgainiui išsiskirtų; tai ta pati
+ * klasė, kurią #157 seka gaudė šešis kartus.
+ *
+ * ⚠️ JUNGTIS UŽDAROMA VISADA. Preflight, palikęs atvirą jungtį, pridėtų vieną
+ * neuždarytą socket'ą kiekvienam startui — ir tai būtų nutekėjimas kelyje, kuris
+ * egzistuoja tam, kad gedimus rodytų.
+ */
+async function patikrintiEilesJungti({ timeoutMs = 2000 } = {}) {
+  if (!process.env.REDIS_URL) {
+    return { pasiekiama: false, priezastis: "REDIS_URL nenustatytas" };
+  }
+
+  let jungtis = null;
+  let laikmatis = null;
+
+  try {
+    jungtis = createQueueConnection();
+
+    const riba = new Promise((_, atmesk) => {
+      laikmatis = setTimeout(
+        () => atmesk(new Error(`eilės preflight timeout (${timeoutMs} ms)`)),
+        timeoutMs
+      );
+    });
+
+    await Promise.race([jungtis.ping(), riba]);
+    return { pasiekiama: true, priezastis: null };
+  } catch (klaida) {
+    /**
+     * ⚠️ PRANEŠIMAS SANITIZUOJAMAS. `REDIS_URL` gali turėti slaptažodį, o
+     * `ioredis` klaidos tekste cituoja adresą. Priežastis keliauja į readiness
+     * atsakymą ir `doctor` išvestį, tad ji privalo būti saugi rodyti.
+     */
+    const tekstas = String((klaida && klaida.message) || klaida);
+    const saugus = tekstas.replace(/redis(s)?:\/\/[^\s]*/gi, "redis://[PASLĖPTA]");
+    return { pasiekiama: false, priezastis: saugus };
+  } finally {
+    if (laikmatis) clearTimeout(laikmatis);
+    if (jungtis) await jungtis.quit().catch(() => {});
+  }
+}
+
 function createQueueConnection() {
   const Redis = require("ioredis");
   const url = process.env.REDIS_URL;
@@ -221,6 +281,7 @@ module.exports = {
   DEFAULT_JOB_OPTIONS,
   WORKER_OPTIONS,
   createQueueConnection,
+  patikrintiEilesJungti,
   jobOptionsFor,
   workerOptionsFor,
   revivalHorizonsMs,

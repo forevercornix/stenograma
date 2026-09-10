@@ -218,6 +218,14 @@ const security = [
   "logger",
   "workerGuard",
   "workerRetry",
+  /**
+   * #155 (barjero prielaida): eilės prieinamumo preflight.
+   *
+   * Eina TEN, KUR `startupChecks` ir `startupOrder` — tai starto elgesys, ir
+   * klausimas yra fail-closed pobūdžio: ar serveris pradeda klausytis su eile,
+   * kurios nėra.
+   */
+  "eilesPreflight",
   "startupChecks",
   "startupOrder",
   "httpClient.timeout",
