@@ -395,6 +395,16 @@ const functional = [
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
   "artifactStoreRegistracija",
   "artifactStoreSelection",
+  /**
+   * #157 (PR-7, 3 sąlyga): prijungimo stebėtojas — BE DB.
+   *
+   * Verdiktas yra trijų aibių palyginimas, ir dublis atkuria `pg` šakas (`42P01`,
+   * tikras gedimas) tiksliau nei gyva bazė, kurioje jas dar reikėtų SUKELTI.
+   * Čia gyvena ir sanitizacijos sargas: realios paslaptys paduodamos per `env`,
+   * ir reikalaujama, kad nė viena neatsirastų verdikte (#319 klasė). Užklausų
+   * galiojimą prieš realią schemą tikrina `artifactStorePrijungimasSchema.integration`.
+   */
+  "artifactStorePrijungimas",
   "erasureExportContract",
   "erasureReplayContract",
   "jobVersionParity",

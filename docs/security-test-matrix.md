@@ -1856,6 +1856,18 @@ apibrėžimą.
 | ⚠️ **Priežastis yra KODAS, ne tekstas** | `artifactMigrationContract` | Privatumo riba: laisvas tekstas atneštų klaidos pranešimą, o jis migracijos kelyje gali cituoti REZULTATO TURINĮ. Lentelė pergyvena job'ą, tad tekstas joje taptų transkripcijos fragmentu lentelėje, kurios paskirtis — apskaityti perkėlimą. Aibė lyginama su migracijos užšaldyta, ne grep'inama |
 | ⚠️ **CLI neturi savo orkestracijos** | `artifactMigrationContract` | Ta pati taisyklė kaip `dr-restore.mjs` (#250 D2). Tikrinama struktūriškai: CLI tekste neturi būti nei `UPDATE job_results`, nei `attemptRegistry` — antras egzempliorius reikštų, kad testuojama viena versija, o paleidžiama kita |
 
+## #157 (PR-7) — saugyklų prijungimo stebėtojas
+
+⚠️ **STEBĖTOJAS PARAŠYTAS PRIEŠ PRIJUNGIMĄ.** Sukurtas po jo, jis tikrintų pats
+save: prijungimo teisingumą patvirtintų tik testas, parašytas tam pačiam pokyčiui.
+Šiandien jo verdiktas rodo `rasymas_neprijungtas`, ir tai TEISINGAS atsakymas —
+būtent ta tyli spraga, kurią uždarys prijungimo žingsnis.
+
+| Garantija | Testai | Mutacijos įrodymas |
+|---|---|---|
+| ⚠️ **Netinkamai prijungta saugykla matoma PRIEŠ pirmą naudojimą — ir tam nepakanka nė vienos POROS** | `artifactStorePrijungimasSchema.integration`, `artifactStorePrijungimas` | Lyginamos TRYS aibės: PARINKTA (`ARTIFACT_STORE_BACKEND`), PRIJUNGTA (rezolveris), REIKALINGA (`job_results` + `job_result_attempts` tipai). Pora „parinkta ↔ prijungta" praleistų diegimą, perėjusį iš `s3` į `fs`: rašymas teisingas, o seni `s3` rezultatai NEBEPERSKAITOMI. Pora „prijungta ↔ reikalinga" praleistų priešingą atvejį: skaitymas veikia, o rašymas tyliai eina ne ten, kur prašyta. ⚠️ **Trečioji aibė ateina IŠ DUOMENŲ, ne iš konfigūracijos** — jokia konfigūracijos patikra jos nepakeičia: bazė gali reikalauti tipo, kurio niekas neprijungė, o abu konfigūracijos šaltiniai apie tai tyli. **Mutacija, ginanti būtent trečiąją aibę:** bandymų registras ignoruojamas (`reikalingiTipai` imami tik iš `job_results`) → diegimas su `pending` `s3` bandymu ir be `s3` saugyklos atrodo ŽALIAS, o šlavėjas neturi kuo ištrinti jau parašyto objekto. ⚠️ **Antroji trečiosios aibės pusė (`job_results`) ginama NE mutacija, o integraciniu testu prieš realią schemą:** įrašius external eilutę, verdiktas privalo pavirsti į `skaitymui_truksta` — mutacija čia nieko nepridėtų, nes klausimas yra „ar užklausa galioja prieš tikrą schemą", į kurį dublis atsakyti negali. Likusios keturios mutacijos gina KITAS puses: endpoint'as verdikte (sanitizacija), `nezinoma` → `ok:false` (neįvykęs stebėjimas ≠ radinys), `SET` vietoj `SET LOCAL` ir negrąžintas klientas (pooled kliento nutekėjimas) |
+| ⚠️ **Diagnostika neneša konfigūracijos REIKŠMIŲ — sanitizacija konstrukcija, ne valymas** | `artifactStorePrijungimas` | #319 pamoka, pritaikyta PRIEŠ įvykį: ten kredencialas pateko į `doctor` išvestį todėl, kad priežastis buvo formuojama iš `REDIS_URL` EILUTĖS ir teko ją trinti regexp'u. Čia verdiktas neša tik backend'ų ir tipų VARDUS (`inline`, `fs`, `s3`) — niekada endpoint'o, kibiro, rakto ar `ARTIFACT_FS_ROOT` reikšmės. **Mutacija:** į verdiktą įdedamas `ARTIFACT_S3_ENDPOINT` → krenta abi šakos. Tikrinamos BŪTENT dvi: galiojanti konfigūracija ir KRITĘS parinkimas — antroji pavojingesnė, nes ten pranešimą formuoja `ArtifactStoreError`, ne šis modulis |
+
 ---
 
 ## Redis ir persistencija

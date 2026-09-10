@@ -1439,13 +1439,13 @@ septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** j
 |---|---|---|---|---|---|
 | 1 | **Aktyvavimo barjeras** — atidaromas TIK uždarius prielaidas; **NE PR-7, o atskiras #155 apimties PR** | ADR `155-postgres-authority.md` §„AKTYVAVIMO BARJERAS"; plano DoD | `backendSelection.js:55` = `false` | 9, 10 | ADR prielaidų lentelė; `selectBackend()` grąžina `barjeras: true` |
 | 2 | **Sargo pašalinimas — paskutinis commit'as** (impl → integrity → regresija → dokumentai → sargas) | body §8; ši sekcija | sargas gyvas (`postgresStore.js:1623-1627`) | **1** | `git log` peržiūroje — plane įvardyta kaip grąžinimo pagrindas |
-| 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | neprijungta (`:823`, `:840`) | **1** | ⚠️ **NIEKAS** — reikia testo, kad `initializePostgres()` paduoda saugyklą |
+| 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | neprijungta (`:823`, `:840`); **stebėtojas yra** (`artifactStore/prijungimoBusena.js`) | **1** | `doctor` ir `/api/health/deep` varnelė „Artefaktų saugyklų prijungimas (startas)": lygina PARINKTA (`ARTIFACT_STORE_BACKEND`) ↔ PRIJUNGTA (rezolveris) ↔ REIKALINGA (`job_results` + `job_result_attempts` tipai) |
 | 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
 | 5 | **`neatkartojama` grandinė: nulis BullMQ pakartojimų** | plano §„PR-4 DoD punktas"; DoD `PARTIAL / UNVERIFIED` | **#298 atviras** | **1**, #298 | Testas privalo matuoti PAKARTOJIMŲ SKAIČIŲ, ne lauko buvimą |
 | 6 | **`backupPolicy.TABLE_BY_TYPE` per-row** | `utils/backupPolicy.js:94` — riba užrašyta, atsakymas atidėtas PR-7 | statinis žemėlapis | — | Kopijos ataskaita teigtų turinį, kurio `job_results` nebėra |
 | 7 | **Restore ataskaita skirsto pagal `nepriklausomas`, ne `ok`** | body §32, §35; ši sekcija | nėra | — | ⚠️ Inline `ok: true` tikras, bet tuščias — mišrioje DB rodytų ~100 % |
 | 8 | **Laukiama vientisumo reikšmė — iš DB, niekada neperskaičiuota iš tikrinamo objekto** | ši sekcija, „Restore verifikacija" | nėra | — | Mutacija: `head()` vietoj `verify()` → sugadintas objektas praeitų |
-| 9 | ⚠️ **Eilės prieinamumo PREFLIGHT** — **ATSKIRAS PR, PRIEŠ PR-7** | ADR barjero prielaidų lentelė — **NEĮGYVENDINTA** | nėra | — | Realus probe PRIEŠ pradedant klausytis; rezultatas readiness/`doctor` išvestyje, ne logo eilutėje |
+| 9 | ⚠️ **Eilės prieinamumo PREFLIGHT** — **ATSKIRAS PR, PRIEŠ PR-7** | ADR barjero prielaidų lentelė | ✅ **ĮGYVENDINTA** (#322): `patikrintiEilesJungti()` (`queues/config.js:235`), reikalaujama `jobRunner.init()` | — | Realus probe PRIEŠ pradedant klausytis; verdiktas `doctor` ir `/api/health/deep` per `runSelfChecks()`, ne logo eilutėje |
 
 ⚠️ **SĄLYGA 9 BUVO PRALEISTA PIRMOJE REDAKCIJOJE.** Ji gyvena ADR'e, ne plano
 PR-7 sekcijoje, tad sąrašas, surinktas tik iš plano, jos nepagautų. ADR aprašo
@@ -1569,9 +1569,49 @@ NEGALIMYBĖ. Ji ištaisyta `445bc1c` dar prieš #312 merge — sujungiant abu į
 žingsnį. Užrašoma, nes klaida buvo reali, o jos nebuvimas įrašytame plane nėra
 įrodymas, kad jos nebuvo.
 
-⚠️ **MATOMUMO STULPELIO IŠVADA.** Iš dešimties sąlygų **viena** (nr. 3) šiandien
-neturi jokio stebėtojo. Tai ta pati klasė, kuri šioje sekoje keturis kartus rasta
-PO fakto, tad PR-7 privalo ją uždaryti testu, ne komentaru.
+⚠️ **MATOMUMO STULPELIO IŠVADA.** Iš dešimties sąlygų **viena** (nr. 3) stebėtojo
+NETURĖJO. Tai ta pati klasė, kuri šioje sekoje keturis kartus rasta PO fakto, tad
+PR-7 privalėjo ją uždaryti testu, ne komentaru.
+
+**Uždaryta pirmuoju PR-7 žingsniu** (`artifactStore/prijungimoBusena.js`): verdiktas
+matomas `doctor` ir `/api/health/deep` išvestyje, o netinkama konfigūracija matoma
+PRIEŠ pirmą naudojimą, ne per jį. Lentelės 3 eilutės matomumo stulpelis atnaujintas.
+
+⚠️ **IR JI PAKEITĖ DARBŲ EILĘ — PRIEŠ DARBĄ, NE PO JO.**
+
+Natūrali PR-7 pradžia buvo pats prijungimas: sąlyga 3 taip ir suformuluota.
+Tuščias matomumo langelis parodė, kad prijungus pirma, jo teisingumą patvirtintų
+tik testas, parašytas TAM PAČIAM pokyčiui — t. y. stebėtojas tikrintų pats save.
+Todėl 3 sąlyga skyla į du žingsnius, ir stebėtojas eina PIRMAS:
+
+```
+0a. prijungimo stebėtojas (šis žingsnis) — verdiktas `doctor`/`health/deep`;
+    ŠIANDIEN jis rodo `rasymas_neprijungtas`, ir tai teisingas atsakymas
+0b. prijungimas — pirmas jo patikrinimas yra to paties verdikto pavirtimas žaliu
+```
+
+Tai pirmas kartas, kai matomumo stulpelis suveikė taip, kaip buvo sumanytas:
+ne kaip trūkumo registras, o kaip eiliškumo argumentas. Užrašoma todėl, kad
+stulpelio vertė matosi tik iš tokio atvejo — kitaip jis atrodo kaip papildoma
+lentelės skiltis.
+
+⚠️ **STEBĖTOJO KAINA — ATIDĖTAS SPRENDIMAS, NE NEPASTEBĖTA DETALĖ.**
+
+`storage_type` neturi indekso nei `job_results`, nei `job_result_attempts`
+lentelėje, tad abu `SELECT DISTINCT` yra **seq scan per kiekvieną startą**.
+Šiame žingsnyje kaina apribota `SET LOCAL statement_timeout` (2 s) transakcijoje:
+nespėta užklausa duoda `nezinoma`, ne lėtą startą ir ne tylų žalią.
+
+Geresnis ilgalaikis sprendimas — **dalinis indeksas**
+`(storage_type) WHERE storage_type <> 'inline'`: inline-only bazėje jis TUŠČIAS,
+tad nekainuoja nieko, o po migracijos laiko po įrašą external eilutei. Tai tas
+pats idiomas kaip `artifact_migration_progress_nesekmes` ir
+`job_result_attempts_valytini`.
+
+**Kodėl ne dabar:** tai SCHEMOS pokytis, o šio žingsnio apimtis — stebėtojas.
+Indeksas pridedamas IŠMATAVUS realią trukmę (didžiausios žinomos bazės startas),
+ne spėjus. Iki tol riba garantuoja, kad blogiausias atvejis yra 2 s ir
+`nezinoma`, o ne neribotas laukimas.
 
 ---
 

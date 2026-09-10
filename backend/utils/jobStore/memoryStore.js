@@ -270,6 +270,23 @@ async function pasalintiBandymus() {
   return 0;
 }
 
+/**
+ * ARTEFAKTŲ REZOLVERIO BŪSENA — STEBĖTOJUI (#157, PR-7, 3 sąlyga).
+ *
+ * ⚠️ ŠIS BACKEND'AS REZOLVERIO NETURI, IR TUŠČIAS ATSAKYMAS YRA TEISINGAS.
+ *
+ * Metodas privalomas VISIEMS trims, nes `jobStoreBackendContract` lygina TIKSLIAS
+ * aibes: trūkstamas metodas reikštų, kad stebėtojas, radęs `undefined`, tyliai
+ * praleistų patikrą — t. y. „nematau" atrodytų kaip „viskas gerai". Būtent tos
+ * klasės sargas ir yra.
+ *
+ * Ir atsakymas nėra tuščia formalybė: diegimas su `ARTIFACT_STORE_BACKEND=s3`
+ * prie ne-PostgreSQL job store'o rezultatų į S3 nerašo, ir verdiktas tai pasako.
+ */
+function saugykluBusena() {
+  return { rasymoBackend: null, registruotiTipai: [] };
+}
+
 async function sweepResultArtifacts() {
   return [];
 }
@@ -378,4 +395,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, saugykluBusena, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
