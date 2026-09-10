@@ -1437,7 +1437,7 @@ septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** j
 
 | # | Sąlyga | Kur priimta | Būsena kode | Priklauso nuo | Kas ir kada pamatys, kad suveikė |
 |---|---|---|---|---|---|
-| 1 | **Aktyvavimo barjeras** — atidaromas TIK uždarius jo prielaidas | ADR `155-postgres-authority.md` §„AKTYVAVIMO BARJERAS"; plano DoD | `backendSelection.js:55` = `false` | 9, 10 | ADR prielaidų lentelė; `selectBackend()` grąžina `barjeras: true` |
+| 1 | **Aktyvavimo barjeras** — atidaromas TIK uždarius prielaidas; **NE PR-7, o atskiras #155 apimties PR** | ADR `155-postgres-authority.md` §„AKTYVAVIMO BARJERAS"; plano DoD | `backendSelection.js:55` = `false` | 9, 10 | ADR prielaidų lentelė; `selectBackend()` grąžina `barjeras: true` |
 | 2 | **Sargo pašalinimas — paskutinis commit'as** (impl → integrity → regresija → dokumentai → sargas) | body §8; ši sekcija | sargas gyvas (`postgresStore.js:1623-1627`) | **1** | `git log` peržiūroje — plane įvardyta kaip grąžinimo pagrindas |
 | 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | neprijungta (`:823`, `:840`) | **1** | ⚠️ **NIEKAS** — reikia testo, kad `initializePostgres()` paduoda saugyklą |
 | 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
@@ -1479,9 +1479,12 @@ Sprendimu jis tampa tik jas uždarius.
 
 | # | Sąlyga | Kur priimta | Būsena | Kas pamatys |
 |---|---|---|---|---|
-| 10 | **Fail-closed startas patikrintas REALIAI** — **PR-7 VIDUJE, kaip CI žingsnis KARTU su atidarymu** | ADR barjero lentelė | įrodyta tik unit lygmeniu (`_initializePostgresForTests`) | CI žingsnis: startas su neprieinama DB ir ATIDARYTU barjeru privalo kristi, ne nusileisti į atmintį |
+| 10 | **Fail-closed startas patikrintas REALIAI** — **kartu su atidarymu, atskirame #155 PR** | ADR barjero lentelė | įrodyta tik unit lygmeniu (`_initializePostgresForTests`) | CI žingsnis: startas su neprieinama DB ir ATIDARYTU barjeru privalo kristi, ne nusileisti į atmintį |
 
 ⚠️ **KODĖL SĄLYGA 10 NEGALI BŪTI ANKSČIAU — TAI NE PLANAVIMO PASIRINKIMAS.**
+
+*(Galioja ir po iškėlimo: ji eina kartu su atidarymu, tik nebe PR-7, o atskirame
+#155 apimties PR.)*
 
 Ji reikalauja paleisti kelią, kurio **uždarytas barjeras neleidžia pasiekti**.
 `initializePostgres()` produkcijoje nekviečiama, kol `POSTGRES_AKTYVAVIMAS_LEISTAS
@@ -1498,42 +1501,73 @@ PROCESO elgesys — startas su `DATABASE_URL` į nepasiekiamą adresą privalo b
 klaida, o ne tyliu nusileidimu į atmintį. Vienetinis testas tikrintų funkciją;
 čia klausimas yra, ką daro `server.js` startas.
 
-⚠️ **IR IŠ TO SEKA RIZIKA, KURIĄ VERTA ĮVARDYTI IŠ ANKSTO:** sąlyga 10 ir
-sąlyga 1 (atidarymas) atsiduria TAME PAČIAME commit'e, tad peržiūrėtojas mato dvi
-rizikas viename diff'e. Tai priimta sąmoningai — alternatyva (atidaryti anksčiau,
-kad būtų ką patikrinti) yra blogesnė. Kompensacija: atidarymas ir jo CI žingsnis
-yra ATSKIRAS commit'as PR-7 viduje, ne sulietas su prijungimu ar backup darbu.
+⚠️ **RIZIKA, KURIĄ TAI ANKSČIAU KĖLĖ, DABAR PAŠALINTA.** Ankstesnė redakcija
+sąlygas 10 ir 1 dėjo į tą patį commit'ą PR-7 viduje, tad peržiūrėtojas būtų matęs
+negrįžtamą sprendimą ir šešis kitus darbus viename PR. Iškėlus barjerą į atskirą
+PR, tas PR turi VIENĄ temą — aktyvavimą — ir visa jį pagrindžianti medžiaga
+(grįžimo mechanika, `deployment_identity` riba, `deletion-guarantees.md` sąlyga)
+atsiduria greta to vienintelio jungiklio, kurį ji aprašo.
 
-**TVARKA — viena prielaida IŠEINA iš PR-7, kita eina su atidarymu**
+**TVARKA — BARJERAS IŠKELIAMAS Į ATSKIRĄ PASKUTINĮ PR**
 
 ```
-0. eilės prieinamumo preflight   — ATSKIRAS PR, sumerginamas PRIEŠ PR-7 (sąlyga 9)
-────────────────────────────────  PR-7 pradžia ────────────────────────────────
-1. ── BARJERAS ── + fail-closed starto CI žingsnis  (sąlygos 1 ir 10; §18.3 TIK ČIA)
-2. rasymoSaugykla prijungimas             (sąlyga 3)
-3. `neatkartojama` grandinė               (sąlyga 5, kartu su #298)
-4. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
-5. integrity testai
-6. pilna regresija (postgres + s3 + **postgres-s3** rinkiniai)
-7. dokumentai
-8. sargo pašalinimas — PASKUTINIS         (sąlyga 2)
+0. eilės prieinamumo preflight  — ATSKIRAS PR, sumergintas PRIEŠ (sąlyga 9; #319)
+──────────────────────────────  PR-7 (#157 apimtis) ──────────────────────────────
+1. rasymoSaugykla prijungimas             (sąlyga 3)
+2. `neatkartojama` grandinė               (sąlyga 5, kartu su #298)
+3. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
+4. integrity testai
+5. pilna regresija (postgres + s3 + **postgres-s3** rinkiniai)
+6. dokumentai
+7. sargo pašalinimas — PASKUTINIS         (sąlyga 2)
+──────────────────────────  PR „aktyvavimas" (#155 apimtis) ──────────────────────
+8. ── BARJERAS ── + fail-closed starto CI žingsnis  (sąlygos 1 ir 10; §18.3 TIK ČIA)
+   + ADR prielaidų lentelės uždarymas
+   + `deletion-guarantees.md` sąlyga ir grįžimo mechanika (#326)
 ```
 
-⚠️ **TAI NĖRA ta pati tvarka, kuri buvo aprašyta žemiau** („sargas paskutinis").
-Ji pridedama PRIEKYJE — bet dvi prielaidos elgiasi SKIRTINGAI:
+⚠️ **PERRAŠYTA (§12.1). ANKSTESNĖ REDAKCIJA DĖJO BARJERĄ Į PR-7 VIDŲ.**
 
-- **sąlyga 9 (preflight)** išeina iš PR-7 visai: atskiras PR, sumerginamas PRIEŠ.
-  Ji neliečia #157 temos (eilės ir metaduomenų backend'o sąveika, ne artefaktų
-  saugykla), yra barjero prielaida, tad turi būti vietoje anksčiau, ir turi savo
-  matomumo klausimą (readiness/`doctor`);
-- **sąlyga 10 (fail-closed startas)** lieka PR-7 viduje ir eina KARTU su
-  atidarymu, nes anksčiau jos įvykdyti neįmanoma — žr. paaiškinimą aukščiau.
+Sprendimas pakeistas po peržiūros, ir priežastys užrašomos, nes jos stipresnės už
+patį pakeitimą:
 
-⚠️ **KODĖL BARJERAS YRA PIRMAS PR-7 ŽINGSNIS, NE PASKUTINIS.** Sargo pašalinimas
-(sąlyga 2) ir `rasymoSaugykla` prijungimas (sąlyga 3) be atidarymo būtų daromi nuo
-kelio, kurio produkcijoje **niekas nepasiekia**: pašalintas sargas negintų nieko,
-o prijungta saugykla liktų be stebėtojo. Tai ne tas pats, kas „sargas paskutinis" —
-ta taisyklė galioja toliau ir kalba apie tvarką PR-7 VIDUJE.
+1. **PR-7 gali įrodyti VISKĄ be atidarymo.** `_initializePostgresForTests`
+   egzistuoja, o integraciniai testai `postgresStore` pasiekia tiesiogiai. Tad
+   `neatkartojama` grandinė, backup/restore, integrity ir pilna regresija
+   uždaromos TESTŲ lygmeniu. Barjero reikia tik sąlygai 10 ir realiam
+   produkciniam naudojimui — dviem dalykams, kurie abu yra apie AKTYVAVIMĄ, ne
+   apie artefaktus.
+2. **Atidarymas — vienintelis NEGRĮŽTAMAS žingsnis visoje sekoje.** Po jo
+   atsiranda duomenų, kurių adresas gyvena tik PostgreSQL'e (ADR §„Kas nutinka
+   mechaniškai"). Sujungus jį su šešiais kitais darbais, recenzentas vertintų
+   negrįžtamą sprendimą ir jį pagrindžiantį darbą VIENAME diff'e. Tai tas pats
+   argumentas, kuriuo iš PR-7 buvo iškelta sąlyga 9.
+3. **ADR ir planas trijose vietose sako, kad #157 barjero NEATIDARO.** Pakeitus
+   tai PR viduje, kurio pavadinimas apie kitką, sprendimas dingtų iš vietos,
+   kurioje jo ieškotų.
+
+⚠️ **IŠ TO SEKA, KAD TRYS MINĖTOS VIETOS LIEKA TEISINGOS, IR JŲ TAISYTI NEREIKIA.**
+#157 (PR-1…PR-7) barjero neatidaro; jį atidaro ATSKIRAS #155 apimties PR. Tai
+užrašoma eksplicitiškai, kad kitas raundas jų „nepataisytų" kaip pasenusių.
+
+⚠️ **SARGO PAŠALINIMAS LIEKA PR-7, NORS BARJERAS — NE.** Jis nuo barjero
+nepriklauso: pašalinus sargą, external kelias tampa pasiekiamas TESTUOSE, o
+produkcijoje — vis dar ne, nes `rasymoSaugykla` prijungimas be atidaryto barjero
+neveikia. Tai nuosekli tarpinė būsena, ne spraga.
+
+⚠️ **KODĖL BARJERAS NEBĖRA PIRMAS PR-7 ŽINGSNIS.** Ankstesnė redakcija jį dėjo
+priekyje su argumentu, kad sargo pašalinimas ir prijungimas be atidarymo veiktų
+nuo kelio, kurio niekas nepasiekia. Argumentas teisingas apie PRODUKCIJĄ, bet
+neteisingas apie ĮRODYMĄ: testai tą kelią pasiekia be barjero, tad PR-7 savo DoD
+uždaro ir taip. Taisyklė „sargas paskutinis" galioja toliau — ji kalba apie tvarką
+PR-7 VIDUJE.
+
+⚠️ **KUR BUVO PRIEŠTARAVIMAS, IR KUR JO NEBUVO.** Pirmoji šio sąrašo redakcija
+(pateikta pokalbyje) sąlygą 10 dėjo 2 žingsniu, o barjerą — 3, nors tas pats
+dokumentas sako, kad sąlyga 10 įvykdoma TIK po atidarymo. Tai buvo ne rizika, o
+NEGALIMYBĖ. Ji ištaisyta `445bc1c` dar prieš #312 merge — sujungiant abu į vieną
+žingsnį. Užrašoma, nes klaida buvo reali, o jos nebuvimas įrašytame plane nėra
+įrodymas, kad jos nebuvo.
 
 ⚠️ **MATOMUMO STULPELIO IŠVADA.** Iš dešimties sąlygų **viena** (nr. 3) šiandien
 neturi jokio stebėtojo. Tai ta pati klasė, kuri šioje sekoje keturis kartus rasta
