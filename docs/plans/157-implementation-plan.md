@@ -323,7 +323,10 @@ ne todėl, kad grandinė neįjungta, o todėl, kad įjungus vieną jos galą kit
 galas vis tiek liktų neuždengtas. Invariantas kyla iš `common.js` lygybės
 autoriteto, ne iš `ArtifactStore` — išmatuota ir aprašyta **#298**.
 
-Iki #298 uždarymo šis DoD punktas žymimas `PARTIAL / UNVERIFIED`, ne `DONE`.
+⚠️ **PERRAŠYTA PO #298 UŽDARYMO.** Punktas tebėra `PARTIAL`, bet priežastis nebe
+sluoksnio, o aktyvavimo barjero — žr. „SĄLYGA 5 PR-7 UŽDAROMA TIK IŠ DALIES"
+PR-7 sekcijoje. Ir pati diagnozė pasitaisė: `Date` atmetimas buvo neteisingas,
+o ne ne toje vietoje.
 
 **DoD, kuriuos uždaro**
 - „Vienas `ArtifactStore` production boundary; business/service sluoksnis neatlieka tiesioginio filesystem/S3 I/O."
@@ -1441,7 +1444,7 @@ septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** j
 | 2 | **Sargo pašalinimas — paskutinis commit'as** (impl → integrity → regresija → dokumentai → sargas) | body §8; ši sekcija | sargas gyvas (`postgresStore.js:1623-1627`) | **1** | `git log` peržiūroje — plane įvardyta kaip grąžinimo pagrindas |
 | 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | ✅ **PRIJUNGTA** (`jobStore/index.js`, `paruostiArtefaktuSaugykla()`); stebėtojas `artifactStore/prijungimoBusena.js` | **1** | `doctor` ir `/api/health/deep` varnelė „Artefaktų saugyklų prijungimas (startas)": lygina PARINKTA (`ARTIFACT_STORE_BACKEND`) ↔ PRIJUNGTA (rezolveris) ↔ REIKALINGA (`job_results` + `job_result_attempts` tipai). Verdikto pavirtimas iš `rasymas_neprijungtas` į žalią išmatuotas VIENAME teste (`jobStoreArtefaktuPrijungimas.integration`) |
 | 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
-| 5 | **`neatkartojama` grandinė: nulis BullMQ pakartojimų** | plano §„PR-4 DoD punktas"; DoD `PARTIAL / UNVERIFIED` | **#298 atviras** | **1**, #298 | Testas privalo matuoti PAKARTOJIMŲ SKAIČIŲ, ne lauko buvimą |
+| 5 | **`neatkartojama` grandinė: nulis BullMQ pakartojimų** | plano §„PR-4 DoD punktas"; DoD `PARTIAL / UNVERIFIED` | #298 ✅ uždarytas; grandinė įrodyta IKI FASADO RIBOS | **1** | Testas matuoja PAKARTOJIMŲ SKAIČIŲ (`vykdymai === 1`, `attemptsMade === 1`), ne lauko buvimą. ⚠️ Klaidos KILMĖ sintetinė: worker'is eina per atmintį, o struktūriniai atmetimai gyvena external kelyje |
 | 6 | **`backupPolicy.TABLE_BY_TYPE` per-row** | `utils/backupPolicy.js:94` — riba užrašyta, atsakymas atidėtas PR-7 | statinis žemėlapis | — | Kopijos ataskaita teigtų turinį, kurio `job_results` nebėra |
 | 7 | **Restore ataskaita skirsto pagal `nepriklausomas`, ne `ok`** | body §32, §35; ši sekcija | nėra | — | ⚠️ Inline `ok: true` tikras, bet tuščias — mišrioje DB rodytų ~100 % |
 | 8 | **Laukiama vientisumo reikšmė — iš DB, niekada neperskaičiuota iš tikrinamo objekto** | ši sekcija, „Restore verifikacija" | nėra | — | Mutacija: `head()` vietoj `verify()` → sugadintas objektas praeitų |
@@ -1514,7 +1517,7 @@ atsiduria greta to vienintelio jungiklio, kurį ji aprašo.
 0. eilės prieinamumo preflight  — ATSKIRAS PR, sumergintas PRIEŠ (sąlyga 9; #319)
 ──────────────────────────────  PR-7 (#157 apimtis) ──────────────────────────────
 1. rasymoSaugykla prijungimas             (sąlyga 3)
-2. `neatkartojama` grandinė               (sąlyga 5, kartu su #298)
+2. #298 + `neatkartojama` grandinė IKI FASADO RIBOS (sąlyga 5 — DALINAI)
 3. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
 4. integrity testai
 5. pilna regresija (postgres + s3 + **postgres-s3** rinkiniai)
@@ -1594,6 +1597,42 @@ Tai pirmas kartas, kai matomumo stulpelis suveikė taip, kaip buvo sumanytas:
 ne kaip trūkumo registras, o kaip eiliškumo argumentas. Užrašoma todėl, kad
 stulpelio vertė matosi tik iš tokio atvejo — kitaip jis atrodo kaip papildoma
 lentelės skiltis.
+
+⚠️ **SĄLYGA 5 PR-7 UŽDAROMA TIK IŠ DALIES — PASAKYTA PRIEŠ DARBĄ, NE ATASKAITOJE.**
+
+Planas šitą sakė dviem prieštaraujančiais būdais, ir abu taisomi (§12.1):
+
+| Kur | Ką sakė | Kas teisinga |
+|---|---|---|
+| Sąlygų lentelė, 5 eilutė | priklauso nuo **1** (barjero) | ✅ tiksliai — pilna produkcinė grandinė be barjero nepasiekiama |
+| Ši sekcija, 1 punktas | „`neatkartojama` grandinė ... uždaroma TESTŲ lygmeniu" | ⚠️ per stipru — testų lygmeniu uždaroma iki FASADO ribos, ne iki galo |
+
+**Atsakė kodas, ne plano tekstas.** `POSTGRES_AKTYVAVIMAS_LEISTAS = false` yra KONSTANTA
+(`backendSelection.js:55`), tad `jobStore.init()` niekada negrąžina postgres, o BullMQ
+worker'is eina per fasadą. Vadinasi struktūrinis atmetimas, gimęs external kelyje,
+tikro worker'io nepasiekia, kol barjeras uždarytas.
+
+**Kas ĮRODYTA PR-7 metu:**
+
+- pakartojimų SKAIČIUS matuojamas (`vykdymai === 1`, `attemptsMade === 1`), ne lauko buvimas;
+- eilė, worker'is, `UnrecoverableError` vyniojimas ir `cause` grandinė — TIKRI;
+- struktūrinių atmetimų aibė ties riba — tikra (`artifactStoreErrors`).
+
+**Kas LIEKA barjero PR daliai:** vienas paleidimas, kuriame atmetimą pagamina TIKRA
+saugykla per TIKRĄ fasadą. Iki tol sintetinė lieka tik klaidos KILMĖ.
+
+⚠️ **#298 UŽDARYMAS ŠIO DoD PUNKTO NEUŽDARO — IR PRIEŽASTIS PASIKEITĖ.**
+
+Iki #298 punktas buvo `PARTIAL / UNVERIFIED`, nes „validacija pririšta prie ne to
+sluoksnio": `Date` atmetimą gamino tik `ArtifactStore` riba, o aktyvūs keliai pro ją
+neina. #298 tą sluoksnio klaidą pašalino, bet KITAIP, nei planuota: paaiškėjo, kad
+`Date` atmetimas apskritai buvo neteisingas — `kanonizuoti()` modeliavo saugyklą
+klaidingai, ir taisymas yra modelio suderinimas, ne atmetimo perkėlimas.
+
+Pasekmė DoD punktui: **`Date` nebeatmetamas niekur, tad grandinė „`Date` → atmetimas
+→ nulis pakartojimų" neįmanoma iš principo.** Ji demonstruojama NUL simboliu ar
+neporiniu surogatu — klasėmis, kurios lieka atmetamos. Punktas tebėra `PARTIAL`, bet
+dėl aktyvavimo barjero, ne dėl sluoksnio.
 
 ⚠️ **§18.3 SPRENDIMAS: NETINKAMA ARTEFAKTŲ KONFIGŪRACIJA STABDO STARTĄ.**
 

@@ -76,10 +76,21 @@ test(
      * maršrutų ir worker'ių). Inline kelias `paruostiReiksme()` nekviečia, tad `Date`
      * ten priimamas — riba jo tiesiog nemato.
      *
-     * Vadinasi pilnos grandinės „Date → atmetimas → nulis pakartojimų" šiandien
-     * paleisti neįmanoma; ji taps pasiekiama PR-7, prijungus rašymo saugyklą. Iki tol
-     * tikrinama TA DALIS, kuri egzistuoja: ar `neatkartojama` klaida iš `finish()`
-     * sustabdo BullMQ retry grandinę. Eilė, worker'is ir pakartojimų semantika — TIKRI.
+     * ⚠️ §12.1 KOREKCIJA (#298): ANKSTESNĖ REDAKCIJA ŽADĖJO, KAD GRANDINĖ SU `Date`
+     * TAPS PASIEKIAMA PR-7. NETAPS — IR NEBETURI.
+     *
+     * #298 parodė, kad `Date` atmetimas buvo ne riba, o NETEISINGAS MODELIS:
+     * `kanonizuoti()` `toJSON` nekviesdavo, nors visos saugyklos serializuoja per
+     * `JSON.stringify`, kuris kviečia. Ištaisius, `Date` tapatybė yra viena visuose
+     * backend'uose, tad jis nebeatmetamas NIEKUR. Grandinė su `Date` neįmanoma iš
+     * principo, ne dėl neprijungtos saugyklos.
+     *
+     * Struktūrinių atmetimų liko (NUL, neporinis surogatas, ciklinė nuoroda, `BigInt`,
+     * nedeterministinis `toJSON`), bet jie gyvena EXTERNAL kelyje, o worker'is per jį
+     * neina, kol galioja aktyvavimo barjeras. Todėl čia tikrinama TA DALIS, kuri
+     * egzistuoja: ar `neatkartojama` klaida iš `finish()` sustabdo BullMQ retry
+     * grandinę. Eilė, worker'is ir pakartojimų semantika — TIKRI; sintetinė lieka tik
+     * klaidos kilmė. Likutis eina su barjeru (plano sąlyga 5).
      */
     const tikrasFinish = jobStore.system.finish;
     t.after(() => {
@@ -91,7 +102,7 @@ test(
 
       const { ArtifactStoreError } = require("../utils/artifactStore/validation");
       throw new ArtifactStoreError(
-        "ArtifactStore: reikšmės tapatybė pasikeistų inline kelyje (Date).",
+        "ArtifactStore: NUL simbolis nepalaikomas (struktūrinis atmetimas).",
         "ARTIFACT_VALUE_UNSUPPORTED",
         { neatkartojama: true }
       );

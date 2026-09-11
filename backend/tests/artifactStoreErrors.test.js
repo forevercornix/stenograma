@@ -23,7 +23,22 @@ test("STRUKTŪRINIS ATMETIMAS pažymėtas kaip neatkartojamas", () => {
   const NUL = String.fromCharCode(0);
 
   const atvejai = [
-    ["Date (prototipo toJSON)", () => paruostiReiksme({ d: new Date(0) })],
+    /**
+     * ⚠️ BUVO `Date`; PAKEISTA PO #298 (§12.1 korekcija ten, kur paskelbta).
+     *
+     * `Date` ties riba nebeatmetamas: `kanonizuoti()` dabar kviečia `toJSON` taip
+     * pat kaip `JSON.stringify`, tad jo tapatybė yra viena visuose backend'uose.
+     * Vietoje jo imamas atvejis, kurio riba VIS DAR neįsileidžia ir dėl tos pačios
+     * priežasties — kanoninė forma nestabili: `toJSON`, kiekvienam kvietimui
+     * grąžinantis kitą reikšmę.
+     */
+    [
+      "nedeterministinis toJSON",
+      () => {
+        let i = 0;
+        return paruostiReiksme({ k: { toJSON: () => (i += 1) } });
+      },
+    ],
     ["NUL tekste", () => paruostiReiksme({ t: `a${NUL}b` })],
     ["ciklinė nuoroda", () => paruostiReiksme((() => { const o = {}; o.s = o; return o; })())],
     ["BigInt", () => paruostiReiksme({ n: BigInt(1) })],

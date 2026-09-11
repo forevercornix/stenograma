@@ -757,7 +757,59 @@ function rezultatoNera(reiksme) {
   return reiksme === undefined || reiksme === null;
 }
 
-function kanonizuoti(reiksme) {
+/** Ko `JSON.stringify` neserializuoja: praleidžia objekte, verčia `null` masyve. */
+function neserializuojama(reiksme) {
+  return reiksme === undefined || typeof reiksme === "function" || typeof reiksme === "symbol";
+}
+
+function kanonizuoti(reiksme, raktas = "") {
+  /**
+   * ⚠️ `toJSON` KVIEČIAMAS — NES JĮ KVIEČIA IR SAUGYKLA (#298).
+   *
+   * ⚠️ TAI NE „priimame daugiau reikšmių", O „modelis pradėjo atitikti tikrovę".
+   *
+   * `kanonizuoti()` egzistuoja tam, kad pagamintų tapatybę, kuri IŠGYVENA saugyklos
+   * round-trip'ą. Visos trys saugyklos serializuoja per `JSON.stringify`, o jis
+   * `toJSON` KVIEČIA. Tačiau `kanonizuoti()` rinko tik NUOSAVUS raktus, tad
+   * prototipe gyvenančio `toJSON` (būtent ten jį turi `Date`) nematydavo:
+   *
+   *   prieš rašymą kanoninė   {"d":{}}
+   *   po skaitymo kanoninė    {"d":"1970-01-01T00:00:00.000Z"}
+   *
+   * Vadinasi teisėtas pakartojimas (ta pati įvestis, tas pats job'as) gaudavo
+   * `RESULT_CONFLICT` — melagingą konfliktą apie savo patį. Išmatuota prieš tikrą
+   * Redis (#298, CI 34106486710); Redis yra AKTYVUS kelias.
+   *
+   * ⚠️ OBJEKTO LITERALE `toJSON` YRA NUOSAVAS, tad senasis kodas jį įdėdavo į `out`,
+   * o `JSON.stringify` paskui IŠKVIESDAVO — t. y. pusiau paisydavo. #298 užrašytas
+   * predikatas („objektas, turintis `toJSON`") dėl to per platus: išmatuota, kad
+   * `{ x: 1, toJSON() { return { x: 1 } } }` round-trip'ą pergyvena. Laužia tik
+   * `toJSON` PROTOTIPE.
+   *
+   * ⚠️ KVIEČIAMA VIENĄ KARTĄ VIENAME LYGYJE, kaip reikalauja `JSON.stringify`
+   * specifikacija (SerializeJSONProperty): grąžinta reikšmė toliau apdorojama
+   * įPRASTAI, o ne dar kartą per `toJSON`. Rekursija čia duotų KITĄ rezultatą nei
+   * saugykla — t. y. atkurtų tą patį defektą iš kitos pusės.
+   *
+   * ⚠️ `raktas` PERDUODAMAS, nes `JSON.stringify` kviečia `toJSON(key)`. `Date` jo
+   * nepaiso, bet nuosava realizacija gali; nepaduotas raktas būtų tyli divergencija
+   * tiksliai tokio pat pobūdžio, kokį šis taisymas uždaro.
+   */
+  if (
+    (reiksme !== null && typeof reiksme === "object") ||
+    typeof reiksme === "bigint"
+  ) {
+    const toJSON = reiksme.toJSON;
+    if (typeof toJSON === "function") {
+      return kanonizuotiBeToJSON(toJSON.call(reiksme, raktas));
+    }
+  }
+
+  return kanonizuotiBeToJSON(reiksme);
+}
+
+/** `kanonizuoti()` žingsniai PO `toJSON` — jų tas pats lygis nebekartoja. */
+function kanonizuotiBeToJSON(reiksme) {
   if (reiksme === null || typeof reiksme !== "object") {
     /**
      * ⚠️ `undefined` PAVERČIAMAS `null`. `JSON.stringify(undefined)` grąžina
@@ -766,7 +818,14 @@ function kanonizuoti(reiksme) {
      */
     return reiksme === undefined ? null : reiksme;
   }
-  if (Array.isArray(reiksme)) return reiksme.map(kanonizuoti);
+  /**
+   * ⚠️ MASYVE NESERIALIZUOJAMA REIKŠMĖ VIRSTA `null`, NE DINGSTA — kaip
+   * `JSON.stringify`. Praleidus ją, pasislinktų INDEKSAI, o segmentų eilė yra
+   * semantika: kanoninė forma imtų teigti kitą rezultatą, ne tą patį.
+   */
+  if (Array.isArray(reiksme)) {
+    return reiksme.map((v, i) => (neserializuojama(v) ? null : kanonizuoti(v, String(i))));
+  }
 
   /**
    * ⚠️ `Object.create(null)`, NE `{}` (#184, Codex C10).
@@ -791,8 +850,21 @@ function kanonizuoti(reiksme) {
      * (`JSON.stringify` juos išmeta), tad palikti juos čia reikštų, kad
      * įrašytas ir perskaitytas objektas skiriasi nuo įrašomo.
      */
-    if (reiksme[raktas] === undefined) continue;
-    out[raktas] = kanonizuoti(reiksme[raktas]);
+    /**
+     * ⚠️ FUNKCIJOS IR SIMBOLIAI PRALEIDŽIAMI ČIA, NE PALIEKAMI IŠORINIAM
+     * `JSON.stringify` (#298).
+     *
+     * Anksčiau jie patekdavo į `out`, o juos išmesdavo galutinis
+     * `JSON.stringify`. Rezultatas beveik visada sutapdavo — IŠSKYRUS raktą
+     * `toJSON`: tada išorinis `stringify` funkciją ne išmesdavo, o IŠKVIESDAVO,
+     * ir kanoninė forma nesutapdavo su round-trip'u. Išmatuota:
+     * `{ k: { toJSON: () => ({ toJSON: () => 1 }) } }` davė `{"k":1}` vietoj
+     * `{"k":{}}`.
+     *
+     * Modelis nebesiremia išorinio `stringify` elgesiu su savo paties išvestimi.
+     */
+    if (neserializuojama(reiksme[raktas])) continue;
+    out[raktas] = kanonizuoti(reiksme[raktas], raktas);
   }
   return out;
 }
