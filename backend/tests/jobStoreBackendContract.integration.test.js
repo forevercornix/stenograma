@@ -1029,6 +1029,15 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
    * kandidatų atranka su retencijos predikatu ir eilučių uždarymas PO to, kai objekto
    * tikrai nebėra.
    *
+   * ⚠️ 26 → 27 (#157, PR-7): pridėtas `verifyResultArtifacts()`. Ta pati priežastis
+   * kaip `deleteResultArtifacts()`: `storage_type -> ArtifactStore` žemėlapis gyvena
+   * store'e ir yra vienintelis.
+   *
+   * ⚠️ MEMORY IR REDIS GRĄŽINA `nepatikrinama_inline` KIEKVIENAM REZULTATUI, ne tuščią
+   * ataskaitą. Rezultatai ten gyvena job'o įraše, tad nepriklausomo metaduomens, su
+   * kuriuo būtų galima lyginti, nėra IŠ VISO. `eiluciuIsViso: 0` sakytų „nėra ko
+   * tikrinti", nors rezultatų yra — operatorius manytų bazę tuščią.
+   *
    * ⚠️ 25 → 26 (#157, PR-7): pridėtas `saugykluBusena()`. Skaičius keliamas
    * SĄMONINGAI. Prijungimo stebėtojas klausia STORE'O, kas registruota, nes
    * `storage_type -> ArtifactStore` žemėlapis gyvena ten ir yra vienintelis — ta
@@ -1069,7 +1078,7 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", ()
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 26, "jobStore kontraktas privalo turėti tiksliai 26 metodus");
+  assert.equal(expected.length, 27, "jobStore kontraktas privalo turėti tiksliai 27 metodus");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,
