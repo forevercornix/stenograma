@@ -1646,22 +1646,75 @@ function createPostgresStore(
           if (verdiktas !== undefined) return verdiktas;
         }
 
-        if (eilute && eilute.storage_type !== "inline") {
-          throw new Error(
-            `postgresStore.finishAtomic: job_results.storage_type = '${eilute.storage_type}' ` +
-              "neturi lygybės autoriteto (#157). Rezultatų palyginimas apibrėžtas TIK 'inline'."
-          );
-        }
-
         /**
-         * ⚠️ SPRENDIMAS PRIIMAMAS IŠ ŠVIEŽIO SKAITYMO, ne iš `readJobForUpdate()`
-         * prijungtos reikšmės — žr. `rezultatoEilute()`. Be šito lenktynių
-         * pralaimėtojas gautų `COMPLETED_WITHOUT_RESULT` vietoj
-         * `RESULT_CONFLICT`.
+         * ⚠️ EXTERNAL EILUTĖ BE ĮEINANČIO RAŠYMO (#157, PR-7, 2 sąlyga).
+         *
+         * Čia patenkama tik tada, kai `rasymas === null` — aukštesnė šaka kitu atveju
+         * jau būtų grąžinusi. `paruostiExternalRasyma()` grąžina `null` lygiai trimis
+         * atvejais (`:1357-1359`): nėra saugyklos, statusas ne `completed`, arba
+         * rezultato nėra. Tad trys šakos žemiau yra IŠSAMIOS, ne pavyzdinės.
+         *
+         * ⚠️ ANKSČIAU ČIA BUVO NON-INLINE FAIL-CLOSED SARGAS, IR JIS ATSAKĖ NETEISINGAI
+         * (§12.1 korekcija; išmatuota PRIEŠ taisymą, `finishExternalFazes.integration`).
+         *
+         * Sargas metė vidinę klaidą „`storage_type` neturi lygybės autoriteto" VISIEMS
+         * trims atvejams. Du iš jų lygybės neklausia iš viso, o trečiam ta formuluotė
+         * nurodo ne tą priežastį.
          */
-        const sviezias = { ...job, result: eilute ? eilute.payload : null };
-        const jauBaigtas = idempotentiskasAtsakymas(sviezias, status, extra);
-        if (jauBaigtas !== undefined) return jauBaigtas;
+        if (eilute && eilute.storage_type !== "inline") {
+          if (status === STATUS.COMPLETED) {
+            /**
+             * ⚠️ REZULTATAS YRA — JIS SAUGYKLOJE. Ateina `completed` be rezultato, tad
+             * tai NE tas pats rezultatas: `RESULT_CONFLICT`, paritetas su inline keliu.
+             *
+             * ⚠️ `COMPLETED_WITHOUT_RESULT` ČIA BŪTŲ MELAS, IR PAVOJINGAS. Jis reiškia
+             * „rezultato nėra" ir yra REMONTUOTINA būsena, po kurios kvietėjas gali
+             * perrašyti rezultatą. Toks perrašymas external eilutę perjungtų į inline
+             * ir paliktų objektą NAŠLAIČIU — tiksliai tai, ką #157 grandinė uždarinėjo.
+             * O būtent jį duotų kelias žemiau: `eilute.payload` external eilutėje
+             * PRIVALOMAI yra `NULL` (formos `CHECK`).
+             */
+            if (rezultatoNera(extra.result)) return "RESULT_CONFLICT";
+
+            /**
+             * ⚠️ VIENINTELIS ATVEJIS, KURIAM KLAIDA TEISINGA: rašymo saugyklos nėra.
+             *
+             * Palyginti nėra kuo (įeinantis rezultatas neturi kvito) ir įrašyti nėra
+             * kur. Pranešimas įvardija TIKRĄ priežastį — neprijungtą saugyklą, ne
+             * `storage_type`, kuris čia yra pasekmė, o ne kaltininkas.
+             *
+             * ⚠️ APSAUGA NEPRARASTA, O PERKELTA. Tą pačią būseną `prijungimoBusena`
+             * stebėtojas (#157, PR-7) rodo `doctor` ir `/api/health/deep` išvestyje —
+             * PRIEŠ naudojimą, ne jo metu. Ši klaida lieka kaip paskutinė riba tam
+             * diegimui, kuris diagnostikos nepaisė.
+             */
+            throw new Error(
+              `postgresStore.finishAtomic: job_results.storage_type = '${eilute.storage_type}', ` +
+                "bet rašymo saugykla neprijungta. Įeinančio rezultato nėra su kuo palyginti " +
+                "ir nėra kur įrašyti. Būsena matoma `doctor` išvestyje — varnelė " +
+                "`Artefaktų saugyklų prijungimas (startas)` (#157)."
+            );
+          }
+
+          /**
+           * ⚠️ KITI STATUSAI — GYVAVIMO CIKLO KLAUSIMAS, NE LYGYBĖS.
+           *
+           * `finish(failed)` ant užbaigto job'o privalo duoti `JobPhaseError` iš
+           * `jobPhase.finish()` žemiau — lygiai kaip inline kelyje. Sargas jį
+           * pasiglemždavo, ir tas pats perėjimas duodavo SKIRTINGĄ klaidą priklausomai
+           * nuo `storage_type`, t. y. backend-priklausomą elgesį.
+           */
+        } else {
+          /**
+           * ⚠️ SPRENDIMAS PRIIMAMAS IŠ ŠVIEŽIO SKAITYMO, ne iš `readJobForUpdate()`
+           * prijungtos reikšmės — žr. `rezultatoEilute()`. Be šito lenktynių
+           * pralaimėtojas gautų `COMPLETED_WITHOUT_RESULT` vietoj
+           * `RESULT_CONFLICT`.
+           */
+          const sviezias = { ...job, result: eilute ? eilute.payload : null };
+          const jauBaigtas = idempotentiskasAtsakymas(sviezias, status, extra);
+          if (jauBaigtas !== undefined) return jauBaigtas;
+        }
       }
 
       const patch = jobPhase.finish(job, status, extra);
