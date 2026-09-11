@@ -398,6 +398,16 @@ const functional = [
    * bendras scenarijų rinkinys (`NUOSTOLINGI`).
    */
   "kanonineTapatybe",
+  /**
+   * #157 (PR-7, sąlygos 6-8): restore verifikacijos VERDIKTAI.
+   *
+   * Klausimas yra apie SPRENDIMĄ („ar ši eilutė laikoma patikrinta"), ne apie
+   * I/O, tad dublis čia tikslesnis už gyvą saugyklą: `nepriklausomas: false` iš
+   * external saugyklos yra kontrakto pažeidimas, kurio tikra saugykla negamina,
+   * o ataskaita privalo jį atskirti nuo teisėtos inline eilutės. Elgesį prieš
+   * tikras saugyklas tikrina `artifactRestoreIntegrity.integration`.
+   */
+  "artifactRestoreVerify",
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */

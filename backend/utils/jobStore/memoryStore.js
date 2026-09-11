@@ -283,6 +283,41 @@ async function pasalintiBandymus() {
  * Ir atsakymas nėra tuščia formalybė: diegimas su `ARTIFACT_STORE_BACKEND=s3`
  * prie ne-PostgreSQL job store'o rezultatų į S3 nerašo, ir verdiktas tai pasako.
  */
+/**
+ * RESTORE VERIFIKACIJA (#157, PR-7) — ŠIS BACKEND'AS NEPRIKLAUSOMOS PATIKROS NETURI.
+ *
+ * ⚠️ ATSAKYMAS NĖRA TUŠČIA ATASKAITA. Rezultatai čia gyvena job'o įraše, tad
+ * nepriklausomo `bytes`/`checksum` metaduomens, su kuriuo būtų galima lyginti,
+ * NĖRA IŠ VISO. Kiekvienas rezultatas yra `nepatikrinama_inline`.
+ *
+ * Grąžinus `eiluciuIsViso: 0`, ataskaita sakytų „nėra ko tikrinti", nors rezultatų
+ * yra — operatorius manytų, kad bazė tuščia. Teisingas atsakymas: „N rezultatų, nė
+ * vienas nepatikrinamas nepriklausomai".
+ */
+async function verifyResultArtifacts() {
+  const { VERDIKTAS, sudarytiAtaskaita } = require("../artifactRestoreVerify");
+  const { rezultatoNera } = require("./common");
+
+  /**
+   * ⚠️ HIDRATUOJAMA SĄMONINGAI. Metaduomenų projekcija `result` PAŠALINA
+   * (`metaduomenuProjekcija`), tad be hidratacijos „ar rezultatas yra" atsakyti
+   * neįmanoma — ataskaita suskaičiuotų nulį ir tylėtų apie visus rezultatus.
+   * Kaina čia maža (nei tinklo, nei saugyklos), o procedūra ir taip yra brangus,
+   * retai paleidžiamas atkūrimo kelias.
+   */
+  const jobai = await listAll({ hydrate: true });
+
+  const verdiktai = jobai
+    .filter((job) => !rezultatoNera(job.result))
+    .map((job) => ({
+      jobId: job.id,
+      storageType: "inline",
+      verdiktas: VERDIKTAS.NEPATIKRINAMA_INLINE,
+    }));
+
+  return sudarytiAtaskaita(verdiktai);
+}
+
 function saugykluBusena() {
   return { rasymoBackend: null, registruotiTipai: [] };
 }
@@ -395,4 +430,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, saugykluBusena, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, verifyResultArtifacts, saugykluBusena, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

@@ -2825,6 +2825,63 @@ function createPostgresStore(
     return attemptRegistry.pasalintiBandymus(pool, attemptIds, nustatymai);
   }
 
+  /**
+   * RESTORE VERIFIKACIJA: ar kiekviena `job_results` eilutė rodo į vientisą artefaktą
+   * (#157, PR-7, sąlygos 6-8).
+   *
+   * ⚠️ GYVENA STORE'E DĖL TOS PAČIOS PRIEŽASTIES KAIP `deleteResultArtifacts()`:
+   * `storage_type -> ArtifactStore` žemėlapis yra ČIA ir yra VIENINTELIS. Antra jo
+   * kopija kvietėjo pusėje būtų antra rezultato vietos interpretacija (A4).
+   *
+   * ⚠️ VERDIKTŲ LOGIKA — ATSKIRAME MODULYJE (`artifactRestoreVerify`), nes ji nuo DB
+   * nepriklauso ir privalo būti išmatuojama be jos. Čia lieka tik tai, ko be DB nėra:
+   * eilučių srautas ir rezolveris.
+   *
+   * ⚠️ PUSLAPIUOJAMA. Atkūrimo pratybose lentelė gali turėti šimtus tūkstančių eilučių,
+   * o `verify()` kiekvienai external eilutei PERSKAITO VISĄ OBJEKTĄ. Sudėjus visus
+   * verdiktus į atmintį vienu `SELECT`, procedūra kristų būtent didelėje bazėje —
+   * toje vienintelėje, kuriai ji ir skirta.
+   *
+   * @param {object} [parinktys]
+   * @param {number} [parinktys.puslapis] eilučių vienoje užklausoje
+   * @returns {Promise<object>} `artifactRestoreVerify.sudarytiAtaskaita()` ataskaita
+   */
+  async function verifyResultArtifacts({ puslapis = 200 } = {}) {
+    const { patikrintiEilute, sudarytiAtaskaita } = require("../artifactRestoreVerify");
+
+    const verdiktai = [];
+    let paskutinis = null;
+
+    for (;;) {
+      /**
+       * ⚠️ PUSLAPIUOJAMA PAGAL `job_id`, NE `OFFSET`.
+       *
+       * `OFFSET` tą pačią eilutę gali parodyti dukart arba praleisti, jei tarp
+       * puslapių kas nors įrašoma — o ataskaita, praleidusi eilutę, teigia
+       * patikrinusi tai, ko nematė.
+       */
+      const { rows } = await pool.query(
+        `SELECT job_id, storage_type, storage_key, bytes, checksum
+           FROM job_results
+          WHERE ($1::text IS NULL OR job_id::text > $1)
+          ORDER BY job_id
+          LIMIT $2`,
+        [paskutinis, puslapis]
+      );
+
+      if (rows.length === 0) break;
+
+      for (const eilute of rows) {
+        verdiktai.push(await patikrintiEilute(eilute, parinktiArtefaktuSaugykla));
+      }
+
+      paskutinis = String(rows[rows.length - 1].job_id);
+      if (rows.length < puslapis) break;
+    }
+
+    return sudarytiAtaskaita(verdiktai);
+  }
+
   async function sweepResultArtifacts(kandidatai) {
     const rezultatai = [];
 
@@ -2923,6 +2980,7 @@ function createPostgresStore(
      * kaip „nieko netikrinu", tad neteisingai sukonfigūruotas diegimas gautų ŽALIĄ
      * varnelę. Jie deklaruoja jį su TUŠČIA būsena — tai jų teisingas atsakymas.
      */
+    verifyResultArtifacts,
     saugykluBusena() {
       return {
         rasymoBackend: rasymoSaugykla ? rasymoSaugykla.backend : null,
