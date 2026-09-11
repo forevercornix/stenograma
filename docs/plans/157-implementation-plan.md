@@ -1441,7 +1441,7 @@ septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** j
 | # | Sąlyga | Kur priimta | Būsena kode | Priklauso nuo | Kas ir kada pamatys, kad suveikė |
 |---|---|---|---|---|---|
 | 1 | **Aktyvavimo barjeras** — atidaromas TIK uždarius prielaidas; **NE PR-7, o atskiras #155 apimties PR** | ADR `155-postgres-authority.md` §„AKTYVAVIMO BARJERAS"; plano DoD | `backendSelection.js:55` = `false` | 9, 10 | ADR prielaidų lentelė; `selectBackend()` grąžina `barjeras: true` |
-| 2 | **Sargo pašalinimas — paskutinis commit'as** (impl → integrity → regresija → dokumentai → sargas) | body §8; ši sekcija | sargas gyvas (`postgresStore.js:1623-1627`) | **1** | `git log` peržiūroje — plane įvardyta kaip grąžinimo pagrindas |
+| 2 | **Sargo SUSIAURINIMAS — paskutinis commit'as** (§12.1: buvo „pašalinimas"; matavimas parodė, kad dalis jo vis dar reikalinga) | body §8; ši sekcija | susiaurintas iki vienintelio teisingo atvejo — external eilutė be prijungtos rašymo saugyklos | **—** | `git log` peržiūroje. ⚠️ Pažodinis trynimas būtų grąžinęs `COMPLETED_WITHOUT_RESULT` ir atidaręs orphan'ų kelią per remonto semantiką |
 | 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | ✅ **PRIJUNGTA** (`jobStore/index.js`, `paruostiArtefaktuSaugykla()`); stebėtojas `artifactStore/prijungimoBusena.js` | **1** | `doctor` ir `/api/health/deep` varnelė „Artefaktų saugyklų prijungimas (startas)": lygina PARINKTA (`ARTIFACT_STORE_BACKEND`) ↔ PRIJUNGTA (rezolveris) ↔ REIKALINGA (`job_results` + `job_result_attempts` tipai). Verdikto pavirtimas iš `rasymas_neprijungtas` į žalią išmatuotas VIENAME teste (`jobStoreArtefaktuPrijungimas.integration`) |
 | 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
 | 5 | **`neatkartojama` grandinė: nulis BullMQ pakartojimų** | plano §„PR-4 DoD punktas"; DoD `PARTIAL / UNVERIFIED` | #298 ✅ uždarytas; grandinė įrodyta IKI FASADO RIBOS | **1** | Testas matuoja PAKARTOJIMŲ SKAIČIŲ (`vykdymai === 1`, `attemptsMade === 1`), ne lauko buvimą. ⚠️ Klaidos KILMĖ sintetinė: worker'is eina per atmintį, o struktūriniai atmetimai gyvena external kelyje |
@@ -1768,6 +1768,45 @@ nėra garantija — lygiai kaip `neatkartojama` be `UnrecoverableError`. Mišrio
 inline eilučių bus dauguma, tad ataskaita, rodanti vien „patikrinta: N", skambėtų
 kaip pilna patikra ir pratybos praeitų per lengvai.
 - „Non-inline fail-closed sargo (`postgresStore.js:1623-1627`) pašalinimas yra **paskutinis** implementacijos žingsnis — po equality, schemos, hydration, completion/concurrency, erasure, migracijos ir backup/restore integracinių įrodymų. Sargo pašalinimas negali būti naudojamas ankstesniems testams „atrakinti"…"
+
+⚠️ **DoD PUNKTAS PERRAŠYTAS (§12.1): „PAŠALINIMAS" PASIRODĖ NEĮVYKDOMAS TA FORMA.**
+
+Formuluotė aukščiau — „non-inline fail-closed sargo pašalinimas yra paskutinis
+implementacijos žingsnis" — **buvo teisinga savo metu**. Ji rašyta PRIEŠ PR-4, kai
+external lygybės autoriteto (`bytes`/`checksum` kolonų) dar nebuvo: tada sargas
+gynė vienintelį dalyką — „external eilutės palyginti negalime" — ir po PR-4 tas
+dalykas tikrai išnyko. „Pašalinamas" reiškė „nebereikalingas".
+
+**Kodėl nustojo galioti.** Matavimas prieš rašant (`finishExternalFazes.integration`)
+parodė, kad sargas gynė NE VIENĄ dalyką, o tris atvejus, ir dviem iš jų atsakė
+neteisingai:
+
+| Atvejis | Ką darė sargas | Kas teisinga |
+|---|---|---|
+| `finish(failed)` ant užbaigto | vidinė klaida apie lygybės autoritetą | `JobPhaseError` iš `jobPhase.finish` |
+| `finish(completed)` be rezultato | ta pati vidinė klaida | `RESULT_CONFLICT` (paritetas su inline) |
+| `completed` su rezultatu, bet be saugyklos | ta pati vidinė klaida | klaida **teisinga**, tik priežastis kita |
+
+⚠️ **PAŽODINIS TRYNIMAS BŪTŲ BUVĘS BLOGESNIS UŽ NEVEIKIMĄ.** Kelias po sargu
+grąžintų `COMPLETED_WITHOUT_RESULT`, nes `sviezias.result = eilute.payload`, o
+external eilutėje `payload` privalomai yra `NULL`. Tai REMONTUOTINA būsena, po
+kurios kvietėjas gali perrašyti rezultatą — perrašymas external eilutę perjungtų į
+inline ir paliktų objektą **našlaičiu**. Trynimas būtų atidaręs orphan'ų kelią per
+remonto semantiką, t. y. tiksliai tai, ką visa #157 grandinė uždarinėjo.
+
+**Nauja formuluotė:** non-inline fail-closed sargas **susiaurinamas iki vienintelio
+atvejo, kuriam jis teisingas** — external eilutė diegime be prijungtos rašymo
+saugyklos — ir tai lieka paskutinis implementacijos žingsnis. Likusius du atvejus
+perima įprastas kelias: fazių logika ir lygybės paritetas su inline.
+
+⚠️ **APSAUGA NEPRARASTA, O PERKELTA.** Likusią sargo dalį dubliuoja `prijungimoBusena`
+stebėtojas (PR-7, 3 sąlyga): ta pati būsena matoma `doctor` ir `/api/health/deep`
+išvestyje **prieš** naudojimą, ne jo metu. Klaida lieka kaip paskutinė riba tam
+diegimui, kuris diagnostikos nepaisė.
+
+⚠️ **UŽRAŠOMA, NES KITAIP PO METŲ ATRODYS, KAD REIKALAVIMAS BUVO APEITAS.** `git log`
+rodys „sargas susiaurintas" ten, kur planas reikalavo „pašalinti", ir be šio įrašo
+skirtumas atrodytų kaip nuolaida sau.
 - „Įvardyta, kad #157 PostgreSQL aktyvavimo barjero neatidaro…"
 
 **§9.1**
