@@ -71,6 +71,33 @@ Garantijos formuluotė — `docs/deletion-guarantees.md` §1 ir §2.
 
 ---
 
+## ⚠️ Atnaujinant į #157 PR-7: `ARTIFACT_STORE_BACKEND` tapo starto sąlyga
+
+**Kas pasikeitė.** Iki šio leidimo serveris `ARTIFACT_STORE_BACKEND` **netikrino
+visai** — diegimas su `ARTIFACT_STORE_BACKEND=s3` ir trūkstamu raktu startuodavo
+ir tyliai rašydavo `inline`. Nuo dabar toks diegimas **nepakils**: rezultatai
+atsidurtų kitoje saugykloje, nei mano operatorius, ir tai paaiškėtų tik tada, kai
+jų prireiktų.
+
+**Kaip atpažinti.** Startas krenta su pranešimu, vardijančiu **trūkstamus
+kintamuosius** (ne jų reikšmes). Prieš atnaujinant tą pačią būseną parodo `doctor`:
+
+```bash
+cd backend && npm run doctor
+# ❌ Artefaktų saugyklų prijungimas (startas): parinkta 's3', bet rašymo saugykla
+#    NEPRIJUNGTA — rezultatai rašomi 'inline'
+```
+
+Ta pati varnelė matoma ir `/api/health/deep` išvestyje (production'e — su
+`x-audit-key`).
+
+**Kaip atsukti.** Pašalinti `ARTIFACT_STORE_BACKEND` iš aplinkos: diegimas grįžta į
+`inline` **eksplicitiškai**, ne tyliai, ir startuoja. Kodo atsukti nereikia — tai
+konfigūracijos veiksmas, atliekamas per vieną perleidimą.
+
+⚠️ Nustačius `fs` ar `s3`, **grįžimas į `inline` nebeįmanomas tyliai** ir tai
+sąmoninga: tylus grįžimas yra būtent tas gedimas, kurį ši riba uždaro.
+
 ## Artefaktų migracija: `inline` → external (#157, PR-6)
 
 `node-pg-migrate` čia nedalyvauja. Tai **duomenų**, ne schemos migracija, ir ji

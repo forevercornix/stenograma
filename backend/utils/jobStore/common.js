@@ -909,6 +909,24 @@ function idempotentiskasAtsakymasIsMetaduomenu(job, status, ateinantis, persisti
 }
 
 /**
+ * ⚠️ ŽENKLAS: „REZULTATAS YRA, BET NE ŠIOJE EILUTĖJE" (#157, PR-7).
+ *
+ * Backend'as, kurio eilutė external, paduoda ŠITĄ vietoj `job.result`. Simbolis, ne
+ * eilutė ar objektas: bet kokia reikšmė galėtų sutapti su tikru rezultatu, ir tada
+ * ženklas taptų nepatikimas būtent ten, kur juo remiamasi.
+ */
+const REZULTATAS_EXTERNAL = Symbol("stenograma.jobStore.rezultatasExternal");
+
+/**
+ * ⚠️ VERDIKTAS: „SPRENDIMO NĖRA, IR TAI NE LYGYBĖS KLAUSIMAS" (#157, PR-7).
+ *
+ * Grąžinamas, kai rezultatas yra external, o įeinantis turi rezultatą be kvito.
+ * Skiriasi nuo `undefined` (eiti įprastu perėjimo keliu) tuo, kad įprastas kelias
+ * čia NEGALIMAS: `writePatched()` rašytų inline reikšmę virš external eilutės.
+ */
+const NEPALYGINAMA = "NEPALYGINAMA";
+
+/**
  * BENDRA IDEMPOTENTIŠKUMO TAISYKLĖ VISIEMS TRIMS BACKEND'AMS (#184, 7.5b).
  *
  * ⚠️ ANTROS LYGYBĖS TAISYKLĖS NĖRA. Trys saugyklos kviečia ŠITĄ funkciją, tad
@@ -943,6 +961,40 @@ function idempotentiskasAtsakymas(job, status, extra) {
    */
   if (rezultatoNera(job.result)) return "COMPLETED_WITHOUT_RESULT";
 
+  /**
+   * ⚠️ EXTERNAL EILUTĖ: REZULTATAS YRA, BET JO KANONINĖS FORMOS ČIA NĖRA
+   * (#157, PR-7, 2 sąlyga).
+   *
+   * `job_results` external eilutėje `payload` privalomai yra `NULL` (formos
+   * `CHECK`), tad kvietėjas negali paduoti `job.result` reikšmės — bet rezultatas
+   * EGZISTUOJA, jis guli saugykloje. Perdavus `null`, atsakymas būtų
+   * `COMPLETED_WITHOUT_RESULT`, o tai MELAS ir PAVOJINGAS: jis reiškia remontuotiną
+   * būseną, po kurios kvietėjas gali perrašyti rezultatą — perrašymas external
+   * eilutę perjungtų į inline ir paliktų objektą NAŠLAIČIU.
+   *
+   * ⚠️ SPRENDIMAS GYVENA ČIA, NE BACKEND'E. `jobFinishIdempotency` sargas draudžia
+   * backend'ui priimti lygybės sprendimą pačiam („antra taisyklė išsiskirtų"), ir
+   * pirmoji šio taisymo redakcija tą draudimą pažeidė — sargas ją pagavo. Taisyklė
+   * lieka viena; backend'as tik pasako, KOKIA forma yra jo eilutė.
+   */
+  if (job.result === REZULTATAS_EXTERNAL) {
+    /**
+     * Įeinantis be rezultato — tai NE tas pats rezultatas, tad konfliktas.
+     * Paritetas su inline keliu, kuriame `finish(completed, {})` ant užbaigto
+     * job'o duoda tą patį atsakymą.
+     */
+    if (rezultatoNera(extra.result)) return "RESULT_CONFLICT";
+
+    /**
+     * Įeinantis SU rezultatu: palyginti nėra kuo — persistinto `checksum` kelias
+     * (`idempotentiskasAtsakymasIsMetaduomenu`) reikalauja įeinančio kvito, o jo
+     * nėra, nes rašymo saugykla neprijungta. Tai KONFIGŪRACIJOS, ne lygybės
+     * klausimas, tad verdiktas atiduodamas kvietėjui — jis vienintelis žino, kodėl
+     * kvito nėra, ir gali tai pasakyti operatoriui.
+     */
+    return NEPALYGINAMA;
+  }
+
   return kanoninisRezultatas(extra.result) === kanoninisRezultatas(job.result)
     ? job
     : "RESULT_CONFLICT";
@@ -973,6 +1025,8 @@ module.exports = {
   kanoninisRezultatas,
   rezultatoNera,
   idempotentiskasAtsakymas,
+  REZULTATAS_EXTERNAL,
+  NEPALYGINAMA,
   KANONINIAI_LAUKAI,
   normalizeFieldValue,
   normalizeJob,
