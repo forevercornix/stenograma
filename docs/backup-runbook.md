@@ -589,6 +589,21 @@ perjungti negalima.
 nei „offline", nei „galima" — tad riba egzistavo tik kaip numanoma. Numanoma riba
 yra ta pati klasė kaip nedokumentuota: operatorius jos nemato.
 
+### ⚠️ Atkūrimas NEBAIGIA procedūros ir artefaktų prasme — toliau §9d
+
+`pg_dump` atkuria `job_results` eilutes. External eilutėje (`storage_type` yra `fs`
+ar `s3`) `payload` yra `NULL`, o **turinys guli saugykloje** — S3 kibire arba failų
+sistemoje, UŽ duomenų bazės ribų.
+
+Vadinasi atkurta bazė gali turėti eilutę su `storage_key`, rodančiu į objektą,
+kurio **nebėra arba kuris sugadintas**, ir jokia DB patikra to nepamatys: schema
+teisinga, eilutė pilna, invariantai galioja.
+
+⚠️ **Tai nėra `pg_dump` trūkumas.** Tai riba: DB kopija apima nuorodas, ne turinį.
+External artefaktų kopijavimas yra ATSKIRA atsakomybė (S3 versijavimas, kibiro
+replikacija arba failų sistemos kopija) ir šiuo runbook'u **neapibrėžiama** — čia
+užrašoma tik tai, kad ji egzistuoja ir kad jos nebuvimas matomas §9d.
+
 ### ⚠️ Vien šis žingsnis NĖRA erasure-safe
 
 Atkūrimas **prikelia po kopijos ištrintus job'us**. Ištrynimo žymos
@@ -910,6 +925,68 @@ klaidingų teigiamų ir blokuotų teisėtas kopijas. Riba įvardijama, ne dangst
 
 ---
 
+## 9d. Artefaktų vientisumo verifikacija — #157 (PR-7)
+
+⚠️ **ATSAKO Į KLAUSIMĄ, KURIO §9a–§9c NEUŽDUODA: ar `storage_key` rodo į vientisą
+artefaktą.**
+
+```bash
+# Paleidžiama PO §9b (suderinimo) ir, jei taikoma, PO §9c (erasure replay).
+node -e "
+  const { createPostgresStore } = require('./backend/utils/jobStore/postgresStore');
+  // ... pool ir saugykla sukuriami taip pat, kaip startas juos kuria
+  const ataskaita = await store.verifyResultArtifacts();
+  console.log(ataskaita.santrauka);
+  process.exitCode = ataskaita.ok ? 0 : 1;
+"
+```
+
+**Ataskaitos pavyzdys:**
+
+```
+eilučių 1284; nepriklausomai patikrinta 37; nepatikrinama (inline, nėra su kuo lyginti) 1247; nesėkmių 0
+```
+
+### ⚠️ „Nepatikrinama" NĖRA „patikrinta" — ir būtent dėl to ataskaita turi DU skaičius
+
+`verify()` grąžina lauką `nepriklausomas`. External eilutėje `bytes` ir `checksum`
+persistinti **atskirai** (DB pusėje, rašymo metu), tad objektas lyginamas su
+nepriklausomu įrašu. **Inline eilutėje tų metaduomenų nėra** — invariantas jų
+reikalauja tik external šakoje — tad `verify()` gali tik perskaičiuoti sumą iš to
+paties `payload`: jis **lygina reikšmę su savimi** ir visada grąžina `ok: true`.
+
+Aukščiau pateiktame pavyzdyje tai reiškia: iš 1284 eilučių realiai patikrintos **37**,
+o ne 1284. Ataskaita, rodanti vieną skaičių, tas pačias pratybas paverstų sėkme.
+
+⚠️ **Todėl žemas „nepriklausomai patikrinta" skaičius NĖRA gedimas** — migracijos
+eigoje jis ir turi būti žemas. Gedimas yra `nesėkmių > 0`.
+
+### Verdiktai
+
+| Verdiktas | Reikšmė | Gedimas? |
+|---|---|---|
+| `patikrinta` | objektas atitinka DB persistintą `bytes`/`checksum` | ne |
+| `nepatikrinama_inline` | inline eilutė — nepriklausomo autoriteto nėra | ne |
+| `nerasta` | eilutė rodo į objektą, kurio saugykloje nėra | **taip** |
+| `nesutampa` | objektas yra, bet neatitinka DB įrašo | **taip** |
+| `saugykla_neregistruota` | `storage_type` neturi saugyklos — perskaityti neįmanoma | **taip** |
+| `nepriklausomumo_neteko` | external saugykla grąžino `nepriklausomas: false` (kontrakto pažeidimas) | **taip** |
+
+### ⚠️ Kaina: ši procedūra PERSKAITO KIEKVIENĄ external objektą
+
+`fs` ir S3 checksum'o metaduomenyse neturi, tad vientisumą patvirtinti galima tik
+perskaičius visą objektą. `head()` čia **nepakanka**: jis grąžina tik dydį, tad
+sugadintas **to paties ilgio** objektas jį praeitų.
+
+Vadinasi §9d nėra metadata kelias ir **neturi būti paleidžiamas starte**. Jo vieta —
+atkūrimo pratybos ir po restore, ne sveikatos patikra.
+
+### ⚠️ Laukiama reikšmė imama iš DB, ne iš objekto
+
+`bytes` ir `checksum` ateina iš `job_results` eilutės, įrašytos rašymo metu.
+Perskaičiavus jas iš tikrinamo objekto, verifikacija lygintų objektą su savimi ir
+**niekada nieko nerastų** — tas pats tuščias `ok: true`, tik be inline pateisinimo.
+
 ## 11. Ką parodyti auditoriui
 
 ✅ Kad kopijos šifruotos (`manifest.encrypted`, algoritmas ir versija).
@@ -920,6 +997,16 @@ Aplikacijos kopijai ji galioja tiesiogiai; `pg_dump` keliui — **tik atlikus §
 ir niekada nesuteiks**: žurnalas pagal konstrukciją gyvena UŽ snapshot'o ribų,
 tad praleidus §9c ištrinti job'ai grįžta. Tai nuolatinė procedūros savybė, ne
 laikina spraga.
+✅ Kad po atkūrimo patikrinta, ar `storage_key` rodo į **vientisą artefaktą** (§9d) —
+ir kad ataskaita pateikia **du** skaičius. ⚠️ **Vienas skaičius būtų melas:** inline
+eilutei `verify()` lygina reikšmę su savimi ir visada grąžina `ok: true`, tad mišrioje
+bazėje „patikrinta: N" reikštų beveik 100 %, nors realiai patikrintos tik external
+eilutės. Auditoriui rodoma eilutė su abiem skaičiais, ne procentas. ⚠️ **Žemas
+„nepriklausomai patikrinta" skaičius NĖRA gedimas** — migracijos eigoje jis ir turi
+būti žemas; gedimas yra `nesėkmių > 0`.
+✅ Kad external artefaktų **kopijavimas yra atskira atsakomybė** (§9a pabaiga): DB
+kopija apima NUORODAS, ne turinį, ir šis runbook'as tos atsakomybės neapibrėžia —
+jis tik padaro jos nebuvimą matomą per §9d.
 ✅ Kad kopijų **kūrimas** audituojamas su aktoriumi — ir aplikacijos
 (`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`), **kai audito
 saugykla patvari** (`AUDIT_BACKEND=postgres`); su numatytu `memory` įrašas
