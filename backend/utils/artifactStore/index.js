@@ -12,7 +12,13 @@
  * Ta pati taisyklė kaip `scripts/dr-restore.mjs` atveju.
  */
 const { ArtifactStoreError } = require("./validation");
-const { LEISTINI, BUTINI, parinktiBackenda, sukurtiSaugykla } = require("./backendSelection");
+const {
+  LEISTINI,
+  BUTINI,
+  parinktiBackenda,
+  sukurtiSaugykla,
+  paruostiKonfiguruotaSaugykla,
+} = require("./backendSelection");
 const { skaitytiRibotai } = require("./boundedRead");
 
 module.exports = {
@@ -21,5 +27,6 @@ module.exports = {
   BUTINI,
   parinktiBackenda,
   sukurtiSaugykla,
+  paruostiKonfiguruotaSaugykla,
   skaitytiRibotai,
 };

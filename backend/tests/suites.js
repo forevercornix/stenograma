@@ -408,6 +408,15 @@ const functional = [
    * tikras saugyklas tikrina `artifactRestoreIntegrity.integration`.
    */
   "artifactRestoreVerify",
+  /**
+   * #155 (A2): cutover skripto RIBOS — be Redis.
+   *
+   * Skriptas buvo parašytas uždaryti klasę „dokumentuota komanda, kurios niekas
+   * negali paleisti", ir pats atsirado BE TESTO — CI logas tai parodė tiesiai.
+   * Tikrinamos tik ribos (rašybos klaida vėliavoje, ne-`redis` backend'as,
+   * atsisakymas PRIEŠ jungtį), nes būtent jos saugo nuo neteisingo paleidimo.
+   */
+  "cutoverTerminalize",
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */

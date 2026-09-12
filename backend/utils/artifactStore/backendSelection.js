@@ -135,4 +135,35 @@ async function sukurtiSaugykla({ backend, env = process.env, vykdytojas = null }
   );
 }
 
-module.exports = { LEISTINI, BUTINI, parinktiBackenda, sukurtiSaugykla };
+
+/**
+ * SUKONFIGŪRUOTA SAUGYKLA — VIENAS SURINKIMAS VISIEMS KVIETĖJAMS (#155, A1).
+ *
+ * ⚠️ KODĖL ČIA, O NE `jobStore/index.js`.
+ *
+ * Surinkimas gyveno `initializePostgres()` viduje, ir būtent DĖL TOS VIETOS
+ * `scripts/dr-restore.mjs` jo nepasiekė: CLI sąmoningai neimportuoja `jobStore`
+ * (tai įkeltų singleton'ą į skriptą, dirbantį su KITA baze). Rezultatas — DR
+ * atkūrimas prieš bazę su `fs` ar `s3` eilute krisdavo ties
+ * `restoredJobStore.paruosti()`, nors testas buvo žalias: jis paduodavo saugyklas
+ * TIESIAI koordinatoriui, aplenkdamas CLI.
+ *
+ * Klausimas „kurią saugyklą sako konfigūracija" yra ARTEFAKTŲ SAUGYKLOS, ne job
+ * store klausimas. Perkėlus, abu kvietėjai mato tą patį atsakymą.
+ *
+ * ⚠️ ANTRA KOPIJA CLI PUSĖJE BUVO ATMESTA: šioje sekoje dvi to paties sprendimo
+ * realizacijos jau tris kartus išsiskyrė.
+ *
+ * ⚠️ `inline` GRĄŽINA `null`, NE SAUGYKLĄ. Inline rezultatas gyvena eilutėje, o
+ * `inlineStore.backend` yra `"inline"` — paduotas kaip rašymo saugykla, jis duotų
+ * inline eilutę SU `storage_key`, kurios `job_results_storage_shape` nepriima.
+ *
+ * @returns {Promise<object|null>} saugykla arba `null`, kai backend'as yra `inline`
+ */
+async function paruostiKonfiguruotaSaugykla(env = process.env) {
+  const { backend } = parinktiBackenda(env);
+  if (backend === "inline") return null;
+  return sukurtiSaugykla({ backend, env });
+}
+
+module.exports = { LEISTINI, BUTINI, parinktiBackenda, sukurtiSaugykla, paruostiKonfiguruotaSaugykla };

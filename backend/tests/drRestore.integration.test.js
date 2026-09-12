@@ -71,6 +71,9 @@ const TIKSLO_URL = testDatabaseUrl("drtarget");
  * duomenų bazės ribų, tad atkūrus SENESNĘ kopiją į kitą bazę, ji rodo į TĄ PAČIĄ
  * saugyklą — būtent tokia yra tikrovė, kurią pratyba turi atkartoti.
  */
+/** Backend'o šaknis — CLI paleidimui ir `cwd`. */
+const REPO_SAKNIS = path.resolve(__dirname, "..");
+
 const ARTEFAKTU_SAKNIS = praleisti() ? null : fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-dr-"));
 let artefaktuSaugykla = null;
 /** Pažymėto job'o objekto raktas — užpildomas 1 žingsnyje. */
@@ -824,6 +827,71 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
         `AND ${auditoLaukas("outcome")} = 'erasure_replayed'`
     );
     assert.equal(rows[0].n, 1, "antras paleidimas antro ištrynimo kvito NERAŠO");
+  });
+
+
+  /**
+   * ⚠️ 9b: TAS PATS ATKŪRIMAS PER CLI — KIRTIMAS PER RIBĄ, KURIĄ KERTA OPERATORIUS.
+   *
+   * 9 žingsnis kviečia koordinatorių TIESIOGIAI ir paduoda `artifactStores` pats.
+   * Operatorius to negali: jis paleidžia `scripts/dr-restore.mjs`. Iki #155 A1 tas
+   * skriptas saugyklų nei kūrė, nei perdavė — tad testas buvo žalias, o CLI prieš
+   * atkurtą bazę su `fs` eilute KRISDAVO ties `restoredJobStore.paruosti()`.
+   *
+   * ⚠️ ŠIS ŽINGSNIS ATSKIRAS NUO 9, NE VIETOJ JO. Sujungus, CLI gedimas atrodytų
+   * kaip idempotentiškumo pažeidimas, ir diagnozė nurodytų ne tą sluoksnį.
+   *
+   * ⚠️ APLINKA — `tiksloEnv`, NE ŠVIEŽIA: `testoAplinka()` kiekvieną kartą generuoja
+   * NAUJĄ `BACKUP_ENCRYPTION_KEY`, tad su šviežia žurnalo iššifruoti nepavyktų.
+   */
+  await t.test("9b. TAS PATS per `dr-restore.mjs` — CLI riba, ne koordinatorius", async () => {
+    const priesJobai = await eiluciuSkaicius(TIKSLO_URL, "jobs");
+    const priesZymos = await eiluciuSkaicius(TIKSLO_URL, "erasure_marks");
+
+    const zurnalas = path.join(ARTEFAKTU_SAKNIS, "..", `dr-zurnalas-${process.pid}.json`);
+    fs.writeFileSync(
+      zurnalas,
+      JSON.stringify({ manifest: artefaktas.manifest, envelope: artefaktas.envelope }),
+      "utf8"
+    );
+
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          path.join(REPO_SAKNIS, "scripts", "dr-restore.mjs"),
+          "run",
+          "--in",
+          zurnalas,
+          "--target",
+          TIKSLO_URL,
+          "--actor",
+          "dr-cli-pratybos",
+        ],
+        {
+          cwd: REPO_SAKNIS,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            ...tiksloEnv,
+            /** ⚠️ TA PATI saugykla kaip pratyboje — kitaip CLI kurtų kitą `fs` šaknį. */
+            ARTIFACT_STORE_BACKEND: "fs",
+            ARTIFACT_FS_ROOT: ARTEFAKTU_SAKNIS,
+          },
+        }
+      );
+    } finally {
+      fs.rmSync(zurnalas, { force: true });
+    }
+
+    assert.equal(await eiluciuSkaicius(TIKSLO_URL, "jobs"), priesJobai, "CLI paleidimas būsenos nekeičia");
+    assert.equal(await eiluciuSkaicius(TIKSLO_URL, "erasure_marks"), priesZymos);
+
+    /** ⚠️ Ir nepažymėto job'o objektas po CLI kelio irgi privalo likti. */
+    assert.ok(
+      fs.existsSync(path.join(ARTEFAKTU_SAKNIS, nepazymetoRaktas)),
+      "CLI kelias liečia TIK savo raktus"
+    );
   });
 
   await t.test("10. PASENĘS ŽURNALAS `PRIVACY_MODE`: patvirtinimas veda iki `verify`", async () => {
