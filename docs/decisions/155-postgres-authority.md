@@ -191,41 +191,32 @@ nepadeda: jis šalina tik indekso įrašus, kurių hash'ai jau dingę.
 Todėl cutover procedūra privalo **terminalizuoti arba eksplicitiškai ištrinti**
 likusius įrašus, ne laukti TTL:
 
-```bash
-# 1. Nustoti priimti naujus job'us
-# 2. Palaukti, kol vykdomi baigsis
-# 3. Terminalizuoti likusius ne-terminalius:
-#    kiekvienam queued/processing job'ui -> finish(FAILED, "cutover")
-#    (finish() šaltinio netikrina, tad veikia ir sugadintiems - #154)
-# 3b. IŠTRINTI hash'us: finish() taiko tik EXPIRE su JOB_TTL_MINUTES,
-#     tad terminalizuotas įrašas dar valandą lieka Redis'e.
-#     redis-cli --scan --pattern 'job:*' | xargs -r redis-cli DEL
-# 4. Patikrinti, kad Redis'e nebeliko job:* raktų
-# 5. Nustatyti DATABASE_URL ir paleisti
-```
+⚠️ **VYKDOMI ŽINGSNIAI PAŠALINTI IŠ ŠIO DOKUMENTO (§12.1 korekcija).**
 
-**DoD:** cutover skriptas + testas, kad po jo `redis-cli KEYS 'job:*'` tuščias.
+Čia buvo shell blokas ir „Diegimo seka" lentelė. Jie **buvo teisingi savo metu** —
+parašyti tada, kai vykdomos procedūros dokumento dar nebuvo. Dabar ji yra
+(`docs/migrations.md`, „Cutover: Redis → PostgreSQL job metaduomenys"), ir **du
+tekstai jau spėjo išsiskirti**:
+
+| Klausimas | Senas ADR blokas | Procedūra |
+|---|---|---|
+| Paskutinis žingsnis | „Nustatyti `DATABASE_URL`" | **eksplicitinis** `JOB_STORE_BACKEND=postgres` |
+| Drain sąlyga | `active + waiting` | **visos** neterminalios, įskaitant `delayed` |
+| 3–3b vykdymas | vidinių funkcijų vardai | `node scripts/cutover-terminalize.mjs` |
+| `redis-cli` | be `-u` (numatytoji instancija) | per `"$REDIS_URL"` |
+
+⚠️ **PIRMENYBĖS PASTABA NEBŪTŲ APSAUGOJUSI.** Skaitytojas, radęs konkretų shell
+bloką, jo nepraleidžia — o ta seka veda prie **destruktyvių veiksmų su neteisinga
+konfigūracija**: trynimo ne toje Redis instancijoje ir perjungimo be eksplicitinio
+pasirinkimo. Todėl blokas pašalintas, o ne paliktas su nuoroda.
+
+**Kas lieka čia:** kodėl TTL nepakanka, kodėl ne migracija, ir kokios rizikos.
+**Kaip tai daroma:** `docs/migrations.md`.
 
 **Kodėl ne migracija:** job metaduomenys yra trumpaamžiai (60 min TTL), o
 migracijos skriptas turėtų atkartoti visą `deserialize` logiką, `owner_kind`
 semantiką ir fazių invariantus — nemaža rizika dėl duomenų, kurie savaime
 išnyksta per valandą.
-
-### Diegimo seka
-
-| Žingsnis | |
-|---|---|
-| 1 | Nustoti priimti naujus job'us (`503` arba maintenance režimas) |
-| 2 | Palaukti, kol `active` + `waiting` job'ų skaičius pasieks **0** |
-| 2b | **SUSTABDYTI VISUS worker'ius** ir patvirtinti, kad jie nebedirba |
-| 3 | **Terminalizuoti likusius** `queued`/`processing` — `finish(FAILED, "cutover")` |
-| 3b | **Išlaisvinti orphan audio** — `releaseAudio()` kiekvienam terminalizuotam |
-| 4 | **Palaukti, kol baigsis laukiantis valymas** — žr. įspėjimą žemiau |
-| 5 | **Migruoti arba palaukti** nepasibaigusių `completed` įrašų (žr. žemiau) |
-| 5b | **Ištrinti hash'us IR indeksą** — žr. komandą žemiau |
-| 6 | **Patikrinti:** nebeliko nei `job:*`, nei `jobs:index`, nei `*_pending` vėliavų |
-| 7 | Nustatyti `DATABASE_URL` (žr. pastabą dėl parinkimo) |
-| 8 | Paleisti su nauju backend'u |
 
 ⚠️ **`JOB_TTL_MINUTES` NĖRA DRAIN TIMEOUT.**
 
@@ -266,12 +257,12 @@ job'o ID ir laiko žyma. Šablonas `job:*` jo **neatitinka** (nėra dvitaškio p
 `job`), o perjungus į PostgreSQL Redis sweeper'is jo nebešalina. Metaduomenys
 liktų neribotai, o 6 žingsnio patikra praeitų.
 
-```bash
-redis-cli --scan --pattern 'job:*' | xargs -r redis-cli DEL
-redis-cli DEL jobs:index
-```
+⚠️ **KOMANDOS ČIA NEBĖRA (§12.1, trečia tokia vieta).** Ji naudojo `redis-cli` be
+`-u`, t. y. rodė į numatytąją `127.0.0.1:6379` DB 0 — Compose diegime tai NE TA
+instancija. Vykdoma redakcija su `"$REDIS_URL"`, `set -euo pipefail` ir
+nutraukiančia patikra gyvena `docs/migrations.md` (5b žingsnis).
 
-⚠️ **NEPASIBAIGĘ `completed` ĮRAŠAI TURI SAVO RETENCIJĄ.**
+⚠️ **NEPASIBAIGĘ TERMINALŪS ĮRAŠAI TURI SAVO RETENCIJĄ** (§12.1: buvo „`completed`", o `redisStore.update()` tą patį TTL taiko visiems `isFinished()` įrašams — `failed` ir `cancelled` taip pat).
 
 Job'as, baigtas prieš pat 2 žingsnį, gauna ŠVIEŽIĄ `JOB_TTL_MINUTES` langą, o 5b
 jį ištrintų iš karto. Repo tą langą dokumentuoja kaip laikotarpį, kuriuo
@@ -811,7 +802,7 @@ atsistatyti iš kopijos, neprarasti rezultatų ir neprikelti ištrintų duomenų
 | Prielaida | Kodėl PRIEŠ aktyvavimą |
 |---|---|
 | **Patikrintas restore (7.6)** — ⚠️ **apibrėžimas praplėstas po #157 (§12.1)**: nebeužtenka, kad atsistatytų DB EILUTĖS; `storage_key` privalo rodyti į **vientisą artefaktą** | Buvo užrašyta prieš #157, kai „restore patikrintas" reiškė „bazė atkurta" — tada tai buvo pilnas apibrėžimas. Po #157 external eilutėje `payload` yra `NULL`, o turinys guli UŽ DB ribų: `pg_dump` atkuria NUORODAS, ne turinį, tad atkurta bazė gali turėti `storage_key`, rodantį į nesantį objektą, ir jokia DB patikra to nepamatys. **Įrodymai:** `pgDumpBackup.integration` (#248 — `jobs` IR `job_results` sutampa), `postRestoreReconcile.integration` (#249 — sesijos revokuotos, in-flight terminalizuoti, D4 atsukimas), `drRestore.integration` (#250 — ištrynimas išgyvena atkūrimą iš senesnės kopijos), `artifactRestoreIntegrity.integration` (#333 — trūkstamas, sugadintas, DB `checksum` autoritetas). Visi `postgres` rinkinyje, nepraleidžiami |
-| ~~**Persistentės ištrynimo žymos** (7.5a dalis)~~ ✅ **ĮGYVENDINTA (#183)** — ⚠️ **apibrėžimas praplėstas po #157 (§12.1)** | Buvo: `deletionTombstones` yra proceso atmintis — atkūrus naujame procese žymos DINGSTA, tad restore pratybos negali įvykdyti savo pačių ištrinto job'o scenarijaus. Dabar: `erasure_marks` lentelė su būsenų mašina, advisory lock'ais ir retencija pagal prikėlimo horizontą (`utils/deletionTombstones/`, migracija `1755400000000_erasure-marks.js`). Atminties režimas lieka TIK diegimams be `DATABASE_URL` ir starte apie tai garsiai įspėja. ⚠️ **BET PO #157 ŽYMOS PERSISTAVIMO NEBEUŽTENKA:** ištrynimas eina per bandymų registrą ir šalina objektus SAUGYKLOJE, tad barjerui reikia, kad jis išgyventų restartą **IR** pasiektų objektus, kurių adresas yra tik registre. Kodas tai dengia: `jobErasure.BUTINI_SYSTEM_METODAI` apima `deleteResultArtifacts` (#157, PR-5), o `drCoordinator.replay()` paduoda `artifactStores` į `restoredJobStore.paruosti()`, kuris be jų external eilutėms **fail-close'ina**. ⚠️ **ĮRODYMAS YRA DALIMIS, NE VIENA PRATYBA:** `drRestore.integration` (#250) naudoja TIK inline duomenis — nė vienos nuorodos į saugyklą |
+| ~~**Persistentės ištrynimo žymos** (7.5a dalis)~~ ✅ **ĮGYVENDINTA (#183)** — ⚠️ **apibrėžimas praplėstas po #157 (§12.1)** | Buvo: `deletionTombstones` yra proceso atmintis — atkūrus naujame procese žymos DINGSTA, tad restore pratybos negali įvykdyti savo pačių ištrinto job'o scenarijaus. Dabar: `erasure_marks` lentelė su būsenų mašina, advisory lock'ais ir retencija pagal prikėlimo horizontą (`utils/deletionTombstones/`, migracija `1755400000000_erasure-marks.js`). Atminties režimas lieka TIK diegimams be `DATABASE_URL` ir starte apie tai garsiai įspėja. ⚠️ **BET PO #157 ŽYMOS PERSISTAVIMO NEBEUŽTENKA:** ištrynimas eina per bandymų registrą ir šalina objektus SAUGYKLOJE, tad barjerui reikia, kad jis išgyventų restartą **IR** pasiektų objektus, kurių adresas yra tik registre. Kodas tai dengia: `jobErasure.BUTINI_SYSTEM_METODAI` apima `deleteResultArtifacts` (#157, PR-5), o `drCoordinator.replay()` paduoda `artifactStores` į `restoredJobStore.paruosti()`, kuris be jų external eilutėms **fail-close'ina**. ⚠️ **ĮRODYMAS BUVO DALIMIS — DABAR NEBĖRA (§12.1, R1).** Ankstesnė šios eilutės redakcija sakė, kad `drRestore.integration` naudoja TIK inline duomenis ir kad external ištrynimas pratyboje neįrodytas. Tai buvo tiesa jos rašymo metu. R1 (#155) tai uždarė: DR pratyba dabar užbaigia pažymėtą job'ą per `rasymoSaugykla`, tikrina, kad objektas realiai guli saugykloje, kad po `eraseJob()` jo failų sistemoje NEBĖRA, ir kad replay atkurtoje bazėje nekrenta ties jau ištrintu objektu |
 | **Transakcinis rezultatų įrašymas** (7.5b dalis) | Be jo nutrūkęs procesas palieka `completed` be `job_results`; kitas bandymas atsimuša į `restart()` terminalų sargą, audio lieka, o klientas rezultato niekada negauna. **Įrodymas:** `postgresStore.integration` — „7.2b klaida po job CAS rollbackina job IR result, o connection grįžta pool'ui": sukelta klaida PO job CAS atsuka ABU įrašus, o jungties grąžinimas tikrinamas realiai (ne per `pool.waitingCount`, kuris praeidavo ir nutekėjus klientui). `externalCompletion.integration` tikrina tą pačią ribą external kelyje: nuoroda ir registro įsipareigojimas rašomi vienoje transakcijoje. ✅ **UŽDARYTA** — apibrėžimas po #157 nepasikeitė: klausimas „ar abu įrašai atomiški" nepriklauso nuo to, kur guli turinys |
 | **Idempotentiškas užbaigimas su konfliktų sprendimu** (7.5b dalis) — ⚠️ **PERRAŠYTA IŠ MECHANIZMO Į GARANTIJĄ (§12.1)** | **Garantija:** du lygiagretūs užbaigimai nesunaikina vienas kito — vėlesnis rezultatas TYLIAI NEPERRAŠO ankstesnio, o skirtingas rezultatas yra klaida, ne sėkmė. ⚠️ **Ankstesnė redakcija nurodė MECHANIZMĄ** (sąlyginį `UPDATE ... WHERE status = 'processing'`), nors prielaidai reikėjo tik garantijos. Ji buvo teisinga savo metu — rašyta prieš 7.5b, kai mechanizmas dar nebuvo pasirinktas — bet ADR sprendė klausimą, kurio neturėjo spręsti, ir pasenо, kai implementacija pasirinko kitą kelią. Perrašius vėl į mechanizmą, tas pats pasikartotų pakeitus užrakinimo strategiją. **Dabartinė realizacija** (nuoroda, ne reikalavimas): `postgresStore.readJobForUpdate()` — `SELECT ... FOR UPDATE OF j`, pesimistinis eilutės užraktas; antrasis vykdytojas po užrakto mato jau `completed` būseną ir eina idempotencijos keliu per `common.js idempotentiskasAtsakymas()`. ⚠️ **REMONTO IŠIMTIS (#157, PR-4):** „rezultatas lyginamas, o ne perrašomas" galioja PAKARTOJIMUI; kai tas pats `checksum` reiškia REMONTĄ (objekto saugykloje nebėra), nuoroda **PERJUNGIAMA** sąmoningai. Be šios išimties taisyklė aprašo save be svarbiausio atvejo. **Įrodymai:** `externalCompletion.integration` — „DU lygiagretūs `finish()` su SKIRTINGAIS rezultatais: vienas laimi, kitas gauna konfliktą", „su TUO PAČIU: lieka VIENAS objektas", „checksum sutampa, bet objekto NĖRA: tai REMONTAS", „DU lygiagretūs REMONTAI: lieka VIENAS įsipareigotas"; `jobFinishIdempotency` — lygybės taisyklė NEDUBLIUOJAMA, visi trys backend'ai kviečia tą pačią funkciją |
 | **Fail-closed startas, patikrintas REALIAI** (7.2a `[F2]`) | `initializePostgres()` neturi fallback į atmintį, bet kol barjeras uždarytas, funkcija produkcijoje NEPASIEKIAMA — įrodyta tik unit lygmeniu (`_initializePostgresForTests`). Barjerą atidarius pirmas realus startas su neprieinama DB ir BŪTŲ tas testas |

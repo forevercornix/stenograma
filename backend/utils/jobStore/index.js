@@ -418,13 +418,19 @@ async function initializePostgres() {
  * ir tylėjo.
  */
 async function paruostiArtefaktuSaugykla() {
-  const { parinktiBackenda, sukurtiSaugykla } = require("../artifactStore");
-  const { backend } = parinktiBackenda(process.env);
+  const { paruostiKonfiguruotaSaugykla } = require("../artifactStore");
 
-  if (backend === "inline") return {};
+  /**
+   * ⚠️ SURINKIMAS GYVENA `utils/artifactStore/`, NE ČIA (#155, A1).
+   *
+   * Iki tol jis buvo šioje funkcijoje, ir būtent dėl tos vietos
+   * `scripts/dr-restore.mjs` jo nepasiekė: CLI sąmoningai neimportuoja `jobStore`.
+   * Čia lieka tik tai, kas yra JOB STORE klausimas — parinkčių forma ir logo eilutė.
+   */
+  const rasymoSaugykla = await paruostiKonfiguruotaSaugykla(process.env);
+  if (!rasymoSaugykla) return {};
 
-  const rasymoSaugykla = await sukurtiSaugykla({ backend });
-  log.info("Artefaktų saugykla prijungta", { backend });
+  log.info("Artefaktų saugykla prijungta", { backend: rasymoSaugykla.backend });
   return { rasymoSaugykla };
 }
 
