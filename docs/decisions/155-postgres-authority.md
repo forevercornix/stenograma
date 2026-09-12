@@ -862,6 +862,65 @@ atidarančio PR DoD — neišbandytas ar neparašytas gedimo kelias, įsijungian
 būtent tuo momentu, yra blogesnis nei akivaizdžiai nesantis: jis atrodo
 padengtas.
 
+## ⚠️ BARJERAS ATIDARYTAS (#155) — SPRENDIMAS IR JO RIBOS
+
+`POSTGRES_AKTYVAVIMAS_LEISTAS = true` nuo šio leidimo. Penkios iš šešių prielaidų
+uždarytos anksčiau; šeštoji (**fail-closed startas, patikrintas REALIAI**) uždaroma
+**pačiu atidarymu** — kol barjeras buvo uždarytas, `initializePostgres()`
+produkcijoje buvo nepasiekiama, tad jos elgesys buvo įrodytas tik unit lygmeniu.
+
+### ⚠️ ATIDARYMAS NĖRA PERJUNGIMAS
+
+| Aplinka | Prieš | Po |
+|---|---|---|
+| `DATABASE_URL` | `memory` (barjeras nuleisdavo) | `memory` |
+| `DATABASE_URL` + `REDIS_URL` | `redis` (barjeras nuleisdavo) | `redis` |
+| `JOB_STORE_BACKEND=postgres` | **klaida** | **`postgres`** |
+
+**Nė vienas esamas diegimas nepersijungia savaime.** Pasikeitė tik tai, kad
+eksplicitinis kelias tapo pasiekiamas.
+
+### ⚠️ POLITIKOS PAKEITIMAS: `postgres` RENKAMAS TIK EKSPLICITIŠKAI
+
+Iki šio leidimo `resolveBackendChoice()` turėjo numanomą išvedimą:
+`DATABASE_URL` buvimas PATS pasirinkdavo `postgres`. Kol barjeras buvo uždarytas,
+to niekas nematė — pasirinkimas būdavo nuleidžiamas atgal.
+
+Atidarius barjerą tas išvedimas būtų perjungęs **kiekvieną** diegimą, turintį
+`DATABASE_URL` — įskaitant nustačiusius jį TIK sesijoms (7.3), auditui ar
+migracijoms. Jie job'ų perkelti neprašė, o Redis metaduomenys **nėra** migruojami
+(žr. „Cutover"), tad jų job'ai tiesiog taptų nematomi.
+
+⚠️ **GRĮŽIMO KRYPTIS NESIMETRIŠKA.** Numanomas pasirinkimas gali būti grąžintas
+vėliau **atskiru leidimu su migracijos pastaba**. Atvirkščiai — ne: grįžimas be
+pastabos tyliai perjungtų veikiančius diegimus, o tai tiksliai tas gedimas, kurio
+šis pakeitimas ir vengia.
+
+⚠️ **`DATABASE_URL` LIEKA REIKŠMINGAS** visoms kitoms ašims: sesijoms, auditui,
+migracijoms ir `doctor` patikroms. Pasikeitė tik tai, kad jis nebesprendžia už
+operatorių, kur gyvena JOB metaduomenys.
+
+### ⚠️ BARJERAS BUVO NETIESIOGINIS LAIDAS DVIEM DALYKAMS
+
+Atidarant paaiškėjo, kad du testai rėmėsi barjeru ne dėl jo paties:
+
+| Kas | Kuo rėmėsi | Kas liko |
+|---|---|---|
+| `#280 P1` | `barjeras: true` kaip **paaiškinimas**, kodėl autoritetas nėra PostgreSQL | `nustatytiAsis()` perduoda `priezastis` |
+| `#280 II` | barjero **metimas** kaip pigus konfigūracijos klaidos liudytojas | liudytojas pakeistas realistiškesniu |
+
+Abiem atvejais **savybė nepasikeitė** — pasikeitė tik tai, kas ją liudija. Tai ta
+pati forma kaip „18 failų, saugių dėl vieno kvietėjo": vėliava buvo atsitiktinai
+pakankama, kol priežastis buvo viena.
+
+### Eilės pasirinkimas — 7.2a sąlyga uždaroma iki galo
+
+`canUseQueue()` remiasi `SHARED_BACKENDS` (`redis`, `postgres`), tad nė vienam
+deriniui rezultatas nepakito. Bet pasekmė vertesnė už patikrą: **eilės pasirinkimas
+nebepriklauso nuo numanomo išvedimo** — jis priklauso nuo `REDIS_URL` ir
+eksplicitinio pasirinkimo. Tai suderina praktiką su 7.2a reikalavimu „eilės
+pasirinkimas atsiejamas nuo metaduomenų backend'o".
+
 ## ⚠️ DB IR RUNTIME AIBĖS PRIVALO SUTAPTI
 
 Atskira taisyklė, išvesta iš trijų iš eilės peržiūros radinių, kurie visi buvo
