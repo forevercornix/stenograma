@@ -121,6 +121,26 @@ try {
         }
       : null;
 
+    /**
+     * ⚠️ SAUGYKLOS SURENKAMOS IŠ TOS PAČIOS KONFIGŪRACIJOS KAIP PRODUKCINIS STARTAS
+     * (#155, A1).
+     *
+     * Be jų `restoredJobStore.paruosti()` fail-close'ina kiekvieną atkurtą bazę,
+     * kurioje yra `fs` ar `s3` eilutė — t. y. DR atkūrimas krisdavo dar PRIEŠ replay.
+     * Testas to nematė, nes paduodavo saugyklas TIESIAI koordinatoriui, aplenkdamas
+     * šį kelią.
+     *
+     * ⚠️ SURINKIMAS NEKOPIJUOJAMAS: kviečiamas `paruostiKonfiguruotaSaugykla()`, tas
+     * pats, kurį kviečia `initializePostgres()`. Antra realizacija šioje sekoje jau
+     * tris kartus išsiskyrė.
+     *
+     * ⚠️ RAKTAS IMAMAS IŠ PAČIOS SAUGYKLOS (`backend`), ne iš konfigūracijos —
+     * antra tipo interpretacija būtų tas pats defektas siauresne forma.
+     */
+    const { paruostiKonfiguruotaSaugykla } = require("../utils/artifactStore");
+    const saugykla = await paruostiKonfiguruotaSaugykla(process.env);
+    const artifactStores = saugykla ? { [saugykla.backend]: saugykla } : null;
+
     const rezultatas = await drCoordinator.paleisti({
       targetUrl: target,
       artefaktas,
@@ -128,6 +148,7 @@ try {
       actor,
       leistiPasenusi: veliava("allow-stale"),
       patvirtinimas,
+      artifactStores,
     });
 
     console.log(
