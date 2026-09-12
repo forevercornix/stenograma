@@ -75,6 +75,8 @@ const ARTEFAKTU_SAKNIS = praleisti() ? null : fs.mkdtempSync(path.join(os.tmpdir
 let artefaktuSaugykla = null;
 /** Pažymėto job'o objekto raktas — užpildomas 1 žingsnyje. */
 let zymetoRaktas = null;
+/** Nepažymėto job'o (B) objekto raktas — C1 kontrolė. */
+let nepazymetoRaktas = null;
 
 const VARTOTOJAS_A = "11111111-1111-4111-8111-111111111111";
 const VARTOTOJAS_B = "22222222-2222-4222-8222-222222222222";
@@ -156,14 +158,21 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
   if (praleisti()) return;
 
   t.after(async () => {
-    await pasalintiDb(SALTINIO_URL);
-    await pasalintiDb(TIKSLO_URL);
-
     /**
-     * ⚠️ LAIKINAS KATALOGAS ŠALINAMAS, ne paliekamas šlavėjui. `verify-clean.mjs`
-     * tokius likučius gaudo, ir jie jau kartą buvo rasti (#157, PR-6: trys katalogai).
+     * ⚠️ KATALOGAS ŠALINAMAS `finally`, NE PO `DROP DATABASE`.
+     *
+     * Nepavykus teardown'ui (užimta bazė, dingusi jungtis), `await` nutraukia hook'ą,
+     * ir nepažymėto job'o TRANSKRIPCIJA lieka `/tmp`. Valymas, vykdomas tik laimingu
+     * keliu, yra valymas, kurio nėra būtent tada, kai jo reikia.
+     *
+     * `verify-clean.mjs` tokius likučius gaudo (#157, PR-6: trys katalogai).
      */
-    if (ARTEFAKTU_SAKNIS) fs.rmSync(ARTEFAKTU_SAKNIS, { recursive: true, force: true });
+    try {
+      await pasalintiDb(SALTINIO_URL);
+      await pasalintiDb(TIKSLO_URL);
+    } finally {
+      if (ARTEFAKTU_SAKNIS) fs.rmSync(ARTEFAKTU_SAKNIS, { recursive: true, force: true });
+    }
   });
 
   const saltinioEnv = testoAplinka(SALTINIO_URL);
@@ -207,6 +216,14 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           fs.existsSync(path.join(ARTEFAKTU_SAKNIS, zymetoRaktas)),
           "objektas privalo realiai gulėti saugykloje — kitaip ištrynimui nebūtų ko šalinti"
         );
+
+        const { rows: bRows } = await pool.query(
+          "SELECT storage_key FROM job_results WHERE job_id = $1",
+          [jobai.completed.id]
+        );
+        assert.equal(bRows[0].storage_key ? true : false, true, "job'as B irgi turi EXTERNAL objektą");
+        nepazymetoRaktas = bRows[0].storage_key;
+        assert.notEqual(nepazymetoRaktas, zymetoRaktas, "du SKIRTINGI objektai — kitaip C1 nieko netikrintų");
 
         const store = sesijuPg.createPostgresStore(pool);
         for (const [userId, role, username] of [
@@ -325,6 +342,40 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     );
 
     /** Kilmės ašis: tapatybė ATKELIAVO su dump'u, tad kilmės patikra praeis. */
+    /**
+     * ⚠️ C2: PERKELTA NUORODA TIKRINAMA PRIEŠ REPLAY, NE TIK PO JO.
+     *
+     * Be šios asercijos „ištrynimas išgyvena restore" galiotų ir TUŠČIAI bazei:
+     * praradus `job_results` bei `job_result_attempts` eilutes, 5 žingsnis to
+     * nepastebėtų (jis tikrina tik `jobs` ir `erasure_marks`), o 8 žingsnis laukia,
+     * kad rezultato eilutės NEBŪTŲ. Testas praeitų neatkūręs to, ką turi ištrinti.
+     */
+    const { rows: atkurtos } = await vykdyti(
+      TIKSLO_URL,
+      "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1",
+      [jobai.zymetas.id]
+    );
+    const atkurta = atkurtos[0] || {};
+    assert.equal(atkurta.storage_type, "fs", "atkurta EXTERNAL nuoroda, ne inline");
+    assert.equal(atkurta.storage_key, zymetoRaktas, "atkurtas TAS PATS raktas");
+
+    /** ⚠️ Registro įrašas irgi privalo grįžti — jis yra antra objekto adreso pusė. */
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "job_result_attempts", "WHERE job_id = $1", [jobai.zymetas.id]),
+      1,
+      "bandymų registro įrašas grįžo kartu su nuoroda"
+    );
+
+    /**
+     * ⚠️ IR OBJEKTO SAUGYKLOJE NEBĖRA — nuoroda atkurta, turinys ne.
+     * Būtent tokia yra tikroji atkurtos bazės būsena, ir replay privalo ją ištverti.
+     */
+    assert.equal(
+      fs.existsSync(path.join(ARTEFAKTU_SAKNIS, zymetoRaktas)),
+      false,
+      "objektas ištrintas 3 žingsnyje ir NEGRĮŽTA su DB kopija"
+    );
+
     const pool = new Pool({ connectionString: TIKSLO_URL });
     try {
       assert.equal(
@@ -585,6 +636,19 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
   });
 
   await t.test("8. galinė būsena: A nebėra, B nepaliesti, sesijos revokuotos", async () => {
+    /**
+     * ⚠️ C1: NEPAŽYMĖTO JOB'O OBJEKTAS PRIVALO IŠLIKTI.
+     *
+     * Iki šiol tikrinta tik tai, kad PAŽYMĖTAS raktas dingo. Ištrynus gretimą raktą
+     * ar visą prefiksą, testas liktų ŽALIAS: „B liko" kontrolė tikrina tik DB eilutę,
+     * o jos niekas neliečia. Vadinasi vienintelis testas, kuris DR kelyje gintų
+     * nuosavybės predikatą, jo negynė.
+     */
+    assert.ok(
+      fs.existsSync(path.join(ARTEFAKTU_SAKNIS, nepazymetoRaktas)),
+      "nepažymėto job'o objektas privalo likti saugykloje — ištrynimas liečia TIK savo raktus"
+    );
+
     assert.equal(
       await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE id = $1", [jobai.zymetas.id]),
       0,
