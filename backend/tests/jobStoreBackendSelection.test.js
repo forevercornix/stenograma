@@ -473,3 +473,104 @@ test("FAIL-CLOSED: PostgreSQL startas turi BAIGTINĘ prisijungimo ribą", async 
     await new Promise((res) => server.close(res));
   }
 });
+
+/**
+ * ⚠️ GRĮŽTAMUMAS — MECHANIZMO PALIKIMO KAINA IR JO ĮRODYMAS (#155).
+ *
+ * `applyActivationBarrier()` ir nepasiekiamas `if (choice.barjeras)` įspėjimas
+ * `jobStore/index.js` paliekami SĄMONINGAI: barjeras yra pats mechanizmas, ir jį
+ * pašalinus konstantos grąžinimas į `false` nebeturėtų ko įjungti — „uždaryti atgal"
+ * reikštų parašyti viską iš naujo.
+ *
+ * ⚠️ BET PALIKTAS MECHANIZMAS BE ĮRODYMO YRA TIK PRIELAIDA, KAD JIS VEIKIA.
+ *
+ * Atidarius barjerą visos jo šakos tapo nepasiekiamos, tad NĖ VIENAS kitas testas jų
+ * nebevykdo: `POLITIKA (1/2)`, `(2/2)` ir „pralaidumo" testas matuoja tik ATIDARYTĄ
+ * būseną. Vadinasi grįžtamumas — vienintelė priežastis, dėl kurios kodas laikomas —
+ * buvo neišbandytas nuo pat atidarymo commit'o. Tai ta pati „savybė be liudytojo"
+ * klasė, kurią šis PR taisė 33 kitose vietose; čia ji buvo PAČIAME barjere.
+ *
+ * ⚠️ KODĖL PERKOMPILIUOJAMA, O NE TIKRINAMAS TEKSTAS. Struktūrinė patikra („šaka
+ * faile tebėra") įrodytų tik tai, kad kodas parašytas. Čia konstanta apverčiama ir
+ * paleidžiama TIKROJI funkcija, tad tikrinamas ELGESYS: metimas eksplicitiniam
+ * keliui ir nuleidimas numanomam. Modulis savų `require` neturi, tad perkompiliavimas
+ * yra pilnas, ne dublis.
+ *
+ * ⚠️ `assert.notEqual` ANT PAKEITIMO YRA DALIS TESTO, NE HIGIENA: konstantą
+ * pervadinus ar pašalinus pakeitimas nieko neberastų, ir testas praeitų TYLIAI
+ * nieko nepatikrinęs — tiksliai tas gedimas, kurį visas šis PR gaudo.
+ */
+function suUzdarytuBarjeru() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const Module = require("node:module");
+
+  const kelias = require.resolve("../utils/jobStore/backendSelection");
+  const saltinis = fs.readFileSync(kelias, "utf8");
+  const pakeistas = saltinis.replace(
+    "const POSTGRES_AKTYVAVIMAS_LEISTAS = true;",
+    "const POSTGRES_AKTYVAVIMAS_LEISTAS = false;"
+  );
+
+  assert.notEqual(
+    pakeistas,
+    saltinis,
+    "konstanta privalo egzistuoti TIKSLIAI tokia forma - kitaip šis testas tyliai nieko netikrina"
+  );
+
+  const modulis = new Module(kelias, null);
+  modulis.filename = kelias;
+  modulis.paths = Module._nodeModulePaths(path.dirname(kelias));
+  modulis._compile(pakeistas, kelias);
+  return modulis.exports;
+}
+
+test("GRĮŽTAMUMAS: konstantą grąžinus į `false`, barjeras vėl UŽDAROSI", () => {
+  const uzdarytas = suUzdarytuBarjeru();
+
+  /** Eksplicitinis kelias vėl yra KLAIDA, ne tylus nuleidimas. */
+  assert.throws(
+    () =>
+      uzdarytas.applyActivationBarrier(
+        uzdarytas.resolveBackendChoice({ JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }),
+        { JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }
+      ),
+    /dar neleidžiamas/,
+    "uždarytas barjeras eksplicitinį pasirinkimą privalo ATMESTI, ne ignoruoti"
+  );
+
+  /**
+   * ⚠️ IR NUMANOMAS KELIAS VĖL NULEIDŽIAMAS SU MATOMA VĖLIAVA.
+   *
+   * Būtent ši šaka maitina `jobStore/index.js` įspėjimą ir `priezastis` priesagą
+   * `(barjeras)`. Be jos uždarymas būtų tylus — t. y. blogesnis nei jo nebuvimas.
+   */
+  const suRedis = { DATABASE_URL: PG, REDIS_URL: REDIS, JOB_STORE_BACKEND: "postgres" };
+  const nuleista = uzdarytas.applyActivationBarrier(
+    { norimas: "postgres", priezastis: "JOB_STORE_BACKEND", eksplicitinis: false, barjeras: false },
+    suRedis
+  );
+
+  assert.equal(nuleista.norimas, "redis", "su `REDIS_URL` nuleidžiama į Redis, ne į atmintį");
+  assert.equal(nuleista.barjeras, true, "vėliava privalo grįžti - ja remiasi operatoriaus įspėjimas");
+  assert.match(nuleista.priezastis, /\(barjeras\)/, "priežastis privalo įvardyti barjerą");
+
+  /** Be `REDIS_URL` — į atmintį, ta pačia šaka. */
+  assert.equal(
+    uzdarytas.applyActivationBarrier(
+      { norimas: "postgres", priezastis: "DATABASE_URL", eksplicitinis: false, barjeras: false },
+      { DATABASE_URL: PG }
+    ).norimas,
+    "memory"
+  );
+
+  /** ⚠️ Kontrolė: perkompiliuotas modulis nekeičia GYVOJO - barjeras tebėra atidarytas. */
+  assert.equal(
+    applyActivationBarrier(resolveBackendChoice({ JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }), {
+      JOB_STORE_BACKEND: "postgres",
+      DATABASE_URL: PG,
+    }).norimas,
+    "postgres",
+    "testas privalo likti izoliuotas - gyvas modulis nepaliestas"
+  );
+});
