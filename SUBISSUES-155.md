@@ -770,9 +770,15 @@ turinys yra dokumentacijos kokybės, ne mašininis reikalavimas.
 
 ### 14. Backend aktyvavimas
 
-7.2b **NEATIDARO** PostgreSQL aktyvavimo barjero.
+> ⚠️ **BŪSENA PASIKEITĖ NUO TADA, KAI TAI RAŠYTA (#155): BARJERAS ATIDARYTAS,
+> `POSTGRES_AKTYVAVIMAS_LEISTAS = true`.** Visos žemiau išvardytos prielaidos
+> įvykdytos. Šis skyrius lieka kaip 7.2b APIMTIES įrašas — jis teisingas apie tai,
+> ko 7.2b nedarė, ir NETEISINGAI skaitomas kaip dabartinė sistemos būsena.
+> Autoritetas dabarčiai — `docs/decisions/155-postgres-authority.md`.
 
-`POSTGRES_AKTYVAVIMAS_LEISTAS` lieka `false`, kol įvykdytos ADR nurodytos
+7.2b **NEATIDARĖ** PostgreSQL aktyvavimo barjero.
+
+`POSTGRES_AKTYVAVIMAS_LEISTAS` liko `false`, kol nebuvo įvykdytos ADR nurodytos
 vėlesnės prielaidos, įskaitant:
 
 - persistentines deletion tombstones;

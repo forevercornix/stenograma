@@ -35,9 +35,10 @@ const ALLOWED_BACKENDS = Object.freeze(["postgres", "redis", "memory"]);
 /**
  * ⚠️ AKTYVAVIMO BARJERAS (ADR „AKTYVAVIMO BARJERAS").
  *
- * `postgresStore` yra ĮGYVENDINTAS, bet NEPARENKAMAS. ADR sako, kad rollback
- * į Redis nepalaikomas, tad PostgreSQL negali tapti autoritetingas anksčiau,
- * nei egzistuoja kelias tą režimą atlaikyti.
+ * ⚠️ BARJERAS ATIDARYTAS (#155) — pilnas sąrašas ir sąlygos žemiau. Ši pastraipa
+ * aprašo, KODĖL jis apskritai buvo: `postgresStore` buvo ĮGYVENDINTAS, bet
+ * NEPARENKAMAS, nes ADR sako, kad rollback į Redis nepalaikomas — tad PostgreSQL
+ * negalėjo tapti autoritetingas anksčiau, nei egzistuoja kelias tą režimą atlaikyti.
  *
  * ⚠️ PRIELAIDŲ SĄRAŠAS ČIA NEDUBLIUOJAMAS. Autoritetas —
  * `docs/decisions/155-postgres-authority.md`, skyrius „AKTYVAVIMO BARJERAS".
@@ -45,8 +46,9 @@ const ALLOWED_BACKENDS = Object.freeze(["postgres", "redis", "memory"]);
  * ADR tuo metu pridėjo eilės prieinamumo preflight, o kopija čia liko be jo.
  * Kopija, kurios niekas netikrina, ilgainiui pradeda meluoti.
  *
- * ⚠️ BARJERO NEATIDARO NEI 7.2a, NEI 7.2b. 7.2b užbaigia atominių operacijų
- * kontraktą; aktyvavimas priklauso VISOMS ADR prielaidoms.
+ * ⚠️ BARJERO NEATIDARĖ NEI 7.2a, NEI 7.2b. 7.2b užbaigė atominių operacijų
+ * kontraktą; aktyvavimas priklausė VISOMS ADR prielaidoms, ir atidarė jį tik
+ * paskutinės uždarymas.
  *
  * ⚠️ KONSTANTA, NE ENV KINTAMASIS. `ALLOW_POSTGRES=1` reikštų, kad barjerą
  * galima apeiti diegimo metu, nepraėjus nė vienos prielaidos ir be jokios
@@ -176,10 +178,17 @@ function resolveBackendChoice(env = process.env) {
 /**
  * NORAS → FAKTAS.
  *
- * Kol barjeras galioja, `DATABASE_URL` NETYLI perjungia srauto: parenkamas
- * ankstesnis backend'as, o skambintojas gauna `barjeras: true`, kad galėtų
- * apie tai pranešti. Eksplicitinis `JOB_STORE_BACKEND=postgres` yra KLAIDA, ne
- * įspėjimas — nurodymo ignoruoti tyliai negalima.
+ * ⚠️ BARJERAS ATIDARYTAS — ŠIOS FUNKCIJOS ŠAKOS ŠIANDIEN NEPASIEKIAMOS.
+ *
+ * Su `POSTGRES_AKTYVAVIMAS_LEISTAS = true` kiekvienas kelias grąžina
+ * `barjeras: false`. Mechanizmas paliekamas, nes jis yra pats barjeras: jį
+ * pašalinus konstantos grąžinimas į `false` nebeturėtų ką įjungti, ir
+ * „uždaryti atgal" reikštų parašyti viską iš naujo.
+ *
+ * Kol barjeras galiojo, elgesys buvo: `DATABASE_URL` netyliai perjungdavo
+ * srautą — parenkamas ankstesnis backend'as, o skambintojas gaudavo
+ * `barjeras: true`, kad galėtų apie tai pranešti; eksplicitinis
+ * `JOB_STORE_BACKEND=postgres` buvo KLAIDA, ne įspėjimas.
  */
 function applyActivationBarrier(choice, env = process.env) {
   if (choice.norimas !== "postgres") return { ...choice, barjeras: false };
@@ -219,13 +228,20 @@ function selectBackend(env = process.env) {
  * ⚠️ ATSAKYMAS NĖRA „ar nustatytas DATABASE_URL".
  *
  * Būtent taip buvo iš pradžių, ir tai melavo: su `DATABASE_URL` be
- * `REDIS_URL` aktyvavimo barjeras palieka job'us ATMINTYJE, o
- * `privacyConfig` skelbdavo `persistentStorage = true`. Operatorius pagrįstai
- * manytų, kad job'ai išgyvens restartą — ir prarastų metaduomenis bei
- * rezultatus.
+ * `REDIS_URL` job'ai lieka ATMINTYJE, o `privacyConfig` skelbdavo
+ * `persistentStorage = true`. Operatorius pagrįstai manytų, kad job'ai išgyvens
+ * restartą — ir prarastų metaduomenis bei rezultatus.
  *
- * Kol barjeras uždarytas, vien `DATABASE_URL` persistencijos NEDUODA. Barjerą
- * atidarius ši funkcija ims grąžinti `true` be jokio pakeitimo čia.
+ * ⚠️ ANKSTESNĖ ŠIO KOMENTARO EILUTĖ BUVO PRANAŠYSTĖ, IR JI NEIŠSIPILDĖ (#155).
+ *
+ * Ji žadėjo: „barjerą atidarius ši funkcija ims grąžinti `true` be jokio
+ * pakeitimo čia". Barjeras atidarytas — ir vien `DATABASE_URL` toliau grąžina
+ * `false`, nes `postgres` renkamas TIK eksplicitiniu `JOB_STORE_BACKEND`.
+ * Funkcija tikrai nepasikeitė, bet ne dėl tos priežasties, kurią ji skelbė.
+ *
+ * Pranašystė komentare yra ta pati klasė kaip priežastis testo varde: ji negali
+ * kristi. Todėl čia lieka tik tai, kas tikrinama — atsakymą duoda
+ * `selectBackend()`, ir jis vienas.
  */
 function isPersistentBackend(env = process.env) {
   return SHARED_BACKENDS.includes(selectBackend(env).norimas);

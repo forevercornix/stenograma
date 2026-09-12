@@ -5,16 +5,24 @@ const { createPostgresStore, KONSTRUKCIJOS_PARINKTYS } = require("./jobStore/pos
  *
  * ⚠️ KODĖL ŠIS ADAPTERIS APSKRITAI EGZISTUOJA.
  *
- * `jobStore` fasadas atsako į klausimą „kur gyvena GYVI job'ai", ir šiandien jo
- * atsakymas nėra PostgreSQL: 7.2a aktyvavimo barjeras `JOB_STORE_BACKEND=postgres`
- * verčia klaida, o vien `DATABASE_URL` grąžina `memory | barjeras: true`
- * (išmatuota). Po DR atkūrimo asmens duomenys guli būtent ATKURTOJE bazėje, tad
- * replay per fasadą būtų vakuumas — `jobs` eilutės liktų, o kvitas skelbtų sėkmę.
+ * `jobStore` fasadas atsako į klausimą „kur gyvena GYVI job'ai" — ir tai NE tas
+ * pats klausimas, į kurį reikia atsakyti po DR atkūrimo. Ten asmens duomenys guli
+ * ATKURTOJE bazėje, tad replay per fasadą būtų vakuumas: `jobs` eilutės liktų, o
+ * kvitas skelbtų sėkmę.
+ *
+ * ⚠️ ATIDARIUS BARJERĄ ŠIS ADAPTERIS TAPO REIKALINGESNIS, NE MAŽIAU (#155).
+ *
+ * Ankstesnė redakcija rėmėsi barjeru: `JOB_STORE_BACKEND=postgres` buvo klaida, o
+ * vien `DATABASE_URL` grąžindavo `memory | barjeras: true`, tad fasadas atkurtos
+ * bazės NEPALIESDAVO — žala buvo „nieko neįvyko". Dabar diegimas GALI turėti
+ * `postgres` fasadą, ir tada replay per jį eitų į PRODUKCINĘ bazę: ne praleistas
+ * trynimas, o trynimas ne toje bazėje. Nukreipimas privalomas abiem atvejais —
+ * pasikeitė tik tai, kuo baigiasi jo nebuvimas.
  *
  * ⚠️ TAI NĖRA ANTRAS JOB STORE IR NĖRA ANTRAS TRYNIMAS.
  *
  * Čia nėra nė vieno savo SQL sakinio: naudojamas tas pats `createPostgresStore()`,
- * kurį naudos fasadas, kai barjeras atsidarys. Adapteris tik perrašo paviršių iš
+ * kurį fasadas naudoja su `JOB_STORE_BACKEND=postgres`. Adapteris tik perrašo paviršių iš
  * plokščio (`get`/`update`/`remove`) į `system.*`, kurio tikisi `jobErasure`.
  * Trynimo semantika lieka `eraseJob()` — viena visai sistemai.
  *

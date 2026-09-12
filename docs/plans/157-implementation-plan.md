@@ -1848,7 +1848,7 @@ visada-„fail" ir taip pat nieko neįrodytų.
 
 | Kriterijus | Kodėl | Kas jį uždarytų |
 |---|---|---|
-| Visi `postgresStore` keliai | Barjeras uždarytas; `DATABASE_URL` vietoje nėra | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
+| Visi `postgresStore` keliai | `DATABASE_URL` vietoje nėra. ⚠️ **Antroji priežastis („barjeras uždarytas") PASIBAIGĖ (#155)** — liko tik ši viena | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
 | `S3ArtifactStore` | Reikia MinIO | `docker compose -f docker-compose.minio.yml up -d && REQUIRE_MINIO=1 npm run test:s3` |
 | I/O ne po užraktu | Reikia dviejų tikrų jungčių | tas pats `test:postgres` |
 | Lenktynių testas | Vienas žalias paleidimas nieko neįrodo | N kartojimų CI; verdiktas „nepaneigta" |

@@ -271,15 +271,17 @@ test("EILĖ: hasQueueBackend() deleguoja į canUseQueue be savo sąlygos", () =>
  * ⚠️ ŠIŲ TESTŲ APIMTIS RIBOTA SĄMONINGAI.
  *
  * DoD reikalauja, kad pasirinkus PostgreSQL prisijungimo klaida nutrauktų
- * startą arba readiness, o ne pereitų į memory. Aktyvavimo barjeras
- * PostgreSQL dar neparenka, tad PILNO produkcinio kelio
- * (`DATABASE_URL` → startas nutrūksta) šiame PR NĖRA - jo galutinis
- * acceptance priklauso aktyvavimo etapui.
+ * startą arba readiness, o ne pereitų į memory.
  *
- * Ką ŠIE testai vis dėlto įrodo: kad gedimo kelias egzistuoja, kad jis META
- * klaidą ir kad jis NEGRĮŽTA į memory. Be jų kriterijus neturėtų jokio
- * įrodymo, o neišbandytas gedimo kelias, įsijungiantis 7.2b momentu, yra
- * blogesnis nei neparašytas - jis atrodo padengtas.
+ * Ką ŠIE testai įrodo: kad gedimo kelias egzistuoja, kad jis META klaidą ir kad
+ * jis NEGRĮŽTA į memory.
+ *
+ * ⚠️ PILNAS PRODUKCINIS KELIAS NEBĖRA JŲ RIBA (#155). Ankstesnė redakcija sakė,
+ * kad jo „šiame PR NĖRA" ir kad acceptance priklauso aktyvavimo etapui — tas
+ * etapas ĮVYKO: barjerą atidarantis PR turi CI žingsnį „Fail-closed startas",
+ * kuris paleidžia tikrą `node server.js` su `JOB_STORE_BACKEND=postgres` ir
+ * uždaru prievadu. Šie testai lieka kaip pigus, greitas sluoksnis; įrodymas,
+ * kad kelias pasiekiamas PRODUKCIJOJE, gyvena ten.
  */
 test("FAIL-CLOSED: neprieinamas PostgreSQL meta klaidą, o ne grįžta į memory", async () => {
   const buves = process.env.DATABASE_URL;
