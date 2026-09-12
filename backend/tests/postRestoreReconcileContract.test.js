@@ -575,8 +575,50 @@ test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal
   assert.equal(verdiktai.has("nepadengta"), true);
   assert.equal(verdiktai.has("nereikalinga"), true);
 
-  /** 7.2a barjeras įvardijamas atskirai — operatorius turi matyti PRIEŽASTĮ. */
-  assert.equal(reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" }).jobai.barjeras, true);
+  /**
+   * ⚠️ PERRAŠYTA SU TAISYKLE (#155). Buvo: „7.2a barjeras įvardijamas atskirai" ir
+   * `assert.equal(...jobai.barjeras, true)`.
+   *
+   * Ta asercija gynė TIKRĄ dalyką — kad operatorius mato PRIEŽASTĮ — bet per
+   * netiesioginį laidą: kol job'ų autoritetas galėjo nebūti PostgreSQL TIK dėl
+   * barjero, `barjeras: true` buvo ATSITIKTINAI pakankamas paaiškinimas.
+   *
+   * Po eksplicitinio pasirinkimo įvedimo priežasčių yra kelios, ir `barjeras` tapo
+   * `false` NEPRARADUS nė vienos ribos — t. y. asercija būtų likusi žalia pakeitus ją
+   * į `false`, bet komentaras toliau tvirtintų, kad priežastis matoma. Ji nebūtų.
+   *
+   * GINA DABAR: operatorius mato priežastį, KAD IR KOKIA JI BŪTŲ — ne konkrečiai
+   * barjerą.
+   */
+  const asysTikDb = reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" });
+  assert.equal(
+    asysTikDb.jobai.priezastis,
+    "numatyta",
+    "vien `DATABASE_URL` nebepasirenka PostgreSQL, ir operatorius privalo matyti, KODĖL"
+  );
+
+  assert.equal(
+    reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db", REDIS_URL: "redis://r" }).jobai.priezastis,
+    "REDIS_URL",
+    "kita priežastis — kitas tekstas; viena vėliava jų abiejų nebeatskirtų"
+  );
+
+  /**
+   * ⚠️ SANITIZACIJA — TIKRINA TESTAS, NE KOMENTARAS (#319).
+   *
+   * `priezastis` keliauja į operatoriaus išvestį prieš cutover. Šiandien ji neša
+   * kintamųjų VARDUS arba literalą `numatyta`; jei kada nors imtų nešti REIKŠMĘ,
+   * DSN su slaptažodžiu atsidurtų `verify` ataskaitoje.
+   */
+  for (const env of [
+    { DATABASE_URL: "postgres://vartotojas:slaptazodis@vidinis.lan:5432/db" },
+    { DATABASE_URL: "postgres://vartotojas:slaptazodis@vidinis.lan:5432/db", REDIS_URL: "redis://r:pw@h" },
+  ]) {
+    const tekstas = JSON.stringify(reconcile.nustatytiAsis(env).jobai);
+    for (const dalis of ["slaptazodis", "vartotojas", "vidinis.lan", "pw"]) {
+      assert.equal(tekstas.includes(dalis), false, `job'ų ašyje rasta: ${dalis}`);
+    }
+  }
 });
 
 test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą autoritetą", () => {

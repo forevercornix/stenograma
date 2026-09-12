@@ -24,14 +24,34 @@ const { resolveBackendChoice, applyActivationBarrier } = jobStore;
 const REDIS = "redis://localhost:6379";
 const PG = "postgres://localhost:5432/steno";
 
-test("parinkimas: DATABASE_URL > REDIS_URL > memory", () => {
+/**
+ * ⚠️ PAVADINIMAS PAKEISTAS SU TAISYKLE (#155). Buvo „parinkimas: DATABASE_URL >
+ * REDIS_URL > memory" — ta pirmenybė nebegalioja: `postgres` renkamas TIK
+ * eksplicitiškai. Palikus seną vardą, testas teigtų ginantis išvedimą, kurio nebėra.
+ *
+ * GINA: `DATABASE_URL` nesprendžia už operatorių, kur gyvena job metaduomenys.
+ */
+test("parinkimas: `postgres` TIK eksplicitiškai; likusiems REDIS_URL > memory", () => {
   assert.equal(resolveBackendChoice({}).norimas, "memory");
   assert.equal(resolveBackendChoice({ REDIS_URL: REDIS }).norimas, "redis");
-  assert.equal(resolveBackendChoice({ DATABASE_URL: PG }).norimas, "postgres");
+
+  /** ⚠️ ESMINĖ EILUTĖ: anksčiau čia buvo `postgres`. */
+  assert.equal(
+    resolveBackendChoice({ DATABASE_URL: PG }).norimas,
+    "memory",
+    "vien `DATABASE_URL` job metaduomenų NEPERJUNGIA — jis reikšmingas sesijoms, auditui, migracijoms"
+  );
+
   assert.equal(
     resolveBackendChoice({ DATABASE_URL: PG, REDIS_URL: REDIS }).norimas,
+    "redis",
+    "diegimas, nustatęs `DATABASE_URL` kitoms ašims, lieka prie savo Redis"
+  );
+
+  assert.equal(
+    resolveBackendChoice({ DATABASE_URL: PG, JOB_STORE_BACKEND: "postgres" }).norimas,
     "postgres",
-    "DATABASE_URL turi turėti pirmenybę"
+    "eksplicitinis pasirinkimas — vienintelis kelias į PostgreSQL"
   );
 });
 
@@ -57,24 +77,32 @@ test("parinkimas: nežinomas JOB_STORE_BACKEND yra klaida, ne tylus fallback", (
   );
 });
 
-test("BARJERAS: DATABASE_URL vienas NEPERJUNGIA srauto į PostgreSQL", () => {
-  /**
-   * ⚠️ ESMINIS 7.2a TESTAS. `postgresStore` yra įgyvendintas, bet ADR
-   * aktyvavimo barjeras dar galioja.
-   *
-   * Prielaidų sąrašas gyvena TIK ADR'e - dubliuota kopija komentare
-   * neišvengiamai pasensta (taip ir nutiko: ADR pridėjo eilės preflight, o
-   * kopijos čia ir `backendSelection.js` liko be jo).
-   *
-   * `DATABASE_URL` (kurio gali prireikti 7.3 sesijoms ar 7.4 auditui) neturi
-   * perjungti job metaduomenų į negrįžtamą režimą.
-   */
+/**
+ * ⚠️ PAVADINIMAS PAKEISTAS (#155): buvo „BARJERAS: ...". Šis testas barjero
+ * NEBEGINA — po numanomo išvedimo nuėmimo `resolveBackendChoice()` jau grąžina
+ * `memory`, ir barjeras jo nebeliečia. Testas lieka žalias DĖL KITOS TAISYKLĖS.
+ *
+ * ⚠️ KODĖL VARDAS SVARBUS: palikus „BARJERAS", po metų kas nors pašalintų
+ * eksplicitinio pasirinkimo reikalavimą, pamatytų žalią testą, kurio vardas kalba
+ * apie barjerą, ir manytų, kad riba tebegalioja.
+ *
+ * GINA: eksplicitinio pasirinkimo taisyklę per VISĄ grandinę, ne tik `resolve`.
+ */
+test("EKSPLICITINIS PASIRINKIMAS: `DATABASE_URL` vienas neperjungia į PostgreSQL", () => {
   const env = { DATABASE_URL: PG };
   const rezultatas = applyActivationBarrier(resolveBackendChoice(env), env);
   assert.equal(rezultatas.norimas, "memory");
 });
 
-test("BARJERAS: DATABASE_URL + REDIS_URL palieka esamą Redis elgesį NEPAKITUSĮ", () => {
+/**
+ * ⚠️ PAVADINIMAS PAKEISTAS (#155): ta pati priežastis. Anksčiau `redis` čia buvo
+ * BARJERO atsarginis kelias (`postgres` -> nuleidžiama); dabar `redis` renkamas
+ * TIESIOGIAI, nes numanomo išvedimo nebėra. Rezultatas tas pats, mechanizmas — ne.
+ *
+ * GINA: veikiantis Redis diegimas, turintis `DATABASE_URL` kitoms ašims, po
+ * barjero atidarymo NEPERSIJUNGIA tyliai.
+ */
+test("EKSPLICITINIS PASIRINKIMAS: `DATABASE_URL` + `REDIS_URL` palieka Redis NEPAKITUSĮ", () => {
   const env = { DATABASE_URL: PG, REDIS_URL: REDIS };
   const rezultatas = applyActivationBarrier(resolveBackendChoice(env), env);
   assert.equal(rezultatas.norimas, "redis");

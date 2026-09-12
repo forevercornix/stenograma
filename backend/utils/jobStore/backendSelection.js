@@ -121,7 +121,31 @@ function resolveBackendChoice(env = process.env) {
     return { norimas: eksplicitinis, priezastis: "JOB_STORE_BACKEND", eksplicitinis: true };
   }
 
-  if (env.DATABASE_URL) return { norimas: "postgres", priezastis: "DATABASE_URL", eksplicitinis: false };
+  /**
+   * ⚠️ `postgres` RENKAMAS TIK EKSPLICITIŠKAI (#155, politikos pakeitimas).
+   *
+   * Anksčiau čia buvo `if (env.DATABASE_URL) return { norimas: "postgres" }` — t. y.
+   * `DATABASE_URL` buvimas PATS perjungdavo job metaduomenų saugyklą. Kol barjeras
+   * buvo uždarytas, to niekas nematė: `applyActivationBarrier()` grąžindavo atgal į
+   * `redis` arba atmintį.
+   *
+   * Atidarius barjerą tas išvedimas būtų perjungęs KIEKVIENĄ diegimą, turintį
+   * `DATABASE_URL` — įskaitant tuos, kurie jį nustatė TIK sesijoms (7.3), auditui ar
+   * migracijoms. Jie job'ų perkelti neprašė, o Redis metaduomenys NĖRA migruojami
+   * (ADR: „TTL nutekėjimas, ne migracija"), tad jų job'ai tiesiog taptų nematomi.
+   *
+   * ⚠️ TAI POLITIKOS PAKEITIMAS, NE TAISYMAS. Numanomas pasirinkimas gali būti
+   * grąžintas vėliau ATSKIRU leidimu su migracijos pastaba; atvirkščiai — ne, nes
+   * grįžimas atgal tyliai perjungtų veikiančius diegimus.
+   *
+   * ⚠️ `DATABASE_URL` LIEKA REIKŠMINGAS visoms kitoms ašims: sesijoms, auditui,
+   * migracijoms ir `doctor` patikroms. Pasikeitė tik tai, kad jis nebesprendžia už
+   * operatorių, kur gyvena JOB metaduomenys.
+   *
+   * ⚠️ BŪSENA MATOMA: `runSelfChecks()` rodo informacinę eilutę „PostgreSQL
+   * sukonfigūruotas, bet job metaduomenys saugomi ATMINTYJE" (pridėta PRIEŠ šį
+   * pakeitimą, kad jis nebūtų pirmas commit'as, kurio niekas netikrina).
+   */
   if (env.REDIS_URL) return { norimas: "redis", priezastis: "REDIS_URL", eksplicitinis: false };
   return { norimas: "memory", priezastis: "numatyta", eksplicitinis: false };
 }

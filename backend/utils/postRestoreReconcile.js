@@ -122,6 +122,26 @@ function nustatytiAsis(env = process.env) {
     },
     jobai: {
       autoritetas: jobai.norimas,
+      /**
+       * ⚠️ PRIEŽASTIS PERDUODAMA ATSKIRAI (#155, eksplicitinio pasirinkimo pasekmė).
+       *
+       * Iki tol paaiškinimą nešė `barjeras: true`: kol job'ų autoritetas galėjo
+       * nebūti PostgreSQL TIK dėl barjero, tos vėliavos pakako. Po eksplicitinio
+       * pasirinkimo įvedimo priežasčių yra kelios (`JOB_STORE_BACKEND`, `REDIS_URL`,
+       * `numatyta`), ir `barjeras: false` nustojo ką nors paaiškinti.
+       *
+       * ⚠️ TAI TA PATI FORMA KAIP „18 FAILŲ, SAUGŪS DĖL VIENO KVIETĖJO": vėliava
+       * buvo ATSITIKTINAI pakankamas paaiškinimas, kol priežastis buvo viena.
+       *
+       * ⚠️ OPERATORIUI TAI REIKALINGA BŪTENT PRIEŠ CUTOVER — vienintelį kartą, kai
+       * klaida negrįžtama. Matydamas `autoritetas: "memory"` be priežasties, jis
+       * spėliotų: barjeras? konfigūracija? klaida?
+       *
+       * ⚠️ SAUGU RODYTI: `resolveBackendChoice()` grąžina kintamųjų VARDUS
+       * (`JOB_STORE_BACKEND`, `REDIS_URL`) arba literalą `numatyta` — niekada
+       * reikšmių. Tai tikrina testas, ne šis komentaras.
+       */
+      priezastis: jobai.priezastis,
       barjeras: Boolean(jobai.barjeras),
       verdiktas: _asiesVerdiktas(jobai.norimas),
     },
