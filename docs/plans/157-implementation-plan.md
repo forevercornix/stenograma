@@ -1528,6 +1528,29 @@ atsiduria greta to vienintelio jungiklio, kurį ji aprašo.
    + ADR prielaidų lentelės uždarymas
    + `deletion-guarantees.md` sąlyga ir grįžimo mechanika (#326)
 ```
+⚠️ **BARJERO PR SEKA — UŽRAŠYTA PRIEŠ PRADEDANT.**
+
+Eiliškumas matomas ne tik pokalbyje, nes pirmasis žingsnis gali baigtis **radiniu**,
+ne ✅, ir tada seka sustoja.
+
+```
+1. ADR prielaidų lentelė — ĮRODYMAS kiekvienai eilutei (PR, testas, ką matuoja)
+2. jei kuri nors nepasitvirtina → RADINYS; §18.3 pateikimas LAUKIA
+3. §18.3 pateikimas su trimis komponentėmis
+4. sprendimas — operatoriaus
+5. barjeras + 10 sąlyga + ADR prielaidų lentelės uždarymas
+```
+
+⚠️ **KODĖL 1 ŽINGSNIS NĖRA DOKUMENTACIJOS TVARKYMAS.** Prielaidos, pažymėtos ✅
+remiantis tuo, kad PR numeriai skamba tinkamai, reikštų barjerą, atidarytą pagal
+lentelę, užpildytą iš atminties. Tai ta pati klasė, kurią ši seka gaudė ne kartą —
+dokumentas, atsilikęs nuo kodo, kuriuo remiamasi kaip įrodymu. Skirtumas: čia juo
+remsis VIENINTELIS NEGRĮŽTAMAS sprendimas visoje sekoje.
+
+⚠️ **PRIELAIDOS RŪŠIS SVARBI.** ADR jas skirsto į „neįgyvendintas darbas" (A) ir
+„įgyvendintas kodas, nepatikrinamas kol barjeras uždarytas" (B). Trūkstamą KODĄ
+nurašius kaip trūkstamą ĮRODYMĄ, barjeras būtų atidarytas su spraga.
+
 
 ⚠️ **PERRAŠYTA (§12.1). ANKSTESNĖ REDAKCIJA DĖJO BARJERĄ Į PR-7 VIDŲ.**
 
