@@ -1482,7 +1482,7 @@ Sprendimu jis tampa tik jas uždarius.
 
 | # | Sąlyga | Kur priimta | Būsena | Kas pamatys |
 |---|---|---|---|---|
-| 10 | **Fail-closed startas patikrintas REALIAI** — **kartu su atidarymu, atskirame #155 PR** | ADR barjero lentelė | įrodyta tik unit lygmeniu (`_initializePostgresForTests`) | CI žingsnis: startas su neprieinama DB ir ATIDARYTU barjeru privalo kristi, ne nusileisti į atmintį |
+| 10 | **Fail-closed startas patikrintas REALIAI** — **kartu su atidarymu, atskirame #155 PR** | ADR barjero lentelė | ✅ **UŽDARYTA** — CI žingsnis „Fail-closed startas" (`ci.yml`, `backend` job) | — | Tikras `node server.js`, `JOB_STORE_BACKEND=postgres`, uždaras prievadas 59999. Trys asercijos: procesas nutraukė startą; priežastis — `PostgreSQL neprieinamas`; job store NEBUVO inicijuotas. ⚠️ Exit kodo nepakanka: su uždarytu barjeru startas krenta irgi, tik kita priežastimi |
 
 ⚠️ **KODĖL SĄLYGA 10 NEGALI BŪTI ANKSČIAU — TAI NE PLANAVIMO PASIRINKIMAS.**
 

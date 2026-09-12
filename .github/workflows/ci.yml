@@ -353,6 +353,63 @@ jobs:
       - name: Švara po testų (jokių likusių artefaktų)
         run: npm run test:clean
 
+      # ⚠️ 10 SĄLYGA (#155): REALUS fail-closed startas.
+      #
+      # Iki barjero atidarymo ši savybė buvo įrodyta TIK unit lygmeniu, per
+      # `_initializePostgresForTests` — t. y. tikrinta funkcija, kurios
+      # produkcinis startas niekada nekviečia tiesiogiai. Tarp jos ir tikro
+      # `node server.js` guli visa parinkimo politika, kurią BŪTENT šis PR ir
+      # pakeitė. Todėl čia paleidžiamas tikras procesas per tikrą kelią.
+      #
+      # ⚠️ EXIT KODO NEPAKANKA — IŠMATUOTA. Su UŽDARYTU barjeru tas pats
+      # startas irgi krenta kodu 1, tik dėl visiškai kitos priežasties
+      # („JOB_STORE_BACKEND=postgres dar neleidžiamas"). Patikra, tikrinanti
+      # vien kodą, būtų žalia abiem atvejais ir nematuotų nieko — barjeras vėl
+      # taptų netiesioginiu liudytoju. Todėl tikrinama PRIEŽASTIS: procesas
+      # privalo būti realiai BANDĘS prisijungti ir kritęs dėl nepasiekiamumo.
+      #
+      # ⚠️ IR TREČIA ASERCIJA — kad nenusileido į atmintį. Kritimas ir
+      # fallback abu baigiasi „serveris neveikia su PostgreSQL"; skiriasi tuo,
+      # ar tuo metu buvo priiminėjami job'ai į saugyklą, kuri nėra autoritetinga.
+      # Būtent tas skirtumas yra split-brain.
+      - name: Fail-closed startas - ATIDARYTAS barjeras + neprieinama DB privalo nutraukti startą (#155, 10 salyga)
+        env:
+          TRANSCRIPTION_PROVIDER: mock
+          LLM_PROVIDER: mock
+          NODE_ENV: test
+          PORT: 3002
+          JOB_STORE_BACKEND: postgres
+          # ⚠️ UŽDARAS PRIEVADAS, NE `postgres` servisas (5432). Nepasiekiamumas
+          # privalo būti tikras ir nepriklausyti nuo serviso sveikatos: jei
+          # servisas kada nors nustotų kilti, patikra imtų praeiti dėl gedimo,
+          # o ne dėl tikrinamos savybės.
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:59999/postgres
+        run: |
+          set +e
+          timeout 60 node server.js > "$RUNNER_TEMP/fail-closed.log" 2>&1
+          KODAS=$?
+          set -e
+          cat "$RUNNER_TEMP/fail-closed.log"
+
+          if [ "$KODAS" -eq 0 ]; then
+            echo "❌ Procesas NENUTRAUKĖ starto su neprieinama DB (exit 0)."
+            exit 1
+          fi
+
+          if ! grep -q "PostgreSQL neprieinamas" "$RUNNER_TEMP/fail-closed.log"; then
+            echo "❌ Procesas krito, bet NE dėl nepasiekiamos DB."
+            echo "   Tai reiškia, kad realus prisijungimo kelias nebuvo pasiektas,"
+            echo "   ir ši patikra nematuoja fail-closed elgsenos."
+            exit 1
+          fi
+
+          if grep -q "Job store backend'as" "$RUNNER_TEMP/fail-closed.log"; then
+            echo "❌ Job store BUVO inicijuotas - startas nusileido į kitą backend'ą."
+            exit 1
+          fi
+
+          echo "✅ Startas nutrauktas dėl nepasiekiamos DB; į atmintį nenusileista."
+
       - name: Smoke test - paleisti serverį ir patikrinti /api/health
         env:
           TRANSCRIPTION_PROVIDER: mock
