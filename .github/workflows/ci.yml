@@ -235,13 +235,40 @@ jobs:
       # kaip elgiasi flexible-checksums derinys su AWS SDK - tai TIKRINAMA
       # sąlyga, ne fonas. Su `latest` testas vieną dieną imtų tikrinti kitą
       # elgesį, ir niekas to nepastebėtų.
+      #
+      # ⚠️ REGISTRAS — `quay.io`, NE DOCKER HUB, IR TAI NE PASIRINKIMAS.
+      #
+      # 2026-09-11 vakare `minio/minio` Docker Hub'e nustojo būti pasiekiamas
+      # anonimiškai. Išmatuota trimis nepriklausomais zondais:
+      #
+      #   registry manifest (pririštas IR `latest`)  401 insufficient_scope
+      #   registry tags/list                          UNAUTHORIZED
+      #   Docker Hub VIEŠAS API                       {"message":"object not found"}
+      #
+      # Kontrolės (`library/alpine`, `library/postgres`) tuo pačiu metu grąžino
+      # 200, tad tai ne užklausos forma ir ne bendras registro gedimas.
+      #
+      # ⚠️ TAI NE PARSISIUNTIMŲ LIMITAS. Limitas duotų 429 arba
+      # `ratelimit-remaining: 0`; viešas API tokiu atveju repozitoriją VIS TIEK
+      # rastų. `object not found` reiškia, kad repozitorijos ten nebėra —
+      # vadinasi `docker/login-action` NEPADĖTŲ, ir autentifikacija būtų
+      # taisymas ne tos priežasties.
+      #
+      # ⚠️ TAS PATS TAG'AS gaunamas iš MinIO NUOSAVO registro (quay.io):
+      # `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`,
+      # multi-arch manifest list, anoniminis parsisiuntimas.
+      #
+      # ⚠️ KO PATIKRINTI NEBEĮMANOMA: ar quay.io atvaizdas BAITAIS sutampa su
+      # buvusiu Docker Hub — pastarojo nebėra, tad palyginti nėra su kuo.
+      # Sutampa tag'o vardas ir leidėjas; to čia pakanka, nes tag'as pririštas
+      # prie MinIO leidimo, o ne prie registro.
       - name: Paleisti MinIO (S3-compatible)
         run: |
           docker run -d --name minio \
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
 
           # Laukiama, kol saugykla ATSAKO, ne fiksuotą laiką: `sleep 5` yra
           # lenktynės, kurios pralaimimos lėtame runner'yje.
