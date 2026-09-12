@@ -94,6 +94,20 @@ async function initializeStore() {
 
   const choice = selectBackend();
 
+  /**
+   * ⚠️ ŠI ŠAKA ŠIANDIEN NEPASIEKIAMA — IR PALIEKAMA SĄMONINGAI (#155).
+   *
+   * `applyActivationBarrier()` su atidarytu barjeru `barjeras: true` negrąžina nė
+   * vienu keliu. Tai barjero MECHANIZMO pusė: jis paliktas, kad konstantos
+   * grąžinimas į `false` vėl ką nors įjungtų, ir šis pranešimas yra tai, ką jis
+   * įjungtų. Pašalinus jį „uždaryti atgal" reikštų parašyti ir pranešimą iš naujo.
+   *
+   * ⚠️ TEKSTAS LIEKA TEISINGAS BŪTENT TAM ATVEJUI, ne šiandienai: „dar neaktyvuota"
+   * galioja tada, kai barjeras uždarytas. Šiandieninę tos pačios būsenos priežastį
+   * („PostgreSQL sukonfigūruotas, bet job'ai atmintyje, nes pasirinkimas
+   * eksplicitinis") sako `startupChecks` eilutė „Job metaduomenų saugykla" — ji
+   * pasiekiama, ir ją dengia `jobStoreBackendInfo` testai.
+   */
   if (choice.barjeras) {
     log.warn(
       `⚠️  DATABASE_URL nustatytas, bet job metaduomenys LIEKA "${choice.norimas}" backend'e. ` +
@@ -158,13 +172,16 @@ async function initializeStore() {
  * elgesys reikštų, kad NAUJI job'ai rašomi į atmintį, o AUTORITETINGI lieka
  * DB — split-brain, kuris „išnyksta" DB atsistačius, palikdamas dvi tikroves.
  *
- * Todėl prisijungimo klaida nutraukia startą. Tai galioja jau dabar, nors
- * barjeras PostgreSQL dar neparenka — kad barjerą atidarant nereikėtų keisti
- * šio kelio.
+ * Todėl prisijungimo klaida nutraukia startą. ⚠️ Tai buvo užrašyta tada, kai
+ * barjeras PostgreSQL dar neparinko — sąmoningai, „kad barjerą atidarant nereikėtų
+ * keisti šio kelio".
  *
- * ⚠️ BARJERO NEATIDARO NEI 7.2a, NEI 7.2b. 7.2b užbaigia atominių operacijų
- * kontraktą, bet aktyvavimas priklauso VISOMS ADR prielaidoms
- * (`docs/decisions/155-postgres-authority.md`, „AKTYVAVIMO BARJERAS").
+ * ⚠️ PRIELAIDA IŠSIPILDĖ (#155). Barjeras atidarytas, ir šis kelias tikrai
+ * nepasikeitė: atidarantis PR pridėjo ne kodą čia, o CI žingsnį „Fail-closed
+ * startas", kuris tą patį elgesį išmatuoja per tikrą `node server.js`.
+ * ⚠️ Užrašoma todėl, kad išsipildžiusi prielaida yra tokia pat reta kaip
+ * neišsipildžiusi, ir abi verta pažymėti — kitaip lieka atmintyje tik nesėkmės.
+ * (`docs/decisions/155-postgres-authority.md`, „AKTYVAVIMO BARJERAS".)
  */
 /**
  * `DB_CONNECT_TIMEOUT_MS` su saugia numatytąja reikšme.
@@ -439,10 +456,12 @@ async function paruostiArtefaktuSaugykla() {
  *
  * ⚠️ NEKEIČIA STARTO BAIGTIES — nei radiniu, nei savo gedimu.
  *
- * Fail-closed startas yra 10 PR-7 sąlyga ir jis eina kartu su aktyvavimo barjeru:
- * įjungtas anksčiau, jis sustabdytų diegimus dėl būsenos, kuri iki barjero atidarymo
- * yra normali. O kritusi pati patikra sustabdytų startą dėl DIAGNOSTIKOS gedimo —
- * naujas gedimo taškas ten, kur jo anksčiau nebuvo.
+ * Fail-closed startas buvo 10 PR-7 sąlyga ir ėjo kartu su aktyvavimo barjeru:
+ * įjungtas anksčiau, jis būtų stabdęs diegimus dėl būsenos, kuri iki barjero
+ * atidarymo yra normali. ⚠️ Abu įvykę (#155) — o ŠI patikra starto baigties vis tiek
+ * nekeičia, ir tai atskiras sprendimas, ne barjero pasekmė: kritusi pati patikra
+ * sustabdytų startą dėl DIAGNOSTIKOS gedimo — naujas gedimo taškas ten, kur jo
+ * anksčiau nebuvo.
  *
  * ⚠️ ŠIANDIEN JIS RODO NEPRIJUNGTĄ RAŠYMĄ, IR TAI TEISINGA.
  *
@@ -1415,16 +1434,21 @@ module.exports = {
   resolveBackendChoice,
   applyActivationBarrier,
   /**
-   * ⚠️ EKSPORTUOJAMA TESTAMS, nes produkcijoje ši funkcija dar NEPASIEKIAMA.
+   * ⚠️ EKSPORTUOJAMA TESTAMS. Priežastis, dėl kurios eksportas atsirado, PASIBAIGĖ.
    *
-   * Vienintelį jos kvietimo tašką (`initializeStore()`) uždaro aktyvavimo
-   * barjeras, tad be eksporto fail-closed elgesys neturėtų JOKIO įrodymo -
-   * nei runtime, nei testo. Neišbandytas gedimo kelias, kuris įsijungs
-   * barjerą atidarius, yra blogesnis nei neparašytas: jis atrodo padengtas.
+   * Buvo: vienintelį jos kvietimo tašką (`initializeStore()`) uždarydavo aktyvavimo
+   * barjeras, tad be eksporto fail-closed elgesys neturėtų JOKIO įrodymo — nei
+   * runtime, nei testo. Neišbandytas gedimo kelias, įsijungiantis barjerą atidarius,
+   * yra blogesnis nei neparašytas: jis atrodo padengtas.
    *
-   * Unit lygmuo įrodo, KAD prisijungimo klaida atmetama ir NĖRA fallback į
-   * memory. Produkcinio kelio (`DATABASE_URL` → startas nutrūksta) galutinis
-   * acceptance priklauso aktyvavimo etapui, ne šiam PR.
+   * ⚠️ BARJERAS ATIDARYTAS, IR ACCEPTANCE ĮVYKDYTAS (#155): produkcinį kelią
+   * (`JOB_STORE_BACKEND=postgres` + uždaras prievadas → startas nutrūksta) matuoja
+   * CI žingsnis „Fail-closed startas" per tikrą `node server.js`. Ankstesnė šio
+   * komentaro eilutė perkėlė acceptance „į aktyvavimo etapą" — tas etapas įvyko.
+   *
+   * ⚠️ EKSPORTAS PALIEKAMAS SĄMONINGAI: unit lygmuo lieka pigus ir greitas
+   * sluoksnis, tikrinantis KAD klaida atmetama ir NĖRA fallback į memory, be
+   * konteinerių. Pasikeitė ne jo vertė, o tai, kad jis nebėra vienintelis įrodymas.
    */
   _initializePostgresForTests: initializePostgres,
   /**

@@ -805,7 +805,7 @@ atsistatyti iš kopijos, neprarasti rezultatų ir neprikelti ištrintų duomenų
 | ~~**Persistentės ištrynimo žymos** (7.5a dalis)~~ ✅ **ĮGYVENDINTA (#183)** — ⚠️ **apibrėžimas praplėstas po #157 (§12.1)** | Buvo: `deletionTombstones` yra proceso atmintis — atkūrus naujame procese žymos DINGSTA, tad restore pratybos negali įvykdyti savo pačių ištrinto job'o scenarijaus. Dabar: `erasure_marks` lentelė su būsenų mašina, advisory lock'ais ir retencija pagal prikėlimo horizontą (`utils/deletionTombstones/`, migracija `1755400000000_erasure-marks.js`). Atminties režimas lieka TIK diegimams be `DATABASE_URL` ir starte apie tai garsiai įspėja. ⚠️ **BET PO #157 ŽYMOS PERSISTAVIMO NEBEUŽTENKA:** ištrynimas eina per bandymų registrą ir šalina objektus SAUGYKLOJE, tad barjerui reikia, kad jis išgyventų restartą **IR** pasiektų objektus, kurių adresas yra tik registre. Kodas tai dengia: `jobErasure.BUTINI_SYSTEM_METODAI` apima `deleteResultArtifacts` (#157, PR-5), o `drCoordinator.replay()` paduoda `artifactStores` į `restoredJobStore.paruosti()`, kuris be jų external eilutėms **fail-close'ina**. ⚠️ **ĮRODYMAS BUVO DALIMIS — DABAR NEBĖRA (§12.1, R1).** Ankstesnė šios eilutės redakcija sakė, kad `drRestore.integration` naudoja TIK inline duomenis ir kad external ištrynimas pratyboje neįrodytas. Tai buvo tiesa jos rašymo metu. R1 (#155) tai uždarė: DR pratyba dabar užbaigia pažymėtą job'ą per `rasymoSaugykla`, tikrina, kad objektas realiai guli saugykloje, kad po `eraseJob()` jo failų sistemoje NEBĖRA, ir kad replay atkurtoje bazėje nekrenta ties jau ištrintu objektu |
 | **Transakcinis rezultatų įrašymas** (7.5b dalis) | Be jo nutrūkęs procesas palieka `completed` be `job_results`; kitas bandymas atsimuša į `restart()` terminalų sargą, audio lieka, o klientas rezultato niekada negauna. **Įrodymas:** `postgresStore.integration` — „7.2b klaida po job CAS rollbackina job IR result, o connection grįžta pool'ui": sukelta klaida PO job CAS atsuka ABU įrašus, o jungties grąžinimas tikrinamas realiai (ne per `pool.waitingCount`, kuris praeidavo ir nutekėjus klientui). `externalCompletion.integration` tikrina tą pačią ribą external kelyje: nuoroda ir registro įsipareigojimas rašomi vienoje transakcijoje. ✅ **UŽDARYTA** — apibrėžimas po #157 nepasikeitė: klausimas „ar abu įrašai atomiški" nepriklauso nuo to, kur guli turinys |
 | **Idempotentiškas užbaigimas su konfliktų sprendimu** (7.5b dalis) — ⚠️ **PERRAŠYTA IŠ MECHANIZMO Į GARANTIJĄ (§12.1)** | **Garantija:** du lygiagretūs užbaigimai nesunaikina vienas kito — vėlesnis rezultatas TYLIAI NEPERRAŠO ankstesnio, o skirtingas rezultatas yra klaida, ne sėkmė. ⚠️ **Ankstesnė redakcija nurodė MECHANIZMĄ** (sąlyginį `UPDATE ... WHERE status = 'processing'`), nors prielaidai reikėjo tik garantijos. Ji buvo teisinga savo metu — rašyta prieš 7.5b, kai mechanizmas dar nebuvo pasirinktas — bet ADR sprendė klausimą, kurio neturėjo spręsti, ir pasenо, kai implementacija pasirinko kitą kelią. Perrašius vėl į mechanizmą, tas pats pasikartotų pakeitus užrakinimo strategiją. **Dabartinė realizacija** (nuoroda, ne reikalavimas): `postgresStore.readJobForUpdate()` — `SELECT ... FOR UPDATE OF j`, pesimistinis eilutės užraktas; antrasis vykdytojas po užrakto mato jau `completed` būseną ir eina idempotencijos keliu per `common.js idempotentiskasAtsakymas()`. ⚠️ **REMONTO IŠIMTIS (#157, PR-4):** „rezultatas lyginamas, o ne perrašomas" galioja PAKARTOJIMUI; kai tas pats `checksum` reiškia REMONTĄ (objekto saugykloje nebėra), nuoroda **PERJUNGIAMA** sąmoningai. Be šios išimties taisyklė aprašo save be svarbiausio atvejo. **Įrodymai:** `externalCompletion.integration` — „DU lygiagretūs `finish()` su SKIRTINGAIS rezultatais: vienas laimi, kitas gauna konfliktą", „su TUO PAČIU: lieka VIENAS objektas", „checksum sutampa, bet objekto NĖRA: tai REMONTAS", „DU lygiagretūs REMONTAI: lieka VIENAS įsipareigotas"; `jobFinishIdempotency` — lygybės taisyklė NEDUBLIUOJAMA, visi trys backend'ai kviečia tą pačią funkciją |
-| **Fail-closed startas, patikrintas REALIAI** (7.2a `[F2]`) | `initializePostgres()` neturi fallback į atmintį, bet kol barjeras uždarytas, funkcija produkcijoje NEPASIEKIAMA — įrodyta tik unit lygmeniu (`_initializePostgresForTests`). Barjerą atidarius pirmas realus startas su neprieinama DB ir BŪTŲ tas testas |
+| ~~**Fail-closed startas, patikrintas REALIAI**~~ (7.2a `[F2]`) ✅ **UŽDARYTA (#155, barjero PR, 4 commit'as)** | Buvo: `initializePostgres()` neturi fallback į atmintį, bet kol barjeras uždarytas, funkcija produkcijoje NEPASIEKIAMA — įrodyta tik unit lygmeniu (`_initializePostgresForTests`). Dabar: CI žingsnis paleidžia TIKRĄ `node server.js` su `JOB_STORE_BACKEND=postgres` ir uždaru prievadu, ir reikalauja, kad startas nutrūktų. ⚠️ **EXIT KODO NEPAKANKA — IŠMATUOTA:** su UŽDARYTU barjeru tas pats startas irgi krenta kodu 1, tik dėl kitos priežasties („dar neleidžiamas"), tad patikra, tikrinanti vien kodą, būtų buvusi žalia abiem atvejais ir nematuotų nieko. Todėl tikrinama PRIEŽASTIS (`PostgreSQL neprieinamas`) ir tai, kad job store nebuvo inicijuotas. **Kontrolė:** grąžinus barjerą į `false`, žingsnis krenta ties priežasties asercija — išmatuota prieš commit'ą |
 | ~~**Eilės prieinamumo preflight**~~ ✅ **ĮGYVENDINTA (#155, PR-7 prielaida)** | `hasQueueBackend()` vertina TIK konfigūraciją (`jobStore/index.js`), `jobRunner.init()` tikrina tik ar `bullmq` modulį galima `require` (`jobRunner.js:76-82`), o jungtis kuriama LAZY pirmo `add` metu (`transcriptionQueue.js:13-24`). Su PostgreSQL metaduomenimis prie Redis nesijungia NIEKAS, tad `server.js` pažymėtų runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų ar kristų. Reikia realaus probe prieš pradedant klausytis. **Dabar:** `patikrintiEilesJungti()` (`queues/config.js`) daro `ping()` su riba, `jobRunner.init()` jo reikalauja PRIEŠ pasirinkdamas `bullmq`, o verdiktas matomas `doctor` ir `/api/health/deep` išvestyje per `runSelfChecks()`. Nesėkmė traktuojama kaip `require()` nesėkmė — inline su garsiu įspėjimu, mirtina su `REDIS_REQUIRED=true`. `/api/ready` NEPAPILDYTAS sąmoningai: jo kontraktas reikalauja loginių būsenų be infrastruktūros detalių |
 
 ⚠️ **TRANSAKCIJA NEIŠSPRENDŽIA LYGIAGRETUMO.**
@@ -847,9 +847,15 @@ darbo, o antrąją nurašius kaip pirmąją, barjeras būtų atidarytas su sprag
 - **eilės prieinamumo preflight** (7.2a paliko neįgyvendintą).
 
 **B. Įgyvendintas kodas, kurio negalima patikrinti, kol barjeras uždarytas** —
-tik `[F2]` fail-closed startas. `initializePostgres()` fallback'o į atmintį
-neturi ir turi baigtinę prisijungimo ribą, bet produkcijoje funkcija
+buvo tik `[F2]` fail-closed startas. `initializePostgres()` fallback'o į atmintį
+neturi ir turi baigtinę prisijungimo ribą, bet produkcijoje funkcija buvo
 NEPASIEKIAMA, tad įrodyta tik unit lygmeniu.
+
+⚠️ **ŠI KATEGORIJA DABAR TUŠČIA (#155, barjero PR).** Atidarius barjerą, kelias
+tapo pasiekiamas, ir CI žingsnis jį vykdo prieš tikrą procesą. Kategorija
+paliekama, nes ji įvardija formą, ne konkretų punktą: kodas, kurio negalima
+patikrinti, kol neatidarytas barjeras, yra atskira rūšis nuo kodo, kurio dar nėra,
+ir sekantis toks punktas turi rasti, kur jį užrašyti.
 
 ⚠️ **Eilės preflight priklauso A, ne B.** `hasQueueBackend()` vertina tik
 konfigūraciją; nė vienoje vietoje nėra kodo, kuris prieš pradedant klausytis
@@ -861,6 +867,205 @@ Uždaryti #179 nė viena iš jų neblokuoja, bet abi privalo būti barjerą
 atidarančio PR DoD — neišbandytas ar neparašytas gedimo kelias, įsijungiantis
 būtent tuo momentu, yra blogesnis nei akivaizdžiai nesantis: jis atrodo
 padengtas.
+
+## ⚠️ BARJERAS ATIDARYTAS (#155) — SPRENDIMAS IR JO RIBOS
+
+`POSTGRES_AKTYVAVIMAS_LEISTAS = true` nuo šio leidimo. Penkios iš šešių prielaidų
+uždarytos anksčiau; šeštoji (**fail-closed startas, patikrintas REALIAI**) uždaroma
+**paskutiniu šio PR commit'u** — kol barjeras buvo uždarytas, `initializePostgres()`
+produkcijoje buvo nepasiekiama, tad jos elgesys buvo įrodytas tik unit lygmeniu.
+⚠️ **Ne pačiu atidarymu.** Atidarymas kelią padaro PASIEKIAMĄ; įrodymas, kad jis
+elgiasi fail-closed, yra atskiras darbas, ir jis eina PO atidarymo, ne kartu su juo.
+
+### ⚠️ ATIDARYMAS NĖRA PERJUNGIMAS
+
+| Aplinka | Prieš | Po |
+|---|---|---|
+| `DATABASE_URL` | `memory` (barjeras nuleisdavo) | `memory` |
+| `DATABASE_URL` + `REDIS_URL` | `redis` (barjeras nuleisdavo) | `redis` |
+| `JOB_STORE_BACKEND=postgres` | **klaida** | **`postgres`** |
+
+**Nė vienas esamas diegimas nepersijungia savaime.** Pasikeitė tik tai, kad
+eksplicitinis kelias tapo pasiekiamas.
+
+### ⚠️ POLITIKOS PAKEITIMAS: `postgres` RENKAMAS TIK EKSPLICITIŠKAI
+
+Iki šio leidimo `resolveBackendChoice()` turėjo numanomą išvedimą:
+`DATABASE_URL` buvimas PATS pasirinkdavo `postgres`. Kol barjeras buvo uždarytas,
+to niekas nematė — pasirinkimas būdavo nuleidžiamas atgal.
+
+Atidarius barjerą tas išvedimas būtų perjungęs **kiekvieną** diegimą, turintį
+`DATABASE_URL` — įskaitant nustačiusius jį TIK sesijoms (7.3), auditui ar
+migracijoms. Jie job'ų perkelti neprašė, o Redis metaduomenys **nėra** migruojami
+(žr. „Cutover"), tad jų job'ai tiesiog taptų nematomi.
+
+⚠️ **GRĮŽIMO KRYPTIS NESIMETRIŠKA.** Numanomas pasirinkimas gali būti grąžintas
+vėliau **atskiru leidimu su migracijos pastaba**. Atvirkščiai — ne: grįžimas be
+pastabos tyliai perjungtų veikiančius diegimus, o tai tiksliai tas gedimas, kurio
+šis pakeitimas ir vengia.
+
+⚠️ **`DATABASE_URL` LIEKA REIKŠMINGAS** visoms kitoms ašims: sesijoms, auditui,
+migracijoms ir `doctor` patikroms. Pasikeitė tik tai, kad jis nebesprendžia už
+operatorių, kur gyvena JOB metaduomenys.
+
+### ⚠️ BARJERAS BUVO NETIESIOGINIS LAIDAS — 33 VIETOSE, RASTOSE PER PENKIS PERĖJIMUS
+
+Atidarant paaiškėjo, kad testai, žinutės, komentarai ir dokumentai rėmėsi barjeru ne
+dėl jo paties. Radinių ne du, kaip atrodė iš pradžių, o **33**. Svarbesnis už skaičių
+yra būdas, kuriuo jie atsirado: **penkiais perėjimais, ir kiekvienas ankstesnis atrodė
+baigtas.**
+
+**1 perėjimas — krito CI (3).** Pasimatė iškart.
+
+| Kas | Kuo rėmėsi | Kas liko |
+|---|---|---|
+| `#280 P1` | `barjeras: true` kaip **paaiškinimas**, kodėl autoritetas nėra PostgreSQL | `nustatytiAsis()` perduoda `priezastis`; integracinė pusė tikrina, kad ji PEREINA per tikrą komandą |
+| `#280 II` | barjero **metimas** kaip pigus konfigūracijos klaidos liudytojas | liudytojas pakeistas: `JOB_STORE_BACKEND=redis` be `REDIS_URL` |
+| `#280 IV` | tas pats metimas kaip „konfigūracijos klaida" prieš transakciją | tas pats pakeitimas; **garantija nepakito**, tik jos scenarijus |
+
+**2 perėjimas — žali testai ir produkcinės žinutės (4).** Rado paieška „kur testuose ar
+žinutėse minimas barjeras" ir klausimas kiekvienam: *ar jis tikrina tai, ką teigia, PO
+atidarymo?*
+
+| Kas | Kodėl liko žalias | Kas liko |
+|---|---|---|
+| `privacyConfig`: „vien `DATABASE_URL` neduoda persistencijos" | faktas teisingas, **priežastis vardo viduje** — ne | vardas be priežasties + pridėta apvirtusi pusė (eksplicitinis pasirinkimas DUODA) |
+| `privacyConfig`: „klaida įvardija BARJERĄ" | tikrino `/aktyvavimo barjeras/` **produkcinėje žinutėje** | žinutė perrašyta; testas tikrina priežastį, VEIKSMĄ ir `doesNotMatch` ant senojo teksto |
+| `describeForDiagnostics().storage.jobState` | `persistentStorage ? "redis" : "memory"` — **teisinga pagal konstrukciją**, kol PostgreSQL neparinkdavo niekas | išvedama iš faktinio backend'o; prieštaringai konfigūracijai — įvardytas nežinojimas |
+| `RECONCILE_BACKEND_NOT_POSTGRES` žinutė | `barjeras ? " dėl 7.2a barjero" : ""` — šaka **tapo nepasiekiama**, ir priežastis dingo iš operatoriaus teksto | žinutė neša `priezastis`; pridėta asercija, kurios anksčiau nebuvo IŠVIS |
+
+**3 perėjimas — tai, kas negali kristi (19).** Komentarai, pranašystės, viena
+nepasiekiama šaka ir **dokumentai**. Rado pilnas `grep` per VISĄ repozitoriją. Jų
+neranda ne tik CI — jų neranda ir asercija, nes tikrinti nėra ko.
+
+Kode (8): `isPersistentBackend()` **pranašystė** („barjerą atidarius ši funkcija ims
+grąžinti `true` be jokio pakeitimo čia" — neišsipildė: funkcija tikrai nepasikeitė, bet
+`DATABASE_URL` vienas toliau duoda `false`); `restoredJobStore` pagrindimas (po
+atidarymo adapteris **reikalingesnis**: be jo replay eitų į produkcinę, ne atkurtą
+bazę — žala iš „nieko neįvyko" tapo „ištrinta ne toje bazėje"); `jobStore/index.js`
+`if (choice.barjeras)` įspėjimas (nepasiekiamas; paliktas kaip mechanizmo pusė);
+`postgresStore` („naudojamas TIK testuose" — nuo #155 paleidžiamas produkcijoje);
+`workers/index.js` (hipotetinė sąlyga tapo pasiekiama konfigūracija); `queues/config.js`
+(„paskutinė NEĮGYVENDINTA prielaida" — įgyvendinta); `sessionStore/backendSelection.js`
+(pranašystė, kuri **išsipildė teisingai**: atskiras jungiklis reiškė, kad sesijos
+nepersijungė); dvi `jobs` migracijos (prielaida „produkcinių eilučių dar nėra"
+pasibaigė — validuojantis `ADD CONSTRAINT` nuo šiol realiai turi ką validuoti).
+
+Dokumentuose (11): `README` statuso eilutė **„Sąžiningai: PostgreSQL DAR
+NEAKTYVUOTAS"** ir DR skyriaus „kol barjeras neuždarytas"; `migrations.md` cutover
+(„ši procedūra nevykdoma"); `backup-runbook.md` — verdiktų pastraipa („job'ų ašis
+**niekada** nėra `suderinta`"), apribojimų eilutė ir replay eilutė; `security-test-matrix.md`
+— penkios eilutės, tarp jų `PARTIAL` žyma, kurios sąlyga jau įvykdyta, ir dviejų
+pervadintų testų senieji vardai.
+
+**4 perėjimas — TO PATIES `grep`'o rezultato pakartotinė triažė (5).** Paskutinis
+perėjimas naujos paieškos nedarė: jis peržiūrėjo **tą pačią išvestį dar kartą**, eilutė
+po eilutės. Rado penkis praleistus: `backendSelection.js` įvadinę pastraipą, kuri sakė
+„`postgresStore` yra ĮGYVENDINTAS, bet NEPARENKAMAS" ir pati sau prieštaravo dvidešimt
+eilučių žemiau („ATIDARYTA (#155)"); `index.js` prielaidą, kuri **išsipildė** (kelio
+keisti nereikėjo — verta užrašyti lygiai taip pat, kaip neišsipildžiusias); tame pačiame
+faile 10 sąlygos formuluotę ir `_initializePostgresForTests` eksporto pagrindimą
+(„acceptance priklauso aktyvavimo etapui" — tas etapas įvyko); ir matricos `replay`
+eilutę.
+
+⚠️ **TAI SVARBIAUSIAS PERĖJIMAS IŠ KETURIŲ, NORS RADO MAŽIAUSIAI.** Jis įrodo, kad
+3 perėjimo paviršius buvo apibrėžtas TEISINGAI — penki radiniai buvo jo išvestyje nuo
+pat pradžių. Nepavyko ne paieška, o **triažė**: skaitant ilgą `grep` rezultatą, dalis
+eilučių atmetama per greitai, ypač tos, kurios atrodo kaip istorinis kontekstas.
+
+**5 perėjimas — failai, kuriuos pats `grep` apėmė, o aš IŠBRAUKIAU (2).** Rašant
+ankstesnę šio skyriaus redakciją, dvi didžiausios paieškos rinkmenos
+(`SUBISSUES-155.md`, `docs/plans/157-implementation-plan.md` — 29 pataikymai kartu)
+buvo **išfiltruotos iš išvesties** kaip „planiniai dokumentai, jų teiginiai istoriniai".
+Prielaida daugiausia pasitvirtino: jų formuluotės aprašo KONKREČIŲ PR apimtį („7.2b
+neatidaro barjero") ir tokios lieka teisingos. Bet ne visos — dvi skaitosi kaip
+DABARTINĖ būsena: `SUBISSUES-155.md` §14 („`POSTGRES_AKTYVAVIMAS_LEISTAS` **lieka**
+`false`, kol…") ir #157 plano „ko įrodyti negalėsiu" lentelė, kurios priežastis
+„barjeras uždarytas" nustojo galioti. Abi pažymėtos, viena — cituojamu įspėjimu
+skyriaus pradžioje.
+
+⚠️ **KLASĖ, KURIĄ VERTA ĮVARDYTI.** Visais 33 atvejais **elgesys nepasikeitė —
+pasikeitė PRIEŽASTIS**. Testas, komentaras ar dokumentas, kuris tikrina (ar aprašo)
+faktą, o vardu bei tekstu teigia priežastį, tokio pokyčio nemato: faktas lieka
+teisingas, spalva lieka žalia, o teiginys tyliai tampa melu.
+
+⚠️ **BLOGIAUSIAS POGRUPIS — MELAS ŽMOGUI SKIRTAME TEKSTE.** `jobState: "redis"`
+PostgreSQL diegimui; „PostgreSQL dar NEAKTYVUOTA"; „job'ai: memory" be priežasties; ir
+pats viešiausias — **README, sakęs vartotojams, kad barjeras tebegalioja, tame pačiame
+commit'e, kuriame jis atidarytas.** Kodo melą pagauna kitas inžinierius; README melą
+skaito tas, kas neskaitė nė vieno issue.
+
+⚠️ **PAMOKA APIE ĮRODYMO ŠALTINĮ.** 30 iš 33 CI nerado ir negalėjo rasti. Žalia suitė
+po tokio pakeitimo nėra įrodymas, kad liudytojai išliko; ji įrodo tik tai, kad faktai
+nepasikeitė.
+
+⚠️ **PAMOKA APIE PATĮ INVENTORIŲ — IŠMOKTA BRANGIAI ŠIAME PAČIAME PR.** Pirmas
+perėjimas rado 3 ir atrodė baigtas (CI žalias). Antras rado 4 ir atrodė baigtas (visi
+radiniai uždaryti). Trečias rado 19 — **daugiau nei abu ankstesni kartu**. Ketvirtas,
+nedaręs jokios naujos paieškos, rado dar 5. Penktas, peržiūrėjęs tik tai, ką ketvirtas
+buvo IŠBRAUKĘS iš savo paties išvesties, rado dar 2.
+
+Pirmų trijų klaida buvo ta pati: **paieška nesąmoningai siaurinama iki to, kas gali
+kristi.** Pirmas žiūrėjo į CI. Antras — į testus ir žinutes. Nė vienas nepažiūrėjo į
+komentarus ir dokumentus, nors ten teiginių daugiausia ir gyvuoja jie ilgiausiai.
+Ketvirtojo radiniai rodo antrą, atskirą klaidą: **teisingai apibrėžtas paviršius
+nieko negelbsti, jei jo išvestis peržiūrima paskubomis.** Penktojo — trečią, pačią
+gėdingiausią: **paviršius buvo susiaurintas jau PO paieškos**, išbraukiant du failus
+pagal kategoriją („tai planiniai dokumentai"). Filtras buvo beveik teisingas — ir
+būtent todėl pavojingas: jis pateisino savo egzistavimą 27 kartus iš 29.
+
+Iš to seka du konkretūs reikalavimai, ne raginimas budėti:
+
+> **1. Inventorius baigiasi tada, kai peržiūrėtas kiekvienas paviršiaus taškas — ne
+> tada, kai uždarytas paskutinis radinys.**
+>
+> **2. „Peržiūrėtas" reiškia: kiekviena `grep` išvesties eilutė perskaityta ir jai
+> atsakyta „ar šis teiginys tebeteisingas". Praleista eilutė yra praleistas radinys,
+> net jei paieška buvo tobula.**
+>
+> **3. Nė vienas failas neišbraukiamas iš išvesties pagal kategoriją. Sprendimas
+> „šis teiginys istorinis" priimamas EILUTEI, ne rinkmenai — kitaip filtras, teisingas
+> 90 % atvejų, tyliai paslepia likusius 10 %.**
+
+⚠️ **IR TAI NE TREČIAS ATVEJIS — TAI KLASĖ, ŠIOJE SEKOJE JAU PASIKARTOJUSI TRIS
+KARTUS.** Kiekvieną kartą paieška buvo apribota dimensija, kuri neatitiko tikrovės:
+
+| Kur | Filtras | Kodėl praleido |
+|---|---|---|
+| `restoredJobStore` | paieška per **simbolio vardą** | riba gyveno ne ten, kur vardas |
+| inventorius #157 PR-5 | `grep`, apkarpytas **`head -4`** | radiniai buvo 5-oje eilutėje ir toliau |
+| šis PR, 5 perėjimas | **kategorijų filtras** („planiniai dokumentai") | 2 iš 29 teiginių kalbėjo apie dabartį |
+
+Bendra forma: **inventoriaus filtras yra PRIELAIDA APIE PAVIRŠIŲ, ir ji tikrintina
+lygiai taip pat, kaip bet kuri kita prielaida.** Filtras, kuris teisingas 90 %
+atvejų, pateisina savo egzistavimą kiekvieną kartą, kai jį taikai — ir būtent todėl
+yra pavojingesnis už akivaizdžiai blogą. Nė vienas iš trijų nebuvo kvailas; visi trys
+buvo *beveik* teisingi.
+
+Praktinė išvada: filtrą galima taikyti tik tada, kai jis **užrašytas kaip teiginys,
+kurį galima paneigti** („šie failai teigia tik apie PR apimtį"), ir kai to teiginio
+patikrinimas kainuoja mažiau nei filtro praleidimas. Abiem ankstesniais atvejais
+patikrinimas būtų kainavęs minutę.
+
+Paviršius apibrėžiamas VIENA komanda per **visą** repozitoriją, įskaitant `README.md`
+ir `docs/`:
+
+```
+grep -rniE "aktyvavim|NEAKTYVUOT|dar neleidžiam|už barjero|barjeras.*(galioja|uždaryt)" .
+```
+
+Ji kainuoja sekundę. Brangus yra ne jos paleidimas, o **jos išvesties perskaitymas iki
+galo** — ir būtent ten šis PR suklupo du kartus. Praleisti tris ketvirtadalius kainavo
+tris papildomus perėjimus, kurių vienas rado melą README'e — t. y. ten, kur jo kaina
+didžiausia, o tikimybė pastebėti mažiausia.
+
+### Eilės pasirinkimas — 7.2a sąlyga uždaroma iki galo
+
+`canUseQueue()` remiasi `SHARED_BACKENDS` (`redis`, `postgres`), tad nė vienam
+deriniui rezultatas nepakito. Bet pasekmė vertesnė už patikrą: **eilės pasirinkimas
+nebepriklauso nuo numanomo išvedimo** — jis priklauso nuo `REDIS_URL` ir
+eksplicitinio pasirinkimo. Tai suderina praktiką su 7.2a reikalavimu „eilės
+pasirinkimas atsiejamas nuo metaduomenų backend'o".
 
 ## ⚠️ DB IR RUNTIME AIBĖS PRIVALO SUTAPTI
 

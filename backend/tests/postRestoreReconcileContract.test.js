@@ -77,7 +77,9 @@ test("#249 D7/D7a: sargai krenta PRIEŠ pirmą mutaciją, skirtingais kodais", (
    * PATOGUMAS.
    *
    * `sessionStore/backendSelection` `postgres` sesijoms reikalauja BŪTENT
-   * `DATABASE_URL` (`PG*` jam netinka), o job'ų ašį uždaro 7.2a barjeras.
+   * `DATABASE_URL` (`PG*` jam netinka), o job'ų ašis be eksplicitinio
+   * `JOB_STORE_BACKEND` lieka atmintyje (#155; iki barjero atidarymo ją uždarė
+   * barjeras — faktas tas pats, priežastis kita).
    * Vadinasi dokumentuotame Compose diegime nė viena ašis negali būti
    * PostgreSQL, ir D7 sargas komandą sustabdo. Tai užrašyta runbook'e ir
    * iškelta atskirai (#282) — čia fiksuojamas FAKTAS, ne pageidavimas.
@@ -99,6 +101,26 @@ test("#249 D7/D7a: sargai krenta PRIEŠ pirmą mutaciją, skirtingais kodais", (
 
   /** ⚠️ Nė vienos PostgreSQL ašies — komanda krenta, o ne „pavyksta be darbo" (D7). */
   assert.equal(kodas(() => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS })), "RECONCILE_BACKEND_NOT_POSTGRES");
+
+  /**
+   * ⚠️ KLAIDA PRIVALO ĮVARDYTI PRIEŽASTĮ, NE TIK AUTORITETĄ (#155).
+   *
+   * Iki barjero atidarymo žinutė turėjo `" dėl 7.2a barjero"` šaką. Atidarius ji
+   * tapo NEPASIEKIAMA, ir operatorius, gaunantis šią klaidą iškart po atkūrimo,
+   * matydavo tik „job'ai: memory" — be jokio kodėl, tuo vieninteliu momentu, kai
+   * klaida negrįžtama. Vėliava dingo tyliai: nė vienas testas žinutės netikrino.
+   *
+   * GINA: priežastis PEREINA į operatoriaus matomą tekstą. Sanitizacija — ta
+   * pati taisyklė kaip ašyse: `priezastis` neša kintamųjų VARDUS, ne reikšmes,
+   * tad DSN čia patekti negali.
+   */
+  try {
+    reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS });
+    assert.fail("turėjo kristi");
+  } catch (err) {
+    assert.match(err.message, /job'ai: memory — numatyta/);
+    assert.doesNotMatch(err.message, /barjer/, "barjeras atidarytas - žinutė juo remtis nebegali");
+  }
 
   /** Kredencialai į klaidas nepatenka: jos rodo tik `host:port/db`. */
   try {
@@ -534,9 +556,10 @@ test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal
   /**
    * ⚠️ `DATABASE_URL` BUVIMAS NĖRA BACKEND'O SPRENDIMAS.
    *
-   * `POSTGRES_AKTYVAVIMAS_LEISTAS = false` reiškia, kad job'ų autoritetas
-   * šiandien NIEKADA nėra PostgreSQL, o sesijos be `SESSION_STORE_BACKEND` gyvena
-   * atmintyje. Senasis sargas to nematė, tad `verify` galėjo pasakyti „galima
+   * Nė vienas žemiau esantis atvejis `JOB_STORE_BACKEND` nenurodo, tad job'ų
+   * autoritetas juose niekada nėra PostgreSQL, o sesijos be `SESSION_STORE_BACKEND`
+   * gyvena atmintyje. ⚠️ Iki #155 tą patį darė aktyvavimo barjeras — tada tai
+   * galiojo VISIEMS diegimams, dabar tik šiems atvejams. Senasis sargas to nematė, tad `verify` galėjo pasakyti „galima
    * cutover", kai gyva būsena yra Redis'e — ir po starto ne terminaliniai job'ai
    * atsinaujintų.
    *
@@ -575,8 +598,50 @@ test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal
   assert.equal(verdiktai.has("nepadengta"), true);
   assert.equal(verdiktai.has("nereikalinga"), true);
 
-  /** 7.2a barjeras įvardijamas atskirai — operatorius turi matyti PRIEŽASTĮ. */
-  assert.equal(reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" }).jobai.barjeras, true);
+  /**
+   * ⚠️ PERRAŠYTA SU TAISYKLE (#155). Buvo: „7.2a barjeras įvardijamas atskirai" ir
+   * `assert.equal(...jobai.barjeras, true)`.
+   *
+   * Ta asercija gynė TIKRĄ dalyką — kad operatorius mato PRIEŽASTĮ — bet per
+   * netiesioginį laidą: kol job'ų autoritetas galėjo nebūti PostgreSQL TIK dėl
+   * barjero, `barjeras: true` buvo ATSITIKTINAI pakankamas paaiškinimas.
+   *
+   * Po eksplicitinio pasirinkimo įvedimo priežasčių yra kelios, ir `barjeras` tapo
+   * `false` NEPRARADUS nė vienos ribos — t. y. asercija būtų likusi žalia pakeitus ją
+   * į `false`, bet komentaras toliau tvirtintų, kad priežastis matoma. Ji nebūtų.
+   *
+   * GINA DABAR: operatorius mato priežastį, KAD IR KOKIA JI BŪTŲ — ne konkrečiai
+   * barjerą.
+   */
+  const asysTikDb = reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" });
+  assert.equal(
+    asysTikDb.jobai.priezastis,
+    "numatyta",
+    "vien `DATABASE_URL` nebepasirenka PostgreSQL, ir operatorius privalo matyti, KODĖL"
+  );
+
+  assert.equal(
+    reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db", REDIS_URL: "redis://r" }).jobai.priezastis,
+    "REDIS_URL",
+    "kita priežastis — kitas tekstas; viena vėliava jų abiejų nebeatskirtų"
+  );
+
+  /**
+   * ⚠️ SANITIZACIJA — TIKRINA TESTAS, NE KOMENTARAS (#319).
+   *
+   * `priezastis` keliauja į operatoriaus išvestį prieš cutover. Šiandien ji neša
+   * kintamųjų VARDUS arba literalą `numatyta`; jei kada nors imtų nešti REIKŠMĘ,
+   * DSN su slaptažodžiu atsidurtų `verify` ataskaitoje.
+   */
+  for (const env of [
+    { DATABASE_URL: "postgres://vartotojas:slaptazodis@vidinis.lan:5432/db" },
+    { DATABASE_URL: "postgres://vartotojas:slaptazodis@vidinis.lan:5432/db", REDIS_URL: "redis://r:pw@h" },
+  ]) {
+    const tekstas = JSON.stringify(reconcile.nustatytiAsis(env).jobai);
+    for (const dalis of ["slaptazodis", "vartotojas", "vidinis.lan", "pw"]) {
+      assert.equal(tekstas.includes(dalis), false, `job'ų ašyje rasta: ${dalis}`);
+    }
+  }
 });
 
 test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą autoritetą", () => {
@@ -644,10 +709,24 @@ test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą a
 
 test("#280 II: konfigūracijos klaida krinta PRIEŠ transakciją, ne po `COMMIT`", () => {
   /**
+   * ⚠️ LIUDYTOJAS PAKEISTAS (#155, §12.1): buvo `JOB_STORE_BACKEND=postgres` su
+   * UŽDARYTU barjeru.
+   *
+   * Ta konfigūracija metė, ir testas ja naudojosi kaip pigia konfigūracijos klaida.
+   * Atidarius barjerą ji tapo TEISĖTA, tad liudytojo nebeliko — bet SAVYBĖ, kurią
+   * testas gina, nepasikeitė: konfigūracijos klaida privalo kristi PRIEŠ transakciją.
+   *
+   * ⚠️ NAUJAS LIUDYTOJAS PASIRINKTAS REALISTIŠKUMO, NE PATOGUMO PAGRINDU:
+   * `JOB_STORE_BACKEND=redis` be `REDIS_URL` yra būtent tas atvejis, kurį ADR
+   * įvardija kaip pavojingiausią — kintamasis, neperduotas į atkūrimo aplinką.
+   * Rašybos klaida (`JOB_STORE_BACKEND=nezinomas`) irgi metа, bet ji retesnė.
+   */
+  /**
    * ⚠️ COMMIT'INTAS, NEAUDITUOTAS DARBAS, PRANEŠTAS KAIP NESĖKMĖ.
    *
-   * `nustatytiAsis()` gali mesti (`JOB_STORE_BACKEND=postgres` su uždarytu 7.2a
-   * barjeru). Kviečiant po `COMMIT`, klaida atsidurdavo `catch` bloke:
+   * `nustatytiAsis()` gali mesti (`JOB_STORE_BACKEND=redis` be `REDIS_URL`; iki
+   * #155 — ir `postgres` su uždarytu barjeru). Kviečiant po `COMMIT`, klaida
+   * atsidurdavo `catch` bloke:
    * `ROLLBACK` jau nieko negrąžintų, auditas būtų praleistas, o CLI grąžintų 2 —
    * sesijos revokuotos, job'ai terminalizuoti, ir niekas apie tai nežino.
    *
@@ -665,13 +744,14 @@ test("#280 II: konfigūracijos klaida krinta PRIEŠ transakciją, ne po `COMMIT`
         NODE_ENV: "test",
         LOG_LEVEL: "error",
         DATABASE_URL: TAIKINYS,
-        JOB_STORE_BACKEND: "postgres",
+        JOB_STORE_BACKEND: "redis",
+        REDIS_URL: "",
       },
     }
   );
 
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+  assert.match(r.stderr, /JOB_STORE_BACKEND=redis, bet REDIS_URL nenustatytas/);
   assert.equal(/ECONNREFUSED/.test(r.stderr), false, "prie bazės jungtis nebuvo galima nė bandyti");
 });
 
@@ -694,10 +774,10 @@ test("#280 II: ašys nustatomos MODULYJE prieš transakciją, ne tik CLI'e", asy
       reconcile.suderinti({
         targetUrl: TAIKINYS,
         actor: "operatorius",
-        env: { DATABASE_URL: TAIKINYS, JOB_STORE_BACKEND: "postgres" },
+        env: { DATABASE_URL: TAIKINYS, JOB_STORE_BACKEND: "redis" },
       }),
     (err) => {
-      assert.match(err.message, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+      assert.match(err.message, /JOB_STORE_BACKEND=redis, bet REDIS_URL nenustatytas/);
       assert.equal(/ECONNREFUSED/.test(err.message), false);
       return true;
     }

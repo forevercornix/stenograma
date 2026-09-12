@@ -423,8 +423,9 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     /**
      * ⚠️ BE ŠIOS PUSĖS 7 ŽINGSNIS ĮRODYTŲ TIK TIEK, KAD NAUJAS KELIAS VEIKIA.
      *
-     * 7.2a barjeras job'ų autoritetu palieka atmintį arba Redis, tad replay be
-     * nukreiptos saugyklos atkurtos bazės NELIEČIA — ir vis tiek UŽDARO žymą bei
+     * Pratybos aplinka `JOB_STORE_BACKEND` nenurodo (žr. `drRestoreEnv`), tad
+     * fasado autoritetas yra atmintis, o replay be nukreiptos saugyklos atkurtos
+     * bazės NELIEČIA — ir vis tiek UŽDARO žymą bei
      * įrašo kvitą. „Sėkmė paskelbta, duomenys liko" yra tiksliai tas vakuumas,
      * dėl kurio saugykla DR kelyje privaloma. Šis žingsnis jį parodo, o ne
      * aprašo.

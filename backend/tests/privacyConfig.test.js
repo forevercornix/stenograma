@@ -509,19 +509,30 @@ test("PERSISTENT_STORAGE=true be jokios patvarios saugyklos = klaida (persistenc
 });
 
 /**
- * #155, 7.2a: PERSISTENCIJA IŠVEDAMA IŠ FAKTINIO BACKEND'O.
+ * #155: PERSISTENCIJA IŠVEDAMA IŠ FAKTINIO BACKEND'O.
  *
- * ⚠️ ŠIE TESTAI PRIKLAUSO NUO AKTYVAVIMO BARJERO IR TAI SĄMONINGA.
+ * ⚠️ ANKSTESNĖ ŠIO BLOKO REDAKCIJA SAKĖ: „šie testai priklauso nuo aktyvavimo
+ * barjero, ir barjerą atidarius lūkesčiai APSIVERS — pastebimai".
  *
- * Kol barjeras uždarytas, vien `DATABASE_URL` job'us palieka ATMINTYJE, tad
- * persistencijos jis NEDUODA. Barjerą atidarius (7.5b/7.6) šie lūkesčiai
- * apsiverčia - ir turi apsiversti pastebimai: testas, parašytas taip, kad
- * praeitų abiem atvejais, nebetikrintų nieko.
+ * Neapsivertė, ir tai radinys. Barjeras atidarytas, o vien `DATABASE_URL`
+ * job'ams persistencijos toliau NEDUODA — nes `postgres` nuo #155 renkamas TIK
+ * eksplicitiniu `JOB_STORE_BACKEND`. Testas liko žalias, o jo pavadinimas ir
+ * paaiškinimas ėmė nurodyti priežastį, kurios nebėra.
+ *
+ * ⚠️ TAI TIKSLIAI TA FORMA, KURIĄ PRANAŠAVO SENASIS KOMENTARAS, tik iš kitos
+ * pusės: jis bijojo testo, praeinančio abiem atvejais, o gavosi testas,
+ * praeinantis dėl KITOS priežasties nei ta, kurią skelbia jo vardas. Žalia
+ * spalva apie tai nepasako nieko.
+ *
+ * Todėl pora: pirmas tikrina, kad `DATABASE_URL` vienas neduoda persistencijos,
+ * antras — kad eksplicitinis pasirinkimas ją DUODA. Antrasis yra ta apvirtusi
+ * pusė, kurios senasis komentaras laukė; be jo pirmasis vėl būtų tik pusė
+ * taisyklės.
  *
  * Ankstesnė realizacija čia melavo: `Boolean(REDIS_URL || DATABASE_URL)`
  * pranešdavo `persistentStorage=true`, nors job'ai dingtų po restarto.
  */
-test("vien DATABASE_URL NEDUODA persistencijos, kol galioja aktyvavimo barjeras", () => {
+test("vien `DATABASE_URL` NEDUODA persistencijos — `postgres` renkamas tik eksplicitiškai", () => {
   const config = getPrivacyConfig({
     ...LOCAL_ENV,
     DATABASE_URL: "postgres://localhost:5432/steno",
@@ -530,8 +541,22 @@ test("vien DATABASE_URL NEDUODA persistencijos, kol galioja aktyvavimo barjeras"
   assert.equal(
     config.persistentStorage,
     false,
-    "barjeras palieka job'us atmintyje - pranešti persistenciją reikštų meluoti operatoriui"
+    "job'ai lieka atmintyje - pranešti persistenciją reikštų meluoti operatoriui"
   );
+});
+
+test("eksplicitinis `JOB_STORE_BACKEND=postgres` DUODA persistenciją", () => {
+  /**
+   * GINA: kad ankstesnis testas nebūtų tenkinamas TRIVIALIAI — realizacija,
+   * kuri PostgreSQL persistencijos neduoda NIEKADA, praeitų jį lygiai taip pat.
+   */
+  const config = getPrivacyConfig({
+    ...LOCAL_ENV,
+    DATABASE_URL: "postgres://localhost:5432/steno",
+    JOB_STORE_BACKEND: "postgres",
+  });
+
+  assert.equal(config.persistentStorage, true);
 });
 
 test("DATABASE_URL + REDIS_URL išveda persistentStorage=true (job'ai Redis'e)", () => {
@@ -620,6 +645,54 @@ test("diagnostika rodo, KUR konkrečiai duomenys gyvena", () => {
 
   // Paslapčių diagnostikoje būti negali.
   assert.ok(!JSON.stringify(persistent).includes("redis://"));
+});
+
+test("diagnostika įvardija PostgreSQL, kai jis ir yra job'ų saugykla (#155)", () => {
+  /**
+   * ⚠️ IŠMATUOTAS DEFEKTAS, NE PRAPLĖTIMAS.
+   *
+   * Iki #155 čia buvo `config.persistentStorage ? "redis" : "memory"`, ir tai
+   * buvo teisinga PAGAL KONSTRUKCIJĄ: persistentinis job store galėjo būti tik
+   * Redis, nes PostgreSQL neparinkdavo niekas. Atidarius barjerą diegimas su
+   * `JOB_STORE_BACKEND=postgres` ėmė gauti `jobState: "redis"`.
+   *
+   * ⚠️ NĖ VIENAS TESTAS NEKRITO. Formulė liko ta pati, o aibė, kuriai ji
+   * teisinga, susitraukė — tas pats pavidalas kaip `barjeras: true` ir
+   * „aktyvavimo barjeras" žinutėje. Laukas, kurio VIENINTELĖ paskirtis yra
+   * pasakyti, kur duomenys gyvena, GDPR atsakyme rodytų ne tą saugyklą.
+   *
+   * GINA: `jobState` seka faktinį backend'ą. Grąžinus formulę į
+   * `persistentStorage ? "redis" : "memory"` → krenta.
+   */
+  const pg = describeForDiagnostics({
+    ...LOCAL_ENV,
+    DATABASE_URL: "postgres://localhost:5432/steno",
+    JOB_STORE_BACKEND: "postgres",
+  });
+
+  assert.equal(pg.persistentStorage, true);
+  assert.equal(pg.storage.jobState, "postgres");
+  assert.ok(!JSON.stringify(pg).includes("postgres://"), "DSN diagnostikoje būti negali");
+});
+
+test("diagnostika NEKRENTA dėl prieštaringos konfigūracijos — ji ją ĮVARDIJA", () => {
+  /**
+   * ⚠️ DIAGNOSTIKA YRA TA VIETA, Į KURIĄ ATEINAMA SU GEDIMU.
+   *
+   * `selectBackend()` prieštaringai aplinkai meta. Su `PERSISTENT_STORAGE=true`
+   * `getPrivacyConfig()` to kelio NEKVIEČIA, tad naujoji `jobState` išvestis
+   * būtų įnešusi NAUJĄ kritimo kelią būtent ten, kur jo negalima turėti.
+   *
+   * GINA: nežinojimas grąžinamas ĮVARDYTAS. Numatytoji „memory" čia meluotų
+   * lygiai taip pat, kaip „redis" meluodavo PostgreSQL diegimui.
+   */
+  const bloga = describeForDiagnostics({
+    ...LOCAL_ENV,
+    PERSISTENT_STORAGE: "true",
+    JOB_STORE_BACKEND: "redis",
+  });
+
+  assert.match(bloga.storage.jobState, /nežinomas/);
 });
 
 test("startupChecks perima persistencijos prieštaravimą (serveris nestartuoja)", () => {
@@ -918,11 +991,21 @@ test("POLITIKA: kategorijos yra UŽŠALDYTOS, kaip ir likusi privatumo politika"
   assert.deepEqual(categories, ["PERSONAL_CODE", "EMAIL", "PHONE", "IBAN"]);
 });
 
-test("PERSISTENT_STORAGE=true su DATABASE_URL: klaida įvardija BARJERĄ, ne trūkstamą URL", () => {
+test("PERSISTENT_STORAGE=true su DATABASE_URL: klaida įvardija EKSPLICITINĮ PASIRINKIMĄ ir jo veiksmą", () => {
   /**
    * ⚠️ Bendrinis tekstas „nei REDIS_URL, nei DATABASE_URL nenustatytas" čia
    * būtų NETIESA ir siūlytų veiksmą, kuris nepadėtų: `DATABASE_URL` jau yra,
    * o startas vis tiek kristų. Klaida privalo nurodyti tikrą priežastį.
+   *
+   * ⚠️ IR PRIEŽASTIS PASIKEITĖ (#155). Iki barjero atidarymo ji buvo „PostgreSQL
+   * dar NEAKTYVUOTA"; po jo tai netiesa. Ankstesnė šio testo redakcija tikrino
+   * `/aktyvavimo barjeras/` — tad po atidarymo liko ŽALIA, ĮTVIRTINDAMA
+   * pasenusią žinutę: operatorius su `DATABASE_URL` būtų siunčiamas kelti Redis,
+   * nors užtenka vieno kintamojo.
+   *
+   * GINA DABAR: žinutė įvardija tikrą priežastį IR veiksmą, kuris ją pašalina.
+   * Patikra be `JOB_STORE_BACKEND=postgres` dalies praeitų ir tada, kai žinutė
+   * vėl imtų siūlyti tik Redis.
    */
   const { errors } = validatePrivacyConfig({
     ...LOCAL_ENV,
@@ -931,6 +1014,12 @@ test("PERSISTENT_STORAGE=true su DATABASE_URL: klaida įvardija BARJERĄ, ne tr�
   });
 
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /aktyvavimo barjeras/);
+  assert.match(errors[0], /renkama TIK eksplicitiškai/);
+  assert.match(errors[0], /JOB_STORE_BACKEND=postgres/);
   assert.doesNotMatch(errors[0], /nei DATABASE_URL nenustatytas/);
+  assert.doesNotMatch(
+    errors[0],
+    /NEAKTYVUOTA|aktyvavimo barjeras/,
+    "barjeras atidarytas - žinutė juo remtis nebegali"
+  );
 });

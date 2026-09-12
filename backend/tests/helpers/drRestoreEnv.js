@@ -29,10 +29,15 @@ const auditoLaukai = require("../../utils/auditStore/fields");
 /**
  * ⚠️ `JOB_STORE_BACKEND=postgres` ČIA NENUSTATOMAS, IR TAI NE PRALEIDIMAS.
  *
- * 7.2a aktyvavimo barjeras jį verčia KLAIDA (`selectBackend` meta „dar
- * neleidžiamas"), o vien `DATABASE_URL` grąžina `memory | barjeras: true`.
  * Job'ai sėjami per tiesioginį `createPostgresStore(pool)`, o replay — per
- * koordinatoriaus nukreiptą saugyklą (#250, C sprendimas).
+ * koordinatoriaus nukreiptą saugyklą (#250, C sprendimas): pratyba matuoja tuos
+ * kelius, ne fasado pasirinkimą.
+ *
+ * ⚠️ PRIEŽASTIS PASIKEITĖ PO #155, SPRENDIMAS — NE. Iki barjero atidarymo
+ * `JOB_STORE_BACKEND=postgres` čia būtų buvusi KLAIDA (`selectBackend` metė „dar
+ * neleidžiamas"). Dabar tai teisėta reikšmė — ir vis tiek nenustatoma: ją
+ * nustačius fasadas imtų rinktis PostgreSQL, o pratyba nebeatskirtų nukreiptos
+ * saugyklos nuo numatytosios. Būtent tą skirtumą matuoja 6a kontrolė.
  */
 function testoAplinka(url, papildomi = {}) {
   return {

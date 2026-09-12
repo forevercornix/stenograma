@@ -728,11 +728,13 @@ async function initializeWorkerOrFail(workerName) {
   /**
    * ⚠️ TIKRINAMA EILĖS GALIMYBĖ, NE KONKRETUS BACKEND'AS (#155, 7.2a).
    *
-   * Anksčiau čia buvo `getBackend() !== "redis"`. Atidarius PostgreSQL
-   * aktyvavimo barjerą su nustatytais IR `DATABASE_URL`, IR `REDIS_URL`,
-   * HTTP procesas dėtų job'us į BullMQ (`hasQueueBackend()` grąžintų `true`),
-   * o KIEKVIENAS atskiras worker'is kristų starte - vartotojo darbas liktų
-   * eilėje amžinai, be nė vieno vykdytojo.
+   * Anksčiau čia buvo `getBackend() !== "redis"`. Su `JOB_STORE_BACKEND=postgres`
+   * ir nustatytu `REDIS_URL` HTTP procesas dėtų job'us į BullMQ
+   * (`hasQueueBackend()` grąžintų `true`), o KIEKVIENAS atskiras worker'is kristų
+   * starte - vartotojo darbas liktų eilėje amžinai, be nė vieno vykdytojo.
+   *
+   * ⚠️ RAŠYTA KAIP ATEITIES SĄLYGA, DABAR YRA PASIEKIAMA KONFIGŪRACIJA (#155):
+   * barjeras atidarytas, tad šis derinys nebėra hipotetinis.
    *
    * Sprendimą priima ta pati `canUseQueue()`, kurią naudoja `server.js`.
    */

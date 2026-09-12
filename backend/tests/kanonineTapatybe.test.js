@@ -14,7 +14,9 @@ const { kanoninisRezultatas } = require("../utils/jobStore/common");
  * NETEISINGAI, ir teisėtas pakartojimas gaudavo `RESULT_CONFLICT`.
  *
  * Išmatuota prieš tikrą Redis (#298, CI 34106486710). Redis yra AKTYVUS kelias;
- * PostgreSQL tuo metu buvo (ir tebėra) už aktyvavimo barjero.
+ * PostgreSQL tuo metu buvo už aktyvavimo barjero. ⚠️ NEBĖRA (#155): barjeras
+ * atidarytas, tad `postgres` yra pasirenkamas kelias — o išvada nesikeičia,
+ * nes klausimas apie GRYNĄ funkciją, kurią visi trys keliai kviečia vienodai.
  *
  * ⚠️ TESTAI BE DB IR BE SAUGYKLOS — SĄMONINGAI. Klausimas yra apie GRYNĄ funkciją,
  * ir dublis čia ne aproksimacija, o pati tikrovė: `JSON.stringify` yra tas pats

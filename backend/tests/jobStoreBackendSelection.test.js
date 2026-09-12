@@ -24,14 +24,34 @@ const { resolveBackendChoice, applyActivationBarrier } = jobStore;
 const REDIS = "redis://localhost:6379";
 const PG = "postgres://localhost:5432/steno";
 
-test("parinkimas: DATABASE_URL > REDIS_URL > memory", () => {
+/**
+ * ⚠️ PAVADINIMAS PAKEISTAS SU TAISYKLE (#155). Buvo „parinkimas: DATABASE_URL >
+ * REDIS_URL > memory" — ta pirmenybė nebegalioja: `postgres` renkamas TIK
+ * eksplicitiškai. Palikus seną vardą, testas teigtų ginantis išvedimą, kurio nebėra.
+ *
+ * GINA: `DATABASE_URL` nesprendžia už operatorių, kur gyvena job metaduomenys.
+ */
+test("parinkimas: `postgres` TIK eksplicitiškai; likusiems REDIS_URL > memory", () => {
   assert.equal(resolveBackendChoice({}).norimas, "memory");
   assert.equal(resolveBackendChoice({ REDIS_URL: REDIS }).norimas, "redis");
-  assert.equal(resolveBackendChoice({ DATABASE_URL: PG }).norimas, "postgres");
+
+  /** ⚠️ ESMINĖ EILUTĖ: anksčiau čia buvo `postgres`. */
+  assert.equal(
+    resolveBackendChoice({ DATABASE_URL: PG }).norimas,
+    "memory",
+    "vien `DATABASE_URL` job metaduomenų NEPERJUNGIA — jis reikšmingas sesijoms, auditui, migracijoms"
+  );
+
   assert.equal(
     resolveBackendChoice({ DATABASE_URL: PG, REDIS_URL: REDIS }).norimas,
+    "redis",
+    "diegimas, nustatęs `DATABASE_URL` kitoms ašims, lieka prie savo Redis"
+  );
+
+  assert.equal(
+    resolveBackendChoice({ DATABASE_URL: PG, JOB_STORE_BACKEND: "postgres" }).norimas,
     "postgres",
-    "DATABASE_URL turi turėti pirmenybę"
+    "eksplicitinis pasirinkimas — vienintelis kelias į PostgreSQL"
   );
 });
 
@@ -57,50 +77,106 @@ test("parinkimas: nežinomas JOB_STORE_BACKEND yra klaida, ne tylus fallback", (
   );
 });
 
-test("BARJERAS: DATABASE_URL vienas NEPERJUNGIA srauto į PostgreSQL", () => {
-  /**
-   * ⚠️ ESMINIS 7.2a TESTAS. `postgresStore` yra įgyvendintas, bet ADR
-   * aktyvavimo barjeras dar galioja.
-   *
-   * Prielaidų sąrašas gyvena TIK ADR'e - dubliuota kopija komentare
-   * neišvengiamai pasensta (taip ir nutiko: ADR pridėjo eilės preflight, o
-   * kopijos čia ir `backendSelection.js` liko be jo).
-   *
-   * `DATABASE_URL` (kurio gali prireikti 7.3 sesijoms ar 7.4 auditui) neturi
-   * perjungti job metaduomenų į negrįžtamą režimą.
-   */
+/**
+ * ⚠️ PAVADINIMAS PAKEISTAS (#155): buvo „BARJERAS: ...". Šis testas barjero
+ * NEBEGINA — po numanomo išvedimo nuėmimo `resolveBackendChoice()` jau grąžina
+ * `memory`, ir barjeras jo nebeliečia. Testas lieka žalias DĖL KITOS TAISYKLĖS.
+ *
+ * ⚠️ KODĖL VARDAS SVARBUS: palikus „BARJERAS", po metų kas nors pašalintų
+ * eksplicitinio pasirinkimo reikalavimą, pamatytų žalią testą, kurio vardas kalba
+ * apie barjerą, ir manytų, kad riba tebegalioja.
+ *
+ * GINA: eksplicitinio pasirinkimo taisyklę per VISĄ grandinę, ne tik `resolve`.
+ */
+test("EKSPLICITINIS PASIRINKIMAS: `DATABASE_URL` vienas neperjungia į PostgreSQL", () => {
   const env = { DATABASE_URL: PG };
   const rezultatas = applyActivationBarrier(resolveBackendChoice(env), env);
   assert.equal(rezultatas.norimas, "memory");
 });
 
-test("BARJERAS: DATABASE_URL + REDIS_URL palieka esamą Redis elgesį NEPAKITUSĮ", () => {
+/**
+ * ⚠️ PAVADINIMAS PAKEISTAS (#155): ta pati priežastis. Anksčiau `redis` čia buvo
+ * BARJERO atsarginis kelias (`postgres` -> nuleidžiama); dabar `redis` renkamas
+ * TIESIOGIAI, nes numanomo išvedimo nebėra. Rezultatas tas pats, mechanizmas — ne.
+ *
+ * GINA: veikiantis Redis diegimas, turintis `DATABASE_URL` kitoms ašims, po
+ * barjero atidarymo NEPERSIJUNGIA tyliai.
+ */
+test("EKSPLICITINIS PASIRINKIMAS: `DATABASE_URL` + `REDIS_URL` palieka Redis NEPAKITUSĮ", () => {
   const env = { DATABASE_URL: PG, REDIS_URL: REDIS };
   const rezultatas = applyActivationBarrier(resolveBackendChoice(env), env);
   assert.equal(rezultatas.norimas, "redis");
 });
 
-test("BARJERAS: eksplicitinis JOB_STORE_BACKEND=postgres yra KLAIDA, ne įspėjimas", () => {
+/**
+ * ⚠️ POLITIKOS PAKEITIMAS VIENAME FAILE — PORA, NE PAVIENIS TESTAS (#155).
+ *
+ * Šie du testai turi būti skaitomi kartu: pirmasis rodo, kas TAPO leistina,
+ * antrasis — kas atsirado VIETOJ jos. Atskirai nė vienas nepasako politikos.
+ *
+ * BUVO: `JOB_STORE_BACKEND=postgres` metė klaidą (barjeras uždarytas), o
+ * `DATABASE_URL` vienas pasirinkdavo `postgres` ir būdavo nuleidžiamas atgal.
+ * Vadinasi eksplicitinis kelias buvo UŽDARYTAS, o numanomas — ATIDARYTAS ir
+ * nematomas.
+ *
+ * TAPO: eksplicitinis kelias yra VIENINTELIS, o numanomo nebėra. Riba
+ * persikėlė iš „ar leidžiama apskritai" į „ar operatorius paprašė".
+ */
+test("POLITIKA (1/2): eksplicitinis `JOB_STORE_BACKEND=postgres` LEIDŽIAMAS", () => {
+  const env = { JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG };
+  const rezultatas = applyActivationBarrier(resolveBackendChoice(env), env);
+
+  assert.equal(rezultatas.norimas, "postgres", "barjeras atidarytas (#155)");
+  assert.equal(rezultatas.barjeras, false, "barjeras nebekeičia pasirinkimo");
+  assert.equal(rezultatas.eksplicitinis, true, "kelias į PostgreSQL yra eksplicitinis pagal apibrėžimą");
+});
+
+test("POLITIKA (2/2): `DATABASE_URL` be eksplicitinio pasirinkimo NEPERJUNGIA", () => {
   /**
-   * Numanomas `DATABASE_URL` gali reikšti „reikia DB sesijoms"; eksplicitinis
-   * nurodymas reiškia tik viena. Jį ignoruoti tyliai būtų blogiau nei kristi.
+   * ⚠️ ŠI PUSĖ YRA NAUJA. Iki #155 jos nebuvo: numanomas išvedimas egzistavo, tik
+   * buvo nuleidžiamas barjero. Atidarius barjerą be šios taisyklės, KIEKVIENAS
+   * diegimas su `DATABASE_URL` — įskaitant nustačiusius jį sesijoms ar auditui —
+   * būtų persijungęs tyliai, o Redis metaduomenys NĖRA migruojami.
    */
-  assert.throws(
-    () =>
-      applyActivationBarrier(
-        resolveBackendChoice({ JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }),
-        {}
-      ),
-    /aktyvavimo barjeras|barjeras/i
+  for (const env of [{ DATABASE_URL: PG }, { DATABASE_URL: PG, REDIS_URL: REDIS }]) {
+    const rezultatas = applyActivationBarrier(resolveBackendChoice(env), env);
+    assert.notEqual(rezultatas.norimas, "postgres", JSON.stringify(env));
+  }
+
+  assert.equal(
+    applyActivationBarrier(resolveBackendChoice({ DATABASE_URL: PG, REDIS_URL: REDIS }), {
+      DATABASE_URL: PG,
+      REDIS_URL: REDIS,
+    }).norimas,
+    "redis",
+    "veikiantis Redis diegimas lieka prie savo saugyklos"
   );
 });
 
-test("BARJERAS: memory ir redis pasirinkimai praeina nepakitę", () => {
-  for (const env of [{}, { REDIS_URL: REDIS }, { JOB_STORE_BACKEND: "memory" }]) {
+/**
+ * ⚠️ PAVADINIMAS PAKEISTAS (#155): buvo „BARJERAS: memory ir redis praeina
+ * nepakitę". Atidarius barjerą `applyActivationBarrier()` tapo GRYNU pralaidumu —
+ * ji nebekeičia NĖ VIENO pasirinkimo, įskaitant `postgres`.
+ *
+ * GINA: funkcija nebeturi šalutinio poveikio pasirinkimui. Jei kas nors joje vėl
+ * įvestų sąlygą, šis testas kristų — ir būtent todėl ji paliekama, o ne šalinama.
+ */
+test("ATIDARYTAS BARJERAS: pasirinkimas pereina NEPAKITĘS visiems backend'ams", () => {
+  const atvejai = [
+    {},
+    { REDIS_URL: REDIS },
+    { JOB_STORE_BACKEND: "memory" },
+    { JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG },
+  ];
+
+  for (const env of atvejai) {
     const pries = resolveBackendChoice(env);
-    assert.equal(applyActivationBarrier(pries, env).norimas, pries.norimas);
+    const po = applyActivationBarrier(pries, env);
+    assert.equal(po.norimas, pries.norimas, JSON.stringify(env));
+    assert.equal(po.barjeras, false, `barjeras nebeįsikiša: ${JSON.stringify(env)}`);
   }
 });
+
 
 /* ── EILĖS ATSIEJIMAS ─────────────────────────────────────────────────────── */
 
@@ -195,15 +271,17 @@ test("EILĖ: hasQueueBackend() deleguoja į canUseQueue be savo sąlygos", () =>
  * ⚠️ ŠIŲ TESTŲ APIMTIS RIBOTA SĄMONINGAI.
  *
  * DoD reikalauja, kad pasirinkus PostgreSQL prisijungimo klaida nutrauktų
- * startą arba readiness, o ne pereitų į memory. Aktyvavimo barjeras
- * PostgreSQL dar neparenka, tad PILNO produkcinio kelio
- * (`DATABASE_URL` → startas nutrūksta) šiame PR NĖRA - jo galutinis
- * acceptance priklauso aktyvavimo etapui.
+ * startą arba readiness, o ne pereitų į memory.
  *
- * Ką ŠIE testai vis dėlto įrodo: kad gedimo kelias egzistuoja, kad jis META
- * klaidą ir kad jis NEGRĮŽTA į memory. Be jų kriterijus neturėtų jokio
- * įrodymo, o neišbandytas gedimo kelias, įsijungiantis 7.2b momentu, yra
- * blogesnis nei neparašytas - jis atrodo padengtas.
+ * Ką ŠIE testai įrodo: kad gedimo kelias egzistuoja, kad jis META klaidą ir kad
+ * jis NEGRĮŽTA į memory.
+ *
+ * ⚠️ PILNAS PRODUKCINIS KELIAS NEBĖRA JŲ RIBA (#155). Ankstesnė redakcija sakė,
+ * kad jo „šiame PR NĖRA" ir kad acceptance priklauso aktyvavimo etapui — tas
+ * etapas ĮVYKO: barjerą atidarantis PR turi CI žingsnį „Fail-closed startas",
+ * kuris paleidžia tikrą `node server.js` su `JOB_STORE_BACKEND=postgres` ir
+ * uždaru prievadu. Šie testai lieka kaip pigus, greitas sluoksnis; įrodymas,
+ * kad kelias pasiekiamas PRODUKCIJOJE, gyvena ten.
  */
 test("FAIL-CLOSED: neprieinamas PostgreSQL meta klaidą, o ne grįžta į memory", async () => {
   const buves = process.env.DATABASE_URL;
@@ -394,4 +472,105 @@ test("FAIL-CLOSED: PostgreSQL startas turi BAIGTINĘ prisijungimo ribą", async 
     for (const socket of jungtys) socket.destroy();
     await new Promise((res) => server.close(res));
   }
+});
+
+/**
+ * ⚠️ GRĮŽTAMUMAS — MECHANIZMO PALIKIMO KAINA IR JO ĮRODYMAS (#155).
+ *
+ * `applyActivationBarrier()` ir nepasiekiamas `if (choice.barjeras)` įspėjimas
+ * `jobStore/index.js` paliekami SĄMONINGAI: barjeras yra pats mechanizmas, ir jį
+ * pašalinus konstantos grąžinimas į `false` nebeturėtų ko įjungti — „uždaryti atgal"
+ * reikštų parašyti viską iš naujo.
+ *
+ * ⚠️ BET PALIKTAS MECHANIZMAS BE ĮRODYMO YRA TIK PRIELAIDA, KAD JIS VEIKIA.
+ *
+ * Atidarius barjerą visos jo šakos tapo nepasiekiamos, tad NĖ VIENAS kitas testas jų
+ * nebevykdo: `POLITIKA (1/2)`, `(2/2)` ir „pralaidumo" testas matuoja tik ATIDARYTĄ
+ * būseną. Vadinasi grįžtamumas — vienintelė priežastis, dėl kurios kodas laikomas —
+ * buvo neišbandytas nuo pat atidarymo commit'o. Tai ta pati „savybė be liudytojo"
+ * klasė, kurią šis PR taisė 33 kitose vietose; čia ji buvo PAČIAME barjere.
+ *
+ * ⚠️ KODĖL PERKOMPILIUOJAMA, O NE TIKRINAMAS TEKSTAS. Struktūrinė patikra („šaka
+ * faile tebėra") įrodytų tik tai, kad kodas parašytas. Čia konstanta apverčiama ir
+ * paleidžiama TIKROJI funkcija, tad tikrinamas ELGESYS: metimas eksplicitiniam
+ * keliui ir nuleidimas numanomam. Modulis savų `require` neturi, tad perkompiliavimas
+ * yra pilnas, ne dublis.
+ *
+ * ⚠️ `assert.notEqual` ANT PAKEITIMO YRA DALIS TESTO, NE HIGIENA: konstantą
+ * pervadinus ar pašalinus pakeitimas nieko neberastų, ir testas praeitų TYLIAI
+ * nieko nepatikrinęs — tiksliai tas gedimas, kurį visas šis PR gaudo.
+ */
+function suUzdarytuBarjeru() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const Module = require("node:module");
+
+  const kelias = require.resolve("../utils/jobStore/backendSelection");
+  const saltinis = fs.readFileSync(kelias, "utf8");
+  const pakeistas = saltinis.replace(
+    "const POSTGRES_AKTYVAVIMAS_LEISTAS = true;",
+    "const POSTGRES_AKTYVAVIMAS_LEISTAS = false;"
+  );
+
+  assert.notEqual(
+    pakeistas,
+    saltinis,
+    "konstanta privalo egzistuoti TIKSLIAI tokia forma - kitaip šis testas tyliai nieko netikrina"
+  );
+
+  const modulis = new Module(kelias, null);
+  modulis.filename = kelias;
+  modulis.paths = Module._nodeModulePaths(path.dirname(kelias));
+  modulis._compile(pakeistas, kelias);
+  return modulis.exports;
+}
+
+test("GRĮŽTAMUMAS: konstantą grąžinus į `false`, barjeras vėl UŽDAROSI", () => {
+  const uzdarytas = suUzdarytuBarjeru();
+
+  /** Eksplicitinis kelias vėl yra KLAIDA, ne tylus nuleidimas. */
+  assert.throws(
+    () =>
+      uzdarytas.applyActivationBarrier(
+        uzdarytas.resolveBackendChoice({ JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }),
+        { JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }
+      ),
+    /dar neleidžiamas/,
+    "uždarytas barjeras eksplicitinį pasirinkimą privalo ATMESTI, ne ignoruoti"
+  );
+
+  /**
+   * ⚠️ IR NUMANOMAS KELIAS VĖL NULEIDŽIAMAS SU MATOMA VĖLIAVA.
+   *
+   * Būtent ši šaka maitina `jobStore/index.js` įspėjimą ir `priezastis` priesagą
+   * `(barjeras)`. Be jos uždarymas būtų tylus — t. y. blogesnis nei jo nebuvimas.
+   */
+  const suRedis = { DATABASE_URL: PG, REDIS_URL: REDIS, JOB_STORE_BACKEND: "postgres" };
+  const nuleista = uzdarytas.applyActivationBarrier(
+    { norimas: "postgres", priezastis: "JOB_STORE_BACKEND", eksplicitinis: false, barjeras: false },
+    suRedis
+  );
+
+  assert.equal(nuleista.norimas, "redis", "su `REDIS_URL` nuleidžiama į Redis, ne į atmintį");
+  assert.equal(nuleista.barjeras, true, "vėliava privalo grįžti - ja remiasi operatoriaus įspėjimas");
+  assert.match(nuleista.priezastis, /\(barjeras\)/, "priežastis privalo įvardyti barjerą");
+
+  /** Be `REDIS_URL` — į atmintį, ta pačia šaka. */
+  assert.equal(
+    uzdarytas.applyActivationBarrier(
+      { norimas: "postgres", priezastis: "DATABASE_URL", eksplicitinis: false, barjeras: false },
+      { DATABASE_URL: PG }
+    ).norimas,
+    "memory"
+  );
+
+  /** ⚠️ Kontrolė: perkompiliuotas modulis nekeičia GYVOJO - barjeras tebėra atidarytas. */
+  assert.equal(
+    applyActivationBarrier(resolveBackendChoice({ JOB_STORE_BACKEND: "postgres", DATABASE_URL: PG }), {
+      JOB_STORE_BACKEND: "postgres",
+      DATABASE_URL: PG,
+    }).norimas,
+    "postgres",
+    "testas privalo likti izoliuotas - gyvas modulis nepaliestas"
+  );
 });
