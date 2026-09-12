@@ -711,11 +711,18 @@ komanda **krenta** (`RECONCILE_BACKEND_NOT_POSTGRES`) prieš pirmą mutaciją:
 suderinimas, kuriam nereikia nė vienos ašies, neturi ko patvirtinti, o „sėkmė be
 darbo" yra tiksliai tas tylus praleidimas, kurio D7 neleidžia.
 
-⚠️ **Šiandien job'ų ašis niekada nėra `suderinta`:** 7.2a aktyvavimo barjeras
-(`POSTGRES_AKTYVAVIMAS_LEISTAS = false`) palieka job'ų autoritetą atmintyje arba
-Redis'e. Darbas atkurtoje bazėje vis tiek atliekamas — likusios `queued` eilutės
-taptų gyvos tą dieną, kai barjeras atsidarys — bet **verdiktas to saugumu
-nevadina**. Žr. §10 ir #281.
+⚠️ **Job'ų ašis yra `suderinta` TIK ten, kur nurodyta `JOB_STORE_BACKEND=postgres`
+(#155).** Aktyvavimo barjeras atidarytas, tad tai nebe neįmanoma — bet ir ne
+numatyta: `DATABASE_URL` vienas job'ų autoriteto neperjungia, tad diegimas,
+turintis jį sesijoms ar auditui, job'ų ašiai toliau gaus `nereikalinga` arba
+`nepadengta`. Darbas atkurtoje bazėje atliekamas abiem atvejais — likusios
+`queued` eilutės taptų gyvos tą dieną, kai diegimas pasirinktų `postgres` — bet
+**verdiktas to saugumu nevadina**. Žr. §10 ir #281.
+
+⚠️ **KĄ TIKRINTI PRIEŠ KOMANDĄ:** jei tikitės `suderinta` job'ų ašiai, įsitikinkite,
+kad `JOB_STORE_BACKEND=postgres` yra ATKŪRIMO aplinkoje, ne tik produkcinėje.
+Neperduotas kintamasis čia yra dažniausia klaidos forma, ir komanda ją įvardija
+priežastimi (`job'ai: memory — numatyta`), ne vien autoritetu.
 
 ⚠️ **`--target` privalo sutapti su `DATABASE_URL`.** Jis nenaudojamas jungtis —
 jis TIKRINAMAS: suderinimas dirba su ta baze, prie kurios prisirišusios
@@ -907,8 +914,8 @@ rašo pats `eraseJob()`.
 | **Su `AUDIT_BACKEND=memory` kūrimo auditas neišlieka** | `PG_DUMP_BACKUP_CREATED` dingsta komandai pasibaigus; komanda įspėja | `AUDIT_BACKEND=postgres` |
 | **Post-restore suderinimo riba yra procedūrinė** | Serverį galima paleisti nesuderinus — `verify` yra patikra, ne sargas | Suderinimo žyma su starto patikra (#279) |
 | **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami 7.6b žingsnyje | Uždaro §9c replay, vykdomas PRIEŠ suderinimą |
-| **Replay be tikslinės bazės kliento neįmanomas** | `DR_REPLAY_STORE_MISSING` — tylaus grįžimo prie fasado nėra | Sąmoningas fail-closed (7.2a barjeras) |
-| **Job'ų autoritetas šiandien nėra PostgreSQL** | 7.2a barjeras: suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | 7.2a aktyvavimo barjero atidarymas (#281) |
+| **Replay be tikslinės bazės kliento neįmanomas** | `DR_REPLAY_STORE_MISSING` — tylaus grįžimo prie fasado nėra | Sąmoningas fail-closed. ⚠️ Po barjero atidarymo (#155) SVARBESNIS: fasadas gali būti `postgres`, ir tada replay per jį eitų į PRODUKCINĘ, ne atkurtą bazę |
+| **Job'ų autoritetas nėra PostgreSQL be eksplicitinio pasirinkimo** | ⚠️ **Barjeras ATIDARYTAS (#155)** — bet `DATABASE_URL` vienas neperjungia: be `JOB_STORE_BACKEND=postgres` suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | Nustatyti `JOB_STORE_BACKEND=postgres` ATKŪRIMO aplinkoje (#281) |
 | **`PG*`-only diegimas neturi nė vienos PostgreSQL ašies** | `post-restore-reconcile` krenta su `RECONCILE_BACKEND_NOT_POSTGRES` | Sesijų atranka turi priimti `PG*` (#282) |
 | **`options`/`search_path` skirtumas = kita bazė** | Vienodi DSN su skirtingu `search_path` laikomi SKIRTINGAIS taikiniais | Sąmoninga fail-closed kryptis |
 

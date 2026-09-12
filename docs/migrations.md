@@ -103,9 +103,10 @@ sąmoninga: tylus grįžimas yra būtent tas gedimas, kurį ši riba uždaro.
 ⚠️ **VYKDOMA PROCEDŪRA. Sprendimą ir jo priežastis aprašo
 `docs/decisions/155-postgres-authority.md`; čia — tik veiksmai ir patikros.**
 
-⚠️ **ĮSIGALIOJA KARTU SU AKTYVAVIMO BARJERU.** Kol
-`POSTGRES_AKTYVAVIMAS_LEISTAS = false`, PostgreSQL job store'u netampa, ir ši
-procedūra nevykdoma.
+⚠️ **BARJERAS ATIDARYTAS — PROCEDŪRA VYKDOMA (#155).** `POSTGRES_AKTYVAVIMAS_LEISTAS
+= true`, tad PostgreSQL job store'u tampa, kai diegimas nurodo
+`JOB_STORE_BACKEND=postgres`. ⚠️ **Tai ir yra vienintelis paleidiklis:**
+`DATABASE_URL` vienas šios procedūros nepradeda ir job'ų neperjungia.
 
 ### Kam ji reikalinga
 
