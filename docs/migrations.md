@@ -98,6 +98,107 @@ konfigūracijos veiksmas, atliekamas per vieną perleidimą.
 ⚠️ Nustačius `fs` ar `s3`, **grįžimas į `inline` nebeįmanomas tyliai** ir tai
 sąmoninga: tylus grįžimas yra būtent tas gedimas, kurį ši riba uždaro.
 
+## ⚠️ Cutover: Redis → PostgreSQL job metaduomenys (#155)
+
+⚠️ **VYKDOMA PROCEDŪRA. Sprendimą ir jo priežastis aprašo
+`docs/decisions/155-postgres-authority.md`; čia — tik veiksmai ir patikros.**
+
+⚠️ **ĮSIGALIOJA KARTU SU AKTYVAVIMO BARJERU.** Kol
+`POSTGRES_AKTYVAVIMAS_LEISTAS = false`, PostgreSQL job store'u netampa, ir ši
+procedūra nevykdoma.
+
+### Kam ji reikalinga
+
+**Esami Redis job metaduomenys NĖRA perkeliami į PostgreSQL** — tai sąmoningas
+sprendimas („TTL nutekėjimas, ne migracija"): job metaduomenys trumpaamžiai, o
+migracijos skriptas turėtų atkartoti visą `deserialize` logiką, `owner_kind`
+semantiką ir fazių invariantus.
+
+⚠️ **BET TTL NEVEIKIA VISIEMS ĮRAŠAMS, IR TAI YRA PROCEDŪROS PRIEŽASTIS.**
+`redisStore.update()` taiko `EXPIRE` **tik** terminaliems įrašams
+(`redisStore.js:285`). Vadinasi:
+
+| Įrašo būsena | Kas su juo nutinka | Pasekmė |
+|---|---|---|
+| `queued` / `processing` | TTL **negauna** | lieka Redis'e **neribotai** kartu su `storageKey` |
+| terminalus su `audio_cleanup_pending` ar `deletion_pending` | `PERSIST` — TTL **nuimamas** | hash'as gali būti **vienintelis** `storageKey` ir retry būsenos šaltinis |
+| terminalus be laukiančio valymo | `EXPIRE` po `JOB_TTL_MINUTES` | dingsta pats |
+
+Po perjungimo naujas autoritetas apie tuos įrašus **nežino**, o Redis sweeper'is
+jų nebešalina. Tai GDPR klausimas, ne operacinis: jautrūs metaduomenys lieka
+saugykloje, kurios niekas nebeprižiūri.
+
+### Žingsniai
+
+| # | Veiksmas | Kodėl privalomas |
+|---|---|---|
+| 1 | Nustoti priimti naujus job'us (`503` arba priežiūros režimas) | be to 2 žingsnis niekada nesibaigs |
+| 2 | Palaukti, kol `active` + `waiting` pasieks **0** | ⚠️ **`JOB_TTL_MINUTES` NĖRA drain timeout** — tai metaduomenų retencija, ne darbo trukmė |
+| 2b | **Sustabdyti visus worker'ius** ir patvirtinti, kad nebedirba | veikiantis worker'is po 3 žingsnio parašytų naują įrašą |
+| 3 | Terminalizuoti likusius `queued`/`processing`: `finish(FAILED, "cutover")` | `finish()` šaltinio netikrina, tad veikia ir sugadintiems (#154) |
+| 3b | **Išlaisvinti orphan audio** — `releaseAudio(jobId, storageKey)` kiekvienam terminalizuotam | be to audio liktų pakibęs be jokio įrašo |
+| 4 | **Palaukti, kol baigsis laukiantis valymas** (`audio_cleanup_pending`, `deletion_pending`) | ⚠️ žr. įspėjimą žemiau — tai ne formalumas |
+| 5 | Nepasibaigusius `completed` įrašus **perkelti arba palaukti** jų retencijos | ⚠️ žr. įspėjimą žemiau |
+| 5b | Ištrinti hash'us **ir indeksą** | žr. komandą žemiau |
+| 6 | Patikrinti: nebeliko nei `job:*`, nei `jobs:index`, nei `*_pending` vėliavų | vienintelė patikra, kuri pagauna 5b praleidimą |
+| 7 | Nustatyti **eksplicitinį** `JOB_STORE_BACKEND=postgres` | ⚠️ žr. „Eksplicitinis pasirinkimas" |
+| 8 | Paleisti su nauju backend'u | — |
+
+### ⚠️ 5b: aklas `job:*` trynimas PRARASTŲ duomenis
+
+```bash
+# Pirma — patikrinti, ar nėra laukiančio valymo (4 žingsnis):
+redis-cli --scan --pattern 'job:*' | while read -r k; do
+  redis-cli HMGET "$k" audio_cleanup_pending deletion_pending | grep -q true && echo "LAUKIA: $k"
+done
+
+# Tik tada:
+redis-cli --scan --pattern 'job:*' | xargs -r redis-cli DEL
+redis-cli DEL jobs:index
+```
+
+⚠️ **`job:*` NEAPIMA INDEKSO.** `jobs:index` yra atskiras sorted set
+(`redisStore.js:42`), ir šablonas `job:*` jo **neatitinka** — nėra dvitaškio po
+`job`. Perjungus, Redis sweeper'is jo nebešalina, tad metaduomenys liktų
+neribotai, o 6 žingsnio patikra be `DEL jobs:index` **praeitų**.
+
+⚠️ **HASH'AI SU `*_pending` YRA VIENINTELIS `storageKey` ŠALTINIS.**
+`redisStore.update()` jiems taiko `PERSIST`, ne `EXPIRE`. Ištrynus juos anksčiau
+laiko, liktų pakibęs jautrus audio arba nebaigtas ištrynimas, kurio niekas
+nebeužbaigs. Todėl 4 žingsnis vykdomas **prieš** 5b, ir tai patikrinama.
+
+### ⚠️ 5: nepasibaigę `completed` įrašai turi savo retenciją
+
+Job'as, baigtas prieš pat 2 žingsnį, gauna **šviežią** `JOB_TTL_MINUTES` langą.
+5b jį ištrintų iš karto, o klientas, apklausęs po priežiūros, gautų „nėra tokio
+job'o" ir **negrįžtamai prarastų transkripciją**, kuri dar turėjo būti saugoma.
+
+Todėl 5 žingsnis: **arba** nepasibaigę terminalūs įrašai perkeliami į PostgreSQL,
+**arba** trynimas atidedamas, kol kiekvieno pažadėta retencija pasibaigs.
+
+### ⚠️ Eksplicitinis pasirinkimas (7 žingsnis)
+
+Perjungimas reikalauja **eksplicitinio** `JOB_STORE_BACKEND=postgres`. Vien
+`DATABASE_URL` nepakanka **sąmoningai**: jį diegimai nustato ir sesijoms (7.3),
+auditui ar migracijoms, o tylus perjungimas reikštų, kad job metaduomenų saugykla
+pasikeitė tiems, kurie to neprašė.
+
+### ⚠️ Restore procedūra privaloma PRIEŠ cutover, ne po jo
+
+5b **ištrina visus** Redis `job:*` hash'us. Po perjungimo atkūrimo šaltinio
+nebelieka: PostgreSQL dar tuščias, o Redis jau išvalytas. Tad
+`docs/backup-runbook.md` §9a–§9d praeinama **prieš** šią procedūrą.
+
+### Patikra po 6 žingsnio
+
+```bash
+redis-cli --scan --pattern 'job:*' | head -1      # tuščia
+redis-cli EXISTS jobs:index                        # 0
+```
+
+⚠️ **Tuščias `job:*` be `EXISTS jobs:index` NĖRA įrodymas** — indeksas pro tą
+šabloną nematomas.
+
 ## Artefaktų migracija: `inline` → external (#157, PR-6)
 
 `node-pg-migrate` čia nedalyvauja. Tai **duomenų**, ne schemos migracija, ir ji

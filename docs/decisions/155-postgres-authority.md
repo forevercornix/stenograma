@@ -167,6 +167,13 @@ invariantų perkėlimo.
 
 ## Cutover: kas nutinka esamiems Redis duomenims
 
+⚠️ **VYKDOMA PROCEDŪRA GYVENA `docs/migrations.md` („Cutover: Redis → PostgreSQL
+job metaduomenys"). Čia lieka SPRENDIMAS ir jo priežastys; komandos, patikros ir
+žingsnių eiliškumas — ten.**
+
+Jei abu tekstai kada nors išsiskirs, **autoritetas yra operatoriaus dokumentas**:
+jį skaito tas, kas procedūrą vykdo. Šis skyrius atsako „kodėl", ne „kaip".
+
 Diegimo metu Redis'e jau bus job metaduomenų ir BullMQ darbų, sukurtų prieš
 `postgresStore` tampant autoritetingu. Be aiškios politikos jie taptų
 nematomais.
