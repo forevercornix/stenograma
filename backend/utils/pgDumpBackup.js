@@ -83,6 +83,7 @@ const DUMP_FORMATAS = "plain";
  */
 const PG_DUMP_ARGUMENTAI = (databaseUrl) => [
   "--exclude-table-data=audit_log",
+  "--exclude-table-data=job_results",
   "--no-owner",
   "--no-privileges",
   databaseUrl,
