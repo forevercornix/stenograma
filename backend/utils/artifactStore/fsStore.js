@@ -764,6 +764,11 @@ function createFsArtifactStore({ root } = {}) {
      */
     if ((await head(raktas)) === null) return false;
 
+    /* MUTACIJA C1: trynimas išplinta į TĖVINĮ KATALOGĄ — t. y. į gretimus raktus.
+       Šis sluoksnis yra ŽEMIAU `svetimiAdresai` sargo, tad DB jo nesustabdo. */
+    await require("node:fs/promises").rm(require("node:path").dirname(pilnas), { recursive: true, force: true });
+    return true;
+
     try {
       await fsp.unlink(pilnas);
     } catch (klaida) {

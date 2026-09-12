@@ -2568,7 +2568,7 @@ function createPostgresStore(
     const attemptRegistry = require("../attemptRegistry");
 
     const { rows: rezultatas } = await vykdytojas.query(
-      "SELECT storage_type, storage_key FROM job_results WHERE ($1 IS NOT NULL) AND storage_key IS NOT NULL",
+      "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1 AND storage_key IS NOT NULL",
       [String(jobId)]
     );
     const bandymai = bandymuRegistras ? await attemptRegistry.joboBandymai(vykdytojas, jobId) : [];
