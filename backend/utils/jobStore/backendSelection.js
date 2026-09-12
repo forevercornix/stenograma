@@ -51,8 +51,31 @@ const ALLOWED_BACKENDS = Object.freeze(["postgres", "redis", "memory"]);
  * ⚠️ KONSTANTA, NE ENV KINTAMASIS. `ALLOW_POSTGRES=1` reikštų, kad barjerą
  * galima apeiti diegimo metu, nepraėjus nė vienos prielaidos ir be jokios
  * peržiūros. Konstanta reiškia, kad atidarymas yra commit'as.
+ *
+ * ⚠️ ATIDARYTA (#155). VISOS ŠEŠIOS ADR PRIELAIDOS UŽDARYTOS.
+ *
+ *   patikrintas restore         #248, #249, #250, #333 (+ R1: #337)
+ *   persistentės ištrynimo žymos #183
+ *   transakcinis rašymas         #184, PR-4
+ *   idempotentiškas užbaigimas   #184, PR-4, #334
+ *   eilės prieinamumo preflight  #322
+ *   fail-closed startas REALIAI  ŠIS PR, paskutinis commit'as (10 sąlyga)
+ *
+ * Šeštoji uždaroma PAČIU atidarymu ir niekaip kitaip: kol barjeras buvo
+ * uždarytas, `initializePostgres()` produkcijoje buvo NEPASIEKIAMA, tad jos
+ * fail-closed elgesys buvo įrodytas tik unit lygmeniu.
+ *
+ * ⚠️ ATIDARYMAS NĖRA PERJUNGIMAS. Po jo `postgres` tampa PASIEKIAMAS, bet
+ * renkamas TIK eksplicitiniu `JOB_STORE_BACKEND=postgres` — vien `DATABASE_URL`
+ * job metaduomenų neperjungia (žr. `resolveBackendChoice()`). Nė vienas esamas
+ * diegimas nepersijungia savaime.
+ *
+ * ⚠️ IR TAI VIENINTELIS NEGRĮŽTAMAS ŽINGSNIS SEKOJE. Po perjungimo atsiranda
+ * duomenų, kurių adresas gyvena TIK PostgreSQL'e (`job_results.storage_key`,
+ * `job_result_attempts`), o saugyklos sąrašymo ribos nėra pagal konstrukciją (A3).
+ * Grįžimo mechanika: `docs/deletion-guarantees.md` §0.
  */
-const POSTGRES_AKTYVAVIMAS_LEISTAS = false;
+const POSTGRES_AKTYVAVIMAS_LEISTAS = true;
 
 /**
  * NORIMAS backend'as — eksplicitinė pirmenybė.

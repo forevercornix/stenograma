@@ -686,6 +686,19 @@ test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą a
 
 test("#280 II: konfigūracijos klaida krinta PRIEŠ transakciją, ne po `COMMIT`", () => {
   /**
+   * ⚠️ LIUDYTOJAS PAKEISTAS (#155, §12.1): buvo `JOB_STORE_BACKEND=postgres` su
+   * UŽDARYTU barjeru.
+   *
+   * Ta konfigūracija metė, ir testas ja naudojosi kaip pigia konfigūracijos klaida.
+   * Atidarius barjerą ji tapo TEISĖTA, tad liudytojo nebeliko — bet SAVYBĖ, kurią
+   * testas gina, nepasikeitė: konfigūracijos klaida privalo kristi PRIEŠ transakciją.
+   *
+   * ⚠️ NAUJAS LIUDYTOJAS PASIRINKTAS REALISTIŠKUMO, NE PATOGUMO PAGRINDU:
+   * `JOB_STORE_BACKEND=redis` be `REDIS_URL` yra būtent tas atvejis, kurį ADR
+   * įvardija kaip pavojingiausią — kintamasis, neperduotas į atkūrimo aplinką.
+   * Rašybos klaida (`JOB_STORE_BACKEND=nezinomas`) irgi metа, bet ji retesnė.
+   */
+  /**
    * ⚠️ COMMIT'INTAS, NEAUDITUOTAS DARBAS, PRANEŠTAS KAIP NESĖKMĖ.
    *
    * `nustatytiAsis()` gali mesti (`JOB_STORE_BACKEND=postgres` su uždarytu 7.2a
@@ -707,13 +720,14 @@ test("#280 II: konfigūracijos klaida krinta PRIEŠ transakciją, ne po `COMMIT`
         NODE_ENV: "test",
         LOG_LEVEL: "error",
         DATABASE_URL: TAIKINYS,
-        JOB_STORE_BACKEND: "postgres",
+        JOB_STORE_BACKEND: "redis",
+        REDIS_URL: "",
       },
     }
   );
 
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+  assert.match(r.stderr, /JOB_STORE_BACKEND=redis, bet REDIS_URL nenustatytas/);
   assert.equal(/ECONNREFUSED/.test(r.stderr), false, "prie bazės jungtis nebuvo galima nė bandyti");
 });
 
@@ -736,10 +750,10 @@ test("#280 II: ašys nustatomos MODULYJE prieš transakciją, ne tik CLI'e", asy
       reconcile.suderinti({
         targetUrl: TAIKINYS,
         actor: "operatorius",
-        env: { DATABASE_URL: TAIKINYS, JOB_STORE_BACKEND: "postgres" },
+        env: { DATABASE_URL: TAIKINYS, JOB_STORE_BACKEND: "redis" },
       }),
     (err) => {
-      assert.match(err.message, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+      assert.match(err.message, /JOB_STORE_BACKEND=redis, bet REDIS_URL nenustatytas/);
       assert.equal(/ECONNREFUSED/.test(err.message), false);
       return true;
     }
