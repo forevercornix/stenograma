@@ -45,7 +45,22 @@ function baseFields(ownerId, storageKey) {
  * ir jis skiriasi nuo `completed`, kuriam `processing` yra būtinas. Fixture,
  * abiem naudojantis tą patį kelią, paslėptų būtent tą skirtumą.
  */
-async function pasetiKeturisStatusus(store, { ownerId, storageKey }) {
+/**
+ * ⚠️ `uzbaigtiZymeta` — NEPRIVALOMA, IR NUMATYTAI IŠJUNGTA (#155, R1).
+ *
+ * Keturi fikstūros naudotojai tikisi, kad `zymetas` yra `queued` BE rezultato.
+ * DR pratybai (R1) reikia priešingo: pažymėtas job'as privalo turėti EXTERNAL
+ * rezultatą, kad ištrynimas turėtų ką šalinti SAUGYKLOJE, o ne tik eilutėje.
+ *
+ * ⚠️ NUMATYTOJI REIKŠMĖ NEKEIČIAMA SĄMONINGAI: pakeitus ją visiems, trys kiti
+ * testai imtų tikrinti kitą būseną, nei buvo parašyti — ir tai paaiškėtų kaip
+ * jų kritimas dėl svetimos priežasties.
+ *
+ * ⚠️ AR REZULTATAS BUS EXTERNAL, SPRENDŽIA `store`, NE ŠI FIKSTŪRA: jei jam
+ * paduota `rasymoSaugykla`, eilutė bus external; jei ne — inline. Fikstūra
+ * nekuria antros saugyklos parinkimo taisyklės.
+ */
+async function pasetiKeturisStatusus(store, { ownerId, storageKey, uzbaigtiZymeta = false }) {
   const queued = await store.create(baseFields(ownerId, storageKey("queued")));
   const processing = await store.create(baseFields(ownerId, storageKey("processing")));
   const failed = await store.create(baseFields(ownerId, storageKey("failed")));
@@ -63,7 +78,16 @@ async function pasetiKeturisStatusus(store, { ownerId, storageKey }) {
     result: { text: "reprezentatyvi transkripcija", segments: [1, 2] },
   });
 
-  return { queued, processing, failed, completed, zymetas };
+  let zymetasUzbaigtas = zymetas;
+  if (uzbaigtiZymeta) {
+    const pradedamas = await store.update(zymetas.id, jobPhase.startPhase(zymetas, "validating"));
+    await store.finishAtomic(pradedamas.id, "completed", {
+      result: { text: "pažymėto job'o transkripcija", segments: [7, 8, 9] },
+    });
+    zymetasUzbaigtas = await store.get(zymetas.id, { hydrate: false });
+  }
+
+  return { queued, processing, failed, completed, zymetas: zymetasUzbaigtas };
 }
 
 module.exports = { pasetiKeturisStatusus };

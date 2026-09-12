@@ -14,6 +14,9 @@ const tombstones = require("../utils/deletionTombstones");
 const auditStore = require("../utils/auditStore");
 const jobErasure = require("../utils/jobErasure");
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
+const fs = require("node:fs");
+const os = require("node:os");
 const erasureReplay = require("../utils/erasureReplay");
 const restoredJobStore = require("../utils/restoredJobStore");
 const sesijuPg = require("../utils/sessionStore/postgresStore");
@@ -55,6 +58,23 @@ process.env.LOG_LEVEL = "error";
 
 const SALTINIO_URL = testDatabaseUrl("drsource");
 const TIKSLO_URL = testDatabaseUrl("drtarget");
+
+/**
+ * ⚠️ EXTERNAL ARTEFAKTŲ SAUGYKLA — R1 (#155).
+ *
+ * Iki šiol DR pratyba naudojo TIK inline duomenis: faile nebuvo nė vienos nuorodos
+ * į saugyklą. Vadinasi teiginys „ištrynimas išgyvena atkūrimą" buvo įrodytas DB
+ * eilutėms, o po #157 rezultatas gali gulėti FAILŲ SISTEMOJE ar S3, ir jo adresas
+ * yra TIK `job_results` / `job_result_attempts`.
+ *
+ * ⚠️ SAUGYKLA VIENA ABIEM BAZĖMS, IR TAI NE SUPAPRASTINIMAS. Objektai gyvena UŽ
+ * duomenų bazės ribų, tad atkūrus SENESNĘ kopiją į kitą bazę, ji rodo į TĄ PAČIĄ
+ * saugyklą — būtent tokia yra tikrovė, kurią pratyba turi atkartoti.
+ */
+const ARTEFAKTU_SAKNIS = praleisti() ? null : fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-dr-"));
+let artefaktuSaugykla = null;
+/** Pažymėto job'o objekto raktas — užpildomas 1 žingsnyje. */
+let zymetoRaktas = null;
 
 const VARTOTOJAS_A = "11111111-1111-4111-8111-111111111111";
 const VARTOTOJAS_B = "22222222-2222-4222-8222-222222222222";
@@ -138,6 +158,12 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
   t.after(async () => {
     await pasalintiDb(SALTINIO_URL);
     await pasalintiDb(TIKSLO_URL);
+
+    /**
+     * ⚠️ LAIKINAS KATALOGAS ŠALINAMAS, ne paliekamas šlavėjui. `verify-clean.mjs`
+     * tokius likučius gaudo, ir jie jau kartą buvo rasti (#157, PR-6: trys katalogai).
+     */
+    if (ARTEFAKTU_SAKNIS) fs.rmSync(ARTEFAKTU_SAKNIS, { recursive: true, force: true });
   });
 
   const saltinioEnv = testoAplinka(SALTINIO_URL);
@@ -155,10 +181,32 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     await suAplinka(saltinioEnv, async () => {
       const pool = new Pool({ connectionString: SALTINIO_URL });
       try {
-        jobai = await pasetiKeturisStatusus(createPostgresStore(pool), {
-          ownerId: VARTOTOJAS_A,
-          storageKey: (k) => `audio/${k}.wav`,
-        });
+        artefaktuSaugykla = createFsArtifactStore({ root: ARTEFAKTU_SAKNIS });
+        await artefaktuSaugykla.patikrintiSaugykla();
+
+        /**
+         * ⚠️ `rasymoSaugykla` PADUODAMA — be jos `zymetas` gautų INLINE rezultatą, ir
+         * pratyba vėl tikrintų tik eilutes. Būtent to R1 ir vengia.
+         */
+        jobai = await pasetiKeturisStatusus(
+          createPostgresStore(pool, { rasymoSaugykla: artefaktuSaugykla }),
+          {
+            ownerId: VARTOTOJAS_A,
+            storageKey: (k) => `audio/${k}.wav`,
+            uzbaigtiZymeta: true,
+          }
+        );
+
+        const { rows } = await pool.query(
+          "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1",
+          [jobai.zymetas.id]
+        );
+        assert.equal(rows[0].storage_type, "fs", "pažymėtas job'as privalo turėti EXTERNAL rezultatą");
+        zymetoRaktas = rows[0].storage_key;
+        assert.ok(
+          fs.existsSync(path.join(ARTEFAKTU_SAKNIS, zymetoRaktas)),
+          "objektas privalo realiai gulėti saugykloje — kitaip ištrynimui nebūtų ko šalinti"
+        );
 
         const store = sesijuPg.createPostgresStore(pool);
         for (const [userId, role, username] of [
@@ -199,13 +247,31 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
          * žymos uždarymas. Šio testo dalykas yra tai, kas vyksta PO to, tad
          * ištrynimas čia yra PARUOŠIMAS, ne tikrinamas elgesys.
          */
-        const saugykla = restoredJobStore.sukurti(pool);
+        /**
+         * ⚠️ `artifactStores` PADUODAMA — be jos `deleteResultArtifacts()` neturėtų
+         * saugyklos `fs` tipui ir ištrynimas kristų. Tai ta pati riba, kurią
+         * `restoredJobStore.paruosti()` gina fail-closed būdu.
+         */
+        const saugykla = restoredJobStore.sukurti(pool, { artifactStores: { fs: artefaktuSaugykla } });
         const job = await saugykla.system.get(jobai.zymetas.id, { hydrate: true });
         await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
         await jobErasure.eraseJob(job, { store: saugykla });
         await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED, { completedAt: Date.now() });
 
         assert.equal(await saugykla.system.get(job.id, { hydrate: true }), null, "šaltinyje job'o A nebėra");
+
+        /**
+         * ⚠️ R1 BRANDUOLYS: ištrynimas pasiekė OBJEKTĄ, ne tik eilutę.
+         *
+         * Be šios asercijos „ištrynimas išgyvena atkūrimą" reikštų tik tai, kad DB
+         * eilutės nebėra — o transkripcija liktų saugykloje, nepasiekiama nei
+         * ištrynimui, nei retencijai, nei rankiniu būdu (`list(prefix)` neegzistuoja).
+         */
+        assert.equal(
+          fs.existsSync(path.join(ARTEFAKTU_SAKNIS, zymetoRaktas)),
+          false,
+          "ištrynimas privalo pašalinti OBJEKTĄ, ne tik `job_results` eilutę"
+        );
 
         artefaktas = erasureExport.sudarytiArtefakta({
           zymos: await tombstones.listAll(),
@@ -387,6 +453,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
                   vykdytojas: pool,
                   actor: "gedimo-testas",
                   env: process.env,
+                  artifactStores: { fs: artefaktuSaugykla },
                 }),
               { tikIvykiui: erasureReplay.AUDITO_IVYKIS }
             ),
@@ -471,6 +538,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "gedimo-testas",
           env: process.env,
+          artifactStores: { fs: artefaktuSaugykla },
         });
 
         assert.deepEqual(atstatymas.replay.uzdarytosZymos, [jobai.failed.id], "žyma uždaryta");
@@ -500,6 +568,12 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "dr-pratybos",
           env: process.env,
+          /**
+           * ⚠️ BE ŠITO REPLAY KRISTŲ FAIL-CLOSED: atkurtoje bazėje yra `fs` eilutė, o
+           * `restoredJobStore.paruosti()` be saugyklos jos nepriima. Tai teisinga riba —
+           * R1 tikrina, kad koordinatorius ją PERDUODA, ne apeina.
+           */
+          artifactStores: { fs: artefaktuSaugykla },
         });
       } finally {
         await pool.end();
@@ -656,6 +730,12 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "dr-pratybos",
           env: process.env,
+          /**
+           * ⚠️ BE ŠITO REPLAY KRISTŲ FAIL-CLOSED: atkurtoje bazėje yra `fs` eilutė, o
+           * `restoredJobStore.paruosti()` be saugyklos jos nepriima. Tai teisinga riba —
+           * R1 tikrina, kad koordinatorius ją PERDUODA, ne apeina.
+           */
+          artifactStores: { fs: artefaktuSaugykla },
         });
       } finally {
         await pool.end();
@@ -710,6 +790,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "pasenusio-testas",
           env: process.env,
+          artifactStores: { fs: artefaktuSaugykla },
         };
 
         /** (a) BE `--allow-stale` — sustoja ties šviežumo riba. */
