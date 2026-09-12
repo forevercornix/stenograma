@@ -133,12 +133,11 @@ saugykloje, kurios niekas nebeprižiūri.
 | # | Veiksmas | Kodėl privalomas |
 |---|---|---|
 | 1 | Nustoti priimti naujus job'us (`503` arba priežiūros režimas) | be to 2 žingsnis niekada nesibaigs |
-| 2 | Palaukti, kol `active` + `waiting` pasieks **0** | ⚠️ **`JOB_TTL_MINUTES` NĖRA drain timeout** — tai metaduomenų retencija, ne darbo trukmė |
+| 2 | Palaukti, kol **visos neterminalios** BullMQ būsenos pasieks **0**: `active`, `waiting`, `waiting-children`, `delayed`, `paused`, `prioritized` | ⚠️ **`active + waiting` NEPAKANKA.** Su numatytuoju `attempts: 3` ir eksponentiniu backoff nepavykęs job'as sėdi `delayed`: nulis pasiekiamas, kai darbas dar SUPLANUOTAS. Tada worker'iai stabdomi, Redis metaduomenys trinami, o `delayed` job'as vėliau pakyla ir krinta ties „nėra įrašo". Retry konfigūracija yra NUMATYTOJI, tad tai įprastas kelias, ne kraštutinis. ⚠️ **`JOB_TTL_MINUTES` NĖRA drain timeout** — tai metaduomenų retencija, ne darbo trukmė |
 | 2b | **Sustabdyti visus worker'ius** ir patvirtinti, kad nebedirba | veikiantis worker'is po 3 žingsnio parašytų naują įrašą |
-| 3 | Terminalizuoti likusius `queued`/`processing`: `finish(FAILED, "cutover")` | `finish()` šaltinio netikrina, tad veikia ir sugadintiems (#154) |
-| 3b | **Išlaisvinti orphan audio** — `releaseAudio(jobId, storageKey)` kiekvienam terminalizuotam | be to audio liktų pakibęs be jokio įrašo |
+| 3 + 3b | **`node scripts/cutover-terminalize.mjs`** — terminalizuoja likusius `queued`/`processing` ir išlaisvina jų audio. Numatytai **sausas**; rašo tik su `--vykdyti` | ⚠️ **Anksčiau čia buvo vardijamos vidinės JS funkcijos (`finish()`, `releaseAudio()`), o komandos, kuri jas iškviestų, repo NETURĖJO** — operatoriui liktų rašyti ad hoc kodą produkcijoje, per vienintelį veiksmą, kurio klaida negrįžtama. Skriptas pats tikrina prielaidas (backend'as yra `redis`; eilėje nebėra neterminalių darbų) ir **atsisako dirbti**, jei jos netenkinamos (`exit 2`) |
 | 4 | **Palaukti, kol baigsis laukiantis valymas** (`audio_cleanup_pending`, `deletion_pending`) | ⚠️ žr. įspėjimą žemiau — tai ne formalumas |
-| 5 | Nepasibaigusius `completed` įrašus **perkelti arba palaukti** jų retencijos | ⚠️ žr. įspėjimą žemiau |
+| 5 | Nepasibaigusius **terminalius** įrašus (`completed`, `failed`, `cancelled`) **perkelti arba palaukti** jų retencijos | ⚠️ žr. įspėjimą žemiau |
 | 5b | Ištrinti hash'us **ir indeksą** | žr. komandą žemiau |
 | 6 | Patikrinti: nebeliko nei `job:*`, nei `jobs:index`, nei `*_pending` vėliavų | vienintelė patikra, kuri pagauna 5b praleidimą |
 | 7 | Nustatyti **eksplicitinį** `JOB_STORE_BACKEND=postgres` | ⚠️ žr. „Eksplicitinis pasirinkimas" |
@@ -147,15 +146,42 @@ saugykloje, kurios niekas nebeprižiūri.
 ### ⚠️ 5b: aklas `job:*` trynimas PRARASTŲ duomenis
 
 ```bash
-# Pirma — patikrinti, ar nėra laukiančio valymo (4 žingsnis):
-redis-cli --scan --pattern 'job:*' | while read -r k; do
-  redis-cli HMGET "$k" audio_cleanup_pending deletion_pending | grep -q true && echo "LAUKIA: $k"
-done
+set -euo pipefail
 
-# Tik tada:
-redis-cli --scan --pattern 'job:*' | xargs -r redis-cli DEL
-redis-cli DEL jobs:index
+# ⚠️ VISOS komandos per SUKONFIGŪRUOTĄ URI. `redis-cli` be `-u` rodo į
+# 127.0.0.1:6379, DB 0 — Compose diegime tai NE TA instancija. Blogiausias
+# derinys: patikra praneša „švaru", o duomenys liko kitoje vietoje.
+: "${REDIS_URL:?REDIS_URL nenustatytas — be jo redis-cli rodytų į 127.0.0.1:6379 DB 0}"
+rc() { redis-cli -u "$REDIS_URL" "$@"; }
+
+# 4 ŽINGSNIO PATIKRA — NUTRAUKIA, NE INFORMUOJA.
+laukia=""
+while read -r k; do
+  [ -z "$k" ] && continue
+  if rc HMGET "$k" audio_cleanup_pending deletion_pending | grep -qx true; then
+    laukia="${laukia}${k}"$'\n'
+  fi
+done < <(rc --scan --pattern 'job:*')
+
+if [ -n "$laukia" ]; then
+  echo "LAUKIANTIS VALYMAS — 5b NEVYKDOMAS:" >&2
+  printf '%s' "$laukia" >&2
+  exit 1
+fi
+
+# Tik dabar:
+rc --scan --pattern 'job:*' | xargs -r redis-cli -u "$REDIS_URL" DEL
+rc DEL jobs:index
 ```
+
+⚠️ **PATIKRA PRIVALO NUTRAUKTI, NE ATSPAUSDINTI.** Ankstesnė redakcija darė
+`grep -q true && echo "LAUKIA"`, o toliau ėjo **besąlyginis** `DEL`. Vykdant bloką
+kaip visumą, buvo ištrinama **būtent tuo atveju, kurį patikra turėjo apsaugoti**, o
+operatorius, matęs „LAUKIA", manytų, kad skriptas sustojo.
+
+⚠️ **`set -euo pipefail` NĖRA STILIUS.** Be jo nepavykęs `--scan` (nepasiekiamas
+Redis, bloga autentifikacija) duotų **tuščią** atsakymą, patikra praeitų, ir `DEL`
+įvyktų prieš bazę, kurios turinio niekas nematė.
 
 ⚠️ **`job:*` NEAPIMA INDEKSO.** `jobs:index` yra atskiras sorted set
 (`redisStore.js:42`), ir šablonas `job:*` jo **neatitinka** — nėra dvitaškio po
@@ -167,7 +193,12 @@ neribotai, o 6 žingsnio patikra be `DEL jobs:index` **praeitų**.
 laiko, liktų pakibęs jautrus audio arba nebaigtas ištrynimas, kurio niekas
 nebeužbaigs. Todėl 4 žingsnis vykdomas **prieš** 5b, ir tai patikrinama.
 
-### ⚠️ 5: nepasibaigę `completed` įrašai turi savo retenciją
+### ⚠️ 5: nepasibaigę TERMINALŪS įrašai turi savo retenciją
+
+⚠️ **VISIEMS TERMINALIEMS, NE TIK `completed`.** `redisStore.update()` tą patį
+`JOB_TTL_MINUTES` taiko kiekvienam `isFinished()` įrašui — įskaitant `failed` ir
+`cancelled`. Ankstesnė formuluotė minėjo tik `completed`, tad du iš trijų terminalių
+tipų būtų ištrinti nesuėjus jų retencijai.
 
 Job'as, baigtas prieš pat 2 žingsnį, gauna **šviežią** `JOB_TTL_MINUTES` langą.
 5b jį ištrintų iš karto, o klientas, apklausęs po priežiūros, gautų „nėra tokio
@@ -192,12 +223,19 @@ nebelieka: PostgreSQL dar tuščias, o Redis jau išvalytas. Tad
 ### Patikra po 6 žingsnio
 
 ```bash
-redis-cli --scan --pattern 'job:*' | head -1      # tuščia
-redis-cli EXISTS jobs:index                        # 0
+set -euo pipefail
+: "${REDIS_URL:?REDIS_URL nenustatytas}"
+rc() { redis-cli -u "$REDIS_URL" "$@"; }
+
+rc --scan --pattern 'job:*' | head -1      # tuščia
+rc EXISTS jobs:index                        # 0
 ```
 
 ⚠️ **Tuščias `job:*` be `EXISTS jobs:index` NĖRA įrodymas** — indeksas pro tą
 šabloną nematomas.
+
+⚠️ **Ir ši patikra taip pat per `-u "$REDIS_URL"`.** Patikra, rodanti į kitą
+instanciją nei trynimas, praneštų „švaru" apie bazę, kurios niekas nelietė.
 
 ## Artefaktų migracija: `inline` → external (#157, PR-6)
 
