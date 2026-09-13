@@ -877,6 +877,59 @@ produkcijoje buvo nepasiekiama, tad jos elgesys buvo įrodytas tik unit lygmeniu
 ⚠️ **Ne pačiu atidarymu.** Atidarymas kelią padaro PASIEKIAMĄ; įrodymas, kad jis
 elgiasi fail-closed, yra atskiras darbas, ir jis eina PO atidarymo, ne kartu su juo.
 
+#### ⚠️ PATIKSLINIMAS: „fail-closed startas" yra DU gedimo režimai, ne vienas
+
+Pirmoji šios prielaidos redakcija teigė bendrai („startas nutrūksta, o ne
+nusileidžia į atmintį"), o įrodymas buvo **vienas**: CI žingsnis su **uždarytu
+portu**. Jis matuoja **atsisakymą jungtis**. Antrasis režimas liko nepadengtas:
+
+| Režimas | Ką daro serveris | Kas nutraukia | Įrodymas |
+|---|---|---|---|
+| **Atsisakymas jungtis** | portas uždarytas / `ECONNREFUSED` | `connectionTimeoutMillis` ir pats `connect` | CI žingsnis „Fail-closed startas" |
+| **Neatsakanti užklausa** | jungtį PRIIMA, rezultatų negrąžina | `query_timeout` (kliento pusė) | `startPoolTimeouts` |
+
+⚠️ **Antrasis buvo NEPADENGTAS iki #342.** `connectionTimeoutMillis` `pg` nuvalo
+ties `ReadyForQuery` (`pg` 8.23, `client.js:377`), tad po rankos paspaudimo
+`SELECT 1` ir schemos patikros neturėjo jokios ribos. PostgreSQL, kuris jungtį
+priima, bet nustoja atsakinėti, pakabindavo startą **neribotai**.
+
+⚠️ **Tai ne fail-closed, o FAIL-NEVER:** procesas nekrenta, neaptarnauja ir
+nepraneša. Kabantis startas blogesnis už krentantį — orkestratorius bent žino, ką
+daryti su kritusiu.
+
+⚠️ **IR TAI TA PATI KLASĖ, KURIĄ ŠIS PR APRAŠO 33 KARTUS — ANTRĄ KARTĄ PAČIAME
+BARJERE.** Teiginys („startas fail-closed") buvo teisingas tam režimui, kuriam
+buvo matuotas, ir tyliai apėmė antrą, kurio niekas nematavo. Pirmasis toks atvejis
+šiame PR buvo grįžtamumas be liudytojo; šis — antrasis.
+
+Prielaida 5 nuo #342 skamba taip: **startas nutrūksta abiem režimais, ir kiekvienas
+turi savo įrodymą.** CI žingsnis lieka pirmojo įrodymu; antrojo įrodymas yra
+`startPoolTimeouts`, veikiantis **be tikros DB** (laido protokolo rankos
+paspaudimą užbaigiantis, o tada nutylantis serveris — žr. `tests/helpers/fakePostgres.js`).
+
+#### ⚠️ EKSPOZICIJA, KURIOS ŠIS PR NEUŽDARO: readiness nezonduoja job store
+
+`readiness.jobStore` yra **starto skląstis**, ne sveikatos zondas. Runtime zondai
+(`probeRuntimeReadiness()`) dengia sesijas, auditą, audito barjerą, ištrynimo žymas
+ir Redis — **bet ne job metaduomenų saugyklą**.
+
+Argumentas yra pati asimetrija: **kiekvienas kitas persistuojantis komponentas
+zonduojamas, o naujai autoritetingas — ne.** Su `JOB_STORE_BACKEND=postgres`
+`/api/ready` grąžins `200`, net jei `jobs` ar `job_results` nebeveikia.
+
+⚠️ **Defektas ne naujas, bet PASIEKIAMAS tapo šiuo PR:** iki barjero `postgres`
+produkcijoje nebuvo renkamas, tad nestebimo autoriteto tiesiog nebuvo.
+
+Neuždaroma čia sąmoningai: kiti zondai tikrina ne ryšį, o **teises ir schemą**
+(`auditStore` — `has_table_privilege` trims veiksmams). Job store zondas,
+padarytas kaip `SELECT 1`, būtų žalias su sugadintomis `jobs`/`job_results`
+lentelėmis — t. y. pridėtų ketvirtą readiness komponentą, kurio semantikos niekas
+neperžiūrėjo, tame pačiame PR, kuris jau neša P1 pataisą. Šios sekos pamoka yra
+priešinga: patikra, cituojanti ne tą įrodymą, blogesnė už jos nebuvimą.
+
+Įrašoma čia, o ne tylima, todėl, kad **atidarymo PR negali įjungti kelio, kurio
+niekas nestebi, be įrašo**.
+
 ### ⚠️ ATIDARYMAS NĖRA PERJUNGIMAS
 
 | Aplinka | Prieš | Po |
