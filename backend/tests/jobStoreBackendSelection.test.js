@@ -574,3 +574,98 @@ test("GRĮŽTAMUMAS: konstantą grąžinus į `false`, barjeras vėl UŽDAROSI",
     "testas privalo likti izoliuotas - gyvas modulis nepaliestas"
   );
 });
+
+test("#342 LEGACY TOLERANCIJA LIEKA `restoredJobStore` — gyvas startas jos nepaveldi", () => {
+  /**
+   * ⚠️ #339 SPRENDIMAS: legacy schemos fallback'ai priklauso ATKŪRIMUI, ne gyvam
+   * startui. Atkurta kopija teisėtai gali būti senesnė už migraciją; produkcinė
+   * bazė — ne.
+   *
+   * Gyvas startas tą toleranciją paveldėjo ne eksplicitiškai, o per NUMATYTĄSIAS
+   * reikšmes: `createPostgresStore()` be argumentų duoda `bandymuRegistras: true`,
+   * ir tai teisinga TIK todėl, kad startas dabar reikalauja visų keturių lentelių.
+   * Ši patikra saugo tą ryšį: jei kas nors gyvame kelyje pradėtų perduoti `false`,
+   * dalinė schema vėl praeitų startą.
+   *
+   * ⚠️ TRIPWIRE (AGENTS.md §9.2). Elgseną — kad trūkstama lentelė nutraukia startą —
+   * įrodo `migrations.integration` ([PG NOT RUN] lokaliai).
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  const gyvas = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "../utils/jobStore/index.js"), "utf8")
+  );
+
+  for (const veliava of ["bandymuRegistras", "migracijosProgresas"]) {
+    assert.ok(
+      !new RegExp(`${veliava}\\s*:`).test(gyvas),
+      `gyvas startas NEGALI perduoti \`${veliava}\` — legacy tolerancija priklauso restoredJobStore (#339)`
+    );
+  }
+
+  /** Antra pusė: `restoredJobStore` ją TURI — kitaip atkūrimas lūžtų. */
+  const atkurimas = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "../utils/restoredJobStore.js"), "utf8")
+  );
+
+  for (const veliava of ["bandymuRegistras", "migracijosProgresas"]) {
+    assert.match(
+      atkurimas,
+      new RegExp(veliava),
+      `restoredJobStore privalo IŠVESTI \`${veliava}\` iš schemos`
+    );
+  }
+});
+
+/**
+ * ⚠️ STARTO SCHEMOS AUTORITETAS YRA VIENAS SĄRAŠAS (#342).
+ *
+ * Lentelių patikra ir invariantų patikra abi ateina iš `BUTINOS_LENTELES`. Iki
+ * #342 jos buvo atskiros, ir būtent todėl pagalbinės lentelės iškrito iš abiejų.
+ */
+test("#342 STARTO SCHEMA: keturios lentelės, kiekviena su privalomais invariantais", () => {
+  const jobStore = require("../utils/jobStore");
+  const lenteles = jobStore.BUTINOS_LENTELES;
+
+  assert.deepEqual(
+    Object.keys(lenteles).sort(),
+    ["artifact_migration_progress", "job_result_attempts", "job_results", "jobs"],
+    "startas privalo reikalauti VISŲ lentelių, kurias liečia gyvas store'as"
+  );
+
+  for (const [lentele, butini] of Object.entries(lenteles)) {
+    assert.ok(butini.length > 0, `${lentele}: invariantų sąrašas negali būti tuščias`);
+  }
+
+  /**
+   * ⚠️ IR KAD STARTAS TĄ SĄRAŠĄ REALIAI NAUDOJA.
+   *
+   * Be šitos dalies testas tikrintų HELPERĮ, o ne KVIETĖJĄ (AGENTS.md §9.1):
+   * grąžinus `initializePostgres()` viduje literalą `["jobs", "job_results"]`,
+   * žemėlapis liktų teisingas, testas — žalias, o startas vėl tikrintų dvi
+   * lenteles iš keturių. Būtent taip ši spraga ir atsirado.
+   *
+   * ⚠️ TRIPWIRE (§9.2): elgseną įrodo `migrations.integration` su tikra DB.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  const saltinis = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "../utils/jobStore/index.js"), "utf8")
+  );
+
+  assert.match(
+    saltinis,
+    /const BUTINOS = Object\.keys\(BUTINOS_LENTELES\)/,
+    "startas privalo IŠVESTI lentelių sąrašą iš `BUTINOS_LENTELES`, ne kartoti literalą"
+  );
+
+  assert.doesNotMatch(
+    saltinis,
+    /const BUTINOS = \[/,
+    "literalus lentelių sąrašas starte grąžintų dalinę patikrą"
+  );
+});

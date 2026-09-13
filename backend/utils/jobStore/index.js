@@ -291,6 +291,48 @@ const REQUIRED_JOB_RESULT_CONSTRAINTS = [
   "job_results_storage_type_values",
 ];
 
+/**
+ * ⚠️ PAGALBINĖS LENTELĖS TIKRINAMOS LYGIAI TAIP PAT (#342 Codex, P1).
+ *
+ * Iki šito gyvas startas tikrino TIK `jobs` ir `job_results`, o store'as buvo
+ * konstruojamas su `bandymuRegistras` ir `migracijosProgresas` = `true` pagal
+ * numatytąją reikšmę. Dalinai migruota bazė startą PRAEIDAVO, o krisdavo vėliau:
+ *
+ *   - external completion → `job_result_attempts` neegzistuoja;
+ *   - BDAR ištrynimas     → `artifact_migration_progress` neegzistuoja.
+ *
+ * ⚠️ ABU — JAU PRIĖMUS SRAUTĄ. Tai tas pats gedimas, kurį dviejų lentelių patikra
+ * ir turėjo pašalinti, tik nukeltas į pirmą tikrą operaciją.
+ *
+ * ⚠️ IR TAI KERTASI SU #339 SPRENDIMU. Legacy schemos tolerancija (`bandymuRegistras:
+ * false` ir pan.) priklauso `restoredJobStore`: atkurta kopija TEISĖTAI gali būti
+ * senesnė už migraciją. Gyvas startas tą toleranciją paveldėjo per numatytąsias
+ * reikšmes, nors jam ji niekada nebuvo skirta — jis privalo reikalauti pilnos
+ * schemos, o ne prisitaikyti prie dalinės.
+ */
+const REQUIRED_ATTEMPT_CONSTRAINTS = [
+  "job_result_attempts_busena_allowed",
+  "job_result_attempts_storage_type_values",
+];
+
+const REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS = [
+  "artifact_migration_progress_busena_allowed",
+  "artifact_migration_progress_priezastis_allowed",
+  "artifact_migration_progress_shape",
+];
+
+/**
+ * Lentelė → jos privalomų invariantų sąrašas. VIENAS autoritetas abiem patikroms:
+ * lentelių buvimui ir suvaržymams — kitaip pridėjus lentelę į vieną sąrašą ir
+ * pamiršus kitą, patikra liktų dalinė būtent taip, kaip iki #342.
+ */
+const BUTINOS_LENTELES = Object.freeze({
+  jobs: REQUIRED_JOB_CONSTRAINTS,
+  job_results: REQUIRED_JOB_RESULT_CONSTRAINTS,
+  job_result_attempts: REQUIRED_ATTEMPT_CONSTRAINTS,
+  artifact_migration_progress: REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS,
+});
+
 async function initializePostgres() {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
@@ -347,7 +389,7 @@ async function initializePostgres() {
    * Readiness, kuris teigia „pasiruošęs" prieš tai, kas iš tikrųjų reikalinga,
    * yra blogesnis nei readiness, kurio nėra: orkestruotojas nukreipia srautą.
    */
-  const BUTINOS = ["jobs", "job_results"];
+  const BUTINOS = Object.keys(BUTINOS_LENTELES);
   try {
     const { rows } = await pool.query(
       `SELECT table_name FROM information_schema.tables
@@ -378,30 +420,28 @@ async function initializePostgres() {
      * veikti teisingai.
      */
     /**
-     * ⚠️ TIKRINAMOS ABI LENTELĖS (#157, PR-1).
+     * ⚠️ TIKRINAMOS VISOS KETURIOS LENTELĖS (#157 PR-1; #342 P1).
      *
-     * Anksčiau filtras buvo `t.relname = 'jobs'`, tad `job_results` invariantai
-     * nebuvo tikrinami išvis — diegimas be `job_results_storage_shape` ar be
-     * vientisumo sargo skelbdavosi pasiruošęs, nors rezultatų rašymo ir restore
-     * verifikacijos keliai jais remiasi.
+     * Pirmoji versija filtravo `t.relname = 'jobs'`, tad `job_results` invariantai
+     * nebuvo tikrinami išvis. #342 parodė, kad ta pati spraga liko dviem pagalbinėms
+     * lentelėms — sąrašas dabar ateina iš `BUTINOS_LENTELES`, tad naujos lentelės
+     * pridėjimas vienoje vietoje uždaro abi patikras.
      */
     const { rows: cRows } = await pool.query(
       `SELECT t.relname, c.conname
          FROM pg_constraint c
          JOIN pg_class t     ON t.oid = c.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
-        WHERE t.relname IN ('jobs', 'job_results')
+        WHERE t.relname = ANY($1)
           AND n.nspname = current_schema()
-          AND c.contype = 'c'`
+          AND c.contype = 'c'`,
+      [BUTINOS]
     );
 
-    const rastiC = cRows.filter((r) => r.relname === "jobs").map((r) => r.conname);
-    const rastiR = cRows.filter((r) => r.relname === "job_results").map((r) => r.conname);
-
-    const trukstaInvariantu = [
-      ...REQUIRED_JOB_CONSTRAINTS.filter((c) => !rastiC.includes(c)),
-      ...REQUIRED_JOB_RESULT_CONSTRAINTS.filter((c) => !rastiR.includes(c)),
-    ];
+    const trukstaInvariantu = Object.entries(BUTINOS_LENTELES).flatMap(([lentele, butini]) => {
+      const rasti = cRows.filter((r) => r.relname === lentele).map((r) => r.conname);
+      return butini.filter((c) => !rasti.includes(c));
+    });
 
     if (trukstaInvariantu.length > 0) {
       throw new Error(
@@ -434,6 +474,27 @@ async function initializePostgres() {
   }
 
   artefaktuPrijungimas = await ivertintiArtefaktuPrijungima(pool, store);
+
+  /**
+   * ⚠️ PATVIRTINTAS `skaitymui_truksta` NUTRAUKIA STARTĄ (#342 Codex, P1).
+   *
+   * Sprendimo taisyklė gyvena `arStabdytiStarta()` — ten ir paaiškinimas, kodėl
+   * stabdo TIK šis radinys, o `nezinoma` nestabdo niekada.
+   */
+  const { arStabdytiStarta } = require("../artifactStore/prijungimoBusena");
+
+  if (arStabdytiStarta(artefaktuPrijungimas)) {
+    await pool.end().catch(() => {});
+    throw new Error(
+      `Artefaktų skaitymas nepilnas: bazėje yra tipų, kuriems saugykla neregistruota ` +
+        `(${artefaktuPrijungimas.truksta.join(", ")}; registruoti: ` +
+        `${artefaktuPrijungimas.registruotiTipai.join(", ") || "nė vieno"}). ` +
+        "Startas nutraukiamas: diegimas pakiltų ir aptarnautų, bet rezultatų skaitymas " +
+        "mestų, o BDAR ištrynimas senų objektų nepasiektų. Sukonfigūruokite trūkstamų " +
+        "tipų saugyklas arba užbaikite migraciją."
+    );
+  }
+
   log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)", {
     artefaktuSaugykla: artefaktuPrijungimas.santrauka,
   });
@@ -493,21 +554,35 @@ async function paruostiArtefaktuSaugykla() {
 /**
  * Ar saugyklos prijungtos taip, kaip prašo konfigūracija ir reikalauja bazė?
  *
- * ⚠️ NEKEIČIA STARTO BAIGTIES — nei radiniu, nei savo gedimu.
+ * ⚠️ STARTO BAIGTĮ KEIČIA TIK VIENAS RADINYS — IR TIK PATVIRTINTAS (#342 P1).
  *
- * Fail-closed startas buvo 10 PR-7 sąlyga ir ėjo kartu su aktyvavimo barjeru:
- * įjungtas anksčiau, jis būtų stabdęs diegimus dėl būsenos, kuri iki barjero
- * atidarymo yra normali. ⚠️ Abu įvykę (#155) — o ŠI patikra starto baigties vis tiek
- * nekeičia, ir tai atskiras sprendimas, ne barjero pasekmė: kritusi pati patikra
- * sustabdytų startą dėl DIAGNOSTIKOS gedimo — naujas gedimo taškas ten, kur jo
- * anksčiau nebuvo.
+ * Ankstesnė redakcija sakė „nekeičia baigties — nei radiniu, nei savo gedimu", ir
+ * pagrindė tuo, kad kritusi patikra būtų naujas gedimo taškas dėl DIAGNOSTIKOS.
+ * Argumentas teisingas — bet tik NEAPIBRĖŽTAM zondui. Jis nedaro skirtumo, kurį
+ * daryti būtina:
  *
- * ⚠️ ŠIANDIEN JIS RODO NEPRIJUNGTĄ RAŠYMĄ, IR TAI TEISINGA.
+ *   nepavyko įvertinti (`nezinoma`)  → diagnostikos gedimas → NESTABDYTI
+ *   patvirtintas `skaitymui_truksta` → faktas apie DUOMENIS → STABDYTI
  *
- * `createPostgresStore(pool)` kviečiamas be saugyklos, tad diegimas su
- * `ARTIFACT_STORE_BACKEND=fs|s3` gauna radinį `rasymas_neprijungtas`. Tai ne
- * stebėtojo klaida — tai pati spraga, kurią uždaro kitas PR-7 žingsnis, ir
- * pirmas jo patikrinimas bus šio verdikto pasikeitimas į žalią.
+ * Antrasis nėra diagnostikos gedimas. Bazė su `fs` rezultatais ir
+ * `ARTIFACT_STORE_BACKEND=s3` (normali būsena po perėjimo ar mišraus atkūrimo)
+ * pakildavo ir aptarnaudavo, o rezultatų skaitymas mesdavo ir BDAR ištrynimas
+ * senų objektų nepasiekdavo.
+ *
+ * ⚠️ TA PATI `NESAUGU` vs `nepavyko` SKIRTIS, KURIĄ ĮVEDĖ PR-5 — čia ji tiesiog
+ * dar nebuvo pritaikyta. Taisyklė gyvena `arStabdytiStarta()`, ne čia, kad ją
+ * būtų galima patikrinti be DB.
+ *
+ * ⚠️ KITI RADINIAI BAIGTIES NEKEIČIA. Jie kalba apie RAŠYMO kelią, kuris kris pats
+ * ir su savo pranešimu; `skaitymui_truksta` skiriasi tuo, kad duomenys JAU YRA.
+ *
+ * ⚠️ SVARSTYTA IR ATMESTA ALTERNATYVA: registruoti skaitytojus KIEKVIENAM
+ * persistintam `storage_type`, ne tik dabartiniam. Tai teisinga kryptis ir
+ * `createPostgresStore()` `artifactStores` jau ją palaiko — bet ji reikalauja
+ * sukonstruoti, pavyzdžiui, `fs` skaitytoją, kai sukonfigūruotas `s3`, o po
+ * migracijos to diegimo `ARTIFACT_FS_ROOT` gali nebebūti. Tada vis tiek liktų šis
+ * kelias. Todėl pirma įrengiamas garsus atsisakymas; automatinis surinkimas jį
+ * PAKEIS, o ne apeis, ir bus priverstas būti teisingas — be jo diegimas nepakils.
  */
 async function ivertintiArtefaktuPrijungima(pool, pgStore) {
   const { nustatytiPrijungimoBusena } = require("../artifactStore/prijungimoBusena");
@@ -1503,6 +1578,9 @@ module.exports = {
   _paruostiArtefaktuSaugyklaForTests: paruostiArtefaktuSaugykla,
   REQUIRED_JOB_CONSTRAINTS,
   REQUIRED_JOB_RESULT_CONSTRAINTS,
+  REQUIRED_ATTEMPT_CONSTRAINTS,
+  REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS,
+  BUTINOS_LENTELES,
   STATUS,
   JOB_TYPES,
   TTL_MS,

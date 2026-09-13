@@ -260,3 +260,81 @@ for (const [pavadinimas, env] of [
     assert.match(tekstas, /s3|fs|inline/);
   });
 }
+
+test("#342 STARTO SPRENDIMAS: stabdo tik PATVIRTINTAS `skaitymui_truksta`", () => {
+  /**
+   * ⚠️ SKIRTIS, KURI IKI ŠIOL BUVO SKAIČIUOJAMA, BET NENAUDOJAMA.
+   *
+   * Modulis nuo pradžių atskyrė „nepavyko pažiūrėti" nuo „pažiūrėjau, blogai",
+   * o startas tylėjo abiem atvejais. Bazė su `fs` rezultatais ir
+   * `ARTIFACT_STORE_BACKEND=s3` pakildavo, aptarnaudavo, o BDAR ištrynimas senų
+   * objektų nepasiekdavo.
+   *
+   * Ta pati `NESAUGU` vs `nepavyko` skirtis, kurią įvedė PR-5.
+   */
+  const { arStabdytiStarta, RADINIAI } = require("../utils/artifactStore/prijungimoBusena");
+
+  /** 1. Patvirtintas faktas apie duomenis → STABDO. */
+  assert.equal(
+    arStabdytiStarta({ nezinoma: false, radiniai: [RADINIAI.SKAITYMUI_TRUKSTA] }),
+    true,
+    "patvirtintas neatitikimas privalo stabdyti - duomenys jau yra, o skaitytojo nėra"
+  );
+
+  /** 2. Neapibrėžtas zondas → NESTABDO, net su tuo pačiu radiniu. */
+  assert.equal(
+    arStabdytiStarta({ nezinoma: true, radiniai: [RADINIAI.SKAITYMUI_TRUKSTA] }),
+    false,
+    "diagnostikos gedimas NEGALI tapti nauju starto gedimo tašku"
+  );
+
+  /** 3. Kiti radiniai → NESTABDO: jie kalba apie rašymą, kuris kris pats. */
+  for (const radinys of [
+    RADINIAI.RASYMAS_NEPRIJUNGTAS,
+    RADINIAI.RASYMAS_NE_TAS,
+    RADINIAI.KONFIGURACIJA_NETINKAMA,
+  ]) {
+    assert.equal(
+      arStabdytiStarta({ nezinoma: false, radiniai: [radinys] }),
+      false,
+      `${radinys} neturi stabdyti starto - tai rašymo kelio klausimas`
+    );
+  }
+
+  /** 4. Švarus verdiktas ir tuščias įvedimas → NESTABDO. */
+  assert.equal(arStabdytiStarta({ nezinoma: false, radiniai: [] }), false);
+  assert.equal(arStabdytiStarta(null), false, "nesant verdikto startas nestabdomas");
+});
+
+test("#342 STARTO SPRENDIMAS: taisyklė remiasi TIKRU verdiktu, ne rankiniu objektu", () => {
+  /**
+   * ⚠️ Testas aukščiau paduoda objektus ranka - jis įrodo TAISYKLĘ, ne tai, kad
+   * tikras verdiktas tokią formą turi. Be šito taisyklė galėtų tikrinti lauką,
+   * kurio `ivertintiPrijungima()` neužpildo, ir startas niekada nestabdytų.
+   */
+  const {
+    ivertintiPrijungima,
+    arStabdytiStarta,
+  } = require("../utils/artifactStore/prijungimoBusena");
+
+  /** Bazėje `fs` eilutės, registruotas tik `s3` - realus po-migracijos atvejis. */
+  const blogas = ivertintiPrijungima({
+    parinktas: "s3",
+    rasymoBackend: "s3",
+    registruotiTipai: ["s3"],
+    reikalingiTipai: ["fs", "s3"],
+  });
+
+  assert.deepEqual(blogas.truksta, ["fs"]);
+  assert.equal(arStabdytiStarta(blogas), true, "tikras verdiktas privalo stabdyti");
+
+  /** Kontrolė: sukonfigūravus `fs` skaitytoją tas pats diegimas pakyla. */
+  const geras = ivertintiPrijungima({
+    parinktas: "s3",
+    rasymoBackend: "s3",
+    registruotiTipai: ["fs", "s3"],
+    reikalingiTipai: ["fs", "s3"],
+  });
+
+  assert.equal(arStabdytiStarta(geras), false);
+});

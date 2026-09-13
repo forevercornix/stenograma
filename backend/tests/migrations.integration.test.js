@@ -291,6 +291,117 @@ test(
 );
 
 test(
+  "#342 STARTAS: TRŪKSTAMA PAGALBINĖ LENTELĖ nutraukia startą, ne pirmą operaciją",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ DVIEJŲ LENTELIŲ PATIKROS NEPAKAKO (#342 Codex, P1).
+     *
+     * Startas tikrino `jobs` ir `job_results`, o store'ą konstruodavo su
+     * `bandymuRegistras`/`migracijosProgresas` = `true` (numatytoji reikšmė).
+     * Dalinai migruota bazė startą PRAEIDAVO, o krisdavo vėliau:
+     *
+     *   `job_result_attempts`          → external completion kelias;
+     *   `artifact_migration_progress`  → BDAR ištrynimo kelias.
+     *
+     * ⚠️ ABU JAU PRIĖMUS SRAUTĄ. Būtent to schemos patikra ir turi neleisti.
+     *
+     * ⚠️ TIKRINAMA PER `DROP`, NE PER DALINĘ MIGRACIJĄ: dalinė migracija duotų ir
+     * trūkstamus invariantus, tad kristų ankstesnė patikra, ir šis testas
+     * praeitų NE dėl to, ką teigia.
+     */
+    const buves = process.env.DATABASE_URL;
+
+    try {
+      for (const lentele of ["job_result_attempts", "artifact_migration_progress"]) {
+        await perkurtiDb();
+        migrate("up");
+
+        const pool = new Pool({ connectionString: DB_URL });
+        try {
+          await pool.query(`DROP TABLE ${lentele} CASCADE`);
+        } finally {
+          await pool.end();
+        }
+
+        process.env.DATABASE_URL = DB_URL;
+        delete require.cache[require.resolve("../utils/jobStore")];
+        const jobStore = require("../utils/jobStore");
+
+        await assert.rejects(
+          () => jobStore._initializePostgresForTests(),
+          new RegExp(`trūksta lentelių:.*${lentele}`),
+          `be \`${lentele}\` startas privalo NUTRŪKTI - srautas nepriimamas`
+        );
+
+        delete require.cache[require.resolve("../utils/jobStore")];
+      }
+
+      /**
+       * KONTROLĖ: su pilna schema tas pats startas praeina. Be jos „viskas
+       * atmetama" praeitų kaip sėkmė - ta pati klaida, kurią #342 taiso
+       * async cutover pusėje.
+       */
+      await perkurtiDb();
+      migrate("up");
+
+      process.env.DATABASE_URL = DB_URL;
+      delete require.cache[require.resolve("../utils/jobStore")];
+      const jobStore = require("../utils/jobStore");
+      const store = await jobStore._initializePostgresForTests();
+
+      assert.equal(store.backend, "postgres");
+      await store.close();
+    } finally {
+      delete require.cache[require.resolve("../utils/jobStore")];
+      if (buves === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = buves;
+    }
+  }
+);
+
+test(
+  "#342 STARTAS: pagalbinių lentelių INVARIANTAI irgi privalomi",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * Lentelės buvimo nepakanka - ta pati taisyklė, kurią `jobs`/`job_results`
+     * pusėje įvedė #157 PR-1. Be šito bazė su lentele, bet be jos `CHECK`
+     * suvaržymų, praeitų startą ir priimtų būsenas, kurių runtime nepripažįsta.
+     */
+    const buves = process.env.DATABASE_URL;
+
+    try {
+      await perkurtiDb();
+      migrate("up");
+
+      const pool = new Pool({ connectionString: DB_URL });
+      try {
+        await pool.query(
+          "ALTER TABLE job_result_attempts DROP CONSTRAINT job_result_attempts_busena_allowed"
+        );
+      } finally {
+        await pool.end();
+      }
+
+      process.env.DATABASE_URL = DB_URL;
+      delete require.cache[require.resolve("../utils/jobStore")];
+      const jobStore = require("../utils/jobStore");
+
+      await assert.rejects(
+        () => jobStore._initializePostgresForTests(),
+        /trūksta invariantų:.*job_result_attempts_busena_allowed/,
+        "pagalbinės lentelės invariantas privalo būti tikrinamas kaip ir pagrindinių"
+      );
+    } finally {
+      delete require.cache[require.resolve("../utils/jobStore")];
+      if (buves === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = buves;
+    }
+  }
+);
+
+test(
   "#155 STARTAS: pasenusi schema (tik tėvinė migracija) nutraukia initializePostgres()",
   { skip: skipWithoutPostgres() },
   async () => {
