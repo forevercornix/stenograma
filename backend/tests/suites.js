@@ -121,6 +121,8 @@ const privacy = [
    */
   "erasureMarks",
   "revivalHorizons",
+  /** #342: starto užklausų ribos — fail-never režimas. Be DB. */
+  "startPoolTimeouts",
   "observabilityEvents.route",
 ];
 

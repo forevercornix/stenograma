@@ -190,9 +190,51 @@ async function initializeStore() {
  * `cors` ir kitą Express infrastruktūrą; `jobStore` nuo jos priklausyti neturi -
  * jį įkelia ir worker procesai, kuriems HTTP sluoksnio nereikia.
  */
-function connectTimeoutMs() {
-  const raw = Number(process.env.DB_CONNECT_TIMEOUT_MS);
+function connectTimeoutMs(env = process.env) {
+  const raw = Number(env.DB_CONNECT_TIMEOUT_MS);
   return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
+}
+
+/**
+ * ⚠️ UŽKLAUSŲ RIBA ATSKIRAI NUO PRISIJUNGIMO RIBOS (#342 Codex, P1).
+ *
+ * `connectionTimeoutMillis` galioja TIK iki jungties gavimo - `pg` jį nuvalo
+ * ties `ReadyForQuery` (patikrinta `pg` 8.23 šaltinyje, `client.js:377`). Po to
+ * `SELECT 1` ir schemos patikros liko BE JOKIOS ribos: PostgreSQL, kuris jungtį
+ * PRIIMA, bet rezultatų negrąžina, pakabindavo `initializePostgres()` neribotai.
+ *
+ * ⚠️ TAI NE FAIL-CLOSED, O FAIL-NEVER: procesas nekrenta, neaptarnauja ir
+ * nepraneša. Kabantis startas blogesnis už krentantį - orkestratorius bent žino,
+ * ką daryti su kritusiu.
+ *
+ * ⚠️ 10 SĄLYGOS CI ŽINGSNIS TO NEPAGAUNA PAGAL KONSTRUKCIJĄ: jis naudoja
+ * UŽDARYTĄ PORTĄ, tad matuoja atsisakymą jungtis, ne degradavusį serverį. Iš
+ * dviejų gedimo režimų jis dengia vieną.
+ *
+ * Du parametrai, ne vienas: `statement_timeout` nutraukia darbą SERVERIO pusėje
+ * (atlaisvina užraktus), `query_timeout` - KLIENTO pusėje (vienintelis, kuris
+ * padeda, kai serveris nebeatsako apskritai). Ta pati pora ir tos pačios
+ * reikšmės kaip `sessionStore` ir `startupChecks.postgresReachability()`.
+ */
+function queryTimeoutMs(env = process.env) {
+  const raw = Number(env.DB_QUERY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
+}
+
+/**
+ * Job pool'o nustatymai VIENOJE vietoje.
+ *
+ * Iškelta iš `initializePostgres()` dėl tos pačios priežasties kaip
+ * `sesijuPoolNustatymai()`: `new Pool(...)` viduje ribos liktų nepasiekiamos
+ * testui, ir vienintelis įrodymas būtų šaltinio teksto paieška (AGENTS.md §9.2).
+ */
+function jobPoolNustatymai(env = process.env) {
+  return {
+    connectionString: env.DATABASE_URL,
+    connectionTimeoutMillis: connectTimeoutMs(env),
+    statement_timeout: queryTimeoutMs(env),
+    query_timeout: queryTimeoutMs(env),
+  };
 }
 
 /**
@@ -264,10 +306,7 @@ async function initializePostgres() {
    * Simetriška Redis keliui, kuris irgi neleidžia sau laukti amžinai
    * (`maxRetriesPerRequest`, `retryStrategy`).
    */
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    connectionTimeoutMillis: connectTimeoutMs(),
-  });
+  const pool = new Pool(jobPoolNustatymai(process.env));
 
   /**
    * ⚠️ NEVEIKLIOS JUNGTIES KLAIDA NETURI NUŽUDYTI PROCESO (#155, 7.4b peržiūra).
@@ -756,6 +795,8 @@ async function sisteminisFinishBandymas(store, id, status, extra) {
 }
 
 module.exports = {
+  /** ⚠️ Eksportuojama, kad starto ribas būtų galima patikrinti BE tikros DB (#342). */
+  jobPoolNustatymai,
   init,
   /**
    * Prieiga prie backend'o TESTAMS.
