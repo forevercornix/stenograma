@@ -8,10 +8,21 @@ Formatas: `## [7.x] Pavadinimas`, tada body iki kito `##`.
 
 ## Skersiniai pataisymai (ne sub-PR)
 
-⚠️ **ANTRAŠTĖ SĄMONINGAI BE `[7.x]`.** `scripts/dev/create-155-subissues.sh`
-sekcijas atpažįsta pagal `^## \[\d+\.\d+[a-z]?\]`, o kiekvieną kitą `## [`
-antraštę laiko KLAIDA ir nutrūksta. Šie darbai turi savo GitHub issue, tad
-sekcija su `## [` juos arba dubliuotų, arba sulaužytų generatorių.
+⚠️ **ANTRAŠTĖ SĄMONINGAI BE `[7.x]`, IR PAGRINDINĖ PRIEŽASTIS YRA DUBLIKATAS.**
+
+`scripts/dev/create-155-subissues.sh` esamą issue randa pagal **TIKSLŲ
+PAVADINIMĄ** (`create-155-subissues.sh:141`: `if i["title"] == pav`, kur `pav`
+yra `[<kodas>] <pavadinimas>`). #245 realus pavadinimas —
+„Keturi PostgreSQL pool'ai, dvi DSN taisyklės — …" — su `[7.x] …` niekada
+nesutaptų, tad gerai suformuota `## [7.6d]` antraštė būtų priimta ir sukurtų
+**ANTRĄ, DUBLIUOJANTĮ** issue šalia jau egzistuojančio #245.
+
+Antraeilė priežastis: netaisyklinga `## [` antraštė (pvz. `## [#245]`)
+generatorių apskritai **nutraukia** (`:105-110`) — jis reikalauja, kad kiekviena
+`## [` antraštė atitiktų `\d+\.\d+[a-z]?`.
+
+Todėl ši antraštė neturi `[` iš viso: parseris jos nemato, ir nė vienas iš dviejų
+gedimų nekyla.
 
 Čia registruojami pataisymai, apimantys kelis 7.x etapus vienu metu.
 
