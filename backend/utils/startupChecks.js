@@ -194,6 +194,24 @@ function validateConfig(env = process.env) {
    * `DATABASE_URL` sesijų režimo nekeičia: jis gali būti įvestas migracijoms
    * ar auditui (7.4), ir neturi netikėtai perjungti AUTENTIKACIJOS.
    */
+  /**
+   * JUNGTIES DVIPRASMYBĖ — KIETA KLAIDA, NEPRIKLAUSOMAI NUO BACKEND'Ų (#245).
+   *
+   * ⚠️ MECHANIZMAS YRA `pgJungtiesNustatymai()`, NE ŠI EILUTĖ. Ten metama
+   * klaida sustabdo bet kurį pool'ą bet kuriame procese. Čia ta pati patikra
+   * kartojama tik tam, kad operatorius pamatytų ją KONFIGŪRACIJOS KLAIDŲ
+   * sąraše — kartu su visomis kitomis, prieš pakylant bet kuriai daliai — o ne
+   * kaip vieną išmestą klaidą iš pirmo `init()`.
+   *
+   * ⚠️ SĄLYGA YRA `arNurodytaPostgres`, NE KONKRETUS BACKEND'AS. Ištrynimo žymos
+   * PostgreSQL renkasi AUTOMATIŠKAI, tad dviprasmiška aplinka be jokio
+   * eksplicitinio `*_BACKEND=postgres` yra realus ir numatytasis atvejis.
+   */
+  if (arNurodytaPostgres(env)) {
+    const skirtumai = jungtiesSemantikosSkirtumai(env);
+    if (skirtumai.length > 0) errors.push(dviprasmybesTekstas(skirtumai));
+  }
+
   {
     const { resolveSessionBackend } = require("./sessionStore/backendSelection");
     try {
@@ -235,7 +253,17 @@ function validateConfig(env = process.env) {
       const auditoBackendas = resolveAuditBackend(env);
       if (auditoBackendas === "postgres") auditTimeoutBudget(env);
     } catch (e) {
-      errors.push(e.message);
+      /**
+       * ⚠️ TA PATI DVIPRASMYBĖ JAU PRANEŠTA AUKŠČIAU (#245 peržiūra).
+       *
+       * `resolveAuditBackend()` ją meta ir savo keliu — jis naudojamas be
+       * `validateConfig()` (pvz. `workers/index.js`). Čia ji būtų ANTRA eilutė
+       * tai pačiai priežasčiai, ir operatorius ieškotų dviejų problemų.
+       *
+       * ⚠️ Skiriama pagal `code`, ne pagal tekstą: audito pranešimas turi savo
+       * priešdėlį, tad eilučių palyginimas dublikato nepagautų.
+       */
+      if (e.code !== "PG_CONNECTION_AMBIGUOUS") errors.push(e.message);
     }
   }
 

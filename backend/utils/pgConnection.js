@@ -61,6 +61,32 @@ function arNurodytaPostgres(env = process.env) {
  * pirmenybė taptų neakivaizdi.
  */
 function pgJungtiesNustatymai(env = process.env) {
+  /**
+   * ⚠️ DVIPRASMYBĖ SUSTABDOMA ČIA — TRŪKSTAMAS #245 GABALAS.
+   *
+   * Pirmoji šio darbo redakcija sargą pastatė TIK trijose vietose:
+   * `arTaPatiBaze()` (DR keliai), `resolveAuditBackend()` ir `runSelfChecks()`
+   * diagnostikoje. Išmatuota, kad to NEPAKAKO:
+   *
+   *   DATABASE_URL + PGOPTIONS, be `AUDIT_BACKEND=postgres`  →  0 klaidų,
+   *   `deletionTombstones` pasirinkdavo `postgres` ir kildavo.
+   *
+   * O tai numatytoji konfigūracija: žymos PostgreSQL renkasi AUTOMATIŠKAI, kai
+   * PostgreSQL nurodytas. DoD reikalauja „netoleruojamas skirtumas bent vienoje
+   * klasėje → startas FAILINA", ir startas nefailindavo.
+   *
+   * ⚠️ TIKRINAMA ČIA, O NE PENKIUOSE KVIETIMO TAŠKUOSE. Sąrašas, kurį reikia
+   * prisiminti pridedant naują pool'ą, jau kartą sugedo: būtent trys tos pačios
+   * taisyklės kopijos ir yra #245 priežastis. Šią funkciją apeiti neįmanoma —
+   * per ją eina visi keturi produkciniai pool'ai, diagnostinis klientas ir
+   * skriptai, tad garantija galioja ir `workers/index.js` procese, kuris
+   * `validateConfig()` NEKVIEČIA.
+   */
+  const skirtumai = jungtiesSemantikosSkirtumai(env);
+  if (skirtumai.length > 0) {
+    throw new PgConnectionError(dviprasmybesTekstas(skirtumai), "PG_CONNECTION_AMBIGUOUS");
+  }
+
   if (env.DATABASE_URL) return { connectionString: env.DATABASE_URL };
 
   const nustatymai = {};
@@ -92,8 +118,10 @@ function pgJungtiesNustatymai(env = process.env) {
  *
  * #245 IR YRA tas atskiras sprendimas. Nuo jo:
  *
- *   - dviprasmybės sargas yra BENDRAS PostgreSQL pool konfigūracijos invariantas,
- *     taikomas visiems keturiems produkciniams pool'ams ir diagnostiniam klientui;
+ *   - dviprasmybės sargas yra BENDRAS PostgreSQL pool konfigūracijos invariantas.
+ *     Jis įgyvendintas `pgJungtiesNustatymai()` VIDUJE, tad galioja visiems
+ *     keturiems produkciniams pool'ams, diagnostiniam klientui ir skriptams
+ *     pagal konstrukciją — ne pagal tai, ar kvietėjas jį prisiminė iškviesti;
  *   - DR tapatumo patikra (`arTaPatiBaze`) lieka PAPILDOMA sargo paskirtis, ne
  *     vienintelė.
  *
@@ -197,6 +225,12 @@ const LAUKU_KLASES = Object.freeze({
   options: "sesija",
   client_encoding: "sesija",
   replication: "sesija",
+  /**
+   * ⚠️ `binary` (`PGBINARY`) yra LAIDO FORMATAS, ne namespace — ir vis dėlto
+   * `sesija`, ne `NEREIKSMINGI`. Jis keičia, kaip serveris koduoja rezultatus,
+   * tad tai sesijos elgsena, o ne vien pavadinimas. Klasių rinkinys #245
+   * kontrakte fiksuotas keturiais; penktos nekuriam dėl vieno lauko.
+   */
   binary: "sesija",
 });
 

@@ -1,4 +1,5 @@
 const {
+  PgConnectionError,
   arNurodytaPostgres,
   arDviprasmiskaKonfiguracija,
   dviprasmybesTekstas,
@@ -79,8 +80,15 @@ function resolveAuditBackend(env = process.env) {
    * Dabar klausimą sprendžia vienas autoritetas visiems keturiems pool'ams.
    */
   if (arDviprasmiskaKonfiguracija(env)) {
-    throw new Error(
-      `AUDIT_BACKEND=postgres, bet ${dviprasmybesTekstas(jungtiesSemantikosSkirtumai(env))}`
+    /**
+     * ⚠️ TIPUOTA KLAIDA, NE TEKSTAS (#245 peržiūra). `validateConfig()` tą pačią
+     * dviprasmybę praneša centrinėje vietoje; be `code` jam liktų tik eilučių
+     * palyginimas, o šis pranešimas turi savo priešdėlį ir nesutaptų. Rezultatas
+     * būtų dvi klaidos vienai priežasčiai.
+     */
+    throw new PgConnectionError(
+      `AUDIT_BACKEND=postgres, bet ${dviprasmybesTekstas(jungtiesSemantikosSkirtumai(env))}`,
+      "PG_CONNECTION_AMBIGUOUS"
     );
   }
 
