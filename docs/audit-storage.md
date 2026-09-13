@@ -57,6 +57,12 @@ taisyklė krisdavo ten, kur dviprasmybės nebuvo, ir tuo pačiu **nematė**
 reiškia kitą schemą — t. y. tiksliai tą „auditas kitoje vietoje" atvejį, kurio ji
 ir siekė neleisti.
 
+⚠️ **Ši taisyklė NĖRA audito taisyklė.** Ji gyvena bendroje PostgreSQL pool'o
+nustatymų funkcijoje, tad galioja visiems pool'ams ir diagnostiniam klientui —
+įskaitant diegimus, kuriuose `AUDIT_BACKEND` apskritai nenustatytas. Čia ji
+aprašyta todėl, kad iki #245 audito atranka turėjo savo, siauresnę ir
+neteisingą, kopiją.
+
 ⚠️ **Operatoriui vis tiek rekomenduojama viena forma.** Tai paprasčiausia ir
 mažiausiai dviprasmiška eksploatacinė praktika — bet tai rekomendacija, ne tai,
 ką tikrina kodas.

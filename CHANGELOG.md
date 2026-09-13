@@ -35,6 +35,23 @@ ji pasensta ir tampa klaidinanti.
   DSN be porto plius `PGPORT`), ir pilnas DSN su `PGSSLMODE`, `PGOPTIONS` ar
   `PGCLIENT_ENCODING`. `PGAPPNAME` ir `PGCONNECT_TIMEOUT` konflikto **nesukuria**.
 
+  ⚠️ **KURIE DIEGIMAI PALIEČIAMI — PLATESNIS RATAS, NEI ATRODO.**
+
+  Patikra veikia ne audito ar konkretaus backend'o lygyje, o **bendroje pool'o
+  nustatymų funkcijoje**, pro kurią eina visi PostgreSQL pool'ai ir diagnostinis
+  klientas. Todėl paliečiamas **kiekvienas** diegimas, kuriame PostgreSQL
+  apskritai nurodytas (`DATABASE_URL` **arba** `PGHOST`) — **įskaitant tuos, kur
+  jokio `*_BACKEND=postgres` nėra nustatyta**: ištrynimo žymos PostgreSQL
+  renkasi **automatiškai**, tad tai yra NUMATYTOJI konfigūracija.
+
+  Praktiškai: aplinka su `DATABASE_URL` ir `PGOPTIONS`, be `AUDIT_BACKEND`,
+  `JOB_STORE_BACKEND` ir `SESSION_STORE_BACKEND`, iki šio leidimo pakildavo ir
+  jungdavosi prie `PGOPTIONS` nurodytos schemos. Nuo šiol ji **nestartuoja**, o
+  `validateConfig` išvardija priežastį prieš pakylant bet kuriai daliai.
+
+  ⚠️ Tai galioja ir `workers/` procesui: sargas yra pool'o statyme, ne
+  `validateConfig`, kurio worker'is nekviečia.
+
   **Prieš atnaujinant:** palikite VIENĄ jungties formą. Tai ir yra rekomendacija
   operatoriui — techninis invariantas nėra „abi formos niekada negali būti
   kartu", bet viena forma yra paprasčiausia ir mažiausiai dviprasmiška praktika.

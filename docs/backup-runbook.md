@@ -672,12 +672,20 @@ node backend/scripts/post-restore-reconcile.mjs \
   run --target "postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE" --actor "$USER"
 ```
 
-⚠️ **ŠIANDIEN `PG*`-only diegimas suderinimo įvykdyti NEGALI.** Suderinimas
-reikalauja bent vienos PostgreSQL ašies (D7); job'ų ašį uždaro 7.2a barjeras
-(#281), o sesijų ašis reikalauja **būtent** `DATABASE_URL`
-(`sessionStore/backendSelection.js` — `PG*` jam netinka, #282). Todėl komanda
-atsisako dirbti su `RECONCILE_BACKEND_NOT_POSTGRES`. Iki #282 uždarymo šis kelias
-yra dokumentuotas, bet neprieinamas — riba, ne garantija.
+⚠️ **IŠLYGA PAŠALINTA (#245).** Iki #245 čia buvo parašyta, kad `PG*`-only
+diegimas suderinimo įvykdyti NEGALI: sesijų ašis reikalaudavo **būtent**
+`DATABASE_URL`, tad tokiame diegime nė viena ašis negalėdavo būti PostgreSQL, ir
+komanda krisdavo su `RECONCILE_BACKEND_NOT_POSTGRES`.
+
+Nuo #245 `SESSION_STORE_BACKEND=postgres` priima ir `PG*` formą
+(`arNurodytaPostgres()`), tad sesijų ašis `PG*`-only diegime **veikia**.
+Išmatuota: `PG*` + `SESSION_STORE_BACKEND=postgres` duoda
+`sesijos: { autoritetas: "postgres", verdiktas: "suderinta" }`.
+
+⚠️ **Bet ašį vis tiek reikia PASIRINKTI.** `PG*` buvimas savaime nieko
+neperjungia: be `SESSION_STORE_BACKEND=postgres` (arba
+`JOB_STORE_BACKEND=postgres`) ašies nėra, ir komanda teisėtai atsisako dirbti.
+Tai politika, ne #245 riba.
 
 ⚠️ Tapatumo patikra abi puses sprendžia **tomis pačiomis taisyklėmis kaip `pg`**:
 
@@ -916,7 +924,7 @@ rašo pats `eraseJob()`.
 | **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami 7.6b žingsnyje | Uždaro §9c replay, vykdomas PRIEŠ suderinimą |
 | **Replay be tikslinės bazės kliento neįmanomas** | `DR_REPLAY_STORE_MISSING` — tylaus grįžimo prie fasado nėra | Sąmoningas fail-closed. ⚠️ Po barjero atidarymo (#155) SVARBESNIS: fasadas gali būti `postgres`, ir tada replay per jį eitų į PRODUKCINĘ, ne atkurtą bazę |
 | **Job'ų autoritetas nėra PostgreSQL be eksplicitinio pasirinkimo** | ⚠️ **Barjeras ATIDARYTAS (#155)** — bet `DATABASE_URL` vienas neperjungia: be `JOB_STORE_BACKEND=postgres` suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | Nustatyti `JOB_STORE_BACKEND=postgres` ATKŪRIMO aplinkoje (#281) |
-| **`PG*`-only diegimas neturi nė vienos PostgreSQL ašies** | `post-restore-reconcile` krenta su `RECONCILE_BACKEND_NOT_POSTGRES` | Sesijų atranka turi priimti `PG*` (#282) |
+| ~~**`PG*`-only diegimas neturi nė vienos PostgreSQL ašies**~~ **UŽDARYTA (#245)** | Buvo: `post-restore-reconcile` krisdavo su `RECONCILE_BACKEND_NOT_POSTGRES`, nes sesijų atranka reikalavo būtent `DATABASE_URL` | Sesijų atranka priima `PG*` per `arNurodytaPostgres()`; ašį vis tiek reikia pasirinkti eksplicitiškai |
 | **`options`/`search_path` skirtumas = kita bazė** | Vienodi DSN su skirtingu `search_path` laikomi SKIRTINGAIS taikiniais | Sąmoninga fail-closed kryptis |
 
 **Kodėl atkūrimas neaudituojamas.** Rašyti nėra kur: `audit_log` į dump'ą

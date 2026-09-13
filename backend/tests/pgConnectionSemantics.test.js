@@ -933,3 +933,169 @@ test("DOKUMENTACIJA: `migrations.md` nebesiūlo laikinai konstruoti `DATABASE_UR
     "teiginys apie `PG*` palaikymą privalo nurodyti PATIKRINTĄ versiją (§14)"
   );
 });
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * ANTRAS PERŽIŪROS RAUNDAS (R6, R8)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+test("R8: `process.env` sukeitimas ATMETA asinchroninį callback'ą (fail-closed)", () => {
+  /**
+   * ⚠️ PO P1 ŠIS KELIAS TAPO PLATESNIS.
+   *
+   * Globalus `process.env` sukeitimas dabar vyksta KIEKVIENAME
+   * `pgJungtiesNustatymai()` kvietime — t. y. kiekvieno pool'o statyme. Saugu
+   * tai TIK tol, kol `fn()` sinchroninis: `finally` atstato globalą, kai `fn`
+   * grįžta, o `Promise` grįžta IŠKART, palikdamas tikrąjį darbą vykti vėliau.
+   *
+   * ⚠️ IR TAI BŪTŲ TYLU. Kryžminė tarša pasireiškia tik lygiagretumo lange, tad
+   * jokia dabartinė asercija jos nepagautų — testai matytų teisingas reikšmes,
+   * o produkcija kartkartėmis jungtųsi ne ten.
+   *
+   * ⚠️ KVIETIMO DAŽNIS IŠMATUOTAS, NE NUSPĖTAS: `pgJungtiesNustatymai()`
+   * kviečiamas iš `*PoolNustatymai(env)` `initializePostgres()` metu — VIENĄ
+   * kartą pool'ui, ne kiekvienai jungčiai ar užklausai (`initPromise` daro
+   * `init()` idempotentišką). Likę kvietėjai — DR keliai ir diagnostinis
+   * klientas — irgi vienkartiniai.
+   */
+  const kelias = require.resolve("pg/lib/connection-parameters");
+  const pgKelias = require.resolve("../utils/pgConnection");
+  const senasEksportas = require.cache[kelias].exports;
+
+  /** `new Thenable()` grąžina objektą su `.then` — tiksliai tai, ką duotų `async fn`. */
+  function Thenable() {
+    this.then = (resolve) => resolve({ host: "h", port: 5432, database: "db" });
+  }
+
+  const tikrojiAplinka = process.env;
+
+  try {
+    require.cache[kelias].exports = Thenable;
+    delete require.cache[pgKelias];
+    const sviezias = require(pgKelias);
+
+    assert.throws(
+      () => sviezias.arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS, PGSSLMODE: "require" }),
+      (err) => {
+        assert.equal(err.code, "PG_ENV_SWAP_ASYNC", "sargas privalo turėti savo kodą");
+        return true;
+      },
+      "asinchroninis callback privalo NUTRAUKTI, o ne tyliai grąžinti `null`"
+    );
+
+    /**
+     * ⚠️ IR GLOBALAS PRIVALO BŪTI ATSTATYTAS. Sargas, paliekantis svetimą
+     * `process.env`, būtų blogesnis už jo nebuvimą.
+     */
+    assert.equal(process.env, tikrojiAplinka, "po metimo globalas privalo būti atstatytas");
+  } finally {
+    require.cache[kelias].exports = senasEksportas;
+    delete require.cache[pgKelias];
+    require(pgKelias);
+  }
+});
+
+test("R6 TRIPWIRE: nė vienas produkcinis `new Pool`/`new Client` neapeina autoriteto", () => {
+  /**
+   * ⚠️ TAI INVENTORIAUS TRIPWIRE (§9.2), NE ELGSENOS ĮRODYMAS — IR RIBA ČIA
+   * UŽRAŠOMA SĄMONINGAI.
+   *
+   * Teiginys „chokepoint apeiti nėra kaip" pirmoje ataskaitos redakcijoje rėmėsi
+   * VIENKARTINIU `grep`. Tai tiksliai ta §14.1 eilutė, kurią šis darbas kitur
+   * taiko griežtai: paieška pagal vardą randa tiesiogines nuorodas, bet ne
+   * konstravimą per alias'ą (`const P = pg.Pool; new P()`), factory, wrapper'į
+   * ar dinaminį `require`.
+   *
+   * ⚠️ KO ŠIS TESTAS NEGAUDO: būtent to paties. Jis paverčia vienkartinį `grep`
+   * NUOLATINIU, tad naujas produkcinis failas su savo pool'u krinta čia, o ne
+   * diegime. Alias'as jį apeitų — ir tai užrašyta, o ne nutylėta.
+   *
+   * ⚠️ FAILAI ATRANDAMI, NE SURAŠOMI. Kietas sąrašas (kaip
+   * `auditStoreFields.test.js` `error` klausytojų tripwire) naujo failo
+   * nepastebėtų — ta pati tyliai senstančio sąrašo yda, kurią #245 uždaro.
+   *
+   * Elgsenos pusę — kad dviprasmybė realiai stabdo — tikrina
+   * „STARTAS FAILINA…" testai visiems keturiems pool'ams.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  const saknis = path.join(__dirname, "..");
+  const PRALEISTI = new Set(["node_modules", "tests", "coverage", ".git"]);
+
+  const failai = [];
+  (function eiti(katalogas) {
+    for (const irasas of fs.readdirSync(katalogas, { withFileTypes: true })) {
+      if (PRALEISTI.has(irasas.name)) continue;
+      const pilnas = path.join(katalogas, irasas.name);
+      if (irasas.isDirectory()) eiti(pilnas);
+      else if (/\.(js|mjs|cjs)$/.test(irasas.name)) failai.push(pilnas);
+    }
+  })(saknis);
+
+  assert.ok(failai.length > 50, `prielaida: atrasta per mažai failų (${failai.length})`);
+
+  const pazeidejai = [];
+  for (const failas of failai) {
+    const svarus = beKomentaru(fs.readFileSync(failas, "utf8"));
+    if (!/new\s+(Pool|Client)\s*\(/.test(svarus)) continue;
+    if (svarus.includes("pgJungtiesNustatymai")) continue;
+    pazeidejai.push(path.relative(saknis, failas));
+  }
+
+  assert.deepEqual(
+    pazeidejai,
+    [],
+    "PostgreSQL pool'as ar klientas statomas apeinant `pgJungtiesNustatymai()`. " +
+      "Tada jungties formos ir dviprasmybės sargo jam NEGALIOJA: aplinka su " +
+      "`PGOPTIONS` nuvestų jį į kitą schemą, o startas nekristų. " +
+      `Pažeidėjai: ${pazeidejai.join(", ")}`
+  );
+});
+
+test("R7 DOKUMENTACIJA: upgrade note įvardija NUMATYTĄJĄ konfigūraciją, ne tik mišrias", () => {
+  /**
+   * ⚠️ ĮRODYMAS BUVO SENESNIS UŽ KODĄ (§12.1).
+   *
+   * Upgrade note rašytas, kai sargas gyveno tik audito, DR ir diagnostikos
+   * keliuose — tada „laužantis pokytis mišrioms konfigūracijoms" buvo tiesa.
+   * Po chokepoint'o perkėlimo paliečiamas KIEKVIENAS diegimas, kuriame
+   * PostgreSQL nurodytas, nes ištrynimo žymos jį renkasi automatiškai. Operatorius,
+   * neturintis nė vieno `*_BACKEND=postgres`, iš senojo teksto pagrįstai
+   * spręstų, kad jam tai negalioja — ir startas kristų be įspėjimo.
+   *
+   * ⚠️ Tikrinamas TURINYS, ne buvimas: „yra `## Unreleased` sekcija" praeitų ir
+   * su senuoju tekstu.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const saknis = path.join(__dirname, "..", "..");
+
+  const changelog = fs.readFileSync(path.join(saknis, "CHANGELOG.md"), "utf8");
+  const nesirasytas = changelog.slice(changelog.indexOf("## Unreleased"));
+
+  assert.match(
+    nesirasytas,
+    /\*\*NUMATYTOJI konfigūracija\*\*|NUMATYTOJI konfigūracija/,
+    "upgrade note privalo pasakyti, kad paliečiama ir numatytoji konfigūracija"
+  );
+  assert.match(
+    nesirasytas,
+    /jokio `\*_BACKEND=postgres` nėra nustatyta|be jokio `\*_BACKEND=postgres`/,
+    "privalo būti įvardyta, kad eksplicitinio backend'o nereikia"
+  );
+  assert.match(nesirasytas, /workers\//, "privalo būti įvardytas ir worker'io procesas");
+
+  /**
+   * ⚠️ IR RUNBOOK'O IŠLYGA. #245 padarė ją NETEISINGĄ: `PG*`-only diegimas
+   * suderinimą dabar įvykdyti gali. Dokumentas, teigiantis priešingai, nukreiptų
+   * operatorių nuo DR procedūros būtent tada, kai ji reikalinga.
+   */
+  const runbook = fs.readFileSync(path.join(saknis, "docs", "backup-runbook.md"), "utf8");
+
+  assert.ok(
+    !/ŠIANDIEN `PG\*`-only diegimas suderinimo įvykdyti NEGALI/.test(runbook),
+    "runbook'o išlyga privalo būti PAŠALINTA - po #245 ji melaginga"
+  );
+  assert.match(runbook, /IŠLYGA PAŠALINTA \(#245\)/, "pašalinimas privalo būti įvardytas, ne tylus");
+});

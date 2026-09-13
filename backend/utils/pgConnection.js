@@ -189,7 +189,32 @@ function suAplinka(env, fn) {
   const tikroji = process.env;
   try {
     process.env = env;
-    return fn();
+    const rezultatas = fn();
+
+    /**
+     * ⚠️ FAIL-CLOSED PRIEŠ ASINCHRONINĮ `fn` (#245 peržiūra, R8).
+     *
+     * `finally` atstato globalą, kai `fn` GRĮŽTA. Jei `fn` grąžintų `Promise`,
+     * atstatymas įvyktų iškart, o pats darbas tęstųsi VĖLIAU — jau su tikrąja
+     * aplinka. Blogesnis variantas: tarp `await` taškų kitas įeinantis kelias
+     * matytų svetimą `process.env`, ir tai būtų kryžminė užklausų tarša —
+     * gedimas, kurio nė vienas dabartinis testas nepagautų, nes jis pasireiškia
+     * tik lygiagretumo lange.
+     *
+     * Šiandien `fn` visada yra vienas `new ConnectionParameters(...)`. Ši
+     * asercija saugo ne šiandieną, o refaktoringą: ji paverčia tylią taršą
+     * garsiu kritimu inicijavimo metu.
+     */
+    if (rezultatas !== null && typeof rezultatas === "object" && typeof rezultatas.then === "function") {
+      throw new PgConnectionError(
+        "`suAplinka()` callback grąžino `Promise`. Globalus `process.env` " +
+          "keičiamas TIK sinchroniniam skaičiavimui: asinchroninis kelias " +
+          "atstatytų aplinką per anksti ir kitiems kvietėjams rodytų svetimą.",
+        "PG_ENV_SWAP_ASYNC"
+      );
+    }
+
+    return rezultatas;
   } finally {
     process.env = tikroji;
   }
@@ -200,7 +225,16 @@ function pgParametrai(nustatymai, env) {
   if (!nustatymai) return null;
   try {
     return suAplinka(env, () => new ConnectionParameters(nustatymai));
-  } catch {
+  } catch (klaida) {
+    /**
+     * ⚠️ PROGRAMAVIMO KLAIDA NEVIRSTA „NEATPAŽINTA KONFIGŪRACIJA" (R8).
+     *
+     * Šis `catch` egzistuoja vienam dalykui: `pg` atmestai KONFIGŪRACIJAI. Jei
+     * jis prarytų ir `PG_ENV_SWAP_ASYNC`, R8 sargas taptų nematomas — grąžintų
+     * `null`, sargas praneštų „skirtumų nėra", ir asinchroninis refaktoringas
+     * praeitų tyliai. Tiksliai tai, ko sargas turi neleisti.
+     */
+    if (klaida && klaida.code === "PG_ENV_SWAP_ASYNC") throw klaida;
     return null;
   }
 }
