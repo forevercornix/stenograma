@@ -2277,6 +2277,8 @@ generuoja ilgą eksportą, tuo metu ištrynimas grąžina 204 — ir tada įraš
 | ⚠️ **Legacy schemos tolerancija lieka `restoredJobStore`** — gyvas startas jos nepaveldi | `jobStoreBackendSelection` (tripwire abiem kryptim) | #339 sprendimas: atkurta kopija teisėtai gali būti senesnė už migraciją, produkcinė bazė — ne. Gyvame kelyje perdavus `bandymuRegistras: false` dalinė schema vėl praeitų startą |
 | ⚠️ **Patvirtintas `skaitymui_truksta` NUTRAUKIA startą; `nezinoma` — ne** | `artifactStorePrijungimas` (taisyklė + tikras verdiktas) | Padarius `arStabdytiStarta()` visada `false` → krinta 2 testai; ignoravus `nezinoma` → krinta 1 (abi išmatuotos). Bazė su `fs` rezultatais ir `ARTIFACT_STORE_BACKEND=s3` pakildavo ir aptarnaudavo, o BDAR ištrynimas senų objektų nepasiekdavo. Ta pati `NESAUGU` vs `nepavyko` skirtis, kurią įvedė PR-5 |
 
+| ⚠️ **Cutover 5b blokas NUTRAUKIA prieš `DEL`, kai bet kuris žingsnis krenta** | `cutoverPreflight` (blokas ištraukiamas iš `docs/migrations.md` ir VYKDOMAS su stub'intu `redis-cli`; be Redis) | Grąžinus senąją formą → krinta DU testai (išmatuota): pertraukiamas `scan` gedimas ir nepavykęs `HMGET`. ⚠️ Vienas `scan` gedimas nepakanka mutacijai: jei krenta abu, senoji forma nutrūksta ties antruoju ir atrodo saugi — yda matoma tik tada, kai PIRMAS krenta, o VĖLESNIS pavyksta |
+
 ### #183 — persistentinės ištrynimo žymos (#155, 7.5a)
 
 ✅ **[PG NOT RUN] ŠIAME SKYRIUJE IŠSPRĘSTA CI.** `erasureMarks.integration`

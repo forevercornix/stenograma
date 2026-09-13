@@ -123,6 +123,8 @@ const privacy = [
   "revivalHorizons",
   /** #342: starto užklausų ribos — fail-never režimas. Be DB. */
   "startPoolTimeouts",
+  /** #342: cutover 5b blokas vykdomas su stub'intu `redis-cli`. Be Redis. */
+  "cutoverPreflight",
   "observabilityEvents.route",
 ];
 
