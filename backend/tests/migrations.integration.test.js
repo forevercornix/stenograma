@@ -402,51 +402,103 @@ test(
 );
 
 test(
-  "#155 STARTAS: pasenusi schema (tik tėvinė migracija) nutraukia initializePostgres()",
+  "#155 STARTAS: LENTELIŲ BUVIMO NEPAKANKA - trūkstamas invariantas nutraukia startą",
   { skip: skipWithoutPostgres() },
   async () => {
     /**
-     * ⚠️ LENTELIŲ BUVIMO NEPAKANKA.
+     * ⚠️ TEIGINYS NEPAKITO; PAKITO BŪDAS JĮ PASIEKTI (#342).
      *
-     * DB, kurioje paleista TIK `1755000000000`, abi lenteles jau turi, tad
-     * `SELECT 1` + lentelių patikra praeitų: `readiness.jobStore` taptų
-     * `true`, serveris imtų klausytis, o DB priiminėtų įrašus, kuriuos
-     * naujesnė migracija turi blokuoti (nežinomas tipas, era `1`, nežinomas
-     * actor source).
+     * Testas nuo pat pradžių įrodinėja VIENĄ dalyką: lentelės gali egzistuoti, o
+     * startas vis tiek privalo nutrūkti, jei trūksta invariantų — kitaip DB
+     * priiminėtų įrašus, kuriuos naujesnė migracija turi blokuoti (nežinomas
+     * tipas, era `1`, nežinomas actor source).
+     *
+     * ⚠️ ANKSČIAU SCENARIJUS BUVO „TIK TĖVINĖ MIGRACIJA", IR JIS NUSTOJO SIEKTI
+     * INVARIANTŲ ŠAKĄ. `a451532` pridėjo į lentelių patikrą dar dvi lenteles
+     * (`job_result_attempts`, `artifact_migration_progress`), tad tėvinės
+     * migracijos scenarijuje dabar nutraukia GRIEŽTESNIS sargas priekyje —
+     * „trūksta lentelių" — ir invariantų kodas nebeįvykdomas.
+     *
+     * ⚠️ REGEX NESUŠVELNINTAS SĄMONINGAI. `/trūksta/` vietoj
+     * `/trūksta invariantų/` būtų pažaliavęs iš karto ir nustojęs tikrinti tai,
+     * ką šis komentaras teigia — šeštas „asercija dėl kitos priežasties" atvejis
+     * šioje sekoje, tik šįkart matomas, nes testas KRITO, o ne nutilo.
+     *
+     * ⚠️ MIGRACIJOS RIBOS, KURIOJE VISOS KETURIOS LENTELĖS YRA, O INVARIANTŲ DAR
+     * NĖRA, NEEGZISTUOJA: paskutinė migracija (`1756600000000`) sukuria paskutinę
+     * lentelę KARTU su jos suvaržymais. Todėl scenarijus konstruojamas
+     * eksplicitiškai — pilna schema minus VIENAS invariantas.
+     *
+     * Tai ir stipriau: senasis scenarijus rėmėsi migracijų TVARKA, tad galėjo
+     * nustoti siekti savo šakos dėl bet kurio nesusijusio pakeitimo — kaip ką tik
+     * ir nutiko. Šis nuo tvarkos nepriklauso.
+     *
+     * ⚠️ „PASENUSI (DALINAI MIGRUOTA) DB ATMETAMA" NEDINGO — ją nuo `a451532`
+     * dengia `#342 STARTAS: TRŪKSTAMA PAGALBINĖ LENTELĖ…` šiame pat faile.
      */
-    await perkurtiDb();
-
-    const tevine = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-migr-"));
+    const NUIMAMAS = "jobs_type_values";
     const buves = process.env.DATABASE_URL;
 
     try {
-      const pirma = fs
-        .readdirSync(path.join(ŠAKNIS, "migrations"))
-        .filter((f) => f.endsWith(".js"))
-        .sort()[0];
-      fs.copyFileSync(path.join(ŠAKNIS, "migrations", pirma), path.join(tevine, pirma));
-      migrate("up", tevine);
+      await perkurtiDb();
+      migrate("up");
+
+      const pool = new Pool({ connectionString: DB_URL });
+      try {
+        await pool.query(`ALTER TABLE jobs DROP CONSTRAINT ${NUIMAMAS}`);
+      } finally {
+        await pool.end();
+      }
 
       process.env.DATABASE_URL = DB_URL;
       delete require.cache[require.resolve("../utils/jobStore")];
       const jobStore = require("../utils/jobStore");
 
-      await assert.rejects(
-        () => jobStore._initializePostgresForTests(),
-        /trūksta invariantų/,
+      /** Klaida gaudoma VIENĄ kartą - abi asercijos tikrina TĄ PATĮ pranešimą. */
+      const klaida = await jobStore._initializePostgresForTests().then(
+        () => {
+          throw new Error("startas privalėjo nutrūkti, o praėjo");
+        },
+        (e) => e
+      );
+
+      assert.match(
+        klaida.message,
+        new RegExp(`trūksta invariantų:.*${NUIMAMAS}`),
         "pasenusi schema privalo nutraukti startą, ne būti paskelbta pasiruošusia"
       );
 
-      // Paleidus visas migracijas startas praeina.
+      /**
+       * ⚠️ SARGAS ŠIO TESTO PRASMEI. Jei ateityje priekyje vėl atsirastų
+       * griežtesnė patikra, testas kristų ČIA su aiškia priežastimi, o ne
+       * pažaliuotų dėl kitos šakos. Būtent tokio sargo iki #342 ir trūko.
+       */
+      assert.doesNotMatch(
+        klaida.message,
+        /trūksta lentelių/,
+        "lentelių patikra privalo būti PRAEITA - kitaip invariantų šaka nepasiekiama"
+      );
+
+      /**
+       * KONTROLĖ: su pilna schema tas pats startas praeina. Be jos „viskas
+       * atmetama" praeitų kaip sėkmė.
+       *
+       * ⚠️ DB PERKURIAMA, ne `migrate("down")`: pastarasis atsuktų PASKUTINĘ
+       * migraciją, o nuimtas invariantas ateina iš pirmosios.
+       */
+      await perkurtiDb();
       migrate("up");
-      const store = await jobStore._initializePostgresForTests();
+
+      delete require.cache[require.resolve("../utils/jobStore")];
+      const sveikas = require("../utils/jobStore");
+      const store = await sveikas._initializePostgresForTests();
+
       assert.equal(store.backend, "postgres");
       await store.close();
     } finally {
       delete require.cache[require.resolve("../utils/jobStore")];
       if (buves === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = buves;
-      fs.rmSync(tevine, { recursive: true, force: true });
     }
   }
 );
