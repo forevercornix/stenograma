@@ -535,18 +535,38 @@ test("#280 P1: `?host=` keičia endpoint'ą — tapatumas privalo tai matyti", (
     "neparsinamas DSN tapatybės neturi"
   );
 
-  /** ⚠️ `PGPORT` fallback: `pg` jį taiko, tad tapatumas privalo taikyti irgi. */
-  assert.throws(
-    () => reconcile.patikrintiSargus("postgres://u@host:5432/db", { DATABASE_URL: "postgres://u@host/db", PGPORT: "6543" }),
-    (err) => {
-      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
-      return true;
-    },
-    "be šito `_pool()` jungtųsi į 6543, o palyginimas sakytų, kad tai ta pati bazė"
-  );
+  /**
+   * ⚠️ `PGPORT` FALLBACK: INVARIANTAS SUSIAURINTAS (#245) — IR KODAS PASIKEITĖ.
+   *
+   * `pg` `PGPORT` vis dar taiko, ir tapatumas vis dar jį mato. Bet nuo #245
+   * pirma suveikia ANKSTESNIS sargas: DSN be porto plius `PGPORT` reiškia, kad
+   * efektyvus TAIKINYS priklauso nuo aplinkos, o ne nuo DSN. Tai
+   * `RECONCILE_CONNECTION_AMBIGUOUS`, ne `…_TARGET_MISMATCH`, ir tai kitas
+   * operatoriaus veiksmas: ne „nurodei ne tą bazę", o „užbaik DSN arba jo
+   * nenaudok".
+   *
+   * ⚠️ ANTRASIS ATVEJIS APVERSTAS SĄMONINGAI. Anksčiau jis PRAEIDAVO (abi pusės
+   * sprendžiamos vienodai → sutampa). Dabar krinta, nes klausimas „į kurią bazę
+   * jungiamės?" iš paties DSN atsakymo NETURI. Kaina įvardyta: pusiau užpildytas
+   * DSN, kurį papildo aplinka, yra teisėtas libpq raštas ir nuo šiol draudžiamas.
+   * Priimta dėl to, kad ta pati „papildymo" mechanika `sslmode` atveju reiškia
+   * TYLIAI pakeistą TLS režimą, o dvi taisyklės tam pačiam mechanizmui grąžintų
+   * būtent tą spragų klasę, kurią #245 uždaro.
+   */
+  for (const taikinys of ["postgres://u@host:5432/db", "postgres://u@host/db"]) {
+    assert.throws(
+      () => reconcile.patikrintiSargus(taikinys, { DATABASE_URL: "postgres://u@host/db", PGPORT: "6543" }),
+      (err) => {
+        assert.equal(err.code, "RECONCILE_CONNECTION_AMBIGUOUS");
+        return true;
+      },
+      "DSN be porto plius `PGPORT` neatsako, kur jungiamasi - net kai `--target` sutampa"
+    );
+  }
 
-  reconcile.patikrintiSargus("postgres://u@host/db", {
-    DATABASE_URL: "postgres://u@host/db",
+  /** ⚠️ KONTROLĖ: UŽBAIGTAS DSN su tuo pačiu `PGPORT` privalo PRAEITI. */
+  reconcile.patikrintiSargus("postgres://u@host:6543/db", {
+    DATABASE_URL: "postgres://u@host:6543/db",
     PGPORT: "6543",
     ...SU_POSTGRES_ASIMI,
   });
@@ -797,12 +817,29 @@ test("#280 IV: dviprasmiška jungties konfigūracija yra KLAIDA, ne interpretaci
    */
   const { PgConnectionError, arDviprasmiskaKonfiguracija, efektyvusJungtiesParametrai } = require("../utils/pgConnection");
 
-  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: "postgres://u@h/db", PGHOST: "h" }), true);
-  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: "postgres://u@h/db" }), false);
+  /**
+   * ⚠️ INVARIANTAS SUSIAURINTAS (#245): DVIPRASMYBĖ YRA EFEKTAS, NE FORMŲ
+   * MAIŠYMAS.
+   *
+   * Buvo `DATABASE_URL && PGHOST`. Ta taisyklė klausė teisingo klausimo ir
+   * atsakė neteisingai abiem kryptimis: su PILNU DSN `PGHOST` `pg` semantikai
+   * neturi jokios įtakos (blokavo teisėtą konfigūraciją), o `PGSSLMODE`,
+   * `PGOPTIONS`, `PGCLIENT_ENCODING` pilną DSN PERRAŠO (jų nematė).
+   *
+   * ⚠️ DR GARANTIJA NESUSILPNĖJO. Ją laiko ne šis sargas, o PALYGINIMAS: su
+   * pilnu DSN efektyvus taikinys yra DSN taikinys, tad kitur rodantis `--target`
+   * krinta kaip `RECONCILE_TARGET_MISMATCH`. Žr. kontrolę žemiau.
+   */
+  const PILNAS = "postgres://u@h:5432/db";
+
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS, PGHOST: "h" }), false, "neveiksnus `PGHOST`");
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS, PGOPTIONS: "-csearch_path=x" }), true);
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS, PGSSLMODE: "require" }), true);
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS }), false);
   assert.equal(arDviprasmiskaKonfiguracija({ PGHOST: "h" }), false);
 
   assert.throws(
-    () => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, PGHOST: "db.vidinis" }),
+    () => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, PGOPTIONS: "-csearch_path=kita" }),
     (err) => {
       assert.equal(err.code, "RECONCILE_CONNECTION_AMBIGUOUS", "operatoriaus veiksmas kitoks nei prie nesutapimo");
       return true;
@@ -811,6 +848,35 @@ test("#280 IV: dviprasmiška jungties konfigūracija yra KLAIDA, ne interpretaci
 
   /** ⚠️ KONTROLĖ: be maišymo abi formos privalo VEIKTI — kitaip sargas draustų teisėtas konfigūracijas. */
   reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, ...SU_POSTGRES_ASIMI });
+
+  /**
+   * ⚠️ KONTROLĖ ATLAISVINIMUI: neveiksnus `PGHOST` greta pilno DSN privalo
+   * PRAEITI. Būtent šis derinys anksčiau krisdavo, ir būtent jis yra #245
+   * atrakinamas atvejis.
+   */
+  reconcile.patikrintiSargus(TAIKINYS, {
+    DATABASE_URL: TAIKINYS,
+    PGHOST: "visai-kitas-host",
+    ...SU_POSTGRES_ASIMI,
+  });
+
+  /**
+   * ⚠️ IR PRIEŠINGA KRYPTIS: kitur rodantis `--target` su tuo pačiu neveiksniu
+   * `PGHOST` privalo kristi kaip NESUTAPIMAS. Be šios eilutės atlaisvinimas
+   * būtų neatskiriamas nuo apsaugos praradimo.
+   */
+  assert.throws(
+    () =>
+      reconcile.patikrintiSargus("postgres://u@kita.baze:5432/stenograma", {
+        DATABASE_URL: TAIKINYS,
+        PGHOST: "visai-kitas-host",
+        ...SU_POSTGRES_ASIMI,
+      }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      return true;
+    }
+  );
 
   /**
    * ⚠️ `PG*` FORMA PATI SAVAIME NĖRA DVIPRASMIŠKA — ji krinta vėliau ir dėl KITOS

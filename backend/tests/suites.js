@@ -231,6 +231,13 @@ const security = [
    */
   "eilesPreflight",
   "startupChecks",
+  /**
+   * #245: viena PostgreSQL jungties formos semantika keturiems pool'ams plius
+   * dviprasmybės sargas pagal EFEKTĄ. Eina TEN, KUR `startupChecks`: tas pats
+   * klausimas („ar servisas jungiasi ten, kur mano operatorius?"), tik iš
+   * konfigūracijos pusės, ir čia gyvena kredencialų nepratekėjimo garantija.
+   */
+  "pgConnectionSemantics",
   "startupOrder",
   "httpClient.timeout",
   "audioMagicBytes",
