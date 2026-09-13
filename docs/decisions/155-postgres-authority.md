@@ -1,9 +1,15 @@
 # 7.0 — ADR: PostgreSQL autoritetas ir konsistencijos modelis
 
-**Statusas:** siūlomas
-**Blokuoja:** 7.2 ir visus vėlesnius #155 etapus
+**Statusas:** Priimtas · **Issue:** #177 (#155 dalis) · **Data:** 2026-09
+**Blokavo:** 7.2 ir visus vėlesnius #155 etapus (grandinė baigta)
+
 **Kontekstas:** #153 (dydžio ribos), #159 (nuosavybė), #154 (fazės) — visos trys
 prielaidos įgyvendintos.
+
+> **Kuo remiantis priimtas.** Ne formalumu: šio dokumento aktyvavimo barjero lentelė
+> buvo **§18.3 sprendimo pagrindas**, o barjeras atidarytas #342 (`main` @ `1c5d9b2`).
+> Iki tol repozitorija vienu metu teigė, kad sprendimas **siūlomas**, ir naudojo jį
+> kaip užrakintą kontraktą — dokumentas teigė mažiau, nei juo faktiškai remtasi.
 
 ---
 
@@ -31,8 +37,8 @@ Kol tai neatsakyta, 7.2 kodas statomas ant neapibrėžto pagrindo.
 ```
 jobStore (fasadas: nuosavybė, fazės, ištrynimo žymos)
   ├── memoryStore     (testai, desktop)
-  ├── redisStore      (paliekamas; nebe numatytasis produkcijai)
-  └── postgresStore   (NAUJAS — produkcijos numatytasis)
+  ├── redisStore      (paliekamas; tai, ką gauna diegimas be `JOB_STORE_BACKEND`)
+  └── postgresStore   (NAUJAS — renkamas TIK eksplicitiškai)
 
 BullMQ / Redis  → eilė, retry, stalled recovery. `jobStore` gyvavimo ciklo
                   metaduomenų KOPIJOS nesaugo (savo vidinius įrašus su
@@ -104,7 +110,12 @@ Redis'e nebelieka jautrių duomenų. Ištrynimas ir toliau privalo valyti BullMQ
 įrašą (`utils/jobErasure.js` tai jau daro).
 
 `redisStore` **nešalinamas** — jis lieka palaikomas backend'as ir turi savo
-kontraktų testus. Bet produkcijos numatytasis tampa `postgresStore`.
+kontraktų testus.
+
+⚠️ **PATIKSLINTA (#177, 2026-09).** Ankstesnė formuluotė sakė, kad „produkcijos
+numatytasis tampa `postgresStore`". Po #342 tai **nebe tiesa**: `postgres` renkamas
+**tik** eksplicitiniu `JOB_STORE_BACKEND=postgres`, o diegimas, jo nenustatęs, gauna
+`redis`. Žr. „POLITIKOS PAKEITIMAS: `postgres` RENKAMAS TIK EKSPLICITIŠKAI".
 
 ---
 
@@ -115,12 +126,12 @@ Visas #159 ir #154 atominis darbas yra **Redis-Lua specifinis**:
 | Operacija | Redis | PostgreSQL atitikmuo |
 |---|---|---|
 | `updateOwned` / `removeOwned` | Lua CAS pagal `owner_id` + `owner_kind` | `UPDATE ... WHERE owner_id IS NOT DISTINCT FROM $1 AND owner_kind = $2` |
+| `reportProgressAtomic` | Lua CAS pagal fazę, `total`, `current` | `UPDATE ... WHERE phase = $1 AND ...` |
 
 ⚠️ **`IS NOT DISTINCT FROM`, NE `=`.** Desktop (`unowned`) ir bendro rakto
 (`api-key`) job'ai turi `owner_id IS NULL`. Su `= $1`, kai `$1` irgi `NULL`,
 sąlyga duoda `UNKNOWN`, ir `UPDATE` neatitinka nė vienos eilutės —
 `updateOwned()` bei `removeOwned()` lūžtų KIEKVIENAM ne-vartotojo job'ui.
-| `reportProgressAtomic` | Lua CAS pagal fazę, `total`, `current` | `UPDATE ... WHERE phase = $1 AND ...` |
 
 SQL atitikmenys techniškai **paprastesni** (transakcijos, `RETURNING`), bet tai
 ne migracija — tai trečia nepriklausoma tų pačių invariantų realizacija.
@@ -631,6 +642,9 @@ worker'io darbą — apsauga išnyktų tuo momentu, kai tampa reikalinga.
 |---|---|
 | `job_results` | **susieta su `jobs` šalinimu**, ne savarankiška |
 | `jobs` | po TTL + atsarga — **TIK terminaliams be laukiančio valymo** |
+| `sessions` | pagal `expires_at`; **revokuota sesija saugoma bent iki jo** |
+| `audit_log` | N dienų (žr. esamą `privacyConfig`) |
+| `erasure_marks` | **≥ max(prikėlimo horizontas, kopijų retencija) + atsarga** |
 
 ⚠️ **RETENCIJA PRIKLAUSO NUO BŪSENOS, ne vien nuo amžiaus.**
 
@@ -657,12 +671,22 @@ memory ir Redis backend'ų, kur metaduomenys ir rezultatas dingsta kartu.
 
 Abu įrašai šalinami atominiai tuo pačiu terminu, arba `job_results` galiojimas
 išvedamas iš tėvinio job'o.
-| `sessions` | `expires_at` + revokuotos |
-| `audit_log` | N dienų (žr. esamą `privacyConfig`) |
-| `erasure_marks` | **≥ maksimalus BullMQ horizontas + atsarga** (žr. skaičiavimą) |
 
-⚠️ Paskutinė eilutė svarbiausia: žymos negalima šalinti anksčiau, nei nebegali
-pasirodyti vėluojantis darbas.
+⚠️ **`erasure_marks` eilutė svarbiausia:** žymos negalima šalinti anksčiau, nei
+nebegali pasirodyti vėluojantis darbas.
+
+⚠️ **PATIKSLINTA (#177, 2026-09) — DVI VIETOS, KURIOS BUVO SIAURESNĖS UŽ REALIZACIJĄ.**
+
+`sessions`: buvo „`expires_at` + revokuotos", o tai skaitosi kaip du nepriklausomi
+šalinimo kriterijai. `sessionStore.postgresStore.sweepExpired()` revokavimo kaip
+šalinimo priežasties **sąmoningai nenaudoja**: revokuota sesija laikoma bent iki savo
+`expires_at`, nes kitaip dingtų atsakymas „ar ši cookie buvo ATŠAUKTA, ar jos niekada
+nebuvo".
+
+`erasure_marks`: buvo „≥ maksimalus BullMQ horizontas + atsarga". 7.5a realizavo
+**dvi** dedamąsias, ne vieną: `max(revivalHorizonsMs().max, kopijų retencija) +
+SAFETY_MARGIN_MS`. Kopijų horizonto ADR nemini, o be jo žyma galėtų būti pašalinta,
+kol atkūrimas iš kopijos dar gali grąžinti job'ą.
 
 **Reikšmė IŠVEDAMA iš `queues/config.js`, ne parenkama:**
 
@@ -683,8 +707,14 @@ erasure_mark_retention ≥ max(visi eilės prikėlimo horizontai) + atsarga
 ```
 
 kur „prikėlimo horizontai" apima `removeOnFail.age`, `removeOnComplete.age`,
-stalled recovery langą, uždelstus (`delayed`) job'us ir bet kokį būsimą
-pakartotinio paleidimo mechanizmą.
+stalled recovery langą, retry backoff sumą, uždelstus (`delayed`) job'us ir bet kokį
+būsimą pakartotinio paleidimo mechanizmą.
+
+⚠️ **PATIKSLINTA (#177, 2026-09).** 7.5a `revivalHorizonsMs()` grąžina **penkias**
+dedamąsias: `removeOnComplete`, `removeOnFail`, `stalled`, `retry` ir **`delayMax`**.
+Paskutinės ADR nenumatė: per-job `delay` be ribos padarytų visą garantiją tuščią
+(job'as, įdėtas su ilgu atidėjimu, atkeliautų jau po to, kai žyma teisėtai pašalinta),
+todėl 7.5a įvedė `MAX_JOB_DELAY_MS` ir vykdo jį `enqueue()` metu.
 
 ⚠️ Kad garantija nebūtų tuščia, sąrašas privalo gyventi **vienoje vietoje** —
 `queues/config.js` eksportuoja `revivalHorizonsMs()`, ir retencijos testas
