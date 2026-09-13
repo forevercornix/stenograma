@@ -309,9 +309,12 @@ function suTapKatalogu(turinys, veiksmas) {
   }
 }
 
-function paleistiTikrintuva(katalogas) {
+function paleistiTikrintuva(katalogas, ...argumentai) {
   try {
-    return { kodas: 0, isvestis: execFileSync("node", [SKRIPTAS, katalogas], { encoding: "utf8" }) };
+    return {
+      kodas: 0,
+      isvestis: execFileSync("node", [SKRIPTAS, katalogas, ...argumentai], { encoding: "utf8" }),
+    };
   } catch (e) {
     return { kodas: e.status, isvestis: (e.stderr || "") + (e.stdout || "") };
   }
@@ -499,5 +502,64 @@ test("PALEIDIKLIS: `--tap-dir` rašo TAP kiekvienam failui ir IŠVALO senus", ()
     }
   } finally {
     fs.rmSync(katalogas, { recursive: true, force: true });
+  }
+});
+
+test("LIUDYTOJAS ĮVARDIJA TĄ RINKINĮ, KURĮ TIKRINO - ne visada `postgres`", () => {
+  /**
+   * ⚠️ RASTA CI ŽURNALE, NE PERŽIŪROJE (#342).
+   *
+   * Patikros CIKLAS visada naudojo `suites[RINKINYS]` ir buvo teisingas. Melavo
+   * SĖKMĖS PRANEŠIMAS: jis buvo užkoduotas ties `suites.postgres.length`, tad
+   * visi TRYS CI žingsniai rašė „visi 27 failai realiai įvykdyti" - nors `s3` ir
+   * `postgresS3` tikrina po VIENĄ failą.
+   *
+   * ⚠️ Tai #330 pamoka, pasikartojusi pačiame liudytoje (tas pats pranešimas
+   * trims rinkiniams), ir ta pati #342 klasė: faktas teisingas, skelbiama
+   * APIMTIS - ne. Peržiūrėtojas, skaitantis S3 žingsnio žurnalą, matė
+   * patvirtinimą apie postgres rinkinį.
+   */
+  const { suites } = require("./suites");
+
+  const scenarijai = [
+    { rinkinys: "s3", zyma: "MINIO_ENDPOINT" },
+    { rinkinys: "postgresS3", zyma: "DATABASE_URL" },
+  ];
+
+  for (const { rinkinys, zyma } of scenarijai) {
+    const failai = suites[rinkinys];
+    assert.ok(failai.length > 0, `${rinkinys} rinkinys negali būti tuščias`);
+
+    const tap = Object.fromEntries(failai.map((f) => [f, SVEIKAS_TAP]));
+
+    const { kodas, isvestis } = suTapKatalogu(tap, (katalogas) =>
+      paleistiTikrintuva(katalogas, rinkinys, zyma)
+    );
+
+    assert.equal(kodas, 0, `${rinkinys}: sveikas TAP privalo praeiti\n${isvestis}`);
+
+    assert.match(
+      isvestis,
+      new RegExp(`"${rinkinys}"`),
+      `pranešimas privalo įvardyti TIKRINTĄ rinkinį, ne \`postgres\`:\n${isvestis}`
+    );
+
+    assert.match(
+      isvestis,
+      new RegExp(`visi ${failai.length} failai`),
+      `pranešimas privalo skelbti TO rinkinio failų skaičių (${failai.length}):\n${isvestis}`
+    );
+
+    /**
+     * ⚠️ NEIGIAMA PUSĖ. Be jos užkoduotas „27" praeitų kiekvienam rinkiniui,
+     * kurio dydis atsitiktinai sutaptų - o būtent užkoduota reikšmė ir buvo yda.
+     */
+    if (failai.length !== suites.postgres.length) {
+      assert.doesNotMatch(
+        isvestis,
+        new RegExp(`visi ${suites.postgres.length} failai`),
+        `pranešimas NEGALI skelbti postgres rinkinio dydžio tikrindamas ${rinkinys}`
+      );
+    }
   }
 });

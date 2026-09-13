@@ -165,7 +165,24 @@ if (klaidos.length > 0) {
   process.exit(1);
 }
 
+/**
+ * ⚠️ PRANEŠIMAS ĮVARDIJA TĄ RINKINĮ, KURĮ REALIAI TIKRINO (#342).
+ *
+ * Iki šito jis buvo užkoduotas: `PostgreSQL rinkinys: visi ${suites.postgres.length}`.
+ * Patikra (žemiau esantis ciklas) visada naudojo `suites[RINKINYS]` ir buvo
+ * TEISINGA - melavo tik išvestis. CI žurnale visi TRYS žingsniai
+ * (`postgres`, `s3`, `postgresS3`) rašė „visi 27 failai realiai įvykdyti",
+ * nors du iš jų tikrino po VIENĄ failą.
+ *
+ * ⚠️ TAI TIKSLIAI #330 PAMOKA, PASIKARTOJUSI PAČIAME LIUDYTOJE: tas pats
+ * pranešimas trims skirtingiems rinkiniams. Ir tai ta pati klasė, kurią #342
+ * aprašo 33 kartus - faktas teisingas, o skelbiama APIMTIS ne. Peržiūrėtojas,
+ * skaitantis S3 žingsnio žurnalą, matė patvirtinimą apie postgres rinkinį.
+ *
+ * `PRALEIDIMO_ZYMA` irgi įvardijama: be jos „nė vieno praleidimo dėl DB" S3
+ * žingsnyje būtų dar vienas teiginys apie ne tą dalyką.
+ */
 console.log(
-  `PostgreSQL rinkinys: visi ${suites.postgres.length} failai realiai įvykdyti ` +
-    "(kiekvienas turi bent vieną nepraleistą `ok`, nė vieno praleidimo dėl DB)."
+  `Rinkinys "${RINKINYS}": visi ${suites[RINKINYS].length} failai realiai įvykdyti ` +
+    `(kiekvienas turi bent vieną nepraleistą \`ok\`, nė vieno praleidimo dėl \`${PRALEIDIMO_ZYMA}\`).`
 );
