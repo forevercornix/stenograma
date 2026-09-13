@@ -86,9 +86,19 @@ function pgJungtiesNustatymai(env = process.env) {
  * principas čia uždaro ir tapatumo, ir dokumentacijos klausimą vienu judesiu:
  * maišymas yra KLAIDA, ne interpretacijos reikalas.
  *
- * ⚠️ RIBA: tikrinama TIK ten, kur tapatumas turi teisinę galią (DR keliai —
- * 7.6a kopija, 7.6b suderinimas). Pool'ų konstravimo semantikos visame repo šis
- * modulis NEKEIČIA: tai atskiras sprendimas su kitokia rizika.
+ * ⚠️ RIBA IŠPLĖSTA (#245). Ankstesnė redakcija sakė: „tikrinama TIK ten, kur
+ * tapatumas turi teisinę galią (DR keliai); pool'ų konstravimo semantikos visame
+ * repo šis modulis NEKEIČIA: tai atskiras sprendimas su kitokia rizika."
+ *
+ * #245 IR YRA tas atskiras sprendimas. Nuo jo:
+ *
+ *   - dviprasmybės sargas yra BENDRAS PostgreSQL pool konfigūracijos invariantas,
+ *     taikomas visiems keturiems produkciniams pool'ams ir diagnostiniam klientui;
+ *   - DR tapatumo patikra (`arTaPatiBaze`) lieka PAPILDOMA sargo paskirtis, ne
+ *     vienintelė.
+ *
+ * ⚠️ IR PATS SARGAS PAKEITĖ PRIGIMTĮ: iš INTENTO į EFEKTĄ. Žr.
+ * `arDviprasmiskaKonfiguracija()`.
  */
 class PgConnectionError extends Error {
   constructor(message, code) {
@@ -98,8 +108,154 @@ class PgConnectionError extends Error {
   }
 }
 
+/**
+ * EFEKTYVI JUNGTIES SEMANTIKA — SKAIČIUOJA PATS `pg`, NE MES (#245).
+ *
+ * ⚠️ ČIA NĖRA IR NEBUS `PG*` SĄRAŠO. Pirmoji šio darbo redakcija turėjo ranka
+ * surašytus laukus (`host`, `port`, `database`, `user`, `password`, `ssl`,
+ * `options`, `client_encoding`) — ir jau rašymo metu praleido DU, kuriuos `pg`
+ * realiai skaito iš aplinkos: `sslnegotiation` (`PGSSLNEGOTIATION`, keičia TLS
+ * rankos paspaudimo būdą) ir `replication` (`PGREPLICATION`, keičia patį
+ * protokolą). Būtent tai ir yra ta yda, kurią #245 uždaro: sąrašas, aprašantis
+ * svetimą paviršių, sensta TYLIAI.
+ *
+ * `pg` yra `^8.x`. Minoras gali pridėti kintamųjų (`sslnegotiation` atsirado
+ * būtent taip), ir rankinis sąrašas apie tai nesužinotų.
+ *
+ * Todėl semantiką konstruoja `pg` savo klase. `pg/lib/*` yra DEKLARUOTAS
+ * paketo `exports` kelias (`pg/package.json`: `"./lib/*": "./lib/*.js"`), ne
+ * įsilaužimas į vidų. Ta pati klasė vykdo ir tikrą `new Pool(...)`, tad tai NE
+ * modelis to, ką darytų `pg`, o tas pats skaičiavimas.
+ *
+ * ⚠️ KONSTRAVIMAS NEJUNGIA. `new ConnectionParameters(cfg)` tik apskaičiuoja
+ * laukus; jokio socket'o, jokios DNS užklausos. Aplinkos riba (PostgreSQL šioje
+ * mašinoje nediegiamas) čia nepažeidžiama.
+ */
+const ConnectionParameters = require("pg/lib/connection-parameters");
+
+/**
+ * ⚠️ `pg` SKAITO `process.env` TIESIOGIAI, NE PERDUOTĄ OBJEKTĄ.
+ *
+ * `connection-parameters.js:15` — `process.env['PG' + key.toUpperCase()]`. Tad
+ * norint sužinoti, ką duotų KITA aplinka, kito kelio nėra: `process.env` reikia
+ * laikinai pakeisti.
+ *
+ * ⚠️ SINCHRONIŠKAI IR TIK SINCHRONIŠKAI. `fn` privalo būti sinchroninė (čia ji
+ * visada yra vienas `new ConnectionParameters(...)`): `await` viduje atidarytų
+ * langą, kuriame svetimas kodas matytų pakeistą `process.env`. `finally`
+ * atstato ir mestos klaidos atveju.
+ */
+/**
+ * ⚠️ ŽINOMA RIBA: TIKRINAMAS PERDUOTAS `env`, O `pg` SKAITO `process.env`.
+ *
+ * Kai kvietėjas paduoda savo objektą (`init({ DATABASE_URL: ... })`), sargas
+ * mato TĄ objektą, o pool'as praleistiems laukams vis tiek ims GLOBALIĄ aplinką.
+ * Tada `PGSSLMODE`, likęs `process.env`, perrašytų semantiką sargui to nematant.
+ *
+ * Nepataisyta sąmoningai: produkcijoje visi penki keliai kviečiami su
+ * `process.env` (`server.js` `init()` be argumentų), o „sargas visada tikrina
+ * globalą" reikštų, kad testo perduotas `env` nieko nebereiškia. Riba užrašyta,
+ * ne užglaistyta (AGENTS.md §14.1).
+ */
+function suAplinka(env, fn) {
+  const tikroji = process.env;
+  try {
+    process.env = env;
+    return fn();
+  } finally {
+    process.env = tikroji;
+  }
+}
+
+/** `null`, kai `pg` tokios konfigūracijos apskritai nepriimtų (pvz. `sslnegotiation=direct` be SSL). */
+function pgParametrai(nustatymai, env) {
+  if (!nustatymai) return null;
+  try {
+    return suAplinka(env, () => new ConnectionParameters(nustatymai));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * LAUKAS → KLASĖ. Klasė yra tai, KĄ skirtumas keičia, ne iš kur jis atėjo.
+ *
+ * ⚠️ NEŽINOMAS LAUKAS PATENKA Į `kita:<laukas>`, O NE IŠKRENTA. Jei `pg`
+ * minoras pridės naują iš aplinkos skaitomą parametrą, jis pasirodys klaidoje
+ * su savo vardu — garsiai. Numatytoji kryptis yra „reikšminga", nes tyliai
+ * praleistas naujas parametras ir yra tas gedimas, kurio ieškom.
+ */
+const LAUKU_KLASES = Object.freeze({
+  host: "taikinys",
+  port: "taikinys",
+  database: "taikinys",
+  isDomainSocket: "taikinys",
+  user: "kredencialai",
+  password: "kredencialai",
+  ssl: "saugumas",
+  sslnegotiation: "saugumas",
+  options: "sesija",
+  client_encoding: "sesija",
+  replication: "sesija",
+  binary: "sesija",
+});
+
+/**
+ * ⚠️ NEREIKŠMINGI — SĄMONINGAS SPRENDIMAS, NE PRALEIDIMAS.
+ *
+ * `application_name` (`PGAPPNAME`) keičia tik tai, kaip jungtis vadinasi
+ * `pg_stat_activity`; `connect_timeout` (`PGCONNECT_TIMEOUT`) yra operacinis
+ * parametras. Nė vienas nekeičia taikinio, kredencialų, saugumo ar sesijos
+ * namespace, tad startą stabdyti dėl jų reikštų drausti teisėtas konfigūracijas.
+ *
+ * ⚠️ KODĖL ČIA NĖRA `statement_timeout`, `query_timeout`, `lock_timeout`,
+ * `idle_in_transaction_session_timeout`, `fallback_application_name`: `pg` jiems
+ * paduoda `val(..., false)` (`connection-parameters.js:120-124`) — aplinkos
+ * kintamojo jie NETURI, tad skirtis dėl aplinkos negali IŠ VISO. Jų įrašymas
+ * teigtų patikrą, kurios nėra.
+ */
+const NEREIKSMINGI = Object.freeze(["application_name", "connect_timeout"]);
+
+/** `ssl` gali būti `false`, `true`, `"no-verify"` arba objektas — lyginama forma, ne tapatybė. */
+function palyginamaReiksme(reiksme) {
+  if (reiksme === null || reiksme === undefined) return "\u0000nera";
+  if (typeof reiksme === "object") return JSON.stringify(reiksme);
+  return String(reiksme);
+}
+
+/**
+ * KURIOS SEMANTIKOS KLASĖS SKIRIASI, kai greta `DATABASE_URL` veikia aplinka.
+ *
+ * Grąžina klasių VARDUS. Reikšmės lieka šios funkcijos viduje ir iš jos
+ * neišeina niekada — `password` yra viena iš lyginamų.
+ *
+ * ⚠️ TIKRINAMA TIK KAI YRA `DATABASE_URL`. Be jo antros interpretacijos nėra:
+ * `PG*` yra vienintelė forma, ir „skirtumas nuo DSN" jai neapibrėžtas.
+ */
+function jungtiesSemantikosSkirtumai(env = process.env) {
+  if (!env.DATABASE_URL) return [];
+
+  const nustatymai = { connectionString: env.DATABASE_URL };
+  const suAplinkos = pgParametrai(nustatymai, env);
+  const beAplinkos = pgParametrai(nustatymai, {});
+
+  /** Nepriimtinos konfigūracijos klaida yra ne dviprasmybė — ją praneša pats `pg` pool'o statyme. */
+  if (!suAplinkos || !beAplinkos) return [];
+
+  const laukai = new Set([...Object.keys(suAplinkos), ...Object.keys(beAplinkos), "password"]);
+  const klases = new Set();
+
+  for (const laukas of laukai) {
+    if (NEREIKSMINGI.includes(laukas)) continue;
+    if (palyginamaReiksme(suAplinkos[laukas]) === palyginamaReiksme(beAplinkos[laukas])) continue;
+    klases.add(LAUKU_KLASES[laukas] || `kita:${laukas}`);
+  }
+
+  return [...klases].sort();
+}
+
 function arDviprasmiskaKonfiguracija(env = process.env) {
-  return Boolean(env.DATABASE_URL && env.PGHOST);
+  return jungtiesSemantikosSkirtumai(env).length > 0;
 }
 
 /**
@@ -157,21 +313,46 @@ function normalizuotiHosta(host) {
  * `options` duos NESUTAPIMĄ. Tai fail-closed kryptis, ir ji sąmoninga.
  */
 function efektyvusJungtiesParametrai(nustatymai, env = process.env) {
-  if (!nustatymai) return null;
+  const p = pgParametrai(nustatymai, env);
+  if (!p) return null;
 
-  const parsed = nustatymai.connectionString
-    ? parseDsn(nustatymai.connectionString)
-    : nustatymai;
+  let nurodyta;
+  try {
+    const parsed = nustatymai.connectionString ? parseDsn(nustatymai.connectionString) : nustatymai;
+    /**
+     * ⚠️ „AR TAPATYBĖ APSKRITAI YRA" — SĄMONINGAI SIAURIAU UŽ `pg`.
+     *
+     * `pg` bazės vardui turi dar vieną atsargą: `defaults.user`, t. y. OPERACINĖS
+     * SISTEMOS naudotojo vardas (`defaults.js:5`). Jos čia NEPAISOMA: paveldėjus
+     * OS naudotoją būtų sukurta tapatybė ten, kur operatorius bazės neįvardijo, ir
+     * DR palyginimas gautų ką lyginti vietoj to, kad kristų fail-closed.
+     */
+    nurodyta = Boolean(parsed.database || env.PGDATABASE || parsed.user || env.PGUSER);
+  } catch {
+    return null;
+  }
+  if (!nurodyta) return null;
 
-  const vartotojas = parsed.user || env.PGUSER || undefined;
-  const host = normalizuotiHosta(parsed.host || env.PGHOST || "localhost");
-  const port = String(parsed.port || env.PGPORT || "5432");
-  const database = String(parsed.database || env.PGDATABASE || vartotojas || "");
-  const options = String(parsed.options || env.PGOPTIONS || "");
+  const host = normalizuotiHosta(p.host);
+  if (!host || !p.database) return null;
 
-  if (!host || !database) return null;
-
-  return { host, port, database, options };
+  /**
+   * ⚠️ RODOMA TAPATYBĖ YRA SIAURESNĖ UŽ PALYGINIMO RINKINĮ (#245).
+   *
+   * `pgParametrai()` turi `user`, `password`, `ssl`, `sslnegotiation` ir kitus —
+   * jie reikalingi konfliktui NUSTATYTI. Grąžinami tik tie keturi laukai, kuriuos
+   * saugu rodyti: šis objektas keliauja į `tapatybesTekstas()`, o iš ten į klaidų
+   * tekstus, logus ir testų snapshot'us.
+   *
+   * Išplėtus ŠĮ objektą kredencialais, slaptažodis ten patektų savaime. Todėl
+   * rinkiniai atskirti, o ne vienas objektas plečiamas abiem tikslams.
+   */
+  return {
+    host,
+    port: String(p.port),
+    database: String(p.database),
+    options: String(p.options || ""),
+  };
 }
 
 /**
@@ -228,13 +409,9 @@ function arTaPatiBaze(url, env = process.env) {
    * ⚠️ DVIPRASMYBĖ TIKRINAMA PIRMA. Su abiem formomis prioritetas priklauso nuo
    * to, kas konstruoja pool'ą, tad „ta pati bazė?" atsakymo apskritai neturi.
    */
-  if (arDviprasmiskaKonfiguracija(env)) {
-    throw new PgConnectionError(
-      "Aplinkoje nustatyti IR `DATABASE_URL`, IR `PG*` - neaišku, į kurią bazę " +
-        "bus jungiamasi. Palikite VIENĄ formą (tas pats reikalavimas kaip " +
-        "`AUDIT_BACKEND=postgres` atveju).",
-      "PG_CONNECTION_AMBIGUOUS"
-    );
+  const skirtumai = jungtiesSemantikosSkirtumai(env);
+  if (skirtumai.length > 0) {
+    throw new PgConnectionError(dviprasmybesTekstas(skirtumai), "PG_CONNECTION_AMBIGUOUS");
   }
 
   /**
@@ -277,8 +454,30 @@ async function tapatiBaze(klientasA, klientasB) {
   };
 }
 
+/**
+ * KLAIDOS TEKSTAS — TIK KLASĖS, NIEKADA REIKŠMĖS (#245).
+ *
+ * ⚠️ Įvardyti, pavyzdžiui, „user=prod vs user=restore" būtų patogu, bet
+ * `kredencialai` klasė apima ir `password`. Vienas neatsargus formatavimas
+ * nuvestų slaptažodį į klaidos tekstą, logus ir testų snapshot'us — todėl
+ * reikšmių čia nėra IŠ VISO, o ne „nėra slaptažodžio".
+ */
+function dviprasmybesTekstas(skirtumai) {
+  return (
+    "Aplinkoje `DATABASE_URL` ir `PG*` duoda SKIRTINGĄ efektyvią jungties " +
+    `semantiką (${skirtumai.join(", ")}) - neaišku, į kurią bazę bus jungiamasi. ` +
+    "Palikite VIENĄ formą arba suderinkite reikšmes. " +
+    "Vien `PG*` buvimas greta `DATABASE_URL` klaida NĖRA: tikrinama, ar jie keičia " +
+    "taikinį, kredencialus, SSL ar sesijos semantiką."
+  );
+}
+
 module.exports = {
   pgJungtiesNustatymai,
+  jungtiesSemantikosSkirtumai,
+  dviprasmybesTekstas,
+  LAUKU_KLASES,
+  NEREIKSMINGI,
   arNurodytaPostgres,
   tapatiBaze,
   PgConnectionError,
