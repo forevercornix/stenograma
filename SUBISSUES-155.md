@@ -6,6 +6,30 @@ Formatas: `## [7.x] Pavadinimas`, tada body iki kito `##`.
 
 ---
 
+## Skersiniai pataisymai (ne sub-PR)
+
+⚠️ **ANTRAŠTĖ SĄMONINGAI BE `[7.x]`.** `scripts/dev/create-155-subissues.sh`
+sekcijas atpažįsta pagal `^## \[\d+\.\d+[a-z]?\]`, o kiekvieną kitą `## [`
+antraštę laiko KLAIDA ir nutrūksta. Šie darbai turi savo GitHub issue, tad
+sekcija su `## [` juos arba dubliuotų, arba sulaužytų generatorių.
+
+Čia registruojami pataisymai, apimantys kelis 7.x etapus vienu metu.
+
+| Issue | Apimtis | Paliesti etapai |
+|---|---|---|
+| #245 | Viena PostgreSQL jungties formos semantika keturiems pool'ams: `DATABASE_URL` ir `PG*` interpretuojami vienodai, dviprasmybės sargas perrašytas iš **intento** (`DATABASE_URL && PGHOST`) į **efektą** (ar aplinka keičia taikinį, kredencialus, SSL ar sesijos namespace) | 7.2a, 7.3, 7.4b, 7.4e, 7.5a |
+
+⚠️ **#245 NEKEIČIA nė vieno komponento backend pasirinkimo politikos.** `PG*`
+buvimas savaime nieko neperjungia į PostgreSQL; aktyvavimo barjeras
+(`POSTGRES_AKTYVAVIMAS_LEISTAS`) nepaliestas. Suvienodinta tik jungties FORMOS
+interpretacija ten, kur komponentas pagal savo politiką PostgreSQL jau pasirinko.
+
+⚠️ **Laužantis konfigūracijos pokytis.** Mišrios konfigūracijos, kuriose `PG*`
+pakeičia `DATABASE_URL` efektyvią semantiką, nuo #245 **stabdo startą**. Žr.
+`CHANGELOG.md` „Unreleased" ir `docs/audit-storage.md`.
+
+---
+
 ## [7.0] ADR: PostgreSQL autoritetas ir konsistencijos modelis
 
 **Tėvinis:** #155 · **Tipas:** dokumentacija · **Blokuoja:** 7.1–7.6

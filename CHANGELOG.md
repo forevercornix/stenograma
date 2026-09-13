@@ -12,6 +12,40 @@ ji pasensta ir tampa klaidinanti.
 
 ### ⚠️ Destruktyvūs pokyčiai
 
+- **`DATABASE_URL` ir `PG*` kartu: startas stabdomas pagal EFEKTĄ, ne pagal formų
+  maišymą** (#245).
+
+  ⚠️ **Tai ankstesnio sprendimo ATŠAUKIMAS ir laužantis konfigūracijos pokytis
+  abiem kryptimis.**
+
+  **Atlaisvinta.** Iki šio leidimo `DATABASE_URL` kartu su `PGHOST` nutraukdavo
+  startą **savaime** (auditas, `startupChecks`, DR keliai). Su pilnu DSN `PGHOST`
+  `pg` semantikai neturi jokios įtakos, tad krisdavo ir visiškai vienareikšmės
+  konfigūracijos. Dokumentuotame Compose diegime (`PG*`) tai reiškė, kad
+  persistencijos įjungti apskritai nebuvo kaip: pridėjus `DATABASE_URL` krisdavo
+  ši patikra.
+
+  **Sugriežtinta.** Nuo šiol startas nutrūksta, kai aplinka pakeičia
+  `DATABASE_URL` apibrėžtą **efektyvią** jungties semantiką — taikinį
+  (`host`/`port`/`database`), kredencialus (`user`/`password`), SSL arba DB
+  sesijos namespace (`options`, `client_encoding`). Šių atvejų senoji taisyklė
+  **nematė**, nors `PGSSLMODE` ir `PGOPTIONS` pilną DSN realiai perrašo.
+
+  Konkrečiai nustos startuoti: pusiau užpildytas DSN, kurį papildo aplinka (pvz.
+  DSN be porto plius `PGPORT`), ir pilnas DSN su `PGSSLMODE`, `PGOPTIONS` ar
+  `PGCLIENT_ENCODING`. `PGAPPNAME` ir `PGCONNECT_TIMEOUT` konflikto **nesukuria**.
+
+  **Prieš atnaujinant:** palikite VIENĄ jungties formą. Tai ir yra rekomendacija
+  operatoriui — techninis invariantas nėra „abi formos niekada negali būti
+  kartu", bet viena forma yra paprasčiausia ir mažiausiai dviprasmiška praktika.
+  Klaidos tekstas įvardija **klasę** (`taikinys`, `kredencialai`, `saugumas`,
+  `sesija`), niekada reikšmes — slaptažodis į klaidas, logus ir diagnostiką
+  nepatenka.
+
+  `PG*`-only diegimuose migracijas leiskite tiesiogiai su esamais kintamaisiais;
+  `docs/migrations.md` rekomendacija „laikinai nurodyti `DATABASE_URL`"
+  **pašalinta** (`node-pg-migrate@9.0.0` `PG*` moka pats).
+
 - **Audito retencija dabar galioja ir PostgreSQL režimui** (#213, 7.4d).
   `AUDIT_RETENTION_DAYS` anksčiau veikė tik atminties žurnalui; nuo šio leidimo
   centralizuotas sweep'as **fiziškai šalina** senesnes `audit_log` eilutes,
@@ -35,6 +69,18 @@ ji pasensta ir tampa klaidinanti.
   senesnė replika gali įrašyti eilutę po to, kai naujoji jau išvalė lentelę.
 
 ### Changed
+
+- **Visi keturi PostgreSQL pool'ai ir diagnostinis klientas jungtį sudaro per
+  `utils/pgConnection.js`** (#245). `jobStore`, `sessionStore`, `auditStore`,
+  ištrynimo žymos ir `make doctor` / `/api/health/deep` zondas tą pačią aplinką
+  nuo šiol interpretuoja vienodai. Iki tol `jobStore` ir `sessionStore` pool'ai
+  mokėjo tik `DATABASE_URL`, o `PG*` diegime gaudavo `connectionString:
+  undefined` ir tyliai jungdavosi prie `pg` numatytosios bazės.
+
+- **`JOB_STORE_BACKEND=postgres` ir `SESSION_STORE_BACKEND=postgres` priima ir
+  `PG*` formą** (#245). Reikalavimas buvo būtent `DATABASE_URL`. Komponentų
+  backend pasirinkimo politika **nesikeičia**: `PG*` buvimas savaime nieko
+  neperjungia į PostgreSQL, o `#155` aktyvavimo barjeras lieka nepaliestas.
 
 - ⚠️ **Retencija nuo šiol palieka ištrynimo žymą** (#183, 7.5a). Pasenusių job'ų
   šalinimas ėjo bendru `sweepExpired()` be jokio barjero, ir

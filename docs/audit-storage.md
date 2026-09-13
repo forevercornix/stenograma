@@ -44,12 +44,25 @@ Compose profiliai naudoja `PG*` **sąmoningai**: slaptažodis su URI simboliais
 (`/`, `?`, `#`, `@`) sukonstruotame URL reikštų kitką arba jį sugadintų. `pg`
 `PG*` skaito be jokio kodavimo.
 
-⚠️ **ABU KARTU — KLAIDA, ne pirmenybė.** `AUDIT_BACKEND=postgres` su abiem
-nustatytais **nutraukia startą**. Priežastis: pool'as teiktų pirmenybę
-`DATABASE_URL`, o operatorius, matantis Compose `PG*`, pagrįstai manytų kitaip —
-ir auditas rašytųsi į kitą duomenų bazę, nei atrodo. Auditas yra būtent ta
-lentelė, apie kurią klausiama po incidento, tad „į kurią DB jis rašė" negali
-priklausyti nuo tylios pirmenybės.
+⚠️ **ABU KARTU — KLAIDA TIK TADA, KAI JIE SKIRIASI (#245).** `AUDIT_BACKEND=postgres`
+su abiem nustatytais **nutraukia startą tik tada**, kai aplinka pakeičia
+efektyvią jungties semantiką, kurią apibrėžia `DATABASE_URL`: taikinį
+(`host`/`port`/`database`), kredencialus, SSL arba DB sesijos namespace
+(`options`, `client_encoding`).
+
+Priežastis, kodėl taisyklė nebėra „bet koks maišymas": su **pilnu** DSN `PGHOST`
+`pg` semantikai neturi jokios įtakos — `pg` ima DSN reikšmę pirma. Senoji
+taisyklė krisdavo ten, kur dviprasmybės nebuvo, ir tuo pačiu **nematė**
+`PGSSLMODE` ar `PGOPTIONS`, kurie pilną DSN realiai perrašo. `-csearch_path=…`
+reiškia kitą schemą — t. y. tiksliai tą „auditas kitoje vietoje" atvejį, kurio ji
+ir siekė neleisti.
+
+⚠️ **Operatoriui vis tiek rekomenduojama viena forma.** Tai paprasčiausia ir
+mažiausiai dviprasmiška eksploatacinė praktika — bet tai rekomendacija, ne tai,
+ką tikrina kodas.
+
+Auditas yra būtent ta lentelė, apie kurią klausiama po incidento, tad „į kurią DB
+jis rašė" negali priklausyti nuo tylios pirmenybės.
 
 ⚠️ Įterptiniams kvietėjams: `init(env)` perduoti `PG*` **persiunčiami** į pool'ą,
 o ne paliekami `pg` skaityti iš `process.env` — kitaip konfigūracija būtų priimta
