@@ -1,3 +1,5 @@
+const { arNurodytaPostgres } = require("../pgConnection");
+
 /**
  * BACKEND'O PARINKIMO POLITIKA (#155, 7.2a).
  *
@@ -118,9 +120,19 @@ function resolveBackendChoice(env = process.env) {
           "backend'as negali tyliai virsti atmintimi - job'ai dingtų po restarto."
       );
     }
-    if (eksplicitinis === "postgres" && !env.DATABASE_URL) {
+    /**
+     * ⚠️ „POSTGRES NURODYTAS" SPRENDŽIA `pgConnection`, NE ŠI VIETA (#245).
+     *
+     * Iki šito reikalauta būtent `DATABASE_URL`. Dokumentuotame Compose diegime
+     * jo NĖRA — ten `PG*` — tad eksplicitinis persistencijos prašymas krisdavo
+     * su pranešimu apie kintamąjį, kurio diegimas net nenaudoja. Antra to paties
+     * pasekmė buvo blogesnė: pasirinkti persistenciją tame diegime būdavo
+     * NEĮMANOMA, o pridėjus `DATABASE_URL` krisdavo audito `PGHOST` konfliktas.
+     */
+    if (eksplicitinis === "postgres" && !arNurodytaPostgres(env)) {
       throw new Error(
-        "JOB_STORE_BACKEND=postgres, bet DATABASE_URL nenustatytas."
+        "JOB_STORE_BACKEND=postgres, bet jungtis nenurodyta: reikia arba " +
+          "DATABASE_URL, arba PGHOST (su PG* rinkiniu)."
       );
     }
 

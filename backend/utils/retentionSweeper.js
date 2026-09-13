@@ -327,8 +327,9 @@ async function _valytiRezultatoBandymus() {
    * užklausa skaito tuščią `erasure_marks` šalia `job_result_attempts`, ir žymų šaka
    * tyliai negina NIEKO. Būtent ta apsauga yra sąlygos 3a esmė.
    *
-   * #245 ta pačią klaidą jau ištaisė kitoje vietoje: `arDviprasmiskaKonfiguracija` buvo
-   * perrašyta iš vardų palyginimo į EFEKTYVIŲ PARAMETRŲ palyginimą, ir
+   * #245 tą pačią klaidą ištaisė kitoje vietoje: `arDviprasmiskaKonfiguracija` buvo
+   * perrašyta iš env kintamųjų BUVIMO (`DATABASE_URL && PGHOST`) į EFEKTYVIŲ
+   * PARAMETRŲ palyginimą, ir
    * `jungtiesTapatybe()` egzistuoja kaip tik šiam klausimui. Čia jis panaudojamas
    * tiesiogiai.
    */

@@ -1,3 +1,5 @@
+const { arNurodytaPostgres } = require("../pgConnection");
+
 /**
  * SESIJŲ BACKEND'O PARINKIMAS (#155, 7.3).
  *
@@ -29,7 +31,7 @@ const ALLOWED_SESSION_BACKENDS = Object.freeze(["memory", "postgres"]);
 
 /**
  * @returns {"memory"|"postgres"}
- * @throws {Error} nežinomai reikšmei arba `postgres` be `DATABASE_URL`.
+ * @throws {Error} nežinomai reikšmei arba `postgres` be nurodyto PostgreSQL (#245).
  */
 function resolveSessionBackend(env = process.env) {
   const eksplicitinis = (env.SESSION_STORE_BACKEND || "").trim();
@@ -52,9 +54,19 @@ function resolveSessionBackend(env = process.env) {
    * neveiktų - t. y. globali revokacija, dėl kurios visa tai daroma, būtų
    * dingusi be jokio pranešimo.
    */
-  if (eksplicitinis === "postgres" && !env.DATABASE_URL) {
+  /**
+   * ⚠️ „POSTGRES NURODYTAS" SPRENDŽIA `pgConnection`, NE ŠI VIETA (#245).
+   *
+   * Iki šito reikalauta būtent `DATABASE_URL`. Dokumentuotame Compose diegime
+   * jo NĖRA — ten `PG*` — tad eksplicitinis persistencijos prašymas krisdavo
+   * su pranešimu apie kintamąjį, kurio diegimas net nenaudoja. Antra to paties
+   * pasekmė buvo blogesnė: pasirinkti persistenciją tame diegime būdavo
+   * NEĮMANOMA, o pridėjus `DATABASE_URL` krisdavo audito `PGHOST` konfliktas.
+   */
+  if (eksplicitinis === "postgres" && !arNurodytaPostgres(env)) {
     throw new Error(
-      "SESSION_STORE_BACKEND=postgres, bet DATABASE_URL nenustatytas. " +
+      "SESSION_STORE_BACKEND=postgres, bet jungtis nenurodyta: reikia arba " +
+        "DATABASE_URL, arba PGHOST (su PG* rinkiniu). " +
         "Eksplicitinis backend'as negali tyliai virsti atmintimi - globali " +
         "revokacija ir sesijų išlikimas po restarto dingtų be įspėjimo."
     );
