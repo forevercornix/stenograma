@@ -121,6 +121,10 @@ const privacy = [
    */
   "erasureMarks",
   "revivalHorizons",
+  /** #342: starto užklausų ribos — fail-never režimas. Be DB. */
+  "startPoolTimeouts",
+  /** #342: cutover 5b blokas vykdomas su stub'intu `redis-cli`. Be Redis. */
+  "cutoverPreflight",
   "observabilityEvents.route",
 ];
 
@@ -417,6 +421,14 @@ const functional = [
    * atsisakymas PRIEŠ jungtį), nes būtent jos saugo nuo neteisingo paleidimo.
    */
   "cutoverTerminalize",
+  /**
+   * #155: informacinė eilutė „PostgreSQL sukonfigūruotas, job'ai atmintyje".
+   *
+   * Rašoma PRIEŠ barjerą, ne po jo — ta pati priežastis kaip #157 PR-7
+   * pradžioje: stebėtojas prieš stebimą dalyką. Po eksplicitinio pasirinkimo
+   * įvedimo ši būsena taps DAŽNA, tad jos tekstas ir sanitizacija tikrinami.
+   */
+  "jobStoreBackendInfo",
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */

@@ -226,13 +226,31 @@ test("7.6b: suderinimas revokuoja sesijas ir terminalizuoja job'us", { skip: pra
 
       /**
        * ⚠️ AŠIŲ VERDIKTAI (#280 P1). Sesijos — `suderinta` (autoritetas
-       * PostgreSQL); job'ai — `nereikalinga`, nes 7.2a barjeras palieka jų gyvą
-       * autoritetą atmintyje. Darbas bazėje atliktas abiem, bet verdiktas sako
-       * TIESĄ apie tai, ką suderinimas realiai užtikrina.
+       * PostgreSQL); job'ai — `nereikalinga`, nes be eksplicitinio
+       * `JOB_STORE_BACKEND` jų gyvas autoritetas lieka atmintyje. Darbas bazėje
+       * atliktas abiem, bet verdiktas sako TIESĄ apie tai, ką suderinimas
+       * realiai užtikrina.
+       *
+       * ⚠️ ANKSČIAU ČIA BUVO `assert.equal(...jobai.barjeras, true)` (#155).
+       *
+       * Ji gynė tikrą dalyką — operatorius mato PRIEŽASTĮ — bet per netiesioginį
+       * laidą: kol job'ų autoritetas galėjo nebūti PostgreSQL TIK dėl barjero,
+       * vėliavos pakako. Atidarius barjerą `barjeras` tapo `false` VISIEMS
+       * keliams, tad asercija būtų tikrinusi lauką, kurio reikšmė nuo šiol
+       * nekinta, o komentaras toliau kalbėtų apie barjerą, kurio nebėra.
+       *
+       * ⚠️ IR TAI NE TAS PATS, KĄ TIKRINA `postRestoreReconcileContract`. Ten
+       * matuojama `nustatytiAsis()` — gryna funkcija. Čia — kad priežastis
+       * PEREINA per tikrą komandą prieš tikrą bazę ir pasiekia operatorių tame
+       * pačiame objekte, kurį jis mato po atkūrimo.
        */
       assert.equal(r.asys.sesijos.verdiktas, "suderinta");
       assert.equal(r.asys.sesijos.autoritetas, "postgres");
-      assert.equal(r.asys.jobai.barjeras, true, "barjeras privalo būti matomas, ne numanomas");
+      assert.equal(
+        r.asys.jobai.priezastis,
+        "numatyta",
+        "operatorius privalo matyti, KODĖL job'ų autoritetas nėra PostgreSQL"
+      );
       assert.equal(r.asys.jobai.verdiktas, "nereikalinga");
 
       /**
@@ -431,8 +449,18 @@ test("#280 IV: konfigūracijos klaida NEPALIEKA įsipareigoto darbo", { skip: pr
   /**
    * ⚠️ TIKRINAMA BŪSENA, NE TVARKA.
    *
-   * Kol ašys buvo nustatomos PO `COMMIT`, `JOB_STORE_BACKEND=postgres` su
-   * uždarytu 7.2a barjeru duodavo: sesijos revokuotos, job'ai terminalizuoti,
+   * ⚠️ SCENARIJUS PAKEISTAS ATIDARIUS BARJERĄ (#155), GARANTIJA — NE.
+   *
+   * Iki tol „konfigūracijos klaida" čia buvo `JOB_STORE_BACKEND=postgres` su
+   * uždarytu barjeru. Po atidarymo tas derinys yra TEISĖTA konfigūracija, tad
+   * testas būtų matavęs nebe klaidos kelią, o jo nebuvimą. Vietoj jo imamas
+   * klaidos atvejis, kurį #280 II raundas įvardijo kaip pavojingiausią:
+   * kintamasis, NEPERDUOTAS į atkūrimo aplinką (`JOB_STORE_BACKEND=redis` be
+   * `REDIS_URL`). Ta pati funkcija, ta pati vieta, tas pats momentas prieš
+   * pirmą mutaciją — tik priežastis kita.
+   *
+   * Kol ašys buvo nustatomos PO `COMMIT`, tokia klaida duodavo: sesijos
+   * revokuotos, job'ai terminalizuoti,
    * `ROLLBACK` per vėlu, `POST_RESTORE_RECONCILED` neįrašytas, exit 2 —
    * ĮSIPAREIGOTOS, NEAUDITUOTOS mutacijos, pranešamos kaip nesėkmė. Operatorius
    * tokioje būsenoje arba kartotų komandą, arba laikytų atkūrimą neįvykusiu.
@@ -461,9 +489,9 @@ test("#280 IV: konfigūracijos klaida NEPALIEKA įsipareigoto darbo", { skip: pr
           reconcile.suderinti({
             targetUrl: SUDERINIMO_URL,
             actor: "operatorius-testas",
-            env: { ...process.env, JOB_STORE_BACKEND: "postgres" },
+            env: { ...process.env, JOB_STORE_BACKEND: "redis", REDIS_URL: "" },
           }),
-        /JOB_STORE_BACKEND=postgres dar neleidžiamas/
+        /JOB_STORE_BACKEND=redis, bet REDIS_URL nenustatytas/
       );
 
       assert.deepEqual(await busena(SUDERINIMO_URL), pries, "konfigūracijos klaida negali palikti pakeitimų");

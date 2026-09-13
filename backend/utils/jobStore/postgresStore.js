@@ -16,10 +16,13 @@ const {
 /**
  * PostgreSQL job store backend'as (#155, 7.2a) — TREČIAS backend'as.
  *
- * ⚠️ ŠIS FAILAS NEĮJUNGIA PostgreSQL. Backend'o parinkimą ir aktyvavimo barjerą
- * valdo `index.js`; žr. `docs/decisions/155-postgres-authority.md` skyrių
- * „AKTYVAVIMO BARJERAS". Iki 7.5a/7.5b/7.6 prielaidų PostgreSQL naudojamas TIK
- * integraciniuose ir kontraktų testuose.
+ * ⚠️ ŠIS FAILAS NEĮJUNGIA PostgreSQL. Backend'o parinkimą valdo `index.js`;
+ * žr. `docs/decisions/155-postgres-authority.md`.
+ *
+ * ⚠️ ANKSTESNĖ EILUTĖ SAKĖ „naudojamas TIK integraciniuose ir kontraktų testuose" —
+ * tai nustojo galioti (#155): aktyvavimo barjeras atidarytas, tad diegimas su
+ * `JOB_STORE_BACKEND=postgres` šį failą paleidžia PRODUKCIJOJE. Ribos ir kontraktas
+ * žemiau nepasikeitė; pasikeitė tai, kad juos dabar tikrina ne vien testai.
  *
  * KONTRAKTAS — 15 metodų, ne 12. Fasadas besąlygiškai kviečia `getOwned()`
  * nuosavybės skaitymui, `restoreRecord()` atkūrimui ir `size()` diagnostikai;

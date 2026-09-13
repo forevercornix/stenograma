@@ -1440,7 +1440,7 @@ septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** j
 
 | # | Sąlyga | Kur priimta | Būsena kode | Priklauso nuo | Kas ir kada pamatys, kad suveikė |
 |---|---|---|---|---|---|
-| 1 | **Aktyvavimo barjeras** — atidaromas TIK uždarius prielaidas; **NE PR-7, o atskiras #155 apimties PR** | ADR `155-postgres-authority.md` §„AKTYVAVIMO BARJERAS"; plano DoD | `backendSelection.js:55` = `false` | 9, 10 | ADR prielaidų lentelė; `selectBackend()` grąžina `barjeras: true` |
+| 1 | **Aktyvavimo barjeras** — atidarytas ATSKIRU #155 apimties PR | ADR `155-postgres-authority.md` §„BARJERAS ATIDARYTAS" | ✅ **ATIDARYTAS** — `backendSelection.js` = `true` | 9, 10 | `selectBackend()` grąžina `barjeras: false` visiems; `POLITIKA (1/2)` ir `(2/2)` pora `jobStoreBackendSelection` |
 | 2 | **Sargo SUSIAURINIMAS — paskutinis commit'as** (§12.1: buvo „pašalinimas"; matavimas parodė, kad dalis jo vis dar reikalinga) | body §8; ši sekcija | susiaurintas iki vienintelio teisingo atvejo — external eilutė be prijungtos rašymo saugyklos | **—** | `git log` peržiūroje. ⚠️ Pažodinis trynimas būtų grąžinęs `COMPLETED_WITHOUT_RESULT` ir atidaręs orphan'ų kelią per remonto semantiką |
 | 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | ✅ **PRIJUNGTA** (`jobStore/index.js`, `paruostiArtefaktuSaugykla()`); stebėtojas `artifactStore/prijungimoBusena.js` | **1** | `doctor` ir `/api/health/deep` varnelė „Artefaktų saugyklų prijungimas (startas)": lygina PARINKTA (`ARTIFACT_STORE_BACKEND`) ↔ PRIJUNGTA (rezolveris) ↔ REIKALINGA (`job_results` + `job_result_attempts` tipai). Verdikto pavirtimas iš `rasymas_neprijungtas` į žalią išmatuotas VIENAME teste (`jobStoreArtefaktuPrijungimas.integration`) |
 | 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
@@ -1482,7 +1482,7 @@ Sprendimu jis tampa tik jas uždarius.
 
 | # | Sąlyga | Kur priimta | Būsena | Kas pamatys |
 |---|---|---|---|---|
-| 10 | **Fail-closed startas patikrintas REALIAI** — **kartu su atidarymu, atskirame #155 PR** | ADR barjero lentelė | įrodyta tik unit lygmeniu (`_initializePostgresForTests`) | CI žingsnis: startas su neprieinama DB ir ATIDARYTU barjeru privalo kristi, ne nusileisti į atmintį |
+| 10 | **Fail-closed startas patikrintas REALIAI** — **kartu su atidarymu, atskirame #155 PR** | ADR barjero lentelė | ✅ **UŽDARYTA** — CI žingsnis „Fail-closed startas" (`ci.yml`, `backend` job) | — | Tikras `node server.js`, `JOB_STORE_BACKEND=postgres`, uždaras prievadas 59999. Trys asercijos: procesas nutraukė startą; priežastis — `PostgreSQL neprieinamas`; job store NEBUVO inicijuotas. ⚠️ Exit kodo nepakanka: su uždarytu barjeru startas krenta irgi, tik kita priežastimi |
 
 ⚠️ **KODĖL SĄLYGA 10 NEGALI BŪTI ANKSČIAU — TAI NE PLANAVIMO PASIRINKIMAS.**
 
@@ -1848,7 +1848,7 @@ visada-„fail" ir taip pat nieko neįrodytų.
 
 | Kriterijus | Kodėl | Kas jį uždarytų |
 |---|---|---|
-| Visi `postgresStore` keliai | Barjeras uždarytas; `DATABASE_URL` vietoje nėra | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
+| Visi `postgresStore` keliai | `DATABASE_URL` vietoje nėra. ⚠️ **Antroji priežastis („barjeras uždarytas") PASIBAIGĖ (#155)** — liko tik ši viena | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
 | `S3ArtifactStore` | Reikia MinIO | `docker compose -f docker-compose.minio.yml up -d && REQUIRE_MINIO=1 npm run test:s3` |
 | I/O ne po užraktu | Reikia dviejų tikrų jungčių | tas pats `test:postgres` |
 | Lenktynių testas | Vienas žalias paleidimas nieko neįrodo | N kartojimų CI; verdiktas „nepaneigta" |

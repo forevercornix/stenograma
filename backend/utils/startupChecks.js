@@ -575,6 +575,51 @@ async function runSelfChecks(env = process.env) {
     /** `jobStore` gali būti neįkeltas — tai ne gedimas, tas pats kaip aukščiau. */
   }
 
+  /**
+   * POSTGRESQL SUKONFIGŪRUOTAS, BET JOB METADUOMENYS ATMINTYJE (#155).
+   *
+   * ⚠️ INFORMACINĖ EILUTĖ, NE GEDIMAS — IR TAI SĄMONINGA.
+   *
+   * Po eksplicitinio pasirinkimo įvedimo `DATABASE_URL` vienas job metaduomenų
+   * NEBEPERJUNGIA. Diegimas, nustatęs jį sesijoms, auditui ar migracijoms, veikia
+   * TEISINGAI — tik jo job'ai gyvena atmintyje ir dingsta per restartą.
+   *
+   * Tai ne `degraded` ir ne 503: procesas daro tiksliai tai, ko konfigūracija
+   * prašo. Bet operatorius, matęs `DATABASE_URL`, gali manyti kitaip — ir
+   * sužinotų tik po restarto, kai job'ai dingtų.
+   *
+   * ⚠️ RAŠOMA ČIA, NES ČIA MATO IR `doctor`, IR `/api/health/deep`. Ta pati vieta
+   * ir ta pati priežastis kaip eilės preflight (#155) bei artefaktų saugyklų
+   * prijungimas (#157, PR-7).
+   *
+   * ⚠️ `/api/ready` NEPAPILDYTAS: jo kontraktas reikalauja loginių būsenų be
+   * infrastruktūros detalių, o „kuris backend'as pasirinktas" yra tokia detalė.
+   *
+   * ⚠️ SANITIZACIJA — KONSTRUKCIJA, NE VALYMAS (#319 pamoka). Eilutė neša TIK
+   * backend'o vardą ir kintamojo VARDĄ; nei DSN, nei host'o, nei kredencialų.
+   */
+  try {
+    const { arNurodytaPostgres } = require("./pgConnection");
+    const jobStore = require("./jobStore");
+    const backendas = jobStore.getBackend && jobStore.getBackend();
+
+    if (arNurodytaPostgres(env) && backendas === "memory") {
+      checks.push({
+        name: "Job metaduomenų saugykla",
+        /**
+         * ⚠️ `ok: true` — TAI NE NUOLAIDA. Raudona varnelė čia reikštų gedimą ten,
+         * kur jo nėra, ir po kelių kartų operatorius jos nebeskaitytų.
+         */
+        ok: true,
+        detail:
+          "PostgreSQL sukonfigūruotas, bet job metaduomenys saugomi ATMINTYJE ir " +
+          "dings per restartą. Persistencijai nustatykite `JOB_STORE_BACKEND=postgres`.",
+      });
+    }
+  } catch {
+    /** `jobStore` gali būti neįkeltas (pvz. `doctor` be starto) — tai ne gedimas. */
+  }
+
   return checks;
 }
 

@@ -272,4 +272,39 @@ async function nustatytiPrijungimoBusena(pool, pgStore, { env = process.env, isp
   }
 }
 
-module.exports = { RADINIAI, ivertintiPrijungima, nustatytiReikalingusTipus, nustatytiPrijungimoBusena };
+/**
+ * AR ŠIS VERDIKTAS PRIVALO SUSTABDYTI STARTĄ? (#342 Codex, P1)
+ *
+ * ⚠️ SKIRTUMAS, KURIS IKI ŠIOL BUVO SKAIČIUOJAMAS, BET NENAUDOJAMAS.
+ *
+ * Modulis nuo pat pradžių atskiria „nepavyko pažiūrėti" (`nezinoma`) nuo
+ * „pažiūrėjau, blogai" (`radiniai`). Startas tos skirties nepaisė: jis tylėjo
+ * abiem atvejais.
+ *
+ * | Zondo rezultatas | Ką reiškia | Startas |
+ * |---|---|---|
+ * | `nezinoma` | DIAGNOSTIKOS gedimas | nestabdomas |
+ * | patvirtintas `skaitymui_truksta` | FAKTAS APIE DUOMENIS | **stabdomas** |
+ *
+ * ⚠️ TAI TA PATI `NESAUGU` vs `nepavyko` SKIRTIS, KURIĄ ĮVEDĖ PR-5 — čia ji
+ * tiesiog dar nebuvo pritaikyta.
+ *
+ * ⚠️ STABDO TIK `skaitymui_truksta`, NE BET KURIS RADINYS. Kiti radiniai
+ * (`rasymas_ne_tas`, `rasymas_neprijungtas`, `konfiguracija_netinkama`) kalba apie
+ * RAŠYMO kelią; jis kris pats, garsiai ir su savo pranešimu. `skaitymui_truksta`
+ * skiriasi tuo, kad bazėje JAU YRA eilučių, kurių niekas nebemoka nei perskaityti,
+ * nei ištrinti — diegimas pakiltų, aptarnautų, o BDAR ištrynimas senų objektų
+ * nepasiektų. Tyliai.
+ */
+function arStabdytiStarta(verdiktas) {
+  if (!verdiktas || verdiktas.nezinoma) return false;
+  return (verdiktas.radiniai || []).includes(RADINIAI.SKAITYMUI_TRUKSTA);
+}
+
+module.exports = {
+  RADINIAI,
+  ivertintiPrijungima,
+  nustatytiReikalingusTipus,
+  nustatytiPrijungimoBusena,
+  arStabdytiStarta,
+};

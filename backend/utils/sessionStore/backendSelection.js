@@ -9,6 +9,10 @@
  * (globali revokacija, rolės snapshot'as, startinis suderinimas), o ne job
  * saugyklos pasekmė.
  *
+ * ⚠️ TAI NUSTOJO BŪTI PROGNOZE (#155). Barjeras atidarytas, ir sesijų režimas
+ * nepasikeitė nė viename diegime — būtent todėl, kad jungiklis atskiras. Atskyrimo
+ * kaina buvo vienas kintamasis; jo nauda išmatuota tą dieną, kai barjeras krito.
+ *
  * ⚠️ `DATABASE_URL` VIENAS SESIJŲ REŽIMO NEKEIČIA.
  *
  * Jis gali būti įvestas dėl migracijų, audito (7.4) ar bet kurios kitos #155

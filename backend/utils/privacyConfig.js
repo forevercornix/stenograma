@@ -1,5 +1,5 @@
 const { describeSelection, isExternal } = require("./providerPrivacy");
-const { isPersistentBackend } = require("./jobStore/backendSelection");
+const { isPersistentBackend, selectBackend } = require("./jobStore/backendSelection");
 const { probeRedactionComponent, isRedactionAvailable } = require("./redactionComponent");
 
 /**
@@ -85,13 +85,16 @@ function getPrivacyConfig(env = process.env) {
    * ⚠️ IŠVEDAMA IŠ FAKTINIO BACKEND'O, NE IŠ ENV KINTAMŲJŲ (#155, 7.2a).
    *
    * `Boolean(env.REDIS_URL || env.DATABASE_URL)` atrodo teisingai, bet MELUOJA:
-   * su `DATABASE_URL` be `REDIS_URL` aktyvavimo barjeras palieka job'us
-   * ATMINTYJE, o ši reikšmė būtų `true`. Operatorius pagrįstai manytų, kad
-   * job'ai išgyvens restartą, ir prarastų metaduomenis bei rezultatus.
+   * su `DATABASE_URL` be `REDIS_URL` job'ai lieka ATMINTYJE, o ši reikšmė būtų
+   * `true`. Operatorius pagrįstai manytų, kad job'ai išgyvens restartą, ir
+   * prarastų metaduomenis bei rezultatus.
    *
-   * Klausimas „ar job store persistentinis?" turi VIENĄ autoritetingą
-   * atsakymą - `jobStore/backendSelection.js`, tas pats, kuriuo remiasi ir
-   * pati inicijacija. Barjerą atidarius ši eilutė nesikeičia.
+   * ⚠️ PRIEŽASTIS PASIKEITĖ, IŠVADA — NE (#155). Iki barjero atidarymo job'us
+   * atmintyje palikdavo BARJERAS; dabar — tai, kad `postgres` renkamas TIK
+   * eksplicitiniu `JOB_STORE_BACKEND`. Ši eilutė nepasikeitė būtent todėl, kad
+   * ji niekada neklausė priežasties: klausimas „ar job store persistentinis?"
+   * turi VIENĄ autoritetingą atsakymą - `jobStore/backendSelection.js`, tas
+   * pats, kuriuo remiasi ir pati inicijacija.
    */
   const persistentRaw = env.PERSISTENT_STORAGE;
   const persistentExplicit = persistentRaw !== undefined && persistentRaw !== "";
@@ -206,10 +209,10 @@ function validatePrivacyConfig(env = process.env) {
   /**
    * ⚠️ NE `REDIS_URL || DATABASE_URL`.
    *
-   * Validacija privalo remtis tuo, kas REALIAI bus naudojama. Kol aktyvavimo
-   * barjeras uždarytas, vien `DATABASE_URL` patvarios saugyklos NEDUODA, tad
-   * `PERSISTENT_STORAGE=true` su juo vienu būtų būtent tas melas, kurį ši
-   * patikra turi gaudyti.
+   * Validacija privalo remtis tuo, kas REALIAI bus naudojama. Vien
+   * `DATABASE_URL` job'ams patvarios saugyklos NEDUODA (`postgres` renkamas tik
+   * eksplicitiškai, #155), tad `PERSISTENT_STORAGE=true` su juo vienu būtų
+   * būtent tas melas, kurį ši patikra turi gaudyti.
    */
   const persistentConfigured = isPersistentBackend(env);
 
@@ -238,14 +241,19 @@ function validatePrivacyConfig(env = process.env) {
      *
      * Su vienu `DATABASE_URL` bendrinis tekstas „nei REDIS_URL, nei
      * DATABASE_URL nenustatytas" yra NETIESA ir siūlo veiksmą, kuris
-     * nepadėtų: `DATABASE_URL` jau yra, o startas vis tiek kristų. Priežastis
-     * kita - aktyvavimo barjeras PostgreSQL dar neparenka.
+     * nepadėtų: `DATABASE_URL` jau yra, o startas vis tiek kristų.
+     *
+     * ⚠️ IR PATI PRIEŽASTIS PASIKEITĖ (#155). Iki barjero atidarymo ji buvo
+     * „PostgreSQL dar neaktyvuota"; po jo tai NETIESA — PostgreSQL aktyvuota,
+     * tik renkama eksplicitiškai. Sena žinutė operatorių siųsdavo kelti Redis,
+     * nors užtektų vieno kintamojo, o testas ją laikė ĮTVIRTINTĄ: jis tikrino
+     * `/aktyvavimo barjeras/`, tad po atidarymo liko ŽALIAS, gindamas melą.
      */
     errors.push(
       postgresConfigured
-        ? "PERSISTENT_STORAGE=true su DATABASE_URL, bet PostgreSQL job saugykla dar " +
-            "NEAKTYVUOTA (#155 aktyvavimo barjeras), tad jobų būsena lieka ATMINTYJE. " +
-            "Nustatykite REDIS_URL arba PERSISTENT_STORAGE=false."
+        ? "PERSISTENT_STORAGE=true su DATABASE_URL, bet job metaduomenys lieka ATMINTYJE: " +
+            "PostgreSQL job saugykla renkama TIK eksplicitiškai (#155). Nustatykite " +
+            "JOB_STORE_BACKEND=postgres, arba REDIS_URL, arba PERSISTENT_STORAGE=false."
         : "PERSISTENT_STORAGE=true, bet nei REDIS_URL, nei DATABASE_URL nenustatytas - be jų " +
             "jobų būsena lieka ATMINTYJE ir dingsta po restarto. Nustatykite vieną iš jų arba " +
             "PERSISTENT_STORAGE=false."
@@ -464,6 +472,26 @@ function assertRawAudioProviderAllowed(kind, name, env = null) {
  * Ką rodyti diagnostikoje (`GET /api/health`). Be paslapčių - tik efektyvios
  * nuostatos, kurias administratoriui reikia matyti.
  */
+/**
+ * ⚠️ DIAGNOSTIKA NEGALI KRISTI DĖL TO, KĄ TURI PARODYTI.
+ *
+ * `selectBackend()` meta prieštaringai sukonfigūruotai aplinkai (`JOB_STORE_BACKEND=redis`
+ * be `REDIS_URL` ir pan.). `getPrivacyConfig()` tą kelią jau turi, bet TIK kai
+ * `PERSISTENT_STORAGE` nenurodytas eksplicitiškai — tad su `PERSISTENT_STORAGE=true`
+ * ir bloga konfigūracija ši funkcija būtų įgijusi NAUJĄ kritimo kelią. Operatorius,
+ * atėjęs į diagnostiką išsiaiškinti gedimo, gautų gedimą vietoj atsakymo.
+ *
+ * Grąžinamas įvardytas nežinojimas, ne tyli numatytoji reikšmė: „memory" čia meluotų
+ * lygiai taip pat, kaip „redis" meluodavo PostgreSQL diegimui.
+ */
+function _jobStateBackend(env) {
+  try {
+    return selectBackend(env).norimas;
+  } catch {
+    return "nežinomas (konfigūracijos klaida)";
+  }
+}
+
 function describeForDiagnostics(env = process.env) {
   const config = getPrivacyConfig(env);
   const selection = describeSelection(env);
@@ -501,7 +529,22 @@ function describeForDiagnostics(env = process.env) {
     // Kur KONKREČIAI duomenys gyvena - be to administratorius negali patikrinti,
     // ar efemeriškas režimas tikrai efemeriškas.
     storage: {
-      jobState: config.persistentStorage ? "redis" : "memory",
+      /**
+       * ⚠️ IŠVEDAMA IŠ FAKTINIO BACKEND'O, NE IŠ `persistentStorage` (#155).
+       *
+       * Buvo `config.persistentStorage ? "redis" : "memory"`. Kol barjeras buvo
+       * uždarytas, tai buvo TEISINGA PAGAL KONSTRUKCIJĄ: persistentinis job
+       * store galėjo būti tik Redis. Atidarius barjerą diegimas su
+       * `JOB_STORE_BACKEND=postgres` gaudavo `jobState: "redis"` — t. y. šis
+       * laukas, kurio vienintelė paskirtis yra pasakyti, KUR duomenys gyvena,
+       * pradėjo rodyti ne tą saugyklą. GDPR atsakyme tai reikštų neteisingą
+       * duomenų vietą.
+       *
+       * ⚠️ `persistentStorage` VIS TIEK TIKRINAMAS PIRMAS: `PERSISTENT_STORAGE=false`
+       * job'us palieka atmintyje NEPRIKLAUSOMAI nuo to, kas sukonfigūruota
+       * (`jobStore/index.js` atmintį parenka PRIEŠ bet kokį backend'ą).
+       */
+      jobState: config.persistentStorage ? _jobStateBackend(env) : "memory",
       audit: "memory", // audito žurnalas šiame MVP visada tik atmintyje
       audio: "disk (trinamas po jobo pabaigos)",
     },

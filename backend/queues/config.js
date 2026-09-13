@@ -219,7 +219,9 @@ async function enqueue(queue, name, data, opts = {}) {
  * kristų — jau turint priimtą užklausą.
  *
  * ADR `155-postgres-authority.md` tai išvardija kaip vieną iš šešių aktyvavimo
- * barjero prielaidų, ir ji buvo vienintelė NEĮGYVENDINTA.
+ * barjero prielaidų, ir ji buvo paskutinė NEĮGYVENDINTA. ⚠️ Visos šešios įvykdytos,
+ * barjeras atidarytas (#155) — bet šis preflight nuo to nepriklauso ir nepasikeitė:
+ * jis atsako į klausimą apie EILĘ, ne apie metaduomenų backend'ą.
  *
  * ⚠️ VIENAS PROBE STARTUI IR READINESS'UI, NE DU.
  *

@@ -35,9 +35,10 @@ const ALLOWED_BACKENDS = Object.freeze(["postgres", "redis", "memory"]);
 /**
  * ⚠️ AKTYVAVIMO BARJERAS (ADR „AKTYVAVIMO BARJERAS").
  *
- * `postgresStore` yra ĮGYVENDINTAS, bet NEPARENKAMAS. ADR sako, kad rollback
- * į Redis nepalaikomas, tad PostgreSQL negali tapti autoritetingas anksčiau,
- * nei egzistuoja kelias tą režimą atlaikyti.
+ * ⚠️ BARJERAS ATIDARYTAS (#155) — pilnas sąrašas ir sąlygos žemiau. Ši pastraipa
+ * aprašo, KODĖL jis apskritai buvo: `postgresStore` buvo ĮGYVENDINTAS, bet
+ * NEPARENKAMAS, nes ADR sako, kad rollback į Redis nepalaikomas — tad PostgreSQL
+ * negalėjo tapti autoritetingas anksčiau, nei egzistuoja kelias tą režimą atlaikyti.
  *
  * ⚠️ PRIELAIDŲ SĄRAŠAS ČIA NEDUBLIUOJAMAS. Autoritetas —
  * `docs/decisions/155-postgres-authority.md`, skyrius „AKTYVAVIMO BARJERAS".
@@ -45,14 +46,38 @@ const ALLOWED_BACKENDS = Object.freeze(["postgres", "redis", "memory"]);
  * ADR tuo metu pridėjo eilės prieinamumo preflight, o kopija čia liko be jo.
  * Kopija, kurios niekas netikrina, ilgainiui pradeda meluoti.
  *
- * ⚠️ BARJERO NEATIDARO NEI 7.2a, NEI 7.2b. 7.2b užbaigia atominių operacijų
- * kontraktą; aktyvavimas priklauso VISOMS ADR prielaidoms.
+ * ⚠️ BARJERO NEATIDARĖ NEI 7.2a, NEI 7.2b. 7.2b užbaigė atominių operacijų
+ * kontraktą; aktyvavimas priklausė VISOMS ADR prielaidoms, ir atidarė jį tik
+ * paskutinės uždarymas.
  *
  * ⚠️ KONSTANTA, NE ENV KINTAMASIS. `ALLOW_POSTGRES=1` reikštų, kad barjerą
  * galima apeiti diegimo metu, nepraėjus nė vienos prielaidos ir be jokios
  * peržiūros. Konstanta reiškia, kad atidarymas yra commit'as.
+ *
+ * ⚠️ ATIDARYTA (#155). VISOS ŠEŠIOS ADR PRIELAIDOS UŽDARYTOS.
+ *
+ *   patikrintas restore         #248, #249, #250, #333 (+ R1: #337)
+ *   persistentės ištrynimo žymos #183
+ *   transakcinis rašymas         #184, PR-4
+ *   idempotentiškas užbaigimas   #184, PR-4, #334
+ *   eilės prieinamumo preflight  #322
+ *   fail-closed startas REALIAI  ŠIS PR, paskutinis commit'as (10 sąlyga)
+ *
+ * Šeštoji uždaroma PAČIU atidarymu ir niekaip kitaip: kol barjeras buvo
+ * uždarytas, `initializePostgres()` produkcijoje buvo NEPASIEKIAMA, tad jos
+ * fail-closed elgesys buvo įrodytas tik unit lygmeniu.
+ *
+ * ⚠️ ATIDARYMAS NĖRA PERJUNGIMAS. Po jo `postgres` tampa PASIEKIAMAS, bet
+ * renkamas TIK eksplicitiniu `JOB_STORE_BACKEND=postgres` — vien `DATABASE_URL`
+ * job metaduomenų neperjungia (žr. `resolveBackendChoice()`). Nė vienas esamas
+ * diegimas nepersijungia savaime.
+ *
+ * ⚠️ IR TAI VIENINTELIS NEGRĮŽTAMAS ŽINGSNIS SEKOJE. Po perjungimo atsiranda
+ * duomenų, kurių adresas gyvena TIK PostgreSQL'e (`job_results.storage_key`,
+ * `job_result_attempts`), o saugyklos sąrašymo ribos nėra pagal konstrukciją (A3).
+ * Grįžimo mechanika: `docs/deletion-guarantees.md` §0.
  */
-const POSTGRES_AKTYVAVIMAS_LEISTAS = false;
+const POSTGRES_AKTYVAVIMAS_LEISTAS = true;
 
 /**
  * NORIMAS backend'as — eksplicitinė pirmenybė.
@@ -121,7 +146,31 @@ function resolveBackendChoice(env = process.env) {
     return { norimas: eksplicitinis, priezastis: "JOB_STORE_BACKEND", eksplicitinis: true };
   }
 
-  if (env.DATABASE_URL) return { norimas: "postgres", priezastis: "DATABASE_URL", eksplicitinis: false };
+  /**
+   * ⚠️ `postgres` RENKAMAS TIK EKSPLICITIŠKAI (#155, politikos pakeitimas).
+   *
+   * Anksčiau čia buvo `if (env.DATABASE_URL) return { norimas: "postgres" }` — t. y.
+   * `DATABASE_URL` buvimas PATS perjungdavo job metaduomenų saugyklą. Kol barjeras
+   * buvo uždarytas, to niekas nematė: `applyActivationBarrier()` grąžindavo atgal į
+   * `redis` arba atmintį.
+   *
+   * Atidarius barjerą tas išvedimas būtų perjungęs KIEKVIENĄ diegimą, turintį
+   * `DATABASE_URL` — įskaitant tuos, kurie jį nustatė TIK sesijoms (7.3), auditui ar
+   * migracijoms. Jie job'ų perkelti neprašė, o Redis metaduomenys NĖRA migruojami
+   * (ADR: „TTL nutekėjimas, ne migracija"), tad jų job'ai tiesiog taptų nematomi.
+   *
+   * ⚠️ TAI POLITIKOS PAKEITIMAS, NE TAISYMAS. Numanomas pasirinkimas gali būti
+   * grąžintas vėliau ATSKIRU leidimu su migracijos pastaba; atvirkščiai — ne, nes
+   * grįžimas atgal tyliai perjungtų veikiančius diegimus.
+   *
+   * ⚠️ `DATABASE_URL` LIEKA REIKŠMINGAS visoms kitoms ašims: sesijoms, auditui,
+   * migracijoms ir `doctor` patikroms. Pasikeitė tik tai, kad jis nebesprendžia už
+   * operatorių, kur gyvena JOB metaduomenys.
+   *
+   * ⚠️ BŪSENA MATOMA: `runSelfChecks()` rodo informacinę eilutę „PostgreSQL
+   * sukonfigūruotas, bet job metaduomenys saugomi ATMINTYJE" (pridėta PRIEŠ šį
+   * pakeitimą, kad jis nebūtų pirmas commit'as, kurio niekas netikrina).
+   */
   if (env.REDIS_URL) return { norimas: "redis", priezastis: "REDIS_URL", eksplicitinis: false };
   return { norimas: "memory", priezastis: "numatyta", eksplicitinis: false };
 }
@@ -129,10 +178,17 @@ function resolveBackendChoice(env = process.env) {
 /**
  * NORAS → FAKTAS.
  *
- * Kol barjeras galioja, `DATABASE_URL` NETYLI perjungia srauto: parenkamas
- * ankstesnis backend'as, o skambintojas gauna `barjeras: true`, kad galėtų
- * apie tai pranešti. Eksplicitinis `JOB_STORE_BACKEND=postgres` yra KLAIDA, ne
- * įspėjimas — nurodymo ignoruoti tyliai negalima.
+ * ⚠️ BARJERAS ATIDARYTAS — ŠIOS FUNKCIJOS ŠAKOS ŠIANDIEN NEPASIEKIAMOS.
+ *
+ * Su `POSTGRES_AKTYVAVIMAS_LEISTAS = true` kiekvienas kelias grąžina
+ * `barjeras: false`. Mechanizmas paliekamas, nes jis yra pats barjeras: jį
+ * pašalinus konstantos grąžinimas į `false` nebeturėtų ką įjungti, ir
+ * „uždaryti atgal" reikštų parašyti viską iš naujo.
+ *
+ * Kol barjeras galiojo, elgesys buvo: `DATABASE_URL` netyliai perjungdavo
+ * srautą — parenkamas ankstesnis backend'as, o skambintojas gaudavo
+ * `barjeras: true`, kad galėtų apie tai pranešti; eksplicitinis
+ * `JOB_STORE_BACKEND=postgres` buvo KLAIDA, ne įspėjimas.
  */
 function applyActivationBarrier(choice, env = process.env) {
   if (choice.norimas !== "postgres") return { ...choice, barjeras: false };
@@ -172,13 +228,20 @@ function selectBackend(env = process.env) {
  * ⚠️ ATSAKYMAS NĖRA „ar nustatytas DATABASE_URL".
  *
  * Būtent taip buvo iš pradžių, ir tai melavo: su `DATABASE_URL` be
- * `REDIS_URL` aktyvavimo barjeras palieka job'us ATMINTYJE, o
- * `privacyConfig` skelbdavo `persistentStorage = true`. Operatorius pagrįstai
- * manytų, kad job'ai išgyvens restartą — ir prarastų metaduomenis bei
- * rezultatus.
+ * `REDIS_URL` job'ai lieka ATMINTYJE, o `privacyConfig` skelbdavo
+ * `persistentStorage = true`. Operatorius pagrįstai manytų, kad job'ai išgyvens
+ * restartą — ir prarastų metaduomenis bei rezultatus.
  *
- * Kol barjeras uždarytas, vien `DATABASE_URL` persistencijos NEDUODA. Barjerą
- * atidarius ši funkcija ims grąžinti `true` be jokio pakeitimo čia.
+ * ⚠️ ANKSTESNĖ ŠIO KOMENTARO EILUTĖ BUVO PRANAŠYSTĖ, IR JI NEIŠSIPILDĖ (#155).
+ *
+ * Ji žadėjo: „barjerą atidarius ši funkcija ims grąžinti `true` be jokio
+ * pakeitimo čia". Barjeras atidarytas — ir vien `DATABASE_URL` toliau grąžina
+ * `false`, nes `postgres` renkamas TIK eksplicitiniu `JOB_STORE_BACKEND`.
+ * Funkcija tikrai nepasikeitė, bet ne dėl tos priežasties, kurią ji skelbė.
+ *
+ * Pranašystė komentare yra ta pati klasė kaip priežastis testo varde: ji negali
+ * kristi. Todėl čia lieka tik tai, kas tikrinama — atsakymą duoda
+ * `selectBackend()`, ir jis vienas.
  */
 function isPersistentBackend(env = process.env) {
   return SHARED_BACKENDS.includes(selectBackend(env).norimas);

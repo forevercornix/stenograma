@@ -118,8 +118,9 @@ test("DELETE /api/jobs/:id per MARŠRUTĄ prašo job'o BE rezultato", async (t) 
    * maršrutas jo nekviečia.
    *
    * ⚠️ KODĖL SKAITIKLIS ČIA NEĮMANOMAS: maršrutai testuose eina per atminties
-   * backend'ą, kuris artefaktų saugyklos apskritai neturi (PostgreSQL už maršrutų
-   * uždarytas aktyvavimo barjero). Todėl grandinė tikrinama dviem susietomis
+   * backend'ą, kuris artefaktų saugyklos apskritai neturi (`JOB_STORE_BACKEND`
+   * čia nenurodytas; iki #155 PostgreSQL už maršrutų laikė ir aktyvavimo
+   * barjeras). Todėl grandinė tikrinama dviem susietomis
    * dalimis: ČIA — kad maršrutas prašo `hydrate: false`; `jobStoreHydration.
    * integration` — kad `hydrate: false` reiškia NULĮ kreipinių į saugyklą.
    */

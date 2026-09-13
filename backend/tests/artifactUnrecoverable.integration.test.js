@@ -72,8 +72,9 @@ test(
      *
      * Pirmoji redakcija grąžino `Date` rezultate ir laukė struktūrinio atmetimo. Testas
      * krito su `completed`: `ArtifactStore` riba yra EXTERNAL kelyje, o worker'is
-     * testuose eina per ATMINTIES saugyklą (aktyvavimo barjeras neleidžia PostgreSQL už
-     * maršrutų ir worker'ių). Inline kelias `paruostiReiksme()` nekviečia, tad `Date`
+     * testuose eina per ATMINTIES saugyklą (šie testai `JOB_STORE_BACKEND`
+     * nenurodo; iki #155 to neleido ir aktyvavimo barjeras). Inline kelias
+     * `paruostiReiksme()` nekviečia, tad `Date`
      * ten priimamas — riba jo tiesiog nemato.
      *
      * ⚠️ §12.1 KOREKCIJA (#298): ANKSTESNĖ REDAKCIJA ŽADĖJO, KAD GRANDINĖ SU `Date`
@@ -86,11 +87,15 @@ test(
      * principo, ne dėl neprijungtos saugyklos.
      *
      * Struktūrinių atmetimų liko (NUL, neporinis surogatas, ciklinė nuoroda, `BigInt`,
-     * nedeterministinis `toJSON`), bet jie gyvena EXTERNAL kelyje, o worker'is per jį
-     * neina, kol galioja aktyvavimo barjeras. Todėl čia tikrinama TA DALIS, kuri
-     * egzistuoja: ar `neatkartojama` klaida iš `finish()` sustabdo BullMQ retry
-     * grandinę. Eilė, worker'is ir pakartojimų semantika — TIKRI; sintetinė lieka tik
-     * klaidos kilmė. Likutis eina su barjeru (plano sąlyga 5).
+     * nedeterministinis `toJSON`), bet jie gyvena EXTERNAL kelyje, o šio testo
+     * worker'is per jį neina. Todėl čia tikrinama TA DALIS, kuri egzistuoja: ar
+     * `neatkartojama` klaida iš `finish()` sustabdo BullMQ retry grandinę. Eilė,
+     * worker'is ir pakartojimų semantika — TIKRI; sintetinė lieka tik klaidos kilmė.
+     *
+     * ⚠️ §12.1: ANKSTESNĖ REDAKCIJA SAKĖ „likutis eina su barjeru". BARJERAS
+     * ATIDARYTAS (#155), IR LIKUTIS NEIŠNYKO. Jam reikia ne barjero, o šio testo
+     * perrašymo prieš tikrą PostgreSQL + saugyklą worker'io kelyje — atskiras
+     * darbas, ne atidarymo pasekmė. Žyma, kuri laukė įvykio, dabar laukia darbo.
      */
     const tikrasFinish = jobStore.system.finish;
     t.after(() => {

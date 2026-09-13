@@ -103,9 +103,10 @@ sąmoninga: tylus grįžimas yra būtent tas gedimas, kurį ši riba uždaro.
 ⚠️ **VYKDOMA PROCEDŪRA. Sprendimą ir jo priežastis aprašo
 `docs/decisions/155-postgres-authority.md`; čia — tik veiksmai ir patikros.**
 
-⚠️ **ĮSIGALIOJA KARTU SU AKTYVAVIMO BARJERU.** Kol
-`POSTGRES_AKTYVAVIMAS_LEISTAS = false`, PostgreSQL job store'u netampa, ir ši
-procedūra nevykdoma.
+⚠️ **BARJERAS ATIDARYTAS — PROCEDŪRA VYKDOMA (#155).** `POSTGRES_AKTYVAVIMAS_LEISTAS
+= true`, tad PostgreSQL job store'u tampa, kai diegimas nurodo
+`JOB_STORE_BACKEND=postgres`. ⚠️ **Tai ir yra vienintelis paleidiklis:**
+`DATABASE_URL` vienas šios procedūros nepradeda ir job'ų neperjungia.
 
 ### Kam ji reikalinga
 
@@ -155,13 +156,29 @@ set -euo pipefail
 rc() { redis-cli -u "$REDIS_URL" "$@"; }
 
 # 4 ŽINGSNIO PATIKRA — NUTRAUKIA, NE INFORMUOJA.
+#
+# ⚠️ SKENUOJAMA VIENĄ KARTĄ, IR TRINAMAS BŪTENT TAS SĄRAŠAS, KURIS BUVO
+# PATIKRINTAS. Ankstesnė redakcija skenavo DU kartus, tad tarp jų atsiradęs
+# raktas būtų ištrintas niekada nepatikrintas.
+if ! raktai=$(rc --scan --pattern 'job:*'); then
+  echo "SCAN NEPAVYKO — 5b NEVYKDOMAS (Redis nepasiekiamas ar bloga autentifikacija)" >&2
+  exit 1
+fi
+
 laukia=""
-while read -r k; do
-  [ -z "$k" ] && continue
-  if rc HMGET "$k" audio_cleanup_pending deletion_pending | grep -qx true; then
+while IFS= read -r k; do
+  [ -n "$k" ] || continue
+
+  # ⚠️ STATUSAS GAUDOMAS EKSPLICITIŠKAI, ne per `set -e`.
+  if ! reiksmes=$(rc HMGET "$k" audio_cleanup_pending deletion_pending); then
+    echo "HMGET NEPAVYKO raktui $k — 5b NEVYKDOMAS" >&2
+    exit 1
+  fi
+
+  if printf '%s\n' "$reiksmes" | grep -qx true; then
     laukia="${laukia}${k}"$'\n'
   fi
-done < <(rc --scan --pattern 'job:*')
+done <<< "$raktai"
 
 if [ -n "$laukia" ]; then
   echo "LAUKIANTIS VALYMAS — 5b NEVYKDOMAS:" >&2
@@ -169,8 +186,10 @@ if [ -n "$laukia" ]; then
   exit 1
 fi
 
-# Tik dabar:
-rc --scan --pattern 'job:*' | xargs -r redis-cli -u "$REDIS_URL" DEL
+# Tik dabar — ir tik patikrintus raktus:
+if [ -n "$raktai" ]; then
+  printf '%s\n' "$raktai" | xargs -r redis-cli -u "$REDIS_URL" DEL
+fi
 rc DEL jobs:index
 ```
 
@@ -179,9 +198,31 @@ rc DEL jobs:index
 kaip visumą, buvo ištrinama **būtent tuo atveju, kurį patikra turėjo apsaugoti**, o
 operatorius, matęs „LAUKIA", manytų, kad skriptas sustojo.
 
-⚠️ **`set -euo pipefail` NĖRA STILIUS.** Be jo nepavykęs `--scan` (nepasiekiamas
-Redis, bloga autentifikacija) duotų **tuščią** atsakymą, patikra praeitų, ir `DEL`
-įvyktų prieš bazę, kurios turinio niekas nematė.
+⚠️ **`set -euo pipefail` NĖRA STILIUS** — bet jo VIENO NEPAKANKA, ir tai buvo
+antra šios patikros yda.
+
+⚠️ **ANTRAS KARTAS TAI PAČIAI PATIKRAI — BET KITA MECHANIKA.** #338 raunde ji
+buvo taisyta todėl, kad `grep -q true && echo` tik **pranešdavo ir tęsdavo**.
+Dabar ji krito kitaip: klaidos statusas **dingdavo dviejose vietose, kurių
+`set -e` nemato**:
+
+| Konstrukcija | Kodėl statusas dingsta |
+|---|---|
+| `if rc HMGET … \| grep -qx true; then` | komanda `if` **sąlygoje** — `set -e` ten sąmoningai nutildytas; nepavykęs `HMGET` neatskiriamas nuo „nėra `true`" |
+| `done < <(rc --scan …)` | **proceso pakaita** vykdoma subshell'e; jos gedimas apimančio shell'o statuso nekeičia |
+
+Pasekmė: nepavykus pradiniam `scan`, ciklas perskaitydavo **nieko**, `laukia`
+likdavo tuščias, patikra „praeidavo", o vėliau pavykęs antras `scan` ištrindavo
+**visus** hash'us ir indeksą — nors laukiantis valymas nebuvo patikrintas nė karto.
+
+Todėl dabar abu statusai gaudomi **eksplicitiškai** (`if ! raktai=$(…)`,
+`if ! reiksmes=$(…)`), o ne paliekami `set -e`. Ir skenuojama **vieną kartą**:
+trinamas tas pats sąrašas, kuris buvo patikrintas.
+
+⚠️ **Pamoka platesnė už šią vietą: shell klaidų sklaida nėra akivaizdi.**
+`set -euo pipefail` dengia paprastas komandų sekas, bet ne `if` sąlygas, ne
+proceso pakaitas ir ne subshell'us. Destruktyviame bloke to skirtumo kaina yra
+duomenys, todėl statusas tikrinamas ranka, o ne paliekamas vėliavai.
 
 ⚠️ **`job:*` NEAPIMA INDEKSO.** `jobs:index` yra atskiras sorted set
 (`redisStore.js:42`), ir šablonas `job:*` jo **neatitinka** — nėra dvitaškio po
