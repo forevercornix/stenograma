@@ -104,3 +104,68 @@ test("būsenų aibė SUTAMPA su migracijos aibe — abiem kryptim", () => {
    */
   assert.match(src, /busena IN \(\$\{sarasas\(BUSENOS_FROZEN\)\}\)|sarasas\(BUSENOS_FROZEN\)/);
 });
+
+test("KONTRAKTAS: retencijos gyvos nuosavybės aibė yra erasure aibės POAIBIS", () => {
+  /**
+   * ⚠️ DVI TO PATIES INVARIANTO REALIZACIJOS — IR SĄMONINGAI DVI (#305.1).
+   *
+   * Nuosavybės klausimą repo užduoda dviejose vietose, ir jos NĖRA ta pati
+   * taisyklė:
+   *
+   *   erasure  (`postgresStore.svetimiAdresai`) — „ar A turi TEISĘ naikinti šį
+   *             objektą?" Atsakymas: ne, jei jį užima BET KURIS svetimas
+   *             bandymas, nes A neturi valdžios B gyvavimo ciklui;
+   *   retencija (`attemptRegistry.valytiniBandymai`) — „ar objekto dar REIKIA?"
+   *             Atsakymas: ne, jei svetimas bandymas yra `abandoned`, nes tą
+   *             objektą šalintų ir paties B šlavėjas.
+   *
+   * ⚠️ TRYS KARTUS ŠIOJE SEKOJE DVI TO PATIES INVARIANTO REALIZACIJOS IŠSISKYRĖ
+   * (`BUTINI` sąrašas, matricos skaičius, `PILNA_FORMA`). Todėl vieno šaltinio
+   * čia nedarom — semantika skiriasi ir suliejimas reikštų vieną iš dviejų
+   * klausimų atsakyti neteisingai, — o fiksuojam SĄRYŠĮ: retencijos aibė privalo
+   * būti erasure aibės POAIBIS. Kol taip, retencija negali ištrinti nieko, ko
+   * erasure nebūtų apsaugojęs.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { BUSENA, GYVOS_BUSENOS } = require("../utils/attemptRegistry");
+
+  const visos = Object.values(BUSENA);
+
+  for (const busena of GYVOS_BUSENOS) {
+    assert.ok(visos.includes(busena), `\`${busena}\` privalo būti žinoma būsena`);
+  }
+
+  assert.deepEqual(
+    [...GYVOS_BUSENOS].sort(),
+    ["committed", "pending"],
+    "gyvos nuosavybės aibė yra SPRENDIMAS - jos pokytis privalo būti matomas čia"
+  );
+
+  assert.ok(
+    !GYVOS_BUSENOS.includes(BUSENA.ATMESTA),
+    "`abandoned` NEBLOKUOJA šlavimo: objekto nebereikia niekam, ir jį šalintų B šlavėjas"
+  );
+
+  /**
+   * ⚠️ POAIBIO SĄRYŠĮ LAIKO TAI, KAD ERASURE UŽKLAUSA BŪSENŲ NEFILTRUOJA.
+   *
+   * Tai tripwire (§9.2): jei kas nors ten pridės `busena` sąlygą, poaibio
+   * garantija gali nutrūkti TYLIAI — erasure imtų praleisti tai, ką retencija
+   * trina. Testas neleidžia to padaryti nepastebėtai.
+   */
+  const { beKomentaru } = require("../utils/auditEvents");
+  const pgStore = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "..", "utils", "jobStore", "postgresStore.js"), "utf8")
+  );
+
+  const pradzia = pgStore.indexOf("async function svetimiAdresai(");
+  assert.ok(pradzia > 0, "prielaida: `svetimiAdresai()` egzistuoja");
+  const kunas = pgStore.slice(pradzia, pgStore.indexOf("\n  async function", pradzia + 10));
+
+  assert.match(kunas, /FROM job_result_attempts/, "prielaida: erasure tikrina ir registrą");
+  assert.ok(
+    !/busena\s*(=|<>|IN|=\s*ANY)/i.test(kunas),
+    "erasure užklausa NETURI filtruoti būsenų - kitaip retencijos aibė nustotų būti jos poaibiu"
+  );
+});

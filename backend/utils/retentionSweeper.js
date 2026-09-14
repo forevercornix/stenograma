@@ -317,7 +317,7 @@ const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
  * senindant EILUTES, ne laiką.
  */
 async function _valytiRezultatoBandymus() {
-  const tuscias = { pasalinta: 0, praleista: 0, pazeidimai: 0, nevykdyta: false };
+  const tuscias = { pasalinta: 0, praleista: 0, svetimi: 0, pazeidimai: 0, nevykdyta: false };
 
   /**
    * ⚠️ TIKRINAMA EFEKTYVI TIKROVĖ, NE DEKLARACIJA (Codex, #304; #245 pamoka).
@@ -362,7 +362,7 @@ async function _valytiRezultatoBandymus() {
   const { revivalHorizonsMs } = require("../queues/config");
   const horizontas = revivalHorizonsMs().horizonMs;
 
-  const { kandidatai, praleista } = await jobStore.system.valytiniBandymai({
+  const { kandidatai, praleista, svetimi = 0 } = await jobStore.system.valytiniBandymai({
     atmestuRibaMs: horizontas,
     laukianciuRibaMs: horizontas + MAX_RASYMO_TRUKME_MS,
     kiekis: JOBU_BATCH,
@@ -379,11 +379,30 @@ async function _valytiRezultatoBandymus() {
     );
   }
 
+  if (svetimi > 0) {
+    /**
+     * ⚠️ NE KLAIDA, BET IR NE TYLA (#305.1).
+     *
+     * Adresas, kurį užima GYVAS svetimo job'o bandymas, praleidžiamas teisingai:
+     * objektas gali būti ką tik įrašytas, o `job_results` jo dar nerodo. Bet
+     * skaičiui augant tai nustoja būti lygiagretumo požymiu ir tampa
+     * nekonsistentiškų metaduomenų požymiu — o tai jau operatoriaus reikalas.
+     *
+     * ⚠️ ATSKIRA EILUTĖ NUO `praleista`: ten priežastis yra laiko žymos, čia —
+     * nuosavybė. Vienas pranešimas dviem priežastims meluotų vienai iš jų.
+     */
+    log.warn(
+      `Retencija: ${svetimi} bandymo eilutė(-ės) praleista - adresą užima GYVAS ` +
+        "SVETIMO job'o bandymas (`pending`/`committed`). Objektas gali būti ką tik " +
+        "įrašytas, tad jo šalinti negalima."
+    );
+  }
+
   const verdiktai = await jobStore.system.sweepResultArtifacts(kandidatai);
 
   if (verdiktai === null) {
     log.warn("Retencija: saugykla nepalaiko `sweepResultArtifacts()` - šlavimas NEVYKDOMAS.");
-    return { ...tuscias, praleista, nevykdyta: true };
+    return { ...tuscias, praleista, svetimi, nevykdyta: true };
   }
 
   let pasalinta = 0;
@@ -462,7 +481,7 @@ async function _valytiRezultatoBandymus() {
    */
   const pazeidimai = await jobStore.system.karantinuotuSkaicius();
 
-  return { pasalinta, praleista, pazeidimai, nepavyke, nevykdyta: false };
+  return { pasalinta, praleista, svetimi, pazeidimai, nepavyke, nevykdyta: false };
 }
 
 /**
@@ -512,6 +531,8 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     const bandymai = await _valytiRezultatoBandymus();
     summary.resultAttempts = bandymai.pasalinta;
     summary.resultAttemptsSkipped = bandymai.praleista;
+    /** ⚠️ Atskiras laukas: kita priežastis, kitas operatoriaus veiksmas (#305.1). */
+    summary.resultAttemptsForeignOwned = bandymai.svetimi;
     summary.resultAttemptsViolations = bandymai.pazeidimai;
     for (const [klase, kiek] of Object.entries(suskaiciuoti(bandymai.nepavyke))) {
       summary.errors.push(`result attempts ${klase} x${kiek}`);

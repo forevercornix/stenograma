@@ -668,6 +668,123 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await saugykla.delete(bBandymas.raktas);
   });
 
+  await t.test("#305.1: GYVAS svetimo job'o bandymas SAUGO adresą nuo retencijos", async () => {
+    /**
+     * ⚠️ VIENINTELIS #305 PUNKTAS, KURIS TRINA SVETIMUS DUOMENIS AUTOMATIŠKAI.
+     *
+     * Erasure pusė turi nuosavybės sargą (`svetimiAdresai()`), retencijos
+     * selektorius jo neturėjo. Scenarijus veikia BE žmogaus:
+     *
+     *   1. job'as B baigė `put()`, dar neįsipareigojo → `pending` eilutė;
+     *   2. job'o A senas bandymas TUO PAČIU adresu patenka į kandidatus, nes
+     *      `job_results` jo nerodo;
+     *   3. šlavėjas objektą ištrina;
+     *   4. B įsipareigoja nuorodą į JAU NEEGZISTUOJANTĮ rezultatą.
+     */
+    const a = await naujasJobas();
+    const b = await naujasJobas();
+
+    /** B ką tik įrašė objektą — eilutė `pending`, `job_results` dar tuščias. */
+    const bBandymas = await nutrukesBandymas(b, { text: "B pending rezultatas" });
+
+    /** A senas bandymas TUO PAČIU adresu (nekonsistentiški metaduomenys). */
+    const aAttempt = attemptRegistry.naujasBandymas();
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena, created_at)
+       VALUES ($1, $2, 'fs', $3, $4, now() - INTERVAL '90 days')`,
+      [aAttempt, a, bBandymas.raktas, attemptRegistry.BUSENA.ATMESTA]
+    );
+
+    const { kandidatai, svetimi } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.deepEqual(
+      kandidatai.filter((k) => k.attempt_id === aAttempt),
+      [],
+      "A eilutė NEGALI būti kandidatė: adresą užima B `pending` bandymas"
+    );
+
+    /**
+     * ⚠️ IR PRALEIDIMAS PRIVALO BŪTI MATOMAS (4b pamoka): fail-closed be
+     * matomumo virsta tyliu kaupimu.
+     */
+    assert.ok(svetimi >= 1, `svetimos nuosavybės skaitiklis privalo rodyti praleidimą, gauta ${svetimi}`);
+
+    await saugykla.delete(bBandymas.raktas);
+    await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [aAttempt]);
+  });
+
+  await t.test("#305.1 KONTROLĖ: adresas, kurio niekas kitas neturi, ŠLUOJAMAS", async () => {
+    /**
+     * ⚠️ BE ŠIOS KONTROLĖS ankstesnis testas būtų tenkinamas ir tuo atveju, jei
+     * šlavėjas nustotų šluoti VISAI — o toks selektorius atrodytų saugus,
+     * nepašalindamas nieko.
+     */
+    const id = await naujasJobas();
+    const nutrukes = await nutrukesBandymas(id, { text: "niekieno kito" });
+
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE job_id = $1", [id]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.equal(
+      kandidatai.filter((k) => k.attempt_id === nutrukes.attemptId).length,
+      1,
+      "vienintelis savininkas - eilutė PRIVALO būti kandidatė"
+    );
+
+    await saugykla.delete(nutrukes.raktas);
+  });
+
+  await t.test("#305.1: svetimas `abandoned` bandymas šlavimo NEBLOKUOJA", async () => {
+    /**
+     * ⚠️ SPRENDIMAS, NE PRALEIDIMAS. Svetimas atmestas bandymas reiškia, kad
+     * objekto nebereikia NIEKAM — jį šalintų ir paties B šlavėjas. Užblokavus
+     * jį, adresas liktų nešluotas tol, kol B eilutė uždaroma: kaupimas be naudos.
+     *
+     * ⚠️ IR BŪTENT ČIA ŠI TAISYKLĖ SKIRIASI NUO `svetimiAdresai()`, kuri blokuoja
+     * VISAS būsenas. Du klausimai: „ar turiu teisę naikinti?" ir „ar dar reikia?".
+     * Sąryšį (poaibį) fiksuoja `attemptRegistry` kontraktinis testas.
+     */
+    const a = await naujasJobas();
+    const b = await naujasJobas();
+
+    const bBandymas = await nutrukesBandymas(b, { text: "B atmestas" });
+    await pool.query("UPDATE job_result_attempts SET busena = $1 WHERE attempt_id = $2", [
+      attemptRegistry.BUSENA.ATMESTA,
+      bBandymas.attemptId,
+    ]);
+
+    const aAttempt = attemptRegistry.naujasBandymas();
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena, created_at)
+       VALUES ($1, $2, 'fs', $3, $4, now() - INTERVAL '90 days')`,
+      [aAttempt, a, bBandymas.raktas, attemptRegistry.BUSENA.ATMESTA]
+    );
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.equal(
+      kandidatai.filter((k) => k.attempt_id === aAttempt).length,
+      1,
+      "svetimas `abandoned` NEGALI blokuoti - objekto nebereikia niekam"
+    );
+
+    await saugykla.delete(bBandymas.raktas);
+    await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [aAttempt]);
+  });
+
   await t.test("KONTROLĖ: SAVAS adresas šalinamas normaliai", async () => {
     /**
      * Be jos ankstesnis testas būtų tenkinamas ir patikros, kuri atmeta VISKĄ — o toks
