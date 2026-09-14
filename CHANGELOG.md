@@ -62,6 +62,13 @@ ji pasensta ir tampa klaidinanti.
   ⚠️ Tai galioja ir `workers/` procesui: sargas yra pool'o statyme, ne
   `validateConfig`, kurio worker'is nekviečia.
 
+  ⚠️ **PAŽADO RIBA — KREDENCIALAI.** Sargas pagauna kredencialų skirtumus,
+  matomus `pg` `ConnectionParameters`, **plius `PGPASSFILE`**. Jis NEGALI
+  pažadėti „bet koks kredencialų skirtumas": `pgpass` numatytai skaito
+  `~/.pgpass` net be jokio aplinkos kintamojo, o failas nėra aplinkos skirtumas.
+  Slaptažodis iš `~/.pgpass` DSN'ui be slaptažodžio yra teisėtas libpq raštas,
+  ne dviprasmybė.
+
   **Prieš atnaujinant:** palikite VIENĄ jungties formą. Tai ir yra rekomendacija
   operatoriui — techninis invariantas nėra „abi formos niekada negali būti
   kartu", bet viena forma yra paprasčiausia ir mažiausiai dviprasmiška praktika.

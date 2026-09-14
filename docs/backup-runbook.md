@@ -687,6 +687,12 @@ paprasčiausia praktika — bet tai rekomendacija, ne tai, ką tikrina kodas.
 savo `PG*` skaito pats, o `PGHOSTADDR` `pg` neskaito iš viso. Todėl `pg-backup`
 kelias vaikiniam procesui perduoda aplinką **be nė vieno `PG*`**.
 
+⚠️ **Tai apima IR preflight patikrą.** `psql`, tikrinantis ar tikslinė bazė
+tuščia, anksčiau aplinką paveldėdavo: preflight tikrindavo VIENĄ klasterį, o
+atkūrimas rašydavo į KITĄ. Jei perimtas klasteris tuščias, o tikrasis taikinys —
+ne, „tuščio taikinio" garantija krisdavo tyliai, ir dump'as būdavo sulietas į
+netuščią bazę.
+
 Praktiškai: `--url` (ar `--target`) nurodo, kur einama, ir aplinka to pakeisti
 nebegali. **Kredencialai privalo būti URL'e arba `~/.pgpass`** — `PGPASSWORD`
 iki `pg_dump`/`psql` nebeeina. Diegimas, kuris juo rėmėsi, kris su

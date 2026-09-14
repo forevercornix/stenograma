@@ -505,7 +505,25 @@ test("PERSISTENT_STORAGE=true be jokios patvarios saugyklos = klaida (persistenc
   const { errors } = validatePrivacyConfig({ ...LOCAL_ENV, PERSISTENT_STORAGE: "true" });
 
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /nei REDIS_URL, nei DATABASE_URL nenustatytas/);
+
+  /**
+   * ⚠️ MATCHER'IS SUSIAURINTAS (#245, Codex IV A2), NE SUŠVELNINTAS.
+   *
+   * Senas tekstas sakė „nei REDIS_URL, nei DATABASE_URL nenustatytas". Po #245
+   * tai būtų MELAS `PGHOST`-only diegimui: PostgreSQL ten sukonfigūruotas, o
+   * pranešimas siųstų operatorių kelti Redis arba rašyti `DATABASE_URL`, kurio
+   * tas diegimas nenaudoja. Dabar įvardijamos ABI formos.
+   *
+   * Tikrinamos visos trys prasminės dalys atskirai — kad testas nesaugotų vienos
+   * konkrečios formuluotės, o saugotų, kad pranešimas nurodo TEISINGĄ veiksmą.
+   */
+  assert.match(errors[0], /REDIS_URL/, "Redis kelias privalo likti įvardytas");
+  assert.match(errors[0], /PGHOST/, "⚠️ `PG*` forma privalo būti įvardyta - kitaip pranešimas meluoja");
+  assert.match(errors[0], /DATABASE_URL/, "ir DSN forma");
+  assert.ok(
+    !/nei REDIS_URL, nei DATABASE_URL nenustatytas/.test(errors[0]),
+    "senoji formuluotė teigė, kad PostgreSQL reiškia BŪTENT `DATABASE_URL`"
+  );
 });
 
 /**

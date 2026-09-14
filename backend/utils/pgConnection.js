@@ -341,6 +341,31 @@ function palyginamaReiksme(reiksme) {
  * ⚠️ TIKRINAMA TIK KAI YRA `DATABASE_URL`. Be jo antros interpretacijos nėra:
  * `PG*` yra vienintelė forma, ir „skirtumas nuo DSN" jai neapibrėžtas.
  */
+/**
+ * ⚠️ `pg` RUNTIME PAVIRŠIUS, KURIO MODELIS NEMATO (Codex IV, B).
+ *
+ * S2 sprendimas — „semantiką skaičiuoja pats `pg`" — galioja KONSTRAVIMUI:
+ * `ConnectionParameters` yra vienas momentas, o `Client` po jo daro daugiau.
+ * Konkrečiai: kai slaptažodis lieka tuščias, `Client` kviečia `pgpass`
+ * (`client.js:299`), o šis skaito `PGPASSFILE` (`pgpass/lib/helper.js:58`).
+ * Modelyje to nėra — `ConnectionParameters` `PGPASSFILE` neskaito, tad
+ * palyginimas rodydavo NULĮ skirtumų, nors aplinka realiai duoda kredencialus.
+ *
+ * ⚠️ TAI NĖRA IŠVEDIMO PAKEITIMAS Į RANKINĮ SĄRAŠĄ. `pg` skaitomų kintamųjų aibė
+ * toliau išvedama (R4 tripwire). Čia pridedamas ĮVARDYTAS papildomas paviršius,
+ * kurio išvesti neįmanoma: jis gyvena kitoje bibliotekoje ir kitame gyvavimo
+ * etape, tad `Proxy` seklys ant `ConnectionParameters` jo nepagauna.
+ *
+ * ⚠️ PAŽADO RIBA, KURIOS ŠIS SĄRAŠAS NEUŽDARO. `pgpass` numatytai skaito
+ * `~/.pgpass` (`HOME` kelias) NET BE jokio aplinkos kintamojo. Failas nėra
+ * aplinkos skirtumas — abiem palyginimo pusėms jis tas pats, — ir slaptažodis iš
+ * `~/.pgpass` DSN'ui be slaptažodžio yra teisėtas libpq raštas, ne dviprasmybė.
+ * Todėl sargas pažada siauriau: kredencialų skirtumai, MATOMI
+ * `ConnectionParameters`, plius `PGPASSFILE`. Žr. `CHANGELOG` ir
+ * `docs/backup-runbook.md` — ten tas pats pažadas užrašytas ta pačia riba.
+ */
+const RUNTIME_KREDENCIALAI = Object.freeze(["PGPASSFILE"]);
+
 function jungtiesSemantikosSkirtumai(env = process.env) {
   if (!env.DATABASE_URL) return [];
 
@@ -363,6 +388,18 @@ function jungtiesSemantikosSkirtumai(env = process.env) {
 
     if (su === be) continue;
     klases.add(LAUKU_KLASES[laukas] || `kita:${laukas}`);
+  }
+
+  /**
+   * ⚠️ RUNTIME KREDENCIALAI — TIK KAI JIE REALIAI BŪTŲ PANAUDOTI.
+   *
+   * `Client` `pgpass` kviečia TIK tada, kai slaptažodis liko tuščias. Su DSN,
+   * kuriame slaptažodis yra, `PGPASSFILE` įtakos neturi, ir stabdyti startą dėl
+   * jo reikštų tą patį klaidingą teigiamą, kurį uždarė `PGBINARY` ir `PGHOST`
+   * registro atvejai.
+   */
+  if (!suAplinkos.password && RUNTIME_KREDENCIALAI.some((raktas) => env[raktas])) {
+    klases.add("kredencialai");
   }
 
   return [...klases].sort();
@@ -590,6 +627,7 @@ module.exports = {
   pgJungtiesNustatymai,
   jungtiesSemantikosSkirtumai,
   dviprasmybesTekstas,
+  RUNTIME_KREDENCIALAI,
   LAUKU_KLASES,
   NEREIKSMINGI,
   arNurodytaPostgres,

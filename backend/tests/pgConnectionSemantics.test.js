@@ -1219,3 +1219,100 @@ test("KLAIDINGI TEIGIAMI: registras ir kodavimo vardas NESTABDO starto", () => {
     "⚠️ unix socket KELIAS registro NEKEIČIA - failų sistema gali skirti raides"
   );
 });
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * KETVIRTAS PERŽIŪROS RAUNDAS (A2, B)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+test("A2: privatumo validacija naudoja BENDRĄ detektorių ir įvardija TIKRĄJĮ selektorių", () => {
+  /**
+   * ⚠️ „PATAISA ĮĖJIME, NE VISAME KELYJE" — TAS PATS ŠABLONAS.
+   *
+   * `arNurodytaPostgres()` buvo pritaikytas `resolveBackendChoice()`, bet
+   * `validatePrivacyConfig()` liko su `Boolean(env.DATABASE_URL)`. `PGHOST`-only
+   * diegime tai davė DU melus vienu metu, ir abu — diagnostikoje, t. y. ten, kur
+   * operatorius ateina ieškoti atsakymo.
+   */
+  const { validatePrivacyConfig } = require("../utils/privacyConfig");
+  const PG_RINKINYS = { PGHOST: "db.compose", PGPORT: "5432", PGUSER: "u", PGPASSWORD: "p", PGDATABASE: "s" };
+
+  /** 1 melas: „nei REDIS_URL, nei DATABASE_URL nenustatytas" — nors PostgreSQL yra. */
+  const pirmas = validatePrivacyConfig({ ...PG_RINKINYS, PERSISTENT_STORAGE: "true" }).errors;
+
+  assert.equal(pirmas.length, 1, `laukiama vienos klaidos, gauta: ${JSON.stringify(pirmas)}`);
+  assert.ok(
+    !/nei REDIS_URL, nei DATABASE_URL nenustatytas/.test(pirmas[0]),
+    `NEGALI teigti, kad PostgreSQL nenurodytas: ${pirmas[0]}`
+  );
+  assert.match(
+    pirmas[0],
+    /JOB_STORE_BACKEND=postgres/,
+    "privalo nurodyti VEIKIANTĮ veiksmą - eksplicitinį selektorių"
+  );
+
+  /**
+   * 2 melas: prieštaros pranešime kintamojo vardas likdavo TUŠČIAS
+   * („bet nustatytas  -"), nes `postgresConfigured` buvo `false`.
+   */
+  const antras = validatePrivacyConfig({
+    ...PG_RINKINYS,
+    PERSISTENT_STORAGE: "false",
+    JOB_STORE_BACKEND: "postgres",
+  }).errors;
+
+  assert.equal(antras.length, 1);
+  assert.ok(!/renka\s+-/.test(antras[0]), `tuščias selektoriaus vardas: ${antras[0]}`);
+  assert.match(
+    antras[0],
+    /JOB_STORE_BACKEND=postgres/,
+    "⚠️ `DATABASE_URL` pašalinimas čia NEVEIKTŲ - persistenciją renka `JOB_STORE_BACKEND`"
+  );
+
+  /** ⚠️ KONTROLĖ: Redis kelias nepasikeitė - kitaip taisymas būtų perrašęs kitą atsakymą. */
+  const redis = validatePrivacyConfig({ REDIS_URL: "redis://r:6379", PERSISTENT_STORAGE: "false" }).errors;
+  assert.equal(redis.length, 1);
+  assert.match(redis[0], /REDIS_URL/);
+});
+
+test("B: `PGPASSFILE` yra RUNTIME kredencialų paviršius, kurio modelis nemato", () => {
+  /**
+   * ⚠️ ANTRA S2 SPRENDIMO RIBA, IR JI KITOKIA NEI PIRMOJI.
+   *
+   * Pirmoji buvo SVETIMA BIBLIOTEKA (libpq `pg_dump`/`psql`). Ši yra `pg`
+   * RUNTIME: `ConnectionParameters` yra tik konstravimo momentas, o `Client` po
+   * jo kviečia `pgpass` (`client.js:299`), kuris skaito `PGPASSFILE`
+   * (`pgpass/lib/helper.js:58`). Modelis to nemato, tad palyginimas rodė NULĮ
+   * skirtumų, nors aplinka realiai duoda kredencialus — ir tai kirtosi su
+   * EKSPLICITINIU sargo pažadu atmesti kredencialų skirtumus.
+   */
+  const BE_SLAPTAZODZIO = "postgres://vartotojas@db.prod:5432/stenograma";
+
+  assert.deepEqual(
+    jungtiesSemantikosSkirtumai({ DATABASE_URL: BE_SLAPTAZODZIO, PGPASSFILE: "/tmp/kitas.pgpass" }),
+    ["kredencialai"],
+    "aplinka duoda slaptažodį, kurio DSN neturi - tai kredencialų skirtumas"
+  );
+
+  /**
+   * ⚠️ IR TIK KAI REALIAI BŪTŲ PANAUDOTAS. `Client` `pgpass` kviečia tik
+   * slaptažodžiui esant tuščiam; su pilnu DSN `PGPASSFILE` įtakos neturi, ir
+   * stabdyti startą dėl jo būtų tas pats klaidingas teigiamas, kurį uždarė
+   * `PGBINARY` ir `PGHOST` registro atvejai.
+   */
+  assert.deepEqual(
+    jungtiesSemantikosSkirtumai({ DATABASE_URL: PILNAS, PGPASSFILE: "/tmp/kitas.pgpass" }),
+    [],
+    "su slaptažodžiu DSN'e `PGPASSFILE` nieko nekeičia"
+  );
+
+  /** ⚠️ KONTROLĖ: DSN be slaptažodžio BE `PGPASSFILE` dviprasmybės NEKELIA. */
+  assert.deepEqual(jungtiesSemantikosSkirtumai({ DATABASE_URL: BE_SLAPTAZODZIO }), []);
+
+  /**
+   * ⚠️ RIBA UŽRAŠOMA, NE UŽGLAISTOMA: `~/.pgpass` skaitomas ir BE aplinkos
+   * kintamojo, tad šis sąrašas jos neuždaro. Tikrinama, kad sąrašas būtų
+   * ĮVARDYTAS ir minimalus — jei kas nors į jį įrašys spėjimą, testas parodys.
+   */
+  const { RUNTIME_KREDENCIALAI } = require("../utils/pgConnection");
+  assert.deepEqual([...RUNTIME_KREDENCIALAI], ["PGPASSFILE"]);
+});

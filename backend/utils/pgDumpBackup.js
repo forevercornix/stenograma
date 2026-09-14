@@ -127,6 +127,25 @@ function libpqSvariAplinka(env = process.env) {
   return svari;
 }
 
+/**
+ * ⚠️ VIENINTELIS BŪDAS PALEISTI libpq CLI — TAISYMAS KELYJE, NE TRIJOSE VIETOSE.
+ *
+ * Pirmoji šio taisymo redakcija išvalė aplinką TEN, KUR BUVO PRANEŠTA: dump'o
+ * kvietimui ir `_psqlSuStdin()`. Trečias kvietimas —
+ * `_patikrintiTikslasTuscias()` preflight — liko su paveldėta aplinka, ir
+ * pasekmė buvo BLOGESNĖ nei dump'o atveju: preflight tikrindavo, ar tuščias
+ * VIENAS klasteris, o restore rašydavo į KITĄ. „Tuščio taikinio" garantija
+ * krisdavo tyliai, ir tai mutacija, ne skaitymas.
+ *
+ * ⚠️ TAI RECIDYVAS, NE NAUJAS DEFEKTAS: „pataisa įėjime, ne visame kelyje" yra
+ * ta pati šaknis, kurią ši seka jau taisė. Todėl dabar taisoma taip, kad
+ * pamiršti būtų NEĮMANOMA: visi libpq paleidimai eina per šią funkciją, o
+ * `pgDumpBackupContract` tripwire tikrina, kad jų nebūtų kitaip.
+ */
+function vykdytiLibpq(binaras, argumentai, nustatymai = {}, env = process.env) {
+  return vykdyti(binaras, argumentai, { ...nustatymai, env: libpqSvariAplinka(env) });
+}
+
 /** Vėliavos, kurios SULAUŽYTŲ nuoseklų snapshot'ą. Tikrina kontrakto testas. */
 const SNAPSHOTA_LAUZANCIOS_VELIAVOS = Object.freeze([
   "--no-synchronized-snapshots",
@@ -225,7 +244,12 @@ class PgDumpBackupError extends Error {
 /** Ar `pg_dump`/`psql` apskritai pasiekiami? Grąžina versijos eilutę arba `null`. */
 async function klientoVersija(binaras = "pg_dump") {
   try {
-    const { stdout } = await vykdyti(binaras, ["--version"], { encoding: "utf8" });
+    /**
+     * ⚠️ `--version` NESIJUNGIA, tad aplinka jam nesvarbi — ir vis dėlto eina per
+     * tą patį kelią. Išimtis „šitam nereikia" yra būtent tai, ką kitą kartą
+     * reikėtų prisiminti; taisyklė be išimčių prisiminimo nereikalauja.
+     */
+    const { stdout } = await vykdytiLibpq(binaras, ["--version"], { encoding: "utf8" });
     return stdout.trim();
   } catch {
     return null;
@@ -361,12 +385,13 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
    */
   let sql;
   try {
-    ({ stdout: sql } = await vykdyti("pg_dump", PG_DUMP_ARGUMENTAI(databaseUrl), {
-      encoding: "utf8",
-      maxBuffer: MAX_DUMP_BYTES,
-      /** ⚠️ Žr. `libpqSvariAplinka()`: `--url` privalo būti vienintelis taikinio šaltinis. */
-      env: libpqSvariAplinka(env),
-    }));
+    /** ⚠️ Žr. `vykdytiLibpq()`: `--url` privalo būti vienintelis taikinio šaltinis. */
+    ({ stdout: sql } = await vykdytiLibpq(
+      "pg_dump",
+      PG_DUMP_ARGUMENTAI(databaseUrl),
+      { encoding: "utf8", maxBuffer: MAX_DUMP_BYTES },
+      env
+    ));
   } catch (klaida) {
     /**
      * ⚠️ ORIGINALI KLAIDA NEPERDUODAMA. Ir `message`, ir `cmd` turi pilną
@@ -944,7 +969,15 @@ function perskaitytiObjektuSkaiciu(stdout) {
 async function _patikrintiTikslasTuscias(targetUrl) {
   let stdout;
   try {
-    ({ stdout } = await vykdyti(
+    /**
+     * ⚠️ PREFLIGHT APLINKA IRGI ŠVARI (Codex IV, A1).
+     *
+     * Be šito preflight tikrindavo KITĄ klasterį nei tas, į kurį rašo restore:
+     * `PGHOSTADDR` nukreipdavo `psql` į savo adresą, o `--target` likdavo tik
+     * autentikacijai. Jei perimtas klasteris tuščias, o tikrasis taikinys — ne,
+     * patikra praeidavo ir dump'as būdavo sulietas į NETUŠČIĄ bazę.
+     */
+    ({ stdout } = await vykdytiLibpq(
       "psql",
       ["--no-psqlrc", "--quiet", "-At", "-c", OBJEKTU_UZKLAUSA, targetUrl],
       { encoding: "utf8" }

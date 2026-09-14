@@ -999,3 +999,62 @@ test("LIBPQ: `pg_dump` vaikinis procesas NEPAVELDI nė vieno `PG*` (#245 perži�
     fs.rmSync(darbinis, { recursive: true, force: true });
   }
 });
+
+test("LIBPQ TRIPWIRE: VISI `pg_dump`/`psql` paleidimai eina per `vykdytiLibpq()`", () => {
+  /**
+   * ⚠️ RECIDYVAS TAME PAČIAME PR'e — TODĖL TAISOMAS KELIAS, NE VIETA.
+   *
+   * Pirmoji aplinkos valymo redakcija uždarė DVI vietas iš keturių: dump'o
+   * kvietimą ir `_psqlSuStdin()`. Trečia — `_patikrintiTikslasTuscias()`
+   * preflight — liko su paveldėta aplinka, ir jos pasekmė BLOGESNĖ: preflight
+   * tikrindavo, ar tuščias VIENAS klasteris, o restore rašydavo į KITĄ.
+   * „Tuščio taikinio" garantija krisdavo tyliai.
+   *
+   * ⚠️ TAI TRIPWIRE (§9.2): jis gina, kad NAUJAS paleidimas neatsirastų šalia
+   * taisyklės. Elgseną — kad aplinka realiai švari — tikrina `LIBPQ:` testas su
+   * `PATH` stub'u.
+   */
+  const { beKomentaru } = require("../utils/auditEvents");
+  const pilnas = beKomentaru(
+    fs.readFileSync(path.join(SAKNIS, "utils", "pgDumpBackup.js"), "utf8")
+  );
+
+  /**
+   * ⚠️ PAČIO WRAPPER'IO KŪNAS IŠIMAMAS. Jame `vykdyti()` kviečiamas TEISĖTAI —
+   * tai vienintelė vieta, kuri tai daryti turi. Neišėmus jo testas gaudytų
+   * taisyklę vietoj jos pažeidėjų.
+   */
+  const wrapperPradzia = pilnas.indexOf("function vykdytiLibpq(");
+  assert.ok(wrapperPradzia > 0, "prielaida: `vykdytiLibpq()` egzistuoja");
+  const wrapperPabaiga = pilnas.indexOf("\n}", wrapperPradzia) + 2;
+  const svarus = pilnas.slice(0, wrapperPradzia) + pilnas.slice(wrapperPabaiga);
+
+  assert.match(
+    pilnas.slice(wrapperPradzia, wrapperPabaiga),
+    /env:\s*libpqSvariAplinka\(env\)/,
+    "wrapper'is privalo perduoti švarią aplinką - kitaip jis tik perkelia problemą"
+  );
+
+  /** Kiekvienas `"pg_dump"` / `"psql"` kaip PIRMAS argumentas paleidimo funkcijai. */
+  const paleidimai = [...svarus.matchAll(/(\w+)\(\s*\n?\s*(?:binaras|"pg_dump"|"psql")/g)]
+    .map((m) => m[1])
+    .filter((f) => ["vykdyti", "vykdytiLibpq", "spawn", "execFile", "exec"].includes(f));
+
+  assert.ok(paleidimai.length >= 4, `prielaida: rasta per mažai paleidimų (${paleidimai.length})`);
+
+  const zali = paleidimai.filter((f) => f !== "vykdytiLibpq" && f !== "spawn");
+  assert.deepEqual(
+    zali,
+    [],
+    "libpq CLI paleidimas apeinant `vykdytiLibpq()` - vaikinis procesas paveldėtų " +
+      `\`PG*\`, ir URL nustotų būti vienintelis taikinio šaltinis. Rasta: ${zali.join(", ")}`
+  );
+
+  /** ⚠️ `spawn` yra vienintelė leistina išimtis, ir ji privalo turėti savo `env`. */
+  const spawnBlokas = svarus.slice(svarus.indexOf("spawn("), svarus.indexOf("spawn(") + 700);
+  assert.match(
+    spawnBlokas,
+    /env:\s*libpqSvariAplinka\(\)/,
+    "`spawn` kelias privalo perduoti švarią aplinką eksplicitiškai"
+  );
+});
