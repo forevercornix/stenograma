@@ -3,6 +3,7 @@ const { STATUS, JOB_TYPES, TTL_MS, isFinished } = require("./common");
 const { createLogger } = require("../../utils/logger");
 const tombstones = require("../deletionTombstones");
 const maintenanceLock = require("../maintenanceLock");
+const { pgJungtiesNustatymai } = require("../pgConnection");
 
 /**
  * VIDINIS gyvavimo ciklo raktas (#19 PR3).
@@ -110,7 +111,8 @@ async function initializeStore() {
    */
   if (choice.barjeras) {
     log.warn(
-      `⚠️  DATABASE_URL nustatytas, bet job metaduomenys LIEKA "${choice.norimas}" backend'e. ` +
+      /** ⚠️ „PostgreSQL nurodytas", ne „DATABASE_URL nustatytas" (#245): `PGHOST` forma lygiavertė. */
+      `⚠️  PostgreSQL nurodytas, bet job metaduomenys LIEKA "${choice.norimas}" backend'e. ` +
         "PostgreSQL kaip autoritetinga saugykla dar neaktyvuota (#155 aktyvavimo barjeras). " +
         (choice.norimas === "memory"
           ? "Job'ai NEIŠGYVENS restarto - persistencijai reikia REDIS_URL."
@@ -229,8 +231,15 @@ function queryTimeoutMs(env = process.env) {
  * testui, ir vienintelis įrodymas būtų šaltinio teksto paieška (AGENTS.md §9.2).
  */
 function jobPoolNustatymai(env = process.env) {
+  /**
+   * ⚠️ JUNGTIES FORMA — NE ČIA (#245). `pgJungtiesNustatymai()` yra VIENINTELIS
+   * autoritetas, kuris renkasi tarp `DATABASE_URL` ir diskrečių `PG*`. Iki šito
+   * šis pool'as mokėjo tik `connectionString`, tad dokumentuotame Compose diegime
+   * (`PG*`, be `DATABASE_URL`) jis gaudavo `connectionString: undefined` ir
+   * jungdavosi prie `pg` numatytosios bazės — TYLIAI, be jokios klaidos.
+   */
   return {
-    connectionString: env.DATABASE_URL,
+    ...pgJungtiesNustatymai(env),
     connectionTimeoutMillis: connectTimeoutMs(env),
     statement_timeout: queryTimeoutMs(env),
     query_timeout: queryTimeoutMs(env),
@@ -333,7 +342,7 @@ const BUTINOS_LENTELES = Object.freeze({
   artifact_migration_progress: REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS,
 });
 
-async function initializePostgres() {
+async function initializePostgres(env = process.env) {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
 
@@ -348,7 +357,7 @@ async function initializePostgres() {
    * Simetriška Redis keliui, kuris irgi neleidžia sau laukti amžinai
    * (`maxRetriesPerRequest`, `retryStrategy`).
    */
-  const pool = new Pool(jobPoolNustatymai(process.env));
+  const pool = new Pool(jobPoolNustatymai(env));
 
   /**
    * ⚠️ NEVEIKLIOS JUNGTIES KLAIDA NETURI NUŽUDYTI PROCESO (#155, 7.4b peržiūra).

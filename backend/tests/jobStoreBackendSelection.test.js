@@ -332,10 +332,39 @@ test("PARINKIMAS: JOB_STORE_BACKEND=redis be REDIS_URL yra KLAIDA", () => {
   );
 });
 
-test("PARINKIMAS: JOB_STORE_BACKEND=postgres be DATABASE_URL yra KLAIDA", () => {
+test("PARINKIMAS: JOB_STORE_BACKEND=postgres be JOKIOS PostgreSQL nuorodos yra KLAIDA", () => {
+  /**
+   * ⚠️ INVARIANTAS SUSIAURINTAS (#245), IR ANKSTESNIS MATCHER'IS DABAR BŪTŲ
+   * NETEISINGAS.
+   *
+   * Buvo tikrinama `/DATABASE_URL nenustatytas/`. Reikalavimas pasikeitė iš
+   * esmės: „PostgreSQL nurodytas" reiškia `DATABASE_URL` ARBA `PGHOST` su `PG*`
+   * rinkiniu. Palikus seną tekstą pranešimas MELUOTŲ — dokumentuotame Compose
+   * diegime operatorius nustatytų `DATABASE_URL`, nors jo diegimui reikia `PG*`.
+   *
+   * Todėl tikrinama, kad įvardytos ABI formos, ir kad `PG*`-only kelias realiai
+   * praeina. Be antrosios asercijos „klaida su geresniu tekstu" būtų
+   * neatskiriama nuo „klaida, kaip ir anksčiau".
+   */
   assert.throws(
     () => resolveBackendChoice({ JOB_STORE_BACKEND: "postgres" }),
-    /DATABASE_URL nenustatytas/
+    (err) => {
+      assert.match(err.message, /DATABASE_URL/, "pirma forma privalo būti įvardyta");
+      assert.match(err.message, /PGHOST/, "antra forma irgi - kitaip pranešimas nurodo ne tą taisymą");
+      return true;
+    }
+  );
+
+  assert.equal(
+    resolveBackendChoice({
+      JOB_STORE_BACKEND: "postgres",
+      PGHOST: "db.compose",
+      PGUSER: "u",
+      PGPASSWORD: "p",
+      PGDATABASE: "stenograma",
+    }).norimas,
+    "postgres",
+    "`PG*`-only diegime eksplicitinė persistencija privalo būti ĮMANOMA"
   );
 });
 

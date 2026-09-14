@@ -44,12 +44,37 @@ Compose profiliai naudoja `PG*` **sąmoningai**: slaptažodis su URI simboliais
 (`/`, `?`, `#`, `@`) sukonstruotame URL reikštų kitką arba jį sugadintų. `pg`
 `PG*` skaito be jokio kodavimo.
 
-⚠️ **ABU KARTU — KLAIDA, ne pirmenybė.** `AUDIT_BACKEND=postgres` su abiem
-nustatytais **nutraukia startą**. Priežastis: pool'as teiktų pirmenybę
-`DATABASE_URL`, o operatorius, matantis Compose `PG*`, pagrįstai manytų kitaip —
-ir auditas rašytųsi į kitą duomenų bazę, nei atrodo. Auditas yra būtent ta
-lentelė, apie kurią klausiama po incidento, tad „į kurią DB jis rašė" negali
-priklausyti nuo tylios pirmenybės.
+⚠️ **ABU KARTU — KLAIDA TIK TADA, KAI JIE SKIRIASI (#245).** `AUDIT_BACKEND=postgres`
+su abiem nustatytais **nutraukia startą tik tada**, kai aplinka pakeičia
+efektyvią jungties semantiką, kurią apibrėžia `DATABASE_URL`: taikinį
+(`host`/`port`/`database`), kredencialus, SSL arba DB sesijos namespace
+(`options`, `client_encoding`).
+
+⚠️ Lyginamos **efektyvios** reikšmės, ne simbolių eilutės: host'ai normalizuojami
+kaip DNS vardai (`LOCALHOST` = `localhost`). `PGBINARY` ir `PGCLIENT_ENCODING` į
+sąrašą **neįeina**: pirmojo `Client` neskaito, antrojo reikšmę jis perduoda
+`Connection`'ui, kuris jos nevartoja (`pg-protocol` dekodavimas fiksuotas
+`utf-8`).
+
+Priežastis, kodėl taisyklė nebėra „bet koks maišymas": su **pilnu** DSN `PGHOST`
+`pg` semantikai neturi jokios įtakos — `pg` ima DSN reikšmę pirma. Senoji
+taisyklė krisdavo ten, kur dviprasmybės nebuvo, ir tuo pačiu **nematė**
+`PGSSLMODE` ar `PGOPTIONS`, kurie pilną DSN realiai perrašo. `-csearch_path=…`
+reiškia kitą schemą — t. y. tiksliai tą „auditas kitoje vietoje" atvejį, kurio ji
+ir siekė neleisti.
+
+⚠️ **Ši taisyklė NĖRA audito taisyklė.** Ji gyvena bendroje PostgreSQL pool'o
+nustatymų funkcijoje, tad galioja visiems pool'ams ir diagnostiniam klientui —
+įskaitant diegimus, kuriuose `AUDIT_BACKEND` apskritai nenustatytas. Čia ji
+aprašyta todėl, kad iki #245 audito atranka turėjo savo, siauresnę ir
+neteisingą, kopiją.
+
+⚠️ **Operatoriui vis tiek rekomenduojama viena forma.** Tai paprasčiausia ir
+mažiausiai dviprasmiška eksploatacinė praktika — bet tai rekomendacija, ne tai,
+ką tikrina kodas.
+
+Auditas yra būtent ta lentelė, apie kurią klausiama po incidento, tad „į kurią DB
+jis rašė" negali priklausyti nuo tylios pirmenybės.
 
 ⚠️ Įterptiniams kvietėjams: `init(env)` perduoti `PG*` **persiunčiami** į pool'ą,
 o ne paliekami `pg` skaityti iš `process.env` — kitaip konfigūracija būtų priimta

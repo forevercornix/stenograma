@@ -1,3 +1,11 @@
+const {
+  PgConnectionError,
+  arNurodytaPostgres,
+  arDviprasmiskaKonfiguracija,
+  dviprasmybesTekstas,
+  jungtiesSemantikosSkirtumai,
+} = require("../pgConnection");
+
 /**
  * AUDITO BACKEND'O PARINKIMAS (#155, 7.4b / #211).
  *
@@ -57,26 +65,34 @@ function resolveAuditBackend(env = process.env) {
    * perduoda tik tada, kai URL realiai yra.
    */
   /**
-   * ⚠️ ABU BŪDAI KARTU - KLAIDA, NE PIRMENYBĖ.
+   * ⚠️ ABU BŪDAI KARTU - KLAIDA TIK TADA, KAI JIE SKIRIASI (#245).
    *
-   * Repo tai jau deklaruoja (`startupChecks.js`: „ABU KONFIGŪRAVIMO BŪDAI KARTU
-   * = KLAIDA, ne pirmenybė"), bet TIK minkštame self-check'e, kuris vykdomas PO
-   * `listen()`. Auditui to nepakanka: `auditoPoolNustatymai()` tyliai teikia
-   * pirmenybę `DATABASE_URL`, tad servisas galėtų paskelbti readiness ir rašyti
-   * auditą į VISAI KITĄ duomenų bazę nei ta, kurią nurodo Compose `PG*`.
+   * Ankstesnė redakcija čia turėjo SAVO taisyklę (`DATABASE_URL && PGHOST`) ir
+   * savo pranešimą. Ji buvo teisinga dėl klausimo („į kurią DB rašomas
+   * auditas?") ir neteisinga dėl atsakymo: su PILNU DSN `PGHOST` `pg`
+   * semantikai neturi JOKIOS įtakos (`connection-parameters.js:9-23` — ima
+   * `config.host` pirma), tad startas krisdavo ten, kur dviprasmybės nebuvo.
    *
-   * Auditas yra būtent ta lentelė, apie kurią klausiama po incidento - „į kurią
-   * DB jis rašė" negali priklausyti nuo tylios pirmenybės.
+   * ⚠️ IR PER LAISVA. `PGSSLMODE`, `PGOPTIONS`, `PGCLIENT_ENCODING` pilną DSN
+   * PERRAŠO, o ši taisyklė jų nematė. `-csearch_path=…` reiškia KITĄ schemą —
+   * t. y. tiksliai tą „auditas kitoje vietoje" atvejį, kurio ji siekė neleisti.
+   *
+   * Dabar klausimą sprendžia vienas autoritetas visiems keturiems pool'ams.
    */
-  if (env.DATABASE_URL && env.PGHOST) {
-    throw new Error(
-      "AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST. " +
-        "Neaišku, į kurią DB rašomas auditas: pool'as teiktų pirmenybę " +
-        "DATABASE_URL, o Compose profiliai naudoja PG*. Palikite TIK VIENĄ būdą."
+  if (arDviprasmiskaKonfiguracija(env)) {
+    /**
+     * ⚠️ TIPUOTA KLAIDA, NE TEKSTAS (#245 peržiūra). `validateConfig()` tą pačią
+     * dviprasmybę praneša centrinėje vietoje; be `code` jam liktų tik eilučių
+     * palyginimas, o šis pranešimas turi savo priešdėlį ir nesutaptų. Rezultatas
+     * būtų dvi klaidos vienai priežasčiai.
+     */
+    throw new PgConnectionError(
+      `AUDIT_BACKEND=postgres, bet ${dviprasmybesTekstas(jungtiesSemantikosSkirtumai(env))}`,
+      "PG_CONNECTION_AMBIGUOUS"
     );
   }
 
-  if (!env.DATABASE_URL && !env.PGHOST) {
+  if (!arNurodytaPostgres(env)) {
     throw new Error(
       "AUDIT_BACKEND=postgres, bet nei DATABASE_URL, nei PGHOST nenustatyti. " +
         "Eksplicitinis backend'as negali tyliai virsti atmintimi - audito " +

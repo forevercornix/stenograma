@@ -1,5 +1,6 @@
 const { describeSelection, isExternal } = require("./providerPrivacy");
 const { isPersistentBackend, selectBackend } = require("./jobStore/backendSelection");
+const { arNurodytaPostgres } = require("./pgConnection");
 const { probeRedactionComponent, isRedactionAvailable } = require("./redactionComponent");
 
 /**
@@ -205,7 +206,18 @@ function validatePrivacyConfig(env = process.env) {
 
   // --- Persistentinė saugykla (GDPR #5: "persistent storage can be disabled") ---
   const redisConfigured = Boolean(env.REDIS_URL);
-  const postgresConfigured = Boolean(env.DATABASE_URL);
+  /**
+   * ⚠️ BENDRAS DETEKTORIUS, NE `DATABASE_URL` (#245, Codex IV A2).
+   *
+   * `Boolean(env.DATABASE_URL)` čia buvo paskutinė vieta repo, kur „ar
+   * PostgreSQL sukonfigūruotas" buvo sprendžiama pagal VIENĄ kintamojo vardą.
+   * `PGHOST`-only diegimui tai davė du melus vienu metu:
+   *
+   *   1. „nei REDIS_URL, nei DATABASE_URL nenustatytas" — nors PostgreSQL
+   *      sukonfigūruotas, ir operatorius siunčiamas kelti Redis be reikalo;
+   *   2. prieštaros pranešime `kuris` likdavo TUŠČIAS („bet nustatytas  -").
+   */
+  const postgresConfigured = arNurodytaPostgres(env);
   /**
    * ⚠️ NE `REDIS_URL || DATABASE_URL`.
    *
@@ -217,14 +229,27 @@ function validatePrivacyConfig(env = process.env) {
   const persistentConfigured = isPersistentBackend(env);
 
   if (config.persistentExplicit && !config.persistentStorage && persistentConfigured) {
-    const kuris = [redisConfigured && "REDIS_URL", postgresConfigured && "DATABASE_URL"]
-      .filter(Boolean)
-      .join(" ir ");
+    /**
+     * ⚠️ ĮVARDIJAMAS TIKRASIS SELEKTORIUS, NE JUNGTIES KINTAMASIS.
+     *
+     * Su `JOB_STORE_BACKEND=postgres` patarimas „pašalinkite DATABASE_URL"
+     * NEVEIKIA: jį pašalinus atranka vis tiek reikalautų PostgreSQL, o su
+     * `PG*` diegimu tokio kintamojo apskritai nėra. Persistenciją čia renka
+     * `JOB_STORE_BACKEND`, ir būtent jį operatorius turi keisti.
+     */
+    const pasirinktas = _jobStateBackend(env);
+    const kuris =
+      pasirinktas === "postgres"
+        ? "JOB_STORE_BACKEND=postgres"
+        : [redisConfigured && "REDIS_URL", postgresConfigured && "PostgreSQL (`DATABASE_URL`/`PGHOST`)"]
+            .filter(Boolean)
+            .join(" ir ");
+
     errors.push(
-      `PERSISTENT_STORAGE=false, bet nustatytas ${kuris} - prieštaringa konfigūracija. ` +
-        "Jobų būsena ir rezultatai (transkripcija, protokolas) atsidurtų patvarioje " +
-        `saugykloje, nors prašoma nieko nesaugoti. Pašalinkite ${kuris} arba nustatykite ` +
-        "PERSISTENT_STORAGE=true."
+      `PERSISTENT_STORAGE=false, bet persistenciją renka ${kuris} - prieštaringa ` +
+        "konfigūracija. Jobų būsena ir rezultatai (transkripcija, protokolas) atsidurtų " +
+        `patvarioje saugykloje, nors prašoma nieko nesaugoti. Pašalinkite ${kuris} arba ` +
+        "nustatykite PERSISTENT_STORAGE=true."
     );
   }
 
@@ -251,10 +276,12 @@ function validatePrivacyConfig(env = process.env) {
      */
     errors.push(
       postgresConfigured
-        ? "PERSISTENT_STORAGE=true su DATABASE_URL, bet job metaduomenys lieka ATMINTYJE: " +
+        ? "PERSISTENT_STORAGE=true su nurodytu PostgreSQL (`DATABASE_URL` arba `PGHOST`), " +
+            "bet job metaduomenys lieka ATMINTYJE: " +
             "PostgreSQL job saugykla renkama TIK eksplicitiškai (#155). Nustatykite " +
             "JOB_STORE_BACKEND=postgres, arba REDIS_URL, arba PERSISTENT_STORAGE=false."
-        : "PERSISTENT_STORAGE=true, bet nei REDIS_URL, nei DATABASE_URL nenustatytas - be jų " +
+        : "PERSISTENT_STORAGE=true, bet nenurodytas nei REDIS_URL, nei PostgreSQL " +
+            "(`DATABASE_URL` ar `PGHOST`) - be jų " +
             "jobų būsena lieka ATMINTYJE ir dingsta po restarto. Nustatykite vieną iš jų arba " +
             "PERSISTENT_STORAGE=false."
     );

@@ -6,6 +6,41 @@ Formatas: `## [7.x] Pavadinimas`, tada body iki kito `##`.
 
 ---
 
+## Skersiniai pataisymai (ne sub-PR)
+
+⚠️ **ANTRAŠTĖ SĄMONINGAI BE `[7.x]`, IR PAGRINDINĖ PRIEŽASTIS YRA DUBLIKATAS.**
+
+`scripts/dev/create-155-subissues.sh` esamą issue randa pagal **TIKSLŲ
+PAVADINIMĄ** (`create-155-subissues.sh:141`: `if i["title"] == pav`, kur `pav`
+yra `[<kodas>] <pavadinimas>`). #245 realus pavadinimas —
+„Keturi PostgreSQL pool'ai, dvi DSN taisyklės — …" — su `[7.x] …` niekada
+nesutaptų, tad gerai suformuota `## [7.6d]` antraštė būtų priimta ir sukurtų
+**ANTRĄ, DUBLIUOJANTĮ** issue šalia jau egzistuojančio #245.
+
+Antraeilė priežastis: netaisyklinga `## [` antraštė (pvz. `## [#245]`)
+generatorių apskritai **nutraukia** (`:105-110`) — jis reikalauja, kad kiekviena
+`## [` antraštė atitiktų `\d+\.\d+[a-z]?`.
+
+Todėl ši antraštė neturi `[` iš viso: parseris jos nemato, ir nė vienas iš dviejų
+gedimų nekyla.
+
+Čia registruojami pataisymai, apimantys kelis 7.x etapus vienu metu.
+
+| Issue | Apimtis | Paliesti etapai |
+|---|---|---|
+| #245 | Viena PostgreSQL jungties formos semantika keturiems pool'ams: `DATABASE_URL` ir `PG*` interpretuojami vienodai, dviprasmybės sargas perrašytas iš **intento** (`DATABASE_URL && PGHOST`) į **efektą** (ar aplinka keičia taikinį, kredencialus, SSL ar sesijos namespace) | 7.2a, 7.3, 7.4b, 7.4e, 7.5a |
+
+⚠️ **#245 NEKEIČIA nė vieno komponento backend pasirinkimo politikos.** `PG*`
+buvimas savaime nieko neperjungia į PostgreSQL; aktyvavimo barjeras
+(`POSTGRES_AKTYVAVIMAS_LEISTAS`) nepaliestas. Suvienodinta tik jungties FORMOS
+interpretacija ten, kur komponentas pagal savo politiką PostgreSQL jau pasirinko.
+
+⚠️ **Laužantis konfigūracijos pokytis.** Mišrios konfigūracijos, kuriose `PG*`
+pakeičia `DATABASE_URL` efektyvią semantiką, nuo #245 **stabdo startą**. Žr.
+`CHANGELOG.md` „Unreleased" ir `docs/audit-storage.md`.
+
+---
+
 ## [7.0] ADR: PostgreSQL autoritetas ir konsistencijos modelis
 
 **Tėvinis:** #155 · **Tipas:** dokumentacija · **Blokuoja:** 7.1–7.6

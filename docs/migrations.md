@@ -55,17 +55,37 @@ bazę. Nuo 7.4e `PG*` priimamas lygiai taip pat.
   migracijoms pritaikyti išlieka.
 
 **Veiksmas.** Prieš atnaujinant paleiskite migracijas prieš **tą pačią** duomenų
-bazę, į kurią rodo audito pool'as:
+bazę, į kurią rodo audito pool'as.
+
+`DATABASE_URL` diegime:
 
 ```bash
 cd backend
 DATABASE_URL=postgres://... npm run migrate:up
 ```
 
-⚠️ Aukščiau esančios komandos naudoja `DATABASE_URL`. `PG*`-only diegime
-nurodykite jį **laikinai, tik migracijoms** — arba įsitikinkite, kad
-`node-pg-migrate` jungiasi prie tos pačios bazės. Migravus į kitą bazę nei
-audito, barjeras liktų neveikiantis, o `/api/ready` — teisėtai `503`.
+`PG*`-only diegime — **su esamais kintamaisiais, nieko laikinai nekonstruojant**:
+
+```bash
+cd backend
+PGHOST=... PGPORT=... PGUSER=... PGPASSWORD=... PGDATABASE=... npm run migrate:up
+```
+
+⚠️ **Ankstesnė šio skyriaus rekomendacija buvo nurodyti `DATABASE_URL` „laikinai,
+tik migracijoms". Ji pašalinta (#245).** `node-pg-migrate` `PG*` moka pats, o
+laikinai konstruojamas URL turi dvi konkrečias ydas: slaptažodis su URI
+rezervuotais simboliais (`/`, `?`, `#`, `@`) URL'e reiškia kitką, ir po #245 toks
+URL greta `PG*` gali pats tapti dviprasmybės klaida.
+
+**Patikrinta šaltinyje** (`node-pg-migrate@9.0.0`,
+`bin/node-pg-migrate.js:347-354`): kai `DATABASE_URL` nenustatytas, įrankis
+konstruoja `pg` `ConnectionParameters()` iš aplinkos ir reikalauja `PGHOST` plius
+išsprendžiamų `user` ir `database`. Todėl `PGUSER` ir `PGDATABASE` nurodykite
+eksplicitiškai: be jų `pg` atsarga yra operacinės sistemos naudotojo vardas, ir
+migracijos nueitų į kitą bazę nei audito pool'as.
+
+Migravus į kitą bazę nei audito, barjeras liktų neveikiantis, o `/api/ready` —
+teisėtai `503`.
 
 Garantijos formuluotė — `docs/deletion-guarantees.md` §1 ir §2.
 

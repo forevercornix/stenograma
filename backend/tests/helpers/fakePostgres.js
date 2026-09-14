@@ -47,8 +47,15 @@ const SSL_REQUEST = 80877103;
  */
 async function startSilentAfterHandshake() {
   const jungtys = new Set();
+  /**
+   * ⚠️ LIUDYTOJAS, NE STATISTIKA (#245). Klausimas „ar diagnostika jungėsi prie
+   * TO endpoint'o, kurį nurodė kvietėjas, ar prie `process.env`" be jo
+   * atsakymo neturi: abu atvejai baigiasi ta pačia timeout klaida.
+   */
+  let priimta = 0;
 
   const server = net.createServer((socket) => {
+    priimta += 1;
     jungtys.add(socket);
     socket.on("close", () => jungtys.delete(socket));
     /** Klientas jungtį nutraukia pats, kai suveikia jo riba - tai ne testo klaida. */
@@ -82,6 +89,10 @@ async function startSilentAfterHandshake() {
 
   return {
     url: `postgres://testas:testas@127.0.0.1:${port}/testas`,
+    host: "127.0.0.1",
+    port: String(port),
+    /** Kiek TCP jungčių serveris realiai priėmė. */
+    priimtaJungciu: () => priimta,
 
     async close() {
       for (const s of jungtys) s.destroy();

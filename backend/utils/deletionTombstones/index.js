@@ -51,10 +51,16 @@ const log = createLogger("tombstones");
  * DB – ta pati priežastis kaip `auditStore.RETENCIJOS_ISPEJIMAS`.
  */
 const ATMINTIES_ISPEJIMAS =
-  "Ištrynimo žymos laikomos TIK ATMINTYJE (nėra DATABASE_URL). Jos neišgyvena " +
-  "restarto ir nėra bendros replikoms, tad po restarto vėluojanti eilės žinutė " +
-  "ištrintam job'ui vėl gali sukurti artefaktus. Persistentinė garantija galioja " +
-  "tik diegimams su DATABASE_URL. Žr. docs/deletion-guarantees.md §2.";
+  /**
+   * ⚠️ ĮVARDIJAMOS ABI FORMOS (#245). Nuo 7.4e šis modulis priima ir `PGHOST`,
+   * o tekstas vis dar minėjo tik `DATABASE_URL` — operatorius dokumentuotame
+   * Compose diegime iš jo suprastų, kad persistencija jam neprieinama.
+   */
+  "Ištrynimo žymos laikomos TIK ATMINTYJE (PostgreSQL nenurodytas: nėra nei " +
+  "DATABASE_URL, nei PGHOST). Jos neišgyvena restarto ir nėra bendros replikoms, " +
+  "tad po restarto vėluojanti eilės žinutė ištrintam job'ui vėl gali sukurti " +
+  "artefaktus. Persistentinė garantija galioja tik diegimams su nurodytu " +
+  "PostgreSQL. Žr. docs/deletion-guarantees.md §2.";
 
 /** Numatytoji atsarga virš prikėlimo horizonto. Vienas autoritetas. */
 const SAFETY_MARGIN_MS = 24 * 60 * 60 * 1000; // 1 para

@@ -17,6 +17,12 @@ const path = require("path");
 const { execFile } = require("child_process");
 const { KNOWN_ROLES } = require("./credentials");
 const { isProviderAllowed, approvedExternalProviders } = require("./providerGovernance");
+const {
+  arNurodytaPostgres,
+  pgJungtiesNustatymai,
+  jungtiesSemantikosSkirtumai,
+  dviprasmybesTekstas,
+} = require("./pgConnection");
 
 const KNOWN_LLM = ["mock", "claude", "gpt", "gemini"];
 const KNOWN_TRANSCRIPTION = [
@@ -188,6 +194,24 @@ function validateConfig(env = process.env) {
    * `DATABASE_URL` sesijų režimo nekeičia: jis gali būti įvestas migracijoms
    * ar auditui (7.4), ir neturi netikėtai perjungti AUTENTIKACIJOS.
    */
+  /**
+   * JUNGTIES DVIPRASMYBĖ — KIETA KLAIDA, NEPRIKLAUSOMAI NUO BACKEND'Ų (#245).
+   *
+   * ⚠️ MECHANIZMAS YRA `pgJungtiesNustatymai()`, NE ŠI EILUTĖ. Ten metama
+   * klaida sustabdo bet kurį pool'ą bet kuriame procese. Čia ta pati patikra
+   * kartojama tik tam, kad operatorius pamatytų ją KONFIGŪRACIJOS KLAIDŲ
+   * sąraše — kartu su visomis kitomis, prieš pakylant bet kuriai daliai — o ne
+   * kaip vieną išmestą klaidą iš pirmo `init()`.
+   *
+   * ⚠️ SĄLYGA YRA `arNurodytaPostgres`, NE KONKRETUS BACKEND'AS. Ištrynimo žymos
+   * PostgreSQL renkasi AUTOMATIŠKAI, tad dviprasmiška aplinka be jokio
+   * eksplicitinio `*_BACKEND=postgres` yra realus ir numatytasis atvejis.
+   */
+  if (arNurodytaPostgres(env)) {
+    const skirtumai = jungtiesSemantikosSkirtumai(env);
+    if (skirtumai.length > 0) errors.push(dviprasmybesTekstas(skirtumai));
+  }
+
   {
     const { resolveSessionBackend } = require("./sessionStore/backendSelection");
     try {
@@ -229,7 +253,17 @@ function validateConfig(env = process.env) {
       const auditoBackendas = resolveAuditBackend(env);
       if (auditoBackendas === "postgres") auditTimeoutBudget(env);
     } catch (e) {
-      errors.push(e.message);
+      /**
+       * ⚠️ TA PATI DVIPRASMYBĖ JAU PRANEŠTA AUKŠČIAU (#245 peržiūra).
+       *
+       * `resolveAuditBackend()` ją meta ir savo keliu — jis naudojamas be
+       * `validateConfig()` (pvz. `workers/index.js`). Čia ji būtų ANTRA eilutė
+       * tai pačiai priežasčiai, ir operatorius ieškotų dviejų problemų.
+       *
+       * ⚠️ Skiriama pagal `code`, ne pagal tekstą: audito pranešimas turi savo
+       * priešdėlį, tad eilučių palyginimas dublikato nepagautų.
+       */
+      if (e.code !== "PG_CONNECTION_AMBIGUOUS") errors.push(e.message);
     }
   }
 
@@ -472,7 +506,7 @@ async function runSelfChecks(env = process.env) {
    *
    * `pg` biblioteka `PG*` skaito pati, kai `connectionString` neperduodamas.
    */
-  if (env.DATABASE_URL || env.PGHOST) {
+  if (arNurodytaPostgres(env)) {
     /**
      * ⚠️ ABU KONFIGŪRAVIMO BŪDAI KARTU = KLAIDA, ne pirmenybė.
      *
@@ -484,13 +518,20 @@ async function runSelfChecks(env = process.env) {
      * Tyli pirmenybė čia blogesnė už klaidą: diagnostika, rodanti ne tą
      * duomenų bazę, yra blogesnė nei diagnostikos nebuvimas.
      */
-    if (env.DATABASE_URL && env.PGHOST) {
+    /**
+     * ⚠️ TAS PATS SARGAS KAIP STARTE, NE JO ATPASAKOJIMAS (#245).
+     *
+     * Ankstesnė redakcija čia turėjo savo `DATABASE_URL && PGHOST` sąlygą ir savo
+     * tekstą — trečią to paties sprendimo kopiją repo. Diagnostika, sakanti
+     * „KONFLIKTAS" ten, kur startas praeina (arba atvirkščiai), yra blogesnė už
+     * diagnostikos nebuvimą: operatorius taiso ne tą dalyką.
+     */
+    const skirtumai = jungtiesSemantikosSkirtumai(env);
+    if (skirtumai.length > 0) {
       checks.push({
         name: "PostgreSQL (migracijų infrastruktūra)",
         ok: false,
-        detail:
-          "KONFLIKTAS: nustatyti IR `DATABASE_URL`, IR `PGHOST` - neaišku, kuri DB " +
-          "tikrinama. Docker profiliai naudoja `PG*`; palikite tik vieną būdą.",
+        detail: `KONFLIKTAS: ${dviprasmybesTekstas(skirtumai)}`,
       });
     } else {
       checks.push(await postgresReachability(env));
@@ -599,7 +640,7 @@ async function runSelfChecks(env = process.env) {
    * backend'o vardą ir kintamojo VARDĄ; nei DSN, nei host'o, nei kredencialų.
    */
   try {
-    const { arNurodytaPostgres } = require("./pgConnection");
+    /** ⚠️ Importuojama failo viršuje (#245) — čia liko tik kvietimas. */
     const jobStore = require("./jobStore");
     const backendas = jobStore.getBackend && jobStore.getBackend();
 
@@ -644,18 +685,15 @@ async function postgresReachability(env) {
      * `pg` numatytai skaito `process.env`, o ne šiai funkcijai perduotą `env`.
      * Testams ir bet kokiam kvietimui su kitokia konfigūracija tai reikštų,
      * kad tikrinama NE ta duomenų bazė, kurią nurodė kvietėjas.
+     *
+     * ⚠️ FORMA IMAMA IŠ `pgJungtiesNustatymai()`, NE IŠSKLEIDŽIAMA ČIA (#245).
+     *
+     * Iki šito ši vieta turėjo SAVO `PG*` išskleidimą — ketvirtą kopiją greta
+     * trijų pool'ų. Diagnostika, kuri jungiasi kitaip nei produkcinis pool'as,
+     * gali rodyti žalią varnelę bazei, į kurią servisas nerašo.
      */
     client = new Client({
-      connectionString: env.DATABASE_URL || undefined,
-      ...(env.DATABASE_URL
-        ? {}
-        : {
-            host: env.PGHOST,
-            port: env.PGPORT ? Number(env.PGPORT) : 5432,
-            user: env.PGUSER,
-            password: env.PGPASSWORD,
-            database: env.PGDATABASE,
-          }),
+      ...pgJungtiesNustatymai(env),
       connectionTimeoutMillis: 5000,
       /**
        * ⚠️ UŽKLAUSŲ TIMEOUT ATSKIRAI. `connectionTimeoutMillis` galioja tik

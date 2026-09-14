@@ -27,8 +27,9 @@ Nustojus jas skaityti — nesvarbu kodėl:
   riba neegzistuoja pagal konstrukciją, o objekto raktas išvedamas iš
   identifikatorių, kurie buvo tik toje pačioje duomenų bazėje.
 
-⚠️ **TAM NEREIKIA NIEKIENO SPRENDIMO.** Pakanka, kad `DATABASE_URL` dingtų:
-pamestas Compose faile, neperduotas env kintamasis, klaida deployment'e. Startas
+⚠️ **TAM NEREIKIA NIEKIENO SPRENDIMO.** Pakanka, kad dingtų PostgreSQL nuoroda —
+`DATABASE_URL` **arba** `PGHOST` su `PG*` rinkiniu: pamesta Compose faile,
+neperduotas env kintamasis, klaida deployment'e. Startas
 pavyksta, `/api/ready` lieka žalias, o duomenys tampa nepasiekiami tyliai.
 
 ### Ką tai reiškia atsakant į subjekto prašymą
@@ -72,7 +73,7 @@ kategorijų sąrašu, o **jobas paliekamas**, kad užklausą būtų galima pakar
 ✅ Naujas darbas tuo pačiu ID nebus pradėtas.
 ✅ Pakartotinis ištrynimas nėra klaida ir duoda tą pačią galutinę būseną.
 
-### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su `DATABASE_URL`** (nuo [7.5a])
+### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su nurodytu PostgreSQL** (nuo [7.5a])
 
 Iki 7.5a žymos gyveno tik proceso atmintyje, ir tai buvo įrašyta 2 skyriuje kaip
 apribojimas. Nuo 7.5a jos saugomos `erasure_marks` lentelėje, tad:
@@ -169,6 +170,13 @@ režimą – žr. 2 skyrių. Startas tokiu atveju garsiai įspėja.
 be `DATABASE_URL`) tai reiškė auditą duomenų bazėje ir žymas atmintyje – t. y.
 7.4e barjeras skaitytų tuščią `erasure_marks` lentelę ir visada praleistų, tyliai.
 Abu pool'ai dabar statomi iš to paties `utils/pgConnection.js`.
+
+⚠️ **NUO #245 TAS PATS GALIOJA VISIEMS KETURIEMS POOL'AMS.** `jobStore`,
+`sessionStore`, `auditStore` ir ištrynimo žymos jungties formą interpretuoja
+vienodai, o `make doctor` / `/api/health/deep` diagnostinis klientas jungiasi per
+tą patį autoritetą. Tai jungties FORMOS suvienodinimas: nė vieno komponento
+backend pasirinkimo politika nesikeičia, ir `PG*` buvimas savaime nieko
+neperjungia į PostgreSQL.
 
 ---
 
@@ -323,7 +331,7 @@ t. y. ar teisingai užrašytas KINTAMASIS. Faktinį terminą tikrina
 ⚠️ **Išleista kopija termino nesutrumpina.** `BACKUP_RETENTION_DAYS` sumažinimas
 neatšaukia anksčiau eksportuotos kopijos: ji galioja pagal savo manifestą.
 Kūrimo metu jos galiojimas fiksuojamas `backup_horizon` lentelėje (aukščiausias
-vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be `DATABASE_URL`
+vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be nurodyto PostgreSQL
 kopijos galiojimas neužsirašo – tai to paties atmintinio režimo apribojimas.
 
 ---
