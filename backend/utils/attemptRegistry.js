@@ -257,7 +257,7 @@ async function valytiniBandymai(
               SELECT 1 FROM job_results r
                WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
             )
-        AND NOT ${svetimaNuosavybe("$6")}
+        /* MUTACIJA #305.1: nuosavybės sąlyga pašalinta — CI privalo kristi */
         AND ${zymosSalyga}
         AND (
               a.created_at > now()
