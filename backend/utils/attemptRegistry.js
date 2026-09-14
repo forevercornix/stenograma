@@ -257,7 +257,8 @@ async function valytiniBandymai(
               SELECT 1 FROM job_results r
                WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
             )
-        /* MUTACIJA #305.1: nuosavybės sąlyga pašalinta — CI privalo kristi */
+        /* MUTACIJA #305.1: sąlyga VISADA TEISINGA — parametras lieka, SQL galioja */
+        AND ($6::text[] IS NOT NULL)
         AND ${zymosSalyga}
         AND (
               a.created_at > now()
