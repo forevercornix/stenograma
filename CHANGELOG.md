@@ -28,7 +28,7 @@ ji pasensta ir tampa klaidinanti.
   **Sugriežtinta.** Nuo šiol startas nutrūksta, kai aplinka pakeičia
   `DATABASE_URL` apibrėžtą **efektyvią** jungties semantiką — taikinį
   (`host`/`port`/`database`), kredencialus (`user`/`password`), SSL arba DB
-  sesijos namespace (`options`, `client_encoding`). Šių atvejų senoji taisyklė
+  sesijos namespace (`options`). Šių atvejų senoji taisyklė
   **nematė**, nors `PGSSLMODE` ir `PGOPTIONS` pilną DSN realiai perrašo.
 
   Konkrečiai nustos startuoti: pusiau užpildytas DSN, kurį papildo aplinka (pvz.
@@ -36,14 +36,15 @@ ji pasensta ir tampa klaidinanti.
   **kitokiu** `PGCLIENT_ENCODING`.
 
   ⚠️ **Konflikto NESUKURIA:** `PGAPPNAME`, `PGCONNECT_TIMEOUT`, `PGBINARY`,
-  `PGCLIENT_ENCODING=UTF8` ir `PGHOST` kitu raidžių registru.
+  `PGCLIENT_ENCODING` (bet kokia reikšmė) ir `PGHOST` kitu raidžių registru.
 
   `PGBINARY` — todėl, kad `pg` `Client` jo **neskaito**: reikšmė patenka į
   `ConnectionParameters`, bet vartotojo neturi (`client.js:102` ima ją iš žalios
-  konfigūracijos). `PGCLIENT_ENCODING=UTF8` ir registro skirtumas — todėl, kad
-  lyginama tai, ką `Client` **realiai naudoja** (`client_encoding || "utf8"`), ir
-  host'ai normalizuojami kaip DNS vardai. Visi trys anksčiau būtų stabdę startą
-  be priežasties.
+  konfigūracijos). `PGCLIENT_ENCODING` — todėl, kad `Client` reikšmę **perduoda**
+  `Connection`'ui, o tas jos **neskaito**, ir `pg-protocol` dekodavimas fiksuotas
+  `utf-8` (`buffer-reader.js:8`); startup pakete visada siunčiama `UTF8`. Host'ai
+  normalizuojami kaip DNS vardai. Visi trys anksčiau būtų stabdę startą be
+  priežasties.
 
   ⚠️ **KURIE DIEGIMAI PALIEČIAMI — PLATESNIS RATAS, NEI ATRODO.**
 
@@ -119,6 +120,13 @@ ji pasensta ir tampa klaidinanti.
   Tai taisyklė, ne sąrašas: libpq aplinkos paviršius pagal konstrukciją yra
   `PG*`, tad naujas kintamasis į jį pateks automatiškai. Rankinio sąrašo čia
   išvesti neįmanoma — libpq iš JS neapklausiamas.
+
+  ⚠️ **IR `--url`/`--target` PRIVALO BŪTI PILNAS.** Kadangi vaikinis procesas
+  `PG*` nebegauna, URL, praleidžiantis portą ar host'ą, jam reiškia `pg`
+  numatytąsias reikšmes, o ne aplinkos. Tapatumo patikra dabar tai pagauna:
+  nepilnas URL `PG*` diegime duoda **nesutapimą**, ne tylų skirtumą. Runbook'o
+  komanda (`postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE`) portą nurodo
+  eksplicitiškai ir veikia toliau.
 
   **Prieš atnaujinant:** kredencialai `pg-backup`/`dr-restore` keliams privalo
   būti **URL'e arba `~/.pgpass`**. Diegimas, perdavęs `--url` be slaptažodžio ir

@@ -257,7 +257,6 @@ const LAUKU_KLASES = Object.freeze({
   ssl: "saugumas",
   sslnegotiation: "saugumas",
   options: "sesija",
-  client_encoding: "sesija",
   replication: "sesija",
 });
 
@@ -298,6 +297,33 @@ const NEREIKSMINGI = Object.freeze([
    * autoriumi.
    */
   "binary",
+  /**
+   * ⚠️ `client_encoding` (`PGCLIENT_ENCODING`) — TA PATI KLASĖ KAIP `binary`, IR
+   * ŠĮ KARTĄ AUDITAS SUSTOJO TIES PIRMU SKAITYTOJU (Codex V, C).
+   *
+   * Trečiame raunde PANEIGIAU teiginį, kad laukas nevartojamas: radau
+   * `client.js:97` — `encoding: this.connectionParameters.client_encoding ||
+   * "utf8"` — ir sustojau. Bet skaitytojas reikšmę PERDUODA, o ne VARTOJA.
+   * Patikrinta grandinė iki galo:
+   *
+   *   `client.js:97`          → `new Connection({ encoding })`
+   *   `connection.js:15-38`   → konstruktorius `config.encoding` NESKAITO
+   *                             (`grep "encoding" connection.js` → 0 atitikmenų)
+   *   `pg-protocol` `BufferReader` → `this.encoding = "utf-8"` FIKSUOTAI,
+   *                             su komentaru `TODO(bmc): support non-utf8`
+   *   `serializer.js:12`      → startup pakete visada `client_encoding=UTF8`
+   *
+   * Vadinasi net `LATIN1` runtime semantikos NEKEIČIA, o startas dėl jo krisdavo.
+   *
+   * ⚠️ TAI SUBTILESNIS „REIKŠMĖS BE VARTOTOJO" PAVIDALAS: vartotojas YRA, bet jis
+   * pats jos nevartoja. Ir tai antras kartas, kai suklydau ties TUO PAČIU lauku —
+   * pirmą kartą per plačiai („perrašo DSN"), antrą per siaurai („turi vartotoją").
+   *
+   * ⚠️ LIEKA RIBA: `connection-parameters.js:173` jį įrašo į
+   * `getLibpqConnectionString()`, kurį naudoja `pg-native`. Repo `pg-native`
+   * NENAUDOJA (patikrinta); atsiradus jam šis įrašas turėtų grįžti į klases.
+   */
+  "client_encoding",
 ]);
 
 /**
@@ -310,10 +336,9 @@ const NEREIKSMINGI = Object.freeze([
  * vardai registrui nejautrūs. Sargas, kurio visa prasmė yra fail-closed,
  * blokuodavo teisėtą konfigūraciją — blogiausia kryptis.
  *
- * ⚠️ `client_encoding` NORMALIZUOJAMAS PAGAL TAI, KĄ REALIAI NAUDOJA `Client`:
- * `client.js:97` — `client_encoding || "utf8"`, ir tai Node srauto kodavimo
- * vardas, kuris registrui nejautrus. Be šito `PGCLIENT_ENCODING=UTF8` su pilnu
- * DSN duodavo `""` prieš `"UTF8"` ir stabdydavo startą, nors abu reiškia tą patį.
+ * ⚠️ `client_encoding` ČIA NEBĖRA: jis perkeltas į `NEREIKSMINGI`, nes grandinė
+ * `Client` → `Connection` → `pg-protocol` jo NEVARTOJA (žr. ten). Normalizatorius
+ * jam būtų antras „be vartotojo" įrašas — šįkart mano paties kode.
  *
  * ⚠️ `isDomainSocket` NENORMALIZUOJAMAS SĄMONINGAI: jis IŠVEDAMAS iš `host`
  * (`connection-parameters.js:117`), tad be `host` skirtumo skirtis negali. JS
@@ -322,7 +347,6 @@ const NEREIKSMINGI = Object.freeze([
  */
 const NORMALIZATORIAI = Object.freeze({
   host: (v) => normalizuotiHosta(v),
-  client_encoding: (v) => String(v || "utf8").toLowerCase(),
 });
 
 /** `ssl` gali būti `false`, `true`, `"no-verify"` arba objektas — lyginama forma, ne tapatybė. */
@@ -555,7 +579,25 @@ function tapatybesTekstas(tapatybe) {
  * riba, kurią aprašo šio failo antraštė. Neatpažinta forma reiškia NESUTAPIMĄ
  * (fail-closed), o ne „tikriausiai gerai".
  */
-function arTaPatiBaze(url, env = process.env) {
+/**
+ * ⚠️ TREČIAS ARGUMENTAS — KAI PATIKRA IR VYKDYMAS MATO SKIRTINGĄ APLINKĄ.
+ *
+ * Iki ketvirto peržiūros raundo jo nereikėjo: visi keliai vykdydavo su ta pačia
+ * aplinka, kurią matė patikra. `libpqSvariAplinka()` tai PAKEITĖ — `pg_dump` ir
+ * `psql` dabar gauna aplinką BE `PG*`, o patikra `--url` toliau sprendė su
+ * pilna. Nesutapimas: patikra patvirtindavo `db.prod:6543`, o vaikinis procesas
+ * jungdavosi prie `db.prod:5432`.
+ *
+ * ⚠️ TAI NE RECIDYVAS, O PATAISOS ŠALUTINIS POVEIKIS. Ankstesnė būsena buvo
+ * bloga kitaip (vaikas paveldėdavo `PG*`), bet modelis ir vykdymas SUTAPDAVO.
+ * Uždarius paveldėjimą, jie išsiskyrė — ir tai klausimas, kurį reikia užduoti po
+ * KIEKVIENO ribos uždarymo: kas dabar mato kitokią tikrovę nei anksčiau?
+ *
+ * `vykdymoAplinka` liečia TIK `nurodyta` pusę — tą URL, kuris keliauja
+ * vykdytojui. `konfiguracija` (mūsų pačių pool'ai) sprendžiama su TIKRA aplinka,
+ * nes Node pool'ai `process.env` skaito ir toliau.
+ */
+function arTaPatiBaze(url, env = process.env, vykdymoAplinka = env) {
   /**
    * ⚠️ DVIPRASMYBĖ TIKRINAMA PIRMA. Su abiem formomis prioritetas priklauso nuo
    * to, kas konstruoja pool'ą, tad „ta pati bazė?" atsakymo apskritai neturi.
@@ -572,7 +614,7 @@ function arTaPatiBaze(url, env = process.env) {
    * interpretacija.
    */
   const konfiguracija = jungtiesTapatybe(pgJungtiesNustatymai(env), env);
-  const nurodyta = jungtiesTapatybe({ connectionString: url }, env);
+  const nurodyta = jungtiesTapatybe({ connectionString: url }, vykdymoAplinka);
 
   const sutampa =
     konfiguracija !== null &&

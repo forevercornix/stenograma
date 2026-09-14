@@ -121,7 +121,20 @@ const PG_DUMP_ARGUMENTAI = (databaseUrl) => [
 function libpqSvariAplinka(env = process.env) {
   const svari = {};
   for (const [raktas, reiksme] of Object.entries(env)) {
-    if (raktas.startsWith("PG")) continue;
+    /**
+     * ⚠️ REGISTRAS NORMALIZUOJAMAS (Codex V, A) — TAISYKLĖS REALIZACIJA, NE PATI
+     * TAISYKLĖ.
+     *
+     * `startsWith("PG")` yra registrui JAUTRI, o Windows aplinkos kintamųjų
+     * vardai — NE. Kintamasis `pghostaddr` filtrą praeidavo, o libpq jį
+     * išsprendžia kaip `PGHOSTADDR`. Repo Windows palaiko eksplicitiškai
+     * (`README` diegimo skyrius), tad tai ne teorinis atvejis.
+     *
+     * Komentaras žemiau sako „tai ne sąrašas, o taisyklė". Taisyklė buvo
+     * teisinga; jos realizacija taisyklė nebuvo — platformoje, kur registras
+     * nereikšmingas, ji praleisdavo.
+     */
+    if (raktas.toUpperCase().startsWith("PG")) continue;
     svari[raktas] = reiksme;
   }
   return svari;
@@ -510,7 +523,19 @@ function patikrintiZymuTapatuma(databaseUrl, env = process.env) {
    */
   let palyginimas;
   try {
-    palyginimas = arTaPatiBaze(databaseUrl, env);
+    /**
+     * ⚠️ URL SPRENDŽIAMAS TA PAČIA ŠVARIA APLINKA, KURIĄ GAUS `pg_dump` (Codex V, B).
+     *
+     * Be trečiojo argumento patikra `--url` papildydavo `PG*` reikšmėmis, kurių
+     * vaikinis procesas NEBEGAUNA: tapatybė patvirtindavo vieną klasterį, o
+     * dump'as eidavo į kitą. Išmatuota: `postgres://u@db.prod/prod` plius
+     * `PGPORT=6543` → patikra sakė `6543`, `pg_dump` jungdavosi prie `5432`.
+     *
+     * ⚠️ `konfiguracija` pusė LIEKA su tikra aplinka: žymų pool'as yra Node `pg`,
+     * ir jis `PG*` skaito. Dvi pusės, dvi aplinkos — būtent todėl, kad jos
+     * skirtingos vykdyme.
+     */
+    palyginimas = arTaPatiBaze(databaseUrl, env, libpqSvariAplinka(env));
   } catch (klaida) {
     if (klaida.code === "PG_CONNECTION_AMBIGUOUS") {
       throw new PgDumpBackupError(klaida.message, "PG_BACKUP_CONNECTION_AMBIGUOUS");
@@ -1052,6 +1077,8 @@ function _psqlSuStdin(targetUrl, sql) {
 }
 
 module.exports = {
+  /** ⚠️ Eksportuojama TESTUI: registrui nejautrus filtras yra elgsena, ne detalė. */
+  libpqSvariAplinka,
   PG_DUMP_ARGUMENTAI,
   SNAPSHOTA_LAUZANCIOS_VELIAVOS,
   ANTRASTE,

@@ -896,7 +896,16 @@ test("KONFLIKTAS: dvi jungties formos NUTRAUKIA startą TIK kai duoda skirtingą
      */
     ["PGSSLMODE (saugumas)", { PGSSLMODE: "require" }],
     ["PGOPTIONS (sesijos namespace)", { PGOPTIONS: "-csearch_path=kita" }],
-    ["PGCLIENT_ENCODING (sesija)", { PGCLIENT_ENCODING: "LATIN1" }],
+    /**
+     * ⚠️ `PGCLIENT_ENCODING` PAŠALINTAS PO PENKTO PERŽIŪROS RAUNDO.
+     *
+     * Jis atrodė kaip sesijos semantiką keičiantis kintamasis, bet grandinė
+     * `Client` → `Connection` → `pg-protocol` reikšmės NEVARTOJA: `Connection`
+     * `config.encoding` neskaito, o `pg-protocol` dekodavimas fiksuotas `utf-8`.
+     * Startas dėl jo krisdavo be priežasties. Vietoj jo — `PGREPLICATION`, kurį
+     * `getStartupConf()` realiai perduoda serveriui.
+     */
+    ["PGREPLICATION (sesija)", { PGREPLICATION: "true" }],
   ]) {
     assert.throws(
       () => resolveAuditBackend({ ...bazė, DATABASE_URL: PILNAS, ...aplinka }),

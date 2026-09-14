@@ -146,7 +146,13 @@ test("D2: konfliktas sprendžiamas pagal EFEKTYVIĄ semantiką, ne pagal env var
     ["DSN be porto + `PGPORT`", "postgres://vartotojas@db.prod/stenograma", { PGPORT: "6543" }, true],
     ["pilnas DSN + `PGSSLMODE=require`", PILNAS, { PGSSLMODE: "require" }, true],
     ["pilnas DSN + `PGOPTIONS` (`search_path`)", PILNAS, { PGOPTIONS: "-csearch_path=kita" }, true],
-    ["pilnas DSN + `PGCLIENT_ENCODING`", PILNAS, { PGCLIENT_ENCODING: "LATIN1" }, true],
+    /**
+     * ⚠️ BUVO `true` IKI PENKTO RAUNDO. `client_encoding` perkeltas į
+     * `NEREIKSMINGI`: grandinė `Client` → `Connection` → `pg-protocol` reikšmės
+     * NEVARTOJA, tad startas dėl jos krisdavo be priežasties. Žr. `NEREIKSMINGI`
+     * komentarą ir testą „D2: NEREIKSMINGI — TRYS priežastys".
+     */
+    ["pilnas DSN + `PGCLIENT_ENCODING` (be vartotojo)", PILNAS, { PGCLIENT_ENCODING: "LATIN1" }, false],
     ["pilnas DSN + `PGAPPNAME`", PILNAS, { PGAPPNAME: "doctor" }, false],
     ["pilnas DSN + `PGCONNECT_TIMEOUT`", PILNAS, { PGCONNECT_TIMEOUT: "9" }, false],
     ["pilnas DSN be aplinkos", PILNAS, {}, false],
@@ -175,7 +181,8 @@ test("D2: skirtumas pranešamas KLASE - `PGSSLMODE` yra saugumas, `PGOPTIONS` se
 
   assert.deepEqual(klases({ PGSSLMODE: "require" }), ["saugumas"]);
   assert.deepEqual(klases({ PGOPTIONS: "-csearch_path=kita" }), ["sesija"]);
-  assert.deepEqual(klases({ PGCLIENT_ENCODING: "LATIN1" }), ["sesija"]);
+  /** ⚠️ `PGCLIENT_ENCODING` čia nebėra — jis `NEREIKSMINGI`, žr. penktą raundą. */
+  assert.deepEqual(klases({ PGREPLICATION: "true" }), ["sesija"], "kitas TIKRAS sesijos laukas");
   assert.deepEqual(
     jungtiesSemantikosSkirtumai({ DATABASE_URL: "postgres://db.prod/stenograma", PGPORT: "6543", PGUSER: "kitas" }),
     ["kredencialai", "taikinys"],
@@ -183,7 +190,7 @@ test("D2: skirtumas pranešamas KLASE - `PGSSLMODE` yra saugumas, `PGOPTIONS` se
   );
 });
 
-test("D2: `NEREIKSMINGI` — DVI SKIRTINGOS priežastys, abi išmatuotos", () => {
+test("D2: `NEREIKSMINGI` — TRYS skirtingos priežastys, visos išmatuotos", () => {
   /**
    * ⚠️ BE ANTROSIOS PUSĖS ŠIS SĄRAŠAS BŪTŲ NEATSKIRIAMAS NUO PRALEIDIMO.
    *
@@ -193,7 +200,9 @@ test("D2: `NEREIKSMINGI` — DVI SKIRTINGOS priežastys, abi išmatuotos", () =>
    *
    *   1. `application_name`, `connect_timeout` — `pg` juos REALIAI perrašo, bet
    *      jie nekeičia taikinio, kredencialų, saugumo ar sesijos namespace;
-   *   2. `binary` — `pg` jį perskaito, bet `Client` jo NESKAITO IŠ VISO.
+   *   2. `binary` — `pg` jį perskaito, bet `Client` jo NESKAITO IŠ VISO;
+   *   3. `client_encoding` — `Client` jį PERDUODA `Connection`'ui, o tas jo
+   *      neskaito, ir `pg-protocol` dekodavimas fiksuotas `utf-8`.
    *
    * Antroji priežastis rasta Codex peržiūroje ir yra „reikšmė be vartotojo"
    * klasė MŪSŲ PAČIŲ kode: ankstesnė redakcija `binary` klasifikavo kaip
@@ -212,7 +221,10 @@ test("D2: `NEREIKSMINGI` — DVI SKIRTINGOS priežastys, abi išmatuotos", () =>
     }
   };
 
-  assert.deepEqual([...NEREIKSMINGI].sort(), ["application_name", "binary", "connect_timeout"]);
+  assert.deepEqual(
+    [...NEREIKSMINGI].sort(),
+    ["application_name", "binary", "client_encoding", "connect_timeout"]
+  );
 
   /** 1 priežastis: `pg` juos perrašo — tad jų buvimas sąraše yra APSISPRENDIMAS. */
   const cp = (aplinka) => su(aplinka, () => new ConnectionParameters({ connectionString: PILNAS }));
@@ -251,12 +263,43 @@ test("D2: `NEREIKSMINGI` — DVI SKIRTINGOS priežastys, abi išmatuotos", () =>
       "`binary` privalo grįžti į `LAUKU_KLASES`, o ne likti `NEREIKSMINGI`"
   );
 
-  /** ⚠️ IR SARGO PUSĖ: `PGBINARY` su pilnu DSN starto NESTABDO. */
-  assert.deepEqual(
-    jungtiesSemantikosSkirtumai({ DATABASE_URL: PILNAS, PGBINARY: "true" }),
-    [],
-    "klaidingas teigiamas fail-closed sarge yra blogiausia jo kryptis"
+  /**
+   * 3 priežastis: `client_encoding` PERDUODAMAS, bet GAVĖJAS jo nevartoja.
+   *
+   * ⚠️ SUBTILESNIS PAVIDALAS, IR AŠ JĮ PRALEIDAU. Trečiame raunde radau
+   * `client.js:97` (`encoding: client_encoding || "utf8"`) ir sustojau, padaręs
+   * išvadą „turi vartotoją". Skaitytojas reikšmę PERDUODA, o ne VARTOJA.
+   *
+   * Tikrinama pati grandinė, ne mano išvada apie ją.
+   */
+  const fs = require("node:fs");
+  const kelias = (m) => require.resolve(m);
+
+  const connectionJs = fs.readFileSync(kelias("pg/lib/connection.js"), "utf8");
+  assert.ok(
+    !/encoding/.test(connectionJs),
+    "`Connection` NETURI skaityti `encoding` - jei ims, `client_encoding` privalo grįžti į klases"
   );
+
+  const bufferReader = fs.readFileSync(kelias("pg-protocol/dist/buffer-reader.js"), "utf8");
+  assert.match(
+    bufferReader,
+    /this\.encoding = ['"]utf-8['"]/,
+    "`pg-protocol` dekodavimas privalo likti FIKSUOTAS - kitaip reikšmė vėl imtų veikti"
+  );
+
+  /** ⚠️ IR SARGO PUSĖ: nė vienas iš trijų su pilnu DSN starto NESTABDO. */
+  for (const aplinka of [
+    { PGBINARY: "true" },
+    { PGCLIENT_ENCODING: "LATIN1" },
+    { PGAPPNAME: "doctor" },
+  ]) {
+    assert.deepEqual(
+      jungtiesSemantikosSkirtumai({ DATABASE_URL: PILNAS, ...aplinka }),
+      [],
+      `klaidingas teigiamas fail-closed sarge yra blogiausia jo kryptis: ${JSON.stringify(aplinka)}`
+    );
+  }
 });
 
 test("D2: KREDENCIALŲ konfliktas failina, bet slaptažodis niekur nepatenka", () => {
@@ -1175,7 +1218,12 @@ test("KLAIDINGI TEIGIAMI: registras ir kodavimo vardas NESTABDO starto", () => {
     ["C: `PGHOST` kitu registru", "postgres://u:p@/stenograma", { PGHOST: "LOCALHOST" }, []],
     ["C: `PGHOST` tas pats", "postgres://u:p@/stenograma", { PGHOST: "localhost" }, []],
     ["A: `PGCLIENT_ENCODING=UTF8`", PILNAS, { PGCLIENT_ENCODING: "UTF8" }, []],
-    ["A: `PGCLIENT_ENCODING=utf8`", PILNAS, { PGCLIENT_ENCODING: "utf8" }, []],
+    /**
+     * ⚠️ `LATIN1` IRGI — IR TAI PASIKEITĖ PO PENKTO RAUNDO. Iki jo čia buvo
+     * laukiamas `["sesija"]`, nes maniau, kad `Client` reikšmę vartoja. Grandinė
+     * `Connection` → `pg-protocol` jos nevartoja; žr. `NEREIKSMINGI`.
+     */
+    ["C: `PGCLIENT_ENCODING=LATIN1`", PILNAS, { PGCLIENT_ENCODING: "LATIN1" }, []],
   ];
 
   for (const [vardas, dsn, aplinka, laukiama] of ATVEJAI) {
@@ -1196,9 +1244,9 @@ test("KLAIDINGI TEIGIAMI: registras ir kodavimo vardas NESTABDO starto", () => {
     "kitas host'as - vis dar konfliktas"
   );
   assert.deepEqual(
-    jungtiesSemantikosSkirtumai({ DATABASE_URL: PILNAS, PGCLIENT_ENCODING: "LATIN1" }),
+    jungtiesSemantikosSkirtumai({ DATABASE_URL: PILNAS, PGOPTIONS: "-csearch_path=kita" }),
     ["sesija"],
-    "kitas kodavimas - vis dar konfliktas (`pg` srautą dekoduotų kitaip nei siunčia serveris)"
+    "tikras sesijos semantikos pokytis - vis dar konfliktas"
   );
 
   /**
@@ -1315,4 +1363,98 @@ test("B: `PGPASSFILE` yra RUNTIME kredencialų paviršius, kurio modelis nemato"
    */
   const { RUNTIME_KREDENCIALAI } = require("../utils/pgConnection");
   assert.deepEqual([...RUNTIME_KREDENCIALAI], ["PGPASSFILE"]);
+});
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * PENKTAS PERŽIŪROS RAUNDAS (B, A)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+test("B: tapatybė sprendžiama TA PAČIA aplinka, kurią gaus vykdytojas", () => {
+  /**
+   * ⚠️ PATAISOS ŠALUTINIS POVEIKIS, NE RECIDYVAS.
+   *
+   * Iki `libpqSvariAplinka()` vaikinis procesas paveldėdavo `PG*`, tad modelis ir
+   * vykdymas SUTAPDAVO (abu su aplinka). Uždarius paveldėjimą, jie IŠSISKYRĖ:
+   * patikra `--url` papildydavo `PG*` reikšmėmis, kurių `pg_dump` nebegauna.
+   *
+   * ⚠️ IR TAI KLAUSIMAS, KURĮ REIKIA UŽDUOTI PO KIEKVIENO RIBOS UŽDARYMO:
+   * kas dabar mato kitokią tikrovę nei anksčiau?
+   *
+   * ⚠️ CODEX SCENARIJUS (`DATABASE_URL` + `PGPORT`) YRA UŽBLOKUOTAS — jį pagauna
+   * #245 dviprasmybės sargas. Pasiekiamas kelias yra `PG*`-only diegimas, kur
+   * `DATABASE_URL` nėra, tad dviprasmybės pagal apibrėžimą nėra.
+   */
+  const { arTaPatiBaze, tapatybesTekstas, PgConnectionError } = require("../utils/pgConnection");
+
+  const PG_ONLY = { PGHOST: "db.prod", PGPORT: "6543", PGUSER: "u", PGDATABASE: "prod" };
+  const svari = Object.fromEntries(
+    Object.entries(PG_ONLY).filter(([k]) => !k.toUpperCase().startsWith("PG"))
+  );
+
+  assert.deepEqual(
+    jungtiesSemantikosSkirtumai(PG_ONLY),
+    [],
+    "prielaida: be `DATABASE_URL` dviprasmybės sargas tyli - todėl kelias pasiekiamas"
+  );
+
+  /** ⚠️ NEPILNAS `--url`: patikra ir vykdymas rodo į SKIRTINGUS portus → KRINTA. */
+  const nepilnas = arTaPatiBaze("postgres://u@db.prod/prod", PG_ONLY, svari);
+  assert.equal(nepilnas.sutampa, false, "nepilnas URL su `PGPORT` NEGALI būti patvirtintas");
+  assert.match(tapatybesTekstas(nepilnas.nurodyta), /:5432\//, "vykdytojas eitų į 5432");
+  assert.match(tapatybesTekstas(nepilnas.konfiguracija), /:6543\//, "o pool'ai naudoja 6543");
+
+  /**
+   * ⚠️ IŠMATUOTA KONTROLĖ, KURI PAGRINDĖ SPRENDIMĄ.
+   *
+   * Runbook'o `PG*` komanda nurodo portą eksplicitiškai
+   * (`postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE`), tad ji privalo PRAEITI.
+   * Griežtesnis variantas („URL turi turėti VISUS komponentus") ją sulaužytų:
+   * slaptažodžio joje NĖRA.
+   */
+  const pilnas = arTaPatiBaze("postgres://u@db.prod:6543/prod", PG_ONLY, svari);
+  assert.equal(pilnas.sutampa, true, "dokumentuota komanda privalo veikti");
+
+  /** ⚠️ Numatytoji reikšmė nesikeičia: be trečio argumento elgesys toks pat kaip anksčiau. */
+  assert.equal(arTaPatiBaze("postgres://u@db.prod/prod", PG_ONLY).sutampa, true);
+
+  assert.ok(PgConnectionError, "tipas eksportuojamas");
+});
+
+test("A: `PG` prefikso filtras registrui NEJAUTRUS", () => {
+  /**
+   * ⚠️ TAISYKLĖ BUVO TEISINGA, REALIZACIJA — NE.
+   *
+   * `startsWith("PG")` yra registrui jautri, o Windows aplinkos kintamųjų vardai
+   * — ne. `pghostaddr` filtrą praeidavo, o libpq jį išsprendžia kaip
+   * `PGHOSTADDR`. Repo Windows palaiko eksplicitiškai (`README`).
+   *
+   * ⚠️ KODĖL `Object.entries` O NE `env.PGHOST`: Node Windows'e `process.env`
+   * SKAITYMĄ daro registrui nejautrų, tad `env.PGHOST` veikia ir tada, kai
+   * kintamasis nustatytas kaip `pghost`. Bet `Object.entries()` grąžina
+   * ORIGINALŲ registrą — būtent todėl pro filtrą ir prasprūsdavo.
+   */
+  const { libpqSvariAplinka } = require("../utils/pgDumpBackup");
+
+  const aplinka = {
+    PATH: "/usr/bin",
+    HOME: "/home/x",
+    PGHOSTADDR: "10.0.0.1",
+    pghostaddr: "10.0.0.2",
+    PgHostAddr: "10.0.0.3",
+    pgpassword: "slaptas",
+    PGSERVICE: "tarnyba",
+    APPLE: "ne-pg",
+  };
+
+  const svari = libpqSvariAplinka(aplinka);
+
+  assert.deepEqual(
+    Object.keys(svari).sort(),
+    ["APPLE", "HOME", "PATH"],
+    `nė vienas \`PG*\` variantas negali likti, gauta: ${JSON.stringify(Object.keys(svari))}`
+  );
+
+  /** ⚠️ KONTROLĖ: ne-`PG` kintamieji privalo IŠLIKTI - kitaip vaikas netektų `PATH`. */
+  assert.equal(svari.PATH, "/usr/bin");
+  assert.equal(svari.APPLE, "ne-pg", "`APPLE` prasideda `A`, ne `PG` - jo šalinti negalima");
 });
