@@ -249,6 +249,16 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
         "ir pool'o nustatymus - prie DB nesijungia",
     },
     {
+      failas: "pgConnectionSemantics.test.js",
+      kodel:
+        "konstruoja `new Client()` tik tam, kad IŠMATUOTŲ, kurių " +
+        "`ConnectionParameters` laukų `Client` realiai NESKAITO (`binary`) - " +
+        "prie DB nesijungia. ⚠️ Įtraukus jį į `postgres` rinkinį matavimas vyktų " +
+        "tik CI'uje, o jis kaip tik ir yra atsakymas į klausimą „ar šis laukas " +
+        "turi vartotoją\", kurį reikia užduoti BE duomenų bazės. Vienintelis šio " +
+        "failo kelias, kuriam reikia laido, naudoja `helpers/fakePostgres.js`",
+    },
+    {
       failas: "drRestorePreconditions.test.js",
       kodel:
         "jungiasi prie SĄMONINGAI nepasiekiamo adreso (127.0.0.1:1): serverio jam " +

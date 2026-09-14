@@ -870,3 +870,132 @@ test("#262 IV: neišsaugojimo režimas atmeta atkūrimą (priimta iš `restoreSe
     }
   );
 });
+
+test("LIBPQ: `pg_dump` vaikinis procesas NEPAVELDI nė vieno `PG*` (#245 peržiūra)", async () => {
+  /**
+   * ⚠️ #245 SUVIENODINO KETURIS `pg` POOL'US — IR TAI NEAPĖMĖ `pg_dump`.
+   *
+   * `pg_dump` naudoja libpq, ne `pg`. Jis paveldėdavo visą `process.env`, o
+   * libpq savo `PG*` skaito PATS. Blogiausias atvejis — `PGHOSTADDR`: libpq jį
+   * laiko TINKLO ADRESU, o `host` tada naudoja tik autentikacijai ir SSL vardo
+   * patikrai. `pg` `ConnectionParameters` šio kintamojo NESKAITO, tad nė vienas
+   * #245 sargas jo nematė.
+   *
+   * Pasekmė: kopija iš VIENO klasterio, o `patikrintiZymuTapatuma()` ir
+   * `backup_horizon` — apie KITĄ. Pasimatytų tik atkuriant.
+   *
+   * ⚠️ TIKROS DB NEREIKIA IR `pg_dump` NEREIKIA. `PATH` pradžioje padedamas
+   * stub'as, kuris išrašo savo aplinką ir SQL vietoj dump'o. Matuojama tai, ką
+   * vaikinis procesas REALIAI gavo — ne tai, ką ketinom perduoti.
+   */
+  const os = require("node:os");
+  const { execFileSync } = require("node:child_process");
+  const backupEncryption = require("../utils/backupEncryption");
+
+  const darbinis = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-libpq-"));
+
+  try {
+    const zurnalas = path.join(darbinis, "aplinka.txt");
+
+    fs.writeFileSync(
+      path.join(darbinis, "pg_dump"),
+      [
+        "#!/usr/bin/env bash",
+        `env | grep '^PG' > ${JSON.stringify(zurnalas)} || true`,
+        'echo "-- stub dump"',
+        "echo \"CREATE TABLE t(x int);\"",
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+
+    const senasPath = process.env.PATH;
+    const URL_TAIKINYS = "postgres://vartotojas:slaptas@db.prod:5432/stenograma";
+
+    /**
+     * ⚠️ ZONDAI PARINKTI TAIP, KAD `pg` JŲ NEMATYTŲ.
+     *
+     * Su PILNU DSN `PGHOST`, `PGPASSWORD` ir `PGSERVICE` `pg` semantikai įtakos
+     * neturi, o `PGHOSTADDR` `pg` neskaito NIEKADA. Todėl #245 dviprasmybės
+     * sargas čia tyli — ir būtent tai yra radinio esmė: libpq juos vartoja, o
+     * visas #245 autoritetas jų nemato.
+     *
+     * `PGOPTIONS` sąmoningai NEĮTRAUKTAS: jį sargas pagauna, tad jis matuotų
+     * kitą apsaugą, ne šią.
+     */
+    const zondai = {
+      DATABASE_URL: URL_TAIKINYS,
+      PGHOSTADDR: "10.9.9.9",
+      PGHOST: "visai-kitas-host",
+      PGPASSWORD: "zondas-slaptas",
+      PGSERVICE: "kita-tarnyba",
+    };
+    const senosZondu = Object.fromEntries(Object.keys(zondai).map((k) => [k, process.env[k]]));
+
+    try {
+      process.env.PATH = `${darbinis}:${senasPath}`;
+      Object.assign(process.env, zondai);
+
+      /**
+       * ⚠️ KVIETIMAS NUTRŪKSTA PO `pg_dump`, IR TAI SĄMONINGA.
+       *
+       * Po dump'o eina `_uzfiksuotiHorizonta()`, kuriam reikia TIKROS DB —
+       * šioje aplinkoje jos nėra ir nebus. Matuojamas dalykas (ką vaikinis
+       * procesas gavo) jau įvykęs, tad klaida gaudoma ir TIKRINAMA: jei ji
+       * ateitų iš kitos vietos, testas matuotų ne tai, ką teigia.
+       */
+      let klaida = null;
+      try {
+        await pgDumpBackup.sukurtiSifruotaKopija({
+          databaseUrl: URL_TAIKINYS,
+          actor: "testas",
+          env: {
+            ...process.env,
+            BACKUP_ENABLED: "true",
+            BACKUP_ENCRYPTION_KEY: backupEncryption.generateKey(),
+          },
+        });
+      } catch (e) {
+        klaida = e;
+      }
+
+      assert.ok(klaida, "be tikros DB horizonto fiksavimas privalo nutrūkti");
+      assert.match(
+        String(klaida.message),
+        /galiojimo NEPAVYKO užfiksuoti/,
+        `nutrūkti privalo BŪTENT ties horizontu, ne anksčiau: ${klaida.message}`
+      );
+    } finally {
+      process.env.PATH = senasPath;
+      for (const [k, v] of Object.entries(senosZondu)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+
+    const gauta = fs.existsSync(zurnalas) ? fs.readFileSync(zurnalas, "utf8").trim() : "";
+
+    assert.equal(
+      gauta,
+      "",
+      `\`pg_dump\` NEGALI matyti nė vieno \`PG*\` - URL privalo būti vienintelis ` +
+        `taikinio šaltinis. Gauta:\n${gauta}`
+    );
+
+    /**
+     * ⚠️ KONTROLĖ: stub'as REALIAI buvo paleistas ir aplinką matė. Be jos tuščias
+     * žurnalas reikštų ir „viskas gerai", ir „testas nieko nepaleido".
+     */
+    assert.ok(fs.existsSync(zurnalas), "stub'as privalo būti įvykdytas");
+
+    const svetimas = execFileSync("bash", ["-c", `PATH=${darbinis}:$PATH PGHOSTADDR=1.2.3.4 pg_dump >/dev/null; cat ${JSON.stringify(zurnalas)}`], {
+      encoding: "utf8",
+    });
+    assert.match(
+      svetimas,
+      /PGHOSTADDR=1\.2\.3\.4/,
+      "prielaida: stub'as `PG*` MATO, kai jie paveldimi - kitaip pagrindinė asercija nieko netikrina"
+    );
+  } finally {
+    fs.rmSync(darbinis, { recursive: true, force: true });
+  }
+});

@@ -88,6 +88,45 @@ const PG_DUMP_ARGUMENTAI = (databaseUrl) => [
   databaseUrl,
 ];
 
+/**
+ * LIBPQ VAIKINIO PROCESO APLINKA — BE NĖ VIENO `PG*` (#245 peržiūra, Codex P1).
+ *
+ * ⚠️ `pg_dump` IR `psql` NAUDOJA libpq, NE `pg`. #245 suvienodino jungties
+ * formos semantiką keturiems Node pool'ams ir diagnostiniam klientui — bet šie
+ * du procesai pro tą autoritetą NEEINA. Jie paveldėdavo visą `process.env`, ir
+ * libpq savo `PG*` skaito PATS.
+ *
+ * ⚠️ BLOGIAUSIAS ATVEJIS YRA `PGHOSTADDR`, IR `pg` JO NEMATO. libpq `hostaddr`
+ * yra TINKLO ADRESAS, o `host` tada naudojamas tik autentikacijai ir SSL vardo
+ * patikrai. Tad `--url`, rodantis į vieną klasterį, plius `PGHOSTADDR`,
+ * rodantis į kitą, duotų kopiją iš KITOS bazės nei ta, kurią patikrino
+ * `patikrintiZymuTapatuma()` ir į kurią rašomas `backup_horizon`. Pasimatytų
+ * tik atkuriant.
+ *
+ * ⚠️ SPRENDIMAS — VALYTI APLINKĄ, NE DENGTI libpq PAVIRŠIŲ. Sąrašas to, ką
+ * skaito libpq, būtų rankinis (`PGHOSTADDR`, `PGSERVICE`, `PGSSLMODE`,
+ * `PGREQUIREPEER`, `PGGSSENCMODE`, `PGTARGETSESSIONATTRS`, …) ir tyliai
+ * senstantis — tiksliai tai, ką #245 atmetė `pg` atveju. Ten spragą uždarė
+ * `Proxy` seklys, bet libpq iš JS neapklausiamas, tad išvesti sąrašo NEĮMANOMA.
+ *
+ * Todėl invertuojama: pašalinamas VISAS `PG` prefiksas. Tai ne sąrašas, o
+ * taisyklė — libpq aplinkos paviršius pagal konstrukciją yra `PG*`, ir naujas
+ * kintamasis į jį pateks automatiškai. URL tampa VIENINTELIU šaltiniu.
+ *
+ * ⚠️ KAINA ĮVARDYTA: kredencialai privalo būti URL'e arba `~/.pgpass`.
+ * Diegimas, perdavęs `--url` be slaptažodžio ir pasikliovęs `PGPASSWORD`,
+ * nustos veikti — ir kris GARSIAI (autentikacijos klaida), o ne tyliai
+ * nukopijuos ne tą klasterį. `.pgpass` lieka veikti: tai failas, ne aplinka.
+ */
+function libpqSvariAplinka(env = process.env) {
+  const svari = {};
+  for (const [raktas, reiksme] of Object.entries(env)) {
+    if (raktas.startsWith("PG")) continue;
+    svari[raktas] = reiksme;
+  }
+  return svari;
+}
+
 /** Vėliavos, kurios SULAUŽYTŲ nuoseklų snapshot'ą. Tikrina kontrakto testas. */
 const SNAPSHOTA_LAUZANCIOS_VELIAVOS = Object.freeze([
   "--no-synchronized-snapshots",
@@ -325,6 +364,8 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
     ({ stdout: sql } = await vykdyti("pg_dump", PG_DUMP_ARGUMENTAI(databaseUrl), {
       encoding: "utf8",
       maxBuffer: MAX_DUMP_BYTES,
+      /** ⚠️ Žr. `libpqSvariAplinka()`: `--url` privalo būti vienintelis taikinio šaltinis. */
+      env: libpqSvariAplinka(env),
     }));
   } catch (klaida) {
     /**
@@ -946,7 +987,15 @@ function _psqlSuStdin(targetUrl, sql) {
        * transakcijos. Išvestis mums nereikalinga (`--quiet`), tad ji
        * atmetama OS lygyje, o ne buferinama be reikalo.
        */
-      { stdio: ["pipe", "ignore", "pipe"] }
+      {
+        stdio: ["pipe", "ignore", "pipe"],
+        /**
+         * ⚠️ TA PATI RIBA KAIP `pg_dump` (Codex P1). `psql` irgi yra libpq, ir
+         * atkūrimo atveju kaina didesnė: `PGHOSTADDR` nukreiptų ATKŪRIMĄ į kitą
+         * klasterį nei `--target`, o tai mutacija, ne skaitymas.
+         */
+        env: libpqSvariAplinka(),
+      }
     );
 
     let stderr = "";

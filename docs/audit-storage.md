@@ -50,6 +50,11 @@ efektyvią jungties semantiką, kurią apibrėžia `DATABASE_URL`: taikinį
 (`host`/`port`/`database`), kredencialus, SSL arba DB sesijos namespace
 (`options`, `client_encoding`).
 
+⚠️ Lyginamos **efektyvios** reikšmės, ne simbolių eilutės: host'ai normalizuojami
+kaip DNS vardai (`LOCALHOST` = `localhost`), o `client_encoding` — pagal tai, ką
+realiai naudoja `pg` `Client` (`client_encoding || "utf8"`). `PGBINARY` į sąrašą
+neįeina: `Client` jo neskaito.
+
 Priežastis, kodėl taisyklė nebėra „bet koks maišymas": su **pilnu** DSN `PGHOST`
 `pg` semantikai neturi jokios įtakos — `pg` ima DSN reikšmę pirma. Senoji
 taisyklė krisdavo ten, kur dviprasmybės nebuvo, ir tuo pačiu **nematė**

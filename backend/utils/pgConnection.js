@@ -259,13 +259,6 @@ const LAUKU_KLASES = Object.freeze({
   options: "sesija",
   client_encoding: "sesija",
   replication: "sesija",
-  /**
-   * ⚠️ `binary` (`PGBINARY`) yra LAIDO FORMATAS, ne namespace — ir vis dėlto
-   * `sesija`, ne `NEREIKSMINGI`. Jis keičia, kaip serveris koduoja rezultatus,
-   * tad tai sesijos elgsena, o ne vien pavadinimas. Klasių rinkinys #245
-   * kontrakte fiksuotas keturiais; penktos nekuriam dėl vieno lauko.
-   */
-  binary: "sesija",
 });
 
 /**
@@ -282,7 +275,55 @@ const LAUKU_KLASES = Object.freeze({
  * kintamojo jie NETURI, tad skirtis dėl aplinkos negali IŠ VISO. Jų įrašymas
  * teigtų patikrą, kurios nėra.
  */
-const NEREIKSMINGI = Object.freeze(["application_name", "connect_timeout"]);
+const NEREIKSMINGI = Object.freeze([
+  "application_name",
+  "connect_timeout",
+  /**
+   * ⚠️ `binary` (`PGBINARY`) — NE „nereikšmingas", O BE VARTOTOJO (Codex, A).
+   *
+   * Ankstesnė redakcija jį klasifikavo kaip `sesija` su pagrindimu „keičia, kaip
+   * serveris koduoja rezultatus". Tai buvo TEIGINYS, ne matavimas. Patikrinta
+   * `pg` šaltinyje:
+   *
+   *   `ConnectionParameters.binary` priskiriamas (`connection-parameters.js:82`),
+   *   bet `Client` jo NESKAITO: `client.js:102` ima `c.binary` iš ŽALIOS
+   *   konfigūracijos, ne iš `this.connectionParameters.binary`. Kitų vartotojų
+   *   JS kelyje nėra (patikrinta `grep "connectionParameters.binary"` — tuščia).
+   *
+   * Todėl `PGBINARY` su pilnu DSN nekeičia NIEKO, o startas krisdavo. Tai
+   * klaidingas teigiamas fail-closed sarge — blogiausia jo kryptis.
+   *
+   * ⚠️ IR TAI YRA „REIKŠMĖ BE VARTOTOJO" KLASĖ MŪSŲ PAČIŲ NAUJAME KODE — ta
+   * pati, kurią #245 gaudė `pg` laukų sąraše ir sarguose. Ji nesibaigia su kodo
+   * autoriumi.
+   */
+  "binary",
+]);
+
+/**
+ * LAUKŲ NORMALIZAVIMAS PRIEŠ PALYGINIMĄ — VIENA TIESA APIE LYGYBĘ (Codex, C/A).
+ *
+ * ⚠️ IKI ŠITO MODULYJE BUVO DVI TIESOS APIE HOST'Ų LYGYBĘ. `normalizuotiHosta()`
+ * egzistuoja nuo #280 ir taikomas rodomai tapatybei, bet dviprasmybės
+ * palyginimas lygino ŽALIAS reikšmes. Pasekmė: `PGHOST=LOCALHOST` su DSN be
+ * host'o duodavo `LOCALHOST` prieš `localhost` ir STABDYDAVO startą, nors DNS
+ * vardai registrui nejautrūs. Sargas, kurio visa prasmė yra fail-closed,
+ * blokuodavo teisėtą konfigūraciją — blogiausia kryptis.
+ *
+ * ⚠️ `client_encoding` NORMALIZUOJAMAS PAGAL TAI, KĄ REALIAI NAUDOJA `Client`:
+ * `client.js:97` — `client_encoding || "utf8"`, ir tai Node srauto kodavimo
+ * vardas, kuris registrui nejautrus. Be šito `PGCLIENT_ENCODING=UTF8` su pilnu
+ * DSN duodavo `""` prieš `"UTF8"` ir stabdydavo startą, nors abu reiškia tą patį.
+ *
+ * ⚠️ `isDomainSocket` NENORMALIZUOJAMAS SĄMONINGAI: jis IŠVEDAMAS iš `host`
+ * (`connection-parameters.js:117`), tad be `host` skirtumo skirtis negali. JS
+ * kelyje jo apskritai niekas neskaito (naudojamas tik `getLibpqConnectionString()`),
+ * bet jo palyginimas yra nekenksmingas perteklius, o ne klaidingas teigiamas.
+ */
+const NORMALIZATORIAI = Object.freeze({
+  host: (v) => normalizuotiHosta(v),
+  client_encoding: (v) => String(v || "utf8").toLowerCase(),
+});
 
 /** `ssl` gali būti `false`, `true`, `"no-verify"` arba objektas — lyginama forma, ne tapatybė. */
 function palyginamaReiksme(reiksme) {
@@ -315,7 +356,12 @@ function jungtiesSemantikosSkirtumai(env = process.env) {
 
   for (const laukas of laukai) {
     if (NEREIKSMINGI.includes(laukas)) continue;
-    if (palyginamaReiksme(suAplinkos[laukas]) === palyginamaReiksme(beAplinkos[laukas])) continue;
+
+    const normalizuoti = NORMALIZATORIAI[laukas] || ((v) => v);
+    const su = palyginamaReiksme(normalizuoti(suAplinkos[laukas]));
+    const be = palyginamaReiksme(normalizuoti(beAplinkos[laukas]));
+
+    if (su === be) continue;
     klases.add(LAUKU_KLASES[laukas] || `kita:${laukas}`);
   }
 

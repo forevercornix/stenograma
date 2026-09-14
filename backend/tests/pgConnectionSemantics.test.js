@@ -183,37 +183,79 @@ test("D2: skirtumas pranešamas KLASE - `PGSSLMODE` yra saugumas, `PGOPTIONS` se
   );
 });
 
-test("D2: `NEREIKSMINGI` yra ĮVARDYTAS sprendimas, ir jie realiai keičia `pg` konfigūraciją", () => {
+test("D2: `NEREIKSMINGI` — DVI SKIRTINGOS priežastys, abi išmatuotos", () => {
   /**
    * ⚠️ BE ANTROSIOS PUSĖS ŠIS SĄRAŠAS BŪTŲ NEATSKIRIAMAS NUO PRALEIDIMO.
    *
    * „`PGAPPNAME` netikrinamas" gali reikšti du dalykus: sąmoningai toleruojamas
-   * arba tiesiog nepastebėtas. Tikrinama, kad `pg` juos IŠ TIESŲ perrašo - tad
-   * jų buvimas sąraše yra apsisprendimas, ne spraga.
+   * arba tiesiog nepastebėtas. Todėl kiekvienam įrašui tikrinama PRIEŽASTIS, ir
+   * jos yra dvi skirtingos:
+   *
+   *   1. `application_name`, `connect_timeout` — `pg` juos REALIAI perrašo, bet
+   *      jie nekeičia taikinio, kredencialų, saugumo ar sesijos namespace;
+   *   2. `binary` — `pg` jį perskaito, bet `Client` jo NESKAITO IŠ VISO.
+   *
+   * Antroji priežastis rasta Codex peržiūroje ir yra „reikšmė be vartotojo"
+   * klasė MŪSŲ PAČIŲ kode: ankstesnė redakcija `binary` klasifikavo kaip
+   * `sesija` su pagrindimu, kuris buvo teiginys, ne matavimas.
    */
   const ConnectionParameters = require("pg/lib/connection-parameters");
+  const { Client } = require("pg");
   const tikroji = process.env;
 
-  const su = (aplinka) => {
+  const su = (aplinka, fn) => {
     try {
       process.env = aplinka;
-      return new ConnectionParameters({ connectionString: PILNAS });
+      return fn();
     } finally {
       process.env = tikroji;
     }
   };
 
-  assert.deepEqual([...NEREIKSMINGI].sort(), ["application_name", "connect_timeout"]);
+  assert.deepEqual([...NEREIKSMINGI].sort(), ["application_name", "binary", "connect_timeout"]);
+
+  /** 1 priežastis: `pg` juos perrašo — tad jų buvimas sąraše yra APSISPRENDIMAS. */
+  const cp = (aplinka) => su(aplinka, () => new ConnectionParameters({ connectionString: PILNAS }));
 
   assert.notEqual(
-    su({ PGAPPNAME: "doctor" }).application_name,
-    su({}).application_name,
-    "`PGAPPNAME` privalo realiai keisti `pg` konfigūraciją - kitaip sąrašo įrašas nieko nereiškia"
+    cp({ PGAPPNAME: "doctor" }).application_name,
+    cp({}).application_name,
+    "`PGAPPNAME` privalo realiai keisti `pg` konfigūraciją - kitaip įrašas nieko nereiškia"
   );
   assert.notEqual(
-    String(su({ PGCONNECT_TIMEOUT: "9" }).connect_timeout),
-    String(su({}).connect_timeout),
+    String(cp({ PGCONNECT_TIMEOUT: "9" }).connect_timeout),
+    String(cp({}).connect_timeout),
     "`PGCONNECT_TIMEOUT` irgi realiai keičia"
+  );
+
+  /**
+   * 2 priežastis: `binary` PERSKAITOMAS, bet NEVARTOJAMAS.
+   *
+   * ⚠️ TIKRINAMAS `Client`, NE `ConnectionParameters`. Pastarajame laukas YRA
+   * (`connection-parameters.js:82`) — būtent todėl jis ir atrodė reikšmingas.
+   * `Client` jį ima iš ŽALIOS konfigūracijos (`client.js:102`:
+   * `c.binary || defaults.binary`), tad `PGBINARY` iki jo nepasiekia.
+   *
+   * ⚠️ KLIENTAS TIK KONSTRUOJAMAS. Jokio prisijungimo, jokios DB.
+   */
+  assert.notEqual(
+    cp({ PGBINARY: "true" }).binary,
+    cp({}).binary,
+    "prielaida: `pg` `PGBINARY` į `ConnectionParameters` PERSKAITO"
+  );
+
+  assert.equal(
+    su({ PGBINARY: "true" }, () => new Client({ connectionString: PILNAS }).binary),
+    su({}, () => new Client({ connectionString: PILNAS }).binary),
+    "`Client.binary` NEGALI priklausyti nuo `PGBINARY` - jei ims priklausyti, " +
+      "`binary` privalo grįžti į `LAUKU_KLASES`, o ne likti `NEREIKSMINGI`"
+  );
+
+  /** ⚠️ IR SARGO PUSĖ: `PGBINARY` su pilnu DSN starto NESTABDO. */
+  assert.deepEqual(
+    jungtiesSemantikosSkirtumai({ DATABASE_URL: PILNAS, PGBINARY: "true" }),
+    [],
+    "klaidingas teigiamas fail-closed sarge yra blogiausia jo kryptis"
   );
 });
 
@@ -864,9 +906,18 @@ test("TRIPWIRE: produkciniai kvietimo taškai `env` objekto NEPERDUODA", () => {
   );
 
   const marsrutas = fs.readFileSync(path.join(saknis, "routes", "backup.js"), "utf8");
+  /**
+   * ⚠️ `\b`, NE LITERALUS `0x08` (Codex, antras raundas).
+   *
+   * Pirmoji šio testo redakcija buvo parašyta per Python heredoc'ą, kur `\b`
+   * yra BACKSPACE simbolis, ne žodžio riba. Regexas ieškojo `<0x08>env` — ko
+   * jokiame faile nėra, tad asercija NEGALĖJO kristi. Sargas, kuris negali
+   * kristi, yra blogesnis už sargo nebuvimą: jis yra vienintelis R3 sprendimo
+   * („tripwire vietoj ribos pašalinimo") pagrindas.
+   */
   const kvietimas = marsrutas.slice(marsrutas.indexOf("restoreService.restoreBackup({"));
   assert.ok(
-    !/^[^}]*env\s*:/m.test(kvietimas.slice(0, kvietimas.indexOf("});"))),
+    !/^[^}]*\benv\s*:/m.test(kvietimas.slice(0, kvietimas.indexOf("});"))),
     "maršrutas NEGALI pradėti perduoti savo `env` - sargas jo neatitiktų"
   );
 });
@@ -1098,4 +1149,73 @@ test("R7 DOKUMENTACIJA: upgrade note įvardija NUMATYTĄJĄ konfigūraciją, ne 
     "runbook'o išlyga privalo būti PAŠALINTA - po #245 ji melaginga"
   );
   assert.match(runbook, /IŠLYGA PAŠALINTA \(#245\)/, "pašalinimas privalo būti įvardytas, ne tylus");
+});
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * TREČIAS PERŽIŪROS RAUNDAS — KLAIDINGI TEIGIAMI FAIL-CLOSED SARGE
+ * ────────────────────────────────────────────────────────────────────────── */
+
+test("KLAIDINGI TEIGIAMI: registras ir kodavimo vardas NESTABDO starto", () => {
+  /**
+   * ⚠️ BLOGIAUSIA FAIL-CLOSED SARGO KRYPTIS — STABDYTI TEISĖTĄ KONFIGŪRACIJĄ.
+   *
+   * Du atvejai, rasti Codex peržiūroje, abu tos pačios formos: lyginamos ŽALIOS
+   * reikšmės ten, kur lygybė nėra simbolių lygybė.
+   *
+   *   C: `PGHOST=LOCALHOST` su DSN be host'o davė `LOCALHOST` prieš `localhost`.
+   *      DNS vardai registrui NEJAUTRŪS, o modulyje `normalizuotiHosta()` jau
+   *      buvo — tik taikomas rodomai tapatybei, ne šiam palyginimui. Dvi tiesos
+   *      apie host'ų lygybę tame pačiame faile.
+   *
+   *   A: `PGCLIENT_ENCODING=UTF8` su pilnu DSN davė `""` prieš `"UTF8"`. Bet
+   *      `Client` naudoja `client_encoding || "utf8"` (`client.js:97`), ir tai
+   *      Node srauto kodavimo vardas — registrui nejautrus. Abu reiškia tą patį.
+   */
+  const ATVEJAI = [
+    ["C: `PGHOST` kitu registru", "postgres://u:p@/stenograma", { PGHOST: "LOCALHOST" }, []],
+    ["C: `PGHOST` tas pats", "postgres://u:p@/stenograma", { PGHOST: "localhost" }, []],
+    ["A: `PGCLIENT_ENCODING=UTF8`", PILNAS, { PGCLIENT_ENCODING: "UTF8" }, []],
+    ["A: `PGCLIENT_ENCODING=utf8`", PILNAS, { PGCLIENT_ENCODING: "utf8" }, []],
+  ];
+
+  for (const [vardas, dsn, aplinka, laukiama] of ATVEJAI) {
+    assert.deepEqual(
+      jungtiesSemantikosSkirtumai({ DATABASE_URL: dsn, ...aplinka }),
+      laukiama,
+      `${vardas}: teisėta konfigūracija NEGALI stabdyti starto`
+    );
+  }
+
+  /**
+   * ⚠️ IR PRIEŠINGA KRYPTIS — BE JOS TAISYMAS BŪTŲ NEATSKIRIAMAS NUO APSAUGOS
+   * PANAIKINIMO. Tikras skirtumas privalo likti konfliktu.
+   */
+  assert.deepEqual(
+    jungtiesSemantikosSkirtumai({ DATABASE_URL: "postgres://u:p@/stenograma", PGHOST: "kitas.host" }),
+    ["taikinys"],
+    "kitas host'as - vis dar konfliktas"
+  );
+  assert.deepEqual(
+    jungtiesSemantikosSkirtumai({ DATABASE_URL: PILNAS, PGCLIENT_ENCODING: "LATIN1" }),
+    ["sesija"],
+    "kitas kodavimas - vis dar konfliktas (`pg` srautą dekoduotų kitaip nei siunčia serveris)"
+  );
+
+  /**
+   * ⚠️ IR VIENA TIESA APIE HOST'Ų LYGYBĘ: palyginimas bei rodoma tapatybė
+   * privalo naudoti TĄ PATĮ `normalizuotiHosta()`. Iki #245 peržiūros jos
+   * išsiskirdavo būtent registro atveju.
+   */
+  const { efektyvusJungtiesParametrai, normalizuotiHosta } = require("../utils/pgConnection");
+
+  assert.equal(
+    efektyvusJungtiesParametrai({ connectionString: "postgres://u:p@DB.PROD:5432/s" }, {}).host,
+    normalizuotiHosta("DB.PROD"),
+    "rodoma tapatybė privalo eiti per tą patį normalizatorių"
+  );
+  assert.equal(
+    normalizuotiHosta("/Prod"),
+    "/Prod",
+    "⚠️ unix socket KELIAS registro NEKEIČIA - failų sistema gali skirti raides"
+  );
 });

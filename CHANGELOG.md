@@ -33,7 +33,17 @@ ji pasensta ir tampa klaidinanti.
 
   Konkrečiai nustos startuoti: pusiau užpildytas DSN, kurį papildo aplinka (pvz.
   DSN be porto plius `PGPORT`), ir pilnas DSN su `PGSSLMODE`, `PGOPTIONS` ar
-  `PGCLIENT_ENCODING`. `PGAPPNAME` ir `PGCONNECT_TIMEOUT` konflikto **nesukuria**.
+  **kitokiu** `PGCLIENT_ENCODING`.
+
+  ⚠️ **Konflikto NESUKURIA:** `PGAPPNAME`, `PGCONNECT_TIMEOUT`, `PGBINARY`,
+  `PGCLIENT_ENCODING=UTF8` ir `PGHOST` kitu raidžių registru.
+
+  `PGBINARY` — todėl, kad `pg` `Client` jo **neskaito**: reikšmė patenka į
+  `ConnectionParameters`, bet vartotojo neturi (`client.js:102` ima ją iš žalios
+  konfigūracijos). `PGCLIENT_ENCODING=UTF8` ir registro skirtumas — todėl, kad
+  lyginama tai, ką `Client` **realiai naudoja** (`client_encoding || "utf8"`), ir
+  host'ai normalizuojami kaip DNS vardai. Visi trys anksčiau būtų stabdę startą
+  be priežasties.
 
   ⚠️ **KURIE DIEGIMAI PALIEČIAMI — PLATESNIS RATAS, NEI ATRODO.**
 
@@ -86,6 +96,28 @@ ji pasensta ir tampa klaidinanti.
   senesnė replika gali įrašyti eilutę po to, kai naujoji jau išvalė lentelę.
 
 ### Changed
+
+- **`pg_dump` ir `psql` nebepaveldi `PG*` aplinkos** (#245). ⚠️ **Laužantis
+  pokytis DR keliams.**
+
+  Šie du procesai naudoja **libpq**, ne `pg`, tad #245 jungties autoritetas jų
+  nedengė: jie paveldėdavo visą `process.env`, o libpq savo `PG*` skaito pats.
+  Blogiausias atvejis — `PGHOSTADDR`, kurio `pg` **neskaito iš viso**: jis yra
+  tinklo adresas, o URL'e nurodytas `host` tada naudojamas tik autentikacijai.
+  `--url`, rodantis į vieną klasterį, plius `PGHOSTADDR`, rodantis į kitą, davė
+  kopiją iš **kitos** bazės nei ta, kurią patikrino tapatumo sargas ir į kurią
+  rašomas `backup_horizon` — ir tai pasimatydavo tik atkuriant.
+
+  Nuo šiol vaikiniam procesui perduodama aplinka **be nė vieno `PG` prefikso**.
+  Tai taisyklė, ne sąrašas: libpq aplinkos paviršius pagal konstrukciją yra
+  `PG*`, tad naujas kintamasis į jį pateks automatiškai. Rankinio sąrašo čia
+  išvesti neįmanoma — libpq iš JS neapklausiamas.
+
+  **Prieš atnaujinant:** kredencialai `pg-backup`/`dr-restore` keliams privalo
+  būti **URL'e arba `~/.pgpass`**. Diegimas, perdavęs `--url` be slaptažodžio ir
+  pasikliovęs `PGPASSWORD`, nustos veikti — ir kris **garsiai**, su
+  autentikacijos klaida, o ne tyliai nukopijuos ne tą klasterį. `.pgpass` lieka
+  veikti: tai failas, ne aplinka.
 
 - **Visi keturi PostgreSQL pool'ai ir diagnostinis klientas jungtį sudaro per
   `utils/pgConnection.js`** (#245). `jobStore`, `sessionStore`, `auditStore`,

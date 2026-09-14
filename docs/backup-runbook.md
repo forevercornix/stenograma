@@ -647,21 +647,50 @@ DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs \
 DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs verify --target "$TIKSLO_URL"
 ```
 
-### ⚠️ VIENA jungties forma: `DATABASE_URL` **arba** `PG*`, ne abi
+### ⚠️ Jungties formos: `DATABASE_URL` ir `PG*` kartu — klaida TIK kai skiriasi (#245)
 
 Dokumentuotame Compose diegime `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`
-jau nustatyti. Prirašius `DATABASE_URL`, aplinkoje atsiduria **abi** formos, ir
-tada klausimas „į kurią bazę jungiamasi" atsakymo NETURI: prioritetas priklauso
-nuo to, kas konstruoja pool'ą.
+jau nustatyti. Prirašius `DATABASE_URL`, aplinkoje atsiduria **abi** formos.
 
-⚠️ **Todėl abi formos kartu yra KLAIDA, ne interpretacijos reikalas.** Suderinimas
-krinta su `RECONCILE_CONNECTION_AMBIGUOUS`, kopijos kūrimas — su
-`PG_BACKUP_CONNECTION_AMBIGUOUS`, dar prieš pirmą mutaciją. Tas pats sprendimas
-repo jau galioja auditui (išmatuota):
+⚠️ **ŠIS SKYRIUS PERRAŠYTAS, NE PAPILDYTAS (#245).** Ankstesnė redakcija sakė,
+kad bet koks abiejų formų buvimas yra dviprasmybė ir **visada** krenta, ir
+cituodavo audito klaidą, kurios repo **nebeturi**
+(`AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST`). Pridėti
+naują pastabą greta senos procedūros nepakanka: skaitytojas, radęs seną, jos
+nepraleis.
+
+**Kaip yra dabar.** Startas nutrūksta tik tada, kai aplinka pakeičia **efektyvią**
+jungties semantiką, kurią apibrėžia `DATABASE_URL` — taikinį
+(`host`/`port`/`database`), kredencialus, SSL arba DB sesijos namespace
+(`options`). Su **pilnu** DSN `PGHOST` `pg` semantikai įtakos neturi, tad vien jo
+buvimas nieko nestabdo; `PGSSLMODE` ir `PGOPTIONS` pilną DSN **perrašo** ir
+stabdo.
+
+Dabartinė klaida (išmatuota):
 
 ```
-AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST.
+Aplinkoje `DATABASE_URL` ir `PG*` duoda SKIRTINGĄ efektyvią jungties semantiką
+(sesija) - neaišku, į kurią bazę bus jungiamasi. Palikite VIENĄ formą arba
+suderinkite reikšmes. Vien `PG*` buvimas greta `DATABASE_URL` klaida NĖRA:
+tikrinama, ar jie keičia taikinį, kredencialus, SSL ar sesijos semantiką.
 ```
+
+Suderinimas tokiu atveju krinta su `RECONCILE_CONNECTION_AMBIGUOUS`, kopijos
+kūrimas — su `PG_BACKUP_CONNECTION_AMBIGUOUS`, dar prieš pirmą mutaciją.
+
+⚠️ **Rekomendacija operatoriui nesikeičia: naudokite VIENĄ formą.** Tai
+paprasčiausia praktika — bet tai rekomendacija, ne tai, ką tikrina kodas.
+
+### ⚠️ `pg_dump` ir `psql` — URL yra VIENINTELIS šaltinis (#245)
+
+Šie du yra **libpq**, ne `pg`, ir jų aukščiau aprašytas sargas NEDENGIA: libpq
+savo `PG*` skaito pats, o `PGHOSTADDR` `pg` neskaito iš viso. Todėl `pg-backup`
+kelias vaikiniam procesui perduoda aplinką **be nė vieno `PG*`**.
+
+Praktiškai: `--url` (ar `--target`) nurodo, kur einama, ir aplinka to pakeisti
+nebegali. **Kredencialai privalo būti URL'e arba `~/.pgpass`** — `PGPASSWORD`
+iki `pg_dump`/`psql` nebeeina. Diegimas, kuris juo rėmėsi, kris su
+autentikacijos klaida; anksčiau jis būtų tyliai nukopijavęs kitą klasterį.
 
 Tokiame diegime `--target` sudaromas iš tų pačių `PG*` reikšmių, o `DATABASE_URL`
 **nenustatomas**:
