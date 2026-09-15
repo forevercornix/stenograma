@@ -113,6 +113,123 @@ Kai npm `moderate` radinys praktiškai svarbus (pvz. pasiekiamas mūsų kelyje),
 jis sprendžiamas **konkrečiam paketui** — atnaujinant arba per išimčių procesą,
 o ne keliant ribą visam auditui.
 
+## `main` apsauga ir merge kontraktas (#324)
+
+`main` keičiama **tik** per PR, kuriame **visi privalomi patikrinimai sėkmingi**.
+Enforcement autoritetas yra **GitHub branch protection / ruleset**, ne šis
+dokumentas ir ne repo testas.
+
+⚠️ **Repo sargas NĖRA enforcement.** Testas, tikrinantis apsaugos konfigūraciją,
+yra **drift detection**: jei apsauga išjungta, tame pačiame PR paleistas raudonas
+sargas pats merge'o uždrausti negali. Tai bootstrap paradoksas, ir jis reiškia,
+kad sargo buvimas negali būti apsaugos įrodymas.
+
+### Privalomų patikrinimų aibė
+
+GitHub nustatymuose laikomas **vienas** required check — `required-ci`.
+Priklausomybių sąrašas gyvena `ci.yml`, versijų kontrolėje.
+
+**Kodėl vienas vardas.** GitHub nustatymuose įrašytas vardas neturi jokios
+apsaugos nuo drift'o: pervadinus job'ą, required check tyliai virsta `missing`.
+Repo valdoma priklausomybė elgiasi priešingai — pervadinus `backend` ir
+nepataisius `needs:`, GitHub Actions atmeta **visą** workflow („depends on unknown
+job"), vartų nėra, ir merge blokuojamas **garsiai**.
+
+Privalomos šakos (9): `backend`, `frontend`, `e2e`, `docker`,
+`compose-config-validate`, `workflow-policy`, `deleted-tests`, `pyannote-server`,
+`whisper-server`.
+
+⚠️ **Nė vienas `ci.yml` job'as neturi job-lygio `if:`** — sąmoningai conditional
+šakų nėra. Todėl gate'e **`skipped` ir `cancelled` yra nesėkmė be išimčių**.
+Atsiradus conditional job'ui, jo semantika sprendžiama atskirai ir įrašoma
+`required-ci` komentare; aklas pridėjimas į `needs:` paverstų jį privalomu
+netyčia.
+
+### `dependency-audit` — patariamasis, su sąlyga
+
+Jis **nėra** `required-ci` dalis. Priežastis išmatuota: per mėnesį jis krito
+**tris** kartus, ir visi trys gedimai buvo **nesusiję su PR turiniu** — `npm
+audit` 503 (infrastruktūra) ir du advisory prieš **nepakeistas** priklausomybes
+(`multer`, `js-yaml`); plius `minio/minio` image pašalinimas iš Docker Hub.
+
+⚠️ **Vartai tikrina repo būseną, o merge gate turėtų klausti apie pakeitimą.** Tai
+ta pati klasė kaip kitur: patikra, kurios subjektas nėra peržiūrimas pokytis.
+Padarius ją privaloma, bypass virstų kasdienybe — o tada jis nustoja būti
+valdomas kelias.
+
+> **Sąlyga, kada jis tampa privalomu:** kai atsakys į klausimą *„ar ŠIS PR įvedė
+> pažeidžiamumą"* — t. y. kai bus lyginamas auditas prieš/po PR priklausomybių
+> pakeitimų, o repo būsenos auditas persikels į tvarkaraštį.
+
+⚠️ **Priimta rizika, pasakyta garsiai:** #307 (`multer`) buvo padarytas **todėl**,
+kad gate'as krito. Patariamuoju jis tokio spaudimo nebedaro. Tai priimtina tik
+todėl, kad Dependabot PR toliau ateina savarankiškai — jei jie nustotų, ši eilutė
+nustoja galioti.
+
+### CodeQL — signalas, ne merge kontrakto dalis (D4)
+
+**Išmatuota:** `GET /repos/…/code-scanning/default-setup` grąžina
+`state: configured`. CodeQL check-runs (`Analyze (actions)`,
+`Analyze (javascript-typescript)`, `Analyze (python)` ir agregatas `CodeQL`) kuria
+**GitHub default setup**, ne repo workflow — todėl `.github/workflows/` jų failo
+nėra ir negali būti.
+
+Iš to seka trys dalykai:
+
+1. jis **negali** būti `required-ci` dalis — `needs:` veikia tik vieno workflow
+   ribose;
+2. jo check'ų vardai yra **GitHub valdomi**; įrašyti juos į required aibę reikštų
+   rankinį sąrašą svetimoje sistemoje, be jokios drift apsaugos — pakeitus kalbų
+   rinkinį required check tyliai virstų `missing`;
+3. jo aprėptis (savaitinis tvarkaraštis plius PR) skiriasi nuo `ci.yml`.
+
+⚠️ **„Signalas" NEREIŠKIA „niekas neskaito".** CodeQL radiniai eina į **Security
+tab** ir generuoja **alerts** — tai jo vartotojas, ir jis įvardijamas čia
+sąmoningai. Radinys, kurio niekas neskaito, po metų būtų dar vienas „egzistuoja,
+bet nieko nekeičia" atvejis.
+
+**Peržiūros riba:** `critical`/`high` CodeQL alert sprendžiamas kaip bet kuris
+saugumo radinys — per issue, ne per merge bloką.
+
+### Stacked-PR politika (D7)
+
+`ci.yml` trigeris lieka `pull_request: branches: [main]`. PR, kurio bazė nėra
+`main`, šio CI negauna.
+
+**Kodėl taip.** `main` apsauga saugo **`main`**, ne visas šakas: kai stacked PR
+retargetinamas į `main`, suveikia ir CI, ir vartai. Filtro pašalinimas reikštų
+**pakartotinį CI** kiekvienam tarpiniam PR — kaina be atitinkamos garantijos.
+
+⚠️ Garantija „joks PR į jokią bazę nemerginamas be CI" yra **platesnis kontraktas
+nei D1**, ir jei jo kada nors reikės, jis priimamas atskirai. Šis pasirinkimas
+`main` apsaugos nesusilpnina.
+
+### Emergency bypass
+
+Žr. `docs/operations/OPERATIONAL_PROCEDURES.md` — bypass registras ir procedūra.
+
+### Kaip operatorius patikrina, kad apsauga TEBĖRA aktyvi
+
+```bash
+# 1. Ar ruleset/branch protection egzistuoja ir ką jis reikalauja
+gh api repos/forevercornix/stenograma/rulesets --jq '.[] | {id, name, target, enforcement}'
+
+# 2. Privalomų check'ų aibė — turi būti LYGIAI ["required-ci"]
+gh api repos/forevercornix/stenograma/rulesets/<ID> \
+  --jq '.rules[] | select(.type=="required_status_checks")
+        | .parameters.required_status_checks[].context'
+
+# 3. Ar tiesioginis push blokuojamas (turi būti non_fast_forward / pull_request taisyklės)
+gh api repos/forevercornix/stenograma/rulesets/<ID> --jq '[.rules[].type]'
+
+# 4. Kas gali apeiti — sąrašas turi būti TRUMPAS ir žinomas
+gh api repos/forevercornix/stenograma/rulesets/<ID> --jq '.bypass_actors'
+```
+
+⚠️ **Konfigūracijos peržiūra nėra įrodymas.** Ji rodo, kas nustatyta, ne ką
+GitHub realiai daro. Vienintelis įrodymas yra PR, kuriame required check raudonas
+arba nepasirodė, ir **merge mygtukas užblokuotas**.
+
 ## Priklausomybių skenavimas
 
 - **Dependabot**: npm (`/backend`, `/frontend`), pip (`/backend/scripts`,

@@ -484,6 +484,81 @@ semantika vengia.
 
 ---
 
+## 3a. `main` apsaugos emergency bypass (#324, D6)
+
+⚠️ **Repo turi vieną savininką.** Su griežtais vartais ir be bypass procedūros
+pirmas išorinis gedimas sustabdo darbą — o tikėtiniausia baigtis yra **vartų
+išjungimas**, t. y. grįžimas į būseną iki #324. Todėl bypass yra **valdomas
+kelias**, ne vartų išjungimas.
+
+### Kada leidžiama
+
+**Tik** kai required check negali patikimai tapti žalias dėl priežasties,
+**nesusijusios su merge'inamo pakeitimo korektiškumu**: išorinis ar
+infrastruktūrinis gedimas.
+
+Per pastarąjį mėnesį tokių buvo trys: `npm audit` 503; `multer`/`js-yaml`
+advisories prieš nepakeistas priklausomybes; `minio/minio` image pašalintas iš
+Docker Hub.
+
+⚠️ **NEAIŠKIOS KILMĖS RAUDONAS TESTAS NĖRA PAKANKAMA PRIEŽASTIS.** Kitaip bypass
+virsta „savininkas nusprendžia, kad pakankamai žalia" — o tai yra vartų nebuvimas
+su papildomu žingsniu.
+
+### Privalomi laukai
+
+Forma tokia pat kaip **#237 `TESTŲ ŠALINIMAS` override registras**, kuris jau
+veikia — antras mechanizmas nekuriamas.
+
+Įrašas dedamas į **merge commit'o žinutę**, viena eilute prasidedančia žyme:
+
+```
+MAIN APSAUGOS BYPASS: <priežastis>
+```
+
+plius kūne visi šeši laukai:
+
+| Laukas | Ką reiškia |
+|---|---|
+| `PR/commit` | kas merginta |
+| `Apeitas check` | konkretus vardas, ne „CI" |
+| `Priežastis` | kas tiksliai neveikė |
+| `Įrodymas, kad išorinis` | nuoroda į status page, advisory, registry — **ne teiginys** |
+| `Patvirtino` | kas priėmė sprendimą |
+| `Follow-up issue` | jei ne vienkartinis; „nėra" tinka tik vienkartiniam |
+
+### Kur įrašas gyvena ir kaip patikrinama, kad jis atsirado
+
+⚠️ **GitHub bypass mechanizmas šių laukų užpildyti NEPRIVERČIA.** Tai
+**procedūrinis audito kontraktas**, ne techninis enforcement, ir tai sakoma
+garsiai — kitaip po pusmečio jis skaitysis kaip garantija.
+
+Patikra po kiekvieno bypass:
+
+```bash
+# Ar merge commit turi žymę
+git log --format='%H %s%n%b' origin/main -20 | grep -A 8 "MAIN APSAUGOS BYPASS:"
+
+# Ar GitHub užfiksavo bypass (ruleset audito žurnalas)
+gh api "repos/forevercornix/stenograma/rulesets/<ID>/history" 2>/dev/null || \
+  echo "Ruleset istorija neprieinama - tikrinkite Settings > Rules > Insights"
+```
+
+**Periodinė patikra:** kartą per ketvirtį palyginti GitHub bypass įvykių skaičių
+su registro įrašų skaičiumi. Nesutapimas reiškia bypass be įrašo — ir tai
+incidentas, ne apskaitos klaida.
+
+### Ko bypass NEDARO
+
+- **neišjungia** apsaugos kitiems pakeitimams;
+- **neišplečia** bypass aktorių sąrašo;
+- **nepakeičia** required aibės.
+
+Jei bypass prireikia daugiau nei kartą tam pačiam check'ui, tai nebėra avarija —
+tai signalas, kad check'as netinka merge kontraktui. Sprendžiama keičiant
+kontraktą (žr. `docs/ci-security-policy.md` `dependency-audit` sąlygą), ne
+kartojant bypass.
+
 ## 4. Klaidingi teiginiai ir neteisingos diagnozės
 
 Ne kiekvienas signalas yra incidentas. Šie atvejai **atrodo** kaip incidentai,
