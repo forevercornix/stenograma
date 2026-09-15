@@ -330,6 +330,8 @@ const functional = [
    * cookie gyvena `postRestoreReconcile.integration`, kuris išvedamas į
    * `postgres` rinkinį per `postgresGuard` importą.
    */
+  /** ⚠️ LAIKINAS — #324 acceptance scenarijus 2. Pašalinamas kartu su testu. */
+  "acceptanceRaudonas",
   "postRestoreReconcileContract",
   /**
    * #250 (7.6c): erasure-safe atkūrimo KONTRAKTAI be DB.
