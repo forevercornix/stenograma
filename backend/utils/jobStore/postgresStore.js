@@ -2978,9 +2978,15 @@ function createPostgresStore(
        */
       if (bandymuRegistras && laukianciuRibaMs !== undefined) {
         try {
-          const { sluotina, priezastis } = await attemptRegistry.arVisDarSluotina(pool, kandidatas, {
-            laukianciuRibaMs,
-          });
+          /* MUTACIJA: tikrinamas TIK svetimas, kaip pirmoje redakcijoje. */
+          const kitas = await pool.query(
+            `SELECT EXISTS (SELECT 1 FROM job_result_attempts k
+               WHERE k.storage_key = $1 AND k.storage_type = $2
+                 AND k.attempt_id::text <> $3 AND k.busena = ANY($4::text[])) AS x`,
+            [kandidatas.storage_key, kandidatas.storage_type, String(kandidatas.attempt_id), attemptRegistry.GYVOS_BUSENOS]
+          );
+          const sluotina = !kitas.rows[0].x;
+          const priezastis = sluotina ? null : 'adresą užima KITAS gyvas bandymas';
 
           if (!sluotina) {
             rezultatai.push({
