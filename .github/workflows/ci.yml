@@ -986,3 +986,100 @@ jobs:
 
       - name: Python auditas (whisper-server) - blokuoja BET KOKS radinys
         run: pip-audit --requirement whisper-server/requirements.txt --strict
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # VIENAS STABILUS VARTŲ VARDAS (#324, D3)
+  #
+  # GitHub nustatymuose laikomas VIENAS required check, o priklausomybių sąrašas
+  # gyvena ČIA, versijų kontrolėje. Priežastis konkreti: GitHub įrašytas vardas
+  # neturi jokios apsaugos nuo drift'o — pervadinus job'ą, required check tyliai
+  # virsta `missing`. Repo valdoma priklausomybė elgiasi priešingai (žr. D3b).
+  #
+  # ⚠️ `dependency-audit` ČIA NĖRA SĄMONINGAI. Jis patariamasis: per mėnesį krito
+  # tris kartus dėl priežasčių, NESUSIJUSIŲ su PR turiniu (`npm audit` 503; du
+  # advisory prieš NEPAKEISTAS priklausomybes). Vartai, kurių subjektas nėra
+  # peržiūrimas pokytis, verčia bypass'ą kasdienybe. Sąlyga, kada jis tampa
+  # privalomu, užrašyta `docs/ci-security-policy.md`.
+  #
+  # ⚠️ CodeQL ČIA NĖRA IR NEGALI BŪTI. Jį kuria GitHub default setup
+  # (`code-scanning/default-setup: configured`), ne repo workflow, tad `needs:`
+  # jo nepasiekia — `needs:` veikia tik vieno workflow ribose.
+  # ══════════════════════════════════════════════════════════════════════════
+  required-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # ⚠️ `always()` YRA VISA ESMĖ, NE ATSARGA.
+    #
+    # Be jo praleista priklausomybė praleidžia ir šį job'ą, o GitHub praleistą
+    # required check skaito kaip PATENKINTĄ. Vartai tada tyliai atsidaro būtent
+    # tada, kai CI nepasileido — t. y. tuo atveju, dėl kurio #324 ir egzistuoja.
+    #
+    # Grandinė pasiekiama ŠIANDIEN: `docker` turi `needs: [backend, frontend]`.
+    if: ${{ always() }}
+    needs:
+      - backend
+      - frontend
+      - e2e
+      - docker
+      - compose-config-validate
+      - workflow-policy
+      - deleted-tests
+      - pyannote-server
+      - whisper-server
+    steps:
+      # ⚠️ TIKRINAMAS KIEKVIENOS PRIKLAUSOMYBĖS `result`, NE `needs.*.result`
+      # AGREGATAS. Agregatas (`contains(needs.*.result, 'failure')`) nepasako,
+      # KURI šaka krito, o klaida, nenurodanti ką taisyti, operatoriui verta
+      # mažiau nei jos nebuvimas.
+      #
+      # ⚠️ `skipped` = NESĖKMĖ BE IŠIMČIŲ. Išmatuota: nė vienas `ci.yml` job'as
+      # neturi job-lygio `if:`, tad sąmoningai conditional šakų NĖRA. Vienintelis
+      # `needs:` yra `docker: [backend, frontend]`, ir jo praleidimas reiškia, kad
+      # kažkas prieš jį krito — ne kad jis nereikalingas.
+      #
+      # Atsiradus sąmoningai conditional job'ui, jo `skipped` semantika turi būti
+      # nuspręsta ATSKIRAI ir įrašyta čia; aklas pridėjimas į šį sąrašą paverstų
+      # jį privalomu netyčia.
+      - name: Visos privalomos šakos privalo būti `success`
+        env:
+          REZULTATAI: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+
+          # ⚠️ JOKIO PROCESO PAKAITO (`< <(...)`).
+          #
+          # `while ... done < <(jq ...)` `jq` gedimą PASLEPTŲ: ciklas
+          # perskaitytų nieko, `nepavyko` liktų 0, ir vartai atsidarytų. Tai
+          # tiksliai ta forma, kurią repo jau gaudė #342 cutover bloke — ten
+          # `scan` gedimas dingdavo proceso pakaite, nepaisant `set -euo
+          # pipefail`. Todėl `jq` vykdomas ATSKIRAI, ir jo statusas matomas.
+          eilutes="$(echo "$REZULTATAI" | jq -r 'to_entries[] | "\(.key)\t\(.value.result)"')"
+
+          if [ -z "$eilutes" ]; then
+            echo "Nepavyko nuskaityti priklausomybių rezultatų - vartai NEATIDAROMI."
+            exit 1
+          fi
+
+          nepavyko=0
+
+          while IFS=$'\t' read -r saka rezultatas; do
+            if [ "$rezultatas" = "success" ]; then
+              echo "OK   $saka: $rezultatas"
+            else
+              echo "FAIL $saka: $rezultatas"
+              nepavyko=1
+            fi
+          done <<< "$eilutes"
+
+          if [ "$nepavyko" -ne 0 ]; then
+            # ⚠️ BE ATVIRKŠTINIŲ KABUČIŲ. Bash dvigubose kabutėse jos yra KOMANDOS
+            # PAKAITAS: "nėra `success`" bandytų paleisti komandą `success`.
+            echo ""
+            echo "Privaloma CI saka nera success."
+            echo "skipped ir cancelled cia yra NESEKME: praleista saka reiskia,"
+            echo "kad patikra NEIVYKO, o ne kad jos nereikejo."
+            exit 1
+          fi
+
+          echo ""
+          echo "Visos privalomos sakos sekmingos."
