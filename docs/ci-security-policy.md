@@ -227,12 +227,27 @@ Todėl kiekvienas įrašas turi lauką **„Ar pagrįstas pagal D6"**, ir jis ga
 | Laukas | Reikšmė |
 |---|---|
 | **PR/commit** | šis PR ⚠️ merge commit SHA įrašomas **po** merge (PR savo paties SHA turėti negali) |
-| **Apeitas check** | `required-ci` — būsena `cancelled` |
+| **Apeitas check** | `required-ci` — būsena **`failure`** ⚠️ ne `cancelled`, žr. pastabą |
 | **Priežastis** | #324 acceptance scenarijus 7: įrodyti, kad bypass kelias veikia ir palieka įrašą |
-| **Įrodymas** | CI **atšauktas sąmoningai**, ne sugedęs — `cancelled`, ne `failure` |
+| **Įrodymas** | CI paleidimas `35022569706` **atšauktas sąmoningai** (`conclusion: cancelled`), ne sugedęs; `backend` ir `docker` — `cancelled` |
 | **Patvirtino** | repozitorijos savininkas |
 | **Follow-up issue** | nereikia — vienkartinis, acceptance dalis |
 | **Ar pagrįstas pagal D6** | ⚠️ **NE** — tai **bandymas**, ne avarija. Įrašomas todėl, kad scenarijus 7 reikalauja įrodyti ne tik „bypass įmanomas", bet ir „bypass palieka pėdsaką" |
+
+⚠️ **Pastaba: atšauktas CI duoda `required-ci: failure`, ne `cancelled`** —
+išmatuota, ne prognozuota.
+
+Atšaukus paleidimą, `backend` ir `docker` gavo `cancelled`, bet **gate job vis
+tiek įvykdytas** (`if: always()`) ir pats grąžino `failure`, nes jo taisyklė
+`cancelled` laiko nesėkme.
+
+Tai **trečias nepriklausomas** to paties patvirtinimas — ir pirmas iš **tikro**
+atšaukimo, ne iš sintetinės mutacijos (ankstesni: run `35011861118` su
+`if: false`, ir run `35017869151`, kur `docker` praleistas dėl kritusio
+`backend`).
+
+Praktinė pasekmė operatoriui: **atšauktas CI merge'o neatrakina** — jis atrodo
+kaip nesėkmė, o ne kaip „patikra neįvyko".
 
 #### Įrašas 1 — netyčinis bypass per per platų `bypass_mode` (2026-09-15)
 
