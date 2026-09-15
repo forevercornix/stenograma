@@ -871,6 +871,8 @@ jobs:
         run: node scripts/check-workflow-policy.mjs
 
   deleted-tests:
+    # ĮRODYMAS #324: priklausomybė SĄMONINGAI praleidžiama.
+    if: false
     runs-on: ubuntu-latest
     # Sargas neturi priklausomybių (tik Node stdlib ir git) - 10 min su kaupu.
     timeout-minutes: 10
