@@ -206,7 +206,55 @@ nei D1**, ir jei jo kada nors reikės, jis priimamas atskirai. Šis pasirinkimas
 
 ### Emergency bypass
 
-Žr. `docs/operations/OPERATIONAL_PROCEDURES.md` — bypass registras ir procedūra.
+**Procedūra** — `docs/operations/OPERATIONAL_PROCEDURES.md` §3a: kada leidžiama,
+šeši privalomi laukai, kaip patikrinama, kad įrašas atsirado.
+
+**Registras** — žemiau. ⚠️ Viena vieta, ne dvi: procedūra sako *kaip*, registras
+fiksuoja *kas įvyko*. Įrašai dedami **naujausi viršuje**.
+
+#### ⚠️ Dvi įrašų rūšys, ir jos NESUPLAKAMOS
+
+D6 sako: bypass skirtas **išoriniam ar infrastruktūriniam** gedimui. Bet registre
+neišvengiamai atsiranda ir kitokių įrašų — netyčinių bei bandomųjų. Jie
+**privalo** būti pažymėti, nes kitaip pirmas precedentas išmoko, kad „konfigūracija
+buvo per plati" yra priimtina bypass priežastis.
+
+Todėl kiekvienas įrašas turi lauką **„Ar pagrįstas pagal D6"**, ir jis gali būti
+`NE`. Neįrašytas bypass yra blogiau nei įrašytas nepagrįstas.
+
+#### Įrašas 2 — acceptance scenarijus 7 (2026-09-15)
+
+| Laukas | Reikšmė |
+|---|---|
+| **PR/commit** | šis PR ⚠️ merge commit SHA įrašomas **po** merge (PR savo paties SHA turėti negali) |
+| **Apeitas check** | `required-ci` — būsena `cancelled` |
+| **Priežastis** | #324 acceptance scenarijus 7: įrodyti, kad bypass kelias veikia ir palieka įrašą |
+| **Įrodymas** | CI **atšauktas sąmoningai**, ne sugedęs — `cancelled`, ne `failure` |
+| **Patvirtino** | repozitorijos savininkas |
+| **Follow-up issue** | nereikia — vienkartinis, acceptance dalis |
+| **Ar pagrįstas pagal D6** | ⚠️ **NE** — tai **bandymas**, ne avarija. Įrašomas todėl, kad scenarijus 7 reikalauja įrodyti ne tik „bypass įmanomas", bet ir „bypass palieka pėdsaką" |
+
+#### Įrašas 1 — netyčinis bypass per per platų `bypass_mode` (2026-09-15)
+
+| Laukas | Reikšmė |
+|---|---|
+| **PR/commit** | `2cba0bd` — tiesioginis push į `main` |
+| **Apeitas check** | `pull_request` **ir** `required-ci` — abi taisyklės vienu metu |
+| **Priežastis** | ruleset `bypass_actors` turėjo `RepositoryRole 5` su `bypass_mode: always`; savininko push'as taisykles apėjo **tyliai leidžiamas**, ne blokuojamas |
+| **Įrodymas** | pakeitus `bypass_mode` į `pull_request`, tas pats push atmestas su **`GH013`** — t. y. priežastis buvo konfigūracija, ne teisių trūkumas |
+| **Patvirtino** | repozitorijos savininkas (acceptance scenarijus 6) |
+| **Follow-up issue** | **nereikia** — konfigūracija ištaisyta tą pačią dieną |
+| **Ar pagrįstas pagal D6** | ⚠️ **NE** — netyčinis. Jokio išorinio gedimo nebuvo |
+
+⚠️ **Ką šis įrašas iš tikrųjų parodė.** Scenarijus 6 buvo skirtas patikrinti, ar
+tiesioginis push blokuojamas. Jis parodė daugiau: **`bypass_mode: always` reiškia
+„visada", įskaitant `git push`**, ir tokia konfigūracija D5 („tiesioginis push
+normaliajame kelyje blokuojamas") **nepatenkina** — savininkui normalus kelias
+tampa apėjimu be jokio pranešimo.
+
+`bypass_mode: pull_request` palieka bypass **PR kelyje**, kur jis matomas ir
+registruojamas, o tiesioginį push blokuoja. Tai ir yra D6 skirtumas tarp *valdomo
+kelio* ir *vartų išjungimo* — tik šįkart išmatuotas, ne aprašytas.
 
 ### Kaip operatorius patikrina, kad apsauga TEBĖRA aktyvi
 
