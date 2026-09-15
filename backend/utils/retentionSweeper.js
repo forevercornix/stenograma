@@ -414,6 +414,8 @@ async function _valytiRezultatoBandymus() {
 
   let pasalinta = 0;
   const uzdarytini = [];
+  /** ⚠️ Ties destruktyvia riba praleisti — atskirai nuo atrankos skaitiklio. */
+  const uzimtiVerdiktai = [];
   const karantinuotini = [];
   const nepavyke = [];
 
@@ -455,6 +457,28 @@ async function _valytiRezultatoBandymus() {
       continue;
     }
 
+    if (v.verdiktas === "uzimtas") {
+      /**
+       * ⚠️ EILUTĖ NEŠALINAMA — IR TAI BUVO SPRAGA PIRMOJE ŠIO SARGO REDAKCIJOJE.
+       *
+       * `uzimtas` prakrisdavo pro `pazeidimas`/`nepavyko` šakas tiesiai į
+       * `uzdarytini`: objektas išsaugotas, o jo VIENINTELIS adresas ištrintas.
+       * Tai tiksliai ta būsena, kuriai registras ir sukurtas —
+       * `list(prefix)` pagal A3 nėra, tad be eilutės objektas tampa
+       * nebeatrandamas. Sargas būtų „apsaugojęs" objektą jį prarasdamas.
+       *
+       * ⚠️ Rado ne peržiūra, o §0 klausimas „kas SUVARTOJA šį verdiktą".
+       *
+       * Praleidimas pasikartos kitame cikle — ir taip ir turi būti: jei adresas
+       * tapo gyvas, eilutė nebėra šluotina, o jei ne, kitas ciklas ją nušluos.
+       */
+      uzimtiVerdiktai.push(v);
+      log.warn(
+        `Retencija: bandymo objektas NEŠALINAMAS (${v.storageKey}) - ${v.priezastis || "adresas užimtas"}.`
+      );
+      continue;
+    }
+
     if (v.verdiktas === "pasalinta") pasalinta += 1;
 
     /**
@@ -488,7 +512,21 @@ async function _valytiRezultatoBandymus() {
    */
   const pazeidimai = await jobStore.system.karantinuotuSkaicius();
 
-  return { pasalinta, praleista, uzimti, pazeidimai, nepavyke, nevykdyta: false };
+  /**
+   * ⚠️ DU ŠALTINIAI TAM PAČIAM RODIKLIUI, IR ABU BŪTINI.
+   *
+   * `uzimti` ateina iš ATRANKOS (eilutės, kurios į partiją nepateko), o
+   * `uzimtiVerdiktai` — iš DESTRUKTYVIOS RIBOS (pateko, bet būsena pasikeitė).
+   * Antrasis yra retas ir būtent todėl svarbus: jis matuoja lenktynės langą.
+   */
+  return {
+    pasalinta,
+    praleista,
+    uzimti: uzimti + uzimtiVerdiktai.length,
+    pazeidimai,
+    nepavyke,
+    nevykdyta: false,
+  };
 }
 
 /**

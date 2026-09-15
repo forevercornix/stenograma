@@ -465,51 +465,85 @@ async function karantinuotuSkaicius(vykdytojas) {
 }
 
 /**
- * PAKARTOTINĖ PATIKRA TIES DESTRUKTYVIA RIBA (#305.1, Codex A).
+ * PAKARTOTINĖ PATIKRA TIES DESTRUKTYVIA RIBA — VISI LANGO VEIKĖJAI (#305.1).
  *
  * ⚠️ PR-5 D ŠAKNIES RECIDYVAS: „snapshot be pakartotinės patikros po užrakto".
- * Ten sprendimas buvo enumeracija → I/O → užraktas → PAKARTOTINĖ PATIKRA →
- * šalinimas (`deleteResultArtifacts` `tiketiniAdresai`); čia ta pati spraga
- * atsivėrė kitame kelyje.
+ * Atrankos užklausa mato SNAPSHOT'Ą, o tarp jos ir fizinio šalinimo būseną gali
+ * pakeisti keli veikėjai.
  *
- * Atrankos užklausa mato SNAPSHOT'Ą. Pasibaigęs `pending` bandymas, kuris nuo
- * šiol NEBLOKUOJA (žr. `kitasGyvasBandymas`), gali įsipareigoti PO to, kai
- * kandidatai jau atrinkti, bet PRIEŠ fizinį šalinimą — ir tada ištrinamas
- * objektas, kurio nuoroda ką tik tapo gyva. Tai tiksliai ta seka, kurią šis PR
- * uždaro, tik langas siauresnis.
+ * ⚠️ PIRMOJI ŠIOS PATIKROS REDAKCIJA ĮVARDIJO VIENĄ — TĄ, KURIS BUVO PRANEŠIME.
+ * Jų yra du, ir antrasis buvo NEMATOMAS PAGAL KONSTRUKCIJĄ:
  *
- * ⚠️ UŽRAKTO ČIA NĖRA SĄMONINGAI (PR-4 D4). Fizinis I/O negali vykti po eilutės
- * užraktu, tad „užrakinti ir trinti" nėra leistina tvarka. Lieka pakartotinė
- * patikra kuo arčiau I/O.
+ *   1. SVETIMAS bandymas įsipareigoja — dengė `kitasGyvasBandymas()`;
+ *   2. PATI KANDIDATĖ įsipareigoja — `kitasGyvasBandymas()` ją EKSPLICITIŠKAI
+ *      išbraukia (`attempt_id <>`), ir selektoriuje tai TEISINGA: kitaip nė viena
+ *      eilutė niekada netaptų šluotina. Bet ties destruktyvia riba klausimas
+ *      kitas — ne „ar kas KITAS užėmė adresą", o „ar objekto dar KAM NORS reikia,
+ *      ĮSKAITANT kandidatę". Tas pats predikatas dviejose pozicijose turi du
+ *      skirtingus teisingus atsakymus.
  *
- * ⚠️ IR LIEKA LIKUTINIS LANGAS — tarp šios patikros ir `delete()`. Jis matuojamas
- * milisekundėmis vietoj viso partijos apdorojimo trukmės, bet jis NE NULIS, ir
- * tai užrašoma, o ne nutylima. Visiškas uždarymas reikalautų užrakto per I/O,
- * t. y. pažeistų PR-4 D4.
+ * ⚠️ IR ANTRA DALIS: kandidatė ateina kaip SNAPSHOT'O objektas, tad net jos pačios
+ * būsena nebuvo skaitoma iš naujo. Todėl čia eilutė perskaitoma IŠ LENTELĖS, o
+ * ne tikima tuo, ką atnešė atranka.
+ *
+ * ⚠️ VIENA PATIKRA VISIEMS VEIKĖJAMS, NE TRYS. Nauja nuoroda `job_results`,
+ * naujas bandymas tuo pačiu adresu ir pačios kandidatės įsipareigojimas yra to
+ * paties klausimo pusės; trys atskiros patikros neišvengiamai išsiskirtų — ta
+ * pati šaknis, kurią šis PR jau taisė kontraktiniu testu.
+ *
+ * ⚠️ UŽRAKTO NĖRA SĄMONINGAI (PR-4 D4): fizinis I/O po eilutės užraktu
+ * draudžiamas, tad „užrakinti ir trinti" nėra leistina tvarka. Likutinis langas
+ * tarp šios patikros ir `delete()` LIEKA, ir jis matuojamas milisekundėmis
+ * vietoj visos partijos trukmės — bet jis NE NULIS, ir tai užrašoma.
+ *
+ * @returns {Promise<{sluotina: boolean, priezastis: string|null}>}
  */
-async function arUzimtasGyvo(vykdytojas, kandidatas, { laukianciuRibaMs }) {
+async function arVisDarSluotina(vykdytojas, kandidatas, { laukianciuRibaMs }) {
   const { rows } = await vykdytojas.query(
-    `WITH a AS (
-       SELECT $1::text AS attempt_id, $2::text AS storage_type, $3::text AS storage_key
-     )
-     SELECT ${kitasGyvasBandymas("$4", "$5", "$6")} AS uzimtas
-       FROM a`,
+    `SELECT
+        a.busena,
+        (a.busena = $4) AS isipareigota,
+        (a.busena = $5 AND a.created_at >= now() - ($6::double precision * INTERVAL '1 millisecond'))
+          AS dar_laukia,
+        EXISTS (
+          SELECT 1 FROM job_results r
+           WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
+        ) AS referencuota,
+        ${kitasGyvasBandymas("$7", "$5", "$6")} AS kitas_gyvas
+       FROM job_result_attempts a
+      WHERE a.attempt_id::text = $1
+        AND a.storage_type = $2
+        AND a.storage_key = $3`,
     [
-      kandidatas.attempt_id,
+      String(kandidatas.attempt_id),
       kandidatas.storage_type,
       kandidatas.storage_key,
-      GYVOS_BUSENOS,
+      BUSENA.ISIPAREIGOTA,
       BUSENA.LAUKIA,
       Number(laukianciuRibaMs),
+      GYVOS_BUSENOS,
     ]
   );
 
-  return Boolean(rows[0] && rows[0].uzimtas);
+  /**
+   * ⚠️ EILUTĖS NEBĖRA → NEŠALINAM. Ją galėjo pašalinti erasure ar lygiagretus
+   * ciklas; tada objekto likimas nebe mūsų sprendimas, ir spėlioti nėra už ką.
+   */
+  if (rows.length === 0) return { sluotina: false, priezastis: "eilutės nebėra" };
+
+  const r = rows[0];
+
+  if (r.isipareigota) return { sluotina: false, priezastis: "kandidatė ĮSIPAREIGOJO po atrankos" };
+  if (r.dar_laukia) return { sluotina: false, priezastis: "kandidatė vėl GYVA (`pending` nepasibaigęs)" };
+  if (r.referencuota) return { sluotina: false, priezastis: "adresą referencuoja `job_results`" };
+  if (r.kitas_gyvas) return { sluotina: false, priezastis: "adresą užima KITAS gyvas bandymas" };
+
+  return { sluotina: true, priezastis: null };
 }
 
 module.exports = {
   BUSENA,
-  arUzimtasGyvo,
+  arVisDarSluotina,
   /** ⚠️ Eksportuojama KONTRAKTINIAM testui: sąryšis su erasure puse turi būti tikrinamas. */
   GYVOS_BUSENOS,
   valytiniBandymai,

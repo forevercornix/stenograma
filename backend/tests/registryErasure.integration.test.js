@@ -935,6 +935,90 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [bAttempt]);
   });
 
+  await t.test("#305.1/II: PATI KANDIDATĖ įsipareigoja tarp atrankos ir šalinimo", async () => {
+    /**
+     * ⚠️ ANTRA TOCTOU TOJE PAČIOJE RIBOJE — TAS PATS LANGAS, KITAS VEIKĖJAS.
+     *
+     * Pirmoji pakartotinės patikros redakcija įvardijo vieną veikėją — tą, kuris
+     * buvo pranešime (svetimas job'as). Jų buvo DU, ir antrasis nematomas PAGAL
+     * KONSTRUKCIJĄ: `kitasGyvasBandymas()` kandidatę eksplicitiškai išbraukia
+     * (`attempt_id <>`), ir selektoriuje tai TEISINGA — kitaip nė viena eilutė
+     * niekada netaptų šluotina. Ties destruktyvia riba klausimas kitas.
+     *
+     * ⚠️ Pamoka už radinį vertingesnė: uždarant lenktynę reikia išvardyti VISUS,
+     * kas gali pakeisti būseną lange, ne tą, kuris pranešime.
+     */
+    const id = await naujasJobas();
+    const bandymas = await nutrukesBandymas(id, { text: "kandidatė, kuri įsipareigos" });
+
+    /** Pasibaigęs `pending` — nuo Codex I raundo jis teisėtai TAMPA kandidatu. */
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE attempt_id = $1", [
+      bandymas.attemptId,
+    ]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.ok(
+      kandidatai.some((k) => k.attempt_id === bandymas.attemptId),
+      "prielaida: atranka kandidatę PRIĖMĖ - be jos testas nematuotų lango"
+    );
+
+    /** ⚠️ TARPAS: kandidatė įsipareigoja PO atrankos, PRIEŠ šalinimą. */
+    await pool.query("UPDATE job_result_attempts SET busena = $1 WHERE attempt_id = $2", [
+      attemptRegistry.BUSENA.ISIPAREIGOTA,
+      bandymas.attemptId,
+    ]);
+
+    const verdiktai = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 });
+    const musu = verdiktai.find((v) => v.attemptId === bandymas.attemptId);
+
+    assert.equal(musu && musu.verdiktas, "uzimtas", `objektas NEGALI būti pašalintas: ${JSON.stringify(musu)}`);
+    assert.match(String(musu.priezastis), /ĮSIPAREIGOJO/, `priežastis privalo įvardyti veikėją: ${musu.priezastis}`);
+    assert.ok(await saugykla.head(bandymas.raktas), "objektas privalo IŠLIKTI");
+
+    /**
+     * ⚠️ IR EILUTĖ PRIVALO IŠLIKTI. Pirmoji sargo redakcija objektą išsaugodavo, o
+     * `uzimtas` verdiktas prakrisdavo į `uzdarytini` — eilutė, VIENINTELIS objekto
+     * adresas, būdavo ištrinama. Tai rado ne peržiūra, o klausimas „kas SUVARTOJA
+     * šį verdiktą".
+     */
+    const { rows } = await pool.query("SELECT 1 FROM job_result_attempts WHERE attempt_id = $1", [
+      bandymas.attemptId,
+    ]);
+    assert.equal(rows.length, 1, "eilutė yra VIENINTELIS objekto adresas - ji privalo IŠLIKTI");
+
+    await saugykla.delete(bandymas.raktas);
+  });
+
+  await t.test("#305.1/II KONTROLĖ: nepasikeitusi kandidatė šluojama normaliai", async () => {
+    /**
+     * ⚠️ BE ŠIOS KONTROLĖS „nešalina" tenkinama ir tada, jei šalinimas nustotų
+     * veikti VISAI — o toks sargas atrodytų teisingas nepašalindamas nieko.
+     */
+    const id = await naujasJobas();
+    const bandymas = await nutrukesBandymas(id, { text: "nepasikeitusi" });
+
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE attempt_id = $1", [
+      bandymas.attemptId,
+    ]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    const verdiktai = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 });
+    const musu = verdiktai.find((v) => v.attemptId === bandymas.attemptId);
+
+    assert.equal(musu && musu.verdiktas, "pasalinta", `niekas nepasikeitė - privalo būti pašalinta: ${JSON.stringify(musu)}`);
+    assert.equal(await saugykla.head(bandymas.raktas), null, "objekto nebeturi būti");
+  });
+
   await t.test("KONTROLĖ: SAVAS adresas šalinamas normaliai", async () => {
     /**
      * Be jos ankstesnis testas būtų tenkinamas ir patikros, kuri atmeta VISKĄ — o toks

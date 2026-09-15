@@ -2970,14 +2970,24 @@ function createPostgresStore(
        * ⚠️ `laukianciuRibaMs` PRIVALO ATEITI IŠ KVIETĖJO. Numatytoji reikšmė čia
        * reikštų ANTRĄ amžiaus semantiką: patikra laikytų gyvu tai, ko atranka
        * nebelaikė, arba atvirkščiai.
+       *
+       * ⚠️ TIKRINAMI VISI LANGO VEIKĖJAI, NE TIK SVETIMAS. Pirmoji redakcija
+       * klausė tik „ar kas KITAS užėmė adresą" — o pati kandidatė gali būti
+       * įsipareigojusi po atrankos, ir `kitasGyvasBandymas()` jos NEMATO pagal
+       * konstrukciją (ji save išbraukia, ir selektoriuje tai teisinga).
        */
       if (bandymuRegistras && laukianciuRibaMs !== undefined) {
         try {
-          if (await attemptRegistry.arUzimtasGyvo(pool, kandidatas, { laukianciuRibaMs })) {
+          const { sluotina, priezastis } = await attemptRegistry.arVisDarSluotina(pool, kandidatas, {
+            laukianciuRibaMs,
+          });
+
+          if (!sluotina) {
             rezultatai.push({
               attemptId: kandidatas.attempt_id,
               storageKey: raktas,
               verdiktas: "uzimtas",
+              priezastis,
             });
             continue;
           }
