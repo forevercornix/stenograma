@@ -2851,7 +2851,7 @@ function createPostgresStore(
    */
   /** Šlavimo kandidatai — predikatas gyvena `attemptRegistry` (#157, PR-5). */
   async function valytiniBandymai(nustatymai) {
-    if (!bandymuRegistras) return { kandidatai: [], praleista: 0 };
+    if (!bandymuRegistras) return { kandidatai: [], praleista: 0, uzimti: 0 };
     const attemptRegistry = require("../attemptRegistry");
     return attemptRegistry.valytiniBandymai(pool, nustatymai);
   }
@@ -2934,8 +2934,9 @@ function createPostgresStore(
     return sudarytiAtaskaita(verdiktai);
   }
 
-  async function sweepResultArtifacts(kandidatai) {
+  async function sweepResultArtifacts(kandidatai, { laukianciuRibaMs } = {}) {
     const rezultatai = [];
+    const attemptRegistry = require("../attemptRegistry");
 
     for (const kandidatas of kandidatai || []) {
       const raktas = kandidatas.storage_key;
@@ -2951,6 +2952,45 @@ function createPostgresStore(
           priezastis: klaida.message,
         });
         continue;
+      }
+
+      /**
+       * ⚠️ NUOSAVYBĖ PERTIKRINAMA TIES DESTRUKTYVIA RIBA (#305.1, Codex A).
+       *
+       * Atranka matė SNAPSHOT'Ą. Pasibaigęs `pending` bandymas, kuris jos
+       * nebeblokuoja, gali įsipareigoti PO atrankos ir PRIEŠ šį šalinimą — ir
+       * tada dingtų objektas, kurio nuoroda ką tik tapo gyva. Tai PR-5 D šaknies
+       * („snapshot be pakartotinės patikros") recidyvas kitame kelyje.
+       *
+       * ⚠️ BE UŽRAKTO SĄMONINGAI: fizinis I/O po eilutės užraktu draudžiamas
+       * (PR-4 D4), tad „užrakinti ir trinti" nėra leistina tvarka. Likutinis
+       * langas tarp šios patikros ir `delete()` lieka, ir jis užrašytas
+       * `arUzimtasGyvo()` komentare — ne nutylėtas.
+       *
+       * ⚠️ `laukianciuRibaMs` PRIVALO ATEITI IŠ KVIETĖJO. Numatytoji reikšmė čia
+       * reikštų ANTRĄ amžiaus semantiką: patikra laikytų gyvu tai, ko atranka
+       * nebelaikė, arba atvirkščiai.
+       */
+      if (bandymuRegistras && laukianciuRibaMs !== undefined) {
+        try {
+          if (await attemptRegistry.arUzimtasGyvo(pool, kandidatas, { laukianciuRibaMs })) {
+            rezultatai.push({
+              attemptId: kandidatas.attempt_id,
+              storageKey: raktas,
+              verdiktas: "uzimtas",
+            });
+            continue;
+          }
+        } catch (klaida) {
+          /** ⚠️ Patikros gedimas = ATSISAKYMAS TRINTI, ne trynimas be patikros. */
+          rezultatai.push({
+            attemptId: kandidatas.attempt_id,
+            storageKey: raktas,
+            verdiktas: "nepavyko",
+            priezastis: `nuosavybės pakartotinė patikra nepavyko: ${klaida.message}`,
+          });
+          continue;
+        }
       }
 
       try {

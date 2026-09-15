@@ -687,15 +687,33 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     /** B ką tik įrašė objektą — eilutė `pending`, `job_results` dar tuščias. */
     const bBandymas = await nutrukesBandymas(b, { text: "B pending rezultatas" });
 
-    /** A senas bandymas TUO PAČIU adresu (nekonsistentiški metaduomenys). */
+    /** A senas bandymas TUO PAČIU adresu (nekonsistentiški metaduomenys) — įrašomas PO bazinio matavimo. */
     const aAttempt = attemptRegistry.naujasBandymas();
+
+    /**
+     * ⚠️ SKAITIKLIS MATUOJAMAS PRIEŠ/PO, NE ABSOLIUČIA REIKŠME (Codex, D).
+     *
+     * Pirmoji redakcija tikrino `svetimi >= 1`, o tai GLOBALUS skaičius bendroje
+     * DB. Prieš tai einantis subtestas palieka lygiai tokią pat kolizijų porą,
+     * tad su 1 ms amžiaus riba ji viena asercijai jau pakako: testas būtų praėjęs
+     * IR TADA, jei šio testo eilutės į skaitiklį apskritai nepatektų.
+     *
+     * Deklaruojama stebimumo regresija taip lieka neapsaugota — klasikinė
+     * „asercija praeina dėl kitos priežasties".
+     */
+    const pries = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
     await pool.query(
       `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena, created_at)
        VALUES ($1, $2, 'fs', $3, $4, now() - INTERVAL '90 days')`,
       [aAttempt, a, bBandymas.raktas, attemptRegistry.BUSENA.ATMESTA]
     );
 
-    const { kandidatai, svetimi } = await attemptRegistry.valytiniBandymai(pool, {
+    const { kandidatai, uzimti } = await attemptRegistry.valytiniBandymai(pool, {
       laukianciuRibaMs: 1,
       atmestuRibaMs: 1,
       kiekis: 100,
@@ -709,9 +727,14 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
 
     /**
      * ⚠️ IR PRALEIDIMAS PRIVALO BŪTI MATOMAS (4b pamoka): fail-closed be
-     * matomumo virsta tyliu kaupimu.
+     * matomumo virsta tyliu kaupimu. Skirtumas PRIEŠ/PO priskiria prieaugį
+     * BŪTENT šio testo eilutei.
      */
-    assert.ok(svetimi >= 1, `svetimos nuosavybės skaitiklis privalo rodyti praleidimą, gauta ${svetimi}`);
+    assert.equal(
+      uzimti - pries.uzimti,
+      1,
+      `šio testo eilutė privalo pridėti LYGIAI 1 (prieš: ${pries.uzimti}, po: ${uzimti})`
+    );
 
     await saugykla.delete(bBandymas.raktas);
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [aAttempt]);
@@ -783,6 +806,131 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
 
     await saugykla.delete(bBandymas.raktas);
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [aAttempt]);
+  });
+
+  await t.test("#305.1/B1: TO PATIES job'o gyvas `pending` irgi saugo adresą", async () => {
+    /**
+     * ⚠️ PIRMOJI REDAKCIJA ŠITO NEDENGĖ, IR TAI BUVO KLAUSIMO KLAIDA.
+     *
+     * Predikatas tikrino `job_id <>`, t. y. klausė „ar savininkas KITAS?". Bet
+     * selektoriaus klausimas yra „ar objekto dar KAM NORS reikia?" — ir tame
+     * pačiame job'e atsakymas lygiai toks pat: gyvas `pending` bandymas gali
+     * ruoštis įsipareigoti.
+     */
+    const id = await naujasJobas();
+
+    const gyvas = await nutrukesBandymas(id, { text: "gyvas pending" });
+
+    const senas = attemptRegistry.naujasBandymas();
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena, created_at)
+       VALUES ($1, $2, 'fs', $3, $4, now() - INTERVAL '90 days')`,
+      [senas, id, gyvas.raktas, attemptRegistry.BUSENA.ATMESTA]
+    );
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 60000,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.deepEqual(
+      kandidatai.filter((k) => k.attempt_id === senas),
+      [],
+      "to paties job'o gyvas `pending` privalo saugoti adresą"
+    );
+
+    await saugykla.delete(gyvas.raktas);
+    await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [senas]);
+  });
+
+  await t.test("#305.1/B2: du PASIBAIGĘ `pending` tuo pačiu adresu — ABU tampa šluotini", async () => {
+    /**
+     * ⚠️ AMŽINA BLOKADA, IR JI KILO IŠ DVIEJŲ AMŽIAUS SEMANTIKŲ VIENAME SAKINYJE.
+     *
+     * Išorinis sakinys `pending`, senesnį už `laukianciuRibaMs`, laiko ŠLUOTINU;
+     * vidinis predikatas tą pačią būseną laikė GYVA neatsižvelgdamas į amžių. Du
+     * pasibaigę `pending` iš skirtingų job'ų tuo pačiu adresu matė vienas kitą
+     * kaip gyvą nuosavybę — ir nė vienas NIEKADA nebūtų nušluotas.
+     */
+    const a = await naujasJobas();
+    const b = await naujasJobas();
+
+    const aBandymas = await nutrukesBandymas(a, { text: "pasibaigęs A" });
+
+    const bAttempt = attemptRegistry.naujasBandymas();
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena, created_at)
+       VALUES ($1, $2, 'fs', $3, $4, now() - INTERVAL '90 days')`,
+      [bAttempt, b, aBandymas.raktas, attemptRegistry.BUSENA.LAUKIA]
+    );
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE attempt_id = $1", [
+      aBandymas.attemptId,
+    ]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    const musu = kandidatai.filter((k) => [aBandymas.attemptId, bAttempt].includes(k.attempt_id));
+    assert.equal(
+      musu.length,
+      2,
+      `abu pasibaigę \`pending\` privalo tapti kandidatais, gauta: ${JSON.stringify(musu)}`
+    );
+
+    await saugykla.delete(aBandymas.raktas);
+    await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [bAttempt]);
+  });
+
+  await t.test("#305.1/A: nuosavybė PERTIKRINAMA ties destruktyvia riba", async () => {
+    /**
+     * ⚠️ PR-5 D ŠAKNIES RECIDYVAS: „snapshot be pakartotinės patikros".
+     *
+     * Atranka mato snapshot'ą. Pasibaigęs `pending`, kuris jos nebeblokuoja, gali
+     * ĮSIPAREIGOTI po atrankos ir prieš fizinį šalinimą — ir tada dingtų objektas,
+     * kurio nuoroda ką tik tapo gyva.
+     *
+     * Testas atkuria būtent tą tarpą: kandidatai atrenkami, TADA adresą užima
+     * gyvas bandymas, ir tik po to kviečiamas šlavėjas.
+     */
+    const a = await naujasJobas();
+    const b = await naujasJobas();
+
+    const aBandymas = await nutrukesBandymas(a, { text: "A senas" });
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE attempt_id = $1", [
+      aBandymas.attemptId,
+    ]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.ok(
+      kandidatai.some((k) => k.attempt_id === aBandymas.attemptId),
+      "prielaida: atranka A eilutę PRIĖMĖ - be jos testas nematuotų tarpo"
+    );
+
+    /** ⚠️ ČIA IR YRA TARPAS: adresą užima gyvas bandymas PO atrankos. */
+    const bAttempt = attemptRegistry.naujasBandymas();
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, 'fs', $3, $4)`,
+      [bAttempt, b, aBandymas.raktas, attemptRegistry.BUSENA.ISIPAREIGOTA]
+    );
+
+    const verdiktai = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 60000 });
+    const musu = verdiktai.find((v) => v.attemptId === aBandymas.attemptId);
+
+    assert.equal(musu && musu.verdiktas, "uzimtas", `objektas NEGALI būti pašalintas: ${JSON.stringify(musu)}`);
+    assert.ok(await saugykla.head(aBandymas.raktas), "objektas privalo IŠLIKTI");
+
+    await saugykla.delete(aBandymas.raktas);
+    await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [bAttempt]);
   });
 
   await t.test("KONTROLĖ: SAVAS adresas šalinamas normaliai", async () => {

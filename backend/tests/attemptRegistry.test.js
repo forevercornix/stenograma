@@ -122,9 +122,20 @@ test("KONTRAKTAS: retencijos gyvos nuosavybės aibė yra erasure aibės POAIBIS"
    * ⚠️ TRYS KARTUS ŠIOJE SEKOJE DVI TO PATIES INVARIANTO REALIZACIJOS IŠSISKYRĖ
    * (`BUTINI` sąrašas, matricos skaičius, `PILNA_FORMA`). Todėl vieno šaltinio
    * čia nedarom — semantika skiriasi ir suliejimas reikštų vieną iš dviejų
-   * klausimų atsakyti neteisingai, — o fiksuojam SĄRYŠĮ: retencijos aibė privalo
-   * būti erasure aibės POAIBIS. Kol taip, retencija negali ištrinti nieko, ko
-   * erasure nebūtų apsaugojęs.
+   * klausimų atsakyti neteisingai, — o fiksuojam SĄRYŠĮ.
+   *
+   * ⚠️ SĄRYŠIS PATIKSLINTAS PO PIRMO CODEX RAUNDO. Iki jo buvo teigiama tiesiog
+   * „retencijos aibė yra erasure aibės POAIBIS". Perrašius predikatą iš
+   * NUOSAVYBĖS į GYVYBINGUMĄ, tai nustojo būti tiesa abiem kryptim:
+   *
+   *   - retencija dabar blokuoja IR TO PATIES job'o gyvą bandymą, o erasure toks
+   *     atvejis nedomina (jis sąmoningai naikina viso job'o artefaktus);
+   *   - retencija NEBEBLOKUOJA pasibaigusio `pending`, o erasure jį blokuoja.
+   *
+   * Tikrasis sąryšis, kuris ir yra saugumo garantija: APSIRIBOJUS SVETIMAIS
+   * bandymais, retencijos gyvų būsenų aibė yra erasure „bet kokios būsenos"
+   * aibės poaibis. To paties job'o blokavimas yra PAPILDOMA apsauga be erasure
+   * atitikmens — pagal konstrukciją, ne praleidimas.
    */
   const fs = require("node:fs");
   const path = require("node:path");

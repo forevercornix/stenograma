@@ -317,7 +317,7 @@ const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
  * senindant EILUTES, ne laiką.
  */
 async function _valytiRezultatoBandymus() {
-  const tuscias = { pasalinta: 0, praleista: 0, svetimi: 0, pazeidimai: 0, nevykdyta: false };
+  const tuscias = { pasalinta: 0, praleista: 0, uzimti: 0, pazeidimai: 0, nevykdyta: false };
 
   /**
    * ⚠️ TIKRINAMA EFEKTYVI TIKROVĖ, NE DEKLARACIJA (Codex, #304; #245 pamoka).
@@ -362,7 +362,7 @@ async function _valytiRezultatoBandymus() {
   const { revivalHorizonsMs } = require("../queues/config");
   const horizontas = revivalHorizonsMs().horizonMs;
 
-  const { kandidatai, praleista, svetimi = 0 } = await jobStore.system.valytiniBandymai({
+  const { kandidatai, praleista, uzimti = 0 } = await jobStore.system.valytiniBandymai({
     atmestuRibaMs: horizontas,
     laukianciuRibaMs: horizontas + MAX_RASYMO_TRUKME_MS,
     kiekis: JOBU_BATCH,
@@ -379,7 +379,7 @@ async function _valytiRezultatoBandymus() {
     );
   }
 
-  if (svetimi > 0) {
+  if (uzimti > 0) {
     /**
      * ⚠️ NE KLAIDA, BET IR NE TYLA (#305.1).
      *
@@ -392,17 +392,24 @@ async function _valytiRezultatoBandymus() {
      * nuosavybė. Vienas pranešimas dviem priežastims meluotų vienai iš jų.
      */
     log.warn(
-      `Retencija: ${svetimi} bandymo eilutė(-ės) praleista - adresą užima GYVAS ` +
-        "SVETIMO job'o bandymas (`pending`/`committed`). Objektas gali būti ką tik " +
-        "įrašytas, tad jo šalinti negalima."
+      `Retencija: ${uzimti} bandymo eilutė(-ės) praleista - adresą užima KITAS ` +
+        "GYVAS bandymas (`committed`, arba dar nepasibaigęs `pending`). Objektas gali " +
+        "būti ką tik įrašytas, tad jo šalinti negalima."
     );
   }
 
-  const verdiktai = await jobStore.system.sweepResultArtifacts(kandidatai);
+  /**
+   * ⚠️ `laukianciuRibaMs` PERDUODAMA ŠLAVĖJUI (#305.1, Codex A). Be jos pakartotinė
+   * patikra ties destruktyvia riba turėtų SAVO amžiaus semantiką — o dvi skirtingos
+   * to paties lauko semantikos viename kelyje ir buvo šio raundo B radinys.
+   */
+  const verdiktai = await jobStore.system.sweepResultArtifacts(kandidatai, {
+    laukianciuRibaMs: horizontas + MAX_RASYMO_TRUKME_MS,
+  });
 
   if (verdiktai === null) {
     log.warn("Retencija: saugykla nepalaiko `sweepResultArtifacts()` - šlavimas NEVYKDOMAS.");
-    return { ...tuscias, praleista, svetimi, nevykdyta: true };
+    return { ...tuscias, praleista, uzimti, nevykdyta: true };
   }
 
   let pasalinta = 0;
@@ -481,7 +488,7 @@ async function _valytiRezultatoBandymus() {
    */
   const pazeidimai = await jobStore.system.karantinuotuSkaicius();
 
-  return { pasalinta, praleista, svetimi, pazeidimai, nepavyke, nevykdyta: false };
+  return { pasalinta, praleista, uzimti, pazeidimai, nepavyke, nevykdyta: false };
 }
 
 /**
@@ -532,7 +539,7 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     summary.resultAttempts = bandymai.pasalinta;
     summary.resultAttemptsSkipped = bandymai.praleista;
     /** ⚠️ Atskiras laukas: kita priežastis, kitas operatoriaus veiksmas (#305.1). */
-    summary.resultAttemptsForeignOwned = bandymai.svetimi;
+    summary.resultAttemptsLiveHeld = bandymai.uzimti;
     summary.resultAttemptsViolations = bandymai.pazeidimai;
     for (const [klase, kiek] of Object.entries(suskaiciuoti(bandymai.nepavyke))) {
       summary.errors.push(`result attempts ${klase} x${kiek}`);
@@ -650,7 +657,22 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
    * operatorius juos mato; bet `success` skaičiuojamas iš `errors`, tad kvitas su
    * karantinuota eilute nebus „sėkmingas ištrynimas".
    */
-  const nebaigtiDarbai = summary.resultAttemptsViolations > 0 || summary.resultAttemptsSkipped > 0;
+  /**
+   * ⚠️ `resultAttemptsLiveHeld` ĮTRAUKTAS Į NEBAIGTĄ DARBĄ (#305.1, Codex C).
+   *
+   * Pirmoji redakcija skaitiklį nustatė, bet jis nepasiekė nei verdikto, nei
+   * kvito: ciklas TIK su praleidimais neišrašydavo jokio patvaraus įvykio, o
+   * ciklas su šalinimu rašydavo `success: true` praleidimų neminėdamas.
+   *
+   * ⚠️ IRONIJA VERTA ĮRAŠO: to paties PR testo komentaras cituoja 4b pamoką
+   * („fail-closed be matomumo virsta tyliu kaupimu"), o pats skaitiklis iki kvito
+   * nenukeliavo. Tai „reikšmė be vartotojo" — klasė, kurią #245 uždarė keturis
+   * kartus, čia atsiradusi tame pačiame PR'e, kuris matomumą ir deklaravo.
+   */
+  const nebaigtiDarbai =
+    summary.resultAttemptsViolations > 0 ||
+    summary.resultAttemptsSkipped > 0 ||
+    summary.resultAttemptsLiveHeld > 0;
   const verta = removedAnything || nebaigtiDarbai || summary.errors.length > 0;
 
   // Įrašom TIK kai kažkas realiai pašalinta arba kai buvo klaidų - kitaip kas
@@ -681,8 +703,10 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
          * ⚠️ `attempts=` ATSKIRAI, IR `nevykdyta` NĖRA NULIS. Kvitas, rodantis `0` ten,
          * kur žingsnis buvo sustabdytas, tvirtintų, kad šluoti nebuvo ko.
          */
+        /** Tvarka: pašalinta / praleista (laikas) / užimta (gyvas bandymas) / pažeidimai. */
         `attempts=${summary.resultAttempts === null ? "nevykdyta" : summary.resultAttempts}` +
-        `/${summary.resultAttemptsSkipped}/${summary.resultAttemptsViolations}`,
+        `/${summary.resultAttemptsSkipped}/${summary.resultAttemptsLiveHeld}` +
+        `/${summary.resultAttemptsViolations}`,
     });
     log.info(
       `Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +

@@ -70,22 +70,48 @@ const BUSENA = Object.freeze({
 const GYVOS_BUSENOS = Object.freeze([BUSENA.LAUKIA, BUSENA.ISIPAREIGOTA]);
 
 /**
- * SQL SĄLYGA: „šio adreso neužima GYVAS SVETIMO job'o bandymas".
+ * SQL SĄLYGA: „šį adresą užima KITAS GYVAS bandymas".
  *
- * ⚠️ VIENA VIETA ABIEMS UŽKLAUSOMS. Kandidatų atranka ir svetimų skaitiklis yra
- * to paties klausimo dvi pusės (kas praleidžiama / kiek jų), tad sąlyga
- * negalimas dviejų eilučių dublikatas: išsiskyrusios jos rodytų skaičių, kuris
- * neatitinka realiai praleistų eilučių.
+ * ⚠️ PIRMOJI REDAKCIJA KLAUSĖ NE TO — IR TAI BUVO UŽDUOTIES FORMULUOTĖS KLAIDA,
+ * NE ATSITIKTINUMAS (Codex, B).
  *
- * ⚠️ `a.job_id <> k.job_id` — SVETIMAS, ne „bet kuris". Savas bandymas tuo pačiu
- * adresu yra ta pati nuosavybė, ir jis šlavimo neblokuoja.
+ * Ji vadinosi `svetimaNuosavybe` ir tikrino `k.job_id <> a.job_id`, t. y.
+ * klausė „ar savininkas KITAS?". Bet selektoriaus klausimas yra „ar objekto dar
+ * KAM NORS reikia?". Du skirtingi klausimai, ir iš vieno neteisingo išplaukė dvi
+ * skirtingos klaidos:
+ *
+ *   1. TO PATIES job'o gyvas `pending` liko NEAPSAUGOTAS. Jei senas šluotinas
+ *      bandymas ir gyvas `pending` bandymas dalijasi adresu, šlavėjas ištrindavo
+ *      objektą, kurį gyvasis ruošėsi įsipareigoti — tas pats duomenų praradimas,
+ *      tik viename job'e;
+ *   2. DU PASIBAIGĘ `pending` BLOKAVO VIENAS KITĄ AMŽINAI. Išorinis sakinys
+ *      `pending`, senesnį už `laukianciuRibaMs`, laiko ŠLUOTINU, o šis predikatas
+ *      tą pačią būseną laikė GYVA neatsižvelgdamas į amžių. Dvi skirtingos to
+ *      paties lauko amžiaus semantikos viename sakinyje: nė vienas iš jų niekada
+ *      nebūtų nušluotas.
+ *
+ * Todėl dabar: blokuoja BET KURIS gyvas bandymas tuo pačiu adresu, IŠSKYRUS
+ * pačią kandidatę (pagal `attempt_id`, ne `job_id`), o `pending` amžiaus taisyklė
+ * ta pati kaip išoriniame sakinyje.
+ *
+ * ⚠️ VIENA VIETA VISIEMS TRIMS KELIAMS. Kandidatų atranka, skaitiklis ir
+ * pakartotinė patikra ties destruktyvia riba yra to paties klausimo pusės; trys
+ * eilutės dublikatai neišvengiamai išsiskirtų.
+ *
+ * @param {string} busenos  vietaženklis gyvų būsenų masyvui
+ * @param {string} laukiantys  vietaženklis `pending` reikšmei
+ * @param {string} riba  vietaženklis `laukianciuRibaMs` reikšmei
  */
-const svetimaNuosavybe = (placeholder) => `EXISTS (
+const kitasGyvasBandymas = (busenos, laukiantys, riba) => `EXISTS (
               SELECT 1 FROM job_result_attempts k
                WHERE k.storage_key = a.storage_key
                  AND k.storage_type = a.storage_type
-                 AND k.job_id <> a.job_id
-                 AND k.busena = ANY(${placeholder}::text[])
+                 AND k.attempt_id <> a.attempt_id
+                 AND k.busena = ANY(${busenos}::text[])
+                 AND (
+                       k.busena <> ${laukiantys}
+                       OR k.created_at >= now() - (${riba}::double precision * INTERVAL '1 millisecond')
+                     )
             )`;
 
 /**
@@ -257,7 +283,7 @@ async function valytiniBandymai(
               SELECT 1 FROM job_results r
                WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
             )
-        AND NOT ${svetimaNuosavybe("$6")}
+        AND NOT ${kitasGyvasBandymas("$6", "$2", "$3")}
         AND ${zymosSalyga}
         AND (
               a.created_at > now()
@@ -304,13 +330,13 @@ async function valytiniBandymai(
   );
 
   /**
-   * SVETIMOS NUOSAVYBĖS SKAITIKLIS — ATSKIRAS NUO `praleista` (#305.1).
+   * GYVO BANDYMO UŽIMTŲ ADRESŲ SKAITIKLIS — ATSKIRAS NUO `praleista` (#305.1).
    *
    * ⚠️ KODĖL NE TAS PATS SKAITIKLIS. `praleista` pranešimas įvardija KONKREČIĄ
    * priežastį („`created_at` ateityje — tikėtina, atkurta iš dump'o"). Suliejus
-   * abu, tas pranešimas imtų MELUOTI kiekvienam svetimos nuosavybės atvejui, o
-   * operatoriaus veiksmas visai kitas: ten laiko žymų problema, čia — lygiagreti
-   * nuosavybė (dažniausiai normali) arba, jei laikosi, nekonsistentiški
+   * abu, tas pranešimas imtų MELUOTI kiekvienam nuosavybės atvejui, o
+   * operatoriaus veiksmas visai kitas: ten laiko žymų problema, čia — lygiagretus
+   * rašymas (dažniausiai normalus) arba, jei laikosi, nekonsistentiški
    * metaduomenys.
    *
    * ⚠️ IR JIS TURI BŪTI MATOMAS (4b pamoka): fail-closed be matomumo virsta
@@ -333,7 +359,7 @@ async function valytiniBandymai(
    * eilutes, nepatenkančias NĖ Į VIENĄ skaitiklį: tyliai praleistas valymas,
    * t. y. tiksliai tai, ko abu rodikliai turi neleisti.
    */
-  const { rows: svetimiRows } = await vykdytojas.query(
+  const { rows: uzimtiRows } = await vykdytojas.query(
     `SELECT count(*)::int AS kiek
        FROM job_result_attempts a
       WHERE a.busena <> $1
@@ -342,7 +368,7 @@ async function valytiniBandymai(
               SELECT 1 FROM job_results r
                WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
             )
-        AND ${svetimaNuosavybe("$5")}
+        AND ${kitasGyvasBandymas("$5", "$2", "$3")}
         AND ${zymosSalyga}
         AND a.created_at < now() - (
               CASE WHEN a.busena = $2 THEN $3::double precision ELSE $4::double precision END
@@ -354,7 +380,7 @@ async function valytiniBandymai(
   return {
     kandidatai: rows.filter((r) => !r.laikas_ateityje),
     praleista: praleistiRows[0].kiek,
-    svetimi: svetimiRows[0].kiek,
+    uzimti: uzimtiRows[0].kiek,
   };
 }
 
@@ -431,8 +457,52 @@ async function karantinuotuSkaicius(vykdytojas) {
   return rows[0].kiek;
 }
 
+/**
+ * PAKARTOTINĖ PATIKRA TIES DESTRUKTYVIA RIBA (#305.1, Codex A).
+ *
+ * ⚠️ PR-5 D ŠAKNIES RECIDYVAS: „snapshot be pakartotinės patikros po užrakto".
+ * Ten sprendimas buvo enumeracija → I/O → užraktas → PAKARTOTINĖ PATIKRA →
+ * šalinimas (`deleteResultArtifacts` `tiketiniAdresai`); čia ta pati spraga
+ * atsivėrė kitame kelyje.
+ *
+ * Atrankos užklausa mato SNAPSHOT'Ą. Pasibaigęs `pending` bandymas, kuris nuo
+ * šiol NEBLOKUOJA (žr. `kitasGyvasBandymas`), gali įsipareigoti PO to, kai
+ * kandidatai jau atrinkti, bet PRIEŠ fizinį šalinimą — ir tada ištrinamas
+ * objektas, kurio nuoroda ką tik tapo gyva. Tai tiksliai ta seka, kurią šis PR
+ * uždaro, tik langas siauresnis.
+ *
+ * ⚠️ UŽRAKTO ČIA NĖRA SĄMONINGAI (PR-4 D4). Fizinis I/O negali vykti po eilutės
+ * užraktu, tad „užrakinti ir trinti" nėra leistina tvarka. Lieka pakartotinė
+ * patikra kuo arčiau I/O.
+ *
+ * ⚠️ IR LIEKA LIKUTINIS LANGAS — tarp šios patikros ir `delete()`. Jis matuojamas
+ * milisekundėmis vietoj viso partijos apdorojimo trukmės, bet jis NE NULIS, ir
+ * tai užrašoma, o ne nutylima. Visiškas uždarymas reikalautų užrakto per I/O,
+ * t. y. pažeistų PR-4 D4.
+ */
+async function arUzimtasGyvo(vykdytojas, kandidatas, { laukianciuRibaMs }) {
+  const { rows } = await vykdytojas.query(
+    `WITH a AS (
+       SELECT $1::text AS attempt_id, $2::text AS storage_type, $3::text AS storage_key
+     )
+     SELECT ${kitasGyvasBandymas("$4", "$5", "$6")} AS uzimtas
+       FROM a`,
+    [
+      kandidatas.attempt_id,
+      kandidatas.storage_type,
+      kandidatas.storage_key,
+      GYVOS_BUSENOS,
+      BUSENA.LAUKIA,
+      Number(laukianciuRibaMs),
+    ]
+  );
+
+  return Boolean(rows[0] && rows[0].uzimtas);
+}
+
 module.exports = {
   BUSENA,
+  arUzimtasGyvo,
   /** ⚠️ Eksportuojama KONTRAKTINIAM testui: sąryšis su erasure puse turi būti tikrinamas. */
   GYVOS_BUSENOS,
   valytiniBandymai,
