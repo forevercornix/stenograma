@@ -701,11 +701,17 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
      * Deklaruojama stebimumo regresija taip lieka neapsaugota — klasikinė
      * „asercija praeina dėl kitos priežasties".
      */
-    const pries = await attemptRegistry.valytiniBandymai(pool, {
-      laukianciuRibaMs: 1,
-      atmestuRibaMs: 1,
-      kiekis: 100,
-    });
+    /**
+     * ⚠️ `laukianciuRibaMs: 60000`, NE `1` (CI `34958511595`).
+     *
+     * Su 1 ms riba B `pending` bandymas laikomas PASIBAIGUSIU jau kitą
+     * milisekundę, tad nuo Codex I raundo jis teisėtai nustoja blokuoti — ir
+     * testas matuotų ne tai, ką teigia. Riba turi būti tokia, kad ką tik įrašytas
+     * `pending` būtų GYVAS; būtent toks ir yra scenarijus.
+     */
+    const RIBOS = { laukianciuRibaMs: 60000, atmestuRibaMs: 1, kiekis: 100 };
+
+    const pries = await attemptRegistry.valytiniBandymai(pool, RIBOS);
 
     await pool.query(
       `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena, created_at)
@@ -713,11 +719,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
       [aAttempt, a, bBandymas.raktas, attemptRegistry.BUSENA.ATMESTA]
     );
 
-    const { kandidatai, uzimti } = await attemptRegistry.valytiniBandymai(pool, {
-      laukianciuRibaMs: 1,
-      atmestuRibaMs: 1,
-      kiekis: 100,
-    });
+    const { kandidatai, uzimti } = await attemptRegistry.valytiniBandymai(pool, RIBOS);
 
     assert.deepEqual(
       kandidatai.filter((k) => k.attempt_id === aAttempt),

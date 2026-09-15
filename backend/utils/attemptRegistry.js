@@ -98,6 +98,12 @@ const GYVOS_BUSENOS = Object.freeze([BUSENA.LAUKIA, BUSENA.ISIPAREIGOTA]);
  * pakartotinė patikra ties destruktyvia riba yra to paties klausimo pusės; trys
  * eilutės dublikatai neišvengiamai išsiskirtų.
  *
+ * ⚠️ `attempt_id` LYGINAMAS PER `::text` ABIEM PUSĖM (CI `34958511595`).
+ * Lentelėje jis yra `uuid`, o pakartotinės patikros CTE paduoda jį kaip
+ * parametrą — be kastų viena iš dviejų naudojimo vietų krinta su
+ * `operator does not exist: uuid <> text`. Tas pats sprendimas kaip
+ * `svetimiAdresai()` `job_id` atveju.
+ *
  * @param {string} busenos  vietaženklis gyvų būsenų masyvui
  * @param {string} laukiantys  vietaženklis `pending` reikšmei
  * @param {string} riba  vietaženklis `laukianciuRibaMs` reikšmei
@@ -106,7 +112,8 @@ const kitasGyvasBandymas = (busenos, laukiantys, riba) => `EXISTS (
               SELECT 1 FROM job_result_attempts k
                WHERE k.storage_key = a.storage_key
                  AND k.storage_type = a.storage_type
-                 AND k.attempt_id <> a.attempt_id
+                 -- ::text abiem pusem: zr. funkcijos komentara virsuje
+                 AND k.attempt_id::text <> a.attempt_id::text
                  AND k.busena = ANY(${busenos}::text[])
                  AND (
                        k.busena <> ${laukiantys}
