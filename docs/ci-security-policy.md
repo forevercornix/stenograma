@@ -115,6 +115,8 @@ o ne keliant ribą visam auditui.
 
 ## `main` apsauga ir merge kontraktas (#324)
 
+⚠️ **Aktyvu nuo 2026-09-15:** ruleset `main-protection` (`enforcement: active`), privalomas patikrinimas — `required-ci`.
+
 `main` keičiama **tik** per PR, kuriame **visi privalomi patikrinimai sėkmingi**.
 Enforcement autoritetas yra **GitHub branch protection / ruleset**, ne šis
 dokumentas ir ne repo testas.
