@@ -104,3 +104,147 @@ test("būsenų aibė SUTAMPA su migracijos aibe — abiem kryptim", () => {
    */
   assert.match(src, /busena IN \(\$\{sarasas\(BUSENOS_FROZEN\)\}\)|sarasas\(BUSENOS_FROZEN\)/);
 });
+
+test("KONTRAKTAS: retencijos gyvos nuosavybės aibė yra erasure aibės POAIBIS", () => {
+  /**
+   * ⚠️ DVI TO PATIES INVARIANTO REALIZACIJOS — IR SĄMONINGAI DVI (#305.1).
+   *
+   * Nuosavybės klausimą repo užduoda dviejose vietose, ir jos NĖRA ta pati
+   * taisyklė:
+   *
+   *   erasure  (`postgresStore.svetimiAdresai`) — „ar A turi TEISĘ naikinti šį
+   *             objektą?" Atsakymas: ne, jei jį užima BET KURIS svetimas
+   *             bandymas, nes A neturi valdžios B gyvavimo ciklui;
+   *   retencija (`attemptRegistry.valytiniBandymai`) — „ar objekto dar REIKIA?"
+   *             Atsakymas: ne, jei svetimas bandymas yra `abandoned`, nes tą
+   *             objektą šalintų ir paties B šlavėjas.
+   *
+   * ⚠️ TRYS KARTUS ŠIOJE SEKOJE DVI TO PATIES INVARIANTO REALIZACIJOS IŠSISKYRĖ
+   * (`BUTINI` sąrašas, matricos skaičius, `PILNA_FORMA`). Todėl vieno šaltinio
+   * čia nedarom — semantika skiriasi ir suliejimas reikštų vieną iš dviejų
+   * klausimų atsakyti neteisingai, — o fiksuojam SĄRYŠĮ.
+   *
+   * ⚠️ SĄRYŠIS PATIKSLINTAS PO PIRMO CODEX RAUNDO. Iki jo buvo teigiama tiesiog
+   * „retencijos aibė yra erasure aibės POAIBIS". Perrašius predikatą iš
+   * NUOSAVYBĖS į GYVYBINGUMĄ, tai nustojo būti tiesa abiem kryptim:
+   *
+   *   - retencija dabar blokuoja IR TO PATIES job'o gyvą bandymą, o erasure toks
+   *     atvejis nedomina (jis sąmoningai naikina viso job'o artefaktus);
+   *   - retencija NEBEBLOKUOJA pasibaigusio `pending`, o erasure jį blokuoja.
+   *
+   * Tikrasis sąryšis, kuris ir yra saugumo garantija: APSIRIBOJUS SVETIMAIS
+   * bandymais, retencijos gyvų būsenų aibė yra erasure „bet kokios būsenos"
+   * aibės poaibis. To paties job'o blokavimas yra PAPILDOMA apsauga be erasure
+   * atitikmens — pagal konstrukciją, ne praleidimas.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { BUSENA, GYVOS_BUSENOS } = require("../utils/attemptRegistry");
+
+  const visos = Object.values(BUSENA);
+
+  for (const busena of GYVOS_BUSENOS) {
+    assert.ok(visos.includes(busena), `\`${busena}\` privalo būti žinoma būsena`);
+  }
+
+  assert.deepEqual(
+    [...GYVOS_BUSENOS].sort(),
+    ["committed", "pending"],
+    "gyvos nuosavybės aibė yra SPRENDIMAS - jos pokytis privalo būti matomas čia"
+  );
+
+  assert.ok(
+    !GYVOS_BUSENOS.includes(BUSENA.ATMESTA),
+    "`abandoned` NEBLOKUOJA šlavimo: objekto nebereikia niekam, ir jį šalintų B šlavėjas"
+  );
+
+  /**
+   * ⚠️ POAIBIO SĄRYŠĮ LAIKO TAI, KAD ERASURE UŽKLAUSA BŪSENŲ NEFILTRUOJA.
+   *
+   * Tai tripwire (§9.2): jei kas nors ten pridės `busena` sąlygą, poaibio
+   * garantija gali nutrūkti TYLIAI — erasure imtų praleisti tai, ką retencija
+   * trina. Testas neleidžia to padaryti nepastebėtai.
+   */
+  const { beKomentaru } = require("../utils/auditEvents");
+  const pgStore = beKomentaru(
+    fs.readFileSync(path.join(__dirname, "..", "utils", "jobStore", "postgresStore.js"), "utf8")
+  );
+
+  const pradzia = pgStore.indexOf("async function svetimiAdresai(");
+  assert.ok(pradzia > 0, "prielaida: `svetimiAdresai()` egzistuoja");
+  const kunas = pgStore.slice(pradzia, pgStore.indexOf("\n  async function", pradzia + 10));
+
+  assert.match(kunas, /FROM job_result_attempts/, "prielaida: erasure tikrina ir registrą");
+  assert.ok(
+    !/busena\s*(=|<>|IN|=\s*ANY)/i.test(kunas),
+    "erasure užklausa NETURI filtruoti būsenų - kitaip retencijos aibė nustotų būti jos poaibiu"
+  );
+});
+
+test("ATIDARYMO SĄLYGA: raktas išvedamas iš `attemptId`, NE iš turinio", () => {
+  /**
+   * ⚠️ ŠIS TESTAS YRA CLAIM SPRENDIMO LIUDYTOJAS (#305.1).
+   *
+   * Sprendimas neįvesti claim protokolo remiasi IŠMATUOTA prielaida: du gyvi
+   * bandymai NORMALIU keliu negauna to paties `(storage_type, storage_key)`, nes
+   * raktas yra `results/<jobId>/<attemptId>.json`, o `attemptId` yra
+   * `crypto.randomUUID()`. Todėl veikėjai #1, #3 ir #4 pasiekiami TIK per
+   * nekonsistentiškus metaduomenis, o į juos repo jau atsako `NESAUGU` — atsisakyti
+   * ir parodyti, ne inžineriškai saugiai apdoroti.
+   *
+   * ⚠️ ATIDARYMO SĄLYGA: claim tampa BŪTINAS, jei normalus kelias kada nors duos du
+   * gyvus bandymus vienu adresu. Konkretus būdas tai padaryti — pakeisti raktą į
+   * TURINIO adresą (variantas, kurį PR-4 jau kartą ATMETĖ: tada du job'ai su tuo
+   * pačiu rezultatu dalytųsi objektu).
+   *
+   * Šis testas yra tos sąlygos sargas: jį sulaužius, claim sprendimas nustoja
+   * galioti, ir tai pamatoma ČIA, ne produkcijoje.
+   */
+  const jobId = "11111111-2222-3333-4444-555555555555";
+
+  /** 1. Raktas TURI savyje `attemptId` — vadinasi jis yra rakto dalis, ne priedas. */
+  const attemptId = attemptRegistry.naujasBandymas();
+  assert.match(
+    attemptRegistry.bandymoRaktas(jobId, attemptId),
+    new RegExp(attemptId),
+    "raktas privalo nešti `attemptId` - be jo attempt-unikalumo nėra"
+  );
+
+  /**
+   * 2. Funkcija NEMATO turinio. Turinio adresas reikalautų trečio argumento arba
+   * checksum'o; dviejų argumentų parašas tai daro neįmanomu.
+   */
+  assert.equal(
+    attemptRegistry.bandymoRaktas.length,
+    2,
+    "⚠️ trečias argumentas reikštų, kad raktas gali priklausyti nuo turinio - žr. atidarymo sąlygą"
+  );
+
+  /** 3. Tūkstantis bandymų - tūkstantis skirtingų adresų, be jokios kolizijos. */
+  const raktai = new Set();
+  for (let i = 0; i < 1000; i += 1) {
+    raktai.add(attemptRegistry.bandymoRaktas(jobId, attemptRegistry.naujasBandymas()));
+  }
+  assert.equal(raktai.size, 1000, "kolizija reikštų, kad claim sprendimas nebegalioja");
+
+  /**
+   * 4. ⚠️ IR ABI PRODUKCINĖS REGISTRACIJOS VIETOS IMA `naujasBandymas()`.
+   *
+   * Be šito tikrintume tik funkciją, o ne tai, kad ja naudojamasi: kvietėjas,
+   * perduodantis pastovų ar iš turinio išvestą `attemptId`, sąlygą sulaužytų,
+   * funkcijos nepalietęs. Tai tripwire (§9.2), ne elgsenos įrodymas.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  for (const santykinis of ["utils/jobStore/postgresStore.js", "utils/artifactMigration.js"]) {
+    const svarus = beKomentaru(fs.readFileSync(path.join(__dirname, "..", santykinis), "utf8"));
+
+    assert.match(
+      svarus,
+      /attemptRegistry\.naujasBandymas\(\)/,
+      `${santykinis}: registracija privalo imti NAUJĄ atsitiktinį \`attemptId\``
+    );
+  }
+});

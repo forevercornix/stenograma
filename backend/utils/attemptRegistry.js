@@ -44,6 +44,84 @@ const BUSENA = Object.freeze({
 });
 
 /**
+ * GYVA SVETIMA NUOSAVYBĖ — KURIOS BŪSENOS SAUGO ADRESĄ NUO ŠLAVIMO (#305.1).
+ *
+ * ⚠️ `pending` SAUGO NE DĖL REFERENCIJOS, O DĖL LAIKO. Tai visos problemos esmė:
+ * job'as B gali būti ką tik baigęs `put()` ir dar neįsipareigojęs — eilutė jau
+ * `job_result_attempts`, o `job_results` dar ne. Predikatas, klausiantis tik
+ * „ar adresas referencuotas", tokio objekto nemato ir leidžia jį ištrinti; B po
+ * to įsipareigoja nuorodą į JAU NEEGZISTUOJANTĮ rezultatą.
+ *
+ * `committed` saugo, nes objektas naudojamas (arba `job_results` eilutė tuoj
+ * atsiras).
+ *
+ * ⚠️ `abandoned` NESAUGO, IR TAI SPRENDIMAS, NE PRALEIDIMAS. Svetimas atmestas
+ * bandymas reiškia, kad to objekto nebereikia NIEKAM: jį šalintų ir paties B
+ * šlavėjas. Užblokavus jį, adresas liktų nešluotas tol, kol B eilutė uždaroma —
+ * t. y. kaupimas be naudos.
+ *
+ * ⚠️ TODĖL ŠI TAISYKLĖ NĖRA TA PATI KAIP `svetimiAdresai()`, IR TAI UŽRAŠOMA.
+ * Erasure pusė blokuoja VISAS būsenas, nes ten klausimas kitas: „ar A turi teisę
+ * naikinti šį objektą?" — ne, jei jį kas nors kitas apskritai užima, nes A
+ * neturi valdžios B gyvavimo ciklui. Čia klausimas yra „ar objekto dar reikia?".
+ * Dvi taisyklės, du klausimai; sąryšį — kad ši aibė yra anos POAIBIS — fiksuoja
+ * kontraktinis testas.
+ */
+const GYVOS_BUSENOS = Object.freeze([BUSENA.LAUKIA, BUSENA.ISIPAREIGOTA]);
+
+/**
+ * SQL SĄLYGA: „šį adresą užima KITAS GYVAS bandymas".
+ *
+ * ⚠️ PIRMOJI REDAKCIJA KLAUSĖ NE TO — IR TAI BUVO UŽDUOTIES FORMULUOTĖS KLAIDA,
+ * NE ATSITIKTINUMAS (Codex, B).
+ *
+ * Ji vadinosi `svetimaNuosavybe` ir tikrino `k.job_id <> a.job_id`, t. y.
+ * klausė „ar savininkas KITAS?". Bet selektoriaus klausimas yra „ar objekto dar
+ * KAM NORS reikia?". Du skirtingi klausimai, ir iš vieno neteisingo išplaukė dvi
+ * skirtingos klaidos:
+ *
+ *   1. TO PATIES job'o gyvas `pending` liko NEAPSAUGOTAS. Jei senas šluotinas
+ *      bandymas ir gyvas `pending` bandymas dalijasi adresu, šlavėjas ištrindavo
+ *      objektą, kurį gyvasis ruošėsi įsipareigoti — tas pats duomenų praradimas,
+ *      tik viename job'e;
+ *   2. DU PASIBAIGĘ `pending` BLOKAVO VIENAS KITĄ AMŽINAI. Išorinis sakinys
+ *      `pending`, senesnį už `laukianciuRibaMs`, laiko ŠLUOTINU, o šis predikatas
+ *      tą pačią būseną laikė GYVA neatsižvelgdamas į amžių. Dvi skirtingos to
+ *      paties lauko amžiaus semantikos viename sakinyje: nė vienas iš jų niekada
+ *      nebūtų nušluotas.
+ *
+ * Todėl dabar: blokuoja BET KURIS gyvas bandymas tuo pačiu adresu, IŠSKYRUS
+ * pačią kandidatę (pagal `attempt_id`, ne `job_id`), o `pending` amžiaus taisyklė
+ * ta pati kaip išoriniame sakinyje.
+ *
+ * ⚠️ VIENA VIETA VISIEMS TRIMS KELIAMS. Kandidatų atranka, skaitiklis ir
+ * pakartotinė patikra ties destruktyvia riba yra to paties klausimo pusės; trys
+ * eilutės dublikatai neišvengiamai išsiskirtų.
+ *
+ * ⚠️ `attempt_id` LYGINAMAS PER `::text` ABIEM PUSĖM (CI `34958511595`).
+ * Lentelėje jis yra `uuid`, o pakartotinės patikros CTE paduoda jį kaip
+ * parametrą — be kastų viena iš dviejų naudojimo vietų krinta su
+ * `operator does not exist: uuid <> text`. Tas pats sprendimas kaip
+ * `svetimiAdresai()` `job_id` atveju.
+ *
+ * @param {string} busenos  vietaženklis gyvų būsenų masyvui
+ * @param {string} laukiantys  vietaženklis `pending` reikšmei
+ * @param {string} riba  vietaženklis `laukianciuRibaMs` reikšmei
+ */
+const kitasGyvasBandymas = (busenos, laukiantys, riba) => `EXISTS (
+              SELECT 1 FROM job_result_attempts k
+               WHERE k.storage_key = a.storage_key
+                 AND k.storage_type = a.storage_type
+                 -- ::text abiem pusem: zr. funkcijos komentara virsuje
+                 AND k.attempt_id::text <> a.attempt_id::text
+                 AND k.busena = ANY(${busenos}::text[])
+                 AND (
+                       k.busena <> ${laukiantys}
+                       OR k.created_at >= now() - (${riba}::double precision * INTERVAL '1 millisecond')
+                     )
+            )`;
+
+/**
  * Objekto raktas vienam bandymui.
  *
  * ⚠️ `jobId` PREFIKSAS YRA ERASURE REIKALAS, NE TAPATYBĖ. Jis leidžia žmogui matyti,
@@ -212,6 +290,7 @@ async function valytiniBandymai(
               SELECT 1 FROM job_results r
                WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
             )
+        AND NOT ${kitasGyvasBandymas("$6", "$2", "$3")}
         AND ${zymosSalyga}
         AND (
               a.created_at > now()
@@ -222,7 +301,14 @@ async function valytiniBandymai(
             )
       ORDER BY a.created_at
       LIMIT $5`,
-    [BUSENA.ISIPAREIGOTA, BUSENA.LAUKIA, Number(laukianciuRibaMs), Number(atmestuRibaMs), Number(kiekis)]
+    [
+      BUSENA.ISIPAREIGOTA,
+      BUSENA.LAUKIA,
+      Number(laukianciuRibaMs),
+      Number(atmestuRibaMs),
+      Number(kiekis),
+      GYVOS_BUSENOS,
+    ]
   );
 
   /**
@@ -250,9 +336,58 @@ async function valytiniBandymai(
     [BUSENA.ISIPAREIGOTA]
   );
 
+  /**
+   * GYVO BANDYMO UŽIMTŲ ADRESŲ SKAITIKLIS — ATSKIRAS NUO `praleista` (#305.1).
+   *
+   * ⚠️ KODĖL NE TAS PATS SKAITIKLIS. `praleista` pranešimas įvardija KONKREČIĄ
+   * priežastį („`created_at` ateityje — tikėtina, atkurta iš dump'o"). Suliejus
+   * abu, tas pranešimas imtų MELUOTI kiekvienam nuosavybės atvejui, o
+   * operatoriaus veiksmas visai kitas: ten laiko žymų problema, čia — lygiagretus
+   * rašymas (dažniausiai normalus) arba, jei laikosi, nekonsistentiški
+   * metaduomenys.
+   *
+   * ⚠️ IR JIS TURI BŪTI MATOMAS (4b pamoka): fail-closed be matomumo virsta
+   * tyliu kaupimu. Eilutė nešluojama teisingai, bet jei tokių daugėja, tai
+   * signalas, ne tyla.
+   *
+   * ⚠️ BE `LIMIT`, bet SU AMŽIAUS SĄLYGA — ir tai skirtumas nuo `praleista`.
+   *
+   * `LIMIT` praleidžiamas dėl tos pačios priežasties kaip #304: `ORDER BY
+   * created_at` partiją užpildo senomis tinkamomis eilutėmis, tad iš jos
+   * skaičiuojamas rodiklis rodytų nulį būtent tada, kai atsilikimas didžiausias.
+   *
+   * Amžiaus sąlyga IŠLAIKOMA, nes dar neprinokusi eilutė nėra „praleista" — ji
+   * tiesiog dar ne eilėje. Be jos skaitiklis rodytų kiekvieną lygiagretų rašymą
+   * ir virstų nuolatiniu triukšmu, t. y. rodikliu, kurio niekas neskaito.
+   *
+   * ⚠️ DU SKAITIKLIAI GALI PERSIDENGTI, IR TAI GERIAU UŽ SKYLĘ. Eilutė su
+   * ateities žyma IR svetima nuosavybe praleidžiama dėl DVIEJŲ priežasčių, tad
+   * pasirodo abiejuose. Alternatyva — įrašyti vienas kito neigimą — palieka
+   * eilutes, nepatenkančias NĖ Į VIENĄ skaitiklį: tyliai praleistas valymas,
+   * t. y. tiksliai tai, ko abu rodikliai turi neleisti.
+   */
+  const { rows: uzimtiRows } = await vykdytojas.query(
+    `SELECT count(*)::int AS kiek
+       FROM job_result_attempts a
+      WHERE a.busena <> $1
+        AND a.karantinas_nuo IS NULL
+        AND NOT EXISTS (
+              SELECT 1 FROM job_results r
+               WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
+            )
+        AND ${kitasGyvasBandymas("$5", "$2", "$3")}
+        AND ${zymosSalyga}
+        AND a.created_at < now() - (
+              CASE WHEN a.busena = $2 THEN $3::double precision ELSE $4::double precision END
+                * INTERVAL '1 millisecond'
+            )`,
+    [BUSENA.ISIPAREIGOTA, BUSENA.LAUKIA, Number(laukianciuRibaMs), Number(atmestuRibaMs), GYVOS_BUSENOS]
+  );
+
   return {
     kandidatai: rows.filter((r) => !r.laikas_ateityje),
     praleista: praleistiRows[0].kiek,
+    uzimti: uzimtiRows[0].kiek,
   };
 }
 
@@ -329,8 +464,88 @@ async function karantinuotuSkaicius(vykdytojas) {
   return rows[0].kiek;
 }
 
+/**
+ * PAKARTOTINĖ PATIKRA TIES DESTRUKTYVIA RIBA — VISI LANGO VEIKĖJAI (#305.1).
+ *
+ * ⚠️ PR-5 D ŠAKNIES RECIDYVAS: „snapshot be pakartotinės patikros po užrakto".
+ * Atrankos užklausa mato SNAPSHOT'Ą, o tarp jos ir fizinio šalinimo būseną gali
+ * pakeisti keli veikėjai.
+ *
+ * ⚠️ PIRMOJI ŠIOS PATIKROS REDAKCIJA ĮVARDIJO VIENĄ — TĄ, KURIS BUVO PRANEŠIME.
+ * Jų yra du, ir antrasis buvo NEMATOMAS PAGAL KONSTRUKCIJĄ:
+ *
+ *   1. SVETIMAS bandymas įsipareigoja — dengė `kitasGyvasBandymas()`;
+ *   2. PATI KANDIDATĖ įsipareigoja — `kitasGyvasBandymas()` ją EKSPLICITIŠKAI
+ *      išbraukia (`attempt_id <>`), ir selektoriuje tai TEISINGA: kitaip nė viena
+ *      eilutė niekada netaptų šluotina. Bet ties destruktyvia riba klausimas
+ *      kitas — ne „ar kas KITAS užėmė adresą", o „ar objekto dar KAM NORS reikia,
+ *      ĮSKAITANT kandidatę". Tas pats predikatas dviejose pozicijose turi du
+ *      skirtingus teisingus atsakymus.
+ *
+ * ⚠️ IR ANTRA DALIS: kandidatė ateina kaip SNAPSHOT'O objektas, tad net jos pačios
+ * būsena nebuvo skaitoma iš naujo. Todėl čia eilutė perskaitoma IŠ LENTELĖS, o
+ * ne tikima tuo, ką atnešė atranka.
+ *
+ * ⚠️ VIENA PATIKRA VISIEMS VEIKĖJAMS, NE TRYS. Nauja nuoroda `job_results`,
+ * naujas bandymas tuo pačiu adresu ir pačios kandidatės įsipareigojimas yra to
+ * paties klausimo pusės; trys atskiros patikros neišvengiamai išsiskirtų — ta
+ * pati šaknis, kurią šis PR jau taisė kontraktiniu testu.
+ *
+ * ⚠️ UŽRAKTO NĖRA SĄMONINGAI (PR-4 D4): fizinis I/O po eilutės užraktu
+ * draudžiamas, tad „užrakinti ir trinti" nėra leistina tvarka. Likutinis langas
+ * tarp šios patikros ir `delete()` LIEKA, ir jis matuojamas milisekundėmis
+ * vietoj visos partijos trukmės — bet jis NE NULIS, ir tai užrašoma.
+ *
+ * @returns {Promise<{sluotina: boolean, priezastis: string|null}>}
+ */
+async function arVisDarSluotina(vykdytojas, kandidatas, { laukianciuRibaMs }) {
+  const { rows } = await vykdytojas.query(
+    `SELECT
+        a.busena,
+        (a.busena = $4) AS isipareigota,
+        (a.busena = $5 AND a.created_at >= now() - ($6::double precision * INTERVAL '1 millisecond'))
+          AS dar_laukia,
+        EXISTS (
+          SELECT 1 FROM job_results r
+           WHERE r.storage_key = a.storage_key AND r.storage_type = a.storage_type
+        ) AS referencuota,
+        ${kitasGyvasBandymas("$7", "$5", "$6")} AS kitas_gyvas
+       FROM job_result_attempts a
+      WHERE a.attempt_id::text = $1
+        AND a.storage_type = $2
+        AND a.storage_key = $3`,
+    [
+      String(kandidatas.attempt_id),
+      kandidatas.storage_type,
+      kandidatas.storage_key,
+      BUSENA.ISIPAREIGOTA,
+      BUSENA.LAUKIA,
+      Number(laukianciuRibaMs),
+      GYVOS_BUSENOS,
+    ]
+  );
+
+  /**
+   * ⚠️ EILUTĖS NEBĖRA → NEŠALINAM. Ją galėjo pašalinti erasure ar lygiagretus
+   * ciklas; tada objekto likimas nebe mūsų sprendimas, ir spėlioti nėra už ką.
+   */
+  if (rows.length === 0) return { sluotina: false, priezastis: "eilutės nebėra" };
+
+  const r = rows[0];
+
+  if (r.isipareigota) return { sluotina: false, priezastis: "kandidatė ĮSIPAREIGOJO po atrankos" };
+  if (r.dar_laukia) return { sluotina: false, priezastis: "kandidatė vėl GYVA (`pending` nepasibaigęs)" };
+  if (r.referencuota) return { sluotina: false, priezastis: "adresą referencuoja `job_results`" };
+  if (r.kitas_gyvas) return { sluotina: false, priezastis: "adresą užima KITAS gyvas bandymas" };
+
+  return { sluotina: true, priezastis: null };
+}
+
 module.exports = {
   BUSENA,
+  arVisDarSluotina,
+  /** ⚠️ Eksportuojama KONTRAKTINIAM testui: sąryšis su erasure puse turi būti tikrinamas. */
+  GYVOS_BUSENOS,
   valytiniBandymai,
   pazymetiKarantina,
   karantinuotuSkaicius,
