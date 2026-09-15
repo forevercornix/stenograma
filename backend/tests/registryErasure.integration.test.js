@@ -1019,6 +1019,86 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     assert.equal(await saugykla.head(bandymas.raktas), null, "objekto nebeturi būti");
   });
 
+  await t.test("#305.1/III: registracija PO zondų, PRIEŠ patikrą — objektas išlieka", async () => {
+    /**
+     * ⚠️ ZONDAI PERKELTI PRIEŠ PATIKRĄ, IR TAI NE LANGO PERKĖLIMAS.
+     *
+     * Trys ankstesni raundai langą PERKĖLĖ. Ketvirta patikra perkeltų jį dar
+     * kartą — todėl jos nedaryta. Vietoj to pakeista PROTOKOLO TVARKA:
+     *
+     *   rašytojas VISADA eina `registruoti() → put()` — EILUTĖ atsiranda PRIEŠ
+     *   objektą.
+     *
+     * Vadinasi DB patikra, esanti paskutiniu žingsniu prieš `delete()`, pagauna
+     * KIEKVIENĄ rašytoją, galėjusį objektą sukurti: jo eilutė jau yra. Anksčiau
+     * tarp patikros ir `delete()` gulėjo NUOTOLINIAI zondai, galintys trukti
+     * sekundes.
+     *
+     * Testas atkuria būtent tą tarpą: zondai jau įvykę, o eilutė atsiranda prieš
+     * patikrą.
+     */
+    const a = await naujasJobas();
+    const b = await naujasJobas();
+
+    const aBandymas = await nutrukesBandymas(a, { text: "A senas" });
+    await pool.query("UPDATE job_result_attempts SET created_at = now() - INTERVAL '90 days' WHERE attempt_id = $1", [
+      aBandymas.attemptId,
+    ]);
+
+    const { kandidatai } = await attemptRegistry.valytiniBandymai(pool, {
+      laukianciuRibaMs: 1,
+      atmestuRibaMs: 1,
+      kiekis: 100,
+    });
+
+    assert.ok(
+      kandidatai.some((k) => k.attempt_id === aBandymas.attemptId),
+      "prielaida: atranka kandidatę PRIĖMĖ"
+    );
+
+    /**
+     * ⚠️ TARPAS ATKURIAMAS PER SAUGYKLOS ZONDĄ. `adresuBusena()` kviečia `head()`;
+     * pakeitus jį taip, kad PIRMO kvietimo metu būtų registruojamas naujas gyvas
+     * bandymas, gaunama tiksliai ta seka: zondai → REGISTRACIJA → patikra.
+     */
+    const tikrasHead = saugykla.head;
+    let ivyko = false;
+
+    saugykla.head = async (raktas) => {
+      const atsakymas = await tikrasHead.call(saugykla, raktas);
+
+      if (!ivyko && raktas === aBandymas.raktas) {
+        ivyko = true;
+        await pool.query(
+          `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+           VALUES ($1, $2, 'fs', $3, $4)`,
+          [attemptRegistry.naujasBandymas(), b, aBandymas.raktas, attemptRegistry.BUSENA.LAUKIA]
+        );
+      }
+
+      return atsakymas;
+    };
+
+    let verdiktai;
+    try {
+      verdiktai = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 60000 });
+    } finally {
+      saugykla.head = tikrasHead;
+    }
+
+    assert.ok(ivyko, "prielaida: zondas įvyko - be jo testas nematuotų tarpo");
+
+    const musu = verdiktai.find((v) => v.attemptId === aBandymas.attemptId);
+    assert.equal(musu && musu.verdiktas, "uzimtas", `objektas NEGALI būti pašalintas: ${JSON.stringify(musu)}`);
+    assert.ok(await saugykla.head(aBandymas.raktas), "objektas privalo IŠLIKTI");
+
+    await saugykla.delete(aBandymas.raktas);
+    await pool.query("DELETE FROM job_result_attempts WHERE storage_key = $1 AND job_id = $2", [
+      aBandymas.raktas,
+      b,
+    ]);
+  });
+
   await t.test("KONTROLĖ: SAVAS adresas šalinamas normaliai", async () => {
     /**
      * Be jos ankstesnis testas būtų tenkinamas ir patikros, kuri atmeta VISKĄ — o toks

@@ -180,3 +180,71 @@ test("KONTRAKTAS: retencijos gyvos nuosavybės aibė yra erasure aibės POAIBIS"
     "erasure užklausa NETURI filtruoti būsenų - kitaip retencijos aibė nustotų būti jos poaibiu"
   );
 });
+
+test("ATIDARYMO SĄLYGA: raktas išvedamas iš `attemptId`, NE iš turinio", () => {
+  /**
+   * ⚠️ ŠIS TESTAS YRA CLAIM SPRENDIMO LIUDYTOJAS (#305.1).
+   *
+   * Sprendimas neįvesti claim protokolo remiasi IŠMATUOTA prielaida: du gyvi
+   * bandymai NORMALIU keliu negauna to paties `(storage_type, storage_key)`, nes
+   * raktas yra `results/<jobId>/<attemptId>.json`, o `attemptId` yra
+   * `crypto.randomUUID()`. Todėl veikėjai #1, #3 ir #4 pasiekiami TIK per
+   * nekonsistentiškus metaduomenis, o į juos repo jau atsako `NESAUGU` — atsisakyti
+   * ir parodyti, ne inžineriškai saugiai apdoroti.
+   *
+   * ⚠️ ATIDARYMO SĄLYGA: claim tampa BŪTINAS, jei normalus kelias kada nors duos du
+   * gyvus bandymus vienu adresu. Konkretus būdas tai padaryti — pakeisti raktą į
+   * TURINIO adresą (variantas, kurį PR-4 jau kartą ATMETĖ: tada du job'ai su tuo
+   * pačiu rezultatu dalytųsi objektu).
+   *
+   * Šis testas yra tos sąlygos sargas: jį sulaužius, claim sprendimas nustoja
+   * galioti, ir tai pamatoma ČIA, ne produkcijoje.
+   */
+  const jobId = "11111111-2222-3333-4444-555555555555";
+
+  /** 1. Raktas TURI savyje `attemptId` — vadinasi jis yra rakto dalis, ne priedas. */
+  const attemptId = attemptRegistry.naujasBandymas();
+  assert.match(
+    attemptRegistry.bandymoRaktas(jobId, attemptId),
+    new RegExp(attemptId),
+    "raktas privalo nešti `attemptId` - be jo attempt-unikalumo nėra"
+  );
+
+  /**
+   * 2. Funkcija NEMATO turinio. Turinio adresas reikalautų trečio argumento arba
+   * checksum'o; dviejų argumentų parašas tai daro neįmanomu.
+   */
+  assert.equal(
+    attemptRegistry.bandymoRaktas.length,
+    2,
+    "⚠️ trečias argumentas reikštų, kad raktas gali priklausyti nuo turinio - žr. atidarymo sąlygą"
+  );
+
+  /** 3. Tūkstantis bandymų - tūkstantis skirtingų adresų, be jokios kolizijos. */
+  const raktai = new Set();
+  for (let i = 0; i < 1000; i += 1) {
+    raktai.add(attemptRegistry.bandymoRaktas(jobId, attemptRegistry.naujasBandymas()));
+  }
+  assert.equal(raktai.size, 1000, "kolizija reikštų, kad claim sprendimas nebegalioja");
+
+  /**
+   * 4. ⚠️ IR ABI PRODUKCINĖS REGISTRACIJOS VIETOS IMA `naujasBandymas()`.
+   *
+   * Be šito tikrintume tik funkciją, o ne tai, kad ja naudojamasi: kvietėjas,
+   * perduodantis pastovų ar iš turinio išvestą `attemptId`, sąlygą sulaužytų,
+   * funkcijos nepalietęs. Tai tripwire (§9.2), ne elgsenos įrodymas.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { beKomentaru } = require("../utils/auditEvents");
+
+  for (const santykinis of ["utils/jobStore/postgresStore.js", "utils/artifactMigration.js"]) {
+    const svarus = beKomentaru(fs.readFileSync(path.join(__dirname, "..", santykinis), "utf8"));
+
+    assert.match(
+      svarus,
+      /attemptRegistry\.naujasBandymas\(\)/,
+      `${santykinis}: registracija privalo imti NAUJĄ atsitiktinį \`attemptId\``
+    );
+  }
+});

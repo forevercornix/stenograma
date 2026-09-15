@@ -290,6 +290,14 @@ function suskaiciuoti(klases) {
   return dazniai;
 }
 
+/**
+ * ⚠️ ŠI RIBA YRA EURISTIKA, IR TAI REGISTRUOTA (#351).
+ *
+ * Ji nėra išvesta: `ArtifactStore.put()` laiko ribos NETURI (`fs` — jokios,
+ * `s3` — SDK numatytosios, repo jų nefiksuoja), tad „kiek ilgiausiai gali trukti
+ * rašymas" niekas neapibrėžia. Pridėjus tą ribą, ši konstanta tampa IŠVEDIMU, ir
+ * tas pats darbas uždaro #157 4c. Žr. `docs/decisions/305-retencijos-nuosavybe.md`.
+ */
 const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
 
 /**

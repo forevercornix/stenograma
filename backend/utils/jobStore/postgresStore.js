@@ -2954,55 +2954,6 @@ function createPostgresStore(
         continue;
       }
 
-      /**
-       * ⚠️ NUOSAVYBĖ PERTIKRINAMA TIES DESTRUKTYVIA RIBA (#305.1, Codex A).
-       *
-       * Atranka matė SNAPSHOT'Ą. Pasibaigęs `pending` bandymas, kuris jos
-       * nebeblokuoja, gali įsipareigoti PO atrankos ir PRIEŠ šį šalinimą — ir
-       * tada dingtų objektas, kurio nuoroda ką tik tapo gyva. Tai PR-5 D šaknies
-       * („snapshot be pakartotinės patikros") recidyvas kitame kelyje.
-       *
-       * ⚠️ BE UŽRAKTO SĄMONINGAI: fizinis I/O po eilutės užraktu draudžiamas
-       * (PR-4 D4), tad „užrakinti ir trinti" nėra leistina tvarka. Likutinis
-       * langas tarp šios patikros ir `delete()` lieka, ir jis užrašytas
-       * `arUzimtasGyvo()` komentare — ne nutylėtas.
-       *
-       * ⚠️ `laukianciuRibaMs` PRIVALO ATEITI IŠ KVIETĖJO. Numatytoji reikšmė čia
-       * reikštų ANTRĄ amžiaus semantiką: patikra laikytų gyvu tai, ko atranka
-       * nebelaikė, arba atvirkščiai.
-       *
-       * ⚠️ TIKRINAMI VISI LANGO VEIKĖJAI, NE TIK SVETIMAS. Pirmoji redakcija
-       * klausė tik „ar kas KITAS užėmė adresą" — o pati kandidatė gali būti
-       * įsipareigojusi po atrankos, ir `kitasGyvasBandymas()` jos NEMATO pagal
-       * konstrukciją (ji save išbraukia, ir selektoriuje tai teisinga).
-       */
-      if (bandymuRegistras && laukianciuRibaMs !== undefined) {
-        try {
-          const { sluotina, priezastis } = await attemptRegistry.arVisDarSluotina(pool, kandidatas, {
-            laukianciuRibaMs,
-          });
-
-          if (!sluotina) {
-            rezultatai.push({
-              attemptId: kandidatas.attempt_id,
-              storageKey: raktas,
-              verdiktas: "uzimtas",
-              priezastis,
-            });
-            continue;
-          }
-        } catch (klaida) {
-          /** ⚠️ Patikros gedimas = ATSISAKYMAS TRINTI, ne trynimas be patikros. */
-          rezultatai.push({
-            attemptId: kandidatas.attempt_id,
-            storageKey: raktas,
-            verdiktas: "nepavyko",
-            priezastis: `nuosavybės pakartotinė patikra nepavyko: ${klaida.message}`,
-          });
-          continue;
-        }
-      }
-
       try {
         const { laikinas, galutinis } = await adresuBusena(saugykla, raktas);
 
@@ -3020,6 +2971,64 @@ function createPostgresStore(
         if (!laikinas && !galutinis) {
           rezultatai.push({ attemptId: kandidatas.attempt_id, storageKey: raktas, verdiktas: "nebuvo" });
           continue;
+        }
+
+        /**
+         * ⚠️ PATIKRA — PASKUTINIS ŽINGSNIS PRIEŠ DESTRUKTYVŲ VEIKSMĄ (#305.1, Codex III).
+         *
+         * ⚠️ IR TAI NE LANGO PERKĖLIMAS, NORS ATRODO PANAŠIAI. Trys ankstesni
+         * raundai langą PERKĖLĖ (atranka→šalinimas, patikra→šalinimas,
+         * zondai→`delete()`); ketvirta patikra perkeltų jį dar kartą. Čia keičiasi
+         * ne patikrų skaičius, o PROTOKOLO TVARKA:
+         *
+         *   rašytojas VISADA eina `registruoti() → put()`, t. y. EILUTĖ atsiranda
+         *   PRIEŠ objektą.
+         *
+         * Vadinasi DB patikra, atliekama paskutiniu žingsniu prieš `delete()`,
+         * pagauna KIEKVIENĄ rašytoją, kuris galėjo sukurti objektą — jo eilutė jau
+         * yra. Likusiam langui užpildyti rašytojas turi spėti ATLIKTI ABU žingsnius
+         * tarp šios užklausos ir `delete()`; anksčiau pakakdavo vieno, o tarp jų dar
+         * gulėjo NUOTOLINIAI zondai (`fs`/`s3`), galintys trukti sekundes.
+         *
+         * ⚠️ JOKIO I/O TARP ŠIOS PATIKROS IR `delete()` — tai ir yra visa priemonės
+         * esmė. Pridėjus čia bet ką, kas eina į tinklą, garantija dingsta.
+         *
+         * ⚠️ UŽRAKTO NĖRA SĄMONINGAI (PR-4 D4): fizinis I/O po užraktu draudžiamas,
+         * o zondai ir `delete()` yra būtent nuotolinis I/O.
+         *
+         * ⚠️ `laukianciuRibaMs` PRIVALO ATEITI IŠ KVIETĖJO — numatytoji reikšmė čia
+         * reikštų ANTRĄ amžiaus semantiką nei atrankoje.
+         */
+        if (bandymuRegistras && laukianciuRibaMs !== undefined) {
+          let verdiktas = null;
+
+          try {
+            const { sluotina, priezastis } = await attemptRegistry.arVisDarSluotina(pool, kandidatas, {
+              laukianciuRibaMs,
+            });
+
+            if (!sluotina) {
+              verdiktas = {
+                attemptId: kandidatas.attempt_id,
+                storageKey: raktas,
+                verdiktas: "uzimtas",
+                priezastis,
+              };
+            }
+          } catch (klaida) {
+            /** ⚠️ Patikros gedimas = ATSISAKYMAS TRINTI, ne trynimas be patikros. */
+            verdiktas = {
+              attemptId: kandidatas.attempt_id,
+              storageKey: raktas,
+              verdiktas: "nepavyko",
+              priezastis: `nuosavybės pakartotinė patikra nepavyko: ${klaida.message}`,
+            };
+          }
+
+          if (verdiktas) {
+            rezultatai.push(verdiktas);
+            continue;
+          }
         }
 
         if (galutinis) await saugykla.delete(raktas);

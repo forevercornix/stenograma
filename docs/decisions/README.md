@@ -19,3 +19,4 @@ patenka tie, kurie riboja darbą už to issue ribų.
 |---|---|---|
 | [0001](0001-stable-user-identity.md) | Stabilus vartotojo identitetas `AUTH_USERS` ketvirtame lauke | Priimtas |
 | [155](155-postgres-authority.md) | PostgreSQL autoritetas job metaduomenims ir konsistencijos modelis | Priimtas |
+| [305](305-retencijos-nuosavybe.md) | Retencijos nuosavybės riba be claim protokolo (su atidarymo sąlyga) | Priimtas |
