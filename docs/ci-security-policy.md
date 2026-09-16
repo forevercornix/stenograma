@@ -226,7 +226,7 @@ Todėl kiekvienas įrašas turi lauką **„Ar pagrįstas pagal D6"**, ir jis ga
 
 | Laukas | Reikšmė |
 |---|---|
-| **PR/commit** | šis PR ⚠️ merge commit SHA įrašomas **po** merge (PR savo paties SHA turėti negali) |
+| **PR/commit** | PR **#358** · merge commit **`43f29a3`** (`43f29a3d65d040718cd297678ca52af6ca77fefb`), 2026-09-15 21:05 UTC |
 | **Apeitas check** | `required-ci` — būsena **`failure`** ⚠️ ne `cancelled`, žr. pastabą |
 | **Priežastis** | #324 acceptance scenarijus 7: įrodyti, kad bypass kelias veikia ir palieka įrašą |
 | **Įrodymas** | CI paleidimas `35022569706` **atšauktas sąmoningai** (`conclusion: cancelled`), ne sugedęs; `backend` ir `docker` — `cancelled` |
