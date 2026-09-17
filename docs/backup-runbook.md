@@ -437,11 +437,41 @@ skirtingi artefaktai. Šis skyrius yra apie antrąjį.
 BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
   --out kopija.json --actor "$USER" --url "$DATABASE_URL"
 
+# `PG*` diegime `--url` nereikalingas - jungtis imama iš aplinkos
+BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
+  --out kopija.json --actor "$USER"
+
 # Atkūrimas į TUŠČIĄ bazę
 node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
 ```
 
 Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+
+#### ⚠️ `PG*` forma palaikoma SĄLYGINIAI (#264)
+
+> Palaikoma `PG*` forma, **kai jungtis aprašoma tik `PGHOST`/`PGPORT`/`PGUSER`/
+> `PGDATABASE`**; kitaip komanda atsisako **garsiai**
+> (`PG_DUMP_ENV_NOT_PORTABLE`).
+
+**Priežastis nėra „nepalaikoma".** `PGSSLMODE`, `PGOPTIONS`, `PGPASSWORD`,
+`PGPASSFILE` ir bet kuris kitas `PG*` **procese** veikia per `process.env` — `pg`
+skaito jį pats. `pg_dump` to kanalo **negauna**: jo aplinka valoma nuo viso `PG`
+prefikso, kad kopija negalėtų tyliai ateiti iš kito klasterio.
+
+⚠️ Išmatuota: iš tų pačių nustatymų `{host, user, password, database}` Node `pg`
+gauna dar `ssl=true`, `options=-csearch_path=prod`, `connect_timeout=9`. DSN iš jų
+tuos tris **tyliai prarastų** — kopija per nešifruotą jungtį arba iš kitos schemos
+atrodytų kaip sėkmė. Todėl atsisakoma, o ne spėjama.
+
+**Kredencialai `PG*` kelyje — `~/.pgpass`.** Jis valymą išgyvena, nes `HOME` nėra
+`PG*`. `PGPASSWORD` yra kliūtis sąmoningai: jį perduoti būtų galima tik DSN'e, o
+tai atvestų slaptažodį į `argv`, matomą `ps` išvestyje.
+
+⚠️ **Nauja libpq aplinkos savybė kliūtimi tampa automatiškai** — sąlyga išvedama
+iš `PG_ATITIKMENYS`, ne surašyta. Priežiūros nereikia.
+
+⚠️ **`restore` šio kelio neturi** ir jam nereikia: `--target` privalomas, aplinkos
+atsargos nėra, tad tyliai paimti ne tos bazės neįmanoma.
 
 ⚠️ **`BACKUP_ENABLED=true` privalomas.** Išjungtos kopijos reiškia išjungtas ir
 šias: `dump` krinta su `BACKUP_DISABLED` dar prieš jungiantis prie bazės.

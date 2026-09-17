@@ -665,9 +665,103 @@ function dviprasmybesTekstas(skirtumai) {
   );
 }
 
+/**
+ * VAIKINIO libpq PROCESO RIBA — `PG*` FORMA JAM NEEKVIVALENTI (#264).
+ *
+ * ⚠️ `pgJungtiesNustatymai()` NĖRA PILNAS JUNGTIES APRAŠAS. Jis pilnas tik kartu
+ * su NEPALIESTA `process.env`.
+ *
+ * Išmatuota: iš tos pačios išvesties `{host, user, password, database}` Node `pg`
+ * gauna dar `ssl=true`, `options=-csearch_path=prod` ir `connect_timeout=9` — jis
+ * pats skaito aplinką per `val()` ir `readSSLConfigFromEnvironment()`. Tai antras
+ * kanalas, ir jis veikia TIK procese.
+ *
+ * `pg_dump`/`psql` to kanalo neturi: `pgDumpBackup.libpqSvariAplinka()` pašalina
+ * VISĄ `PG` prefiksą, kad vaikinis procesas negalėtų tyliai nukeliauti į kitą
+ * klasterį. Tad `PG*` konfigūracija vaikiniam procesui yra IŠ PRINCIPO
+ * neekvivalenti tai, kurią naudoja procesas.
+ *
+ * ⚠️ RIBA GYVENA ČIA, NE KVIETĖJE. Tai teiginys apie jungties MODELĮ, ne apie
+ * vieną CLI. Kitas kvietėjas, kuriam prireiks vaikinio libpq proceso, jį ras ten,
+ * kur ieškos semantikos.
+ *
+ * ⚠️ SĄLYGA IŠVEDAMA IŠ `PG_ATITIKMENYS`, NE SURAŠOMA.
+ *
+ * Rankinis sąrašas („PGSSLMODE, PGOPTIONS, PGPASSFILE, …") būtų ta pati klasė,
+ * kurią #245 atmetė `pg` atveju ir kurią `libpqSvariAplinka()` invertavo:
+ * senstantis tyliai. `PG_ATITIKMENYS` jau yra autoritetas — jis įvardija LYGIAI
+ * tuos kintamuosius, kuriuos `PG*` forma perkelia į nustatymų objektą. Visa kita
+ * `PG*` erdvėje pasiekia `pg` TIK per aplinką, tad vaikiniam procesui prarandama
+ * pagal konstrukciją.
+ *
+ * Naujas libpq kintamasis → kliūtis ATSIRANDA AUTOMATIŠKAI → fail-closed be
+ * priežiūros.
+ *
+ * ⚠️ `PGPASSWORD` — VIENINTELĖ ĮVARDYTA IŠIMTIS. Žemėlapyje jis yra, bet į vaikinį
+ * procesą nepereina: aplinka valoma, o vėliavos slaptažodžiui libpq CLI neturi.
+ * Įdėti jį į DSN reikštų rankinį URI kodavimą — tiksliai tai, ko #264 prašė
+ * išvengti, plius slaptažodis `argv` eilutėje, matomoje `ps` išvestyje.
+ * Išeitis operatoriui — `~/.pgpass`, kuris valymą IŠGYVENA, nes `HOME` nėra `PG*`.
+ *
+ * ⚠️ TAIKOMA TIK `PG*` KELIUI. Su eksplicitiniu URL riba negalioja sąmoningai:
+ * ten operatorius PATS įvardija taikinį, ir „URL yra vienintelis šaltinis" yra
+ * `libpqSvariAplinka()` užrašyta ir priimta kaina. `PG*` atveju operatorius URL
+ * nerašė — jo konfigūracija YRA `PG*` aibė, tad tylus jos pusės praradimas būtų
+ * kitas dalykas.
+ *
+ * @param {object} [env]
+ * @returns {string[]} kliūčių vardai (tušias masyvas = perduodama)
+ */
+function vaikinioProcesoKliutys(env = process.env) {
+  const kliutys = [];
+
+  for (const [raktas, reiksme] of Object.entries(env)) {
+    /** ⚠️ Registras kaip `libpqSvariAplinka()`: Windows vardai registrui nejautrūs. */
+    const didziosiomis = raktas.toUpperCase();
+    if (!didziosiomis.startsWith("PG")) continue;
+    if (reiksme === undefined || reiksme === "") continue;
+
+    /** Išimtis prieš žemėlapį: `PGPASSWORD` jame YRA, bet nepereina. */
+    if (didziosiomis === "PGPASSWORD") {
+      kliutys.push(raktas);
+      continue;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(PG_ATITIKMENYS, didziosiomis)) continue;
+
+    kliutys.push(raktas);
+  }
+
+  return kliutys.sort();
+}
+
+/**
+ * KLAIDOS TEKSTAS — VARDAI, NIEKADA REIKŠMĖS.
+ *
+ * ⚠️ Vardai čia SAUGŪS ir BŪTINI: operatorius turi žinoti, KURĮ kintamąjį
+ * pašalinti. Reikšmių nėra — tarp kliūčių yra `PGPASSWORD`.
+ *
+ * ⚠️ Tekstas sako KODĖL ir KAIP IŠEITI. „Nepalaikoma" siųstų operatorių ieškoti
+ * palaikymo, o problema yra ne palaikymas, o antro kanalo nebuvimas.
+ */
+function vaikinioProcesoKliuciuTekstas(kliutys) {
+  return (
+    `Jungtis aprašyta kintamaisiais, kurių vaikinis libpq procesas NEGAUNA: ${kliutys.join(", ")}. ` +
+    "Procese jie veikia per `process.env` (`pg` skaito jį pats), bet `pg_dump` aplinka " +
+    "valoma nuo VISO `PG` prefikso, kad kopija negalėtų tyliai ateiti iš kito klasterio. " +
+    "Perduoti juos būtų galima tik per DSN, o jis tyliai prarastų `sslmode` ir `options` " +
+    "arba atvestų slaptažodį į `argv`. " +
+    "Išeitis: nurodykite taikinį eksplicitiškai per `--url`, arba palikite tik " +
+    "`PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`, o kredencialus laikykite `~/.pgpass` " +
+    "(jis valymą išgyvena, nes `HOME` nėra `PG*`)."
+  );
+}
+
 module.exports = {
   pgJungtiesNustatymai,
   jungtiesSemantikosSkirtumai,
+  vaikinioProcesoKliutys,
+  vaikinioProcesoKliuciuTekstas,
   dviprasmybesTekstas,
   RUNTIME_KREDENCIALAI,
   LAUKU_KLASES,
