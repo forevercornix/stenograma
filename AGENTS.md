@@ -550,6 +550,21 @@ If the same root cause exists outside the legitimate PR scope and repairing it
 would materially broaden the change, follow §13: document and escalate or split it
 rather than silently expanding the PR.
 
+When closing a race, enumerate **every actor and every interval** — a
+one-dimensional inventory closes one cell at a time while the window stays open.
+
+Measured in #305.1: three consecutive rounds each closed one actor in the window
+between candidate selection and physical deletion, and each round moved the
+window rather than closing it. A two-dimensional inventory — 6 actors × 3
+intervals, of which only 4 actors can lose data — showed **8 of those 12 cells
+uncovered**, while the per-actor report had named just one. The same discipline
+then produced a second finding the report had not raised: asking *what consumes
+this verdict* revealed a skip verdict falling through into the row-deletion
+branch.
+
+An inventory of actors answers "who can act". An inventory of intervals answers
+"when" — and a race needs both.
+
 ### 19.4 Repair the invariant, not the comment
 
 For each root-cause group:
