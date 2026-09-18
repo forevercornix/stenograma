@@ -1,0 +1,293 @@
+const { createPostgresStore, KONSTRUKCIJOS_PARINKTYS } = require("./jobStore/postgresStore");
+
+/**
+ * JOB'Ų SAUGYKLA, NUKREIPTA Į ATKURTĄ BAZĘ (#155, 7.6c / #250).
+ *
+ * ⚠️ KODĖL ŠIS ADAPTERIS APSKRITAI EGZISTUOJA.
+ *
+ * `jobStore` fasadas atsako į klausimą „kur gyvena GYVI job'ai" — ir tai NE tas
+ * pats klausimas, į kurį reikia atsakyti po DR atkūrimo. Ten asmens duomenys guli
+ * ATKURTOJE bazėje, tad replay per fasadą būtų vakuumas: `jobs` eilutės liktų, o
+ * kvitas skelbtų sėkmę.
+ *
+ * ⚠️ ATIDARIUS BARJERĄ ŠIS ADAPTERIS TAPO REIKALINGESNIS, NE MAŽIAU (#155).
+ *
+ * Ankstesnė redakcija rėmėsi barjeru: `JOB_STORE_BACKEND=postgres` buvo klaida, o
+ * vien `DATABASE_URL` grąžindavo `memory | barjeras: true`, tad fasadas atkurtos
+ * bazės NEPALIESDAVO — žala buvo „nieko neįvyko". Dabar diegimas GALI turėti
+ * `postgres` fasadą, ir tada replay per jį eitų į PRODUKCINĘ bazę: ne praleistas
+ * trynimas, o trynimas ne toje bazėje. Nukreipimas privalomas abiem atvejais —
+ * pasikeitė tik tai, kuo baigiasi jo nebuvimas.
+ *
+ * ⚠️ TAI NĖRA ANTRAS JOB STORE IR NĖRA ANTRAS TRYNIMAS.
+ *
+ * Čia nėra nė vieno savo SQL sakinio: naudojamas tas pats `createPostgresStore()`,
+ * kurį fasadas naudoja su `JOB_STORE_BACKEND=postgres`. Adapteris tik perrašo paviršių iš
+ * plokščio (`get`/`update`/`remove`) į `system.*`, kurio tikisi `jobErasure`.
+ * Trynimo semantika lieka `eraseJob()` — viena visai sistemai.
+ *
+ * ⚠️ KĄ ŠIS KELIAS DENGIA IR KO NEKEIČIA.
+ *
+ * Nukreipiama TIK įrašo vieta. Audio saugykla, BullMQ eilė ir auditas yra
+ * GLOBALŪS posistemiai, ne per-bazės: `eraseJob()` juos valo tais pačiais
+ * kvietimais, o `storageKey` ima iš pačios atkurtos eilutės. Todėl audio
+ * objektas pasiekiamas ir pašalinamas net tada, kai job'o įrašas atkeliavo iš
+ * seno snapshot'o.
+ *
+ * ⚠️ NEPILNAS PAVIRŠIUS ATMETAMAS ČIA IR DAR KARTĄ `eraseJob()`. Dviguba
+ * patikra sąmoninga: praleistas metodas reikštų tyliai nepašalintą artefaktų
+ * klasę su sėkmės kvitu, o tokio gedimo kaina yra GDPR, ne patogumas.
+ */
+
+/**
+ * Metodai, kurių `jobErasure.eraseJob()` reikalauja iš `system.*`.
+ *
+ * ⚠️ SARGAS TIKRINA BUVIMĄ, NE ELGESĮ IR NE PARAŠĄ (§12.1). Metodo dingimą jis
+ * pagauna; tai, kad metodas ims elgtis kitaip ar praras parametrą — ne. Parašo
+ * pusę uždaro ne patikra, o generavimas (žr. `sukurti()`).
+ *
+ * ⚠️ SĄRAŠAS IMAMAS IŠ `jobErasure`, NE KARTOJAMAS (#157, PR-5).
+ *
+ * Iki tol čia gulėjo antra to paties sąrašo kopija, ir ji iškart atsiliko: PR-5
+ * pridėjo `deleteResultArtifacts`, `jobErasure` jo pareikalavo, o adapteris liko su
+ * senuoju trejetu — DR replay krito CI (`34142484397`). Tai TA PATI ketvirtojo atvejo
+ * forma, kurią PR-3 uždarė generavimu: sąrašas, gyvenantis dviese, išsiskiria tyliai,
+ * o kaina čia yra praleista artefaktų klasė su sėkmės kvitu.
+ */
+/**
+ * ⚠️ DU ŠALTINIAI, NE VIENAS (#157, PR-5; Codex H1).
+ *
+ * `jobErasure.BUTINI_SYSTEM_METODAI` atsako „ko reikia `eraseJob()`", ir tai teisingas
+ * šaltinis SAVO klausimui. Bet replay `!job` šaka `eraseJob()` nekviečia — ji pati šalina
+ * artefaktus ir pati uždaro registro eilutes. Ėmus tik pirmąjį sąrašą, `pasalintiBandymus`
+ * į generuojamą paviršių nepatekdavo, ir `TypeError` įvykdavo PO destruktyvaus I/O:
+ * objektai ištrinti, žyma neišspręsta, o kiekvienas kitas DR replay krenta toje pačioje
+ * vietoje.
+ *
+ * Vienas sąrašas dviem klausimams būtų ta pati klaida, tik atvirkščia: iki šiol ji reiškė
+ * atsiliekančią KOPIJĄ, čia reikštų per siaurą ŠALTINĮ. Todėl imama SĄJUNGA, o kiekvienas
+ * vartotojas savo reikalavimus deklaruoja pats.
+ */
+const { BUTINI_SYSTEM_METODAI } = require("./jobErasure");
+const { BUTINI_REPLAY_METODAI } = require("./erasureReplay");
+
+const BUTINI = Object.freeze([...new Set([...BUTINI_SYSTEM_METODAI, ...BUTINI_REPLAY_METODAI])]);
+
+/**
+ * @param {import("pg").Pool} pool atkurtos bazės pool'as
+ * @returns {{system: {get: Function, update: Function, remove: Function}}}
+ */
+/**
+ * ⚠️ KIEKVIENA KONSTRUKCIJOS PARINKTIS TURI DEKLARUOTĄ SPRENDIMĄ (#157, PR-5; Codex #304).
+ *
+ * Trečias kartas iš eilės, kai šis adapteris atsiliko nuo `postgresStore`: PR-3 numesti
+ * parašai, PR-5 antra būtinų metodų sąrašo kopija, dabar — saugyklos, be kurių DR replay
+ * su bet kokia external eilute krenta `parinktiArtefaktuSaugykla()` viduje.
+ *
+ * Taškinis taisymas („perduokim ir saugyklas") uždarytų trečią atvejį ir paliktų
+ * ketvirtą. Šaknis yra ta, kad adapteris STATO store'ą, tad kiekviena nauja parinktis jam
+ * yra nauja skola. Struktūrinio taisymo (adapteris gauna JAU SUKONFIGŪRUOTĄ store'ą)
+ * šiandien padaryti negalima: gamybinio surinkimo, iš kurio kvietėjas jį gautų, dar nėra
+ * — tai PR-7 („prijungimas `initializePostgres()` viduje"). Užrašyta, o ne apeita
+ * tyliai (§19.3).
+ *
+ * Todėl mechanizmas: aibė ateina iš `postgresStore`, o čia kiekvienas jos vardas turi
+ * EKSPLICITINĮ sprendimą. Atsiradus ketvirtai parinkčiai, `sukurti()` kris — ne DR
+ * replay viduryje, o konstrukcijos metu, su vardu.
+ */
+const PARINKCIU_SPRENDIMAI = Object.freeze({
+  /**
+   * Perduodama IŠVESTINAI: `paruosti()` pats nustato, ar atkurtoje bazėje yra
+   * `job_result_attempts`, ir store'as sukonstruojamas tai žinodamas. Kvietėjas šios
+   * parinkties nenurodo — schema yra bazės faktas, ne kvietėjo pasirinkimas.
+   */
+  bandymuRegistras: "isvedama-is-schemos",
+  /**
+   * Perduodama IŠVESTINAI, kaip ir gretima: `artifact_migration_progress` yra
+   * NAUJESNĖ lentelė, tad kopija gali turėti registrą ir neturėti progreso.
+   */
+  migracijosProgresas: "isvedama-is-schemos",
+  /** Perduodama: atkurtoje bazėje gali būti `fs` ir `s3` eilučių vienu metu. */
+  artifactStores: "perduodama",
+  /** Perduodama: vieno tipo saugykla yra tas pats klausimas siauresne forma. */
+  artifactStore: "perduodama",
+  /**
+   * NEPERDUODAMA SĄMONINGAI: replay tik ŠALINA. Rašymo saugykla atkurtoje bazėje
+   * reikštų, kad DR kelias gali kurti naujus artefaktus — o jis to daryti negali.
+   */
+  rasymoSaugykla: "nenaudojama-replay-tik-salina",
+});
+
+/**
+ * NEPILNA KONFIGŪRACIJA ATMETAMA PRIEŠ PIRMĄ REPLAY ŽINGSNĮ (#157, PR-5; Codex #304).
+ *
+ * ⚠️ KRITIMAS VIDURYJE YRA BLOGIAUSIA IŠ TRIJŲ GALIMYBIŲ. Be šios patikros DR replay su
+ * external eilute nueina iki `parinktiArtefaktuSaugykla()` ir krenta ten — dalis job'ų
+ * jau apdorota, replay pažymimas kritiniu, o operatorius mato klaidą apie „neregistruotą
+ * `storage_type`" viduryje procedūros, kurios apimtis jam nebeaiški.
+ *
+ * Patikra yra AIBIŲ palyginimas: kokių tipų eilučių bazėje YRA prieš tai, kokių saugyklų
+ * adapteriui PADUOTA. Ji nieko netrina ir nieko nekeičia.
+ *
+ * ⚠️ `inline` NEREIKALAUJA SAUGYKLOS: turinys gyvena eilutėje ir dingsta kartu su ja.
+ */
+async function paruosti(pool, parinktys = {}) {
+  /**
+   * ⚠️ SENESNĖ KOPIJA `job_result_attempts` LENTELĖS NETURI (Codex, #304 antras raundas).
+   *
+   * Atkūrimas iš kopijos, sukurtos PRIEŠ migraciją `1756300000000`, jos neturi, ir viena
+   * užklausa kristų su `42P01` — sugriaudama būtent tą fail-before-first-step garantiją,
+   * kuriai preflight ir egzistuoja. Kopijos formatas tebėra `version 1`, o DR seka tikrina
+   * tik migracijų ATSILIKIMĄ, tad tokios kopijos formaliai priimamos.
+   *
+   * ⚠️ PASIRINKTAS ANTRAS VARIANTAS: trūkstama lentelė = TUŠČIA bandymų aibė.
+   *
+   * Pirmasis (migracijos tampa privalomu žingsniu prieš replay) keistų DR SEKĄ, o ji
+   * aprašyta runbook'e ir tikrinama atskirai — tai PR-7 lygio pokytis, ne preflight
+   * detalė. Antrasis yra teisingas ir faktiškai: jei lentelės nėra, tai bandymų registro
+   * toje bazėje NIEKADA nebuvo, tad bandymų aibė tikrai tuščia — tai FAKTAS, ne prielaida.
+   *
+   * ⚠️ IR JIS FAIL-CLOSED GARANTIJOS NEAPGAUNA: `job_results` external eilutės tikrinamos
+   * toliau, tad sena kopija su `s3` rezultatais preflight'ą vis tiek sustabdo. Tuščia
+   * bandymų aibė reiškia „nėra ko šluoti", ne „nėra ko tikrinti".
+   */
+  const { rows: rezultatuTipai } = await pool.query(
+    "SELECT DISTINCT storage_type FROM job_results WHERE storage_type <> 'inline'"
+  );
+
+  let bandymuTipai = [];
+  let bandymuRegistras = true;
+  try {
+    const { rows } = await pool.query("SELECT DISTINCT storage_type FROM job_result_attempts");
+    bandymuTipai = rows;
+  } catch (klaida) {
+    /** `42P01` = lentelės nėra. Bet kokia kita klaida yra tikras gedimas ir keliauja toliau. */
+    if (klaida.code !== "42P01") throw klaida;
+    bandymuRegistras = false;
+  }
+
+  /**
+   * ⚠️ ATSKIRAS SCHEMOS FAKTAS, NE `bandymuRegistras` IŠVESTINĖ (#157, PR-6; Codex A).
+   *
+   * `artifact_migration_progress` (`1756600000000`) yra NAUJESNĖ už
+   * `job_result_attempts` (`1756300000000`), tad kopija gali turėti antrąją ir
+   * neturėti pirmosios. Išvedus vieną faktą iš kito, replay prieš tarpinę schemą
+   * kristų su `42P01` — būtent tuo momentu, kai eilė, audio ir auditas jau
+   * išvalyti, t. y. paverstų palaikomą kelią DALINAI ĮVYKDYTU GEDIMU.
+   *
+   * ⚠️ TIKRINAMA TA PAČIA FORMA, kaip gretimas faktas: užklausa + `42P01`, o bet
+   * kokia kita klaida keliauja toliau kaip tikras gedimas.
+   */
+  let migracijosProgresas = true;
+  try {
+    await pool.query("SELECT 1 FROM artifact_migration_progress LIMIT 1");
+  } catch (klaida) {
+    if (klaida.code !== "42P01") throw klaida;
+    migracijosProgresas = false;
+  }
+
+  const rows = [...rezultatuTipai, ...bandymuTipai];
+
+  /**
+   * ⚠️ SKAIČIUOJAMOS TIK TOS SAUGYKLOS, KURIAS STORE'AS REALIAI UŽREGISTRUOS (Codex, #304).
+   *
+   * `Object.keys()` įtraukdavo ir `{ s3: null }`: raktas yra, reikšmės nėra, o
+   * `createPostgresStore()` tokios eilutės į žemėlapį NEDEDA (`if (saugykla)`). Preflight
+   * praeidavo, replay mutuodavo ankstesnius job'us ir kristų ties pirmu S3 artefaktu —
+   * būtent tai, ką jis turėjo užkirsti.
+   *
+   * Tikrinama TIKROVĖ, ne deklaracija: reikšmė privalo egzistuoti ir turėti `backend`,
+   * kaip reikalauja pats registruojantis kelias.
+   */
+  const registruojama = (saugykla) => Boolean(saugykla) && typeof saugykla.backend === "string";
+
+  const turimi = new Set([
+    ...Object.entries((parinktys && parinktys.artifactStores) || {})
+      .filter(([, saugykla]) => registruojama(saugykla))
+      .map(([tipas]) => tipas),
+    ...(parinktys && registruojama(parinktys.artifactStore) ? [parinktys.artifactStore.backend] : []),
+  ]);
+
+  const truksta = rows.map((r) => r.storage_type).filter((tipas) => tipas && !turimi.has(tipas));
+
+  if (truksta.length > 0) {
+    throw new TypeError(
+      `restoredJobStore: atkurtoje bazėje yra \`${truksta.join("`, `")}\` eilučių, bet šioms ` +
+        "saugykloms adapteris negavo. Replay pašalintų DB eilutes, o objektai liktų — " +
+        "tad procedūra stabdoma PRIEŠ pirmą žingsnį, ne viduryje."
+    );
+  }
+
+  /**
+   * ⚠️ SCHEMOS FAKTAS PERDUODAMAS STORE'UI, NE TIK PATIKRINAMAS ČIA (Codex, #304 / E1).
+   *
+   * Fallback, gyvenantis tik preflight'e, uždaro ĮĖJIMĄ, o ne kelią: `deleteResultArtifacts()`
+   * toliau užklaustų tą pačią trūkstamą lentelę ir kristų replay VIDURYJE. Store'as
+   * sukonstruojamas žinodamas, ar registras yra, tad visi registro keliai iš to seka —
+   * vienas sprendimas, ne trys `try/catch`.
+   *
+   * ⚠️ IŠ TO SEKA PRIELAIDA, KURIĄ VERTA ĮVARDYTI: schemos faktas tampa store'o BŪSENA,
+   * nustatoma VIENĄ kartą konstrukcijos metu. Jei kada nors migracijos būtų taikomos TUO
+   * PAČIU procesu, kuris jau turi sukonstruotą store'ą, faktas pasentų ir liktų „lentelės
+   * nėra", nors ji jau yra. Šiandien to kelio nėra — replay migracijų nedaro — tad tai
+   * prielaida, ne defektas; bet ji užrašoma, o ne laikoma savybe.
+   */
+  return sukurti(pool, { ...parinktys, bandymuRegistras, migracijosProgresas });
+}
+
+function sukurti(
+  pool,
+  { artifactStores = null, artifactStore = null, bandymuRegistras = true, migracijosProgresas = true } = {}
+) {
+  if (!pool || typeof pool.query !== "function") {
+    throw new TypeError("restoredJobStore: reikia atkurtos bazės pool'o.");
+  }
+
+  const nedeklaruotos = KONSTRUKCIJOS_PARINKTYS.filter((v) => !PARINKCIU_SPRENDIMAI[v]);
+  if (nedeklaruotos.length > 0) {
+    throw new TypeError(
+      `restoredJobStore: \`postgresStore\` turi parinktis be sprendimo: \`${nedeklaruotos.join("`, `")}\`. ` +
+        "Adapteris privalo pasakyti, ką su kiekviena daro — kitaip nauja parinktis tyliai " +
+        "dingsta, o DR replay krenta viduryje."
+    );
+  }
+
+  const store = createPostgresStore(pool, {
+    artifactStores,
+    artifactStore,
+    bandymuRegistras,
+    migracijosProgresas,
+  });
+
+  const truksta = BUTINI.filter((metodas) => typeof store[metodas] !== "function");
+  if (truksta.length > 0) {
+    throw new TypeError(
+      `restoredJobStore: \`postgresStore\` neteikia \`${truksta.join("`, `")}\`. ` +
+        "Paviršius pasikeitė — adapteris privalo kristi, ne praleisti artefaktų klasę."
+    );
+  }
+
+  /**
+   * ⚠️ METODAI GENERUOJAMI, NE RAŠOMI RANKA (Codex, #291).
+   *
+   * Ankstesnė redakcija juos išvardijo su fiksuotais parametrais
+   * (`get: (jobId) => store.get(jobId)`), ir adapteris TYLIAI NUMESDAVO antrąjį
+   * argumentą. Taip mirė `{ hydrate: false }` DR replay kelyje — bet mirtų ir bet
+   * kuris BŪSIMAS parametras, nes siaurinimas yra adapterio savybė, ne vieno
+   * argumento klaida.
+   *
+   * ⚠️ IR SARGAS ŠITO NEPAGAVO, NORS STOVI 8 EILUTĖS AUKŠČIAU. Jis tikrina METODŲ
+   * VARDUS, ne parašus, tad paviršiaus pokytį mato, o parametro pokyčio — ne.
+   * `Function.length` čia irgi nepadėtų: `get(id, opts = {})` turi `length === 1`,
+   * kaip ir `(jobId) => ...`. Todėl taisoma ne patikra, o MECHANIZMAS: rankomis
+   * neparašytas metodas negali susiaurinti to, ko neaprašo.
+   */
+  const system = {};
+  for (const metodas of BUTINI) {
+    system[metodas] = (...argumentai) => store[metodas](...argumentai);
+  }
+
+  return { system };
+}
+
+module.exports = { BUTINI, sukurti, paruosti };

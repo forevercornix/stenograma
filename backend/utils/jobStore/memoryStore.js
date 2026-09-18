@@ -1,4 +1,4 @@
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, matchesOwner, normalizeJob, idempotentiskasAtsakymas, metaduomenuProjekcija } = require("./common");
 
 /**
  * In-memory job store backend'as.
@@ -21,8 +21,21 @@ async function create(fields = {}) {
   return job;
 }
 
-async function get(id) {
-  return jobs.get(id) || null;
+/**
+ * ⚠️ `hydrate: false` PROJEKCIJA TURI ELGTIS VIENODAI VISUOSE BACKEND'UOSE (#157, PR-3).
+ *
+ * PostgreSQL kelyje ji taupo `payload` deserializavimą; atmintyje taupyti nėra ko.
+ * Bet FORMA privalo sutapti: nehidratuotas job'as `result` lauko NETURI, ir kvietėjas,
+ * parašytas prieš vieną backend'ą, negali tyliai sulūžti prieš kitą.
+ *
+ * @param {{hydrate?: boolean}} [nustatymai]
+ */
+async function get(id, { hydrate = true } = {}) {
+  const job = jobs.get(id) || null;
+  if (!job || hydrate) return job;
+
+  /** Kopija: originalas saugykloje lieka pilnas. */
+  return metaduomenuProjekcija(job);
 }
 
 /**
@@ -100,10 +113,15 @@ async function update(id, patch, options = {}) {
  * ───────────────────────────────────────────────────────────────────────── */
 
 /** @returns {object|null|"FORBIDDEN"} */
-async function getOwned(id, scope) {
+/**
+ * @param {{hydrate?: boolean}} [nustatymai] forma vienoda visuose backend'uose (#157, PR-3)
+ */
+async function getOwned(id, scope, { hydrate = true } = {}) {
   const job = jobs.get(id);
   if (!job) return null;
-  return matchesOwner(job, scope) ? job : "FORBIDDEN";
+  if (!matchesOwner(job, scope)) return "FORBIDDEN";
+
+  return hydrate ? job : metaduomenuProjekcija(job);
 }
 
 /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
@@ -185,6 +203,129 @@ async function size() {
  * eilė, GPU trūkumas) buvo palaikomas orphan ir jo failas IŠTRINAMAS dar
  * apdorojant. Čia turi būti VISI jobai.
  */
+/**
+ * VISOS job'o REZULTATO artefaktų nuorodos (#157, PR-5).
+ *
+ * ⚠️ TUŠČIAS SĄRAŠAS ČIA YRA FAKTAS, NE PRIELAIDA.
+ *
+ * ``memory`` rezultatą persistina TIK savo įraše: external rašymo kelio (`rasymoSaugykla`,
+ * bandymų registras) šis backend'as neturi, tad „job'as neturi external artefaktų" yra
+ * konstrukcijos savybė, o ne spėjimas apie duomenis. Skirtumas svarbus: fasadas `null`
+ * traktuoja kaip „nežinau, netrink", o `[]` — kaip „nėra ko trinti", ir pastarasis čia
+ * teisingas.
+ *
+ * ⚠️ JEI KADA NORS ATSIRASTŲ EXTERNAL KELIAS MEMORY BACKEND'E, ŠIS METODAS PRIVALO
+ * PASIKEISTI KARTU. Kontrakto testas tikrina elgesį (po `finish()` su rezultatu sąrašas
+ * lieka tuščias), tad tylus praleidimas pasimatytų.
+ */
+async function listResultArtifacts() {
+  return [];
+}
+
+/**
+ * Rezultato artefaktų šalinimas — `memory` backend'e nėra ko šalinti (#157, PR-5).
+ *
+ * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: external rašymo kelio šis backend'as
+ * neturi, tad tuščias rezultatas yra konstrukcijos savybė. Metodas egzistuoja, kad
+ * erasure kelias neturėtų `typeof === "function"` šakos: tokia šaka reikštų tylų
+ * praleidimą ten, kur praleidimas yra BDAR klausimas.
+ */
+async function deleteResultArtifacts() {
+  return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+}
+
+/**
+ * Šlavimo verdiktai — `memory` backend'e kandidatų nėra (#157, PR-5).
+ *
+ * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: bandymų registro šis backend'as
+ * neturi, tad ir šluoti nėra ko. Metodas egzistuoja, kad šlavėjas neturėtų
+ * `typeof === "function"` šakos.
+ */
+/** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+/**
+ * Jungties tapatybė — `memory` backend'as jos NETURI (#157, PR-5).
+ *
+ * ⚠️ `null` REIŠKIA „NĖRA JUNGTIES", NE „NEŽINAU". Kvietėjas (retencijos šlavėjas) iš
+ * to daro teisingą išvadą: be jungties tapatybės negalima įrodyti, kad žymos ir bandymai
+ * yra toje pačioje bazėje, tad žingsnis nevykdomas.
+ */
+/** Registro nėra — karantinuoti nėra ko (#157, PR-5). */
+async function pazymetiKarantina() {
+  return [];
+}
+
+async function karantinuotuSkaicius() {
+  return 0;
+}
+
+function jungtiesTapatybe() {
+  return null;
+}
+
+async function valytiniBandymai() {
+  return { kandidatai: [], praleista: 0 };
+}
+
+async function pasalintiBandymus() {
+  return 0;
+}
+
+/**
+ * ARTEFAKTŲ REZOLVERIO BŪSENA — STEBĖTOJUI (#157, PR-7, 3 sąlyga).
+ *
+ * ⚠️ ŠIS BACKEND'AS REZOLVERIO NETURI, IR TUŠČIAS ATSAKYMAS YRA TEISINGAS.
+ *
+ * Metodas privalomas VISIEMS trims, nes `jobStoreBackendContract` lygina TIKSLIAS
+ * aibes: trūkstamas metodas reikštų, kad stebėtojas, radęs `undefined`, tyliai
+ * praleistų patikrą — t. y. „nematau" atrodytų kaip „viskas gerai". Būtent tos
+ * klasės sargas ir yra.
+ *
+ * Ir atsakymas nėra tuščia formalybė: diegimas su `ARTIFACT_STORE_BACKEND=s3`
+ * prie ne-PostgreSQL job store'o rezultatų į S3 nerašo, ir verdiktas tai pasako.
+ */
+/**
+ * RESTORE VERIFIKACIJA (#157, PR-7) — ŠIS BACKEND'AS NEPRIKLAUSOMOS PATIKROS NETURI.
+ *
+ * ⚠️ ATSAKYMAS NĖRA TUŠČIA ATASKAITA. Rezultatai čia gyvena job'o įraše, tad
+ * nepriklausomo `bytes`/`checksum` metaduomens, su kuriuo būtų galima lyginti,
+ * NĖRA IŠ VISO. Kiekvienas rezultatas yra `nepatikrinama_inline`.
+ *
+ * Grąžinus `eiluciuIsViso: 0`, ataskaita sakytų „nėra ko tikrinti", nors rezultatų
+ * yra — operatorius manytų, kad bazė tuščia. Teisingas atsakymas: „N rezultatų, nė
+ * vienas nepatikrinamas nepriklausomai".
+ */
+async function verifyResultArtifacts() {
+  const { VERDIKTAS, sudarytiAtaskaita } = require("../artifactRestoreVerify");
+  const { rezultatoNera } = require("./common");
+
+  /**
+   * ⚠️ HIDRATUOJAMA SĄMONINGAI. Metaduomenų projekcija `result` PAŠALINA
+   * (`metaduomenuProjekcija`), tad be hidratacijos „ar rezultatas yra" atsakyti
+   * neįmanoma — ataskaita suskaičiuotų nulį ir tylėtų apie visus rezultatus.
+   * Kaina čia maža (nei tinklo, nei saugyklos), o procedūra ir taip yra brangus,
+   * retai paleidžiamas atkūrimo kelias.
+   */
+  const jobai = await listAll({ hydrate: true });
+
+  const verdiktai = jobai
+    .filter((job) => !rezultatoNera(job.result))
+    .map((job) => ({
+      jobId: job.id,
+      storageType: "inline",
+      verdiktas: VERDIKTAS.NEPATIKRINAMA_INLINE,
+    }));
+
+  return sudarytiAtaskaita(verdiktai);
+}
+
+function saugykluBusena() {
+  return { rasymoBackend: null, registruotiTipai: [] };
+}
+
+async function sweepResultArtifacts() {
+  return [];
+}
+
 async function listReferencedStorageKeys() {
   const keys = new Set();
   for (const job of jobs.values()) {
@@ -251,20 +392,37 @@ async function finishAtomic(id, status, extra = {}) {
   return next;
 }
 
-async function listAll() {
-  return [...jobs.values()];
+async function listAll({ hydrate = true } = {}) {
+  const visi = [...jobs.values()];
+  return hydrate ? visi : visi.map(metaduomenuProjekcija);
 }
 
+/**
+ * ⚠️ `listByFlag()` YRA METADUOMENŲ KELIAS PAGAL APIBRĖŽIMĄ (#157, PR-3).
+ *
+ * Abu valymo ciklai naudoja tik vėliavą, bandymus, terminą ir `storageKey`; nė vienas
+ * kvietėjas rezultato neskaito. Todėl grąžinama ta pati nehidratuota projekcija kaip
+ * PostgreSQL pusėje — hidratacijos parinktis čia būtų svirtis, kurios niekam nereikia,
+ * o divergencija liktų galima.
+ */
 async function listByFlag(field, limit = 100) {
   const pending = [];
   for (const job of jobs.values()) {
-    if (job[field]) pending.push(job);
+    if (job[field]) pending.push(metaduomenuProjekcija(job));
     if (pending.length >= limit) break;
   }
   return pending;
 }
 
-async function remove(id) {
+/**
+ * ⚠️ `tiketiniAdresai` PRIIMAMAS IR IGNORUOJAMAS SĄMONINGAI (#157, PR-5).
+ *
+ * Artefaktų aibės CAS turi prasmę tik ten, kur yra bandymų registras. Šis backend'as
+ * external rezultatų neturi, tad tikėtina aibė VISADA tuščia ir visada sutampa — tai
+ * faktas, ne praleidimas. Parametras priimamas, kad kvietėjas neturėtų šakos „ar šis
+ * backend'as moka".
+ */
+async function remove(id, _nustatymai = {}) {
   return jobs.delete(id);
 }
 
@@ -272,4 +430,4 @@ async function close() {
   jobs.clear();
 }
 
-module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };
+module.exports = { create, restoreRecord, get, update, remove, reportProgressAtomic, finishAtomic, getOwned, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, verifyResultArtifacts, saugykluBusena, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "memory" };

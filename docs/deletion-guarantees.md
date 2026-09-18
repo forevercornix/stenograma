@@ -9,6 +9,50 @@ Techninis modelis aprašytas [`artefact-lifecycle.md`](artefact-lifecycle.md);
 
 ---
 
+## 0. ⚠️ SĄLYGA, KURIAI GALIOJA VISOS ŽEMIAU ESANČIOS GARANTIJOS
+
+**Jos galioja tol, kol PostgreSQL yra job'ų autoritetas** — t. y. kol diegimas
+mato tą pačią duomenų bazę, kurioje gyvena `job_results` ir
+`job_result_attempts`.
+
+Po #157 rezultatai gali gulėti failų sistemoje arba S3, o **vienintelis jų
+adresas** yra tos dvi lentelės. Ištrynimo kelias ir neįsipareigotų bandymų
+šlavėjas skaito būtent jas.
+
+Nustojus jas skaityti — nesvarbu kodėl:
+
+- objektai saugykloje **lieka**, nes niekas apie juos nebežino;
+- jų nepasiekia nei ištrynimas pagal subjekto prašymą, nei retencijos valymas;
+- **jų neįmanoma surasti net rankiniu būdu**: saugyklos sąrašymo (`list(prefix)`)
+  riba neegzistuoja pagal konstrukciją, o objekto raktas išvedamas iš
+  identifikatorių, kurie buvo tik toje pačioje duomenų bazėje.
+
+⚠️ **TAM NEREIKIA NIEKIENO SPRENDIMO.** Pakanka, kad dingtų PostgreSQL nuoroda —
+`DATABASE_URL` **arba** `PGHOST` su `PG*` rinkiniu: pamesta Compose faile,
+neperduotas env kintamasis, klaida deployment'e. Startas
+pavyksta, `/api/ready` lieka žalias, o duomenys tampa nepasiekiami tyliai.
+
+### Ką tai reiškia atsakant į subjekto prašymą
+
+Jei diegimas kada nors veikė su PostgreSQL, o dabar neveikia, **negalima teigti,
+kad duomenys ištrinti** — sistema jų nemato, bet tai nereiškia, kad jų nėra.
+Tokiu atveju pirmas žingsnis yra ATSTATYTI prieigą prie tos duomenų bazės
+(7.6 restore), ne tęsti ištrynimo procedūrą be jos.
+
+### Teisinga seka atsisakant PostgreSQL
+
+1. **pirma** ištrinti duomenis per veikiantį diegimą — kol ištrynimas dar pasiekia
+   saugyklą;
+2. **tik paskui** keisti konfigūraciją.
+
+Atvirkštinė tvarka palieka transkripcijas be savininko ir be adreso.
+
+⚠️ Techninė mechanika ir aktyvavimo sprendimo kontekstas —
+[`decisions/155-postgres-authority.md`](decisions/155-postgres-authority.md)
+§„Grįžimas atgal".
+
+---
+
 ## 1. Ką ištrynimas garantuoja
 
 `DELETE /api/jobs/:id` ir `DELETE /api/transcribe-jobs/:id` per vieną
@@ -29,7 +73,7 @@ kategorijų sąrašu, o **jobas paliekamas**, kad užklausą būtų galima pakar
 ✅ Naujas darbas tuo pačiu ID nebus pradėtas.
 ✅ Pakartotinis ištrynimas nėra klaida ir duoda tą pačią galutinę būseną.
 
-### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su `DATABASE_URL`** (nuo [7.5a])
+### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su nurodytu PostgreSQL** (nuo [7.5a])
 
 Iki 7.5a žymos gyveno tik proceso atmintyje, ir tai buvo įrašyta 2 skyriuje kaip
 apribojimas. Nuo 7.5a jos saugomos `erasure_marks` lentelėje, tad:
@@ -127,7 +171,40 @@ be `DATABASE_URL`) tai reiškė auditą duomenų bazėje ir žymas atmintyje –
 7.4e barjeras skaitytų tuščią `erasure_marks` lentelę ir visada praleistų, tyliai.
 Abu pool'ai dabar statomi iš to paties `utils/pgConnection.js`.
 
+⚠️ **NUO #245 TAS PATS GALIOJA VISIEMS KETURIEMS POOL'AMS.** `jobStore`,
+`sessionStore`, `auditStore` ir ištrynimo žymos jungties formą interpretuoja
+vienodai, o `make doctor` / `/api/health/deep` diagnostinis klientas jungiasi per
+tą patį autoritetą. Tai jungties FORMOS suvienodinimas: nė vieno komponento
+backend pasirinkimo politika nesikeičia, ir `PG*` buvimas savaime nieko
+neperjungia į PostgreSQL.
+
 ---
+
+### 1.x External rezultatas: ištrynimas eina per REGISTRĄ (#157, PR-5)
+
+Kol rezultatas gyveno `job_results.payload` viduje, `jobs` eilutės ištrynimas buvo visas
+atsakymas. Po #157 dalis rezultatų guli failų sistemoje arba S3, ir eilutės ištrynimas jų
+neliečia. Todėl ištrynimas remiasi **bandymų registru** (`job_result_attempts`), ne
+`job_results.storage_key`.
+
+**Ką tai keičia praktiškai:**
+
+| Klausimas | Atsakymas |
+|---|---|
+| Kuriuos objektus šalina ištrynimas? | **Visus job'o bandymus**, ne tik referencuotą. `job_results.storage_key` rodo į vieną — tą, kuris ir taip saugus, nes referencuotas. Pralaimėję ir nutrūkę bandymai paliko savo objektus attempt-unique adresais, ir be registro jie yra transkripcijos be jokios rodyklės |
+| Ar šalinamas ir nebaigtas rašymas? | **Taip.** `fs` rašymas eina per laikiną failą, kurio vardas **išvedamas iš rakto**, tad procesui žuvus tarp `writeFile` ir `rename` likęs failas su transkripcija pasiekiamas: šalinamas ir jis |
+| Ar dalinis gedimas gali būti raportuotas kaip sėkmė? | **Ne.** Bet kuris nepavykęs objekto šalinimas yra kritinė nesėkmė: DB metaduomenys **nešalinami**, `deletion_pending` lieka, ir pakartojimas turi iš ko sužinoti adresus. ⚠️ **Bet automatinis kartojimas nėra besąlygiškas:** `deletionRetry` kartoja tol, kol žyma yra `deletion_pending`; perėjus į **`deletion_failed`**, automatinis kelias eilutę praleidžia GARSIAI, ir naują bandymą autorizuoja **operatorius** (`erasure-marks retry <jobId>`). Operatorius, laukiantis automatinio pakartojimo po `deletion_failed`, lauktų neribotai |
+| Kas nutinka registro eilutėms po ištrynimo? | Jos šalinamos **toje pačioje transakcijoje**, po patvirtinto fizinio ištrynimo. FK į `jobs` nėra sąmoningai — kad eilutė išgyventų NUTRŪKUSĮ ištrynimą; bet po patvirtinto ji liktų neribotai su job ID ir adresu, o tai asmens duomenų liekana |
+| Ar visi job'o pabaigos keliai eina per registrą? | Vartotojo ištrynimas, administracinis ištrynimas ir **retencijos pasenusių job'ų kelias** — taip. Riba: `sweepExpired()` TTL bendrasis `DELETE` — ne, žr. 2 skyrių |
+
+**Apleisti bandymai valomi atskirai.** Objektas, likęs po nutrūkusio rašymo, kurio job'as
+niekada nebuvo ištrintas, pašalinamas retencijos šlavėjo. Šlavėjas zonduoja **abu**
+adresus (laikiną ir galutinį), o „nė vieno nėra" jam yra **sėkmė**: eilutė uždaroma.
+
+⚠️ **Radus ABU adresus objektai NEŠALINAMI.** Su attempt-unique raktais tai neįmanoma,
+tad tai invarianto pažeidimas, ne šalinimo atvejis — eilutė **karantinuojama**, pranešama
+**vieną kartą**, ir lieka matoma retencijos suvestinėje, kol operatorius ją uždaro. Taip
+vienintelis signalas apie pasikeitusią rakto schemą nepaskęsta pasikartojimuose.
 
 ## 2. Ko ištrynimas NEGARANTUOJA
 
@@ -137,6 +214,35 @@ auditoriui.
 ⚠️ **Jau vykdomas processor'ius nesustabdomas vidury.** Iki pirmojo įrašo į jobą
 jis gali spėti iškviesti išorinį tiekėją arba parašyti laikiną failą. Rezultatas
 į jobą nepateks, bet tarpiniai pėdsakai gali likti, kol juos surinks retencija.
+
+⚠️ **Apleistų bandymų šlavimas NEVYKDOMAS, jei žymos ir registras skirtingose bazėse.**
+
+Šlavėjo apsauga remiasi dviem šakomis: eilutė nešalinama, jei jos objektas referencuotas
+**arba** jos job'as turi neišspręstą ištrynimo žymą. Antroji šaka reikalauja, kad
+`erasure_marks` ir `job_result_attempts` būtų **toje pačioje bazėje** — tikrinama pagal
+jungties tapatybę, ne pagal backend'o vardą (abu gali vadintis „postgres" ir rodyti
+skirtingur). Nesutapus, žingsnis **nevykdomas visas**, ir retencijos suvestinėje tai
+matoma kaip `nevykdyta`, ne kaip nulis.
+
+⚠️ **`sweepExpired()` TTL bendrasis `DELETE` per registrą NEEINA.** Nuo #183 pagrindinis
+retencijos kelias yra `listExpired` + per-job šalinimas, o `sweepExpired()` lieka
+priežiūrai ir praeina tik tada, kai kandidatų nebuvo.
+
+**Kas nutinka, jei ši prielaida lūžta — tai duomenų saugojimo, ne tvarkos klausimas.**
+Pasenęs job'as su external rezultatu praeitų šiuo keliu, ir seka būtų tokia:
+
+1. bendrasis `DELETE` pašalina `jobs` eilutę;
+2. `CASCADE` pašalina `job_results`, tad nuorodos nebelieka;
+3. registro eilutė išgyvena (FK nėra sąmoningai) ir lieka **`committed`**;
+4. kandidatų predikatas įsipareigotų eilučių neima — tad šlavėjas jos nepaims
+   **niekada**, ne „vėliau", o pagal apibrėžimą.
+
+Rezultatas — **nuolatinis orphan'as su transkripcija**: jo nepasiekia nei erasure (job'o
+eilutės nebėra), nei šlavėjas (eilutė išbraukta), nei DB krypties skenavimas (į jį niekas
+nerodo). Tai asmens duomenys, likę po job'o gyvavimo pabaigos — tiksliai ta būsena, kuriai
+registras ir buvo sukurtas.
+
+Riba užrašyta; mechanizmo, kuris pagautų iškvietimo tvarkos pasikeitimą, kol kas nėra.
 
 ⚠️ **Ištrynimo žymos neišgyvena restarto – BE PostgreSQL.** Kai nenurodytas nei
 `DATABASE_URL`, nei `PG*`, jos gyvena tik proceso atmintyje ir nėra bendros
@@ -162,6 +268,23 @@ pusės negarantuoja.
 atlikti, bet ne su kieno duomenimis.
 
 ---
+
+### ⚠️ Versijuoti S3 kibirai — už #157 apimties
+
+`DeleteObject` versijuotame kibire sukuria tik **delete marker**: ankstesnė
+versija lieka pasiekiama ir apmokestinama, o operacija grąžina sėkmę. Autoritetingam
+ištrynimo keliui tai reikštų **patvirtintą ištrynimą su išlikusia transkripcija** —
+tiksliai tai, ko §1 garantijos neleidžia.
+
+Visų versijų šalinimas nepasirinktas sąmoningai: jam reikėtų `ListObjectVersions`,
+ištrynimas taptų neapibrėžtos trukmės operacija, o rezultatas vis tiek priklausytų
+nuo bucket lifecycle politikos, kurios diegimas nevaldo.
+
+Todėl `S3ArtifactStore` **neleidžia startuoti** su versijuotu kibiru
+(`Enabled` arba `Suspended`). Diegimams, kuriems versijavimo reikia, ištrynimo
+garantija turi būti užtikrinta lifecycle politika, ir tai yra atskiras darbas —
+ne tyli šio dokumento išimtis.
+
 
 ## 3. Retencija
 
@@ -208,7 +331,7 @@ t. y. ar teisingai užrašytas KINTAMASIS. Faktinį terminą tikrina
 ⚠️ **Išleista kopija termino nesutrumpina.** `BACKUP_RETENTION_DAYS` sumažinimas
 neatšaukia anksčiau eksportuotos kopijos: ji galioja pagal savo manifestą.
 Kūrimo metu jos galiojimas fiksuojamas `backup_horizon` lentelėje (aukščiausias
-vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be `DATABASE_URL`
+vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be nurodyto PostgreSQL
 kopijos galiojimas neužsirašo – tai to paties atmintinio režimo apribojimas.
 
 ---

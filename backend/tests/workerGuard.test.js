@@ -62,8 +62,8 @@ test("initializeWorkerOrFail praeina, kai jobStore backend = redis", async () =>
 
 test("initializeWorkerOrFail praeina su PostgreSQL metaduomenimis + Redis eile", async () => {
   /**
-   * ⚠️ #155, 7.2a. Anksčiau čia buvo `getBackend() !== "redis"`, tad atidarius
-   * aktyvavimo barjerą su nustatytais IR `DATABASE_URL`, IR `REDIS_URL` HTTP
+   * ⚠️ #155. Anksčiau čia buvo `getBackend() !== "redis"`, tad su
+   * `JOB_STORE_BACKEND=postgres` ir nustatytu `REDIS_URL` HTTP
    * procesas dėtų job'us į BullMQ (`hasQueueBackend()` → `true`), o KIEKVIENAS
    * atskiras worker'is kristų starte: vartotojo darbas liktų eilėje amžinai,
    * be nė vieno vykdytojo.

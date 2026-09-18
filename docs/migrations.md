@@ -55,16 +55,294 @@ bazę. Nuo 7.4e `PG*` priimamas lygiai taip pat.
   migracijoms pritaikyti išlieka.
 
 **Veiksmas.** Prieš atnaujinant paleiskite migracijas prieš **tą pačią** duomenų
-bazę, į kurią rodo audito pool'as:
+bazę, į kurią rodo audito pool'as.
+
+`DATABASE_URL` diegime:
 
 ```bash
 cd backend
 DATABASE_URL=postgres://... npm run migrate:up
 ```
 
-⚠️ Aukščiau esančios komandos naudoja `DATABASE_URL`. `PG*`-only diegime
-nurodykite jį **laikinai, tik migracijoms** — arba įsitikinkite, kad
-`node-pg-migrate` jungiasi prie tos pačios bazės. Migravus į kitą bazę nei
-audito, barjeras liktų neveikiantis, o `/api/ready` — teisėtai `503`.
+`PG*`-only diegime — **su esamais kintamaisiais, nieko laikinai nekonstruojant**:
+
+```bash
+cd backend
+PGHOST=... PGPORT=... PGUSER=... PGPASSWORD=... PGDATABASE=... npm run migrate:up
+```
+
+⚠️ **Ankstesnė šio skyriaus rekomendacija buvo nurodyti `DATABASE_URL` „laikinai,
+tik migracijoms". Ji pašalinta (#245).** `node-pg-migrate` `PG*` moka pats, o
+laikinai konstruojamas URL turi dvi konkrečias ydas: slaptažodis su URI
+rezervuotais simboliais (`/`, `?`, `#`, `@`) URL'e reiškia kitką, ir po #245 toks
+URL greta `PG*` gali pats tapti dviprasmybės klaida.
+
+**Patikrinta šaltinyje** (`node-pg-migrate@9.0.0`,
+`bin/node-pg-migrate.js:347-354`): kai `DATABASE_URL` nenustatytas, įrankis
+konstruoja `pg` `ConnectionParameters()` iš aplinkos ir reikalauja `PGHOST` plius
+išsprendžiamų `user` ir `database`. Todėl `PGUSER` ir `PGDATABASE` nurodykite
+eksplicitiškai: be jų `pg` atsarga yra operacinės sistemos naudotojo vardas, ir
+migracijos nueitų į kitą bazę nei audito pool'as.
+
+Migravus į kitą bazę nei audito, barjeras liktų neveikiantis, o `/api/ready` —
+teisėtai `503`.
 
 Garantijos formuluotė — `docs/deletion-guarantees.md` §1 ir §2.
+
+---
+
+## ⚠️ Atnaujinant į #157 PR-7: `ARTIFACT_STORE_BACKEND` tapo starto sąlyga
+
+**Kas pasikeitė.** Iki šio leidimo serveris `ARTIFACT_STORE_BACKEND` **netikrino
+visai** — diegimas su `ARTIFACT_STORE_BACKEND=s3` ir trūkstamu raktu startuodavo
+ir tyliai rašydavo `inline`. Nuo dabar toks diegimas **nepakils**: rezultatai
+atsidurtų kitoje saugykloje, nei mano operatorius, ir tai paaiškėtų tik tada, kai
+jų prireiktų.
+
+**Kaip atpažinti.** Startas krenta su pranešimu, vardijančiu **trūkstamus
+kintamuosius** (ne jų reikšmes). Prieš atnaujinant tą pačią būseną parodo `doctor`:
+
+```bash
+cd backend && npm run doctor
+# ❌ Artefaktų saugyklų prijungimas (startas): parinkta 's3', bet rašymo saugykla
+#    NEPRIJUNGTA — rezultatai rašomi 'inline'
+```
+
+Ta pati varnelė matoma ir `/api/health/deep` išvestyje (production'e — su
+`x-audit-key`).
+
+**Kaip atsukti.** Pašalinti `ARTIFACT_STORE_BACKEND` iš aplinkos: diegimas grįžta į
+`inline` **eksplicitiškai**, ne tyliai, ir startuoja. Kodo atsukti nereikia — tai
+konfigūracijos veiksmas, atliekamas per vieną perleidimą.
+
+⚠️ Nustačius `fs` ar `s3`, **grįžimas į `inline` nebeįmanomas tyliai** ir tai
+sąmoninga: tylus grįžimas yra būtent tas gedimas, kurį ši riba uždaro.
+
+## ⚠️ Cutover: Redis → PostgreSQL job metaduomenys (#155)
+
+⚠️ **VYKDOMA PROCEDŪRA. Sprendimą ir jo priežastis aprašo
+`docs/decisions/155-postgres-authority.md`; čia — tik veiksmai ir patikros.**
+
+⚠️ **BARJERAS ATIDARYTAS — PROCEDŪRA VYKDOMA (#155).** `POSTGRES_AKTYVAVIMAS_LEISTAS
+= true`, tad PostgreSQL job store'u tampa, kai diegimas nurodo
+`JOB_STORE_BACKEND=postgres`. ⚠️ **Tai ir yra vienintelis paleidiklis:**
+`DATABASE_URL` vienas šios procedūros nepradeda ir job'ų neperjungia.
+
+### Kam ji reikalinga
+
+**Esami Redis job metaduomenys NĖRA perkeliami į PostgreSQL** — tai sąmoningas
+sprendimas („TTL nutekėjimas, ne migracija"): job metaduomenys trumpaamžiai, o
+migracijos skriptas turėtų atkartoti visą `deserialize` logiką, `owner_kind`
+semantiką ir fazių invariantus.
+
+⚠️ **BET TTL NEVEIKIA VISIEMS ĮRAŠAMS, IR TAI YRA PROCEDŪROS PRIEŽASTIS.**
+`redisStore.update()` taiko `EXPIRE` **tik** terminaliems įrašams
+(`redisStore.js:285`). Vadinasi:
+
+| Įrašo būsena | Kas su juo nutinka | Pasekmė |
+|---|---|---|
+| `queued` / `processing` | TTL **negauna** | lieka Redis'e **neribotai** kartu su `storageKey` |
+| terminalus su `audio_cleanup_pending` ar `deletion_pending` | `PERSIST` — TTL **nuimamas** | hash'as gali būti **vienintelis** `storageKey` ir retry būsenos šaltinis |
+| terminalus be laukiančio valymo | `EXPIRE` po `JOB_TTL_MINUTES` | dingsta pats |
+
+Po perjungimo naujas autoritetas apie tuos įrašus **nežino**, o Redis sweeper'is
+jų nebešalina. Tai GDPR klausimas, ne operacinis: jautrūs metaduomenys lieka
+saugykloje, kurios niekas nebeprižiūri.
+
+### Žingsniai
+
+| # | Veiksmas | Kodėl privalomas |
+|---|---|---|
+| 1 | Nustoti priimti naujus job'us (`503` arba priežiūros režimas) | be to 2 žingsnis niekada nesibaigs |
+| 2 | Palaukti, kol **visos neterminalios** BullMQ būsenos pasieks **0**: `active`, `waiting`, `waiting-children`, `delayed`, `paused`, `prioritized` | ⚠️ **`active + waiting` NEPAKANKA.** Su numatytuoju `attempts: 3` ir eksponentiniu backoff nepavykęs job'as sėdi `delayed`: nulis pasiekiamas, kai darbas dar SUPLANUOTAS. Tada worker'iai stabdomi, Redis metaduomenys trinami, o `delayed` job'as vėliau pakyla ir krinta ties „nėra įrašo". Retry konfigūracija yra NUMATYTOJI, tad tai įprastas kelias, ne kraštutinis. ⚠️ **`JOB_TTL_MINUTES` NĖRA drain timeout** — tai metaduomenų retencija, ne darbo trukmė |
+| 2b | **Sustabdyti visus worker'ius** ir patvirtinti, kad nebedirba | veikiantis worker'is po 3 žingsnio parašytų naują įrašą |
+| 3 + 3b | **`node scripts/cutover-terminalize.mjs`** — terminalizuoja likusius `queued`/`processing` ir išlaisvina jų audio. Numatytai **sausas**; rašo tik su `--vykdyti` | ⚠️ **Anksčiau čia buvo vardijamos vidinės JS funkcijos (`finish()`, `releaseAudio()`), o komandos, kuri jas iškviestų, repo NETURĖJO** — operatoriui liktų rašyti ad hoc kodą produkcijoje, per vienintelį veiksmą, kurio klaida negrįžtama. Skriptas pats tikrina prielaidas (backend'as yra `redis`; eilėje nebėra neterminalių darbų) ir **atsisako dirbti**, jei jos netenkinamos (`exit 2`) |
+| 4 | **Palaukti, kol baigsis laukiantis valymas** (`audio_cleanup_pending`, `deletion_pending`) | ⚠️ žr. įspėjimą žemiau — tai ne formalumas |
+| 5 | Nepasibaigusius **terminalius** įrašus (`completed`, `failed`, `cancelled`) **perkelti arba palaukti** jų retencijos | ⚠️ žr. įspėjimą žemiau |
+| 5b | Ištrinti hash'us **ir indeksą** | žr. komandą žemiau |
+| 6 | Patikrinti: nebeliko nei `job:*`, nei `jobs:index`, nei `*_pending` vėliavų | vienintelė patikra, kuri pagauna 5b praleidimą |
+| 7 | Nustatyti **eksplicitinį** `JOB_STORE_BACKEND=postgres` | ⚠️ žr. „Eksplicitinis pasirinkimas" |
+| 8 | Paleisti su nauju backend'u | — |
+
+### ⚠️ 5b: aklas `job:*` trynimas PRARASTŲ duomenis
+
+```bash
+set -euo pipefail
+
+# ⚠️ VISOS komandos per SUKONFIGŪRUOTĄ URI. `redis-cli` be `-u` rodo į
+# 127.0.0.1:6379, DB 0 — Compose diegime tai NE TA instancija. Blogiausias
+# derinys: patikra praneša „švaru", o duomenys liko kitoje vietoje.
+: "${REDIS_URL:?REDIS_URL nenustatytas — be jo redis-cli rodytų į 127.0.0.1:6379 DB 0}"
+rc() { redis-cli -u "$REDIS_URL" "$@"; }
+
+# 4 ŽINGSNIO PATIKRA — NUTRAUKIA, NE INFORMUOJA.
+#
+# ⚠️ SKENUOJAMA VIENĄ KARTĄ, IR TRINAMAS BŪTENT TAS SĄRAŠAS, KURIS BUVO
+# PATIKRINTAS. Ankstesnė redakcija skenavo DU kartus, tad tarp jų atsiradęs
+# raktas būtų ištrintas niekada nepatikrintas.
+if ! raktai=$(rc --scan --pattern 'job:*'); then
+  echo "SCAN NEPAVYKO — 5b NEVYKDOMAS (Redis nepasiekiamas ar bloga autentifikacija)" >&2
+  exit 1
+fi
+
+laukia=""
+while IFS= read -r k; do
+  [ -n "$k" ] || continue
+
+  # ⚠️ STATUSAS GAUDOMAS EKSPLICITIŠKAI, ne per `set -e`.
+  if ! reiksmes=$(rc HMGET "$k" audio_cleanup_pending deletion_pending); then
+    echo "HMGET NEPAVYKO raktui $k — 5b NEVYKDOMAS" >&2
+    exit 1
+  fi
+
+  if printf '%s\n' "$reiksmes" | grep -qx true; then
+    laukia="${laukia}${k}"$'\n'
+  fi
+done <<< "$raktai"
+
+if [ -n "$laukia" ]; then
+  echo "LAUKIANTIS VALYMAS — 5b NEVYKDOMAS:" >&2
+  printf '%s' "$laukia" >&2
+  exit 1
+fi
+
+# Tik dabar — ir tik patikrintus raktus:
+if [ -n "$raktai" ]; then
+  printf '%s\n' "$raktai" | xargs -r redis-cli -u "$REDIS_URL" DEL
+fi
+rc DEL jobs:index
+```
+
+⚠️ **PATIKRA PRIVALO NUTRAUKTI, NE ATSPAUSDINTI.** Ankstesnė redakcija darė
+`grep -q true && echo "LAUKIA"`, o toliau ėjo **besąlyginis** `DEL`. Vykdant bloką
+kaip visumą, buvo ištrinama **būtent tuo atveju, kurį patikra turėjo apsaugoti**, o
+operatorius, matęs „LAUKIA", manytų, kad skriptas sustojo.
+
+⚠️ **`set -euo pipefail` NĖRA STILIUS** — bet jo VIENO NEPAKANKA, ir tai buvo
+antra šios patikros yda.
+
+⚠️ **ANTRAS KARTAS TAI PAČIAI PATIKRAI — BET KITA MECHANIKA.** #338 raunde ji
+buvo taisyta todėl, kad `grep -q true && echo` tik **pranešdavo ir tęsdavo**.
+Dabar ji krito kitaip: klaidos statusas **dingdavo dviejose vietose, kurių
+`set -e` nemato**:
+
+| Konstrukcija | Kodėl statusas dingsta |
+|---|---|
+| `if rc HMGET … \| grep -qx true; then` | komanda `if` **sąlygoje** — `set -e` ten sąmoningai nutildytas; nepavykęs `HMGET` neatskiriamas nuo „nėra `true`" |
+| `done < <(rc --scan …)` | **proceso pakaita** vykdoma subshell'e; jos gedimas apimančio shell'o statuso nekeičia |
+
+Pasekmė: nepavykus pradiniam `scan`, ciklas perskaitydavo **nieko**, `laukia`
+likdavo tuščias, patikra „praeidavo", o vėliau pavykęs antras `scan` ištrindavo
+**visus** hash'us ir indeksą — nors laukiantis valymas nebuvo patikrintas nė karto.
+
+Todėl dabar abu statusai gaudomi **eksplicitiškai** (`if ! raktai=$(…)`,
+`if ! reiksmes=$(…)`), o ne paliekami `set -e`. Ir skenuojama **vieną kartą**:
+trinamas tas pats sąrašas, kuris buvo patikrintas.
+
+⚠️ **Pamoka platesnė už šią vietą: shell klaidų sklaida nėra akivaizdi.**
+`set -euo pipefail` dengia paprastas komandų sekas, bet ne `if` sąlygas, ne
+proceso pakaitas ir ne subshell'us. Destruktyviame bloke to skirtumo kaina yra
+duomenys, todėl statusas tikrinamas ranka, o ne paliekamas vėliavai.
+
+⚠️ **`job:*` NEAPIMA INDEKSO.** `jobs:index` yra atskiras sorted set
+(`redisStore.js:42`), ir šablonas `job:*` jo **neatitinka** — nėra dvitaškio po
+`job`. Perjungus, Redis sweeper'is jo nebešalina, tad metaduomenys liktų
+neribotai, o 6 žingsnio patikra be `DEL jobs:index` **praeitų**.
+
+⚠️ **HASH'AI SU `*_pending` YRA VIENINTELIS `storageKey` ŠALTINIS.**
+`redisStore.update()` jiems taiko `PERSIST`, ne `EXPIRE`. Ištrynus juos anksčiau
+laiko, liktų pakibęs jautrus audio arba nebaigtas ištrynimas, kurio niekas
+nebeužbaigs. Todėl 4 žingsnis vykdomas **prieš** 5b, ir tai patikrinama.
+
+### ⚠️ 5: nepasibaigę TERMINALŪS įrašai turi savo retenciją
+
+⚠️ **VISIEMS TERMINALIEMS, NE TIK `completed`.** `redisStore.update()` tą patį
+`JOB_TTL_MINUTES` taiko kiekvienam `isFinished()` įrašui — įskaitant `failed` ir
+`cancelled`. Ankstesnė formuluotė minėjo tik `completed`, tad du iš trijų terminalių
+tipų būtų ištrinti nesuėjus jų retencijai.
+
+Job'as, baigtas prieš pat 2 žingsnį, gauna **šviežią** `JOB_TTL_MINUTES` langą.
+5b jį ištrintų iš karto, o klientas, apklausęs po priežiūros, gautų „nėra tokio
+job'o" ir **negrįžtamai prarastų transkripciją**, kuri dar turėjo būti saugoma.
+
+Todėl 5 žingsnis: **arba** nepasibaigę terminalūs įrašai perkeliami į PostgreSQL,
+**arba** trynimas atidedamas, kol kiekvieno pažadėta retencija pasibaigs.
+
+### ⚠️ Eksplicitinis pasirinkimas (7 žingsnis)
+
+Perjungimas reikalauja **eksplicitinio** `JOB_STORE_BACKEND=postgres`. Vien
+`DATABASE_URL` nepakanka **sąmoningai**: jį diegimai nustato ir sesijoms (7.3),
+auditui ar migracijoms, o tylus perjungimas reikštų, kad job metaduomenų saugykla
+pasikeitė tiems, kurie to neprašė.
+
+### ⚠️ Restore procedūra privaloma PRIEŠ cutover, ne po jo
+
+5b **ištrina visus** Redis `job:*` hash'us. Po perjungimo atkūrimo šaltinio
+nebelieka: PostgreSQL dar tuščias, o Redis jau išvalytas. Tad
+`docs/backup-runbook.md` §9a–§9d praeinama **prieš** šią procedūrą.
+
+### Patikra po 6 žingsnio
+
+```bash
+set -euo pipefail
+: "${REDIS_URL:?REDIS_URL nenustatytas}"
+rc() { redis-cli -u "$REDIS_URL" "$@"; }
+
+rc --scan --pattern 'job:*' | head -1      # tuščia
+rc EXISTS jobs:index                        # 0
+```
+
+⚠️ **Tuščias `job:*` be `EXISTS jobs:index` NĖRA įrodymas** — indeksas pro tą
+šabloną nematomas.
+
+⚠️ **Ir ši patikra taip pat per `-u "$REDIS_URL"`.** Patikra, rodanti į kitą
+instanciją nei trynimas, praneštų „švaru" apie bazę, kurios niekas nelietė.
+
+## Artefaktų migracija: `inline` → external (#157, PR-6)
+
+`node-pg-migrate` čia nedalyvauja. Tai **duomenų**, ne schemos migracija, ir ji
+vykdoma atskirai, kai schema jau atnaujinta:
+
+```bash
+cd backend
+DATABASE_URL=postgres://...                     node scripts/migrate-artifacts.mjs dry-run
+DATABASE_URL=... ARTIFACT_STORE_BACKEND=fs      node scripts/migrate-artifacts.mjs run --limit 500
+DATABASE_URL=...                                node scripts/migrate-artifacts.mjs status
+```
+
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida ·
+**`3` dalis eilučių neperkelta — reikia peržiūros** (`status` parodo, kurios ir
+kodėl).
+
+Paleidimas saugus kartoti: perkelta eilutė nebėra `inline`, tad atranka jos
+nebemato. `--limit` grandinę galima leisti tiek kartų, kiek reikia.
+
+### ⚠️ Ko tikėtis iš srauto — `s3` atveju jis DVIGUBAS
+
+Prieš perjungdama nuorodą, migracija kiekvienai eilutei kviečia
+`ArtifactStore.verify()`, o šis **perskaito visą objektą** ir perskaičiuoja
+kontrolinę sumą. `s3` (ar bet kurios tinklinės saugyklos) atveju tai reiškia, kad
+kiekviena eilutė **parsiunčiama atgal iš karto po įkėlimo**.
+
+Praktinė pasekmė, kurios iš žodžio „migracija" nesitikima:
+
+| | |
+|---|---|
+| Įkeliama | ~*N* × vidutinis rezultato dydis |
+| Parsiunčiama | **tiek pat** |
+| Viso srauto | **~2×** duomenų apimtis |
+
+Prie leidžiamo 20 MiB vienos eilutės dydžio ir kelių dešimčių tūkstančių eilučių
+tai virsta pralaidumo ir **egress kaštų** klausimu. Planuokite pagal dvigubą
+apimtį ir leiskite dalimis (`--limit`), o ne vienu paleidimu.
+
+⚠️ **Tai NĖRA neefektyvumas, kurį reikia pašalinti.** Iš karto po šios patikros
+migracija ištrina `payload` — vienintelę galiojančią rezultato kopiją. `head()`
+grąžina tik dydį, tad sugadintas **to paties ilgio** objektas ją praeitų, ir
+kopija būtų sunaikinta mainais į nepatikrintą prielaidą (išmatuota:
+`artifactMigration.integration`, CI 34360090645). Migracija yra vienintelė vieta
+repo, kur skaitymo kaina mažesnė už klaidos kainą — kitur `verify()` metadata-only
+keliuose sąmoningai **draudžiamas**.
+
+Jei srautas nepriimtinas, teisingas sprendimas yra leisti mažesnėmis dalimis arba
+ne piko metu — **ne** išjungti patikrą.

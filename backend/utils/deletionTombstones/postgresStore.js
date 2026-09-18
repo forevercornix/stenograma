@@ -128,6 +128,68 @@ async function probeBarrierWithClient(vykdytojas) {
   }
 }
 
+/**
+ * NEIŠSPRĘSTOS ŽYMOS SĄLYGA — SQL POSAKIS KVIETĖJO UŽKLAUSAI (#157, PR-5).
+ *
+ * ⚠️ KODĖL POSAKIS, O NE ATSAKYMAS.
+ *
+ * Bandymų registro šlavėjui reikia predikato „šis job'as neturi neišspręstos žymos"
+ * TOJE PAČIOJE užklausoje, kurioje jis renka kandidatus: `erasure_marks` gyvena toje
+ * pačioje bazėje, tad vienas sakinys yra įmanomas, o du skaitymai paliktų langą, kuriame
+ * žyma spėtų atsirasti tarp patikros ir šalinimo. Tai ta pati TOCTOU forma, kurią 7.4e
+ * sprendžia `assertNotBarredWithClient()` — čia tik kita kryptis: ne „patikrink man", o
+ * „duok man sąlygą, kurią įdėsiu į savo `WHERE`".
+ *
+ * ⚠️ IR KODĖL ČIA, O NE KVIETĖJO MODULYJE. `erasure_marks` SQL neegzistuoja už šio
+ * katalogo ribų (`erasureMarks` tripwire per visą repo, #183). Autoritetas lieka vienas:
+ * lentelės vardą, stulpelį ir statuso reikšmę žino TIK šis modulis; kvietėjas gauna
+ * tekstą ir savo alias'ą.
+ *
+ * ⚠️ POSAKIS NETURI BIND PARAMETRŲ, IR TAI KONTRAKTAS, NE STILIUS. Kvietėjas savo `$1`,
+ * `$2` numeruoja pats; parametras posakyje tyliai sujauktų numeraciją, o klaida
+ * pasirodytų kaip nesusijęs tipo neatitikimas kitoje sakinio vietoje. Tikrina
+ * `erasureMarks` testas, ne vien šis sakinys.
+ *
+ * ⚠️ SVARSTYTAS IR ATMESTAS KETVIRTAS VARIANTAS: DB PUSĖS FUNKCIJA ARBA `VIEW`.
+ *
+ * Jis turi tas pačias savybes (vienas sakinys, lentelės vardas lieka modulyje) ir dvi
+ * papildomas: injekcijos paviršiaus nebūtų apskritai (alias validacija ir posakio testai
+ * taptų nereikalingi), o priklausomybė taptų matoma SCHEMOJE, ne tik JS importe.
+ *
+ * Atmestas dėl trijų priežasčių, ir nė viena nėra „taip paprasčiau":
+ *   1. migracija yra ISTORIJOS ĮRAŠAS — funkcijos kūnas taptų versijuojamu artefaktu,
+ *      kurio keitimas reikalautų naujos migracijos kiekvienam predikato patikslinimui,
+ *      o predikatas šiame cikle keitėsi jau du kartus (nuoroda -> nuoroda ARBA žyma);
+ *   2. `NOT EXISTS` inline planas gali būti geresnis nei funkcijos kvietimas EILUTEI —
+ *      matuota nebuvo, tad tai rizika, ne faktas, bet ji krypsta viena kryptimi;
+ *   3. atminties režimu (`pasirinktiBackend() === "memory"`) funkcijos nėra, tad
+ *      kvietėjas vis tiek turėtų antrą kelią — o du keliai yra tai, ko čia ir vengiama.
+ *
+ * ⚠️ Tai PIRMAS kartas šiame repo, kai SQL TEKSTAS keliauja tarp modulių, tad
+ * alternatyva užrašoma, o ne nutylima: kitas skaitytojas pagrįstai klaus, kodėl ne per
+ * schemą.
+ *
+ * @param {string} alias kvietėjo lentelės alias'as, kurio `job_id` lyginamas
+ * @returns {string} `NOT EXISTS (...)` posakis be parametrų
+ */
+function neisspresptosZymosSalyga(alias) {
+  /**
+   * ⚠️ TIPAS TIKRINAMAS PRIEŠ FORMĄ (rado testas, #157 PR-5).
+   *
+   * Pirmoji redakcija darė `String(alias)` ir tikrino formą — o `String(null)` yra
+   * `"null"`, kuris allowlist'ą PRAEINA. Rezultatas būtų `null.job_id` užklausoje:
+   * ne injekcija, bet klaida, pasirodanti kaip nesusijęs SQL gedimas toli nuo priežasties.
+   */
+  if (typeof alias !== "string" || !/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new TypeError("neisspresptosZymosSalyga: alias privalo būti paprastas vardas.");
+  }
+
+  return (
+    "NOT EXISTS (SELECT 1 FROM erasure_marks m " +
+    `WHERE m.job_id = ${alias}.job_id AND m.status <> '${TOMBSTONE_STATUS.DELETED}')`
+  );
+}
+
 async function assertNotBarredWithClient(klientas, jobId) {
   if (!klientas || typeof klientas.query !== "function") {
     throw new TypeError("assertNotBarred: reikia kviečiančiojo DB kliento (transakcijos).");
@@ -444,6 +506,77 @@ function createErasureMarkStore(pool) {
   async function assertNotBarred(klientas, jobId) {
     return assertNotBarredWithClient(klientas, jobId);
   }
+  /**
+   * VISOS žymos — įskaitant `deleted` (#250, 7.6c).
+   *
+   * ⚠️ `listUnresolved()` EKSPORTUI NEPAKANKA, IR TAI NE DETALĖ. Ji sąmoningai
+   * praleidžia `deleted`, o būtent tos žymos yra 7.6c priežastis: jos įrodo, kad
+   * subjekto duomenų būti negali. Eksportas be jų atkurtų DB be pačių svarbiausių
+   * ištrynimų.
+   *
+   * ⚠️ BE `limit`: eksportas privalo būti PILNAS. Riba čia reikštų tylų
+   * praradimą — būtent tai, ko visa procedūra ir vengia.
+   */
+  async function listAll() {
+    const { rows } = await pool.query(
+      `SELECT ${STULPELIAI} FROM erasure_marks ORDER BY job_id`
+    );
+
+    return rows.map(iIrasa);
+  }
+
+  /**
+   * SULIETOS ŽYMOS ĮRAŠYMAS (#250, 7.6c).
+   *
+   * ⚠️ SPRENDIMAS PRIIMAMAS NE ČIA. Ką rašyti, nusprendžia
+   * `utils/erasureExport.js` (`suliejimoPlanas`) PRIEŠ bet kokį rašymą; ši
+   * funkcija tik vykdo. Antra tvarkos taisyklė SQL'e būtų ta pati dviejų tiesų
+   * klasė, kurią repo jau gaudė.
+   *
+   * ⚠️ `claim_token` VISADA `NULL`. Svetimas žetonas žymi mirusį pre-restore
+   * vykdytoją; jį persistinus autoritetingas kelias grąžintų `IN_PROGRESS`
+   * neribotai.
+   *
+   * ⚠️ LAIKO ŽYMOS IŠSAUGOMOS IŠ EKSPORTO, ne `now()`. `updated_at` yra ir
+   * retencijos raktas (`retencijosRiba`), ir suliejimo tvarkos raktas: perrašius
+   * jį rašymo metu, antras paleidimas matytų „naujesnę" vietinę žymą, o retencija
+   * pailgėtų be priežasties.
+   */
+  async function importuotiZyma(irasas) {
+    const { rows } = await pool.query(
+      `INSERT INTO erasure_marks
+         (job_id, status, reason, actor_kind, marked_at, updated_at, completed_at,
+          attempts, last_failure_kind, claim_token)
+       VALUES ($1, $2, $3, $4, to_timestamp($5 / 1000.0), to_timestamp($6 / 1000.0),
+               CASE WHEN $7::bigint IS NULL THEN NULL ELSE to_timestamp($7 / 1000.0) END,
+               $8, $9, NULL)
+       ON CONFLICT (job_id) DO UPDATE
+          SET status = EXCLUDED.status,
+              reason = EXCLUDED.reason,
+              actor_kind = EXCLUDED.actor_kind,
+              marked_at = LEAST(erasure_marks.marked_at, EXCLUDED.marked_at),
+              updated_at = EXCLUDED.updated_at,
+              completed_at = EXCLUDED.completed_at,
+              attempts = GREATEST(erasure_marks.attempts, EXCLUDED.attempts),
+              last_failure_kind = EXCLUDED.last_failure_kind,
+              claim_token = NULL
+       RETURNING ${STULPELIAI}`,
+      [
+        irasas.jobId,
+        irasas.status,
+        irasas.reason,
+        irasas.actorKind,
+        Number(irasas.requestedAt),
+        Number(irasas.updatedAt),
+        irasas.completedAt === null || irasas.completedAt === undefined ? null : Number(irasas.completedAt),
+        Number(irasas.attempts) || 0,
+        irasas.lastFailureKind || null,
+      ]
+    );
+
+    return iIrasa(rows[0]);
+  }
+
   async function listUnresolved({ olderThanMs = 0, limit = 100 } = {}) {
     const { rows } = await pool.query(
       `SELECT ${STULPELIAI},
@@ -576,6 +709,8 @@ function createErasureMarkStore(pool) {
     assertNotBarred,
     retencijosRiba,
     listUnresolved,
+    listAll,
+    importuotiZyma,
     purgeExpired,
     size,
     clear,
@@ -586,6 +721,7 @@ function createErasureMarkStore(pool) {
 
 module.exports = {
   STULPELIAI,
+  neisspresptosZymosSalyga,
   assertNotBarredWithClient,
   probeBarrierWithClient,
   createErasureMarkStore,

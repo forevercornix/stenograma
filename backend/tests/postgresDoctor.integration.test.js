@@ -251,28 +251,70 @@ test("#155 DOCTOR: prisijungimo klaidos ATSKIRIAMOS pagal kodą", async () => {
   );
 });
 
-test("#155 DOCTOR: DATABASE_URL ir PG* KARTU yra klaida, ne pirmenybė", async () => {
+test("#155/#245 DOCTOR: KONFLIKTAS skelbiamas, kai aplinka keičia EFEKTYVIĄ semantiką", async () => {
   /**
-   * ⚠️ OBSERVABILITY DIVERGENCE.
+   * ⚠️ OBSERVABILITY DIVERGENCE — KLAUSIMAS TAS PATS, ATSAKYMAS SUSIAURINTAS (#245).
    *
    * Docker profiliai backend'ui perduoda `PG*`, o `.env` failuose dažnai lieka
    * `DATABASE_URL`. `doctor` skaito ABU failus, tad operatorius gali turėti abu
    * vienu metu — ir `doctor` tikrintų VISAI KITĄ DB nei tą, su kuria dirba
-   * stackas.
+   * stackas. Tyli pirmenybė blogesnė už klaidą.
    *
-   * Tyli pirmenybė blogesnė už klaidą: diagnostika, rodanti ne tą duomenų bazę,
-   * yra blogesnė nei diagnostikos nebuvimas.
+   * ⚠️ SENAS INVARIANTAS BUVO „bet koks maišymas = KONFLIKTAS", IR JIS TAPO
+   * NETEISINGAS ABIEM KRYPTIMIS:
+   *
+   *   per griežta — su pilnu DSN `PGHOST` `pg` semantikai NETURI ĮTAKOS
+   *                 (`connection-parameters.js:9-23`), tad `doctor` skelbdavo
+   *                 konfliktą ten, kur diagnostika buvo visiškai vienareikšmė;
+   *   per laisva  — `PGSSLMODE` ir `PGOPTIONS` pilną DSN PERRAŠO, o senoji
+   *                 taisyklė jų NEMATĖ: `doctor` tikrindavo kitą schemą ir
+   *                 rodydavo tai kaip normalią būseną.
+   *
+   * ⚠️ ŠĮ TESTĄ PAGAVO CI, NE LOKALUS PALEIDIMAS. Jis gyvena `postgres`
+   * rinkinyje, kurio kūrimo aplinkoje paleisti neįmanoma — tai ketvirtas to
+   * paties #245 susiaurinimo pasireiškimas, ir vienintelis, kurio nepagavo
+   * lokalus `npm test`.
    */
-  const checks = await runSelfChecks({
-    ...process.env,
-    DATABASE_URL: "postgres://a@kitas-hostas/kita_db",
-    PGHOST: "postgres",
-  });
+  const BAZE = "postgres://a@kitas-hostas/kita_db";
 
-  const p = rasti(checks);
-  assert.ok(p, "eilutė privalo būti");
-  assert.equal(p.ok, false, "konfliktas NĖRA gera būsena");
-  assert.match(p.detail, /KONFLIKTAS/);
-  assert.match(p.detail, /DATABASE_URL/);
-  assert.match(p.detail, /PGHOST/);
+  /** ⚠️ SUGRIEŽTINIMO KRYPTIS: tai, ko senoji taisyklė nematė. */
+  for (const [vardas, aplinka, klase] of [
+    ["PGOPTIONS", { PGOPTIONS: "-csearch_path=kita" }, "sesija"],
+    ["PGSSLMODE", { PGSSLMODE: "require" }, "saugumas"],
+  ]) {
+    const checks = await runSelfChecks({ ...process.env, DATABASE_URL: BAZE, ...aplinka });
+    const p = rasti(checks);
+
+    assert.ok(p, `${vardas}: eilutė privalo būti`);
+    assert.equal(p.ok, false, `${vardas}: konfliktas NĖRA gera būsena`);
+    assert.match(p.detail, /KONFLIKTAS/, `${vardas}: konfliktas privalo būti įvardytas`);
+    assert.match(p.detail, /DATABASE_URL/, `${vardas}: pirma forma`);
+    assert.match(
+      p.detail,
+      new RegExp(klase),
+      `${vardas}: privalo būti įvardyta KLASĖ - be jos operatorius nežino, ką taisyti`
+    );
+  }
+
+  /**
+   * ⚠️ ATLAISVINIMO KRYPTIS — IR BE JOS TESTAS BŪTŲ „VISADA KONFLIKTAS".
+   *
+   * Neveiksnus `PGHOST` greta pilno DSN diagnostikos NEDVIPRASMINA: `doctor`
+   * privalo zonduoti DSN taikinį ir pranešti TIKRĄ jo būseną. Būtent šis
+   * derinys anksčiau duodavo melagingą „KONFLIKTAS".
+   */
+  const svarus = await runSelfChecks({ ...process.env, DATABASE_URL: BAZE, PGHOST: "postgres" });
+  const ps = rasti(svarus);
+
+  assert.ok(ps, "eilutė privalo būti ir be konflikto");
+  assert.doesNotMatch(
+    ps.detail,
+    /KONFLIKTAS/,
+    `neveiksnus \`PGHOST\` NEGALI būti skelbiamas konfliktu: ${ps.detail}`
+  );
+  assert.match(
+    ps.detail,
+    /kitas-hostas/,
+    `zonduojamas privalo būti DSN taikinys, ne \`PGHOST\`: ${ps.detail}`
+  );
 });

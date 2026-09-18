@@ -35,7 +35,18 @@ const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const { suites } = require(path.join(here, "..", "tests", "suites.js"));
 
+/**
+ * ⚠️ PARAMETRIZUOTA, NE NUKOPIJUOTA (#157, PR-2).
+ *
+ * S3 rinkiniui reikia TOS PAČIOS garantijos su kitu rinkinio vardu ir kita
+ * praleidimo žyma. Antra šio failo kopija ilgainiui išsiskirtų su pirmąja, ir
+ * skirtumas pasimatytų tik tada, kai vienas iš dviejų sargų nustotų ginti.
+ *
+ * Numatytosios reikšmės palieka esamą `postgres` iškvietimą nepakitusį.
+ */
 const katalogas = process.argv[2];
+const RINKINYS = process.argv[3] || "postgres";
+const PRALEIDIMO_ZYMA = process.argv[4] || "DATABASE_URL";
 
 if (!katalogas) {
   console.error("Naudojimas: verify-postgres-suite-ran.mjs <tap-katalogas>");
@@ -97,7 +108,7 @@ function ivertintiFaila(turinys) {
     if (/^\s*type:\s*'suite'\s*$/m.test(yamlEilutes.join("\n"))) continue;
 
     if (/#\s*SKIP/i.test(eilute)) {
-      if (eilute.includes("DATABASE_URL")) praleistiDelDb += 1;
+      if (eilute.includes(PRALEIDIMO_ZYMA)) praleistiDelDb += 1;
       continue;
     }
 
@@ -109,14 +120,19 @@ function ivertintiFaila(turinys) {
 
 const klaidos = [];
 
-if (suites.postgres.length === 0) {
+if (!suites[RINKINYS]) {
+  console.error(`Nežinomas rinkinys "${RINKINYS}". Galimi: ${Object.keys(suites).join(", ")}.`);
+  process.exit(2);
+}
+
+if (suites[RINKINYS].length === 0) {
   klaidos.push(
-    "Postgres rinkinys TUŠČIAS. Išvedimas (`postgresGuard` importai) nieko nerado - " +
+    `Rinkinys "${RINKINYS}" TUŠČIAS. Išvedimas (sargo importai) nieko nerado - ` +
       "arba testai pervadinti, arba importo forma pasikeitė."
   );
 }
 
-for (const testas of suites.postgres) {
+for (const testas of suites[RINKINYS]) {
   const kelias = path.join(katalogas, `${testas}.tap`);
 
   if (!fs.existsSync(kelias)) {
@@ -128,7 +144,7 @@ for (const testas of suites.postgres) {
 
   if (praleistiDelDb > 0) {
     klaidos.push(
-      `${testas}: ${praleistiDelDb} test. praleista dėl trūkstamo \`DATABASE_URL\`.`
+      `${testas}: ${praleistiDelDb} test. praleista dėl trūkstamo \`${PRALEIDIMO_ZYMA}\`.`
     );
   }
 
@@ -142,14 +158,31 @@ for (const testas of suites.postgres) {
 
 if (klaidos.length > 0) {
   console.error(
-    "PostgreSQL rinkinys NEBUVO realiai įvykdytas:\n\n" +
+    `Rinkinys "${RINKINYS}" NEBUVO realiai įvykdytas:\n\n` +
       klaidos.map((k) => `  - ${k}`).join("\n") +
       "\n\nŽalias job'as su praleistais testais nėra sėkmė."
   );
   process.exit(1);
 }
 
+/**
+ * ⚠️ PRANEŠIMAS ĮVARDIJA TĄ RINKINĮ, KURĮ REALIAI TIKRINO (#342).
+ *
+ * Iki šito jis buvo užkoduotas: `PostgreSQL rinkinys: visi ${suites.postgres.length}`.
+ * Patikra (žemiau esantis ciklas) visada naudojo `suites[RINKINYS]` ir buvo
+ * TEISINGA - melavo tik išvestis. CI žurnale visi TRYS žingsniai
+ * (`postgres`, `s3`, `postgresS3`) rašė „visi 27 failai realiai įvykdyti",
+ * nors du iš jų tikrino po VIENĄ failą.
+ *
+ * ⚠️ TAI TIKSLIAI #330 PAMOKA, PASIKARTOJUSI PAČIAME LIUDYTOJE: tas pats
+ * pranešimas trims skirtingiems rinkiniams. Ir tai ta pati klasė, kurią #342
+ * aprašo 33 kartus - faktas teisingas, o skelbiama APIMTIS ne. Peržiūrėtojas,
+ * skaitantis S3 žingsnio žurnalą, matė patvirtinimą apie postgres rinkinį.
+ *
+ * `PRALEIDIMO_ZYMA` irgi įvardijama: be jos „nė vieno praleidimo dėl DB" S3
+ * žingsnyje būtų dar vienas teiginys apie ne tą dalyką.
+ */
 console.log(
-  `PostgreSQL rinkinys: visi ${suites.postgres.length} failai realiai įvykdyti ` +
-    "(kiekvienas turi bent vieną nepraleistą `ok`, nė vieno praleidimo dėl DB)."
+  `Rinkinys "${RINKINYS}": visi ${suites[RINKINYS].length} failai realiai įvykdyti ` +
+    `(kiekvienas turi bent vieną nepraleistą \`ok\`, nė vieno praleidimo dėl \`${PRALEIDIMO_ZYMA}\`).`
 );

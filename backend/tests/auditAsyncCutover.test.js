@@ -1,4 +1,5 @@
 const test = require("node:test");
+const { mock } = require("node:test");
 const assert = require("node:assert/strict");
 
 process.env.NODE_ENV = "test";
@@ -151,6 +152,12 @@ test("POST-HOC: visi po-veiksmo įvykiai įvardyti eksplicitiškai ir LIEKA blok
        */
       "ERASURE_MARK_RELEASED",
       "ERASURE_MARK_RETRIED",
+      /**
+       * ⚠️ PRIDĖTA #250 (7.6c). Kvitas rašomas po `eraseJob()`: duomenų jau nėra,
+       * tad audito gedimas apsaugo tik ataskaitą. Žyma tokiu atveju lieka atvira,
+       * ir kitas replay paleidimas kvitą pakartoja.
+       */
+      "ERASURE_REPLAYED",
       "LIFECYCLE_DELETION",
       "LOGOUT",
       "RETENTION_PURGE",
@@ -625,7 +632,7 @@ test("INLINE: audito gedimas autorizacijoje perkelia job'ą į TERMINALIĄ būse
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     assert.deepEqual(pagauti, [], "inline kelias negali palikti nesuvaldyto Promise");
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED, "job'as privalo tapti terminalus");
     assert.equal(
       poVykdymo.errorCode || poVykdymo.error_code,
@@ -1215,7 +1222,7 @@ test("SIAURAS CATCH: NE audito klaida NEVADINAMA `AUDIT_UNAVAILABLE`", async () 
    * `schemaVersion` nustatomas TIESIOGIAI saugykloje: `create()` jo nepriima,
    * o mus domina būtent PERSISTUOTAS nesuderinamas įrašas.
    */
-  const issaugotas = await jobStore.system.get(job.id);
+  const issaugotas = await jobStore.system.get(job.id, { hydrate: true });
   issaugotas.schemaVersion = 99;
 
   const pagauti = [];
@@ -1227,7 +1234,7 @@ test("SIAURAS CATCH: NE audito klaida NEVADINAMA `AUDIT_UNAVAILABLE`", async () 
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     assert.deepEqual(pagauti, [], "inline kelias vis tiek negali palikti nesuvaldyto Promise");
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED, "job'as privalo tapti terminalus");
     assert.notEqual(
       poVykdymo.errorCode || poVykdymo.error_code,
@@ -1279,7 +1286,7 @@ test("ŠALTINIO AUDIO: terminalus audito gedimas ATLAISVINA įkeltą failą", as
       ["JOB_EXECUTION_DENIED"]
     );
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED);
     assert.equal(poVykdymo.errorCode || poVykdymo.error_code, "AUDIT_UNAVAILABLE");
 
@@ -1335,7 +1342,7 @@ test("ŠALTINIO AUDIO: ATŠAUKTOS TEISĖS irgi atlaisvina įkeltą failą", asyn
   try {
     await jobRunner._runInline("protocol", job.id, { storageKey });
 
-    const poVykdymo = await jobStore.system.get(job.id);
+    const poVykdymo = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(poVykdymo.status, jobStore.STATUS.FAILED);
     assert.equal(
       poVykdymo.errorCode || poVykdymo.error_code,
@@ -1408,5 +1415,151 @@ test("SKAITIKLIS: VIENAS lėtas rašymas duoda VIENĄ didinimą (abiejose katego
     getAuditCounters().auditWriteFailures,
     1,
     "blokuojantis vėlyvas įrašas privalo likti MATOMAS: kvietėjui pasakyta 503, o pėdsakas atsirado"
+  );
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #283 — SKENERIO KELIŲ KONTRAKTAS (Windows portabilumas)
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+test("#283: `auditStore` išimtis veikia ABIEM kelio formomis, ir `row.event` nepatenka į nežinomus", () => {
+  /**
+   * ⚠️ ĮRAŠŲ SĄRAŠAS PADUODAMAS TIESIOGIAI, NE PER FAILŲ SISTEMĄ.
+   *
+   * Linux CI niekada nesukurs `auditStore\postgresStore.js` formos, o būtent ją
+   * reikia patikrinti: Windows'e `fs.readdirSync(dir, { recursive: true })`
+   * grąžina OS-natyvius skirtukus, ir `startsWith("auditStore/")` ten yra
+   * `false`. Testas, šakojantis pagal `process.platform`, CI'uje visada
+   * praleistų būtent tą šaką, dėl kurios rašomas (§9.2).
+   *
+   * ⚠️ TIKRINAMAS SKENERIO ELGESYS, ne kanonizavimo helperio grąžinama eilutė:
+   * klausimas yra „ar `row.event` pateko į nežinomų producer šaltinių aibę",
+   * nes būtent tai stabdo startą.
+   */
+  const { skenuotiIrasus } = require("../utils/auditEvents");
+
+  const SAUGYKLOS_TURINYS = `
+    async function irasyti(row) {
+      return { event: row.event, subjectId: row.subject_id };
+    }
+  `;
+
+  for (const irasas of ["auditStore/postgresStore.js", "auditStore\\postgresStore.js"]) {
+    const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+    skenuotiIrasus([irasas], () => SAUGYKLOS_TURINYS, kaupikliai);
+
+    assert.deepEqual(
+      [...kaupikliai.nezinomiSaltiniai],
+      [],
+      `${JSON.stringify(irasas)}: saugyklos sluoksnio mapping'as negali tapti nežinomu producer šaltiniu`
+    );
+    assert.deepEqual(
+      [...kaupikliai.rasti],
+      [],
+      `${JSON.stringify(irasas)}: iš saugyklos sluoksnio neimamas NĖ VIENAS įvykis`
+    );
+  }
+});
+
+test("#285: turinys skaitomas per NEAPDOROTĄ įrašą, ne per kanoninį kelią", () => {
+  /**
+   * ⚠️ FAIL-OPEN FAIL-CLOSED VALIDATORIUJE.
+   *
+   * Kanoninė forma egzistuoja palyginimams. Jei ji naudojama ir failų sistemai,
+   * POSIX'e `foo\bar.js` (VIENAS failas tokiu vardu) būtų skaitomas kaip
+   * `foo/bar.js` — svetimas turinys arba nieko. Tikras producer'is tyliai
+   * iškristų iš starto validacijos, o skeneris praneštų sėkmę.
+   *
+   * ⚠️ TIKRINAMA, KĄ GAVO SKAITYTOJAS, ne ką grąžina kanonizatorius: būtent
+   * skaitytojo argumentas nusprendžia, kurį failą atveria produkcinis kelias.
+   */
+  const { skenuotiIrasus } = require("../utils/auditEvents");
+
+  const gautiKeliai = [];
+  const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+  skenuotiIrasus(
+    ["services/normalus.js", "services/keistas\\vardas.js"],
+    (kelias) => {
+      gautiKeliai.push(kelias);
+      return 'await rasytiAudita({ event: "BACKUP_CREATED" });';
+    },
+    kaupikliai
+  );
+
+  assert.deepEqual(
+    gautiKeliai,
+    ["services/normalus.js", "services/keistas\\vardas.js"],
+    "skaitytojas privalo gauti TĄ PATĮ įrašą, kurį grąžino `readdirSync`"
+  );
+
+  /** ⚠️ KONTROLĖ: abiejų failų turinys REALIAI pateko į skenavimą. */
+  assert.deepEqual([...kaupikliai.rasti], ["BACKUP_CREATED"]);
+});
+
+test("#283 KONTROLĖ: ne-`auditStore` produkcinis failas ir toliau skenuojamas", () => {
+  /**
+   * ⚠️ BE ŠITO PATIKRA GALĖTŲ VIRSTI VISADA-„PRALEISTI".
+   *
+   * Jei kanonizavimas ar filtras imtų atmesti viską, ankstesnis testas liktų
+   * žalias ir nieko nebeįrodytų. Ta pati kontrolės taisyklė, kuri šiame repo jau
+   * pritaikyta septynis kartus.
+   */
+  const { skenuotiIrasus } = require("../utils/auditEvents");
+
+  const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+  skenuotiIrasus(
+    ["services/backupService.js", "services\\backupService.js"],
+    () => 'await rasytiAudita({ event: "BACKUP_CREATED" });',
+    kaupikliai
+  );
+
+  assert.deepEqual([...kaupikliai.rasti], ["BACKUP_CREATED"], "produkcinis literalas privalo būti randamas abiem formomis");
+});
+
+test("#283 FAIL-CLOSED: nežinomas šaltinis stabdo startą PER PRODUKCINES grandis", () => {
+  /**
+   * ⚠️ GRANDINĖ, NE HELPERIS (#285 peržiūra).
+   *
+   * Ankstesnė redakcija paduodavo paruoštus rinkinius tiesiai į
+   * `validateAuditEvents()` ir apeidavo DVI grandis:
+   *
+   *   `startupChecks.validateConfig` → `validateAuditEvents`
+   *   `validateAuditEvents`          → `producerIvykiai()`
+   *
+   * Nutrūkus bet kuriai, testas būtų likęs žalias — o 7.4a garantija yra būtent
+   * tos grandinės vientisumas: „neklasifikuotas produkcinis audito įvykis →
+   * klaida STARTO metu".
+   *
+   * ⚠️ Keičiamas tik SKENERIO rezultatas; abi grandys lieka tikros.
+   */
+  const auditEvents = require("../utils/auditEvents");
+  const startupChecks = require("../utils/startupChecks");
+
+  const skeneris = mock.method(auditEvents, "producerIvykiai", () => ({
+    rasti: new Set(),
+    nezinomiSaltiniai: new Set(["NEZINOMA_KONSTANTA.REIKSME"]),
+  }));
+
+  try {
+    const { errors } = startupChecks.validateConfig({});
+
+    assert.ok(
+      errors.some((k) => /NEZINOMA_KONSTANTA\.REIKSME/.test(k)),
+      "nežinomas producer šaltinis privalo pasiekti `validateConfig()` klaidas"
+    );
+    assert.equal(skeneris.mock.callCount() > 0, true, "skeneris privalo būti kviečiamas numatytuoju keliu");
+  } finally {
+    skeneris.mock.restore();
+  }
+
+  /** ⚠️ KONTROLĖ: be nežinomo šaltinio ta pati konfigūracija tos klaidos NETURI. */
+  const svarus = startupChecks.validateConfig({});
+  assert.equal(
+    svarus.errors.some((k) => /NEZINOMA_KONSTANTA/.test(k)),
+    false,
+    "patikra, kuri visada randa klaidą, nieko netikrina"
   );
 });

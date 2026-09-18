@@ -332,11 +332,33 @@ test("UŽRAKTAS: turi MAKSIMALIĄ trukmę", () => {
    */
   maintenanceLock._resetForTests();
 
-  maintenanceLock.acquire("test", { maxHoldMs: 1 });
+  /**
+   * ⚠️ LANGAS PLATUS SĄMONINGAI (CI 33951067157).
+   *
+   * Su `maxHoldMs: 1` tarp `acquire()` ir pirmojo tvirtinimo pakakdavo vienos
+   * milisekundės planuoklio delsos — užraktas jau būdavo pasibaigęs, ir testas
+   * krisdavo teigdamas, kad jis NEGALIOJA iškart po paėmimo. Tas pats commit'as
+   * CI davė ir raudoną, ir žalią rezultatą, tad tai laiko lenktynės teste, ne
+   * elgesio pokytis.
+   *
+   * Prasmė nepakito: tikrinama, kad užraktas galioja iškart ir NEBEGALIOJA
+   * pasibaigus jo trukmei — tik langas nebėra siauresnis už planuoklio tikslumą.
+   *
+   * ⚠️ JEI ŠIS LANGAS VĖL PASIRODYS PER SIAURAS, ATSAKYMAS NĖRA `100`.
+   *
+   * Konstantos didinimas yra begalinė seka: po kelių raundų liktų testas, kuris
+   * trunka ilgai ir netikrina nieko, ko nepatikrintų trumpesnis. Teisingas
+   * pataisymas — MATUOTI faktinę trukmę, o ne laukti pasirinktos: fiksuoti laiką
+   * prieš `acquire()`, ciklu laukti, kol `isLocked()` taps `false`, ir tvirtinti,
+   * kad praėjo BENT `maxHoldMs`. Tada tvirtinimas kalba apie užrakto elgesį, o ne
+   * apie tai, ar runner'is spėjo per pasirinktą langą.
+   */
+  const TRUKME_MS = 50;
+  maintenanceLock.acquire("test", { maxHoldMs: TRUKME_MS });
   assert.equal(maintenanceLock.isLocked(), true);
 
   const start = Date.now();
-  while (Date.now() - start < 5) {
+  while (Date.now() - start <= TRUKME_MS) {
     /* laukiam, kol pasibaigs */
   }
 
@@ -371,7 +393,7 @@ test("E2E: kopija sukuriama ir atkuriama per TIKRUS endpoint'us", async () => {
 
   // 3. Ištrinam jobą ir atkuriam.
   await jobStore.system.remove(job.id);
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 
   const restored = await request(app)
     .post("/api/admin/backups/restore")
@@ -381,7 +403,7 @@ test("E2E: kopija sukuriama ir atkuriama per TIKRUS endpoint'us", async () => {
 
   assert.equal(restored.status, 200, `atkūrimas nepavyko: ${JSON.stringify(restored.body)}`);
   assert.ok(restored.body.completedSteps.includes("applied"));
-  assert.ok(await jobStore.system.get(job.id), "jobas turi grįžti");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "jobas turi grįžti");
 });
 
 /** Išskiria `manifest.json` ir `backup.data` iš `multipart/mixed` atsakymo. */

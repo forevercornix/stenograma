@@ -33,6 +33,15 @@ const SAKNIS = path.resolve(__dirname, "..");
 const TAIKINYS = "postgres://vartotojas:slaptas@db.vidinis:5432/stenograma";
 const APLINKA = { DATABASE_URL: "postgres://kitas:kitoks@db.vidinis:5432/stenograma" };
 
+/**
+ * ⚠️ BENT VIENA `postgres` AŠIS — NUO #280 follow-up TAI SARGO SĄLYGA.
+ *
+ * `patikrintiSargus()` reikalauja, kad bent vienos ašies autoritetas būtų
+ * PostgreSQL: komanda, kuriai nereikia nė vienos ašies, neturi ko patvirtinti
+ * (D7). Todėl visi „privalo praeiti" atvejai naudoja šią aplinką.
+ */
+const SU_POSTGRES_ASIMI = { SESSION_STORE_BACKEND: "postgres" };
+
 test("#249 D7/D7a: sargai krenta PRIEŠ pirmą mutaciją, skirtingais kodais", () => {
   /**
    * ⚠️ TRYS SKIRTINGI OPERATORIAUS VEIKSMAI — TRYS SKIRTINGI KODAI.
@@ -63,10 +72,55 @@ test("#249 D7/D7a: sargai krenta PRIEŠ pirmą mutaciją, skirtingais kodais", (
   );
 
   /** `PG*` ašis tikrinama vienodai — dokumentuotas Compose diegimas neturi URL. */
+  /**
+   * ⚠️ `PG*`-ONLY DIEGIMAS ŠIANDIEN AŠIES NETURI — IR TAI RADINYS, NE TESTO
+   * PATOGUMAS.
+   *
+   * `sessionStore/backendSelection` `postgres` sesijoms reikalauja BŪTENT
+   * `DATABASE_URL` (`PG*` jam netinka), o job'ų ašis be eksplicitinio
+   * `JOB_STORE_BACKEND` lieka atmintyje (#155; iki barjero atidarymo ją uždarė
+   * barjeras — faktas tas pats, priežastis kita).
+   * Vadinasi dokumentuotame Compose diegime nė viena ašis negali būti
+   * PostgreSQL, ir D7 sargas komandą sustabdo. Tai užrašyta runbook'e ir
+   * iškelta atskirai (#282) — čia fiksuojamas FAKTAS, ne pageidavimas.
+   */
   assert.equal(
-    kodas(() => reconcile.patikrintiSargus(TAIKINYS, { PGHOST: "db.vidinis", PGDATABASE: "stenograma" })),
-    "OK"
+    kodas(() =>
+      reconcile.patikrintiSargus(TAIKINYS, {
+        PGHOST: "db.vidinis",
+        PGPORT: "5432",
+        PGDATABASE: "stenograma",
+        PGUSER: "vartotojas",
+      })
+    ),
+    "RECONCILE_BACKEND_NOT_POSTGRES"
   );
+
+  /** Su `DATABASE_URL` ir eksplicitine sesijų ašimi — praeina. */
+  assert.equal(kodas(() => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, ...SU_POSTGRES_ASIMI })), "OK");
+
+  /** ⚠️ Nė vienos PostgreSQL ašies — komanda krenta, o ne „pavyksta be darbo" (D7). */
+  assert.equal(kodas(() => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS })), "RECONCILE_BACKEND_NOT_POSTGRES");
+
+  /**
+   * ⚠️ KLAIDA PRIVALO ĮVARDYTI PRIEŽASTĮ, NE TIK AUTORITETĄ (#155).
+   *
+   * Iki barjero atidarymo žinutė turėjo `" dėl 7.2a barjero"` šaką. Atidarius ji
+   * tapo NEPASIEKIAMA, ir operatorius, gaunantis šią klaidą iškart po atkūrimo,
+   * matydavo tik „job'ai: memory" — be jokio kodėl, tuo vieninteliu momentu, kai
+   * klaida negrįžtama. Vėliava dingo tyliai: nė vienas testas žinutės netikrino.
+   *
+   * GINA: priežastis PEREINA į operatoriaus matomą tekstą. Sanitizacija — ta
+   * pati taisyklė kaip ašyse: `priezastis` neša kintamųjų VARDUS, ne reikšmes,
+   * tad DSN čia patekti negali.
+   */
+  try {
+    reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS });
+    assert.fail("turėjo kristi");
+  } catch (err) {
+    assert.match(err.message, /job'ai: memory — numatyta/);
+    assert.doesNotMatch(err.message, /barjer/, "barjeras atidarytas - žinutė juo remtis nebegali");
+  }
 
   /** Kredencialai į klaidas nepatenka: jos rodo tik `host:port/db`. */
   try {
@@ -454,7 +508,10 @@ test("#280 P1: `?host=` keičia endpoint'ą — tapatumas privalo tai matyti", (
   );
 
   /** ⚠️ KONTROLĖ: vienodi DSN su tuo pačiu `?host=` privalo PRAEITI — kitaip patikra būtų visada-„ne". */
-  reconcile.patikrintiSargus(`${AUTORITETAS}?host=/restore`, { DATABASE_URL: `${AUTORITETAS}?host=/restore` });
+  reconcile.patikrintiSargus(`${AUTORITETAS}?host=/restore`, {
+    DATABASE_URL: `${AUTORITETAS}?host=/restore`,
+    ...SU_POSTGRES_ASIMI,
+  });
 
   /**
    * ⚠️ DSN BE HOSTO NEBĖRA FAIL-CLOSED — IR TAI PATAISYTA SĄMONINGAI.
@@ -464,7 +521,10 @@ test("#280 P1: `?host=` keičia endpoint'ą — tapatumas privalo tai matyti", (
    * rodo į tą pačią bazę — atmesti reikštų uždrausti teisėtą konfigūraciją.
    * Fail-closed lieka tam, ko išspręsti NEĮMANOMA: neparsinamam DSN.
    */
-  reconcile.patikrintiSargus("postgres:///stenograma", { DATABASE_URL: "postgres:///stenograma" });
+  reconcile.patikrintiSargus("postgres:///stenograma", {
+    DATABASE_URL: "postgres:///stenograma",
+    ...SU_POSTGRES_ASIMI,
+  });
 
   assert.throws(
     () => reconcile.patikrintiSargus("visai ne url", { DATABASE_URL: "postgres://u@h:5432/s" }),
@@ -475,34 +535,64 @@ test("#280 P1: `?host=` keičia endpoint'ą — tapatumas privalo tai matyti", (
     "neparsinamas DSN tapatybės neturi"
   );
 
-  /** ⚠️ `PGPORT` fallback: `pg` jį taiko, tad tapatumas privalo taikyti irgi. */
-  assert.throws(
-    () => reconcile.patikrintiSargus("postgres://u@host:5432/db", { DATABASE_URL: "postgres://u@host/db", PGPORT: "6543" }),
-    (err) => {
-      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
-      return true;
-    },
-    "be šito `_pool()` jungtųsi į 6543, o palyginimas sakytų, kad tai ta pati bazė"
-  );
+  /**
+   * ⚠️ `PGPORT` FALLBACK: INVARIANTAS SUSIAURINTAS (#245) — IR KODAS PASIKEITĖ.
+   *
+   * `pg` `PGPORT` vis dar taiko, ir tapatumas vis dar jį mato. Bet nuo #245
+   * pirma suveikia ANKSTESNIS sargas: DSN be porto plius `PGPORT` reiškia, kad
+   * efektyvus TAIKINYS priklauso nuo aplinkos, o ne nuo DSN. Tai
+   * `RECONCILE_CONNECTION_AMBIGUOUS`, ne `…_TARGET_MISMATCH`, ir tai kitas
+   * operatoriaus veiksmas: ne „nurodei ne tą bazę", o „užbaik DSN arba jo
+   * nenaudok".
+   *
+   * ⚠️ ANTRASIS ATVEJIS APVERSTAS SĄMONINGAI. Anksčiau jis PRAEIDAVO (abi pusės
+   * sprendžiamos vienodai → sutampa). Dabar krinta, nes klausimas „į kurią bazę
+   * jungiamės?" iš paties DSN atsakymo NETURI. Kaina įvardyta: pusiau užpildytas
+   * DSN, kurį papildo aplinka, yra teisėtas libpq raštas ir nuo šiol draudžiamas.
+   * Priimta dėl to, kad ta pati „papildymo" mechanika `sslmode` atveju reiškia
+   * TYLIAI pakeistą TLS režimą, o dvi taisyklės tam pačiam mechanizmui grąžintų
+   * būtent tą spragų klasę, kurią #245 uždaro.
+   */
+  for (const taikinys of ["postgres://u@host:5432/db", "postgres://u@host/db"]) {
+    assert.throws(
+      () => reconcile.patikrintiSargus(taikinys, { DATABASE_URL: "postgres://u@host/db", PGPORT: "6543" }),
+      (err) => {
+        assert.equal(err.code, "RECONCILE_CONNECTION_AMBIGUOUS");
+        return true;
+      },
+      "DSN be porto plius `PGPORT` neatsako, kur jungiamasi - net kai `--target` sutampa"
+    );
+  }
 
-  reconcile.patikrintiSargus("postgres://u@host/db", { DATABASE_URL: "postgres://u@host/db", PGPORT: "6543" });
+  /** ⚠️ KONTROLĖ: UŽBAIGTAS DSN su tuo pačiu `PGPORT` privalo PRAEITI. */
+  reconcile.patikrintiSargus("postgres://u@host:6543/db", {
+    DATABASE_URL: "postgres://u@host:6543/db",
+    PGPORT: "6543",
+    ...SU_POSTGRES_ASIMI,
+  });
 });
 
 test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal `DATABASE_URL`", () => {
   /**
    * ⚠️ `DATABASE_URL` BUVIMAS NĖRA BACKEND'O SPRENDIMAS.
    *
-   * `POSTGRES_AKTYVAVIMAS_LEISTAS = false` reiškia, kad job'ų autoritetas
-   * šiandien NIEKADA nėra PostgreSQL, o sesijos be `SESSION_STORE_BACKEND` gyvena
-   * atmintyje. Senasis sargas to nematė, tad `verify` galėjo pasakyti „galima
+   * Nė vienas žemiau esantis atvejis `JOB_STORE_BACKEND` nenurodo, tad job'ų
+   * autoritetas juose niekada nėra PostgreSQL, o sesijos be `SESSION_STORE_BACKEND`
+   * gyvena atmintyje. ⚠️ Iki #155 tą patį darė aktyvavimo barjeras — tada tai
+   * galiojo VISIEMS diegimams, dabar tik šiems atvejams. Senasis sargas to nematė, tad `verify` galėjo pasakyti „galima
    * cutover", kai gyva būsena yra Redis'e — ir po starto ne terminaliniai job'ai
    * atsinaujintų.
    *
    * ⚠️ GRIEŽTAS YRA VERDIKTAS, NE KOMANDA: atmintinės sesijos restarto
    * neišgyvena, tad ten revokacija NEREIKALINGA, o ne „praleista".
    */
+  /**
+   * ⚠️ PIRMOJI EILUTĖ PASIKEITĖ PO #280 follow-up: visos ašys `nereikalinga`
+   * REIŠKIA, kad komandai nėra ko patvirtinti, tad „saugu" ji nebeduoda. Ašių
+   * verdiktai lieka tokie patys — pasikeitė KOMANDOS verdiktas.
+   */
   const atvejai = [
-    [{ DATABASE_URL: "postgres://u@h/db" }, "nereikalinga", "nereikalinga", true],
+    [{ DATABASE_URL: "postgres://u@h/db" }, "nereikalinga", "nereikalinga", false],
     [{ DATABASE_URL: "postgres://u@h/db", SESSION_STORE_BACKEND: "postgres" }, "suderinta", "nereikalinga", true],
     [{ DATABASE_URL: "postgres://u@h/db", REDIS_URL: "redis://r" }, "nereikalinga", "nepadengta", false],
     [
@@ -528,8 +618,50 @@ test("#280 P1: kiekviena ašis vertinama pagal APLIKACIJOS autoritetą, ne pagal
   assert.equal(verdiktai.has("nepadengta"), true);
   assert.equal(verdiktai.has("nereikalinga"), true);
 
-  /** 7.2a barjeras įvardijamas atskirai — operatorius turi matyti PRIEŽASTĮ. */
-  assert.equal(reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" }).jobai.barjeras, true);
+  /**
+   * ⚠️ PERRAŠYTA SU TAISYKLE (#155). Buvo: „7.2a barjeras įvardijamas atskirai" ir
+   * `assert.equal(...jobai.barjeras, true)`.
+   *
+   * Ta asercija gynė TIKRĄ dalyką — kad operatorius mato PRIEŽASTĮ — bet per
+   * netiesioginį laidą: kol job'ų autoritetas galėjo nebūti PostgreSQL TIK dėl
+   * barjero, `barjeras: true` buvo ATSITIKTINAI pakankamas paaiškinimas.
+   *
+   * Po eksplicitinio pasirinkimo įvedimo priežasčių yra kelios, ir `barjeras` tapo
+   * `false` NEPRARADUS nė vienos ribos — t. y. asercija būtų likusi žalia pakeitus ją
+   * į `false`, bet komentaras toliau tvirtintų, kad priežastis matoma. Ji nebūtų.
+   *
+   * GINA DABAR: operatorius mato priežastį, KAD IR KOKIA JI BŪTŲ — ne konkrečiai
+   * barjerą.
+   */
+  const asysTikDb = reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db" });
+  assert.equal(
+    asysTikDb.jobai.priezastis,
+    "numatyta",
+    "vien `DATABASE_URL` nebepasirenka PostgreSQL, ir operatorius privalo matyti, KODĖL"
+  );
+
+  assert.equal(
+    reconcile.nustatytiAsis({ DATABASE_URL: "postgres://u@h/db", REDIS_URL: "redis://r" }).jobai.priezastis,
+    "REDIS_URL",
+    "kita priežastis — kitas tekstas; viena vėliava jų abiejų nebeatskirtų"
+  );
+
+  /**
+   * ⚠️ SANITIZACIJA — TIKRINA TESTAS, NE KOMENTARAS (#319).
+   *
+   * `priezastis` keliauja į operatoriaus išvestį prieš cutover. Šiandien ji neša
+   * kintamųjų VARDUS arba literalą `numatyta`; jei kada nors imtų nešti REIKŠMĘ,
+   * DSN su slaptažodžiu atsidurtų `verify` ataskaitoje.
+   */
+  for (const env of [
+    { DATABASE_URL: "postgres://vartotojas:slaptazodis@vidinis.lan:5432/db" },
+    { DATABASE_URL: "postgres://vartotojas:slaptazodis@vidinis.lan:5432/db", REDIS_URL: "redis://r:pw@h" },
+  ]) {
+    const tekstas = JSON.stringify(reconcile.nustatytiAsis(env).jobai);
+    for (const dalis of ["slaptazodis", "vartotojas", "vidinis.lan", "pw"]) {
+      assert.equal(tekstas.includes(dalis), false, `job'ų ašyje rasta: ${dalis}`);
+    }
+  }
 });
 
 test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą autoritetą", () => {
@@ -574,9 +706,10 @@ test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą a
       assert.deepEqual(
         mano,
         {
-          host: String(pgIdentity.host).toLowerCase(),
+          host: require("../utils/pgConnection").normalizuotiHosta(pgIdentity.host),
           port: String(pgIdentity.port),
           database: String(pgIdentity.database),
+          options: String(pgIdentity.options || ""),
         },
         `${dsn} su ${JSON.stringify(env)}: tapatumas privalo sutapti su tuo, kaip jungsis \`pg\``
       );
@@ -596,10 +729,24 @@ test("#280 II: tapatumo eiliškumas SUTAMPA su `pg` — tripwire prieš tikrą a
 
 test("#280 II: konfigūracijos klaida krinta PRIEŠ transakciją, ne po `COMMIT`", () => {
   /**
+   * ⚠️ LIUDYTOJAS PAKEISTAS (#155, §12.1): buvo `JOB_STORE_BACKEND=postgres` su
+   * UŽDARYTU barjeru.
+   *
+   * Ta konfigūracija metė, ir testas ja naudojosi kaip pigia konfigūracijos klaida.
+   * Atidarius barjerą ji tapo TEISĖTA, tad liudytojo nebeliko — bet SAVYBĖ, kurią
+   * testas gina, nepasikeitė: konfigūracijos klaida privalo kristi PRIEŠ transakciją.
+   *
+   * ⚠️ NAUJAS LIUDYTOJAS PASIRINKTAS REALISTIŠKUMO, NE PATOGUMO PAGRINDU:
+   * `JOB_STORE_BACKEND=redis` be `REDIS_URL` yra būtent tas atvejis, kurį ADR
+   * įvardija kaip pavojingiausią — kintamasis, neperduotas į atkūrimo aplinką.
+   * Rašybos klaida (`JOB_STORE_BACKEND=nezinomas`) irgi metа, bet ji retesnė.
+   */
+  /**
    * ⚠️ COMMIT'INTAS, NEAUDITUOTAS DARBAS, PRANEŠTAS KAIP NESĖKMĖ.
    *
-   * `nustatytiAsis()` gali mesti (`JOB_STORE_BACKEND=postgres` su uždarytu 7.2a
-   * barjeru). Kviečiant po `COMMIT`, klaida atsidurdavo `catch` bloke:
+   * `nustatytiAsis()` gali mesti (`JOB_STORE_BACKEND=redis` be `REDIS_URL`; iki
+   * #155 — ir `postgres` su uždarytu barjeru). Kviečiant po `COMMIT`, klaida
+   * atsidurdavo `catch` bloke:
    * `ROLLBACK` jau nieko negrąžintų, auditas būtų praleistas, o CLI grąžintų 2 —
    * sesijos revokuotos, job'ai terminalizuoti, ir niekas apie tai nežino.
    *
@@ -617,13 +764,14 @@ test("#280 II: konfigūracijos klaida krinta PRIEŠ transakciją, ne po `COMMIT`
         NODE_ENV: "test",
         LOG_LEVEL: "error",
         DATABASE_URL: TAIKINYS,
-        JOB_STORE_BACKEND: "postgres",
+        JOB_STORE_BACKEND: "redis",
+        REDIS_URL: "",
       },
     }
   );
 
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+  assert.match(r.stderr, /JOB_STORE_BACKEND=redis, bet REDIS_URL nenustatytas/);
   assert.equal(/ECONNREFUSED/.test(r.stderr), false, "prie bazės jungtis nebuvo galima nė bandyti");
 });
 
@@ -646,10 +794,10 @@ test("#280 II: ašys nustatomos MODULYJE prieš transakciją, ne tik CLI'e", asy
       reconcile.suderinti({
         targetUrl: TAIKINYS,
         actor: "operatorius",
-        env: { DATABASE_URL: TAIKINYS, JOB_STORE_BACKEND: "postgres" },
+        env: { DATABASE_URL: TAIKINYS, JOB_STORE_BACKEND: "redis" },
       }),
     (err) => {
-      assert.match(err.message, /JOB_STORE_BACKEND=postgres dar neleidžiamas/);
+      assert.match(err.message, /JOB_STORE_BACKEND=redis, bet REDIS_URL nenustatytas/);
       assert.equal(/ECONNREFUSED/.test(err.message), false);
       return true;
     }
@@ -669,12 +817,29 @@ test("#280 IV: dviprasmiška jungties konfigūracija yra KLAIDA, ne interpretaci
    */
   const { PgConnectionError, arDviprasmiskaKonfiguracija, efektyvusJungtiesParametrai } = require("../utils/pgConnection");
 
-  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: "postgres://u@h/db", PGHOST: "h" }), true);
-  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: "postgres://u@h/db" }), false);
+  /**
+   * ⚠️ INVARIANTAS SUSIAURINTAS (#245): DVIPRASMYBĖ YRA EFEKTAS, NE FORMŲ
+   * MAIŠYMAS.
+   *
+   * Buvo `DATABASE_URL && PGHOST`. Ta taisyklė klausė teisingo klausimo ir
+   * atsakė neteisingai abiem kryptimis: su PILNU DSN `PGHOST` `pg` semantikai
+   * neturi jokios įtakos (blokavo teisėtą konfigūraciją), o `PGSSLMODE`,
+   * `PGOPTIONS`, `PGCLIENT_ENCODING` pilną DSN PERRAŠO (jų nematė).
+   *
+   * ⚠️ DR GARANTIJA NESUSILPNĖJO. Ją laiko ne šis sargas, o PALYGINIMAS: su
+   * pilnu DSN efektyvus taikinys yra DSN taikinys, tad kitur rodantis `--target`
+   * krinta kaip `RECONCILE_TARGET_MISMATCH`. Žr. kontrolę žemiau.
+   */
+  const PILNAS = "postgres://u@h:5432/db";
+
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS, PGHOST: "h" }), false, "neveiksnus `PGHOST`");
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS, PGOPTIONS: "-csearch_path=x" }), true);
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS, PGSSLMODE: "require" }), true);
+  assert.equal(arDviprasmiskaKonfiguracija({ DATABASE_URL: PILNAS }), false);
   assert.equal(arDviprasmiskaKonfiguracija({ PGHOST: "h" }), false);
 
   assert.throws(
-    () => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, PGHOST: "db.vidinis" }),
+    () => reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, PGOPTIONS: "-csearch_path=kita" }),
     (err) => {
       assert.equal(err.code, "RECONCILE_CONNECTION_AMBIGUOUS", "operatoriaus veiksmas kitoks nei prie nesutapimo");
       return true;
@@ -682,13 +847,63 @@ test("#280 IV: dviprasmiška jungties konfigūracija yra KLAIDA, ne interpretaci
   );
 
   /** ⚠️ KONTROLĖ: be maišymo abi formos privalo VEIKTI — kitaip sargas draustų teisėtas konfigūracijas. */
-  reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS });
-  reconcile.patikrintiSargus("postgres://vartotojas@db.vidinis:5432/stenograma", {
-    PGHOST: "db.vidinis",
-    PGPORT: "5432",
-    PGDATABASE: "stenograma",
-    PGUSER: "vartotojas",
+  reconcile.patikrintiSargus(TAIKINYS, { DATABASE_URL: TAIKINYS, ...SU_POSTGRES_ASIMI });
+
+  /**
+   * ⚠️ KONTROLĖ ATLAISVINIMUI: neveiksnus `PGHOST` greta pilno DSN privalo
+   * PRAEITI. Būtent šis derinys anksčiau krisdavo, ir būtent jis yra #245
+   * atrakinamas atvejis.
+   */
+  reconcile.patikrintiSargus(TAIKINYS, {
+    DATABASE_URL: TAIKINYS,
+    PGHOST: "visai-kitas-host",
+    ...SU_POSTGRES_ASIMI,
   });
+
+  /**
+   * ⚠️ IR PRIEŠINGA KRYPTIS: kitur rodantis `--target` su tuo pačiu neveiksniu
+   * `PGHOST` privalo kristi kaip NESUTAPIMAS. Be šios eilutės atlaisvinimas
+   * būtų neatskiriamas nuo apsaugos praradimo.
+   */
+  assert.throws(
+    () =>
+      reconcile.patikrintiSargus("postgres://u@kita.baze:5432/stenograma", {
+        DATABASE_URL: TAIKINYS,
+        PGHOST: "visai-kitas-host",
+        ...SU_POSTGRES_ASIMI,
+      }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      return true;
+    }
+  );
+
+  /**
+   * ⚠️ `PG*` FORMA PATI SAVAIME NĖRA DVIPRASMIŠKA — ji krinta vėliau ir dėl KITOS
+   * priežasties (nėra PostgreSQL ašies). Skirtingi kodai skiria du skirtingus
+   * operatoriaus veiksmus: pašalinti vieną jungties formą vs pataisyti backend'ų
+   * konfigūraciją.
+   */
+  const kodas = (fn) => {
+    try {
+      fn();
+      return "OK";
+    } catch (err) {
+      return err.code;
+    }
+  };
+
+  assert.equal(
+    kodas(() =>
+      reconcile.patikrintiSargus("postgres://vartotojas@db.vidinis:5432/stenograma", {
+        PGHOST: "db.vidinis",
+        PGPORT: "5432",
+        PGDATABASE: "stenograma",
+        PGUSER: "vartotojas",
+      })
+    ),
+    "RECONCILE_BACKEND_NOT_POSTGRES"
+  );
 
   /**
    * ⚠️ `PG*` FORMA SPRENDŽIAMA TA PAČIA FUNKCIJA. Iki šito `PG*` šaka apskritai
@@ -697,12 +912,103 @@ test("#280 IV: dviprasmiška jungties konfigūracija yra KLAIDA, ne interpretaci
    */
   assert.deepEqual(
     efektyvusJungtiesParametrai({ host: "h", database: "db" }, {}),
-    { host: "h", port: "5432", database: "db" }
+    { host: "h", port: "5432", database: "db", options: "" }
   );
   assert.deepEqual(
     efektyvusJungtiesParametrai({ host: "h" }, { PGDATABASE: "iš-aplinkos" }),
-    { host: "h", port: "5432", database: "iš-aplinkos" }
+    { host: "h", port: "5432", database: "iš-aplinkos", options: "" }
   );
 
   assert.ok(new PgConnectionError("x", "PG_CONNECTION_AMBIGUOUS") instanceof Error);
+});
+
+test("#280 follow-up P1: `options` (`search_path`) yra taikinio dalis", () => {
+  /**
+   * ⚠️ VISOS SUDERINIMO UŽKLAUSOS NAUDOJA NEKVALIFIKUOTUS LENTELIŲ VARDUS.
+   *
+   * `pg` `options` perduoda serveriui startup pakete
+   * (`connection-parameters.js:83, 151`), tad `-csearch_path=prod` vs `…=restore`
+   * yra SKIRTINGOS lentelės tame pačiame klasteryje. Tapatumas juos laikė
+   * vienodais, o `_pool()` po to mutuodavo kitą schemą.
+   *
+   * ⚠️ ĮTRAUKIAMA, NE ATMETAMA: savo „namespace keičiančių parametrų" sąrašas
+   * greta `pg` supratimo būtų antra interpretacija — ta pati klasė, kurią
+   * `efektyvusJungtiesParametrai()` uždarė.
+   */
+  const BAZE = "postgres://vartotojas@db.vidinis:5432/stenograma";
+  const su = (o) => `${BAZE}?options=${encodeURIComponent(o)}`;
+
+  assert.throws(
+    () =>
+      reconcile.patikrintiSargus(su("-csearch_path=restore"), {
+        DATABASE_URL: su("-csearch_path=prod"),
+        ...SU_POSTGRES_ASIMI,
+      }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      assert.match(err.message, /search_path/, "priežastis privalo būti MATOMA klaidoje");
+      return true;
+    }
+  );
+
+  /** ⚠️ KONTROLĖ: vienodas `options` privalo PRAEITI — kitaip patikra būtų visada-„ne". */
+  reconcile.patikrintiSargus(su("-csearch_path=restore"), {
+    DATABASE_URL: su("-csearch_path=restore"),
+    ...SU_POSTGRES_ASIMI,
+  });
+
+  /** `PGOPTIONS` fallback — tas pats `val()` eiliškumas kaip kitiems laukams. */
+  const { efektyvusJungtiesParametrai } = require("../utils/pgConnection");
+  assert.equal(
+    efektyvusJungtiesParametrai({ connectionString: BAZE }, { PGOPTIONS: "-csearch_path=iš-aplinkos" }).options,
+    "-csearch_path=iš-aplinkos"
+  );
+  assert.equal(
+    efektyvusJungtiesParametrai({ connectionString: su("-csearch_path=iš-dsn") }, { PGOPTIONS: "-csearch_path=iš-aplinkos" })
+      .options,
+    "-csearch_path=iš-dsn",
+    "eksplicitinis DSN laimi prieš aplinką"
+  );
+});
+
+test("#280 follow-up P1: socket kelio raidės reikšmingos, DNS vardo — ne", () => {
+  /**
+   * ⚠️ DVI SKIRTINGOS ERDVĖS VIENAME LAUKE.
+   *
+   * DNS vardai case-insensitive, o `?host=/Prod` yra FAILŲ SISTEMOS kelias iki
+   * unix socket katalogo. `toLowerCase()` visam host'ui sutapdydavo `/Prod` ir
+   * `/prod`, nors `pg` juos laiko skirtingais taikiniais.
+   *
+   * ⚠️ Normalizavimas gyvena VIENAME helperyje: iki šito jis buvo dviejose
+   * vietose, ir taisant vieną pora būtų išsiskyrusi.
+   */
+  const { normalizuotiHosta } = require("../utils/pgConnection");
+
+  assert.equal(normalizuotiHosta("HOST.Example"), "host.example");
+  assert.equal(normalizuotiHosta("/Prod"), "/Prod", "socket kelias lieka kaip yra");
+  assert.equal(normalizuotiHosta("  /var/run/PostgreSQL  "), "/var/run/PostgreSQL");
+
+  assert.throws(
+    () =>
+      reconcile.patikrintiSargus("postgres://u@/stenograma?host=/Prod", {
+        DATABASE_URL: "postgres://u@/stenograma?host=/prod",
+        ...SU_POSTGRES_ASIMI,
+      }),
+    (err) => {
+      assert.equal(err.code, "RECONCILE_TARGET_MISMATCH");
+      return true;
+    }
+  );
+
+  /** ⚠️ KONTROLĖ: DNS vardo raidės NETURI kurti nesutapimo. */
+  reconcile.patikrintiSargus("postgres://u@DB.Vidinis:5432/stenograma", {
+    DATABASE_URL: "postgres://u@db.vidinis:5432/stenograma",
+    ...SU_POSTGRES_ASIMI,
+  });
+
+  /** Ir tas pats socket kelias abiejose pusėse — praeina. */
+  reconcile.patikrintiSargus("postgres://u@/stenograma?host=/Prod", {
+    DATABASE_URL: "postgres://u@/stenograma?host=/Prod",
+    ...SU_POSTGRES_ASIMI,
+  });
 });
