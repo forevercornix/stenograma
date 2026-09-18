@@ -1,5 +1,5 @@
 const jobPhase = require("../jobPhase");
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas, metaduomenuProjekcija } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -54,10 +54,20 @@ const TTL_SECONDS = Math.ceil(TTL_MS / 1000);
 const JSON_FIELDS = new Set(["result", "progress", "artefacts"]);
 
 /**
- * Redis hash'e VISKAS yra eilutė. Todėl laukus, kurių tipas turi reikšmę, būtina
- * atstatyti - kitaip `false` grįžta kaip `"false"`, o TAI YRA TRUTHY.
+ * ⚠️ TIPŲ AIBĖS ČIA NEBEGYVENA (#205, 7.2c).
  *
- * Ką tai laužė (rasta savo testu, Redis režime):
+ * `BOOLEAN_FIELDS` ir `NUMBER_FIELDS` yra kanoninis duomenų modelio kontraktas,
+ * ne Redis detalė - jos deklaruotos `common.js` ir importuojamos aukščiau.
+ *
+ * Kodėl perkelta: aibės saugojo nuo gedimo, kuris kartojasi, bet gynė TIK
+ * skaitymo kelią. Rašymo kelias normalizavimo neturėjo, tad tas pats patch'as
+ * trijuose backend'uose duodavo skirtingą reikšmę - `audio_cleanup_pending:
+ * "false"` memory'je likdavo truthy eilutė, o PostgreSQL'e per
+ * `Boolean("false")` tapdavo `true`. Ne kitoks tipas, o PRIEŠINGA loginė
+ * reikšmė. Dabar normalizavimas vyksta `applyPatch()` metu, dar prieš
+ * `serialize()`.
+ *
+ * Ką aibės laužė iki #205 (rasta savo testu, Redis režime):
  *   - `audio_cleanup_pending: "false"` -> listByFlag() grąžindavo VISUS jobus, o
  *     retryPendingAudioCleanups() tada trindavo dar apdorojamų jobų audio;
  *   - hasPendingCleanup() visada true -> update() kviesdavo PERSIST vietoj EXPIRE,
@@ -65,35 +75,48 @@ const JSON_FIELDS = new Set(["result", "progress", "artefacts"]);
  *   - `audio_cleanup_attempts: "0"` -> `("0" || 0) + 1` === "01" (eilučių
  *     konkatenacija), tad bandymų skaitliukas ir alerto riba neveikė.
  *
- * `attempt_count` jau buvo apdorojamas atskirai - tai buvo užuomina, kad ši spąsta
- * žinoma; naujus laukus reikėjo pridėti čia iš karto.
+ * `deserialize()` IŠLIEKA: Redis hash'e viskas fiziškai yra eilutė, tad
+ * skaitant tipą vis tiek reikia atstatyti. Bet taisyklė - viena, bendra su
+ * rašymo keliu (`normalizeFieldValue()`).
  */
-const BOOLEAN_FIELDS = new Set([
-  "audio_cleanup_pending",
-  "deletion_pending",
-  /**
-   * #154. BŪTINA čia: Redis viską grąžina kaip string'ą, o `"false"` yra
-   * TRUTHY. Be konversijos `progressKnown === false` niekada nesuveiktų, ir
-   * diarizacijos fazė rodytų procentą vietoj „progresas neteikiamas".
-   *
-   * Klastingiau nei #158 `schemaVersion`: ten `"2" !== 2` bent jau krisdavo į
-   * kitą šaką, o čia klaidinga reikšmė atrodo visiškai validi.
-   */
-  "progressKnown",
-]);
 
-const NUMBER_FIELDS = new Set([
-  "attempt_count",
-  "audio_cleanup_attempts",
-  "deletion_attempts",
-  /**
-   * Įrašo era (#158). BŪTINA čia: Redis viską grąžina kaip string'ą, o
-   * `jobAuthorization` lygina `schemaVersion === 2`. Be konversijos "2" !== 2
-   * ir KIEKVIENAS Redis job'as tyliai atrodytų kaip legacy – t. y. jų tapatybė
-   * būtų sprendžiama pagal vardą, nors `actor` jau yra userId.
-   */
-  "schemaVersion",
-]);
+/**
+ * Laukiama versija Lua argumentui: skaičius → tekstas, „nėra sąlygos" → `''`.
+ *
+ * ⚠️ TEKSTAS, NE SKAIČIUS. Redis hash reikšmės yra tekstas, tad Lua palyginimas
+ * `v ~= ARGV[n]` yra TEKSTINIS. Perdavus skaičių, `redis.call` jį konvertuotų
+ * pats, bet konversijos taisyklė būtų kliento, ne mūsų - ir `1` vs `"1"`
+ * niuansas gyventų už mūsų testų ribų.
+ *
+ * ⚠️ `''` NĖRA WILDCARD - skriptas jį tikrina EKSPLICITIŠKAI (`if ARGV[3] ~= ''`)
+ * ir tik tada praleidžia patikrą. Reikšmė `''` hash'e reikštų `null` versiją,
+ * kurios `normalizeJob()` neleidžia.
+ */
+/**
+ * Serializuotas job'as BE `version` (#184, Codex B6).
+ *
+ * ⚠️ VERSIJĄ RAŠO SERVERIS, NE SNAPSHOT'AS. `applyPatch()` apskaičiuoja
+ * `job.version + 1` iš PERSKAITYTOS reikšmės; kol ta reikšmė keliauja į `HSET`,
+ * du lygiagretūs kvietėjai gali abu perskaityti `N`, abu apskaičiuoti `N + 1` ir
+ * abu įrašyti — įvyko dvi mutacijos, o versija paaugo vieną kartą. Tada po
+ * pirmojo commit'o paimtas snapshot'as neša `N + 1`, ir vėlesnis CAS su ta
+ * reikšme praeina nepaisant įsiterpusios antros mutacijos.
+ *
+ * Todėl `version` iš rašomų laukų išimamas, o jį didina `HINCRBY` — atominis
+ * serverio skaitiklis, kuris nė vieno padidinimo neprarandą.
+ *
+ * ⚠️ TAS PATS SPRENDIMAS KAIP PostgreSQL `VERSIJOS_ZYMA` (`"version" =
+ * jobs.version + 1`). Skiriasi tik priemonė, ne taisyklė.
+ */
+function serializeBeVersijos(job) {
+  const flat = serialize(job);
+  delete flat.version;
+  return flat;
+}
+
+function versijosArgumentas(expectedVersion) {
+  return expectedVersion === undefined || expectedVersion === null ? "" : String(expectedVersion);
+}
 
 function serialize(job) {
   const flat = {};
@@ -121,10 +144,20 @@ function deserialize(flat) {
       } catch {
         job[k] = null;
       }
-    } else if (BOOLEAN_FIELDS.has(k)) {
-      job[k] = String(v).toLowerCase() === "true";
-    } else if (NUMBER_FIELDS.has(k)) {
-      job[k] = parseInt(v, 10) || 0;
+    } else if (BOOLEAN_FIELDS.has(k) || NUMBER_FIELDS.has(k)) {
+      /**
+       * ⚠️ TAS PATS HELPERIS KAIP RAŠYMO KELYJE (#205).
+       *
+       * Dvi nepriklausomos to paties konvertavimo realizacijos yra ta pati
+       * klasė, kurią 7.2c šalina - tik viena pakopa žemiau. Testas įrodo, kad
+       * abi vietos tai pačiai įvesčiai duoda tapatų rezultatą.
+       *
+       * ⚠️ `v === ""` šaka aukščiau lieka Redis SAVYBĖ, ne antra taisyklė:
+       * `serialize()` `null` užrašo kaip `""`, tad tuščia eilutė reiškia
+       * „buvo null", o ne „reikšmė yra tuščia". Po 7.2c kanoniniame lauke
+       * `""` Redis'e nebeatsiranda - normalizavimas įvyksta prieš `serialize()`.
+       */
+      job[k] = normalizeFieldValue(k, v);
     } else {
       job[k] = v;
     }
@@ -152,21 +185,94 @@ function createRedisStore(redisClient) {
    * našlaičiu, kurio niekas niekada nepašalintų.
    */
   async function restoreRecord(job) {
-    await redisClient.hset(JOB_PREFIX + job.id, serialize(job));
-    await redisClient.zadd(INDEX_KEY, Date.now(), job.id);
-    return job;
+    /**
+     * ⚠️ NORMALIZUOJAMA IR ČIA (#205, 7.2c). `restoreRecord()` priima
+     * SAVAVALIŠKĄ įrašą iš atsarginės kopijos, o senesnė kopija gali turėti
+     * būtent tas tekstines reikšmes, dėl kurių 7.2c egzistuoja. Atkūrimas be
+     * normalizavimo grąžintų gedimą į gyvą sistemą tuo momentu, kai niekas
+     * neįtaria. `applyPatch()` šio kelio nedengia - jis čia nekviečiamas.
+     */
+    const kanoninis = normalizeJob(job);
+    await redisClient.hset(JOB_PREFIX + kanoninis.id, serialize(kanoninis));
+    await redisClient.zadd(INDEX_KEY, Date.now(), kanoninis.id);
+    return kanoninis;
   }
 
-  async function get(id) {
+  /**
+   * ⚠️ `hydrate: false` PROJEKCIJA — FORMOS PARITETAS (#157, PR-3). Redis eilutė yra
+   * vienas hash'as, tad turinio čia neišvengsi; bet kvietėjas, gavęs nehidratuotą
+   * job'ą, VISUOSE backend'uose privalo matyti tą patį: `result` lauko nėra.
+   *
+   * @param {{hydrate?: boolean}} [nustatymai]
+   */
+  async function get(id, { hydrate = true } = {}) {
     const flat = await redisClient.hgetall(JOB_PREFIX + id);
-    return deserialize(flat);
+    const job = deserialize(flat);
+    if (!job || hydrate) return job;
+
+    return metaduomenuProjekcija(job);
   }
 
-  async function update(id, patch) {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.expectedVersion] optimistic lock sąlyga (#184, 7.5b)
+   * @returns {object|null|"CONCURRENCY_CONFLICT"}
+   */
+  async function update(id, patch, options = {}) {
     const existing = await get(id);
     if (!existing) return null;
     const next = applyPatch(existing, patch);
-    await redisClient.hset(JOB_PREFIX + id, serialize(next));
+
+    /**
+     * ⚠️ SU SĄLYGA - PER LUA, BE SĄLYGOS - PER `HSET` (#184, 7.5b).
+     *
+     * Be `expectedVersion` elgesys nesikeičia (last-write-wins, kaip iki šiol).
+     * Su sąlyga rašymas privalo eiti per skriptą: JS patikra tarp `get()` ir
+     * `hset()` neapsaugotų nuo nieko, nes tarp jų yra `await`.
+     */
+    if (options.expectedVersion !== undefined) {
+      const flat = serializeBeVersijos(next);
+      const args = [versijosArgumentas(options.expectedVersion)];
+      for (const [k, v] of Object.entries(flat)) args.push(k, v);
+
+      const outcome = await redisClient.eval(CAS_VERSIJA_LUA, 1, JOB_PREFIX + id, ...args);
+      const [kodas, naujaVersija] = Array.isArray(outcome) ? outcome : [outcome, null];
+      if (Number(kodas) === -1) return null;
+      if (Number(kodas) === 2) return "CONCURRENCY_CONFLICT";
+      next.version = Number(naujaVersija);
+    } else {
+      /**
+       * ⚠️ VIENA TRANSAKCIJA, NE DU `await` (#184, Codex F1).
+       *
+       * `HSET` rašo visus laukus IŠSKYRUS `version`, o `HINCRBY` versiją didina
+       * atominiu serverio skaitikliu — padidinimas nė vieno nepraranda.
+       *
+       * ⚠️ BET DVIEM ATSKIROMIS KOMANDOMIS TO NEUŽTENKA, IR PIRMOJI ŠIO PR
+       * REDAKCIJA TĄ TIK APRAŠĖ, O NE UŽDARĖ. Jei `HSET` pavyksta, o `HINCRBY`
+       * krenta (nutrūkęs ryšys tarp `await`), lieka NAUJI LAUKAI SU SENA
+       * VERSIJA. Tą versiją turintis klientas tada praeina CAS ir perrašo
+       * neužfiksuotą pakeitimą — t. y. lūžta būtent ta invarianta, kurią B6
+       * atkuria. „Sisteminis last-write-wins" čia buvo klaidingas pateisinimas:
+       * klausimas ne apie laukų nugalėtoją, o apie tai, ar versija seka mutacijas.
+       *
+       * `MULTI`/`EXEC` daro tai viskas-arba-nieko: nutrūkus ryšiui iki `EXEC`,
+       * nepritaikoma nė viena komanda.
+       */
+      const rezultatai = await redisClient
+        .multi()
+        .hset(JOB_PREFIX + id, serializeBeVersijos(next))
+        .hincrby(JOB_PREFIX + id, "version", 1)
+        .exec();
+
+      /** `exec()` grąžina `[[err, reikšmė], …]`; versija yra antros komandos rezultatas. */
+      const versijosAtsakas = rezultatai && rezultatai[1];
+      if (!versijosAtsakas || versijosAtsakas[0]) {
+        throw versijosAtsakas && versijosAtsakas[0]
+          ? versijosAtsakas[0]
+          : new Error(`redisStore.update: MULTI/EXEC nepavyko (job ${id}).`);
+      }
+      next.version = Number(versijosAtsakas[1]);
+    }
     await redisClient.zadd(INDEX_KEY, Date.now(), id);
     // Baigtiems job'ams - Redis EXPIRE, kad pats išvalytų po TTL. IŠIMTIS:
     // nebaigtas valymas (audio_cleanup_pending / deletion_pending) - tada
@@ -206,15 +312,54 @@ function createRedisStore(redisClient) {
    * `""` yra teisėtas trims skirtingoms būsenoms (desktop, bendras raktas,
    * legacy), tad be rūšies bendro rakto turėtojas taptų legacy job'ų savininku.
    */
+  /**
+   * ⚠️ VERSIJOS SĄLYGA TIKRINAMA ČIA, NE JS PUSĖJE (#184, 7.5b).
+   *
+   * `ARGV[3]` yra laukiama versija arba `''`, kai sąlygos nėra. JS pusėje ta
+   * pati patikra būtų beprasmė: tarp `get()` ir `eval()` yra `await`, ir būtent
+   * tas langas yra visa problema.
+   *
+   * ⚠️ NUOSAVYBĖ TIKRINAMA PIRMA, VERSIJA PO JOS. Grąžinami SKIRTINGI kodai
+   * (`0` vs `2`), nes svetimas savininkas su pasenusia versija privalo gauti
+   * `"FORBIDDEN"` - autorizacijos rezultatas nėra lygiagretumo rezultatas.
+   *
+   * Kodai: `-1` nėra eilutės · `0` svetima · `2` pasenusi versija · `1` įrašyta.
+   */
   const CAS_UPDATE_LUA = `
-    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+    if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
     local id = redis.call('HGET', KEYS[1], 'ownerId')
     if id == false or id == nil then id = '' end
     local kind = redis.call('HGET', KEYS[1], 'ownerKind')
     if kind == false or kind == nil then kind = '' end
-    if id ~= ARGV[1] or kind ~= ARGV[2] then return 0 end
-    redis.call('HSET', KEYS[1], unpack(ARGV, 3))
-    return 1
+    if id ~= ARGV[1] or kind ~= ARGV[2] then return {0, 0} end
+    if ARGV[3] ~= '' then
+      local v = redis.call('HGET', KEYS[1], 'version')
+      if v == false or v == nil then v = '' end
+      if v ~= ARGV[3] then return {2, 0} end
+    end
+    redis.call('HSET', KEYS[1], unpack(ARGV, 4))
+    local nauja = redis.call('HINCRBY', KEYS[1], 'version', 1)
+    return {1, nauja}
+  `;
+
+  /**
+   * VERSIJOS CAS BE NUOSAVYBĖS - `update()` keliui (#184, 7.5b).
+   *
+   * `update()` yra sisteminis kelias (worker'iai, fazių perėjimai): nuosavybės
+   * jis netikrina sąmoningai. Bet `expectedVersion` jam reikalingas lygiai taip
+   * pat, tad atskiras skriptas, o ne `CAS_UPDATE_LUA` su „bet kokiu" savininku:
+   * wildcard savininkas nuosavybės CAS'e būtų tyli spraga, laukianti kvietėjo.
+   *
+   * Kodai: `-1` nėra eilutės · `2` pasenusi versija · `1` įrašyta.
+   */
+  const CAS_VERSIJA_LUA = `
+    if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
+    local v = redis.call('HGET', KEYS[1], 'version')
+    if v == false or v == nil then v = '' end
+    if v ~= ARGV[1] then return {2, 0} end
+    redis.call('HSET', KEYS[1], unpack(ARGV, 2))
+    local nauja = redis.call('HINCRBY', KEYS[1], 'version', 1)
+    return {1, nauja}
   `;
 
   const CAS_REMOVE_LUA = `
@@ -268,10 +413,10 @@ function createRedisStore(redisClient) {
    * Grąžinamos reikšmės: `-1` job'o nėra, `0` įvykis atmestas, `1` įrašyta.
    */
   const CAS_PROGRESS_LUA = `
-    if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+    if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
 
     local status = redis.call('HGET', KEYS[1], 'status')
-    if status ~= ARGV[1] then return 0 end
+    if status ~= ARGV[1] then return {0, 0} end
 
     -- TIPAS irgi turi nepakisti tarp get() ir eval().
     --
@@ -279,11 +424,11 @@ function createRedisStore(redisClient) {
     -- pakeiciamas (restoreRecord perraso hash'a), Lua to nepastebedavo - CAS
     -- lygino tik statusa, faze ir progresa. Rezultatai issiskirdavo.
     local jobType = redis.call('HGET', KEYS[1], 'type')
-    if jobType ~= ARGV[8] then return 0 end
+    if jobType ~= ARGV[8] then return {0, 0} end
 
     local phase = redis.call('HGET', KEYS[1], 'phase')
     if phase == false or phase == nil then phase = '' end
-    if phase ~= ARGV[2] then return 0 end
+    if phase ~= ARGV[2] then return {0, 0} end
 
     local progress = redis.call('HGET', KEYS[1], 'progress')
     if progress ~= false and progress ~= nil and progress ~= 'null' then
@@ -301,8 +446,8 @@ function createRedisStore(redisClient) {
         -- Redis pusej buvo atmetamas, o memory pusej priimamas: ten
         -- Number.isFinite("8") yra false, ir gryna funkcija tokio progreso
         -- nelaiko galiojanciu. Backend'ai issiskirdavo.
-        if type(p.total) == 'number' and p.total ~= tonumber(ARGV[3]) then return 0 end
-        if type(p.current) == 'number' and tonumber(ARGV[4]) < p.current then return 0 end
+        if type(p.total) == 'number' and p.total ~= tonumber(ARGV[3]) then return {0, 0} end
+        if type(p.current) == 'number' and tonumber(ARGV[4]) < p.current then return {0, 0} end
       end
     end
 
@@ -310,7 +455,20 @@ function createRedisStore(redisClient) {
       'progress', ARGV[5],
       'progressKnown', ARGV[6],
       'updatedAt', ARGV[7])
-    return 1
+
+    -- VERSIJA DIDINAMA IR CIA (#184, Codex B7).
+    --
+    -- Priimtas progreso ivykis yra SEKMINGA AUTORITETINGA MUTACIJA, tad pagal
+    -- 7.5b kontrakta ji privalo didinti version. Memory ir PostgreSQL tai daro
+    -- per applyPatch(); Redis progreso kelias yra ATSKIRAS ir ji aplenkdavo.
+    --
+    -- Pasekme buvo ne kosmetine: po priimto Redis progreso ivykio snapshot'as su
+    -- senaja versija LIKDAVO galiojantis velesniam CAS, nors iraso busena jau
+    -- buvo pasikeitusi. Trys backend'ai turejo tris skirtingus version
+    -- kontraktus, o bendras rinkinys to nematuoja - progreso kelias per
+    -- FakeRedis eval neturi.
+    local nauja = redis.call('HINCRBY', KEYS[1], 'version', 1)
+    return {1, nauja}
   `;
 
   /**
@@ -368,8 +526,14 @@ function createRedisStore(redisClient) {
       existing.type == null ? "" : String(existing.type)
     );
 
-    if (Number(outcome) === -1) return null;
-    if (Number(outcome) === 0) return "REJECTED";
+    /**
+     * ⚠️ SKRIPTAS GRĄŽINA `{kodas, naujaVersija}` (#184, Codex B7). Klaidų kodai
+     * lieka tie patys; nauja tik antroji reikšmė, kurios šis kelias nenaudoja —
+     * grąžinamas įrašas vis tiek perskaitomas iš naujo (žr. žemiau).
+     */
+    const [kodas] = Array.isArray(outcome) ? outcome : [outcome];
+    if (Number(kodas) === -1) return null;
+    if (Number(kodas) === 0) return "REJECTED";
 
     await redisClient.zadd(INDEX_KEY, now, id);
 
@@ -382,26 +546,87 @@ function createRedisStore(redisClient) {
   }
 
   /** @returns {object|null|"FORBIDDEN"} */
-  async function getOwned(id, scope) {
-    const job = await get(id);
+  /** @param {{hydrate?: boolean}} [nustatymai] forma vienoda visuose backend'uose (#157, PR-3) */
+  async function getOwned(id, scope, nustatymai = {}) {
+    const job = await get(id, nustatymai);
     if (!job) return null;
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }
 
-  /** @returns {object|null|"FORBIDDEN"} */
-  async function updateOwned(id, patch, scope) {
+  /**
+   * ATOMINIS IR IDEMPOTENTIŠKAS TERMINALUS PERĖJIMAS (#184, 7.5b).
+   *
+   * ⚠️ REDIS NEGALI TO PADARYTI VIENU LUA SKRIPTU, IR TAI SĄMONINGA.
+   *
+   * Sprendimą priima `jobPhase` — GRYNA JS funkcija. Perrašius perėjimų grafą
+   * ir rezultatų lygybę į Lua, atsirastų ANTRAS gyvavimo ciklo autoritetas,
+   * kurio #184 eksplicitiškai draudžia („perėjimų grafas SQL'e neperrašomas").
+   *
+   * Vietoj to atomiškumą duoda VERSIJOS CAS iš to paties snapshot'o, kuriuo
+   * buvo priimtas sprendimas: jei įrašas tarp skaitymo ir rašymo pasikeitė,
+   * `CAS_VERSIJA_LUA` rašymo neįvykdo, ir kvietėjas gauna konfliktą, ne tylų
+   * perrašymą. PostgreSQL šito nereikia — ten sprendimas priimamas po
+   * `FOR UPDATE` toje pačioje transakcijoje.
+   *
+   * @returns {object|null|"RESULT_CONFLICT"|"COMPLETED_WITHOUT_RESULT"|"CONCURRENCY_CONFLICT"}
+   */
+  async function finishAtomic(id, status, extra = {}) {
+    const jobPhase = require("../jobPhase");
+    const job = await get(id);
+    if (!job) return null;
+
+    const jauBaigtas = idempotentiskasAtsakymas(job, status, extra);
+    if (jauBaigtas !== undefined) return jauBaigtas;
+
+    const patch = jobPhase.finish(job, status, extra);
+    const rezultatas = await update(id, patch, { expectedVersion: job.version });
+
+    /**
+     * ⚠️ PO PRALAIMĖTO CAS BŪSENA PERSKAITOMA IR PERKLASIFIKUOJAMA (#184, Codex B8).
+     *
+     * PostgreSQL sprendimą priima po `FOR UPDATE` toje pačioje transakcijoje, tad
+     * lenktynių pralaimėtojas iškart mato įsipareigotą būseną ir grąžina
+     * `RESULT_CONFLICT`. Redis to negali: sprendimą priima gryna JS funkcija, o
+     * atomiškumą duoda versijos CAS. Grąžinus vien `CONCURRENCY_CONFLICT`,
+     * kvietėjo retry pamatytų jau `completed` job'ą ir gautų NUGALĖTOJO rezultatą
+     * kaip idempotentišką sėkmę — reikalingas `RESULT_CONFLICT` dingtų tyliai, ir
+     * trys backend'ai atsakytų skirtingai į tą pačią lenktynę.
+     *
+     * ⚠️ VIENAS PERSKAITYMAS, BE CIKLO. Jei įrašas tebėra ne terminalus, tai
+     * TIKRAS lygiagretumo konfliktas, ir kvietėjas sprendžia pats.
+     */
+    if (rezultatas === "CONCURRENCY_CONFLICT") {
+      const dabartinis = await get(id);
+      if (!dabartinis) return null;
+
+      const perklasifikuota = idempotentiskasAtsakymas(dabartinis, status, extra);
+      if (perklasifikuota !== undefined) return perklasifikuota;
+    }
+
+    return rezultatas;
+  }
+
+  /** @returns {object|null|"FORBIDDEN"|"CONCURRENCY_CONFLICT"} */
+  async function updateOwned(id, patch, scope, options = {}) {
     const existing = await get(id);
     if (!existing) return null;
     if (!matchesOwner(existing, scope)) return "FORBIDDEN";
 
     const next = applyPatch(existing, patch);
-    const flat = serialize(next);
-    const args = [normalizeOwnerId(scope.ownerId), scope.ownerKind || ""];
+    const flat = serializeBeVersijos(next);
+    const args = [
+      normalizeOwnerId(scope.ownerId),
+      scope.ownerKind || "",
+      versijosArgumentas(options.expectedVersion),
+    ];
     for (const [k, v] of Object.entries(flat)) args.push(k, v);
 
     const outcome = await redisClient.eval(CAS_UPDATE_LUA, 1, JOB_PREFIX + id, ...args);
-    if (Number(outcome) === -1) return null;
-    if (Number(outcome) === 0) return "FORBIDDEN";
+    const [kodas, naujaVersija] = Array.isArray(outcome) ? outcome : [outcome, null];
+    if (Number(kodas) === -1) return null;
+    if (Number(kodas) === 0) return "FORBIDDEN";
+    if (Number(kodas) === 2) return "CONCURRENCY_CONFLICT";
+    next.version = Number(naujaVersija);
 
     await redisClient.zadd(INDEX_KEY, Date.now(), id);
     if (hasPendingCleanup(next)) {
@@ -423,13 +648,37 @@ function createRedisStore(redisClient) {
     return true;
   }
 
-  async function remove(id) {
+  /**
+ * ⚠️ `tiketiniAdresai` PRIIMAMAS IR IGNORUOJAMAS SĄMONINGAI (#157, PR-5).
+ *
+ * Artefaktų aibės CAS turi prasmę tik ten, kur yra bandymų registras. Šis backend'as
+ * external rezultatų neturi, tad tikėtina aibė VISADA tuščia ir visada sutampa — tai
+ * faktas, ne praleidimas. Parametras priimamas, kad kvietėjas neturėtų šakos „ar šis
+ * backend'as moka".
+ */
+async function remove(id, _nustatymai = {}) {
     const existed = await redisClient.exists(JOB_PREFIX + id);
 
     await redisClient.del(JOB_PREFIX + id);
     await redisClient.zrem(INDEX_KEY, id);
 
     return Boolean(existed);
+  }
+
+  /**
+   * ⚠️ REDIS REŽIME APLIKACIJA PASENUSIŲ JOB'Ų NETRINA - GRĄŽINAM TUŠČIĄ.
+   *
+   * Terminą čia vykdo pats Redis per `EXPIRE`: hash'as išnyksta be jokio
+   * aplikacijos veiksmo, tad nėra momento, kuriame būtų galima įrašyti žymą
+   * PRIEŠ šalinimą. `sweepExpired()` šiame backend'e tik genėja `jobs:index`
+   * nuo raktų, kurių hash jau nebėra - tai priežiūra, ne ištrynimas.
+   *
+   * ⚠️ TAI APRIBOJIMAS, NE PRALEIDIMAS: `docs/deletion-guarantees.md` jį
+   * įvardija. Retencijos barjeras galioja `postgres` ir `memory` jobStore
+   * režimuose; Redis režime pasenusio jobo ID žymos negauna.
+   */
+  async function listExpired() {
+    return [];
   }
 
   async function sweepExpired(now = Date.now()) {
@@ -466,8 +715,131 @@ function createRedisStore(redisClient) {
    * Naudoja `_scanJobs`, kuris eina per `SCAN`, ne `KEYS` – pastarasis
    * blokuotų Redis, kol pereina visą raktų erdvę.
    */
-  async function listAll() {
-    return _scanJobs();
+  async function listAll({ hydrate = true } = {}) {
+    const visi = await _scanJobs();
+    return hydrate ? visi : visi.map(metaduomenuProjekcija);
+  }
+
+  /**
+   * VISOS job'o REZULTATO artefaktų nuorodos (#157, PR-5).
+   *
+   * ⚠️ TUŠČIAS SĄRAŠAS ČIA YRA FAKTAS, NE PRIELAIDA.
+   *
+   * ``redis`` rezultatą persistina TIK savo įraše: external rašymo kelio (`rasymoSaugykla`,
+   * bandymų registras) šis backend'as neturi, tad „job'as neturi external artefaktų" yra
+   * konstrukcijos savybė, o ne spėjimas apie duomenis. Skirtumas svarbus: fasadas `null`
+   * traktuoja kaip „nežinau, netrink", o `[]` — kaip „nėra ko trinti", ir pastarasis čia
+   * teisingas.
+   *
+   * ⚠️ JEI KADA NORS ATSIRASTŲ EXTERNAL KELIAS REDIS BACKEND'E, ŠIS METODAS PRIVALO
+   * PASIKEISTI KARTU. Kontrakto testas tikrina elgesį (po `finish()` su rezultatu sąrašas
+   * lieka tuščias), tad tylus praleidimas pasimatytų.
+   */
+  async function listResultArtifacts() {
+    return [];
+  }
+
+  /**
+   * Rezultato artefaktų šalinimas — `redis` backend'e nėra ko šalinti (#157, PR-5).
+   *
+   * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: external rašymo kelio šis backend'as
+   * neturi, tad tuščias rezultatas yra konstrukcijos savybė. Metodas egzistuoja, kad
+   * erasure kelias neturėtų `typeof === "function"` šakos: tokia šaka reikštų tylų
+   * praleidimą ten, kur praleidimas yra BDAR klausimas.
+   */
+  async function deleteResultArtifacts() {
+    return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+  }
+
+  /**
+   * Šlavimo verdiktai — `redis` backend'e kandidatų nėra (#157, PR-5).
+   *
+   * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: bandymų registro šis backend'as
+   * neturi, tad ir šluoti nėra ko. Metodas egzistuoja, kad šlavėjas neturėtų
+   * `typeof === "function"` šakos.
+   */
+  /** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+  /**
+   * Jungties tapatybė — `redis` backend'as jos NETURI (#157, PR-5).
+   *
+   * ⚠️ `null` REIŠKIA „NĖRA JUNGTIES", NE „NEŽINAU". Kvietėjas (retencijos šlavėjas) iš
+   * to daro teisingą išvadą: be jungties tapatybės negalima įrodyti, kad žymos ir bandymai
+   * yra toje pačioje bazėje, tad žingsnis nevykdomas.
+   */
+  /** Registro nėra — karantinuoti nėra ko (#157, PR-5). */
+  async function pazymetiKarantina() {
+    return [];
+  }
+
+  async function karantinuotuSkaicius() {
+    return 0;
+  }
+
+  function jungtiesTapatybe() {
+    return null;
+  }
+
+  async function valytiniBandymai() {
+    return { kandidatai: [], praleista: 0 };
+  }
+
+  async function pasalintiBandymus() {
+    return 0;
+  }
+
+  /**
+   * ARTEFAKTŲ REZOLVERIO BŪSENA — STEBĖTOJUI (#157, PR-7, 3 sąlyga).
+   *
+   * ⚠️ ŠIS BACKEND'AS REZOLVERIO NETURI, IR TUŠČIAS ATSAKYMAS YRA TEISINGAS.
+   *
+   * Metodas privalomas VISIEMS trims, nes `jobStoreBackendContract` lygina TIKSLIAS
+   * aibes: trūkstamas metodas reikštų, kad stebėtojas, radęs `undefined`, tyliai
+   * praleistų patikrą — t. y. „nematau" atrodytų kaip „viskas gerai". Būtent tos
+   * klasės sargas ir yra.
+   *
+   * Ir atsakymas nėra tuščia formalybė: diegimas su `ARTIFACT_STORE_BACKEND=s3`
+   * prie ne-PostgreSQL job store'o rezultatų į S3 nerašo, ir verdiktas tai pasako.
+   */
+  /**
+   * RESTORE VERIFIKACIJA (#157, PR-7) — ŠIS BACKEND'AS NEPRIKLAUSOMOS PATIKROS NETURI.
+   *
+   * ⚠️ ATSAKYMAS NĖRA TUŠČIA ATASKAITA. Rezultatai čia gyvena job'o įraše, tad
+   * nepriklausomo `bytes`/`checksum` metaduomens, su kuriuo būtų galima lyginti,
+   * NĖRA IŠ VISO. Kiekvienas rezultatas yra `nepatikrinama_inline`.
+   *
+   * Grąžinus `eiluciuIsViso: 0`, ataskaita sakytų „nėra ko tikrinti", nors rezultatų
+   * yra — operatorius manytų, kad bazė tuščia. Teisingas atsakymas: „N rezultatų, nė
+   * vienas nepatikrinamas nepriklausomai".
+   */
+  async function verifyResultArtifacts() {
+    const { VERDIKTAS, sudarytiAtaskaita } = require("../artifactRestoreVerify");
+    const { rezultatoNera } = require("./common");
+
+    /**
+     * ⚠️ HIDRATUOJAMA SĄMONINGAI. Metaduomenų projekcija `result` PAŠALINA, tad be
+     * hidratacijos „ar rezultatas yra" atsakyti neįmanoma — ataskaita suskaičiuotų
+     * nulį ir tylėtų apie visus rezultatus. Procedūra ir taip yra brangus, retai
+     * paleidžiamas atkūrimo kelias.
+     */
+    const jobai = await listAll({ hydrate: true });
+
+    const verdiktai = jobai
+      .filter((job) => !rezultatoNera(job.result))
+      .map((job) => ({
+        jobId: job.id,
+        storageType: "inline",
+        verdiktas: VERDIKTAS.NEPATIKRINAMA_INLINE,
+      }));
+
+    return sudarytiAtaskaita(verdiktai);
+  }
+
+  function saugykluBusena() {
+    return { rasymoBackend: null, registruotiTipai: [] };
+  }
+
+  async function sweepResultArtifacts() {
+    return [];
   }
 
   async function listReferencedStorageKeys() {
@@ -481,13 +853,14 @@ function createRedisStore(redisClient) {
     return [...keys];
   }
 
+  /** ⚠️ METADUOMENŲ KELIAS — ta pati projekcija kaip kituose backend'uose (#157, PR-3). */
   async function listByFlag(field, limit = 100) {
     const jobs = await _scanJobs();
     const pending = [];
 
     for (const job of jobs) {
       if (pending.length >= limit) break;
-      if (job[field]) pending.push(job);
+      if (job[field]) pending.push(metaduomenuProjekcija(job));
     }
 
     return pending;
@@ -540,7 +913,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, updateOwned, removeOwned, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, verifyResultArtifacts, saugykluBusena, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

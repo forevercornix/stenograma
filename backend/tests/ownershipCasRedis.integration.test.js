@@ -294,3 +294,238 @@ test("#159 REDIS: fono keliai apdoroja job'us su SKIRTINGAIS savininkais", { ski
     await client.quit();
   }
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * OPTIMISTIC LOCK VERSIJOS CAS (#184, 7.5b)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#184 REDIS: `expectedVersion` konfliktas atmeta rašymą Lua viduje", { skip }, async () => {
+  /**
+   * ⚠️ TIKRAS REDIS BŪTINAS, IR TAI NE FORMALUMAS.
+   *
+   * `FakeRedis` `eval` neturi, tad versijos sąlyga per jį apskritai nevykdoma.
+   * Patikra JS pusėje būtų bevertė: tarp `get()` ir `hset()` yra `await`, ir
+   * būtent tas langas yra visa problema. Šis testas tikrina, kad sąlyga realiai
+   * gyvena SKRIPTE.
+   */
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    assert.equal(job.version, 1);
+
+    /** Konkurentas įrašo savo pakeitimą - versija tampa 2. */
+    await store.update(job.id, { actor: "konkurentas" });
+
+    /** Pasenęs kvietėjas tebeturi snapshot'ą su `version = 1`. */
+    const rezultatas = await store.update(job.id, { actor: "pasenes" }, { expectedVersion: 1 });
+    assert.equal(rezultatas, "CONCURRENCY_CONFLICT");
+
+    const dabartinis = await store.get(job.id);
+    assert.equal(dabartinis.actor, "konkurentas", "konfliktas NIEKO neįrašė");
+    assert.equal(dabartinis.version, 2, "konfliktas versijos NEDIDINA");
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});
+
+test("#184 REDIS: sutampanti versija praeina, ir increment'as yra TOJE PAČIOJE operacijoje", { skip }, async () => {
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    const po = await store.update(job.id, { actor: "as" }, { expectedVersion: 1 });
+    assert.equal(po.version, 2);
+    assert.equal(po.actor, "as");
+
+    /** Persistentinė reikšmė - iš Redis, ne iš grąžinimo. */
+    const hash = await client.hgetall(`job:${job.id}`);
+    assert.equal(hash.version, "2", "versija ir patch'as įrašyti kartu");
+    assert.equal(hash.actor, "as");
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});
+
+test("#184 REDIS: SVETIMAS savininkas su pasenusia versija gauna FORBIDDEN, ne konfliktą", { skip }, async () => {
+  /**
+   * ⚠️ TVARKA TIKRINAMA LUA VIDUJE. Abi nesėkmės sąlygos tenkinamos vienu metu;
+   * skriptas nuosavybę tikrina PIRMA ir grąžina `0`, ne `2`. Perklasifikavus
+   * kvietėjas gautų „bandyk dar kartą" ten, kur atsakymas yra „tau negalima".
+   */
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    await store.update(job.id, { actor: "konkurentas" });
+
+    const rezultatas = await store.updateOwned(
+      job.id,
+      { actor: "as" },
+      user(B),
+      { expectedVersion: 1 }
+    );
+    assert.equal(rezultatas, "FORBIDDEN");
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});
+
+test("#184 REDIS: SAVAS savininkas su pasenusia versija gauna CONCURRENCY_CONFLICT", { skip }, async () => {
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    await store.update(job.id, { actor: "konkurentas" });
+
+    const rezultatas = await store.updateOwned(
+      job.id,
+      { actor: "as" },
+      user(A),
+      { expectedVersion: 1 }
+    );
+    assert.equal(rezultatas, "CONCURRENCY_CONFLICT");
+    assert.equal((await store.get(job.id)).actor, "konkurentas");
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});
+
+test("#184 REDIS: be `expectedVersion` elgesys NEPAKITĘS (last-write-wins)", { skip }, async () => {
+  /**
+   * ⚠️ REGRESIJOS SARGAS. Sąlyginis kelias neturi tapti numatytuoju: sisteminiai
+   * kvietėjai (retencija, valymas) jos neperduoda, ir jų semantika 7.5b
+   * nekeičiama.
+   */
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    await store.update(job.id, { actor: "pirmas" });
+    const po = await store.update(job.id, { actor: "antras" });
+    assert.equal(po.actor, "antras");
+    assert.equal(po.version, 3);
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});
+
+test("#184 REDIS: nerastas įrašas grąžina `null` IR su sąlyga, IR be jos", { skip }, async () => {
+  const { store, client } = await freshStore();
+  try {
+    assert.equal(await store.update("nera-tokio", { actor: "x" }), null);
+    assert.equal(await store.update("nera-tokio", { actor: "x" }, { expectedVersion: 1 }), null);
+  } finally {
+    await client.quit();
+  }
+});
+
+test("#184-B ⚠️ `finishAtomic` po pralaimėto CAS PERKLASIFIKUOJA į RESULT_CONFLICT", { skip }, async () => {
+  /**
+   * ⚠️ TRYS BACKEND'AI TURI ATSAKYTI VIENODAI Į TĄ PAČIĄ LENKTYNĘ (Codex B8).
+   *
+   * PostgreSQL sprendimą priima po `FOR UPDATE` toje pačioje transakcijoje, tad
+   * pralaimėtojas iškart mato įsipareigotą būseną ir grąžina `RESULT_CONFLICT`.
+   * Redis atomiškumą gauna iš versijos CAS, tad be perklasifikavimo grąžindavo
+   * vien `CONCURRENCY_CONFLICT` — o kvietėjo retry tada pamatytų jau `completed`
+   * job'ą ir gautų NUGALĖTOJO rezultatą kaip idempotentišką sėkmę. Reikalingas
+   * `RESULT_CONFLICT` dingtų TYLIAI.
+   *
+   * ⚠️ ĮSITERPIAMA PER KLIENTĄ, NE PER `store.get` (pirmoji redakcija krito CI).
+   *
+   * `finishAtomic()` kviečia MODULIO VIDINĮ `get()`, ne grąžinto objekto metodą,
+   * tad `store.get` perrašymas nieko nepakeičia — stub'as taip ir nesuveikė.
+   * Vienintelis realus įsiterpimo taškas yra pats Redis klientas: vidinis
+   * `get()` eina per `hgetall`.
+   *
+   * ⚠️ NUGALĖTOJAS DIRBA PER ATSKIRĄ JUNGTĮ, kad jo paties `hgetall` nepatektų į
+   * tą patį perėmimą — priešingu atveju gautume rekursiją, ne lenktynę.
+   */
+  const pralaimetojas = await freshStore();
+  const nugaletojas = await freshStore();
+  const job = await pralaimetojas.store.create({ ownerId: A, ownerKind: K.USER });
+
+  try {
+    await pralaimetojas.store.update(job.id, { status: "processing", phase: "validating" });
+
+    const originalusHgetall = pralaimetojas.client.hgetall.bind(pralaimetojas.client);
+    let konkurentasIvyko = false;
+    pralaimetojas.client.hgetall = async (key) => {
+      const snapshot = await originalusHgetall(key);
+      if (!konkurentasIvyko && key === `job:${job.id}`) {
+        konkurentasIvyko = true;
+        /** Nugalėtojas įsipareigoja SAVO rezultatą PO mūsų skaitymo. */
+        await nugaletojas.store.finishAtomic(job.id, "completed", {
+          result: { vykdytojas: "A" },
+        });
+      }
+      return snapshot;
+    };
+
+    let rezultatas;
+    try {
+      rezultatas = await pralaimetojas.store.finishAtomic(job.id, "completed", {
+        result: { vykdytojas: "B" },
+      });
+    } finally {
+      pralaimetojas.client.hgetall = originalusHgetall;
+    }
+
+    assert.ok(konkurentasIvyko, "prielaida: konkurentas tikrai įsiterpė");
+    assert.equal(
+      rezultatas,
+      "RESULT_CONFLICT",
+      "⚠️ pralaimėtojas privalo gauti REZULTATO konfliktą, ne generinį versijos"
+    );
+
+    const galutinis = await nugaletojas.store.get(job.id);
+    assert.deepEqual(galutinis.result, { vykdytojas: "A" }, "nugalėtojo rezultatas nepaliestas");
+  } finally {
+    await nugaletojas.client.del(`job:${job.id}`).catch(() => {});
+    await nugaletojas.client.zrem("jobs:index", job.id).catch(() => {});
+    await pralaimetojas.client.quit().catch(() => {});
+    await nugaletojas.client.quit().catch(() => {});
+  }
+});
+
+test("#184-B ⚠️ priimtas progreso įvykis didina `version` (Lua HINCRBY)", { skip }, async () => {
+  /**
+   * ⚠️ REDIS PROGRESO KELIAS VERSIJOS APSKRITAI NEDIDINO (Codex B7).
+   *
+   * `CAS_PROGRESS_LUA` rašė tik `progress`, `progressKnown` ir `updatedAt`, o
+   * memory bei PostgreSQL eina per `applyPatch()` ir didina. Pasekmė nebuvo
+   * kosmetinė: po PRIIMTO progreso įvykio snapshot'as su senąja versija LIKDAVO
+   * galiojantis vėlesniam CAS, nors įrašo būsena jau pasikeitusi — trys
+   * backend'ai turėjo tris skirtingus `version` kontraktus.
+   *
+   * ⚠️ Vietinis `jobVersionParity` testas to nepagavo: jis eina per fasadą su
+   * MEMORY backend'u, o Redis progreso kelias reikalauja `eval`.
+   */
+  const { store, client } = await freshStore();
+  const job = await store.create({ ownerId: A, ownerKind: K.USER });
+  try {
+    await store.update(job.id, { status: "processing", phase: "transcribing" });
+    const pries = await store.get(job.id);
+
+    const po = await store.reportProgressAtomic(job.id, {
+      phase: "transcribing",
+      progress: { current: 5, total: 10 },
+    });
+
+    assert.ok(po && typeof po === "object", "įvykis TIKRAI priimtas, ne atmestas");
+    assert.equal(po.progress.current, 5);
+    assert.equal(po.version, pries.version + 1, "⚠️ priimtas įvykis yra mutacija: tiksliai +1");
+
+    const hash = await client.hgetall(`job:${job.id}`);
+    assert.equal(hash.version, String(pries.version + 1), "persistentinė reikšmė sutampa");
+  } finally {
+    await client.del(`job:${job.id}`).catch(() => {});
+    await client.zrem("jobs:index", job.id).catch(() => {});
+    await client.quit();
+  }
+});

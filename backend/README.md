@@ -283,6 +283,12 @@ tipų būseną atskirai, tad tokį filtravimą būtų nesunku pridėti `server.j
 ```bash
 npm test        # node --test (built-in) - 1042 testai, mock provideriais, be jokių raktų
 npm run check   # node --check kiekvienam .js failui
+
+# #237: ar PR nepašalino testų? Lygina identitetus tarp `git merge-base` ir head'o.
+# Reikia git istorijos - CI tam turi ATSKIRĄ `deleted-tests` job'ą su `fetch-depth: 0`.
+npm run test:deleted                       # bazė: origin/main
+npm run test:deleted -- --base origin/main # eksplicitinė bazė (derinimui)
+npm run test:deleted -- --self-test        # tik sargo savipatikra, repo neliečiama
 ```
 
 - `tests/protocolSchema.test.js` — schema validacija (privalomi laukai, tipai, klaidų pranešimai).
