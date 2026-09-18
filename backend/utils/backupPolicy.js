@@ -70,6 +70,85 @@ const EXCLUDED_DESPITE_PERSISTENT = {
     "atskaitomybės žurnalas, ne būsena – atkūrimas grąžintų GDPR ištrintus įrašus",
 };
 
+/**
+ * ARTEFAKTO TIPAS → PERSISTENTINĖS LENTELĖS VARDAS (#155, 7.4f / #231).
+ *
+ * ⚠️ KODĖL ŠIS ŽEMĖLAPIS APSKRITAI REIKALINGAS.
+ *
+ * Politika operuoja ARTEFAKTŲ TIPAIS, o 7.6 atkūrimo DoD klausia apie
+ * LENTELES („prieš kopiją įrašyta unikali audito eilutė po restore
+ * NERANDAMA"). Be atvaizdavimo testas turėtų įrašyti `audit_log` literalu, o
+ * toks sąrašas tyliai išsiskiria su politika - būtent to 7.4f ir vengia.
+ *
+ * ⚠️ ŽEMĖLAPIS PRIVALO BŪTI IŠSAMUS. Naujas `ARTEFACT_TYPES` narys be įrašo čia
+ * krinta testu: kitaip vietoj rankomis palaikomo sąrašo TESTE gautume rankomis
+ * palaikomą žemėlapį KODE, ir problema tik persikeltų.
+ *
+ * `null` yra teisėta reikšmė - ji reiškia „šis tipas neturi savo lentelės"
+ * (failai saugykloje, laikini artefaktai). Ji SĄMONINGA, ne praleista.
+ *
+ * ⚠️ `transcript` / `protocol` -> `job_results` YRA APIE METADUOMENIS, NE APIE TURINĮ
+ * (#157, PR-5, sąlyga 5).
+ *
+ * Iki #157 abu teiginiai sutapdavo: eilutė buvo ir adresas, ir turinys. Po #157 external
+ * eilutėje `payload` yra `NULL`, o turinys guli S3 arba failų sistemoje — tad
+ * `job_results` kopija atkuria NUORODĄ, ne rezultatą. Žemėlapis lieka teisingas savo
+ * klausimui („kurią LENTELĘ liečia šis tipas"), bet jis NEBEATSAKO į klausimą „ar
+ * turinys pateks į kopiją".
+ *
+ * ⚠️ ATSAKYMAS YRA PER-ROW, TAD JIS ČIA NETELPA. Po migracijos DB bus mišri, ir
+ * konfigūracija nesako, kur guli JAU EGZISTUOJANTIS rezultatas; sprendžia eilutės
+ * `storage_type`.
+ *
+ * ⚠️ PER-ROW ATSAKYMAS DABAR EGZISTUOJA (#157, PR-7, sąlyga 6):
+ * `postgresStore.verifyResultArtifacts()` eina per `job_results` ir sprendžia PAGAL
+ * EILUTĘ — inline eilutė gauna „nepatikrinama", external tikrinama prieš DB
+ * persistintus `bytes`/`checksum`. Ataskaitos taisyklės gyvena
+ * `utils/artifactRestoreVerify.js`.
+ *
+ * ⚠️ IR ŠIS ŽEMĖLAPIS LIEKA VIEN APIE LENTELES — SĄMONINGAI.
+ *
+ * Būtų patogu jį „pataisyti" pridėjus turinio požymį, bet tai reikštų DVI vietas,
+ * atsakančias į tą patį klausimą, ir viena iš jų būtų konfigūracija — t. y. tiksliai
+ * ta forma, kurios per-row sprendimas ir vengia. Žemėlapis atsako „kurią LENTELĘ
+ * liečia šis tipas"; kur guli TURINYS, atsako eilutė, ir tik ji.
+ *
+ * ⚠️ ŽEMĖLAPIS NETURI VYKDOMO KVIETĖJO — IŠMATUOTA, NE NUMANYTA (#157, PR-7).
+ *
+ * `TABLE_BY_TYPE` skaito tik testai (`backupPolicy.test.js`) ir žmonės. Tai svarbu
+ * apimčiai: „perkelti sprendimą į per-row" čia neturi ką perkelti — sprendimo
+ * kelio nėra. Todėl PR-7 ne keičia šį žemėlapį, o SUKURIA per-row kelią ten, kur
+ * sprendimas realiai priimamas, ir palieka žemėlapį atsakantį tik savo klausimą.
+ */
+const TABLE_BY_TYPE = Object.freeze({
+  [ARTEFACT_TYPES.SOURCE_AUDIO.id]: null,
+  [ARTEFACT_TYPES.UPLOAD_TEMP.id]: null,
+  [ARTEFACT_TYPES.CONVERSION_TEMP.id]: null,
+  [ARTEFACT_TYPES.TRANSCRIPT.id]: "job_results",
+  [ARTEFACT_TYPES.TRANSCRIPT_REDACTED.id]: null,
+  [ARTEFACT_TYPES.PROTOCOL.id]: "job_results",
+  [ARTEFACT_TYPES.EXPORT_REDACTED.id]: null,
+  [ARTEFACT_TYPES.EXPORT_ORIGINAL.id]: null,
+  [ARTEFACT_TYPES.QUEUE_RECORD.id]: null,
+  [ARTEFACT_TYPES.JOB_RECORD.id]: "jobs",
+  [ARTEFACT_TYPES.AUDIT_ENTRY.id]: "audit_log",
+});
+
+/**
+ * Lentelės, kurių kopija NEAPIMA.
+ *
+ * ⚠️ IŠVEDAMA IŠ POLITIKOS, ne surašoma. `excludedTypes()` jau žino, kas
+ * išbraukta ir kodėl; čia tik pridedamas lentelės vardas. 7.6 testas gauna
+ * aibę iš ČIA, o ne iš literalo.
+ */
+function excludedTables() {
+  return excludedTypes()
+    .map((įrašas) => TABLE_BY_TYPE[įrašas.type])
+    .filter((lentelė) => lentelė !== null && lentelė !== undefined)
+    .filter((lentelė, i, visos) => visos.indexOf(lentelė) === i)
+    .sort();
+}
+
 /** Ar šis artefakto tipas įtraukiamas į kopiją? */
 function isIncluded(typeId) {
   const type = TYPES_BY_ID[typeId];
@@ -189,6 +268,8 @@ module.exports = {
   isIncluded,
   includedTypes,
   excludedTypes,
+  excludedTables,
+  TABLE_BY_TYPE,
   retentionDays,
   isEnabled,
   policySnapshot,

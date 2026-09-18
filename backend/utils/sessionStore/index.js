@@ -2,6 +2,7 @@ const memoryStore = require("./memoryStore");
 const { resolveSessionBackend } = require("./backendSelection");
 const { idleTimeoutMs, absoluteTimeoutMs } = require("./common");
 const { createLogger } = require("../logger");
+const { pgJungtiesNustatymai } = require("../pgConnection");
 
 const log = createLogger("sessionStore");
 
@@ -87,8 +88,8 @@ const REQUIRED_SESSION_CONSTRAINTS = [
  * kuris TCP srautą tyliai numeta, paliktų startą kabantį neribotai ir
  * NIEKADA nepasiektų fail-closed klaidos.
  */
-function connectTimeoutMs() {
-  const raw = Number(process.env.DB_CONNECT_TIMEOUT_MS);
+function connectTimeoutMs(env = process.env) {
+  const raw = Number(env.DB_CONNECT_TIMEOUT_MS);
   return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
 }
 
@@ -111,8 +112,8 @@ function connectTimeoutMs() {
  * serveris nebeatsako apskritai). Ta pati pora ir tos pačios numatytosios
  * reikšmės kaip `utils/startupChecks.js` diagnostikos jungtyje.
  */
-function queryTimeoutMs() {
-  const raw = Number(process.env.DB_QUERY_TIMEOUT_MS);
+function queryTimeoutMs(env = process.env) {
+  const raw = Number(env.DB_QUERY_TIMEOUT_MS);
   return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
 }
 
@@ -124,11 +125,23 @@ function queryTimeoutMs() {
  * vienintelis įrodymas būtų šaltinio teksto paieška (AGENTS.md §9.2).
  */
 function sesijuPoolNustatymai(env = process.env) {
+  /**
+   * ⚠️ JUNGTIES FORMA — NE ČIA (#245). `pgJungtiesNustatymai()` yra VIENINTELIS
+   * autoritetas, kuris renkasi tarp `DATABASE_URL` ir diskrečių `PG*`. Iki šito
+   * šis pool'as mokėjo tik `connectionString`, tad dokumentuotame Compose diegime
+   * (`PG*`, be `DATABASE_URL`) jis gaudavo `connectionString: undefined` ir
+   * jungdavosi prie `pg` numatytosios bazės — TYLIAI, be jokios klaidos.
+   */
+  /**
+   * ⚠️ IR RIBOS SKAITOMOS IŠ TO PATIES `env`. Iki šito jos eidavo per
+   * `process.env`, nors funkcija priima `env` — dvi tiesos apie tą pačią
+   * konfigūraciją viename objekte.
+   */
   return {
-    connectionString: env.DATABASE_URL,
-    connectionTimeoutMillis: connectTimeoutMs(),
-    statement_timeout: queryTimeoutMs(),
-    query_timeout: queryTimeoutMs(),
+    ...pgJungtiesNustatymai(env),
+    connectionTimeoutMillis: connectTimeoutMs(env),
+    statement_timeout: queryTimeoutMs(env),
+    query_timeout: queryTimeoutMs(env),
   };
 }
 
@@ -137,6 +150,23 @@ async function initializePostgres(env) {
   const { createPostgresStore } = require("./postgresStore");
 
   const pool = new Pool(sesijuPoolNustatymai(env));
+
+  /**
+   * ⚠️ NEVEIKLIOS JUNGTIES KLAIDA NETURI NUŽUDYTI PROCESO (#155, 7.4b peržiūra).
+   *
+   * `pg-pool` klaidą neveiklioje jungtyje (PostgreSQL restartas, tinklo trūkis)
+   * skelbia kaip `error` įvykį ANT POOL'O. `EventEmitter` neapdorotą `error`
+   * meta, tad Node nutraukia visą procesą - ne užklausą, o serverį ar worker'į.
+   * Klausytojas paverčia tai tuo, kas jis ir yra: pašalinta jungtis plius logas.
+   *
+   * ⚠️ LOGINAMAS TIK KODAS: `pg` pranešime gali būti vartotojo vardas
+   * (`password authentication failed for user "x"`).
+   */
+  pool.on("error", (klaida) => {
+    log.error("Sesijų pool'o neveiklios jungties klaida - jungtis pašalinta", {
+      klaida: klaida && klaida.code ? klaida.code : "nežinoma",
+    });
+  });
 
   try {
     await pool.query("SELECT 1");

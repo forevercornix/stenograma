@@ -26,7 +26,15 @@ const { ARTEFACT_TYPES, PERSISTENCE, TYPES_BY_ID } = require("./artefactInventor
 const SCAN_STRATEGIES = {
   [ARTEFACT_TYPES.JOB_RECORD.id]: {
     async scan(jobId, { jobStore }) {
-      return Boolean(await jobStore.system.get(jobId));
+      /**
+       * ⚠️ BE HIDRATACIJOS: klausiama, ar ĮRAŠAS yra, o ne kas jame (#157, PR-3).
+       *
+       * Hidratuojant ši patikra sugadinto artefakto atveju MESTŲ — t. y. ištrynimo
+       * PATIKRA lūžtų būtent ties tais job'ais, dėl kurių ji ir daroma. Tai ta pati
+       * klasė kaip `adminDeleteJob()`: verifikacijos kelias negali priklausyti nuo
+       * to, ar artefaktas perskaitomas.
+       */
+      return Boolean(await jobStore.system.get(jobId, { hydrate: false }));
     },
   },
 
@@ -38,10 +46,15 @@ const SCAN_STRATEGIES = {
        * Naudojam TĄ PAČIĄ funkciją, kurią naudoja pats ištrynimas – kitaip
        * skeneris ieškotų to, ko ten iš principo nėra, ir visada rastų „švaru".
        */
-      const subjectId = auditLog.pseudonymizeIdentifier(jobId);
-      if (!subjectId) return false;
-
-      return (await auditLog.getAll()).some((entry) => entry.subjectId === subjectId);
+      /**
+       * ⚠️ EGZISTAVIMO PATIKRA, NE VISO ŽURNALO ATSIĖMIMAS (#155, 7.4b).
+       *
+       * Anksčiau čia buvo `getAll().some(...)`. Persistentiniame režime tai
+       * reikštų, kad kiekviena artefaktų patikra perkelia per tinklą visą
+       * `audit_log` lentelę - o ji auga be ribos. `hasSubject()` skaičiuoja
+       * SQL pusėje ir pats pseudonimizuoja ID.
+       */
+      return auditLog.hasSubject(jobId);
     },
   },
 
@@ -91,8 +104,28 @@ const SCAN_STRATEGIES = {
    * `job.result` viduje. Jų „pėdsakas" yra tiksliai `job_record` pėdsakas, tad
    * atskiras skenavimas duotų tą patį atsakymą du kartus.
    */
-  [ARTEFACT_TYPES.TRANSCRIPT.id]: { scan: null, reason: "saugoma job_record viduje" },
-  [ARTEFACT_TYPES.PROTOCOL.id]: { scan: null, reason: "saugoma job_record viduje" },
+  /**
+   * ⚠️ PRIEŽASTIS PERRAŠYTA: PO #157 „saugoma job_record viduje" NEBĖRA TIESA (PR-5).
+   *
+   * `inline` eilutėms ji tebegalioja, bet external eilutėms turinys guli S3 arba failų
+   * sistemoje, ir tada skenavimas yra VIENINTELIS kelias rasti likutį po nepavykusio
+   * ištrynimo. Priežastis, teigianti daugiau, nei tiesa, yra blogesnė už jos nebuvimą:
+   * ji uždaro klausimą, kurio niekas nebeuždavė.
+   *
+   * ⚠️ SPRENDIMAS YRA PER-ROW, TAD JIS NEGALI GYVENTI ŠIOJE STATINĖJE LENTELĖJE.
+   * Registras aprašo artefakto TIPĄ; fizinę vietą sprendžia vartotojas pagal eilutės
+   * `storage_type` (A4). Todėl čia lieka `scan: null` su TIKSLIA priežastimi, o external
+   * eilučių orphan aptikimas eina per `jobStore.system.listResultArtifacts()` — DB
+   * kryptimi, kaip reikalauja #157 riba.
+   */
+  [ARTEFACT_TYPES.TRANSCRIPT.id]: {
+    scan: null,
+    reason: "inline eilutėse saugoma job_record viduje; external eilutės tikrinamos per registrą",
+  },
+  [ARTEFACT_TYPES.PROTOCOL.id]: {
+    scan: null,
+    reason: "inline eilutėse saugoma job_record viduje; external eilutės tikrinamos per registrą",
+  },
 
   /**
    * EFEMERIŠKI – niekada nesaugomi.

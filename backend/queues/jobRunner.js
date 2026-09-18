@@ -1,5 +1,6 @@
 const { AuditWriteError } = require("../utils/auditWrite");
 const jobStore = require("../utils/jobStore");
+const { patikrintiEilesJungti } = require("./config");
 const { assertResultWithinLimits } = require("../utils/resultLimits");
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
@@ -31,6 +32,27 @@ const _processors = {};
 
 function registerProcessor(type, fn) {
   _processors[type] = fn;
+}
+
+/**
+ * ⚠️ PREFLIGHT VERDIKTAS YRA BŪSENA, NE LOGO EILUTĖ.
+ *
+ * ADR reikalauja, kad rezultatas būtų matomas readiness/`doctor` išvestyje: logo
+ * eilutė dingsta rotacijoje, o operatorius, tikrinantis „kodėl inline", jos
+ * neranda. `null` reiškia „preflight dar nevykdytas" — tai TREČIA būsena, ne
+ * tas pats, kas „nepasiekiama".
+ */
+let _eilesPreflight = null;
+
+/** Ta pati riba kaip readiness (`READINESS_TIMEOUT_MS`), su tuo pačiu numatytuoju. */
+const PREFLIGHT_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.READINESS_TIMEOUT_MS);
+  return Number.isInteger(raw) && raw >= 100 && raw <= 60000 ? raw : 2000;
+})();
+
+/** Grąžina paskutinį preflight verdiktą arba `null`, jei jis dar nevykdytas. */
+function getQueuePreflight() {
+  return _eilesPreflight;
 }
 
 async function init(options = {}) {
@@ -78,6 +100,28 @@ async function init(options = {}) {
     // Naudojam ATSKIRAS eiles (queues/transcriptionQueue.js, protocolQueue.js) -
     // pagal struktūros reikalavimą. Jos sukuriamos lazy pirmo add metu.
     require("bullmq"); // patikrinam, kad bullmq įdiegtas (mes fallback jei ne)
+
+    /**
+     * ⚠️ REALUS PROBE PRIEŠ PRADEDANT KLAUSYTIS (#155, barjero prielaida).
+     *
+     * `require("bullmq")` įrodo tik tai, kad modulis įdiegtas. Jungtis kuriama
+     * LAZY pirmo `add` metu, tad be šito patikrinimo `server.js` pažymėtų
+     * runner'į ready ir imtų klausytis, o PIRMAS `enqueue` kabotų arba kristų —
+     * jau turint priimtą užklausą.
+     *
+     * ⚠️ NESĖKMĖ TRAKTUOJAMA TAIP PAT KAIP `require()` NESĖKMĖ, ne griežčiau.
+     * Tai sąmoninga: naujas fail-closed elgesys keliui, kuris iki šiol
+     * nusileisdavo, būtų politikos pakeitimas, o barjero prielaida reikalauja
+     * MATOMUMO, ne kitokio sprendimo. `REDIS_REQUIRED=true` ir toliau paverčia
+     * tai mirtina — kaip ir visose gretimose šakose.
+     */
+    const verdiktas = await patikrintiEilesJungti({ timeoutMs: PREFLIGHT_TIMEOUT_MS });
+    _eilesPreflight = verdiktas;
+
+    if (!verdiktas.pasiekiama) {
+      throw new Error(`eilė nepasiekiama: ${verdiktas.priezastis}`);
+    }
+
     _mode = "bullmq";
     log.info("Job runner: BullMQ (atskiri worker procesai; atsparu restartams)");
     return _mode;
@@ -207,7 +251,8 @@ async function _runInline(type, jobId, payload) {
   // vis tiek turi vykti. Observability niekada negali tapti vykdymo sąlyga.
   let job = null;
   try {
-    if (typeof jobStore.get === "function") job = await jobStore.system.get(jobId);
+    /** ⚠️ TIK KONTEKSTUI (`requestId`, `actor`) — turinio čia niekas neskaito (#157, PR-3). */
+    if (typeof jobStore.get === "function") job = await jobStore.system.get(jobId, { hydrate: false });
   } catch {
     job = null;
   }
@@ -253,7 +298,8 @@ async function _runInline(type, jobId, payload) {
         return;
       }
 
-      if (tombstones.isDeleted(jobId)) {
+      /** ⚠️ `await` PRIVALOMAS - be jo Promise truthy, ir KIEKVIENAS jobas praleidžiamas (#183). */
+      if (await tombstones.isDeleted(jobId)) {
         log.warn("Praleistas ištrinto jobo vykdymas", { stage: "skipped_deleted", jobId, execution: "inline" });
         return;
       }
@@ -297,7 +343,7 @@ async function _runInline(type, jobId, payload) {
           execution: "inline",
           klaida: error && error.message,
         });
-        await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+        await jobStore.system.finishFailed(jobId, {
           error_code: auditoGedimas ? "AUDIT_UNAVAILABLE" : "AUTHORIZATION_ERROR",
           error_message: auditoGedimas
             ? "Vykdymas nutrauktas: nepavyko užfiksuoti autorizacijos sprendimo."
@@ -316,7 +362,7 @@ async function _runInline(type, jobId, payload) {
          * kelias produkcijoje būtų kritęs. Testas to nepagavo, nes tikrino tik
          * kodo TEKSTĄ (`grep AUTHORIZATION_REVOKED`), ne elgesį.
          */
-        await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, {
+        await jobStore.system.finishFailed(jobId, {
           error_code: "AUTHORIZATION_REVOKED",
           error_message: "Vykdymas nutrauktas: aktoriaus teisės nebegalioja.",
         });
@@ -343,13 +389,29 @@ async function _runInline(type, jobId, payload) {
 async function _atlaisvintiSaltini(jobId, payload) {
   if (!payload || !payload.storageKey) return;
 
-  const { releaseAudio } = require("../utils/audioCleanup");
-  await releaseAudio(jobId, payload.storageKey).catch((e) =>
+  /**
+   * ⚠️ BARJERAS GALIOJA IR INLINE KELYJE (Codex peržiūros A grupė).
+   *
+   * 7.5b barjerą įdėjo tik į `workers/_cleanupStorage()`, ir tai uždarė WORKER
+   * kelią. Inline vykdymas turi SAVO valymo funkciją ir savo `finally` bloką,
+   * tad jis liko be barjero visiškai: `finish()` grąžinus
+   * `COMPLETED_WITHOUT_RESULT`, ši šaka metė klaidą, o `finally` vis tiek
+   * ištrindavo šaltinio audio — pašalindama medžiagą, kurios reikia remontui.
+   *
+   * Autoritetas vienas abiem keliams: `utils/audioBarrier.js`.
+   */
+  const { salintiAudioSuBarjeru } = require("../utils/audioBarrier");
+  await salintiAudioSuBarjeru(jobId, payload, { execution: "inline" }).catch((e) =>
     log.error(`Nepavyko atlaisvinti audio nutraukus vykdymą (job ${jobId}): ${e.message}`)
   );
 }
 
 async function _executeInline(type, processor, jobId, payload) {
+  /**
+   * Ar terminalus perėjimas realiai ĮSIPAREIGOTAS saugykloje? Nustatoma abiejose
+   * šakose (`finish` ir `finishFailed`); `finally` pagal tai sprendžia dėl audio.
+   */
+  let terminalasIsipareigotas = false;
   /**
    * GRANDINĖS ĮVYKIAI rašomi ČIA, kur baigtis realiai žinoma (GDPR #17).
    *
@@ -383,7 +445,28 @@ async function _executeInline(type, processor, jobId, payload) {
      */
     assertResultWithinLimits(result);
 
-    await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+    /**
+     * ⚠️ GRĄŽINIMAS TIKRINAMAS (#184, 7.5b). `finish()` gali grąžinti
+     * `CONCURRENCY_CONFLICT`, o ignoruotas konfliktas reikštų, kad `inline`
+     * kelias praneša sėkmę apie rezultatą, kurio neįsipareigojo. Klaida čia yra
+     * teisingas atsakymas: `catch` šaka žemiau pažymės job'ą `failed` per
+     * `finishFailed()`, kuris JAU `completed` įrašo nebeperrašo.
+     */
+    const uzbaigtas = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+    terminalasIsipareigotas = typeof uzbaigtas !== "symbol" && uzbaigtas !== null;
+    if (typeof uzbaigtas === "symbol") {
+      /**
+       * ⚠️ VISI KONFLIKTO SIMBOLIAI — VIENA ŠAKA (#184, 7.5b).
+       *
+       * `inline` kelias audio valymo sprendimo nepriima pats (jį daro
+       * `_executeInline` `finally` per `_atlaisvintiSaltini`), tad čia
+       * pakanka NEPRANEŠTI sėkmės. `typeof === "symbol"` apima ir ateities
+       * baigtis: naujas simbolis negalės tyliai praeiti kaip job objektas.
+       */
+      throw new Error(
+        `Job rezultatas NEĮSIPAREIGOTAS (${String(uzbaigtas)}): ${jobId}. Įrašą pakeitė kitas vykdytojas.`
+      );
+    }
 
     log.info("Darbas baigtas", {
       stage: "completed",
@@ -394,7 +477,8 @@ async function _executeInline(type, processor, jobId, payload) {
     });
   } catch (e) {
     const { errorCode, message } = _classifyError(e, `${type} job`);
-    await jobStore.system.finish(jobId, jobStore.STATUS.FAILED, { error: message, error_code: errorCode });
+    const nesekme = await jobStore.system.finishFailed(jobId, { error: message, error_code: errorCode });
+    terminalasIsipareigotas = typeof nesekme !== "symbol" && nesekme !== null;
 
     // Pranešimas jau sanitizuotas `_classifyError`; kodas yra enum.
     log.warn("Darbas nepavyko", {
@@ -406,12 +490,34 @@ async function _executeInline(type, processor, jobId, payload) {
       durationMs: Date.now() - started,
     });
   } finally {
-    // Inline režimas neturi retry - tad audio galima trinti iškart po galutinio
-    // statuso (sėkmė ar nesėkmė). Trinam tik jei payload turi storageKey (transkripcija).
-    if (payload && payload.storageKey) {
-      // storageKey nulinamas TIK po sėkmingo trynimo - žr. utils/audioCleanup.js.
-      const { releaseAudio } = require("../utils/audioCleanup");
-      await releaseAudio(jobId, payload.storageKey);
+    /**
+     * Inline režimas neturi retry - tad audio galima trinti iškart po galutinio
+     * statuso (sėkmė ar nesėkmė).
+     *
+     * ⚠️ BET TIK PO ĮSIPAREIGOTO PERĖJIMO, IR TIK PER BARJERĄ.
+     *
+     * Dvi atskiros sąlygos, nes jos gina skirtingus dalykus:
+     *
+     *   · `terminalasIsipareigotas` — ar būsena APSKRITAI pasikeitė. Jei ir
+     *     `finish(COMPLETED)`, ir `finishFailed()` pralaimėjo CAS, įrašas lieka
+     *     `processing`, o barjeras ne-terminalį sąmoningai praleidžia (kitaip
+     *     audio failai kauptųsi). Be šios sąlygos šaltinis būdavo ištrinamas
+     *     paliekant AKTYVŲ job'ą be įvesties — Codex tai atkūrė.
+     *   · barjeras — ar būsena, į kurią perėjom, apskritai leidžia šalinti
+     *     (`completed` be rezultato yra remontuotina).
+     *
+     * ⚠️ SIMETRIŠKA `workers/_handleFailure()`. Tas pats sprendimas dviejuose
+     * vykdymo keliuose; skiriasi tik tai, iš kur ateina baigtis.
+     */
+    if (terminalasIsipareigotas) {
+      const { salintiAudioSuBarjeru } = require("../utils/audioBarrier");
+      await salintiAudioSuBarjeru(jobId, payload, { execution: "inline" });
+    } else if (payload && payload.storageKey) {
+      log.error("Terminalus perėjimas NEĮSIPAREIGOTAS - audio NEŠALINAMAS", {
+        stage: "finish_not_committed",
+        execution: "inline",
+        jobId,
+      });
     }
   }
 }
@@ -420,6 +526,25 @@ async function _executeInline(type, processor, jobId, payload) {
 // klaidos SANITIZUOJAMOS - kad paslaptys (API raktai, keliai) nepatektų į jobStore,
 // kurį skaito klientas per GET /api/jobs/:id. HttpError su ne-500 statusu (validacija,
 // override) yra saugu rodyti kaip yra.
+/**
+ * VIEŠI ARTEFAKTŲ SAUGYKLOS PRANEŠIMAI - PAGAL KODĄ (#157, PR-2, Codex #290).
+ *
+ * ⚠️ KIEKVIENAS KODAS TURI SAVO TEKSTĄ, IR TAI NE KOSMETIKA. „Objekto nėra"
+ * siunčia remontą į atkūrimą, „turinys sugadintas" - į vientisumo tyrimą, o
+ * „rezultatas nesaugotinas" reiškia, kad kartoti nėra prasmės. Vienas bendras
+ * tekstas visus tris paverstų ta pačia neinformatyvia eilute.
+ */
+const VIESI_ARTEFAKTU_PRANESIMAI = Object.freeze({
+  ARTIFACT_VALUE_UNSUPPORTED: "Rezultato nepavyko išsaugoti: jo turinys neatitinka saugyklos reikalavimų.",
+  ARTIFACT_KEY_INVALID: "Rezultato nepavyko išsaugoti: neteisingas saugyklos adresas.",
+  ARTIFACT_NOT_FOUND: "Rezultato saugykloje nėra.",
+  ARTIFACT_CORRUPT: "Rezultatas saugykloje yra, bet jo turinys neperskaitomas.",
+  ARTIFACT_STORAGE_PROTOCOL: "Rezultatų saugykla atsakė netinkamai — tai saugyklos, ne rezultato klaida.",
+  ARTIFACT_ORPHAN_LEFT: "Rezultato išsaugoti nepavyko, o saugykloje liko nebaigtas įrašas — reikia administratoriaus.",
+  ARTIFACT_CONFIG_INVALID: "Artefaktų saugykla sukonfigūruota neteisingai.",
+  NEZINOMA: "Rezultato saugyklos klaida.",
+});
+
 function _classifyError(e, context = "job") {
   const { sanitizeServerError } = require("../utils/sanitizeError");
 
@@ -439,7 +564,8 @@ function _classifyError(e, context = "job") {
    * sustabdo retry grandinę. Originali klaida perduodama per `cause`, tad
    * domeninis kodas turi būti imamas iš jos, ne iš gaubiančios klaidos.
    */
-  const domeninė = e && e.cause && e.cause.name === "ResultLimitError" ? e.cause : e;
+  const NEATKARTOJAMOS = ["ResultLimitError", "ArtifactStoreError"];
+  const domeninė = e && e.cause && NEATKARTOJAMOS.includes(e.cause.name) ? e.cause : e;
 
   /**
    * FAZĖS KLAIDA TURI SAVO KODĄ (#154).
@@ -456,6 +582,59 @@ function _classifyError(e, context = "job") {
    */
   if (domeninė && domeninė.name === "JobPhaseError") {
     return { errorCode: domeninė.code, message: domeninė.message };
+  }
+
+  /**
+   * ARTEFAKTŲ SAUGYKLOS KLAIDA TURI SAVO KODĄ (#157, PR-2).
+   *
+   * ⚠️ STRUKTŪRINIS ATMETIMAS NĖRA `internal_error`. `Date` rezultate arba NUL
+   * simbolis tekste nuo kartojimo neišnyks, ir operatoriui reikia matyti, KAS
+   * nutiko: `ARTIFACT_VALUE_UNSUPPORTED` pasako, kad rezultatas nesaugotinas,
+   * o `ARTIFACT_NOT_FOUND` — kad dingo objektas. Suplakus juos į vieną kodą,
+   * abu virstų ta pačia neinformatyvia eilute.
+   *
+   * ⚠️ RETRY GRANDINĘ SUSTABDO KVIETĖJAS, NE ŠI ŠAKA. Klasifikatorius tik
+   * įvardija; `UnrecoverableError` vyniojimas gyvena completion kelyje (PR-4),
+   * kaip ir `assertResultWithinLimits` atveju.
+   */
+  if (domeninė && domeninė.name === "ArtifactStoreError") {
+    /**
+     * ⚠️ VIEŠAS PRANEŠIMAS GAMINAMAS IŠ KODO, NE IŠ `message` (Codex, #290).
+     *
+     * `ArtifactStoreError.message` nešasi `JSON.parse` diagnostiką, į kurią Node
+     * įdeda ARTEFAKTO TURINIO fragmentą — transkripcijų atveju asmenvardžius,
+     * adresus ar sveikatos informaciją. Šis laukas keliauja į job'o klaidos
+     * įrašą, kurį savininkas mato per `GET /api/jobs/:id`.
+     *
+     * ⚠️ TAI TA PATI TAISYKLĖ KAIP `sanitizeServerError`: pilnas tekstas lieka
+     * serverio loge, o kvietėjui atiduodama tik tai, kas parašyta MŪSŲ.
+     * Skirtumas — kodas išsaugomas, nes pagal jį operatorius sprendžia, ar
+     * ieškoti dingusio objekto, ar tirti vientisumą.
+     */
+    /**
+     * ⚠️ Į LOGĄ EINA KODAS, NE PRANEŠIMAS (Codex P1, #290).
+     *
+     * Ankstesnė redakcija čia rašė pilną `message` ir parserio diagnostiką. Abu jie
+     * gali nešti ARTEFAKTO TURINIO fragmentą — transkripcijos asmenvardžius, adresus,
+     * sveikatos informaciją — o logger'io euristinė redakcija savavališkų vardų
+     * nepašalina. Rezultatas: viešas kelias turinį slepia, o centralizuoti logai jį
+     * išsaugo. Tai tas pats nuotėkis pro kitas duris.
+     *
+     * Logguojama tik tai, kas SAUGU pagal konstrukciją: kodas, kontekstas ir
+     * neatkartojamumo ženklas. Originali klaida lieka `cause` grandinėje — pasiekiama
+     * derinant, bet niekur automatiškai neserializuojama.
+     */
+    log.error("Artefaktų saugyklos klaida", {
+      stage: "artifact_store",
+      context,
+      errorCode: domeninė.code,
+      neatkartojama: Boolean(domeninė.neatkartojama),
+    });
+
+    return {
+      errorCode: domeninė.code,
+      message: VIESI_ARTEFAKTU_PRANESIMAI[domeninė.code] || VIESI_ARTEFAKTU_PRANESIMAI.NEZINOMA,
+    };
   }
 
   if (domeninė && domeninė.name === "ResultLimitError") {
@@ -481,6 +660,7 @@ async function close() {
 }
 
 module.exports = {
+  getQueuePreflight,
   init,
   getMode,
   registerProcessor,

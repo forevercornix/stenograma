@@ -77,7 +77,7 @@ test("#154 STORE: pilnas transcription srautas su diarizacija", async () => {
   assert.equal(po.progressKnown, false);
 
   po = await jobStore.system.startPhase(job.id, PHASE.MERGING);
-  po = await jobStore.system.finish(job.id, STATUS.COMPLETED);
+  po = await jobStore.system.finish(job.id, STATUS.COMPLETED, { result: { text: "ok" } });
 
   assert.equal(po.status, STATUS.COMPLETED);
   assert.equal(po.phase, null);
@@ -156,7 +156,11 @@ test("#154 STORE: terminalus perėjimas iš BET KURIOS fazės išvalo būseną",
       progress: { current: 3900, total: 4400 },
     });
 
-    const po = await jobStore.system.finish(job.id, status, { error_code: "x" });
+    /** ⚠️ `completed` reikalauja rezultato (#184, C11) - kiti terminalai ne. */
+    const po = await jobStore.system.finish(job.id, status, {
+      error_code: "x",
+      ...(status === STATUS.COMPLETED ? { result: { text: "ok" } } : {}),
+    });
 
     assert.equal(po.status, status);
     assert.equal(po.phase, null, `${status}: fazė turi būti išvalyta`);
@@ -210,7 +214,7 @@ test("#154 STORE: terminalaus statuso NEGALIMA įrašyti apeinant finish()", asy
     TypeError
   );
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(po.status, STATUS.PROCESSING, "būsena nepakito");
   assert.equal(po.phase, PHASE.TRANSCRIBING);
   assert.deepEqual(po.progress, { current: 50, total: 100 });
@@ -265,7 +269,7 @@ test("#154 STORE: fazių metodai gerbia IŠTRYNIMO ŽYMĄ", async () => {
    */
   const tombstones = require("../utils/deletionTombstones");
   const job = await naujas();
-  tombstones.mark(job.id, { actor: "testas" });
+  await tombstones.mark(job.id, { reason: "user_request" });
 
   try {
     assert.equal(await jobStore.system.startPhase(job.id, PHASE.VALIDATING), null);
@@ -315,7 +319,7 @@ test("#154 LENKTYNĖS: lygiagretūs progreso įvykiai IŠLAIKO monotoniškumą",
     }),
   ]);
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(po.progress.current, 60, "senesnis įvykis NETURI perrašyti naujesnio");
 });
 
