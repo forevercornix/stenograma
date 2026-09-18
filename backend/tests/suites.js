@@ -137,6 +137,7 @@ const security = [
   "deletionRetryPersistence",
   /** CI workflow struktūra: dublikuotas raktas tyliai išjungtų testų žingsnį. */
   "workflowIntegrity",
+  "dependabotPolicy",
   /**
    * #237: ištrintų testų sargas.
    *

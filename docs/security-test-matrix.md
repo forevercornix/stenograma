@@ -1241,6 +1241,11 @@ pipeline galėtų ignoruoti, bet sluoksniavimas išlieka.
 |---|---|---|
 | **Jokių DUBLIUOTŲ YAML raktų** | `workflowIntegrity` | Grąžinus nuslinkusį `run:` → krinta |
 | **Kiekvienas step'as turi `run` arba `uses`** | `workflowIntegrity` | Pašalinus `run` → krinta |
+| ⚠️ **Dependabot grupė NEGALI įsileisti `major`** — pagal konstrukciją (#367) | `dependabotPolicy` | Pridėjus `"major"` į `update-types` → krinta. Be to `eslint` 9→10 keliautų kartu su patch'ais, ir lūžtantis pakeitimas pasislėptų grupiniame diff'e |
+| ⚠️ **Security PR semantika NEPAKEIČIAMA netyčia** (#367) | `dependabotPolicy` | Pakeitus į `applies-to: security-updates` → krinta. Security PR paleidžia advisory, ne `schedule`; sugrupavus, pažeidžiamumo pataisymas lauktų kitų grupės narių |
+| ⚠️ **Izoliuota runtime infrastruktūra** (`bullmq`, `express-rate-limit`) (#367) | `dependabotPolicy` | Pašalinus iš `exclude-patterns` → krinta. `bullmq` regresija pasimato ne lint'e, o kaip pakibęs job'as |
+| ⚠️ **ML/GPU grandinė negali patekti į Python grupę** — tikrinama ir su BŪSIMAIS paketais (#367) | `dependabotPolicy` | Pavertus leidimo sąrašą draudimo (`*`) → krinta. Tikrinami ir `torch`/`transformers`, kurių repo dar neturi: draudimų sąraše jie neatsirastų ir tyliai patektų į grupę |
+| ⚠️ **`ignore` pririštas prie katalogo, kuriame priklausomybė REALIAI yra** (#367) | `dependabotPolicy` | Perkėlus `numpy` bloką prie `github-actions` → krinta. Tai sargas tam defektui, kuris ir davė #367 šį punktą: YAML komentarų nemato, tad blokas prisiriša tyliai |
 | **`docs/decisions/` nuorodos tikrinamos IR `.env.example`, IR compose failuose** | `workflowIntegrity` | Pirmoji versija skenavo tik `README.md` ir `docs/*.md`, tad nutrūkusi nuoroda `.env.example` praėjo — o būtent ten vartotojas ją pamato pirmiausia |
 | **Sprendimų įrašai (ADR) egzistuoja, nuorodos galioja** | `workflowIntegrity` | `rm -rf docs/decisions` generuojant pataisą ištrynė SEKAMUS failus, ir kitas `git add -A` tą užfiksavo. Mutacija: pašalinus ADR 0001 → krinta |
 | **`docker compose config` žingsniai turi PRIVALOMUS kintamuosius** | `workflowIntegrity` | `${POSTGRES_PASSWORD:?}` neturi numatytosios reikšmės, tad net `config` be jo krinta — job'as krito CI'e. Mutacija: pašalinus `env` → krinta |
