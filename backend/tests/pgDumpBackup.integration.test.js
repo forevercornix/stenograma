@@ -921,8 +921,37 @@ test("#264: `PG*` forma prieš TIKRĄ `pg_dump` — vėliavos ir `~/.pgpass`", {
   });
 
   await perkurtiDb(SALTINIO_URL);
-  const sentinelis = `SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`;
-  await uzpildytiSaltini(sentinelis);
+  await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
+
+  /**
+   * ⚠️ LIUDYTOJAS RAŠOMAS Į `job_results`, NE Į `audit_log`.
+   *
+   * Pirmoji šio testo redakcija ieškojo `uzpildytiSaltini()` audito sentinelio —
+   * bet `PG_DUMP_ARGUMENTAI` turi `--exclude-table-data=audit_log` (7.4d), tad ta
+   * reikšmė į kopiją NEGALI patekti PAGAL KONSTRUKCIJĄ. Asercija krito teisingai,
+   * tik ne dėl to, ką tikrino.
+   *
+   * ⚠️ LIUDYTOJAS BŪTINAS. `pg_dump`, prisijungęs prie NUMATYTOSIOS bazės, irgi
+   * grąžintų sintaksiškai teisingą SQL ir teigiamą baitų skaičių — tik be šių
+   * duomenų. Be unikalaus žymens testas praeitų nieko neįrodęs.
+   */
+  const zyme = `PG_FORMA_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`;
+  const zymeKlientas = new Client({ connectionString: SALTINIO_URL });
+  await zymeKlientas.connect();
+  try {
+    const { rows } = await zymeKlientas.query(
+      `INSERT INTO jobs (id, type, status, created_at, updated_at)
+       VALUES (gen_random_uuid(), 'transcription', 'completed', now(), now())
+       RETURNING id`
+    );
+    await zymeKlientas.query(
+      `INSERT INTO job_results (job_id, storage_type, payload, created_at)
+       VALUES ($1, 'inline', $2::jsonb, now())`,
+      [rows[0].id, JSON.stringify({ text: zyme })]
+    );
+  } finally {
+    await zymeKlientas.end();
+  }
 
   const portas = url.port || "5432";
   const baze = url.pathname.replace(/^\//, "");
@@ -976,8 +1005,8 @@ test("#264: `PG*` forma prieš TIKRĄ `pg_dump` — vėliavos ir `~/.pgpass`", {
 
   assert.match(
     plaintext.toString("utf8"),
-    new RegExp(sentinelis),
-    "⚠️ kopijoje privalo būti ŠALTINIO sentinelis - be jo testas praeitų ir tada, " +
+    new RegExp(zyme),
+    "⚠️ kopijoje privalo būti ŠALTINIO žymė - be jos testas praeitų ir tada, " +
       "jei `pg_dump` būtų nuėjęs į numatytąją lokalią bazę"
   );
 });
