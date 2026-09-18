@@ -482,6 +482,29 @@ function normalizuotiLaukima(laukiama = {}) {
 }
 
 /**
+ * PERSISTINTO KONTRAKTO FORMA — VIENAS ŠALTINIS (#292, Codex A).
+ *
+ * ⚠️ ŠIOS DVI TAISYKLĖS NĖRA MŪSŲ SUGALVOTOS. Jos gyvena DB `CHECK`
+ * `job_results_integrity_shape` (migracija `1756100000000`):
+ *
+ *   (bytes IS NULL OR bytes > 0)
+ *   AND (checksum IS NULL OR checksum ~ '^[0-9a-f]{64}$')
+ *
+ * ⚠️ ANTRAS SKAITINIS DOMENAS ATSIRADO NETYČIA. Pirmoji #292 redakcija tikrino
+ * `bytes < 0`, tad NULIS praeidavo kaip validus — nors `CHECK` jo neleidžia.
+ * Pasekmė: eilutė su `bytes = 0` plius TUŠČIO payload SHA-256 ir nupjautas
+ * tuščias objektas saugykloje duodavo `ok: true` — atkūrimo verifikacija
+ * PATVIRTINDAVO neįmanomą būseną.
+ *
+ * Tai ta pati klasė, kurią #292 uždaro, tik naujajame validatoriuje.
+ *
+ * ⚠️ RIBOS IMAMOS IŠ KONTRAKTO, NE KARTOJAMOS PAGAL ATMINTĮ. Keičiant `CHECK`,
+ * keičiama IR ČIA — nuoroda į migraciją yra tam, kad tai būtų matoma.
+ */
+const PERSISTINTAS_MIN_BYTES = 1;
+const PERSISTINTAS_CHECKSUM = /^[0-9a-f]{64}$/;
+
+/**
  * AR LŪKESTIS TINKA BŪTI RESURSŲ BIUDŽETU (#292).
  *
  * ⚠️ ŠAKNIS: persistintas `job_results.bytes` naudojamas IR kaip tikrinamas
@@ -533,7 +556,14 @@ function ivertintiLaukimoBaitus(laukiama, riba) {
       : { bytes: null, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
   }
 
-  if (!Number.isInteger(bytes) || bytes < 0) {
+  /**
+   * ⚠️ `bytes > 0`, NE `>= 0` — TA PATI RIBA KAIP `CHECK` (Codex A).
+   *
+   * Kanoninė JSON eilutė niekada nėra 0 baitų: mažiausia įmanoma yra `{}`, du
+   * baitai. Nulis reiškia nutrauktą arba tuščią rašymą — BŪTENT tą gedimą, kurį
+   * `bytes` ir turi gaudyti.
+   */
+  if (!Number.isInteger(bytes) || bytes < PERSISTINTAS_MIN_BYTES) {
     return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
   }
 
@@ -553,6 +583,22 @@ function ivertintiLaukimoBaitus(laukiama, riba) {
    */
   if (bytes > riba) {
     return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_VIRSIJA };
+  }
+
+  /**
+   * ⚠️ `checksum` FORMATAS IRGI YRA PERSISTINTAS KONTRAKTAS (Codex A, antra pusė).
+   *
+   * `CHECK` garantuoja 64 mažąsias hex reikšmes. Neatitinkanti suma eilutėje yra
+   * NEĮMANOMA būsena, tad tai metaduomenų defektas — o ne „turinys nesutampa".
+   * Be šios patikros operatorius būtų siunčiamas tirti SAUGYKLĄ, kai sugedusi yra
+   * DB eilutė: tiksliai ta painiava, kurią #292 ir skiria.
+   *
+   * ⚠️ REGISTRAS NETIKRINAMAS: `normalizuotiLaukima()` jau sumažina raides, o
+   * `CHECK` didžiųjų į eilutę neįleistų. Tikrinamas ILGIS ir ABĖCĖLĖ.
+   */
+  const { checksum } = normalizuotiLaukima(laukiama);
+  if (checksum !== null && !PERSISTINTAS_CHECKSUM.test(checksum)) {
+    return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
   }
 
   return { bytes, tinka: true, priezastis: null };

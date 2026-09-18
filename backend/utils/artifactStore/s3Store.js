@@ -390,16 +390,6 @@ function createS3ArtifactStore({
      */
     const remas = getLimits()[LIMIT_KIND.RESULT_BYTES];
 
-    /**
-     * ⚠️ METADUOMENŲ DEFEKTAS - PRIEŠ BET KOKĮ TINKLO I/O (#292).
-     *
-     * Sprendimui užtenka metaduomenų, tad `GetObject` net nesiunčiamas. Tai
-     * pigiau nei `fs` pusėje ir svarbiau: kelias eina per tinklą.
-     */
-    const lukestis = ivertintiLaukimoBaitus(laukiama, remas);
-    if (lukestis.priezastis !== null) {
-      return metaduomenuDefektoVerdiktas(true, lukestis.priezastis);
-    }
 
     /**
      * ⚠️ NAUJAS PRE-I/O ŽINGSNIS: `head()` PRIEŠ `readStream()` (#292).
@@ -421,6 +411,28 @@ function createS3ArtifactStore({
      */
     const galva = await head(raktas);
     if (!galva) return nesancioVerdiktas(true);
+
+    /**
+     * ⚠️ METADUOMENŲ DEFEKTAS - PRIEŠ PAYLOAD, BET PO `head()` (#292, Codex B).
+     *
+     * Pirmoji redakcija šiuos vartus dėjo PIRMUS, ir tai fabrikuodavo `exists`.
+     * Kai lūkestis nevalidus IR objekto nėra, ankstyvas grįžimas praleisdavo
+     * `HeadObject` ir grąžindavo `exists: true` — atkūrimas pranešdavo
+     * `NESUTAMPA`, nors teisingas atsakymas yra `NERASTA`.
+     *
+     * ⚠️ TAI BUVO TIESIOGINIS DoD PAŽEIDIMAS: „`fsStore` ir `s3Store` vienoda
+     * semantika". `fs` pusėje `head()` eina pirmas ir atsako teisingai, tad ta
+     * pati persistinta būsena gaudavo SKIRTINGUS verdiktus pagal backend'ą — o
+     * operatoriui tai skirtingos išvados: tirti nesutapimą vs tirti dingusį
+     * objektą.
+     *
+     * ⚠️ „PAYLOAD NEATIDAROMAS" NEPAŽEIDŽIAMAS: `head()` nėra payload, o
+     * `GetObject` toliau nesiunčiamas. Tai tvarkos, ne mechanizmo klausimas.
+     */
+    const lukestis = ivertintiLaukimoBaitus(laukiama, remas);
+    if (lukestis.priezastis !== null) {
+      return metaduomenuDefektoVerdiktas(true, lukestis.priezastis);
+    }
 
     /** Realus objektas virš rėmo - saugyklos, ne metaduomenų anomalija. */
     if (galva.bytes > remas) {

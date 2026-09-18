@@ -59,14 +59,23 @@ const S3_KONF = {
  * atskiras teiginys nuo „verdiktas teisingas", ir būtent jis yra #292 esmė:
  * sprendimas priimamas PRIEŠ I/O, ne po jo.
  */
-function s3Dublis({ contentLength, kunas = "{}" }) {
+function s3Dublis({ contentLength, kunas = "{}", nera = false }) {
   const kvietimai = [];
   const klientas = {
     async send(komanda) {
       const vardas = komanda.constructor.name;
       kvietimai.push(vardas);
       if (vardas === "GetBucketVersioningCommand") return {};
-      if (vardas === "HeadObjectCommand") return { ContentLength: contentLength };
+      if (vardas === "HeadObjectCommand") {
+        /** ⚠️ Tikro SDK forma dingusiam objektui - `head()` ją verčia į `null`. */
+        if (nera) {
+          const k = new Error("NotFound");
+          k.name = "NotFound";
+          k.$metadata = { httpStatusCode: 404 };
+          throw k;
+        }
+        return { ContentLength: contentLength };
+      }
       if (vardas === "GetObjectCommand") return { Body: Readable.from([Buffer.from(kunas)]) };
       return {};
     },
@@ -257,4 +266,121 @@ test("#292 BIUDŽETAS: saugykla praneša vieną dydį, atiduoda DIDESNĮ → ska
     "⚠️ kilmė - saugykla: ji pranešė ne tą, ką atidavė"
   );
   assert.equal(verdiktas.checksum, null, "nutraukto skaitymo sumos neteigiame");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * CODEX RAUNDAS: A (`bytes = 0`) ir B (`s3` fabrikuoja `exists`)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#292 A: `bytes = 0` yra METADUOMENŲ defektas — taip sako DB `CHECK`", async (t) => {
+  /**
+   * ⚠️ RIBA NE MŪSŲ SUGALVOTA. `job_results_integrity_shape` (migracija
+   * `1756100000000`) reikalauja `bytes > 0`: kanoninė JSON eilutė niekada nėra 0
+   * baitų, mažiausia įmanoma yra `{}` — du baitai.
+   *
+   * ⚠️ KAS BŪTŲ BE ŠIOS PATIKROS. Eilutė su `bytes = 0`, TUŠČIO payload SHA-256 ir
+   * nupjautas tuščias objektas saugykloje duotų `ok: true` — atkūrimo
+   * verifikacija PATVIRTINTŲ neįmanomą būseną.
+   *
+   * ⚠️ Tai ta pati klasė, kurią #292 uždaro, tik naujajame validatoriuje: antras
+   * skaitinis domenas atsirado netyčia, nes validatorius su `CHECK` nesutapo.
+   */
+  const saugykla = await fsAplinka(t);
+  const raktas = "results/nulis.json";
+  await saugykla.put(raktas, { text: "turinys" });
+
+  const tusciasSha = crypto.createHash("sha256").update(Buffer.alloc(0)).digest("hex");
+  const verdiktas = await saugykla.verify(raktas, { bytes: 0, checksum: tusciasSha });
+
+  assert.equal(verdiktas.ok, false, "⚠️ neįmanoma būsena NEGALI būti patvirtinta");
+  assert.equal(
+    verdiktas.priezastis,
+    PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+    "kilmė - DB eilutė, ne saugykla"
+  );
+});
+
+test("#292 A: `checksum` ne pagal `CHECK` formatą irgi yra METADUOMENŲ defektas", async (t) => {
+  /**
+   * ⚠️ ANTRA `CHECK` PUSĖ, RASTA TIKRINANT PIRMĄ.
+   *
+   * `CHECK` garantuoja `^[0-9a-f]{64}$`. Neatitinkanti suma eilutėje yra NEĮMANOMA
+   * būsena, tad tai metaduomenų defektas — o ne „turinys nesutampa". Be šios
+   * patikros operatorius būtų siunčiamas tirti SAUGYKLĄ, kai sugedusi yra DB
+   * eilutė: tiksliai ta painiava, kurią #292 ir skiria.
+   */
+  const saugykla = await fsAplinka(t);
+  const raktas = "results/bloga-suma.json";
+  const kvitas = await saugykla.put(raktas, { text: "turinys" });
+
+  for (const [vardas, checksum] of [
+    ["per trumpa", "a".repeat(63)],
+    ["ne hex", "z".repeat(64)],
+    ["tuščia", ""],
+  ]) {
+    const verdiktas = await saugykla.verify(raktas, { bytes: kvitas.bytes, checksum });
+
+    assert.equal(
+      verdiktas.priezastis,
+      PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+      `${vardas}: privalo būti metaduomenų defektas`
+    );
+  }
+});
+
+test("#292 B: nevalidus lūkestis PLIUS dingęs objektas → `NERASTA` ABIEJUOSE backend'uose", async (t) => {
+  /**
+   * ⚠️ DoD REIKALAVIMAS: „`fsStore` ir `s3Store` VIENODA SEMANTIKA".
+   *
+   * `s3` pusėje metaduomenų vartai buvo PIRMI, tad ankstyvas grįžimas praleisdavo
+   * `HeadObject` ir grąžindavo `exists: true` DINGUSIAM objektui. `fs` pusėje
+   * `head()` eina pirmas ir atsako teisingai.
+   *
+   * Ta pati persistinta būsena gaudavo skirtingus verdiktus pagal backend'ą, ir
+   * operatoriaus išvada skyrėsi: tirti NESUTAPIMĄ vs tirti DINGUSĮ objektą.
+   *
+   * ⚠️ TREČIAS KARTAS ŠIOJE SEKOJE, kai `fs`/`s3` asimetrija duoda defektą.
+   */
+  const fs = await fsAplinka(t);
+  const fsVerdiktas = await fs.verify("results/nera.json", { bytes: -5, checksum: "zzz" });
+
+  assert.equal(fsVerdiktas.exists, false, "fs: dingusio objekto `exists` privalo būti `false`");
+
+  const { saugykla: s3, kvietimai } = s3Dublis({ contentLength: null, nera: true });
+  const s3Verdiktas = await s3.verify("results/nera.json", { bytes: -5, checksum: "zzz" });
+
+  assert.equal(
+    s3Verdiktas.exists,
+    false,
+    "⚠️ s3: `exists` privalo ATSPINDĖTI TIKROVĘ, o ne būti fabrikuotas iš ankstyvo grįžimo"
+  );
+  assert.deepEqual(
+    { fs: fsVerdiktas.exists, s3: s3Verdiktas.exists },
+    { fs: false, s3: false },
+    "abu backend'ai - viena semantika"
+  );
+
+  /** ⚠️ ANTRAS TEIGINYS, TVIRTINAMAS ATSKIRAI: payload vis tiek neatidaromas. */
+  assert.equal(
+    kvietimai.includes("GetObjectCommand"),
+    false,
+    `payload NEGALI būti atidarytas: ${kvietimai.join(", ")}`
+  );
+});
+
+test("#292 B1: `GetObject` nesiunčiamas IR `exists` atspindi tikrovę — du atskiri teiginiai", async () => {
+  /**
+   * ⚠️ KODĖL DU ASSERT'AI, O NE VIENAS.
+   *
+   * Ankstesnis testas tikrino TIK „`GetObject` nesiunčiamas", ir jis PRAĖJO, kol
+   * `exists: true` buvo fabrikuojamas. Sargas, tikrinantis vieną savybę, gretimos
+   * nemato — o defektas gyveno būtent gretimoje.
+   */
+  const { saugykla, kvietimai } = s3Dublis({ contentLength: 512 });
+  const verdiktas = await saugykla.verify("results/yra.json", { bytes: -5, checksum: "a".repeat(64) });
+
+  assert.equal(kvietimai.includes("GetObjectCommand"), false, "payload neatidaromas");
+  assert.equal(verdiktas.exists, true, "objektas REALIAI yra - `exists` privalo tai rodyti");
+  assert.equal(verdiktas.priezastis, PRIEZASTIS.METADUOMENYS_NEVALIDUS, "kilmė - metaduomenys");
+  assert.ok(kvietimai.includes("HeadObjectCommand"), "tikrovė sužinoma per `head()`, ne spėjama");
 });

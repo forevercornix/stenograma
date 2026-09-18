@@ -176,6 +176,14 @@ Common patterns that pass while proving nothing:
   semantics does not verify that the production path invokes it.
 - **Fixed-size text windows.** Searching N characters before a marker breaks
   when a comment grows; scan the whole file or parse structurally.
+- **Both sources happen to agree.** When a fix changes *where* a value comes
+  from, a case in which the old and new sources hold the same value cannot
+  detect the change — the case must **separate** them. Measured in #292: the fix
+  moved the read budget from the persisted expectation to the measured size, but
+  the test passed `bytes: 16` while `head()` also reported 16, so old and new
+  budget were the same number and the mutation survived. Rerun without the
+  expectation — old budget `MAX_RESULT_BYTES` (20 MB) versus new `head().bytes`
+  (16) — and it failed. The first version guarded the gate, not the direction.
 
 Where a test's value depends on ordering or interception, state the assumption
 in a comment so a later edit cannot silently invalidate it.

@@ -1038,6 +1038,36 @@ node -e "
 eilučių 1284; nepriklausomai patikrinta 37; nepatikrinama (inline, nėra su kuo lyginti) 1247; nesėkmių 0
 ```
 
+### ⚠️ Kaina: procedūra eina per KIEKVIENĄ `job_results` eilutę (#292)
+
+`verifyResultArtifacts()` puslapiuoja per **visą** lentelę. Atkūrimo pratybose ji
+gali turėti šimtus tūkstančių eilučių, ir kiekvienai **external** eilutei:
+
+| Veiksmas | `fs` | `s3` |
+|---|---|---|
+| Metaduomenų patikra | `head()` | `HeadObject` |
+| Turinio perskaitymas | visas objektas | visas objektas (`GetObject`) |
+
+⚠️ **Nuo #292 `s3` pusėje pridėtas vienas `HeadObject` kiekvienai external
+eilutei.** Jis reikalingas tam, kad skaitymo biudžetas būtų imamas iš **išmatuoto**
+dydžio, o ne iš persistinto lūkesčio — t. y. iš tos pačios pusės, kurią procedūra
+ir turi patikrinti.
+
+**Ką tai reiškia planuojant pratybas.** Kaina linijinė nuo **external** eilučių
+skaičiaus (`storage_type <> 'inline'`), ne nuo visos lentelės. Prieš pratybas
+verta jį pasimatuoti:
+
+```sql
+SELECT storage_type, count(*) FROM job_results GROUP BY storage_type;
+```
+
+⚠️ **Inline eilutės šios kainos neturi** — joms nepriklausomo metaduomens nėra, tad
+`verify()` jų neskaito (žr. skyrių žemiau).
+
+⚠️ **Metaduomenų defektas kainuoja MAŽIAU, ne daugiau.** Nuo #292 eilutė su
+netinkamu `bytes`/`checksum` atmetama po `head()`, bet **prieš** `GetObject` — toks
+artefaktas neatidaromas visai.
+
 ### ⚠️ „Nepatikrinama" NĖRA „patikrinta" — ir būtent dėl to ataskaita turi DU skaičius
 
 `verify()` grąžina lauką `nepriklausomas`. External eilutėje `bytes` ir `checksum`
