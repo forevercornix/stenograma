@@ -1,5 +1,5 @@
 const jobPhase = require("../jobPhase");
-const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, newJob, applyPatch, isFinished, hasPendingCleanup, normalizeOwnerId, matchesOwner, normalizeJob, normalizeFieldValue, BOOLEAN_FIELDS, NUMBER_FIELDS, idempotentiskasAtsakymas, metaduomenuProjekcija } = require("./common");
 
 /**
  * Redis job store backend'as (persistentus, atsparus restartams, palaiko kelis
@@ -198,9 +198,19 @@ function createRedisStore(redisClient) {
     return kanoninis;
   }
 
-  async function get(id) {
+  /**
+   * ⚠️ `hydrate: false` PROJEKCIJA — FORMOS PARITETAS (#157, PR-3). Redis eilutė yra
+   * vienas hash'as, tad turinio čia neišvengsi; bet kvietėjas, gavęs nehidratuotą
+   * job'ą, VISUOSE backend'uose privalo matyti tą patį: `result` lauko nėra.
+   *
+   * @param {{hydrate?: boolean}} [nustatymai]
+   */
+  async function get(id, { hydrate = true } = {}) {
     const flat = await redisClient.hgetall(JOB_PREFIX + id);
-    return deserialize(flat);
+    const job = deserialize(flat);
+    if (!job || hydrate) return job;
+
+    return metaduomenuProjekcija(job);
   }
 
   /**
@@ -536,8 +546,9 @@ function createRedisStore(redisClient) {
   }
 
   /** @returns {object|null|"FORBIDDEN"} */
-  async function getOwned(id, scope) {
-    const job = await get(id);
+  /** @param {{hydrate?: boolean}} [nustatymai] forma vienoda visuose backend'uose (#157, PR-3) */
+  async function getOwned(id, scope, nustatymai = {}) {
+    const job = await get(id, nustatymai);
     if (!job) return null;
     return matchesOwner(job, scope) ? job : "FORBIDDEN";
   }
@@ -637,7 +648,15 @@ function createRedisStore(redisClient) {
     return true;
   }
 
-  async function remove(id) {
+  /**
+ * ⚠️ `tiketiniAdresai` PRIIMAMAS IR IGNORUOJAMAS SĄMONINGAI (#157, PR-5).
+ *
+ * Artefaktų aibės CAS turi prasmę tik ten, kur yra bandymų registras. Šis backend'as
+ * external rezultatų neturi, tad tikėtina aibė VISADA tuščia ir visada sutampa — tai
+ * faktas, ne praleidimas. Parametras priimamas, kad kvietėjas neturėtų šakos „ar šis
+ * backend'as moka".
+ */
+async function remove(id, _nustatymai = {}) {
     const existed = await redisClient.exists(JOB_PREFIX + id);
 
     await redisClient.del(JOB_PREFIX + id);
@@ -696,8 +715,131 @@ function createRedisStore(redisClient) {
    * Naudoja `_scanJobs`, kuris eina per `SCAN`, ne `KEYS` – pastarasis
    * blokuotų Redis, kol pereina visą raktų erdvę.
    */
-  async function listAll() {
-    return _scanJobs();
+  async function listAll({ hydrate = true } = {}) {
+    const visi = await _scanJobs();
+    return hydrate ? visi : visi.map(metaduomenuProjekcija);
+  }
+
+  /**
+   * VISOS job'o REZULTATO artefaktų nuorodos (#157, PR-5).
+   *
+   * ⚠️ TUŠČIAS SĄRAŠAS ČIA YRA FAKTAS, NE PRIELAIDA.
+   *
+   * ``redis`` rezultatą persistina TIK savo įraše: external rašymo kelio (`rasymoSaugykla`,
+   * bandymų registras) šis backend'as neturi, tad „job'as neturi external artefaktų" yra
+   * konstrukcijos savybė, o ne spėjimas apie duomenis. Skirtumas svarbus: fasadas `null`
+   * traktuoja kaip „nežinau, netrink", o `[]` — kaip „nėra ko trinti", ir pastarasis čia
+   * teisingas.
+   *
+   * ⚠️ JEI KADA NORS ATSIRASTŲ EXTERNAL KELIAS REDIS BACKEND'E, ŠIS METODAS PRIVALO
+   * PASIKEISTI KARTU. Kontrakto testas tikrina elgesį (po `finish()` su rezultatu sąrašas
+   * lieka tuščias), tad tylus praleidimas pasimatytų.
+   */
+  async function listResultArtifacts() {
+    return [];
+  }
+
+  /**
+   * Rezultato artefaktų šalinimas — `redis` backend'e nėra ko šalinti (#157, PR-5).
+   *
+   * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: external rašymo kelio šis backend'as
+   * neturi, tad tuščias rezultatas yra konstrukcijos savybė. Metodas egzistuoja, kad
+   * erasure kelias neturėtų `typeof === "function"` šakos: tokia šaka reikštų tylų
+   * praleidimą ten, kur praleidimas yra BDAR klausimas.
+   */
+  async function deleteResultArtifacts() {
+    return { pasalinti: [], jauNebuvo: [], nepavyko: [] };
+  }
+
+  /**
+   * Šlavimo verdiktai — `redis` backend'e kandidatų nėra (#157, PR-5).
+   *
+   * ⚠️ TAS PATS FAKTAS KAIP `listResultArtifacts()`: bandymų registro šis backend'as
+   * neturi, tad ir šluoti nėra ko. Metodas egzistuoja, kad šlavėjas neturėtų
+   * `typeof === "function"` šakos.
+   */
+  /** Registro šis backend'as neturi — kandidatų nėra, ir tai faktas (#157, PR-5). */
+  /**
+   * Jungties tapatybė — `redis` backend'as jos NETURI (#157, PR-5).
+   *
+   * ⚠️ `null` REIŠKIA „NĖRA JUNGTIES", NE „NEŽINAU". Kvietėjas (retencijos šlavėjas) iš
+   * to daro teisingą išvadą: be jungties tapatybės negalima įrodyti, kad žymos ir bandymai
+   * yra toje pačioje bazėje, tad žingsnis nevykdomas.
+   */
+  /** Registro nėra — karantinuoti nėra ko (#157, PR-5). */
+  async function pazymetiKarantina() {
+    return [];
+  }
+
+  async function karantinuotuSkaicius() {
+    return 0;
+  }
+
+  function jungtiesTapatybe() {
+    return null;
+  }
+
+  async function valytiniBandymai() {
+    return { kandidatai: [], praleista: 0 };
+  }
+
+  async function pasalintiBandymus() {
+    return 0;
+  }
+
+  /**
+   * ARTEFAKTŲ REZOLVERIO BŪSENA — STEBĖTOJUI (#157, PR-7, 3 sąlyga).
+   *
+   * ⚠️ ŠIS BACKEND'AS REZOLVERIO NETURI, IR TUŠČIAS ATSAKYMAS YRA TEISINGAS.
+   *
+   * Metodas privalomas VISIEMS trims, nes `jobStoreBackendContract` lygina TIKSLIAS
+   * aibes: trūkstamas metodas reikštų, kad stebėtojas, radęs `undefined`, tyliai
+   * praleistų patikrą — t. y. „nematau" atrodytų kaip „viskas gerai". Būtent tos
+   * klasės sargas ir yra.
+   *
+   * Ir atsakymas nėra tuščia formalybė: diegimas su `ARTIFACT_STORE_BACKEND=s3`
+   * prie ne-PostgreSQL job store'o rezultatų į S3 nerašo, ir verdiktas tai pasako.
+   */
+  /**
+   * RESTORE VERIFIKACIJA (#157, PR-7) — ŠIS BACKEND'AS NEPRIKLAUSOMOS PATIKROS NETURI.
+   *
+   * ⚠️ ATSAKYMAS NĖRA TUŠČIA ATASKAITA. Rezultatai čia gyvena job'o įraše, tad
+   * nepriklausomo `bytes`/`checksum` metaduomens, su kuriuo būtų galima lyginti,
+   * NĖRA IŠ VISO. Kiekvienas rezultatas yra `nepatikrinama_inline`.
+   *
+   * Grąžinus `eiluciuIsViso: 0`, ataskaita sakytų „nėra ko tikrinti", nors rezultatų
+   * yra — operatorius manytų, kad bazė tuščia. Teisingas atsakymas: „N rezultatų, nė
+   * vienas nepatikrinamas nepriklausomai".
+   */
+  async function verifyResultArtifacts() {
+    const { VERDIKTAS, sudarytiAtaskaita } = require("../artifactRestoreVerify");
+    const { rezultatoNera } = require("./common");
+
+    /**
+     * ⚠️ HIDRATUOJAMA SĄMONINGAI. Metaduomenų projekcija `result` PAŠALINA, tad be
+     * hidratacijos „ar rezultatas yra" atsakyti neįmanoma — ataskaita suskaičiuotų
+     * nulį ir tylėtų apie visus rezultatus. Procedūra ir taip yra brangus, retai
+     * paleidžiamas atkūrimo kelias.
+     */
+    const jobai = await listAll({ hydrate: true });
+
+    const verdiktai = jobai
+      .filter((job) => !rezultatoNera(job.result))
+      .map((job) => ({
+        jobId: job.id,
+        storageType: "inline",
+        verdiktas: VERDIKTAS.NEPATIKRINAMA_INLINE,
+      }));
+
+    return sudarytiAtaskaita(verdiktai);
+  }
+
+  function saugykluBusena() {
+    return { rasymoBackend: null, registruotiTipai: [] };
+  }
+
+  async function sweepResultArtifacts() {
+    return [];
   }
 
   async function listReferencedStorageKeys() {
@@ -711,13 +853,14 @@ function createRedisStore(redisClient) {
     return [...keys];
   }
 
+  /** ⚠️ METADUOMENŲ KELIAS — ta pati projekcija kaip kituose backend'uose (#157, PR-3). */
   async function listByFlag(field, limit = 100) {
     const jobs = await _scanJobs();
     const pending = [];
 
     for (const job of jobs) {
       if (pending.length >= limit) break;
-      if (job[field]) pending.push(job);
+      if (job[field]) pending.push(metaduomenuProjekcija(job));
     }
 
     return pending;
@@ -770,7 +913,7 @@ function createRedisStore(redisClient) {
     }
   }
 
-  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
+  return { create, restoreRecord, get, update, remove, getOwned, reportProgressAtomic, finishAtomic, updateOwned, removeOwned, listExpired, sweepExpired, size, listAll, listByFlag, listReferencedStorageKeys, listResultArtifacts, deleteResultArtifacts, sweepResultArtifacts, verifyResultArtifacts, saugykluBusena, valytiniBandymai, jungtiesTapatybe, pasalintiBandymus, pazymetiKarantina, karantinuotuSkaicius, close, STATUS, JOB_TYPES, TTL_MS, backend: "redis" };
 }
 
 module.exports = { createRedisStore, serialize, deserialize, BOOLEAN_FIELDS, NUMBER_FIELDS };

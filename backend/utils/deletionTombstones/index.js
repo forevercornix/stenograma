@@ -51,10 +51,16 @@ const log = createLogger("tombstones");
  * DB – ta pati priežastis kaip `auditStore.RETENCIJOS_ISPEJIMAS`.
  */
 const ATMINTIES_ISPEJIMAS =
-  "Ištrynimo žymos laikomos TIK ATMINTYJE (nėra DATABASE_URL). Jos neišgyvena " +
-  "restarto ir nėra bendros replikoms, tad po restarto vėluojanti eilės žinutė " +
-  "ištrintam job'ui vėl gali sukurti artefaktus. Persistentinė garantija galioja " +
-  "tik diegimams su DATABASE_URL. Žr. docs/deletion-guarantees.md §2.";
+  /**
+   * ⚠️ ĮVARDIJAMOS ABI FORMOS (#245). Nuo 7.4e šis modulis priima ir `PGHOST`,
+   * o tekstas vis dar minėjo tik `DATABASE_URL` — operatorius dokumentuotame
+   * Compose diegime iš jo suprastų, kad persistencija jam neprieinama.
+   */
+  "Ištrynimo žymos laikomos TIK ATMINTYJE (PostgreSQL nenurodytas: nėra nei " +
+  "DATABASE_URL, nei PGHOST). Jos neišgyvena restarto ir nėra bendros replikoms, " +
+  "tad po restarto vėluojanti eilės žinutė ištrintam job'ui vėl gali sukurti " +
+  "artefaktus. Persistentinė garantija galioja tik diegimams su nurodytu " +
+  "PostgreSQL. Žr. docs/deletion-guarantees.md §2.";
 
 /** Numatytoji atsarga virš prikėlimo horizonto. Vienas autoritetas. */
 const SAFETY_MARGIN_MS = 24 * 60 * 60 * 1000; // 1 para
@@ -81,11 +87,50 @@ function pasirinktiBackend(env) {
   return arNurodytaPostgres(env) ? "postgres" : "memory";
 }
 
-async function initializePostgres(env) {
-  const pool = new Pool({
+/**
+ * ⚠️ UŽKLAUSŲ RIBA ATSKIRAI NUO PRISIJUNGIMO RIBOS (#342 Codex, P1).
+ *
+ * `connectionTimeoutMillis` galioja tik iki jungties gavimo. `init()` daro
+ * `SELECT 1 FROM erasure_marks LIMIT 1`, ir be ribos serveris, kuris jungtį
+ * priima, bet neatsako, pakabintų startą neribotai.
+ *
+ * ⚠️ ČIA TAI SVARBIAU NEI KITUR. `server.js` `deletionTombstones.init()` yra
+ * starto kelyje, o ADR prielaidos 5 matavimas parodė, kad fail-closed elgesį
+ * realiai užtikrina BŪTENT ši patikra - trečias sluoksnis. Sluoksnis, kuris
+ * gali kaboti, fail-closed neduoda: jis duoda fail-never.
+ *
+ * Riba ta pati kaip `jobStore`, `sessionStore` ir `postgresReachability()`.
+ *
+ * ⚠️ `PG_CONNECT_TIMEOUT_MS` PALIEKAMAS KAIP ATSARGA. Namų kintamasis yra
+ * `DB_CONNECT_TIMEOUT_MS` (taip daro visi kiti pool'ai); #183 čia įvedė kitą
+ * vardą. Skaitomi abu - pirmenybė namų vardui - kad esami diegimai nenustotų
+ * veikti tyliai.
+ */
+function riba(env, vardai, numatyta = 5000) {
+  for (const vardas of vardai) {
+    const raw = Number(env[vardas]);
+    if (Number.isFinite(raw) && raw >= 100) return raw;
+  }
+  return numatyta;
+}
+
+/**
+ * Žymų pool'o nustatymai VIENOJE vietoje - kad ribas būtų galima patikrinti be
+ * tikros DB (AGENTS.md §9.2; ta pati forma kaip `sesijuPoolNustatymai()`).
+ */
+function zymuPoolNustatymai(env = process.env) {
+  const uzklausa = riba(env, ["DB_QUERY_TIMEOUT_MS"]);
+
+  return {
     ...pgJungtiesNustatymai(env),
-    connectionTimeoutMillis: Number(env.PG_CONNECT_TIMEOUT_MS) || 5000,
-  });
+    connectionTimeoutMillis: riba(env, ["DB_CONNECT_TIMEOUT_MS", "PG_CONNECT_TIMEOUT_MS"]),
+    statement_timeout: uzklausa,
+    query_timeout: uzklausa,
+  };
+}
+
+async function initializePostgres(env) {
+  const pool = new Pool(zymuPoolNustatymai(env));
 
   /**
    * ⚠️ Neveiklios jungties klaida neturi nužudyti proceso – ta pati taisyklė
@@ -471,6 +516,30 @@ async function assertNotBarred(klientas, jobId) {
 }
 
 /** Neterminalės žymos su amžiumi – operatoriaus matomumo kelias (#183). */
+/**
+ * VISOS žymos eksportui (#250, 7.6c) — įskaitant `deleted`.
+ *
+ * ⚠️ ATSKIRAS METODAS, NE `listUnresolved()` VĖLIAVA. Ta funkcija turi savo
+ * semantiką (operatoriaus „kas įstrigo" rodinys) ir amžiaus/limito parametrus;
+ * eksportui reikia PILNOS aibės be ribų, o dvi prasmės viename metode reikštų,
+ * kad kvietėjas turi žinoti, kurią gauna.
+ */
+async function listAll() {
+  await ensureInit();
+  return store.listAll();
+}
+
+/**
+ * Sulietos žymos įrašymas (#250, 7.6c).
+ *
+ * ⚠️ SPRENDIMĄ PRIIMA `utils/erasureExport.js`. Fasadas jo nekartoja: čia tik
+ * `ensureInit()` ir perdavimas saugyklai.
+ */
+async function importuotiZyma(irasas) {
+  await ensureInit();
+  return store.importuotiZyma(irasas);
+}
+
 async function listUnresolved(options = {}) {
   await ensureInit();
   return store.listUnresolved(options);
@@ -631,6 +700,8 @@ async function _clearForTests() {
 function _stopSweepForTests() {}
 
 module.exports = {
+  /** ⚠️ Eksportuojama, kad starto ribas būtų galima patikrinti BE tikros DB (#342). */
+  zymuPoolNustatymai,
   /** ⚠️ Eksportuojama TESTUI: mutacija „vėl tik `DATABASE_URL`" turi būti pagaunama. */
   pasirinktiBackend,
   TOMBSTONE_STATUS,
@@ -662,6 +733,8 @@ module.exports = {
   refreshBackupHorizon,
   assertNotBarred,
   listUnresolved,
+  listAll,
+  importuotiZyma,
   retentionMs,
   purgeExpired,
   size,
@@ -672,5 +745,31 @@ module.exports = {
   /** Kuris backend'as realiai aptarnauja žymas. Testams ir readiness. */
   get backend() {
     return store.backend;
+  },
+
+  /**
+   * EFEKTYVI JUNGTIES TAPATYBĖ — „ta pati bazė?", ne „tas pats vardas" (#157, PR-5).
+   *
+   * ⚠️ VARDO PALYGINIMO NEUŽTENKA, IR TAI #245 PAGRINDINĖ PAMOKA. Du komponentai gali
+   * abu būti „postgres" ir rodyti į SKIRTINGAS bazes; tada `erasure_marks` skaitoma
+   * tuščia šalia `job_result_attempts`, ir žymų apsauga tyliai negina nieko — būtent ta
+   * apsauga, dėl kurios sąlyga 3a buvo įvesta.
+   */
+  /**
+   * ⚠️ IMAMA IŠ `_pool.options`, NE IŠ `env` (Codex, #304 antras raundas).
+   *
+   * Pirmoji redakcija perskaičiuodavo tapatybę iš KONFIGŪRACIJOS. Tai buvo tas pats
+   * defektas, tik perkeltas: vardo palyginimas -> konfigūracijos palyginimas, o reikėjo
+   * iki INICIJUOTO RYŠIO. `init(env)` gali gauti kitą aplinką nei `process.env` (testai,
+   * DR keliai, kelių bazių procesai), ir tada sargas lygintų ne tas jungtis — ir praeitų.
+   *
+   * Precedentas repo jau buvo: PostgreSQL job store tapatybę ima iš `_pool.options`.
+   * Klausimas yra „kur jungtis REALIAI eina", tad atsakymą turi duoti pati jungtis.
+   */
+  jungtiesTapatybe() {
+    if (store.backend !== "postgres" || !_pool || !_pool.options) return null;
+
+    const { jungtiesTapatybe: tapatybe } = require("../pgConnection");
+    return tapatybe(_pool.options);
   },
 };

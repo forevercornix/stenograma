@@ -92,7 +92,7 @@ test("DELETE /api/transcribe-jobs/:id - aktyvus jobas grąžina 409", async () =
   );
 
   assert.equal(res.status, 409);
-  assert.ok(await jobStore.system.get(job.id));
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }));
 });
 
 test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą", async () => {
@@ -122,7 +122,7 @@ test("DELETE /api/transcribe-jobs/:id - ištrina užbaigtą jobą ir jo auditą"
   );
 
   assert.equal(res.status, 204);
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 
   // DATA_ERASED kvitas SĄMONINGAI lieka, bet jis nesusietas su subjektu
   // (subjectId=null), tad į own() nepatenka - žr. utils/jobErasure.js.
@@ -173,7 +173,7 @@ test("DELETE /api/transcribe-jobs/:id - PILNAS srautas: upload -> polling -> iš
   const afterDelete = (await auditLog.getAll())
     .filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(jobId));
   assert.equal(afterDelete.length, 0);
-  assert.equal(await jobStore.system.get(jobId), null);
+  assert.equal(await jobStore.system.get(jobId, { hydrate: true }), null);
 });
 
 test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, jobas lieka)", async () => {
@@ -186,7 +186,7 @@ test("DELETE /api/transcribe-jobs/:id - PROTOKOLO jobo ID nepriimamas (404, joba
   const res = await request(app).delete(`/api/transcribe-jobs/${protocolJob.id}`);
 
   assert.equal(res.status, 404);
-  assert.ok(await jobStore.system.get(protocolJob.id), "protokolo jobas turi likti nepaliestas");
+  assert.ok(await jobStore.system.get(protocolJob.id, { hydrate: true }), "protokolo jobas turi likti nepaliestas");
 
   await jobStore.system.remove(protocolJob.id);
 });
@@ -198,11 +198,11 @@ test("DELETE /api/transcribe-jobs/:id - LEGACY jobas be type ištrinamas (ne 404
   await markCompleted(jobStore.system, legacy.id, { result: { text: "Senas rezultatas" },
     type: undefined });
 
-  const stored = await jobStore.system.get(legacy.id);
+  const stored = await jobStore.system.get(legacy.id, { hydrate: true });
   stored.type = undefined; // imituojam seną Redis įrašą be lauko
 
   const res = await request(app).delete(`/api/transcribe-jobs/${legacy.id}`);
 
   assert.equal(res.status, 204);
-  assert.equal(await jobStore.system.get(legacy.id), null);
+  assert.equal(await jobStore.system.get(legacy.id, { hydrate: true }), null);
 });

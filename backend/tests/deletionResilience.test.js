@@ -33,7 +33,7 @@ test("jobStore TTL praėjo, bet audito įrašai liko - DELETE juos vis tiek išt
   const jobId = "11111111-2222-3333-4444-555555555555";
   await auditLog.record({ jobId, transcriptionProvider: "mock", success: true });
 
-  assert.equal(await jobStore.system.get(jobId), null, "jobStore įrašo neturi būti");
+  assert.equal(await jobStore.system.get(jobId, { hydrate: true }), null, "jobStore įrašo neturi būti");
   assert.equal((await auditLog.getAll()).length, 1);
 
   const res = await request(app).delete(`/api/transcribe-jobs/${jobId}`);
@@ -87,7 +87,7 @@ test("deletion_pending jobas pakartojamas automatiškai", async () => {
 
   assert.ok(summary.attempted >= 1);
   assert.ok(summary.succeeded >= 1);
-  assert.equal(await jobStore.system.get(job.id), null, "pakartojimas turi užbaigti ištrynimą");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "pakartojimas turi užbaigti ištrynimą");
 });
 
 test("lenktynės: du vienalaikiai DELETE - vienas 204, kitas 404, be avarijos", async () => {
@@ -105,7 +105,7 @@ test("lenktynės: du vienalaikiai DELETE - vienas 204, kitas 404, be avarijos", 
     statuses.every((status) => [204, 404].includes(status)),
     `netikėti statusai: ${statuses.join(", ")}`
   );
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 });
 
 test("lenktynės: DELETE kol jobas dar aktyvus -> 409, jobas nepaliestas", async () => {
@@ -165,7 +165,7 @@ test("audio valymo klaida pažymima ATSKIRA vėliava (ne deletion_pending)", asy
   const failingKey = "uploads";
   assert.equal(await releaseAudio(job.id, failingKey), false);
 
-  const flagged = await jobStore.system.get(job.id);
+  const flagged = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(flagged.audio_cleanup_pending, true);
   assert.equal(
     flagged.deletion_pending,
@@ -194,7 +194,7 @@ test("audio valymo retry ištrina TIK audio, rezultatą palieka", async () => {
 
   assert.ok(summary.succeeded >= 1);
 
-  const after = await jobStore.system.get(job.id);
+  const after = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(after, "jobas turi LIKTI - trinamas tik audio");
   assert.equal(after.storageKey, null);
   assert.equal(after.audio_cleanup_pending, false);
@@ -214,11 +214,11 @@ test("nebaigto valymo jobas neišmetamas per TTL", async () => {
   const farFuture = Date.now() + 10 * 24 * 60 * 60 * 1000;
   await jobStore.sweepExpired(farFuture);
 
-  assert.ok(await jobStore.system.get(job.id), "pažymėtas jobas turi išlikti po TTL");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "pažymėtas jobas turi išlikti po TTL");
 
   await jobStore.system.update(job.id, { audio_cleanup_pending: false });
   await jobStore.sweepExpired(farFuture);
-  assert.equal(await jobStore.system.get(job.id), null, "be vėliavos - išmetamas normaliai");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "be vėliavos - išmetamas normaliai");
 });
 
 test("nežinomas ID nesukuria klaidingo DATA_ERASED kvito", async () => {
@@ -266,7 +266,7 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
   assert.equal(retrySummary.failed, 0);
 
   // Nesvarbu, kuris nugalėjo - galutinė būsena turi būti ta pati.
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
   assert.equal(
     (await auditLog.getAll()).filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(job.id))
       .length,
@@ -300,7 +300,7 @@ test("backoff: dar neatėjęs bandymo laikas praleidžiamas (deferred)", async (
 
   assert.ok(summary.deferred >= 1, "jobas turi būti atidėtas, o ne bandomas iš karto");
 
-  const untouched = await jobStore.system.get(job.id);
+  const untouched = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(untouched.audio_cleanup_attempts, 2, "skaitliukas neturi keistis");
 
   await jobStore.system.update(job.id, { audio_cleanup_pending: false });
@@ -374,7 +374,7 @@ test("#183 MARŠRUTAS: svetima `deletion_pending` žyma duoda 202, o ne dubliuot
 
   assert.equal(res.status, 202);
   assert.equal(res.body.status, "in_progress");
-  assert.ok(await jobStore.system.get(job.id), "202 reiškia, kad darbas NEPRADĖTAS");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "202 reiškia, kad darbas NEPRADĖTAS");
 });
 
 test("#183 MARŠRUTAS: neišspręsta žyma duoda 503, ne 204", async () => {

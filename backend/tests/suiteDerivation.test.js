@@ -27,20 +27,107 @@ function visiTestuFailai() {
   return fs.readdirSync(TESTU_KATALOGAS).filter((f) => f.endsWith(".test.js"));
 }
 
+/** Nepriklausomas skenavimas: kurie failai importuoja duotą sargą. */
+function pagalSarga(sargas) {
+  return visiTestuFailai()
+    .filter((f) => importuotiModuliai(failoTurinys(f)).some((k) => k.endsWith(sargas)))
+    .map((f) => f.replace(/\.test\.js$/, ""))
+    .sort();
+}
+
 test("IŠVEDIMAS: rinkinys sutampa su faktine `postgresGuard` priklausomybe", () => {
   /**
    * Round-trip: išvedimo funkcija ir nepriklausomas skenavimas privalo duoti tą
    * pačią aibę. Skirtumas reikštų, kad išvedimas sugedo (pvz. pasikeitė importo
    * forma), o rinkinys tyliai susitraukė.
+   *
+   * ⚠️ NUO #157 PR-6 `postgres` YRA SKIRTUMAS, NE VISA AIBĖ. Failai, kuriems
+   * reikia IR S3, iškeliami į `postgresS3` — kitaip jie praleistų save postgres
+   * žingsnyje (nėra MinIO) ir sulaužytų jo „tikrai vykdytas" sargą.
    */
-  const nepriklausomai = visiTestuFailai()
-    .filter((f) => importuotiModuliai(failoTurinys(f)).some((k) => k.endsWith("postgresGuard")))
-    .map((f) => f.replace(/\.test\.js$/, ""))
-    .sort();
+  const suPg = pagalSarga("postgresGuard");
+  const suMinio = pagalSarga("minioGuard");
+  const nepriklausomai = suPg.filter((v) => !suMinio.includes(v));
 
   assert.deepEqual(suites.postgres, nepriklausomai, "išvestas rinkinys išsiskyrė su realybe");
   assert.deepEqual(isvestiPostgresRinkini(), nepriklausomai);
   assert.ok(nepriklausomai.length >= 9, "rinkinys negali tyliai susitraukti");
+});
+
+test("IŠVEDIMAS: trys rinkiniai NESIKERTA ir nieko nepraranda", () => {
+  /**
+   * ⚠️ DVI KRYPTYS, IR ABI BŪTINOS.
+   *
+   * Persidengimas reikštų, kad failas paleidžiamas žingsnyje, kuriame trūksta
+   * vieno iš jo servisų — t. y. praleistų save ir sulaužytų to žingsnio sargą.
+   * Praradimas reikštų, kad failas nepaleidžiamas NIEKUR, o tai tyliausias iš
+   * visų gedimų: CI lieka žalias, o kodas nepatikrintas.
+   */
+  const suPg = pagalSarga("postgresGuard");
+  const suMinio = pagalSarga("minioGuard");
+
+  const persidengimas = [
+    ...suites.postgres.filter((v) => suites.s3.includes(v) || suites.postgresS3.includes(v)),
+    ...suites.s3.filter((v) => suites.postgresS3.includes(v)),
+  ];
+  assert.deepEqual(persidengimas, [], "rinkiniai persidengia — failas praleistų save svetimame žingsnyje");
+
+  const visiInfra = [...new Set([...suPg, ...suMinio])].sort();
+  const padengti = [...new Set([...suites.postgres, ...suites.s3, ...suites.postgresS3])].sort();
+  assert.deepEqual(padengti, visiInfra, "failas su infrastruktūros priklausomybe iškrito iš VISŲ rinkinių");
+
+  /** KONTROLĖ: išskyrimas tikrai kažką atskiria, o ne yra tuščias no-op. */
+  assert.ok(suites.postgresS3.length > 0, "be dvigubos priklausomybės failo taisyklė nepatikrinta");
+});
+
+test("SAVIPATIKRA: išvedimo taisyklė atskiria FIKTYVŲ dvigubos priklausomybės failą", () => {
+  /**
+   * ⚠️ KOL `postgresS3` TURI VIENĄ FAILĄ, JO SARGO JAUTRUMAS PRIKLAUSO NUO TO
+   * VIENO ATVEJO.
+   *
+   * Taisyklė gali būti teisinga ir sutapti su vieninteliu failu vienu metu —
+   * abu paaiškinimai duoda tą patį rezultatą, ir jų neatskiria niekas. Antras
+   * TIKRAS dvigubos priklausomybės testas būtų stipresnis, bet brangesnis;
+   * pigesnis atsakymas yra savipatikra, kaip CLI `process.exit()` sargo atveju.
+   *
+   * Tikrinama TAISYKLĖ, ne failų sistema: fiktyvus turinys paduodamas tam pačiam
+   * skeneriui (`importuotiModuliai`), ir tikrinama, į kurią aibę jis patektų.
+   * Failo į diską nerašom — testas, kuriantis testų failus, keistų aibę, kurią
+   * pats matuoja.
+   */
+  const klasifikuoti = (turinys) => {
+    const importai = importuotiModuliai(turinys);
+    const pg = importai.some((k) => k.endsWith("postgresGuard"));
+    const minio = importai.some((k) => k.endsWith("minioGuard"));
+
+    if (pg && minio) return "postgresS3";
+    if (pg) return "postgres";
+    if (minio) return "s3";
+    return "nė vieno";
+  };
+
+  const ABU = `
+    const { skipWithoutPostgres } = require("./helpers/postgresGuard");
+    const { skipWithoutMinio } = require("./helpers/minioGuard");
+  `;
+
+  assert.equal(klasifikuoti(ABU), "postgresS3", "dviguba priklausomybė privalo eiti į savo rinkinį");
+  assert.equal(
+    klasifikuoti('const { skipWithoutPostgres } = require("./helpers/postgresGuard");'),
+    "postgres"
+  );
+  assert.equal(
+    klasifikuoti('const { skipWithoutMinio } = require("./helpers/minioGuard");'),
+    "s3"
+  );
+  assert.equal(klasifikuoti('const x = require("node:fs");'), "nė vieno");
+
+  /**
+   * ⚠️ IR ATVIRKŠČIAI: be dvigubo importo `postgresS3` privalo likti TUŠČIAS.
+   * Be šios pusės taisyklė „viskas eina į postgresS3" praeitų pirmą tvirtinimą.
+   */
+  const tikPg = ['const a = require("./helpers/postgresGuard");'];
+  assert.equal(tikPg.filter((t) => klasifikuoti(t) === "postgresS3").length, 0);
 });
 
 test("SKENAVIMAS: komentaro ir literalo atpažinimas - teisinga TVARKA", () => {
@@ -161,6 +248,25 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
         "kuria `new Pool()` tik tam, kad patikrintų `error` klausytojo registraciją " +
         "ir pool'o nustatymus - prie DB nesijungia",
     },
+    {
+      failas: "pgConnectionSemantics.test.js",
+      kodel:
+        "konstruoja `new Client()` tik tam, kad IŠMATUOTŲ, kurių " +
+        "`ConnectionParameters` laukų `Client` realiai NESKAITO (`binary`) - " +
+        "prie DB nesijungia. ⚠️ Įtraukus jį į `postgres` rinkinį matavimas vyktų " +
+        "tik CI'uje, o jis kaip tik ir yra atsakymas į klausimą „ar šis laukas " +
+        "turi vartotoją\", kurį reikia užduoti BE duomenų bazės. Vienintelis šio " +
+        "failo kelias, kuriam reikia laido, naudoja `helpers/fakePostgres.js`",
+    },
+    {
+      failas: "drRestorePreconditions.test.js",
+      kodel:
+        "jungiasi prie SĄMONINGAI nepasiekiamo adreso (127.0.0.1:1): serverio jam " +
+        "NEREIKIA, o ryšio gedimas ir yra tikrinamas rezultatas - kiekvienas DR sargas " +
+        "privalo kristi dėl ryšio, ne dėl konfigūracijos (#250). Įtraukus jį į " +
+        "`postgres` rinkinį patikra vyktų tik CI'uje, t. y. kaip tik ten, kur ji " +
+        "turi būti nebereikalinga",
+    },
   ];
 
   const naudojaPg = visiTestuFailai().filter((f) =>
@@ -169,7 +275,15 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
 
   for (const failas of naudojaPg) {
     const vardas = failas.replace(/\.test\.js$/, "");
-    if (suites.postgres.includes(vardas)) continue;
+    /**
+     * ⚠️ `postgresS3` IRGI TINKA (#157, PR-6).
+     *
+     * Klausimas yra „ar failas paleidžiamas žingsnyje, kuriame YRA duomenų bazė",
+     * ne „ar jis konkrečiame rinkinyje". Failas, naudojantis `pg` IR `minioGuard`,
+     * teisėtai gyvena `postgresS3`; be šitos šakos jis reikalautų išimties su
+     * priežastimi, kuri būtų netiesa.
+     */
+    if (suites.postgres.includes(vardas) || suites.postgresS3.includes(vardas)) continue;
 
     const isimtis = ISIMTYS.find((i) => i.failas === failas);
     assert.ok(
@@ -205,9 +319,12 @@ function suTapKatalogu(turinys, veiksmas) {
   }
 }
 
-function paleistiTikrintuva(katalogas) {
+function paleistiTikrintuva(katalogas, ...argumentai) {
   try {
-    return { kodas: 0, isvestis: execFileSync("node", [SKRIPTAS, katalogas], { encoding: "utf8" }) };
+    return {
+      kodas: 0,
+      isvestis: execFileSync("node", [SKRIPTAS, katalogas, ...argumentai], { encoding: "utf8" }),
+    };
   } catch (e) {
     return { kodas: e.status, isvestis: (e.stderr || "") + (e.stdout || "") };
   }
@@ -395,5 +512,64 @@ test("PALEIDIKLIS: `--tap-dir` rašo TAP kiekvienam failui ir IŠVALO senus", ()
     }
   } finally {
     fs.rmSync(katalogas, { recursive: true, force: true });
+  }
+});
+
+test("LIUDYTOJAS ĮVARDIJA TĄ RINKINĮ, KURĮ TIKRINO - ne visada `postgres`", () => {
+  /**
+   * ⚠️ RASTA CI ŽURNALE, NE PERŽIŪROJE (#342).
+   *
+   * Patikros CIKLAS visada naudojo `suites[RINKINYS]` ir buvo teisingas. Melavo
+   * SĖKMĖS PRANEŠIMAS: jis buvo užkoduotas ties `suites.postgres.length`, tad
+   * visi TRYS CI žingsniai rašė „visi 27 failai realiai įvykdyti" - nors `s3` ir
+   * `postgresS3` tikrina po VIENĄ failą.
+   *
+   * ⚠️ Tai #330 pamoka, pasikartojusi pačiame liudytoje (tas pats pranešimas
+   * trims rinkiniams), ir ta pati #342 klasė: faktas teisingas, skelbiama
+   * APIMTIS - ne. Peržiūrėtojas, skaitantis S3 žingsnio žurnalą, matė
+   * patvirtinimą apie postgres rinkinį.
+   */
+  const { suites } = require("./suites");
+
+  const scenarijai = [
+    { rinkinys: "s3", zyma: "MINIO_ENDPOINT" },
+    { rinkinys: "postgresS3", zyma: "DATABASE_URL" },
+  ];
+
+  for (const { rinkinys, zyma } of scenarijai) {
+    const failai = suites[rinkinys];
+    assert.ok(failai.length > 0, `${rinkinys} rinkinys negali būti tuščias`);
+
+    const tap = Object.fromEntries(failai.map((f) => [f, SVEIKAS_TAP]));
+
+    const { kodas, isvestis } = suTapKatalogu(tap, (katalogas) =>
+      paleistiTikrintuva(katalogas, rinkinys, zyma)
+    );
+
+    assert.equal(kodas, 0, `${rinkinys}: sveikas TAP privalo praeiti\n${isvestis}`);
+
+    assert.match(
+      isvestis,
+      new RegExp(`"${rinkinys}"`),
+      `pranešimas privalo įvardyti TIKRINTĄ rinkinį, ne \`postgres\`:\n${isvestis}`
+    );
+
+    assert.match(
+      isvestis,
+      new RegExp(`visi ${failai.length} failai`),
+      `pranešimas privalo skelbti TO rinkinio failų skaičių (${failai.length}):\n${isvestis}`
+    );
+
+    /**
+     * ⚠️ NEIGIAMA PUSĖ. Be jos užkoduotas „27" praeitų kiekvienam rinkiniui,
+     * kurio dydis atsitiktinai sutaptų - o būtent užkoduota reikšmė ir buvo yda.
+     */
+    if (failai.length !== suites.postgres.length) {
+      assert.doesNotMatch(
+        isvestis,
+        new RegExp(`visi ${suites.postgres.length} failai`),
+        `pranešimas NEGALI skelbti postgres rinkinio dydžio tikrindamas ${rinkinys}`
+      );
+    }
   }
 });

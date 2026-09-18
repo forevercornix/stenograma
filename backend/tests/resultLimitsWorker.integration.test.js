@@ -93,7 +93,7 @@ test(
 
     let galutinis;
     for (let i = 0; i < 40; i++) {
-      galutinis = await jobStore.system.get(job.id);
+      galutinis = await jobStore.system.get(job.id, { hydrate: true });
       if (galutinis?.status === "completed" || galutinis?.status === "failed") break;
       await new Promise((r) => setTimeout(r, 250));
     }
@@ -161,7 +161,7 @@ test(
 
     let galutinis;
     for (let i = 0; i < 40; i++) {
-      galutinis = await jobStore.system.get(job.id);
+      galutinis = await jobStore.system.get(job.id, { hydrate: true });
       if (galutinis?.status === "completed" || galutinis?.status === "failed") break;
       await new Promise((r) => setTimeout(r, 250));
     }

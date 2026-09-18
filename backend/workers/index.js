@@ -133,7 +133,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
        *
        * ⚠️ TOMBSTONE PATIKRA LIEKA PIRMA (aukščiau) — 7.5a barjeras nekeičiamas.
        */
-      const jauEsantis = await jobStore.system.get(jobId);
+      const jauEsantis = await jobStore.system.get(jobId, { hydrate: true });
       const sprendimas = sprendimasPriesRestart(jauEsantis);
 
       if (sprendimas === RETRY_VEIKSMAS.REMONTUOTINA) {
@@ -365,8 +365,35 @@ function createWorker(queueName, processor, workerOptions = {}) {
             throw fatal;
           }
 
-          // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
-          const completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+          /**
+           * ⚠️ STRUKTŪRINIS ARTEFAKTO ATMETIMAS SUSTABDO RETRY GRANDINĘ (#157, PR-4).
+           *
+           * `neatkartojama: true` reiškia, kad pakartojimas duos TĄ PATĮ atmetimą:
+           * `Date` rezultate, NUL simbolis, neporinis surogatas. Be vyniojimo BullMQ
+           * kartotų `attempts` kartų, o kiekvienas bandymas yra PILNAS transkribavimas
+           * arba LLM kvietimas — tiksliai tai, ką #153 uždarė dydžio pusėje.
+           *
+           * ⚠️ PR-2 PADARĖ ŽENKLĄ, PR-4 JO PAISO. Iki šiol `neatkartojama` buvo
+           * GAMINAMAS, bet niekas jo neskaitė — savybė be ją paisančio kelio yra
+           * dokumentacija, ne savybė. Tai užrašyta PR-2 kaip `UNVERIFIED`, ir čia
+           * uždaroma.
+           *
+           * Seka precedentą 20 eilučių aukščiau (`assertResultWithinLimits`): ta pati
+           * forma, tas pats `cause` perdavimas, kad `_classifyError()` matytų domeninį
+           * kodą, ne `internal_error`.
+           */
+          let completedJob;
+          try {
+            // COMPLETED rašom čia (ne on-completed), kad rezultatas tikrai išsaugotas.
+            completedJob = await jobStore.system.finish(jobId, jobStore.STATUS.COMPLETED, { result });
+          } catch (klaida) {
+            if (!klaida || klaida.neatkartojama !== true) throw klaida;
+
+            const { UnrecoverableError } = require("bullmq");
+            const fatal = new UnrecoverableError(klaida.message);
+            fatal.cause = klaida;
+            throw fatal;
+          }
           if (!completedJob) {
             throw new Error(`Nepavyko išsaugoti job rezultato (COMPLETED): ${jobId}. Job store įrašo nebėra.`);
           }
@@ -463,7 +490,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
      * kuris tiriamas dažniausiai, liktų vienintelis be koreliacijos.
      */
     const { runWithContext } = require("../utils/requestContext");
-    const failedJob = await jobStore.system.get(jobId).catch(() => null);
+    /** ⚠️ TIK KORELIACIJAI (`requestId`, `actor`) — rezultato ši šaka neskaito (#157, PR-3). */
+    const failedJob = await jobStore.system.get(jobId, { hydrate: false }).catch(() => null);
 
     /**
      * ⚠️ ATMETIMAS GAUDOMAS ČIA, ĮVYKIO KLAUSYTOJO RIBOJE (Codex).
@@ -700,11 +728,13 @@ async function initializeWorkerOrFail(workerName) {
   /**
    * ⚠️ TIKRINAMA EILĖS GALIMYBĖ, NE KONKRETUS BACKEND'AS (#155, 7.2a).
    *
-   * Anksčiau čia buvo `getBackend() !== "redis"`. Atidarius PostgreSQL
-   * aktyvavimo barjerą su nustatytais IR `DATABASE_URL`, IR `REDIS_URL`,
-   * HTTP procesas dėtų job'us į BullMQ (`hasQueueBackend()` grąžintų `true`),
-   * o KIEKVIENAS atskiras worker'is kristų starte - vartotojo darbas liktų
-   * eilėje amžinai, be nė vieno vykdytojo.
+   * Anksčiau čia buvo `getBackend() !== "redis"`. Su `JOB_STORE_BACKEND=postgres`
+   * ir nustatytu `REDIS_URL` HTTP procesas dėtų job'us į BullMQ
+   * (`hasQueueBackend()` grąžintų `true`), o KIEKVIENAS atskiras worker'is kristų
+   * starte - vartotojo darbas liktų eilėje amžinai, be nė vieno vykdytojo.
+   *
+   * ⚠️ RAŠYTA KAIP ATEITIES SĄLYGA, DABAR YRA PASIEKIAMA KONFIGŪRACIJA (#155):
+   * barjeras atidarytas, tad šis derinys nebėra hipotetinis.
    *
    * Sprendimą priima ta pati `canUseQueue()`, kurią naudoja `server.js`.
    */

@@ -219,6 +219,43 @@ test("SKENERIO IŠIMTIS: saugyklos sluoksnis realiai NĖRA producer'is", () => {
   }
 });
 
+/** Fasado apibrėžimas ir saugyklos sluoksnis nėra kvietėjai. */
+const NE_KVIETEJAI = ["utils/auditLog.js", "utils/auditStore/"];
+
+/**
+ * `auditLog.getAll()` KVIETĖJŲ SKENERIS — VIENAS, DVIEM KVIETIMAMS (#285).
+ *
+ * ⚠️ KANONIZUOJAMA TIES ĮVESTIES RIBA (#283).
+ *
+ * `fs.readdirSync(dir, { recursive: true })` Windows'e grąžina
+ * `auditStore\postgresStore.js`, tad `${katalogas}/${irasas}` duoda
+ * `utils/auditStore\postgresStore.js`, o `NE_KVIETEJAI` prefiksas turi
+ * BAIGIAMĄJĮ `/` — išimtis nesuveikdavo. Naudojamas TAS PATS `kanonizuotiKelia()`
+ * kaip producer skeneryje: antra normalizavimo kopija būtų ta pati klasė.
+ *
+ * ⚠️ TURINYS SKAITOMAS PER NEAPDOROTĄ ĮRAŠĄ (#285): kanoninė forma skirta
+ * palyginimams, ne failų sistemai.
+ *
+ * @param {string} katalogas produkcinis katalogas (`utils`, `services`, …)
+ * @param {Iterable<string>} irasai `readdirSync` įrašai (OS-natyvūs arba POSIX)
+ * @param {(irasas: string) => string} skaityti turinio šaltinis
+ */
+function rastiNeribotusSkaitymus(katalogas, irasai, skaityti) {
+  const { beKomentaru, kanonizuotiKelia } = require("../utils/auditEvents");
+  const rasti = [];
+
+  for (const irasas of irasai) {
+    const santykinis = `${katalogas}/${kanonizuotiKelia(irasas)}`;
+    if (!santykinis.endsWith(".js")) continue;
+    if (NE_KVIETEJAI.some((k) => santykinis.startsWith(k))) continue;
+
+    const svarus = beKomentaru(skaityti(irasas));
+    if (/auditLog\s*\.\s*getAll\s*\(/.test(svarus)) rasti.push(santykinis);
+  }
+
+  return rasti;
+}
+
 test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRAUDŽIAMI", () => {
   /**
    * ⚠️ TRIPWIRE (AGENTS.md §9.2), ne elgsenos įrodymas.
@@ -236,7 +273,6 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
    */
   const fs = require("node:fs");
   const path = require("node:path");
-  const { beKomentaru } = require("../utils/auditEvents");
 
   /**
    * Žinomi kvietėjai. Kiekvienas įrašas privalo turėti priežastį - be jos
@@ -249,9 +285,6 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
   const PRODUKCINIAI = ["utils", "services", "middleware", "routes", "workers", "queues"];
   const saknis = path.join(__dirname, "..");
 
-  /** Fasado apibrėžimas ir saugyklos sluoksnis nėra kvietėjai. */
-  const NE_KVIETEJAI = ["utils/auditLog.js", "utils/auditStore/"];
-
   const rasti = [];
 
   for (const katalogas of PRODUKCINIAI) {
@@ -263,15 +296,18 @@ test("NERIBOTAS SKAITYMAS: nauji produkciniai `auditLog.getAll()` kvietėjai DRA
       continue;
     }
 
-    for (const irasas of irasai) {
-      const santykinis = `${katalogas}/${String(irasas)}`;
-      if (!santykinis.endsWith(".js")) continue;
-      if (NE_KVIETEJAI.some((k) => santykinis.startsWith(k))) continue;
-
-      const svarus = beKomentaru(fs.readFileSync(path.join(dir, String(irasas)), "utf8"));
-
-      if (/auditLog\s*\.\s*getAll\s*\(/.test(svarus)) rasti.push(santykinis);
-    }
+    /**
+     * ⚠️ TAS PATS SKENERIS, KURĮ KVIEČIA IR KONTROLINIS TESTAS (#285 peržiūra).
+     *
+     * Pirmoji redakcija turėjo predikato KOPIJĄ testo apačioje. Linux CI'uje
+     * tikri įrašai naudoja `/`, tad kanonizavimą pašalinus IŠ ČIA kopija likdavo
+     * žalia — mutacija OA buvo paskelbta krintančia, nors nekrisdavo. Griežčiausia
+     * #266 forma: assert'as tvirtino teisybę apie kodą, kurio produkcinis srautas
+     * nenaudoja.
+     */
+    rastiNeribotusSkaitymus(katalogas, irasai, (irasas) =>
+      fs.readFileSync(path.join(dir, String(irasas)), "utf8")
+    ).forEach((f) => rasti.push(f));
   }
 
   const netiketi = rasti.filter((f) => !LEIDZIAMI.some((l) => l.failas === f));
@@ -805,31 +841,94 @@ test("POOL: injektuoti `PG*` PERSIUNČIAMI, ne paliekami bibliotekos nuožiūrai
   assert.equal(suUrl.host, undefined, "su URL `PG*` neturi būti maišomi");
 });
 
-test("KONFLIKTAS: `DATABASE_URL` IR `PGHOST` kartu NUTRAUKIA startą", () => {
+test("KONFLIKTAS: dvi jungties formos NUTRAUKIA startą TIK kai duoda skirtingą semantiką", () => {
   /**
-   * ⚠️ #211 peržiūra (P2). Repo tai JAU deklaruoja (`startupChecks.js`: „ABU
-   * KONFIGŪRAVIMO BŪDAI KARTU = KLAIDA, ne pirmenybė"), bet tik MINKŠTAME
-   * self-check'e, kuris vykdomas PO `listen()`.
+   * ⚠️ INVARIANTAS SUSIAURINTAS SĄMONINGAI (#245) — ANKSTESNIS BUVO NETEISINGAS
+   * ABIEM KRYPTIMIS.
    *
-   * Auditui to nepakanka: `auditoPoolNustatymai()` tyliai teiktų pirmenybę
-   * `DATABASE_URL`, tad servisas paskelbtų readiness ir rašytų auditą į VISAI
-   * KITĄ duomenų bazę nei ta, kurią nurodo Compose `PG*`. Auditas yra būtent ta
-   * lentelė, apie kurią klausiama po incidento - „į kurią DB jis rašė" negali
-   * priklausyti nuo tylios pirmenybės.
+   * Buvo tikrinama: „`DATABASE_URL` IR `PGHOST` kartu → klaida". Klausimas
+   * („į kurią DB rašomas auditas?") buvo teisingas, atsakymas — ne:
+   *
+   *   PER GRIEŽTA — su PILNU DSN `PGHOST` `pg` semantikai NETURI JOKIOS įtakos
+   *                 (`connection-parameters.js:9-23`: `config.host` pirma). Auditas
+   *                 krisdavo ten, kur dviprasmybės nebuvo, ir dokumentuotame
+   *                 Compose diegime (`PG*`) persistencijos įjungti buvo NEĮMANOMA:
+   *                 pridėjus `DATABASE_URL` krisdavo būtent ši patikra.
+   *
+   *   PER LAISVA  — `PGSSLMODE` ir `PGOPTIONS` pilną DSN PERRAŠO
+   *                 (`connection-parameters.js:83, 85`), o taisyklė jų nematė.
+   *                 `-csearch_path=…` yra KITA schema, t. y. tiksliai tas „auditas
+   *                 kitoje vietoje" atvejis, kurio ji ir siekė neleisti.
+   *
+   * Naujas invariantas tikrina EFEKTĄ, ir abi kryptys yra būtinos: be pirmosios
+   * grįžtų blokada, be antrosios — tyli spraga.
    */
   const { resolveAuditBackend } = require("../utils/auditStore/backendSelection");
 
   const bazė = { AUDIT_BACKEND: "postgres", AUDIT_ID_SALT: "s", AUDIT_ID_SALT_ID: "i" };
+  const PILNAS = "postgres://u:p@db.prod:5432/stenograma";
 
-  /** Kiekvienas atskirai - teisėtas. */
-  assert.equal(resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://a/b" }), "postgres");
+  /** Kiekviena forma atskirai - teisėta. */
+  assert.equal(resolveAuditBackend({ ...bazė, DATABASE_URL: PILNAS }), "postgres");
   assert.equal(resolveAuditBackend({ ...bazė, PGHOST: "postgres" }), "postgres");
 
-  assert.throws(
-    () => resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://a/b", PGHOST: "kitas" }),
-    /IR DATABASE_URL, IR PGHOST|TIK VIENĄ/,
-    "abu kartu privalo nutraukti startą, o ne tyliai pasirinkti vieną"
+  /**
+   * ⚠️ ATLAISVINIMO KRYPTIS. Būtent šis derinys anksčiau krisdavo — ir būtent jis
+   * yra dokumentuotas Compose diegimas su pridėtu DSN.
+   */
+  assert.equal(
+    resolveAuditBackend({ ...bazė, DATABASE_URL: PILNAS, PGHOST: "kitas" }),
+    "postgres",
+    "pilnas DSN paverčia `PGHOST` neveiksniu - blokuoti reikštų drausti teisėtą konfigūraciją"
   );
+
+  /** ⚠️ SUGRIEŽTINIMO KRYPTIS: tai, ko senoji taisyklė NEMATĖ. */
+  for (const [vardas, aplinka] of [
+    /**
+     * ⚠️ `require`, NE `disable`. `disable` sutampa su `pg` numatytuoju
+     * (`defaults.ssl === false`), tad jokio skirtumo nesukuria — o testas,
+     * naudojantis `disable`, „praeitų" nieko netikrindamas.
+     *
+     * ⚠️ IR KRYPTIS ČIA VIENA. Kai DSN turi `?sslmode=…`, `config.ssl` yra
+     * apibrėžtas, ir `PGSSLMODE` `pg` apskritai neskaito
+     * (`connection-parameters.js:85`) — aplinka gali SSL tik įjungti, niekada
+     * nenuleisti žemiau to, ką eksplicitiškai sako DSN.
+     */
+    ["PGSSLMODE (saugumas)", { PGSSLMODE: "require" }],
+    ["PGOPTIONS (sesijos namespace)", { PGOPTIONS: "-csearch_path=kita" }],
+    /**
+     * ⚠️ `PGCLIENT_ENCODING` PAŠALINTAS PO PENKTO PERŽIŪROS RAUNDO.
+     *
+     * Jis atrodė kaip sesijos semantiką keičiantis kintamasis, bet grandinė
+     * `Client` → `Connection` → `pg-protocol` reikšmės NEVARTOJA: `Connection`
+     * `config.encoding` neskaito, o `pg-protocol` dekodavimas fiksuotas `utf-8`.
+     * Startas dėl jo krisdavo be priežasties. Vietoj jo — `PGREPLICATION`, kurį
+     * `getStartupConf()` realiai perduoda serveriui.
+     */
+    ["PGREPLICATION (sesija)", { PGREPLICATION: "true" }],
+  ]) {
+    assert.throws(
+      () => resolveAuditBackend({ ...bazė, DATABASE_URL: PILNAS, ...aplinka }),
+      /SKIRTINGĄ efektyvią jungties semantiką/,
+      `${vardas}: pilną DSN perrašantis kintamasis privalo nutraukti startą`
+    );
+  }
+
+  /**
+   * ⚠️ SLAPTAŽODIS NEGALI PATEKTI Į KLAIDĄ. Kredencialų konfliktas praneša TIK
+   * klasę; reikšmės į pranešimą nepatenka net kaip fragmentas.
+   */
+  const klaida = (() => {
+    try {
+      resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://u@db.prod:5432/s", PGPASSWORD: "labai-slaptas" });
+      return null;
+    } catch (e) {
+      return e.message;
+    }
+  })();
+
+  assert.match(klaida, /kredencialai/, "klasė privalo būti įvardyta");
+  assert.ok(!klaida.includes("labai-slaptas"), "slaptažodis NEGALI patekti į klaidos tekstą");
 });
 
 test("DOKUMENTACIJA: `PG*` forma įvardyta kaip PALAIKOMA, o konfliktas - kaip klaida", () => {
@@ -1344,4 +1443,52 @@ test("KEŠAS: NEIGIAMAS rezultatas NEKEŠUOJAMAS, bet lygiagretūs zondai sujung
   /** Atsistačius DB - pastebima IŠ KARTO, be TTL laukimo. */
   atsakymas = true;
   assert.equal(await store.probe(), true, "atsistatymas neturi būti atidėtas");
+});
+
+test("#283 KONTROLĖ: `utils/auditStore/` išimtis veikia ABIEM kelio formomis", () => {
+  /**
+   * ⚠️ BE ŠIO TESTO TAISYMAS NIEKO NEĮRODYTŲ.
+   *
+   * Aukštesnis skeneris (`NERIBOTAS SKAITYMAS`) šiandien išimties NEPANAUDOJA:
+   * nė vienas `utils/auditStore/*` failas nekviečia `auditLog.getAll(`, tad
+   * `NE_KVIETEJAI` šaka niekada nevykdoma, ir Windows'e testas praeidavo
+   * ATSITIKTINAI. Pataisius kanonizavimą jis praeitų lygiai taip pat — dėl to
+   * paties nulio atitikmenų.
+   *
+   * Todėl čia paduodamas SINTETINIS turinys, kuris išimtį realiai įjungia:
+   * saugyklos sluoksnio failas su `auditLog.getAll(` abiem kelio formomis
+   * PRIVALO būti atmestas, o toks pat produkcinis failas — RASTAS.
+   *
+   * ⚠️ Testas nesišakoja pagal `process.platform`: Linux CI tikros
+   * `auditStore\postgresStore.js` formos nesukurs niekada (§9.2).
+   */
+  /**
+   * ⚠️ KVIEČIAMAS TIKRASIS SKENERIS, NE JO KOPIJA (#285 peržiūra).
+   *
+   * Pirmoji redakcija atkartojo predikatą su savo `kanonizuotiKelia()` kvietimu.
+   * Linux CI'uje tikri įrašai naudoja `/`, tad pašalinus kanonizavimą iš TIKROJO
+   * skenerio kopija likdavo žalia — mutacija OA buvo paskelbta krintančia,
+   * nors nekrisdavo.
+   */
+  const TURINYS_SU_GETALL = "const visi = await auditLog.getAll();";
+  const skaityti = () => TURINYS_SU_GETALL;
+
+  for (const irasas of ["auditStore/postgresStore.js", "auditStore\\postgresStore.js"]) {
+    assert.deepEqual(
+      rastiNeribotusSkaitymus("utils", [irasas], skaityti),
+      [],
+      `${JSON.stringify(irasas)}: saugyklos sluoksnis privalo būti atmestas, nors turi \`getAll(\``
+    );
+  }
+
+  /** ⚠️ KONTROLĖ KONTROLEI: produkcinis failas su tuo pačiu turiniu — RANDAMAS. */
+  assert.deepEqual(rastiNeribotusSkaitymus("services", ["backupService.js"], skaityti), [
+    "services/backupService.js",
+  ]);
+  assert.deepEqual(rastiNeribotusSkaitymus("services", ["vidinis\\backupService.js"], skaityti), [
+    "services/vidinis/backupService.js",
+  ]);
+
+  /** Fasado failas — irgi ne kvietėjas. */
+  assert.deepEqual(rastiNeribotusSkaitymus("utils", ["auditLog.js"], skaityti), []);
 });

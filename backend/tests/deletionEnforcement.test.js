@@ -241,7 +241,7 @@ test("LENKTYNĖS: ištrynimas VYKDYMO metu neleidžia užbaigti darbo", async ()
   const afterDeletion = await markCompleted(jobStore.system, job.id, { result: { protokolas: "neturėtų išlikti" } });
 
   assert.equal(afterDeletion, null, "rezultatas NEGALI būti įrašytas po ištrynimo");
-  assert.equal(await jobStore.system.get(job.id), null, "jobo įrašo neturi būti");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "jobo įrašo neturi būti");
 });
 
 test("STRUKTŪRA: ABU vykdymo keliai tikrina žymą PRIEŠ darbą", () => {
@@ -487,7 +487,7 @@ test("ATKŪRIMAS: žyma, atsiradusi RAŠYMO metu, atšaukia atkūrimą", async (
     const rezultatas = await jobStore.restoreRecord(jobas);
 
     assert.equal(rezultatas, null, "atkūrimas privalo būti atšauktas");
-    assert.equal(await jobStore.system.get(jobas.id), null, "atkurtas įrašas privalo būti pašalintas");
+    assert.equal(await jobStore.system.get(jobas.id, { hydrate: true }), null, "atkurtas įrašas privalo būti pašalintas");
     assert.ok(kartas >= 2, "po-rašymo patikra privalo įvykti");
   } finally {
     tombstones.isDeleted = originalus;

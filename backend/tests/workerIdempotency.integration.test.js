@@ -135,7 +135,7 @@ test(
     assert.equal(bullmqBusena, "completed", "⚠️ retry privalo baigtis SĖKME, ne dead-letter");
     assert.equal(processorKvietimu, 0, "⚠️ transkripcija/perdirbimas NEKARTOJAMAS");
 
-    const galutinis = await jobStore.system.get(job.id);
+    const galutinis = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(galutinis.status, "completed");
     assert.deepEqual(
       galutinis.result,
@@ -505,7 +505,7 @@ test(
     await jobStore.system.startPhase(job.id, "validating");
     await jobStore.system.finishFailed(job.id, { error: "tiekėjo klaida", error_code: "x" });
 
-    const pries = await jobStore.system.get(job.id);
+    const pries = await jobStore.system.get(job.id, { hydrate: true });
     assert.equal(pries.status, "failed", "prielaida: įrašas terminalus");
     assert.equal(pries.audio_cleanup_pending, false, "prielaida: valymo vėliavos NĖRA");
 
