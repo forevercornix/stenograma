@@ -130,7 +130,24 @@ async function patikrintiEilute(eilute, parinktiSaugykla) {
   }
 
   if (verdiktas.ok !== true) {
-    return { jobId: eilute.job_id, storageType: eilute.storage_type, verdiktas: VERDIKTAS.NESUTAMPA };
+    /**
+     * ⚠️ PRIEŽASTIS PERDUODAMA, NES BE JOS VERDIKTAS NETURI VARTOTOJO (#292).
+     *
+     * `verify()` dabar skiria dvi anomalijas: metaduomenų defektą (DB eilutė) ir
+     * objekto anomaliją (saugykla). Bet sprendimas čia priimamas tik iš
+     * `{exists, nepriklausomas, ok}`, tad be `detale` abi virstų tuo pačiu
+     * `NESUTAMPA`, ir skirtumas, dėl kurio jos ir buvo atskirtos, dingtų
+     * ataskaitoje.
+     *
+     * ⚠️ Atskiro VERDIKTAS kibiro sąmoningai NEKURIU: tai keistų ataskaitos formą
+     * ir jos sargus, o #292 apimtis yra `verify()` riba. Registruojama atskirai.
+     */
+    return {
+      jobId: eilute.job_id,
+      storageType: eilute.storage_type,
+      verdiktas: VERDIKTAS.NESUTAMPA,
+      ...(verdiktas.priezastis ? { detale: verdiktas.priezastis } : {}),
+    };
   }
 
   return { jobId: eilute.job_id, storageType: eilute.storage_type, verdiktas: VERDIKTAS.PATIKRINTA };

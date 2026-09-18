@@ -11,7 +11,9 @@ const {
   atkurtiReiksme,
   nesancioVerdiktas,
   neverifikuojamasVerdiktas,
-  normalizuotiLaukima,
+  ivertintiLaukimoBaitus,
+  metaduomenuDefektoVerdiktas,
+  PRIEZASTIS,
   vientisumoVerdiktas,
 } = require("./validation");
 const { getLimits, LIMIT_KIND } = require("../resultLimits");
@@ -689,15 +691,75 @@ function createFsArtifactStore({ root } = {}) {
      * persistintą `bytes`, išsemtų atkūrimo procesą BŪTENT tame kelyje, kuris
      * sugadinimą ir turi aptikti. Codex šią klasę rado S3 pusėje; `fs` turėjo tą pačią.
      *
-     * Riba: persistintas lūkestis, o jo nesant — `MAX_RESULT_BYTES`. Būtent dėl šios
-     * kainos `verify()` metadata-only keliuose DRAUDŽIAMAS.
+     * ⚠️ BIUDŽETAS IMAMAS IŠ IŠMATUOTO DYDŽIO, NE IŠ PERSISTINTO LŪKESČIO (#292).
+     *
+     * Ankstesnė redakcija ribą imdavo iš `expected.bytes` — t. y. iš TOS PAČIOS
+     * pusės, kurią `verify()` ir turi patikrinti. Kryptis buvo apversta:
+     * teigiama reikšmė valdė resursus, o išmatuota tik lyginama.
+     *
+     * Dabar: `head().bytes` (išmatuota) yra biudžetas, `expected.bytes` lieka
+     * TIKRINAMU TEIGINIU, o `MAX_RESULT_BYTES` — absoliutus rėmas, kurio nė viena
+     * pusė nekeičia. Būtent dėl skaitymo kainos `verify()` metadata-only keliuose
+     * DRAUDŽIAMAS.
      *
      * ⚠️ OBJEKTAS GALI DINGTI TARP `head()` IR SKAITYMO. Langas mažas, bet realus:
      * erasure kelias trina lygiagrečiai. Be šito `verify()` mestų žalią `ENOENT`
      * vietoj dokumentuoto „nėra", ir 7.6 ataskaita nutrūktų vietoj eilutės.
      */
-    const lauktas = normalizuotiLaukima(laukiama);
-    const riba = lauktas.bytes === null ? getLimits()[LIMIT_KIND.RESULT_BYTES] : lauktas.bytes;
+    const remas = getLimits()[LIMIT_KIND.RESULT_BYTES];
+
+    /**
+     * ⚠️ METADUOMENŲ DEFEKTAS SPRENDŽIAMAS PRIEŠ BET KOKĮ I/O (#292).
+     *
+     * Nevalidus ar virš rėmo esantis lūkestis yra DB eilutės yda, ne objekto.
+     * Payload čia net neatidaromas: sprendimui užtenka metaduomenų.
+     */
+    const lukestis = ivertintiLaukimoBaitus(laukiama, remas);
+    if (lukestis.priezastis !== null) {
+      return metaduomenuDefektoVerdiktas(true, lukestis.priezastis);
+    }
+
+    /**
+     * ⚠️ OBJEKTO ANOMALIJA - KITA KILMĖ, KITAS VERDIKTAS (#292).
+     *
+     * `head().bytes` virš rėmo reiškia REALŲ objektą, neatitinkantį
+     * konfigūracijos. Operatoriaus išvada kita: tirti saugyklą, ne DB. Verdiktas
+     * imamas ESAMAS (`neverifikuojamas`) - jo dokumentuota prasmė pažodžiui yra
+     * „objektas yra, bet viršija patikimą dydį". Antras kodas būtų sinonimas.
+     */
+    if (galva.bytes > remas) {
+      return neverifikuojamasVerdiktas(true, PRIEZASTIS.OBJEKTAS_VIRSIJA);
+    }
+
+    /**
+     * ⚠️ RIBA - IŠMATUOTAS DYDIS. Objektas, kuris skaitymo metu paaugtų virš to,
+     * ką pranešė `head()`, yra lygiai tokia pat anomalija kaip per didelis nuo
+     * pradžių, ir skaitymas nutrūksta.
+     */
+
+    /**
+     * ⚠️ DYDIS - TIKRINAMAS TEIGINYS, IR JĮ GALIMA PATIKRINTI BE SKAITYMO (#292).
+     *
+     * Jei lūkestis validus, bet IŠMATUOTAS dydis nuo jo skiriasi, objektas
+     * sutapti NEGALI - jokia suma to nepakeis. Skaitymas būtų grynas švaistymas.
+     *
+     * ⚠️ TAI NE „biudžetas iš lūkesčio". Lūkestis čia LYGINAMAS su išmatuota
+     * reikšme, o ne riboja resursus; sprendimą priima išmatuota pusė. Būtent to
+     * ir reikalauja #292 kryptis: išmatuota > teigiama.
+     *
+     * ⚠️ IR TAI PIGIAU UŽ SENĄJĮ KELIĄ. Anksčiau išpūstas objektas buvo skaitomas
+     * iki persistinto lūkesčio ir tik tada nutraukiamas; dabar neatidaromas visai.
+     */
+    if (lukestis.tinka && galva.bytes !== lukestis.bytes) {
+      return vientisumoVerdiktas({
+        laukiama,
+        bytes: galva.bytes,
+        /** Sumos neskaičiavome, tad jos ir neteigiame. */
+        checksum: null,
+        nepriklausomas: true,
+      });
+    }
+    const riba = galva.bytes;
 
     let deskriptorius;
     try {
@@ -732,7 +794,12 @@ function createFsArtifactStore({ root } = {}) {
       await deskriptorius.close().catch(() => {});
     }
 
-    if (perzengta) return neverifikuojamasVerdiktas(true);
+    /**
+     * ⚠️ PAAUGĘS OBJEKTAS - OBJEKTO ANOMALIJA (#292). Riba dabar yra `head().bytes`,
+     * tad peržengimas reiškia, kad objektas skaitymo metu buvo didesnis nei
+     * saugykla ką tik pranešė - realaus objekto savybė, ne metaduomenų.
+     */
+    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.OBJEKTAS_VIRSIJA);
 
     /**
      * ⚠️ `nepriklausomas: true` — LYGINAMA SU IŠORE ĮRAŠYTU METADUOMENIU.

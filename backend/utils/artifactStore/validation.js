@@ -482,6 +482,113 @@ function normalizuotiLaukima(laukiama = {}) {
 }
 
 /**
+ * AR LŪKESTIS TINKA BŪTI RESURSŲ BIUDŽETU (#292).
+ *
+ * ⚠️ ŠAKNIS: persistintas `job_results.bytes` naudojamas IR kaip tikrinamas
+ * teiginys, IR kaip biudžeto autoritetas. Antrasis vaidmuo yra klaida — reikšmė
+ * ateina iš TOS PAČIOS pusės, kurią `verify()` ir turi patikrinti.
+ *
+ * ⚠️ KODĖL NE `normalizuotiLaukima()` SUGRIEŽTINIMAS.
+ *
+ * Tos dvi funkcijos atsako SKIRTINGUS klausimus:
+ *
+ *   `normalizuotiLaukima()` — „su kuo lyginame". Ten leniency nekenkia: `-5` ar
+ *   trupmena niekada nesutaps su išmatuotu baitų skaičiumi, tad `ok:false`, ir tai
+ *   fail-closed.
+ *
+ *   ši funkcija — „ar šia reikšme galima RIBOTI skaitymą". Čia leniency
+ *   katastrofiška: `-5` nutraukia skaitymą ties pirmu gabalu ir teisėtą objektą
+ *   paskelbia neverifikuojamu, o `1e18` biudžeto neberiboja iš viso.
+ *
+ * ⚠️ Sugriežtinus `normalizuotiLaukima()`, nevalidus lūkestis virstų `null` ir
+ * TYLIAI nukristų į `MAX_RESULT_BYTES` — t. y. metaduomenų defektas dingtų,
+ * o #292 kaip tik reikalauja jį PRANEŠTI. Tad sugriežtinimas problemos
+ * nesprendžia; jis ją paslepia kitoje vietoje.
+ *
+ * ⚠️ PARSINIMAS NEDUBLIUOJAMAS: naudojama ta pati `normalizuotiLaukima()`
+ * išvestis, o pridedamas TIK tinkamumo vertinimas. Dvi to paties klausimo
+ * realizacijos šioje sekoje išsiskyrė ne kartą.
+ *
+ * @param {object} laukiama
+ * @param {number} riba absoliutus rėmas (`MAX_RESULT_BYTES`)
+ * @returns {{ bytes: number|null, tinka: boolean, priezastis: string|null }}
+ */
+function ivertintiLaukimoBaitus(laukiama, riba) {
+  const { bytes } = normalizuotiLaukima(laukiama);
+
+  /**
+   * ⚠️ „LAUKO NĖRA" IR „LAUKAS YRA, BET ŠIUKŠLINAS" NĖRA TAS PATS.
+   *
+   * `normalizuotiLaukima()` abu paverčia `null`, nes jai svarbu tik palyginimas.
+   * Čia skirtumas esminis: nenurodytas lūkestis yra teisėta būsena (biudžetu tampa
+   * absoliutus rėmas), o `bytes: "abc"` DB eilutėje yra defektas, kurį operatorius
+   * privalo pamatyti. Sulyginus juos, šiukšlina reikšmė dingtų tyliai.
+   */
+  const zalias = laukiama && typeof laukiama === "object" ? laukiama.bytes : undefined;
+  const laukoNera = zalias === undefined || zalias === null;
+
+  if (bytes === null) {
+    return laukoNera
+      ? { bytes: null, tinka: false, priezastis: null }
+      : { bytes: null, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
+  }
+
+  if (!Number.isInteger(bytes) || bytes < 0) {
+    return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
+  }
+
+  /**
+   * ⚠️ `bigint` VIRŠ `Number.MAX_SAFE_INTEGER` TYLIAI PRARANDA TIKSLUMĄ.
+   * `Number(9007199254740993n)` duoda `9007199254740992`. Reikšmė, kurios
+   * negalime perskaityti tiksliai, biudžetu būti negali.
+   */
+  if (!Number.isSafeInteger(bytes)) {
+    return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
+  }
+
+  /**
+   * ⚠️ `MAX_RESULT_BYTES` YRA ABSOLIUTUS RĖMAS, KURIO NĖ VIENA PUSĖ NEKEIČIA.
+   * Lūkestis virš jo yra metaduomenų defektas: toks objektas apskritai neturėjo
+   * būti įrašytas (`assertWithinLimit` rašymo kelyje).
+   */
+  if (bytes > riba) {
+    return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_VIRSIJA };
+  }
+
+  return { bytes, tinka: true, priezastis: null };
+}
+
+/**
+ * VERDIKTŲ PRIEŽASTYS — KILMĖ, NE TIK NESĖKMĖ (#292).
+ *
+ * ⚠️ Dvi anomalijos turi SKIRTINGĄ kilmę, tad ir operatoriaus išvada kita:
+ * metaduomenų defektas siunčia tirti DB eilutę, objekto anomalija — saugyklą.
+ * Be šio lauko abu virstų tuo pačiu `NESUTAMPA`, ir skirtumas dingtų.
+ */
+const PRIEZASTIS = Object.freeze({
+  /** `expected.bytes` nevalidus: ne sveikas, neigiamas ar netikslus. */
+  METADUOMENYS_NEVALIDUS: "metaduomenys_nevalidus",
+  /** `expected.bytes` viršija `MAX_RESULT_BYTES` - toks objektas neturėjo būti įrašytas. */
+  METADUOMENYS_VIRSIJA: "metaduomenys_virsija",
+  /** Realus objektas didesnis nei leidžia konfigūracija. */
+  OBJEKTAS_VIRSIJA: "objektas_virsija",
+});
+
+/**
+ * METADUOMENŲ DEFEKTO VERDIKTAS (#292).
+ *
+ * ⚠️ NE `neverifikuojamasVerdiktas`. Ten objektas realiai per didelis; čia
+ * objektas gali būti visiškai tvarkingas, o klaidinga yra DB eilutė. Sulyginus
+ * juos, operatorius tirtų saugyklą vietoj duomenų bazės.
+ *
+ * ⚠️ PAYLOAD NEATIDAROMAS. Sprendimas priimamas iš metaduomenų, tad skaitymo
+ * kelias net nepradedamas.
+ */
+function metaduomenuDefektoVerdiktas(nepriklausomas, priezastis) {
+  return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas, priezastis };
+}
+
+/**
  * NESANČIO OBJEKTO VERDIKTAS - VIENA FORMA VISIEMS BACKEND'AMS (Codex, #290).
  *
  * ⚠️ TRŪKSTAMAS LAUKAS YRA TREČIA BŪSENA. PR-7 ataskaita eilutes skirsto pagal
@@ -501,8 +608,8 @@ function nesancioVerdiktas(nepriklausomas) {
  * patikra taptų atminties gedimo šaltiniu būtent tame kelyje, kuriam ji skirta.
  * `ok: false` yra fail-closed: kvietėjas negauna patvirtinimo, kurio neturime.
  */
-function neverifikuojamasVerdiktas(nepriklausomas) {
-  return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas };
+function neverifikuojamasVerdiktas(nepriklausomas, priezastis = PRIEZASTIS.OBJEKTAS_VIRSIJA) {
+  return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas, priezastis };
 }
 
 /** Rastam objektui: palyginimas su lūkesčiu, ta pati forma kaip `nesancioVerdiktas`. */
@@ -623,6 +730,9 @@ module.exports = {
   atkurtiReiksme,
   patikrintiPersistuotaReiksme,
   normalizuotiLaukima,
+  ivertintiLaukimoBaitus,
+  PRIEZASTIS,
+  metaduomenuDefektoVerdiktas,
   nesancioVerdiktas,
   neverifikuojamasVerdiktas,
   vientisumoVerdiktas,
