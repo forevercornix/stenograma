@@ -589,6 +589,15 @@ A finding is resolved when the underlying supported failure mode is no longer
 reachable, or when evidence establishes that the finding was not applicable — not
 merely when the originally mentioned line changes.
 
+When several conditions can produce different verdicts, write the precedence down
+as data — a table or ordered list — rather than leaving it to the order of
+`return` statements. Where statement order decides, each new case is inserted by
+guess, and only the combination someone happened to notice gets tested. Measured
+in #292: three consecutive review rounds on validation ordering in one file, each
+fixed by moving a `return`; the fourth was avoided by validating every field first
+and selecting the verdict from an explicit precedence list, which also made the
+full combination matrix enumerable in a test.
+
 ### 19.5 Properties that look like guarantees
 
 Apply §14.1 when implementation structure appears to establish a guarantee merely

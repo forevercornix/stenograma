@@ -1034,6 +1034,20 @@ node -e "
 
 **Ataskaitos pavyzdys:**
 
+⚠️ **Nuo #292 santraukoje yra PRIEŽASČIŲ suvestinė.** Be jos „nesėkmių 3" nepasakė,
+ką daryti: trys skirtingos priežastys reikalauja trijų skirtingų veiksmų.
+
+| Priežastis | Ką tirti |
+|---|---|
+| `metaduomenys_nevalidus` | **DB eilutę** — reikšmė pažeidžia `job_results_integrity_shape` |
+| `virsija_dabartine_riba` | **konfigūraciją** — `MAX_RESULT_BYTES` mažesnis nei artefaktas; eilutė gali būti sveika |
+| `saugykla_neatitinka_head` | **objektą** — jis pasikeitė tarp `head()` ir skaitymo |
+
+Pilnas nesėkmių sąrašas lieka `ataskaita.nesekmes` tiems, kas apdoroja programiškai;
+santraukoje jis nespausdinamas, nes eilučių skaičius neribotas.
+
+
+
 ```
 eilučių 1284; nepriklausomai patikrinta 37; nepatikrinama (inline, nėra su kuo lyginti) 1247; nesėkmių 0
 ```

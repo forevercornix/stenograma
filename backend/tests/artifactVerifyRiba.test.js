@@ -41,7 +41,10 @@ const REMAS = getLimits()[LIMIT_KIND.RESULT_BYTES];
 async function fsAplinka(t) {
   const saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-292-"));
   t.after(() => fsp.rm(saknis, { recursive: true, force: true }));
-  return createFsArtifactStore({ root: saknis });
+  const saugykla = createFsArtifactStore({ root: saknis });
+  /** ⚠️ Šaknis grąžinama, kad testas galėtų keisti objektą UŽ saugyklos nugaros. */
+  saugykla.saknisTestui = saknis;
+  return saugykla;
 }
 
 const S3_KONF = {
@@ -261,8 +264,8 @@ test("#292 BIUDŽETAS: saugykla praneša vieną dydį, atiduoda DIDESNĮ → ska
   assert.equal(verdiktas.exists, true, "objektas YRA");
   assert.equal(
     verdiktas.priezastis,
-    PRIEZASTIS.VIRSIJA_RIBA,
-    "⚠️ kilmė - saugykla: ji pranešė ne tą, ką atidavė"
+    PRIEZASTIS.SAUGYKLA_NEATITINKA,
+    "⚠️ kilmė - SAUGYKLA: ji pranešė ne tą, ką atidavė; riba čia nebuvo peržengta"
   );
   assert.equal(verdiktas.checksum, null, "nutraukto skaitymo sumos neteigiame");
 });
@@ -461,4 +464,157 @@ test("#292 B: `checksum` validuojamas ŽALIAS — kanonizavimas nėra validumo �
   /** ⚠️ KONTROLĖ: kanoninė forma toliau praeina — patikra neatmeta teisėtų. */
   const geras = await saugykla.verify(raktas, { bytes: kvitas.bytes, checksum: kvitas.checksum });
   assert.equal(geras.ok, true, "teisėta kanoninė suma PRIVALO praeiti");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * TREČIAS CODEX RAUNDAS: B (pirmenybė) ir C (saugyklos anomalija)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#292 B: metaduomenų defektas NUSVERIA politiką — visi 6 deriniai apibrėžti", async (t) => {
+  /**
+   * ⚠️ ŠAKNIS, KURIĄ ŠIS TESTAS UŽDARO: pirmenybę nustatydavo `return` SEKA.
+   *
+   * `bytes` virš ribos PLIUS sugadintas `checksum` siųsdavo operatorių į
+   * konfigūraciją, nors eilutė pažeidžia ir kontraktą. Pakeitus
+   * `MAX_RESULT_BYTES`, politikos radinys dingtų, o sugadinta eilutė liktų — ir
+   * liktų NEPRANEŠTA.
+   *
+   * ⚠️ TIKRINAMI VISI DERINIAI, ne tik tas, kurį kas nors pastebėjo: trys `bytes`
+   * būsenos × dvi `checksum` būsenos. Būtent daliniai patikrinimai ir davė tris
+   * raundus iš eilės dėl tos pačios tvarkos.
+   */
+  const saugykla = await fsAplinka(t);
+  const raktas = "results/deriniai.json";
+  const kvitas = await saugykla.put(raktas, { text: "turinys" });
+
+  const senas = process.env.MAX_RESULT_BYTES;
+  process.env.MAX_RESULT_BYTES = String(Math.max(1, kvitas.bytes - 1));
+  try {
+    const BYTES = {
+      ok: kvitas.bytes,
+      nevalidus: 0,
+      virsija: Number(process.env.MAX_RESULT_BYTES) + 1,
+    };
+    const SUMOS = { ok: kvitas.checksum, nevalidus: "ZZZ" };
+
+    const LAUKIAMA = {
+      "ok/ok": PRIEZASTIS.VIRSIJA_RIBA,
+      "ok/nevalidus": PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+      "nevalidus/ok": PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+      "nevalidus/nevalidus": PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+      "virsija/ok": PRIEZASTIS.VIRSIJA_RIBA,
+      "virsija/nevalidus": PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+    };
+
+    let tikrinta = 0;
+    for (const [bn, bv] of Object.entries(BYTES)) {
+      for (const [cn, cv] of Object.entries(SUMOS)) {
+        const verdiktas = await saugykla.verify(raktas, { bytes: bv, checksum: cv });
+        assert.equal(verdiktas.priezastis, LAUKIAMA[`${bn}/${cn}`], `derinys ${bn}/${cn}`);
+        tikrinta += 1;
+      }
+    }
+
+    assert.equal(tikrinta, 6, "visi deriniai privalo būti patikrinti, ne pasirinkti");
+  } finally {
+    if (senas === undefined) delete process.env.MAX_RESULT_BYTES;
+    else process.env.MAX_RESULT_BYTES = senas;
+  }
+});
+
+test("#292 C: srautas viršija `head()`, bet TELPA į ribą → SAUGYKLOS anomalija", async (t) => {
+  /**
+   * ⚠️ KLASĖ, KURIOS NIEKADA NEBUVO, IR KURI PASIMATĖ TIK ATSIRADUS GRETIMAI.
+   *
+   * Objektas, paaugęs tarp `head()` ir skaitymo, bet likęs ŽEMIAU
+   * `MAX_RESULT_BYTES`, gaudavo `VIRSIJA_RIBA` — operatorius keisdavo
+   * konfigūraciją, nors riba NEBUVO peržengta.
+   *
+   * Radinys atsirado panaudojus naują verdiktą NE PAGAL PASKIRTĮ.
+   */
+  const { saugykla, kvietimai } = s3Dublis({
+    contentLength: 16,
+    kunas: Buffer.alloc(4096, 0x61).toString("latin1"),
+  });
+
+  const verdiktas = await saugykla.verify("results/paaugo.json", {});
+
+  assert.ok(kvietimai.includes("GetObjectCommand"), "prielaida: kūnas pradėtas skaityti");
+  assert.equal(
+    verdiktas.priezastis,
+    PRIEZASTIS.SAUGYKLA_NEATITINKA,
+    "⚠️ 4 KiB telpa į 20 MB ribą — tai NE politikos klausimas"
+  );
+  assert.notEqual(verdiktas.priezastis, PRIEZASTIS.VIRSIJA_RIBA, "operatorius neturi keisti konfigūracijos");
+});
+
+test("#292 C: ta pati semantika `fs` pusėje (paritetas)", async (t) => {
+  /**
+   * ⚠️ `fs` TURĖJO TĄ PAČIĄ YDĄ. Paritetas tikrinamas eksplicitiškai, nes trečias
+   * kartas šioje sekoje rodo, kad backend'ų asimetrija savaime nepasimato.
+   */
+  const saugykla = await fsAplinka(t);
+  const raktas = "results/fs-paaugo.json";
+  const kvitas = await saugykla.put(raktas, { text: "pradinis" });
+
+  /** ⚠️ KONTROLĖ PIRMA: nepakitęs objektas privalo praeiti. */
+  const kontrole = await saugykla.verify(raktas, { bytes: kvitas.bytes, checksum: kvitas.checksum });
+  assert.equal(kontrole.ok, true, "kontrolė: nepakitęs objektas praeina");
+
+  /**
+   * Objektas padidinamas UŽ saugyklos nugaros — 4 KiB gerokai žemiau 20 MB ribos.
+   * `head()` praneš naują dydį, tad lūkestis NEPERDUODAMAS: kitaip suveiktų
+   * dydžių palyginimas, ir skaitymas net neprasidėtų.
+   */
+  await fsp.writeFile(path.join(saugykla.saknisTestui, raktas), Buffer.alloc(4096, 0x61));
+
+  /** ⚠️ Riba sumažinama iki 2 KiB, kad 4 KiB objektas ją viršytų ir be `head()`. */
+  const senas = process.env.MAX_RESULT_BYTES;
+  process.env.MAX_RESULT_BYTES = "2048";
+  try {
+    const verdiktas = await saugykla.verify(raktas, {});
+
+    assert.equal(
+      verdiktas.priezastis,
+      PRIEZASTIS.VIRSIJA_RIBA,
+      "objektas virš RIBOS - politikos klausimas, ir `fs` tai sako taip pat kaip `s3`"
+    );
+    assert.equal(verdiktas.exists, true);
+  } finally {
+    if (senas === undefined) delete process.env.MAX_RESULT_BYTES;
+    else process.env.MAX_RESULT_BYTES = senas;
+  }
+});
+
+test("#292 A: priežastys pasiekia OPERATORIAUS SANTRAUKĄ, ne tik objektą", () => {
+  /**
+   * ⚠️ §8b MATAVO NE TĄ RIBĄ.
+   *
+   * Jis klausė, ar `detale` IŠLIEKA objekte, ir atsakė „taip". Klausimas, kuris
+   * svarbus: ar operatorius ją MATO. Runbook'o §9d spausdina TIK
+   * `ataskaita.santrauka`, o joje priežasčių nebuvo — tad nė vienas produkcinis
+   * kelias `detale` neskaitė.
+   *
+   * ⚠️ TESTAS EINA PER TĄ PATĮ LAUKĄ, KURĮ SPAUSDINA RUNBOOK'AS. Tikrinant
+   * `ataskaita.nesekmes[].detale`, ši yda liktų nepastebėta — tai ką tik ir įvyko.
+   */
+  const { sudarytiAtaskaita } = require("../utils/artifactRestoreVerify");
+
+  const ataskaita = sudarytiAtaskaita([
+    { jobId: "a", verdiktas: "nesutampa", detale: PRIEZASTIS.METADUOMENYS_NEVALIDUS },
+    { jobId: "b", verdiktas: "nesutampa", detale: PRIEZASTIS.VIRSIJA_RIBA },
+    { jobId: "c", verdiktas: "nesutampa", detale: PRIEZASTIS.SAUGYKLA_NEATITINKA },
+    { jobId: "d", verdiktas: "patikrinta" },
+  ]);
+
+  for (const priezastis of Object.values(PRIEZASTIS)) {
+    assert.match(
+      ataskaita.santrauka,
+      new RegExp(priezastis),
+      `⚠️ \`${priezastis}\` privalo būti SANTRAUKOJE - ją operatorius ir spausdina`
+    );
+  }
+
+  /** Trys skirtingos operatoriaus išvados privalo būti atskiriamos. */
+  assert.equal(Object.keys(ataskaita.pagalPriezasti).length, 3, "trys priežastys - trys eilutės");
 });

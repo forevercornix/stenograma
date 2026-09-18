@@ -503,8 +503,18 @@ function createS3ArtifactStore({
       maisa.update(dalis);
     }
 
-    /** Objektas paaugo virš to, ką ką tik pranešė `head()` - objekto anomalija. */
-    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
+    /**
+     * ⚠️ SAUGYKLA ATIDAVĖ NE TAI, KĄ PRANEŠĖ — NE POLITIKOS RIBA (#292, Codex C).
+     *
+     * Riba čia yra `head().bytes`, tad peržengimas reiškia, kad objektas skaitymo
+     * metu buvo DIDESNIS nei saugykla ką tik pranešė. Tai gali įvykti ir LIKUS
+     * ŽEMIAU `MAX_RESULT_BYTES` — pvz. `head()` sako 16 B, o kūnas atiduoda 4 KiB.
+     *
+     * ⚠️ Grąžinus čia `VIRSIJA_RIBA`, operatorius keistų konfigūraciją, nors riba
+     * NEBUVO peržengta. Klausimas yra apie OBJEKTĄ, kuris pasikeitė tarp `head()`
+     * ir skaitymo, arba apie saugyklą, meluojančią apie dydį.
+     */
+    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.SAUGYKLA_NEATITINKA);
 
     return vientisumoVerdiktas({
       laukiama,
