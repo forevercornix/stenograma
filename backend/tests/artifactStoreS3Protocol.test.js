@@ -260,9 +260,21 @@ test("`verify()` nutraukia skaitymą peržengus patikimą dydį", async (t) => {
     },
   });
 
+  /**
+   * ⚠️ `HeadObject` STUB'INAMAS NUO #292: `verify()` dabar ima biudžetą iš
+   * IŠMATUOTO dydžio, tad prieš skaitymą klausia saugyklos.
+   *
+   * Paskelbtas dydis čia SĄMONINGAI mažesnis už tikrąjį srautą — tai ir yra
+   * scenarijus: saugykla praneša vieną dydį, o atiduoda daugiau. Anksčiau tą patį
+   * vaidmenį atliko persistintas lūkestis, bet jis ateina iš netikrinamos pusės.
+   */
   const saugykla = createS3ArtifactStore({
     ...KONFIGURACIJA,
-    klientas: klientasSu({ ...NEVERSIJUOTAS, GetObjectCommand: { Body: srautas } }),
+    klientas: klientasSu({
+      ...NEVERSIJUOTAS,
+      HeadObjectCommand: { ContentLength: 128 * 1024 },
+      GetObjectCommand: { Body: srautas },
+    }),
   });
 
   const verdiktas = await saugykla.verify("results/a.json", {
@@ -287,6 +299,8 @@ test("KONTROLĖ: tinkamo dydžio objektas patvirtinamas inkrementiškai", async 
     ...KONFIGURACIJA,
     klientas: klientasSu({
       ...NEVERSIJUOTAS,
+      /** #292: `verify()` prieš skaitymą klausia išmatuoto dydžio. */
+      HeadObjectCommand: { ContentLength: turinys.byteLength },
       GetObjectCommand: () => ({ Body: Readable.from([turinys.subarray(0, 5), turinys.subarray(5)]) }),
     }),
   });

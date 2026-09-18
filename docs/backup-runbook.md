@@ -1034,9 +1034,53 @@ node -e "
 
 **Ataskaitos pavyzdys:**
 
+⚠️ **Nuo #292 santraukoje yra PRIEŽASČIŲ suvestinė.** Be jos „nesėkmių 3" nepasakė,
+ką daryti: trys skirtingos priežastys reikalauja trijų skirtingų veiksmų.
+
+| Priežastis | Ką tirti |
+|---|---|
+| `metaduomenys_nevalidus` | **DB eilutę** — reikšmė pažeidžia `job_results_integrity_shape` |
+| `virsija_dabartine_riba` | **konfigūraciją** — `MAX_RESULT_BYTES` mažesnis nei artefaktas; eilutė gali būti sveika |
+| `saugykla_neatitinka_head` | **objektą** — jis pasikeitė tarp `head()` ir skaitymo |
+
+Pilnas nesėkmių sąrašas lieka `ataskaita.nesekmes` tiems, kas apdoroja programiškai;
+santraukoje jis nespausdinamas, nes eilučių skaičius neribotas.
+
+
+
 ```
 eilučių 1284; nepriklausomai patikrinta 37; nepatikrinama (inline, nėra su kuo lyginti) 1247; nesėkmių 0
 ```
+
+### ⚠️ Kaina: procedūra eina per KIEKVIENĄ `job_results` eilutę (#292)
+
+`verifyResultArtifacts()` puslapiuoja per **visą** lentelę. Atkūrimo pratybose ji
+gali turėti šimtus tūkstančių eilučių, ir kiekvienai **external** eilutei:
+
+| Veiksmas | `fs` | `s3` |
+|---|---|---|
+| Metaduomenų patikra | `head()` | `HeadObject` |
+| Turinio perskaitymas | visas objektas | visas objektas (`GetObject`) |
+
+⚠️ **Nuo #292 `s3` pusėje pridėtas vienas `HeadObject` kiekvienai external
+eilutei.** Jis reikalingas tam, kad skaitymo biudžetas būtų imamas iš **išmatuoto**
+dydžio, o ne iš persistinto lūkesčio — t. y. iš tos pačios pusės, kurią procedūra
+ir turi patikrinti.
+
+**Ką tai reiškia planuojant pratybas.** Kaina linijinė nuo **external** eilučių
+skaičiaus (`storage_type <> 'inline'`), ne nuo visos lentelės. Prieš pratybas
+verta jį pasimatuoti:
+
+```sql
+SELECT storage_type, count(*) FROM job_results GROUP BY storage_type;
+```
+
+⚠️ **Inline eilutės šios kainos neturi** — joms nepriklausomo metaduomens nėra, tad
+`verify()` jų neskaito (žr. skyrių žemiau).
+
+⚠️ **Metaduomenų defektas kainuoja MAŽIAU, ne daugiau.** Nuo #292 eilutė su
+netinkamu `bytes`/`checksum` atmetama po `head()`, bet **prieš** `GetObject` — toks
+artefaktas neatidaromas visai.
 
 ### ⚠️ „Nepatikrinama" NĖRA „patikrinta" — ir būtent dėl to ataskaita turi DU skaičius
 

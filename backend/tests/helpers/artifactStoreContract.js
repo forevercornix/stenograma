@@ -339,6 +339,37 @@ function paleistiKontrakta(vardas, paruosti) {
       );
     });
 
+    await t.test("verify: NEVALIDUS lūkestis dingusiam objektui -> `exists: false` (#292)", async () => {
+      /**
+       * ⚠️ PARITETO LIUDYTOJAS, IR JIS GYVENA KONTRAKTE SĄMONINGAI.
+       *
+       * `s3` pusėje metaduomenų vartai buvo PIRMI, tad nevalidus lūkestis
+       * grąžindavo `exists: true` net tada, kai objekto NĖRA — ankstyvas grįžimas
+       * praleisdavo `head()`. `fs` pusėje `head()` eina pirmas ir atsakydavo
+       * teisingai.
+       *
+       * Ta pati persistinta būsena gaudavo SKIRTINGUS verdiktus pagal backend'ą, o
+       * operatoriaus išvada skirdavosi: tirti nesutapimą vs tirti dingusį objektą.
+       *
+       * ⚠️ ANKSTESNIS ATVEJIS ŠIO NEPAGAUDAVO: jis dingusiam objektui perduodavo
+       * VALIDŲ lūkestį (`bytes: 1`), tad metaduomenų vartai nesuveikdavo, ir abu
+       * backend'ai elgdavosi vienodai. Skirtumas matomas tik tada, kai SUSIDEDA
+       * abi sąlygos.
+       *
+       * ⚠️ TREČIAS KARTAS ŠIOJE SEKOJE, kai `fs`/`s3` asimetrija duoda defektą.
+       * Todėl atvejis dedamas į KONTRAKTĄ, kuris galioja visiems backend'ams, o ne
+       * į vieno backend'o failą: taip kitas toks nukrypimas krinta pats.
+       */
+      const verdiktas = await saugykla.verify(await raktas(), { bytes: -5, checksum: "zzz" });
+
+      assert.equal(verdiktas.ok, false, "nevalidus lūkestis negali duoti patvirtinimo");
+      assert.equal(
+        verdiktas.exists,
+        false,
+        "`exists` privalo atspindėti TIKROVĘ, o ne būti fabrikuotas iš ankstyvo grįžimo"
+      );
+    });
+
     await t.test("verify: laukiami metaduomenys ateina IŠ DB, tad tipas gali būti eilutė", async () => {
       /**
        * ⚠️ `bigint` STULPELIS PER `node-postgres` GRĮŽTA EILUTE (Codex P1, #290).
