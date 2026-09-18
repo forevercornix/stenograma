@@ -5,16 +5,24 @@ const { createPostgresStore, KONSTRUKCIJOS_PARINKTYS } = require("./jobStore/pos
  *
  * ⚠️ KODĖL ŠIS ADAPTERIS APSKRITAI EGZISTUOJA.
  *
- * `jobStore` fasadas atsako į klausimą „kur gyvena GYVI job'ai", ir šiandien jo
- * atsakymas nėra PostgreSQL: 7.2a aktyvavimo barjeras `JOB_STORE_BACKEND=postgres`
- * verčia klaida, o vien `DATABASE_URL` grąžina `memory | barjeras: true`
- * (išmatuota). Po DR atkūrimo asmens duomenys guli būtent ATKURTOJE bazėje, tad
- * replay per fasadą būtų vakuumas — `jobs` eilutės liktų, o kvitas skelbtų sėkmę.
+ * `jobStore` fasadas atsako į klausimą „kur gyvena GYVI job'ai" — ir tai NE tas
+ * pats klausimas, į kurį reikia atsakyti po DR atkūrimo. Ten asmens duomenys guli
+ * ATKURTOJE bazėje, tad replay per fasadą būtų vakuumas: `jobs` eilutės liktų, o
+ * kvitas skelbtų sėkmę.
+ *
+ * ⚠️ ATIDARIUS BARJERĄ ŠIS ADAPTERIS TAPO REIKALINGESNIS, NE MAŽIAU (#155).
+ *
+ * Ankstesnė redakcija rėmėsi barjeru: `JOB_STORE_BACKEND=postgres` buvo klaida, o
+ * vien `DATABASE_URL` grąžindavo `memory | barjeras: true`, tad fasadas atkurtos
+ * bazės NEPALIESDAVO — žala buvo „nieko neįvyko". Dabar diegimas GALI turėti
+ * `postgres` fasadą, ir tada replay per jį eitų į PRODUKCINĘ bazę: ne praleistas
+ * trynimas, o trynimas ne toje bazėje. Nukreipimas privalomas abiem atvejais —
+ * pasikeitė tik tai, kuo baigiasi jo nebuvimas.
  *
  * ⚠️ TAI NĖRA ANTRAS JOB STORE IR NĖRA ANTRAS TRYNIMAS.
  *
  * Čia nėra nė vieno savo SQL sakinio: naudojamas tas pats `createPostgresStore()`,
- * kurį naudos fasadas, kai barjeras atsidarys. Adapteris tik perrašo paviršių iš
+ * kurį fasadas naudoja su `JOB_STORE_BACKEND=postgres`. Adapteris tik perrašo paviršių iš
  * plokščio (`get`/`update`/`remove`) į `system.*`, kurio tikisi `jobErasure`.
  * Trynimo semantika lieka `eraseJob()` — viena visai sistemai.
  *
@@ -94,6 +102,11 @@ const PARINKCIU_SPRENDIMAI = Object.freeze({
    * parinkties nenurodo — schema yra bazės faktas, ne kvietėjo pasirinkimas.
    */
   bandymuRegistras: "isvedama-is-schemos",
+  /**
+   * Perduodama IŠVESTINAI, kaip ir gretima: `artifact_migration_progress` yra
+   * NAUJESNĖ lentelė, tad kopija gali turėti registrą ir neturėti progreso.
+   */
+  migracijosProgresas: "isvedama-is-schemos",
   /** Perduodama: atkurtoje bazėje gali būti `fs` ir `s3` eilučių vienu metu. */
   artifactStores: "perduodama",
   /** Perduodama: vieno tipo saugykla yra tas pats klausimas siauresne forma. */
@@ -153,6 +166,26 @@ async function paruosti(pool, parinktys = {}) {
     bandymuRegistras = false;
   }
 
+  /**
+   * ⚠️ ATSKIRAS SCHEMOS FAKTAS, NE `bandymuRegistras` IŠVESTINĖ (#157, PR-6; Codex A).
+   *
+   * `artifact_migration_progress` (`1756600000000`) yra NAUJESNĖ už
+   * `job_result_attempts` (`1756300000000`), tad kopija gali turėti antrąją ir
+   * neturėti pirmosios. Išvedus vieną faktą iš kito, replay prieš tarpinę schemą
+   * kristų su `42P01` — būtent tuo momentu, kai eilė, audio ir auditas jau
+   * išvalyti, t. y. paverstų palaikomą kelią DALINAI ĮVYKDYTU GEDIMU.
+   *
+   * ⚠️ TIKRINAMA TA PAČIA FORMA, kaip gretimas faktas: užklausa + `42P01`, o bet
+   * kokia kita klaida keliauja toliau kaip tikras gedimas.
+   */
+  let migracijosProgresas = true;
+  try {
+    await pool.query("SELECT 1 FROM artifact_migration_progress LIMIT 1");
+  } catch (klaida) {
+    if (klaida.code !== "42P01") throw klaida;
+    migracijosProgresas = false;
+  }
+
   const rows = [...rezultatuTipai, ...bandymuTipai];
 
   /**
@@ -199,10 +232,13 @@ async function paruosti(pool, parinktys = {}) {
    * nėra", nors ji jau yra. Šiandien to kelio nėra — replay migracijų nedaro — tad tai
    * prielaida, ne defektas; bet ji užrašoma, o ne laikoma savybe.
    */
-  return sukurti(pool, { ...parinktys, bandymuRegistras });
+  return sukurti(pool, { ...parinktys, bandymuRegistras, migracijosProgresas });
 }
 
-function sukurti(pool, { artifactStores = null, artifactStore = null, bandymuRegistras = true } = {}) {
+function sukurti(
+  pool,
+  { artifactStores = null, artifactStore = null, bandymuRegistras = true, migracijosProgresas = true } = {}
+) {
   if (!pool || typeof pool.query !== "function") {
     throw new TypeError("restoredJobStore: reikia atkurtos bazės pool'o.");
   }
@@ -216,7 +252,12 @@ function sukurti(pool, { artifactStores = null, artifactStore = null, bandymuReg
     );
   }
 
-  const store = createPostgresStore(pool, { artifactStores, artifactStore, bandymuRegistras });
+  const store = createPostgresStore(pool, {
+    artifactStores,
+    artifactStore,
+    bandymuRegistras,
+    migracijosProgresas,
+  });
 
   const truksta = BUTINI.filter((metodas) => typeof store[metodas] !== "function");
   if (truksta.length > 0) {

@@ -30,9 +30,22 @@
  * nepastebimi. Kritimas su aiškiu pranešimu yra teisingas elgesys - operatorius
  * turi nuspręsti, ką su jomis daryti.
  *
- * Praktikoje tokių eilučių būti neturėtų: `newJob()` visada nustato `2`, o
- * PostgreSQL dar neaktyvuotas (aktyvavimo barjeras), tad produkcinių `jobs`
- * eilučių dar nėra.
+ * Praktikoje tokių eilučių būti neturėtų: `newJob()` visada nustato `2`.
+ *
+ * ⚠️ ANTRA PRIELAIDA PASIBAIGĖ (#155). Ji skambėjo: „PostgreSQL dar neaktyvuotas
+ * (aktyvavimo barjeras), tad produkcinių `jobs` eilučių dar nėra". Barjeras
+ * atidarytas — eilučių JAU GALI BŪTI, ir diegimas, įjungęs `postgres` prie senesnės
+ * schemos, šią migraciją paleis su pilna lentele.
+ *
+ * ⚠️ GARANTIJA DĖL TO NESUSILPNĖJO — ji tiesiog nustojo būti nemokama. Elgesys
+ * aprašytas aukščiau (validuojantis `ADD CONSTRAINT`, kritimas su aiškiu pranešimu)
+ * buvo teisingas ir tada, kai nebuvo ką validuoti; nuo šiol jis realiai tikrinamas.
+ * Nauja tik tai, kad operatorius šį kritimą gali pamatyti, ir tada jis reiškia
+ * tiksliai tai, ką sako: lentelėje yra eilučių, kurių naujasis constraint'as
+ * nepriima, ir sprendimas dėl jų yra jo.
+ *
+ * ⚠️ NEKOPIJUOTI SENOS PRIELAIDOS Į NAUJAS MIGRACIJAS. „Produkcinių eilučių dar
+ * nėra" nuo #155 neteisinga NĖ VIENAI `jobs` ar `job_results` migracijai.
  */
 
 exports.shorthands = undefined;

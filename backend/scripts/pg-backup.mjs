@@ -17,6 +17,25 @@
  *   node scripts/pg-backup.mjs dump    --out kopija.json --actor <kas> [--url $DATABASE_URL]
  *   node scripts/pg-backup.mjs restore --in  kopija.json --target <url>
  *
+ * JUNGTIES FORMA (#264): `dump` priima `--url`, `DATABASE_URL` ARBA `PG*`.
+ *
+ * ⚠️ GARANTIJA SĄLYGINĖ, IR TAI JOS TIKSLI FORMULUOTĖ:
+ *
+ *   palaikoma `PG*` forma, KAI jungtis aprašoma tik `PGHOST`/`PGPORT`/`PGUSER`/
+ *   `PGDATABASE`; kitaip komanda atsisako GARSIAI.
+ *
+ * Priežastis nėra „nepalaikoma". `PGSSLMODE`, `PGOPTIONS`, `PGPASSWORD`,
+ * `PGPASSFILE` ir bet kuris kitas `PG*` procese veikia per `process.env` — `pg`
+ * skaito jį pats. `pg_dump` to kanalo NEGAUNA: jo aplinka valoma nuo viso `PG`
+ * prefikso, kad kopija negalėtų tyliai ateiti iš kito klasterio. Perduoti juos
+ * būtų galima tik per DSN, o jis tyliai prarastų `sslmode` ir `options` arba
+ * atvestų slaptažodį į `argv`.
+ *
+ * Kredencialai `PG*` kelyje — `~/.pgpass` (valymą išgyvena, nes `HOME` nėra `PG*`).
+ *
+ * ⚠️ `restore` šio kelio NETURI sąmoningai: `--target` privalomas, aplinkos
+ * atsargos nėra, tad tyliai paimti ne tos bazės neįmanoma.
+ *
  * ⚠️ `--actor` PRIVALOMAS `dump` komandai: runbook'o §11 teigia, kad kopijų
  * kūrimas audituojamas SU AKTORIUMI. Neprivalomas laukas tą teiginį vėl
  * susilpnintų iki „kartais".

@@ -17,6 +17,12 @@ const path = require("path");
 const { execFile } = require("child_process");
 const { KNOWN_ROLES } = require("./credentials");
 const { isProviderAllowed, approvedExternalProviders } = require("./providerGovernance");
+const {
+  arNurodytaPostgres,
+  pgJungtiesNustatymai,
+  jungtiesSemantikosSkirtumai,
+  dviprasmybesTekstas,
+} = require("./pgConnection");
 
 const KNOWN_LLM = ["mock", "claude", "gpt", "gemini"];
 const KNOWN_TRANSCRIPTION = [
@@ -188,6 +194,24 @@ function validateConfig(env = process.env) {
    * `DATABASE_URL` sesijų režimo nekeičia: jis gali būti įvestas migracijoms
    * ar auditui (7.4), ir neturi netikėtai perjungti AUTENTIKACIJOS.
    */
+  /**
+   * JUNGTIES DVIPRASMYBĖ — KIETA KLAIDA, NEPRIKLAUSOMAI NUO BACKEND'Ų (#245).
+   *
+   * ⚠️ MECHANIZMAS YRA `pgJungtiesNustatymai()`, NE ŠI EILUTĖ. Ten metama
+   * klaida sustabdo bet kurį pool'ą bet kuriame procese. Čia ta pati patikra
+   * kartojama tik tam, kad operatorius pamatytų ją KONFIGŪRACIJOS KLAIDŲ
+   * sąraše — kartu su visomis kitomis, prieš pakylant bet kuriai daliai — o ne
+   * kaip vieną išmestą klaidą iš pirmo `init()`.
+   *
+   * ⚠️ SĄLYGA YRA `arNurodytaPostgres`, NE KONKRETUS BACKEND'AS. Ištrynimo žymos
+   * PostgreSQL renkasi AUTOMATIŠKAI, tad dviprasmiška aplinka be jokio
+   * eksplicitinio `*_BACKEND=postgres` yra realus ir numatytasis atvejis.
+   */
+  if (arNurodytaPostgres(env)) {
+    const skirtumai = jungtiesSemantikosSkirtumai(env);
+    if (skirtumai.length > 0) errors.push(dviprasmybesTekstas(skirtumai));
+  }
+
   {
     const { resolveSessionBackend } = require("./sessionStore/backendSelection");
     try {
@@ -229,7 +253,17 @@ function validateConfig(env = process.env) {
       const auditoBackendas = resolveAuditBackend(env);
       if (auditoBackendas === "postgres") auditTimeoutBudget(env);
     } catch (e) {
-      errors.push(e.message);
+      /**
+       * ⚠️ TA PATI DVIPRASMYBĖ JAU PRANEŠTA AUKŠČIAU (#245 peržiūra).
+       *
+       * `resolveAuditBackend()` ją meta ir savo keliu — jis naudojamas be
+       * `validateConfig()` (pvz. `workers/index.js`). Čia ji būtų ANTRA eilutė
+       * tai pačiai priežasčiai, ir operatorius ieškotų dviejų problemų.
+       *
+       * ⚠️ Skiriama pagal `code`, ne pagal tekstą: audito pranešimas turi savo
+       * priešdėlį, tad eilučių palyginimas dublikato nepagautų.
+       */
+      if (e.code !== "PG_CONNECTION_AMBIGUOUS") errors.push(e.message);
     }
   }
 
@@ -472,7 +506,7 @@ async function runSelfChecks(env = process.env) {
    *
    * `pg` biblioteka `PG*` skaito pati, kai `connectionString` neperduodamas.
    */
-  if (env.DATABASE_URL || env.PGHOST) {
+  if (arNurodytaPostgres(env)) {
     /**
      * ⚠️ ABU KONFIGŪRAVIMO BŪDAI KARTU = KLAIDA, ne pirmenybė.
      *
@@ -484,17 +518,147 @@ async function runSelfChecks(env = process.env) {
      * Tyli pirmenybė čia blogesnė už klaidą: diagnostika, rodanti ne tą
      * duomenų bazę, yra blogesnė nei diagnostikos nebuvimas.
      */
-    if (env.DATABASE_URL && env.PGHOST) {
+    /**
+     * ⚠️ TAS PATS SARGAS KAIP STARTE, NE JO ATPASAKOJIMAS (#245).
+     *
+     * Ankstesnė redakcija čia turėjo savo `DATABASE_URL && PGHOST` sąlygą ir savo
+     * tekstą — trečią to paties sprendimo kopiją repo. Diagnostika, sakanti
+     * „KONFLIKTAS" ten, kur startas praeina (arba atvirkščiai), yra blogesnė už
+     * diagnostikos nebuvimą: operatorius taiso ne tą dalyką.
+     */
+    const skirtumai = jungtiesSemantikosSkirtumai(env);
+    if (skirtumai.length > 0) {
       checks.push({
         name: "PostgreSQL (migracijų infrastruktūra)",
         ok: false,
-        detail:
-          "KONFLIKTAS: nustatyti IR `DATABASE_URL`, IR `PGHOST` - neaišku, kuri DB " +
-          "tikrinama. Docker profiliai naudoja `PG*`; palikite tik vieną būdą.",
+        detail: `KONFLIKTAS: ${dviprasmybesTekstas(skirtumai)}`,
       });
     } else {
       checks.push(await postgresReachability(env));
     }
+  }
+
+  /**
+   * EILĖS PRIEINAMUMO PREFLIGHT (#155, aktyvavimo barjero prielaida).
+   *
+   * ⚠️ RODOMA ČIA, NES ČIA MATO IR `doctor`, IR `/api/health/deep`.
+   *
+   * ADR reikalauja, kad preflight rezultatas būtų matomas operatoriui, ne tik
+   * logo eilutėje: logas rotuojasi, o klausimas „kodėl režimas `inline`, nors
+   * `REDIS_URL` nustatytas" užduodamas praėjus savaitėms.
+   *
+   * ⚠️ `/api/ready` ČIA NETINKA. Jo kontraktas reikalauja loginių būsenų be
+   * infrastruktūros detalių, o preflight priežastis (`ECONNREFUSED`, timeout)
+   * būtent tokia detalė ir yra.
+   *
+   * ⚠️ VERDIKTAS NEKARTOJAMAS — imamas iš `jobRunner`, kuris jį gavo starto metu.
+   * Antras `ping()` čia reikštų antrą „ar eilė pasiekiama" atsakymą, galintį
+   * nesutapti su tuo, pagal kurį PARINKTAS režimas.
+   */
+  try {
+    const jobRunner = require("../queues/jobRunner");
+    const verdiktas = jobRunner.getQueuePreflight && jobRunner.getQueuePreflight();
+
+    if (verdiktas) {
+      checks.push({
+        name: "Eilės preflight (startas)",
+        ok: verdiktas.pasiekiama,
+        detail: verdiktas.pasiekiama
+          ? "eilė buvo pasiekiama starto metu"
+          : `eilė NEBUVO pasiekiama: ${verdiktas.priezastis}`,
+      });
+    }
+  } catch {
+    /** `jobRunner` gali būti neįkeltas (pvz. `doctor` be starto) — tai ne gedimas. */
+  }
+
+  /**
+   * ARTEFAKTŲ SAUGYKLŲ PRIJUNGIMAS (#157, PR-7, 3 sąlyga).
+   *
+   * ⚠️ TAS PATS ADRESAS IR TA PATI PRIEŽASTIS KAIP EILĖS PREFLIGHT: čia mato ir
+   * `doctor`, ir `/api/health/deep`, o logo eilutė iki klausimo neišgyvena.
+   *
+   * ⚠️ `/api/ready` ČIA NETINKA — `auditReadiness.route` kontraktas reikalauja
+   * loginių būsenų BE infrastruktūros detalių, o „kuris backend'as registruotas"
+   * yra būtent tokia detalė. #319 pirma redakcija ties tuo ir krito.
+   *
+   * ⚠️ VARNELĖ ŽALIA ESANT `nezinoma` — ir tai sąmoninga. Neįvykęs stebėjimas nėra
+   * gedimas; `detail` pasako, kad atsakymo nėra, ir tai matoma be klaidingo pavojaus.
+   *
+   * ⚠️ RADINYS PAVERČIA `/api/health/deep` Į `degraded` (503) — SĄMONINGAI, IR TAI
+   * NĖRA 10 SĄLYGA.
+   *
+   * 10 sąlyga yra FAIL-CLOSED STARTAS: procesas nepakyla. Ji eina kartu su barjeru
+   * ir čia jos nėra — procesas pakyla ir aptarnauja. Raudona varnelė gilioje
+   * sveikatoje yra ne startas, o būtent tas paviršius, kuriam ji skirta.
+   *
+   * Kas realiai pasikeičia: diegimas, NUSTATĘS `ARTIFACT_STORE_BACKEND=fs|s3`, gauna
+   * 503 ties `/api/health/deep`. Toks diegimas yra sugedęs — jo rezultatai rašomi
+   * `inline`, ne ten, kur prašyta. Iki šiol jis tylėjo.
+   *
+   * ⚠️ SRAUTO TAI NELIEČIA: `/api/ready` NEPAPILDYTAS (jo kontraktas — loginės
+   * būsenos be infrastruktūros detalių), o `/api/health/deep` production'e dar ir
+   * uždarytas `x-audit-key`. Diegimai be `ARTIFACT_STORE_BACKEND` (t. y. `inline`)
+   * radinio negauna: `inline` saugyklos nereikalauja.
+   */
+  try {
+    const jobStore = require("./jobStore");
+    const verdiktas = jobStore.getArtifactStoreStatus && jobStore.getArtifactStoreStatus();
+
+    if (verdiktas) {
+      checks.push({
+        name: "Artefaktų saugyklų prijungimas (startas)",
+        ok: verdiktas.ok || verdiktas.nezinoma,
+        detail: verdiktas.santrauka,
+      });
+    }
+  } catch {
+    /** `jobStore` gali būti neįkeltas — tai ne gedimas, tas pats kaip aukščiau. */
+  }
+
+  /**
+   * POSTGRESQL SUKONFIGŪRUOTAS, BET JOB METADUOMENYS ATMINTYJE (#155).
+   *
+   * ⚠️ INFORMACINĖ EILUTĖ, NE GEDIMAS — IR TAI SĄMONINGA.
+   *
+   * Po eksplicitinio pasirinkimo įvedimo `DATABASE_URL` vienas job metaduomenų
+   * NEBEPERJUNGIA. Diegimas, nustatęs jį sesijoms, auditui ar migracijoms, veikia
+   * TEISINGAI — tik jo job'ai gyvena atmintyje ir dingsta per restartą.
+   *
+   * Tai ne `degraded` ir ne 503: procesas daro tiksliai tai, ko konfigūracija
+   * prašo. Bet operatorius, matęs `DATABASE_URL`, gali manyti kitaip — ir
+   * sužinotų tik po restarto, kai job'ai dingtų.
+   *
+   * ⚠️ RAŠOMA ČIA, NES ČIA MATO IR `doctor`, IR `/api/health/deep`. Ta pati vieta
+   * ir ta pati priežastis kaip eilės preflight (#155) bei artefaktų saugyklų
+   * prijungimas (#157, PR-7).
+   *
+   * ⚠️ `/api/ready` NEPAPILDYTAS: jo kontraktas reikalauja loginių būsenų be
+   * infrastruktūros detalių, o „kuris backend'as pasirinktas" yra tokia detalė.
+   *
+   * ⚠️ SANITIZACIJA — KONSTRUKCIJA, NE VALYMAS (#319 pamoka). Eilutė neša TIK
+   * backend'o vardą ir kintamojo VARDĄ; nei DSN, nei host'o, nei kredencialų.
+   */
+  try {
+    /** ⚠️ Importuojama failo viršuje (#245) — čia liko tik kvietimas. */
+    const jobStore = require("./jobStore");
+    const backendas = jobStore.getBackend && jobStore.getBackend();
+
+    if (arNurodytaPostgres(env) && backendas === "memory") {
+      checks.push({
+        name: "Job metaduomenų saugykla",
+        /**
+         * ⚠️ `ok: true` — TAI NE NUOLAIDA. Raudona varnelė čia reikštų gedimą ten,
+         * kur jo nėra, ir po kelių kartų operatorius jos nebeskaitytų.
+         */
+        ok: true,
+        detail:
+          "PostgreSQL sukonfigūruotas, bet job metaduomenys saugomi ATMINTYJE ir " +
+          "dings per restartą. Persistencijai nustatykite `JOB_STORE_BACKEND=postgres`.",
+      });
+    }
+  } catch {
+    /** `jobStore` gali būti neįkeltas (pvz. `doctor` be starto) — tai ne gedimas. */
   }
 
   return checks;
@@ -521,18 +685,15 @@ async function postgresReachability(env) {
      * `pg` numatytai skaito `process.env`, o ne šiai funkcijai perduotą `env`.
      * Testams ir bet kokiam kvietimui su kitokia konfigūracija tai reikštų,
      * kad tikrinama NE ta duomenų bazė, kurią nurodė kvietėjas.
+     *
+     * ⚠️ FORMA IMAMA IŠ `pgJungtiesNustatymai()`, NE IŠSKLEIDŽIAMA ČIA (#245).
+     *
+     * Iki šito ši vieta turėjo SAVO `PG*` išskleidimą — ketvirtą kopiją greta
+     * trijų pool'ų. Diagnostika, kuri jungiasi kitaip nei produkcinis pool'as,
+     * gali rodyti žalią varnelę bazei, į kurią servisas nerašo.
      */
     client = new Client({
-      connectionString: env.DATABASE_URL || undefined,
-      ...(env.DATABASE_URL
-        ? {}
-        : {
-            host: env.PGHOST,
-            port: env.PGPORT ? Number(env.PGPORT) : 5432,
-            user: env.PGUSER,
-            password: env.PGPASSWORD,
-            database: env.PGDATABASE,
-          }),
+      ...pgJungtiesNustatymai(env),
       connectionTimeoutMillis: 5000,
       /**
        * ⚠️ UŽKLAUSŲ TIMEOUT ATSKIRAI. `connectionTimeoutMillis` galioja tik

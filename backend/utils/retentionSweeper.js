@@ -290,6 +290,14 @@ function suskaiciuoti(klases) {
   return dazniai;
 }
 
+/**
+ * ⚠️ ŠI RIBA YRA EURISTIKA, IR TAI REGISTRUOTA (#351).
+ *
+ * Ji nėra išvesta: `ArtifactStore.put()` laiko ribos NETURI (`fs` — jokios,
+ * `s3` — SDK numatytosios, repo jų nefiksuoja), tad „kiek ilgiausiai gali trukti
+ * rašymas" niekas neapibrėžia. Pridėjus tą ribą, ši konstanta tampa IŠVEDIMU, ir
+ * tas pats darbas uždaro #157 4c. Žr. `docs/decisions/305-retencijos-nuosavybe.md`.
+ */
 const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
 
 /**
@@ -317,7 +325,7 @@ const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
  * senindant EILUTES, ne laiką.
  */
 async function _valytiRezultatoBandymus() {
-  const tuscias = { pasalinta: 0, praleista: 0, pazeidimai: 0, nevykdyta: false };
+  const tuscias = { pasalinta: 0, praleista: 0, uzimti: 0, pazeidimai: 0, nevykdyta: false };
 
   /**
    * ⚠️ TIKRINAMA EFEKTYVI TIKROVĖ, NE DEKLARACIJA (Codex, #304; #245 pamoka).
@@ -327,8 +335,9 @@ async function _valytiRezultatoBandymus() {
    * užklausa skaito tuščią `erasure_marks` šalia `job_result_attempts`, ir žymų šaka
    * tyliai negina NIEKO. Būtent ta apsauga yra sąlygos 3a esmė.
    *
-   * #245 ta pačią klaidą jau ištaisė kitoje vietoje: `arDviprasmiskaKonfiguracija` buvo
-   * perrašyta iš vardų palyginimo į EFEKTYVIŲ PARAMETRŲ palyginimą, ir
+   * #245 tą pačią klaidą ištaisė kitoje vietoje: `arDviprasmiskaKonfiguracija` buvo
+   * perrašyta iš env kintamųjų BUVIMO (`DATABASE_URL && PGHOST`) į EFEKTYVIŲ
+   * PARAMETRŲ palyginimą, ir
    * `jungtiesTapatybe()` egzistuoja kaip tik šiam klausimui. Čia jis panaudojamas
    * tiesiogiai.
    */
@@ -361,7 +370,7 @@ async function _valytiRezultatoBandymus() {
   const { revivalHorizonsMs } = require("../queues/config");
   const horizontas = revivalHorizonsMs().horizonMs;
 
-  const { kandidatai, praleista } = await jobStore.system.valytiniBandymai({
+  const { kandidatai, praleista, uzimti = 0 } = await jobStore.system.valytiniBandymai({
     atmestuRibaMs: horizontas,
     laukianciuRibaMs: horizontas + MAX_RASYMO_TRUKME_MS,
     kiekis: JOBU_BATCH,
@@ -378,15 +387,43 @@ async function _valytiRezultatoBandymus() {
     );
   }
 
-  const verdiktai = await jobStore.system.sweepResultArtifacts(kandidatai);
+  if (uzimti > 0) {
+    /**
+     * ⚠️ NE KLAIDA, BET IR NE TYLA (#305.1).
+     *
+     * Adresas, kurį užima GYVAS svetimo job'o bandymas, praleidžiamas teisingai:
+     * objektas gali būti ką tik įrašytas, o `job_results` jo dar nerodo. Bet
+     * skaičiui augant tai nustoja būti lygiagretumo požymiu ir tampa
+     * nekonsistentiškų metaduomenų požymiu — o tai jau operatoriaus reikalas.
+     *
+     * ⚠️ ATSKIRA EILUTĖ NUO `praleista`: ten priežastis yra laiko žymos, čia —
+     * nuosavybė. Vienas pranešimas dviem priežastims meluotų vienai iš jų.
+     */
+    log.warn(
+      `Retencija: ${uzimti} bandymo eilutė(-ės) praleista - adresą užima KITAS ` +
+        "GYVAS bandymas (`committed`, arba dar nepasibaigęs `pending`). Objektas gali " +
+        "būti ką tik įrašytas, tad jo šalinti negalima."
+    );
+  }
+
+  /**
+   * ⚠️ `laukianciuRibaMs` PERDUODAMA ŠLAVĖJUI (#305.1, Codex A). Be jos pakartotinė
+   * patikra ties destruktyvia riba turėtų SAVO amžiaus semantiką — o dvi skirtingos
+   * to paties lauko semantikos viename kelyje ir buvo šio raundo B radinys.
+   */
+  const verdiktai = await jobStore.system.sweepResultArtifacts(kandidatai, {
+    laukianciuRibaMs: horizontas + MAX_RASYMO_TRUKME_MS,
+  });
 
   if (verdiktai === null) {
     log.warn("Retencija: saugykla nepalaiko `sweepResultArtifacts()` - šlavimas NEVYKDOMAS.");
-    return { ...tuscias, praleista, nevykdyta: true };
+    return { ...tuscias, praleista, uzimti, nevykdyta: true };
   }
 
   let pasalinta = 0;
   const uzdarytini = [];
+  /** ⚠️ Ties destruktyvia riba praleisti — atskirai nuo atrankos skaitiklio. */
+  const uzimtiVerdiktai = [];
   const karantinuotini = [];
   const nepavyke = [];
 
@@ -428,6 +465,28 @@ async function _valytiRezultatoBandymus() {
       continue;
     }
 
+    if (v.verdiktas === "uzimtas") {
+      /**
+       * ⚠️ EILUTĖ NEŠALINAMA — IR TAI BUVO SPRAGA PIRMOJE ŠIO SARGO REDAKCIJOJE.
+       *
+       * `uzimtas` prakrisdavo pro `pazeidimas`/`nepavyko` šakas tiesiai į
+       * `uzdarytini`: objektas išsaugotas, o jo VIENINTELIS adresas ištrintas.
+       * Tai tiksliai ta būsena, kuriai registras ir sukurtas —
+       * `list(prefix)` pagal A3 nėra, tad be eilutės objektas tampa
+       * nebeatrandamas. Sargas būtų „apsaugojęs" objektą jį prarasdamas.
+       *
+       * ⚠️ Rado ne peržiūra, o §0 klausimas „kas SUVARTOJA šį verdiktą".
+       *
+       * Praleidimas pasikartos kitame cikle — ir taip ir turi būti: jei adresas
+       * tapo gyvas, eilutė nebėra šluotina, o jei ne, kitas ciklas ją nušluos.
+       */
+      uzimtiVerdiktai.push(v);
+      log.warn(
+        `Retencija: bandymo objektas NEŠALINAMAS (${v.storageKey}) - ${v.priezastis || "adresas užimtas"}.`
+      );
+      continue;
+    }
+
     if (v.verdiktas === "pasalinta") pasalinta += 1;
 
     /**
@@ -461,7 +520,21 @@ async function _valytiRezultatoBandymus() {
    */
   const pazeidimai = await jobStore.system.karantinuotuSkaicius();
 
-  return { pasalinta, praleista, pazeidimai, nepavyke, nevykdyta: false };
+  /**
+   * ⚠️ DU ŠALTINIAI TAM PAČIAM RODIKLIUI, IR ABU BŪTINI.
+   *
+   * `uzimti` ateina iš ATRANKOS (eilutės, kurios į partiją nepateko), o
+   * `uzimtiVerdiktai` — iš DESTRUKTYVIOS RIBOS (pateko, bet būsena pasikeitė).
+   * Antrasis yra retas ir būtent todėl svarbus: jis matuoja lenktynės langą.
+   */
+  return {
+    pasalinta,
+    praleista,
+    uzimti: uzimti + uzimtiVerdiktai.length,
+    pazeidimai,
+    nepavyke,
+    nevykdyta: false,
+  };
 }
 
 /**
@@ -511,6 +584,8 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
     const bandymai = await _valytiRezultatoBandymus();
     summary.resultAttempts = bandymai.pasalinta;
     summary.resultAttemptsSkipped = bandymai.praleista;
+    /** ⚠️ Atskiras laukas: kita priežastis, kitas operatoriaus veiksmas (#305.1). */
+    summary.resultAttemptsLiveHeld = bandymai.uzimti;
     summary.resultAttemptsViolations = bandymai.pazeidimai;
     for (const [klase, kiek] of Object.entries(suskaiciuoti(bandymai.nepavyke))) {
       summary.errors.push(`result attempts ${klase} x${kiek}`);
@@ -628,7 +703,22 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
    * operatorius juos mato; bet `success` skaičiuojamas iš `errors`, tad kvitas su
    * karantinuota eilute nebus „sėkmingas ištrynimas".
    */
-  const nebaigtiDarbai = summary.resultAttemptsViolations > 0 || summary.resultAttemptsSkipped > 0;
+  /**
+   * ⚠️ `resultAttemptsLiveHeld` ĮTRAUKTAS Į NEBAIGTĄ DARBĄ (#305.1, Codex C).
+   *
+   * Pirmoji redakcija skaitiklį nustatė, bet jis nepasiekė nei verdikto, nei
+   * kvito: ciklas TIK su praleidimais neišrašydavo jokio patvaraus įvykio, o
+   * ciklas su šalinimu rašydavo `success: true` praleidimų neminėdamas.
+   *
+   * ⚠️ IRONIJA VERTA ĮRAŠO: to paties PR testo komentaras cituoja 4b pamoką
+   * („fail-closed be matomumo virsta tyliu kaupimu"), o pats skaitiklis iki kvito
+   * nenukeliavo. Tai „reikšmė be vartotojo" — klasė, kurią #245 uždarė keturis
+   * kartus, čia atsiradusi tame pačiame PR'e, kuris matomumą ir deklaravo.
+   */
+  const nebaigtiDarbai =
+    summary.resultAttemptsViolations > 0 ||
+    summary.resultAttemptsSkipped > 0 ||
+    summary.resultAttemptsLiveHeld > 0;
   const verta = removedAnything || nebaigtiDarbai || summary.errors.length > 0;
 
   // Įrašom TIK kai kažkas realiai pašalinta arba kai buvo klaidų - kitaip kas
@@ -659,8 +749,10 @@ async function runRetentionSweep({ now = Date.now() } = {}) {
          * ⚠️ `attempts=` ATSKIRAI, IR `nevykdyta` NĖRA NULIS. Kvitas, rodantis `0` ten,
          * kur žingsnis buvo sustabdytas, tvirtintų, kad šluoti nebuvo ko.
          */
+        /** Tvarka: pašalinta / praleista (laikas) / užimta (gyvas bandymas) / pažeidimai. */
         `attempts=${summary.resultAttempts === null ? "nevykdyta" : summary.resultAttempts}` +
-        `/${summary.resultAttemptsSkipped}/${summary.resultAttemptsViolations}`,
+        `/${summary.resultAttemptsSkipped}/${summary.resultAttemptsLiveHeld}` +
+        `/${summary.resultAttemptsViolations}`,
     });
     log.info(
       `Retencija: pašalinta jobų=${summary.jobs}, audio failų=${summary.audio}, ` +

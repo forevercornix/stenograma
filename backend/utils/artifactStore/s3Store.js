@@ -8,7 +8,9 @@ const {
   atkurtiReiksme,
   nesancioVerdiktas,
   neverifikuojamasVerdiktas,
-  normalizuotiLaukima,
+  ivertintiLaukimoBaitus,
+  metaduomenuDefektoVerdiktas,
+  PRIEZASTIS,
   vientisumoVerdiktas,
 } = require("./validation");
 const { getLimits, LIMIT_KIND } = require("../resultLimits");
@@ -378,12 +380,102 @@ function createS3ArtifactStore({
      * sugadinimą ir turi aptikti — patikra taptų savo pačios gedimo šaltiniu.
      *
      * Dabar skaičiuojami baitai ir atnaujinama maiša gabalas po gabalo, o skaitymas
-     * nutraukiamas peržengus patikimą dydį. Riba: persistintas lūkestis, o jo
-     * nesant — `MAX_RESULT_BYTES` (ta pati, kurią gina hidratacija).
+     * nutraukiamas peržengus patikimą dydį.
+     *
+     * ⚠️ BIUDŽETAS IMAMAS IŠ IŠMATUOTO DYDŽIO, NE IŠ PERSISTINTO LŪKESČIO (#292).
+     *
+     * Ankstesnė redakcija ribą imdavo iš `expected.bytes` — iš TOS PAČIOS pusės,
+     * kurią `verify()` ir turi patikrinti. `fs` pusėje išmatuotas dydis jau buvo
+     * (`head()` kviečiamas prieš skaitymą); `s3` pusėje jo nebuvo VISAI.
      */
-    const lauktas = normalizuotiLaukima(laukiama);
-    const riba =
-      lauktas.bytes === null ? getLimits()[LIMIT_KIND.RESULT_BYTES] : lauktas.bytes;
+    const remas = getLimits()[LIMIT_KIND.RESULT_BYTES];
+
+
+    /**
+     * ⚠️ NAUJAS PRE-I/O ŽINGSNIS: `head()` PRIEŠ `readStream()` (#292).
+     *
+     * ⚠️ KODĖL `head()`, O NE `ContentLength` IŠ `GetObject`.
+     *
+     * Antrasis kelias round-trip'o nekainuotų, bet reikalautų keisti
+     * `readStream()` grąžinimo kontraktą (dabar jis atiduoda TIK `Body`) ir
+     * sukurtų ANTRĄ vietą, kur interpretuojami S3 dydžio metaduomenys. `head()`
+     * jau yra vienintelis toks autoritetas ir jau griežtai validuoja
+     * `ContentLength` (trys Codex #290 pataisos gyvena būtent ten). Antro kelio
+     * kūrimas reikštų dvi realizacijas to paties klausimo — klasė, kuri šioje
+     * sekoje išsiskyrė ne kartą.
+     *
+     * ⚠️ KAINA ĮVARDYTA: vienas papildomas `HeadObject` kiekvienam artefaktui.
+     * `verify()` yra 7.6 atkūrimo kelyje, tad kaina linijinė nuo artefaktų
+     * skaičiaus. Priimama sąmoningai: be jos `s3` pusėje išmatuoto dydžio nėra iš
+     * viso, o biudžetas liktų imamas iš netikrinamos pusės.
+     */
+    const galva = await head(raktas);
+    if (!galva) return nesancioVerdiktas(true);
+
+    /**
+     * ⚠️ METADUOMENŲ DEFEKTAS - PRIEŠ PAYLOAD, BET PO `head()` (#292, Codex B).
+     *
+     * Pirmoji redakcija šiuos vartus dėjo PIRMUS, ir tai fabrikuodavo `exists`.
+     * Kai lūkestis nevalidus IR objekto nėra, ankstyvas grįžimas praleisdavo
+     * `HeadObject` ir grąžindavo `exists: true` — atkūrimas pranešdavo
+     * `NESUTAMPA`, nors teisingas atsakymas yra `NERASTA`.
+     *
+     * ⚠️ TAI BUVO TIESIOGINIS DoD PAŽEIDIMAS: „`fsStore` ir `s3Store` vienoda
+     * semantika". `fs` pusėje `head()` eina pirmas ir atsako teisingai, tad ta
+     * pati persistinta būsena gaudavo SKIRTINGUS verdiktus pagal backend'ą — o
+     * operatoriui tai skirtingos išvados: tirti nesutapimą vs tirti dingusį
+     * objektą.
+     *
+     * ⚠️ „PAYLOAD NEATIDAROMAS" NEPAŽEIDŽIAMAS: `head()` nėra payload, o
+     * `GetObject` toliau nesiunčiamas. Tai tvarkos, ne mechanizmo klausimas.
+     */
+    const lukestis = ivertintiLaukimoBaitus(laukiama, remas);
+
+    /**
+     * ⚠️ DVI KLASĖS, DU VERDIKTAI — IR JOS SKIRIASI OPERATORIAUS VEIKSMU (Codex A).
+     *
+     *   netaisyklinga reikšmė  -> tirti DB EILUTĘ      -> metaduomenų defektas;
+     *   viršija dabartinę ribą -> tirti KONFIGŪRACIJĄ  -> `neverifikuojamas`.
+     *
+     * Antrasis nėra defektas: sumažinus `MAX_RESULT_BYTES`, anksčiau teisėtai
+     * įrašyti artefaktai ją viršija, nors eilutė ir objektas sveiki.
+     */
+    if (lukestis.priezastis === PRIEZASTIS.METADUOMENYS_NEVALIDUS) {
+      return metaduomenuDefektoVerdiktas(true, lukestis.priezastis);
+    }
+    if (lukestis.priezastis === PRIEZASTIS.VIRSIJA_RIBA) {
+      return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
+    }
+
+    /** Realus objektas virš rėmo - saugyklos, ne metaduomenų anomalija. */
+    if (galva.bytes > remas) {
+      return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
+    }
+
+
+    /**
+     * ⚠️ DYDIS - TIKRINAMAS TEIGINYS, IR JĮ GALIMA PATIKRINTI BE SKAITYMO (#292).
+     *
+     * Jei lūkestis validus, bet IŠMATUOTAS dydis nuo jo skiriasi, objektas
+     * sutapti NEGALI - jokia suma to nepakeis. Skaitymas būtų grynas švaistymas.
+     *
+     * ⚠️ TAI NE „biudžetas iš lūkesčio". Lūkestis čia LYGINAMAS su išmatuota
+     * reikšme, o ne riboja resursus; sprendimą priima išmatuota pusė. Būtent to
+     * ir reikalauja #292 kryptis: išmatuota > teigiama.
+     *
+     * ⚠️ IR TAI PIGIAU UŽ SENĄJĮ KELIĄ. Anksčiau išpūstas objektas buvo skaitomas
+     * iki persistinto lūkesčio ir tik tada nutraukiamas; dabar neatidaromas visai.
+     */
+    if (lukestis.tinka && galva.bytes !== lukestis.bytes) {
+      return vientisumoVerdiktas({
+        laukiama,
+        bytes: galva.bytes,
+        /** Sumos neskaičiavome, tad jos ir neteigiame. */
+        checksum: null,
+        nepriklausomas: true,
+      });
+    }
+    const riba = galva.bytes;
 
     let srautas;
     try {
@@ -411,7 +503,18 @@ function createS3ArtifactStore({
       maisa.update(dalis);
     }
 
-    if (perzengta) return neverifikuojamasVerdiktas(true);
+    /**
+     * ⚠️ SAUGYKLA ATIDAVĖ NE TAI, KĄ PRANEŠĖ — NE POLITIKOS RIBA (#292, Codex C).
+     *
+     * Riba čia yra `head().bytes`, tad peržengimas reiškia, kad objektas skaitymo
+     * metu buvo DIDESNIS nei saugykla ką tik pranešė. Tai gali įvykti ir LIKUS
+     * ŽEMIAU `MAX_RESULT_BYTES` — pvz. `head()` sako 16 B, o kūnas atiduoda 4 KiB.
+     *
+     * ⚠️ Grąžinus čia `VIRSIJA_RIBA`, operatorius keistų konfigūraciją, nors riba
+     * NEBUVO peržengta. Klausimas yra apie OBJEKTĄ, kuris pasikeitė tarp `head()`
+     * ir skaitymo, arba apie saugyklą, meluojančią apie dydį.
+     */
+    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.SAUGYKLA_NEATITINKA);
 
     return vientisumoVerdiktas({
       laukiama,

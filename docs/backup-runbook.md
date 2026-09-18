@@ -437,11 +437,52 @@ skirtingi artefaktai. Šis skyrius yra apie antrąjį.
 BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
   --out kopija.json --actor "$USER" --url "$DATABASE_URL"
 
+# `PG*` diegime `--url` nereikalingas - jungtis imama iš aplinkos
+BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
+  --out kopija.json --actor "$USER"
+
 # Atkūrimas į TUŠČIĄ bazę
 node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
 ```
 
 Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+
+#### ⚠️ `PG*` forma palaikoma SĄLYGINIAI (#264)
+
+> Palaikoma `PG*` forma, **kai jungtis aprašoma tik `PGHOST`/`PGPORT`/`PGUSER`/
+> `PGDATABASE`**; kitaip komanda atsisako **garsiai**
+> (`PG_DUMP_ENV_NOT_PORTABLE`).
+
+**Priežastis nėra „nepalaikoma".** `PGSSLMODE`, `PGOPTIONS`, `PGPASSWORD`,
+`PGPASSFILE` ir bet kuris kitas `PG*` **procese** veikia per `process.env` — `pg`
+skaito jį pats. `pg_dump` to kanalo **negauna**: jo aplinka valoma nuo viso `PG`
+prefikso, kad kopija negalėtų tyliai ateiti iš kito klasterio.
+
+⚠️ Išmatuota: iš tų pačių nustatymų `{host, user, password, database}` Node `pg`
+gauna dar `ssl=true`, `options=-csearch_path=prod`, `connect_timeout=9`. DSN iš jų
+tuos tris **tyliai prarastų** — kopija per nešifruotą jungtį arba iš kitos schemos
+atrodytų kaip sėkmė. Todėl atsisakoma, o ne spėjama.
+
+**Kredencialai `PG*` kelyje — `~/.pgpass`.** Jis valymą išgyvena, nes `HOME` nėra
+`PG*`. `PGPASSWORD` yra kliūtis sąmoningai: jį perduoti būtų galima tik DSN'e, o
+tai atvestų slaptažodį į `argv`, matomą `ps` išvestyje.
+
+⚠️ **`PG_` yra aplikacijos erdvė, ne libpq.** Repo savas `PG_CONNECT_TIMEOUT_MS`
+dump'o **nestabdo**: libpq vardų erdvėje po `PG` visada eina raidė (`PGHOST`,
+`PGSSLMODE`, net `PGCONNECT_TIMEOUT` — pabraukimas viduje). Tai **stebėjimas apie
+vardų konvenciją, ne garantija**, todėl jį saugo liudytojo testas — atsiradus
+libpq kintamajam su `PG_`, sargas kris.
+
+⚠️ **`PGDATABASE` privalo būti VARDAS, ne connection string.** Reikšmė su `=` arba
+prasidedanti `postgres://` atmetama (`PG_DUMP_CONNINFO_IN_NAME`): `pg_dump -d` ją
+išskleistų, ir jos parametrai **perrašytų** `-h`/`-p`/`-U`, o Node `pg` tą pačią
+reikšmę laiko literaliu vardu. Išmatuota su PostgreSQL 16.15.
+
+⚠️ **Nauja libpq aplinkos savybė kliūtimi tampa automatiškai** — sąlyga išvedama
+iš `PG_ATITIKMENYS`, ne surašyta. Priežiūros nereikia.
+
+⚠️ **`restore` šio kelio neturi** ir jam nereikia: `--target` privalomas, aplinkos
+atsargos nėra, tad tyliai paimti ne tos bazės neįmanoma.
 
 ⚠️ **`BACKUP_ENABLED=true` privalomas.** Išjungtos kopijos reiškia išjungtas ir
 šias: `dump` krinta su `BACKUP_DISABLED` dar prieš jungiantis prie bazės.
@@ -589,6 +630,21 @@ perjungti negalima.
 nei „offline", nei „galima" — tad riba egzistavo tik kaip numanoma. Numanoma riba
 yra ta pati klasė kaip nedokumentuota: operatorius jos nemato.
 
+### ⚠️ Atkūrimas NEBAIGIA procedūros ir artefaktų prasme — toliau §9d
+
+`pg_dump` atkuria `job_results` eilutes. External eilutėje (`storage_type` yra `fs`
+ar `s3`) `payload` yra `NULL`, o **turinys guli saugykloje** — S3 kibire arba failų
+sistemoje, UŽ duomenų bazės ribų.
+
+Vadinasi atkurta bazė gali turėti eilutę su `storage_key`, rodančiu į objektą,
+kurio **nebėra arba kuris sugadintas**, ir jokia DB patikra to nepamatys: schema
+teisinga, eilutė pilna, invariantai galioja.
+
+⚠️ **Tai nėra `pg_dump` trūkumas.** Tai riba: DB kopija apima nuorodas, ne turinį.
+External artefaktų kopijavimas yra ATSKIRA atsakomybė (S3 versijavimas, kibiro
+replikacija arba failų sistemos kopija) ir šiuo runbook'u **neapibrėžiama** — čia
+užrašoma tik tai, kad ji egzistuoja ir kad jos nebuvimas matomas §9d.
+
 ### ⚠️ Vien šis žingsnis NĖRA erasure-safe
 
 Atkūrimas **prikelia po kopijos ištrintus job'us**. Ištrynimo žymos
@@ -632,21 +688,56 @@ DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs \
 DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs verify --target "$TIKSLO_URL"
 ```
 
-### ⚠️ VIENA jungties forma: `DATABASE_URL` **arba** `PG*`, ne abi
+### ⚠️ Jungties formos: `DATABASE_URL` ir `PG*` kartu — klaida TIK kai skiriasi (#245)
 
 Dokumentuotame Compose diegime `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`
-jau nustatyti. Prirašius `DATABASE_URL`, aplinkoje atsiduria **abi** formos, ir
-tada klausimas „į kurią bazę jungiamasi" atsakymo NETURI: prioritetas priklauso
-nuo to, kas konstruoja pool'ą.
+jau nustatyti. Prirašius `DATABASE_URL`, aplinkoje atsiduria **abi** formos.
 
-⚠️ **Todėl abi formos kartu yra KLAIDA, ne interpretacijos reikalas.** Suderinimas
-krinta su `RECONCILE_CONNECTION_AMBIGUOUS`, kopijos kūrimas — su
-`PG_BACKUP_CONNECTION_AMBIGUOUS`, dar prieš pirmą mutaciją. Tas pats sprendimas
-repo jau galioja auditui (išmatuota):
+⚠️ **ŠIS SKYRIUS PERRAŠYTAS, NE PAPILDYTAS (#245).** Ankstesnė redakcija sakė,
+kad bet koks abiejų formų buvimas yra dviprasmybė ir **visada** krenta, ir
+cituodavo audito klaidą, kurios repo **nebeturi**
+(`AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST`). Pridėti
+naują pastabą greta senos procedūros nepakanka: skaitytojas, radęs seną, jos
+nepraleis.
+
+**Kaip yra dabar.** Startas nutrūksta tik tada, kai aplinka pakeičia **efektyvią**
+jungties semantiką, kurią apibrėžia `DATABASE_URL` — taikinį
+(`host`/`port`/`database`), kredencialus, SSL arba DB sesijos namespace
+(`options`). Su **pilnu** DSN `PGHOST` `pg` semantikai įtakos neturi, tad vien jo
+buvimas nieko nestabdo; `PGSSLMODE` ir `PGOPTIONS` pilną DSN **perrašo** ir
+stabdo.
+
+Dabartinė klaida (išmatuota):
 
 ```
-AUDIT_BACKEND=postgres, bet nustatyti IR DATABASE_URL, IR PGHOST.
+Aplinkoje `DATABASE_URL` ir `PG*` duoda SKIRTINGĄ efektyvią jungties semantiką
+(sesija) - neaišku, į kurią bazę bus jungiamasi. Palikite VIENĄ formą arba
+suderinkite reikšmes. Vien `PG*` buvimas greta `DATABASE_URL` klaida NĖRA:
+tikrinama, ar jie keičia taikinį, kredencialus, SSL ar sesijos semantiką.
 ```
+
+Suderinimas tokiu atveju krinta su `RECONCILE_CONNECTION_AMBIGUOUS`, kopijos
+kūrimas — su `PG_BACKUP_CONNECTION_AMBIGUOUS`, dar prieš pirmą mutaciją.
+
+⚠️ **Rekomendacija operatoriui nesikeičia: naudokite VIENĄ formą.** Tai
+paprasčiausia praktika — bet tai rekomendacija, ne tai, ką tikrina kodas.
+
+### ⚠️ `pg_dump` ir `psql` — URL yra VIENINTELIS šaltinis (#245)
+
+Šie du yra **libpq**, ne `pg`, ir jų aukščiau aprašytas sargas NEDENGIA: libpq
+savo `PG*` skaito pats, o `PGHOSTADDR` `pg` neskaito iš viso. Todėl `pg-backup`
+kelias vaikiniam procesui perduoda aplinką **be nė vieno `PG*`**.
+
+⚠️ **Tai apima IR preflight patikrą.** `psql`, tikrinantis ar tikslinė bazė
+tuščia, anksčiau aplinką paveldėdavo: preflight tikrindavo VIENĄ klasterį, o
+atkūrimas rašydavo į KITĄ. Jei perimtas klasteris tuščias, o tikrasis taikinys —
+ne, „tuščio taikinio" garantija krisdavo tyliai, ir dump'as būdavo sulietas į
+netuščią bazę.
+
+Praktiškai: `--url` (ar `--target`) nurodo, kur einama, ir aplinka to pakeisti
+nebegali. **Kredencialai privalo būti URL'e arba `~/.pgpass`** — `PGPASSWORD`
+iki `pg_dump`/`psql` nebeeina. Diegimas, kuris juo rėmėsi, kris su
+autentikacijos klaida; anksčiau jis būtų tyliai nukopijavęs kitą klasterį.
 
 Tokiame diegime `--target` sudaromas iš tų pačių `PG*` reikšmių, o `DATABASE_URL`
 **nenustatomas**:
@@ -657,12 +748,20 @@ node backend/scripts/post-restore-reconcile.mjs \
   run --target "postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE" --actor "$USER"
 ```
 
-⚠️ **ŠIANDIEN `PG*`-only diegimas suderinimo įvykdyti NEGALI.** Suderinimas
-reikalauja bent vienos PostgreSQL ašies (D7); job'ų ašį uždaro 7.2a barjeras
-(#281), o sesijų ašis reikalauja **būtent** `DATABASE_URL`
-(`sessionStore/backendSelection.js` — `PG*` jam netinka, #282). Todėl komanda
-atsisako dirbti su `RECONCILE_BACKEND_NOT_POSTGRES`. Iki #282 uždarymo šis kelias
-yra dokumentuotas, bet neprieinamas — riba, ne garantija.
+⚠️ **IŠLYGA PAŠALINTA (#245).** Iki #245 čia buvo parašyta, kad `PG*`-only
+diegimas suderinimo įvykdyti NEGALI: sesijų ašis reikalaudavo **būtent**
+`DATABASE_URL`, tad tokiame diegime nė viena ašis negalėdavo būti PostgreSQL, ir
+komanda krisdavo su `RECONCILE_BACKEND_NOT_POSTGRES`.
+
+Nuo #245 `SESSION_STORE_BACKEND=postgres` priima ir `PG*` formą
+(`arNurodytaPostgres()`), tad sesijų ašis `PG*`-only diegime **veikia**.
+Išmatuota: `PG*` + `SESSION_STORE_BACKEND=postgres` duoda
+`sesijos: { autoritetas: "postgres", verdiktas: "suderinta" }`.
+
+⚠️ **Bet ašį vis tiek reikia PASIRINKTI.** `PG*` buvimas savaime nieko
+neperjungia: be `SESSION_STORE_BACKEND=postgres` (arba
+`JOB_STORE_BACKEND=postgres`) ašies nėra, ir komanda teisėtai atsisako dirbti.
+Tai politika, ne #245 riba.
 
 ⚠️ Tapatumo patikra abi puses sprendžia **tomis pačiomis taisyklėmis kaip `pg`**:
 
@@ -696,11 +795,18 @@ komanda **krenta** (`RECONCILE_BACKEND_NOT_POSTGRES`) prieš pirmą mutaciją:
 suderinimas, kuriam nereikia nė vienos ašies, neturi ko patvirtinti, o „sėkmė be
 darbo" yra tiksliai tas tylus praleidimas, kurio D7 neleidžia.
 
-⚠️ **Šiandien job'ų ašis niekada nėra `suderinta`:** 7.2a aktyvavimo barjeras
-(`POSTGRES_AKTYVAVIMAS_LEISTAS = false`) palieka job'ų autoritetą atmintyje arba
-Redis'e. Darbas atkurtoje bazėje vis tiek atliekamas — likusios `queued` eilutės
-taptų gyvos tą dieną, kai barjeras atsidarys — bet **verdiktas to saugumu
-nevadina**. Žr. §10 ir #281.
+⚠️ **Job'ų ašis yra `suderinta` TIK ten, kur nurodyta `JOB_STORE_BACKEND=postgres`
+(#155).** Aktyvavimo barjeras atidarytas, tad tai nebe neįmanoma — bet ir ne
+numatyta: `DATABASE_URL` vienas job'ų autoriteto neperjungia, tad diegimas,
+turintis jį sesijoms ar auditui, job'ų ašiai toliau gaus `nereikalinga` arba
+`nepadengta`. Darbas atkurtoje bazėje atliekamas abiem atvejais — likusios
+`queued` eilutės taptų gyvos tą dieną, kai diegimas pasirinktų `postgres` — bet
+**verdiktas to saugumu nevadina**. Žr. §10 ir #281.
+
+⚠️ **KĄ TIKRINTI PRIEŠ KOMANDĄ:** jei tikitės `suderinta` job'ų ašiai, įsitikinkite,
+kad `JOB_STORE_BACKEND=postgres` yra ATKŪRIMO aplinkoje, ne tik produkcinėje.
+Neperduotas kintamasis čia yra dažniausia klaidos forma, ir komanda ją įvardija
+priežastimi (`job'ai: memory — numatyta`), ne vien autoritetu.
 
 ⚠️ **`--target` privalo sutapti su `DATABASE_URL`.** Jis nenaudojamas jungtis —
 jis TIKRINAMAS: suderinimas dirba su ta baze, prie kurios prisirišusios
@@ -892,9 +998,9 @@ rašo pats `eraseJob()`.
 | **Su `AUDIT_BACKEND=memory` kūrimo auditas neišlieka** | `PG_DUMP_BACKUP_CREATED` dingsta komandai pasibaigus; komanda įspėja | `AUDIT_BACKEND=postgres` |
 | **Post-restore suderinimo riba yra procedūrinė** | Serverį galima paleisti nesuderinus — `verify` yra patikra, ne sargas | Suderinimo žyma su starto patikra (#279) |
 | **Užbarjeruoti job'ai lieka ne terminaliniai** | `queued`/`processing` su ištrynimo žyma nekeičiami 7.6b žingsnyje | Uždaro §9c replay, vykdomas PRIEŠ suderinimą |
-| **Replay be tikslinės bazės kliento neįmanomas** | `DR_REPLAY_STORE_MISSING` — tylaus grįžimo prie fasado nėra | Sąmoningas fail-closed (7.2a barjeras) |
-| **Job'ų autoritetas šiandien nėra PostgreSQL** | 7.2a barjeras: suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | 7.2a aktyvavimo barjero atidarymas (#281) |
-| **`PG*`-only diegimas neturi nė vienos PostgreSQL ašies** | `post-restore-reconcile` krenta su `RECONCILE_BACKEND_NOT_POSTGRES` | Sesijų atranka turi priimti `PG*` (#282) |
+| **Replay be tikslinės bazės kliento neįmanomas** | `DR_REPLAY_STORE_MISSING` — tylaus grįžimo prie fasado nėra | Sąmoningas fail-closed. ⚠️ Po barjero atidarymo (#155) SVARBESNIS: fasadas gali būti `postgres`, ir tada replay per jį eitų į PRODUKCINĘ, ne atkurtą bazę |
+| **Job'ų autoritetas nėra PostgreSQL be eksplicitinio pasirinkimo** | ⚠️ **Barjeras ATIDARYTAS (#155)** — bet `DATABASE_URL` vienas neperjungia: be `JOB_STORE_BACKEND=postgres` suderinimas job'ų ašiai duoda `nereikalinga`/`nepadengta`, ne `suderinta` | Nustatyti `JOB_STORE_BACKEND=postgres` ATKŪRIMO aplinkoje (#281) |
+| ~~**`PG*`-only diegimas neturi nė vienos PostgreSQL ašies**~~ **UŽDARYTA (#245)** | Buvo: `post-restore-reconcile` krisdavo su `RECONCILE_BACKEND_NOT_POSTGRES`, nes sesijų atranka reikalavo būtent `DATABASE_URL` | Sesijų atranka priima `PG*` per `arNurodytaPostgres()`; ašį vis tiek reikia pasirinkti eksplicitiškai |
 | **`options`/`search_path` skirtumas = kita bazė** | Vienodi DSN su skirtingu `search_path` laikomi SKIRTINGAIS taikiniais | Sąmoninga fail-closed kryptis |
 
 **Kodėl atkūrimas neaudituojamas.** Rašyti nėra kur: `audit_log` į dump'ą
@@ -910,6 +1016,112 @@ klaidingų teigiamų ir blokuotų teisėtas kopijas. Riba įvardijama, ne dangst
 
 ---
 
+## 9d. Artefaktų vientisumo verifikacija — #157 (PR-7)
+
+⚠️ **ATSAKO Į KLAUSIMĄ, KURIO §9a–§9c NEUŽDUODA: ar `storage_key` rodo į vientisą
+artefaktą.**
+
+```bash
+# Paleidžiama PO §9b (suderinimo) ir, jei taikoma, PO §9c (erasure replay).
+node -e "
+  const { createPostgresStore } = require('./backend/utils/jobStore/postgresStore');
+  // ... pool ir saugykla sukuriami taip pat, kaip startas juos kuria
+  const ataskaita = await store.verifyResultArtifacts();
+  console.log(ataskaita.santrauka);
+  process.exitCode = ataskaita.ok ? 0 : 1;
+"
+```
+
+**Ataskaitos pavyzdys:**
+
+⚠️ **Nuo #292 santraukoje yra PRIEŽASČIŲ suvestinė.** Be jos „nesėkmių 3" nepasakė,
+ką daryti: trys skirtingos priežastys reikalauja trijų skirtingų veiksmų.
+
+| Priežastis | Ką tirti |
+|---|---|
+| `metaduomenys_nevalidus` | **DB eilutę** — reikšmė pažeidžia `job_results_integrity_shape` |
+| `virsija_dabartine_riba` | **konfigūraciją** — `MAX_RESULT_BYTES` mažesnis nei artefaktas; eilutė gali būti sveika |
+| `saugykla_neatitinka_head` | **objektą** — jis pasikeitė tarp `head()` ir skaitymo |
+
+Pilnas nesėkmių sąrašas lieka `ataskaita.nesekmes` tiems, kas apdoroja programiškai;
+santraukoje jis nespausdinamas, nes eilučių skaičius neribotas.
+
+
+
+```
+eilučių 1284; nepriklausomai patikrinta 37; nepatikrinama (inline, nėra su kuo lyginti) 1247; nesėkmių 0
+```
+
+### ⚠️ Kaina: procedūra eina per KIEKVIENĄ `job_results` eilutę (#292)
+
+`verifyResultArtifacts()` puslapiuoja per **visą** lentelę. Atkūrimo pratybose ji
+gali turėti šimtus tūkstančių eilučių, ir kiekvienai **external** eilutei:
+
+| Veiksmas | `fs` | `s3` |
+|---|---|---|
+| Metaduomenų patikra | `head()` | `HeadObject` |
+| Turinio perskaitymas | visas objektas | visas objektas (`GetObject`) |
+
+⚠️ **Nuo #292 `s3` pusėje pridėtas vienas `HeadObject` kiekvienai external
+eilutei.** Jis reikalingas tam, kad skaitymo biudžetas būtų imamas iš **išmatuoto**
+dydžio, o ne iš persistinto lūkesčio — t. y. iš tos pačios pusės, kurią procedūra
+ir turi patikrinti.
+
+**Ką tai reiškia planuojant pratybas.** Kaina linijinė nuo **external** eilučių
+skaičiaus (`storage_type <> 'inline'`), ne nuo visos lentelės. Prieš pratybas
+verta jį pasimatuoti:
+
+```sql
+SELECT storage_type, count(*) FROM job_results GROUP BY storage_type;
+```
+
+⚠️ **Inline eilutės šios kainos neturi** — joms nepriklausomo metaduomens nėra, tad
+`verify()` jų neskaito (žr. skyrių žemiau).
+
+⚠️ **Metaduomenų defektas kainuoja MAŽIAU, ne daugiau.** Nuo #292 eilutė su
+netinkamu `bytes`/`checksum` atmetama po `head()`, bet **prieš** `GetObject` — toks
+artefaktas neatidaromas visai.
+
+### ⚠️ „Nepatikrinama" NĖRA „patikrinta" — ir būtent dėl to ataskaita turi DU skaičius
+
+`verify()` grąžina lauką `nepriklausomas`. External eilutėje `bytes` ir `checksum`
+persistinti **atskirai** (DB pusėje, rašymo metu), tad objektas lyginamas su
+nepriklausomu įrašu. **Inline eilutėje tų metaduomenų nėra** — invariantas jų
+reikalauja tik external šakoje — tad `verify()` gali tik perskaičiuoti sumą iš to
+paties `payload`: jis **lygina reikšmę su savimi** ir visada grąžina `ok: true`.
+
+Aukščiau pateiktame pavyzdyje tai reiškia: iš 1284 eilučių realiai patikrintos **37**,
+o ne 1284. Ataskaita, rodanti vieną skaičių, tas pačias pratybas paverstų sėkme.
+
+⚠️ **Todėl žemas „nepriklausomai patikrinta" skaičius NĖRA gedimas** — migracijos
+eigoje jis ir turi būti žemas. Gedimas yra `nesėkmių > 0`.
+
+### Verdiktai
+
+| Verdiktas | Reikšmė | Gedimas? |
+|---|---|---|
+| `patikrinta` | objektas atitinka DB persistintą `bytes`/`checksum` | ne |
+| `nepatikrinama_inline` | inline eilutė — nepriklausomo autoriteto nėra | ne |
+| `nerasta` | eilutė rodo į objektą, kurio saugykloje nėra | **taip** |
+| `nesutampa` | objektas yra, bet neatitinka DB įrašo | **taip** |
+| `saugykla_neregistruota` | `storage_type` neturi saugyklos — perskaityti neįmanoma | **taip** |
+| `nepriklausomumo_neteko` | external saugykla grąžino `nepriklausomas: false` (kontrakto pažeidimas) | **taip** |
+
+### ⚠️ Kaina: ši procedūra PERSKAITO KIEKVIENĄ external objektą
+
+`fs` ir S3 checksum'o metaduomenyse neturi, tad vientisumą patvirtinti galima tik
+perskaičius visą objektą. `head()` čia **nepakanka**: jis grąžina tik dydį, tad
+sugadintas **to paties ilgio** objektas jį praeitų.
+
+Vadinasi §9d nėra metadata kelias ir **neturi būti paleidžiamas starte**. Jo vieta —
+atkūrimo pratybos ir po restore, ne sveikatos patikra.
+
+### ⚠️ Laukiama reikšmė imama iš DB, ne iš objekto
+
+`bytes` ir `checksum` ateina iš `job_results` eilutės, įrašytos rašymo metu.
+Perskaičiavus jas iš tikrinamo objekto, verifikacija lygintų objektą su savimi ir
+**niekada nieko nerastų** — tas pats tuščias `ok: true`, tik be inline pateisinimo.
+
 ## 11. Ką parodyti auditoriui
 
 ✅ Kad kopijos šifruotos (`manifest.encrypted`, algoritmas ir versija).
@@ -920,6 +1132,16 @@ Aplikacijos kopijai ji galioja tiesiogiai; `pg_dump` keliui — **tik atlikus §
 ir niekada nesuteiks**: žurnalas pagal konstrukciją gyvena UŽ snapshot'o ribų,
 tad praleidus §9c ištrinti job'ai grįžta. Tai nuolatinė procedūros savybė, ne
 laikina spraga.
+✅ Kad po atkūrimo patikrinta, ar `storage_key` rodo į **vientisą artefaktą** (§9d) —
+ir kad ataskaita pateikia **du** skaičius. ⚠️ **Vienas skaičius būtų melas:** inline
+eilutei `verify()` lygina reikšmę su savimi ir visada grąžina `ok: true`, tad mišrioje
+bazėje „patikrinta: N" reikštų beveik 100 %, nors realiai patikrintos tik external
+eilutės. Auditoriui rodoma eilutė su abiem skaičiais, ne procentas. ⚠️ **Žemas
+„nepriklausomai patikrinta" skaičius NĖRA gedimas** — migracijos eigoje jis ir turi
+būti žemas; gedimas yra `nesėkmių > 0`.
+✅ Kad external artefaktų **kopijavimas yra atskira atsakomybė** (§9a pabaiga): DB
+kopija apima NUORODAS, ne turinį, ir šis runbook'as tos atsakomybės neapibrėžia —
+jis tik padaro jos nebuvimą matomą per §9d.
 ✅ Kad kopijų **kūrimas** audituojamas su aktoriumi — ir aplikacijos
 (`BACKUP_CREATED`), ir `pg_dump` (`PG_DUMP_BACKUP_CREATED`), **kai audito
 saugykla patvari** (`AUDIT_BACKEND=postgres`); su numatytu `memory` įrašas

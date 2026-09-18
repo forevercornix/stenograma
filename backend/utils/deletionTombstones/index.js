@@ -51,10 +51,16 @@ const log = createLogger("tombstones");
  * DB – ta pati priežastis kaip `auditStore.RETENCIJOS_ISPEJIMAS`.
  */
 const ATMINTIES_ISPEJIMAS =
-  "Ištrynimo žymos laikomos TIK ATMINTYJE (nėra DATABASE_URL). Jos neišgyvena " +
-  "restarto ir nėra bendros replikoms, tad po restarto vėluojanti eilės žinutė " +
-  "ištrintam job'ui vėl gali sukurti artefaktus. Persistentinė garantija galioja " +
-  "tik diegimams su DATABASE_URL. Žr. docs/deletion-guarantees.md §2.";
+  /**
+   * ⚠️ ĮVARDIJAMOS ABI FORMOS (#245). Nuo 7.4e šis modulis priima ir `PGHOST`,
+   * o tekstas vis dar minėjo tik `DATABASE_URL` — operatorius dokumentuotame
+   * Compose diegime iš jo suprastų, kad persistencija jam neprieinama.
+   */
+  "Ištrynimo žymos laikomos TIK ATMINTYJE (PostgreSQL nenurodytas: nėra nei " +
+  "DATABASE_URL, nei PGHOST). Jos neišgyvena restarto ir nėra bendros replikoms, " +
+  "tad po restarto vėluojanti eilės žinutė ištrintam job'ui vėl gali sukurti " +
+  "artefaktus. Persistentinė garantija galioja tik diegimams su nurodytu " +
+  "PostgreSQL. Žr. docs/deletion-guarantees.md §2.";
 
 /** Numatytoji atsarga virš prikėlimo horizonto. Vienas autoritetas. */
 const SAFETY_MARGIN_MS = 24 * 60 * 60 * 1000; // 1 para
@@ -81,11 +87,50 @@ function pasirinktiBackend(env) {
   return arNurodytaPostgres(env) ? "postgres" : "memory";
 }
 
-async function initializePostgres(env) {
-  const pool = new Pool({
+/**
+ * ⚠️ UŽKLAUSŲ RIBA ATSKIRAI NUO PRISIJUNGIMO RIBOS (#342 Codex, P1).
+ *
+ * `connectionTimeoutMillis` galioja tik iki jungties gavimo. `init()` daro
+ * `SELECT 1 FROM erasure_marks LIMIT 1`, ir be ribos serveris, kuris jungtį
+ * priima, bet neatsako, pakabintų startą neribotai.
+ *
+ * ⚠️ ČIA TAI SVARBIAU NEI KITUR. `server.js` `deletionTombstones.init()` yra
+ * starto kelyje, o ADR prielaidos 5 matavimas parodė, kad fail-closed elgesį
+ * realiai užtikrina BŪTENT ši patikra - trečias sluoksnis. Sluoksnis, kuris
+ * gali kaboti, fail-closed neduoda: jis duoda fail-never.
+ *
+ * Riba ta pati kaip `jobStore`, `sessionStore` ir `postgresReachability()`.
+ *
+ * ⚠️ `PG_CONNECT_TIMEOUT_MS` PALIEKAMAS KAIP ATSARGA. Namų kintamasis yra
+ * `DB_CONNECT_TIMEOUT_MS` (taip daro visi kiti pool'ai); #183 čia įvedė kitą
+ * vardą. Skaitomi abu - pirmenybė namų vardui - kad esami diegimai nenustotų
+ * veikti tyliai.
+ */
+function riba(env, vardai, numatyta = 5000) {
+  for (const vardas of vardai) {
+    const raw = Number(env[vardas]);
+    if (Number.isFinite(raw) && raw >= 100) return raw;
+  }
+  return numatyta;
+}
+
+/**
+ * Žymų pool'o nustatymai VIENOJE vietoje - kad ribas būtų galima patikrinti be
+ * tikros DB (AGENTS.md §9.2; ta pati forma kaip `sesijuPoolNustatymai()`).
+ */
+function zymuPoolNustatymai(env = process.env) {
+  const uzklausa = riba(env, ["DB_QUERY_TIMEOUT_MS"]);
+
+  return {
     ...pgJungtiesNustatymai(env),
-    connectionTimeoutMillis: Number(env.PG_CONNECT_TIMEOUT_MS) || 5000,
-  });
+    connectionTimeoutMillis: riba(env, ["DB_CONNECT_TIMEOUT_MS", "PG_CONNECT_TIMEOUT_MS"]),
+    statement_timeout: uzklausa,
+    query_timeout: uzklausa,
+  };
+}
+
+async function initializePostgres(env) {
+  const pool = new Pool(zymuPoolNustatymai(env));
 
   /**
    * ⚠️ Neveiklios jungties klaida neturi nužudyti proceso – ta pati taisyklė
@@ -655,6 +700,8 @@ async function _clearForTests() {
 function _stopSweepForTests() {}
 
 module.exports = {
+  /** ⚠️ Eksportuojama, kad starto ribas būtų galima patikrinti BE tikros DB (#342). */
+  zymuPoolNustatymai,
   /** ⚠️ Eksportuojama TESTUI: mutacija „vėl tik `DATABASE_URL`" turi būti pagaunama. */
   pasirinktiBackend,
   TOMBSTONE_STATUS,
