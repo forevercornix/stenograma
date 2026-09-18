@@ -484,10 +484,27 @@ If such content is material to a finding:
 - state that the comparison is not verifiable from available evidence;
 - name the specific fact that would settle it.
 
-Where a repository copy of the same specification exists — for example
-`SUBISSUES-155.md`, `docs/decisions/` — use the repository copy as evidence and
-say explicitly which copy was used. A repository copy and a GitHub issue body
-can diverge; treat that divergence as a finding when it is material.
+Where a repository copy of the same specification exists, say explicitly which
+copy was used — but do not treat every copy as equally authoritative.
+
+**Authority model.** The active GitHub issue body is authoritative for that
+issue's current requirements and Definition of Done. Architecture decision
+records in `docs/decisions/` are authoritative for the architectural decisions
+within their own scope. Repository code, tests and migrations are the AS-IS
+evidence.
+
+**Provenance is not authority.** A historical planning or issue-generation
+artifact — for example `SUBISSUES-155.md` — records *where a requirement came
+from*. Divergence between such an artifact and an active issue body is **not by
+itself a finding**, and it is expected: an issue evolves through review after it
+is generated.
+
+⚠️ **This rule has two sides.** References to such artifacts from code, tests or
+documentation may remain as provenance — they are the evidence of why a statement
+exists. Do not propose removing them: deleting provenance looks like tidying, but
+it destroys the only trace of where a decision came from. Where the constraint a
+reference names is still an active architectural contract, prefer the ADR as the
+long-term authority and say so, rather than dropping the reference.
 
 ---
 
@@ -581,11 +598,20 @@ Provide copyable requirement/DoD wording only for changes actually required.
 
 Do not rewrite unaffected sections.
 
-State where the accepted wording belongs. In this repository the authoritative
-source for #155 sub-issue text is `SUBISSUES-155.md`, republished by
-`scripts/dev/create-155-subissues.sh --update`. Wording pasted directly into a GitHub issue
-body will be overwritten on the next run and will silently diverge from the
-spec file in the meantime.
+State where the accepted wording belongs. For an issue that is already created
+and active, that place is **its GitHub issue body**: it is the authority for its
+current requirements and Definition of Done.
+
+⚠️ **Do not propose editing a historical planning artifact as a way to change an
+active issue specification.** `SUBISSUES-155.md` is a historical planning and
+issue-generation artifact — not an archive, because
+`scripts/dev/create-155-subissues.sh --update` can still write to GitHub from it.
+
+That script is also the reason to be careful in the other direction: `--update`
+**overwrites** an issue body from the file. It is a replace, not a merge — there
+is no reconciliation of changes made to an active issue after creation. So
+recommending an `--update` run is recommending the loss of any wording the issue
+gained through review.
 
 #### Final verdict
 

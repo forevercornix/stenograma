@@ -121,6 +121,10 @@ const privacy = [
    */
   "erasureMarks",
   "revivalHorizons",
+  /** #342: starto užklausų ribos — fail-never režimas. Be DB. */
+  "startPoolTimeouts",
+  /** #342: cutover 5b blokas vykdomas su stub'intu `redis-cli`. Be Redis. */
+  "cutoverPreflight",
   "observabilityEvents.route",
 ];
 
@@ -218,7 +222,22 @@ const security = [
   "logger",
   "workerGuard",
   "workerRetry",
+  /**
+   * #155 (barjero prielaida): eilės prieinamumo preflight.
+   *
+   * Eina TEN, KUR `startupChecks` ir `startupOrder` — tai starto elgesys, ir
+   * klausimas yra fail-closed pobūdžio: ar serveris pradeda klausytis su eile,
+   * kurios nėra.
+   */
+  "eilesPreflight",
   "startupChecks",
+  /**
+   * #245: viena PostgreSQL jungties formos semantika keturiems pool'ams plius
+   * dviprasmybės sargas pagal EFEKTĄ. Eina TEN, KUR `startupChecks`: tas pats
+   * klausimas („ar servisas jungiasi ten, kur mano operatorius?"), tik iš
+   * konfigūracijos pusės, ir čia gyvena kredencialų nepratekėjimo garantija.
+   */
+  "pgConnectionSemantics",
   "startupOrder",
   "httpClient.timeout",
   "audioMagicBytes",
@@ -300,6 +319,7 @@ const functional = [
    * binaro, tad išvedamas į `postgres` rinkinį per `postgresGuard` importą.
    */
   "pgDumpBackupContract",
+  "pgBackupPgForma",
   /**
    * #249 (7.6b): post-restore suderinimo KONTRAKTAS be DB.
    *
@@ -356,6 +376,7 @@ const functional = [
   "artifactStoreInlineWrite",
   /** #157 (PR-2): `fs` riba, laikini failai ir rašymo patvarumas. */
   "artifactStoreFsBoundary",
+  "artifactVerifyRiba",
   /** #157 (PR-2): klaidų pranešimų higiena — turinys nepatenka į viešą lauką. */
   "artifactStoreMessages",
   /** #157 (PR-2): kodekas — viena reikšmių sritis abiem kryptim + raktų pernešamumas. */
@@ -382,11 +403,65 @@ const functional = [
   "sweepVerdiktai",
   /** #157 (PR-4): lygybės paritetas ir round-trip ištikimybė. */
   "artifactRoundTrip",
+  /**
+   * #298: kanoninė tapatybė modeliuoja saugyklą.
+   *
+   * Grynos funkcijos savybės, tad be DB ir be saugyklos — `JSON.stringify` yra
+   * tas pats visuose trijuose keliuose. Elgesį prieš tikras saugyklas tikrina
+   * bendras scenarijų rinkinys (`NUOSTOLINGI`).
+   */
+  "kanonineTapatybe",
+  /**
+   * #157 (PR-7, sąlygos 6-8): restore verifikacijos VERDIKTAI.
+   *
+   * Klausimas yra apie SPRENDIMĄ („ar ši eilutė laikoma patikrinta"), ne apie
+   * I/O, tad dublis čia tikslesnis už gyvą saugyklą: `nepriklausomas: false` iš
+   * external saugyklos yra kontrakto pažeidimas, kurio tikra saugykla negamina,
+   * o ataskaita privalo jį atskirti nuo teisėtos inline eilutės. Elgesį prieš
+   * tikras saugyklas tikrina `artifactRestoreIntegrity.integration`.
+   */
+  "artifactRestoreVerify",
+  /**
+   * #155 (A2): cutover skripto RIBOS — be Redis.
+   *
+   * Skriptas buvo parašytas uždaryti klasę „dokumentuota komanda, kurios niekas
+   * negali paleisti", ir pats atsirado BE TESTO — CI logas tai parodė tiesiai.
+   * Tikrinamos tik ribos (rašybos klaida vėliavoje, ne-`redis` backend'as,
+   * atsisakymas PRIEŠ jungtį), nes būtent jos saugo nuo neteisingo paleidimo.
+   */
+  "cutoverTerminalize",
+  /**
+   * #155: informacinė eilutė „PostgreSQL sukonfigūruotas, job'ai atmintyje".
+   *
+   * Rašoma PRIEŠ barjerą, ne po jo — ta pati priežastis kaip #157 PR-7
+   * pradžioje: stebėtojas prieš stebimą dalyką. Po eksplicitinio pasirinkimo
+   * įvedimo ši būsena taps DAŽNA, tad jos tekstas ir sanitizacija tikrinami.
+   */
+  "jobStoreBackendInfo",
   /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
   "artifactStoreS3Protocol",
   /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
   "artifactStoreRegistracija",
   "artifactStoreSelection",
+  /**
+   * #157 (PR-7, 3 sąlyga): prijungimo stebėtojas — BE DB.
+   *
+   * Verdiktas yra trijų aibių palyginimas, ir dublis atkuria `pg` šakas (`42P01`,
+   * tikras gedimas) tiksliau nei gyva bazė, kurioje jas dar reikėtų SUKELTI.
+   * Čia gyvena ir sanitizacijos sargas: realios paslaptys paduodamos per `env`,
+   * ir reikalaujama, kad nė viena neatsirastų verdikte (#319 klasė). Užklausų
+   * galiojimą prieš realią schemą tikrina `artifactStorePrijungimasSchema.integration`.
+   */
+  "artifactStorePrijungimas",
+  /**
+   * #157 (PR-7): PRIJUNGIMO taisyklės — BE DB.
+   *
+   * `initializePostgres()` be tikros DB nepasileidžia, tad jo asercijos guli
+   * `postgres` rinkinyje. Bet taisyklė „`inline` saugykla NEPADUODAMA" nuo DB
+   * nepriklauso, o jos pažeidimas duotų `23514` KIEKVIENAM užbaigimui diegime,
+   * kuris #157 dar nenaudoja — tokia klasė negali laukti CI raundo.
+   */
+  "jobStoreArtefaktuPrijungimas",
   "erasureExportContract",
   "erasureReplayContract",
   "jobVersionParity",

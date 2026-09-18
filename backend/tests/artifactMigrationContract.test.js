@@ -2,8 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
-const { BUSENA, PRIEZASTIS, KANDIDATAI_SQL, PAYLOAD_SQL } = require("../utils/artifactMigration");
+const { BUSENA, PRIEZASTIS, KANDIDATAI_SQL, PAYLOAD_SQL, migruoti } = require("../utils/artifactMigration");
 
 process.env.NODE_ENV = "test";
 
@@ -206,6 +207,223 @@ test("SCENARIJAI neturi backend'o literalų — kitaip jie perima vieno savybes"
     rasti(scenarijai + "\nassert.equal(r.storage_type, \"fs\");\n").length,
     1,
     "sargas neranda įterpto literalo — jis nieko negina"
+  );
+});
+
+/**
+ * DVIPRASMIŠKAS `COMMIT` — TIKRINAMA BE DB, IR TAI SPRENDIMAS (#157, PR-6).
+ *
+ * ⚠️ TRYS INTEGRACINIAI RAUNDAI KABO, IR KAINA VIRŠIJO NAUDĄ.
+ *
+ * Pirmos redakcijos lopė tikro pool'o klientą (tarša išeidavo į gretimus
+ * scenarijus), antra bandė lopą nusiimti pačiam, trečia davė `migruoti()` atskirą
+ * pool'ą. Visos trys baigėsi `test timed out after 300000ms` (CI 34440571250,
+ * 34441688559, 34442823089).
+ *
+ * ⚠️ IR PATS KLAUSIMAS DB NEREIKALAUJA. „Ar po dviprasmiško `COMMIT` vykdomas
+ * valymas" yra KODO ŠAKOS klausimas, ne PostgreSQL elgesio. Tikra DB čia įrodo
+ * ne daugiau, o tik lėčiau ir su bendrų resursų rizika — ta pačia, kurią
+ * užregistravo #310.
+ *
+ * Padirbtas pool'as leidžia `COMMIT` „pavykti" ir TIK PASKUI mesti — tiksliai ta
+ * seka, kurios tikra DB neduoda deterministiškai.
+ */
+function padirbtasPool({ commitElgesys }) {
+  const irasai = { sakiniai: [], atlaisvinta: 0 };
+
+  const atsakymas = (sql) => {
+    if (/FROM job_results r/.test(sql)) return { rows: [{ job_id: "job-1" }], rowCount: 1 };
+    if (/SELECT\s+payload/.test(sql)) return { rows: [{ payload: { text: "x" } }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  };
+
+  const client = {
+    async query(sql) {
+      irasai.sakiniai.push(String(sql).trim().split(/\s+/)[0].toUpperCase());
+      if (String(sql).trim().toUpperCase() === "COMMIT") return commitElgesys();
+      return atsakymas(String(sql));
+    },
+    release() {
+      irasai.atlaisvinta += 1;
+    },
+  };
+
+  return {
+    irasai,
+    async query(sql) {
+      irasai.sakiniai.push(String(sql).trim().split(/\s+/)[0].toUpperCase());
+      return atsakymas(String(sql));
+    },
+    async connect() {
+      return client;
+    },
+  };
+}
+
+function padirbtaSaugykla() {
+  const irasai = { put: 0, verify: 0, delete: [] };
+
+  return {
+    irasai,
+    backend: "fs",
+    async put(raktas) {
+      irasai.put += 1;
+      return { reference: raktas, bytes: 10, checksum: "e".repeat(64) };
+    },
+    async verify() {
+      irasai.verify += 1;
+      return { ok: true, exists: true, bytes: 10, checksum: "e".repeat(64), nepriklausomas: true };
+    },
+    async head() {
+      return { bytes: 10 };
+    },
+    async delete(raktas) {
+      irasai.delete.push(raktas);
+      return true;
+    },
+  };
+}
+
+test("DVIPRASMIŠKAS `COMMIT` NEIŠTRINA objekto, į kurį jau rodo nuoroda", async () => {
+  /**
+   * ⚠️ P1: „NEŽINAU, AR ĮVYKO" NEGALI VIRSTI DESTRUKTYVIU VEIKSMU.
+   *
+   * PostgreSQL gali įsipareigoti, o atsakymas kliento nepasiekti. Tada `COMMIT`
+   * meta, nors transakcija ĮVYKO. Ištrynus objektą tokiu atveju liktų external
+   * eilutė be objekto IR be inline kopijos — sunaikinta vienintelė kopija.
+   *
+   * ⚠️ TA PATI KLASĖ KAIP PR-5 A ŠAKNIS.
+   */
+  const pool = padirbtasPool({
+    commitElgesys: () => {
+      throw new Error("simuliuotas ryšio nutrūkimas PO sėkmingo COMMIT");
+    },
+  });
+  const saugykla = padirbtaSaugykla();
+
+  await assert.rejects(() => migruoti(pool, saugykla, {}), /nutrūkimas/);
+
+  assert.deepEqual(
+    saugykla.irasai.delete,
+    [],
+    "objektas IŠTRINTAS po dviprasmiško `COMMIT` — sunaikinta vienintelė kopija"
+  );
+  assert.ok(pool.irasai.sakiniai.includes("COMMIT"), "kontrolė: `COMMIT` tikrai buvo išsiųstas");
+  assert.equal(pool.irasai.atlaisvinta, 1, "jungtis privalo būti atlaisvinta");
+});
+
+test("KONTROLĖ: ĮPRASTA nesėkmė objektą VIS TIEK ištrina", async () => {
+  /**
+   * Be jos ankstesnis testas būtų tenkinamas ir tada, jei valymas dingtų VISAI —
+   * o tada pralaimėję bandymai kauptųsi kaip orphan'ai. Skiriasi tik tuo, KADA
+   * įvyksta nesėkmė: prieš `COMMIT`, kai baigtis NĖRA dviprasmiška.
+   */
+  const pool = padirbtasPool({ commitElgesys: () => ({ rows: [], rowCount: 1 }) });
+  const saugykla = padirbtaSaugykla();
+
+  saugykla.verify = async () => ({
+    ok: false,
+    exists: true,
+    bytes: 1,
+    checksum: "a".repeat(64),
+    nepriklausomas: true,
+  });
+
+  const s = await migruoti(pool, saugykla, {});
+
+  assert.equal(s.nepavyko.vientisumas_nepatvirtintas, 1);
+  assert.equal(saugykla.irasai.delete.length, 1, "aiški nesėkmė privalo išvalyti savo objektą");
+});
+
+test("SCHEMOS VARTAI: progreso šalinimas praleidžiamas, kai lentelės nėra (Codex A)", () => {
+  /**
+   * ⚠️ BESĄLYGINĖ UŽKLAUSA GRIOVĖ DR REPLAY.
+   *
+   * `restoredJobStore.paruosti()` SĄMONINGAI leidžia senesnę schemą, o
+   * `artifact_migration_progress` (`1756600000000`) yra NAUJESNĖ už
+   * `job_result_attempts` (`1756300000000`) — tad kopija gali turėti registrą ir
+   * neturėti progreso. Besąlyginis `DELETE` tokioje bazėje duotų `42P01` PO to,
+   * kai eilė, audio, artefaktai ir auditas jau išvalyti: palaikomas replay
+   * virstų DALINAI ĮVYKDYTU GEDIMU.
+   *
+   * ⚠️ TIKRINAMA STRUKTŪRIŠKAI, nes elgesio testas reikalautų DB su TARPINE
+   * schema — o tokios `node-pg-migrate` „up N" riba neduoda be atskiro
+   * mechanizmo. Struktūra čia atsako į tą patį klausimą: ar kvietimas eina per
+   * vartus, ar aplenkia juos.
+   */
+  const store = fs.readFileSync(
+    path.join(__dirname, "..", "utils", "jobStore", "postgresStore.js"),
+    "utf8"
+  );
+
+  const eilute = store
+    .split("\n")
+    .find((e) => e.includes("DELETE FROM artifact_migration_progress"));
+
+  assert.ok(eilute, "progreso šalinimo sakinys dingo");
+
+  const indeksas = store.split("\n").indexOf(eilute);
+  const kontekstas = store.split("\n").slice(Math.max(0, indeksas - 3), indeksas).join("\n");
+
+  assert.match(
+    kontekstas,
+    /if \(migracijosProgresas\)/,
+    "šalinimas nepraeina pro schemos vartus — senesnė kopija duotų `42P01` VIDURYJE replay"
+  );
+
+  /**
+   * ⚠️ IR VARTAI PRIVALO BŪTI IŠVEDAMI, NE PADUODAMI. Kvietėjas negali pasirinkti
+   * schemos — tai bazės faktas. Ta pati taisyklė kaip `bandymuRegistras`.
+   */
+  const restored = fs.readFileSync(path.join(__dirname, "..", "utils", "restoredJobStore.js"), "utf8");
+  assert.match(restored, /migracijosProgresas: "isvedama-is-schemos"/);
+  assert.match(restored, /42P01/);
+});
+
+test("CLI: nežinomas argumentas atmetamas — ir BE brūkšnių (Codex C)", () => {
+  /**
+   * ⚠️ FILTRAS PRALEIDO SAVO TAIKINĮ.
+   *
+   * Pirma redakcija paliko tik `-` prasidedančius tokenus, tad `run retry-failed`
+   * TYLIAI vykdydavo su `retryFailed === false` — tiksliai tas gedimas, kurį
+   * validacija turėjo užkirsti. Filtras, praleidžiantis savo taikinį, blogesnis
+   * nei jo nebuvimas: jis sukuria įspūdį, kad argumentai tikrinami.
+   *
+   * ⚠️ TIKRINAMA PER TIKRĄ PALEIDIMĄ, ne per funkciją: klausimas yra, ką daro
+   * KOMANDA, o ne ar egzistuoja filtras. DB nereikia — validacija vyksta PRIEŠ
+   * prisijungimą, ir būtent tai yra viena iš tikrinamų savybių.
+   */
+  const cli = path.join(__dirname, "..", "scripts", "migrate-artifacts.mjs");
+
+  const paleisti = (argumentai) => {
+    try {
+      execFileSync(process.execPath, [cli, ...argumentai], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, DATABASE_URL: "", PGHOST: "" },
+      });
+      return { kodas: 0, isvestis: "" };
+    } catch (e) {
+      return { kodas: e.status, isvestis: String(e.stderr || "") };
+    }
+  };
+
+  for (const argumentai of [["run", "retry-failed"], ["run", "--retry-failed", "typo"], ["run", "--retry-fai"]]) {
+    const r = paleisti(argumentai);
+    assert.equal(r.kodas, 1, `${argumentai.join(" ")}: privalo būti naudojimo klaida`);
+    assert.match(r.isvestis, /Nežinomi argumentai/, `${argumentai.join(" ")}: netinkama priežastis`);
+  }
+
+  /**
+   * ⚠️ KONTROLĖ: galiojantys argumentai NEATMETAMI. Be jos „viskas atmetama"
+   * tenkintų ankstesnius tvirtinimus, o komanda taptų nenaudojama.
+   */
+  const galiojantys = paleisti(["run", "--retry-failed"]);
+  assert.equal(galiojantys.kodas, 1, "be DB komanda vis tiek krenta — bet dėl KITOS priežasties");
+  assert.match(
+    galiojantys.isvestis,
+    /PostgreSQL nenurodyta/,
+    "galiojantis argumentas atmestas kaip nežinomas — filtras per platus"
   );
 });
 

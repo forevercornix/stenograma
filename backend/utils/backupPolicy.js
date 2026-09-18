@@ -98,9 +98,27 @@ const EXCLUDED_DESPITE_PERSISTENT = {
  *
  * ⚠️ ATSAKYMAS YRA PER-ROW, TAD JIS ČIA NETELPA. Po migracijos DB bus mišri, ir
  * konfigūracija nesako, kur guli JAU EGZISTUOJANTIS rezultatas; sprendžia eilutės
- * `storage_type`. External artefaktų kopijavimo atsakomybė apibrėžiama PR-7 kartu su
- * `docs/backup-runbook.md` §9a/§11 — čia užrašoma riba, kad žemėlapis netvirtintų
- * daugiau, nei žino (§12.1).
+ * `storage_type`.
+ *
+ * ⚠️ PER-ROW ATSAKYMAS DABAR EGZISTUOJA (#157, PR-7, sąlyga 6):
+ * `postgresStore.verifyResultArtifacts()` eina per `job_results` ir sprendžia PAGAL
+ * EILUTĘ — inline eilutė gauna „nepatikrinama", external tikrinama prieš DB
+ * persistintus `bytes`/`checksum`. Ataskaitos taisyklės gyvena
+ * `utils/artifactRestoreVerify.js`.
+ *
+ * ⚠️ IR ŠIS ŽEMĖLAPIS LIEKA VIEN APIE LENTELES — SĄMONINGAI.
+ *
+ * Būtų patogu jį „pataisyti" pridėjus turinio požymį, bet tai reikštų DVI vietas,
+ * atsakančias į tą patį klausimą, ir viena iš jų būtų konfigūracija — t. y. tiksliai
+ * ta forma, kurios per-row sprendimas ir vengia. Žemėlapis atsako „kurią LENTELĘ
+ * liečia šis tipas"; kur guli TURINYS, atsako eilutė, ir tik ji.
+ *
+ * ⚠️ ŽEMĖLAPIS NETURI VYKDOMO KVIETĖJO — IŠMATUOTA, NE NUMANYTA (#157, PR-7).
+ *
+ * `TABLE_BY_TYPE` skaito tik testai (`backupPolicy.test.js`) ir žmonės. Tai svarbu
+ * apimčiai: „perkelti sprendimą į per-row" čia neturi ką perkelti — sprendimo
+ * kelio nėra. Todėl PR-7 ne keičia šį žemėlapį, o SUKURIA per-row kelią ten, kur
+ * sprendimas realiai priimamas, ir palieka žemėlapį atsakantį tik savo klausimą.
  */
 const TABLE_BY_TYPE = Object.freeze({
   [ARTEFACT_TYPES.SOURCE_AUDIO.id]: null,

@@ -78,11 +78,15 @@ const TERMINALIZAVIMO_ZINUTE =
  *   selectBackend({DATABASE_URL, REDIS_URL}) -> { norimas: "redis",  barjeras: true }
  *   resolveSessionBackend({DATABASE_URL})    -> "memory"
  *
- * `POSTGRES_AKTYVAVIMAS_LEISTAS = false` reiškia, kad job'ų autoritetas ŠIANDIEN
- * niekada nėra PostgreSQL. Vadinasi `verify` galėjo pasakyti „galima cutover",
- * kai gyva būsena yra kitur — o Redis atveju ne terminaliniai job'ai po starto
- * ATSINAUJINA. Tai tas pats „sėkmingas praleidimas", kurio D7 neleidžia, tik
- * barjero, ne atminties režime.
+ * ⚠️ PAVYZDŽIAI UŽRAŠYTI, KAI BARJERAS BUVO UŽDARYTAS (#155). Šiandien jie
+ * duoda `barjeras: false`, o `{DATABASE_URL}` lieka `memory` dėl KITOS
+ * priežasties: `postgres` renkamas tik eksplicitiniu `JOB_STORE_BACKEND`.
+ * Išvada nepasikeitė — `DATABASE_URL` buvimas nėra backend'o sprendimas — ir
+ * būtent todėl ši ašis skaičiuojama per `selectBackend()`, ne per env.
+ *
+ * Vadinasi `verify` galėjo pasakyti „galima cutover", kai gyva būsena yra
+ * kitur — o Redis atveju ne terminaliniai job'ai po starto ATSINAUJINA. Tai tas
+ * pats „sėkmingas praleidimas", kurio D7 neleidžia, tik ne atminties režime.
  *
  * ⚠️ GRIEŽTAS YRA VERDIKTAS, NE KOMANDA.
  *
@@ -97,7 +101,8 @@ const TERMINALIZAVIMO_ZINUTE =
  *
  * ⚠️ DARBAS ATLIEKAMAS ABIEM AŠIMS NEPRIKLAUSOMAI NUO VERDIKTO. Atkurtoje bazėje
  * likusios `queued` eilutės ir neatšauktos sesijos taps gyvos tą dieną, kai
- * atsidarys 7.2a barjeras arba `SESSION_STORE_BACKEND` taps `postgres`. Verdiktas
+ * diegimas nurodys `JOB_STORE_BACKEND=postgres` arba `SESSION_STORE_BACKEND`
+ * taps `postgres`. Verdiktas
  * atsako į klausimą „ar dabar saugu", ne „ar buvo dirbta".
  */
 const VERDIKTAS = Object.freeze({
@@ -122,6 +127,40 @@ function nustatytiAsis(env = process.env) {
     },
     jobai: {
       autoritetas: jobai.norimas,
+      /**
+       * ⚠️ PRIEŽASTIS PERDUODAMA ATSKIRAI (#155, eksplicitinio pasirinkimo pasekmė).
+       *
+       * Iki tol paaiškinimą nešė `barjeras: true`: kol job'ų autoritetas galėjo
+       * nebūti PostgreSQL TIK dėl barjero, tos vėliavos pakako. Po eksplicitinio
+       * pasirinkimo įvedimo priežasčių yra kelios (`JOB_STORE_BACKEND`, `REDIS_URL`,
+       * `numatyta`), ir `barjeras: false` nustojo ką nors paaiškinti.
+       *
+       * ⚠️ TAI TA PATI FORMA KAIP „18 FAILŲ, SAUGŪS DĖL VIENO KVIETĖJO": vėliava
+       * buvo ATSITIKTINAI pakankamas paaiškinimas, kol priežastis buvo viena.
+       *
+       * ⚠️ OPERATORIUI TAI REIKALINGA BŪTENT PRIEŠ CUTOVER — vienintelį kartą, kai
+       * klaida negrįžtama. Matydamas `autoritetas: "memory"` be priežasties, jis
+       * spėliotų: barjeras? konfigūracija? klaida?
+       *
+       * ⚠️ SAUGU RODYTI: `resolveBackendChoice()` grąžina kintamųjų VARDUS
+       * (`JOB_STORE_BACKEND`, `REDIS_URL`) arba literalą `numatyta` — niekada
+       * reikšmių. Tai tikrina testas, ne šis komentaras.
+       */
+      priezastis: jobai.priezastis,
+      /**
+       * ⚠️ ATIDARIUS BARJERĄ ŠIS LAUKAS YRA PASTOVUS `false` (#155).
+       *
+       * `applyActivationBarrier()` `barjeras: true` nebegrąžina nė vienu keliu, o
+       * uždarius barjerą atgal priežastis vis tiek atsirastų `priezastis` lauke
+       * (`"... (barjeras)"`). T. y. vėliava šiandien nebeneša informacijos, kurios
+       * neneštų `priezastis`.
+       *
+       * ⚠️ PALIEKAMA SĄMONINGAI, IR TAI ATVIRAS KLAUSIMAS, NE SPRENDIMAS.
+       * Laukas yra operatoriaus išvestyje (`post-restore-reconcile.mjs`), tad jo
+       * pašalinimas keičia komandos kontraktą — atskiras sprendimas, ne šio PR
+       * pasekmė. Asercijos ant jo NEDEDAMOS: tikrinti lauką, kurio reikšmė
+       * nekinta, reikštų testą, kuris praeina visada.
+       */
       barjeras: Boolean(jobai.barjeras),
       verdiktas: _asiesVerdiktas(jobai.norimas),
     },
@@ -214,9 +253,17 @@ function patikrintiSargus(targetUrl, env) {
    */
   const asys = nustatytiAsis(env);
   if (![asys.sesijos, asys.jobai].some((a) => a.verdiktas === VERDIKTAS.SUDERINTA)) {
+    /**
+     * ⚠️ PRIEŽASTIS ĮVARDIJAMA BŪTENT ČIA (#155).
+     *
+     * Iki barjero atidarymo čia kabėjo `${...barjeras ? " dėl 7.2a barjero" : ""}`.
+     * Atidarius jį ta šaka tapo NEPASIEKIAMA, ir operatorius, gaunantis šią
+     * klaidą po atkūrimo, matydavo tik „job'ai: memory" — be jokio kodėl.
+     * `priezastis` atsako tą patį klausimą visiems keliams, ne vienam.
+     */
     throw new ReconcileError(
       `Nė viena ašis nėra PostgreSQL (sesijos: ${asys.sesijos.autoritetas}, ` +
-        `job'ai: ${asys.jobai.autoritetas}${asys.jobai.barjeras ? " dėl 7.2a barjero" : ""}). ` +
+        `job'ai: ${asys.jobai.autoritetas} — ${asys.jobai.priezastis}). ` +
         "Suderinimas pakeistų eilutes bazėje, kurios aplikacija nenaudoja, ir " +
         "praneštų sėkmę - tylus praleidimas pavojingesnis nei kritimas (D7).",
       "RECONCILE_BACKEND_NOT_POSTGRES"
@@ -270,8 +317,11 @@ async function suderinti({ targetUrl, actor = null, env = process.env } = {}) {
   /**
    * ⚠️ AŠYS NUSTATOMOS PRIEŠ TRANSAKCIJĄ (#280, II raundas).
    *
-   * `nustatytiAsis()` gali MESTI: `JOB_STORE_BACKEND=postgres` su uždarytu 7.2a
-   * barjeru yra konfigūracijos klaida, ne įspėjimas. Kviečiant po `COMMIT`, ta
+   * `nustatytiAsis()` gali MESTI: `JOB_STORE_BACKEND=redis` be `REDIS_URL` (ar
+   * kitas prieštaringas derinys) yra konfigūracijos klaida, ne įspėjimas —
+   * pavojingiausia jos forma yra kintamasis, neperduotas į atkūrimo aplinką.
+   * ⚠️ Iki #155 čia buvo nurodytas `JOB_STORE_BACKEND=postgres` su uždarytu
+   * barjeru; atidarius jį tas derinys tapo TEISĖTA konfigūracija. Kviečiant po `COMMIT`, ta
    * klaida atsidurdavo `catch` bloke, `ROLLBACK` vėluodavo (commit'as jau
    * įvykęs), auditas būdavo praleistas, o CLI grąžindavo 2 — t. y.
    * **commit'intas, neaudituotas darbas, praneštas kaip nesėkmė.**

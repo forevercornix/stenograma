@@ -114,27 +114,28 @@ const ATMETAMI = Object.freeze([
    */
   { vardas: "viršutinio lygio null", reiksme: null },
   /**
-   * ⚠️ IŠMATUOTA DIVERGENCIJA, NE TEORINĖ (peržiūros radinys).
+   * ⚠️ NEDETERMINISTINIS `toJSON` — TAI, KAS LIKO PO #298 (§12.1 korekcija).
    *
-   * `kanonizuoti()` perrenka tik NUOSAVUS raktus, o inline `payload` keliauja per
-   * `JSON.stringify`, kviečiantį PROTOTIPE gyvenantį `toJSON()`. Todėl `Date`
-   * kanoniškai virsta `{}` (visos datos tapatingos tarpusavyje!), o po inline
-   * round-trip'o - ISO eilute. Pakartotinis `finish()` tada duotų
-   * `RESULT_CONFLICT`, ne no-op.
+   * Ankstesnė redakcija čia atmetė VISUS objektus su prototipo `toJSON` (`Date`,
+   * klasių egzempliorius). Priežastis buvo teisinga diagnozei: `kanonizuoti()`
+   * `toJSON` nekviesdavo, o `JSON.stringify` kviesdavo, tad ta pati reikšmė
+   * skirtinguose keliuose duodavo skirtingą kanoninę eilutę.
    *
-   * `fs` ir S3 to neparodytų - jie grąžina tuos pačius baitus. Todėl reikšmė
-   * atmetama ties riba, o ne paliekama kaip backend'o savybė.
+   * #298 taisymas pašalino PRIEŽASTĮ, ne pasekmę: `kanonizuoti()` dabar `toJSON`
+   * kviečia taip pat kaip `JSON.stringify`, tad `Date` tapatybė yra viena visuose
+   * trijuose backend'uose. Jos vieta — `NUOSTOLINGI`, ne čia: reikšmė išlieka,
+   * tik pakeičia formą, ir pakeičia VIENODAI.
+   *
+   * ⚠️ RIBA VIS DĖLTO TURI KĄ GINTI, ir būtent tai lieka čia: `toJSON`, grąžinantis
+   * SKIRTINGĄ reikšmę kiekvienam kvietimui. Tokios reikšmės kanoninė forma
+   * nestabili iš principo — kvitas aprašytų A, o saugykla laikytų B.
    */
-  { vardas: "Date (prototipo toJSON)", reiksme: { d: new Date(0) } },
   {
-    vardas: "klasės egzempliorius su prototipo toJSON",
-    reiksme: {
-      x: new (class {
-        toJSON() {
-          return 1;
-        }
-      })(),
-    },
+    vardas: "nedeterministinis toJSON",
+    reiksme: (() => {
+      let i = 0;
+      return { k: { toJSON: () => (i += 1) } };
+    })(),
   },
   /**
    * ⚠️ NE BAIGTINĖS REIKŠMĖS VIRŠUTINIAME LYGYJE — TA PATI KLASĖ KAIP `null`.
@@ -179,6 +180,33 @@ const ATMETAMI = Object.freeze([
  * kiekvienam, kas kada nors perduos ne JSON kilmės objektą.
  */
 const NUOSTOLINGI = Object.freeze([
+  /**
+   * ⚠️ `Date` — NUOSTOLINGA, NE ATMETAMA (#298).
+   *
+   * Reikšmė išlieka, bet pakeičia TIPĄ: po saugojimo tai ISO eilutė, ne `Date`.
+   * Tai nėra šios ribos pasirinkimas — taip elgiasi `JSON.stringify`, per kurį
+   * serializuoja visos trys saugyklos. Iki #298 `kanonizuoti()` to nemodeliavo,
+   * ir divergencija atrodė kaip reikšmės problema; ji buvo MODELIO problema.
+   *
+   * Rinkinys tikrina svarbiausią dalį: forma pasikeičia VIENODAI, tad tapatybė
+   * lieka viena, ir pakartotinis `finish()` duoda no-op, ne `RESULT_CONFLICT`.
+   */
+  {
+    vardas: "Date VIRSTA ISO eilute (vienodai visur)",
+    reiksme: { d: new Date(0) },
+    virsta: { d: "1970-01-01T00:00:00.000Z" },
+  },
+  {
+    vardas: "klasės egzempliorius su prototipo toJSON VIRSTA jo grąžinama reikšme",
+    reiksme: {
+      x: new (class {
+        toJSON() {
+          return 1;
+        }
+      })(),
+    },
+    virsta: { x: 1 },
+  },
   {
     vardas: "funkcija objekto lauke DINGSTA",
     reiksme: { text: "x", f: () => 1 },

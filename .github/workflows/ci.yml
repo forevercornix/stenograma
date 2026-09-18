@@ -235,13 +235,40 @@ jobs:
       # kaip elgiasi flexible-checksums derinys su AWS SDK - tai TIKRINAMA
       # sąlyga, ne fonas. Su `latest` testas vieną dieną imtų tikrinti kitą
       # elgesį, ir niekas to nepastebėtų.
+      #
+      # ⚠️ REGISTRAS — `quay.io`, NE DOCKER HUB, IR TAI NE PASIRINKIMAS.
+      #
+      # 2026-09-11 vakare `minio/minio` Docker Hub'e nustojo būti pasiekiamas
+      # anonimiškai. Išmatuota trimis nepriklausomais zondais:
+      #
+      #   registry manifest (pririštas IR `latest`)  401 insufficient_scope
+      #   registry tags/list                          UNAUTHORIZED
+      #   Docker Hub VIEŠAS API                       {"message":"object not found"}
+      #
+      # Kontrolės (`library/alpine`, `library/postgres`) tuo pačiu metu grąžino
+      # 200, tad tai ne užklausos forma ir ne bendras registro gedimas.
+      #
+      # ⚠️ TAI NE PARSISIUNTIMŲ LIMITAS. Limitas duotų 429 arba
+      # `ratelimit-remaining: 0`; viešas API tokiu atveju repozitoriją VIS TIEK
+      # rastų. `object not found` reiškia, kad repozitorijos ten nebėra —
+      # vadinasi `docker/login-action` NEPADĖTŲ, ir autentifikacija būtų
+      # taisymas ne tos priežasties.
+      #
+      # ⚠️ TAS PATS TAG'AS gaunamas iš MinIO NUOSAVO registro (quay.io):
+      # `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`,
+      # multi-arch manifest list, anoniminis parsisiuntimas.
+      #
+      # ⚠️ KO PATIKRINTI NEBEĮMANOMA: ar quay.io atvaizdas BAITAIS sutampa su
+      # buvusiu Docker Hub — pastarojo nebėra, tad palyginti nėra su kuo.
+      # Sutampa tag'o vardas ir leidėjas; to čia pakanka, nes tag'as pririštas
+      # prie MinIO leidimo, o ne prie registro.
       - name: Paleisti MinIO (S3-compatible)
         run: |
           docker run -d --name minio \
             -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
 
           # Laukiama, kol saugykla ATSAKO, ne fiksuotą laiką: `sleep 5` yra
           # lenktynės, kurios pralaimimos lėtame runner'yje.
@@ -325,6 +352,63 @@ jobs:
       # kažko neištrina.
       - name: Švara po testų (jokių likusių artefaktų)
         run: npm run test:clean
+
+      # ⚠️ 10 SĄLYGA (#155): REALUS fail-closed startas.
+      #
+      # Iki barjero atidarymo ši savybė buvo įrodyta TIK unit lygmeniu, per
+      # `_initializePostgresForTests` — t. y. tikrinta funkcija, kurios
+      # produkcinis startas niekada nekviečia tiesiogiai. Tarp jos ir tikro
+      # `node server.js` guli visa parinkimo politika, kurią BŪTENT šis PR ir
+      # pakeitė. Todėl čia paleidžiamas tikras procesas per tikrą kelią.
+      #
+      # ⚠️ EXIT KODO NEPAKANKA — IŠMATUOTA. Su UŽDARYTU barjeru tas pats
+      # startas irgi krenta kodu 1, tik dėl visiškai kitos priežasties
+      # („JOB_STORE_BACKEND=postgres dar neleidžiamas"). Patikra, tikrinanti
+      # vien kodą, būtų žalia abiem atvejais ir nematuotų nieko — barjeras vėl
+      # taptų netiesioginiu liudytoju. Todėl tikrinama PRIEŽASTIS: procesas
+      # privalo būti realiai BANDĘS prisijungti ir kritęs dėl nepasiekiamumo.
+      #
+      # ⚠️ IR TREČIA ASERCIJA — kad nenusileido į atmintį. Kritimas ir
+      # fallback abu baigiasi „serveris neveikia su PostgreSQL"; skiriasi tuo,
+      # ar tuo metu buvo priiminėjami job'ai į saugyklą, kuri nėra autoritetinga.
+      # Būtent tas skirtumas yra split-brain.
+      - name: Fail-closed startas - ATIDARYTAS barjeras + neprieinama DB privalo nutraukti startą (#155, 10 salyga)
+        env:
+          TRANSCRIPTION_PROVIDER: mock
+          LLM_PROVIDER: mock
+          NODE_ENV: test
+          PORT: 3002
+          JOB_STORE_BACKEND: postgres
+          # ⚠️ UŽDARAS PRIEVADAS, NE `postgres` servisas (5432). Nepasiekiamumas
+          # privalo būti tikras ir nepriklausyti nuo serviso sveikatos: jei
+          # servisas kada nors nustotų kilti, patikra imtų praeiti dėl gedimo,
+          # o ne dėl tikrinamos savybės.
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:59999/postgres
+        run: |
+          set +e
+          timeout 60 node server.js > "$RUNNER_TEMP/fail-closed.log" 2>&1
+          KODAS=$?
+          set -e
+          cat "$RUNNER_TEMP/fail-closed.log"
+
+          if [ "$KODAS" -eq 0 ]; then
+            echo "❌ Procesas NENUTRAUKĖ starto su neprieinama DB (exit 0)."
+            exit 1
+          fi
+
+          if ! grep -q "PostgreSQL neprieinamas" "$RUNNER_TEMP/fail-closed.log"; then
+            echo "❌ Procesas krito, bet NE dėl nepasiekiamos DB."
+            echo "   Tai reiškia, kad realus prisijungimo kelias nebuvo pasiektas,"
+            echo "   ir ši patikra nematuoja fail-closed elgsenos."
+            exit 1
+          fi
+
+          if grep -q "Job store backend'as" "$RUNNER_TEMP/fail-closed.log"; then
+            echo "❌ Job store BUVO inicijuotas - startas nusileido į kitą backend'ą."
+            exit 1
+          fi
+
+          echo "✅ Startas nutrauktas dėl nepasiekiamos DB; į atmintį nenusileista."
 
       - name: Smoke test - paleisti serverį ir patikrinti /api/health
         env:
@@ -902,3 +986,100 @@ jobs:
 
       - name: Python auditas (whisper-server) - blokuoja BET KOKS radinys
         run: pip-audit --requirement whisper-server/requirements.txt --strict
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # VIENAS STABILUS VARTŲ VARDAS (#324, D3)
+  #
+  # GitHub nustatymuose laikomas VIENAS required check, o priklausomybių sąrašas
+  # gyvena ČIA, versijų kontrolėje. Priežastis konkreti: GitHub įrašytas vardas
+  # neturi jokios apsaugos nuo drift'o — pervadinus job'ą, required check tyliai
+  # virsta `missing`. Repo valdoma priklausomybė elgiasi priešingai (žr. D3b).
+  #
+  # ⚠️ `dependency-audit` ČIA NĖRA SĄMONINGAI. Jis patariamasis: per mėnesį krito
+  # tris kartus dėl priežasčių, NESUSIJUSIŲ su PR turiniu (`npm audit` 503; du
+  # advisory prieš NEPAKEISTAS priklausomybes). Vartai, kurių subjektas nėra
+  # peržiūrimas pokytis, verčia bypass'ą kasdienybe. Sąlyga, kada jis tampa
+  # privalomu, užrašyta `docs/ci-security-policy.md`.
+  #
+  # ⚠️ CodeQL ČIA NĖRA IR NEGALI BŪTI. Jį kuria GitHub default setup
+  # (`code-scanning/default-setup: configured`), ne repo workflow, tad `needs:`
+  # jo nepasiekia — `needs:` veikia tik vieno workflow ribose.
+  # ══════════════════════════════════════════════════════════════════════════
+  required-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # ⚠️ `always()` YRA VISA ESMĖ, NE ATSARGA.
+    #
+    # Be jo praleista priklausomybė praleidžia ir šį job'ą, o GitHub praleistą
+    # required check skaito kaip PATENKINTĄ. Vartai tada tyliai atsidaro būtent
+    # tada, kai CI nepasileido — t. y. tuo atveju, dėl kurio #324 ir egzistuoja.
+    #
+    # Grandinė pasiekiama ŠIANDIEN: `docker` turi `needs: [backend, frontend]`.
+    if: ${{ always() }}
+    needs:
+      - backend
+      - frontend
+      - e2e
+      - docker
+      - compose-config-validate
+      - workflow-policy
+      - deleted-tests
+      - pyannote-server
+      - whisper-server
+    steps:
+      # ⚠️ TIKRINAMAS KIEKVIENOS PRIKLAUSOMYBĖS `result`, NE `needs.*.result`
+      # AGREGATAS. Agregatas (`contains(needs.*.result, 'failure')`) nepasako,
+      # KURI šaka krito, o klaida, nenurodanti ką taisyti, operatoriui verta
+      # mažiau nei jos nebuvimas.
+      #
+      # ⚠️ `skipped` = NESĖKMĖ BE IŠIMČIŲ. Išmatuota: nė vienas `ci.yml` job'as
+      # neturi job-lygio `if:`, tad sąmoningai conditional šakų NĖRA. Vienintelis
+      # `needs:` yra `docker: [backend, frontend]`, ir jo praleidimas reiškia, kad
+      # kažkas prieš jį krito — ne kad jis nereikalingas.
+      #
+      # Atsiradus sąmoningai conditional job'ui, jo `skipped` semantika turi būti
+      # nuspręsta ATSKIRAI ir įrašyta čia; aklas pridėjimas į šį sąrašą paverstų
+      # jį privalomu netyčia.
+      - name: Visos privalomos šakos privalo būti `success`
+        env:
+          REZULTATAI: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+
+          # ⚠️ JOKIO PROCESO PAKAITO (`< <(...)`).
+          #
+          # `while ... done < <(jq ...)` `jq` gedimą PASLEPTŲ: ciklas
+          # perskaitytų nieko, `nepavyko` liktų 0, ir vartai atsidarytų. Tai
+          # tiksliai ta forma, kurią repo jau gaudė #342 cutover bloke — ten
+          # `scan` gedimas dingdavo proceso pakaite, nepaisant `set -euo
+          # pipefail`. Todėl `jq` vykdomas ATSKIRAI, ir jo statusas matomas.
+          eilutes="$(echo "$REZULTATAI" | jq -r 'to_entries[] | "\(.key)\t\(.value.result)"')"
+
+          if [ -z "$eilutes" ]; then
+            echo "Nepavyko nuskaityti priklausomybių rezultatų - vartai NEATIDAROMI."
+            exit 1
+          fi
+
+          nepavyko=0
+
+          while IFS=$'\t' read -r saka rezultatas; do
+            if [ "$rezultatas" = "success" ]; then
+              echo "OK   $saka: $rezultatas"
+            else
+              echo "FAIL $saka: $rezultatas"
+              nepavyko=1
+            fi
+          done <<< "$eilutes"
+
+          if [ "$nepavyko" -ne 0 ]; then
+            # ⚠️ BE ATVIRKŠTINIŲ KABUČIŲ. Bash dvigubose kabutėse jos yra KOMANDOS
+            # PAKAITAS: "nėra `success`" bandytų paleisti komandą `success`.
+            echo ""
+            echo "Privaloma CI saka nera success."
+            echo "skipped ir cancelled cia yra NESEKME: praleista saka reiskia,"
+            echo "kad patikra NEIVYKO, o ne kad jos nereikejo."
+            exit 1
+          fi
+
+          echo ""
+          echo "Visos privalomos sakos sekmingos."

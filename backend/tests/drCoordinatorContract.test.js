@@ -71,9 +71,13 @@ test("SAUGYKLA: replay be tikslinės bazės kliento KRENTA", async () => {
   /**
    * ⚠️ TYLUS GRĮŽIMAS PRIE FASADO BŪTŲ VAKUUMAS.
    *
-   * 7.2a barjeras job'ų autoritetu palieka atmintį arba Redis, tad replay per
-   * fasadą atkurtos bazės eilučių NEPALIESTŲ — o kvitas skelbtų sėkmę. Todėl
-   * klientas privalomas, ne numatytas.
+   * Testinėje aplinkoje fasado autoritetas yra atmintis (`JOB_STORE_BACKEND`
+   * nenurodytas), tad replay per fasadą atkurtos bazės eilučių NEPALIESTŲ — o
+   * kvitas skelbtų sėkmę. Todėl klientas privalomas, ne numatytas.
+   *
+   * ⚠️ IR PO #155 TAI SVARBIAU, NE MAŽIAU: barjeras atidarytas, tad diegimas
+   * GALI turėti `postgres` fasadą — bet tada replay eitų į PRODUKCINĘ, ne į
+   * atkurtą bazę. Nukreipimas privalomas abiem atvejais, tik žala skirtinga.
    */
   await assert.rejects(
     () => drCoordinator.replay({ merge: tikrasMerge() }),

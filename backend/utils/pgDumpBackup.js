@@ -5,7 +5,17 @@ const { promisify } = require("node:util");
 const backupEncryption = require("./backupEncryption");
 const backupManifest = require("./backupManifest");
 const backupPolicy = require("./backupPolicy");
-const { arNurodytaPostgres, arTaPatiBaze, tapatybesTekstas } = require("./pgConnection");
+const {
+  arNurodytaPostgres,
+  arTaPatiBaze,
+  tapatybesTekstas,
+  jungtiesTapatybe,
+  pgJungtiesNustatymai,
+  vaikinioProcesoKliutys,
+  vaikinioProcesoKliuciuTekstas,
+  arConninfoReiksme,
+  conninfoTekstas,
+} = require("./pgConnection");
 const privacyConfig = require("./privacyConfig");
 const tombstones = require("./deletionTombstones");
 /**
@@ -81,12 +91,136 @@ const DUMP_FORMATAS = "plain";
  * `--no-owner`/`--no-privileges`: atkūrimas į kitą bazę neturi reikalauti tų
  * pačių rolių.
  */
-const PG_DUMP_ARGUMENTAI = (databaseUrl) => [
-  "--exclude-table-data=audit_log",
-  "--no-owner",
-  "--no-privileges",
-  databaseUrl,
-];
+const PG_DUMP_BENDROS = ["--exclude-table-data=audit_log", "--no-owner", "--no-privileges"];
+
+/**
+ * TAIKINYS — URL POZICIŠKAI ARBA `PG*` PER VĖLIAVAS (#264).
+ *
+ * ⚠️ DVI FORMOS, NES JŲ KILMĖ SKIRTINGA, NE DĖL PATOGUMO.
+ *
+ * `--url` kelias lieka POZICINIS ir nepakitęs: operatorius pats įvardijo
+ * taikinį, URL yra vienintelis šaltinis, ir tai jau padengta regresijos testais.
+ * Jo perrašymas į vėliavas reikštų URL ARDYMĄ — o query eilutės (`sslmode`,
+ * `options`) į vėliavas nepersikelia, tad tylus praradimas atsirastų ten, kur jo
+ * šiandien nėra.
+ *
+ * `PG*` kelias naudoja ATSKIRAS VĖLIAVAS, ir tai jo esmė:
+ *
+ *   - URI kodavimo NEREIKIA NIEKUR — dingsta visa DSN konstravimo problema,
+ *     kurią #264 body vadina klaidinga („ypač slaptažodžiams su URI simboliais");
+ *   - slaptažodis NIEKADA nepatenka į `argv` — libpq CLI slaptažodžio vėliavos
+ *     neturi, tad `ps` išvestyje jo nebus. `pg-backup.mjs:25` jau fiksuoja, kad
+ *     `pg_dump` klaidos tekstas turi visą argumentų eilutę; šiam keliui ta yda
+ *     neegzistuoja pagal konstrukciją.
+ *
+ * ⚠️ Kredencialai `PG*` kelyje eina per `~/.pgpass` — jis valymą IŠGYVENA, nes
+ * `HOME` nėra `PG*`. `PGPASSWORD` yra kliūtis (žr. `vaikinioProcesoKliutys()`).
+ *
+ * @param {string|{host?:string,port?:number,user?:string,database?:string}} taikinys
+ */
+const PG_DUMP_ARGUMENTAI = (taikinys) => {
+  if (typeof taikinys === "string") return [...PG_DUMP_BENDROS, taikinys];
+
+  const veliavos = [];
+  /** Tvarka stabili: testas lygina argumentų seką, ne aibę. */
+  if (taikinys.host !== undefined) veliavos.push("-h", String(taikinys.host));
+
+  /**
+   * ⚠️ PORTAS - TA PATI „NENUSTATYTA" SEMANTIKA ABIEJOSE PUSĖSE (Codex II, B1).
+   *
+   * `PGPORT=""` `pgJungtiesNustatymai()` paverčia SKAITINIU `0`, o Node `pg`
+   * falsy reikšmę laiko nesančia ir sprendžia `5432`. Be šios patikros vėliavose
+   * atsirasdavo `-p 0`, kurį `pg_dump` atmeta - tad modelis sakė `5432`, o
+   * vaikinis procesas krisdavo.
+   *
+   * ⚠️ IR PREFLIGHT TAPATYBĖ TO NEPAGAUDAVO: ji abi puses sprendžia per tą pačią
+   * falsy taisyklę, tad matė `5432` ↔ `5432` ir praleisdavo. Dvi skirtingos
+   * „nenustatyta" semantikos tame pačiame kelyje.
+   *
+   * Sprendimas: vėliava rašoma TIK tada, kai portas yra baigtinis teigiamas
+   * skaičius. Kitaip jis laikomas nenurodytu - lygiai kaip `pg`.
+   */
+  const portas = Number(taikinys.port);
+  if (taikinys.port !== undefined && Number.isFinite(portas) && portas > 0) {
+    veliavos.push("-p", String(portas));
+  }
+
+  if (taikinys.user !== undefined) veliavos.push("-U", String(taikinys.user));
+  if (taikinys.database !== undefined) veliavos.push("-d", String(taikinys.database));
+
+  return [...PG_DUMP_BENDROS, ...veliavos];
+};
+
+/**
+ * LIBPQ VAIKINIO PROCESO APLINKA — BE NĖ VIENO `PG*` (#245 peržiūra, Codex P1).
+ *
+ * ⚠️ `pg_dump` IR `psql` NAUDOJA libpq, NE `pg`. #245 suvienodino jungties
+ * formos semantiką keturiems Node pool'ams ir diagnostiniam klientui — bet šie
+ * du procesai pro tą autoritetą NEEINA. Jie paveldėdavo visą `process.env`, ir
+ * libpq savo `PG*` skaito PATS.
+ *
+ * ⚠️ BLOGIAUSIAS ATVEJIS YRA `PGHOSTADDR`, IR `pg` JO NEMATO. libpq `hostaddr`
+ * yra TINKLO ADRESAS, o `host` tada naudojamas tik autentikacijai ir SSL vardo
+ * patikrai. Tad `--url`, rodantis į vieną klasterį, plius `PGHOSTADDR`,
+ * rodantis į kitą, duotų kopiją iš KITOS bazės nei ta, kurią patikrino
+ * `patikrintiZymuTapatuma()` ir į kurią rašomas `backup_horizon`. Pasimatytų
+ * tik atkuriant.
+ *
+ * ⚠️ SPRENDIMAS — VALYTI APLINKĄ, NE DENGTI libpq PAVIRŠIŲ. Sąrašas to, ką
+ * skaito libpq, būtų rankinis (`PGHOSTADDR`, `PGSERVICE`, `PGSSLMODE`,
+ * `PGREQUIREPEER`, `PGGSSENCMODE`, `PGTARGETSESSIONATTRS`, …) ir tyliai
+ * senstantis — tiksliai tai, ką #245 atmetė `pg` atveju. Ten spragą uždarė
+ * `Proxy` seklys, bet libpq iš JS neapklausiamas, tad išvesti sąrašo NEĮMANOMA.
+ *
+ * Todėl invertuojama: pašalinamas VISAS `PG` prefiksas. Tai ne sąrašas, o
+ * taisyklė — libpq aplinkos paviršius pagal konstrukciją yra `PG*`, ir naujas
+ * kintamasis į jį pateks automatiškai. URL tampa VIENINTELIU šaltiniu.
+ *
+ * ⚠️ KAINA ĮVARDYTA: kredencialai privalo būti URL'e arba `~/.pgpass`.
+ * Diegimas, perdavęs `--url` be slaptažodžio ir pasikliovęs `PGPASSWORD`,
+ * nustos veikti — ir kris GARSIAI (autentikacijos klaida), o ne tyliai
+ * nukopijuos ne tą klasterį. `.pgpass` lieka veikti: tai failas, ne aplinka.
+ */
+function libpqSvariAplinka(env = process.env) {
+  const svari = {};
+  for (const [raktas, reiksme] of Object.entries(env)) {
+    /**
+     * ⚠️ REGISTRAS NORMALIZUOJAMAS (Codex V, A) — TAISYKLĖS REALIZACIJA, NE PATI
+     * TAISYKLĖ.
+     *
+     * `startsWith("PG")` yra registrui JAUTRI, o Windows aplinkos kintamųjų
+     * vardai — NE. Kintamasis `pghostaddr` filtrą praeidavo, o libpq jį
+     * išsprendžia kaip `PGHOSTADDR`. Repo Windows palaiko eksplicitiškai
+     * (`README` diegimo skyrius), tad tai ne teorinis atvejis.
+     *
+     * Komentaras žemiau sako „tai ne sąrašas, o taisyklė". Taisyklė buvo
+     * teisinga; jos realizacija taisyklė nebuvo — platformoje, kur registras
+     * nereikšmingas, ji praleisdavo.
+     */
+    if (raktas.toUpperCase().startsWith("PG")) continue;
+    svari[raktas] = reiksme;
+  }
+  return svari;
+}
+
+/**
+ * ⚠️ VIENINTELIS BŪDAS PALEISTI libpq CLI — TAISYMAS KELYJE, NE TRIJOSE VIETOSE.
+ *
+ * Pirmoji šio taisymo redakcija išvalė aplinką TEN, KUR BUVO PRANEŠTA: dump'o
+ * kvietimui ir `_psqlSuStdin()`. Trečias kvietimas —
+ * `_patikrintiTikslasTuscias()` preflight — liko su paveldėta aplinka, ir
+ * pasekmė buvo BLOGESNĖ nei dump'o atveju: preflight tikrindavo, ar tuščias
+ * VIENAS klasteris, o restore rašydavo į KITĄ. „Tuščio taikinio" garantija
+ * krisdavo tyliai, ir tai mutacija, ne skaitymas.
+ *
+ * ⚠️ TAI RECIDYVAS, NE NAUJAS DEFEKTAS: „pataisa įėjime, ne visame kelyje" yra
+ * ta pati šaknis, kurią ši seka jau taisė. Todėl dabar taisoma taip, kad
+ * pamiršti būtų NEĮMANOMA: visi libpq paleidimai eina per šią funkciją, o
+ * `pgDumpBackupContract` tripwire tikrina, kad jų nebūtų kitaip.
+ */
+function vykdytiLibpq(binaras, argumentai, nustatymai = {}, env = process.env) {
+  return vykdyti(binaras, argumentai, { ...nustatymai, env: libpqSvariAplinka(env) });
+}
 
 /** Vėliavos, kurios SULAUŽYTŲ nuoseklų snapshot'ą. Tikrina kontrakto testas. */
 const SNAPSHOTA_LAUZANCIOS_VELIAVOS = Object.freeze([
@@ -186,7 +320,12 @@ class PgDumpBackupError extends Error {
 /** Ar `pg_dump`/`psql` apskritai pasiekiami? Grąžina versijos eilutę arba `null`. */
 async function klientoVersija(binaras = "pg_dump") {
   try {
-    const { stdout } = await vykdyti(binaras, ["--version"], { encoding: "utf8" });
+    /**
+     * ⚠️ `--version` NESIJUNGIA, tad aplinka jam nesvarbi — ir vis dėlto eina per
+     * tą patį kelią. Išimtis „šitam nereikia" yra būtent tai, ką kitą kartą
+     * reikėtų prisiminti; taisyklė be išimčių prisiminimo nereikalauja.
+     */
+    const { stdout } = await vykdytiLibpq(binaras, ["--version"], { encoding: "utf8" });
     return stdout.trim();
   } catch {
     return null;
@@ -238,11 +377,87 @@ function _perskaitytiAntraste(plaintext) {
  *
  * @returns {{ manifest: object, envelope: object, dumpBytes: number }}
  */
-async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.env } = {}) {
-  if (!databaseUrl) {
-    throw new PgDumpBackupError("Nenurodytas `databaseUrl`.", "PG_DUMP_NO_URL");
+/**
+ * `PG*` TAIKINYS — ARBA NUSTATYMAI, ARBA GARSUS ATSISAKYMAS (#264).
+ *
+ * ⚠️ TRYS ATSKIROS BAIGTYS, IR NĖ VIENA IŠ JŲ NĖRA TYLI:
+ *
+ *   1. PostgreSQL apskritai nenurodyta  → `PG_DUMP_NO_URL` (kaip anksčiau);
+ *   2. nurodyta, bet su kliūtimis       → `PG_DUMP_ENV_NOT_PORTABLE`;
+ *   3. nurodyta ir perduodama           → nustatymai vėliavoms.
+ *
+ * ⚠️ 2 atvejis yra viso #264 esmė. Be jo `PG*` diegimas gautų kopiją iš
+ * numatytojo klasterio arba per nešifruotą jungtį — ir abu atvejai atrodytų
+ * kaip sėkmė.
+ */
+function _pgTaikinysIsAplinkos(env) {
+  if (!arNurodytaPostgres(env)) {
+    throw new PgDumpBackupError(
+      "Nenurodytas nei `databaseUrl` (`--url`/`DATABASE_URL`), nei `PG*` " +
+        "(`PGHOST`/`PGUSER`/…). Kopijos šaltinis neapibrėžtas.",
+      "PG_DUMP_NO_URL"
+    );
   }
 
+  const kliutys = vaikinioProcesoKliutys(env);
+  if (kliutys.length > 0) {
+    throw new PgDumpBackupError(vaikinioProcesoKliuciuTekstas(kliutys), "PG_DUMP_ENV_NOT_PORTABLE");
+  }
+
+  /**
+   * ⚠️ `password` PAŠALINAMAS EKSPLICITIŠKAI, nors `PGPASSWORD` jau yra kliūtis.
+   *
+   * Dvi priežastys: `pgJungtiesNustatymai()` jį grąžina, o vėliavos jam vietos
+   * neturi — tad neleistina reikšmė net neturi pasiekti argumentų konstravimo.
+   * Ir jei riba kada nors susilpnėtų, čia liktų antras sluoksnis, neleidžiantis
+   * slaptažodžiui nutekėti į `argv`.
+   */
+  const { password: _nenaudojamas, ...nustatymai } = pgJungtiesNustatymai(env);
+
+  /**
+   * ⚠️ `connectionString` FORMA GRĄŽINAMA KAIP POZICINIS TAIKINYS (Codex II, A2).
+   *
+   * `pgJungtiesNustatymai()` su `DATABASE_URL` grąžina `{connectionString}`, o ne
+   * atskirus laukus. Pirmoji redakcija tą objektą paduodavo vėliavų
+   * konstruktoriui, kuris moka tik `host`/`port`/`user`/`database` — tad
+   * `pg_dump` NEGAUDAVO TAIKINIO IŠ VISO ir jungdavosi prie numatytosios lokalios
+   * bazės, o tapatybės patikra tuo metu patvirtindavo nurodytą URL.
+   *
+   * ⚠️ TAI BUVO REGRESIJA ESAMAME KELYJE, ne naujo kelio trūkumas: paveikti
+   * programiniai kvietėjai, paduodantys `env.DATABASE_URL` be `databaseUrl`.
+   *
+   * Grąžinus eilutę, taikinys eina tuo pačiu POZICINIU keliu kaip `--url`, ir
+   * kartu atgauna PILNĄ `arTaPatiBaze()` palyginimą.
+   */
+  if (nustatymai.connectionString) return nustatymai.connectionString;
+
+  /**
+   * ⚠️ CONNINFO TEN, KUR LAUKIAMAS VARDAS (Codex II, A1). Žr. `arConninfoReiksme()`
+   * — reikšmė atmetama, ne escape'inama.
+   */
+  if (arConninfoReiksme(nustatymai.database)) {
+    throw new PgDumpBackupError(conninfoTekstas("PGDATABASE"), "PG_DUMP_CONNINFO_IN_NAME");
+  }
+
+  return nustatymai;
+}
+
+async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.env } = {}) {
+  /**
+   * TAIKINIO FORMA — `--url` ARBA `PG*` (#264).
+   *
+   * ⚠️ GARANTIJA SĄLYGINĖ, IR TAI JOS FORMULUOTĖ: palaikoma `PG*` forma, KAI
+   * jungtis aprašoma tik `PG_ATITIKMENYS` kintamaisiais; kitaip atsisakoma
+   * GARSIAI. Ta pati formuluotė — `pg-backup.mjs` naudojime, runbook'e ir
+   * matricoje.
+   *
+   * ⚠️ PRIORITETAS NEKINTA: eksplicitinis `--url`/`DATABASE_URL` perrašo `PG*`,
+   * ir jam riba netaikoma (ten URL yra vienintelis šaltinis pagal sutartį).
+   *
+   * ⚠️ TVARKA (Codex II, C1): sprendimas (`BACKUP_ENABLED`) → artefakto savybė
+   * (šifravimas) → TAIKINYS → tapatumas → darbas. Taikinys yra KONFIGŪRACIJOS
+   * klausimas, tad eina po abiejų SPRENDIMO klausimų.
+   */
   /**
    * ⚠️ ADMINISTRACINIS JUNGIKLIS TIKRINAMAS PIRMAS (Codex P1).
    *
@@ -297,7 +512,22 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
    * dump'o būtų teisingas, bet brangus, o klaida - ta pati. Tvarka: sprendimas
    * (`BACKUP_ENABLED`) → artefakto savybė (šifravimas) → tapatumas → darbas.
    */
-  patikrintiZymuTapatuma(databaseUrl);
+
+  /**
+   * ⚠️ TAIKINYS SPRENDŽIAMAS PO POLITIKOS (Codex II, C1).
+   *
+   * Pirmoji redakcija jį sprendė PIRMA. Pasekmė: su išjungtomis kopijomis IR
+   * nepernešama `PG*` konfigūracija operatorius gaudavo `PG_DUMP_ENV_NOT_PORTABLE`
+   * ir imdavo taisyti kredencialus, nors tikroji priežastis buvo administracinis
+   * jungiklis — ir jokia aplinkos pataisa jam nebūtų padėjusi.
+   *
+   * Tvarka, kurią jau deklaruoja komentaras žemiau: sprendimas (`BACKUP_ENABLED`)
+   * → artefakto savybė (šifravimas) → taikinys → tapatumas → darbas. Taikinys yra
+   * KONFIGŪRACIJOS klausimas, tad jis eina po abiejų SPRENDIMO klausimų.
+   */
+  const taikinys = databaseUrl || _pgTaikinysIsAplinkos(env);
+
+  patikrintiZymuTapatuma(taikinys);
 
   const snapshotTime = Date.now();
 
@@ -322,10 +552,13 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
    */
   let sql;
   try {
-    ({ stdout: sql } = await vykdyti("pg_dump", PG_DUMP_ARGUMENTAI(databaseUrl), {
-      encoding: "utf8",
-      maxBuffer: MAX_DUMP_BYTES,
-    }));
+    /** ⚠️ Žr. `vykdytiLibpq()`: `--url` privalo būti vienintelis taikinio šaltinis. */
+    ({ stdout: sql } = await vykdytiLibpq(
+      "pg_dump",
+      PG_DUMP_ARGUMENTAI(taikinys),
+      { encoding: "utf8", maxBuffer: MAX_DUMP_BYTES },
+      env
+    ));
   } catch (klaida) {
     /**
      * ⚠️ ORIGINALI KLAIDA NEPERDUODAMA. Ir `message`, ir `cmd` turi pilną
@@ -333,7 +566,7 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
      * atspausdintų. Diagnozei paliekamas `stderr` be kredencialų.
      */
     throw new PgDumpBackupError(
-      `\`pg_dump\` nepavyko: ${saugusStderr(klaida.stderr || klaida.message, databaseUrl)}`,
+      `\`pg_dump\` nepavyko: ${saugusStderr(klaida.stderr || klaida.message, typeof taikinys === "string" ? taikinys : null)}`,
       "PG_DUMP_FAILED"
     );
   }
@@ -354,7 +587,7 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
   manifest.snapshotTime = new Date(snapshotTime).toISOString();
   manifest.excludedInFlightJobs = 0;
 
-  await _uzfiksuotiHorizonta(manifest, databaseUrl);
+  await _uzfiksuotiHorizonta(manifest, taikinys);
 
   const envelope = backupEncryption.encrypt(plaintext, { env, manifest });
 
@@ -442,9 +675,65 @@ function patikrintiZymuTapatuma(databaseUrl, env = process.env) {
    * ⚠️ Dviprasmiška konfigūracija (`DATABASE_URL` IR `PG*`) gauna savo kodą:
    * ten klausimas „ta pati bazė?" atsakymo neturi (#280, IV raundas).
    */
+  /**
+   * `PG*` KELIAS — PALYGINIMAS TARP DVIEJŲ ŠALTINIŲ, NE SU SAVIMI (#264).
+   *
+   * ⚠️ PIRMOJI ŠIO TAISYMO REDAKCIJA ČIA GRĮŽDAVO IŠ KARTO, teigdama, kad
+   * tapatybė galioja „pagal konstrukciją": abi pusės esą kyla iš to paties
+   * `pgJungtiesNustatymai()`. Tai buvo NETIESA.
+   *
+   * Taikinys statomas iš `sukurtiSifruotaKopija({env})` INJEKTUOTOS aplinkos, o
+   * žymų pool'as jungiasi iš GLOBALIOS `process.env`. Produkcijoje jos sutampa
+   * (CLI `env` neperduoda), bet API leidžia joms išsiskirti — ir tada „pagal
+   * konstrukciją" būtų prielaida, ne garantija. Tiksliai ta klasė, kurią ši seka
+   * gaudo: sargas, remiantis tuo, kad iki šiol niekas taip nedarė.
+   *
+   * ⚠️ `arTaPatiBaze()` netinka — jo pirmas argumentas yra URL, kurio šiame
+   * kelyje nėra. Naudojamas tas pats primityvas, kuriuo remiasi ir jis pats
+   * (`jungtiesTapatybe()`), tad antros palyginimo realizacijos neatsiranda.
+   *
+   * ⚠️ Taikinio pusė sprendžiama ŠVARIA aplinka — ta pačia, kurią gaus
+   * `pg_dump`. Žymų pusė lieka su tikra `process.env`, nes žymų pool'as yra Node
+   * `pg` ir jis `PG*` skaito. Dvi pusės, dvi aplinkos — kaip ir URL kelyje.
+   */
+  if (typeof databaseUrl !== "string") {
+    const taikinys = jungtiesTapatybe(databaseUrl, libpqSvariAplinka(env));
+    const zymos = jungtiesTapatybe(pgJungtiesNustatymai(process.env), process.env);
+
+    const sutampa =
+      taikinys !== null &&
+      zymos !== null &&
+      taikinys.host === zymos.host &&
+      taikinys.port === zymos.port &&
+      taikinys.database === zymos.database &&
+      taikinys.options === zymos.options;
+
+    if (!sutampa) {
+      throw new PgDumpBackupError(
+        `Dump'o šaltinis (${tapatybesTekstas(taikinys)}) nesutampa su ištrynimo žymų baze ` +
+          `(${tapatybesTekstas(zymos)}). Kopijos galiojimas atsidurtų ne toje bazėje, kurios ` +
+          "žymas jis privalo saugoti, tad kopija neišduodama.",
+        "PG_BACKUP_SOURCE_MISMATCH"
+      );
+    }
+    return;
+  }
+
   let palyginimas;
   try {
-    palyginimas = arTaPatiBaze(databaseUrl, env);
+    /**
+     * ⚠️ URL SPRENDŽIAMAS TA PAČIA ŠVARIA APLINKA, KURIĄ GAUS `pg_dump` (Codex V, B).
+     *
+     * Be trečiojo argumento patikra `--url` papildydavo `PG*` reikšmėmis, kurių
+     * vaikinis procesas NEBEGAUNA: tapatybė patvirtindavo vieną klasterį, o
+     * dump'as eidavo į kitą. Išmatuota: `postgres://u@db.prod/prod` plius
+     * `PGPORT=6543` → patikra sakė `6543`, `pg_dump` jungdavosi prie `5432`.
+     *
+     * ⚠️ `konfiguracija` pusė LIEKA su tikra aplinka: žymų pool'as yra Node `pg`,
+     * ir jis `PG*` skaito. Dvi pusės, dvi aplinkos — būtent todėl, kad jos
+     * skirtingos vykdyme.
+     */
+    palyginimas = arTaPatiBaze(databaseUrl, env, libpqSvariAplinka(env));
   } catch (klaida) {
     if (klaida.code === "PG_CONNECTION_AMBIGUOUS") {
       throw new PgDumpBackupError(klaida.message, "PG_BACKUP_CONNECTION_AMBIGUOUS");
@@ -903,7 +1192,15 @@ function perskaitytiObjektuSkaiciu(stdout) {
 async function _patikrintiTikslasTuscias(targetUrl) {
   let stdout;
   try {
-    ({ stdout } = await vykdyti(
+    /**
+     * ⚠️ PREFLIGHT APLINKA IRGI ŠVARI (Codex IV, A1).
+     *
+     * Be šito preflight tikrindavo KITĄ klasterį nei tas, į kurį rašo restore:
+     * `PGHOSTADDR` nukreipdavo `psql` į savo adresą, o `--target` likdavo tik
+     * autentikacijai. Jei perimtas klasteris tuščias, o tikrasis taikinys — ne,
+     * patikra praeidavo ir dump'as būdavo sulietas į NETUŠČIĄ bazę.
+     */
+    ({ stdout } = await vykdytiLibpq(
       "psql",
       ["--no-psqlrc", "--quiet", "-At", "-c", OBJEKTU_UZKLAUSA, targetUrl],
       { encoding: "utf8" }
@@ -946,7 +1243,15 @@ function _psqlSuStdin(targetUrl, sql) {
        * transakcijos. Išvestis mums nereikalinga (`--quiet`), tad ji
        * atmetama OS lygyje, o ne buferinama be reikalo.
        */
-      { stdio: ["pipe", "ignore", "pipe"] }
+      {
+        stdio: ["pipe", "ignore", "pipe"],
+        /**
+         * ⚠️ TA PATI RIBA KAIP `pg_dump` (Codex P1). `psql` irgi yra libpq, ir
+         * atkūrimo atveju kaina didesnė: `PGHOSTADDR` nukreiptų ATKŪRIMĄ į kitą
+         * klasterį nei `--target`, o tai mutacija, ne skaitymas.
+         */
+        env: libpqSvariAplinka(),
+      }
     );
 
     let stderr = "";
@@ -970,6 +1275,8 @@ function _psqlSuStdin(targetUrl, sql) {
 }
 
 module.exports = {
+  /** ⚠️ Eksportuojama TESTUI: registrui nejautrus filtras yra elgsena, ne detalė. */
+  libpqSvariAplinka,
   PG_DUMP_ARGUMENTAI,
   SNAPSHOTA_LAUZANCIOS_VELIAVOS,
   ANTRASTE,

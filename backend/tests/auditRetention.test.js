@@ -630,6 +630,7 @@ test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION
   jobStore.system.valytiniBandymai = async () => ({
     kandidatai: [{ attempt_id: "a", storage_type: "fs", storage_key: "results/j/a.json" }],
     praleista: 0,
+    uzimti: 0,
   });
   jobStore.system.sweepResultArtifacts = async () => [
     { attemptId: "a", storageKey: "results/j/a.json", verdiktas: "pasalinta" },
@@ -647,7 +648,8 @@ test("#157 PR-5: ciklas, pašalinęs TIK rezultato bandymus, IŠRAŠO `RETENTION
     const irasai = await auditLog.getAll();
     const kvitas = irasai.find((i) => i.event === "RETENTION_PURGE");
     assert.ok(kvitas, `kvitas privalo būti išrašytas: ${JSON.stringify(irasai)}`);
-    assert.match(kvitas.details, /attempts=1\/0\/0/, kvitas.details);
+    /** ⚠️ Keturi laukai nuo #305.1: pašalinta/praleista/UŽIMTA/pažeidimai. */
+    assert.match(kvitas.details, /attempts=1\/0\/0\/0/, kvitas.details);
   } finally {
     tombstones.jungtiesTapatybe = tikrasTapatybe;
     Object.assign(jobStore.system, {
@@ -977,5 +979,97 @@ test("#157 PR-5: `NESAUGU` žymima `permanent`, ne `retryable`", async () => {
     jobStore.system.deleteResultArtifacts = atsargos.delete;
     tombstones.jungtiesTapatybe = atsargos.zymos;
     jobStore.system.jungtiesTapatybe = atsargos.job;
+  }
+});
+
+test("#305.1: ciklas TIK su praleidimais palieka kvitą, ir jis NĖRA `success: true`", async () => {
+  /**
+   * ⚠️ „REIKŠMĖ BE VARTOTOJO" — TAME PAČIAME PR'e, KURIS MATOMUMĄ DEKLARAVO.
+   *
+   * `resultAttemptsLiveHeld` buvo nustatomas, bet nepasiekė nei `nebaigtiDarbai`,
+   * nei `verta`, nei kvito detalių. Pasekmės dvi:
+   *
+   *   - ciklas, kuriame TIK praleista, neišrašydavo JOKIO patvaraus įvykio —
+   *     eilutės kaupiasi tyloje, o operatorius to nemato niekada;
+   *   - ciklas, kuriame kas nors pašalinta, rašydavo `success: true` ir
+   *     praleidimų neminėdavo — kvitas tvirtintų darbą, kuris neįvyko.
+   *
+   * ⚠️ Ironija verta įrašo: to paties PR testo komentaras cituoja 4b pamoką
+   * („fail-closed be matomumo virsta tyliu kaupimu"), o skaitiklis iki kvito
+   * nenukeliavo. Ta pati klasė, kurią #245 uždarė keturis kartus.
+   */
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const tikrasTapatybe = tombstones.jungtiesTapatybe;
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+
+  const originalus = {
+    valytiniBandymai: jobStore.system.valytiniBandymai,
+    sweepResultArtifacts: jobStore.system.sweepResultArtifacts,
+    pasalintiBandymus: jobStore.system.pasalintiBandymus,
+    listExpired: jobStore.listExpired,
+    listReferencedStorageKeys: jobStore.system.listReferencedStorageKeys,
+    jungtiesTapatybe: jobStore.system.jungtiesTapatybe,
+  };
+
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  /** ⚠️ NIEKO nepašalinta: vienintelis įvykis yra praleidimas dėl gyvo bandymo. */
+  jobStore.system.valytiniBandymai = async () => ({ kandidatai: [], praleista: 0, uzimti: 3 });
+  jobStore.system.sweepResultArtifacts = async () => [];
+  jobStore.system.pasalintiBandymus = async () => 0;
+  jobStore.listExpired = async () => [];
+  jobStore.system.listReferencedStorageKeys = async () => null;
+
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+
+    assert.equal(summary.resultAttempts, 0, "kontrolė: NIEKAS nepašalinta");
+    assert.equal(summary.resultAttemptsLiveHeld, 3, "kontrolė: skaitiklis suvestinėje");
+
+    /**
+     * ⚠️ PASKUTINIS ĮRAŠAS, NE PIRMAS.
+     *
+     * `find()` grąžina ANKSČIAUSIĄ `RETENTION_PURGE` — šiame faile jį palieka
+     * ankstesnis testas, ir asercija tikrintų SVETIMĄ kvitą. Pirmoji šio testo
+     * redakcija taip ir krito: `success` buvo `true`, bet to kvito, kurį šis
+     * ciklas išrašė. Klasika — „asercija apie kitą objektą nei teigiama".
+     */
+    const irasai = await auditLog.getAll();
+    const kvitai = irasai.filter((i) => i.event === "RETENTION_PURGE");
+    const kvitas = kvitai[kvitai.length - 1];
+
+    assert.ok(
+      kvitas,
+      `ciklas TIK su praleidimais privalo palikti PATVARŲ įvykį: ${JSON.stringify(irasai)}`
+    );
+    /**
+     * ⚠️ LAUKAS YRA `result`, NE `success`. `auditLog` `success: false` išsaugo
+     * kaip `result: "failure"`; pirmoji šio testo redakcija tikrino `kvitas.success`
+     * ir gaudavo `undefined`, t. y. asercija būtų praėjusi bet kokiam kvitui, jei
+     * būtų buvusi rašoma kaip `!== true`.
+     */
+    assert.equal(
+      kvitas.result,
+      "failure",
+      `praleidimas NĖRA sėkmė - kvitas tvirtintų darbą, kuris neįvyko: ${JSON.stringify(kvitas)}`
+    );
+    assert.match(
+      kvitas.details,
+      /attempts=0\/0\/3\/0/,
+      `kategorija privalo būti kvito detalėse: ${kvitas.details}`
+    );
+  } finally {
+    tombstones.jungtiesTapatybe = tikrasTapatybe;
+    Object.assign(jobStore.system, {
+      valytiniBandymai: originalus.valytiniBandymai,
+      sweepResultArtifacts: originalus.sweepResultArtifacts,
+      pasalintiBandymus: originalus.pasalintiBandymus,
+      listReferencedStorageKeys: originalus.listReferencedStorageKeys,
+      jungtiesTapatybe: originalus.jungtiesTapatybe,
+    });
+    jobStore.listExpired = originalus.listExpired;
   }
 });

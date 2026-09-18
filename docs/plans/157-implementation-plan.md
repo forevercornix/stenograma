@@ -82,20 +82,22 @@ PR #288 (7.6c uždarymas) — planas naudoja dabartinius numerius ir įvardija a
 | `migrations/1755000000000_...:309-311` | ta pati | `storage_type IN ('inline','s3')` — `fs` neteisėtas |
 | `migrations/1755000000000_...:317-323` | ta pati | `ELSE storage_key IS NOT NULL` — `payload` external atveju NEUŽDRAUSTAS |
 | `postgresStore.js:739-745` | ta pati | `ON CONFLICT ... SET payload = EXCLUDED.payload`; `storage_type`/`storage_key` neliečiami |
+
+⚠️ **ŠI EILUTĖ PASENUSI IR NUMERIU, IR TEIGINIU (§12.1).** `ON CONFLICT ... SET payload = EXCLUDED.payload` nebėra ties `:739-745` (dabar ~`:966`), ir svarbiau — besąlyginio `payload` perrašymo TEN NEBĖRA: 7.5b jį pakeitė, ką sako pats kodo komentaras („Iki 7.5b čia buvo... BESĄLYGINIS"). Numerio taisymas vienas išsaugotų neteisingą teiginį, tad eilutė paliekama pažymėta ir peržiūrima kartu su PR-7 backup/restore darbu, ne tyliai pataisoma.
 | `postgresStore.js:579-583` | ta pati | `SELECT_JOB` = `LEFT JOIN job_results` + `r.payload AS result` |
-| `postgresStore.js:1499-1514` | ta pati | `listByFlag()` sąmoningai be prijungimo — precedentas |
-| `postgresStore.js:778-785, 799` | ta pati | `rezultatoEilute()` po `FOR UPDATE OF j` |
-| `postgresStore.js:989-1007` | ta pati | non-inline fail-closed sargas |
+| `postgresStore.js:2362-2377` | ta pati | `listByFlag()` sąmoningai be prijungimo — precedentas |
+| `postgresStore.js:1034-1041` | ta pati | `rezultatoEilute()` po `FOR UPDATE OF j` |
+| `postgresStore.js:1623-1627` | ta pati | non-inline fail-closed sargas |
 | `services/backupService.js:259-262` | ta pati | `countActiveJobs()` per `listAll()`, naudoja tik `status` |
-| `services/lifecycleService.js:118, 393-394` | **`:129`, `:404-405`** | PR #288 įterpė `COVERED_CATEGORIES` predikatus; `STORED_IN_JOB_RECORD` logika nepakitusi |
-| `utils/artefactScanner.js:99-100` | ta pati | `scan: null, reason: "saugoma job_record viduje"` |
+| `services/lifecycleService.js:118, 393-394` | **`:129`, `:434`** | PR #288 įterpė `COVERED_CATEGORIES` predikatus. ⚠️ **`STORED_IN_JOB_RECORD` logika PAKITO (PR-5):** `:434` dabar yra `if (outcome.jobRemoved || externalNebera)` — `externalNebera` dengia external eilutę, kurios objekto nebėra, įskaitant NAŠLAIČIŲ kelią, kur `jobRemoved` visada `false`. Teiginys „nepakitusi" buvo teisingas iki PR-5 ir nuo tada klaidina |
+| `utils/artefactScanner.js:117-123` | **PAKEISTA (PR-5)** | `scan: null` liko, bet PRIEŽASTIS perrašyta: „inline eilutėse saugoma job_record viduje; **external eilutės tikrinamos per registrą**". Senoji formuluotė po #157 buvo netiesa — ji teigė, kad turinys visada eilutėje |
 | `utils/artefactInventory.js` | `:77`, `:98` | „…jobo įraše" / „…jobo rezultate" |
 | `utils/backupPolicy.js:94,96` | ta pati | `transcript`/`protocol` → `"job_results"` |
 | `utils/resultLimits.js:154` | ta pati | `MAX_RESULT_BYTES` = 20 MiB |
 
 Papildomai patvirtinta, kas planą formuoja:
 
-- `rowToJob` (`postgresStore.js:94`) rezultatą prikabina kaip `result: row.result`
+- `rowToJob` (`postgresStore.js:69`) rezultatą prikabina kaip `result: row.result`
   — hidratacijos riba yra **viena vieta**, ne išbarstyta;
 - kontraktinių rinkinių precedentas jau yra: `jobStoreBackendContract`,
   `sessionStoreBackendContract`, `auditStoreBackendContract` — `artifactStoreContract`
@@ -122,7 +124,7 @@ PR-1 schema ──► PR-2 boundary ──► PR-3 hydration ──► PR-4 comp
                                         └──► PR-7 backup/restore + sargo pašalinimas
 ```
 
-PR-7 yra vienintelis, kuris liečia `postgresStore.js:989-1007`.
+PR-7 yra vienintelis, kuris liečia `postgresStore.js:1623-1627`.
 
 ---
 
@@ -321,7 +323,10 @@ ne todėl, kad grandinė neįjungta, o todėl, kad įjungus vieną jos galą kit
 galas vis tiek liktų neuždengtas. Invariantas kyla iš `common.js` lygybės
 autoriteto, ne iš `ArtifactStore` — išmatuota ir aprašyta **#298**.
 
-Iki #298 uždarymo šis DoD punktas žymimas `PARTIAL / UNVERIFIED`, ne `DONE`.
+⚠️ **PERRAŠYTA PO #298 UŽDARYMO.** Punktas tebėra `PARTIAL`, bet priežastis nebe
+sluoksnio, o aktyvavimo barjero — žr. „SĄLYGA 5 PR-7 UŽDAROMA TIK IŠ DALIES"
+PR-7 sekcijoje. Ir pati diagnozė pasitaisė: `Date` atmetimas buvo neteisingas,
+o ne ne toje vietoje.
 
 **DoD, kuriuos uždaro**
 - „Vienas `ArtifactStore` production boundary; business/service sluoksnis neatlieka tiesioginio filesystem/S3 I/O."
@@ -513,7 +518,7 @@ neprijungtas, tokių objektų atsirasti negali; nuo prijungimo momento (PR-7) sk
 pusė privalo jau egzistuoti. Tvarka yra garantijos dalis, ne patogumas.
 
 **Ką palieka veikiantį:** external completion veikia `fs` backend'e; sargas
-(`postgresStore.js:989-1007`) **dar lieka**, nes erasure ir backup keliai
+(`postgresStore.js:1623-1627`) **dar lieka**, nes erasure ir backup keliai
 nepadengti (#157 to reikalauja eksplicitiškai).
 
 **Failai**
@@ -689,7 +694,7 @@ kokią DB transakciją, be varianto (b) neturi jokio detektoriaus — DB kryptie
 skenavimas jo nemato pagal apibrėžimą.
 
 `put()` vyksta **prieš** `inTransaction()`, ne jo viduje: tai išsprendžia
-`rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:778-785, 799`) be
+`rezultatoEilute()` po `FOR UPDATE OF j` (`postgresStore.js:1034-1041`) be
 tinklo I/O po užraktu.
 
 ⚠️ **PR-4 NESIŠAKOJA PAGAL BACKEND'O VARDĄ — TIK PAGAL `reference`.**
@@ -1155,7 +1160,7 @@ užklausos timeout'ą), o ne ieškoti geresnės formulės iš esamų reikšmių.
 
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
-- `backend/services/lifecycleService.js` — `STORED_IN_JOB_RECORD` šaka (`:129`, `:404-405`)
+- `backend/services/lifecycleService.js` — `STORED_IN_JOB_RECORD` šaka (`:129`, `:434`)
 - `backend/utils/artefactScanner.js` — `transcript`/`protocol` skenavimas
 - `backend/utils/artefactInventory.js` — aprašai
 - `backend/utils/backupPolicy.js` — `TABLE_BY_TYPE` per-row (paruošimas PR-7)
@@ -1424,6 +1429,293 @@ nebuvo patikrinta.
 
 **Ką palieka veikiantį:** visą grandinę; tik čia dingsta fail-closed sargas.
 
+---
+
+⚠️ **ĮĖJIMO SĄLYGOS — SURINKTA PR-7 PRADŽIOJE** (tas pats šablonas kaip PR-4/5/6).
+
+⚠️ **SURINKTA IŠ PLANO IR KODO, NE IŠ ATMINTIES.** Metodas nėra formalumas: iš
+septynių pradžioje numanytų sąlygų **trys** pasirodė kitokios, o **dvi** jau
+įgyvendintos. Prielaida, paimta iš ankstesnio pokalbio, yra tas pats silpnas
+įrodymas, kurį §14.1 draudžia — tik jos šaltinis atrodo patikimesnis.
+
+| # | Sąlyga | Kur priimta | Būsena kode | Priklauso nuo | Kas ir kada pamatys, kad suveikė |
+|---|---|---|---|---|---|
+| 1 | **Aktyvavimo barjeras** — atidarytas ATSKIRU #155 apimties PR | ADR `155-postgres-authority.md` §„BARJERAS ATIDARYTAS" | ✅ **ATIDARYTAS** — `backendSelection.js` = `true` | 9, 10 | `selectBackend()` grąžina `barjeras: false` visiems; `POLITIKA (1/2)` ir `(2/2)` pora `jobStoreBackendSelection` |
+| 2 | **Sargo SUSIAURINIMAS — paskutinis commit'as** (§12.1: buvo „pašalinimas"; matavimas parodė, kad dalis jo vis dar reikalinga) | body §8; ši sekcija | susiaurintas iki vienintelio teisingo atvejo — external eilutė be prijungtos rašymo saugyklos | **—** | `git log` peržiūroje. ⚠️ Pažodinis trynimas būtų grąžinęs `COMPLETED_WITHOUT_RESULT` ir atidaręs orphan'ų kelią per remonto semantiką |
+| 3 | **`rasymoSaugykla` prijungimas** tik po PR-5 skaitymo pusės | ši sekcija; PR-5 = #304 | ✅ **PRIJUNGTA** (`jobStore/index.js`, `paruostiArtefaktuSaugykla()`); stebėtojas `artifactStore/prijungimoBusena.js` | **1** | `doctor` ir `/api/health/deep` varnelė „Artefaktų saugyklų prijungimas (startas)": lygina PARINKTA (`ARTIFACT_STORE_BACKEND`) ↔ PRIJUNGTA (rezolveris) ↔ REIKALINGA (`job_results` + `job_result_attempts` tipai). Verdikto pavirtimas iš `rasymas_neprijungtas` į žalią išmatuotas VIENAME teste (`jobStoreArtefaktuPrijungimas.integration`) |
+| 4 | **Resolveris pagal `result_storage_type`**, ne globalus store | plano PR-4; matrica | **jau padaryta** (`:1190`, `:1926`) | — | `jobStoreHydration.integration` |
+| 5 | **`neatkartojama` grandinė: nulis BullMQ pakartojimų** | plano §„PR-4 DoD punktas"; DoD `PARTIAL / UNVERIFIED` | #298 ✅ uždarytas; grandinė įrodyta IKI FASADO RIBOS | **1** | Testas matuoja PAKARTOJIMŲ SKAIČIŲ (`vykdymai === 1`, `attemptsMade === 1`), ne lauko buvimą. ⚠️ Klaidos KILMĖ sintetinė: worker'is eina per atmintį, o struktūriniai atmetimai gyvena external kelyje |
+| 6 | **`backupPolicy.TABLE_BY_TYPE` per-row** | `utils/backupPolicy.js:94` — riba užrašyta, atsakymas atidėtas PR-7 | ✅ **PER-ROW KELIAS SUKURTAS** (`verifyResultArtifacts()` + `artifactRestoreVerify`); žemėlapis nebeteigia apie turinį | — | ⚠️ **Išmatuota: `TABLE_BY_TYPE` produkcinių kvietėjų NETURI** (tik testai), tad sprendimo nebuvo ko „perkelti" — jis sukurtas ten, kur realiai priimamas |
+| 7 | **Restore ataskaita skirsto pagal `nepriklausomas`, ne `ok`** | body §32, §35; ši sekcija | ✅ `sudarytiAtaskaita()`: `nepriklausomaiPatikrinta` ir `nepatikrinama` — DU skaičiai | — | Mišrioje DB: 97 inline + 3 external duoda „patikrinta 3", ne „100 %". Runbook §9d rodo abu skaičius auditoriui |
+| 8 | **Laukiama vientisumo reikšmė — iš DB, niekada neperskaičiuota iš tikrinamo objekto** | ši sekcija, „Restore verifikacija" | ✅ `verify()` gauna eilutės `bytes`/`checksum` | — | ⚠️ Įrodoma PRIEŠINGA kryptimi: sugadinamas DB `checksum`, o vientisas objektas privalo KRISTI. Mutacija `laukiama = {}` → krenta |
+| 9 | ⚠️ **Eilės prieinamumo PREFLIGHT** — **ATSKIRAS PR, PRIEŠ PR-7** | ADR barjero prielaidų lentelė | ✅ **ĮGYVENDINTA** (#322): `patikrintiEilesJungti()` (`queues/config.js:235`), reikalaujama `jobRunner.init()` | — | Realus probe PRIEŠ pradedant klausytis; verdiktas `doctor` ir `/api/health/deep` per `runSelfChecks()`, ne logo eilutėje |
+
+⚠️ **SĄLYGA 9 BUVO PRALEISTA PIRMOJE REDAKCIJOJE.** Ji gyvena ADR'e, ne plano
+PR-7 sekcijoje, tad sąrašas, surinktas tik iš plano, jos nepagautų. ADR aprašo
+defektą tiksliai: `hasQueueBackend()` vertina TIK konfigūraciją, `jobRunner.init()`
+tikrina tik ar `bullmq` galima `require` (`queues/jobRunner.js:77-82`), o jungtis
+kuriama LAZY pirmo `add` metu (`queues/transcriptionQueue.js:13-21`). Su
+PostgreSQL metaduomenimis prie Redis **nesijungia niekas**: `server.js` pažymėtų
+runner'į ready ir imtų klausytis, o pirmas `enqueue` kabotų arba kristų.
+
+⚠️ **KAI SĄLYGA 1 TAPS SPRENDIMU, JIS PRIVALO APIMTI IR ATSUKIMĄ.**
+
+Atidarymas yra VIENKRYPTIS, tad pateikimas be atsakymo „ką darome, jei po
+savaitės paaiškės problema" būtų nepilnas. Mechanika užrašyta ADR
+`155-postgres-authority.md` §„Grįžimas atgal" → „Kas nutinka mechaniškai".
+
+Trumpai, kad sprendimo pateikėjas neieškotų: perjungimas atgal įvyksta TYLIAI
+(nėra nei patikros, nei įspėjimo), job'ai tampa nematomi iš karto, o **po #157
+saugykloje lieka transkripcijų, kurių adresas gyveno tik PostgreSQL'e** — jų
+nepasiekia nei erasure, nei retencija, ir jų neįmanoma surasti rankiniu būdu
+(`list(prefix)` pagal A3 nėra). Tai duomenų apsaugos, ne prieinamumo klausimas.
+
+Teisinga seka atsisakant PostgreSQL: pirma IŠTRINTI duomenis per veikiantį
+diegimą, tik paskui keisti konfigūraciją.
+
+⚠️ **SĄLYGA 1 ŠIANDIEN NĖRA §18.3 SPRENDIMAS — JI UŽBLOKUOTA NEPILNA PRIELAIDA.**
+
+ADR išvardija šešias prielaidas; dvi neuždarytos: **eilės preflight** (sąlyga 9)
+ir **fail-closed startas, patikrintas realiai** (sąlyga 10 žemiau). Kol jos
+atviros, „ar atidaryti barjerą" nėra klausimas — atsakymas žinomas ir yra „ne".
+Sprendimu jis tampa tik jas uždarius.
+
+| # | Sąlyga | Kur priimta | Būsena | Kas pamatys |
+|---|---|---|---|---|
+| 10 | **Fail-closed startas patikrintas REALIAI** — **kartu su atidarymu, atskirame #155 PR** | ADR barjero lentelė | ✅ **UŽDARYTA** — CI žingsnis „Fail-closed startas" (`ci.yml`, `backend` job) | — | Tikras `node server.js`, `JOB_STORE_BACKEND=postgres`, uždaras prievadas 59999. Trys asercijos: procesas nutraukė startą; priežastis — `PostgreSQL neprieinamas`; job store NEBUVO inicijuotas. ⚠️ Exit kodo nepakanka: su uždarytu barjeru startas krenta irgi, tik kita priežastimi |
+
+⚠️ **KODĖL SĄLYGA 10 NEGALI BŪTI ANKSČIAU — TAI NE PLANAVIMO PASIRINKIMAS.**
+
+*(Galioja ir po iškėlimo: ji eina kartu su atidarymu, tik nebe PR-7, o atskirame
+#155 apimties PR.)*
+
+Ji reikalauja paleisti kelią, kurio **uždarytas barjeras neleidžia pasiekti**.
+`initializePostgres()` produkcijoje nekviečiama, kol `POSTGRES_AKTYVAVIMAS_LEISTAS
+= false`; šiandien ji pasiekiama tik per `_initializePostgresForTests`. Vadinasi
+„realus fail-closed startas" prieš atidarymą reikštų arba testinį įėjimą (t. y.
+vėl NE realų kelią), arba laikiną barjero atidarymą — o tai tas pats atidarymas,
+tik be jo peržiūros.
+
+ADR tą patį sako iš kitos pusės: *„Barjerą atidarius pirmas realus startas su
+neprieinama DB ir BŪTŲ tas testas."*
+
+⚠️ **IŠ TO SEKA FORMA: CI ŽINGSNIS, NE VIENETINIS TESTAS.** Įrodymas yra
+PROCESO elgesys — startas su `DATABASE_URL` į nepasiekiamą adresą privalo baigtis
+klaida, o ne tyliu nusileidimu į atmintį. Vienetinis testas tikrintų funkciją;
+čia klausimas yra, ką daro `server.js` startas.
+
+⚠️ **RIZIKA, KURIĄ TAI ANKSČIAU KĖLĖ, DABAR PAŠALINTA.** Ankstesnė redakcija
+sąlygas 10 ir 1 dėjo į tą patį commit'ą PR-7 viduje, tad peržiūrėtojas būtų matęs
+negrįžtamą sprendimą ir šešis kitus darbus viename PR. Iškėlus barjerą į atskirą
+PR, tas PR turi VIENĄ temą — aktyvavimą — ir visa jį pagrindžianti medžiaga
+(grįžimo mechanika, `deployment_identity` riba, `deletion-guarantees.md` sąlyga)
+atsiduria greta to vienintelio jungiklio, kurį ji aprašo.
+
+**TVARKA — BARJERAS IŠKELIAMAS Į ATSKIRĄ PASKUTINĮ PR**
+
+```
+0. eilės prieinamumo preflight  — ATSKIRAS PR, sumergintas PRIEŠ (sąlyga 9; #319)
+──────────────────────────────  PR-7 (#157 apimtis) ──────────────────────────────
+1. rasymoSaugykla prijungimas             (sąlyga 3)
+2. #298 + `neatkartojama` grandinė IKI FASADO RIBOS (sąlyga 5 — DALINAI)
+3. backup/restore + per-row + ataskaita   (sąlygos 6, 7, 8)
+4. integrity testai
+5. pilna regresija (postgres + s3 + **postgres-s3** rinkiniai)
+6. dokumentai
+7. sargo pašalinimas — PASKUTINIS         (sąlyga 2)
+──────────────────────────  PR „aktyvavimas" (#155 apimtis) ──────────────────────
+8. ── BARJERAS ── + fail-closed starto CI žingsnis  (sąlygos 1 ir 10; §18.3 TIK ČIA)
+   + ADR prielaidų lentelės uždarymas
+   + `deletion-guarantees.md` sąlyga ir grįžimo mechanika (#326)
+```
+⚠️ **BARJERO PR SEKA — UŽRAŠYTA PRIEŠ PRADEDANT.**
+
+Eiliškumas matomas ne tik pokalbyje, nes pirmasis žingsnis gali baigtis **radiniu**,
+ne ✅, ir tada seka sustoja.
+
+```
+1. ADR prielaidų lentelė — ĮRODYMAS kiekvienai eilutei (PR, testas, ką matuoja)
+2. jei kuri nors nepasitvirtina → RADINYS; §18.3 pateikimas LAUKIA
+3. §18.3 pateikimas su trimis komponentėmis
+4. sprendimas — operatoriaus
+5. barjeras + 10 sąlyga + ADR prielaidų lentelės uždarymas
+```
+
+⚠️ **KODĖL 1 ŽINGSNIS NĖRA DOKUMENTACIJOS TVARKYMAS.** Prielaidos, pažymėtos ✅
+remiantis tuo, kad PR numeriai skamba tinkamai, reikštų barjerą, atidarytą pagal
+lentelę, užpildytą iš atminties. Tai ta pati klasė, kurią ši seka gaudė ne kartą —
+dokumentas, atsilikęs nuo kodo, kuriuo remiamasi kaip įrodymu. Skirtumas: čia juo
+remsis VIENINTELIS NEGRĮŽTAMAS sprendimas visoje sekoje.
+
+⚠️ **PRIELAIDOS RŪŠIS SVARBI.** ADR jas skirsto į „neįgyvendintas darbas" (A) ir
+„įgyvendintas kodas, nepatikrinamas kol barjeras uždarytas" (B). Trūkstamą KODĄ
+nurašius kaip trūkstamą ĮRODYMĄ, barjeras būtų atidarytas su spraga.
+
+
+⚠️ **PERRAŠYTA (§12.1). ANKSTESNĖ REDAKCIJA DĖJO BARJERĄ Į PR-7 VIDŲ.**
+
+Sprendimas pakeistas po peržiūros, ir priežastys užrašomos, nes jos stipresnės už
+patį pakeitimą:
+
+1. **PR-7 gali įrodyti VISKĄ be atidarymo.** `_initializePostgresForTests`
+   egzistuoja, o integraciniai testai `postgresStore` pasiekia tiesiogiai. Tad
+   `neatkartojama` grandinė, backup/restore, integrity ir pilna regresija
+   uždaromos TESTŲ lygmeniu. Barjero reikia tik sąlygai 10 ir realiam
+   produkciniam naudojimui — dviem dalykams, kurie abu yra apie AKTYVAVIMĄ, ne
+   apie artefaktus.
+2. **Atidarymas — vienintelis NEGRĮŽTAMAS žingsnis visoje sekoje.** Po jo
+   atsiranda duomenų, kurių adresas gyvena tik PostgreSQL'e (ADR §„Kas nutinka
+   mechaniškai"). Sujungus jį su šešiais kitais darbais, recenzentas vertintų
+   negrįžtamą sprendimą ir jį pagrindžiantį darbą VIENAME diff'e. Tai tas pats
+   argumentas, kuriuo iš PR-7 buvo iškelta sąlyga 9.
+3. **ADR ir planas trijose vietose sako, kad #157 barjero NEATIDARO.** Pakeitus
+   tai PR viduje, kurio pavadinimas apie kitką, sprendimas dingtų iš vietos,
+   kurioje jo ieškotų.
+
+⚠️ **IŠ TO SEKA, KAD TRYS MINĖTOS VIETOS LIEKA TEISINGOS, IR JŲ TAISYTI NEREIKIA.**
+#157 (PR-1…PR-7) barjero neatidaro; jį atidaro ATSKIRAS #155 apimties PR. Tai
+užrašoma eksplicitiškai, kad kitas raundas jų „nepataisytų" kaip pasenusių.
+
+⚠️ **SARGO PAŠALINIMAS LIEKA PR-7, NORS BARJERAS — NE.** Jis nuo barjero
+nepriklauso: pašalinus sargą, external kelias tampa pasiekiamas TESTUOSE, o
+produkcijoje — vis dar ne, nes `rasymoSaugykla` prijungimas be atidaryto barjero
+neveikia. Tai nuosekli tarpinė būsena, ne spraga.
+
+⚠️ **KODĖL BARJERAS NEBĖRA PIRMAS PR-7 ŽINGSNIS.** Ankstesnė redakcija jį dėjo
+priekyje su argumentu, kad sargo pašalinimas ir prijungimas be atidarymo veiktų
+nuo kelio, kurio niekas nepasiekia. Argumentas teisingas apie PRODUKCIJĄ, bet
+neteisingas apie ĮRODYMĄ: testai tą kelią pasiekia be barjero, tad PR-7 savo DoD
+uždaro ir taip. Taisyklė „sargas paskutinis" galioja toliau — ji kalba apie tvarką
+PR-7 VIDUJE.
+
+⚠️ **KUR BUVO PRIEŠTARAVIMAS, IR KUR JO NEBUVO.** Pirmoji šio sąrašo redakcija
+(pateikta pokalbyje) sąlygą 10 dėjo 2 žingsniu, o barjerą — 3, nors tas pats
+dokumentas sako, kad sąlyga 10 įvykdoma TIK po atidarymo. Tai buvo ne rizika, o
+NEGALIMYBĖ. Ji ištaisyta `445bc1c` dar prieš #312 merge — sujungiant abu į vieną
+žingsnį. Užrašoma, nes klaida buvo reali, o jos nebuvimas įrašytame plane nėra
+įrodymas, kad jos nebuvo.
+
+⚠️ **MATOMUMO STULPELIO IŠVADA.** Iš dešimties sąlygų **viena** (nr. 3) stebėtojo
+NETURĖJO. Tai ta pati klasė, kuri šioje sekoje keturis kartus rasta PO fakto, tad
+PR-7 privalėjo ją uždaryti testu, ne komentaru.
+
+**Uždaryta pirmuoju PR-7 žingsniu** (`artifactStore/prijungimoBusena.js`): verdiktas
+matomas `doctor` ir `/api/health/deep` išvestyje, o netinkama konfigūracija matoma
+PRIEŠ pirmą naudojimą, ne per jį. Lentelės 3 eilutės matomumo stulpelis atnaujintas.
+
+⚠️ **IR JI PAKEITĖ DARBŲ EILĘ — PRIEŠ DARBĄ, NE PO JO.**
+
+Natūrali PR-7 pradžia buvo pats prijungimas: sąlyga 3 taip ir suformuluota.
+Tuščias matomumo langelis parodė, kad prijungus pirma, jo teisingumą patvirtintų
+tik testas, parašytas TAM PAČIAM pokyčiui — t. y. stebėtojas tikrintų pats save.
+Todėl 3 sąlyga skyla į du žingsnius, ir stebėtojas eina PIRMAS:
+
+```
+0a. prijungimo stebėtojas (šis žingsnis) — verdiktas `doctor`/`health/deep`;
+    ŠIANDIEN jis rodo `rasymas_neprijungtas`, ir tai teisingas atsakymas
+0b. prijungimas — pirmas jo patikrinimas yra to paties verdikto pavirtimas žaliu
+```
+
+Tai pirmas kartas, kai matomumo stulpelis suveikė taip, kaip buvo sumanytas:
+ne kaip trūkumo registras, o kaip eiliškumo argumentas. Užrašoma todėl, kad
+stulpelio vertė matosi tik iš tokio atvejo — kitaip jis atrodo kaip papildoma
+lentelės skiltis.
+
+⚠️ **SĄLYGA 5 PR-7 UŽDAROMA TIK IŠ DALIES — PASAKYTA PRIEŠ DARBĄ, NE ATASKAITOJE.**
+
+Planas šitą sakė dviem prieštaraujančiais būdais, ir abu taisomi (§12.1):
+
+| Kur | Ką sakė | Kas teisinga |
+|---|---|---|
+| Sąlygų lentelė, 5 eilutė | priklauso nuo **1** (barjero) | ✅ tiksliai — pilna produkcinė grandinė be barjero nepasiekiama |
+| Ši sekcija, 1 punktas | „`neatkartojama` grandinė ... uždaroma TESTŲ lygmeniu" | ⚠️ per stipru — testų lygmeniu uždaroma iki FASADO ribos, ne iki galo |
+
+**Atsakė kodas, ne plano tekstas.** `POSTGRES_AKTYVAVIMAS_LEISTAS = false` yra KONSTANTA
+(`backendSelection.js:55`), tad `jobStore.init()` niekada negrąžina postgres, o BullMQ
+worker'is eina per fasadą. Vadinasi struktūrinis atmetimas, gimęs external kelyje,
+tikro worker'io nepasiekia, kol barjeras uždarytas.
+
+**Kas ĮRODYTA PR-7 metu:**
+
+- pakartojimų SKAIČIUS matuojamas (`vykdymai === 1`, `attemptsMade === 1`), ne lauko buvimas;
+- eilė, worker'is, `UnrecoverableError` vyniojimas ir `cause` grandinė — TIKRI;
+- struktūrinių atmetimų aibė ties riba — tikra (`artifactStoreErrors`).
+
+**Kas LIEKA barjero PR daliai:** vienas paleidimas, kuriame atmetimą pagamina TIKRA
+saugykla per TIKRĄ fasadą. Iki tol sintetinė lieka tik klaidos KILMĖ.
+
+⚠️ **#298 UŽDARYMAS ŠIO DoD PUNKTO NEUŽDARO — IR PRIEŽASTIS PASIKEITĖ.**
+
+Iki #298 punktas buvo `PARTIAL / UNVERIFIED`, nes „validacija pririšta prie ne to
+sluoksnio": `Date` atmetimą gamino tik `ArtifactStore` riba, o aktyvūs keliai pro ją
+neina. #298 tą sluoksnio klaidą pašalino, bet KITAIP, nei planuota: paaiškėjo, kad
+`Date` atmetimas apskritai buvo neteisingas — `kanonizuoti()` modeliavo saugyklą
+klaidingai, ir taisymas yra modelio suderinimas, ne atmetimo perkėlimas.
+
+Pasekmė DoD punktui: **`Date` nebeatmetamas niekur, tad grandinė „`Date` → atmetimas
+→ nulis pakartojimų" neįmanoma iš principo.** Ji demonstruojama NUL simboliu ar
+neporiniu surogatu — klasėmis, kurios lieka atmetamos. Punktas tebėra `PARTIAL`, bet
+dėl aktyvavimo barjero, ne dėl sluoksnio.
+
+⚠️ **§18.3 SPRENDIMAS: NETINKAMA ARTEFAKTŲ KONFIGŪRACIJA STABDO STARTĄ.**
+
+Prijungimas atnešė klausimą, kurio 3 sąlygos formuluotėje nebuvo: ką daryti, kai
+`ARTIFACT_STORE_BACKEND` nustatytas, bet jo konfigūracija netinkama.
+
+**Kas buvo iki tol.** Serveris `parinktiBackenda()` nekvietė **iš viso** —
+vienintelis produkcinis kvietėjas buvo `scripts/migrate-artifacts.mjs`. Diegimas su
+`ARTIFACT_STORE_BACKEND=s3` ir trūkstamu raktu startuodavo ir rašydavo `inline`.
+
+**Kodėl tai negalėjo taip likti.** `backendSelection.js` tą elgesį draudžia
+žodžiais: *„Grįžimas į `inline` NEGALIMAS: dalis rezultatų atsidurtų kitoje
+saugykloje, nei mano operatorius, ir tai paaiškėtų tik tada, kai jų prireiktų."*
+Prijungimas be to draudimo būtų atkūręs tylų grįžimą — su ta pačia konfigūracija,
+tik dabar per kelią, kuris apie ją klausia.
+
+**Alternatyva, kuri atmesta.** Gaudyti klaidą, neprijungti, o radinį
+`konfiguracija_netinkama` parodyti `doctor` išvestyje. Ji atmesta todėl, kad tai
+tiksliai yra „grįžti į `inline` ir tęsti darbą": raudona varnelė nesustabdo
+rašymo, o rezultatai jau būtų ne ten.
+
+⚠️ **TAI NĖRA 10 SĄLYGA.** 10 sąlyga yra startas su NEPRIEINAMA DB ir ATIDARYTU
+barjeru; ji eina kartu su atidarymu, atskirame #155 PR. Čia sustabdo PR-2
+kontraktas, galiojantis nuo #290. Barjeras lieka `false`.
+
+⚠️ **KAIP ATSUKTI.** Pašalinti `ARTIFACT_STORE_BACKEND` iš aplinkos — diegimas
+grįžta į `inline` **eksplicitiškai**, ne tyliai, ir startuoja. Kodo atsukimo
+nereikia; tai konfigūracijos veiksmas, kurį gali atlikti operatorius per vieną
+perleidimą.
+
+⚠️ **PASEKMĖ, KURIĄ VERTA ŽINOTI PRIEŠ DIEGIMĄ:** diegimas su pasenusiu ar nepilnu
+`ARTIFACT_STORE_BACKEND` nuo šiol **nepakils**. Jis ir yra tas, dėl kurio riba
+egzistuoja — iki šiol jis kilo ir tylėjo.
+
+⚠️ **ŠALUTINĖ IŠVADA: `konfiguracija_netinkama` radinys starte NEBEPASIEKIAMAS.**
+`initializePostgres()` krenta anksčiau, nei stebėtojas suformuoja verdiktą. Kodas
+lieka — jis pasiekiamas tiesioginiams kvietėjams ir testams — bet plane užrašoma,
+kad `doctor` išvestyje jo niekas nepamatys; tylėti apie tai reikštų palikti verdikto
+kodą, kuris atrodo gyvas.
+
+⚠️ **STEBĖTOJO KAINA — ATIDĖTAS SPRENDIMAS, NE NEPASTEBĖTA DETALĖ.**
+
+`storage_type` neturi indekso nei `job_results`, nei `job_result_attempts`
+lentelėje, tad abu `SELECT DISTINCT` yra **seq scan per kiekvieną startą**.
+Šiame žingsnyje kaina apribota `SET LOCAL statement_timeout` (2 s) transakcijoje:
+nespėta užklausa duoda `nezinoma`, ne lėtą startą ir ne tylų žalią.
+
+Geresnis ilgalaikis sprendimas — **dalinis indeksas**
+`(storage_type) WHERE storage_type <> 'inline'`: inline-only bazėje jis TUŠČIAS,
+tad nekainuoja nieko, o po migracijos laiko po įrašą external eilutei. Tai tas
+pats idiomas kaip `artifact_migration_progress_nesekmes` ir
+`job_result_attempts_valytini`.
+
+**Kodėl ne dabar:** tai SCHEMOS pokytis, o šio žingsnio apimtis — stebėtojas.
+Indeksas pridedamas IŠMATAVUS realią trukmę (didžiausios žinomos bazės startas),
+ne spėjus. Iki tol riba garantuoja, kad blogiausias atvejis yra 2 s ir
+`nezinoma`, o ne neribotas laukimas.
+
+---
+
 ⚠️ **ĮĖJIMO SĄLYGA: `rasymoSaugykla` PRIJUNGIMAS REIKALAUJA REGISTRO SKAITYMO PUSĖS.**
 
 Produkcinis prijungimas (`initializePostgres()` paduoda saugyklą) negali įvykti anksčiau,
@@ -1438,7 +1730,8 @@ lieka galioti, o prijungimas — atidedamas.
 ```
 1. backup/restore implementacija (be sargo pašalinimo)
 2. integrity testai (missing / corrupt / kontrolė)
-3. pilna regresija + integraciniai įrodymai (postgres + MinIO rinkiniai žali)
+3. pilna regresija + integraciniai įrodymai (**postgres, s3 IR postgres-s3** rinkiniai žali)
+   ⚠️ `postgres-s3` NEPRALEIDŽIAMAS: PR-7 backup/restore kelias kerta ABU servisus, tad regresija, vardijanti tik `postgres` ir `s3`, praleistų KIEKVIENĄ kombinuotą scenarijų. Nepraleidimą tikrina `verify-postgres-suite-ran.mjs /tmp/pgs3-tap postgresS3`
 4. dokumentai (runbook §9a/§9c/§11, matrica, README)
 5. sargo pašalinimas — PASKUTINIS commit'as
 ```
@@ -1453,7 +1746,7 @@ atidedamas — sargas nešalinamas anksčiau.
 - `backend/utils/backupPolicy.js` — `TABLE_BY_TYPE` sprendimas **per-row** pagal
   eilutės `storage_type` (ne pagal aktyvų backend'ą)
 - `backend/utils/pgDumpBackup.js` / `backend/utils/artifactBackup.js` — external objektų atsakomybė
-- `backend/utils/jobStore/postgresStore.js:989-1007` — **sargas pašalinamas**
+- `backend/utils/jobStore/postgresStore.js:1623-1627` — **sargas pašalinamas**
 - `docs/backup-runbook.md` §9a, §9c, §11
 - `docs/security-test-matrix.md`, `README.md` apribojimų lentelė
 - `backend/tests/artifactRestoreIntegrity.integration.test.js`
@@ -1497,7 +1790,46 @@ skaičiuojanti `ok`, mišrioje DB parodytų beveik 100 % ir būtų melas. `verif
 nėra garantija — lygiai kaip `neatkartojama` be `UnrecoverableError`. Mišrioje DB
 inline eilučių bus dauguma, tad ataskaita, rodanti vien „patikrinta: N", skambėtų
 kaip pilna patikra ir pratybos praeitų per lengvai.
-- „Non-inline fail-closed sargo (`postgresStore.js:989-1007`) pašalinimas yra **paskutinis** implementacijos žingsnis — po equality, schemos, hydration, completion/concurrency, erasure, migracijos ir backup/restore integracinių įrodymų. Sargo pašalinimas negali būti naudojamas ankstesniems testams „atrakinti"…"
+- „Non-inline fail-closed sargo (`postgresStore.js:1623-1627`) pašalinimas yra **paskutinis** implementacijos žingsnis — po equality, schemos, hydration, completion/concurrency, erasure, migracijos ir backup/restore integracinių įrodymų. Sargo pašalinimas negali būti naudojamas ankstesniems testams „atrakinti"…"
+
+⚠️ **DoD PUNKTAS PERRAŠYTAS (§12.1): „PAŠALINIMAS" PASIRODĖ NEĮVYKDOMAS TA FORMA.**
+
+Formuluotė aukščiau — „non-inline fail-closed sargo pašalinimas yra paskutinis
+implementacijos žingsnis" — **buvo teisinga savo metu**. Ji rašyta PRIEŠ PR-4, kai
+external lygybės autoriteto (`bytes`/`checksum` kolonų) dar nebuvo: tada sargas
+gynė vienintelį dalyką — „external eilutės palyginti negalime" — ir po PR-4 tas
+dalykas tikrai išnyko. „Pašalinamas" reiškė „nebereikalingas".
+
+**Kodėl nustojo galioti.** Matavimas prieš rašant (`finishExternalFazes.integration`)
+parodė, kad sargas gynė NE VIENĄ dalyką, o tris atvejus, ir dviem iš jų atsakė
+neteisingai:
+
+| Atvejis | Ką darė sargas | Kas teisinga |
+|---|---|---|
+| `finish(failed)` ant užbaigto | vidinė klaida apie lygybės autoritetą | `JobPhaseError` iš `jobPhase.finish` |
+| `finish(completed)` be rezultato | ta pati vidinė klaida | `RESULT_CONFLICT` (paritetas su inline) |
+| `completed` su rezultatu, bet be saugyklos | ta pati vidinė klaida | klaida **teisinga**, tik priežastis kita |
+
+⚠️ **PAŽODINIS TRYNIMAS BŪTŲ BUVĘS BLOGESNIS UŽ NEVEIKIMĄ.** Kelias po sargu
+grąžintų `COMPLETED_WITHOUT_RESULT`, nes `sviezias.result = eilute.payload`, o
+external eilutėje `payload` privalomai yra `NULL`. Tai REMONTUOTINA būsena, po
+kurios kvietėjas gali perrašyti rezultatą — perrašymas external eilutę perjungtų į
+inline ir paliktų objektą **našlaičiu**. Trynimas būtų atidaręs orphan'ų kelią per
+remonto semantiką, t. y. tiksliai tai, ką visa #157 grandinė uždarinėjo.
+
+**Nauja formuluotė:** non-inline fail-closed sargas **susiaurinamas iki vienintelio
+atvejo, kuriam jis teisingas** — external eilutė diegime be prijungtos rašymo
+saugyklos — ir tai lieka paskutinis implementacijos žingsnis. Likusius du atvejus
+perima įprastas kelias: fazių logika ir lygybės paritetas su inline.
+
+⚠️ **APSAUGA NEPRARASTA, O PERKELTA.** Likusią sargo dalį dubliuoja `prijungimoBusena`
+stebėtojas (PR-7, 3 sąlyga): ta pati būsena matoma `doctor` ir `/api/health/deep`
+išvestyje **prieš** naudojimą, ne jo metu. Klaida lieka kaip paskutinė riba tam
+diegimui, kuris diagnostikos nepaisė.
+
+⚠️ **UŽRAŠOMA, NES KITAIP PO METŲ ATRODYS, KAD REIKALAVIMAS BUVO APEITAS.** `git log`
+rodys „sargas susiaurintas" ten, kur planas reikalavo „pašalinti", ir be šio įrašo
+skirtumas atrodytų kaip nuolaida sau.
 - „Įvardyta, kad #157 PostgreSQL aktyvavimo barjero neatidaro…"
 
 **§9.1**
@@ -1516,7 +1848,7 @@ visada-„fail" ir taip pat nieko neįrodytų.
 
 | Kriterijus | Kodėl | Kas jį uždarytų |
 |---|---|---|
-| Visi `postgresStore` keliai | Barjeras uždarytas; `DATABASE_URL` vietoje nėra | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
+| Visi `postgresStore` keliai | `DATABASE_URL` vietoje nėra. ⚠️ **Antroji priežastis („barjeras uždarytas") PASIBAIGĖ (#155)** — liko tik ši viena | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
 | `S3ArtifactStore` | Reikia MinIO | `docker compose -f docker-compose.minio.yml up -d && REQUIRE_MINIO=1 npm run test:s3` |
 | I/O ne po užraktu | Reikia dviejų tikrų jungčių | tas pats `test:postgres` |
 | Lenktynių testas | Vienas žalias paleidimas nieko neįrodo | N kartojimų CI; verdiktas „nepaneigta" |

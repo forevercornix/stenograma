@@ -108,7 +108,7 @@ try {
     if (r.nieko) console.log("Nieko nereikėjo: aktyvių sesijų ir ne terminalinių job'ų nebuvo.");
 
     console.log(`Ašys: sesijos=${r.asys.sesijos.verdiktas} (${r.asys.sesijos.autoritetas}); ` +
-      `job'ai=${r.asys.jobai.verdiktas} (${r.asys.jobai.autoritetas}${r.asys.jobai.barjeras ? ", 7.2a barjeras" : ""})`);
+      `job'ai=${r.asys.jobai.verdiktas} (${r.asys.jobai.autoritetas} — ${r.asys.jobai.priezastis})`);
 
     /**
      * ⚠️ NEPADENGTA AŠIS — SAVAS EXIT KODAS, NE IŠNAŠA.
@@ -132,7 +132,7 @@ try {
     const v = await reconcile.patikrinti({ targetUrl: target });
 
     console.log(`Ašys: sesijos=${v.asys.sesijos.verdiktas} (${v.asys.sesijos.autoritetas}); ` +
-      `job'ai=${v.asys.jobai.verdiktas} (${v.asys.jobai.autoritetas}${v.asys.jobai.barjeras ? ", 7.2a barjeras" : ""})`);
+      `job'ai=${v.asys.jobai.verdiktas} (${v.asys.jobai.autoritetas} — ${v.asys.jobai.priezastis})`);
 
     if (v.duomenysSutvarkyti && !reconcile.arSaugu(v.asys)) {
       console.error(
