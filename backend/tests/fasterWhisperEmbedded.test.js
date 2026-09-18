@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
-const { execSync } = require("child_process");
+const { skipWithoutPython } = require("./helpers/pythonGuard");
 const FasterWhisperEmbeddedProvider = require("../providers/transcription/FasterWhisperEmbeddedProvider");
 
 const FIXTURES_DIR = path.join(__dirname, "fixtures");
@@ -9,14 +9,8 @@ const SUCCESS_SCRIPT = path.join(FIXTURES_DIR, "mock_faster_whisper_success.py")
 const ERROR_SCRIPT = path.join(FIXTURES_DIR, "mock_faster_whisper_error.py");
 const HANG_SCRIPT = path.join(FIXTURES_DIR, "mock_faster_whisper_hang.py");
 
-let pythonAvailable = true;
-try {
-  execSync("python3 --version", { stdio: "ignore" });
-} catch {
-  pythonAvailable = false;
-}
 
-test("FasterWhisperEmbeddedProvider: sėkmingas atsakymas atitinka standartinį TranscriptionProvider kontraktą", { skip: !pythonAvailable && "python3 nerastas šioje aplinkoje" }, async () => {
+test("FasterWhisperEmbeddedProvider: sėkmingas atsakymas atitinka standartinį TranscriptionProvider kontraktą", { skip: skipWithoutPython() }, async () => {
   const provider = new FasterWhisperEmbeddedProvider({ scriptPath: SUCCESS_SCRIPT, model: "small", device: "cpu" });
   const result = await provider.transcribe(Buffer.from("fake audio bytes"), { filename: "test.wav", language: "lt" });
 
@@ -31,7 +25,7 @@ test("FasterWhisperEmbeddedProvider: sėkmingas atsakymas atitinka standartinį 
   assert.match(result.text, /device=cpu/);
 });
 
-test("FasterWhisperEmbeddedProvider: audio buferis realiai įrašomas į laikiną failą PRIEŠ paleidžiant Python", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
+test("FasterWhisperEmbeddedProvider: audio buferis realiai įrašomas į laikiną failą PRIEŠ paleidžiant Python", { skip: skipWithoutPython() }, async () => {
   // mock_faster_whisper_success.py pats patikrina, kad audio_path egzistuoja -
   // jei Node pusė neįrašytų buferio į diską teisingai, gautume klaidą čia.
   const provider = new FasterWhisperEmbeddedProvider({ scriptPath: SUCCESS_SCRIPT });
@@ -39,7 +33,7 @@ test("FasterWhisperEmbeddedProvider: audio buferis realiai įrašomas į laikin�
   assert.ok(result.text.length > 0);
 });
 
-test("FasterWhisperEmbeddedProvider: Python klaida (pvz. sugadintas audio) tampa aiškia JS klaida", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
+test("FasterWhisperEmbeddedProvider: Python klaida (pvz. sugadintas audio) tampa aiškia JS klaida", { skip: skipWithoutPython() }, async () => {
   const provider = new FasterWhisperEmbeddedProvider({ scriptPath: ERROR_SCRIPT });
   await assert.rejects(
     () => provider.transcribe(Buffer.from("x"), { filename: "test.wav" }),
@@ -55,7 +49,7 @@ test("FasterWhisperEmbeddedProvider: neteisingas pythonBin grąžina aiškų 'ar
   );
 });
 
-test("FasterWhisperEmbeddedProvider: procesas nutraukiamas po timeout (kabantis modelio atsisiuntimas ir pan.)", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
+test("FasterWhisperEmbeddedProvider: procesas nutraukiamas po timeout (kabantis modelio atsisiuntimas ir pan.)", { skip: skipWithoutPython() }, async () => {
   const provider = new FasterWhisperEmbeddedProvider({ scriptPath: HANG_SCRIPT, timeoutMs: 300 });
   await assert.rejects(
     () => provider.transcribe(Buffer.from("x"), { filename: "test.wav" }),
@@ -63,7 +57,7 @@ test("FasterWhisperEmbeddedProvider: procesas nutraukiamas po timeout (kabantis 
   );
 });
 
-test("FasterWhisperEmbeddedProvider: laikinas audio failas ištrinamas po apdorojimo (sėkmės ir klaidos atveju)", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
+test("FasterWhisperEmbeddedProvider: laikinas audio failas ištrinamas po apdorojimo (sėkmės ir klaidos atveju)", { skip: skipWithoutPython() }, async () => {
   const fsp = require("fs/promises");
   const fsSync = require("fs");
 
@@ -102,7 +96,7 @@ test("FasterWhisperEmbeddedProvider: laikinas audio failas ištrinamas po apdoro
   }
 });
 
-test("FasterWhisperEmbeddedProvider: CUDA bibliotekos kelio nustatymas GRACINGAI grąžina null, kai nvidia-cublas/cudnn neįdiegti", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
+test("FasterWhisperEmbeddedProvider: CUDA bibliotekos kelio nustatymas GRACINGAI grąžina null, kai nvidia-cublas/cudnn neįdiegti", { skip: skipWithoutPython() }, async () => {
   const provider = new FasterWhisperEmbeddedProvider({ scriptPath: SUCCESS_SCRIPT, device: "cuda" });
   const result = await provider._resolveCudaLibraryPath();
   // Šioje aplinkoje (be GPU/be nvidia-cublas-cu12 įdiegto) tikimasi null - SVARBU,
@@ -115,7 +109,7 @@ test("FasterWhisperEmbeddedProvider: CUDA bibliotekos kelio nustatymas GRACINGAI
   assert.equal(transcribeResult.provider, "faster-whisper-embedded");
 });
 
-test("FasterWhisperEmbeddedProvider: onProgress callback iškviečiamas REALIU LAIKU su kiekvienu segmentu (ne tik po viso proceso pabaigos)", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
+test("FasterWhisperEmbeddedProvider: onProgress callback iškviečiamas REALIU LAIKU su kiekvienu segmentu (ne tik po viso proceso pabaigos)", { skip: skipWithoutPython() }, async () => {
   const progressScript = path.join(FIXTURES_DIR, "mock_faster_whisper_progress.py");
   const provider = new FasterWhisperEmbeddedProvider({ scriptPath: progressScript });
 
@@ -131,7 +125,7 @@ test("FasterWhisperEmbeddedProvider: onProgress callback iškviečiamas REALIU L
   assert.equal(result.text, "mock su progresu");
 });
 
-test("FasterWhisperEmbeddedProvider: veikia normaliai IR BE onProgress (neprivalomas parametras)", { skip: !pythonAvailable && "python3 nerastas" }, async () => {
+test("FasterWhisperEmbeddedProvider: veikia normaliai IR BE onProgress (neprivalomas parametras)", { skip: skipWithoutPython() }, async () => {
   const progressScript = path.join(FIXTURES_DIR, "mock_faster_whisper_progress.py");
   const provider = new FasterWhisperEmbeddedProvider({ scriptPath: progressScript });
   const result = await provider.transcribe(Buffer.from("x"), { filename: "test.wav" });

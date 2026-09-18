@@ -64,36 +64,38 @@ async function auditAccess(req, res, next) {
  * daug kartų.
  */
 router.get("/audit", pollRateLimiter, auditAccess, validate({ query: schemas.auditQuery }), async (req, res) => {
-  const { limit, offset, event, requestId } = req.validated.query;
+  const { limit, cursor, action, requestId, jobId, from, to } = req.validated.query;
 
   /**
-   * ⚠️ `getAll()` YRA ASYNC NUO 7.4a (#210), TAD JIS GALI ATMESTI.
+   * ⚠️ SUGADINTAS KURSORIUS - 400, NE 500 (#212).
    *
-   * Repo neturi globalaus Express klaidų handlerio. Neapdorotas rejection
-   * nukristų į Express numatytąjį kelią, kuris ne produkcijoje grąžina klaidos
-   * tekstą ir stack trace - o čia tai būtų audito saugyklos vidinė
-   * diagnostika. `getAll()` šiandien yra atmintyje ir nekrenta, bet 7.4b
-   * pakeis realizaciją į DB; sargas turi egzistuoti PRIEŠ tai, ne po.
+   * `CursorError` yra kliento klaida: tokenas sugadintas, nepilnas arba
+   * priklauso kitai filtrų aibei. Be atskiro apdorojimo jis nukristų į bendrą
+   * `catch` ir virstų 500 - serverio gedimu, kurio nėra.
+   *
+   * ⚠️ Rotavus aktyvų raktą anksčiau išduoti kursoriai irgi tampa negaliojantys
+   * (atspaudas nebesutampa). Tai sąmoninga #212 pasekmė; klientas pradeda
+   * puslapiavimą iš naujo.
    */
-  let entries;
+  let rezultatas;
   try {
-    entries = await auditLog.getAll();
+    rezultatas = await auditLog.query({ limit, cursor, action, requestId, jobId, from, to });
   } catch (error) {
+    if (error && error.code === "AUDIT_CURSOR_INVALID") {
+      return res.status(400).json({ error: error.message, code: error.code });
+    }
     return res.status(500).json({ error: sanitizeServerError(error, "GET /api/audit") });
   }
 
-  // Filtrai taikomi PRIEŠ puslapiavimą - kitaip `limit` reikštų skirtingus
-  // dalykus su filtru ir be jo.
-  if (event) entries = entries.filter((entry) => entry.event === event);
-  if (requestId) entries = entries.filter((entry) => entry.requestId === requestId);
-
+  /**
+   * ⚠️ `total` PAŠALINTAS kartu su `offset`. Keyset puslapiavime jis reikštų
+   * `COUNT` per visą filtruotą aibę KIEKVIENAM puslapiui, o `next_cursor` tą
+   * patį klausimą („ar yra daugiau") atsako pigiai ir tiksliai.
+   */
   res.json({
-    entries: entries.slice(offset, offset + limit),
-    // Bendras skaičius leidžia klientui suprasti, ar yra daugiau - be jo
-    // puslapiavimas būtų aklas.
-    total: entries.length,
+    entries: rezultatas.entries,
+    next_cursor: rezultatas.nextCursor,
     limit,
-    offset,
   });
 });
 

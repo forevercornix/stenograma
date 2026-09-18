@@ -102,6 +102,32 @@ const AUDIT_EVENTS = Object.freeze({
   RETENTION_PURGE: KATEGORIJA.BLOKUOJANTIS,
   ADMIN_ORPHAN_CLEANUP: KATEGORIJA.BLOKUOJANTIS,
 
+  /**
+   * ⚠️ ŽYMŲ OPERATORIAUS KELIAS - BLOKUOJANTIS IR *NE* POST-HOC (#155, 7.5a / #183).
+   *
+   * Barjeras nuo `deletion_pending` plius neterminalių žymų nesenėjimas reiškia,
+   * kad nuolat nepavykstantis ištrynimas užrakintų job'ą neribotam laikui.
+   * Išeitis yra, bet ji privalo palikti pėdsaką.
+   *
+   * ⚠️ NUO #183 PERŽIŪROS ŠIE ĮVYKIAI YRA POST-HOC, ir tai ATŠAUKIA ankstesnį
+   * priskyrimą. Anksčiau čia stovėjo „rašomi PRIEŠ veiksmą: neužfiksavus, KAS
+   * nuėmė barjerą, barjeras NENUIMAMAS".
+   *
+   * Ta tvarka dengė tik vieną gedimo pusę: du lygiagretūs operatoriai abu
+   * įrašydavo `success: true`, o sąlyginis perėjimas pavykdavo tik vienam -
+   * likdavo patvarus sėkmės įrašas veiksmui, kurio nebuvo. Todėl
+   * `erasureMarkService` dabar commit'ina perėjimą PIRMA, o auditą rašo po jo
+   * su `success` pagal faktinį rezultatą.
+   *
+   * Klasifikacija seka realizaciją, ne atvirkščiai: audito gedimas šių perėjimų
+   * nebeatšaukia, tad žymėti juos „ne post-hoc" reikštų tvirtinti apsaugą,
+   * kurios nebėra. BLOKUOJANTIS lieka - sėkmė be patvirtinto įrašo
+   * nedeklaruojama (kvietėjas gauna klaidą), bet duomenų tai nebeapsaugo.
+   */
+  ERASURE_MARK_RETRIED: KATEGORIJA.BLOKUOJANTIS,
+  ERASURE_MARK_FORCE_RESOLVED: KATEGORIJA.BLOKUOJANTIS,
+  ERASURE_MARK_RELEASED: KATEGORIJA.BLOKUOJANTIS,
+
   // ── Job gyvavimo ciklas (#210: neblokuojantys) ─────────────────────────────
   TRANSCRIPTION_COMPLETED: KATEGORIJA.NEBLOKUOJANTIS,
   TRANSCRIPTION_FAILED: KATEGORIJA.NEBLOKUOJANTIS,
@@ -125,6 +151,48 @@ const AUDIT_EVENTS = Object.freeze({
   BACKUP_REJECTED: KATEGORIJA.NEBLOKUOJANTIS,
   BACKUP_RESTORED: KATEGORIJA.NEBLOKUOJANTIS,
   BACKUP_RESTORE_FAILED: KATEGORIJA.NEBLOKUOJANTIS,
+  /**
+   * ⚠️ ATSKIRAS NUO `BACKUP_CREATED` (#248, 7.6a). Aplikacijos kopija turi
+   * politikos filtruotą turinį, o `pg_dump` artefaktas - visą bazę; auditoriui
+   * tai skirtingi dalykai, ir vienas įvykio vardas juos suplaktų.
+   *
+   * Atitikmens atkūrimo pusėje NĖRA sąmoningai: ten `audit_log` neįtrauktas į
+   * dump'ą, tikslinė bazė tuščia, o rašymas į kitą saugyklą reikštų, kad
+   * avarinis atkūrimas priklauso nuo audito prieinamumo.
+   */
+  PG_DUMP_BACKUP_CREATED: KATEGORIJA.NEBLOKUOJANTIS,
+  /**
+   * ⚠️ POST-RESTORE SUDERINIMAS (#249, 7.6b). Rašomas TIK po sėkmingo commit:
+   * rollback negali palikti įrašo „suderinta", nes tokiu atveju evidencija
+   * teigtų daugiau, nei įvyko.
+   *
+   * NEBLOKUOJANTIS, kaip ir kiti kopijų/atkūrimo įvykiai: audito gedimas
+   * nepadaro jau commit'into suderinimo neįvykusio, o jo „atsukti" nebūtų kaip.
+   */
+  POST_RESTORE_RECONCILED: KATEGORIJA.NEBLOKUOJANTIS,
+  /**
+   * ⚠️ IŠTRYNIMŲ REPLAY PO ATKŪRIMO (#250, 7.6c) — BLOKUOJANTIS.
+   *
+   * Skirtingai nei kopijų ir suderinimo įvykiai, šis fiksuoja ASMENS DUOMENŲ
+   * ŠALINIMĄ, tad priklauso tai pačiai šeimai kaip `LIFECYCLE_DELETION`: audito
+   * gedimas čia reiškia ištrynimą be pėdsako, o būtent pėdsakas įrodo, kad
+   * ištrynimas įvyko (#210).
+   *
+   * ⚠️ RAŠOMAS BE `jobId`, KAIP IR `DATA_ERASED` BEI `LIFECYCLE_DELETION`.
+   * Subjektui susieto kvito barjeras (7.4e / #216) neįsileistų, o `eraseJob()`
+   * jį vėliau pašalintų kartu su kitais to subjekto įrašais. Pagrindimas —
+   * `utils/erasureReplay.js`, prie paties rašymo.
+   */
+  ERASURE_REPLAYED: KATEGORIJA.BLOKUOJANTIS,
+  /**
+   * DR koordinatoriaus įvykiai (#250, 7.6c) — NEBLOKUOJANTYS.
+   *
+   * ⚠️ SKIRTUMAS NUO `ERASURE_REPLAYED` SĄMONINGAS: šie fiksuoja PROCEDŪRĄ
+   * (atkūrimas baigtas; priimtas pasenęs žurnalas), ne asmens duomenų šalinimą.
+   * Per-ištrynimo kvitą rašo `ERASURE_REPLAYED`, ir būtent jis yra blokuojantis.
+   */
+  DR_RECOVERY_COMPLETED: KATEGORIJA.NEBLOKUOJANTIS,
+  DR_STALE_LEDGER_ACCEPTED: KATEGORIJA.NEBLOKUOJANTIS,
 });
 
 /**
@@ -173,17 +241,40 @@ const IŠVEDAMI_ĮVYKIAI = Object.freeze([
  * trynimą dabar reikštų naują gedimo režimą (nepavykęs trynimas paliktų
  * melagingą „ištrinta" pėdsaką) negaunant realios garantijos.
  *
- * Namai perrikiavimui jau egzistuoja:
- *   SUBISSUES-155.md [7.4b] - `audit_log` schema, `AUDIT_ID_SALT`, persistentis
- *                             auditas (tada atsiranda patvarumas ir transakcija);
- *   SUBISSUES-155.md [7.5b] - „AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS" (patvari
- *                             eilė su eksplicitiniu klaidų pranešimu).
+ * ⚠️ 7.4b SPRENDIMAS (#211): PERRIKIAVIMO ČIA NĖRA, IR TAI SĄMONINGA.
+ *
+ * [7.4b] persistentinį auditą jau įgyvendino - įrašas išgyvena restartą. Bet
+ * PATVARUMAS NĖRA PERRIKIAVIMAS. Kad šie įvykiai taptų tikrai fail-closed,
+ * auditas turėtų būti rašomas PRIEŠ veiksmą, o tai keičia ištrynimo semantiką:
+ * nepavykęs trynimas paliktų melagingą „ištrinta" pėdsaką, jei nebūtų
+ * kompensacinio mechanizmo.
+ *
+ * Toks mechanizmas - patvari eilė su eksplicitiniu klaidų pranešimu - yra
+ * SUBISSUES-155.md [7.5b] („AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS"). Iki tol
+ * perrikiavimas pakeistų vieną gedimo režimą kitu, negaunant realios garantijos.
+ *
+ * Pagrindimas užrašytas ČIA ir `docs/audit-storage.md` §12, o ne issue
+ * komentare, kad jo nereikėtų atkurti iš išorinių šaltinių.
  */
 const POST_HOC_IVYKIAI = Object.freeze([
   "DATA_ERASED",
   "LIFECYCLE_DELETION",
   "RETENTION_PURGE",
   "ADMIN_ORPHAN_CLEANUP",
+  /**
+   * ⚠️ PRIDĖTA #183 PERŽIŪROJE. Abu operatoriaus keliai commit'ina žymos
+   * perėjimą PRIEŠ `rasytiAudita()`, tad audito gedimas jo nebeatšaukia:
+   * pakartotinis bandymas grąžins `already_terminal`, ne pakartos veiksmą.
+   */
+  "ERASURE_MARK_RETRIED",
+  "ERASURE_MARK_FORCE_RESOLVED",
+  "ERASURE_MARK_RELEASED",
+  /**
+   * ⚠️ PRIDĖTA #250 (7.6c). Replay rašo kvitą JAU PO `eraseJob()`, tad audito
+   * gedimas duomenų nebegrąžina — jis tik palieka žymą atvirą, kad kitas
+   * paleidimas galėtų kvitą pakartoti. Post-hoc, ne fail-closed.
+   */
+  "ERASURE_REPLAYED",
   /**
    * Sesija jau atšaukta ir cookie išvalytas, kai rašomas `LOGOUT`. Atmesti
    * atsijungimo nebegalima - o ir nereikėtų: neatšaukta sesija būtų blogesnė
@@ -305,6 +396,20 @@ const PRODUKCINIAI_KATALOGAI = Object.freeze([
 ]);
 
 /**
+ * ⚠️ SAUGYKLOS SLUOKSNIS NĖRA PRODUCER'IS (#155, 7.4b).
+ *
+ * `utils/auditStore/*` įvykių NEKURIA - jis atvaizduoja jau sukurtą eilutę į DB
+ * ir atgal (`event: row.event`, `event: eilute.event`). Skeneriui tai atrodo
+ * kaip įvykis, nurodomas per neišsprendžiamą konstantą, ir startas krinta.
+ *
+ * ⚠️ IŠIMTIS TIKRINAMA, NE PASITIKIMA. Katalogas išbraukiamas tik tol, kol
+ * jame realiai nėra nė vieno rašymo kvietimo; tai tikrina
+ * `tests/auditStoreFields.test.js`. Be tokios sargybos išimtis taptų vieta,
+ * kurioje klasifikacijos patikra tyliai nustotų galioti.
+ */
+const NE_PRODUCER_KELIAI = Object.freeze(["auditStore"]);
+
+/**
  * ⚠️ KOMENTARAI PAŠALINAMI PRIEŠ SKENUOJANT (AGENTS.md §9.2).
  *
  * Be to patikra pagauna SAVO PAČIOS dokumentaciją: šio failo komentare yra
@@ -358,31 +463,75 @@ function konstantosReiksme(turinys, identifikatorius, laukas) {
   return null;
 }
 
-function producerIvykiai() {
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const saknis = path.resolve(__dirname, "..");
-  const rasti = new Set();
-  const nezinomiSaltiniai = new Set();
+/**
+ * OS-NATYVUS KELIAS → VIENA VIDINĖ FORMA (#283).
+ *
+ * ⚠️ `fs.readdirSync(dir, { recursive: true })` GRĄŽINA OS-NATYVIUS SKIRTUKUS.
+ *
+ * Windows'e įrašas yra `auditStore\postgresStore.js`, tad
+ * `startsWith("auditStore/")` ten yra `false`: `NE_PRODUCER_KELIAI` išimtis
+ * nesuveikdavo, skeneris perskaitydavo saugyklos sluoksnį, rasdavo teisėtą
+ * mapping'ą `event: row.event` ir SUSTABDYDAVO STARTĄ dėl konstantos, kurios
+ * niekas nekuria. Su galiojančia mock konfigūracija `npm run doctor` krisdavo.
+ *
+ * ⚠️ KANONIZUOJAMA TIES ĮVESTIES RIBA, NE PALYGINIME.
+ *
+ * `startsWith(`${k}/`) || startsWith(`${k}\\`)` pataisytų ŠĮ palyginimą ir
+ * paliktų klasę atvirą: antras filtras ateitų be jo. Ta pati taisyklė, kurią repo
+ * jau taikė `arTaPatiBaze()`, `efektyvusJungtiesParametrai()` ir
+ * `jobPhase.finish()` patch'ui — viena tiesa vienoje vietoje.
+ *
+ * ⚠️ ATPAŽĮSTAMI ABU SKIRTUKAI, NE TIK `path.sep`. Regresija tikrinama Linux
+ * CI'uje su Windows formos įrašais; `path.sep` ten yra `/`, tad normalizavimas
+ * nieko nekeistų ir testas praeitų nieko neįrodęs.
+ *
+ * ⚠️ LIKUSI RIBA — TIK FILTRAVIMO, NE SKAITYMO (#285 peržiūra).
+ *
+ * POSIX sistemose `\` yra leistinas failo vardo simbolis. Failas, pavadintas
+ * `auditStore\x.js`, kanonizuojamas į `auditStore/x.js` ir būtų PRALEISTAS kaip
+ * saugyklos sluoksnis — ši riba lieka, ir kaina už ją yra Windows starto veikimas.
+ *
+ * Bet TURINYS nuo šiol skaitomas per NEAPDOROTĄ įrašą, tad tokio failo turinys
+ * nebepakeičiamas kito failo turiniu. Iki taisymo `foo\bar.js` POSIX'e būtų
+ * skaitomas kaip `foo/bar.js`: tikras producer'is tyliai iškristų iš starto
+ * validacijos — fail-open fail-closed validatoriuje.
+ */
+function kanonizuotiKelia(irasas) {
+  return String(irasas).split("\\").join("/");
+}
 
-  for (const katalogas of PRODUKCINIAI_KATALOGAI) {
-    const dir = path.join(saknis, katalogas);
-    let irasai;
-    try {
-      irasai = fs.readdirSync(dir, { recursive: true });
-    } catch {
-      continue; // katalogo nėra - žr. komentarą aukščiau
-    }
-    for (const irasas of irasai) {
-      if (!String(irasas).endsWith(".js")) continue;
-      const kelias = path.join(dir, String(irasas));
-      let turinys;
-      try {
-        turinys = fs.readFileSync(kelias, "utf8");
-      } catch {
-        continue;
-      }
-      const svarus = beKomentaru(turinys);
+/**
+ * Skeneris, atskirtas nuo failų sistemos (#283).
+ *
+ * ⚠️ ATSKYRIMAS YRA ĮRODYMO SĄLYGA, NE STILIUS. Linux CI niekada nesukurs
+ * `auditStore\postgresStore.js` formos, tad regresiją galima įrodyti tik paduodant
+ * įrašų sąrašą TIESIOGIAI. Testas, šakojantis pagal `process.platform`, CI'uje
+ * visada praleistų būtent tą šaką, dėl kurios rašomas.
+ *
+ * @param {Iterable<string>} irasai katalogo įrašai (OS-natyvūs arba POSIX)
+ * @param {(kanoninisKelias: string) => string|null} skaityti failo turinys arba `null`
+ */
+function skenuotiIrasus(irasai, skaityti, kaupikliai) {
+  const { rasti, nezinomiSaltiniai } = kaupikliai;
+
+  for (const neapdorotas of irasai) {
+    const irasas = kanonizuotiKelia(neapdorotas);
+
+    if (!irasas.endsWith(".js")) continue;
+    if (NE_PRODUCER_KELIAI.some((k) => irasas.startsWith(`${k}/`))) continue;
+
+    /**
+     * ⚠️ SKAITOMA PER NEAPDOROTĄ ĮRAŠĄ, NE PER KANONINĮ (#285 peržiūra).
+     *
+     * Kanoninė forma egzistuoja PALYGINIMAMS. Failų sistemai ji netinka: POSIX'e
+     * `foo\bar.js` yra VIENAS failas tokiu vardu, o `path.join(dir, "foo", "bar.js")`
+     * rodytų į KITĄ. Skaitymas per kanoninį kelią grąžindavo svetimą turinį arba
+     * nieko, ir tikras producer'is tyliai iškristų iš starto validacijos.
+     */
+    const turinys = skaityti(neapdorotas);
+    if (turinys === null || turinys === undefined) continue;
+
+    const svarus = beKomentaru(turinys);
 
       /** Tiesioginiai literalai: `event: "DATA_ERASED"`. */
       for (const m of svarus.matchAll(/event:\s*"([A-Z_0-9]+)"/g)) rasti.add(m[1]);
@@ -414,19 +563,69 @@ function producerIvykiai() {
       for (const m of svarus.matchAll(
         /event:\s*([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)(?![\w$])(?!\s*\()/g
       )) {
-        const reiksme = konstantosReiksme(svarus, m[1], m[2]);
-        if (reiksme) rasti.add(reiksme);
-        else nezinomiSaltiniai.add(`${m[1]}.${m[2]}`);
-      }
+      const reiksme = konstantosReiksme(svarus, m[1], m[2]);
+      if (reiksme) rasti.add(reiksme);
+      else nezinomiSaltiniai.add(`${m[1]}.${m[2]}`);
     }
   }
-  return { rasti, nezinomiSaltiniai };
+
+  return kaupikliai;
 }
 
+function producerIvykiai() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const saknis = path.resolve(__dirname, "..");
+  const kaupikliai = { rasti: new Set(), nezinomiSaltiniai: new Set() };
+
+  for (const katalogas of PRODUKCINIAI_KATALOGAI) {
+    const dir = path.join(saknis, katalogas);
+    let irasai;
+    try {
+      irasai = fs.readdirSync(dir, { recursive: true });
+    } catch {
+      continue; // katalogo nėra - žr. komentarą aukščiau
+    }
+
+    /**
+     * ⚠️ `readdirSync` ĮRAŠAS PERDUODAMAS `path.join` NEPALIESTAS. Jis jau yra
+     * tos OS forma, kurioje failas realiai egzistuoja; bet koks perrašymas čia
+     * duotų kelią, kurio failų sistema nemato.
+     */
+    skenuotiIrasus(
+      irasai,
+      (neapdorotas) => {
+        try {
+          return fs.readFileSync(path.join(dir, String(neapdorotas)), "utf8");
+        } catch {
+          return null;
+        }
+      },
+      kaupikliai
+    );
+  }
+
+  return kaupikliai;
+}
+
+/**
+ * ⚠️ SKENERIS KVIEČIAMAS PER `module.exports`, NE TIESIOGIAI (#285 peržiūra).
+ *
+ * Anksčiau čia buvo neprivalomas `ivykiai` argumentas testui, ir dėl to
+ * fail-closed regresija apeidavo DVI produkcines grandis: `startupChecks →
+ * validateAuditEvents` ir `validateAuditEvents → producerIvykiai()`. Nutrūkus
+ * bet kuriai, testas būtų likęs žalias, o 7.4a garantija būtent tos grandinės
+ * vientisumą ir reiškia.
+ *
+ * Netiesioginis kvietimas leidžia testui pakeisti SKENERIO rezultatą
+ * (`mock.method`), bet grandinė lieka tikra: `validateConfig()` iškviečia
+ * `validateAuditEvents()`, o ši — `producerIvykiai()`. Produkcinis elgesys
+ * nepakitęs, argumentų nebėra.
+ */
 function validateAuditEvents() {
   const klaidos = [];
 
-  const { rasti, nezinomiSaltiniai } = producerIvykiai();
+  const { rasti, nezinomiSaltiniai } = module.exports.producerIvykiai();
 
   for (const šaltinis of nezinomiSaltiniai) {
     klaidos.push(
@@ -473,6 +672,14 @@ module.exports = {
   arBlokuojantis,
   validateAuditEvents,
   producerIvykiai,
+  /**
+   * ⚠️ EKSPORTUOJAMA DĖL REGRESIJOS ĮRODYMO (#283). Skenerio elgesys su Windows
+   * formos įrašais Linux CI'uje kitaip nepasiekiamas: tikra failų sistema tokių
+   * įrašų negrąžins niekada.
+   */
+  skenuotiIrasus,
+  kanonizuotiKelia,
+  NE_PRODUCER_KELIAI,
   /**
    * Eksportuojama testams: statinės patikros PRIVALO nuskusti komentarus, kitaip
    * jos pagauna savo pačių dokumentaciją (taip jau nutiko #210 eigoje).

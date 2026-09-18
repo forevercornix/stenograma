@@ -221,9 +221,19 @@ test("PARUOŠTUMAS: PostgreSQL režimas be baigto suderinimo → 503, ne autenti
   const login = await prisijungti();
   const cookie = cookieIs(login);
 
-  process.env.SESSION_STORE_BACKEND = "postgres";
-  process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://neveikia:1@127.0.0.1:1/none";
+  /**
+   * ⚠️ REIKŠMĖ ĮSIMENAMA PRIEŠ PERRAŠANT (#183 peržiūra).
+   *
+   * Anksčiau `buvoUrl` buvo nuskaitomas PO priskyrimo, tad visada būdavo
+   * truthy, ir `finally` bloko `if (!buvoUrl) delete ...` niekada nesuveikdavo:
+   * netikras `DATABASE_URL` nutekėdavo į visus vėlesnius šio failo testus
+   * (AGENTS.md §9.3). Nepastebėta iki 7.5a, kai readiness ėmė zonduoti ir žymų
+   * saugyklą - tada nutekėjęs URL pavertė nesusijusį readiness testą raudonu.
+   */
   const buvoUrl = process.env.DATABASE_URL;
+
+  process.env.SESSION_STORE_BACKEND = "postgres";
+  process.env.DATABASE_URL = buvoUrl || "postgres://neveikia:1@127.0.0.1:1/none";
   try {
     /**
      * ⚠️ VĖLIAVA ČIA SĄMONINGAI NEKEIČIAMA.
@@ -965,17 +975,37 @@ test("POOL: sesijų jungtis turi BAIGTINES ribas - jungimuisi IR užklausoms", (
     assert.ok(Number.isFinite(n[raktas]) && n[raktas] > 0, `${raktas} privalo būti baigtinis ir teigiamas`);
   }
 
-  /** Konfigūruojama, bet be tylaus virtimo begalybe prie šiukšlinės reikšmės. */
+  /**
+   * Konfigūruojama, bet be tylaus virtimo begalybe prie šiukšlinės reikšmės.
+   *
+   * ⚠️ REIKŠMĖ IMAMA IŠ PERDUOTO `env`, NE IŠ `process.env` (#245). Anksčiau ši
+   * funkcija priimdavo `env`, o ribas skaitydavo iš globalo — dvi tiesos apie tą
+   * pačią konfigūraciją viename objekte, ir testas tą nesutapimą įtvirtindavo.
+   * Produkcijoje elgesys nesikeičia: `sessionStore.init()` kviečiamas be
+   * argumentų, tad `env` ir yra `process.env`.
+   */
+  assert.equal(
+    sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x", DB_QUERY_TIMEOUT_MS: "1500" }).query_timeout,
+    1500
+  );
+
+  assert.equal(
+    sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x", DB_QUERY_TIMEOUT_MS: "abc" }).query_timeout,
+    5000,
+    "netinkama reikšmė grįžta į saugią numatytąją, o ne į neribotą laukimą"
+  );
+
+  /**
+   * ⚠️ IR KONTROLĖ, KAD GLOBALAS NEBEPRASISUNKIA: perduotas `env` be ribos
+   * privalo duoti numatytąją, o ne `process.env` reikšmę.
+   */
   const senas = process.env.DB_QUERY_TIMEOUT_MS;
   try {
     process.env.DB_QUERY_TIMEOUT_MS = "1500";
-    assert.equal(sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x" }).query_timeout, 1500);
-
-    process.env.DB_QUERY_TIMEOUT_MS = "abc";
     assert.equal(
       sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x" }).query_timeout,
       5000,
-      "netinkama reikšmė grįžta į saugią numatytąją, o ne į neribotą laukimą"
+      "`process.env` NEGALI perrašyti perduoto `env` - kitaip funkcija turi du šaltinius"
     );
   } finally {
     if (senas === undefined) delete process.env.DB_QUERY_TIMEOUT_MS;

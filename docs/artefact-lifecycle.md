@@ -67,6 +67,13 @@ kad jie **neišlieka**, o ne kad jie pašalinami.
 
 ---
 
+⚠️ **REGISTRAS APRAŠO TIPĄ, NE FIZINĘ VIETĄ** (#157, PR-5). Iki #157 `transcript` ir
+`protocol` aprašai sakė „jobo įraše" / „jobo rezultate", ir tai buvo tiesa. Po #157 dalis
+rezultatų guli failų sistemoje arba S3, tad tokie aprašai taptų melu external eilutėms.
+Fizinę vietą sprendžia **vartotojai pagal eilutės `storage_type`**; registrui ji
+nepriklauso, nes registras, priklausomas nuo konfigūracijos, mišrioje DB nustotų būti
+tiesos šaltinis.
+
 ## Išvedimo grafas
 
 ```
@@ -163,9 +170,17 @@ paties kodo, ir jos galėjo išsiskirti.
 | `deleted` | ❌ | ✅ |
 
 Perėjimai **vienkrypčiai**: `deleted` yra galutinė ir jos atšaukti negalima –
-kitaip programavimo klaida paverstų jau įrodytą ištrynimą neapibrėžtu. Bet
-`deletion_failed → deleted` **leidžiamas sąmoningai**: tai retry kelias, be
-kurio dalinis ištrynimas liktų amžinai neužbaigtas.
+kitaip programavimo klaida paverstų jau įrodytą ištrynimą neapibrėžtu.
+
+⚠️ **`deletion_failed → deleted` UŽDARYTAS** (#183). Ankstesnė šio dokumento
+versija teigė priešingai, bet `allowedSources("deleted")` yra `["deletion_pending"]`
+ir visada buvo: tiesioginis perėjimas reikštų patvirtintą ištrynimą be jokio
+įrodymo, kad antras bandymas apskritai vyko.
+
+Retry kelias nedingo – jis eina per `deletion_pending` ir yra **eksplicitinis
+operatoriaus veiksmas** (`erasure-marks retry`, auditas `ERASURE_MARK_RETRIED`).
+Automatinis `failed → pending` būtų blogesnis: būsena, kuri išsisprendžia
+savaime, nebėra barjeras.
 
 ⚠️ **Tik `deleted` leidžia grąžinti `already_deleted`.** Ankstesnė versija turėjo
 vieną reikšmę „pažymėta", ir tai laužė retry: po dalinės nesėkmės antras
@@ -185,11 +200,19 @@ tombstone ──► eraseJob ──► struktūrizuotas rezultatas ──► aud
 Jei žyma atsirastų po šalinimo, tarp jų liktų langas, kuriame worker'is dar
 nematytų žymos, o duomenų jau nebūtų – ir jis juos atkurtų.
 
-Žymos gyvena **atskirai** nuo jobo įrašo (`utils/deletionTombstones.js`), nes
-turi atsakyti į klausimą „ar šis ID buvo ištrintas?" **tada, kai įrašo nebėra**.
+Žymos gyvena **atskirai** nuo jobo įrašo (`utils/deletionTombstones/`), nes turi
+atsakyti į klausimą „ar šis ID buvo ištrintas?" **tada, kai įrašo nebėra**.
 
-`DELETION_TOMBSTONE_TTL_HOURS` (numatyta 72) privalo viršyti ilgiausią eilės
-įrašo gyvavimo trukmę – BullMQ užbaigtus jobus laiko iki 24 val.
+Nuo 7.5a (#183) jos yra **persistentinės**: `erasure_marks` lentelė su būsenų
+mašina ir advisory lock'ais. Be `DATABASE_URL` lieka atminties režimas – jis
+neišgyvena restarto, ir startas apie tai garsiai įspėja.
+
+Retencija nebeskaičiuojama fiksuota TTL reikšme: žyma laikoma tol, kol job'as
+dar gali būti prikeltas. Horizontas išvedamas iš eilės konfigūracijos
+(`revivalHorizonsMs()`), sudedant nuoseklias dedamąsias – `delay`, retry
+grandinę ir stalled perėmimą – prie terminalaus laikymo, plius saugos atsargą.
+`DELETION_TOMBSTONE_TTL_HOURS` lieka kaip rankinis perrašymas, ne numatytoji
+taisyklė.
 
 ### Struktūrizuotas rezultatas
 
@@ -215,6 +238,13 @@ turi atsakyti į klausimą „ar šis ID buvo ištrintas?" **tada, kai įrašo n
 | `already_deleted` | Žyma jau buvo – ištrynimas įvyko anksčiau |
 | `partial` | Liko kategorijų, bet gedimai **kartotini** |
 | `failed` | Gedimai galutiniai – reikia žmogaus |
+| `in_progress` | Ištrynimą jau vykdo **kitas** autoritetingas procesas. HTTP **202**; nė vienas destruktyvus veiksmas nepradedamas |
+| `tombstone_unresolved` | Duomenys pašalinti, bet žyma liko `deletion_failed`. HTTP **503** – apskaitą užbaigia operatorius |
+
+⚠️ **`tombstone_unresolved` yra trečias atsakymas sąmoningai.** „Ištrinta"
+teigtų patvirtintą ištrynimą, kurio persistentinis įrašas neliudija;
+„nepavyko" teigtų, kad duomenys liko. Nė vienas iš dviejų paprastesnių
+atsakymų nebūtų tiesa.
 
 **Efemeriškos kategorijos rodomos atskirai** sąmoningai: „nėra ko trinti" ir
 „pamiršome ištrinti" turi atrodyti skirtingai. Ta pati logika galioja
@@ -357,3 +387,17 @@ būtent jis atsako, kada duomenys buvo pašalinti.
   `derivedFrom`. Be dviejų paskutinių punktų ištrynimas apeitų grafą, kurio
   dalis nurodo į niekur – apėjimas „pavyktų", tik nieko nerastų.
 - **`meeting` lygio artefaktų** – žr. pastabą prie registro.
+- **`list(prefix)` krypties inventorizacijos** (#157, PR-5). Orphan aptikimas apibrėžtas
+  **DB kryptimi**: kiekvienam persistintam adresui tikrinamas objekto egzistavimas.
+  Priešinga kryptis („objektas yra, DB nerodo") reikalautų `list(prefix)` visuose trijuose
+  backend'uose, ir #157 apimčiai ji eksplicitiškai nepriklauso. ⚠️ Su bandymų registru ta
+  kryptis nustoja būti reikalinga **tam, ką parašė pats servisas** — bet ne tam, kas
+  atsirado kitaip (žr. kitą punktą).
+- **Objektų, atsiradusių NE per mūsų rašymo kelią** (#157, PR-4 orphan sprendimas).
+  Bandymų registras dengia viską, ką parašo pats servisas: kiekvienas `put()` turi
+  registruotą `attemptId`, tad „objektas yra, DB nerodo" nustoja egzistuoti kaip
+  klasė. ⚠️ **Bet objektas, atsiradęs rankiniu kopijavimu ar atkūrimu į kitą
+  prefiksą, registre neatsiras** – jo nepasiekia nei erasure, nei DB krypties
+  skenavimas (A3). Tai ne prielaida, o užrašyta riba: aptikti tokius objektus
+  reikėtų `list(prefix)` visuose trijuose backend'uose, o tai #157 apimčiai
+  eksplicitiškai nepriklauso.

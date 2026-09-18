@@ -59,6 +59,24 @@ function createBackupUpload() {
       files: 2,
       // Papildomų laukų neleidžiam - žr. `assertExactlyTwoParts`.
       fields: 0,
+
+      /**
+       * ⚠️ MULTER-RIBOS: laukų VARDŲ ribų čia sąmoningai NĖRA.
+       *
+       * `utils/uploadStorage.js` nustato `fieldNameSize`, `fieldNestingDepth` ir
+       * `fieldArrayIndexLimit`, nes multer 2.3.0 jas tikrina tik `hasOwnProperty`
+       * sąlygoje — nenurodyta riba reiškia, kad patikros nėra.
+       *
+       * Šitam keliui jos NEREIKALINGOS, ir tai ne apsileidimas: su `fields: 0`
+       * busboy pirmą tekstinį lauką praleidžia dar PRIEŠ `field` įvykį
+       * (`fields === fieldsLimit` → `skipPart`, `busboy/lib/types/multipart.js`),
+       * tad multer'io vardo patikros čia apskritai nepasiekiamos. Pridėtos jos
+       * būtų negyvas kodas, kurį kas nors vėliau kopijuotų kaip pavyzdį.
+       *
+       * ⚠️ ŽYMA SKIRTA SARGUI, NE SKAITYTOJUI. Argumentas gyveno tik PR #307
+       * aprašyme; trečias upload kelias, pridėtas po pusmečio, jo negautų. Kol
+       * sargo nėra (#305, 6 punktas), ši žyma yra vieta, kurią jis ras.
+       */
     },
   });
 }

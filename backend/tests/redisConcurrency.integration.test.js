@@ -50,14 +50,14 @@ test("REDIS: koreliacijos laukai išgyvena tikrą saugyklos ratą", { skip: skip
   });
 
   // Ne tas pats objektas - realiai skaitom iš Redis.
-  const loaded = await jobStore.system.get(created.id);
+  const loaded = await jobStore.system.get(created.id, { hydrate: true });
 
   assert.equal(loaded.requestId, "req_tikras_redis_1");
   assert.equal(loaded.actor, "key_abc123def456");
 
   // `null` irgi turi išlikti `null`, o ne virsti eilute "null".
   const plain = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL });
-  const loadedPlain = await jobStore.system.get(plain.id);
+  const loadedPlain = await jobStore.system.get(plain.id, { hydrate: true });
 
   assert.equal(loadedPlain.requestId, null);
   assert.equal(loadedPlain.actor, null);
@@ -77,7 +77,7 @@ test("REDIS: lygiagretūs jobai nesumaišo koreliacijos", { skip: skipWithoutRed
     )
   );
 
-  const loaded = await Promise.all(jobs.map((job) => jobStore.system.get(job.id)));
+  const loaded = await Promise.all(jobs.map((job) => jobStore.system.get(job.id, { hydrate: true })));
 
   for (let i = 0; i < COUNT; i += 1) {
     assert.equal(
@@ -156,13 +156,13 @@ test("REDIS: ištrintas jobas dingsta iš saugyklos, ne tik iš atminties", { sk
     requestId: "req_trynimo_testas",
   });
 
-  assert.ok(await jobStore.system.get(job.id), "jobas turi egzistuoti prieš trynimą");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "jobas turi egzistuoti prieš trynimą");
 
   await jobStore.system.remove(job.id);
 
   // GDPR ištrynimas, kuris veikia tik atmintyje, palieka duomenis Redis'e -
   // o būtent ten jie išgyvena restartą.
-  assert.equal(await jobStore.system.get(job.id), null, "jobas turi dingti iš TIKROS saugyklos");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "jobas turi dingti iš TIKROS saugyklos");
 });
 
 test("REDIS: jobas ir jo ištrynimas IŠGYVENA restartą", { skip: skipWithoutRedis() }, async () => {
@@ -193,7 +193,7 @@ test("REDIS: jobas ir jo ištrynimas IŠGYVENA restartą", { skip: skipWithoutRe
   await jobStore._resetForTests();
   await jobStore.init({ redisUrl: REDIS_URL });
 
-  const afterRestart = await jobStore.system.get(job.id);
+  const afterRestart = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(afterRestart, "jobas turi išgyventi restartą");
   assert.equal(afterRestart.requestId, "req_restarto_testas", "koreliacija irgi turi išlikti");
 
@@ -205,7 +205,7 @@ test("REDIS: jobas ir jo ištrynimas IŠGYVENA restartą", { skip: skipWithoutRe
   await jobStore.init({ redisUrl: REDIS_URL });
 
   assert.equal(
-    await jobStore.system.get(job.id),
+    await jobStore.system.get(job.id, { hydrate: true }),
     null,
     "ištrintas jobas NEGALI atsirasti po restarto - kitaip trynimas veikė tik atmintyje"
   );

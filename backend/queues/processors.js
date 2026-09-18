@@ -3,6 +3,40 @@ const { transcribeAudio } = require("../services/transcriptionService");
 const { generateProtocol } = require("../services/protocolService");
 const jobStore = require("../utils/jobStore");
 const { PHASE } = require("../utils/jobPhase");
+const { createLogger } = require("../utils/logger");
+
+const log = createLogger("processors");
+
+/**
+ * `startPhase` su konflikto POLITIKA (#184, 7.5b).
+ *
+ * ⚠️ KODĖL PIPELINE NENUTRAUKIAMAS.
+ *
+ * Versijos konfliktas čia reiškia, kad įrašą tarp skaitymo ir rašymo pakeitė
+ * kažkas kitas – dažniausiai persidengiantis vykdymas po stalled recovery.
+ * Fazės žyma yra STEBĖJIMO būsena; ji nesaugo rezultato. Rezultatą saugo
+ * `finish()`, kuris tokioje situacijoje pats atsisako įsipareigoti. Nutraukus
+ * pipeline čia, būtų mainoma tikra transkripcija į fazės kosmetiką.
+ *
+ * ⚠️ BET TYLA IRGI NETINKA. Iki 7.5b `onPhase` grąžinimas buvo ignoruojamas
+ * visiškai (`await onPhase?.(…)` paslaugose), tad pralaimėtas perėjimas
+ * nepalikdavo jokio pėdsako. `warn` yra minimumas, iš kurio persidengimą
+ * apskritai galima pamatyti logu.
+ *
+ * ⚠️ AKLO RETRY NĖRA. Perėjimas nekartojamas: laimėtojas jau nustatė kitą fazę,
+ * o kartojimas su tuo pačiu snapshot'u duotų tą patį atsakymą.
+ */
+async function pradetiFaze(jobId, phase, options) {
+  const rezultatas = await jobStore.system.startPhase(jobId, phase, options);
+  if (rezultatas === jobStore.CONCURRENCY_CONFLICT) {
+    log.warn("Fazės perėjimas pralaimėjo versijos konfliktą – pipeline tęsiamas", {
+      jobId,
+      phase,
+      stage: "phase_conflict",
+    });
+  }
+  return rezultatas;
+}
 
 /**
  * Job processor'iai - bendras vykdymo kodas inline runner'iui IR BullMQ worker'iams.
@@ -40,7 +74,7 @@ async function transcriptionProcessor(payload, jobId) {
    * dekoracija, kurią pipeline gali ignoruoti.
    */
   const onPhase = jobId
-    ? (phase, options) => jobStore.system.startPhase(jobId, phase, options)
+    ? (phase, options) => pradetiFaze(jobId, phase, options)
     : undefined;
 
   // Gauname audio iš bendro storage pagal raktą (veikia ir atskirame worker'yje).
@@ -104,7 +138,7 @@ async function protocolProcessor(payload, jobId) {
    * protokolas", kol dar vyksta validacija.
    */
   const onPhase = jobId
-    ? (phase, options) => jobStore.system.startPhase(jobId, phase, options)
+    ? (phase, options) => pradetiFaze(jobId, phase, options)
     : undefined;
 
   // Protokolo generavimas neturi failo - visas payload jau JSON.
