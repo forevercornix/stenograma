@@ -74,7 +74,15 @@ const ARTEFACT_TYPES = {
     persistence: PERSISTENCE.PERSISTENT,
     owner: "job",
     derivedFrom: "source_audio",
-    description: "Transkripcijos tekstas ir segmentai jobo įraše",
+    /**
+     * ⚠️ APRAŠE NEBĖRA FIZINĖS SAUGOJIMO VIETOS (#157, PR-5, sąlyga 5).
+     *
+     * „jobo įraše" po #157 yra melas external eilutėms: turinys guli S3 arba failų
+     * sistemoje. Registras aprašo artefakto TIPĄ, o fizinę vietą sprendžia vartotojai
+     * pagal eilutės `storage_type` — kitaip registras taptų priklausomas nuo
+     * konfigūracijos, o mišrioje DB konfigūracija nėra tiesos šaltinis (A4).
+     */
+    description: "Transkripcijos tekstas ir segmentai",
   },
 
   TRANSCRIPT_REDACTED: {
@@ -95,7 +103,8 @@ const ARTEFACT_TYPES = {
     persistence: PERSISTENCE.PERSISTENT,
     owner: "job",
     derivedFrom: "transcript",
-    description: "Sugeneruotas protokolas jobo rezultate",
+    /** ⚠️ Ta pati priežastis kaip `TRANSCRIPT`: aprašas be fizinės vietos (#157, PR-5). */
+    description: "Sugeneruotas protokolas",
   },
 
   EXPORT_REDACTED: {

@@ -564,7 +564,7 @@ test("#160 HTTP: admin B ištrina admin A job'ą TIK per override, ne kaip savin
    * ten jis būtų aiškinamas kaip įrašas su `undefined` laukais ir galėtų
    * paleisti valymą.
    */
-  assert.equal(await jobStoreForOwnership.system.get(jobId), null, "realiai ištrinta");
+  assert.equal(await jobStoreForOwnership.system.get(jobId, { hydrate: true }), null, "realiai ištrinta");
 
   // Bet SKAITYTI to paties job'o admin A negalėjo – override tik trynimui.
   const kitas = await request(app)
@@ -648,7 +648,7 @@ test("#160 HTTP: session-admin svetimą job'ą IŠTRINA (override)", async () =>
   const res = await request(app).delete(`/api/jobs/${jobId}`).set("Cookie", adminCookie);
 
   assert.equal(res.status, 204, "trynimo override leidžiamas");
-  assert.equal(await jobStoreForOwnership.system.get(jobId), null, "realiai ištrinta");
+  assert.equal(await jobStoreForOwnership.system.get(jobId, { hydrate: true }), null, "realiai ištrinta");
 });
 
 test("#160 HTTP: eilinis vartotojas NEVALO našlaičio", async () => {
@@ -816,4 +816,39 @@ test("#160 EXPORT: savininkas savo job'ą susieja normaliai (regresija)", async 
     "invalid_type",
     "SAVAS job'as pasiekiamas – matomas tikras tipo neatitikimas, ne missing"
   );
+});
+
+test("#183 HTTP: lygiagretus admin override gauna 202, ne 503", async () => {
+  /**
+   * ⚠️ TA PATI BŪSENA NEGALI DUOTI SKIRTINGO KODO PAGAL PRIVILEGIJĄ (§16).
+   *
+   * Įvedus 202 savininko kelyje, administracinė šaka liko su savo atsakymų
+   * kopija ir tą pačią būseną - kita replika jau vykdo ištrynimą - vertė 503,
+   * t. y. „serverio gedimu" ten, kur gedimo nėra. Operatorius, matantis 503,
+   * pradėtų ieškoti incidento, kurio nėra.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const cookieB = await loginAs("antrasadmin", "antras-slaptas-3");
+  const created = await request(app)
+    .post("/api/jobs")
+    .set("Cookie", cookieB)
+    .send({ transcript: "Petras: Aptariame biudzeta kitiems metams." });
+  const jobId = created.body.jobId;
+
+  // Kita replika jau pasiėmė šį jobą - žymos šis procesas neįrašė.
+  await tombstones.mark(jobId, { reason: "user_request", actorKind: "user" });
+
+  const cookieA = await loginAs("sysadmin", "admin-slaptas-1");
+  const res = await request(app).delete(`/api/jobs/${jobId}`).set("Cookie", cookieA);
+
+  assert.equal(res.status, 202, "administracinė šaka atvaizduoja barjerą taip pat kaip savininko");
+  assert.equal(res.body.status, "in_progress");
+
+  /**
+   * ESMINĖ patikra: 202 turi reikšti, kad darbas NEPRADĖTAS. Vien statuso
+   * kodas to neįrodo - jis atrodytų vienodai ir tada, jei duomenys jau būtų
+   * ištrinti, o atsakymas tik meluotų.
+   */
+  assert.ok(await jobStoreForOwnership.system.get(jobId, { hydrate: true }), "destruktyvus darbas NEPRADĖTAS");
 });

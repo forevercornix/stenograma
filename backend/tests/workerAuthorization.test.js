@@ -52,7 +52,7 @@ test("PROPAGAVIMAS: jobas neša aktoriaus ID, rolę ir šaltinį", async () => {
   const created = await request(app).post("/api/jobs").set("Cookie", cookie).send({ transcript: TRANSCRIPT });
   assert.equal(created.status, 202);
 
-  const job = await jobStore.system.get(created.body.jobId);
+  const job = await jobStore.system.get(created.body.jobId, { hydrate: true });
 
   /**
    * #158: `actor` yra STABILUS `userId`, ne vardas – todėl pervadinimas
@@ -79,7 +79,7 @@ test("KREDENCIALAI: jobo įraše NĖRA nei slaptažodžio, nei sesijos ID, nei c
   const sessionId = cookie.split(";")[0].split("=")[1];
 
   const created = await request(app).post("/api/jobs").set("Cookie", cookie).send({ transcript: TRANSCRIPT });
-  const job = await jobStore.system.get(created.body.jobId);
+  const job = await jobStore.system.get(created.body.jobId, { hydrate: true });
 
   const serialized = JSON.stringify(job);
 
@@ -135,7 +135,7 @@ test("REVOKACIJA: atsijungimas (logout) NENUTRAUKIA jobo", async () => {
 
   await request(app).post("/api/auth/logout").set("Cookie", cookie);
 
-  const job = await jobStore.system.get(created.body.jobId);
+  const job = await jobStore.system.get(created.body.jobId, { hydrate: true });
   const decision = authorizeJobExecution(job, PERMISSIONS.JOB_CREATE);
 
   assert.equal(decision.allowed, true, "logout neturi nutraukti jau pradėto darbo");
@@ -300,8 +300,15 @@ test("STRUKTŪRA: abu vykdymo keliai naudoja TĄ PAČIĄ autorizacijos funkciją
        * pakartojimų apdorojimą, o šaltinio audio liktų susietas. Būtent tokį
        * dublikatą paliko skriptinis redagavimas #210 eigoje.
        */
+      /**
+       * ⚠️ REGEX APIMA IR `finishFailed()` (#184, 7.5b) – bet TIK kaip alternatyvą,
+       * ne kaip papildomą leidimą: skaičius tebėra LYGIAI 1. `finishFailed()`
+       * yra `finish(FAILED, …)` su konfliktų politika, tad dublikatas su
+       * skirtingais vardais (`finish` + `finishFailed`) toje pačioje šakoje
+       * krenta lygiai taip pat, kaip krito du `finish()`.
+       */
       assert.equal(
-        (saka.match(/system\.finish\(/g) || []).length,
+        (saka.match(/system\.finish(?:Failed)?\(/g) || []).length,
         1,
         `${file}: šaka „${pavadinimas}" turi daryti LYGIAI VIENĄ terminalų perėjimą`
       );

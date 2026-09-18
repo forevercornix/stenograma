@@ -140,7 +140,7 @@ test("#154 ATŠAUKIMAS: INLINE kelias realiai pažymi job'ą failed", async (t) 
   });
 
   await jobRunner._runInline("transcription", job.id, {});
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
 
   assert.equal(processorKviestas, false, "darbas neturi prasidėti");
   assert.equal(po.status, STATUS.FAILED, "job'as pažymėtas failed");
@@ -182,12 +182,22 @@ test("#154 ATŠAUKIMAS: WORKER kelias naudoja TĄ PATĮ finish() metodą", () =>
     const i = src.indexOf("AUTHORIZATION_REVOKED");
     assert.ok(i > 0, `${failas}: atšaukimo šaka turi egzistuoti KODE, ne tik komentare`);
 
-    /** Ieškom artimiausio kvietimo PRIEŠ kodą – be komentarų jis šalia. */
+    /**
+     * Ieškom artimiausio kvietimo PRIEŠ kodą – be komentarų jis šalia.
+     *
+     * ⚠️ PRIIMAMI ABU TERMINALŪS KELIAI (#184, 7.5b). `finishFailed()` yra
+     * `finish(FAILED, …)` su konfliktų politika, o ne jo apėjimas: jis kviečia
+     * TĄ PATĮ `jobPhase.finish()` per `system.finish` kūną. Garantija, kurią šis
+     * testas saugo, nepakito – draudžiamas lieka neapdorotas `update({status})`.
+     */
     const priesKoda = src.slice(0, i);
-    const paskutinisFinish = priesKoda.lastIndexOf(".finish(");
+    const paskutinisFinish = Math.max(
+      priesKoda.lastIndexOf(".finish("),
+      priesKoda.lastIndexOf(".finishFailed(")
+    );
     const paskutinisUpdate = priesKoda.lastIndexOf(".update(");
 
-    assert.ok(paskutinisFinish > 0, `${failas}: turi naudoti finish()`);
+    assert.ok(paskutinisFinish > 0, `${failas}: turi naudoti finish() arba finishFailed()`);
     assert.ok(
       paskutinisFinish > paskutinisUpdate,
       `${failas}: artimiausias kvietimas prieš AUTHORIZATION_REVOKED turi būti finish(), ne update()`
@@ -229,7 +239,8 @@ test("#154 RETRY: terminalaus job'o perpaleisti NEGALIMA", async () => {
   for (const status of [STATUS.COMPLETED, STATUS.FAILED, STATUS.CANCELLED]) {
     const job = await naujas();
     await jobStore.system.restart(job.id);
-    await jobStore.system.finish(job.id, status);
+    /** ⚠️ `completed` reikalauja rezultato (#184, C11). */
+    await jobStore.system.finish(job.id, status, status === STATUS.COMPLETED ? { result: { text: "ok" } } : {});
 
     await assert.rejects(
       () => jobStore.system.restart(job.id),
@@ -257,7 +268,7 @@ test("#154 KLAIDA: nelegalus perėjimas job'ą pažymi SAVO kodu", async (t) => 
   });
 
   await jobRunner._runInline("transcription", job.id, {});
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
 
   assert.equal(po.status, STATUS.FAILED);
   assert.equal(po.error_code, "ILLEGAL_TRANSITION", "ne internal_error");
@@ -282,7 +293,7 @@ test("#154 RECOVERY: nutrūkęs job'as lieka processing su fazе, ne pakibęs be
   });
 
   // Worker'is „krinta" – jokio finish() nekviečiama.
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
 
   assert.equal(po.status, STATUS.PROCESSING);
   assert.equal(po.phase, PHASE.TRANSCRIBING, "matoma, KUR nutrūko");
