@@ -437,11 +437,52 @@ skirtingi artefaktai. Šis skyrius yra apie antrąjį.
 BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
   --out kopija.json --actor "$USER" --url "$DATABASE_URL"
 
+# `PG*` diegime `--url` nereikalingas - jungtis imama iš aplinkos
+BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
+  --out kopija.json --actor "$USER"
+
 # Atkūrimas į TUŠČIĄ bazę
 node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
 ```
 
 Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+
+#### ⚠️ `PG*` forma palaikoma SĄLYGINIAI (#264)
+
+> Palaikoma `PG*` forma, **kai jungtis aprašoma tik `PGHOST`/`PGPORT`/`PGUSER`/
+> `PGDATABASE`**; kitaip komanda atsisako **garsiai**
+> (`PG_DUMP_ENV_NOT_PORTABLE`).
+
+**Priežastis nėra „nepalaikoma".** `PGSSLMODE`, `PGOPTIONS`, `PGPASSWORD`,
+`PGPASSFILE` ir bet kuris kitas `PG*` **procese** veikia per `process.env` — `pg`
+skaito jį pats. `pg_dump` to kanalo **negauna**: jo aplinka valoma nuo viso `PG`
+prefikso, kad kopija negalėtų tyliai ateiti iš kito klasterio.
+
+⚠️ Išmatuota: iš tų pačių nustatymų `{host, user, password, database}` Node `pg`
+gauna dar `ssl=true`, `options=-csearch_path=prod`, `connect_timeout=9`. DSN iš jų
+tuos tris **tyliai prarastų** — kopija per nešifruotą jungtį arba iš kitos schemos
+atrodytų kaip sėkmė. Todėl atsisakoma, o ne spėjama.
+
+**Kredencialai `PG*` kelyje — `~/.pgpass`.** Jis valymą išgyvena, nes `HOME` nėra
+`PG*`. `PGPASSWORD` yra kliūtis sąmoningai: jį perduoti būtų galima tik DSN'e, o
+tai atvestų slaptažodį į `argv`, matomą `ps` išvestyje.
+
+⚠️ **`PG_` yra aplikacijos erdvė, ne libpq.** Repo savas `PG_CONNECT_TIMEOUT_MS`
+dump'o **nestabdo**: libpq vardų erdvėje po `PG` visada eina raidė (`PGHOST`,
+`PGSSLMODE`, net `PGCONNECT_TIMEOUT` — pabraukimas viduje). Tai **stebėjimas apie
+vardų konvenciją, ne garantija**, todėl jį saugo liudytojo testas — atsiradus
+libpq kintamajam su `PG_`, sargas kris.
+
+⚠️ **`PGDATABASE` privalo būti VARDAS, ne connection string.** Reikšmė su `=` arba
+prasidedanti `postgres://` atmetama (`PG_DUMP_CONNINFO_IN_NAME`): `pg_dump -d` ją
+išskleistų, ir jos parametrai **perrašytų** `-h`/`-p`/`-U`, o Node `pg` tą pačią
+reikšmę laiko literaliu vardu. Išmatuota su PostgreSQL 16.15.
+
+⚠️ **Nauja libpq aplinkos savybė kliūtimi tampa automatiškai** — sąlyga išvedama
+iš `PG_ATITIKMENYS`, ne surašyta. Priežiūros nereikia.
+
+⚠️ **`restore` šio kelio neturi** ir jam nereikia: `--target` privalomas, aplinkos
+atsargos nėra, tad tyliai paimti ne tos bazės neįmanoma.
 
 ⚠️ **`BACKUP_ENABLED=true` privalomas.** Išjungtos kopijos reiškia išjungtas ir
 šias: `dump` krinta su `BACKUP_DISABLED` dar prieš jungiantis prie bazės.
@@ -993,9 +1034,53 @@ node -e "
 
 **Ataskaitos pavyzdys:**
 
+⚠️ **Nuo #292 santraukoje yra PRIEŽASČIŲ suvestinė.** Be jos „nesėkmių 3" nepasakė,
+ką daryti: trys skirtingos priežastys reikalauja trijų skirtingų veiksmų.
+
+| Priežastis | Ką tirti |
+|---|---|
+| `metaduomenys_nevalidus` | **DB eilutę** — reikšmė pažeidžia `job_results_integrity_shape` |
+| `virsija_dabartine_riba` | **konfigūraciją** — `MAX_RESULT_BYTES` mažesnis nei artefaktas; eilutė gali būti sveika |
+| `saugykla_neatitinka_head` | **objektą** — jis pasikeitė tarp `head()` ir skaitymo |
+
+Pilnas nesėkmių sąrašas lieka `ataskaita.nesekmes` tiems, kas apdoroja programiškai;
+santraukoje jis nespausdinamas, nes eilučių skaičius neribotas.
+
+
+
 ```
 eilučių 1284; nepriklausomai patikrinta 37; nepatikrinama (inline, nėra su kuo lyginti) 1247; nesėkmių 0
 ```
+
+### ⚠️ Kaina: procedūra eina per KIEKVIENĄ `job_results` eilutę (#292)
+
+`verifyResultArtifacts()` puslapiuoja per **visą** lentelę. Atkūrimo pratybose ji
+gali turėti šimtus tūkstančių eilučių, ir kiekvienai **external** eilutei:
+
+| Veiksmas | `fs` | `s3` |
+|---|---|---|
+| Metaduomenų patikra | `head()` | `HeadObject` |
+| Turinio perskaitymas | visas objektas | visas objektas (`GetObject`) |
+
+⚠️ **Nuo #292 `s3` pusėje pridėtas vienas `HeadObject` kiekvienai external
+eilutei.** Jis reikalingas tam, kad skaitymo biudžetas būtų imamas iš **išmatuoto**
+dydžio, o ne iš persistinto lūkesčio — t. y. iš tos pačios pusės, kurią procedūra
+ir turi patikrinti.
+
+**Ką tai reiškia planuojant pratybas.** Kaina linijinė nuo **external** eilučių
+skaičiaus (`storage_type <> 'inline'`), ne nuo visos lentelės. Prieš pratybas
+verta jį pasimatuoti:
+
+```sql
+SELECT storage_type, count(*) FROM job_results GROUP BY storage_type;
+```
+
+⚠️ **Inline eilutės šios kainos neturi** — joms nepriklausomo metaduomens nėra, tad
+`verify()` jų neskaito (žr. skyrių žemiau).
+
+⚠️ **Metaduomenų defektas kainuoja MAŽIAU, ne daugiau.** Nuo #292 eilutė su
+netinkamu `bytes`/`checksum` atmetama po `head()`, bet **prieš** `GetObject` — toks
+artefaktas neatidaromas visai.
 
 ### ⚠️ „Nepatikrinama" NĖRA „patikrinta" — ir būtent dėl to ataskaita turi DU skaičius
 

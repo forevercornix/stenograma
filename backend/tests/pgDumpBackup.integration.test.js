@@ -2,6 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const path = require("node:path");
+const fs = require("node:fs");
+const os = require("node:os");
 const { execFileSync } = require("node:child_process");
 const { Client } = require("pg");
 
@@ -885,4 +887,126 @@ test("#262: preflight mato NE TIK lenteles (seka, matview, funkcija, schema, enu
 
   const { rows } = await vykdyti(TIKSLO_URL, "SELECT count(*)::int AS n FROM jobs");
   assert.ok(rows[0].n > 0, "tuščia bazė privalo būti atkuriama");
+});
+
+/**
+ * `PG*` FORMA PRIEŠ TIKRĄ `pg_dump` (#264, Codex II, D).
+ *
+ * ⚠️ ŠIS TESTAS UŽDARO VISUS TRIS `UNVERIFIED` PUNKTUS, kurių `pgBackupPgForma`
+ * uždaryti negali PAGAL KONSTRUKCIJĄ.
+ *
+ * Ten `pg_dump` pakeistas `PATH` stub'u, tad matuojama, ką vaikinis procesas
+ * GAVO — ne ką jis su tuo DARO. Trys teiginiai likdavo neįrodyti:
+ *
+ *   1. ar `pg_dump` apskritai priima `-h/-p/-U/-d` vietoj pozicinio URL;
+ *   2. ar kopija iš `PG*` diegimo galioja;
+ *   3. ar `~/.pgpass` kelias veikia, kai `PGPASSWORD` yra kliūtis.
+ *
+ * ⚠️ TREČIASIS UŽDAROMAS NE PAPILDOMAI, O BŪTINYBĖS DĖKA. CI klasteris naudoja
+ * slaptažodinę autentikaciją, o `PGPASSWORD` `PG*` kelyje ATMETAMAS. Vadinasi
+ * vienintelis būdas šiam testui prisijungti yra `~/.pgpass` — jei jis neveiktų,
+ * testas kristų, o ne tyliai praeitų kitu keliu.
+ *
+ * ⚠️ `HOME` NUKREIPIAMAS Į LAIKINĄ KATALOGĄ. `libpqSvariAplinka()` šalina visą
+ * `PG` prefiksą, tad `PGPASSFILE` vaikinio proceso nepasiekia — bet `HOME` nėra
+ * `PG*` ir išgyvena. Būtent tai ir yra dokumentuotas kredencialų kelias.
+ */
+test("#264: `PG*` forma prieš TIKRĄ `pg_dump` — vėliavos ir `~/.pgpass`", { skip: praleisti() }, async (t) => {
+  const url = new URL(SALTINIO_URL);
+  const namai = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-264-home-"));
+
+  t.after(async () => {
+    fs.rmSync(namai, { recursive: true, force: true });
+    await pasalintiDb(SALTINIO_URL);
+  });
+
+  await perkurtiDb(SALTINIO_URL);
+  await uzpildytiSaltini(`SENTINEL_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`);
+
+  /**
+   * ⚠️ LIUDYTOJAS RAŠOMAS Į `job_results`, NE Į `audit_log`.
+   *
+   * Pirmoji šio testo redakcija ieškojo `uzpildytiSaltini()` audito sentinelio —
+   * bet `PG_DUMP_ARGUMENTAI` turi `--exclude-table-data=audit_log` (7.4d), tad ta
+   * reikšmė į kopiją NEGALI patekti PAGAL KONSTRUKCIJĄ. Asercija krito teisingai,
+   * tik ne dėl to, ką tikrino.
+   *
+   * ⚠️ LIUDYTOJAS BŪTINAS. `pg_dump`, prisijungęs prie NUMATYTOSIOS bazės, irgi
+   * grąžintų sintaksiškai teisingą SQL ir teigiamą baitų skaičių — tik be šių
+   * duomenų. Be unikalaus žymens testas praeitų nieko neįrodęs.
+   */
+  const zyme = `PG_FORMA_${crypto.randomUUID().replace(/-/g, "").toUpperCase()}`;
+  const zymeKlientas = new Client({ connectionString: SALTINIO_URL });
+  await zymeKlientas.connect();
+  try {
+    const { rows } = await zymeKlientas.query(
+      `INSERT INTO jobs (id, type, status, created_at, updated_at)
+       VALUES (gen_random_uuid(), 'transcription', 'completed', now(), now())
+       RETURNING id`
+    );
+    await zymeKlientas.query(
+      `INSERT INTO job_results (job_id, storage_type, payload, created_at)
+       VALUES ($1, 'inline', $2::jsonb, now())`,
+      [rows[0].id, JSON.stringify({ text: zyme })]
+    );
+  } finally {
+    await zymeKlientas.end();
+  }
+
+  const portas = url.port || "5432";
+  const baze = url.pathname.replace(/^\//, "");
+
+  /** ⚠️ `0600` privalomas: libpq atsisako skaityti per plačiai atvertą failą. */
+  fs.writeFileSync(
+    path.join(namai, ".pgpass"),
+    `${url.hostname}:${portas}:${baze}:${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}\n`,
+    { mode: 0o600 }
+  );
+
+  /**
+   * ⚠️ `PGPASSWORD` SĄMONINGAI NENUSTATOMAS. Jis yra kliūtis, ir jei čia
+   * atsirastų, testas įrodinėtų kitą kelią nei tas, kurį dokumentuojame.
+   */
+  const pgAplinka = {
+    PGHOST: url.hostname,
+    PGPORT: portas,
+    PGUSER: decodeURIComponent(url.username),
+    PGDATABASE: baze,
+  };
+
+  const env = { ...TESTO_ENV, ...pgAplinka, HOME: namai };
+  delete env.DATABASE_URL;
+  delete env.PGPASSWORD;
+
+  const kopija = await suZymuAplinka(SALTINIO_URL, () =>
+    /** ⚠️ `databaseUrl` NEPERDUODAMAS — taikinys privalo ateiti iš `PG*`. */
+    pgDumpBackup.sukurtiSifruotaKopija({ actor: "operatorius-testas", env })
+  );
+
+  assert.equal(kopija.manifest.encrypted, true, "kopija iš `PG*` kelio privalo būti šifruota");
+  assert.ok(kopija.dumpBytes > 0, "dump'as privalo turėti turinį - tuščias reikštų, kad jungtis nuėjo ne ten");
+
+  /**
+   * ⚠️ TURINIO PATIKRA, NE TIK DYDŽIO. `pg_dump`, prisijungęs prie NUMATYTOSIOS
+   * lokalios bazės, irgi grąžintų teisingą SQL ir teigiamą baitų skaičių — ir
+   * testas praeitų, nieko neįrodęs. Sentinelis yra vienintelis liudytojas, kad
+   * vėliavos nuvedė į TĄ klasterį.
+   */
+  /**
+   * ⚠️ `decrypt()` GRĄŽINA `{ plaintext: Buffer, usedPreviousKey }`, NE EILUTĘ —
+   * tas pats įspėjimas kaip `pgDumpBackup.js:947`. Pirmoji šio testo redakcija
+   * rašė `String(aiskus)` ir gaudavo `[object Object]`, tad asercija krito NE dėl
+   * to, ką tikrina.
+   */
+  const { plaintext } = backupEncryptionModulis.decrypt(kopija.envelope, {
+    env: TESTO_ENV,
+    manifest: kopija.manifest,
+  });
+
+  assert.match(
+    plaintext.toString("utf8"),
+    new RegExp(zyme),
+    "⚠️ kopijoje privalo būti ŠALTINIO žymė - be jos testas praeitų ir tada, " +
+      "jei `pg_dump` būtų nuėjęs į numatytąją lokalią bazę"
+  );
 });
