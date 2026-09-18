@@ -993,11 +993,82 @@ test("KONTRAKTAS: su nustatytu URL adapteris NEGALI praleisti savo scenarijų", 
   }
 });
 
-test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 15 metodų aibę", () => {
+test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ metodų aibę", () => {
   /**
+   * ⚠️ SKAIČIUS IŠ PAVADINIMO PAŠALINTAS (#157, PR-5).
+   *
+   * Testo vardas yra jo TAPATYBĖ ištrintų testų sargui (#237), tad kiekvienas
+   * kontrakto praplėtimas versdavo vardą keistis — ir sargas tai matydavo kaip
+   * PAŠALINTĄ testą, reikalaujantį override. Taip įvyko keliant 18 → 19
+   * (CI `34144363714`). Skaičius gyvena tvirtinime žemiau, kur jam ir vieta:
+   * tikrinamas jis vienodai, o tapatybė nustoja svyruoti kartu su kontraktu.
+   *
    * Trūkstamas metodas viename backend'e reikštų, kad fasadas tyliai grįžta į
    * atsarginį kelią – be jokio signalo. Būtent taip `reportProgressAtomic()`
    * ilgai nebuvo memory backend'e.
+   *
+   * ⚠️ 15 → 16 (#183): pridėtas `listExpired()`. Retencija nuo šiol privalo
+   * įrašyti ištrynimo žymą PRIEŠ šalinimą, tad jai reikia ID, o ne kiekio.
+   * Skaičius keliamas SĄMONINGAI - būtent šis sargas ir pagavo, kad metodas
+   * buvo pridėtas tik dviem backend'ams iš trijų.
+   *
+   * ⚠️ Redis `listExpired()` grąžina tuščią sąrašą, ir tai NE spraga: terminą
+   * ten vykdo pats Redis per `EXPIRE`, tad momento žymai įrašyti nėra. Kontrakto
+   * prasme metodas privalo egzistuoti; semantinį skirtumą įvardija
+   * `docs/deletion-guarantees.md`.
+   *
+   * ⚠️ 23 → 25 (#157, PR-5): pridėti `pazymetiKarantina()` ir `karantinuotuSkaicius()`.
+   * `pazeidimas` yra VIENINTELIS signalas apie pasikeitusią rakto schemą, tad jis
+   * pranešamas vieną kartą, o eilutė lieka matoma suvestinėje, kol operatorius ją uždaro.
+   *
+   * ⚠️ 22 → 23 (#157, PR-5): pridėtas `jungtiesTapatybe()`. Šlavėjas privalo įrodyti,
+   * kad žymos ir bandymų registras yra TOJE PAČIOJE bazėje; vardų palyginimas to
+   * neįrodo (#245 pamoka). `memory`/`redis` grąžina `null` — jungties jie neturi.
+   *
+   * ⚠️ 20 → 22 (#157, PR-5): pridėti `valytiniBandymai()` ir `pasalintiBandymus()` —
+   * kandidatų atranka su retencijos predikatu ir eilučių uždarymas PO to, kai objekto
+   * tikrai nebėra.
+   *
+   * ⚠️ 26 → 27 (#157, PR-7): pridėtas `verifyResultArtifacts()`. Ta pati priežastis
+   * kaip `deleteResultArtifacts()`: `storage_type -> ArtifactStore` žemėlapis gyvena
+   * store'e ir yra vienintelis.
+   *
+   * ⚠️ MEMORY IR REDIS GRĄŽINA `nepatikrinama_inline` KIEKVIENAM REZULTATUI, ne tuščią
+   * ataskaitą. Rezultatai ten gyvena job'o įraše, tad nepriklausomo metaduomens, su
+   * kuriuo būtų galima lyginti, nėra IŠ VISO. `eiluciuIsViso: 0` sakytų „nėra ko
+   * tikrinti", nors rezultatų yra — operatorius manytų bazę tuščią.
+   *
+   * ⚠️ 25 → 26 (#157, PR-7): pridėtas `saugykluBusena()`. Skaičius keliamas
+   * SĄMONINGAI. Prijungimo stebėtojas klausia STORE'O, kas registruota, nes
+   * `storage_type -> ArtifactStore` žemėlapis gyvena ten ir yra vienintelis — ta
+   * pati priežastis, dėl kurios čia atsirado `deleteResultArtifacts()`. Backend'as,
+   * praradęs šį metodą, stebėtojui atrodytų kaip „nieko netikrinu", ir neteisingai
+   * sukonfigūruotas diegimas gautų ŽALIĄ varnelę: „nematau" pavirstų į „viskas gerai".
+   *
+   * ⚠️ MEMORY IR REDIS GRĄŽINA TUŠČIĄ BŪSENĄ, IR TAI NE UŽPILDAS. Jie artefaktų
+   * rezolverio neturi, tad `rasymoBackend: null` yra jų TEISINGAS atsakymas; jį
+   * gavęs stebėtojas parodo, kad `ARTIFACT_STORE_BACKEND=s3` prie tokio job store'o
+   * nieko į S3 nerašo.
+   *
+   * ⚠️ 19 → 20 (#157, PR-5): pridėtas `sweepResultArtifacts()`. Šlavėjas klausia
+   * saugyklos dėl tos pačios priežasties kaip erasure: laikinojo etapo buvimas ir
+   * `storage_type -> ArtifactStore` žemėlapis gyvena ten.
+   *
+   * ⚠️ 18 → 19 (#157, PR-5): pridėtas `deleteResultArtifacts()`. Šalina saugykla, ne
+   * `jobErasure`, nes `storage_type -> ArtifactStore` žemėlapis gyvena store'e ir yra
+   * vienintelis; antra jo kopija kvietėjo pusėje būtų antra rezultato vietos
+   * interpretacija (A4).
+   *
+   * ⚠️ 17 → 18 (#157, PR-5): pridėtas `listResultArtifacts()`. Skaičius keliamas
+   * SĄMONINGAI. Erasure ir šlavėjas nuo šiol klausia REGISTRO, o ne vienos `job_results`
+   * nuorodos; backend'as, praradęs šį metodą, fasade duotų `null`, ir kvietėjas
+   * NIEKO netrintų — saugu, bet tyliai neteisinga, tad sargas krenta iškart.
+   *
+   * ⚠️ 16 → 17 (#184, 7.5b): pridėtas `finishAtomic()`. Skaičius keliamas
+   * SĄMONINGAI. Fasadas jo NETIKRINA `typeof === "function"` sąlyga: tokia
+   * patikra reikštų tylų grįžimą į NEATOMINĮ `get` + `update` kelią, jei kuris
+   * nors backend'as metodą prarastų - ir elgesys atrodytų teisingas, kol
+   * neįvyktų lenktynės. Vietoj to šis sargas krenta iškart.
    */
   const redis = createRedisStore({ on: () => {}, defineCommand: () => {} });
   const postgres = createPostgresStore({});
@@ -1007,11 +1078,45 @@ test("KONTRAKTAS: visi trys backend'ai deklaruoja TĄ PAČIĄ 15 metodų aibę",
     .sort();
   const expected = metodai(memoryStore);
 
-  assert.equal(expected.length, 15, "jobStore kontraktas privalo turėti tiksliai 15 metodų");
+  assert.equal(expected.length, 27, "jobStore kontraktas privalo turėti tiksliai 27 metodus");
   assert.deepEqual(metodai(redis), expected,
     "Redis metodų aibė privalo tiksliai sutapti su memory");
   assert.deepEqual(metodai(postgres), expected,
     "PostgreSQL metodų aibė privalo tiksliai sutapti su memory");
+
+  /**
+   * ⚠️ NE-FUNKCINIAI RAKTAI — APĖJIMAS PADAROMAS EKSPLICITINIS (#249, 7.6b).
+   *
+   * Aukščiau esantis palyginimas filtruoja `typeof === "function"`, tad OBJEKTO
+   * formos paviršius pro jį praeina NE dėl išimties, o dėl to, kad sargas jo
+   * NEMATO. 7.6b tuo pasinaudojo sąmoningai: `atkurimas.*` operacijos yra
+   * PostgreSQL-only (offline suderinimas, kuris memory režime privalo kristi),
+   * tad memory/Redis realizacijos būtų negyvas kodas.
+   *
+   * Sprendimas praktiškai teisingas, bet be šios patikros sargo teiginys „visi
+   * trys deklaruoja tą pačią aibę" nuo šiol būtų pažodžiui neteisingas, o kitas
+   * žmogus, pridėjęs antrą tokį raktą, gautų TYLĄ — būtent tai, ko šis sargas ir
+   * neturi leisti.
+   *
+   * Todėl skirtumas VARDIJAMAS: naujas ne-funkcinis raktas lauš testą, kol
+   * nebus įrašytas čia kartu su priežastimi.
+   */
+  const neFunkcijos = (store) => Object.keys(store)
+    .filter((key) => typeof store[key] !== "function")
+    .sort();
+
+  const LEIDZIAMAS_SKIRTUMAS = ["atkurimas"];
+
+  assert.deepEqual(neFunkcijos(memoryStore), neFunkcijos(redis),
+    "memory ir Redis ne-funkcinis paviršius privalo sutapti");
+
+  const skirtumas = neFunkcijos(postgres).filter((k) => !neFunkcijos(memoryStore).includes(k));
+  assert.deepEqual(skirtumas, LEIDZIAMAS_SKIRTUMAS,
+    "PostgreSQL ne-funkcinis paviršius gali skirtis TIK vardytais raktais");
+
+  /** ⚠️ KONTROLĖ: sąrašas nėra tuščias formalumas — raktas realiai egzistuoja. */
+  assert.equal(typeof postgres.atkurimas, "object");
+  assert.equal(typeof postgres.atkurimas.terminalizuotiNeTerminaliniusWithClient, "function");
 });
 
 test(
@@ -1108,4 +1213,127 @@ test("KONTRAKTAS: dokumentacija neteigia, kad memory backend'ui CAS nereikalinga
       `${failas}: teiginys prieštarauja reportProgressAtomic() egzistavimui`
     );
   }
+});
+
+/* ═══ FORMOS EKVIVALENTUMAS: METADUOMENŲ KELIAI ═══════════════════════ */
+
+/**
+ * ⚠️ KONTRAKTAS TIKRINO METODŲ AIBĘ IR ELGESĮ, BET NE GRĄŽINAMĄ FORMĄ
+ * (Codex blokatorius, #291).
+ *
+ * PR-3 metu PostgreSQL `listByFlag()` nustojo grąžinti `result`, o atminties ir Redis
+ * pusė jį grąžino toliau — ir rinkinys liko ŽALIAS. Kvietėjas, parašytas prieš vieną
+ * backend'ą, tokiu atveju tyliai elgiasi kitaip prieš kitą.
+ *
+ * ⚠️ LAUKŲ AIBĖ LYGINAMA TARP BACKEND'Ų, ne su ranka surašytu sąrašu: įrašytas
+ * sąrašas pasentų su pirmu nauju lauku, o palyginimas tarp backend'ų gaudo būtent tą
+ * klasę, dėl kurios šis testas ir egzistuoja.
+ */
+test("KONTRAKTAS: `listResultArtifacts()` inline backend'e grąžina TUŠČIĄ sąrašą — po tikro `finish()`", async () => {
+  /**
+   * ⚠️ TIKRINAMAS ELGESYS, NE KONSTANTA (#157, PR-5).
+   *
+   * `memory` realizacija grąžina `[]`, ir komentaras prie jos teigia, kad tai FAKTAS:
+   * external rašymo kelio šis backend'as neturi. Teiginys tikrinamas per tikrą
+   * užbaigimą su rezultatu — jei kada nors atsirastų external kelias, o metodas liktų
+   * grąžinantis `[]`, šis testas ir toliau būtų žalias TIK tol, kol rezultatas
+   * persistinamas įraše.
+   *
+   * ⚠️ KO ŠIS TESTAS NEĮRODO: PostgreSQL pusės. Ten sąrašas turi turėti registro
+   * bandymus, ir tai tikrinama PR-5 integraciniame teste su tikra DB — čia įrodoma tik
+   * inline backend'o pusė ir `null` vs `[]` skirtumas.
+   */
+  const job = await memoryStore.create({ ownerKind: "unowned", type: JOB_TYPES.TRANSCRIPTION });
+  await memoryStore.update(job.id, { status: "processing", phase: PHASE.TRANSCRIBING });
+  await memoryStore.finishAtomic(job.id, "completed", { result: { text: "inline" } });
+
+  const artefaktai = await memoryStore.listResultArtifacts(job.id);
+
+  assert.deepEqual(artefaktai, [], "inline rezultatas external artefaktų nepalieka");
+  assert.notEqual(artefaktai, null, '`null` reikstu "nezinau" - o cia zinoma');
+});
+
+test("KONTRAKTAS: `listByFlag()` grąžina TĄ PAČIĄ laukų aibę visuose backend'uose", async (t) => {
+  const formos = new Map();
+
+  for (const adapter of ADAPTERIAI) {
+    if (adapter.skip) {
+      t.diagnostic(`${adapter.name}: praleista (${adapter.skip})`);
+      continue;
+    }
+
+    const ctx = await adapter.setup();
+    try {
+      const job = await ctx.store.create({ ownerKind: OWNER_KIND.UNOWNED, type: JOB_TYPES.TRANSCRIPTION });
+      await ctx.store.update(job.id, { status: "processing", phase: PHASE.TRANSCRIBING });
+      await ctx.store.update(job.id, {
+        status: "completed",
+        phase: null,
+        result: { text: "turinys" },
+        deletion_pending: true,
+      });
+
+      const [irasas] = await ctx.store.listByFlag("deletion_pending");
+      assert.ok(irasas, `${adapter.name}: pažymėtas įrašas privalo būti grąžintas`);
+
+      formos.set(adapter.name, Object.keys(irasas).sort());
+
+      /**
+       * ⚠️ METADUOMENŲ KELYJE `result` LAUKO NĖRA — ir jis nėra `null`. `null` reikštų
+       * „rezultato nėra", nors jis yra; be to `applyPatch()` sprendžia pagal
+       * `"result" in job`, tad `null` būtų nurodymas jį IŠTRINTI.
+       */
+      assert.equal("result" in irasas, false, `${adapter.name}: metaduomenų kelias turinio neneša`);
+
+      /** KONTROLĖ: pilnas kelias rezultatą TURI — kitaip lygintume dvi tuštumas. */
+      assert.deepEqual(
+        (await ctx.store.get(job.id)).result,
+        { text: "turinys" },
+        `${adapter.name}: hidratuotas kelias privalo grąžinti rezultatą`
+      );
+
+      await ctx.store.remove(job.id);
+    } finally {
+      await ctx.cleanup();
+    }
+  }
+
+  /**
+   * ⚠️ VIENA ŽINOMA DIVERGENCIJA, IR JI NE APIE HIDRATACIJĄ.
+   *
+   * `deletion_pending`, `deletion_attempts` ir jų palydovai `newJob()` išvestyje
+   * NEEGZISTUOJA — juos materializuoja tik `postgresStore.rowToJob()` ir ištrynimo
+   * kelias. Tai užrašyta `common.js` (`BOOLEAN_FIELDS`/`NUMBER_FIELDS` komentaras) ir
+   * yra SENESNĖ už #157: laukai atsiranda tada, kai jais pradedama naudotis.
+   *
+   * ⚠️ SĄRAŠAS UŽRAŠOMAS, O NE PALIEKAMAS TYLĖTI. Skirtumas, kurio niekas nemato, po
+   * kelių mėnesių tampa „taip visada buvo"; skirtumas, kurio aibė tvirtinama, kiekvieną
+   * NAUJĄ narį paverčia kritimu. Būtent to ir reikia: `result` grįžimas į vieną
+   * backend'ą kris, nes jo šiame sąraše nėra.
+   */
+  const ZINOMOS_DIVERGENCIJOS = new Set([
+    "audio_cleanup_next_attempt_at",
+    "deletion_attempts",
+    "deletion_next_attempt_at",
+  ]);
+
+  const [pirmas, ...kiti] = [...formos.entries()];
+  assert.ok(pirmas, "bent vienas backend'as privalo būti įvykdytas");
+
+  for (const [vardas, laukai] of kiti) {
+    const tik_cia = laukai.filter((l) => !pirmas[1].includes(l));
+    const tik_ten = pirmas[1].filter((l) => !laukai.includes(l));
+    const skirtumas = [...tik_cia, ...tik_ten].sort();
+
+    t.diagnostic(`${vardas} vs ${pirmas[0]}: skirtumas = ${JSON.stringify(skirtumas)}`);
+
+    const nauji = skirtumas.filter((l) => !ZINOMOS_DIVERGENCIJOS.has(l));
+    assert.deepEqual(
+      nauji,
+      [],
+      `${vardas} ir ${pirmas[0]} išsiskyrė NAUJAIS laukais — kontraktas išsiskyrė`
+    );
+  }
+
+  t.diagnostic(`palyginti backend'ai: ${[...formos.keys()].join(", ")}`);
 });

@@ -27,10 +27,59 @@ const jobRunner = require("../queues/jobRunner");
  * naudoja tą patį jobStore, tad pasitikint URL'u protokolo jobo ID, pateiktas
  * transkripcijos endpoint'ui, būtų ieškomas ne toje eilėje.
  *
+ * ⚠️ SAUGYKLA GALI BŪTI NUKREIPTA (#250, 7.6c).
+ *
+ * Po DR atkūrimo asmens duomenys guli ATKURTOJE bazėje, o fasado autoritetas
+ * šiandien yra atmintis arba Redis (7.2a barjeras: `JOB_STORE_BACKEND=postgres`
+ * meta klaidą, vien `DATABASE_URL` grąžina `memory | barjeras: true`). Be šio
+ * parametro ištrynimų replay tokioje bazėje būtų VAKUUMAS: `jobs` eilutės
+ * liktų, o kvitas skelbtų sėkmę.
+ *
+ * Alternatyva - atskiras DB-only trynimas atkūrimo kelyje - reikštų ANTRĄ
+ * erasure vykdytoją, kuris ištrintų eilutes, bet paliktų audio objektus
+ * saugykloje: dalinis ištrynimas, praneštas kaip sėkmė. Todėl keičiama tik tai,
+ * KUR gyvena įrašas; audio, eilė ir auditas lieka tie patys globalūs posistemiai,
+ * o `storageKey` imamas iš pačios atkurtos eilutės.
+ *
+ * ⚠️ NEPILNA SAUGYKLA ATMETAMA PRIEŠ PIRMĄ ŠALINIMĄ. Trūkstamas metodas reikštų
+ * tyliai praleistą artefaktų klasę su sėkmės kvitu - ta pati klasė kaip #183
+ * „complete() nemetė, vadinasi pavyko".
+ *
  * @param {object} job - jobStore įrašas (ne tik id)
+ * @param {object} [opcijos]
+ * @param {object} [opcijos.store] - saugykla su `system.get/update/remove`;
+ *   numatytoji yra fasadas, tad esamiems kvietėjams elgesys nesikeičia
  * @returns {object} outcome su `criticalFailure` vėliava
  */
-async function eraseJob(job) {
+/**
+ * ⚠️ `deleteResultArtifacts` ĮTRAUKTAS Į BŪTINŲ AIBĘ (#157, PR-5).
+ *
+ * Be jo nukreipta saugykla praeitų patikrą ir kristų VIDURYJE — po eilės ir audio
+ * šalinimo, su `TypeError` vietoj aiškaus atmetimo. Šio sargo pažadas yra būtent
+ * priešingas: nepilna saugykla atmetama PRIEŠ pirmą šalinimą, kad nebūtų pusiau
+ * atlikto ištrynimo su neaiškia priežastimi.
+ */
+const BUTINI_SYSTEM_METODAI = Object.freeze(["get", "update", "remove", "deleteResultArtifacts"]);
+
+function patikrintiSaugykla(store) {
+  if (store === jobStore) return store;
+
+  const truksta = !store || !store.system
+    ? BUTINI_SYSTEM_METODAI
+    : BUTINI_SYSTEM_METODAI.filter((m) => typeof store.system[m] !== "function");
+
+  if (truksta.length > 0) {
+    throw new TypeError(
+      `eraseJob: nukreipta saugykla neteikia \`system.${truksta.join("`, `system.")}\`. ` +
+        "Nepilna saugykla reikštų praleistą artefaktų klasę su sėkmės kvitu."
+    );
+  }
+
+  return store;
+}
+
+async function eraseJob(job, { store = jobStore } = {}) {
+  const saugykla = patikrintiSaugykla(store);
   const jobId = job.id;
 
   // LEGACY: prieš `job.type` įvedimą sukurti (ypač Redis'e išlikę) jobai šio
@@ -51,6 +100,11 @@ async function eraseJob(job) {
     jobRemoved: false,
     queueJobRemoved: false,
     storageRemoved: false,
+    /** Bandyta šalinti, bet objekto NEBUVO — ne tas pat, kas „liko". */
+    storageAlreadyAbsent: false,
+    /** REZULTATO artefaktai (#157, PR-5): visi job'o bandymai, ne tik referencuotas. */
+    resultArtifactsRemoved: 0,
+    resultArtifactsAlreadyAbsent: 0,
     auditEntriesRemoved: 0,
     errors: [],
     criticalFailure: false,
@@ -89,12 +143,71 @@ async function eraseJob(job) {
 
   if (storageKey) {
     try {
-      await fileStorage.del(storageKey);
-      outcome.storageRemoved = true;
+      /**
+       * ⚠️ TRYS BŪSENOS, NE DVI (#250, Codex peržiūra).
+       *
+       * `fileStorage.del()` nesant objekto grąžina `false` BE klaidos. Anksčiau
+       * čia buvo `storageRemoved = true` besąlygiškai — tad `DATA_ERASED` rašė
+       * `storage=deleted` ir tada, kai nieko nepašalinta (auditas tvirtino
+       * veiksmą, kurio nebuvo).
+       *
+       * ⚠️ BET PAPRASTAS `Boolean(...)` PERŠOKA Į KITĄ KRAŠTUTINUMĄ. `false`
+       * tada reikštų „audio LIKO", nors objekto nebėra — o `lifecycleService`
+       * (`COVERED_CATEGORIES`) būtent taip jį ir skaito, tad įprastas
+       * pakartotinis trynimas rodytų `remaining: [source_audio]` prie sėkmingo
+       * statuso. Melagingas kvitas būtų pakeistas melagingu likučiu.
+       *
+       * Todėl fiksuojamos DVI skirtingos tiesos: „mes pašalinome" ir „jau nebuvo".
+       * Klausimui „ar artefakto nebėra" atsako jų sąjunga, ir būtent ją naudoja
+       * kvitas bei kategorijos.
+       */
+      const pasalinta = await fileStorage.del(storageKey);
+      outcome.storageRemoved = Boolean(pasalinta);
+      outcome.storageAlreadyAbsent = !pasalinta;
     } catch (e) {
       outcome.errors.push(`storage: ${e.message}`);
       outcome.criticalFailure = true;
     }
+  }
+
+  /**
+   * 2b) REZULTATO ARTEFAKTAI — PER REGISTRĄ, NE PER VIENĄ NUORODĄ (#157, PR-5).
+   *
+   * ⚠️ ŠALINAMI VISI JOB'O BANDYMAI, NE TIK LAIMĖJĘS. `job_results.storage_key` rodo į
+   * vieną — tą, kuris ir taip saugus, nes referencuotas. Pralaimėję ir remontuoti
+   * bandymai paliko savo objektus attempt-unique adresais, ir būtent dėl jų bandymų
+   * registras egzistuoja: be jo tie objektai yra transkripcijos be jokios rodyklės.
+   *
+   * ⚠️ PRIEŠ JOB'O EILUTĖS ŠALINIMĄ, IR TVARKA YRA GARANTIJOS DALIS. `job_results` turi
+   * `ON DELETE CASCADE` nuo `jobs`; pašalinus eilutę pirma, adresai dingtų, o
+   * pakartojimas (`deletionRetry`) nebeturėtų ko trinti.
+   *
+   * ⚠️ `null` YRA KRITINĖ NESĖKMĖ, NE NO-OP. Fasadas jį grąžina, kai saugykla metodo
+   * neturi — o „ištrinta" be objekto pašalinimo yra tiksliai tas melas, kurį #157 riba
+   * draudžia. Tyli šaka čia reikštų BDAR teiginį be padengimo.
+   */
+  let matytiArtefaktai = null;
+
+  try {
+    const artefaktai = await saugykla.system.deleteResultArtifacts(jobId);
+
+    if (artefaktai === null) {
+      outcome.errors.push("result artifacts: saugykla nepalaiko deleteResultArtifacts()");
+      outcome.criticalFailure = true;
+    } else {
+      outcome.resultArtifactsRemoved = artefaktai.pasalinti.length;
+      outcome.resultArtifactsAlreadyAbsent = artefaktai.jauNebuvo.length;
+      /** Aibė, kurią matėme PRIEŠ I/O — ją patikrins eilutės šalinimas po užrakto. */
+      matytiArtefaktai = artefaktai.matyti || null;
+
+      for (const nesekme of artefaktai.nepavyko) {
+        outcome.errors.push(`result artifact ${nesekme.storageKey}: ${nesekme.priezastis}`);
+        outcome.criticalFailure = true;
+      }
+    }
+  } catch (e) {
+    outcome.errors.push(`result artifacts: ${e.message}`);
+    outcome.criticalFailure = true;
   }
 
   // 3) Audito įrašai. KRITINIAI: pseudonimizuoti duomenys pagal BDAR vis tiek
@@ -112,7 +225,7 @@ async function eraseJob(job) {
   //    kad operaciją būtų galima pakartoti su tuo pačiu ID.
   if (outcome.criticalFailure) {
     try {
-      await jobStore.system.update(jobId, { deletion_pending: true, storageKey });
+      await saugykla.system.update(jobId, { deletion_pending: true, storageKey });
     } catch (e) {
       // Klientas ir taip gaus 503, bet garantijos, kad vėliava išsaugota, nėra -
       // tad bent jau nenutylim (anksčiau čia buvo tuščias .catch()).
@@ -122,10 +235,81 @@ async function eraseJob(job) {
   }
 
   try {
-    outcome.jobRemoved = Boolean(await jobStore.system.remove(jobId));
+    /**
+     * ⚠️ AIBĖ TIKRINAMA DAR KARTĄ PO UŽRAKTO (Codex, #304).
+     *
+     * Enumeracija vyko be užrakto — kitaip fizinis I/O būtų po `jobs` eilutės užraktu,
+     * ko PR-4 D4 neleidžia. Tarp jos ir šito šalinimo worker'is, praėjęs žymos patikrą
+     * PRIEŠ žymos atsiradimą, gali įsipareigoti naują bandymą; `CASCADE` tada pašalintų
+     * šviežią nuorodą, o objektas liktų be jos.
+     *
+     * `remove()` su `tiketiniAdresai` palygina aibę toje pačioje transakcijoje, kurioje
+     * šalina, ir grąžina `false`, jei atsirado naujas adresas. Tai NE „nieko nebuvo":
+     * žemiau `jobRemoved === false` su nepašalinta eilute reiškia NEBAIGTĄ ištrynimą.
+     */
+    outcome.jobRemoved = Boolean(
+      await saugykla.system.remove(jobId, matytiArtefaktai ? { tiketiniAdresai: matytiArtefaktai } : {})
+    );
+
+    if (!outcome.jobRemoved && matytiArtefaktai) {
+      /**
+       * ⚠️ SKAITYMO KLAIDA NĖRA „JOB'O NEBĖRA" (Codex, #304).
+       *
+       * Ankstesnė redakcija darė `.catch(() => null)`: laikinas DB gedimas virsdavo
+       * išvada „eilutės nebėra, vadinasi ištrynimas pavyko", `criticalFailure` likdavo
+       * `false`, kvitas būdavo išrašomas, o žyma finalizuojama. Neigiamas rezultatas
+       * priimtas iš įrodymo, kuris jo NENUSTATO.
+       *
+       * Ta pati taisyklė jau veikia `fsStore` zonde (`ENOENT` skiriamas nuo kitų
+       * klaidų) ir `sweepResultArtifacts` (metimas -> `nepavyko`, ne `nebuvo`); ji
+       * tiesiog nebuvo pritaikyta čia.
+       */
+      let dar = null;
+      try {
+        dar = await saugykla.system.get(jobId, { hydrate: false });
+      } catch (skaitymoKlaida) {
+        outcome.errors.push(
+          `jobStore: po-CAS patikros skaityti nepavyko (${skaitymoKlaida.message}) — ` +
+            "ištrynimo būsena NEŽINOMA, tad kvitas neišrašomas"
+        );
+        outcome.criticalFailure = true;
+        dar = null;
+      }
+
+      if (dar) {
+        /**
+         * ⚠️ TAI NE „LENKTYNĖS" — TAI BARJERO PRAĖJIMAS.
+         *
+         * Bandymas, įsipareigotas PO to, kai ištrynimo žyma jau egzistuoja, reiškia, kad
+         * kažkas praėjo tombstone patikrą, kuri tam ir skirta. Pakartojimas čia padės
+         * (nauja aibė bus enumeruota iš naujo), bet jei tai KARTOJASI, problema yra
+         * barjero, ne ištrynimo — ir klaidos tekstas tai pasako, kad operatorius
+         * neieškotų jos ištrynimo kelyje.
+         */
+        outcome.errors.push(
+          "result artifacts: tarp enumeracijos ir šalinimo įsipareigotas naujas bandymas — " +
+            "ištrynimas NEBAIGTAS. Pasikartojant tai yra ŽYMOS BARJERO, ne ištrynimo problema."
+        );
+        outcome.criticalFailure = true;
+      }
+    }
   } catch (e) {
     outcome.errors.push(`jobStore: ${e.message}`);
     outcome.criticalFailure = true;
+  }
+
+  /**
+   * ⚠️ NEBAIGTAS IŠTRYNIMAS PRIVALO TURĖTI KAS JĮ ATNAUJINS (Codex, #304 peržiūra).
+   *
+   * `deletionRetry` kandidatus randa per `listPendingDeletions()`, t. y. per
+   * `deletion_pending` vėliavą. Aukštesnis `criticalFailure` blokas ją uždeda ir
+   * grįžta, bet šalinimo žingsnio gedimai iki šiol jos NEUŽDĖDAVO — tad būsena „eilutė
+   * liko, ištrynimas nebaigtas" būtų fail-closed be pabaigos: niekas nebandytų iš naujo.
+   */
+  if (outcome.criticalFailure && !outcome.jobRemoved) {
+    await saugykla.system
+      .update(jobId, { deletion_pending: true, storageKey })
+      .catch((e) => outcome.errors.push(`deletion_pending: ${e.message}`));
   }
 
   await writeDeletionReceipt(outcome);
@@ -156,10 +340,19 @@ async function writeDeletionReceipt(outcome) {
   // klaidingą DATA_ERASED įrašą - o kadangi kvitai neturi subjectId, jų srautas
   // galėjo per AUDIT_MAX_ENTRIES išstumti tikrus audito įrašus. Tas pats galioja
   // lenktynių atvejui, kai `jobStore.system.remove()` grąžina false.
+  /**
+   * ⚠️ `resultArtifactsRemoved` PRIVALO BŪTI ČIA (Codex, #304).
+   *
+   * Be jo: jei rezultato objekto pašalinimas buvo VIENINTELIS fizinis veiksmas,
+   * `DATA_ERASED` kvito nebūtų — ištrynimas įvyktų be pėdsako. Reikšmė buvo rašoma į
+   * suvestinę, kurios šis sprendimas neskaito: „write nėra behavior" (§19.5) trečiu
+   * pavidalu.
+   */
   const anythingRemoved =
     outcome.jobRemoved ||
     outcome.queueJobRemoved ||
     outcome.storageRemoved ||
+    outcome.resultArtifactsRemoved > 0 ||
     outcome.auditEntriesRemoved > 0;
 
   if (!anythingRemoved) return;
@@ -176,8 +369,14 @@ async function writeDeletionReceipt(outcome) {
     success: true,
     details:
       `type=${outcome.type} queue=${outcome.queueJobRemoved ? "deleted" : "none"} ` +
-      `storage=${outcome.storageRemoved ? "deleted" : "none"} ` +
+      `storage=${outcome.storageRemoved ? "deleted" : outcome.storageAlreadyAbsent ? "absent" : "none"} ` +
       `jobStore=${outcome.jobRemoved ? "deleted" : "none"} ` +
+      /**
+       * ⚠️ REZULTATO ARTEFAKTAI KVITE ATSKIRAI (#157, PR-5). `storage=` kalba apie
+       * ŠALTINIO AUDIO; sujungus abu, kvitas nebepasakytų, kuris artefaktas pašalintas,
+       * o po #157 jų yra du skirtingi tipai skirtingose vietose.
+       */
+      `results=${outcome.resultArtifactsRemoved}/${outcome.resultArtifactsAlreadyAbsent} ` +
       `audit=${outcome.auditEntriesRemoved}`,
   });
 }
@@ -260,8 +459,16 @@ async function eraseOrphanedJobData(jobId, options = {}) {
   outcome.ownershipVerified = false;
 
   outcome.orphan = true;
+  /**
+   * ⚠️ IR ČIA (Codex, #304). Našlaitis, kurio VIENINTELIS artefaktas yra external
+   * rezultatas, be šito būtų ištrintas, o kvietėjas gautų 404 — „nieko neradom" apie
+   * job'ą, kurio transkripciją ką tik pašalinom.
+   */
   outcome.found =
-    outcome.queueJobRemoved || outcome.storageRemoved || outcome.auditEntriesRemoved > 0;
+    outcome.queueJobRemoved ||
+    outcome.storageRemoved ||
+    outcome.resultArtifactsRemoved > 0 ||
+    outcome.auditEntriesRemoved > 0;
 
   // jobStore įrašo nebuvo - tai ne klaida, o šio kelio prielaida.
   outcome.jobRemoved = false;
@@ -269,4 +476,4 @@ async function eraseOrphanedJobData(jobId, options = {}) {
   return outcome;
 }
 
-module.exports = { eraseJob, eraseOrphanedJobData };
+module.exports = { BUTINI_SYSTEM_METODAI, eraseJob, eraseOrphanedJobData };

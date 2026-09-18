@@ -2,8 +2,8 @@
 #
 # Trigeris: komentaras, PRASIDEDANTIS `/gemini-pre-review`, issue gijoje (ne PR),
 # rašytas OWNER / MEMBER / COLLABORATOR. Naujas issue apžvalgos nepaleidžia —
-# sąmoningai: `create-155-subissues.sh` viena partija sukuria 9 issue su 3
-# label'ais kiekvienam, tad automatinis trigeris duotų ~36 paleidimus.
+# sąmoningai: `scripts/dev/create-155-subissues.sh` viena partija sukuria 16 issue su 3
+# label'ais kiekvienam, tad automatinis trigeris duotų ~64 paleidimus.
 #
 # Prieš pirmą paleidimą: Settings > Secrets and variables > Actions >
 #   GEMINI_API_KEY   (privaloma; be jo job'as fail'ina ir paskelbia klaidos komentarą)
@@ -94,7 +94,10 @@ jobs:
     if: needs.gate.outputs.run == 'true'
 
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 min neužteko #35 (trys paleidimai iš eilės nutraukti ties 19m54s).
+    # Apžvalgos trukmė auga kartu su repo; jei ir 40 neužteks, sprendimas
+    # yra apimties siaurinimas (ką skenuoti), ne dar didesnis skaičius.
+    timeout-minutes: 40
 
     permissions:
       contents: read
@@ -365,9 +368,18 @@ jobs:
             State that the comparison is not verifiable from available evidence,
             per GEMINI.md §10.1.
 
-            Where the parent specification exists in the repository (for
-            example SUBISSUES-155.md, docs/decisions/), use the repository copy
-            as evidence and say which copy you used.
+            Authority model. The issue body supplied in
+            .gemini-review-input/ is the TO-BE authority: it states the current
+            requirements and Definition of Done under review. Repository code,
+            tests and migrations are the AS-IS evidence. Architecture decision
+            records in docs/decisions/ are authoritative for the architectural
+            decisions within their own scope.
+
+            Historical planning artifacts — for example SUBISSUES-155.md, which
+            generates issue text — record where a requirement came from. They
+            are provenance, not authority: a divergence between such an artifact
+            and an active issue body is not by itself a finding, and rewriting
+            the artifact is not a way to change an active issue specification.
 
             Inspect all relevant repository evidence available through the
             read-only tools, including where material:

@@ -17,6 +17,11 @@
 
 /** Testai, kuriems reikia TIKRO Redis (be jo jie patys save praleidžia). */
 const redis = [
+  /**
+   * #157 (PR-4): struktūrinis atmetimas TIKRAME BullMQ kelyje. Vienetinis testas
+   * įrodytų tik ženklo buvimą; klausimas yra, ar retry grandinė realiai sustoja.
+   */
+  "artifactUnrecoverable.integration",
   "queueRecovery.integration",
   "heartbeatReadiness.integration",
   "redisConcurrency.integration",
@@ -41,6 +46,14 @@ const redis = [
    * ELGESĮ, o BullMQ yra produkcijos kelias, kuris po #155 rašys į DB.
    */
   "resultLimitsWorker.integration",
+  /**
+   * #184 (7.5b): worker'io įėjimo kelio idempotentiškumas ir audio barjeras.
+   *
+   * TIKRAS BullMQ būtinas: patikra gyvena `createWorker()` processor'iaus viduje
+   * ir be tikros eilės nepasiekiama. Vienetinis testas tikrintų atkartotą
+   * sąlygos KOPIJĄ, o kopija ilgainiui nuo originalo išsiskiria.
+   */
+  "workerIdempotency.integration",
 ];
 
 /**
@@ -48,6 +61,8 @@ const redis = [
  * eksporto variantai, auditas be turinio.
  */
 const privacy = [
+  /** #155, 7.4d: persistentinė retencija ir `PRIVACY_MODE` postgres režime. */
+  "auditRetention",
   "piiRedaction",
   "privacyConfig",
   "privacyPolicy",
@@ -61,7 +76,22 @@ const privacy = [
   "exportVariants.route",
   "exports.route",
   "auditErasure.service",
+  /**
+   * #216 (7.4e): audito ištrynimo galutinumas - barjeras prieš subjektui susietą
+   * rašymą po ištrynimo. Eina TEN, KUR `auditErasure.service`: ta pati garantijų
+   * šeima, tik iš kitos pusės - ana tikrina, kad ištrynimas RANDA įrašus, ši -
+   * kad po jo naujų NEATSIRANDA.
+   */
+  "auditErasureFinality",
   "auditLog",
+  "auditStoreFields",
+  "auditKeyRing",
+  "auditCursor",
+  "auditQuery.route",
+  "auditRotation",
+  "suiteDerivation",
+  "auditReadiness.route",
+  "auditStoreBackendContract.integration",
   "jobErasure",
   "deletionResilience",
   "audioCleanup",
@@ -84,6 +114,17 @@ const privacy = [
   "deletionEnforcement",
   "lifecycleE2E",
   "deletionDocumentation",
+  /**
+   * #155, 7.5a: persistentinės ištrynimo žymos. `revivalHorizons` čia, o ne
+   * `functional`, sąmoningai - jo dalykas yra ne eilių konfigūracija, o
+   * klausimas „kiek ilgai žyma privalo gyvuoti", t. y. ištrynimo garantija.
+   */
+  "erasureMarks",
+  "revivalHorizons",
+  /** #342: starto užklausų ribos — fail-never režimas. Be DB. */
+  "startPoolTimeouts",
+  /** #342: cutover 5b blokas vykdomas su stub'intu `redis-cli`. Be Redis. */
+  "cutoverPreflight",
   "observabilityEvents.route",
 ];
 
@@ -96,6 +137,16 @@ const security = [
   "deletionRetryPersistence",
   /** CI workflow struktūra: dublikuotas raktas tyliai išjungtų testų žingsnį. */
   "workflowIntegrity",
+  /**
+   * #237: ištrintų testų sargas.
+   *
+   * Eina TEN, KUR `workflowIntegrity` - abu gina ne funkciją, o patį patikrų
+   * sluoksnį, ir abiem prasminga lūžti tame pačiame žingsnyje. `security`
+   * pasirinktas dar ir todėl, kad `check-security-matrix.mjs` reikalauja
+   * kiekvieną šio rinkinio failą paminėti matricoje - t. y. rinkinys PRIVERČIA
+   * dokumentaciją, o ne pasikliauja atmintimi.
+   */
+  "deletedTestsGuard",
   /** #159: nuosavybės filtras ir privilegijuoto namespace'o riba. */
   "jobOwnership",
   "systemNamespaceBoundary",
@@ -149,6 +200,11 @@ const security = [
    * dviejų, o divergencija būtų būtent ta, kurios niekas nemato.
    */
   "sessionStoreBackendContract.integration",
+  /**
+   * ⚠️ #155, 7.4b: TAS PATS DVIGUBAS REGISTRAVIMAS. `security` paleidžia audito
+   * atminties adapterį kiekviename `npm test`; `postgres` - PostgreSQL adapterį.
+   */
+  "auditStoreBackendContract.integration",
   "rbac.route",
   "workerAuthorization",
   "authRoutes.route",
@@ -166,7 +222,22 @@ const security = [
   "logger",
   "workerGuard",
   "workerRetry",
+  /**
+   * #155 (barjero prielaida): eilės prieinamumo preflight.
+   *
+   * Eina TEN, KUR `startupChecks` ir `startupOrder` — tai starto elgesys, ir
+   * klausimas yra fail-closed pobūdžio: ar serveris pradeda klausytis su eile,
+   * kurios nėra.
+   */
+  "eilesPreflight",
   "startupChecks",
+  /**
+   * #245: viena PostgreSQL jungties formos semantika keturiems pool'ams plius
+   * dviprasmybės sargas pagal EFEKTĄ. Eina TEN, KUR `startupChecks`: tas pats
+   * klausimas („ar servisas jungiasi ten, kur mano operatorius?"), tik iš
+   * konfigūracijos pusės, ir čia gyvena kredencialų nepratekėjimo garantija.
+   */
+  "pgConnectionSemantics",
   "startupOrder",
   "httpClient.timeout",
   "audioMagicBytes",
@@ -187,6 +258,17 @@ const functional = [
   "diarization.route",
   "fasterWhisperConcurrency",
   "fasterWhisperEmbedded",
+  /**
+   * #202: `pythonGuard` elgsenos testai eina TEN, KUR VEIKIA PATS SARGAS.
+   *
+   * Failas testuoja ne funkcionalumą, o testų infrastruktūrą - repo tokio
+   * rinkinio neturi (`suiteDerivation` yra `privacy`, `workflowIntegrity` -
+   * `security`), tad rinktis reikia iš esamų. `functional` pasirinktas dėl
+   * vienos konkrečios priežasties: būtent šį rinkinį CI paleidžia su
+   * `REQUIRE_PYTHON=1`, tad sargo testai vykdomi TOJE pačioje aplinkoje, kurią
+   * sargas ir valdo - o ne kitame žingsnyje, kur vėliavos nėra.
+   */
+  "pythonGuard",
   "fasterWhisperStream",
   "filterHallucinations",
   "generate.route",
@@ -196,6 +278,193 @@ const functional = [
   "jobRunnerBullmq",
   "jobStore",
   "jobStoreRedis",
+  /**
+   * #205 (7.2c): kanoninių tipų normalizavimas ir backend'ų paritetas.
+   *
+   * Eina TEN, KUR `jobStore` ir `jobStoreRedis` - tai to paties sluoksnio
+   * elgsena. Memory ir Redis (per `FakeRedis`) pusė vykdoma be išorinių
+   * servisų; PostgreSQL pusė gyvena `postgresStore.integration`, kur jau yra
+   * veikianti DB infrastruktūra.
+   */
+  "jobStoreTypeNormalization",
+  /**
+   * #184 (7.5b): `jobs.version` optimistic lock pariteto pagrindas.
+   *
+   * Tas pats sluoksnis ir tos pačios priežastys kaip `jobStoreTypeNormalization`:
+   * memory ir Redis (per `FakeRedis`) tikrinami be išorinių servisų, o PostgreSQL
+   * pusė lieka `migrations.integration` / `postgresStore.integration`, kur DB
+   * realiai yra.
+   */
+  /**
+   * #184 (7.5b): konflikto kontraktas — penkios atskiriamos baigtys.
+   *
+   * Memory ir fasado pusė be išorinių servisų; PostgreSQL klasifikacija lieka
+   * `postgresStore.integration`, Redis Lua CAS — `ownershipCasRedis.integration`.
+   */
+  "jobConflictContract",
+  /**
+   * #184 (7.5b): atominis ir idempotentiškas `finish(COMPLETED)`.
+   *
+   * Kanoninė lygybė ir trys `completed` baigtys tikrinamos be servisų; `jsonb`
+   * round-trip, transakcijos atomiškumas ir lenktynės - `postgresStore.integration`,
+   * worker'io įėjimo kelias - `workerIdempotency.integration` (`redis`).
+   */
+  "jobFinishIdempotency",
+  /**
+   * #248 (7.6a): šifruotos PostgreSQL kopijos KONTRAKTAS be DB.
+   *
+   * Dydžio riba, rūšies antraštė ir D2 sargas („operatoriaus kelias neturi savo
+   * orkestracijos") tikrinami be išorinių servisų. Pati procedūra —
+   * `pgDumpBackup.integration`, kuris reikalauja ir tikros DB, ir `pg_dump`
+   * binaro, tad išvedamas į `postgres` rinkinį per `postgresGuard` importą.
+   */
+  "pgDumpBackupContract",
+  "pgBackupPgForma",
+  /**
+   * #249 (7.6b): post-restore suderinimo KONTRAKTAS be DB.
+   *
+   * Fail-closed sargai (`RECONCILE_*`), terminalizavimo patch'o KILMĖ iš
+   * `jobPhase` autoriteto, praleidimo predikatas ir CLI exit kodai tikrinami be
+   * išorinių servisų — su padirbtu DB klientu, ne su mock'intu `jobPhase`.
+   *
+   * Persistentinė būsena, transakcijos atsukimas ir realus auth kelias su senais
+   * cookie gyvena `postRestoreReconcile.integration`, kuris išvedamas į
+   * `postgres` rinkinį per `postgresGuard` importą.
+   */
+  "postRestoreReconcileContract",
+  /**
+   * #250 (7.6c): erasure-safe atkūrimo KONTRAKTAI be DB.
+   *
+   * `erasureExportContract` — suliejimo taisyklė ir artefakto sargai (gryna
+   * logika); `erasureReplayContract` — replay elgesys su TIKRAIS atminties
+   * saugyklos keliais (`jobStore`, `deletionTombstones`, `jobErasure`), kur
+   * įrodoma, kad replay pašalina job'ą ten, kur `lifecycleService` jo palieka;
+   * `drCoordinatorContract` — sekos raktai ir pasenusio žurnalo override abiem
+   * pėdsako laikmenomis.
+   *
+   * Persistavimas, transakcijos ir pilna DR seka su tikru `pg_restore` gyvena
+   * `drRestore.integration`, kuris išvedamas į `postgres` rinkinį.
+   */
+  "drCoordinatorContract",
+  /**
+   * #250: `drRestore.integration` APLINKOS prielaidos, tikrinamos VIETOJE.
+   *
+   * Trys CI raundai iš eilės krito ne ties DR elgesiu, o ties aplinka
+   * (`AUDIT_ID_SALT`, sesijos forma, base64 raktas vietoj hex). Šis testas tą
+   * patį klausimą užduoda per sekundes, prieš nepasiekiamą bazę.
+   */
+  "drRestorePreconditions",
+  /**
+   * #157 (PR-2): `ArtifactStore` kontraktas ir klaidų klasifikavimas.
+   *
+   * `artifactStoreContract` paleidžia BENDRĄ scenarijų rinkinį prieš `fs` — jam
+   * nereikia nei DB, nei tinklo, tad kontrakto pažeidimas matomas per sekundes.
+   * Tas pats rinkinys prieš `inline` ir `s3` gyvena integraciniuose failuose.
+   */
+  "artifactStoreContract",
+  "artifactStoreErrors",
+  /**
+   * #157 (PR-2): S3 sprendimai, tikrinami BE tinklo.
+   *
+   * Trys dalykai neįrodomi prieš tikrą MinIO: `NoSuchBucket` klaidos ji pagal
+   * užsakymą neduoda, versijuoto kibiro CI'uje nekuriame, o checksum nustatymų
+   * pašalinimo pririšta versija NESULAUŽO (išmatuota). Vietinis testas juos
+   * padengia deterministiškai.
+   */
+  "artifactStoreS3Config",
+  /** #157 (PR-2): inline rašymo kelias — kvitas aprašo tai, kas įrašyta. */
+  "artifactStoreInlineWrite",
+  /** #157 (PR-2): `fs` riba, laikini failai ir rašymo patvarumas. */
+  "artifactStoreFsBoundary",
+  "artifactVerifyRiba",
+  /** #157 (PR-2): klaidų pranešimų higiena — turinys nepatenka į viešą lauką. */
+  "artifactStoreMessages",
+  /** #157 (PR-2): kodekas — viena reikšmių sritis abiem kryptim + raktų pernešamumas. */
+  "artifactStoreCodec",
+  /** #157 (PR-3): ribotas skaitymas — hidratacijos stabdis. */
+  "artifactStoreBoundedRead",
+  /** #157 (PR-3): hidratacijos vėliava — projekcijos forma ir kvietimo vieta. */
+  "jobStoreHydrationFlag",
+  /** #157 (PR-3): hidratacija kaip OPERACIJOS sprendimas (maršruto kelias). */
+  "jobAccessHydration",
+  /** #157 (PR-3): adapteris negali siaurinti parašo. */
+  "restoredJobStoreForwarding",
+  /** #157 (PR-4): bandymų registro modulis (grynas SQL sluoksnis). */
+  "attemptRegistry",
+  /**
+   * #157 (PR-6): migracijos kontraktas be DB.
+   *
+   * Pariteto klausimai (`BUSENA`/`PRIEZASTIS` prieš migracijos užšaldytas aibes)
+   * ir CLI struktūrinė sargyba atsakomi per sekundes; elgesys su tikra DB gyvena
+   * `artifactMigration.integration`, kuris išvedamas į `postgres` rinkinį per
+   * `postgresGuard` importą.
+   */
+  "artifactMigrationContract",
+  "sweepVerdiktai",
+  /** #157 (PR-4): lygybės paritetas ir round-trip ištikimybė. */
+  "artifactRoundTrip",
+  /**
+   * #298: kanoninė tapatybė modeliuoja saugyklą.
+   *
+   * Grynos funkcijos savybės, tad be DB ir be saugyklos — `JSON.stringify` yra
+   * tas pats visuose trijuose keliuose. Elgesį prieš tikras saugyklas tikrina
+   * bendras scenarijų rinkinys (`NUOSTOLINGI`).
+   */
+  "kanonineTapatybe",
+  /**
+   * #157 (PR-7, sąlygos 6-8): restore verifikacijos VERDIKTAI.
+   *
+   * Klausimas yra apie SPRENDIMĄ („ar ši eilutė laikoma patikrinta"), ne apie
+   * I/O, tad dublis čia tikslesnis už gyvą saugyklą: `nepriklausomas: false` iš
+   * external saugyklos yra kontrakto pažeidimas, kurio tikra saugykla negamina,
+   * o ataskaita privalo jį atskirti nuo teisėtos inline eilutės. Elgesį prieš
+   * tikras saugyklas tikrina `artifactRestoreIntegrity.integration`.
+   */
+  "artifactRestoreVerify",
+  /**
+   * #155 (A2): cutover skripto RIBOS — be Redis.
+   *
+   * Skriptas buvo parašytas uždaryti klasę „dokumentuota komanda, kurios niekas
+   * negali paleisti", ir pats atsirado BE TESTO — CI logas tai parodė tiesiai.
+   * Tikrinamos tik ribos (rašybos klaida vėliavoje, ne-`redis` backend'as,
+   * atsisakymas PRIEŠ jungtį), nes būtent jos saugo nuo neteisingo paleidimo.
+   */
+  "cutoverTerminalize",
+  /**
+   * #155: informacinė eilutė „PostgreSQL sukonfigūruotas, job'ai atmintyje".
+   *
+   * Rašoma PRIEŠ barjerą, ne po jo — ta pati priežastis kaip #157 PR-7
+   * pradžioje: stebėtojas prieš stebimą dalyką. Po eksplicitinio pasirinkimo
+   * įvedimo ši būsena taps DAŽNA, tad jos tekstas ir sanitizacija tikrinami.
+   */
+  "jobStoreBackendInfo",
+  /** #157 (PR-2): S3 kaip fail-closed riba — politika, atsakymų validacija, srautinė patikra. */
+  "artifactStoreS3Protocol",
+  /** #157 (PR-2): backend'o parinkimas ir fail-fast konfigūracija. */
+  "artifactStoreRegistracija",
+  "artifactStoreSelection",
+  /**
+   * #157 (PR-7, 3 sąlyga): prijungimo stebėtojas — BE DB.
+   *
+   * Verdiktas yra trijų aibių palyginimas, ir dublis atkuria `pg` šakas (`42P01`,
+   * tikras gedimas) tiksliau nei gyva bazė, kurioje jas dar reikėtų SUKELTI.
+   * Čia gyvena ir sanitizacijos sargas: realios paslaptys paduodamos per `env`,
+   * ir reikalaujama, kad nė viena neatsirastų verdikte (#319 klasė). Užklausų
+   * galiojimą prieš realią schemą tikrina `artifactStorePrijungimasSchema.integration`.
+   */
+  "artifactStorePrijungimas",
+  /**
+   * #157 (PR-7): PRIJUNGIMO taisyklės — BE DB.
+   *
+   * `initializePostgres()` be tikros DB nepasileidžia, tad jo asercijos guli
+   * `postgres` rinkinyje. Bet taisyklė „`inline` saugykla NEPADUODAMA" nuo DB
+   * nepriklauso, o jos pažeidimas duotų `23514` KIEKVIENAM užbaigimui diegime,
+   * kuris #157 dar nenaudoja — tokia klasė negali laukti CI raundo.
+   */
+  "jobStoreArtefaktuPrijungimas",
+  "erasureExportContract",
+  "erasureReplayContract",
+  "jobVersionParity",
   "jobs.route",
   "mergeDiarization",
   "mockLLMProvider",
@@ -216,52 +485,233 @@ const functional = [
  * triukšmu. CI paleidžia su `REQUIRE_POSTGRES=1`, kuris praleidimą paverčia
  * klaida.
  */
-const postgres = [
-  "migrations.integration",
-  /** #155: PostgreSQL būsena doctor/health išvestyje. */
-  "postgresDoctor.integration",
-  /**
-   * #155, 7.2a: trečias `jobStore` backend'as.
-   *
-   * ⚠️ TIKRAS PostgreSQL BŪTINAS, ne mock. Testuojami dalykai gyvena būtent
-   * DB pusėje: `CHECK` constraint'ų `UNKNOWN` semantika, dalinio `UNIQUE`
-   * indekso elgesys su `NULL` ir `ON DELETE CASCADE`. Su mock'u jie visi
-   * praeitų nieko netikrindami.
-   */
-  "postgresStore.integration",
-  /**
-   * #155, 7.2a: DB CHECK aibės vs runtime autoritetai.
-   *
-   * ⚠️ Sąrašai IŠVEDAMI iš runtime konstantų, ne surašomi - naujas job tipas,
-   * statusas ar fazė be atitinkamos migracijos krinta iškart, o ne po to, kai
-   * sugadinta kopija bus įrašyta.
-   */
-  "dbRuntimeParity.integration",
-  /**
-   * ⚠️ REGISTRUOTAS ABIEJUOSE RINKINIUOSE (`redis` ir `postgres`).
-   *
-   * CI turi du atskirus žingsnius su skirtingomis priklausomybėmis
-   * (`test:redis` su `REDIS_URL`, `test:postgres` su `DATABASE_URL`). Failas,
-   * likęs tik `redis` rinkinyje, PostgreSQL žingsnyje NEBŪTŲ paleistas, o
-   * `redis` žingsnyje `DATABASE_URL` nėra - tad 7.2b pridėtas PostgreSQL
-   * adapteris pats save praleistų, ir CI tikrintų du backend'us iš trijų.
-   *
-   * PostgreSQL adapteris vykdomas šiame rinkinyje; Redis scenarijai šiame
-   * žingsnyje teisėtai praleidžiami, nes `REDIS_URL` čia nėra.
-   */
-  "jobStoreBackendContract.integration",
-  /** #155, 7.3: bendras sesijų scenarijų rinkinys - PostgreSQL adapteris. */
-  "sessionStoreBackendContract.integration",
-  /**
-   * #155, 7.3: garantijos, kurių atmintyje NĖRA - hash-only saugojimas, DB
-   * laiko invariantai, viena sąlyginė autentikacijos užklausa, revokacija
-   * tarp procesų ir startinis suderinimas.
-   */
-  "sessionPersistence.integration",
-];
+/**
+ * TESTAI, KURIEMS REIKIA TIKRO PostgreSQL - IŠVEDAMI, NE SURAŠOMI (#155, 7.4f / #231).
+ *
+ * ⚠️ RANKINIS SĄRAŠAS ČIA BUVO REALI SPRAGA.
+ *
+ * Naujas integracinis testas, kurio kas nors nepridėtų ranka, NIEKADA nebūtų
+ * paleistas: `npm run test:postgres` jo nematytų, CI liktų žalias, o kodas -
+ * nepatikrintas. Skirtingai nuo kitų rinkinių, čia klaida nematoma - failas
+ * priklauso `privacy` ar `security`, tad manifesto pilnumo patikra nesiskundžia,
+ * o vienintelis dalykas, kurio trūksta, yra vykdymas su tikra DB.
+ *
+ * ⚠️ KRITERIJUS - `postgresGuard` IMPORTAS, NE `.integration` VARDAS.
+ *
+ * Spec'as siūlė „vardas su `.integration` ARBA `postgresGuard` importas", bet
+ * vardo kriterijus surenka ir REDIS integracinius testus (`actorEraRedis`,
+ * `queueRecovery`, `ownershipCasRedis`...), kuriems PostgreSQL nereikia. Jie
+ * postgres žingsnyje praleistų save dėl `REDIS_URL` trūkumo, ir vykdymo
+ * įrodymas („kiekvienam failui bent vienas `ok`") kristų dėl testų, kurie ten
+ * apskritai nepriklauso.
+ *
+ * `postgresGuard` importas yra TIKROJI priklausomybė ir duoda tiksliai tą aibę,
+ * kuri anksčiau buvo surašyta ranka. Nuo naujo PG testo, pamiršusio guard'ą,
+ * saugo atskira patikra `tests/suiteDerivation.test.js`: kiekvienas failas,
+ * importuojantis `pg` arba guard'ą, privalo atsidurti šiame rinkinyje.
+ *
+ * ⚠️ VYKDYMO ĮRODYMAS ATSKIRAI. Sąrašo sudarymas neįrodo, kad testai pasileido:
+ * su `REQUIRE_POSTGRES=1` kiekvienam rinkinio failui privalo pasirodyti bent
+ * vienas `ok` (žr. `tests/suiteDerivation.test.js`). Žalias job'as su
+ * praleistais testais nėra sėkmė.
+ */
+/**
+ * Failo `require()` argumentai.
+ *
+ * ⚠️ VIENAS PRAĖJIMAS SIMBOLIAIS, NE REGEX GRANDINĖ (#233 Codex raundas 2, #1).
+ *
+ * Ankstesnė versija komentarus nuimdavo PRIEŠ atpažindama literalus. Tvarka
+ * neteisinga iš principo: komentaro ir literalo atpažinimas yra tarpusavyje
+ * priklausomas, tad regex grandinė lūžta ABIEM kryptimis, ir abi buvo realios:
+ *
+ *   1. `'// require("./helpers/postgresGuard");'` - eilutė, ne komentaras. Iš
+ *      jos nuimtas „komentaras" nuplėšia uždarančią kabutę, ir skeneris randa
+ *      importą, kurio nėra. Šitaip `suiteDerivation` ĮKRITO į postgres rinkinį -
+ *      dėl savo paties sintetinio testo duomenų.
+ *   2. `const marker = '//'; require('./helpers/postgresGuard')` - čia `//` yra
+ *      eilutėje, bet senoji versija nuo jos nuplėšdavo likusią eilutę kartu su
+ *      TIKRU importu. Realus PostgreSQL testas tyliai iškristų iš CI.
+ *
+ * Todėl einama simboliais su būsena: kodas, `'`/`"`/`` ` `` literalas, eilutės
+ * komentaras, bloko komentaras, reguliarusis reiškinys. Pilno JS parserio
+ * nereikia - reikia tik teisingos atpažinimo tvarkos.
+ *
+ * ⚠️ REGULIARIEJI REIŠKINIAI ATPAŽĮSTAMI SĄMONINGAI. Testų failuose pilna
+ * šablonų su kabutėmis (`/["']/`). Be šito pirmoji tokio šablono kabutė
+ * pradėtų „eilutę", kuri surytų kodą iki kitos kabutės - kartu su tikrais
+ * importais. Tai ta pati 2 klaida, tik kita priežastimi.
+ *
+ * ⚠️ Šablonas NEKONSTRUOJAMAS iš kintamųjų (CodeQL): grąžinami visi importai, o
+ * kvietėjas lygina eilutes.
+ *
+ * RIBOS, kurias verta žinoti: šablonine eilute su `${...}`, kurioje yra dar
+ * viena atgalinė kabutė, tokenizatorius suklystų; tokio kodo repozitorijoje
+ * nėra, o `pg` naudojimo patikra `suiteDerivation.test.js` dengia tą kelią
+ * nepriklausomai.
+ */
+function importuotiModuliai(saltinis) {
+  const literalai = [];
+  let skeletas = "";
+  let i = 0;
+  let pries = "";
+
+  /** Po identifikatoriaus, skaičiaus ar uždarančio skliausto `/` yra dalyba. */
+  const PO_REIKSMES = /[\w$)\]]/;
+
+  while (i < saltinis.length) {
+    const c = saltinis[i];
+    const kitas = saltinis[i + 1];
+
+    if (c === "/" && kitas === "/") {
+      while (i < saltinis.length && saltinis[i] !== "\n") i += 1;
+      skeletas += " ";
+      continue;
+    }
+
+    if (c === "/" && kitas === "*") {
+      i += 2;
+      while (i < saltinis.length && !(saltinis[i] === "*" && saltinis[i + 1] === "/")) i += 1;
+      i += 2;
+      skeletas += " ";
+      continue;
+    }
+
+    if (c === "/" && !PO_REIKSMES.test(pries)) {
+      i += 1;
+      let simboliuKlase = false;
+      while (i < saltinis.length) {
+        const r = saltinis[i];
+        if (r === "\\") {
+          i += 2;
+          continue;
+        }
+        if (r === "\n") break;
+        if (r === "[") simboliuKlase = true;
+        else if (r === "]") simboliuKlase = false;
+        else if (r === "/" && !simboliuKlase) {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      skeletas += " ";
+      /** Po šablono einantis `/` yra dalyba, ne naujas šablonas. */
+      pries = ")";
+      continue;
+    }
+
+    if (c === '"' || c === "'" || c === "`") {
+      const kabute = c;
+      let turinys = "";
+      i += 1;
+      while (i < saltinis.length) {
+        const r = saltinis[i];
+        if (r === "\\") {
+          turinys += saltinis[i + 1] === undefined ? "" : saltinis[i + 1];
+          i += 2;
+          continue;
+        }
+        if (r === kabute) {
+          i += 1;
+          break;
+        }
+        /** Nebaigtas vienos eilutės literalas - nutraukiam, kad nesurytume failo. */
+        if (kabute !== "`" && r === "\n") break;
+        turinys += r;
+        i += 1;
+      }
+      skeletas += ` ${literalai.length} `;
+      literalai.push(turinys);
+      pries = ")";
+      continue;
+    }
+
+    skeletas += c;
+    if (!/\s/.test(c)) pries = c;
+    i += 1;
+  }
+
+  const rasti = [];
+  const sablonas = /require\s*\(\s* (\d+) \s*\)/g;
+
+  let atitikmuo = sablonas.exec(skeletas);
+  while (atitikmuo !== null) {
+    rasti.push(literalai[Number(atitikmuo[1])]);
+    atitikmuo = sablonas.exec(skeletas);
+  }
+
+  return rasti;
+}
+
+/**
+ * ⚠️ RINKINYS IŠVEDAMAS IŠ SARGO IMPORTO, NE RAŠOMAS RANKA.
+ *
+ * Rankinis sąrašas leistų naujam integraciniam testui iškristi tyliai: jis
+ * nebūtų paleistas, CI liktų žalias, o kodas — nepatikrintas. Ta pati taisyklė
+ * galioja abiem infrastruktūroms, tad išvedimas parametrizuotas, o ne
+ * nukopijuotas (#157, PR-2).
+ */
+function importuojaSarga(failas, sargas) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  const turinys = fs.readFileSync(path.join(__dirname, failas), "utf8");
+  return importuotiModuliai(turinys).some((kelias) => kelias.endsWith(sargas));
+}
+
+/**
+ * @param {string} sargas    privalomas importas
+ * @param {string|null} be   importas, kurio failas NETURI turėti
+ */
+function isvestiRinkini(sargas, be = null) {
+  const fs = require("node:fs");
+
+  return fs
+    .readdirSync(__dirname)
+    .filter((failas) => failas.endsWith(".test.js"))
+    .filter((failas) => importuojaSarga(failas, sargas))
+    .filter((failas) => be === null || !importuojaSarga(failas, be))
+    .map((failas) => failas.replace(/\.test\.js$/, ""))
+    .sort();
+}
+
+/**
+ * ⚠️ TRYS RINKINIAI, NE DU — IR IŠSKYRIMAS YRA JŲ ESMĖ (#157, PR-6).
+ *
+ * `postgres` žingsnis turi `DATABASE_URL`, S3 — `MINIO_ENDPOINT`. Sujungus juos,
+ * vienas trūkstamas servisas paverstų kito garantiją praleidimu, o „rinkinys
+ * tikrai vykdytas" sargas nebegalėtų pasakyti, KURIO trūko. Tas principas lieka
+ * nepakeistas.
+ *
+ * ⚠️ BET ATSIRADO FAILAS, KURIAM REIKIA ABIEJŲ (`artifactMigrationS3.integration`:
+ * migracija iš DB į tinklinę saugyklą). Palikus senas taisykles, jis patektų į
+ * ABU rinkinius ir ABIEJUOSE praleistų save — nes kiekviename žingsnyje trūktų
+ * svetimo serviso. Kristų abu „tikrai vykdytas" sargai, ir ne dėl defekto.
+ *
+ * Todėl aibės tampa TARPUSAVYJE NESIKERTANČIOS:
+ *
+ *   postgres    — importuoja `postgresGuard` ir NE `minioGuard`;
+ *   s3          — importuoja `minioGuard` ir NE `postgresGuard`;
+ *   postgresS3  — importuoja ABU; savo žingsnis, savo sargas.
+ *
+ * ⚠️ IŠSKYRIMAS BŪTINAS ABIEM KRYPTIM. Pašalinus jį vienoje pusėje, dvigubos
+ * priklausomybės failas tyliai grįžtų į tą rinkinį ir vėl sulaužytų jo sargą —
+ * tik jau po pusmečio ir kitam žmogui.
+ */
+function isvestiPostgresRinkini() {
+  return isvestiRinkini("postgresGuard", "minioGuard");
+}
+
+const postgres = isvestiPostgresRinkini();
+const s3 = isvestiRinkini("minioGuard", "postgresGuard");
+
+/** Failai, kuriems reikia IR PostgreSQL, IR S3-suderinamos saugyklos. */
+const postgresS3 = isvestiRinkini("postgresGuard").filter((v) =>
+  isvestiRinkini("minioGuard").includes(v)
+);
 
 module.exports = {
-  suites: { privacy, security, functional, redis, postgres },
+  suites: { privacy, security, functional, redis, postgres, s3, postgresS3 },
 
   /**
    * Rinkiniai, kuriuos apima `npm test`.
@@ -270,5 +720,9 @@ module.exports = {
    * įtraukus juos čia „3 skipped" taptų nuolatiniu triukšmu, kurį visi išmoktų
    * ignoruoti. Jie paleidžiami atskirai (`npm run test:redis`) ir CI.
    */
+  isvestiPostgresRinkini,
+  isvestiRinkini,
+  importuotiModuliai,
+
   defaultSuites: ["privacy", "security", "functional"],
 };

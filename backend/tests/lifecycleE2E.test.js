@@ -211,7 +211,7 @@ test("E2E: eksportas NEPALIEKA artefakto po atsakymo", async () => {
    * Po eksporto jobo įraše NETURI atsirasti naujo artefakto: failas
    * išsiųstas ir pamirštas.
    */
-  const afterExport = await jobStore.system.get(protocolId);
+  const afterExport = await jobStore.system.get(protocolId, { hydrate: true });
   /**
    * Jei jobo įrašo nebėra (TTL ar ankstesnis valymas), efemeriško artefakto
    * nebuvimas laikomas PATVIRTINTU: jis gali gyventi tik jobo įraše, tad
@@ -275,7 +275,7 @@ test("E2E: ištrinto jobo ID NEGALI būti atkurtas nauju darbu", async () => {
   const recreated = await markCompleted(jobStore.system, jobId, { result: { text: "neturi išlikti" } });
 
   assert.equal(recreated, null, "ištrinto jobo atkurti negalima");
-  assert.equal(await jobStore.system.get(jobId), null);
+  assert.equal(await jobStore.system.get(jobId, { hydrate: true }), null);
 });
 
 test("E2E: ATŠAUKIMAS – ištrynimas nebaigus darbo palieka švarią būseną", async () => {
@@ -328,7 +328,7 @@ test("E2E: saugykloje NELIEKA audio failo po ištrynimo", async () => {
    * ilgiau, nei trunka apdorojimas. Bet tai reiškia, kad raktą reikia užfiksuoti
    * anksčiau, o ne tikėtis rasti jį pabaigoje.
    */
-  const uploaded = await jobStore.system.get(jobId);
+  const uploaded = await jobStore.system.get(jobId, { hydrate: true });
   const storageKey = uploaded ? uploaded.storageKey : null;
 
   assert.ok(storageKey, "produkcijos kelias turi išsaugoti audio ir įrašyti storageKey");
@@ -468,4 +468,46 @@ test("SKENERIS: efemeriški tipai imami iš REGISTRO, ne iš strategijų sąraš
       `${typeId} yra efemeriškas – jo skenuoti nėra kur`
     );
   }
+});
+
+test("#157 SKENERIS klausia, ar ĮRAŠAS yra — ne ką jame (sugadintas artefaktas jo nesulaužo)", async (t) => {
+  /**
+   * ⚠️ IŠTRYNIMO PATIKRA NEGALI PRIKLAUSYTI NUO TO, AR ARTEFAKTAS PERSKAITOMAS.
+   *
+   * `JOB_RECORD` strategija atsako į vieną klausimą: ar job'o eilutė dar yra.
+   * Hidratuodama ji sugadinto artefakto atveju MESTŲ — t. y. patikra lūžtų būtent
+   * ties tais job'ais, dėl kurių ji ir daroma. Tai ta pati klasė kaip
+   * `adminDeleteJob()`: paskutinė instancija negali reikalauti sveiko turinio.
+   */
+  const job = await jobStore.create({ ownerKind: "unowned", type: "protocol" });
+
+  const originalus = jobStore.system.get;
+  const kvietimai = [];
+  jobStore.system.get = async (id, nustatymai = {}) => {
+    kvietimai.push(nustatymai);
+    if (nustatymai.hydrate !== false) {
+      throw Object.assign(new Error("artefaktas sugadintas"), { code: "ARTIFACT_CORRUPT" });
+    }
+    return originalus(id, nustatymai);
+  };
+  t.after(() => {
+    jobStore.system.get = originalus;
+  });
+
+  const rezultatas = await artefactScanner.scanAllArtefacts(job.id, {
+    jobStore,
+    auditLog,
+    fileStorage,
+    jobRunner,
+    storageKey: null,
+  });
+
+  assert.ok(rezultatas.found.includes("job_record"), "įrašas TEBĖRA, ir skeneris tai mato");
+  assert.deepEqual(
+    kvietimai.map((n) => n && n.hydrate),
+    [false],
+    "skeneriui rūpi ĮRAŠO buvimas, ne jo turinys"
+  );
+
+  await jobStore.system.remove(job.id);
 });

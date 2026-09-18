@@ -1,8 +1,9 @@
 const memoryStore = require("./memoryStore");
-const { STATUS, JOB_TYPES, TTL_MS } = require("./common");
+const { STATUS, JOB_TYPES, TTL_MS, isFinished } = require("./common");
 const { createLogger } = require("../../utils/logger");
 const tombstones = require("../deletionTombstones");
 const maintenanceLock = require("../maintenanceLock");
+const { pgJungtiesNustatymai } = require("../pgConnection");
 
 /**
  * VIDINIS gyvavimo ciklo raktas (#19 PR3).
@@ -36,6 +37,15 @@ const log = createLogger("job-store");
 let store = memoryStore; // numatyta, kol init() nepakeičia
 let initPromise = null;   // bendras inicijavimo Promise (žr. init() komentarą)
 let _redisFactoryForTests = null; // TESTAMS: injektuota Redis factory (žr. eksportus)
+/**
+ * ARTEFAKTŲ SAUGYKLOS PRIJUNGIMO VERDIKTAS (#157, PR-7, 3 sąlyga).
+ *
+ * ⚠️ SKAIČIUOJAMAS STARTE, RODOMAS VĖLIAU — ta pati forma kaip eilės preflight
+ * (#155). Perskaičiuotas rodymo metu jis atsakytų apie DABARTINĘ konfigūraciją,
+ * o klausiama apie tą, PAGAL KURIĄ buvo sukurtas rezolveris. Du nesutampantys
+ * atsakymai į „ar prijungta teisingai" yra blogiau nei vienas pasenęs.
+ */
+let artefaktuPrijungimas = null;
 
 /**
  * RACE CONDITION APSAUGA: anksčiau `initialized = true` buvo nustatomas IŠKART, o Redis
@@ -85,9 +95,24 @@ async function initializeStore() {
 
   const choice = selectBackend();
 
+  /**
+   * ⚠️ ŠI ŠAKA ŠIANDIEN NEPASIEKIAMA — IR PALIEKAMA SĄMONINGAI (#155).
+   *
+   * `applyActivationBarrier()` su atidarytu barjeru `barjeras: true` negrąžina nė
+   * vienu keliu. Tai barjero MECHANIZMO pusė: jis paliktas, kad konstantos
+   * grąžinimas į `false` vėl ką nors įjungtų, ir šis pranešimas yra tai, ką jis
+   * įjungtų. Pašalinus jį „uždaryti atgal" reikštų parašyti ir pranešimą iš naujo.
+   *
+   * ⚠️ TEKSTAS LIEKA TEISINGAS BŪTENT TAM ATVEJUI, ne šiandienai: „dar neaktyvuota"
+   * galioja tada, kai barjeras uždarytas. Šiandieninę tos pačios būsenos priežastį
+   * („PostgreSQL sukonfigūruotas, bet job'ai atmintyje, nes pasirinkimas
+   * eksplicitinis") sako `startupChecks` eilutė „Job metaduomenų saugykla" — ji
+   * pasiekiama, ir ją dengia `jobStoreBackendInfo` testai.
+   */
   if (choice.barjeras) {
     log.warn(
-      `⚠️  DATABASE_URL nustatytas, bet job metaduomenys LIEKA "${choice.norimas}" backend'e. ` +
+      /** ⚠️ „PostgreSQL nurodytas", ne „DATABASE_URL nustatytas" (#245): `PGHOST` forma lygiavertė. */
+      `⚠️  PostgreSQL nurodytas, bet job metaduomenys LIEKA "${choice.norimas}" backend'e. ` +
         "PostgreSQL kaip autoritetinga saugykla dar neaktyvuota (#155 aktyvavimo barjeras). " +
         (choice.norimas === "memory"
           ? "Job'ai NEIŠGYVENS restarto - persistencijai reikia REDIS_URL."
@@ -149,13 +174,16 @@ async function initializeStore() {
  * elgesys reikštų, kad NAUJI job'ai rašomi į atmintį, o AUTORITETINGI lieka
  * DB — split-brain, kuris „išnyksta" DB atsistačius, palikdamas dvi tikroves.
  *
- * Todėl prisijungimo klaida nutraukia startą. Tai galioja jau dabar, nors
- * barjeras PostgreSQL dar neparenka — kad barjerą atidarant nereikėtų keisti
- * šio kelio.
+ * Todėl prisijungimo klaida nutraukia startą. ⚠️ Tai buvo užrašyta tada, kai
+ * barjeras PostgreSQL dar neparinko — sąmoningai, „kad barjerą atidarant nereikėtų
+ * keisti šio kelio".
  *
- * ⚠️ BARJERO NEATIDARO NEI 7.2a, NEI 7.2b. 7.2b užbaigia atominių operacijų
- * kontraktą, bet aktyvavimas priklauso VISOMS ADR prielaidoms
- * (`docs/decisions/155-postgres-authority.md`, „AKTYVAVIMO BARJERAS").
+ * ⚠️ PRIELAIDA IŠSIPILDĖ (#155). Barjeras atidarytas, ir šis kelias tikrai
+ * nepasikeitė: atidarantis PR pridėjo ne kodą čia, o CI žingsnį „Fail-closed
+ * startas", kuris tą patį elgesį išmatuoja per tikrą `node server.js`.
+ * ⚠️ Užrašoma todėl, kad išsipildžiusi prielaida yra tokia pat reta kaip
+ * neišsipildžiusi, ir abi verta pažymėti — kitaip lieka atmintyje tik nesėkmės.
+ * (`docs/decisions/155-postgres-authority.md`, „AKTYVAVIMO BARJERAS".)
  */
 /**
  * `DB_CONNECT_TIMEOUT_MS` su saugia numatytąja reikšme.
@@ -164,9 +192,58 @@ async function initializeStore() {
  * `cors` ir kitą Express infrastruktūrą; `jobStore` nuo jos priklausyti neturi -
  * jį įkelia ir worker procesai, kuriems HTTP sluoksnio nereikia.
  */
-function connectTimeoutMs() {
-  const raw = Number(process.env.DB_CONNECT_TIMEOUT_MS);
+function connectTimeoutMs(env = process.env) {
+  const raw = Number(env.DB_CONNECT_TIMEOUT_MS);
   return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
+}
+
+/**
+ * ⚠️ UŽKLAUSŲ RIBA ATSKIRAI NUO PRISIJUNGIMO RIBOS (#342 Codex, P1).
+ *
+ * `connectionTimeoutMillis` galioja TIK iki jungties gavimo - `pg` jį nuvalo
+ * ties `ReadyForQuery` (patikrinta `pg` 8.23 šaltinyje, `client.js:377`). Po to
+ * `SELECT 1` ir schemos patikros liko BE JOKIOS ribos: PostgreSQL, kuris jungtį
+ * PRIIMA, bet rezultatų negrąžina, pakabindavo `initializePostgres()` neribotai.
+ *
+ * ⚠️ TAI NE FAIL-CLOSED, O FAIL-NEVER: procesas nekrenta, neaptarnauja ir
+ * nepraneša. Kabantis startas blogesnis už krentantį - orkestratorius bent žino,
+ * ką daryti su kritusiu.
+ *
+ * ⚠️ 10 SĄLYGOS CI ŽINGSNIS TO NEPAGAUNA PAGAL KONSTRUKCIJĄ: jis naudoja
+ * UŽDARYTĄ PORTĄ, tad matuoja atsisakymą jungtis, ne degradavusį serverį. Iš
+ * dviejų gedimo režimų jis dengia vieną.
+ *
+ * Du parametrai, ne vienas: `statement_timeout` nutraukia darbą SERVERIO pusėje
+ * (atlaisvina užraktus), `query_timeout` - KLIENTO pusėje (vienintelis, kuris
+ * padeda, kai serveris nebeatsako apskritai). Ta pati pora ir tos pačios
+ * reikšmės kaip `sessionStore` ir `startupChecks.postgresReachability()`.
+ */
+function queryTimeoutMs(env = process.env) {
+  const raw = Number(env.DB_QUERY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw >= 100 ? raw : 5000;
+}
+
+/**
+ * Job pool'o nustatymai VIENOJE vietoje.
+ *
+ * Iškelta iš `initializePostgres()` dėl tos pačios priežasties kaip
+ * `sesijuPoolNustatymai()`: `new Pool(...)` viduje ribos liktų nepasiekiamos
+ * testui, ir vienintelis įrodymas būtų šaltinio teksto paieška (AGENTS.md §9.2).
+ */
+function jobPoolNustatymai(env = process.env) {
+  /**
+   * ⚠️ JUNGTIES FORMA — NE ČIA (#245). `pgJungtiesNustatymai()` yra VIENINTELIS
+   * autoritetas, kuris renkasi tarp `DATABASE_URL` ir diskrečių `PG*`. Iki šito
+   * šis pool'as mokėjo tik `connectionString`, tad dokumentuotame Compose diegime
+   * (`PG*`, be `DATABASE_URL`) jis gaudavo `connectionString: undefined` ir
+   * jungdavosi prie `pg` numatytosios bazės — TYLIAI, be jokios klaidos.
+   */
+  return {
+    ...pgJungtiesNustatymai(env),
+    connectionTimeoutMillis: connectTimeoutMs(env),
+    statement_timeout: queryTimeoutMs(env),
+    query_timeout: queryTimeoutMs(env),
+  };
 }
 
 /**
@@ -190,9 +267,82 @@ const REQUIRED_JOB_CONSTRAINTS = [
   "jobs_status_phase",
   "jobs_status_values",
   "jobs_type_values",
+  /**
+   * ⚠️ SĄMONINGAS SPRENDIMAS, NE AUTOMATINIS ĮRAŠAS (#184, 7.5b).
+   *
+   * `version integer NOT NULL DEFAULT 1` pats jokio VARDINIO constraint'o
+   * nesukuria, tad pasirinkimas buvo dvejetainis: arba `jobs_version_positive`
+   * migracijoje IR čia, arba nė vieno. Tylus „įrašom version į sąrašą" be
+   * migracijos sulaužytų readiness (žemiau, `trukstaC`), o constraint be įrašo
+   * sulaužytų `migrations.integration.test.js` pilnumo patikrą.
+   *
+   * Pasirinkta pirma: DB lygmens `version >= 1` pašalina falsy-nulio klasę ten,
+   * kur JS `expectedVersion` patikra jos nepasiektų.
+   */
+  "jobs_version_positive",
 ];
 
-async function initializePostgres() {
+/**
+ * `job_results` INVARIANTAI, BŪTINI STARTUI (#157, PR-1).
+ *
+ * ⚠️ KODĖL ATSKIRAS SĄRAŠAS, O NE ĮRAŠAI VIRŠUJE. Readiness užklausa filtravo
+ * `t.relname = 'jobs'`, tad `job_results` invariantai NEBUVO tikrinami išvis:
+ * diegimas, pritaikęs tik pirmąją #157 migraciją arba praradęs constraint'ą dėl
+ * schemos nukrypimo, startuodavo sėkmingai — o vėlesni rašytojai ir restore
+ * verifikacija remiasi būtent jais (Codex #289).
+ *
+ * ⚠️ SĄRAŠAS PILNAS, NE PAVYZDINIS — pilnumą tikrina
+ * `migrations.integration.test.js`, ta pačia forma kaip `jobs` pusėje.
+ */
+const REQUIRED_JOB_RESULT_CONSTRAINTS = [
+  "job_results_integrity_shape",
+  "job_results_storage_shape",
+  "job_results_storage_type_values",
+];
+
+/**
+ * ⚠️ PAGALBINĖS LENTELĖS TIKRINAMOS LYGIAI TAIP PAT (#342 Codex, P1).
+ *
+ * Iki šito gyvas startas tikrino TIK `jobs` ir `job_results`, o store'as buvo
+ * konstruojamas su `bandymuRegistras` ir `migracijosProgresas` = `true` pagal
+ * numatytąją reikšmę. Dalinai migruota bazė startą PRAEIDAVO, o krisdavo vėliau:
+ *
+ *   - external completion → `job_result_attempts` neegzistuoja;
+ *   - BDAR ištrynimas     → `artifact_migration_progress` neegzistuoja.
+ *
+ * ⚠️ ABU — JAU PRIĖMUS SRAUTĄ. Tai tas pats gedimas, kurį dviejų lentelių patikra
+ * ir turėjo pašalinti, tik nukeltas į pirmą tikrą operaciją.
+ *
+ * ⚠️ IR TAI KERTASI SU #339 SPRENDIMU. Legacy schemos tolerancija (`bandymuRegistras:
+ * false` ir pan.) priklauso `restoredJobStore`: atkurta kopija TEISĖTAI gali būti
+ * senesnė už migraciją. Gyvas startas tą toleranciją paveldėjo per numatytąsias
+ * reikšmes, nors jam ji niekada nebuvo skirta — jis privalo reikalauti pilnos
+ * schemos, o ne prisitaikyti prie dalinės.
+ */
+const REQUIRED_ATTEMPT_CONSTRAINTS = [
+  "job_result_attempts_busena_allowed",
+  "job_result_attempts_storage_type_values",
+];
+
+const REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS = [
+  "artifact_migration_progress_busena_allowed",
+  "artifact_migration_progress_priezastis_allowed",
+  "artifact_migration_progress_shape",
+];
+
+/**
+ * Lentelė → jos privalomų invariantų sąrašas. VIENAS autoritetas abiem patikroms:
+ * lentelių buvimui ir suvaržymams — kitaip pridėjus lentelę į vieną sąrašą ir
+ * pamiršus kitą, patikra liktų dalinė būtent taip, kaip iki #342.
+ */
+const BUTINOS_LENTELES = Object.freeze({
+  jobs: REQUIRED_JOB_CONSTRAINTS,
+  job_results: REQUIRED_JOB_RESULT_CONSTRAINTS,
+  job_result_attempts: REQUIRED_ATTEMPT_CONSTRAINTS,
+  artifact_migration_progress: REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS,
+});
+
+async function initializePostgres(env = process.env) {
   const { Pool } = require("pg");
   const { createPostgresStore } = require("./postgresStore");
 
@@ -207,9 +357,23 @@ async function initializePostgres() {
    * Simetriška Redis keliui, kuris irgi neleidžia sau laukti amžinai
    * (`maxRetriesPerRequest`, `retryStrategy`).
    */
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    connectionTimeoutMillis: connectTimeoutMs(),
+  const pool = new Pool(jobPoolNustatymai(env));
+
+  /**
+   * ⚠️ NEVEIKLIOS JUNGTIES KLAIDA NETURI NUŽUDYTI PROCESO (#155, 7.4b peržiūra).
+   *
+   * `pg-pool` klaidą neveiklioje jungtyje (PostgreSQL restartas, tinklo trūkis)
+   * skelbia kaip `error` įvykį ANT POOL'O. `EventEmitter` neapdorotą `error`
+   * meta, tad Node nutraukia visą procesą - ne užklausą, o serverį ar worker'į.
+   * Klausytojas paverčia tai tuo, kas jis ir yra: pašalinta jungtis plius logas.
+   *
+   * ⚠️ LOGINAMAS TIK KODAS: `pg` pranešime gali būti vartotojo vardas
+   * (`password authentication failed for user "x"`).
+   */
+  pool.on("error", (klaida) => {
+    log.error("Job pool'o neveiklios jungties klaida - jungtis pašalinta", {
+      klaida: klaida && klaida.code ? klaida.code : "nežinoma",
+    });
   });
 
   try {
@@ -234,7 +398,7 @@ async function initializePostgres() {
    * Readiness, kuris teigia „pasiruošęs" prieš tai, kas iš tikrųjų reikalinga,
    * yra blogesnis nei readiness, kurio nėra: orkestruotojas nukreipia srautą.
    */
-  const BUTINOS = ["jobs", "job_results"];
+  const BUTINOS = Object.keys(BUTINOS_LENTELES);
   try {
     const { rows } = await pool.query(
       `SELECT table_name FROM information_schema.tables
@@ -264,23 +428,36 @@ async function initializePostgres() {
      * sąrašas auga, o šis rinkinys įvardija tai, kas realiai būtina saugyklai
      * veikti teisingai.
      */
+    /**
+     * ⚠️ TIKRINAMOS VISOS KETURIOS LENTELĖS (#157 PR-1; #342 P1).
+     *
+     * Pirmoji versija filtravo `t.relname = 'jobs'`, tad `job_results` invariantai
+     * nebuvo tikrinami išvis. #342 parodė, kad ta pati spraga liko dviem pagalbinėms
+     * lentelėms — sąrašas dabar ateina iš `BUTINOS_LENTELES`, tad naujos lentelės
+     * pridėjimas vienoje vietoje uždaro abi patikras.
+     */
     const { rows: cRows } = await pool.query(
-      `SELECT c.conname
+      `SELECT t.relname, c.conname
          FROM pg_constraint c
          JOIN pg_class t     ON t.oid = c.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
-        WHERE t.relname = 'jobs'
+        WHERE t.relname = ANY($1)
           AND n.nspname = current_schema()
-          AND c.contype = 'c'`
+          AND c.contype = 'c'`,
+      [BUTINOS]
     );
-    const rastiC = cRows.map((r) => r.conname);
-    const trukstaC = REQUIRED_JOB_CONSTRAINTS.filter((c) => !rastiC.includes(c));
 
-    if (trukstaC.length > 0) {
+    const trukstaInvariantu = Object.entries(BUTINOS_LENTELES).flatMap(([lentele, butini]) => {
+      const rasti = cRows.filter((r) => r.relname === lentele).map((r) => r.conname);
+      return butini.filter((c) => !rasti.includes(c));
+    });
+
+    if (trukstaInvariantu.length > 0) {
       throw new Error(
-        `PostgreSQL schema pasenusi - trūksta invariantų: ${trukstaC.join(", ")}. ` +
+        `PostgreSQL schema pasenusi - trūksta invariantų: ${trukstaInvariantu.join(", ")}. ` +
           "Paleiskite `npm run migrate:up`: be jų DB priimtų įrašus, kurių " +
-          "runtime nepripažįsta (nežinomas tipas, nepalaikoma era, nežinomas actor source)."
+          "runtime nepripažįsta (nežinomas tipas, nepalaikoma era, nežinomas actor " +
+          "source, rezultato eilutė be vientisumo metaduomenų)."
       );
     }
   } catch (err) {
@@ -288,9 +465,139 @@ async function initializePostgres() {
     throw err;
   }
 
-  store = createPostgresStore(pool);
-  log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)");
+  /**
+   * ⚠️ POOL'AS UŽDAROMAS IR ČIA. Aukščiau esantis `catch` dengia tik schemos
+   * patikras; be šio bloko netinkama artefaktų konfigūracija paliktų atvirą
+   * jungčių pool'ą procese, kuris vis tiek nepakils.
+   *
+   * ⚠️ `createPostgresStore()` YRA VIDUJE, NE UŽ RIBOS. Jis irgi meta —
+   * konstrukcijos sargas (PR-2) atmeta saugyklą be `backend` ir dvi skirtingas
+   * saugyklas tam pačiam tipui. Palikus jį lauke, būtų uždarytas pool'as vienam
+   * gedimo keliui ir paliktas atviras gretimam.
+   */
+  try {
+    store = createPostgresStore(pool, await paruostiArtefaktuSaugykla());
+  } catch (err) {
+    await pool.end().catch(() => {});
+    throw err;
+  }
+
+  artefaktuPrijungimas = await ivertintiArtefaktuPrijungima(pool, store);
+
+  /**
+   * ⚠️ PATVIRTINTAS `skaitymui_truksta` NUTRAUKIA STARTĄ (#342 Codex, P1).
+   *
+   * Sprendimo taisyklė gyvena `arStabdytiStarta()` — ten ir paaiškinimas, kodėl
+   * stabdo TIK šis radinys, o `nezinoma` nestabdo niekada.
+   */
+  const { arStabdytiStarta } = require("../artifactStore/prijungimoBusena");
+
+  if (arStabdytiStarta(artefaktuPrijungimas)) {
+    await pool.end().catch(() => {});
+    throw new Error(
+      `Artefaktų skaitymas nepilnas: bazėje yra tipų, kuriems saugykla neregistruota ` +
+        `(${artefaktuPrijungimas.truksta.join(", ")}; registruoti: ` +
+        `${artefaktuPrijungimas.registruotiTipai.join(", ") || "nė vieno"}). ` +
+        "Startas nutraukiamas: diegimas pakiltų ir aptarnautų, bet rezultatų skaitymas " +
+        "mestų, o BDAR ištrynimas senų objektų nepasiektų. Sukonfigūruokite trūkstamų " +
+        "tipų saugyklas arba užbaikite migraciją."
+    );
+  }
+
+  log.info("Job store: PostgreSQL (autoritetinga metaduomenų saugykla)", {
+    artefaktuSaugykla: artefaktuPrijungimas.santrauka,
+  });
   return store;
+}
+
+/**
+ * Artefaktų saugykla `createPostgresStore()` parinktims (#157, PR-7, 3 sąlyga).
+ *
+ * ⚠️ `inline` SAUGYKLA NEPADUODAMA — IR TAI NE PRALEIDIMAS, O SCHEMOS RIBA.
+ *
+ * `inlineStore.backend` yra `"inline"`, o `paruostiExternalRasyma()` iš `backend`
+ * lauko gamina `storage_type` KARTU su `storage_key`. `job_results_storage_shape`
+ * inline šakai reikalauja `storage_key IS NULL`, tad kiekvienas užbaigimas kristų
+ * `23514`. Paduota inline saugykla ne „nieko nekeistų" — ji sulaužytų rašymą
+ * VISIEMS diegimams, kurie #157 dar nenaudoja.
+ *
+ * ⚠️ IR JOS NEREIKIA SKAITYMUI: inline eilutė grąžinama iš `payload` dar prieš
+ * rezolverį (`postgresStore.js:1205`), tad `parinktiArtefaktuSaugykla("inline")`
+ * nekviečiamas niekada.
+ *
+ * ⚠️ NETINKAMA KONFIGŪRACIJA STABDO STARTĄ — §18.3 SPRENDIMAS.
+ *
+ * `parinktiBackenda()` ir `patikrintiSaugykla()` meta; čia jos NEGAUDOMOS. Iki šio
+ * žingsnio serveris `parinktiBackenda()` nekvietė iš viso (vienintelis produkcinis
+ * kvietėjas buvo `scripts/migrate-artifacts.mjs`), tad diegimas su
+ * `ARTIFACT_STORE_BACKEND=s3` ir trūkstamu raktu startuodavo ir rašydavo `inline` —
+ * tiksliai tas grįžimas, kurį `backendSelection.js` draudžia žodžiais: „dalis
+ * rezultatų atsidurtų kitoje saugykloje, nei mano operatorius, ir tai paaiškėtų tik
+ * tada, kai jų prireiktų".
+ *
+ * ⚠️ TAI NĖRA 10 SĄLYGA. 10 sąlyga yra startas su NEPRIEINAMA DB ir ATIDARYTU
+ * barjeru; ji eina kartu su atidarymu, atskirame #155 PR. Čia sustabdo PR-2
+ * kontraktas, galiojantis nuo #290, o barjeras lieka `false`.
+ *
+ * ⚠️ PASEKMĖ, KURIĄ VERTA ŽINOTI: diegimas su pasenusiu `ARTIFACT_STORE_BACKEND`
+ * nuo šiol NEPAKILS. Jis ir yra tas, dėl kurio riba egzistuoja — iki šiol jis kilo
+ * ir tylėjo.
+ */
+async function paruostiArtefaktuSaugykla() {
+  const { paruostiKonfiguruotaSaugykla } = require("../artifactStore");
+
+  /**
+   * ⚠️ SURINKIMAS GYVENA `utils/artifactStore/`, NE ČIA (#155, A1).
+   *
+   * Iki tol jis buvo šioje funkcijoje, ir būtent dėl tos vietos
+   * `scripts/dr-restore.mjs` jo nepasiekė: CLI sąmoningai neimportuoja `jobStore`.
+   * Čia lieka tik tai, kas yra JOB STORE klausimas — parinkčių forma ir logo eilutė.
+   */
+  const rasymoSaugykla = await paruostiKonfiguruotaSaugykla(process.env);
+  if (!rasymoSaugykla) return {};
+
+  log.info("Artefaktų saugykla prijungta", { backend: rasymoSaugykla.backend });
+  return { rasymoSaugykla };
+}
+
+/**
+ * Ar saugyklos prijungtos taip, kaip prašo konfigūracija ir reikalauja bazė?
+ *
+ * ⚠️ STARTO BAIGTĮ KEIČIA TIK VIENAS RADINYS — IR TIK PATVIRTINTAS (#342 P1).
+ *
+ * Ankstesnė redakcija sakė „nekeičia baigties — nei radiniu, nei savo gedimu", ir
+ * pagrindė tuo, kad kritusi patikra būtų naujas gedimo taškas dėl DIAGNOSTIKOS.
+ * Argumentas teisingas — bet tik NEAPIBRĖŽTAM zondui. Jis nedaro skirtumo, kurį
+ * daryti būtina:
+ *
+ *   nepavyko įvertinti (`nezinoma`)  → diagnostikos gedimas → NESTABDYTI
+ *   patvirtintas `skaitymui_truksta` → faktas apie DUOMENIS → STABDYTI
+ *
+ * Antrasis nėra diagnostikos gedimas. Bazė su `fs` rezultatais ir
+ * `ARTIFACT_STORE_BACKEND=s3` (normali būsena po perėjimo ar mišraus atkūrimo)
+ * pakildavo ir aptarnaudavo, o rezultatų skaitymas mesdavo ir BDAR ištrynimas
+ * senų objektų nepasiekdavo.
+ *
+ * ⚠️ TA PATI `NESAUGU` vs `nepavyko` SKIRTIS, KURIĄ ĮVEDĖ PR-5 — čia ji tiesiog
+ * dar nebuvo pritaikyta. Taisyklė gyvena `arStabdytiStarta()`, ne čia, kad ją
+ * būtų galima patikrinti be DB.
+ *
+ * ⚠️ KITI RADINIAI BAIGTIES NEKEIČIA. Jie kalba apie RAŠYMO kelią, kuris kris pats
+ * ir su savo pranešimu; `skaitymui_truksta` skiriasi tuo, kad duomenys JAU YRA.
+ *
+ * ⚠️ SVARSTYTA IR ATMESTA ALTERNATYVA: registruoti skaitytojus KIEKVIENAM
+ * persistintam `storage_type`, ne tik dabartiniam. Tai teisinga kryptis ir
+ * `createPostgresStore()` `artifactStores` jau ją palaiko — bet ji reikalauja
+ * sukonstruoti, pavyzdžiui, `fs` skaitytoją, kai sukonfigūruotas `s3`, o po
+ * migracijos to diegimo `ARTIFACT_FS_ROOT` gali nebebūti. Tada vis tiek liktų šis
+ * kelias. Todėl pirma įrengiamas garsus atsisakymas; automatinis surinkimas jį
+ * PAKEIS, o ne apeis, ir bus priverstas būti teisingas — be jo diegimas nepakils.
+ */
+async function ivertintiArtefaktuPrijungima(pool, pgStore) {
+  const { nustatytiPrijungimoBusena } = require("../artifactStore/prijungimoBusena");
+  return nustatytiPrijungimoBusena(pool, pgStore, {
+    ispeti: (zinute, ctx) => log.warn(zinute, ctx),
+  });
 }
 
 /**
@@ -322,6 +629,75 @@ async function ensureInit() {
  */
 const FORBIDDEN = Symbol("jobStore.FORBIDDEN");
 
+/**
+ * „Įrašas pasikeitė nuo tada, kai jį matei" - optimistic lock konfliktas
+ * (#184, 7.5b).
+ *
+ * ⚠️ KONTRAKTAS PRAPLEČIAMAS, NE PERRAŠOMAS. #180 forma lieka nepajudinta:
+ * `null` = nerastas, `FORBIDDEN` = svetimas. Šis simbolis pridedamas TA PAČIA
+ * forma ir toje pačioje vertimo vietoje (saugykla grąžina eilutę, fasadas -
+ * simbolį), tad nė vienas metodas neįgyja savo atskiros konflikto formos.
+ *
+ * ⚠️ KUO SKIRIASI NUO `FORBIDDEN`. Nuosavybės neatitikimas NIEKADA neverčiamas
+ * į šitą: tai autorizacijos, ne lygiagretumo rezultatas. Saugyklose nuosavybė
+ * tikrinama PIRMA būtent dėl to.
+ *
+ * ⚠️ KUO SKIRIASI NUO `JobPhaseError`. Gyvavimo ciklo konfliktas (neleistinas
+ * perėjimas) lieka `JobPhaseError` - jau esantis TIPIZUOTAS `jobPhase`
+ * autoritetas, kurio #184 nekeičia. Skirtumas kvietėjui yra veiksmas:
+ * `CONCURRENCY_CONFLICT` reiškia „perskaityk naują būseną ir spręsk iš naujo",
+ * `JobPhaseError` - „šis perėjimas neteisėtas, aklai nekartok".
+ *
+ * `Symbol` - dėl tos pačios priežasties kaip `FORBIDDEN`: jo negalima gauti iš
+ * JSON ar sumaišyti su job objektu.
+ */
+const CONCURRENCY_CONFLICT = Symbol("jobStore.CONCURRENCY_CONFLICT");
+
+/**
+ * „Jau `completed`, bet KITU rezultatu" — consistency conflict (#184, 7.5b).
+ *
+ * ⚠️ ATSKIRAS NUO `CONCURRENCY_CONFLICT`. Versijos konfliktas reiškia „perskaityk
+ * iš naujo ir spręsk"; šitas reiškia „du vykdytojai pagamino SKIRTINGUS
+ * rezultatus tam pačiam darbui" — pakartojimas to neišspręs. Esamas rezultatas
+ * NEPERRAŠOMAS jokiomis aplinkybėmis.
+ */
+const RESULT_CONFLICT = Symbol("jobStore.RESULT_CONFLICT");
+
+/**
+ * „`jobs.status = completed`, bet rezultato saugykloje NĖRA" (#184, 7.5b).
+ *
+ * ⚠️ TAI NĖRA SĖKMĖ, IR TAI NĖRA KONFLIKTAS. Tai REMONTUOTINA būsena: nutrūkusi
+ * transakcija, ranka redaguota eilutė, atkūrimas iš nepilnos kopijos.
+ *
+ * ⚠️ KODĖL JI PRIVALO BŪTI ATSKIRIAMA. Audio valymo sprendimas priimamas iš
+ * `finish()` grąžinamos reikšmės. Su bendru gyvavimo ciklo konfliktu kvietėjas
+ * negalėtų atskirti „tas pats rezultatas, no-op, audio galima" nuo „rezultato
+ * nėra, audio LIEKA" — ir vienas iš dviejų atvejų neišvengiamai elgtųsi
+ * neteisingai. Šaltinio audio yra vienintelė medžiaga, iš kurios būseną dar
+ * galima suremontuoti.
+ */
+const COMPLETED_WITHOUT_RESULT = Symbol("jobStore.COMPLETED_WITHOUT_RESULT");
+
+/**
+ * Saugyklos eilutė → fasado forma. VIENAS vertimas visiems keliams (#184).
+ *
+ * ⚠️ Kopijos kiekviename metode būtų tiksliai tai, ką issue draudžia: „nė vienas
+ * metodas negrąžina konfliktui savo formos".
+ */
+const SAUGYKLOS_BAIGTYS = Object.freeze({
+  FORBIDDEN,
+  CONCURRENCY_CONFLICT,
+  RESULT_CONFLICT,
+  COMPLETED_WITHOUT_RESULT,
+});
+
+function fasadoRezultatas(result) {
+  if (typeof result === "string" && result in SAUGYKLOS_BAIGTYS) {
+    return SAUGYKLOS_BAIGTYS[result];
+  }
+  return result;
+}
+
 const { OWNER_KIND, assertOwnerIdentity } = require("./common");
 const jobPhase = require("../jobPhase");
 
@@ -352,8 +728,15 @@ const PHASE_STATE_FIELDS = ["status", "phase", "progress", "progressKnown"];
  *
  * Grąžina `true`, jei operaciją reikia praleisti.
  */
-function blockedByTombstone(id, method) {
-  if (!tombstones.isDeleted(id)) return false;
+async function blockedByTombstone(id, method) {
+  /**
+   * ⚠️ `await` PRIVALOMAS (#155, 7.5a / #183).
+   *
+   * Persistentiniame režime atsakymas ateina iš `erasure_marks`, o `Promise` yra
+   * truthy: be `await` KIEKVIENAS job'as atrodytų ištrintas, visas apdorojimas
+   * būtų tyliai užblokuotas, o esami testai liktų žali.
+   */
+  if (!(await tombstones.isDeleted(id))) return false;
   log.warn(`Atmestas jobo ${method}() po ištrynimo`, { jobId: id });
   return true;
 }
@@ -477,7 +860,27 @@ function assertRestorableId(job) {
   }
 }
 
+/**
+ * Sisteminis terminalus perėjimas – VIENAS bandymas, be politikos (#184, 7.5b).
+ *
+ * Iškeltas iš `system.finish()`, kad `system.finishFailed()` galėtų jį pakartoti
+ * NEDUBLIUODAMAS nei tombstone barjero, nei snapshot'o sąlygos.
+ */
+async function sisteminisFinishBandymas(store, id, status, extra) {
+  /**
+   * ⚠️ ATSARGINIO KELIO NĖRA SĄMONINGAI (#184, 7.5b).
+   *
+   * `finishAtomic` deklaruoja visi trys backend'ai (kontrakto rinkinys tikrina
+   * metodų aibės tapatumą), tad `typeof === "function"` patikra čia reikštų tylų
+   * grįžimą į NEATOMINĮ kelią, jei kuris nors backend'as metodą prarastų. Toks
+   * grįžimas būtų nematomas: elgesys atrodytų teisingas, kol neįvyktų lenktynės.
+   */
+  return fasadoRezultatas(await store.finishAtomic(id, status, extra));
+}
+
 module.exports = {
+  /** ⚠️ Eksportuojama, kad starto ribas būtų galima patikrinti BE tikros DB (#342). */
+  jobPoolNustatymai,
   init,
   /**
    * Prieiga prie backend'o TESTAMS.
@@ -487,7 +890,15 @@ module.exports = {
    * lenktynių" nėra deterministinis – testas praeitų ir be atomiškumo.
    */
   _storeForTests: () => store,
+  /**
+   * Starto verdiktas apie artefaktų saugyklų prijungimą; `null` ne PostgreSQL režime.
+   * Rodo `startupChecks.runSelfChecks()` — t. y. ir `doctor`, ir `/api/health/deep`.
+   */
+  getArtifactStoreStatus: () => artefaktuPrijungimas,
   FORBIDDEN,
+  CONCURRENCY_CONFLICT,
+  RESULT_CONFLICT,
+  COMPLETED_WITHOUT_RESULT,
   OWNER_KIND,
 
   /**
@@ -502,41 +913,88 @@ module.exports = {
    * be jo atskiras namespace taptų patogiu privilege escalation keliu.
    */
   system: {
-    get: async (id) => {
+    /**
+     * ⚠️ `hydrate` YRA PRIVALOMAS, IR NUMATYTOSIOS REIKŠMĖS ČIA NĖRA (#157, PR-4).
+     *
+     * Keturios paieškos PR-3 metu davė keturis nepilnus sąrašus (store metodai →
+     * maršrutai → `jobStore.get()` vardas → `restoredJobStore` adapteris), ir visos
+     * keturios rėmėsi SINTAKSINIU raktu. Adapteris `store` perpakuoja nauju vardu —
+     * vardas dingsta, paieška pagal vardą dingsta kartu. Penktas grep duotų penktą
+     * nepilną sąrašą.
+     *
+     * Apvertus numatytąją reikšmę, aibė nustoja būti SURAŠOMA: kiekvienas kvietėjas —
+     * dabartinis, būsimas, per adapterį ar tiesiogiai — privalo pasirinkti, o
+     * praleistus parodo testai, ne atmintis.
+     *
+     * ⚠️ VIEŠAS `jobStore.get()` (transporto kelias) numatytosios reikšmės NEKEIČIA:
+     * ten sprendimą priima OPERACIJA (`jobAccessPolicy.reikiaRezultato()`), tad
+     * kvietėjui nėra ko pasirinkti. Griežtinamas TIK sisteminis kelias.
+     *
+     * @param {string} id
+     * @param {{hydrate: boolean}} nustatymai PRIVALOMA - žr. aukščiau
+     */
+    get: async (id, nustatymai) => {
+      if (!nustatymai || typeof nustatymai.hydrate !== "boolean") {
+        throw new TypeError(
+          "jobStore.system.get(): `hydrate` privalomas (#157, PR-4). Nurodykite " +
+            "`{ hydrate: true }`, jei reikia `job.result`, arba `{ hydrate: false }` " +
+            "metaduomenų keliui — numatytoji reikšmė čia tyliai grąžintų turinį."
+        );
+      }
+
       await ensureInit();
-      return store.get(id);
+      return store.get(id, nustatymai);
     },
     update: async (id, patch, options = {}) => {
       assertNoRawPhaseWrite(patch);
       await ensureInit();
-      if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+      if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && (await tombstones.isDeleted(id))) {
         log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
         return null;
       }
       return store.update(id, patch);
     },
-    remove: async (id) => {
+    /**
+     * ⚠️ `nustatymai` PERDUODAMI, NE NUMETAMI (#157, PR-5; Codex #304).
+     *
+     * Būtent siaurinimas adapteryje nužudė `{ hydrate: false }` PR-3 metu. Čia tas pats
+     * pavojus: `{ tiketiniAdresai }` yra artefaktų aibės CAS, ir be jo eilutė būtų
+     * pašalinta neatsižvelgus į bandymą, įsipareigotą po enumeracijos.
+     */
+    remove: async (id, nustatymai = {}) => {
       await ensureInit();
-      return store.remove(id);
+      return store.remove(id, nustatymai);
     },
 
     /**
-     * Fazės pradžia. Grąžina atnaujintą job'ą arba `null`, jei jo nėra.
+     * Fazės pradžia. Grąžina atnaujintą job'ą, `null` (nėra) arba
+     * `CONCURRENCY_CONFLICT` (įrašas pasikeitė nuo skaitymo).
      *
-     * ⚠️ MEMORY store atveju `get` ir `update` vyksta be `await` tarp jų, tad
-     * lenktynių lango nėra. REDIS atveju to NEPAKANKA – ten patikra ir rašymas
-     * turi būti viena atominė operacija (#154, 3 žingsnis).
+     * ⚠️ TOCTOU LANGAS UŽDARYTAS (#184, 7.5b).
+     *
+     * Iki 7.5b čia buvo `get` + `update` be jokios sąlygos, ir šis komentaras
+     * tą spragą PRIPAŽINO: „memory atveju lenktynių lango nėra; Redis atveju to
+     * NEPAKANKA". Pripažinimas nebuvo sprendimas - langas liko atviras VISIEMS
+     * backend'ams, nes jis yra FASADO lygmens: tarp `store.get()` ir
+     * `store.update()` yra `await`, ir jokia saugyklos SQL/Lua patobulinta
+     * vidinė atomika jo neuždaro.
+     *
+     * Dabar sąlyga perduodama iš TO PATIES snapshot'o, kuriuo `jobPhase`
+     * skaičiavo patch'ą: jei įrašas tarp skaitymo ir rašymo pasikeitė,
+     * mutacija neįvyksta, o kvietėjas gauna konfliktą vietoj tylaus perrašymo.
      */
     startPhase: async (id, nextPhase, phaseOptions = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "startPhase")) return null;
+      if (await blockedByTombstone(id, "startPhase")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
       const { extra = {}, ...opts } = phaseOptions;
       const patch = jobPhase.startPhase(job, nextPhase, opts);
       // `extra` PIRMA – kad negalėtų perrašyti fazės invarianto.
-      return store.update(id, { ...extra, ...patch });
+      return fasadoRezultatas(
+        await store.update(id, { ...extra, ...patch }, { expectedVersion: job.version })
+      );
     },
 
     /**
@@ -548,7 +1006,7 @@ module.exports = {
      */
     restart: async (id, extra = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "restart")) return null;
+      if (await blockedByTombstone(id, "restart")) return null;
       const job = await store.get(id);
       if (!job) return null;
 
@@ -564,7 +1022,7 @@ module.exports = {
      */
     reportProgress: async (id, event) => {
       await ensureInit();
-      if (blockedByTombstone(id, "reportProgress")) return null;
+      if (await blockedByTombstone(id, "reportProgress")) return null;
 
       const job = await store.get(id);
       if (!job) return null;
@@ -602,15 +1060,124 @@ module.exports = {
       return store.update(id, patch);
     },
 
-    /** Terminalus perėjimas – vienu patch'u išvalo fazės būseną. */
+    /**
+     * Terminalus perėjimas – vienu patch'u išvalo fazės būseną.
+     *
+     * ⚠️ SĄLYGA IŠ TO PATIES SNAPSHOT'O (#184, 7.5b) – žr. `startPhase()`.
+     * Grąžina job'ą, `null` arba `CONCURRENCY_CONFLICT`; neleistinas perėjimas
+     * lieka `JobPhaseError`.
+     */
     finish: async (id, status, extra = {}) => {
       await ensureInit();
-      if (blockedByTombstone(id, "finish")) return null;
-      const job = await store.get(id);
-      if (!job) return null;
+      if (await blockedByTombstone(id, "finish")) return null;
+      return sisteminisFinishBandymas(store, id, status, extra);
+    },
 
-      const patch = jobPhase.finish(job, status, extra);
-      return store.update(id, patch);
+    /**
+     * `FAILED` žymėjimas SU KONFLIKTŲ POLITIKA (#184, 7.5b).
+     *
+     * ⚠️ KODĖL ATSKIRAS METODAS, O NE POLITIKA KIEKVIENAME KVIETĖJE.
+     *
+     * `finish(FAILED, …)` kvietėjų yra AŠTUONI (`queues/jobRunner.js` ×4,
+     * `workers/index.js` ×4), ir visi jie yra klaidų apdorojimo šakos. Politika,
+     * nukopijuota aštuonis kartus, išsiskirtų būtent ten, kur niekas nežiūri –
+     * o šitos politikos kaina klaidingai pritaikius yra `completed` įrašo
+     * pavertimas `failed`.
+     *
+     * KONTRAKTAS:
+     *
+     *   `JOB_ALREADY_TERMINAL` → job jau terminalus. NO-OP SĖKMĖ: `FAILED`
+     *                      žymėjimas nebeaktualus, kas nors kitas jį jau pabaigė.
+     *
+     * ⚠️ VISI KITI `JobPhaseError` KODAI PERMETAMI, NE SLOPINAMI (Codex D5).
+     *
+     * `jobPhase` ta pačia klase meta ir `UNKNOWN_SOURCE_STATUS` (nežinomas ar
+     * ateities persistentinis statusas). Jį nuslopinus, „jau terminalus"
+     * verdiktas būtų MELAGINGAS, o kvietėjas eitų į audio valymą neįsipareigojęs
+     * `FAILED`.
+     *
+     * ⚠️ IŠ TO SEKA PAREIGA KVIETĖJUI: šis metodas GALI atmesti. Kvietėjas,
+     * kviečiantis jį iš `async` įvykio klausytojo, privalo turėti savo
+     * `.catch()` — `EventEmitter` grąžinto Promise nelaukia, ir atmetimas taptų
+     * neapdorotu (žr. `workers/index.js` `worker.on("failed", …)`). Būtent to
+     * neapibrėžta ankstesnė šio kontrakto redakcija ir kainavo.
+     *   konfliktas       → perskaitoma AUTORITETINGA būsena, ir:
+     *                      · terminalus `COMPLETED` → žymėjimas ATMETAMAS;
+     *                      · kitas terminalus       → no-op sėkmė;
+     *                      · ne terminalus          → VIENAS pakartojimas;
+     *                      · antras konfliktas      → `log.error`, pasitraukimas.
+     *
+     * ⚠️ AKLO RETRY NĖRA NĖ VIENOJE ŠAKOJE. Ciklo irgi nėra: du bandymai, po to
+     * pasitraukimas. Neribotas kartojimas čia reikštų, kad nuolat atnaujinamas
+     * job'as niekada negautų `failed` žymos ir kviečiantis worker'is kabėtų.
+     *
+     * ⚠️ `COMPLETED` NIEKADA NEVIRSTA `FAILED`. Dingęs BullMQ ack neturi teisės
+     * sunaikinti sėkmingo rezultato, kuris jau guli saugykloje. Tai buvo
+     * įmanoma iki 7.5b: pralaimėjęs lenktynes `finish(FAILED)` tiesiog
+     * perrašydavo įrašą.
+     *
+     * @returns {Promise<object|null|symbol>} job'as, `null` (nėra / atmesta
+     *   pagal tombstone) arba `CONCURRENCY_CONFLICT`, kai abu bandymai krito.
+     */
+    finishFailed: async (id, extra = {}) => {
+      await ensureInit();
+      if (await blockedByTombstone(id, "finish")) return null;
+
+      for (let bandymas = 1; bandymas <= 2; bandymas++) {
+        let rezultatas;
+        try {
+          rezultatas = await sisteminisFinishBandymas(store, id, STATUS.FAILED, extra);
+        } catch (err) {
+          /**
+           * ⚠️ SLOPINAMAS TIK `JOB_ALREADY_TERMINAL`, NE BET KOKS `JobPhaseError`
+           * (Codex peržiūros A grupė).
+           *
+           * Ankstesnė redakcija tikrino `err.name !== "JobPhaseError"`. Bet
+           * `jobPhase` ta pačia klase meta ir `UNKNOWN_SOURCE_STATUS`
+           * (`utils/jobPhase.js`), kai persistentinis įrašas turi nežinomą ar
+           * ateities statusą. Tada „jau terminalus" verdiktas būdavo MELAGINGAS:
+           * grąžindavom nepakeistą įrašą kaip no-op sėkmę, o worker'io nesėkmės
+           * tvarkytojas eidavo toliau į audio valymą — nors `FAILED` niekada
+           * nebuvo įsipareigotas.
+           *
+           * Kodas tikrinamas eksplicitiškai; visos kitos priežastys (nežinomas
+           * statusas, DB, infrastruktūra) keliauja pro šalį, nes jų slėpimas
+           * paverstų gedimą tylia sėkme.
+           */
+          if (err.name !== "JobPhaseError" || err.code !== "JOB_ALREADY_TERMINAL") throw err;
+          const dabartinis = await store.get(id);
+          log.info("finishFailed: job jau terminalus, FAILED žymėjimas nebeaktualus", {
+            jobId: id,
+            status: dabartinis?.status,
+          });
+          return dabartinis;
+        }
+
+        if (rezultatas !== CONCURRENCY_CONFLICT) return rezultatas;
+
+        /** Konfliktas – sprendimas priimamas iš AUTORITETINGOS būsenos, ne iš snapshot'o. */
+        const dabartinis = await store.get(id);
+        if (!dabartinis) return null;
+
+        if (dabartinis.status === STATUS.COMPLETED) {
+          log.warn("finishFailed: job jau COMPLETED – FAILED žymėjimas ATMESTAS", {
+            jobId: id,
+            reason: extra.error_code || extra.error || null,
+          });
+          return dabartinis;
+        }
+        if (isFinished(dabartinis.status)) return dabartinis;
+
+        if (bandymas === 2) {
+          log.error("finishFailed: du versijos konfliktai iš eilės, pasitraukiama", {
+            jobId: id,
+            status: dabartinis.status,
+          });
+          return CONCURRENCY_CONFLICT;
+        }
+      }
+      /* c8 ignore next */
+      return CONCURRENCY_CONFLICT;
     },
     listPendingDeletions: async (limit) => {
       await ensureInit();
@@ -618,9 +1185,18 @@ module.exports = {
         ? store.listByFlag("deletion_pending", limit)
         : [];
     },
-    listAll: async () => {
+    /**
+     * ⚠️ HIDRATACIJA YRA EKSPLICITINIS ARGUMENTAS, NE NUMANOMA (#157, PR-3).
+     *
+     * Numatytoji reikšmė - hidratuoti, kad viešas kontraktas nepasikeistų. Metaduomenų
+     * keliai (pvz. `countActiveJobs()`) perduoda `hydrate: false` ir nustoja tempti
+     * `payload`, kurio niekada nežiūrėjo.
+     *
+     * @param {{hydrate?: boolean}} [nustatymai]
+     */
+    listAll: async (nustatymai = {}) => {
       await ensureInit();
-      return store.listAll();
+      return store.listAll(nustatymai);
     },
     /**
      * Grąžina `null`, jei saugykla to nepalaiko - iškviečiantis kodas tada
@@ -631,6 +1207,80 @@ module.exports = {
       await ensureInit();
       return typeof store.listReferencedStorageKeys === "function"
         ? store.listReferencedStorageKeys()
+        : null;
+    },
+    /**
+     * VISOS job'o rezultato artefaktų nuorodos — erasure ir šlavėjui (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU", ne „nėra". Ta pati fail-safe forma kaip
+     * `listReferencedStorageKeys()`: saugykla, kuri metodo neturi, negali leisti
+     * kvietėjui nuspręsti, kad trinti nėra ko. `[]` grąžina tik tie backend'ai, kuriems
+     * tai FAKTAS (inline-only saugojimas), ir jie tą užrašo pas save.
+     */
+    listResultArtifacts: async (jobId) => {
+      await ensureInit();
+      return typeof store.listResultArtifacts === "function"
+        ? store.listResultArtifacts(jobId)
+        : null;
+    },
+    /**
+     * Rezultato artefaktų šalinimas — erasure kelias (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU, AR PAŠALINTA". Erasure privalo tai laikyti KRITINE
+     * nesėkme, ne no-op: „ištrinta" be objekto pašalinimo yra būtent tas melas,
+     * kurio #157 riba draudžia („dalinis object-storage gedimas negali būti
+     * raportuojamas kaip sėkmingas galutinis ištrynimas").
+     */
+    /**
+     * Šlavimo verdiktai — retencijos kelias (#157, PR-5).
+     *
+     * ⚠️ `null` = „NEŽINAU". Šlavėjas tai privalo laikyti ŽINGSNIO sustabdymu, ne
+     * tuščiu rezultatu: nulis nušluotų reiškia „nieko nebuvo", o `null` — „nežinau, ar
+     * buvo". Ta pati riba kaip `listResultArtifacts()`.
+     */
+    /**
+     * Šlavimo kandidatai — retencijos predikatas (#157, PR-5, sąlyga 3).
+     *
+     * ⚠️ `null` = „NEŽINAU": saugykla be registro negali pasakyti, kad kandidatų nėra.
+     */
+    /** Efektyvi jungties tapatybė — „ta pati bazė?", ne „tas pats vardas" (#157, PR-5). */
+    jungtiesTapatybe: async () => {
+      await ensureInit();
+      return typeof store.jungtiesTapatybe === "function" ? store.jungtiesTapatybe() : null;
+    },
+    valytiniBandymai: async (nustatymai) => {
+      await ensureInit();
+      return typeof store.valytiniBandymai === "function"
+        ? store.valytiniBandymai(nustatymai)
+        : null;
+    },
+    /** Registro eilučių uždarymas PO to, kai objekto tikrai nebėra (#157, PR-5). */
+    pasalintiBandymus: async (attemptIds, nustatymai = {}) => {
+      await ensureInit();
+      return typeof store.pasalintiBandymus === "function"
+        ? store.pasalintiBandymus(attemptIds, nustatymai)
+        : null;
+    },
+    /** Karantinas: vienkartinis pranešimas apie invarianto pažeidimą (#157, PR-5). */
+    pazymetiKarantina: async (attemptIds) => {
+      await ensureInit();
+      return typeof store.pazymetiKarantina === "function" ? store.pazymetiKarantina(attemptIds) : [];
+    },
+    /** Kiek eilučių karantine — matoma suvestinėje, kol jos egzistuoja (#157, PR-5). */
+    karantinuotuSkaicius: async () => {
+      await ensureInit();
+      return typeof store.karantinuotuSkaicius === "function" ? store.karantinuotuSkaicius() : 0;
+    },
+    sweepResultArtifacts: async (kandidatai) => {
+      await ensureInit();
+      return typeof store.sweepResultArtifacts === "function"
+        ? store.sweepResultArtifacts(kandidatai)
+        : null;
+    },
+    deleteResultArtifacts: async (jobId) => {
+      await ensureInit();
+      return typeof store.deleteResultArtifacts === "function"
+        ? store.deleteResultArtifacts(jobId)
         : null;
     },
     listPendingAudioCleanups: async (limit) => {
@@ -673,11 +1323,15 @@ module.exports = {
    *   sprendžia 403 vs 404. Sulieti į `null` reikštų, kad transporto sluoksnis
    *   nebeturi iš ko pasirinkti.
    */
-  get: async (scope) => {
+  /**
+   * @param {{jobId: string, ownerId: string|null, ownerKind?: string}} scope
+   * @param {{hydrate?: boolean}} [nustatymai] `hydrate: false` - tik metaduomenys (#157, PR-3)
+   */
+  get: async (scope, nustatymai = {}) => {
     assertScope(scope, "get");
     await ensureInit();
-    const result = await store.getOwned(scope.jobId, scope);
-    return result === "FORBIDDEN" ? FORBIDDEN : result;
+    const result = await store.getOwned(scope.jobId, scope, nustatymai);
+    return fasadoRezultatas(result);
   },
   /**
    * @param {string} id
@@ -706,14 +1360,25 @@ module.exports = {
   finish: async (scope, status, extra = {}) => {
     assertScope(scope, "finish");
     await ensureInit();
-    if (blockedByTombstone(scope.jobId, "finish")) return null;
+    if (await blockedByTombstone(scope.jobId, "finish")) return null;
 
     const job = await store.getOwned(scope.jobId, scope);
     if (!job) return null;
     if (job === "FORBIDDEN") return FORBIDDEN;
 
     const patch = jobPhase.finish(job, status, extra);
-    return store.update(scope.jobId, patch);
+    /**
+     * ⚠️ `updateOwned`, NE `update` (#184, 7.5b).
+     *
+     * Iki 7.5b čia buvo `store.update()` – nuosavybė patikrinta `getOwned()`
+     * metu, o tarp jos ir rašymo liko `await`. Sąlyginis kelias tą uždaro DVIEM
+     * invariantais viename `UPDATE`: nuosavybė IR versija. Vien versijos
+     * neužtektų – ji pasikeistų ir tada, kai savininkas nepasikeitė, o
+     * nuosavybės perdavimo atveju atsakymas privalo likti `FORBIDDEN`.
+     */
+    return fasadoRezultatas(
+      await store.updateOwned(scope.jobId, patch, scope, { expectedVersion: job.version })
+    );
   },
 
   update: async (scope, patch, options = {}) => {
@@ -748,13 +1413,13 @@ module.exports = {
      * įrašyti ar gauti iš JSON konfigūracijos. Kad juo pasinaudotum, reikia
      * eksplicitiškai importuoti iš `jobStore`, o tai matoma peržiūroje.
      */
-    if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && tombstones.isDeleted(id)) {
+    if (options.allowAfterDeletion !== LIFECYCLE_INTERNAL && (await tombstones.isDeleted(id))) {
       log.warn("Atmestas jobo atnaujinimas po ištrynimo", { jobId: id });
       return null;
     }
 
     const result = await store.updateOwned(id, patch, scope);
-    return result === "FORBIDDEN" ? FORBIDDEN : result;
+    return fasadoRezultatas(result);
   },
   /**
    * @param {{jobId: string, ownerId: string|null}} scope
@@ -764,7 +1429,11 @@ module.exports = {
     assertScope(scope, "remove");
     await ensureInit();
     const result = await store.removeOwned(scope.jobId, scope);
-    return result === "FORBIDDEN" ? FORBIDDEN : result;
+    return fasadoRezultatas(result);
+  },
+  listExpired: async (now, limit) => {
+    await ensureInit();
+    return typeof store.listExpired === "function" ? store.listExpired(now, limit) : [];
   },
   sweepExpired: async (now) => {
     await ensureInit();
@@ -818,12 +1487,56 @@ module.exports = {
 
     assertRestorableId(job);
 
-    if (tombstones.isDeleted(job.id)) {
+    if (await tombstones.isDeleted(job.id)) {
       log.warn("Atkūrimas praleido ištrintą jobą", { jobId: job.id });
       return null;
     }
 
-    return store.restoreRecord(job);
+    /**
+     * ⚠️ PATIKRA VIRŠUJE YRA PIGUS ANKSTYVAS IŠĖJIMAS, NE GARANTIJA (#183 Codex, P1).
+     *
+     * Ji ir `store.restoreRecord()` yra du atskiri veiksmai: lygiagreti replika
+     * gali įterpti žymą tarp jų. Persistentiniame kelyje langą uždaro pats
+     * store'as - `postgresStore.restoreRecord()` kviečia `assertNotBarred()`
+     * SAVO transakcijoje su advisory lock'u.
+     *
+     * Kitiems backend'ams tokios transakcijos nėra, tad langas uždaromas
+     * KOMPENSUOJANČIA po-rašymo patikra: jei žyma atsirado tuo metu, atkurtas
+     * įrašas pašalinamas. Rezultatas toks pat kaip niekada neatkūrus, tik
+     * pasiekiamas dviem žingsniais.
+     */
+    const atkurta = await store.restoreRecord(job);
+
+    if (atkurta && (await tombstones.isDeleted(job.id))) {
+      log.warn("Atkūrimas ATŠAUKTAS: žyma atsirado rašymo metu", { jobId: job.id });
+
+      /**
+       * ⚠️ NEPAVYKĘS VALYMAS PROPAGUOJAMAS, NE NUTYLIMAS (#183 Codex).
+       *
+       * Anksčiau `remove()` klaida buvo suloginama, o funkcija vis tiek
+       * grąžindavo `null` - t. y. praneštų, kad atkūrimas SAUGIAI praleistas,
+       * nors užbarjeruotas job'as LIEKA saugykloje. Praradus atminties žymą
+       * (restartas atminties režime) jis atgytų, o atkūrimo kvietėjas apie tai
+       * nebūtų sužinojęs: būsena blogesnė nei prieš, o pranešimas - sėkmingas.
+       *
+       * Dabar klaida keliauja kvietėjui: atkūrimas krinta matomai ir gali būti
+       * ištaisytas. `null` reiškia „neatkurta IR nieko nepalikta"; nieko kito
+       * jis reikšti negali.
+       */
+      try {
+        await store.remove(job.id);
+      } catch (klaida) {
+        log.error("Atšaukto atkūrimo nepavyko išvalyti", { jobId: job.id, klaida: klaida.message });
+        klaida.message =
+          `Atkūrimas atšauktas dėl ištrynimo žymos, bet įrašo pašalinti nepavyko ` +
+          `(job ${job.id}): ${klaida.message}. Užbarjeruotas įrašas LIKO saugykloje.`;
+        throw klaida;
+      }
+
+      return null;
+    }
+
+    return atkurta;
   },
 
   size: async () => {
@@ -846,19 +1559,37 @@ module.exports = {
   resolveBackendChoice,
   applyActivationBarrier,
   /**
-   * ⚠️ EKSPORTUOJAMA TESTAMS, nes produkcijoje ši funkcija dar NEPASIEKIAMA.
+   * ⚠️ EKSPORTUOJAMA TESTAMS. Priežastis, dėl kurios eksportas atsirado, PASIBAIGĖ.
    *
-   * Vienintelį jos kvietimo tašką (`initializeStore()`) uždaro aktyvavimo
-   * barjeras, tad be eksporto fail-closed elgesys neturėtų JOKIO įrodymo -
-   * nei runtime, nei testo. Neišbandytas gedimo kelias, kuris įsijungs
-   * barjerą atidarius, yra blogesnis nei neparašytas: jis atrodo padengtas.
+   * Buvo: vienintelį jos kvietimo tašką (`initializeStore()`) uždarydavo aktyvavimo
+   * barjeras, tad be eksporto fail-closed elgesys neturėtų JOKIO įrodymo — nei
+   * runtime, nei testo. Neišbandytas gedimo kelias, įsijungiantis barjerą atidarius,
+   * yra blogesnis nei neparašytas: jis atrodo padengtas.
    *
-   * Unit lygmuo įrodo, KAD prisijungimo klaida atmetama ir NĖRA fallback į
-   * memory. Produkcinio kelio (`DATABASE_URL` → startas nutrūksta) galutinis
-   * acceptance priklauso aktyvavimo etapui, ne šiam PR.
+   * ⚠️ BARJERAS ATIDARYTAS, IR ACCEPTANCE ĮVYKDYTAS (#155): produkcinį kelią
+   * (`JOB_STORE_BACKEND=postgres` + uždaras prievadas → startas nutrūksta) matuoja
+   * CI žingsnis „Fail-closed startas" per tikrą `node server.js`. Ankstesnė šio
+   * komentaro eilutė perkėlė acceptance „į aktyvavimo etapą" — tas etapas įvyko.
+   *
+   * ⚠️ EKSPORTAS PALIEKAMAS SĄMONINGAI: unit lygmuo lieka pigus ir greitas
+   * sluoksnis, tikrinantis KAD klaida atmetama ir NĖRA fallback į memory, be
+   * konteinerių. Pasikeitė ne jo vertė, o tai, kad jis nebėra vienintelis įrodymas.
    */
   _initializePostgresForTests: initializePostgres,
+  /**
+   * Prieiga prie PRIJUNGIMO TAISYKLIŲ testams (#157, PR-7).
+   *
+   * ⚠️ EKSPONUOJAMA TA PATI FUNKCIJA, kurią kviečia `initializePostgres()`, ne jos
+   * kopija: taisyklė „inline nepaduodama" turi VIENĄ egzempliorių. Testas be DB
+   * kitaip arba nepasiekiamas, arba tikrintų perrašytą tos pačios logikos versiją —
+   * antra interpretacija, nustojanti sutapti tyliai.
+   */
+  _paruostiArtefaktuSaugyklaForTests: paruostiArtefaktuSaugykla,
   REQUIRED_JOB_CONSTRAINTS,
+  REQUIRED_JOB_RESULT_CONSTRAINTS,
+  REQUIRED_ATTEMPT_CONSTRAINTS,
+  REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS,
+  BUTINOS_LENTELES,
   STATUS,
   JOB_TYPES,
   TTL_MS,

@@ -1,8 +1,43 @@
 # SUBISSUES-155
 
-Vieninteliai sub-issue tekstų šaltinis. `create-155-subissues.sh` juos skaito.
+Vieninteliai sub-issue tekstų šaltinis. `scripts/dev/create-155-subissues.sh` juos skaito.
 
 Formatas: `## [7.x] Pavadinimas`, tada body iki kito `##`.
+
+---
+
+## Skersiniai pataisymai (ne sub-PR)
+
+⚠️ **ANTRAŠTĖ SĄMONINGAI BE `[7.x]`, IR PAGRINDINĖ PRIEŽASTIS YRA DUBLIKATAS.**
+
+`scripts/dev/create-155-subissues.sh` esamą issue randa pagal **TIKSLŲ
+PAVADINIMĄ** (`create-155-subissues.sh:141`: `if i["title"] == pav`, kur `pav`
+yra `[<kodas>] <pavadinimas>`). #245 realus pavadinimas —
+„Keturi PostgreSQL pool'ai, dvi DSN taisyklės — …" — su `[7.x] …` niekada
+nesutaptų, tad gerai suformuota `## [7.6d]` antraštė būtų priimta ir sukurtų
+**ANTRĄ, DUBLIUOJANTĮ** issue šalia jau egzistuojančio #245.
+
+Antraeilė priežastis: netaisyklinga `## [` antraštė (pvz. `## [#245]`)
+generatorių apskritai **nutraukia** (`:105-110`) — jis reikalauja, kad kiekviena
+`## [` antraštė atitiktų `\d+\.\d+[a-z]?`.
+
+Todėl ši antraštė neturi `[` iš viso: parseris jos nemato, ir nė vienas iš dviejų
+gedimų nekyla.
+
+Čia registruojami pataisymai, apimantys kelis 7.x etapus vienu metu.
+
+| Issue | Apimtis | Paliesti etapai |
+|---|---|---|
+| #245 | Viena PostgreSQL jungties formos semantika keturiems pool'ams: `DATABASE_URL` ir `PG*` interpretuojami vienodai, dviprasmybės sargas perrašytas iš **intento** (`DATABASE_URL && PGHOST`) į **efektą** (ar aplinka keičia taikinį, kredencialus, SSL ar sesijos namespace) | 7.2a, 7.3, 7.4b, 7.4e, 7.5a |
+
+⚠️ **#245 NEKEIČIA nė vieno komponento backend pasirinkimo politikos.** `PG*`
+buvimas savaime nieko neperjungia į PostgreSQL; aktyvavimo barjeras
+(`POSTGRES_AKTYVAVIMAS_LEISTAS`) nepaliestas. Suvienodinta tik jungties FORMOS
+interpretacija ten, kur komponentas pagal savo politiką PostgreSQL jau pasirinko.
+
+⚠️ **Laužantis konfigūracijos pokytis.** Mišrios konfigūracijos, kuriose `PG*`
+pakeičia `DATABASE_URL` efektyvią semantiką, nuo #245 **stabdo startą**. Žr.
+`CHANGELOG.md` „Unreleased" ir `docs/audit-storage.md`.
 
 ---
 
@@ -770,9 +805,15 @@ turinys yra dokumentacijos kokybės, ne mašininis reikalavimas.
 
 ### 14. Backend aktyvavimas
 
-7.2b **NEATIDARO** PostgreSQL aktyvavimo barjero.
+> ⚠️ **BŪSENA PASIKEITĖ NUO TADA, KAI TAI RAŠYTA (#155): BARJERAS ATIDARYTAS,
+> `POSTGRES_AKTYVAVIMAS_LEISTAS = true`.** Visos žemiau išvardytos prielaidos
+> įvykdytos. Šis skyrius lieka kaip 7.2b APIMTIES įrašas — jis teisingas apie tai,
+> ko 7.2b nedarė, ir NETEISINGAI skaitomas kaip dabartinė sistemos būsena.
+> Autoritetas dabarčiai — `docs/decisions/155-postgres-authority.md`.
 
-`POSTGRES_AKTYVAVIMAS_LEISTAS` lieka `false`, kol įvykdytos ADR nurodytos
+7.2b **NEATIDARĖ** PostgreSQL aktyvavimo barjero.
+
+`POSTGRES_AKTYVAVIMAS_LEISTAS` liko `false`, kol nebuvo įvykdytos ADR nurodytos
 vėlesnės prielaidos, įskaitant:
 
 - persistentines deletion tombstones;
@@ -955,6 +996,221 @@ Kur įmanoma:
 neatitinka bendro kontrakto, testas **neturi būti silpninamas** vien tam, kad
 visi trys taptų žali. Pirmiausia nustatomas autoritetingas domeno kontraktas ir
 pataisoma nukrypstanti realizacija.
+
+---
+
+## [7.2c] Tipų normalizavimas ir backend'ų elgsenos paritetas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.2b · **Tipas:** duomenų modelio
+kontraktas · **Prioritetas:** P1
+
+Tipų konvertavimo aibės (`BOOLEAN_FIELDS`, `NUMBER_FIELDS`) gyvena
+`redisStore.js` viduje, nors jos saugo nuo gedimo, kuris kartojasi. Bet po
+peržiūros paaiškėjo, kad **problema platesnė nei aibių vieta**: normalizavimo
+nėra rašymo kelyje, tad trys backend'ai to paties patch'o rezultatą grąžina
+skirtingai — ne tik kitokiu tipu, bet ir kitokia logine reikšme.
+
+## Ar tai pasiekiama ŠIANDIEN
+
+⚠️ **Ne per produkcinius kelius.** Patikrinta prieš `main` (`11fb336`):
+produkcinis kodas eilučių į šiuos laukus nesiunčia, o eilutės ateidavo iš Redis,
+ne iš kviečiančiųjų. Divergencija pasiekiama tik per tiesioginį `store.update()`
+su eilutės reikšme.
+
+Tai apsauga nuo ateities regresijos, ne esamo gedimo taisymas — bet šablonas jau
+sprogo **tris kartus**, ir vienas iš jų reiškė duomenų praradimą.
+
+## Įrodymas
+
+`store.update(id, { laukas: "false" })` ir `"0"`, prieš tikrą PostgreSQL:
+
+| Laukas | memory | postgres |
+|---|---|---|
+| ⚠️ `audio_cleanup_pending` | `"false"` | `true` |
+| ⚠️ `deletion_pending` | `"false"` | `true` |
+| ⚠️ `progressKnown` | `"false"` | `false` |
+| ⚠️ `attempt_count` | `"0"` | `0` |
+| ⚠️ `audio_cleanup_attempts` | `"0"` | `0` |
+| ⚠️ `deletion_attempts` | `"0"` | `0` |
+
+Du pirmieji pavojingiausi: memory palieka `"false"`, kuris JavaScript'e yra
+**truthy**, o PostgreSQL grąžina `true` per `Boolean("false")`. Skiriasi ne tik
+tipas, bet ir loginė reikšmė, kurią mato kviečiantysis kodas.
+
+`schemaVersion` (septintas tos pačios aibės laukas) ištaisytas #204.
+
+## Kodėl verta spręsti
+
+`redisStore.js:58-70` komentaras dokumentuoja tris pasekmes:
+
+| Laukas | Pasekmė |
+|---|---|
+| `audio_cleanup_pending: "false"` | `listByFlag()` grąžindavo VISUS job'us, o `retryPendingAudioCleanups()` trindavo dar apdorojamų job'ų audio |
+| `progressKnown: "false"` | `"false"` yra truthy → `progressKnown === false` niekada nesuveikdavo |
+| `audio_cleanup_attempts: "0"` | `("0" \|\| 0) + 1 === "01"` → skaitliukas ir alerto riba neveikė |
+
+Tas pats komentaras įvardija šaknį: *„`attempt_count` jau buvo apdorojamas
+atskirai — tai buvo užuomina, kad ši spąsta žinoma; naujus laukus reikėjo
+pridėti čia iš karto."*
+
+Duomenų praradimas jau įvyko kartą. Ketvirtas kartas kainuos tiek pat, o
+šiandien niekas jo nesustabdytų.
+
+## Pasirinktas sprendimas
+
+Kanoninių tipų kontraktas perkeliamas į `common.js`, bet **vien aibių perkėlimo
+NEPAKANKA.** Normalizavimas vykdomas bendrame **rašymo** kelyje, prieš
+backend'ams gaunant pataisytą objektą:
+
+```
+patch
+→ common.js validacija / applyPatch()
+→ kanoninių boolean/number laukų normalizavimas
+→ kanoninis job objektas
+→ memory / Redis / PostgreSQL backend
+```
+
+Todėl:
+
+- `memoryStore` niekada neišsaugo `"false"` ar `"0"` kanoniniame lauke;
+- `redisStore.update()` **tiesioginis** rezultatas jau normalizuotas, dar PRIEŠ
+  serialize/deserialize round-trip;
+- `postgresStore` negauna `"false"` ir nepaverčia jo per
+  `Boolean("false") === true`;
+- `redisStore.deserialize()` **išlieka**, nes Redis fiziškai saugo tekstą — bet
+  aibę ima iš `common.js`, ne apibrėžia savo.
+
+### ⚠️ `create()` ir `restoreRecord()` — ne tik `update()`
+
+`applyPatch()` dengia atnaujinimus. Bet **`restoreRecord()` priima savavališką
+įrašą iš atsarginės kopijos**, o senesnė kopija gali turėti būtent tas tekstines
+reikšmes, dėl kurių šis issue egzistuoja. Atkūrimas be normalizavimo grąžintų
+gedimą į gyvą sistemą — ir kaip tik tuo momentu, kai niekas neįtaria.
+
+Normalizavimas taikomas **visiems** keliams, kuriais job objektas patenka į
+saugyklą: `create()`, `update()`, `restoreRecord()`. Testas kiekvienam.
+
+### Kanoninės konversijos semantika
+
+Normalizavimas **negali** naudoti bendro JavaScript truthiness:
+
+```
+"false" → false        NE Boolean("false") → true
+"true"  → true
+"0"     → 0            (number, ne eilutė)
+```
+
+Neaiški ar neleistina reikšmė **negali būti tyliai interpretuojama kaip kita
+loginė reikšmė**.
+
+⚠️ **Neleistinos įvesties politika neišrandama iš naujo** — ji išlaiko esamą
+`applyPatch()` kontraktą. Bet kad ir kokia ji būtų, ji privalo būti **vienoda
+visuose trijuose backend'uose**, ir tai įrodo testas. Priešingu atveju
+divergencija tiesiog persikelia iš teisingų reikšmių į neteisingas.
+
+### Dvi normalizavimo vietos negali išsiskirti
+
+Po pataisos jų lieka dvi: rašymo kelias `common.js` ir `redisStore.deserialize()`
+skaitymo kelyje. Abi privalo naudoti **tą patį helperį**, ir testas įrodo, kad
+tai pačiai įvesčiai jos duoda tapatų rezultatą. Dvi nepriklausomos realizacijos
+yra ta pati klasė, kurią šis issue ir šalina.
+
+### Job modelio sargas
+
+`BOOLEAN_FIELDS` ir `NUMBER_FIELDS` lieka **eksplicitinis** kanoninis kontraktas
+`common.js`. Bet jų pilnumas **netikrinamas antru rankiniu sąrašu**.
+
+Sargo testas programiškai sukuria `newJob()` ir tikrina:
+
+- kiekvienas laukas, kurio numatytoji reikšmė yra `boolean`, yra
+  `BOOLEAN_FIELDS`;
+- kiekvienas laukas, kurio numatytoji reikšmė yra `number`, yra `NUMBER_FIELDS`.
+
+Taip naujas typed laukas negali atsirasti `newJob()` pamirštant normalizavimo
+kontraktą.
+
+⚠️ **Aibės NEGENERUOJAMOS iš `newJob()`.** `newJob()` yra runtime objektų
+konstruktorius, o laukų schema — duomenų modelio kontraktas. Schema neturi būti
+netiesiogiai „atrandama" paleidžiant konstruktorių; ji deklaruojama, o
+konstruktorius prieš ją tikrinamas.
+
+⚠️ **Sargo riba, kurią reikia įvardyti:** jis mato tik tuos laukus, kurie
+egzistuoja `newJob()` išvestyje. Laukas, atsirandantis tik vėliau (pvz. tik
+užbaigimo metu), pro jį prasmuktų. Tokie laukai deklaruojami kanoniniame
+kontrakte eksplicitiškai, ir ta riba užrašoma sargo komentare — kitaip jis
+skelbtų pilnumą, kurio neturi.
+
+### Typed defaults invariantas
+
+Kad sargas būtų patikimas:
+
+- kanoninis boolean laukas `newJob()` turi turėti **boolean** numatytąją reikšmę;
+- kanoninis number laukas — **number**;
+- naujas boolean/number laukas negali būti inicializuojamas `null` ar
+  `undefined` (nes `typeof null === "object"`, ir tipo aptikimas tyliai
+  nesuveiktų).
+
+Jei ateityje reikės nullable typed lauko, jo tipas deklaruojamas kanoniniame
+kontrakte eksplicitiškai ir sargas praplečiamas — negalima leisti jam tyliai
+iškristi iš tikrinimo. Ši taisyklė užrašoma komentaru pačiame `newJob()`.
+
+## DoD
+
+- [ ] `BOOLEAN_FIELDS` ir `NUMBER_FIELDS` apibrėžtos `common.js`; `redisStore`
+      savo kopijų nebeturi.
+- [ ] `applyPatch()` arba vienas jo naudojamas `common.js` helperis yra
+      **autoritetingas rašymo kelio normalizavimo taškas** visiems backend'ams.
+- [ ] Normalizavimas taikomas `create()`, `update()` **ir** `restoreRecord()` —
+      testas kiekvienam keliui.
+- [ ] `"false"` boolean lauke normalizuojamas į `false`, ne per truthiness į
+      `true`.
+- [ ] `"0"` skaitiniame lauke normalizuojamas į number `0`.
+- [ ] Neleistinos įvesties elgesys išlaiko esamą `applyPatch()` kontraktą ir yra
+      **vienodas visuose trijuose backend'uose** — testas.
+- [ ] `redisStore.deserialize()` ir rašymo kelias naudoja tą patį helperį;
+      testas įrodo tapatų rezultatą tai pačiai įvesčiai.
+- [ ] ⚠️ **RAŠYMO + SKAITYMO PARITETAS.** Kiekvienam kanoniniam laukui tas pats
+      tekstinis patch'as taikomas visiems trims backend'ams, ir testas atskirai
+      tikrina:
+      **(1)** `await store.update(id, patch)` **tiesioginį** rezultatą;
+      **(2)** po to `await store.get(id)` rezultatą.
+      Abu turi turėti identišką kanoninę reikšmę IR identišką JavaScript tipą.
+      **Vien `get()` patikros nepakanka** — Redis skaitymo kelio `deserialize()`
+      paslėptų rašymo kelio regresiją.
+- [ ] Paritetų testas **parametrizuotas pagal aibę**, apima VISUS
+      `BOOLEAN_FIELDS` ir `NUMBER_FIELDS`, ne tik istorinius šešis laukus.
+- [ ] Sargo testas iš `newJob()` nustato visus boolean/number numatytųjų
+      reikšmių laukus ir įrodo, kad jie yra atitinkamoje kanoninėje aibėje.
+- [ ] Sargo riba (laukai, neegzistuojantys `newJob()` išvestyje) įvardyta
+      komentare, ne nutylėta.
+- [ ] `newJob()` turi komentarą su typed defaults invariantu.
+- [ ] Regresijos testai trims istoriniams atvejams: `listByFlag()` su `"false"`,
+      `progressKnown === false` patikra, `attempt_count` didinimas.
+- [ ] ⚠️ **Mutacija:** pridėjus naują boolean/number lauką į `newJob()` ir
+      neįtraukus jo į kanoninį kontraktą, **sargo testas krinta**.
+- [ ] ⚠️ **Mutacija:** pašalinus rašymo kelio normalizavimą, **pariteto testas
+      krinta net tada, kai `redisStore.deserialize()` tebeveikia**.
+- [ ] `docs/security-test-matrix.md` įrašas: audio valymo vėliavos yra duomenų
+      praradimo riba, ne stiliaus klausimas. Eilutė įvardija savo mutaciją.
+
+## Ko NEAPIMA
+
+- `schemaVersion` — ištaisytas #204.
+- Redis serializavimo formato keitimo: Redis ir toliau saugo eilutes, keičiasi
+  tik tai, kur apibrėžta kanoninė aibė.
+- Įvesties validacijos maršrutuose: čia storage-layer kontraktas, ne HTTP.
+- Naujų laukų pridėjimo į job modelį.
+- Bendro schema framework'o, Zod ar JSON Schema migracijos.
+
+## Kilmė
+
+Rasta klausiant, ar #204 sprendžia pavienį atvejį, ar šabloną. `schemaVersion`
+buvo septintas iš septynių tos pačios aibės laukų; likę šeši patikrinti
+eksperimentu ir visi elgėsi skirtingai.
+
+Peržiūra parodė, kad tai ne Redis refaktoringas, o rašymo kelio kontrakto
+pataisymas — todėl issue pervadintas ir formalizuotas kaip **7.2c**, tiesioginis
+7.2b backend kontrakto ekvivalentumo tęsinys.
 
 ---
 
@@ -1603,7 +1859,9 @@ Išskaidyta. Darbo tekstai gyvena vaikuose žemiau:
 | `7.4a` | #210 | Audit fasado async cutover |
 | `7.4b` | #211 | `audit_log` schema ir postgres backend |
 | `7.4c` | #212 | Rakto rotacija ir audit užklausos |
-| `7.4d` | #213 | Retencija, privatumo režimas, readiness ir CI |
+| `7.4d` | #213 | Retencija ir privatumo režimas |
+| `7.4e` | #216 | Audito ištrynimo galutinumas |
+| `7.4f` | #231 | Readiness, backup ir CI registracija |
 
 Šioje sekcijoje DoD punktų nebelaikome - kitaip tas pats darbas turėtų
 dvi versijas spec'e.
@@ -1891,9 +2149,113 @@ ištrynimas per visas dar taikomas rakto generacijas.
 
 ### Užfiksuoti sprendimai
 
-- Istoriniai raktai: `AUDIT_ID_SALT_PREVIOUS` — kableliais atskirtas `id:reikšmė`
-  sąrašas. **Maksimum 5** generacijos; daugiau → startup klaida.
-- Puslapiavimas — **keyset kursorius** `(timestamp, id)`, ne `OFFSET`.
+Agentas jų NEKEIČIA ir alternatyvų nesirenka:
+
+- Aktyvus raktas — **pora** `AUDIT_ID_SALT_ID` + `AUDIT_ID_SALT`. `AUDIT_ID_SALT_ID`
+  yra stabilus operatoriaus suteiktas generacijos ID, persistinamas kaip
+  `hash_key_id`. Pats secret'as nepersistinamas niekada.
+- Istoriniai raktai — `AUDIT_ID_SALT_PREVIOUS`, kableliais atskirtas `id:secret`
+  sąrašas.
+- ID formatas: `[A-Za-z0-9_.-]{1,64}`. Secret formatas: base64url arba hex — kablelio
+  ir dvitaškio jame būti negali, todėl sąrašo skaidymas yra vienareikšmis.
+- ⚠️ **`AUDIT_ID_SALT_ID` PRIVALOMAS TIK `postgres` REŽIME; `memory` ĮSPĖJA.**
+
+  Tai EKSPLICITINIS sprendimas, ne praleistas reikalavimas. Atmintyje
+  `hash_key_id` niekur nerašomas, tad generacijos etiketė beprasmė, o
+  reikalavimas jos visur sulaužytų esamus atminties diegimus be jokios naudos.
+  Simetriška 7.4b taisyklei, kur `AUDIT_ID_SALT` privaloma tik persistentiniam
+  backend'ui.
+
+  Bet tylėti negalima: nustačius `AUDIT_ID_SALT` be `AUDIT_ID_SALT_ID`, startas
+  rašo `warn`. Tai vienintelė vieta, kur operatorius gali sužinoti IŠ ANKSTO,
+  kad perjungus `AUDIT_BACKEND=postgres` sistema nebepakils — kitaip jis tai
+  pamatytų tik migracijos metu.
+- Rūšiavimas — pagal **7.4b tvarkos autoritetą (`seq`)**, mažėjimo tvarka (naujausi
+  pirma). ⚠️ `timestamp` NĖRA tvarkos autoritetas: `now()` vienoje transakcijoje
+  visoms eilutėms grąžina tą patį momentą, o lygiagrečios transakcijos gali
+  prieštarauti įrašymo eilei. `seq` unikalus ir monotoniškas, tad kursoriui
+  atskiro laužtuko nereikia.
+- ⚠️ **DESC galioja TIK `query()` / `GET /api/audit`.** `getAll()` ir `list()` lieka
+  saugyklos (ASC) tvarka — 7.4b bendras paritetų rinkinys ir jo testai nekeičiami.
+- Puslapiavimas — keyset cursor. `OFFSET` po 7.4c nebėra palaikomas.
+- Startup gedimas šiame etape reiškia **proceso startą nutraukiantį FAIL**, ne vien
+  readiness — simetriškai 7.4b taisyklei, kad init klaida nekrenta į memory.
+
+### Rakto gyvavimo ciklo kontraktas
+
+⚠️ **RIBA IR GDPR TAISYKLĖ NEGALI SUKURTI NEIŠSPRENDŽIAMOS KONFIGŪRACIJOS.**
+Naivus derinys „maks. N istorinių" + „rakto negalima pašalinti, kol DB yra jo įrašų"
+duoda spąstus: pasukus raktą N+1 kartų greičiau nei suveikia retencija, viršijimas
+neleidžia startuoti, o pašalinti nė vieno rakto negalima, nes visi dar turi įrašų.
+Backend'as tampa nepaleidžiamas be teisėto išėjimo. Todėl:
+
+- Konfigūracija galioja, jei istorinių raktų **≤ 10 ARBA kiekvienas istorinis raktas
+  vis dar turi įrašų DB**. Riba atmeta tik NEBEREIKALINGUS raktus; reikalingo rakto
+  ji niekada neatmeta.
+- **Fan-out autoritetas yra DB, ne env sąrašo ilgis.** Kandidatinių `subject_id`
+  aibę apibrėžia generacijos, faktiškai esančios `audit_log`.
+
+Toliau:
+
+- Aktyvaus `AUDIT_ID_SALT_ID` ir visų istorinių `id` aibė unikali. Kolizija,
+  dublikatas, tuščias ID, tuščias secret'as, netinkamas formatas → startup FAIL.
+- ⚠️ **RAKTO NEGALIMA PAMIRŠTI, KOL DB YRA JUO PSEUDONIMIZUOTŲ ĮRAŠŲ.** Vien sąrašo
+  ilgio ribos GDPR garantijai nepakanka. PostgreSQL backend startup metu nuskaito
+  DB naudojamas `hash_key_id` generacijas; radus generaciją, kuriai resolveris
+  nebeturi rakto — FAIL-CLOSED. Taip užkertama būsena, kurioje persistentinis įrašas
+  egzistuoja, bet `removeBySubjectIdentifier(jobId)` nebegali apskaičiuoti jo
+  `subject_id`.
+- Raktą iš `AUDIT_ID_SALT_PREVIOUS` išimti leidžiama tik tada, kai DB nebeliko nė
+  vieno įrašo su tuo `hash_key_id`.
+- ⚠️ **PATIKROS KAINA.** `SELECT DISTINCT hash_key_id` kas startą yra pilnas skenavimas
+  ant augančios lentelės. Naudojamas loose index scan (rekursyvus CTE ant
+  `hash_key_id` indekso iš 7.4b). Naujos lentelės nekuriama.
+- ⚠️ **ATSISTATYMO KELIAS PRIVALOMAS.** Negrįžtamai praradus secret'ą fail-closed
+  taisyklė kitaip reikštų amžinai nepaleidžiamą backend'ą. Yra eksplicitinis
+  `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`, kuris paleidžia sistemą, kiekvieno
+  starto metu logina `warn` ir yra dokumentuotas kaip **sąmoningas GDPR garantijos
+  laužymas**. Numatyta reikšmė — `false`.
+- 7.4c retencijos NEĮGYVENDINA (tai 7.4d). 7.4c tik fail-closed būdu neleidžia paleisti
+  konfigūracijos, kuri persistentinius įrašus padarytų neberandamus GDPR keliu.
+
+### `/api/audit` filtrų kontraktas
+
+- `action` query parametras filtruoja persistentinį `event` lauką. Atskiras `action`
+  DB stulpelis nekuriamas.
+- `from` / `to` — griežtai validuojami ISO-8601 date-time. Netinkama reikšmė → 400.
+  `from > to` → 400.
+- `request_id` filtruoja atskirą `request_id` stulpelį.
+- `job_id` niekada nenaudojamas kaip plaintext lookup. Resolveris VIENĄ kartą
+  apskaičiuoja kandidatinius `subject_id` aktyviai ir visoms DB esančioms taikomoms
+  generacijoms, o užklausa naudoja vieną set-based predikatą
+  (`subject_id = ANY($1)`), ne N atskirų.
+- Filtrai komponuojami tarpusavyje viename užklausos kelyje, ne vienas kitą pakeičia.
+
+### Cursor kontraktas
+
+- `limit` išlaiko esamą ribojimo/capping kontraktą.
+- `cursor` — opaque URL-safe tokenas; klientas jo nekonstruoja ir neinterpretuoja.
+- Serveris cursor'e užkoduoja paskutinio grąžinto įrašo **pilną deterministinį sort
+  key pagal 7.4b ordering kontraktą**. ⚠️ Jei galutinis 7.4b ordering turi papildomą
+  monotonišką tie-breaker, cursor privalo apimti tą patį pilną raktą — aklai naudoti
+  `(timestamp, id)` negalima — faktinis 7.4b raktas yra `seq`.
+- ⚠️ **CURSOR NĖRA SLĖPTUVĖ FILTRŲ REIKŠMĖMS.** „Opaque" nereiškia „šifruotas".
+  Filtrų aibės susiejimas daromas per **HMAC-SHA256 fingerprint** (keyed aktyviu
+  `AUDIT_ID_SALT`, trumpinamas iki 16 baitų), o ne per užkoduotas pačias reikšmes.
+  Priešingu atveju `job_id` keliautų URL'e ir patektų į nginx access logus. Cursor
+  payload'e yra TIK sort key ir fingerprint.
+- Cursor su kita filtrų aibe (įskaitant pakeistą rūšiavimo kryptį) → 400.
+- Sugadintas, nepilnas ar semantiškai netinkamas cursor → 400, ne 500.
+- `next_cursor` — opaque tokenas kitam puslapiui arba `null`. Nustatomas per
+  `limit + 1` fetch: `null` grąžinamas tiksliai tada, kai kito puslapio nėra. Tuščias
+  paskutinis puslapis neleidžiamas.
+- Rotavus aktyvų raktą anksčiau išduoti cursor'ai nustoja galioti (fingerprint
+  nebesutampa) → 400. Dokumentuota kaip sąmoningas elgesys.
+- ⚠️ **OFFSET TRANSITION.** 7.4c sąmoningai keičia `/api/audit` puslapiavimo kontraktą.
+  `offset` po 7.4c atmetamas kaip nepalaikomas parametras; tylaus fallback į OFFSET
+  nelieka. ⚠️ Jei `schemas.auditQuery` šiandien nežinomus parametrus tyliai nukerta,
+  „`offset` → 400" yra ATSKIRAS validacijos politikos pakeitimas šiam maršrutui, ne
+  šalutinis efektas — jį reikia padaryti eksplicitiškai.
 
 ### DoD
 
@@ -1930,69 +2292,189 @@ Retencijos, `PRIVACY_MODE`, `AUDIT_MAX_ENTRIES`, readiness (7.4d).
 
 ---
 
-## [7.4d] Retencija, privatumo režimas, readiness ir CI
+## [7.4d] Retencija ir privatumo režimas
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.4b
+**Tėvinis:** #155 · **Priklauso nuo:** 7.4b, 7.4f · **Lygiagretus:** 7.4e
 
-Operacinis 7.4 uždarymas: retencija, `PRIVACY_MODE`, readiness, kabliukas 7.6 atkūrimui,
-CI registracija ir dokumentacija.
+Persistentinio audito duomenų gyvavimo ciklo uždarymas: retencija ir
+`PRIVACY_MODE`.
+
+⚠️ **APIMTIS SUSIAURINTA.** Readiness, backup/7.6 kabliukas, PostgreSQL CI
+registracija, cutover ir operatoriaus dokumentacija įgyvendinti **7.4f (#231)**
+ir čia NEKARTOJAMI. Ankstesnė šio issue redakcija juos apėmė; jei kur nors
+matote tuos reikalavimus, autoritetas yra #231.
 
 ### Užfiksuoti sprendimai
 
-- `AUDIT_MAX_ENTRIES` PostgreSQL režime **NETAIKOMA**. Tai buvo apsauga nuo RAM
-  augimo; ribos „palik paskutinius N" į DB neperkeliame. Dokumentuojama eksplicitiškai.
-- Retencijos riba: `timestamp < cutoff` → šalinama, `timestamp == cutoff` → **lieka**.
-- `PRIVACY_MODE=true` PostgreSQL režime: naujų įrašų nerašo IR starto metu išvalo
-  esamas `audit_log` eilutes — atitinka dabartinį in-memory kontraktą, kuris žada
-  ištrynimą, ne tik nutildymą.
+- `AUDIT_MAX_ENTRIES` PostgreSQL režime **NETAIKOMA** kaip retencijos taisyklė.
+  Tai buvo apsauga nuo RAM augimo; ribos „palik paskutinius N" į DB
+  neperkeliame.
+- Retencijos riba: `timestamp < cutoff` → šalinama, `timestamp == cutoff` →
+  **lieka**, `timestamp > cutoff` → lieka.
+- `PRIVACY_MODE=true` PostgreSQL režime: naujų įrašų nerašo IR starto metu
+  fiziškai išvalo esamas `audit_log` eilutes — atitinka dabartinį in-memory
+  kontraktą, kuris žada ištrynimą, ne nutildymą.
+- Batch dydis **nefiksuojamas skaičiumi šiame issue**. Reikalaujama „ribotas
+  batch su viena autoritetinga numatytąja reikšme"; konkretų dydį parenka
+  realizacija pagal repo konvencijas ir jį testuoja.
+
+- ⚠️ **Init tvarka:** `PRIVACY_MODE` purge vykdomas ir `await`inamas **PRIEŠ**
+  `patikrintiGeneracijas()`. Išvalius eilutes `usedGenerations()` grąžina `[]`,
+  tad 7.4c naslaičių patikra nebeturi ko atmesti. Priešinga tvarka sustabdytų
+  startą dėl įrašų, kuriuos purge tuoj pat ištrintų.
+- Batch kandidatų atranka PostgreSQL režime naudoja `FOR UPDATE SKIP LOCKED`.
+  Nukrypti galima tik su eksplicitiniu pagrindimu.
+
+### Retencijos vykdymo kontraktas
+
+- Retencijos autoritetas — esama centralizuota `privacyConfig` /
+  `retentionSweeper` architektūra. Auditui nekuriamas atskiras timer'is,
+  scheduler'is ar antra retention konfigūracija.
+- Cutoff apskaičiuojamas **VIENĄ kartą** sweep ciklo pradžioje iš kontroliuojamo
+  laiko šaltinio: `cutoff = now − retention`. Visi to paties sweep batch'ai
+  naudoja tą pačią reikšmę. ⚠️ Perskaičiuojant `now()` kiekvienam batch'ui,
+  ilgo sweep metu keistųsi naikinamų eilučių aibė.
+- Sweep vykdomas ribotais batch'ais. Vienas DB kvietimas pašalina ne daugiau
+  nei batch limitas; pilnas sweep kartoja, kol pašalinta mažiau nei limitas
+  arba nulis.
+- ⚠️ **Batch dydis turi VIENĄ autoritetingą šaltinį** — konstantą arba
+  konfigūraciją store/retention sluoksnyje. Ranka įrašyti skirtingi dydžiai
+  kode ir teste yra ta pati rankomis palaikomo sąrašo klasė, kurią 7.4f
+  pašalino kitur.
+- ⚠️ **Kandidatų atranka deterministinė ir indeksu palaikoma.** Negalima
+  parsisiųsti visų expired eilučių į Node ir trinti po vieną. PostgreSQL
+  `DELETE` neturi paprasto `LIMIT` — reikalingas kandidatų CTE/subquery.
+  Issue fiksuoja REZULTATĄ, ne SQL sintaksę.
+- ⚠️ **SWEEP CIKLAI NEPERSIDENGIA VIENOJE INSTANCIJOJE.** Jei ankstesnis sweep
+  dar vyksta, scheduler'io kitas tick'as nepradeda antro. Įrodoma elgsenos
+  testu, ne `isSweeping` kintamojo egzistavimu.
+- ⚠️ **Proceso lokali spyna NĖRA multi-instance korektiškumo garantija.** Dvi
+  instancijos gali trinti tą pačią expired aibę vienu metu; rezultatas privalo
+  likti korektiškas ir idempotentiškas. Jei reikia stipresnio mechanizmo
+  (advisory lock), tai eksplicitinis sprendimas su pagrindimu, ne prielaida.
+
+### `PRIVACY_MODE` startup kontraktas
+
+- `PRIVACY_MODE=true` su PostgreSQL yra **STARTUP BARJERAS**, ne foninis
+  best-effort valymas.
+- Init seka: DB/pool paruoštas → migracijos pritaikytos → audit store
+  inicializuotas → `PRIVACY_MODE` RAW valymas **`await`intas** → tik tada
+  instancija gali aptarnauti srautą.
+- ⚠️ **Valymas negali vykti prieš migracijas ar store init** — kitaip startas
+  griūva lenktynėse.
+- ⚠️ **Purge nesėkmė → startup FAIL-CLOSED.** Negalima tęsti su
+  `PRIVACY_MODE=true` ir senomis eilutėmis DB.
+- ⚠️ **VEIKIANTI KLAIDA, NE BŪSIMA SPRAGA.** `auditLog.js:555-559` ir `:619-633`:
+  `PRIVACY_MODE=true` metu `record()`, `getAll()` ir `query()` kviečia
+  `purgeForPrivacyMode()` → `clear()`, o `postgresStore.clear()` (`:347-357`)
+  meta klaidą, kai `NODE_ENV !== "test"`. Produkcijoje su PostgreSQL procesas
+  kristų per pirmą audito rašymą. PostgreSQL režime tai privalo būti saugus
+  no-op: DB išvaloma starto metu, nauji įrašai nepridedami.
+- Kol `PRIVACY_MODE=true`, nauji audit įrašai nepersistinami.
+- Režimo keitimas vyksta per proceso restartą / init semantiką. Runtime
+  hot-toggle nekuriamas, jei repo kontrakte tokio nėra.
+- `true → false` neprikelia ištrintų įrašų; po normalaus starto tiesiog vėl
+  leidžiami nauji.
+
+### `DELETE` kelių kontraktas
+
+- Teisėti aukšto lygio šalinimo keliai persistentiniame audite: **subject
+  erasure**, **retencija**, **`PRIVACY_MODE` startup purge**.
+- ⚠️ **Suderinama su FAKTINE 7.4b append-only apsauga.** 7.4d neapeina jos
+  „specialiu raw SQL hack'u". Jei 7.4b pasirinko store-API enforcement — visi
+  trys keliai eina per kontroliuojamą store API; jei DB roles/grants — per tam
+  skirtą leistiną kelią. Prieš rašant kodą įvardyti, kuris mechanizmas
+  faktiškai galioja.
+- Bendras produkcinis audit caller'is negauna laisvo `DELETE FROM audit_log`
+  primityvo.
+
+### `AUDIT_MAX_ENTRIES`
+
+- Memory backend išlaiko esamą semantiką.
+- PostgreSQL backend šio limito nelaiko retencijos taisykle: eilutės netrinamos
+  vien todėl, kad jų skaičius viršijo N.
+- ⚠️ Testas įrodo **faktinį elgesį**, ne config parse: į DB įrašoma daugiau nei
+  `AUDIT_MAX_ENTRIES`, ir eilutės išlieka, kol jų nepaliečia laiko retencija,
+  erasure ar privacy purge.
 
 ### DoD
 
-- [ ] ⚠️ **Retencijos autoritetas lieka `privacyConfig` / centralizuota retention
-      architektūra.** Antras nepriklausomas mechanizmas vien auditui nekuriamas;
-      persistentinis auditas įtraukiamas į ESAMĄ retention kelią.
-- [ ] Retencijos testas su **kontroliuojamu laiko šaltiniu**: `< cutoff` pašalinamas,
-      `== cutoff` lieka, `> cutoff` lieka.
-- [ ] ⚠️ **Sweep BATCH'AIS.** Vienas `DELETE` ant išaugusios lentelės laiko ilgą
-      lock'ą. Ribotas batch dydis + indeksas ant `timestamp`; testas, kad kelių batch'ų
-      ciklas baigiasi ir nepalieka likučių.
-- [ ] Retencijos ir append-only sąveika: retencija ir erasure yra vieninteliai
-      leidžiami `DELETE` keliai — testas, kad kitas kelias atmetamas.
-- [ ] `PRIVACY_MODE` semantika įgyvendinta pagal aukščiau užfiksuotą sprendimą.
-      ⚠️ **Privalomas RAW PostgreSQL testas:** negali likti būsenos, kur
-      `GET /api/audit` grąžina `[]`, o `audit_log` tebeturi senus įrašus.
-- [ ] `AUDIT_MAX_ENTRIES` PostgreSQL semantika testuota ir dokumentuota.
-- [ ] ⚠️ **Readiness liečia realų `audit_log`, ne `SELECT 1`.** Scenarijus: DB
-      pasiekiama, `audit_log` trūksta arba neprieinama → NOT ready.
-- [ ] ⚠️ **Readiness probe nebrangus.** Kviečiamas kas health poll'ą — teisės
-      tikrinamos per `has_table_privilege()`, be šiukšlinių eilučių rašymo, su
-      rezultato cache trumpam intervalui.
-- [ ] `/api/health` DB ir audit backend detalių produkcijoje pagal nutylėjimą NErodo
-      (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
-- [ ] ⚠️ **KABLIUKAS 7.6 ATKŪRIMUI.** `utils/backupPolicy.js` jau sąmoningai išbraukia
-      auditą iš atkūrimo: atkūrus, GDPR ištrinti įrašai grįžtų, o naujesni append-only
-      įvykiai būtų perrašyti. 7.4d privalo `audit_log` į tą politiką užregistruoti —
-      kitaip 7.6 DoD („prieš kopiją įrašyta unikali audito eilutė po restore NERANDAMA")
-      neįgyvendinamas.
-- [ ] ⚠️ **`REQUIRE_POSTGRES=1`** — simetriškas esamam `REQUIRE_REDIS=1`. PostgreSQL
-      CI job'e privalomas scenarijus, kuris `skip`'inasi, laikomas GEDIMU, ne sėkme.
-- [ ] PostgreSQL integration testai realiai registruoti PostgreSQL CI rinkinyje —
-      tikrinamas faktinis vykdymas su `DATABASE_URL`, ne failo egzistavimas.
-- [ ] ⚠️ **CUTOVER IR ROLLBACK.** Esami in-memory įrašai NEPERKELIAMI. Grįžimas
-      `postgres → memory` reiškia, kad seni įrašai lieka DB ir nauji į juos nebepatenka —
-      įrašyta į diegimo pastabas kaip sąmoningas, ne atsitiktinis elgesys.
-- [ ] Dokumentacija atnaujinta: `.env.example`, startup/config, privacy/audit dokai,
-      security/evidence matrix (jei repo sargai to reikalauja). Aprašyta: kaip
-      generuojamas `AUDIT_ID_SALT`, kada privalomas, rotacijos modelis, istorinių raktų
-      konfigūracija, `hash_key_id` paskirtis, ką operatorius privalo išsaugoti per
-      rotaciją, kokios pasekmės pašalinus istorinį raktą.
-- [ ] Secret reikšmės nepatenka į logus ar health/readiness atsakymus — testas.
-- [ ] README apribojimų lentelės eilutė ir Roadmap punktas atnaujinti.
+**Retencija**
+
+- [ ] ⚠️ Retencijos autoritetas lieka `privacyConfig` / centralizuota
+      architektūra. Antras mechanizmas vien auditui nekuriamas.
+- [ ] Cutoff apskaičiuojamas vieną kartą sweep ciklui ir tas pats perduodamas
+      visiems batch'ams — testas.
+- [ ] RAW PostgreSQL ribos testas su kontroliuojamu laiku: `< cutoff`
+      pašalinama, `== cutoff` lieka, `> cutoff` lieka.
+- [ ] Vienas DB batch kvietimas pašalina ne daugiau nei batch limitas; testas
+      įrodo, kad didesnei expired aibei atliekami keli atskiri DB kvietimai.
+- [ ] Batch dydis turi vieną autoritetingą šaltinį; testas jį naudoja, o ne
+      kartoja skaičių.
+- [ ] Vienos instancijos sweep'ai nepersidengia — elgsenos testas, ne vėliavos
+      egzistavimas.
+- [ ] Dviejų instancijų lygiagretus sweep prieš tą pačią DB nepalieka expired
+      eilučių ir nesukelia korektiškumo klaidos. Batch atranka naudoja
+      `FOR UPDATE SKIP LOCKED`; dvi lygiagrečios transakcijos baigiasi be
+      deadlock'o.
+- [ ] ⚠️ `retentionSweeper` **`await`ina** `auditLog.purgeExpired(now)`. Tapus
+      async, be `await` sweeper logintų `[object Promise]` vietoj skaičiaus ir
+      galėtų palikti neapdorotą rejection. Testas: grąžinamas baigtinis sveikasis
+      skaičius abiejuose backend'uose.
+- [ ] ⚠️ **RETENCIJA ATRAKINA RAKTO IŠĖMIMĄ.** 7.4c fail-closed taisyklė
+      neleidžia pašalinti rakto, kol DB yra jo `hash_key_id` įrašų. Testas
+      užbaigia ciklą: retencija pašalina visus `A` generacijos įrašus → `A`
+      išimamas iš `AUDIT_ID_SALT_PREVIOUS` → startas sėkmingas.
+- [ ] Retencija taikoma vienodai visoms generacijoms — senas `hash_key_id`
+      nėra priežastis įrašą palikti ar pašalinti anksčiau.
+
+**`PRIVACY_MODE`**
+
+- [ ] Purge vykdomas tik PO DB/migracijų/store init ir PRIEŠ instancijai tampant
+      pasiruošusia aptarnauti srautą.
+- [ ] Purge `await`inamas; fire-and-forget nėra.
+- [ ] Purge klaida → startup FAIL, procesas nepradeda aptarnauti užklausų.
+- [ ] ⚠️ RAW PostgreSQL testas: prieš startą DB turi žinomą sentinel eilutę →
+      startas su `PRIVACY_MODE=true` → RAW `audit_log` sentinel eilutės nėra.
+- [ ] Tame pačiame scenarijuje audit įvykio generavimas po starto nepalieka
+      naujos RAW eilutės.
+- [ ] `true → false`: seni įrašai negrįžta, nauji vėl persistinami.
+- [ ] ⚠️ Gamybiniame režime (`NODE_ENV !== "test"`) `PRIVACY_MODE=true` su
+      PostgreSQL NEsukelia klaidos rašant, skaitant ar užklausiant auditą —
+      testas gamybiniu režimu, ne tik `NODE_ENV=test`.
+- [ ] Purge `await`inamas PRIEŠ `patikrintiGeneracijas()` — testas: DB turi
+      naslaičių generaciją, `PRIVACY_MODE=true`, startas praeina.
+
+**`DELETE` politika ir `AUDIT_MAX_ENTRIES`**
+
+- [ ] Retencija, erasure ir privacy purge integruoti su 7.4b apsauga per
+      autoritetingą leistiną kelią; bendras neautorizuotas `DELETE` lieka
+      nepasiekiamas — testas.
+- [ ] PostgreSQL režime daugiau nei `AUDIT_MAX_ENTRIES` įrašų vien dėl kiekio
+      nėra ištrinami — elgsenos testas.
+- [ ] Memory `AUDIT_MAX_ENTRIES` elgesys neregresuoja.
+
+**Regresija ir sąveika**
+
+- [ ] 7.4d nedubliuoja ir nekeičia 7.4f readiness/backup/CI/dokumentacijos
+      funkcionalumo; 7.4f laikomas prerequisite baseline.
+- [ ] ⚠️ **PATIKRINTI PRIEŠ RAŠANT:** `postgresDoctor.integration.test.js`
+      turi tripwire (`/job store|sesij|audit/i`), draudžiantį žadėti
+      neįgyvendintas integracijas. Jei retencija/privacy keičia doctor
+      pranešimą, testas krenta. Nustatyti, ar jis dar galioja po 7.4b/7.4f, ir
+      atnaujinti kartu, ne aklai.
+- [ ] ⚠️ **`pg_dump` IŠBRAUKIMAS.** `backupPolicy` dirba su artefaktų tipais, o
+      `audit_log` yra DB lentelė: fizinė `pg_dump` kopija ją įtrauktų, ir atkūrus
+      grįžtų GDPR ištrinti bei pasenę įrašai. `docs/backup-runbook.md` pilnos
+      PostgreSQL kopijos skyriuje įrašyti `--exclude-table-data=audit_log` su
+      paaiškinimu kodėl.
 
 ### Ko NEAPIMA
 
-Job store architektūros, sesijų persistencijos, authentication redesign, bendros
-secrets-management platformos ir kitų #155 etapų acceptance criteria keitimo.
+Readiness, `/api/health`, backup politikos kabliuko, PostgreSQL CI registracijos,
+cutover ir operatoriaus dokumentacijos (visa tai — 7.4f/#231). Rakto rotacijos
+(7.4c). Ištrynimo galutinumo barjero (7.4e/#216). 7.6 atkūrimo. Job store,
+sesijų ir authentication pakeitimų.
 
 ---
 
@@ -2230,73 +2712,347 @@ logika ir readiness lieka 7.4d.
 
 ---
 
+## [7.4f] Audit readiness, backup ir CI registracija
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.4b, 7.4c · **Lygiagretus:** 7.4d, 7.4e
+· **Blokuoja:** 7.6
+
+Operacinis 7.4 uždarymas: readiness, kabliukas 7.6 atkūrimui, PostgreSQL CI
+rinkinio išvedimas ir operatoriaus dokumentacija.
+
+⚠️ **Kodėl atskirai.** Ši apimtis buvo suplanuota kaip 7.4e, bet §7.4e atiteko
+audito ištrynimo galutinumui (#216), tad readiness, backup politika ir CI
+liko be savo issue — nors nuo `backupPolicy` kabliuko priklauso 7.6 DoD.
+
+### Jau padaryta ankstesniuose etapuose
+
+Šie punktai NĖRA šio darbo dalis; įrašyti, kad nebūtų perdaryti:
+
+- `tests/helpers/postgresGuard.js` su `REQUIRE_POSTGRES=1` — egzistuoja.
+- `readiness.auditStore` laukas ir jo nustatymas po `auditStore.init()`
+  (`server.js:81`, `:383`) — egzistuoja. Trūksta tik **patikros**.
+- `backupPolicy` išbraukia `ARTEFACT_TYPES.AUDIT_ENTRY` su pagrindimu
+  (`backupPolicy.js:65-80`) — egzistuoja. Trūksta **išvedamo sąrašo ir testo**.
+
+### Readiness
+
+- [ ] ⚠️ **`/api/ready` TIKRINA `readiness.auditStore`.** Šiandien
+      `server.js:305-309` tikrina tik `jobStore && jobRunner &&
+      sessionReconcile`. Jei `auditStore.init()` krenta, serveris grąžina 200 ir
+      priima srautą — fail-closed audito apsauga apeinama. Tai veikianti klaida,
+      ne būsimo darbo spraga.
+- [ ] ⚠️ **Aktyvus zondas `probeRuntimeReadiness()` viduje.** Simetriškai
+      `sessionStore.probe()`, su `READINESS_TIMEOUT_MS` riba. Be jo DB kritimas
+      ar teisių pakeitimas PO starto lieka nepastebėtas, ir instancija toliau
+      priima audito generuojančias užklausas (pvz. prisijungimus).
+- [ ] ⚠️ **`postgresStore.probe()` tikrina PRIVILEGIJAS, ne `SELECT 1`.**
+      Dabartinė realizacija (`auditStore/postgresStore.js:250-253`) įrodo tik
+      kad ryšys gyvas. Reikia `has_table_privilege()` patikros `SELECT`,
+      `INSERT` ir `DELETE` teisėms ant `audit_log`, pagal
+      `sessionStore/postgresStore.js` šabloną. Be `DELETE` GDPR ištrynimas
+      lūžtų tyliai.
+- [ ] ⚠️ **Zondo rezultatas kešuojamas** (TTL ~2000 ms). Orkestratoriaus
+      poll'ai kitaip generuoja SQL kiekvienam kvietimui.
+- [ ] ⚠️ **Cache ĮRODOMAS `pool.query` sekimu, ne laiko matavimu.**
+      Realizacija su `Date.now()`, bet be faktinio praleidimo, praeitų naivų
+      testą. Testas: kelis kartus iš eilės kviečiamas `probe()` kešo lange →
+      `pool.query` iškviestas lygiai vieną kartą.
+- [ ] ⚠️ **NEIŠSPRENDŽIAMOS GENERACIJOS → NOT READY.** Jei 7.4c raktų
+      resolveris nemato rakto DB esančiai `hash_key_id` generacijai,
+      `/api/ready` grąžina 503 — net kai procesas paleistas su
+      `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`. Vėliavėlė leidžia
+      startuoti, bet nedeklaruoja sveikatos.
+- [ ] ⚠️ **BET `/api/health` (liveness) LIEKA 200.** Priešingu atveju
+      orkestratorius nuolat perkraudinėtų podą, ir operatorius neturėtų lango
+      išvalyti senų eilučių — vėliavėlė netektų prasmės, o atsistatymo kelias
+      būtų paneigtas. Testas abiem endpoint'ams tuo pačiu metu.
+- [ ] `/api/health` DB ir audit backend detalių produkcijoje pagal nutylėjimą
+      NErodo (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
+- [ ] ⚠️ **Secret reikšmės nepatenka į logus, health ar readiness atsakymus** —
+      testas, apimantis ir 7.4c raktų validacijos startup klaidas.
+
+### Backup ir 7.6 sąsaja
+
+- [ ] ⚠️ **`excludedTables()` IŠVEDAMAS iš `backupPolicy.js`,** ne surašytas
+      teste. Hardcode'intas `audit_log` teste yra rankomis palaikomas sąrašas,
+      linkęs tyliai išsiskirti su politika.
+- [ ] Testas, kad `audit_log` yra išbraukimų aibėje ir kad aibė gaunama iš
+      politikos, ne iš literalo. Tai kabliukas, kurio reikia 7.6 DoD („prieš
+      kopiją įrašyta unikali audito eilutė po restore NERANDAMA").
+- [ ] ⚠️ **RAKTAI NĖRA KOPIJOJE, BET BE JŲ KOPIJA BEVERTĖ.**
+      `docs/backup-runbook.md` skyriuose „Kas patenka į kopiją", „Atkūrimas" ir
+      „Ko atkūrimas negrąžina" privalo būti eksplicitiškai: `AUDIT_ID_SALT` ir
+      `AUDIT_ID_SALT_PREVIOUS` saugomi ATSKIRAI ir atkuriami kartu. Atkūrus
+      `audit_log` be jų, visos generacijos tampa neišsprendžiamos (7.4c
+      fail-closed), o GDPR ištrynimas nebeįmanomas.
+
+### PostgreSQL CI
+
+- [ ] ⚠️ **`tests/suites.js` postgres rinkinys IŠVEDAMAS, ne surašomas.**
+      Dabar tai fiksuotas vardų sąrašas (`suites.js:210-235`). Naujas
+      integracinis testas, kurio kas nors nepridės ranka, niekada nebus
+      paleistas — CI liks žalias, o kodas nepatikrintas. Rinkinys sudaromas
+      skenuojant `tests/`: failai su `.integration` varde arba importuojantys
+      `postgresGuard`.
+- [ ] ⚠️ **Įrodymas, kad testai TIKRAI vykdyti.** Su `REQUIRE_POSTGRES=1`
+      tikrinama, kad kiekvienam postgres rinkinio failui pasirodė bent vienas
+      `ok`. Žalias job'as su praleistais testais nėra sėkmė.
+- [ ] Visi 7.4b–7.4e PostgreSQL integration testai patenka į išvestą rinkinį —
+      patikrinama faktiniu vykdymu, ne failo egzistavimu.
+
+### Cutover ir dokumentacija
+
+- [ ] ⚠️ **CUTOVER IR ROLLBACK.** Esami in-memory įrašai NEPERKELIAMI. Grįžimas
+      `postgres → memory` reiškia, kad seni įrašai lieka DB ir nauji į juos
+      nebepatenka — sąmoningas elgesys, įrašytas į diegimo pastabas.
+- [ ] `.env.example` ir operatoriaus dokumentacija: `AUDIT_BACKEND`,
+      `AUDIT_ID_SALT`, `AUDIT_ID_SALT_ID`, `AUDIT_ID_SALT_PREVIOUS`,
+      `AUDIT_WRITE_TIMEOUT_MS`, `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS`.
+- [ ] Security/evidence matrix atnaujinta, jei to reikalauja repo sargai.
+- [ ] README apribojimų lentelės eilutė ir Roadmap punktas atnaujinti.
+
+### Ko NEAPIMA
+
+Retencijos ir `PRIVACY_MODE` (7.4d), ištrynimo galutinumo barjero (7.4e),
+rakto rotacijos realizacijos (7.4c). `postgresGuard.js` kūrimo — jis jau yra.
+Job store, sesijų ir authentication pakeitimų.
+
+---
+
 ## [7.5a] Persistentės ištrynimo žymos
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.1
+**Tėvinis:** #155 · **Priklauso nuo:** 7.1 · **Blokuoja:** 7.4e, 7.6
 
 Tiesioginis `docs/deletion-guarantees.md` 2 skyriaus apribojimo pašalinimas.
 
-### DoD
+⚠️ **TAI MIGRACIJA, NE NAUJA SISTEMA.** `backend/utils/deletionTombstones.js` jau
+egzistuoja: in-memory `Map` (`:46-52`), sinchroninis `isDeleted()` (`:168-180`) ir
+lokalus `setInterval` valymas (`:207-213`). 7.5a perkelia tai į PostgreSQL.
 
-- [ ] `erasure_marks (job_id, marked_at, reason)`.
+Šis etapas sukuria **vienintelį persistentinį job ištrynimo tombstone autoritetą**,
+kurį vėliau naudoja ir 7.4e audito ištrynimo galutinumo barjeras. **7.4e NEKURIA
+atskiros audito tombstone lentelės.**
+
+### Užfiksuoti sprendimai
+
+- Barjeras aktyvus nuo `deletion_pending`, ne tik nuo `deleted`.
+- `deleted` — terminali būsena; vėlyvas `deletion_failed` jos neperrašo.
+- Tombstone retencija: viena formulė (žr. žemiau), ne „arba".
+- `reason` allowlist: `user_request`, `retention_policy`, `operator_cleanup`.
+- Lygiagretus `DELETE`: `deletion_pending` → HTTP **202**, `deleted` → HTTP **204**.
+  Jokio papildomo I/O.
+- Be `DATABASE_URL` `deletionTombstones` grįžta į atmintinį `Map` — bet žr.
+  „Fallback ir garantijos apimtis" žemiau: tai keičia tai, ką galima teigti dokuose.
+- ⚠️ **`revivalHorizonsMs()` NEEGZISTUOJA** — `queues/config.js` šiandien
+  eksportuoja tik `QUEUE_NAMES`, `DEFAULT_JOB_OPTIONS`, `WORKER_OPTIONS` ir
+  `createQueueConnection`. Ankstesnė redakcija teigė priešingai. Helperio
+  sukūrimas įeina į 7.5a apimtį.
+
+### Schema
+
+- [ ] `erasure_marks` — persistentinis vienintelio autoriteto tombstone registras.
+      Minimalus loginis kontraktas:
+      `job_id` (PRIMARY KEY arba lygiavertė unikalumo garantija);
+      `status` (uždara aibė `deletion_pending | deleted | deletion_failed`);
+      `marked_at` (pirmojo inicijavimo laikas);
+      `updated_at` (paskutinio perėjimo laikas);
+      `reason` (allowlist: `user_request`, `retention_policy`, `operator_cleanup`).
+- [ ] ⚠️ **`job_id` — stabilus identifikatorius, kurį vėliau naudos 7.4e.**
+      Schema negali būti raktuojama laikinu procesu ar pseudonimu. Prieš rašant
+      patikrinti, kad tai tas pats identifikatorius, kurį mato audito kelias.
+- [ ] `status` invariantas enforce'inamas DB lygiu ir testuojamas tiesioginiu SQL.
+- [ ] `marked_at` po sukūrimo nekeičiamas; progresas atnaujina tik `status`,
+      `updated_at` ir leidžiamus diagnostinius laukus.
 - [ ] ⚠️ **FK į `jobs` NĖRA.** `CASCADE` ištrintų tombstone tuo momentu, kai jis
-      tampa reikalingas vėluojančiam darbui atmesti. Testas: `jobs` eilutės
-      ištrynimas **neturi** pašalinti žymos.
-- [ ] Žyma išgyvena restartą.
-- [ ] Po restarto vėluojanti eilės žinutė ištrintam job'ui **NEkuria
-      artefaktų** — end-to-end testas.
-- [ ] ⚠️ **IŠTRYNIMO KOORDINAVIMAS TARP REPLIKŲ.** Persistentės žymos
-      NEPAKEIČIA `lifecycleService` `inFlight` koordinavimo, kuris yra procesui
-      lokalus. Du `DELETE` skirtingose replikose abu įvykdytų ištrynimą ir
-      lenktyniautų dėl `pending → deleted` / `pending → failed` įrašymo:
-      kvietėjai gautų prieštaringus rezultatus, o vėlesnis nesėkmės įrašas
-      perrašytų patvirtintą ištrynimą.
+      tampa reikalingas. Testas: `jobs` eilutės ištrynimas **neturi** pašalinti
+      žymos.
+- [ ] ⚠️ **`reason` yra allowlist, ne laisvas laukas.** Ta pati klasė kaip 7.4b
+      `meta`: tikrinama RAŠANT, nežinoma reikšmė atmetama. Į `erasure_marks`
+      nepatenka transkripcija, promptai, audio turinys ar neapdorotos exception
+      žinutės. RAW testas su sentinel tekstu.
+- [ ] Nauja migracija; jau pritaikytos neredaguojamos.
+- [ ] Indeksai tik ten, kur yra realus prieigos kelias.
 
-      Reikia paskirstyto single-flight (DB eilutės arba advisory lock) ir
-      sąlyginių perėjimų (`WHERE status = 'pending'`). Testas: daugiaprocesis
-      lygiagretumo scenarijus.
-- [ ] ⚠️ **NEIŠSPRĘSTOS ŽYMOS NESENSTA.** Baigtinis horizontas taikomas TIK
-      patvirtintoms `deleted` žymoms. `deletion_pending` ir `deletion_failed`
-      lieka, kol ištrynimas pavyks arba operatorius išspręs — priešingu atveju
-      žymos galiojimo pabaiga pašalintų barjerą tuo metu, kai jautrūs duomenys
-      dar laukia valymo.
-- [ ] Retencija ≥ **max(visi eilės prikėlimo horizontai) + atsarga**. Šiandien
-      ribojantis yra `removeOnFail.age` = 24 h (`queues/config.js:29`).
-- [ ] ⚠️ **RETENCIJA PRIKLAUSO NUO BŪSENOS.** `queued`/`processing` įrašai ir
-      terminaliai su `*_pending` NEŠALINAMI pagal amžių — esamos saugyklos tai
-      daro sąmoningai (`redisStore.js:175`), nes toks įrašas gali būti
-      vienintelis `storageKey` šaltinis. Besąlygiška „po TTL" taisyklė leistų
-      ištrinti gyvą job'ą arba palikti audio be savininko.
-- [ ] ⚠️ **REZULTATAS NEGALI PASIBAIGTI PIRMA UŽ JOB'Ą.** Savarankiškas
-      `job_results.expires_at` paliktų skaitomą `completed` job'ą BE
-      transkripcijos — būseną, kurią 7.5b vadina remontu reikalaujančia, ir
-      kuri skiriasi nuo memory/Redis, kur abu dingsta kartu. Testas: rezultatas
-      pasiekiamas tol, kol pasiekiamas job'as.
-- [ ] ⚠️ **ATSARGINIŲ KOPIJŲ LANGAS ĮEINA Į APATINĘ RIBĄ.** `BACKUP_RETENTION_DAYS`
-      numatytai **7 dienos**, o eilės prikėlimo horizontas ~24 h. Formulė,
-      remianti tik eilės horizontu, leistų patvirtintai ištrynimo žymai
-      pasibaigti, kol dar egzistuoja PRIEŠ ištrynimą daryta kopija. Ją atkūrus
-      nebeliktų ko sujungti, ir ištrintas job'as grįžtų — tiesiogiai
-      prieštaraujant 7.6 atkūrimo scenarijui. Riba:
-      `max(eilės horizontai, BACKUP_RETENTION_DAYS)` arba negaliojantis
-      ištrynimo žurnalas, kol pasibaigs kiekviena jį apimanti kopija.
-- [ ] ⚠️ **UŽDELSTI JOB'AI TURI TURĖTI RIBĄ.** `revivalHorizonsMs()` mato tik
-      `queues/config.js`; per-job `delay`, perduotas `enqueue` vietoje, jam
-      nematomas. Garantija „naujas mechanizmas ribą pakeičia savaime" tokiu
-      atveju netiesa. Arba įvedamas MAKSIMALUS leistinas `delay`, tikrinamas
-      įdedant, arba registras, per kurį privalo eiti visi producer'iai.
-      Šiandien nė vienas producer'is `delay` neperduoda — tad riba įvedama
-      dabar, kol nekainuoja.
-- [ ] ⚠️ **SĄRAŠAS IŠVEDAMAS, ne surašomas.** Fiksuotas masyvas reiškia, kad
-      pridėjus naują prikėlimo mechanizmą testas lieka žalias, kol kas nors
-      rankiniu būdu jį papildys — o garantija sako, kad riba pasikeičia SAVAIME.
-      `queues/config.js` eksportuoja `revivalHorizonsMs()`, ir tik jis yra
-      autoritetas.
-- [ ] ⚠️ **VIENETAI NORMALIZUOJAMI.** BullMQ `age` yra **sekundės**, o
-      `stalledInterval` — **milisekundės**. `Math.max()` ant neapdorotų reikšmių
-      parinktų klaidingą horizontą arba praleistų tikrinimą per kelias eilių
-      tvarkas. Testas lygina tik po konversijos į bendrą vienetą.
-- [ ] `docs/deletion-guarantees.md` apribojimas pašalintas, ne perrašytas.
+### Būsenų kontraktas
+
+Leidžiami perėjimai:
+
+- nėra žymos → `deletion_pending`
+- `deletion_pending` → `deleted`
+- `deletion_pending` → `deletion_failed`
+- `deletion_failed` → `deletion_pending` **tik eksplicitiniam retry**
+- `deleted` — terminali
+
+- [ ] ⚠️ **`deleted` NEGALI būti perrašyta į `deletion_failed`.** Tai pagrindinė
+      daugiaprocesio lenktynių garantija: vėliau užsibaigęs nesėkmingas bandymas
+      negali panaikinti jau patvirtinto ištrynimo.
+- [ ] Perėjimai vykdomi **sąlyginiais DB `UPDATE`** pagal esamą būseną, ne
+      „read → decide JS → unconditional update".
+- [ ] RAW SQL testas atmeta nežinomą būseną.
+- [ ] `deletion_failed → deletion_pending` leidžiamas tik eksplicitiniam retry,
+      ne atsitiktiniam lygiagrečiam kvietėjui.
+
+### Barjero semantika
+
+- [ ] `pending`, `failed`, `deleted` → job užbarjerintas naujiems jautriems
+      artefaktams. **Tik žymos nebuvimas reiškia „nėra barjero".**
+- [ ] ⚠️ **`deletion_failed` IŠLAIKO barjerą.** Nesėkmingas ištrynimas reiškia,
+      kad jautrūs duomenys dar gali egzistuoti; operacija taisoma arba
+      kartojama, o ne leidžiama kurti naujus.
+- [ ] ⚠️ **UŽSTRIGUSIOS ŽYMOS TURI TURĖTI IŠEITĮ.** Barjeras nuo `pending` plius
+      neterminalių žymų nesenėjimas reiškia, kad nuolat nepavykstantis ištrynimas
+      užrakina job'ą neribotam laikui. Reikia: (a) operatoriaus kelio žymai
+      išspręsti (retry arba dokumentuotas force-resolve su pėdsaku), ir (b)
+      matomumo — būdo išvardyti neterminales žymas ir jų amžių. Be to tai ta
+      pati fail-closed be išeities spraga, kurią 7.4c turėjo taisyti atskirai.
+
+### Async cutover — P0
+
+- [ ] ⚠️ **`isDeleted()` TAMPA ASYNC, IR TAI LŪŽTA TYLIAI.** DB užklausa
+      asinchroninė, o `if (tombstones.isDeleted(jobId))` su Promise visada duoda
+      `true` — Promise yra truthy. Pasekmė: **visi job'ai blokuojami ir
+      atkūrimas neveikia**, o esami testai praeina.
+- [ ] Migruoti VISUS kvietėjus su `await`: `workers/index.js:94`,
+      `queues/jobRunner.js:256`, `utils/jobStore/index.js:373`, `:529`, `:768`,
+      `:838` (`restoreRecord`), `services/restoreService.js`.
+      Sąrašas patvirtinamas paieška, ne kopijuojamas iš čia.
+- [ ] `isConfirmedDeleted()` ir kiti sinchroniniai skaitymo keliai — taip pat.
+- [ ] ⚠️ **STATINIS ZONDAS TIKRINA `await`, NE PAMINĖJIMĄ.**
+      `deletionEnforcement.test.js` šiandien ieško eilutės
+      `tombstones.isDeleted(jobId)`; pamiršus `await`, testas praeitų, o kodas
+      lūžtų. Patikra keičiama į `/await\s+tombstones\.isDeleted\(/`.
+- [ ] ⚠️ **Elgsenos testas priešinga kryptimi:** kai žymos NĖRA, job'as
+      NEPRALEIDŽIAMAS. Be jo „viskas blokuojama" praeitų kaip sėkmė.
+
+### Fallback ir garantijos apimtis
+
+- [ ] Be `DATABASE_URL` (atminties/Redis režimas) `deletionTombstones`
+      automatiškai naudoja atmintinį `Map`; procesas nelūžta.
+- [ ] ⚠️ **FALLBACK REIŠKIA, KAD GARANTIJOS NĖRA.** Atmintiniame režime žymos
+      neišgyvena restarto ir nėra bendros replikoms — t.y. tiksliai tas
+      apribojimas, kurį 7.5a šalina. Todėl `docs/deletion-guarantees.md`
+      2 skyriaus apribojimas šalinamas **sąlyginai**: garantija galioja
+      diegimams su `DATABASE_URL`, ir tai užrašoma eksplicitiškai.
+      Besąlygiškas pašalinimas būtų melagingas teiginys atminties režimui.
+- [ ] Startas atmintiniame režime garsiai įspėja, kad ištrynimo garantija
+      neveikia — kaip ir esamas retencijos įspėjimas.
+- [ ] Testas abiem režimams: su `DATABASE_URL` žyma išgyvena restartą, be jo —
+      ne, ir tai yra dokumentuotas elgesys, ne gedimas.
+
+### Distributed single-flight
+
+- [ ] Vienam `job_id` vienu metu tik vienas procesas yra autoritetingas aktyvaus
+      ištrynimo vykdytojas.
+- [ ] ⚠️ **Procesui lokalus `Map`, mutex ar `inFlight` NEPAKANKA.** Sprendimas
+      veikia tarp atskirų Node procesų, replikų ir DB pool'ų.
+- [ ] Leidžiamas row-lock arba advisory-lock modelis, bet **scope per konkretų
+      `job_id`**, ne globalus.
+- [ ] ⚠️ **Lock negali būti laikomas per nekontroliuojamą išorinį I/O** (failai,
+      S3, Redis), jei tai duotų ilgą DB transakciją. Prieš implementuojant
+      pateikiamas konkretus koordinavimo modelis: kada lock įgyjamas, kada
+      atleidžiamas.
+- [ ] ⚠️ **Lock saugo PERĖJIMĄ, žyma saugo DARBO EIGĄ.** Atleidus lock'ą prieš
+      baigiantis išoriniam I/O, antram kvietėjui koordinaciją užtikrina
+      `deletion_pending` būsena, ne lock'as. Tai užrašoma eksplicitiškai.
+- [ ] Antras lygiagretus `DELETE` gauna deterministinį rezultatą pagal
+      autoritetingą būseną: `deletion_pending` → **202**, `deleted` → **204**;
+      jokio papildomo I/O nepradedama.
+- [ ] ⚠️ **LOCK ATLEIDIMAS ĮRODOMAS, NE DEKLARUOJAMAS.** Realizacija, laikanti
+      lock'ą per visą ištrynimą vienoje ilgoje transakcijoje, praeitų paprastą
+      lenktynių testą, bet produkcijoje išsemtų pool'ą. Testas su dirbtinai
+      uždelstu išoriniu I/O įrodo, kad kitos DB operacijos ir nekonfliktuojantys
+      ištrynimai tuo metu vykdomi.
+
+### Sąsaja su 7.4e
+
+- [ ] 7.5a pateikia **vieną autoritetingą deletion-state reader / service
+      boundary**. 7.4e neturi skaityti `erasure_marks` ad-hoc SQL skirtingose
+      vietose.
+- [ ] Turi būti įmanoma **atominiu DB keliu** nustatyti, ar `job_id`
+      užbarjerintas naujiems subjektiniams įrašams. Tai 7.4e TOCTOU reikalavimo
+      prielaida.
+- [ ] Audito write barjeras šiame issue **NEĮGYVENDINAMAS**.
+
+### Revival horizon
+
+- [ ] ⚠️ **AUTORITETAS SUKURIAMAS ČIA.** Vienas helperis/registras, išvedantis
+      visus konfigūruotus eilių prikėlimo horizontus iš faktinės queue
+      konfigūracijos (`DEFAULT_JOB_OPTIONS`, `WORKER_OPTIONS`,
+      `removeOnComplete`/`removeOnFail`, `stalledInterval`, `lockDuration`,
+      retry/backoff).
+- [ ] Testai neturi rankiniu būdu nukopijuoto horizontų sąrašo — reikšmės
+      išvedamos iš faktinės konfigūracijos.
+- [ ] ⚠️ **VIENETAI NORMALIZUOJAMI PRIEŠ `Math.max`.** BullMQ `age` yra
+      **sekundės**, `stalledInterval` — **milisekundės**. Testas įrodo konversiją.
+- [ ] ⚠️ **Per-job `delay` negali apeiti garantijos.** Arba autoritetinga
+      maksimali leistina `delay` riba, tikrinama enqueue vietoje, arba visi
+      producer'iai privalo eiti per bendrą registruotą kelią. Ne dokumentuoti —
+      testuoti. Šiandien nė vienas producer'is `delay` neperduoda, tad riba
+      įvedama dabar, kol nekainuoja.
+
+### Tombstone retencija
+
+- [ ] `deletion_pending` ir `deletion_failed` **NESENSTA** automatiškai.
+- [ ] `deleted` šalinama tik po
+      `max(maxRevivalHorizon, backupRetentionHorizon) + safetyMargin`.
+- [ ] Visi dydžiai normalizuojami į milisekundes prieš palyginimą.
+- [ ] `safetyMargin` turi vieną autoritetingą vietą; testas jos nedubliuoja.
+- [ ] ⚠️ **FAIL-SAFE:** jei kurios nors dedamosios negalima patikimai
+      apskaičiuoti, rezultatas — **žymos NEŠALINTI**, ne pasirinkti mažesnį TTL.
+- [ ] ⚠️ **Tombstone valymas įtraukiamas į ESAMĄ centralizuotą retention kelią**
+      (`retentionSweeper`), ne į atskirą timer'į — ta pati taisyklė kaip 7.4d.
+
+### Sąsaja su 7.6
+
+- [ ] ⚠️ **ATKŪRIMAS NEGALI TRINTI AR TRUNCATE'INTI `erasure_marks`.**
+      `restoreService.js:401-415` perrašo job'us po vieną; jei atkūrimas
+      paliestų žymų lentelę, po kopijos sukurtos žymos dingtų, ir ištrinti
+      job'ai grįžtų be tombstone. Testas: žyma sukurta PO kopijos → restore →
+      žyma tebėra.
+- [ ] ⚠️ **`erasure_marks` IŠ ATSARGINIŲ KOPIJŲ NEIŠBRAUKIAMAS** — priešingai
+      nei `audit_log`. 7.6 DoD reikalauja, kad ištrynimo žurnalas išliktų už
+      snapshot'o ribų ir būtų sujungtas po atkūrimo; jei žymos dingtų, atkūrus
+      job'ai grįžtų be tombstone. Tai užrašoma eksplicitiškai, kad 7.4f/7.6
+      backup politika jų atsitiktinai neišbrauktų kartu su auditu.
+
+### Job ir result retencijos invariantai
+
+- [ ] ⚠️ **RETENCIJA PRIKLAUSO NUO BŪSENOS.** `queued`, `processing` ir
+      terminalūs su `*_pending` pagal amžių NEŠALINAMI — toks įrašas gali būti
+      vienintelis `storageKey` šaltinis (`redisStore.js:175`).
+- [ ] `job_results` neturi nepriklausomo TTL, leidžiančio rezultatui išnykti
+      anksčiau nei parent job.
+- [ ] Testas tikrina stebimą kontraktą: kol `completed` job pasiekiamas, jo
+      rezultatas irgi pasiekiamas.
+- [ ] Parent job'ui išnykus teisėtu keliu, rezultatas nelieka orphan'u.
+
+### Crash, restart, lenktynės
+
+- [ ] Žyma išgyvena restartą; neišspręsta `pending`/`failed` būsena taip pat.
+- [ ] Po restarto vėluojanti eilės žinutė mato barjerą **PRIEŠ** materializuodama
+      naujus jautrius artefaktus — end-to-end testas.
+- [ ] Po `jobs` eilutės ištrynimo žyma fiziškai lieka RAW `erasure_marks`.
+- [ ] Deterministinis, ne tikimybinis lenktynių testas su dviem nepriklausomomis
+      jungtimis/procesais:
+      **A** — dvi replikos pradeda ištrynimą, tik viena vykdo destruktyvų
+      darbą, abi gauna suderinamą galutinį rezultatą;
+      **B** — vienas bandymas pasiekia `deleted`, lėtesnis krenta po to,
+      `deleted` išlieka;
+      **C** — procesas miršta ties `pending`, po restarto barjeras aktyvus ir
+      ištrynimą galima tęsti.
+
+### Dokumentacija
+
+- [ ] `docs/deletion-guarantees.md` 2 skyriaus apribojimas **pašalintas**, ne
+      perrašytas švelnesniais žodžiais — ir tik tada, kai persistentė žyma,
+      paskirstyta koordinacija ir restart E2E įrodyti.
+- [ ] Neteigti multi-replica ar restart garantijų, kurioms nėra testų.
+
+### Ko NEAPIMA
+
+Audito write barjero (7.4e). Optimistic locking ir konfliktų politikos (7.5b).
+7.6 atkūrimo. 7.4c/7.4d/7.4f darbų. Job store architektūros perprojektavimo,
+sesijų ir authentication pakeitimų.
 
 ---
 
@@ -2305,98 +3061,1084 @@ Tiesioginis `docs/deletion-guarantees.md` 2 skyriaus apribojimo pašalinimas.
 **Tėvinis:** #155 · **Priklauso nuo:** 7.2b
 
 `jobs.version` ir konfliktų semantika. Atskirta nuo 7.5a: ta yra saugumo
-klausimas, ši — saugyklos korektiškumo.
+klausimas, ši — saugyklos korektiškumo. Nuo 7.5a nepriklauso — problemos
+ortogonalios.
 
-### DoD
+Trys dalykai: **optimistic version CAS**, **vienas konflikto kontraktas**,
+**atominis ir idempotentiškas `completed` + rezultato įsipareigojimas.**
 
-- [ ] `jobs.version` stulpelis, didinamas kiekvieno atnaujinimo.
-- [ ] Progreso atnaujinimai — `WHERE version = $n`; statuso perėjimai —
-      `WHERE status = $expected`.
-- [ ] Konflikto rezultatas: aiškus, atskiriamas nuo „nerasta" ir nuo „neleistina".
-- [ ] Kvietėjo politika dokumentuota: kada retry, kada klaida vartotojui.
-- [ ] Deterministinis lenktynių testas su tikru Postgres.
-- [ ] `version` nesikerta su #154 fazių CAS — abu tikrinami tame pačiame
-      `UPDATE`, ne dviem.
+### Užfiksuotas optimistic-lock kontraktas
+
+- `jobs.version` pradinė reikšmė naujam job'ui — **`1`**. Viena reikšmė, vienodai
+  visiems PostgreSQL job'ams.
+- Kiekviena **sėkminga** autoritetinga `jobs` eilutės mutacija didina `version`
+  lygiai `+1`.
+- Mutacija, kuri dėl CAS konflikto neatnaujino nė vienos eilutės, `version`
+  **nekeičia**.
+- Vienos loginės operacijos viduje negali būti kelių nekontroliuojamų
+  increment'ų vien todėl, kad ji palietė kelis SQL sakinius.
+- `job_results` pakeitimas neturi atskiro optimistic-lock autoriteto; jo
+  konsistencija su `jobs` užtikrinama per `finish()` transakciją.
+
+⚠️ **Backend'ų apimtis apibrėžiama eksplicitiškai.** `version` stulpelis yra
+PostgreSQL mechanizmas, bet **konflikto kontraktas yra fasado lygmens** ir
+galioja visiems backend'ams. Memory ir Redis tų pačių garantijų pasiekia savo
+priemonėmis (vienas procesas, Lua CAS). Prieš rašant kodą įvardyti, ką bendras
+paritetų rinkinys tikrina visiems, o kas lieka PostgreSQL-specifiška — kitaip
+rinkinys arba lūžta, arba tyliai susiaurėja.
+
+### Vienas konflikto rezultato kontraktas
+
+Optimistic-lock konfliktas turi būti aiškiai atskirtas nuo keturių kitų dalykų:
+
+1. job nerastas;
+2. owner/authorization neatitiko;
+3. lifecycle perėjimas neleistinas;
+4. DB/infrastruktūros klaida.
+
+⚠️ **Negalima vienuose metoduose grąžinti `null`, kituose `false`, o trečiuose
+mesti generinę klaidą tam pačiam konfliktui.** Vienas autoritetingas
+rezultatas / typed error / statuso objektas pagal esamą `jobStore` fasado
+kontraktą.
+
+Kvietėjų politika dokumentuota eksplicitiškai:
+
+- progresas, pralaimėjęs versijos CAS → perskaityti naują būseną ir spręsti, ar
+  retry dar prasmingas;
+- statuso perėjimo konfliktas → **NEretry'inti aklai**;
+- idempotentiškas `finish(COMPLETED)` → lyginti galutinę būseną ir rezultatą;
+- skirtingas jau įsipareigojęs galutinis rezultatas → consistency error.
+
+### `version` + fazių/statuso CAS
+
+#154 fazių CAS ir `version` **nėra du atskiri round-trip'ai**. Kai operacijai
+aktualūs abu invariantai, jie tikrinami VIENAME `UPDATE`:
+
+```
+WHERE id = ? AND version = ? AND <status/phase invariant>
+```
+
+⚠️ **Nulis eilučių nėra automatiškai „version conflict".** Implementacija privalo
+perskaityti autoritetingą būseną ir atskirti: eilutė dingo · version konfliktas ·
+status/phase konfliktas. Testas įrodo visus tris atskirai.
+
+### `finish(COMPLETED, { result })` autoritetas
+
+`COMPLETED` reiškia tik tokią būseną, kurioje:
+
+- `jobs.status = 'completed'`;
+- egzistuoja atitinkamas `job_results` rezultatas;
+- **abu commit'inti vienoje DB transakcijoje.**
+
+Negalima padaryti `jobs=completed`, o `job_results` įrašyti kitu commit'u. Jei
+rezultato rašymas nepavyksta — visa `finish` transakcija rollback.
+
+⚠️ **Transakcijos ribos apibrėžiamos.** `finish()` transakcija apima `jobs` ir
+`job_results` ir **nieko daugiau**. Audito rašymas, eilės patvirtinimas ir audio
+valymas lieka už jos — audito įtraukimas į transakciją reikštų, kad rollback
+ištrina audito įrašą, o jo laikymas viduje siektų už 7.5b apimties ribų.
+
+`finish(FAILED, ...)` kelias irgi apibrėžiamas: ar jis rašo į `job_results`, ar
+ne. Neapibrėžtas jis taptų antra, netyčine semantika.
 
 ### Idempotentiškas užbaigimas
 
 ⚠️ **`completed` BE REZULTATO NĖRA SĖKMĖ.**
 
 `workers/index.js:192` įrašo `COMPLETED`, `:198` valo audio, `:207` grąžina
-rezultatą. Kritus tarp jų PostgreSQL sako `completed`, BullMQ patvirtinimo
-negavo ir kartoja, o `restart()` terminalų įrašą atmeta.
+rezultatą. Kritus tarp jų PostgreSQL sako `completed`, BullMQ patvirtinimo negavo
+ir kartoja, o `restart()` terminalų įrašą atmeta. Blogiau: rezultatai gyvena
+atskiroje `job_results` lentelėje — jei statusas įsipareigojo, o rezultato
+įrašymas nepavyko, „tęsti valymą, tada sėkmė" ištrintų šaltinio audio ir
+patvirtintų sėkmę, kai klientas transkripcijos neturi. **Negrįžtamai.**
 
-Blogiau: rezultatai gyvena atskiroje `job_results` lentelėje. Jei statusas
-įsipareigojo, o rezultato įrašymas nepavyko, „tęsti valymą, tada sėkmė"
-ištrintų šaltinio audio ir patvirtintų sėkmę, kai klientas transkripcijos
-neturi — **negrįžtamai**.
+Kai retry randa job'ą jau `completed`:
+
+- rezultatas semantiškai **sutampa** su tuo, kurį retry bando įrašyti →
+  idempotentiška sėkmė;
+- rezultatas **skiriasi** → consistency conflict, esamas rezultatas
+  **NEPERRAŠOMAS**;
+- statusas `completed`, bet **rezultato nėra** → korumpuota arba remontuotina
+  būsena, NE sėkmė.
+
+⚠️ **„Tas pats rezultatas" lyginamas pagal kanoninę persistentinę
+reprezentaciją**, ne pagal JS objekto nuorodą ar nestabilų JSON raktų eiliškumą.
+Jei repo turi vieną rezultatų normalizavimo ar hidratavimo autoritetą — naudoti
+jį. Antros lygybės taisyklės vien 7.5b poreikiams nekurti; jei autoriteto nėra,
+sukurti vieną ir įvardyti kaip tokį.
+
+Praktinė pastaba: rezultatas gali būti kelių valandų transkripcija. Palyginimo
+kaina apgalvojama (pvz. kanoninės formos hash), bet lyginimo **teisingumas**
+nedera į kompromisą — hash kolizijos atveju elgesys apibrėžiamas.
+
+### Stalled / lygiagretus užbaigimas
+
+⚠️ **SĄLYGINIS UŽBAIGIMAS, ne vien transakcija.** Stalled recovery metu du
+persidengiantys vykdymai perskaito tą patį `processing` snapshot'ą, ir abi
+transakcijos gali įsipareigoti — vėlesnis rezultatas tyliai perrašo pirmąjį.
+
+Reikia `UPDATE ... WHERE status = 'processing' RETURNING`. Nulis eilučių →
+rezultatas **LYGINAMAS**, ne perrašomas.
+
+Lenktynių eiga:
+
+1. abu vykdytojai pradeda nuo to paties `processing` snapshot'o;
+2. tik vienas autoritetingai commit'ina `processing → completed`;
+3. antras po sąlyginio `UPDATE` su 0 eilučių perskaito įsipareigotą būseną;
+4. tas pats rezultatas → idempotentiška sėkmė;
+5. skirtingas rezultatas → consistency conflict;
+6. **jokiomis aplinkybėmis antras vykdytojas neperrašo pirmojo `job_results`.**
+
+Lenktynių testas **deterministinis**, ne paremtas `sleep()` tikimybe.
+
+### Audio valymo barjeras
+
+Audio šalinimas leidžiamas tik autoritetingai patvirtinus **`completed` +
+persistentinis rezultatas**. Vien `jobs.status='completed'` nepakanka.
+
+Aptikus `completed` be rezultato: audio **NEŠALINAMAS**, būsena laikoma
+remontuotina pagal esamą recovery politiką, ir testas įrodo, kad šaltinio audio
+išlieka.
+
+### DoD
+
+**Version ir konfliktai**
+
+- [ ] Naujo PostgreSQL job'o `version` pradinė reikšmė (`1`) užfiksuota ir
+      testuojama.
+- [ ] Kiekviena sėkminga `jobs` mutacija didina `version` lygiai `+1`;
+      konfliktas ar no-op jos nekeičia.
+- [ ] Progreso CAS ir phase/status CAS, kai abu reikalingi, vykdomi **viename**
+      `UPDATE`, ne dviem mutacijomis.
+- [ ] ⚠️ Nulis `UPDATE` eilučių nėra automatiškai „version conflict": testai
+      atskiria not-found, version conflict ir lifecycle conflict.
+- [ ] Konflikto rezultatas turi vieną bendrą kontraktą `jobStore` fasado
+      lygmenyje; nė vienas metodas negrąžina jam savo formos.
+- [ ] Kvietėjo politika dokumentuota: kada retry, kada klaida vartotojui.
+- [ ] ⚠️ Backend'ų apimtis įvardyta: kas galioja visiems per bendrą paritetų
+      rinkinį, kas lieka PostgreSQL-specifiška. Rinkinys nesusiaurinamas.
+
+**Atominis užbaigimas**
 
 - [ ] `finish(COMPLETED, { result })` atnaujina `jobs` IR `job_results`
       **vienoje transakcijoje**.
-- [ ] `completed` be `job_results` eilutės traktuojamas kaip **remontas arba
-      perdirbimas**, ne sėkmė.
-- [ ] Retry, radęs `completed` su tuo pačiu `result`, laiko tai sėkme (ne
-      klaida) — kitaip BullMQ kartotų be galo.
-- [ ] ⚠️ **SĄLYGINIS UŽBAIGIMAS, ne vien transakcija.** Stalled recovery metu du
-      persidengiantys vykdymai perskaito tą patį `processing` snapshot'ą, ir abi
-      transakcijos gali įsipareigoti — vėlesnis rezultatas tyliai perrašo
-      pirmąjį. Reikia `UPDATE ... WHERE status = 'processing' RETURNING`; nulis
-      eilučių → rezultatas LYGINAMAS, ne perrašomas, o skirtingas rezultatas yra
-      klaida. Testas: lenktynės ties draiverio riba.
-- [ ] **Testas:** procesas nutraukiamas tarp `finish()` ir `return`; po retry
-      job'as lieka `completed` SU rezultatu, audio išvalytas, eilė nekartoja.
-- [ ] **Testas:** `completed` be rezultato → audio NEIŠTRINAMAS.
-- [ ] ⚠️ **AUDITO RAŠYMO KLAIDOS NEPRARANDAMOS.** `auditLog.record()` šiandien
-      sinchroninis, ir kvietėjai (`authorizeJobOrAudit()`,
-      `lifecycleService.writeAudit()`) jo NELAUKIA ir negaudo. Pakeitus jį į DB
-      įrašymą, gedimas taptų neapdorotu `rejection`, o autorizacijos ar
-      ištrynimo srautas tęstųsi — audito įvykis dingtų tyliai. Reikia arba
-      `await` ten, kur tinka, arba patvarios eilės su eksplicitiniu klaidų
-      pranešimu. Testas: draiverio gedimas prieš teigiant, kad auditas
-      persistentis.
+- [ ] Transakcija apima tik `jobs` ir `job_results`; auditas, eilės
+      patvirtinimas ir audio valymas lieka už jos.
+- [ ] `finish(FAILED, ...)` elgesys su `job_results` apibrėžtas ir testuotas.
+- [ ] `job_results` persistinimui nepavykus, rollback'inama **visa** transakcija;
+      pusinės `completed` būsenos nelieka — testas.
+
+**Idempotentiškumas**
+
+- [ ] Retry prieš jau `completed` su tuo pačiu kanoniniu rezultatu → sėkmė arba
+      no-op; `version` ir rezultatas be reikalo neperrašomi.
+- [ ] Retry prieš `completed` su **skirtingu** rezultatu → aiškus consistency
+      conflict; esamas rezultatas nepakeistas.
+- [ ] `completed` be `job_results` → nėra sėkmė; audio **neištrinamas**.
+- [ ] Kanoninio palyginimo autoritetas įvardytas; antros lygybės taisyklės nėra.
+
+**Lenktynės ir atsparumas**
+
+- [ ] Deterministinis dviejų nepriklausomų DB jungčių completion lenktynių
+      testas: tik vienas įsipareigoja rezultatą, kitas jo neperrašo.
+- [ ] Testas: procesas nutraukiamas po sėkmingo `finish` commit'o, bet prieš
+      BullMQ patvirtinimą → retry mato `completed` + rezultatą ir baigiasi
+      idempotentiškai, neperdirbdamas.
+- [ ] Testas: transakcijos gedimas tarp `jobs` ir `job_results` nepalieka
+      pusinės `completed` būsenos.
+
+### Ko NEAPIMA
+
+- **Audito persistentinio rašymo ir async klaidų semantikos** — tai 7.4b/7.4e
+  audito linijos atsakomybė. 7.5b audito call-site'ų nekeičia ir 7.4a įvykių
+  klasifikacijos (blokuojantys / ne-blokuojantys) nesilpnina.
+- Persistentinių erasure marks — 7.5a.
+- Bendro retry schedulerio ar retention mechanizmo.
+- Job store architektūros perprojektavimo, sesijų ir authentication pakeitimų.
+
+⚠️ Ankstesnėje šio issue redakcijoje buvo punktas apie `auditLog.record()`
+sinchroniškumą. Jis pašalintas sąmoningai: tas darbas atliktas 7.4a async
+cutover metu. Jei kur nors matote seną redakciją — gyva versija laimi.
 
 ---
 
 ## [7.6] Health, readiness ir backup su restore
 
-**Tėvinis:** #155 · **Priklauso nuo:** 7.2a
+**Tėvinis:** #155 · **Tipas:** tracking · **Priklauso nuo:** 7.2a
+
+Šis issue yra **sekimo gijos** viršus. Darbas suskaidytas į tris PR, nes jame
+maišėsi trys skirtingos rizikos zonos: kopijos artefakto teisingumas, atkurtų
+duomenų korektiškumas ir post-restore suderinimas.
+
+| Sub-PR | Issue | Priklauso nuo |
+|---|---|---|
+| 7.6a — šifruota kopija + bazinis restore | #248 | 7.2a, 7.4f (#231) |
+| 7.6b — post-restore aplikacinis suderinimas | #249 | 7.6a |
+| 7.6c — erasure-safe restore + DR pratybos | #250 | 7.5a (#183), 7.6b |
+
+7.6a ir 7.6b nepriklauso nuo 7.5a, tad gali eiti lygiagrečiai su ja. 7.6c laukia
+ištrynimo žymų — kitaip tektų kurti antrą tombstone mechanizmą.
 
 ### DoD
 
-- [ ] `make doctor` ir readiness rodo DB būseną (prisijungimas, schemos versija,
-      migracijų atsilikimas).
-- [ ] `/api/health` DB būsenos NErodo produkcijoje pagal nutylėjimą
-      (`HEALTH_DETAILS`, kaip esami tiekėjų pavadinimai).
-- [ ] `docs/backup-runbook.md` papildytas Postgres atsarginėmis kopijomis.
-- [ ] ⚠️ **RESTORE testas, ne tik instrukcija:** `pg_dump` → nauja tuščia DB →
-      restore → `schema_version` patikra → keli reprezentatyvūs **`jobs`** IR
-      **`job_results`** įrašai sutampa. Gali būti atskiras integracinis workflow.
-- [ ] ⚠️ **PRATYBOS NAUDOJA ŠIFRUOTĄ ARTEFAKTĄ.** `utils/backupEncryption.js`
-      reikalauja AES-256-GCM su autentikuotu atkūrimu. Kriterijus, tenkinamas
-      paprastu `pg_dump`, tyliai susilpnintų esamą apsaugą — o `job_results`
-      turės transkripcijas. Testas: dešifravimas ir autentiškumo patikra prieš
-      restore.
-- [ ] ⚠️ **`job_results` ĮTRAUKIAMI Į PALYGINIMĄ.** Transkripcijos gyvena
-      atskiroje lentelėje; procedūra, kuri jų neatkuria arba sugadina, praeitų
-      patikrą, nors kiekvienas baigtas job'as būtų praradęs vartotojui matomą
-      rezultatą.
-- [ ] ⚠️ **`audit_log` IŠ ATKŪRIMO IŠBRAUKTAS.** `utils/backupPolicy.js` tai jau
-      daro sąmoningai: atkūrus, GDPR ištrinti įrašai grįžtų, o naujesni
-      append-only įvykiai būtų perrašyti arba dubliuoti. Testas: prieš kopiją
-      įrašoma UNIKALIAI ATPAŽĮSTAMA audito eilutė, ir po restore jos NĖRA.
-      ⚠️ „Nesutampa su dump'u" nepakanka — atkūrimas įrašo naujų įvykių, tad
-      nesutapimas atsiranda savaime.
-- [ ] ⚠️ **Sesijos po atkūrimo MASIŠKAI ATŠAUKIAMOS.** Kitaip atkūrimas prikeltų
-      atšauktas sesijas: klientas ar užpuolikas gali tebeturėti tą pačią cookie,
-      o senas `token_hash` ją vėl padarytų galiojančia. Testas: sesija atšaukta
-      PO kopijos → po restore ta cookie neautentifikuoja.
-- [ ] ⚠️ **NE-TERMINALĖS EILUTĖS PO ATKŪRIMO SUDERINAMOS.** Kopijoje gali būti
-      `queued`/`processing` įrašų, o BullMQ būsena į kopiją NEPATENKA (backup
-      politika eilės įrašus išbraukia sąmoningai). Atkūrus juos nepakeistus,
-      jie lieka amžinai ne-terminalūs: `sweepExpired()` jų nešalina, ir
-      klientai apklausinėja job'us, kurie niekada nepasileis. Restore
-      procedūra privalo juos terminalizuoti arba saugiai atkurti eilės darbą.
-- [ ] ⚠️ **Ištrynimo žurnalas išsaugomas UŽ snapshot'o ribų** ir sujungiamas po
-      atkūrimo. Kitaip job'as, ištrintas po kopijos, grįžtų su rezultatu, bet be
-      tombstone. Testas: job'as ištrintas po kopijos → po restore jo NĖRA.
-- [ ] README apribojimų lentelės eilutės atnaujintos; Roadmap `[x]`.
+- [x] #248 uždarytas
+- [x] #249 uždarytas
+- [x] #250 uždarytas
+
+Detalūs kriterijai gyvena sub-issue'uose, ne čia. README apribojimų lentelė ir
+Roadmap `[x]` atnaujinami 7.6c, ne anksčiau.
+
+---
+
+## [7.6a] Šifruota Postgres kopija ir bazinis restore įrodymas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.2a, 7.4f
+
+Pirmas iš trijų 7.6 gabalų. Apimtis tik viena: **ar galime patikimai pasidaryti kopiją
+ir ją atkurti.** Jokių sesijų, ne-terminalių job'ų ar erasure replay.
+
+---
+
+## Patikrinta AS-IS (`7ce5356`)
+
+Eilučių numeriai sensta — prieš darbą inventorizuok iš naujo. Ši lentelė galioja
+įvardytam commit'ui.
+
+| Faktas | Kur | Reikšmė šiam darbui |
+|---|---|---|
+| `_canonicalContents()` iš `contents` reikalauja tik netuščio `type` string'o ir neneigiamų sveikųjų `count`/`bytes` | `utils/backupEncryption.js:159-176` | **šifravimas tipų registro NEtikrina** |
+| Politikos vartai yra manifeste | `utils/backupManifest.js:82` (`createManifest`), `:163` (`validateManifest`) | čia atmetamas tipas, kurio `isIncluded()` nepripažįsta |
+| `isIncluded()` yra IŠVEDAMAS: `persistence === PERSISTENT` ir ne `EXCLUDED_DESPITE_PERSISTENT` | `utils/backupPolicy.js:120-126` | naujas persistentinis tipas **automatiškai** patenka ir į aplikacijos JSON kopiją |
+| Kiekvienas registro tipas PRIVALO turėti skenavimo strategiją | `utils/artefactScanner.js:15`, gina `tests/lifecycleE2E.test.js:423` | `ARTEFACT_TYPES` yra **GDPR ištrynimo inventorius**, ne kopijų leidimų sąrašas |
+| `audit_log` išbrauktas sąmoningai | `utils/backupPolicy.js:45+` (`EXCLUDED_DESPITE_PERSISTENT`) | nekeičiama |
+| `MAX_CIPHERTEXT_BYTES = 2 GB`, envelope laukai — **base64 eilutės atmintyje** | `utils/backupEncryption.js:318,356` | žr. D6: praktinė riba gerokai žemesnė nei 2 GB |
+| `testDatabaseUrl(suffix)` ir `adminDatabaseUrl()` JAU egzistuoja | `tests/helpers/postgresGuard.js:45,55` | naudojami `sessionStoreBackendContract.integration.test.js:460-465` ir `jobStoreBackendContract.integration.test.js:385` su `CREATE DATABASE` |
+| `postgresReachability()` tikrina `pgmigrations` ir lygina su `backend/migrations/` katalogu | `utils/startupChecks.js:504,551-583` | migracijų atsilikimas JAU matomas per `make doctor` |
+| `/api/ready` (`probeRuntimeReadiness()`) tikrina komponentų liveness zondus, migracijų atsilikimo — ne | `server.js` | žr. D5 |
+| Runbook jau turi `pg_dump --exclude-table-data=audit_log` | `docs/backup-runbook.md:62-95` | procedūra yra, automatikos nėra |
+| `backupDocumentation.test.js` turi ~10 sargų, tarp jų „KIEKVIENA žinoma riba įvardyta" | `tests/backupDocumentation.test.js:135` | naujas įspėjimas jungiamas prie ŠIO mechanizmo |
+| `backupService`/`restoreService` dengia tik aplikacijos lygio JSON kopijas | `services/` | `pg_dump` kelio repo neturi visai |
+| CI: serveris `postgres:16-alpine`, **`postgresql-client` niekur neinstaliuojamas** | `.github/workflows/ci.yml:51` | žr. D7 — be to visas DoD CI'uje neįvykdomas |
+
+---
+
+## Užrakinti sprendimai
+
+### D1 — PostgreSQL dump artefakto kontraktas
+
+7.6a turi apibrėžti, kaip dump'as reprezentuojamas esamame manifesto / šifravimo
+formate. Esamos AES-256-GCM + AAD grandinės apeiti negalima vien todėl, kad payload yra
+SQL, o ne aplikacijos JSON.
+
+⚠️ **„Užregistruoti naują kanoninį tipą" NĖRA lokalus veiksmas.** `ARTEFACT_TYPES`
+registras maitina ištrynimo inventorių, ne tik kopijų politiką, ir turi dvi
+automatines pasekmes:
+
+1. `isIncluded()` išvedamas iš `persistence` — naujas **persistentinis** tipas iškart
+   tampa įtrauktas ir į aplikacijos JSON kopijos kelią (`includedTypes()`), kur jo
+   semantika netinka;
+2. `artefactScanner` reikalauja strategijos **kiekvienam** registro tipui, ir
+   `lifecycleE2E.test.js:423` tai gina — naujas įrašas iškart sukuria pareigą atsakyti,
+   kaip dump'as skenuojamas ir trinamas per GDPR ištrynimą.
+
+Prieš implementaciją apsvarstyti **tris** variantus ir pasirinkimą užrašyti su
+priežastimi:
+
+- **(a)** naujas kanoninis tipas (pvz. `POSTGRES_DUMP`) su eksplicitiniu atsakymu į abi
+  pasekmes aukščiau;
+- **(b)** atskira manifesto **ašis** — artefakto *rūšis* (aplikacijos kopija vs. DB
+  dump'as) — kuri nepraplečia `ARTEFACT_TYPES` ir nepaliečia ištrynimo inventoriaus;
+- **(c)** kitas variantas, jei kodas pasiūlo geresnį.
+
+Ko **negalima**: laisvinti `backupEncryption.js` kriptografinės semantikos ar v2 AAD
+formato vien dėl šio PR. Fail-closed manifesto/šifravimo kontraktas lieka fail-closed.
+
+Naujas dump tipas negali tapti leidimu produkcinės aplikacijos kopijos turiniui ten,
+kur jo semantika netinka.
+
+### D2 — vienas vykdomas backup/restore kelias
+
+Turi egzistuoti **vienas** programinis/operatoriaus kelias, kurį naudoja ir integracinis
+testas, ir dokumentuota procedūra. Jis atsakingas už:
+
+- `pg_dump` iškvietimą;
+- dump artefakto manifesto/metaduomenų sukūrimą;
+- AES-256-GCM šifravimą per `utils/backupEncryption.js`;
+- prieš restore atliekamą manifesto, checksum ir GCM autentifikacijos patikrą;
+- dešifruoto dump'o perdavimą PostgreSQL restore įrankiui;
+- aiškius exit kodus ir klaidas.
+
+⚠️ Testas **NETURI** atkurti šios orkestracijos savo atskira imitacija. Konkretūs failų
+vardai (`backup-db.js` / `restore-db.js`) **nefiksuojami** — fiksuojamas elgesys ir tai,
+kad kelias vienas.
+
+### D3 — izoliuota tikslinė DB
+
+⚠️ **Helperis JAU yra — antro provisioning framework'o nekurti.**
+`tests/helpers/postgresGuard.js` teikia `testDatabaseUrl(suffix)` ir
+`adminDatabaseUrl()`, o modelis (`CREATE DATABASE` per admin URL + `resourceStack`
+teardown) jau naudojamas dviejuose kontraktų testuose. Restore testas eina tuo pačiu
+keliu.
+
+### D4 — restore atomiškumas
+
+Kriptografinės ir manifesto klaidos sustabdo procesą **PRIEŠ pirmą SQL mutaciją**.
+
+Jei autentifikuotas dump'as jau pradėtas vykdyti, SQL ar ryšio klaida negali palikti
+„sėkmingai užbaigto" dalinio restore. Restore vykdomas režimu, kuris pagal pasirinktą
+`pg_dump` formatą duoda maksimaliai atominę fail-closed semantiką (pvz.
+single-transaction, jei formatas ir įrankis ją palaiko).
+
+⚠️ Konkreti vėliavėlė (`psql -1` ar kita) **nefiksuojama** — formatas (plain, custom)
+dar pasirenkamas. Fiksuojama garantija.
+
+Pastaba: „hard fail PRIEŠ restore" (sugadintas ciphertext, blogas raktas) ir „SQL klaida
+jau pradėjus" yra **du skirtingi** reikalavimai; abu privalo turėti testą.
+
+### D5 — readiness / doctor riba
+
+7.6a **neperimplementuoja** 7.4f readiness darbo.
+
+`make doctor` per `startupChecks.postgresReachability()` jau lygina `pgmigrations` su
+`backend/migrations/` katalogu, t. y. migracijų atsilikimo signalas **egzistuoja**.
+Todėl 7.6a numatytai tik **dokumentuoja jį kaip privalomą post-restore verifikacijos
+žingsnį**.
+
+`/api/ready` migracijų atsilikimo patikra šiame PR daroma **TIK** jei be jos negalima
+tenkinti jau egzistuojančio 7.6 kontrakto; kitu atveju — atskiras follow-up. Sprendimą
+užrašyti, nesvarbu kuris.
+
+### D6 — dydžio riba yra tikra, ir ji žemesnė nei 2 GB
+
+`MAX_CIPHERTEXT_BYTES` yra 2 GB, bet envelope laukai (`iv`, `authTag`, `ciphertext`) yra
+**base64 eilutės atmintyje**, o V8 eilutės ilgis ribotas. Praktinė lubos ateina
+gerokai anksčiau nei nominalios 2 GB, ir produkcinis dump'as su transkripcijomis prie
+jų gali priartėti.
+
+7.6a **neįveda** srautinio šifravimo. Bet riba privalo būti:
+
+- išmatuota arba argumentuotai įvardyta;
+- užrašyta runbook'e kaip žinoma riba (kitaip dokumentas teigia daugiau, nei kodas
+  gali — §12.1);
+- padengta testu ties klaidos keliu (per didelis artefaktas duoda aiškią klaidą, ne
+  neaiškų V8 kritimą).
+
+### D7 — `pg_dump` prieinamumas CI'uje
+
+⚠️ Šiandien workflow **neįdiegia jokio** PostgreSQL kliento, o serveris yra
+`postgres:16-alpine`. Runner'io numatytasis klientas yra senesnis, o `pg_dump` prieš
+naujesnį serverį atsisako dirbti. Be šito visas DoD CI'uje neįvykdomas — ir kris ne dėl
+logikos.
+
+- workflow įdiegia suderinamą klientą (`postgresql-client-16` ar lygiavertį), **versija
+  pririšama**, ne paliekama runner'io numatytajai, kuri keičiasi be įspėjimo;
+- testas turi **atskirą praleidimo ašį** „nėra `pg_dump` binaro", ir ji, kaip
+  `skipWithoutPostgres()`, po `REQUIRE_POSTGRES=1` virsta klaida. Tyliai praleistas
+  failas apeitų `verify-postgres-suite-ran.mjs` prasmę.
+
+---
+
+## DoD
+
+### Kopija ir šifravimas
+
+- [ ] `pg_dump` procedūra `docs/backup-runbook.md`.
+- [ ] Artefaktas šifruojamas per `utils/backupEncryption.js` (AES-256-GCM). Paprastas
+      `pg_dump` be šifravimo kriterijaus NETENKINA — `job_results` turi transkripcijas.
+- [ ] D1 sprendimas priimtas ir užrašytas; jei pasirinktas naujas kanoninis tipas —
+      atsakyta į abi automatines pasekmes (`isIncluded()` išvedimas, `artefactScanner`
+      strategijos pareiga), ir `lifecycleE2E.test.js:423` lieka žalias **dėl
+      sprendimo**, ne dėl atsitiktinumo.
+- [ ] `backupEncryption.js` kriptografinė semantika ir v2 AAD formatas nepakeisti.
+- [ ] D6: dydžio riba įvardyta, užrašyta runbook'e ir padengta klaidos keliu.
+
+### Vienas kelias
+
+- [ ] Egzistuoja vienas programinis backup/restore kelias (D2); integracinis testas ir
+      dokumentuota procedūra naudoja **jį**, ne dvi realizacijas.
+- [ ] Testas neatkuria orkestracijos savo imitacija.
+- [ ] Aiškūs exit kodai / klaidos.
+
+### Restore įrodymas
+
+- [ ] Restore į naują **TUŠČIĄ** DB; `schema_version` patikra.
+- [ ] ⚠️ Testas naudoja atskirą, unikaliai pavadintą laikiną DB per esamą
+      `testDatabaseUrl()` / `adminDatabaseUrl()` ir **niekada** nedaro DROP/restore ant
+      bendros `DATABASE_URL` bazės.
+- [ ] Testas išvalo **tik SAVO** sukurtą DB; lygiagretus kitų PostgreSQL integracinių
+      testų vykdymas nepaveikiamas.
+- [ ] ⚠️ Palyginimas **nėra vien `COUNT(*)`**: tikrinami konkretūs `jobs.id`, statusai
+      ir jų ryšys su `job_results`, įskaitant reprezentatyvų transcript/protocol
+      payload. Procedūra, neatkurianti `job_results`, praeitų `COUNT` patikrą, nors
+      kiekvienas baigtas job'as būtų praradęs vartotojui matomą rezultatą.
+- [ ] ⚠️ Kopijos šaltinio nuoseklumas: procedūra dokumentuoja ir testas remiasi
+      PostgreSQL consistent snapshot semantika — `jobs` ir susiję `job_results` negali
+      būti paimti iš skirtingų loginių momentų vien dėl skaitymo sekos.
+
+### Fail-closed
+
+- [ ] Sugadintas ciphertext arba blogas raktas → **hard fail PRIEŠ restore**, ne dalinis
+      atkūrimas. Testas abiem atvejais.
+- [ ] ⚠️ Neužtenka „grąžina klaidą": prieš ir po bandymo tikslinė **tuščia DB lieka
+      semantiškai nepaliesta** (jokių lentelių, jokių įrašų).
+- [ ] D4: tyčia sugadintas jau **validžiai dešifruotas** restore payload nepaverčiamas
+      sėkmingu restore; dalinės būsenos nelieka.
+- [ ] Pasirinktas restore režimas ir jo atomiškumo garantija užrašyti.
+
+### Auditas
+
+- [ ] `audit_log` NEatkuriamas (`utils/backupPolicy.js` tai jau daro sąmoningai).
+- [ ] ⚠️ Testas naudoja **unikalų sentinel'į**: prieš kopiją įrašoma unikaliai
+      atpažįstama audito eilutė, po restore jos NĖRA. „Nesutampa su dump'u" nepakanka —
+      atkūrimas įrašo naujų įvykių, tad nesutapimas atsiranda savaime.
+
+### Dokumentacija ir readiness
+
+- [ ] ⚠️ **RUNBOOK ĮSPĖJA, KAD PROCEDŪRA DAR NE ERASURE-SAFE.** Po šio PR restore veiks,
+      bet prikeltų po kopijos ištrintus job'us — tombstone'ai (7.5a) ir replay (7.6c)
+      dar neuždaryti. Be įspėjimo dokumentas taptų stipresnis už kodą (§12.1).
+- [ ] Testas gina šį įspėjimą, **prijungtas prie esamo** `backupDocumentation.test.js`
+      „KIEKVIENA žinoma riba įvardyta" mechanizmo, jei tas sąrašas išvedamas — ne
+      vienuoliktas rankinis `assert`.
+- [ ] D5 sprendimas užrašytas: `make doctor` signalas dokumentuotas kaip privalomas
+      post-restore žingsnis; `/api/ready` keičiamas tik jei būtina.
+- [ ] `/api/health` DB būsenos produkcijoje NErodo pagal nutylėjimą (`HEALTH_DETAILS`,
+      kaip esami tiekėjų pavadinimai).
+
+### CI
+
+- [ ] D7: workflow įdiegia pririštos versijos PostgreSQL klientą; `pg_dump` CI'uje
+      realiai vykdomas.
+- [ ] Praleidimo ašis „nėra `pg_dump`" po `REQUIRE_POSTGRES=1` virsta klaida.
+- [ ] Testas registruotas `postgres` rinkinyje (per `postgresGuard` importą), tad
+      `verify-postgres-suite-ran.mjs` reikalauja neprapleisto `ok`.
+
+---
+
+## Ko NEAPIMA
+
+Sesijų, ne-terminalių job'ų, ištrynimo žymų, erasure replay. Srautinio šifravimo.
+Roadmap `[x]` NEdedamas — 7.6 uždaromas tik po 7.6c.
+
+⚠️ Šis nuokrypis nuo bendro 7.6 aprašo `SUBISSUES-155.md` yra **sąmoningas ir
+suplanuotas** (pirmas iš trijų). Testų ir kodo komentaruose tai įvardyti, kad nekiltų
+painiavos su bendruoju 7.6 DoD.
+
+---
+
+## Pastabos vykdytojui
+
+- **Įrodymo standartas:** AGENTS.md §14. „Testas praėjo" nėra restore korektiškumo
+  įrodymas, jei palyginimas paviršinis.
+- **Mutacijos:** §9.1. Kiekvienas fail-closed testas privalo kristi, kai atitinkama
+  patikra pašalinama.
+- **Testų izoliacija:** §9.3. Restore testas liečia DB — izoliacija čia nėra higiena, o
+  korektiškumo sąlyga.
+- **Dokumentacija:** §12.1. Runbook negali teigti daugiau, nei procedūra gali —
+  ypač dėl erasure-safety ir dydžio ribos.
+- **Apimties disciplina:** §13. `/api/ready` architektūra, srautinis šifravimas ir
+  erasure replay yra už ribos; jei kuris pasirodys būtinas — sustok ir pasakyk.
+
+---
+
+## [7.6b] Post-restore aplikacinis suderinimas
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.6a
+
+Apimtis: **ką daryti su būsena, kurios DB snapshot vienas pats saugiai atkurti
+negali.** Jokio queue replay, jokio erasure replay, jokio prikėlimo.
+
+Vieta grandinėje: 7.6a „saugiai atkurk DB" → **7.6b „dar offline režime padaryk
+atkurtą aplikacinę būseną saugią"** → 7.6c „pritaikyk po snapshot'o įvykusius
+ištrynimus" → tik tada cutover.
+
+---
+
+## Patikrinta AS-IS (`58aa57b`)
+
+Numeriai sensta — prieš darbą inventorizuok iš naujo.
+
+| Faktas | Kur | Reikšmė šiam darbui |
+|---|---|---|
+| `jobPhase.finish()` grąžina `{ ...extra, status, phase: null, progress: null, progressKnown: false }` | `utils/jobPhase.js:486` | **lifecycle autoritetas jau gamina constraint'us tenkinantį patch'ą** — SQL `SET` sąrašo rankomis rašyti nereikia |
+| `finish()` leidžia `QUEUED` ir `PROCESSING` kaip šaltinį | `utils/jobPhase.js:515` | `queued → failed` ir `processing → failed` yra **legalūs** perėjimai, ne apėjimas |
+| `jobs.version` (7.5b) su `jobs_version_positive` | `migrations/1755900000000_jobs-version.js` | masinis `UPDATE` privalo didinti `version` ir tenkinti `>= 1` |
+| Tombstone barjeras taikomas KIEKVIENAI fasado mutacijai, įsk. `finish` | `utils/jobStore/index.js:753` | tiesioginis SQL jį **apeitų** |
+| Sesijų fasadas turi tik `destroyAllForUser` / `destroyAllForUserId` | `utils/sessionStore/index.js:366-367` | **masinės revokacijos metodo NĖRA** — jį reikia sukurti |
+| Sesijos tikrinamos prieš `AUTH_USERS` KIEKVIENOS užklausos metu, ne tik starte | `utils/sessionStore/postgresStore.js:157` | revokacija svarbi tiems vartotojams, kurie `AUTH_USERS` tebėra |
+| `REQUIRED_SESSION_CONSTRAINTS` ir sesijų backend'ų paritetas | `utils/sessionStore/index.js:357` | naujas fasado metodas paliečia memory backend'ą |
+| Audit log į DB kopiją NEPATENKA sąmoningai | `utils/backupPolicy.js` (7.6a) | evidencija rašoma į GYVĄ audito saugyklą po restore |
+
+---
+
+## Užrakinti sprendimai
+
+### D1 — vykdymo riba: offline PRIEŠ serverio startą
+
+Post-restore suderinimas **NEGALI** būti administracinis HTTP endpoint'as ir negali
+reikalauti veikiančio aplikacijos serverio.
+
+Jis vykdomas kaip offline operatoriaus CLI žingsnis:
+
+```
+DB restore → post-restore reconciliation → reconciliation verification
+           → tik tada application/server startup ir traffic cutover
+```
+
+Kol suderinimas nebaigtas sėkmingai, backend'as negali pradėti priimti vartotojų
+srauto. CLI nesėkmė yra **fail-closed**: operatorius negali laikyti restore
+procedūros užbaigta.
+
+Konkretaus komandos ar failo pavadinimo issue nefiksuoja — pirma pažiūrėk esamą
+`backend/scripts/` ir `package.json` struktūrą ir pasirink ją atitinkantį.
+
+### D2 — kaip riba UŽTIKRINAMA (sprendimas priimamas prieš kodą)
+
+⚠️ Runbook'o žingsnis yra **procedūra, ne garantija**. Šiandien niekas nesustabdo
+operatoriaus, paleidusio serverį prieš suderinimą — o būtent tas langas ir yra D1
+saugumo problema.
+
+Apsvarstyti ir pasirinkti su priežastimi:
+
+- **(a) tik procedūrinė riba** — runbook + CLI verifikacija, be starto sargo.
+  Pigu, bet garantijos nėra, ir tai privalo būti sąžiningai užrašyta (§12.1);
+- **(b) persistentinė suderinimo žyma + starto patikra** — startas (ar readiness)
+  fail-closed, kol žymos nėra. Brangiau, bet paverčia procedūrą invariantu.
+
+⚠️ **Jei renkiesi (b), žyma privalo būti susieta su ŠIA restore karta.** Paprasta
+„suderinta = true" žyma DB viduje pati pateks į vėlesnes kopijas; atkūrus tokią
+kopiją atsikuria ir žyma, tad starto patikra praeitų dar prieš suderinant šios
+kartos sesijas ir in-flight job'us — būtent tą prikeltų sesijų grėsmę, nuo kurios
+visa D1/D2 ir saugo. Reikia unikalaus backup/restore kartos identifikatoriaus
+žymoje, kuris restore metu paskelbiamas negaliojančiu arba pakeičiamas, prieš
+laikant DB paleidžiama. Be to (b) nėra invariantas.
+
+Pasirinkimas įrašomas; „numanoma (a)" netinka.
+
+### D3 — terminalizavimo kontraktas: per `jobPhase`, ne per ranka rašytą SQL
+
+`queued` / `processing` → saugi terminalinė būsena atliekama taip, kad galutinis job
+objektas tenkintų **visus tuo metu galiojančius** lifecycle ir PostgreSQL CHECK
+invariantus.
+
+⚠️ **Negalima kurti antros, restore-only būsenos interpretacijos.** Patch'as
+išvedamas iš `jobPhase.finish(job, FAILED, …)`, kuris jau grąžina
+`phase: null, progress: null, progressKnown: false` — t. y. `jobs_status_phase`,
+`jobs_progress_only_processing` ir `jobs_progress_known` tenkinami **dėl
+autoriteto**, o ne dėl to, kad kažkas teisingai surašė `SET` sąrašą.
+
+AS-IS tai apima bent `phase`, `progress_known`, `progress_current`,
+`progress_total` — ir **visus kitus** laukus, kurių terminalinė būsena neleidžia.
+Prieš implementaciją invariantai ir constraint'ai inventorizuojami iš naujo:
+tarp šio teksto ir darbo pabaigos job modelis gali būti pasikeitęs (7.5b jau
+pridėjo `version`).
+
+- [ ] `version` didinamas kaip ir bet kuriai kitai mutacijai; `jobs_version_positive`
+      tenkinamas.
+
+### D4 — atomiškumas
+
+PostgreSQL restore suderinimas yra **viena loginė fail-closed operacija**.
+
+Jei sesijos ir job'ai yra toje pačioje atkuriamoje DB, masinė sesijų revokacija ir
+ne-terminalių job'ų terminalizavimas atliekami **vienoje DB transakcijoje**. Bet
+kuri klaida iki commit → rollback visam suderinimui.
+
+Negali egzistuoti „sėkminga" būsena, kur sesijos jau revokuotos, o dalis in-flight
+job'ų liko nesuderinta, arba atvirkščiai.
+
+⚠️ **Įtampa su D3 sprendžiama eksplicitiškai.** Fasadas (`jobStore.system.*`)
+transakcijos ribos neatveria, o `jobPhase` yra grynas patch'o skaičiuotojas.
+Tinkamas modelis jau yra repo: `reportProgressAtomicSync(id, event, jobPhase)` —
+grynoji taisyklė perduodama saugyklai, kuri ją įvykdo savo transakcijoje. Ta pati
+forma tinka ir čia. Ranka rašytas `UPDATE … SET status='failed'` netinka.
+
+### D5 — tombstone barjeras
+
+Fasadas tombstone barjerą taiko kiekvienai mutacijai (`jobStore/index.js:753`),
+tiesioginis SQL — ne. Suderinimas privalo apsispręsti:
+
+- job'ai su ištrynimo žyma **praleidžiami** (paliekami 7.6c), arba
+- barjeras taikomas ir čia.
+
+Tylus apėjimas neleistinas: tai būtų rašymas į įrašą, kurio ištrynimas jau
+pažymėtas.
+
+### D6 — masinė sesijų revokacija
+
+Fasade tokio metodo **nėra** — tik `destroyAllForUser` / `destroyAllForUserId`.
+Naujas metodas paliečia sesijų backend'ų paritetą (memory + postgres). Apsispręsti
+ir užrašyti: ar tai fasado metodas su realizacija abiejuose backend'uose, ar
+PostgreSQL-only operacija, gyvenanti suderinimo kelyje.
+
+### D7 — backend precondition (fail, ne skip)
+
+7.6b yra **PostgreSQL DB restore procedūros dalis**. Jei būtinas PostgreSQL
+backend / `DATABASE_URL` nepasiekiamas arba konfigūracija neatitinka šio restore
+režimo, CLI **HARD FAILINA**.
+
+⚠️ Jokio „successful skip" memory/Redis režime. Tylus praleidimas leistų
+operatoriui manyti, kad suderinimas įvyko — tai pavojingiau nei kritimas. Tai NĖRA
+bendras `jobStore`/`sessionStore` administravimo įrankis.
+
+### D7a — tapatumas: suderinama TA PATI bazė, kurią mato saugyklos
+
+⚠️ **Ši pamoka gauta 7.6a metu (#248, Codex P1) ir čia kartojasi trimis
+saugyklomis vietoj vienos.** Ten `recordBackupHorizon()` ėjo per `ensureInit()`,
+kuris backend'ą renkasi iš **globalios aplinkos**, ne iš perduoto `databaseUrl` —
+tad su `--url` kitai bazei horizontas atsidurdavo ne toje bazėje, kurią artefaktas
+atkuria, o garantija tyliai nustodavo galioti.
+
+7.6b `jobStore`, `sessionStore` ir audito fasadai backend'ą renkasi lygiai taip
+pat. Vadinasi:
+
+- suderinimo tikslinė bazė **privalo sutapti** su ta, prie kurios prisirišusios
+  saugyklos; nesutapimas → **fail-closed** su savo klaidos kodu;
+- atmintinis backend'as yra atskira klaida, ne tas pats atvejis: suderinimas jame
+  formaliai įvyktų ir dingtų procesui pasibaigus (7.6a tam turi atskirą
+  `PG_BACKUP_HORIZON_NOT_PERSISTENT`);
+- tapatumas tikrinamas **prieš** pirmą mutaciją, ne po jos;
+- palyginimo riba (du klasteriai tame pačiame hoste vienodu bazės vardu) užrašoma
+  ten pat, kaip `utils/pgConnection.js` ją jau užrašo — ne nutylima.
+
+Saugyklų inicijavimas pagal perduotą URL **atmetamas**: bendrame procese jos
+perimtų globalią būseną. Riba yra tapatumo patikra, ne perkonfigūravimas.
+
+### D7b — CLI inicijuoja IR uždaro kiekvieną saugyklą, kurią naudoja
+
+Precedentas repo yra: `scripts/erasure-marks.js:160-175` aprašo tiksliai šią
+klaidą — „vieno entrypoint'o dvi saugyklos, ir inicijuota buvo tik viena". 7.6a
+nuo jo nukrypo ir gavo P2: `rasytiAudita()` rašė į numatytąjį atmintinį fasadą,
+procesas baigdavosi, ir įvykis dingdavo, nors komanda pranešdavo sėkmę.
+
+7.6b liečia **tris** saugyklas (job, sesijų, audito). Kiekviena inicijuojama
+eksplicitiškai ir uždaroma; testas įrodo, kad įrašas realiai persistintas, o ne
+kad funkcija iškviesta.
+
+### D8 — audito / operacinė evidencija
+
+Sėkmingas suderinimas palieka patikrinamą operacinę evidenciją pagal **tuo metu
+galiojantį** audito kontraktą.
+
+- Jei naudojamas audito įvykis, jis rašomas **tik PO sėkmingo commit**.
+- Rollback **NEGALI** kartu palikti klaidinančio „suderinta" įrašo.
+- Įvykio pavadinimas ir API imami iš AS-IS audito autoriteto; **antras audito
+  mechanizmas nekuriamas**.
+
+### D9 — idempotentiškumas
+
+DR operatorius gali nežinoti, ar pirmas paleidimas baigėsi prieš ar po commit. Tą
+pačią komandą saugu paleisti pakartotinai:
+
+- nėra aktyvių sesijų → sėkmė / no-op;
+- nėra `queued`/`processing` job'ų → sėkmė / no-op;
+- terminalinių job'ų ir jų rezultatų nekeičia;
+- naujų semantinių būsenos pokyčių nesukuria.
+
+### D10 — audio ir `storageKey`
+
+Suderinimas **netrina audio** ir nekuria valymo vėliavų. Terminalizuoti job'ai
+išsaugo `storageKey` tokį, koks buvo. Jei paaiškės, kad tai palieka orphan'ų klasę,
+tai įvardijama kaip riba, o ne sprendžiama čia.
+
+---
+
+## DoD
+
+### Vykdymo riba
+
+- [ ] Suderinimas yra offline CLI žingsnis; HTTP endpoint'o nėra.
+- [ ] CLI nesėkmė fail-closed; exit kodas atskiria „nepavyko" nuo „nieko nereikėjo".
+- [ ] D2 sprendimas priimtas ir užrašytas; jei (a) — riba įvardyta kaip procedūrinė.
+- [ ] `docs/backup-runbook.md`: eiliškumas restore → suderinimas → verifikacija →
+      startas → cutover, su konkrečia komanda.
+- [ ] D7: be PostgreSQL backend'o CLI **krenta**; testas įrodo, kad memory režime
+      NĖRA „sėkmingo praleidimo".
+- [ ] ⚠️ **D7a tapatumas:** tikslinė bazė sutampa su ta, prie kurios prisirišusios
+      saugyklos; nesutapimas ir atmintinis backend'as duoda **atskirus** klaidos
+      kodus, ir abu tikrinami **prieš** pirmą mutaciją. Testas: nurodžius svetimą
+      bazę, joje **nelieka jokio pėdsako** (ne tik grąžinama klaida).
+- [ ] ⚠️ **D7b gyvavimo ciklas:** visos trys saugyklos inicijuojamos ir
+      uždaromos; testas įrodo **persistintą** įrašą tikroje eilutėje, ne funkcijos
+      iškvietimą.
+- [ ] ⚠️ **7.6a runbook'o apribojimai peržiūrimi.** 7.6a §9a reikalauja, kad
+      tikslinė bazė liktų **offline** ir draudžia cutover, nes suderinimo dar
+      nebuvo; §11 eilutės susiaurintos. Šis PR tą dalį **atnaujina** (offline
+      reikalavimas virsta „offline iki suderinimo pabaigos"), o erasure išimtis
+      lieka iki 7.6c. Neatnaujinta riba būtų dokumentacija, silpnesnė už kodą —
+      ta pati §12.1 klaida, tik kita kryptimi.
+
+### Sesijos
+
+- [ ] Visos atkurtos sesijos masiškai revokuojamos.
+- [ ] ⚠️ Realiame PostgreSQL teste sukuriamos **kelios aktyvios sesijos bent dviem
+      skirtingiems vartotojams**.
+- [ ] Po suderinimo **nė viena** pre-restore sesija nebeautentifikuoja — tikrinamas
+      ir persistentinis būsenos laukas, **ir realus auth kelias** su senais cookie.
+- [ ] Vienos sesijos testas kriterijaus **netenkina**: jį praeitų ir realizacija,
+      revokuojanti tik tą vieną.
+- [ ] D6 sprendimas užrašytas; sesijų backend'ų paritetas nesulaužytas.
+
+### Job'ai
+
+- [ ] `queued` / `processing` → saugi terminalinė būsena per `jobPhase` autoritetą.
+- [ ] ⚠️ **ŠIAME PR — TIK TERMINALIZAVIMAS, JOKIO PRIKĖLIMO.** Prikelti job'ą
+      galima tik žinant, kad jo duomenys neištrinti; tombstone merge yra 7.6c.
+- [ ] Realiame PostgreSQL teste vienu metu yra `queued`, `processing`, `failed` ir
+      `completed + result` job'ai.
+- [ ] Po suderinimo: `queued`/`processing` → terminalūs su sutvarkytais
+      processing-only laukais; `failed` semantiškai nepakitęs; `completed` lieka
+      `completed`, o jo `job_results` **persistentinė reprezentacija identiška**.
+- [ ] Suderinimas nekuria, neperrašo ir netrina terminalinių job'ų rezultatų.
+- [ ] Nė vienas CHECK constraint nepažeidžiamas — testas prieš tikrą DB, ne mock'ą.
+- [ ] D5 sprendimas dėl tombstone'ų priimtas ir padengtas testu.
+
+### Atomiškumas ir idempotentiškumas
+
+- [ ] Sesijų revokacija ir job'ų terminalizavimas — vienoje transakcijoje.
+- [ ] Testas: klaida po dalies darbo → rollback; nei sesijos, nei job'ai nepakitę.
+- [ ] Testas: komanda vykdoma **DU kartus**; persistentinė būsena po pirmo ir antro
+      vykdymo lyginama ir sutampa.
+- [ ] Antras vykdymas negrąžina klaidos.
+
+### Evidencija
+
+- [ ] Evidencija rašoma tik po sėkmingo commit; rollback jos nepalieka. Testas
+      abiem kryptim.
+- [ ] Antro audito mechanizmo nesukurta.
+
+---
+
+## Ko NEAPIMA
+
+- BullMQ eilės rekonstrukcijos ir queue replay — eksplicitiškai out of scope.
+- Erasure replay ir tombstone merge — 7.6c.
+- Ne-terminalių job'ų **prikėlimo** kelio.
+- Memory/Redis režimo palaikymo (žr. D7).
+- Roadmap `[x]` NEdedamas — 7.6 uždaromas tik po 7.6c.
+
+## Pastabos vykdytojui
+
+- **§14:** „CLI grąžino 0" nėra suderinimo įrodymas; įrodymas yra persistentinė
+  būsena ir auth kelias.
+- **§9.1:** kiekviena garantija turi mutaciją — ypač revokacija ir terminalinių
+  įrašų neliečiamumas.
+- **§9.3:** testas kuria ir naikina savo DB; bendros `DATABASE_URL` bazės
+  nedrop'ina (7.6a helperis `testDatabaseUrl()` / `adminDatabaseUrl()`).
+- **§13:** jei kuris punktas reikalauja keisti `jobPhase` grafą, sesijų kontraktą
+  ar 7.6c apimtį — **sustok ir pasakyk**.
+
+---
+
+## [7.6c] Erasure-safe restore ir pilnos DR pratybos
+
+**Tėvinis:** #155 · **Priklauso nuo:** 7.5a, 7.6b
+
+Paskutinis 7.6 gabalas. Apimtis tik **GDPR galutinumas ir pilnas end-to-end**.
+
+Esmė viena: DB snapshot gali būti senas, bet **ištrynimo žurnalas negali būti
+senesnis už ištrynimus, kurių galutinumą žadame išlaikyti**.
+
+---
+
+## Patikrinta AS-IS (`58aa57b`)
+
+Numeriai sensta — prieš darbą inventorizuok iš naujo.
+
+| Faktas | Kur | Reikšmė šiam darbui |
+|---|---|---|
+| `TOMBSTONE_STATUS`: `deletion_pending` / `deleted` / `deletion_failed` + `ALLOWED_TRANSITIONS` | `utils/deletionTombstones/states.js:16-23` | **monotoniškumas išvedamas iš šio grafo**, ne rašomas iš naujo |
+| Fasadas eksportuoja `ALLOWED_TRANSITIONS`, `mark`, `complete`, `retry`, `forceResolve`, `release`, `isDeleted`, `isBarred`, `get`, `listUnresolved`, `purgeExpired`, `recordBackupHorizon` | `utils/deletionTombstones/index.js:633-670` | eksporto/importo metodų **NĖRA** — juos reikia sukurti |
+| ⚠️ `listUnresolved()` grąžina tik NEIŠSPRĘSTAS žymas | ten pat | `deleted` žymos yra būtent tos, kurios svarbiausios — pilnam eksportui jos nepakanka |
+| `erasure_marks` stulpeliai: `job_id, status, reason, actor_kind, marked_at, updated_at, completed_at, attempts, last_failure_kind, claim_token` | `utils/deletionTombstones/postgresStore.js:55-58` | eksporto forma remiasi ŠIA schema |
+| Autoritetingas ištrynimo vykdymas: `lifecycleService.deleteJobArtefacts` (+ `DELETION_STATUS`), žemiau `jobErasure.eraseJob` | `services/lifecycleService.js:644`, `utils/jobErasure.js:272` | replay **reuse'ina** juos, nekuria restore-specific trynimo |
+| `maintenanceLock` turi **10 min** auto-expiry | `utils/maintenanceLock.js:29` | pilnos DR pratybos ilgesnės — žr. D3 |
+| Retencija susieta su `recordBackupHorizon` / `BACKUP_RETENTION_DAYS` (7.5a) | `utils/deletionTombstones/index.js`, 7.5a DoD | žymos negali pasibaigti anksčiau nei jas apimanti kopija |
+| 7.6a runbook įspėjimas „dar ne erasure-safe" atsiranda **7.6a metu** | #248 | jei 7.6a dar neuždarytas, čia nėra ko šalinti |
+
+---
+
+## Užrakinti sprendimai
+
+### D1 — erasure būsena už snapshot'o ribų
+
+Prieš DB restore turi būti išsaugota autoritetinga 7.5a `erasure_marks` būsena
+**UŽ atkuriamo PostgreSQL snapshot'o ribų**.
+
+Naudojamas **tas pats 7.5a tombstone modelis** — naujas ištrynimo žurnalo formatas
+ar antra erasure semantika nekuriama.
+
+Turi egzistuoti operatoriaus/CLI kelias, kuris:
+
+1. eksportuoja autoritetingas `erasure_marks` — **visas, ne tik neišspręstas**
+   (`listUnresolved()` nepakanka: `deleted` žymos yra pačios svarbiausios);
+2. apsaugo eksportą nuo neautorizuoto skaitymo ir nepastebimo pakeitimo;
+3. po DB restore **fail-closed** būdu validuoja eksportą;
+4. **monotoniškai** sulieja žymas su atkurtos DB `erasure_marks`;
+5. negali panaikinti naujesnės ar stipresnės jau egzistuojančios žymos.
+
+⚠️ **Grafas yra būsenų mašinos autoritetas, BET NE dviejų snapshot'ų tvarka.**
+`states.ALLOWED_TRANSITIONS` yra `PENDING → [DELETED, FAILED]`,
+`FAILED → [PENDING]`, `DELETED → []` (`states.js:86-90`). Iš to seka tik viena
+tvarkos taisyklė: **`deleted` yra terminalus ir laimi visada**. `pending` ir
+`failed` sudaro ciklą, tad pasiekiamumas nepasako, kuris įrašas naujesnis:
+senesnio `pending` importas virš naujesnio `failed` nutrintų gedimo metaduomenis
+ir grąžintų pasenusį `claim_token`, o atvirkščiai — nuslopintų naujesnį
+autorizuotą retry.
+
+Todėl merge taisyklė yra **dviejų dalių**, ir abi užrašomos:
+
+1. `deleted` terminalumas — iš grafo, ne iš naujo;
+2. `pending` vs `failed` konfliktas — atskira laiko/kartos taisyklė
+   (`updated_at` ar generacija), apibrėžta eksplicitiškai.
+
+Antra tvarkos taisyklė, paslėpta teste ar SQL'e, yra ta pati dviejų kopijų klasė,
+kurią repo jau kelis kartus gaudė — tad ji privalo gyventi viename autoritete.
+
+⚠️ **Importuoti `claim_token` NEPERKELIAMI kaip paprasta būsena.**
+`claim_token` žymi GYVĄ ištrynimo vykdytoją ir neturi nei lease, nei timeout'o.
+Po DR bet kuris tokenas, eksportuotas su `deletion_pending` žyma, priklauso jau
+mirusiam pre-restore procesui; importavus jį nepakeistą, autoritetingas kelias
+grąžina `IN_PROGRESS` neribotai (`lifecycleService.js:338-349`) ir koordinatorius
+niekada nebaigia. Importuojami claim'ai išvalomi arba pervedami per **esamas
+audituojamas** `release`/`retry` semantikas prieš replay.
+
+Konkreti reprezentacija (formatas, šifravimas) parenkama pagal 7.6a artefaktų
+kontraktą — kriptografinė grandinė nedubliuojama.
+
+### D2 — replay: tombstone grąžinimo NEPAKANKA
+
+Jei senas dump'as jau atkūrė `jobs` ir `job_results`, žymų įterpimas atgal
+duomenų nepašalina.
+
+Po merge kiekvienai galiojančiai žymai taikomas **tas pats autoritetingas
+trynimo įgyvendinimas**, kurį įvedė 7.5a. Atkurtas subjektas negali likti gyvas
+vien todėl, kad žyma jau egzistuoja.
+
+⚠️ **`lifecycleService.deleteJobArtefacts()` TIESIOGIAI ČIA NETINKA.** Pagrindiniu
+7.6c atveju — importuota `deleted` žyma — jis pirmiausia tikrina žymą ir grąžina
+`ALREADY_DELETED` su `deleted: []`, **nekviesdamas `eraseJob()`**
+(`services/lifecycleService.js:217-239`). Vadinasi būtent tas kelias, kurį šis
+issue nurodytų, paliktų atkurtas `jobs` ir `job_results` eilutes gyvas ir dar
+praneštų apie sėkmingai užbaigtą ištrynimą. Tas pats trumpasis kelias yra ir
+`PENDING` žymai be claim'o (`:338-349` → `IN_PROGRESS`).
+
+Reikia **replay-aware įėjimo taško**, kuris:
+
+- naudoja tą patį autoritetingą trynimo įgyvendinimą (`jobErasure.eraseJob` ir
+  ta pati artefaktų aibė), tad antros erasure semantikos neatsiranda;
+- **neima** pasenusios žymos trumpojo kelio: žyma čia yra įrodymas, kad trinti
+  REIKIA, o ne kad jau ištrinta;
+- žymos būsenos ir audito kvito semantiką palieka esamam autoritetui.
+
+Testas privalo kristi, jei replay eina per `deleteJobArtefacts()` tiesiogiai.
+
+Po replay:
+
+- atitinkamas `jobs` įrašas neegzistuoja;
+- jo `job_results` neegzistuoja;
+- visi 7.5a kontrakte įvardyti priklausomi persistentiniai artefaktai pašalinti;
+- jei audio/storage valymas pagal esamą kontraktą yra asinchroninis, jo būsena
+  lieka saugiai užregistruota ir **negali būti laikoma sėkmingu revive**.
+
+⚠️ 7.6c **nekopijuoja deletion SQL**. Restore-specific trynimo kelias
+nekuriamas.
+
+### D3 — vienas DR koordinatorius ir fail-closed seka
+
+Pilnas 7.6 recovery turi vieną operatoriaus vykdomą koordinuotą kelią:
+
+```
+restore → tombstone import/merge → erasure replay/cleanup
+        → session revocation → non-terminal job reconciliation
+        → verification → tik tada server/workers startup ir traffic cutover
+```
+
+Žingsniai **nėra** nepriklausomos komandos, kurias operatorius gali saugiai
+paleisti bet kokia tvarka. Bet kuriam žingsniui nepavykus, vėlesni žingsniai ir
+cutover nevykdomi.
+
+7.6c **reuse'ina** 7.6a restore ir 7.6b reconciliation kelius; antrų jų
+realizacijų nekuria.
+
+⚠️ **`maintenanceLock` nėra automatinis atsakymas.** Jo `DEFAULT_MAX_HOLD_MS` yra
+**10 min** (`utils/maintenanceLock.js:29`), o pilnos DR pratybos beveik tikrai
+ilgesnės — užraktas tyliai pasibaigtų proceso viduryje. Pagrindinė saugumo riba
+čia yra **„serveris ir worker'iai dar neveikia"** (7.6b D1/D2), ne online
+užraktas. Jei `maintenanceLock` vis tiek naudojamas, jo galiojimo pabaiga privalo
+būti apdorota eksplicitiškai.
+
+### D4 — eksporto šviežumas
+
+DR procedūra turi apibrėžti, **kokia išorinė erasure-state kopija laikoma
+autoritetinga atkūrimo momentu**.
+
+Negalima remtis vien žymų eksportu, padarytu kartu su senu DB backup: jis
+neapimtų ištrynimų, įvykusių PO kopijos — o būtent jie yra visa 7.6c priežastis.
+
+Runbook aiškiai nurodo, kaip ir kada išorinė erasure būsena atnaujinama ir kaip
+prieš cutover patikrinama, kad naudojama **naujausia prieinama** versija.
+
+⚠️ **Šviežumo patikra runbook'e neatkuria to, kas niekada nebuvo eksportuota.**
+Neplanuoto DB praradimo atveju „naujausias prieinamas" eksportas vis tiek gali
+būti senesnis už ištrynimą: vartotojo ištrynimas pavyksta po paskutinio eksporto,
+o DB krenta prieš kitą. Tada senas snapshot'as + naujausias eksportas neturi nei
+tos žymos, nei būdo ją atkurti, ir job'as atgyja — nors procedūra vadinasi
+erasure-safe.
+
+Todėl reikalinga **viena iš dviejų**, ir pasirinkimas užrašomas:
+
+- **(a)** ištrynimo kelias patvariai atnaujina už-snapshot'o būseną **prieš**
+  patvirtindamas galutinumą (t. y. eksportas nustoja būti periodinis);
+- **(b)** eksplicitiškai apibrėžtas ir įgyvendintas **ribotas galutinumo/RPO
+  kontraktas** — kiek ištrynimų galima prarasti ir per kiek laiko, su tuo
+  sutinkant dokumentuotai.
+
+„Runbook liepia dažnai eksportuoti" nėra nė vienas iš jų.
+
+⚠️ **Kopijų horizontas irgi privalo pergyventi restore.** `recordBackupHorizon()`
+savo monotoninę aukščiausią reikšmę saugo `backup_horizon` lentelėje
+(`migrations/1755800000000_backup-horizon.js:31`) — **toje pačioje** DB, tad
+senesnio snapshot'o atkūrimas ją atsuka atgal. Jei po atkurto snapshot'o buvo
+išleista ilgiau galiojanti kopija, importuotos žymos taptų šalintinos, nors ta
+kopija dar gali prikelti jų job'us. Išorinė atkūrimo būsena (ar kopijų katalogas)
+privalo nešti **maksimalią išleistą galiojimo pabaigą** ir sulieti ją
+monotoniškai **prieš** atnaujinant žymų retenciją.
+
+### D5 — idempotentiškumas
+
+Kaip ir 7.6b: DR operatorius gali nežinoti, kur nutrūko pirmas bandymas. Merge ir
+replay saugu paleisti pakartotinai:
+
+- antras merge nekeičia jau sulietų žymų;
+- antras replay neranda ką šalinti → sėkmė / no-op;
+- naujų semantinių pokyčių nesukuria;
+- testas lygina persistentinę būseną po pirmo ir antro vykdymo.
+
+### D6 — audito evidencija
+
+Replay trina asmens duomenis, tad įvykiai rašomi per **esamą** audito autoritetą
+(7.4 kontraktas). Antras audito mechanizmas nekuriamas.
+
+⚠️ `audit_log` į DB kopiją nepatenka (7.6a), tad replay įvykiai gula į **gyvą**
+audito saugyklą jau po restore. Tai teisinga, bet turi būti pasakyta — kitaip
+kas nors ieškos jų dump'e.
+
+---
+
+## DoD
+
+### Erasure būsena už snapshot'o ribų
+
+- [x] Naudojamos 7.5a persistentės ištrynimo žymos. **Antras tombstone
+      mechanizmas NEKURIAMAS** — jei 7.5a neuždarytas, šis darbas laukia.
+- [x] Egzistuoja CLI kelias: eksportas → apsauga → fail-closed validacija →
+      monotoniškas merge.
+- [x] Eksportas apima **visas** žymas, įskaitant `deleted`; `listUnresolved()`
+      vieno nepakanka — testas įrodo, kad `deleted` žyma eksportą praeina.
+- [x] ⚠️ `deleted` terminalumas išvestas iš `states.ALLOWED_TRANSITIONS`, ne
+      surašytas atskirai. Testas: `deleted` žymos merge NEPAVERČIA
+      `deletion_pending`.
+- [x] ⚠️ `pending` vs `failed` konflikto taisyklė apibrėžta **atskirai** (laikas
+      ar karta) ir gyvena viename autoritete. Testai abiem kryptim: senesnis
+      `pending` neperrašo naujesnio `failed` (gedimo metaduomenys ir claim
+      nedingsta), ir senesnis `failed` neslopina naujesnio autorizuoto retry.
+- [x] ⚠️ Importuoti `claim_token` išvalomi arba pervedami per esamas audituojamas
+      `release`/`retry` semantikas prieš replay. Testas: importuota `pending`
+      žyma su pasenusiu tokenu **NEBLOKUOJA** koordinatoriaus ties
+      `IN_PROGRESS`.
+- [x] ⚠️ Eksportas neša ir **kopijų horizontą** (`backup_horizon`), sulietą
+      monotoniškai prieš atnaujinant žymų retenciją. Testas: atkūrus senesnį
+      snapshot'ą horizontas neatsuka atgal.
+- [x] Sugadintas ar neautentiškas eksportas → hard fail **PRIEŠ** bet kokį merge.
+- [x] D4: šviežumo semantika apibrėžta runbook'e ir susieta su 7.5a horizontu.
+
+### Replay
+
+- [x] Po merge kiekvienai galiojančiai žymai taikomas 7.5a erasure kelias.
+- [x] Po kopijos ištrintas job'as po restore **NEATSIRANDA**; jo `job_results` ir
+      kiti priklausomi įrašai taip pat ne.
+- [x] Asinchroninio audio valymo būsena užregistruota ir **nelaikoma** sėkmingu
+      revive.
+- [x] Replay naudoja esamą autoritetą; restore-specific deletion SQL nėra —
+      tikrinama mutacija arba tripwire.
+- [x] ⚠️ Replay **neima pasenusios žymos trumpojo kelio**. Testas: importuota
+      `deleted` žyma + atkurtos `jobs` / `job_results` eilutės → po replay eilučių
+      NĖRA. Testas privalo kristi, jei replay eina per
+      `lifecycleService.deleteJobArtefacts()` tiesiogiai (jis grąžintų
+      `ALREADY_DELETED` su `deleted: []`).
+
+### Seka
+
+- [x] ⚠️ **TOMBSTONE MERGE EINA PIRMAS, PRIEŠ SUDERINIMĄ.** Ištrintas job'as
+      kopijoje gali gulėti kaip `queued`; jei 7.6b suderinimas pamatys jį pirmas,
+      jis terminalizuos (ar vėliau prikels) darbą su jau ištrintais duomenimis.
+- [x] Seka užtikrinama **struktūriškai**, ne tik dokumentu: suderinimo žingsnis
+      negali įvykti, jei merge ir replay nebaigti sėkmingai. Testas įrodo, kad
+      bandymas paleisti ne ta tvarka **krenta**, o ne tyliai praeina.
+- [x] D3: `maintenanceLock` galiojimo pabaiga apdorota arba pagrįstai
+      nenaudojama.
+- [x] ⚠️ **Gedimo sklidimo testas:** klaida įleidžiama **replay metu**, po
+      sėkmingo merge. Tikrinama, kad sesijų revokacija, job'ų suderinimas,
+      verifikacija ir cutover **liko neįvykdyti**, o paleidžiamumo žyma —
+      nepaliesta. Be jo realizacija, kuri replay klaidą pagauna ir tęsia,
+      praeitų visus kitus testus ir pažeistų būtent fail-closed garantiją.
+
+### DR E2E
+
+- [x] Realus PostgreSQL kelias: 7.6a backup/restore ir 7.6b reconciliation, ne
+      aplikacijos lygio ar memory imitacija.
+- [x] Scenarijus:
+      1. sukurti job A, job B, aktyvias sesijas ir in-flight job'ą;
+      2. padaryti kopiją;
+      3. PO kopijos ištrinti job A ir sukurti jo 7.5a žymą;
+      4. išsaugoti post-backup erasure state už snapshot'o ribų;
+      5. restore'inti seną snapshot'ą;
+      6. paleisti pilną DR koordinatorių;
+      7. patikrinti rezultatą.
+- [x] ⚠️ **Testas fiziškai įrodo praradimą ir grąžinimą:** po restore ir PRIEŠ
+      merge tikrinama, kad job A DB **vėl egzistuoja**, o jo žymos DB **NĖRA**.
+      Be šio tarpinio patikrinimo testas gali būti klaidingai žalias — praeitų ir
+      realizacija, kuri nieko nesulieja.
+- [x] Po koordinatoriaus: job A neegzistuoja; jo `job_results` neegzistuoja; jo
+      žyma išlieka; job B lieka; pre-restore sesijos neautentifikuoja;
+      `queued`/`processing` suderinti; `completed` rezultatai nepažeisti;
+      cutover verifikacija sėkminga.
+- [x] Testas registruotas `postgres` rinkinyje (per `postgresGuard` importą), tad
+      `verify-postgres-suite-ran.mjs` reikalauja neprapleisto `ok`.
+- [x] D5: koordinatorius vykdomas **du kartus**; būsena po abiejų sutampa.
+
+### Dokumentacija ir uždarymas
+
+- [x] ⚠️ 7.6a runbook įspėjimas („dar ne erasure-safe") pašalinamas **tik po
+      sėkmingo realaus DR E2E**, kartu su testu, kuris jo reikalavo.
+      Dokumentacijos testas keičiamas iš „įspėjimas privalomas" į „pilna
+      erasure-safe procedūra dokumentuota ir įrodyta". Jei 7.6a to įspėjimo dar
+      nepridėjo — čia nėra ko šalinti, ir tai pasakoma, o ne tyliai praleidžiama.
+- [x] Runbook aprašo pilną seką su konkrečiomis komandomis.
+- [x] README apribojimų lentelės eilutės atnaujintos; Roadmap `[x]`.
+- [x] #185 uždaromas.
+
+---
+
+## Ko NEAPIMA
+
+- Queue replay architektūros — ji ir toliau out of scope.
+- Naujo tombstone modelio, antros erasure semantikos, antro audito mechanizmo.
+- 7.6a ir 7.6b kelių perrašymo — jie reuse'inami.
+
+## Pastabos vykdytojui
+
+- **§14:** „koordinatorius grąžino 0" nėra įrodymas; įrodymas yra DB būsena prieš
+  merge, po merge ir po replay.
+- **§9.1:** mutacijos privalomos merge monotoniškumui, sekos sargui ir replay
+  trynimui.
+- **§9.3:** E2E kuria ir naikina savo DB (`testDatabaseUrl()` /
+  `adminDatabaseUrl()`), bendros `DATABASE_URL` bazės nedrop'ina.
+- **§12.1:** runbook negali skelbti erasure-safe procedūros anksčiau, nei E2E ją
+  įrodo.
+- **§13:** jei prireiks keisti 7.5a būsenų grafą, 7.6a artefaktų kontraktą ar
+  atidaryti queue replay — **sustok ir pasakyk**.
+
+---
+

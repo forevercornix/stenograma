@@ -1,5 +1,6 @@
 const { eraseJob } = require("../utils/jobErasure");
 const tombstones = require("../utils/deletionTombstones");
+const { ACTOR_KIND, ERASURE_REASON } = require("../utils/deletionTombstones/states");
 const { ARTEFACT_TYPES } = require("../utils/artefactInventory");
 const { createLogger } = require("../utils/logger");
 const { rasytiAudita } = require("../utils/auditWrite");
@@ -35,6 +36,24 @@ const DELETION_STATUS = {
   FAILED: "failed",
   /** Nieko nebuvo – jobas jau ištrintas anksčiau. */
   ALREADY_DELETED: "already_deleted",
+  /**
+   * Ištrynimą jau vykdo KITAS autoritetingas procesas (#183, 7.5a DoD).
+   *
+   * ⚠️ Nė vienas destruktyvus veiksmas NEPRADEDAMAS. Antras kvietėjas gauna
+   * determinuotą atsakymą pagal autoritetingą žymos būseną, o ne kartoja tą patį
+   * eilės/saugyklos/audito darbą.
+   */
+  IN_PROGRESS: "in_progress",
+  /**
+   * Duomenys ištrinti, BET barjeras liko `deletion_failed` (#183).
+   *
+   * ⚠️ ATSKIRAS STATUSAS, NES ABU PAPRASTESNI ATSAKYMAI MELUOTŲ. „Ištrinta"
+   * teigtų patvirtintą ištrynimą, kurio persistentinis įrašas neliudija;
+   * „nepavyko trynimas" teigtų, kad duomenys liko. Tikroji būsena yra trečia:
+   * darbas atliktas, apskaita neužbaigta, ir ją užbaigti gali TIK operatorius
+   * per `erasure-marks retry` (žr. `deletion_failed → deleted` uždarymą).
+   */
+  TOMBSTONE_UNRESOLVED: "tombstone_unresolved",
 };
 
 /**
@@ -80,10 +99,21 @@ function classifyFailure(message) {
  * Susiejimas EKSPLICITINIS, ne spėjamas iš laukų pavadinimų: kai atsiras nauja
  * kategorija, ji turės būti pridėta ČIA, o ne likti tyliai nepastebėta.
  */
+/**
+ * ⚠️ KLAUSIMAS YRA „AR ARTEFAKTO NEBĖRA", NE „AR MES JĮ IŠTRYNĖME" (#250).
+ *
+ * `source_audio` turi DVI būsenas, reiškiančias tą patį rezultatą: objektą
+ * pašalinome (`storageRemoved`) arba jo jau nebuvo (`storageAlreadyAbsent`).
+ * Skaitant tik pirmąją, įprastas pakartotinis trynimas rodytų
+ * `remaining: [source_audio]` prie sėkmingo statuso — likutis, kurio nėra.
+ */
 const COVERED_CATEGORIES = [
-  { type: ARTEFACT_TYPES.QUEUE_RECORD.id, outcomeKey: "queueJobRemoved" },
-  { type: ARTEFACT_TYPES.SOURCE_AUDIO.id, outcomeKey: "storageRemoved" },
-  { type: ARTEFACT_TYPES.JOB_RECORD.id, outcomeKey: "jobRemoved" },
+  { type: ARTEFACT_TYPES.QUEUE_RECORD.id, nebera: (o) => Boolean(o.queueJobRemoved) },
+  {
+    type: ARTEFACT_TYPES.SOURCE_AUDIO.id,
+    nebera: (o) => Boolean(o.storageRemoved || o.storageAlreadyAbsent),
+  },
+  { type: ARTEFACT_TYPES.JOB_RECORD.id, nebera: (o) => Boolean(o.jobRemoved) },
 ];
 
 /**
@@ -136,6 +166,19 @@ const EPHEMERAL_CATEGORIES = [
  * ⚠️ Koordinavimas galioja tik ŠIAM PROCESUI. Kelioms replikoms reikėtų Redis
  * užrakto – ta pati riba kaip žymų saugykloje.
  */
+/**
+ * ⚠️ PROCESUI LOKALI OPTIMIZACIJA, NE KOREKTIŠKUMO MECHANIZMAS (#155, 7.5a).
+ *
+ * Iki 7.5a tai buvo VIENINTELIS vienintelio vykdytojo mechanizmas, ir jis
+ * galiojo tik viename procese: dvi replikos tą patį jobą trynė lygiagrečiai.
+ * Nuo 7.5a autoritetas yra sąlyginis `erasure_marks` rašymas su per-`job_id`
+ * advisory lock'u - jis veikia tarp procesų, replikų ir pool'ų.
+ *
+ * Žemėlapis paliktas todėl, kad tame pačiame procese jis sutaupo antrą pilną
+ * ištrynimo eigą ir leidžia lygiagretiems kvietėjams gauti TĄ PATĮ rezultato
+ * objektą. Pašalinus jį korektiškumas nenukentėtų - tik atsirastų nereikalingas
+ * darbas.
+ */
 const inFlight = new Map();
 
 /**
@@ -143,7 +186,7 @@ const inFlight = new Map();
  *
  * @param {object|null} job - jobo įrašas arba `null`, jei jo nebėra
  * @param {string} jobId
- * @param {{actor?: string}} options
+ * @param {{actor?: string, actorKind?: string, reason?: string}} options
  * @returns {Promise<object>} stabilus struktūrizuotas rezultatas
  */
 async function deleteJobArtefacts(job, jobId, options = {}) {
@@ -153,12 +196,52 @@ async function deleteJobArtefacts(job, jobId, options = {}) {
    * `pending` ir `failed` reikšmės TYČIA nepatenka čia: pirmoji reiškia, kad
    * operacija dar vyksta (laukiam žemiau), antroji – kad ją reikia kartoti.
    */
-  if (tombstones.isConfirmedDeleted(jobId)) {
-    const marker = tombstones.get(jobId);
+  const barjeras = await tombstones.barrierState(jobId);
+
+  /**
+   * ⚠️ NEPAVYKĘS ANKSTESNIS BANDYMAS NEKARTOJAMAS AUTOMATIŠKAI (#183).
+   *
+   * `deletion_failed → deleted` uždarytas sąmoningai: patvirtinti ištrynimą
+   * galima tik po UŽFIKSUOTO naujo bandymo. Anksčiau šis kelias vis tiek
+   * pakartodavo visą destruktyvų darbą, o tada `complete()` perėjimą atmesdavo -
+   * ir atsakymas skelbdavo sėkmę, kurios žyma neliudija.
+   *
+   * Automatinis `failed → pending` čia BŪTŲ blogesnis: jis apeitų
+   * `ERASURE_MARK_RETRIED` auditą, ir `deletion_failed` nustotų reikšti
+   * „operatorius turi įsikišti". Būsena, kuri išsisprendžia savaime, nebėra
+   * barjeras.
+   */
+  if (barjeras && barjeras.status === tombstones.TOMBSTONE_STATUS.FAILED) {
+    return buildResult({
+      jobId,
+      status: DELETION_STATUS.TOMBSTONE_UNRESOLVED,
+      actor: null,
+      actorKind: barjeras.actorKind,
+      requestedAt: barjeras.requestedAt,
+      completedAt: null,
+      deleted: [],
+      remaining: [],
+      failures: [],
+    });
+  }
+
+  if (barjeras && barjeras.status === tombstones.TOMBSTONE_STATUS.DELETED) {
+    const marker = barjeras;
     return buildResult({
       jobId,
       status: DELETION_STATUS.ALREADY_DELETED,
-      actor: marker.actor,
+      /**
+       * ⚠️ AKTORIAUS IDENTIFIKATORIAUS ČIA NEBĖRA (#155, 7.5a).
+       *
+       * `erasure_marks` pergyvena jobą ir nėra išbraukiama iš kopijų, tad plikas
+       * `ownerId` joje taptų asmens duomenimis lentelėje, kurios paskirtis -
+       * įrodyti, kad asmens duomenys pašalinti. Saugoma tik kategorija.
+       *
+       * Tikslus atsekamumas NEDINGO: jis yra `LIFECYCLE_DELETION` audito kvite,
+       * kur veikia pseudonimizacija ir rakto rotacija.
+       */
+      actor: null,
+      actorKind: marker.actorKind,
       requestedAt: marker.requestedAt,
       completedAt: marker.completedAt,
       deleted: [],
@@ -167,19 +250,67 @@ async function deleteJobArtefacts(job, jobId, options = {}) {
     });
   }
 
-  // Jei operacija jau vyksta - laukiam JOS rezultato, negrąžinam savo.
+  // Jei operacija jau vyksta ŠIAME procese - laukiam JOS rezultato, negrąžinam savo.
   const running = inFlight.get(jobId);
   if (running) return running;
 
-  const operation = _performDeletion(job, jobId, options).finally(() => {
-    inFlight.delete(jobId);
-  });
+  /**
+   * ⚠️ MESTA KLAIDA PALIEKA ŽYMĄ `deletion_failed`, NE `deletion_pending` (#183).
+   *
+   * Nuo tada, kai antras kvietėjas gauna 202 pagal `deletion_pending`, užstrigusi
+   * `pending` žyma reikštų, kad KIEKVIENAS vėlesnis `DELETE` amžinai atsakytų
+   * „jau vyksta", o ištrynimas nebeįvyktų niekada. Pagrindinis toks kelias -
+   * metantis audito rašymas (`AuditWriteError`) tarp žymėjimo ir užbaigimo.
+   *
+   * `failed` yra teisinga būsena: bandymas TIKRAI nepavyko, barjeras lieka
+   * aktyvus, `attempts` padidėja, žyma matoma `listUnresolved` sąraše, o
+   * operatorius turi dokumentuotą kelią `erasure-marks retry`.
+   *
+   * ⚠️ Tai NEUŽDARO kieto proceso nužudymo (SIGKILL) tarp žymėjimo ir užbaigimo -
+   * ten `pending` lieka, ir reikia operatoriaus. Žr. `docs/deletion-guarantees.md`
+   * ir ataskaitos riziką dėl trūkstamos `release` komandos.
+   */
+  const operation = _performDeletion(job, jobId, options)
+    .catch(async (klaida) => {
+      /**
+       * ⚠️ ŽYMIMA TIK SAVO PRETENZIJA (#183 Codex).
+       *
+       * Anksčiau šis `catch` pervesdavo žymą į `deletion_failed` BET KOKIU
+       * atveju - įskaitant tą, kai klaida įvyko dar `mark()`/`claimRetry()`
+       * viduje ir ši replika pretenzijos NIEKADA negavo. Tada ji nusukdavo
+       * SVETIMĄ, veikiančią pretenziją: A toliau trintų, o jos `complete()`
+       * būtų atmestas, ir realiai pašalinti duomenys liktų užrašyti kaip
+       * neišspręsti - plius nereikalingas operatoriaus pakartojimas.
+       *
+       * `klaida.vykdytojas` nustato `_performDeletion` iškart po pretenzijos.
+       */
+      if (klaida && klaida.vykdytojas !== true) throw klaida;
+
+      try {
+        await tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.FAILED, {
+          failureKind: classifyFailure(klaida && klaida.message),
+        });
+      } catch (zymosKlaida) {
+        log.error("Nepavyko pažymėti žymos kaip `deletion_failed`", {
+          jobId,
+          klaida: zymosKlaida.message,
+        });
+      }
+      throw klaida;
+    })
+    .finally(() => {
+      inFlight.delete(jobId);
+    });
 
   inFlight.set(jobId, operation);
   return operation;
 }
 
-async function _performDeletion(job, jobId, { actor = null } = {}) {
+async function _performDeletion(
+  job,
+  jobId,
+  { actor = null, actorKind = ACTOR_KIND.USER, reason = ERASURE_REASON.USER_REQUEST } = {}
+) {
   /**
    * ŽYMA PRIEŠ ŠALINIMĄ.
    *
@@ -188,7 +319,46 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
    * worker'is dar nematytų žymos, o duomenų jau nebūtų – ir jis juos
    * atkurtų.
    */
-  const marker = tombstones.mark(jobId, { actor });
+  const { zyma: marker, vykdytojas } = await tombstones.claimForDeletion(jobId, {
+    reason,
+    actorKind,
+  });
+
+  /**
+   * ⚠️ PRETENZIJA PRIEŠ DESTRUKTYVŲ I/O (#183, 7.5a DoD).
+   *
+   * `claimed === false` su `pending` reiškia, kad žymą laiko KITAS vykdytojas -
+   * kita replika arba kitas procesas. Viršuje esantis `barrierState` skaitymas
+   * to negarantuoja: tarp jo ir šio `mark()` yra langas. Pretenzija atominė
+   * pačiame `INSERT ... ON CONFLICT DO NOTHING`, tad ji, o ne skaitymas, yra
+   * autoritetas.
+   *
+   * Grąžinam determinuotą būseną NEPRADĖJĘ nė vieno eilės, saugyklos ar audito
+   * veiksmo - DoD reikalauja būtent to („jokio papildomo I/O nepradedama").
+   */
+  /**
+   * Nuo šios vietos klaidos priklauso ŠIAI pretenzijai - žr. `deleteJobArtefacts`
+   * `catch`. Vėliava keliauja su klaida, nes `catch` yra už funkcijos ribų.
+   */
+  const zymetiNesekme = (fn) =>
+    fn().catch((e) => {
+      if (vykdytojas) e.vykdytojas = true;
+      throw e;
+    });
+
+  if (!vykdytojas && marker && marker.status === tombstones.TOMBSTONE_STATUS.PENDING) {
+    return buildResult({
+      jobId,
+      status: DELETION_STATUS.IN_PROGRESS,
+      actor: null,
+      actorKind: marker.actorKind,
+      requestedAt: marker.requestedAt,
+      completedAt: null,
+      deleted: [],
+      remaining: [],
+      failures: [],
+    });
+  }
 
   if (!job) {
     /**
@@ -197,13 +367,14 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
      * Taip vėluojanti eilės žinutė nebegalės sukurti artefaktų ID, kurio
      * savininko jau nėra. Rezultatas – ne klaida: trinti nebuvo ko.
      */
-    tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.DELETED);
-    const finished = tombstones.get(jobId);
+    await tombstones.complete(jobId, tombstones.TOMBSTONE_STATUS.DELETED);
+    const finished = await tombstones.get(jobId);
 
     return buildResult({
       jobId,
       status: DELETION_STATUS.ALREADY_DELETED,
       actor,
+      actorKind,
       requestedAt: marker.requestedAt,
       completedAt: finished ? finished.completedAt : null,
       deleted: [],
@@ -212,13 +383,13 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
     });
   }
 
-  const outcome = await eraseJob(job);
+  const outcome = await zymetiNesekme(() => eraseJob(job));
 
   const deleted = [];
   const remaining = [];
 
-  for (const { type, outcomeKey } of COVERED_CATEGORIES) {
-    if (outcome[outcomeKey]) deleted.push(type);
+  for (const { type, nebera } of COVERED_CATEGORIES) {
+    if (nebera(outcome)) deleted.push(type);
     else remaining.push(type);
   }
 
@@ -230,7 +401,37 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
    * Jei `job_record` pašalintas, transkripcija ir protokolas pašalinti kartu –
    * fiziškai kito kelio nėra. Jei ne, jie lieka kartu su juo.
    */
-  if (outcome.jobRemoved) deleted.push(...STORED_IN_JOB_RECORD);
+  /**
+   * ⚠️ PER-ROW `storage_type`, NE PER-CONFIG (#157, PR-5, sąlyga 5).
+   *
+   * Iki #157 `transcript` ir `protocol` gyveno `job_results.payload` viduje, tad
+   * `jobRemoved` buvo visas atsakymas. Po #157 tai TAMPA MELU external eilutėms: `jobs`
+   * eilutės ištrynimas neliečia S3/failų sistemos objekto, o abu artefaktai būtų
+   * raportuoti kaip `deleted`.
+   *
+   * ⚠️ SPRENDŽIAMA PAGAL FAKTĄ, NE PAGAL AKTYVŲ BACKEND'Ą. Po migracijos DB bus MIŠRI
+   * ilgą laiką: dalis eilučių `inline`, dalis external. Konfigūracija sako, kur bus
+   * rašoma toliau; ji nesako, kur guli JAU EGZISTUOJANTIS rezultatas. Todėl klausiama
+   * `resultArtifactsRemoved` / `resultArtifactsAlreadyAbsent` — t. y. ar external
+   * objekto NEBĖRA, ta pačia „ar artefakto nebėra" sąjunga kaip `source_audio` po #288.
+   *
+   * `inline` eilutei sąjunga lieka `jobRemoved`: objektų nebuvo, tad nė vieno ir
+   * nepašalinta, o turinys dingo kartu su eilute.
+   */
+  const externalNebera =
+    (outcome.resultArtifactsRemoved || 0) > 0 || (outcome.resultArtifactsAlreadyAbsent || 0) > 0;
+
+  /**
+   * ⚠️ SĄJUNGA, NE VIENAS FAKTAS — ta pati forma kaip `source_audio` po #288.
+   *
+   * `jobRemoved` dengia `inline` eilutę: turinys gyveno joje ir dingo kartu. `externalNebera`
+   * dengia external eilutę, kurios objekto nebėra — įskaitant NAŠLAIČIŲ kelią, kuriame
+   * `jobRemoved` visada `false`, nors objektas ką tik pašalintas.
+   *
+   * Artefakto šalinimo NESĖKMĖ čia nepatenka pagal konstrukciją: `eraseJob` ją paverčia
+   * `criticalFailure`, o tada eilutė nešalinama ir `jobRemoved` lieka `false`.
+   */
+  if (outcome.jobRemoved || externalNebera) deleted.push(...STORED_IN_JOB_RECORD);
   else remaining.push(...STORED_IN_JOB_RECORD);
 
   const failures = (outcome.errors || [])
@@ -263,6 +464,7 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
     jobId,
     status,
     actor,
+    actorKind,
     requestedAt: marker.requestedAt,
     completedAt,
     deleted,
@@ -279,13 +481,58 @@ async function _performDeletion(job, jobId, { actor = null } = {}) {
    * keliu grąžintų `already_deleted` su `complete: true` ir gyvavimo ciklo
    * įvykis dingtų NEGRĮŽTAMAI - tyliai, nes atsakymas atrodytų sėkmingas.
    *
-   * Kritus auditui žyma lieka `deletion_pending`: artefaktų kurti vis dar
-   * negalima, trumpinimo kelio nėra, o pakartotinis kvietimas idempotentiškai
-   * pakartos ir trynimą, ir auditą.
+   * ⚠️ ATSAKYMAS PASIKEITĖ SU 7.5a (#183): kritus auditui žyma tampa
+   * `deletion_failed`, NE `deletion_pending`.
+   *
+   * #210 rėmėsi prielaida, kad „pakartotinis kvietimas idempotentiškai pakartos
+   * ir trynimą, ir auditą". Nuo tada, kai antras kvietėjas gauna 202 pagal
+   * `deletion_pending`, ta prielaida NEBEGALIOJA: pakartotinis kvietimas
+   * pamatytų `pending`, atsakytų „jau vykdoma" ir nedarytų nieko - amžinai.
+   *
+   * `failed` yra tikslus: bandymas nepavyko, barjeras lieka aktyvus, žyma matoma
+   * `listUnresolved` sąraše, o prarastas įvykis vis tiek užfiksuojamas - per
+   * dokumentuotą `erasure-marks retry`, kuris rašo `ERASURE_MARK_RETRIED`.
+   * Automatinis savaiminis išsisprendimas būtų būtent tai, ką 7.5a uždraudė.
    */
-  await writeAudit(result);
+  await zymetiNesekme(() => writeAudit(result));
 
-  tombstones.complete(jobId, zymosBusena, { completedAt });
+  /**
+   * ⚠️ NESĖKMĖS KATEGORIJA, NE ŽINUTĖ. `failures` turi tik klasifikaciją
+   * (`retryable` / `permanent`), o ne originalų tekstą, kuriame būna failų
+   * kelių, saugyklos raktų ir tiekėjo atsakymų.
+   */
+  const failureKind = failures.length ? failures[0].kind : null;
+
+  const uzbaigta = await tombstones.complete(jobId, zymosBusena, { completedAt, failureKind });
+
+  /**
+   * ⚠️ SĖKMĖ IŠVEDAMA IŠ GRĄŽINTOS ŽYMOS, NE IŠ TO, KAD `complete()` NEMETĖ (#183).
+   *
+   * `complete()` neleidžiamo perėjimo NEMETA - jis grąžina AUTORITETINGĄ esamą
+   * būseną (elgesys nepakeistas nuo 7.4a). Ignoruojant grąžinamą reikšmę,
+   * atsakymas skelbdavo patvirtintą ištrynimą, kurio persistentinis įrašas
+   * neliudija.
+   *
+   * Trečias statusas, o ne vienas iš dviejų paprastesnių: duomenys IŠTRINTI
+   * (tad „nepavyko" meluotų), bet barjeras neužtikrintas (tad „ištrinta"
+   * meluotų taip pat). Užbaigti apskaitą gali tik operatorius.
+   *
+   * ⚠️ AUDITO ĮRAŠAS LIEKA TOKS, KOKS BUVO. Jis fiksuoja ATLIKTĄ DARBĄ, ir tas
+   * darbas tikrai įvyko; atsakymas fiksuoja BARJERO būseną. Jie skiriasi
+   * teisėtai, o auditą perrašyti po `#210` tvarkos būtų blogiau nei skirtumą
+   * paaiškinti.
+   */
+  if (
+    zymosBusena === tombstones.TOMBSTONE_STATUS.DELETED &&
+    (!uzbaigta || uzbaigta.status !== tombstones.TOMBSTONE_STATUS.DELETED)
+  ) {
+    log.error("Ištrynimas atliktas, bet žymos užbaigti nepavyko", {
+      jobId,
+      zymosBusena: uzbaigta ? uzbaigta.status : "nėra",
+    });
+
+    return { ...result, status: DELETION_STATUS.TOMBSTONE_UNRESOLVED, complete: false };
+  }
 
   return result;
 }
@@ -335,11 +582,23 @@ function resolveStatus({ outcome, remaining, failures }) {
  * Laukai vienodi VISIEMS rezultatams – ir sėkmei, ir daliniam, ir galutiniam
  * gedimui. Kintantis formatas verstų klientą spėlioti, ką jis gavo.
  */
-function buildResult({ jobId, status, actor, requestedAt, completedAt, deleted, remaining, failures }) {
+function buildResult({
+  jobId,
+  status,
+  actor,
+  actorKind = null,
+  requestedAt,
+  completedAt,
+  deleted,
+  remaining,
+  failures,
+}) {
   return {
     jobId,
     status,
     actor: actor || null,
+    /** Kategorija (`user` / `operator` / `system`) - vienintelis dalykas, kurį saugo žyma. */
+    actorKind: actorKind || null,
 
     /** Kada ištrynimo PAPRAŠYTA. Visada yra. */
     requestedAt: requestedAt || null,

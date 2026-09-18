@@ -81,7 +81,7 @@ test("#154 SRAUTAS: transcription SU diarizacija", () => {
     job = { ...job, ...patch };
   }
 
-  const galas = finish(job, STATUS.COMPLETED);
+  const galas = finish(job, STATUS.COMPLETED, { result: { text: "ok" } });
   assert.equal(galas.phase, null);
 });
 
@@ -94,7 +94,7 @@ test("#154 SRAUTAS: transcription BE diarizacijos baigiasi po transcribing", () 
   job = { ...job, ...startPhase(job, PHASE.VALIDATING) };
   job = { ...job, ...startPhase(job, PHASE.TRANSCRIBING) };
 
-  const galas = finish(job, STATUS.COMPLETED);
+  const galas = finish(job, STATUS.COMPLETED, { result: { text: "ok" } });
   assert.equal(galas.status, STATUS.COMPLETED);
   assert.equal(galas.phase, null);
 });
@@ -105,7 +105,7 @@ test("#154 SRAUTAS: protocol job'as", () => {
   job = { ...job, ...startPhase(job, PHASE.GENERATING_PROTOCOL) };
 
   assert.equal(job.phase, PHASE.GENERATING_PROTOCOL);
-  assert.equal(finish(job, STATUS.COMPLETED).phase, null);
+  assert.equal(finish(job, STATUS.COMPLETED, { result: { text: "ok" } }).phase, null);
 });
 
 test("#154 PERĖJIMAI: neleistinas perėjimas grafo viduje atmetamas", () => {
@@ -364,7 +364,9 @@ test("#154 TERMINALŪS: iš KIEKVIENOS fazės į kiekvieną terminalų statusą"
       for (const status of TERMINAL) {
         const patch = finish(
           { type, status: STATUS.PROCESSING, phase, progress: { current: 3900, total: 4400 }, progressKnown: true },
-          status
+          status,
+          /** ⚠️ `completed` reikalauja rezultato (#184, C11) - kiti terminalai ne. */
+          status === STATUS.COMPLETED ? { result: { text: "ok" } } : {}
         );
 
         assert.equal(patch.status, status);
@@ -581,7 +583,9 @@ test("#154 TERMINALŪS: nežinomas šaltinio statusas atmetamas (fail-closed)", 
 
   // Žinomi šaltiniai su KONSISTENTIŠKA būsena veikia.
   assert.doesNotThrow(() =>
-    finish({ type: T, status: STATUS.PROCESSING, phase: PHASE.VALIDATING }, STATUS.COMPLETED)
+    finish({ type: T, status: STATUS.PROCESSING, phase: PHASE.VALIDATING }, STATUS.COMPLETED, {
+      result: { text: "ok" },
+    })
   );
   assert.doesNotThrow(() => finish({ type: T, status: STATUS.QUEUED, phase: null }, STATUS.FAILED));
 });
@@ -630,7 +634,8 @@ test("#154 GRIEŽTUMAS priklauso nuo to, ar išvestis remiasi šaltiniu", () => 
     // `finish()` – VISADA praeina: iš bet kokios būsenos turi būti išėjimas.
     for (const status of TERMINAL) {
       if (job.status === STATUS.QUEUED && status === STATUS.COMPLETED) continue;
-      assert.doesNotThrow(() => finish(job, status), `${kodel} → ${status}`);
+      /** ⚠️ `completed` reikalauja rezultato (#184, C11) - kiti terminalai ne. */
+      assert.doesNotThrow(() => finish(job, status, status === STATUS.COMPLETED ? { result: { text: "ok" } } : {}), `${kodel} → ${status}`);
     }
 
     // `restart()` ir `startPhase()` – atmeta: jų išvestis remiasi šaltiniu.
@@ -726,7 +731,7 @@ test("#154 LEGACY: užstrigęs įrašas TURI kelią iš processing", () => {
   const legacy = { type: T, status: STATUS.PROCESSING, phase: null };
 
   for (const status of TERMINAL) {
-    assert.doesNotThrow(() => finish(legacy, status), `legacy → ${status}`);
+    assert.doesNotThrow(() => finish(legacy, status, status === STATUS.COMPLETED ? { result: { text: "ok" } } : {}), `legacy → ${status}`);
   }
 
   assert.throws(

@@ -61,11 +61,46 @@ operatorius manytų, kad auditas išsaugotas.
 head -c 200 incident-audit-*.json
 ```
 
-Kartokite su `offset`, kol grąžinama mažiau įrašų nei `limit`.
+**Puslapiavimas — `cursor`, ne `offset` (#155, 7.4c).**
+
+Atsakyme yra `next_cursor`: opaque tokenas arba `null`. Kartokite, kol jis
+tampa `null`:
+
+```bash
+CURSOR=""
+while : ; do
+  URL="https://<host>/api/audit?limit=1000"
+  [ -n "$CURSOR" ] && URL="$URL&cursor=$CURSOR"
+
+  curl --fail-with-body --show-error --silent -b cookies.txt "$URL" -o page.json || break
+  cat page.json >> "incident-audit-$(date -u +%Y%m%dT%H%M%SZ).json"
+
+  CURSOR=$(python3 -c "import json,sys;print(json.load(open('page.json')).get('next_cursor') or '')")
+  [ -z "$CURSOR" ] && break
+done
+```
+
+⚠️ **`offset` po 7.4c grąžina 400.** Tai sąmoningas pakeitimas: neribotai
+augančioje lentelėje `OFFSET` padarydavo senesnius įrašus nepasiekiamus, o
+lygiagrečių įrašymų metu praleisdavo arba dubliuodavo eilutes. Kursorius
+remiasi `seq` ir tų problemų neturi.
+
+⚠️ **Kursorius susietas su filtrų aibe.** Pakeitus bet kurį filtrą — arba
+pasukus aktyvų raktą (`AUDIT_ID_SALT`) — anksčiau išduoti kursoriai grąžina
+400, ir puslapiavimą reikia pradėti iš naujo. Filtrų reikšmės pačiame tokene
+NELAIKOMOS: jis keliauja URL'e ir patenka į access logus.
+
+**Filtrai:** `action` (įvykio tipas), `request_id`, `job_id`, `from`, `to`
+(ISO-8601). Jie komponuojami tarpusavyje.
 
 ⚠️ Audito įrašai turi **pseudonimizuotą** `subjectId`, ne žalią jobo ID.
-Ieškant konkretaus jobo reikia tos pačios `pseudonymizeIdentifier` funkcijos —
-tiesioginė teksto paieška nieko neras.
+`job_id` filtras tai daro už jus — jis apskaičiuoja pseudonimus visoms
+taikomoms raktų generacijoms, tad randa ir įrašus, sukurtus PRIEŠ rotaciją.
+Tiesioginė teksto paieška nieko neras.
+
+Rankinei paieškai (pvz. tiesiai DB) reikia tos pačios `pseudonymizeIdentifier`
+funkcijos — bet TIK su tos generacijos raktu, kuria įrašas buvo sukurtas
+(`hash_key_id` stulpelis pasako, kuria).
 
 ### Žingsnis 2: išsaugoti sistemos būseną
 
@@ -232,10 +267,326 @@ galima pamatyti turimomis priemonėmis.
 | `AUTHORIZATION_DENIED` dažnio pokytis | Kas savaitę | Staigus šuolis — arba klaida, arba zondavimas |
 | `/api/health/deep` | Kasdien | Anksti parodo tiekėjų problemas |
 
-⚠️ **Audito retencija — 30 d.** (`AUDIT_RETENTION_DAYS`). Senesnių įvykių
-analizei reikia iš anksto išsaugotų kopijų.
+⚠️ **Audito retencija priklauso nuo `AUDIT_BACKEND`.**
+
+- **`memory`** (numatytasis): audito retencija — 30 d. pagal
+  `AUDIT_RETENTION_DAYS`. Senesnių įvykių analizei reikia iš anksto išsaugotų
+  kopijų.
+- **`postgres`** (nuo [7.4d]): `AUDIT_RETENTION_DAYS` **GALIOJA** – `audit_log`
+  eilutės šalinamos to paties centralizuoto sweep'o metu, ribotais batch'ais.
+
+  ⚠️ **IŠORINĖS valymo politikos NEBEREIKIA, ir jos nekurkite.** Iki 7.4d ji
+  buvo būtina; dabar ji būtų ANTRAS nepriklausomas trynimo mechanizmas ant tos
+  pačios lentelės. Du valytojai, nežinantys vienas apie kitą, šalintų eilutes
+  pagal skirtingas ribas ir skirtingus laikrodžius, o `RETENTION_PURGE` įrašas
+  rodytų tik vieno jų darbą – audito žurnalas nustotų atitikti tikrovę.
+
+  Jei išorinė politika jau įdiegta iš ankstesnės versijos, **išjunkite ją**
+  atnaujindami.
+
+- **`AUDIT_MAX_ENTRIES` persistentiškai NETAIKOMAS.** Tai atminties apsauga;
+  eilutės niekada nešalinamos vien dėl to, kad jų skaičius viršijo N. Startas
+  įspėja `warn` lygiu, jei kintamasis nustatytas su `postgres` backend'u.
+
+### ⚠️ ATNAUJINANT Į 7.4d: PIRMAS SWEEP'AS TRINA IŠ KARTO
+
+Tai **vienintelis destruktyvus 7.4d pokytis**, ir jis įvyksta be atskiro
+patvirtinimo.
+
+Diegimas, kuriame `AUDIT_RETENTION_DAYS` buvo nustatytas tuomet, kai jis galiojo
+**tik atminčiai**, po atnaujinimo tą pačią reikšmę pritaiko `audit_log` lentelei.
+Pirmas retencijos ciklas paleidžiamas **praėjus ~5 s po starto**, tad visos
+eilutės, jau senesnės už terminą, dingsta **per kelias minutes** ir
+**negrįžtamai**.
+
+Vienintelis pranešimas produkte yra starto logas. Jo nepakanka: operatorius,
+neskaitantis starto logų, apie tai sužinos tik pastebėjęs, kad senų įrašų nebėra.
+
+**Prieš atnaujinant:**
+
+1. patikrinkite faktinę reikšmę — `AUDIT_RETENTION_DAYS` (numatyta: 30 d.);
+2. nuspręskite, ar ji tinka **persistentiniam** auditui — atmintyje ji reiškė
+   „iki restarto arba iki N dienų", DB ji reiškia tik „N dienų";
+3. jei reikia išsaugoti senesnius įrašus, pasidarykite **pilną PostgreSQL
+   kopiją** prieš atnaujinimą (`docs/backup-runbook.md`) — aplikacijos kopija
+   audito eilučių neapima;
+4. tik tada atnaujinkite.
+
+### Užstrigusios ištrynimo žymos (nuo [7.5a])
+
+Ištrynimo barjeras aktyvus nuo **pirmojo** žingsnio (`deletion_pending`), o
+neterminalės žymos **nesensta**. Abu sprendimai sąmoningi: nesėkmingas ištrynimas
+reiškia, kad jautrūs duomenys dar gali egzistuoti, ir laikrodis to neišsprendžia.
+
+⚠️ **Todėl nuolat nepavykstantis ištrynimas užrakina job'ą neribotam laikui.**
+Išeitis yra, bet ji rankinė ir palieka audito pėdsaką.
+
+**Ar yra užstrigusių žymų:**
+
+```bash
+node backend/scripts/erasure-marks.js list --hours 24
+```
+
+Stulpeliai: `job_id`, būsena, priežastis, aktoriaus kategorija, bandymų skaičius,
+paskutinės klaidos kategorija, amžius valandomis. Terminalės (`deleted`) į sąrašą
+**nepatenka** – jos nėra užstrigusios.
+
+**Pakartoti ištrynimą** (`deletion_failed` → `deletion_pending`; pats ištrynimas
+paleidžiamas įprastu keliu):
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js retry "$JOB_ID" --actor "$OPERATOR"
+```
+
+**Atlaisvinti užstrigusią pretenziją** (`deletion_pending` → `deletion_failed`),
+kai žyma liko be vykdytojo – procesas nužudytas (SIGKILL, OOM, konteinerio
+nutraukimas) tarp žymėjimo ir užbaigimo:
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js release "$JOB_ID" --actor "$OPERATOR"
+```
+
+⚠️ **`release` NETVIRTINA NIEKO APIE DUOMENIS.** Po kieto nužudymo nežinoma,
+kiek valymo spėta atlikti; žyma gauna `last_failure_kind=executor_lost`, kuris
+būtent tą neapibrėžtį ir įrašo. Po jo eina įprastas `retry`, ir ištrynimas
+užbaigiamas normaliu keliu.
+
+⚠️ Barjeras **nenuimamas nė akimirkai**: `deletion_pending` ir `deletion_failed`
+abu blokuoja artefaktų kūrimą, o perėjimas tarp jų yra vienas sąlyginis `UPDATE`.
+
+⚠️ `release` veikia **tik** iš `deletion_pending`. Iš `deleted` atlaisvinti nėra
+ko, o iš `deletion_failed` jau veikia `retry`; leidus juos, `release` taptų būdu
+perrašyti nesėkmės kategoriją, t. y. suklastoti įrašą apie tai, kas nutiko.
+
+### ⚠️ `release` ar `force-resolve`? Skirtumas yra teiginys apie duomenis
+
+| | `release` | `force-resolve` |
+|---|---|---|
+| Iš kokios būsenos | tik `deletion_pending` | `deletion_pending` arba `deletion_failed` |
+| Į kokią | `deletion_failed` | `deleted` (terminali) |
+| Ką operatorius **teigia** | vykdytojo nebėra | **duomenų nebėra** |
+| Ką reikia žinoti iš anksto | nieko apie duomenis | patikrintą faktą |
+| Kas galima po to | `retry` → ištrynimas užbaigiamas | nieko – būsena terminali |
+
+**Po SIGKILL pirmiausia `release`, ne `force-resolve`.** Priežastis viena:
+`force-resolve` yra teiginys, kurio tuo momentu niekas nepatikrino. Procesas
+galėjo nutrūkti prieš saugyklos valymą, po jo, ar viduryje – ir `deleted` būseną
+uždėjus, tas klausimas užsidaro **negrįžtamai**: būsena terminali, `retry` iš jos
+nebeveda, o žyma toliau tvirtins, kad ištrynimas patvirtintas.
+
+`release` tą klausimą palieka atvirą ir leidžia ištrynimui realiai įvykti.
+`force-resolve` tinka tik tada, kai duomenų nebuvimas **patikrintas** – arba kai
+patikrinta, kad jų niekada nebuvo.
+
+**Paskelbti išspręsta**, kai patikrinta, kad duomenų nebėra (arba jų niekada
+nebuvo):
+
+```bash
+JOB_ID="..." OPERATOR="..."
+node backend/scripts/erasure-marks.js force-resolve "$JOB_ID" --actor "$OPERATOR"
+```
+
+⚠️ `force-resolve` **nėra ištrynimas**. Operatorius patvirtina faktą ir prisiima
+jį auditu (`ERASURE_MARK_FORCE_RESOLVED`). Barjeras **lieka** – būsena tampa
+`deleted`, tad job'as ir toliau nebus prikeltas.
+
+⚠️ `--actor` privalomas. Auditas rašomas **po** perėjimo, o jo `success`
+atspindi faktinį rezultatą (#183).
+
+⚠️ **Gedimo forma, kurią reikia žinoti.** Iki 7.5a peržiūros auditas ėjo pirmas,
+ir šis dokumentas žadėjo „neužfiksavus – barjeras nenuimamas". Ta tvarka dengė
+tik vieną pusę: du lygiagretūs operatoriai abu įrašydavo sėkmę, o perėjimas
+pavykdavo tik vienam – likdavo patvarus sėkmės įrašas veiksmui, kurio nebuvo.
+
+Dabartinė tvarka apverčia riziką ir ją reikia įvardyti tiesiai: **jei audito
+rašymas krinta PO sėkmingo perėjimo, žyma jau yra `deleted`, o įrašo nėra.**
+Pakartotinis bandymas įvykio neatkurs – jis grąžins `already_terminal`.
+
+Praktiškai tai reiškia:
+
+- komanda krinta su klaida, ne tyliai – operatorius mato, kad auditas nepavyko;
+- **užfiksuokite tai rankiniu būdu** (incidento įraše), nes automatinio pėdsako
+  nebebus;
+- žymos būsenos keisti nereikia – barjeras veikia, trūksta tik įrašo, kas jį
+  uždėjo.
+
+Atominio perėjimo-su-auditu nėra sąmoningai: auditas gyvena kitoje saugykloje
+(galimai kitoje DB) nei žymos, tad viena transakcija jų apimti negali.
+
+⚠️ **HTTP maršruto šiems veiksmams NĖRA sąmoningai.** Užstrigusi žyma yra
+incidentas, ne kasdienis darbas; maršrutas pridėtų autentikacijos, autorizacijos
+ir rate-limit paviršių tam, kas daroma retai ir turint DB prieigą.
+
+> ### ⚠️ DIEGIMO SPRENDIMO ĮVESTIS: šis kelias reikalauja shell prieigos
+>
+> Abi komandos vykdomos **ant host'o, kuriame nustatytas `DATABASE_URL`**. Kito
+> įėjimo nėra.
+>
+> **Diegime, kuriame operatoriai turi TIK HTTP prieigą, užstrigusi ištrynimo
+> žyma NETURI VAISTŲ** – job'as lieka užbarjeruotas neribotą laiką, kol kas nors
+> prideda maršrutą arba suteikia shell prieigą.
+>
+> Tai nėra gedimas ir ne priežiūros skola – tai **sąmoningo apimties sprendimo
+> kaina** (#183, 7.5a). Bet ji privalo būti pasverta **planuojant diegimą**, ne
+> atrandama incidento metu, 2 val. nakties, kai vartotojas skambina dėl
+> ištrynimo, kuris „nieko nedaro".
+>
+> **Prieš diegiant nuspręskite:**
+>
+> 1. ar bent vienas budintis asmuo turi shell prieigą prie host'o su
+>    `DATABASE_URL`? Jei taip – jokių papildomų veiksmų nereikia;
+> 2. jei ne – arba tokia prieiga suteikiama (ir įrašoma į budėjimo procedūrą),
+>    arba prieš paleidžiant į produkciją pridedamas administracinis maršrutas.
+>
+> ⚠️ Trečio varianto – „išspręsim, kai atsitiks" – nėra: barjeras nuo
+> `deletion_pending` reiškia, kad tuo metu job'as jau užrakintas, o
+> neterminalės žymos **nesensta**, tad laukimas problemos neišsprendžia.
+
+### ⚠️ Dalis ištrynimų dabar LAUKIA operatoriaus, ne kartojasi savaime
+
+Iki 7.5a fone veikė antra kartojimo sistema: `retryPendingDeletions()` sweeper'is
+periodiškai kartodavo nebaigtus ištrynimus. Ji prieštarauja žymų mašinai, kurioje
+`deletion_failed` yra **operatoriaus sprendimas**, ne laikina būsena.
+
+Nuo šiol sweeper'is **praleidžia** jobus, kurių žyma yra `deletion_failed`, ir
+kiekvieną tokį atvejį įrašo `warn` lygiu su nuoroda, ką daryti.
+
+⚠️ **Praktikoje tai reiškia daugumą sweeper'io kandidatų.** Jobas patenka į jo
+sąrašą tik po nepavykusio ištrynimo, o tas pats nepavykimas žymą perveda į
+`deletion_failed`. Diegimuose su `DATABASE_URL` sweeper'is tampa daugiausia
+**pranešėju**, ne kartotoju. Jis toliau kartoja tik tuos atvejus, kur žymos nėra
+(ją pašalino retencija) arba ji tebėra `deletion_pending`.
+
+⚠️ **MATOMUMO ŠALTINIS YRA `erasure-marks list`, NE SWEEPER'IO LOGAI.** Logas
+pasako, kad jobas paliktas, bet jis nesikaupia į sąrašą ir dingsta su rotacija.
+Autoritetingas neišspręstų ištrynimų sąrašas yra:
+
+```bash
+node backend/scripts/erasure-marks.js list --hours 24
+```
+
+Tai turi būti **periodinė procedūra**, ne reakcija į pranešimą. Neišspręsta žyma
+reiškia, kad jautrūs duomenys gali tebebūti saugomi.
+
+Atkūrimo eiga: `erasure-marks retry <jobId> --actor <kas>` → įprastas `DELETE`
+(arba kitas ištrynimo kelias) užbaigia darbą.
+
+⚠️ **Automatinio „vykdytojas mirė" aptikimo NĖRA IR NEBUS.** Lease ar heartbeat
+ant `deletion_pending` būtų paskirstyta nuoma – būtent tai, ko 7.5a atsisakė
+sąmoningai (lock'as neturi būti laikomas per išorinį I/O). Sprendimą, kad
+vykdytojo nebėra, priima operatorius, ne laikmatis.
+
+**Ko šiame kelyje NĖRA:** automatinio užstrigusių žymų šalinimo. Tai būtų
+barjero nuėmimas be žmogaus sprendimo – tiksliai tai, ko `deletion_failed`
+semantika vengia.
 
 ---
+
+## 3a. `main` apsaugos emergency bypass (#324, D6)
+
+⚠️ **Repo turi vieną savininką.** Su griežtais vartais ir be bypass procedūros
+pirmas išorinis gedimas sustabdo darbą — o tikėtiniausia baigtis yra **vartų
+išjungimas**, t. y. grįžimas į būseną iki #324. Todėl bypass yra **valdomas
+kelias**, ne vartų išjungimas.
+
+### Kada leidžiama
+
+**Tik** kai required check negali patikimai tapti žalias dėl priežasties,
+**nesusijusios su merge'inamo pakeitimo korektiškumu**: išorinis ar
+infrastruktūrinis gedimas.
+
+Per pastarąjį mėnesį tokių buvo trys: `npm audit` 503; `multer`/`js-yaml`
+advisories prieš nepakeistas priklausomybes; `minio/minio` image pašalintas iš
+Docker Hub.
+
+⚠️ **NEAIŠKIOS KILMĖS RAUDONAS TESTAS NĖRA PAKANKAMA PRIEŽASTIS.** Kitaip bypass
+virsta „savininkas nusprendžia, kad pakankamai žalia" — o tai yra vartų nebuvimas
+su papildomu žingsniu.
+
+### Privalomi laukai
+
+Forma tokia pat kaip **#237 `TESTŲ ŠALINIMAS` override registras**, kuris jau
+veikia — antras mechanizmas nekuriamas.
+
+Įrašas dedamas į **merge commit'o žinutę**, viena eilute prasidedančia žyme:
+
+```
+MAIN APSAUGOS BYPASS: <priežastis>
+```
+
+plius kūne visi šeši laukai:
+
+| Laukas | Ką reiškia |
+|---|---|
+| `PR/commit` | kas merginta |
+| `Apeitas check` | konkretus vardas, ne „CI" |
+| `Priežastis` | kas tiksliai neveikė |
+| `Įrodymas, kad išorinis` | nuoroda į status page, advisory, registry — **ne teiginys** |
+| `Patvirtino` | kas priėmė sprendimą |
+| `Follow-up issue` | jei ne vienkartinis; „nėra" tinka tik vienkartiniam |
+
+### Kur įrašas gyvena ir kaip patikrinama, kad jis atsirado
+
+**Registras** — `docs/ci-security-policy.md`, skyrius „Emergency bypass". Jis yra
+versijų kontrolėje, peržiūrimas kaip bet kuris pakeitimas, ir **vienintelis**
+autoritetingas įrašo šaltinis.
+
+⚠️ **GitHub bypass mechanizmas šių laukų užpildyti NEPRIVERČIA.** Tai
+**procedūrinis audito kontraktas**, ne techninis enforcement.
+
+#### ⚠️ Merge commit'o žymė NEBĖRA patikros pagrindas — išmatuota
+
+Pirmoji šios procedūros redakcija reikalavo `MAIN APSAUGOS BYPASS:` žymės merge
+commit'o žinutėje ir siūlė ją tikrinti `grep`. **Pirmas realus bypass tą
+sugriovė:** commit `43f29a3` žymės **neturi** (`grep` grąžino `0`), nors bypass
+tikrai įvyko ir registro įrašas buvo parašytas.
+
+Priežastis struktūrinė: squash merge žinutė sudaroma **GitHub sąsajoje merge
+metu**, ir žymę reikia įklijuoti ranka. Patikra, kurią galima pamiršti pirmą
+kartą ją naudojant, nėra patikra.
+
+Žymė lieka **neprivaloma patogybė**. Patikros pagrindas — GitHub `rule-suites`.
+
+#### Patikra po kiekvieno bypass
+
+```bash
+# Ar GitHub užfiksavo bypass įvykį (autoritetingas šaltinis)
+gh api "repos/forevercornix/stenograma/rulesets/rule-suites?ref=refs/heads/main&per_page=20" \
+  --jq '.[] | select(.result=="bypass") | "\(.id) \(.pushed_at) \(.actor_name)"'
+```
+
+⚠️ **NE `rulesets/<ID>/history`** — ji rodo ruleset **konfigūracijos** pakeitimus,
+ne bypass įvykius. Pirmoji redakcija siūlė būtent ją; tai buvo neteisingas
+instrumentas.
+
+#### Ketvirtinė sutikrinimo patikra
+
+Palyginti `result=bypass` įvykių skaičių su registro įrašų skaičiumi.
+Nesutapimas reiškia **bypass be įrašo** — incidentas, ne apskaitos klaida.
+
+**Pirmas matavimas (2026-09-16):**
+
+| Šaltinis | Kiekis |
+|---|---|
+| `rule-suites` `result=bypass` | **2** (`4086485870`, `4086981788`) |
+| Registro įrašai | **2** (Įrašas 1 — `2cba0bd`; Įrašas 2 — `43f29a3`) |
+
+Sutampa. ⚠️ Tame pačiame sąraše matomas ir `result=fail` (`4086523987`) — tai
+`GH013` atmestas push, t. y. **vartai suveikė**. Registre jo nėra ir neturi būti:
+registras fiksuoja apėjimus, ne atmetimus.
+
+### Ko bypass NEDARO
+
+- **neišjungia** apsaugos kitiems pakeitimams;
+- **neišplečia** bypass aktorių sąrašo;
+- **nepakeičia** required aibės.
+
+Jei bypass prireikia daugiau nei kartą tam pačiam check'ui, tai nebėra avarija —
+tai signalas, kad check'as netinka merge kontraktui. Sprendžiama keičiant
+kontraktą (žr. `docs/ci-security-policy.md` `dependency-audit` sąlygą), ne
+kartojant bypass.
 
 ## 4. Klaidingi teiginiai ir neteisingos diagnozės
 

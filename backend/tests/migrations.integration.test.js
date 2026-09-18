@@ -291,30 +291,98 @@ test(
 );
 
 test(
-  "#155 STARTAS: pasenusi schema (tik tėvinė migracija) nutraukia initializePostgres()",
+  "#342 STARTAS: TRŪKSTAMA PAGALBINĖ LENTELĖ nutraukia startą, ne pirmą operaciją",
   { skip: skipWithoutPostgres() },
   async () => {
     /**
-     * ⚠️ LENTELIŲ BUVIMO NEPAKANKA.
+     * ⚠️ DVIEJŲ LENTELIŲ PATIKROS NEPAKAKO (#342 Codex, P1).
      *
-     * DB, kurioje paleista TIK `1755000000000`, abi lenteles jau turi, tad
-     * `SELECT 1` + lentelių patikra praeitų: `readiness.jobStore` taptų
-     * `true`, serveris imtų klausytis, o DB priiminėtų įrašus, kuriuos
-     * naujesnė migracija turi blokuoti (nežinomas tipas, era `1`, nežinomas
-     * actor source).
+     * Startas tikrino `jobs` ir `job_results`, o store'ą konstruodavo su
+     * `bandymuRegistras`/`migracijosProgresas` = `true` (numatytoji reikšmė).
+     * Dalinai migruota bazė startą PRAEIDAVO, o krisdavo vėliau:
+     *
+     *   `job_result_attempts`          → external completion kelias;
+     *   `artifact_migration_progress`  → BDAR ištrynimo kelias.
+     *
+     * ⚠️ ABU JAU PRIĖMUS SRAUTĄ. Būtent to schemos patikra ir turi neleisti.
+     *
+     * ⚠️ TIKRINAMA PER `DROP`, NE PER DALINĘ MIGRACIJĄ: dalinė migracija duotų ir
+     * trūkstamus invariantus, tad kristų ankstesnė patikra, ir šis testas
+     * praeitų NE dėl to, ką teigia.
      */
-    await perkurtiDb();
-
-    const tevine = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-migr-"));
     const buves = process.env.DATABASE_URL;
 
     try {
-      const pirma = fs
-        .readdirSync(path.join(ŠAKNIS, "migrations"))
-        .filter((f) => f.endsWith(".js"))
-        .sort()[0];
-      fs.copyFileSync(path.join(ŠAKNIS, "migrations", pirma), path.join(tevine, pirma));
-      migrate("up", tevine);
+      for (const lentele of ["job_result_attempts", "artifact_migration_progress"]) {
+        await perkurtiDb();
+        migrate("up");
+
+        const pool = new Pool({ connectionString: DB_URL });
+        try {
+          await pool.query(`DROP TABLE ${lentele} CASCADE`);
+        } finally {
+          await pool.end();
+        }
+
+        process.env.DATABASE_URL = DB_URL;
+        delete require.cache[require.resolve("../utils/jobStore")];
+        const jobStore = require("../utils/jobStore");
+
+        await assert.rejects(
+          () => jobStore._initializePostgresForTests(),
+          new RegExp(`trūksta lentelių:.*${lentele}`),
+          `be \`${lentele}\` startas privalo NUTRŪKTI - srautas nepriimamas`
+        );
+
+        delete require.cache[require.resolve("../utils/jobStore")];
+      }
+
+      /**
+       * KONTROLĖ: su pilna schema tas pats startas praeina. Be jos „viskas
+       * atmetama" praeitų kaip sėkmė - ta pati klaida, kurią #342 taiso
+       * async cutover pusėje.
+       */
+      await perkurtiDb();
+      migrate("up");
+
+      process.env.DATABASE_URL = DB_URL;
+      delete require.cache[require.resolve("../utils/jobStore")];
+      const jobStore = require("../utils/jobStore");
+      const store = await jobStore._initializePostgresForTests();
+
+      assert.equal(store.backend, "postgres");
+      await store.close();
+    } finally {
+      delete require.cache[require.resolve("../utils/jobStore")];
+      if (buves === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = buves;
+    }
+  }
+);
+
+test(
+  "#342 STARTAS: pagalbinių lentelių INVARIANTAI irgi privalomi",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * Lentelės buvimo nepakanka - ta pati taisyklė, kurią `jobs`/`job_results`
+     * pusėje įvedė #157 PR-1. Be šito bazė su lentele, bet be jos `CHECK`
+     * suvaržymų, praeitų startą ir priimtų būsenas, kurių runtime nepripažįsta.
+     */
+    const buves = process.env.DATABASE_URL;
+
+    try {
+      await perkurtiDb();
+      migrate("up");
+
+      const pool = new Pool({ connectionString: DB_URL });
+      try {
+        await pool.query(
+          "ALTER TABLE job_result_attempts DROP CONSTRAINT job_result_attempts_busena_allowed"
+        );
+      } finally {
+        await pool.end();
+      }
 
       process.env.DATABASE_URL = DB_URL;
       delete require.cache[require.resolve("../utils/jobStore")];
@@ -322,20 +390,115 @@ test(
 
       await assert.rejects(
         () => jobStore._initializePostgresForTests(),
-        /trūksta invariantų/,
+        /trūksta invariantų:.*job_result_attempts_busena_allowed/,
+        "pagalbinės lentelės invariantas privalo būti tikrinamas kaip ir pagrindinių"
+      );
+    } finally {
+      delete require.cache[require.resolve("../utils/jobStore")];
+      if (buves === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = buves;
+    }
+  }
+);
+
+test(
+  "#155 STARTAS: LENTELIŲ BUVIMO NEPAKANKA - trūkstamas invariantas nutraukia startą",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ TEIGINYS NEPAKITO; PAKITO BŪDAS JĮ PASIEKTI (#342).
+     *
+     * Testas nuo pat pradžių įrodinėja VIENĄ dalyką: lentelės gali egzistuoti, o
+     * startas vis tiek privalo nutrūkti, jei trūksta invariantų — kitaip DB
+     * priiminėtų įrašus, kuriuos naujesnė migracija turi blokuoti (nežinomas
+     * tipas, era `1`, nežinomas actor source).
+     *
+     * ⚠️ ANKSČIAU SCENARIJUS BUVO „TIK TĖVINĖ MIGRACIJA", IR JIS NUSTOJO SIEKTI
+     * INVARIANTŲ ŠAKĄ. `a451532` pridėjo į lentelių patikrą dar dvi lenteles
+     * (`job_result_attempts`, `artifact_migration_progress`), tad tėvinės
+     * migracijos scenarijuje dabar nutraukia GRIEŽTESNIS sargas priekyje —
+     * „trūksta lentelių" — ir invariantų kodas nebeįvykdomas.
+     *
+     * ⚠️ REGEX NESUŠVELNINTAS SĄMONINGAI. `/trūksta/` vietoj
+     * `/trūksta invariantų/` būtų pažaliavęs iš karto ir nustojęs tikrinti tai,
+     * ką šis komentaras teigia — šeštas „asercija dėl kitos priežasties" atvejis
+     * šioje sekoje, tik šįkart matomas, nes testas KRITO, o ne nutilo.
+     *
+     * ⚠️ MIGRACIJOS RIBOS, KURIOJE VISOS KETURIOS LENTELĖS YRA, O INVARIANTŲ DAR
+     * NĖRA, NEEGZISTUOJA: paskutinė migracija (`1756600000000`) sukuria paskutinę
+     * lentelę KARTU su jos suvaržymais. Todėl scenarijus konstruojamas
+     * eksplicitiškai — pilna schema minus VIENAS invariantas.
+     *
+     * Tai ir stipriau: senasis scenarijus rėmėsi migracijų TVARKA, tad galėjo
+     * nustoti siekti savo šakos dėl bet kurio nesusijusio pakeitimo — kaip ką tik
+     * ir nutiko. Šis nuo tvarkos nepriklauso.
+     *
+     * ⚠️ „PASENUSI (DALINAI MIGRUOTA) DB ATMETAMA" NEDINGO — ją nuo `a451532`
+     * dengia `#342 STARTAS: TRŪKSTAMA PAGALBINĖ LENTELĖ…` šiame pat faile.
+     */
+    const NUIMAMAS = "jobs_type_values";
+    const buves = process.env.DATABASE_URL;
+
+    try {
+      await perkurtiDb();
+      migrate("up");
+
+      const pool = new Pool({ connectionString: DB_URL });
+      try {
+        await pool.query(`ALTER TABLE jobs DROP CONSTRAINT ${NUIMAMAS}`);
+      } finally {
+        await pool.end();
+      }
+
+      process.env.DATABASE_URL = DB_URL;
+      delete require.cache[require.resolve("../utils/jobStore")];
+      const jobStore = require("../utils/jobStore");
+
+      /** Klaida gaudoma VIENĄ kartą - abi asercijos tikrina TĄ PATĮ pranešimą. */
+      const klaida = await jobStore._initializePostgresForTests().then(
+        () => {
+          throw new Error("startas privalėjo nutrūkti, o praėjo");
+        },
+        (e) => e
+      );
+
+      assert.match(
+        klaida.message,
+        new RegExp(`trūksta invariantų:.*${NUIMAMAS}`),
         "pasenusi schema privalo nutraukti startą, ne būti paskelbta pasiruošusia"
       );
 
-      // Paleidus visas migracijas startas praeina.
+      /**
+       * ⚠️ SARGAS ŠIO TESTO PRASMEI. Jei ateityje priekyje vėl atsirastų
+       * griežtesnė patikra, testas kristų ČIA su aiškia priežastimi, o ne
+       * pažaliuotų dėl kitos šakos. Būtent tokio sargo iki #342 ir trūko.
+       */
+      assert.doesNotMatch(
+        klaida.message,
+        /trūksta lentelių/,
+        "lentelių patikra privalo būti PRAEITA - kitaip invariantų šaka nepasiekiama"
+      );
+
+      /**
+       * KONTROLĖ: su pilna schema tas pats startas praeina. Be jos „viskas
+       * atmetama" praeitų kaip sėkmė.
+       *
+       * ⚠️ DB PERKURIAMA, ne `migrate("down")`: pastarasis atsuktų PASKUTINĘ
+       * migraciją, o nuimtas invariantas ateina iš pirmosios.
+       */
+      await perkurtiDb();
       migrate("up");
-      const store = await jobStore._initializePostgresForTests();
+
+      delete require.cache[require.resolve("../utils/jobStore")];
+      const sveikas = require("../utils/jobStore");
+      const store = await sveikas._initializePostgresForTests();
+
       assert.equal(store.backend, "postgres");
       await store.close();
     } finally {
       delete require.cache[require.resolve("../utils/jobStore")];
       if (buves === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = buves;
-      fs.rmSync(tevine, { recursive: true, force: true });
     }
   }
 );
@@ -472,8 +635,197 @@ test(
         [...REQUIRED_JOB_CONSTRAINTS].sort(),
         "migracijų sukurtų CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
       );
+
+      /**
+       * ⚠️ TA PATI PILNUMO PATIKRA `job_results` LENTELEI (#157, PR-1).
+       *
+       * Readiness anksčiau filtravo tik `jobs`, tad `job_results` invariantai
+       * nebuvo tikrinami nei starte, nei čia (Codex #289). Sąrašas išvedamas iš
+       * šviežiai migruotos DB — naujas constraint'as migracijoje be įrašo
+       * `REQUIRED_JOB_RESULT_CONSTRAINTS` krinta iškart.
+       */
+      const { REQUIRED_JOB_RESULT_CONSTRAINTS } = require("../utils/jobStore");
+      const { rows: rezultatai } = await pool.query(
+        `SELECT c.conname
+           FROM pg_constraint c
+           JOIN pg_class t     ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE t.relname = 'job_results'
+            AND n.nspname = current_schema()
+            AND c.contype = 'c'`
+      );
+
+      assert.deepEqual(
+        rezultatai.map((r) => r.conname).sort(),
+        [...REQUIRED_JOB_RESULT_CONSTRAINTS].sort(),
+        "`job_results` CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
+      );
     } finally {
       await pool.end();
+    }
+  }
+);
+
+test(
+  "#157 STARTAS: dingęs `job_results` invariantas SUSTABDO paleidimą",
+  { skip: skipWithoutPostgres() },
+  async () => {
+    /**
+     * ⚠️ CODEX RADINYS (#289): readiness užklausa filtravo `t.relname = 'jobs'`,
+     * tad diegimas, pritaikęs tik pirmąją #157 migraciją arba praradęs
+     * constraint'ą dėl schemos nukrypimo, startuodavo SĖKMINGAI — o rezultatų
+     * rašymo ir restore verifikacijos keliai remiasi būtent tais invariantais.
+     *
+     * Tikrinamas ELGESYS, ne sąrašas: constraint'as realiai pašalinamas, ir
+     * startas privalo kristi fail-closed.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const { _initializePostgresForTests } = require("../utils/jobStore");
+    assert.ok(_initializePostgresForTests, "startas turi būti pasiekiamas testui");
+
+    /**
+     * ⚠️ `initializePostgres()` SKAITO `process.env`, ARGUMENTŲ NEPRIIMA, ir
+     * sėkmės atveju pool'o NEUŽDARO (jį perima store). Todėl aplinka keičiama
+     * trumpam, o sukurtas store'as uždaromas rankomis — kitaip liktų atviros
+     * jungtys, ir kitas failas gautų „too many clients" (§9.3).
+     */
+    const senasUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = DB_URL;
+
+    async function startas() {
+      const store = await _initializePostgresForTests();
+      await store.close?.();
+      return store;
+    }
+
+    try {
+      /** KONTROLĖ: pilna schema startą PRAEINA — kitaip patikra būtų visada „ne". */
+      await startas();
+
+      await pg(DB_URL, "ALTER TABLE job_results DROP CONSTRAINT job_results_storage_shape");
+
+      await assert.rejects(
+        startas,
+        /job_results_storage_shape/,
+        "dingęs invariantas privalo sustabdyti startą ir būti ĮVARDYTAS"
+      );
+    } finally {
+      await pg(
+        DB_URL,
+        `ALTER TABLE job_results ADD CONSTRAINT job_results_storage_shape CHECK (
+           CASE storage_type
+             WHEN 'inline' THEN payload IS NOT NULL AND storage_key IS NULL
+                  AND bytes IS NULL AND checksum IS NULL
+             ELSE storage_key IS NOT NULL AND payload IS NULL
+                  AND bytes IS NOT NULL AND checksum IS NOT NULL
+           END
+         )`
+      );
+      if (senasUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = senasUrl;
+    }
+  }
+);
+
+test(
+  "#184 SCHEMA: `jobs.version` upgrade iš ankstesnės schemos + INSERT/SELECT",
+  { skip: skipWithoutPostgres(), timeout: 120000 },
+  async () => {
+    /**
+     * ⚠️ KODĖL ŠIS TESTAS APSKRITAI REIKALINGAS (#184, 7.5b).
+     *
+     * Readiness patikra (`utils/jobStore/index.js`) tikrina LENTELES ir
+     * CHECK CONSTRAINT'US — ne stulpelius. Pamirštas stulpelių žemėlapis
+     * (`COLUMNS` / `PATCH_STULPELIAI` / `jobToRow`) starte NEKRIS: jis kris
+     * pirmo `INSERT` metu, gyvame sraute. Todėl schemos garantija tikrinama
+     * čia, o ne pasitikima startu.
+     *
+     * ⚠️ TIKRINAMAS UPGRADE, NE TIK ŠVIEŽIA SCHEMA. Švarioje DB stulpelis
+     * atsirastų ir be `DEFAULT`; klausimas yra, ką gauna EILUTĖS, kurios jau
+     * egzistavo. `NOT NULL` be galiojančios numatytosios reikšmės tokį
+     * `ALTER TABLE` nutrauktų — ir tai paaiškėtų tik produkcijoje.
+     */
+    await perkurtiDb();
+
+    /**
+     * 1. Schema BE `version` — viskas IKI 7.5b migracijos imtinai.
+     *
+     * ⚠️ `--timestamp` YRA PRIVALOMAS, NE PAPUOŠIMAS. Be jo `node-pg-migrate`
+     * skaitinį argumentą traktuoja kaip migracijų KIEKĮ
+     * (`upMigrations.slice(0, Math.abs(count))`), tad `up 1755800000000`
+     * pritaikytų VISAS — įskaitant tą, kurios čia dar neturi būti. Su vėliava
+     * filtras yra `timestamp <= count`.
+     */
+    migrate("up 1755800000000 --timestamp");
+
+    const pries = new Pool({ connectionString: DB_URL });
+    let jobId;
+    try {
+      const { rows: stulpeliai } = await pries.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'jobs' AND column_name = 'version'`
+      );
+      assert.deepEqual(stulpeliai, [], "prielaida: prieš migraciją stulpelio NĖRA");
+
+      const { rows } = await pries.query(
+        `INSERT INTO jobs (id, type, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), 'transcription', 'queued', now(), now())
+         RETURNING id`
+      );
+      jobId = rows[0].id;
+    } finally {
+      await pries.end();
+    }
+
+    /** 2. Forward migracija. */
+    migrate("up");
+
+    const po = new Pool({ connectionString: DB_URL });
+    try {
+      /** 2a. JAU EGZISTAVUSI eilutė gavo galiojančią pradinę reikšmę. */
+      const { rows: senos } = await po.query("SELECT version FROM jobs WHERE id = $1", [jobId]);
+      assert.equal(senos[0].version, 1, "esama eilutė po migracijos turi `version = 1`");
+
+      /** 2b. Nauja eilutė be eksplicitinės reikšmės — tas pats `1`. */
+      const { rows: naujos } = await po.query(
+        `INSERT INTO jobs (id, type, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), 'transcription', 'queued', now(), now())
+         RETURNING id, version`
+      );
+      assert.equal(naujos[0].version, 1, "DEFAULT 1");
+
+      /** 2c. `NOT NULL` realiai galioja. */
+      await assert.rejects(
+        () => po.query("UPDATE jobs SET version = NULL WHERE id = $1", [jobId]),
+        /null value|not-null/i,
+        "`version` privalo būti NOT NULL"
+      );
+
+      /**
+       * 2d. `jobs_version_positive` realiai galioja.
+       *
+       * ⚠️ TAI IR YRA PRIEŽASTIS, DĖL KURIOS CONSTRAINT ĮVESTAS. `DEFAULT 1`
+       * pats nulio nedraudžia, o `0` JS pusėje yra FALSY: `expectedVersion`
+       * patikra tokią reikšmę palaikytų „versija nenurodyta". DB lygmuo tą
+       * klasę pašalina ten, kur JS jos nepasiekia — rankinis `UPDATE`,
+       * atkūrimas iš kopijos.
+       */
+      await assert.rejects(
+        () => po.query("UPDATE jobs SET version = 0 WHERE id = $1", [jobId]),
+        /jobs_version_positive/,
+        "`version = 0` privalo būti atmestas"
+      );
+
+      /** 2e. Įprastas increment'as praeina. */
+      const { rows: padidinta } = await po.query(
+        "UPDATE jobs SET version = version + 1 WHERE id = $1 RETURNING version",
+        [jobId]
+      );
+      assert.equal(padidinta[0].version, 2);
+    } finally {
+      await po.end();
     }
   }
 );

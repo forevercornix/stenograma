@@ -5,6 +5,7 @@ const {
   ACCESS_DECISION,
   OPERATION,
   decideJobAccess,
+  reikiaRezultato,
 } = require("./jobAccessPolicy");
 
 /**
@@ -50,7 +51,21 @@ async function resolveJobAccess(req, jobId, operation) {
   const actor = getAccessActor(req);
   const scope = { ownerId: actor.ownerId, ownerKind: actor.ownerKind };
 
-  const result = await jobStore.get({ jobId, ...scope });
+  /**
+   * ⚠️ HIDRATACIJA YRA OPERACIJOS SPRENDIMAS (#157, PR-3).
+   *
+   * Ši grandinė prasideda MARŠRUTE, ne saugykloje: `resolveJobAccess()` naudoja
+   * KIEKVIENAS interaktyvus endpoint'as (`routes/jobs.js` READ ir DELETE,
+   * `routes/transcribeJobs.js` READ ir DELETE, `routes/exports.js`). Ieškant, kas
+   * hidratuoja be reikalo, saugyklos metodų peržiūros NEPAKAKO — reikėjo eiti nuo
+   * maršruto.
+   *
+   * `DELETE` rezultato nenaudoja, bet už jį mokėjo — ir krisdavo ties hidratacija
+   * būtent tada, kai objektas sugadintas. Vėliavą parenka operacija, ne kvietėjas:
+   * naujas endpoint'as gauna teisingą elgesį kartu su operacijos pasirinkimu.
+   */
+  const hydrate = reikiaRezultato(operation);
+  const result = await jobStore.get({ jobId, ...scope }, { hydrate });
   const input = toAccessInput(result);
 
   return {
