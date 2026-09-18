@@ -16,10 +16,24 @@ async function markProcessing(store, id, extra = {}) {
   return store.restart(id, extra);
 }
 
-/** Job'as realiai pravedamas iki `completed`. */
+/**
+ * Job'as realiai pravedamas iki `completed`.
+ *
+ * ⚠️ REZULTATAS PRIDEDAMAS PAGAL NUTYLĖJIMĄ (#184, Codex E2).
+ *
+ * Nuo 7.5b `completed` BE rezultato yra atskira, REMONTUOTINA būsena: audio
+ * barjeras tokiam įrašui šalinimo neleidžia, nes šaltinis yra vienintelė
+ * medžiaga remontui. Fixture, gaminantis tokią būseną „patogumo dėlei",
+ * gamintų sugadintą job'ą ir verstų testus matuoti ne tai, ką tikrina.
+ *
+ * Kvietėjas, kuriam REIKIA būtent remontuotinos būsenos, perduoda
+ * `{ result: null }` eksplicitiškai — tada tai matoma teste, o ne paslėpta
+ * helperyje.
+ */
 async function markCompleted(store, id, extra = {}) {
   await store.restart(id);
-  return store.finish(id, "completed", extra);
+  const su = "result" in extra ? extra : { ...extra, result: { text: "fixture" } };
+  return store.finish(id, "completed", su);
 }
 
 /** Job'as pravedamas iki `failed`. */

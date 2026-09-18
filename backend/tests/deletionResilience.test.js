@@ -33,7 +33,7 @@ test("jobStore TTL praėjo, bet audito įrašai liko - DELETE juos vis tiek išt
   const jobId = "11111111-2222-3333-4444-555555555555";
   await auditLog.record({ jobId, transcriptionProvider: "mock", success: true });
 
-  assert.equal(await jobStore.system.get(jobId), null, "jobStore įrašo neturi būti");
+  assert.equal(await jobStore.system.get(jobId, { hydrate: true }), null, "jobStore įrašo neturi būti");
   assert.equal((await auditLog.getAll()).length, 1);
 
   const res = await request(app).delete(`/api/transcribe-jobs/${jobId}`);
@@ -87,7 +87,7 @@ test("deletion_pending jobas pakartojamas automatiškai", async () => {
 
   assert.ok(summary.attempted >= 1);
   assert.ok(summary.succeeded >= 1);
-  assert.equal(await jobStore.system.get(job.id), null, "pakartojimas turi užbaigti ištrynimą");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "pakartojimas turi užbaigti ištrynimą");
 });
 
 test("lenktynės: du vienalaikiai DELETE - vienas 204, kitas 404, be avarijos", async () => {
@@ -105,7 +105,7 @@ test("lenktynės: du vienalaikiai DELETE - vienas 204, kitas 404, be avarijos", 
     statuses.every((status) => [204, 404].includes(status)),
     `netikėti statusai: ${statuses.join(", ")}`
   );
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 });
 
 test("lenktynės: DELETE kol jobas dar aktyvus -> 409, jobas nepaliestas", async () => {
@@ -165,7 +165,7 @@ test("audio valymo klaida pažymima ATSKIRA vėliava (ne deletion_pending)", asy
   const failingKey = "uploads";
   assert.equal(await releaseAudio(job.id, failingKey), false);
 
-  const flagged = await jobStore.system.get(job.id);
+  const flagged = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(flagged.audio_cleanup_pending, true);
   assert.equal(
     flagged.deletion_pending,
@@ -194,7 +194,7 @@ test("audio valymo retry ištrina TIK audio, rezultatą palieka", async () => {
 
   assert.ok(summary.succeeded >= 1);
 
-  const after = await jobStore.system.get(job.id);
+  const after = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(after, "jobas turi LIKTI - trinamas tik audio");
   assert.equal(after.storageKey, null);
   assert.equal(after.audio_cleanup_pending, false);
@@ -214,11 +214,11 @@ test("nebaigto valymo jobas neišmetamas per TTL", async () => {
   const farFuture = Date.now() + 10 * 24 * 60 * 60 * 1000;
   await jobStore.sweepExpired(farFuture);
 
-  assert.ok(await jobStore.system.get(job.id), "pažymėtas jobas turi išlikti po TTL");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "pažymėtas jobas turi išlikti po TTL");
 
   await jobStore.system.update(job.id, { audio_cleanup_pending: false });
   await jobStore.sweepExpired(farFuture);
-  assert.equal(await jobStore.system.get(job.id), null, "be vėliavos - išmetamas normaliai");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "be vėliavos - išmetamas normaliai");
 });
 
 test("nežinomas ID nesukuria klaidingo DATA_ERASED kvito", async () => {
@@ -266,7 +266,7 @@ test("lenktynės: DELETE ir scheduler retry tuo pačiu metu", async () => {
   assert.equal(retrySummary.failed, 0);
 
   // Nesvarbu, kuris nugalėjo - galutinė būsena turi būti ta pati.
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
   assert.equal(
     (await auditLog.getAll()).filter((entry) => entry.subjectId === auditLog.pseudonymizeIdentifier(job.id))
       .length,
@@ -300,7 +300,7 @@ test("backoff: dar neatėjęs bandymo laikas praleidžiamas (deferred)", async (
 
   assert.ok(summary.deferred >= 1, "jobas turi būti atidėtas, o ne bandomas iš karto");
 
-  const untouched = await jobStore.system.get(job.id);
+  const untouched = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(untouched.audio_cleanup_attempts, 2, "skaitliukas neturi keistis");
 
   await jobStore.system.update(job.id, { audio_cleanup_pending: false });
@@ -347,4 +347,143 @@ test("retry suvestinė: deferred NEįskaičiuojami į attempted", async () => {
     await jobStore.system.update(job.id, { audio_cleanup_pending: false }).catch(() => {});
     await jobStore.system.remove(job.id);
   }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #183 BARJERO NULEMTI HTTP ATSAKYMAI
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#183 MARŠRUTAS: svetima `deletion_pending` žyma duoda 202, o ne dubliuotą darbą", async () => {
+  /**
+   * 7.5a DoD: antras lygiagretus `DELETE` gauna determinuotą atsakymą pagal
+   * autoritetingą būseną, ir jokio papildomo I/O nepradedama.
+   *
+   * ⚠️ TIKRINAMAS IR KŪNAS, IR DUOMENYS. Vien 202 statusas nieko neįrodytų, jei
+   * jobStore įrašo tuo metu jau nebūtų - tada tai būtų ne „susilaikėm“, o
+   * „ištrynėm ir pameluojam“.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
+
+  // Kita replika jau pasiėmė šį jobą - žymos šis procesas neįrašė.
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
+
+  assert.equal(res.status, 202);
+  assert.equal(res.body.status, "in_progress");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "202 reiškia, kad darbas NEPRADĖTAS");
+});
+
+test("#183 MARŠRUTAS: neišspręsta žyma duoda 503, ne 204", async () => {
+  /**
+   * Duomenys ištrinti, barjeras liko `deletion_failed`. 204 teigtų patvirtintą
+   * ištrynimą, kurio persistentinis įrašas neliudija.
+   */
+  const tombstones = require("../utils/deletionTombstones");
+
+  const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.TRANSCRIPTION });
+  await markCompleted(jobStore.system, job.id, { result: { text: "x" } });
+
+  await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
+  await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.FAILED, { failureKind: "retryable" });
+
+  const res = await request(app).delete(`/api/transcribe-jobs/${job.id}`);
+
+  assert.equal(res.status, 503);
+  assert.equal(res.body.status, "tombstone_unresolved");
+});
+
+test("#183 NUTEKĖJIMAS: našlaičio 503 atsakyme NĖRA klaidų tekstų", async () => {
+  /**
+   * ⚠️ #19: `expose no filesystem paths, storage keys, Redis keys, provider
+   * payloads or deleted content`.
+   *
+   * Savininko kelias šios taisyklės laikėsi su eksplicitiniu komentaru, o
+   * našlaičių kelias siųsdavo `deletion: result.outcome` - kartu su `errors`,
+   * kuriuose yra `storage: <žinutė>` ir `jobStore: <žinutė>`. Administracinis
+   * kelias negali būti išimtis (AGENTS.md §16).
+   *
+   * Tikrinamas ATVAIZDAVIMAS, ne maršruto integracija: dirbtinai sugadinti
+   * saugyklą per HTTP neįmanoma deterministiškai, o būtent atvaizdavimas ir
+   * sprendžia, kas patenka į kūną.
+   */
+  const { atsakytiNaslaicioValymu } = require("../utils/deletionHttp");
+
+  let kunas = null;
+  const res = {
+    status(kodas) {
+      this._kodas = kodas;
+      return this;
+    },
+    json(turinys) {
+      kunas = turinys;
+      return this;
+    },
+  };
+
+  atsakytiNaslaicioValymu(
+    res,
+    {
+      cleaned: false,
+      barjeras: null,
+      outcome: {
+        found: true,
+        jobRemoved: false,
+        queueJobRemoved: false,
+        storageRemoved: false,
+        auditEntriesRemoved: 0,
+        errors: [
+          "storage: ENOENT /var/data/stenograma/uploads/slaptas-raktas.wav",
+          "jobStore: WRONGTYPE bull:transcription:42",
+        ],
+      },
+    },
+    { jobId: "j1", log: { error() {}, warn() {} } }
+  );
+
+  assert.equal(res._kodas, 503);
+
+  const tekstas = JSON.stringify(kunas);
+  assert.ok(!("errors" in kunas.deletion), "`errors` laukas negali patekti į atsakymą");
+  assert.ok(!tekstas.includes("/var/data"), "failų keliai negali patekti į atsakymą");
+  assert.ok(!tekstas.includes("bull:"), "eilės raktai negali patekti į atsakymą");
+  assert.equal(kunas.deletion.auditEntriesRemoved, 0, "kiek pašalinta - lieka");
+});
+
+test("#183 CLI: `--actor --note` NEPRIIMAMAS kaip aktorius", async () => {
+  /**
+   * Barjero pakeitimas su aktoriumi, kurio niekas nenurodė, yra blogesnis už
+   * atmestą komandą: auditas atrodo pilnas, o jame - apsirikimas.
+   *
+   * Tikrinama per realų proceso paleidimą, nes tai `process.argv` parsinimas -
+   * funkcijos kvietimas tiesiogiai to nedengtų.
+   */
+  const { execFileSync } = require("child_process");
+  const path = require("path");
+
+  let kodas = 0;
+  let isvestis = "";
+  try {
+    isvestis = execFileSync(
+      process.execPath,
+      [
+        path.join(__dirname, "../scripts/erasure-marks.js"),
+        "release",
+        "koks-nors-id",
+        "--actor",
+        "--note",
+        "bilietas-123",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, LOG_LEVEL: "error" } }
+    );
+  } catch (e) {
+    kodas = e.status;
+    isvestis = `${e.stdout || ""}${e.stderr || ""}`;
+  }
+
+  assert.equal(kodas, 2, "komanda turi būti atmesta dėl trūkstamo `--actor`");
+  assert.match(isvestis, /--actor/, "operatorius turi matyti, ko trūksta");
 });

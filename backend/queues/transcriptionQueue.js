@@ -1,4 +1,4 @@
-const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, createQueueConnection } = require("./config");
+const { QUEUE_NAMES, DEFAULT_JOB_OPTIONS, createQueueConnection, enqueue } = require("./config");
 
 /**
  * Transkripcijos eilė (atskiras modulis pagal 1 etapo struktūros reikalavimą).
@@ -21,7 +21,11 @@ function getTranscriptionQueue() {
 async function addTranscriptionJob(jobId, payload) {
   const queue = getTranscriptionQueue();
   // DEFAULT_JOB_OPTIONS (attempts/backoff/removeOnFail) BŪTINA - be jų nebūtų retry.
-  return queue.add("transcribe", { jobId, payload }, { ...DEFAULT_JOB_OPTIONS, jobId });
+  //
+  // ⚠️ PER `enqueue()`, NE TIESIOGIAI `queue.add()` (#155, 7.5a): ten vykdoma
+  // `delay` riba, be kurios atidėtas job'as galėtų atkeliauti jau po to, kai
+  // ištrynimo žyma teisėtai pašalinta.
+  return enqueue(queue, "transcribe", { jobId, payload }, { ...DEFAULT_JOB_OPTIONS, jobId });
 }
 
 /**

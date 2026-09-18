@@ -93,10 +93,51 @@ function _displaySafeMime(value) {
   return MIME_SHAPE.test(mime) ? mime : "[neatpažintas]";
 }
 
+/**
+ * ⚠️ RIBOS UŽRAŠOMOS EKSPLICITIŠKAI, NES MULTER JŲ NETURI NUMATYTŲJŲ.
+ *
+ * `multer` 2.3.0 uždarė keturias CVE, tarp jų `GHSA-wc9g-mqfw-jrwm`: sukurtas
+ * `multipart` lauko vardas keldavo neapdorotą `RangeError` ir NUTRAUKDAVO Node
+ * procesą. Pats crash'as pataisytas bibliotekoje (`appendField` apgaubtas
+ * `try/catch` → `INVALID_FIELD_NAME`), ir tam pakanka atnaujinimo.
+ *
+ * BET IŠTEKLIŲ RIBOS LIKO NEĮJUNGTOS. `make-middleware.js` kiekvieną iš trijų
+ * naujų patikrų daro tik `hasOwnProperty` sąlygoje: nenurodyta riba reiškia,
+ * kad patikros NĖRA. Numatytųjų reikšmių nesudedama niekur — `index.js` daro
+ * `this.limits = options.limits`.
+ *
+ * ⚠️ IR BUSBOY ČIA NEPADEDA. Jo `fieldNameSize` galioja TIK `urlencoded`
+ * keliui; `multipart` šakoje `nameTruncated` paduodamas kaip literalus `false`
+ * (`busboy/lib/types/multipart.js`). Vadinasi mūsų kelyje — o `/api/transcribe`
+ * yra būtent `multipart/form-data` — lauko vardo ilgio neriboja NIEKAS, kol jo
+ * neapribojam čia. `fields`, `files` ir `parts` busboy numatytai yra `Infinity`,
+ * tad ir kartojimo faktorius neribotas.
+ *
+ * Reikšmės imamos iš to, ką kelias REALIAI naudoja, ne iš apvalių skaičių:
+ * frontend'as siunčia `audio` (arba `file`) plius `language` ir `diarize`.
+ * `fieldNestingDepth: 0` reiškia „jokių laužtinių skliaustų" — jų nė vienas
+ * laukas neturi, tad tai ne apribojimas, o esamos formos užrašymas. Naujas
+ * masyvinis laukas kris su `LIMIT_FIELD_NESTING`, t. y. matomai ir fail-closed,
+ * o ne tyliai atidarys vektorių atgal.
+ *
+ * ⚠️ `createBackupUpload()` (`routes/backup.js`) ŠIŲ RIBŲ NEREIKIA. Jis jau turi
+ * `fields: 0`, o busboy tada pirmą tekstinį lauką praleidžia dar prieš `field`
+ * įvykį (`fields === fieldsLimit` → `skipPart`), tad multer'io vardo patikros
+ * ten apskritai nepasiekiamos. Pridėtos jos būtų negyvas kodas.
+ */
+const AUDIO_LIMITS = {
+  files: 2,
+  fields: 8,
+  parts: 12,
+  fieldNameSize: 100,
+  fieldNestingDepth: 0,
+  fieldArrayIndexLimit: 0,
+};
+
 function createAudioUpload() {
   return multer({
     storage,
-    limits: { fileSize: MAX_UPLOAD_MB() * 1024 * 1024 },
+    limits: { ...AUDIO_LIMITS, fileSize: MAX_UPLOAD_MB() * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
       /**
        * Saugūs metaduomenys išsaugomi PRIEŠ sprendimą.
@@ -125,6 +166,7 @@ function createAudioUpload() {
 
 module.exports = {
   storage,
+  AUDIO_LIMITS,
   createAudioUpload,
   isAllowedAudio,
   ALLOWED_MIME,

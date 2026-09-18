@@ -43,6 +43,17 @@ cd backend && npm test && npm run lint
 cd ../frontend && npx vitest run && npm run build
 ```
 
+⚠️ **Pridėjus testą į `privacy`, `security`, `redis`, `postgres` ar `s3` rinkinį —
+dar viena komanda:**
+
+```bash
+cd backend && npm run test:matrix
+```
+
+`npm test` paleidžia `run-tests.mjs` numatytuosius rinkinius, o `test:matrix` yra
+ATSKIRAS skriptas, kurio jis nekviečia — tad „visi testai žali" lokaliai gali
+reikšti, kad saugumo matricoje trūksta eilutės, ir tai paaiškės tik CI'uje.
+
 Šiame projekte galioja taisyklė: **jei pakeitimas liečia dokumentacijoje
 nurodytą faktą (skaičių, kintamojo vardą, komandą), dokumentacija keičiama
 tame pačiame PR.** Dalis testų tai tikrina automatiškai.

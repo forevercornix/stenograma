@@ -14,6 +14,8 @@ const authRoute = require("./routes/auth");
  * ir tada, kai `startServer()` šiame procese nevykdomas (testai, embedded).
  */
 const sessionStore = require("./utils/sessionStore");
+const auditStore = require("./utils/auditStore");
+const deletionTombstones = require("./utils/deletionTombstones");
 const jobStore = require("./utils/jobStore");
 const jobRunner = require("./queues/jobRunner");
 const { validateConfig, runSelfChecks } = require("./utils/startupChecks");
@@ -77,7 +79,13 @@ app.use("/api", generalApiLimiter);
  * užklausas. Vėliavos AUTORITETAS yra `sessionStore.isReady()` - čia laikoma
  * kopija skirta `/api/ready` išvesčiai.
  */
-const readiness = { jobStore: false, jobRunner: false, sessionReconcile: false };
+const readiness = {
+  jobStore: false,
+  jobRunner: false,
+  sessionReconcile: false,
+  auditStore: false,
+  deletionTombstones: false,
+};
 app.locals.readiness = readiness; // route failai gali tikrinti be ciklinės priklausomybės
 
 function requireJobSystemReady(req, res, next) {
@@ -182,6 +190,87 @@ async function probeRuntimeReadiness() {
     sessionStoreReachable = false;
   }
 
+  /**
+   * AUDITO AUTORITETO GYVA BŪSENA (#155, 7.4f / #231).
+   *
+   * ⚠️ `readiness.auditStore` YRA STARTO VĖLIAVA, NE SVEIKATA - lygiai kaip
+   * `sessionReconcile`. DB kritimas ar teisių atėmimas PO starto ja nesimato, o
+   * instancija toliau priima audito generuojančias užklausas (pvz.
+   * prisijungimus), kurių blokuojantis auditas kris su `AUDIT_WRITE_FAILED`.
+   *
+   * ⚠️ ZONDAS TIKRINA TEISES, ne vien ryšį - žr. `auditStore/postgresStore.js`.
+   * Atminties režime jis visada teigiamas, tad elgesys nesikeičia.
+   */
+  let auditStoreReachable = false;
+  try {
+    auditStoreReachable = await withTimeout(
+      auditStore.probe(),
+      READINESS_TIMEOUT_MS,
+      "audito saugykla"
+    );
+  } catch {
+    auditStoreReachable = false;
+  }
+
+  /**
+   * ⚠️ BARJERO ZONDAS PER AUDITO JUNGTĮ (#155, 7.4e / #216).
+   *
+   * ATSKIRAS NUO `auditStore.probe()` SĄMONINGAI. Barjeras
+   * (`assertNotBarredWithClient`) skaito `erasure_marks` per KVIETĖJO - audito -
+   * jungtį, o `deletionTombstones.probe()` tikrina ją per SAVO pool'ą. Jei
+   * audito DB lentelės neturi (arba turi be vėlesnių migracijų), abu esami
+   * zondai lieka teigiami, o pirmas audito rašymas duoda `42P01`/`42703` →
+   * CHECK FAILED → fail-closed. Blokuojantiems įvykiams tai reiškia, kad
+   * prisijungimas nustoja veikti VYKDYMO metu, jau praėjus sveikatos patikras.
+   *
+   * ⚠️ ATSKIRAS KOMPONENTAS, NE `auditStoreReachable` dalis: sujungus,
+   * readiness sakytų „auditas neveikia" ten, kur trūksta tik barjero migracijos.
+   */
+  let auditBarrierReachable = false;
+  try {
+    auditBarrierReachable = await withTimeout(
+      auditStore.probeBarrier(),
+      READINESS_TIMEOUT_MS,
+      "ištrynimo barjeras"
+    );
+  } catch {
+    auditBarrierReachable = false;
+  }
+
+  /**
+   * ⚠️ IŠTRYNIMO ŽYMŲ ZONDAS (#155, 7.5a / #183).
+   *
+   * Be jo instancija su nustatytu `DATABASE_URL` ir nepasiekiama DB (arba be
+   * migracijos) startuodavo, praneštų `ready` ir priimtų job'us, o gedimą
+   * aptiktų tik pirmo `isDeleted()` metu - jau vykdydama darbą, kurį barjeras
+   * turėjo sustabdyti. Ta pati forma kaip 7.4f `readiness.auditStore`.
+   */
+  let tombstonesReachable = false;
+  try {
+    tombstonesReachable = await withTimeout(
+      deletionTombstones.probe(),
+      READINESS_TIMEOUT_MS,
+      "ištrynimo žymos"
+    );
+  } catch {
+    tombstonesReachable = false;
+  }
+
+  /**
+   * ⚠️ NEIŠSPRENDŽIAMOS GENERACIJOS → NOT READY, NORS PROCESAS PAKILO.
+   *
+   * `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true` leidžia STARTUOTI, kad
+   * operatorius turėtų langą išvalyti senas eilutes. Bet sveikatos ji
+   * nedeklaruoja: tų įrašų `removeBySubjectIdentifier()` nepasiekia, tad
+   * instancija negali būti laikoma paruošta srautui.
+   *
+   * ⚠️ LIVENESS (`/api/health`) LIEKA 200. Priešingu atveju orkestruotojas
+   * perkraudinėtų podą cikle, ir atsistatymo langas, dėl kurio vėliavėlė
+   * egzistuoja, niekada neatsivertų - ji būtų paneigta.
+   */
+  const nasliaites = auditStore.nasliaitesGeneracijos();
+  const auditKeysResolvable = nasliaites.length === 0;
+
   if (jobRunner.getMode && jobRunner.getMode() === "bullmq") {
     let conn = null;
     try {
@@ -195,6 +284,13 @@ async function probeRuntimeReadiness() {
        * Be jo pakibęs Redis pakabina ir `/api/ready`: orkestruotojas vietoj
        * aiškaus 503 gauna timeout, o konteineris kabo „tikrinamas" būsenoje.
        * Readiness turi atsakyti VISADA - net jei atsakymas yra „neparuošta".
+       *
+       * ⚠️ TAS PATS `ping` KAIP STARTO PREFLIGHT, tik čia jungtis jau atidaryta
+       * worker'io statusui, tad pakartotinis `patikrintiEilesJungti()` kurtų
+       * ANTRĄ jungtį kiekvienam readiness kvietimui. Bendra yra KLAUSIMO forma
+       * ir riba. Starto verdiktas gyvena `jobRunner.getQueuePreflight()` ir
+       * rodomas `/api/health/deep` bei `doctor` išvestyje — NE `/api/ready`,
+       * kurio kontraktas reikalauja loginių būsenų be infrastruktūros detalių.
        */
       await withTimeout(conn.ping(), READINESS_TIMEOUT_MS, "redis ping");
       workers = await withTimeout(getWorkerStatus(conn), READINESS_TIMEOUT_MS, "worker status");
@@ -205,11 +301,32 @@ async function probeRuntimeReadiness() {
     }
   }
 
-  return { redisReachable, workers, sessionStoreReachable };
+  return {
+    redisReachable,
+    workers,
+    sessionStoreReachable,
+    auditStoreReachable,
+    auditBarrierReachable,
+    auditKeysResolvable,
+    tombstonesReachable,
+  };
 }
 
 app.get("/api/ready", pollRateLimiter, async (req, res) => {
-  const initReady = readiness.jobStore && readiness.jobRunner && readiness.sessionReconcile;
+  /**
+   * ⚠️ `auditStore` ĮTRAUKTAS Į `initReady` (#155, 7.4f / #231).
+   *
+   * Iki tol čia buvo tik `jobStore && jobRunner && sessionReconcile`. Kritus
+   * `auditStore.init()` serveris grąžindavo 200 ir priimdavo srautą - t. y.
+   * fail-closed audito apsauga, dėl kurios startas ir nutraukiamas, būdavo
+   * apeinama readiness lygyje.
+   */
+  const initReady =
+    readiness.jobStore &&
+    readiness.jobRunner &&
+    readiness.sessionReconcile &&
+    readiness.auditStore &&
+    readiness.deletionTombstones;
   if (!initReady) {
     return res.status(503).json({
       ready: false,
@@ -217,6 +334,8 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
         jobStore: readiness.jobStore,
         jobRunner: readiness.jobRunner,
         sessionReconcile: readiness.sessionReconcile,
+        auditStore: readiness.auditStore,
+        deletionTombstones: readiness.deletionTombstones,
       },
     });
   }
@@ -227,20 +346,57 @@ app.get("/api/ready", pollRateLimiter, async (req, res) => {
   // ir protokolo worker'iai gali būti ATSKIRI procesai/konteineriai, žr.
   // utils/workerHeartbeat.js) - kitaip jobai būtų priimami, bet liktų queued, nes
   // niekas jų neapdoroja. Inline režime nieko papildomo (viskas tame pačiame procese).
-  const { redisReachable, workers, sessionStoreReachable } = await probeRuntimeReadiness();
+  const {
+    redisReachable,
+    workers,
+    sessionStoreReachable,
+    auditStoreReachable,
+    auditBarrierReachable,
+    auditKeysResolvable,
+    tombstonesReachable,
+  } = await probeRuntimeReadiness();
   const workerAlive = workers.transcription && workers.protocol;
 
-  const ready = initReady && redisReachable && workerAlive && sessionStoreReachable;
+  const ready =
+    initReady &&
+    redisReachable &&
+    workerAlive &&
+    sessionStoreReachable &&
+    auditStoreReachable &&
+    auditBarrierReachable &&
+    auditKeysResolvable &&
+    tombstonesReachable;
+
   res.status(ready ? 200 : 503).json({
     ready,
     components: {
       jobStore: readiness.jobStore,
       jobRunner: readiness.jobRunner,
       sessionReconcile: readiness.sessionReconcile,
+      auditStore: readiness.auditStore,
+      deletionTombstones: readiness.deletionTombstones,
       redisReachable, // BullMQ režime rodo realų Redis ryšį; inline - visada true
       workerAlive,    // BullMQ režime: true TIK jei ABU worker tipai gyvi; inline - visada true
       workers,        // detali būsena PER TIPĄ - kuri konkrečiai eilė (jei kuri) neturi gyvo worker'io
       sessionStoreReachable, // GYVA sesijų autoriteto būsena; atmintyje - visada true
+      auditStoreReachable,   // GYVA audito saugyklos būsena su TEISIŲ patikra; atmintyje - visada true
+      /**
+       * ⚠️ ATSKIRA PRIEŽASTIS (#216): ar `erasure_marks` pasiekiama per AUDITO
+       * jungtį. `false` reiškia, kad barjeras kris vykdymo metu, nors audito
+       * saugykla veikia. Atmintyje - visada true. Rodoma TIK būsena, be jokio
+       * pranešimo: detales neša serverio logas, ne readiness atsakymas.
+       */
+      auditBarrierReachable,
+      /**
+       * ⚠️ STARTO MOMENTO SNAPSHOT'AS, ne gyva būsena. `false` reiškia, kad
+       * procesas pakilo su `AUDIT_ALLOW_UNRESOLVABLE_KEY_GENERATIONS=true`, ir
+       * dalies įrašų GDPR ištrynimas nebepasiekia. Generacijų sąrašas ČIA
+       * NERODOMAS - jis yra `hash_key_id` etikečių aibė, o readiness atsakymas
+       * yra viešesnis nei logai.
+       */
+      auditKeysResolvable,
+      /** GYVA ištrynimo žymų būsena su TEISIŲ patikra; atmintyje - visada true. */
+      tombstonesReachable,
     },
   });
 });
@@ -292,6 +448,19 @@ app.get("/api/health", pollRateLimiter, (req, res) => {
  * tai, ko #14 reikalauja išvengti.
  */
 app.get("/api/health/deep", pollRateLimiter, async (req, res) => {
+  /**
+   * ⚠️ PREFLIGHT VERDIKTAS RODOMAS ČIA, NE `/api/ready`.
+   *
+   * `/api/ready` kontraktas (patikrintas `auditReadiness.route`) reikalauja, kad
+   * komponentai būtų LOGINĖS BŪSENOS be infrastruktūros detalių — o preflight
+   * priežastis būtent tokia detalė ir yra (`ECONNREFUSED`, adresas, timeout).
+   * Įdėjus ją ten, readiness virstų diagnostikos kanalu, kurio kontraktas
+   * sąmoningai neleidžia.
+   *
+   * Deep health ir `doctor` yra operatoriaus paviršius — ten priežastis ne tik
+   * leidžiama, bet ir reikalinga: ji atsako į klausimą „kodėl režimas `inline`,
+   * nors `REDIS_URL` nustatytas", į kurį iki #155 atsakymo nebuvo.
+   */
   const isProduction = process.env.NODE_ENV === "production";
   const authorized = process.env.AUDIT_API_KEY && req.header("x-audit-key") === process.env.AUDIT_API_KEY;
   if (isProduction && !authorized) {
@@ -362,6 +531,36 @@ async function startServer({ port, listen, onStep } = {}) {
     `Sesijų saugykla: ${sessionStore.backend} ` +
       `(suderinta ${suderinimas.patikrinta}, revokuota ${suderinimas.revokuota})`
   );
+
+  /**
+   * 1c. AUDITO AUTORITETAS - PRIEŠ `app.listen()` (#155, 7.4b).
+   *
+   * ⚠️ FAIL-CLOSED. `AUDIT_BACKEND=postgres` su nepasiekiama DB, netaikyta
+   * migracija, trūkstamu invariantu ar nukritusiu append-only trigeriu NUTRAUKIA
+   * startą. Tylus grįžimas į atmintį reikštų, kad operatorius paprašė
+   * persistentinio audito, servisas pakilo, o žurnalas dingsta per restartą -
+   * ir tai paaiškėtų tik tada, kai audito prireiks.
+   *
+   * ⚠️ PRIEŠ `listen()`, ne po. Auditas rašomas iš `/api/auth/login` - kelio,
+   * kuris prijungtas be `requireJobSystemReady`. Inicijavus jį fone, tame lange
+   * blokuojantis autentikacijos įvykis kristų su `AUDIT_WRITE_FAILED`.
+   */
+  await auditStore.init();
+  step("auditStore.init");
+
+  /**
+   * ⚠️ ŽYMOS INICIJUOJAMOS ANKSTI, NORS `init()` YRA LAZY (#183 Codex, P1).
+   *
+   * Lazy kelias lieka skriptams ir worker'iams, kurie HTTP starto neturi. Bet
+   * HTTP procesui „pirmas kvietėjas inicijuoja" reiškia, kad neveikianti DB
+   * paaiškėtų tik apdorojant job'ą - jau priėmus srautą. Fail-closed: klaida
+   * nutraukia startą, kaip ir `auditStore`.
+   */
+  await deletionTombstones.init();
+  step("deletionTombstones.init");
+  readiness.deletionTombstones = true;
+  log.info(`Audito saugykla: ${auditStore.backend()}`);
+  readiness.auditStore = true;
 
   /**
    * 2. Job runner.
@@ -438,4 +637,32 @@ app._setReadyForTests = (value = true) => {
   readiness.jobStore = value;
   readiness.jobRunner = value;
   readiness.sessionReconcile = value;
+  /**
+   * ⚠️ `auditStore` ČIA PRIVALO BŪTI (#155, 7.4f).
+   *
+   * Nuo 7.4f `/api/ready` jo reikalauja. Palikus jį `false`, kiekvienas testas,
+   * kuris tik „pažymi sistemą paruošta", gautų 503 - ir tai atrodytų kaip
+   * readiness regresija, nors realiai trūktų vėliavos pačiame pagalbininke.
+   */
+  readiness.auditStore = value;
+
+  /**
+   * ⚠️ `deletionTombstones` - ta pati priežastis (#155, 7.5a / #183).
+   *
+   * Kiekvienas naujas readiness komponentas privalo atsirasti ir čia, kitaip
+   * „pažymėk paruošta" nustoja reikšti paruošta, ir dešimtys nesusijusių testų
+   * gauna 503 kaip tariamą regresiją.
+   */
+  readiness.deletionTombstones = value;
+};
+
+/**
+ * ⚠️ ATSKIRAS PAGALBININKAS AUDITO VĖLIAVAI (#155, 7.4f).
+ *
+ * `_setReadyForTests(false)` nuleidžia VISKĄ, tad readiness kristų ir be audito.
+ * Norint įrodyti, kad būtent `auditStore` įtrauktas į patikrą, reikia nuleisti
+ * TIK jį, paliekant kitus žalius.
+ */
+app._setAuditReadyForTests = (value = true) => {
+  readiness.auditStore = value;
 };

@@ -105,7 +105,7 @@ test("#159 FILTRAS: A negauna, nekeičia ir neištrina B job'o", async () => {
   assert.equal(await jobStore.update({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }, { attempt_count: 7 }), jobStore.FORBIDDEN);
   assert.equal(await jobStore.remove({ jobId: job.id, ownerId: A, ownerKind: OWNER_KIND.USER }), jobStore.FORBIDDEN);
 
-  const still = await jobStore.system.get(job.id);
+  const still = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(still, "svetimas job'as turi likti nepaliestas");
   assert.notEqual(still.status, "failed", "atmestas update neturi būti pritaikytas");
 });
@@ -170,7 +170,7 @@ test("#159 SYSTEM: sweep mato VISUS job'us nepriklausomai nuo savininko", async 
 test("#159 SYSTEM: get/update/remove veikia be owner konteksto", async () => {
   const job = await jobStore.create({ ownerId: B, ownerKind: OWNER_KIND.USER });
 
-  assert.ok(await jobStore.system.get(job.id), "worker'is neturi ir negali turėti ownerId");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "worker'is neturi ir negali turėti ownerId");
   assert.ok(await jobStore.system.restart(job.id));
   assert.equal(await jobStore.system.remove(job.id), true);
 });
@@ -546,7 +546,23 @@ test("#180 P2-2: postgresStore.updateOwned() rašo TIK patch'o stulpelius, nuosa
   assert.equal(pagauta.params[0], esamas.id);
   assert.equal(pagauta.params[1], scope.ownerId);
   assert.equal(pagauta.params[2], scope.ownerKind);
-  assert.equal(pagauta.params.length, 3 + stulpeliai.length,
+
+  /**
+   * 5) VERSIJOS SĄLYGA – TAME PAČIAME `WHERE`, ne antru round-trip'u (#184, 7.5b).
+   *
+   * ⚠️ Šis testas KRITO, kai buvo pridėtas ketvirtasis parametras – ir tai
+   * teisingas elgesys, ne trukdis: parametrų skaičiaus patikra egzistuoja būtent
+   * tam, kad nauja sąlyga negalėtų atsirasti nepastebėta. Todėl tikrinamas ne
+   * tik naujas skaičius, bet ir pati sąlygos FORMA.
+   *
+   * `$4::int IS NULL` šaka reiškia „sąlygos nėra": be `expectedVersion` elgesys
+   * lieka toks pat, koks buvo iki 7.5b.
+   */
+  assert.match(pagauta.sql, /\(\$4::int IS NULL OR version = \$4\)/,
+    "nuosavybė IR versija privalo būti viename UPDATE");
+  assert.equal(pagauta.params[3], null, "be `expectedVersion` sąlyga neaktyvi");
+
+  assert.equal(pagauta.params.length, 4 + stulpeliai.length,
     "parametrų skaičius privalo atitikti parametrizuotų SET stulpelių skaičių");
 });
 

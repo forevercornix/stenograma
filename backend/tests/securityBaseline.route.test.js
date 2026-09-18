@@ -558,21 +558,45 @@ test("QUERY: audito parametrai validuojami ir turi ribas", async () => {
   }
 });
 
-test("QUERY: auditas PUSLAPIUOJAMAS, ne grąžinamas visas", async () => {
+test("QUERY: auditas puslapiuojamas KURSORIUMI, o `offset` ATMETAMAS", async () => {
+  /**
+   * ⚠️ KONTRAKTAS PAKEISTAS 7.4c (#212), IR TAI SĄMONINGA.
+   *
+   * `OFFSET` neribotai augančioje lentelėje daro senesnius įrašus nepasiekiamus
+   * (ankstesnė riba - 1 000 000), o lygiagrečių INSERT'ų metu praleidžia arba
+   * dubliuoja eilutes. Keyset kursorius abu dalykus išsprendžia.
+   *
+   * `offset` atmetimas NĖRA šalutinis efektas: `auditQuery` yra `.strict()`, tad
+   * pašalinus lauką iš schemos parametras savaime tampa 400 - bet tai vis tiek
+   * politikos sprendimas, tad tikrinamas eksplicitiškai.
+   */
   const saved = process.env.AUDIT_API_KEY;
   delete process.env.AUDIT_API_KEY;
 
   try {
-    const res = await request(app).get("/api/audit?limit=2&offset=0");
+    const res = await request(app).get("/api/audit?limit=2");
 
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.body.entries));
     assert.ok(res.body.entries.length <= 2, "limitas turi būti taikomas");
-
-    // Be `total` puslapiavimas būtų aklas - klientas nežinotų, ar yra daugiau.
-    assert.equal(typeof res.body.total, "number");
     assert.equal(res.body.limit, 2);
-    assert.equal(res.body.offset, 0);
+
+    /** `next_cursor` yra arba opaque tokenas, arba `null` - trečio varianto nėra. */
+    assert.ok(
+      res.body.next_cursor === null || typeof res.body.next_cursor === "string",
+      "`next_cursor` privalo būti tokenas arba null"
+    );
+
+    /** ⚠️ `total` pašalintas: keyset režime jis reikštų COUNT kiekvienam puslapiui. */
+    assert.equal(res.body.total, undefined, "`total` nebėra kontrakto dalis");
+    assert.equal(res.body.offset, undefined, "`offset` nebėra kontrakto dalis");
+
+    const suOffset = await request(app).get("/api/audit?limit=2&offset=0");
+    assert.equal(suOffset.status, 400, "`offset` privalo būti ATMETAMAS, ne tyliai ignoruojamas");
+
+    /** Senasis `event` parametro vardas irgi nebepriimamas - vienas vardas filtrui. */
+    const suEvent = await request(app).get("/api/audit?event=LOGIN_SUCCESS");
+    assert.equal(suEvent.status, 400, "`event` pakeistas į `action`");
   } finally {
     if (saved !== undefined) process.env.AUDIT_API_KEY = saved;
   }

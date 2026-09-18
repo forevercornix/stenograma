@@ -199,7 +199,7 @@ test("#153 LIFECYCLE: viršijus ribą job'as pereina į TERMINALŲ failed", asyn
     new ResultLimitError({ kind: K.TRANSCRIPT_BYTES, limit: 10, actual: 999 })
   );
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
   assert.equal(po.status, jobStore.STATUS.FAILED, "NE processing");
   assert.equal(po.error_code, "RESULT_TOO_LARGE");
   assert.equal(po.result, null, "rezultato artefaktas neišsaugotas");
@@ -222,7 +222,7 @@ test("#153 LIFECYCLE: job metaduomenys LIEKA, kad priežastis būtų matoma", as
     new ResultLimitError({ kind: K.RESULT_BYTES, limit: 1, actual: 2 })
   );
 
-  const po = await jobStore.system.get(job.id);
+  const po = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(po, "job įrašas turi likti");
   assert.ok(po.error, "su klaidos pranešimu");
   assert.ok(po.updatedAt, "ir laiko žyma");

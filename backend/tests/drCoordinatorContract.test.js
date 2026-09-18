@@ -1,0 +1,385 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+process.env.NODE_ENV = "test";
+process.env.LOG_LEVEL = "error";
+
+const drCoordinator = require("../utils/drCoordinator");
+const auditLog = require("../utils/auditLog");
+
+/**
+ * 7.6c DR SEKOS IR OVERRIDE KONTRAKTAS (#155, #250).
+ *
+ * ⚠️ SEKA TIKRINAMA KRITIMU, NE STEBĖJIMU.
+ *
+ * Testas, skaičiuojantis, kiek kartų buvo kviesta funkcija, tikrina REALIZACIJĄ.
+ * Čia tikrinama GARANTIJA: žingsnis, gavęs ne to žingsnio rezultatą, KRENTA. Todėl
+ * kiekvienam sekos raktui yra ir kontrolė — tikras rezultatas praeina, kitaip
+ * testas praeitų ir tada, jei sargas atmestų VISKĄ.
+ */
+
+const CHECKSUM = "a".repeat(64);
+
+function tikrasMerge() {
+  return { zingsnis: "merge", zurnaloChecksum: CHECKSUM, zymos: [], sulietos: [], praleistos: [] };
+}
+
+function tikrasReplay() {
+  return { zingsnis: "replay", zurnaloChecksum: CHECKSUM, istrinta: [], jauNebuvo: [], nesekmes: [] };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 1. SEKA
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("SEKA: replay be suliejimo rezultato KRENTA", () => {
+  for (const bloga of [undefined, null, {}, { zingsnis: "replay", zurnaloChecksum: CHECKSUM, zymos: [] }, { zingsnis: "merge", zymos: [] }]) {
+    assert.throws(
+      () => drCoordinator._patikrintiMerge(bloga),
+      (k) => k.code === "DR_SEQUENCE_VIOLATION",
+      `neteisingas įėjimas praėjo: ${JSON.stringify(bloga)}`
+    );
+  }
+});
+
+test("SEKA: tikras suliejimo rezultatas PRAEINA (kontrolė)", () => {
+  assert.doesNotThrow(() => drCoordinator._patikrintiMerge(tikrasMerge()));
+});
+
+test("SEKA: suderinimas be replay rezultato KRENTA", () => {
+  for (const bloga of [undefined, null, {}, { zingsnis: "merge", zurnaloChecksum: CHECKSUM }, { zingsnis: "replay" }]) {
+    assert.throws(
+      () => drCoordinator._patikrintiReplay(bloga),
+      (k) => k.code === "DR_SEQUENCE_VIOLATION"
+    );
+  }
+});
+
+test("SEKA: tikras replay rezultatas PRAEINA (kontrolė)", () => {
+  assert.doesNotThrow(() => drCoordinator._patikrintiReplay(tikrasReplay()));
+});
+
+test("SEKA: `replay()` su svetimu objektu krenta PRIEŠ bet kokį trynimą", async () => {
+  await assert.rejects(
+    () => drCoordinator.replay({ merge: { zingsnis: "merge", zymos: [{ jobId: "x", status: "deletion_pending" }] } }),
+    (k) => k.code === "DR_SEQUENCE_VIOLATION",
+    "be `zurnaloChecksum` rankomis sukurtas objektas sekos nepraeina"
+  );
+});
+
+test("SAUGYKLA: replay be tikslinės bazės kliento KRENTA", async () => {
+  /**
+   * ⚠️ TYLUS GRĮŽIMAS PRIE FASADO BŪTŲ VAKUUMAS.
+   *
+   * Testinėje aplinkoje fasado autoritetas yra atmintis (`JOB_STORE_BACKEND`
+   * nenurodytas), tad replay per fasadą atkurtos bazės eilučių NEPALIESTŲ — o
+   * kvitas skelbtų sėkmę. Todėl klientas privalomas, ne numatytas.
+   *
+   * ⚠️ IR PO #155 TAI SVARBIAU, NE MAŽIAU: barjeras atidarytas, tad diegimas
+   * GALI turėti `postgres` fasadą — bet tada replay eitų į PRODUKCINĘ, ne į
+   * atkurtą bazę. Nukreipimas privalomas abiem atvejais, tik žala skirtinga.
+   */
+  await assert.rejects(
+    () => drCoordinator.replay({ merge: tikrasMerge() }),
+    (k) => k.code === "DR_REPLAY_STORE_MISSING"
+  );
+
+  await assert.rejects(
+    () => drCoordinator.replay({ merge: tikrasMerge(), vykdytojas: { query: "ne funkcija" } }),
+    (k) => k.code === "DR_REPLAY_STORE_MISSING"
+  );
+});
+
+test("SAUGYKLA: su klientu replay PRAEINA (kontrolė)", async () => {
+  /** Tuščias žymų sąrašas: tikrinamas sargas, ne trynimas — DB čia neliečiama. */
+  const rez = await drCoordinator.replay({
+    merge: tikrasMerge(),
+    vykdytojas: { query: async () => ({ rows: [] }) },
+  });
+
+  assert.equal(rez.zingsnis, "replay");
+  assert.deepEqual(rez.istrinta, []);
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 2. PASENUSIO ŽURNALO OVERRIDE — ABI LAIKMENOS
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const SARGAI = Object.freeze({
+  amzius: 25 * 3_600_000,
+  langas: 24 * 3_600_000,
+  deploymentId: "11111111-1111-4111-8111-111111111111",
+  zurnaloChecksum: CHECKSUM,
+});
+
+const ZURNALAS = Object.freeze({ zymos: [] });
+
+/** Audito dublis: `rasytiAudita()` politika lieka tikra, keičiasi tik REŽIMAS ir rezultatas. */
+function auditoDublis({ privacy = false } = {}) {
+  return { isPrivacyModeEnabled: () => privacy };
+}
+
+test("OVERRIDE (auditas): kvitas įrašomas → priėmimas tęsiasi ir laikmena įvardyta", async () => {
+  await auditLog.clear();
+
+  const rez = await drCoordinator._uzfiksuotiOverride({
+    sargai: SARGAI,
+    zurnalas: ZURNALAS,
+    actor: "op",
+    patvirtinimas: null,
+    auditLog: auditoDublis(),
+  });
+
+  assert.equal(rez.laikmena, "audito_irasas");
+  assert.equal(rez.pasenimoValandos, 25);
+
+  const { entries } = await auditLog.query({ limit: 50 });
+  const kvitai = (entries || []).filter((e) => e.event === drCoordinator.SVIEZUMO_OVERRIDE_IVYKIS);
+  assert.equal(kvitai.length, 1, "pėdsakas realiai gulė į auditą");
+});
+
+test("OVERRIDE (auditas): kvito NĖRA → priėmimas NETĘSIAMAS", async () => {
+  /**
+   * ⚠️ `PRIVACY_MODE` čia išjungtas, tad `null` gali reikšti TIK gedimą — būtent
+   * tai daro šį fail-closed vienareikšmiu.
+   */
+  const auditStore = require("../utils/auditStore");
+  const tikrasis = auditStore.current;
+  auditStore.current = () => ({ async append() { return null; }, async query() { return { entries: [], total: 0 }; } });
+
+  try {
+    await assert.rejects(
+      () =>
+        drCoordinator._uzfiksuotiOverride({
+          sargai: SARGAI,
+          zurnalas: ZURNALAS,
+          actor: "op",
+          patvirtinimas: null,
+          auditLog: auditoDublis(),
+        }),
+      (k) => k.code === "DR_STALE_OVERRIDE_UNRECORDED",
+      "sąmoningas rizikos prisiėmimas be pėdsako neleidžiamas"
+    );
+  } finally {
+    auditStore.current = tikrasis;
+  }
+});
+
+test("OVERRIDE (privatumas): be patvirtinimo KRENTA, o klaida neša laukiamas reikšmes", async () => {
+  await assert.rejects(
+    () =>
+      drCoordinator._uzfiksuotiOverride({
+        sargai: SARGAI,
+        zurnalas: ZURNALAS,
+        actor: "op",
+        patvirtinimas: null,
+        auditLog: auditoDublis({ privacy: true }),
+      }),
+    (k) =>
+      k.code === "DR_STALE_OVERRIDE_UNCONFIRMED" &&
+      k.message.includes(CHECKSUM) &&
+      k.message.includes("pasenimoValandos=25"),
+    "be reikšmių operatorius neturėtų iš kur jų gauti"
+  );
+});
+
+test("OVERRIDE (privatumas): sutampantis patvirtinimas PRAEINA (kontrolė)", async () => {
+  const rez = await drCoordinator._uzfiksuotiOverride({
+    sargai: SARGAI,
+    zurnalas: ZURNALAS,
+    actor: "op",
+    patvirtinimas: {
+      deploymentId: SARGAI.deploymentId,
+      zurnaloChecksum: SARGAI.zurnaloChecksum,
+      pasenimoValandos: 25,
+    },
+    auditLog: auditoDublis({ privacy: true }),
+  });
+
+  assert.equal(rez.laikmena, "operatoriaus_patvirtinimas");
+  assert.equal(rez.pasenimoValandos, 25);
+});
+
+test("OVERRIDE (privatumas): kiekvienas neteisingas laukas atskirai KRENTA", async () => {
+  const teisingas = {
+    deploymentId: SARGAI.deploymentId,
+    zurnaloChecksum: SARGAI.zurnaloChecksum,
+    pasenimoValandos: 25,
+  };
+
+  /**
+   * ⚠️ KIEKVIENAS LAUKAS ATSKIRAI. Vienas „blogas patvirtinimas" praeitų ir tada,
+   * jei lygintume tik vieną iš trijų — o `--yes` su teisingu checksum'u būtų
+   * tiksliai tas apėjimas, kurio šis sargas neturi leisti.
+   */
+  const blogi = [
+    { ...teisingas, deploymentId: "22222222-2222-4222-8222-222222222222" },
+    { ...teisingas, zurnaloChecksum: "b".repeat(64) },
+    { ...teisingas, pasenimoValandos: 24 },
+    { ...teisingas, pasenimoValandos: 26 },
+  ];
+
+  for (const patvirtinimas of blogi) {
+    await assert.rejects(
+      () =>
+        drCoordinator._uzfiksuotiOverride({
+          sargai: SARGAI,
+          zurnalas: ZURNALAS,
+          actor: "op",
+          patvirtinimas,
+          auditLog: auditoDublis({ privacy: true }),
+        }),
+      (k) => k.code === "DR_STALE_OVERRIDE_UNCONFIRMED",
+      `praėjo neteisingas patvirtinimas: ${JSON.stringify(patvirtinimas)}`
+    );
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 3. ŠVIEŽUMO LANGAS
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+test("LANGAS: numatytasis 24 h, override iš aplinkos, šiukšlės grąžina numatytąjį", () => {
+  assert.equal(drCoordinator.NUMATYTAS_SVIEZUMO_LANGAS_MS, 24 * 3_600_000);
+  assert.equal(drCoordinator.sviezumoLangasMs({}), 24 * 3_600_000);
+  assert.equal(drCoordinator.sviezumoLangasMs({ ERASURE_EXPORT_MAX_AGE_MS: "3600000" }), 3_600_000);
+  assert.equal(drCoordinator.sviezumoLangasMs({ ERASURE_EXPORT_MAX_AGE_MS: "ne skaičius" }), 24 * 3_600_000);
+  assert.equal(drCoordinator.sviezumoLangasMs({ ERASURE_EXPORT_MAX_AGE_MS: "-5" }), 24 * 3_600_000);
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 4. TEIGIAMAS OVERRIDE KELIAS PER `paleisti()` (#250, Codex peržiūra)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ KODĖL ŠIS TESTAS ATSIRADO.
+ *
+ * Override šakos buvo padengtos tik `_uzfiksuotiOverride()` lygyje ir tik
+ * NEIGIAMOS (`UNRECORDED`, `UNCONFIRMED`). Dėl to liko nepastebėta, kad
+ * `paleisti()` apskritai NEPRIIMDAVO `patvirtinimas` — CLI jį perduodavo,
+ * o seka jį numesdavo. `PRIVACY_MODE` diegime teisėto atsigavimo su pasenusiu
+ * žurnalu NEBUVO IŠVIS.
+ *
+ * Testas eina per TIKRĄ `paleisti()`, ne per vidinę funkciją: būtent tarp jų ir
+ * dingdavo argumentas.
+ */
+function pasenesArtefaktas(deploymentId) {
+  const erasureExport = require("../utils/erasureExport");
+
+  const artefaktas = erasureExport.sudarytiArtefakta({
+    zymos: [],
+    horizontas: null,
+    saltinis: "testas",
+    deploymentId,
+    env: process.env,
+  });
+
+  /**
+   * ⚠️ SENUMAS GAUNAMAS PER APLINKĄ, NE PERRAŠANT ARTEFAKTĄ. Turinys
+   * autentifikuojamas GCM, tad `eksportuotaMs` keitimas jį sulaužytų — ir testas
+   * tikrintų dešifravimą, ne šviežumą.
+   */
+  return artefaktas;
+}
+
+test("OVERRIDE per `paleisti()`: patvirtinimas PASIEKIA sargą", async () => {
+  const crypto = require("node:crypto");
+  const DEPLOYMENT = "33333333-3333-4333-8333-333333333333";
+
+  const senas = { ...process.env };
+  Object.assign(process.env, {
+    DATABASE_URL: "postgres://u:p@127.0.0.1:1/nera",
+    AUDIT_BACKEND: "postgres",
+    AUDIT_ID_SALT: crypto.randomBytes(32).toString("hex"),
+    AUDIT_ID_SALT_ID: "2026-09",
+    BACKUP_ENABLED: "true",
+    BACKUP_ENCRYPTION_KEY: crypto.randomBytes(32).toString("hex"),
+    /**
+     * ⚠️ 1 ms LANGAS PATS SAVAIME NEPAKANKA (Codex, #288).
+     *
+     * Produkcija pasenusiu laiko `amzius > langas`, tad greitame paleidime
+     * artefaktas gali nespėti „pasenti" ir testas kristų dėl visai kitos
+     * priežasties. Todėl žemiau dar sąmoningai palaukiama — riba peržengiama
+     * DETERMINISTIŠKAI, ne pagal planuoklio nuotaiką.
+     */
+    ERASURE_EXPORT_MAX_AGE_MS: "1",
+    PRIVACY_MODE: "true",
+  });
+
+  try {
+    const artefaktas = pasenesArtefaktas(DEPLOYMENT);
+
+    /** Peržengiame 1 ms ribą su atsarga — be to `amzius > langas` būtų lenktynės. */
+    await new Promise((r) => setTimeout(r, 25));
+
+    const vykdytojas = { query: async () => ({ rows: [{ deployment_id: DEPLOYMENT }] }) };
+
+    const bendri = {
+      targetUrl: process.env.DATABASE_URL,
+      artefaktas,
+      vykdytojas,
+      actor: "op",
+      env: process.env,
+      leistiPasenusi: true,
+    };
+
+    /** (a) BE patvirtinimo — kelias privalo sustoti čia. */
+    const bePatvirtinimo = await drCoordinator
+      .paleisti(bendri)
+      .then(() => null)
+      .catch((k) => k);
+
+    assert.equal(
+      bePatvirtinimo && bePatvirtinimo.code,
+      "DR_STALE_OVERRIDE_UNCONFIRMED",
+      "be patvirtinimo `PRIVACY_MODE` kelias nesitęsia"
+    );
+
+    /**
+     * (b) SU teisingu patvirtinimu — sargas PRALEIDŽIA.
+     *
+     * Toliau seka krenta ties nepasiekiama baze, ir tai teisinga: šis testas
+     * įrodo, kad argumentas pasiekia sargą, o ne kad DR veikia be DB. Pilnas
+     * teigiamas praėjimas iki `verify` gyvena `drRestore.integration`.
+     */
+    const sargai = await drCoordinator.patikrintiSargus({
+      targetUrl: bendri.targetUrl,
+      artefaktas,
+      vykdytojas,
+      env: process.env,
+      leistiPasenusi: true,
+    });
+
+    const suPatvirtinimu = await drCoordinator
+      .paleisti({
+        ...bendri,
+        patvirtinimas: {
+          deploymentId: DEPLOYMENT,
+          zurnaloChecksum: sargai.zurnaloChecksum,
+          pasenimoValandos: Math.floor(sargai.amzius / 3_600_000),
+        },
+      })
+      .then(() => null)
+      .catch((k) => k);
+
+    assert.notEqual(
+      suPatvirtinimu && suPatvirtinimu.code,
+      "DR_STALE_OVERRIDE_UNCONFIRMED",
+      "teisingas patvirtinimas privalo PASIEKTI sargą — anksčiau jis dingdavo `paleisti()` viduje"
+    );
+  } finally {
+    for (const raktas of [
+      "DATABASE_URL",
+      "AUDIT_BACKEND",
+      "AUDIT_ID_SALT",
+      "AUDIT_ID_SALT_ID",
+      "BACKUP_ENABLED",
+      "BACKUP_ENCRYPTION_KEY",
+      "ERASURE_EXPORT_MAX_AGE_MS",
+      "PRIVACY_MODE",
+    ]) {
+      if (senas[raktas] === undefined) delete process.env[raktas];
+      else process.env[raktas] = senas[raktas];
+    }
+  }
+});
