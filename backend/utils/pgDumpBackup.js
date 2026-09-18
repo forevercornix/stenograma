@@ -13,6 +13,8 @@ const {
   pgJungtiesNustatymai,
   vaikinioProcesoKliutys,
   vaikinioProcesoKliuciuTekstas,
+  arConninfoReiksme,
+  conninfoTekstas,
 } = require("./pgConnection");
 const privacyConfig = require("./privacyConfig");
 const tombstones = require("./deletionTombstones");
@@ -122,7 +124,27 @@ const PG_DUMP_ARGUMENTAI = (taikinys) => {
   const veliavos = [];
   /** Tvarka stabili: testas lygina argumentų seką, ne aibę. */
   if (taikinys.host !== undefined) veliavos.push("-h", String(taikinys.host));
-  if (taikinys.port !== undefined) veliavos.push("-p", String(taikinys.port));
+
+  /**
+   * ⚠️ PORTAS - TA PATI „NENUSTATYTA" SEMANTIKA ABIEJOSE PUSĖSE (Codex II, B1).
+   *
+   * `PGPORT=""` `pgJungtiesNustatymai()` paverčia SKAITINIU `0`, o Node `pg`
+   * falsy reikšmę laiko nesančia ir sprendžia `5432`. Be šios patikros vėliavose
+   * atsirasdavo `-p 0`, kurį `pg_dump` atmeta - tad modelis sakė `5432`, o
+   * vaikinis procesas krisdavo.
+   *
+   * ⚠️ IR PREFLIGHT TAPATYBĖ TO NEPAGAUDAVO: ji abi puses sprendžia per tą pačią
+   * falsy taisyklę, tad matė `5432` ↔ `5432` ir praleisdavo. Dvi skirtingos
+   * „nenustatyta" semantikos tame pačiame kelyje.
+   *
+   * Sprendimas: vėliava rašoma TIK tada, kai portas yra baigtinis teigiamas
+   * skaičius. Kitaip jis laikomas nenurodytu - lygiai kaip `pg`.
+   */
+  const portas = Number(taikinys.port);
+  if (taikinys.port !== undefined && Number.isFinite(portas) && portas > 0) {
+    veliavos.push("-p", String(portas));
+  }
+
   if (taikinys.user !== undefined) veliavos.push("-U", String(taikinys.user));
   if (taikinys.database !== undefined) veliavos.push("-d", String(taikinys.database));
 
@@ -391,6 +413,32 @@ function _pgTaikinysIsAplinkos(env) {
    * slaptažodžiui nutekėti į `argv`.
    */
   const { password: _nenaudojamas, ...nustatymai } = pgJungtiesNustatymai(env);
+
+  /**
+   * ⚠️ `connectionString` FORMA GRĄŽINAMA KAIP POZICINIS TAIKINYS (Codex II, A2).
+   *
+   * `pgJungtiesNustatymai()` su `DATABASE_URL` grąžina `{connectionString}`, o ne
+   * atskirus laukus. Pirmoji redakcija tą objektą paduodavo vėliavų
+   * konstruktoriui, kuris moka tik `host`/`port`/`user`/`database` — tad
+   * `pg_dump` NEGAUDAVO TAIKINIO IŠ VISO ir jungdavosi prie numatytosios lokalios
+   * bazės, o tapatybės patikra tuo metu patvirtindavo nurodytą URL.
+   *
+   * ⚠️ TAI BUVO REGRESIJA ESAMAME KELYJE, ne naujo kelio trūkumas: paveikti
+   * programiniai kvietėjai, paduodantys `env.DATABASE_URL` be `databaseUrl`.
+   *
+   * Grąžinus eilutę, taikinys eina tuo pačiu POZICINIU keliu kaip `--url`, ir
+   * kartu atgauna PILNĄ `arTaPatiBaze()` palyginimą.
+   */
+  if (nustatymai.connectionString) return nustatymai.connectionString;
+
+  /**
+   * ⚠️ CONNINFO TEN, KUR LAUKIAMAS VARDAS (Codex II, A1). Žr. `arConninfoReiksme()`
+   * — reikšmė atmetama, ne escape'inama.
+   */
+  if (arConninfoReiksme(nustatymai.database)) {
+    throw new PgDumpBackupError(conninfoTekstas("PGDATABASE"), "PG_DUMP_CONNINFO_IN_NAME");
+  }
+
   return nustatymai;
 }
 
@@ -405,9 +453,11 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
    *
    * ⚠️ PRIORITETAS NEKINTA: eksplicitinis `--url`/`DATABASE_URL` perrašo `PG*`,
    * ir jam riba netaikoma (ten URL yra vienintelis šaltinis pagal sutartį).
+   *
+   * ⚠️ TVARKA (Codex II, C1): sprendimas (`BACKUP_ENABLED`) → artefakto savybė
+   * (šifravimas) → TAIKINYS → tapatumas → darbas. Taikinys yra KONFIGŪRACIJOS
+   * klausimas, tad eina po abiejų SPRENDIMO klausimų.
    */
-  const taikinys = databaseUrl || _pgTaikinysIsAplinkos(env);
-
   /**
    * ⚠️ ADMINISTRACINIS JUNGIKLIS TIKRINAMAS PIRMAS (Codex P1).
    *
@@ -462,6 +512,21 @@ async function sukurtiSifruotaKopija({ databaseUrl, actor = null, env = process.
    * dump'o būtų teisingas, bet brangus, o klaida - ta pati. Tvarka: sprendimas
    * (`BACKUP_ENABLED`) → artefakto savybė (šifravimas) → tapatumas → darbas.
    */
+
+  /**
+   * ⚠️ TAIKINYS SPRENDŽIAMAS PO POLITIKOS (Codex II, C1).
+   *
+   * Pirmoji redakcija jį sprendė PIRMA. Pasekmė: su išjungtomis kopijomis IR
+   * nepernešama `PG*` konfigūracija operatorius gaudavo `PG_DUMP_ENV_NOT_PORTABLE`
+   * ir imdavo taisyti kredencialus, nors tikroji priežastis buvo administracinis
+   * jungiklis — ir jokia aplinkos pataisa jam nebūtų padėjusi.
+   *
+   * Tvarka, kurią jau deklaruoja komentaras žemiau: sprendimas (`BACKUP_ENABLED`)
+   * → artefakto savybė (šifravimas) → taikinys → tapatumas → darbas. Taikinys yra
+   * KONFIGŪRACIJOS klausimas, tad jis eina po abiejų SPRENDIMO klausimų.
+   */
+  const taikinys = databaseUrl || _pgTaikinysIsAplinkos(env);
+
   patikrintiZymuTapatuma(taikinys);
 
   const snapshotTime = Date.now();

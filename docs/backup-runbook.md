@@ -467,6 +467,17 @@ atrodytų kaip sėkmė. Todėl atsisakoma, o ne spėjama.
 `PG*`. `PGPASSWORD` yra kliūtis sąmoningai: jį perduoti būtų galima tik DSN'e, o
 tai atvestų slaptažodį į `argv`, matomą `ps` išvestyje.
 
+⚠️ **`PG_` yra aplikacijos erdvė, ne libpq.** Repo savas `PG_CONNECT_TIMEOUT_MS`
+dump'o **nestabdo**: libpq vardų erdvėje po `PG` visada eina raidė (`PGHOST`,
+`PGSSLMODE`, net `PGCONNECT_TIMEOUT` — pabraukimas viduje). Tai **stebėjimas apie
+vardų konvenciją, ne garantija**, todėl jį saugo liudytojo testas — atsiradus
+libpq kintamajam su `PG_`, sargas kris.
+
+⚠️ **`PGDATABASE` privalo būti VARDAS, ne connection string.** Reikšmė su `=` arba
+prasidedanti `postgres://` atmetama (`PG_DUMP_CONNINFO_IN_NAME`): `pg_dump -d` ją
+išskleistų, ir jos parametrai **perrašytų** `-h`/`-p`/`-U`, o Node `pg` tą pačią
+reikšmę laiko literaliu vardu. Išmatuota su PostgreSQL 16.15.
+
 ⚠️ **Nauja libpq aplinkos savybė kliūtimi tampa automatiškai** — sąlyga išvedama
 iš `PG_ATITIKMENYS`, ne surašyta. Priežiūros nereikia.
 

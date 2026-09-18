@@ -32,11 +32,23 @@ const { vaikinioProcesoKliutys } = require("../utils/pgConnection");
 
 const PG_BAZE = { PGHOST: "db.vidinis", PGPORT: "6543", PGUSER: "kopijuotojas", PGDATABASE: "stenograma" };
 
-/** Aplinka be jokių `PG*` - kad testo tarpusavio nutekėjimo nebūtų. */
+/**
+ * ⚠️ ŠVARI APLINKA APIMA IR `DATABASE_URL` (Codex II, C2).
+ *
+ * Pirmoji redakcija šalino tik `PG*`, ir `DATABASE_URL` likdavo. Paleidus rinkinį
+ * shell'e su nustatytu `DATABASE_URL`, TRYS iš dešimties testų krisdavo -
+ * įskaitant centrinę vėliavų aserciją, nes taikinys nukrypdavo į URL formą.
+ *
+ * ⚠️ TAI NUVERTINO NE VIENĄ TESTĄ, O VISĄ ŠIO PR ĮRODYMŲ BAZĘ: „10/10" reiškė
+ * „10/10 ten, kur `DATABASE_URL` nenustatytas". Operatoriaus mašinoje jis
+ * nustatytas beveik visada.
+ */
+const JUNGTIES_KINTAMIEJI = (raktas) => raktas.toUpperCase().startsWith("PG") || raktas === "DATABASE_URL";
+
 function svariProcesoAplinka() {
   const e = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (!k.toUpperCase().startsWith("PG")) e[k] = v;
+    if (!JUNGTIES_KINTAMIEJI(k)) e[k] = v;
   }
   return e;
 }
@@ -48,7 +60,7 @@ function svariProcesoAplinka() {
  * neeksportuojamas sąmoningai, ir kviesti jį apeinant `sukurtiSifruotaKopija()`
  * reikštų tikrinti savo pačios surinkimą, ne produkcinį.
  */
-async function suStubu(pgKintamieji, { url = undefined } = {}) {
+async function suStubu(pgKintamieji, { url = undefined, papildoma = {} } = {}) {
   const darbinis = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-264-"));
   const zurnalas = path.join(darbinis, "argv.json");
 
@@ -72,13 +84,32 @@ async function suStubu(pgKintamieji, { url = undefined } = {}) {
     PATH: `${darbinis}:${process.env.PATH}`,
     BACKUP_ENABLED: "true",
     BACKUP_ENCRYPTION_KEY: "a".repeat(64),
+    ...papildoma,
   };
 
+  /**
+   * ⚠️ VISŲ jungties kintamųjų snapshot'as ir IŠVALYMAS, ne tik `PG_BAZE` raktų.
+   *
+   * Žymų pusė skaitoma iš `process.env`, tad paveldėtas `DATABASE_URL` ar senas
+   * `PGSSLMODE` keistų būtent tą pusę, kurios testas netikrina eksplicitiškai -
+   * ir gedimas atrodytų kaip logikos klaida.
+   */
   const senosProceso = {};
-  for (const k of Object.keys(PG_BAZE)) senosProceso[k] = process.env[k];
-  /** Žymų pusė skaitoma iš `process.env` - tad ji turi atitikti taikinį. */
-  for (const [k, v] of Object.entries(pgKintamieji)) {
-    if (k.toUpperCase().startsWith("PG")) process.env[k] = v;
+  for (const k of Object.keys(process.env)) {
+    if (JUNGTIES_KINTAMIEJI(k)) {
+      senosProceso[k] = process.env[k];
+      delete process.env[k];
+    }
+  }
+
+  /**
+   * ⚠️ Į `process.env` atspindimi IR `PG*`, IR `DATABASE_URL`: žymų pusė
+   * (`patikrintiZymuTapatuma`) skaito GLOBALIĄ aplinką, ne injektuotą. Be to
+   * taikinys ir žymos rodytų į skirtingas vietas, ir testas kristų dėl tapatybės,
+   * o ne dėl to, ką tikrina.
+   */
+  for (const [k, v] of Object.entries({ ...pgKintamieji, ...papildoma })) {
+    if (JUNGTIES_KINTAMIEJI(k)) process.env[k] = v;
   }
 
   try {
@@ -92,11 +123,8 @@ async function suStubu(pgKintamieji, { url = undefined } = {}) {
     const irasyta = fs.existsSync(zurnalas) ? JSON.parse(fs.readFileSync(zurnalas, "utf8")) : null;
     return { klaida, irasyta };
   } finally {
-    for (const [k, v] of Object.entries(senosProceso)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-    for (const k of Object.keys(pgKintamieji)) if (!(k in senosProceso)) delete process.env[k];
+    for (const k of Object.keys(process.env)) if (JUNGTIES_KINTAMIEJI(k)) delete process.env[k];
+    for (const [k, v] of Object.entries(senosProceso)) process.env[k] = v;
     fs.rmSync(darbinis, { recursive: true, force: true });
   }
 }
@@ -221,4 +249,147 @@ test("#264 PRIORITETAS: eksplicitinis `--url` perrašo `PG*` ir ribos NEGAUNA", 
 
   assert.ok(irasyta, "su `--url` riba netaikoma, `pg_dump` privalo pasileisti");
   assert.equal(irasyta.argv.at(-1), url, "taikinys - pozicinis URL");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * ANTRAS CODEX RAUNDAS — A1, A2, B1, B2, C1
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+const { arConninfoReiksme, PG_ATITIKMENYS } = require("../utils/pgConnection");
+
+test("#264 A1: `PGDATABASE` su conninfo ATMETAMAS, ne escape'inamas", async () => {
+  /**
+   * ⚠️ TA PATI KLASĖ, KURIĄ ŠIS PR UŽDARO — JO PACIO VIDUJE.
+   *
+   * `pg_dump -d` priima connection string, ir jo parametrai PERRAŠO `-h`/`-p`/`-U`.
+   * Node `pg` tą pačią reikšmę laiko literaliu vardu. Išmatuota: tapatybė grąžina
+   * `host=safe.invalid`, o vaikinis procesas eitų į `other.invalid`.
+   *
+   * Forma identiška `PGHOSTADDR` (#245 P1): modelis ir vaikinis procesas tą PAČIĄ
+   * įvestį interpretuoja skirtingai.
+   */
+  const { klaida, irasyta } = await suStubu({
+    PGHOST: "safe.invalid",
+    PGUSER: "u",
+    PGDATABASE: "host=other.invalid dbname=x",
+  });
+
+  assert.equal(klaida?.code, "PG_DUMP_CONNINFO_IN_NAME");
+  assert.equal(irasyta, null, "⚠️ `pg_dump` NEGALI būti paleistas su conninfo vardo vietoje");
+  assert.match(klaida.message, /PERRAŠO|perrašo/, "tekstas privalo sakyti KODĖL, ne „netinkamas vardas\"");
+  /** ⚠️ Reikšmės tekste nėra: conninfo gali turėti `password=…`. */
+  assert.equal(klaida.message.includes("other.invalid"), false, "reikšmė klaidos tekste");
+});
+
+test("#264 A1: aptikimas IŠVESTAS — `=` arba URI prefiksas, ne sąrašas", () => {
+  for (const v of ["host=other dbname=x", "postgres://k/x", "postgresql://k/x", " dbname=x "]) {
+    assert.equal(arConninfoReiksme(v), true, `${v} yra conninfo`);
+  }
+  for (const v of ["stenograma", "my-db", "db_1", ""]) {
+    assert.equal(arConninfoReiksme(v), false, `${v} yra vardas`);
+  }
+});
+
+test("#264 A2: `DATABASE_URL` be `--url` — `pg_dump` GAUNA taikinį", async () => {
+  /**
+   * ⚠️ REGRESIJA ESAMAME KELYJE, ne naujo kelio trūkumas.
+   *
+   * `pgJungtiesNustatymai()` su `DATABASE_URL` grąžina `{connectionString}`, o
+   * vėliavų konstruktorius moka tik `host`/`port`/`user`/`database` — tad
+   * `pg_dump` negaudavo taikinio IŠ VISO ir jungdavosi prie numatytosios lokalios
+   * bazės, o tapatybės patikra tuo metu patvirtindavo nurodytą URL.
+   */
+  const url = "postgres://kopijuotojas@db.vidinis:6543/stenograma";
+  const { irasyta } = await suStubu({}, { papildoma: { DATABASE_URL: url } });
+
+  assert.ok(irasyta, "stub'as privalo būti paleistas");
+  assert.equal(irasyta.argv.at(-1), url, "⚠️ taikinys privalo pasiekti vaikinį procesą");
+  assert.equal(irasyta.argv.length, 4, `taikinys yra POZICINIS, be vėliavų: ${irasyta.argv.join(" ")}`);
+});
+
+test("#264 B1: `PGPORT=\"\"` — vėliavos BE `-p`, ta pati semantika kaip `pg`", async () => {
+  /**
+   * ⚠️ DVI „NENUSTATYTA" SEMANTIKOS TAME PAČIAME KELYJE.
+   *
+   * `pgJungtiesNustatymai()` tuščią reikšmę verčia SKAITINIU `0`, o Node `pg`
+   * falsy laiko nesančia ir sprendžia `5432`. Be patikros vėliavose atsirasdavo
+   * `-p 0`, kurį `pg_dump` atmeta — ir preflight tapatybė to NEPAGAUDAVO, nes abi
+   * jos pusės naudoja tą pačią falsy taisyklę.
+   */
+  const { irasyta } = await suStubu({ PGHOST: "db.vidinis", PGUSER: "u", PGDATABASE: "d", PGPORT: "" });
+
+  assert.ok(irasyta, "tuščias `PGPORT` neturi stabdyti - jis reiškia „nenurodyta\"");
+  assert.equal(irasyta.argv.includes("-p"), false, `⚠️ \`-p\` negali atsirasti: ${irasyta.argv.join(" ")}`);
+  assert.equal(irasyta.argv.includes("0"), false, "`-p 0` yra reikšmė, kurios `pg_dump` nepriima");
+});
+
+test("#264 B2: repo savas `PG_CONNECT_TIMEOUT_MS` dump'o NESTABDO", async () => {
+  /**
+   * ⚠️ KLAIDINGAS TEIGIAMAS, KURIS BŪTŲ SULAUŽĘS KIEKVIENĄ DUMP'Ą.
+   *
+   * `deletionTombstones/index.js:126` atgalinio suderinamumo atsarga prasideda
+   * `PG`, `PG_ATITIKMENYS` jos nėra — tad riba laikė ją libpq kintamuoju.
+   */
+  const { irasyta, klaida } = await suStubu({
+    PGHOST: "db.vidinis",
+    PGUSER: "u",
+    PGDATABASE: "d",
+    PG_CONNECT_TIMEOUT_MS: "5000",
+  });
+
+  /**
+   * ⚠️ TIKRINAMA RIBA, NE VISA PROCEDŪRA. Be tikros DB kelias vis tiek baigsis
+   * `PG_BACKUP_HORIZON_UNRECORDED` - tai laukiama ir NEsusiję su portabilumu.
+   * Svarbu, kad `pg_dump` BUVO pasiektas.
+   */
+  assert.notEqual(klaida?.code, "PG_DUMP_ENV_NOT_PORTABLE", "aplikacijos kintamasis neturi blokuoti");
+  assert.ok(irasyta, "`pg_dump` privalo būti pasiektas");
+});
+
+test("#264 B2 LIUDYTOJAS: vardų konvencija `PG` + raidė = libpq, `PG_` = aplikacija", () => {
+  /**
+   * ⚠️ PRIELAIDA SU LIUDYTOJU, NE GARANTIJA.
+   *
+   * Skirtumas tarp libpq ir aplikacijos kintamųjų remiasi STEBĖJIMU, kad libpq
+   * vardų erdvėje po `PG` visada eina raidė. Tai ne specifikacijos garantija.
+   *
+   * ⚠️ Šis testas yra tos prielaidos liudytojas: atsiradus libpq kintamajam su
+   * `PG_`, jis KRIS, ir taisyklė bus peržiūrėta — o ne tyliai praleis kintamąjį,
+   * kurį vaikinis procesas skaito.
+   */
+  const ZINOMI_LIBPQ = [
+    "PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPASSFILE",
+    "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS", "PGAPPNAME", "PGSSLMODE", "PGSSLCERT",
+    "PGSSLKEY", "PGSSLROOTCERT", "PGSSLCRL", "PGSSLNEGOTIATION", "PGREQUIREPEER",
+    "PGREQUIRESSL", "PGGSSENCMODE", "PGKRBSRVNAME", "PGGSSLIB", "PGCONNECT_TIMEOUT",
+    "PGCLIENTENCODING", "PGTARGETSESSIONATTRS", "PGTZ", "PGDATESTYLE", "PGGEQO",
+  ];
+
+  for (const vardas of ZINOMI_LIBPQ) {
+    assert.equal(
+      vardas.startsWith("PG_"),
+      false,
+      `⚠️ ${vardas} laužo prielaidą: libpq kintamasis su \`PG_\` reikštų, kad riba jį praleidžia`
+    );
+  }
+
+  for (const raktas of Object.keys(PG_ATITIKMENYS)) {
+    assert.equal(raktas.startsWith("PG_"), false, `${raktas} laužo tą pačią prielaidą`);
+  }
+});
+
+test("#264 C1: išjungtos kopijos duoda `BACKUP_DISABLED`, ne aplinkos klaidą", async () => {
+  /**
+   * ⚠️ TVARKA YRA OPERATORIAUS KLAUSIMAS, NE STILIAUS.
+   *
+   * Sprendus taikinį pirma, operatorius su išjungtomis kopijomis IR nepernešama
+   * `PG*` konfigūracija gaudavo `PG_DUMP_ENV_NOT_PORTABLE` ir imdavo taisyti
+   * kredencialus — nors jokia aplinkos pataisa nebūtų padėjusi.
+   */
+  const { klaida } = await suStubu(
+    { PGHOST: "db.vidinis", PGUSER: "u", PGDATABASE: "d", PGSSLMODE: "require" },
+    { papildoma: { BACKUP_ENABLED: "false" } }
+  );
+
+  assert.equal(klaida?.code, "BACKUP_DISABLED", "sprendimas turi pirmenybę prieš konfigūraciją");
 });
