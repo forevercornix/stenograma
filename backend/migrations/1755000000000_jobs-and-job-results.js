@@ -2,9 +2,10 @@
 /**
  * JOB METADUOMENŲ SCHEMA (#155, 7.2a).
  *
- * Ši migracija sukuria `jobs` ir `job_results` — lenteles, kurios po
- * aktyvavimo barjero taps autoritetinga job metaduomenų saugykla
- * (žr. `docs/decisions/155-postgres-authority.md`).
+ * Ši migracija sukuria `jobs` ir `job_results` — lenteles, kurios su
+ * `JOB_STORE_BACKEND=postgres` yra autoritetinga job metaduomenų saugykla
+ * (žr. `docs/decisions/155-postgres-authority.md`). ⚠️ Rašant tai buvo ateitis už
+ * aktyvavimo barjero; nuo #155 — pasirenkamas dabartis.
  *
  * ⚠️ VIENOS EILUTĖS INVARIANTAI PRIKLAUSO DB; PERĖJIMŲ GRAFAS — NE.
  *
@@ -290,7 +291,9 @@ exports.up = (pgm) => {
    *
    * ⚠️ Kaina: `completed` be `job_results` eilutės tampa įmanoma būsena.
    * 7.5b ją apibrėžia kaip remontą reikalaujančią, ne sėkmę, ir reikalauja
-   * transakcinio užbaigimo. Iki tol PostgreSQL lieka už aktyvavimo barjero.
+   * transakcinio užbaigimo. ⚠️ Ankstesnė eilutė čia sakė „iki tol PostgreSQL lieka
+   * už aktyvavimo barjero" — barjeras atidarytas (#155), tad šią būseną dengia nebe
+   * jis, o transakcinis užbaigimas ir remonto apibrėžimas.
    */
   pgm.createTable("job_results", {
     job_id: {

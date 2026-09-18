@@ -4,6 +4,242 @@ Projekto raidos milestone'ai. Formatas grubiai pagal [Keep a Changelog](https://
 
 ---
 
+## Unreleased
+
+Neišleisti pokyčiai, jau esantys `main` šakoje. Artimiausio `release:` commit'o
+metu ši sekcija **suliejama** į naujos versijos sekciją ir ištuštinama – kitaip
+ji pasensta ir tampa klaidinanti.
+
+### ⚠️ Destruktyvūs pokyčiai
+
+- **`DATABASE_URL` ir `PG*` kartu: startas stabdomas pagal EFEKTĄ, ne pagal formų
+  maišymą** (#245).
+
+  ⚠️ **Tai ankstesnio sprendimo ATŠAUKIMAS ir laužantis konfigūracijos pokytis
+  abiem kryptimis.**
+
+  **Atlaisvinta.** Iki šio leidimo `DATABASE_URL` kartu su `PGHOST` nutraukdavo
+  startą **savaime** (auditas, `startupChecks`, DR keliai). Su pilnu DSN `PGHOST`
+  `pg` semantikai neturi jokios įtakos, tad krisdavo ir visiškai vienareikšmės
+  konfigūracijos. Dokumentuotame Compose diegime (`PG*`) tai reiškė, kad
+  persistencijos įjungti apskritai nebuvo kaip: pridėjus `DATABASE_URL` krisdavo
+  ši patikra.
+
+  **Sugriežtinta.** Nuo šiol startas nutrūksta, kai aplinka pakeičia
+  `DATABASE_URL` apibrėžtą **efektyvią** jungties semantiką — taikinį
+  (`host`/`port`/`database`), kredencialus (`user`/`password`), SSL arba DB
+  sesijos namespace (`options`). Šių atvejų senoji taisyklė
+  **nematė**, nors `PGSSLMODE` ir `PGOPTIONS` pilną DSN realiai perrašo.
+
+  Konkrečiai nustos startuoti: pusiau užpildytas DSN, kurį papildo aplinka (pvz.
+  DSN be porto plius `PGPORT`), ir pilnas DSN su `PGSSLMODE`, `PGOPTIONS` ar
+  **kitokiu** `PGCLIENT_ENCODING`.
+
+  ⚠️ **Konflikto NESUKURIA:** `PGAPPNAME`, `PGCONNECT_TIMEOUT`, `PGBINARY`,
+  `PGCLIENT_ENCODING` (bet kokia reikšmė) ir `PGHOST` kitu raidžių registru.
+
+  `PGBINARY` — todėl, kad `pg` `Client` jo **neskaito**: reikšmė patenka į
+  `ConnectionParameters`, bet vartotojo neturi (`client.js:102` ima ją iš žalios
+  konfigūracijos). `PGCLIENT_ENCODING` — todėl, kad `Client` reikšmę **perduoda**
+  `Connection`'ui, o tas jos **neskaito**, ir `pg-protocol` dekodavimas fiksuotas
+  `utf-8` (`buffer-reader.js:8`); startup pakete visada siunčiama `UTF8`. Host'ai
+  normalizuojami kaip DNS vardai. Visi trys anksčiau būtų stabdę startą be
+  priežasties.
+
+  ⚠️ **KURIE DIEGIMAI PALIEČIAMI — PLATESNIS RATAS, NEI ATRODO.**
+
+  Patikra veikia ne audito ar konkretaus backend'o lygyje, o **bendroje pool'o
+  nustatymų funkcijoje**, pro kurią eina visi PostgreSQL pool'ai ir diagnostinis
+  klientas. Todėl paliečiamas **kiekvienas** diegimas, kuriame PostgreSQL
+  apskritai nurodytas (`DATABASE_URL` **arba** `PGHOST`) — **įskaitant tuos, kur
+  jokio `*_BACKEND=postgres` nėra nustatyta**: ištrynimo žymos PostgreSQL
+  renkasi **automatiškai**, tad tai yra NUMATYTOJI konfigūracija.
+
+  Praktiškai: aplinka su `DATABASE_URL` ir `PGOPTIONS`, be `AUDIT_BACKEND`,
+  `JOB_STORE_BACKEND` ir `SESSION_STORE_BACKEND`, iki šio leidimo pakildavo ir
+  jungdavosi prie `PGOPTIONS` nurodytos schemos. Nuo šiol ji **nestartuoja**, o
+  `validateConfig` išvardija priežastį prieš pakylant bet kuriai daliai.
+
+  ⚠️ Tai galioja ir `workers/` procesui: sargas yra pool'o statyme, ne
+  `validateConfig`, kurio worker'is nekviečia.
+
+  ⚠️ **PAŽADO RIBA — KREDENCIALAI.** Sargas pagauna kredencialų skirtumus,
+  matomus `pg` `ConnectionParameters`, **plius `PGPASSFILE`**. Jis NEGALI
+  pažadėti „bet koks kredencialų skirtumas": `pgpass` numatytai skaito
+  `~/.pgpass` net be jokio aplinkos kintamojo, o failas nėra aplinkos skirtumas.
+  Slaptažodis iš `~/.pgpass` DSN'ui be slaptažodžio yra teisėtas libpq raštas,
+  ne dviprasmybė.
+
+  **Prieš atnaujinant:** palikite VIENĄ jungties formą. Tai ir yra rekomendacija
+  operatoriui — techninis invariantas nėra „abi formos niekada negali būti
+  kartu", bet viena forma yra paprasčiausia ir mažiausiai dviprasmiška praktika.
+  Klaidos tekstas įvardija **klasę** (`taikinys`, `kredencialai`, `saugumas`,
+  `sesija`), niekada reikšmes — slaptažodis į klaidas, logus ir diagnostiką
+  nepatenka.
+
+  `PG*`-only diegimuose migracijas leiskite tiesiogiai su esamais kintamaisiais;
+  `docs/migrations.md` rekomendacija „laikinai nurodyti `DATABASE_URL`"
+  **pašalinta** (`node-pg-migrate@9.0.0` `PG*` moka pats).
+
+- **Audito retencija dabar galioja ir PostgreSQL režimui** (#213, 7.4d).
+  `AUDIT_RETENTION_DAYS` anksčiau veikė tik atminties žurnalui; nuo šio leidimo
+  centralizuotas sweep'as **fiziškai šalina** senesnes `audit_log` eilutes,
+  ribotais batch'ais, o riba imama iš DB laikrodžio.
+
+  ⚠️ **Pirmas ciklas paleidžiamas ~5 s po starto ir pašalina viską, kas jau
+  viršija terminą — per kelias minutes ir negrįžtamai.** Diegimas, kuriame
+  reikšmė buvo nustatyta tuomet, kai ji galiojo tik atminčiai, praras senus
+  audito įrašus be atskiro patvirtinimo.
+
+  Prieš atnaujinant: pasitikrinkite `AUDIT_RETENTION_DAYS` (numatyta 30 d.) ir,
+  jei senesni įrašai reikalingi, pasidarykite pilną PostgreSQL kopiją —
+  aplikacijos kopija audito eilučių neapima. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md` §3 ir `docs/backup-runbook.md`.
+
+- **`PRIVACY_MODE=true` su `AUDIT_BACKEND=postgres` nebenutraukia starto**
+  (#213, 7.4d). Derinys leidžiamas: starto metu `audit_log` fiziškai išvaloma, o
+  nauji įrašai nepersistinami.
+
+  ⚠️ Vėliavos perjungimui reikia **pilno sustabdymo, ne rolling update** —
+  senesnė replika gali įrašyti eilutę po to, kai naujoji jau išvalė lentelę.
+
+### Changed
+
+- **`pg_dump` ir `psql` nebepaveldi `PG*` aplinkos** (#245). ⚠️ **Laužantis
+  pokytis DR keliams.**
+
+  Šie du procesai naudoja **libpq**, ne `pg`, tad #245 jungties autoritetas jų
+  nedengė: jie paveldėdavo visą `process.env`, o libpq savo `PG*` skaito pats.
+  Blogiausias atvejis — `PGHOSTADDR`, kurio `pg` **neskaito iš viso**: jis yra
+  tinklo adresas, o URL'e nurodytas `host` tada naudojamas tik autentikacijai.
+  `--url`, rodantis į vieną klasterį, plius `PGHOSTADDR`, rodantis į kitą, davė
+  kopiją iš **kitos** bazės nei ta, kurią patikrino tapatumo sargas ir į kurią
+  rašomas `backup_horizon` — ir tai pasimatydavo tik atkuriant.
+
+  Nuo šiol vaikiniam procesui perduodama aplinka **be nė vieno `PG` prefikso**.
+  Tai taisyklė, ne sąrašas: libpq aplinkos paviršius pagal konstrukciją yra
+  `PG*`, tad naujas kintamasis į jį pateks automatiškai. Rankinio sąrašo čia
+  išvesti neįmanoma — libpq iš JS neapklausiamas.
+
+  ⚠️ **IR `--url`/`--target` PRIVALO BŪTI PILNAS.** Kadangi vaikinis procesas
+  `PG*` nebegauna, URL, praleidžiantis portą ar host'ą, jam reiškia `pg`
+  numatytąsias reikšmes, o ne aplinkos. Tapatumo patikra dabar tai pagauna:
+  nepilnas URL `PG*` diegime duoda **nesutapimą**, ne tylų skirtumą. Runbook'o
+  komanda (`postgres://$PGUSER@$PGHOST:$PGPORT/$PGDATABASE`) portą nurodo
+  eksplicitiškai ir veikia toliau.
+
+  **Prieš atnaujinant:** kredencialai `pg-backup`/`dr-restore` keliams privalo
+  būti **URL'e arba `~/.pgpass`**. Diegimas, perdavęs `--url` be slaptažodžio ir
+  pasikliovęs `PGPASSWORD`, nustos veikti — ir kris **garsiai**, su
+  autentikacijos klaida, o ne tyliai nukopijuos ne tą klasterį. `.pgpass` lieka
+  veikti: tai failas, ne aplinka.
+
+- **Visi keturi PostgreSQL pool'ai ir diagnostinis klientas jungtį sudaro per
+  `utils/pgConnection.js`** (#245). `jobStore`, `sessionStore`, `auditStore`,
+  ištrynimo žymos ir `make doctor` / `/api/health/deep` zondas tą pačią aplinką
+  nuo šiol interpretuoja vienodai. Iki tol `jobStore` ir `sessionStore` pool'ai
+  mokėjo tik `DATABASE_URL`, o `PG*` diegime gaudavo `connectionString:
+  undefined` ir tyliai jungdavosi prie `pg` numatytosios bazės.
+
+- **`JOB_STORE_BACKEND=postgres` ir `SESSION_STORE_BACKEND=postgres` priima ir
+  `PG*` formą** (#245). Reikalavimas buvo būtent `DATABASE_URL`. Komponentų
+  backend pasirinkimo politika **nesikeičia**: `PG*` buvimas savaime nieko
+  neperjungia į PostgreSQL, o `#155` aktyvavimo barjeras lieka nepaliestas.
+
+- ⚠️ **Retencija nuo šiol palieka ištrynimo žymą** (#183, 7.5a). Pasenusių job'ų
+  šalinimas ėjo bendru `sweepExpired()` be jokio barjero, ir
+  `ERASURE_REASON.RETENTION_POLICY` neturėjo nė vieno kvietėjo – atkūrimas iš
+  senesnės kopijos tokį ID priimdavo. Dabar žyma rašoma prieš šalinimą, o
+  job'as, kurį jau tvarko kitas vykdytojas, praleidžiamas (`jobsSkipped`).
+
+  ⚠️ **Išimtis: `JOB_STORE_BACKEND=redis`** – ten terminą vykdo pats Redis per
+  `EXPIRE`, tad žymos įrašyti nėra kur. Įvardyta `docs/deletion-guarantees.md`.
+
+- ⚠️ **Atkūrimas nebeatkuria žymėto jobo AUDIO** (#183). Įrašo sargas veikė, bet
+  garso failai buvo rašomi besąlygiškai – ištrinto jobo audio grįždavo originaliu
+  saugyklos raktu.
+
+- **Išleistos kopijos galiojimas fiksuojamas** `backup_horizon` lentelėje
+  (migracija `1755800000000`). `BACKUP_RETENTION_DAYS` sumažinimas nebesutrumpina
+  ištrynimo žymų termino: jau eksportuota kopija galioja pagal savo manifestą.
+
+- **`DELETION_TOMBSTONE_TTL_HOURS` nebėra autoritetas** – jis gali terminą tik
+  pailginti. Faktinis terminas išvedamas ir su numatytosiomis reikšmėmis yra
+  ~8 paros, ne 72 val. Dokumentacija pataisyta.
+
+- **Admin override žymoje fiksuojamas `operator` / `operator_cleanup`**, ne
+  `user` / `user_request` (#183).
+
+- **Vieno vykdytojo garantija dabar galioja ir operatoriaus autorizuotam
+  pakartojimui** (#183, 7.5a). `erasure_marks` gavo `claim_token` stulpelį:
+  pretenzija į ištrynimo vykdymą yra būsena, ne akimirka, tad ir vėliau atėjusi
+  replika gauna **202**, o ne pradeda lygiagretų trynimą. Migracija
+  `1755700000000`.
+
+- ⚠️ **Foninis ištrynimų kartojimas nebekartoja `deletion_failed` žymėtų jobų**
+  (#183, 7.5a). `retryPendingDeletions()` buvo antra kartojimo sistema: jam
+  pavykus, jobas dingdavo, o žyma likdavo `deletion_failed` amžinai ir be
+  `LIFECYCLE_DELETION` įrašo.
+
+  **Praktikoje tai dauguma sweeper'io kandidatų**: jobas į jo sąrašą patenka tik
+  po nepavykusio ištrynimo, o tas pats nepavykimas žymą ir perveda į
+  `deletion_failed`. Sweeper'is tampa daugiausia pranešėju (`warn` kiekvienam
+  praleistam jobui + `unresolved` skaitiklis), o naują bandymą autorizuoja
+  operatorius: `erasure-marks retry <jobId>`.
+
+  ⚠️ **Reikalinga periodinė procedūra:** `erasure-marks list` yra autoritetingas
+  neišspręstų ištrynimų sąrašas; sweeper'io logai su rotacija dingsta. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
+- **Nauja operatoriaus komanda `erasure-marks release`** (#183, 7.5a).
+  Perveda užstrigusią `deletion_pending` žymą į `deletion_failed` su
+  `last_failure_kind=executor_lost`, iš kur veikia esamas `retry`.
+
+  Skirta atvejui, kai procesas nužudytas (SIGKILL, OOM) tarp žymėjimo ir
+  užbaigimo. ⚠️ **`force-resolve` tam netinka**: jis teigia, kad duomenų nebėra,
+  o po kieto nužudymo tai nežinoma. `release` netvirtina nieko apie duomenis.
+  Automatinio aptikimo nėra sąmoningai. Žr.
+  `docs/operations/OPERATIONAL_PROCEDURES.md`.
+
+- ⚠️ **`DELETE` atsakymų rinkinys prasiplėtė: 202 ir `tombstone_unresolved`**
+  (#183, 7.5a). Abu jobų endpoint'ai (`/api/jobs/:id`, `/api/transcribe-jobs/:id`):
+
+  | Situacija | Anksčiau | Dabar |
+  |---|---|---|
+  | Ištrynimą jau vykdo kitas procesas ar replika | 204 arba 404 po pakartoto darbo | **202** `in_progress`, jokio darbo nepradedama |
+  | Žyma `deletion_failed` | 204 (klaidingai – žyma likdavo `failed`) | **503** `tombstone_unresolved` |
+  | Patvirtintai ištrinta | 204 | 204 (nepakito) |
+
+  ⚠️ **Klientai, laikę 204 vieninteliu sėkmės kodu, turi priimti ir 202.** 202
+  reiškia „ištrynimas vyksta, pakartokite vėliau", ne klaidą.
+
+  ⚠️ **`deletion_failed` nebekartojamas automatiškai.** Naują bandymą autorizuoja
+  operatorius: `node backend/scripts/erasure-marks.js retry <jobId>`. Kietai
+  nužudytas procesas gali palikti `deletion_pending` žymą, kuriai visi vėlesni
+  `DELETE` atsakys 202 – žr. `docs/deletion-guarantees.md`.
+
+- **Našlaičių 503 atsakyme nebėra klaidų tekstų** (#183). Anksčiau siųstas visas
+  `outcome`, įskaitant `errors` su failų keliais ir eilės raktais (#19 tai
+  draudžia). Klientas gauna tik tai, kas pašalinta; savininko kelias šios
+  taisyklės laikėsi visada.
+
+- **Našlaičių valymas nuo šiol palieka ištrynimo žymą ir yra fail-closed**
+  (#183, 7.5a). `adminCleanupOrphan()` ir `desktopCleanupOrphan()` anksčiau
+  šalino likusius pėdsakus **nepalikdami barjero** – atkūrimas iš senesnės
+  kopijos tą `jobId` vėl priimdavo. Dabar žyma (`reason=orphan_cleanup`)
+  rašoma **prieš** šalinimą.
+
+  ⚠️ **Operacinė pasekmė:** jei žymos įrašyti nepavyksta (DB nepasiekiama),
+  valymas **atmetamas su klaida**, o ne atliekamas tyliai. Anksčiau ta pati
+  operacija būtų pavykusi. Teisingas veiksmas – **pakartoti vėliau**; našlaitis
+  be `jobs` eilutės palaukęs nieko nepablogina, o ištrynimas be barjero yra
+  negrįžtamas. Žr. `docs/deletion-guarantees.md` §1.
+
+- `AUDIT_MAX_ENTRIES` PostgreSQL režimui **netaikoma** ir netaps retencijos
+  taisykle: eilutės nešalinamos vien dėl kiekio. Ji lieka atminties apsauga.
+
+---
+
 ## v1.3.0 – Milestone 2: prieiga, duomenų valdymas ir operacinis pasirengimas
 
 Didžiausias leidimas iki šiol: **70 commit'ai** (36 be merge), **145 failai,

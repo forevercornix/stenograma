@@ -499,7 +499,7 @@ generation pipeline, Docker deployment, health/readiness checks). Pilnas sąraš
 - [ ] Realios įrašo TRUKMĖS (ne tik failo dydžio) tikrinimas prieš apdorojimą (`ffprobe` ar panaši biblioteka) - žr. paaiškinimą `backend/README.md` "Faster-Whisper" skyriuje.
 - [x] ~~Playwright/Cypress E2E testas (naršyklė → audio upload → transcribe → generate → edit → export)~~ → **Milestone 1**: Playwright E2E (`frontend/e2e/`) dengia įklijuoto teksto IR pilno audio upload → polling → protokolas → DOCX srautus + klaidų kelius. Vykdomi CI'e su Chromium. Liko: redagavimo srautas, diarizacijos pasirinkimas naršyklėje.
 - [ ] Audit log perkėlimas iš atminties į SQLite/Postgres (su retention politika, PII redagavimu, paieška, eksportu). *(Milestone 2, #155 7.4)*
-- [ ] PostgreSQL job metaduomenims *(Milestone 2, #155)*. Padaryta: `postgres:16` servisas ir migracijų karkasas (7.1), `postgresStore` backend'as su `jobs`/`job_results` schema, `CHECK` invariantais ir 15 metodų kontraktu (7.2a). **Sąžiningai: PostgreSQL DAR NEAKTYVUOTAS** - galioja ADR aktyvavimo barjeras, tad `DATABASE_URL` job metaduomenų neperjungia, kol nebus patikrinto restore (7.6), persistentinių ištrynimo žymų (7.5a) ir sąlyginio transakcinio užbaigimo (7.5b). Žr. [`docs/decisions/155-postgres-authority.md`](docs/decisions/155-postgres-authority.md).
+- [ ] PostgreSQL job metaduomenims *(Milestone 2, #155)*. Padaryta: `postgres:16` servisas ir migracijų karkasas (7.1), `postgresStore` backend'as su `jobs`/`job_results` schema, `CHECK` invariantais ir 15 metodų kontraktu (7.2a). **Aktyvavimo barjeras ATIDARYTAS** (#155): jo prielaidos — patikrintas restore (7.6), persistentinės ištrynimo žymos (7.5a) ir sąlyginis transakcinis užbaigimas (7.5b) — įvykdytos, tad `postgres` yra pasirenkamas job metaduomenų backend'as. ⚠️ **Sąžiningai: `DATABASE_URL` vienas jo NEĮJUNGIA** - pasirinkimas EKSPLICITINIS (`JOB_STORE_BACKEND=postgres`). Taip dėl to, kad `DATABASE_URL` reikalingas ir sesijoms, ir auditui, ir migracijoms: numanomas išvedimas tyliai perjungtų job'us diegimams, kurie to neprašė. Be eksplicitinio pasirinkimo job'ai lieka ATMINTYJE, ir tai matoma `doctor` eilutėje „Job metaduomenų saugykla" PRIEŠ restartą. Žr. [`docs/decisions/155-postgres-authority.md`](docs/decisions/155-postgres-authority.md).
 - [x] ~~Tikra job queue vietoj in-memory saugyklos~~ → **Milestone 1**: BullMQ eilė su atskirais worker procesais (`workers/transcriptionWorker.js`, `protocolWorker.js`), retry+backoff, `failed` būsenos retencija po visų bandymų (ne atskira dead-letter eilė - žr. terminijos pastabą aukščiau), stalled recovery, atominis job reservation; Redis-backed persistentus state su fallback į in-memory. Liko (Milestone 2): PostgreSQL ilgalaikiams rezultatams.
 - [ ] Tikras audio streaming tiekėjui (šiuo metu visas failas skaitomas į RAM prieš siunčiant - žr. backend README).
 - [ ] Antivirusinis audio failų skenavimas (šiuo metu tik magic-bytes signature patikra, ne pilnas turinio skenavimas).
@@ -939,14 +939,32 @@ AUDIT_RETENTION_DAYS=30    # numatyta: 30
 AUDIT_MAX_ENTRIES=5000     # kieta atminties riba
 ```
 
-Pasenę įrašai šalinami tiek rašant naują įvykį, tiek skaitant `GET /api/audit`.
+⚠️ **`AUDIT_RETENTION_DAYS` galioja ABIEM režimams** (nuo [7.4d]).
+**`AUDIT_MAX_ENTRIES` – tik `AUDIT_BACKEND=memory`.**
 
-**Apribojimas – tai NĖRA production-grade audit trail.** Žurnalas yra
+**`memory` (numatytasis).** Pasenę įrašai šalinami tiek rašant naują įvykį, tiek
+skaitant `GET /api/audit`, tiek periodiniu retencijos ciklu. Žurnalas yra
 backend'o atmintyje, tad: dingsta po restarto; nesidalija tarp replikų; neturi
-DB transakcijų, tamper-resistance, prieigos žurnalo ar tikro retention
-scheduler'io. Retencija realiai reiškia „iki restarto arba iki N dienų, kas
-ateina pirmiau". Ilgalaikei atitikčiai reikia SQLite/PostgreSQL saugyklos –
-žr. Roadmap (Milestone 2).
+DB transakcijų ar tamper-resistance. Retencija realiai reiškia „iki restarto
+arba iki N dienų, kas ateina pirmiau".
+
+**`postgres` (#155, 7.4b, retencija – 7.4d).** Žurnalas persistentinis,
+dalijamas tarp replikų ir append-only (`UPDATE` atmeta DB trigeris).
+
+- **`AUDIT_RETENTION_DAYS` GALIOJA** (nuo 7.4d): `audit_log` eilutės šalinamos
+  to paties centralizuoto sweep'o metu, ribotais batch'ais, o riba imama iš **DB
+  laikrodžio** – to paties, kuris deda `timestamp`.
+- **`AUDIT_MAX_ENTRIES` NEGALIOJA**: tai atminties apsauga, ne duomenų politika.
+  Eilutės niekada nešalinamos vien dėl to, kad jų skaičius viršijo N. Startas
+  įspėja `warn` lygiu, jei kintamasis nustatytas kartu su `postgres`.
+
+> ⚠️ **Išorinės valymo politikos NEREIKIA, ir jos nekurkite.** Iki 7.4d ji buvo
+> būtina; dabar tai būtų antras nepriklausomas trynimo mechanizmas ant tos
+> pačios lentelės, veikiantis pagal kitą ribą ir kitą laikrodį, o
+> `RETENTION_PURGE` įrašas rodytų tik vieno jų darbą. Jei ji įdiegta iš
+> ankstesnės versijos – **išjunkite**.
+
+Konfigūracija ir sprendimai – `docs/audit-storage.md` §9.
 
 ### Privatumo režimas
 
@@ -1413,7 +1431,31 @@ veikianti sistema nepaliečiama, tad nutrūkęs atkūrimas jos nesugadina.
 
 ⚠️ **Atkūrimas gerbia ištrynimo žymas (#19).** Kopija atkuria būklę, bet
 **negali atšaukti sprendimo ištrinti** — be to ji taptų būdu apeiti GDPR
-ištrynimą.
+ištrynimą. Ištrynimų žurnalas eksportuojamas **atskirai nuo snapshot'o** ir po
+atkūrimo sujungiamas monotoniškai (terminali būsena nugali), o kiekvienam
+sulietam ID ištrynimas **pakartojamas** per tą patį autoritetą, kuris trina
+gyvoje sistemoje (`utils/erasureReplay.js`).
+
+⚠️ **Kiek ištrynimų galima prarasti (RPO).** Prarandami ištrynimai, įvykę **po
+paskutinio žurnalo eksporto**; su numatytąja kadencija (eksportas prieš kiekvieną
+kopiją, kopijos kas parą) tai **iki 24 valandų**. Rečiau eksportuojantis diegimas
+praranda daugiau — riba yra eksportas, ne kalendorius. Senesnis žurnalas
+atkūrimą **sustabdo** (`DR_LEDGER_STALE`); tęsti galima tik su užfiksuotu
+patvirtinimu, kuris gula į auditą (arba, `PRIVACY_MODE` režime, į operatoriaus
+patvirtinimą reikšmėmis).
+
+⚠️ **Tai įrodytas kelias, o ne automatiškai veikianti gynyba.** Aktyvavimo
+barjeras atidarytas, tad PostgreSQL **gali** būti job'ų autoritetas — bet tik
+diegimuose, kurie nurodė `JOB_STORE_BACKEND=postgres`. Ten, kur nenurodyta,
+grandinė lieka **procedūra**, ne kasdien veikianti apsauga (#281, #282). Jos
+pilnos pratybos — kopija → ištrynimas → atkūrimas iš senesnio snapshot'o →
+replay — **įvykdytos ir žalios** CI `postgres` rinkinyje, įskaitant tarpinį
+patikrinimą, kad ištrintas job'as po atkūrimo tikrai grįžta.
+
+Skirtumas tarp „įrodyto kelio" ir „veikiančios gynybos" svarbus būtent čia: šį
+skyrių skaito ir tie, kas neskaitė nė vieno issue. Procedūrą ir toliau paleidžia
+**operatorius**, ne sistema — barjero atidarymas to nepakeitė ir neturėjo: jis
+nulėmė, KUR gyvena job'ai, o ne kas paleidžia atkūrimą.
 
 ⚠️ **Auditas nekopijuojamas** dėl tos pačios priežasties: jo įrašai saugo
 pseudonimizuotą subjektą, tad žymų patikra jų neapima, ir atkūrus GDPR ištrinti
@@ -1658,6 +1700,31 @@ lentelėje saugoma tik jo SHA-256 maiša – nutekėjusi `sessions` lentelė
 nesuteikia galimybės perimti sesijų. Jungiklis **eksplicitinis**: vien
 `DATABASE_URL` autentifikacijos režimo nekeičia. Numatyta lieka `memory`
 (vienas procesas). Diegimo detalės – `docs/auth-deployment.md`.
+
+**Persistentinis auditas (#155, 7.4b).** `AUDIT_BACKEND=postgres` perkelia
+audito žurnalą į duomenų bazę: jis išgyvena restartą, dalijamas tarp replikų ir
+yra **append-only `UPDATE` atžvilgiu** – jį atmeta DB trigeris, tad esamos
+eilutės pataisyti nebegalima net per `psql`.
+
+⚠️ **Tai NĖRA pilna tamper-resistance garantija.** `DELETE` DB lygmenyje
+sąmoningai **neribojamas**, nes GDPR ištrynimas eilutes fiziškai trina. Vadinasi
+aplikacijos DB rolės turėtojas gali įrašą **ištrinti** arba ištrinti ir įrašyti
+pakeistą – `UPDATE` trigeris tokio kelio nemato. Riba, ribojanti trynimą iki
+subjekto, gyvena API lygmenyje, ne duomenų bazėje.
+
+Pilnai apsaugai reikėtų atskiros DB rolės be `DELETE` teisės, o tai sulaužytų
+GDPR ištrynimą – kompromisas aprašytas `docs/audit-storage.md` §4.
+
+Jungiklis **eksplicitinis** ir atskiras nuo dviejų kitų: vien `DATABASE_URL`
+audito režimo nekeičia. `postgres` papildomai reikalauja `AUDIT_ID_SALT` ir
+`AUDIT_ID_SALT_ID` – be stabilios druskos pseudonimai skirtųsi tarp restartų, ir
+GDPR ištrynimas senų įrašų nerastų. Trūkstant bet kurio, startas **nutrūksta**;
+grįžimo į atmintį nėra.
+
+⚠️ Retencija persistentiniame režime **veikia** nuo [7.4d]: `AUDIT_RETENTION_DAYS`
+taikomas ir `audit_log` eilutėms per centralizuotą sweep'ą. `AUDIT_MAX_ENTRIES`
+lieka **tik atminties** apsauga. Sprendimai ir diegimo detalės –
+`docs/audit-storage.md` §9.
 
 **Rolėmis grįsta autorizacija (#18 PR2).** Leidimai gyvena viename registre
 (`utils/permissions.js`) ir yra **deny-by-default** – naujas leidimas be
@@ -2023,11 +2090,34 @@ o numatytas tiekėjų pasirinkimas.
 1. **Pasenusius jobus** – metaduomenys + rezultatas (transkripcija/protokolas) po `JOB_TTL_MINUTES`.
 2. **Nuskendusius audio failus** – senesnius nei `AUDIO_RETENTION_HOURS` ir nepaminėtus nė viename gyvame jobe. Iki tol jų nešalino niekas: jei procesas nukrito tarp failo įkėlimo ir jobo užbaigimo, failas likdavo storage neribotai.
 3. **Pasenusius audito įrašus** – pagal `AUDIT_RETENTION_DAYS`, nepriklausomai nuo srauto.
+   ⚠️ **Abiem backend'ams** (nuo [7.4d]). Su `postgres` eilutės šalinamos
+   ribotais batch'ais, o riba imama iš DB laikrodžio – to paties, kuris deda
+   `timestamp`. `AUDIT_MAX_ENTRIES` persistentiškai **netaikomas**: eilutės
+   nešalinamos vien dėl kiekio.
 
-Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais (`jobs=2 audio=1 audit=5`),
-`subjectId: null` – be identifikatorių, failų vardų ar turinio. Įvykis rašomas
-**tik kai kas nors realiai pašalinta**, kitaip kas valandą rašomas tuščias įrašas
-per `AUDIT_MAX_ENTRIES` išstumtų naudinguosius.
+4. **Pasenusias ištrynimo žymas** – tik patvirtintai `deleted`, ir tik praėjus
+   `max(eilės prikėlimo horizontas, kopijų retencija) + atsarga` (nuo [7.5a]).
+   ⚠️ `deletion_pending` ir `deletion_failed` **nesensta niekada**: nesėkmingas
+   ištrynimas reiškia, kad jautrūs duomenys dar gali egzistuoti. Neapskaičiavus
+   termino, žymos **nešalinamos** (fail-safe), o ne šalinamos pagal spėjimą.
+
+Šalinimas įrašomas kaip `RETENTION_PURGE` su kiekiais
+(`jobs=2 audio=1 audit=5 tombstones=1`),
+`subjectId: null` – be identifikatorių, failų vardų ar turinio.
+
+⚠️ **Įvykis rašomas DVIEM atvejais**, ne vienu:
+
+1. kai kas nors realiai pašalinta → `success: true`;
+2. kai ciklas krito – **net jei pašalinta nulis** → `success: false` ir `error`
+   su priežastimi. Nesėkmingas automatinis asmens duomenų šalinimas privalo
+   palikti pėdsaką; be šito nulinis kritęs ciklas baigtųsi visiškoje tyloje.
+
+Tuščias IR sėkmingas ciklas įrašo **nerašo** – kitaip kas valandą rašomas tuščias
+įrašas per `AUDIT_MAX_ENTRIES` išstumtų naudinguosius.
+
+⚠️ **Monitoringas privalo tikrinti `success`, ne vien įvykio buvimą.** Įvykis su
+`success: false` reiškia, kad valymas neįvyko arba įvyko iš dalies; skaičiuojamas
+kaip „valymas įvyko", jis rodytų priešingai, nei nutiko.
 
 **Kas laikoma „nuskendusiu" failu.** Tik failas, kurio **nenaudoja nė vienas gyvas
 jobas** – nepriklausomai nuo jobo statuso (`queued`, `processing`, `completed`,

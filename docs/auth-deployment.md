@@ -84,14 +84,18 @@ langas leistų sesijai gyventi neribotai, jei ji nuolat naudojama.
 |---|---|---|
 | `SESSION_STORE_BACKEND` | `memory` | `memory` arba `postgres`. Nežinoma reikšmė **stabdo startą**, ne virsta numatytąja |
 
-⚠️ **Jungiklis EKSPLICITINIS.** Vien `DATABASE_URL` sesijų režimo **nekeičia** –
+⚠️ **Jungiklis EKSPLICITINIS.** Vien nurodytas PostgreSQL (`DATABASE_URL` ar
+`PG*`) sesijų režimo **nekeičia** –
 jis gali būti įvestas dėl migracijų ar audito, ir neturi netikėtai perjungti
 autentifikacijos. `SESSION_STORE_BACKEND` yra **atskiras** nuo
 `JOB_STORE_BACKEND`: job metaduomenų perkėlimas į PostgreSQL ir sesijų
 persistencija yra du nesusiję sprendimai.
 
-`SESSION_STORE_BACKEND=postgres` reikalauja `DATABASE_URL` ir paleistų
-migracijų (`npm run migrate:up`). Trūkstama `sessions` lentelė arba trūkstamas
+`SESSION_STORE_BACKEND=postgres` reikalauja **nurodyto PostgreSQL** ir paleistų
+migracijų (`npm run migrate:up`). „Nurodytas" reiškia `DATABASE_URL` **arba**
+`PGHOST` su `PG*` rinkiniu — abi formos lygiavertės (#245). Iki #245 buvo
+priimamas tik `DATABASE_URL`, tad dokumentuotame Compose diegime (`PG*`) sesijų
+persistencijos įjungti apskritai nebuvo kaip. Trūkstama `sessions` lentelė arba trūkstamas
 laiko invariantas **nutraukia startą** – grįžimo į atmintį nėra, nes jis tyliai
 atimtų globalią revokaciją.
 
@@ -100,7 +104,7 @@ atimtų globalią revokaciją.
 | Išgyvena restartą | ne | **taip** |
 | Kelios replikos | ne | **taip** |
 | Atsijungimas galioja kitame procese | ne | **taip** |
-| Reikia `DATABASE_URL` | ne | **taip** |
+| Reikia nurodyto PostgreSQL (`DATABASE_URL` **arba** `PG*`) | ne | **taip** |
 
 **Paleidimo tvarka.** `sessionStore.init()`, schemos invariantų patikra ir
 startinis `AUTH_USERS` suderinimas baigiami **prieš** `app.listen()`. Kol jie

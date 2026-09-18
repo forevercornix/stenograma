@@ -250,3 +250,166 @@ test("DOKUMENTACIJA: sprendimų įrašai (ADR) egzistuoja ir nuorodos galioja", 
 
   assert.deepEqual(problemos, [], `Nutrūkusios ADR nuorodos:\n  ${problemos.join("\n  ")}`);
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #202 `REQUIRE_*` SARGAI CI'e
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** `backend` job'o tekstas - nuo jo antraštės iki kito job'o. */
+function backendJob() {
+  const ci = fs.readFileSync(path.join(CI, "ci.yml"), "utf8");
+  return ci.slice(ci.indexOf("\n  backend:"), ci.indexOf("\n  frontend:"));
+}
+
+/** Job'o žingsniai atskirai: `      - ` yra žingsnio pradžios įtrauka. */
+function zingsniai(jobas) {
+  return jobas.split(/\n      - /).slice(1);
+}
+
+test("CI: kiekvienas `REQUIRE_*` sargas nustatytas TAME žingsnyje, kurį jis gina", () => {
+  /**
+   * ⚠️ VĖLIAVA, KURIOS NIEKAS NETIKRINA, YRA VĖLIAVA, KURIĄ GALIMA PAŠALINTI.
+   *
+   * Trys sargai (`REQUIRE_REDIS` #15, `REQUIRE_POSTGRES` #155/7.1,
+   * `REQUIRE_PYTHON` #202) egzistuoja tam, kad tylus praleidimas taptų klaida.
+   * Iki #202 nė vieno netikrino niekas: pašalinus eilutę iš `ci.yml`, visi
+   * testai liktų žali, o CI grįžtų prie tos pačios spragos.
+   *
+   * ⚠️ TIKRINAMA ŽINGSNIO APIMTIMI, NE VISO FAILO TEKSTE.
+   *
+   * Pirmoji šio testo versija sujungdavo visus workflow failus ir ieškojo
+   * žetono bet kur. Tai reiškė, kad `REQUIRE_PYTHON: "1"`, perkelta į visiškai
+   * nesusijusį `frontend` job'ą, testą palikdavo ŽALIĄ - nors ten ji negina
+   * nieko. „Yra kažkur" nėra įrodymas, kad „veikia ten, kur reikia".
+   *
+   * Todėl vėliava siejama su KOMANDA: ji privalo būti tame pačiame žingsnyje,
+   * kuris paleidžia jos ginamą rinkinį.
+   */
+  const SARGAI = [
+    { vėliava: "REQUIRE_REDIS", komanda: "npm run test:redis", issue: "#15" },
+    { vėliava: "REQUIRE_POSTGRES", komanda: "npm run test:postgres", issue: "#155, 7.1" },
+    { vėliava: "REQUIRE_PYTHON", komanda: "npm run test:functional", issue: "#202" },
+  ];
+
+  const žingsniai = zingsniai(backendJob());
+
+  const pažeidimai = SARGAI.filter(({ vėliava, komanda }) => {
+    const vėliavosŠablonas = new RegExp(`${vėliava}:\\s*["']?1["']?`);
+
+    return !žingsniai.some((z) => z.includes(komanda) && vėliavosŠablonas.test(z));
+  });
+
+  assert.deepEqual(
+    pažeidimai.map((s) => `${s.vėliava} (${s.issue}) → ${s.komanda}`),
+    [],
+    "sargas privalo būti TAME žingsnyje, kurį gina - kitame job'e jis nieko nedaro"
+  );
+});
+
+test("CI: `backend` job'as paruošia Python EKSPLICITIŠKAI, ne per runner'io prielaidą", () => {
+  /**
+   * ⚠️ `REQUIRE_PYTHON=1` BE `setup-python` PAVERSTŲ CI RAUDONU.
+   *
+   * Abi pusės būtinos ir viena be kitos yra klaida: vėliava be Python paruošimo
+   * duotų nuolat krentantį job'ą, o Python paruošimas be vėliavos grąžintų
+   * tylų praleidimą. Todėl tikrinamos KARTU.
+   *
+   * Versija lyginama su kitais job'ais: trečia Python versija repo be
+   * priežasties neįvedama (#202).
+   */
+  const ciTekstas = fs.readFileSync(path.join(CI, "ci.yml"), "utf8");
+
+  const backendJob = ciTekstas.slice(
+    ciTekstas.indexOf("\n  backend:"),
+    ciTekstas.indexOf("\n  frontend:")
+  );
+
+  assert.ok(
+    /uses:\s*actions\/setup-python/.test(backendJob),
+    "`backend` job'as privalo turėti `actions/setup-python` - kitaip `REQUIRE_PYTHON=1` remiasi runner'io image prielaida"
+  );
+
+  const versijos = [...ciTekstas.matchAll(/python-version:\s*["']?([\d.]+)["']?/g)].map(
+    (m) => m[1]
+  );
+
+  assert.ok(versijos.length >= 2, "tikimasi kelių `setup-python` naudojimų");
+  assert.equal(
+    new Set(versijos).size,
+    1,
+    `visi job'ai turi naudoti TĄ PAČIĄ Python versiją, rasta: ${[...new Set(versijos)].join(", ")}`
+  );
+});
+
+/**
+ * FAIL-CLOSED STARTO ŽINGSNIS IŠLIEKA CI'UJE (#155, 10 sąlyga).
+ *
+ * ⚠️ KODĖL ŠIS TESTAS ATSIRADO — RADO MATRICOS PATIKRA, NE PERŽIŪRA.
+ *
+ * Barjerą atidarantis PR pridėjo matricos eilutę, kurios vienintelis liudytojas yra
+ * CI žingsnis. `check-matrix-rows.mjs` ją pažymėjo („rodo į nesamą testų failą
+ * `ci.yml`"), ir tai buvo teisinga: eilutė teigė dengimą, kurio repozitorijoje niekas
+ * netikrino. Žingsnį ištrynus ar jo asercijas nuėmus **nekristų niekas** — matrica
+ * toliau skelbtų, kad savybė padengta.
+ *
+ * ⚠️ KĄ ŠIS TESTAS DENGIA IR KO NE. Jis NEPAKEIČIA paties žingsnio: fail-closed
+ * elgesį matuoja tikras `node server.js` CI'uje, ir kitaip jo išmatuoti negalima.
+ * Šis testas gina tik tai, kad žingsnis TEBĖRA ir tebeturi visas TRIS asercijas —
+ * t. y. kad liudytojas neišnyko tyliai.
+ *
+ * ⚠️ TIKRINAMOS VISOS TRYS, NE VIEN ŽINGSNIO VARDAS. Vardas be asercijų yra
+ * tuščias žingsnis, praeinantis visada — tiksliai tas pats „atrodo padengta",
+ * dėl kurio eilutė ir buvo pažymėta. Kiekviena asercija turi savo priežastį:
+ * exit kodas vienas nepakanka (uždarius barjerą atgal startas kristų dėl KITOS
+ * priežasties), tad tikrinama ir kritimo PRIEŽASTIS, ir tai, kad nenusileista
+ * į kitą backend'ą (split-brain).
+ */
+test("CI: fail-closed starto žingsnis TEBĖRA ir tebeturi visas tris asercijas", () => {
+  const ciTekstas = fs.readFileSync(path.join(CI, "ci.yml"), "utf8");
+
+  const pradzia = ciTekstas.indexOf("- name: Fail-closed startas");
+  assert.notEqual(
+    pradzia,
+    -1,
+    "fail-closed starto žingsnis privalo egzistuoti - be jo matricos eilutė lieka be įrodymo"
+  );
+
+  /** Žingsnio ribos: iki kito `- name:` tame pačiame lygyje. */
+  const likutis = ciTekstas.slice(pradzia + 1);
+  const pabaiga = likutis.indexOf("\n      - name:");
+  const zingsnis = pabaiga === -1 ? likutis : likutis.slice(0, pabaiga);
+
+  assert.match(
+    zingsnis,
+    /JOB_STORE_BACKEND:\s*postgres/,
+    "žingsnis privalo rinktis PostgreSQL EKSPLICITIŠKAI - kitaip matuojamas ne tas kelias"
+  );
+
+  /**
+   * ⚠️ UŽDARAS PRIEVADAS, NE `postgres` servisas. Jei nepasiekiamumas priklausytų
+   * nuo serviso sveikatos, patikra imtų praeiti dėl serviso gedimo, o ne dėl
+   * tikrinamos savybės.
+   */
+  assert.match(
+    zingsnis,
+    /DATABASE_URL:\s*postgresql:\/\/[^\n]*:59999\//,
+    "nepasiekiamumas privalo remtis UŽDARU prievadu, ne serviso būsena"
+  );
+
+  /** 1 asercija: startas apskritai nutrūko. */
+  assert.match(zingsnis, /KODAS.*-eq 0|-eq 0.*KODAS/s, "privalo tikrinti, kad exit kodas ne 0");
+
+  /** 2 asercija: krito BŪTENT dėl nepasiekiamos DB, ne dėl kitos priežasties. */
+  assert.match(
+    zingsnis,
+    /grep -q "PostgreSQL neprieinamas"/,
+    "exit kodo NEPAKANKA - privalo būti tikrinama kritimo PRIEŽASTIS"
+  );
+
+  /** 3 asercija: nenusileista į kitą backend'ą (split-brain). */
+  assert.match(
+    zingsnis,
+    /grep -q "Job store backend'as"/,
+    "privalo tikrinti, kad job store NEBUVO inicijuotas - kitaip fallback praeitų"
+  );
+});
