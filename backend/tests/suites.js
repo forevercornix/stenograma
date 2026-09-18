@@ -319,6 +319,7 @@ const functional = [
    * binaro, tad išvedamas į `postgres` rinkinį per `postgresGuard` importą.
    */
   "pgDumpBackupContract",
+  "pgBackupPgForma",
   /**
    * #249 (7.6b): post-restore suderinimo KONTRAKTAS be DB.
    *
