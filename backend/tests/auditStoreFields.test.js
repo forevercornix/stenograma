@@ -841,31 +841,94 @@ test("POOL: injektuoti `PG*` PERSIUNČIAMI, ne paliekami bibliotekos nuožiūrai
   assert.equal(suUrl.host, undefined, "su URL `PG*` neturi būti maišomi");
 });
 
-test("KONFLIKTAS: `DATABASE_URL` IR `PGHOST` kartu NUTRAUKIA startą", () => {
+test("KONFLIKTAS: dvi jungties formos NUTRAUKIA startą TIK kai duoda skirtingą semantiką", () => {
   /**
-   * ⚠️ #211 peržiūra (P2). Repo tai JAU deklaruoja (`startupChecks.js`: „ABU
-   * KONFIGŪRAVIMO BŪDAI KARTU = KLAIDA, ne pirmenybė"), bet tik MINKŠTAME
-   * self-check'e, kuris vykdomas PO `listen()`.
+   * ⚠️ INVARIANTAS SUSIAURINTAS SĄMONINGAI (#245) — ANKSTESNIS BUVO NETEISINGAS
+   * ABIEM KRYPTIMIS.
    *
-   * Auditui to nepakanka: `auditoPoolNustatymai()` tyliai teiktų pirmenybę
-   * `DATABASE_URL`, tad servisas paskelbtų readiness ir rašytų auditą į VISAI
-   * KITĄ duomenų bazę nei ta, kurią nurodo Compose `PG*`. Auditas yra būtent ta
-   * lentelė, apie kurią klausiama po incidento - „į kurią DB jis rašė" negali
-   * priklausyti nuo tylios pirmenybės.
+   * Buvo tikrinama: „`DATABASE_URL` IR `PGHOST` kartu → klaida". Klausimas
+   * („į kurią DB rašomas auditas?") buvo teisingas, atsakymas — ne:
+   *
+   *   PER GRIEŽTA — su PILNU DSN `PGHOST` `pg` semantikai NETURI JOKIOS įtakos
+   *                 (`connection-parameters.js:9-23`: `config.host` pirma). Auditas
+   *                 krisdavo ten, kur dviprasmybės nebuvo, ir dokumentuotame
+   *                 Compose diegime (`PG*`) persistencijos įjungti buvo NEĮMANOMA:
+   *                 pridėjus `DATABASE_URL` krisdavo būtent ši patikra.
+   *
+   *   PER LAISVA  — `PGSSLMODE` ir `PGOPTIONS` pilną DSN PERRAŠO
+   *                 (`connection-parameters.js:83, 85`), o taisyklė jų nematė.
+   *                 `-csearch_path=…` yra KITA schema, t. y. tiksliai tas „auditas
+   *                 kitoje vietoje" atvejis, kurio ji ir siekė neleisti.
+   *
+   * Naujas invariantas tikrina EFEKTĄ, ir abi kryptys yra būtinos: be pirmosios
+   * grįžtų blokada, be antrosios — tyli spraga.
    */
   const { resolveAuditBackend } = require("../utils/auditStore/backendSelection");
 
   const bazė = { AUDIT_BACKEND: "postgres", AUDIT_ID_SALT: "s", AUDIT_ID_SALT_ID: "i" };
+  const PILNAS = "postgres://u:p@db.prod:5432/stenograma";
 
-  /** Kiekvienas atskirai - teisėtas. */
-  assert.equal(resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://a/b" }), "postgres");
+  /** Kiekviena forma atskirai - teisėta. */
+  assert.equal(resolveAuditBackend({ ...bazė, DATABASE_URL: PILNAS }), "postgres");
   assert.equal(resolveAuditBackend({ ...bazė, PGHOST: "postgres" }), "postgres");
 
-  assert.throws(
-    () => resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://a/b", PGHOST: "kitas" }),
-    /IR DATABASE_URL, IR PGHOST|TIK VIENĄ/,
-    "abu kartu privalo nutraukti startą, o ne tyliai pasirinkti vieną"
+  /**
+   * ⚠️ ATLAISVINIMO KRYPTIS. Būtent šis derinys anksčiau krisdavo — ir būtent jis
+   * yra dokumentuotas Compose diegimas su pridėtu DSN.
+   */
+  assert.equal(
+    resolveAuditBackend({ ...bazė, DATABASE_URL: PILNAS, PGHOST: "kitas" }),
+    "postgres",
+    "pilnas DSN paverčia `PGHOST` neveiksniu - blokuoti reikštų drausti teisėtą konfigūraciją"
   );
+
+  /** ⚠️ SUGRIEŽTINIMO KRYPTIS: tai, ko senoji taisyklė NEMATĖ. */
+  for (const [vardas, aplinka] of [
+    /**
+     * ⚠️ `require`, NE `disable`. `disable` sutampa su `pg` numatytuoju
+     * (`defaults.ssl === false`), tad jokio skirtumo nesukuria — o testas,
+     * naudojantis `disable`, „praeitų" nieko netikrindamas.
+     *
+     * ⚠️ IR KRYPTIS ČIA VIENA. Kai DSN turi `?sslmode=…`, `config.ssl` yra
+     * apibrėžtas, ir `PGSSLMODE` `pg` apskritai neskaito
+     * (`connection-parameters.js:85`) — aplinka gali SSL tik įjungti, niekada
+     * nenuleisti žemiau to, ką eksplicitiškai sako DSN.
+     */
+    ["PGSSLMODE (saugumas)", { PGSSLMODE: "require" }],
+    ["PGOPTIONS (sesijos namespace)", { PGOPTIONS: "-csearch_path=kita" }],
+    /**
+     * ⚠️ `PGCLIENT_ENCODING` PAŠALINTAS PO PENKTO PERŽIŪROS RAUNDO.
+     *
+     * Jis atrodė kaip sesijos semantiką keičiantis kintamasis, bet grandinė
+     * `Client` → `Connection` → `pg-protocol` reikšmės NEVARTOJA: `Connection`
+     * `config.encoding` neskaito, o `pg-protocol` dekodavimas fiksuotas `utf-8`.
+     * Startas dėl jo krisdavo be priežasties. Vietoj jo — `PGREPLICATION`, kurį
+     * `getStartupConf()` realiai perduoda serveriui.
+     */
+    ["PGREPLICATION (sesija)", { PGREPLICATION: "true" }],
+  ]) {
+    assert.throws(
+      () => resolveAuditBackend({ ...bazė, DATABASE_URL: PILNAS, ...aplinka }),
+      /SKIRTINGĄ efektyvią jungties semantiką/,
+      `${vardas}: pilną DSN perrašantis kintamasis privalo nutraukti startą`
+    );
+  }
+
+  /**
+   * ⚠️ SLAPTAŽODIS NEGALI PATEKTI Į KLAIDĄ. Kredencialų konfliktas praneša TIK
+   * klasę; reikšmės į pranešimą nepatenka net kaip fragmentas.
+   */
+  const klaida = (() => {
+    try {
+      resolveAuditBackend({ ...bazė, DATABASE_URL: "postgres://u@db.prod:5432/s", PGPASSWORD: "labai-slaptas" });
+      return null;
+    } catch (e) {
+      return e.message;
+    }
+  })();
+
+  assert.match(klaida, /kredencialai/, "klasė privalo būti įvardyta");
+  assert.ok(!klaida.includes("labai-slaptas"), "slaptažodis NEGALI patekti į klaidos tekstą");
 });
 
 test("DOKUMENTACIJA: `PG*` forma įvardyta kaip PALAIKOMA, o konfliktas - kaip klaida", () => {

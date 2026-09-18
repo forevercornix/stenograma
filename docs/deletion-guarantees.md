@@ -9,6 +9,50 @@ Techninis modelis aprašytas [`artefact-lifecycle.md`](artefact-lifecycle.md);
 
 ---
 
+## 0. ⚠️ SĄLYGA, KURIAI GALIOJA VISOS ŽEMIAU ESANČIOS GARANTIJOS
+
+**Jos galioja tol, kol PostgreSQL yra job'ų autoritetas** — t. y. kol diegimas
+mato tą pačią duomenų bazę, kurioje gyvena `job_results` ir
+`job_result_attempts`.
+
+Po #157 rezultatai gali gulėti failų sistemoje arba S3, o **vienintelis jų
+adresas** yra tos dvi lentelės. Ištrynimo kelias ir neįsipareigotų bandymų
+šlavėjas skaito būtent jas.
+
+Nustojus jas skaityti — nesvarbu kodėl:
+
+- objektai saugykloje **lieka**, nes niekas apie juos nebežino;
+- jų nepasiekia nei ištrynimas pagal subjekto prašymą, nei retencijos valymas;
+- **jų neįmanoma surasti net rankiniu būdu**: saugyklos sąrašymo (`list(prefix)`)
+  riba neegzistuoja pagal konstrukciją, o objekto raktas išvedamas iš
+  identifikatorių, kurie buvo tik toje pačioje duomenų bazėje.
+
+⚠️ **TAM NEREIKIA NIEKIENO SPRENDIMO.** Pakanka, kad dingtų PostgreSQL nuoroda —
+`DATABASE_URL` **arba** `PGHOST` su `PG*` rinkiniu: pamesta Compose faile,
+neperduotas env kintamasis, klaida deployment'e. Startas
+pavyksta, `/api/ready` lieka žalias, o duomenys tampa nepasiekiami tyliai.
+
+### Ką tai reiškia atsakant į subjekto prašymą
+
+Jei diegimas kada nors veikė su PostgreSQL, o dabar neveikia, **negalima teigti,
+kad duomenys ištrinti** — sistema jų nemato, bet tai nereiškia, kad jų nėra.
+Tokiu atveju pirmas žingsnis yra ATSTATYTI prieigą prie tos duomenų bazės
+(7.6 restore), ne tęsti ištrynimo procedūrą be jos.
+
+### Teisinga seka atsisakant PostgreSQL
+
+1. **pirma** ištrinti duomenis per veikiantį diegimą — kol ištrynimas dar pasiekia
+   saugyklą;
+2. **tik paskui** keisti konfigūraciją.
+
+Atvirkštinė tvarka palieka transkripcijas be savininko ir be adreso.
+
+⚠️ Techninė mechanika ir aktyvavimo sprendimo kontekstas —
+[`decisions/155-postgres-authority.md`](decisions/155-postgres-authority.md)
+§„Grįžimas atgal".
+
+---
+
 ## 1. Ką ištrynimas garantuoja
 
 `DELETE /api/jobs/:id` ir `DELETE /api/transcribe-jobs/:id` per vieną
@@ -29,7 +73,7 @@ kategorijų sąrašu, o **jobas paliekamas**, kad užklausą būtų galima pakar
 ✅ Naujas darbas tuo pačiu ID nebus pradėtas.
 ✅ Pakartotinis ištrynimas nėra klaida ir duoda tą pačią galutinę būseną.
 
-### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su `DATABASE_URL`** (nuo [7.5a])
+### ⚠️ Ištrynimo žymos išgyvena restartą – **diegimuose su nurodytu PostgreSQL** (nuo [7.5a])
 
 Iki 7.5a žymos gyveno tik proceso atmintyje, ir tai buvo įrašyta 2 skyriuje kaip
 apribojimas. Nuo 7.5a jos saugomos `erasure_marks` lentelėje, tad:
@@ -126,6 +170,13 @@ režimą – žr. 2 skyrių. Startas tokiu atveju garsiai įspėja.
 be `DATABASE_URL`) tai reiškė auditą duomenų bazėje ir žymas atmintyje – t. y.
 7.4e barjeras skaitytų tuščią `erasure_marks` lentelę ir visada praleistų, tyliai.
 Abu pool'ai dabar statomi iš to paties `utils/pgConnection.js`.
+
+⚠️ **NUO #245 TAS PATS GALIOJA VISIEMS KETURIEMS POOL'AMS.** `jobStore`,
+`sessionStore`, `auditStore` ir ištrynimo žymos jungties formą interpretuoja
+vienodai, o `make doctor` / `/api/health/deep` diagnostinis klientas jungiasi per
+tą patį autoritetą. Tai jungties FORMOS suvienodinimas: nė vieno komponento
+backend pasirinkimo politika nesikeičia, ir `PG*` buvimas savaime nieko
+neperjungia į PostgreSQL.
 
 ---
 
@@ -280,7 +331,7 @@ t. y. ar teisingai užrašytas KINTAMASIS. Faktinį terminą tikrina
 ⚠️ **Išleista kopija termino nesutrumpina.** `BACKUP_RETENTION_DAYS` sumažinimas
 neatšaukia anksčiau eksportuotos kopijos: ji galioja pagal savo manifestą.
 Kūrimo metu jos galiojimas fiksuojamas `backup_horizon` lentelėje (aukščiausias
-vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be `DATABASE_URL`
+vanduo, niekada nemažėja), ir žymų retencija jį įskaito. Be nurodyto PostgreSQL
 kopijos galiojimas neužsirašo – tai to paties atmintinio režimo apribojimas.
 
 ---

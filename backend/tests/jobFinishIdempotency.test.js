@@ -9,6 +9,8 @@ const jobStore = require("../utils/jobStore");
 const {
   kanoninisRezultatas,
   idempotentiskasAtsakymas,
+  REZULTATAS_EXTERNAL,
+  NEPALYGINAMA,
   JOB_TYPES,
   OWNER_KIND,
   STATUS,
@@ -608,6 +610,107 @@ test("#184-C ⚠️ `finish(COMPLETED)` BE rezultato atmetamas PIRMAME perėjime
   /** Kiti terminalai rezultato nereikalauja. */
   assert.doesNotThrow(() => finish(processing, STATUS.FAILED, { error: "x" }));
   assert.doesNotThrow(() => finish(processing, STATUS.CANCELLED, {}));
+});
+
+/**
+ * EXTERNAL EILUTĖS FORMA — TRYS ŠAKOS, TIKRINAMOS ATSKIRAI (#157, PR-7, 2 sąlyga).
+ *
+ * ⚠️ KODĖL ATSKIRAI, O NE PER INTEGRACINĮ FAILĄ.
+ *
+ * `finishExternalFazes.integration` įrodė, kad trys atvejai KARTU laiko seną elgesį
+ * (raudonas raundas: 3 krito, kontrolė praėjo). Bet šakos yra tarpusavyje
+ * IŠSKIRIANČIOS: pašalinus vieną, jos atvejis nukrinta į gretimą, ir integraciniai
+ * testai gali likti žali su MIRUSIU kodu. Tai §9.1 klausimas, ir atsakyti į jį
+ * galima tik izoliuota mutacija.
+ *
+ * ⚠️ IR TAM DB NEREIKIA: verdiktą priima `common.js`, o `postgresStore` tik pasako,
+ * kokia forma yra jo eilutė. Trys mutacijos paleidžiamos LOKALIAI, per sekundes.
+ */
+test("#157 EXTERNAL forma: `completed` BE rezultato — `RESULT_CONFLICT`", () => {
+  const external = { status: STATUS.COMPLETED, result: REZULTATAS_EXTERNAL };
+
+  /**
+   * ⚠️ REZULTATAS YRA — JIS SAUGYKLOJE. `COMPLETED_WITHOUT_RESULT` čia reikštų
+   * remontuotiną būseną, po kurios kvietėjas perrašytų rezultatą ir external eilutė
+   * virstų inline — objektas liktų NAŠLAIČIU.
+   */
+  assert.equal(idempotentiskasAtsakymas(external, STATUS.COMPLETED, {}), "RESULT_CONFLICT");
+  assert.notEqual(idempotentiskasAtsakymas(external, STATUS.COMPLETED, {}), "COMPLETED_WITHOUT_RESULT");
+});
+
+test("#157 EXTERNAL forma: `completed` SU rezultatu — `NEPALYGINAMA`, ne konfliktas", () => {
+  const external = { status: STATUS.COMPLETED, result: REZULTATAS_EXTERNAL };
+
+  /**
+   * ⚠️ SKIRTUMAS NUO `RESULT_CONFLICT` YRA ESMINIS. Konfliktas reiškia „palyginau ir
+   * nesutampa"; čia palyginti NĖRA KUO, nes įeinantis rezultatas neturi kvito.
+   * Verdiktas atiduodamas kvietėjui — jis vienintelis žino, KODĖL kvito nėra
+   * (neprijungta saugykla), ir gali tai pasakyti operatoriui.
+   */
+  assert.equal(
+    idempotentiskasAtsakymas(external, STATUS.COMPLETED, { result: { text: "x" } }),
+    NEPALYGINAMA
+  );
+});
+
+test("#157 EXTERNAL forma: `finish(failed)` lieka GYVAVIMO CIKLO klausimas", () => {
+  const external = { status: STATUS.COMPLETED, result: REZULTATAS_EXTERNAL };
+
+  /**
+   * ⚠️ SARGAS ŠITĄ PASIGLEMŽDAVO. Iki #157 PR-7 ta pati būsena duodavo vidinę klaidą
+   * apie „lygybės autoritetą", nors lygybės niekas neklausė — t. y. tas pats
+   * perėjimas grąžindavo SKIRTINGĄ klaidą priklausomai nuo `storage_type`.
+   */
+  assert.equal(idempotentiskasAtsakymas(external, STATUS.FAILED, {}), undefined);
+  assert.equal(idempotentiskasAtsakymas(external, STATUS.CANCELLED, {}), undefined);
+});
+
+/**
+ * ⚠️ TĖVINĖ ŠAKA TURI SAVO TESTĄ — IR TAI RADO IZOLIUOTA MUTACIJA.
+ *
+ * Pašalinus `job.result === REZULTATAS_EXTERNAL` aptikimą, testas „be rezultato →
+ * `RESULT_CONFLICT`" VIS TIEK PRAEINA — bet PER KLAIDĄ: simbolis nukrinta į kanoninį
+ * palyginimą, o `kanoninisRezultatas(simbolis)` yra `undefined`, kai tuo tarpu
+ * `kanoninisRezultatas(undefined)` yra `"null"`. Nesutampa — atsitiktinai teisingas
+ * atsakymas.
+ *
+ * ⚠️ IR ATSITIKTINUMAS PAVOJINGAS: reikšmė, kurios kanoninė forma irgi `undefined`
+ * (funkcija, simbolis), duotų `undefined === undefined`, t. y. MELAGINGĄ no-op —
+ * skirtingas rezultatas būtų priimtas kaip tas pats. Būtent to `RESULT_CONFLICT`
+ * ir vengia.
+ *
+ * Todėl aptikimo šaka pririšama atskirai: simbolis NIEKADA nepatenka į palyginimą.
+ */
+test("#157 EXTERNAL forma NIEKADA nepatenka į kanoninį palyginimą", () => {
+  const external = { status: STATUS.COMPLETED, result: REZULTATAS_EXTERNAL };
+
+  /** ⚠️ Prielaida, kuria remiasi šis testas — išmatuota, ne numanyta. */
+  assert.equal(kanoninisRezultatas(REZULTATAS_EXTERNAL), undefined);
+  assert.equal(kanoninisRezultatas(() => 1), undefined);
+
+  /**
+   * Be aptikimo šakos ŠITAS duotų `job` (melagingą no-op), nes abi kanoninės formos
+   * yra `undefined`. Su ja — `NEPALYGINAMA`.
+   */
+  assert.equal(
+    idempotentiskasAtsakymas(external, STATUS.COMPLETED, { result: () => 1 }),
+    NEPALYGINAMA,
+    "simbolis pateko į kanoninį palyginimą — skirtingas rezultatas priimtas kaip tas pats"
+  );
+});
+
+/**
+ * ⚠️ KONTROLĖ: TA PATI FUNKCIJA INLINE FORMAI ELGIASI NEPAKITUSIAI.
+ *
+ * Be jos trys testai aukščiau būtų suderinami su pakeitimu, kuris external šaką
+ * padaro teisingą, o inline — sulaužo.
+ */
+test("#157 KONTROLĖ: inline forma nepakitusi", () => {
+  const inline = { status: STATUS.COMPLETED, result: { text: "x" } };
+
+  assert.equal(idempotentiskasAtsakymas(inline, STATUS.COMPLETED, { result: { text: "x" } }), inline);
+  assert.equal(idempotentiskasAtsakymas(inline, STATUS.COMPLETED, { result: { text: "y" } }), "RESULT_CONFLICT");
+  assert.equal(idempotentiskasAtsakymas(inline, STATUS.FAILED, {}), undefined);
 });
 
 test("#184-C ⚠️ `finish(FAILED)` ant `completed`-be-rezultato lieka GYVAVIMO CIKLO klausimas", () => {

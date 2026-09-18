@@ -499,7 +499,7 @@ generation pipeline, Docker deployment, health/readiness checks). Pilnas sąraš
 - [ ] Realios įrašo TRUKMĖS (ne tik failo dydžio) tikrinimas prieš apdorojimą (`ffprobe` ar panaši biblioteka) - žr. paaiškinimą `backend/README.md` "Faster-Whisper" skyriuje.
 - [x] ~~Playwright/Cypress E2E testas (naršyklė → audio upload → transcribe → generate → edit → export)~~ → **Milestone 1**: Playwright E2E (`frontend/e2e/`) dengia įklijuoto teksto IR pilno audio upload → polling → protokolas → DOCX srautus + klaidų kelius. Vykdomi CI'e su Chromium. Liko: redagavimo srautas, diarizacijos pasirinkimas naršyklėje.
 - [ ] Audit log perkėlimas iš atminties į SQLite/Postgres (su retention politika, PII redagavimu, paieška, eksportu). *(Milestone 2, #155 7.4)*
-- [ ] PostgreSQL job metaduomenims *(Milestone 2, #155)*. Padaryta: `postgres:16` servisas ir migracijų karkasas (7.1), `postgresStore` backend'as su `jobs`/`job_results` schema, `CHECK` invariantais ir 15 metodų kontraktu (7.2a). **Sąžiningai: PostgreSQL DAR NEAKTYVUOTAS** - galioja ADR aktyvavimo barjeras, tad `DATABASE_URL` job metaduomenų neperjungia, kol nebus patikrinto restore (7.6), persistentinių ištrynimo žymų (7.5a) ir sąlyginio transakcinio užbaigimo (7.5b). Žr. [`docs/decisions/155-postgres-authority.md`](docs/decisions/155-postgres-authority.md).
+- [ ] PostgreSQL job metaduomenims *(Milestone 2, #155)*. Padaryta: `postgres:16` servisas ir migracijų karkasas (7.1), `postgresStore` backend'as su `jobs`/`job_results` schema, `CHECK` invariantais ir 15 metodų kontraktu (7.2a). **Aktyvavimo barjeras ATIDARYTAS** (#155): jo prielaidos — patikrintas restore (7.6), persistentinės ištrynimo žymos (7.5a) ir sąlyginis transakcinis užbaigimas (7.5b) — įvykdytos, tad `postgres` yra pasirenkamas job metaduomenų backend'as. ⚠️ **Sąžiningai: `DATABASE_URL` vienas jo NEĮJUNGIA** - pasirinkimas EKSPLICITINIS (`JOB_STORE_BACKEND=postgres`). Taip dėl to, kad `DATABASE_URL` reikalingas ir sesijoms, ir auditui, ir migracijoms: numanomas išvedimas tyliai perjungtų job'us diegimams, kurie to neprašė. Be eksplicitinio pasirinkimo job'ai lieka ATMINTYJE, ir tai matoma `doctor` eilutėje „Job metaduomenų saugykla" PRIEŠ restartą. Žr. [`docs/decisions/155-postgres-authority.md`](docs/decisions/155-postgres-authority.md).
 - [x] ~~Tikra job queue vietoj in-memory saugyklos~~ → **Milestone 1**: BullMQ eilė su atskirais worker procesais (`workers/transcriptionWorker.js`, `protocolWorker.js`), retry+backoff, `failed` būsenos retencija po visų bandymų (ne atskira dead-letter eilė - žr. terminijos pastabą aukščiau), stalled recovery, atominis job reservation; Redis-backed persistentus state su fallback į in-memory. Liko (Milestone 2): PostgreSQL ilgalaikiams rezultatams.
 - [ ] Tikras audio streaming tiekėjui (šiuo metu visas failas skaitomas į RAM prieš siunčiant - žr. backend README).
 - [ ] Antivirusinis audio failų skenavimas (šiuo metu tik magic-bytes signature patikra, ne pilnas turinio skenavimas).
@@ -1444,16 +1444,18 @@ atkūrimą **sustabdo** (`DR_LEDGER_STALE`); tęsti galima tik su užfiksuotu
 patvirtinimu, kuris gula į auditą (arba, `PRIVACY_MODE` režime, į operatoriaus
 patvirtinimą reikšmėmis).
 
-⚠️ **Tai įrodytas kelias, o ne veikianti gynyba.** Kol 7.2a aktyvavimo barjeras
-neuždarytas, PostgreSQL nėra job'ų autoritetas produkcijoje (#281, #282), tad
-visa ši grandinė šiandien yra **procedūra**, o ne kasdien veikianti apsauga. Jos
+⚠️ **Tai įrodytas kelias, o ne automatiškai veikianti gynyba.** Aktyvavimo
+barjeras atidarytas, tad PostgreSQL **gali** būti job'ų autoritetas — bet tik
+diegimuose, kurie nurodė `JOB_STORE_BACKEND=postgres`. Ten, kur nenurodyta,
+grandinė lieka **procedūra**, ne kasdien veikianti apsauga (#281, #282). Jos
 pilnos pratybos — kopija → ištrynimas → atkūrimas iš senesnio snapshot'o →
 replay — **įvykdytos ir žalios** CI `postgres` rinkinyje, įskaitant tarpinį
 patikrinimą, kad ištrintas job'as po atkūrimo tikrai grįžta.
 
 Skirtumas tarp „įrodyto kelio" ir „veikiančios gynybos" svarbus būtent čia: šį
-skyrių skaito ir tie, kas neskaitė nė vieno issue. Kol barjeras neatidarytas,
-procedūrą paleidžia **operatorius**, ne sistema.
+skyrių skaito ir tie, kas neskaitė nė vieno issue. Procedūrą ir toliau paleidžia
+**operatorius**, ne sistema — barjero atidarymas to nepakeitė ir neturėjo: jis
+nulėmė, KUR gyvena job'ai, o ne kas paleidžia atkūrimą.
 
 ⚠️ **Auditas nekopijuojamas** dėl tos pačios priežasties: jo įrašai saugo
 pseudonimizuotą subjektą, tad žymų patikra jų neapima, ir atkūrus GDPR ištrinti

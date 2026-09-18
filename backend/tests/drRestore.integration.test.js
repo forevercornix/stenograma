@@ -14,6 +14,9 @@ const tombstones = require("../utils/deletionTombstones");
 const auditStore = require("../utils/auditStore");
 const jobErasure = require("../utils/jobErasure");
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
+const fs = require("node:fs");
+const os = require("node:os");
 const erasureReplay = require("../utils/erasureReplay");
 const restoredJobStore = require("../utils/restoredJobStore");
 const sesijuPg = require("../utils/sessionStore/postgresStore");
@@ -55,6 +58,28 @@ process.env.LOG_LEVEL = "error";
 
 const SALTINIO_URL = testDatabaseUrl("drsource");
 const TIKSLO_URL = testDatabaseUrl("drtarget");
+
+/**
+ * ⚠️ EXTERNAL ARTEFAKTŲ SAUGYKLA — R1 (#155).
+ *
+ * Iki šiol DR pratyba naudojo TIK inline duomenis: faile nebuvo nė vienos nuorodos
+ * į saugyklą. Vadinasi teiginys „ištrynimas išgyvena atkūrimą" buvo įrodytas DB
+ * eilutėms, o po #157 rezultatas gali gulėti FAILŲ SISTEMOJE ar S3, ir jo adresas
+ * yra TIK `job_results` / `job_result_attempts`.
+ *
+ * ⚠️ SAUGYKLA VIENA ABIEM BAZĖMS, IR TAI NE SUPAPRASTINIMAS. Objektai gyvena UŽ
+ * duomenų bazės ribų, tad atkūrus SENESNĘ kopiją į kitą bazę, ji rodo į TĄ PAČIĄ
+ * saugyklą — būtent tokia yra tikrovė, kurią pratyba turi atkartoti.
+ */
+/** Backend'o šaknis — CLI paleidimui ir `cwd`. */
+const REPO_SAKNIS = path.resolve(__dirname, "..");
+
+const ARTEFAKTU_SAKNIS = praleisti() ? null : fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-dr-"));
+let artefaktuSaugykla = null;
+/** Pažymėto job'o objekto raktas — užpildomas 1 žingsnyje. */
+let zymetoRaktas = null;
+/** Nepažymėto job'o (B) objekto raktas — C1 kontrolė. */
+let nepazymetoRaktas = null;
 
 const VARTOTOJAS_A = "11111111-1111-4111-8111-111111111111";
 const VARTOTOJAS_B = "22222222-2222-4222-8222-222222222222";
@@ -136,8 +161,21 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
   if (praleisti()) return;
 
   t.after(async () => {
-    await pasalintiDb(SALTINIO_URL);
-    await pasalintiDb(TIKSLO_URL);
+    /**
+     * ⚠️ KATALOGAS ŠALINAMAS `finally`, NE PO `DROP DATABASE`.
+     *
+     * Nepavykus teardown'ui (užimta bazė, dingusi jungtis), `await` nutraukia hook'ą,
+     * ir nepažymėto job'o TRANSKRIPCIJA lieka `/tmp`. Valymas, vykdomas tik laimingu
+     * keliu, yra valymas, kurio nėra būtent tada, kai jo reikia.
+     *
+     * `verify-clean.mjs` tokius likučius gaudo (#157, PR-6: trys katalogai).
+     */
+    try {
+      await pasalintiDb(SALTINIO_URL);
+      await pasalintiDb(TIKSLO_URL);
+    } finally {
+      if (ARTEFAKTU_SAKNIS) fs.rmSync(ARTEFAKTU_SAKNIS, { recursive: true, force: true });
+    }
   });
 
   const saltinioEnv = testoAplinka(SALTINIO_URL);
@@ -155,10 +193,40 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     await suAplinka(saltinioEnv, async () => {
       const pool = new Pool({ connectionString: SALTINIO_URL });
       try {
-        jobai = await pasetiKeturisStatusus(createPostgresStore(pool), {
-          ownerId: VARTOTOJAS_A,
-          storageKey: (k) => `audio/${k}.wav`,
-        });
+        artefaktuSaugykla = createFsArtifactStore({ root: ARTEFAKTU_SAKNIS });
+        await artefaktuSaugykla.patikrintiSaugykla();
+
+        /**
+         * ⚠️ `rasymoSaugykla` PADUODAMA — be jos `zymetas` gautų INLINE rezultatą, ir
+         * pratyba vėl tikrintų tik eilutes. Būtent to R1 ir vengia.
+         */
+        jobai = await pasetiKeturisStatusus(
+          createPostgresStore(pool, { rasymoSaugykla: artefaktuSaugykla }),
+          {
+            ownerId: VARTOTOJAS_A,
+            storageKey: (k) => `audio/${k}.wav`,
+            uzbaigtiZymeta: true,
+          }
+        );
+
+        const { rows } = await pool.query(
+          "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1",
+          [jobai.zymetas.id]
+        );
+        assert.equal(rows[0].storage_type, "fs", "pažymėtas job'as privalo turėti EXTERNAL rezultatą");
+        zymetoRaktas = rows[0].storage_key;
+        assert.ok(
+          fs.existsSync(path.join(ARTEFAKTU_SAKNIS, zymetoRaktas)),
+          "objektas privalo realiai gulėti saugykloje — kitaip ištrynimui nebūtų ko šalinti"
+        );
+
+        const { rows: bRows } = await pool.query(
+          "SELECT storage_key FROM job_results WHERE job_id = $1",
+          [jobai.completed.id]
+        );
+        assert.equal(bRows[0].storage_key ? true : false, true, "job'as B irgi turi EXTERNAL objektą");
+        nepazymetoRaktas = bRows[0].storage_key;
+        assert.notEqual(nepazymetoRaktas, zymetoRaktas, "du SKIRTINGI objektai — kitaip C1 nieko netikrintų");
 
         const store = sesijuPg.createPostgresStore(pool);
         for (const [userId, role, username] of [
@@ -199,13 +267,31 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
          * žymos uždarymas. Šio testo dalykas yra tai, kas vyksta PO to, tad
          * ištrynimas čia yra PARUOŠIMAS, ne tikrinamas elgesys.
          */
-        const saugykla = restoredJobStore.sukurti(pool);
+        /**
+         * ⚠️ `artifactStores` PADUODAMA — be jos `deleteResultArtifacts()` neturėtų
+         * saugyklos `fs` tipui ir ištrynimas kristų. Tai ta pati riba, kurią
+         * `restoredJobStore.paruosti()` gina fail-closed būdu.
+         */
+        const saugykla = restoredJobStore.sukurti(pool, { artifactStores: { fs: artefaktuSaugykla } });
         const job = await saugykla.system.get(jobai.zymetas.id, { hydrate: true });
         await tombstones.mark(job.id, { reason: "user_request", actorKind: "user" });
         await jobErasure.eraseJob(job, { store: saugykla });
         await tombstones.complete(job.id, tombstones.TOMBSTONE_STATUS.DELETED, { completedAt: Date.now() });
 
         assert.equal(await saugykla.system.get(job.id, { hydrate: true }), null, "šaltinyje job'o A nebėra");
+
+        /**
+         * ⚠️ R1 BRANDUOLYS: ištrynimas pasiekė OBJEKTĄ, ne tik eilutę.
+         *
+         * Be šios asercijos „ištrynimas išgyvena atkūrimą" reikštų tik tai, kad DB
+         * eilutės nebėra — o transkripcija liktų saugykloje, nepasiekiama nei
+         * ištrynimui, nei retencijai, nei rankiniu būdu (`list(prefix)` neegzistuoja).
+         */
+        assert.equal(
+          fs.existsSync(path.join(ARTEFAKTU_SAKNIS, zymetoRaktas)),
+          false,
+          "ištrynimas privalo pašalinti OBJEKTĄ, ne tik `job_results` eilutę"
+        );
 
         artefaktas = erasureExport.sudarytiArtefakta({
           zymos: await tombstones.listAll(),
@@ -259,6 +345,40 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     );
 
     /** Kilmės ašis: tapatybė ATKELIAVO su dump'u, tad kilmės patikra praeis. */
+    /**
+     * ⚠️ C2: PERKELTA NUORODA TIKRINAMA PRIEŠ REPLAY, NE TIK PO JO.
+     *
+     * Be šios asercijos „ištrynimas išgyvena restore" galiotų ir TUŠČIAI bazei:
+     * praradus `job_results` bei `job_result_attempts` eilutes, 5 žingsnis to
+     * nepastebėtų (jis tikrina tik `jobs` ir `erasure_marks`), o 8 žingsnis laukia,
+     * kad rezultato eilutės NEBŪTŲ. Testas praeitų neatkūręs to, ką turi ištrinti.
+     */
+    const { rows: atkurtos } = await vykdyti(
+      TIKSLO_URL,
+      "SELECT storage_type, storage_key FROM job_results WHERE job_id = $1",
+      [jobai.zymetas.id]
+    );
+    const atkurta = atkurtos[0] || {};
+    assert.equal(atkurta.storage_type, "fs", "atkurta EXTERNAL nuoroda, ne inline");
+    assert.equal(atkurta.storage_key, zymetoRaktas, "atkurtas TAS PATS raktas");
+
+    /** ⚠️ Registro įrašas irgi privalo grįžti — jis yra antra objekto adreso pusė. */
+    assert.equal(
+      await eiluciuSkaicius(TIKSLO_URL, "job_result_attempts", "WHERE job_id = $1", [jobai.zymetas.id]),
+      1,
+      "bandymų registro įrašas grįžo kartu su nuoroda"
+    );
+
+    /**
+     * ⚠️ IR OBJEKTO SAUGYKLOJE NEBĖRA — nuoroda atkurta, turinys ne.
+     * Būtent tokia yra tikroji atkurtos bazės būsena, ir replay privalo ją ištverti.
+     */
+    assert.equal(
+      fs.existsSync(path.join(ARTEFAKTU_SAKNIS, zymetoRaktas)),
+      false,
+      "objektas ištrintas 3 žingsnyje ir NEGRĮŽTA su DB kopija"
+    );
+
     const pool = new Pool({ connectionString: TIKSLO_URL });
     try {
       assert.equal(
@@ -303,8 +423,9 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     /**
      * ⚠️ BE ŠIOS PUSĖS 7 ŽINGSNIS ĮRODYTŲ TIK TIEK, KAD NAUJAS KELIAS VEIKIA.
      *
-     * 7.2a barjeras job'ų autoritetu palieka atmintį arba Redis, tad replay be
-     * nukreiptos saugyklos atkurtos bazės NELIEČIA — ir vis tiek UŽDARO žymą bei
+     * Pratybos aplinka `JOB_STORE_BACKEND` nenurodo (žr. `drRestoreEnv`), tad
+     * fasado autoritetas yra atmintis, o replay be nukreiptos saugyklos atkurtos
+     * bazės NELIEČIA — ir vis tiek UŽDARO žymą bei
      * įrašo kvitą. „Sėkmė paskelbta, duomenys liko" yra tiksliai tas vakuumas,
      * dėl kurio saugykla DR kelyje privaloma. Šis žingsnis jį parodo, o ne
      * aprašo.
@@ -387,6 +508,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
                   vykdytojas: pool,
                   actor: "gedimo-testas",
                   env: process.env,
+                  artifactStores: { fs: artefaktuSaugykla },
                 }),
               { tikIvykiui: erasureReplay.AUDITO_IVYKIS }
             ),
@@ -471,6 +593,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "gedimo-testas",
           env: process.env,
+          artifactStores: { fs: artefaktuSaugykla },
         });
 
         assert.deepEqual(atstatymas.replay.uzdarytosZymos, [jobai.failed.id], "žyma uždaryta");
@@ -500,6 +623,12 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "dr-pratybos",
           env: process.env,
+          /**
+           * ⚠️ BE ŠITO REPLAY KRISTŲ FAIL-CLOSED: atkurtoje bazėje yra `fs` eilutė, o
+           * `restoredJobStore.paruosti()` be saugyklos jos nepriima. Tai teisinga riba —
+           * R1 tikrina, kad koordinatorius ją PERDUODA, ne apeina.
+           */
+          artifactStores: { fs: artefaktuSaugykla },
         });
       } finally {
         await pool.end();
@@ -511,6 +640,19 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
   });
 
   await t.test("8. galinė būsena: A nebėra, B nepaliesti, sesijos revokuotos", async () => {
+    /**
+     * ⚠️ C1: NEPAŽYMĖTO JOB'O OBJEKTAS PRIVALO IŠLIKTI.
+     *
+     * Iki šiol tikrinta tik tai, kad PAŽYMĖTAS raktas dingo. Ištrynus gretimą raktą
+     * ar visą prefiksą, testas liktų ŽALIAS: „B liko" kontrolė tikrina tik DB eilutę,
+     * o jos niekas neliečia. Vadinasi vienintelis testas, kuris DR kelyje gintų
+     * nuosavybės predikatą, jo negynė.
+     */
+    assert.ok(
+      fs.existsSync(path.join(ARTEFAKTU_SAKNIS, nepazymetoRaktas)),
+      "nepažymėto job'o objektas privalo likti saugykloje — ištrynimas liečia TIK savo raktus"
+    );
+
     assert.equal(
       await eiluciuSkaicius(TIKSLO_URL, "jobs", "WHERE id = $1", [jobai.zymetas.id]),
       0,
@@ -656,6 +798,12 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "dr-pratybos",
           env: process.env,
+          /**
+           * ⚠️ BE ŠITO REPLAY KRISTŲ FAIL-CLOSED: atkurtoje bazėje yra `fs` eilutė, o
+           * `restoredJobStore.paruosti()` be saugyklos jos nepriima. Tai teisinga riba —
+           * R1 tikrina, kad koordinatorius ją PERDUODA, ne apeina.
+           */
+          artifactStores: { fs: artefaktuSaugykla },
         });
       } finally {
         await pool.end();
@@ -680,6 +828,71 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
         `AND ${auditoLaukas("outcome")} = 'erasure_replayed'`
     );
     assert.equal(rows[0].n, 1, "antras paleidimas antro ištrynimo kvito NERAŠO");
+  });
+
+
+  /**
+   * ⚠️ 9b: TAS PATS ATKŪRIMAS PER CLI — KIRTIMAS PER RIBĄ, KURIĄ KERTA OPERATORIUS.
+   *
+   * 9 žingsnis kviečia koordinatorių TIESIOGIAI ir paduoda `artifactStores` pats.
+   * Operatorius to negali: jis paleidžia `scripts/dr-restore.mjs`. Iki #155 A1 tas
+   * skriptas saugyklų nei kūrė, nei perdavė — tad testas buvo žalias, o CLI prieš
+   * atkurtą bazę su `fs` eilute KRISDAVO ties `restoredJobStore.paruosti()`.
+   *
+   * ⚠️ ŠIS ŽINGSNIS ATSKIRAS NUO 9, NE VIETOJ JO. Sujungus, CLI gedimas atrodytų
+   * kaip idempotentiškumo pažeidimas, ir diagnozė nurodytų ne tą sluoksnį.
+   *
+   * ⚠️ APLINKA — `tiksloEnv`, NE ŠVIEŽIA: `testoAplinka()` kiekvieną kartą generuoja
+   * NAUJĄ `BACKUP_ENCRYPTION_KEY`, tad su šviežia žurnalo iššifruoti nepavyktų.
+   */
+  await t.test("9b. TAS PATS per `dr-restore.mjs` — CLI riba, ne koordinatorius", async () => {
+    const priesJobai = await eiluciuSkaicius(TIKSLO_URL, "jobs");
+    const priesZymos = await eiluciuSkaicius(TIKSLO_URL, "erasure_marks");
+
+    const zurnalas = path.join(ARTEFAKTU_SAKNIS, "..", `dr-zurnalas-${process.pid}.json`);
+    fs.writeFileSync(
+      zurnalas,
+      JSON.stringify({ manifest: artefaktas.manifest, envelope: artefaktas.envelope }),
+      "utf8"
+    );
+
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          path.join(REPO_SAKNIS, "scripts", "dr-restore.mjs"),
+          "run",
+          "--in",
+          zurnalas,
+          "--target",
+          TIKSLO_URL,
+          "--actor",
+          "dr-cli-pratybos",
+        ],
+        {
+          cwd: REPO_SAKNIS,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            ...tiksloEnv,
+            /** ⚠️ TA PATI saugykla kaip pratyboje — kitaip CLI kurtų kitą `fs` šaknį. */
+            ARTIFACT_STORE_BACKEND: "fs",
+            ARTIFACT_FS_ROOT: ARTEFAKTU_SAKNIS,
+          },
+        }
+      );
+    } finally {
+      fs.rmSync(zurnalas, { force: true });
+    }
+
+    assert.equal(await eiluciuSkaicius(TIKSLO_URL, "jobs"), priesJobai, "CLI paleidimas būsenos nekeičia");
+    assert.equal(await eiluciuSkaicius(TIKSLO_URL, "erasure_marks"), priesZymos);
+
+    /** ⚠️ Ir nepažymėto job'o objektas po CLI kelio irgi privalo likti. */
+    assert.ok(
+      fs.existsSync(path.join(ARTEFAKTU_SAKNIS, nepazymetoRaktas)),
+      "CLI kelias liečia TIK savo raktus"
+    );
   });
 
   await t.test("10. PASENĘS ŽURNALAS `PRIVACY_MODE`: patvirtinimas veda iki `verify`", async () => {
@@ -710,6 +923,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           vykdytojas: pool,
           actor: "pasenusio-testas",
           env: process.env,
+          artifactStores: { fs: artefaktuSaugykla },
         };
 
         /** (a) BE `--allow-stale` — sustoja ties šviežumo riba. */

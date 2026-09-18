@@ -975,17 +975,37 @@ test("POOL: sesijų jungtis turi BAIGTINES ribas - jungimuisi IR užklausoms", (
     assert.ok(Number.isFinite(n[raktas]) && n[raktas] > 0, `${raktas} privalo būti baigtinis ir teigiamas`);
   }
 
-  /** Konfigūruojama, bet be tylaus virtimo begalybe prie šiukšlinės reikšmės. */
+  /**
+   * Konfigūruojama, bet be tylaus virtimo begalybe prie šiukšlinės reikšmės.
+   *
+   * ⚠️ REIKŠMĖ IMAMA IŠ PERDUOTO `env`, NE IŠ `process.env` (#245). Anksčiau ši
+   * funkcija priimdavo `env`, o ribas skaitydavo iš globalo — dvi tiesos apie tą
+   * pačią konfigūraciją viename objekte, ir testas tą nesutapimą įtvirtindavo.
+   * Produkcijoje elgesys nesikeičia: `sessionStore.init()` kviečiamas be
+   * argumentų, tad `env` ir yra `process.env`.
+   */
+  assert.equal(
+    sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x", DB_QUERY_TIMEOUT_MS: "1500" }).query_timeout,
+    1500
+  );
+
+  assert.equal(
+    sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x", DB_QUERY_TIMEOUT_MS: "abc" }).query_timeout,
+    5000,
+    "netinkama reikšmė grįžta į saugią numatytąją, o ne į neribotą laukimą"
+  );
+
+  /**
+   * ⚠️ IR KONTROLĖ, KAD GLOBALAS NEBEPRASISUNKIA: perduotas `env` be ribos
+   * privalo duoti numatytąją, o ne `process.env` reikšmę.
+   */
   const senas = process.env.DB_QUERY_TIMEOUT_MS;
   try {
     process.env.DB_QUERY_TIMEOUT_MS = "1500";
-    assert.equal(sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x" }).query_timeout, 1500);
-
-    process.env.DB_QUERY_TIMEOUT_MS = "abc";
     assert.equal(
       sessionStore.sesijuPoolNustatymai({ DATABASE_URL: "x" }).query_timeout,
       5000,
-      "netinkama reikšmė grįžta į saugią numatytąją, o ne į neribotą laukimą"
+      "`process.env` NEGALI perrašyti perduoto `env` - kitaip funkcija turi du šaltinius"
     );
   } finally {
     if (senas === undefined) delete process.env.DB_QUERY_TIMEOUT_MS;

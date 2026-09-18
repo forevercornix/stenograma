@@ -484,6 +484,110 @@ semantika vengia.
 
 ---
 
+## 3a. `main` apsaugos emergency bypass (#324, D6)
+
+⚠️ **Repo turi vieną savininką.** Su griežtais vartais ir be bypass procedūros
+pirmas išorinis gedimas sustabdo darbą — o tikėtiniausia baigtis yra **vartų
+išjungimas**, t. y. grįžimas į būseną iki #324. Todėl bypass yra **valdomas
+kelias**, ne vartų išjungimas.
+
+### Kada leidžiama
+
+**Tik** kai required check negali patikimai tapti žalias dėl priežasties,
+**nesusijusios su merge'inamo pakeitimo korektiškumu**: išorinis ar
+infrastruktūrinis gedimas.
+
+Per pastarąjį mėnesį tokių buvo trys: `npm audit` 503; `multer`/`js-yaml`
+advisories prieš nepakeistas priklausomybes; `minio/minio` image pašalintas iš
+Docker Hub.
+
+⚠️ **NEAIŠKIOS KILMĖS RAUDONAS TESTAS NĖRA PAKANKAMA PRIEŽASTIS.** Kitaip bypass
+virsta „savininkas nusprendžia, kad pakankamai žalia" — o tai yra vartų nebuvimas
+su papildomu žingsniu.
+
+### Privalomi laukai
+
+Forma tokia pat kaip **#237 `TESTŲ ŠALINIMAS` override registras**, kuris jau
+veikia — antras mechanizmas nekuriamas.
+
+Įrašas dedamas į **merge commit'o žinutę**, viena eilute prasidedančia žyme:
+
+```
+MAIN APSAUGOS BYPASS: <priežastis>
+```
+
+plius kūne visi šeši laukai:
+
+| Laukas | Ką reiškia |
+|---|---|
+| `PR/commit` | kas merginta |
+| `Apeitas check` | konkretus vardas, ne „CI" |
+| `Priežastis` | kas tiksliai neveikė |
+| `Įrodymas, kad išorinis` | nuoroda į status page, advisory, registry — **ne teiginys** |
+| `Patvirtino` | kas priėmė sprendimą |
+| `Follow-up issue` | jei ne vienkartinis; „nėra" tinka tik vienkartiniam |
+
+### Kur įrašas gyvena ir kaip patikrinama, kad jis atsirado
+
+**Registras** — `docs/ci-security-policy.md`, skyrius „Emergency bypass". Jis yra
+versijų kontrolėje, peržiūrimas kaip bet kuris pakeitimas, ir **vienintelis**
+autoritetingas įrašo šaltinis.
+
+⚠️ **GitHub bypass mechanizmas šių laukų užpildyti NEPRIVERČIA.** Tai
+**procedūrinis audito kontraktas**, ne techninis enforcement.
+
+#### ⚠️ Merge commit'o žymė NEBĖRA patikros pagrindas — išmatuota
+
+Pirmoji šios procedūros redakcija reikalavo `MAIN APSAUGOS BYPASS:` žymės merge
+commit'o žinutėje ir siūlė ją tikrinti `grep`. **Pirmas realus bypass tą
+sugriovė:** commit `43f29a3` žymės **neturi** (`grep` grąžino `0`), nors bypass
+tikrai įvyko ir registro įrašas buvo parašytas.
+
+Priežastis struktūrinė: squash merge žinutė sudaroma **GitHub sąsajoje merge
+metu**, ir žymę reikia įklijuoti ranka. Patikra, kurią galima pamiršti pirmą
+kartą ją naudojant, nėra patikra.
+
+Žymė lieka **neprivaloma patogybė**. Patikros pagrindas — GitHub `rule-suites`.
+
+#### Patikra po kiekvieno bypass
+
+```bash
+# Ar GitHub užfiksavo bypass įvykį (autoritetingas šaltinis)
+gh api "repos/forevercornix/stenograma/rulesets/rule-suites?ref=refs/heads/main&per_page=20" \
+  --jq '.[] | select(.result=="bypass") | "\(.id) \(.pushed_at) \(.actor_name)"'
+```
+
+⚠️ **NE `rulesets/<ID>/history`** — ji rodo ruleset **konfigūracijos** pakeitimus,
+ne bypass įvykius. Pirmoji redakcija siūlė būtent ją; tai buvo neteisingas
+instrumentas.
+
+#### Ketvirtinė sutikrinimo patikra
+
+Palyginti `result=bypass` įvykių skaičių su registro įrašų skaičiumi.
+Nesutapimas reiškia **bypass be įrašo** — incidentas, ne apskaitos klaida.
+
+**Pirmas matavimas (2026-09-16):**
+
+| Šaltinis | Kiekis |
+|---|---|
+| `rule-suites` `result=bypass` | **2** (`4086485870`, `4086981788`) |
+| Registro įrašai | **2** (Įrašas 1 — `2cba0bd`; Įrašas 2 — `43f29a3`) |
+
+Sutampa. ⚠️ Tame pačiame sąraše matomas ir `result=fail` (`4086523987`) — tai
+`GH013` atmestas push, t. y. **vartai suveikė**. Registre jo nėra ir neturi būti:
+registras fiksuoja apėjimus, ne atmetimus.
+
+### Ko bypass NEDARO
+
+- **neišjungia** apsaugos kitiems pakeitimams;
+- **neišplečia** bypass aktorių sąrašo;
+- **nepakeičia** required aibės.
+
+Jei bypass prireikia daugiau nei kartą tam pačiam check'ui, tai nebėra avarija —
+tai signalas, kad check'as netinka merge kontraktui. Sprendžiama keičiant
+kontraktą (žr. `docs/ci-security-policy.md` `dependency-audit` sąlygą), ne
+kartojant bypass.
+
 ## 4. Klaidingi teiginiai ir neteisingos diagnozės
 
 Ne kiekvienas signalas yra incidentas. Šie atvejai **atrodo** kaip incidentai,

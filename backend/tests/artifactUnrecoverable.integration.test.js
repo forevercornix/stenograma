@@ -72,14 +72,30 @@ test(
      *
      * Pirmoji redakcija grąžino `Date` rezultate ir laukė struktūrinio atmetimo. Testas
      * krito su `completed`: `ArtifactStore` riba yra EXTERNAL kelyje, o worker'is
-     * testuose eina per ATMINTIES saugyklą (aktyvavimo barjeras neleidžia PostgreSQL už
-     * maršrutų ir worker'ių). Inline kelias `paruostiReiksme()` nekviečia, tad `Date`
+     * testuose eina per ATMINTIES saugyklą (šie testai `JOB_STORE_BACKEND`
+     * nenurodo; iki #155 to neleido ir aktyvavimo barjeras). Inline kelias
+     * `paruostiReiksme()` nekviečia, tad `Date`
      * ten priimamas — riba jo tiesiog nemato.
      *
-     * Vadinasi pilnos grandinės „Date → atmetimas → nulis pakartojimų" šiandien
-     * paleisti neįmanoma; ji taps pasiekiama PR-7, prijungus rašymo saugyklą. Iki tol
-     * tikrinama TA DALIS, kuri egzistuoja: ar `neatkartojama` klaida iš `finish()`
-     * sustabdo BullMQ retry grandinę. Eilė, worker'is ir pakartojimų semantika — TIKRI.
+     * ⚠️ §12.1 KOREKCIJA (#298): ANKSTESNĖ REDAKCIJA ŽADĖJO, KAD GRANDINĖ SU `Date`
+     * TAPS PASIEKIAMA PR-7. NETAPS — IR NEBETURI.
+     *
+     * #298 parodė, kad `Date` atmetimas buvo ne riba, o NETEISINGAS MODELIS:
+     * `kanonizuoti()` `toJSON` nekviesdavo, nors visos saugyklos serializuoja per
+     * `JSON.stringify`, kuris kviečia. Ištaisius, `Date` tapatybė yra viena visuose
+     * backend'uose, tad jis nebeatmetamas NIEKUR. Grandinė su `Date` neįmanoma iš
+     * principo, ne dėl neprijungtos saugyklos.
+     *
+     * Struktūrinių atmetimų liko (NUL, neporinis surogatas, ciklinė nuoroda, `BigInt`,
+     * nedeterministinis `toJSON`), bet jie gyvena EXTERNAL kelyje, o šio testo
+     * worker'is per jį neina. Todėl čia tikrinama TA DALIS, kuri egzistuoja: ar
+     * `neatkartojama` klaida iš `finish()` sustabdo BullMQ retry grandinę. Eilė,
+     * worker'is ir pakartojimų semantika — TIKRI; sintetinė lieka tik klaidos kilmė.
+     *
+     * ⚠️ §12.1: ANKSTESNĖ REDAKCIJA SAKĖ „likutis eina su barjeru". BARJERAS
+     * ATIDARYTAS (#155), IR LIKUTIS NEIŠNYKO. Jam reikia ne barjero, o šio testo
+     * perrašymo prieš tikrą PostgreSQL + saugyklą worker'io kelyje — atskiras
+     * darbas, ne atidarymo pasekmė. Žyma, kuri laukė įvykio, dabar laukia darbo.
      */
     const tikrasFinish = jobStore.system.finish;
     t.after(() => {
@@ -91,7 +107,7 @@ test(
 
       const { ArtifactStoreError } = require("../utils/artifactStore/validation");
       throw new ArtifactStoreError(
-        "ArtifactStore: reikšmės tapatybė pasikeistų inline kelyje (Date).",
+        "ArtifactStore: NUL simbolis nepalaikomas (struktūrinis atmetimas).",
         "ARTIFACT_VALUE_UNSUPPORTED",
         { neatkartojama: true }
       );

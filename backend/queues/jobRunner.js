@@ -1,5 +1,6 @@
 const { AuditWriteError } = require("../utils/auditWrite");
 const jobStore = require("../utils/jobStore");
+const { patikrintiEilesJungti } = require("./config");
 const { assertResultWithinLimits } = require("../utils/resultLimits");
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
@@ -31,6 +32,27 @@ const _processors = {};
 
 function registerProcessor(type, fn) {
   _processors[type] = fn;
+}
+
+/**
+ * ⚠️ PREFLIGHT VERDIKTAS YRA BŪSENA, NE LOGO EILUTĖ.
+ *
+ * ADR reikalauja, kad rezultatas būtų matomas readiness/`doctor` išvestyje: logo
+ * eilutė dingsta rotacijoje, o operatorius, tikrinantis „kodėl inline", jos
+ * neranda. `null` reiškia „preflight dar nevykdytas" — tai TREČIA būsena, ne
+ * tas pats, kas „nepasiekiama".
+ */
+let _eilesPreflight = null;
+
+/** Ta pati riba kaip readiness (`READINESS_TIMEOUT_MS`), su tuo pačiu numatytuoju. */
+const PREFLIGHT_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.READINESS_TIMEOUT_MS);
+  return Number.isInteger(raw) && raw >= 100 && raw <= 60000 ? raw : 2000;
+})();
+
+/** Grąžina paskutinį preflight verdiktą arba `null`, jei jis dar nevykdytas. */
+function getQueuePreflight() {
+  return _eilesPreflight;
 }
 
 async function init(options = {}) {
@@ -78,6 +100,28 @@ async function init(options = {}) {
     // Naudojam ATSKIRAS eiles (queues/transcriptionQueue.js, protocolQueue.js) -
     // pagal struktūros reikalavimą. Jos sukuriamos lazy pirmo add metu.
     require("bullmq"); // patikrinam, kad bullmq įdiegtas (mes fallback jei ne)
+
+    /**
+     * ⚠️ REALUS PROBE PRIEŠ PRADEDANT KLAUSYTIS (#155, barjero prielaida).
+     *
+     * `require("bullmq")` įrodo tik tai, kad modulis įdiegtas. Jungtis kuriama
+     * LAZY pirmo `add` metu, tad be šito patikrinimo `server.js` pažymėtų
+     * runner'į ready ir imtų klausytis, o PIRMAS `enqueue` kabotų arba kristų —
+     * jau turint priimtą užklausą.
+     *
+     * ⚠️ NESĖKMĖ TRAKTUOJAMA TAIP PAT KAIP `require()` NESĖKMĖ, ne griežčiau.
+     * Tai sąmoninga: naujas fail-closed elgesys keliui, kuris iki šiol
+     * nusileisdavo, būtų politikos pakeitimas, o barjero prielaida reikalauja
+     * MATOMUMO, ne kitokio sprendimo. `REDIS_REQUIRED=true` ir toliau paverčia
+     * tai mirtina — kaip ir visose gretimose šakose.
+     */
+    const verdiktas = await patikrintiEilesJungti({ timeoutMs: PREFLIGHT_TIMEOUT_MS });
+    _eilesPreflight = verdiktas;
+
+    if (!verdiktas.pasiekiama) {
+      throw new Error(`eilė nepasiekiama: ${verdiktas.priezastis}`);
+    }
+
     _mode = "bullmq";
     log.info("Job runner: BullMQ (atskiri worker procesai; atsparu restartams)");
     return _mode;
@@ -616,6 +660,7 @@ async function close() {
 }
 
 module.exports = {
+  getQueuePreflight,
   init,
   getMode,
   registerProcessor,
