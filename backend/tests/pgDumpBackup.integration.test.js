@@ -963,13 +963,19 @@ test("#264: `PG*` forma prieš TIKRĄ `pg_dump` — vėliavos ir `~/.pgpass`", {
    * testas praeitų, nieko neįrodęs. Sentinelis yra vienintelis liudytojas, kad
    * vėliavos nuvedė į TĄ klasterį.
    */
-  const aiskus = backupEncryptionModulis.decrypt(kopija.envelope, {
+  /**
+   * ⚠️ `decrypt()` GRĄŽINA `{ plaintext: Buffer, usedPreviousKey }`, NE EILUTĘ —
+   * tas pats įspėjimas kaip `pgDumpBackup.js:947`. Pirmoji šio testo redakcija
+   * rašė `String(aiskus)` ir gaudavo `[object Object]`, tad asercija krito NE dėl
+   * to, ką tikrina.
+   */
+  const { plaintext } = backupEncryptionModulis.decrypt(kopija.envelope, {
     env: TESTO_ENV,
     manifest: kopija.manifest,
   });
 
   assert.match(
-    String(aiskus),
+    plaintext.toString("utf8"),
     new RegExp(sentinelis),
     "⚠️ kopijoje privalo būti ŠALTINIO sentinelis - be jo testas praeitų ir tada, " +
       "jei `pg_dump` būtų nuėjęs į numatytąją lokalią bazę"
