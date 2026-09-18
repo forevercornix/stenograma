@@ -547,7 +547,24 @@ function ivertintiLaukimoBaitus(laukiama, riba) {
    * absoliutus rėmas), o `bytes: "abc"` DB eilutėje yra defektas, kurį operatorius
    * privalo pamatyti. Sulyginus juos, šiukšlina reikšmė dingtų tyliai.
    */
-  const zalias = laukiama && typeof laukiama === "object" ? laukiama.bytes : undefined;
+  const salt = laukiama && typeof laukiama === "object" ? laukiama : {};
+  const zalias = salt.bytes;
+
+  /**
+   * ⚠️ `bytes` ŽALIA FORMA — TA PATI TAISYKLĖ KAIP `checksum` (Codex B1).
+   *
+   * `normalizuotiLaukima()` eilutei taiko `.trim()`, tad `" 42 "` ir `"42\n"`
+   * praeidavo. `bigint` stulpelis per `node-postgres` grąžina tiksliai `"42"` —
+   * be tarpų — vadinasi tokia forma reiškia kvietėjo ydą, ne DB reikšmę.
+   *
+   * Inventorius (Codex B1): normalizuotame lūkestyje YRA DU laukai, ir ABU buvo
+   * normalizuojami PRIEŠ validaciją. `checksum` turėjo pasiekiamą pasekmę
+   * (`ok: true` sugadintai formai), `bytes` — ne, bet klasė ta pati, tad
+   * uždaromi abu. Trečio lauko nėra.
+   */
+  if (typeof zalias === "string" && !/^\d+$/.test(zalias)) {
+    return { bytes: null, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
+  }
   const laukoNera = zalias === undefined || zalias === null;
 
   if (bytes === null) {
@@ -577,28 +594,33 @@ function ivertintiLaukimoBaitus(laukiama, riba) {
   }
 
   /**
-   * ⚠️ `MAX_RESULT_BYTES` YRA ABSOLIUTUS RĖMAS, KURIO NĖ VIENA PUSĖ NEKEIČIA.
-   * Lūkestis virš jo yra metaduomenų defektas: toks objektas apskritai neturėjo
-   * būti įrašytas (`assertWithinLimit` rašymo kelyje).
+   * ⚠️ `MAX_RESULT_BYTES` YRA ABSOLIUTUS RĖMAS, KURIO NĖ VIENA PUSĖ NEKEIČIA —
+   * bet jo peržengimas NĖRA metaduomenų defektas (Codex A).
+   *
+   * Sumažinus ribą, anksčiau teisėtai įrašyti artefaktai ją viršija, nors eilutė
+   * ir objektas sveiki. Tai politikos, ne duomenų klausimas.
    */
   if (bytes > riba) {
-    return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_VIRSIJA };
+    return { bytes, tinka: false, priezastis: PRIEZASTIS.VIRSIJA_RIBA };
   }
 
   /**
-   * ⚠️ `checksum` FORMATAS IRGI YRA PERSISTINTAS KONTRAKTAS (Codex A, antra pusė).
+   * ⚠️ `checksum` VALIDUOJAMAS ŽALIAS, PRIEŠ KANONIZAVIMĄ (Codex B).
    *
-   * `CHECK` garantuoja 64 mažąsias hex reikšmes. Neatitinkanti suma eilutėje yra
-   * NEĮMANOMA būsena, tad tai metaduomenų defektas — o ne „turinys nesutampa".
-   * Be šios patikros operatorius būtų siunčiamas tirti SAUGYKLĄ, kai sugedusi yra
-   * DB eilutė: tiksliai ta painiava, kurią #292 ir skiria.
+   * Pirmoji šio patikrinimo redakcija žiūrėjo į `normalizuotiLaukima()` išvestį —
+   * t. y. tikrino tai, ką pati ir sutvarkė. `trim().toLowerCase()` paverčia
+   * `"  AAA…  "` teisinga atrodančia reikšme, tad DIDŽIOSIOMIS ar su tarpais
+   * persistinta suma PRAEIDAVO, o sutapus objektui duodavo `ok: true` — nors DB
+   * `CHECK` reikalauja lygiai 64 mažųjų hex.
    *
-   * ⚠️ REGISTRAS NETIKRINAMAS: `normalizuotiLaukima()` jau sumažina raides, o
-   * `CHECK` didžiųjų į eilutę neįleistų. Tikrinamas ILGIS ir ABĖCĖLĖ.
+   * ⚠️ KANONIZAVIMAS YRA PALYGINIMO PATOGUMAS, NE VALIDUMO ŠALTINIS. Tolerancija
+   * registrui teisinga LYGINANT; sprendžiant, ar eilutė sveika, ji slepia defektą.
    */
-  const { checksum } = normalizuotiLaukima(laukiama);
-  if (checksum !== null && !PERSISTINTAS_CHECKSUM.test(checksum)) {
-    return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
+  const zaliaSuma = salt.checksum;
+  if (zaliaSuma !== undefined && zaliaSuma !== null) {
+    if (typeof zaliaSuma !== "string" || !PERSISTINTAS_CHECKSUM.test(zaliaSuma)) {
+      return { bytes, tinka: false, priezastis: PRIEZASTIS.METADUOMENYS_NEVALIDUS };
+    }
   }
 
   return { bytes, tinka: true, priezastis: null };
@@ -612,12 +634,32 @@ function ivertintiLaukimoBaitus(laukiama, riba) {
  * Be šio lauko abu virstų tuo pačiu `NESUTAMPA`, ir skirtumas dingtų.
  */
 const PRIEZASTIS = Object.freeze({
-  /** `expected.bytes` nevalidus: ne sveikas, neigiamas ar netikslus. */
+  /**
+   * NETAISYKLINGA REIKŠMĖ -> tirti DB EILUTĘ.
+   *
+   * Neigiama, `0`, ne sveika, netiksli, arba `checksum` ne pagal `CHECK` formatą.
+   * Tokios būsenos schema neleidžia, tad eilutė sugadinta.
+   */
   METADUOMENYS_NEVALIDUS: "metaduomenys_nevalidus",
-  /** `expected.bytes` viršija `MAX_RESULT_BYTES` - toks objektas neturėjo būti įrašytas. */
-  METADUOMENYS_VIRSIJA: "metaduomenys_virsija",
-  /** Realus objektas didesnis nei leidžia konfigūracija. */
-  OBJEKTAS_VIRSIJA: "objektas_virsija",
+
+  /**
+   * VIRŠIJA DABARTINĘ POLITIKĄ -> tirti KONFIGŪRACIJĄ, ne eilutę (Codex A).
+   *
+   * ⚠️ APIMA ABI PUSES: ir `expected.bytes > riba`, ir `head().bytes > riba`.
+   *
+   * ⚠️ PRIELAIDA, KURI GALIOJO TIK NEMAŽĖJANČIAI RIBAI. #292 body teigė, kad
+   * teisėtas `bytes` niekada negali viršyti `MAX_RESULT_BYTES`, nes `put()`
+   * didesnio nepriima — vadinasi peržengimas esąs anomalija „pagal apibrėžimą".
+   *
+   * Tai neteisinga, kai riba SUMAŽINAMA. Anksčiau teisėtai įrašyti artefaktai
+   * turi `bytes`, viršijantį dabartinę ribą, nors eilutė IR objektas sveiki. DB
+   * `CHECK` maksimumo NETURI: riba yra DIEGIMO POLITIKA, ne duomenų kontraktas.
+   *
+   * Todėl operatoriui sakoma keisti KONFIGŪRACIJĄ, o ne taisyti DB — kitaip tai
+   * būtų tiksliai tas klaidingas nukreipimas, kuriam išvengti verdiktai ir buvo
+   * atskirti.
+   */
+  VIRSIJA_RIBA: "virsija_dabartine_riba",
 });
 
 /**
@@ -654,7 +696,7 @@ function nesancioVerdiktas(nepriklausomas) {
  * patikra taptų atminties gedimo šaltiniu būtent tame kelyje, kuriam ji skirta.
  * `ok: false` yra fail-closed: kvietėjas negauna patvirtinimo, kurio neturime.
  */
-function neverifikuojamasVerdiktas(nepriklausomas, priezastis = PRIEZASTIS.OBJEKTAS_VIRSIJA) {
+function neverifikuojamasVerdiktas(nepriklausomas, priezastis = PRIEZASTIS.VIRSIJA_RIBA) {
   return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas, priezastis };
 }
 

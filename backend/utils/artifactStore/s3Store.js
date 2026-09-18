@@ -430,13 +430,26 @@ function createS3ArtifactStore({
      * `GetObject` toliau nesiunčiamas. Tai tvarkos, ne mechanizmo klausimas.
      */
     const lukestis = ivertintiLaukimoBaitus(laukiama, remas);
-    if (lukestis.priezastis !== null) {
+
+    /**
+     * ⚠️ DVI KLASĖS, DU VERDIKTAI — IR JOS SKIRIASI OPERATORIAUS VEIKSMU (Codex A).
+     *
+     *   netaisyklinga reikšmė  -> tirti DB EILUTĘ      -> metaduomenų defektas;
+     *   viršija dabartinę ribą -> tirti KONFIGŪRACIJĄ  -> `neverifikuojamas`.
+     *
+     * Antrasis nėra defektas: sumažinus `MAX_RESULT_BYTES`, anksčiau teisėtai
+     * įrašyti artefaktai ją viršija, nors eilutė ir objektas sveiki.
+     */
+    if (lukestis.priezastis === PRIEZASTIS.METADUOMENYS_NEVALIDUS) {
       return metaduomenuDefektoVerdiktas(true, lukestis.priezastis);
+    }
+    if (lukestis.priezastis === PRIEZASTIS.VIRSIJA_RIBA) {
+      return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
     }
 
     /** Realus objektas virš rėmo - saugyklos, ne metaduomenų anomalija. */
     if (galva.bytes > remas) {
-      return neverifikuojamasVerdiktas(true, PRIEZASTIS.OBJEKTAS_VIRSIJA);
+      return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
     }
 
 
@@ -491,7 +504,7 @@ function createS3ArtifactStore({
     }
 
     /** Objektas paaugo virš to, ką ką tik pranešė `head()` - objekto anomalija. */
-    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.OBJEKTAS_VIRSIJA);
+    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
 
     return vientisumoVerdiktas({
       laukiama,

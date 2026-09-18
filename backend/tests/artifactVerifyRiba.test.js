@@ -91,7 +91,6 @@ const NEVALIDUS_LUKESCIAI = [
   ["neigiamas", -5, PRIEZASTIS.METADUOMENYS_NEVALIDUS],
   ["trupmena", 12.5, PRIEZASTIS.METADUOMENYS_NEVALIDUS],
   ["šiukšlina eilutė", "abc", PRIEZASTIS.METADUOMENYS_NEVALIDUS],
-  ["virš rėmo", REMAS + 1, PRIEZASTIS.METADUOMENYS_VIRSIJA],
 ];
 
 test("#292 fs: nevalidus `expected.bytes` → METADUOMENŲ verdiktas, payload neatidaromas", async (t) => {
@@ -144,7 +143,7 @@ test("#292 s3: `head().bytes` virš rėmo → OBJEKTO verdiktas, ne metaduomenų
   assert.equal(verdiktas.exists, true, "objektas realiai YRA");
   assert.equal(
     verdiktas.priezastis,
-    PRIEZASTIS.OBJEKTAS_VIRSIJA,
+    PRIEZASTIS.VIRSIJA_RIBA,
     "⚠️ kilmė - SAUGYKLA: operatorius turi tirti objektą, ne DB eilutę"
   );
   assert.equal(kvietimai.includes("GetObjectCommand"), false, "per didelis objektas neatidaromas");
@@ -167,7 +166,7 @@ test("#292 fs: objektas virš rėmo → OBJEKTO verdiktas", async (t) => {
 
     assert.equal(verdiktas.ok, false);
     assert.equal(verdiktas.exists, true);
-    assert.equal(verdiktas.priezastis, PRIEZASTIS.OBJEKTAS_VIRSIJA, "kilmė - saugykla");
+    assert.equal(verdiktas.priezastis, PRIEZASTIS.VIRSIJA_RIBA, "kilmė - saugykla");
   } finally {
     if (senas === undefined) delete process.env.MAX_RESULT_BYTES;
     else process.env.MAX_RESULT_BYTES = senas;
@@ -262,7 +261,7 @@ test("#292 BIUDŽETAS: saugykla praneša vieną dydį, atiduoda DIDESNĮ → ska
   assert.equal(verdiktas.exists, true, "objektas YRA");
   assert.equal(
     verdiktas.priezastis,
-    PRIEZASTIS.OBJEKTAS_VIRSIJA,
+    PRIEZASTIS.VIRSIJA_RIBA,
     "⚠️ kilmė - saugykla: ji pranešė ne tą, ką atidavė"
   );
   assert.equal(verdiktas.checksum, null, "nutraukto skaitymo sumos neteigiame");
@@ -383,4 +382,83 @@ test("#292 B1: `GetObject` nesiunčiamas IR `exists` atspindi tikrovę — du at
   assert.equal(verdiktas.exists, true, "objektas REALIAI yra - `exists` privalo tai rodyti");
   assert.equal(verdiktas.priezastis, PRIEZASTIS.METADUOMENYS_NEVALIDUS, "kilmė - metaduomenys");
   assert.ok(kvietimai.includes("HeadObjectCommand"), "tikrovė sužinoma per `head()`, ne spėjama");
+});
+
+test("#292 A: `bytes` virš ribos yra POLITIKOS, ne metaduomenų klausimas", async (t) => {
+  /**
+   * ⚠️ ŠIS ATVEJIS TAISO PRIELAIDĄ PAČIAME #292 BODY.
+   *
+   * Body teigė, kad teisėtas `bytes` niekada negali viršyti `MAX_RESULT_BYTES`,
+   * nes `put()` didesnio nepriima — vadinasi peržengimas esąs anomalija „pagal
+   * apibrėžimą". Tai galioja TIK jei riba niekada nemažėja.
+   *
+   * Sumažinus `MAX_RESULT_BYTES`, anksčiau TEISĖTAI įrašyti artefaktai turi
+   * `bytes`, viršijantį dabartinę ribą, nors EILUTĖ IR OBJEKTAS SVEIKI. DB `CHECK`
+   * maksimumo NETURI: riba yra diegimo politika, ne duomenų kontraktas.
+   *
+   * ⚠️ Pasakius „metaduomenų defektas", operatorius taisytų DB, kai reikia keisti
+   * KONFIGŪRACIJĄ — tiksliai tas klaidingas nukreipimas, kuriam išvengti verdiktai
+   * ir buvo atskirti.
+   */
+  const saugykla = await fsAplinka(t);
+  const raktas = "results/senas-didelis.json";
+  const kvitas = await saugykla.put(raktas, { text: "visiškai sveikas turinys" });
+
+  /** Riba sumažinama PO teisėto įrašymo — būtent tai ir įvyksta produkcijoje. */
+  const senas = process.env.MAX_RESULT_BYTES;
+  process.env.MAX_RESULT_BYTES = String(Math.max(1, kvitas.bytes - 1));
+  try {
+    const verdiktas = await saugykla.verify(raktas, { bytes: kvitas.bytes, checksum: kvitas.checksum });
+
+    assert.equal(
+      verdiktas.priezastis,
+      PRIEZASTIS.VIRSIJA_RIBA,
+      "⚠️ sveika eilutė po ribos sumažinimo NĖRA metaduomenų defektas"
+    );
+    assert.notEqual(
+      verdiktas.priezastis,
+      PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+      "operatorius neturi būti siunčiamas taisyti DB"
+    );
+    assert.equal(verdiktas.exists, true, "objektas YRA ir yra sveikas");
+  } finally {
+    if (senas === undefined) delete process.env.MAX_RESULT_BYTES;
+    else process.env.MAX_RESULT_BYTES = senas;
+  }
+});
+
+test("#292 B: `checksum` validuojamas ŽALIAS — kanonizavimas nėra validumo šaltinis", async (t) => {
+  /**
+   * ⚠️ ORDERING YDA MANO PACIOS ANKSTESNIAME TAISYME.
+   *
+   * Patikra buvo pridėta, bet ji žiūrėjo į `normalizuotiLaukima()` išvestį — t. y.
+   * tikrino tai, ką pati ir sutvarkė. `trim().toLowerCase()` paverčia `"  AAA…  "`
+   * teisinga atrodančia reikšme, tad DIDŽIOSIOMIS ar su tarpais persistinta suma
+   * praeidavo, o SUTAPUS OBJEKTUI duodavo `ok: true`.
+   *
+   * ⚠️ Objektas čia SVEIKAS ir suma TEISINGA — skiriasi tik forma. Būtent todėl
+   * testas įtikinamas: be žalios validacijos jis duotų `ok: true`.
+   */
+  const saugykla = await fsAplinka(t);
+  const raktas = "results/forma.json";
+  const kvitas = await saugykla.put(raktas, { text: "turinys" });
+
+  for (const [vardas, suma] of [
+    ["didžiosiomis", kvitas.checksum.toUpperCase()],
+    ["su tarpais", `  ${kvitas.checksum}  `],
+    ["mišriu registru", kvitas.checksum.slice(0, 10).toUpperCase() + kvitas.checksum.slice(10)],
+  ]) {
+    const verdiktas = await saugykla.verify(raktas, { bytes: kvitas.bytes, checksum: suma });
+
+    assert.equal(
+      verdiktas.priezastis,
+      PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+      `${vardas}: DB \`CHECK\` tokios formos neįleistų, tad eilutė sugadinta`
+    );
+    assert.equal(verdiktas.ok, false, `${vardas}: negali būti patvirtinta`);
+  }
+
+  /** ⚠️ KONTROLĖ: kanoninė forma toliau praeina — patikra neatmeta teisėtų. */
+  const geras = await saugykla.verify(raktas, { bytes: kvitas.bytes, checksum: kvitas.checksum });
+  assert.equal(geras.ok, true, "teisėta kanoninė suma PRIVALO praeiti");
 });

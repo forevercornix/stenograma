@@ -715,8 +715,21 @@ function createFsArtifactStore({ root } = {}) {
      * Payload čia net neatidaromas: sprendimui užtenka metaduomenų.
      */
     const lukestis = ivertintiLaukimoBaitus(laukiama, remas);
-    if (lukestis.priezastis !== null) {
+
+    /**
+     * ⚠️ DVI KLASĖS, DU VERDIKTAI — IR JOS SKIRIASI OPERATORIAUS VEIKSMU (Codex A).
+     *
+     *   netaisyklinga reikšmė  -> tirti DB EILUTĘ      -> metaduomenų defektas;
+     *   viršija dabartinę ribą -> tirti KONFIGŪRACIJĄ  -> `neverifikuojamas`.
+     *
+     * Antrasis nėra defektas: sumažinus `MAX_RESULT_BYTES`, anksčiau teisėtai
+     * įrašyti artefaktai ją viršija, nors eilutė ir objektas sveiki.
+     */
+    if (lukestis.priezastis === PRIEZASTIS.METADUOMENYS_NEVALIDUS) {
       return metaduomenuDefektoVerdiktas(true, lukestis.priezastis);
+    }
+    if (lukestis.priezastis === PRIEZASTIS.VIRSIJA_RIBA) {
+      return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
     }
 
     /**
@@ -728,7 +741,7 @@ function createFsArtifactStore({ root } = {}) {
      * „objektas yra, bet viršija patikimą dydį". Antras kodas būtų sinonimas.
      */
     if (galva.bytes > remas) {
-      return neverifikuojamasVerdiktas(true, PRIEZASTIS.OBJEKTAS_VIRSIJA);
+      return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
     }
 
     /**
@@ -799,7 +812,7 @@ function createFsArtifactStore({ root } = {}) {
      * tad peržengimas reiškia, kad objektas skaitymo metu buvo didesnis nei
      * saugykla ką tik pranešė - realaus objekto savybė, ne metaduomenų.
      */
-    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.OBJEKTAS_VIRSIJA);
+    if (perzengta) return neverifikuojamasVerdiktas(true, PRIEZASTIS.VIRSIJA_RIBA);
 
     /**
      * ⚠️ `nepriklausomas: true` — LYGINAMA SU IŠORE ĮRAŠYTU METADUOMENIU.
