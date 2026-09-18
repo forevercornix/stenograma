@@ -147,6 +147,39 @@ Atsiradus conditional job'ui, jo semantika sprendžiama atskirai ir įrašoma
 `required-ci` komentare; aklas pridėjimas į `needs:` paverstų jį privalomu
 netyčia.
 
+### Perėjimo kaina: PR, atidaryti PRIEŠ vartus (#324)
+
+⚠️ **`required-ci` galioja tik tiems PR, kuriems jis buvo paleistas.** Vartų job'as
+atsirado 2026-09-15; PR, kurių paskutinis CI paleidimas senesnis, `required-ci`
+check'o **neturi ir savaime negaus** — GitHub rodo jį kaip `Expected`, ir merge
+lieka blokuotas neribotai.
+
+**Išmatuota 2026-09-17:** 23 atviri Dependabot PR, iš jų:
+
+| Būsena | Kiek | `required-ci` | Merge |
+|---|---|---|---|
+| `BEHIND` | **20** | **nėra** | blokuotas |
+| `CLEAN` | 3 | yra | galimas |
+
+Visi 20 turi senosios aibės check'us (10 arba 11, priklausomai nuo PR amžiaus)
+ir **nė vieno** `required-ci`.
+
+⚠️ **Jie nėra „žali, tik blokuoti".** Išmatuota: 18 iš 20 neturi nė vieno `fail`,
+bet **visi 20** turi `CodeQL skipping` (D4 — patariamasis, ne merge kontrakto
+dalis), o du turi tikrus gedimus: **#275** (`docker`) ir **#219** (`e2e`,
+`frontend`). Tie du po rebase'o kris ir per `required-ci` — ir teisingai.
+
+**Tai ne yda, o perėjimo kaina, ir ji fail-closed.** Senas žalias PR merginamas
+nebūtų — vartai neturi jo rezultato, tad neatsidaro.
+
+**Atrakinimas — po vieną PR:** rebase arba „Update branch". Abu kelia
+`synchronize`, tad `required-ci` pasileidžia. Dependabot'ui užtenka komentaro
+`@dependabot rebase`.
+
+⚠️ **Masinio atrakinimo nedaryti vienu ypu.** 20 rebase'ų = 20 lygiagrečių CI
+paleidimų; `backend` job'as trunka ~5 min, `e2e` daugiau. Eilė užsikimštų, ir
+tikrieji PR lauktų už jų.
+
 ### `dependency-audit` — patariamasis, su sąlyga
 
 Jis **nėra** `required-ci` dalis. Priežastis išmatuota: per mėnesį jis krito
@@ -198,13 +231,46 @@ saugumo radinys — per issue, ne per merge bloką.
 `ci.yml` trigeris lieka `pull_request: branches: [main]`. PR, kurio bazė nėra
 `main`, šio CI negauna.
 
-**Kodėl taip.** `main` apsauga saugo **`main`**, ne visas šakas: kai stacked PR
-retargetinamas į `main`, suveikia ir CI, ir vartai. Filtro pašalinimas reikštų
-**pakartotinį CI** kiekvienam tarpiniam PR — kaina be atitinkamos garantijos.
+**Kodėl taip.** `main` apsauga saugo **`main`**, ne visas šakas. Filtro
+pašalinimas reikštų **pakartotinį CI** kiekvienam tarpiniam PR — kaina be
+atitinkamos garantijos.
 
 ⚠️ Garantija „joks PR į jokią bazę nemerginamas be CI" yra **platesnis kontraktas
 nei D1**, ir jei jo kada nors reikės, jis priimamas atskirai. Šis pasirinkimas
 `main` apsaugos nesusilpnina.
+
+#### ⚠️ Retargetas CI NESUKELIA (8 scenarijus, išmatuota)
+
+Ankstesnė šio skyriaus redakcija teigė, kad „kai stacked PR retargetinamas į
+`main`, suveikia ir CI, ir vartai". **Pirmoji pusė neteisinga.**
+
+`ci.yml` turi `pull_request:` be `types:`, tad galioja numatytieji —
+`opened`, `synchronize`, `reopened`. Bazės keitimas kelia `edited`, kurio tame
+sąraše **nėra**. Retargetas naujo CI paleidimo nesukuria.
+
+**Matavimas (PR #357, 2026-09-15, `head_sha` `c4805b9`):**
+
+| Laikas (UTC) | Įvykis | CI |
+|---|---|---|
+| `20:06:42` | `base_ref_changed` — retarget į `main` | **nepaleista** |
+| `20:09:03` | `closed` | — |
+| `20:09:08` | `reopened` | — |
+| `20:09:10` | — | paleista `run=35017869151`, `event=pull_request` |
+
+CI startavo **2 s po `reopened`**, ne po retarget'o, kuris įvyko 2,5 min anksčiau.
+
+**Ką tai reiškia vartams.** Nieko blogo: `required-ci` niekada nepraneša
+rezultato, GitHub jį rodo kaip `Expected`, ir PR lieka **BLOCKED**. Elgsena
+**fail-closed** — vartai laiko, o ne praleidžia.
+
+⚠️ **Bet operatoriui tai reiškia veiksmą.** Retargetinus stacked PR, CI reikia
+sukelti **atskirai**: `git commit --allow-empty` + push (`synchronize`) arba
+PR uždarymas ir atidarymas (`reopened`). Prielaida „retargetinau, palauksiu CI"
+baigiasi neribotu laukimu.
+
+⚠️ `types: [..., edited]` pridėjimas šią spragą uždarytų, bet kainuotų CI
+paleidimą kiekvienam pavadinimo ar aprašymo redagavimui. Nepriimta; jei
+prireiks — sprendžiama atskirai.
 
 ### Emergency bypass
 

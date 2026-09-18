@@ -482,6 +482,210 @@ function normalizuotiLaukima(laukiama = {}) {
 }
 
 /**
+ * PERSISTINTO KONTRAKTO FORMA — VIENAS ŠALTINIS (#292, Codex A).
+ *
+ * ⚠️ ŠIOS DVI TAISYKLĖS NĖRA MŪSŲ SUGALVOTOS. Jos gyvena DB `CHECK`
+ * `job_results_integrity_shape` (migracija `1756100000000`):
+ *
+ *   (bytes IS NULL OR bytes > 0)
+ *   AND (checksum IS NULL OR checksum ~ '^[0-9a-f]{64}$')
+ *
+ * ⚠️ ANTRAS SKAITINIS DOMENAS ATSIRADO NETYČIA. Pirmoji #292 redakcija tikrino
+ * `bytes < 0`, tad NULIS praeidavo kaip validus — nors `CHECK` jo neleidžia.
+ * Pasekmė: eilutė su `bytes = 0` plius TUŠČIO payload SHA-256 ir nupjautas
+ * tuščias objektas saugykloje duodavo `ok: true` — atkūrimo verifikacija
+ * PATVIRTINDAVO neįmanomą būseną.
+ *
+ * Tai ta pati klasė, kurią #292 uždaro, tik naujajame validatoriuje.
+ *
+ * ⚠️ RIBOS IMAMOS IŠ KONTRAKTO, NE KARTOJAMOS PAGAL ATMINTĮ. Keičiant `CHECK`,
+ * keičiama IR ČIA — nuoroda į migraciją yra tam, kad tai būtų matoma.
+ */
+const PERSISTINTAS_MIN_BYTES = 1;
+const PERSISTINTAS_CHECKSUM = /^[0-9a-f]{64}$/;
+
+/**
+ * AR LŪKESTIS TINKA BŪTI RESURSŲ BIUDŽETU (#292).
+ *
+ * ⚠️ ŠAKNIS: persistintas `job_results.bytes` naudojamas IR kaip tikrinamas
+ * teiginys, IR kaip biudžeto autoritetas. Antrasis vaidmuo yra klaida — reikšmė
+ * ateina iš TOS PAČIOS pusės, kurią `verify()` ir turi patikrinti.
+ *
+ * ⚠️ KODĖL NE `normalizuotiLaukima()` SUGRIEŽTINIMAS.
+ *
+ * Tos dvi funkcijos atsako SKIRTINGUS klausimus:
+ *
+ *   `normalizuotiLaukima()` — „su kuo lyginame". Ten leniency nekenkia: `-5` ar
+ *   trupmena niekada nesutaps su išmatuotu baitų skaičiumi, tad `ok:false`, ir tai
+ *   fail-closed.
+ *
+ *   ši funkcija — „ar šia reikšme galima RIBOTI skaitymą". Čia leniency
+ *   katastrofiška: `-5` nutraukia skaitymą ties pirmu gabalu ir teisėtą objektą
+ *   paskelbia neverifikuojamu, o `1e18` biudžeto neberiboja iš viso.
+ *
+ * ⚠️ Sugriežtinus `normalizuotiLaukima()`, nevalidus lūkestis virstų `null` ir
+ * TYLIAI nukristų į `MAX_RESULT_BYTES` — t. y. metaduomenų defektas dingtų,
+ * o #292 kaip tik reikalauja jį PRANEŠTI. Tad sugriežtinimas problemos
+ * nesprendžia; jis ją paslepia kitoje vietoje.
+ *
+ * ⚠️ PARSINIMAS NEDUBLIUOJAMAS: naudojama ta pati `normalizuotiLaukima()`
+ * išvestis, o pridedamas TIK tinkamumo vertinimas. Dvi to paties klausimo
+ * realizacijos šioje sekoje išsiskyrė ne kartą.
+ *
+ * @param {object} laukiama
+ * @param {number} riba absoliutus rėmas (`MAX_RESULT_BYTES`)
+ * @returns {{ bytes: number|null, tinka: boolean, priezastis: string|null }}
+ */
+function ivertintiLaukimoBaitus(laukiama, riba) {
+  const salt = laukiama && typeof laukiama === "object" ? laukiama : {};
+  const zalias = salt.bytes;
+  const zaliaSuma = salt.checksum;
+
+  /**
+   * ⚠️ RENKAMI VISI RADINIAI, TADA RENKAMAS VERDIKTAS (#292, Codex B).
+   *
+   * Ankstesnė redakcija grįždavo ties pirmu radiniu, tad `bytes` virš ribos
+   * PLIUS sugadintas `checksum` siųsdavo operatorių į konfigūraciją, nors eilutė
+   * pažeidžia ir kontraktą. Pirmenybę nustatydavo sakinių eilė — nerašyta ir
+   * netikrinama.
+   */
+  const radiniai = [];
+
+  /**
+   * ⚠️ `bytes` ŽALIA FORMA (Codex B1). `normalizuotiLaukima()` eilutei taiko
+   * `.trim()`, tad `" 42 "` praeidavo; `bigint` per `node-postgres` grąžina
+   * tiksliai `"42"`, be tarpų.
+   */
+  const zaliaBloga = typeof zalias === "string" && !/^\d+$/.test(zalias);
+
+  const { bytes } = normalizuotiLaukima(laukiama);
+  const laukoNera = zalias === undefined || zalias === null;
+
+  if (zaliaBloga) {
+    radiniai.push(PRIEZASTIS.METADUOMENYS_NEVALIDUS);
+  } else if (bytes === null) {
+    /**
+     * ⚠️ „LAUKO NĖRA" IR „LAUKAS ŠIUKŠLINAS" NĖRA TAS PATS. Pirmas yra teisėta
+     * būsena (biudžetu tampa absoliutus rėmas), antras — DB defektas.
+     */
+    if (!laukoNera) radiniai.push(PRIEZASTIS.METADUOMENYS_NEVALIDUS);
+  } else if (!Number.isInteger(bytes) || bytes < PERSISTINTAS_MIN_BYTES) {
+    /** `bytes > 0`, ne `>= 0` — ta pati riba kaip `CHECK` (migracija 1756100000000). */
+    radiniai.push(PRIEZASTIS.METADUOMENYS_NEVALIDUS);
+  } else if (!Number.isSafeInteger(bytes)) {
+    /** `bigint` virš `MAX_SAFE_INTEGER` tyliai praranda tikslumą — biudžetu netinka. */
+    radiniai.push(PRIEZASTIS.METADUOMENYS_NEVALIDUS);
+  } else if (bytes > riba) {
+    /** Politika, ne defektas: sumažinus ribą, sveikos eilutės ją viršija. */
+    radiniai.push(PRIEZASTIS.VIRSIJA_RIBA);
+  }
+
+  /**
+   * ⚠️ `checksum` VALIDUOJAMAS ŽALIAS, PRIEŠ KANONIZAVIMĄ (Codex B).
+   * Kanonizavimas (`trim().toLowerCase()`) yra PALYGINIMO patogumas, ne validumo
+   * šaltinis: jis paverčia sugadintą formą teisinga atrodančia.
+   */
+  if (zaliaSuma !== undefined && zaliaSuma !== null) {
+    if (typeof zaliaSuma !== "string" || !PERSISTINTAS_CHECKSUM.test(zaliaSuma)) {
+      radiniai.push(PRIEZASTIS.METADUOMENYS_NEVALIDUS);
+    }
+  }
+
+  const priezastis = svarbiausiaPriezastis(radiniai);
+  const tinkaBiudzetui = priezastis === null && bytes !== null;
+
+  return { bytes, tinka: tinkaBiudzetui, priezastis };
+}
+
+/**
+ * VERDIKTŲ PRIEŽASTYS — KILMĖ, NE TIK NESĖKMĖ (#292).
+ *
+ * ⚠️ Dvi anomalijos turi SKIRTINGĄ kilmę, tad ir operatoriaus išvada kita:
+ * metaduomenų defektas siunčia tirti DB eilutę, objekto anomalija — saugyklą.
+ * Be šio lauko abu virstų tuo pačiu `NESUTAMPA`, ir skirtumas dingtų.
+ */
+const PRIEZASTIS = Object.freeze({
+  /**
+   * NETAISYKLINGA REIKŠMĖ -> tirti DB EILUTĘ.
+   *
+   * Neigiama, `0`, ne sveika, netiksli, arba `checksum` ne pagal `CHECK` formatą.
+   * Tokios būsenos schema neleidžia, tad eilutė sugadinta.
+   */
+  METADUOMENYS_NEVALIDUS: "metaduomenys_nevalidus",
+
+  /**
+   * VIRŠIJA DABARTINĘ POLITIKĄ -> tirti KONFIGŪRACIJĄ, ne eilutę (Codex A).
+   *
+   * ⚠️ APIMA ABI PUSES: ir `expected.bytes > riba`, ir `head().bytes > riba`.
+   *
+   * ⚠️ PRIELAIDA, KURI GALIOJO TIK NEMAŽĖJANČIAI RIBAI. #292 body teigė, kad
+   * teisėtas `bytes` niekada negali viršyti `MAX_RESULT_BYTES`, nes `put()`
+   * didesnio nepriima — vadinasi peržengimas esąs anomalija „pagal apibrėžimą".
+   *
+   * Tai neteisinga, kai riba SUMAŽINAMA. Anksčiau teisėtai įrašyti artefaktai
+   * turi `bytes`, viršijantį dabartinę ribą, nors eilutė IR objektas sveiki. DB
+   * `CHECK` maksimumo NETURI: riba yra DIEGIMO POLITIKA, ne duomenų kontraktas.
+   *
+   * Todėl operatoriui sakoma keisti KONFIGŪRACIJĄ, o ne taisyti DB — kitaip tai
+   * būtų tiksliai tas klaidingas nukreipimas, kuriam išvengti verdiktai ir buvo
+   * atskirti.
+   */
+  VIRSIJA_RIBA: "virsija_dabartine_riba",
+
+  /**
+   * SAUGYKLA ATIDAVĖ NE TAI, KĄ PRANEŠĖ -> tirti OBJEKTĄ (Codex C).
+   *
+   * ⚠️ ŠI KLASĖ NIEKADA NEEGZISTAVO, ir jos trūkumas pasimatė tik atsiradus
+   * `VIRSIJA_RIBA`: objektas, paaugęs tarp `head()` ir skaitymo, bet LIKĘS žemiau
+   * `MAX_RESULT_BYTES`, gaudavo politikos verdiktą. Operatorius keisdavo
+   * konfigūraciją, nors riba NEBUVO peržengta.
+   *
+   * Radinys atsirado panaudojus naują verdiktą NE PAGAL PASKIRTĮ — klasė, kurios
+   * trūko, tapo matoma tik tada, kai atsirado gretima.
+   */
+  SAUGYKLA_NEATITINKA: "saugykla_neatitinka_head",
+});
+
+/**
+ * VERDIKTŲ PIRMENYBĖ — UŽRAŠYTA, NE IŠVESTA IŠ `return` SEKOS (#292, Codex B).
+ *
+ * ⚠️ TRYS RAUNDAI IŠ EILĖS DĖL VALIDACIJOS TVARKOS TAME PAČIAME FAILE.
+ *
+ * Kai verdiktą nustato sakinių eilė, kiekvienas naujas atvejis įterpiamas į ją
+ * SPĖJIMU, o tikrinamas tik tas derinys, kurį kas nors pastebėjo. Ketvirto karto
+ * išvengiama ne dar vienu `return` perstūmimu, o tuo, kad pirmenybė tampa
+ * DUOMENIMIS: laukai validuojami VISI, tada verdiktas renkamas iš šio sąrašo.
+ *
+ * ⚠️ TVARKOS PAGRINDIMAS: metaduomenų defektas nusveria politiką, nes sugadintą
+ * eilutę reikia taisyti NEPRIKLAUSOMAI nuo konfigūracijos. Pakeitus `MAX_RESULT_BYTES`,
+ * politikos radinys dingtų, o sugadinta eilutė liktų — ir liktų nepranešta.
+ */
+const PIRMENYBE = Object.freeze([
+  PRIEZASTIS.METADUOMENYS_NEVALIDUS,
+  PRIEZASTIS.VIRSIJA_RIBA,
+]);
+
+/** Renka SVARBIAUSIĄ radinį pagal užrašytą pirmenybę. */
+function svarbiausiaPriezastis(radiniai) {
+  for (const p of PIRMENYBE) if (radiniai.includes(p)) return p;
+  return null;
+}
+
+/**
+ * METADUOMENŲ DEFEKTO VERDIKTAS (#292).
+ *
+ * ⚠️ NE `neverifikuojamasVerdiktas`. Ten objektas realiai per didelis; čia
+ * objektas gali būti visiškai tvarkingas, o klaidinga yra DB eilutė. Sulyginus
+ * juos, operatorius tirtų saugyklą vietoj duomenų bazės.
+ *
+ * ⚠️ PAYLOAD NEATIDAROMAS. Sprendimas priimamas iš metaduomenų, tad skaitymo
+ * kelias net nepradedamas.
+ */
+function metaduomenuDefektoVerdiktas(nepriklausomas, priezastis) {
+  return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas, priezastis };
+}
+
+/**
  * NESANČIO OBJEKTO VERDIKTAS - VIENA FORMA VISIEMS BACKEND'AMS (Codex, #290).
  *
  * ⚠️ TRŪKSTAMAS LAUKAS YRA TREČIA BŪSENA. PR-7 ataskaita eilutes skirsto pagal
@@ -501,8 +705,8 @@ function nesancioVerdiktas(nepriklausomas) {
  * patikra taptų atminties gedimo šaltiniu būtent tame kelyje, kuriam ji skirta.
  * `ok: false` yra fail-closed: kvietėjas negauna patvirtinimo, kurio neturime.
  */
-function neverifikuojamasVerdiktas(nepriklausomas) {
-  return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas };
+function neverifikuojamasVerdiktas(nepriklausomas, priezastis = PRIEZASTIS.VIRSIJA_RIBA) {
+  return { ok: false, exists: true, bytes: null, checksum: null, nepriklausomas, priezastis };
 }
 
 /** Rastam objektui: palyginimas su lūkesčiu, ta pati forma kaip `nesancioVerdiktas`. */
@@ -623,6 +827,9 @@ module.exports = {
   atkurtiReiksme,
   patikrintiPersistuotaReiksme,
   normalizuotiLaukima,
+  ivertintiLaukimoBaitus,
+  PRIEZASTIS,
+  metaduomenuDefektoVerdiktas,
   nesancioVerdiktas,
   neverifikuojamasVerdiktas,
   vientisumoVerdiktas,

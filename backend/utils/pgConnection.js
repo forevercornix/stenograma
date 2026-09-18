@@ -665,9 +665,181 @@ function dviprasmybesTekstas(skirtumai) {
   );
 }
 
+/**
+ * VAIKINIO libpq PROCESO RIBA — `PG*` FORMA JAM NEEKVIVALENTI (#264).
+ *
+ * ⚠️ `pgJungtiesNustatymai()` NĖRA PILNAS JUNGTIES APRAŠAS. Jis pilnas tik kartu
+ * su NEPALIESTA `process.env`.
+ *
+ * Išmatuota: iš tos pačios išvesties `{host, user, password, database}` Node `pg`
+ * gauna dar `ssl=true`, `options=-csearch_path=prod` ir `connect_timeout=9` — jis
+ * pats skaito aplinką per `val()` ir `readSSLConfigFromEnvironment()`. Tai antras
+ * kanalas, ir jis veikia TIK procese.
+ *
+ * `pg_dump`/`psql` to kanalo neturi: `pgDumpBackup.libpqSvariAplinka()` pašalina
+ * VISĄ `PG` prefiksą, kad vaikinis procesas negalėtų tyliai nukeliauti į kitą
+ * klasterį. Tad `PG*` konfigūracija vaikiniam procesui yra IŠ PRINCIPO
+ * neekvivalenti tai, kurią naudoja procesas.
+ *
+ * ⚠️ RIBA GYVENA ČIA, NE KVIETĖJE. Tai teiginys apie jungties MODELĮ, ne apie
+ * vieną CLI. Kitas kvietėjas, kuriam prireiks vaikinio libpq proceso, jį ras ten,
+ * kur ieškos semantikos.
+ *
+ * ⚠️ SĄLYGA IŠVEDAMA IŠ `PG_ATITIKMENYS`, NE SURAŠOMA.
+ *
+ * Rankinis sąrašas („PGSSLMODE, PGOPTIONS, PGPASSFILE, …") būtų ta pati klasė,
+ * kurią #245 atmetė `pg` atveju ir kurią `libpqSvariAplinka()` invertavo:
+ * senstantis tyliai. `PG_ATITIKMENYS` jau yra autoritetas — jis įvardija LYGIAI
+ * tuos kintamuosius, kuriuos `PG*` forma perkelia į nustatymų objektą. Visa kita
+ * `PG*` erdvėje pasiekia `pg` TIK per aplinką, tad vaikiniam procesui prarandama
+ * pagal konstrukciją.
+ *
+ * Naujas libpq kintamasis → kliūtis ATSIRANDA AUTOMATIŠKAI → fail-closed be
+ * priežiūros.
+ *
+ * ⚠️ `PGPASSWORD` — VIENINTELĖ ĮVARDYTA IŠIMTIS. Žemėlapyje jis yra, bet į vaikinį
+ * procesą nepereina: aplinka valoma, o vėliavos slaptažodžiui libpq CLI neturi.
+ * Įdėti jį į DSN reikštų rankinį URI kodavimą — tiksliai tai, ko #264 prašė
+ * išvengti, plius slaptažodis `argv` eilutėje, matomoje `ps` išvestyje.
+ * Išeitis operatoriui — `~/.pgpass`, kuris valymą IŠGYVENA, nes `HOME` nėra `PG*`.
+ *
+ * ⚠️ TAIKOMA TIK `PG*` KELIUI. Su eksplicitiniu URL riba negalioja sąmoningai:
+ * ten operatorius PATS įvardija taikinį, ir „URL yra vienintelis šaltinis" yra
+ * `libpqSvariAplinka()` užrašyta ir priimta kaina. `PG*` atveju operatorius URL
+ * nerašė — jo konfigūracija YRA `PG*` aibė, tad tylus jos pusės praradimas būtų
+ * kitas dalykas.
+ *
+ * @param {object} [env]
+ * @returns {string[]} kliūčių vardai (tušias masyvas = perduodama)
+ */
+function vaikinioProcesoKliutys(env = process.env) {
+  const kliutys = [];
+
+  for (const [raktas, reiksme] of Object.entries(env)) {
+    /** ⚠️ Registras kaip `libpqSvariAplinka()`: Windows vardai registrui nejautrūs. */
+    const didziosiomis = raktas.toUpperCase();
+    if (!didziosiomis.startsWith("PG")) continue;
+    if (reiksme === undefined || reiksme === "") continue;
+
+    /**
+     * ⚠️ `PG_` YRA APLIKACIJOS ERDVĖ, NE libpq (Codex II, B2).
+     *
+     * Repo savas `PG_CONNECT_TIMEOUT_MS` (`deletionTombstones/index.js:126`,
+     * atgalinio suderinamumo atsarga) prasideda `PG`, `PG_ATITIKMENYS` jo nėra —
+     * tad be šios eilutės KIEKVIENAS dump krisdavo `PG_DUMP_ENV_NOT_PORTABLE`.
+     *
+     * ⚠️ NE SĄRAŠAS. „Exempt known application-owned settings" būtų rankinis
+     * sąrašas — ta pati klasė, kurios visa ši riba vengia. Skirtumas išvedamas iš
+     * VARDŲ KONVENCIJOS: libpq kintamųjų erdvėje po `PG` VISADA eina raidė
+     * (`PGHOST`, `PGOPTIONS`, `PGSSLMODE`, net `PGCONNECT_TIMEOUT` — pabraukimas
+     * viduje, ne po `PG`). Aplikacijos kintamieji repo naudoja `PG_`.
+     *
+     * ⚠️ TAI STEBĖJIMAS, NE GARANTIJA — ir todėl turi LIUDYTOJĄ.
+     * `pgBackupPgForma` testas tvirtina, kad nė vienas `PG_ATITIKMENYS` raktas ir
+     * nė vienas žinomas libpq kintamasis neprasideda `PG_`. Atsiradus tokiam,
+     * sargas kris, ir prielaida bus peržiūrėta — o ne tyliai praleis kintamąjį,
+     * kurį vaikinis procesas skaito.
+     */
+    if (didziosiomis.startsWith("PG_")) continue;
+
+    /** Išimtis prieš žemėlapį: `PGPASSWORD` jame YRA, bet nepereina. */
+    if (didziosiomis === "PGPASSWORD") {
+      kliutys.push(raktas);
+      continue;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(PG_ATITIKMENYS, didziosiomis)) continue;
+
+    kliutys.push(raktas);
+  }
+
+  return kliutys.sort();
+}
+
+/**
+ * CONNINFO REIKŠMĖ TEN, KUR MODELIS LAUKIA VARDO (#264, Codex II, A1).
+ *
+ * ⚠️ TA PATI KLASĖ, KURIĄ ŠI RIBA UŽDARO — JOS PAČIOS VIDUJE.
+ *
+ * `pg_dump -d` priima ne tik bazės vardą, bet ir CONNECTION STRING, ir libpq
+ * dokumentacija sako, kad jo parametrai PERRAŠO prieštaraujančias komandinės
+ * eilutės parinktis. Išmatuota su PostgreSQL 16.15:
+ *
+ *   pg_dump -h safe.invalid -d 'host=other.invalid dbname=x'  ->  jungiasi prie
+ *   other.invalid
+ *
+ * Node `pg` tą pačią reikšmę laiko LITERALIU bazės vardu. Išmatuota: tapatybė
+ * grąžina `host=safe.invalid`, o vaikinis procesas eitų kitur.
+ *
+ * ⚠️ FORMA IDENTIŠKA `PGHOSTADDR` (#245 P1): modelis ir vaikinis procesas tą
+ * PAČIĄ įvestį interpretuoja skirtingai, ir skirtumas matomas tik atkuriant.
+ *
+ * ⚠️ ATMETAMA, NE ESCAPE'INAMA — ta pati logika kaip visoje riboje: reikšmė,
+ * kurios semantika vaikiniame procese kitokia, yra NEPERNEŠAMA. Escape'inimas
+ * reikštų, kad mes modeliuojame libpq parsinimą, o to ši riba kaip tik vengia.
+ *
+ * ⚠️ TIKRINAMA TIK `database`. libpq conninfo išplėtimą taiko `dbname`
+ * parametrui, ne `host`/`user` — hostas su `=` lieka (keistu) hostu. Platesnė
+ * patikra atmestų teisėtas reikšmes be priežasties.
+ *
+ * ⚠️ TAI NESIKERTA SU POZICINIU URL (A2). Ten operatoriaus PARAŠYTAS
+ * `DATABASE_URL` yra taikinys, ir jo interpretavimas kaip conninfo yra
+ * NUMATYTAS elgesys. Čia atmetama, kai VARDO vietoje netyčia atsiduria conninfo.
+ * Ta pati libpq savybė, priešingas ketinimas.
+ *
+ * @param {unknown} reiksme
+ * @returns {boolean}
+ */
+function arConninfoReiksme(reiksme) {
+  if (typeof reiksme !== "string") return false;
+  const nukirpta = reiksme.trim();
+  if (nukirpta.includes("=")) return true;
+  return /^postgres(ql)?:\/\//i.test(nukirpta);
+}
+
+/**
+ * ⚠️ REIKŠMĖS TEKSTE NĖRA — tik laukas ir priežastis. `PGDATABASE` conninfo gali
+ * turėti `password=…`, tad reikšmės rodymas nuvestų slaptažodį į klaidos tekstą.
+ */
+function conninfoTekstas(laukas) {
+  return (
+    `\`${laukas}\` reikšmė yra CONNECTION STRING, ne vardas. libpq ją išskleidžia ` +
+    "ir jos parametrai PERRAŠO `-h`/`-p`/`-U` vėliavas, o Node `pg` tą pačią reikšmę " +
+    "laiko literaliu vardu. Tapatybės patikra patvirtintų vieną klasterį, o `pg_dump` " +
+    "nueitų į kitą — todėl kopija neišduodama. " +
+    "Nurodykite vardą be `=` ir be `postgres://`, arba taikinį per `--url`."
+  );
+}
+
+/**
+ * KLAIDOS TEKSTAS — VARDAI, NIEKADA REIKŠMĖS.
+ *
+ * ⚠️ Vardai čia SAUGŪS ir BŪTINI: operatorius turi žinoti, KURĮ kintamąjį
+ * pašalinti. Reikšmių nėra — tarp kliūčių yra `PGPASSWORD`.
+ *
+ * ⚠️ Tekstas sako KODĖL ir KAIP IŠEITI. „Nepalaikoma" siųstų operatorių ieškoti
+ * palaikymo, o problema yra ne palaikymas, o antro kanalo nebuvimas.
+ */
+function vaikinioProcesoKliuciuTekstas(kliutys) {
+  return (
+    `Jungtis aprašyta kintamaisiais, kurių vaikinis libpq procesas NEGAUNA: ${kliutys.join(", ")}. ` +
+    "Procese jie veikia per `process.env` (`pg` skaito jį pats), bet `pg_dump` aplinka " +
+    "valoma nuo VISO `PG` prefikso, kad kopija negalėtų tyliai ateiti iš kito klasterio. " +
+    "Perduoti juos būtų galima tik per DSN, o jis tyliai prarastų `sslmode` ir `options` " +
+    "arba atvestų slaptažodį į `argv`. " +
+    "Išeitis: nurodykite taikinį eksplicitiškai per `--url`, arba palikite tik " +
+    "`PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`, o kredencialus laikykite `~/.pgpass` " +
+    "(jis valymą išgyvena, nes `HOME` nėra `PG*`)."
+  );
+}
+
 module.exports = {
   pgJungtiesNustatymai,
   jungtiesSemantikosSkirtumai,
+  vaikinioProcesoKliutys,
+  vaikinioProcesoKliuciuTekstas,
+  arConninfoReiksme,
+  conninfoTekstas,
   dviprasmybesTekstas,
   RUNTIME_KREDENCIALAI,
   LAUKU_KLASES,

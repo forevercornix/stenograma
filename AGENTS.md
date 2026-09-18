@@ -176,6 +176,14 @@ Common patterns that pass while proving nothing:
   semantics does not verify that the production path invokes it.
 - **Fixed-size text windows.** Searching N characters before a marker breaks
   when a comment grows; scan the whole file or parse structurally.
+- **Both sources happen to agree.** When a fix changes *where* a value comes
+  from, a case in which the old and new sources hold the same value cannot
+  detect the change — the case must **separate** them. Measured in #292: the fix
+  moved the read budget from the persisted expectation to the measured size, but
+  the test passed `bytes: 16` while `head()` also reported 16, so old and new
+  budget were the same number and the mutation survived. Rerun without the
+  expectation — old budget `MAX_RESULT_BYTES` (20 MB) versus new `head().bytes`
+  (16) — and it failed. The first version guarded the gate, not the direction.
 
 Where a test's value depends on ordering or interception, state the assumption
 in a comment so a later edit cannot silently invalidate it.
@@ -550,6 +558,21 @@ If the same root cause exists outside the legitimate PR scope and repairing it
 would materially broaden the change, follow §13: document and escalate or split it
 rather than silently expanding the PR.
 
+When closing a race, enumerate **every actor and every interval** — a
+one-dimensional inventory closes one cell at a time while the window stays open.
+
+Measured in #305.1: three consecutive rounds each closed one actor in the window
+between candidate selection and physical deletion, and each round moved the
+window rather than closing it. A two-dimensional inventory — 6 actors × 3
+intervals, of which only 4 actors can lose data — showed **8 of those 12 cells
+uncovered**, while the per-actor report had named just one. The same discipline
+then produced a second finding the report had not raised: asking *what consumes
+this verdict* revealed a skip verdict falling through into the row-deletion
+branch.
+
+An inventory of actors answers "who can act". An inventory of intervals answers
+"when" — and a race needs both.
+
 ### 19.4 Repair the invariant, not the comment
 
 For each root-cause group:
@@ -565,6 +588,15 @@ For each root-cause group:
 A finding is resolved when the underlying supported failure mode is no longer
 reachable, or when evidence establishes that the finding was not applicable — not
 merely when the originally mentioned line changes.
+
+When several conditions can produce different verdicts, write the precedence down
+as data — a table or ordered list — rather than leaving it to the order of
+`return` statements. Where statement order decides, each new case is inserted by
+guess, and only the combination someone happened to notice gets tested. Measured
+in #292: three consecutive review rounds on validation ordering in one file, each
+fixed by moving a `return`; the fourth was avoided by validating every field first
+and selecting the verdict from an explicit precedence list, which also made the
+full combination matrix enumerable in a test.
 
 ### 19.5 Properties that look like guarantees
 

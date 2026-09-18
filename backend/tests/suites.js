@@ -319,6 +319,7 @@ const functional = [
    * binaro, tad išvedamas į `postgres` rinkinį per `postgresGuard` importą.
    */
   "pgDumpBackupContract",
+  "pgBackupPgForma",
   /**
    * #249 (7.6b): post-restore suderinimo KONTRAKTAS be DB.
    *
@@ -375,6 +376,7 @@ const functional = [
   "artifactStoreInlineWrite",
   /** #157 (PR-2): `fs` riba, laikini failai ir rašymo patvarumas. */
   "artifactStoreFsBoundary",
+  "artifactVerifyRiba",
   /** #157 (PR-2): klaidų pranešimų higiena — turinys nepatenka į viešą lauką. */
   "artifactStoreMessages",
   /** #157 (PR-2): kodekas — viena reikšmių sritis abiem kryptim + raktų pernešamumas. */

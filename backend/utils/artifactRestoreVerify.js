@@ -130,7 +130,24 @@ async function patikrintiEilute(eilute, parinktiSaugykla) {
   }
 
   if (verdiktas.ok !== true) {
-    return { jobId: eilute.job_id, storageType: eilute.storage_type, verdiktas: VERDIKTAS.NESUTAMPA };
+    /**
+     * ⚠️ PRIEŽASTIS PERDUODAMA, NES BE JOS VERDIKTAS NETURI VARTOTOJO (#292).
+     *
+     * `verify()` dabar skiria dvi anomalijas: metaduomenų defektą (DB eilutė) ir
+     * objekto anomaliją (saugykla). Bet sprendimas čia priimamas tik iš
+     * `{exists, nepriklausomas, ok}`, tad be `detale` abi virstų tuo pačiu
+     * `NESUTAMPA`, ir skirtumas, dėl kurio jos ir buvo atskirtos, dingtų
+     * ataskaitoje.
+     *
+     * ⚠️ Atskiro VERDIKTAS kibiro sąmoningai NEKURIU: tai keistų ataskaitos formą
+     * ir jos sargus, o #292 apimtis yra `verify()` riba. Registruojama atskirai.
+     */
+    return {
+      jobId: eilute.job_id,
+      storageType: eilute.storage_type,
+      verdiktas: VERDIKTAS.NESUTAMPA,
+      ...(verdiktas.priezastis ? { detale: verdiktas.priezastis } : {}),
+    };
   }
 
   return { jobId: eilute.job_id, storageType: eilute.storage_type, verdiktas: VERDIKTAS.PATIKRINTA };
@@ -150,20 +167,72 @@ function sudarytiAtaskaita(verdiktai) {
 
   const nesekmes = verdiktai.filter((v) => NESEKMES.includes(v.verdiktas));
 
+  /**
+   * ⚠️ AGREGUOJAMA PAGAL PRIEŽASTĮ, NE TIK PAGAL VERDIKTĄ (#292, Codex A).
+   *
+   * Be šito `NESUTAMPA` sulietų tris skirtingas operatoriaus išvadas: tirti DB
+   * eilutę, tirti objektą ir keisti konfigūraciją.
+   *
+   * Nesėkmė be priežasties (pvz. `NERASTA`) skaičiuojama pagal patį verdiktą —
+   * kitaip ji dingtų iš suvestinės, nors yra nesėkmė.
+   */
+  const pagalPriezasti = {};
+  for (const v of nesekmes) {
+    const raktas = v.detale || v.verdiktas;
+    pagalPriezasti[raktas] = (pagalPriezasti[raktas] || 0) + 1;
+  }
+
   return {
     eiluciuIsViso: verdiktai.length,
     /** ⚠️ TIK `nepriklausomas: true` — inline čia NEĮEINA. */
     nepriklausomaiPatikrinta: pagalVerdikta[VERDIKTAS.PATIKRINTA],
     nepatikrinama: pagalVerdikta[VERDIKTAS.NEPATIKRINAMA_INLINE],
     pagalVerdikta,
+    pagalPriezasti,
     nesekmes,
     /** ⚠️ FAIL-CLOSED: viena nesėkmė reiškia, kad atkūrimas nepatvirtintas. */
     ok: nesekmes.length === 0,
-    santrauka: suformuotiSantrauka(verdiktai.length, pagalVerdikta, nesekmes.length),
+    santrauka: suformuotiSantrauka(verdiktai.length, pagalVerdikta, nesekmes.length, pagalPriezasti),
   };
 }
 
-function suformuotiSantrauka(isViso, pagalVerdikta, nesekmiu) {
+/**
+ * PRIEŽASČIŲ SUVESTINĖ — TAI, KĄ OPERATORIUS REALIAI MATO (#292, Codex A).
+ *
+ * ⚠️ ANKSTESNĖ REDAKCIJA PRIEŽASTIS TIK IŠSAUGODAVO, IR TAI BUVO IŠMATUOTA NE TĄ
+ * RIBĄ.
+ *
+ * Patikrinau, ar `detale` IŠLIEKA objekte, ir atsakiau „taip". Klausimas, kuris
+ * svarbus, yra kitas: ar operatorius ją MATO. Runbook'o §9d kvietimas spausdina
+ * TIK `ataskaita.santrauka`, o joje priežasčių nebuvo — tad nė vienas produkcinis
+ * kelias `detale` neskaitė.
+ *
+ * ⚠️ Tai ta pati klasė, kurią `verify()` verdiktams uždarė ši pati užduotis
+ * („reikšmė be vartotojo"), tik pakopa toliau: verdiktas gavo vartotoją,
+ * PRIEŽASTIS ne.
+ *
+ * ⚠️ KODĖL SUVESTINĖ, O NE VISŲ NESĖKMIŲ SPAUSDINIMAS. `verifyResultArtifacts()`
+ * eina per VISĄ `job_results` lentelę, kuri atkūrimo pratybose gali turėti šimtus
+ * tūkstančių eilučių (`postgresStore.js:2890` komentaras). Nesėkmių skaičius
+ * NERIBOTAS, tad jų sąrašas nustumtų svarbiausią eilutę už ekrano ribų. Priežasčių
+ * aibė, priešingai, yra BAIGTINĖ ir maža — suvestinė telpa į vieną eilutę.
+ *
+ * Pilnas sąrašas lieka `ataskaita.nesekmes` tiems, kas apdoroja programiškai.
+ */
+function suformuotiPriezastis(pagalPriezasti) {
+  /**
+   * ⚠️ RAŠOMA VISADA, NET KAI NULIS — ta pati taisyklė kaip „nepatikrinama".
+   * Forma, priklausanti nuo duomenų, neleistų atskirti „tokių nesėkmių nėra" nuo
+   * „apie jas ši ataskaita nieko nesako".
+   */
+  const eilutes = Object.keys(pagalPriezasti)
+    .sort()
+    .map((k) => `${k} ${pagalPriezasti[k]}`);
+
+  return eilutes.length > 0 ? eilutes.join(", ") : "nėra";
+}
+
+function suformuotiSantrauka(isViso, pagalVerdikta, nesekmiu, pagalPriezasti = {}) {
   const patikrinta = pagalVerdikta[VERDIKTAS.PATIKRINTA];
   const inline = pagalVerdikta[VERDIKTAS.NEPATIKRINAMA_INLINE];
 
@@ -176,7 +245,8 @@ function suformuotiSantrauka(isViso, pagalVerdikta, nesekmiu) {
    */
   return (
     `eilučių ${isViso}; nepriklausomai patikrinta ${patikrinta}; ` +
-    `nepatikrinama (inline, nėra su kuo lyginti) ${inline}; nesėkmių ${nesekmiu}`
+    `nepatikrinama (inline, nėra su kuo lyginti) ${inline}; nesėkmių ${nesekmiu}; ` +
+    `priežastys: ${suformuotiPriezastis(pagalPriezasti)}`
   );
 }
 
