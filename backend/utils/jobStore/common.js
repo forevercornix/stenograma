@@ -732,12 +732,84 @@ function kanoninisRezultatas(reiksme) {
   return JSON.stringify(kanonizuoti(reiksme));
 }
 
+/**
+ * METADUOMENŲ PROJEKCIJA — VIENA FORMA VISIEMS BACKEND'AMS (#157, PR-3).
+ *
+ * ⚠️ FORMOS DIVERGENCIJA YRA TYLI: `jobStoreBackendContract` tikrina METODŲ aibę ir
+ * ELGESĮ, bet ne grąžinamą FORMĄ. PostgreSQL `listByFlag()` pradėjus praleisti
+ * `result`, o atminties pusei jį grąžinant, kvietėjas, parašytas prieš vieną
+ * backend'ą, tyliai elgtųsi kitaip prieš kitą — ir niekas nekristų.
+ *
+ * ⚠️ `result` PAŠALINAMAS, O NE NUSTATOMAS Į `null`. `null` reiškia „rezultato NĖRA"
+ * (`rezultatoNera()`), tad tai būtų melas apie job'ą, kurio rezultatas yra; be to
+ * `applyPatch()` sprendžia pagal `"result" in job`, ir `null` reikštų nurodymą jį
+ * IŠTRINTI.
+ */
+function metaduomenuProjekcija(job) {
+  if (!job) return job;
+
+  const { result: _nehidratuota, ...metaduomenys } = job;
+  return metaduomenys;
+}
+
 /** Ar rezultato APSKRITAI nėra? `null` ir `undefined` — ta pati būsena. */
 function rezultatoNera(reiksme) {
   return reiksme === undefined || reiksme === null;
 }
 
-function kanonizuoti(reiksme) {
+/** Ko `JSON.stringify` neserializuoja: praleidžia objekte, verčia `null` masyve. */
+function neserializuojama(reiksme) {
+  return reiksme === undefined || typeof reiksme === "function" || typeof reiksme === "symbol";
+}
+
+function kanonizuoti(reiksme, raktas = "") {
+  /**
+   * ⚠️ `toJSON` KVIEČIAMAS — NES JĮ KVIEČIA IR SAUGYKLA (#298).
+   *
+   * ⚠️ TAI NE „priimame daugiau reikšmių", O „modelis pradėjo atitikti tikrovę".
+   *
+   * `kanonizuoti()` egzistuoja tam, kad pagamintų tapatybę, kuri IŠGYVENA saugyklos
+   * round-trip'ą. Visos trys saugyklos serializuoja per `JSON.stringify`, o jis
+   * `toJSON` KVIEČIA. Tačiau `kanonizuoti()` rinko tik NUOSAVUS raktus, tad
+   * prototipe gyvenančio `toJSON` (būtent ten jį turi `Date`) nematydavo:
+   *
+   *   prieš rašymą kanoninė   {"d":{}}
+   *   po skaitymo kanoninė    {"d":"1970-01-01T00:00:00.000Z"}
+   *
+   * Vadinasi teisėtas pakartojimas (ta pati įvestis, tas pats job'as) gaudavo
+   * `RESULT_CONFLICT` — melagingą konfliktą apie savo patį. Išmatuota prieš tikrą
+   * Redis (#298, CI 34106486710); Redis yra AKTYVUS kelias.
+   *
+   * ⚠️ OBJEKTO LITERALE `toJSON` YRA NUOSAVAS, tad senasis kodas jį įdėdavo į `out`,
+   * o `JSON.stringify` paskui IŠKVIESDAVO — t. y. pusiau paisydavo. #298 užrašytas
+   * predikatas („objektas, turintis `toJSON`") dėl to per platus: išmatuota, kad
+   * `{ x: 1, toJSON() { return { x: 1 } } }` round-trip'ą pergyvena. Laužia tik
+   * `toJSON` PROTOTIPE.
+   *
+   * ⚠️ KVIEČIAMA VIENĄ KARTĄ VIENAME LYGYJE, kaip reikalauja `JSON.stringify`
+   * specifikacija (SerializeJSONProperty): grąžinta reikšmė toliau apdorojama
+   * įPRASTAI, o ne dar kartą per `toJSON`. Rekursija čia duotų KITĄ rezultatą nei
+   * saugykla — t. y. atkurtų tą patį defektą iš kitos pusės.
+   *
+   * ⚠️ `raktas` PERDUODAMAS, nes `JSON.stringify` kviečia `toJSON(key)`. `Date` jo
+   * nepaiso, bet nuosava realizacija gali; nepaduotas raktas būtų tyli divergencija
+   * tiksliai tokio pat pobūdžio, kokį šis taisymas uždaro.
+   */
+  if (
+    (reiksme !== null && typeof reiksme === "object") ||
+    typeof reiksme === "bigint"
+  ) {
+    const toJSON = reiksme.toJSON;
+    if (typeof toJSON === "function") {
+      return kanonizuotiBeToJSON(toJSON.call(reiksme, raktas));
+    }
+  }
+
+  return kanonizuotiBeToJSON(reiksme);
+}
+
+/** `kanonizuoti()` žingsniai PO `toJSON` — jų tas pats lygis nebekartoja. */
+function kanonizuotiBeToJSON(reiksme) {
   if (reiksme === null || typeof reiksme !== "object") {
     /**
      * ⚠️ `undefined` PAVERČIAMAS `null`. `JSON.stringify(undefined)` grąžina
@@ -746,7 +818,14 @@ function kanonizuoti(reiksme) {
      */
     return reiksme === undefined ? null : reiksme;
   }
-  if (Array.isArray(reiksme)) return reiksme.map(kanonizuoti);
+  /**
+   * ⚠️ MASYVE NESERIALIZUOJAMA REIKŠMĖ VIRSTA `null`, NE DINGSTA — kaip
+   * `JSON.stringify`. Praleidus ją, pasislinktų INDEKSAI, o segmentų eilė yra
+   * semantika: kanoninė forma imtų teigti kitą rezultatą, ne tą patį.
+   */
+  if (Array.isArray(reiksme)) {
+    return reiksme.map((v, i) => (neserializuojama(v) ? null : kanonizuoti(v, String(i))));
+  }
 
   /**
    * ⚠️ `Object.create(null)`, NE `{}` (#184, Codex C10).
@@ -771,11 +850,81 @@ function kanonizuoti(reiksme) {
      * (`JSON.stringify` juos išmeta), tad palikti juos čia reikštų, kad
      * įrašytas ir perskaitytas objektas skiriasi nuo įrašomo.
      */
-    if (reiksme[raktas] === undefined) continue;
-    out[raktas] = kanonizuoti(reiksme[raktas]);
+    /**
+     * ⚠️ FUNKCIJOS IR SIMBOLIAI PRALEIDŽIAMI ČIA, NE PALIEKAMI IŠORINIAM
+     * `JSON.stringify` (#298).
+     *
+     * Anksčiau jie patekdavo į `out`, o juos išmesdavo galutinis
+     * `JSON.stringify`. Rezultatas beveik visada sutapdavo — IŠSKYRUS raktą
+     * `toJSON`: tada išorinis `stringify` funkciją ne išmesdavo, o IŠKVIESDAVO,
+     * ir kanoninė forma nesutapdavo su round-trip'u. Išmatuota:
+     * `{ k: { toJSON: () => ({ toJSON: () => 1 }) } }` davė `{"k":1}` vietoj
+     * `{"k":{}}`.
+     *
+     * Modelis nebesiremia išorinio `stringify` elgesiu su savo paties išvestimi.
+     */
+    if (neserializuojama(reiksme[raktas])) continue;
+    out[raktas] = kanonizuoti(reiksme[raktas], raktas);
   }
   return out;
 }
+
+/**
+ * EXTERNAL ATITIKMUO — TA PATI TAISYKLĖ, KITA REPREZENTACIJA (#157, PR-4).
+ *
+ * ⚠️ ANTROS LYGYBĖS TAISYKLĖS ČIA NĖRA, IR BŪTENT TODĖL JI GYVENA ŠIAME FAILE.
+ *
+ * External rezultato turinys guli saugykloje, tad palyginti dvi kanonines eilutes
+ * reikštų jį PERSKAITYTI kiekvieno pakartotinio `finish()` metu. Vietoj to lyginamas
+ * `checksum`, kuris IŠVESTAS iš tos pačios `kanoninisRezultatas()` išvesties
+ * (`artifactStore/validation.js` riba) — tai ne kita taisyklė, o ta pati santrauka.
+ *
+ * ⚠️ SPRENDIMO STRUKTŪRA IDENTIŠKA `idempotentiskasAtsakymas()`: tie patys žingsniai,
+ * ta pati tvarka, tie patys sentinel'iai. Jei kada nors išsiskirs, tai matysis čia, o
+ * ne dviejuose failuose, kurių niekas nelygina.
+ *
+ * @param {object} job užrakintas job'o snapshot'as
+ * @param {string} status prašomas statusas
+ * @param {{checksum: string, bytes: number}} ateinantis įeinančio rezultato santrauka
+ * @param {{checksum: string|null, bytes: number|string|null}} persistintas eilutės metaduomenys
+ */
+function idempotentiskasAtsakymasIsMetaduomenu(job, status, ateinantis, persistintas) {
+  if (job.status !== STATUS.COMPLETED) return undefined;
+  if (status !== STATUS.COMPLETED) return undefined;
+
+  /** ⚠️ `COMPLETED` BE REZULTATO NĖRA SĖKMĖ — ta pati riba kaip inline kelyje. */
+  if (!persistintas || persistintas.checksum == null || persistintas.bytes == null) {
+    return "COMPLETED_WITHOUT_RESULT";
+  }
+
+  /**
+   * ⚠️ `bytes` LYGINAMAS SKAIČIUMI: `bigint` per `node-postgres` grįžta EILUTE, tad
+   * griežtas `===` čia visada sakytų „skirtingas rezultatas".
+   */
+  const tapatu =
+    persistintas.checksum === ateinantis.checksum &&
+    Number(persistintas.bytes) === Number(ateinantis.bytes);
+
+  return tapatu ? job : "RESULT_CONFLICT";
+}
+
+/**
+ * ⚠️ ŽENKLAS: „REZULTATAS YRA, BET NE ŠIOJE EILUTĖJE" (#157, PR-7).
+ *
+ * Backend'as, kurio eilutė external, paduoda ŠITĄ vietoj `job.result`. Simbolis, ne
+ * eilutė ar objektas: bet kokia reikšmė galėtų sutapti su tikru rezultatu, ir tada
+ * ženklas taptų nepatikimas būtent ten, kur juo remiamasi.
+ */
+const REZULTATAS_EXTERNAL = Symbol("stenograma.jobStore.rezultatasExternal");
+
+/**
+ * ⚠️ VERDIKTAS: „SPRENDIMO NĖRA, IR TAI NE LYGYBĖS KLAUSIMAS" (#157, PR-7).
+ *
+ * Grąžinamas, kai rezultatas yra external, o įeinantis turi rezultatą be kvito.
+ * Skiriasi nuo `undefined` (eiti įprastu perėjimo keliu) tuo, kad įprastas kelias
+ * čia NEGALIMAS: `writePatched()` rašytų inline reikšmę virš external eilutės.
+ */
+const NEPALYGINAMA = "NEPALYGINAMA";
 
 /**
  * BENDRA IDEMPOTENTIŠKUMO TAISYKLĖ VISIEMS TRIMS BACKEND'AMS (#184, 7.5b).
@@ -812,6 +961,40 @@ function idempotentiskasAtsakymas(job, status, extra) {
    */
   if (rezultatoNera(job.result)) return "COMPLETED_WITHOUT_RESULT";
 
+  /**
+   * ⚠️ EXTERNAL EILUTĖ: REZULTATAS YRA, BET JO KANONINĖS FORMOS ČIA NĖRA
+   * (#157, PR-7, 2 sąlyga).
+   *
+   * `job_results` external eilutėje `payload` privalomai yra `NULL` (formos
+   * `CHECK`), tad kvietėjas negali paduoti `job.result` reikšmės — bet rezultatas
+   * EGZISTUOJA, jis guli saugykloje. Perdavus `null`, atsakymas būtų
+   * `COMPLETED_WITHOUT_RESULT`, o tai MELAS ir PAVOJINGAS: jis reiškia remontuotiną
+   * būseną, po kurios kvietėjas gali perrašyti rezultatą — perrašymas external
+   * eilutę perjungtų į inline ir paliktų objektą NAŠLAIČIU.
+   *
+   * ⚠️ SPRENDIMAS GYVENA ČIA, NE BACKEND'E. `jobFinishIdempotency` sargas draudžia
+   * backend'ui priimti lygybės sprendimą pačiam („antra taisyklė išsiskirtų"), ir
+   * pirmoji šio taisymo redakcija tą draudimą pažeidė — sargas ją pagavo. Taisyklė
+   * lieka viena; backend'as tik pasako, KOKIA forma yra jo eilutė.
+   */
+  if (job.result === REZULTATAS_EXTERNAL) {
+    /**
+     * Įeinantis be rezultato — tai NE tas pats rezultatas, tad konfliktas.
+     * Paritetas su inline keliu, kuriame `finish(completed, {})` ant užbaigto
+     * job'o duoda tą patį atsakymą.
+     */
+    if (rezultatoNera(extra.result)) return "RESULT_CONFLICT";
+
+    /**
+     * Įeinantis SU rezultatu: palyginti nėra kuo — persistinto `checksum` kelias
+     * (`idempotentiskasAtsakymasIsMetaduomenu`) reikalauja įeinančio kvito, o jo
+     * nėra, nes rašymo saugykla neprijungta. Tai KONFIGŪRACIJOS, ne lygybės
+     * klausimas, tad verdiktas atiduodamas kvietėjui — jis vienintelis žino, kodėl
+     * kvito nėra, ir gali tai pasakyti operatoriui.
+     */
+    return NEPALYGINAMA;
+  }
+
   return kanoninisRezultatas(extra.result) === kanoninisRezultatas(job.result)
     ? job
     : "RESULT_CONFLICT";
@@ -834,12 +1017,16 @@ function isFinished(status) {
 }
 
 module.exports = {
+  metaduomenuProjekcija,
+  idempotentiskasAtsakymasIsMetaduomenu,
   normalizeSchemaVersion,
   BOOLEAN_FIELDS,
   NUMBER_FIELDS,
   kanoninisRezultatas,
   rezultatoNera,
   idempotentiskasAtsakymas,
+  REZULTATAS_EXTERNAL,
+  NEPALYGINAMA,
   KANONINIAI_LAUKAI,
   normalizeFieldValue,
   normalizeJob,

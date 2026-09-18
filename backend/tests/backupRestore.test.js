@@ -27,7 +27,7 @@ async function completedJob(overrides = {}) {
   await jobStore.init();
   const job = await jobStore.create({ ownerKind: "unowned", type: jobStore.JOB_TYPES.PROTOCOL, ...overrides });
   await markCompleted(jobStore.system, job.id, { result: { pavadinimas: "Testas" } });
-  return jobStore.system.get(job.id);
+  return jobStore.system.get(job.id, { hydrate: true });
 }
 
 test("KOPIJA: išjungta pagal nutylėjimą – reikia sąmoningo įjungimo", async () => {
@@ -108,12 +108,12 @@ test("ATKŪRIMAS: pilnas ciklas grąžina jobą", async () => {
 
   const backup = await backupService.createBackup({ actor: "sysadmin" });
   await jobStore.system.remove(job.id);
-  assert.equal(await jobStore.system.get(job.id), null);
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null);
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
   assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
-  assert.ok(await jobStore.system.get(job.id), "jobas turi grįžti");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "jobas turi grįžti");
 });
 
 test("ATKŪRIMAS: grandinė vykdoma NUOSEKLIAI ir fiksuoja žingsnius", async () => {
@@ -153,7 +153,7 @@ test("FAIL-CLOSED: SUGADINTAS turinys sustabdo atkūrimą", async () => {
 
   assert.equal(result.ok, false);
   assert.equal(result.failedStep, STEPS.CHECKSUM);
-  assert.equal(await jobStore.system.get(job.id), null, "sugadinta kopija NEGALI nieko atkurti");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "sugadinta kopija NEGALI nieko atkurti");
 });
 
 test("FAIL-CLOSED: sustojus grandinei sistema LIEKA NEPALIESTA", async () => {
@@ -180,7 +180,7 @@ test("FAIL-CLOSED: sustojus grandinei sistema LIEKA NEPALIESTA", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.failedStep, STEPS.MANIFEST);
   assert.equal(after, before, "nepavykęs atkūrimas neturi keisti sistemos būklės");
-  assert.ok(await jobStore.system.get(survivor.id), "esami jobai turi likti");
+  assert.ok(await jobStore.system.get(survivor.id, { hydrate: true }), "esami jobai turi likti");
 });
 
 test("FAIL-CLOSED: NAUJESNIS formatas atmetamas", async () => {
@@ -276,7 +276,7 @@ test("ŽYMOS: ištrintas jobas NEGRĮŽTA iš kopijos", async () => {
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
   assert.equal(result.ok, true, "atkūrimas pats pavyksta");
-  assert.equal(await jobStore.system.get(job.id), null, "bet ištrintas jobas NEGRĮŽTA");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "bet ištrintas jobas NEGRĮŽTA");
 });
 
 test("ŽYMOS: `pending` žyma irgi blokuoja atkūrimą", async () => {
@@ -291,7 +291,7 @@ test("ŽYMOS: `pending` žyma irgi blokuoja atkūrimą", async () => {
 
   await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
-  assert.equal(await jobStore.system.get(job.id), null, "vykstant ištrynimui atkūrimas irgi blokuojamas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "vykstant ištrynimui atkūrimas irgi blokuojamas");
 });
 
 test("SAUGYKLA: raktas iš kopijos VALIDUOJAMAS (kelio apėjimas)", async () => {
@@ -466,7 +466,7 @@ test("AUDITAS: SENA kopija su auditu praleidžiama, ne atkuriama", async () => {
   const result = await restoreService.restoreBackup({ manifest: legacyManifest, data: legacyData });
 
   assert.equal(result.ok, true, "sena kopija turi būti atkuriama");
-  assert.ok(await jobStore.system.get(job.id), "jobai atkuriami kaip įprasta");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "jobai atkuriami kaip įprasta");
 
   const restored = (await auditLog.getAll()).slice(before);
   assert.ok(
@@ -509,7 +509,7 @@ test("#180 P2-E: neatstovaujamas įrašas atmetamas PRIEŠ bet kokią atkūrimo 
   await jobStore.system.remove(a.id);
   await jobStore.system.remove(b.id);
   const gyvas = await completedJob();
-  const gyvasPries = await jobStore.system.get(gyvas.id);
+  const gyvasPries = await jobStore.system.get(gyvas.id, { hydrate: true });
 
   const tikriVeiksmai = {
     assertRestorable: jobStore.assertRestorable,
@@ -583,10 +583,10 @@ test("#180 P2-E: neatstovaujamas įrašas atmetamas PRIEŠ bet kokią atkūrimo 
     assert.equal(irasytaAudio, 0, "audio negali būti įrašytas prieš patikrą");
 
     /** Gyva būsena nepakitusi; kopijos job'ai neatsirado. */
-    assert.deepEqual(await jobStore.system.get(gyvas.id), gyvasPries,
+    assert.deepEqual(await jobStore.system.get(gyvas.id, { hydrate: true }), gyvasPries,
       "gyvas įrašas privalo likti nepakitęs");
-    assert.equal(await jobStore.system.get(a.id), null, "A negalėjo būti atkurtas");
-    assert.equal(await jobStore.system.get(b.id), null, "B negalėjo būti atkurtas");
+    assert.equal(await jobStore.system.get(a.id, { hydrate: true }), null, "A negalėjo būti atkurtas");
+    assert.equal(await jobStore.system.get(b.id, { hydrate: true }), null, "B negalėjo būti atkurtas");
   } finally {
     jobStore.assertRestorable = tikriVeiksmai.assertRestorable;
     jobStore.restoreRecord = tikriVeiksmai.restoreRecord;
@@ -701,7 +701,7 @@ test("SAUGUMAS: kopija su suklastotu job identifikatoriumi atmetama PRIEŠ bet k
     "atmestas atkūrimas negali nieko pritaikyti");
 
   /** 2) ⚠️ ESMĖ: kenksminga reikšmė NEPATEKO į saugyklą. */
-  assert.equal(await jobStore.system.get(kenksmingasId), null,
+  assert.equal(await jobStore.system.get(kenksmingasId, { hydrate: true }), null,
     "suklastotas identifikatorius negali atsidurti saugykloje");
   assert.equal(await jobStore.size(), kiekPries,
     "saugyklos dydis privalo likti nepakitęs - nė vienas įrašas nepritaikytas");
@@ -714,12 +714,12 @@ test("SAUGUMAS: teisėtas UUID identifikatorius atkuriamas be pakitimų (regresi
   const backup = await backupService.createBackup({ actor: "sysadmin" });
 
   await jobStore.system.remove(job.id);
-  assert.equal(await jobStore.system.get(job.id), null, "prielaida: job'as pašalintas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "prielaida: job'as pašalintas");
 
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin" });
 
   assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
-  assert.ok(await jobStore.system.get(job.id), "teisėtas UUID job'as privalo grįžti");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "teisėtas UUID job'as privalo grįžti");
 });
 
 test("#180 P2-E: ištrintas (tombstone) įrašas neblokuoja likusios kopijos atkūrimo", async () => {
@@ -772,9 +772,9 @@ test("#180 P2-E: ištrintas (tombstone) įrašas neblokuoja likusios kopijos atk
     "atkuriamas įrašas PRIVALO būti patikrintas preflight fazėje");
 
   assert.equal(result.ok, true, `atkūrimas privalo pavykti: ${result.reason}`);
-  assert.ok(await jobStore.system.get(liekantis.id),
+  assert.ok(await jobStore.system.get(liekantis.id, { hydrate: true }),
     "teisėtas job'as privalo grįžti, nepaisant tombstone'into kaimyno");
-  assert.equal(await jobStore.system.get(istrintas.id), null,
+  assert.equal(await jobStore.system.get(istrintas.id, { hydrate: true }), null,
     "tombstone'intas job'as NEGALI būti prikeltas");
 });
 

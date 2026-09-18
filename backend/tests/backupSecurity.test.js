@@ -428,7 +428,7 @@ test("SRAUTAS: šifruota kopija ATKURIAMA per pilną grandinę", async () => {
   assert.equal(result.ok, true, `atkūrimas nepavyko: ${result.reason}`);
   assert.ok(result.completedSteps.includes(STEPS.DECRYPTED));
 
-  const restored = await jobStore.system.get(job.id);
+  const restored = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(restored, "jobas turi grįžti");
   assert.equal(restored.result.x, 42, "turinys turi būti teisingai dešifruotas");
 });
@@ -477,7 +477,7 @@ test("SRAUTAS: ROTACIJA – kopija atkuriama ankstesniu raktu", async () => {
   const result = await restoreService.restoreBackup({ ...backup, env: poRotacijos });
 
   assert.equal(result.ok, true, `rotacija turi išsaugoti senas kopijas: ${result.reason}`);
-  assert.equal((await jobStore.system.get(job.id)).result.x, 7);
+  assert.equal((await jobStore.system.get(job.id, { hydrate: true })).result.x, 7);
 });
 
 test("SRAUTAS: kontrolinė suma dengia ŠIFRUOTĄ turinį", async () => {
@@ -732,7 +732,7 @@ test("ŽYMOS: ŠIFRUOTA kopija irgi negrąžina ištrinto jobo", async () => {
   const result = await restoreService.restoreBackup({ ...backup, actor: "sysadmin", env });
 
   assert.equal(result.ok, true, "atkūrimas pats pavyksta");
-  assert.equal(await jobStore.system.get(job.id), null, "bet ištrintas jobas NEGRĮŽTA net iš šifruotos kopijos");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "bet ištrintas jobas NEGRĮŽTA net iš šifruotos kopijos");
 });
 
 test("ŽYMOS: atkūrimas ANKSTESNIU raktu irgi gerbia žymas", async () => {
@@ -766,7 +766,7 @@ test("ŽYMOS: atkūrimas ANKSTESNIU raktu irgi gerbia žymas", async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.equal(await jobStore.system.get(job.id), null, "ištrintas jobas negrįžta ir per rotacijos kelią");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "ištrintas jobas negrįžta ir per rotacijos kelią");
 });
 
 test("STARTUP: netinkamas ANKSTESNIS raktas aptinkamas paleidžiant", () => {

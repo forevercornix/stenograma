@@ -99,10 +99,21 @@ function classifyFailure(message) {
  * Susiejimas EKSPLICITINIS, ne spėjamas iš laukų pavadinimų: kai atsiras nauja
  * kategorija, ji turės būti pridėta ČIA, o ne likti tyliai nepastebėta.
  */
+/**
+ * ⚠️ KLAUSIMAS YRA „AR ARTEFAKTO NEBĖRA", NE „AR MES JĮ IŠTRYNĖME" (#250).
+ *
+ * `source_audio` turi DVI būsenas, reiškiančias tą patį rezultatą: objektą
+ * pašalinome (`storageRemoved`) arba jo jau nebuvo (`storageAlreadyAbsent`).
+ * Skaitant tik pirmąją, įprastas pakartotinis trynimas rodytų
+ * `remaining: [source_audio]` prie sėkmingo statuso — likutis, kurio nėra.
+ */
 const COVERED_CATEGORIES = [
-  { type: ARTEFACT_TYPES.QUEUE_RECORD.id, outcomeKey: "queueJobRemoved" },
-  { type: ARTEFACT_TYPES.SOURCE_AUDIO.id, outcomeKey: "storageRemoved" },
-  { type: ARTEFACT_TYPES.JOB_RECORD.id, outcomeKey: "jobRemoved" },
+  { type: ARTEFACT_TYPES.QUEUE_RECORD.id, nebera: (o) => Boolean(o.queueJobRemoved) },
+  {
+    type: ARTEFACT_TYPES.SOURCE_AUDIO.id,
+    nebera: (o) => Boolean(o.storageRemoved || o.storageAlreadyAbsent),
+  },
+  { type: ARTEFACT_TYPES.JOB_RECORD.id, nebera: (o) => Boolean(o.jobRemoved) },
 ];
 
 /**
@@ -377,8 +388,8 @@ async function _performDeletion(
   const deleted = [];
   const remaining = [];
 
-  for (const { type, outcomeKey } of COVERED_CATEGORIES) {
-    if (outcome[outcomeKey]) deleted.push(type);
+  for (const { type, nebera } of COVERED_CATEGORIES) {
+    if (nebera(outcome)) deleted.push(type);
     else remaining.push(type);
   }
 
@@ -390,7 +401,37 @@ async function _performDeletion(
    * Jei `job_record` pašalintas, transkripcija ir protokolas pašalinti kartu –
    * fiziškai kito kelio nėra. Jei ne, jie lieka kartu su juo.
    */
-  if (outcome.jobRemoved) deleted.push(...STORED_IN_JOB_RECORD);
+  /**
+   * ⚠️ PER-ROW `storage_type`, NE PER-CONFIG (#157, PR-5, sąlyga 5).
+   *
+   * Iki #157 `transcript` ir `protocol` gyveno `job_results.payload` viduje, tad
+   * `jobRemoved` buvo visas atsakymas. Po #157 tai TAMPA MELU external eilutėms: `jobs`
+   * eilutės ištrynimas neliečia S3/failų sistemos objekto, o abu artefaktai būtų
+   * raportuoti kaip `deleted`.
+   *
+   * ⚠️ SPRENDŽIAMA PAGAL FAKTĄ, NE PAGAL AKTYVŲ BACKEND'Ą. Po migracijos DB bus MIŠRI
+   * ilgą laiką: dalis eilučių `inline`, dalis external. Konfigūracija sako, kur bus
+   * rašoma toliau; ji nesako, kur guli JAU EGZISTUOJANTIS rezultatas. Todėl klausiama
+   * `resultArtifactsRemoved` / `resultArtifactsAlreadyAbsent` — t. y. ar external
+   * objekto NEBĖRA, ta pačia „ar artefakto nebėra" sąjunga kaip `source_audio` po #288.
+   *
+   * `inline` eilutei sąjunga lieka `jobRemoved`: objektų nebuvo, tad nė vieno ir
+   * nepašalinta, o turinys dingo kartu su eilute.
+   */
+  const externalNebera =
+    (outcome.resultArtifactsRemoved || 0) > 0 || (outcome.resultArtifactsAlreadyAbsent || 0) > 0;
+
+  /**
+   * ⚠️ SĄJUNGA, NE VIENAS FAKTAS — ta pati forma kaip `source_audio` po #288.
+   *
+   * `jobRemoved` dengia `inline` eilutę: turinys gyveno joje ir dingo kartu. `externalNebera`
+   * dengia external eilutę, kurios objekto nebėra — įskaitant NAŠLAIČIŲ kelią, kuriame
+   * `jobRemoved` visada `false`, nors objektas ką tik pašalintas.
+   *
+   * Artefakto šalinimo NESĖKMĖ čia nepatenka pagal konstrukciją: `eraseJob` ją paverčia
+   * `criticalFailure`, o tada eilutė nešalinama ir `jobRemoved` lieka `false`.
+   */
+  if (outcome.jobRemoved || externalNebera) deleted.push(...STORED_IN_JOB_RECORD);
   else remaining.push(...STORED_IN_JOB_RECORD);
 
   const failures = (outcome.errors || [])

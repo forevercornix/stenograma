@@ -67,7 +67,7 @@ test('#160 SERVISAS: suklastotas maršruto teiginys „čia admin" atmetamas', a
   await assert.rejects(() => adminDeleteJob(job.id, sessionUser), AdminOverrideDenied);
   await assert.rejects(() => adminDeleteJob(job.id, null), AdminOverrideDenied);
 
-  const still = await jobStore.system.get(job.id);
+  const still = await jobStore.system.get(job.id, { hydrate: true });
   assert.ok(still, "nė vienas atmestas bandymas neturi nieko ištrinti");
 });
 
@@ -86,7 +86,7 @@ test("#160 SERVISAS: session-admin ištrina svetimą job'ą", async () => {
   const result = await adminDeleteJob(job.id, sessionAdmin);
 
   assert.equal(result.deleted, true);
-  assert.equal(await jobStore.system.get(job.id), null, "job'as realiai ištrintas");
+  assert.equal(await jobStore.system.get(job.id, { hydrate: true }), null, "job'as realiai ištrintas");
 });
 
 test("#160 SERVISAS: legacy job'as (be ownerKind) taip pat trinamas", async () => {
@@ -344,11 +344,11 @@ test("#183 FAIL-CLOSED: žymos įrašymo klaida SUSTABDO valymą, o ne praleidž
   }
 
   assert.ok(
-    await jobStore.system.get(adminJob.id),
+    await jobStore.system.get(adminJob.id, { hydrate: true }),
     "be žymos valymas negali įvykti - įrašas privalo likti (admin kelias)"
   );
   assert.ok(
-    await jobStore.system.get(desktopJob.id),
+    await jobStore.system.get(desktopJob.id, { hydrate: true }),
     "be žymos valymas negali įvykti - įrašas privalo likti (desktop kelias)"
   );
 });
@@ -370,7 +370,7 @@ test("#183 NAŠLAITIS: svetima žyma sustabdo valymą (202), sava - ne", async (
 
   assert.equal(r.cleaned, false);
   assert.equal(r.barjeras, "in_progress");
-  assert.ok(await jobStore.system.get(job.id), "destruktyvus darbas NEPRADĖTAS");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "destruktyvus darbas NEPRADĖTAS");
 });
 
 test("#183 NAŠLAITIS: `deletion_failed` grąžina `tombstone_unresolved`, be pakartojimo", async () => {
@@ -383,7 +383,7 @@ test("#183 NAŠLAITIS: `deletion_failed` grąžina `tombstone_unresolved`, be pa
 
   assert.equal(r.cleaned, false);
   assert.equal(r.barjeras, "tombstone_unresolved");
-  assert.ok(await jobStore.system.get(job.id), "automatinio pakartojimo nėra - jį autorizuoja operatorius");
+  assert.ok(await jobStore.system.get(job.id, { hydrate: true }), "automatinio pakartojimo nėra - jį autorizuoja operatorius");
   assert.equal((await tombstones.get(job.id)).status, TOMBSTONE_STATUS.FAILED);
 });
 
@@ -448,4 +448,67 @@ test("#183 OVERRIDE: žyma fiksuoja OPERATORIŲ, ne savininko prašymą", async 
   assert.ok(zyma, "override privalo palikti žymą");
   assert.equal(zyma.actorKind, ACTOR_KIND.OPERATOR, "veikė operatorius, ne savininkas");
   assert.equal(zyma.reason, ERASURE_REASON.OPERATOR_CLEANUP, "priežastis - ne `user_request`");
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * HIDRATACIJA: OVERRIDE YRA PASKUTINĖ INSTANCIJA (#157, PR-3)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+test("#157 ADMIN OVERRIDE prašo job'o BE rezultato", async (t) => {
+  /**
+   * ⚠️ ČIA TAI SVARBIAU NEI SAVININKO KELYJE.
+   *
+   * `ADMIN_DELETE_OVERRIDE` egzistuoja BŪTENT sugedusiems ir svetimiems job'ams.
+   * Hidratuodamas jis lūžtų PIRMA: job'as su sugadintu artefaktu taptų neištrinamas
+   * ABIEM keliais — savininką politika nukreipia į override, o override krenta ties
+   * hidratacija. Tai ne saugumo, o prieinamumo ir BDAR klausimas: neištrinama
+   * transkripcija.
+   *
+   * ⚠️ SKAITIKLIS ČIA NEĮMANOMAS (atminties backend'as artefaktų saugyklos neturi),
+   * tad tikrinamas SAITAS su kvietimo vieta; ką `hydrate: false` reiškia saugyklai,
+   * įrodo `jobStoreHydration.integration` („sugadintas artefaktas: `hydrate:false`
+   * kelias VEIKIA").
+   */
+  const job = await svetimasJob();
+
+  const originalus = jobStore.system.get;
+  const kvietimai = [];
+  jobStore.system.get = async (id, nustatymai) => {
+    kvietimai.push(nustatymai);
+    return originalus(id, nustatymai);
+  };
+  t.after(() => {
+    jobStore.system.get = originalus;
+  });
+
+  const result = await adminDeleteJob(job.id, sessionAdmin);
+
+  assert.equal(result.deleted, true, "override privalo ištrinti");
+  assert.deepEqual(
+    kvietimai.map((n) => n && n.hydrate),
+    [false],
+    "paskutinė instancija negali priklausyti nuo to, ar artefaktas perskaitomas"
+  );
+});
+
+test("#157 SUGADINTAS artefaktas NEBLOKUOJA admin override'o", async (t) => {
+  /**
+   * ⚠️ ELGESIO PATIKRA, NE TIK VĖLIAVOS. Saugykla, kuri kiekvienam hidratuotam
+   * skaitymui meta, imituoja sugadintą artefaktą; ištrynimas vis tiek privalo pavykti.
+   */
+  const job = await svetimasJob();
+
+  const originalus = jobStore.system.get;
+  jobStore.system.get = async (id, nustatymai = {}) => {
+    if (nustatymai.hydrate !== false) {
+      throw Object.assign(new Error("artefaktas sugadintas"), { code: "ARTIFACT_CORRUPT" });
+    }
+    return originalus(id, nustatymai);
+  };
+  t.after(() => {
+    jobStore.system.get = originalus;
+  });
+
+  const result = await adminDeleteJob(job.id, sessionAdmin);
+  assert.equal(result.deleted, true, "override privalo veikti BŪTENT tada, kai artefaktas blogas");
 });

@@ -284,6 +284,13 @@ async function probeRuntimeReadiness() {
        * Be jo pakibęs Redis pakabina ir `/api/ready`: orkestruotojas vietoj
        * aiškaus 503 gauna timeout, o konteineris kabo „tikrinamas" būsenoje.
        * Readiness turi atsakyti VISADA - net jei atsakymas yra „neparuošta".
+       *
+       * ⚠️ TAS PATS `ping` KAIP STARTO PREFLIGHT, tik čia jungtis jau atidaryta
+       * worker'io statusui, tad pakartotinis `patikrintiEilesJungti()` kurtų
+       * ANTRĄ jungtį kiekvienam readiness kvietimui. Bendra yra KLAUSIMO forma
+       * ir riba. Starto verdiktas gyvena `jobRunner.getQueuePreflight()` ir
+       * rodomas `/api/health/deep` bei `doctor` išvestyje — NE `/api/ready`,
+       * kurio kontraktas reikalauja loginių būsenų be infrastruktūros detalių.
        */
       await withTimeout(conn.ping(), READINESS_TIMEOUT_MS, "redis ping");
       workers = await withTimeout(getWorkerStatus(conn), READINESS_TIMEOUT_MS, "worker status");
@@ -441,6 +448,19 @@ app.get("/api/health", pollRateLimiter, (req, res) => {
  * tai, ko #14 reikalauja išvengti.
  */
 app.get("/api/health/deep", pollRateLimiter, async (req, res) => {
+  /**
+   * ⚠️ PREFLIGHT VERDIKTAS RODOMAS ČIA, NE `/api/ready`.
+   *
+   * `/api/ready` kontraktas (patikrintas `auditReadiness.route`) reikalauja, kad
+   * komponentai būtų LOGINĖS BŪSENOS be infrastruktūros detalių — o preflight
+   * priežastis būtent tokia detalė ir yra (`ECONNREFUSED`, adresas, timeout).
+   * Įdėjus ją ten, readiness virstų diagnostikos kanalu, kurio kontraktas
+   * sąmoningai neleidžia.
+   *
+   * Deep health ir `doctor` yra operatoriaus paviršius — ten priežastis ne tik
+   * leidžiama, bet ir reikalinga: ji atsako į klausimą „kodėl režimas `inline`,
+   * nors `REDIS_URL` nustatytas", į kurį iki #155 atsakymo nebuvo.
+   */
   const isProduction = process.env.NODE_ENV === "production";
   const authorized = process.env.AUDIT_API_KEY && req.header("x-audit-key") === process.env.AUDIT_API_KEY;
   if (isProduction && !authorized) {

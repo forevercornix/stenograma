@@ -151,9 +151,73 @@ test("RUNBOOK: KIEKVIENA žinoma riba įvardyta", () => {
     { pattern: /best-effort/i, what: "paslapčių patikros ribos" },
     { pattern: /[Ss]erveris kopijų nesaugo/, what: "serveris kopijų nesaugo" },
     { pattern: /audito žurnale \*\*nebus\*\*|[Aa]tkuriami duomenys, ne jų istorija/, what: "auditas neatkuriamas" },
+    /**
+     * ⚠️ 7.6c (#250): TEIGINYS PASIKEITĖ, RIBA — NE.
+     *
+     * Iki 7.6c čia buvo reikalaujama įspėjimo „replay ateis su 7.6c". Replay
+     * atėjo ir įrodytas pratybomis (`drRestore.integration`, CI run 33782254813,
+     * 10 subtestų, `skipped 0`), tad tas įspėjimas būtų tapęs netiesa.
+     *
+     * ⚠️ BET ĮSPĖJIMAS NEPAŠALINTAS — JIS SUSIAURINTAS, IR TAI SĄMONINGA.
+     * `pg-backup.mjs restore` erasure-safe nėra ir NETAPS: ištrynimų žurnalas
+     * pagal konstrukciją gyvena UŽ snapshot'o ribų, tad sulieti ir pakartoti gali
+     * tik §9c. Praleidęs jį operatorius gauna lygiai tą patį senąjį pavojų.
+     *
+     * Todėl tikrinami DU dalykai: kad riba tebeįvardyta IR kad pilna procedūra
+     * dokumentuota. Vien pirmojo šiandien nepakaktų (runbook'as atrodytų
+     * silpnesnis už kodą), vien antrojo — irgi (operatorius nesužinotų, kad
+     * §9c praleisti negalima).
+     */
+    { pattern: /nėra erasure-safe/i, what: "vien restore be §9c nėra erasure-safe" },
+    { pattern: /## 9c\. Erasure-safe atkūrimas/i, what: "pilna erasure-safe procedūra dokumentuota" },
+    { pattern: /dr-restore\.mjs/, what: "erasure-safe procedūros komandos" },
+    /**
+     * ⚠️ SENOJI ATEITIES FORMA PRIVALO BŪTI NEBERANDAMA (Codex, #288).
+     *
+     * §11 (auditoriui rodomas sąrašas) dar teigė, kad garantija „dar NEGALIOJA"
+     * ir kad replay „ateina su 7.6c" — o 7.6c jau įgyvendintas ir įrodytas.
+     * Ankstesnė šios patikros redakcija to nepagavo: ji ieškojo tik frazės
+     * „nėra erasure-safe", kurią tas pats pasenęs tekstas ir tenkino. Teigiamų
+     * patikrų sąrašui reikėjo NEIGIAMOS eilutės.
+     */
+    {
+      pattern: /(ateina|ateis) su 7\.6c|dar NEGALIOJA/i,
+      what: "pasenusi ateities formuluotė",
+      privalo_nebuti: true,
+    },
+    { pattern: /MAX_DUMP_BYTES|256 MB/, what: "pg_dump dydžio riba" },
+    /**
+     * ⚠️ #262 PERŽIŪRA: dvi garantijos SUSIAURINTOS, ne įgyvendintos.
+     *
+     * `pg_dump` atkūrimas neaudituojamas (rašyti nėra kur: `audit_log` ne
+     * dump'e, bazė tuščia, aplikacija neveikia), o paslapčių skeneris pilnam DB
+     * dump'ui netaikomas (duotų daugiausia klaidingų teigiamų). Abu sprendimai
+     * §11 teiginius susilpnina, tad runbook'as PRIVALO juos įvardyti — kitaip
+     * auditoriui rodomas sąrašas taptų stipresnis už kodą (§12.1).
+     */
+    { pattern: /[Aa]tkūrimas audito žurnale nefiksuojamas|Kodėl atkūrimas neaudituojamas/, what: "pg_dump atkūrimas neaudituojamas" },
+    { pattern: /[Pp]aslapčių skeneris[^|]*netaikomas|Kodėl dump'as neskenuojamas/, what: "paslapčių skeneris netaikomas dump'ui" },
+    /**
+     * ⚠️ #262 IV raundas: audito garantija SĄLYGINĖ, ne besąlyginė. Su numatytu
+     * `AUDIT_BACKEND=memory` įrašas neišlieka, tad §11 be sąlygos būtų netiesa.
+     */
+    { pattern: /AUDIT_BACKEND=memory[^|]*neišlieka|kai audito\s+saugykla patvari/, what: "kūrimo auditas sąlyginis" },
   ];
 
   for (const limit of knownLimits) {
+    if (limit.privalo_nebuti) {
+      /**
+       * ⚠️ NEIGIAMA EILUTĖ ŠIAME SĄRAŠE (Codex, #288). Dokumentacija negali
+       * vienoje vietoje skelbti procedūrą baigta, o kitoje — laukiama.
+       */
+      assert.equal(
+        limit.pattern.test(doc),
+        false,
+        `runbook'e liko ${limit.what}: skelbiama laukiama tai, kas jau įrodyta`
+      );
+      continue;
+    }
+
     assert.match(doc, limit.pattern, `riba neįvardyta: ${limit.what}`);
   }
 });
