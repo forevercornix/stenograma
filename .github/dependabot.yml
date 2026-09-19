@@ -1,22 +1,172 @@
 version: 2
 
+# GRUPUOTA DEPENDABOT POLITIKA (#367).
+#
+# ⚠️ 22 atviri PR buvo ne backlog'o gedimas, o KONFIGŪRACIJOS ELGESYS: šeši
+# nepriklausomi srautai su vienodu limitu ir be jokio skirstymo pagal riziką.
+#
+# ⚠️ KAINA PASIKEITĖ PO #324. Nuo `main-protection` ruleset įjungimo kiekvienas PR
+# reikalauja žalio `required-ci` (9 privalomos šakos plius CodeQL). Grupavimas
+# mažina SKAIČIUOJAMĄ kainą, ne tik sąrašo ilgį.
+#
+# ⚠️ GRUPĖS TAIKOMOS TIK VERSION UPDATES. Security updates paleidžia advisory, ne
+# `schedule`; jiems `open-pull-requests-limit` NETAIKOMAS, ir jie NEGRUPUOJAMI.
+# Sąmoningai nenaudojamas `applies-to: security-updates` - esama security PR
+# semantika išsaugoma nepakitusi. Išmatuota 2026-09-18:
+#   `dependabot_security_updates: enabled`, `automated-security-fixes: enabled`.
+#
+# ⚠️ MAJOR NIEKADA NEPATENKA Į GRUPĘ - PAGAL KONSTRUKCIJĄ, NE PAGAL KOMENTARĄ.
+# Kiekviena grupė riboja `update-types: [minor, patch]`. Major kriterijaus
+# neatitinka, tad Dependabot jį kelia ATSKIRU PR.
+
 updates:
+  # ══════════════════════════════════════════════════════════════════════════
+  # JS - BACKEND
+  # ══════════════════════════════════════════════════════════════════════════
   - package-ecosystem: "npm"
     directory: "/backend"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    # Dvi grupės plius du izoliuoti runtime paketai plius galimi major.
+    open-pull-requests-limit: 6
+    groups:
+      # ⚠️ PRODUCTION IR DEV ATSKIRTI, NES SKIRIASI GEDIMO KAINA.
+      #
+      # Production priklausomybės lūžta VARTOTOJUI; dev - tik CI ir vietiniame
+      # darbe. Sujungus jas, `eslint` atnaujinimas keliautų kartu su `zod`, ir
+      # vienas kritęs lint'as blokuotų runtime pataisymą.
+      backend-production:
+        applies-to: version-updates
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+        exclude-patterns:
+          # ⚠️ IZOLIUOTA RUNTIME INFRASTRUKTŪRA, IR TAI PAGRINDIMAS, NE ŽYMA.
+          #
+          # `bullmq` yra eilių pagrindas: `queues/jobRunner.js`,
+          # `queues/config.js`, `services/lifecycleService.js`. Jo regresija
+          # nepasimato lint'e ar vieneto teste - ji pasimato kaip pakibęs arba
+          # pamestas job'as, tad PR reikia SAVO eilių testų dėmesio.
+          - "bullmq"
+          # `express-rate-limit` yra saugumui jautrus kelias
+          # (`middleware/rateLimiter.js`, tikrinamas `utils/startupChecks.js`).
+          # Grupėje jo pakeitimas dingtų tarp kitų diff'ų.
+          - "express-rate-limit"
+      backend-dev:
+        applies-to: version-updates
+        dependency-type: "development"
+        update-types: ["minor", "patch"]
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # JS - FRONTEND
+  # ══════════════════════════════════════════════════════════════════════════
+  #
+  # ⚠️ VIENA GRUPĖ, NE DVI. Frontend'e production/dev riba kitokia: 3 production
+  # ir 14 dev priklausomybių, o dev pusė (`vite`, `vitest`, `@vitejs/plugin-react`)
+  # yra vienas build įrankių rinkinys, kuris ir taip atnaujinamas kartu.
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 4
+    groups:
+      frontend:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
 
+  # ══════════════════════════════════════════════════════════════════════════
+  # PYTHON - ML/GPU/INFERENCE GRANDINĖ
+  # ══════════════════════════════════════════════════════════════════════════
+  #
+  # ⚠️ GRUPUOJAMA LEIDIMU, NE DRAUDIMU - IR TAI ESMINIS SPRENDIMAS.
+  #
+  # Akivaizdus kelias būtų bendra Python grupė su `exclude-patterns` ML paketams.
+  # Jis fail-open: atsiradus `torch`, `transformers` ar `pyannote.audio` priedui,
+  # naujas paketas draudimų sąraše NEATSIRASTŲ ir TYLIAI patektų į bendrą grupę -
+  # tiksliai tas atvejis, dėl kurio #367 ir parašytas.
+  #
+  # Todėl grupuojami TIK eksplicitiškai išvardyti SERVISO paketai. Viskas kita -
+  # įskaitant kiekvieną būsimą ML priklausomybę - lieka atskiru PR PAGAL
+  # NUTYLĖJIMĄ. Fail-closed.
+  #
+  # ⚠️ KLASIFIKACIJA IŠ DALIES IŠVEDAMA, IŠ DALIES - ĮVARDYTAS SPRENDIMAS.
+  #
+  # Pirmoji šio komentaro redakcija skelbė, kad visa klasifikacija išvedama iš
+  # lock failų. NETIESA, ir tai svarbu: komanda žemiau grąžina TIK GPU-only
+  # priedus. Dalinis išvedimas su totaliniu teiginiu yra būtent ta klasė, kurią
+  # šis repo gaudo.
+  #
+  # ── 1. IŠVEDAMA: GPU-only aibė ──────────────────────────────────────────────
+  #
+  #   for d in backend/scripts pyannote-server whisper-server; do
+  #     comm -13 <(grep -oiE '^[a-z0-9_.-]+' $d/requirements-cpu.lock.txt | sort -u) \
+  #              <(grep -oiE '^[a-z0-9_.-]+' $d/requirements-gpu.lock.txt | sort -u)
+  #   done
+  #
+  #   Grąžina (išmatuota 2026-09-19): nvidia-cublas-cu12, nvidia-cudnn-cu12
+  #
+  #   ⚠️ KO JI NEDUODA: ji NEskiria inference nuo serviso ir NEmato paketų, kurių
+  #   lock failuose nėra. Ji atsako tik į klausimą „kas atsiranda TIK su GPU".
+  #
+  # ── 2. SPRENDIMAS: inference vs servisas ────────────────────────────────────
+  #
+  #   Šis skirtumas iš lock failų NEIŠVEDAMAS - jis reikalauja žinoti, KĄ paketas
+  #   daro. Kriterijus, kad kitas žmogus galėtų pakartoti SPRENDIMĄ, net jei ne
+  #   komandą:
+  #
+  #     inference = dalyvauja modelio įkėlime, svorių atsisiuntime arba
+  #                 inferencijos vykdyme;
+  #     servisas  = HTTP/testų karkasas, nepriklausomas nuo modelio.
+  #
+  #   inference: ctranslate2, faster-whisper, onnxruntime, tokenizers,
+  #              huggingface-hub, hf_transfer, av, numpy, pyannote.audio
+  #   servisas:  fastapi, uvicorn, python-multipart, pytest
+  #
+  # ── 3. KODĖL VIEN KOMANDOS NEPAKANKA ────────────────────────────────────────
+  #
+  #   `hf_transfer` yra `pyannote-server/requirements.txt`, bet NĖ VIENAME lock
+  #   faile. Komanda, žiūrinti tik į lock'us, jo nemato IŠ PRINCIPO - ne dėl
+  #   klaidos, o dėl to, kad ne visi manifestai yra lock failai.
+  #
+  #   Tikrinama taip - ⚠️ CIKLAS BŪTINAS, `$d` be jo rodo į šakninį katalogą:
+  #
+  #     for d in backend/scripts pyannote-server whisper-server; do
+  #       echo "-- $d --"
+  #       comm -23 <(grep -oiE '^[a-z0-9_.-]+' $d/requirements.txt | tr 'A-Z' 'a-z' | sort -u) \
+  #                <(cat $d/requirements-*.lock.txt | grep -oiE '^[a-z0-9_.-]+' | tr 'A-Z' 'a-z' | sort -u)
+  #     done
+  #
+  #   Grąžina (paleista 2026-09-19): TIK `pyannote-server` -> hf_transfer.
+  #   Kiti du katalogai - tušti. Vadinasi toks paketas yra LYGIAI VIENAS.
+  #
+  #   ⚠️ KO JI NEDUODA: ji lygina TIK `requirements.txt` su lock failais. Paketo,
+  #   kurio nėra nė viename iš jų (pvz. įdiegto Dockerfile eilute), ji nemato.
+  #
+  # ── 4. KLASĖ, KURIĄ ŠIS BLOKAS JAU PADARĖ DUKART ────────────────────────────
+  #
+  #   ⚠️ DOKUMENTUOTA KOMANDA, KURIOS NIEKAS NEPALEIDO, YRA TEIGINYS, NE PATIKRA.
+  #
+  #   Pirmoji redakcija skelbė, kad komanda duoda visą klasifikaciją - ji duoda
+  #   vieną aibę iš trijų. Antroji buvo pridėta PIRMAJAI IŠTAISYTI ir įgijo tos
+  #   pačios klasės ydą: `$d` be ciklo, tad ji niekada nerodė `hf_transfer` -
+  #   tiksliai to paketo, dėl kurio ir buvo parašyta.
+  #
+  #   Abu kartus tekstas atrodė teisingas skaitant. Todėl: pridedant komandą į šį
+  #   failą, ji PALEIDŽIAMA, o išvestis įrašoma greta - kaip aukščiau.
+  #
+  # ⚠️ GARANTIJĄ TEIKIA NE ŠIS SĄRAŠAS, O LEIDIMO POLITIKA. Net jei klasifikacija
+  # pasentų, į grupes patenka tik keturi eksplicitiškai išvardyti serviso paketai;
+  # `dependabotPolicy` sargas draudžia wildcard ir reikalauja, kad leidžiamų vardų
+  # aibė būtų to rinkinio poaibis. Sąrašas čia yra PROVENANCE, ne mechanizmas.
+  #
+  # ⚠️ `backend/scripts` GRUPĖS NETURI IŠ VISO. Jo `requirements.txt` yra
+  # `faster-whisper`, `nvidia-cublas-cu12`, `nvidia-cudnn-cu12` - 100 % ML/GPU.
+  # Grupė čia reikštų būtent tai, ko #367 vengia: dešimt GPU atnaujinimų viename
+  # PR, kur vienas kritęs build'as blokuoja visus.
   - package-ecosystem: "pip"
     directory: "/backend/scripts"
     schedule:
       interval: "weekly"
+    # Penki ML paketai, kiekvienas atskirai - limitas lieka 5 sąmoningai.
     open-pull-requests-limit: 5
     # numpy 2.5+ reikalauja Python >=3.12, o image'ai naudoja python3.11
     # (žr. paaiškinimą requirements lock failuose). Be šios taisyklės Dependabot
@@ -25,11 +175,28 @@ updates:
     ignore:
       - dependency-name: "numpy"
         versions: [">=2.5"]
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # PYTHON - SERVISAI (ML dalis lieka izoliuota)
+  # ══════════════════════════════════════════════════════════════════════════
+  #
+  # ⚠️ GRUPĖ NEKERTA `directory` RIBOS. `groups:` yra konkretaus `updates:` įrašo
+  # dalis, tad bendro Python PR per visus servisus nėra ir #367 jo nereikalauja:
+  # `pyannote-server` ir `whisper-server` turi savo lock failus ir savo build'us.
   - package-ecosystem: "pip"
     directory: "/pyannote-server"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 4
+    groups:
+      pyannote-service:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+        patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "python-multipart"
+          - "pytest"
     # numpy 2.5+ reikalauja Python >=3.12, o image'ai naudoja python3.11
     # (žr. paaiškinimą requirements lock failuose). Be šios taisyklės Dependabot
     # siūlytų tą patį neveikiantį atnaujinimą kas savaitę, o GPU build'as kristų
@@ -37,27 +204,45 @@ updates:
     ignore:
       - dependency-name: "numpy"
         versions: [">=2.5"]
+
   - package-ecosystem: "pip"
     directory: "/whisper-server"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      whisper-service:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+        patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "python-multipart"
+          - "pytest"
+    # ⚠️ ŠIS `ignore` ANKSČIAU KABOJO PO `github-actions` KOMENTARO (#367).
+    #
+    # YAML komentarų nemato, tad blokas vis tiek prisirišdavo prie ŠIO įrašo -
+    # efektas buvo teisingas, bet skaitytojas suprasdavo, kad `numpy` ignoruoja
+    # `github-actions`. `whisper-server` lock failai turi `numpy` ir tą pačią
+    # `python3.11` ribą, tad taisyklė čia PRIKLAUSO - grąžinama į savo vietą.
+    ignore:
+      - dependency-name: "numpy"
+        versions: [">=2.5"]
 
-  # GitHub Actions ekosistema (#16).
+  # ══════════════════════════════════════════════════════════════════════════
+  # GITHUB ACTIONS
+  # ══════════════════════════════════════════════════════════════════════════
   #
   # Be jos trečiųjų šalių action'ai niekada neatnaujinami - o būtent jie turi
   # prieigą prie workflow konteksto ir paslapčių. Priklausomybių skenavimas be
   # šios eilutės dengia tik aplikacijos kodą, bet ne tiekimo grandinę, per kurią
-  # tas kodas statomas.
-    # numpy 2.5+ reikalauja Python >=3.12, o image'ai naudoja python3.11
-    # (žr. paaiškinimą requirements lock failuose). Be šios taisyklės Dependabot
-    # siūlytų tą patį neveikiantį atnaujinimą kas savaitę, o GPU build'as kristų
-    # kiekvieną kartą, kai jis būtų sumergintas.
-    ignore:
-      - dependency-name: "numpy"
-        versions: [">=2.5"]
+  # tas kodas statomas (#16).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
