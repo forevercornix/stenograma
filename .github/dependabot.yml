@@ -88,19 +88,54 @@ updates:
   # įskaitant kiekvieną būsimą ML priklausomybę - lieka atskiru PR PAGAL
   # NUTYLĖJIMĄ. Fail-closed.
   #
-  # ⚠️ KLASIFIKACIJA IŠVESTA IŠ LOCK FAILŲ, NE IŠ ATMINTIES. Perskaičiuojama taip:
+  # ⚠️ KLASIFIKACIJA IŠ DALIES IŠVEDAMA, IŠ DALIES - ĮVARDYTAS SPRENDIMAS.
+  #
+  # Pirmoji šio komentaro redakcija skelbė, kad visa klasifikacija išvedama iš
+  # lock failų. NETIESA, ir tai svarbu: komanda žemiau grąžina TIK GPU-only
+  # priedus. Dalinis išvedimas su totaliniu teiginiu yra būtent ta klasė, kurią
+  # šis repo gaudo.
+  #
+  # ── 1. IŠVEDAMA: GPU-only aibė ──────────────────────────────────────────────
   #
   #   for d in backend/scripts pyannote-server whisper-server; do
   #     comm -13 <(grep -oiE '^[a-z0-9_.-]+' $d/requirements-cpu.lock.txt | sort -u) \
   #              <(grep -oiE '^[a-z0-9_.-]+' $d/requirements-gpu.lock.txt | sort -u)
   #   done
   #
-  # Išmatuota 2026-09-18:
-  #   tik GPU:      nvidia-cublas-cu12, nvidia-cudnn-cu12
-  #                 (backend/scripts ir whisper-server)
-  #   inference:    ctranslate2, faster-whisper, onnxruntime, tokenizers,
-  #                 huggingface-hub, hf_transfer, av, numpy, pyannote.audio
-  #   servisas:     fastapi, uvicorn, python-multipart, pytest
+  #   Grąžina (išmatuota 2026-09-19): nvidia-cublas-cu12, nvidia-cudnn-cu12
+  #
+  #   ⚠️ KO JI NEDUODA: ji NEskiria inference nuo serviso ir NEmato paketų, kurių
+  #   lock failuose nėra. Ji atsako tik į klausimą „kas atsiranda TIK su GPU".
+  #
+  # ── 2. SPRENDIMAS: inference vs servisas ────────────────────────────────────
+  #
+  #   Šis skirtumas iš lock failų NEIŠVEDAMAS - jis reikalauja žinoti, KĄ paketas
+  #   daro. Kriterijus, kad kitas žmogus galėtų pakartoti SPRENDIMĄ, net jei ne
+  #   komandą:
+  #
+  #     inference = dalyvauja modelio įkėlime, svorių atsisiuntime arba
+  #                 inferencijos vykdyme;
+  #     servisas  = HTTP/testų karkasas, nepriklausomas nuo modelio.
+  #
+  #   inference: ctranslate2, faster-whisper, onnxruntime, tokenizers,
+  #              huggingface-hub, hf_transfer, av, numpy, pyannote.audio
+  #   servisas:  fastapi, uvicorn, python-multipart, pytest
+  #
+  # ── 3. KODĖL VIEN KOMANDOS NEPAKANKA ────────────────────────────────────────
+  #
+  #   `hf_transfer` yra `pyannote-server/requirements.txt`, bet NĖ VIENAME lock
+  #   faile. Komanda, žiūrinti tik į lock'us, jo nemato IŠ PRINCIPO - ne dėl
+  #   klaidos, o dėl to, kad ne visi manifestai yra lock failai.
+  #
+  #   ⚠️ Išmatuota 2026-09-19: toks paketas yra LYGIAI VIENAS. Tikrinama taip:
+  #
+  #     comm -23 <(grep -oiE '^[a-z0-9_.-]+' $d/requirements.txt | sort -u) \
+  #              <(cat $d/requirements-*.lock.txt | grep -oiE '^[a-z0-9_.-]+' | sort -u)
+  #
+  # ⚠️ GARANTIJĄ TEIKIA NE ŠIS SĄRAŠAS, O LEIDIMO POLITIKA. Net jei klasifikacija
+  # pasentų, į grupes patenka tik keturi eksplicitiškai išvardyti serviso paketai;
+  # `dependabotPolicy` sargas draudžia wildcard ir reikalauja, kad leidžiamų vardų
+  # aibė būtų to rinkinio poaibis. Sąrašas čia yra PROVENANCE, ne mechanizmas.
   #
   # ⚠️ `backend/scripts` GRUPĖS NETURI IŠ VISO. Jo `requirements.txt` yra
   # `faster-whisper`, `nvidia-cublas-cu12`, `nvidia-cudnn-cu12` - 100 % ML/GPU.

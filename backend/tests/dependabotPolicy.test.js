@@ -92,23 +92,37 @@ test("#367: izoliuota runtime infrastruktūra NEPATENKA į backend production gr
   }
 });
 
-test("#367: ML/GPU grandinė negali patekti į Python grupę — TIKRINAMA IR SU BŪSIMAIS PAKETAIS", () => {
+test("#367: Python grupė priima TIK deklaruotus serviso paketus, be wildcard", () => {
   /**
-   * ⚠️ SVARBIAUSIA ASERCIJA, IR JI TIKRINA TAISYKLĘ, NE SĄRAŠĄ.
+   * ⚠️ SVARBIAUSIA ASERCIJA, IR JI PERRAŠYTA PO CODEX RAUNDO.
    *
-   * Python grupės naudoja LEIDIMO sąrašą (`patterns`), ne draudimo. Skirtumas
-   * matomas tik su paketu, kurio ŠIANDIEN NĖRA: `torch` ar `transformers`
-   * draudimų sąraše neatsirastų ir tyliai patektų į bendrą grupę. Su leidimo
-   * sąrašu jie lieka atskiru PR PAGAL NUTYLĖJIMĄ — fail-closed.
+   * Pirmoji redakcija tikrino `patterns.includes(paketas)` prieš ML paketų sąrašą.
+   * Ji buvo apeinama VIENA EILUTE: įrašius `torch*` ar `nvidia-*`, Dependabot tuos
+   * paketus ATITIKTŲ, o testas liktų žalias — jis atmesdavo tik literalus ir
+   * vienišą `*`. Vienintelis politikos liudytojas nukaunamas pakeitimu, kuris
+   * atrodo kaip natūralus praplėtimas.
    *
-   * Todėl tarp tikrinamų yra ir paketų, kurių repo neturi. Jie čia NE per klaidą.
+   * ⚠️ TAISYKLĖ DABAR IŠVEDAMA, NE SĄRAŠINĖ, ir ji uždaro klasę, ne atvejus:
+   *
+   *   1. šablonas privalo būti PAŽODINIS - jokio `*`, `?`, `[`, `]`;
+   *   2. leidžiamų vardų aibė privalo būti DEKLARUOTO serviso rinkinio POAIBIS.
+   *
+   * Iš to seka, kad į grupę negali patekti JOKS paketas, kurio čia nėra - nei
+   * `torch`, nei `transformers`, nei toks, kurio dar niekas nežino. ML paketų
+   * sąrašo nebereikia, ir tai sąmoningas pasirinkimas: perteklinis sąrašas sensta,
+   * o uždara aibė - ne.
+   *
+   * ⚠️ Išmatuota prieš rašant: dabartinėje konfigūracijoje wildcard'ų yra NULIS,
+   * tad draudimas nieko teisėto nelaužo.
+   *
+   * ⚠️ Pridėjus TEISĖTĄ naują serviso paketą (pvz. `starlette`), šis testas kris.
+   * Tai NE trūkumas: jis verčia priimti sąmoningą sprendimą, o ne tyliai praplėsti
+   * grupę.
    */
-  const ESAMI = [
-    "onnxruntime", "ctranslate2", "tokenizers", "huggingface-hub", "hf_transfer",
-    "faster-whisper", "pyannote.audio", "nvidia-cublas-cu12", "nvidia-cudnn-cu12",
-    "numpy", "av",
-  ];
-  const BUSIMI = ["torch", "transformers", "accelerate", "nvidia-cuda-runtime-cu12"];
+  const SERVISO_PAKETAI = new Set(["fastapi", "uvicorn", "python-multipart", "pytest"]);
+  const WILDCARD = /[*?[\]]/;
+
+  let tikrinta = 0;
 
   for (const { u, vardas, cfg } of grupes(politika())) {
     if (u["package-ecosystem"] !== "pip") continue;
@@ -118,20 +132,24 @@ test("#367: ML/GPU grandinė negali patekti į Python grupę — TIKRINAMA IR SU
       Array.isArray(sablonai) && sablonai.length > 0,
       `${u.directory}/${vardas}: Python grupė PRIVALO turėti leidimo sąrašą; be jo ji priima viską`
     );
-    assert.equal(
-      sablonai.includes("*"),
-      false,
-      `${u.directory}/${vardas}: \`*\` paverstų leidimo sąrašą draudimo sąrašu`
-    );
 
-    for (const paketas of [...ESAMI, ...BUSIMI]) {
+    for (const sablonas of sablonai) {
       assert.equal(
-        sablonai.includes(paketas),
+        WILDCARD.test(sablonas),
         false,
-        `${u.directory}/${vardas}: ${paketas} yra ML/inference grandinėje ir privalo likti izoliuotas`
+        `${u.directory}/${vardas}: šablonas ${JSON.stringify(sablonas)} turi wildcard - ` +
+          "leidimo sąrašas naudoja PAŽODINIUS vardus, o wildcard grąžina draudimo mąstymą"
       );
+      assert.ok(
+        SERVISO_PAKETAI.has(sablonas),
+        `${u.directory}/${vardas}: ${JSON.stringify(sablonas)} nėra deklaruotas serviso paketas - ` +
+          "ML/inference grandinė privalo likti izoliuota"
+      );
+      tikrinta += 1;
     }
   }
+
+  assert.ok(tikrinta >= 8, `prielaida: Python grupių šablonų yra (rasta ${tikrinta})`);
 });
 
 test("#367: kiekvienas `ignore` pririštas prie katalogo, kuriame priklausomybė REALIAI yra", () => {
