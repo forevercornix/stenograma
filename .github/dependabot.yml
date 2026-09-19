@@ -127,10 +127,31 @@ updates:
   #   faile. Komanda, žiūrinti tik į lock'us, jo nemato IŠ PRINCIPO - ne dėl
   #   klaidos, o dėl to, kad ne visi manifestai yra lock failai.
   #
-  #   ⚠️ Išmatuota 2026-09-19: toks paketas yra LYGIAI VIENAS. Tikrinama taip:
+  #   Tikrinama taip - ⚠️ CIKLAS BŪTINAS, `$d` be jo rodo į šakninį katalogą:
   #
-  #     comm -23 <(grep -oiE '^[a-z0-9_.-]+' $d/requirements.txt | sort -u) \
-  #              <(cat $d/requirements-*.lock.txt | grep -oiE '^[a-z0-9_.-]+' | sort -u)
+  #     for d in backend/scripts pyannote-server whisper-server; do
+  #       echo "-- $d --"
+  #       comm -23 <(grep -oiE '^[a-z0-9_.-]+' $d/requirements.txt | tr 'A-Z' 'a-z' | sort -u) \
+  #                <(cat $d/requirements-*.lock.txt | grep -oiE '^[a-z0-9_.-]+' | tr 'A-Z' 'a-z' | sort -u)
+  #     done
+  #
+  #   Grąžina (paleista 2026-09-19): TIK `pyannote-server` -> hf_transfer.
+  #   Kiti du katalogai - tušti. Vadinasi toks paketas yra LYGIAI VIENAS.
+  #
+  #   ⚠️ KO JI NEDUODA: ji lygina TIK `requirements.txt` su lock failais. Paketo,
+  #   kurio nėra nė viename iš jų (pvz. įdiegto Dockerfile eilute), ji nemato.
+  #
+  # ── 4. KLASĖ, KURIĄ ŠIS BLOKAS JAU PADARĖ DUKART ────────────────────────────
+  #
+  #   ⚠️ DOKUMENTUOTA KOMANDA, KURIOS NIEKAS NEPALEIDO, YRA TEIGINYS, NE PATIKRA.
+  #
+  #   Pirmoji redakcija skelbė, kad komanda duoda visą klasifikaciją - ji duoda
+  #   vieną aibę iš trijų. Antroji buvo pridėta PIRMAJAI IŠTAISYTI ir įgijo tos
+  #   pačios klasės ydą: `$d` be ciklo, tad ji niekada nerodė `hf_transfer` -
+  #   tiksliai to paketo, dėl kurio ir buvo parašyta.
+  #
+  #   Abu kartus tekstas atrodė teisingas skaitant. Todėl: pridedant komandą į šį
+  #   failą, ji PALEIDŽIAMA, o išvestis įrašoma greta - kaip aukščiau.
   #
   # ⚠️ GARANTIJĄ TEIKIA NE ŠIS SĄRAŠAS, O LEIDIMO POLITIKA. Net jei klasifikacija
   # pasentų, į grupes patenka tik keturi eksplicitiškai išvardyti serviso paketai;

@@ -134,16 +134,29 @@ test("#367: Python grupė priima TIK deklaruotus serviso paketus, be wildcard", 
     );
 
     for (const sablonas of sablonai) {
+      /**
+       * ⚠️ PRANEŠIMAS NURODO IŠEITĮ, IR TAI NE MANDAGUMAS.
+       *
+       * Žmogus, pridėjęs teisėtą serviso paketą, pamatys raudoną testą ir turės
+       * du kelius: suprasti dviejų žingsnių taisymą arba ĮRAŠYTI WILDCARD.
+       * Antrasis yra tiksliai tai, ką ši taisyklė uždaro — ir jis GREITESNIS.
+       * Pranešimas nusprendžia, kuriuo keliu jis eis.
+       */
+      const ISEITIS =
+        "Pridedant TEISĖTĄ serviso paketą: įrašyk jį į `SERVISO_PAKETAI` ŠIAME teste " +
+        "IR į grupės `patterns` konfigūracijoje. Wildcard NELEIDŽIAMAS - jis įsileistų " +
+        "ir ML/inference paketus, kurių niekas nesvarstė.";
+
       assert.equal(
         WILDCARD.test(sablonas),
         false,
         `${u.directory}/${vardas}: šablonas ${JSON.stringify(sablonas)} turi wildcard - ` +
-          "leidimo sąrašas naudoja PAŽODINIUS vardus, o wildcard grąžina draudimo mąstymą"
+          `leidimo sąrašas naudoja PAŽODINIUS vardus. ${ISEITIS}`
       );
       assert.ok(
         SERVISO_PAKETAI.has(sablonas),
         `${u.directory}/${vardas}: ${JSON.stringify(sablonas)} nėra deklaruotas serviso paketas - ` +
-          "ML/inference grandinė privalo likti izoliuota"
+          `ML/inference grandinė privalo likti izoliuota. ${ISEITIS}`
       );
       tikrinta += 1;
     }
