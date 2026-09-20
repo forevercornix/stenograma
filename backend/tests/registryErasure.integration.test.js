@@ -95,6 +95,28 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     try {
       return await scenarijus();
     } finally {
+      /**
+       * ⚠️ PIRMA IŠVALOMI DUBLIKATAI, TADA ATKURIAMAS INDEKSAS — IR TAI NE
+       * PATOGUMAS, O ŠIO HELPER'IO TEISINGUMO SĄLYGA.
+       *
+       * Scenarijus SĄMONINGAI palieka dvi eilutes vienu adresu; tai jo tikslas.
+       * Bandant statyti indeksą virš tokios būsenos, `CREATE UNIQUE INDEX` krenta
+       * `23505` — ir indeksas NEATSIKURIA. Išmatuota CI (run 35492896256): aštuoni
+       * (b) testai krito būtent ties atkūrimu, o devintas — dėl to, kad iki jo
+       * indekso nebeliko.
+       *
+       * ⚠️ TRINAMA DETERMINISTIŠKAI IR TIK TAI, KĄ SUKŪRĖ SCENARIJUS: kiekvienam
+       * adresui paliekama eilutė su mažiausiu `attempt_id`. Tai testo šiukšlių
+       * valymas, ne sprendimas apie duomenis — eilutės egzistuoja tik todėl, kad
+       * testas tyčia sukūrė būseną, kurios produkcijoje būti negali.
+       */
+      await pool.query(
+        `DELETE FROM job_result_attempts a
+               USING job_result_attempts b
+               WHERE a.storage_type = b.storage_type
+                 AND a.storage_key = b.storage_key
+                 AND a.attempt_id > b.attempt_id`
+      );
       await pool.query(
         `CREATE UNIQUE INDEX IF NOT EXISTS ${attemptRegistry.VIENO_ADRESO_INDEKSAS}
            ON job_result_attempts (storage_type, storage_key)`
