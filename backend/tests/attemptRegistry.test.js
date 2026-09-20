@@ -265,11 +265,25 @@ function metantisVykdytojas(code, constraint) {
   };
 }
 
+/**
+ * ⚠️ RAKTAS IŠVEDAMAS `bandymoRaktas()`, NE RAŠOMAS RANKA (#375 F3).
+ *
+ * Ankstesnė redakcija čia turėjo `results/<jobId>/a.json` — formą, kurios
+ * produkcijoje nėra. Dėl to testas žemiau galėjo tvirtinti, kad klaidos tekste
+ * NĖRA `attemptId`, ir būti žalias: fixture raktas jo tiesiog neturėjo.
+ *
+ * Tikras raktas yra `results/<jobId>/<attemptId>.json`, tad `attemptId` klaidos
+ * tekste yra VISADA. Fixture, nukrypstantis nuo schemos, paverčia asercijas
+ * teiginiais apie patį fixture.
+ */
 const BANDYMAS = {
   attemptId: "11111111-2222-3333-4444-555555555555",
   jobId: "99999999-8888-7777-6666-555555555555",
   storageType: "fs",
-  storageKey: "results/99999999-8888-7777-6666-555555555555/a.json",
+  storageKey: attemptRegistry.bandymoRaktas(
+    "99999999-8888-7777-6666-555555555555",
+    "11111111-2222-3333-4444-555555555555"
+  ),
 };
 
 test("#375 D4: `23505` SU šio indekso vardu → `BendroAdresoKlaida`", async () => {
@@ -327,17 +341,37 @@ test("#375 D4: ne `23505` klaida perduodama nepakeista", async () => {
   );
 });
 
-test("#375: kolizijos klaidos tekste NĖRA `attemptId` — tik adresas", () => {
+test("#375: kolizijos klaidoje yra ADRESAS ir nuoroda — ir nieko daugiau", () => {
   /**
-   * ⚠️ Pranešimas keliauja į job'o klaidos lauką ir logus. Adresas jame reikalingas
-   * (be jo operatorius nežino, KURIS raktas užimtas), o `attemptId` — ne: jis nieko
-   * neprideda prie diagnozės ir tik pailgina eilutę.
+   * ⚠️ ANKSTESNĖ ŠIO TESTO REDAKCIJA TVIRTINO, KAD TEKSTE NĖRA `attemptId` (F3).
+   *
+   * Ji buvo žalia, bet ne todėl, kad savybė galioja. Fixture raktas tada buvo
+   * `results/<jobId>/a.json`, o tikrasis — `results/<jobId>/<attemptId>.json`.
+   * Kadangi žinutė įdeda `storageKey`, PRODUKCIJOJE `attemptId` joje yra visada.
+   * Asercija negalėjo kristi dėl jokio elgesio pokyčio — ji matavo fixture.
+   *
+   * ⚠️ IR TAI NĖRA YDA, KURIĄ REIKTŲ TAISYTI KODE. `attemptId` yra rakto DALIS;
+   * norint jo tekste neturėti, reikėtų nerodyti adreso — o adresas ir yra
+   * vienintelis dalykas, dėl kurio ši klaida operatoriui naudinga.
+   *
+   * GINA TAI, KAS TIKRAI GALIOJA: matomas adresas, matoma nuoroda į sprendimą, ir
+   * NIEKO daugiau — jokio `stack`, jokio SQL, jokios eilutės turinio.
    */
-  const klaida = new attemptRegistry.BendroAdresoKlaida("fs", BANDYMAS.storageKey);
+  const klaida = new attemptRegistry.BendroAdresoKlaida(BANDYMAS.storageType, BANDYMAS.storageKey);
 
-  assert.match(klaida.message, /results\//, "adresas privalo būti matomas");
-  assert.equal(klaida.message.includes(BANDYMAS.attemptId), false, "`attemptId` nereikalingas");
+  assert.ok(klaida.message.includes(BANDYMAS.storageKey), "adresas privalo būti matomas");
   assert.match(klaida.message, /#375/, "nuoroda į sprendimą");
+
+  /** Kodas ir laukai — struktūroje, kad kvietėjai nesiremtų teksto analize. */
+  assert.equal(klaida.code, "ATTEMPT_ADDRESS_TAKEN");
+  assert.equal(klaida.storageType, BANDYMAS.storageType);
+  assert.equal(klaida.storageKey, BANDYMAS.storageKey);
+
+  /**
+   * ⚠️ RIBA IŠ VIRŠAUS. Be jos „nieko daugiau" būtų pageidavimas: pranešimas gali
+   * ilgainiui prisirinkti SQL fragmentų ar eilutės turinio, ir niekas nekristų.
+   */
+  assert.equal(/INSERT|SELECT|\bat \b/i.test(klaida.message), false, `į tekstą pateko per daug: ${klaida.message}`);
 });
 
 /* ══════════════════════════════════════════════════════════════════════════════
