@@ -184,6 +184,24 @@ exports.up = (pgm) => {
       END IF;
     END $$;
   `);
+
+  /**
+   * ⚠️ RIBA GRĄŽINAMA — `SET LOCAL` APIMTIS YRA TRANSAKCIJA, NE ŠI MIGRACIJA.
+   *
+   * `node-pg-migrate` su numatytuoju `singleTransaction` visas laukiančias
+   * migracijas vykdo VIENOJE `BEGIN`/`COMMIT` (`dist/legacy/runner.js`). Vadinasi
+   * viršuje nustatytas `lock_timeout = '5s'` galiotų ir KIEKVIENAI migracijai,
+   * einančiai po šitos tame pačiame paleidime.
+   *
+   * ⚠️ ŠIANDIEN TAI NEKENKIA TIK DĖL EILĖS TVARKOS — ši migracija paskutinė.
+   * Pridėjus `1756800000000`, ji ribą paveldėtų TYLIAI, ir ilgesnė operacija
+   * kristų `55P03` dėl nuostatos, padarytos kitame faile. Prielaida, galiojanti
+   * tik todėl, kad niekas dar nepridėjo sekančio failo, nėra prielaida.
+   *
+   * 5 s riba yra ŠIO statymo sprendimas, pagrįstas ŠIOS lentelės dydžiu. Kitai
+   * migracijai jis nieko nereiškia, tad čia ir baigiasi.
+   */
+  pgm.sql("SET LOCAL lock_timeout = DEFAULT");
 };
 
 exports.down = (pgm) => {

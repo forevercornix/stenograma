@@ -1101,3 +1101,82 @@ test(
     }
   }
 );
+
+/**
+ * #375 F2: `SET LOCAL lock_timeout` APIMTIS YRA TRANSAKCIJA, NE MIGRACIJA.
+ *
+ * ⚠️ RADINYS IŠ PERŽIŪROS, NE IŠ KRITUSIO TESTO.
+ *
+ * `node-pg-migrate` su numatytuoju `singleTransaction` visas laukiančias migracijas
+ * vykdo VIENOJE `BEGIN`/`COMMIT` (`dist/legacy/runner.js`). `SET LOCAL` galioja iki
+ * transakcijos pabaigos, tad `1756700000000` nustatyta 5 s riba taikoma ir KIEKVIENAI
+ * migracijai, einančiai po jos tame pačiame paleidime.
+ *
+ * ⚠️ ŠIANDIEN TAI NEKENKIA TIK DĖL EILĖS TVARKOS — #375 migracija paskutinė. Būtent
+ * todėl testas nekelia klausimo „ar dabar blogai", o gamina SEKANČIĄ migraciją ir
+ * matuoja, ką ji paveldi. Prielaida, galiojanti tik todėl, kad niekas dar nepridėjo
+ * kito failo, nėra prielaida — ir ji lūžtų TYLIAI, kitame PR, kito žmogaus rankose.
+ */
+test(
+  "#375 F2: po `1756700000000` einanti migracija NEPAVELDI 5 s `lock_timeout`",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async (t) => {
+    await perkurtiDb();
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-375-f2-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    for (const f of fs.readdirSync(path.join(ŠAKNIS, "migrations")).filter((f) => f.endsWith(".js"))) {
+      fs.copyFileSync(path.join(ŠAKNIS, "migrations", f), path.join(dir, f));
+    }
+
+    /**
+     * ⚠️ SINTETINĖ MIGRACIJA, VARDAS PO #375 — kad `node-pg-migrate` ją vykdytų
+     * TOJE PAČIOJE transakcijoje iškart po jos. Ji nieko nekeičia schemoje: jos
+     * vienintelis darbas — pasakyti, kokią ribą paveldėjo.
+     *
+     * ⚠️ TIKRINAMA `= '5s'`, NE `<> '0'`. Diegimas gali turėti savo `lock_timeout`
+     * serverio lygiu, ir tada `<> '0'` kristų dėl TEISINGOS konfigūracijos. Klausimas
+     * čia siauras: ar nuteka BŪTENT ši migracijos nustatyta reikšmė.
+     */
+    fs.writeFileSync(
+      path.join(dir, "1756800000000_f2-lock-timeout-nutekejimas.js"),
+      `exports.shorthands = undefined;
+exports.up = (pgm) => {
+  pgm.sql(\`
+    DO $$
+    BEGIN
+      IF current_setting('lock_timeout') = '5s' THEN
+        RAISE EXCEPTION 'F2: paveldėtas lock_timeout = %', current_setting('lock_timeout');
+      END IF;
+    END $$;
+  \`);
+};
+exports.down = () => {};
+`
+    );
+
+    let klaida = null;
+    try {
+      migrate("up", dir);
+    } catch (e) {
+      klaida = e;
+    }
+
+    if (klaida) {
+      const tekstas = `${klaida.stdout || ""}${klaida.stderr || ""}${klaida.message || ""}`;
+      assert.fail(`sekanti migracija paveldėjo ribą:\n${tekstas.slice(0, 400)}`);
+    }
+
+    /** Kontrolė: #375 indeksas vis tiek pastatytas — ribos grąžinimas jo nesugadino. */
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const busena = await indeksoBusena(pool);
+      assert.ok(busena && busena.indisvalid && busena.indisunique, "indeksas privalo likti galiojantis");
+    } finally {
+      await pool.end();
+    }
+
+    t.diagnostic("#375 F2: `lock_timeout` grąžintas — sekanti migracija jo nepaveldi");
+  }
+);
