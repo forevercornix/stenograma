@@ -105,10 +105,25 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
        * (b) testai krito būtent ties atkūrimu, o devintas — dėl to, kad iki jo
        * indekso nebeliko.
        *
-       * ⚠️ TRINAMA DETERMINISTIŠKAI IR TIK TAI, KĄ SUKŪRĖ SCENARIJUS: kiekvienam
-       * adresui paliekama eilutė su mažiausiu `attempt_id`. Tai testo šiukšlių
-       * valymas, ne sprendimas apie duomenis — eilutės egzistuoja tik todėl, kad
-       * testas tyčia sukūrė būseną, kurios produkcijoje būti negali.
+       * ⚠️ APIMTIS — VISA LENTELĖ, NE SCENARIJAUS EILUTĖS. Ankstesnė šio komentaro
+       * redakcija teigė „tik tai, ką sukūrė scenarijus"; `DELETE` jokio scenarijaus
+       * ribojimo neturi ir šalina KIEKVIENĄ dublikatą lentelėje.
+       *
+       * Čia tai saugu, ir saugumas kyla iš trijų patikrinamų dalykų, ne iš ketinimo:
+       * dublikatas apskritai įmanomas TIK šiame `beIndekso()` lange (kitur jį
+       * atmeta indeksas); failas turi SAVO duomenų bazę (`testDatabaseUrl(...)`);
+       * subtestai vykdomi nuosekliai, tad antro atviro lango nėra. Nė vienas kitas
+       * testas dublikatų nepalieka, tad trinti nėra ko, kas jam priklausytų.
+       *
+       * ⚠️ UŽRAŠOMA, NES SIAURESNIS VARIANTAS ATRODO PAPRASTESNIS, NEI YRA:
+       * apriboti pagal `job_id` reikštų helper'iui žinoti, ką scenarijus sukūrė, o
+       * scenarijai kuria skirtingus job'us skirtingu metu. Platesnis `DELETE` su
+       * užrašyta prielaida čia teisingesnis nei siauresnis su numanoma.
+       *
+       * Trinama DETERMINISTIŠKAI: kiekvienam adresui paliekama eilutė su mažiausiu
+       * `attempt_id`. Tai testo šiukšlių valymas, ne sprendimas apie duomenis —
+       * eilutės egzistuoja tik todėl, kad testas tyčia sukūrė būseną, kurios
+       * produkcijoje būti negali.
        */
       await pool.query(
         `DELETE FROM job_result_attempts a
