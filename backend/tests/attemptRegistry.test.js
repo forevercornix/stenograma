@@ -339,3 +339,73 @@ test("#375: kolizijos klaidos tekste NĖRA `attemptId` — tik adresas", () => {
   assert.equal(klaida.message.includes(BANDYMAS.attemptId), false, "`attemptId` nereikalingas");
   assert.match(klaida.message, /#375/, "nuoroda į sprendimą");
 });
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * #375 D4 — KLAIDA PRIVALO IŠLIKTI DOMENINĖ IKI OPERATORIAUS
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+const jobRunner = require("../queues/jobRunner");
+
+/**
+ * ⚠️ D4 GALIOJO TIK IKI `registruoti()` RIBOS, IR TAI NEBUVO MATOMA.
+ *
+ * `BendroAdresoKlaida` krisdavo į `_classifyError()` numatytąją šaką: kodas
+ * tapdavo `internal_error`, pranešimas — `sanitizeServerError()` neutralus
+ * tekstas. Konstraintas rašymą atmesdavo teisingai, bet PRIEŽASTIS dingdavo
+ * būtent ten, kur D4 ją siuntė — job'o klaidos įraše.
+ *
+ * ⚠️ NĖ VIENAS TESTAS TO NEMATĖ, nes visi matavo `registruoti()` IŠVESTĮ, o ne
+ * tai, kas su ja nutinka toliau. Riba tarp „klaida sukurta" ir „klaida pasiekė
+ * adresatą" buvo nepadengta.
+ */
+test("#375 D4: `BendroAdresoKlaida` iki operatoriaus ateina DOMENINĖ, ne `internal_error`", () => {
+  const klaida = new attemptRegistry.BendroAdresoKlaida("fs", BANDYMAS.storageKey);
+
+  const rezultatas = jobRunner._classifyError(klaida, "testas");
+
+  assert.equal(
+    rezultatas.errorCode,
+    "ATTEMPT_ADDRESS_TAKEN",
+    "kodas privalo išlikti — `internal_error` čia reikštų, kad D4 diagnostika dingo"
+  );
+  assert.notEqual(rezultatas.errorCode, "internal_error");
+});
+
+test("#375 D4: viešame pranešime NĖRA saugyklos adreso, o loge — YRA", () => {
+  /**
+   * ⚠️ DVI PUSĖS, IR ABI BŪTINOS.
+   *
+   * Viešas laukas keliauja per `GET /api/jobs/:id` savininkui: `storage_key` yra
+   * kelias su `jobId` ir `attemptId`, jam nieko nesakantis. Precedentas —
+   * `ArtifactStoreError` (#290): viešas tekstas gaminamas IŠ KODO.
+   *
+   * Bet adresas ir YRA D4 turinys, tad jis privalo likti loge — kitaip pataisymas
+   * tik perkeltų praradimą iš vienos vietos į kitą.
+   */
+  const klaida = new attemptRegistry.BendroAdresoKlaida("fs", BANDYMAS.storageKey);
+
+  const eilutes = [];
+  const originalus = console.error;
+  console.error = (...args) => {
+    eilutes.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+
+  let rezultatas;
+  try {
+    rezultatas = jobRunner._classifyError(klaida, "testas");
+  } finally {
+    console.error = originalus;
+  }
+
+  const logas = eilutes.join("\n");
+
+  assert.equal(
+    rezultatas.message.includes(BANDYMAS.storageKey),
+    false,
+    `adresas pateko į VIEŠĄ pranešimą: ${rezultatas.message}`
+  );
+  assert.match(rezultatas.message, /adresas jau užimtas/, "bet pranešimas privalo pasakyti, KAS nutiko");
+
+  assert.ok(logas.includes("ATTEMPT_ADDRESS_TAKEN"), "kodas privalo patekti į logą");
+  assert.ok(logas.includes(BANDYMAS.storageKey), `adresas privalo likti loge:\n${logas.slice(0, 300)}`);
+});

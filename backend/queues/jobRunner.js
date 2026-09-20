@@ -644,6 +644,49 @@ function _classifyError(e, context = "job") {
     };
   }
 
+  /**
+   * BENDRAS SAUGYKLOS ADRESAS TURI SAVO KODĄ (#375 D4).
+   *
+   * ⚠️ BE ŠIOS ŠAKOS D4 GALIOJA TIK IKI `registruoti()` RIBOS.
+   *
+   * `BendroAdresoKlaida` iki šiol krisdavo į numatytąją šaką: kodas tapdavo
+   * `internal_error`, o pranešimas — `sanitizeServerError()` neutralus tekstas.
+   * Vadinasi visas D4 diagnostinis turinys (adresas, „rakto schemos klaida",
+   * nuoroda į #375) dingdavo BŪTENT ten, kur jo reikia — job'o klaidos įraše,
+   * kurį mato operatorius. Konstraintas rašymą atmesdavo teisingai, bet
+   * priežastis tapdavo neatskiriama nuo bet kurios kitos vidinės klaidos.
+   *
+   * Tai ta pati klasė ir tas pats sprendimas kaip `JobPhaseError` (#154) ir
+   * `ArtifactStoreError` (#157): nuo kartojimo tokia klaida neišnyks, ir
+   * operatoriui reikia matyti, KAS nutiko.
+   *
+   * ⚠️ VIEŠAS PRANEŠIMAS GAMINAMAS IŠ KODO, NE IŠ `message` — kaip
+   * `ArtifactStoreError` atveju (#290). `BendroAdresoKlaida.message` nešasi
+   * `storage_key`, o jis yra kelias su `jobId` ir `attemptId`; savininkui jis
+   * nieko nepasako, o klaidos laukas keliauja per `GET /api/jobs/:id`.
+   *
+   * ⚠️ ADRESAS LIEKA LOGE, IR BŪTENT JIS YRA D4 TURINYS. Rašomas STRUKTŪRINIAIS
+   * laukais, ne interpoliuojamas į tekstą: taip jį mato operatorius, bet jis
+   * nepatenka į viešą pranešimą.
+   */
+  if (domeninė && domeninė.name === "BendroAdresoKlaida") {
+    log.error("Bendras saugyklos adresas registre", {
+      stage: "attempt_registry",
+      context,
+      errorCode: domeninė.code,
+      storageType: domeninė.storageType,
+      storageKey: domeninė.storageKey,
+    });
+
+    return {
+      errorCode: domeninė.code,
+      message:
+        "Rezultato nepavyko užregistruoti: saugyklos adresas jau užimtas kito bandymo. " +
+        "Tai duomenų vientisumo arba konfigūracijos klaida, ne laikinas gedimas — " +
+        "reikia administratoriaus.",
+    };
+  }
+
   if (e && e.statusCode && e.statusCode !== 500) {
     return { errorCode: `http_${e.statusCode}`, message: e.message };
   }
