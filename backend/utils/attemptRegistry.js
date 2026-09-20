@@ -33,6 +33,40 @@ const crypto = require("node:crypto");
  * `revivalHorizonsMs()` — yra PR-5 apimtis.
  */
 
+/**
+ * ⚠️ DB INVARIANTO VARDAS — TAS PATS, KURĮ STATO `1756700000000` (#375).
+ *
+ * Kartojamas, ne importuojamas iš migracijos: migracijos yra užšaldyti istorijos
+ * įrašai, ir importas susietų jas su judančiu moduliu. Kad du vardai nenuslystų,
+ * juos sieja kontraktinis testas, ne bendra konstanta.
+ */
+const VIENO_ADRESO_INDEKSAS = "job_result_attempts_vienas_adresas";
+
+/**
+ * DU BANDYMAI VIENU SAUGYKLOS ADRESU (#375 D4).
+ *
+ * ⚠️ TAI RAKTO SCHEMOS KLAIDA, NE LENKTYNĖS. `bandymoRaktas()` deda į kelią
+ * `crypto.randomUUID()`, tad kolizija reikštų arba pakeistą rakto schemą, arba
+ * trečią registracijos kelią, kuris raktą PAKARTOTINAI panaudoja.
+ *
+ * ⚠️ TODĖL KLAIDA GARSI, O NE TYLIAI PAKARTOJAMA. Registracija su nauju
+ * `attemptId` būtų greičiausias kelias į žalią testą ir tiksliai tas, kuris
+ * sunaikina konstrainto prasmę: kolizija dingtų iš akių, o priežastis liktų.
+ */
+class BendroAdresoKlaida extends Error {
+  constructor(storageType, storageKey) {
+    super(
+      `Bandymas jau registruotas adresu ${storageType}:${storageKey}. ` +
+        "Su attempt-unique raktais tai neįmanoma, tad kolizija reiškia rakto schemos " +
+        "klaidą arba registracijos kelią, kuris raktą naudoja pakartotinai (#375)."
+    );
+    this.name = "BendroAdresoKlaida";
+    this.code = "ATTEMPT_ADDRESS_TAKEN";
+    this.storageType = storageType;
+    this.storageKey = storageKey;
+  }
+}
+
 /** Būsenos privalo sutapti su migracijos `job_result_attempts_busena_allowed`. */
 const BUSENA = Object.freeze({
   /** Registruota prieš `put()`; objektas gali egzistuoti arba ne. */
@@ -143,11 +177,33 @@ function naujasBandymas() {
  * @param {{query: Function}} vykdytojas pool arba transakcijos klientas
  */
 async function registruoti(vykdytojas, { attemptId, jobId, storageType, storageKey }) {
-  await vykdytojas.query(
-    `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [attemptId, String(jobId), storageType, storageKey, BUSENA.LAUKIA]
-  );
+  try {
+    await vykdytojas.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [attemptId, String(jobId), storageType, storageKey, BUSENA.LAUKIA]
+    );
+  } catch (klaida) {
+    /**
+     * ⚠️ KLASIFIKUOJAMA PAGAL `code` IR `constraint`, NE TIK PAGAL `code` (#375 D4).
+     *
+     * Ta pati lentelė turi bent tris unikalumo šaltinius: `attempt_id` pirminis
+     * raktas, dalinis `job_result_attempts_vienas_isipareigotas` ir šis. Visi trys
+     * duoda `23505`. Klasifikuojant tik pagal kodą, `attempt_id` kolizija — visai
+     * kitas gedimas — būtų pranešta kaip bendras adresas, ir remontas eitų ne ta
+     * kryptimi.
+     *
+     * Precedentas: `postgresStore.js` `create()` taip pat lygina `err.constraint`.
+     *
+     * ⚠️ VIENAS TAŠKAS ABIEM KVIETĖJAMS. Klasifikacija gyvena čia, o ne
+     * `postgresStore` ir `artifactMigration` pusėse: dvi kopijos to paties
+     * `catch` ilgainiui išsiskirtų, ir viena iš jų liktų su plikąja `23505`.
+     */
+    if (klaida && klaida.code === "23505" && klaida.constraint === VIENO_ADRESO_INDEKSAS) {
+      throw new BendroAdresoKlaida(storageType, storageKey);
+    }
+    throw klaida;
+  }
 }
 
 /**
@@ -543,6 +599,9 @@ async function arVisDarSluotina(vykdytojas, kandidatas, { laukianciuRibaMs }) {
 
 module.exports = {
   BUSENA,
+  BendroAdresoKlaida,
+  /** ⚠️ Eksportuojamas KONTRAKTINIAM testui: turi sutapti su migracijos `1756700000000` vardu. */
+  VIENO_ADRESO_INDEKSAS,
   arVisDarSluotina,
   /** ⚠️ Eksportuojama KONTRAKTINIAM testui: sąryšis su erasure puse turi būti tikrinamas. */
   GYVOS_BUSENOS,

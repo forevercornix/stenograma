@@ -248,3 +248,94 @@ test("ATIDARYMO SĄLYGA: raktas išvedamas iš `attemptId`, NE iš turinio", () 
     );
   }
 });
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * #375 D4 — `23505` KLASIFIKACIJA BE DUOMENŲ BAZĖS
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/** Vykdytojas, metantis nurodytą PostgreSQL klaidą — kaip ją mestų tikras `pg`. */
+function metantisVykdytojas(code, constraint) {
+  return {
+    async query() {
+      const klaida = new Error("duplicate key value violates unique constraint");
+      klaida.code = code;
+      klaida.constraint = constraint;
+      throw klaida;
+    },
+  };
+}
+
+const BANDYMAS = {
+  attemptId: "11111111-2222-3333-4444-555555555555",
+  jobId: "99999999-8888-7777-6666-555555555555",
+  storageType: "fs",
+  storageKey: "results/99999999-8888-7777-6666-555555555555/a.json",
+};
+
+test("#375 D4: `23505` SU šio indekso vardu → `BendroAdresoKlaida`", async () => {
+  /**
+   * ⚠️ ELGSENA TIKRINAMA BE DB SĄMONINGAI. Klausimas čia yra „kaip klasifikuojama
+   * klaida", ne „ar PostgreSQL ją meta" — antrąjį dengia
+   * `postgresStore.integration`. Dublis leidžia patikrinti ir tą šaką, kurios
+   * tikra DB pagal užsakymą negamina.
+   */
+  await assert.rejects(
+    () =>
+      attemptRegistry.registruoti(
+        metantisVykdytojas("23505", attemptRegistry.VIENO_ADRESO_INDEKSAS),
+        BANDYMAS
+      ),
+    (klaida) => {
+      assert.ok(klaida instanceof attemptRegistry.BendroAdresoKlaida);
+      assert.equal(klaida.code, "ATTEMPT_ADDRESS_TAKEN");
+      assert.equal(klaida.storageType, "fs", "klaida neša adresą diagnostikai");
+      return true;
+    }
+  );
+});
+
+test("#375 D4: `23505` su KITU konstraintu praeina NEPAKEISTAS", async () => {
+  /**
+   * ⚠️ ŠI ASERCIJA GINA `err.constraint` DALĮ.
+   *
+   * Ta pati lentelė turi bent tris unikalumo šaltinius: `attempt_id` PK, dalinį
+   * `job_result_attempts_vienas_isipareigotas` ir mūsiškį. Klasifikuojant tik pagal
+   * `err.code`, PK pažeidimas — visai kitas gedimas — būtų praneštas kaip bendras
+   * adresas, ir remontas eitų ne ta kryptimi.
+   */
+  for (const svetimas of ["job_result_attempts_pkey", "job_result_attempts_vienas_isipareigotas"]) {
+    await assert.rejects(
+      () => attemptRegistry.registruoti(metantisVykdytojas("23505", svetimas), BANDYMAS),
+      (klaida) => {
+        assert.equal(
+          klaida instanceof attemptRegistry.BendroAdresoKlaida,
+          false,
+          `${svetimas}: NĖRA bendro adreso klaida`
+        );
+        assert.equal(klaida.code, "23505", "originali klaida perduodama nepakeista");
+        return true;
+      }
+    );
+  }
+});
+
+test("#375 D4: ne `23505` klaida perduodama nepakeista", async () => {
+  /** Ryšio ar sintaksės klaida neturi virsti domenine — kitaip dingtų priežastis. */
+  await assert.rejects(
+    () => attemptRegistry.registruoti(metantisVykdytojas("08006", null), BANDYMAS),
+    (klaida) => klaida.code === "08006" && !(klaida instanceof attemptRegistry.BendroAdresoKlaida)
+  );
+});
+
+test("#375: kolizijos klaidos tekste NĖRA `attemptId` — tik adresas", () => {
+  /**
+   * ⚠️ Pranešimas keliauja į job'o klaidos lauką ir logus. Adresas jame reikalingas
+   * (be jo operatorius nežino, KURIS raktas užimtas), o `attemptId` — ne: jis nieko
+   * neprideda prie diagnozės ir tik pailgina eilutę.
+   */
+  const klaida = new attemptRegistry.BendroAdresoKlaida("fs", BANDYMAS.storageKey);
+
+  assert.match(klaida.message, /results\//, "adresas privalo būti matomas");
+  assert.equal(klaida.message.includes(BANDYMAS.attemptId), false, "`attemptId` nereikalingas");
+  assert.match(klaida.message, /#375/, "nuoroda į sprendimą");
+});

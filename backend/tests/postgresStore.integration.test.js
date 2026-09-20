@@ -19,6 +19,7 @@ const {
   IMMUTABLE_COLUMNS,
   PROGRESO_CAS_PREDIKATAS,
 } = require("../utils/jobStore/postgresStore");
+const attemptRegistry = require("../utils/attemptRegistry");
 const memoryStore = require("../utils/jobStore/memoryStore");
 const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
 const { OWNER_KIND, normalizeFieldValue } = require("../utils/jobStore/common");
@@ -2373,6 +2374,210 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
 
     const { rows } = await pool.query("SELECT count(*)::int AS n FROM job_results WHERE job_id = $1", [id]);
     assert.equal(rows[0].n, 0, "FAILED rezultato neįrašo");
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+   * #375 — `UNIQUE (storage_type, storage_key)` ANT `job_result_attempts`
+   * ═══════════════════════════════════════════════════════════════════════════ */
+
+  await t.test("#375 DB: du bandymai tuo pačiu `(storage_type, storage_key)` — `23505`", async () => {
+    /**
+     * ⚠️ TIKRINAMAS IR INDEKSO VARDAS, NE TIK KODAS.
+     *
+     * `job_result_attempts` turi bent tris unikalumo šaltinius: `attempt_id` PK,
+     * dalinį `job_result_attempts_vienas_isipareigotas` ir šį. Visi duoda `23505`.
+     * Asercija be vardo praeitų ir tada, kai suveikė VISAI KITAS invariantas — t. y.
+     * tikrintų, kad „kažkas atmetė", ne kad atmetė ŠIS konstraintas.
+     */
+    const jobA = await store.create({ ownerKind: "unowned", type: "transcription" });
+    const jobB = await store.create({ ownerKind: "unowned", type: "transcription" });
+    const raktas = `results/${jobA.id}/${attemptRegistry.naujasBandymas()}.json`;
+
+    await attemptRegistry.registruoti(pool, {
+      attemptId: attemptRegistry.naujasBandymas(),
+      jobId: jobA.id,
+      storageType: "fs",
+      storageKey: raktas,
+    });
+
+    await assert.rejects(
+      () =>
+        pool.query(
+          `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+           VALUES ($1, $2, 'fs', $3, 'pending')`,
+          [attemptRegistry.naujasBandymas(), jobB.id, raktas]
+        ),
+      (klaida) =>
+        klaida.code === "23505" && klaida.constraint === attemptRegistry.VIENO_ADRESO_INDEKSAS,
+      "antras bandymas tuo pačiu adresu privalo būti atmestas ŠIO indekso"
+    );
+  });
+
+  await t.test("#375 DB: tas pats `storage_key` KITOJE saugykloje — leidžiama", async () => {
+    /**
+     * ⚠️ BE ŠIOS ASERCIJOS INDEKSAS TIK ANT `storage_key` PRAEITŲ VISUS KITUS TESTUS.
+     *
+     * Tapatybė yra PORA: `fs` ir `s3` objektai tuo pačiu keliu yra skirtingi
+     * objektai, ir uždraudus tai, migracija sulaužytų teisėtą būseną.
+     */
+    const jobas = await store.create({ ownerKind: "unowned", type: "transcription" });
+    const raktas = `results/${jobas.id}/${attemptRegistry.naujasBandymas()}.json`;
+
+    for (const tipas of ["fs", "s3"]) {
+      await attemptRegistry.registruoti(pool, {
+        attemptId: attemptRegistry.naujasBandymas(),
+        jobId: jobas.id,
+        storageType: tipas,
+        storageKey: raktas,
+      });
+    }
+
+    const { rows } = await pool.query(
+      "SELECT count(*)::int AS n FROM job_result_attempts WHERE storage_key = $1",
+      [raktas]
+    );
+    assert.equal(rows[0].n, 2, "abi saugyklos turi teisę į tą patį kelią");
+  });
+
+  await t.test("#375 DB: `abandoned` + `pending` tuo pačiu adresu — ATMETAMA", async () => {
+    /**
+     * ⚠️ ŠIS ATVEJIS SKIRIA PILNĄ INDEKSĄ NUO DALINIO.
+     *
+     * Dalinis (`WHERE busena <> 'abandoned'`) čia praeitų — ir praleistų būtent tą
+     * bendrą adresą, kurį mato šlavėjas: `abandoned` eilutė su užimtu raktu yra
+     * lygiai ta būsena, dėl kurios #305.1 gynyba egzistuoja.
+     */
+    const jobas = await store.create({ ownerKind: "unowned", type: "transcription" });
+    const raktas = `results/${jobas.id}/${attemptRegistry.naujasBandymas()}.json`;
+
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, 'fs', $3, 'abandoned')`,
+      [attemptRegistry.naujasBandymas(), jobas.id, raktas]
+    );
+
+    await assert.rejects(
+      () =>
+        pool.query(
+          `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+           VALUES ($1, $2, 'fs', $3, 'pending')`,
+          [attemptRegistry.naujasBandymas(), jobas.id, raktas]
+        ),
+      (klaida) =>
+        klaida.code === "23505" && klaida.constraint === attemptRegistry.VIENO_ADRESO_INDEKSAS,
+      "`abandoned` eilutė adresą UŽIMA — indeksas pilnas, ne dalinis"
+    );
+  });
+
+  await t.test("#375 API: `registruoti()` kolizija → domeninė klaida, ne tyli sėkmė", async () => {
+    /**
+     * ⚠️ FIKSUOTAS `attemptId`, NE ATSITIKTINUMAS.
+     *
+     * Su `randomUUID` kolizijos nesukelsi, tad testas remtųsi tikimybe. Fiksuotas
+     * raktas atkuria tą PAČIĄ būseną, kurią duotų pakeista rakto schema.
+     *
+     * ⚠️ ❌ NE PAKARTOTINĖ REGISTRACIJA SU NAUJU ID. Tai būtų greičiausias kelias į
+     * žalią testą ir sunaikintų konstrainto prasmę: kolizija reiškia rakto schemos
+     * klaidą, ir ją paslėpus liktų priežastis be simptomo.
+     */
+    const jobas = await store.create({ ownerKind: "unowned", type: "transcription" });
+    const fiksuotas = attemptRegistry.naujasBandymas();
+    const raktas = attemptRegistry.bandymoRaktas(jobas.id, fiksuotas);
+
+    await attemptRegistry.registruoti(pool, {
+      attemptId: fiksuotas,
+      jobId: jobas.id,
+      storageType: "fs",
+      storageKey: raktas,
+    });
+
+    await assert.rejects(
+      () =>
+        attemptRegistry.registruoti(pool, {
+          /** KITAS bandymas, TAS PATS adresas — būtent tai indeksas ir draudžia. */
+          attemptId: attemptRegistry.naujasBandymas(),
+          jobId: jobas.id,
+          storageType: "fs",
+          storageKey: raktas,
+        }),
+      (klaida) =>
+        klaida instanceof attemptRegistry.BendroAdresoKlaida &&
+        klaida.code === "ATTEMPT_ADDRESS_TAKEN",
+      "kolizija privalo virsti GARSIA domenine klaida"
+    );
+  });
+
+  await t.test("#375 API: KITAS `23505` (`attempt_id` PK) NĖRA bendro adreso klaida", async () => {
+    /**
+     * ⚠️ ŠIS TESTAS GINA `err.constraint` DALĮ KLASIFIKACIJOJE.
+     *
+     * Klasifikuojant tik pagal `err.code`, `attempt_id` pirminio rakto pažeidimas —
+     * visai kitas gedimas — būtų praneštas kaip bendras adresas, ir remontas eitų
+     * ne ta kryptimi. Čia adresai SKIRTINGI, sutampa tik `attempt_id`.
+     */
+    const jobas = await store.create({ ownerKind: "unowned", type: "transcription" });
+    const tasPatsId = attemptRegistry.naujasBandymas();
+
+    await attemptRegistry.registruoti(pool, {
+      attemptId: tasPatsId,
+      jobId: jobas.id,
+      storageType: "fs",
+      storageKey: attemptRegistry.bandymoRaktas(jobas.id, tasPatsId),
+    });
+
+    await assert.rejects(
+      () =>
+        attemptRegistry.registruoti(pool, {
+          attemptId: tasPatsId,
+          jobId: jobas.id,
+          storageType: "fs",
+          /** SKIRTINGAS adresas — tad suveikti privalo PK, ne mūsų indeksas. */
+          storageKey: attemptRegistry.bandymoRaktas(jobas.id, attemptRegistry.naujasBandymas()),
+        }),
+      (klaida) =>
+        klaida.code === "23505" && !(klaida instanceof attemptRegistry.BendroAdresoKlaida),
+      "`attempt_id` kolizija privalo likti PLIKA `23505`, ne bendro adreso klaida"
+    );
+  });
+
+  await t.test("#375 KONTRAKTAS: kodo ir migracijos indekso vardai SUTAMPA", async () => {
+    /**
+     * ⚠️ VARDAS KARTOJAMAS DVIEJOSE VIETOSE SĄMONINGAI (užšaldymo konvencija), tad jį
+     * sieja ŠIS testas, ne bendra konstanta. Be jo pervadinus indeksą migracijoje
+     * klasifikacija tyliai nustotų veikti: `23505` liktų, `constraint` nebesutaptų,
+     * ir kolizija virstų plikąja DB klaida.
+     */
+    const { rows } = await pool.query(
+      `SELECT i.indisvalid, i.indisunique
+         FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE c.relname = $1`,
+      [attemptRegistry.VIENO_ADRESO_INDEKSAS]
+    );
+
+    assert.equal(rows.length, 1, "kodo žinomas vardas privalo egzistuoti DB");
+    assert.equal(rows[0].indisvalid, true);
+    assert.equal(rows[0].indisunique, true);
+  });
+
+  await t.test("#375 EXPLAIN: `kitasGyvasBandymas` paieška pagal `(storage_key, storage_type)`", async (st) => {
+    /**
+     * ⚠️ ŠALUTINIS RADINYS, NE DoD SĄLYGA. `kitasGyvasBandymas` kiekvienai šlavimo
+     * kandidatei vykdo `EXISTS` pagal `(storage_key, storage_type)`; iki #375 tam
+     * indekso nebuvo.
+     *
+     * ⚠️ PLANAS NETVIRTINAMAS ASERCIJA. Mažoje lentelėje planuotojas teisėtai renkasi
+     * `Seq Scan` — jis pigesnis. Tvirtinti „privalo naudoti indeksą" reikštų testą,
+     * krentantį dėl TEISINGO planuotojo sprendimo. Išvestis paliekama diagnostikai.
+     */
+    const { rows } = await pool.query(
+      `EXPLAIN (FORMAT JSON)
+       SELECT 1 FROM job_result_attempts k
+        WHERE k.storage_key = $1 AND k.storage_type = $2`,
+      ["results/x/y.json", "fs"]
+    );
+
+    st.diagnostic(`#375 EXPLAIN: ${JSON.stringify(rows[0]["QUERY PLAN"])}`);
+    assert.ok(rows.length === 1, "planas privalo būti gautas");
   });
 
 });

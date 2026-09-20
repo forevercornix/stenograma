@@ -4,7 +4,8 @@ const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
-const { Pool } = require("pg");
+const crypto = require("node:crypto");
+const { Pool, Client } = require("pg");
 const {
   skipWithoutPostgres,
   testDatabaseUrl,
@@ -826,6 +827,277 @@ test(
       assert.equal(padidinta[0].version, 2);
     } finally {
       await po.end();
+    }
+  }
+);
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * #375 — `job_result_attempts_vienas_adresas`
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+const VIENO_ADRESO_MIGRACIJA = "1756700000000_job-result-attempts-vienas-adresas.js";
+const VIENO_ADRESO_INDEKSAS = "job_result_attempts_vienas_adresas";
+
+/**
+ * Migruoja iki BŪSENOS PRIEŠ #375 — visos migracijos, išskyrus paskutinę.
+ *
+ * ⚠️ KOPIJUOJAMA Į LAIKINĄ KATALOGĄ, ne filtruojama repo viduje: `node --test`
+ * failus vykdo lygiagrečiai, o kiti PostgreSQL testai skaito būtent repo
+ * `migrations/`. Repo turinys nepaliečiamas.
+ */
+function iki375(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-375-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const visos = fs
+    .readdirSync(path.join(ŠAKNIS, "migrations"))
+    .filter((f) => f.endsWith(".js"))
+    .sort();
+
+  assert.ok(visos.includes(VIENO_ADRESO_MIGRACIJA), "prielaida: #375 migracija repo yra");
+
+  for (const f of visos.filter((f) => f !== VIENO_ADRESO_MIGRACIJA)) {
+    fs.copyFileSync(path.join(ŠAKNIS, "migrations", f), path.join(dir, f));
+  }
+  return dir;
+}
+
+async function indeksoBusena(pool) {
+  const { rows } = await pool.query(
+    `SELECT i.indisvalid, i.indisunique
+       FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE c.relname = $1`,
+    [VIENO_ADRESO_INDEKSAS]
+  );
+  return rows[0] || null;
+}
+
+/** Du bandymai vienu adresu — būsena, kurios #375 migracija neturi praleisti. */
+async function ivestiDublikata(pool) {
+  const jobId = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO jobs (id, type, status, progress_known, schema_version, created_at, updated_at)
+     VALUES ($1, 'transcription', 'queued', false, 2, now(), now())`,
+    [jobId]
+  );
+  const raktas = `results/${jobId}/bendras.json`;
+  for (const busena of ["pending", "abandoned"]) {
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, 'fs', $3, $4)`,
+      [crypto.randomUUID(), jobId, raktas, busena]
+    );
+  }
+  return { jobId, raktas };
+}
+
+test(
+  "#375 MIGRACIJA: dublikatas → krenta su diagnostika, indeksas NESUKURIAMAS",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async (t) => {
+    /**
+     * ⚠️ TIKRINAMOS TRYS SAVYBĖS, NE VIENA.
+     *
+     * „Krenta" nepakanka: plikoji `23505` irgi krenta, ir būtent ją D3 pakeičia.
+     * Todėl tikrinama, kad (1) pranešime yra skaičius ir `storage_type`,
+     * (2) RAKTŲ jame NĖRA, (3) indeksas neliko pusiau sukurtas.
+     */
+    await perkurtiDb();
+    const priesDir = iki375(t);
+    migrate("up", priesDir);
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      await ivestiDublikata(pool);
+
+      let klaida = null;
+      try {
+        migrate("up");
+      } catch (e) {
+        klaida = e;
+      }
+
+      assert.ok(klaida, "migracija su dublikatu privalo KRISTI");
+
+      const tekstas = `${klaida.stdout || ""}${klaida.stderr || ""}${klaida.message || ""}`;
+      assert.match(tekstas, /job_result_attempts turi 1 adres/, "diagnostikoje privalo būti SKAIČIUS");
+      assert.match(tekstas, /storage_type: fs/, "ir `storage_type`");
+      assert.match(tekstas, /#375/, "ir nuoroda į issue");
+
+      /**
+       * ⚠️ RAKTAI Į DEPLOY'AUS LOGUS NEPATENKA. `1756300000000` užrašė, kad
+       * `storage_key` asmens duomenų neturi, bet diagnostikai pakanka skaičiaus, o
+       * logų retencija kitokia nei DB.
+       */
+      assert.equal(
+        /results\/[0-9a-f-]+\/bendras\.json/.test(tekstas),
+        false,
+        `raktas neturi patekti į išvestį:\n${tekstas.slice(0, 400)}`
+      );
+
+      assert.equal(await indeksoBusena(pool), null, "indeksas NEGALI likti pusiau sukurtas");
+    } finally {
+      await pool.end();
+    }
+  }
+);
+
+test(
+  "#375 MIGRACIJA: `down` šalina indeksą, `up` vėl praeina, antras `up` — no-op",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async (t) => {
+    await perkurtiDb();
+    migrate("up");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      assert.ok(await indeksoBusena(pool), "po `up` indeksas privalo būti");
+
+      migrate("down");
+      assert.equal(await indeksoBusena(pool), null, "`down` privalo jį pašalinti");
+
+      migrate("up");
+      const busena = await indeksoBusena(pool);
+      assert.ok(busena && busena.indisvalid && busena.indisunique, "`up` privalo atkurti GALIOJANTĮ");
+
+      /** Antras `up` be klaidos: migracija jau pritaikyta, tad ji nebekartojama. */
+      migrate("up");
+      assert.ok(await indeksoBusena(pool), "antras `up` neturi nieko sugriauti");
+
+      t.diagnostic("#375: down → up → up ciklas žalias");
+    } finally {
+      await pool.end();
+    }
+  }
+);
+
+test(
+  "#375 D6: NEVEIKIANTIS indeksas tuo pačiu vardu → migracija KRENTA, ne praeina tyliai",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async (t) => {
+    /**
+     * ⚠️ `INVALID` INDEKSAS SUKURIAMAS TIKRU GEDIMU, NE `pg_index` REDAGAVIMU.
+     *
+     * `CREATE UNIQUE INDEX CONCURRENTLY` ant lentelės su dublikatu krenta ir PALIEKA
+     * `indisvalid = false` indeksą tuo vardu — tiksliai ta būsena, kurią `IF NOT
+     * EXISTS` praleistų. Redaguojant `pg_index` tiesiogiai testas tikrintų savo
+     * paties simuliaciją, ne PostgreSQL elgesį.
+     */
+    await perkurtiDb();
+    const priesDir = iki375(t);
+    migrate("up", priesDir);
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const { raktas } = await ivestiDublikata(pool);
+
+      await assert.rejects(
+        () =>
+          pool.query(
+            `CREATE UNIQUE INDEX CONCURRENTLY ${VIENO_ADRESO_INDEKSAS}
+               ON job_result_attempts (storage_type, storage_key)`
+          ),
+        "prielaida: su dublikatu `CONCURRENTLY` statymas privalo kristi"
+      );
+
+      const paliktas = await indeksoBusena(pool);
+      assert.ok(paliktas, "prielaida: nutrūkęs statymas paliko indeksą");
+      assert.equal(paliktas.indisvalid, false, "prielaida: jis NEVEIKIANTIS");
+
+      /**
+       * ⚠️ DUBLIKATAS PAŠALINAMAS — kitaip migracija kristų ties D3 preflight, ir
+       * testas įrodytų ne tą dalyką. Dabar duomenys švarūs, o kliūtis viena:
+       * neveikiantis indeksas.
+       */
+      await pool.query("DELETE FROM job_result_attempts WHERE storage_key = $1 AND busena = 'abandoned'", [raktas]);
+
+      let klaida = null;
+      try {
+        migrate("up");
+      } catch (e) {
+        klaida = e;
+      }
+
+      assert.ok(klaida, "migracija PRIVALO kristi — `IF NOT EXISTS` čia praeitų tyliai");
+      const tekstas = `${klaida.stdout || ""}${klaida.stderr || ""}${klaida.message || ""}`;
+      assert.match(tekstas, /NEVEIKIANTIS|indisvalid/, "pranešimas privalo įvardyti PRIEŽASTĮ");
+
+      const poBandymo = await indeksoBusena(pool);
+      assert.equal(poBandymo.indisvalid, false, "neveikiantis indeksas lieka — jį šalina operatorius");
+    } finally {
+      await pool.end();
+    }
+  }
+);
+
+test(
+  "#375 `lock_timeout`: pakibęs rašytojas → migracija KRENTA per ribą, ne kabo",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async (t) => {
+    /**
+     * ⚠️ BE `lock_timeout` ŠIS TESTAS VIRŠYTŲ SAVO LAIKO RIBĄ.
+     *
+     * `LOCK TABLE ... SHARE` laukia už kiekvienos atviros transakcijos, rašiusios į
+     * lentelę. Kol migracija laukia, eilėje už jos stovi VISI nauji `registruoti()` —
+     * t. y. be ribos migracija sustabdo rezultatų rašymą neribotam laikui, ir tai
+     * atrodo kaip pakibęs deploy'us, ne kaip gedimas.
+     */
+    await perkurtiDb();
+    const priesDir = iki375(t);
+    migrate("up", priesDir);
+
+    const blokuojantis = new Client({ connectionString: DB_URL });
+    await blokuojantis.connect();
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const jobId = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO jobs (id, type, status, progress_known, schema_version, created_at, updated_at)
+         VALUES ($1, 'transcription', 'queued', false, 2, now(), now())`,
+        [jobId]
+      );
+
+      /** Transakcija LIEKA ATVIRA — būtent ji ir yra „pakibęs rašytojas". */
+      await blokuojantis.query("BEGIN");
+      await blokuojantis.query(
+        `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+         VALUES ($1, $2, 'fs', $3, 'pending')`,
+        [crypto.randomUUID(), jobId, `results/${jobId}/kabo.json`]
+      );
+
+      const pradzia = Date.now();
+      let klaida = null;
+      try {
+        migrate("up");
+      } catch (e) {
+        klaida = e;
+      }
+      const truko = Date.now() - pradzia;
+
+      assert.ok(klaida, "migracija privalo KRISTI, o ne laukti neribotai");
+
+      const tekstas = `${klaida.stdout || ""}${klaida.stderr || ""}${klaida.message || ""}`;
+      assert.match(tekstas, /lock_timeout|55P03|timeout/i, `laukiama užrakto ribos klaida:\n${tekstas.slice(0, 300)}`);
+
+      /**
+       * ⚠️ TIKRINAMA IR TRUKMĖ. Be jos testas praeitų ir tada, jei kritimą sukeltų
+       * kas nors kita po ilgo laukimo — o būtent laukimas ir yra tas defektas.
+       * Riba 5 s plius `npx` starto atsarga.
+       */
+      assert.ok(truko < 60000, `krito per ${truko} ms — riba privalo veikti`);
+      t.diagnostic(`#375 lock_timeout: krito per ${truko} ms`);
+
+      const pool2 = new Pool({ connectionString: DB_URL });
+      try {
+        assert.equal(await indeksoBusena(pool2), null, "indeksas nesukurtas — migracija nutrūko");
+      } finally {
+        await pool2.end();
+      }
+    } finally {
+      await blokuojantis.query("ROLLBACK").catch(() => {});
+      await blokuojantis.end().catch(() => {});
+      await pool.end();
     }
   }
 );
