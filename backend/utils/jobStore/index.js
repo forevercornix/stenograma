@@ -331,6 +331,46 @@ const REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS = [
 ];
 
 /**
+ * PRIVALOMI INDEKSAI — TA PATI TAISYKLĖ KAIP `BUTINOS_LENTELES` (#376 Codex P2 #1).
+ *
+ * ⚠️ KODĖL INDEKSAS APSKRITAI ČIA. `job_result_attempts_vienas_adresas`
+ * (`1756700000000`) yra ne našumo priemonė, o INVARIANTAS: vienas saugyklos
+ * adresas ↔ viena registro eilutė. Juo remsis #351 D6.
+ *
+ * Iki šios patikros readiness matė tik `contype = 'c'` — check constraint'us. DB,
+ * migruota tik iki `1756600000000`, readiness PRAEIDAVO: rašymas vyktų be
+ * invarianto, `BendroAdresoKlaida` niekada nesuveiktų, o #351 remtųsi garantija,
+ * kurios nėra. Migracijos pačios patikros čia nepadeda — jos veikia tik TADA, kai
+ * migracija leidžiama.
+ *
+ * ⚠️ READINESS YRA VIENINTELIS AUTORITETAS VISOMS DB, nes tik jis vykdomas
+ * KIEKVIENAME starte, nepriklausomai nuo to, kada ir kaip bazė buvo migruota.
+ *
+ * ⚠️ NEUŽTENKA VARDO. Tikrinama pora `(schema, lentelė)` plius stulpelių seka ir
+ * `indisvalid`/`indisunique`. Indeksas tuo pačiu vardu kitoje schemoje, ant kitos
+ * lentelės arba ant kitos stulpelių poros yra KITAS objektas — o pasitenkinus
+ * vardu, tai būtų ta pati klaida, kurią šis PR taiso testų pusėje.
+ *
+ * ⚠️ DALINIS INDEKSAS (`WHERE ...`) NĖRA TAS PATS INVARIANTAS: jis draudžia
+ * pasikartojimus tik predikatą tenkinančiose eilutėse, tad `1756700000000`
+ * garantijos neduoda. Kiekvienas įrašas deklaruoja tai PATS (`salyginis`), o ne
+ * užklausa — antras indeksas ateityje gali teisėtai būti dalinis. Išraiškinis
+ * (`ON t (lower(x))`) indeksas atmetamas jau per stulpelių palyginimą, tad
+ * atskiros patikros jam nereikia.
+ */
+const BUTINI_INDEKSAI = Object.freeze([
+  Object.freeze({
+    vardas: "job_result_attempts_vienas_adresas",
+    lentele: "job_result_attempts",
+    /** Tvarka reikšminga: `(storage_type, storage_key)`, ne atvirkščiai. */
+    stulpeliai: Object.freeze(["storage_type", "storage_key"]),
+    unikalus: true,
+    /** `false` = indeksas privalo dengti VISAS eilutes, be `WHERE` predikato. */
+    salyginis: false,
+  }),
+]);
+
+/**
  * Lentelė → jos privalomų invariantų sąrašas. VIENAS autoritetas abiem patikroms:
  * lentelių buvimui ir suvaržymams — kitaip pridėjus lentelę į vieną sąrašą ir
  * pamiršus kitą, patikra liktų dalinė būtent taip, kaip iki #342.
@@ -458,6 +498,78 @@ async function initializePostgres(env = process.env) {
           "Paleiskite `npm run migrate:up`: be jų DB priimtų įrašus, kurių " +
           "runtime nepripažįsta (nežinomas tipas, nepalaikoma era, nežinomas actor " +
           "source, rezultato eilutė be vientisumo metaduomenų)."
+      );
+    }
+
+    /**
+     * ⚠️ INDEKSŲ PATIKRA ATSKIRA UŽKLAUSA, NE PRIJUNGTA PRIE CONSTRAINT'Ų (#376).
+     *
+     * `pg_constraint` ir `pg_index` yra skirtingi katalogai su skirtingais raktais;
+     * sujungus juos į vieną `UNION`, tektų suvienodinti stulpelių aibę, ir patikra
+     * taptų sunkiau skaitoma nei du atskiri, aiškūs klausimai.
+     *
+     * ⚠️ TAPATYBĘ NUSTATO KETURI DALYKAI, NE VARDAS: schema, lentelė, stulpelių
+     * SEKA ir `indisvalid`/`indisunique`.
+     *
+     * ⚠️ SEKA IMAMA PER `pg_get_indexdef(oid, pozicija, pretty)`, NE PER
+     * `unnest(indkey)`. Pirmoji versija naudojo koreliuotą `unnest(i.indkey) WITH
+     * ORDINALITY` ir GALIOJANČIAM indeksui grąžino tuščią rezultatą — išmatuota CI
+     * (run 35567237647): pilna schema buvo paskelbta pasenusia. Priežasties
+     * netyriau; `pg_get_indexdef` su pozicija yra dokumentuota katalogo funkcija,
+     * grąžinanti tos pozicijos stulpelį, ir `indnkeyatts` riboja iki RAKTO
+     * stulpelių (be `INCLUDE`).
+     */
+    const { rows: iRows } = await pool.query(
+      `SELECT i.indexrelid::regclass::text AS vardas,
+              t.relname                    AS lentele,
+              i.indisvalid,
+              i.indisunique,
+              (i.indpred IS NOT NULL)      AS salyginis,
+              (SELECT array_agg(pg_get_indexdef(i.indexrelid, k.ord::int, true) ORDER BY k.ord)
+                 FROM generate_series(1, i.indnkeyatts) AS k(ord)
+              ) AS stulpeliai
+         FROM pg_index i
+         JOIN pg_class ic    ON ic.oid = i.indexrelid
+         JOIN pg_class t     ON t.oid  = i.indrelid
+         JOIN pg_namespace n ON n.oid  = ic.relnamespace
+        WHERE ic.relname = ANY($1)
+          AND n.nspname = current_schema()`,
+      [BUTINI_INDEKSAI.map((x) => x.vardas)]
+    );
+
+    const trukstaIndeksu = BUTINI_INDEKSAI.filter((butinas) => {
+      const rastas = iRows.find(
+        (r) => r.vardas.split(".").pop() === butinas.vardas && r.lentele === butinas.lentele
+      );
+      if (!rastas) return true;
+      if (!rastas.indisvalid) return true;
+      if (butinas.unikalus && !rastas.indisunique) return true;
+      if (Boolean(rastas.salyginis) !== Boolean(butinas.salyginis)) return true;
+
+      const stulpeliai = rastas.stulpeliai || [];
+      return (
+        stulpeliai.length !== butinas.stulpeliai.length ||
+        stulpeliai.some((s, i) => s !== butinas.stulpeliai[i])
+      );
+    });
+
+    if (trukstaIndeksu.length > 0) {
+      /**
+       * ⚠️ PRANEŠIME — VARDAS IR LAUKIAMA FORMA, NE „kažko trūksta".
+       *
+       * Indeksas gali būti neteisingas keturiais skirtingais būdais, ir operatoriui
+       * reikia žinoti, kurio laukiama. Rakto reikšmių čia nėra — tik schemos vardai.
+       */
+      const aprasai = trukstaIndeksu.map(
+        (x) =>
+          `${x.vardas} (${x.lentele}: ${x.stulpeliai.join(", ")}` +
+          `${x.unikalus ? ", UNIQUE" : ""}${x.salyginis ? ", su WHERE" : ", be WHERE"})`
+      );
+      throw new Error(
+        `PostgreSQL schema pasenusi - trūksta arba netinkami indeksai: ${aprasai.join("; ")}. ` +
+          "Paleiskite `npm run migrate:up`: be jų DB priimtų dvi registro eilutes " +
+          "vienu saugyklos adresu, ir rašymas vyktų be invarianto, kuriuo remiasi " +
+          "bandymų registras."
       );
     }
   } catch (err) {
@@ -1590,6 +1702,7 @@ module.exports = {
   REQUIRED_ATTEMPT_CONSTRAINTS,
   REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS,
   BUTINOS_LENTELES,
+  BUTINI_INDEKSAI,
   STATUS,
   JOB_TYPES,
   TTL_MS,

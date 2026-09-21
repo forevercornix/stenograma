@@ -10,6 +10,7 @@ const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./he
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
 const attemptRegistry = require("../utils/attemptRegistry");
+const { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele } = require("./helpers/indeksoTapatybe");
 const { STATUS, OWNER_KIND } = require("../utils/jobStore/common");
 
 process.env.NODE_ENV = "test";
@@ -91,7 +92,17 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
    * nebūtų prielaida, paskutinis testas faile ją patikrina eksplicitiškai.
    */
   async function beIndekso(scenarijus) {
-    await pool.query(`DROP INDEX IF EXISTS ${attemptRegistry.VIENO_ADRESO_INDEKSAS}`);
+    /**
+     * ⚠️ VARDAS KVALIFIKUOJAMAS SCHEMA (#376 Codex P2 #2).
+     *
+     * Nekvalifikuotas `DROP INDEX` taikosi pagal `search_path`, o izoliacijos
+     * sargas žemiau tikrina `current_schema()`. Kol schema viena, jie sutampa;
+     * kai ne — testas pašalintų vieną objektą, o tikrintų kitą, ir abi operacijos
+     * „pavyktų". Prielaidos „testo DB turi vieną schemą" nėra.
+     */
+    const indeksas = await kvalifikuotasVardas(pool, attemptRegistry.VIENO_ADRESO_INDEKSAS);
+    const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
+    await pool.query(`DROP INDEX IF EXISTS ${indeksas}`);
     try {
       return await scenarijus();
     } finally {
@@ -132,9 +143,13 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
                  AND a.storage_key = b.storage_key
                  AND a.attempt_id > b.attempt_id`
       );
+      /**
+       * ⚠️ INDEKSO VARDAS ČIA BE SCHEMOS: `CREATE INDEX` jos nepriima — indeksas
+       * paveldi LENTELĖS schemą. Todėl kvalifikuojama lentelė, ne vardas.
+       */
       await pool.query(
         `CREATE UNIQUE INDEX IF NOT EXISTS ${attemptRegistry.VIENO_ADRESO_INDEKSAS}
-           ON job_result_attempts (storage_type, storage_key)`
+           ON ${lentele} (storage_type, storage_key)`
       );
     }
   }
@@ -1366,15 +1381,25 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
      *
      * Šis testas yra paskutinis faile sąmoningai.
      */
-    const { rows } = await pool.query(
-      `SELECT i.indisvalid, i.indisunique
-         FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
-        WHERE c.relname = $1`,
-      [attemptRegistry.VIENO_ADRESO_INDEKSAS]
+    /**
+     * ⚠️ PAIEŠKA KVALIFIKUOTA SCHEMA IR LENTELE (#376 Codex P2 #2). Vien `relname`
+     * rastų to paties vardo indeksą bet kurioje `search_path` schemoje ir ant bet
+     * kurios lentelės — t. y. sargas galėtų paskelbti žalią remdamasis SVETIMU
+     * objektu, o izoliacijos spraga liktų atvira.
+     */
+    const rastas = await rastiIndeksa(
+      pool,
+      attemptRegistry.VIENO_ADRESO_INDEKSAS,
+      "job_result_attempts"
     );
 
-    assert.equal(rows.length, 1, "indeksas privalo egzistuoti po visų (b) testų");
-    assert.equal(rows[0].indisvalid, true, "ir būti GALIOJANTIS");
-    assert.equal(rows[0].indisunique, true, "ir unikalus");
+    assert.ok(rastas, "indeksas privalo egzistuoti po visų (b) testų — ŠIOJE schemoje");
+    assert.equal(rastas.indisvalid, true, "ir būti GALIOJANTIS");
+    assert.equal(rastas.indisunique, true, "ir unikalus");
+    assert.deepEqual(
+      rastas.stulpeliai,
+      ["storage_type", "storage_key"],
+      "ir ant TOS PAČIOS stulpelių poros, ta pačia tvarka"
+    );
   });
 });

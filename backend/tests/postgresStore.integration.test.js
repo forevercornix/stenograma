@@ -20,6 +20,7 @@ const {
   PROGRESO_CAS_PREDIKATAS,
 } = require("../utils/jobStore/postgresStore");
 const attemptRegistry = require("../utils/attemptRegistry");
+const { rastiIndeksa } = require("./helpers/indeksoTapatybe");
 const memoryStore = require("../utils/jobStore/memoryStore");
 const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
 const { OWNER_KIND, normalizeFieldValue } = require("../utils/jobStore/common");
@@ -2547,16 +2548,24 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
      * klasifikacija tyliai nustotų veikti: `23505` liktų, `constraint` nebesutaptų,
      * ir kolizija virstų plikąja DB klaida.
      */
-    const { rows } = await pool.query(
-      `SELECT i.indisvalid, i.indisunique
-         FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
-        WHERE c.relname = $1`,
-      [attemptRegistry.VIENO_ADRESO_INDEKSAS]
+    /**
+     * ⚠️ PAIEŠKA KVALIFIKUOTA, RIŠIMO PRASMĖ NEPAKITUSI (#376 Codex P2 #2).
+     *
+     * Testo paskirtis lieka ta pati: surišti vardą, kurį kartoja kodas
+     * (`attemptRegistry.VIENO_ADRESO_INDEKSAS`), su tuo, kurį stato migracija.
+     * Pakeista tik tai, KIEK tiksliai objektas identifikuojamas: vien `relname`
+     * rastų to paties vardo indeksą kitoje schemoje ar ant kitos lentelės, ir
+     * rišimas būtų su svetimu objektu.
+     */
+    const rastas = await rastiIndeksa(
+      pool,
+      attemptRegistry.VIENO_ADRESO_INDEKSAS,
+      "job_result_attempts"
     );
 
-    assert.equal(rows.length, 1, "kodo žinomas vardas privalo egzistuoti DB");
-    assert.equal(rows[0].indisvalid, true);
-    assert.equal(rows[0].indisunique, true);
+    assert.ok(rastas, "kodo žinomas vardas privalo egzistuoti ŠIOJE schemoje ir ant ŠIOS lentelės");
+    assert.equal(rastas.indisvalid, true);
+    assert.equal(rastas.indisunique, true);
   });
 
   await t.test("#375 EXPLAIN: `kitasGyvasBandymas` paieška pagal `(storage_key, storage_type)`", async (st) => {
