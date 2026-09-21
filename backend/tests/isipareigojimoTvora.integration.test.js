@@ -144,6 +144,30 @@ async function ribotas(zadas, { atblokuoti, pranesimas, ms = LAUKIMO_RIBA_MS }) 
   assert.fail(pranesimas);
 }
 
+/**
+ * ATBLOKAVIMAS PER `pg_terminate_backend` — kai blokuotojas nėra testo valdomas.
+ *
+ * ⚠️ NAUDOJAMA TEN, KUR UŽRAKTĄ LAIKO POOL'O AR PRODUKCINIO KODO JUNGTIS. Tokiai
+ * `ROLLBACK` nepasiųsi: testas jos neturi. `pg_blocking_pids()` atsako, KAS konkrečiai
+ * blokuoja duotą backend'ą, tad nutraukiama tiksliai, o ne visos jungtys iš eilės.
+ *
+ * ⚠️ TREČIA, NEPRIKLAUSOMA JUNGTIS. Pool'o klientas čia reikštų priklausomybę nuo to
+ * paties pool'o, kurio jungtis ir kabo.
+ *
+ * @param {number} pid  UŽBLOKUOTO backend'o `pg_backend_pid()`, paimtas IŠ ANKSTO
+ */
+function atblokuotiPer(pid) {
+  return async () => {
+    const c = new Client({ connectionString: DB_URL });
+    await c.connect();
+    try {
+      await c.query("SELECT pg_terminate_backend(p) FROM unnest(pg_blocking_pids($1)) p", [pid]);
+    } finally {
+      await c.end().catch(() => {});
+    }
+  };
+}
+
 /* ═══════════════════════ R1 — COMMIT'O TVORA ═══════════════════════ */
 
 test(
@@ -425,29 +449,13 @@ test(
 
       await kitas.query("BEGIN");
 
-      /**
-       * ⚠️ ATBLOKUOJA TREČIA, NEPRIKLAUSOMA JUNGTIS. Blokuotojas čia yra PATIKROS
-       * jungtis iš to paties pool'o; paimti dar vieną pool'o klientą reikštų
-       * priklausomybę nuo pool'o būsenos, o `pg_terminate_backend` nutraukia
-       * blokuotoją nepriklausomai nuo jos.
-       */
-      const atblokuoti = async () => {
-        const c = new Client({ connectionString: DB_URL });
-        await c.connect();
-        try {
-          await c.query("SELECT pg_terminate_backend(p) FROM unnest(pg_blocking_pids($1)) p", [pid]);
-        } finally {
-          await c.end().catch(() => {});
-        }
-      };
-
       const pradzia = Date.now();
       const r = await ribotas(
         kitas.query("UPDATE job_result_attempts SET updated_at = now() WHERE attempt_id = $1", [
           bandymas.attemptId,
         ]),
         {
-          atblokuoti,
+          atblokuoti: atblokuotiPer(pid),
           pranesimas:
             "lygiagretus `UPDATE` buvo UŽBLOKUOTAS ilgiau nei 5 s — užraktas laikomas " +
             "per `delete()`? Patikra privalo būti autocommit, ne išreikštinė transakcija.",
@@ -508,7 +516,23 @@ test(
         "UPDATE job_result_attempts SET updated_at = now() WHERE attempt_id = $1",
         [bandymas.attemptId]
       );
-      [uzimtas] = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 });
+      /**
+       * ⚠️ TA PATI FIGŪRA KAIP TESTE 6, IR TODĖL TAS PATS SARGAS (#351, P4).
+       *
+       * Rašytojas laiko eilutę, o atlaisvinantis `ROLLBACK` stovi eilute žemiau — UŽ
+       * `await`. Be `NOWAIT` patikra laukia rašytojo, rašytojas laukia patikros, ir
+       * failas pakimba, nors testas turi `timeout: 180000`: `finally` nepasiekiamas,
+       * pool'e lieka paimta jungtis, `pool.end()` nebegrįžta. Išmatuota run
+       * `35625863455` — 20 min job timeout, nė vienos TAP eilutės iš šio failo.
+       */
+      const r8 = await ribotas(store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 }), {
+        atblokuoti: () => rasytojas.query("ROLLBACK").catch(() => {}),
+        pranesimas:
+          "`sweepResultArtifacts` LAUKĖ rašytojo užrakto ilgiau nei 5 s — `NOWAIT` " +
+          "pašalintas? Patikra privalo grįžti nedelsiant kaip `55P03`.",
+      });
+      assert.ok(r8.ok, `šlavimas neturėjo mesti: ${r8.ok ? "" : r8.klaida.message}`);
+      [uzimtas] = r8.reiksme;
       await rasytojas.query("ROLLBACK");
     } finally {
       rasytojas.release();
@@ -518,12 +542,137 @@ test(
     assert.match(uzimtas.priezastis, /RAŠYTOJAS|užrakt/i, uzimtas.priezastis);
 
     /* (b) Kita klaida (lentelės nebėra) → `nepavyko`, ne `uzimtas`. */
-    await pool.query("ALTER TABLE job_result_attempts RENAME TO job_result_attempts_slepta");
-    const [nepavyko] = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 });
+    /**
+     * ⚠️ `ALTER TABLE ... RENAME` IRGI YRA LAUKIMO TAŠKAS, IR TAI NE TEORIJA.
+     *
+     * Jam reikia `ACCESS EXCLUSIVE`, kuris konfliktuoja net su `ACCESS SHARE`. Jei
+     * mutacija palieka nutekėjusią transakciją (M7 `abfc7ad` forma: `verdiktas →
+     * continue` praleidžia `COMMIT`/`release`), ji `ACCESS SHARE` tebelaiko, ir
+     * pervadinimas laukia amžinai. Blokuotojas čia NĖRA testo valdomas — jį laiko
+     * produkcinio kodo jungtis, — tad atblokuojama `pg_terminate_backend`'u.
+     */
+    const perv = await pool.connect();
+    try {
+      const { rows: pidB } = await perv.query("SELECT pg_backend_pid() AS pid");
+      const rPerv = await ribotas(
+        perv.query("ALTER TABLE job_result_attempts RENAME TO job_result_attempts_slepta"),
+        {
+          atblokuoti: atblokuotiPer(pidB[0].pid),
+          pranesimas:
+            "`ALTER TABLE ... RENAME` buvo UŽBLOKUOTAS ilgiau nei 5 s — kas nors laiko " +
+            "atvirą transakciją ant `job_result_attempts` (nutekėjusi pool'o jungtis?).",
+        }
+      );
+      assert.ok(rPerv.ok, `pervadinimas privalo praeiti: ${rPerv.ok ? "" : rPerv.klaida.message}`);
+    } finally {
+      perv.release();
+    }
+
+    const rB = await ribotas(store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 }), {
+      atblokuoti: async () => {},
+      pranesimas: "antras šlavimas UŽSTRIGO — nors lentelės nebėra, jis turėjo kristi iškart.",
+    });
+    assert.ok(rB.ok, `šlavimas neturėjo mesti: ${rB.ok ? "" : rB.klaida.message}`);
+    const [nepavyko] = rB.reiksme;
     await pool.query("ALTER TABLE job_result_attempts_slepta RENAME TO job_result_attempts");
 
     assert.equal(nepavyko.verdiktas, "nepavyko", "nežinoma klaida NEGALI virsti `uzimtas`");
     assert.match(nepavyko.priezastis, /pakartotinė patikra nepavyko/, nepavyko.priezastis);
+  }
+);
+
+test(
+  "#351 R2: užraktas paleistas iki `delete()` — matuojama KVIETIMO VIETOJE, ne funkcijoje",
+  { skip: PRALEISTI, timeout: 180000 },
+  async (t) => {
+    /**
+     * ⚠️ KUO ŠIS TESTAS SKIRIASI NUO ANKSTESNIO („patikra yra autocommit").
+     *
+     * Tas gina FUNKCIJOS kontraktą: `arVisDarSluotina(pool, …)` po savęs užrakto
+     * nepalieka. Bet jis kviečia funkciją su `pool`, tad realistinei regresijai —
+     * kai užraktą prailgina ne funkcija, o KVIETIMO VIETA, paduodama transakcijos
+     * klientą (`sweepResultArtifacts` mutacija M7, `abfc7ad` forma) — jis žalias
+     * PAGAL KONSTRUKCIJĄ: mutacijos net nepasiekia.
+     *
+     * Čia matuojama ten, kur garantija realiai reikalinga: MOMENTU, kai vykdomas
+     * `delete()`. Jei tuo metu eilutė vis dar užrakinta, nuotolinis I/O vyksta po
+     * užraktu — tiksliai tai, ką PR-4 D4 draudžia.
+     *
+     * ⚠️ ZONDAS GYVENA SAUGYKLOS DUBLYJE, NE TESTE PO ŠLAVIMO. Po šlavimo tikrinti
+     * per vėlu: užraktas iki tol jau paleistas bet kuriuo atveju, ir tvirtinimas
+     * nieko nebeskirtų.
+     */
+    await perkurtiDb();
+    const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+    const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
+    const os = require("node:os");
+    const fsp = require("node:fs/promises");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    const saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-kablys-"));
+    t.after(async () => {
+      await pool.end().catch(() => {});
+      await fsp.rm(saknis, { recursive: true, force: true });
+    });
+
+    const jobId = await sukurtiJoba(pool, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const bandymas = await sukurtiBandyma(pool, { jobId, amziusMs: MAX + 60_000 });
+
+    const fs = createFsArtifactStore({ root: saknis });
+    let zondas = null;
+
+    const saugykla = {
+      ...fs,
+      backend: "fs",
+      /**
+       * ⚠️ KABLYS `delete()` VIDUJE. Trečia, nuo pool'o nepriklausoma jungtis bando
+       * tą patį `UPDATE`, kurį darytų rašytojas. Su autocommit patikra užraktas jau
+       * paleistas, tad jis praeina per milisekundes.
+       */
+      async delete(raktas) {
+        const c = new Client({ connectionString: DB_URL });
+        await c.connect();
+        try {
+          const { rows } = await c.query("SELECT pg_backend_pid() AS pid");
+          const pradzia = Date.now();
+          const r = await ribotas(
+            c.query("UPDATE job_result_attempts SET updated_at = now() WHERE attempt_id = $1", [
+              bandymas.attemptId,
+            ]),
+            {
+              atblokuoti: atblokuotiPer(rows[0].pid),
+              pranesimas:
+                "`delete()` METU eilutė TEBEUŽRAKINTA ilgiau nei 5 s — patikros užraktas " +
+                "nusitęsė per nuotolinį I/O. Kvietimo vieta paduoda transakcijos klientą?",
+            }
+          );
+          zondas = { ok: r.ok, trukmeMs: Date.now() - pradzia, klaida: r.ok ? null : r.klaida };
+        } finally {
+          await c.end().catch(() => {});
+        }
+        return fs.delete(raktas);
+      },
+    };
+
+    const store = createPostgresStore(pool, {
+      artifactStores: { fs: saugykla },
+      bandymuRegistras: true,
+    });
+
+    await fs.put(bandymas.raktas, Buffer.from("x"));
+    const kandidatai = [
+      { attempt_id: bandymas.attemptId, storage_type: "fs", storage_key: bandymas.raktas },
+    ];
+
+    const [verdiktas] = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 });
+
+    assert.equal(verdiktas.verdiktas, "pasalinta", `kontrolė: objektas pašalintas (${verdiktas.priezastis})`);
+    assert.ok(zondas, "zondas PRIVALO būti pasiektas — kitaip testas nieko nematavo");
+    assert.ok(zondas.ok, `\`UPDATE\` \`delete()\` metu privalo praeiti: ${zondas.klaida && zondas.klaida.message}`);
+    assert.ok(
+      zondas.trukmeMs < LAUKIMO_RIBA_MS,
+      `eilutė privalo būti LAISVA \`delete()\` metu, truko ${zondas.trukmeMs} ms`
+    );
   }
 );
 
