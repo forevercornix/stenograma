@@ -1353,6 +1353,45 @@ test(
 );
 
 test(
+  "#376 R1: DALINIS (WHERE) indeksas tuo pačiu vardu → startas KRENTA",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async () => {
+    /**
+     * ⚠️ DALINIS INDEKSAS ATRODO TEISINGAS PAGAL VISUS KITUS KRITERIJUS: tas pats
+     * vardas, ta pati schema, ta pati lentelė, ta pati stulpelių SEKA, `UNIQUE`,
+     * `indisvalid`. Skiriasi tik apimtis — jis draudžia pasikartojimus TIK
+     * predikatą tenkinančiose eilutėse. `('s3', 'k')` pora už predikato ribų
+     * liktų leidžiama du kartus, o `1756700000000` garantija būtų tik tariama.
+     *
+     * ⚠️ TAI VIENINTELIS TESTAS, ĮRODANTIS `salyginis` KRITERIJŲ. Be jo užtektų
+     * keturių ankstesnių, ir dalinis indeksas praeitų readiness tyliai.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
+      await pool.query(`DROP INDEX ${indeksas}`);
+      const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
+      await pool.query(
+        `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS}
+           ON ${lentele} (storage_type, storage_key)
+           WHERE storage_type <> 'inline'`
+      );
+
+      await assert.rejects(
+        () => startas(DB_URL),
+        (klaida) => klaida.message.includes(VIENO_ADRESO_INDEKSAS),
+        "dalinis indeksas NEGALI tenkinti readiness"
+      );
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  }
+);
+
+test(
   "#376 R1 KONTROLĖ: pilna schema → startas PRAEINA",
   { skip: skipWithoutPostgres(), timeout: 180000 },
   async () => {

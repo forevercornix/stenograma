@@ -351,10 +351,12 @@ const REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS = [
  * lentelės arba ant kitos stulpelių poros yra KITAS objektas — o pasitenkinus
  * vardu, tai būtų ta pati klaida, kurią šis PR taiso testų pusėje.
  *
- * ⚠️ STULPELIAI TIKRINAMI PER KATALOGĄ (`pg_index.indkey` + `pg_attribute`), NE
- * PER `pg_get_indexdef()` TEKSTĄ. Teksto palyginimas lūžtų nuo formatavimo,
- * kabučių ar `COLLATE` — t. y. praneštų apie skirtumą, kurio nėra, arba praleistų
- * tikrą.
+ * ⚠️ DALINIS INDEKSAS (`WHERE ...`) NĖRA TAS PATS INVARIANTAS: jis draudžia
+ * pasikartojimus tik predikatą tenkinančiose eilutėse, tad `1756700000000`
+ * garantijos neduoda. Kiekvienas įrašas deklaruoja tai PATS (`salyginis`), o ne
+ * užklausa — antras indeksas ateityje gali teisėtai būti dalinis. Išraiškinis
+ * (`ON t (lower(x))`) indeksas atmetamas jau per stulpelių palyginimą, tad
+ * atskiros patikros jam nereikia.
  */
 const BUTINI_INDEKSAI = Object.freeze([
   Object.freeze({
@@ -363,6 +365,8 @@ const BUTINI_INDEKSAI = Object.freeze([
     /** Tvarka reikšminga: `(storage_type, storage_key)`, ne atvirkščiai. */
     stulpeliai: Object.freeze(["storage_type", "storage_key"]),
     unikalus: true,
+    /** `false` = indeksas privalo dengti VISAS eilutes, be `WHERE` predikato. */
+    salyginis: false,
   }),
 ]);
 
@@ -508,10 +512,10 @@ async function initializePostgres(env = process.env) {
      * SEKA ir `indisvalid`/`indisunique`.
      *
      * ⚠️ SEKA IMAMA PER `pg_get_indexdef(oid, pozicija, pretty)`, NE PER
-     * `unnest(indkey)`. `indkey` yra `int2vector`, ne paprastas masyvas, ir
-     * korreliuotas `unnest` jo viduje grąžino tuščią rezultatą net GALIOJANČIAM
-     * indeksui — išmatuota CI (run 35567237647): pilna schema buvo paskelbta
-     * pasenusia. `pg_get_indexdef` su pozicija yra dokumentuota katalogo funkcija,
+     * `unnest(indkey)`. Pirmoji versija naudojo koreliuotą `unnest(i.indkey) WITH
+     * ORDINALITY` ir GALIOJANČIAM indeksui grąžino tuščią rezultatą — išmatuota CI
+     * (run 35567237647): pilna schema buvo paskelbta pasenusia. Priežasties
+     * netyriau; `pg_get_indexdef` su pozicija yra dokumentuota katalogo funkcija,
      * grąžinanti tos pozicijos stulpelį, ir `indnkeyatts` riboja iki RAKTO
      * stulpelių (be `INCLUDE`).
      */
@@ -520,6 +524,7 @@ async function initializePostgres(env = process.env) {
               t.relname                    AS lentele,
               i.indisvalid,
               i.indisunique,
+              (i.indpred IS NOT NULL)      AS salyginis,
               (SELECT array_agg(pg_get_indexdef(i.indexrelid, k.ord::int, true) ORDER BY k.ord)
                  FROM generate_series(1, i.indnkeyatts) AS k(ord)
               ) AS stulpeliai
@@ -539,6 +544,7 @@ async function initializePostgres(env = process.env) {
       if (!rastas) return true;
       if (!rastas.indisvalid) return true;
       if (butinas.unikalus && !rastas.indisunique) return true;
+      if (Boolean(rastas.salyginis) !== Boolean(butinas.salyginis)) return true;
 
       const stulpeliai = rastas.stulpeliai || [];
       return (
@@ -555,7 +561,9 @@ async function initializePostgres(env = process.env) {
        * reikia žinoti, kurio laukiama. Rakto reikšmių čia nėra — tik schemos vardai.
        */
       const aprasai = trukstaIndeksu.map(
-        (x) => `${x.vardas} (${x.lentele}: ${x.stulpeliai.join(", ")}${x.unikalus ? ", UNIQUE" : ""})`
+        (x) =>
+          `${x.vardas} (${x.lentele}: ${x.stulpeliai.join(", ")}` +
+          `${x.unikalus ? ", UNIQUE" : ""}${x.salyginis ? ", su WHERE" : ", be WHERE"})`
       );
       throw new Error(
         `PostgreSQL schema pasenusi - trūksta arba netinkami indeksai: ${aprasai.join("; ")}. ` +
