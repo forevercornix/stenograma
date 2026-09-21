@@ -76,8 +76,28 @@ const UZDARYMO_RIBA_MS = 10_000;
  */
 const stebimi = new WeakMap();
 
-function delsaVidine(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * LENKTYNĖS, KURIOS ATŠAUKIA PRALAIMĖJUSĮ LAIKMATĮ.
+ *
+ * ⚠️ `Promise.race` PATS NIEKO NENUTRAUKIA. Sveikai užsidarius pool'ui laikmatis lieka
+ * gyvas ir laiko event loop'ą, kol suveiks. Išmatuota: be atšaukimo backend job'as
+ * užtruko **9 min 25 s** (run `35658701601`) vietoj ~5 min — testai tie patys, laukė
+ * tik procesas, po ~10 s kiekviename faile.
+ *
+ * ⚠️ `unref()` ČIA NETINKA, IR TAI IRGI IŠMATUOTA. Jis laikmatį padaro nematomą event
+ * loop'ui, tad procesas išeina NELAUKĘS nė tyčinio laukimo — `resursuKruva` testai,
+ * tikrinantys būtent ribos suveikimą, tada nebeišvedami išvis.
+ *
+ * @returns {Promise<"OK"|"TIMEOUT">}
+ */
+function lenktynesSuRiba(zadas, ms) {
+  let laikmatis;
+  const riba = new Promise((r) => {
+    laikmatis = setTimeout(() => r("TIMEOUT"), ms);
+  });
+  return Promise.race([zadas.then(() => "OK", () => "OK"), riba]).finally(() =>
+    clearTimeout(laikmatis)
+  );
 }
 
 /**
@@ -113,10 +133,7 @@ function stebetiPoola(pool, { vardas = "pool", dsn } = {}) {
 async function uzdarytiPoola(pool) {
   const busena = stebimi.get(pool) || { vardas: "pool", tikros: [], valymo: [] };
 
-  const baigta = await Promise.race([
-    pool.end().then(() => "OK", () => "OK"),
-    delsaVidine(UZDARYMO_RIBA_MS).then(() => "TIMEOUT"),
-  ]);
+  const baigta = await lenktynesSuRiba(pool.end(), UZDARYMO_RIBA_MS);
 
   let ribaVirsyta = false;
   if (baigta === "TIMEOUT") {
