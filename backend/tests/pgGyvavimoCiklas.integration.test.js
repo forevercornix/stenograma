@@ -113,13 +113,24 @@ test(
 test(
   "#380 D7: NUTRAUKTA jungtis ne valymo metu — registruojama kaip TIKRA klaida",
   { skip: PRALEISTI, timeout: 120000 },
-  async (t) => {
+  async () => {
     /**
      * ⚠️ TAI M4 SCENARIJUS: backend'ą nutraukia TESTAS, ne helper'io valymas. Skirtumą
      * nustato ŽYMĖ, kurią helper'is įjungia prieš savo paties `pg_terminate_backend`,
      * o ne pranešimo tekstas — abiem atvejais `pg` sako tą patį.
      */
-    const { pool } = poolasTestui(t, { dsn: DB_URL, vardas: "nutraukiamas" });
+    /**
+     * ⚠️ POOL'AS VALDOMAS RANKOMIS, NE `poolasTestui`. Šis testas SĄMONINGAI sukuria
+     * tikrą jungties klaidą, tad registruotas valymas teisingai kristų `t.after`
+     * kabliuke — ir testas atrodytų kaip gedimas vietoj įrodymo. Uždarymo ATMETIMAS
+     * čia yra pats tvirtinimas.
+     */
+    const { Pool } = require("pg");
+    const { stebetiPoola } = require("./helpers/resourceStack");
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), {
+      vardas: "nutraukiamas",
+      dsn: DB_URL,
+    });
 
     const klientas = await pool.connect();
     const { rows } = await klientas.query("SELECT pg_backend_pid() AS pid");
@@ -144,5 +155,12 @@ test(
       `nutraukta jungtis privalo būti UŽRAŠYTA kaip tikra klaida, gauta: ${JSON.stringify(klaidos)}`
     );
     assert.deepEqual(klaidos.valymo, [], "tai NĖRA valymo sukelta klaida");
+
+    /** ⚠️ IR JI PRIVALO NUVERSTI UŽDARYMĄ — antraip apskaita būtų tik žurnalas. */
+    await assert.rejects(
+      () => uzdarytiPoola(pool),
+      (e) => /CONNECTION_ERROR \(ne valymo\) nutraukiamas/.test(e.message),
+      "tikra jungties klaida privalo būti GEDIMAS, ne fonas"
+    );
   }
 );
