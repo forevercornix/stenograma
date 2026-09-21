@@ -1117,9 +1117,11 @@ async function sluotiSuHorizontu(env) {
   };
 
   let kviesta = 0;
+  const argumentai = [];
   jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
-  jobStore.system.valytiniBandymai = async () => {
+  jobStore.system.valytiniBandymai = async (a) => {
     kviesta += 1;
+    argumentai.push(a);
     return { kandidatai: [], praleista: 0, uzimti: 0 };
   };
   jobStore.listExpired = async () => [];
@@ -1132,7 +1134,7 @@ async function sluotiSuHorizontu(env) {
   const grazinti = horizontoAplinka({ ...env, LOG_LEVEL: "warn" });
   try {
     const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
-    return { summary, kviesta, warnai };
+    return { summary, kviesta, warnai, argumentai };
   } finally {
     grazinti();
     console.warn = tikrasWarn;
@@ -1220,4 +1222,37 @@ test("#351 D4a RIBA: BAIGTINIS per didelis horizontas sargo NEGAUDO", async () =
 
   assert.equal(kviesta, 1, "sargas šito atvejo NEGAUDO — ir testas fiksuoja būtent tai");
   assert.notEqual(summary.resultAttempts, null, "žingsnis NEBUVO praleistas sargo");
+});
+
+test("#351 R3: ribų skirtumas imamas IŠ ŠLAVĖJO, ir jis lygus `MAX_RASYMO_TRUKME_MS`", async () => {
+  /**
+   * ⚠️ TIKRINAMA PERDUOTA REIKŠMĖ, NE PERSKAIČIUOTA.
+   *
+   * Pirmoji redakcija skaičiavo `horizontas + attemptRegistry.MAX_RASYMO_TRUKME_MS`
+   * ir tikrino, kad skirtumas lygus `MAX`. Tai tautologija: abu dėmenys imami iš to
+   * paties modulio, tad sudubliuota šlavėjo konstanta lieka nematoma. Išmatuota —
+   * mutacija M8 (`retentionSweeper` su sava 30 min reikšme) tokio tvirtinimo NENUKOVĖ.
+   *
+   * Todėl imamas argumentas, kurį šlavėjas REALIAI paduoda `valytiniBandymai()`, ir
+   * lyginamas su registro konstanta. Dvi kopijos, išsiskyrusios per vieną deploy'ų,
+   * čia ir krenta.
+   */
+  const attemptRegistry = require("../utils/attemptRegistry");
+  const { argumentai, kviesta } = await sluotiSuHorizontu({
+    QUEUE_MAX_ATTEMPTS: undefined,
+    QUEUE_BACKOFF_MS: undefined,
+  });
+
+  assert.equal(kviesta, 1, "kontrolė: žingsnis įvyko");
+  const { laukianciuRibaMs, atmestuRibaMs } = argumentai[0];
+
+  assert.equal(
+    laukianciuRibaMs - atmestuRibaMs,
+    attemptRegistry.MAX_RASYMO_TRUKME_MS,
+    `šlavėjo riba ir tvora PRIVALO minėti tą patį skaičių: ${laukianciuRibaMs} - ${atmestuRibaMs}`
+  );
+  assert.ok(
+    laukianciuRibaMs >= attemptRegistry.MAX_RASYMO_TRUKME_MS,
+    "D4: `laukianciuRibaMs >= MAX_RASYMO_TRUKME_MS`"
+  );
 });

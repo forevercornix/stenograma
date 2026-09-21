@@ -242,7 +242,7 @@ test(
 );
 
 test(
-  "#351 R1 RIBOS: `MAX - ε` PRAEINA, `MAX + ε` ATMETAMA, ir `laukianciuRiba - horizontas === MAX`",
+  "#351 R1 RIBOS: `MAX - ε` PRAEINA, `MAX + ε` ATMETAMA",
   { skip: PRALEISTI, timeout: 180000 },
   async (t) => {
     /**
@@ -270,10 +270,14 @@ test(
       "`MAX + ε` privalo būti atmesta"
     );
 
-    const { revivalHorizonsMs } = require("../queues/config");
-    const horizontas = revivalHorizonsMs().horizonMs;
-    const laukianciuRiba = horizontas + attemptRegistry.MAX_RASYMO_TRUKME_MS;
-    assert.equal(laukianciuRiba - horizontas, MAX, "abi pusės PRIVALO minėti tą patį skaičių");
+    /**
+     * ⚠️ RIBŲ SANTYKIS ČIA NETIKRINAMAS SĄMONINGAI. Pirmoji redakcija skaičiavo
+     * `horizontas + attemptRegistry.MAX_RASYMO_TRUKME_MS` ir tikrino, kad skirtumas
+     * lygus `MAX` — tautologija, kurios sudubliuota šlavėjo konstanta net nepaliečia.
+     * Išmatuota: mutacija M8 (`retentionSweeper` sava 30 min reikšmė) šio failo
+     * NENUKOVĖ. Tikrinama ten, kur reikšmė realiai gimsta — `auditRetention`,
+     * perimant argumentą, kurį šlavėjas paduoda `valytiniBandymai()`.
+     */
   }
 );
 
