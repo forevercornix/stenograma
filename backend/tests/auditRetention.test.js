@@ -1073,3 +1073,151 @@ test("#305.1: ciklas TIK su praleidimais palieka kvitą, ir jis NĖRA `success: 
     jobStore.listExpired = originalus.listExpired;
   }
 });
+
+/* ══════════════════ #351 D4a — NETINKAMAS PRIKĖLIMO HORIZONTAS ══════════════════ */
+
+/**
+ * ⚠️ KODĖL ŠIE TESTAI GYVENA ČIA, O NE INTEGRACINIAME FAILE.
+ *
+ * Klausimas yra ne „ką daro DB", o „ar šlavėjas apskritai PRIEINA prie DB". Sargas
+ * grąžina anksčiau nei bet kokia užklausa, tad tikrinama būtent tai, kad
+ * `valytiniBandymai()` NEBUVO pakviesta. Tikra bazė čia nieko nepridėtų, o slėptų:
+ * su ja neįvykęs šlavimas atrodytų taip pat, kaip šlavimas, neradęs kandidatų.
+ */
+function horizontoAplinka(reiksmes) {
+  const atsargos = {};
+  for (const [k, v] of Object.entries(reiksmes)) {
+    atsargos[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  return () => {
+    for (const [k, v] of Object.entries(atsargos)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+}
+
+async function sluotiSuHorizontu(env) {
+  const retentionSweeper = require("../utils/retentionSweeper");
+  const jobStore = require("../utils/jobStore");
+  const tombstones = require("../utils/deletionTombstones");
+
+  /** ⚠️ Ta pati tapatybė abiem pusėms — kitaip žingsnis krenta anksčiau, ne dėl horizonto. */
+  const TAPATYBE = { host: "db", port: 5432, database: "stenograma" };
+  const tikrasZymu = tombstones.jungtiesTapatybe;
+  tombstones.jungtiesTapatybe = () => TAPATYBE;
+
+  const originalus = {
+    valytiniBandymai: jobStore.system.valytiniBandymai,
+    jungtiesTapatybe: jobStore.system.jungtiesTapatybe,
+    listExpired: jobStore.listExpired,
+    listReferencedStorageKeys: jobStore.system.listReferencedStorageKeys,
+  };
+
+  let kviesta = 0;
+  jobStore.system.jungtiesTapatybe = async () => TAPATYBE;
+  jobStore.system.valytiniBandymai = async () => {
+    kviesta += 1;
+    return { kandidatai: [], praleista: 0, uzimti: 0 };
+  };
+  jobStore.listExpired = async () => [];
+  jobStore.system.listReferencedStorageKeys = async () => null;
+
+  const warnai = [];
+  const tikrasWarn = console.warn;
+  console.warn = (...a) => warnai.push(a.map(String).join(" "));
+
+  const grazinti = horizontoAplinka({ ...env, LOG_LEVEL: "warn" });
+  try {
+    const summary = await retentionSweeper.runRetentionSweep({ now: Date.now() });
+    return { summary, kviesta, warnai };
+  } finally {
+    grazinti();
+    console.warn = tikrasWarn;
+    tombstones.jungtiesTapatybe = tikrasZymu;
+    Object.assign(jobStore.system, {
+      valytiniBandymai: originalus.valytiniBandymai,
+      jungtiesTapatybe: originalus.jungtiesTapatybe,
+      listReferencedStorageKeys: originalus.listReferencedStorageKeys,
+    });
+    jobStore.listExpired = originalus.listExpired;
+  }
+}
+
+test("#351 D4a: horizontas `NaN` — bandymų šlavimas NEVYKDOMAS, warn užfiksuotas", async () => {
+  /**
+   * ⚠️ `NaN` PAGAMINAMAS PO `teigiamas()` VALIDACIJOS, NE PRIEŠ JĄ.
+   *
+   * `retry += baze * 2 ** i`: kai `i >= 1024`, `2 ** i === Infinity`, o `baze === 0`
+   * duoda `0 * Infinity === NaN`. Abi įvestys (`1026`, `0`) yra teisėti teigiami
+   * skaičiai, tad konfigūracijos sargas jų nesustabdo. Mažiausia tokia reikšmė —
+   * išmatuota — yra `QUEUE_MAX_ATTEMPTS=1026`.
+   *
+   * ⚠️ `NaN + MAX === NaN`, o `NaN >= MAX` yra `false`: D4 invariantas NETENKINAMAS.
+   */
+  const { summary, kviesta, warnai } = await sluotiSuHorizontu({
+    QUEUE_MAX_ATTEMPTS: "1026",
+    QUEUE_BACKOFF_MS: "0",
+  });
+
+  assert.equal(kviesta, 0, "kandidatų užklausa NEGALI būti pasiekta su neapibrėžta riba");
+  assert.equal(summary.resultAttempts, null, "neįvykęs žingsnis pranešamas `null`, ne nuliu");
+  assert.ok(
+    warnai.some((e) => e.includes("attempt_sweep_skipped") && e.includes("NaN")),
+    `warn privalo įvardyti neteisingą horizontą: ${JSON.stringify(warnai)}`
+  );
+});
+
+test("#351 D4a: horizontas `Infinity` — bandymų šlavimas NEVYKDOMAS", async () => {
+  /**
+   * Ta pati aritmetika su `baze > 0` duoda `Infinity`, ne `NaN`. Sargas privalo
+   * gaudyti abu: `Infinity + MAX === Infinity`, ir amžiaus riba lieka neapibrėžta
+   * lygiai taip pat.
+   */
+  const { summary, kviesta, warnai } = await sluotiSuHorizontu({
+    QUEUE_MAX_ATTEMPTS: "1026",
+    QUEUE_BACKOFF_MS: "1",
+  });
+
+  assert.equal(kviesta, 0, "kandidatų užklausa NEGALI būti pasiekta");
+  assert.equal(summary.resultAttempts, null);
+  assert.ok(
+    warnai.some((e) => e.includes("attempt_sweep_skipped") && e.includes("Infinity")),
+    `warn privalo įvardyti reikšmę: ${JSON.stringify(warnai)}`
+  );
+});
+
+test("#351 D4a KONTROLĖ: tvarkingas horizontas šlavimo NESUSTABDO", async () => {
+  /**
+   * ⚠️ BE ŠITO du testai aukščiau suderinami su sargu, kuris atmeta VISKĄ — tokia
+   * realizacija juos praeitų, o produkcijoje bandymai nebūtų šluojami niekada.
+   */
+  const { summary, kviesta } = await sluotiSuHorizontu({
+    QUEUE_MAX_ATTEMPTS: undefined,
+    QUEUE_BACKOFF_MS: undefined,
+  });
+
+  assert.equal(kviesta, 1, "su tvarkinga riba kandidatų užklausa PRIVALO įvykti");
+  assert.equal(summary.resultAttempts, 0, "žingsnis įvyko ir nerado ko šalinti");
+});
+
+test("#351 D4a RIBA: BAIGTINIS per didelis horizontas sargo NEGAUDO", async () => {
+  /**
+   * ⚠️ TAI SARGO RIBOS FIKSAVIMAS, NE JO PRAPLĖTIMAS.
+   *
+   * `QUEUE_MAX_ATTEMPTS=60` duoda ~2.9e21 ms — baigtinį ir teigiamą, tad
+   * `Number.isFinite` jį praleidžia. Ribos čia nespėliojau: ji priklausytų nuo
+   * PostgreSQL `interval` vidinės reprezentacijos, kurios šiame repo niekas
+   * nefiksuoja, o spėta riba būtų blogesnė už nesančią — ji atrodytų kaip išvedimas.
+   *
+   * Fail-closed tam atvejui užtikrina KITAS mechanizmas: sakinys krenta DB pusėje, o
+   * `_valytiRezultatoBandymus()` kvietėjas klaidą gaudo ir nešalina nieko. Tai
+   * įrodoma su tikra baze (`isipareigojimoTvora.integration`), ne čia.
+   */
+  const { summary, kviesta } = await sluotiSuHorizontu({ QUEUE_MAX_ATTEMPTS: "60" });
+
+  assert.equal(kviesta, 1, "sargas šito atvejo NEGAUDO — ir testas fiksuoja būtent tai");
+  assert.notEqual(summary.resultAttempts, null, "žingsnis NEBUVO praleistas sargo");
+});

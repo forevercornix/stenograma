@@ -3002,8 +3002,13 @@ function createPostgresStore(
          * ⚠️ JOKIO I/O TARP ŠIOS PATIKROS IR `delete()` — tai ir yra visa priemonės
          * esmė. Pridėjus čia bet ką, kas eina į tinklą, garantija dingsta.
          *
-         * ⚠️ UŽRAKTO NĖRA SĄMONINGAI (PR-4 D4): fizinis I/O po užraktu draudžiamas,
-         * o zondai ir `delete()` yra būtent nuotolinis I/O.
+         * ⚠️ UŽRAKTAS YRA (#351 D3), IR PR-4 D4 TEBEGALIOJA. Patikra ima kandidatės
+         * eilutės `FOR UPDATE ... NOWAIT`, tad ji serializuojasi su rašytojo
+         * `isipareigoti()`. Draudimo „jokio fizinio I/O po užraktu" tai nepažeidžia
+         * ne dėl to, kad užrakto nėra, o dėl to, kad patikra vykdoma per `pool`:
+         * implicit transakcija baigiasi kartu su `SELECT`, ir užraktas paleidžiamas
+         * PRIEŠ zondus bei `delete()`. Perkėlus patikrą į išreikštinę transakciją,
+         * užraktas nusitęstų per nuotolinį I/O — būtent tai D4 ir draudžia.
          *
          * ⚠️ `laukianciuRibaMs` PRIVALO ATEITI IŠ KVIETĖJO — numatytoji reikšmė čia
          * reikštų ANTRĄ amžiaus semantiką nei atrankoje.
@@ -3025,12 +3030,28 @@ function createPostgresStore(
               };
             }
           } catch (klaida) {
-            /** ⚠️ Patikros gedimas = ATSISAKYMAS TRINTI, ne trynimas be patikros. */
+            /**
+             * ⚠️ `55P03` YRA ATSAKYMAS, NE GEDIMAS (#351 D3).
+             *
+             * `lock_not_available` reiškia, kad eilutę TUO METU laiko rašytojas —
+             * t. y. patikra pavyko ir grąžino „užimta". Iki #351 ji nueidavo į šitą
+             * patį `catch` ir virsdavo `nepavyko`, o tai operatoriaus kvite atrodo
+             * kaip DB triktis: nuoroda į klaidą, ne į normalų konkurencinį darbą.
+             *
+             * ⚠️ KLASIFIKUOJAMA PAGAL `code`, NE PAGAL PRANEŠIMO TEKSTĄ. Tekstas
+             * priklauso nuo serverio lokalės ir versijos; precedentas — `create()`
+             * (`err.code === "23505"`). ⚠️ IR TIK ŠI VIENA ŠAKA: visos kitos klaidos
+             * lieka `nepavyko`, nes apie jas mes NIEKO nežinome.
+             */
+            const uzrakto = klaida && klaida.code === "55P03";
+
             verdiktas = {
               attemptId: kandidatas.attempt_id,
               storageKey: raktas,
-              verdiktas: "nepavyko",
-              priezastis: `nuosavybės pakartotinė patikra nepavyko: ${klaida.message}`,
+              verdiktas: uzrakto ? "uzimtas" : "nepavyko",
+              priezastis: uzrakto
+                ? "kandidatės eilutę laiko RAŠYTOJAS (užraktas neprieinamas)"
+                : `nuosavybės pakartotinė patikra nepavyko: ${klaida.message}`,
             };
           }
 
