@@ -2661,9 +2661,18 @@ function createPostgresStore(
    *
    * ⚠️ KAS PASIKEITĖ IR KODĖL TO PAKAKO ANKSČIAU. Iki šiol registras buvo ATRANDAMUMO
    * mechanizmas: jis sako, kur ieškoti. Dabar jis yra DESTRUKTYVAUS VEIKSMO ĮĖJIMAS, ir
-   * tam reikia stipresnės garantijos, nei buvo suprojektuota. Schema `(job_id, storage_key)`
-   * unikalumo nereikalauja, o attempt-unique raktai to nepadaro savaime: jie garantuoja,
-   * kad MES nesukursime dublikato, ne kad jo nebus PO ATKŪRIMO.
+   * tam reikia stipresnės garantijos, nei buvo suprojektuota. Attempt-unique raktai jos
+   * nepadaro savaime: jie garantuoja, kad MES nesukursime dublikato, ne kad jo nebus PO
+   * ATKŪRIMO.
+   *
+   * ⚠️ NUO #375 SCHEMA UNIKALUMO REIKALAUJA — IR ŠI PATIKRA VIS TIEK LIEKA.
+   *
+   * `job_result_attempts_vienas_adresas` (`1756700000000`) neleidžia dviejų eilučių tuo
+   * pačiu `(storage_type, storage_key)`. Bet patikra gina ne tą momentą, kada indeksas
+   * galioja, o tą, kada jo NĖRA: atkūrimą iš dump'o, paimto PRIEŠ migraciją, ir bazę,
+   * kurioje indeksas pašalintas ranka. Sargas, kuris dingsta kartu su ginama savybe,
+   * nėra sargas — todėl ši šaka pasilieka, o ją dengiantys testai (#375 D7) vykdomi
+   * BŪTENT su pašalintu indeksu.
    *
    * ⚠️ PASIEKIAMA NE PER KODO KLAIDĄ, O PER NEKONSISTENTIŠKUS METADUOMENIS: eilutes,
    * atkurtas iš skirtingų momentų, arba taisytas ranka. Tada job'o A ištrynimas gali

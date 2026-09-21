@@ -72,6 +72,94 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
   const saugykla = { ...fs, backend: "fs" };
   const store = createPostgresStore(pool, { rasymoSaugykla: saugykla });
 
+  /**
+   * ⚠️ SCENARIJUS BE `job_result_attempts_vienas_adresas` INDEKSO (#375 D7b).
+   *
+   * Aštuoni žemiau esantys testai SĄMONINGAI kuria dvi registro eilutes vienu
+   * `(storage_type, storage_key)`. Nuo #375 tokia sąranka atmetama `23505` — ir
+   * būtent todėl jie NEŠALINAMI: jie gina `svetimiAdresai` ir `kitasGyvasBandymas`
+   * tam atvejui, kai indekso NĖRA. Grėsmės modelis užrašytas :599–608: būsena
+   * pasiekiama ne per kodo klaidą, o per atkūrimą iš dump'o, paimto PRIEŠ migraciją,
+   * arba ranka taisytas eilutes.
+   *
+   * ❌ Paversti juos „tikisi 23505" būtų greičiausias žalias kelias ir panaikintų
+   * vienintelę tos gynybos aprėptį — kodą, kurio niekas netikrina.
+   *
+   * ⚠️ IZOLIACIJA (AGENTS.md §9.3). Indeksas atkuriamas `finally`, tad kitas testas
+   * mato DB SU indeksu. Failas turi SAVO duomenų bazę (`testDatabaseUrl("registryerasure")`),
+   * o subtestai vykdomi nuosekliai, tad langas neperžengia šio failo ribų. Kad tai
+   * nebūtų prielaida, paskutinis testas faile ją patikrina eksplicitiškai.
+   */
+  async function beIndekso(scenarijus) {
+    await pool.query(`DROP INDEX IF EXISTS ${attemptRegistry.VIENO_ADRESO_INDEKSAS}`);
+    try {
+      return await scenarijus();
+    } finally {
+      /**
+       * ⚠️ PIRMA IŠVALOMI DUBLIKATAI, TADA ATKURIAMAS INDEKSAS — IR TAI NE
+       * PATOGUMAS, O ŠIO HELPER'IO TEISINGUMO SĄLYGA.
+       *
+       * Scenarijus SĄMONINGAI palieka dvi eilutes vienu adresu; tai jo tikslas.
+       * Bandant statyti indeksą virš tokios būsenos, `CREATE UNIQUE INDEX` krenta
+       * `23505` — ir indeksas NEATSIKURIA. Išmatuota CI (run 35492896256): aštuoni
+       * (b) testai krito būtent ties atkūrimu, o devintas — dėl to, kad iki jo
+       * indekso nebeliko.
+       *
+       * ⚠️ APIMTIS — VISA LENTELĖ, NE SCENARIJAUS EILUTĖS. Ankstesnė šio komentaro
+       * redakcija teigė „tik tai, ką sukūrė scenarijus"; `DELETE` jokio scenarijaus
+       * ribojimo neturi ir šalina KIEKVIENĄ dublikatą lentelėje.
+       *
+       * Čia tai saugu, ir saugumas kyla iš trijų patikrinamų dalykų, ne iš ketinimo:
+       * dublikatas apskritai įmanomas TIK šiame `beIndekso()` lange (kitur jį
+       * atmeta indeksas); failas turi SAVO duomenų bazę (`testDatabaseUrl(...)`);
+       * subtestai vykdomi nuosekliai, tad antro atviro lango nėra. Nė vienas kitas
+       * testas dublikatų nepalieka, tad trinti nėra ko, kas jam priklausytų.
+       *
+       * ⚠️ UŽRAŠOMA, NES SIAURESNIS VARIANTAS ATRODO PAPRASTESNIS, NEI YRA:
+       * apriboti pagal `job_id` reikštų helper'iui žinoti, ką scenarijus sukūrė, o
+       * scenarijai kuria skirtingus job'us skirtingu metu. Platesnis `DELETE` su
+       * užrašyta prielaida čia teisingesnis nei siauresnis su numanoma.
+       *
+       * Trinama DETERMINISTIŠKAI: kiekvienam adresui paliekama eilutė su mažiausiu
+       * `attempt_id`. Tai testo šiukšlių valymas, ne sprendimas apie duomenis —
+       * eilutės egzistuoja tik todėl, kad testas tyčia sukūrė būseną, kurios
+       * produkcijoje būti negali.
+       */
+      await pool.query(
+        `DELETE FROM job_result_attempts a
+               USING job_result_attempts b
+               WHERE a.storage_type = b.storage_type
+                 AND a.storage_key = b.storage_key
+                 AND a.attempt_id > b.attempt_id`
+      );
+      await pool.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${attemptRegistry.VIENO_ADRESO_INDEKSAS}
+           ON job_result_attempts (storage_type, storage_key)`
+      );
+    }
+  }
+
+  /**
+   * ⚠️ SĄRANKA, KURIĄ NUO #375 ATMETA DB — bendra (a) pusė aštuoniems testams.
+   *
+   * Tikrinamas `23505` IR konstrainto vardas: ta pati lentelė turi kelis unikalumo
+   * šaltinius (`attempt_id` PK, dalinis `vienas_isipareigotas`), tad vien kodas
+   * nepasakytų, KURIS invariantas suveikė.
+   */
+  async function sarankaAtmetama(jobId, storageType, storageKey, busena) {
+    await assert.rejects(
+      () =>
+        pool.query(
+          `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [attemptRegistry.naujasBandymas(), jobId, storageType, storageKey, busena]
+        ),
+      (klaida) =>
+        klaida.code === "23505" && klaida.constraint === attemptRegistry.VIENO_ADRESO_INDEKSAS,
+      "bendras adresas privalo būti atmestas su `23505` IR šio indekso vardu"
+    );
+  }
+
   async function naujasJobas() {
     const job = await store.create({ ownerKind: OWNER_KIND.UNOWNED, type: "transcription" });
     await store.update(job.id, { status: STATUS.PROCESSING, phase: "transcribing" });
@@ -594,7 +682,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await fsp.rm(laikinas, { force: true });
   });
 
-  await t.test("SVETIMAS adresas NEŠALINAMAS: job'o A ištrynimas neliečia job'o B rezultato", async () => {
+  await t.test("SVETIMAS adresas NEŠALINAMAS: job'o A ištrynimas neliečia job'o B rezultato [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ REGISTRAS TAPO DESTRUKTYVAUS VEIKSMO ĮĖJIMU (Codex, #304 / F).
      *
@@ -631,9 +719,9 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
       "klaidos klasė privalo sakyti „nesaugu\", ne „nepavyko\": pakartojimas to neišspręstų"
     );
     assert.deepEqual(rezultatas.pasalinti, [], "nieko nepašalinta");
-  });
+  }));
 
-  await t.test("SVETIMAS `pending` bandymas irgi saugo objektą — registras yra antras šaltinis", async () => {
+  await t.test("SVETIMAS `pending` bandymas irgi saugo objektą — registras yra antras šaltinis [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ PRALEISTA PUSĖ BUVO PATS REGISTRAS (Codex, #304 / I).
      *
@@ -666,9 +754,9 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     assert.match(rezultatas.nepavyko[0].priezastis, /NESAUGU/);
 
     await saugykla.delete(bBandymas.raktas);
-  });
+  }));
 
-  await t.test("#305.1: GYVAS svetimo job'o bandymas SAUGO adresą nuo retencijos", async () => {
+  await t.test("#305.1: GYVAS svetimo job'o bandymas SAUGO adresą nuo retencijos [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ VIENINTELIS #305 PUNKTAS, KURIS TRINA SVETIMUS DUOMENIS AUTOMATIŠKAI.
      *
@@ -740,7 +828,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
 
     await saugykla.delete(bBandymas.raktas);
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [aAttempt]);
-  });
+  }));
 
   await t.test("#305.1 KONTROLĖ: adresas, kurio niekas kitas neturi, ŠLUOJAMAS", async () => {
     /**
@@ -768,7 +856,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     await saugykla.delete(nutrukes.raktas);
   });
 
-  await t.test("#305.1: svetimas `abandoned` bandymas šlavimo NEBLOKUOJA", async () => {
+  await t.test("#305.1: svetimas `abandoned` bandymas šlavimo NEBLOKUOJA [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ SPRENDIMAS, NE PRALEIDIMAS. Svetimas atmestas bandymas reiškia, kad
      * objekto nebereikia NIEKAM — jį šalintų ir paties B šlavėjas. Užblokavus
@@ -808,9 +896,9 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
 
     await saugykla.delete(bBandymas.raktas);
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [aAttempt]);
-  });
+  }));
 
-  await t.test("#305.1/B1: TO PATIES job'o gyvas `pending` irgi saugo adresą", async () => {
+  await t.test("#305.1/B1: TO PATIES job'o gyvas `pending` irgi saugo adresą [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ PIRMOJI REDAKCIJA ŠITO NEDENGĖ, IR TAI BUVO KLAUSIMO KLAIDA.
      *
@@ -844,9 +932,9 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
 
     await saugykla.delete(gyvas.raktas);
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [senas]);
-  });
+  }));
 
-  await t.test("#305.1/B2: du PASIBAIGĘ `pending` tuo pačiu adresu — ABU tampa šluotini", async () => {
+  await t.test("#305.1/B2: du PASIBAIGĘ `pending` tuo pačiu adresu — ABU tampa šluotini [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ AMŽINA BLOKADA, IR JI KILO IŠ DVIEJŲ AMŽIAUS SEMANTIKŲ VIENAME SAKINYJE.
      *
@@ -885,9 +973,9 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
 
     await saugykla.delete(aBandymas.raktas);
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [bAttempt]);
-  });
+  }));
 
-  await t.test("#305.1/A: nuosavybė PERTIKRINAMA ties destruktyvia riba", async () => {
+  await t.test("#305.1/A: nuosavybė PERTIKRINAMA ties destruktyvia riba [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ PR-5 D ŠAKNIES RECIDYVAS: „snapshot be pakartotinės patikros".
      *
@@ -933,7 +1021,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
 
     await saugykla.delete(aBandymas.raktas);
     await pool.query("DELETE FROM job_result_attempts WHERE attempt_id = $1", [bAttempt]);
-  });
+  }));
 
   await t.test("#305.1/II: PATI KANDIDATĖ įsipareigoja tarp atrankos ir šalinimo", async () => {
     /**
@@ -1019,7 +1107,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     assert.equal(await saugykla.head(bandymas.raktas), null, "objekto nebeturi būti");
   });
 
-  await t.test("#305.1/III: registracija PO zondų, PRIEŠ patikrą — objektas išlieka", async () => {
+  await t.test("#305.1/III: registracija PO zondų, PRIEŠ patikrą — objektas išlieka [D7b: be indekso]", async () => beIndekso(async () => {
     /**
      * ⚠️ ZONDAI PERKELTI PRIEŠ PATIKRĄ, IR TAI NE LANGO PERKĖLIMAS.
      *
@@ -1097,7 +1185,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
       aBandymas.raktas,
       b,
     ]);
-  });
+  }));
 
   await t.test("KONTROLĖ: SAVAS adresas šalinamas normaliai", async () => {
     /**
@@ -1209,5 +1297,84 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     assert.equal(await saugykla.head(eilute.storage_key), null);
     assert.equal(await saugykla.head(nutrukes.raktas), null);
     assert.equal(outcome.jobRemoved, true, "objektai pašalinti, tad eilutę šalinti leidžiama");
+  });
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+   * #375 D7a — TA PATI SĄRANKA, KURIĄ DB DABAR ATMETA
+   * ═══════════════════════════════════════════════════════════════════════════ */
+
+  await t.test("#375 D7a: visos aštuonios bendro adreso sąrankos atmetamos `23505`", async () => {
+    /**
+     * ⚠️ AŠTUONIŲ (b) TESTŲ ANTROJI PUSĖ — NAUJASIS INVARIANTAS.
+     *
+     * Aukščiau esantys aštuoni testai vykdomi SU PAŠALINTU indeksu, nes gina tą
+     * atvejį, kai jo nėra. Šis tikrina priešingą kryptį: kad normalioje bazėje ta
+     * pati sąranka nebeįmanoma.
+     *
+     * ⚠️ TIKRINAMOS VISOS TRYS `busena` REIKŠMĖS, KURIAS NAUDOJA (b) PUSĖ.
+     * Indeksas PILNAS, ne dalinis, tad `abandoned` eilutė su užimtu adresu turi
+     * būti atmesta lygiai taip pat kaip `pending` — o būtent `abandoned` ir yra ta
+     * būsena, kurią dalinis indeksas praleistų.
+     *
+     * ⚠️ IR VIENAS LEIDŽIAMAS ATVEJIS. Be jo testas praeitų ir su indeksu, kuris
+     * atmeta VISKĄ — įskaitant teisėtą tą patį raktą kitoje saugykloje.
+     */
+    const b = await naujasJobas();
+    await store.finishAtomic(b, STATUS.COMPLETED, { result: { text: "gyvas B" } });
+    const bEilute = await rezultatoEilute(b);
+
+    const atvejai = [
+      ["SVETIMAS adresas NEŠALINAMAS", attemptRegistry.BUSENA.ATMESTA],
+      ["SVETIMAS `pending` bandymas", attemptRegistry.BUSENA.ATMESTA],
+      ["#305.1 GYVAS svetimo job'o bandymas", attemptRegistry.BUSENA.ATMESTA],
+      ["#305.1 svetimas `abandoned`", attemptRegistry.BUSENA.ATMESTA],
+      ["#305.1/B1 to paties job'o `pending`", attemptRegistry.BUSENA.ATMESTA],
+      ["#305.1/B2 du pasibaigę `pending`", attemptRegistry.BUSENA.LAUKIA],
+      ["#305.1/A nuosavybė pertikrinama", attemptRegistry.BUSENA.ISIPAREIGOTA],
+      ["#305.1/III registracija po zondų", attemptRegistry.BUSENA.LAUKIA],
+    ];
+
+    for (const [scenarijus, busena] of atvejai) {
+      const a = await naujasJobas();
+      await sarankaAtmetama(a, bEilute.storage_type, bEilute.storage_key, busena);
+      assert.ok(scenarijus, "scenarijaus vardas — kad ataskaitos lentelė turėtų atitikmenį");
+    }
+
+    /**
+     * ⚠️ KONTROLĖ: TAS PATS RAKTAS KITOJE SAUGYKLOJE LEIDŽIAMAS.
+     *
+     * Tapatybė yra PORA. `s3` objektas tuo pačiu keliu yra kitas objektas, ir
+     * indeksas ant vieno `storage_key` jį uždraustų.
+     */
+    const c = await naujasJobas();
+    await pool.query(
+      `INSERT INTO job_result_attempts (attempt_id, job_id, storage_type, storage_key, busena)
+       VALUES ($1, $2, 's3', $3, $4)`,
+      [attemptRegistry.naujasBandymas(), c, bEilute.storage_key, attemptRegistry.BUSENA.LAUKIA]
+    );
+  });
+
+  await t.test("#375 D7 IZOLIACIJA: indeksas atkurtas po visų (b) testų", async () => {
+    /**
+     * ⚠️ IZOLIACIJA ĮRODOMA, NE TEIGIAMA (AGENTS.md §9.3).
+     *
+     * `beIndekso()` atkuria indeksą `finally` bloke, bet tai yra TEIGINYS, kol
+     * niekas jo nepatikrina. Jei kuris nors (b) testas nutrūktų taip, kad `finally`
+     * nesuveiktų, visi vėlesni šio failo testai — ir kitas failas, jei kada nors
+     * pasidalytų DB — dirbtų bazėje be invarianto, o jų žalia spalva nieko
+     * nereikštų.
+     *
+     * Šis testas yra paskutinis faile sąmoningai.
+     */
+    const { rows } = await pool.query(
+      `SELECT i.indisvalid, i.indisunique
+         FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE c.relname = $1`,
+      [attemptRegistry.VIENO_ADRESO_INDEKSAS]
+    );
+
+    assert.equal(rows.length, 1, "indeksas privalo egzistuoti po visų (b) testų");
+    assert.equal(rows[0].indisvalid, true, "ir būti GALIOJANTIS");
+    assert.equal(rows[0].indisunique, true, "ir unikalus");
   });
 });

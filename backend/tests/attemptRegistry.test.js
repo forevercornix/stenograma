@@ -248,3 +248,198 @@ test("ATIDARYMO SĄLYGA: raktas išvedamas iš `attemptId`, NE iš turinio", () 
     );
   }
 });
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * #375 D4 — `23505` KLASIFIKACIJA BE DUOMENŲ BAZĖS
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/** Vykdytojas, metantis nurodytą PostgreSQL klaidą — kaip ją mestų tikras `pg`. */
+function metantisVykdytojas(code, constraint) {
+  return {
+    async query() {
+      const klaida = new Error("duplicate key value violates unique constraint");
+      klaida.code = code;
+      klaida.constraint = constraint;
+      throw klaida;
+    },
+  };
+}
+
+/**
+ * ⚠️ RAKTAS IŠVEDAMAS `bandymoRaktas()`, NE RAŠOMAS RANKA (#375 F3).
+ *
+ * Ankstesnė redakcija čia turėjo `results/<jobId>/a.json` — formą, kurios
+ * produkcijoje nėra. Dėl to testas žemiau galėjo tvirtinti, kad klaidos tekste
+ * NĖRA `attemptId`, ir būti žalias: fixture raktas jo tiesiog neturėjo.
+ *
+ * Tikras raktas yra `results/<jobId>/<attemptId>.json`, tad `attemptId` klaidos
+ * tekste yra VISADA. Fixture, nukrypstantis nuo schemos, paverčia asercijas
+ * teiginiais apie patį fixture.
+ */
+const BANDYMAS = {
+  attemptId: "11111111-2222-3333-4444-555555555555",
+  jobId: "99999999-8888-7777-6666-555555555555",
+  storageType: "fs",
+  storageKey: attemptRegistry.bandymoRaktas(
+    "99999999-8888-7777-6666-555555555555",
+    "11111111-2222-3333-4444-555555555555"
+  ),
+};
+
+test("#375 D4: `23505` SU šio indekso vardu → `BendroAdresoKlaida`", async () => {
+  /**
+   * ⚠️ ELGSENA TIKRINAMA BE DB SĄMONINGAI. Klausimas čia yra „kaip klasifikuojama
+   * klaida", ne „ar PostgreSQL ją meta" — antrąjį dengia
+   * `postgresStore.integration`. Dublis leidžia patikrinti ir tą šaką, kurios
+   * tikra DB pagal užsakymą negamina.
+   */
+  await assert.rejects(
+    () =>
+      attemptRegistry.registruoti(
+        metantisVykdytojas("23505", attemptRegistry.VIENO_ADRESO_INDEKSAS),
+        BANDYMAS
+      ),
+    (klaida) => {
+      assert.ok(klaida instanceof attemptRegistry.BendroAdresoKlaida);
+      assert.equal(klaida.code, "ATTEMPT_ADDRESS_TAKEN");
+      assert.equal(klaida.storageType, "fs", "klaida neša adresą diagnostikai");
+      return true;
+    }
+  );
+});
+
+test("#375 D4: `23505` su KITU konstraintu praeina NEPAKEISTAS", async () => {
+  /**
+   * ⚠️ ŠI ASERCIJA GINA `err.constraint` DALĮ.
+   *
+   * Ta pati lentelė turi bent tris unikalumo šaltinius: `attempt_id` PK, dalinį
+   * `job_result_attempts_vienas_isipareigotas` ir mūsiškį. Klasifikuojant tik pagal
+   * `err.code`, PK pažeidimas — visai kitas gedimas — būtų praneštas kaip bendras
+   * adresas, ir remontas eitų ne ta kryptimi.
+   */
+  for (const svetimas of ["job_result_attempts_pkey", "job_result_attempts_vienas_isipareigotas"]) {
+    await assert.rejects(
+      () => attemptRegistry.registruoti(metantisVykdytojas("23505", svetimas), BANDYMAS),
+      (klaida) => {
+        assert.equal(
+          klaida instanceof attemptRegistry.BendroAdresoKlaida,
+          false,
+          `${svetimas}: NĖRA bendro adreso klaida`
+        );
+        assert.equal(klaida.code, "23505", "originali klaida perduodama nepakeista");
+        return true;
+      }
+    );
+  }
+});
+
+test("#375 D4: ne `23505` klaida perduodama nepakeista", async () => {
+  /** Ryšio ar sintaksės klaida neturi virsti domenine — kitaip dingtų priežastis. */
+  await assert.rejects(
+    () => attemptRegistry.registruoti(metantisVykdytojas("08006", null), BANDYMAS),
+    (klaida) => klaida.code === "08006" && !(klaida instanceof attemptRegistry.BendroAdresoKlaida)
+  );
+});
+
+test("#375: kolizijos klaidoje yra ADRESAS ir nuoroda — ir nieko daugiau", () => {
+  /**
+   * ⚠️ ANKSTESNĖ ŠIO TESTO REDAKCIJA TVIRTINO, KAD TEKSTE NĖRA `attemptId` (F3).
+   *
+   * Ji buvo žalia, bet ne todėl, kad savybė galioja. Fixture raktas tada buvo
+   * `results/<jobId>/a.json`, o tikrasis — `results/<jobId>/<attemptId>.json`.
+   * Kadangi žinutė įdeda `storageKey`, PRODUKCIJOJE `attemptId` joje yra visada.
+   * Asercija negalėjo kristi dėl jokio elgesio pokyčio — ji matavo fixture.
+   *
+   * ⚠️ IR TAI NĖRA YDA, KURIĄ REIKTŲ TAISYTI KODE. `attemptId` yra rakto DALIS;
+   * norint jo tekste neturėti, reikėtų nerodyti adreso — o adresas ir yra
+   * vienintelis dalykas, dėl kurio ši klaida operatoriui naudinga.
+   *
+   * GINA TAI, KAS TIKRAI GALIOJA: matomas adresas, matoma nuoroda į sprendimą, ir
+   * NIEKO daugiau — jokio `stack`, jokio SQL, jokios eilutės turinio.
+   */
+  const klaida = new attemptRegistry.BendroAdresoKlaida(BANDYMAS.storageType, BANDYMAS.storageKey);
+
+  assert.ok(klaida.message.includes(BANDYMAS.storageKey), "adresas privalo būti matomas");
+  assert.match(klaida.message, /#375/, "nuoroda į sprendimą");
+
+  /** Kodas ir laukai — struktūroje, kad kvietėjai nesiremtų teksto analize. */
+  assert.equal(klaida.code, "ATTEMPT_ADDRESS_TAKEN");
+  assert.equal(klaida.storageType, BANDYMAS.storageType);
+  assert.equal(klaida.storageKey, BANDYMAS.storageKey);
+
+  /**
+   * ⚠️ RIBA IŠ VIRŠAUS. Be jos „nieko daugiau" būtų pageidavimas: pranešimas gali
+   * ilgainiui prisirinkti SQL fragmentų ar eilutės turinio, ir niekas nekristų.
+   */
+  assert.equal(/INSERT|SELECT|\bat \b/i.test(klaida.message), false, `į tekstą pateko per daug: ${klaida.message}`);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * #375 D4 — KLAIDA PRIVALO IŠLIKTI DOMENINĖ IKI OPERATORIAUS
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+const jobRunner = require("../queues/jobRunner");
+
+/**
+ * ⚠️ D4 GALIOJO TIK IKI `registruoti()` RIBOS, IR TAI NEBUVO MATOMA.
+ *
+ * `BendroAdresoKlaida` krisdavo į `_classifyError()` numatytąją šaką: kodas
+ * tapdavo `internal_error`, pranešimas — `sanitizeServerError()` neutralus
+ * tekstas. Konstraintas rašymą atmesdavo teisingai, bet PRIEŽASTIS dingdavo
+ * būtent ten, kur D4 ją siuntė — job'o klaidos įraše.
+ *
+ * ⚠️ NĖ VIENAS TESTAS TO NEMATĖ, nes visi matavo `registruoti()` IŠVESTĮ, o ne
+ * tai, kas su ja nutinka toliau. Riba tarp „klaida sukurta" ir „klaida pasiekė
+ * adresatą" buvo nepadengta.
+ */
+test("#375 D4: `BendroAdresoKlaida` iki operatoriaus ateina DOMENINĖ, ne `internal_error`", () => {
+  const klaida = new attemptRegistry.BendroAdresoKlaida("fs", BANDYMAS.storageKey);
+
+  const rezultatas = jobRunner._classifyError(klaida, "testas");
+
+  assert.equal(
+    rezultatas.errorCode,
+    "ATTEMPT_ADDRESS_TAKEN",
+    "kodas privalo išlikti — `internal_error` čia reikštų, kad D4 diagnostika dingo"
+  );
+  assert.notEqual(rezultatas.errorCode, "internal_error");
+});
+
+test("#375 D4: viešame pranešime NĖRA saugyklos adreso, o loge — YRA", () => {
+  /**
+   * ⚠️ DVI PUSĖS, IR ABI BŪTINOS.
+   *
+   * Viešas laukas keliauja per `GET /api/jobs/:id` savininkui: `storage_key` yra
+   * kelias su `jobId` ir `attemptId`, jam nieko nesakantis. Precedentas —
+   * `ArtifactStoreError` (#290): viešas tekstas gaminamas IŠ KODO.
+   *
+   * Bet adresas ir YRA D4 turinys, tad jis privalo likti loge — kitaip pataisymas
+   * tik perkeltų praradimą iš vienos vietos į kitą.
+   */
+  const klaida = new attemptRegistry.BendroAdresoKlaida("fs", BANDYMAS.storageKey);
+
+  const eilutes = [];
+  const originalus = console.error;
+  console.error = (...args) => {
+    eilutes.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+  };
+
+  let rezultatas;
+  try {
+    rezultatas = jobRunner._classifyError(klaida, "testas");
+  } finally {
+    console.error = originalus;
+  }
+
+  const logas = eilutes.join("\n");
+
+  assert.equal(
+    rezultatas.message.includes(BANDYMAS.storageKey),
+    false,
+    `adresas pateko į VIEŠĄ pranešimą: ${rezultatas.message}`
+  );
+  assert.match(rezultatas.message, /adresas jau užimtas/, "bet pranešimas privalo pasakyti, KAS nutiko");
+
+  assert.ok(logas.includes("ATTEMPT_ADDRESS_TAKEN"), "kodas privalo patekti į logą");
+  assert.ok(logas.includes(BANDYMAS.storageKey), `adresas privalo likti loge:\n${logas.slice(0, 300)}`);
+});

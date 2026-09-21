@@ -81,13 +81,22 @@ const log = createLogger("artifact-fs");
  * trukti vienas rašymas". Dvi skirtingos trukmės, sutampančios tik dabar. Sąlyga, kurią
  * tai uždeda šlavėjui, užrašyta plane (PR-5 įėjimo sąlyga 4a), o ne palikta horizontui.
  *
- * ⚠️ DETERMINIZMAS SAUGUS TIK TODĖL, KAD RAKTAI YRA ATTEMPT-UNIQUE.
+ * ⚠️ DETERMINIZMAS SAUGUS TODĖL, KAD RAKTAI YRA ATTEMPT-UNIQUE — IR TAI DABAR DB
+ * INVARIANTAS, NE KONVENCIJA (#375).
  *
  * Du rašytojai tam pačiam raktui vienu metu susidurtų ties `wx` (`EEXIST`), o ne tyliai
- * perrašytų vienas kitą. Šiandien tokių nėra: `results/<jobId>/<attemptId>.json` duoda
- * kiekvienam bandymui savo adresą. Pakeitus rakto schemą į turinio adresą ar bet kokią
- * kitą, kur du rašytojai dalijasi raktu, ŠI prielaida dingtų — todėl ji užrašyta čia, o
- * ne numanoma.
+ * perrašytų vienas kitą. Kad tokių nebūtų, anksčiau laikė TIK rakto generavimo
+ * konvencija: `results/<jobId>/<attemptId>.json` su `crypto.randomUUID()`. Konvencija
+ * galiojo tol, kol niekas nepakeis rakto schemos.
+ *
+ * Nuo `1756700000000` ją laiko `job_result_attempts_vienas_adresas` — unikalus indeksas
+ * ant `(storage_type, storage_key)`. Pakeitus rakto schemą į turinio adresą ar bet kokią
+ * kitą, kur du rašytojai dalytųsi raktu, REGISTRACIJA ATMETAMA (`ATTEMPT_ADDRESS_TAKEN`),
+ * ir tai įvyksta PRIEŠ `put()` — t. y. prieš šį kelią.
+ *
+ * ⚠️ RIBA: indeksas gina REGISTRĄ, ne failų sistemą. Objektas, atsiradęs ne per mūsų
+ * rašymo kelią (rankinis kopijavimas, atkūrimas į kitą prefiksą), jo nepaiso — todėl
+ * `wx` čia lieka, o ne pakeičiamas prielaida, kad kolizijų nebebus.
  *
  * @param {string} raktas artefakto raktas (toks pat, koks registre `storage_key`)
  * @returns {string} laikino failo vardas TAME PAČIAME kataloge kaip galutinis objektas
