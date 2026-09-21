@@ -6,7 +6,7 @@ const os = require("node:os");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const { Pool, Client } = require("pg");
-const { rastiIndeksa, kvalifikuotasVardas } = require("./helpers/indeksoTapatybe");
+const { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele } = require("./helpers/indeksoTapatybe");
 const { iki } = require("./helpers/migracijuAibe");
 const {
   skipWithoutPostgres,
@@ -1261,8 +1261,9 @@ test(
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
       await pool.query(`DROP INDEX ${indeksas}`);
+      const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
       await pool.query(
-        `CREATE UNIQUE INDEX ${indeksas} ON job_result_attempts (job_id, storage_key)`
+        `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS} ON ${lentele} (job_id, storage_key)`
       );
 
       await assert.rejects(
@@ -1293,8 +1294,9 @@ test(
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
       await pool.query(`DROP INDEX ${indeksas}`);
+      const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
       await pool.query(
-        `CREATE UNIQUE INDEX ${indeksas} ON job_result_attempts (storage_key, storage_type)`
+        `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS} ON ${lentele} (storage_key, storage_type)`
       );
 
       await assert.rejects(
@@ -1399,8 +1401,9 @@ test(
       assert.equal(rastas, null, "svetimos schemos objektas NĖRA mūsų indeksas");
 
       /** Kontrolė: atkūrus savoje schemoje — randamas, su teisinga stulpelių seka. */
+      const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
       await pool.query(
-        `CREATE UNIQUE INDEX ${musu} ON job_result_attempts (storage_type, storage_key)`
+        `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS} ON ${lentele} (storage_type, storage_key)`
       );
       const vel = await rastiIndeksa(pool, VIENO_ADRESO_INDEKSAS, "job_result_attempts");
       assert.ok(vel, "savoje schemoje privalo būti randamas");

@@ -505,17 +505,23 @@ async function initializePostgres(env = process.env) {
      * taptų sunkiau skaitoma nei du atskiri, aiškūs klausimai.
      *
      * ⚠️ TAPATYBĘ NUSTATO KETURI DALYKAI, NE VARDAS: schema, lentelė, stulpelių
-     * SEKA ir `indisvalid`/`indisunique`. `indkey` yra `int2vector` — jo elementų
-     * eilė ir yra indekso stulpelių tvarka, tad `WITH ORDINALITY` ją išsaugo.
+     * SEKA ir `indisvalid`/`indisunique`.
+     *
+     * ⚠️ SEKA IMAMA PER `pg_get_indexdef(oid, pozicija, pretty)`, NE PER
+     * `unnest(indkey)`. `indkey` yra `int2vector`, ne paprastas masyvas, ir
+     * korreliuotas `unnest` jo viduje grąžino tuščią rezultatą net GALIOJANČIAM
+     * indeksui — išmatuota CI (run 35567237647): pilna schema buvo paskelbta
+     * pasenusia. `pg_get_indexdef` su pozicija yra dokumentuota katalogo funkcija,
+     * grąžinanti tos pozicijos stulpelį, ir `indnkeyatts` riboja iki RAKTO
+     * stulpelių (be `INCLUDE`).
      */
     const { rows: iRows } = await pool.query(
       `SELECT i.indexrelid::regclass::text AS vardas,
               t.relname                    AS lentele,
               i.indisvalid,
               i.indisunique,
-              (SELECT array_agg(a.attname ORDER BY k.ord)
-                 FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
-                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+              (SELECT array_agg(pg_get_indexdef(i.indexrelid, k.ord::int, true) ORDER BY k.ord)
+                 FROM generate_series(1, i.indnkeyatts) AS k(ord)
               ) AS stulpeliai
          FROM pg_index i
          JOIN pg_class ic    ON ic.oid = i.indexrelid

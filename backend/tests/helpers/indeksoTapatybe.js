@@ -29,9 +29,8 @@ async function rastiIndeksa(vykdytojas, vardas, lentele) {
   const { rows } = await vykdytojas.query(
     `SELECT i.indisvalid,
             i.indisunique,
-            (SELECT array_agg(a.attname ORDER BY k.ord)
-               FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
-               JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+            (SELECT array_agg(pg_get_indexdef(i.indexrelid, k.ord::int, true) ORDER BY k.ord)
+               FROM generate_series(1, i.indnkeyatts) AS k(ord)
             ) AS stulpeliai
        FROM pg_index i
        JOIN pg_class ic    ON ic.oid = i.indexrelid
@@ -58,6 +57,17 @@ async function rastiIndeksa(vykdytojas, vardas, lentele) {
  * įterpiamas per `quote_ident`, tad veikia ir su schema, kurios vardas reikalauja
  * kabučių. Prielaidos „testo DB turi vieną schemą" čia NĖRA — ji būtų dar viena
  * neužrašyta sąlyga, o būtent tokias šis PR ir šalina.
+ *
+ * ⚠️ KVALIFIKUOJAMAS TIK `DROP`, NE `CREATE` — IR TAI NE PASIRINKIMAS.
+ *
+ * PostgreSQL `CREATE INDEX` schemos prefikso indekso varde NEPRIIMA: indeksas
+ * visada kuriamas TOJE schemoje, kurioje yra lentelė. `CREATE UNIQUE INDEX
+ * public.x ON t (...)` duoda `syntax error at or near "."`. Išmatuota CI
+ * (run 35567237647): 11 kritimų būtent dėl to.
+ *
+ * Todėl simetrija čia klaidinga, o ne patogi: `DROP` taikinį reikia kvalifikuoti,
+ * nes jis ieško pagal `search_path`; `CREATE` jo kvalifikuoti NEGALIMA, nes jis
+ * paveldi lentelės schemą. Kvalifikuojama LENTELĖ, ne indeksas.
  */
 async function kvalifikuotasVardas(vykdytojas, vardas) {
   const { rows } = await vykdytojas.query(
@@ -67,4 +77,15 @@ async function kvalifikuotasVardas(vykdytojas, vardas) {
   return `${rows[0].schema}.${rows[0].objektas}`;
 }
 
-module.exports = { rastiIndeksa, kvalifikuotasVardas };
+/**
+ * Schema plius lentelė — `CREATE INDEX ... ON <čia>` taikiniui.
+ *
+ * ⚠️ Būtent lentelės kvalifikacija ir nulemia, kurioje schemoje atsiras indeksas,
+ * tad ji yra vienintelis būdas `CREATE` pusėje taikyti tą patį objektą, kurį
+ * `DROP` pusėje nurodo kvalifikuotas indekso vardas.
+ */
+async function kvalifikuotaLentele(vykdytojas, lentele) {
+  return kvalifikuotasVardas(vykdytojas, lentele);
+}
+
+module.exports = { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele };

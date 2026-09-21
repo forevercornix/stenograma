@@ -10,7 +10,7 @@ const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./he
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
 const attemptRegistry = require("../utils/attemptRegistry");
-const { rastiIndeksa, kvalifikuotasVardas } = require("./helpers/indeksoTapatybe");
+const { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele } = require("./helpers/indeksoTapatybe");
 const { STATUS, OWNER_KIND } = require("../utils/jobStore/common");
 
 process.env.NODE_ENV = "test";
@@ -101,6 +101,7 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
      * „pavyktų". Prielaidos „testo DB turi vieną schemą" nėra.
      */
     const indeksas = await kvalifikuotasVardas(pool, attemptRegistry.VIENO_ADRESO_INDEKSAS);
+    const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
     await pool.query(`DROP INDEX IF EXISTS ${indeksas}`);
     try {
       return await scenarijus();
@@ -142,9 +143,13 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
                  AND a.storage_key = b.storage_key
                  AND a.attempt_id > b.attempt_id`
       );
+      /**
+       * ⚠️ INDEKSO VARDAS ČIA BE SCHEMOS: `CREATE INDEX` jos nepriima — indeksas
+       * paveldi LENTELĖS schemą. Todėl kvalifikuojama lentelė, ne vardas.
+       */
       await pool.query(
-        `CREATE UNIQUE INDEX IF NOT EXISTS ${indeksas}
-           ON job_result_attempts (storage_type, storage_key)`
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${attemptRegistry.VIENO_ADRESO_INDEKSAS}
+           ON ${lentele} (storage_type, storage_key)`
       );
     }
   }
