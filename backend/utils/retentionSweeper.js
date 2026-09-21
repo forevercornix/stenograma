@@ -291,14 +291,18 @@ function suskaiciuoti(klases) {
 }
 
 /**
- * ⚠️ ŠI RIBA YRA EURISTIKA, IR TAI REGISTRUOTA (#351).
+ * ⚠️ RIBA NEBĖRA EURISTIKA, IR JI NEBEGYVENA ČIA (#351 R3).
  *
- * Ji nėra išvesta: `ArtifactStore.put()` laiko ribos NETURI (`fs` — jokios,
- * `s3` — SDK numatytosios, repo jų nefiksuoja), tad „kiek ilgiausiai gali trukti
- * rašymas" niekas neapibrėžia. Pridėjus tą ribą, ši konstanta tampa IŠVEDIMU, ir
- * tas pats darbas uždaro #157 4c. Žr. `docs/decisions/305-retencijos-nuosavybe.md`.
+ * Iki #351 čia stovėjo sava konstanta su prierašu „tai euristika: niekas neapibrėžia,
+ * kiek ilgiausiai gali trukti rašymas". Tai buvo tiesa tol, kol riba buvo tik šlavėjo
+ * spėjimas. Dabar ją VYKDO `attemptRegistry.isipareigoti()` commit'o tvora: `pending`,
+ * senesnis už šią reikšmę, įsipareigoti nebegali. Riba tapo POLITIKA.
+ *
+ * ⚠️ TODĖL IMPORTUOJAMA, NE DUBLIUOJAMA. `laukianciuRibaMs = horizontas + MAX ≥ MAX`
+ * galioja pagal konstrukciją tik tol, kol abi pusės mini TĄ PATĮ skaičių. Dalinio
+ * deploy'aus taisyklė užrašyta prie pačios konstantos `attemptRegistry.js`.
  */
-const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
+const { MAX_RASYMO_TRUKME_MS } = require("./attemptRegistry");
 
 /**
  * REZULTATO BANDYMŲ ŠLAVIMAS (#157, PR-5).
@@ -369,6 +373,49 @@ async function _valytiRezultatoBandymus() {
 
   const { revivalHorizonsMs } = require("../queues/config");
   const horizontas = revivalHorizonsMs().horizonMs;
+
+  /**
+   * ⚠️ NETINKAMAS HORIZONTAS = ŠLAVIMAS PRALEIDŽIAMAS, NE PRITEMPIAMAS (#351 D4a).
+   *
+   * `teigiamas()` (`queues/config.js`) tikrina ĮVESTIS, bet `horizonMs` skaičiuojamas
+   * PO jo: `retry += baze * 2 ** i`. Kai `i >= 1024`, `2 ** i` yra `Infinity`, ir tada
+   * `baze > 0` duoda `Infinity`, o `baze === 0` — `0 * Infinity === NaN`. Išmatuota:
+   * `QUEUE_MAX_ATTEMPTS=1026` su `QUEUE_BACKOFF_MS=0` grąžina `NaN`.
+   *
+   * ⚠️ TAI GRIAUNA D4 PAGAL KONSTRUKCIJĄ, NE „KARTAIS". `NaN + MAX === NaN`, o
+   * `NaN >= MAX` yra `false` — t. y. `laukianciuRibaMs ≥ MAX_RASYMO_TRUKME_MS`
+   * NETENKINAMAS. Riba keliauja į SQL kaip `$::double precision` amžiaus predikate;
+   * blogiausiu atveju `dar_laukia` taptų `false` GYVAI `pending` eilutei, ir šlavėjas
+   * ištrintų objektą, kurį rašytojas dar rašo — tiksliai tas gedimas, kurį #351 taiso.
+   *
+   * ⚠️ NE `clamp`, NE `Math.min`. Pritempta reikšmė paverstų konfigūracijos klaidą
+   * tyliu, kitokiu elgesiu; operatorius matytų normalų šlavimą su neteisinga riba.
+   * `queues/config.js` čia irgi netaisomas — tai atskiras issue.
+   *
+   * ⚠️ RIBOTA APIMTIS: sargas gaudo `NaN`, `Infinity` ir neigiamą. BAIGTINĖS, bet per
+   * didelės reikšmės (pvz., `QUEUE_MAX_ATTEMPTS=60` → ~2.9e21 ms) jis NEGAUDO — jos
+   * praeina ir krenta PostgreSQL pusėje, nes `interval` tiek netalpina. Ribos čia
+   * nespėliojau: ji priklausytų nuo `interval` vidinės reprezentacijos, kurios šiame
+   * repo niekas nefiksuoja. Ta šaka yra fail-closed kitu mechanizmu — sakinys meta,
+   * `_valytiRezultatoBandymus()` kvietėjas gaudo, ir nešalinama nieko. Tai tikrina
+   * atskiras testas.
+   *
+   * Precedentas: `deletionTombstones/index.js` — `Number.isFinite` patikra ir
+   * `log.warn` su „žymos NEŠALINAMOS".
+   */
+  if (!Number.isFinite(horizontas) || horizontas < 0) {
+    log.warn(
+      "Retencija: prikėlimo horizontas NETINKAMAS - rezultato bandymų šlavimas NEVYKDOMAS. " +
+        "Su tokia reikšme amžiaus riba neapibrėžta, ir gyvas `pending` galėtų būti " +
+        "palaikytas šluotinu.",
+      {
+        stage: "attempt_sweep_skipped",
+        priezastis: "netinkamas prikėlimo horizontas",
+        horizontas: String(horizontas),
+      }
+    );
+    return { ...tuscias, nevykdyta: true };
+  }
 
   const { kandidatai, praleista, uzimti = 0 } = await jobStore.system.valytiniBandymai({
     atmestuRibaMs: horizontas,

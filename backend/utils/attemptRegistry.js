@@ -67,6 +67,55 @@ class BendroAdresoKlaida extends Error {
   }
 }
 
+/**
+ * ILGIAUSIA LEISTINA RAŠYMO TRUKMĖ — POLITIKA, KURIĄ VYKDO COMMIT'O TVORA (#351).
+ *
+ * ⚠️ TAI NEBĖRA EURISTIKA. Iki #351 čia stovėjo prierašas „niekas neapibrėžia, kiek
+ * ilgiausiai gali trukti rašymas" — tiesa tol, kol riba buvo tik šlavėjo spėjimas.
+ * Dabar `isipareigoti()` ją VYKDO: `pending`, senesnis už šią reikšmę, įsipareigoti
+ * nebegali. Riba nustojo aprašinėti pasaulį ir pradėjo jį apibrėžti.
+ *
+ * ⚠️ VIENA KOPIJA, DVI PUSĖS. Šlavėjas (`retentionSweeper.js`) ją IMPORTUOJA. Dubliuoti
+ * draudžiama: `laukianciuRibaMs = horizontas + MAX_RASYMO_TRUKME_MS ≥ MAX_RASYMO_TRUKME_MS`
+ * galioja PAGAL KONSTRUKCIJĄ tik tol, kol abi pusės mini TĄ PATĮ skaičių. Dvi kopijos,
+ * išsiskyrusios per vieną deploy'ų, atidarytų būtent tą langą, kurį tvora uždaro.
+ *
+ * ⚠️ KRYPTIS, NE VIETA. Konstanta gyvena ČIA, nes `attemptRegistry` yra lapas
+ * (`node:crypto` + tingus `deletionTombstones`); atvirkštinis importas per `jobStore`
+ * sukurtų ciklą.
+ *
+ * ⚠️ DALINIO DEPLOY'AUS TAISYKLĖ. Šlavėjas veikia API procese, tvora — worker'yje, ir
+ * jie atnaujinami ne vienu metu:
+ *   - **MAŽINTI** galima bet kuria tvarka. Trumpesnė tvora reiškia, kad rašytojas
+ *     įsipareigoja rečiau, o senas šlavėjas laukia ILGIAU nei reikia — saugi pusė.
+ *   - **DIDINTI** — pirma šlavėjas, paskui worker'is. Priešinga tvarka duotų worker'į,
+ *     leidžiantį įsipareigoti po to, kai senas šlavėjas jau laiko objektą šluotinu.
+ */
+const MAX_RASYMO_TRUKME_MS = 60 * 60 * 1000;
+
+/**
+ * COMMIT'AS PO TVOROS — RAŠYTOJAS PAVĖLAVO (#351 D1/D2).
+ *
+ * ⚠️ TAI NE „NIEKO NEĮVYKO", O ATŠAUKIAMA TRANSAKCIJA. Iki šios klaidos toje pačioje
+ * transakcijoje jau nuvertintas buvęs `committed` bandymas ir perjungta `job_results`
+ * nuoroda. Grąžinus `false`, abu tie veiksmai liktų įsipareigoti, o bandymas — ne:
+ * registras sakytų „nė vieno gyvo", o nuoroda rodytų į objektą, kurį šlavėjas jau
+ * laiko savo. Todėl metama, ir visa transakcija atšaukiama.
+ */
+class PavelavusioIsipareigojimoKlaida extends Error {
+  constructor(attemptId, tvoraMs) {
+    super(
+      `Bandymas ${attemptId} įsipareigoti nebegali: eilutės nėra, ji ne \`pending\`, ` +
+        `arba senesnė už ${tvoraMs} ms rašymo tvorą (#351). Šlavėjas tokį objektą jau ` +
+        "laiko šluotinu, tad įsipareigojimas remtųsi adresu, kurio niekas nebegina."
+    );
+    this.name = "PavelavusioIsipareigojimoKlaida";
+    this.code = "ATTEMPT_COMMIT_TOO_LATE";
+    this.attemptId = attemptId;
+    this.tvoraMs = tvoraMs;
+  }
+}
+
 /** Būsenos privalo sutapti su migracijos `job_result_attempts_busena_allowed`. */
 const BUSENA = Object.freeze({
   /** Registruota prieš `put()`; objektas gali egzistuoti arba ne. */
@@ -260,12 +309,46 @@ async function isipareigoti(vykdytojas, { jobId, attemptId }) {
     [String(jobId), attemptId, BUSENA.ATMESTA, BUSENA.ISIPAREIGOTA]
   );
 
-  await vykdytojas.query(
+  /**
+   * ⚠️ AMŽIAUS TVORA — `clock_timestamp()`, NE `now()` (#351 D1).
+   *
+   * `now()` yra TRANSAKCIJOS pradžios laikas (`postgresStore.js` `inTransaction`,
+   * `BEGIN`). Jis fiksuojamas dar PRIEŠ pirmąjį CAS sakinį ir prieš bet kokį užrakto
+   * laukimą toje pačioje transakcijoje — t. y. prieš tą patį segmentą, dėl kurio tvora
+   * ir kuriama. Rašytojas, pradėjęs transakciją laiku ir joje prastovėjęs valandą,
+   * `now()` tvorą praeitų visada. `clock_timestamp()` skaitomas SAKINIO vykdymo metu,
+   * tad matuoja tikrąjį amžių commit'o momentu.
+   *
+   * ⚠️ TESTAI SU `now()` SUŽALIUOTŲ. Todėl tai tikrina atskira mutacija, o ne akis.
+   *
+   * ⚠️ `busena = $4` YRA DALIS TVOROS, NE PATOGUMAS. Be jos `abandoned` eilutė
+   * grįžtų į `committed` — šlavėjas tokią jau laiko baigta, ir prikėlimas atkurtų
+   * būtent tą nuorodą į objektą, kurio niekas nebegina.
+   */
+  const { rowCount } = await vykdytojas.query(
     `UPDATE job_result_attempts
         SET busena = $3, updated_at = now()
-      WHERE job_id = $1 AND attempt_id = $2`,
-    [String(jobId), attemptId, BUSENA.ISIPAREIGOTA]
+      WHERE job_id = $1
+        AND attempt_id = $2
+        AND busena = $4
+        AND created_at > clock_timestamp() - ($5::double precision * INTERVAL '1 millisecond')`,
+    [String(jobId), attemptId, BUSENA.ISIPAREIGOTA, BUSENA.LAUKIA, MAX_RASYMO_TRUKME_MS]
   );
+
+  /**
+   * ⚠️ METAMA, NE `return false` (#351 D2). Pirmasis sakinys aukščiau JAU nuvertino
+   * buvusį `committed`, o kvietėjas toje pačioje transakcijoje jau perjungė
+   * `job_results` nuorodą. Vienintelis būdas tų dviejų neįsipareigoti — atšaukti visą
+   * transakciją, o tam reikia metimo.
+   *
+   * Trys priežastys suplaktos sąmoningai: eilutės nebėra, ji ne `pending`, ji per sena.
+   * Visais trimis atvejais atsakymas tas pats — objektas nebe rašytojo, — o jų
+   * atskyrimas reikalautų antros užklausos, kuri skaitytų tai, ką ką tik pakeitė
+   * lygiagretus veikėjas.
+   */
+  if (rowCount !== 1) {
+    throw new PavelavusioIsipareigojimoKlaida(attemptId, MAX_RASYMO_TRUKME_MS);
+  }
 }
 
 /** Visi job'o bandymai — erasure kelias (PR-5) trina PAGAL REGISTRĄ, ne pagal nuorodą. */
@@ -554,6 +637,43 @@ async function karantinuotuSkaicius(vykdytojas) {
  *
  * @returns {Promise<{sluotina: boolean, priezastis: string|null}>}
  */
+/**
+ * ⚠️ UŽRAKTAS SERIALIZUOJA PATIKRĄ SU COMMIT'U (#351 D3).
+ *
+ * ⚠️ `FOR UPDATE`, NE `FOR KEY SHARE`. `isipareigoti()` keičia `busena` ir
+ * `updated_at` — ne raktinius stulpelius, — tad jo `UPDATE` ima `FOR NO KEY UPDATE`.
+ * `FOR KEY SHARE` su juo NEKONFLIKTUOJA: abu praeitų vienu metu, ir serializacijos
+ * nebūtų. `FOR UPDATE` konfliktuoja ir su `FOR NO KEY UPDATE`, ir su `FOR UPDATE`, tad
+ * apima ir dabartinį rašytoją, ir būsimą, kuris imtų keisti raktą.
+ *
+ * ⚠️ `NOWAIT`, NE LAUKIMAS IR NE `SKIP LOCKED`.
+ *   - laukimas: šlavėjas užstrigtų už rašytojo, kuris teisėtai gali rašyti minutes;
+ *   - `SKIP LOCKED`: eilutė tiesiog dingtų iš rezultato, ir `rows.length === 0` šaka
+ *     grąžintų „eilutės nebėra" — MELAGINGĄ priežastį tam, kas realiai yra „užimta".
+ *     Priežastis keliauja į operatoriaus kvitą, tad melas čia nėra kosmetinis;
+ *   - `NOWAIT`: konfliktas grįžta NEDELSIANT kaip `55P03`, ir kvietėjas jį verčia
+ *     verdiktu `uzimtas` (`postgresStore.js` `sweepResultArtifacts`).
+ *
+ * ⚠️ DEADLOCK'O RIZIKOS NĖRA PAGAL KONSTRUKCIJĄ. `finishAtomic` ima `jobs` eilutę, o
+ * paskui `job_result_attempts` — priešinga tvarka nei reikėtų ciklui. Bet net jei
+ * tvarka sutaptų, `NOWAIT` laukti neleidžia, o veikėjas, kuris nelaukia, į deadlock'o
+ * ciklą įeiti negali.
+ *
+ * ⚠️ AUTOCOMMIT, NE IŠREIKŠTINĖ TRANSAKCIJA (PR-4 D4 lieka galioti). Patikra vykdoma
+ * per `pool`, tad implicit transakcija baigiasi kartu su šiuo `SELECT` ir užraktas
+ * paleidžiamas PRIEŠ `delete()`. Fizinio I/O po užraktu nėra — draudimas nepažeistas.
+ * Tai tikrina testas, ne šis komentaras.
+ *
+ * ⚠️ GARANTIJOS RIBA (#351 R4 / D6). Užraktas serializuoja tik KANDIDATĖS PAČIOS
+ * commit'ą. Saugumas TARP skirtingų bandymų tuo pačiu adresu remiasi ne juo, o
+ * `job_result_attempts_vienas_adresas` unikalumu (#375); gyvas startas be to indekso
+ * nepakyla (`BUTINI_INDEKSAI`, `jobStore/index.js`, #377).
+ *
+ * ⚠️ IŠIMTIS: atkurtame store (`restoredJobStore`) nei šlavėjas, nei `isipareigoti()`
+ * nepasiekiami — adapteris atiduoda tik `get`/`update`/`remove`/`deleteResultArtifacts`/
+ * `pasalintiBandymus`, be `valytiniBandymai`, `sweepResultArtifacts` ir `finishAtomic`,
+ * — tad schema be indekso (#304) šios garantijos neliečia.
+ */
 async function arVisDarSluotina(vykdytojas, kandidatas, { laukianciuRibaMs }) {
   const { rows } = await vykdytojas.query(
     `SELECT
@@ -569,7 +689,8 @@ async function arVisDarSluotina(vykdytojas, kandidatas, { laukianciuRibaMs }) {
        FROM job_result_attempts a
       WHERE a.attempt_id::text = $1
         AND a.storage_type = $2
-        AND a.storage_key = $3`,
+        AND a.storage_key = $3
+        FOR UPDATE OF a NOWAIT`,
     [
       String(kandidatas.attempt_id),
       kandidatas.storage_type,
@@ -600,6 +721,9 @@ async function arVisDarSluotina(vykdytojas, kandidatas, { laukianciuRibaMs }) {
 module.exports = {
   BUSENA,
   BendroAdresoKlaida,
+  PavelavusioIsipareigojimoKlaida,
+  /** ⚠️ Eksportuojama ŠLAVĖJUI (#351 R3): viena kopija, dvi pusės. */
+  MAX_RASYMO_TRUKME_MS,
   /** ⚠️ Eksportuojamas KONTRAKTINIAM testui: turi sutapti su migracijos `1756700000000` vardu. */
   VIENO_ADRESO_INDEKSAS,
   arVisDarSluotina,
