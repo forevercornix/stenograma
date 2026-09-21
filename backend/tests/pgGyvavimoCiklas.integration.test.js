@@ -1,8 +1,8 @@
-const { test } = require("node:test");
+const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const { Client } = require("pg");
 
-const { skipWithoutPostgres, testDatabaseUrl } = require("./helpers/postgresGuard");
+const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
 const { poolasTestui, uzdarytiPoola, poolKlaidos } = require("./helpers/resourceStack");
 
 process.env.NODE_ENV = "test";
@@ -21,6 +21,38 @@ process.env.LOG_LEVEL = "error";
 
 const DB_URL = testDatabaseUrl("pggyvavimo");
 const PRALEISTI = skipWithoutPostgres();
+
+function dbVardas() {
+  return new URL(DB_URL).pathname.replace(/^\//, "");
+}
+
+async function adminPg(sql) {
+  const c = new Client({ connectionString: adminDatabaseUrl() });
+  await c.connect();
+  try {
+    return await c.query(sql);
+  } finally {
+    await c.end();
+  }
+}
+
+/**
+ * ⚠️ SAVA BAZĖ, NE BENDRA. Testai čia sąmoningai palieka nutekėjusį klientą ir nutraukia
+ * backend'ą; bendroje bazėje tai būtų šalutinis poveikis gretimiems failams.
+ *
+ * ⚠️ SCHEMOS ČIA NEREIKIA. Tikrinamas jungčių gyvavimo ciklas, ne SQL semantika, tad
+ * `SELECT 1` pakanka, o migracijos tik pailgintų failą be jokio tvirtinimo.
+ */
+before(async () => {
+  if (PRALEISTI) return;
+  await adminPg(`DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`);
+  await adminPg(`CREATE DATABASE "${dbVardas()}"`);
+});
+
+after(async () => {
+  if (PRALEISTI) return;
+  await adminPg(`DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(() => {});
+});
 
 test(
   "#380 D1: paimtas ir GRĄŽINTAS klientas — uždarymas praeina be ribos",
