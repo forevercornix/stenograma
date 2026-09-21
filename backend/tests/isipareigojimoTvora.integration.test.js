@@ -145,6 +145,84 @@ async function ribotas(zadas, { atblokuoti, pranesimas, ms = LAUKIMO_RIBA_MS }) 
 }
 
 /**
+ * POOL'AS SU KLAIDŲ KLAUSYTOJU KIEKVIENAM KLIENTUI — TIK TESTUOSE.
+ *
+ * ⚠️ IŠMATUOTA `pg-pool@3.14.0` ŠALTINYJE. `_acquireClient` checkout metu nuima
+ * pool'o klaidų klausytoją (`index.js:344`, `client.removeListener("error",
+ * idleListener)`), o į `_clients` grąžinama tik per `idleListener` (`:59`) arba
+ * `release()` (`_release` → `_remove`, `:397/:404/:413`). Vadinasi PAIMTAS klientas
+ * klausytojo NETURI: nutraukus jo backend'ą, `'error'` kyla be klausytojo, ir
+ * `EventEmitter` verčia tai neperimta išimtimi — procesas krenta.
+ *
+ * ⚠️ TAI VALYMO INFRASTRUKTŪRA, NE ĮRODYMAS. Įrodymas yra `nutekejimoTvirtinimas`.
+ */
+function naujasPoolas() {
+  const pool = new Pool({ connectionString: DB_URL });
+  pool.on("connect", (client) => client.on("error", () => {}));
+  return pool;
+}
+
+/**
+ * UŽDARYMAS, KURIS NEGALI PAKIBTI.
+ *
+ * ⚠️ `pool.end()` IŠSISPRENDŽIA TIK KAI `_clients` TUŠČIAS (`index.js:140`). Klientas,
+ * kurio niekas negrąžino, ten lieka amžinai — tad `end()` pažado laukti negalima.
+ * Nutraukus likusius šios bazės backend'us sokai užsidaro ir event loop atsilaisvina;
+ * `_clients` nuo to nesusitvarko, ir to nereikia — testas jau baigtas.
+ */
+async function uzdarytiPoola(pool) {
+  const baigta = await Promise.race([
+    pool.end().then(() => "OK", () => "OK"),
+    delsa(5_000).then(() => "TIMEOUT"),
+  ]);
+  if (baigta === "OK") return;
+
+  const c = new Client({ connectionString: DB_URL });
+  await c.connect().catch(() => {});
+  try {
+    await c.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()`
+    );
+  } catch {
+    /* bazės gali nebebūti — valymas nėra tvirtinimas */
+  } finally {
+    await c.end().catch(() => {});
+  }
+}
+
+/**
+ * NUTEKĖJUSIO KLIENTO SARGAS — PAGRINDINIS TVIRTINIMAS PRIEŠ M7.
+ *
+ * ⚠️ TAI SAVYBĖ, NE TESTŲ INFRASTRUKTŪRA. Šlavėjas, negrąžinantis pool'o kliento,
+ * produkcijoje reiškia POOL'O IŠSEKIMĄ: po `max` šlavimo ciklų nė viena užklausa
+ * nebegauna jungties. CI tai matosi kaip pakibęs `pool.end()`, bet gedimas yra
+ * gamybinis, ne testinis.
+ *
+ * ⚠️ MATUOJAMAS SKIRTUMAS, NE `totalCount === idleCount`. Absoliuti lygybė čia
+ * neteisinga: testas 8 (a) pats laiko `rasytojas` klientą paimtą, tad lygybė kristų
+ * ir be jokios mutacijos. Skirtumas „kiek klientų paimta" atsako tiksliai į tą klausimą,
+ * kurio reikia — ar ŠLAVĖJAS savąjį grąžino, — ir nepriklauso nuo to, ką laiko testas.
+ */
+function paimtuKlientu(pool) {
+  return pool.totalCount - pool.idleCount;
+}
+
+function nutekejimoTvirtinimas(pool, kontekstas) {
+  const pries = paimtuKlientu(pool);
+  return () => {
+    assert.equal(
+      paimtuKlientu(pool),
+      pries,
+      `šlavėjas negrąžino kliento (${kontekstas}) — ` +
+        "`COMMIT`/`release` praleidžiamas verdikto kelyje? " +
+        `paimta prieš=${pries}, po=${paimtuKlientu(pool)}`
+    );
+    assert.equal(pool.waitingCount, 0, `pool'e liko laukiančių užklausų (${kontekstas})`);
+  };
+}
+
+/**
  * ATBLOKAVIMAS PER `pg_terminate_backend` — kai blokuotojas nėra testo valdomas.
  *
  * ⚠️ NAUDOJAMA TEN, KUR UŽRAKTĄ LAIKO POOL'O AR PRODUKCINIO KODO JUNGTIS. Tokiai
@@ -183,8 +261,8 @@ test(
      * Todėl tvirtinama ir tai, kad senasis `committed` IŠLIKO.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "11111111-1111-4111-8111-111111111111");
     const senas = await sukurtiBandyma(pool, { jobId, busena: "committed" });
@@ -217,8 +295,8 @@ test(
      * atsakymas yra metimas: objektas nebe rašytojo.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "22222222-2222-4222-8222-222222222222");
     const senas = await sukurtiBandyma(pool, { jobId, busena: "committed" });
@@ -251,8 +329,8 @@ test(
      * nepriklauso nuo amžiaus: eilutė gali būti VISAI ŠVIEŽIA.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "33333333-3333-4333-8333-333333333333");
     const atmestas = await sukurtiBandyma(pool, { jobId, amziusMs: 0, busena: "abandoned" });
@@ -290,8 +368,8 @@ test(
      * eilutė gaminama tiksliai ties riba. Produkcinė konstanta nekeičiama.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "44444444-4444-4444-8444-444444444444");
     const bandymas = await sukurtiBandyma(pool, { jobId, amziusMs: MAX - 5_000 });
@@ -328,15 +406,30 @@ test(
      * išsiskirtų per vieną deploy'ų.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "55555555-5555-4555-8555-555555555555");
 
     const jaunas = await sukurtiBandyma(pool, { jobId, amziusMs: MAX - 60_000 });
-    await pool.query("BEGIN");
-    await attemptRegistry.isipareigoti(pool, { jobId, attemptId: jaunas.attemptId });
-    await pool.query("COMMIT");
+
+    /**
+     * ⚠️ PRISEGTAS KLIENTAS, NE `pool.query("BEGIN")` (#351, P2.5).
+     *
+     * `pool.query()` po kiekvieno sakinio grąžina klientą į pool'ą — su `BEGIN` tai
+     * reiškia klientą, gulintį *idle in transaction*. Trys sakiniai teoriškai gali
+     * nueiti į tris skirtingus klientus, tad toks testas tikrina POOL'O EILIŠKUMĄ, ne
+     * transakciją, o išsiskyrę jie paliktų atvirą transakciją ir pakabintų `pool.end()`.
+     * Tvarka tokia pat kaip testuose 1–4.
+     */
+    const rasytojas5 = await pool.connect();
+    try {
+      await rasytojas5.query("BEGIN");
+      await attemptRegistry.isipareigoti(rasytojas5, { jobId, attemptId: jaunas.attemptId });
+      await rasytojas5.query("COMMIT");
+    } finally {
+      rasytojas5.release();
+    }
     assert.equal(await busena(pool, jaunas.attemptId), "committed", "`MAX - ε` privalo praeiti");
 
     const senas = await sukurtiBandyma(pool, { jobId, amziusMs: MAX + 60_000 });
@@ -369,8 +462,8 @@ test(
      * Todėl tvirtinama, kad atsakymas grįžo greičiau nei rašytojas paleido užraktą.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "66666666-6666-4666-8666-666666666666");
     const bandymas = await sukurtiBandyma(pool, { jobId, amziusMs: 0 });
@@ -424,8 +517,8 @@ test(
      * (`delete()`), ir šis tvirtinimas kris.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "77777777-7777-4777-8777-777777777777");
     const bandymas = await sukurtiBandyma(pool, { jobId, amziusMs: MAX + 60_000 });
@@ -489,10 +582,10 @@ test(
     const os = require("node:os");
     const fsp = require("node:fs/promises");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = naujasPoolas();
     const saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-tvora-"));
     t.after(async () => {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
       await fsp.rm(saknis, { recursive: true, force: true });
     });
 
@@ -525,6 +618,7 @@ test(
        * pool'e lieka paimta jungtis, `pool.end()` nebegrįžta. Išmatuota run
        * `35625863455` — 20 min job timeout, nė vienos TAP eilutės iš šio failo.
        */
+      const nutekejo8a = nutekejimoTvirtinimas(pool, "8a: rašytojas laiko eilutę");
       const r8 = await ribotas(store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 }), {
         atblokuoti: () => rasytojas.query("ROLLBACK").catch(() => {}),
         pranesimas:
@@ -532,6 +626,7 @@ test(
           "pašalintas? Patikra privalo grįžti nedelsiant kaip `55P03`.",
       });
       assert.ok(r8.ok, `šlavimas neturėjo mesti: ${r8.ok ? "" : r8.klaida.message}`);
+      nutekejo8a();
       [uzimtas] = r8.reiksme;
       await rasytojas.query("ROLLBACK");
     } finally {
@@ -568,11 +663,13 @@ test(
       perv.release();
     }
 
+    const nutekejo8b = nutekejimoTvirtinimas(pool, "8b: lentelės nebėra");
     const rB = await ribotas(store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 }), {
       atblokuoti: async () => {},
       pranesimas: "antras šlavimas UŽSTRIGO — nors lentelės nebėra, jis turėjo kristi iškart.",
     });
     assert.ok(rB.ok, `šlavimas neturėjo mesti: ${rB.ok ? "" : rB.klaida.message}`);
+    nutekejo8b();
     const [nepavyko] = rB.reiksme;
     await pool.query("ALTER TABLE job_result_attempts_slepta RENAME TO job_result_attempts");
 
@@ -608,10 +705,10 @@ test(
     const os = require("node:os");
     const fsp = require("node:fs/promises");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = naujasPoolas();
     const saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-kablys-"));
     t.after(async () => {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
       await fsp.rm(saknis, { recursive: true, force: true });
     });
 
@@ -664,7 +761,9 @@ test(
       { attempt_id: bandymas.attemptId, storage_type: "fs", storage_key: bandymas.raktas },
     ];
 
+    const nutekejo9 = nutekejimoTvirtinimas(pool, "9: šluotinas kandidatas su `delete()` kabliu");
     const [verdiktas] = await store.sweepResultArtifacts(kandidatai, { laukianciuRibaMs: 1 });
+    nutekejo9();
 
     assert.equal(verdiktas.verdiktas, "pasalinta", `kontrolė: objektas pašalintas (${verdiktas.priezastis})`);
     assert.ok(zondas, "zondas PRIVALO būti pasiektas — kitaip testas nieko nematavo");
@@ -692,8 +791,8 @@ test(
      * `QUEUE_MAX_ATTEMPTS=60` duoda ~2.9e21 ms — baigtinį, teigiamą ir per didelį.
      */
     await perkurtiDb();
-    const pool = new Pool({ connectionString: DB_URL });
-    t.after(async () => pool.end().catch(() => {}));
+    const pool = naujasPoolas();
+    t.after(() => uzdarytiPoola(pool));
 
     const jobId = await sukurtiJoba(pool, "99999999-9999-4999-8999-999999999999");
     const bandymas = await sukurtiBandyma(pool, { jobId, amziusMs: MAX + 60_000 });
