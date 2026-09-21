@@ -92,6 +92,58 @@ async function busena(vykdytojas, attemptId) {
   return rows.length ? rows[0].busena : null;
 }
 
+/**
+ * LAUKIMAS YRA GEDIMAS, IR JIS PRIVALO KRISTI ASERCIJA (#351, po M5b/M7 matavimo).
+ *
+ * ⚠️ IŠMATUOTA: mutacijos M5b (`35611849584`) ir M7 (`35616863123`) nukovė build'ą ne
+ * asercija, o 20 min job timeout'u — nors testai turi `timeout: 180000`. Priežastis ne
+ * „jungtis laiko procesą": tai SAVITARPIO LAUKIMAS pačiame teste. Rašytojo `COMMIT`
+ * stovi PO patikros `await`, tad be `NOWAIT` patikra laukia rašytojo, o rašytojas
+ * niekada nepasiekia `COMMIT`. `node:test` testą nutraukia, bet `finally` nepasiekiamas,
+ * pool'e lieka paimta jungtis, ir `pool.end()` laukia jos amžinai.
+ *
+ * ⚠️ REGRESIJA TADA ATRODO KAIP INFRASTRUKTŪROS GEDIMAS, NE KAIP KODO REGRESIJA. Būtent
+ * tai šis helper'is ir taiso: laukimas paverčiamas įvardyta asercija.
+ *
+ * ⚠️ ❌ NE `lock_timeout` IR NE `statement_timeout`. Jiedu meta TĄ PATĮ `55P03` kaip
+ * `NOWAIT`, tad M5b būtų klasifikuota kaip `uzimtas` ir PRAEITŲ ŽALIAI — testas priimtų
+ * laukimą kaip įrodymą, kad laukimo nėra. Riba matuojama Node pusėje, ne DB.
+ *
+ * ⚠️ ATBLOKUOTI PRIVALOMA PRIEŠ `assert.fail`. Be to `finally` ir `pool.end()` vis tiek
+ * nebaigtų — testas kristų teisingai, o job'as vis tiek kabėtų.
+ *
+ * @param {Promise<any>} zadas       jau pradėtas darbas (ne funkcija: laikas skaičiuojamas nuo starto)
+ * @param {object}       o
+ * @param {Function}     o.atblokuoti  paleidžia užraktą, kad `zadas` galėtų grįžti
+ * @param {string}       o.pranesimas  ką operatorius turi perskaityti
+ */
+const LAUKIMO_RIBA_MS = 5_000;
+
+function delsa(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function ribotas(zadas, { atblokuoti, pranesimas, ms = LAUKIMO_RIBA_MS }) {
+  /** Nei viena šaka nemeta: rezultatas paverčiamas duomenimis, kad `race` liktų švarus. */
+  const saugus = zadas.then(
+    (reiksme) => ({ ok: true, reiksme }),
+    (klaida) => ({ ok: false, klaida })
+  );
+
+  const laikmatis = delsa(ms).then(() => "TIMEOUT");
+  const rezultatas = await Promise.race([saugus, laikmatis]);
+  if (rezultatas !== "TIMEOUT") return rezultatas;
+
+  /**
+   * ⚠️ PIRMA ATBLOKUOJAM, TADA LAUKIAM `saugus`. Antra eilutė yra ta, kuri grąžina
+   * jungtį į pool'ą; be jos `pool.end()` kabėtų net ir po teisingos asercijos.
+   */
+  await atblokuoti();
+  await saugus;
+
+  assert.fail(pranesimas);
+}
+
 /* ═══════════════════════ R1 — COMMIT'O TVORA ═══════════════════════ */
 
 test(
@@ -306,13 +358,27 @@ test(
       /** Rašytojas praeina tvorą ir LAIKO transakciją atvirą. */
       await attemptRegistry.isipareigoti(rasytojas, { jobId, attemptId: bandymas.attemptId });
 
+      /**
+       * ⚠️ RIBA MATUOJAMA NODE PUSĖJE, IR LAUKIMAS KRENTA ASERCIJA, NE TIMEOUT'U.
+       *
+       * Atblokavimas: rašytojo jungtis šiuo metu yra *idle in transaction* — ji nieko
+       * nevykdo, tik laiko užraktą, — tad `ROLLBACK` ją pasiekia iš karto. Paleidus
+       * užraktą patikra grįžta, jungtis sugrįžta į pool'ą, ir `pool.end()` baigiasi.
+       */
       const pradzia = Date.now();
-      await assert.rejects(
-        () => attemptRegistry.arVisDarSluotina(pool, kandidatas, { laukianciuRibaMs: 1 }),
-        (e) => e.code === "55P03",
-        "užimtos eilutės patikra privalo grįžti `55P03`, ne laukti"
+      const r = await ribotas(
+        attemptRegistry.arVisDarSluotina(pool, kandidatas, { laukianciuRibaMs: 1 }),
+        {
+          atblokuoti: () => rasytojas.query("ROLLBACK").catch(() => {}),
+          pranesimas:
+            "patikra LAUKĖ užrakto ilgiau nei 5 s — `NOWAIT` pašalintas? " +
+            "Su `NOWAIT` konfliktas grįžta nedelsiant kaip `55P03`.",
+        }
       );
-      assert.ok(Date.now() - pradzia < 5_000, "atsakymas privalo būti NEDELSIANT");
+
+      assert.equal(r.ok, false, "užimtos eilutės patikra privalo MESTI, ne grąžinti verdiktą");
+      assert.equal(r.klaida.code, "55P03", `laukiamas 55P03, gauta: ${r.klaida.code}`);
+      assert.ok(Date.now() - pradzia < LAUKIMO_RIBA_MS, "atsakymas privalo būti NEDELSIANT");
 
       await rasytojas.query("COMMIT");
     } finally {
@@ -350,13 +416,51 @@ test(
      */
     const kitas = await pool.connect();
     try {
+      /**
+       * ⚠️ PID IMAMAS IŠ ANKSTO. Užblokavus `UPDATE`, ta pati jungtis nieko daugiau
+       * nebeatsakys, tad jos `pg_backend_pid()` vėliau nebepasiekiamas.
+       */
+      const { rows: pidEil } = await kitas.query("SELECT pg_backend_pid() AS pid");
+      const pid = pidEil[0].pid;
+
       await kitas.query("BEGIN");
-      await kitas.query(
-        "UPDATE job_result_attempts SET updated_at = now() WHERE attempt_id = $1",
-        [bandymas.attemptId]
+
+      /**
+       * ⚠️ ATBLOKUOJA TREČIA, NEPRIKLAUSOMA JUNGTIS. Blokuotojas čia yra PATIKROS
+       * jungtis iš to paties pool'o; paimti dar vieną pool'o klientą reikštų
+       * priklausomybę nuo pool'o būsenos, o `pg_terminate_backend` nutraukia
+       * blokuotoją nepriklausomai nuo jos.
+       */
+      const atblokuoti = async () => {
+        const c = new Client({ connectionString: DB_URL });
+        await c.connect();
+        try {
+          await c.query("SELECT pg_terminate_backend(p) FROM unnest(pg_blocking_pids($1)) p", [pid]);
+        } finally {
+          await c.end().catch(() => {});
+        }
+      };
+
+      const pradzia = Date.now();
+      const r = await ribotas(
+        kitas.query("UPDATE job_result_attempts SET updated_at = now() WHERE attempt_id = $1", [
+          bandymas.attemptId,
+        ]),
+        {
+          atblokuoti,
+          pranesimas:
+            "lygiagretus `UPDATE` buvo UŽBLOKUOTAS ilgiau nei 5 s — užraktas laikomas " +
+            "per `delete()`? Patikra privalo būti autocommit, ne išreikštinė transakcija.",
+        }
       );
+
+      assert.ok(r.ok, `\`UPDATE\` privalo praeiti: ${r.ok ? "" : r.klaida.message}`);
+      assert.ok(Date.now() - pradzia < LAUKIMO_RIBA_MS, "eilutė privalo būti LAISVA");
+
       await kitas.query("COMMIT");
     } finally {
+      /** ⚠️ Timeout šakoje `COMMIT` nepasiekiamas — transakcija uždaroma čia. */
+      await kitas.query("ROLLBACK").catch(() => {});
       kitas.release();
     }
   }
