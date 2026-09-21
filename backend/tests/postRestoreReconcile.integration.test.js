@@ -16,6 +16,7 @@ const sesijuPg = require("../utils/sessionStore/postgresStore");
 const { hashPassword } = require("../utils/credentials");
 const tombstones = require("../utils/deletionTombstones");
 const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -204,7 +205,7 @@ test("7.6b: suderinimas revokuoja sesijas ir terminalizuoja job'us", { skip: pra
   await perkurtiDb(SUDERINIMO_URL);
 
   await suAplinka(SUDERINIMO_URL, async () => {
-    const pool = new Pool({ connectionString: SUDERINIMO_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: SUDERINIMO_URL }), { vardas: "pool", dsn: SUDERINIMO_URL });
 
     try {
       const { store: sesijuStore, sesijos } = await pripildytiSesijas(pool);
@@ -305,7 +306,7 @@ test("7.6b: suderinimas revokuoja sesijas ir terminalizuoja job'us", { skip: pra
       assert.deepEqual(v.nesuderinti, []);
       assert.deepEqual(v.uzbarjeruoti, [uzbarjeruotas.id]);
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   });
 });
@@ -318,7 +319,7 @@ test("7.6b D9: antras vykdymas palieka TĄ PAČIĄ persistentinę būseną", { s
   await perkurtiDb(SUDERINIMO_URL);
 
   await suAplinka(SUDERINIMO_URL, async () => {
-    const pool = new Pool({ connectionString: SUDERINIMO_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: SUDERINIMO_URL }), { vardas: "pool", dsn: SUDERINIMO_URL });
 
     try {
       await pripildytiSesijas(pool);
@@ -342,7 +343,7 @@ test("7.6b D9: antras vykdymas palieka TĄ PAČIĄ persistentinę būseną", { s
       assert.equal(antras.jobai.terminalizuota, 0);
       assert.equal(antras.nieko, false, "užbarjeruotas job'as vis dar randamas, tad tai ne visiškas no-op");
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   });
 });
@@ -355,7 +356,7 @@ test("7.6b D4: klaida po dalies darbo ATSUKA viską", { skip: praleisti(), timeo
   await perkurtiDb(SUDERINIMO_URL);
 
   await suAplinka(SUDERINIMO_URL, async () => {
-    const pool = new Pool({ connectionString: SUDERINIMO_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: SUDERINIMO_URL }), { vardas: "pool", dsn: SUDERINIMO_URL });
 
     try {
       const { store: sesijuStore, sesijos } = await pripildytiSesijas(pool);
@@ -399,7 +400,7 @@ test("7.6b D4: klaida po dalies darbo ATSUKA viską", { skip: praleisti(), timeo
       assert.equal(v.suderinta, false, "verifikacija privalo pasakyti, kad startas negalimas");
       assert.equal(v.aktyviosSesijos, 3);
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   });
 });
@@ -416,7 +417,7 @@ test("7.6b D7a: svetima bazė NEPALIEČIAMA — jokio pėdsako", { skip: praleis
   await perkurtiDb(SVETIMA_URL);
 
   await suAplinka(SUDERINIMO_URL, async () => {
-    const svetimasPool = new Pool({ connectionString: SVETIMA_URL });
+    const svetimasPool = stebetiPoola(new Pool({ connectionString: SVETIMA_URL }), { vardas: "svetimasPool", dsn: SVETIMA_URL });
 
     try {
       await pripildytiSesijas(svetimasPool);
@@ -440,7 +441,7 @@ test("7.6b D7a: svetima bazė NEPALIEČIAMA — jokio pėdsako", { skip: praleis
       assert.deepEqual(await auditoIrasai(SVETIMA_URL), []);
       assert.deepEqual(await auditoIrasai(SUDERINIMO_URL), [], "ir savoje bazėje evidencijos būti negali");
     } finally {
-      await svetimasPool.end().catch(() => {});
+      await uzdarytiPoola(svetimasPool);
     }
   });
 });
@@ -476,7 +477,7 @@ test("#280 IV: konfigūracijos klaida NEPALIEKA įsipareigoto darbo", { skip: pr
   await perkurtiDb(SUDERINIMO_URL);
 
   await suAplinka(SUDERINIMO_URL, async () => {
-    const pool = new Pool({ connectionString: SUDERINIMO_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: SUDERINIMO_URL }), { vardas: "pool", dsn: SUDERINIMO_URL });
 
     try {
       const { store: sesijuStore, sesijos } = await pripildytiSesijas(pool);
@@ -502,7 +503,7 @@ test("#280 IV: konfigūracijos klaida NEPALIEKA įsipareigoto darbo", { skip: pr
 
       assert.deepEqual(await auditoIrasai(SUDERINIMO_URL), [], "nesėkmė evidencijos nepalieka");
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   });
 });
@@ -526,7 +527,7 @@ test("#280 follow-up: be nė vienos PostgreSQL ašies komanda KRENTA, nieko nepa
   await perkurtiDb(SUDERINIMO_URL);
 
   await suAplinka(SUDERINIMO_URL, async () => {
-    const pool = new Pool({ connectionString: SUDERINIMO_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: SUDERINIMO_URL }), { vardas: "pool", dsn: SUDERINIMO_URL });
 
     try {
       const { store: sesijuStore, sesijos } = await pripildytiSesijas(pool);
@@ -556,7 +557,7 @@ test("#280 follow-up: be nė vienos PostgreSQL ašies komanda KRENTA, nieko nepa
       const r = await reconcile.suderinti({ targetUrl: SUDERINIMO_URL, actor: "operatorius-testas" });
       assert.equal(r.asys.sesijos.verdiktas, "suderinta");
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   });
 });

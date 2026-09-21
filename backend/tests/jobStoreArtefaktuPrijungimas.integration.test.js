@@ -7,6 +7,7 @@ const path = require("node:path");
 const { Client } = require("pg");
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 /**
  * ARTEFAKTŲ SAUGYKLOS PRIJUNGIMAS PRIE `initializePostgres()` (#157, PR-7, 3 sąlyga).
@@ -154,14 +155,14 @@ test("`fs`: saugykla prijungiama, ir stebėtojo verdiktas pavirsta iš raudono �
        * Kitaip „buvo raudona, tapo žalia" būtų du teiginiai apie dvi skirtingas
        * sąlygas, ir pokytį galėtų paaiškinti bet kuri iš jų.
        */
-      const matavimoPool = new Pool({ connectionString: DB_URL });
+      const matavimoPool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "matavimoPool", dsn: DB_URL });
       let pries;
       try {
         pries = await nustatytiPrijungimoBusena(matavimoPool, createPostgresStore(matavimoPool), {
           env: { ARTIFACT_STORE_BACKEND: "fs", ARTIFACT_FS_ROOT: saknis },
         });
       } finally {
-        await matavimoPool.end().catch(() => {});
+        await uzdarytiPoola(matavimoPool);
       }
 
       assert.deepEqual(pries.radiniai, [RADINIAI.RASYMAS_NEPRIJUNGTAS], "prieš prijungimą — raudona");

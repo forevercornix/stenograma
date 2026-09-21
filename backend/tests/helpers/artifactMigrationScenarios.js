@@ -7,6 +7,7 @@ const { Pool, Client } = require("pg");
 const { testDatabaseUrl, adminDatabaseUrl } = require("./postgresGuard");
 const { migruoti, sausasPaleidimas, PRIEZASTIS } = require("../../utils/artifactMigration");
 const attemptRegistry = require("../../utils/attemptRegistry");
+const { stebetiPoola, uzdarytiPoola } = require("./resourceStack");
 
 /**
  * MIGRACIJOS SCENARIJŲ RINKINYS — VIENAS, VISIEMS BACKEND'AMS (#157, PR-6).
@@ -91,7 +92,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
      * asercijos `ok`, failas `exit 1` (CI 34352704975 ir 34363036930).
      * Klasė registruota #310.
      */
-    if (pool) await pool.end().catch(() => {});
+    if (pool) await uzdarytiPoola(pool);
     pool = null;
 
     await adminPg(`DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`);
@@ -103,7 +104,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    pool = new Pool({ connectionString: DB_URL });
+    pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "scenarijai", dsn: DB_URL });
 
     /** ⚠️ Ankstesnis fixture išvalomas ČIA, ne tik `after()` — kitaip lieka šiukšlės. */
     if (fixture) await fixture.isvalyti().catch(() => {});
@@ -114,7 +115,7 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
 
   after(async () => {
     if (PRALEISTI) return;
-    if (pool) await pool.end().catch(() => {});
+    if (pool) await uzdarytiPoola(pool);
     if (fixture) await fixture.isvalyti().catch(() => {});
     await adminPg(`DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(() => {});
   });

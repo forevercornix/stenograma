@@ -25,6 +25,7 @@ const memoryStore = require("../utils/jobStore/memoryStore");
 const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
 const { OWNER_KIND, normalizeFieldValue } = require("../utils/jobStore/common");
 const { IVESTYS, NELEISTINOS, patchLaukai } = require("./helpers/canonicalTypeFixtures");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 /**
  * `postgresStore` INTEGRACINIAI TESTAI (#155, 7.2a).
@@ -46,11 +47,11 @@ let pool;
 let store;
 
 async function vykdyti(url, sql) {
-  const p = new Pool({ connectionString: url });
+  const p = stebetiPoola(new Pool({ connectionString: url }), { vardas: "p", dsn: url });
   try {
     await p.query(sql);
   } finally {
-    await p.end();
+    await uzdarytiPoola(p);
   }
 }
 
@@ -147,7 +148,7 @@ async function priima(stulpeliai, kodel) {
  * teisėtai užtrunka, tad riba turi skirti „lėtą" nuo „niekada".
  */
 function naujasPool() {
-  const p = new Pool({ connectionString: DB_URL });
+  const p = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "p", dsn: DB_URL });
   p.on("connect", (client) => {
     client.query("SET lock_timeout = '5s'; SET statement_timeout = '60s'").catch(() => {});
   });
@@ -2362,7 +2363,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
         "⚠️ saugykloje guli BŪTENT nugalėtojo rezultatas - antrasis jo neperrašė"
       );
     } finally {
-      await poolA.end();
+      await uzdarytiPoola(poolA);
       await poolB.end();
     }
   });

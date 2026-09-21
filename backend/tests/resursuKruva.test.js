@@ -5,7 +5,7 @@ const { EventEmitter } = require("node:events");
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
-const { sukurtiResursuKruva } = require("./helpers/resourceStack");
+const { sukurtiResursuKruva, poolKlaidos } = require("./helpers/resourceStack");
 
 /**
  * `pg` GYVAVIMO CIKLO AUTORITETAS (#380 R2).
@@ -102,8 +102,8 @@ test("#380 D7: jungties klaida NE valymo metu — REGISTRUOJAMA ir virsta gedimu
   klaida.code = "57P01";
   klientas.emit("error", klaida);
 
-  assert.deepEqual(kruva.jungciuKlaidos(), ["darbinis: 57P01"], "klaida privalo būti UŽRAŠYTA");
-  assert.deepEqual(kruva.valymoSukeltos(), [], "tai NĖRA valymo sukelta klaida");
+  assert.deepEqual(poolKlaidos(pool).tikros, ["darbinis: 57P01"], "klaida privalo būti UŽRAŠYTA");
+  assert.deepEqual(poolKlaidos(pool).valymo, [], "tai NĖRA valymo sukelta klaida");
 
   await assert.rejects(
     () => kruva.isvalyti(),

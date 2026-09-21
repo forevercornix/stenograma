@@ -12,6 +12,7 @@ const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
 const attemptRegistry = require("../utils/attemptRegistry");
 const { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele } = require("./helpers/indeksoTapatybe");
 const { STATUS, OWNER_KIND } = require("../utils/jobStore/common");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -62,10 +63,10 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const pool = new Pool({ connectionString: DB_URL });
+  const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
   const saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-erasure-"));
   t.after(async () => {
-    await pool.end().catch(() => {});
+    await uzdarytiPoola(pool);
     await fsp.rm(saknis, { recursive: true, force: true });
   });
 

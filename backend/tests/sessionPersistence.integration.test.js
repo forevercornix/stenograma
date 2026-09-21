@@ -9,7 +9,7 @@ process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
-const { sukurtiResursuKruva } = require("./helpers/resourceStack");
+const { sukurtiResursuKruva, stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const { createPostgresStore } = require("../utils/sessionStore/postgresStore");
 const { hashSessionToken } = require("../utils/sessionStore/tokens");
 const { hashPassword } = require("../utils/credentials");
@@ -45,11 +45,11 @@ const ADMIN = Object.freeze({ id: UID_A, username: "admin", role: "administrator
 const PETRAS = Object.freeze({ id: UID_B, username: "petras", role: "operator" });
 
 async function nuleistiDb(dbName) {
-  const a = new Pool({ connectionString: adminDatabaseUrl() });
+  const a = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "a", dsn: adminDatabaseUrl() });
   try {
     await a.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
   } finally {
-    await a.end();
+    await uzdarytiPoola(a);
   }
 }
 
@@ -66,8 +66,8 @@ async function paruostiDb(priesdelis) {
     const url = testDatabaseUrl(priesdelis);
     const dbName = new URL(url).pathname.slice(1);
 
-    const admin = new Pool({ connectionString: adminDatabaseUrl() });
-    const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
+    const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "admin", dsn: adminDatabaseUrl() });
+    const uzdarytiAdmin = resursai.registruotiPoola(admin, { vardas: "admin pool" });
     await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
     await admin.query(`CREATE DATABASE "${dbName}"`);
     resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
@@ -79,8 +79,8 @@ async function paruostiDb(priesdelis) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const pool = new Pool({ connectionString: url });
-    resursai.registruoti("darbinis pool", () => pool.end());
+    const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "pool", dsn: url });
+    resursai.registruotiPoola(pool, { vardas: "darbinis pool" });
 
     return { url, pool, resursai, store: createPostgresStore(pool) };
   } catch (klaida) {
@@ -253,8 +253,8 @@ test("LENKTYNĖS: revokacija tarp dviejų procesų suveikia IŠ KARTO", { skip: 
    * `touch()`, tad rezultatas nepriklauso nuo planavimo.
    */
   const ctx = await paruostiDb("session_two_procs");
-  const antras = new Pool({ connectionString: ctx.url });
-  ctx.resursai.registruoti("antro proceso pool", () => antras.end());
+  const antras = stebetiPoola(new Pool({ connectionString: ctx.url }), { vardas: "antras", dsn: ctx.url });
+  ctx.resursai.registruotiPoola(antras, { vardas: "antro proceso pool" });
   try {
     const storeA = ctx.store;
     const storeB = createPostgresStore(antras);
@@ -280,8 +280,8 @@ test("RESTARTAS: ta pati cookie po `restarto` atkuria req.user duomenis", { skip
   try {
     const { token } = await ctx.store.create(ADMIN, ENV);
 
-    const pooolPoRestarto = new Pool({ connectionString: ctx.url });
-    ctx.resursai.registruoti("pool po restarto", () => pooolPoRestarto.end());
+    const pooolPoRestarto = stebetiPoola(new Pool({ connectionString: ctx.url }), { vardas: "pooolPoRestarto", dsn: ctx.url });
+    ctx.resursai.registruotiPoola(pooolPoRestarto, { vardas: "pool po restarto" });
     const poRestarto = createPostgresStore(pooolPoRestarto);
 
     const session = await poRestarto.touch(token, ENV);
@@ -771,7 +771,7 @@ const { Pool } = require("pg");
 const { createPostgresStore } = require("./utils/sessionStore/postgresStore");
 
 (async () => {
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const pool = stebetiPoola(new Pool({ connectionString: process.env.DATABASE_URL }), { vardas: "pool", dsn: process.env.DATABASE_URL });
   try {
     const store = createPostgresStore(pool);
     if (process.env.VEIKSMAS === "destroy") {
@@ -782,7 +782,7 @@ const { createPostgresStore } = require("./utils/sessionStore/postgresStore");
     const s = await store.touch(process.env.SESIJOS_TOKENAS);
     process.stdout.write(s ? "OK:" + s.userId + ":" + s.role : "NULL");
   } finally {
-    await pool.end();
+    await uzdarytiPoola(pool);
   }
 })().catch((e) => process.stdout.write("KLAIDA:" + e.message));
 `;
@@ -878,8 +878,8 @@ test("POOL: užklausų riba REALIAI nutraukia kabantį sakinį", { skip: SKIP },
   const ctx = await paruostiDb("session_query_timeout");
   const sessionStore = require("../utils/sessionStore");
   const nustatymai = sessionStore.sesijuPoolNustatymai({ DATABASE_URL: ctx.url });
-  const ribotas = new Pool({ ...nustatymai, statement_timeout: 500, query_timeout: 500 });
-  ctx.resursai.registruoti("ribotas pool", () => ribotas.end());
+  const ribotas = stebetiPoola(new Pool({ ...nustatymai, statement_timeout: 500, query_timeout: 500 }), { vardas: "ribotas" });
+  ctx.resursai.registruotiPoola(ribotas, { vardas: "ribotas pool" });
   try {
     const pradzia = Date.now();
     await assert.rejects(
@@ -991,12 +991,12 @@ test("ZONDAS: atimta `UPDATE` teisė → readiness false, nors `SELECT` veikia",
 
     await ctx.pool.query(`CREATE ROLE "${role}" LOGIN PASSWORD 'zondas'`);
     ctx.resursai.registruoti("testinė rolė", async () => {
-      const valytojas = new Pool({ connectionString: ctx.url });
+      const valytojas = stebetiPoola(new Pool({ connectionString: ctx.url }), { vardas: "valytojas", dsn: ctx.url });
       try {
         await valytojas.query(`DROP OWNED BY "${role}"`).catch(() => {});
         await valytojas.query(`DROP ROLE IF EXISTS "${role}"`).catch(() => {});
       } finally {
-        await valytojas.end();
+        await uzdarytiPoola(valytojas);
       }
     });
 
@@ -1010,15 +1010,15 @@ test("ZONDAS: atimta `UPDATE` teisė → readiness false, nors `SELECT` veikia",
     const roleUrl = url.toString();
 
     /** 1. Su VISOMIS teisėmis zondas teigiamas - kitaip testas nieko neatskirtų. */
-    const pilnas = new Pool({ connectionString: roleUrl });
-    ctx.resursai.registruoti("rolės pool (pilnos teisės)", () => pilnas.end());
+    const pilnas = stebetiPoola(new Pool({ connectionString: roleUrl }), { vardas: "pilnas", dsn: roleUrl });
+    ctx.resursai.registruotiPoola(pilnas, { vardas: "rolės pool (pilnos teisės)" });
     assert.equal(await createPostgresStore(pilnas).probe(), true, "prielaida: pilnos teisės duoda true");
 
     /** 2. Atimam TIK `UPDATE` - `SELECT` lieka. */
     await ctx.pool.query(`REVOKE UPDATE ON sessions FROM "${role}"`);
 
-    const ribotas = new Pool({ connectionString: roleUrl });
-    ctx.resursai.registruoti("rolės pool (be UPDATE)", () => ribotas.end());
+    const ribotas = stebetiPoola(new Pool({ connectionString: roleUrl }), { vardas: "ribotas", dsn: roleUrl });
+    ctx.resursai.registruotiPoola(ribotas, { vardas: "rolės pool (be UPDATE)" });
     const ribotasStore = createPostgresStore(ribotas);
 
     /** Skaitymas TEBEVEIKIA - todėl skaitymo zondas šio gedimo nepagautų. */

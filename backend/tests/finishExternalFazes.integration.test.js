@@ -10,6 +10,7 @@ const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./he
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
 const { STATUS, OWNER_KIND } = require("../utils/jobStore/common");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 /**
  * `finishAtomic()` ANT UŽBAIGTO JOB'O SU EXTERNAL EILUTE (#157, PR-7, 2 sąlyga).
@@ -81,7 +82,7 @@ before(async () => {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  pool = new Pool({ connectionString: DB_URL });
+  pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
   saknis = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-fazes-"));
   saugykla = createFsArtifactStore({ root: saknis });
   await saugykla.patikrintiSaugykla();
@@ -91,7 +92,7 @@ before(async () => {
 
 after(async () => {
   if (PRALEISTI) return;
-  if (pool) await pool.end().catch(() => {});
+  if (pool) await uzdarytiPoola(pool);
   pool = null;
   if (saknis) fs.rmSync(saknis, { recursive: true, force: true });
   await pg(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(() => {});

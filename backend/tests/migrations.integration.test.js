@@ -8,6 +8,7 @@ const crypto = require("node:crypto");
 const { Pool, Client } = require("pg");
 const { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele } = require("./helpers/indeksoTapatybe");
 const { iki } = require("./helpers/migracijuAibe");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const {
   skipWithoutPostgres,
   testDatabaseUrl,
@@ -257,7 +258,7 @@ test(
 
       migrate("up", tevine);
 
-      const pool = new Pool({ connectionString: DB_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
       try {
         const irasyti = (tipas, era) =>
           pool.query(
@@ -285,7 +286,7 @@ test(
           "nežinomas tipas privalo būti atmestas PO atnaujinimo"
         );
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     } finally {
       fs.rmSync(tevine, { recursive: true, force: true });
@@ -320,11 +321,11 @@ test(
         await perkurtiDb();
         migrate("up");
 
-        const pool = new Pool({ connectionString: DB_URL });
+        const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
         try {
           await pool.query(`DROP TABLE ${lentele} CASCADE`);
         } finally {
-          await pool.end();
+          await uzdarytiPoola(pool);
         }
 
         process.env.DATABASE_URL = DB_URL;
@@ -378,13 +379,13 @@ test(
       await perkurtiDb();
       migrate("up");
 
-      const pool = new Pool({ connectionString: DB_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
       try {
         await pool.query(
           "ALTER TABLE job_result_attempts DROP CONSTRAINT job_result_attempts_busena_allowed"
         );
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
 
       process.env.DATABASE_URL = DB_URL;
@@ -446,11 +447,11 @@ test(
       await perkurtiDb();
       migrate("up");
 
-      const pool = new Pool({ connectionString: DB_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
       try {
         await pool.query(`ALTER TABLE jobs DROP CONSTRAINT ${NUIMAMAS}`);
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
 
       process.env.DATABASE_URL = DB_URL;
@@ -525,7 +526,7 @@ test(
     migrate("up");
 
     const { REQUIRED_SESSION_CONSTRAINTS } = require("../utils/sessionStore");
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
 
     try {
       const { rows } = await pool.query(
@@ -544,7 +545,7 @@ test(
         "migracijų sukurtų sesijų CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
       );
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -569,7 +570,7 @@ test(
     /** Iki 7.3: `jobs` + `job_results` ir runtime pariteto sugriežtinimas. */
     migrate("up 2");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const { rows: pries } = await pool.query(
         `SELECT to_regclass(current_schema() || '.sessions') AS yra`
@@ -595,7 +596,7 @@ test(
         "atnaujinta DB privalo gauti VISUS sesijų invariantus, ne tik lentelę"
       );
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -620,7 +621,7 @@ test(
     migrate("up");
 
     const { REQUIRED_JOB_CONSTRAINTS } = require("../utils/jobStore");
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
 
     try {
       const { rows } = await pool.query(
@@ -664,7 +665,7 @@ test(
         "`job_results` CHECK invariantų aibė nesutampa su tikrinamu sąrašu"
       );
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -763,7 +764,7 @@ test(
      */
     migrate("up 1755800000000 --timestamp");
 
-    const pries = new Pool({ connectionString: DB_URL });
+    const pries = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pries", dsn: DB_URL });
     let jobId;
     try {
       const { rows: stulpeliai } = await pries.query(
@@ -779,13 +780,13 @@ test(
       );
       jobId = rows[0].id;
     } finally {
-      await pries.end();
+      await uzdarytiPoola(pries);
     }
 
     /** 2. Forward migracija. */
     migrate("up");
 
-    const po = new Pool({ connectionString: DB_URL });
+    const po = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "po", dsn: DB_URL });
     try {
       /** 2a. JAU EGZISTAVUSI eilutė gavo galiojančią pradinę reikšmę. */
       const { rows: senos } = await po.query("SELECT version FROM jobs WHERE id = $1", [jobId]);
@@ -828,7 +829,7 @@ test(
       );
       assert.equal(padidinta[0].version, 2);
     } finally {
-      await po.end();
+      await uzdarytiPoola(po);
     }
   }
 );
@@ -914,7 +915,7 @@ test(
     const priesDir = iki375(t);
     migrate("up", priesDir);
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       await ivestiDublikata(pool);
 
@@ -945,7 +946,7 @@ test(
 
       assert.equal(await indeksoBusena(pool), null, "indeksas NEGALI likti pusiau sukurtas");
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -957,7 +958,7 @@ test(
     await perkurtiDb();
     migrate("up");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       assert.ok(await indeksoBusena(pool), "po `up` indeksas privalo būti");
 
@@ -974,7 +975,7 @@ test(
 
       t.diagnostic("#375: down → up → up ciklas žalias");
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -995,7 +996,7 @@ test(
     const priesDir = iki375(t);
     migrate("up", priesDir);
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const { raktas } = await ivestiDublikata(pool);
 
@@ -1033,7 +1034,7 @@ test(
       const poBandymo = await indeksoBusena(pool);
       assert.equal(poBandymo.indisvalid, false, "neveikiantis indeksas lieka — jį šalina operatorius");
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -1057,7 +1058,7 @@ test(
     const blokuojantis = new Client({ connectionString: DB_URL });
     await blokuojantis.connect();
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const jobId = crypto.randomUUID();
       await pool.query(
@@ -1096,16 +1097,16 @@ test(
       assert.ok(truko < 60000, `krito per ${truko} ms — riba privalo veikti`);
       t.diagnostic(`#375 lock_timeout: krito per ${truko} ms`);
 
-      const pool2 = new Pool({ connectionString: DB_URL });
+      const pool2 = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool2", dsn: DB_URL });
       try {
         assert.equal(await indeksoBusena(pool2), null, "indeksas nesukurtas — migracija nutrūko");
       } finally {
-        await pool2.end();
+        await uzdarytiPoola(pool2);
       }
     } finally {
       await blokuojantis.query("ROLLBACK").catch(() => {});
       await blokuojantis.end().catch(() => {});
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -1177,12 +1178,12 @@ exports.down = () => {};
     }
 
     /** Kontrolė: #375 indeksas vis tiek pastatytas — ribos grąžinimas jo nesugadino. */
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const busena = await indeksoBusena(pool);
       assert.ok(busena && busena.indisvalid && busena.indisunique, "indeksas privalo likti galiojantis");
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
 
     t.diagnostic("#375 F2: `lock_timeout` grąžintas — sekanti migracija jo nepaveldi");
@@ -1205,7 +1206,7 @@ async function startas(url) {
     DATABASE_URL: url,
   });
   /** Startas grąžina gyvą pool'ą — testas privalo jį uždaryti. */
-  if (rezultatas && rezultatas.pool) await rezultatas.pool.end().catch(() => {});
+  if (rezultatas && rezultatas.pool) await uzdarytiPoola(rezultatas.pool);
   if (rezultatas && rezultatas.store && rezultatas.store.close) {
     await rezultatas.store.close().catch(() => {});
   }
@@ -1257,7 +1258,7 @@ test(
     await perkurtiDb();
     migrate("up");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
       await pool.query(`DROP INDEX ${indeksas}`);
@@ -1272,7 +1273,7 @@ test(
         "neteisinga stulpelių pora privalo kristi taip pat kaip nebuvimas"
       );
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -1290,7 +1291,7 @@ test(
     await perkurtiDb();
     migrate("up");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
       await pool.query(`DROP INDEX ${indeksas}`);
@@ -1305,7 +1306,7 @@ test(
         "atvirkštinė tvarka privalo būti atmesta"
       );
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -1324,7 +1325,7 @@ test(
     await perkurtiDb();
     migrate("up");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       /** Svetima schema su TIKSLIA kopija — tik kitoje vietoje. */
       await pool.query("CREATE SCHEMA svetima");
@@ -1347,7 +1348,7 @@ test(
         "svetimos schemos indeksas NEGALI tenkinti readiness"
       );
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -1369,7 +1370,7 @@ test(
     await perkurtiDb();
     migrate("up");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
       await pool.query(`DROP INDEX ${indeksas}`);
@@ -1386,7 +1387,7 @@ test(
         "dalinis indeksas NEGALI tenkinti readiness"
       );
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -1421,7 +1422,7 @@ test(
     await perkurtiDb();
     migrate("up");
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       await pool.query("CREATE SCHEMA svetima2");
       await pool.query(
@@ -1448,7 +1449,7 @@ test(
       assert.ok(vel, "savoje schemoje privalo būti randamas");
       assert.deepEqual(vel.stulpeliai, ["storage_type", "storage_key"]);
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   }
 );
@@ -1473,7 +1474,7 @@ test(
     const priesDir = iki375(t);
     migrate("up", priesDir);
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const restoredJobStore = require("../utils/restoredJobStore");
 
@@ -1486,7 +1487,7 @@ test(
 
       if (paruosta.store && paruosta.store.close) await paruosta.store.close().catch(() => {});
     } finally {
-      await pool.end().catch(() => {});
+      await uzdarytiPoola(pool);
     }
   }
 );

@@ -14,6 +14,7 @@ const {
 const { STATUS, JOB_TYPES, OWNER_KIND } = require("../utils/jobStore/common");
 const { phasesForType } = require("../utils/jobPhase");
 const { assertSupportedSchemaVersion } = require("../utils/jobAuthorization");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 /**
  * DB ↔ RUNTIME PARITETAS (#155, 7.2a).
@@ -48,11 +49,11 @@ const DB_URL = testDatabaseUrl("parity");
 let pool;
 
 async function vykdyti(url, sql) {
-  const p = new Pool({ connectionString: url });
+  const p = stebetiPoola(new Pool({ connectionString: url }), { vardas: "p", dsn: url });
   try {
     await p.query(sql);
   } finally {
-    await p.end();
+    await uzdarytiPoola(p);
   }
 }
 
@@ -148,10 +149,10 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  pool = new Pool({ connectionString: DB_URL });
+  pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
 
   t.after(async () => {
-    await pool.end().catch(() => {});
+    await uzdarytiPoola(pool);
     await vykdyti(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${vardas}" WITH (FORCE)`);
   });
 

@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const { Pool, Client } = require("pg");
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const {
   createPostgresStore,
   SELECT_JOB_META,
@@ -111,8 +112,8 @@ test("#157 PR-3: hidratacija yra EKSPLICITINĖ ir RIBOTA", { skip: PRALEISTI, ti
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const pool = new Pool({ connectionString: DB_URL });
-  t.after(() => pool.end().catch(() => {}));
+  const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
+  t.after(() => uzdarytiPoola(pool));
 
   const turinys = { text: "external transkripcija", segments: [1, 2, 3] };
   const saugykla = skaitiklineSaugykla(turinys);

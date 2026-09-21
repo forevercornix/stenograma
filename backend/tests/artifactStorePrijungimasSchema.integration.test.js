@@ -7,6 +7,7 @@ const { Client, Pool } = require("pg");
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
 const { RADINIAI, nustatytiPrijungimoBusena } = require("../utils/artifactStore/prijungimoBusena");
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 /**
  * PRIJUNGIMO STEBĖTOJAS PRIEŠ REALIĄ SCHEMĄ (#157, PR-7, 3 sąlyga).
@@ -63,12 +64,12 @@ before(async () => {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  pool = new Pool({ connectionString: DB_URL });
+  pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
 });
 
 after(async () => {
   if (PRALEISTI) return;
-  if (pool) await pool.end().catch(() => {});
+  if (pool) await uzdarytiPoola(pool);
   pool = null;
   await pg(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(() => {});
 });

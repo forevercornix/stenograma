@@ -62,8 +62,109 @@ function vienaKarta(veiksmas) {
  */
 const UZDARYMO_RIBA_MS = 10_000;
 
-function delsa(ms) {
+/**
+ * ⚠️ VIENA REALIZACIJA, TRYS ĮĖJIMO TAŠKAI (#380 D4).
+ *
+ * `stebetiPoola` + `uzdarytiPoola` yra mechanizmas; `registruotiPoola` (krūvoje) ir
+ * `poolasTestui` (testo kontekste) — tik jo apvalkalai. Trijų įėjimo taškų reikia ne
+ * dėl skonio: repo `pg` pool'ai gyvena trimis skirtingais gyvavimo ciklais — krūvoje
+ * (`setup()`/`cleanup()`), per testą (`t.after`) ir per vieną `try/finally` bloką, —
+ * ir jų suvienodinimas reikštų perrašyti testus, kurie apie šį PR nieko nežino.
+ *
+ * ❌ TAI NĖRA TREČIAS MECHANIZMAS: riba, nutraukimas ir klaidų apskaita gyvena
+ * VIENOJE vietoje žemiau, o apvalkalai tik nurodo, KADA ją paleisti.
+ */
+const stebimi = new WeakMap();
+
+function delsaVidine(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Prikabina `'error'` klausytoją kiekvienam pool'o klientui ir pradeda apskaitą.
+ *
+ * ⚠️ KABINAMA KŪRIMO METU, NE UŽDARYMO. `pg-pool@3.14.0` PAIMTAM klientui savo
+ * klausytoją nuima (`index.js:344`), tad vėliau prikabinti jau nebėra kur: klaida
+ * kyla ant kliento, kurio niekas nebeseka, ir `EventEmitter` verčia tai neperimta
+ * išimtimi.
+ */
+function stebetiPoola(pool, { vardas = "pool", dsn } = {}) {
+  if (stebimi.has(pool)) return pool;
+  const busena = { vardas, dsn, tikros: [], valymo: [], valyme: false };
+  stebimi.set(pool, busena);
+  pool.on("connect", (client) =>
+    client.on("error", (err) => {
+      const irasas = `${vardas}: ${err && err.code ? err.code : "?"}`;
+      if (busena.valyme) busena.valymo.push(irasas);
+      else busena.tikros.push(irasas);
+    })
+  );
+  return pool;
+}
+
+/**
+ * RIBOTAS UŽDARYMAS — VIENINTELĖ VIETA, KUR TAI DAROMA (#380 D3a, D6, D7).
+ *
+ * ⚠️ `pool.end()` PAŽADO NELAUKIAMA NERIBOTAI. `pg-pool` jį išsprendžia tik kai
+ * `_clients` tuščias (`index.js:140`), o negrąžinto kliento iš ten niekas nešalina
+ * (`_remove` pasiekiamas tik per `idleListener` `:59` arba `release()` `:397/:404/:413`).
+ * Laukimas būtų neribotas PAGAL KONSTRUKCIJĄ, ne dėl lėto tinklo.
+ */
+async function uzdarytiPoola(pool) {
+  const busena = stebimi.get(pool) || { vardas: "pool", tikros: [], valymo: [] };
+
+  const baigta = await Promise.race([
+    pool.end().then(() => "OK", () => "OK"),
+    delsaVidine(UZDARYMO_RIBA_MS).then(() => "TIMEOUT"),
+  ]);
+
+  let ribaVirsyta = false;
+  if (baigta === "TIMEOUT") {
+    ribaVirsyta = true;
+    busena.valyme = true;
+    try {
+      if (busena.dsn) {
+        const { Client } = require("pg");
+        const c = new Client({ connectionString: busena.dsn });
+        await c.connect().catch(() => {});
+        await c
+          .query(
+            `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+              WHERE datname = current_database() AND pid <> pg_backend_pid()`
+          )
+          .catch(() => {});
+        await c.end().catch(() => {});
+      }
+    } finally {
+      busena.valyme = false;
+    }
+  }
+
+  /**
+   * ⚠️ D7: TIKROS JUNGČIŲ KLAIDOS YRA GEDIMAS, NE FONAS. Jei jungtis nutrūko NE per
+   * šio helper'io valymą, ją nutraukė kažkas kitas — testas, DB restartas ar
+   * operatorius. Atskiriama pagal ŽYMĘ, nustatytą prieš mūsų pačių
+   * `pg_terminate_backend`, o ne pagal pranešimo tekstą: teksto filtras
+   * (`/Connection terminated/`) paslėptų IDENTIŠKĄ tikrą gedimą.
+   */
+  const priezastys = [];
+  if (ribaVirsyta) {
+    priezastys.push(
+      `POOL_CLOSE_TIMEOUT ${busena.vardas}: \`pool.end()\` nebaigė per ${UZDARYMO_RIBA_MS} ms ` +
+        `(paimta klientų: ${pool.totalCount - pool.idleCount}, laukia: ${pool.waitingCount}). ` +
+        "Kažkas paėmė klientą ir nepadarė `release()`."
+    );
+  }
+  if (busena.tikros.length > 0) {
+    priezastys.push(`CONNECTION_ERROR (ne valymo) ${busena.vardas}: ${busena.tikros.join(", ")}`);
+  }
+  if (priezastys.length > 0) throw new Error(priezastys.join(" | "));
+}
+
+/** D7 diagnostikai: klaidos, kurias sukėlė pats valymas (jos NĖRA gedimas). */
+function poolKlaidos(pool) {
+  const b = stebimi.get(pool);
+  return b ? { tikros: [...b.tikros], valymo: [...b.valymo] } : { tikros: [], valymo: [] };
 }
 
 function sukurtiResursuKruva() {
@@ -86,18 +187,6 @@ function sukurtiResursuKruva() {
    * (`/Connection terminated/`) atrodytų lygiavertis, bet paslėptų IDENTIŠKĄ tikrą
    * gedimą — testą, kuris pats nutraukia backend'ą, arba DB, kuri nukrito darbo metu.
    */
-  let valyme = false;
-  const tikrosKlaidos = [];
-  const valymoKlaidos = [];
-
-  function klausytojas(vardas) {
-    return (err) => {
-      const irasas = `${vardas}: ${err && err.code ? err.code : "?"}`;
-      if (valyme) valymoKlaidos.push(irasas);
-      else tikrosKlaidos.push(irasas);
-    };
-  }
-
   return {
     /**
      * Registruoja jau SUKURTĄ resursą. Kviesti iš karto po sukūrimo.
@@ -140,45 +229,8 @@ function sukurtiResursuKruva() {
      *   sokai užsidarytų ir event loop atsilaisvintų.
      */
     registruotiPoola(pool, { vardas, dsn } = {}) {
-      const zenklas = vardas || "pool";
-      pool.on("connect", (client) => client.on("error", klausytojas(zenklas)));
-
-      return this.registruoti(zenklas, async () => {
-        const baigta = await Promise.race([
-          pool.end().then(() => "OK", () => "OK"),
-          delsa(UZDARYMO_RIBA_MS).then(() => "TIMEOUT"),
-        ]);
-        if (baigta === "OK") return;
-
-        /**
-         * ⚠️ `pool.end()` PAŽADO NEBELAUKIAMA. `pg-pool` jį išsprendžia tik kai
-         * `_clients` tuščias (`index.js:140`), o negrąžinto kliento ten niekas
-         * nepašalina — laukimas būtų neribotas pagal konstrukciją.
-         */
-        valyme = true;
-        try {
-          if (dsn) {
-            const { Client } = require("pg");
-            const c = new Client({ connectionString: dsn });
-            await c.connect().catch(() => {});
-            await c
-              .query(
-                `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                  WHERE datname = current_database() AND pid <> pg_backend_pid()`
-              )
-              .catch(() => {});
-            await c.end().catch(() => {});
-          }
-        } finally {
-          valyme = false;
-        }
-
-        throw new Error(
-          `POOL_CLOSE_TIMEOUT ${zenklas}: \`pool.end()\` nebaigė per ${UZDARYMO_RIBA_MS} ms ` +
-            `(paimta klientų: ${pool.totalCount - pool.idleCount}, laukia: ${pool.waitingCount}). ` +
-            "Kažkas paėmė klientą ir nepadarė `release()`."
-        );
-      });
+      stebetiPoola(pool, { vardas, dsn });
+      return this.registruoti(vardas || "pool", () => uzdarytiPoola(pool));
     },
 
     /** Kiek pool'o klientų šiuo metu PAIMTA (dokumentuoti skaitikliai, ne `_`-laukai). */
@@ -208,16 +260,6 @@ function sukurtiResursuKruva() {
       };
     },
 
-    /** D7: jungties klaidos, kilusios NE per šios krūvos valymą. */
-    jungciuKlaidos() {
-      return [...tikrosKlaidos];
-    },
-
-    /** Diagnostikai: klaidos, kurias sukėlė pats valymas (jos NĖRA gedimas). */
-    valymoSukeltos() {
-      return [...valymoKlaidos];
-    },
-
     /**
      * Išvynioja krūvą ATVIRKŠTINE tvarka. Naudojama ir klaidos, ir sėkmės
      * (`cleanup()`) keliuose, tad valymo logika yra VIENA.
@@ -240,10 +282,6 @@ function sukurtiResursuKruva() {
        * restartas ar operatorius. Praryti tai reikštų, kad sargas mato tik savo paties
        * triukšmą.
        */
-      if (tikrosKlaidos.length > 0) {
-        nesekmes.push(`CONNECTION_ERROR (ne valymo): ${tikrosKlaidos.join(", ")}`);
-      }
-
       if (nesekmes.length === 0) return;
       if (klaida) {
         klaida.valymoKlaidos = (klaida.valymoKlaidos || []).concat(nesekmes);
@@ -277,4 +315,4 @@ function poolasTestui(t, { dsn, vardas = "darbinis", Pool } = {}) {
   return { pool, kruva };
 }
 
-module.exports = { sukurtiResursuKruva, vienaKarta, poolasTestui };
+module.exports = { sukurtiResursuKruva, vienaKarta, poolasTestui, stebetiPoola, uzdarytiPoola, poolKlaidos };
