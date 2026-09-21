@@ -177,6 +177,28 @@ for (const senas of readdirSync(tapDir).filter((n) => n.endsWith(".tap"))) {
   unlinkSync(join(tapDir, senas));
 }
 
+/**
+ * D5 — VIENO FAILO LAIKO RIBA IR IŠVESTIES BUFERIS (#380).
+ *
+ * ⚠️ IŠVESTA IŠ MATAVIMO, NE SPĖTA. Trys žali `main` run'ai (`35651144332`,
+ * `35583526448`, `35565366586`): lėčiausi failai — `auditPersistence.integration`
+ * **33 s** ir `migrations.integration` **30 s**, visų kitų mediana 1–4 s. Riba 120 s
+ * yra ×3,6 nuo išmatuoto MAKSIMUMO: kad duotų netikrą kritimą, runner'is turi suktis
+ * dvigubai lėčiau nei blogiausias stebėtas atvejis.
+ *
+ * ⚠️ RIBA YRA VIENO FAILO, NE VISO RINKINIO. Vienas pakibęs failas kainuoja 120 s
+ * vietoj 20 min job timeout'o. Sisteminis gedimas (kabo visi) job'o ribą vis tiek
+ * pasiektų — bet tada diagnozė jau nedviprasmiška iš PIRMO `FILE_TIMEOUT`.
+ *
+ * ⚠️ `maxBuffer` NUSTATOMAS AIŠKIAI. Numatytasis `spawnSync` buferis — 1 MiB, o
+ * didžiausia išmatuota TAP sekcija (`artifactMigrationS3.integration`, run
+ * `35651144332`) ~267 KB. Atsarga tik ~4×, o KRITĘS failas išveda kartotinai daugiau
+ * nei žalias (YAML blokai su `stack`). Viršijus buferį procesas nutraukiamas su
+ * `ENOBUFS`, ir be atskyrimo tai atrodytų kaip laiko riba.
+ */
+const FAILO_RIBA_MS = 120_000;
+const FAILO_BUFERIS = 64 * 1024 * 1024;
+
 let bendraBusena = 0;
 
 for (const failas of files) {
@@ -205,10 +227,56 @@ for (const failas of files) {
       encoding: "utf8",
       env: vaikoEnv,
       stdio: ["inherit", "pipe", "pipe"],
+      timeout: FAILO_RIBA_MS,
+      maxBuffer: FAILO_BUFERIS,
+      /**
+       * ⚠️ `SIGKILL`, NE NUMATYTASIS `SIGTERM`. Pakibęs procesas kabo neatsakančiame
+       * `pg` sakinyje arba event loop'e, kurį laiko nutekėjęs klientas; `SIGTERM`
+       * tokiu atveju gali būti apdorotas ir proceso nepabaigti, ir riba taptų dar
+       * viena vieta, kur laukiama neribotai.
+       */
+      killSignal: "SIGKILL",
     }
   );
 
-  const tap = (rezultatas.stdout ?? "") + (rezultatas.stderr ?? "");
+  /**
+   * ⚠️ NUTRAUKTAS FAILAS = KRITĘS FAILAS, SU VARDU (#380 R1).
+   *
+   * `spawnSync` nutraukus procesą GRĄŽINA tai, ką jis spėjo išvesti, tad dalinė
+   * išvestis IŠSAUGOMA — ji yra diagnostika: iš jos matyti, kuris testas buvo
+   * paskutinis. Prie jos prikabinama TAP eilutė su stabiliu kodu.
+   *
+   * ⚠️ `ENOBUFS` ATSKIRIAMAS NUO `ETIMEDOUT`. Abu ateina per `rezultatas.error` ir
+   * abu nutraukia procesą, bet reiškia priešingus dalykus: pirmas — testas išvedė
+   * PER DAUG, antras — nustojo išvesti apskritai. Sulieti juos reikštų siųsti
+   * operatorių taisyti ne to.
+   */
+  const klaidosKodas = rezultatas.error ? rezultatas.error.code : null;
+  const perpildytas = klaidosKodas === "ENOBUFS";
+  const nutrauktas = !perpildytas && (klaidosKodas === "ETIMEDOUT" || rezultatas.signal === "SIGKILL");
+
+  let zyma = "";
+  if (perpildytas) {
+    zyma =
+      `\nnot ok 0 - FILE_OVERFLOW ${vardas}\n` +
+      "  ---\n" +
+      "  kodas: 'FILE_OVERFLOW'\n" +
+      `  failas: '${vardas}'\n` +
+      `  buferis_baitais: ${FAILO_BUFERIS}\n` +
+      "  paaiskinimas: 'TAP išvestis viršijo buferį — tai NE laiko riba'\n" +
+      "  ...\n";
+  } else if (nutrauktas) {
+    zyma =
+      `\nnot ok 0 - FILE_TIMEOUT ${vardas}\n` +
+      "  ---\n" +
+      "  kodas: 'FILE_TIMEOUT'\n" +
+      `  failas: '${vardas}'\n` +
+      `  riba_ms: ${FAILO_RIBA_MS}\n` +
+      "  paaiskinimas: 'failas nebaigė per ribą ir buvo nutrauktas; aukščiau — dalinė išvestis'\n" +
+      "  ...\n";
+  }
+
+  const tap = (rezultatas.stdout ?? "") + (rezultatas.stderr ?? "") + zyma;
 
   /**
    * ⚠️ RAŠOMA IR TADA, KAI PROCESAS KRITO. Kritęs ar nulūžęs failas duoda TAP be
@@ -217,9 +285,21 @@ for (const failas of files) {
    */
   writeFileSync(join(tapDir, `${vardas}.tap`), tap, "utf8");
 
-  console.log(`───── ${vardas} (exit ${rezultatas.status ?? "signal"}) ─────`);
+  const busenosTekstas = perpildytas
+    ? "FILE_OVERFLOW"
+    : nutrauktas
+      ? `FILE_TIMEOUT po ${FAILO_RIBA_MS} ms`
+      : `exit ${rezultatas.status ?? "signal"}`;
+  console.log(`───── ${vardas} (${busenosTekstas}) ─────`);
   process.stdout.write(tap);
 
+  /**
+   * ⚠️ NUTRAUKTAS FAILAS VIRSTA NENULINE BENDRA BŪSENA. Nutraukus signalu
+   * `rezultatas.status` yra `null`, o `null !== 0`, tad `?? 1` duoda 1. CI apskaitos
+   * keisti nereikėjo: žingsnis krenta per exit kodą (`ci.yml:213`), o
+   * `verify-postgres-suite-ran.mjs` prie to prideda per-failo įrodymą.
+   */
+  if (rezultatas.status !== 0) bendraBusena = rezultatas.status ?? 1;
   if (rezultatas.status !== 0) bendraBusena = rezultatas.status ?? 1;
 }
 
