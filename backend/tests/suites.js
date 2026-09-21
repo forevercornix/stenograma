@@ -392,6 +392,8 @@ const functional = [
   "restoredJobStoreForwarding",
   /** #157 (PR-4): bandymų registro modulis (grynas SQL sluoksnis). */
   "attemptRegistry",
+  /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
+  "migracijuAibe",
   /**
    * #157 (PR-6): migracijos kontraktas be DB.
    *

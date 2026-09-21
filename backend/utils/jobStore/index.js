@@ -331,6 +331,42 @@ const REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS = [
 ];
 
 /**
+ * PRIVALOMI INDEKSAI — TA PATI TAISYKLĖ KAIP `BUTINOS_LENTELES` (#376 Codex P2 #1).
+ *
+ * ⚠️ KODĖL INDEKSAS APSKRITAI ČIA. `job_result_attempts_vienas_adresas`
+ * (`1756700000000`) yra ne našumo priemonė, o INVARIANTAS: vienas saugyklos
+ * adresas ↔ viena registro eilutė. Juo remsis #351 D6.
+ *
+ * Iki šios patikros readiness matė tik `contype = 'c'` — check constraint'us. DB,
+ * migruota tik iki `1756600000000`, readiness PRAEIDAVO: rašymas vyktų be
+ * invarianto, `BendroAdresoKlaida` niekada nesuveiktų, o #351 remtųsi garantija,
+ * kurios nėra. Migracijos pačios patikros čia nepadeda — jos veikia tik TADA, kai
+ * migracija leidžiama.
+ *
+ * ⚠️ READINESS YRA VIENINTELIS AUTORITETAS VISOMS DB, nes tik jis vykdomas
+ * KIEKVIENAME starte, nepriklausomai nuo to, kada ir kaip bazė buvo migruota.
+ *
+ * ⚠️ NEUŽTENKA VARDO. Tikrinama pora `(schema, lentelė)` plius stulpelių seka ir
+ * `indisvalid`/`indisunique`. Indeksas tuo pačiu vardu kitoje schemoje, ant kitos
+ * lentelės arba ant kitos stulpelių poros yra KITAS objektas — o pasitenkinus
+ * vardu, tai būtų ta pati klaida, kurią šis PR taiso testų pusėje.
+ *
+ * ⚠️ STULPELIAI TIKRINAMI PER KATALOGĄ (`pg_index.indkey` + `pg_attribute`), NE
+ * PER `pg_get_indexdef()` TEKSTĄ. Teksto palyginimas lūžtų nuo formatavimo,
+ * kabučių ar `COLLATE` — t. y. praneštų apie skirtumą, kurio nėra, arba praleistų
+ * tikrą.
+ */
+const BUTINI_INDEKSAI = Object.freeze([
+  Object.freeze({
+    vardas: "job_result_attempts_vienas_adresas",
+    lentele: "job_result_attempts",
+    /** Tvarka reikšminga: `(storage_type, storage_key)`, ne atvirkščiai. */
+    stulpeliai: Object.freeze(["storage_type", "storage_key"]),
+    unikalus: true,
+  }),
+]);
+
+/**
  * Lentelė → jos privalomų invariantų sąrašas. VIENAS autoritetas abiem patikroms:
  * lentelių buvimui ir suvaržymams — kitaip pridėjus lentelę į vieną sąrašą ir
  * pamiršus kitą, patikra liktų dalinė būtent taip, kaip iki #342.
@@ -458,6 +494,68 @@ async function initializePostgres(env = process.env) {
           "Paleiskite `npm run migrate:up`: be jų DB priimtų įrašus, kurių " +
           "runtime nepripažįsta (nežinomas tipas, nepalaikoma era, nežinomas actor " +
           "source, rezultato eilutė be vientisumo metaduomenų)."
+      );
+    }
+
+    /**
+     * ⚠️ INDEKSŲ PATIKRA ATSKIRA UŽKLAUSA, NE PRIJUNGTA PRIE CONSTRAINT'Ų (#376).
+     *
+     * `pg_constraint` ir `pg_index` yra skirtingi katalogai su skirtingais raktais;
+     * sujungus juos į vieną `UNION`, tektų suvienodinti stulpelių aibę, ir patikra
+     * taptų sunkiau skaitoma nei du atskiri, aiškūs klausimai.
+     *
+     * ⚠️ TAPATYBĘ NUSTATO KETURI DALYKAI, NE VARDAS: schema, lentelė, stulpelių
+     * SEKA ir `indisvalid`/`indisunique`. `indkey` yra `int2vector` — jo elementų
+     * eilė ir yra indekso stulpelių tvarka, tad `WITH ORDINALITY` ją išsaugo.
+     */
+    const { rows: iRows } = await pool.query(
+      `SELECT i.indexrelid::regclass::text AS vardas,
+              t.relname                    AS lentele,
+              i.indisvalid,
+              i.indisunique,
+              (SELECT array_agg(a.attname ORDER BY k.ord)
+                 FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+              ) AS stulpeliai
+         FROM pg_index i
+         JOIN pg_class ic    ON ic.oid = i.indexrelid
+         JOIN pg_class t     ON t.oid  = i.indrelid
+         JOIN pg_namespace n ON n.oid  = ic.relnamespace
+        WHERE ic.relname = ANY($1)
+          AND n.nspname = current_schema()`,
+      [BUTINI_INDEKSAI.map((x) => x.vardas)]
+    );
+
+    const trukstaIndeksu = BUTINI_INDEKSAI.filter((butinas) => {
+      const rastas = iRows.find(
+        (r) => r.vardas.split(".").pop() === butinas.vardas && r.lentele === butinas.lentele
+      );
+      if (!rastas) return true;
+      if (!rastas.indisvalid) return true;
+      if (butinas.unikalus && !rastas.indisunique) return true;
+
+      const stulpeliai = rastas.stulpeliai || [];
+      return (
+        stulpeliai.length !== butinas.stulpeliai.length ||
+        stulpeliai.some((s, i) => s !== butinas.stulpeliai[i])
+      );
+    });
+
+    if (trukstaIndeksu.length > 0) {
+      /**
+       * ⚠️ PRANEŠIME — VARDAS IR LAUKIAMA FORMA, NE „kažko trūksta".
+       *
+       * Indeksas gali būti neteisingas keturiais skirtingais būdais, ir operatoriui
+       * reikia žinoti, kurio laukiama. Rakto reikšmių čia nėra — tik schemos vardai.
+       */
+      const aprasai = trukstaIndeksu.map(
+        (x) => `${x.vardas} (${x.lentele}: ${x.stulpeliai.join(", ")}${x.unikalus ? ", UNIQUE" : ""})`
+      );
+      throw new Error(
+        `PostgreSQL schema pasenusi - trūksta arba netinkami indeksai: ${aprasai.join("; ")}. ` +
+          "Paleiskite `npm run migrate:up`: be jų DB priimtų dvi registro eilutes " +
+          "vienu saugyklos adresu, ir rašymas vyktų be invarianto, kuriuo remiasi " +
+          "bandymų registras."
       );
     }
   } catch (err) {
@@ -1590,6 +1688,7 @@ module.exports = {
   REQUIRED_ATTEMPT_CONSTRAINTS,
   REQUIRED_MIGRATION_PROGRESS_CONSTRAINTS,
   BUTINOS_LENTELES,
+  BUTINI_INDEKSAI,
   STATUS,
   JOB_TYPES,
   TTL_MS,

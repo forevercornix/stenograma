@@ -6,6 +6,8 @@ const os = require("node:os");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const { Pool, Client } = require("pg");
+const { rastiIndeksa, kvalifikuotasVardas } = require("./helpers/indeksoTapatybe");
+const { iki } = require("./helpers/migracijuAibe");
 const {
   skipWithoutPostgres,
   testDatabaseUrl,
@@ -856,20 +858,26 @@ function iki375(t) {
 
   assert.ok(visos.includes(VIENO_ADRESO_MIGRACIJA), "prielaida: #375 migracija repo yra");
 
-  for (const f of visos.filter((f) => f !== VIENO_ADRESO_MIGRACIJA)) {
+  /**
+   * ⚠️ FILTRUOJAMA PAGAL TVARKĄ, NE PAGAL VARDĄ (#376 Codex P2 #3).
+   *
+   * `f !== VIENO_ADRESO_MIGRACIJA` šalino VIENĄ failą, o ne viską po jo. Pridėjus
+   * `1756800000000`, ji patektų į „iki #375" katalogą, `checkOrder` atmestų #375
+   * kaip ne eilės tvarka, ir testai kristų NEIŠBANDĘ to, ką turėjo išbandyti.
+   */
+  for (const f of iki(visos, VIENO_ADRESO_MIGRACIJA)) {
     fs.copyFileSync(path.join(ŠAKNIS, "migrations", f), path.join(dir, f));
   }
   return dir;
 }
 
+/**
+ * ⚠️ PAIEŠKA KVALIFIKUOTA SCHEMA IR LENTELE (#376 Codex P2 #2). Vien `relname`
+ * rastų to paties vardo indeksą bet kurioje `search_path` schemoje — tad
+ * tvirtinimas „indeksas nesukurtas" galėtų būti melagingas dėl svetimo objekto.
+ */
 async function indeksoBusena(pool) {
-  const { rows } = await pool.query(
-    `SELECT i.indisvalid, i.indisunique
-       FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
-      WHERE c.relname = $1`,
-    [VIENO_ADRESO_INDEKSAS]
-  );
-  return rows[0] || null;
+  return rastiIndeksa(pool, VIENO_ADRESO_INDEKSAS, "job_result_attempts");
 }
 
 /** Du bandymai vienu adresu — būsena, kurios #375 migracija neturi praleisti. */
@@ -1178,5 +1186,265 @@ exports.down = () => {};
     }
 
     t.diagnostic("#375 F2: `lock_timeout` grąžintas — sekanti migracija jo nepaveldi");
+  }
+);
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * #376 R1 — GYVAS STARTAS TIKRINA INDEKSĄ (Codex P2 #1)
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ MATUOJAMAS PRODUKCINIS KELIAS. `_initializePostgresForTests` yra ta pati
+ * `initializePostgres()`, kurią kviečia startas — ne jos kopija. `env` paduodamas
+ * eksplicitiškai, tad `process.env` neteršiamas.
+ */
+async function startas(url) {
+  const jobStore = require("../utils/jobStore");
+  const rezultatas = await jobStore._initializePostgresForTests({
+    ...process.env,
+    DATABASE_URL: url,
+  });
+  /** Startas grąžina gyvą pool'ą — testas privalo jį uždaryti. */
+  if (rezultatas && rezultatas.pool) await rezultatas.pool.end().catch(() => {});
+  if (rezultatas && rezultatas.store && rezultatas.store.close) {
+    await rezultatas.store.close().catch(() => {});
+  }
+  return rezultatas;
+}
+
+test(
+  "#376 R1: schema iki `1756600000000` → gyvas startas KRENTA, klaidoje minimas indeksas",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async (t) => {
+    /**
+     * ⚠️ BE ŠIOS PATIKROS READINESS PRAEIDAVO. Jis matė tik `contype = 'c'` —
+     * check constraint'us, o `1756700000000` jų neprideda. DB, migruota tik iki
+     * `1756600000000`, būtų paskelbta pasiruošusia: rašymas vyktų BE invarianto,
+     * `BendroAdresoKlaida` niekada nesuveiktų, o #351 D6 remtųsi garantija, kurios
+     * nėra.
+     *
+     * ⚠️ MIGRACIJOS PAČIOS PATIKROS ČIA NEPADEDA — jos veikia tik tada, kai
+     * migracija leidžiama. Readiness yra vienintelis autoritetas, vykdomas
+     * KIEKVIENAME starte.
+     */
+    await perkurtiDb();
+    const priesDir = iki375(t);
+    migrate("up", priesDir);
+
+    await assert.rejects(
+      () => startas(DB_URL),
+      (klaida) => {
+        assert.match(klaida.message, /job_result_attempts_vienas_adresas/, "privalo įvardyti INDEKSĄ");
+        assert.match(klaida.message, /migrate:up/, "ir nurodyti veiksmą");
+        return true;
+      },
+      "startas su schema be indekso PRIVALO kristi"
+    );
+  }
+);
+
+test(
+  "#376 R1: tas pats VARDAS ant kitos stulpelių poros → startas KRENTA",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async () => {
+    /**
+     * ⚠️ TAI ATVEJIS, KURĮ VARDO PATIKRA PRALEISTŲ.
+     *
+     * Indeksas yra, galiojantis, unikalus ir teisingu vardu — bet ant `(job_id,
+     * storage_key)`. Invarianto, kuriuo remiasi #351 D6, jis NETEIKIA. Tenkinantis
+     * vardu readiness paskelbtų žalią.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
+      await pool.query(`DROP INDEX ${indeksas}`);
+      await pool.query(
+        `CREATE UNIQUE INDEX ${indeksas} ON job_result_attempts (job_id, storage_key)`
+      );
+
+      await assert.rejects(
+        () => startas(DB_URL),
+        (klaida) => klaida.message.includes(VIENO_ADRESO_INDEKSAS),
+        "neteisinga stulpelių pora privalo kristi taip pat kaip nebuvimas"
+      );
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  }
+);
+
+test(
+  "#376 R1: teisingi stulpeliai ATVIRKŠTINE tvarka → startas KRENTA",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async () => {
+    /**
+     * ⚠️ TVARKA YRA DALIS TAPATYBĖS, NE DETALĖ. `(storage_key, storage_type)`
+     * uždraudžia tą pačią porų aibę, bet duoda kitą prefiksą paieškoms — ir
+     * `1756700000000` deklaruoja būtent `(storage_type, storage_key)`. Patikra,
+     * lyginanti aibes, o ne sekas, šio skirtumo nematytų.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
+      await pool.query(`DROP INDEX ${indeksas}`);
+      await pool.query(
+        `CREATE UNIQUE INDEX ${indeksas} ON job_result_attempts (storage_key, storage_type)`
+      );
+
+      await assert.rejects(
+        () => startas(DB_URL),
+        (klaida) => klaida.message.includes(VIENO_ADRESO_INDEKSAS),
+        "atvirkštinė tvarka privalo būti atmesta"
+      );
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  }
+);
+
+test(
+  "#376 R1: galiojantis to paties vardo indeksas KITOJE schemoje → startas KRENTA",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async () => {
+    /**
+     * ⚠️ TAI ATVEJIS, DĖL KURIO `current_schema()` FILTRAS APSKRITAI REIKALINGAS.
+     *
+     * `relname` unikalus tik schemos ribose. Be filtro readiness rastų svetimą
+     * objektą — teisingo vardo, galiojantį, unikalų, ant tos pačios stulpelių poros
+     * — ir paskelbtų žalią, nors DABARTINĖJE schemoje invarianto nėra.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      /** Svetima schema su TIKSLIA kopija — tik kitoje vietoje. */
+      await pool.query("CREATE SCHEMA svetima");
+      await pool.query(
+        `CREATE TABLE svetima.job_result_attempts (
+           attempt_id uuid, storage_type text, storage_key text)`
+      );
+      await pool.query(
+        `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS}
+           ON svetima.job_result_attempts (storage_type, storage_key)`
+      );
+
+      /** O dabartinėje schemoje jo NEBĖRA. */
+      const musu = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
+      await pool.query(`DROP INDEX ${musu}`);
+
+      await assert.rejects(
+        () => startas(DB_URL),
+        (klaida) => klaida.message.includes(VIENO_ADRESO_INDEKSAS),
+        "svetimos schemos indeksas NEGALI tenkinti readiness"
+      );
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  }
+);
+
+test(
+  "#376 R1 KONTROLĖ: pilna schema → startas PRAEINA",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async () => {
+    /**
+     * ⚠️ BE ŠIOS KONTROLĖS keturi aukščiau esantys testai suderinami su readiness,
+     * kuris atmeta VISKĄ. Tokia realizacija juos praeitų, o produkcija nebepakiltų.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const rezultatas = await startas(DB_URL);
+    assert.ok(rezultatas, "pilna schema privalo praleisti startą");
+  }
+);
+
+test(
+  "#376 R2: helper'is NERANDA to paties vardo indekso kitoje schemoje",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async () => {
+    /**
+     * ⚠️ TESTŲ HELPER'IS TIKRINAMAS ATSKIRAI NUO READINESS.
+     *
+     * Jį naudoja trys tvirtinimai, sakantys „invariantas galioja". Jei jis rastų
+     * svetimą objektą, tie testai liktų žali bazėje be invarianto — sargai, kurie
+     * negali kristi.
+     */
+    await perkurtiDb();
+    migrate("up");
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      await pool.query("CREATE SCHEMA svetima2");
+      await pool.query(
+        `CREATE TABLE svetima2.job_result_attempts (
+           attempt_id uuid, storage_type text, storage_key text)`
+      );
+      await pool.query(
+        `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS}
+           ON svetima2.job_result_attempts (storage_type, storage_key)`
+      );
+
+      const musu = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
+      await pool.query(`DROP INDEX ${musu}`);
+
+      const rastas = await rastiIndeksa(pool, VIENO_ADRESO_INDEKSAS, "job_result_attempts");
+      assert.equal(rastas, null, "svetimos schemos objektas NĖRA mūsų indeksas");
+
+      /** Kontrolė: atkūrus savoje schemoje — randamas, su teisinga stulpelių seka. */
+      await pool.query(
+        `CREATE UNIQUE INDEX ${musu} ON job_result_attempts (storage_type, storage_key)`
+      );
+      const vel = await rastiIndeksa(pool, VIENO_ADRESO_INDEKSAS, "job_result_attempts");
+      assert.ok(vel, "savoje schemoje privalo būti randamas");
+      assert.deepEqual(vel.stulpeliai, ["storage_type", "storage_key"]);
+    } finally {
+      await pool.end().catch(() => {});
+    }
+  }
+);
+
+test(
+  "#376 R1 KONTROLĖ: `restoredJobStore` su schema BE indekso — elgesys NEPAKITĘS",
+  { skip: skipWithoutPostgres(), timeout: 180000 },
+  async (t) => {
+    /**
+     * ⚠️ ŠI KONTROLĖ SAUGO RIBĄ, O NE PATIKRĄ (#339, #376 §0.1).
+     *
+     * Gyvas startas privalo reikalauti pilnos schemos; atkurta kopija TEISĖTAI gali
+     * būti senesnė. Jei R1 reikalavimas kada nors nuslystų į `restoredJobStore`
+     * kelią, atkūrimas iš prieš `1756700000000` sukurtos kopijos nustotų veikti —
+     * t. y. DR procedūra kristų dėl invarianto, kurio ta kopija negalėjo turėti.
+     *
+     * ⚠️ RIBA YRA STRUKTŪRINĖ, NE DRAUSMĖ: `restoredJobStore.paruosti()` schemą
+     * ZONDUOJA (`try/catch` apie `job_result_attempts`), o `initializePostgres()`
+     * jos REIKALAUJA. Šis testas tikrina, kad taip ir liko.
+     */
+    await perkurtiDb();
+    const priesDir = iki375(t);
+    migrate("up", priesDir);
+
+    const pool = new Pool({ connectionString: DB_URL });
+    try {
+      const restoredJobStore = require("../utils/restoredJobStore");
+
+      /** Startas tą pačią schemą atmeta — kontrolė, kad testas matuoja skirtumą. */
+      await assert.rejects(() => startas(DB_URL), /job_result_attempts_vienas_adresas/);
+
+      /** O atkūrimo kelias ją PRIIMA. */
+      const paruosta = await restoredJobStore.paruosti(pool);
+      assert.ok(paruosta, "atkurta kopija be indekso privalo likti naudojama");
+
+      if (paruosta.store && paruosta.store.close) await paruosta.store.close().catch(() => {});
+    } finally {
+      await pool.end().catch(() => {});
+    }
   }
 );
