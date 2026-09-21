@@ -771,7 +771,13 @@ const { Pool } = require("pg");
 const { createPostgresStore } = require("./utils/sessionStore/postgresStore");
 
 (async () => {
-  const pool = stebetiPoola(new Pool({ connectionString: process.env.DATABASE_URL }), { vardas: "pool", dsn: process.env.DATABASE_URL });
+  /**
+   * ⚠️ ČIA `stebetiPoola` NENAUDOJAMA SĄMONINGAI (#380 R3). Tai VAIKO PROCESO skriptas,
+   * įterptas kaip tekstas ir paleidžiamas per `node -e`: jame nėra šio failo importų, o
+   * pridėti juos reikštų į matavimą įvesti testų infrastruktūrą, kurios matuojamas
+   * procesas neturi. Vaiko gyvavimo ciklą riboja `execFileSync` — jis laukia pabaigos.
+   */
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
     const store = createPostgresStore(pool);
     if (process.env.VEIKSMAS === "destroy") {
@@ -782,7 +788,7 @@ const { createPostgresStore } = require("./utils/sessionStore/postgresStore");
     const s = await store.touch(process.env.SESIJOS_TOKENAS);
     process.stdout.write(s ? "OK:" + s.userId + ":" + s.role : "NULL");
   } finally {
-    await uzdarytiPoola(pool);
+    await pool.end();
   }
 })().catch((e) => process.stdout.write("KLAIDA:" + e.message));
 `;
