@@ -544,7 +544,6 @@ async function initializePostgres(env = process.env) {
       if (!rastas) return true;
       if (!rastas.indisvalid) return true;
       if (butinas.unikalus && !rastas.indisunique) return true;
-      if (Boolean(rastas.salyginis) !== Boolean(butinas.salyginis)) return true;
 
       const stulpeliai = rastas.stulpeliai || [];
       return (
