@@ -66,13 +66,20 @@ const PRALEISTI = skipWithoutPostgres();
  * ⚠️ `DDL_BE_TRANSAKCIJOS` sakiniai (`CREATE INDEX CONCURRENTLY`) transakcijos bloke
  * neleidžiami, tad jiems riba nededama — jie vykdomi kaip anksčiau.
  */
-const DDL_BE_TRANSAKCIJOS = /CONCURRENTLY/i;
+/**
+ * ⚠️ VYNIOJAMI TIK UŽRAKTO SAKINIAI, NE VISKAS. Pirmoji redakcija `BEGIN`/`COMMIT`
+ * dėjo aplink KIEKVIENĄ `pg()` kvietimą, ir `DROP DATABASE` krito su `25001`
+ * („cannot run inside a transaction block") — išmatuota CI, run `35755029032`.
+ * D8 skirtas tik tiems sakiniams, kurie laukia užrakto.
+ */
+const UZRAKTO_DDL = /\b(DROP\s+INDEX|CREATE\s+(UNIQUE\s+)?INDEX|ALTER\s+TABLE|TRUNCATE|LOCK\s+TABLE)\b/i;
+const NE_TRANSAKCIJOJE = /CONCURRENTLY/i;
 
 async function pg(url, sql, params = []) {
   const c = new Client({ connectionString: url });
   await c.connect();
   try {
-    if (DDL_BE_TRANSAKCIJOS.test(sql)) return await c.query(sql, params);
+    if (!UZRAKTO_DDL.test(sql) || NE_TRANSAKCIJOJE.test(sql)) return await c.query(sql, params);
 
     await c.query("BEGIN");
     await c.query(`SET LOCAL lock_timeout = '${FIKTURU_LOCK_RIBA}'`);

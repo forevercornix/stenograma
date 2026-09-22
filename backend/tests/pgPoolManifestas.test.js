@@ -168,8 +168,14 @@ function neapgaubtasDdl(turinys) {
   for (let i = 0; i < eil.length; i += 1) {
     const s = eil[i].trim();
     if (s.startsWith("*") || s.startsWith("//") || !DDL.test(eil[i])) continue;
+    /**
+     * ⚠️ REGEX APIBRĖŽIMAS NĖRA SAKINYS. Pats `UZRAKTO_DDL` šablonas vardija tuos
+     * pačius raktažodžius, tad be šios eilutės sargas rastų pažeidimą kiekviename
+     * faile, kuris D8 taisyklę tik APRAŠO.
+     */
+    if (/=\s*\//.test(eil[i]) || s.startsWith("const ") || s.startsWith("Object.freeze")) continue;
     const ctx = eil.slice(Math.max(0, i - 6), i + 1).join("\n");
-    if (ctx.includes("fikturosDdl(") || ctx.includes("await pg(") || ctx.includes("DDL_BE_TRANSAKCIJOS")) continue;
+    if (ctx.includes("fikturosDdl(") || ctx.includes("await pg(") || ctx.includes("NE_TRANSAKCIJOJE")) continue;
     n += 1;
   }
   return n;
