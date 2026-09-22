@@ -180,6 +180,34 @@ const files = vienasFailas
 
 console.log(vienasFailas ? `Vienas failas: ${vienasFailas}\n` : `Rinkiniai: ${requested.join(", ")} (${files.length} failų)\n`);
 
+/**
+ * ⚠️ ŠIS KELIAS YRA NERIBOTAS, IR TAI UŽRAŠYTA SĄMONINGAI (#380).
+ *
+ * Be `--tap-dir` visi failai leidžiami VIENU `spawnSync` be `timeout` ir be procesų
+ * grupės nužudymo. `FAILO_RIBA_MS` (120 s), `FAILO_BUFERIS` ir `process.kill(-pid)`
+ * galioja TIK `--tap-dir` keliui žemiau. Pakibęs failas čia vis dar suvalgo visą job'ą.
+ *
+ * ⚠️ KURIE CI ŽINGSNIAI EINA ŠIUO KELIU (nedengti):
+ *   `ci.yml:112` `test:suites`, `:116` `test:matrix`, `:123` `test:privacy`,
+ *   `:126` `test:security`, `:136` `test:functional`, `:154` `test:redis`.
+ *
+ * ⚠️ KODĖL TAI PRIIMTINA ŠIANDIEN, BET NE VISAM LAIKUI.
+ *
+ * #380 taiso PostgreSQL pool'ų nutekėjimą, o šiuose žingsniuose `DATABASE_URL`
+ * nenustatytas: `skipWithoutPostgres()` grąžina priežastį, o pool'ai kuriami `setup()`
+ * VIDUJE, kuris praleistam adapteriui nevykdomas — tad pg pool'o ten neatsiranda
+ * (išmatuota: `auditStoreBackendContract.integration.test.js:590–600`).
+ *
+ * ⚠️ BET „NĖRA PG POOL'Ų" NĖRA TAS PAT, KAS „NIEKAS NEGALI PAKIBTI":
+ *   · `redis` rinkinyje veikia TIKRI BullMQ/Redis klientai (`ci.yml:154` nustato
+ *     `REDIS_URL`) — jie irgi laiko sokus ir event loop'ą;
+ *   · `functional` rinkinyje yra `runnerProcesuGrupe.test.js`, kuris PATS leidžia
+ *     subprocesus (`node`, `sleep`) — tikrindamas būtent tai, ko šis kelias nedaro.
+ *
+ * Todėl riba čia nėra „nereikalinga", o tik NEĮDIEGTA: #380 apimtis yra `pg`, ir
+ * plėsti ją be atskiro matavimo reikštų keisti kiekvieno `npm test` elgseną remiantis
+ * prielaida. Rekomendacija — atskiras issue; argumentai ataskaitoje.
+ */
 if (!tapDir) {
   const result = spawnSync("node", ["--test", ...files], {
     cwd: backendRoot,
@@ -227,7 +255,13 @@ for (const senas of readdirSync(tapDir).filter((n) => n.endsWith(".tap"))) {
  * minutes — arba tektų keisti pačią konstantą, ir tada testas matuotų ne tai, ką CI.
  */
 const FAILO_RIBA_MS = Number(process.env.TESTU_FAILO_RIBA_MS) || 120_000;
-const FAILO_BUFERIS = 64 * 1024 * 1024;
+/**
+ * ⚠️ BUFERIS PERRAŠOMAS TIK APLINKOS KINTAMUOJU, IR TIK TESTUI — kaip ir
+ * `TESTU_FAILO_RIBA_MS`. CI jo nenustato, tad produkcinė reikšmė yra 64 MiB.
+ * Alternatyva būtų testas, realiai išvedantis >64 MiB TAP; jis kainuotų minutes
+ * kiekviename CI paleidime ir matuotų `spawn` srautų greitį, ne klasifikaciją.
+ */
+const FAILO_BUFERIS = Number(process.env.TESTU_FAILO_BUFERIS) || 64 * 1024 * 1024;
 
 /**
  * VIENO FAILO PALEIDIMAS SU PROCESŲ GRUPE (#380 P1).
