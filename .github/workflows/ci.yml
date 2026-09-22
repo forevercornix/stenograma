@@ -431,6 +431,56 @@ jobs:
           kill $SERVER_PID
           exit 1
 
+  # ⚠️ LAIKINAS MATAVIMO JOB'AS (#382 §0.1). NEĮLIEJAMAS — tik matavimo commit'e.
+  matavimas382:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+      - name: npm ci
+        run: npm ci
+      - name: Matavimas — abu režimai
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: |
+          set +e
+          for R in privacy security functional redis; do
+            T0=$(date +%s%3N)
+            node scripts/run-tests.mjs $R > /tmp/bendras-$R.log 2>&1
+            E=$?
+            T1=$(date +%s%3N)
+            echo "MATAVIMAS bendras $R $((T1-T0)) exit=$E"
+            T0=$(date +%s%3N)
+            node scripts/run-tests.mjs $R --tap-dir=/tmp/tap-$R > /tmp/perfailo-$R.log 2>&1
+            E=$?
+            T1=$(date +%s%3N)
+            echo "MATAVIMAS perfailo $R $((T1-T0)) exit=$E"
+            grep -aoE "───── \\S+ \\(exit [1-9][0-9]*\\)|───── \\S+ \\(FILE_[A-Z]+" /tmp/perfailo-$R.log | sed "s/^/KRITO $R /" || true
+          done
+          echo "--- per-failo trukmės (sekundėmis, iš žymų) ---"
+          for R in privacy security functional redis; do
+            grep -aE "─────" /tmp/perfailo-$R.log | sed "s/^/TRUKMES $R /" || true
+          done
+          exit 0
+
   frontend:
     runs-on: ubuntu-latest
     # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
