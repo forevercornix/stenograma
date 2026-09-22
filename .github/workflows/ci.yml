@@ -473,7 +473,7 @@ jobs:
             if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-privacy"; fi
             T0=$(date +%s); node scripts/run-tests.mjs privacy $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
             echo "MATAVIMAS $M privacy $((T1-T0)) exit=$E"
-            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO privacy /"
+            echo "SKAICIAI $M privacy pass=$(grep -ac '^ *ok [0-9]' /tmp/l.log) skip=$(grep -ac 'SKIP' /tmp/l.log) notok=$(grep -ac '^ *not ok [0-9]' /tmp/l.log)"
           done
           exit 0
 
@@ -484,7 +484,7 @@ jobs:
             if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-security"; fi
             T0=$(date +%s); node scripts/run-tests.mjs security $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
             echo "MATAVIMAS $M security $((T1-T0)) exit=$E"
-            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO security /"
+            echo "SKAICIAI $M security pass=$(grep -ac '^ *ok [0-9]' /tmp/l.log) skip=$(grep -ac 'SKIP' /tmp/l.log) notok=$(grep -ac '^ *not ok [0-9]' /tmp/l.log)"
           done
           exit 0
 
@@ -495,7 +495,7 @@ jobs:
             if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-functional"; fi
             T0=$(date +%s); node scripts/run-tests.mjs functional $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
             echo "MATAVIMAS $M functional $((T1-T0)) exit=$E"
-            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO functional /"
+            echo "SKAICIAI $M functional pass=$(grep -ac '^ *ok [0-9]' /tmp/l.log) skip=$(grep -ac 'SKIP' /tmp/l.log) notok=$(grep -ac '^ *not ok [0-9]' /tmp/l.log)"
           done
           exit 0
 
@@ -508,7 +508,7 @@ jobs:
             if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-redis"; fi
             T0=$(date +%s); node scripts/run-tests.mjs redis $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
             echo "MATAVIMAS $M redis $((T1-T0)) exit=$E"
-            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO redis /"
+            echo "SKAICIAI $M redis pass=$(grep -ac '^ *ok [0-9]' /tmp/l.log) skip=$(grep -ac 'SKIP' /tmp/l.log) notok=$(grep -ac '^ *not ok [0-9]' /tmp/l.log)"
           done
           exit 0
 
