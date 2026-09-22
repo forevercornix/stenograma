@@ -400,6 +400,8 @@ const functional = [
   "resursuKruva",
   /** ⚠️ `functional`: sargas skaito failų TEKSTĄ, tad DB jam nereikia (#380). */
   "pgPoolManifestas",
+  /** ⚠️ : tikrina proceso medžio semantiką, DB nereikia (#380 P1). */
+  "runnerProcesuGrupe",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**

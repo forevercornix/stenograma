@@ -29,7 +29,7 @@
  */
 
 import { readdirSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -124,7 +124,16 @@ function istrauktiTapDir(argumentai) {
 const { dir: tapDir, likutis: rinkiniuArgs } = istrauktiTapDir(args);
 const discovered = discoverTests();
 
-const problems = verifyManifest(discovered);
+/**
+ * ⚠️ `--failas` REŽIME MANIFESTO PATIKRA PRALEIDŽIAMA, IR TIK JAME.
+ *
+ * Sintetinis kabantis failas jokiam rinkiniui nepriklauso — tokia ir yra jo prasmė.
+ * Patikra jį pagautų kaip „nepriskirtą", ir testas nepasiektų to, ką matuoja. Rinkinių
+ * režime (vienintelis, kurį naudoja CI) patikra lieka nepakitusi.
+ */
+const vienoFailoRezimas = rinkiniuArgs.includes("--failas");
+
+const problems = vienoFailoRezimas ? [] : verifyManifest(discovered);
 if (problems.length > 0) {
   console.error("Testų manifestas nesutampa su tikrove:\n");
   for (const problem of problems) console.error(`  - ${problem}`);
@@ -141,9 +150,23 @@ if (rinkiniuArgs.includes("--list")) {
   process.exit(0);
 }
 
+/**
+ * ⚠️ `--failas <kelias>` — ĮĖJIMO TAŠKAS TESTUI, NE CI KELIAS (#380 P1).
+ *
+ * Procesų grupės testui reikia paleisti VIENĄ sintetinį kabantį failą, kurio jokiame
+ * rinkinyje nėra ir neturi būti. Alternatyva būtų įrašyti jį į `suites.js` — t. y.
+ * padaryti kabantį failą nuolatine rinkinio dalimi.
+ *
+ * ⚠️ CI JO NEPASIEKIA: `ci.yml` visada paduoda rinkinio vardą (`postgres`, `s3`,
+ * `postgresS3`), o `--failas` ir rinkinių vardai yra viena kitą išskiriantys.
+ */
+const failoArgIdx = rinkiniuArgs.indexOf("--failas");
+const vienasFailas = failoArgIdx !== -1 ? rinkiniuArgs[failoArgIdx + 1] : null;
+if (failoArgIdx !== -1) rinkiniuArgs.splice(failoArgIdx, 2);
+
 const requested = rinkiniuArgs.length > 0 ? rinkiniuArgs : defaultSuites;
 
-const unknown = requested.filter((name) => !suites[name]);
+const unknown = vienasFailas ? [] : requested.filter((name) => !suites[name]);
 if (unknown.length > 0) {
   console.error(`Nežinomi rinkiniai: ${unknown.join(", ")}`);
   console.error(`Galimi: ${Object.keys(suites).join(", ")}`);
@@ -151,9 +174,11 @@ if (unknown.length > 0) {
 }
 
 // Dublikatai kai rinkiniai persidengia - failas paleidžiamas kartą.
-const files = resolveFiles([...new Set(requested.flatMap((name) => suites[name]))]);
+const files = vienasFailas
+  ? [vienasFailas]
+  : resolveFiles([...new Set(requested.flatMap((name) => suites[name]))]);
 
-console.log(`Rinkiniai: ${requested.join(", ")} (${files.length} failų)\n`);
+console.log(vienasFailas ? `Vienas failas: ${vienasFailas}\n` : `Rinkiniai: ${requested.join(", ")} (${files.length} failų)\n`);
 
 if (!tapDir) {
   const result = spawnSync("node", ["--test", ...files], {
@@ -196,8 +221,117 @@ for (const senas of readdirSync(tapDir).filter((n) => n.endsWith(".tap"))) {
  * nei žalias (YAML blokai su `stack`). Viršijus buferį procesas nutraukiamas su
  * `ENOBUFS`, ir be atskyrimo tai atrodytų kaip laiko riba.
  */
-const FAILO_RIBA_MS = 120_000;
+/**
+ * ⚠️ RIBA PERRAŠOMA TIK APLINKOS KINTAMUOJU, IR TIK TESTUI. CI jos nenustato, tad
+ * produkcinė reikšmė yra 120 s. Be šio taško procesų grupės testas turėtų laukti dvi
+ * minutes — arba tektų keisti pačią konstantą, ir tada testas matuotų ne tai, ką CI.
+ */
+const FAILO_RIBA_MS = Number(process.env.TESTU_FAILO_RIBA_MS) || 120_000;
 const FAILO_BUFERIS = 64 * 1024 * 1024;
+
+/**
+ * VIENO FAILO PALEIDIMAS SU PROCESŲ GRUPE (#380 P1).
+ *
+ * ⚠️ `spawnSync` NEPAKAKO, IR PRIEŽASTIS STRUKTŪRINĖ. Jo `timeout` siunčia signalą
+ * TIK tiesioginiam vaikui. `node --test` procesas savo ruožtu leidžia subprocesus
+ * (`pg_dump` per `pgDumpBackup`, `npx node-pg-migrate` per `execFileSync`, `node -e`
+ * per `sessionPersistence`), ir jie lieka gyvi — laikydami atviras jungtis bei
+ * pipe'us. Nužudžius tik supervisor'ių, runner'is grįžta, o našlaičiai toliau sukasi.
+ *
+ * ⚠️ `detached: true` DUODA NAUJĄ PROCESŲ GRUPĘ, ir `process.kill(-pid, …)` nužudo
+ * JĄ VISĄ. Tai vienintelis būdas pasiekti anūkus, kurių `pid` mes nežinome.
+ *
+ * ⚠️ ❌ NE `--experimental-test-isolation=none`. Flag'o vardas priklauso nuo Node
+ * versijos, o svarbiausia — jis keičia testų izoliaciją, ne subprocesų likimą:
+ * `pg_dump` ir `execFileSync` vaikai išgyventų lygiai taip pat.
+ *
+ * Išsaugoma viskas, ką turėjo `spawnSync` forma: dalinė išvestis, `maxBuffer` riba,
+ * `FILE_TIMEOUT` / `FILE_OVERFLOW` atskyrimas ir exit kodas.
+ */
+function paleistiFaila(failas, vaikoEnv) {
+  return new Promise((resolve) => {
+    const vaikas = spawn(
+      "node",
+      ["--test", "--test-reporter=tap", "--test-reporter-destination=stdout", failas],
+      {
+        cwd: backendRoot,
+        env: vaikoEnv,
+        stdio: ["inherit", "pipe", "pipe"],
+        detached: true,
+      }
+    );
+
+    einamojiGrupe = vaikas.pid;
+
+    let stdout = "";
+    let stderr = "";
+    let dydis = 0;
+    let busena = null; // "ETIMEDOUT" | "ENOBUFS"
+    let baigta = false;
+
+    const nuzudytiGrupe = () => {
+      try {
+        process.kill(-vaikas.pid, "SIGKILL");
+      } catch {
+        /* grupės nebėra — vadinasi jau mirusi */
+      }
+    };
+
+    const laikmatis = setTimeout(() => {
+      busena = "ETIMEDOUT";
+      nuzudytiGrupe();
+    }, FAILO_RIBA_MS);
+
+    const kaupti = (srautas, kur) => {
+      srautas.setEncoding("utf8");
+      srautas.on("data", (gabalas) => {
+        dydis += gabalas.length;
+        if (dydis > FAILO_BUFERIS) {
+          if (!busena) {
+            busena = "ENOBUFS";
+            nuzudytiGrupe();
+          }
+          return;
+        }
+        if (kur === 1) stdout += gabalas;
+        else stderr += gabalas;
+      });
+    };
+    kaupti(vaikas.stdout, 1);
+    kaupti(vaikas.stderr, 2);
+
+    const baigti = (status, signal) => {
+      if (baigta) return;
+      baigta = true;
+      clearTimeout(laikmatis);
+      einamojiGrupe = null;
+      /** ⚠️ Grupė nužudoma IR normalios pabaigos atveju: supervisor'ius galėjo baigtis, o anūkas – ne. */
+      nuzudytiGrupe();
+      resolve({ stdout, stderr, status, signal, busena });
+    };
+
+    vaikas.on("error", (e) => baigti(null, null, e));
+    vaikas.on("close", (status, signal) => baigti(status, signal));
+  });
+}
+
+/**
+ * ⚠️ RUNNER'IUI NUTRAUKUS (SIGINT/SIGTERM) GRUPĖ NUŽUDOMA, PASKUI IŠEINAM. Be to
+ * `Ctrl-C` paliktų einamąjį `node --test` ir jo anūkus gyvus — su atvira DB jungtimi.
+ */
+let einamojiGrupe = null;
+for (const signalas of ["SIGINT", "SIGTERM"]) {
+  process.on(signalas, () => {
+    if (einamojiGrupe) {
+      try {
+        process.kill(-einamojiGrupe, "SIGKILL");
+      } catch {
+        /* jau mirusi */
+      }
+    }
+    process.exit(130);
+  });
+}
 
 let bendraBusena = 0;
 
@@ -219,25 +353,7 @@ for (const failas of files) {
   const vaikoEnv = { ...process.env };
   delete vaikoEnv.NODE_TEST_CONTEXT;
 
-  const rezultatas = spawnSync(
-    "node",
-    ["--test", "--test-reporter=tap", "--test-reporter-destination=stdout", failas],
-    {
-      cwd: backendRoot,
-      encoding: "utf8",
-      env: vaikoEnv,
-      stdio: ["inherit", "pipe", "pipe"],
-      timeout: FAILO_RIBA_MS,
-      maxBuffer: FAILO_BUFERIS,
-      /**
-       * ⚠️ `SIGKILL`, NE NUMATYTASIS `SIGTERM`. Pakibęs procesas kabo neatsakančiame
-       * `pg` sakinyje arba event loop'e, kurį laiko nutekėjęs klientas; `SIGTERM`
-       * tokiu atveju gali būti apdorotas ir proceso nepabaigti, ir riba taptų dar
-       * viena vieta, kur laukiama neribotai.
-       */
-      killSignal: "SIGKILL",
-    }
-  );
+  const rezultatas = await paleistiFaila(failas, vaikoEnv);
 
   /**
    * ⚠️ NUTRAUKTAS FAILAS = KRITĘS FAILAS, SU VARDU (#380 R1).
@@ -251,9 +367,9 @@ for (const failas of files) {
    * PER DAUG, antras — nustojo išvesti apskritai. Sulieti juos reikštų siųsti
    * operatorių taisyti ne to.
    */
-  const klaidosKodas = rezultatas.error ? rezultatas.error.code : null;
+  const klaidosKodas = rezultatas.busena;
   const perpildytas = klaidosKodas === "ENOBUFS";
-  const nutrauktas = !perpildytas && (klaidosKodas === "ETIMEDOUT" || rezultatas.signal === "SIGKILL");
+  const nutrauktas = !perpildytas && klaidosKodas === "ETIMEDOUT";
 
   let zyma = "";
   if (perpildytas) {

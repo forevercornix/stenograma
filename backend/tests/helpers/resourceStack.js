@@ -113,16 +113,51 @@ function testoFailas() {
  * loop'ui, tad procesas išeina NELAUKĘS nė tyčinio laukimo — `resursuKruva` testai,
  * tikrinantys būtent ribos suveikimą, tada nebeišvedami išvis.
  *
- * @returns {Promise<"OK"|"TIMEOUT">}
+ * ⚠️ ATMETIMAS NĖRA „OK" (#380 P2b). Pirmoji redakcija `pool.end()` atmetimą vertė
+ * sėkme (`() => "OK"`), tad dvigubas uždarymas („Called end on pool more than once"),
+ * nutrūkusi jungtis ar bet kuri kita `end()` klaida dingdavo be pėdsako. Dabar
+ * grąžinamos TRYS baigtys, ir `REJECTED` nuverčia valymą su priežastimi.
+ *
+ * @returns {Promise<{baigtis: "OK"|"TIMEOUT"|"REJECTED", priezastis?: Error}>}
  */
 function lenktynesSuRiba(zadas, ms) {
   let laikmatis;
   const riba = new Promise((r) => {
-    laikmatis = setTimeout(() => r("TIMEOUT"), ms);
+    laikmatis = setTimeout(() => r({ baigtis: "TIMEOUT" }), ms);
   });
-  return Promise.race([zadas.then(() => "OK", () => "OK"), riba]).finally(() =>
-    clearTimeout(laikmatis)
-  );
+  return Promise.race([
+    zadas.then(
+      () => ({ baigtis: "OK" }),
+      (priezastis) => ({ baigtis: "REJECTED", priezastis })
+    ),
+    riba,
+  ]).finally(() => clearTimeout(laikmatis));
+}
+
+/**
+ * NUTRAUKIMO TAIKINYS — IŠVEDAMAS, NE REIKALAUJAMAS (#380 P2a).
+ *
+ * ⚠️ RIBOTAS VALYMAS PRIVALO BŪTI TIESA KIEKVIENAI REGISTRACIJAI. Be `dsn`
+ * `uzdarytiPoola()` riboja `pool.end()`, bet nutekėjusių jungčių nutraukti nebegali —
+ * sokai lieka atviri, ir failas vis tiek kabo iki runner'io ribos. Tyli šaka valyme
+ * („jei turim dsn") tokį pool'ą paverstų išimtimi, apie kurią niekas nežino.
+ *
+ * ⚠️ TAIKINYS IŠVEDAMAS IŠ PATIES POOL'O. `pg` išsaugo `options.connectionString` arba
+ * diskrečius `host`/`port`/`user`/`password`/`database` — abu tinka `pg.Client`. Kvietimo
+ * vietų dėl to keisti nereikia: iš 156 registracijų 45 neturėjo `dsn` argumento, ir
+ * visoms jį duoda `pool.options`.
+ *
+ * ⚠️ JEI NEIŠVEDAMAS — KRENTAME REGISTRACIJOS METU. Tada gedimas rodo į vietą, kur
+ * pool'as SUKURTAS, o ne į valymą po dvidešimties minučių.
+ */
+function nutraukimoTaikinys(pool, dsn) {
+  if (dsn) return { connectionString: dsn };
+  const o = (pool && pool.options) || {};
+  if (o.connectionString) return { connectionString: o.connectionString };
+  if (o.host || o.database) {
+    return { host: o.host, port: o.port, user: o.user, password: o.password, database: o.database };
+  }
+  return null;
 }
 
 /**
@@ -135,7 +170,19 @@ function lenktynesSuRiba(zadas, ms) {
  */
 function stebetiPoola(pool, { vardas = "pool", dsn } = {}) {
   if (stebimi.has(pool)) return pool;
-  const busena = { vardas, dsn, tikros: [], valymo: [], valyme: false };
+
+  const taikinys = nutraukimoTaikinys(pool, dsn);
+  if (!taikinys) {
+    const klaida = new Error(
+      `POOL_NO_TERMINATE ${vardas} (${testoFailas()}): nepavyko išvesti nutraukimo taikinio ` +
+        "nei iš `dsn`, nei iš `pool.options` (`connectionString` / `host` / `database`). " +
+        "Be jo nutekėjusių jungčių nutraukti nebūtų kuo, ir riba liktų tik pusiau tiesa."
+    );
+    klaida.code = "POOL_NO_TERMINATE";
+    throw klaida;
+  }
+
+  const busena = { vardas, dsn, taikinys, tikros: [], valymo: [], valyme: false };
   stebimi.set(pool, busena);
 
   /**
@@ -208,26 +255,33 @@ function stebetiPoola(pool, { vardas = "pool", dsn } = {}) {
 async function uzdarytiPoola(pool) {
   const busena = stebimi.get(pool) || { vardas: "pool", tikros: [], valymo: [] };
 
-  const baigta = await lenktynesSuRiba(pool.end(), UZDARYMO_RIBA_MS);
+  const rezultatas = await lenktynesSuRiba(pool.end(), UZDARYMO_RIBA_MS);
 
   let ribaVirsyta = false;
-  if (baigta === "TIMEOUT") {
+  let nutraukimoKlaida = null;
+
+  if (rezultatas.baigtis === "TIMEOUT") {
     ribaVirsyta = true;
     busena.valyme = true;
+
+    /**
+     * ⚠️ NUTRAUKIMO NESĖKMĖ UŽRAŠOMA, NE PRARYJAMA (#380 P2a). Iki tol čia stovėjo trys
+     * `.catch(() => {})`: jei nutraukimas nepavykdavo (bloga jungtis, nebėra teisių,
+     * bazė dingusi), riba liktų tik pusiau tiesa, o kvitas sakytų tą patį kaip ir
+     * pavykus. Dabar tai antras gedimas šalia `POOL_CLOSE_TIMEOUT`.
+     */
+    const { Client } = require("pg");
+    const c = new Client(busena.taikinys);
     try {
-      if (busena.dsn) {
-        const { Client } = require("pg");
-        const c = new Client({ connectionString: busena.dsn });
-        await c.connect().catch(() => {});
-        await c
-          .query(
-            `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-              WHERE datname = current_database() AND pid <> pg_backend_pid()`
-          )
-          .catch(() => {});
-        await c.end().catch(() => {});
-      }
+      await c.connect();
+      await c.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid()`
+      );
+    } catch (e) {
+      nutraukimoKlaida = e;
     } finally {
+      await c.end().catch(() => {});
       busena.valyme = false;
     }
   }
@@ -240,6 +294,26 @@ async function uzdarytiPoola(pool) {
    * (`/Connection terminated/`) paslėptų IDENTIŠKĄ tikrą gedimą.
    */
   const priezastys = [];
+
+  /**
+   * ⚠️ `pool.end()` ATMETIMAS YRA GEDIMAS (#380 P2b). Dažniausia jo forma — „Called end
+   * on pool more than once", t. y. dvigubas uždarymas: du savininkai mano, kad pool'as
+   * jų. Iki tol tai buvo verčiama sėkme ir dingdavo.
+   */
+  if (rezultatas.baigtis === "REJECTED") {
+    const p = rezultatas.priezastis;
+    priezastys.push(
+      `POOL_END_REJECTED ${busena.vardas} (${testoFailas()}): ${p && p.message ? p.message : p}`
+    );
+  }
+
+  if (nutraukimoKlaida) {
+    priezastys.push(
+      `POOL_TERMINATE_FAILED ${busena.vardas} (${testoFailas()}): ` +
+        `${nutraukimoKlaida.code || ""} ${nutraukimoKlaida.message}`.trim()
+    );
+  }
+
   if (ribaVirsyta) {
     priezastys.push(
       `POOL_CLOSE_TIMEOUT ${busena.vardas}: \`pool.end()\` nebaigė per ${UZDARYMO_RIBA_MS} ms ` +

@@ -25,7 +25,12 @@ function poolDublis({ kabo = false, paimta = 0 } = {}) {
   e.klientai = [];
   e.end = () => (kabo ? new Promise(() => {}) : Promise.resolve());
   /** `pg` pool'o paviršius, kurio reikia checkout ribai: `options` ir `connect`. */
-  e.options = { max: 10 };
+  /**
+   * ⚠️ DUBLIS TURI NUTRAUKIMO TAIKINĮ (#380 P2a). Be jo registracija teisingai krenta
+   * `POOL_NO_TERMINATE` — tai tikrina atskiras testas žemiau, o čia jis tik trukdytų.
+   * DSN sąmoningai neegzistuojantis: nutraukimo kelias turi kristi MATOMAI, ne tyliai.
+   */
+  e.options = { max: 10, connectionString: "postgres://dublis@127.0.0.1:1/dublis" };
   e.connectKlaida = null;
   e.connect = () =>
     e.connectKlaida ? Promise.reject(e.connectKlaida) : Promise.resolve({ release() {} });
@@ -63,7 +68,10 @@ test("#380 R2: KABANTIS `pool.end()` nutrūksta per ribą ir virsta ĮVARDYTA va
   const pradzia = Date.now();
   await assert.rejects(
     () => kruva.isvalyti(),
-    (e) => /POOL_CLOSE_TIMEOUT kabantis/.test(e.message) && /paimta klientų: 2/.test(e.message),
+    (e) =>
+      /POOL_CLOSE_TIMEOUT kabantis/.test(e.message) &&
+      /paimta klientų: 2/.test(e.message) &&
+      /POOL_TERMINATE_FAILED kabantis/.test(e.message),
     "riba privalo virsti įvardyta klaida, ne tyliu praėjimu"
   );
   assert.ok(Date.now() - pradzia < 30_000, `nutrūko per ${Date.now() - pradzia} ms`);
@@ -233,4 +241,64 @@ test("#380 KONTROLĖ: kita `connect()` klaida NEVIRSTA `POOL_EXHAUSTED`", async 
   );
 
   await kruva.isvalyti().catch(() => {});
+});
+
+/* ══════════ P2a/P2b — riba privalo būti tiesa KIEKVIENAI registracijai ══════════ */
+
+test("#380 P2a: pool'as BE išvedamo nutraukimo taikinio krenta REGISTRACIJOS metu", () => {
+  /**
+   * ⚠️ KRENTAME TEN, KUR POOL'AS SUKURTAS, NE VALYME. Tyli šaka („jei turim dsn")
+   * paverstų tokį pool'ą išimtimi, apie kurią niekas nežino: riba liktų pusiau tiesa,
+   * nutekėjusios jungtys — neužverstos, ir failas vis tiek kabėtų iki runner'io ribos.
+   */
+  const kruva = sukurtiResursuKruva();
+  const pool = poolDublis();
+  pool.options = { max: 10 };
+
+  assert.throws(
+    () => kruva.registruotiPoola(pool, { vardas: "beTaikinio" }),
+    (e) =>
+      e.code === "POOL_NO_TERMINATE" &&
+      /POOL_NO_TERMINATE beTaikinio/.test(e.message) &&
+      /connectionString/.test(e.message)
+  );
+});
+
+test("#380 P2a: taikinys IŠVEDAMAS iš `pool.options`, kai `dsn` neduotas", () => {
+  /**
+   * ⚠️ IŠVEDIMAS, NE REIKALAVIMAS. Iš 156 registracijų 45 neturėjo `dsn` argumento;
+   * visoms jį duoda pats pool'as. Jei to nebūtų, tektų liesti 45 kvietimo vietas —
+   * o kiekviena tokia vieta yra proga praleisti vieną.
+   */
+  const kruva = sukurtiResursuKruva();
+
+  const su = poolDublis();
+  su.options = { max: 10, connectionString: "postgres://a@h:5432/db" };
+  kruva.registruotiPoola(su, { vardas: "per-connectionString" });
+
+  const diskretus = poolDublis();
+  diskretus.options = { max: 10, host: "h", port: 5432, database: "db" };
+  kruva.registruotiPoola(diskretus, { vardas: "per-diskrecius" });
+
+  assert.equal(kruva.kiek(), 2, "abi formos privalo būti priimtos");
+});
+
+test("#380 P2b: `pool.end()` ATMETIMAS nuverčia valymą su priežastimi", async () => {
+  /**
+   * ⚠️ DAŽNIAUSIA FORMA — DVIGUBAS UŽDARYMAS. `pg` tada sako „Called end on pool more
+   * than once", o tai reiškia, kad du savininkai mano, jog pool'as jų. Iki #380 P2b
+   * `lenktynesSuRiba` atmetimą vertė sėkme (`() => "OK"`), ir tai dingdavo be pėdsako.
+   */
+  const kruva = sukurtiResursuKruva();
+  const pool = poolDublis();
+  pool.end = () => Promise.reject(new Error("Called end on pool more than once"));
+  kruva.registruotiPoola(pool, { vardas: "dvigubas" });
+
+  await assert.rejects(
+    () => kruva.isvalyti(),
+    (e) =>
+      /POOL_END_REJECTED dvigubas/.test(e.message) &&
+      /Called end on pool more than once/.test(e.message),
+    "atmetimas privalo būti gedimas, ne tyli sėkmė"
+  );
 });
