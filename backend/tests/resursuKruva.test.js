@@ -24,6 +24,11 @@ function poolDublis({ kabo = false, paimta = 0 } = {}) {
   e.waitingCount = 0;
   e.klientai = [];
   e.end = () => (kabo ? new Promise(() => {}) : Promise.resolve());
+  /** `pg` pool'o paviršius, kurio reikia checkout ribai: `options` ir `connect`. */
+  e.options = { max: 10 };
+  e.connectKlaida = null;
+  e.connect = () =>
+    e.connectKlaida ? Promise.reject(e.connectKlaida) : Promise.resolve({ release() {} });
   /** Imituoja `pool.connect()`: klientas gauna krūvos prikabintą klausytoją. */
   e.prijungti = () => {
     const c = new EventEmitter();
@@ -153,4 +158,70 @@ test("#380 R2: `registruoti()` kontraktas jo 6 vartotojams NEPAKITĘS", async ()
   const pirmine = new Error("setup krito");
   await kruva2.isvalyti(pirmine);
   assert.deepEqual(pirmine.valymoKlaidos, ["blogas: nepavyko"], "valymas NEUŽDENGIA pirminės");
+});
+
+test("#380: pool'o IŠSEKIMAS virsta `POOL_EXHAUSTED` su pool'u, failu ir skaitikliais", async () => {
+  /**
+   * ⚠️ TAI M1 DIAGNOZĖS TAISYMAS. Be `connectionTimeoutMillis` pilname pool'e užklausa
+   * dedama į `_pendingQueue` BE laikmačio (`pg-pool@3.14.0`, `index.js:206–208`), tad
+   * `pool.query()` TESTO KŪNE laukia amžinai — ir failas krenta ne 10 s uždarymo ribą,
+   * o 120 s runner'io ribą, be jokios nuorodos į priežastį. Išmatuota: run
+   * `35663397047`, `registryErasure.integration` → `FILE_TIMEOUT`.
+   *
+   * ⚠️ VERČIAMA, NE PRIDEDAMA. `pg` pranešimas nesako nei kuris pool'as, nei kuriame
+   * faile, nei kiek klientų paimta — o būtent to operatoriui ir reikia.
+   */
+  const kruva = sukurtiResursuKruva();
+  const pool = poolDublis({ paimta: 9 });
+  kruva.registruotiPoola(pool, { vardas: "išsekęs" });
+
+  assert.equal(
+    pool.options.connectionTimeoutMillis,
+    5_000,
+    "stebimas pool'as PRIVALO gauti checkout ribą — kitaip išsekimas yra amžinas laukimas"
+  );
+
+  pool.connectKlaida = new Error("timeout exceeded when trying to connect");
+  await assert.rejects(
+    () => pool.connect(),
+    (e) =>
+      e.code === "POOL_EXHAUSTED" &&
+      /POOL_EXHAUSTED išsekęs/.test(e.message) &&
+      /max=10/.test(e.message) &&
+      /paimta=9/.test(e.message),
+    "diagnostika privalo įvardyti pool'ą, ribą ir skaitiklius"
+  );
+
+  await kruva.isvalyti().catch(() => {});
+});
+
+test("#380 KONTROLĖ: kvietėjo nurodyta checkout riba NEPERRAŠOMA", async () => {
+  /**
+   * ⚠️ BE ŠITO „riba nustatoma" suderinama su realizacija, kuri perrašo VISKĄ — ir
+   * testas, matuojantis būtent savo ribą, tyliai matuotų mūsų.
+   */
+  const pool = poolDublis();
+  pool.options.connectionTimeoutMillis = 250;
+  const { stebetiPoola } = require("./helpers/resourceStack");
+  stebetiPoola(pool, { vardas: "savas" });
+  assert.equal(pool.options.connectionTimeoutMillis, 250);
+});
+
+test("#380 KONTROLĖ: kita `connect()` klaida NEVIRSTA `POOL_EXHAUSTED`", async () => {
+  /**
+   * ⚠️ Vertimas pagal pranešimą yra siauras SĄMONINGAI: jis apima tik tą vieną eilutę,
+   * kurią `pg-pool` generuoja pats (`index.js:223`). Bet kokia kita klaida privalo eiti
+   * nepaliesta — antraip tinklo gedimas atrodytų kaip nutekėjęs klientas.
+   */
+  const kruva = sukurtiResursuKruva();
+  const pool = poolDublis();
+  kruva.registruotiPoola(pool, { vardas: "kitas" });
+
+  pool.connectKlaida = Object.assign(new Error("ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" });
+  await assert.rejects(
+    () => pool.connect(),
+    (e) => e.code === "ECONNREFUSED" && !/POOL_EXHAUSTED/.test(e.message)
+  );
+
+  await kruva.isvalyti().catch(() => {});
 });

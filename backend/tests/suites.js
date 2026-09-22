@@ -398,6 +398,8 @@ const functional = [
    * tikra baze jį tektų gaminti lenktynėmis.
    */
   "resursuKruva",
+  /** ⚠️ `functional`: sargas skaito failų TEKSTĄ, tad DB jam nereikia (#380). */
+  "pgPoolManifestas",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**

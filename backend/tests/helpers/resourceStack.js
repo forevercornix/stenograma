@@ -77,6 +77,31 @@ const UZDARYMO_RIBA_MS = 10_000;
 const stebimi = new WeakMap();
 
 /**
+ * D5 — KIEK LAUKTI LAISVO KLIENTO (#380, po M1 diagnozės).
+ *
+ * ⚠️ IŠMATUOTA, NE SPĖTA. Žaliame run'e (`35651144332`) `registryErasure.integration`
+ * su ~77 testais ir šimtais užklausų trunka **2 s** — vadinasi vienas checkout su
+ * prisijungimu kainuoja milisekundes. 5 s yra tris eilės dydžio atsarga.
+ *
+ * ⚠️ BE ŠIOS REIKŠMĖS POOL'O IŠSEKIMAS YRA AMŽINAS LAUKIMAS, IR TAI IŠMATUOTA
+ * ŠALTINYJE. `pg-pool@3.14.0`: numatytasis `max` yra 10 (`index.js:89`), o pilname
+ * pool'e be `connectionTimeoutMillis` užklausa dedama į `_pendingQueue` BE jokio
+ * laikmačio (`:206–208`); laikmatis kuriamas tik tada, kai reikšmė nustatyta (`:218`).
+ * Todėl M1 (run `35663397047`) `registryErasure` baigėsi ne `POOL_CLOSE_TIMEOUT` per
+ * 10 s, o `FILE_TIMEOUT` per 120 s: nutekėję klientai užėmė visus slotus, ir kitas
+ * `pool.query()` TESTO KŪNE laukė amžinai — teardown'o iki jo net nebuvo pasiekta.
+ */
+const CHECKOUT_RIBA_MS = 5_000;
+
+/** `pg` tekstas, kurį grąžina `connect()` išsekus pool'ui (`pg-pool` `:223`). */
+const PG_CHECKOUT_TIMEOUT = /timeout exceeded when trying to connect/i;
+
+function testoFailas() {
+  const a = process.argv.find((x) => typeof x === "string" && x.endsWith(".test.js"));
+  return a ? a.slice(a.lastIndexOf("/") + 1) : "(nežinomas failas)";
+}
+
+/**
  * LENKTYNĖS, KURIOS ATŠAUKIA PRALAIMĖJUSĮ LAIKMATĮ.
  *
  * ⚠️ `Promise.race` PATS NIEKO NENUTRAUKIA. Sveikai užsidarius pool'ui laikmatis lieka
@@ -112,6 +137,45 @@ function stebetiPoola(pool, { vardas = "pool", dsn } = {}) {
   if (stebimi.has(pool)) return pool;
   const busena = { vardas, dsn, tikros: [], valymo: [], valyme: false };
   stebimi.set(pool, busena);
+
+  /**
+   * ⚠️ IŠSEKIMAS PRIVALO BŪTI ĮVARDYTAS, NE AMŽINAS. `connectionTimeoutMillis`
+   * nustatomas po konstrukcijos sąmoningai: `connect()` jį skaito KVIETIMO metu
+   * (`pg-pool` `:206`, `:225`), tad kvietėjams nereikia nieko keisti. Jei kvietėjas jį
+   * jau nurodė — nepaliečiam: tai jo matavimo dalis.
+   */
+  if (pool.options && !pool.options.connectionTimeoutMillis) {
+    pool.options.connectionTimeoutMillis = CHECKOUT_RIBA_MS;
+  }
+
+  /**
+   * ⚠️ `pg` PRANEŠIMAS („timeout exceeded when trying to connect") NEPASAKO NIEKO
+   * NAUDINGO: nei kuris pool'as, nei kuriame faile, nei kiek klientų paimta. Čia jis
+   * verčiamas į `POOL_EXHAUSTED` su visu tuo. `pool.query()` irgi eina per `connect()`
+   * (`pg-pool` `query()` → `this.connect(...)`), tad vienos vietos pakanka abiem.
+   */
+  const originalusConnect =
+    typeof pool.connect === "function" ? pool.connect.bind(pool) : null;
+  const paversti = (err) => {
+    if (!err || !PG_CHECKOUT_TIMEOUT.test(err.message || "")) return err;
+    const naujas = new Error(
+      `POOL_EXHAUSTED ${vardas} (${testoFailas()}): per ${CHECKOUT_RIBA_MS} ms negauta laisvo ` +
+        `kliento (max=${pool.options && pool.options.max}, paimta=${pool.totalCount - pool.idleCount}, ` +
+        `laukia=${pool.waitingCount}). Kažkas paima klientus ir nepadaro \`release()\`.`
+    );
+    naujas.code = "POOL_EXHAUSTED";
+    naujas.cause = err;
+    return naujas;
+  };
+  if (originalusConnect) pool.connect = function (cb) {
+    if (typeof cb === "function") {
+      return originalusConnect((err, klientas, done) => cb(paversti(err), klientas, done));
+    }
+    return originalusConnect().catch((err) => {
+      throw paversti(err);
+    });
+  };
+
   pool.on("connect", (client) =>
     client.on("error", (err) => {
       const irasas = `${vardas}: ${err && err.code ? err.code : "?"}`;
@@ -199,7 +263,11 @@ function sukurtiResursuKruva() {
    *   2. klaida yra DUOMUO: jei jungtis nutrūko ne per mūsų valymą, tai tikras gedimas,
    *      ir jis privalo būti matomas.
    *
-   * ⚠️ ATSKIRIAMA PAGAL ŽYMĘ, NE PAGAL PRANEŠIMĄ. `valyme` nustatoma PRIEŠ šios krūvos
+   * ⚠️ ŽYMĖS LANGAS YRA SIAURAS, IR TAI SVARBU: tikra klaida, pataikiusi į priverstinio
+ * valymo langą, būtų klasifikuota kaip valymo — bet tas langas atsidaro tik po
+ * `UZDARYMO_RIBA_MS`, kai failas jau krenta, tad paslėpti jame nebėra ko.
+ *
+ * ⚠️ ATSKIRIAMA PAGAL ŽYMĘ, NE PAGAL PRANEŠIMĄ. `valyme` nustatoma PRIEŠ šios krūvos
    * pačios `pg_terminate_backend` ir nuimama po jo. Filtras pagal tekstą
    * (`/Connection terminated/`) atrodytų lygiavertis, bet paslėptų IDENTIŠKĄ tikrą
    * gedimą — testą, kuris pats nutraukia backend'ą, arba DB, kuri nukrito darbo metu.
