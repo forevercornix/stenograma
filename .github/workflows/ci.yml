@@ -432,9 +432,17 @@ jobs:
           exit 1
 
   # ⚠️ LAIKINAS MATAVIMO JOB'AS (#382 §0.1). NEĮLIEJAMAS — tik matavimo commit'e.
+  #
+  # ⚠️ `REDIS_URL` NUSTATOMAS TIK `redis` RINKINIUI. Pirmas bandymas nustatė jį visam
+  # žingsniui, ir matavimas pakeitė tai, ką matuoja: `suiteDerivation.test.js` viduje
+  # leidžia `run-tests.mjs redis --tap-dir`, tad su `REDIS_URL` tas įdėtasis paleidimas
+  # ėmė daryti TIKRĄ darbą, kurio normaliame `test:privacy` žingsnyje nėra.
+  #
+  # ⚠️ KIEKVIENAS RINKINYS — ATSKIRAS ŽINGSNIS. Job'ui nutrūkus, jau išmatuoti rinkiniai
+  # lieka matomi; vienas ilgas žingsnis prarado viską (run 35790333838).
   matavimas382:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: backend
@@ -457,27 +465,50 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - name: npm ci
         run: npm ci
-      - name: Matavimas — abu režimai
+
+      - name: Matavimas privacy
+        run: |
+          set +e
+          for M in bendras perfailo; do
+            if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-privacy"; fi
+            T0=$(date +%s); node scripts/run-tests.mjs privacy $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
+            echo "MATAVIMAS $M privacy $((T1-T0)) exit=$E"
+            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO privacy /"
+          done
+          exit 0
+
+      - name: Matavimas security
+        run: |
+          set +e
+          for M in bendras perfailo; do
+            if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-security"; fi
+            T0=$(date +%s); node scripts/run-tests.mjs security $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
+            echo "MATAVIMAS $M security $((T1-T0)) exit=$E"
+            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO security /"
+          done
+          exit 0
+
+      - name: Matavimas functional
+        run: |
+          set +e
+          for M in bendras perfailo; do
+            if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-functional"; fi
+            T0=$(date +%s); node scripts/run-tests.mjs functional $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
+            echo "MATAVIMAS $M functional $((T1-T0)) exit=$E"
+            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO functional /"
+          done
+          exit 0
+
+      - name: Matavimas redis
         env:
           REDIS_URL: redis://localhost:6379
         run: |
           set +e
-          for R in privacy security functional redis; do
-            T0=$(date +%s%3N)
-            node scripts/run-tests.mjs $R > /tmp/bendras-$R.log 2>&1
-            E=$?
-            T1=$(date +%s%3N)
-            echo "MATAVIMAS bendras $R $((T1-T0)) exit=$E"
-            T0=$(date +%s%3N)
-            node scripts/run-tests.mjs $R --tap-dir=/tmp/tap-$R > /tmp/perfailo-$R.log 2>&1
-            E=$?
-            T1=$(date +%s%3N)
-            echo "MATAVIMAS perfailo $R $((T1-T0)) exit=$E"
-            grep -aoE "───── \\S+ \\(exit [1-9][0-9]*\\)|───── \\S+ \\(FILE_[A-Z]+" /tmp/perfailo-$R.log | sed "s/^/KRITO $R /" || true
-          done
-          echo "--- per-failo trukmės (sekundėmis, iš žymų) ---"
-          for R in privacy security functional redis; do
-            grep -aE "─────" /tmp/perfailo-$R.log | sed "s/^/TRUKMES $R /" || true
+          for M in bendras perfailo; do
+            if [ "$M" = "bendras" ]; then A=""; else A="--tap-dir=/tmp/tap-redis"; fi
+            T0=$(date +%s); node scripts/run-tests.mjs redis $A > /tmp/l.log 2>&1; E=$?; T1=$(date +%s)
+            echo "MATAVIMAS $M redis $((T1-T0)) exit=$E"
+            grep -aoE "───── [^ ]+ \\((exit [1-9][0-9]*|FILE_[A-Z]+)" /tmp/l.log | sed "s/^/KRITO redis /"
           done
           exit 0
 
