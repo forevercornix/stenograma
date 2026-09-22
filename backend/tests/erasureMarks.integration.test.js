@@ -9,7 +9,7 @@ process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
-const { sukurtiResursuKruva } = require("./helpers/resourceStack");
+const { sukurtiResursuKruva, stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const { createErasureMarkStore, LOCK_NAMESPACE } = require("../utils/deletionTombstones/postgresStore");
 const { CURRENT_SCHEMA_VERSION } = require("../utils/jobStore/common");
 const states = require("../utils/deletionTombstones/states");
@@ -63,16 +63,16 @@ async function paruostiDb(suffix) {
     const url = testDatabaseUrl(suffix);
     const dbName = new URL(url).pathname.slice(1);
 
-    const admin = new Pool({ connectionString: adminDatabaseUrl() });
-    const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
+    const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "admin", dsn: adminDatabaseUrl() });
+    const uzdarytiAdmin = resursai.registruotiPoola(admin, { vardas: "admin pool" });
     await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
     await admin.query(`CREATE DATABASE "${dbName}"`);
     resursai.registruoti("laikina DB", async () => {
-      const a = new Pool({ connectionString: adminDatabaseUrl() });
+      const a = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "a", dsn: adminDatabaseUrl() });
       try {
         await a.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
       } finally {
-        await a.end();
+        await uzdarytiPoola(a);
       }
     });
     await uzdarytiAdmin();
@@ -83,8 +83,8 @@ async function paruostiDb(suffix) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const pool = new Pool({ connectionString: url });
-    resursai.registruoti("darbinis pool", () => pool.end());
+    const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "pool", dsn: url });
+    resursai.registruotiPoola(pool, { vardas: "darbinis pool" });
 
     return { url, pool, resursai };
   } catch (klaida) {
@@ -291,8 +291,8 @@ test("LENKTYNĖS A: dvi instancijos, DU POOL'AI - tik viena laimi claim'ą", { s
   const { url, pool, resursai } = await paruostiDb("erasure_race_a");
 
   try {
-    const antras = new Pool({ connectionString: url });
-    resursai.registruoti("antras pool", () => antras.end());
+    const antras = stebetiPoola(new Pool({ connectionString: url }), { vardas: "antras", dsn: url });
+    resursai.registruotiPoola(antras, { vardas: "antras pool" });
 
     const a = createErasureMarkStore(pool);
     const b = createErasureMarkStore(antras);
@@ -320,8 +320,8 @@ test("LENKTYNĖS B: lėtesnis bandymas krenta PO `deleted` - `deleted` išlieka"
   const { url, pool, resursai } = await paruostiDb("erasure_race_b");
 
   try {
-    const antras = new Pool({ connectionString: url });
-    resursai.registruoti("antras pool", () => antras.end());
+    const antras = stebetiPoola(new Pool({ connectionString: url }), { vardas: "antras", dsn: url });
+    resursai.registruotiPoola(antras, { vardas: "antras pool" });
 
     const greitas = createErasureMarkStore(pool);
     const letas = createErasureMarkStore(antras);
@@ -348,11 +348,11 @@ test("LENKTYNĖS C: kritimas ties `pending` - barjeras išgyvena, retry tęsia",
   const { url, pool, resursai } = await paruostiDb("erasure_race_c");
 
   try {
-    const kritęs = new Pool({ connectionString: url });
+    const kritęs = stebetiPoola(new Pool({ connectionString: url }), { vardas: "kritęs", dsn: url });
     const kritusioStore = createErasureMarkStore(kritęs);
 
     await kritusioStore.mark("j", { reason: REASON });
-    await kritęs.end(); // „procesas mirė"
+    await uzdarytiPoola(kritęs); // „procesas mirė"
 
     const naujas = createErasureMarkStore(pool);
 
@@ -388,10 +388,10 @@ test("PO RESTARTO: TIKRAS vykdymo kelias konsultuojasi su barjeru", { skip: SKIP
     await irasytiTevineEilute(pool, jobId);
 
     /** ── „Prieš restartą": žyma įrašoma per ATSKIRĄ pool'ą, kuris po to miršta ── */
-    const senas = new Pool({ connectionString: url });
+    const senas = stebetiPoola(new Pool({ connectionString: url }), { vardas: "senas", dsn: url });
     const senoStore = createErasureMarkStore(senas);
     await senoStore.mark(jobId, { reason: REASON });
-    await senas.end();
+    await uzdarytiPoola(senas);
 
     /** ── „Po restarto": švieži moduliai, kaip naujame procese ──────────── */
     for (const kelias of [
@@ -491,11 +491,11 @@ test("ATKŪRIMAS: žyma, atsiradusi TARP patikros ir rašymo, sustabdo atkūrim�
 
         /** Pirmas kvietimas - fasado ankstyva patikra: žymos DAR nėra. */
         if (kartas === 1) {
-          const konkurentas = new Pool({ connectionString: url });
+          const konkurentas = stebetiPoola(new Pool({ connectionString: url }), { vardas: "konkurentas", dsn: url });
           try {
             await createErasureMarkStore(konkurentas).mark(id, { reason: REASON });
           } finally {
-            await konkurentas.end();
+            await uzdarytiPoola(konkurentas);
           }
           return false;
         }
@@ -536,8 +536,8 @@ test("LOCK'AS: NELAIKOMAS per išorinį I/O - kitas darbas vyksta tuo metu", { s
   const { url, pool, resursai } = await paruostiDb("erasure_lock_io");
 
   try {
-    const stebetojas = new Pool({ connectionString: url });
-    resursai.registruoti("stebėtojo pool", () => stebetojas.end());
+    const stebetojas = stebetiPoola(new Pool({ connectionString: url }), { vardas: "stebetojas", dsn: url });
+    resursai.registruotiPoola(stebetojas, { vardas: "stebėtojo pool" });
 
     const store = createErasureMarkStore(pool);
 
@@ -606,8 +606,8 @@ test("7.4e SĄSAJA: `assertNotBarred()` veikia KVIETĖJO transakcijoje", { skip:
      * ATOMIŠKUMAS: kol kvietėjo transakcija laiko lock'ą, lygiagretus `mark()`
      * to paties `job_id` LAUKIA. Be to 7.4e patikra ir rašymas prasilenktų.
      */
-    const antras = new Pool({ connectionString: url });
-    resursai.registruoti("antras pool", () => antras.end());
+    const antras = stebetiPoola(new Pool({ connectionString: url }), { vardas: "antras", dsn: url });
+    resursai.registruotiPoola(antras, { vardas: "antras pool" });
     const kitasStore = createErasureMarkStore(antras);
 
     await klientas.query("BEGIN");
@@ -856,8 +856,8 @@ test("PRETENZIJA: du pool'ai kovoja dėl autorizuoto pakartojimo - laimi VIENAS"
   const { url, pool, resursai } = await paruostiDb("erasure_claim_race");
 
   try {
-    const antras = new Pool({ connectionString: url });
-    resursai.registruoti("antras pool", () => antras.end());
+    const antras = stebetiPoola(new Pool({ connectionString: url }), { vardas: "antras", dsn: url });
+    resursai.registruotiPoola(antras, { vardas: "antras pool" });
 
     const a = createErasureMarkStore(pool);
     const b = createErasureMarkStore(antras);

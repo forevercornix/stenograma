@@ -392,6 +392,16 @@ const functional = [
   "restoredJobStoreForwarding",
   /** #157 (PR-4): bandymų registro modulis (grynas SQL sluoksnis). */
   "attemptRegistry",
+  /**
+   * ⚠️ `functional`, NE `postgres` (#380). Testuojamas GYVAVIMO CIKLAS, ne SQL:
+   * pool'o dublis leidžia „`end()` kabo" scenarijų padaryti deterministinį, o su
+   * tikra baze jį tektų gaminti lenktynėmis.
+   */
+  "resursuKruva",
+  /** ⚠️ `functional`: sargas skaito failų TEKSTĄ, tad DB jam nereikia (#380). */
+  "pgPoolManifestas",
+  /** ⚠️ : tikrina proceso medžio semantiką, DB nereikia (#380 P1). */
+  "runnerProcesuGrupe",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**

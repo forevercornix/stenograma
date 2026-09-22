@@ -12,6 +12,7 @@ const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
 const attemptRegistry = require("../utils/attemptRegistry");
 const { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele } = require("./helpers/indeksoTapatybe");
 const { STATUS, OWNER_KIND } = require("../utils/jobStore/common");
+const { stebetiPoola, uzdarytiPoola, fikturosDdl } = require("./helpers/resourceStack");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -62,10 +63,10 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const pool = new Pool({ connectionString: DB_URL });
+  const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
   const saknis = await fsp.mkdtemp(path.join(os.tmpdir(), "stenograma-erasure-"));
   t.after(async () => {
-    await pool.end().catch(() => {});
+    await uzdarytiPoola(pool);
     await fsp.rm(saknis, { recursive: true, force: true });
   });
 
@@ -102,7 +103,14 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
      */
     const indeksas = await kvalifikuotasVardas(pool, attemptRegistry.VIENO_ADRESO_INDEKSAS);
     const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
-    await pool.query(`DROP INDEX IF EXISTS ${indeksas}`);
+    /**
+     * ⚠️ FIKTŪROS DDL EINA PER AUTORITETĄ (#380 D8). `DROP INDEX` ima
+     * `ACCESS EXCLUSIVE`, tad jis laukia už KIEKVIENOS atviros transakcijos, rašiusios
+     * į lentelę — o užrakto laukimas numatytai NERIBOTAS. Be ribos regresija, palikusi
+     * atvirą transakciją, kabina failą iki runner'io 120 s ribos ir be jokios nuorodos,
+     * KAS laiko užraktą (išmatuota: M1, run `35663397047` ir `35750213535`).
+     */
+    await fikturosDdl(pool, "job_result_attempts", `DROP INDEX IF EXISTS ${indeksas}`);
     try {
       return await scenarijus();
     } finally {
@@ -147,7 +155,9 @@ test("#157 PR-5: erasure trina PAGAL REGISTRĄ", { skip: PRALEISTI, timeout: 180
        * ⚠️ INDEKSO VARDAS ČIA BE SCHEMOS: `CREATE INDEX` jos nepriima — indeksas
        * paveldi LENTELĖS schemą. Todėl kvalifikuojama lentelė, ne vardas.
        */
-      await pool.query(
+      await fikturosDdl(
+        pool,
+        "job_result_attempts",
         `CREATE UNIQUE INDEX IF NOT EXISTS ${attemptRegistry.VIENO_ADRESO_INDEKSAS}
            ON ${lentele} (storage_type, storage_key)`
       );

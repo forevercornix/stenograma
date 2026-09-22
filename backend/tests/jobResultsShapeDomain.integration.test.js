@@ -5,6 +5,7 @@ const path = require("node:path");
 const { Client, Pool } = require("pg");
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -125,7 +126,7 @@ async function perkurtiDb() {
    * (CI 34352704975), ir čia ji nebuvo pritaikyta. Tai ne sutapimas, o modelio
    * spraga: taisymas buvo lokalus, o klasė — bendra abiem failams.
    */
-  if (pool) await pool.end().catch(() => {});
+  if (pool) await uzdarytiPoola(pool);
   pool = null;
 
   await pg(admin, `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`);
@@ -136,12 +137,12 @@ async function perkurtiDb() {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  pool = new Pool({ connectionString: DB_URL });
+  pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
 }
 
 after(async () => {
   if (PRALEISTI) return;
-  if (pool) await pool.end().catch(() => {});
+  if (pool) await uzdarytiPoola(pool);
   await pg(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(() => {});
 });
 

@@ -2,7 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const { skipWithoutRedis } = require("./helpers/redisGuard");
-const { sukurtiResursuKruva } = require("./helpers/resourceStack");
+const { sukurtiResursuKruva, stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
 const { Pool } = require("pg");
 const path = require("node:path");
@@ -16,6 +16,7 @@ const { createRedisStore } = require("../utils/jobStore/redisStore");
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { PHASE } = require("../utils/jobPhase");
 const { OWNER_KIND, JOB_TYPES } = require("../utils/jobStore/common");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * BACKEND'Ų KONTRAKTO EKVIVALENTUMAS.
@@ -44,11 +45,11 @@ const { OWNER_KIND, JOB_TYPES } = require("../utils/jobStore/common");
 
 /** Laikinos DB nuleidimas per atskirą admin jungtį (tas pats kelias visur). */
 async function nuleistiDb(dbName) {
-  const a = new Pool({ connectionString: adminDatabaseUrl() });
+  const a = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "a", dsn: adminDatabaseUrl() });
   try {
     await a.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
   } finally {
-    await a.end();
+    await uzdarytiPoola(a);
   }
 }
 
@@ -384,8 +385,8 @@ const ADAPTERIAI = [
       try {
       const url = testDatabaseUrl("backend_contract");
       const dbName = new URL(url).pathname.slice(1);
-      const admin = new Pool({ connectionString: adminDatabaseUrl() });
-      const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
+      const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "admin", dsn: adminDatabaseUrl() });
+      const uzdarytiAdmin = resursai.registruotiPoola(admin, { vardas: "admin pool" });
       await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
       await admin.query(`CREATE DATABASE "${dbName}"`);
       resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
@@ -395,8 +396,8 @@ const ADAPTERIAI = [
         cwd: path.resolve(__dirname, ".."), env: { ...process.env, DATABASE_URL: url },
         stdio: ["ignore", "pipe", "pipe"],
       });
-      const pool = new Pool({ connectionString: url });
-      resursai.registruoti("darbinis pool", () => pool.end());
+      const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "pool", dsn: url });
+      resursai.registruotiPoola(pool, { vardas: "darbinis pool" });
       /**
        * ⚠️ PRODUKCINĖ SCHEMA NELIEČIAMA (#180 P3-7).
        *
@@ -651,8 +652,8 @@ test(
     try {
     const url = testDatabaseUrl("backend_contract_sintetine");
     const dbName = new URL(url).pathname.slice(1);
-    const admin = new Pool({ connectionString: adminDatabaseUrl() });
-    const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
+    const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "admin", dsn: adminDatabaseUrl() });
+    const uzdarytiAdmin = resursai.registruotiPoola(admin, { vardas: "admin pool" });
     await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
     await admin.query(`CREATE DATABASE "${dbName}"`);
     resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
@@ -664,8 +665,8 @@ test(
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const pool = new Pool({ connectionString: url });
-    resursai.registruoti("darbinis pool", () => pool.end());
+    const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "pool", dsn: url });
+    resursai.registruotiPoola(pool, { vardas: "darbinis pool" });
     const store = createPostgresStore(pool);
     try {
       /** Constraint'as PRIVALO egzistuoti prieš pašalinant - kitaip migracija pasikeitė. */
@@ -674,7 +675,7 @@ test(
       assert.equal(pries.rows[0].n, 1,
         "prielaida: produkcinė migracija sukuria jobs_status_phase");
 
-      await pool.query("ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase");
+      await fikturosDdl(pool, "jobs", "ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase");
 
       const po = await pool.query(
         `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'jobs_status_phase'`);
@@ -749,7 +750,7 @@ function netikrasResursas(vardas, zurnalas) {
  * #180 P2-A: TIKROJI setup gyvavimo seka - ankstyvas uždarymas + valymas.
  *
  * ⚠️ ŠI SEKA IR SUGEDO REALIAME CI. `admin` pool'as buvo registruojamas krūvoje,
- * o paskui sėkmės kelyje uždaromas TIESIOGIAI (`admin.end()`). `vienaKarta()`
+ * o paskui sėkmės kelyje uždaromas TIESIOGIAI (`uzdarytiPoola(admin)`). `vienaKarta()`
  * skaičiuoja tik per krūvą einančius kvietimus, tad `isvalyti()` uždarydavo jį
  * ANTRĄ kartą ir abu PostgreSQL kontrakto testai krisdavo su
  * „resursų valymas nepavyko: admin pool: Called end on pool more than once".
@@ -774,7 +775,7 @@ test("KONTRAKTAS: anksti uždarytas resursas nebeuždaromas per valymą (P2-A)",
 
   /**
    * ⚠️ ESMĖ: `isvalyti()` NEGALI uždaryti admin pool'o dar kartą. Su tiesioginiu
-   * `admin.end()` čia būtų mesta „Called end on pool more than once", ir klaida
+   * `uzdarytiPoola(admin)` čia būtų mesta „Called end on pool more than once", ir klaida
    * atkeliautų kaip `resursų valymas nepavyko: …`.
    */
   await resursai.isvalyti();

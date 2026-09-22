@@ -7,6 +7,7 @@ const { Pool, Client } = require("pg");
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
 const { paleistiKontrakta } = require("./helpers/artifactStoreContract");
 const { createInlineArtifactStore } = require("../utils/artifactStore/inlineStore");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -56,7 +57,7 @@ if (!PRALEISTI) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const pool = new Pool({ connectionString: DB_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
 
     /**
      * ⚠️ KIEKVIENAM RAKTUI - TIKRAS `jobs` ĮRAŠAS.
@@ -90,7 +91,7 @@ if (!PRALEISTI) {
       nuoroda: "null",
       nepriklausomas: false,
       isvalyti: async () => {
-        await pool.end().catch(() => {});
+        await uzdarytiPoola(pool);
         await pg(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${dbVardas()}" WITH (FORCE)`).catch(
           () => {}
         );

@@ -9,7 +9,7 @@ process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
-const { sukurtiResursuKruva } = require("./helpers/resourceStack");
+const { sukurtiResursuKruva, stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const memoryStore = require("../utils/auditStore/memoryStore");
 const { createPostgresStore } = require("../utils/auditStore/postgresStore");
 const { visiLaukai, META_LAUKAI } = require("../utils/auditStore/fields");
@@ -553,11 +553,11 @@ async function paleisti(ctx, pavadinimas) {
 }
 
 async function nuleistiDb(dbName) {
-  const admin = new Pool({ connectionString: adminDatabaseUrl() });
+  const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "admin", dsn: adminDatabaseUrl() });
   try {
     await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
   } finally {
-    await admin.end();
+    await uzdarytiPoola(admin);
   }
 }
 
@@ -597,8 +597,8 @@ const ADAPTERIAI = [
       try {
         const url = testDatabaseUrl("audit_contract");
         const dbName = new URL(url).pathname.slice(1);
-        const admin = new Pool({ connectionString: adminDatabaseUrl() });
-        const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
+        const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "admin", dsn: adminDatabaseUrl() });
+        const uzdarytiAdmin = resursai.registruotiPoola(admin, { vardas: "admin pool" });
         await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
         await admin.query(`CREATE DATABASE "${dbName}"`);
         resursai.registruoti("laikina DB", () => nuleistiDb(dbName));
@@ -610,8 +610,8 @@ const ADAPTERIAI = [
           stdio: ["ignore", "pipe", "pipe"],
         });
 
-        const pool = new Pool({ connectionString: url });
-        resursai.registruoti("darbinis pool", () => pool.end());
+        const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "pool", dsn: url });
+        resursai.registruotiPoola(pool, { vardas: "darbinis pool" });
 
         return {
           store: createPostgresStore(pool, { hashKeyId: HASH_KEY_ID }),

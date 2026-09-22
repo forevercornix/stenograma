@@ -20,6 +20,8 @@ const {
 const { createPostgresStore } = require("../utils/auditStore/postgresStore");
 const { rasytiAudita, AuditWriteError } = require("../utils/auditWrite");
 const { pgJungtiesNustatymai } = require("../utils/pgConnection");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * AUDITO IŠTRYNIMO GALUTINUMAS — ATOMIŠKUMAS IR RAW ĮRODYMAS (#155, 7.4e / #216).
@@ -43,11 +45,11 @@ const DRUSKA = "7f3a9c1e5b2d4a6f8c0e1d3b5a7f9c2e4d6b8a0c2e4f6a8c0e2d4b6a8f0c2e4d
 const DRUSKOS_ID = "2026-09";
 
 async function vykdyti(url, sql) {
-  const p = new Pool({ connectionString: url });
+  const p = stebetiPoola(new Pool({ connectionString: url }), { vardas: "p", dsn: url });
   try {
     await p.query(sql);
   } finally {
-    await p.end();
+    await uzdarytiPoola(p);
   }
 }
 
@@ -98,17 +100,17 @@ test("auditErasureFinality", { skip: skipWithoutPostgres() }, async (t) => {
   await tombstones.init(aplinka);
 
   /** Nepriklausoma jungtis — RAW įrodymui ir antrai „instancijai". */
-  const rawPool = new Pool({ connectionString: DB_URL });
+  const rawPool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "rawPool", dsn: DB_URL });
 
   t.after(async () => {
-    await rawPool.end().catch(() => {});
+    await uzdarytiPoola(rawPool);
     await auditStore.shutdown().catch(() => {});
     await tombstones.shutdown().catch(() => {});
     await vykdyti(adminDatabaseUrl(), `DROP DATABASE IF EXISTS "${vardas}" WITH (FORCE)`);
   });
 
   t.beforeEach(async () => {
-    await rawPool.query("TRUNCATE audit_log, erasure_marks");
+    await fikturosDdl(rawPool, "audit_log", "TRUNCATE audit_log, erasure_marks");
   });
 
   /** RAW: kiek eilučių lentelėje priklauso šiam subjektui? */
@@ -256,7 +258,7 @@ test("auditErasureFinality", { skip: skipWithoutPostgres() }, async (t) => {
        * lokalus: `createPostgresStore` su SAVO pool'u yra tas pats, kas antras
        * servisas prieš tą pačią DB.
        */
-      const antrasPool = new Pool({ connectionString: DB_URL });
+      const antrasPool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "antrasPool", dsn: DB_URL });
       const antraInstancija = createPostgresStore(antrasPool, {
         hashKeyId: DRUSKOS_ID,
         readinessBudgetMs: 2000,
@@ -288,7 +290,7 @@ test("auditErasureFinality", { skip: skipWithoutPostgres() }, async (t) => {
 
         assert.equal(await rawKiek(jobId), 0, "RAW DB: multi-instance galutinumas");
       } finally {
-        await antrasPool.end().catch(() => {});
+        await uzdarytiPoola(antrasPool);
       }
     }
   );
@@ -328,7 +330,7 @@ test("auditErasureFinality", { skip: skipWithoutPostgres() }, async (t) => {
       const nustatymai = pgJungtiesNustatymai(pgEnv);
       assert.equal("connectionString" in nustatymai, false, "dvi formos kartu - neakivaizdi pirmenybė");
 
-      const pgPool = new Pool(nustatymai);
+      const pgPool = stebetiPoola(new Pool(nustatymai), { vardas: "pgPool" });
 
       try {
         assert.equal(
@@ -337,7 +339,7 @@ test("auditErasureFinality", { skip: skipWithoutPostgres() }, async (t) => {
           "iš `PG*` sudarytas pool'as privalo realiai pasiekti `erasure_marks`"
         );
       } finally {
-        await pgPool.end().catch(() => {});
+        await uzdarytiPoola(pgPool);
       }
     }
   );

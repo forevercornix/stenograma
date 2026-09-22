@@ -30,6 +30,7 @@ const { pasetiKeturisStatusus } = require("./helpers/postRestoreFixtures");
  */
 const { testoAplinka, auditoLaukas } = require("./helpers/drRestoreEnv");
 const { suSugadintuAuditu } = require("./helpers/auditStoreSeam");
+const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
@@ -191,7 +192,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
   await t.test("1. šaltinis pripildomas, tapatybė yra", async () => {
     await suAplinka(saltinioEnv, async () => {
-      const pool = new Pool({ connectionString: SALTINIO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: SALTINIO_URL }), { vardas: "pool", dsn: SALTINIO_URL });
       try {
         artefaktuSaugykla = createFsArtifactStore({ root: ARTEFAKTU_SAKNIS });
         await artefaktuSaugykla.patikrintiSaugykla();
@@ -239,7 +240,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
         saltinioDeployment = await deploymentIdentity.skaitytiTapatybe(pool);
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
 
       assert.match(saltinioDeployment, /^[0-9a-f-]{36}$/, "migracija sukūrė tapatybės eilutę");
@@ -260,7 +261,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
   await t.test("3. job'as A ištrinamas PO kopijos, žurnalas eksportuojamas", async () => {
     await suAplinka(saltinioEnv, async () => {
-      const pool = new Pool({ connectionString: SALTINIO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: SALTINIO_URL }), { vardas: "pool", dsn: SALTINIO_URL });
       try {
         /**
          * ⚠️ ATKARTOJAMA PRODUKCINĖ SEKA (`lifecycleService`): žyma → `eraseJob()` →
@@ -301,7 +302,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           env: process.env,
         });
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
 
       assert.ok(artefaktas.envelope.ciphertext, "žurnalas šifruotas");
@@ -379,7 +380,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
       "objektas ištrintas 3 žingsnyje ir NEGRĮŽTA su DB kopija"
     );
 
-    const pool = new Pool({ connectionString: TIKSLO_URL });
+    const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
     try {
       assert.equal(
         await deploymentIdentity.skaitytiTapatybe(pool),
@@ -387,7 +388,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
         "atkurta bazė turi ŠALTINIO diegimo tapatybę"
       );
     } finally {
-      await pool.end();
+      await uzdarytiPoola(pool);
     }
   });
 
@@ -401,7 +402,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
         env: process.env,
       });
 
-      const pool = new Pool({ connectionString: TIKSLO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
       try {
         await assert.rejects(
           () =>
@@ -414,7 +415,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           (k) => k.code === "ERASURE_FOREIGN_LEDGER"
         );
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
   });
@@ -477,7 +478,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
      * žyma — `failed` job'ui, kurio nemato nė viena kita asercija.
      */
     const gedimoArtefaktas = await suAplinka(saltinioEnv, async () => {
-      const pool = new Pool({ connectionString: SALTINIO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: SALTINIO_URL }), { vardas: "pool", dsn: SALTINIO_URL });
       try {
         await tombstones.mark(jobai.failed.id, { reason: "user_request", actorKind: "user" });
         const tik = (await tombstones.listAll()).filter((z) => z.jobId === jobai.failed.id);
@@ -491,12 +492,12 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           env: process.env,
         });
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
 
     await suAplinka(tiksloEnv, async () => {
-      const pool = new Pool({ connectionString: TIKSLO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
       try {
         await assert.rejects(
           () =>
@@ -516,7 +517,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           "replay nesėkmė privalo nutraukti seką"
         );
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
 
@@ -585,7 +586,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
      * žurnalas tos žymos neuždarys, nes jos jame nėra.
      */
     await suAplinka(tiksloEnv, async () => {
-      const pool = new Pool({ connectionString: TIKSLO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
       try {
         const atstatymas = await drCoordinator.paleisti({
           targetUrl: TIKSLO_URL,
@@ -599,7 +600,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
         assert.deepEqual(atstatymas.replay.uzdarytosZymos, [jobai.failed.id], "žyma uždaryta");
         assert.equal(atstatymas.verify.suderinta, true, "cutover vėl leidžiamas");
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
 
@@ -615,7 +616,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
 
   await t.test("7. koordinatorius: suliejimas → replay → suderinimas → verifikacija", async () => {
     pirmas = await suAplinka(tiksloEnv, async () => {
-      const pool = new Pool({ connectionString: TIKSLO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
       try {
         return await drCoordinator.paleisti({
           targetUrl: TIKSLO_URL,
@@ -631,7 +632,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           artifactStores: { fs: artefaktuSaugykla },
         });
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
 
@@ -703,7 +704,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
      */
     assert.ok(sesijuTokenai.length > 0, "kontrolė: tokenai išsaugoti");
     await suAplinka(tiksloEnv, async () => {
-      const pool = new Pool({ connectionString: TIKSLO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
       try {
         const store = sesijuPg.createPostgresStore(pool);
         for (const token of sesijuTokenai) {
@@ -714,7 +715,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           );
         }
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
 
@@ -790,7 +791,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     assert.ok(priesBusena.sessions.length > 0, "sesijų yra");
 
     const antras = await suAplinka(tiksloEnv, async () => {
-      const pool = new Pool({ connectionString: TIKSLO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
       try {
         return await drCoordinator.paleisti({
           targetUrl: TIKSLO_URL,
@@ -806,7 +807,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
           artifactStores: { fs: artefaktuSaugykla },
         });
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
 
@@ -915,7 +916,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
     };
 
     await suAplinka(pasenesEnv, async () => {
-      const pool = new Pool({ connectionString: TIKSLO_URL });
+      const pool = stebetiPoola(new Pool({ connectionString: TIKSLO_URL }), { vardas: "pool", dsn: TIKSLO_URL });
       try {
         const bendri = {
           targetUrl: TIKSLO_URL,
@@ -967,7 +968,7 @@ test("7.6c: DR pratyba — ištrynimas išgyvena atkūrimą iš senesnės kopijo
         );
         assert.equal(rezultatas.verify.suderinta, true, "verifikacija praėjo — cutover leidžiamas");
       } finally {
-        await pool.end();
+        await uzdarytiPoola(pool);
       }
     });
   });

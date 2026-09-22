@@ -9,7 +9,7 @@ process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
-const { sukurtiResursuKruva } = require("./helpers/resourceStack");
+const { sukurtiResursuKruva, stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const { createPostgresStore } = require("../utils/auditStore/postgresStore");
 const {
   REQUIRED_AUDIT_CONSTRAINTS,
@@ -19,6 +19,7 @@ const {
 } = require("../utils/auditStore");
 const { META_LAUKAI } = require("../utils/auditStore/fields");
 const { EVENT_PATTERN } = require("../utils/auditEvents");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * AUDITO PERSISTENCIJOS GARANTIJOS (#155, 7.4b / #211).
@@ -56,16 +57,16 @@ async function paruostiDb(suffix) {
     const url = testDatabaseUrl(suffix);
     const dbName = new URL(url).pathname.slice(1);
 
-    const admin = new Pool({ connectionString: adminDatabaseUrl() });
-    const uzdarytiAdmin = resursai.registruoti("admin pool", () => admin.end());
+    const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "admin", dsn: adminDatabaseUrl() });
+    const uzdarytiAdmin = resursai.registruotiPoola(admin, { vardas: "admin pool" });
     await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
     await admin.query(`CREATE DATABASE "${dbName}"`);
     resursai.registruoti("laikina DB", async () => {
-      const a = new Pool({ connectionString: adminDatabaseUrl() });
+      const a = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), { vardas: "a", dsn: adminDatabaseUrl() });
       try {
         await a.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
       } finally {
-        await a.end();
+        await uzdarytiPoola(a);
       }
     });
     await uzdarytiAdmin();
@@ -76,8 +77,8 @@ async function paruostiDb(suffix) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const pool = new Pool({ connectionString: url });
-    resursai.registruoti("darbinis pool", () => pool.end());
+    const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "pool", dsn: url });
+    resursai.registruotiPoola(pool, { vardas: "darbinis pool" });
 
     return { url, pool, resursai };
   } catch (klaida) {
@@ -493,13 +494,13 @@ test("IŠLIKIMAS: instancija A įrašo, A sunaikinama, B tą patį randa", { ski
    */
   const { url, resursai } = await paruostiDb("audit_islikimas");
   try {
-    const poolA = new Pool({ connectionString: url });
+    const poolA = stebetiPoola(new Pool({ connectionString: url }), { vardas: "poolA", dsn: url });
     const storeA = createPostgresStore(poolA, { hashKeyId: HASH_KEY_ID });
     const irasas = await storeA.append(eilute({ details: "pries-restarta", subjectId: "pseudo-r" }));
-    await poolA.end();
+    await uzdarytiPoola(poolA);
 
-    const poolB = new Pool({ connectionString: url });
-    resursai.registruoti("pool B", () => poolB.end());
+    const poolB = stebetiPoola(new Pool({ connectionString: url }), { vardas: "poolB", dsn: url });
+    resursai.registruotiPoola(poolB, { vardas: "pool B" });
     const storeB = createPostgresStore(poolB, { hashKeyId: HASH_KEY_ID });
 
     const { entries, total } = await storeB.list();
@@ -515,10 +516,10 @@ test("IŠLIKIMAS: instancija A įrašo, A sunaikinama, B tą patį randa", { ski
 test("KELIOS INSTANCIJOS: dvi saugyklos toje pačioje DB mato viena kitą", { skip: SKIP }, async () => {
   const { url, resursai } = await paruostiDb("audit_multi");
   try {
-    const poolA = new Pool({ connectionString: url });
-    const poolB = new Pool({ connectionString: url });
-    resursai.registruoti("pool A", () => poolA.end());
-    resursai.registruoti("pool B", () => poolB.end());
+    const poolA = stebetiPoola(new Pool({ connectionString: url }), { vardas: "poolA", dsn: url });
+    const poolB = stebetiPoola(new Pool({ connectionString: url }), { vardas: "poolB", dsn: url });
+    resursai.registruotiPoola(poolA, { vardas: "pool A" });
+    resursai.registruotiPoola(poolB, { vardas: "pool B" });
 
     const storeA = createPostgresStore(poolA, { hashKeyId: HASH_KEY_ID });
     const storeB = createPostgresStore(poolB, { hashKeyId: HASH_KEY_ID });
@@ -717,8 +718,8 @@ test("POOL: nustatymuose YRA laiko ribos, ir jos MAŽESNĖS už fasado langą", 
     );
 
     /** ELGSENA: DB realiai nutraukia užklausą, viršijusią `statement_timeout`. */
-    const pool = new Pool(nustatymai);
-    resursai.registruoti("timeout pool", () => pool.end());
+    const pool = stebetiPoola(new Pool(nustatymai), { vardas: "pool" });
+    resursai.registruotiPoola(pool, { vardas: "timeout pool" });
 
     const pradzia = Date.now();
     await assert.rejects(
@@ -742,12 +743,12 @@ test("POOL: išsekęs pool'as duoda KLAIDĄ per ribotą laiką, o ne kabo", { sk
    */
   const { url, resursai } = await paruostiDb("audit_pool_issekes");
   try {
-    const pool = new Pool({
+    const pool = stebetiPoola(new Pool({
       connectionString: url,
       max: 1,
       connectionTimeoutMillis: 300,
-    });
-    resursai.registruoti("mažas pool", () => pool.end());
+    }), { vardas: "pool" });
+    resursai.registruotiPoola(pool, { vardas: "mažas pool" });
 
     /** Vienintelė jungtis paimama ir NEATLAISVINAMA. */
     const uzimtas = await pool.connect();
@@ -795,8 +796,8 @@ test("PRODUKCINIS KELIAS: DB rašymo klaida NESUKELIA `unhandledRejection`", { s
     });
 
     /** Lentelė pašalinama PO inicijavimo - modeliuojam gedimą veikimo metu. */
-    const pool = new Pool({ connectionString: url });
-    resursai.registruoti("drop pool", () => pool.end());
+    const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "pool", dsn: url });
+    resursai.registruotiPoola(pool, { vardas: "drop pool" });
     await pool.query("DROP TABLE audit_log");
 
     /** BLOKUOJANTIS įvykis: veiksmas privalo būti atmestas, o ne tyliai praeiti. */
@@ -925,7 +926,7 @@ test("RESTARTAS: auditas išlieka per PILNĄ `init → shutdown → init` ciklą
    * praeina ir per `shutdown()`, ir per PAKARTOTINĮ `init()` - o būtent
    * pakartotinis `init()` iš naujo tikrina lentelę, invariantus ir trigerį, iš
    * naujo skaito `AUDIT_ID_SALT_ID` ir kuria naują pool'ą. Bet kuris iš tų
-   * žingsnių galėtų sulaužyti tęstinumą, o `pool.end()` testas to nepamatytų.
+   * žingsnių galėtų sulaužyti tęstinumą, o `uzdarytiPoola(pool)` testas to nepamatytų.
    *
    * ⚠️ KO ŠIS TESTAS NEĮRODO: konteinerio restarto. Image sluoksniai, volume'ai
    * ir orkestruotojo tvarka lieka nepatikrinti - tam reikėtų Docker, kurio šioje
@@ -1013,7 +1014,7 @@ test("STARTAS: REPLICA-ONLY trigeris NEPRALEIDŽIAMAS", { skip: SKIP }, async ()
     const store = createPostgresStore(pool, { hashKeyId: HASH_KEY_ID });
     const irasas = await store.append(eilute({ details: "originalas" }));
 
-    await pool.query(`ALTER TABLE audit_log ENABLE REPLICA TRIGGER ${REQUIRED_AUDIT_TRIGGER}`);
+    await fikturosDdl(pool, "audit_log", `ALTER TABLE audit_log ENABLE REPLICA TRIGGER ${REQUIRED_AUDIT_TRIGGER}`);
 
     /** PRIELAIDA: būtent dėl to režimas nepriimtinas - `UPDATE` nebestabdomas. */
     await pool.query("UPDATE audit_log SET result = 'failure' WHERE id = $1", [irasas.id]);
@@ -1051,7 +1052,7 @@ test("STARTAS: trūkstamas `seq` unikalumas NUTRAUKIA startą", { skip: SKIP }, 
   const { url, pool, resursai } = await paruostiDb("audit_be_seq_unique");
 
   try {
-    await pool.query(`ALTER TABLE audit_log DROP CONSTRAINT ${REQUIRED_AUDIT_UNIQUE_CONSTRAINTS[0]}`);
+    await fikturosDdl(pool, "audit_log", `ALTER TABLE audit_log DROP CONSTRAINT ${REQUIRED_AUDIT_UNIQUE_CONSTRAINTS[0]}`);
     await auditStore.shutdown();
 
     await assert.rejects(
@@ -1651,10 +1652,10 @@ test("RETENCIJA: dvi instancijos lygiagrečiai - be deadlock'o ir be likučių",
       await irasytiSuLaiku(pool, { id: crypto.randomUUID(), timestamp: SENAS });
     }
 
-    const poolA = new Pool({ connectionString: url });
-    const poolB = new Pool({ connectionString: url });
-    resursai.registruoti("instancija A", () => poolA.end());
-    resursai.registruoti("instancija B", () => poolB.end());
+    const poolA = stebetiPoola(new Pool({ connectionString: url }), { vardas: "poolA", dsn: url });
+    const poolB = stebetiPoola(new Pool({ connectionString: url }), { vardas: "poolB", dsn: url });
+    resursai.registruotiPoola(poolA, { vardas: "instancija A" });
+    resursai.registruotiPoola(poolB, { vardas: "instancija B" });
 
     const sweep = async (p) => {
       const store = createPostgresStore(p, { hashKeyId: HASH_KEY_ID });
