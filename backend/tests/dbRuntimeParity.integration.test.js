@@ -15,6 +15,7 @@ const { STATUS, JOB_TYPES, OWNER_KIND } = require("../utils/jobStore/common");
 const { phasesForType } = require("../utils/jobPhase");
 const { assertSupportedSchemaVersion } = require("../utils/jobAuthorization");
 const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * DB ↔ RUNTIME PARITETAS (#155, 7.2a).
@@ -157,7 +158,7 @@ test("DB ↔ runtime paritetas", { skip: skipWithoutPostgres() }, async (t) => {
   });
 
   t.beforeEach(async () => {
-    await pool.query("TRUNCATE jobs CASCADE");
+    await fikturosDdl(pool, "jobs", "TRUNCATE jobs CASCADE");
   });
 
   /* ── type ────────────────────────────────────────────────────────────── */

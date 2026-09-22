@@ -13,6 +13,7 @@ const { sukurtiResursuKruva, stebetiPoola, uzdarytiPoola } = require("./helpers/
 const { createPostgresStore } = require("../utils/sessionStore/postgresStore");
 const { hashSessionToken } = require("../utils/sessionStore/tokens");
 const { hashPassword } = require("../utils/credentials");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * PERSISTENTINIŲ SESIJŲ GARANTIJOS, KURIŲ ATMINTYJE NĖRA (#155, 7.3).
@@ -428,7 +429,7 @@ test("INIT: schema be sesijų invariantų NUTRAUKIA startą", { skip: SKIP }, as
   const senasBackend = process.env.SESSION_STORE_BACKEND;
   const senasUrl = process.env.DATABASE_URL;
   try {
-    await ctx.pool.query(`ALTER TABLE sessions DROP CONSTRAINT sessions_idle_after_created`);
+    await fikturosDdl(ctx.pool, "sessions", `ALTER TABLE sessions DROP CONSTRAINT sessions_idle_after_created`);
 
     process.env.SESSION_STORE_BACKEND = "postgres";
     process.env.DATABASE_URL = ctx.url;

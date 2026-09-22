@@ -16,6 +16,7 @@ const { createRedisStore } = require("../utils/jobStore/redisStore");
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { PHASE } = require("../utils/jobPhase");
 const { OWNER_KIND, JOB_TYPES } = require("../utils/jobStore/common");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * BACKEND'Ų KONTRAKTO EKVIVALENTUMAS.
@@ -674,7 +675,7 @@ test(
       assert.equal(pries.rows[0].n, 1,
         "prielaida: produkcinė migracija sukuria jobs_status_phase");
 
-      await pool.query("ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase");
+      await fikturosDdl(pool, "jobs", "ALTER TABLE jobs DROP CONSTRAINT jobs_status_phase");
 
       const po = await pool.query(
         `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'jobs_status_phase'`);

@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const { Client } = require("pg");
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
+const { FIKTURU_LOCK_RIBA, lockTimeoutKlaida } = require("./helpers/resourceStack");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
@@ -54,11 +55,36 @@ const JOB_ID = "aaaaaaaa-0000-4000-8000-000000000001";
  */
 const PRALEISTI = skipWithoutPostgres();
 
+/**
+ * ⚠️ FIKTŪRŲ KLIENTAS SU `lock_timeout` (#380 D8).
+ *
+ * Šitas klientas skirtas TIK fiktūroms — produkcinis kodas juo nevykdomas, tad `55P03`
+ * iš jo niekur nenukeliauja ir `uzimtas` klasifikacijos (#351) neiškraipo. Riba gyvena
+ * čia, o ne kvietimo vietose, nes kiekvienas `pg()` kvietimas atidaro savo jungtį:
+ * `SET LOCAL` galioja transakcijai, tad ji privalo eiti tuo pačiu klientu.
+ *
+ * ⚠️ `DDL_BE_TRANSAKCIJOS` sakiniai (`CREATE INDEX CONCURRENTLY`) transakcijos bloke
+ * neleidžiami, tad jiems riba nededama — jie vykdomi kaip anksčiau.
+ */
+const DDL_BE_TRANSAKCIJOS = /CONCURRENTLY/i;
+
 async function pg(url, sql, params = []) {
   const c = new Client({ connectionString: url });
   await c.connect();
   try {
-    return await c.query(sql, params);
+    if (DDL_BE_TRANSAKCIJOS.test(sql)) return await c.query(sql, params);
+
+    await c.query("BEGIN");
+    await c.query(`SET LOCAL lock_timeout = '${FIKTURU_LOCK_RIBA}'`);
+    try {
+      const r = await c.query(sql, params);
+      await c.query("COMMIT");
+      return r;
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      if (!err || err.code !== "55P03") throw err;
+      throw await lockTimeoutKlaida(c, "job_results", err);
+    }
   } finally {
     await c.end();
   }

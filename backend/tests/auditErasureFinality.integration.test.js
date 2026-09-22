@@ -21,6 +21,7 @@ const { createPostgresStore } = require("../utils/auditStore/postgresStore");
 const { rasytiAudita, AuditWriteError } = require("../utils/auditWrite");
 const { pgJungtiesNustatymai } = require("../utils/pgConnection");
 const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * AUDITO IŠTRYNIMO GALUTINUMAS — ATOMIŠKUMAS IR RAW ĮRODYMAS (#155, 7.4e / #216).
@@ -109,7 +110,7 @@ test("auditErasureFinality", { skip: skipWithoutPostgres() }, async (t) => {
   });
 
   t.beforeEach(async () => {
-    await rawPool.query("TRUNCATE audit_log, erasure_marks");
+    await fikturosDdl(rawPool, "audit_log", "TRUNCATE audit_log, erasure_marks");
   });
 
   /** RAW: kiek eilučių lentelėje priklauso šiam subjektui? */

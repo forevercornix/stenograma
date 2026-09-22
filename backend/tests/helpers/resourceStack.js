@@ -253,6 +253,111 @@ async function uzdarytiPoola(pool) {
   if (priezastys.length > 0) throw new Error(priezastys.join(" | "));
 }
 
+/**
+ * D8 — FIKTŪRŲ DDL SU `lock_timeout` (#380, po M1 diagnozės).
+ *
+ * ⚠️ DRAUDIMAS NEPANAIKINTAS, TIK PATIKSLINTAS. `lock_timeout` testų jungtyse
+ * draudžiamas todėl, kad jis meta `55P03`, o produkcija tą kodą klasifikuoja kaip
+ * `uzimtas` (#351 M5b) — t. y. laukimas pasislėptų kaip normalus konkurencinis darbas.
+ * Tas pavojus egzistuoja TIK ten, kur jungtimi eina PRODUKCINIS kodas.
+ *
+ * Fiktūrų DDL (`DROP`/`CREATE INDEX`, `ALTER`, `TRUNCATE`, `LOCK`) vykdomas ATSKIRU
+ * klientu, kuriuo produkcinis kodas nevykdomas, tad `55P03` iš jo niekur nenukeliauja —
+ * jį perima šis helper'is ir paverčia `FIXTURE_LOCK_TIMEOUT` diagnostika.
+ *
+ * ⚠️ `SET LOCAL`, NE `SET`. Riba galioja tik šiai transakcijai; be `LOCAL` ji liktų
+ * jungtyje, o jungtis grįžtų į pool'ą ir paveiktų kitus sakinius.
+ *
+ * Precedentas: migracija `1756700000000` (`SET LOCAL lock_timeout = '5s'` prieš
+ * `LOCK TABLE` ir `CREATE INDEX`, `SET LOCAL lock_timeout = DEFAULT` pabaigoje).
+ */
+const FIKTURU_LOCK_RIBA = "5s";
+
+/**
+ * KAS LAIKO KONFLIKTUOJANTĮ UŽRAKTĄ — SKAITOMA, KOL DB DAR GYVA (#380 D8, 3 p.).
+ *
+ * ⚠️ PO `FILE_TIMEOUT` ŠITO NEBEPADARYSI. Procesą užbaigia `SIGKILL`, tad vienintelis
+ * momentas, kai blokuotojas dar matomas, yra ties pačiu `lock_timeout` kritimu.
+ *
+ * ⚠️ BE UŽKLAUSOS TEKSTO IR BE DSN. `pg_stat_activity.query` neša naudotojų duomenis
+ * (raktus, turinį), tad imami tik metaduomenys: būsena, transakcijos amžius, užrakto
+ * režimas ir `pid`.
+ */
+async function kasLaikoUzrakta(vykdytojas, lentele) {
+  const { rows } = await vykdytojas.query(
+    `SELECT a.pid,
+            a.state,
+            round(EXTRACT(EPOCH FROM (clock_timestamp() - a.xact_start)))::int AS xact_amzius_s,
+            l.mode,
+            l.granted
+       FROM pg_locks l
+       JOIN pg_stat_activity a ON a.pid = l.pid
+      WHERE l.relation = $1::regclass
+        AND a.pid <> pg_backend_pid()
+      ORDER BY l.granted DESC, a.xact_start`,
+    [lentele]
+  );
+  return rows.map(
+    (r) =>
+      `pid=${r.pid} state=${r.state} xact=${r.xact_amzius_s === null ? "—" : r.xact_amzius_s + "s"} ` +
+      `mode=${r.mode} granted=${r.granted}`
+  );
+}
+
+/**
+ * `55P03` → `FIXTURE_LOCK_TIMEOUT` su diagnostika. Vienintelė vieta, kur ši klaida
+ * gaminama — ją naudoja ir pool'o kelias, ir fiktūrų `Client` keliai testuose.
+ *
+ * ⚠️ DIAGNOSTIKA IMAMA PO `ROLLBACK`: kitaip mūsų pačių transakcija būtų sąraše.
+ */
+async function lockTimeoutKlaida(vykdytojas, lentele, priezastis) {
+  let kas = [];
+  try {
+    kas = await kasLaikoUzrakta(vykdytojas, lentele);
+  } catch (e) {
+    kas = [`(nepavyko nuskaityti: ${e.code || e.message})`];
+  }
+  const klaida = new Error(
+    `FIXTURE_LOCK_TIMEOUT ${lentele} (${testoFailas()}): fiktūros DDL negavo užrakto per ` +
+      `${FIKTURU_LOCK_RIBA}. Užraktą laiko: ${kas.length ? kas.join("; ") : "(niekas nerastas)"}`
+  );
+  klaida.code = "FIXTURE_LOCK_TIMEOUT";
+  klaida.blokuotojai = kas;
+  klaida.cause = priezastis;
+  return klaida;
+}
+
+/**
+ * FIKTŪRŲ DDL SU RIBA IR DIAGNOSTIKA.
+ *
+ * ⚠️ ATSKIRAS KLIENTAS, NE `pool.query()`. `SET LOCAL` galioja transakcijai, tad
+ * sakiniai privalo eiti per TĄ PATĮ klientą; `pool.query()` po kiekvieno sakinio
+ * klientą grąžina, ir riba dingtų dar prieš DDL.
+ *
+ * @param {import("pg").Pool} pool
+ * @param {string} lentele  lentelė, ant kurios imamas užraktas — diagnostikai
+ * @param {string|string[]} sakiniai
+ */
+async function fikturosDdl(pool, lentele, sakiniai) {
+  const eile = Array.isArray(sakiniai) ? sakiniai : [sakiniai];
+  const klientas = await pool.connect();
+  try {
+    await klientas.query("BEGIN");
+    await klientas.query(`SET LOCAL lock_timeout = '${FIKTURU_LOCK_RIBA}'`);
+    try {
+      for (const s of eile) await klientas.query(s);
+      await klientas.query("COMMIT");
+    } catch (err) {
+      await klientas.query("ROLLBACK").catch(() => {});
+      if (!err || err.code !== "55P03") throw err;
+
+      throw await lockTimeoutKlaida(klientas, lentele, err);
+    }
+  } finally {
+    klientas.release();
+  }
+}
+
 /** D7 diagnostikai: klaidos, kurias sukėlė pats valymas (jos NĖRA gedimas). */
 function poolKlaidos(pool) {
   const b = stebimi.get(pool);
@@ -411,4 +516,15 @@ function poolasTestui(t, { dsn, vardas = "darbinis", Pool } = {}) {
   return { pool, kruva };
 }
 
-module.exports = { sukurtiResursuKruva, vienaKarta, poolasTestui, stebetiPoola, uzdarytiPoola, poolKlaidos };
+module.exports = {
+  sukurtiResursuKruva,
+  vienaKarta,
+  poolasTestui,
+  stebetiPoola,
+  uzdarytiPoola,
+  poolKlaidos,
+  fikturosDdl,
+  kasLaikoUzrakta,
+  lockTimeoutKlaida,
+  FIKTURU_LOCK_RIBA,
+};

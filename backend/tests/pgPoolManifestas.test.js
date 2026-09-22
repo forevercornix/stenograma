@@ -127,3 +127,97 @@ test("#380 SARGAS: kiekviena išimtis turi priežastį ir tebegalioja", () => {
     );
   }
 });
+
+/* ══════════════════ D8 — FIKTŪRŲ DDL PER AUTORITETĄ (#380) ══════════════════ */
+
+const DDL = /\b(DROP\s+INDEX|CREATE\s+(UNIQUE\s+)?INDEX|ALTER\s+TABLE|TRUNCATE|LOCK\s+TABLE)\b/i;
+
+/**
+ * ⚠️ IŠIMTYS SU PRIEŽASTIMI, KAIP IR POOL'Ų PUSĖJE.
+ */
+const DDL_ISIMTYS = Object.freeze([
+  {
+    failas: "isipareigojimoTvora.integration.test.js",
+    priezastis:
+      "du `ALTER TABLE ... RENAME` čia TURI savo ribą — `ribotas()` plius " +
+      "`pg_terminate_backend` (#351 8b); perdavus juos `fikturosDdl()`, dingtų būtent tas " +
+      "sargas, kurį testas įrodo. Trečias radinys yra ASERCIJOS PRANEŠIMO tekstas, ne " +
+      "sakinys — skaitiklis teksto nuo kodo neskiria, ir to nebandau apeiti euristika.",
+    kiek: 3,
+  },
+  {
+    failas: "migrations.integration.test.js",
+    priezastis:
+      "`CREATE UNIQUE INDEX CONCURRENTLY` transakcijos bloke krenta su `25001`, o " +
+      "`fikturosDdl()` vynioja į `BEGIN`/`COMMIT`, kad `SET LOCAL` galiotų. Riba ten ir " +
+      "nereikalinga: `CONCURRENTLY` sąmoningai neima `ACCESS EXCLUSIVE`.",
+    kiek: 1,
+  },
+]);
+
+/**
+ * Suskaičiuoja DDL sakinius, kurie NEEINA per autoritetą.
+ *
+ * ⚠️ KONTEKSTAS — ŠEŠIOS EILUTĖS AUKŠČIAU. Daugiaeilis `fikturosDdl(\n pool,\n "t",\n
+ * `SQL`)` kvietimas SQL eilutėje paties `fikturosDdl` neturi, tad vien eilutės tikrinimas
+ * duotų netikrą pažeidimą kiekvienam teisingai migruotam sakiniui.
+ */
+function neapgaubtasDdl(turinys) {
+  const eil = turinys.split("\n");
+  let n = 0;
+  for (let i = 0; i < eil.length; i += 1) {
+    const s = eil[i].trim();
+    if (s.startsWith("*") || s.startsWith("//") || !DDL.test(eil[i])) continue;
+    const ctx = eil.slice(Math.max(0, i - 6), i + 1).join("\n");
+    if (ctx.includes("fikturosDdl(") || ctx.includes("await pg(") || ctx.includes("DDL_BE_TRANSAKCIJOS")) continue;
+    n += 1;
+  }
+  return n;
+}
+
+test("#380 D8: fiktūrų DDL eina per autoritetą, ne tiesiai į `pool.query()`", () => {
+  const pazeidimai = [];
+
+  for (const { vardas, kelias } of surinktiFailus()) {
+    const kiek = neapgaubtasDdl(skaityti(kelias));
+    if (kiek === 0) continue;
+
+    const isimtis = DDL_ISIMTYS.find((i) => i.failas === vardas);
+    if (isimtis && kiek === isimtis.kiek) continue;
+
+    pazeidimai.push(`${kelias}: ${kiek} DDL be \`fikturosDdl()\`` + (isimtis ? ` (išimtis leidžia ${isimtis.kiek})` : ""));
+  }
+
+  assert.deepEqual(
+    pazeidimai,
+    [],
+    "`DROP`/`CREATE INDEX`, `ALTER`, `TRUNCATE`, `LOCK` privalo eiti per `fikturosDdl()`: " +
+      "be `lock_timeout` jie laukia už kiekvienos atviros transakcijos NERIBOTAI (#380 D8)"
+  );
+});
+
+test("#380 D8 SAVIPATIKRA: įterptas DDL be helper'io RANDAMAS, o per helper'į — ne", () => {
+  /**
+   * ⚠️ TA PATI TAISYKLĖ KAIP POOL'Ų SARGE: skaitiklis, niekada neradęs pažeidimo, yra
+   * nepatikrintas. Tikrinamos ABI kryptys, įskaitant daugiaeilį kvietimą — būtent jis
+   * pirmoje redakcijoje būtų davęs netikrą pažeidimą.
+   */
+  const perHelperi = 'await fikturosDdl(pool, "t", `DROP INDEX x`);';
+  const daugiaeilis = 'await fikturosDdl(\n  pool,\n  "t",\n  `CREATE UNIQUE INDEX i ON t (a)`\n);';
+  const pazeistas = 'await pool.query(`DROP INDEX x`);';
+
+  assert.equal(neapgaubtasDdl(perHelperi), 0, "vienaeilis per helper'į NĖRA pažeidimas");
+  assert.equal(neapgaubtasDdl(daugiaeilis), 0, "daugiaeilis per helper'į NĖRA pažeidimas");
+  assert.equal(neapgaubtasDdl(pazeistas), 1, "DDL be helper'io PRIVALO būti randamas");
+});
+
+test("#380 D8: kiekviena DDL išimtis turi priežastį ir tebegalioja", () => {
+  for (const i of DDL_ISIMTYS) {
+    assert.ok(i.priezastis && i.priezastis.length > 40, `${i.failas}: išimtis be priežasties`);
+    assert.equal(
+      neapgaubtasDdl(skaityti(i.failas)),
+      i.kiek,
+      `${i.failas}: išimtis nebeatitinka tikrovės`
+    );
+  }
+});

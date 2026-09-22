@@ -19,6 +19,7 @@ const {
 } = require("../utils/auditStore");
 const { META_LAUKAI } = require("../utils/auditStore/fields");
 const { EVENT_PATTERN } = require("../utils/auditEvents");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * AUDITO PERSISTENCIJOS GARANTIJOS (#155, 7.4b / #211).
@@ -1013,7 +1014,7 @@ test("STARTAS: REPLICA-ONLY trigeris NEPRALEIDŽIAMAS", { skip: SKIP }, async ()
     const store = createPostgresStore(pool, { hashKeyId: HASH_KEY_ID });
     const irasas = await store.append(eilute({ details: "originalas" }));
 
-    await pool.query(`ALTER TABLE audit_log ENABLE REPLICA TRIGGER ${REQUIRED_AUDIT_TRIGGER}`);
+    await fikturosDdl(pool, "audit_log", `ALTER TABLE audit_log ENABLE REPLICA TRIGGER ${REQUIRED_AUDIT_TRIGGER}`);
 
     /** PRIELAIDA: būtent dėl to režimas nepriimtinas - `UPDATE` nebestabdomas. */
     await pool.query("UPDATE audit_log SET result = 'failure' WHERE id = $1", [irasas.id]);
@@ -1051,7 +1052,7 @@ test("STARTAS: trūkstamas `seq` unikalumas NUTRAUKIA startą", { skip: SKIP }, 
   const { url, pool, resursai } = await paruostiDb("audit_be_seq_unique");
 
   try {
-    await pool.query(`ALTER TABLE audit_log DROP CONSTRAINT ${REQUIRED_AUDIT_UNIQUE_CONSTRAINTS[0]}`);
+    await fikturosDdl(pool, "audit_log", `ALTER TABLE audit_log DROP CONSTRAINT ${REQUIRED_AUDIT_UNIQUE_CONSTRAINTS[0]}`);
     await auditStore.shutdown();
 
     await assert.rejects(

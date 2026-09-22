@@ -26,6 +26,7 @@ const { PROGRESS_INVARIANTS } = require("../utils/jobPhase");
 const { OWNER_KIND, normalizeFieldValue } = require("../utils/jobStore/common");
 const { IVESTYS, NELEISTINOS, patchLaukai } = require("./helpers/canonicalTypeFixtures");
 const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
+const { fikturosDdl } = require("./helpers/resourceStack");
 
 /**
  * `postgresStore` INTEGRACINIAI TESTAI (#155, 7.2a).
@@ -182,7 +183,7 @@ test("postgresStore", { skip: skipWithoutPostgres() }, async (t) => {
   });
 
   t.beforeEach(async () => {
-    await pool.query("TRUNCATE jobs CASCADE");
+    await fikturosDdl(pool, "jobs", "TRUNCATE jobs CASCADE");
   });
 
   /* ── Kontraktas ──────────────────────────────────────────────────────── */

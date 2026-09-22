@@ -8,6 +8,7 @@ const crypto = require("node:crypto");
 const { Pool, Client } = require("pg");
 const { rastiIndeksa, kvalifikuotasVardas, kvalifikuotaLentele } = require("./helpers/indeksoTapatybe");
 const { iki } = require("./helpers/migracijuAibe");
+const { fikturosDdl } = require("./helpers/resourceStack");
 const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const {
   skipWithoutPostgres,
@@ -270,7 +271,7 @@ test(
         // Tėvinė schema šias reikšmes PRIIMA - tai ir yra spraga.
         await assert.doesNotReject(() => irasyti("transcription", 1));
         await assert.doesNotReject(() => irasyti("bogus", 2));
-        await pool.query("TRUNCATE jobs CASCADE");
+        await fikturosDdl(pool, "jobs", "TRUNCATE jobs CASCADE");
 
         // Atnaujinimas.
         migrate("up");
@@ -381,7 +382,9 @@ test(
 
       const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
       try {
-        await pool.query(
+        await fikturosDdl(
+          pool,
+          "job_result_attempts",
           "ALTER TABLE job_result_attempts DROP CONSTRAINT job_result_attempts_busena_allowed"
         );
       } finally {
@@ -449,7 +452,7 @@ test(
 
       const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
       try {
-        await pool.query(`ALTER TABLE jobs DROP CONSTRAINT ${NUIMAMAS}`);
+        await fikturosDdl(pool, "jobs", `ALTER TABLE jobs DROP CONSTRAINT ${NUIMAMAS}`);
       } finally {
         await uzdarytiPoola(pool);
       }
@@ -1000,6 +1003,14 @@ test(
     try {
       const { raktas } = await ivestiDublikata(pool);
 
+      /**
+       * ⚠️ IŠIMTIS IŠ D8: `CONCURRENTLY` TRANSAKCIJOS BLOKE NELEIDŽIAMAS (#380).
+       *
+       * `fikturosDdl()` sakinį vynioja į `BEGIN`/`COMMIT`, kad `SET LOCAL lock_timeout`
+       * apskritai galiotų, o `CREATE INDEX CONCURRENTLY` tokiame bloke krenta su `25001`.
+       * Ir riba čia nereikalinga: `CONCURRENTLY` sąmoningai NEIMA `ACCESS EXCLUSIVE` —
+       * būtent tai ir yra jo prasmė, o testas tikrina, kad jis krenta dėl DUBLIKATO.
+       */
       await assert.rejects(
         () =>
           pool.query(
@@ -1261,9 +1272,11 @@ test(
     const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
-      await pool.query(`DROP INDEX ${indeksas}`);
+      await fikturosDdl(pool, "job_result_attempts", `DROP INDEX ${indeksas}`);
       const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
-      await pool.query(
+      await fikturosDdl(
+        pool,
+        lentele,
         `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS} ON ${lentele} (job_id, storage_key)`
       );
 
@@ -1294,9 +1307,11 @@ test(
     const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
-      await pool.query(`DROP INDEX ${indeksas}`);
+      await fikturosDdl(pool, "job_result_attempts", `DROP INDEX ${indeksas}`);
       const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
-      await pool.query(
+      await fikturosDdl(
+        pool,
+        lentele,
         `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS} ON ${lentele} (storage_key, storage_type)`
       );
 
@@ -1333,14 +1348,16 @@ test(
         `CREATE TABLE svetima.job_result_attempts (
            attempt_id uuid, storage_type text, storage_key text)`
       );
-      await pool.query(
+      await fikturosDdl(
+        pool,
+        "svetima",
         `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS}
            ON svetima.job_result_attempts (storage_type, storage_key)`
       );
 
       /** O dabartinėje schemoje jo NEBĖRA. */
       const musu = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
-      await pool.query(`DROP INDEX ${musu}`);
+      await fikturosDdl(pool, "job_result_attempts", `DROP INDEX ${musu}`);
 
       await assert.rejects(
         () => startas(DB_URL),
@@ -1373,9 +1390,11 @@ test(
     const pool = stebetiPoola(new Pool({ connectionString: DB_URL }), { vardas: "pool", dsn: DB_URL });
     try {
       const indeksas = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
-      await pool.query(`DROP INDEX ${indeksas}`);
+      await fikturosDdl(pool, "job_result_attempts", `DROP INDEX ${indeksas}`);
       const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
-      await pool.query(
+      await fikturosDdl(
+        pool,
+        lentele,
         `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS}
            ON ${lentele} (storage_type, storage_key)
            WHERE storage_type <> 'inline'`
@@ -1429,20 +1448,24 @@ test(
         `CREATE TABLE svetima2.job_result_attempts (
            attempt_id uuid, storage_type text, storage_key text)`
       );
-      await pool.query(
+      await fikturosDdl(
+        pool,
+        "svetima2",
         `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS}
            ON svetima2.job_result_attempts (storage_type, storage_key)`
       );
 
       const musu = await kvalifikuotasVardas(pool, VIENO_ADRESO_INDEKSAS);
-      await pool.query(`DROP INDEX ${musu}`);
+      await fikturosDdl(pool, "job_result_attempts", `DROP INDEX ${musu}`);
 
       const rastas = await rastiIndeksa(pool, VIENO_ADRESO_INDEKSAS, "job_result_attempts");
       assert.equal(rastas, null, "svetimos schemos objektas NĖRA mūsų indeksas");
 
       /** Kontrolė: atkūrus savoje schemoje — randamas, su teisinga stulpelių seka. */
       const lentele = await kvalifikuotaLentele(pool, "job_result_attempts");
-      await pool.query(
+      await fikturosDdl(
+        pool,
+        lentele,
         `CREATE UNIQUE INDEX ${VIENO_ADRESO_INDEKSAS} ON ${lentele} (storage_type, storage_key)`
       );
       const vel = await rastiIndeksa(pool, VIENO_ADRESO_INDEKSAS, "job_result_attempts");
