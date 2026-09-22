@@ -187,6 +187,8 @@ test("#380: pool'o IŠSEKIMAS virsta `POOL_EXHAUSTED` su pool'u, failu ir skaiti
     (e) =>
       e.code === "POOL_EXHAUSTED" &&
       /POOL_EXHAUSTED išsekęs/.test(e.message) &&
+      /timeout exceeded when trying to connect/.test(e.message) &&
+      /per 5000 ms/.test(e.message) &&
       /max=10/.test(e.message) &&
       /paimta=9/.test(e.message),
     "diagnostika privalo įvardyti pool'ą, ribą ir skaitiklius"
@@ -205,6 +207,13 @@ test("#380 KONTROLĖ: kvietėjo nurodyta checkout riba NEPERRAŠOMA", async () =
   const { stebetiPoola } = require("./helpers/resourceStack");
   stebetiPoola(pool, { vardas: "savas" });
   assert.equal(pool.options.connectionTimeoutMillis, 250);
+
+  /** ⚠️ IR PRANEŠIMAS PRIVALO SKELBTI KVIETĖJO RIBĄ, ne mūsų numatytąją. */
+  pool.connectKlaida = new Error("timeout exceeded when trying to connect");
+  await assert.rejects(
+    () => pool.connect(),
+    (e) => /per 250 ms/.test(e.message) && !/per 5000 ms/.test(e.message)
+  );
 });
 
 test("#380 KONTROLĖ: kita `connect()` klaida NEVIRSTA `POOL_EXHAUSTED`", async () => {

@@ -158,10 +158,21 @@ function stebetiPoola(pool, { vardas = "pool", dsn } = {}) {
     typeof pool.connect === "function" ? pool.connect.bind(pool) : null;
   const paversti = (err) => {
     if (!err || !PG_CHECKOUT_TIMEOUT.test(err.message || "")) return err;
+    /**
+     * ⚠️ RIBA IMAMA IŠ POOL'O, NE IŠ KONSTANTOS. Kvietėjas gali būti nurodęs savą
+     * (`auditPersistence` „išsekęs pool'as" testas naudoja 300 ms), ir pranešimas,
+     * skelbiantis mūsų numatytąją, meluotų apie tai, ką ką tik išmatavo.
+     *
+     * ⚠️ ORIGINALUS `pg` TEKSTAS IŠSAUGOMAS. Jis yra vienintelis dalykas, kurį atpažįsta
+     * jau esantys tvirtinimai ir operatoriaus atmintis; nauja informacija PRIDEDAMA,
+     * o ne keičia jį.
+     */
+    const riba = (pool.options && pool.options.connectionTimeoutMillis) || CHECKOUT_RIBA_MS;
     const naujas = new Error(
-      `POOL_EXHAUSTED ${vardas} (${testoFailas()}): per ${CHECKOUT_RIBA_MS} ms negauta laisvo ` +
-        `kliento (max=${pool.options && pool.options.max}, paimta=${pool.totalCount - pool.idleCount}, ` +
-        `laukia=${pool.waitingCount}). Kažkas paima klientus ir nepadaro \`release()\`.`
+      `POOL_EXHAUSTED ${vardas} (${testoFailas()}): ${err.message} — per ${riba} ms negauta ` +
+        `laisvo kliento (max=${pool.options && pool.options.max}, ` +
+        `paimta=${pool.totalCount - pool.idleCount}, laukia=${pool.waitingCount}). ` +
+        "Kažkas paima klientus ir nepadaro `release()`."
     );
     naujas.code = "POOL_EXHAUSTED";
     naujas.cause = err;
