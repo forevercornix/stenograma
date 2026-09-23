@@ -26,4 +26,4 @@ tokenizers==0.23.2
 av==18.1.0
 onnxruntime==1.28.0
 # Netiesioginės, bet svarbios suderinamumui:
-tqdm==4.70.0
+tqdm==4.70.1
