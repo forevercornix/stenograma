@@ -405,6 +405,8 @@ const functional = [
   /** ⚠️ `functional`: skaito `ci.yml` ir `package.json` TEKSTĄ, DB nereikia (#382 D2). */
   "vykdymoPlanas",
   "tapLiudytojas",
+  /** ⚠️ `functional`: struktūriškai parsina `ci.yml` TEKSTĄ, servisų nekelia (#405 D). */
+  "servisuManifestas",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**
