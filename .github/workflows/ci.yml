@@ -533,7 +533,7 @@ jobs:
     timeout-minutes: 10
     services:
       pg:
-        image: ${{ env.ZONDO_PG_ATVAIZDAS }}
+        image: postgres:16-alpine
         env:
           POSTGRES_PASSWORD: postgres
         ports:
