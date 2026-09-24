@@ -132,6 +132,36 @@ jobs:
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:privacy -- --tap-dir=/tmp/privacy-tap
+      - name: SAUSAS PALEIDIMAS privacy (#402 §0) — NEMERGINTI
+        if: always()
+        run: |
+          set +e
+          echo "=== SAUSAS privacy ==="
+          node scripts/verify-postgres-suite-ran.mjs /tmp/privacy-tap privacy __NIEKO_NEATITINKA__ 2>&1 | sed "s/^/DRY privacy /"
+          echo "DRY privacy exit=$?"
+          node - <<'PYEOF' 2>&1 | sed "s/^/INV privacy /"
+          const fs=require("fs"),path=require("path");
+          const {suites}=require("./tests/suites.js");
+          const dir="/tmp/privacy-tap";
+          for(const t of suites["privacy"]){
+            const f=path.join(dir,t+".tap");
+            if(!fs.existsSync(f)){console.log(t+" NERA_TAP");continue;}
+            const s=fs.readFileSync(f,"utf8").split("\n");
+            let ok=0,sk=0,sky=[];
+            for(let i=0;i<s.length;i++){
+              const l=s[i];
+              if(!/^\s*ok \d+ - /.test(l)) continue;
+              const y=[];let j=i+1;
+              if(/^\s*---\s*$/.test(s[j]||"")){j++;while(j<s.length&&!/^\s*\.\.\.\s*$/.test(s[j])){y.push(s[j]);j++;}}
+              if(/^\s*type:\s*'suite'\s*$/m.test(y.join("\n"))) continue;
+              if(/#\s*SKIP/i.test(l)){sk++;const m=/#\s*SKIP\s*(.*)$/i.exec(l);if(m&&sky.length<2)sky.push(m[1].slice(0,60));continue;}
+              ok++;
+            }
+            console.log(t+" ok="+ok+" skip="+sk+(sk?" | "+sky.join(" ; "):""));
+          }
+          PYEOF
+          exit 0
+
 
       - name: Saugumo regresijos testai
         # ⚠️ `--tap-dir` IŠSAUGO PER-FAILO TAP (#382 D2). Riba nuo jo NEPRIKLAUSO:
@@ -146,6 +176,36 @@ jobs:
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:security -- --tap-dir=/tmp/security-tap
+      - name: SAUSAS PALEIDIMAS security (#402 §0) — NEMERGINTI
+        if: always()
+        run: |
+          set +e
+          echo "=== SAUSAS security ==="
+          node scripts/verify-postgres-suite-ran.mjs /tmp/security-tap security __NIEKO_NEATITINKA__ 2>&1 | sed "s/^/DRY security /"
+          echo "DRY security exit=$?"
+          node - <<'PYEOF' 2>&1 | sed "s/^/INV security /"
+          const fs=require("fs"),path=require("path");
+          const {suites}=require("./tests/suites.js");
+          const dir="/tmp/security-tap";
+          for(const t of suites["security"]){
+            const f=path.join(dir,t+".tap");
+            if(!fs.existsSync(f)){console.log(t+" NERA_TAP");continue;}
+            const s=fs.readFileSync(f,"utf8").split("\n");
+            let ok=0,sk=0,sky=[];
+            for(let i=0;i<s.length;i++){
+              const l=s[i];
+              if(!/^\s*ok \d+ - /.test(l)) continue;
+              const y=[];let j=i+1;
+              if(/^\s*---\s*$/.test(s[j]||"")){j++;while(j<s.length&&!/^\s*\.\.\.\s*$/.test(s[j])){y.push(s[j]);j++;}}
+              if(/^\s*type:\s*'suite'\s*$/m.test(y.join("\n"))) continue;
+              if(/#\s*SKIP/i.test(l)){sk++;const m=/#\s*SKIP\s*(.*)$/i.exec(l);if(m&&sky.length<2)sky.push(m[1].slice(0,60));continue;}
+              ok++;
+            }
+            console.log(t+" ok="+ok+" skip="+sk+(sk?" | "+sky.join(" ; "):""));
+          }
+          PYEOF
+          exit 0
+
 
       - name: Funkciniai testai
         env:
@@ -167,6 +227,36 @@ jobs:
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:functional -- --tap-dir=/tmp/functional-tap
+      - name: SAUSAS PALEIDIMAS functional (#402 §0) — NEMERGINTI
+        if: always()
+        run: |
+          set +e
+          echo "=== SAUSAS functional ==="
+          node scripts/verify-postgres-suite-ran.mjs /tmp/functional-tap functional __NIEKO_NEATITINKA__ 2>&1 | sed "s/^/DRY functional /"
+          echo "DRY functional exit=$?"
+          node - <<'PYEOF' 2>&1 | sed "s/^/INV functional /"
+          const fs=require("fs"),path=require("path");
+          const {suites}=require("./tests/suites.js");
+          const dir="/tmp/functional-tap";
+          for(const t of suites["functional"]){
+            const f=path.join(dir,t+".tap");
+            if(!fs.existsSync(f)){console.log(t+" NERA_TAP");continue;}
+            const s=fs.readFileSync(f,"utf8").split("\n");
+            let ok=0,sk=0,sky=[];
+            for(let i=0;i<s.length;i++){
+              const l=s[i];
+              if(!/^\s*ok \d+ - /.test(l)) continue;
+              const y=[];let j=i+1;
+              if(/^\s*---\s*$/.test(s[j]||"")){j++;while(j<s.length&&!/^\s*\.\.\.\s*$/.test(s[j])){y.push(s[j]);j++;}}
+              if(/^\s*type:\s*'suite'\s*$/m.test(y.join("\n"))) continue;
+              if(/#\s*SKIP/i.test(l)){sk++;const m=/#\s*SKIP\s*(.*)$/i.exec(l);if(m&&sky.length<2)sky.push(m[1].slice(0,60));continue;}
+              ok++;
+            }
+            console.log(t+" ok="+ok+" skip="+sk+(sk?" | "+sky.join(" ; "):""));
+          }
+          PYEOF
+          exit 0
+
 
       # ATSKIRAS žingsnis TIK realaus Redis/BullMQ integraciniams testams
       # (tests/queueRecovery.integration.test.js - restart/stalled recovery;
@@ -196,6 +286,36 @@ jobs:
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:redis -- --tap-dir=/tmp/redis-tap
+      - name: SAUSAS PALEIDIMAS redis (#402 §0) — NEMERGINTI
+        if: always()
+        run: |
+          set +e
+          echo "=== SAUSAS redis ==="
+          node scripts/verify-postgres-suite-ran.mjs /tmp/redis-tap redis __NIEKO_NEATITINKA__ 2>&1 | sed "s/^/DRY redis /"
+          echo "DRY redis exit=$?"
+          node - <<'PYEOF' 2>&1 | sed "s/^/INV redis /"
+          const fs=require("fs"),path=require("path");
+          const {suites}=require("./tests/suites.js");
+          const dir="/tmp/redis-tap";
+          for(const t of suites["redis"]){
+            const f=path.join(dir,t+".tap");
+            if(!fs.existsSync(f)){console.log(t+" NERA_TAP");continue;}
+            const s=fs.readFileSync(f,"utf8").split("\n");
+            let ok=0,sk=0,sky=[];
+            for(let i=0;i<s.length;i++){
+              const l=s[i];
+              if(!/^\s*ok \d+ - /.test(l)) continue;
+              const y=[];let j=i+1;
+              if(/^\s*---\s*$/.test(s[j]||"")){j++;while(j<s.length&&!/^\s*\.\.\.\s*$/.test(s[j])){y.push(s[j]);j++;}}
+              if(/^\s*type:\s*'suite'\s*$/m.test(y.join("\n"))) continue;
+              if(/#\s*SKIP/i.test(l)){sk++;const m=/#\s*SKIP\s*(.*)$/i.exec(l);if(m&&sky.length<2)sky.push(m[1].slice(0,60));continue;}
+              ok++;
+            }
+            console.log(t+" ok="+ok+" skip="+sk+(sk?" | "+sky.join(" ; "):""));
+          }
+          PYEOF
+          exit 0
+
 
       # ⚠️ PostgreSQL KLIENTAS DIEGIAMAS ATSKIRAI (#155, 7.6a / #248).
       #
