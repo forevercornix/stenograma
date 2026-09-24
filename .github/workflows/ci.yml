@@ -316,6 +316,154 @@ jobs:
         # uždarymas.
         run: node scripts/verify-postgres-suite-ran.mjs /tmp/pg-tap
 
+      # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
+      # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas
+      # kažko neištrina.
+      - name: Švara po testų (jokių likusių artefaktų)
+        run: npm run test:clean
+
+      # ⚠️ 10 SĄLYGA (#155): REALUS fail-closed startas.
+      #
+      # Iki barjero atidarymo ši savybė buvo įrodyta TIK unit lygmeniu, per
+      # `_initializePostgresForTests` — t. y. tikrinta funkcija, kurios
+      # produkcinis startas niekada nekviečia tiesiogiai. Tarp jos ir tikro
+      # `node server.js` guli visa parinkimo politika, kurią BŪTENT šis PR ir
+      # pakeitė. Todėl čia paleidžiamas tikras procesas per tikrą kelią.
+      #
+      # ⚠️ EXIT KODO NEPAKANKA — IŠMATUOTA. Su UŽDARYTU barjeru tas pats
+      # startas irgi krenta kodu 1, tik dėl visiškai kitos priežasties
+      # („JOB_STORE_BACKEND=postgres dar neleidžiamas"). Patikra, tikrinanti
+      # vien kodą, būtų žalia abiem atvejais ir nematuotų nieko — barjeras vėl
+      # taptų netiesioginiu liudytoju. Todėl tikrinama PRIEŽASTIS: procesas
+      # privalo būti realiai BANDĘS prisijungti ir kritęs dėl nepasiekiamumo.
+      #
+      # ⚠️ IR TREČIA ASERCIJA — kad nenusileido į atmintį. Kritimas ir
+      # fallback abu baigiasi „serveris neveikia su PostgreSQL"; skiriasi tuo,
+      # ar tuo metu buvo priiminėjami job'ai į saugyklą, kuri nėra autoritetinga.
+      # Būtent tas skirtumas yra split-brain.
+      - name: Fail-closed startas - ATIDARYTAS barjeras + neprieinama DB privalo nutraukti startą (#155, 10 salyga)
+        env:
+          TRANSCRIPTION_PROVIDER: mock
+          LLM_PROVIDER: mock
+          NODE_ENV: test
+          PORT: 3002
+          JOB_STORE_BACKEND: postgres
+          # ⚠️ UŽDARAS PRIEVADAS, NE `postgres` servisas (5432). Nepasiekiamumas
+          # privalo būti tikras ir nepriklausyti nuo serviso sveikatos: jei
+          # servisas kada nors nustotų kilti, patikra imtų praeiti dėl gedimo,
+          # o ne dėl tikrinamos savybės.
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:59999/postgres
+        run: |
+          set +e
+          timeout 60 node server.js > "$RUNNER_TEMP/fail-closed.log" 2>&1
+          KODAS=$?
+          set -e
+          cat "$RUNNER_TEMP/fail-closed.log"
+
+          if [ "$KODAS" -eq 0 ]; then
+            echo "❌ Procesas NENUTRAUKĖ starto su neprieinama DB (exit 0)."
+            exit 1
+          fi
+
+          if ! grep -q "PostgreSQL neprieinamas" "$RUNNER_TEMP/fail-closed.log"; then
+            echo "❌ Procesas krito, bet NE dėl nepasiekiamos DB."
+            echo "   Tai reiškia, kad realus prisijungimo kelias nebuvo pasiektas,"
+            echo "   ir ši patikra nematuoja fail-closed elgsenos."
+            exit 1
+          fi
+
+          if grep -q "Job store backend'as" "$RUNNER_TEMP/fail-closed.log"; then
+            echo "❌ Job store BUVO inicijuotas - startas nusileido į kitą backend'ą."
+            exit 1
+          fi
+
+          echo "✅ Startas nutrauktas dėl nepasiekiamos DB; į atmintį nenusileista."
+
+      - name: Smoke test - paleisti serverį ir patikrinti /api/health
+        env:
+          TRANSCRIPTION_PROVIDER: mock
+          LLM_PROVIDER: mock
+          NODE_ENV: test
+          PORT: 3001
+        run: |
+          node server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:3001/api/ready; then
+              echo "Backend atsakė sėkmingai"
+              kill $SERVER_PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend neatsakė per 10s"
+          kill $SERVER_PID
+          exit 1
+
+  # ⚠️ ATSKIRAS JOB'AS S3 KELIUI (#405, D - SIGNALŲ ATSKYRIMAS).
+  #
+  # Iki #405 MinIO žingsnis gyveno `backend` job'e, tad nepasiekiamas atvaizdas
+  # paraudonindavo VISĄ backend šaką. Signalas tada reiškė dvi visiškai
+  # skirtingas būsenas - "mūsų kodas sulūžo" ir "trečios šalies registras
+  # neatsako" - ir skirti jas buvo galima tik skaitant logą.
+  #
+  # Atskiras job'as tą sumaišymą pašalina: `backend` lieka skaitomas net tada,
+  # kai S3 kelias nepakyla, o S3 gedimas turi savo vardą.
+  #
+  # ⚠️ JOKIO `continue-on-error`. Atskyrimas reiškia ATSKIRĄ signalą, ne
+  # SILPNESNĮ: šis job'as yra `required-ci` priklausomybė, ir jo kritimas
+  # uždaro vartus lygiai taip pat, kaip anksčiau uždarydavo `backend`.
+  backend-s3:
+    runs-on: ubuntu-latest
+    # Be ribos pakibęs runner'is laikytų eilę užimtą iki 6 val. numatytojo limito (#16).
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+
+    # ⚠️ `postgres:` APIBRĖŽIMAS ČIA DUBLIUOJASI SU `backend` JOB'U, IR TAI
+    # LEISTA SĄMONINGAI (#405, D).
+    #
+    # `postgresS3` rinkiniui reikia ABIEJŲ servisų, o `services:` yra job'o
+    # lygio raktas: composite action jo pridėti negali, ir `env` kontekstas
+    # `services.<id>.image` reikšmėje NEPRIEINAMAS - išmatuota zondu
+    # (workflow atmetamas prieš startą, 0 job'ų; kontrolė su kietai įrašytu
+    # atvaizdu - 12 job'ų).
+    #
+    # Reikalaujama savybė yra ne "vienas autoritetas", o "kopijos negali
+    # TYLIAI išsiskirti". Ją laiko sargas `tests/servisuManifestas.test.js`:
+    # jis struktūriškai išveda VISUS `services.<id>` apibrėžimus iš `ci.yml`
+    # ir reikalauja, kad tas pats servisas visur būtų apibrėžtas VIENODAI.
+    # Pakeitus vieną kopiją, sargas krenta ir įvardija abu job'us.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Deterministinis diegimas (npm ci)
+        run: npm ci
+
       # ⚠️ MinIO PALEIDŽIAMAS ŽINGSNIU, NE `services:` BLOKU (#157, PR-2).
       #
       # GitHub servisų konteineriai komandos perduoti NELEIDŽIA, o `minio/minio`
@@ -438,90 +586,6 @@ jobs:
         # rinkinys būtų vienintelis, kurio praleidimas liktų nepastebėtas — t. y.
         # tiksliai ta spraga, dėl kurios sargai apskritai egzistuoja.
         run: node scripts/verify-postgres-suite-ran.mjs /tmp/pgs3-tap postgresS3 DATABASE_URL
-
-      # Testas, kuris po savęs nesutvarko, ilgainiui slepia tikrus nutekėjimus:
-      # kai /tmp pilnas senų artefaktų, niekas nebemato, kad produkcinis kodas
-      # kažko neištrina.
-      - name: Švara po testų (jokių likusių artefaktų)
-        run: npm run test:clean
-
-      # ⚠️ 10 SĄLYGA (#155): REALUS fail-closed startas.
-      #
-      # Iki barjero atidarymo ši savybė buvo įrodyta TIK unit lygmeniu, per
-      # `_initializePostgresForTests` — t. y. tikrinta funkcija, kurios
-      # produkcinis startas niekada nekviečia tiesiogiai. Tarp jos ir tikro
-      # `node server.js` guli visa parinkimo politika, kurią BŪTENT šis PR ir
-      # pakeitė. Todėl čia paleidžiamas tikras procesas per tikrą kelią.
-      #
-      # ⚠️ EXIT KODO NEPAKANKA — IŠMATUOTA. Su UŽDARYTU barjeru tas pats
-      # startas irgi krenta kodu 1, tik dėl visiškai kitos priežasties
-      # („JOB_STORE_BACKEND=postgres dar neleidžiamas"). Patikra, tikrinanti
-      # vien kodą, būtų žalia abiem atvejais ir nematuotų nieko — barjeras vėl
-      # taptų netiesioginiu liudytoju. Todėl tikrinama PRIEŽASTIS: procesas
-      # privalo būti realiai BANDĘS prisijungti ir kritęs dėl nepasiekiamumo.
-      #
-      # ⚠️ IR TREČIA ASERCIJA — kad nenusileido į atmintį. Kritimas ir
-      # fallback abu baigiasi „serveris neveikia su PostgreSQL"; skiriasi tuo,
-      # ar tuo metu buvo priiminėjami job'ai į saugyklą, kuri nėra autoritetinga.
-      # Būtent tas skirtumas yra split-brain.
-      - name: Fail-closed startas - ATIDARYTAS barjeras + neprieinama DB privalo nutraukti startą (#155, 10 salyga)
-        env:
-          TRANSCRIPTION_PROVIDER: mock
-          LLM_PROVIDER: mock
-          NODE_ENV: test
-          PORT: 3002
-          JOB_STORE_BACKEND: postgres
-          # ⚠️ UŽDARAS PRIEVADAS, NE `postgres` servisas (5432). Nepasiekiamumas
-          # privalo būti tikras ir nepriklausyti nuo serviso sveikatos: jei
-          # servisas kada nors nustotų kilti, patikra imtų praeiti dėl gedimo,
-          # o ne dėl tikrinamos savybės.
-          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:59999/postgres
-        run: |
-          set +e
-          timeout 60 node server.js > "$RUNNER_TEMP/fail-closed.log" 2>&1
-          KODAS=$?
-          set -e
-          cat "$RUNNER_TEMP/fail-closed.log"
-
-          if [ "$KODAS" -eq 0 ]; then
-            echo "❌ Procesas NENUTRAUKĖ starto su neprieinama DB (exit 0)."
-            exit 1
-          fi
-
-          if ! grep -q "PostgreSQL neprieinamas" "$RUNNER_TEMP/fail-closed.log"; then
-            echo "❌ Procesas krito, bet NE dėl nepasiekiamos DB."
-            echo "   Tai reiškia, kad realus prisijungimo kelias nebuvo pasiektas,"
-            echo "   ir ši patikra nematuoja fail-closed elgsenos."
-            exit 1
-          fi
-
-          if grep -q "Job store backend'as" "$RUNNER_TEMP/fail-closed.log"; then
-            echo "❌ Job store BUVO inicijuotas - startas nusileido į kitą backend'ą."
-            exit 1
-          fi
-
-          echo "✅ Startas nutrauktas dėl nepasiekiamos DB; į atmintį nenusileista."
-
-      - name: Smoke test - paleisti serverį ir patikrinti /api/health
-        env:
-          TRANSCRIPTION_PROVIDER: mock
-          LLM_PROVIDER: mock
-          NODE_ENV: test
-          PORT: 3001
-        run: |
-          node server.js &
-          SERVER_PID=$!
-          for i in $(seq 1 10); do
-            if curl -sf http://localhost:3001/api/ready; then
-              echo "Backend atsakė sėkmingai"
-              kill $SERVER_PID
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Backend neatsakė per 10s"
-          kill $SERVER_PID
-          exit 1
 
   frontend:
     runs-on: ubuntu-latest
@@ -1110,6 +1174,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - backend
+      - backend-s3
       - frontend
       - e2e
       - docker
