@@ -124,28 +124,52 @@ jobs:
         # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
         # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
-        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
-        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Nuo #402 jį SKAITO
+        # `verify-postgres-suite-ran.mjs` žingsnis iškart po šito — be jo tyliai nutilęs
+        # failas (importo klaida, visi testai praleisti) praeitų žalias.
         #
         # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:privacy -- --tap-dir=/tmp/privacy-tap
+      - name: Privatumo testai TIKRAI vykdyti (ne praleisti)
+        # ⚠️ ATSKIRAS ŽINGSNIS, ne dalis ankstesnio (#402 D1; #231 forma).
+        #
+        # Iki #402 šie keturi rinkiniai TAP rašė, o neskaitė jo niekas: 175 failai
+        # turėjo įrodymo VIETĄ be vartotojo. Tyliai nutilęs failas — importo klaida,
+        # visi testai praleisti — tokį job'ą praeidavo žalias.
+        #
+        # ⚠️ ŽYMA `-`: šis rinkinys privalomo env NETURI. `DATABASE_URL` čia sulaužytų
+        # tris kontraktinius failus, kurie ne-pg rinkiniuose sąmoningai praleidžia savo
+        # PostgreSQL adapterį (jį tikrina `postgres` rinkinys, `:269`).
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/privacy-tap privacy -
+
 
       - name: Saugumo regresijos testai
         # ⚠️ `--tap-dir` IŠSAUGO PER-FAILO TAP (#382 D2). Riba nuo jo NEPRIKLAUSO:
         # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
         # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
-        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
-        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Nuo #402 jį SKAITO
+        # `verify-postgres-suite-ran.mjs` žingsnis iškart po šito — be jo tyliai nutilęs
+        # failas (importo klaida, visi testai praleisti) praeitų žalias.
         #
         # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:security -- --tap-dir=/tmp/security-tap
+      - name: Saugumo testai TIKRAI vykdyti (ne praleisti)
+        # ⚠️ ATSKIRAS ŽINGSNIS, ne dalis ankstesnio (#402 D1; #231 forma).
+        #
+        # Iki #402 šie keturi rinkiniai TAP rašė, o neskaitė jo niekas: 175 failai
+        # turėjo įrodymo VIETĄ be vartotojo. Tyliai nutilęs failas — importo klaida,
+        # visi testai praleisti — tokį job'ą praeidavo žalias.
+        #
+        # ⚠️ ŽYMA `-`: šis rinkinys privalomo env NETURI. `DATABASE_URL` čia sulaužytų
+        # tris kontraktinius failus, kurie ne-pg rinkiniuose sąmoningai praleidžia savo
+        # PostgreSQL adapterį (jį tikrina `postgres` rinkinys, `:269`).
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/security-tap security -
+
 
       - name: Funkciniai testai
         env:
@@ -159,14 +183,26 @@ jobs:
         # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
         # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
-        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
-        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Nuo #402 jį SKAITO
+        # `verify-postgres-suite-ran.mjs` žingsnis iškart po šito — be jo tyliai nutilęs
+        # failas (importo klaida, visi testai praleisti) praeitų žalias.
         #
         # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:functional -- --tap-dir=/tmp/functional-tap
+      - name: Funkciniai testai TIKRAI vykdyti (ne praleisti)
+        # ⚠️ ATSKIRAS ŽINGSNIS, ne dalis ankstesnio (#402 D1; #231 forma).
+        #
+        # Iki #402 šie keturi rinkiniai TAP rašė, o neskaitė jo niekas: 175 failai
+        # turėjo įrodymo VIETĄ be vartotojo. Tyliai nutilęs failas — importo klaida,
+        # visi testai praleisti — tokį job'ą praeidavo žalias.
+        #
+        # ⚠️ ŽYMA `-`: šis rinkinys privalomo env NETURI. `DATABASE_URL` čia sulaužytų
+        # tris kontraktinius failus, kurie ne-pg rinkiniuose sąmoningai praleidžia savo
+        # PostgreSQL adapterį (jį tikrina `postgres` rinkinys, `:269`).
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/functional-tap functional -
+
 
       # ATSKIRAS žingsnis TIK realaus Redis/BullMQ integraciniams testams
       # (tests/queueRecovery.integration.test.js - restart/stalled recovery;
@@ -188,14 +224,26 @@ jobs:
         # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
         # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
-        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
-        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Nuo #402 jį SKAITO
+        # `verify-postgres-suite-ran.mjs` žingsnis iškart po šito — be jo tyliai nutilęs
+        # failas (importo klaida, visi testai praleisti) praeitų žalias.
         #
         # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
         # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:redis -- --tap-dir=/tmp/redis-tap
+      - name: Redis/BullMQ testai TIKRAI vykdyti (ne praleisti)
+        # ⚠️ ATSKIRAS ŽINGSNIS, ne dalis ankstesnio (#402 D1; #231 forma).
+        #
+        # Iki #402 šie keturi rinkiniai TAP rašė, o neskaitė jo niekas: 175 failai
+        # turėjo įrodymo VIETĄ be vartotojo. Tyliai nutilęs failas — importo klaida,
+        # visi testai praleisti — tokį job'ą praeidavo žalias.
+        #
+        # ⚠️ ŽYMA `-`: šis rinkinys privalomo env NETURI. `DATABASE_URL` čia sulaužytų
+        # tris kontraktinius failus, kurie ne-pg rinkiniuose sąmoningai praleidžia savo
+        # PostgreSQL adapterį (jį tikrina `postgres` rinkinys, `:269`).
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/redis-tap redis -
+
 
       # ⚠️ PostgreSQL KLIENTAS DIEGIAMAS ATSKIRAI (#155, 7.6a / #248).
       #

@@ -46,10 +46,47 @@ const { suites } = require(path.join(here, "..", "tests", "suites.js"));
  */
 const katalogas = process.argv[2];
 const RINKINYS = process.argv[3] || "postgres";
-const PRALEIDIMO_ZYMA = process.argv[4] || "DATABASE_URL";
+
+/**
+ * ⚠️ PRALEIDIMO ŽYMA TURI TREČIĄ BŪSENĄ: „PRIVALOMO ENV NĖRA“ (#402).
+ *
+ * Žyma reiškia ne „ką praleidžia“, o „kurio env trūkumas TYLIAI ištuštintų rinkinį,
+ * todėl praleidimas dėl jo yra GEDIMAS“. Trims pirmiesiems vartotojams tai tiesa
+ * (`REQUIRE_POSTGRES=1`, `MINIO_ENDPOINT`). Keturiems, prijungtiems #402, tokio env
+ * NĖRA: jų praleidimai projektiniai — kontraktiniai failai ne-pg rinkiniuose leidžia
+ * atminties/Redis adapterius, o `redisConcurrency` praleidžia testą būtent TODĖL, kad
+ * Redis yra. Perdavus jiems `DATABASE_URL`, tikrintuvas sulaužytų tris teisėtus failus.
+ *
+ * ⚠️ `-` YRA VIENINTELĖ PRIPAŽINTA „JOKIOS“ FORMA. Bet kokia kita netikėta reikšmė
+ * (`--`, tuščia eilutė, `DATABASE_URl` su mažąja `l`) atmetama, o ne tyliai priimama:
+ * tokia žyma nieko neatitiktų, ir patikra praeitų atrodydama griežta.
+ *
+ * Forma tikrinama, o ne lyginama su sąrašu: env vardas yra SCREAMING_SNAKE, tad
+ * `DATABASE_URl` krenta dėl mažosios raidės, o naujas teisėtas vardas praeina be jokio
+ * registro atnaujinimo.
+ */
+const ZYMOS_FORMA = /^[A-Z][A-Z0-9_]*$/;
+const ZYMA_NEREIKALINGA = "-";
+const zymaPateikta = process.argv.length > 4;
+const zymaTekstas = process.argv[4];
+const PRALEIDIMO_ZYMA = zymaPateikta ? zymaTekstas : "DATABASE_URL";
 
 if (!katalogas) {
-  console.error("Naudojimas: verify-postgres-suite-ran.mjs <tap-katalogas>");
+  console.error(
+    "Naudojimas: verify-postgres-suite-ran.mjs <tap-katalogas> [rinkinys] [praleidimo-žyma]\n" +
+      "  praleidimo-žyma: env kintamojo vardas (SCREAMING_SNAKE) arba `-`, kai rinkinys\n" +
+      "                   privalomo env neturi.\n" +
+      "  Numatytieji: rinkinys=postgres, žyma=DATABASE_URL."
+  );
+  process.exit(2);
+}
+
+if (zymaPateikta && zymaTekstas !== ZYMA_NEREIKALINGA && !ZYMOS_FORMA.test(zymaTekstas)) {
+  console.error(
+    `Netinkama praleidimo žyma "${zymaTekstas}". Leidžiama: env kintamojo vardas ` +
+      "(SCREAMING_SNAKE, pvz. `DATABASE_URL`) arba `-`, kai rinkinys privalomo env neturi.\n" +
+      "Žyma, kuri neatitinka nieko, patikrą praleistų atrodydama griežta — todėl ji atmetama."
+  );
   process.exit(2);
 }
 
@@ -108,7 +145,10 @@ function ivertintiFaila(turinys) {
     if (/^\s*type:\s*'suite'\s*$/m.test(yamlEilutes.join("\n"))) continue;
 
     if (/#\s*SKIP/i.test(eilute)) {
-      if (eilute.includes(PRALEIDIMO_ZYMA)) praleistiDelDb += 1;
+      /** `-`: privalomo env nėra, tad praleidimų priskirti nėra kam. */
+      if (PRALEIDIMO_ZYMA !== ZYMA_NEREIKALINGA && eilute.includes(PRALEIDIMO_ZYMA)) {
+        praleistiDelDb += 1;
+      }
       continue;
     }
 
@@ -182,7 +222,16 @@ if (klaidos.length > 0) {
  * `PRALEIDIMO_ZYMA` irgi įvardijama: be jos „nė vieno praleidimo dėl DB" S3
  * žingsnyje būtų dar vienas teiginys apie ne tą dalyką.
  */
+/**
+ * ⚠️ PRANEŠIMAS SAKO TIESĄ IR TADA, KAI ŽYMOS NĖRA (#402). Su `-` teiginys „nė vieno
+ * praleidimo dėl `-`" būtų dar vienas faktas apie ne tą dalyką — tiksliai #342 klasė.
+ */
+const zymosDalis =
+  PRALEIDIMO_ZYMA === ZYMA_NEREIKALINGA
+    ? "privalomo env šis rinkinys neturi, tad praleidimai nepriskiriami"
+    : `nė vieno praleidimo dėl \`${PRALEIDIMO_ZYMA}\``;
+
 console.log(
   `Rinkinys "${RINKINYS}": visi ${suites[RINKINYS].length} failai realiai įvykdyti ` +
-    `(kiekvienas turi bent vieną nepraleistą \`ok\`, nė vieno praleidimo dėl \`${PRALEIDIMO_ZYMA}\`).`
+    `(kiekvienas turi bent vieną nepraleistą \`ok\`, ${zymosDalis}).`
 );

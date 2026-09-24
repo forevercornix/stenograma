@@ -91,12 +91,40 @@ function ciZingsniai() {
     const runM = /npm run (test:[\w-]+)(.*)$/.exec(eil);
     if (!runM) continue;
 
+    const tapM = /--tap-dir=(\S+)/.exec(runM[2]);
+
     rezultatas.push({
       eilute: i + 1,
       jobas,
       katalogas: zingsnioKatalogas || jobKatalogas,
       skriptas: runM[1],
-      ribotas: /--tap-dir/.test(runM[2]),
+      ribotas: Boolean(tapM),
+      tapKelias: tapM ? tapM[1] : null,
+    });
+  }
+  return rezultatas;
+}
+
+/**
+ * `verify-postgres-suite-ran.mjs <katalogas> [rinkinys] [žyma]` kvietimai iš `ci.yml`.
+ *
+ * ⚠️ IMAMI TIE PATYS ARGUMENTAI, KURIUOS MATO SKRIPTAS. Sargas negali remtis žingsnio
+ * PAVADINIMU ar tvarka: būtent tokia patikra praleistų `functional`, verifikuojamą
+ * pagal `/tmp/security-tap` — žingsnis egzistuoja, vardas gražus, o įrodymas svetimas.
+ */
+function verifyKvietimai() {
+  const eilutes = fs.readFileSync(CI_KELIAS, "utf8").split("\n");
+  const rezultatas = [];
+  for (let i = 0; i < eilutes.length; i += 1) {
+    /** Komentarų eilutės mini skriptą, bet jo nekviečia. */
+    if (/^\s*#/.test(eilutes[i])) continue;
+    const m = /verify-postgres-suite-ran\.mjs\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?/.exec(eilutes[i]);
+    if (!m) continue;
+    rezultatas.push({
+      eilute: i + 1,
+      tapKelias: m[1],
+      rinkinys: m[2] || "postgres",
+      zyma: m[3] === undefined ? "DATABASE_URL" : m[3],
     });
   }
   return rezultatas;
@@ -264,4 +292,120 @@ test("#382 D1 SAVIPATIKRA: grąžinta šaka be ribos RANDAMA", () => {
 
   assert.equal(rasti(svarus), 0, "švarus runner'is NĖRA pažeidimas");
   assert.equal(rasti(pazeistas), 1, "grąžinta `spawnSync` šaka PRIVALO būti randama");
+});
+
+/* ══════════ D2 — 1:1 RYŠYS TARP RINKINIO, TAP IR VARTOTOJO (#402) ══════════ */
+
+/**
+ * ⚠️ TRYS PAŽEIDIMŲ RŪŠYS, IR VIEN „VERIFY EGZISTUOJA" NĖRA NĖ VIENOS ATSAKYMAS.
+ *
+ *   · TRŪKSTAMAS — rinkinys leidžiamas, bet jo TAP niekas neskaito (būtent tai #402
+ *     ir rado: 175 failai turėjo įrodymo vietą be vartotojo);
+ *   · DUBLIUOTAS — du `verify` tam pačiam katalogui arba du katalogai tam pačiam
+ *     rinkiniui: tada neaišku, kuris iš jų yra įrodymas;
+ *   · SVETIMAS — `verify … /tmp/security-tap functional`. Žingsnis yra, vardas gražus,
+ *     o skaitomas KITO paleidimo katalogas. Patikra „ar yra verify žingsnis" tai
+ *     praeitų, ir įrodymas būtų apie ne tą rinkinį (#342 klasė).
+ *
+ * Todėl lyginamos POROS `(rinkinys, tapKelias)`, o ne buvimas.
+ */
+function suporuoti() {
+  const leidimai = isvestiPlana().filter((z) => z.ribotas);
+  const verifai = verifyKvietimai();
+  const pazeidimai = [];
+
+  for (const z of leidimai) {
+    for (const r of z.rinkiniai) {
+      const savi = verifai.filter((v) => v.rinkinys === r);
+
+      if (savi.length === 0) {
+        pazeidimai.push(`TRŪKSTA: rinkinys "${r}" (ci.yml:${z.eilute}) neturi \`verify\` žingsnio`);
+        continue;
+      }
+      if (savi.length > 1) {
+        pazeidimai.push(
+          `DUBLIS: rinkinys "${r}" turi ${savi.length} \`verify\` žingsnius ` +
+            `(ci.yml:${savi.map((v) => v.eilute).join(", ")})`
+        );
+        continue;
+      }
+      if (savi[0].tapKelias !== z.tapKelias) {
+        pazeidimai.push(
+          `SVETIMAS: rinkinys "${r}" rašo į ${z.tapKelias} (ci.yml:${z.eilute}), ` +
+            `o tikrinamas pagal ${savi[0].tapKelias} (ci.yml:${savi[0].eilute})`
+        );
+      }
+    }
+  }
+
+  /** Tas pats klausimas iš kitos pusės: katalogas, kurio niekas nerašo. */
+  const rasomi = new Set(leidimai.map((z) => z.tapKelias));
+  for (const v of verifyKvietimai()) {
+    if (!rasomi.has(v.tapKelias)) {
+      pazeidimai.push(
+        `SVETIMAS: \`verify\` (ci.yml:${v.eilute}) skaito ${v.tapKelias}, kurio nerašo joks žingsnis`
+      );
+    }
+  }
+  return pazeidimai;
+}
+
+test("#402 D2: kiekvienas rinkinys turi TIKSLIAI VIENĄ TAP katalogą ir vieną vartotoją", () => {
+  assert.deepEqual(
+    suporuoti(),
+    [],
+    "kiekvienas CI leidžiamas `suites.js` rinkinys privalo turėti savo `--tap-dir` ir " +
+      "`verify-postgres-suite-ran.mjs`, skaitantį BŪTENT tą katalogą (#402 D2)"
+  );
+});
+
+test("#402 D2 SAVIPATIKRA: trūkstamas, dubliuotas ir SVETIMAS katalogai randami", () => {
+  /**
+   * ⚠️ TAS PATS PALYGINIMAS ANT SINTETINIŲ PLANŲ. Sargas, niekada neradęs pažeidimo,
+   * yra nepatikrintas; čia mutacija vykdoma kiekviename paleidime, ir visoms TRIMS
+   * rūšims atskirai — antraip „randa pažeidimą" galėtų reikšti tik vieną iš jų.
+   */
+  const poruoti = (leidimai, verifai) => {
+    const p = [];
+    for (const z of leidimai) {
+      const savi = verifai.filter((v) => v.rinkinys === z.rinkinys);
+      if (savi.length === 0) p.push("TRŪKSTA " + z.rinkinys);
+      else if (savi.length > 1) p.push("DUBLIS " + z.rinkinys);
+      else if (savi[0].tapKelias !== z.tapKelias) p.push("SVETIMAS " + z.rinkinys);
+    }
+    return p;
+  };
+
+  const svarus = [
+    { rinkinys: "privacy", tapKelias: "/tmp/p" },
+    { rinkinys: "functional", tapKelias: "/tmp/f" },
+  ];
+  const veikiantys = [
+    { rinkinys: "privacy", tapKelias: "/tmp/p", eilute: 1 },
+    { rinkinys: "functional", tapKelias: "/tmp/f", eilute: 2 },
+  ];
+
+  assert.deepEqual(poruoti(svarus, veikiantys), [], "švarus planas NĖRA pažeidimas");
+
+  assert.deepEqual(
+    poruoti(svarus, veikiantys.slice(0, 1)),
+    ["TRŪKSTA functional"],
+    "rinkinys be `verify` PRIVALO būti randamas"
+  );
+
+  assert.deepEqual(
+    poruoti(svarus, [...veikiantys, { rinkinys: "privacy", tapKelias: "/tmp/p", eilute: 3 }]),
+    ["DUBLIS privacy"],
+    "du `verify` tam pačiam rinkiniui PRIVALO būti randami"
+  );
+
+  /** ⚠️ Būtent šis atvejis praeitų patikrą „ar verify žingsnis egzistuoja". */
+  assert.deepEqual(
+    poruoti(svarus, [
+      veikiantys[0],
+      { rinkinys: "functional", tapKelias: "/tmp/security-tap", eilute: 2 },
+    ]),
+    ["SVETIMAS functional"],
+    "`verify`, skaitantis KITO paleidimo katalogą, PRIVALO būti randamas"
+  );
 });

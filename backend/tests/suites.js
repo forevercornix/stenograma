@@ -404,6 +404,7 @@ const functional = [
   "runnerProcesuGrupe",
   /** ⚠️ `functional`: skaito `ci.yml` ir `package.json` TEKSTĄ, DB nereikia (#382 D2). */
   "vykdymoPlanas",
+  "tapLiudytojas",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**
