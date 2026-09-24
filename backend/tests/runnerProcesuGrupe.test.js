@@ -203,7 +203,19 @@ bandymas("SPAUSDINA daugiau nei buferis", () => {
      */
     const tap = fs.readFileSync(path.join(tmp, "zzSrautoPerpilda.tap"), "utf8");
     assert.match(tap, /TAP version 13/, "dalinė išvestis privalo prasidėti TAP antrašte");
-    assert.ok(tap.length > 4000, `dalinė išvestis per trumpa (${tap.length} B) — ar ji apskritai išsaugota?`);
+
+    /**
+     * ⚠️ TVIRTINAMA, KAD TURINYS IŠSAUGOTAS, O NE KIEK BAITŲ (#382 §2.1).
+     *
+     * Pirmoji redakcija reikalavo `tap.length > 4000` prie 8192 B ribos ir buvo TRAPI:
+     * kiek baitų spėja praeiti iki `SIGKILL`, priklauso nuo pipe buferių gylio visoje
+     * grandinėje. Per-failo režime ta grandinė pailgėja (`runner → node --test →
+     * runner → node --test`), ir testas krito su 3756 B — ne dėl regresijos, o dėl
+     * buferio. Išmatuota: #382 §0.1 raundas `35794066086`.
+     *
+     * Dabar tikrinama SAVYBĖ: dalinėje išvestyje yra tai, ką failas realiai spausdino.
+     */
+    assert.match(tap, /x{100,}/, "dalinėje išvestyje privalo likti tai, ką failas spausdino");
     assert.match(tap, /FILE_OVERFLOW zzSrautoPerpilda/, "žyma privalo būti prikabinta prie dalinės išvesties");
   }
 );

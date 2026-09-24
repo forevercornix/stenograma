@@ -291,6 +291,28 @@ npm run test:deleted -- --base origin/main # eksplicitinė bazė (derinimui)
 npm run test:deleted -- --self-test        # tik sargo savipatikra, repo neliečiama
 ```
 
+### Vieno failo laiko riba (#382 D1)
+
+`run-tests.mjs` **kiekvieną** testų failą leidžia atskiru procesu su laiko riba
+(`FAILO_RIBA_MS`, 120 s) ir po nutraukimo nužudo visą procesų grupę. Kelio be ribos
+nebėra: `--tap-dir` nebelemia vykdymo būdo, tik tai, ar TAP paliekamas nurodytame
+kataloge.
+
+Viršijęs failas krenta su `FILE_TIMEOUT` ir **savo vardu**, o likę failai vykdomi
+toliau. Per didelė išvestis duoda `FILE_OVERFLOW` (`FAILO_BUFERIS`, 64 MiB).
+
+Riba išvesta iš CI matavimo: lėčiausias failas repo yra `suiteDerivation` — **36 s**,
+t. y. 3,3× atsarga. Lėtoje mašinoje (pvz. telefone per Termux) tas pats failas gali
+trukti kelis kartus ilgiau ir ribą viršyti. Tada:
+
+```bash
+TESTU_FAILO_RIBA_MS=600000 npm test   # perrašo ribą TIK šiam paleidimui
+```
+
+⚠️ Tai **ne antra riba**, o tos pačios politikos perrašymas vienam paleidimui (D5:
+`FAILO_RIBA_MS` lieka vienintelis skaičius). CI šio kintamojo nenustato niekada, tad
+produkcinė reikšmė nepriklauso nuo to, ką kas nors pasidarė lokaliai.
+
 - `tests/protocolSchema.test.js` — schema validacija (privalomi laukai, tipai, klaidų pranešimai).
 - `tests/prompt.snapshot.test.js` — apsaugo `meeting_v1`/`meeting_v2` prompt šablonus nuo netyčinių pakeitimų + patikrina prompt-injection apsaugos frazes.
 - `tests/mockLLMProvider.test.js` — MockLLMProvider ištraukia teisingą transkripcijos bloką iš prompto (regresijos testas klaidai, kai injection-guard tekstas sutrikdydavo naivų `"""` regex).
