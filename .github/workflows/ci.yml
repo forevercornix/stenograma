@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+# ZONDAS #405: ar `services.image` mato workflow lygio `env`? NEMERGINTI.
+env:
+  ZONDO_PG_ATVAIZDAS: postgres:16-alpine
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -522,6 +526,28 @@ jobs:
           echo "Backend neatsakė per 10s"
           kill $SERVER_PID
           exit 1
+
+  # ZONDAS #405 D: ar `services.image` gali remtis workflow lygio `env`. NEMERGINTI.
+  zondas405:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      pg:
+        image: ${{ env.ZONDO_PG_ATVAIZDAS }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-retries 5
+    steps:
+      - name: Ar servisas pakilo
+        run: |
+          echo "ZONDAS env reiksme: ${ZONDO_PG_ATVAIZDAS}"
+          docker ps --format '{{.Image}} {{.Status}}' | sed 's/^/ZONDAS docker /'
+          exit 0
 
   frontend:
     runs-on: ubuntu-latest
