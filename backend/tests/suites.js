@@ -402,6 +402,8 @@ const functional = [
   "pgPoolManifestas",
   /** ⚠️ : tikrina proceso medžio semantiką, DB nereikia (#380 P1). */
   "runnerProcesuGrupe",
+  /** ⚠️ `functional`: skaito `ci.yml` ir `package.json` TEKSTĄ, DB nereikia (#382 D2). */
+  "vykdymoPlanas",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**

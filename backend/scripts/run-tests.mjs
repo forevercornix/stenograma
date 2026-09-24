@@ -387,7 +387,9 @@ for (const failas of files) {
   const vaikoEnv = { ...process.env };
   delete vaikoEnv.NODE_TEST_CONTEXT;
 
+  const pradzia = Date.now();
   const rezultatas = await paleistiFaila(failas, vaikoEnv);
+  const trukmeMs = Date.now() - pradzia;
 
   /**
    * ⚠️ NUTRAUKTAS FAILAS = KRITĘS FAILAS, SU VARDU (#380 R1).
@@ -440,7 +442,14 @@ for (const failas of files) {
     : nutrauktas
       ? `FILE_TIMEOUT po ${FAILO_RIBA_MS} ms`
       : `exit ${rezultatas.status ?? "signal"}`;
-  console.log(`───── ${vardas} (${busenosTekstas}) ─────`);
+  /**
+   * ⚠️ TRUKMĖ ŽYMOJE — D5 ATSARGOS MATOMUMAS (#382).
+   *
+   * `FAILO_RIBA_MS` yra viena politika visiems failams, tad vienintelis būdas žinoti,
+   * kiek iki jos liko, yra matyti KIEKVIENO failo trukmę. Be jos artėjimas prie ribos
+   * pasimatytų tik tada, kai ji jau viršyta — t. y. kaip kritimas, ne kaip įspėjimas.
+   */
+  console.log(`───── ${vardas} (${busenosTekstas}, ${trukmeMs} ms) ─────`);
   process.stdout.write(tap);
 
   /**

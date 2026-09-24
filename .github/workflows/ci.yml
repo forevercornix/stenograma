@@ -120,10 +120,24 @@ jobs:
         run: node scripts/verify-clean.mjs --snapshot
 
       - name: Privatumo regresijos testai
-        run: npm run test:privacy
+        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
+        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
+        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        #
+        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
+        run: npm run test:privacy -- --tap-dir=/tmp/privacy-tap
 
       - name: Saugumo regresijos testai
-        run: npm run test:security
+        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
+        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
+        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        #
+        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
+        run: npm run test:security -- --tap-dir=/tmp/security-tap
 
       - name: Funkciniai testai
         env:
@@ -133,7 +147,14 @@ jobs:
           # Be jo dingęs python3 duotų 9 praleistus testus ir žalią job'ą:
           # padengimo iliuziją, kuri blogesnė nei testų nebuvimas.
           REQUIRE_PYTHON: "1"
-        run: npm run test:functional
+        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
+        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
+        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        #
+        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
+        run: npm run test:functional -- --tap-dir=/tmp/functional-tap
 
       # ATSKIRAS žingsnis TIK realaus Redis/BullMQ integraciniams testams
       # (tests/queueRecovery.integration.test.js - restart/stalled recovery;
@@ -151,7 +172,14 @@ jobs:
           # job'as lieka ŽALIAS nieko nepatikrinęs. Prarasti dabar galima tik
           # abu vienu metu - o tai jau matomas pakeitimas, ne atsitiktinumas.
           REQUIRE_REDIS: "1"
-        run: npm run test:redis
+        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
+        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
+        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        #
+        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
+        run: npm run test:redis -- --tap-dir=/tmp/redis-tap
 
       # ⚠️ PostgreSQL KLIENTAS DIEGIAMAS ATSKIRAI (#155, 7.6a / #248).
       #
