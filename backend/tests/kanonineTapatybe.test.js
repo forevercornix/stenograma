@@ -56,6 +56,8 @@ const KORPUSAS = Object.freeze([
 ]);
 
 test("SAVYBĖ: kanoninė forma pergyvena JSON round-trip'ą", () => {
+  /** MUTACIJA M4 (#405): sąmoningas NE-S3 kritimas `backend` job'e. */
+  assert.equal(1, 2, "MUTACIJA M4: sąmoningas backend kritimas, nesusijęs su S3");
   for (const [vardas, reiksme] of KORPUSAS) {
     assert.equal(
       kanoninisRezultatas(reiksme),
