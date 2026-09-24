@@ -11,10 +11,19 @@ const { suites } = require("./suites");
 /**
  * VYKDYMO PLANO SARGAS — KIEKVIENAS FAILAS EINA RIBOTU KELIU (#382 D2).
  *
- * ⚠️ KODĖL SARGO APSKRITAI REIKIA. #380 uždarė ribą `postgres`/`s3`/`postgresS3`
- * rinkiniams, o keturi likusieji tyliai liko be jos — ne dėl sprendimo, o dėl to, kad
- * niekas netikrino. #382 juos uždaro, bet be sargo kitas naujas rinkinys arba naujas
- * CI žingsnis vėl atsidurtų neribotame kelyje, ir vėl to niekas nepamatytų.
+ * ⚠️ KĄ ŠIS SARGAS REIŠKIA PO #382 D1, IR KO NEBEREIŠKIA.
+ *
+ * Pašalinus neribotą šaką iš `run-tests.mjs`, riba nebepriklauso nuo `--tap-dir`:
+ * kiekvienas failas leidžiamas per `paleistiFaila` bet kuriuo atveju. Todėl šis sargas
+ * **nebegina ribos** — ją gina D1 testai failo apačioje, tikrinantys patį runner'į.
+ *
+ * Kas lieka: `--tap-dir` yra vienintelis būdas IŠSAUGOTI per-failo TAP. Iš jo remiasi
+ * `verify-postgres-suite-ran.mjs` (#231) — įrodymas, kad KIEKVIENAS rinkinio failas
+ * realiai vykdytas, o ne tyliai praleistas. Šiandien tą katalogą skaito trys žingsniai
+ * (`ci.yml:253`, `:340`, `:376`); likusiems keturiems jis rašomas, bet neskaitomas.
+ *
+ * ⚠️ TAI UŽRAŠOMA, O NE NUTYLIMA: keturiems rinkiniams `--tap-dir` šiandien yra
+ * pasiruošimas, ne garantija. Verifikatoriaus išplėtimas jiems — atskiras darbas.
  *
  * ⚠️ PLANAS IŠVEDAMAS, NE SURAŠOMAS. Rankinis „ribotų rinkinių" sąrašas pasentų tyliai
  * — tai tiksliai ta klasė, kurią D2 uždaro. Todėl planas skaitomas iš tų pačių TRIJŲ
@@ -34,6 +43,7 @@ const { suites } = require("./suites");
  */
 
 const SAKNIS = path.resolve(__dirname, "..");
+const RUNNER_KELIAS = path.join(SAKNIS, "scripts", "run-tests.mjs");
 const CI_KELIAS = path.join(SAKNIS, "..", ".github", "workflows", "ci.yml");
 
 /** `run-tests.mjs` nekviečiantys skriptai plano neliečia. */
@@ -118,19 +128,20 @@ function isvestiPlana() {
   return planas;
 }
 
-test("#382 D2: kiekvienas CI vykdomas testų failas eina RIBOTU keliu", () => {
+test("#382 D2: kiekvienas CI vykdomas testų žingsnis IŠSAUGO per-failo TAP", () => {
   const planas = isvestiPlana();
   assert.ok(planas.length > 0, "planas tuščias — ar `ci.yml` formatas pasikeitė?");
 
   const pazeidimai = planas
     .filter((z) => !z.ribotas)
-    .map((z) => `ci.yml:${z.eilute} (${z.jobas}) ${z.skriptas} → ${z.failai.length} failų BE ribos`);
+    .map((z) => `ci.yml:${z.eilute} (${z.jobas}) ${z.skriptas} → ${z.failai.length} failų BE per-failo TAP`);
 
   assert.deepEqual(
     pazeidimai,
     [],
-    "kiekvienas `run-tests.mjs` žingsnis privalo turėti `--tap-dir`: be jo visi failai " +
-      "leidžiami vienu procesu be laiko ribos ir be procesų grupės nužudymo (#382 D1)"
+    "kiekvienas `run-tests.mjs` žingsnis privalo turėti `--tap-dir`: be jo per-failo TAP " +
+      "nueina į laikiną katalogą ir dingsta, o su juo dingsta ir įrodymas, kad kiekvienas " +
+      "failas realiai vykdytas (#231). Riba nuo šito NEPRIKLAUSO — ją gina D1 testai žemiau"
   );
 });
 
@@ -191,4 +202,66 @@ test("#382 D2: planas imamas iš TRIJŲ šaltinių, ne iš rankinio sąrašo", (
     Object.values(skriptai).every((a) => !/--tap-dir/.test(a)),
     "`--tap-dir` atsirado `package.json` — tada sprendimo taškas nebe `ci.yml`, ir sargas tikrina ne tą"
   );
+});
+
+/* ══════════════ D1 — RUNNER'YJE NĖRA ŠAKOS BE RIBOS (#382) ══════════════ */
+
+/**
+ * ⚠️ PIRMINIS SARGAS YRA ŠIS, NE `ci.yml` PATIKRA.
+ *
+ * Kol `run-tests.mjs` turėjo antrą šaką (`if (!tapDir)` su `spawnSync`), riba
+ * priklausė nuo to, ar KVIETĖJAS pridėjo `--tap-dir`. Tai reiškė, kad kiekvienas naujas
+ * kvietėjas — CI žingsnis, npm skriptas, kito testo `execFileSync`, kūrėjo ranka — galėjo
+ * ribos netekti tyliai. Pašalinus šaką, riba nustojo priklausyti nuo kvietėjo.
+ *
+ * Šis testas gina būtent tai: kad šaka negrįžtų.
+ */
+function runnerioTekstas() {
+  return fs.readFileSync(RUNNER_KELIAS, "utf8");
+}
+
+test("#382 D1: `run-tests.mjs` neturi vykdymo šakos be ribos", () => {
+  const s = runnerioTekstas();
+
+  /**
+   * ⚠️ TIKRINAMAS VYKDYMAS, NE ŽODIS. `spawnSync` importas ar paminėjimas komentare
+   * nieko nereiškia; reikšmę turi tik `spawnSync(...)` KVIETIMAS, nes tik jis paleidžia
+   * procesą aplenkdamas `paleistiFaila`.
+   */
+  const kvietimai = [...s.matchAll(/(?<![\w.])spawnSync\s*\(/g)];
+  assert.deepEqual(
+    kvietimai.map((m) => s.slice(0, m.index).split("\n").length),
+    [],
+    "`run-tests.mjs` nebeturi kviesti `spawnSync` — procesus leidžia tik `paleistiFaila`, " +
+      "kuris turi laiko ribą, buferio ribą ir procesų grupės nužudymą (#382 D1)"
+  );
+});
+
+test("#382 D1: `--tap-dir` nebelemia VYKDYMO būdo, tik TAP vietą", () => {
+  /**
+   * ⚠️ BE ŠITO ankstesnis testas suderinamas su realizacija, kuri `spawnSync` tiesiog
+   * pervadino. Tikrinama savybė: be `--tap-dir` runner'is pasidaro laikiną katalogą ir
+   * eina TUO PAČIU keliu, o ne kitu.
+   */
+  const s = runnerioTekstas();
+  assert.match(s, /mkdtempSync\(/, "be `--tap-dir` privalo būti sukuriamas laikinas katalogas");
+  assert.match(
+    s,
+    /await paleistiFaila\(/,
+    "vienintelis proceso paleidimo kelias privalo būti `paleistiFaila`"
+  );
+});
+
+test("#382 D1 SAVIPATIKRA: grąžinta šaka be ribos RANDAMA", () => {
+  /**
+   * ⚠️ TAS PATS FILTRAS ANT SINTETINIO TEKSTO. Sargas, niekada neradęs pažeidimo, yra
+   * nepatikrintas — o čia mutacija vykdoma kiekviename paleidime.
+   */
+  const rasti = (tekstas) => [...tekstas.matchAll(/(?<![\w.])spawnSync\s*\(/g)].length;
+
+  const svarus = 'const r = await paleistiFaila(failas, env);\nimport { spawn } from "node:child_process";';
+  const pazeistas = svarus + '\nif (!tapDir) { const r2 = spawnSync("node", ["--test", ...files]); }';
+
+  assert.equal(rasti(svarus), 0, "švarus runner'is NĖRA pažeidimas");
+  assert.equal(rasti(pazeistas), 1, "grąžinta `spawnSync` šaka PRIVALO būti randama");
 });

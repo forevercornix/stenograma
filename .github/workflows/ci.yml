@@ -120,22 +120,30 @@ jobs:
         run: node scripts/verify-clean.mjs --snapshot
 
       - name: Privatumo regresijos testai
-        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
-        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
-        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        # ⚠️ `--tap-dir` IŠSAUGO PER-FAILO TAP (#382 D2). Riba nuo jo NEPRIKLAUSO:
+        # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
+        # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
-        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
+        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
+        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        #
+        # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:privacy -- --tap-dir=/tmp/privacy-tap
 
       - name: Saugumo regresijos testai
-        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
-        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
-        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        # ⚠️ `--tap-dir` IŠSAUGO PER-FAILO TAP (#382 D2). Riba nuo jo NEPRIKLAUSO:
+        # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
+        # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
-        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
+        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
+        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        #
+        # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:security -- --tap-dir=/tmp/security-tap
 
@@ -147,12 +155,16 @@ jobs:
           # Be jo dingęs python3 duotų 9 praleistus testus ir žalią job'ą:
           # padengimo iliuziją, kuri blogesnė nei testų nebuvimas.
           REQUIRE_PYTHON: "1"
-        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
-        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
-        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        # ⚠️ `--tap-dir` IŠSAUGO PER-FAILO TAP (#382 D2). Riba nuo jo NEPRIKLAUSO:
+        # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
+        # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
-        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
+        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
+        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        #
+        # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:functional -- --tap-dir=/tmp/functional-tap
 
@@ -172,12 +184,16 @@ jobs:
           # job'as lieka ŽALIAS nieko nepatikrinęs. Prarasti dabar galima tik
           # abu vienu metu - o tai jau matomas pakeitimas, ne atsitiktinumas.
           REQUIRE_REDIS: "1"
-        # ⚠️ `--tap-dir` = RIBOTAS KELIAS (#382 D1). Be jo visi failai leidžiami VIENU
-        # procesu be laiko ribos ir be procesų grupės nužudymo: vienas pakibęs failas
-        # suvalgo visą job'ą, o diagnostikoje nėra net jo vardo.
+        # ⚠️ `--tap-dir` IŠSAUGO PER-FAILO TAP (#382 D2). Riba nuo jo NEPRIKLAUSO:
+        # `run-tests.mjs` neribotos šakos nebeturi, tad kiekvienas failas leidžiamas per
+        # `paleistiFaila` su laiko riba ir procesų grupės nužudymu bet kuriuo atveju.
         #
-        # ⚠️ IŠMATUOTA, NE SPĖTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
-        # 35794066086): per-failo režimas keturiems rinkiniams kainuoja +65 s
+        # Ką flagas duoda: `.tap` failą kiekvienam testų failui. Trims žingsniams
+        # (`:253`, `:340`, `:376`) iš jo remiasi `verify-postgres-suite-ran.mjs` (#231);
+        # čia jis kol kas rašomas, bet neskaitomas — pasiruošimas, ne garantija.
+        #
+        # ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai 35792384092 / 35792992177 /
+        # 35794066086): per-failo vykdymas keturiems rinkiniams kainuoja +65 s
         # (91 s → 156 s medianomis), o testų skaičiai abiem režimais SUTAMPA tiksliai.
         run: npm run test:redis -- --tap-dir=/tmp/redis-tap
 

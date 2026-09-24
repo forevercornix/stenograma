@@ -28,8 +28,9 @@
  * `test:security`, kuris tiesiog nepaleido naujo saugumo testo.
  */
 
-import { readdirSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { spawnSync, spawn } from "node:child_process";
+import { readdirSync, existsSync, mkdirSync, writeFileSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -121,7 +122,8 @@ function istrauktiTapDir(argumentai) {
   return { dir: reiksme, likutis: argumentai.filter((_, j) => j !== i && j !== i + 1) };
 }
 
-const { dir: tapDir, likutis: rinkiniuArgs } = istrauktiTapDir(args);
+let { dir: tapDir, likutis: rinkiniuArgs } = istrauktiTapDir(args);
+let laikinasTapDir = null;
 const discovered = discoverTests();
 
 /**
@@ -181,40 +183,27 @@ const files = vienasFailas
 console.log(vienasFailas ? `Vienas failas: ${vienasFailas}\n` : `Rinkiniai: ${requested.join(", ")} (${files.length} failų)\n`);
 
 /**
- * ⚠️ ŠIS KELIAS YRA NERIBOTAS, IR TAI UŽRAŠYTA SĄMONINGAI (#380).
+ * ⚠️ KELIO BE RIBOS NEBĖRA (#382 D1).
  *
- * Be `--tap-dir` visi failai leidžiami VIENU `spawnSync` be `timeout` ir be procesų
- * grupės nužudymo. `FAILO_RIBA_MS` (120 s), `FAILO_BUFERIS` ir `process.kill(-pid)`
- * galioja TIK `--tap-dir` keliui žemiau. Pakibęs failas čia vis dar suvalgo visą job'ą.
+ * Iki šito `run-tests.mjs` turėjo DVI šakas: be `--tap-dir` visi failai buvo leidžiami
+ * vienu `spawnSync` be `timeout` ir be procesų grupės nužudymo. Ta šaka ištrinta —
+ * `--tap-dir` nebelemia VYKDYMO būdo, tik tai, ar TAP išsaugomas nurodytame kataloge.
  *
- * ⚠️ KURIE CI ŽINGSNIAI EINA ŠIUO KELIU (nedengti):
- *   `ci.yml:112` `test:suites`, `:116` `test:matrix`, `:123` `test:privacy`,
- *   `:126` `test:security`, `:136` `test:functional`, `:154` `test:redis`.
+ * ⚠️ TAI NE OPTIMIZACIJA, O D1. Kol egzistavo antra šaka, kiekvienas ją naudojantis
+ * žingsnis buvo be ribos „ne dėl sprendimo, o dėl to, kad niekas netikrino" — būtent
+ * taip keturi rinkiniai ir liko nedengti po #380.
  *
- * ⚠️ KODĖL TAI PRIIMTINA ŠIANDIEN, BET NE VISAM LAIKUI.
+ * ⚠️ KAINA IŠMATUOTA (#382 §0.1, run'ai `35792384092` / `35792992177` / `35794066086`):
+ * +65 s keturiems rinkiniams (91 s → 156 s medianomis), o testų skaičiai abiem
+ * režimais sutampa tiksliai.
  *
- * #380 taiso PostgreSQL pool'ų nutekėjimą, o šiuose žingsniuose `DATABASE_URL`
- * nenustatytas: `skipWithoutPostgres()` grąžina priežastį, o pool'ai kuriami `setup()`
- * VIDUJE, kuris praleistam adapteriui nevykdomas — tad pg pool'o ten neatsiranda
- * (išmatuota: `auditStoreBackendContract.integration.test.js:590–600`).
- *
- * ⚠️ BET „NĖRA PG POOL'Ų" NĖRA TAS PAT, KAS „NIEKAS NEGALI PAKIBTI":
- *   · `redis` rinkinyje veikia TIKRI BullMQ/Redis klientai (`ci.yml:154` nustato
- *     `REDIS_URL`) — jie irgi laiko sokus ir event loop'ą;
- *   · `functional` rinkinyje yra `runnerProcesuGrupe.test.js`, kuris PATS leidžia
- *     subprocesus (`node`, `sleep`) — tikrindamas būtent tai, ko šis kelias nedaro.
- *
- * Todėl riba čia nėra „nereikalinga", o tik NEĮDIEGTA: #380 apimtis yra `pg`, ir
- * plėsti ją be atskiro matavimo reikštų keisti kiekvieno `npm test` elgseną remiantis
- * prielaida. Rekomendacija — atskiras issue; argumentai ataskaitoje.
+ * ⚠️ BE `--tap-dir` TAP RAŠOMAS Į LAIKINĄ KATALOGĄ. Jis reikalingas pačiam mechanizmui
+ * (per-failo `.tap` yra tai, ką rašo `paleistiFaila`), o kvietėjui — ne, tad po
+ * paleidimo pašalinamas. Taip lokalus `npm test` gauna tą pačią ribą, kurią turi CI.
  */
 if (!tapDir) {
-  const result = spawnSync("node", ["--test", ...files], {
-    cwd: backendRoot,
-    stdio: "inherit",
-  });
-
-  process.exit(result.status ?? 1);
+  tapDir = mkdtempSync(join(tmpdir(), "stenograma-tap-"));
+  laikinasTapDir = tapDir;
 }
 
 /**
@@ -425,6 +414,8 @@ for (const failas of files) {
       `  failas: '${vardas}'\n` +
       `  riba_ms: ${FAILO_RIBA_MS}\n` +
       "  paaiskinimas: 'failas nebaigė per ribą ir buvo nutrauktas; aukščiau — dalinė išvestis'\n" +
+      "  lėtoje mašinoje: 'TESTU_FAILO_RIBA_MS=<ms> npm test — riba yra viena politika (#382 D5),\n" +
+      "    tad ji ne didinama, o perrašoma tik tam paleidimui'\n" +
       "  ...\n";
   }
 
@@ -462,5 +453,12 @@ for (const failas of files) {
   if (rezultatas.status !== 0) bendraBusena = rezultatas.status ?? 1;
 }
 
-console.log(`\nTAP išsaugotas: ${tapDir} (${files.length} failų)`);
+/**
+ * ⚠️ LAIKINAS KATALOGAS PAŠALINAMAS, NURODYTASIS — NE. Pastarasis yra kvietėjo
+ * artefaktas (CI jį skaito `verify-postgres-suite-ran.mjs`), o pirmasis egzistuoja tik
+ * dėl to, kad mechanizmui reikia kur rašyti.
+ */
+if (laikinasTapDir) rmSync(laikinasTapDir, { recursive: true, force: true });
+else console.log(`\nTAP išsaugotas: ${tapDir} (${files.length} failų)`);
+
 process.exit(bendraBusena);
