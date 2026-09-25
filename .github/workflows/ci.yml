@@ -464,93 +464,88 @@ jobs:
       - name: Deterministinis diegimas (npm ci)
         run: npm ci
 
-      # ⚠️ MinIO PALEIDŽIAMAS ŽINGSNIU, NE `services:` BLOKU (#157, PR-2).
+      # ⚠️ S3-SUDERINAMA SAUGYKLA PALEIDŽIAMA ŽINGSNIU, NE `services:` BLOKU.
       #
-      # GitHub servisų konteineriai komandos perduoti NELEIDŽIA, o `minio/minio`
-      # be `server /data` tik atspausdina pagalbą ir išsijungia. Servisas būtų
-      # kritęs dar prieš pirmą testą, ir gedimo priežastis atrodytų kaip mūsų
-      # kodo problema.
+      # GitHub servisų konteineriai komandos perduoti NELEIDŽIA, o serveriui
+      # reikia argumentų (`server -s3`). Servisas būtų kritęs dar prieš pirmą
+      # testą, ir gedimo priežastis atrodytų kaip mūsų kodo problema.
       #
-      # ⚠️ TAG'AS PRIRIŠTAS TIKSLIAI, ne `latest`.
+      # ⚠️ KODĖL SEAWEEDFS, O NE MinIO (#405).
       #
-      # ⚠️ ANKSTESNIS PAAIŠKINIMAS ČIA BUVO NETEISINGAS, IR TAI IŠMATUOTA
-      # (#405, 3 punktas). Jis teigė, kad prisegimą lemia flexible-checksums
-      # derinio elgsena su AWS SDK. Gyvuosiuose testuose tokio tvirtinimo NĖRA:
-      # `artifactStoreS3.integration` MATAVIMO testas pats sako, kad garantijos
-      # negina (CI 33946366087 - rašymas ir skaitymas praėjo BE mūsų nustatymų),
-      # o jo galutinis tvirtinimas tenkinamas ABIEM baigtimis, tad MinIO versijų
-      # atskirti negali. Checksum konfigūraciją realiai gina `artifactStoreS3Config`
-      # ir `artifactStoreS3Protocol` - `functional` rinkinys, veikiantis BE tinklo.
+      # MinIO atvaizdas tapo nepasiekiamas: Docker Hub 2026-09-11 nustojo jį
+      # atiduoti anonimiškai, o `quay.io` šiandien grąžina 401 IR pririštam
+      # tag'ui, IR `latest`. Rinkiniai nebuvo vykdomi nuo 2026-09-24.
       #
-      # ⚠️ KĄ GYVIEJI RINKINIAI TIKRINA IŠ TIKRŲJŲ:
+      # ⚠️ SERVERIO PASIRINKIMAS NĖRA TESTUOJAMA SĄLYGA, IR TAI IŠMATUOTA.
       #
-      #   1. BENDRĄ `ArtifactStore` S3 KONTRAKTĄ - tas pats nekeičiamas rinkinys,
-      #      kuris eina ir prieš `fs`, ir prieš `postgres` (`s3`: 22 subtestai,
-      #      iš jų 3 `EXTERNAL`; `postgresS3`: 29 migracijos scenarijai);
-      #   2. `GetBucketVersioning` ATSAKYMO FORMĄ - `s3Store.js` reikalauja, kad
-      #      neversijuotas kibiras grąžintų atsakymą BE `Status`, ir tikrina tai
-      #      prieš pirmą operaciją bei IŠ NAUJO prieš kiekvieną `delete()`. Tai
-      #      VIENINTELIS gyvas tvirtinimas, jautrus tiekėjo elgsenai - bet jis
-      #      fail-closed, tad pokytis būtų garsus, ne tylus.
+      # Keturios skirtingos S3-suderinamos realizacijos — seaweedfs (Go),
+      # garage (Rust), adobe/s3mock (Java, in-memory) ir localstack (Python) —
+      # praėjo ESAMUS `s3` ir `postgresS3` rinkinius IDENTIŠKAI (25/25 ir 34/34,
+      # nė vieno praleidimo), be nė vieno testo pakeitimo. Rinkiniai tikrina
+      # BENDRĄ `ArtifactStore` S3 kontraktą, ne konkretaus serverio savybes.
       #
-      # Prisegimas lieka, nes tiekėjo elgsena (2) gali pasikeisti tarp versijų.
-      # Bet jis ginamas TUO, kas tikrinama, o ne savybe, kurios niekas netikrina.
+      # Todėl čia NETEIGIAMA, kad ši versija ką nors gina. Kandidatas pasirinktas
+      # pagal du dalykus, kurių MinIO nebeturi:
       #
-      # ⚠️ REGISTRAS — `quay.io`, NE DOCKER HUB, IR TAI NE PASIRINKIMAS.
+      #   gyvas projektas    4.47 (2026-09-14), saugykla nearchyvuota
+      #   DU prižiūrimi registrai  docker.io/chrislusf + ghcr.io/chrislusf
       #
-      # 2026-09-11 vakare `minio/minio` Docker Hub'e nustojo būti pasiekiamas
-      # anonimiškai. Išmatuota trimis nepriklausomais zondais:
+      # ⚠️ PRISEGTA DIGEST'U, NE TAG'U. Tag'as yra kintamas rodyklė; digest'as —
+      # turinio adresas. Išmatuota, kad ABU registrai atiduoda TĄ PATĮ digest'ą
+      # `sha256:ce9e796f…` ir leidžia traukti tiesiogiai pagal jį.
       #
-      #   registry manifest (pririštas IR `latest`)  401 insufficient_scope
-      #   registry tags/list                          UNAUTHORIZED
-      #   Docker Hub VIEŠAS API                       {"message":"object not found"}
-      #
-      # Kontrolės (`library/alpine`, `library/postgres`) tuo pačiu metu grąžino
-      # 200, tad tai ne užklausos forma ir ne bendras registro gedimas.
-      #
-      # ⚠️ TAI NE PARSISIUNTIMŲ LIMITAS. Limitas duotų 429 arba
-      # `ratelimit-remaining: 0`; viešas API tokiu atveju repozitoriją VIS TIEK
-      # rastų. `object not found` reiškia, kad repozitorijos ten nebėra —
-      # vadinasi `docker/login-action` NEPADĖTŲ, ir autentifikacija būtų
-      # taisymas ne tos priežasties.
-      #
-      # ⚠️ TAS PATS TAG'AS gaunamas iš MinIO NUOSAVO registro (quay.io):
-      # `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`,
-      # multi-arch manifest list, anoniminis parsisiuntimas.
-      #
-      # ⚠️ KO PATIKRINTI NEBEĮMANOMA: ar quay.io atvaizdas BAITAIS sutampa su
-      # buvusiu Docker Hub — pastarojo nebėra, tad palyginti nėra su kuo.
-      # Sutampa tag'o vardas ir leidėjas; to čia pakanka, nes tag'as pririštas
-      # prie MinIO leidimo, o ne prie registro.
-      - name: Paleisti MinIO (S3-compatible)
+      # ⚠️ ANTRAS REGISTRAS TURI VARTOTOJĄ, O NE TIK PAMINĖJIMĄ. Atsarginis
+      # šaltinis, kurio niekas nekviečia, yra komentaras — o ne atsarga. Todėl
+      # traukiama su fallback'u, ir jo suveikimas įrodytas mutacija (#405).
+      - name: Paleisti S3-suderinamą saugyklą (seaweedfs)
+        env:
+          PIRMINIS: docker.io/chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+          ATSARGINIS: ghcr.io/chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
         run: |
-          docker run -d --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          set -uo pipefail
+
+          # ⚠️ ABU ŠALTINIAI BANDOMI, IR KURIS SUVEIKĖ — MATYTI LOGE.
+          # Tylus fallback'as paslėptų, kad pirminis registras nebeveikia.
+          ATVAIZDAS=""
+          if docker pull "$PIRMINIS"; then
+            ATVAIZDAS="$PIRMINIS"
+            echo "registras=pirminis"
+          else
+            echo "PIRMINIS REGISTRAS NEATSAKĖ - bandomas atsarginis."
+            if docker pull "$ATSARGINIS"; then
+              ATVAIZDAS="$ATSARGINIS"
+              echo "registras=atsarginis"
+            fi
+          fi
+
+          if [ -z "$ATVAIZDAS" ]; then
+            echo "NĖ VIENAS registras neatidavė atvaizdo."
+            exit 1
+          fi
+
+          docker run -d --name s3saugykla -p 8333:8333 "$ATVAIZDAS" server -s3 -s3.port=8333
 
           # Laukiama, kol saugykla ATSAKO, ne fiksuotą laiką: `sleep 5` yra
           # lenktynės, kurios pralaimimos lėtame runner'yje.
-          for i in $(seq 1 40); do
-            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
-              echo "MinIO pasiruošęs po $i bandymo(-ų)."
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://localhost:8333 2>/dev/null; then
+              echo "Saugykla pasiruošusi po $i bandymo(-ų)."
               exit 0
             fi
             sleep 1
           done
 
-          echo "MinIO nepakilo per 40 s - konteinerio logas:"
-          docker logs minio || true
+          echo "Saugykla nepakilo per 60 s - konteinerio logas:"
+          docker logs s3saugykla || true
           exit 1
 
-      - name: S3 testai (MinIO, `ArtifactStore` kontraktas)
+      - name: S3 testai (`ArtifactStore` kontraktas prieš tikrą saugyklą)
         working-directory: backend
         env:
-          MINIO_ENDPOINT: http://localhost:9000
-          MINIO_ACCESS_KEY: minioadmin
-          MINIO_SECRET_KEY: minioadmin
-          # ⚠️ REQUIRE_MINIO=1 paverčia TYLŲ praleidimą klaida - kitaip pirmas
+          S3_ENDPOINT: http://localhost:8333
+          S3_ACCESS_KEY: stenogramatestaccess
+          S3_SECRET_KEY: stenogramatestsecret0123456789
+          # ⚠️ REQUIRE_S3=1 paverčia TYLŲ praleidimą klaida - kitaip pirmas
           # nepakilęs konteineris paverstų CI žalią į „nebuvo ko tikrinti", ir
           # tai būtų blogiausias derinys: infrastruktūros kaina sumokėta,
           # garantijos nulis.
@@ -559,7 +554,7 @@ jobs:
           # šis testas egzistuoja, prieš AWS veiktų IR BE JOS. Tik
           # S3-compatible saugykla parodo skirtumą, tad praleistas rinkinys
           # reikštų, kad vienintelis ją tikrinantis kelias tyliai dingo.
-          REQUIRE_MINIO: "1"
+          REQUIRE_S3: "1"
         run: |
           status=0
           npm run test:s3 -- --tap-dir=/tmp/s3-tap || status=$?
@@ -569,7 +564,7 @@ jobs:
         working-directory: backend
         # Tas pats tikrintuvas kaip PostgreSQL pusėje, tik su kitu rinkiniu ir
         # kita praleidimo žyma - parametrizuotas, ne nukopijuotas.
-        run: node scripts/verify-postgres-suite-ran.mjs /tmp/s3-tap s3 MINIO_ENDPOINT
+        run: node scripts/verify-postgres-suite-ran.mjs /tmp/s3-tap s3 S3_ENDPOINT
 
       # ⚠️ TREČIAS RINKINYS: TESTAI, KURIEMS REIKIA ABIEJŲ SERVISŲ (#157, PR-6).
       #
@@ -580,21 +575,21 @@ jobs:
       # ir ne dėl defekto.
       #
       # Todėl `suites.js` aibės padarytos NESIKERTANČIOMIS: `postgres` yra
-      # postgresGuard BE minioGuard, `s3` — atvirkščiai, o `postgresS3` — abu.
+      # postgresGuard BE s3Guard, `s3` — atvirkščiai, o `postgresS3` — abu.
       # Principas („vienas trūkstamas servisas neturi paversti kito garantijos
       # praleidimu") lieka nepakeistas; pridėtas tik trečias atvejis.
       #
       # ⚠️ SERVISŲ PALEISTI NEREIKIA: `postgres` yra job'o lygio `services:`, o
-      # MinIO pakeltas ankstesniu žingsniu ir tebeveikia.
+      # S3 saugykla pakelta ankstesniu žingsniu ir tebeveikia.
       - name: PostgreSQL + S3 testai (migracija į tinklinę saugyklą)
         working-directory: backend
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           REQUIRE_POSTGRES: "1"
-          MINIO_ENDPOINT: http://localhost:9000
-          MINIO_ACCESS_KEY: minioadmin
-          MINIO_SECRET_KEY: minioadmin
-          REQUIRE_MINIO: "1"
+          S3_ENDPOINT: http://localhost:8333
+          S3_ACCESS_KEY: stenogramatestaccess
+          S3_SECRET_KEY: stenogramatestsecret0123456789
+          REQUIRE_S3: "1"
         run: |
           status=0
           npm run test:postgres-s3 -- --tap-dir=/tmp/pgs3-tap || status=$?

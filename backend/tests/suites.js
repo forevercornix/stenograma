@@ -696,7 +696,7 @@ function isvestiRinkini(sargas, be = null) {
 /**
  * ⚠️ TRYS RINKINIAI, NE DU — IR IŠSKYRIMAS YRA JŲ ESMĖ (#157, PR-6).
  *
- * `postgres` žingsnis turi `DATABASE_URL`, S3 — `MINIO_ENDPOINT`. Sujungus juos,
+ * `postgres` žingsnis turi `DATABASE_URL`, S3 — `S3_ENDPOINT`. Sujungus juos,
  * vienas trūkstamas servisas paverstų kito garantiją praleidimu, o „rinkinys
  * tikrai vykdytas" sargas nebegalėtų pasakyti, KURIO trūko. Tas principas lieka
  * nepakeistas.
@@ -708,8 +708,8 @@ function isvestiRinkini(sargas, be = null) {
  *
  * Todėl aibės tampa TARPUSAVYJE NESIKERTANČIOS:
  *
- *   postgres    — importuoja `postgresGuard` ir NE `minioGuard`;
- *   s3          — importuoja `minioGuard` ir NE `postgresGuard`;
+ *   postgres    — importuoja `postgresGuard` ir NE `s3Guard`;
+ *   s3          — importuoja `s3Guard` ir NE `postgresGuard`;
  *   postgresS3  — importuoja ABU; savo žingsnis, savo sargas.
  *
  * ⚠️ IŠSKYRIMAS BŪTINAS ABIEM KRYPTIM. Pašalinus jį vienoje pusėje, dvigubos
@@ -717,15 +717,15 @@ function isvestiRinkini(sargas, be = null) {
  * tik jau po pusmečio ir kitam žmogui.
  */
 function isvestiPostgresRinkini() {
-  return isvestiRinkini("postgresGuard", "minioGuard");
+  return isvestiRinkini("postgresGuard", "s3Guard");
 }
 
 const postgres = isvestiPostgresRinkini();
-const s3 = isvestiRinkini("minioGuard", "postgresGuard");
+const s3 = isvestiRinkini("s3Guard", "postgresGuard");
 
 /** Failai, kuriems reikia IR PostgreSQL, IR S3-suderinamos saugyklos. */
 const postgresS3 = isvestiRinkini("postgresGuard").filter((v) =>
-  isvestiRinkini("minioGuard").includes(v)
+  isvestiRinkini("s3Guard").includes(v)
 );
 
 module.exports = {

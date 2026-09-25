@@ -32,7 +32,7 @@ const KONFIGURACIJOS = Object.freeze([
   { rinkinys: "functional", zyma: "-" },
   { rinkinys: "redis", zyma: "-" },
   { rinkinys: "postgres", zyma: "DATABASE_URL" },
-  { rinkinys: "s3", zyma: "MINIO_ENDPOINT" },
+  { rinkinys: "s3", zyma: "S3_ENDPOINT" },
   { rinkinys: "postgresS3", zyma: "DATABASE_URL" },
 ]);
 
@@ -90,9 +90,9 @@ test("#402 M4a: `-` ir env žyma pranešime sako SKIRTINGUS dalykus", () => {
     assert.equal(beZymos.status, 0, beZymos.isvestis);
     assert.match(beZymos.isvestis, /privalomo env šis rinkinys neturi/, beZymos.isvestis);
 
-    const suZyma = paleisti(dir, "s3", "MINIO_ENDPOINT");
+    const suZyma = paleisti(dir, "s3", "S3_ENDPOINT");
     assert.equal(suZyma.status, 0, suZyma.isvestis);
-    assert.match(suZyma.isvestis, /nė vieno praleidimo dėl `MINIO_ENDPOINT`/, suZyma.isvestis);
+    assert.match(suZyma.isvestis, /nė vieno praleidimo dėl `S3_ENDPOINT`/, suZyma.isvestis);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -155,7 +155,7 @@ test("#402 M4b: netikėta žymos reikšmė atmetama FAIL-CLOSED, ne priimama tyl
   }
 
   /** Kontrolė: abi teisėtos formos priimamos. */
-  for (const gera of ["-", "MINIO_ENDPOINT"]) {
+  for (const gera of ["-", "S3_ENDPOINT"]) {
     assert.notEqual(paleisti(dir, "s3", gera).status, 2, `žyma "${gera}" turėjo būti priimta`);
   }
 });

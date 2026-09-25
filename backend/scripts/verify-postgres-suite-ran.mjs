@@ -52,7 +52,7 @@ const RINKINYS = process.argv[3] || "postgres";
  *
  * Žyma reiškia ne „ką praleidžia“, o „kurio env trūkumas TYLIAI ištuštintų rinkinį,
  * todėl praleidimas dėl jo yra GEDIMAS“. Trims pirmiesiems vartotojams tai tiesa
- * (`REQUIRE_POSTGRES=1`, `MINIO_ENDPOINT`). Keturiems, prijungtiems #402, tokio env
+ * (`REQUIRE_POSTGRES=1`, `S3_ENDPOINT`). Keturiems, prijungtiems #402, tokio env
  * NĖRA: jų praleidimai projektiniai — kontraktiniai failai ne-pg rinkiniuose leidžia
  * atminties/Redis adapterius, o `redisConcurrency` praleidžia testą būtent TODĖL, kad
  * Redis yra. Perdavus jiems `DATABASE_URL`, tikrintuvas sulaužytų tris teisėtus failus.
