@@ -43,7 +43,7 @@
  * ir be pirmųjų dviejų nieko nekeisdavo.
  */
 const MIGRACIJOS_VARDAI = ["REQUIRE_MINIO", "MINIO_ENDPOINT"];
-const rastiSeni = []; /* MUTACIJA P2: senų vardų patikra pašalinta */
+const rastiSeni = MIGRACIJOS_VARDAI.filter((v) => process.env[v] !== undefined);
 
 if (rastiSeni.length > 0) {
   throw new Error(
