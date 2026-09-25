@@ -471,10 +471,30 @@ jobs:
       # kritęs dar prieš pirmą testą, ir gedimo priežastis atrodytų kaip mūsų
       # kodo problema.
       #
-      # ⚠️ TAG'AS PRIRIŠTAS TIKSLIAI, ne `latest`. Būtent MinIO versija lemia,
-      # kaip elgiasi flexible-checksums derinys su AWS SDK - tai TIKRINAMA
-      # sąlyga, ne fonas. Su `latest` testas vieną dieną imtų tikrinti kitą
-      # elgesį, ir niekas to nepastebėtų.
+      # ⚠️ TAG'AS PRIRIŠTAS TIKSLIAI, ne `latest`.
+      #
+      # ⚠️ ANKSTESNIS PAAIŠKINIMAS ČIA BUVO NETEISINGAS, IR TAI IŠMATUOTA
+      # (#405, 3 punktas). Jis teigė, kad prisegimą lemia flexible-checksums
+      # derinio elgsena su AWS SDK. Gyvuosiuose testuose tokio tvirtinimo NĖRA:
+      # `artifactStoreS3.integration` MATAVIMO testas pats sako, kad garantijos
+      # negina (CI 33946366087 - rašymas ir skaitymas praėjo BE mūsų nustatymų),
+      # o jo galutinis tvirtinimas tenkinamas ABIEM baigtimis, tad MinIO versijų
+      # atskirti negali. Checksum konfigūraciją realiai gina `artifactStoreS3Config`
+      # ir `artifactStoreS3Protocol` - `functional` rinkinys, veikiantis BE tinklo.
+      #
+      # ⚠️ KĄ GYVIEJI RINKINIAI TIKRINA IŠ TIKRŲJŲ:
+      #
+      #   1. BENDRĄ `ArtifactStore` S3 KONTRAKTĄ - tas pats nekeičiamas rinkinys,
+      #      kuris eina ir prieš `fs`, ir prieš `postgres` (`s3`: 22 subtestai,
+      #      iš jų 3 `EXTERNAL`; `postgresS3`: 29 migracijos scenarijai);
+      #   2. `GetBucketVersioning` ATSAKYMO FORMĄ - `s3Store.js` reikalauja, kad
+      #      neversijuotas kibiras grąžintų atsakymą BE `Status`, ir tikrina tai
+      #      prieš pirmą operaciją bei IŠ NAUJO prieš kiekvieną `delete()`. Tai
+      #      VIENINTELIS gyvas tvirtinimas, jautrus tiekėjo elgsenai - bet jis
+      #      fail-closed, tad pokytis būtų garsus, ne tylus.
+      #
+      # Prisegimas lieka, nes tiekėjo elgsena (2) gali pasikeisti tarp versijų.
+      # Bet jis ginamas TUO, kas tikrinama, o ne savybe, kurios niekas netikrina.
       #
       # ⚠️ REGISTRAS — `quay.io`, NE DOCKER HUB, IR TAI NE PASIRINKIMAS.
       #
