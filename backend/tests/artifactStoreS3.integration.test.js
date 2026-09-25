@@ -2,7 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 
-const { skipWithoutMinio, minioKonfiguracija } = require("./helpers/minioGuard");
+const { skipWithoutS3, s3Konfiguracija } = require("./helpers/s3Guard");
 const { paleistiKontrakta } = require("./helpers/artifactStoreContract");
 const { createS3ArtifactStore, CHECKSUM_REZIMAS } = require("../utils/artifactStore/s3Store");
 
@@ -18,13 +18,13 @@ process.env.LOG_LEVEL = "error";
  * kontraktas neapibrėžtas - ne kad S3 ypatingas.
  *
  * ⚠️ ŠIS FAILAS VIETOJE NEVYKDOMAS - reikia S3-compatible saugyklos.
- * CI: `REQUIRE_MINIO=1` paverčia praleidimą klaida.
+ * CI: `REQUIRE_S3=1` paverčia praleidimą klaida.
  */
 
-const PRALEISTI = skipWithoutMinio();
+const PRALEISTI = skipWithoutS3();
 
 async function paruostiKibira(vardas) {
-  const konfiguracija = minioKonfiguracija(vardas);
+  const konfiguracija = s3Konfiguracija(vardas);
   const { S3Client, CreateBucketCommand } = require("@aws-sdk/client-s3");
 
   const klientas = new S3Client({

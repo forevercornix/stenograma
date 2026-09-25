@@ -46,7 +46,7 @@ test("IŠVEDIMAS: rinkinys sutampa su faktine `postgresGuard` priklausomybe", ()
    * žingsnyje (nėra MinIO) ir sulaužytų jo „tikrai vykdytas" sargą.
    */
   const suPg = pagalSarga("postgresGuard");
-  const suMinio = pagalSarga("minioGuard");
+  const suMinio = pagalSarga("s3Guard");
   const nepriklausomai = suPg.filter((v) => !suMinio.includes(v));
 
   assert.deepEqual(suites.postgres, nepriklausomai, "išvestas rinkinys išsiskyrė su realybe");
@@ -64,7 +64,7 @@ test("IŠVEDIMAS: trys rinkiniai NESIKERTA ir nieko nepraranda", () => {
    * visų gedimų: CI lieka žalias, o kodas nepatikrintas.
    */
   const suPg = pagalSarga("postgresGuard");
-  const suMinio = pagalSarga("minioGuard");
+  const suMinio = pagalSarga("s3Guard");
 
   const persidengimas = [
     ...suites.postgres.filter((v) => suites.s3.includes(v) || suites.postgresS3.includes(v)),
@@ -98,7 +98,7 @@ test("SAVIPATIKRA: išvedimo taisyklė atskiria FIKTYVŲ dvigubos priklausomybė
   const klasifikuoti = (turinys) => {
     const importai = importuotiModuliai(turinys);
     const pg = importai.some((k) => k.endsWith("postgresGuard"));
-    const minio = importai.some((k) => k.endsWith("minioGuard"));
+    const minio = importai.some((k) => k.endsWith("s3Guard"));
 
     if (pg && minio) return "postgresS3";
     if (pg) return "postgres";
@@ -108,7 +108,7 @@ test("SAVIPATIKRA: išvedimo taisyklė atskiria FIKTYVŲ dvigubos priklausomybė
 
   const ABU = `
     const { skipWithoutPostgres } = require("./helpers/postgresGuard");
-    const { skipWithoutMinio } = require("./helpers/minioGuard");
+    const { skipWithoutS3 } = require("./helpers/s3Guard");
   `;
 
   assert.equal(klasifikuoti(ABU), "postgresS3", "dviguba priklausomybė privalo eiti į savo rinkinį");
@@ -117,7 +117,7 @@ test("SAVIPATIKRA: išvedimo taisyklė atskiria FIKTYVŲ dvigubos priklausomybė
     "postgres"
   );
   assert.equal(
-    klasifikuoti('const { skipWithoutMinio } = require("./helpers/minioGuard");'),
+    klasifikuoti('const { skipWithoutS3 } = require("./helpers/s3Guard");'),
     "s3"
   );
   assert.equal(klasifikuoti('const x = require("node:fs");'), "nė vieno");
@@ -279,7 +279,7 @@ test("APSAUGA: kiekvienas `pg` naudojantis testas yra postgres rinkinyje", () =>
      * ⚠️ `postgresS3` IRGI TINKA (#157, PR-6).
      *
      * Klausimas yra „ar failas paleidžiamas žingsnyje, kuriame YRA duomenų bazė",
-     * ne „ar jis konkrečiame rinkinyje". Failas, naudojantis `pg` IR `minioGuard`,
+     * ne „ar jis konkrečiame rinkinyje". Failas, naudojantis `pg` IR `s3Guard`,
      * teisėtai gyvena `postgresS3`; be šitos šakos jis reikalautų išimties su
      * priežastimi, kuri būtų netiesa.
      */
@@ -532,7 +532,7 @@ test("LIUDYTOJAS ĮVARDIJA TĄ RINKINĮ, KURĮ TIKRINO - ne visada `postgres`", 
   const { suites } = require("./suites");
 
   const scenarijai = [
-    { rinkinys: "s3", zyma: "MINIO_ENDPOINT" },
+    { rinkinys: "s3", zyma: "S3_ENDPOINT" },
     { rinkinys: "postgresS3", zyma: "DATABASE_URL" },
   ];
 
