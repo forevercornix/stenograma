@@ -1,7 +1,7 @@
 const crypto = require("node:crypto");
 
 const { skipWithoutPostgres } = require("./helpers/postgresGuard");
-const { skipWithoutMinio, minioKonfiguracija } = require("./helpers/minioGuard");
+const { skipWithoutS3, s3Konfiguracija } = require("./helpers/s3Guard");
 const { createS3ArtifactStore, CHECKSUM_REZIMAS } = require("../utils/artifactStore/s3Store");
 const { paleistiMigracijosScenarijus } = require("./helpers/artifactMigrationScenarios");
 
@@ -37,7 +37,7 @@ process.env.LOG_LEVEL = "error";
  * rinkinio „tikrai vykdytas" sargą (žr. `suites.js` komentarą).
  */
 
-const PRALEISTI = skipWithoutPostgres() || skipWithoutMinio();
+const PRALEISTI = skipWithoutPostgres() || skipWithoutS3();
 
 let klientas = null;
 let kibiras = null;
@@ -67,9 +67,9 @@ paleistiMigracijosScenarijus("s3", {
     const { CreateBucketCommand, GetObjectCommand, PutObjectCommand, ListObjectsV2Command } =
       require("@aws-sdk/client-s3");
 
-    /** ⚠️ KIEKVIENAM PALEIDIMUI — SAVAS KIBIRAS (`minioGuard` taisyklė). */
+    /** ⚠️ KIEKVIENAM PALEIDIMUI — SAVAS KIBIRAS (`s3Guard` taisyklė). */
     kibiras = `migracija-${crypto.randomUUID()}`;
-    const konfiguracija = minioKonfiguracija(kibiras);
+    const konfiguracija = s3Konfiguracija(kibiras);
 
     klientas = s3Klientas(konfiguracija);
     await klientas.send(new CreateBucketCommand({ Bucket: kibiras }));
@@ -112,7 +112,7 @@ paleistiMigracijosScenarijus("s3", {
          * tik CI žingsnio trukmę, o `DeleteBucket` reikalautų prieš tai ištrinti
          * kiekvieną objektą — tai antras šalinimo kelias teste, kurio klaidos
          * maskuotų tikrus radinius. Vietoj to kiekvienas paleidimas ima SAVĄ
-         * kibirą (`minioGuard` taisyklė), tad tarpusavio įtakos nėra.
+         * kibirą (`s3Guard` taisyklė), tad tarpusavio įtakos nėra.
          */
         if (klientas) await klientas.destroy();
         klientas = null;
