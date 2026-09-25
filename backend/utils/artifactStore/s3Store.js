@@ -30,7 +30,7 @@ const { getLimits, LIMIT_KIND } = require("../resultLimits");
  * ⚠️ ABI REIKŠMĖS NUSTATOMOS EKSPLICITIŠKAI, IR TAI NE STILIUS. Be šio komentaro
  * kitas žmogus jas „supaprastins" atgal į numatytąsias, o CI liks žalias tol, kol
  * kas nors paleis tai prieš tikrą taikinį. Mutacija (grąžinus numatytąsias) yra
- * dalis MinIO testo - žr. `artifactStoreS3.integration`.
+ * dalis integracinio `s3` testo - žr. `artifactStoreS3.integration`.
  *
  * ⚠️ RAŠYMO IR SKAITYMO KELIAI LŪŽTA ATSKIRAI. `PutObject` klaida ateina dėl
  * `Content-Md5`, `GetObject` - dėl pasirašytos checksum-mode antraštės. Testas,
@@ -562,7 +562,7 @@ function createS3ArtifactStore({
   /**
    * ⚠️ TESTO SEAMAS, IR JIS UŽRAŠYTAS.
    *
-   * Checksum nustatymai yra TIKRINAMA sąlyga, bet pririšta MinIO versija juos
+   * Checksum nustatymai yra TIKRINAMA sąlyga, bet pririšta saugykla juos
    * jau palaiko ir be mūsų (išmatuota, CI 33946366087), tad mutacija prieš ją
    * nieko nesulaužo. Vienintelis vietoje įvykdomas enforcement — patvirtinti,
    * kad KLIENTAS realiai neša tas reikšmes: pašalinus jas iš konstruktoriaus,

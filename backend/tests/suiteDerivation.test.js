@@ -43,7 +43,7 @@ test("IŠVEDIMAS: rinkinys sutampa su faktine `postgresGuard` priklausomybe", ()
    *
    * ⚠️ NUO #157 PR-6 `postgres` YRA SKIRTUMAS, NE VISA AIBĖ. Failai, kuriems
    * reikia IR S3, iškeliami į `postgresS3` — kitaip jie praleistų save postgres
-   * žingsnyje (nėra MinIO) ir sulaužytų jo „tikrai vykdytas" sargą.
+   * žingsnyje (nėra S3 saugyklos) ir sulaužytų jo „tikrai vykdytas" sargą.
    */
   const suPg = pagalSarga("postgresGuard");
   const suMinio = pagalSarga("s3Guard");

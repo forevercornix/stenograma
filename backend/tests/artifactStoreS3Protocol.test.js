@@ -11,14 +11,14 @@ const { createS3ArtifactStore, patikrintiVersijavima } = require("../utils/artif
 /**
  * S3 KAIP FAIL-CLOSED SAUGYKLOS RIBA (#157, PR-2, Codex #290).
  *
- * ⚠️ KODĖL ŠIE TESTAI NEGALI GYVENTI MinIO RINKINYJE.
+ * ⚠️ KODĖL ŠIE TESTAI NEGALI GYVENTI INTEGRACINIAME `s3` RINKINYJE.
  *
  * Tikra saugykla pagal užsakymą negamina protokolo gedimų: atsakymo be
  * `ContentLength`, sėkmės be kūno ar nežinomos versijavimo būsenos. Būtent jie yra
  * fail-closed elgesio esmė, tad klientas įterpiamas per užrašytą seamą, o
  * kviečiami TIE PATYS metodai, kuriuos kviečia produkcija.
  *
- * ⚠️ SEAMAS NEPAKEIČIA MinIO RINKINIO. Ten tikrinamas tikras protokolas su tikra
+ * ⚠️ SEAMAS NEPAKEIČIA `s3` RINKINIO. Ten tikrinamas tikras protokolas su tikra
  * saugykla; čia — elgesys, kai saugykla atsako netaisyklingai.
  */
 

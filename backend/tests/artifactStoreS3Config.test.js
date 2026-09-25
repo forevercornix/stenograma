@@ -13,11 +13,11 @@ const {
 /**
  * `S3ArtifactStore` SPRENDIMAI, TIKRINAMI BE TINKLO (#157, PR-2).
  *
- * ⚠️ KODĖL VIETOJE, O NE PRIEŠ MinIO.
+ * ⚠️ KODĖL VIETOJE, O NE PRIEŠ TIKRĄ SAUGYKLĄ.
  *
  * Trys dalykai čia neįrodomi prieš tikrą saugyklą: `NoSuchBucket` klaidos ji
  * pagal užsakymą neduoda, versijuoto kibiro CI'uje nekuriame, o checksum
- * nustatymų mutacijos pririšta MinIO versija NESULAUŽO (išmatuota, CI
+ * nustatymų mutacijos pririšta saugykla NESULAUŽO (išmatuota, CI
  * 33946366087). Vietinis testas juos padengia deterministiškai.
  */
 
@@ -64,7 +64,7 @@ test("CHECKSUM nustatymai realiai PATENKA į klientą", async () => {
   /**
    * ⚠️ TAI VIENINTELIS VIETOJE ĮVYKDOMAS ENFORCEMENT.
    *
-   * Pririšta MinIO versija numatytuosius nustatymus jau palaiko (išmatuota), tad
+   * Pririšta saugykla numatytuosius nustatymus jau palaiko (išmatuota), tad
    * mutacija prieš ją nieko nesulaužo. Bet pašalinus juos iš konstruktoriaus,
    * SDK grąžina `WHEN_SUPPORTED` — ir šis testas krenta BE JOKIO tinklo.
    *
