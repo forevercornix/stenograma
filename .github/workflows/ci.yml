@@ -499,7 +499,7 @@ jobs:
       # traukiama su fallback'u, ir jo suveikimas įrodytas mutacija (#405).
       - name: Paleisti S3-suderinamą saugyklą (seaweedfs)
         env:
-          PIRMINIS: 127.0.0.1:5000/chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+          PIRMINIS: docker.io/chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
           ATSARGINIS: ghcr.io/chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
         run: |
           set -uo pipefail
