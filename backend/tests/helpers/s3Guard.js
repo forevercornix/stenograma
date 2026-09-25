@@ -25,6 +25,38 @@
  * turėjome su `flushdb` (žr. `redisGuard.js`).
  */
 
+/**
+ * ⚠️ SENI VARDAI META KLAIDĄ, O NE TYLI (#405, P2).
+ *
+ * Alias'o čia NĖRA ir nebus: du priimami vardai reiškia CI, kuris atrodo
+ * apsaugotas ir nėra (#290 pamoka). Bet ir TYLĖJIMAS netinka — iki šios
+ * patikros `REQUIRE_MINIO=1` be `S3_ENDPOINT` praeidavo, rinkinys tyliai
+ * praleisdavo save, o job'as likdavo ŽALIAS. Tai tiksliai tas gedimas, dėl
+ * kurio `REQUIRE_*` sargai apskritai egzistuoja, tik persikėlęs į vardą.
+ *
+ * Todėl senas vardas nebeveikia kaip TRIGERIS, bet veikia kaip STABDIS:
+ * aplinka, kurioje jis yra, sustabdoma su migracijos nurodymu.
+ *
+ * ⚠️ TIKRINAMI TIKSLIAI DU VARDAI — tie, kurie anksčiau ką nors LEMDAVO:
+ * `REQUIRE_MINIO` (įjungdavo sargą) ir `MINIO_ENDPOINT` (nurodydavo saugyklą).
+ * `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`/`MINIO_REGION` niekada nebuvo trigeriai
+ * ir be pirmųjų dviejų nieko nekeisdavo.
+ */
+const MIGRACIJOS_VARDAI = ["REQUIRE_MINIO", "MINIO_ENDPOINT"];
+const rastiSeni = MIGRACIJOS_VARDAI.filter((v) => process.env[v] !== undefined);
+
+if (rastiSeni.length > 0) {
+  throw new Error(
+    `S3 sargas: aplinkoje rasti PASENĘ vardai (${rastiSeni.join(", ")}). ` +
+      "Nuo #405 jie NEBEVEIKIA - nei kaip įjungimo trigeris, nei kaip adresas, " +
+      "ir NĖRA alias'ai. Palikti tyliai reikštų, kad rinkinys praleidžia save, " +
+      "o CI lieka žalias. Eksportuokite naujus vardus ir nuimkite senuosius:\n" +
+      "  REQUIRE_S3=1              (vienintelis įjungimo vardas; buvo REQUIRE_MINIO)\n" +
+      "  S3_ENDPOINT=http://...    (privalomas kartu su REQUIRE_S3; buvo MINIO_ENDPOINT)\n" +
+      "  S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION   (neprivalomi; numatytieji >=16 simbolių)"
+  );
+}
+
 const S3_ENDPOINT = process.env.S3_ENDPOINT;
 
 const REQUIRED = process.env.REQUIRE_S3 === "1";

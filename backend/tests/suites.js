@@ -407,6 +407,8 @@ const functional = [
   "tapLiudytojas",
   /** ⚠️ `functional`: struktūriškai parsina `ci.yml` TEKSTĄ, servisų nekelia (#405 D). */
   "servisuManifestas",
+  /** ⚠️ `functional`: sargo VARDŲ kontraktas; vaikiniai procesai, saugyklos nereikia (#405 P2). */
+  "s3Sargas",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**
