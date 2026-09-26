@@ -96,7 +96,6 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
         )),
         ribaMs
       );
-      laikmatis.unref(); /* MUTACIJA M2 */
       /**
        * ⚠️ BE `unref()`. Su juo laikmatis nelaikytų event loop'o gyvo, ir jei
        * blokuota užklausa loop'o nelaiko (pvz. netikras pool'as), procesas
@@ -136,7 +135,7 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
          * tyliai baigiasi. Todėl testo parašas yra `release(true)` NEBUVIMAS po
          * `pg_cancel_backend`, o ne kabėjimas — pastarojo laukdami nieko negautume.
          */
-        darbas.catch(() => {});
+        await darbas; /* MUTACIJA M3 */
         klientas.release(true);
       }
       throw err;
