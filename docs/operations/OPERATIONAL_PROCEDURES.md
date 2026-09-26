@@ -625,13 +625,3 @@ incidentu, komanda išmoks juos ignoruoti. Todėl kiekvieną klaidingą teigimą
 ⚠️ Svarbiausia riba: **auditas neišgyvena restarto**. Kol tai nepakeista,
 įrodymų išsaugojimas yra **rankinis pirmas žingsnis**, o ne kažkas, ką galima
 padaryti vėliau.
-
-
-<!-- MUTACIJA: visos npm formos su neegzistuojančiu taikiniu -->
-1. `npm run nera-tokio`
-2. `npm run --prefix frontend nera-tokio`
-3. `npm --prefix frontend run nera-tokio`
-4. `npm run nera-tokio -- --arg`
-5. `npm run nera-tokio --if-present`
-6. `npm restart`
-7. `npm run -w frontend test:e2e`
