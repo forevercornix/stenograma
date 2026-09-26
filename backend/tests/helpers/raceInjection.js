@@ -18,8 +18,16 @@
  * jungtis sunaikinama. Be to blokuota užklausa laikytų event loop'ą gyvą, ir
  * kabojimas tik persikeltų iš testo į proceso pabaigą.
  *
- * ⚠️ ATSKIRAS MODULIS SĄMONINGAI. Taip fail-fast elgesį galima patikrinti su
- * netikru pool'u, be tikro PostgreSQL - kitaip pats sargas liktų neišbandytas.
+ * ⚠️ ATSKIRAS MODULIS SĄMONINGAI, IR FAIL-FAST ELGSENA TIKRINAMA (#412).
+ *
+ * Iki #412 čia stovėjo teiginys, kad elgseną „galima patikrinti su netikru pool'u" —
+ * ketinimas, užrašytas kaip savybė (§12.1). Testo nebuvo, o šio sargo gedimas yra
+ * TYLUS: su `unref()`, su per ilga riba arba su kabančiu valymu visos trys būsenos
+ * atrodo vienodai, kol regresijos nėra.
+ *
+ * Dabar tikrina `tests/lenktyniuInjekcija.test.js` — izoliuotuose vaikiniuose
+ * procesuose, su netikru pool'u, be PostgreSQL. Trys savybės, trys atskiri parašai,
+ * kiekviena su savo mutacija.
  */
 
 /** Riba parinkta gerokai virš normalaus vykdymo (~ms) ir gerokai žemiau CI ribos. */
@@ -35,6 +43,25 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
     const pool = gautiPool();
     const klientas = await pool.connect();
 
+    /**
+     * ⚠️ PREAMBULĖ RIBOS NETURI, IR TAI SĄMONINGAS KOMPROMISAS (#412).
+     *
+     * `SELECT pg_backend_pid()` vykdoma PRIEŠ laikmatį, tad žemiau esanti riba jos
+     * nedengia. Neribotas kelias atrodo kaip spraga, tad priežastis užrašoma čia —
+     * kitaip kitas skaitytojas spręs iš naujo. Du IŠMATUOTI ramsčiai:
+     *
+     *   1. `pg_backend_pid()` NEIMA JOKIO UŽRAKTO ir neliečia nė vienos lentelės.
+     *      Eilutės užraktas — vienintelė regresija, dėl kurios šis sargas egzistuoja —
+     *      jos blokuoti negali.
+     *   2. `pool.connect()`, einantis dar anksčiau ir būtų DIDESNĖ spraga, jau
+     *      ribotas: vartotojas kuria pool'ą per `stebetiPoola`, o šis nustato
+     *      `connectionTimeoutMillis = 5000`, jei jo nėra
+     *      (`resourceStack.js:194–195`, #380). Pool'o išsekimas baigiasi įvardytu
+     *      kritimu, ne amžinu laukimu.
+     *
+     * Ribos plėtimas čia reikštų antrą laikmatį keliui, kuris dėl ginamos regresijos
+     * užstrigti negali.
+     */
     let pid = null;
     try {
       const r = await klientas.query("SELECT pg_backend_pid() AS pid");
@@ -44,6 +71,15 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
       throw e;
     }
 
+    /**
+     * ⚠️ SĖKMĖS ŠAKOS PRISKYRIMAS YRA SIMETRINIS/GYNYBINIS, BE STEBIMO EFEKTO.
+     *
+     * Išmatuota (#412): jį pašalinus rezultatas nepasikeičia — sėkmės kelyje `catch`
+     * nevykdomas, tad `baigta` niekas neskaito. Todėl jo NEDENGIA joks testas, ir tai
+     * ne praleidimas. Klaidos šakos priskyrimas, priešingai, yra reikšmingas: be jo
+     * įprasta SQL klaida nukeliautų į griežtą šaką (`pg_cancel_backend` +
+     * `release(true)`) — tą dengia `lenktyniuInjekcija` klaidos kontrolė.
+     */
     let baigta = false;
     const darbas = Promise.resolve(klientas.query(sql, params)).then(
       (r) => { baigta = true; return r; },
@@ -66,6 +102,11 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
        * baigtųsi anksčiau, nei riba suveiktų - sargas tyliai nesuveiktų.
        * `clearTimeout()` iškviečiamas ABIEJUOSE keliuose, tad laikmatis
        * neprailgina normalaus vykdymo.
+       *
+       * ⚠️ TIKRINAMA, NE TIK APRAŠYTA (#412): `lenktyniuInjekcija` matuoja VAIKO
+       * gyvavimo trukmę — pridėjus `unref()` procesas baigiasi prieš ribą ir
+       * laukiama diagnostika NEATVYKSTA. Tai vienintelė iš trijų savybių, kurios
+       * gedimas nieko nesulaužo viduje, tad įrodymas gyvena tėviniame procese.
        */
     });
 
@@ -88,6 +129,11 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
          * valymas pats gali kaboti amžinai (jei nutraukimas nesuveikė) - t. y.
          * tiksliai tas gedimas, kurio ši riba turi išvengti. Pakanka pridėti
          * tuščią `catch`, kad nebūtų `unhandledRejection`, ir sunaikinti jungtį.
+         *
+         * ⚠️ TIKRINAMA `lenktyniuInjekcija` (#412). Išmatuota, kad `await darbas`
+         * čia NEKABO: išvalius laikmatį niekas event loop'o nebelaiko ir procesas
+         * tyliai baigiasi. Todėl testo parašas yra `release(true)` NEBUVIMAS po
+         * `pg_cancel_backend`, o ne kabėjimas — pastarojo laukdami nieko negautume.
          */
         darbas.catch(() => {});
         klientas.release(true);
