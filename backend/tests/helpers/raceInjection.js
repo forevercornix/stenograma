@@ -96,7 +96,6 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
         )),
         ribaMs
       );
-      laikmatis.unref(); /* MUTACIJA M2 (#412) */
       /**
        * ⚠️ BE `unref()`. Su juo laikmatis nelaikytų event loop'o gyvo, ir jei
        * blokuota užklausa loop'o nelaiko (pvz. netikras pool'as), procesas

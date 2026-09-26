@@ -167,11 +167,16 @@ test("#412 DIAGNOSTIKA: pranešimas turi kontekstą, ribą ir nuorodą į #180",
 test("#412 `unref()` NĖRA: procesas išgyvena iki ribos, nors užklausa loop'o nelaiko", () => {
   const v = paleistiVaika("kabo");
 
+  /**
+   * ⚠️ TVIRTINAMA TIK GYVAVIMO TRUKMĖ, SĄMONINGAI. Pridėjus čia dar ir žymės
+   * patikrą, testas kristų ir nuo M1 (riba pašalinta), ir nuo M3 (valymas laukia) —
+   * t. y. vienos savybės gedimą priskirtų kitai. Žymę tikrina 1-as testas; čia
+   * lieka vienintelis dalykas, kurį nukauna BŪTENT `unref()`.
+   */
   assert.ok(
     v.gyveno >= VIDINE_RIBA_MS - 20,
     `vaikas gyveno ${v.gyveno} ms < ${VIDINE_RIBA_MS} ms - laikmatis nebelaiko event loop'o`
   );
-  assert.match(v.baigtis, /^ERR:/, "išgyvenimas be žymės reikštų, kad riba nesuveikė");
 });
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -228,6 +233,40 @@ test("#412 KONTROLĖ greita SQL klaida: ta pati švelni šaka, be `pg_cancel_bac
   assert.equal(v.baigtis, "ERR:syntax error");
   assert.deepEqual(v.ivykiai, ["uzklausa", "release()"]);
   assert.ok(v.gyveno < VIDINE_RIBA_MS, "klaidos kelias neturi laukti ribos");
+});
+
+/**
+ * ⚠️ PILNAS PARAŠAS VIENOJE VIETOJE.
+ *
+ * Kiekviena iš trijų mutacijų pajudina SKIRTINGĄ šio parašo lauką, tad kritimo
+ * išvestis iškart parodo, KURI savybė sugedo:
+ *
+ *     M1  kodas 0→1, `stderr` tuščias→ne, `cancel` dingsta
+ *     M2  `gyveno` ≈ribaMs→≈0
+ *     M3  `release(true)` dingsta, `cancel` lieka
+ *
+ * Be šio testo M1 ir M3 skirtųsi tik pavienių asercijų tekstais, ir vienos
+ * savybės gedimą būtų lengva priskirti kitai.
+ */
+test("#412 PARAŠAS: ribos kelio baigtis, įvykiai, kodas ir `stderr` — tikslūs", () => {
+  const v = paleistiVaika("kabo");
+
+  assert.deepEqual(
+    {
+      zyme: v.baigtis.slice(0, 40),
+      ivykiai: v.ivykiai,
+      kodas: v.kodas,
+      stderrIlgis: v.stderrIlgis,
+      pasiekeRiba: v.gyveno >= VIDINE_RIBA_MS - 20,
+    },
+    {
+      zyme: "ERR:race injection blocked before CAS af",
+      ivykiai: ["uzklausa", "cancel:4242", "release(true)"],
+      kodas: 0,
+      stderrIlgis: 0,
+      pasiekeRiba: true,
+    }
+  );
 });
 
 test("#412 numatytoji riba nepakitusi", () => {
