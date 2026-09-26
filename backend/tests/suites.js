@@ -413,6 +413,8 @@ const functional = [
   "dokumentuotosKomandos",
   /** ⚠️ `functional`: sargai tikrinami vaikiniuose procesuose, be DB ir Redis (#410 D3). */
   "sargaiPostgresRedis",
+  /** ⚠️ `functional`: netikras pool'as yra grynas objektas, `pg` neimportuojamas (#412 D5). */
+  "lenktyniuInjekcija",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**
