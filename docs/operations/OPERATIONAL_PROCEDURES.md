@@ -627,7 +627,7 @@ incidentu, komanda išmoks juos ignoruoti. Todėl kiekvieną klaidingą teigimą
 padaryti vėliau.
 
 
-<!-- MUTACIJA M1/M2 (#410) -->
-M1: `docker compose -f docker-compose.nera-tokio.yml up -d`
-
-M2: `npm run nera-tokio-taikinio`
+<!-- MUTACIJA M3 (#410) -->
+| Kelias | Komanda |
+|---|---|
+| M3 | `docker compose -f docker-compose.m3-gyva.yml up -d` ⚠️ *anksčiau rodė ~~`docker compose -f docker-compose.m3-istorine.yml up -d`~~* |
