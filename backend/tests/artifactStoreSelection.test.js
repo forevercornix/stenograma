@@ -140,7 +140,7 @@ test("sukurtiSaugykla grąžina TĄ PATĮ paviršių visiems backend'ams", async
    * Factory S3 atveju LAUKIA versijavimo patikros (fail-closed startas), o ji
    * reikalauja tinklo. Paviršiaus paritetas yra formos klausimas, tad tinklo
    * priklausomybė čia būtų netikras testas; startą tikrina
-   * `artifactStoreS3Protocol` ir MinIO rinkinys.
+   * `artifactStoreS3Protocol` ir integracinis `s3` rinkinys.
    */
   const { createS3ArtifactStore } = require("../utils/artifactStore/s3Store");
 

@@ -10,14 +10,20 @@ process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";
 
 /**
- * `ArtifactStore` KONTRAKTAS: `s3` BACKEND'AS PRIEŠ MinIO (#157, PR-2).
+ * `ArtifactStore` KONTRAKTAS: `s3` BACKEND'AS PRIEŠ TIKRĄ SAUGYKLĄ (#157, PR-2).
  *
  * ⚠️ TAS PATS RINKINYS, NEKEIČIAMAS. S3 yra pirmas TIKRAI nutolęs backend'as:
  * tinklo latencija, kita klaidų taksonomija, `ETag` semantika, brangus `head`.
  * Jei kuris nors scenarijus čia pareikalautų išimties, tai reikštų, kad
  * kontraktas neapibrėžtas - ne kad S3 ypatingas.
  *
- * ⚠️ ŠIS FAILAS VIETOJE NEVYKDOMAS - reikia S3-compatible saugyklos.
+ * ⚠️ ŠIS FAILAS VIETOJE NEVYKDOMAS - reikia S3-suderinamos saugyklos.
+ *
+ * ⚠️ TIEKĖJAS ČIA NEĮVARDIJAMAS SĄMONINGAI (#405, P3). Išmatuota, kad keturios
+ * skirtingos realizacijos (seaweedfs, garage, adobe/s3mock, localstack) praeina
+ * šį rinkinį IDENTIŠKAI, be nė vieno pakeitimo. Vardas, minintis vieną tiekėją,
+ * teigtų, kad tikrinama jo elgsena — o tikrinamas BENDRAS S3 kontraktas. Blogiau:
+ * gyvi paleidimai prieš kitą serverį patektų į įrodymų grandinę svetimu vardu.
  * CI: `REQUIRE_S3=1` paverčia praleidimą klaida.
  */
 
@@ -76,7 +82,7 @@ if (!PRALEISTI) {
    * atsako `SignatureDoesNotMatch`. Testas, dengiantis tik `put`, praleistų pusę
    * klasės ir liktų žalias.
    */
-  test("MinIO: `get` kelias veikia su eksplicitiniais checksum nustatymais", { timeout: 60000 }, async () => {
+  test("S3-suderinama saugykla: `get` kelias veikia su eksplicitiniais checksum nustatymais", { timeout: 60000 }, async () => {
     const vardas = `getkelias-${crypto.randomUUID()}`;
     const saugykla = createS3ArtifactStore(await paruostiKibira(vardas));
 
@@ -104,13 +110,14 @@ if (!PRALEISTI) {
   });
 
   /**
-   * INFORMACINIS MATAVIMAS: ką pririšta MinIO versija daro BE mūsų nustatymų.
+   * INFORMACINIS MATAVIMAS: ką pririšta saugykla daro BE mūsų nustatymų.
    *
-   * ⚠️ TAI NEBE MUTACIJA, IR TAI IŠMATUOTA (CI 33946366087):
+   * ⚠️ TAI NEBE MUTACIJA, IR TAI IŠMATUOTA DUKART - PRIEŠ DVI SKIRTINGAS SAUGYKLAS:
    *
-   *     rašymas=praėjo, skaitymas=praėjo
+   *     MinIO      RELEASE.2025-04-22  CI 33946366087  rašymas=praėjo, skaitymas=praėjo
+   *     seaweedfs  4.47                CI 36181198716  rašymas=praėjo, skaitymas=praėjo
    *
-   * Pririšta MinIO versija numatytuosius checksum nustatymus jau palaiko, tad
+   * Abi pririštos saugyklos numatytuosius checksum nustatymus jau palaiko, tad
    * jų pašalinimas ČIA nieko nesulaužo. Vadinasi šis testas garantijos NEGINA —
    * ir vadinti jį mutacija reikštų teigti daugiau, nei jis daro (§9.1, §12.1).
    *
@@ -119,10 +126,10 @@ if (!PRALEISTI) {
    * tinklo, jei kas nors nustatymus pašalins.
    *
    * ⚠️ ŠIS TESTAS LIEKA, nes matavimas vertingas: jis pasakys, kada pririšta
-   * versija pasikeis. Bet jo tvirtinimai kalba tik apie tai, ką jis TIKRAI
+   * saugykla ims elgtis kitaip. Bet jo tvirtinimai kalba tik apie tai, ką jis TIKRAI
    * mato — mūsų konfigūracijos veikimą — be besąlyginio `assert.ok(true)`.
    */
-  test("MATAVIMAS: numatytieji checksum nustatymai prieš pririštą MinIO", { timeout: 60000 }, async () => {
+  test("MATAVIMAS: numatytieji checksum nustatymai prieš pririštą saugyklą", { timeout: 60000 }, async () => {
     const vardas = `mutacija-${crypto.randomUUID()}`;
     const konfiguracija = await paruostiKibira(vardas);
 
@@ -170,7 +177,7 @@ if (!PRALEISTI) {
     }
 
     console.log(
-      `[#157 MATAVIMAS] numatytieji checksum nustatymai prieš pririštą MinIO: ` +
+      `[#157 MATAVIMAS] numatytieji checksum nustatymai prieš pririštą saugyklą: ` +
         `rašymas=${rasymoKlaida || "praėjo"}, skaitymas=${skaitymoKlaida || "praėjo"}`
     );
 
@@ -179,7 +186,7 @@ if (!PRALEISTI) {
      *
      * Kontrolė aukščiau jau įrodė, kad MŪSŲ konfigūracija abu kelius praeina.
      * Apie numatytuosius nustatymus tvirtinti nėra ko: jų elgesys priklauso nuo
-     * MinIO versijos, ir abi baigtys teisėtos. Besąlyginis `assert.ok(true)`
+     * saugyklos versijos, ir abi baigtys teisėtos. Besąlyginis `assert.ok(true)`
      * čia buvo tuščias — jis atrodė kaip patikra, nebūdamas ja.
      */
     assert.ok(

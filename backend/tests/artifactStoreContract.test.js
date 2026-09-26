@@ -16,7 +16,8 @@ process.env.LOG_LEVEL = "error";
  *
  * ⚠️ KODĖL ŠIS BACKEND'AS TIKRINAMAS VIETOJE. Jam nereikia nei DB, nei tinklo,
  * tad kontrakto pažeidimas matomas per sekundes, o ne per CI raundą. `inline`
- * reikalauja PostgreSQL, `s3` - MinIO; abu gyvena integraciniuose rinkiniuose.
+ * reikalauja PostgreSQL, `s3` - S3-suderinamos saugyklos; abu gyvena integraciniuose
+ * rinkiniuose.
  */
 
 const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");

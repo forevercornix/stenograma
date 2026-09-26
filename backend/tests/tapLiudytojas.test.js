@@ -13,10 +13,11 @@ const { suites } = require("./suites");
 /**
  * TAP LIUDYTOJO ELGSENA VISOMS SEPTYNIOMS KONFIGŪRACIJOMS (#402).
  *
- * ⚠️ KODĖL FIXTURE'AI, O NE TIKRI RINKINIAI. `s3` ir `postgresS3` žingsniai CI'e
- * šiandien nepasiekiami: prieš juos krinta MinIO (`quay.io … unauthorized`) — išorinis
- * gedimas, paliktas už #402 ribų. Be šio failo jų semantika liktų NEPATIKRINTA, o
- * #402 kaip tik prideda ketvirtą naują režimą (`-`) prie tų trijų.
+ * ⚠️ KODĖL FIXTURE'AI, O NE TIKRI RINKINIAI. Fixture'ai atsirado #402 metu, kai
+ * `s3` ir `postgresS3` žingsniai CI'e buvo nepasiekiami (prieš juos krisdavo MinIO,
+ * `quay.io … unauthorized`). ⚠️ NUO #405 TA PRIEŽASTIS DINGO — rinkiniai vėl
+ * vykdomi prieš seaweedfs — BET FIXTURE'AI LIEKA, ir tai ne inercija: jie tikrina
+ * LIUDYTOJĄ, ne rinkinius, tad turi veikti ir tada, kai saugyklos nėra.
  *
  * ⚠️ TAI TIKRINA LIUDYTOJĄ, NE RINKINIUS. TAP katalogai gaminami sintetiškai, tad
  * atsakymas nepriklauso nuo to, ar konkretus testas šiandien praleidžiamas.

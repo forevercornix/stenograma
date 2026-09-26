@@ -8,7 +8,7 @@ const path = require("node:path");
  *
  * ⚠️ KODĖL SARGAS, O NE "VIENAS AUTORITETAS".
  *
- * `postgresS3` rinkiniui reikia ir PostgreSQL, ir MinIO, o signalų atskyrimas
+ * `postgresS3` rinkiniui reikia ir PostgreSQL, ir S3 saugyklos, o signalų atskyrimas
  * (#405 D) reikalauja, kad S3 kelias gyventų ATSKIRAME job'e. `services:` yra
  * job'o lygio raktas, tad antras job'as privalo turėti savo `postgres:`
  * apibrėžimą. Kelio aplinkkeliui nėra, ir tai IŠMATUOTA, ne numatyta:

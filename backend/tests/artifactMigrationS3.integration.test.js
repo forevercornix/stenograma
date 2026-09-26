@@ -108,7 +108,7 @@ paleistiMigracijosScenarijus("s3", {
 
       async isvalyti() {
         /**
-         * ⚠️ KIBIRAS NENAIKINAMAS, IR TAI SĄMONINGA. MinIO konteineris gyvuoja
+         * ⚠️ KIBIRAS NENAIKINAMAS, IR TAI SĄMONINGA. Saugyklos konteineris gyvuoja
          * tik CI žingsnio trukmę, o `DeleteBucket` reikalautų prieš tai ištrinti
          * kiekvieną objektą — tai antras šalinimo kelias teste, kurio klaidos
          * maskuotų tikrus radinius. Vietoj to kiekvienas paleidimas ima SAVĄ
