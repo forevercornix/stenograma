@@ -625,3 +625,7 @@ incidentu, komanda išmoks juos ignoruoti. Todėl kiekvieną klaidingą teigimą
 ⚠️ Svarbiausia riba: **auditas neišgyvena restarto**. Kol tai nepakeista,
 įrodymų išsaugojimas yra **rankinis pirmas žingsnis**, o ne kažkas, ką galima
 padaryti vėliau.
+
+
+<!-- MUTACIJA: beskontekstė komanda -->
+Paleisti: `npm run lint`
