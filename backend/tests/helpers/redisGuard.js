@@ -57,7 +57,7 @@
  */
 
 const REDIS_URL = process.env.REDIS_URL;
-const REQUIRED = false; /* MUTACIJA M4 (#410): sargas niekada nereikalauja */
+const REQUIRED = process.env.REQUIRE_REDIS === "1";
 
 if (REQUIRED && !REDIS_URL) {
   throw new Error(
