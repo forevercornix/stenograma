@@ -1850,7 +1850,7 @@ visada-„fail" ir taip pat nieko neįrodytų.
 | Kriterijus | Kodėl | Kas jį uždarytų |
 |---|---|---|
 | Visi `postgresStore` keliai | `DATABASE_URL` vietoje nėra. ⚠️ **Antroji priežastis („barjeras uždarytas") PASIBAIGĖ (#155)** — liko tik ši viena | `REQUIRE_POSTGRES=1 npm run test:postgres` (CI) |
-| `S3ArtifactStore` | Reikia S3-suderinamos saugyklos | `docker run -d -p 8333:8333 chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882 server -s3 -s3.port=8333` , tada `REQUIRE_S3=1 S3_ENDPOINT=http://localhost:8333 npm run test:s3`. ⚠️ *#405: ankstesnė redakcija rodė `docker compose -f docker-compose.minio.yml up -d` — **tokio failo repo NIEKADA nebuvo** (0 commit'ų visoje istorijoje), tad komanda neveikė dar prieš MinIO atvaizdo dingimą.* |
+| `S3ArtifactStore` | Reikia S3-suderinamos saugyklos | `docker run -d -p 8333:8333 chrislusf/seaweedfs@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882 server -s3 -s3.port=8333` , tada `REQUIRE_S3=1 S3_ENDPOINT=http://localhost:8333 npm run test:s3`. ⚠️ *#405: ankstesnė redakcija rodė ~~`docker compose -f docker-compose.minio.yml up -d`~~ — **tokio failo repo NIEKADA nebuvo** (0 commit'ų visoje istorijoje), tad komanda neveikė dar prieš MinIO atvaizdo dingimą.* |
 | I/O ne po užraktu | Reikia dviejų tikrų jungčių | tas pats `test:postgres` |
 | Lenktynių testas | Vienas žalias paleidimas nieko neįrodo | N kartojimų CI; verdiktas „nepaneigta" |
 | Hidratacijos nauda dydžiu | Reikia realaus duomenų kiekio | nematuojama šiame darbe; įvardijama kaip riba |
