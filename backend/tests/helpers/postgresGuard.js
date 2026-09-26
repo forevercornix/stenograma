@@ -15,7 +15,7 @@
  */
 
 const DATABASE_URL = process.env.DATABASE_URL;
-const REQUIRED = process.env.REQUIRE_POSTGRES === "1";
+const REQUIRED = false; /* MUTACIJA M4 (#410): sargas niekada nereikalauja */
 
 if (REQUIRED && !DATABASE_URL) {
   throw new Error(
