@@ -83,16 +83,14 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
     let baigta = false;
     const darbas = Promise.resolve(klientas.query(sql, params)).then(
       (r) => { baigta = true; return r; },
-      (e) => { baigta = true; throw e; }
+      (e) => { throw e; }
     );
 
     let laikmatis;
     const riba = new Promise((_, reject) => {
       laikmatis = setTimeout(
         () => reject(new Error(
-          `race injection blocked before CAS after ${ribaMs} ms [${kontekstas}]: ` +
-          "pessimistic row lock likely reintroduced - the store must NOT hold a row " +
-          "lock while the competing mutation is injected (#180 P2-3/P3-10)"
+          "race injection timed out"
         )),
         ribaMs
       );
@@ -111,8 +109,7 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
     });
 
     try {
-      const rezultatas = await darbas; /* MUTACIJA M1 */
-      clearTimeout(laikmatis);
+      const rezultatas = await Promise.race([darbas, riba]);
       klientas.release();
       return rezultatas;
     } catch (err) {
