@@ -79,7 +79,14 @@ const ruozeYra = (ruozai, i) => ruozai.some(([a, b]) => i >= a && i < b);
 const SABLONAI = [
   { tipas: "docker-compose", re: /-f\s+([A-Za-z0-9._/-]*compose[A-Za-z0-9._/-]*\.ya?ml)/g },
   { tipas: "node-script", re: /node\s+((?:backend\/|frontend\/)?scripts\/[A-Za-z0-9._/-]+)/g },
-  { tipas: "npm-run", re: /npm\s+run\s+([A-Za-z0-9:_-]+)/g },
+  /**
+   * ⚠️ `--prefix <katalogas>` ATPAŽĮSTAMAS ATSKIRAI, IR TAI NE PATOGUMAS.
+   *
+   * Be jo `npm run --prefix frontend test:e2e` būtų perskaitytas kaip taikinys
+   * `--prefix`, kurio jokiame `package.json` nėra — sargas duotų KLAIDINGĄ kritimą
+   * ant teisingos komandos. Prefiksas kartu yra ir efektyvi bazė.
+   */
+  { tipas: "npm-run", re: /npm\s+run\s+(?:--prefix\s+([A-Za-z0-9._/-]+)\s+)?([A-Za-z0-9:_-]+)/g },
   { tipas: "sh", re: /(?:^|[\s`(])(\.\/[A-Za-z0-9._/-]+\.sh|scripts\/[A-Za-z0-9._/-]+\.sh)/g },
 ];
 
@@ -93,14 +100,34 @@ function surinkti(dokumentai, aplinka) {
 
   for (const { kelias, tekstas } of dokumentai) {
     const eilutes = tekstas.split("\n");
-    let cdBaze = null;
+    let bloke = false;
+    let blokoBaze = null;
 
     for (let i = 0; i < eilutes.length; i += 1) {
       const eil = eilutes[i];
 
-      /** `cd <katalogas>` dokumente keičia išrišimo bazę (D1). */
-      const cd = /\bcd\s+([A-Za-z0-9._/-]+)/.exec(eil);
-      if (cd) cdBaze = cd[1].replace(/^\.\//, "");
+      /**
+       * ⚠️ `cd` BAZĖ GALIOJA SEGMENTUI, NE „IKI KITO `cd`" (Codex P2).
+       *
+       * Išmatuota `README.md`: `cd backend` yra ```` ```bash ```` bloke (`:276–281`),
+       * o `npm run test:e2e` — `:294`, atskirame PROZOS punkte apie `frontend/e2e/`.
+       * Bazė, galiojanti „iki kito `cd`", tam punktui pritaikytų `backend` — čia
+       * atsitiktinai nekenksminga, bet mechanizmas neteisingas: kitu atveju jis
+       * duotų KLAIDINGĄ kritimą, o klaidingas kritimas yra būdas sargą išjungti.
+       *
+       * Taisyklė: bloke `cd` galioja iki bloko pabaigos; prozoje bazės nėra,
+       * nebent `cd` nurodytas TOJE PAČIOJE eilutėje prieš komandą.
+       */
+      if (/^\s*```/.test(eil)) {
+        bloke = !bloke;
+        if (!bloke) blokoBaze = null;
+        continue;
+      }
+
+      if (bloke) {
+        const cd = /\bcd\s+([A-Za-z0-9._/-]+)/.exec(eil);
+        if (cd) blokoBaze = cd[1].replace(/^\.\//, "");
+      }
 
       const ruozai = isbrauktiRuozai(eil);
 
@@ -108,19 +135,24 @@ function surinkti(dokumentai, aplinka) {
         re.lastIndex = 0;
         let m;
         while ((m = re.exec(eil)) !== null) {
-          const taikinysIndeksas = m.index + m[0].indexOf(m[1]);
+          const prefiksas = tipas === "npm-run" ? m[1] : null;
+          const taikinys = tipas === "npm-run" ? m[2] : m[1];
+          const taikinysIndeksas = m.index + m[0].lastIndexOf(taikinys);
 
           if (ruozeYra(ruozai, taikinysIndeksas)) {
             praleistaSegmentu += 1;
             continue;
           }
 
+          const baze = prefiksas || efektyviBaze(eil, taikinysIndeksas, bloke, blokoBaze);
+
           radiniai.push({
             kelias,
             eilute: i + 1,
             tipas,
-            taikinys: m[1],
-            ...isristi(tipas, m[1], cdBaze, aplinka),
+            taikinys,
+            baze,
+            ...isristi(tipas, taikinys, baze, aplinka),
           });
         }
       }
@@ -130,12 +162,43 @@ function surinkti(dokumentai, aplinka) {
   return { radiniai, praleistaSegmentu };
 }
 
+/**
+ * Bazė komandai, esančiai pozicijoje `indeksas`.
+ *
+ * ⚠️ TOS PAČIOS EILUTĖS `cd` NUGALI BLOKO BAZĘ (`cd frontend && npm run x`), bet
+ * tik jei jis eina PRIEŠ komandą — `npm run x && cd frontend` bazės nekeičia.
+ */
+function efektyviBaze(eil, indeksas, bloke, blokoBaze) {
+  const re = /\bcd\s+([A-Za-z0-9._/-]+)/g;
+  let m;
+  let vietine = null;
+  while ((m = re.exec(eil)) !== null) {
+    if (m.index < indeksas) vietine = m[1].replace(/^\.\//, "");
+  }
+
+  if (vietine) return vietine;
+  return bloke ? blokoBaze : null;
+}
+
 /** D1 išrišimo taisyklės. ⚠️ Šakninio `package.json` repo NĖRA — išmatuota. */
 function isristi(tipas, taikinys, cdBaze, { yra, npmTaikiniai }) {
   if (tipas === "npm-run") {
+    /**
+     * ⚠️ IŠRIŠAMA PAGAL EFEKTYVŲ PAKETĄ, NE PAGAL SĄJUNGĄ (Codex P2).
+     *
+     * Sąjunga (`backend` ∪ `frontend`) praleistų tikrą gedimą: `cd backend` bloke
+     * parašyta komanda, kurios yra tik `frontend/package.json`, realiai nepasileistų,
+     * o sargas ją laikytų tvarkinga. Kai bazės nėra, sąjunga lieka vienintelis
+     * teisingas atsakymas — dokumentas nenurodo, kur komanda paleidžiama.
+     */
+    const paketai =
+      cdBaze === "backend" || cdBaze === "frontend"
+        ? [cdBaze]
+        : ["backend", "frontend"];
+
     return {
-      egzistuoja: npmTaikiniai.has(taikinys),
-      kandidatai: "backend/package.json | frontend/package.json",
+      egzistuoja: paketai.some((p) => npmTaikiniai[p].has(taikinys)),
+      kandidatai: paketai.map((p) => `${p}/package.json`).join(" | "),
     };
   }
 
@@ -161,10 +224,10 @@ function repoAplinka() {
 
   return {
     yra: (p) => fs.existsSync(path.join(SAKNIS, p)),
-    npmTaikiniai: new Set([
-      ...skriptai("backend/package.json"),
-      ...skriptai("frontend/package.json"),
-    ]),
+    npmTaikiniai: {
+      backend: new Set(skriptai("backend/package.json")),
+      frontend: new Set(skriptai("frontend/package.json")),
+    },
   };
 }
 
@@ -237,7 +300,7 @@ test("⚠️ `~~` praleidimų skaičius MATOMAS ir šiandien yra tikslus", () =>
 
 const APLINKA = {
   yra: (p) => p === "yra.sh" || p === "backend/scripts/yra.mjs",
-  npmTaikiniai: new Set(["test", "lint"]),
+  npmTaikiniai: { backend: new Set(["test", "lint"]), frontend: new Set(["test:e2e"]) },
 };
 
 const dok = (tekstas) => [{ kelias: "sinteze.md", tekstas }];
@@ -287,7 +350,7 @@ test("KONTROLĖ: išbraukta komanda su GERU taikiniu irgi tik praleidžiama, ne 
 });
 
 test("D1: `cd <katalogas>` dokumente keičia išrišimo bazę", () => {
-  const aplinka = { yra: (p) => p === "pakatalogis/vietinis.sh", npmTaikiniai: new Set() };
+  const aplinka = { yra: (p) => p === "pakatalogis/vietinis.sh", npmTaikiniai: { backend: new Set(), frontend: new Set() } };
 
   assert.equal(pazeidimai(surinkti(dok("`./vietinis.sh`"), aplinka).radiniai).length, 1);
   assert.equal(
@@ -297,9 +360,70 @@ test("D1: `cd <katalogas>` dokumente keičia išrišimo bazę", () => {
 });
 
 test("D1: `node scripts/X` išrišamas ir į `backend/scripts/`, ir į šaknies `scripts/`", () => {
-  const aplinka = { yra: (p) => p === "backend/scripts/yra.mjs" || p === "scripts/saknis.mjs", npmTaikiniai: new Set() };
+  const aplinka = { yra: (p) => p === "backend/scripts/yra.mjs" || p === "scripts/saknis.mjs", npmTaikiniai: { backend: new Set(), frontend: new Set() } };
 
   assert.equal(pazeidimai(surinkti(dok("`node scripts/yra.mjs`"), aplinka).radiniai).length, 0);
   assert.equal(pazeidimai(surinkti(dok("`node scripts/saknis.mjs`"), aplinka).radiniai).length, 0);
   assert.equal(pazeidimai(surinkti(dok("`node scripts/nera.mjs`"), aplinka).radiniai).length, 1);
+});
+
+/* ── EFEKTYVUS PAKETAS IR BAZĖS APIMTIS (Codex P2) ─────────────────────── */
+
+/**
+ * ⚠️ SĄJUNGA PRALEISTŲ TIKRĄ GEDIMĄ. `cd backend` bloke parašyta komanda, kurios
+ * yra tik `frontend/package.json`, realiai nepasileistų — bet sąjunga ją laikytų
+ * tvarkinga. Tai tylus praleidimas tiksliai tos klasės, kurią sargas gaudo.
+ */
+test("EFEKTYVUS PAKETAS: `cd backend` bloke svetimas taikinys KRENTA", () => {
+  const blokas = "```bash\ncd backend\nnpm run test:e2e\n```";
+  const blogi = pazeidimai(surinkti(dok(blokas), APLINKA).radiniai);
+
+  assert.equal(blogi.length, 1, "`test:e2e` yra tik `frontend` - `backend` bazėje jo nėra");
+  assert.equal(blogi[0].baze, "backend");
+  assert.equal(blogi[0].kandidatai, "backend/package.json");
+});
+
+test("EFEKTYVUS PAKETAS: `cd frontend` bloke tas pats taikinys PRAEINA", () => {
+  const blokas = "```bash\ncd frontend\nnpm run test:e2e\n```";
+  const { radiniai } = surinkti(dok(blokas), APLINKA);
+
+  assert.equal(pazeidimai(radiniai).length, 0);
+  assert.equal(radiniai[0].baze, "frontend");
+  assert.equal(radiniai[0].kandidatai, "frontend/package.json");
+});
+
+/**
+ * ⚠️ BŪTENT ŠIS ATVEJIS BUVO NETEISINGAS. `README.md`: `cd backend` gyvena
+ * ```` ```bash ```` bloke, o `npm run test:e2e` — vėlesniame PROZOS punkte apie
+ * `frontend/e2e/`. Bazė, galiojusi „iki kito `cd`", būtų pritaikiusi `backend` ir
+ * davusi klaidingą kritimą ant teisingos komandos.
+ */
+test("BAZĖS APIMTIS: `cd` bloke NEGALIOJA po jo einančiai prozai", () => {
+  const dokumentas = "```bash\ncd backend\nnpm test\n```\n\nProzoje: `npm run test:e2e`\n";
+  const { radiniai } = surinkti(dok(dokumentas), APLINKA);
+
+  const prozoje = radiniai.find((r) => r.taikinys === "test:e2e");
+  assert.equal(prozoje.baze, null, "prozos komandai bazės nėra");
+  assert.equal(prozoje.kandidatai, "backend/package.json | frontend/package.json");
+  assert.equal(pazeidimai(radiniai).length, 0, "klaidingo kritimo būti negali");
+});
+
+test("BAZĖS APIMTIS: tos pačios eilutės `cd` nugali bloko bazę", () => {
+  const blokas = "```bash\ncd backend\ncd frontend && npm run test:e2e\n```";
+  const { radiniai } = surinkti(dok(blokas), APLINKA);
+
+  assert.equal(radiniai[0].baze, "frontend");
+  assert.equal(pazeidimai(radiniai).length, 0);
+});
+
+test("`npm run --prefix <katalogas>` - prefiksas yra taikinio bazė, ne taikinys", () => {
+  const { radiniai } = surinkti(dok("`npm run --prefix frontend test:e2e`"), APLINKA);
+
+  assert.equal(radiniai.length, 1);
+  assert.equal(radiniai[0].taikinys, "test:e2e", "`--prefix` negali būti palaikytas taikiniu");
+  assert.equal(radiniai[0].baze, "frontend");
+  assert.equal(pazeidimai(radiniai).length, 0);
+
+  const blogi = pazeidimai(surinkti(dok("`npm run --prefix backend test:e2e`"), APLINKA).radiniai);
+  assert.equal(blogi.length, 1, "prefiksas privalo susiaurinti paketą, ne tik būti praleistas");
 });

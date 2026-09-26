@@ -291,7 +291,7 @@ Testų aprėptis (backend):
 - `tests/jobStore.test.js` + `tests/jobStoreRedis.test.js` — job store (async, in-memory + Redis su fake klientu).
 
 Naršyklinis E2E (`frontend/e2e/`, Playwright): pilnas srautas įklijuoti tekstą →
-generuoti protokolą → eksportuoti DOCX (mock provideriai). Paleidimas: `npm run test:e2e`
+generuoti protokolą → eksportuoti DOCX (mock provideriai). Paleidimas: `npm run --prefix frontend test:e2e`
 (reikia `npx playwright install chromium`).
 
 GitHub Actions (`.github/workflows/ci.yml`) kiekvienam push/PR paleidžia: `npm ci` →
