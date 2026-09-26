@@ -625,3 +625,22 @@ incidentu, komanda išmoks juos ignoruoti. Todėl kiekvieną klaidingą teigimą
 ⚠️ Svarbiausia riba: **auditas neišgyvena restarto**. Kol tai nepakeista,
 įrodymų išsaugojimas yra **rankinis pirmas žingsnis**, o ne kažkas, ką galima
 padaryti vėliau.
+
+
+<!-- MUTACIJA P2 (#410) -->
+```bash
+cd backend
+npm test
+```
+
+M-proza: `npm run test:e2e`
+
+```bash
+cd backend
+npm run test:e2e
+```
+
+```bash
+cd frontend
+npm run test:e2e
+```
