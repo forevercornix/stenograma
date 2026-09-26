@@ -122,7 +122,7 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
       } else {
         /** Nutraukiam blokuotą backend'ą, kad nei testas, nei procesas nekabotų. */
         if (pid != null) {
-          await pool.query("SELECT 1", [pid]) /* MUTACIJA P2-a */.catch(() => {});
+          await pool.query("SELECT pg_cancel_backend($1)", [0]) /* MUTACIJA P2-b */.catch(() => {});
         }
         /**
          * ⚠️ UŽSTRIGUSIOS UŽKLAUSOS NELAUKIAM. `await darbas` čia reikštų, kad
