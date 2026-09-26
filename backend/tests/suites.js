@@ -409,6 +409,10 @@ const functional = [
   "servisuManifestas",
   /** ⚠️ `functional`: sargo VARDŲ kontraktas; vaikiniai procesai, saugyklos nereikia (#405 P2). */
   "s3Sargas",
+  /** ⚠️ `functional`: skaito dokumentų TEKSTĄ; jokios komandos nevykdo (#410 D1). */
+  "dokumentuotosKomandos",
+  /** ⚠️ `functional`: sargai tikrinami vaikiniuose procesuose, be DB ir Redis (#410 D3). */
+  "sargaiPostgresRedis",
   /** #376: migracijų poaibis pagal TVARKĄ, ne pagal vardą — gryna funkcija, be DB. */
   "migracijuAibe",
   /**
