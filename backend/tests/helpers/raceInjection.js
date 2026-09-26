@@ -96,6 +96,7 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
         )),
         ribaMs
       );
+      laikmatis.unref(); /* MUTACIJA M2 (#412) */
       /**
        * ⚠️ BE `unref()`. Su juo laikmatis nelaikytų event loop'o gyvo, ir jei
        * blokuota užklausa loop'o nelaiko (pvz. netikras pool'as), procesas
@@ -111,7 +112,7 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
     });
 
     try {
-      const rezultatas = await darbas; /* MUTACIJA M1 (#412): riba pašalinta */
+      const rezultatas = await Promise.race([darbas, riba]);
       clearTimeout(laikmatis);
       klientas.release();
       return rezultatas;
