@@ -317,6 +317,37 @@ function isristi(tipas, taikinys, cdBaze, { yra, npmTaikiniai }, darbovietė = n
 
 const pazeidimai = (radiniai) => radiniai.filter((r) => !r.egzistuoja);
 
+/**
+ * BESKONTEKSTĖS `npm` KOMANDOS — SĄMONINGAI SILPNESNĖ SĄLYGA (#410 follow-up).
+ *
+ * Kai dokumentas nenurodo paketo (nei `cd`, nei `--prefix`), taikinys tikrinamas
+ * abiejuose `package.json`. Tai reiškia, kad ginama savybė yra **„taikinys
+ * egzistuoja bent viename pakete"**, ne „komanda pasileistų ten, kur parašyta".
+ *
+ * ⚠️ KO ŠI SĄLYGA NEGALI PAGAUTI: teisingas taikinys, NE TAS paketas — pvz.
+ * `frontend` skriptas, dokumentuotas kaip `backend` instrukcija.
+ *
+ * ⚠️ RIZIKOS DYDIS IŠMATUOTAS (2026-09-26, `6cbbf01`): iš 56 beskonteksčių komandų
+ * 16 egzistuoja ABIEJUOSE paketuose, 40 — tik `backend`, ir **nė viena — tik
+ * `frontend`**. Tad šiandien nėra nė vienos beskonteksčio paketui specifinės
+ * komandos, kurią sąjunga praleistų neteisingai. Rizika lieka ATEIČIAI.
+ *
+ * ⚠️ NETEIGIAMA, KAD BESKONTEKSTĖ KOMANDA PATIKRINTA PILNAI. Ji patikrinta
+ * silpniau, ir būtent todėl jų skaičius spausdinamas bei tikrinamas TIKSLIAI:
+ * tyliai augantis skaičius būtų būdas susilpninti sąlygą nieko nekeičiant —
+ * ta pati logika kaip `~~` praleidimų skaitiklis.
+ *
+ * ⚠️ KODĖL NE „NUMATYTOJI BAZĖ PAGAL DOKUMENTO VIETĄ" (svarstyta ir ATMESTA).
+ * Toks sprendimas priimamas KATALOGUI, o ADR 155
+ * (`docs/decisions/155-postgres-authority.md:1111`) tai tiesiogiai draudžia:
+ * „Nė vienas failas neišbraukiamas iš išvesties pagal kategoriją. Sprendimas
+ * priimamas EILUTEI, ne rinkmenai." Be to išmatuota, kad 27 iš 56 gyvena repo
+ * šaknyje, kur katalogas apie paketą nesako nieko. Užrašoma čia, kad kitas
+ * skaitytojas šios priežasties neatrastų iš naujo.
+ */
+const beskontekstes = (radiniai) =>
+  radiniai.filter((r) => r.tipas === "npm" && r.baze !== "backend" && r.baze !== "frontend");
+
 /* ══════════════════════════════════════════════════════════════════════════
  * TIKROJI APLINKA
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -356,7 +387,8 @@ test("D1: kiekviena dokumentuota komanda turi EGZISTUOJANTĮ taikinį", () => {
   const { radiniai, praleistaSegmentu } = surinkti(repoDokumentai(), repoAplinka());
 
   console.log(
-    `[#410] komandų: ${radiniai.length} · praleista išbrauktų segmentų: ${praleistaSegmentu}`
+    `[#410] komandų: ${radiniai.length} · praleista išbrauktų segmentų: ${praleistaSegmentu}` +
+      ` · beskonteksčių \`npm\`: ${beskontekstes(radiniai).length}`
   );
 
   const blogi = pazeidimai(radiniai);
@@ -382,6 +414,40 @@ test("SARGAS NĖRA TUŠČIAS: aibė tikrai išvesta iš teksto", () => {
       `nerasta nė vienos \`${t}\` komandos - šablonas sugedęs`
     );
   }
+});
+
+/**
+ * ⚠️ TIKSLUS SKAIČIUS, NE „≥ 0" — TA PATI LOGIKA KAIP `~~` SKAITIKLIS.
+ *
+ * Beskontekstėms komandoms sargas tikrina SILPNESNĘ sąlygą. Jei jų skaičius gali
+ * augti tyliai, sąlygą galima susilpninti nieko nekeičiant sarge: pakanka rašyti
+ * naujus dokumentus be paketo. Skaičiaus pokytis privalo būti SĄMONINGAS.
+ */
+test("BESKONTEKSTĖS `npm` komandos: skaičius MATOMAS ir tikslus", () => {
+  const { radiniai } = surinkti(repoDokumentai(), repoAplinka());
+  const be = beskontekstes(radiniai);
+
+  assert.equal(
+    be.length,
+    56,
+    "pasikeitė beskonteksčių `npm` komandų skaičius - sargas joms tikrina tik " +
+      "„taikinys yra bent viename pakete\"; augimas turi būti sąmoningas sprendimas"
+  );
+});
+
+/**
+ * ⚠️ KONTROLĖ: skaitiklis skaičiuoja TAI, KĄ TEIGIA. Be jos „56" galėtų būti
+ * bet kokio filtro rezultatas - pvz. visų `npm` komandų arba nulio.
+ */
+test("BESKONTEKSTĖS: skaitiklis atskiria bazę turinčias nuo neturinčių", () => {
+  const suBaze = surinkti(dok("```bash\ncd backend\nnpm test\n```"), APLINKA);
+  assert.equal(beskontekstes(suBaze.radiniai).length, 0);
+
+  const prefiksu = surinkti(dok("`npm run --prefix frontend test:e2e`"), APLINKA);
+  assert.equal(beskontekstes(prefiksu.radiniai).length, 0);
+
+  const be = surinkti(dok("`npm test`"), APLINKA);
+  assert.equal(beskontekstes(be.radiniai).length, 1);
 });
 
 test("⚠️ `~~` praleidimų skaičius MATOMAS ir šiandien yra tikslus", () => {
