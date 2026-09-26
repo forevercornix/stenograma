@@ -625,3 +625,9 @@ incidentu, komanda išmoks juos ignoruoti. Todėl kiekvieną klaidingą teigimą
 ⚠️ Svarbiausia riba: **auditas neišgyvena restarto**. Kol tai nepakeista,
 įrodymų išsaugojimas yra **rankinis pirmas žingsnis**, o ne kažkas, ką galima
 padaryti vėliau.
+
+
+<!-- MUTACIJA M1/M2 (#410) -->
+M1: `docker compose -f docker-compose.nera-tokio.yml up -d`
+
+M2: `npm run nera-tokio-taikinio`
