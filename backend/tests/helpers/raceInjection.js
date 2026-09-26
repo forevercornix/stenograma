@@ -111,7 +111,7 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
     });
 
     try {
-      const rezultatas = await Promise.race([darbas, riba]);
+      const rezultatas = await darbas; /* MUTACIJA M1 */
       clearTimeout(laikmatis);
       klientas.release();
       return rezultatas;
