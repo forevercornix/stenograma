@@ -55,7 +55,7 @@ const VAIKO_KODAS = `
   /** ⚠️ Išvestis per \`exit\`, ne per \`then\`: mutacijos, kuriose pažadas NIEKADA
    *  neišsisprendžia, kitaip neduotų jokio parašo, ir M1/M2/M3 susilietų. */
   process.on("exit", () => {
-    process.stdout.write(JSON.stringify({ baigtis, ivykiai, gyveno: Date.now() - t0 }));
+    process.stdout.write(JSON.stringify({ baigtis, ivykiai, nutraukimas, gyveno: Date.now() - t0 }));
   });
 
   const klientas = {
@@ -69,9 +69,27 @@ const VAIKO_KODAS = `
     release(sunaikinti) { ivykiai.push(sunaikinti === true ? "release(true)" : "release()"); },
   };
 
+  /**
+   * ⚠️ ĮVYKIS PAGAL SQL, NE PAGAL PARAMETRĄ (Codex P2).
+   *
+   * Ankstesnė redakcija rašė "cancel:" + p[0] nežiūrėdama, KAS siunčiama — tad
+   * \`SELECT 1\` ar \`pg_terminate_backend\` būtų davę TĄ PATĮ parašą, ir valymo
+   * testas praeitų su nutraukimu, kurio nėra. Nežinoma užklausa dabar gauna savo
+   * įvykį, tad parašas pasikeičia, o ne tyliai sutampa.
+   */
+  let nutraukimas = null;
+
   const pool = {
     async connect() { return klientas; },
-    async query(sql, p) { ivykiai.push("cancel:" + p[0]); return { rows: [] }; },
+    async query(sql, p) {
+      if (/pg_cancel_backend/.test(sql)) {
+        nutraukimas = { sql, params: p };
+        ivykiai.push("cancel:" + p[0]);
+      } else {
+        ivykiai.push("nezinoma-uzklausa:" + String(sql).slice(0, 40));
+      }
+      return { rows: [] };
+    },
   };
 
   sukurtiInjektoriu(() => pool, ribaMs)("UPDATE x", [], "zondas").then(
@@ -194,6 +212,23 @@ test("#412 VALYMAS: po `pg_cancel_backend` jungtis sunaikinama NELAUKIANT užkla
 
   const cancelVieta = v.ivykiai.indexOf("cancel:4242");
   const releaseVieta = v.ivykiai.indexOf("release(true)");
+
+  /**
+   * ⚠️ TIKRINAMA, KAS SIUNČIAMA, NE TIK KAD KAŽKAS SIŲSTA.
+   *
+   * ⚠️ IR ČIA YRA DUBLIO RIBA: netikras pool'as gali įrodyti, KOKS SQL ir su kokiu
+   * parametru išsiųstas, bet NE tai, kad PostgreSQL užklausą realiai nutraukė —
+   * tam reikėtų gyvos jungties. Ta riba lieka sąmoningai.
+   *
+   * ⚠️ `pg_cancel_backend`, NE `pg_terminate_backend`: pirmasis nutraukia UŽKLAUSĄ
+   * (SQLSTATE 57014) palikdamas seansą, antrasis nužudo visą backend'ą. Injekcijai
+   * reikia nutraukti tik užstrigusią užklausą.
+   */
+  assert.deepEqual(
+    v.nutraukimas,
+    { sql: "SELECT pg_cancel_backend($1)", params: [4242] },
+    "privalo būti siunčiamas BŪTENT `pg_cancel_backend` su to backend'o pid"
+  );
 
   assert.notEqual(cancelVieta, -1, "užstrigęs backend'as privalo būti nutrauktas");
   assert.notEqual(releaseVieta, -1, "jungtis privalo būti sunaikinta, o ne grąžinta į pool'ą");
