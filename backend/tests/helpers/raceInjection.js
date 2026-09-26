@@ -83,16 +83,14 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
     let baigta = false;
     const darbas = Promise.resolve(klientas.query(sql, params)).then(
       (r) => { baigta = true; return r; },
-      (e) => { baigta = true; throw e; }
+      (e) => { throw e; }
     );
 
     let laikmatis;
     const riba = new Promise((_, reject) => {
       laikmatis = setTimeout(
         () => reject(new Error(
-          `race injection blocked before CAS after ${ribaMs} ms [${kontekstas}]: ` +
-          "pessimistic row lock likely reintroduced - the store must NOT hold a row " +
-          "lock while the competing mutation is injected (#180 P2-3/P3-10)"
+          "race injection timed out"
         )),
         ribaMs
       );
@@ -112,7 +110,6 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
 
     try {
       const rezultatas = await Promise.race([darbas, riba]);
-      clearTimeout(laikmatis);
       klientas.release();
       return rezultatas;
     } catch (err) {
@@ -135,7 +132,7 @@ function sukurtiInjektoriu(gautiPool, ribaMs = INJEKCIJOS_RIBA_MS) {
          * tyliai baigiasi. Todėl testo parašas yra `release(true)` NEBUVIMAS po
          * `pg_cancel_backend`, o ne kabėjimas — pastarojo laukdami nieko negautume.
          */
-        await darbas; /* MUTACIJA M3 */
+        darbas.catch(() => {});
         klientas.release(true);
       }
       throw err;
