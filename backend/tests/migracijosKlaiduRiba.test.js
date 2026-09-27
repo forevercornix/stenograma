@@ -32,7 +32,7 @@ process.env.LOG_LEVEL = "error";
  * Dublis su N kandidatų. Fiksuoja VISUS sakinius su parametrais — kitaip
  * „`failed` įrašo NĖRA" būtų tikrinama pagal tai, ko testas nemato.
  */
-function padirbtasPoolDaug(eiluciu = 1) {
+function padirbtasPoolDaug(eiluciu = 1, payload = { text: "x" }) {
   const sakiniai = [];
 
   const atsakymas = (sql) => {
@@ -42,7 +42,7 @@ function padirbtasPoolDaug(eiluciu = 1) {
         rowCount: eiluciu,
       };
     }
-    if (/SELECT\s+payload/.test(sql)) return { rows: [{ payload: { text: "x" } }], rowCount: 1 };
+    if (/SELECT\s+payload/.test(sql)) return { rows: [{ payload }], rowCount: 1 };
     return { rows: [], rowCount: 1 };
   };
 
@@ -201,6 +201,29 @@ test("#421 D3: eilutės lygio `put()` klaida lieka `failed`, ciklas TĘSIA", asy
   assert.equal(s.apdorota, 2, "abi eilutės gavo baigtį");
   assert.equal(s.nepavyko[PRIEZASTIS.SAUGYKLOS_KLAIDA], 2);
   assert.equal(pool.nesekmes().length, 2, "eilutės savybė PRIVALO palikti `failed`");
+});
+
+test("#421 D3: `payload` neatvaizduojamas lieka EILUTĖS savybe — partija tęsiasi", async () => {
+  /**
+   * ⚠️ DVI KLASĖS PRIVALO LIKTI ATSKIRIAMOS (D1 riba, D3).
+   *
+   * Neatvaizduojamas `payload` yra TOS eilutės savybė: kita eilutė su tvarkingu
+   * turiniu praeitų. Pavertus jį sisteminiu, vienas sugedęs įrašas sustabdytų
+   * visą partiją — t. y. #421 pataisa nuklystų į priešingą kraštutinumą.
+   *
+   * ⚠️ `NUL` simbolis parinktas todėl, kad jį atmeta `paruostiReiksme()` —
+   * patikra, kuri migratoriuje vyksta PRIEŠ registrą (1 žingsnis).
+   */
+  const pool = padirbtasPoolDaug(2, { text: "a\u0000b" });
+  const saugykla = padirbtaSaugykla();
+
+  const s = await migruoti(pool, saugykla, {});
+
+  assert.equal(s.nutraukta, false, "eilutės savybė partijos NENUTRAUKIA");
+  assert.equal(s.apdorota, 2);
+  assert.equal(s.nepavyko[PRIEZASTIS.PAYLOAD_NEATVAIZDUOJAMAS], 2);
+  assert.equal(pool.nesekmes().length, 2, "eilutės savybė PRIVALO palikti `failed`");
+  assert.equal(saugykla.irasai.put, 0, "riba tikrinama PRIEŠ rašymą");
 });
 
 // ---------------------------------------------------------------------------
