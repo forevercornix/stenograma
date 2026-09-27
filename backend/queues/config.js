@@ -112,6 +112,90 @@ function teigiamas(reiksme, numatytas = 0) {
  * pakeistų tikrovę, o testas liktų žalias su senuoju maksimumu. Naujas
  * prikėlimo kelias privalo atsirasti ČIA.
  */
+/**
+ * ⚠️ ĮVESTYS, IŠ KURIŲ SKAIČIUOJAMI HORIZONTAI (#419 D4).
+ *
+ * Sąrašas egzistuoja TIK pranešimui: kai horizontas negalioja, operatorius turi
+ * matyti VISĄ įėjimą, o ne vieną spėtą kaltininką. Kaltininko čia nespėliojama
+ * sąmoningai - `retry` sprogimas priklauso nuo DVIEJŲ reikšmių sandaugos
+ * (`QUEUE_MAX_ATTEMPTS` ir `QUEUE_BACKOFF_MS`), tad „kaltas X" būtų išvedimas.
+ *
+ * ⚠️ NUMATYTOSIOS REIKŠMĖS ČIA NEKARTOJAMOS. Efektyvi reikšmė imama iš jau
+ * suskaičiuotų `jobOptions`/`workerOptions`, ne iš antros numatytųjų kopijos:
+ * kopija nutoltų nuo `jobOptionsFor()` tyliai, ir pranešimas meluotų būtent
+ * tada, kai juo remiamasi.
+ */
+const HORIZONTO_IVESTYS = [
+  ["QUEUE_MAX_ATTEMPTS", (j) => j.attempts],
+  ["QUEUE_BACKOFF_MS", (j) => j.backoff && j.backoff.delay],
+  ["QUEUE_TTL_SECONDS", (j) => j.removeOnComplete && j.removeOnComplete.age],
+  ["QUEUE_STALLED_INTERVAL_MS", (j, w) => w.stalledInterval],
+  ["QUEUE_MAX_STALLED", (j, w) => w.maxStalledCount],
+  ["QUEUE_LOCK_DURATION_MS", (j, w) => w.lockDuration],
+];
+
+/**
+ * Atskira klasė, kad kvietėjas galėtų atskirti „konfigūracija negalioja" nuo
+ * bet kurios kitos klaidos, neanalizuodamas pranešimo teksto.
+ *
+ * ⚠️ PAVELDIMA IŠ `TypeError`, nes `teigiamas()` (:92) jau meta būtent jį: viena
+ * šeima reiškia, kad SUMOS klaida nesiskiria nuo DEDAMOSIOS klaidos, ir kvietėjui
+ * nereikia gaudyti dviejų dalykų ten, kur abu reiškia „konfigūracija taisytina".
+ * Šiandien nė vienas kvietėjas jų neatskiria - `deletionTombstones` `catch`
+ * (:573-579) gaudo viską be `instanceof`, tad hierarchija to kelio nekeičia.
+ */
+class NegaliojantisHorizontasKlaida extends TypeError {
+  constructor(pranesimas, negalioja) {
+    super(pranesimas);
+    this.name = "NegaliojantisHorizontasKlaida";
+    this.code = "QUEUE_HORIZON_INVALID";
+    /** Dydžių vardai, kurie negalioja - be reikšmių, kad logas liktų trumpas. */
+    this.negalioja = negalioja;
+  }
+}
+
+/**
+ * ⚠️ VALIDACIJA PRIE ŠALTINIO - TIK `NaN` IR `Infinity` (#419 D1).
+ *
+ * `teigiamas()` tikrina ĮVESTIS, bet horizontas skaičiuojamas PO jo:
+ * `retry += baze * 2 ** i`. Kai `i >= 1024`, `2 ** i` virsta `Infinity`, ir
+ * `baze > 0` duoda `Infinity`, o `baze === 0` - `0 * Infinity === NaN`. Tokia
+ * reikšmė keliauja į amžiaus predikatą, kur `NaN >= X` yra `false`, t. y.
+ * palyginimas TYLIAI nusprendžia priešingai, nei ketinta.
+ *
+ * ⚠️ KAS LIEKA NEDENGTA IR KODĖL. BAIGTINĖ, BET ABSURDIŠKA reikšmė (pvz.,
+ * `QUEUE_MAX_ATTEMPTS=60` → ~2.9e21 ms) ČIA PRAEINA. Tai SPRENDIMAS, ne spraga:
+ * viršutinės ribos šis repo niekur nefiksuoja, o išgalvota riba atrodytų kaip
+ * išvesta. Ta šaka yra fail-closed KITU mechanizmu - PostgreSQL `interval`
+ * tokio dydžio nepriima, sakinys meta, kvietėjas gaudo, ir nešalinama nieko.
+ * Tą patį trimis vietomis jau užrašo `utils/retentionSweeper.js` (:398) ir DU
+ * testai, kurie šitą elgseną TVIRTINA: `tests/auditRetention.test.js:1221` ir
+ * `tests/isipareigojimoTvora.integration.test.js:714`.
+ *
+ * ❌ Todėl NETEIGIAMA, kad horizontas „validuotas". Iš trijų gedimo klasių
+ * čia dengiamos dvi.
+ */
+function patikrintiHorizontus(horizontai, jobOptions, workerOptions, env) {
+  const negalioja = Object.entries(horizontai).filter(([, v]) => !Number.isFinite(v));
+
+  if (negalioja.length === 0) return horizontai;
+
+  const dydziai = negalioja.map(([k, v]) => `${k}=${v}`).join(", ");
+  const ivestys = HORIZONTO_IVESTYS.map(([vardas, imti]) => {
+    const zalia = env[vardas];
+    const efektyvi = imti(jobOptions, workerOptions);
+    return `${vardas}=${zalia === undefined ? "(nenustatyta)" : zalia} → ${efektyvi}`;
+  }).join("; ");
+
+  throw new NegaliojantisHorizontasKlaida(
+    `Neapskaičiuojami eilės prikėlimo horizontai: ${dydziai}. ` +
+      `Įvestys (aplinka → efektyvi reikšmė): ${ivestys}. ` +
+      "Konfigūracija privalo būti taisoma: su tokia reikšme amžiaus riba neapibrėžta, " +
+      "ir ištrynimo žyma galėtų būti pašalinta, kol job'as dar prikeliamas (#155, 7.5a / #419).",
+    negalioja.map(([k]) => k)
+  );
+}
+
 function revivalHorizonsMs(env = process.env) {
   const jobOptions = jobOptionsFor(env);
   const workerOptions = workerOptionsFor(env);
@@ -171,7 +255,33 @@ function revivalHorizonsMs(env = process.env) {
    * gaunant maksimumą. Pervadinus kiekvienas kvietėjas kertasi kompiliavimo
    * metu, ne tyliai.
    */
-  return { ...horizontai, nuoseklus, terminalus, horizonMs: nuoseklus + terminalus };
+  /** ⚠️ Tikrinami VISI aštuoni grąžinami dydžiai, ne vien `horizonMs` (#419 D1). */
+  return patikrintiHorizontus(
+    { ...horizontai, nuoseklus, terminalus, horizonMs: nuoseklus + terminalus },
+    jobOptions,
+    workerOptions,
+    env
+  );
+}
+
+/**
+ * ⚠️ FAIL-CLOSED PALEIDŽIANT (#419 D2).
+ *
+ * Kvietėjas nieko negrąžina ir nieko nekeičia - jis TIK meta. Egzistuoja tam,
+ * kad paleidimo taške matytųsi KETINIMAS: be jo ten stovėtų `revivalHorizonsMs()`
+ * su išmetamu rezultatu, ir pirmas skaitytojas (ar linter'is) tai palaikytų
+ * likučiu bei pašalintų.
+ *
+ * ⚠️ TIKRINAMA PRIEŠ PIRMĄ VEIKSMĄ, ne readiness patikroje. Readiness atsako
+ * „ar galiu aptarnauti"; čia klausimas kitas - procesas su tokia konfigūracija
+ * negali pakilti APSKRITAI, nes kiekvienas jo sprendimas dėl retencijos remtųsi
+ * neapibrėžta riba.
+ *
+ * ⚠️ NEDENGTA IR ČIA: baigtinė, bet absurdiška reikšmė praeina. Žr.
+ * `patikrintiHorizontus()` komentarą - apimtis susiaurinta sąmoningai.
+ */
+function patvirtintiHorizontusPaleidziant(env = process.env) {
+  revivalHorizonsMs(env);
 }
 
 /**
@@ -287,6 +397,8 @@ module.exports = {
   jobOptionsFor,
   workerOptionsFor,
   revivalHorizonsMs,
+  NegaliojantisHorizontasKlaida,
+  patvirtintiHorizontusPaleidziant,
   enqueue,
   MAX_JOB_DELAY_MS,
 };

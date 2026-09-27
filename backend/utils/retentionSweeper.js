@@ -372,10 +372,49 @@ async function _valytiRezultatoBandymus() {
   }
 
   const { revivalHorizonsMs } = require("../queues/config");
-  const horizontas = revivalHorizonsMs().horizonMs;
+
+  /**
+   * ⚠️ NUO #419 D1 ŠI FUNKCIJA META, O NE GRĄŽINA `NaN` - IR ELGESYS ČIA
+   * NESIKEIČIA SĄMONINGAI.
+   *
+   * Metimas paverstas TUO PAČIU praleidimu su tuo pačiu `attempt_sweep_skipped`
+   * warn'u, kurį #351 D4a įvedė, nes šio modulio kontraktas yra „netinkamas
+   * horizontas = žingsnis nevykdomas, `resultAttempts: null`", ne „šlavėjas
+   * sprogsta". Kitaip #419 tyliai pakeistų kaimyninį kontraktą, kurio jis
+   * neliečia, ir operatorius vietoj įvardyto praleidimo gautų klaidos eilutę
+   * suvestinėje.
+   *
+   * Klaidos pranešimas įdedamas į warn'ą - jis įvardija ir dydį (`retry=NaN`),
+   * ir visą įėjimą, t. y. daugiau, nei sargas turėjo iki tol.
+   */
+  let horizontas;
+
+  try {
+    horizontas = revivalHorizonsMs().horizonMs;
+  } catch (klaida) {
+    log.warn(
+      "Retencija: prikėlimo horizontas NETINKAMAS - rezultato bandymų šlavimas NEVYKDOMAS. " +
+        `Konfigūracija atmesta prie šaltinio: ${klaida.message}`,
+      {
+        stage: "attempt_sweep_skipped",
+        priezastis: "netinkamas prikėlimo horizontas",
+        klaida: klaida.name,
+      }
+    );
+    return { ...tuscias, nevykdyta: true };
+  }
 
   /**
    * ⚠️ NETINKAMAS HORIZONTAS = ŠLAVIMAS PRALEIDŽIAMAS, NE PRITEMPIAMAS (#351 D4a).
+   *
+   * ⚠️ NUO #419 ŠIS SARGAS NEBĖRA PIRMOJI GYNYBOS LINIJA, IR LIEKA SĄMONINGAI.
+   * `revivalHorizonsMs()` pati meta prie `NaN`/`Infinity`, o paleidimo taškai
+   * (`server.js`, `workers/index.js`, `scripts/erasure-marks.js`) tokio proceso
+   * nebeleidžia pakilti - t. y. čia atkeliauti jau neturėtų. Bet šitas modulis
+   * `require`-inamas ir tiesiogiai (testai, būsimi entrypoint'ai), o `< 0` šaka
+   * priklauso nuo `teigiamas()` elgesio, ne nuo šio sargo. Pašalinus jį, gynyba
+   * priklausytų nuo to, kad kiekvienas būsimas kvietėjas eina per paleidimo
+   * taškų sąrašą - prielaida, kurios niekas nevykdo.
    *
    * `teigiamas()` (`queues/config.js`) tikrina ĮVESTIS, bet `horizonMs` skaičiuojamas
    * PO jo: `retry += baze * 2 ** i`. Kai `i >= 1024`, `2 ** i` yra `Infinity`, ir tada

@@ -127,6 +127,13 @@ const privacy = [
    */
   "erasureMarks",
   "revivalHorizons",
+  /**
+   * #419: horizonto validacija prie šaltinio. Čia pat, kur `revivalHorizons`,
+   * ir dėl tos pačios priežasties - klausimas yra „kiek ilgai žyma privalo
+   * gyvuoti", o `NaN` riba tą garantiją panaikina tyliai. Be DB ir be Redis:
+   * paleidimo taškai tikrinami subprocesais, DB vartotojas - dubliu.
+   */
+  "horizontoValidacija",
   /** #342: starto užklausų ribos — fail-never režimas. Be DB. */
   "startPoolTimeouts",
   /** #342: cutover 5b blokas vykdomas su stub'intu `redis-cli`. Be Redis. */
