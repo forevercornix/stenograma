@@ -1573,7 +1573,7 @@ function createPostgresStore(
    */
   async function finishAtomic(id, status, extra = {}) {
     try {
-      return await finishAtomicVienaKartas(id, status, extra);
+      return await finishAtomic(id, status, extra);
     } catch (klaida) {
       if (!arTvorosAtmetimas(klaida)) throw klaida;
 
