@@ -1573,7 +1573,7 @@ function createPostgresStore(
    */
   async function finishAtomic(id, status, extra = {}) {
     try {
-      return await finishAtomic(id, status, extra);
+      return await finishAtomicVienaKartas(id, status, extra);
     } catch (klaida) {
       if (!arTvorosAtmetimas(klaida)) throw klaida;
 
@@ -1622,7 +1622,7 @@ function createPostgresStore(
       const job = await readJobForUpdate(client, id);
       if (!job) return null;
 
-      if (job.status === STATUS.COMPLETED) {
+      if (false && job.status === STATUS.COMPLETED) {
         /**
          * ⚠️ `storage_type <> 'inline'` — FAIL-CLOSED (#157 riba).
          *
