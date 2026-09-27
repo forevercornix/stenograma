@@ -692,7 +692,7 @@ function _classifyError(e, context = "job") {
    * šakoje žemiau: jos atsako į vienintelį klausimą, kurį operatorius turės — kiek
    * rašytojas kabojo ir kokia riba galiojo.
    */
-  if (domeninė && domeninė.name === "MUTACIJA-M5-nera-tokios-klaidos") {
+  if (domeninė && domeninė.name === "PavelavusioIsipareigojimoKlaida") {
     log.error("Rašytojas nebespėjo įsipareigoti per rašymo tvorą", {
       stage: "attempt_registry",
       context,
