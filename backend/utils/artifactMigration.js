@@ -573,7 +573,7 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
        * ⚠️ TRAUKIAMA ČIA, NE ATRANKOJE. Atmintyje vienu metu — daugiausia vienas
        * `payload`; žr. `PAYLOAD_SQL` komentarą apie ~20 GiB partiją.
        */
-      const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
+      const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]).catch((e) => { throw Object.assign(e, { neapgaubta: true }); });
       if (turinys.rowCount !== 1) {
         /** Eilutę jau perjungė kas nors kitas. Ne nesėkmė — `failed` apie ją meluotų. */
         suvestine.praleista += 1;

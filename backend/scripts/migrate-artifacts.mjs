@@ -241,7 +241,7 @@ try {
    * sulaužytų `pipe`: iki šiol `stdout` buvo validus JSON, ir automatika tuo remiasi.
    */
   if (e && e.code === "MIGRATION_BATCH_ABORTED" && e.suvestine) {
-    console.error(JSON.stringify(e.suvestine, null, 2));
+    console.log(JSON.stringify(e.suvestine, null, 2));
     console.error(`Migracija nutraukta: ${e.message}`);
     process.exitCode = 4;
   } else {
