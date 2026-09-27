@@ -320,6 +320,22 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
         kandidatai.kandidatai >= 1,
         "sisteminis gedimas negali išimti eilutės iš atrankos"
       );
+
+      /**
+       * ⚠️ FIKSŪRA IŠVALOMA, IR TAI TIESIOGINĖ D2 PASEKMĖ.
+       *
+       * Iki #421 ši eilutė likdavo `failed` ir dėl to IŠKRISDAVO iš
+       * `KANDIDATAI_SQL` — kiti šio rinkinio scenarijai, kviečiantys
+       * `migruoti()` be filtro, jos nebematydavo. Dabar ji sąmoningai lieka
+       * kandidatė, tad be valymo ji dalyvautų KITŲ scenarijų partijose ir
+       * iškreiptų jų skaičius (išmatuota CI 36356971025: `2 !== 1`).
+       *
+       * Valoma čia, o ne tų scenarijų pusėje: nuosavybė priklauso tam, kas
+       * fiksūrą sukūrė. `jobs` šalinimas kaskaduoja į `job_results`; bandymų
+       * lentelė FK neturi, tad šalinama atskirai.
+       */
+      await pool.query("DELETE FROM job_result_attempts WHERE job_id = $1", [String(jobId)]);
+      await pool.query("DELETE FROM jobs WHERE id = $1", [jobId]);
     });
 
     await t.test("`verify()` nepatvirtino → `vientisumas_nepatvirtintas`, objektas pašalintas", async () => {
