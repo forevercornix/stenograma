@@ -1622,7 +1622,7 @@ function createPostgresStore(
       const job = await readJobForUpdate(client, id);
       if (!job) return null;
 
-      if (job.status === STATUS.COMPLETED) {
+      if (job.status === "MUTACIJA-M3-nera-tokios-busenos") {
         /**
          * ⚠️ `storage_type <> 'inline'` — FAIL-CLOSED (#157 riba).
          *
