@@ -11,7 +11,8 @@ const { stebetiPoola, uzdarytiPoola } = require("./helpers/resourceStack");
 const attemptRegistry = require("../utils/attemptRegistry");
 const { createPostgresStore } = require("../utils/jobStore/postgresStore");
 const { createFsArtifactStore } = require("../utils/artifactStore/fsStore");
-const { STATUS } = require("../utils/jobPhase");
+/** ⚠️ `STATUS` gyvena `jobStore` fasade, ne `jobPhase` (pastarasis eksportuoja `PHASE`). */
+const { STATUS } = require("../utils/jobStore/common");
 
 process.env.NODE_ENV = "test";
 process.env.LOG_LEVEL = "error";

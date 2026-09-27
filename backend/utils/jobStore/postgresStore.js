@@ -1545,7 +1545,7 @@ function createPostgresStore(
 
   /** Tvoros atmetimas (#351): bandymui galutinis, job'ui — ne. */
   const arTvorosAtmetimas = (klaida) =>
-    false && Boolean(klaida) && klaida.code === "ATTEMPT_COMMIT_TOO_LATE"; /* MUTACIJA M1 */
+    Boolean(klaida) && klaida.code === "ATTEMPT_COMMIT_TOO_LATE";
 
   /**
    * VIENAS PAKARTOJIMAS PO TVOROS ATMETIMO (#415, D1/D3).
