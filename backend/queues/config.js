@@ -137,6 +137,12 @@ const HORIZONTO_IVESTYS = [
 /**
  * Atskira klasė, kad kvietėjas galėtų atskirti „konfigūracija negalioja" nuo
  * bet kurios kitos klaidos, neanalizuodamas pranešimo teksto.
+ *
+ * ⚠️ PAVELDIMA IŠ `TypeError`, nes `teigiamas()` (:92) jau meta būtent jį: viena
+ * šeima reiškia, kad SUMOS klaida nesiskiria nuo DEDAMOSIOS klaidos, ir kvietėjui
+ * nereikia gaudyti dviejų dalykų ten, kur abu reiškia „konfigūracija taisytina".
+ * Šiandien nė vienas kvietėjas jų neatskiria - `deletionTombstones` `catch`
+ * (:573-579) gaudo viską be `instanceof`, tad hierarchija to kelio nekeičia.
  */
 class NegaliojantisHorizontasKlaida extends TypeError {
   constructor(pranesimas, negalioja) {
