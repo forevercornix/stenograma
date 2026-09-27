@@ -29,8 +29,17 @@
  * operatorius manytų, kad darbas atliktas.
  *
  * Exit kodai:
- *   0 sėkmė · 1 naudojimo klaida · 2 procedūros klaida (fail-closed)
+ *   0 sėkmė · 1 naudojimo klaida · 2 procedūros klaida (partija net neprasidėjo)
  *   3 `run`: dalis eilučių NEPERKELTA — reikia operatoriaus peržiūros
+ *   4 `run`: partija NUTRAUKTA viduryje (#417)
+ *
+ * ⚠️ `3` ir `4` yra skirtingos situacijos. `3` reiškia, kad VISOS kandidatės
+ * apdorotos, o kai kurios nepavyko domeniškai. `4` reiškia, kad partija nutrūko po
+ * netikėtos klaidos ir DALIS kandidačių liko nepaliestos; `stdout` vis tiek gauna
+ * validų JSON su daline suvestine, o pranešimas eina į `stderr`.
+ *
+ * ⚠️ TAS PATS SĄRAŠAS YRA `docs/migrations.md`. Du autoritetai, sinchronizuojami
+ * RANKOMIS — sargo jiems nėra (#417 riba, kandidatas atskiram issue).
  */
 import pg from "pg";
 

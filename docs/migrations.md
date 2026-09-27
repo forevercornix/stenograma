@@ -321,6 +321,9 @@ Nutraukimo atveju `stdout` vis tiek gauna **validų JSON** su daline suvestine
 (`apdorota`, `nutraukta`, `nutraukimoPriezastis`), o klaidos pranešimas eina į
 `stderr`.
 
+⚠️ **Tas pats sąrašas yra `scripts/migrate-artifacts.mjs` antraštėje.** Du
+autoritetai, sinchronizuojami rankomis — sargo jiems nėra (#417 riba).
+
 Paleidimas saugus kartoti: perkelta eilutė nebėra `inline`, tad atranka jos
 nebemato. `--limit` grandinę galima leisti tiek kartų, kiek reikia.
 

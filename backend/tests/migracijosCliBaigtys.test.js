@@ -34,7 +34,7 @@ const SAKNIS = path.resolve(__dirname, "..");
  *
  * @param {number|0} sprogstaTies `0` — nesprogsta; kitaip tos eilės užklausa meta.
  */
-function paleistiCli({ eiluciu, sprogstaTies }) {
+function paleistiCli({ eiluciu, sprogstaTies, atrankaSprogsta = false, casNepavyksta = false }) {
   const saknis = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-cli-"));
   const pgDir = path.join(saknis, "pg");
   fs.mkdirSync(pgDir, { recursive: true });
@@ -44,12 +44,19 @@ function paleistiCli({ eiluciu, sprogstaTies }) {
     `
     const EILUCIU = ${eiluciu};
     const SPROGSTA = ${sprogstaTies};
+    const ATRANKA_SPROGSTA = ${atrankaSprogsta};
+    const CAS_NEPAVYKSTA = ${casNepavyksta};
     let payloadKvietimu = 0;
 
     const kandidatai = Array.from({ length: EILUCIU }, (_, i) => ({ job_id: "job-" + (i + 1) }));
 
     function atsakymas(sql) {
-      if (/FROM job_results r/.test(sql)) return { rows: kandidatai, rowCount: kandidatai.length };
+      if (/FROM job_results r/.test(sql)) {
+        if (ATRANKA_SPROGSTA) throw new Error("kandidatų atranka krito");
+        return { rows: kandidatai, rowCount: kandidatai.length };
+      }
+      /** CAS perjungimas: \`rowCount !== 1\` duoda domeninį \`EILUTE_PASIKEITE\`. */
+      if (CAS_NEPAVYKSTA && /UPDATE job_results/.test(sql)) return { rows: [], rowCount: 0 };
       if (/SELECT\\s+payload/.test(sql)) {
         payloadKvietimu += 1;
         if (payloadKvietimu === SPROGSTA) throw new Error("ryšys nutrūko");
@@ -149,4 +156,34 @@ test("#417 CLI: sėkminga partija - kodas 0, jokio `stderr` triukšmo", () => {
   assert.equal(suvestine.nutraukta, false);
   assert.equal(suvestine.nutraukimoPriezastis, null);
   assert.equal(suvestine.apdorota, 2);
+});
+
+
+/**
+ * ⚠️ KETURIOS BAIGTYS — KETURI TESTAI. Iki šio papildymo failas dengė tik `4` ir `0`, o
+ * matricos eilutė tvirtino visą schemą: `2` ir `3` keliai egzistavo (`:164`, `:234`), bet
+ * jų niekas nevykdė, tad nutraukimo kodą suvienodinus su bet kuriuo jų NIEKAS nebūtų
+ * kritę. Tai tos pačios klasės per didelis teiginys, kurį #417 ir taiso.
+ */
+test("#417 CLI: partija NET NEPRASIDĖJO - kodas 2, jokios suvestinės", () => {
+  const r = paleistiCli({ eiluciu: 3, sprogstaTies: 0, atrankaSprogsta: true });
+
+  assert.equal(r.kodas, 2, `laukta 2, gauta ${r.kodas}. stderr: ${r.stderr.slice(0, 300)}`);
+  assert.equal(r.stdout.trim(), "", "suvestinės NĖRA - partija neprasidėjo, nėra ko atsiskaityti");
+  assert.match(r.stderr, /kandidatų atranka krito/);
+});
+
+/**
+ * ⚠️ `3` REIŠKIA PRIEŠINGĄ DALYKĄ NEI `4`: visos kandidatės apdorotos, bet kai kurios
+ * nepavyko domeniškai. Čia CAS perjungimas grąžina `rowCount 0` → `EILUTE_PASIKEITE`.
+ */
+test("#417 CLI: visos apdorotos, dalis nepavyko domeniškai - kodas 3", () => {
+  const r = paleistiCli({ eiluciu: 2, sprogstaTies: 0, casNepavyksta: true });
+
+  assert.equal(r.kodas, 3, `laukta 3, gauta ${r.kodas}. stderr: ${r.stderr.slice(0, 300)}`);
+
+  const suvestine = JSON.parse(r.stdout);
+  assert.equal(suvestine.nutraukta, false, "domeninė nesėkmė NĖRA nutraukimas");
+  assert.equal(suvestine.apdorota, 2, "VISOS kandidatės apdorotos - tuo `3` skiriasi nuo `4`");
+  assert.ok(Object.values(suvestine.nepavyko).reduce((a, b) => a + b, 0) > 0);
 });
