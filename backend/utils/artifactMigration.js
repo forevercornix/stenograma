@@ -604,7 +604,6 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
        */
       suvestine.apdorota += 1;
     } catch (klaida) {
-      suvestine.apdorota += 1;
       suvestine.nutraukta = true;
       suvestine.nutraukimoPriezastis =
         klaida && klaida.message ? klaida.message : String(klaida);
