@@ -1575,6 +1575,7 @@ function createPostgresStore(
     try {
       return await finishAtomicVienaKartas(id, status, extra);
     } catch (klaida) {
+      throw klaida; /* MUTACIJA M1: pakartojimo nėra */
       if (!arTvorosAtmetimas(klaida)) throw klaida;
 
       const { createLogger } = require("../logger");
