@@ -446,6 +446,34 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
 }
 
 /**
+ * PARTIJA NUTRAUKTA, BET SUVESTINĖ IŠLIEKA (#417, D1).
+ *
+ * ⚠️ KODĖL KLAIDA, O NE ĮPRASTAS `return`. `migruoti()` šiandien meta, ir kvietėjų yra
+ * 24 (20 scenarijų, 3 kontrakto testai, CLI). Nė vienas jų netikrina naujo lauko, tad
+ * pavertus nutraukimą sėkmingu grąžinimu VISI jie nutrauktą partiją imtų laikyti sėkme.
+ * Exit kodas tai dengtų tik vienoje vietoje iš 24.
+ *
+ * ⚠️ PRANEŠIME PRIVALO LIKTI ORIGINALUS TEKSTAS. `artifactMigrationContract:304`
+ * reikalauja `/nutrūkimas/` atitikmens; apgaubus pranešimą savo tekstu be originalo,
+ * tas sargas kristų — tai būtų regresija, ne pataisa.
+ */
+class NutrauktaPartijosKlaida extends Error {
+  constructor(priezastis, suvestine) {
+    const originalus = priezastis && priezastis.message ? priezastis.message : String(priezastis);
+    super(
+      `Migracijos partija nutraukta po ${suvestine.apdorota}/${suvestine.kandidatai} eilučių: ` +
+        originalus
+    );
+    this.name = "NutrauktaPartijosKlaida";
+    this.code = "MIGRATION_BATCH_ABORTED";
+    this.cause = priezastis;
+
+    /** ⚠️ ATSKIRAS LAUKAS, ne `message` tekstas: suvestinė turi likti mašininė. */
+    this.suvestine = suvestine;
+  }
+}
+
+/**
  * Sausas paleidimas: ką migracija PADARYTŲ, nieko nekeisdama.
  *
  * ⚠️ NELIEČIA NEI SAUGYKLOS, NEI DB — net progreso lentelės. Dry-run, kuris rašo,
@@ -461,6 +489,17 @@ async function sausasPaleidimas(pool, { limit = 1000, retryFailed = false } = {}
 
   const suvestine = { kandidatai: rows.length, perkeltini: 0, praleista: 0, neatvaizduojami: [] };
 
+  /**
+   * ⚠️ ŠIS CIKLAS NUTRAUKIMO KONTRAKTO NETURI, IR TAI SĄMONINGA (#417).
+   *
+   * `migruoti()` nutrūkusi partija privalo atsiskaityti daline suvestine, nes ji jau
+   * spėjo PERKELTI eilučių. Sausas paleidimas nerašo NIEKO — nei į saugyklą, nei į DB,
+   * nei į progreso lentelę — tad nutrūkus nėra dalinio darbo, kurį būtų galima prarasti,
+   * ir nėra ko atsiskaityti.
+   *
+   * Užrašyta čia, o ne tik ataskaitoje: be šito kitas skaitytojas matys dvi
+   * struktūriškai vienodas vietas, iš kurių viena apgaubta, o kita ne, ir spręs iš naujo.
+   */
   for (const eilute of rows) {
     /** ⚠️ Ta pati baitinė riba kaip `migruoti()`: vienu metu — vienas `payload`. */
     const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
@@ -504,34 +543,72 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
     perkelta: 0,
     praleista: 0,
     nepavyko: {},
+
+    /**
+     * ⚠️ TRYS LAUKAI, KURIE ATSAKO Į „KIEK SPĖTA" (#417, D1).
+     *
+     * Be jų nutraukta partija operatoriui atrodo identiškai nepradėtai: eilutė lieka
+     * `inline`, progreso įrašo nėra (CAS `UPDATE` ir progreso `INSERT` yra TOJE PAČIOJE
+     * transakcijoje, tad `ROLLBACK` panaikina abu), ir vienintelis skirtumas — kiek
+     * darbo jau padaryta — dingsta kartu su klaida.
+     */
+    apdorota: 0,
+    nutraukta: false,
+    nutraukimoPriezastis: null,
   };
 
   for (const eilute of rows) {
     /**
-     * ⚠️ TRAUKIAMA ČIA, NE ATRANKOJE. Atmintyje vienu metu — daugiausia vienas
-     * `payload`; žr. `PAYLOAD_SQL` komentarą apie ~20 GiB partiją.
+     * ⚠️ APGAUBIAMA VISA EILUTĖS ITERACIJA, ĮSKAITANT `PAYLOAD_SQL` (#417, D4, atviras
+     * kl. 2). `payload` skaitymas yra UŽ `perkeltiEilute`, bet jo klaida yra ta pati DB
+     * klasė kaip registracijos ar transakcijos gedimas — ta pati priežastis (jungties
+     * netekimas) negali duoti dviejų skirtingų kontraktų.
+     *
+     * ⚠️ TAI NĖRA `try { … } catch { continue }` (D4 draudimas). Gaudoma TIK tam, kad
+     * prie klaidos prikabintume dalinę suvestinę; iškart po to metama toliau. Ciklas
+     * NETĘSIAMAS — sisteminis gedimas netampa N tyliais.
      */
-    const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
-    if (turinys.rowCount !== 1) {
-      /** Eilutę jau perjungė kas nors kitas. Ne nesėkmė — `failed` apie ją meluotų. */
-      suvestine.praleista += 1;
-      continue;
-    }
+    try {
+      /**
+       * ⚠️ TRAUKIAMA ČIA, NE ATRANKOJE. Atmintyje vienu metu — daugiausia vienas
+       * `payload`; žr. `PAYLOAD_SQL` komentarą apie ~20 GiB partiją.
+       */
+      const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
+      if (turinys.rowCount !== 1) {
+        /** Eilutę jau perjungė kas nors kitas. Ne nesėkmė — `failed` apie ją meluotų. */
+        suvestine.praleista += 1;
+        suvestine.apdorota += 1;
+        continue;
+      }
 
-    const rezultatas = await perkeltiEilute(pool, saugykla, {
-      jobId: eilute.job_id,
-      payload: turinys.rows[0].payload,
-      runId: paleidimas,
-    });
+      const rezultatas = await perkeltiEilute(pool, saugykla, {
+        jobId: eilute.job_id,
+        payload: turinys.rows[0].payload,
+        runId: paleidimas,
+      });
 
-    if (rezultatas.verdiktas === BUSENA.ATLIKTA) {
-      suvestine.perkelta += 1;
-    } else if (rezultatas.verdiktas === PRALEISTA) {
-      /** Job'as ištrintas tarp atrankos ir registracijos — ne nesėkmė (Codex B). */
-      suvestine.praleista += 1;
-    } else {
-      suvestine.nepavyko[rezultatas.priezastis] =
-        (suvestine.nepavyko[rezultatas.priezastis] || 0) + 1;
+      if (rezultatas.verdiktas === BUSENA.ATLIKTA) {
+        suvestine.perkelta += 1;
+      } else if (rezultatas.verdiktas === PRALEISTA) {
+        /** Job'as ištrintas tarp atrankos ir registracijos — ne nesėkmė (Codex B). */
+        suvestine.praleista += 1;
+      } else {
+        suvestine.nepavyko[rezultatas.priezastis] =
+          (suvestine.nepavyko[rezultatas.priezastis] || 0) + 1;
+      }
+
+      /**
+       * ⚠️ DIDINAMA TIK PO VERDIKTO. „Apdorota" reiškia „eilutė gavo baigtį", ne
+       * „eilutė buvo pradėta": nutraukusi eilutė į skaičių NEĮEINA, kitaip suvestinė
+       * teigtų darbą, kurio rezultato nėra.
+       */
+      suvestine.apdorota += 1;
+    } catch (klaida) {
+      suvestine.nutraukta = true;
+      suvestine.nutraukimoPriezastis =
+        klaida && klaida.message ? klaida.message : String(klaida);
+
+      throw new NutrauktaPartijosKlaida(klaida, suvestine);
     }
   }
 
@@ -539,6 +616,7 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
 }
 
 module.exports = {
+  NutrauktaPartijosKlaida,
   BUSENA,
   PRIEZASTIS,
   KANDIDATAI_SQL,

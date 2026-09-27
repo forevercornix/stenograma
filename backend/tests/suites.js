@@ -415,6 +415,8 @@ const functional = [
   "servisuManifestas",
   /** ⚠️ `functional`: sargo VARDŲ kontraktas; vaikiniai procesai, saugyklos nereikia (#405 P2). */
   "s3Sargas",
+  /** ⚠️ `functional`: CLI paleidžiamas subprocesu su `pg` dubliu per ESM krautuvą (#417 D2). */
+  "migracijosCliBaigtys",
   /** ⚠️ `functional`: skaito dokumentų TEKSTĄ; jokios komandos nevykdo (#410 D1). */
   "dokumentuotosKomandos",
   /** ⚠️ `functional`: sargai tikrinami vaikiniuose procesuose, be DB ir Redis (#410 D3). */
