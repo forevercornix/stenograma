@@ -243,7 +243,7 @@ try {
   if (e && e.code === "MIGRATION_BATCH_ABORTED" && e.suvestine) {
     console.log(JSON.stringify(e.suvestine, null, 2));
     console.error(`Migracija nutraukta: ${e.message}`);
-    process.exitCode = 4;
+    process.exitCode = 3;
   } else {
     console.error(
       e instanceof NaudojimoKlaida ? e.message : `Migracija nutraukta: ${e && e.message ? e.message : e}`

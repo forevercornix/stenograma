@@ -593,7 +593,8 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
         /** Job'as ištrintas tarp atrankos ir registracijos — ne nesėkmė (Codex B). */
         suvestine.praleista += 1;
       } else {
-        throw new Error(`domeninė nesėkmė: ${rezultatas.priezastis}`);
+        suvestine.nepavyko[rezultatas.priezastis] =
+          (suvestine.nepavyko[rezultatas.priezastis] || 0) + 1;
       }
 
       /**
