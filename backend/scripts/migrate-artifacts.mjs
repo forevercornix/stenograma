@@ -29,8 +29,17 @@
  * operatorius manytų, kad darbas atliktas.
  *
  * Exit kodai:
- *   0 sėkmė · 1 naudojimo klaida · 2 procedūros klaida (fail-closed)
+ *   0 sėkmė · 1 naudojimo klaida · 2 procedūros klaida (partija net neprasidėjo)
  *   3 `run`: dalis eilučių NEPERKELTA — reikia operatoriaus peržiūros
+ *   4 `run`: partija NUTRAUKTA viduryje (#417)
+ *
+ * ⚠️ `3` ir `4` yra skirtingos situacijos. `3` reiškia, kad VISOS kandidatės
+ * apdorotos, o kai kurios nepavyko domeniškai. `4` reiškia, kad partija nutrūko po
+ * netikėtos klaidos ir DALIS kandidačių liko nepaliestos; `stdout` vis tiek gauna
+ * validų JSON su daline suvestine, o pranešimas eina į `stderr`.
+ *
+ * ⚠️ TAS PATS SĄRAŠAS YRA `docs/migrations.md`. Du autoritetai, sinchronizuojami
+ * RANKOMIS — sargo jiems nėra (#417 riba, kandidatas atskiram issue).
  */
 import pg from "pg";
 
@@ -228,10 +237,28 @@ try {
   pool = new Pool(pgJungtiesNustatymai());
   process.exitCode = await vykdyti(pool);
 } catch (e) {
-  console.error(
-    e instanceof NaudojimoKlaida ? e.message : `Migracija nutraukta: ${e && e.message ? e.message : e}`
-  );
-  process.exitCode = e instanceof NaudojimoKlaida ? e.kodas : 2;
+  /**
+   * ⚠️ NUTRAUKTA PARTIJA TURI SAVO BAIGTĮ (#417, D2).
+   *
+   * `2` reiškia „procedūros klaida" — kai nepavyko net pradėti (blogas
+   * `ARTIFACT_STORE_BACKEND`, nepasiekiama DB). `4` reiškia „partija pradėta ir
+   * nutrūko VIDURYJE", ir tai kita operatoriaus situacija: dalis eilučių jau perkelta,
+   * o dalis kandidačių liko nepaliestos. `3` čia netinka — jis reiškia PRIEŠINGĄ
+   * dalyką: VISOS eilutės apdorotos, kai kurios nepavyko domeniškai.
+   *
+   * ⚠️ DALINĖ SUVESTINĖ EINA Į `stdout`, pranešimas — į `stderr`. Suvestinė į `stderr`
+   * sulaužytų `pipe`: iki šiol `stdout` buvo validus JSON, ir automatika tuo remiasi.
+   */
+  if (e && e.code === "MIGRATION_BATCH_ABORTED" && e.suvestine) {
+    console.log(JSON.stringify(e.suvestine, null, 2));
+    console.error(`Migracija nutraukta: ${e.message}`);
+    process.exitCode = 4;
+  } else {
+    console.error(
+      e instanceof NaudojimoKlaida ? e.message : `Migracija nutraukta: ${e && e.message ? e.message : e}`
+    );
+    process.exitCode = e instanceof NaudojimoKlaida ? e.kodas : 2;
+  }
 } finally {
   if (pool) await pool.end().catch(() => {});
 }

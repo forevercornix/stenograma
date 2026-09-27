@@ -445,3 +445,157 @@ test("STRUKTŪRINĖ SARGYBA: CLI neturi savo orkestracijos", () => {
     "CLI tiesiogiai liečia registrą — tvarka turi gyventi VIENOJE vietoje"
   );
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #417: NUTRAUKTA PARTIJA ATSISKAITO
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ KĄ ŠIE TESTAI GINA. Iki #417 netikėta klaida vienoje eilutėje nutraukdavo visą
+ * partiją ir suvestinė dingdavo kartu: operatorius nesužinodavo, kiek eilučių jau
+ * perkelta. Eilutė lieka `inline`, o progreso įrašo nėra (CAS `UPDATE` ir progreso
+ * `INSERT` yra toje pačioje transakcijoje), tad nutraukta partija atrodo identiškai
+ * nepradėtai.
+ *
+ * ⚠️ `migruoti()` TEBEMETA, ir tai užrakinta: kvietėjų yra 24, nė vienas jų netikrina
+ * naujo lauko, tad įprastas `return` nutrauktą partiją paverstų sėkme 23 vietose.
+ */
+
+/** Pool'as, kurio N-oji eilutė sprogsta netikėta klaida. */
+function partijosPool({ eiluciu, sprogstaTies, sprogimas = "ryšys nutrūko" }) {
+  const irasai = { sakiniai: [], atlaisvinta: 0 };
+  let payloadKvietimu = 0;
+
+  const kandidatai = Array.from({ length: eiluciu }, (_, i) => ({ job_id: `job-${i + 1}` }));
+
+  const atsakymas = (sql) => {
+    if (/FROM job_results r/.test(sql)) return { rows: kandidatai, rowCount: kandidatai.length };
+    if (/SELECT\s+payload/.test(sql)) {
+      payloadKvietimu += 1;
+      if (payloadKvietimu === sprogstaTies) throw new Error(sprogimas);
+      return { rows: [{ payload: { text: `x${payloadKvietimu}` } }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 1 };
+  };
+
+  const client = {
+    async query(sql) {
+      irasai.sakiniai.push(String(sql).trim().split(/\s+/)[0].toUpperCase());
+      return atsakymas(String(sql));
+    },
+    release() { irasai.atlaisvinta += 1; },
+  };
+
+  return {
+    irasai,
+    async query(sql) { return atsakymas(String(sql)); },
+    async connect() { return client; },
+  };
+}
+
+test("#417 D1: nutraukta partija neša DALINĘ suvestinę", async () => {
+  const pool = partijosPool({ eiluciu: 5, sprogstaTies: 3 });
+  const saugykla = padirbtaSaugykla();
+
+  const klaida = await migruoti(pool, saugykla, {}).then(
+    () => null,
+    (e) => e
+  );
+
+  assert.ok(klaida, "partija PRIVALO nutrūkti, ne grąžinti suvestinę");
+  assert.equal(klaida.code, "MIGRATION_BATCH_ABORTED");
+  assert.ok(klaida.suvestine, "D1: suvestinė privalo pasiekti operatorių");
+
+  assert.equal(klaida.suvestine.nutraukta, true);
+  assert.equal(klaida.suvestine.kandidatai, 5);
+  assert.equal(klaida.suvestine.apdorota, 2, "dvi eilutės spėtos apdoroti prieš sprogimą");
+  assert.match(klaida.suvestine.nutraukimoPriezastis, /ryšys nutrūko/);
+
+  /** ⚠️ Originali klaida privalo likti pasiekiama — be jos priežastis dingsta. */
+  assert.equal(klaida.cause.message, "ryšys nutrūko");
+});
+
+/**
+ * ⚠️ M2 TAIKINYS: jei nutraukimas taptų įprastu `return`, 23 kvietėjai iš 24 nutrauktą
+ * partiją imtų laikyti sėkme. Fatal semantika yra kontraktas, ne stilius.
+ */
+test("#417 D1: nutraukimas lieka FATAL - `migruoti()` atmeta pažadą", async () => {
+  const pool = partijosPool({ eiluciu: 3, sprogstaTies: 2 });
+
+  await assert.rejects(
+    () => migruoti(pool, padirbtaSaugykla(), {}),
+    (e) => e.name === "NutrauktaPartijosKlaida" && e.suvestine.nutraukta === true
+  );
+});
+
+/**
+ * ⚠️ M6 TAIKINYS: `PAYLOAD_SQL` skaitymas yra UŽ `perkeltiEilute`, tad jį lengva palikti
+ * neapgaubtą — tada klaida pasiektų kvietėją be suvestinės, nors visos kitos DB klaidos
+ * ją neša. Ta pati priežastis negali duoti dviejų kontraktų.
+ */
+test("#417 D4: `PAYLOAD_SQL` klaida traktuojama IDENTIŠKAI", async () => {
+  const pool = partijosPool({ eiluciu: 4, sprogstaTies: 1, sprogimas: "payload SELECT krito" });
+
+  const klaida = await migruoti(pool, padirbtaSaugykla(), {}).then(() => null, (e) => e);
+
+  assert.equal(klaida.code, "MIGRATION_BATCH_ABORTED", "ir šis kelias privalo nešti suvestinę");
+  assert.equal(klaida.suvestine.apdorota, 0, "sprogo ties pirmąja - nė viena neapdorota");
+  assert.match(klaida.suvestine.nutraukimoPriezastis, /payload SELECT krito/);
+});
+
+/**
+ * ⚠️ M3 TAIKINYS: domeninė nesėkmė ir netikėta klaida yra DVI KLASĖS. Pavertus domeninį
+ * verdiktą permetimu, viena nepavykusi eilutė nutrauktų partiją — tiksliai tas elgesys,
+ * kurį #417 taiso, tik iš kitos pusės.
+ */
+test("#417 D5: domeninė nesėkmė TĘSIA ciklą, ne nutraukia", async () => {
+  const pool = partijosPool({ eiluciu: 3, sprogstaTies: 0 });
+  const saugykla = padirbtaSaugykla();
+  saugykla.verify = async () => ({ ok: false, exists: true, bytes: 1, checksum: "a".repeat(64), nepriklausomas: true });
+
+  const s = await migruoti(pool, saugykla, {});
+
+  assert.equal(s.nutraukta, false, "domeninė nesėkmė NĖRA nutraukimas");
+  assert.equal(s.nutraukimoPriezastis, null);
+  assert.equal(s.apdorota, 3, "visos trys eilutės gavo baigtį");
+  assert.ok(Object.values(s.nepavyko).reduce((a, b) => a + b, 0) > 0, "kontrolė: nesėkmių tikrai buvo");
+});
+
+/**
+ * ⚠️ M7 TAIKINYS. „Apdorota" reiškia „eilutė gavo baigtį". Skaičiuojant ir nutrūkusią,
+ * suvestinė teigtų darbą, kurio rezultato nėra — operatorius manytų, kad ta eilutė jau
+ * sutvarkyta, ir jos nebeieškotų.
+ */
+test("#417 SKAITIKLIAI: mišri partija - kiekvienas skaičius atitinka faktą", async () => {
+  const pool = partijosPool({ eiluciu: 4, sprogstaTies: 4 });
+  const saugykla = padirbtaSaugykla();
+
+  /** Antra eilutė - domeninė nesėkmė; likusios praeina. */
+  let put = 0;
+  const tikrasisVerify = saugykla.verify;
+  saugykla.verify = async (...a) => {
+    put += 1;
+    if (put === 2) return { ok: false, exists: true, bytes: 1, checksum: "a".repeat(64), nepriklausomas: true };
+    return tikrasisVerify(...a);
+  };
+
+  const klaida = await migruoti(pool, saugykla, {}).then(() => null, (e) => e);
+  const s = klaida.suvestine;
+
+  assert.equal(s.kandidatai, 4);
+  assert.equal(s.apdorota, 3, "nutrūkusi eilutė į `apdorota` NEĮEINA");
+  assert.equal(s.perkelta, 2);
+  assert.equal(Object.values(s.nepavyko).reduce((a, b) => a + b, 0), 1);
+  assert.equal(s.perkelta + s.praleista + Object.values(s.nepavyko).reduce((a, b) => a + b, 0), s.apdorota,
+    "skaitikliai privalo sudėti į `apdorota` - kitaip vienas jų meluoja");
+});
+
+test("#417 KONTROLĖ: įprastas baigimas - `nutraukta: false`, `apdorota` = visos", async () => {
+  const pool = partijosPool({ eiluciu: 3, sprogstaTies: 0 });
+
+  const s = await migruoti(pool, padirbtaSaugykla(), {});
+
+  assert.equal(s.nutraukta, false);
+  assert.equal(s.nutraukimoPriezastis, null);
+  assert.equal(s.apdorota, 3);
+});

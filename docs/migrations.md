@@ -310,9 +310,19 @@ DATABASE_URL=... ARTIFACT_STORE_BACKEND=fs      node scripts/migrate-artifacts.m
 DATABASE_URL=...                                node scripts/migrate-artifacts.mjs status
 ```
 
-Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida ·
-**`3` dalis eilučių neperkelta — reikia peržiūros** (`status` parodo, kurios ir
-kodėl).
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida (partija
+net neprasidėjo) · **`3` dalis eilučių neperkelta — reikia peržiūros** (`status`
+parodo, kurios ir kodėl) · **`4` partija NUTRAUKTA viduryje** (#417).
+
+⚠️ `3` ir `4` yra skirtingos situacijos. `3` reiškia, kad **visos** kandidatės
+apdorotos, o kai kurios nepavyko domeniškai. `4` reiškia, kad partija nutrūko po
+netikėtos klaidos (DB gedimas ar pan.) ir **dalis kandidačių liko nepaliestos**.
+Nutraukimo atveju `stdout` vis tiek gauna **validų JSON** su daline suvestine
+(`apdorota`, `nutraukta`, `nutraukimoPriezastis`), o klaidos pranešimas eina į
+`stderr`.
+
+⚠️ **Tas pats sąrašas yra `scripts/migrate-artifacts.mjs` antraštėje.** Du
+autoritetai, sinchronizuojami rankomis — sargo jiems nėra (#417 riba).
 
 Paleidimas saugus kartoti: perkelta eilutė nebėra `inline`, tad atranka jos
 nebemato. `--limit` grandinę galima leisti tiek kartų, kiek reikia.
