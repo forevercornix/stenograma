@@ -568,10 +568,12 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
      * prie klaidos prikabintume dalinę suvestinę; iškart po to metama toliau. Ciklas
      * NETĘSIAMAS — sisteminis gedimas netampa N tyliais.
      */
-    /* MUTACIJA M6: `PAYLOAD_SQL` iškelta UŽ apgaubimo. */
-    const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
-
     try {
+      /**
+       * ⚠️ TRAUKIAMA ČIA, NE ATRANKOJE. Atmintyje vienu metu — daugiausia vienas
+       * `payload`; žr. `PAYLOAD_SQL` komentarą apie ~20 GiB partiją.
+       */
+      const turinys = await pool.query(PAYLOAD_SQL, [eilute.job_id]);
       if (turinys.rowCount !== 1) {
         /** Eilutę jau perjungė kas nors kitas. Ne nesėkmė — `failed` apie ją meluotų. */
         suvestine.praleista += 1;
