@@ -1543,7 +1543,74 @@ function createPostgresStore(
   /** Vidinis ženklas: external pakartojimas yra no-op, o job'as hidratuojamas PO transakcijos. */
   const EXTERNAL_HIDRATUOTI = Symbol("external-hidratuoti");
 
+  /** Tvoros atmetimas (#351): bandymui galutinis, job'ui — ne. */
+  const arTvorosAtmetimas = (klaida) =>
+    Boolean(klaida) && klaida.code === "ATTEMPT_COMMIT_TOO_LATE";
+
+  /**
+   * VIENAS PAKARTOJIMAS PO TVOROS ATMETIMO (#415, D1/D3).
+   *
+   * ⚠️ KODĖL PAKARTOJIMAS APSKRITAI TEISĖTAS. Tvora atmeta BANDYMĄ, ne JOB'Ą: ji
+   * remiasi bandymo `created_at`, tad naujas bandymas su tuo pačiu jau apskaičiuotu
+   * rezultatu gauna naują laiką ir tvorą praeina. Iki #415 vietoj to būdavo
+   * perskaičiuojamas visas darbas — transkripcijos job'ui tai valandos.
+   *
+   * ⚠️ PAKARTOJIMAS EINA PER VISĄ `finishAtomicVienaKartas` (D2), ne trumpesniu keliu
+   * į `registruoti → put → isipareigoti`. Lėtas rašytojas galėjo būti pakeistas, o
+   * `readJobForUpdate` užraktas plius `status === COMPLETED` šaka yra VIENINTELIS
+   * dalykas, skiriantis zombį nuo teisėto vykdytojo. Kvito turėjimas to nekeičia.
+   *
+   * ⚠️ TIKSLIAI VIENAS, IR TAI STRUKTŪRA, NE DRAUSMĖ: du kvietimai, jokio ciklo.
+   * Jei ir antrasis bandymas per lėtas, problema nebe laike, o rašytojo trukmėje —
+   * ir klaida keliauja toliau su `neatkartojama: true`, tad worker'is procesoriaus
+   * nebepaleidžia (D3).
+   *
+   * ⚠️ SENOJO BANDYMO VALYMAS JAU ĮVYKĘS: `finishAtomicVienaKartas` `finally`
+   * (`if (!isipareigota) await isvalytiBandyma(rasymas)`) pašalina objektą ir pažymi
+   * registro eilutę dar prieš mums pamatant klaidą. Naujas kvietimas gauna NAUJĄ
+   * `attemptId` ir NAUJĄ raktą iš `paruostiExternalRasyma()` — perpanaudojimą #375
+   * `UNIQUE (storage_type, storage_key)` vis tiek atmestų.
+   */
   async function finishAtomic(id, status, extra = {}) {
+    try {
+      return await finishAtomicVienaKartas(id, status, extra);
+    } catch (klaida) {
+      if (!arTvorosAtmetimas(klaida)) throw klaida;
+
+      const { createLogger } = require("../logger");
+      const log = createLogger("postgres-store");
+
+      log.warn("Tvora atmetė bandymą - kartojama VIENĄ kartą su nauju bandymu", {
+        stage: "finish_fence_retry",
+        jobId: String(id),
+        attemptId: klaida.attemptId,
+        tvoraMs: klaida.tvoraMs,
+      });
+
+      const pradzia = Date.now();
+      const rezultatas = await finishAtomicVienaKartas(id, status, extra);
+
+      /**
+       * ⚠️ SĖKMĖ IRGI SKELBIAMA (#415, D6). Rašytojas, kabojęs ilgiau nei tvora, yra
+       * signalas net tada, kai rezultatas išsaugotas: be šios eilutės operatorius
+       * matytų tik tylą ir nesužinotų, kad sistema vos spėjo.
+       *
+       * ⚠️ ATSKIRAS `stage` NUO ATMETIMO. Taip loge matyti, kuo baigėsi: yra
+       * `finish_fence_retry` be poros → pakartojimas irgi atmestas (ir tada klaidą
+       * aprašo `jobRunner` šaka); yra pora → pakartojimas pavyko.
+       */
+      log.warn("Pakartojimas po tvoros atmetimo PAVYKO", {
+        stage: "finish_fence_retry_ok",
+        jobId: String(id),
+        atmestasAttemptId: klaida.attemptId,
+        pakartojimoTrukmeMs: Date.now() - pradzia,
+      });
+
+      return rezultatas;
+    }
+  }
+
+  async function finishAtomicVienaKartas(id, status, extra = {}) {
     const jobPhase = require("../jobPhase");
     const attemptRegistry = require("../attemptRegistry");
 
