@@ -232,18 +232,26 @@ test("#415 D2: kitas vykdytojas baigė tarp bandymų - nugalėtojo rezultatas NE
         `UPDATE jobs SET status = 'completed', updated_at = now() WHERE id = $1`,
         [jobId]
       );
+      /** ⚠️ `job_results` NETURI `updated_at` — tik `created_at` (migracija 1755000000000). */
       await pool.query(
-        `INSERT INTO job_results (job_id, payload, storage_type, created_at, updated_at)
-         VALUES ($1, $2::jsonb, 'inline', now(), now())`,
+        `INSERT INTO job_results (job_id, payload, storage_type, created_at)
+         VALUES ($1, $2::jsonb, 'inline', now())`,
         [jobId, JSON.stringify({ text: "SVETIMAS nugalėtojas" })]
       );
     }
     return r;
   };
 
+  /**
+   * ⚠️ GAUDOMA SIAURAI. Platus `.catch(() => null)` paslėpė seam'o SQL klaidą ir testas
+   * krito ne ten, kur atrodė — tiksliai tos klasės tylus gedimas, kurį #415 uždaro.
+   */
   await store
     .finishAtomic(jobId, STATUS.COMPLETED, { result: { text: "mūsų vėlyvas rezultatas" } })
-    .catch(() => null);
+    .catch((e) => {
+      if (e && (e.code === "ATTEMPT_COMMIT_TOO_LATE" || e.code === "RESULT_CONFLICT")) return null;
+      throw e;
+    });
 
   const { rows } = await pool.query(
     "SELECT payload, storage_type FROM job_results WHERE job_id = $1",
