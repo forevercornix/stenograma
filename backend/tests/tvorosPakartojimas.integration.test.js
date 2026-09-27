@@ -219,15 +219,29 @@ test("#415 D2: kitas vykdytojas baigė tarp bandymų - nugalėtojo rezultatas NE
     bandymai.push(args);
 
     if (bandymai.length === 1) {
-      /** Pirmą bandymą seniname, kad tvora jį atmestų. */
+      /** Pirmą bandymą seniname, kad tvora jį atmestų ir prasidėtų PAKARTOJIMAS. */
       await pool.query(
         `UPDATE job_result_attempts
             SET created_at = clock_timestamp() - ($2::double precision * INTERVAL '1 millisecond')
           WHERE attempt_id = $1`,
         [args.attemptId, MAX + 60_000]
       );
+    }
 
-      /** …ir SVETIMAS vykdytojas job'ą užbaigia inline, kol mūsų bandymas dar gyvas. */
+    /**
+     * ⚠️ SVETIMAS UŽBAIGIMAS ĮTERPIAMAS PER ANTRĄ REGISTRACIJĄ, NE PIRMĄ (Codex P2).
+     *
+     * `registruoti()` vyksta `paruostiExternalRasyma()` metu — PRIEŠ transakciją. Įterpus
+     * per pirmą kvietimą, PIRMOJI transakcija iškart matytų `status === COMPLETED` ir
+     * grąžintų `RESULT_CONFLICT` nepasiekusi `isipareigoti()`: tvora nesuveiktų,
+     * pakartojimo nebūtų, o pirmo bandymo pasenimas liktų nepanaudotas. Testas tada gintų
+     * „nugalėtojas neperrašomas", bet NE tai, ką skelbia — jei pakartojimas nustotų iš
+     * naujo imti užraktą, jis liktų žalias.
+     *
+     * Antra registracija vyksta PO tvoros atmetimo ir PRIEŠ pakartojimo transakciją —
+     * tiksliai tas langas, kuriame svetimas vykdytojas gali baigti.
+     */
+    if (bandymai.length === 2) {
       await pool.query(
         `UPDATE jobs SET status = 'completed', updated_at = now() WHERE id = $1`,
         [jobId]
@@ -256,6 +270,12 @@ test("#415 D2: kitas vykdytojas baigė tarp bandymų - nugalėtojo rezultatas NE
   const { rows } = await pool.query(
     "SELECT payload, storage_type FROM job_results WHERE job_id = $1",
     [jobId]
+  );
+
+  assert.equal(
+    bandymai.length,
+    2,
+    "tvora PRIVALO būti suveikusi ir pakartojimas įvykęs - kitaip testas gina ne tai, ką skelbia"
   );
 
   assert.equal(rows.length, 1, "dublikato būti negali");

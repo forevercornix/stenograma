@@ -81,7 +81,17 @@ test(
 
     queueConnection = createQueueConnection();
     queue = new Queue(queueName, { connection: queueConnection });
-    await queue.add("protocol", { jobId: job.id, payload: { transcript: "tekstas" } }, { jobId: job.id });
+    /**
+     * ⚠️ `attempts: 2` — BE JO TESTAS PRAEITŲ TUŠČIAI (Codex P2). Numatytoji BullMQ
+     * reikšmė leidžia VIENĄ bandymą, tad procesoriaus kvietimų liktų 1 ir be
+     * `UnrecoverableError`, o `attemptsMade === 1` patvirtintų numatytąją reikšmę, ne
+     * grandinės sustabdymą. Forma pagal `artifactUnrecoverable.integration:64`.
+     */
+    await queue.add(
+      "protocol",
+      { jobId: job.id, payload: { transcript: "tekstas" } },
+      { jobId: job.id, attempts: 2, backoff: { type: "fixed", delay: 50 } }
+    );
 
     let procesoriausKvietimu = 0;
 
