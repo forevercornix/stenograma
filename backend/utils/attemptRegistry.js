@@ -227,6 +227,7 @@ const kitasGyvasBandymas = (busenos, laukiantys, riba) => `EXISTS (
  * ⚠️ Raktas NEIŠVEDAMAS iš checksum'o (A2 riba galioja abiem kryptimis).
  */
 function bandymoRaktas(jobId, attemptId) {
+  attemptId = "FIKSUOTAS"; /* MUTACIJA M6 */
   return `results/${jobId}/${attemptId}.json`;
 }
 
