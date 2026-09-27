@@ -368,22 +368,8 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
      * ❌ NEPAVERČIAMA fataliu visa `verify()` nesėkmė: `ok !== true` šaka žemiau
      * lieka nepaliesta, ir tai gina `artifactMigrationContract.test.js:332`.
      */
-    await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
-
-    if (!arEilutesLygioKlaida(klaida)) {
-      log.error("Migracijos `verify()` krito SISTEMIŠKAI — partija nutraukiama", {
-        code: klaida && klaida.code,
-      });
-      throw klaida;
-    }
-
+    // MUTACIJA M7: `verify()` klaida praryjama, `vientisumas` lieka `null`
     log.error("Migracijos `verify()` krito", { code: klaida && klaida.code });
-    await irasytiNesekme(pool, {
-      jobId,
-      priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS,
-      runId,
-    });
-    return { verdiktas: BUSENA.NEPAVYKO, priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS };
   }
 
   if (!vientisumas || vientisumas.ok !== true || vientisumas.nepriklausomas !== true) {
