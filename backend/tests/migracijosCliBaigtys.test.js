@@ -34,7 +34,13 @@ const SAKNIS = path.resolve(__dirname, "..");
  *
  * @param {number|0} sprogstaTies `0` — nesprogsta; kitaip tos eilės užklausa meta.
  */
-function paleistiCli({ eiluciu, sprogstaTies, atrankaSprogsta = false, casNepavyksta = false }) {
+function paleistiCli({
+  eiluciu,
+  sprogstaTies,
+  atrankaSprogsta = false,
+  casNepavyksta = false,
+  saugyklaNeveiksni = false,
+}) {
   const saknis = fs.mkdtempSync(path.join(os.tmpdir(), "stenograma-cli-"));
   const pgDir = path.join(saknis, "pg");
   fs.mkdirSync(pgDir, { recursive: true });
@@ -82,7 +88,21 @@ function paleistiCli({ eiluciu, sprogstaTies, atrankaSprogsta = false, casNepavy
   );
 
   const saugyklaSaknis = path.join(saknis, "artefaktai");
+
+  /**
+   * ⚠️ NEVEIKSNI SAUGYKLA GAMINAMA FAILŲ SISTEMA, NE DUBLIU (#421).
+   *
+   * `root` lieka teisėtas katalogas, bet `results` vietoje paliekamas paprastas
+   * FAILAS: `put()` bandys jame kurti pakatalogį ir gaus `ENOTDIR` iš branduolio.
+   *
+   * ⚠️ NE `chmod`: proot/konteineryje procesas dažnai yra `root`, ir teisės
+   * nieko nesustabdytų — testas būtų žalias vienoje aplinkoje ir raudonas kitoje.
+   *
+   * ⚠️ NE PATS `root`: neteisėtą `root` `fsStore` atmeta KONSTRUKTORIUJE, ir
+   * partija net neprasidėtų (kodas 2). Klausimas yra apie gedimą `put()` metu.
+   */
   fs.mkdirSync(saugyklaSaknis, { recursive: true });
+  if (saugyklaNeveiksni) fs.writeFileSync(path.join(saugyklaSaknis, "results"), "ne katalogas");
 
   /** Krautuvas: `pg` → dublis. Registruojamas per `--import`, tad veikia ESM kelyje. */
   const dublioUrl = "file://" + path.join(pgDir, "index.mjs").replace(/\\/g, "/");
@@ -186,4 +206,26 @@ test("#417 CLI: visos apdorotos, dalis nepavyko domeniškai - kodas 3", () => {
   assert.equal(suvestine.nutraukta, false, "domeninė nesėkmė NĖRA nutraukimas");
   assert.equal(suvestine.apdorota, 2, "VISOS kandidatės apdorotos - tuo `3` skiriasi nuo `4`");
   assert.ok(Object.values(suvestine.nepavyko).reduce((a, b) => a + b, 0) > 0);
+});
+
+test("#421 CLI: saugyklos gedimas - kodas 4, dalinė suvestinė į `stdout`", () => {
+  /**
+   * ⚠️ TA PATI BAIGTIS KAIP DB GEDIMUI, IR TAI ESMĖ (#421 D1, D4).
+   *
+   * Iki #421 nepasiekiama saugykla duodavo kodą `3` („dalis eilučių nepavyko") ir
+   * po `failed` įrašą kiekvienai eilutei. Ta pati klasifikuota infrastruktūrinė
+   * priežastis negali gauti kito kontrakto vien dėl to, kuriame sluoksnyje ji
+   * aptikta: DB gedimas nuo #417 duoda `4`, ir saugyklos gedimas duoda `4`.
+   */
+  const r = paleistiCli({ eiluciu: 3, sprogstaTies: 0, saugyklaNeveiksni: true });
+
+  assert.equal(r.kodas, 4, `laukta 4, gauta ${r.kodas}. stderr: ${r.stderr.slice(0, 300)}`);
+
+  const suvestine = JSON.parse(r.stdout);
+  assert.equal(suvestine.nutraukta, true);
+  assert.equal(suvestine.apdorota, 0, "nė viena eilutė baigties negavo");
+  assert.equal(suvestine.kandidatai, 3);
+  assert.deepEqual(suvestine.nepavyko, {}, "sisteminis gedimas NEPILDO `nepavyko` (D2)");
+
+  assert.notEqual(r.stderr.trim(), "", "klaidos pranešimas privalo eiti į `stderr`");
 });

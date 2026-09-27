@@ -441,6 +441,13 @@ const functional = [
    * `postgresGuard` importą.
    */
   "artifactMigrationContract",
+  /**
+   * #421: riba tarp eilutės savybės ir sisteminio saugyklos gedimo. Be DB —
+   * klausimas yra apie KLASIFIKACIJĄ ir partijos verdiktą, o dublis fiksuoja
+   * kiekvieną sakinį, tad „`failed` įrašo nėra" matoma tiesiogiai. Elgesį su
+   * tikra DB tikrina tas pats `artifactMigration.integration` scenarijų rinkinys.
+   */
+  "migracijosKlaiduRiba",
   "sweepVerdiktai",
   /** #157 (PR-4): lygybės paritetas ir round-trip ištikimybė. */
   "artifactRoundTrip",

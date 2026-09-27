@@ -284,22 +284,41 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       assert.equal((await eilute(jobId)).storage_type, "inline", "kopija lieka vietoje");
     });
 
-    await t.test("`put()` krito → `saugyklos_klaida`, bandymas `abandoned`", async () => {
+    await t.test("`put()` krito SISTEMIŠKAI → partija nutraukiama, `failed` įrašo NĖRA", async () => {
+      /**
+       * ⚠️ ŠIS SCENARIJUS PAKEISTAS #421 (D9). Iki tol jis tvirtino priešingai:
+       * `saugyklos_klaida` progreso įrašą ir tęsiamą ciklą. Tas elgesys ir buvo
+       * defektas — nepasiekiama saugykla duodavo po `failed` KIEKVIENAI partijos
+       * eilutei, o jos visos iškrisdavo iš atrankos, kol kas nors nepaleisdavo
+       * `--retry-failed`. Praeinantis infrastruktūros gedimas virsdavo būsena,
+       * kuriai atstatyti reikia žmogaus.
+       *
+       * ⚠️ TIKRINAMA SU GYVA DB SĄMONINGAI: klausimas „ar eilutė LIEKA kandidatė"
+       * atsakomas tik tikra `artifact_migration_progress` lentele — dublis
+       * parodytų tik tai, kad `INSERT` nebuvo išsiųstas.
+       */
       const jobId = await naujasInline({ text: "krentantis" });
       const sugedusi = { ...saugykla, put: async () => { throw new Error("saugykla nepasiekiama"); } };
 
-      const s = await migruoti(pool, sugedusi, {});
+      await assert.rejects(() => migruoti(pool, sugedusi, {}), /nepasiekiama/);
 
-      assert.equal(s.nepavyko[PRIEZASTIS.SAUGYKLOS_KLAIDA], 1);
-      assert.equal((await progresas(jobId)).priezastis, PRIEZASTIS.SAUGYKLOS_KLAIDA);
+      assert.equal(await progresas(jobId), null, "`failed` įrašo būti NEGALI (D2)");
       assert.equal((await eilute(jobId)).storage_type, "inline", "kopija lieka vietoje");
 
+      /** ⚠️ D7: nuosavybės kontraktas NEPASIKEITĖ — tai ta pati asercija kaip iki #421. */
       const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
       assert.equal(bandymai.length, 1, "registro eilutė LIEKA — ji yra įrodymas");
       assert.equal(
         bandymai[0].busena,
         attemptRegistry.BUSENA.ATMESTA,
         "`pending` likusi eilutė siųstų šlavėją ten, kur nieko nėra"
+      );
+
+      /** Eilutė privalo grįžti į atranką BE `retryFailed` — tai D2 esmė. */
+      const kandidatai = await sausasPaleidimas(pool, {});
+      assert.ok(
+        kandidatai.kandidatai >= 1,
+        "sisteminis gedimas negali išimti eilutės iš atrankos"
       );
     });
 
