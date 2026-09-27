@@ -608,7 +608,7 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
       suvestine.nutraukimoPriezastis =
         klaida && klaida.message ? klaida.message : String(klaida);
 
-      throw new NutrauktaPartijosKlaida(klaida, suvestine);
+      throw klaida;
     }
   }
 
