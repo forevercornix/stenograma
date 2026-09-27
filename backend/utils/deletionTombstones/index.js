@@ -561,6 +561,15 @@ async function listUnresolved(options = {}) {
 function retentionMs(env = process.env) {
   let horizontas;
 
+  /**
+   * ⚠️ NUO #419 ŠIS `catch` NEBĖRA PIRMOJI GYNYBOS LINIJA, IR LIEKA SĄMONINGAI.
+   *
+   * `revivalHorizonsMs()` dabar META prie `NaN`/`Infinity` (#419 D1), o
+   * paleidimo taškai tokio proceso nebeleidžia pakilti (D2). Todėl šita šaka
+   * dažniausiai nebepasiekiama - bet ji ir toliau gaudo VISKĄ, ką ta funkcija
+   * gali mesti (pvz., `teigiamas()` klaidą dėl šiukšlės įvestyje), ir verčia
+   * tai į `null` = ŽYMŲ NEŠALINTI. Tai teisinga pusė abiem atvejais.
+   */
   try {
     const { revivalHorizonsMs } = require("../../queues/config");
     horizontas = revivalHorizonsMs(env).horizonMs;

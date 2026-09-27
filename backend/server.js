@@ -27,6 +27,24 @@ const { createLogger } = require("./utils/logger");
 
 const log = createLogger("server");
 
+/**
+ * ⚠️ PRIKĖLIMO HORIZONTAI - FAIL-CLOSED PRIEŠ VISKĄ KITĄ (#419 D2).
+ *
+ * ⚠️ NE PO `SKIP_CONFIG_VALIDATION` VĖLIAVA SĄMONINGAI. Ta vėliava egzistuoja
+ * provider'ių/raktų patikroms apeiti diegiant; horizontas nėra tos klasės
+ * dalykas - `NaN` riba nereiškia „trūksta rakto", ji reiškia, kad kiekvienas
+ * retencijos palyginimas šiame procese nusprendžia TYLIAI ir priešingai, nei
+ * ketinta (`NaN >= X` visada `false`). Apeinamas fail-closed nėra fail-closed.
+ *
+ * ⚠️ MODULIO LYGYJE, ne `startServer()` viduje. `/api/ready` zondas ir testai
+ * `require`-ina šį modulį be `startServer()`; horizonto vartotojai
+ * (`retentionSweeper`, `deletionTombstones`) pasiekiami ir tuo keliu.
+ */
+{
+  const { patvirtintiHorizontusPaleidziant } = require("./queues/config");
+  patvirtintiHorizontusPaleidziant();
+}
+
 // KIETA konfigūracijos validacija (vartotojo prašymas po realaus diegimo: "jei
 // kažko trūksta - aiškiai parašyti ir nestartuoti", o ne griūti pirmoje užklausoje).
 // Testų aplinkoje (mock provideriai) klaidų nebūna, tad testai nepaveikiami.

@@ -24,7 +24,12 @@ const {
   arGalimaSalintiAudio,
   salintiAudioSuBarjeru,
 } = require("../utils/audioBarrier");
-const { DEFAULT_JOB_OPTIONS, WORKER_OPTIONS, createQueueConnection } = require("../queues/config");
+const {
+  DEFAULT_JOB_OPTIONS,
+  WORKER_OPTIONS,
+  createQueueConnection,
+  patvirtintiHorizontusPaleidziant,
+} = require("../queues/config");
 const { transcriptionProcessor, protocolProcessor } = require("../queues/processors");
 const { createLogger } = require("../utils/logger");
 const { authorizeJobOrAudit } = require("../utils/jobAuthorization");
@@ -696,6 +701,17 @@ jobRunner.registerProcessor("protocol", protocolProcessor);
  * @throws jei nėra REDIS_URL arba jobStore backend ne "redis".
  */
 async function initializeWorkerOrFail(workerName) {
+  /**
+   * ⚠️ PRIKĖLIMO HORIZONTAI - PIRMAS PATIKRINIMAS (#419 D2).
+   *
+   * Prieš `REDIS_URL`, prieš `jobStore.init()`: worker'is yra pagrindinis
+   * horizonto vartotojas (barjeras kiekvienam job'ui), tad procesas su
+   * neapibrėžta riba negali paimti NĖ VIENO darbo. Ta pati semantika kaip
+   * audito saugyklos fail-closed žemiau - klaida propaguojama, entrypoint
+   * ją verčia `exit 1`.
+   */
+  patvirtintiHorizontusPaleidziant();
+
   if (!process.env.REDIS_URL) {
     throw new Error(`${workerName} reikia REDIS_URL (BullMQ). Be jo naudokite inline režimą (darbas HTTP procese).`);
   }

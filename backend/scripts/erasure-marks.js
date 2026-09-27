@@ -180,6 +180,27 @@ async function isvalyti() {
 
 /** ⚠️ Skriptas vykdomas TIK paleistas tiesiogiai - testai importuoja `main`. */
 if (require.main === module) {
+  /**
+   * ⚠️ HORIZONTAI TIKRINAMI PRIEŠ PIRMĄ VEIKSMĄ (#419 D2).
+   *
+   * „Fail-closed" skriptui reiškia kitką nei servisui: readiness patikros čia
+   * nėra, o pirmas veiksmas - `auditStore.init()` - jau atidaro jungtį. Todėl
+   * patikra stovi PRIEŠ ją, sinchroniškai: incidento įrankis, tyliai
+   * paskaičiavęs barjerą pagal neapibrėžtą ribą, atsakytų klaidingai būtent
+   * tada, kai atsakymas brangiausias (žr. failo antraštę).
+   *
+   * ⚠️ `exit 1`, kaip ir bet kuri kita šio skripto klaida - atskiro kodo
+   * neįvedu, nes komandos kontraktas (0/1/2) yra dokumentuotas, o
+   * konfigūracijos klaida nėra komandos rezultatas.
+   */
+  try {
+    const { patvirtintiHorizontusPaleidziant } = require("../queues/config");
+    patvirtintiHorizontusPaleidziant();
+  } catch (klaida) {
+    console.error(`Klaida: ${klaida.message}`);
+    process.exit(1);
+  }
+
   auditStore
     .init()
     .then(main)
