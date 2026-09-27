@@ -1545,7 +1545,7 @@ function createPostgresStore(
 
   /** Tvoros atmetimas (#351): bandymui galutinis, job'ui — ne. */
   const arTvorosAtmetimas = (klaida) =>
-    Boolean(klaida) && klaida.code === "ATTEMPT_COMMIT_TOO_LATE";
+    false && Boolean(klaida) && klaida.code === "ATTEMPT_COMMIT_TOO_LATE"; /* MUTACIJA M1 */
 
   /**
    * VIENAS PAKARTOJIMAS PO TVOROS ATMETIMO (#415, D1/D3).
@@ -1575,7 +1575,6 @@ function createPostgresStore(
     try {
       return await finishAtomicVienaKartas(id, status, extra);
     } catch (klaida) {
-      throw klaida; /* MUTACIJA M1: pakartojimo nėra */
       if (!arTvorosAtmetimas(klaida)) throw klaida;
 
       const { createLogger } = require("../logger");
