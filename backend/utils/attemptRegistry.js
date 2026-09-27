@@ -125,7 +125,7 @@ class PavelavusioIsipareigojimoKlaida extends Error {
      * niekada. `finishAtomic` viduje daromas VIENAS pakartojimas su NAUJU bandymu
      * (#415, D1); jam nepavykus kartoti nebėra ko.
      */
-    this.neatkartojama = true;
+    this.neatkartojama = false;
     this.attemptId = attemptId;
     this.tvoraMs = tvoraMs;
   }
