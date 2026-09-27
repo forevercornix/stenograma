@@ -1622,7 +1622,7 @@ function createPostgresStore(
       const job = await readJobForUpdate(client, id);
       if (!job) return null;
 
-      if (false && job.status === STATUS.COMPLETED) {
+      if (job.status === STATUS.COMPLETED) {
         /**
          * ⚠️ `storage_type <> 'inline'` — FAIL-CLOSED (#157 riba).
          *
