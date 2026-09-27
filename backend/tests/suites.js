@@ -22,6 +22,12 @@ const redis = [
    * įrodytų tik ženklo buvimą; klausimas yra, ar retry grandinė realiai sustoja.
    */
   "artifactUnrecoverable.integration",
+  /**
+   * #415 (D3/D5): tvoros atmetimo klasės kelias BullMQ grandinėje. Skiriasi nuo
+   * eilutės aukščiau: matuojami procesoriaus KVIETIMAI ir `error_code`, ne vien
+   * `attemptsMade`. Reikia Redis, nes klausimas yra apie tikrą retry grandinę.
+   */
+  "tvorosGrandine.integration",
   "queueRecovery.integration",
   "heartbeatReadiness.integration",
   "redisConcurrency.integration",

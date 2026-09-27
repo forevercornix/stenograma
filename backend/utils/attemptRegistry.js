@@ -111,6 +111,21 @@ class PavelavusioIsipareigojimoKlaida extends Error {
     );
     this.name = "PavelavusioIsipareigojimoKlaida";
     this.code = "ATTEMPT_COMMIT_TOO_LATE";
+
+    /**
+     * ⚠️ `neatkartojama` — VĖLIAVA, KURIĄ SKAITO WORKER'IS (#415, D3).
+     *
+     * Ji NIEKO nedaro pati: `workers/index.js:388–396` ją paverčia
+     * `UnrecoverableError`, o `_handleFailure` — `attemptsExhausted`. Be jos BullMQ
+     * kartotų VISĄ procesorių `QUEUE_MAX_ATTEMPTS` kartų, o transkripcijos job'ui tai
+     * valandos skaičiavimo iš naujo.
+     *
+     * ⚠️ TEISINGA ČIA, NES BANDYMUI ATMETIMAS YRA GALUTINIS: tvora remiasi
+     * `created_at`, o laikas juda tik į priekį — tas pats bandymas jos nebepraeis
+     * niekada. `finishAtomic` viduje daromas VIENAS pakartojimas su NAUJU bandymu
+     * (#415, D1); jam nepavykus kartoti nebėra ko.
+     */
+    this.neatkartojama = true;
     this.attemptId = attemptId;
     this.tvoraMs = tvoraMs;
   }

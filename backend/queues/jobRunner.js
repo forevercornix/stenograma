@@ -564,7 +564,17 @@ function _classifyError(e, context = "job") {
    * sustabdo retry grandinę. Originali klaida perduodama per `cause`, tad
    * domeninis kodas turi būti imamas iš jos, ne iš gaubiančios klaidos.
    */
-  const NEATKARTOJAMOS = ["ResultLimitError", "ArtifactStoreError"];
+  /**
+   * ⚠️ `PavelavusioIsipareigojimoKlaida` ČIA — BE JOS ŠAKA PRODUKCIJOJE NEVEIKTŲ
+   * (#415, D5). Worker'is tvoros atmetimą apgaubia `UnrecoverableError`, o `cause`
+   * išpakuojamas TIK šiame sąraše esantiems vardams — neįrašius, klasifikatorius
+   * matytų gaubiančią klaidą ir grąžintų `internal_error`.
+   */
+  const NEATKARTOJAMOS = [
+    "ResultLimitError",
+    "ArtifactStoreError",
+    "PavelavusioIsipareigojimoKlaida",
+  ];
   const domeninė = e && e.cause && NEATKARTOJAMOS.includes(e.cause.name) ? e.cause : e;
 
   /**
@@ -669,6 +679,37 @@ function _classifyError(e, context = "job") {
    * laukais, ne interpoliuojamas į tekstą: taip jį mato operatorius, bet jis
    * nepatenka į viešą pranešimą.
    */
+  /**
+   * TVOROS ATMETIMAS TURI SAVO KODĄ (#415, D5).
+   *
+   * ⚠️ BE ŠIOS ŠAKOS OPERATORIUS MATYTŲ `internal_error` — neatskiriamą nuo tikros
+   * vidinės klaidos. Skirtumas praktinis: „rašytojas per lėtas" reiškia, kad rezultatas
+   * BUVO apskaičiuotas, bet įsipareigoti nebespėta, ir job'as krito NUOLATINAI —
+   * pakartojimas jau įvyko `finishAtomic` viduje (#415, D1) ir irgi buvo atmestas.
+   * Vidinė klaida reikštų defektą, kurį reikia taisyti kode.
+   *
+   * ⚠️ TRUKMĖ IR TVOROS RIBA — STRUKTŪRINIAIS LAUKAIS, kaip `BendroAdresoKlaida`
+   * šakoje žemiau: jos atsako į vienintelį klausimą, kurį operatorius turės — kiek
+   * rašytojas kabojo ir kokia riba galiojo.
+   */
+  if (domeninė && domeninė.name === "PavelavusioIsipareigojimoKlaida") {
+    log.error("Rašytojas nebespėjo įsipareigoti per rašymo tvorą", {
+      stage: "attempt_registry",
+      context,
+      errorCode: domeninė.code,
+      attemptId: domeninė.attemptId,
+      tvoraMs: domeninė.tvoraMs,
+    });
+
+    return {
+      errorCode: domeninė.code,
+      message:
+        "Rezultato išsaugoti nepavyko: apdorojimas užtruko ilgiau, nei leidžia rašymo " +
+        "riba, ir pakartotinis bandymas irgi nespėjo. Rezultatas neišsaugotas — " +
+        "užduotį reikia paleisti iš naujo.",
+    };
+  }
+
   if (domeninė && domeninė.name === "BendroAdresoKlaida") {
     log.error("Bendras saugyklos adresas registre", {
       stage: "attempt_registry",
