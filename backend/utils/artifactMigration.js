@@ -593,8 +593,7 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
         /** Job'as ištrintas tarp atrankos ir registracijos — ne nesėkmė (Codex B). */
         suvestine.praleista += 1;
       } else {
-        suvestine.nepavyko[rezultatas.priezastis] =
-          (suvestine.nepavyko[rezultatas.priezastis] || 0) + 1;
+        throw new Error(`domeninė nesėkmė: ${rezultatas.priezastis}`);
       }
 
       /**
@@ -608,7 +607,7 @@ async function migruoti(pool, saugykla, { limit = 1000, retryFailed = false, run
       suvestine.nutraukimoPriezastis =
         klaida && klaida.message ? klaida.message : String(klaida);
 
-      return suvestine;
+      throw new NutrauktaPartijosKlaida(klaida, suvestine);
     }
   }
 
