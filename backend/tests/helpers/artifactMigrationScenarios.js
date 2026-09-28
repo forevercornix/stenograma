@@ -5,7 +5,12 @@ const path = require("node:path");
 const { Pool, Client } = require("pg");
 
 const { testDatabaseUrl, adminDatabaseUrl } = require("./postgresGuard");
-const { migruoti, sausasPaleidimas, PRIEZASTIS } = require("../../utils/artifactMigration");
+const {
+  migruoti,
+  sausasPaleidimas,
+  PRIEZASTIS,
+  KANDIDATAI_SQL,
+} = require("../../utils/artifactMigration");
 const attemptRegistry = require("../../utils/attemptRegistry");
 const { stebetiPoola, uzdarytiPoola } = require("./resourceStack");
 
@@ -314,11 +319,25 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
         "`pending` likusi eilutė siųstų šlavėją ten, kur nieko nėra"
       );
 
-      /** Eilutė privalo grįžti į atranką BE `retryFailed` — tai D2 esmė. */
-      const kandidatai = await sausasPaleidimas(pool, {});
+      /**
+       * Eilutė privalo grįžti į atranką BE `retryFailed` — tai D2 esmė.
+       *
+       * ⚠️ TIKRINAMA, KAD ATRANKOJE YRA BŪTENT ŠI EILUTĖ (#421 F2).
+       *
+       * Ankstesnė redakcija tvirtino `sausasPaleidimas().kandidatai >= 1`, o ta
+       * funkcija grąžina tik `rows.length` — be ID. Toks skaičius NEATSKIRIA „ši
+       * eilutė kandidatė" nuo „kažkuri kandidatė", o šiame rinkinyje kitos eilutės
+       * tikrai egzistuoja (žr. fiksūros valymą žemiau: CI 36356971025, `2 !== 1`).
+       * Asercija, pavadinta D2 vardu, matavo ne D2.
+       *
+       * `KANDIDATAI_SQL` imamas iš produkcinio modulio, ne kartojamas čia: antra
+       * užklausos kopija nuo atrankos ilgainiui išsiskirtų, ir testas tvirtintų
+       * savo paties SQL.
+       */
+      const { rows: atranka } = await pool.query(KANDIDATAI_SQL, [1000, false]);
       assert.ok(
-        kandidatai.kandidatai >= 1,
-        "sisteminis gedimas negali išimti eilutės iš atrankos"
+        atranka.some((r) => String(r.job_id) === String(jobId)),
+        `sisteminis gedimas negali išimti ŠIOS eilutės iš atrankos (${jobId})`
       );
 
       /**
