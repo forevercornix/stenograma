@@ -370,21 +370,11 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
      */
     await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
 
-    // MUTACIJA F1: patikra pašalinta — KIEKVIENAS `verify()` metimas sisteminis
-    {
-      log.error("Migracijos `verify()` krito SISTEMIŠKAI — partija nutraukiama", {
-        code: klaida && klaida.code,
-      });
-      throw klaida;
-    }
-
-    log.error("Migracijos `verify()` krito", { code: klaida && klaida.code });
-    await irasytiNesekme(pool, {
-      jobId,
-      priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS,
-      runId,
+    // MUTACIJA F1, antra forma: patikra IR eilutės lygio kūnas pašalinti
+    log.error("Migracijos `verify()` krito SISTEMIŠKAI — partija nutraukiama", {
+      code: klaida && klaida.code,
     });
-    return { verdiktas: BUSENA.NEPAVYKO, priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS };
+    throw klaida;
   }
 
   if (!vientisumas || vientisumas.ok !== true || vientisumas.nepriklausomas !== true) {
