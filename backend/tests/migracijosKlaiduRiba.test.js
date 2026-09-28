@@ -279,6 +279,48 @@ test("#421 D6 SARGAS: `verify()` verdiktas `ok: false` lieka `failed`, partija T
   assert.equal(pool.nesekmes().length, 2, "neigiamas verdiktas PRIVALO palikti `failed`");
 });
 
+/**
+ * ⚠️ TREČIA `verify()` BAIGTIS — IR IKI ŠIOL JI BUVO KODAS BE ĮRODYMO (F1).
+ *
+ * D6 sukūrė `verify()` `catch` bloke eilutės lygio šaką, bet jos nedengė nė vienas
+ * testas: du testai aukščiau matuoja metimą (žalias `ETIMEDOUT` → sisteminis) ir
+ * verdiktą (`ok: false`). Trečias kelias — `ArtifactStoreError` su eilutės lygio
+ * kodu — egzistavo tik dėl BŪSIMO atvejo, be įrodymo, kad tam atvejui suveiks.
+ *
+ * ⚠️ TAS PATS ARGUMENTAS, KURIUO §0 ATMETĖ GRYNĄ (b). Ten buvo pasakyta: nevykdomi
+ * invariantai nėra apsauga. Sargas, paliktas sąmoningai dėl senėjimo krypties,
+ * privalo turėti testą — kitaip jo „garsi kryptis" yra prielaida, ne savybė.
+ *
+ * ⚠️ IR JO PUT() DVYNYS TESTĄ TURI („D3: eilutės lygio `put()` klaida"). Vienas
+ * sargas, dvi kopijos, viena tikrinama — būtent ta asimetrija čia ir uždaroma.
+ *
+ * Šiandien `verify()` šio kodo nemeta (abu adapteriai vientisumo nesutapimams
+ * grąžina VERDIKTUS), tad tai tvora ateičiai — lygiai kaip `put()` pusėje.
+ */
+test("#421 D6 TREČIA BAIGTIS: `verify()` meta EILUTĖS lygio klaidą → `failed`, partija TĘSIASI", async () => {
+  const pool = padirbtasPoolDaug(2);
+  const saugykla = padirbtaSaugykla({
+    async verify() {
+      throw new ArtifactStoreError("nepalaikoma reikšmė", KLAIDA.REIKSME);
+    },
+  });
+
+  const s = await migruoti(pool, saugykla, {});
+
+  assert.equal(s.nutraukta, false, "eilutės savybė partijos NENUTRAUKIA");
+  assert.equal(s.apdorota, 2, "abi eilutės gavo baigtį");
+  assert.equal(s.nepavyko[PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS], 2);
+  assert.equal(pool.nesekmes().length, 2, "eilutės savybė PRIVALO palikti `failed`");
+
+  /**
+   * ⚠️ D7 IR ŠIAME KELYJE. Nuosavybės kontraktas nepriklauso nuo klasės, tad
+   * objektas ir registro įrašas sutvarkomi ir čia — kitaip eilutės lygio klaida
+   * paliktų orphan'ą, kurio sisteminė nepalieka.
+   */
+  assert.equal(saugykla.irasai.delete.length, 2, "`isvalytiBandyma` privalo įvykti");
+  assert.equal(pool.atmestiBandymai().length, 2, "bandymas pažymimas `abandoned`");
+});
+
 // ---------------------------------------------------------------------------
 // Partija sugenda VIDURYJE
 // ---------------------------------------------------------------------------
