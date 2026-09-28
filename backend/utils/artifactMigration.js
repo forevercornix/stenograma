@@ -370,7 +370,8 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
      */
     await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
 
-    if (!arEilutesLygioKlaida(klaida)) {
+    // MUTACIJA F1: patikra pašalinta — KIEKVIENAS `verify()` metimas sisteminis
+    {
       log.error("Migracijos `verify()` krito SISTEMIŠKAI — partija nutraukiama", {
         code: klaida && klaida.code,
       });
