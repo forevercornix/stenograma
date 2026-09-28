@@ -90,6 +90,37 @@ const KLAIDA = Object.freeze({
 });
 
 /**
+ * ⚠️ KURIE KODAI YRA „ŠIO OBJEKTO", O NE „ŠIOS SAUGYKLOS" REIKALAS (#421 D5).
+ *
+ * Aibė gyvena ČIA, prie `KLAIDA`, o ne kvietėjo pusėje: kvietėjas, turintis savo
+ * kopiją, ilgainiui nuo šio sąrašo išsiskirtų, ir klasifikacija remtųsi tuo, ką
+ * jis prisiminė, ne tuo, ką adapteris iš tikrųjų sako.
+ *
+ * ⚠️ TAI NE „SISTEMINIŲ KLAIDŲ SĄRAŠAS", O JO PAPILDINYS, IR TAI IŠMATUOTA.
+ * Teigiamo „tai saugyklos gedimas" ženklo `put()` kelyje NĖRA: `KLAIDA.SAUGYKLA`
+ * metamas tik `s3Store` `head()` ir `readStream()`, o `fsStore` jo nemeta nė
+ * karto; sisteminiai gedimai iš `put()` išeina ŽALI (`ENOSPC`, AWS SDK klaida).
+ * Todėl įvardijama tai, ką adapteris autoritetingai žino - eilutės lygio atvejai,
+ * - o visa kita lieka „neklasifikuota", t. y. sisteminė.
+ *
+ * ⚠️ SENĖJIMO KRYPTIS PASIRINKTA SĄMONINGAI. Atsiradus naujam eilutės lygio kodui
+ * ir pamiršus jį čia, atvejis bus palaikytas sisteminiu - partija nutrūks
+ * GARSIAI. Priešinga kryptis (sisteminis virsta eilutės nesėkme) yra būtent tas
+ * tylus gedimas, dėl kurio #421 egzistuoja.
+ */
+const EILUTES_LYGIO_KODAI = Object.freeze([KLAIDA.RAKTAS, KLAIDA.REIKSME]);
+
+/**
+ * Ar klaida yra ŠIOS eilutės savybė (ne saugyklos gedimas).
+ *
+ * ⚠️ TIKRINAMAS TIPAS IR KODAS, NE PRANEŠIMAS. Žalia tiekėjo ar OS klaida
+ * `instanceof` netenkina, tad ji niekada nebus palaikyta eilutės savybe.
+ */
+function arEilutesLygioKlaida(klaida) {
+  return klaida instanceof ArtifactStoreError && EILUTES_LYGIO_KODAI.includes(klaida.code);
+}
+
+/**
  * ⚠️ RAKTAS TIKRINAMAS ALLOWLIST'U, NE DRAUDIMŲ SĄRAŠU.
  *
  * Draudimų sąrašas (be `..`, be `/` pradžioje) pralaimi kiekvienam naujam
@@ -817,6 +848,8 @@ module.exports = {
   ArtifactStoreError,
   struktūrinė,
   KLAIDA,
+  EILUTES_LYGIO_KODAI,
+  arEilutesLygioKlaida,
   MAX_RAKTO_ILGIS,
   MAX_SEGMENTO_BAITAI,
   patikrintiRakta,

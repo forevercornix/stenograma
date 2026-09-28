@@ -1,7 +1,12 @@
 const crypto = require("node:crypto");
 
 const attemptRegistry = require("./attemptRegistry");
-const { paruostiReiksme, ArtifactStoreError, KLAIDA } = require("./artifactStore/validation");
+const {
+  paruostiReiksme,
+  ArtifactStoreError,
+  KLAIDA,
+  arEilutesLygioKlaida,
+} = require("./artifactStore/validation");
 const { createLogger } = require("./logger");
 
 /**
@@ -270,7 +275,42 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
   try {
     kvitas = await saugykla.put(raktas, paruosta);
   } catch (klaida) {
+    /**
+     * ⚠️ VALYMAS PIRMA, IR ABIEJOSE ŠAKOSE (#421 D7).
+     *
+     * `isvalytiBandyma` kviečiama PRIEŠ sprendimą, kuria šaka eiti: nuosavybės
+     * kontraktas nepriklauso nuo to, ar gedimas sisteminis. Ji pati nemeta
+     * (klaidas logina), tad metimo kelio ji nenutraukia ir naujų orphan'ų
+     * neatsiranda.
+     */
     await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
+
+    /**
+     * ⚠️ SISTEMINIS GEDIMAS NEPALIEKA `failed` PĖDSAKO (#421 D1, D2).
+     *
+     * Iki #421 nepasiekiama saugykla duodavo `failed` KIEKVIENAI partijos
+     * eilutei: 1000 eilučių — 1000 identiškų įrašų, ir visos jos iškrisdavo iš
+     * `KANDIDATAI_SQL` atrankos, kol operatorius nepaleistų `--retry-failed`.
+     * Praeinantis infrastruktūros gedimas taip virsdavo būsena, kuriai atstatyti
+     * reikia žmogaus. Ta pati priežastis DB pusėje (registracija, transakcija)
+     * jau nuo #417 partiją NUTRAUKIA ir nepažymi nieko — du kontraktai tai pačiai
+     * priežasčiai skyrėsi tik tuo, kuriame sluoksnyje ji buvo aptikta.
+     *
+     * ⚠️ METAMA ŽALIA KLAIDA, NE NAUJA KLASĖ (#421 D4). Ciklas
+     * (`migruoti()`) ją apgaubia `NutrauktaPartijosKlaida` su daline suvestine ir
+     * `cause` — tas pats #417 kontraktas, tas pats exit kodas 4.
+     *
+     * ⚠️ KLASIFIKACIJA GYVENA ADAPTERIO SLUOKSNYJE (`artifactStore/validation.js`),
+     * ne čia: migratorius neinterpretuoja tiekėjo pranešimų ir nelaiko savo
+     * kodų kopijos.
+     */
+    if (!arEilutesLygioKlaida(klaida)) {
+      log.error("Migracijos rašymas nepavyko SISTEMIŠKAI — partija nutraukiama", {
+        code: klaida && klaida.code,
+      });
+      throw klaida;
+    }
+
     await irasytiNesekme(pool, { jobId, priezastis: PRIEZASTIS.SAUGYKLOS_KLAIDA, runId });
     log.error("Migracijos rašymas nepavyko", { code: klaida && klaida.code });
     return { verdiktas: BUSENA.NEPAVYKO, priezastis: PRIEZASTIS.SAUGYKLOS_KLAIDA };
@@ -310,7 +350,40 @@ async function perkeltiEilute(pool, saugykla, { jobId, payload, runId }) {
       checksum: kvitas.checksum,
     });
   } catch (klaida) {
+    /**
+     * ⚠️ METIMAS IR `ok !== true` — DVI SKIRTINGOS BAIGTYS (#421 D6).
+     *
+     * Iki #421 šis `catch` klaidą tik loggino, palikdavo `vientisumas = null`, ir
+     * žemiau esantis `if` traktuodavo VIENODAI du visiškai skirtingus faktus:
+     * „patikra neįvyko" (saugykla nepasiekiama) ir „patikra įvyko ir sako, kad
+     * objektas netinkamas". Pirmasis yra tos pačios klasės gedimas kaip `put()`
+     * metimas; antrasis yra TIKRAS konkretaus objekto defektas, ir jam `failed`
+     * teisingas.
+     *
+     * ⚠️ POŽYMIS YRA ADAPTERIO KONTRAKTE, NE SPĖJIME. Abu adapteriai
+     * (`s3Store.js:373+`, `fsStore.js:690+`) grąžina VERDIKTĄ, kai patikra įvyko
+     * (įskaitant „objekto nėra" ir „nesutampa"), ir META tik tada, kai patikros
+     * atlikti nepavyko.
+     *
+     * ❌ NEPAVERČIAMA fataliu visa `verify()` nesėkmė: `ok !== true` šaka žemiau
+     * lieka nepaliesta, ir tai gina `artifactMigrationContract.test.js:332`.
+     */
+    await isvalytiBandyma(pool, saugykla, { attemptId, raktas });
+
+    if (!arEilutesLygioKlaida(klaida)) {
+      log.error("Migracijos `verify()` krito SISTEMIŠKAI — partija nutraukiama", {
+        code: klaida && klaida.code,
+      });
+      throw klaida;
+    }
+
     log.error("Migracijos `verify()` krito", { code: klaida && klaida.code });
+    await irasytiNesekme(pool, {
+      jobId,
+      priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS,
+      runId,
+    });
+    return { verdiktas: BUSENA.NEPAVYKO, priezastis: PRIEZASTIS.VIENTISUMAS_NEPATVIRTINTAS };
   }
 
   if (!vientisumas || vientisumas.ok !== true || vientisumas.nepriklausomas !== true) {

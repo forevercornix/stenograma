@@ -5,7 +5,12 @@ const path = require("node:path");
 const { Pool, Client } = require("pg");
 
 const { testDatabaseUrl, adminDatabaseUrl } = require("./postgresGuard");
-const { migruoti, sausasPaleidimas, PRIEZASTIS } = require("../../utils/artifactMigration");
+const {
+  migruoti,
+  sausasPaleidimas,
+  PRIEZASTIS,
+  KANDIDATAI_SQL,
+} = require("../../utils/artifactMigration");
 const attemptRegistry = require("../../utils/attemptRegistry");
 const { stebetiPoola, uzdarytiPoola } = require("./resourceStack");
 
@@ -284,16 +289,28 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
       assert.equal((await eilute(jobId)).storage_type, "inline", "kopija lieka vietoje");
     });
 
-    await t.test("`put()` krito → `saugyklos_klaida`, bandymas `abandoned`", async () => {
+    await t.test("`put()` krito SISTEMIŠKAI → partija nutraukiama, `failed` įrašo NĖRA", async () => {
+      /**
+       * ⚠️ ŠIS SCENARIJUS PAKEISTAS #421 (D9). Iki tol jis tvirtino priešingai:
+       * `saugyklos_klaida` progreso įrašą ir tęsiamą ciklą. Tas elgesys ir buvo
+       * defektas — nepasiekiama saugykla duodavo po `failed` KIEKVIENAI partijos
+       * eilutei, o jos visos iškrisdavo iš atrankos, kol kas nors nepaleisdavo
+       * `--retry-failed`. Praeinantis infrastruktūros gedimas virsdavo būsena,
+       * kuriai atstatyti reikia žmogaus.
+       *
+       * ⚠️ TIKRINAMA SU GYVA DB SĄMONINGAI: klausimas „ar eilutė LIEKA kandidatė"
+       * atsakomas tik tikra `artifact_migration_progress` lentele — dublis
+       * parodytų tik tai, kad `INSERT` nebuvo išsiųstas.
+       */
       const jobId = await naujasInline({ text: "krentantis" });
       const sugedusi = { ...saugykla, put: async () => { throw new Error("saugykla nepasiekiama"); } };
 
-      const s = await migruoti(pool, sugedusi, {});
+      await assert.rejects(() => migruoti(pool, sugedusi, {}), /nepasiekiama/);
 
-      assert.equal(s.nepavyko[PRIEZASTIS.SAUGYKLOS_KLAIDA], 1);
-      assert.equal((await progresas(jobId)).priezastis, PRIEZASTIS.SAUGYKLOS_KLAIDA);
+      assert.equal(await progresas(jobId), null, "`failed` įrašo būti NEGALI (D2)");
       assert.equal((await eilute(jobId)).storage_type, "inline", "kopija lieka vietoje");
 
+      /** ⚠️ D7: nuosavybės kontraktas NEPASIKEITĖ — tai ta pati asercija kaip iki #421. */
       const bandymai = await attemptRegistry.joboBandymai(pool, String(jobId));
       assert.equal(bandymai.length, 1, "registro eilutė LIEKA — ji yra įrodymas");
       assert.equal(
@@ -301,6 +318,43 @@ function paleistiMigracijosScenarijus(vardas, { dbSuffix, praleisti, paruostiSau
         attemptRegistry.BUSENA.ATMESTA,
         "`pending` likusi eilutė siųstų šlavėją ten, kur nieko nėra"
       );
+
+      /**
+       * Eilutė privalo grįžti į atranką BE `retryFailed` — tai D2 esmė.
+       *
+       * ⚠️ TIKRINAMA, KAD ATRANKOJE YRA BŪTENT ŠI EILUTĖ (#421 F2).
+       *
+       * Ankstesnė redakcija tvirtino `sausasPaleidimas().kandidatai >= 1`, o ta
+       * funkcija grąžina tik `rows.length` — be ID. Toks skaičius NEATSKIRIA „ši
+       * eilutė kandidatė" nuo „kažkuri kandidatė", o šiame rinkinyje kitos eilutės
+       * tikrai egzistuoja (žr. fiksūros valymą žemiau: CI 36356971025, `2 !== 1`).
+       * Asercija, pavadinta D2 vardu, matavo ne D2.
+       *
+       * `KANDIDATAI_SQL` imamas iš produkcinio modulio, ne kartojamas čia: antra
+       * užklausos kopija nuo atrankos ilgainiui išsiskirtų, ir testas tvirtintų
+       * savo paties SQL.
+       */
+      const { rows: atranka } = await pool.query(KANDIDATAI_SQL, [1000, false]);
+      assert.ok(
+        atranka.some((r) => String(r.job_id) === String(jobId)),
+        `sisteminis gedimas negali išimti ŠIOS eilutės iš atrankos (${jobId})`
+      );
+
+      /**
+       * ⚠️ FIKSŪRA IŠVALOMA, IR TAI TIESIOGINĖ D2 PASEKMĖ.
+       *
+       * Iki #421 ši eilutė likdavo `failed` ir dėl to IŠKRISDAVO iš
+       * `KANDIDATAI_SQL` — kiti šio rinkinio scenarijai, kviečiantys
+       * `migruoti()` be filtro, jos nebematydavo. Dabar ji sąmoningai lieka
+       * kandidatė, tad be valymo ji dalyvautų KITŲ scenarijų partijose ir
+       * iškreiptų jų skaičius (išmatuota CI 36356971025: `2 !== 1`).
+       *
+       * Valoma čia, o ne tų scenarijų pusėje: nuosavybė priklauso tam, kas
+       * fiksūrą sukūrė. `jobs` šalinimas kaskaduoja į `job_results`; bandymų
+       * lentelė FK neturi, tad šalinama atskirai.
+       */
+      await pool.query("DELETE FROM job_result_attempts WHERE job_id = $1", [String(jobId)]);
+      await pool.query("DELETE FROM jobs WHERE id = $1", [jobId]);
     });
 
     await t.test("`verify()` nepatvirtino → `vientisumas_nepatvirtintas`, objektas pašalintas", async () => {
