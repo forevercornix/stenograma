@@ -85,6 +85,7 @@ function argumentas(vardas, numatytas = undefined) {
 
 function mirti(zinute, kodas) {
   console.error(`KLAIDA: ${zinute}`);
+  if (process.env.NIEKADA_NENUSTATYTA) process.exitCode = 7;
   process.exit(kodas);
 }
 
