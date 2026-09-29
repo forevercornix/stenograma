@@ -200,6 +200,16 @@ tik po D0 pataisymo.
 | fail | 0 | **0** | 0 |
 | skipped | 11 | **11** | **0 naujų praleidimų** |
 
+⚠️ **Galutinė kontrolė po visų mutacijų grąžinimo: `36542684177` — success**, skaičiai
+identiški pradinei bazei (2860 / 2849 / 0 / 11). Tai patvirtina, kad grąžinimas nieko
+nepaslėpė ir nieko nepaliko: mutacijų nebeliko, o sargas vis dar vykdomas
+(`operatoriausExitKodai (exit 0, 156 ms)`).
+
+Grąžinimas patikrintas **medžio hash'u**, ne `git diff` tyla (#421 pamoka):
+
+    backend/  bazė 9b150d393386   po grąžinimo 9b150d393386   SUTAMPA
+    docs/     bazė 0a3b3c1e2f8f   po grąžinimo 0a3b3c1e2f8f   SUTAMPA
+
 Sargas CI'e realiai vykdomas: `operatoriausExitKodai (exit 0, 235 ms)` — t. y. registracija
 `suites.js` veikia, ir žalia spalva nėra dėl to, kad testas nepaleistas.
 
