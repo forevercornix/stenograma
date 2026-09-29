@@ -356,3 +356,8 @@ keliuose sąmoningai **draudžiamas**.
 
 Jei srautas nepriimtinas, teisingas sprendimas yra leisti mažesnėmis dalimis arba
 ne piko metu — **ne** išjungti patikrą.
+
+<!-- #423 M3 mutacija -->
+```bash
+node backend/scripts/m3-laikinas.mjs
+```
