@@ -25,7 +25,7 @@
  *   node scripts/cutover-terminalize.mjs --vykdyti   # realiai keičia
  *
  * Exit kodai: 0 sėkmė · 1 naudojimo klaida · 2 prielaidos netenkinamos ·
- * 3 dalis job'ų neapdorota.
+ * 9 dalis job'ų neapdorota.
  */
 import { createRequire } from "node:module";
 
