@@ -33,3 +33,9 @@ pyannote-server/.venv/
 whisper-server/.venv/
 *.bak.*
 downloads/
+
+# Raundų ataskaitos: rezultatas perduodamas adresatui, ne repozitorijai.
+# ⚠️ Konvencija galiojo nuo pradžių, bet buvo tik praktikoje — per visą istoriją
+# nė viena ataskaita nebuvo įtraukta, kol #423 raunde neįtraukiau jos netyčia.
+# Taisyklė, kurios niekas netikrina, galioja tol, kol kas nors jos nepažeidžia.
+ATASKAITA-*.md
