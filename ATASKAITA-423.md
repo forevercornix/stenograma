@@ -171,6 +171,44 @@ nepasikeitė" (`changed: false`) IR netikėta klaida. Užrašyta, **neliesta** (
 
 ---
 
+## Atviri klausimai 1–3
+
+**1. Kaip verifikuojamas deklaruotas kontraktas → (c) MIŠRIAI.**
+
+Padalijimas ne patogumo, o mechanizmo: kur kodas statiškai matomas — statiškai; kur ne —
+vykdymu.
+
+| | Skriptai | Kaip verifikuojama |
+|---|---|---|
+| statiškai | 6 iš 7 (literalai, ternarai, vieno lygio apvalkalas) | `išvesti ⊆ antraštė` sargo |
+| vykdymu | `migrate-artifacts` (`= await vykdyti()`, `e.kodas`) | `migracijosCliBaigtys` — 0/2/3/4 per tikrą `spawnSync` |
+
+⚠️ **Simetrija naudinga, ne atsitiktinė:** vienintelis statiškai neišvedamas skriptas yra
+geriausiai padengtas vykdymu. ❌ „Antraštė yra autoritetas, nes statiškai sunku" nebuvo
+priimta — sargas kiekvienam iš septynių lygina su KODU, ne tik su dokumentu.
+
+**2. Keturi pilni dubliai → PALIEKAMI, su sargu.**
+
+`migrations.md:313–319` atsirado ne atsitiktinai (#417 jį reikalavo), o trys
+`backup-runbook.md` dubliai (`:448`, `:776`, `:883`) yra tos pačios klasės. Operatorius
+procedūrą skaito iš runbook'o, ne iš skripto antraštės, tad trumpinimas iki nuorodos
+pablogintų būtent tą kelią, dėl kurio dubliai egzistuoja.
+
+⚠️ **Sąlyga, kuri tai pateisina:** dublis leidžiamas TIK todėl, kad `Set(dokumentas) ===
+Set(antraštė)` dabar tikrinamas abiem kryptimis (M2a/M2b/M2c). Be sargo tas pats
+sprendimas būtų buvęs D2 pažeidimas.
+
+**3. `migrations.md:159` prozinis `exit 2` → NE dublis.**
+
+Tai runbook'o lentelės ląstelė apie elgesį („atsisako dirbti, jei jos netenkinamos
+(`exit 2`)"), ne kodų sąrašas. Traktuoti ją kaip dublį reikštų, kad sargas turi
+interpretuoti prozą — o tai klaidingų kritimų šaltinis, ir klaidingas kritimas yra būdas
+sargą išjungti.
+
+⚠️ **Užrašoma kaip SĄMONINGAI NEAPRĖPTA**, ne nutylima: `cutover-terminalize` kodas `2`
+dokumente minimas, bet sargo netikrinamas. Jo antraštę gina kodo pusė (M1 krito būtent
+ties ja).
+
 ## Apimtis
 
 **Prognozė: 7–9 failai. Faktas: 6.**
