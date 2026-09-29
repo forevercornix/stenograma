@@ -13,6 +13,24 @@
  *   node scripts/erasure-marks.js release <jobId> --actor <kas>
  *   node scripts/erasure-marks.js force-resolve <jobId> --actor <kas>
  *
+ * Exit kodai:
+ *   0 — komanda įvykdyta ir PAKEITĖ būseną (`retry`/`release`/`force-resolve`
+ *       grąžino `changed: true`), arba `list` sėkmingai išvedė sąrašą
+ *   1 — komanda įvykdyta, bet NIEKO nepakeitė (`changed: false`); tas pats kodas
+ *       grąžinamas ir netikėtos klaidos atveju (`:201`, `:216`)
+ *   2 — naudojimo klaida: nėra `<jobId>`, nėra `--actor`, arba komanda nežinoma
+ *
+ * ⚠️ `1` IR `2` REIKŠMĖS ČIA ATVIRKŠČIOS NEI KITUOSE OPERATORIAUS SKRIPTUOSE.
+ *
+ * `dr-restore`, `pg-backup`, `post-restore-reconcile`, `migrate-artifacts` ir
+ * `cutover-terminalize` naudoja `1` naudojimo klaidai, o `2` — procedūros klaidai.
+ * Čia `2` yra naudojimo klaida, o `1` reiškia „niekas nepasikeitė". Tai UŽRAŠOMA,
+ * ne derinama: semantikos suvienodinimas pakeistų elgesį, kuriuo jau gali remtis
+ * operatoriaus įrašai (#423 D5 ir „Ko NEAPIMA").
+ *
+ * ⚠️ `1` YRA PERKRAUTAS: „nieko nepakeista" ir „netikėta klaida" neatskiriami.
+ * Irgi užrašoma, ne taisoma — naujo kodo įvedimas yra elgesio pakeitimas.
+ *
  * ⚠️ `release` NETVIRTINA NIEKO APIE DUOMENIS. Jis skirtas `deletion_pending`
  * žymai, likusiai be vykdytojo (procesas nužudytas prieš užbaigimą), ir veda ją
  * į `deletion_failed`, iš kur veikia `retry`. `force-resolve` tam NETINKA: jis
@@ -190,8 +208,13 @@ if (require.main === module) {
    * tada, kai atsakymas brangiausias (žr. failo antraštę).
    *
    * ⚠️ `exit 1`, kaip ir bet kuri kita šio skripto klaida - atskiro kodo
-   * neįvedu, nes komandos kontraktas (0/1/2) yra dokumentuotas, o
-   * konfigūracijos klaida nėra komandos rezultatas.
+   * neįvedu, nes konfigūracijos klaida nėra komandos rezultatas.
+   *
+   * ⚠️ ANKSTESNĖ ŠIO KOMENTARO REDAKCIJA TEIGĖ, KAD „komandos kontraktas (0/1/2)
+   * YRA DOKUMENTUOTAS" — jis nebuvo dokumentuotas niekur (#423 D6): nei failo
+   * antraštėje, nei `docs/`. Teiginys vietoj patikros, ir būtent tokį atvejį
+   * `operatoriausExitKodai` sargas dabar gaudo. Kontraktas užrašytas failo
+   * antraštėje, o sargas tikrina, kad jis atitiktų kodą.
    */
   try {
     const { patvirtintiHorizontusPaleidziant } = require("../queues/config");

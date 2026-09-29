@@ -1,5 +1,12 @@
 /**
- * CUTOVER 3–3b ŽINGSNIAI: terminalizuoti likusius job'us ir išlaisvinti audio.
+ * CUTOVER 3–3b ŽINGSNIAI — OPERATORIAUS ĮĖJIMAS (#157, PR-6).
+ *
+ * Terminalizuoja likusius job'us ir išlaisvina jų audio.
+ *
+ * ⚠️ SAVIDEKLARACIJA UŽRAŠYTA EKSPLICITIŠKAI (#423 D0). Iki tol šis failas į
+ * operatoriaus ribą pakliūdavo tik per atsitiktinę prozą („Operatoriui liktų rašyti
+ * ad hoc kodą" žemiau) — t. y. riba laikėsi ant formuluotės, kurią bet kuris
+ * perrašymas galėjo pašalinti nieko nepastebint. Žr. `operatoriausExitKodai`.
  *
  * ⚠️ KODĖL SKRIPTAS, O NE INSTRUKCIJA DOKUMENTE.
  *
