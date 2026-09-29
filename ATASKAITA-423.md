@@ -225,3 +225,41 @@ ribą, o izoliuotai ir CI'e abu žali; `#380 R2` izoliuotai 12/12.
 | `erasure-marks` `1`/`2` semantikos nesutapimas | UŽRAŠYTAS, ne ištaisytas — taisymas yra elgesio pakeitimas (D5, „Ko NEAPIMA") |
 | `doctor.js` / `smoke.js` exit kodų kontraktas | už ribos pagal D0; priešingas signalas `server.js:478` užrašytas sargo dokumentacijoje |
 | `migrations.md:159` prozinis `exit 2` | sąmoningai ne dublis — sargas prozos neinterpretuoja, nes tai klaidingų kritimų šaltinis |
+
+---
+
+## Mutacijos — visos vykdytos CI
+
+| # | Mutacija | CI run | Kas krito |
+|---|---|---|---|
+| **M1** | antraštėje `3` → `9` (`cutover-terminalize`) | `36538381124` ❌ | `kodai {3} nustatomi KODE, bet antraštėje jų nėra` — ⚠️ prieš **kodą**, ne dokumentą |
+| **M2a** | dokumente `2` → `9` (`backup-runbook.md:448`) | `36538849561` ❌ | `dublis NESUTAMPA — tik dokumente {9}, tik antraštėje {2}` |
+| **M2b** | dokumente **trūksta** kodo | `36539620343` ❌ | `tik dokumente {}, tik antraštėje {2}` |
+| **M2c** | dokumente **perteklinis** kodas | `36540172139` ❌ | `tik dokumente {7}, tik antraštėje {}` |
+| **M3** | naujas operatoriaus skriptas be antraštės | `36540806118` ❌ | `m3-laikinas.mjs: … antraštės NETURI`; antroji pusė (8 ne-operatoriaus → 0) žalia |
+| **M4** | naujas `process.exitCode = 7` (`pg-backup`) | `36541428596` ❌ | `kodai {7} nustatomi KODE, bet antraštėje jų nėra` |
+| **M5** | vienas ribos signalas be kito | `36542033664` ❌ | `ribos signalai IŠSISKYRĖ (savideklaracija=false, dokumentuotas=true)` |
+
+⚠️ **M2 trys kryptys duoda TRIS SKIRTINGUS pažeidimo tekstus** — tai ir yra abipusės
+lygybės įrodymas: įtraukimo patikra (`Set(dok) ⊆ Set(antraštė)`) būtų praleidusi M2b ir M2c.
+
+⚠️ **M1 krito prieš KODĄ, ne dokumentą.** `cutover-terminalize` dokumento dublio neturi,
+tad jo antraštė tikrinama tik prieš kodą. Sargas, lyginantis vien „antraštė ↔ dokumentas",
+šios mutacijos nebūtų pamatęs — o tokių skriptų yra trys.
+
+⚠️ **M4 forma pasirinkta LINT-SAUGI iš anksto** (`if (process.env.…)`, ne pliki
+nepasiekiami sakiniai). #421 F1 pamoka: mutacija, mirusi `no-unreachable` lint'e, yra
+teisingas faktas su neteisinga išvada. Patikrinta prieš push'ą: 0 lint problemų; CI kritimas
+— teste.
+
+### ⚠️ Vienas paleidimas NEGALIOJA, ir tai užrašoma
+
+`22ed6bd` (`36539...`) buvo raudonas, bet **ne dėl M2b**. Grąžinimui naudojau `git revert`
+ant commit'o, kuris PATS buvo revert'as (`revert M1 + MUTACIJA M2a`) — tad M1 **atsistatė**,
+ir paleidimas krito dėl jos. Kaip M2b įrodymas jis netinka.
+
+Tai tiksliai #421 pamoka: `git diff` prieš tėvą buvo **tuščias abiem atvejais**, ir klaidą
+pamačiau tik iš pažeidimo TEKSTO (rodė `cutover-terminalize`, ne `backup-runbook`).
+Nuo M2b kiekvienos mutacijos apimtis prieš push'ą tikrinama
+`git diff --cached e976a40 --stat` — ir M3 atveju ta patikra iškart parodė, kad `backup-runbook.md`
+grąžintas teisingai.
