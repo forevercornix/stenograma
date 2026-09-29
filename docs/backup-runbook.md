@@ -445,7 +445,7 @@ BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
 node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
 ```
 
-Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `9` procedūros klaida.
 
 #### ⚠️ `PG*` forma palaikoma SĄLYGINIAI (#264)
 
