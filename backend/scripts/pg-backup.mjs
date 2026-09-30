@@ -171,8 +171,5 @@ try {
 
 await isvalyti();
 
-function naujasKelias() {
-  if (process.env.NIEKADA_NENUSTATYTA) return 9;
-  return 0;
-}
-if (process.env.NIEKADA_NENUSTATYTA) process.exitCode = naujasKelias();
+const NIEKADA_RIBA = { limit: process.env.X ? 5 : 77 };
+if (process.env.NIEKADA_NENUSTATYTA) console.log(NIEKADA_RIBA.limit);
