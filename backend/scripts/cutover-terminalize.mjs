@@ -191,4 +191,4 @@ async function uzdaryti() {
   await jobStore.close().catch(() => {});
 }
 
-// process.exitCode = 9
+if (process.env.NIEKADA_NENUSTATYTA) process.exitCode = 10;
