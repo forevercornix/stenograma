@@ -170,6 +170,3 @@ try {
 }
 
 await isvalyti();
-
-const NIEKADA_RIBA = { limit: process.env.X ? 5 : 77 };
-if (process.env.NIEKADA_NENUSTATYTA) console.log(NIEKADA_RIBA.limit);
