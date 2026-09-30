@@ -190,3 +190,5 @@ async function uzdaryti() {
   await closeTranscriptionQueue().catch(() => {});
   await jobStore.close().catch(() => {});
 }
+
+// process.exitCode = 9
