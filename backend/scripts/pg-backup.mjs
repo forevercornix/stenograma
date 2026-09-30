@@ -170,3 +170,9 @@ try {
 }
 
 await isvalyti();
+
+function naujasKelias() {
+  if (process.env.NIEKADA_NENUSTATYTA) return 9;
+  return 0;
+}
+if (process.env.NIEKADA_NENUSTATYTA) process.exitCode = naujasKelias();
