@@ -190,5 +190,3 @@ async function uzdaryti() {
   await closeTranscriptionQueue().catch(() => {});
   await jobStore.close().catch(() => {});
 }
-
-if (process.env.NIEKADA_NENUSTATYTA) process.exitCode = 10;
