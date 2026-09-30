@@ -18,6 +18,10 @@
  *
  * Rezultatą įrašykite į AUTH_USERS formatu "vardas:rolė:maiša:userId".
  *
+ * Exit kodai:
+ *   0 — maiša sugeneruota ir išvesta
+ *   1 — naudojimo klaida: trūksta argumentų, nežinoma rolė, netaisyklingas
+ *       `--user-id` (ne UUIDv4), tuščias arba nesutampantis slaptažodis
  *
  * ⚠️ PROCEDŪROS KLAIDOS KODO NĖRA, IR TAI NE PRALEIDIMAS. Skriptas neturi nė vienos
  * išorinės priklausomybės: nei DB, nei tinklo, nei failų — `scrypt` ir `readline`.
@@ -116,10 +120,3 @@ async function main() {
 }
 
 main();
-
-/**
- * Exit kodai:
- *   0 — maiša sugeneruota ir išvesta
- *   1 — naudojimo klaida: trūksta argumentų, nežinoma rolė, netaisyklingas
- *       `--user-id` (ne UUIDv4), tuščias arba nesutampantis slaptažodis
- */

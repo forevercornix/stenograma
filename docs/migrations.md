@@ -312,7 +312,7 @@ DATABASE_URL=...                                node scripts/migrate-artifacts.m
 
 Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida (partija
 net neprasidėjo) · **`3` dalis eilučių neperkelta — reikia peržiūros** (`status`
-parodo, kurios ir kodėl) · **`4` partija NUTRAUKTA viduryje** (#417).
+parodo, kurios ir kodėl) · **`6` partija NUTRAUKTA viduryje** (#417).
 
 ⚠️ `3` ir `4` yra skirtingos situacijos. `3` reiškia, kad **visos** kandidatės
 apdorotos, o kai kurios nepavyko domeniškai. `4` reiškia, kad partija nutrūko po

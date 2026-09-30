@@ -445,7 +445,7 @@ BACKUP_ENABLED=true node backend/scripts/pg-backup.mjs dump \
 node backend/scripts/pg-backup.mjs restore --in kopija.json --target "$TIKSLO_URL"
 ```
 
-Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida.
+Exit kodai: `0` sėkmė · `1` naudojimo klaida · `9` procedūros klaida.
 
 #### ⚠️ `PG*` forma palaikoma SĄLYGINIAI (#264)
 
@@ -775,7 +775,7 @@ yra"** — praleistas `PGPORT` nėra numatytoji reikšmė, o paveldėta.
 
 Exit kodai: `0` suderinta (arba nieko nereikėjo) · `1` naudojimo klaida ·
 `2` procedūros klaida · `3` (`verify`) **bazė dar NĖRA suderinta** ·
-`4` **ašis NEPADENGTA** (darbas atliktas, bet gyvas tos ašies autoritetas ne
+`8` **ašis NEPADENGTA** (darbas atliktas, bet gyvas tos ašies autoritetas ne
 PostgreSQL — cutover saugiu vadinti negalima).
 
 ### ⚠️ Ką suderinimas užtikrina KIEKVIENAI ašiai atskirai
@@ -881,7 +881,7 @@ DATABASE_URL="$TIKSLO_URL" node backend/scripts/dr-restore.mjs verify --target "
 ```
 
 Exit kodai: `0` sėkmė · `1` naudojimo klaida · `2` procedūros klaida (fail-closed)
-· `3` `verify`: dar NESUDERINTA.
+· `7` `verify`: dar NESUDERINTA.
 
 ### Ką daro suliejimas (D4)
 
