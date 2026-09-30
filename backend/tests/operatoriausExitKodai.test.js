@@ -110,16 +110,8 @@ function skriptai() {
  */
 const SAVIDEKLARACIJA = /OPERATORIAUS (ĮĖJIMAS|ĮRANKIS)/;
 
-/** Pirmas `/** … *​/` blokas — struktūrinis vienetas, ne eilučių langas. */
-function pirmasBlokas(tekstas) {
-  const i = tekstas.indexOf("/**");
-  if (i === -1) return "";
-  const j = tekstas.indexOf("*/", i);
-  return j === -1 ? tekstas.slice(i) : tekstas.slice(i, j + 2);
-}
-
-function arSavideklaracija(tekstas) {
-  return SAVIDEKLARACIJA.test(pirmasBlokas(tekstas));
+function arSavideklaracija(komentarai) {
+  return SAVIDEKLARACIJA.test(antrastesBlokas(komentarai));
 }
 
 /** Tas pats šablonas, kurį naudoja #410 `node-script`: abu prefiksai priimami. */
@@ -149,230 +141,361 @@ function riba() {
   const dok = dokumentai();
   return skriptai().map((s) => ({
     ...s,
-    savideklaracija: arSavideklaracija(s.tekstas),
+    savideklaracija: arSavideklaracija(analize(s.tekstas).komentarai),
     dokumentuotas: arDokumentuotas(dok, s.vardas),
   }));
 }
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * DEKLARACIJA — `Exit kodai:` ANTRAŠTĖS SKAITYMAS
+ * AST — VIENAS ĮRANKIS PENKIEMS RADINIAMS (#423 Codex P2)
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * ⚠️ BLOKAS BAIGIASI TUŠČIA KOMENTARO EILUTE, NE FIKSUOTU EILUČIŲ SKAIČIUMI.
+ * ⚠️ PIRMOJI ŠIO SARGO REDAKCIJA AIBĘ VEDĖ IŠ NEAPDOROTO TEKSTO, IR TAI BUVO VIENA
+ * ŠAKNIS PENKIEMS GEDIMAMS.
  *
- * Antraštės skiriasi forma: dvi vienoje eilutėje (`pg-backup`, `cutover-terminalize`),
- * trys su įtraukomis ir vyniojimu (`post-restore-reconcile` kodo `4` aprašymas tęsiasi
- * kitoje eilutėje). Fiksuotas `slice(0, N)` arba „iki komentaro galo" vienu atveju
- * nupjautų kodą, kitu — įtrauktų po jo esančią ⚠️ prozą, kurioje skaičiai reiškia
- * issue numerius.
+ * Codex P2 rado penkis, ir keturi turėjo atkūrimą — sargas likdavo ŽALIAS tuo atveju,
+ * kurį skelbė gaudantis:
+ *
+ *   komentaras `process.exitCode = 9`   sargas KRISDAVO be jokio elgesio pakeitimo
+ *   tikras `process.exitCode = 10`      PRAEIDAVO: `\d` priima vieną skaitmenį
+ *   apvalkalas su >400 simbolių kūnu    visi jo kodai IŠKRISDAVO iš aibės
+ *   `Exit kodai:` bet kur faile         antraštės gale pakanka, nors D4 reikalauja jos
+ *
+ * ⚠️ TAI NE PENKI LOPAI, O VIENAS PAKEITIMAS. Fiksuotas langas (400 simbolių, `\d`,
+ * visas failas) yra ta pati klaida penkiose vietose: tekstas neturi struktūros, tad
+ * riba visada yra spėjimas. AST ją turi.
+ *
+ * ⚠️ NE NAUJA PRIKLAUSOMYBĖ — IŠMATUOTA. `eslint` yra DEKLARUOTA `devDependency`
+ * (`^10.10.0`, lock'e 10.10.0), o jo viešas `Linter` API per in-memory taisyklę
+ * atiduoda `Program` mazgą ir komentarus. `acorn`/`espree` NENAUDOJAMI: repo juos
+ * turi tik tranzityviai per `eslint`, o iš repo šaknies `acorn` apskritai
+ * išsisprendžia į SISTEMINĮ `/usr/share/nodejs/acorn`. Tranzityvi priklausomybė gali
+ * išnykti atnaujinus `eslint`; deklaruota — ne.
+ *
+ * ⚠️ PATIKRINTA SU LOCK'E FIKSUOTA VERSIJA, NE SU LOKALIU `node_modules`. Lokalus
+ * įdiegimas buvo pasenęs (10.8.1, netenkina `^10.10.0`), o CI per `npm ci` gauna
+ * 10.10.0. AST kelias patikrintas abiem: septyni rinkiniai ir visi keturi Codex
+ * atkūrimai duoda tą patį.
  */
-const VIENAS_SKAITMUO = /(?<![\d#])\b(\d)\b(?!\d)/g;
+function analize(tekstas) {
+  const { Linter } = require("eslint");
+  const linter = new Linter();
+  let programa = null;
+  let komentarai = [];
 
-function antrastesKodai(tekstas) {
+  const pranesimai = linter.verify(tekstas, {
+    languageOptions: { ecmaVersion: "latest", sourceType: "module" },
+    plugins: {
+      sargas: {
+        rules: {
+          imk: {
+            create(ctx) {
+              return {
+                Program(n) {
+                  programa = n;
+                  komentarai = ctx.sourceCode.getAllComments();
+                },
+              };
+            },
+          },
+        },
+      },
+    },
+    rules: { "sargas/imk": "error" },
+  });
+
   /**
-   * ⚠️ ŽYMA PRIKABINTA PRIE KOMENTARO EILUTĖS PRADŽIOS, NE „bet kur tekste".
-   *
-   * Pirmoji redakcija ieškojo `/Exit kodai:/` bet kurioje eilutėje — ir SULŪŽO nuo
-   * savo paties dokumentacijos: `hash-password.js` antraštėje yra paaiškinimas,
-   * minintis `` `Exit kodai:` `` kaip tekstą. `findIndex` pagavo jį, blokas baigėsi
-   * tuščia eilute, ir kodų aibė grįžo tuščia — t. y. skriptas su TEISINGA antraište
-   * atrodė kaip be jos.
-   *
-   * Todėl reikalaujama, kad žyma būtų komentaro eilutės PRADŽIOJE. Minėjimas tekste
-   * (`` `Exit kodai:` ``) tokios formos neturi, o tikra antraštė visada turi.
+   * ⚠️ PARSINIMO KLAIDA YRA PAŽEIDIMAS, NE TYLI TUŠČIA AIBĖ. Grąžinus `null`, sargas
+   * skriptą laikytų „be kodų" ir praneštų sėkmę — tiksliai tas tylus praleidimas,
+   * kurio #423 neturi palikti.
    */
-  const eilutes = tekstas.split("\n");
-  const pradzia = eilutes.findIndex((e) => /^\s*\*\s*Exit kodai:/.test(e));
+  const fatal = pranesimai.find((p) => p.fatal);
+  if (fatal) throw new Error(`nepavyko suparsinti: ${fatal.message} (${fatal.line}:${fatal.column})`);
+
+  return { programa, komentarai };
+}
+
+/** Rekursinis AST apėjimas be priklausomybių: `parent` praleidžiamas (ciklas). */
+function* eiti(mazgas) {
+  if (!mazgas || typeof mazgas !== "object") return;
+  if (Array.isArray(mazgas)) {
+    for (const x of mazgas) yield* eiti(x);
+    return;
+  }
+  if (typeof mazgas.type === "string") yield mazgas;
+  for (const k of Object.keys(mazgas)) {
+    if (k === "parent") continue;
+    const v = mazgas[k];
+    if (v && typeof v === "object") yield* eiti(v);
+  }
+}
+
+const sveikas = (n) => (n && n.type === "Literal" && Number.isInteger(n.value) ? n.value : null);
+
+const exitTaikinys = (n) =>
+  Boolean(
+    n &&
+      n.type === "MemberExpression" &&
+      n.object.type === "Identifier" &&
+      n.object.name === "process" &&
+      n.property.type === "Identifier" &&
+      (n.property.name === "exit" || n.property.name === "exitCode")
+  );
+
+const beAwait = (n) => (n && n.type === "AwaitExpression" ? n.argument : n);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * DEKLARACIJA — `Exit kodai:` TIK PIRMAME ANTRAŠTĖS BLOKE (Codex P2, 5 radinys)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ BLOKAS IMAMAS IŠ `getAllComments()`, NE PAIEŠKA TEKSTE.
+ *
+ * Ankstesnė redakcija `Exit kodai:` ieškojo VISAME faile, tad antraštės blokas,
+ * perkeltas į failo galą, sargą tenkindavo — nors D4 ir matrica teigia, kad
+ * reikalaujama BŪTENT antraštės. Codex tai atkūrė: perkėlus bloką visi testai liko
+ * žali.
+ *
+ * Pirmas `Block` tipo komentaras yra struktūrinis vienetas: jo ribų nekeičia nei
+ * pridėtos eilutės, nei tas pats tekstas kitoje vietoje.
+ */
+function antrastesBlokas(komentarai) {
+  const pirmas = komentarai.find((c) => c.type === "Block");
+  return pirmas ? pirmas.value : "";
+}
+
+const VISI_SVEIKIEJI = /(?<![\d#.])(\d+)(?![\d.])/g;
+
+function antrastesKodai(komentarai) {
+  const blokas = antrastesBlokas(komentarai);
+  const eilutes = blokas.split("\n");
+  const pradzia = eilutes.findIndex((e) => /^\s*\*?\s*Exit kodai:/.test(e));
   if (pradzia === -1) return null;
 
-  const blokas = [];
+  const imti = [];
   for (let i = pradzia; i < eilutes.length; i += 1) {
     const e = eilutes[i];
-    if (i > pradzia && (/^\s*\*\s*$/.test(e) || /\*\//.test(e) || /^\s*\*\s*⚠️/.test(e))) break;
-    blokas.push(e);
+    if (i > pradzia && (/^\s*\*?\s*$/.test(e) || /^\s*\*?\s*⚠️/.test(e))) break;
+    imti.push(e);
   }
 
   const kodai = new Set();
-  for (const m of blokas.join("\n").matchAll(VIENAS_SKAITMUO)) kodai.add(Number(m[1]));
+  for (const m of imti.join("\n").matchAll(VISI_SVEIKIEJI)) kodai.add(Number(m[1]));
   return kodai;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * ĮRODYMAS — STATINIS IŠVEDIMAS IŠ KODO (D7)
+ * ĮRODYMAS — TAISYKLĖ IR JOS RIBA (D7)
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * ⚠️ UŽRAŠOMA TAISYKLĖ IR JOS RIBA, NE SKRIPTŲ SĄRAŠAS.
+ * TAISYKLĖ — sveikųjų literalai iš AST, keturiose pozicijose:
  *
- * Sąrašas („šie šeši statiškai, tas vienas vykdymu") pasentų tyliai: pridėjus aštuntą
- * skriptą niekas neprimintų jo priskirti. Taisyklė sena netampa.
+ *   1. `process.exit(N)` ir `process.exitCode = N`        tiesioginis
+ *   2. ternaras TIESIOGIAI exit pozicijoje                `process.exitCode = x ? 1 : 2`
+ *   3. apvalkalas: funkcija, kurios PARAMETRAS eina į exit — literalai iš jos
+ *      kvietimo vietų (`mirti(zinutė, 2)`)
+ *   4. `return N` ir `return x ? N : M` — ⚠️ TIK EXIT GAMINTOJUOSE
  *
- * TAISYKLĖ — renkami sveikųjų skaičių LITERALAI iš keturių formų:
+ * ⚠️ 4 PUNKTO SIAURINIMAS YRA PATS SVARBIAUSIAS, IR JIS ATSIRADO IŠ IŠMATUOTOS
+ * KLAIDOS. Perėjus į AST, „kiekvienas `return N`" pradėjo duoti `erasure-marks.js`
+ * kodą `100` — iš `:130` `limit: Number.isFinite(limit) ? limit : 100`, ternaro
+ * OBJEKTO LITERALE, visai ne exit kelyje. Senasis `\d` jį praleido ATSITIKTINAI,
+ * nes `100` yra trys skaitmenys: dvi klaidos vienas kitą kompensavo. Pataisius tik
+ * „pilnus sveikuosius" be šio siaurinimo, sargas būtų pradėjęs kristi be priežasties.
  *
- *   1. `process.exit(N)` ir `process.exitCode = N`      tiesioginis
- *   2. `return N;`                                       grąžinimas į `process.exitCode`
- *   3. `? N : M`                                         ternaras (`erasure-marks.js:141`)
- *   4. `mirti(zinutė, N)`                                vieno lygio apvalkalas —
- *      funkcija, kurios PARAMETRAS eina į `process.exit(param)`; literalai imami
- *      iš jos kvietimo vietų
+ * EXIT GAMINTOJAS atpažįstamas struktūriškai — funkcija, kurios grąžinimas realiai
+ * eina į exit:
  *
- * ⚠️ TAISYKLĖS RIBA, IR JI TIKRINAMA, NE TIKIMA: literalas, gaunamas per RUNTIME
- * reikšmę, statiškai nepasiekiamas. Išmatuota — vienintelis toks kelias repo yra
- * `migrate-artifacts.mjs`: `process.exitCode = await vykdyti(pool)` ir
- * `= e instanceof NaudojimoKlaida ? e.kodas : 2`, kur `kodas` ateina iš numatytojo
- * parametro (`klaida(zinute, kodas = 1)`).
+ *   `process.exitCode = await vykdyti(pool)`   → `vykdyti`
+ *   `.then(main)` grandinėje, kurios vėlesnio handler'io parametras eina į exit → `main`
  *
- * ⚠️ TODĖL LYGINAMA `išvesti ⊆ antraštė`, NE LYGYBĖ. Lygybė reikštų, kad taisyklė
- * pilna — o ji nėra, ir teigti kitaip būtų tas pats per didelis teiginys, kurį šis
- * sargas gaudo. Įtraukimas vis tiek pagauna abi svarbias klaidas: naują kodą be
- * antraštės įrašo (jis atsiras išvestuose) ir antraštėje pakeistą numerį (senasis
- * išvestas, bet nebedeklaruotas).
+ * ⚠️ RIBA, IR JI TIKRINAMA DVIEM MUTACIJOMIS, NE TEIGIAMA. Siaurinimas įveda SAVO
+ * prielaidą: kad visi kodų šaltiniai pasiekiami iš `process.exit*` per grąžinimų
+ * grandinę. Jei grandinė praleistų gamintoją, aibė TYLIAI susitrauktų — tas pats
+ * gedimas kaip `100`, tik priešinga kryptimi. Todėl:
  *
- * ⚠️ DEKLARUOTI, BET NEIŠVESTI kodai SPAUSDINAMI. Tyliai augantis jų skaičius būtų
- * būdas sargą išjungti nieko nekeičiant — tas pats mechanizmas, kurį #410 sargas
- * užrašė apie praleidimų skaičių.
+ *   (a) naujas exit gamintojas su nedeklaruotu kodu → sargas KRENTA;
+ *   (b) ternaro literalas NE exit kelyje            → į aibę NEPATENKA.
+ *
+ * ⚠️ IR KODAS `0` LIEKA STRUKTŪRINIS: sėkmė yra kodo NENUSTATYMAS, tad literalo
+ * dažnai nėra. Žr. `isvestiSuSekme`.
  */
-function apvalkalai(tekstas) {
-  const rasti = [];
-  for (const m of tekstas.matchAll(/function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/g)) {
-    const [, vardas, params] = m;
-    const vardai = params.split(",").map((p) => p.trim().split(/[\s=]/)[0]).filter(Boolean);
-    const kunas = tekstas.slice(m.index, m.index + 400);
-    for (let i = 0; i < vardai.length; i += 1) {
-      if (new RegExp(`process\\.exit(?:Code)?\\s*(?:=\\s*|\\(\\s*)${vardai[i]}\\b`).test(kunas)) {
-        rasti.push({ vardas, indeksas: i });
+function exitGamintojai(programa) {
+  const gamintojai = new Set();
+  let thenGrandineGamina = false;
+
+  for (const n of eiti(programa)) {
+    if (n.type === "AssignmentExpression" && exitTaikinys(n.left)) {
+      const e = beAwait(n.right);
+      if (e && e.type === "CallExpression" && e.callee.type === "Identifier") gamintojai.add(e.callee.name);
+    }
+    if (n.type === "CallExpression" && exitTaikinys(n.callee)) {
+      const e = beAwait(n.arguments[0]);
+      if (e && e.type === "CallExpression" && e.callee.type === "Identifier") gamintojai.add(e.callee.name);
+    }
+    /** `.then(h)`, kurio parametras eina į exit → visa grandinė gamina exit kodą. */
+    if (n.type === "CallExpression" && n.callee.type === "MemberExpression" && n.callee.property.name === "then") {
+      for (const a of n.arguments) {
+        if (a.type !== "ArrowFunctionExpression" && a.type !== "FunctionExpression") continue;
+        const p0 = a.params[0] && a.params[0].type === "Identifier" ? a.params[0].name : null;
+        if (!p0) continue;
+        for (const v of eiti(a.body)) {
+          const eina =
+            (v.type === "CallExpression" && exitTaikinys(v.callee) && v.arguments[0] && v.arguments[0].type === "Identifier" && v.arguments[0].name === p0) ||
+            (v.type === "AssignmentExpression" && exitTaikinys(v.left) && v.right.type === "Identifier" && v.right.name === p0);
+          if (eina) thenGrandineGamina = true;
+        }
       }
+    }
+  }
+
+  if (thenGrandineGamina) {
+    for (const n of eiti(programa)) {
+      if (n.type !== "CallExpression" || n.callee.type !== "MemberExpression" || n.callee.property.name !== "then") continue;
+      for (const a of n.arguments) if (a.type === "Identifier") gamintojai.add(a.name);
+    }
+  }
+
+  return gamintojai;
+}
+
+function apvalkalai(programa) {
+  const rasti = [];
+  for (const n of eiti(programa)) {
+    if (n.type !== "FunctionDeclaration" || !n.id) continue;
+    const params = n.params.map((p) => (p.type === "Identifier" ? p.name : null));
+    for (const v of eiti(n.body)) {
+      const vardas =
+        v.type === "CallExpression" && exitTaikinys(v.callee) && v.arguments[0] && v.arguments[0].type === "Identifier"
+          ? v.arguments[0].name
+          : v.type === "AssignmentExpression" && exitTaikinys(v.left) && v.right.type === "Identifier"
+            ? v.right.name
+            : null;
+      if (vardas === null) continue;
+      const i = params.indexOf(vardas);
+      if (i >= 0) rasti.push({ vardas: n.id.name, indeksas: i });
     }
   }
   return rasti;
 }
 
-/**
- * Argumentų dalijimas, atsparus eilutėms ir skliaustams.
- *
- * ⚠️ EILUTĖS SEKAMOS ATSKIRAI, IR TAI IŠMATUOTA KLAIDA, NE ATSARGUMAS. Pirmoji šios
- * funkcijos redakcija backtick'ą laikė skliaustu, bet niekada jo neuždarydavo — o
- * `pg-backup.mjs` kviečia `mirti("`dump` reikalauja …", 1)`, t. y. backtick'ą DVIGUBOSE
- * kabutėse. Gylis niekada negrįždavo į 1, argumentai nesuskildavo, ir kodai `1`/`2`
- * tyliai iškrisdavo iš išvestos aibės.
- */
-function argumentai(tekstas, nuo) {
-  let gylis = 1;
-  let dabar = "";
-  let eiluteje = null;
-  const argai = [];
-
-  for (let i = nuo; i < tekstas.length; i += 1) {
-    const c = tekstas[i];
-
-    if (eiluteje) {
-      if (c === "\\") {
-        dabar += c + (tekstas[i + 1] || "");
-        i += 1;
-        continue;
-      }
-      if (c === eiluteje) eiluteje = null;
-      dabar += c;
-      continue;
-    }
-
-    if (c === "\"" || c === "'" || c === "`") {
-      eiluteje = c;
-      dabar += c;
-      continue;
-    }
-
-    if ("([{".includes(c)) gylis += 1;
-    else if (")]}".includes(c)) {
-      gylis -= 1;
-      if (gylis === 0) break;
-    }
-
-    if (c === "," && gylis === 1) {
-      argai.push(dabar);
-      dabar = "";
-      continue;
-    }
-    dabar += c;
-  }
-
-  argai.push(dabar);
-  return argai;
-}
-
-function isvestiKodai(tekstas) {
+function isvestiKodai(programa) {
   const kodai = new Set();
+  const pridek = (n) => {
+    const v = sveikas(n);
+    if (v !== null) kodai.add(v);
+  };
+  const pridekTernara = (n) => {
+    if (n && n.type === "ConditionalExpression") {
+      pridek(n.consequent);
+      pridek(n.alternate);
+    }
+  };
 
-  for (const m of tekstas.matchAll(/process\.exit(?:Code)?\s*(?:=\s*|\(\s*)(\d)\b/g)) kodai.add(Number(m[1]));
-  for (const m of tekstas.matchAll(/\breturn\s+(\d)\s*;/g)) kodai.add(Number(m[1]));
-  /**
-   * ⚠️ TERNARO PUSĖS VERTINAMOS ATSKIRAI. `? N : M` forma pagautų
-   * `erasure-marks.js:141` (`? 0 : 1`), bet praleistų `migrate-artifacts.mjs:260`
-   * (`? e.kodas : 2`), kur literalas yra tik vienoje pusėje — o būtent jis ir yra
-   * deklaruotas kodas `2`.
-   */
-  for (const m of tekstas.matchAll(/\?\s*([^?:]+?)\s*:\s*([^;,)\n]+)/g)) {
-    for (const puse of [m[1], m[2]]) {
-      if (/^\d$/.test(puse.trim())) kodai.add(Number(puse.trim()));
+  for (const n of eiti(programa)) {
+    if (n.type === "AssignmentExpression" && exitTaikinys(n.left)) {
+      pridek(n.right);
+      pridekTernara(n.right);
+    }
+    if (n.type === "CallExpression" && exitTaikinys(n.callee)) {
+      pridek(n.arguments[0]);
+      pridekTernara(n.arguments[0]);
     }
   }
 
-  for (const w of apvalkalai(tekstas)) {
-    const re = new RegExp(`\\b${w.vardas}\\s*\\(`, "g");
-    for (const m of tekstas.matchAll(re)) {
-      const a = argumentai(tekstas, m.index + m[0].length)[w.indeksas];
-      if (a !== undefined && /^\s*(\d)\s*$/.test(a)) kodai.add(Number(a.trim()));
+  for (const w of apvalkalai(programa)) {
+    for (const n of eiti(programa)) {
+      if (n.type !== "CallExpression" || n.callee.type !== "Identifier" || n.callee.name !== w.vardas) continue;
+      pridek(n.arguments[w.indeksas]);
+    }
+  }
+
+  const gamintojai = exitGamintojai(programa);
+  for (const n of eiti(programa)) {
+    const vardas =
+      n.type === "FunctionDeclaration" && n.id
+        ? n.id.name
+        : n.type === "VariableDeclarator" && n.id.type === "Identifier" && n.init && /Function/.test(n.init.type)
+          ? n.id.name
+          : null;
+    if (!vardas || !gamintojai.has(vardas)) continue;
+    for (const v of eiti(n)) {
+      if (v.type !== "ReturnStatement" || !v.argument) continue;
+      pridek(v.argument);
+      pridekTernara(v.argument);
     }
   }
 
   return kodai;
 }
 
-
 /**
  * ⚠️ KODAS `0` YRA STRUKTŪRINIS, NE IŠVEDAMAS.
  *
  * Sėkmė yra kodo NENUSTATYMAS: `process.exitCode` numatytai `0`, tad literalo, kurį
- * būtų galima surinkti, dažnai nėra (keturi iš penkių skriptų jo neturi). Laikyti tai
- * „neišvestu kodu" reikštų keturias netikras spragas ir paslėptų vienintelę tikrą.
+ * būtų galima surinkti, dažnai nėra. Laikyti tai „neišvestu kodu" reikštų keturias
+ * netikras spragas ir paslėptų vienintelę tikrą (`migrate-artifacts` kodas `1`).
  */
-const isvestiSuSekme = (tekstas) => new Set([0, ...isvestiKodai(tekstas)]);
+const isvestiSuSekme = (programa) => new Set([0, ...isvestiKodai(programa)]);
 
 /* ══════════════════════════════════════════════════════════════════════════
- * DUBLIS — DOKUMENTO KODAI IR JŲ PRISKYRIMAS SKRIPTUI
+ * DUBLIS — SEKCIJOS RIBA, NE EILUČIŲ LANGAS (Codex P2, 4 radinys)
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /**
- * ⚠️ DUBLIS PRISKIRIAMAS ARTIMIAUSIU AUKŠČIAU ESANČIU IŠKVIETIMU, NE ŽEMĖLAPIU.
+ * ⚠️ 60 EILUČIŲ LANGAS BUVO TA PATI KLAIDA KAIP 400 SIMBOLIŲ.
  *
- * Rankinis „dokumentas → skriptas" žemėlapis gintų tik tuos dublius, kuriuos kas nors
- * atsiminė įrašyti — o trys iš keturių esamų dublių (`backup-runbook.md`) buvo
- * praleisti net rašant patį issue. Priskyrimas iš teksto tokios atminties nereikalauja.
+ * Codex atkūrė: prozai tarp iškvietimo ir `Exit kodai` pastraipos išaugus iki 60
+ * eilučių, `skriptas` likdavo `null`, ir dublis TYLIAI iškrisdavo iš tikrinimo. Jis
+ * tai išmatavo ANTRAJAME `backup-runbook.md` dublyje kartu pakeisdamas kodą — visi
+ * testai liko žali.
  *
- * Išmatuota: visi keturi dubliai turi `node …scripts/X` iškvietimą 3–29 eilutėmis
- * aukščiau, ir tai vienintelis skriptas tarp jų.
+ * ⚠️ MARKDOWN AST ČIA NEREIKIA: dokumentas jau turi struktūrą — ANTRAŠTES. Dublis
+ * siejamas su skriptu, iškviestu TOJE PAČIOJE sekcijoje: skenuojama atgal iki
+ * artimiausios ankstesnės antraštės, ir iškvietimas privalo būti tarp jos ir dublio.
+ * ❌ Jokio naujo skaičiaus.
+ *
+ * Išmatuota — visi keturi dubliai tenkina taisyklę, ir iškvietimas visada eina iškart
+ * po antraštės:
+ *
+ *   backup-runbook.md:448   antraštė :444   iškvietimas :445
+ *   backup-runbook.md:776   antraštė :746   iškvietimas :747
+ *   backup-runbook.md:883   antraštė :879   iškvietimas :880
+ *   migrations.md:313       antraštė :301   iškvietimas :310
  */
+const ANTRASTE = /^#{1,6}\s/;
+const DOK_ISKVIETIMAS = /node\s+(?:[A-Za-z0-9_$."'/=-]*\s+)?(?:backend\/|frontend\/)?scripts\/([A-Za-z0-9._-]+\.(?:mjs|js))\b/;
+
 function dokumentuDubliai(dok) {
   const dubliai = [];
-  const iskvietimas = /node\s+(?:[A-Za-z0-9_$."'/=-]*\s+)?(?:backend\/|frontend\/)?scripts\/([A-Za-z0-9._-]+\.(?:mjs|js))\b/;
 
   for (const { kelias, tekstas } of dok) {
     const eilutes = tekstas.split("\n");
+
     for (let i = 0; i < eilutes.length; i += 1) {
       if (!/Exit kodai/.test(eilutes[i])) continue;
 
+      /** Sekcijos pradžia: artimiausia ankstesnė antraštė (arba failo pradžia). */
+      let sekcija = 0;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        if (ANTRASTE.test(eilutes[j])) {
+          sekcija = j;
+          break;
+        }
+      }
+
       let skriptas = null;
-      for (let j = i; j >= 0 && j > i - 60; j -= 1) {
-        const m = eilutes[j].match(iskvietimas);
+      for (let j = i; j > sekcija; j -= 1) {
+        const m = eilutes[j].match(DOK_ISKVIETIMAS);
         if (m) {
           skriptas = m[1];
           break;
         }
       }
 
-      /** Blokas: nuo `Exit kodai` iki tuščios eilutės — dubliai rašomi pastraipa. */
       const blokas = [];
       for (let j = i; j < eilutes.length; j += 1) {
         if (j > i && /^\s*$/.test(eilutes[j])) break;
@@ -380,13 +503,12 @@ function dokumentuDubliai(dok) {
       }
 
       const kodai = new Set();
-      for (const m of blokas.join("\n").matchAll(VIENAS_SKAITMUO)) kodai.add(Number(m[1]));
+      for (const m of blokas.join("\n").matchAll(VISI_SVEIKIEJI)) kodai.add(Number(m[1]));
       dubliai.push({ kelias, eilute: i + 1, skriptas, kodai });
     }
   }
   return dubliai;
 }
-
 
 /* ══════════════════════════════════════════════════════════════════════════
  * PAŽEIDIMAI — VIENA FUNKCIJA, KAD SAVIPATIKRA MATUOTŲ TĄ PATĮ KELIĄ (D3)
@@ -404,7 +526,8 @@ function pazeidimai({ skriptai: sk = skriptai(), dok = dokumentai() } = {}) {
   const dubliai = dokumentuDubliai(dok);
 
   for (const s of sk) {
-    const savideklaracija = arSavideklaracija(s.tekstas);
+    const { programa, komentarai } = analize(s.tekstas);
+    const savideklaracija = arSavideklaracija(komentarai);
     const dokumentuotas = arDokumentuotas(dok, s.vardas);
 
     /** D0/M5: riba apibrėžta tik tada, kai abu signalai sutampa. */
@@ -418,14 +541,14 @@ function pazeidimai({ skriptai: sk = skriptai(), dok = dokumentai() } = {}) {
 
     if (!savideklaracija) continue; // ne operatoriaus skriptas — kodų kontrakto neturi
 
-    const antraste = antrastesKodai(s.tekstas);
+    const antraste = antrastesKodai(komentarai);
     if (!antraste) {
       p.push(`${s.vardas}: operatoriaus skriptas nustato exit kodą, bet \`Exit kodai:\` antraštės NETURI (#423 D4)`);
       continue;
     }
 
     /** M1/M4: kiekvienas išvestas kodas privalo būti deklaruotas. */
-    const isvesti = isvestiSuSekme(s.tekstas);
+    const isvesti = isvestiSuSekme(programa);
     const nedeklaruoti = [...isvesti].filter((k) => !antraste.has(k)).sort();
     if (nedeklaruoti.length) {
       p.push(
@@ -479,7 +602,7 @@ test("#423 M3 antroji pusė: aštuoni NE-operatoriaus skriptai duoda 0 pažeidim
    * visko, kas neturi antraštės, „aptiktų" naują operatoriaus skriptą — bet kartu
    * reikalautų antraštės iš `run-tests.mjs` ir `check-*`, kuriems kodų kontrakto nėra.
    */
-  const kiti = skriptai().filter((s) => !arSavideklaracija(s.tekstas));
+  const kiti = skriptai().filter((s) => !arSavideklaracija(analize(s.tekstas).komentarai));
   assert.equal(kiti.length, 8);
   assert.deepEqual(pazeidimai({ skriptai: kiti }), []);
 });
@@ -500,6 +623,56 @@ test("#423 D3 SAVIPATIKRA: įterptas nesutapimas duoda LYGIAI 1 pažeidimą", ()
   assert.deepEqual(pazeidimai({ skriptai: sk }), []);
 });
 
+test("#423 D3 SAVIPATIKRA: KIEKVIENO iš keturių dublių nesutapimas gaudomas", () => {
+  /**
+   * ⚠️ SPRAGA, KURIĄ ATSKLEIDĖ CODEX 4 RADINYS: ankstesnė redakcija mutuodavo TIK
+   * PIRMĄ dublį (`backup-runbook.md:448`). Trys likusieji sargo neturėjo — ir būtent
+   * antrajame Codex atkūrė tylų praleidimą.
+   *
+   * ⚠️ AIBĖ IŠVEDAMA, NE SURAŠOMA: dubliai imami iš `dokumentuDubliai()`, tad
+   * pridėjus penktą jis į savipatikrą pakliūva savaime. Rankinis sąrašas gintų tik
+   * tuos, kuriuos kas nors atsiminė įrašyti.
+   */
+  const bazinis = dokumentai();
+  const dubliai = dokumentuDubliai(bazinis).filter((d) => d.skriptas);
+
+  assert.equal(dubliai.length, 4, `laukta keturių dublių, rasta ${dubliai.length}`);
+
+  for (const d of dubliai) {
+    const kodas = [...d.kodai].sort((a, b) => b - a)[0];
+
+    /**
+     * ⚠️ MUTUOJAMAS VISAS TO DUBLIO BLOKAS, NE PIRMA JO EILUTĖ.
+     *
+     * Išmatuota: `backup-runbook.md:776` dublis yra DAUGELIO eilučių — kodai `3` ir `4`
+     * gyvena tęsinyje. Pirmoji redakcija keitė tik `d.eilute`, tad tam dubliui mutacija
+     * nieko nepadarydavo, savipatikra gaudavo 0 pažeidimų ir KRISDAVO — t. y. spraga
+     * būtų buvusi ta pati, kurią šis testas ir uždaro, tik kitoje vietoje.
+     */
+    const sugadinti = bazinis.map((f) => {
+      if (f.kelias !== d.kelias) return f;
+      const eilutes = f.tekstas.split("\n");
+      const re = new RegExp(`(?<![\\d.])${kodas}(?![\\d.])`);
+      for (let i = d.eilute - 1; i < eilutes.length; i += 1) {
+        if (i > d.eilute - 1 && /^\s*$/.test(eilutes[i])) break;
+        if (re.test(eilutes[i])) {
+          eilutes[i] = eilutes[i].replace(re, "9");
+          break;
+        }
+      }
+      return { ...f, tekstas: eilutes.join("\n") };
+    });
+
+    const p = pazeidimai({ dok: sugadinti });
+    assert.equal(
+      p.length,
+      1,
+      `${d.kelias}:${d.eilute} (${d.skriptas}): laukta 1, gauta ${p.length}:\n  ${p.join("\n  ")}`
+    );
+    assert.match(p[0], new RegExp(`${d.skriptas.replace(".", "\\.")}\\): dublis NESUTAMPA`), `${d.kelias}:${d.eilute}`);
+  }
+});
+
 test("#423 D3 SAVIPATIKRA: dublio nesutapimas gaudomas VISOMIS trimis kryptimis", () => {
   /**
    * ⚠️ `Set(dokumentas) === Set(antraštė)`, ne įtraukimas. Vien „dokumento kodai ⊆
@@ -516,10 +689,25 @@ test("#423 D3 SAVIPATIKRA: dublio nesutapimas gaudomas VISOMIS trimis kryptimis"
     ["perteklinis", "`2` procedūros klaida.", "`2` procedūros klaida · `7` naujas."],
   ];
 
+  /**
+   * ⚠️ EILUTĖS NUMERIS IŠVEDAMAS, NE ĮRAŠYTAS.
+   *
+   * Pirmoji redakcija tikrino `backup-runbook.md:448`, ir tai lūžo vos dokumente
+   * atsirado eilučių aukščiau — t. y. tas pats fiksuotas langas, kurį Codex rado
+   * sarge, tik mano paties teste. Išmatuota: įterpus 70 eilučių prozos, sargas dublį
+   * PRISKYRĖ teisingai, o krito būtent ši asercija.
+   */
+  const pgDublis = dokumentuDubliai(bazinis).find((d) => d.skriptas === "pg-backup.mjs");
+  assert.ok(pgDublis, "prielaida: `pg-backup` dublis randamas");
+
   for (const [vardas, nuo, kur] of atvejai) {
     const p = pazeidimai({ dok: pakeisti(nuo, kur) });
     assert.equal(p.length, 1, `${vardas}: laukta 1, gauta ${p.length}:\n  ${p.join("\n  ")}`);
-    assert.match(p[0], /backup-runbook\.md:448 \(pg-backup\.mjs\): dublis NESUTAMPA/, vardas);
+    assert.match(
+      p[0],
+      new RegExp(`backup-runbook\\.md:${pgDublis.eilute} \\(pg-backup\\.mjs\\): dublis NESUTAMPA`),
+      vardas
+    );
   }
 });
 
@@ -538,4 +726,92 @@ test("#423 D0 SAVIPATIKRA: vienas ribos signalas be kito — pažeidimas (M5)", 
   const p = pazeidimai({ skriptai: bePirmo });
   assert.equal(p.length, 1, `laukta 1, gauta ${p.length}:\n  ${p.join("\n  ")}`);
   assert.match(p[0], /pg-backup\.mjs: ribos signalai IŠSISKYRĖ/);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * REGRESIJOS INKARAS — AIBĖS UŽFIKSUOTOS PRIEŠ AST PERĖJIMĄ
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ BE ŠIO INKARO AST PERRAŠYMAS GALĖTŲ TYLIAI SUMAŽINTI AIBĘ, IR VISKAS LIKTŲ ŽALIA.
+ *
+ * `išvesti ⊆ antraštė` yra ĮTRAUKIMAS: aibei susitraukus iki tuščios, sąlyga galioja
+ * TOBULAI, o sargas nebegina nieko. Tai tiksliai ta klasė, kurią gaudo visas #423 —
+ * patikra, kuri praeina dėl to, kad nustojo matuoti.
+ *
+ * ⚠️ REIKŠMĖS IŠMATUOTOS PRIEŠ PERĖJIMĄ, teksto (regex) keliu, ir užrašytos čia kaip
+ * ETALONAS. AST kelias privalo duoti TĄ PAČIĄ aibę kiekvienam iš septynių — nei
+ * daugiau (klaidingi teigiami, kaip `erasure-marks` `100`), nei mažiau (tyli spraga).
+ *
+ * ⚠️ `0` ČIA NEĮTRAUKTAS: inkaras fiksuoja IŠVESTUS kodus, o `0` pridedamas atskirai
+ * (`isvestiSuSekme`) kaip struktūrinis. Sumaišius juos, inkaras nustotų matuoti
+ * būtent išvedimą.
+ */
+const ETALONAS = Object.freeze({
+  "cutover-terminalize.mjs": [1, 2, 3],
+  "dr-restore.mjs": [1, 2, 3],
+  "erasure-marks.js": [0, 1, 2],
+  "hash-password.js": [1],
+  "migrate-artifacts.mjs": [0, 2, 3, 4],
+  "pg-backup.mjs": [1, 2],
+  "post-restore-reconcile.mjs": [1, 2, 3, 4],
+});
+
+test("#423 INKARAS: AST duoda TAS PAČIAS aibes kaip teksto kelias prieš perėjimą", () => {
+  const sk = skriptai();
+
+  for (const [vardas, tiketa] of Object.entries(ETALONAS)) {
+    const s = sk.find((x) => x.vardas === vardas);
+    assert.ok(s, `${vardas}: skriptas privalo būti aibėje`);
+    const gauta = [...isvestiKodai(analize(s.tekstas).programa)].sort((a, b) => a - b);
+    assert.deepEqual(gauta, tiketa, `${vardas}: išvesta {${gauta}}, etalonas {${tiketa}}`);
+  }
+
+  assert.equal(Object.keys(ETALONAS).length, 7, "etalonas privalo apimti visus septynis");
+});
+
+test("#423 RIBA (b): ternaro literalas NE exit kelyje į aibę NEPATENKA", () => {
+  /**
+   * ⚠️ IŠMATUOTA KLAIDA, NE ATSARGUMAS. Perėjus į AST, „kiekvienas ternaras" pradėjo
+   * duoti `erasure-marks.js` kodą `100` — iš `:130`
+   * `limit: Number.isFinite(limit) ? limit : 100`, ternaro OBJEKTO LITERALE.
+   *
+   * Senasis `\d` jį praleido ATSITIKTINAI (trys skaitmenys), tad dvi klaidos vienas
+   * kitą kompensavo. Pataisius tik „pilnus sveikuosius", sargas būtų pradėjęs kristi
+   * be jokio elgesio pakeitimo.
+   */
+  const s = skriptai().find((x) => x.vardas === "erasure-marks.js");
+  const kodai = isvestiKodai(analize(s.tekstas).programa);
+
+  assert.equal(kodai.has(100), false, "`limit ? … : 100` nėra exit kodas");
+  assert.deepEqual([...kodai].sort((a, b) => a - b), [0, 1, 2]);
+});
+
+test("#423 RIBA (a): NAUJAS exit gamintojas su nedeklaruotu kodu — sargas KRENTA", () => {
+  /**
+   * ⚠️ SIAURINIMAS IKI „EXIT GAMINTOJŲ" ĮVEDA SAVO PRIELAIDĄ: kad visi kodų šaltiniai
+   * pasiekiami iš `process.exit*` per grąžinimų grandinę. Jei grandinė praleistų
+   * gamintoją, aibė TYLIAI susitrauktų — tas pats gedimas kaip `100`, tik priešinga
+   * kryptimi.
+   *
+   * GINA: pridėjus NAUJĄ gamintoją (funkciją, kurios grąžinimas eina į
+   * `process.exitCode`) su kodu, kurio antraštėje nėra, sargas privalo kristi.
+   */
+  const sk = skriptai();
+  const pg = sk.find((x) => x.vardas === "pg-backup.mjs");
+
+  const suGamintoju = sk.map((x) =>
+    x === pg
+      ? {
+          ...x,
+          tekstas:
+            x.tekstas +
+            "\nfunction naujasKelias() {\n  if (process.env.NIEKADA_NENUSTATYTA) return 9;\n  return 0;\n}\nprocess.exitCode = naujasKelias();\n",
+        }
+      : x
+  );
+
+  const p = pazeidimai({ skriptai: suGamintoju });
+  assert.equal(p.length, 1, `laukta 1, gauta ${p.length}:\n  ${p.join("\n  ")}`);
+  assert.match(p[0], /pg-backup\.mjs: kodai \{9\}/, "naujo gamintojo kodas privalo būti pastebėtas");
 });
