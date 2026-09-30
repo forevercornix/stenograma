@@ -426,6 +426,11 @@ const functional = [
   "migracijosCliBaigtys",
   /** ⚠️ `functional`: skaito dokumentų TEKSTĄ; jokios komandos nevykdo (#410 D1). */
   "dokumentuotosKomandos",
+  /**
+   * ⚠️ `functional`: skaito `backend/scripts/` ir `docs/` TEKSTĄ — nė vieno skripto
+   * nepaleidžia, tad nei DB, nei Redis, nei saugyklos nereikia (#423 D3).
+   */
+  "operatoriausExitKodai",
   /** ⚠️ `functional`: sargai tikrinami vaikiniuose procesuose, be DB ir Redis (#410 D3). */
   "sargaiPostgresRedis",
   /** ⚠️ `functional`: netikras pool'as yra grynas objektas, `pg` neimportuojamas (#412 D5). */

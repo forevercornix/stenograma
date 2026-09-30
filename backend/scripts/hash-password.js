@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 /**
+ * SLAPTAŽODŽIO MAIŠOS GENERATORIUS — OPERATORIAUS ĮRANKIS (#158).
+ *
  * Sugeneruoja scrypt maišą slaptažodžiui - naudojama AUTH_USERS reikšmei
  * paruošti (žr. .env.example ir README „Autentifikacija").
+ *
+ * ⚠️ SAVIDEKLARACIJA UŽRAŠYTA EKSPLICITIŠKAI (#423 D0). Iki tol šis failas į ribą
+ * pakliūdavo tik todėl, kad žodis „operatoriaus" atsitiktinai pataikė į pirmas 25
+ * failo eilutes — ne į antraštę, o į vėlesnį komentarą apie `--user-id`. Pridėjus
+ * `Exit kodai:` bloką jis iš to lango iškrito, ir sargas ribą paskelbė neapibrėžta.
+ * Žr. `operatoriausExitKodai`.
  *
  * Naudojimas:
  *   node scripts/hash-password.js <vardas> <rolė>
@@ -9,6 +17,16 @@
  *   process listą - vardas ir rolė nėra paslaptis, tad jie saugūs kaip argv)
  *
  * Rezultatą įrašykite į AUTH_USERS formatu "vardas:rolė:maiša:userId".
+ *
+ * Exit kodai:
+ *   0 — maiša sugeneruota ir išvesta
+ *   1 — naudojimo klaida: trūksta argumentų, nežinoma rolė, netaisyklingas
+ *       `--user-id` (ne UUIDv4), tuščias arba nesutampantis slaptažodis
+ *
+ * ⚠️ PROCEDŪROS KLAIDOS KODO NĖRA, IR TAI NE PRALEIDIMAS. Skriptas neturi nė vienos
+ * išorinės priklausomybės: nei DB, nei tinklo, nei failų — `scrypt` ir `readline`.
+ * Todėl nėra būsenos, kurioje „naudojimas teisingas, bet procedūra lūžo", o kodas,
+ * kurio niekas negali grąžinti, būtų deklaracija be elgesio (#423 D6).
  */
 const crypto = require("node:crypto");
 const readline = require("node:readline/promises");
