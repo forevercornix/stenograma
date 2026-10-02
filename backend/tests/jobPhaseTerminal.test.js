@@ -319,3 +319,89 @@ test("#154 RECOVERY: persistintas progresas NĖRA media-level resume pažadas", 
   assert.equal(po.progress, null, "progresas NEIŠSAUGOMAS – jis nereiškia resume taško");
   assert.equal(po.progressKnown, false);
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * #253 — SAVININKO KELIO `finish()` SUTARTIS
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * ⚠️ DU UŽBAIGIMO KELIAI, VIENAS SU #184 GARANTIJOMIS.
+ *
+ * `system.finish()` → `finishAtomic()` duoda atomiškumą, tikrą no-op,
+ * `RESULT_CONFLICT` ir `COMPLETED_WITHOUT_RESULT`. Savininko kelias turi tik
+ * versijos CAS.
+ *
+ * ⚠️ IKI #253 TAI NEKENKĖ TIK DĖL KVIETĖJŲ, NE DĖL SARGO. Išmatuota prieš kodą:
+ * savininko `finish()` turėjo du kvietėjus (`transcribeJobs.js:246` ir
+ * `jobOwnership.test.js`), abu `FAILED`. Bet `finish(scope, COMPLETED, { result })`
+ * buvo visiškai teisėtas kvietimas — o pavojų aktyvuoja ne klaida, o įprastas
+ * naujas kvietėjas.
+ */
+test("#253: savininko kelio `finish()` ATMETA `completed` — garsiai, su kodu", async () => {
+  const scope = { jobId: "nesvarbu-253", ownerKind: OWNER_KIND.USER, ownerId: "u-253" };
+
+  await assert.rejects(
+    () => jobStore.finish(scope, STATUS.COMPLETED, { result: { text: "x" } }),
+    (klaida) => {
+      assert.equal(klaida.name, "JobPhaseError");
+      assert.equal(klaida.code, "COMPLETED_REQUIRES_SYSTEM_PATH");
+      /** Žinutė privalo pasakyti, KUR eiti — kitaip kvietėjas nuimtų sargą. */
+      assert.match(klaida.message, /system\.finish/);
+      return true;
+    }
+  );
+});
+
+test("#253 KONTROLĖ: `failed` ir `cancelled` savininko kelyje PRAEINA sargą", async () => {
+  /**
+   * ⚠️ BE ŠIOS PUSĖS SARGAS GALĖTŲ ATMESTI VISKĄ, ir pirmasis testas praeitų dėl
+   * klaidingos priežasties. Tikrinama, kad sargas praleidžia — ne kad job'as
+   * egzistuoja: nesančiam job'ui `finish()` grąžina `null` PO sargo, tad `null`
+   * čia yra teisingas atsakymas ir įrodo, kad sargas nebemetė.
+   */
+  const scope = { jobId: "nesvarbu-253b", ownerKind: OWNER_KIND.USER, ownerId: "u-253" };
+
+  for (const status of [STATUS.FAILED, STATUS.CANCELLED]) {
+    const rez = await jobStore.finish(scope, status, { error: "x" });
+    assert.equal(rez, null, `${status}: sargas privalo praleisti (nesantis job'as → null)`);
+  }
+});
+
+test("#253: vienintelis produkcinis kvietėjas NEPERDUODA `completed`", async () => {
+  /**
+   * ⚠️ STATINĖ PATIKRA SĄMONINGAI, IR JOS RIBA UŽRAŠOMA. Ji neįrodo elgesio — tai
+   * daro du testai aukščiau. Ji gina KITĄ dalyką: kad sutarties susiaurinimas
+   * nepaliktų produkcinio kvietėjo, kuris jį pažeidžia. Be jos sargas galėtų būti
+   * teisingas, o maršrutas — krentantis.
+   *
+   * ⚠️ Aibė išvedama iš TEKSTO, ne rankinio sąrašo: pridėjus trečią kvietėją su
+   * `COMPLETED` jis pakliūtų savaime.
+   */
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const saknis = path.join(__dirname, "..");
+
+  const failai = [];
+  const eiti = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === "node_modules" || e.name === "tests") continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) eiti(p);
+      else if (e.name.endsWith(".js")) failai.push(p);
+    }
+  };
+  eiti(path.join(saknis, "routes"));
+  eiti(path.join(saknis, "services"));
+
+  const pazeidimai = [];
+  for (const f of failai) {
+    const t = fs.readFileSync(f, "utf8");
+    for (const m of t.matchAll(/\.finish\(\s*\{[^}]*\}\s*,\s*([^,)]+)/g)) {
+      if (/COMPLETED|["']completed["']/.test(m[1])) {
+        pazeidimai.push(`${path.relative(saknis, f)}: ${m[1].trim()}`);
+      }
+    }
+  }
+
+  assert.deepEqual(pazeidimai, [], `savininko kelyje COMPLETED nebegalimas:\n  ${pazeidimai.join("\n  ")}`);
+});
