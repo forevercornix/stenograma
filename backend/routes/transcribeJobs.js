@@ -455,9 +455,3 @@ router.delete("/transcribe-jobs/:id", rateLimiter, authenticate, requirePermissi
 });
 
 module.exports = router;
-
-/** #253 N2 mutacija. */
-async function n2(id) {
-  await require("../utils/jobStore").finish({ job: { id } }, "completed");
-}
-module.exports.n2 = n2;
