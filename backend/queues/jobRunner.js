@@ -767,9 +767,3 @@ try {
   // Jei processors dar neįkeliami (pvz. dalinė testų aplinka), tylим - server.js
   // vis tiek registruos per registerProcessors().
 }
-
-/** #253 N3 mutacija: kvietejas kataloge, kurio senoji aprėptis neturejo. */
-async function n3(scope) {
-  await require("../utils/jobStore").finish(scope, "completed");
-}
-module.exports.n3 = n3;
