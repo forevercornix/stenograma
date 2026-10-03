@@ -431,6 +431,12 @@ const functional = [
    * nepaleidžia, tad nei DB, nei Redis, nei saugyklos nereikia (#423 D3).
    */
   "operatoriausExitKodai",
+  /**
+   * ⚠️ `functional`: bendro AST helper'io ELGSENOS testas (#410 D3a). Jokio I/O —
+   * parsina eilutes atmintyje. Be jo du sargai (#423, #253) remtųsi įrankiu, kurio
+   * niekas netikrina (#412).
+   */
+  "astAnalize",
   /** ⚠️ `functional`: sargai tikrinami vaikiniuose procesuose, be DB ir Redis (#410 D3). */
   "sargaiPostgresRedis",
   /** ⚠️ `functional`: netikras pool'as yra grynas objektas, `pg` neimportuojamas (#412 D5). */

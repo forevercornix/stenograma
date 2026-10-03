@@ -854,6 +854,57 @@ async function blockedByTombstone(id, method) {
 }
 
 /**
+ * SAVININKO KELIO `finish()` SUTARTIS: `COMPLETED` ATMETAMAS (#253, kryptis B).
+ *
+ * ⚠️ DU UŽBAIGIMO KELIAI, VIENAS SU #184 GARANTIJOMIS.
+ *
+ * Sisteminis kelias (`system.finish()` → `store.finishAtomic()`) duoda: `jobs` +
+ * `job_results` VIENOJE transakcijoje, sprendimą po `FOR UPDATE`, tikrą no-op
+ * pakartojimui su tuo pačiu kanoniniu rezultatu, `RESULT_CONFLICT` skirtingam
+ * rezultatui ir `COMPLETED_WITHOUT_RESULT` remontuotinai būsenai.
+ *
+ * Savininko kelias turi versijos CAS (7.5b), bet NĖ VIENOS iš tų keturių. Iki #253
+ * tai nekenkė tik todėl, kad vienintelis produkcinis kvietėjas
+ * (`routes/transcribeJobs.js`) žymi TIK `FAILED`.
+ *
+ * ⚠️ IR BŪTENT TAI BUVO PROBLEMA, NE JOS PANEIGIMAS. `finish(scope, COMPLETED,
+ * { result })` buvo visiškai teisėtas kvietimas, kurio niekas nesustabdytų — o
+ * pavojų aktyvuoja NE klaida, o įprastas naujas kvietėjas po pusmečio. Jis tyliai
+ * apeitų visus keturis dalykus, ir blogiausias yra ketvirtas: maršrutas galėtų
+ * nustatyti `completed` BE `job_results` eilutės, audio valymo barjeras tai
+ * teisingai blokuotų, o job'as liktų amžinai remontuotinos būsenos BE JOKIO SIGNALO.
+ *
+ * ⚠️ KODĖL SUTARTIES SUSIAURINIMAS, NE SUJUNGIMAS (kryptis B, ne A).
+ *
+ * A reikštų, kad savininko kelias kviečia tą patį `finishAtomic()`. Bet nuosavybė
+ * tikrinama `getOwned()`, o atominis užbaigimas yra atskiras žingsnis — tarp jų
+ * atsirastų TOCTOU nuosavybei, ir jam uždaryti reikėtų arba `finishAtomicOwned()`,
+ * arba scope perdavimo į `finishAtomic`. Tai reali kaina už kelią, kurio
+ * `COMPLETED` semantikai NIEKAS nenaudoja.
+ *
+ * B paverčia numanomą prielaidą tikrinama ir nieko nelaužo. ⚠️ Išmatuota prieš
+ * kodą: savininko kelio `finish()` turi DU kvietėjus — `transcribeJobs.js:246`
+ * (`FAILED`) ir `jobOwnership.test.js` (`failed`). Nė vienas neperduoda
+ * `COMPLETED`; visi `markCompleted()` fixture'ai eina per `jobStore.system`.
+ *
+ * ⚠️ JEI `COMPLETED` IŠ MARŠRUTO KADA NORS REALIAI REIKĖS, atsakymas yra A, ne šio
+ * sargo nuėmimas: nuėmus jį grįžtų tyli būsena be `job_results`.
+ *
+ * `JobPhaseError` pasirinkta todėl, kad ji JAU klasifikuojama (`jobRunner`
+ * `_classifyError`) — kodas pasiekia operatorių be naujos šakos.
+ */
+function assertSavininkoKeliasBeRezultato(status) {
+  if (status !== STATUS.COMPLETED) return;
+
+  throw new jobPhase.JobPhaseError(
+    "Savininko kelio `finish()` nepriima `completed`: jis neturi #184 rezultatų " +
+      "garantijų (atomiškumo, no-op, `RESULT_CONFLICT`, `COMPLETED_WITHOUT_RESULT`). " +
+      "Sėkmingą užbaigimą atlieka `jobStore.system.finish()`. Žr. #253.",
+    "COMPLETED_REQUIRES_SYSTEM_PATH"
+  );
+}
+
+/**
  * ⚠️ `status` ĮTRAUKTAS SĄMONINGAI.
  *
  * #154 invariantas nėra vien `phase`/`progress` invariantas – tai
@@ -1471,6 +1522,7 @@ module.exports = {
    */
   finish: async (scope, status, extra = {}) => {
     assertScope(scope, "finish");
+    assertSavininkoKeliasBeRezultato(status);
     await ensureInit();
     if (await blockedByTombstone(scope.jobId, "finish")) return null;
 
