@@ -268,7 +268,8 @@ async function _runInline(type, jobId, payload) {
        * metu įvykusiu rašymu. Vykdymo autorizacija nepakinta — ji ima `job`
        * įrašą, ne kontekstą.
        */
-      actor: auditoAktoriusIsJobo(job),
+      /** P1-a MUTACIJA (#246): identity atgal i kontekksta INLINE kelyje. */
+      actor: (job && job.actor) || null,
       // Rolė keliauja kartu su kontekstu, kad servisai galėtų ja remtis
       // nekviesdami saugyklos iš naujo (#18 PR3).
       actorRole: (job && job.actorRole) || null,
