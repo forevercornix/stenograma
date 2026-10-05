@@ -159,6 +159,26 @@ async function isvalytiAudita(pool) {
   await fikturosDdl(pool, "audit_log", "TRUNCATE audit_log");
 }
 
+/**
+ * RIBOTAS LAUKIMAS.
+ *
+ * ⚠️ MARŠRUTAS PATS PALEIDŽIA VYKDYMĄ. `routes/jobs.js` po sukūrimo kviečia
+ * `jobRunner.enqueue*()`, o inline režimu tai `setImmediate(() => _runInline(...))`,
+ * kurio Promise niekas nelaiko. Todėl testas negali nei iškart trinti jobo (jis
+ * dar vykdomas), nei rankiniu `_runInline` pakartoti vykdymo (jis jau įvyko, ir
+ * idempotencija antrą kartą nieko nedaro). Abu variantai buvo pirmoje redakcijoje
+ * ir abu krito CI.
+ */
+async function palaukti(kolKas, ribaMs = 15000, zingsnis = 250) {
+  const terminas = Date.now() + ribaMs;
+  for (;;) {
+    const r = await kolKas();
+    if (r) return r;
+    if (Date.now() > terminas) return null;
+    await new Promise((x) => setTimeout(x, zingsnis));
+  }
+}
+
 /** Visos `audit_log` eilutės kaip neapdorotas tekstas — jokio aplikacijos sluoksnio. */
 async function visosEilutes(pool) {
   const { rows } = await pool.query("SELECT to_jsonb(a)::text AS visa FROM audit_log a ORDER BY a.id");
@@ -313,6 +333,22 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
       const jobId = sukurtas.body && (sukurtas.body.jobId || sukurtas.body.id);
       assert.ok(jobId, "job ID privalo būti — kitaip tikrinam ne tą kelią");
 
+      /**
+       * ⚠️ PALAUKTI TERMINALIOS BŪSENOS PRIEŠ TRYNIMĄ. Vykdomo jobo trynimas
+       * grąžina `409`, ir pirmoji redakcija būtent taip ir krito.
+       */
+      const jobStore = require("../utils/jobStore");
+      const baigtas = await palaukti(async () => {
+        const j = await jobStore.system.get(jobId, { hydrate: false });
+        return j && ["completed", "failed"].includes(j.status) ? j : null;
+      });
+      assert.ok(baigtas, "jobas privalo pasiekti terminalią būseną");
+
+      /**
+       * ⚠️ VALOMA PO VYKDYMO, PRIEŠ TRYNIMĄ. API rakto jobo VYKDYMO eilutės
+       * teisėtai turi atspaudą (`actorSource === "api-key"`), tad be šio valymo
+       * žemiau esantis „atspaudo nėra" tvirtinimas kristų dėl ne to kelio.
+       */
       await isvalytiAudita(pool);
 
       const istrintas = await request(app)
@@ -379,12 +415,22 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
     assert.equal(jobas.actorSource, "session", "prielaida: jobas sukurtas sesijos keliu");
     assert.equal(jobas.actor, OPERATORIUS.userId, "prielaida: `jobs.actor` yra userId — jis LIEKA autorizacijai");
 
-    await isvalytiAudita(pool);
+    /**
+     * ⚠️ NEVALOMA IR `_runInline` NEKVIEČIAMAS.
+     *
+     * Vykdymą jau paleido pats maršrutas, tad rankinis pakartojimas nieko
+     * nedarytų (idempotencija), o valymas galėtų nušluoti būtent tas eilutes,
+     * kurias reikia patikrinti. Tvirtinama ant VISŲ eilučių: prisijungimas,
+     * sukūrimas ir vykdymas — visi trys yra sesijos kelias, ir visi trys
+     * privalo būti be identifikacijos.
+     */
+    const eilutes = await palaukti(async () => {
+      const e = await visosEilutes(pool);
+      /** Laukiam, kol atsiras VYKDYMO eilutė, ne tik prisijungimo. */
+      return e.some((x) => /PROTOCOL|JOB_|LIFECYCLE|EXECUTION/.test(x)) ? e : null;
+    });
+    assert.ok(eilutes, "vykdymo audito eilutės privalo atsirasti — kitaip testas nieko netikrina");
 
-    /** Vykdymas tame pačiame procese — tiksliai tas kelias, kuris įdeda kontekstą. */
-    await jobRunner._runInline("protocol", jobId, { transcript: "pakankamai ilgas testinis tekstas" }).catch(() => {});
-
-    const eilutes = await visosEilutes(pool);
     patvirtintiBeIdentity(eilutes, uzdraustosReiksmes(), "asinchroninis sesijos darbas");
   });
 });
