@@ -59,10 +59,18 @@ const ZENKLAI = Object.freeze(["create", "enqueue", "addTranscriptionJob", "addP
  * netenkina PAGAL APIBRĖŽIMĄ (reikalaujama `property.type === "Identifier"`),
  * tad jos praleidimas nieko nepaslepia.
  *
- * ⚠️ KAINA IŠMATUOTA, NE SPĖTA. Be šio filtro ir be įsiminimo M1a–M1c darė
- * ~2,3 pilnus medžio parsinimus ir CI `backend` šakai pridėjo ~122 s — daugiau
- * nei stebėtas runner'io svyravimas. Sargas, kuris tiek kainuoja, ilgainiui
- * būtų išimtas.
+ * KAINA: be filtro ir be įsiminimo M1a–M1c darė ~2,3 pilnus medžio parsinimus.
+ * Lokaliai tai 7,5 s -> 4,4 s.
+ *
+ * ⚠️ ŠIS FILTRAS NĖRA PAGRĮSTAS IŠMATUOTA CI DELTA — ir pirmoji šio komentaro
+ * redakcija klaidingai tvirtino, kad yra. Palyginimas „kontrolė 466 s prieš
+ * `main` 344 s = +122 s" buvo sudarytas prieš VIENĄ sparčiausią `main` matavimą.
+ * Keturi `main` matavimai duoda 344/419/438/495 s (diapazonas 151 s), o šios
+ * šakos — 466 ir 497 s, t. y. ABU to diapazono vidų. Optimizacija CI laiko
+ * nepakeitė.
+ *
+ * Filtras laikomas todėl, kad mažiau parsinimų prie TO PATIES verdikto yra
+ * griežtai geriau, o ne todėl, kad būtų išmatuota CI nauda.
  */
 function galiTuretiGamintoja(tekstas) {
   return ZENKLAI.some((zenklas) => tekstas.includes(zenklas));
