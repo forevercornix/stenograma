@@ -45,6 +45,48 @@ function produkciniaiFailai(saknis = SAKNIS) {
   return rasti;
 }
 
+/** Vardai, kuriuos predikatai apskritai gali atitikti. */
+const ZENKLAI = Object.freeze(["create", "enqueue", "addTranscriptionJob", "addProtocolJob"]);
+
+/**
+ * ⚠️ PIRMINIS FILTRAS — SAUGI VIRŠUTINĖ APROKSIMACIJA, NE ŠABLONO GRĄŽINIMAS.
+ *
+ * AST lieka VIENINTELIS atitikimo autoritetas (#424 pamoka: tekstas neturi
+ * struktūros, tad riba visada yra spėjimas). Filtras nieko neatitikinėja — jis
+ * tik atmeta failus, kuriuose atitikties BŪTI NEGALI: visi trys predikatai
+ * reikalauja `Identifier` tipo vardo, o identifikatorius šaltinyje visada
+ * parašytas pažodžiu. Skaičiuojamoji forma (`x["create"](...)`) predikatų
+ * netenkina PAGAL APIBRĖŽIMĄ (reikalaujama `property.type === "Identifier"`),
+ * tad jos praleidimas nieko nepaslepia.
+ *
+ * ⚠️ KAINA IŠMATUOTA, NE SPĖTA. Be šio filtro ir be įsiminimo M1a–M1c darė
+ * ~2,3 pilnus medžio parsinimus ir CI `backend` šakai pridėjo ~122 s — daugiau
+ * nei stebėtas runner'io svyravimas. Sargas, kuris tiek kainuoja, ilgainiui
+ * būtų išimtas.
+ */
+function galiTuretiGamintoja(tekstas) {
+  return ZENKLAI.some((zenklas) => tekstas.includes(zenklas));
+}
+
+/**
+ * Suparsintas medis — ĮSIMENAMAS.
+ *
+ * Trys M1 testai anksčiau parsindavo tą patį medį iš naujo. Vienas parsinimas,
+ * dalijamas tarp jų, duoda tą patį verdiktą be tos kainos.
+ */
+let _medis = null;
+function medis() {
+  if (_medis) return _medis;
+  _medis = [];
+  for (const failas of produkciniaiFailai()) {
+    const tekstas = fs.readFileSync(failas, "utf8");
+    if (!galiTuretiGamintoja(tekstas)) continue;
+    const { programa } = analize(tekstas);
+    _medis.push({ failas: path.relative(SAKNIS, failas), mazgai: [...eiti(programa)] });
+  }
+  return _medis;
+}
+
 /** `jobStore.create(...)` — job'o SUKŪRIMAS. */
 function arSukurimas(mazgas) {
   if (mazgas.type !== "CallExpression") return false;
@@ -80,19 +122,43 @@ function arProducerVidus(mazgas) {
   return false;
 }
 
-function vietos(predikatas, failai = produkciniaiFailai()) {
+function vietos(predikatas, failai = null) {
   const rasta = [];
-  for (const failas of failai) {
-    const tekstas = fs.readFileSync(failas, "utf8");
-    const { programa } = analize(tekstas);
-    for (const mazgas of eiti(programa)) {
-      if (predikatas(mazgas)) {
-        rasta.push({ failas: path.relative(SAKNIS, failas), eilute: mazgas.loc.start.line });
+  if (failai) {
+    /** Aiškiai nurodytas rinkinys parsinamas BE pirminio filtro — žr. M1c. */
+    for (const failas of failai) {
+      const { programa } = analize(fs.readFileSync(failas, "utf8"));
+      for (const mazgas of eiti(programa)) {
+        if (predikatas(mazgas)) rasta.push({ failas: path.relative(SAKNIS, failas), eilute: mazgas.loc.start.line });
       }
+    }
+    return rasta;
+  }
+  for (const { failas, mazgai } of medis()) {
+    for (const mazgas of mazgai) {
+      if (predikatas(mazgas)) rasta.push({ failas, eilute: mazgas.loc.start.line });
     }
   }
   return rasta;
 }
+
+test("#440 M1 SAVIKONTROLĖ: pirminis filtras nepaslepia nė vieno gamintojo", () => {
+  /**
+   * ⚠️ FILTRAS YRA FALSIFIKUOJAMA PRIELAIDA, NE DUOTYBĖ.
+   *
+   * Jei iš `ZENKLAI` iškristų vardas, atitinkami failai nebebūtų net
+   * parsinami, ir M1a–M1b praeitų todėl, kad gamintojo nebepamatė. Todėl
+   * tikrinama, kad kiekvienas IŠMATUOTAS gamintojo failas filtrą pereina.
+   */
+  const gamintojai = ["routes/jobs.js", "routes/transcribeJobs.js", "queues/jobRunner.js"];
+  for (const rel of gamintojai) {
+    const tekstas = fs.readFileSync(path.join(SAKNIS, rel), "utf8");
+    assert.ok(galiTuretiGamintoja(tekstas), `pirminis filtras atmestų gamintoją: ${rel}`);
+  }
+
+  /** Ir pats medis privalo būti netuščias — kitaip visi „⊆ routes/" yra tušti. */
+  assert.ok(medis().length >= 20, `medyje ${medis().length} failų — filtras per agresyvus`);
+});
 
 test("#440 M1 SAVIKONTROLĖ: detektoriai randa įterptą gamintoją", () => {
   /**
