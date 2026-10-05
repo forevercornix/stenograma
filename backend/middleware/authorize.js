@@ -64,7 +64,8 @@ function resolveIdentity(req) {
      * `username` lieka `req.user`, nes jį naudoja logai ir sesijos sluoksnis;
      * į persistentinį auditą jis nebepatenka.
      */
-    return { actor: null, role: req.user.role, source: "session" };
+    /** M3 MUTACIJA (#246). */
+    return { actor: req.user.username, role: req.user.role, source: "session" };
   }
 
   if (req.apiKeyAuthenticated) {
