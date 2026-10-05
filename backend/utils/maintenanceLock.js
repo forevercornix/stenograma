@@ -47,54 +47,163 @@ const log = createLogger("maintenance");
  * atskiras darbas (#440 follow-up); iki tol tai operacinė sąlyga.
  */
 
+/**
+ * ⚠️ NUOMA SU FENCING TOKEN'U (#440 §0.2).
+ *
+ * Anksčiau užraktas buvo fiksuota 10 min nuoma be pratęsimo ir be savininko
+ * tapatybės. Iš to kilo dvi grandinės, abi išmatuotos:
+ *
+ *   A. Ilgesnis nei nuoma atkūrimas tyliai tęsdavosi BE užrakto: `create()`
+ *      vėl priimdavo darbus, abu worker'iai vėl pradėdavo vykdymą, o
+ *      `restoreService` tuo metu vis dar rašydavo. Barjeras
+ *      (`routes/backup.js`) savo darbą jau būdavo padaręs ir nebesikartodavo.
+ *   B. `acquire()` nurašydavo pasibaigusią nuomą, tad ANTRAS atkūrimas
+ *      galėdavo ją paimti, kol pirmas dar rašo. O `release()` savininko
+ *      netikrindavo – pirmosios operacijos `finally` nuimdavo ANTROSIOS
+ *      nuomą. Klasikinė nuoma be fencing'o.
+ *
+ * Todėl: nuoma pratęsiama, kol operacija gyva (A), ir kiekviena nuoma turi
+ * token'ą, be kurio jos nuimti negalima (B).
+ */
+
 let _lock = null;
 
-/** Kiek ilgiausiai užraktas gali galioti, kad gedimas neužblokuotų sistemos amžiams. */
+/**
+ * ⚠️ MONOTONINIS IR PER `_resetForTests()` NENULINAMAS.
+ *
+ * Token'o paskirtis – atskirti nuomas. Nulinamas skaitiklis galėtų išduoti
+ * token'ą, identišką pasenusiam, ir fencing nustotų veikti būtent ten, kur
+ * jis tikrinamas – testuose.
+ */
+let _tokenSkaitiklis = 0;
+
+/** Kiek ilgiausiai nuoma galioja BE pratęsimo, kad miręs savininkas neužblokuotų sistemos. */
 const DEFAULT_MAX_HOLD_MS = 10 * 60 * 1000; // 10 min
 
+/** Kaip dažnai `withLock()` pratęsia nuomą. Trečdalis – du praleisti ciklai dar nelemia pabaigos. */
+const RENEW_INTERVAL_DIVISOR = 3;
+
 /**
- * Uždeda užraktą.
+ * Ar nuoma pasibaigusi?
  *
- * @returns {{acquired: boolean, reason?: string}}
+ * ⚠️ SKAITYMAS BE ŠALUTINIO POVEIKIO. Būsenos nurašymas gyvena tik
+ * `_nurasytiPasibaigusia()`.
+ */
+function _pasibaigusi() {
+  return Boolean(_lock) && _lock.expiresAt <= Date.now();
+}
+
+/**
+ * ⚠️ VIENINTELĖ VIETA, KUR PASIBAIGUSI NUOMA NURAŠOMA (#440, atviras kl. 2).
+ *
+ * Anksčiau nurašymas buvo `isLocked()` šalutinis poveikis, o to trys
+ * išmatuotos pasekmės:
+ *
+ *   1. Galėdavo neįvykti NIEKADA: tyliame atkūrime `isLocked()` niekas
+ *      nekviečia, tad ir žurnalo įrašas apie prarastą garantiją neatsirasdavo.
+ *   2. Atribucija klaidinga: kai įvykdavo, įrašą sukeldavo nesusijęs kvietėjas
+ *      (pvz. worker'is, imantis darbą), ne priežiūros kontekstas.
+ *   3. Diagnostinis skaitymas MUTUODAVO būseną – `status()` irgi kviesdavo
+ *      `isLocked()`.
+ *
+ * Nuomos pabaiga reiškia „savininkas laikomas mirusiu", ir tokiam perėjimui
+ * priklauso vienas aiškus, žurnaluojamas veiksmas.
+ */
+function _nurasytiPasibaigusia() {
+  if (!_pasibaigusi()) return false;
+
+  log.warn("Priežiūros nuoma pasibaigė – savininkas laikomas mirusiu", {
+    reason: _lock.reason,
+    token: _lock.token,
+    heldMs: Date.now() - _lock.acquiredAt,
+  });
+  _lock = null;
+  return true;
+}
+
+/**
+ * Uždeda užraktą ir grąžina nuomos token'ą.
+ *
+ * @returns {{acquired: boolean, token?: number, reason?: string}}
  */
 function acquire(reason, { maxHoldMs = DEFAULT_MAX_HOLD_MS } = {}) {
+  /** Pasibaigusi nuoma nurašoma AIŠKIAI, ne per `isLocked()` skaitymą. */
+  _nurasytiPasibaigusia();
+
   if (isLocked()) {
     return { acquired: false, reason: "priežiūros operacija jau vykdoma" };
   }
 
-  _lock = { reason, acquiredAt: Date.now(), expiresAt: Date.now() + maxHoldMs };
-  log.warn("Priežiūros užraktas uždėtas – naujų darbų priėmimas sustabdytas", { reason });
+  _tokenSkaitiklis += 1;
+  const dabar = Date.now();
+  _lock = { reason, token: _tokenSkaitiklis, acquiredAt: dabar, expiresAt: dabar + maxHoldMs };
+  log.warn("Priežiūros užraktas uždėtas – naujų darbų priėmimas sustabdytas", {
+    reason,
+    token: _lock.token,
+  });
 
-  return { acquired: true };
+  return { acquired: true, token: _lock.token };
 }
 
-function release() {
-  if (!_lock) return;
+/**
+ * Pratęsia SAVO nuomą.
+ *
+ * ⚠️ PASIBAIGUSI NUOMA NEBEPRATĘSIAMA (fail-closed). Jei garantija jau nustojo
+ * galioti, worker'iai ir `create()` tuo metu galėjo priimti darbų – atgaivinus
+ * nuomą tas faktas būtų užtušuotas. Operacija apie tai sužino iš `renewed:
+ * false` ir žurnalo įrašo, o ne iš tylos.
+ *
+ * @returns {{renewed: boolean, reason?: string}}
+ */
+function renew(token, { maxHoldMs = DEFAULT_MAX_HOLD_MS } = {}) {
+  if (!_lock) return { renewed: false, reason: "nuomos nėra" };
 
-  log.info("Priežiūros užraktas nuimtas", { heldMs: Date.now() - _lock.acquiredAt });
+  if (_lock.token !== token) {
+    log.error("Atmestas SVETIMOS nuomos pratęsimas", { token, savininkas: _lock.token });
+    return { renewed: false, reason: "ne jūsų nuoma" };
+  }
+
+  if (_pasibaigusi()) {
+    return { renewed: false, reason: "nuoma jau pasibaigusi" };
+  }
+
+  _lock.expiresAt = Date.now() + maxHoldMs;
+  return { renewed: true };
+}
+
+/**
+ * Nuima SAVO nuomą.
+ *
+ * ⚠️ SVETIMAS ATLAISVINIMAS ATMETAMAS IR UŽFIKSUOJAMAS (#440 grandinė B).
+ * Be šios patikros pasenęs savininkas nuimdavo naujojo nuomą, ir sistema
+ * likdavo be jokios apsaugos, nors formaliai „užraktas buvo laikomas".
+ *
+ * @returns {{released: boolean, reason?: string}}
+ */
+function release(token) {
+  if (!_lock) return { released: false, reason: "nuomos nėra" };
+
+  if (_lock.token !== token) {
+    log.error("Atmestas SVETIMOS nuomos atlaisvinimas", { token, savininkas: _lock.token });
+    return { released: false, reason: "ne jūsų nuoma" };
+  }
+
+  log.info("Priežiūros užraktas nuimtas", { heldMs: Date.now() - _lock.acquiredAt, token });
   _lock = null;
+  return { released: true };
 }
 
 /**
  * Ar užraktas galioja?
  *
- * Pasibaigęs užraktas NEBEGALIOJA ir automatiškai išvalomas: procesui nukritus
- * vidury atkūrimo (ar užmiršus `release`) sistema kitaip liktų užblokuota
- * neribotai, ir vienintelė išeitis būtų restartas.
+ * ⚠️ BE ŠALUTINIO POVEIKIO (#440, atviras kl. 2). Pasibaigusi nuoma NEGALIOJA,
+ * bet jos nurašymas čia nebevyksta – tai daro `_nurasytiPasibaigusia()`.
  */
 function isLocked() {
-  if (!_lock) return false;
-
-  if (_lock.expiresAt <= Date.now()) {
-    log.warn("Priežiūros užraktas pasibaigė automatiškai", { reason: _lock.reason });
-    _lock = null;
-    return false;
-  }
-
-  return true;
+  return Boolean(_lock) && !_pasibaigusi();
 }
 
-/** Užrakto būsena diagnostikai – be jokio turinio. */
+/** Užrakto būsena diagnostikai – be jokio turinio ir be būsenos keitimo. */
 function status() {
   if (!isLocked()) return { locked: false };
 
@@ -106,26 +215,66 @@ function status() {
 }
 
 /**
- * Vykdo operaciją su užraktu ir GARANTUOTAI jį nuima.
+ * Vykdo operaciją su užraktu, PRATĘSDAMAS nuomą, kol ji gyva, ir garantuotai
+ * nuimdamas savo nuomą.
  *
- * `finally` čia būtinas: be jo nepavykęs atkūrimas paliktų sistemą
- * užblokuotą, o operatorius matytų „priežiūros operacija jau vykdoma" po to,
- * kai ji seniai baigėsi.
+ * ⚠️ PRATĘSIMAS GYVENA ČIA, NE KVIETĖJE. Kol operacija vykdoma, „atkūrimas
+ * tęsiasi" ir „užraktas galioja" nustoja būti du nepriklausomi faktai, tad
+ * įrodytos maksimalios atkūrimo trukmės nebereikia (#440 D1). Palikus
+ * pratęsimą kvietėjui, garantija priklausytų nuo to, ar kiekvienas jį
+ * prisiminė.
+ *
+ * ⚠️ MIRUSIO SAVININKO ATSIGAVIMAS IŠSAUGOTAS (#440 D4): pratęsimą daro tik
+ * gyvas procesas. Jam nukritus `setInterval` nustoja veikti, nuoma pasibaigia
+ * kaip anksčiau, ir sistema atsilaisvina be restarto.
  */
 async function withLock(reason, operation, options = {}) {
   const result = acquire(reason, options);
   if (!result.acquired) return { locked: false, reason: result.reason };
 
+  const token = result.token;
+  const maxHoldMs = options.maxHoldMs || DEFAULT_MAX_HOLD_MS;
+  const periodas = Math.max(1, Math.floor(maxHoldMs / RENEW_INTERVAL_DIVISOR));
+
+  const laikmatis = setInterval(() => {
+    const atnaujinta = renew(token, { maxHoldMs });
+    if (!atnaujinta.renewed) {
+      log.error("Nuomos pratęsti nepavyko – priežiūros garantija NEBEGALIOJA", {
+        reason,
+        token,
+        priezastis: atnaujinta.reason,
+      });
+    }
+  }, periodas);
+
+  /** ⚠️ `unref()` – pratęsimo laikmatis neturi laikyti proceso gyvo. */
+  if (typeof laikmatis.unref === "function") laikmatis.unref();
+
   try {
     return { locked: true, value: await operation() };
   } finally {
-    release();
+    clearInterval(laikmatis);
+    release(token);
   }
 }
 
-/** Testams. */
+/**
+ * Testams.
+ *
+ * ⚠️ `_tokenSkaitiklis` SĄMONINGAI NENULINAMAS – žr. jo deklaraciją.
+ */
 function _resetForTests() {
   _lock = null;
 }
 
-module.exports = { acquire, release, isLocked, status, withLock, DEFAULT_MAX_HOLD_MS, _resetForTests };
+module.exports = {
+  acquire,
+  renew,
+  release,
+  isLocked,
+  status,
+  withLock,
+  DEFAULT_MAX_HOLD_MS,
+  RENEW_INTERVAL_DIVISOR,
+  _resetForTests,
+};
