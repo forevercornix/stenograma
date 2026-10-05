@@ -250,25 +250,67 @@ router.post(
       });
     }
 
-    const outcome = await maintenanceLock.withLock("backup_restore", async () => {
-      /**
-       * PAKARTOTINĖ patikra JAU SU UŽRAKTU.
-       *
-       * Pirmoji patikra buvo teisinga tuo momentu, kai ją atlikom. Ši –
-       * galutinė: nuo šiol naujų darbų atsirasti nebegali.
-       */
-      const stillActive = await backupService.countActiveJobs();
-      if (stillActive > 0) return { conflict: stillActive };
+    /**
+     * ⚠️ PRARASTOS NUOMOS KLAIDA TURI SAVO ATSAKYMĄ, NE BENDRO 500.
+     *
+     * `_apply()` barjeras meta `LeaseLostError`, kai nuoma prarandama rašymo
+     * metu. Be šio atvaizdavimo operatorius gautų „vidinė klaida" ir imtųsi
+     * netinkamo veiksmo — ieškotų sugadintos kopijos, nors kopija gera, o
+     * problema yra priežiūros garantija. Kitos klaidos kelio nekeičia.
+     */
+    let outcome;
+    try {
+      outcome = await maintenanceLock.withLock("backup_restore", async (signal) => {
+        /**
+         * PAKARTOTINĖ patikra JAU SU UŽRAKTU.
+         *
+         * Pirmoji patikra buvo teisinga tuo momentu, kai ją atlikom. Ši –
+         * galutinė: nuo šiol naujų darbų atsirasti nebegali.
+         */
+        const stillActive = await backupService.countActiveJobs();
+        if (stillActive > 0) return { conflict: stillActive };
 
-      return restoreService.restoreBackup({
-        manifest,
-        data: req.backupParts.data.buffer,
-        actor: req.authz ? req.authz.actor : null,
+        /**
+         * ⚠️ `signal` PERDUODAMAS GILIAU, NE SUSTOJA ČIA (#440 P1).
+         *
+         * Nuoma gali būti prarasta atkūrimui tebevykstant. Jei signalas
+         * pasiliktų maršrute, `restoreService` toliau rašytų visą kopiją, o
+         * kitas atkūrimas tuo metu jau galėtų rašyti tuos pačius `id`.
+         * Barjeras gyvena PRIEŠ KIEKVIENĄ mutaciją `_apply()` viduje.
+         */
+        return restoreService.restoreBackup({
+          manifest,
+          data: req.backupParts.data.buffer,
+          actor: req.authz ? req.authz.actor : null,
+          signal,
+        });
       });
-    });
+    } catch (error) {
+      if (error && error.code === "MAINTENANCE_LEASE_LOST") {
+        return res.status(409).json({
+          error: "Atkūrimas sustabdytas: priežiūros nuoma prarasta operacijai tebevykstant.",
+          code: "MAINTENANCE_LEASE_LOST",
+        });
+      }
+      throw error;
+    }
 
     if (!outcome.locked) {
       return res.status(409).json({ error: "Vyksta kita priežiūros operacija.", code: "MAINTENANCE_IN_PROGRESS" });
+    }
+
+    /**
+     * ⚠️ PRARASTA NUOMA NĖRA SĖKMĖ (#440 P1, atsarginis sluoksnis).
+     *
+     * Čia patenkama tik tada, kai operacija signalo nepaklausė — barjeras
+     * `_apply()` viduje normaliu atveju meta klaidą anksčiau. Bet jei patenkama,
+     * atsakymas negali būti `200`: prielaida, kuria atkūrimas rėmėsi, negaliojo.
+     */
+    if (outcome.leaseLost) {
+      return res.status(409).json({
+        error: "Atkūrimas sustabdytas: priežiūros nuoma prarasta operacijai tebevykstant.",
+        code: "MAINTENANCE_LEASE_LOST",
+      });
     }
 
     if (outcome.value.conflict) {

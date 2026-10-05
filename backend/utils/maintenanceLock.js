@@ -122,6 +122,21 @@ function _nurasytiPasibaigusia() {
 }
 
 /**
+ * Nuoma prarasta operacijai tebevykstant.
+ *
+ * Atskira klasė, o ne paprastas `Error`: atkūrimas privalo šią priežastį
+ * atskirti nuo turinio klaidų, nes veiksmas kitas — ne „kopija bloga", o
+ * „priežiūros garantijos nebėra, nustok rašyti".
+ */
+class LeaseLostError extends Error {
+  constructor(reason, token, priezastis) {
+    super(`Priežiūros nuoma prarasta operacijai tebevykstant (reason=${reason}, token=${token}): ${priezastis}`);
+    this.name = "LeaseLostError";
+    this.code = "MAINTENANCE_LEASE_LOST";
+  }
+}
+
+/**
  * Uždeda užraktą ir grąžina nuomos token'ą.
  *
  * @returns {{acquired: boolean, token?: number, reason?: string}}
@@ -236,22 +251,50 @@ async function withLock(reason, operation, options = {}) {
   const maxHoldMs = options.maxHoldMs || DEFAULT_MAX_HOLD_MS;
   const periodas = Math.max(1, Math.floor(maxHoldMs / RENEW_INTERVAL_DIVISOR));
 
+  /**
+   * ⚠️ SUSTABDYMO SIGNALAS PRIVALO PASIEKTI PAČIĄ OPERACIJĄ.
+   *
+   * `withLock()` gali reaguoti tik PO to, kai `operation()` išsisprendžia — o
+   * tada kiekvienas atkūrimo rašymas (`putAtKey()`, `restoreRecord()`) jau
+   * įvykęs. Vien `log.error` arba „rezultatas nepatikimas" čia nieko neduoda:
+   * tuo metu kitas atkūrimas jau gali rašyti tuos pačius `id`. Todėl operacija
+   * gauna `AbortSignal` ir privalo jį tikrinti PRIEŠ kiekvieną mutaciją.
+   */
+  const stabdymas = new AbortController();
+
   const laikmatis = setInterval(() => {
     const atnaujinta = renew(token, { maxHoldMs });
-    if (!atnaujinta.renewed) {
-      log.error("Nuomos pratęsti nepavyko – priežiūros garantija NEBEGALIOJA", {
-        reason,
-        token,
-        priezastis: atnaujinta.reason,
-      });
-    }
+    if (atnaujinta.renewed) return;
+
+    log.error("Nuomos pratęsti nepavyko – priežiūros garantija NEBEGALIOJA, operacija stabdoma", {
+      reason,
+      token,
+      priezastis: atnaujinta.reason,
+    });
+    clearInterval(laikmatis);
+    if (!stabdymas.signal.aborted) stabdymas.abort(new LeaseLostError(reason, token, atnaujinta.reason));
   }, periodas);
 
   /** ⚠️ `unref()` – pratęsimo laikmatis neturi laikyti proceso gyvo. */
   if (typeof laikmatis.unref === "function") laikmatis.unref();
 
   try {
-    return { locked: true, value: await operation() };
+    const value = await operation(stabdymas.signal);
+
+    /**
+     * ⚠️ ATSARGINIS FAIL-CLOSED SLUOKSNIS, NE PAGRINDINIS.
+     *
+     * Pagrindinė apsauga yra signalas, kurį operacija tikrina prieš kiekvieną
+     * rašymą. Bet operacija gali signalo ir nepaklausyti (sena realizacija,
+     * naujas kvietėjas), ir tada ji grąžintų reikšmę, tarsi viskas gerai. Tokiu
+     * atveju `withLock()` baigties kaip SĖKMĖS nebeteikia: nuoma buvo prarasta,
+     * tad prielaida, kuria operacija rėmėsi, negaliojo.
+     */
+    if (stabdymas.signal.aborted) {
+      return { locked: true, leaseLost: true, reason: "nuoma prarasta operacijai tebevykstant", value };
+    }
+
+    return { locked: true, value };
   } finally {
     clearInterval(laikmatis);
     release(token);
@@ -268,6 +311,7 @@ function _resetForTests() {
 }
 
 module.exports = {
+  LeaseLostError,
   acquire,
   renew,
   release,
