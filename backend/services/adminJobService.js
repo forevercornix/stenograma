@@ -271,8 +271,6 @@ async function adminDeleteJob(jobId, actor) {
 
   await rasytiAudita({
     event: ADMIN_EVENT.DELETE_OVERRIDE,
-    /** M5 MUTACIJA (#246): userId atgal į auditą. */
-    actor: actor.ownerId,
     success: result.complete,
     details:
       `override=admin ownerKind=${job.ownerKind || "legacy"} ` +
