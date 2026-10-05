@@ -108,8 +108,7 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
         success: false,
         outcome: "store_not_ready",
         /** ⚠️ TIK ROLĖ (#246 D4): `KNOWN_ROLES` yra uždara enum'a, ne identifikatorius. */
-        /** M2 MUTACIJA (#246). */
-        details: `username=${identity.username} role=${identity.role}`,
+        details: `role=${identity.role}`,
       });
       log.error("Prisijungimas atmestas: sesijų autoritetas dar nepasiruošęs.");
       return sessionStoreUnavailable(res);
