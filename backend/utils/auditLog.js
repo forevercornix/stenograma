@@ -589,7 +589,23 @@ async function record(entry = {}) {
      * kartais žino ID geriau nei aplinkinis scope (pvz. retry, vykstantis be
      * jokios HTTP užklausos).
      *
-     * `actor` yra rakto ATSPAUDAS, ne raktas - žr. utils/requestContext.js.
+     * ⚠️ `actor` YRA RAKTO ATSPAUDAS **TIK API RAKTO KELYJE** (#246 D7).
+     *
+     * Ankstesnė šios eilutės redakcija teigė tai be sąlygos, ir tas teiginys
+     * buvo STIPRESNIS UŽ REALIZACIJĄ: sesijos šakoje `setActor()` rašė pliką
+     * vartotojo vardą. Teiginys išgyveno tris peržiūras (7.4b, 7.4c, 7.4e)
+     * būtent todėl, kad skaitantysis jam patikėjo ir tikrinimą sustabdė
+     * (AGENTS.md §12.1).
+     *
+     * Dabartinė būsena po #246:
+     *   - API rakto kelias → `actorFingerprint(configuredKey)` (`key_<12 hex>`),
+     *     identifikuoja RAKTĄ, ne asmenį. NEKEIČIAMAS (D2).
+     *   - Sesijos kelias → aktoriaus NĖRA (`null`). `setActor()` ten
+     *     nebekviečiamas, o `middleware/authorize.js` grąžina `actor: null`.
+     *   - CLI keliai (`erasure-marks.js`, `pgDumpBackup` su `--actor`) →
+     *     operatoriaus SAVIDEKLARUOTA reikšmė. Sąmoningai palikta (#246 §0.4,
+     *     E-out), tad šis laukas vis dar GALI turėti žmogaus vardą — bet tik
+     *     tada, kai jį pateikė pats operatorius.
      */
     requestId: sanitizeControlled(entry.requestId ?? getRequestId(), 64),
     actor: sanitizeControlled(entry.actor ?? getActor(), 40),

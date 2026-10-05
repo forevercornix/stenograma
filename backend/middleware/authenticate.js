@@ -44,13 +44,16 @@ async function authenticate(req, res, next) {
 
     if (session) {
       /**
-       * `id` yra STABILI tapatybė (#158); `username` lieka, nes jį naudoja
-       * auditas ir logai. `setActor()` SĄMONINGAI nekeičiamas – jis maitina
-       * audito koreliaciją, kur skaitomas vardas yra vertingesnis už UUID
-       * (žr. sessionAuth.js komentarą prie setActor).
+       * `id` yra STABILI tapatybė (#158); `username` lieka `req.user`
+       * autorizacijai ir logams.
+       *
+       * ⚠️ `setActor()` ČIA PAŠALINTAS (#246 D1). Ankstesnis komentaras teigė,
+       * kad jis „sąmoningai nekeičiamas, nes skaitomas vardas vertingesnis už
+       * UUID" — tas pasirinkimas buvo tikras, bet jis sprendė koreliacijos, ne
+       * privatumo klausimą. Žr. `sessionAuth.js` paaiškinimą prie tos pačios
+       * vietos.
        */
       req.user = { id: session.userId || null, username: session.username, role: session.role };
-      setActor(session.username);
       return next();
     }
     /**
