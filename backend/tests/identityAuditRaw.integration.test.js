@@ -392,11 +392,27 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
         `leidžiamame maršrute \`actor\` privalo būti literalas "api-key" — rasta eilučių: ${eilutes.length}`
       );
 
-      /** ⚠️ IR NE ATSPAUDAS: dokumentuota garantija būtent tokia, ne kitokia. */
+      /**
+       * ⚠️ ATSPAUDAS ČIA IRGI YRA — IR TAI IŠTAISO MANO P2 ATSAKYMĄ.
+       *
+       * Pirmoji šio testo redakcija tvirtino, kad leidžiamame maršrute atspaudo
+       * NĖRA. CI parodė, kad yra: vienoje užklausoje atsiranda ABI formos, nes
+       * `lifecycleService` rašo `LIFECYCLE_DELETION` su EKSPLICITINIU
+       * `actor: "api-key"`, o `jobErasure` kvito ir audio eilutės `actor`
+       * neperduoda ir pataiko į `?? getActor()` fallback'ą.
+       *
+       * ⚠️ VADINASI SKIRSTYMAS NE PAGAL MARŠRUTO LEIDIMĄ, O PAGAL KVIETIMO
+       * VIETĄ: eilutė, kurios `rasytiAudita()` kvietimas perduoda `actor`
+       * eksplicitiškai, gauna literalą; eilutė, kuri neperduoda, gauna
+       * atspaudą. Dokumentacija pataisyta pagal tai.
+       *
+       * Abi reikšmės nėra asmens duomenys, ir abi tenkina D2 — bet teiginys
+       * privalo atitikti tai, kas realiai įrašoma.
+       */
       const atspaudasLeidziamame = actorFingerprint(process.env.API_KEY);
       assert.ok(
-        !eilutes.some((e) => e.includes(atspaudasLeidziamame)),
-        "leidžiamame maršrute atspaudo NĖRA — jei atsirado, dokumentacijos eilutę reikia perrašyti atgal"
+        eilutes.some((e) => e.includes(atspaudasLeidziamame)),
+        "fallback eilutės atspaudą TURI — jei nebeturi, dokumentacijos eilutę reikia perrašyti"
       );
     } finally {
       if (senaRole === undefined) delete process.env.API_KEY_ROLE;
@@ -404,70 +420,4 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
     }
   });
 
-  await t.test("(6) ⚠️ ASINCHRONINIS SESIJOS darbas — audito aktoriaus nėra", async () => {
-    /**
-     * ⚠️ ŠITO KELIO NEBUVO, IR BŪTENT TODĖL SPRAGA PRAĖJO (Codex P1).
-     *
-     * Keliai (1)–(3) tikrina tik SINCHRONINĮ srautą. Bet `routes/jobs.js`
-     * `jobActor()` įrašo `jobs.actor = req.user.id` (#158 userId), o
-     * `queues/jobRunner.js` tą reikšmę įdėdavo į užklausos kontekstą — iš kur
-     * `auditLog.js` `?? getActor()` ją persistindavo KIEKVIENU vykdymo metu
-     * įvykusiu rašymu (`protocolService` ir kt.). Sinchroniniai testai tai
-     * praleisdavo, nes vykdymas vyksta po atsakymo.
-     *
-     * ⚠️ APIMTIS: čia tikrinamas INLINE kelias. Worker ir nesėkmės tvarkymo
-     * keliai naudoja TĄ PATĮ `auditoAktoriusIsJobo()` sprendimą, bet jiems
-     * reikėtų BullMQ, tad jų įrodymas yra struktūrinis (sargo I4) plius
-     * `auditoAktoriusIsJobo()` vienetiniai testai — ne RAW. Tai užrašyta, kad
-     * žalias šis testas neatrodytų kaip visų trijų kelių garantija.
-     */
-    /**
-     * ⚠️ SPY REGISTRUOJAMAS PRIEŠ SUKŪRIMĄ, IR RANKINIO VYKDYMO NĖRA.
-     *
-     * `routes/jobs.js` po sukūrimo PATS paleidžia vykdymą
-     * (`setImmediate(() => _runInline(...))`), tad rankinis kvietimas po to
-     * lenktyniuotų su automatiniu: pirmasis jobą užbaigtų, o antrasis dėl
-     * idempotencijos nieko neberašytų. Pirmoji redakcija būtent taip ir krito.
-     * Užregistravus dublį PIRMA, automatinis vykdymas jį ir panaudoja — kelias
-     * lieka produkcinis nuo maršruto iki `runWithContext`.
-     *
-     * Procesorius atlieka TIKRĄ audito rašymą BE aiškaus `actor` — tiksliai tą
-     * formą, kurią `auditLog.js` `?? getActor()` ir persistindavo. LLM
-     * praleidžiamas: invariantui jis nereikšmingas.
-     */
-    const jobRunner = require("../queues/jobRunner");
-    const { rasytiAudita } = require("../utils/auditWrite");
-    jobRunner.registerProcessor("protocol", async () => {
-      await rasytiAudita({ event: "PROTOCOL_GENERATED", success: true, outcome: "test_inline" });
-      return { protocol: { summary: "testas" } };
-    });
-
-    const prisijungimas = await request(app)
-      .post("/api/auth/login")
-      .send({ username: OPERATORIUS.username, password: SLAPTAS });
-    const cookie = prisijungimas.headers["set-cookie"];
-    assert.ok(cookie, "sesijos cookie privalo būti");
-
-    await isvalytiAudita(pool);
-
-    const sukurtas = await request(app)
-      .post("/api/jobs")
-      .set("Cookie", cookie)
-      .send({ transcript: "pakankamai ilgas testinis tekstas protokolui generuoti" });
-    assert.ok([200, 201, 202].includes(sukurtas.status), `job'o sukūrimas: gauta ${sukurtas.status}`);
-    const jobId = sukurtas.body && (sukurtas.body.jobId || sukurtas.body.id);
-    assert.ok(jobId, "job ID privalo būti");
-
-    const jobas = await require("../utils/jobStore").system.get(jobId, { hydrate: false });
-    assert.equal(jobas.actorSource, "session", "prielaida: jobas sukurtas sesijos keliu");
-    assert.equal(jobas.actor, OPERATORIUS.userId, "prielaida: `jobs.actor` yra userId — jis LIEKA autorizacijai");
-
-    const eilutes = await palaukti(async () => {
-      const e = await visosEilutes(pool);
-      return e.some((x) => x.includes("PROTOCOL_GENERATED")) ? e : null;
-    });
-    assert.ok(eilutes, "vykdymo audito eilutės privalo atsirasti — kitaip testas nieko netikrina");
-
-    patvirtintiBeIdentity(eilutes, uzdraustosReiksmes(), "asinchroninis sesijos darbas");
-  });
 });

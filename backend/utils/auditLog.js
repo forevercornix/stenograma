@@ -601,13 +601,19 @@ async function record(entry = {}) {
      *   - API rakto kelias, FALLBACK (šis `?? getActor()`) →
      *     `actorFingerprint(configuredKey)` (`key_<12 hex>`), identifikuoja
      *     RAKTĄ, ne asmenį. NEKEIČIAMAS (D2).
-     *   - ⚠️ API rakto kelias, LEIDŽIAMI MARŠRUTAI → literalas `"api-key"`, NE
+     *   - ⚠️ API rakto kelias su AIŠKIU `actor` → literalas `"api-key"`, NE
      *     atspaudas. `middleware/authorize.js` `resolveIdentity()` raktui
      *     grąžina būtent literalą, o `jobs` / `transcribeJobs` / `backup`
-     *     perduoda `req.authz.actor` eksplicitiškai — tad šios eilutės
-     *     fallback'o nepasiekia. Priimta sąmoningai: `API_KEY` yra vienas, tad
-     *     atspaudas būtų konstanta ir neatskirtų nieko, ko neatskiria
-     *     literalas.
+     *     perduoda `req.authz.actor` eksplicitiškai — tad tos eilutės šio
+     *     fallback'o nepasiekia.
+     *
+     *     ⚠️ SKIRSTYMAS PAGAL KVIETIMO VIETĄ, NE PAGAL MARŠRUTĄ. Vienoje
+     *     užklausoje atsiranda ABI formos (išmatuota `identityAuditRaw`
+     *     testu): trynimo kelyje `LIFECYCLE_DELETION` gauna literalą, o
+     *     `jobErasure` kvito eilutės `actor` neperduoda ir gauna atspaudą.
+     *     Priimta sąmoningai: `API_KEY` yra vienas, tad atspaudas yra
+     *     konstanta ir neatskiria nieko, ko neatskiria literalas; nė viena
+     *     reikšmė nėra asmens duomuo.
      *   - Sesijos kelias, SINCHRONINIS → aktoriaus nėra (`null`). `setActor()`
      *     ten nebekviečiamas, o `middleware/authorize.js` grąžina `actor: null`.
      *   - Sesijos kelias, ASINCHRONINIS (inline, worker, nesėkmės tvarkymas) →

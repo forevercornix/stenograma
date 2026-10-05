@@ -358,15 +358,19 @@ nerašo.** Užrakinta:
 | Sesija (bet kuri užklausa) | `meta.actor` = vartotojo vardas | **nieko** |
 | `LOGIN_SUCCESS` / `LOGIN_FAILED` | `details` su `username=` | tik `role=`, arba nieko |
 | Admin override / našlaičių valymas | `meta.actor` = `userId` (#158) | **nieko** |
-| API raktas, **fallback** (atmesta užklausa, `rasytiAudita` be aiškaus `actor`) | `actorFingerprint` (`key_<12 hex>`) | **nepakitęs** (identifikuoja raktą, ne asmenį) |
-| ⚠️ API raktas, **leidžiami maršrutai** (`jobs`, `transcribeJobs`, `backup` — perduoda `req.authz.actor`) | literalas `"api-key"` | literalas `"api-key"` |
+| API raktas, `rasytiAudita` **be** aiškaus `actor` | `actorFingerprint` (`key_<12 hex>`) | **nepakitęs** (identifikuoja raktą, ne asmenį) |
+| ⚠️ API raktas, `rasytiAudita` **su** aiškiu `actor` (`jobs`, `transcribeJobs`, `backup` perduoda `req.authz.actor`) | literalas `"api-key"` | literalas `"api-key"` |
 
-⚠️ **Dvi API rakto eilutės, ne viena — ir ankstesnė redakcija klydo.** Ji teigė, kad
-API rakto kelyje `actor` yra atspaudas, bet `middleware/authorize.js`
-`resolveIdentity()` raktui grąžina **literalą `"api-key"`**, o leidžiami maršrutai
-perduoda `req.authz.actor` eksplicitiškai — tad `?? getActor()` fallback'o, kuriame
-gyvena atspaudas, jie nepasiekia. Atspaudas realiai atsiranda tik ten, kur `actor`
-neperduodamas (pvz. atmesto leidimo auditas).
+⚠️ **Dvi API rakto eilutės, ne viena, ir skirstymas yra PAGAL KVIETIMO VIETĄ, ne
+pagal maršrutą.** Ankstesnė redakcija teigė tik atspaudą; antroji — kad leidžiamuose
+maršrutuose atspaudo nebūna. Abi klydo, ir tai parodė regresinis testas: **vienoje
+užklausoje atsiranda ABI formos.** Trynimo metu `lifecycleService` rašo
+`LIFECYCLE_DELETION` su eksplicitiniu `actor: "api-key"` (nes maršrutas perduoda
+`req.authz.actor`), o `jobErasure` kvito ir audio eilutės `actor` neperduoda ir
+pataiko į `?? getActor()`, kur gyvena atspaudas.
+
+Taigi lemia ne maršruto leidimas, o tai, ar KONKRETUS `rasytiAudita()` kvietimas
+perduoda `actor`.
 
 **Tai priimta sąmoningai.** Sistema turi **vieną** `API_KEY`, tad
 `actorFingerprint(configuredKey)` yra konstanta: leidžiamuose maršrutuose jis
