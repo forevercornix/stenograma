@@ -1189,6 +1189,15 @@ tai greitasis sargas, ne pilna garantija: allowlist pati yra tikroji apsauga.
 | Retry iš BET KURIOS fazės grąžina į `validating` | `jobPhaseTerminal` | Tikrinamos visos keturios fazės |
 | **Terminalaus job'o perpaleisti negalima** | `jobPhaseTerminal` | Patikros pašalinimas → `completed` grįžtų į `processing`, ir vartotojas matytų pažangą baigtame darbe |
 | Nelegalus perėjimas job'ą pažymi SAVO kodu | `jobPhaseTerminal` | `ILLEGAL_TRANSITION`, ne `internal_error` |
+| **Job'ą kuria TIK API procesas** (`jobStore.create()` ⊆ `routes/`) | `prieziurosUzraktoNuoma` (M1a) | #440 §0.1: vietinio priežiūros užrakto pakanka tik todėl, kad gamyba vienaprocesė. Gamintojas už `routes/` → krinta. ⚠️ Aibė IŠVEDAMA AST'u per visą produkcinį medį, ne surašoma |
+| **Į eilę įkelia TIK API procesas** (`jobRunner.enqueue*` ⊆ `routes/`) | `prieziurosUzraktoNuoma` (M1b) | Ta pati §0.1 prielaida antrame sluoksnyje |
+| ⚠️ **Worker'ių procesai NEGAMINA** (nulis gamintojų `workers/` + `processors.js`) | `prieziurosUzraktoNuoma` (M1c) | Vienintelė vieta, kur tikrinamas teiginys „`--scale transcription-worker=3` saugus". Iki #440 tai buvo prozos teiginys, o komentaras tvirtino PRIEŠINGAI |
+| M1 savikontrolė: detektoriai neakli | `prieziurosUzraktoNuoma` | Be jos M1a–M1c praeitų tuščiai, jei AST predikatas nustotų atitikti — sargas rodytų žalią būtent tada, kai apsaugos nebėra |
+| **Nuoma pratęsiama, kol operacija gyva** | `prieziurosUzraktoNuoma` (M2) | #440 §0.2 grandinė A: `restoreBackup()` trukmė neribota (nėra timeout'o, įvestis be viršutinio rėžio), tad fiksuota 10 min nuoma garantijos duoti negali. `setInterval`/`renew()` pašalinimas → krinta |
+| ⚠️ **Pasenęs savininkas NEGALI nuimti naujos nuomos** | `prieziurosUzraktoNuoma` (grandinė B) | ATSKIRA mutacija nuo M2: M2 tikrina pratęsimą, ši — savininką. `release()` token'o patikros pašalinimas → krinta. Be jos fencing liktų neįrodytas |
+| Miręs savininkas sistemos neužblokuoja (D4) | `prieziurosUzraktoNuoma` (M3, **teigiama kontrolė**) | Be jos M2 pataisa galėtų panaikinti priežastį, dėl kurios nuoma egzistuoja: pratęsimas be pabaigos = užraktas amžinai |
+| `status()`/`isLocked()` būsenos nemutuoja | `prieziurosUzraktoNuoma` | #440 atviras kl. 2. Stebimas skirtumas: po pasibaigimo savininkas dar gali nuimti SAVO nuomą — su senuoju elgesiu diagnostinis skaitymas ją nurašydavo |
+| Užrakto metu darbas nepradedamas IR nepažymimas `failed` | `prieziurosUzraktoNuoma` (M4/D3) | D3 saugo SAVYBĘ, ne realizaciją. Praleidimą pavertus `throw` → krinta |
 | Nutrūkęs job'as lieka `processing` SU faze | `jobPhaseTerminal` | `processing + phase=null` neatsiranda net krentant worker'iui |
 | **Progresas resetinamas per retry** | `jobPhaseTerminal` | Palikus jį UI rodytų 42 %, kai realus darbas ties 0 % — monotoniškumas NĖRA media-level resume |
 
