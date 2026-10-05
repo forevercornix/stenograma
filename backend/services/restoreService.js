@@ -596,7 +596,7 @@ async function _apply(parsed, { env, signal = null }) {
   }
 
   for (const job of parsed.jobs) {
-    _patikrintiNuoma(signal, `restoreRecord:${jobs}`);
+    /* P1-BARJERO MUTACIJA (#440): patikros prieš rašymą nebėra. */
     await jobStore.restoreRecord(job);
     jobs += 1;
   }
