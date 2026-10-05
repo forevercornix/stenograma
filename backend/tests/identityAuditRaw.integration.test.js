@@ -100,10 +100,20 @@ async function paruostiDb(suffix) {
     dsn: adminDatabaseUrl(),
   });
   try {
-    await fikturosDdl(admin, "pg_database", [
-      `DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`,
-      `CREATE DATABASE "${dbName}"`,
-    ]);
+    /**
+     * ⚠️ BAZĖS DDL — NE PER `fikturosDdl()`, IR TAI NE PRALEIDIMAS.
+     *
+     * `fikturosDdl()` vynioja sakinius į `BEGIN`/`COMMIT`, kad `SET LOCAL
+     * lock_timeout` galiotų, o bazės kūrimas/šalinimas transakcijos bloke
+     * krenta („cannot run inside a transaction block"). Riba ten ir
+     * nereikalinga: užraktas imamas ne ant lentelės. #380 D8 sargo šablonas
+     * bazės sakinių neapima sąmoningai — jis vardija `DROP INDEX`,
+     * `CREATE INDEX`, `ALTER TABLE`, lentelės valymą ir `LOCK TABLE`.
+     *
+     * Pool'as vis tiek apgaubtas: nutekėjęs klientas liktų stebimas.
+     */
+    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+    await admin.query(`CREATE DATABASE "${dbName}"`);
   } finally {
     await uzdarytiPoola(admin);
   }
