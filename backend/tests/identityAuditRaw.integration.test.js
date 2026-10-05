@@ -5,6 +5,25 @@ const { execFileSync } = require("child_process");
 const { Pool } = require("pg");
 
 const { skipWithoutPostgres, testDatabaseUrl, adminDatabaseUrl } = require("./helpers/postgresGuard");
+/**
+ * ⚠️ POOL'AI PER `stebetiPoola()`, DDL PER `fikturosDdl()` (#380, #380 D8).
+ *
+ * Neapgaubtas pool'o konstruktorius, nutekėjus klientui, pakabintų failą be
+ * diagnostikos; lentelės valymas be `lock_timeout` lauktų už kiekvienos atviros
+ * transakcijos NERIBOTAI. Abu sargai pagavo pirmąją šio failo redakciją CI, ne
+ * lokaliai.
+ *
+ * ⚠️ FORMULUOTĖ SĄMONINGAI BE LITERALŲ. Tie sargai tekstiniai, tad komentaras,
+ * CITUOJANTIS draudžiamą šabloną, pats tampa pažeidimu — pirmoji šio komentaro
+ * redakcija būtent taip ir nukrito (ta pati klasė kaip #423, kur parseris lūžo
+ * ant savo dokumentacijos).
+ */
+const {
+  sukurtiResursuKruva,
+  stebetiPoola,
+  uzdarytiPoola,
+  fikturosDdl,
+} = require("./helpers/resourceStack");
 const { hashPassword, loadUsers } = require("../utils/credentials");
 
 /**
@@ -72,15 +91,21 @@ function uzdraustosReiksmes() {
 }
 
 async function paruostiDb(suffix) {
+  const resursai = sukurtiResursuKruva();
   const url = testDatabaseUrl(suffix);
   const dbName = new URL(url).pathname.slice(1);
 
-  const admin = new Pool({ connectionString: adminDatabaseUrl() });
+  const admin = stebetiPoola(new Pool({ connectionString: adminDatabaseUrl() }), {
+    vardas: "admin",
+    dsn: adminDatabaseUrl(),
+  });
   try {
-    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await admin.query(`CREATE DATABASE "${dbName}"`);
+    await fikturosDdl(admin, "pg_database", [
+      `DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`,
+      `CREATE DATABASE "${dbName}"`,
+    ]);
   } finally {
-    await admin.end();
+    await uzdarytiPoola(admin);
   }
 
   execFileSync("npx", ["node-pg-migrate", "up"], {
@@ -89,7 +114,15 @@ async function paruostiDb(suffix) {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  return { url, pool: new Pool({ connectionString: url }) };
+  const pool = stebetiPoola(new Pool({ connectionString: url }), { vardas: "darbinis", dsn: url });
+  resursai.registruotiPoola(pool, { vardas: "darbinis pool" });
+
+  return { url, pool, resursai };
+}
+
+/** Lentelės valymas per autoritetą — žr. importo komentarą (#380 D8). */
+async function isvalytiAudita(pool) {
+  await fikturosDdl(pool, "audit_log", "TRUNCATE audit_log");
 }
 
 /** Visos `audit_log` eilutės kaip neapdorotas tekstas — jokio aplikacijos sluoksnio. */
@@ -111,10 +144,10 @@ function patvirtintiBeIdentity(eilutes, reiksmes, kelias) {
 }
 
 test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { skip: SKIP }, async (t) => {
-  const { url, pool } = await paruostiDb("identity_raw");
+  const { url, pool, resursai } = await paruostiDb("identity_raw");
   t.after(async () => {
     await auditStore.shutdown();
-    await pool.end();
+    await resursai.isvalyti();
   });
 
   await auditStore.shutdown();
@@ -125,7 +158,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
   const reiksmes = uzdraustosReiksmes();
 
   await t.test("(1) SĖKMINGAS prisijungimas", async () => {
-    await pool.query("TRUNCATE audit_log");
+    await isvalytiAudita(pool);
     const atsakymas = await request(app)
       .post("/auth/login")
       .send({ username: OPERATORIUS.username, password: SLAPTAS });
@@ -140,7 +173,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
   });
 
   await t.test("(2) NESĖKMINGAS prisijungimas", async () => {
-    await pool.query("TRUNCATE audit_log");
+    await isvalytiAudita(pool);
     const atsakymas = await request(app)
       .post("/auth/login")
       .send({ username: OPERATORIUS.username, password: "neteisingas-slaptas-9" });
@@ -166,7 +199,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
     const cookie = prisijungimas.headers["set-cookie"];
     assert.ok(cookie, "sesijos cookie privalo būti");
 
-    await pool.query("TRUNCATE audit_log");
+    await isvalytiAudita(pool);
 
     /**
      * Pasirinktas kelias — leidimo ATMETIMAS: `operator` rolė neturi
@@ -182,7 +215,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
   });
 
   await t.test("(4) API RAKTO veiksmas — kontrolė DVIEM kryptimis (D2)", async () => {
-    await pool.query("TRUNCATE audit_log");
+    await isvalytiAudita(pool);
 
     const atsakymas = await request(app)
       .post("/admin/backups/restore")
