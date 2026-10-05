@@ -90,15 +90,7 @@ const RENEW_INTERVAL_DIVISOR = 3;
  * `_nurasytiPasibaigusia()`.
  */
 function _pasibaigusi() {
-  /**
-   * M3 MUTACIJA (#440): nuoma niekada nebepasibaigia.
-   *
-   * Tai tikėtina „M2 pataisa" — garantija tikrai nebenustoja galioti. Bet ji
-   * naikina priežastį, dėl kurios nuoma egzistuoja (D4): miręs savininkas
-   * užblokuotų sistemą neribotai.
-   */
-  void _lock;
-  return false;
+  return Boolean(_lock) && _lock.expiresAt <= Date.now();
 }
 
 /**
