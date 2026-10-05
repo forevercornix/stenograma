@@ -293,7 +293,8 @@ test("UŽRAKTAS: TOCTOU langas uždarytas – naujų darbų kurti negalima", asy
   maintenanceLock._resetForTests();
   await clearJobs();
 
-  maintenanceLock.acquire("test_restore");
+  /** ⚠️ Nuoma nuimama TIK su savo token'u (#440 fencing). */
+  const { token } = maintenanceLock.acquire("test_restore");
 
   try {
     await assert.rejects(
@@ -302,7 +303,7 @@ test("UŽRAKTAS: TOCTOU langas uždarytas – naujų darbų kurti negalima", asy
       "su užraktu naujų darbų kurti negalima"
     );
   } finally {
-    maintenanceLock.release();
+    maintenanceLock.release(token);
   }
 
   // Nuėmus užraktą – vėl galima.
