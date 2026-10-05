@@ -838,4 +838,14 @@ if (require.main === module) {
     });
 }
 
-module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, arGalimaSalintiAudio, RETRY_VEIKSMAS };
+/**
+ * M1 MUTACIJA (#440): worker'io procesas sukuria job'ą.
+ *
+ * Tai tiksliai tas atvejis, kurį M1 sargas turi pagauti — gamintojas už
+ * `routes/` ribų reiškia, kad vietinio priežiūros užrakto nebepakanka.
+ */
+async function _m1SukurtiTesinio(tipas) {
+  return jobStore.create({ ownerKind: "unowned", type: tipas });
+}
+
+module.exports = { createWorker, _m1SukurtiTesinio, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, arGalimaSalintiAudio, RETRY_VEIKSMAS };
