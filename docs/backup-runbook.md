@@ -222,8 +222,42 @@ Atkūrimo metu **naujų darbų priimti negalima**. Tai ne apribojimas, o
 būtinybė: be jo tarp aktyvių darbų patikros ir pritaikymo worker'is spėtų
 paimti naują darbą.
 
-Užraktas galioja **ne ilgiau kaip 10 min** — procesui nukritus vidury sistema
-kitaip liktų užblokuota, ir vienintelė išeitis būtų restartas.
+**10 min yra nuomos riba BE PRATĘSIMO, ne užrakto trukmės riba.** Kol atkūrimas
+gyvas, jis nuomą pratęsinėja, tad užraktas galioja **tiek, kiek operacija
+vykdoma** (#440). Taip ir turi būti: atkūrimo trukmė neribota (jo darbas
+proporcingas kopijai, o `MAX_BACKUP_UPLOAD_MB` viršutinio rėžio neturi), tad
+fiksuota riba reikštų, kad didelis atkūrimas tęsiasi be jokios apsaugos.
+
+Jei pratęsti nepavyksta, atkūrimas **nutrūksta fail-closed** ir operatorius
+gauna `409 MAINTENANCE_LEASE_LOST`. ⚠️ Pritaikymas nėra transakcinis, tad
+nutrūkęs atkūrimas palieka **dalinai atkurtą** būseną — žr. žinomas ribas.
+
+#### ⚠️ Dvi skirtingos gedimo formos — ir jas reikia atskirti
+
+| | Miręs savininkas | **Gyvas, bet pakibęs savininkas** |
+|---|---|---|
+| Kas vyksta | procesas nukrito ar `release` neįvyko | procesas gyvas, pratęsinėja nuomą, bet atkūrimas nebeeina į priekį |
+| Nuoma | **pasibaigia** po 10 min | **nesibaigia niekada** |
+| Nauji darbai | po 10 min vėl priimami | **blokuojami neribotai** |
+| Išeitis | nieko — sistema atsigauna pati | **restartas** |
+
+**Gyvas-bet-pakibęs savininkas yra NAUJA forma, kurios iki pratęsimo nebuvo:**
+anksčiau bet kokia blokada savaime pasibaigdavo po 10 min. Dabar tai kaina už
+tai, kad garantija nebenustoja galioti vidury darbo.
+
+**Kaip atskirti.** Žurnale ieškoti `maintenance` įrašų:
+
+- `Priežiūros užraktas uždėtas` **be** `Priežiūros užraktas nuimtas` ilgiau nei
+  tikėtina atkūrimo trukmė → savininkas vis dar laiko nuomą;
+- `Priežiūros nuoma pasibaigė – savininkas laikomas mirusiu` → savininkas
+  **miręs**, nuoma jau atlaisvinta, nieko daryti nereikia;
+- `Nuomos pratęsti nepavyko` → nuoma prarasta, atkūrimas stabdomas.
+
+Jei pirmas atvejis, o `BACKUP_RESTORED` arba `BACKUP_RESTORE_FAILED` audito
+įrašo nėra — savininkas **pakibęs**. Veiksmas: restartuoti backend procesą.
+⚠️ Prieš restartą įvertinti, ar atkūrimas nebuvo įpusėjęs: pritaikymas nėra
+transakcinis, tad restartas palieka dalinai atkurtą būseną, ir atkūrimą reikės
+pakartoti nuo pradžių.
 
 ⚠️ **Užraktas veikia tik viename procese — bet riba yra ne ten, kur anksčiau
 buvo užrašyta** (#440 §0.1). Jis gyvena vieno proceso atmintyje.

@@ -67,14 +67,33 @@ test("RUNBOOK: numatytosios reikšmės SUTAMPA su kodu", () => {
     "dokumentuota retencija išsiskyrė su kodu"
   );
 
-  // Užrakto trukmė.
-  const lockMinutes = doc.match(/ne ilgiau kaip (\d+) min/);
-  assert.ok(lockMinutes, "užrakto trukmė turi būti dokumentuota");
+  /**
+   * Nuomos trukmė.
+   *
+   * ⚠️ FRAZĖ PASIKEITĖ SU ELGSENA (#440). Anksčiau tikrinta „ne ilgiau kaip N
+   * min" — tai buvo teisinga, kol nuoma buvo fiksuota. Įvedus pratęsimą
+   * užraktas galioja tiek, kiek operacija vykdoma, o `DEFAULT_MAX_HOLD_MS`
+   * reiškia ribą BE pratęsimo. Sargas prirakintas prie pataisytos formuluotės,
+   * nes riba, įvardyta ne ta reikšme, nukreipia operatorių ne į tą veiksmą.
+   */
+  const lockMinutes = doc.match(/(\d+) min yra nuomos riba/);
+  assert.ok(lockMinutes, "nuomos riba be pratęsimo turi būti dokumentuota");
   assert.equal(
     Number(lockMinutes[1]),
     maintenanceLock.DEFAULT_MAX_HOLD_MS / 60000,
-    "dokumentuota užrakto trukmė išsiskyrė su kodu"
+    "dokumentuota nuomos riba išsiskyrė su kodu"
   );
+
+  /** Senas, dabar klaidingas teiginys nebegali grįžti. */
+  assert.doesNotMatch(
+    doc,
+    /[Uu]žraktas galioja \*\*ne ilgiau kaip \d+ min\*\*/,
+    "grįžo paneigtas teiginys: su pratęsimu užraktas galioja tiek, kiek operacija vykdoma"
+  );
+
+  /** ⚠️ Gyvas-bet-pakibęs savininkas — nauja gedimo forma, privalo būti aprašyta. */
+  assert.match(doc, /[Gg]yvas,? bet pakibęs savininkas/, "nauja gedimo forma neaprašyta");
+  assert.match(doc, /MAINTENANCE_LEASE_LOST/, "fail-closed baigtis neaprašyta");
 });
 
 test("RUNBOOK: paslapčių skaičius SUTAMPA su inventoriumi", () => {
