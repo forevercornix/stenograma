@@ -294,9 +294,8 @@ async function _runInline(type, jobId, payload) {
        * dėl laiko.
        */
       if (maintenanceLock.isLocked()) {
-        /** M4 MUTACIJA (#440): praleidimas paverstas klaida — D3 savybė sulaužyta. */
         log.warn("Praleistas darbas dėl priežiūros užrakto", { stage: "skipped_maintenance", jobId, execution: "inline" });
-        throw new Error("priežiūros užraktas");
+        return;
       }
 
       /** ⚠️ `await` PRIVALOMAS - be jo Promise truthy, ir KIEKVIENAS jobas praleidžiamas (#183). */
