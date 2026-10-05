@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { analize, eiti } = require("./helpers/astAnalize");
+const { analize, eiti, saknis, irisimai, arNarioKvietimas } = require("./helpers/astAnalize");
 
 /**
  * BENDRO AST HELPER'IO ELGSENOS TESTAS (#410 D3a).
@@ -91,4 +91,88 @@ test("#410 D3a: `parent` nuoroda apėjimo NEUŽCIKLINA", () => {
   const { programa } = analize("a.b(c, d); e.f(g);");
   const visi = [...eiti(programa)];
   assert.ok(visi.length > 5, `apėjimas privalo baigtis ir rasti mazgus, rasta ${visi.length}`);
+});
+
+/* ───────── Įrišimų išrišimas (iškelta #246, pirmą kartą #440 P3) ───────── */
+
+const KONFIG = Object.freeze({
+  moduliai: { m: /(^|\/)modulis$/ },
+  vardai: { m: /^daryk$/ },
+});
+
+function rista(kodas) {
+  const { programa } = analize(kodas);
+  const mazgai = [...eiti(programa)];
+  return { mazgai, rista: irisimai(mazgai, KONFIG) };
+}
+
+function kiek(kodas) {
+  const { mazgai, rista: r } = rista(kodas);
+  return mazgai.filter((m) => arNarioKvietimas(m, "m", r, KONFIG.vardai)).length;
+}
+
+test("#246 D3a: `saknis()` grąžina member chain'o šaknį", () => {
+  const { programa } = analize("a.b.c.daryk();");
+  const kvietimas = [...eiti(programa)].find((n) => n.type === "CallExpression");
+  assert.equal(saknis(kvietimas.callee), "a");
+  assert.equal(saknis({ type: "Literal" }), null, "ne Identifier šaknis -> null");
+});
+
+test("#246 D3a: atpažįstamos VISOS įrišimo formos", () => {
+  /**
+   * ⚠️ LENTELĖ ABIEM KRYPTIMIS.
+   *
+   * Vien „randa" patikros neužtenka: pagalbininkas, kuris atitinka VISKĄ, yra
+   * toks pat nenaudingas kaip tas, kuris neatitinka nieko — tik pirmasis dar ir
+   * duoda klaidingus kritimus sarge, kuris jį naudoja.
+   */
+  const formos = [
+    ["pažodinis", 'const m = require("./modulis"); m.daryk();', 1],
+    ["alias", 'const m = require("./modulis"); const a = m; a.daryk();', 1],
+    ["alias per du žingsnius", 'const m = require("./modulis"); const a = m; const b = a; b.daryk();', 1],
+    ["deklaracijų tvarka APVERSTA", 'const b = a; const a = m; const m = require("./modulis"); b.daryk();', 1],
+    ["gilesnis narys", 'const m = require("./modulis"); const s = m.sub; s.daryk();', 1],
+    ["destruktūrizacija", 'const { daryk } = require("./modulis"); daryk();', 1],
+    ["destruktūrizacija su pervardijimu", 'const { daryk: d } = require("./modulis"); d();', 1],
+    ["narys iš require", 'const d = require("./modulis").daryk; d();', 1],
+    ["⚠️ KITAS modulis", 'const x = require("./kitas"); x.daryk();', 0],
+    ["⚠️ KITAS narys", 'const m = require("./modulis"); m.kitas();', 0],
+    ["⚠️ nedestruktūrizuotas to paties vardo kvietimas", "daryk();", 0],
+  ];
+
+  for (const [vardas, kodas, laukta] of formos) {
+    assert.equal(kiek(kodas), laukta, `forma „${vardas}": rasta ${kiek(kodas)}, laukta ${laukta}`);
+  }
+});
+
+test("#246 D3a: `destrukt` aibė yra PER MODULĮ, ne bendra", () => {
+  /**
+   * ⚠️ ŠIS DEFEKTAS REALIAI BUVO (#440 P3 mutacija (b)).
+   *
+   * Su bendra aibe vieno modulio destruktūrizuotas vardas būdavo palaikomas ir
+   * kito modulio nariu, ir sargas pranešdavo apie pažeidimą, kurio nėra.
+   */
+  const cfg = {
+    moduliai: { a: /(^|\/)aaa$/, b: /(^|\/)bbb$/ },
+    vardai: { a: /^daryk$/, b: /^daryk$/ },
+  };
+  const { programa } = analize('const { daryk } = require("./aaa"); daryk();');
+  const mazgai = [...eiti(programa)];
+  const r = irisimai(mazgai, cfg);
+
+  assert.equal(mazgai.filter((m) => arNarioKvietimas(m, "a", r, cfg.vardai)).length, 1, "savo modulis");
+  assert.equal(mazgai.filter((m) => arNarioKvietimas(m, "b", r, cfg.vardai)).length, 0, "⚠️ svetimas modulis NETURI atitikti");
+});
+
+test("#246 D3a ⚠️ RIBA: shadowing NEIŠRIŠAMAS (vienfailinis, ne scope manager)", () => {
+  /**
+   * ⚠️ UŽRAŠOMA KAIP RIBA, NE KAIP GEDIMAS.
+   *
+   * Pagalbininkas renka deklaracijas per visą failą, neskaičiuodamas scope'ų.
+   * Vidinis `m`, užtemdantis modulio aliasą, vis tiek bus laikomas aliasu —
+   * tai SAUGI kryptis sargui (daugiau radinių, ne mažiau), bet ji reiškia, kad
+   * pagalbininkas NĖRA scope manager. Sargo antraštėje tai turi būti pasakyta.
+   */
+  const kodas = 'const m = require("./modulis"); function f(){ const m = {daryk(){}}; m.daryk(); }';
+  assert.equal(kiek(kodas), 1, "užtemdytas vardas vis tiek atitinka — žinoma ir priimta riba");
 });
