@@ -88,6 +88,7 @@ const app = require("../server");
 app._setReadyForTests();
 const auditStore = require("../utils/auditStore");
 const { actorFingerprint } = require("../utils/requestContext");
+const jobRunner = require("../queues/jobRunner");
 
 /**
  * UŽDRAUSTOS REIKŠMĖS — IŠVEDAMOS IŠ AUTORITETO (#246 §0.2).
@@ -245,7 +246,13 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
     patvirtintiBeIdentity(eilutes, reiksmes, "sesijos veiksmas");
   });
 
-  await t.test("(4) API RAKTO veiksmas — kontrolė DVIEM kryptimis (D2)", async () => {
+  await t.test("(4) API RAKTO veiksmas, FALLBACK kelias — kontrolė dviem kryptimis (D2)", async () => {
+    /**
+     * ⚠️ ŠIS KELIAS ĮRODO TIK FALLBACK'Ą. Atmesta užklausa audituojama
+     * `middleware/authorize.js` BE aiškaus `actor`, tad `auditLog.js`
+     * `?? getActor()` paima atspaudą. Leidžiamuose maršrutuose taip NĖRA —
+     * žr. (5).
+     */
     await isvalytiAudita(pool);
 
     const atsakymas = await request(app)
@@ -268,7 +275,116 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
     assert.match(atspaudas, /^key_[0-9a-f]{12}$/, "atspaudo forma pakito");
     assert.ok(
       eilutes.some((e) => e.includes(atspaudas)),
-      `API rakto kelyje atspaudas ${atspaudas} PRIVALO būti audite (D2) — rasta eilučių: ${eilutes.length}`
+      `API rakto fallback kelyje atspaudas ${atspaudas} PRIVALO būti audite (D2) — rasta eilučių: ${eilutes.length}`
     );
+  });
+
+  await t.test("(5) API RAKTO LEIDŽIAMAS maršrutas — `actor` yra literalas, NE atspaudas", async () => {
+    /**
+     * ⚠️ ŠIS KELIAS EGZISTUOJA DĖL CODEX P2.
+     *
+     * Dokumentacijos eilutė „API raktas → `actorFingerprint`" buvo NEĮRODYTA ir
+     * leidžiamuose maršrutuose NETEISINGA: `middleware/authorize.js`
+     * `resolveIdentity()` API raktui grąžina LITERALĄ `"api-key"`, o
+     * `routes/jobs.js`, `transcribeJobs.js` ir `backup.js` perduoda
+     * `req.authz.actor` EKSPLICITIŠKAI — tad `?? getActor()` fallback'o, kuriame
+     * gyvena atspaudas, jie nepasiekia.
+     *
+     * ⚠️ IR TAI PRIIMTA SĄMONINGAI, NE PRALEIDIMAS. Sistema turi VIENĄ
+     * `API_KEY` (ankstesnio rakto mechanizmas yra kopijų šifravimui,
+     * `backupEncryption.js`), tad `actorFingerprint(configuredKey)` yra
+     * KONSTANTA: leidžiamuose maršrutuose jis neatskirtų nieko, ko neatskiria
+     * `"api-key"`. D2 reikalauja, kad `actor` nebūtų neapdorotas raktas —
+     * literalas tą tenkina net stipriau, nes iš paslapties apskritai neišvestas.
+     * ❌ Atspaudo propagavimas per `resolveIdentity()` būtų DAUGIAU duomenų
+     * audite be išmatuotos naudos, o #246 kryptis yra mažiausias identifikatorių
+     * skaičius.
+     */
+    const senaRole = process.env.API_KEY_ROLE;
+    try {
+      /** `operator` neturi `job:delete`; leidžiamam maršrutui reikia aukštesnės rolės. */
+      process.env.API_KEY_ROLE = "administrator";
+
+      const sukurtas = await request(app)
+        .post("/api/jobs")
+        .set("X-API-Key", process.env.API_KEY)
+        .send({ transcript: "pakankamai ilgas testinis tekstas protokolui generuoti" });
+      assert.ok([200, 201, 202].includes(sukurtas.status), `job'o sukūrimas: gauta ${sukurtas.status}`);
+      const jobId = sukurtas.body && (sukurtas.body.jobId || sukurtas.body.id);
+      assert.ok(jobId, "job ID privalo būti — kitaip tikrinam ne tą kelią");
+
+      await isvalytiAudita(pool);
+
+      const istrintas = await request(app)
+        .delete(`/api/jobs/${jobId}`)
+        .set("X-API-Key", process.env.API_KEY);
+      assert.ok([200, 202, 204].includes(istrintas.status), `ištrynimas: gauta ${istrintas.status}`);
+
+      const eilutes = await visosEilutes(pool);
+
+      /** Kryptis A: asmens identifikatorių nėra. */
+      patvirtintiBeIdentity(eilutes, uzdraustosReiksmes(), "API rakto leidžiamas maršrutas");
+
+      /** Kryptis B: `actor` yra būtent literalas — tai ir yra įrodoma garantija. */
+      assert.ok(
+        eilutes.some((e) => e.includes('"actor":"api-key"')),
+        `leidžiamame maršrute \`actor\` privalo būti literalas "api-key" — rasta eilučių: ${eilutes.length}`
+      );
+
+      /** ⚠️ IR NE ATSPAUDAS: dokumentuota garantija būtent tokia, ne kitokia. */
+      const atspaudasLeidziamame = actorFingerprint(process.env.API_KEY);
+      assert.ok(
+        !eilutes.some((e) => e.includes(atspaudasLeidziamame)),
+        "leidžiamame maršrute atspaudo NĖRA — jei atsirado, dokumentacijos eilutę reikia perrašyti atgal"
+      );
+    } finally {
+      if (senaRole === undefined) delete process.env.API_KEY_ROLE;
+      else process.env.API_KEY_ROLE = senaRole;
+    }
+  });
+
+  await t.test("(6) ⚠️ ASINCHRONINIS SESIJOS darbas — audito aktoriaus nėra", async () => {
+    /**
+     * ⚠️ ŠITO KELIO NEBUVO, IR BŪTENT TODĖL SPRAGA PRAĖJO (Codex P1).
+     *
+     * Keliai (1)–(3) tikrina tik SINCHRONINĮ srautą. Bet `routes/jobs.js`
+     * `jobActor()` įrašo `jobs.actor = req.user.id` (#158 userId), o
+     * `queues/jobRunner.js` tą reikšmę įdėdavo į užklausos kontekstą — iš kur
+     * `auditLog.js` `?? getActor()` ją persistindavo KIEKVIENU vykdymo metu
+     * įvykusiu rašymu (`protocolService` ir kt.). Sinchroniniai testai tai
+     * praleisdavo, nes vykdymas vyksta po atsakymo.
+     *
+     * ⚠️ APIMTIS: čia tikrinamas INLINE kelias. Worker ir nesėkmės tvarkymo
+     * keliai naudoja TĄ PATĮ `auditoAktoriusIsJobo()` sprendimą, bet jiems
+     * reikėtų BullMQ, tad jų įrodymas yra struktūrinis (sargo I4) plius
+     * `auditoAktoriusIsJobo()` vienetiniai testai — ne RAW. Tai užrašyta, kad
+     * žalias šis testas neatrodytų kaip visų trijų kelių garantija.
+     */
+    const prisijungimas = await request(app)
+      .post("/api/auth/login")
+      .send({ username: OPERATORIUS.username, password: SLAPTAS });
+    const cookie = prisijungimas.headers["set-cookie"];
+    assert.ok(cookie, "sesijos cookie privalo būti");
+
+    const sukurtas = await request(app)
+      .post("/api/jobs")
+      .set("Cookie", cookie)
+      .send({ transcript: "pakankamai ilgas testinis tekstas protokolui generuoti" });
+    assert.ok([200, 201, 202].includes(sukurtas.status), `job'o sukūrimas: gauta ${sukurtas.status}`);
+    const jobId = sukurtas.body && (sukurtas.body.jobId || sukurtas.body.id);
+    assert.ok(jobId, "job ID privalo būti");
+
+    /** ⚠️ PRIELAIDA, KURIĄ TIKRINAM: įrašas TURI sesijos tapatybę. */
+    const jobas = await require("../utils/jobStore").system.get(jobId, { hydrate: false });
+    assert.equal(jobas.actorSource, "session", "prielaida: jobas sukurtas sesijos keliu");
+    assert.equal(jobas.actor, OPERATORIUS.userId, "prielaida: `jobs.actor` yra userId — jis LIEKA autorizacijai");
+
+    await isvalytiAudita(pool);
+
+    /** Vykdymas tame pačiame procese — tiksliai tas kelias, kuris įdeda kontekstą. */
+    await jobRunner._runInline("protocol", jobId, { transcript: "pakankamai ilgas testinis tekstas" }).catch(() => {});
+
+    const eilutes = await visosEilutes(pool);
+    patvirtintiBeIdentity(eilutes, uzdraustosReiksmes(), "asinchroninis sesijos darbas");
   });
 });

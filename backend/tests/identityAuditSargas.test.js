@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const { analize, eiti, irisimai, arNarioKvietimas } = require("./helpers/astAnalize");
 const { loadUsers, hashPassword } = require("../utils/credentials");
+const { auditoAktoriusIsJobo } = require("../utils/requestContext");
 
 /**
  * #246 D9 — STRUKTŪRINIS IDENTITY SARGAS.
@@ -323,4 +324,85 @@ test("#246 D9 · I3: `details` šablonuose nėra identifikuojančių laukų", ()
     }
   }
   assert.deepEqual(pazeidimai, [], `\`details\` neša identity:\n${pazeidimai.join("\n")}`);
+});
+
+test("#246 D9 · I4: kiekvienas `runWithContext` audito aktorių ima iš pagalbininko", () => {
+  /**
+   * ⚠️ ASINCHRONINIAI KELIAI (Codex P1). Jų yra TRYS: inline
+   * (`queues/jobRunner.js`), worker ir nesėkmės tvarkymas (`workers/index.js`).
+   * `jobs.actor` sesijoje yra `userId`, tad bet kuris iš jų, perduodantis jį
+   * tiesiai, atkuria pažeidimą.
+   *
+   * ⚠️ KODĖL STRUKTŪRINIS, O NE ELGSENOS. Inline kelią dengia RAW testas
+   * (`identityAuditRaw.integration` (6)); worker ir nesėkmės keliams reikėtų
+   * BullMQ, tad jų elgsenos CI šiame žingsnyje nepaleidžia. Čia tikrinama, kad
+   * visi trys naudoja TĄ PATĮ sprendimą — `auditoAktoriusIsJobo()`. Tai ne
+   * elgsenos garantija, bet tiksliai ta, kurią galima duoti be Redis, ir ji
+   * pagauna būtent tą mutaciją, kuri grąžintų `actor` į kontekstą.
+   */
+  const pazeidimai = [];
+  for (const { failas, mazgai } of medis()) {
+    for (const mazgas of mazgai) {
+      if (mazgas.type !== "CallExpression") continue;
+      const k = mazgas.callee;
+      const vardas =
+        k.type === "Identifier"
+          ? k.name
+          : k.type === "MemberExpression" && k.property.type === "Identifier"
+            ? k.property.name
+            : null;
+      if (vardas !== "runWithContext") continue;
+
+      const arg = mazgas.arguments[0];
+      if (!arg || arg.type !== "ObjectExpression") continue;
+      for (const savybe of arg.properties) {
+        if (savybe.type !== "Property" || savybe.key.type !== "Identifier") continue;
+        if (savybe.key.name !== "actor") continue;
+
+        const perPagalbininka = [...eiti(savybe.value)].some(
+          (n) =>
+            n.type === "CallExpression" &&
+            n.callee.type === "Identifier" &&
+            n.callee.name === "auditoAktoriusIsJobo"
+        );
+        /**
+         * ⚠️ EKSPLICITUS `null` IRGI TENKINA — ir tai ne išimtis, o invarianto
+         * dalis. `utils/requestContext.js` HTTP middleware pradeda kontekstą su
+         * `actor: null`, kas yra tiksliai tai, ko D1 reikalauja. Invariantas yra
+         * „pagalbininkas ARBA eksplicitus `null`", ne „visada pagalbininkas":
+         * pastarasis būtų privertęs įvesti nereikalingą kvietimą ten, kur jobo
+         * apskritai nėra.
+         */
+        const eksplicitusNull = savybe.value.type === "Literal" && savybe.value.value === null;
+        if (!perPagalbininka && !eksplicitusNull) pazeidimai.push(`${failas}:${savybe.loc.start.line}`);
+      }
+    }
+  }
+  assert.deepEqual(
+    pazeidimai,
+    [],
+    `\`runWithContext\` audito aktorių ima ne iš \`auditoAktoriusIsJobo()\`:\n${pazeidimai.join("\n")}`
+  );
+});
+
+test("#246 `auditoAktoriusIsJobo()` elgsena — FAIL-CLOSED pagal `actorSource`", () => {
+  /**
+   * ⚠️ TAI VIENINTELIS ELGSENOS ĮRODYMAS WORKER IR NESĖKMĖS KELIAMS (be Redis).
+   * Jie naudoja tą patį sprendimą, tad jo semantika turi būti pririšta čia.
+   */
+  assert.equal(
+    auditoAktoriusIsJobo({ actor: "33333333-3333-4333-8333-333333333333", actorSource: "session" }),
+    null,
+    "sesijos jobas audito aktoriaus NETEIKIA"
+  );
+  assert.equal(
+    auditoAktoriusIsJobo({ actor: "key_abc123def456", actorSource: "api-key" }),
+    "key_abc123def456",
+    "API rakto atspaudas IŠLIEKA (D2)"
+  );
+  /** ⚠️ #17 laikų jobai turėjo `actor` BE `actorSource`, ir ten galėjo būti plikas vardas. */
+  assert.equal(auditoAktoriusIsJobo({ actor: "jonas", actorSource: null }), null, "nežinoma era -> fail-closed");
+  assert.equal(auditoAktoriusIsJobo({ actor: "jonas" }), null, "`actorSource` nėra -> fail-closed");
+  assert.equal(auditoAktoriusIsJobo(null), null);
+  assert.equal(auditoAktoriusIsJobo({ actorSource: "api-key" }), null, "be `actor` -> null, ne undefined");
 });

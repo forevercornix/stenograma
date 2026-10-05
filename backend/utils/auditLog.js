@@ -598,10 +598,27 @@ async function record(entry = {}) {
      * (AGENTS.md §12.1).
      *
      * Dabartinė būsena po #246:
-     *   - API rakto kelias → `actorFingerprint(configuredKey)` (`key_<12 hex>`),
-     *     identifikuoja RAKTĄ, ne asmenį. NEKEIČIAMAS (D2).
-     *   - Sesijos kelias → aktoriaus NĖRA (`null`). `setActor()` ten
-     *     nebekviečiamas, o `middleware/authorize.js` grąžina `actor: null`.
+     *   - API rakto kelias, FALLBACK (šis `?? getActor()`) →
+     *     `actorFingerprint(configuredKey)` (`key_<12 hex>`), identifikuoja
+     *     RAKTĄ, ne asmenį. NEKEIČIAMAS (D2).
+     *   - ⚠️ API rakto kelias, LEIDŽIAMI MARŠRUTAI → literalas `"api-key"`, NE
+     *     atspaudas. `middleware/authorize.js` `resolveIdentity()` raktui
+     *     grąžina būtent literalą, o `jobs` / `transcribeJobs` / `backup`
+     *     perduoda `req.authz.actor` eksplicitiškai — tad šios eilutės
+     *     fallback'o nepasiekia. Priimta sąmoningai: `API_KEY` yra vienas, tad
+     *     atspaudas būtų konstanta ir neatskirtų nieko, ko neatskiria
+     *     literalas.
+     *   - Sesijos kelias, SINCHRONINIS → aktoriaus nėra (`null`). `setActor()`
+     *     ten nebekviečiamas, o `middleware/authorize.js` grąžina `actor: null`.
+     *   - Sesijos kelias, ASINCHRONINIS (inline, worker, nesėkmės tvarkymas) →
+     *     aktoriaus irgi nėra. ⚠️ ANKSTESNĖ ŠIO KOMENTARO REDAKCIJA ČIA KLYDO:
+     *     ji sakė tik „sesijos kelias → `null`", nors `jobs.actor` (sesijoje —
+     *     `userId`) keliaudavo į kontekstą per `queues/jobRunner.js` ir
+     *     `workers/index.js`, ir šis `?? getActor()` jį persistindavo. Tai buvo
+     *     ta pati §12.1 forma kaip eilutė aukščiau — teiginys, stipresnis už
+     *     realizaciją, tik šįkart jį parašiau pats. Dabar sprendimą priima
+     *     `requestContext.auditoAktoriusIsJobo()`, viena vieta visiems trims
+     *     keliams.
      *   - CLI keliai (`erasure-marks.js`, `pgDumpBackup` su `--actor`) →
      *     operatoriaus SAVIDEKLARUOTA reikšmė. Sąmoningai palikta (#246 §0.4,
      *     E-out), tad šis laukas vis dar GALI turėti žmogaus vardą — bet tik

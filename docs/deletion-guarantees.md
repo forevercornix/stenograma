@@ -358,7 +358,21 @@ nerašo.** Užrakinta:
 | Sesija (bet kuri užklausa) | `meta.actor` = vartotojo vardas | **nieko** |
 | `LOGIN_SUCCESS` / `LOGIN_FAILED` | `details` su `username=` | tik `role=`, arba nieko |
 | Admin override / našlaičių valymas | `meta.actor` = `userId` (#158) | **nieko** |
-| API raktas | `actorFingerprint` (`key_<12 hex>`) | **nepakitęs** (identifikuoja raktą, ne asmenį) |
+| API raktas, **fallback** (atmesta užklausa, `rasytiAudita` be aiškaus `actor`) | `actorFingerprint` (`key_<12 hex>`) | **nepakitęs** (identifikuoja raktą, ne asmenį) |
+| ⚠️ API raktas, **leidžiami maršrutai** (`jobs`, `transcribeJobs`, `backup` — perduoda `req.authz.actor`) | literalas `"api-key"` | literalas `"api-key"` |
+
+⚠️ **Dvi API rakto eilutės, ne viena — ir ankstesnė redakcija klydo.** Ji teigė, kad
+API rakto kelyje `actor` yra atspaudas, bet `middleware/authorize.js`
+`resolveIdentity()` raktui grąžina **literalą `"api-key"`**, o leidžiami maršrutai
+perduoda `req.authz.actor` eksplicitiškai — tad `?? getActor()` fallback'o, kuriame
+gyvena atspaudas, jie nepasiekia. Atspaudas realiai atsiranda tik ten, kur `actor`
+neperduodamas (pvz. atmesto leidimo auditas).
+
+**Tai priimta sąmoningai.** Sistema turi **vieną** `API_KEY`, tad
+`actorFingerprint(configuredKey)` yra konstanta: leidžiamuose maršrutuose jis
+neatskirtų nieko, ko neatskiria `"api-key"`. Nė viena reikšmė nėra asmens duomuo, ir
+abi tenkina reikalavimą, kad audite nebūtų neapdoroto rakto — literalas net stipriau,
+nes iš paslapties apskritai neišvestas. Abi eilutės dabar turi savo regresinį testą.
 
 **Kodėl ne pakaitalas (ID, HMAC, pseudonimas).** Audito subjekto gyvavimo ciklas
 yra **job-centric**: kandidatiniai `subject_id` skaičiuojami iš `job_id`, o
