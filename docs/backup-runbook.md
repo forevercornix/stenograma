@@ -225,9 +225,24 @@ paimti naują darbą.
 Užraktas galioja **ne ilgiau kaip 10 min** — procesui nukritus vidury sistema
 kitaip liktų užblokuota, ir vienintelė išeitis būtų restartas.
 
-⚠️ **Užraktas veikia tik viename procese.** Atkūrimą galima saugiai daryti
-**tik tada, kai veikia vienas backend procesas.** Keliems worker'iams reikėtų
-Redis užrakto.
+⚠️ **Užraktas gyvena vieno proceso atmintyje — bet riba yra ne ten, kur
+anksčiau buvo užrašyta** (#440 §0.1).
+
+**Worker'ių skalavimas saugus.** Worker'iai job'ų **negamina**, tik vartoja
+eilę, tad `docker compose ... up --scale transcription-worker=3` (ir
+`protocol-worker`) šios garantijos nepažeidžia. Ankstesnė šio runbook'o
+redakcija teigė priešingai — tai buvo netikslu.
+
+**Pavojus yra gamintojo (API) proceso dauginimas.** Langą uždaro dvi dalys
+kartu: job'ą sukuria ir į eilę įkelia tik du HTTP maršrutai tame pačiame
+procese, kuris laiko užraktą (`routes/jobs.js`, `routes/transcribeJobs.js`),
+ir barjeras užrakto viduje (`routes/backup.js` → `countActiveJobs()`, kuris
+skaičiuoja visas nebaigtas būsenas globaliai, įskaitant BullMQ retry pauzę).
+Suskalavus `backend` iki dviejų replikų, antrojo proceso `create()` tikrintų
+savo užraktą — visada atvirą — ir kurtų darbus atkūrimo metu.
+
+⚠️ **Tai operacinė sąlyga, ne vykdoma patikra:** niekas netikrina, kad
+`backend` procesas būtų vienas. Atkūrimo metu laikykite vieną API repliką.
 
 ---
 
@@ -982,7 +997,7 @@ rašo pats `eraseJob()`.
 
 | Riba | Poveikis | Kur spręsti |
 |---|---|---|
-| Užraktas tik viename procese | Atkūrimas saugus tik su vienu backend | Redis užraktas |
+| Užraktas tik viename procese | Atkūrimas saugus tik su vienu **gamintojo (API)** procesu; worker'ių skalavimas saugus (#440 §0.1) | Sargas, draudžiantis kelias `backend` replikas (#440 follow-up) |
 | Pritaikymas **nėra transakcinis** | Infrastruktūros gedimas vidury palieka dalinį atkūrimą | Duomenų bazė su rollback |
 | Rakto ID nėra | Rotacijos apskaita — rankinė | Kito etapo tema |
 | Tik vienas ankstesnis raktas | Dviguba rotacija sunaikina kopijas | Kelių raktų palaikymas |

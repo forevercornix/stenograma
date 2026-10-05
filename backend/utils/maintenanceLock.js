@@ -17,10 +17,34 @@ const log = createLogger("maintenance");
  * Užraktas uždaro langą: jį uždėjus naujų darbų nebeįmanoma nei sukurti, nei
  * pradėti, tad patikros rezultatas lieka galiojantis iki pat pabaigos.
  *
- * ⚠️ RIBA: užraktas gyvena ATMINTYJE, viename procese – ta pati riba kaip
- * ištrynimo žymų (#19) ir sesijų (#18). Keliems worker'ių procesams reikėtų
- * Redis užrakto; iki tol atkūrimą galima saugiai daryti tik tada, kai veikia
- * vienas backend procesas.
+ * ⚠️ RIBA: UŽRAKTAS GYVENA ATMINTYJE, VIENAME PROCESE – ta pati riba kaip
+ * ištrynimo žymų (#19) ir sesijų (#18). Bet riba yra NE ten, kur ilgai buvo
+ * užrašyta (#440 §0.1): pavojus yra ne worker'ių skaičius, o GAMINTOJO
+ * (API) proceso dauginimas.
+ *
+ * ⚠️ WORKER'IŲ SKALAVIMAS SAUGUS. Worker'iai job'ų NEGAMINA – jie tik vartoja
+ * eilę. `docker compose ... up --scale transcription-worker=3` šios garantijos
+ * nepažeidžia, nors ankstesnė šio komentaro redakcija būtent tai ir teigė.
+ *
+ * KAS IŠ TIKRŲJŲ UŽDARO LANGĄ – dvi dalys kartu:
+ *
+ *   1. VIENINTELIS GAMINTOJAS TAME PAČIAME PROCESE. Job'ą sukuria ir į eilę
+ *      įkelia tik du HTTP maršrutai – `routes/jobs.js:96`/`:112` ir
+ *      `routes/transcribeJobs.js:191`/`:209` – t. y. tas pats procesas, kuris
+ *      laiko šį užraktą. Todėl `jobStore.create()` patikra (`jobStore/index.js`)
+ *      yra TINKAMAME procese ir realiai blokuoja.
+ *   2. BARJERAS UŽRAKTO VIDUJE (`routes/backup.js:259`). `countActiveJobs()`
+ *      skaičiuoja VISAS nebaigtas būsenas globaliai, įskaitant BullMQ retry
+ *      pauzę (tarpinis bandymas sąmoningai lieka `processing`, žr.
+ *      `workers/index.js`). Grąžinus nulį, eilėje nėra ko paimti.
+ *
+ * Vietinio užrakto PAKANKA būtent todėl, kad gamyba yra vienaprocesė – ne
+ * todėl, kad užraktas būtų bendras.
+ *
+ * ⚠️ TAI NĖRA VYKDOMA SĄLYGA. Niekas netikrina, kad gamintojo procesas būtų
+ * vienas: suskalavus `backend` iki dviejų replikų, antrojo proceso `create()`
+ * tikrintų savo `_lock = null` ir kurtų job'us atkūrimo metu. Sargas tam yra
+ * atskiras darbas (#440 follow-up); iki tol tai operacinė sąlyga.
  */
 
 let _lock = null;
