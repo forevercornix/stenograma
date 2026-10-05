@@ -114,6 +114,12 @@ async function paruostiDb(suffix) {
   return { url, pool, resursai };
 }
 
+/** Visos `audit_log` eilutės kaip neapdorotas tekstas — be aplikacijos sluoksnio. */
+async function visosEilutes(pool) {
+  const { rows } = await pool.query("SELECT to_jsonb(a)::text AS visa FROM audit_log a ORDER BY a.id");
+  return rows.map((r) => r.visa);
+}
+
 /**
  * RIBOTAS LAUKIMAS. Pasibaigus laikui grąžinamas `null`, ir kvietėjas PRIVALO
  * tai paversti kritimu — tyli `null` reikšmė reikštų testą, kuris nieko
@@ -173,26 +179,29 @@ test("#246 P1: sesijos keliu sukurto jobo VYKDYMAS audite neatspaudžia identity
   assert.equal(jobas.actor, OPERATORIUS.userId, "`jobs.actor` yra userId — jis LIEKA autorizacijai (#18 PR3)");
 
   /**
-   * (B) VYKDYMAS TIESIOGIAI PER `_runInline()`.
+   * (B) VYKDYMAS: laukiama, kol audito eilučių PADAUGĖJA.
    *
-   * ⚠️ NE PER MARŠRUTO AUTOMATIKĄ. `setImmediate` paleidimo Promise niekas
-   * nelaiko, tad automatinis vykdymas jau galėjo įvykti (ir idempotencija
-   * antrą kartą nieko nerašytų) arba dar nebūti prasidėjęs. Tiesioginis
-   * kvietimas naudoja TĄ PATĮ produkcinį `_runInline()`, kuris ir sudaro
-   * kontekstą per `runWithContext({ actor: auditoAktoriusIsJobo(job), … })` —
-   * t. y. tikrinamas tas pats seam'as, tik be lenktynių.
+   * ⚠️ TVIRTINIMAS NEPRIKLAUSO NEI NUO ĮVYKIO VARDO, NEI NUO TO, KURIS
+   * PROCESORIUS VEIKĖ. Ankstesnės redakcijos laukė konkretaus sentinelio iš
+   * testinio dublio, bet maršruto automatinis vykdymas jau būdavo įvykęs su
+   * tikru procesoriumi, tad sentinelio nebūdavo niekada, o tiesioginis
+   * `_runInline()` po to nutildavo dėl idempotencijos. Keturios CI redakcijos
+   * rodė tą patį simptomą („nulis eilučių") su skirtingomis priežastimis.
    *
-   * ⚠️ KLAIDA NESLEPIAMA: be `.catch` — jei vykdymas nutrūksta, testas krenta
-   * su tikra priežastimi, ne su „nulis eilučių".
+   * Bet koks naujas įrašas po sukūrimo yra VYKDYMO įrašas, ir invariantas
+   * taikomas jam visam vienodai — tad skaičiaus didėjimas yra tikslesnis
+   * signalas nei bet kuris vardas.
    */
-  await jobRunner._runInline("protocol", jobId, { transcript: "pakankamai ilgas testinis tekstas" });
+  const poSukurimo = (await visosEilutes(pool)).length;
 
   const eilutes = await palaukti(async () => {
-    const { rows } = await pool.query("SELECT to_jsonb(a)::text AS visa FROM audit_log a ORDER BY a.id");
-    const visos = rows.map((r) => r.visa);
-    return visos.some((x) => x.includes("PROTOCOL_GENERATED")) ? visos : null;
+    const visos = await visosEilutes(pool);
+    return visos.length > poSukurimo ? visos : null;
   });
-  assert.ok(eilutes, "vykdymo audito eilutė privalo atsirasti — kitaip testas nieko netikrina");
+  assert.ok(
+    eilutes,
+    `vykdymo audito eilučių privalo atsirasti (po sukūrimo buvo ${poSukurimo}) — kitaip testas nieko netikrina`
+  );
 
   const reiksmes = uzdraustosReiksmes();
   for (const eilute of eilutes) {
