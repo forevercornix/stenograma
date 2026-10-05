@@ -233,27 +233,11 @@ async function withLock(reason, operation, options = {}) {
   if (!result.acquired) return { locked: false, reason: result.reason };
 
   const token = result.token;
-  const maxHoldMs = options.maxHoldMs || DEFAULT_MAX_HOLD_MS;
-  const periodas = Math.max(1, Math.floor(maxHoldMs / RENEW_INTERVAL_DIVISOR));
 
-  const laikmatis = setInterval(() => {
-    const atnaujinta = renew(token, { maxHoldMs });
-    if (!atnaujinta.renewed) {
-      log.error("Nuomos pratęsti nepavyko – priežiūros garantija NEBEGALIOJA", {
-        reason,
-        token,
-        priezastis: atnaujinta.reason,
-      });
-    }
-  }, periodas);
-
-  /** ⚠️ `unref()` – pratęsimo laikmatis neturi laikyti proceso gyvo. */
-  if (typeof laikmatis.unref === "function") laikmatis.unref();
-
+  /** M2 MUTACIJA (#440): pratęsimo nėra — nuoma vėl fiksuota. */
   try {
     return { locked: true, value: await operation() };
   } finally {
-    clearInterval(laikmatis);
     release(token);
   }
 }
