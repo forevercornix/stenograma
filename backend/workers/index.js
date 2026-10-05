@@ -838,15 +838,4 @@ if (require.main === module) {
     });
 }
 
-/**
- * P3-a MUTACIJA (#440): gamintojas per ALIAS'Ą, ne pažodinį vardą.
- *
- * Pirmoji sargo redakcija šito nepamatydavo.
- */
-async function _p3aAlias(tipas) {
-  const jobStoreModulis = require("../utils/jobStore");
-  const store = jobStoreModulis;
-  return store.create({ ownerKind: "unowned", type: tipas });
-}
-
-module.exports = { createWorker, _p3aAlias, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, arGalimaSalintiAudio, RETRY_VEIKSMAS };
+module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, arGalimaSalintiAudio, RETRY_VEIKSMAS };
