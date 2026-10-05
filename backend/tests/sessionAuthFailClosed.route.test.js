@@ -540,12 +540,19 @@ test("VARDAS: `req.user.username` išvedamas iš AUTH_USERS, ne iš persistuoto 
 
 test("AKTORIUS: authorize.js aktorius seka AUTH_USERS pervadinimą per TIKRĄ HTTP", async () => {
   /**
-   * ⚠️ VARDAS NEBEPERSISTINAMAS, TAD JIS PRIVALO ATEITI IŠ `AUTH_USERS`.
+   * ⚠️ VARDAS SESIJOJE NEPERSISTINAMAS, TAD JIS PRIVALO ATEITI IŠ `AUTH_USERS`.
    *
-   * `middleware/authorize.js resolveIdentity()` naudoja `req.user.username`
-   * kaip AUDITO AKTORIŲ. Realizacija, kuri vardą laikytų sesijoje, po
-   * pervadinimo rašytų į auditą SENĄ vardą - ir incidento tyrimas remtųsi
-   * tapatybe, kurios nebėra.
+   * Realizacija, kuri vardą laikytų sesijoje, po pervadinimo rodytų SENĄ vardą
+   * — ir `/api/auth/me` bei autorizacija remtųsi tapatybe, kurios nebėra.
+   *
+   * ⚠️ TESTO PREMISA PASIKEITĖ SU #246. Anksčiau čia buvo tikrinama, kad tas
+   * pats vardas pasiekia AUDITO AKTORIŲ (`resolveIdentity().actor`). Dabar
+   * audito aktoriaus sesijos kelyje NĖRA (D1): vardas lieka `req.user`
+   * autorizacijai ir logams, bet į `audit_log` nebepatenka.
+   *
+   * ⚠️ TODĖL TIKRINAMOS ABI PUSĖS: pervadinimo sekimas (jis vis dar privalo
+   * veikti) IR tai, kad aktorius yra `null` (kitaip senas elgesys grįžtų
+   * tyliai, o šis testas liktų žalias).
    *
    * Tikrinamas VISAS kelias: cookie → `sessionStore.touch()` → `req.user` →
    * `resolveIdentity()`. Vienetinė saugyklos patikra įrodytų tik saugyklos
@@ -569,14 +576,22 @@ test("AKTORIUS: authorize.js aktorius seka AUTH_USERS pervadinimą per TIKRĄ HT
     assert.equal(po.status, 200, "pervadinimas nėra revokacijos priežastis");
     assert.equal(po.body.username, "naujasvardas", "req.user.username privalo ateiti iš AUTH_USERS");
 
-    /** Ir tas pats vardas pasiekia autorizacijos aktorių. */
+    /** Ir tas pats vardas pasiekia AUTORIZACIJĄ — bet nebe auditą. */
     const req = { headers: { cookie } };
     await requireSession(req, { status: () => ({ json: () => {} }) }, () => {});
     const tapatybe = resolveIdentity(req);
 
     assert.equal(tapatybe.source, "session");
-    assert.equal(tapatybe.actor, "naujasvardas", "audito aktorius seka AUTH_USERS");
-    assert.equal(tapatybe.role, "administrator");
+    assert.equal(tapatybe.role, "administrator", "rolė — autorizacijos operandas, privalo išlikti");
+    assert.equal(req.user.username, "naujasvardas", "vardas privalo sekti AUTH_USERS `req.user` lygyje");
+
+    /**
+     * ⚠️ AUDITO AKTORIAUS NĖRA (#246 D1).
+     *
+     * Tikrinama `null`, o ne „ne `naujasvardas`": pastarasis praeitų ir tada,
+     * jei grįžtų `userId` ar bet kuris kitas persistentinis žymuo.
+     */
+    assert.equal(tapatybe.actor, null, "sesijos kelyje audito aktoriaus būti negali");
   } finally {
     process.env.AUTH_USERS = senasAuth;
   }
