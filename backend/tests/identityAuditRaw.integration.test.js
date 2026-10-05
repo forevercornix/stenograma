@@ -68,6 +68,21 @@ process.env.PRIVACY_MODE = "false";
  */
 process.env.BACKUP_ENABLED = "true";
 
+/**
+ * ⚠️ `operator`, NE NUTYLIMASIS `administrator` — KITAIP (4) KELIAS NIEKO NEĮRAŠO.
+ *
+ * `resolveApiKeyRole()` nutylimai grąžina `administrator`, kuris TURI
+ * `backup:restore`. Tada užklausa praeina autorizaciją ir krenta vėliau ties
+ * dalių patikra — audito eilutės neatsiranda, ir „identifikuojančių reikšmių
+ * nerasta" būtų tuščias žalias. CI tai ir parodė: (4) kelias grąžino nulį
+ * eilučių.
+ *
+ * Su `operator` role leidimas ATMETAMAS, o `middleware/authorize.js` atmetimą
+ * audituoja API RAKTO kontekste — t. y. būtent toje šakoje, kurioje `actor`
+ * privalo likti atspaudu (D2).
+ */
+process.env.API_KEY_ROLE = "operator";
+
 const request = require("supertest");
 const app = require("../server");
 app._setReadyForTests();
