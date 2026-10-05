@@ -381,8 +381,14 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
       patvirtintiBeIdentity(eilutes, uzdraustosReiksmes(), "API rakto leidžiamas maršrutas");
 
       /** Kryptis B: `actor` yra būtent literalas — tai ir yra įrodoma garantija. */
+      /**
+       * ⚠️ TARPUI TOLERANTIŠKAS ŠABLONAS. PostgreSQL `jsonb` tekstinė forma
+       * rašo `"actor": "api-key"` SU tarpu po dvitaškio, tad pažodinis
+       * `"actor":"api-key"` neatitinka. Pirmoji redakcija dėl to krito su
+       * „rasta eilučių: 2" — eilutės BUVO, tik šablonas netiko.
+       */
       assert.ok(
-        eilutes.some((e) => e.includes('"actor":"api-key"')),
+        eilutes.some((e) => /"actor"\s*:\s*"api-key"/.test(e)),
         `leidžiamame maršrute \`actor\` privalo būti literalas "api-key" — rasta eilučių: ${eilutes.length}`
       );
 
@@ -415,11 +421,34 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
      * `auditoAktoriusIsJobo()` vienetiniai testai — ne RAW. Tai užrašyta, kad
      * žalias šis testas neatrodytų kaip visų trijų kelių garantija.
      */
+    /**
+     * ⚠️ SPY REGISTRUOJAMAS PRIEŠ SUKŪRIMĄ, IR RANKINIO VYKDYMO NĖRA.
+     *
+     * `routes/jobs.js` po sukūrimo PATS paleidžia vykdymą
+     * (`setImmediate(() => _runInline(...))`), tad rankinis kvietimas po to
+     * lenktyniuotų su automatiniu: pirmasis jobą užbaigtų, o antrasis dėl
+     * idempotencijos nieko neberašytų. Pirmoji redakcija būtent taip ir krito.
+     * Užregistravus dublį PIRMA, automatinis vykdymas jį ir panaudoja — kelias
+     * lieka produkcinis nuo maršruto iki `runWithContext`.
+     *
+     * Procesorius atlieka TIKRĄ audito rašymą BE aiškaus `actor` — tiksliai tą
+     * formą, kurią `auditLog.js` `?? getActor()` ir persistindavo. LLM
+     * praleidžiamas: invariantui jis nereikšmingas.
+     */
+    const jobRunner = require("../queues/jobRunner");
+    const { rasytiAudita } = require("../utils/auditWrite");
+    jobRunner.registerProcessor("protocol", async () => {
+      await rasytiAudita({ event: "PROTOCOL_GENERATED", success: true, outcome: "test_inline" });
+      return { protocol: { summary: "testas" } };
+    });
+
     const prisijungimas = await request(app)
       .post("/api/auth/login")
       .send({ username: OPERATORIUS.username, password: SLAPTAS });
     const cookie = prisijungimas.headers["set-cookie"];
     assert.ok(cookie, "sesijos cookie privalo būti");
+
+    await isvalytiAudita(pool);
 
     const sukurtas = await request(app)
       .post("/api/jobs")
@@ -429,36 +458,9 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
     const jobId = sukurtas.body && (sukurtas.body.jobId || sukurtas.body.id);
     assert.ok(jobId, "job ID privalo būti");
 
-    /** ⚠️ PRIELAIDA, KURIĄ TIKRINAM: įrašas TURI sesijos tapatybę. */
     const jobas = await require("../utils/jobStore").system.get(jobId, { hydrate: false });
     assert.equal(jobas.actorSource, "session", "prielaida: jobas sukurtas sesijos keliu");
     assert.equal(jobas.actor, OPERATORIUS.userId, "prielaida: `jobs.actor` yra userId — jis LIEKA autorizacijai");
-
-    /**
-     * ⚠️ VYKDYMAS PER TIKRĄ `_runInline`, SU SPY PROCESORIUM.
-     *
-     * Tikrinamas invariantas yra „sesijos keliu sukurto jobo VYKDYMAS audite
-     * neatsispaudžia identifikacija", o ne tai, ar veikia LLM. Todėl
-     * procesorius pakeičiamas dubliu, kuris atlieka tikrą audito rašymą BE
-     * aiškaus `actor` — t. y. tiksliai tą formą, kurią `auditLog.js`
-     * `?? getActor()` ir persistindavo.
-     *
-     * ⚠️ PRODUKCINIS KELIAS IŠLIEKA: `_runInline()` pats sudaro kontekstą per
-     * `runWithContext({ actor: auditoAktoriusIsJobo(job), … })`, ir būtent tai
-     * tikrinama. Praleidžiamas tik LLM, kuris invariantui nereikšmingas.
-     *
-     * ⚠️ KLAIDOS NEBESLEPIAMOS. Pirmoji redakcija turėjo `.catch(() => {})`, ir
-     * ji paslėpė tikrą priežastį, dėl kurios eilučių neatsirado — testas rodė
-     * „nulis eilučių", o ne tai, kas realiai nutiko.
-     */
-    const jobRunner = require("../queues/jobRunner");
-    const { rasytiAudita } = require("../utils/auditWrite");
-    jobRunner.registerProcessor("protocol", async () => {
-      await rasytiAudita({ event: "PROTOCOL_GENERATED", success: true, outcome: "test_inline" });
-      return { protocol: { summary: "testas" } };
-    });
-
-    await jobRunner._runInline("protocol", jobId, { transcript: "pakankamai ilgas testinis tekstas" });
 
     const eilutes = await palaukti(async () => {
       const e = await visosEilutes(pool);
