@@ -88,7 +88,6 @@ const app = require("../server");
 app._setReadyForTests();
 const auditStore = require("../utils/auditStore");
 const { actorFingerprint } = require("../utils/requestContext");
-const jobRunner = require("../queues/jobRunner");
 
 /**
  * UŽDRAUSTOS REIKŠMĖS — IŠVEDAMOS IŠ AUTORITETO (#246 §0.2).
