@@ -271,8 +271,8 @@ async function withLock(reason, operation, options = {}) {
       token,
       priezastis: atnaujinta.reason,
     });
-    /** P1-SIGNALO MUTACIJA (#440): sustabdymo nebėra, tik žurnalas. */
     clearInterval(laikmatis);
+    if (!stabdymas.signal.aborted) stabdymas.abort(new LeaseLostError(reason, token, atnaujinta.reason));
   }, periodas);
 
   /** ⚠️ `unref()` – pratęsimo laikmatis neturi laikyti proceso gyvo. */
