@@ -83,6 +83,22 @@ process.env.BACKUP_ENABLED = "true";
  */
 process.env.API_KEY_ROLE = "operator";
 
+/**
+ * ⚠️ PG REIKIA TIK AUDITUI — `jobStore` IR ŽYMOS LIEKA ATMINTYJE.
+ *
+ * RAW invariantas tikrina `audit_log` turinį, tad autoritetingas Postgres čia
+ * reikalingas tik audito saugyklai. Pirmoji redakcija sukūrė migruotą bazę ir
+ * nukreipė į ją TIK `auditStore`, o `jobStore` su `deletionTombstones` liko
+ * rodyti į `DATABASE_URL` be migracijų — ir fail-closed žymų barjeras teisingai
+ * krito su „relation \"erasure_marks\" does not exist".
+ *
+ * ⚠️ TVARKA SVARBI: `postgresGuard` `DATABASE_URL` nusiskaito modulio įkėlimo
+ * metu (jo `const DATABASE_URL`), tad jį pašalinti galima TIK po `require`.
+ * Priešingu atveju testas pats save praleistų.
+ */
+delete process.env.DATABASE_URL;
+process.env.JOB_STORE_BACKEND = "memory";
+
 const request = require("supertest");
 const app = require("../server");
 app._setReadyForTests();
