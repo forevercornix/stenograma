@@ -1,6 +1,4 @@
 const sessionStore = require("../utils/sessionStore");
-const kontekstas = require("../utils/requestContext");
-const ctx = kontekstas;
 
 
 /**
@@ -138,8 +136,6 @@ async function requireSession(req, res, next) {
 
   /** `id` - stabili tapatybė (#158); `username` lieka `req.user` autorizacijai ir logams. */
   req.user = { id: session.userId || null, username: session.username, role: session.role };
-  /** M4 MUTACIJA (#246): ta pati forma per ALIAS'Ą per du žingsnius. */
-  ctx.setActor(session.username);
 
   /**
    * ⚠️ AKTORIUS AUDITE NEBENUSTATOMAS SESIJOS KELYJE (#246 D1).
