@@ -838,12 +838,4 @@ if (require.main === module) {
     });
 }
 
-/**
- * P3-b MUTACIJA (#440): gamintojas per DESTRUKTŪRIZACIJĄ su pervardijimu.
- */
-async function _p3bDestrukt(tipas) {
-  const { create: sukurti } = require("../utils/jobStore");
-  return sukurti({ ownerKind: "unowned", type: tipas });
-}
-
-module.exports = { createWorker, _p3bDestrukt, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, arGalimaSalintiAudio, RETRY_VEIKSMAS };
+module.exports = { createWorker, shutdownWorker, startWorkers, initializeWorkerOrFail, runWorkerProcess, _cleanupStorage, sprendimasPriesRestart, arGalimaSalintiAudio, RETRY_VEIKSMAS };
