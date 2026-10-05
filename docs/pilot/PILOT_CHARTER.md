@@ -219,7 +219,7 @@ piloto negalima tikėtis.
 |---|---|
 | Auditas gyvena tik atmintyje; restartas jį ištrina | #21 |
 | Įkėlimų išjungimo jungiklio nėra | #21 |
-| Priežiūros užraktas veikia tik viename procese | #21 |
+| Priežiūros užraktas veikia tik viename procese — atkūrimas saugus tik su vienu **gamintojo (API)** procesu; worker'ių skalavimas saugus, nes worker'iai job'ų negamina | #21 |
 | Atkūrimo pritaikymas nėra transakcinis | #20 |
 | Kopijos nepasiekia jau ištrintų duomenų; kopijų retencija apibrėžia faktinį ištrynimo langą | #19, #20 |
 | Vykdomas processor'ius nesustabdomas vidury ištrynimo | #19 |

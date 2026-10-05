@@ -225,8 +225,8 @@ paimti naują darbą.
 Užraktas galioja **ne ilgiau kaip 10 min** — procesui nukritus vidury sistema
 kitaip liktų užblokuota, ir vienintelė išeitis būtų restartas.
 
-⚠️ **Užraktas gyvena vieno proceso atmintyje — bet riba yra ne ten, kur
-anksčiau buvo užrašyta** (#440 §0.1).
+⚠️ **Užraktas veikia tik viename procese — bet riba yra ne ten, kur anksčiau
+buvo užrašyta** (#440 §0.1). Jis gyvena vieno proceso atmintyje.
 
 **Worker'ių skalavimas saugus.** Worker'iai job'ų **negamina**, tik vartoja
 eilę, tad `docker compose ... up --scale transcription-worker=3` (ir

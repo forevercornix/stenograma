@@ -140,6 +140,18 @@ test("RIBOS: charta įvardija VISAS žinomas sistemos ribas", () => {
        */
       source: "backup-runbook.md",
       inSource: /[Uu]žraktas veikia tik viename procese/,
+      /**
+       * ⚠️ RIBOS PRISKYRIMAS, NE TIK JOS BUVIMAS (#440 §0.1).
+       *
+       * Abu dokumentai ilgai teigė, kad pavojus yra worker'ių skaičius.
+       * Matavimas parodė priešingai: worker'iai job'ų NEGAMINA, tad jų
+       * skalavimas saugus, o pavojinga yra GAMINTOJO (API) proceso
+       * dauginimas. Riba, įvardyta su neteisinga priežastimi, nukreipia
+       * operatorių ne į tą veiksmą — todėl tikrinamas ir priskyrimas.
+       */
+      priskyrimas: /gamintojo \(API\)/,
+      /** Senas klaidingas teiginys nebegali grįžti nei į vieną dokumentą. */
+      nebegalioja: /[Kk]eliems worker.{0,3}iams reikėtų Redis užrakto/,
     },
     {
       what: "atkūrimas ne transakcinis",
@@ -182,6 +194,17 @@ test("RIBOS: charta įvardija VISAS žinomas sistemos ribas", () => {
       limit.inSource,
       `riba „${limit.what}" chartoje yra, bet ${limit.source} apie ją nekalba`
     );
+
+    /** Priskyrimas tikrinamas ABIEJUOSE dokumentuose, jei riba jį turi. */
+    if (limit.priskyrimas) {
+      assert.match(text, limit.priskyrimas, `chartoje riba „${limit.what}" be teisingo priskyrimo`);
+      assert.match(source, limit.priskyrimas, `${limit.source} riba „${limit.what}" be teisingo priskyrimo`);
+    }
+
+    if (limit.nebegalioja) {
+      assert.doesNotMatch(text, limit.nebegalioja, `chartoje grįžo paneigtas teiginys: ${limit.what}`);
+      assert.doesNotMatch(source, limit.nebegalioja, `${limit.source} grįžo paneigtas teiginys: ${limit.what}`);
+    }
   }
 });
 
@@ -192,7 +215,12 @@ test("RIBOS: kiekviena nuoroda į issue realiai egzistuoja dokumentuose", () => 
    */
   const text = charter();
 
-  const referenced = [...text.matchAll(/#(\d{2})/g)].map((match) => match[1]);
+  /**
+   * ⚠️ `\d{2,}`, NE `\d{2}`. Dviejų skaitmenų šablonas trijų skaitmenų nuorodą
+   * nukirpdavo (`#440` -> `"44"`) ir tikrindavo ne tą issue — tylus klaidingas
+   * verdiktas abiem kryptimis.
+   */
+  const referenced = [...text.matchAll(/#(\d{2,})/g)].map((match) => match[1]);
   assert.ok(referenced.length >= 5, "charta turi remtis kitais etapais");
 
   const knownIssues = new Set(["18", "19", "20", "21", "22", "23", "24", "28"]);
