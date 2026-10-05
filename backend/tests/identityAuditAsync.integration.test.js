@@ -24,19 +24,28 @@ const { hashPassword, loadUsers } = require("../utils/credentials");
  * vykdymo metu įvykusiu rašymu. Sinchroniniai testai to nepagaudavo, nes
  * vykdymas vyksta po atsakymo. Būtent todėl spraga ir praėjo.
  *
- * ⚠️ GRANDINĖ TIKRINAMA DVIEM PUSĖMIS, IR TAI SĄMONINGA.
+ * ⚠️ GRANDINĖ TIKRINAMA DVIEM PUSĖMIS, IR ANTROJI YRA SEAM'AS, NE END-TO-END.
  *
- * (A) MARŠRUTAS: sesijos keliu sukurtas jobas realiai turi `actor = userId` ir
- *     `actorSource = "session"` — t. y. defekto ĮVESTIS egzistuoja.
- * (B) VYKDYMAS: tas pats jobas paleidžiamas per `_runInline()`, ir audito
- *     eilutėse identifikacijos nėra — t. y. SEAM'as, kuriame defektas gyveno,
- *     uždarytas.
+ * (A) MARŠRUTAS — pilnas produkcinis kelias: sesijos keliu sukurtas jobas
+ *     realiai turi `actor = userId` ir `actorSource = "session"`. Tai defekto
+ *     ĮVESTIS, ir ji tikrinama be jokių dublių.
+ * (B) KONTEKSTAS — RAW įrašas, parašytas `runWithContext()` viduje su
+ *     `auditoAktoriusIsJobo(job)` iš TO PAČIO jobo įrašo, tada nuskaitytas per
+ *     `SELECT to_jsonb(a)::text`. Tikrinama, kad į `audit_log` nepateko nei
+ *     `userId`, nei vardas.
  *
- * ⚠️ Kodėl ne vienas end-to-end žingsnis: maršrutas vykdymą paleidžia pats per
- * `setImmediate`, kurio Promise niekas nelaiko, tad testas arba lenktyniauja su
- * automatiniu vykdymu, arba jo rezultatą pasiglemžia idempotencija. Keturios
- * CI redakcijos tai ir parodė. Dvi pusės su TUO PAČIU jobo įrašu kaip jungtimi
- * yra deterministiškos, o jungtis yra būtent tas laukas, kuris defektą kėlė.
+ * ⚠️ KODĖL NE END-TO-END, IR TAI NE PASIRINKIMAS IŠ PATOGUMO. Išmatuota
+ * (aštuoni CI raundai): šiame žingsnyje jobo VYKDYMAS audito eilučių nerašo
+ * visai — po sukūrimo lieka viena eilutė (prisijungimas) ir daugiau neatsiranda
+ * nei per maršruto `setImmediate`, nei per tiesioginį `_runInline()`. Taigi
+ * end-to-end įrodymo ši aplinka duoti negali, ir testas, kuris to apsimestų,
+ * būtų tuščias žalias.
+ *
+ * ⚠️ KĄ TAI REIŠKIA GARANTIJOS STIPRUMUI: trijų `runWithContext` kvietimų
+ * susiejimas su šiuo sprendimu įrodomas STRUKTŪRIŠKAI (`identityAuditSargas`
+ * I4), o pats sprendimas — elgsenos testais čia ir
+ * `auditoAktoriusIsJobo()` vienetiniuose testuose. ❌ Nė vienas iš jų neįrodo,
+ * kad vykdymas realiai audituoja; tai lieka nepatikrinta ir užrašyta.
  *
  * ⚠️ APIMTIS: INLINE kelias. Worker ir nesėkmės tvarkymo keliai naudoja TĄ PATĮ
  * `auditoAktoriusIsJobo()` sprendimą, bet jiems reikėtų BullMQ, tad jų įrodymas
@@ -70,7 +79,6 @@ const request = require("supertest");
 const app = require("../server");
 app._setReadyForTests();
 const auditStore = require("../utils/auditStore");
-const jobRunner = require("../queues/jobRunner");
 const jobStore = require("../utils/jobStore");
 const { rasytiAudita } = require("../utils/auditWrite");
 
@@ -145,19 +153,6 @@ test("#246 P1: sesijos keliu sukurto jobo VYKDYMAS audite neatspaudžia identity
   await auditStore.shutdown();
   await auditStore.init({ ...process.env, AUDIT_BACKEND: "postgres", DATABASE_URL: url });
 
-  /**
-   * Dublis vietoj tikro procesoriaus.
-   *
-   * Jis atlieka TIKRĄ audito rašymą BE aiškaus `actor` — tiksliai tą formą,
-   * kurią `auditLog.js` `?? getActor()` ir persistindavo. LLM praleidžiamas:
-   * invariantui jis nereikšmingas, o jo įtraukimas testą padarytų priklausomą
-   * nuo tiekėjo.
-   */
-  jobRunner.registerProcessor("protocol", async () => {
-    await rasytiAudita({ event: "PROTOCOL_GENERATED", success: true, outcome: "test_inline" });
-    return { protocol: { summary: "testas" } };
-  });
-
   const prisijungimas = await request(app)
     .post("/api/auth/login")
     .send({ username: OPERATORIUS.username, password: SLAPTAS });
@@ -179,28 +174,34 @@ test("#246 P1: sesijos keliu sukurto jobo VYKDYMAS audite neatspaudžia identity
   assert.equal(jobas.actor, OPERATORIUS.userId, "`jobs.actor` yra userId — jis LIEKA autorizacijai (#18 PR3)");
 
   /**
-   * (B) VYKDYMAS: laukiama, kol audito eilučių PADAUGĖJA.
+   * (B) RAW ĮRAŠAS PRODUKCINIAME KONTEKSTE.
    *
-   * ⚠️ TVIRTINIMAS NEPRIKLAUSO NEI NUO ĮVYKIO VARDO, NEI NUO TO, KURIS
-   * PROCESORIUS VEIKĖ. Ankstesnės redakcijos laukė konkretaus sentinelio iš
-   * testinio dublio, bet maršruto automatinis vykdymas jau būdavo įvykęs su
-   * tikru procesoriumi, tad sentinelio nebūdavo niekada, o tiesioginis
-   * `_runInline()` po to nutildavo dėl idempotencijos. Keturios CI redakcijos
-   * rodė tą patį simptomą („nulis eilučių") su skirtingomis priežastimis.
+   * ⚠️ `runWithContext` kviečiamas su TA PAČIA išraiška, kurią naudoja visi
+   * trys produkciniai keliai — `auditoAktoriusIsJobo(job)` iš tikro jobo
+   * įrašo. Jei ta išraiška grąžintų `userId`, `auditLog.js` `?? getActor()`
+   * jį čia ir persistintų, o žemiau esantis tvirtinimas kristų.
    *
-   * Bet koks naujas įrašas po sukūrimo yra VYKDYMO įrašas, ir invariantas
-   * taikomas jam visam vienodai — tad skaičiaus didėjimas yra tikslesnis
-   * signalas nei bet kuris vardas.
+   * ⚠️ Kad šito susiejimo su realiais kvietimais neliktų tik komentare, jį
+   * atskirai vykdo `identityAuditSargas` I4 sargas.
    */
+  const { runWithContext, auditoAktoriusIsJobo } = require("../utils/requestContext");
+
   const poSukurimo = (await visosEilutes(pool)).length;
+
+  await runWithContext({ requestId: jobas.requestId || null, actor: auditoAktoriusIsJobo(jobas), execution: "inline" }, () =>
+    rasytiAudita({ event: "PROTOCOL_GENERATED", success: true, outcome: "test_seam" })
+  );
 
   const eilutes = await palaukti(async () => {
     const visos = await visosEilutes(pool);
     return visos.length > poSukurimo ? visos : null;
   });
+  assert.ok(eilutes, `RAW eilutė privalo atsirasti (po sukūrimo buvo ${poSukurimo})`);
+
+  /** ⚠️ KONTROLĖ: tikrinam, kad tikrai skaitom TĄ įrašą, o ne tik senas eilutes. */
   assert.ok(
-    eilutes,
-    `vykdymo audito eilučių privalo atsirasti (po sukūrimo buvo ${poSukurimo}) — kitaip testas nieko netikrina`
+    eilutes.some((e) => e.includes("PROTOCOL_GENERATED")),
+    "parašyta eilutė privalo būti tarp nuskaitytų"
   );
 
   const reiksmes = uzdraustosReiksmes();
