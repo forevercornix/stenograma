@@ -61,8 +61,16 @@ process.env.API_KEY = "raw-testinis-api-raktas-pakankamai-ilgas";
 process.env.AUDIT_ID_SALT = "raw-testine-druska-nera-produkcine";
 process.env.AUDIT_ID_SALT_ID = "raw-2026-10";
 process.env.PRIVACY_MODE = "false";
+/**
+ * ⚠️ PRIEŠ `require("../server")`. `routes/backup` montuojamas SĄLYGIŠKAI
+ * (`server.js`: `if (backupPolicy.isEnabled())`), tad be šio jungiklio (3) ir
+ * (4) keliai gautų 404, o testas tikrintų ne tą dalyką.
+ */
+process.env.BACKUP_ENABLED = "true";
 
 const request = require("supertest");
+const app = require("../server");
+app._setReadyForTests();
 const auditStore = require("../utils/auditStore");
 const { actorFingerprint } = require("../utils/requestContext");
 
@@ -163,14 +171,12 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
   await auditStore.shutdown();
   await auditStore.init({ ...process.env, AUDIT_BACKEND: "postgres", DATABASE_URL: url });
 
-  const app = require("../server");
-  app._setReadyForTests();
   const reiksmes = uzdraustosReiksmes();
 
   await t.test("(1) SĖKMINGAS prisijungimas", async () => {
     await isvalytiAudita(pool);
     const atsakymas = await request(app)
-      .post("/auth/login")
+      .post("/api/auth/login")
       .send({ username: OPERATORIUS.username, password: SLAPTAS });
     assert.equal(atsakymas.status, 200, "prisijungimas turi pavykti — kitaip tikrinam ne tą kelią");
 
@@ -185,7 +191,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
   await t.test("(2) NESĖKMINGAS prisijungimas", async () => {
     await isvalytiAudita(pool);
     const atsakymas = await request(app)
-      .post("/auth/login")
+      .post("/api/auth/login")
       .send({ username: OPERATORIUS.username, password: "neteisingas-slaptas-9" });
     assert.equal(atsakymas.status, 401);
 
@@ -204,7 +210,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
 
   await t.test("(3) SESIJA autentifikuotas veiksmas", async () => {
     const prisijungimas = await request(app)
-      .post("/auth/login")
+      .post("/api/auth/login")
       .send({ username: OPERATORIUS.username, password: SLAPTAS });
     const cookie = prisijungimas.headers["set-cookie"];
     assert.ok(cookie, "sesijos cookie privalo būti");
@@ -217,7 +223,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
      * SESIJOS kontekste. Būtent tas kelias (`resolveIdentity` → `req.authz`)
      * ir buvo antrasis propagacijos kanalas.
      */
-    const atsakymas = await request(app).post("/admin/backups/restore").set("Cookie", cookie);
+    const atsakymas = await request(app).post("/api/admin/backups/restore").set("Cookie", cookie);
     assert.ok([400, 403].includes(atsakymas.status), `laukta 403/400, gauta ${atsakymas.status}`);
 
     const eilutes = await visosEilutes(pool);
@@ -228,7 +234,7 @@ test("#246 RAW: keturi keliai atskirai, be identifikuojančių reikšmių", { sk
     await isvalytiAudita(pool);
 
     const atsakymas = await request(app)
-      .post("/admin/backups/restore")
+      .post("/api/admin/backups/restore")
       .set("X-API-Key", process.env.API_KEY);
     assert.ok([400, 403, 503].includes(atsakymas.status), `gauta ${atsakymas.status}`);
 
