@@ -34,18 +34,22 @@ const { hashPassword, loadUsers } = require("../utils/credentials");
  *     `SELECT to_jsonb(a)::text`. Tikrinama, kad į `audit_log` nepateko nei
  *     `userId`, nei vardas.
  *
- * ⚠️ KODĖL NE END-TO-END, IR TAI NE PASIRINKIMAS IŠ PATOGUMO. Išmatuota
- * (aštuoni CI raundai): šiame žingsnyje jobo VYKDYMAS audito eilučių nerašo
- * visai — po sukūrimo lieka viena eilutė (prisijungimas) ir daugiau neatsiranda
- * nei per maršruto `setImmediate`, nei per tiesioginį `_runInline()`. Taigi
- * end-to-end įrodymo ši aplinka duoti negali, ir testas, kuris to apsimestų,
- * būtų tuščias žalias.
+ * ⚠️ KODĖL (B) YRA SEAM'AS — IR KODĖL ANKSTESNIS PAAIŠKINIMAS BUVO KLAIDINGAS.
  *
- * ⚠️ KĄ TAI REIŠKIA GARANTIJOS STIPRUMUI: trijų `runWithContext` kvietimų
- * susiejimas su šiuo sprendimu įrodomas STRUKTŪRIŠKAI (`identityAuditSargas`
- * I4), o pats sprendimas — elgsenos testais čia ir
- * `auditoAktoriusIsJobo()` vienetiniuose testuose. ❌ Nė vienas iš jų neįrodo,
- * kad vykdymas realiai audituoja; tai lieka nepatikrinta ir užrašyta.
+ * Aštuoni CI raundai rodė „nulis audito eilučių po vykdymo", ir buvau užrašęs,
+ * kad šis CI žingsnis vykdymo audito duoti NEGALI. Tai buvo neteisinga.
+ * Tikroji priežastis: testinis procesorius rašė įvykį `PROTOCOL_GENERATED`,
+ * kurio `utils/auditEvents.js` NEKLASIFIKUOJA, tad `rasytiAudita()` teisingai
+ * metė `MalformedAuditEventError`, o `_paleistiInline()` jį logguodavo (ne
+ * nurijo) — ir testas matydavo tik simptomą.
+ *
+ * ⚠️ Pamoka tiksli: aštuonis kartus taisiau PRIEŽASTIS to paties simptomo,
+ * nė karto nepatikrinęs savo paties įvesties. Įvykio vardas yra prielaida, ir
+ * ji buvo falsifikuojama pirmą minutę.
+ *
+ * (B) lieka seam'u sąmoningai: jis naudoja TĄ PAČIĄ išraišką, kurią naudoja
+ * visi trys produkciniai keliai, ir yra deterministinis — be `setImmediate`
+ * lenktynių ir be priklausomybės nuo to, kuris procesorius užregistruotas.
  *
  * ⚠️ APIMTIS: INLINE kelias. Worker ir nesėkmės tvarkymo keliai naudoja TĄ PATĮ
  * `auditoAktoriusIsJobo()` sprendimą, bet jiems reikėtų BullMQ, tad jų įrodymas
@@ -189,7 +193,7 @@ test("#246 P1: sesijos keliu sukurto jobo VYKDYMAS audite neatspaudžia identity
   const poSukurimo = (await visosEilutes(pool)).length;
 
   await runWithContext({ requestId: jobas.requestId || null, actor: auditoAktoriusIsJobo(jobas), execution: "inline" }, () =>
-    rasytiAudita({ event: "PROTOCOL_GENERATED", success: true, outcome: "test_seam" })
+    rasytiAudita({ event: "PROTOCOL_COMPLETED", success: true, outcome: "test_seam" })
   );
 
   const eilutes = await palaukti(async () => {
@@ -200,7 +204,7 @@ test("#246 P1: sesijos keliu sukurto jobo VYKDYMAS audite neatspaudžia identity
 
   /** ⚠️ KONTROLĖ: tikrinam, kad tikrai skaitom TĄ įrašą, o ne tik senas eilutes. */
   assert.ok(
-    eilutes.some((e) => e.includes("PROTOCOL_GENERATED")),
+    eilutes.some((e) => e.includes("PROTOCOL_COMPLETED")),
     "parašyta eilutė privalo būti tarp nuskaitytų"
   );
 
