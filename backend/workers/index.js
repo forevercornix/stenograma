@@ -247,7 +247,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
         {
           requestId: processingJob.requestId || null,
           /** ⚠️ AUDITO AKTORIUS (#246 D1) — žr. `auditoAktoriusIsJobo()` paaiškinimą. */
-          actor: auditoAktoriusIsJobo(processingJob),
+          /** P1-b MUTACIJA (#246): identity atgal į kontekstą WORKER kelyje. */
+          actor: processingJob.actor || null,
           actorRole: processingJob.actorRole || null,
           execution: "worker",
         },
