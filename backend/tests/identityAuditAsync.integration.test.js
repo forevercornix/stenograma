@@ -24,6 +24,20 @@ const { hashPassword, loadUsers } = require("../utils/credentials");
  * vykdymo metu įvykusiu rašymu. Sinchroniniai testai to nepagaudavo, nes
  * vykdymas vyksta po atsakymo. Būtent todėl spraga ir praėjo.
  *
+ * ⚠️ GRANDINĖ TIKRINAMA DVIEM PUSĖMIS, IR TAI SĄMONINGA.
+ *
+ * (A) MARŠRUTAS: sesijos keliu sukurtas jobas realiai turi `actor = userId` ir
+ *     `actorSource = "session"` — t. y. defekto ĮVESTIS egzistuoja.
+ * (B) VYKDYMAS: tas pats jobas paleidžiamas per `_runInline()`, ir audito
+ *     eilutėse identifikacijos nėra — t. y. SEAM'as, kuriame defektas gyveno,
+ *     uždarytas.
+ *
+ * ⚠️ Kodėl ne vienas end-to-end žingsnis: maršrutas vykdymą paleidžia pats per
+ * `setImmediate`, kurio Promise niekas nelaiko, tad testas arba lenktyniauja su
+ * automatiniu vykdymu, arba jo rezultatą pasiglemžia idempotencija. Keturios
+ * CI redakcijos tai ir parodė. Dvi pusės su TUO PAČIU jobo įrašu kaip jungtimi
+ * yra deterministiškos, o jungtis yra būtent tas laukas, kuris defektą kėlė.
+ *
  * ⚠️ APIMTIS: INLINE kelias. Worker ir nesėkmės tvarkymo keliai naudoja TĄ PATĮ
  * `auditoAktoriusIsJobo()` sprendimą, bet jiems reikėtų BullMQ, tad jų įrodymas
  * yra struktūrinis (`identityAuditSargas` I4) plius to pagalbininko elgsenos
@@ -126,17 +140,12 @@ test("#246 P1: sesijos keliu sukurto jobo VYKDYMAS audite neatspaudžia identity
   await auditStore.init({ ...process.env, AUDIT_BACKEND: "postgres", DATABASE_URL: url });
 
   /**
-   * ⚠️ DUBLIS REGISTRUOJAMAS PRIEŠ SUKŪRIMĄ, IR RANKINIO VYKDYMO NĖRA.
+   * Dublis vietoj tikro procesoriaus.
    *
-   * `routes/jobs.js` po sukūrimo PATS paleidžia vykdymą
-   * (`setImmediate(() => _runInline(...))`). Rankinis kvietimas po to
-   * lenktyniuotų: pirmasis jobą užbaigtų, antrasis dėl idempotencijos nieko
-   * neberašytų. Užregistravus dublį pirma, jį panaudoja automatinis vykdymas —
-   * kelias lieka produkcinis nuo maršruto iki `runWithContext`.
-   *
-   * Dublis atlieka TIKRĄ audito rašymą BE aiškaus `actor` — tiksliai tą formą,
-   * kurią `?? getActor()` ir persistindavo. LLM praleidžiamas: invariantui jis
-   * nereikšmingas.
+   * Jis atlieka TIKRĄ audito rašymą BE aiškaus `actor` — tiksliai tą formą,
+   * kurią `auditLog.js` `?? getActor()` ir persistindavo. LLM praleidžiamas:
+   * invariantui jis nereikšmingas, o jo įtraukimas testą padarytų priklausomą
+   * nuo tiekėjo.
    */
   jobRunner.registerProcessor("protocol", async () => {
     await rasytiAudita({ event: "PROTOCOL_GENERATED", success: true, outcome: "test_inline" });
@@ -162,6 +171,21 @@ test("#246 P1: sesijos keliu sukurto jobo VYKDYMAS audite neatspaudžia identity
   const jobas = await jobStore.system.get(jobId, { hydrate: false });
   assert.equal(jobas.actorSource, "session", "prielaida: jobas sukurtas sesijos keliu");
   assert.equal(jobas.actor, OPERATORIUS.userId, "`jobs.actor` yra userId — jis LIEKA autorizacijai (#18 PR3)");
+
+  /**
+   * (B) VYKDYMAS TIESIOGIAI PER `_runInline()`.
+   *
+   * ⚠️ NE PER MARŠRUTO AUTOMATIKĄ. `setImmediate` paleidimo Promise niekas
+   * nelaiko, tad automatinis vykdymas jau galėjo įvykti (ir idempotencija
+   * antrą kartą nieko nerašytų) arba dar nebūti prasidėjęs. Tiesioginis
+   * kvietimas naudoja TĄ PATĮ produkcinį `_runInline()`, kuris ir sudaro
+   * kontekstą per `runWithContext({ actor: auditoAktoriusIsJobo(job), … })` —
+   * t. y. tikrinamas tas pats seam'as, tik be lenktynių.
+   *
+   * ⚠️ KLAIDA NESLEPIAMA: be `.catch` — jei vykdymas nutrūksta, testas krenta
+   * su tikra priežastimi, ne su „nulis eilučių".
+   */
+  await jobRunner._runInline("protocol", jobId, { transcript: "pakankamai ilgas testinis tekstas" });
 
   const eilutes = await palaukti(async () => {
     const { rows } = await pool.query("SELECT to_jsonb(a)::text AS visa FROM audit_log a ORDER BY a.id");
