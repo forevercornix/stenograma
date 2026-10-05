@@ -6,6 +6,7 @@ const path = require("node:path");
 const maintenanceLock = require("../utils/maintenanceLock");
 const jobStore = require("../utils/jobStore");
 const jobRunner = require("../queues/jobRunner");
+const restoreService = require("../services/restoreService");
 const { analize, eiti } = require("./helpers/astAnalize");
 
 /**
@@ -90,34 +91,148 @@ function medis() {
     const tekstas = fs.readFileSync(failas, "utf8");
     if (!galiTuretiGamintoja(tekstas)) continue;
     const { programa } = analize(tekstas);
-    _medis.push({ failas: path.relative(SAKNIS, failas), mazgai: [...eiti(programa)] });
+    const mazgai = [...eiti(programa)];
+    _medis.push({ failas: path.relative(SAKNIS, failas), mazgai, rista: irisimai(mazgai) });
   }
   return _medis;
 }
 
-/** `jobStore.create(...)` — job'o SUKŪRIMAS. */
-function arSukurimas(mazgas) {
-  if (mazgas.type !== "CallExpression") return false;
-  const k = mazgas.callee;
-  return (
-    k.type === "MemberExpression" &&
-    k.property.type === "Identifier" &&
-    k.property.name === "create" &&
-    k.object.type === "Identifier" &&
-    k.object.name === "jobStore"
-  );
+/**
+ * ⚠️ GAMINTOJO PAVIRŠIUS VEDAMAS IŠ MODULIO RIBOS, NE IŠ PAŽODINIO VARDO (#440 P3).
+ *
+ * Pirmoji šio sargo redakcija atpažino tik `jobStore.create(...)` — pažodinį
+ * objekto vardą. Praslystų `const store = jobStore; store.create(...)`,
+ * destruktūrizacija `const { create } = jobStore` ir bet koks pervardijimas, o
+ * tai griauna būtent tą §0.1 prielaidą, kurią sargas turi vykdyti.
+ *
+ * ⚠️ Tai ta pati klasė, kurią uždarė #424: riba, vedama iš atsitiktinio
+ * paviršiaus vardo, o ne iš mechanizmo. Autoritetinga riba čia yra tai, KAIP
+ * modulis gaunamas — `require()` kelias — tad įrišimai išrišami iš jo.
+ */
+const MODULIO_KELIAI = Object.freeze({
+  /** ⚠️ TIK FASADAS. `jobStore/postgresStore` ir kiti backend'ai turi savo `create()`, kurį fasadas teisėtai kviečia. */
+  jobStore: /(^|\/)jobStore$/,
+  jobRunner: /(^|\/)jobRunner$/,
+});
+
+const GAMINTOJO_VARDAI = Object.freeze({
+  jobStore: /^create$/,
+  jobRunner: /^enqueue(Transcription|Protocol)$/,
+});
+
+/** Member chain'o šaknis: `a.b.c` -> `a`. */
+function saknis(mazgas) {
+  let dabartinis = mazgas;
+  while (dabartinis && dabartinis.type === "MemberExpression") dabartinis = dabartinis.object;
+  return dabartinis && dabartinis.type === "Identifier" ? dabartinis.name : null;
 }
 
-/** `jobRunner.enqueueTranscription/Protocol(...)` — ĮKĖLIMAS į eilę. */
-function arIkelimas(mazgas) {
-  if (mazgas.type !== "CallExpression") return false;
-  const k = mazgas.callee;
-  return (
-    k.type === "MemberExpression" &&
-    k.property.type === "Identifier" &&
-    /^enqueue(Transcription|Protocol)$/.test(k.property.name)
-  );
+/** `require("…/jobStore")` -> `"jobStore"`; kitaip `null`. */
+function modulisIsRequire(mazgas) {
+  if (!mazgas || mazgas.type !== "CallExpression") return null;
+  if (mazgas.callee.type !== "Identifier" || mazgas.callee.name !== "require") return null;
+  const arg = mazgas.arguments[0];
+  if (!arg || arg.type !== "Literal" || typeof arg.value !== "string") return null;
+  const kelias = arg.value.replace(/\.js$/, "");
+  for (const [modulis, sablonas] of Object.entries(MODULIO_KELIAI)) {
+    if (sablonas.test(kelias)) return modulis;
+  }
+  return null;
 }
+
+/** Iš `ObjectPattern` surenka gamintojų įrišimus (`const { create } = jobStore`). */
+function pridetiDestrukt(pattern, modulis, destrukt) {
+  let pakito = false;
+  for (const savybe of pattern.properties) {
+    if (savybe.type !== "Property" || savybe.key.type !== "Identifier") continue;
+    if (!GAMINTOJO_VARDAI[modulis].test(savybe.key.name)) continue;
+    const vardas = savybe.value.type === "Identifier" ? savybe.value.name : savybe.key.name;
+    if (!destrukt[modulis].has(vardas)) { destrukt[modulis].add(vardas); pakito = true; }
+  }
+  return pakito;
+}
+
+/**
+ * Išriša failo įrišimus iki nejudamojo taško.
+ *
+ * Kilpa būtina: `const a = jobStore; const b = a;` yra dviejų žingsnių grandinė,
+ * o deklaracijų tvarka faile negarantuota.
+ */
+function irisimai(mazgai) {
+  const aliasai = { jobStore: new Set(), jobRunner: new Set() };
+  /**
+   * ⚠️ PER MODULĮ, NE VIENA AIBĖ.
+   *
+   * Bendra aibė reikštų, kad destruktūrizuotas `create` būtų palaikytas ir
+   * `jobRunner` gamintoju — M1b praneštų apie pažeidimą, kurio nėra. Rasta
+   * paleidus P3 mutaciją (b): ji „nužudė" ir M1b, nors įkėlimo nepalietė.
+   */
+  const destrukt = { jobStore: new Set(), jobRunner: new Set() };
+
+  for (const mazgas of mazgai) {
+    if (mazgas.type !== "VariableDeclarator" || !mazgas.init) continue;
+
+    const tiesiogiai = modulisIsRequire(mazgas.init);
+    if (tiesiogiai) {
+      if (mazgas.id.type === "Identifier") aliasai[tiesiogiai].add(mazgas.id.name);
+      else if (mazgas.id.type === "ObjectPattern") pridetiDestrukt(mazgas.id, tiesiogiai, destrukt);
+      continue;
+    }
+
+    /** `require("…/jobStore").create` — gamintojas be tarpinio kintamojo. */
+    if (mazgas.init.type === "MemberExpression") {
+      const modulis = modulisIsRequire(mazgas.init.object);
+      if (modulis && mazgas.init.property.type === "Identifier" && GAMINTOJO_VARDAI[modulis].test(mazgas.init.property.name)) {
+        if (mazgas.id.type === "Identifier") destrukt[modulis].add(mazgas.id.name);
+      }
+    }
+  }
+
+  let pakito = true;
+  while (pakito) {
+    pakito = false;
+    for (const mazgas of mazgai) {
+      if (mazgas.type !== "VariableDeclarator" || !mazgas.init) continue;
+      for (const modulis of Object.keys(aliasai)) {
+        const isAliaso =
+          (mazgas.init.type === "Identifier" && aliasai[modulis].has(mazgas.init.name)) ||
+          (mazgas.init.type === "MemberExpression" && aliasai[modulis].has(saknis(mazgas.init)));
+        if (!isAliaso) continue;
+
+        if (mazgas.id.type === "Identifier" && !aliasai[modulis].has(mazgas.id.name)) {
+          aliasai[modulis].add(mazgas.id.name);
+          pakito = true;
+        } else if (mazgas.id.type === "ObjectPattern") {
+          if (pridetiDestrukt(mazgas.id, modulis, destrukt)) pakito = true;
+        }
+      }
+    }
+  }
+
+  return { aliasai, destrukt };
+}
+
+/** Ar mazgas yra `modulis` gamintojo kvietimas, atsižvelgiant į failo įrišimus? */
+function arGamintojas(modulis) {
+  return (mazgas, rista) => {
+    if (mazgas.type !== "CallExpression") return false;
+    const k = mazgas.callee;
+
+    /** `alias.create(...)` arba `alias.system.create(...)`. */
+    if (k.type === "MemberExpression" && k.property.type === "Identifier") {
+      if (!GAMINTOJO_VARDAI[modulis].test(k.property.name)) return false;
+      return rista.aliasai[modulis].has(saknis(k));
+    }
+
+    /** Destruktūrizuotas `create(...)` — tik TO modulio įrišimas. */
+    if (k.type === "Identifier") return rista.destrukt[modulis].has(k.name);
+
+    return false;
+  };
+}
+
+const arSukurimas = arGamintojas("jobStore");
+const arIkelimas = arGamintojas("jobRunner");
 
 /** Žemesnio lygio producer'iai — `enqueue()` ir abu `add*Job`. */
 function arProducerVidus(mazgas) {
@@ -136,15 +251,17 @@ function vietos(predikatas, failai = null) {
     /** Aiškiai nurodytas rinkinys parsinamas BE pirminio filtro — žr. M1c. */
     for (const failas of failai) {
       const { programa } = analize(fs.readFileSync(failas, "utf8"));
-      for (const mazgas of eiti(programa)) {
-        if (predikatas(mazgas)) rasta.push({ failas: path.relative(SAKNIS, failas), eilute: mazgas.loc.start.line });
+      const mazgai = [...eiti(programa)];
+      const rista = irisimai(mazgai);
+      for (const mazgas of mazgai) {
+        if (predikatas(mazgas, rista)) rasta.push({ failas: path.relative(SAKNIS, failas), eilute: mazgas.loc.start.line });
       }
     }
     return rasta;
   }
-  for (const { failas, mazgai } of medis()) {
+  for (const { failas, mazgai, rista } of medis()) {
     for (const mazgas of mazgai) {
-      if (predikatas(mazgas)) rasta.push({ failas, eilute: mazgas.loc.start.line });
+      if (predikatas(mazgas, rista)) rasta.push({ failas, eilute: mazgas.loc.start.line });
     }
   }
   return rasta;
@@ -168,27 +285,46 @@ test("#440 M1 SAVIKONTROLĖ: pirminis filtras nepaslepia nė vieno gamintojo", (
   assert.ok(medis().length >= 20, `medyje ${medis().length} failų — filtras per agresyvus`);
 });
 
-test("#440 M1 SAVIKONTROLĖ: detektoriai randa įterptą gamintoją", () => {
+test("#440 M1 SAVIKONTROLĖ: detektoriai randa gamintoją per ĮRIŠIMUS, ne pažodinį vardą", () => {
   /**
    * ⚠️ BE ŠIOS PATIKROS M1 GALI PRAEITI TUŠČIAI.
    *
-   * Jei AST predikatas nustotų atitikti (pakeistas callee formatas, kitas
-   * kvietimo stilius), visi „⊆ routes/" tvirtinimai praeitų todėl, kad
-   * nerasta NIEKO. Tada sargas rodytų žalią būtent tada, kai apsaugos nebėra.
+   * Jei AST predikatas nustotų atitikti, visi „⊆ routes/" tvirtinimai praeitų
+   * todėl, kad nerasta NIEKO — sargas rodytų žalią būtent tada, kai apsaugos
+   * nebėra.
+   *
+   * ⚠️ Tikrinamos VISOS formos, kuriomis gamintojas gali būti pasiekiamas. Tris
+   * iš jų pirmoji redakcija praleisdavo (#440 P3).
    */
-  const imituotas = `
-    const jobStore = require("x");
-    async function blogaiWorkeryje() {
-      const j = await jobStore.create({ ownerKind: "unowned" });
-      await jobRunner.enqueueProtocol(j.id, {});
-      await addProtocolJob(j.id, {});
-    }
-  `;
-  const { programa } = analize(imituotas);
+  const formos = [
+    ["pažodinis", 'const jobStore = require("../utils/jobStore"); jobStore.create({});', 1],
+    ["alias", 'const jobStore = require("../utils/jobStore"); const store = jobStore; store.create({});', 1],
+    ["alias per du žingsnius", 'const jobStore = require("../utils/jobStore"); const a = jobStore; const b = a; b.create({});', 1],
+    ["destruktūrizacija", 'const { create } = require("../utils/jobStore"); create({});', 1],
+    ["destruktūrizacija su pervardijimu", 'const { create: mk } = require("../utils/jobStore"); mk({});', 1],
+    ["tiesiogiai iš require", 'const mk = require("../utils/jobStore").create; mk({});', 1],
+    ["⚠️ SVETIMAS `create` NESKAIČIUOJAMAS", 'const kitas = require("./kazkas"); kitas.create({});', 0],
+    ["⚠️ BACKEND'O `create` NESKAIČIUOJAMAS", 'const s = require("../utils/jobStore/postgresStore"); s.create({});', 0],
+  ];
+
+  for (const [vardas, kodas, laukta] of formos) {
+    const { programa } = analize(kodas);
+    const mazgai = [...eiti(programa)];
+    const rista = irisimai(mazgai);
+    const rasta = mazgai.filter((m) => arSukurimas(m, rista)).length;
+    assert.equal(rasta, laukta, `forma „${vardas}": rasta ${rasta}, laukta ${laukta}`);
+  }
+
+  /** Ta pati garantija įkėlimo pusėje. */
+  const ikelimas = 'const jr = require("../queues/jobRunner"); const r = jr; r.enqueueProtocol("id", {});';
+  const { programa } = analize(ikelimas);
   const mazgai = [...eiti(programa)];
-  assert.equal(mazgai.filter(arSukurimas).length, 1, "sukūrimo detektorius aklas");
-  assert.equal(mazgai.filter(arIkelimas).length, 1, "įkėlimo detektorius aklas");
-  assert.equal(mazgai.filter(arProducerVidus).length, 1, "vidinio producer'io detektorius aklas");
+  assert.equal(mazgai.filter((m) => arIkelimas(m, irisimai(mazgai))).length, 1, "įkėlimo alias praslydo");
+
+  /** Vidinio producer'io detektorius įrišimų nereikalauja — vardinis, mažam rinkiniui. */
+  const vidus = "await addProtocolJob(id, {});";
+  const vp = analize(vidus);
+  assert.equal([...eiti(vp.programa)].filter(arProducerVidus).length, 1, "vidinio producer'io detektorius aklas");
 });
 
 test("#440 M1a: `jobStore.create()` produkcijoje kviečiamas TIK iš `routes/`", () => {
@@ -238,15 +374,46 @@ test("#440 M1c ⚠️ WORKER'IŲ PROCESAI NEGAMINA — nulis gamintojų", () => 
 
 const NUOMA_MS = 120;
 
-test("#440 M2: pratęsimas IŠLAIKO garantiją po pradinės nuomos pabaigos", async () => {
+test("#440 M2a MECHANIZMAS: `renew()` perneša nuomą už PRADINĖS pabaigos", async () => {
   /**
-   * ⚠️ PAGRINDINIS §0.2 ATVEJIS.
+   * ⚠️ DETERMINISTINĖ M2 pusė.
+   *
+   * Tikrinamas pats pratęsimo mechanizmas, be laikmačių sutapimo: nuoma
+   * paimama trumpa, pratęsiama ilga, ir po to palaukiama gerokai už PRADINĖS
+   * pabaigos.
+   *
+   * ⚠️ PRADINĖ NUOMA 400 ms, NE 40 ms. Su 40 ms testas krisdavo atsitiktinai:
+   * badavimas tarp `acquire()` ir `renew()` nuomą perkirsdavo, `renew()`
+   * teisėtai grąžindavo `renewed: false` (fail-closed), ir testas rodydavo
+   * gedimą ten, kur elgsena teisinga. Pratęsta nuoma — 60 s, tad verdiktas
+   * po 700 ms nepriklauso nuo tvarkaraščio.
+   */
+  maintenanceLock._resetForTests();
+
+  const nuoma = maintenanceLock.acquire("test_mechanizmas", { maxHoldMs: 400 });
+  assert.equal(maintenanceLock.renew(nuoma.token, { maxHoldMs: 60_000 }).renewed, true);
+
+  await new Promise((r) => setTimeout(r, 700));
+
+  assert.equal(maintenanceLock.isLocked(), true, "pratęsta nuoma privalo galioti už pradinės pabaigos");
+  assert.equal(maintenanceLock.release(nuoma.token).released, true);
+});
+
+test("#440 M2b: `withLock()` pratęsinėja PATS, be kvietėjo pagalbos", async () => {
+  /**
+   * ⚠️ PAGRINDINIS §0.2 ATVEJIS, INTEGRACINIS.
    *
    * Be pratęsimo ilgesnis nei nuoma atkūrimas tęsdavosi BE užrakto: `create()`
    * vėl priimdavo darbus, o `restoreService` tuo metu vis dar rašydavo.
    *
-   * ⚠️ MUTACIJA: pašalinus `setInterval`/`renew()` iš `withLock()` šis testas
-   * krenta ties `isLocked()` — garantija nustoja galioti operacijai tebevykstant.
+   * ⚠️ MUTACIJA: pašalinus `setInterval`/`renew()` iš `withLock()` nuoma
+   * pasibaigia po `NUOMA_MS`, o operacija vykdoma ilgiau — testas krenta ties
+   * `matytaViduje` DETERMINISTIŠKAI (pratęsimo nebėra visai).
+   *
+   * ⚠️ Nuoma sąmoningai DIDELĖ (1 s), o pratęsimo periodas — trečdalis. Su
+   * trumpesne nuoma testas krisdavo atsitiktinai: vienos branduolio mašinoje
+   * laikmačiai gali būti atidėti ilgiau nei visa nuoma, ir garantija teisėtai
+   * nutrūkdavo. Čia tikrinama pratęsimo LOGIKA, ne runner'io tvarkaraštis.
    */
   maintenanceLock._resetForTests();
 
@@ -254,15 +421,15 @@ test("#440 M2: pratęsimas IŠLAIKO garantiją po pradinės nuomos pabaigos", as
   const rezultatas = await maintenanceLock.withLock(
     "test_ilgas_atkurimas",
     async () => {
-      /** Laukiam ILGIAU nei pradinė nuoma — pratęsimas turi ją pernešti. */
-      await new Promise((r) => setTimeout(r, NUOMA_MS * 2.5));
+      await new Promise((r) => setTimeout(r, 1400));
       matytaViduje = maintenanceLock.isLocked();
       return "baigta";
     },
-    { maxHoldMs: NUOMA_MS }
+    { maxHoldMs: 1000 }
   );
 
   assert.equal(rezultatas.locked, true);
+  assert.notEqual(rezultatas.leaseLost, true, "pratęsimas turėjo išlaikyti nuomą");
   assert.equal(rezultatas.value, "baigta");
   assert.equal(matytaViduje, true, "nuoma turi galioti VISĄ operacijos laiką");
   assert.equal(maintenanceLock.isLocked(), false, "po operacijos nuoma nuimama");
@@ -386,4 +553,126 @@ test("#440 M4 (D3): užrakto metu darbas NEPRADEDAMAS ir NEPAŽYMIMAS `failed`",
   assert.equal(kviestas, 0, "užrakto metu procesorius neturi būti kviečiamas");
   const po = await jobStore.system.get(job.id, { hydrate: false });
   assert.notEqual(po.status, "failed", "⚠️ priežiūra NĖRA nesėkmė — job'as privalo likti vykdomas vėliau");
+});
+
+/* ─────────── P1: prarasta nuoma STABDO operaciją, ne tik žurnaluoja ─────────── */
+
+test("#440 P1a: nuomos praradimas PERDUODAMAS į operaciją kaip signalas", async () => {
+  /**
+   * ⚠️ `withLock()` VIENAS NEGALI SUSTABDYTI RAŠYMO.
+   *
+   * Jis reaguoja tik po to, kai `operation()` išsisprendžia — o tada kiekvienas
+   * atkūrimo rašymas jau įvykęs. Todėl operacija gauna `AbortSignal`.
+   *
+   * ⚠️ PRARADIMAS PRIVERČIAMAS, NE IŠGAUNAMAS IŠ LAIKMAČIŲ SUTAPIMO.
+   * Pirmoji šio testo redakcija rėmėsi trumpa nuoma, bet su pratęsimu nuoma
+   * tiesiog nesibaigdavo (pratęsimo periodas < nuomos), ir testas praeidavo
+   * atsitiktinai. Dabar nuoma PERIMAMA operacijos viduje: nuo to momento
+   * `renew(token)` grąžina `renewed: false` deterministiškai — tiksliai ta
+   * baigtis, kurią reikia patikrinti.
+   *
+   * ⚠️ MUTACIJA: pašalinus `stabdymas.abort(...)` iš pratęsimo laikmačio
+   * signalas nesuveikia niekada ir testas krenta ties `signalasSuveike`.
+   */
+  maintenanceLock._resetForTests();
+
+  let signalasSuveike = false;
+  let priezastisKodas = null;
+
+  const rezultatas = await maintenanceLock.withLock(
+    "test_prarasta_nuoma",
+    async (signal) => {
+      signal.addEventListener("abort", () => {
+        signalasSuveike = true;
+        priezastisKodas = signal.reason && signal.reason.code;
+      });
+
+      /** Nuomą perima kitas savininkas — mūsų token'as nebegalioja. */
+      maintenanceLock._resetForTests();
+      maintenanceLock.acquire("kitas_atkurimas", { maxHoldMs: 60_000 });
+
+      /** Laukiam bent kelių pratęsimo ciklų. */
+      for (let i = 0; i < 50 && !signalasSuveike; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      return "operacija_nepaklausė";
+    },
+    { maxHoldMs: 30 }
+  );
+
+  assert.equal(signalasSuveike, true, "operacija privalo GAUTI nuomos praradimo signalą");
+  assert.equal(priezastisKodas, "MAINTENANCE_LEASE_LOST", "priežastis turi būti atpažįstama, ne bendras Error");
+
+  /**
+   * ⚠️ ATSARGINIS SLUOKSNIS: operacija signalo nepaklausė ir grąžino reikšmę.
+   * Baigtis vis tiek NĖRA sėkmė — prielaida, kuria operacija rėmėsi, negaliojo.
+   */
+  assert.equal(rezultatas.leaseLost, true, "prarasta nuoma negali būti grąžinta kaip sėkmė");
+
+  maintenanceLock._resetForTests();
+});
+
+test("#440 P1b ⚠️ RAŠYMAS SUSTOJA: `_apply()` barjeras nutraukia atkūrimą vidury", async () => {
+  /**
+   * ⚠️ TAI PAGRINDINIS P1 ĮRODYMAS.
+   *
+   * Nepakanka, kad baigtis būtų pažymėta nepatikima: tuo metu KITAS atkūrimas
+   * jau gali teisėtai laikyti nuomą ir rašyti tuos pačius `id`. Todėl
+   * tikrinamas MUTACIJŲ granuliarumas — kad po nuomos praradimo nebeįvyksta
+   * nė vienas tolesnis rašymas.
+   *
+   * ⚠️ MUTACIJA: pašalinus `_patikrintiNuoma()` kvietimą iš `_apply()` job'ų
+   * ciklo atkūrimas pabaigia visus tris įrašus ir testas krenta ties `rasyta`.
+   */
+  const stabdymas = new AbortController();
+  const rasyta = [];
+
+  const tikrasRestore = jobStore.restoreRecord;
+  jobStore.restoreRecord = async (job) => {
+    rasyta.push(job.id);
+    /** Nuoma prarandama PO pirmo rašymo — tiksliai tas atvejis, kurį saugom. */
+    if (rasyta.length === 1) {
+      stabdymas.abort(new maintenanceLock.LeaseLostError("test", 1, "pratęsimas nepavyko"));
+    }
+    return job;
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        restoreService._apply(
+          { jobs: [{ id: "a" }, { id: "b" }, { id: "c" }], audio: [] },
+          { env: {}, signal: stabdymas.signal }
+        ),
+      (e) => e.code === "MAINTENANCE_LEASE_LOST",
+      "atkūrimas privalo NUTRŪKTI, ne tęstis"
+    );
+  } finally {
+    jobStore.restoreRecord = tikrasRestore;
+  }
+
+  assert.deepEqual(rasyta, ["a"], `po nuomos praradimo rašymas tęsėsi: ${rasyta.join(",")}`);
+});
+
+test("#440 P1c: be signalo `_apply()` elgiasi kaip anksčiau (neigiama kontrolė)", async () => {
+  /**
+   * ⚠️ BE ŠIOS KONTROLĖS P1b galėtų praeiti dėl to, kad barjeras meta VISADA.
+   * Tada atkūrimas niekada nebeveiktų, o testas vis tiek būtų žalias.
+   */
+  const rasyta = [];
+  const tikrasRestore = jobStore.restoreRecord;
+  jobStore.restoreRecord = async (job) => {
+    rasyta.push(job.id);
+    return job;
+  };
+  try {
+    const rezultatas = await restoreService._apply(
+      { jobs: [{ id: "a" }, { id: "b" }], audio: [] },
+      { env: {} }
+    );
+    assert.equal(rezultatas.jobs, 2);
+  } finally {
+    jobStore.restoreRecord = tikrasRestore;
+  }
+  assert.deepEqual(rasyta, ["a", "b"], "be signalo visi įrašai turi būti atkurti");
 });
