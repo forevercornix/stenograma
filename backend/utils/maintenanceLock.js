@@ -183,7 +183,10 @@ function renew(token, { maxHoldMs = DEFAULT_MAX_HOLD_MS } = {}) {
 function release(token) {
   if (!_lock) return { released: false, reason: "nuomos nėra" };
 
-  /** GRANDINĖS B MUTACIJA (#440): savininkas netikrinamas — nuoma be fencing'o. */
+  if (_lock.token !== token) {
+    log.error("Atmestas SVETIMOS nuomos atlaisvinimas", { token, savininkas: _lock.token });
+    return { released: false, reason: "ne jūsų nuoma" };
+  }
 
   log.info("Priežiūros užraktas nuimtas", { heldMs: Date.now() - _lock.acquiredAt, token });
   _lock = null;
