@@ -1,5 +1,4 @@
 const sessionStore = require("../utils/sessionStore");
-const { setActor } = require("../utils/requestContext");
 
 
 /**
@@ -137,8 +136,6 @@ async function requireSession(req, res, next) {
 
   /** `id` - stabili tapatybė (#158); `username` lieka `req.user` autorizacijai ir logams. */
   req.user = { id: session.userId || null, username: session.username, role: session.role };
-  /** M1 MUTACIJA (#246). */
-  setActor(session.username);
 
   /**
    * ⚠️ AKTORIUS AUDITE NEBENUSTATOMAS SESIJOS KELYJE (#246 D1).
