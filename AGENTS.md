@@ -283,6 +283,29 @@ Flag as a defect, not a style issue:
 Where a hand-maintained list must exist, prefer a test asserting it matches
 reality over a comment asking future authors to remember.
 
+**Measured case — the same line, twice, and never by its author.**
+`utils/auditLog.js:592` stated that `actor` is a key fingerprint. True only on
+the API-key path; the session path wrote a bare username. The claim survived
+three reviews (#155 7.4b, 7.4c, 7.4e) because each reader took it as settled and
+stopped checking. #246 opened on that discovery.
+
+Then, while fixing it, the replacement comment eleven lines below (`:603`)
+asserted "session path → no actor" — also stronger than the code, because the
+asynchronous paths still put `jobs.actor` (a stable `userId`) into the audit
+context. **The same file, the same class, introduced by the author who had just
+removed the first one**, and found by review rather than by the author.
+
+Two operational consequences follow:
+
+- After changing behaviour at a place, re-read every nearby comment that
+  describes that behaviour. The comment you just wrote is the most likely next
+  instance, because you wrote it from the mental model you were in the middle of
+  changing.
+- A guarantee table or comment whose claim no test exercises is the same defect
+  in a different medium. In #246 two successive documentation claims about the
+  API-key path ("fingerprint", then "no fingerprint on allowed routes") were both
+  false, and a test — not analysis — disproved each.
+
 If later evidence disproves or materially weakens an earlier claim in a plan, PR
 description, checked-in report, guarantee table, or other maintained project
 artifact, correct the claim **at the place where it was originally published**.
