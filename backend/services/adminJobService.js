@@ -1,4 +1,25 @@
 const jobStore = require("../utils/jobStore");
+/**
+ * ⚠️ `actor` AUDITE NEBEPERDUODAMAS (#246 D1, C kanalas).
+ *
+ * Keturios šio failo `rasytiAudita()` vietos rašė `actor: actor.ownerId`, o
+ * `ownerId` yra `req.user.id` — #158 STABILUS vartotojo identifikatorius
+ * (`ownerScope.js`). Tai toks pat invarianto pažeidimas kaip plikas vardas, tik
+ * mažiau akivaizdus: UUID irgi yra persistentinis asmens identifikatorius be
+ * audito gyvavimo ciklo.
+ *
+ * ⚠️ RAKTAS PAŠALINAMAS, NE NUSTATOMAS Į `null`. `auditLog.js` numatytąją
+ * reikšmę ima `entry.actor ?? getActor()`, tad abu variantai elgtųsi vienodai;
+ * rakto nebuvimas aiškiau pasako, kad šis kelias aktoriaus NETEIKIA, o ne
+ * teikia tuščią.
+ *
+ * ⚠️ TAI NELIEČIA NUOSAVYBĖS MODELIO. `jobs.owner_id` ir `jobAuthorization`
+ * toliau naudoja `ownerId` — tai darbo savininkas, ne audito atribucija.
+ * Keičiasi tik tai, kas patenka į `audit_log.meta`.
+ *
+ * Diagnostika išlieka `details` eilutėse: `ownerKind` yra `OWNER_KIND` uždara
+ * enum'a (`user` / `api_principal` / `unowned`), ne identifikatorius.
+ */
 const { rasytiAudita } = require("../utils/auditWrite");
 const { eraseOrphanedJobData } = require("../utils/jobErasure");
 const lifecycleService = require("./lifecycleService");
@@ -130,7 +151,6 @@ async function assertSessionAdmin(actor, operation) {
 
   await rasytiAudita({
     event: ADMIN_EVENT.ACCESS_DENIED,
-    actor: actor ? actor.ownerId : null,
     success: false,
     details: `operation=${operation} ownerKind=${actor ? actor.ownerKind : "none"}`,
   });
@@ -233,15 +253,24 @@ async function adminDeleteJob(jobId, actor) {
    * nėra išbraukiama iš kopijų, tad ta klaida būtų PASTOVI: našlaičių kelias
    * jau rašo `operator`, ir eiliniam override'ui negali galioti kitaip.
    */
+  /**
+   * ⚠️ `actor` NEBEPERDUODAMAS (#246 D1). `actorKind` LIEKA.
+   *
+   * `actor` iš čia keliaudavo į kvitą (`lifecycleService`) ir iš jo į
+   * `rasytiAudita()` — t. y. `ownerId` (#158 userId) patekdavo į
+   * `audit_log.meta`. `actorKind` yra kita reikšmė ir kita paskirtis:
+   * `ACTOR_KIND` uždara enum'a, ji saugoma ištrynimo ŽYMOJE
+   * (`claimForDeletion()` gauna tik `{ reason, actorKind }`), ir būtent ji
+   * atskiria administracinį override nuo savininko prašymo. Jos pašalinimas
+   * sulaužytų #19 žymos semantiką, o `actor` pašalinimas — ne.
+   */
   const result = await lifecycleService.deleteJobArtefacts(job, jobId, {
-    actor: actor.ownerId,
     actorKind: ACTOR_KIND.OPERATOR,
     reason: ERASURE_REASON.OPERATOR_CLEANUP,
   });
 
   await rasytiAudita({
     event: ADMIN_EVENT.DELETE_OVERRIDE,
-    actor: actor.ownerId,
     success: result.complete,
     details:
       `override=admin ownerKind=${job.ownerKind || "legacy"} ` +
@@ -409,7 +438,6 @@ async function adminCleanupOrphan(jobId, actor) {
    */
   await rasytiAudita({
     event: ADMIN_EVENT.ORPHAN_CLEANUP,
-    actor: actor.ownerId,
     success,
     details: `override=admin ownershipVerified=false barrier=${barjeras || "none"}`,
   });
@@ -433,7 +461,6 @@ async function desktopCleanupOrphan(jobId, actor) {
   if (!actor || actor.ownerKind !== OWNER_KIND.UNOWNED) {
     await rasytiAudita({
       event: ADMIN_EVENT.ACCESS_DENIED,
-      actor: actor ? actor.ownerId : null,
       success: false,
       details: `operation=desktop_orphan_cleanup ownerKind=${actor ? actor.ownerKind : "none"}`,
     });

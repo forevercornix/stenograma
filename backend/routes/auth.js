@@ -1,5 +1,5 @@
 const express = require("express");
-const { verifyCredentials, USERNAME_PATTERN } = require("../utils/credentials");
+const { verifyCredentials } = require("../utils/credentials");
 const sessionStore = require("../utils/sessionStore");
 const {
   requireSession,
@@ -50,14 +50,33 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
     const identity = verifyCredentials(username, password);
 
     if (!identity) {
-      // AUDITAS: nesėkmingas bandymas įrašomas BE slaptažodžio - tik vardas,
-      // kurį pats vartotojas pateikė (jis gali būti klaidingas, bet nėra
-      // paslaptis tokiu pačiu būdu kaip slaptažodis).
+      /**
+       * ⚠️ `details` ČIA YRA `null`, IR TAI NE PRALEIDIMAS (#246 D4).
+       *
+       * Anksčiau čia buvo pateiktas vartotojo vardas, pagrįsta tuo, kad jis
+       * „nėra paslaptis taip, kaip slaptažodis". Tai tiesa — bet atsako į kitą
+       * klausimą: vardas nėra paslaptis, BET yra asmens duomuo persistentinėje
+       * lentelėje be ištrynimo kelio.
+       *
+       * ⚠️ IR ROLĖS ČIA ĮRAŠYTI NEGALIMA. Į šią šaką patenkama tada, kai
+       * `verifyCredentials()` grąžino `null`, t. y. `identity` NEEGZISTUOJA.
+       * Rolės įrašymas būtų išgalvoto lauko fabrikavimas: nėra ko paimti. Tai
+       * skiriasi nuo `:91`/`:106`, kur kredencialai jau patvirtinti ir rolė yra
+       * autoritetinga.
+       *
+       * ⚠️ DIAGNOSTIKA NEPRARANDAMA: `outcome: "invalid_credentials"` jau
+       * nešioja visą skirtumą tarp šios ir kitų `LOGIN_FAILED` šakų, o
+       * `requestId` duoda koreliaciją su operaciniais logais.
+       *
+       * ⚠️ „KURI PASKYRA ATAKUOJAMA" TURI SAVO SLUOKSNĮ: `loginAccountLimiter`
+       * riboja pagal `ip:canonicalUsername(...)` (`middleware/rateLimiter.js`),
+       * ir tai NE persistentinis auditas. Koreliacijos praradimas audite yra
+       * sąmoningas pasirinkimas, ne nepastebėta pasekmė (#246 D4).
+       */
       await rasytiAudita({
         event: "LOGIN_FAILED",
         success: false,
         outcome: "invalid_credentials",
-        details: `username=${USERNAME_PATTERN.test(username) ? username : "[invalid_format]"}`,
       });
       log.warn("Nepavykęs prisijungimas");
 
@@ -88,7 +107,8 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
         event: "LOGIN_FAILED",
         success: false,
         outcome: "store_not_ready",
-        details: `username=${identity.username} role=${identity.role}`,
+        /** ⚠️ TIK ROLĖ (#246 D4): `KNOWN_ROLES` yra uždara enum'a, ne identifikatorius. */
+        details: `role=${identity.role}`,
       });
       log.error("Prisijungimas atmestas: sesijų autoritetas dar nepasiruošęs.");
       return sessionStoreUnavailable(res);
@@ -103,7 +123,8 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
         success: false,
         /** ⚠️ `outcome` audite trumpinamas iki 20 simbolių (`auditLog.js`) - ilgesnė reikšmė taptų nebeatpažįstama. */
         outcome: err.code === "IDENTITY_UNAVAILABLE" ? "identity_unavailable" : "store_unavailable",
-        details: `username=${identity.username} role=${identity.role}`,
+        /** ⚠️ TIK ROLĖ (#246 D4). Priežastį nešioja `outcome`, ne `details`. */
+        details: `role=${identity.role}`,
       });
       log.error(`Sesijos sukurti nepavyko: ${err.message}`);
 
@@ -136,7 +157,12 @@ router.post("/auth/login", loginIpLimiter, loginAccountLimiter, validate({ body:
         event: "LOGIN_SUCCESS",
         success: true,
         outcome: "session_created",
-        details: `username=${identity.username} role=${identity.role}`,
+        /**
+         * ⚠️ TIK ROLĖ (#246 D1, D4). Sėkmingas prisijungimas irgi nebesaugo, KAS
+         * prisijungė: audito subjekto ciklas yra job-centric, o vartotojo ciklo
+         * nėra, tad bet kuris žmogaus žymuo būtų subjektas be ištrynimo kelio.
+         */
+        details: `role=${identity.role}`,
       });
     } catch (error) {
       /**
