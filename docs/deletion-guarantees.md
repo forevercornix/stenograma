@@ -344,12 +344,87 @@ Kiekvienas ištrynimas palieka **du** pėdsakus:
 `queue=deleted storage=none audit=12`. Jis lieka **po** to, kai subjekto įrašai
 pašalinti, tad įrodo, kad ištrynimas įvyko, neatkurdamas to, kas ištrinta.
 
-**Gyvavimo ciklo įrašas** (`LIFECYCLE_DELETION`) – aktorius, rezultatas, laikas
-ir kategorijų skaičiai.
+**Gyvavimo ciklo įrašas** (`LIFECYCLE_DELETION`) – rezultatas, laikas ir
+kategorijų skaičiai. ⚠️ **Aktoriaus jame nebėra** sesijos ir admin keliams —
+žr. žemiau.
+
+### ⚠️ Vartotojo identifikacija audite (#246)
+
+**Nuo #246 sesijos ir prisijungimo keliai į `audit_log` identifikacijos
+nerašo.** Užrakinta:
+
+| Kelias | Kas buvo | Kas yra |
+|---|---|---|
+| Sesija (bet kuri užklausa) | `meta.actor` = vartotojo vardas | **nieko** |
+| `LOGIN_SUCCESS` / `LOGIN_FAILED` | `details` su `username=` | tik `role=`, arba nieko |
+| Admin override / našlaičių valymas | `meta.actor` = `userId` (#158) | **nieko** |
+| API raktas, `rasytiAudita` **be** aiškaus `actor` | `actorFingerprint` (`key_<12 hex>`) | **nepakitęs** (identifikuoja raktą, ne asmenį) |
+| ⚠️ API raktas, `rasytiAudita` **su** aiškiu `actor` (`jobs`, `transcribeJobs`, `backup` perduoda `req.authz.actor`) | literalas `"api-key"` | literalas `"api-key"` |
+
+⚠️ **Dvi API rakto eilutės, ne viena, ir skirstymas yra PAGAL KVIETIMO VIETĄ, ne
+pagal maršrutą.** Ankstesnė redakcija teigė tik atspaudą; antroji — kad leidžiamuose
+maršrutuose atspaudo nebūna. Abi klydo, ir tai parodė regresinis testas: **vienoje
+užklausoje atsiranda ABI formos.** Trynimo metu `lifecycleService` rašo
+`LIFECYCLE_DELETION` su eksplicitiniu `actor: "api-key"` (nes maršrutas perduoda
+`req.authz.actor`), o `jobErasure` kvito ir audio eilutės `actor` neperduoda ir
+pataiko į `?? getActor()`, kur gyvena atspaudas.
+
+Taigi lemia ne maršruto leidimas, o tai, ar KONKRETUS `rasytiAudita()` kvietimas
+perduoda `actor`.
+
+**Tai priimta sąmoningai.** Sistema turi **vieną** `API_KEY`, tad
+`actorFingerprint(configuredKey)` yra konstanta: leidžiamuose maršrutuose jis
+neatskirtų nieko, ko neatskiria `"api-key"`. Nė viena reikšmė nėra asmens duomuo, ir
+abi tenkina reikalavimą, kad audite nebūtų neapdoroto rakto — literalas net stipriau,
+nes iš paslapties apskritai neišvestas. Abi eilutės dabar turi savo regresinį testą.
+
+**Kodėl ne pakaitalas (ID, HMAC, pseudonimas).** Audito subjekto gyvavimo ciklas
+yra **job-centric**: kandidatiniai `subject_id` skaičiuojami iš `job_id`, o
+vienintelis produkcinis `removeBySubjectIdentifier()` kvietėjas gauna `jobId`.
+Vartotojo ištrynimo ciklo sistemoje **nėra**. Bet kuris žmogaus žymuo audite
+būtų antras subjektas be ištrynimo, retencijos ir rotacijos — t. y. tas pats
+pažeidimas, tik mažiau akivaizdus.
+
+#### ⚠️ Ką operatorius dėl to PRARANDA
+
+Sesijos veiksmams (eksportas, ištrynimas, admin override, prisijungimas) audite
+**nebėra atsakymo į „kas tai padarė"**. Lieka `role`, `outcome`, `requestId`,
+pseudonimizuotas `subject_id` ir laikas.
+
+Vienintelis kelias nuo veiksmo prie žmogaus — **`requestId` koreliacija su
+operaciniais logais**, kurių retencija yra atskira ir trumpesnė už audito.
+⚠️ Tai **sąmoningai priimta kaina**, ne praleidimas. Alternatyvus atribucijos
+mechanizmas yra atskiras darbas.
+
+#### ⚠️ KO #246 NEUŽDARĖ: CLI `--actor`
+
+**Pažadas yra siauras ir tokiu turi būti skaitomas:**
+
+> identifikacija nepersistinama **iš sesijos ir prisijungimo kelių**.
+
+❌ **Negalima teigti „vartotojo identifikacija audite nebepersistinama".**
+`erasure-marks.js --actor "$OPERATOR"` ir `pgDumpBackup --actor "$USER"`
+**toliau** rašo perduotą reikšmę į `audit_log.meta.actor`, o `--actor` abiem
+dokumentuotas kaip **privalomas** (`backup-runbook.md`,
+`operations/OPERATIONAL_PROCEDURES.md`).
+
+Skirtumas, dėl kurio tas kelias paliktas: reikšmę **deklaruoja pats
+operatorius** kvietimo metu, žinodamas, kad pasirašo audito įrašą — tai ne
+sistemos iš sesijos surinkta tapatybė. Bet rezultatas `audit_log` yra toks pat
+persistentinis ir be ciklo.
+
+⚠️ **Praktinė rekomendacija:** `--actor` reikšme rinkitės ne asmens vardą, o
+vaidmenį ar bilieto numerį (pvz. `--actor "ops-dežuruojantis"` arba
+`--actor "INC-2026-104"`). `"$USER"` runbook'ų pavyzdžiuose yra patogus, bet
+jis įrašo operacinės sistemos paskyros vardą į lentelę be ištrynimo kelio.
+
+⚠️ **RAW regresinis testas šio kelio NEDENGIA** (jis neina per sesiją), tad jis
+lieka žalias net kai vardas realiai įrašomas. Tai užrašyta ir pačiame teste.
 
 ### Ką galima parodyti auditoriui
 
-✅ Kad ištrynimas įvyko, kada ir kieno iniciatyva.
+✅ Kad ištrynimas įvyko, kada ir **kokios rolės** iniciatyva.
+❌ ⚠️ **Ne** tai, KURIS žmogus jį inicijavo (#246) — žr. aukščiau.
 ✅ Kurios kategorijos pašalintos, kurios liko.
 ❌ **Ne** tai, kas konkrečiai buvo ištrinta – turinio audite nėra sąmoningai.
 

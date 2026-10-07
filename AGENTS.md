@@ -283,6 +283,29 @@ Flag as a defect, not a style issue:
 Where a hand-maintained list must exist, prefer a test asserting it matches
 reality over a comment asking future authors to remember.
 
+**Measured case — the same line, twice, and never by its author.**
+`utils/auditLog.js:592` stated that `actor` is a key fingerprint. True only on
+the API-key path; the session path wrote a bare username. The claim survived
+three reviews (#155 7.4b, 7.4c, 7.4e) because each reader took it as settled and
+stopped checking. #246 opened on that discovery.
+
+Then, while fixing it, the replacement comment eleven lines below (`:603`)
+asserted "session path → no actor" — also stronger than the code, because the
+asynchronous paths still put `jobs.actor` (a stable `userId`) into the audit
+context. **The same file, the same class, introduced by the author who had just
+removed the first one**, and found by review rather than by the author.
+
+Two operational consequences follow:
+
+- After changing behaviour at a place, re-read every nearby comment that
+  describes that behaviour. The comment you just wrote is the most likely next
+  instance, because you wrote it from the mental model you were in the middle of
+  changing.
+- A guarantee table or comment whose claim no test exercises is the same defect
+  in a different medium. In #246 two successive documentation claims about the
+  API-key path ("fingerprint", then "no fingerprint on allowed routes") were both
+  false, and a test — not analysis — disproved each.
+
 If later evidence disproves or materially weakens an earlier claim in a plan, PR
 description, checked-in report, guarantee table, or other maintained project
 artifact, correct the claim **at the place where it was originally published**.
@@ -343,11 +366,34 @@ claimed behavior:
 | A search by symbol/function/variable name found no other callers | Names and direct references — not an inventory of behavior reached through adapters, wrappers, aliases, arguments, injection, registries, factories, or restored objects |
 | A hand-maintained list matches the repository today | A point-in-time match — not that the list stays complete as the repository changes |
 | A check, test, validation command, or matrix exists in the repository | That the artifact exists — not that the required CI or verification path executes it |
+| A local tool run (lint, audit, lockfile write, benchmark, formatter) | What *that installed version* does — not what the project's pinned or `engines`-declared toolchain does |
 
 When a criterion depends on an environment unavailable during review (GPU,
 browser, real credentials, production data volume), classify it `UNVERIFIED`
 and name the evidence that would settle it — do not soften it to `PASS` because
 the code looks right.
+**A local tool version that does not match the project's `engines` or lockfile
+produces diffs and verdicts that are not the project's.** Check the tool version
+against the project's declared one *before* trusting its output — not only its
+result. This has happened three times, each in a different medium:
+
+- **#423** — local ESLint 10.8.1 against a lockfile pinning 10.10.0. A guard
+  passed locally and failed in CI. The guard was correct; the measurement was
+  not.
+- **#440** — a CI duration baseline taken from a *single* `main` run. A
+  +122 s delta was attributed to new tests; four samples (344/419/438/495 s)
+  showed the delta was inside normal variance, and the optimisation changed
+  nothing. One sample is not a baseline.
+- **#444** — local npm 9.2.0 editing a lockfile written by npm ≥10
+  (`engines: node >=22`). `npm audit fix` produced a diff that looked like the
+  intended one-package bump but silently **removed** an unrelated
+  `"license": "MIT"` field that 284 of 287 entries carry. The authoritative
+  toolchain keeps `license` and adds `funding`.
+
+In all three the output was plausible, self-consistent, and wrong in a way the
+result alone could not reveal. Where the correct toolchain is unavailable
+locally, say so and let CI or the owner produce the artifact — do not ship the
+diff your version happened to generate.
 
 ## 15. Review severity
 

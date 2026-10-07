@@ -245,7 +245,7 @@ async function _runInline(type, jobId, payload) {
    * atkuriam iš jobo metaduomenų, lygiai kaip tai daro BullMQ worker'iai.
    * Kitaip inline ir worker keliai duotų skirtingą koreliaciją.
    */
-  const { runWithContext } = require("../utils/requestContext");
+  const { runWithContext, auditoAktoriusIsJobo } = require("../utils/requestContext");
 
   // Koreliacijos metaduomenys yra PAPILDOMI: jei jų gauti nepavyksta, darbas
   // vis tiek turi vykti. Observability niekada negali tapti vykdymo sąlyga.
@@ -260,7 +260,15 @@ async function _runInline(type, jobId, payload) {
   return runWithContext(
     {
       requestId: (job && job.requestId) || null,
-      actor: (job && job.actor) || null,
+      /**
+       * ⚠️ AUDITO AKTORIUS, NE AUTORIZACIJOS (#246 D1).
+       *
+       * `job.actor` sesijos kelyje yra `userId`, ir anksčiau jis čia keliaudavo
+       * į kontekstą, iš kur `auditLog.js` jį persistindavo kiekvienu vykdymo
+       * metu įvykusiu rašymu. Vykdymo autorizacija nepakinta — ji ima `job`
+       * įrašą, ne kontekstą.
+       */
+      actor: auditoAktoriusIsJobo(job),
       // Rolė keliauja kartu su kontekstu, kad servisai galėtų ja remtis
       // nekviesdami saugyklos iš naujo (#18 PR3).
       actorRole: (job && job.actorRole) || null,
