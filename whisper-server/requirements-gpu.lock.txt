@@ -7,7 +7,7 @@
 # realaus GPU veikimo ŠIOJE APLINKOJE NEBUVO - patikrinkite pirmo build'o metu.
 
 faster-whisper==1.2.1
-ctranslate2==4.8.1
+ctranslate2==4.8.2
 # numpy 2.5+ reikalauja Python >=3.12, o šie image'ai naudoja python3.11.
 # 2.4.6 yra PASKUTINĖ versija su Requires-Python >=3.11.
 #
@@ -16,7 +16,7 @@ ctranslate2==4.8.1
 # versijos atgal pakete, kuris yra tiesiogiai audio kelyje. Grįžti prie 3.12
 # verta, kai `av` išleis cp312 wheel'ą; tada tai bus grynas kėlimas be nuleidimų.
 numpy==2.4.6
-huggingface-hub==2.0.0
+huggingface-hub==2.1.1
 tokenizers==0.23.2
 av==18.1.0
 onnxruntime==1.28.0
