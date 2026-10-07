@@ -665,12 +665,23 @@ async function writeAudit(result) {
     success: result.complete,
     outcome: result.status,
     /**
-     * AKTORIUS PERDUODAMAS EKSPLICITIŠKAI.
+     * AKTORIUS PERDUODAMAS EKSPLICITIŠKAI — BET JO BEVEIK NIEKADA NEBĖRA (#246).
      *
-     * `auditLog.record` turi fallback į užklausos kontekstą (`getActor()`),
-     * bet gyvavimo ciklo servisą galima kviesti IR BE HTTP konteksto –
-     * retencijos valymo, worker'io ar skripto keliais. Tada aktorius tyliai
-     * taptų `null`, ir audito įrašas neatsakytų į klausimą „kas ištrynė".
+     * Eksplicitinis perdavimas lieka, nes gyvavimo ciklo servisą galima kviesti
+     * IR BE HTTP konteksto (retencija, worker'is, skriptas), o tada `getActor()`
+     * fallback nieko neduotų.
+     *
+     * ⚠️ BET ANKSTESNIS PAGRINDIMAS („audito įrašas neatsakytų, kas ištrynė")
+     * NEBEGALIOJA SESIJOS IR ADMIN KELIAMS. Pagal #246 D1 jie `actor` nebeteikia:
+     * `req.authz.actor` sesijoje yra `null` (`middleware/authorize.js`), o
+     * `adminJobService` jo nebeperduoda. Atsakymo į „kas ištrynė" sesijos
+     * veiksmams nebėra, ir tai SĄMONINGAI prarasta galimybė (D8) — koreliacija
+     * lieka per `requestId`.
+     *
+     * ⚠️ REIKŠMĘ VIS DAR TURI CLI KELIAI: `erasure-marks.js --actor` ir
+     * `pgDumpBackup --actor` perduoda operatoriaus SAVIDEKLARUOTĄ vardą. Tai
+     * sąmoningai paliktas kelias (#246 §0.4, E-out), o ne praleidimas — žr.
+     * `docs/deletion-guarantees.md`.
      */
     actor: result.actor || undefined,
     details:

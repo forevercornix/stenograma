@@ -7,7 +7,7 @@ const maintenanceLock = require("../utils/maintenanceLock");
 const jobStore = require("../utils/jobStore");
 const jobRunner = require("../queues/jobRunner");
 const restoreService = require("../services/restoreService");
-const { analize, eiti } = require("./helpers/astAnalize");
+const { analize, eiti, irisimai, arNarioKvietimas } = require("./helpers/astAnalize");
 
 /**
  * #440 — PRIEŽIŪROS UŽRAKTO NUOMA IR GAMINTOJŲ AIBĖ.
@@ -92,7 +92,7 @@ function medis() {
     if (!galiTuretiGamintoja(tekstas)) continue;
     const { programa } = analize(tekstas);
     const mazgai = [...eiti(programa)];
-    _medis.push({ failas: path.relative(SAKNIS, failas), mazgai, rista: irisimai(mazgai) });
+    _medis.push({ failas: path.relative(SAKNIS, failas), mazgai, rista: irisimai(mazgai, KONFIG) });
   }
   return _medis;
 }
@@ -120,119 +120,27 @@ const GAMINTOJO_VARDAI = Object.freeze({
   jobRunner: /^enqueue(Transcription|Protocol)$/,
 });
 
-/** Member chain'o šaknis: `a.b.c` -> `a`. */
-function saknis(mazgas) {
-  let dabartinis = mazgas;
-  while (dabartinis && dabartinis.type === "MemberExpression") dabartinis = dabartinis.object;
-  return dabartinis && dabartinis.type === "Identifier" ? dabartinis.name : null;
-}
-
-/** `require("…/jobStore")` -> `"jobStore"`; kitaip `null`. */
-function modulisIsRequire(mazgas) {
-  if (!mazgas || mazgas.type !== "CallExpression") return null;
-  if (mazgas.callee.type !== "Identifier" || mazgas.callee.name !== "require") return null;
-  const arg = mazgas.arguments[0];
-  if (!arg || arg.type !== "Literal" || typeof arg.value !== "string") return null;
-  const kelias = arg.value.replace(/\.js$/, "");
-  for (const [modulis, sablonas] of Object.entries(MODULIO_KELIAI)) {
-    if (sablonas.test(kelias)) return modulis;
-  }
-  return null;
-}
-
-/** Iš `ObjectPattern` surenka gamintojų įrišimus (`const { create } = jobStore`). */
-function pridetiDestrukt(pattern, modulis, destrukt) {
-  let pakito = false;
-  for (const savybe of pattern.properties) {
-    if (savybe.type !== "Property" || savybe.key.type !== "Identifier") continue;
-    if (!GAMINTOJO_VARDAI[modulis].test(savybe.key.name)) continue;
-    const vardas = savybe.value.type === "Identifier" ? savybe.value.name : savybe.key.name;
-    if (!destrukt[modulis].has(vardas)) { destrukt[modulis].add(vardas); pakito = true; }
-  }
-  return pakito;
-}
-
 /**
- * Išriša failo įrišimus iki nejudamojo taško.
+ * ⚠️ ĮRIŠIMŲ IŠRIŠIMAS IŠKELTAS Į `helpers/astAnalize.js` (#246, #253 taisyklė).
  *
- * Kilpa būtina: `const a = jobStore; const b = a;` yra dviejų žingsnių grandinė,
- * o deklaracijų tvarka faile negarantuota.
+ * Kai to paties kelio prireikė #246 identity sargui, vietinė kopija būtų buvusi
+ * antra — o dvi kopijos ilgainiui išsiskiria. Čia lieka tik ŠIO sargo
+ * konfigūracija: kurie moduliai ir kurie jų nariai yra gamintojai.
  */
-function irisimai(mazgai) {
-  const aliasai = { jobStore: new Set(), jobRunner: new Set() };
-  /**
-   * ⚠️ PER MODULĮ, NE VIENA AIBĖ.
-   *
-   * Bendra aibė reikštų, kad destruktūrizuotas `create` būtų palaikytas ir
-   * `jobRunner` gamintoju — M1b praneštų apie pažeidimą, kurio nėra. Rasta
-   * paleidus P3 mutaciją (b): ji „nužudė" ir M1b, nors įkėlimo nepalietė.
-   */
-  const destrukt = { jobStore: new Set(), jobRunner: new Set() };
+const KONFIG = Object.freeze({
+  moduliai: {
+    /** ⚠️ TIK FASADAS. `jobStore/postgresStore` ir kiti backend'ai turi savo `create()`, kurį fasadas teisėtai kviečia. */
+    jobStore: /(^|\/)jobStore$/,
+    jobRunner: /(^|\/)jobRunner$/,
+  },
+  vardai: {
+    jobStore: /^create$/,
+    jobRunner: /^enqueue(Transcription|Protocol)$/,
+  },
+});
 
-  for (const mazgas of mazgai) {
-    if (mazgas.type !== "VariableDeclarator" || !mazgas.init) continue;
-
-    const tiesiogiai = modulisIsRequire(mazgas.init);
-    if (tiesiogiai) {
-      if (mazgas.id.type === "Identifier") aliasai[tiesiogiai].add(mazgas.id.name);
-      else if (mazgas.id.type === "ObjectPattern") pridetiDestrukt(mazgas.id, tiesiogiai, destrukt);
-      continue;
-    }
-
-    /** `require("…/jobStore").create` — gamintojas be tarpinio kintamojo. */
-    if (mazgas.init.type === "MemberExpression") {
-      const modulis = modulisIsRequire(mazgas.init.object);
-      if (modulis && mazgas.init.property.type === "Identifier" && GAMINTOJO_VARDAI[modulis].test(mazgas.init.property.name)) {
-        if (mazgas.id.type === "Identifier") destrukt[modulis].add(mazgas.id.name);
-      }
-    }
-  }
-
-  let pakito = true;
-  while (pakito) {
-    pakito = false;
-    for (const mazgas of mazgai) {
-      if (mazgas.type !== "VariableDeclarator" || !mazgas.init) continue;
-      for (const modulis of Object.keys(aliasai)) {
-        const isAliaso =
-          (mazgas.init.type === "Identifier" && aliasai[modulis].has(mazgas.init.name)) ||
-          (mazgas.init.type === "MemberExpression" && aliasai[modulis].has(saknis(mazgas.init)));
-        if (!isAliaso) continue;
-
-        if (mazgas.id.type === "Identifier" && !aliasai[modulis].has(mazgas.id.name)) {
-          aliasai[modulis].add(mazgas.id.name);
-          pakito = true;
-        } else if (mazgas.id.type === "ObjectPattern") {
-          if (pridetiDestrukt(mazgas.id, modulis, destrukt)) pakito = true;
-        }
-      }
-    }
-  }
-
-  return { aliasai, destrukt };
-}
-
-/** Ar mazgas yra `modulis` gamintojo kvietimas, atsižvelgiant į failo įrišimus? */
-function arGamintojas(modulis) {
-  return (mazgas, rista) => {
-    if (mazgas.type !== "CallExpression") return false;
-    const k = mazgas.callee;
-
-    /** `alias.create(...)` arba `alias.system.create(...)`. */
-    if (k.type === "MemberExpression" && k.property.type === "Identifier") {
-      if (!GAMINTOJO_VARDAI[modulis].test(k.property.name)) return false;
-      return rista.aliasai[modulis].has(saknis(k));
-    }
-
-    /** Destruktūrizuotas `create(...)` — tik TO modulio įrišimas. */
-    if (k.type === "Identifier") return rista.destrukt[modulis].has(k.name);
-
-    return false;
-  };
-}
-
-const arSukurimas = arGamintojas("jobStore");
-const arIkelimas = arGamintojas("jobRunner");
+const arSukurimas = (mazgas, rista) => arNarioKvietimas(mazgas, "jobStore", rista, KONFIG.vardai);
+const arIkelimas = (mazgas, rista) => arNarioKvietimas(mazgas, "jobRunner", rista, KONFIG.vardai);
 
 /** Žemesnio lygio producer'iai — `enqueue()` ir abu `add*Job`. */
 function arProducerVidus(mazgas) {
@@ -252,7 +160,7 @@ function vietos(predikatas, failai = null) {
     for (const failas of failai) {
       const { programa } = analize(fs.readFileSync(failas, "utf8"));
       const mazgai = [...eiti(programa)];
-      const rista = irisimai(mazgai);
+      const rista = irisimai(mazgai, KONFIG);
       for (const mazgas of mazgai) {
         if (predikatas(mazgas, rista)) rasta.push({ failas: path.relative(SAKNIS, failas), eilute: mazgas.loc.start.line });
       }
@@ -310,7 +218,7 @@ test("#440 M1 SAVIKONTROLĖ: detektoriai randa gamintoją per ĮRIŠIMUS, ne pa�
   for (const [vardas, kodas, laukta] of formos) {
     const { programa } = analize(kodas);
     const mazgai = [...eiti(programa)];
-    const rista = irisimai(mazgai);
+    const rista = irisimai(mazgai, KONFIG);
     const rasta = mazgai.filter((m) => arSukurimas(m, rista)).length;
     assert.equal(rasta, laukta, `forma „${vardas}": rasta ${rasta}, laukta ${laukta}`);
   }
@@ -319,7 +227,7 @@ test("#440 M1 SAVIKONTROLĖ: detektoriai randa gamintoją per ĮRIŠIMUS, ne pa�
   const ikelimas = 'const jr = require("../queues/jobRunner"); const r = jr; r.enqueueProtocol("id", {});';
   const { programa } = analize(ikelimas);
   const mazgai = [...eiti(programa)];
-  assert.equal(mazgai.filter((m) => arIkelimas(m, irisimai(mazgai))).length, 1, "įkėlimo alias praslydo");
+  assert.equal(mazgai.filter((m) => arIkelimas(m, irisimai(mazgai, KONFIG))).length, 1, "įkėlimo alias praslydo");
 
   /** Vidinio producer'io detektorius įrišimų nereikalauja — vardinis, mažam rinkiniui. */
   const vidus = "await addProtocolJob(id, {});";

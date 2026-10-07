@@ -47,7 +47,24 @@ function resolveApiKeyRole(env = process.env) {
  */
 function resolveIdentity(req) {
   if (req.user && req.user.role) {
-    return { actor: req.user.username, role: req.user.role, source: "session" };
+    /**
+     * ⚠️ `actor` SESIJOS KELYJE YRA `null` (#246 D1, D3).
+     *
+     * Anksčiau čia buvo `req.user.username`, ir tai buvo ANTRAS propagacijos
+     * kelias, kurio `setActor` inventorius nedengė: `req.authz.actor` →
+     * `routes/{jobs,transcribeJobs,backup}` → servisai → `rasytiAudita`. Jį
+     * rado peržiūra, ne paieška pagal simbolio vardą — todėl #246 paviršius
+     * išvedamas, o ne surašomas.
+     *
+     * ⚠️ `actor` ČIA NIEKADA NEBUVO AUTORIZACIJOS OPERANDAS. Sprendimus priima
+     * `role` ir `source` (plius `ownerScope` nuosavybei), tad `null` teisių
+     * modelio nekeičia — išmatuota: `authz.actor` skaitomas tik keturiose
+     * vietose, ir visos keturios yra audito perdavimas.
+     *
+     * `username` lieka `req.user`, nes jį naudoja logai ir sesijos sluoksnis;
+     * į persistentinį auditą jis nebepatenka.
+     */
+    return { actor: null, role: req.user.role, source: "session" };
   }
 
   if (req.apiKeyAuthenticated) {
