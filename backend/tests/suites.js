@@ -106,6 +106,7 @@ const privacy = [
   "backupRestore",
   "backupSecurity",
   "backupRoutes.route",
+  "identityAuditSargas",
   "prieziurosUzraktoNuoma",
   "backupDocumentation",
   "incidentRunbook",
