@@ -179,58 +179,16 @@ function riba() {
  * 10.10.0. AST kelias patikrintas abiem: septyni rinkiniai ir visi keturi Codex
  * atkūrimai duoda tą patį.
  */
-function analize(tekstas) {
-  const { Linter } = require("eslint");
-  const linter = new Linter();
-  let programa = null;
-  let komentarai = [];
-
-  const pranesimai = linter.verify(tekstas, {
-    languageOptions: { ecmaVersion: "latest", sourceType: "module" },
-    plugins: {
-      sargas: {
-        rules: {
-          imk: {
-            create(ctx) {
-              return {
-                Program(n) {
-                  programa = n;
-                  komentarai = ctx.sourceCode.getAllComments();
-                },
-              };
-            },
-          },
-        },
-      },
-    },
-    rules: { "sargas/imk": "error" },
-  });
-
-  /**
-   * ⚠️ PARSINIMO KLAIDA YRA PAŽEIDIMAS, NE TYLI TUŠČIA AIBĖ. Grąžinus `null`, sargas
-   * skriptą laikytų „be kodų" ir praneštų sėkmę — tiksliai tas tylus praleidimas,
-   * kurio #423 neturi palikti.
-   */
-  const fatal = pranesimai.find((p) => p.fatal);
-  if (fatal) throw new Error(`nepavyko suparsinti: ${fatal.message} (${fatal.line}:${fatal.column})`);
-
-  return { programa, komentarai };
-}
-
-/** Rekursinis AST apėjimas be priklausomybių: `parent` praleidžiamas (ciklas). */
-function* eiti(mazgas) {
-  if (!mazgas || typeof mazgas !== "object") return;
-  if (Array.isArray(mazgas)) {
-    for (const x of mazgas) yield* eiti(x);
-    return;
-  }
-  if (typeof mazgas.type === "string") yield mazgas;
-  for (const k of Object.keys(mazgas)) {
-    if (k === "parent") continue;
-    const v = mazgas[k];
-    if (v && typeof v === "object") yield* eiti(v);
-  }
-}
+/**
+ * ⚠️ AST MECHANIZMAS IŠKELTAS Į `tests/helpers/astAnalize.js` (#253).
+ *
+ * Kai to paties kelio prireikė ANTRAM sargui (`#253` savininko `finish()` aprėptis),
+ * kopijavimas būtų reiškęs dvi versijas, kurios ilgainiui išsiskirtų — ir viena iš jų
+ * liktų su senuoju langu. Helper'is turi SAVO elgsenos testą (`astAnalize.test.js`,
+ * #410 D3a), nes bendra logika be savo patikros yra tas pats mechanizmas, kurį
+ * sprendžia #412.
+ */
+const { analize, eiti } = require("./helpers/astAnalize");
 
 const sveikas = (n) => (n && n.type === "Literal" && Number.isInteger(n.value) ? n.value : null);
 

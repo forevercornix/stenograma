@@ -148,6 +148,41 @@ function _processSalt() {
 }
 
 /** Papildo esamą kontekstą (naudoja autentifikacijos middleware). */
+/**
+ * AUDITO AKTORIUS IŠ JOBO ĮRAŠO (#246 D1, ASINCHRONINIS KELIAS).
+ *
+ * ⚠️ KODĖL ŠITO PRIREIKĖ. #246 uždarė sinchroninius kelius, bet asinchroninis
+ * liko atviras: `jobs.actor` sesijos kelyje yra `req.user.id` (#158 userId,
+ * `routes/jobs.js` `jobActor()`), o `queues/jobRunner.js` ir `workers/index.js`
+ * jį įdėdavo į užklausos kontekstą. `auditLog.js` numatytąją reikšmę ima
+ * `entry.actor ?? getActor()`, tad kiekvienas vykdymo metu įvykęs rašymas be
+ * aiškaus `actor` persistindavo tą `userId`.
+ *
+ * ⚠️ `job.actor` NEŠALINAMAS. Vykdymo metu atliekama nuosavybės ir rolės
+ * patikra (#18 PR3) remiasi JOBO įrašu, ne kontekstu — išmatuota:
+ * `utils/jobAuthorization.js` neturi nė vienos nuorodos į `requestContext`.
+ * Keičiasi tik tai, kas patenka į audito kontekstą.
+ *
+ * ⚠️ FAIL-CLOSED: reikšmė išlaikoma TIK kai `actorSource` eksplicitiškai
+ * `"api-key"` (tada `actor` yra rakto atspaudas, D2). Sesijai — `null`;
+ * NEŽINOMAI erai (`actorSource` nėra — #17 laikų jobai, žr.
+ * `jobAuthorization.js` paaiškinimą) irgi `null`, nes tokiuose įrašuose `actor`
+ * galėjo būti plikas vardas.
+ *
+ * ⚠️ VIENA VIETA, NE TRYS. Kelius yra trys (inline, worker, nesėkmės
+ * tvarkymas); trys kopijos to paties sprendimo neišvengiamai išsiskirtų, ir
+ * pakaktų vienoje pamiršti, kad garantija dingtų būtent tame kelyje (#180
+ * P3-12 pamoka).
+ *
+ * @param {object|null} job
+ * @returns {string|null}
+ */
+function auditoAktoriusIsJobo(job) {
+  if (!job) return null;
+  if (job.actorSource === "api-key") return job.actor || null;
+  return null;
+}
+
 function setActor(actor) {
   const current = storage.getStore();
   if (!current) return;
@@ -168,5 +203,6 @@ module.exports = {
   getRequestId,
   getActor,
   actorFingerprint,
+  auditoAktoriusIsJobo,
   setActor,
 };

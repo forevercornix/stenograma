@@ -59,7 +59,7 @@ const STEPS = {
  * @param {string} [params.actor]
  * @returns {Promise<{ok: boolean, completedSteps: string[], failedStep?: string, reason?: string, restored?: object}>}
  */
-async function restoreBackup({ manifest, data, actor = null, env = process.env }) {
+async function restoreBackup({ manifest, data, actor = null, env = process.env, signal = null }) {
   const completedSteps = [];
 
   // 1. MANIFESTAS
@@ -349,7 +349,7 @@ async function restoreBackup({ manifest, data, actor = null, env = process.env }
    * Iki šios eilutės veikianti sistema NEBUVO paliesta nė karto. Visos
    * patikros atliktos su duomenimis atmintyje.
    */
-  const applied = await _apply(parsed, { env });
+  const applied = await _apply(parsed, { env, signal });
   completedSteps.push(STEPS.APPLIED);
 
   await _audit({
@@ -530,7 +530,26 @@ async function _validateContent(parsed) {
  * Tikram transakciškumui reikėtų duomenų bazės su rollback – tai už piloto
  * ribų ir dokumentuota.
  */
-async function _apply(parsed, { env }) {
+/**
+ * ⚠️ BARJERAS PRIEŠ KIEKVIENĄ MUTACIJĄ (#440 P1).
+ *
+ * Priežiūros nuoma gali būti prarasta operacijai tebevykstant (pratęsimas
+ * nepavyko, procesas pakibo per visą nuomos trukmę). Nuo tos sekundės
+ * `create()` vėl priima darbus, abu worker'iai vėl pradeda vykdymą, o KITAS
+ * atkūrimas gali teisėtai paimti nuomą ir rašyti TUOS PAČIUS `id`.
+ *
+ * Todėl tikrinama ne kartą operacijos pradžioje, o PRIEŠ KIEKVIENĄ rašymą:
+ * granuliarumas turi atitikti tai, kas saugoma. Patikra operacijos pradžioje
+ * būtų tas pats TOCTOU, dėl kurio apskritai egzistuoja priežiūros užraktas.
+ */
+function _patikrintiNuoma(signal, veiksmas) {
+  if (!signal || !signal.aborted) return;
+  const priezastis = signal.reason instanceof Error ? signal.reason : new Error("priežiūros nuoma prarasta");
+  log.error("Atkūrimas STABDOMAS: priežiūros nuoma prarasta", { veiksmas, priezastis: priezastis.message });
+  throw priezastis;
+}
+
+async function _apply(parsed, { env, signal = null }) {
   let jobs = 0;
   let audio = 0;
   /** Kiek audio failų NEATKURTA dėl ištrynimo žymos - tylus praleidimas klaidintų. */
@@ -571,11 +590,13 @@ async function _apply(parsed, { env }) {
       continue;
     }
 
+    _patikrintiNuoma(signal, `putAtKey:${audio}`);
     await fileStorage.putAtKey(audioEntry.key, Buffer.from(audioEntry.content, "base64"));
     audio += 1;
   }
 
   for (const job of parsed.jobs) {
+    _patikrintiNuoma(signal, `restoreRecord:${jobs}`);
     await jobStore.restoreRecord(job);
     jobs += 1;
   }
@@ -616,4 +637,16 @@ async function _audit({ event, actor, manifest, success, outcome = null, details
   });
 }
 
-module.exports = { restoreBackup, STEPS };
+module.exports = {
+  restoreBackup,
+  STEPS,
+  /**
+   * ⚠️ EKSPORTUOJAMA TESTAMS (#440 P1).
+   *
+   * Nuomos praradimas tikrinamas ties MUTACIJŲ granuliarumu: kad rašymas
+   * sustoja po pirmo barjero, o ne „operacija grąžino klaidą". Per
+   * `restoreBackup()` tam reikėtų pilnos galiojančios kopijos su manifestu ir
+   * kontroline suma, ir testas tikrintų daug ko kito, o ne būtent to.
+   */
+  _apply,
+};

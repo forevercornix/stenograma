@@ -392,6 +392,10 @@ node backend/scripts/erasure-marks.js force-resolve "$JOB_ID" --actor "$OPERATOR
 jį auditu (`ERASURE_MARK_FORCE_RESOLVED`). Barjeras **lieka** – būsena tampa
 `deleted`, tad job'as ir toliau nebus prikeltas.
 
+⚠️ `--actor` reikšmė PERSISTINAMA `audit_log.meta.actor` be ištrynimo kelio
+(#246) — rinkitės vaidmenį ar bilieto numerį, ne asmens vardą. Žr.
+`docs/deletion-guarantees.md` §4.
+
 ⚠️ `--actor` privalomas. Auditas rašomas **po** perėjimo, o jo `success`
 atspindi faktinį rezultatą (#183).
 

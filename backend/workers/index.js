@@ -233,7 +233,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
        * konteksto paveldėti negali. ID atkuriamas iš jobStore įrašo - taip
        * worker'io logai susiejami su ta pačia užklausa.
        */
-      const { runWithContext } = require("../utils/requestContext");
+      const { runWithContext, auditoAktoriusIsJobo } = require("../utils/requestContext");
 
       /**
        * Kontekstas apgaubia VISĄ likusį vykdymą, ne vien `processor()`.
@@ -246,7 +246,8 @@ function createWorker(queueName, processor, workerOptions = {}) {
       return runWithContext(
         {
           requestId: processingJob.requestId || null,
-          actor: processingJob.actor || null,
+          /** ⚠️ AUDITO AKTORIUS (#246 D1) — žr. `auditoAktoriusIsJobo()` paaiškinimą. */
+          actor: auditoAktoriusIsJobo(processingJob),
           actorRole: processingJob.actorRole || null,
           execution: "worker",
         },
@@ -494,7 +495,7 @@ function createWorker(queueName, processor, workerOptions = {}) {
      * atskirai), tad kontekstą atkuriam iš naujo - kitaip nesėkmės kelias,
      * kuris tiriamas dažniausiai, liktų vienintelis be koreliacijos.
      */
-    const { runWithContext } = require("../utils/requestContext");
+    const { runWithContext, auditoAktoriusIsJobo } = require("../utils/requestContext");
     /** ⚠️ TIK KORELIACIJAI (`requestId`, `actor`) — rezultato ši šaka neskaito (#157, PR-3). */
     const failedJob = await jobStore.system.get(jobId, { hydrate: false }).catch(() => null);
 
@@ -514,7 +515,14 @@ function createWorker(queueName, processor, workerOptions = {}) {
     return runWithContext(
       {
         requestId: (failedJob && failedJob.requestId) || null,
-        actor: (failedJob && failedJob.actor) || null,
+        /**
+         * ⚠️ IR KLAIDŲ APDOROJIMO KELYJE (#246 D1).
+         *
+         * Šis kelias atskiras nuo vykdymo: jis rašo `JOB_FAILED` ir audio
+         * valymo įrašus. Palikus jį nepakeistą, garantija veiktų tik sėkmės
+         * atveju — t. y. tiksliai tada, kai audito eilučių mažiausiai.
+         */
+        actor: auditoAktoriusIsJobo(failedJob),
         execution: "worker",
       },
       () => _handleFailure(job, err, jobId, payload)

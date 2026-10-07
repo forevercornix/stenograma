@@ -867,7 +867,7 @@ paskutiniuose PR-4 raunduose**, tad senas šio skyriaus vaizdas nebėra pilnas.
 | 4 | **Šlavėjas zonduoja ABU vardus** (laikiną ir galutinį); „nė vieno nėra" = sėkmė | #294 uždarymas — žr. skyrių iškart žemiau |
 | 4a | **Šlavėjas neliečia VYKSTANČIO rašymo:** `pending` eilutei horizontas turi atskirą „maksimalios rašymo trukmės" narį, neišvestą iš `revivalHorizonsMs()` | PR-5 peržiūra — determinizmo pasekmė |
 | 4b | **Fail-closed praleidimas MATOMAS:** skaitiklis + `log.warn` suvestinėje, 7.5a precedentu (`retentionSweeper.js:269-274`) | PR-5 peržiūra |
-| 4c | **„Maksimali rašymo trukmė" užrašoma kaip EURISTIKA** su kilme ir galiojimo pabaiga, `MAX_SEGMENTO_BAITAI` šablonu | PR-5 peržiūra |
+| 4c | ✅ **UŽDARYTA (#351).** Reikšmė tebėra euristika (saugyklos užklausos timeout'o nėra), bet **ribą vykdo `isipareigoti()` amžiaus tvora**, o `MAX_RASYMO_TRUKME_MS` turi vieną autoritetą. ⚠️ Ankstesnė redakcija sakė, kad ribos niekas neapibrėžia — nuo #351 tai netiesa | PR-5 peržiūra; uždaro #351 |
 | 3a | **Žymų saugyklos neatitikimas — ŽINGSNIO lygio būsena**, pranešama vieną kartą, ne kaip N praleistų eilučių | PR-5 peržiūra |
 | 4d | **Abu vardai rasti = INVARIANTO PAŽEIDIMAS**, pranešamas, o ne tyliai ištrinamas | PR-5 peržiūra |
 | 5 | **Per-row `storage_type` visiems trims vartotojams**; `fs` turi laikiną objektą, `s3` — ne, ir tai irgi per-row klausimas | A4 + #294 |
@@ -1129,35 +1129,63 @@ teisingas sprendimas su neapibrėžta pabaiga — o saugyklos augimą kas nors a
 metų. Skaitiklis eina į tą pačią `runRetentionSweep()` suvestinę kaip `jobs`, `audio`,
 `auditEntries`, `tombstones`.
 
-⚠️ **SĄLYGA 4c: „MAKSIMALI RAŠYMO TRUKMĖ" YRA EURISTIKA, IR TAI UŽRAŠOMA IŠ KARTO.**
+⚠️ **SĄLYGA 4c: „MAKSIMALI RAŠYMO TRUKMĖ" — REIKŠMĖ YRA EURISTIKA, BET RIBA VYKDOMA (#351).**
 
-4a sąmoningai atsieja šį narį nuo `revivalHorizonsMs()`, bet iš to seka kaina: atsiranda
-NAUJA RANKINĖ konstanta. Skirtumas nuo prikėlimo horizontų yra esminis — pastarieji
-IŠVEDAMI iš eilės konfigūracijos, tad pasikeitus eilei riba pasikeičia savaime. Rašymo
-trukmė tokio šaltinio neturi.
+⚠️ **ŠIS SKYRIUS PERRAŠYTAS PO #351.** Ankstesnė redakcija sakė „RIBOS NIEKAS
+NEAPIBRĖŽIA" ir iš to sekė, kad konstanta yra nevykdoma politika. **Antroji dalis tapo
+netiesa:** `isipareigoti()` amžiaus tvora (`attemptRegistry.js`, #351 D1) ribą vykdo DB
+sakinyje, ir pavėlavęs rašytojas įsipareigoti nebegali.
 
-Dalinį šaltinį ji vis dėlto turi, ir jis įvardijamas: **`MAX_RESULT_BYTES`**
-(`utils/resultLimits.js:154`, numatyta 20 MiB) kartu su saugyklos užklausos timeout'u
-apibrėžia viršutinę vieno rašymo trukmės ribą geriau nei pasirinktas skaičius. `fs`
-timeout'o neturi; `s3` naudoja SDK numatytuosius, tad tikslaus šaltinio šiandien NĖRA —
-ir būtent todėl konstanta yra euristika, ne išvedimas.
+Senoji formuluotė suplakė **du skirtingus** dalykus:
 
-Todėl ji užrašoma tuo pačiu šablonu kaip `MAX_SEGMENTO_BAITAI` (#294): **iš ko kilo, ką
-atmeta ir KADA NUSTOTŲ GALIOTI.** Be to po pusmečio ji bus arba „supaprastinta", arba
-padvigubinta be matavimo — abu be jokio signalo, nes rankinė reikšmė tyliai atsilieka nuo
-tikrovės (ši klasė projekte kartojosi keturis kartus).
+| Teiginys | Ar tebegalioja |
+|---|---|
+| reikšmės (1 h) niekas neIŠVEDA — nėra saugyklos užklausos timeout'o | ✅ **galioja** |
+| ribos niekas neVYKDO — ji tik aprašyta | ❌ **nebegalioja nuo #351** |
 
-⚠️ **KODĖL IŠVEDIMO NĖRA: RIBOS NIEKAS NEAPIBRĖŽIA.**
+## Kas nepasikeitė: reikšmė tebėra euristika
 
-Tikslinimas, kuris keičia paieškos kryptį ateities skaitytojui. Viršutinės vieno rašymo
-trukmės ribos nėra ne todėl, kad jos neapskaičiavome, o todėl, kad **jos niekas
-neapibrėžia**: `fs` `put()` timeout'o neturi apskritai, o `s3` naudoja AWS SDK
-numatytuosius, kurių repo nefiksuoja. `API_TIMEOUT_MS` yra `httpClient` konstanta ir
-saugyklų neliečia.
+4a sąmoningai atsieja šį narį nuo `revivalHorizonsMs()`, ir iš to seka kaina: atsiranda
+RANKINĖ konstanta. Skirtumas nuo prikėlimo horizontų esminis — pastarieji IŠVEDAMI iš
+eilės konfigūracijos, tad pasikeitus eilei riba pasikeičia savaime. Rašymo trukmė tokio
+šaltinio tebeneturi.
 
-Vadinasi 4c yra euristika ne dėl formulės trūkumo, o dėl **trūkstamo apribojimo**. Kas
-nors, norintis 4c paversti išvedimu, turi pirma pridėti tą apribojimą (saugyklos
-užklausos timeout'ą), o ne ieškoti geresnės formulės iš esamų reikšmių.
+Dalinis šaltinis yra ir įvardijamas: **`MAX_RESULT_BYTES`** (`utils/resultLimits.js`,
+numatyta 20 MiB) kartu su saugyklos užklausos timeout'u apibrėžtų viršutinę vieno rašymo
+trukmės ribą geriau nei pasirinktas skaičius. Bet `fs` `put()` timeout'o neturi
+apskritai, o `s3` naudoja AWS SDK numatytuosius, kurių repo nefiksuoja; `API_TIMEOUT_MS`
+yra `httpClient` konstanta ir saugyklų neliečia.
+
+Vadinasi **reikšmė** yra euristika ne dėl formulės trūkumo, o dėl **trūkstamo
+apribojimo**. Kas nors, norintis ją paversti išvedimu, turi pirma pridėti tą apribojimą
+(saugyklos užklausos timeout'ą), o ne ieškoti geresnės formulės iš esamų reikšmių.
+
+## Kas pasikeitė: ribą dabar vykdo tvora
+
+#351 įvedė `isipareigoti()` amžiaus tvorą:
+
+- tvora gyvena SQL sakinyje — `busena = 'pending' AND created_at > clock_timestamp() - tvora`;
+- `clock_timestamp()`, ne `now()`: pastarasis yra `BEGIN` laikas, užfiksuotas dar prieš
+  CAS ir užraktų laukimus toje pačioje transakcijoje;
+- `rowCount !== 1` meta `ATTEMPT_COMMIT_TOO_LATE` ir atšaukia VISĄ transakciją;
+- šlavėjo pakartotinė patikra serializuota `FOR UPDATE OF a NOWAIT`, o `55P03` yra
+  atsakymas (`uzimtas`), ne gedimas.
+
+⚠️ **`MAX_RASYMO_TRUKME_MS` nuo tada turi VIENĄ autoritetą** (`attemptRegistry.js`), o
+`retentionSweeper.js` jį IMPORTUOJA. `laukianciuRibaMs = horizontas + MAX ≥ MAX` galioja
+pagal konstrukciją tik tol, kol abi pusės mini tą patį skaičių — todėl dubliuoti
+draudžiama, ir prie konstantos užrašyta dalinio deploy'aus taisyklė (mažinti — bet kuria
+tvarka; didinti — pirma šlavėjas).
+
+⚠️ **Ir ta klasė, kurios senoji redakcija bijojo, iš tikrųjų pasitaikė — tik dokumente, ne
+konstantoje.** Buvo užrašyta: „po pusmečio ji bus arba supaprastinta, arba padvigubinta be
+matavimo — abu be jokio signalo". Konstanta neatsiliko; **atsiliko šis skyrius**, ir
+niekas to nepranešė, nes planas nebuvo niekuo susietas su #351. Rasta vertinant #351
+uždarymą, ne sargu.
+
+Uždaro: **#351** (tvora, serializavimas, konstantos autoritetas), **#415** (tvoros
+atmetimas nebeišmeta jau apskaičiuoto rezultato), **#419** (horizonto validacija prie
+šaltinio).
 
 **Failai**
 - `backend/utils/jobErasure.js` — external objekto šalinimas per `ArtifactStore`
