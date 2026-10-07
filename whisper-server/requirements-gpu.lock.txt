@@ -26,7 +26,7 @@ tqdm==4.70.1
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cudnn-cu12==9.27.0.42
 
-fastapi==0.141.1
-uvicorn==0.52.3
+fastapi==0.142.2
+uvicorn==0.54.0
 python-multipart==0.0.32
 pytest==9.1.1
