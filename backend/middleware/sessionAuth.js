@@ -1,5 +1,4 @@
 const sessionStore = require("../utils/sessionStore");
-const { setActor } = require("../utils/requestContext");
 
 
 /**
@@ -135,12 +134,32 @@ async function requireSession(req, res, next) {
 
   if (!session) return unauthorized(res);
 
-  // `id` - stabili tapatybė (#158); `username` lieka auditui ir logams.
+  /** `id` - stabili tapatybė (#158); `username` lieka `req.user` autorizacijai ir logams. */
   req.user = { id: session.userId || null, username: session.username, role: session.role };
-  // AKTORIUS audito įrašams - vartotojo vardas, ne sesijos ID (žr. GDPR #17
-  // requestContext modelį; scrypt atspaudas čia neprasmingas, nes vardas pats
-  // savaime nėra paslaptis, kaip API raktas).
-  setActor(session.username);
+
+  /**
+   * ⚠️ AKTORIUS AUDITE NEBENUSTATOMAS SESIJOS KELYJE (#246 D1).
+   *
+   * Anksčiau čia buvo `setActor(session.username)`, pagrįsta tuo, kad vardas
+   * nėra paslaptis, tad atspaudas neprasmingas. Argumentas galiojo, bet atsakė
+   * į kitą klausimą: vardas nėra paslaptis, BET yra asmens duomuo lentelėje be
+   * ištrynimo kelio.
+   *
+   * ⚠️ `actor` yra `META_LAUKAI` (`auditStore/fields.js`), o `auditLog.js`
+   * numatytąją reikšmę ima iš `getActor()`. Tad vienas `setActor()` čia
+   * įrašydavo vardą į KIEKVIENOS sesija autentifikuotos užklausos audito
+   * eilutę, ne tik į prisijungimą.
+   *
+   * ❌ PAKAITALO NĖRA IR NEGALI BŪTI (D1): nei `userId`, nei HMAC, nei
+   * pseudonimas — audito subjekto gyvavimo ciklas yra job-centric
+   * (`auditLog.js` kandidatus skaičiuoja iš `job_id`; vienintelis produkcinis
+   * `removeBySubjectIdentifier()` kvietėjas — `jobErasure.js` su `jobId`), o
+   * vartotojo ciklo repo nėra. Bet kuris pakaitalas būtų antras subjektas be
+   * ciklo.
+   *
+   * Operatoriaus atribucija sesijos veiksmams dėl to prarandama sąmoningai
+   * (D8); koreliacija lieka per `requestId`. Žr. `docs/deletion-guarantees.md`.
+   */
 
   next();
 }
@@ -180,7 +199,7 @@ async function optionalSession(req, res, next) {
   req.user = session
     ? { id: session.userId || null, username: session.username, role: session.role }
     : null;
-  if (session) setActor(session.username);
+  /** ⚠️ `setActor()` ir čia nebenustatomas — ta pati priežastis kaip `requireSession()` (#246 D1). */
 
   next();
 }

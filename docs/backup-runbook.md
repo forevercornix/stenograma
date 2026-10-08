@@ -549,6 +549,13 @@ inicijavimas nutrauktų atkūrimą dar nepradėjus.
 ⚠️ **`--actor` privalomas `dump` komandai** — juo pasirašomas audito įrašas
 `PG_DUMP_BACKUP_CREATED`. Be jo komanda krinta su exit kodu `1`.
 
+⚠️ **`--actor` reikšmė PERSISTINAMA `audit_log.meta.actor` be ištrynimo kelio**
+(#246). Pavyzdžiuose naudojamas `"$USER"` įrašo operacinės sistemos paskyros
+vardą — rinkitės vaidmenį ar bilieto numerį (`--actor "ops-dežuruojantis"`,
+`--actor "INC-2026-104"`). #246 uždarė sesijos ir prisijungimo kelius; šis
+kelias paliktas sąmoningai, nes reikšmę deklaruoja pats operatorius. Žr.
+`docs/deletion-guarantees.md` §4.
+
 ⚠️ **Jungties eilučių išvestyje nebus.** Ir sėkmės pranešimas, ir klaidos tekstas
 praeina pro kredencialų filtrą: `pg_dump` klaidos žinutėje kitaip atsidurtų visa
 argumentų eilutė su slaptažodžiu.

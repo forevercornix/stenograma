@@ -589,7 +589,46 @@ async function record(entry = {}) {
      * kartais žino ID geriau nei aplinkinis scope (pvz. retry, vykstantis be
      * jokios HTTP užklausos).
      *
-     * `actor` yra rakto ATSPAUDAS, ne raktas - žr. utils/requestContext.js.
+     * ⚠️ `actor` YRA RAKTO ATSPAUDAS **TIK API RAKTO KELYJE** (#246 D7).
+     *
+     * Ankstesnė šios eilutės redakcija teigė tai be sąlygos, ir tas teiginys
+     * buvo STIPRESNIS UŽ REALIZACIJĄ: sesijos šakoje `setActor()` rašė pliką
+     * vartotojo vardą. Teiginys išgyveno tris peržiūras (7.4b, 7.4c, 7.4e)
+     * būtent todėl, kad skaitantysis jam patikėjo ir tikrinimą sustabdė
+     * (AGENTS.md §12.1).
+     *
+     * Dabartinė būsena po #246:
+     *   - API rakto kelias, FALLBACK (šis `?? getActor()`) →
+     *     `actorFingerprint(configuredKey)` (`key_<12 hex>`), identifikuoja
+     *     RAKTĄ, ne asmenį. NEKEIČIAMAS (D2).
+     *   - ⚠️ API rakto kelias su AIŠKIU `actor` → literalas `"api-key"`, NE
+     *     atspaudas. `middleware/authorize.js` `resolveIdentity()` raktui
+     *     grąžina būtent literalą, o `jobs` / `transcribeJobs` / `backup`
+     *     perduoda `req.authz.actor` eksplicitiškai — tad tos eilutės šio
+     *     fallback'o nepasiekia.
+     *
+     *     ⚠️ SKIRSTYMAS PAGAL KVIETIMO VIETĄ, NE PAGAL MARŠRUTĄ. Vienoje
+     *     užklausoje atsiranda ABI formos (išmatuota `identityAuditRaw`
+     *     testu): trynimo kelyje `LIFECYCLE_DELETION` gauna literalą, o
+     *     `jobErasure` kvito eilutės `actor` neperduoda ir gauna atspaudą.
+     *     Priimta sąmoningai: `API_KEY` yra vienas, tad atspaudas yra
+     *     konstanta ir neatskiria nieko, ko neatskiria literalas; nė viena
+     *     reikšmė nėra asmens duomuo.
+     *   - Sesijos kelias, SINCHRONINIS → aktoriaus nėra (`null`). `setActor()`
+     *     ten nebekviečiamas, o `middleware/authorize.js` grąžina `actor: null`.
+     *   - Sesijos kelias, ASINCHRONINIS (inline, worker, nesėkmės tvarkymas) →
+     *     aktoriaus irgi nėra. ⚠️ ANKSTESNĖ ŠIO KOMENTARO REDAKCIJA ČIA KLYDO:
+     *     ji sakė tik „sesijos kelias → `null`", nors `jobs.actor` (sesijoje —
+     *     `userId`) keliaudavo į kontekstą per `queues/jobRunner.js` ir
+     *     `workers/index.js`, ir šis `?? getActor()` jį persistindavo. Tai buvo
+     *     ta pati §12.1 forma kaip eilutė aukščiau — teiginys, stipresnis už
+     *     realizaciją, tik šįkart jį parašiau pats. Dabar sprendimą priima
+     *     `requestContext.auditoAktoriusIsJobo()`, viena vieta visiems trims
+     *     keliams.
+     *   - CLI keliai (`erasure-marks.js`, `pgDumpBackup` su `--actor`) →
+     *     operatoriaus SAVIDEKLARUOTA reikšmė. Sąmoningai palikta (#246 §0.4,
+     *     E-out), tad šis laukas vis dar GALI turėti žmogaus vardą — bet tik
+     *     tada, kai jį pateikė pats operatorius.
      */
     requestId: sanitizeControlled(entry.requestId ?? getRequestId(), 64),
     actor: sanitizeControlled(entry.actor ?? getActor(), 40),
