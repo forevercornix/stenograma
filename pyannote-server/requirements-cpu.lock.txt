@@ -14,9 +14,9 @@
 # žr. komentarą viršuje ir Dockerfile'us.
 
 pyannote.audio==4.0.7
-fastapi==0.142.2
+fastapi==0.162.0
 uvicorn==0.54.0
-python-multipart==0.0.32
+python-multipart==0.0.33
 huggingface-hub==2.1.1
 # numpy 2.5+ reikalauja Python >=3.12, o šie image'ai naudoja python3.11.
 # 2.4.6 yra PASKUTINĖ versija su Requires-Python >=3.11.
@@ -28,4 +28,4 @@ huggingface-hub==2.1.1
 numpy==2.4.6
 
 # Testavimui:
-pytest==9.1.1
+pytest==9.2.0
